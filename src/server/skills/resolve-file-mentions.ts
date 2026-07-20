@@ -183,70 +183,291 @@ interface SourceRange {
 	end: number;
 }
 
-/** Find Markdown fenced code blocks, including an unterminated final block. */
-function scanFencedCodeRanges(text: string): SourceRange[] {
-	const ranges: SourceRange[] = [];
-	let fenceStart: number | undefined;
-	let fenceChar = "";
-	let fenceLength = 0;
-	let lineStart = 0;
+interface SourceLine extends SourceRange {
+	/** End before the original CR, LF, or CRLF line ending. */
+	contentEnd: number;
+}
 
-	while (lineStart < text.length) {
-		const newline = text.indexOf("\n", lineStart);
-		const lineEnd = newline === -1 ? text.length : newline;
-		const nextLineStart = newline === -1 ? text.length : newline + 1;
-		const line = text.slice(lineStart, lineEnd).replace(/\r$/, "");
-
-		if (fenceStart !== undefined) {
-			const closing = /^( {0,3})(`+|~+)[ \t]*$/.exec(line);
+/** Split without normalizing line endings so all offsets remain source offsets. */
+function scanSourceLines(
+	text: string,
+	start = 0,
+	end = text.length,
+): SourceLine[] {
+	const lines: SourceLine[] = [];
+	let lineStart = start;
+	while (lineStart < end) {
+		let contentEnd = lineStart;
+		while (
+			contentEnd < end &&
+			text[contentEnd] !== "\r" &&
+			text[contentEnd] !== "\n"
+		) {
+			contentEnd++;
+		}
+		let lineEnd = contentEnd;
+		if (lineEnd < end) {
 			if (
-				closing &&
-				closing[2][0] === fenceChar &&
-				closing[2].length >= fenceLength
+				text[lineEnd] === "\r" &&
+				lineEnd + 1 < end &&
+				text[lineEnd + 1] === "\n"
 			) {
-				ranges.push({ start: fenceStart, end: nextLineStart });
-				fenceStart = undefined;
-				fenceChar = "";
-				fenceLength = 0;
-			}
-		} else {
-			const opening = /^( {0,3})(`{3,}|~{3,})(.*)$/.exec(line);
-			if (opening) {
-				const delimiter = opening[2];
-				const info = opening[3];
-				// CommonMark does not allow a backtick in a backtick fence's info string.
-				if (delimiter[0] !== "`" || !info.includes("`")) {
-					fenceStart = lineStart;
-					fenceChar = delimiter[0];
-					fenceLength = delimiter.length;
-				}
+				lineEnd += 2;
+			} else {
+				lineEnd++;
 			}
 		}
+		lines.push({ start: lineStart, contentEnd, end: lineEnd });
+		lineStart = lineEnd;
+	}
+	return lines;
+}
 
-		if (newline === -1) break;
-		lineStart = nextLineStart;
+interface QuotePrefix {
+	depth: number;
+	offset: number;
+}
+
+/** Consume all common block-quote markers (`>`, optionally indented/spaced). */
+function consumeQuotePrefix(line: string): QuotePrefix {
+	let offset = 0;
+	let depth = 0;
+	while (offset < line.length) {
+		let marker = offset;
+		let spaces = 0;
+		while (spaces < 3 && line[marker] === " ") {
+			marker++;
+			spaces++;
+		}
+		if (line[marker] !== ">") break;
+		offset = marker + 1;
+		if (line[offset] === " " || line[offset] === "\t") offset++;
+		depth++;
+	}
+	return { depth, offset };
+}
+
+/** Consume exactly the outer quote containers of an already-open fence. */
+function consumeRequiredQuotePrefix(
+	line: string,
+	depth: number,
+): number | undefined {
+	let offset = 0;
+	for (let i = 0; i < depth; i++) {
+		let marker = offset;
+		let spaces = 0;
+		while (spaces < 3 && line[marker] === " ") {
+			marker++;
+			spaces++;
+		}
+		if (line[marker] !== ">") return undefined;
+		offset = marker + 1;
+		if (line[offset] === " " || line[offset] === "\t") offset++;
+	}
+	return offset;
+}
+
+function sourceColumns(text: string, start: number, end: number): number {
+	let columns = 0;
+	for (let i = start; i < end; i++) {
+		if (text[i] === "\t") columns += 4 - (columns % 4);
+		else columns++;
+	}
+	return columns;
+}
+
+/** Consume at least `required` indentation columns, returning the source offset. */
+function consumeIndentation(
+	text: string,
+	start: number,
+	required: number,
+): number | undefined {
+	let columns = 0;
+	let offset = start;
+	while (offset < text.length && columns < required) {
+		if (text[offset] === " ") columns++;
+		else if (text[offset] === "\t") columns += 4 - (columns % 4);
+		else return undefined;
+		offset++;
+	}
+	return columns >= required ? offset : undefined;
+}
+
+interface ListMarker {
+	contentOffset: number;
+}
+
+/** Find a bullet/ordered-list marker at a container content boundary. */
+function findListMarker(line: string, offset: number): ListMarker | undefined {
+	const match = /^( {0,3})(?:[*+-]|\d{1,9}[.)])([ \t]+)/.exec(
+		line.slice(offset),
+	);
+	if (!match) return undefined;
+	return { contentOffset: offset + match[0].length };
+}
+
+interface ListContext {
+	quoteDepth: number;
+	/** Content indentation relative to the end of the quote prefix. */
+	indentColumns: number;
+}
+
+interface FenceState {
+	start: number;
+	char: string;
+	length: number;
+	quoteDepth: number;
+	listIndentColumns: number;
+}
+
+interface FenceOpeningContext {
+	contentOffset: number;
+	listContext?: ListContext;
+}
+
+/**
+ * Locate possible fence content on a prose line while tracking the common list
+ * forms that put a fence after a marker or on an indented continuation line.
+ */
+function fenceOpeningContext(
+	line: string,
+	quote: QuotePrefix,
+	previousList?: ListContext,
+): FenceOpeningContext {
+	let listContext =
+		previousList?.quoteDepth === quote.depth ? previousList : undefined;
+	let contentOffset = quote.offset;
+	let marker = findListMarker(line, quote.offset);
+
+	if (marker) {
+		contentOffset = marker.contentOffset;
+		listContext = {
+			quoteDepth: quote.depth,
+			indentColumns: sourceColumns(line, quote.offset, contentOffset),
+		};
+	} else if (listContext) {
+		const continuation = consumeIndentation(
+			line,
+			quote.offset,
+			listContext.indentColumns,
+		);
+		if (continuation === undefined) {
+			listContext = undefined;
+		} else {
+			contentOffset = continuation;
+		}
 	}
 
-	if (fenceStart !== undefined) {
-		ranges.push({ start: fenceStart, end: text.length });
+	// Handle common nested-list prefixes on the same line/continuation.
+	while ((marker = findListMarker(line, contentOffset)) !== undefined) {
+		contentOffset = marker.contentOffset;
+		listContext = {
+			quoteDepth: quote.depth,
+			indentColumns: sourceColumns(line, quote.offset, contentOffset),
+		};
 	}
+
+	return { contentOffset, listContext };
+}
+
+function parseFenceOpening(
+	line: string,
+	contentOffset: number,
+): { char: string; length: number } | undefined {
+	const opening = /^( {0,3})(`{3,}|~{3,})(.*)$/.exec(line.slice(contentOffset));
+	if (!opening) return undefined;
+	const delimiter = opening[2];
+	const info = opening[3];
+	// CommonMark does not allow a backtick in a backtick fence's info string.
+	if (delimiter[0] === "`" && info.includes("`")) return undefined;
+	return { char: delimiter[0], length: delimiter.length };
+}
+
+/** Return the literal-content offset, or undefined when a container ended. */
+function fenceContentOffset(
+	line: string,
+	fence: FenceState,
+): number | undefined {
+	// A markerless blank line cannot expose a mention and may sit between quoted
+	// container lines, so retaining it avoids prematurely splitting the range.
+	if (/^[ \t]*$/.test(line)) return line.length;
+	const quoteOffset = consumeRequiredQuotePrefix(line, fence.quoteDepth);
+	if (quoteOffset === undefined) return undefined;
+	if (fence.listIndentColumns === 0) return quoteOffset;
+	return consumeIndentation(line, quoteOffset, fence.listIndentColumns);
+}
+
+/** Find fenced code, including container-scoped and unterminated fences. */
+function scanFencedCodeRanges(text: string): SourceRange[] {
+	const ranges: SourceRange[] = [];
+	const lines = scanSourceLines(text);
+	let fence: FenceState | undefined;
+	let listContext: ListContext | undefined;
+
+	for (const sourceLine of lines) {
+		const line = text.slice(sourceLine.start, sourceLine.contentEnd);
+
+		if (fence) {
+			const contentOffset = fenceContentOffset(line, fence);
+			if (contentOffset !== undefined) {
+				const closing = /^( {0,3})(`{3,}|~{3,})[ \t]*$/.exec(
+					line.slice(contentOffset),
+				);
+				if (
+					closing &&
+					closing[2][0] === fence.char &&
+					closing[2].length >= fence.length
+				) {
+					ranges.push({ start: fence.start, end: sourceLine.end });
+					fence = undefined;
+				}
+				continue;
+			}
+
+			// A block-quote/list container ended an otherwise unterminated fence.
+			ranges.push({ start: fence.start, end: sourceLine.start });
+			fence = undefined;
+		}
+
+		const quote = consumeQuotePrefix(line);
+		const openingContext = fenceOpeningContext(line, quote, listContext);
+		listContext = /^[ \t]*$/.test(line)
+			? listContext
+			: openingContext.listContext;
+		const opening = parseFenceOpening(line, openingContext.contentOffset);
+		if (opening) {
+			fence = {
+				start: sourceLine.start,
+				char: opening.char,
+				length: opening.length,
+				quoteDepth: quote.depth,
+				listIndentColumns: openingContext.listContext?.indentColumns ?? 0,
+			};
+		}
+	}
+
+	if (fence) ranges.push({ start: fence.start, end: text.length });
 	return ranges;
 }
 
-/** Find matched inline backtick spans inside one non-fenced source segment. */
-function scanInlineCodeRanges(
-	text: string,
-	segmentStart: number,
-	segmentEnd: number,
-): SourceRange[] {
+function isEscapedBacktickRun(text: string, start: number): boolean {
+	let backslashes = 0;
+	for (let i = start - 1; i >= 0 && text[i] === "\\"; i--) backslashes++;
+	return backslashes % 2 === 1;
+}
+
+/** Pair inline delimiters only inside one Markdown inline block. */
+function scanInlineBlock(text: string, block: SourceRange): SourceRange[] {
 	const runs: Array<SourceRange & { length: number }> = [];
-	let cursor = segmentStart;
-	while (cursor < segmentEnd) {
+	let cursor = block.start;
+	while (cursor < block.end) {
 		const start = text.indexOf("`", cursor);
-		if (start === -1 || start >= segmentEnd) break;
+		if (start === -1 || start >= block.end) break;
 		let end = start + 1;
-		while (end < segmentEnd && text[end] === "`") end++;
-		runs.push({ start, end, length: end - start });
+		while (end < block.end && text[end] === "`") end++;
+		if (!isEscapedBacktickRun(text, start)) {
+			runs.push({ start, end, length: end - start });
+		}
 		cursor = end;
 	}
 
@@ -271,6 +492,74 @@ function scanInlineCodeRanges(
 		runIndex = closingIndex + 1;
 	}
 	return ranges;
+}
+
+interface InlineLineContext {
+	blank: boolean;
+	quoteDepth: number;
+	startsListItem: boolean;
+	standaloneBlock: boolean;
+}
+
+function inlineLineContext(line: string): InlineLineContext {
+	const quote = consumeQuotePrefix(line);
+	const content = line.slice(quote.offset);
+	const blank = /^[ \t]*$/.test(content);
+	const startsListItem = findListMarker(line, quote.offset) !== undefined;
+	const standaloneBlock =
+		/^( {0,3})#{1,6}(?:[ \t]+|$)/.test(content) ||
+		/^( {0,3})(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(
+			content,
+		) ||
+		/^( {0,3})(?:=+|-+)[ \t]*$/.test(content);
+	return { blank, quoteDepth: quote.depth, startsListItem, standaloneBlock };
+}
+
+/**
+ * Split non-fenced source into Markdown inline blocks. Blank lines, distinct
+ * list items, quote-container changes, and line-level blocks are hard
+ * boundaries, so unmatched delimiters cannot pair across unrelated blocks.
+ */
+function scanInlineCodeRanges(
+	text: string,
+	segmentStart: number,
+	segmentEnd: number,
+): SourceRange[] {
+	const blocks: SourceRange[] = [];
+	let blockStart: number | undefined;
+	let blockEnd = segmentStart;
+	let quoteDepth = 0;
+
+	const flush = () => {
+		if (blockStart !== undefined)
+			blocks.push({ start: blockStart, end: blockEnd });
+		blockStart = undefined;
+	};
+
+	for (const sourceLine of scanSourceLines(text, segmentStart, segmentEnd)) {
+		const line = text.slice(sourceLine.start, sourceLine.contentEnd);
+		const context = inlineLineContext(line);
+		if (context.blank) {
+			flush();
+			continue;
+		}
+
+		const startsNewBlock =
+			blockStart !== undefined &&
+			(context.startsListItem ||
+				context.standaloneBlock ||
+				context.quoteDepth !== quoteDepth);
+		if (startsNewBlock) flush();
+		if (blockStart === undefined) {
+			blockStart = sourceLine.start;
+			quoteDepth = context.quoteDepth;
+		}
+		blockEnd = sourceLine.end;
+		if (context.standaloneBlock) flush();
+	}
+	flush();
+
+	return blocks.flatMap((block) => scanInlineBlock(text, block));
 }
 
 /** Find source ranges in which file-mention candidates must stay verbatim. */
@@ -397,20 +686,20 @@ export function resolveFileMentions(
 
 		const lexicalAbs = path.resolve(resolvedCwd, normRel);
 
-		// Classify existence before safety and delivery checks while also obtaining
-		// the canonical target for the later containment check. ENOENT/ENOTDIR —
-		// including a dangling symlink — means there is no deliverable filesystem
-		// target, so the candidate remains ordinary text. Other failures are not
-		// proof of absence and retain failed-reference metadata below.
-		let absPath: string | undefined;
+		// Existence classification is deliberately metadata-only and separate from
+		// canonicalization/delivery. Only a genuine initial ENOENT/ENOTDIR is plain
+		// text. Once lstat establishes an entry (including a symlink), every later
+		// realpath/stat/access failure retains unresolved mention metadata.
+		let classificationError: unknown;
 		try {
-			absPath = fs.realpathSync.native(lexicalAbs);
+			fs.lstatSync(lexicalAbs);
 		} catch (error) {
 			if (isMissingPathError(error)) continue;
+			classificationError = error;
 		}
 
 		// Missing candidates do not consume this cap. Extra existing candidates
-		// require only the canonical metadata classification above, never stat/read.
+		// require only the metadata classification above, never realpath/stat/read.
 		if (resolvedCount >= MAX_MENTIONS_PER_SEND) {
 			markUnresolved("too-many-mentions");
 			continue;
@@ -425,11 +714,16 @@ export function resolveFileMentions(
 			continue;
 		}
 
-		// A non-absence realpath error may represent an existing inaccessible or
-		// cyclic-symlink target. Preserve its failed-reference metadata, but never
-		// stat or read when canonical containment could not be established.
-		if (!absPath) {
+		if (classificationError) {
 			markUnresolved("unreadable");
+			continue;
+		}
+
+		let absPath: string;
+		try {
+			absPath = fs.realpathSync.native(lexicalAbs);
+		} catch (error) {
+			markUnresolved(isMissingPathError(error) ? "missing" : "unreadable");
 			continue;
 		}
 
