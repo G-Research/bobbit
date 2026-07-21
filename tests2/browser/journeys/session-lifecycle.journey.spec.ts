@@ -158,12 +158,16 @@ test.describe("Journey: Session Lifecycle", () => {
 			await expect(newSessionWithRole).toBeVisible({ timeout: 15_000 });
 			await newSessionWithRole.click();
 
-			const pickerRoleControl = page.locator('#picker-role-container button[title="Select role"]').first();
-			await expect(pickerRoleControl).toBeVisible({ timeout: 15_000 });
+			const pickerPanel = page
+				.locator("div.fixed.z-50")
+				.filter({ hasText: "Create New Session in default" })
+				.last();
+			await expect(pickerPanel).toBeVisible({ timeout: 15_000 });
+			const pickerRoleControl = pickerPanel.locator('#picker-role-container button[title="Select role"]');
 			await expect(pickerRoleControl).toContainText("General");
 			await pickerRoleControl.click();
-			await expect(page.locator('#picker-role-container button[title="Select General role"]')).toBeVisible();
-			await expect(page.locator('#picker-role-container button[title="No role"]')).toHaveCount(0);
+			await expect(pickerPanel.locator('#picker-role-container button[title="Select General role"]')).toBeVisible();
+			await expect(pickerPanel.locator('#picker-role-container button[title="No role"]')).toHaveCount(0);
 		} finally {
 			if (sessionId) await deleteSession(sessionId).catch(() => {});
 		}
