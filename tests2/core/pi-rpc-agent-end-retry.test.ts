@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 
 import { guardProcessEnv } from "./helpers/env-guard.js";
 
@@ -179,6 +180,115 @@ describe("Pi RPC agent_end retry contract", () => {
 		// Lifecycle + cost tracking still see every event, including the retryable one.
 		expect(handleAgentLifecycle).toHaveBeenCalledTimes(3);
 		expect(trackCostFromEvent).toHaveBeenCalledTimes(3);
+
+		unsub();
+	});
+
+	it("keeps summarization retries and compaction continuations streaming until terminal agent_end", async () => {
+		const manager = makeManager();
+		const listeners = new Set<(event: AgentSessionEvent) => void>();
+		const prompt = vi.fn(async () => ({ success: true }));
+		const session = putSession(manager, {
+			isCompacting: true,
+			allowedTools: ["read", "write"],
+			oneTimeGrantedTools: ["read"],
+			rpcClient: {
+				onEvent: (fn: (event: AgentSessionEvent) => void) => {
+					listeners.add(fn);
+					return () => { listeners.delete(fn); };
+				},
+				prompt,
+				getState: vi.fn(async () => ({ success: true, data: {} })),
+			},
+		});
+		session.promptQueue.enqueue("dispatch only after terminal settlement");
+		manager.refreshAfterCompaction = vi.fn();
+
+		const trackCostFromEvent = vi.fn();
+		const unsub = subscribeToEvents(session, {
+			store: manager._testStore,
+			handleAgentLifecycle: (current: any, event: AgentSessionEvent) => manager.handleAgentLifecycle(current, event),
+			trackCostFromEvent,
+		} as any);
+		let idleResolved = false;
+		const wait = manager.waitForIdle(session.id, 10_000).then(() => { idleResolved = true; });
+		const emit = (event: AgentSessionEvent) => {
+			for (const listener of [...listeners]) listener(event);
+		};
+
+		const scheduled: AgentSessionEvent = {
+			type: "summarization_retry_scheduled",
+			attempt: 1,
+			maxAttempts: 3,
+			delayMs: 250,
+			errorMessage: "temporary summarizer disconnect",
+		};
+		const attemptStart: AgentSessionEvent = {
+			type: "summarization_retry_attempt_start",
+			source: "compaction",
+			reason: "overflow",
+		};
+		const retryFinished: AgentSessionEvent = { type: "summarization_retry_finished" };
+		const compactionUsage = {
+			input: 11,
+			output: 13,
+			cacheRead: 17,
+			cacheWrite: 19,
+			totalTokens: 60,
+			cost: { input: 0.1, output: 0.2, cacheRead: 0.3, cacheWrite: 0.4, total: 1 },
+		};
+		const compactionEnd: AgentSessionEvent = {
+			type: "compaction_end",
+			reason: "overflow",
+			result: {
+				summary: "compacted after retry",
+				firstKeptEntryId: "entry-2",
+				tokensBefore: 1_000,
+				estimatedTokensAfter: 100,
+				usage: compactionUsage,
+			},
+			aborted: false,
+			willRetry: true,
+		};
+
+		emit(scheduled);
+		emit(attemptStart);
+		emit(retryFinished);
+		emit(compactionEnd);
+		await flush();
+
+		expect(idleResolved).toBe(false);
+		expect(session.status).toBe("streaming");
+		expect(session.isCompacting).toBe(false);
+		expect(session.completedTurnCount ?? 0).toBe(0);
+		expect(session.allowedTools).toEqual(["read", "write"]);
+		expect(session.oneTimeGrantedTools).toEqual(["read"]);
+		expect(prompt).not.toHaveBeenCalled();
+		expect(trackCostFromEvent).toHaveBeenCalledTimes(4);
+
+		const continuationEvents = session.eventBuffer.getAll().map((entry: any) => entry.event);
+		expect(continuationEvents.map((event: any) => event.type)).toEqual([
+			"summarization_retry_scheduled",
+			"summarization_retry_attempt_start",
+			"summarization_retry_finished",
+			"compaction_end",
+		]);
+		expect(continuationEvents[3].willRetry).toBe(true);
+		assert.equal(continuationEvents[3].result.usage, compactionUsage, "summary usage must be forwarded, not synthesized or dropped");
+
+		emit({ type: "agent_end", messages: [], willRetry: false });
+		await wait;
+		await flush();
+
+		expect(idleResolved).toBe(true);
+		// The terminal boundary briefly settles idle and then drains the queued
+		// prompt, whose optimistic dispatch transition makes the session streaming.
+		expect(session.status).toBe("streaming");
+		expect(session.completedTurnCount).toBe(1);
+		expect(session.allowedTools).toEqual(["write"]);
+		expect(session.oneTimeGrantedTools).toEqual([]);
+		expect(prompt).toHaveBeenCalledTimes(1);
+		expect(prompt).toHaveBeenCalledWith("dispatch only after terminal settlement", undefined);
 
 		unsub();
 	});
