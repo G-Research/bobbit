@@ -507,6 +507,13 @@ describe("worktree inventory classifier", () => {
 			const removed = new Set<string>();
 			const pending: Array<{ path: string; release: () => void }> = [];
 			const completionOrder: string[] = [];
+			let resolveWaitNotification: (() => void) | undefined;
+			const notifyWaiter = () => {
+				const resolve = resolveWaitNotification;
+				resolveWaitNotification = undefined;
+				resolve?.();
+			};
+			const waitForNotification = () => new Promise<void>(resolve => { resolveWaitNotification = resolve; });
 			let active = 0;
 			let maxActive = 0;
 			const baseFs = inventoryFsFor(filesystem);
@@ -516,7 +523,10 @@ describe("worktree inventory classifier", () => {
 					active++;
 					maxActive = Math.max(maxActive, active);
 					try {
-						await new Promise<void>(resolve => pending.push({ path: filePath, release: resolve }));
+						await new Promise<void>(resolve => {
+							pending.push({ path: filePath, release: resolve });
+							notifyWaiter();
+						});
 						completionOrder.push(filePath);
 						await fs.promises.access(filePath);
 					} finally {
@@ -543,16 +553,19 @@ describe("worktree inventory classifier", () => {
 			].join("\n\n") + "\n";
 			const service = makeService(makeCtx(repo, { filesystem }), porcelain, new Map(), { fs: asyncFs, ioConcurrency: 2, commandRunner });
 			let settled = false;
-			const cleanupPromise = service.cleanup({ mode: "all-safe" }).finally(() => { settled = true; });
-			await waitFor(() => pending.length === 2 || settled, "cleanup did not reach deferred removal verification");
-			if (settled) assert.fail(`cleanup settled before deferred verification: ${JSON.stringify(await cleanupPromise)}`);
+			const cleanupPromise = service.cleanup({ mode: "all-safe" }).finally(() => {
+				settled = true;
+				notifyWaiter();
+			});
+			while (pending.length < 2 && !settled) await waitForNotification();
+			if (pending.length < 2) assert.fail(`cleanup settled before starting 2 deferred removal verifications: ${JSON.stringify(await cleanupPromise)}`);
 			await new Promise<void>(resolve => setImmediate(resolve));
 			assert.equal(settled, false);
 			while (!settled) {
-				await waitFor(() => pending.length > 0 || settled, "cleanup verification workers stalled");
+				while (pending.length === 0 && !settled) await waitForNotification();
+				if (settled) break;
 				const wave = pending.splice(0);
 				for (const operation of wave.reverse()) operation.release();
-				await new Promise<void>(resolve => setImmediate(resolve));
 			}
 			const response = await cleanupPromise;
 			assert.equal(response.counts.cleaned, candidatePaths.length);
