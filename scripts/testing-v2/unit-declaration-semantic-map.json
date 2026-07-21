@@ -1017,9 +1017,17 @@
       {
         "file": "tests2/core/plan-mutation-store.test.ts",
         "name": "pruneExpired removes only expired entries and returns the exact count"
+      },
+      {
+        "file": "tests2/core/plan-mutation-store.test.ts",
+        "name": "streams a wide prune directory with bounded read-ahead and an exact removed count"
+      },
+      {
+        "file": "tests2/core/plan-mutation-store.test.ts",
+        "name": "cooperatively yields while streaming a wide directory of ignored entries"
       }
     ],
-    "rationale": "The asynchronous PlanMutationStore rewrite consolidated the original synchronous assertion into a renamed test that preserves the same observable store contract while pinning the new persistence detail."
+    "rationale": "The asynchronous PlanMutationStore rewrite retains exact expiry/count semantics while the streaming regression owners pin bounded read-ahead and cooperative yielding for wide prune directories."
   },
   {
     "baseFile": "tests2/core/preview-artifacts.test.ts",
@@ -1187,9 +1195,13 @@
       {
         "file": "tests2/core/preview-mount.test.ts",
         "name": "rejects an entry replaced by a symlink during the direct-copy fallback"
+      },
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "falls back to a descriptor-anchored copy when a successful hardlink has the wrong identity"
       }
     ],
-    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+    "rationale": "The asynchronous preview-mount rewrite retains entry-only copy semantics while the fallback regression owners pin descriptor-anchored safety after symlink substitution or hardlink identity mismatch."
   },
   {
     "baseFile": "tests2/core/preview-mount.test.ts",
