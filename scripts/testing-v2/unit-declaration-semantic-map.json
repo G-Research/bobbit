@@ -1188,9 +1188,25 @@
       {
         "file": "tests2/core/bounded-tree-quarantine-races.test.ts",
         "name": "preserveRoot detaches authorized children but retains the claimed root"
+      },
+      {
+        "file": "tests2/core/bounded-tree-quarantine-errors.test.ts",
+        "name": "does not overwrite a collision at the original path and reports the exact quarantine"
+      },
+      {
+        "file": "tests2/core/bounded-tree-quarantine-errors.test.ts",
+        "name": "preserves a mismatched quarantine identity without external deletion"
+      },
+      {
+        "file": "tests2/core/bounded-tree-quarantine-errors.test.ts",
+        "name": "preserves the original error when an exact quarantine cannot be renamed back"
+      },
+      {
+        "file": "tests2/core/bounded-tree-quarantine-errors.test.ts",
+        "name": "treats a parent disappearing before setup as missing only with force"
       }
     ],
-    "rationale": "The bounded asynchronous cleanup owners preserve idempotency and failure isolation while proving recursive deletion detaches only verified identities, rejects replacements before traversal and after destructive acts, restores mismatched moves, and retains an authorized preserveRoot."
+    "rationale": "The bounded asynchronous cleanup owners preserve idempotency and failure isolation while proving recursive deletion detaches only verified identities, rejects replacements before traversal and after destructive acts, restores exact failed quarantines for retry, never overwrites collisions or deletes mismatched external identities, reports un-restorable quarantine ownership without masking the original error, retains force-only missing-parent semantics, and keeps an authorized preserveRoot."
   },
   {
     "baseFile": "tests2/core/preview-artifacts.test.ts",
