@@ -1229,9 +1229,17 @@
       {
         "file": "tests2/core/preview-mount.test.ts",
         "name": "writes inline content atomically and returns stable async hashes"
+      },
+      {
+        "file": "tests2/core/preview-install-transaction-races.test.ts",
+        "name": "keeps a failed write blocked until a later verified writer repairs it"
+      },
+      {
+        "file": "tests2/core/preview-install-transaction-races.test.ts",
+        "name": "serializes same-key writers before either worker can mutate"
       }
     ],
-    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+    "rationale": "The async inline owner retains atomic replacement and hashing, while the transaction owners keep failed writes fenced until verified repair and serialize same-key writers before either can mutate or republish the live root."
   },
   {
     "baseFile": "tests2/core/preview-mount.test.ts",
@@ -1254,14 +1262,18 @@
       },
       {
         "file": "tests2/core/preview-mount.test.ts",
-        "name": "rejects an entry replaced by a symlink during the direct-copy fallback"
+        "name": "rejects an entry replaced by a symlink before descriptor-anchored streaming"
       },
       {
         "file": "tests2/core/preview-mount.test.ts",
-        "name": "falls back to a descriptor-anchored copy when a successful hardlink has the wrong identity"
+        "name": "streams through a validated destination without a hardlink optimization"
+      },
+      {
+        "file": "tests2/core/preview-transaction-edge-cases.test.ts",
+        "name": "writes zero source bytes when a staging destination ancestor is swapped outside"
       }
     ],
-    "rationale": "The asynchronous preview-mount rewrite retains entry-only copy semantics while the fallback regression owners pin descriptor-anchored safety after symlink substitution or hardlink identity mismatch."
+    "rationale": "The route owner retains entry-only copy semantics, while the descriptor-streaming owners reject substituted sources before reads, bypass unsafe hardlinks, and validate the staged destination ancestry before any source byte can escape."
   },
   {
     "baseFile": "tests2/core/preview-mount.test.ts",
@@ -1432,9 +1444,13 @@
       {
         "file": "tests2/core/preview-mount.test.ts",
         "name": "stages before swap, supports reopening a mounted path, and rolls back staging errors"
+      },
+      {
+        "file": "tests2/core/preview-transaction-edge-cases.test.ts",
+        "name": "repairs a blocked directory symlink by rename without traversing its target"
       }
     ],
-    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+    "rationale": "The staged-swap owner retains ordinary re-mount replacement, while the blocked-root owner proves a directory symlink is detached by rename and replaced without traversing or mutating its external target."
   },
   {
     "baseFile": "tests2/core/preview-mount.test.ts",
@@ -1488,9 +1504,25 @@
       {
         "file": "tests2/core/preview-canonical-root-races.test.ts",
         "name": "atomically quarantines a substituted staging root without traversing it"
+      },
+      {
+        "file": "tests2/core/preview-install-transaction-races.test.ts",
+        "name": "rolls the exact backup back when staging disappears before its rename"
+      },
+      {
+        "file": "tests2/core/preview-install-transaction-races.test.ts",
+        "name": "rejects unsupported staging identity before fencing or mutating old live"
+      },
+      {
+        "file": "tests2/core/preview-transaction-edge-cases.test.ts",
+        "name": "republishes an intact verified live root after a pre-mutation hash error"
+      },
+      {
+        "file": "tests2/core/preview-transaction-edge-cases.test.ts",
+        "name": "logs an exact mismatched failed-live quarantine while preserving rollback"
       }
     ],
-    "rationale": "The staged-swap owner preserves prior mounted content on ordinary failures, while the root-substitution owners prove raced symlink and real-directory replacements are rejected and quarantined by whole-root rename without traversing or deleting external data."
+    "rationale": "The staged-swap and identity owners preserve prior mounted content across ordinary, source-ENOENT, unsupported-identity, and pre-mutation hash failures; substitution owners quarantine raced roots without traversal, and rollback remains bound to the exact backup even when a mismatched failed live root must be preserved separately."
   },
   {
     "baseFile": "tests2/core/preview-mount.test.ts",
@@ -1503,9 +1535,13 @@
       {
         "file": "tests2/core/preview-canonical-root-races.test.ts",
         "name": "waits for an acquired content read before exposing a replacement root"
+      },
+      {
+        "file": "tests2/core/preview-install-transaction-races.test.ts",
+        "name": "destroys an aborted non-HTML stream and releases its directory lease"
       }
     ],
-    "rationale": "The staged mount owner retains watcher-safe replacement behavior, while the content-read lease owner proves a whole-root install remains unavailable until acquired readers release it."
+    "rationale": "The staged mount owner retains watcher-safe replacement behavior; the content-read owners keep replacement behind active leases and prove an aborted non-HTML stream is destroyed so its lease releases and the waiting writer can proceed."
   },
   {
     "baseFile": "tests2/core/preview-mount.test.ts",
@@ -1518,9 +1554,17 @@
       {
         "file": "tests2/core/preview-mount.test.ts",
         "name": "removeMount propagates non-ENOENT deletion failures"
+      },
+      {
+        "file": "tests2/core/preview-install-transaction-races.test.ts",
+        "name": "blocked purge detaches by rename before inspecting only the owned quarantine"
+      },
+      {
+        "file": "tests2/core/preview-install-transaction-races.test.ts",
+        "name": "serializes owned quarantine cleanup and logs failures without losing ownership"
       }
     ],
-    "rationale": "The asynchronous cleanup owner remains idempotent for missing mounts, while the strict-error owner proves idempotency does not hide real non-ENOENT deletion failures."
+    "rationale": "The async cleanup owners preserve missing-mount idempotency and strict non-ENOENT errors; blocked purges first detach the exact live root, recursively inspect only their owned quarantine, and serialize bounded cleanup while explicitly logging and preserving failed quarantines."
   },
   {
     "baseFile": "tests2/core/preview-mount.test.ts",
