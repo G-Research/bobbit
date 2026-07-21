@@ -1147,9 +1147,37 @@
       {
         "file": "tests2/core/preview-identity-guard-cost.test.ts",
         "name": "keeps multi-candidate metadata lookup and deep exact validation linear"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "keeps 50 unique persists to one cold metadata scan and bounded catalog lookup work"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "keeps same-hash positive validation in stored filesystem order"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "invalidates on external candidate addition and preserves filesystem first-valid selection"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "invalidates a corrupt cached positive and rescans once to the later exact candidate"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "leaves sessions above 256 candidates uncached and retains streaming scans"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "evicts the least-recently-used session above the 64-session cap"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "scans cold caches, answers complete negatives, and clears on filesystem seam reset"
       }
     ],
-    "rationale": "The artifact owners retain first-exact content-hash reuse while skipping invalid candidates and prove metadata lookup reads one deterministic enumeration batch at the shared ceiling without prefetching the next batch, preserves first-valid enumeration order despite out-of-order completion, and isolates corrupt, mismatched-hash, wrong-ID, and missing metadata. The operation-cost owner preserves that selection across twenty-four mismatches plus one deep exact candidate, requires one metadata open per candidate and one content open per validated file, and compares twelve versus twenty-four misses with linear lstat/realpath ceilings so session, candidate, and trusted-root identity claims cannot multiply lookup work."
+    "rationale": "The artifact owners retain first-exact content-hash reuse while skipping invalid candidates and prove metadata lookup reads one deterministic enumeration batch at the shared ceiling without prefetching the next batch, preserves first-valid enumeration order despite out-of-order completion, and isolates corrupt, mismatched-hash, wrong-ID, and missing metadata. The operation-cost owner preserves that selection across twenty-four mismatches plus one deep exact candidate, requires one metadata open per candidate and one content open per validated file, and compares twelve versus twenty-four misses with linear lstat/realpath ceilings so session, candidate, and trusted-root identity claims cannot multiply lookup work. The bounded-catalog owners prove fifty successful persists incrementally update one cold catalog without metadata rescans, cached positives retain stored filesystem order, external root mutation and corrupt positives force canonical rescans that still select the first valid exact candidate, sessions above 256 candidates stay on the streaming scan path, the 64-session cache evicts its least-recently-used entry, complete negative results avoid repeat metadata reads, and resetting the filesystem seam clears cached state."
   },
   {
     "baseFile": "tests2/core/preview-artifacts.test.ts",
