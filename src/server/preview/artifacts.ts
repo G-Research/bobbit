@@ -175,8 +175,13 @@ export async function persistPreviewArtifact(
 				files,
 			};
 			await writeJsonAtomic(path.join(tmpDir, "artifact.json"), record);
+			const priorCatalog = peekPreviewArtifactCatalog(sessionId);
+			// Fence every lookup or cold scan captured before this candidate becomes
+			// visible. The refresh below captures the first post-install operation;
+			// its prior snapshot is revalidated rather than touched in place.
+			invalidatePreviewArtifactCatalog(sessionId);
 			await artifactFs.rename(tmpDir, finalDir);
-			await refreshPreviewArtifactCatalogAfterInstall(sessionId, record);
+			await refreshPreviewArtifactCatalogAfterInstall(sessionId, record, priorCatalog);
 			return record;
 		} catch (err) {
 			invalidatePreviewArtifactCatalog(sessionId);
@@ -820,10 +825,10 @@ function previewArtifactCatalogOperationIsCurrent(operation: PreviewArtifactCata
 async function refreshPreviewArtifactCatalogAfterInstall(
 	sessionId: string,
 	record: PreviewArtifactRecord,
+	prior: PreviewArtifactCatalog | undefined,
 ): Promise<void> {
 	const operation = capturePreviewArtifactCatalogOperation();
 	try {
-		const prior = peekPreviewArtifactCatalog(sessionId);
 		const sessionBound = await bindArtifactSessionRoot(sessionId, operation.io);
 		if (!sessionBound) return;
 		const startStamp = await currentArtifactSessionStamp(sessionId, sessionBound);
