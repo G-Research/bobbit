@@ -21,17 +21,8 @@
   },
   "v2Native": [
     {
-      "path": "tests2/core/file-mentions-authenticated-boundary.test.ts",
-      "reason": "Exact authenticated 8 MiB code-dense and deep-list Markdown resource coverage runs in a constrained child Node heap so an AST-allocation regression cannot crash the unit coordinator.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "e2e",
-        "project": "e2e"
-      }
-    },
-    {
-      "path": "tests2/core/file-mentions-resource-limits.test.ts",
-      "reason": "Structural resource, admission, concurrency, and non-regular-target coverage split from the semantic file-mention resolver suite to keep both within the tier-1 per-file wall budget.",
+      "path": "tests2/core/server-boot-worktree-ordering.test.ts",
+      "reason": "Deterministic deferred regression proving the post-listen orphan-worktree sweep settles before pool initialization can expose claimable entries, while unrelated request work remains responsive.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -39,8 +30,125 @@
       }
     },
     {
-      "path": "tests2/core/ws-session-command-serialiser.test.ts",
-      "reason": "Pure unit coverage for per-session WebSocket command ordering, cross-session concurrency, rejection isolation, and idle-key cleanup using deterministic deferred promises.",
+      "path": "tests2/core/async-background-cleanup-static.test.ts",
+      "reason": "TypeScript AST/type-checker guard for the Async Background Cleanup goal: follows only the complete named preview artifact/mount/route/listener, worktree, plan-mutation, archive-purge, and orphan-cleanup production call graphs, and reports ASYNC_BACKGROUND_CLEANUP_SYNC_IO root-to-violation traces for direct, aliased, destructured, injected, or wrapped synchronous filesystem/subprocess/Atomics.wait operations.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/preview-identity-guard-cost.test.ts",
+      "reason": "Deterministic counting/deferred-filesystem regressions proving preview identity claims remain flat while the 256-candidate/64-session LRU catalog revalidates exact artifact.json stamps under the shared I/O ceiling before complete negatives or cached positives, detects descendant metadata edits and first-valid reorder without parent mutation, preserves owned-install order and mount-only repair, invalidates on cleanup/persist failure, fences in-flight filesystem-seam resets, touches hot sessions, and leaves oversized stores on the canonical bounded batch path.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/git-targeted-cleanup-symlink-race.test.ts",
+      "reason": "Deterministic native v2 regression proving targeted Git cleanup cannot traverse a directory replaced by a symlink between lstat and open, remains idempotent for a missing target, and shares the process-wide recovery I/O concurrency ceiling across roots.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/preview-root-identity-races.test.ts",
+      "reason": "Deterministic native and memfs regressions proving bounded preview walks and removals reject real-directory identity replacement, whole-root preview installation quarantines a raced replacement without external traversal, and artifact metadata descriptors reject regular-file replacement before reading bytes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/preview-canonical-root-races.test.ts",
+      "reason": "Deterministic injected-filesystem regressions proving canonical preview and artifact roots stay identity-bound within trusted stores, opened canonical files match descriptor identities before reads, missing stable expectations fail closed, and whole-root staging substitution is quarantined without traversal or deletion.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/preview-install-transaction-races.test.ts",
+      "reason": "Deterministic deferred regressions for source-ENOENT rollback, stable staging preflight, persistent failed-write fencing, same-key writer serialization, rename-first blocked purge, aborted stream lease release, and serialized owned-quarantine cleanup logging.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/preview-transaction-edge-cases.test.ts",
+      "reason": "Deterministic transaction regressions proving pre-mutation failures republish intact verified mounts, blocked non-directory roots detach without traversal, mismatched quarantines retain explicit cleanup ownership, rollback backups remain authoritative, and destination-ancestor swaps receive zero source bytes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/purge-preview-pool-shutdown-coder61c7.test.ts",
+      "reason": "Deterministic native v2 coverage for coalesced immediate and expiry archive purges, stale-snapshot fencing, serialized preview purge cleanup, a single reclaim-candidate concurrency ceiling across many boot projects, and awaited CPU diagnostics shutdown.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/archive-purge-async.test.ts",
+      "reason": "Deterministic native v2 coverage for bounded deferred archive stats, event-loop progress, scheduled purge single-flight behavior, stop barriers that cancel future ticks and join active cleanup, and awaited failure-isolated termination listeners.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/preview-purge-listener-error.test.ts",
+      "reason": "In-process gateway regression proving purge awaits the preview termination listener, the listener explicitly owns deletion errors without rejecting the purge response, retained artifacts remain targeted for later cleanup, and the gateway stays healthy.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/core/bounded-async-work.test.ts",
+      "reason": "Deterministic native v2 coverage for the shared background-I/O ceiling, bounded dynamic queues and traversal, cooperative deep-tree yielding, sorted files, streamed hashing input, symlink safety, bounded copy, and idempotent post-order deletion.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/bounded-tree-parent-identity.test.ts",
+      "reason": "Deterministic injected-filesystem regressions proving queued and local-DFS tree work retains its producing-parent and operation-root identities, parent replacement cannot expose external entries to visitors/copy/hash, and symlink ancestors are never traversed.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/bounded-tree-quarantine-races.test.ts",
+      "reason": "Deterministic native and injected-filesystem races inside async visitors, readlink, opendir, rename, unlink, and rmdir prove full traversal claims fence copy/hash inputs, deletion detaches only verified identities into random same-parent quarantine paths, mismatched moves are restored without deletion, and preserveRoot detaches children while retaining the authorized root.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/bounded-tree-quarantine-errors.test.ts",
+      "reason": "Deterministic quarantine lifecycle failures prove root and child opendir/read/unlink/rmdir errors restore the exact remaining identity for visible retry, partial cleanup remains visible, collisions never overwrite, impossible restoration reports and logs its quarantine path, missing parents retain force semantics, and mismatched external identities are never deleted.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -1152,6 +1260,33 @@
         "runner": "playwright",
         "tier": "browser",
         "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/file-mentions-authenticated-boundary.test.ts",
+      "reason": "Exact authenticated 8 MiB code-dense and deep-list Markdown resource coverage runs in a constrained child Node heap so an AST-allocation regression cannot crash the unit coordinator.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
+      "path": "tests2/core/file-mentions-resource-limits.test.ts",
+      "reason": "Structural resource, admission, concurrency, and non-regular-target coverage split from the semantic file-mention resolver suite to keep both within the tier-1 per-file wall budget.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/ws-session-command-serialiser.test.ts",
+      "reason": "Pure unit coverage for per-session WebSocket command ordering, cross-session concurrency, rejection isolation, and idle-key cleanup using deterministic deferred promises.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
       }
     }
   ],
@@ -11088,7 +11223,7 @@
       "bucket": "v2-core",
       "method": "codemod",
       "replacement": [],
-      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks).",
+      "rationale": "Vitest preview-artifact logic suite, including deterministic deferred metadata batches that prove the shared eight-operation ceiling, bounded directory read-ahead, ordered first-valid reuse despite out-of-order completion, and corrupt/mismatched/missing candidate isolation.",
       "migrated": true,
       "v2Path": "tests2/core/preview-artifacts.test.ts",
       "execution": {

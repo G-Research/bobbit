@@ -50,6 +50,20 @@ import path from "node:path";
 
 const TOMBSTONE_FILE = ".deletion-tombstones.json";
 
+export type DeletionTombstoneAsyncFs = Pick<
+	typeof fs.promises,
+	"mkdir" | "readFile" | "writeFile"
+>;
+
+type PendingTombstone = { fileName: string; key: string };
+type TombstoneWriteState = {
+	pending: PendingTombstone[];
+	inFlight: Promise<void>;
+};
+
+/** One writer per durable tombstone file; synchronous callers fold into it. */
+const asyncWriters = new Map<string, TombstoneWriteState>();
+
 /** Absolute path to the tombstone file for a given state dir. */
 export function deletionTombstoneFile(stateDir: string): string {
 	return path.join(stateDir, TOMBSTONE_FILE);
@@ -92,6 +106,13 @@ export function readDeletionTombstones(stateDir: string, fileName: string): Set<
  */
 export function recordDeletionTombstone(stateDir: string, fileName: string, key: string): void {
 	if (!key) return;
+	const writer = asyncWriters.get(path.resolve(deletionTombstoneFile(stateDir)));
+	if (writer) {
+		// A synchronous store mutation cannot await the active purge writer. Add
+		// its intent to that writer so the older async snapshot cannot erase it.
+		writer.pending.push({ fileName, key });
+		return;
+	}
 	try {
 		if (!fs.existsSync(stateDir)) {
 			fs.mkdirSync(stateDir, { recursive: true });
@@ -105,4 +126,91 @@ export function recordDeletionTombstone(stateDir: string, fileName: string, key:
 	} catch {
 		/* best-effort — deletion must succeed even if the tombstone write fails */
 	}
+}
+
+async function readAllDeletionTombstonesAsync(
+	stateDir: string,
+	fsImpl: DeletionTombstoneAsyncFs,
+): Promise<Record<string, string[]>> {
+	try {
+		const data = JSON.parse(await fsImpl.readFile(deletionTombstoneFile(stateDir), "utf-8")) as unknown;
+		if (!data || typeof data !== "object" || Array.isArray(data)) return {};
+		const out: Record<string, string[]> = {};
+		for (const [storedFileName, keys] of Object.entries(data as Record<string, unknown>)) {
+			if (Array.isArray(keys)) {
+				out[storedFileName] = keys.filter((storedKey): storedKey is string => typeof storedKey === "string");
+			}
+		}
+		return out;
+	} catch {
+		return {};
+	}
+}
+
+async function drainTombstones(
+	writerKey: string,
+	stateDir: string,
+	state: TombstoneWriteState,
+	fsImpl: DeletionTombstoneAsyncFs,
+): Promise<void> {
+	try {
+		while (state.pending.length > 0) {
+			const batch = state.pending.splice(0);
+			try {
+				await fsImpl.mkdir(stateDir, { recursive: true });
+				const all = await readAllDeletionTombstonesAsync(stateDir, fsImpl);
+				let changed = false;
+				for (const { fileName, key } of batch) {
+					const list = all[fileName] ?? [];
+					if (list.includes(key)) continue;
+					list.push(key);
+					all[fileName] = list;
+					changed = true;
+				}
+				if (changed) {
+					await fsImpl.writeFile(deletionTombstoneFile(stateDir), JSON.stringify(all, null, 2), "utf-8");
+				}
+			} catch {
+				/* best-effort — deletion must succeed even if the tombstone write fails */
+			}
+		}
+	} finally {
+		if (asyncWriters.get(writerKey) === state) {
+			// Retire or restart the writer before this promise settles. Deferring
+			// deletion to a reaction leaves a microtask window where a tombstone can
+			// be queued onto an already-settled writer and never persisted.
+			asyncWriters.delete(writerKey);
+			if (state.pending.length > 0) {
+				asyncWriters.set(writerKey, state);
+				state.inFlight = drainTombstones(writerKey, stateDir, state, fsImpl);
+			}
+		}
+	}
+}
+
+/**
+ * Promise-based purge seam for a durable deletion tombstone. Calls targeting
+ * the same state directory are serialized, remain idempotent, and fold any
+ * synchronous tombstones recorded while an async write is pending.
+ */
+export function recordDeletionTombstoneAsync(
+	stateDir: string,
+	fileName: string,
+	key: string,
+	fsImpl: DeletionTombstoneAsyncFs = fs.promises,
+): Promise<void> {
+	if (!key) return Promise.resolve();
+	const writerKey = path.resolve(deletionTombstoneFile(stateDir));
+	const existing = asyncWriters.get(writerKey);
+	if (existing) {
+		existing.pending.push({ fileName, key });
+		return existing.inFlight;
+	}
+
+	const state = { pending: [{ fileName, key }], inFlight: Promise.resolve() } as TombstoneWriteState;
+	// Publish the state before starting the async function so even an injected
+	// filesystem that throws synchronously cannot finalize an unpublished writer.
+	asyncWriters.set(writerKey, state);
+	state.inFlight = drainTombstones(writerKey, stateDir, state, fsImpl);
+	return state.inFlight;
 }

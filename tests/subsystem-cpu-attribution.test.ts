@@ -29,7 +29,7 @@ function restoreEnv(): void {
 
 async function flushSnapshot(reason: string): Promise<any> {
 	const { getCpuDiagnostics } = await import("../src/server/agent/cpu-diagnostics.js");
-	getCpuDiagnostics().flush(reason);
+	await getCpuDiagnostics().flush(reason);
 	const lines = fs.readFileSync(diagFile, "utf-8").trim().split(/\r?\n/);
 	return JSON.parse(lines.at(-1)!);
 }
@@ -55,7 +55,7 @@ function initRepo(name: string): string {
 after(async () => {
 	try {
 		const { getCpuDiagnostics } = await import("../src/server/agent/cpu-diagnostics.js");
-		getCpuDiagnostics().shutdown();
+		await getCpuDiagnostics().shutdown();
 	} catch { /* ignore */ }
 	restoreEnv();
 	try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -197,7 +197,7 @@ describe("subsystem CPU attribution", () => {
 			const pool = new WorktreePool({ repoPath: process.cwd(), targetSize: 0 });
 			const result = await pool.claim("session/disabled");
 			if (result !== null) process.exit(2);
-			getCpuDiagnostics().flush("disabled");
+			await getCpuDiagnostics().flush("disabled");
 		`;
 		const scriptPath = path.join(tmpRoot, "disabled-check.mjs");
 		fs.writeFileSync(scriptPath, script);

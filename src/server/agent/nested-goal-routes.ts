@@ -948,7 +948,7 @@ export async function tryHandleNestedGoalRoute(
 			createdAt: now,
 			expiresAt: now + DEFAULT_MUTATION_TTL_MS,
 		};
-		planMutationStore.put(pending);
+		await planMutationStore.put(pending);
 		broadcastToAll({
 			type: "mutation_pending",
 			goalId: goal.id,
@@ -1029,8 +1029,8 @@ export async function tryHandleNestedGoalRoute(
 		const resolved = resolvePlanContext(id);
 		if (!resolved) return true;
 		const now = Date.now();
-		const pending = resolved.ctx.planMutationStore
-			.listForGoal(id)
+		const pending = (await resolved.ctx.planMutationStore
+			.listForGoal(id))
 			.filter(m => m.expiresAt > now)
 			.map(m => ({
 				requestId: m.requestId,
@@ -1324,26 +1324,36 @@ export async function tryHandleNestedGoalRoute(
 		if (!ctx) { json({ error: "Project context not found" }, 404); return true; }
 		const planMutationStore = ctx.planMutationStore;
 		const goalManager = ctx.goalManager;
-		const pending = planMutationStore.get(goalId, requestId);
-		if (!pending) { json({ error: "Mutation request not found", code: "REQUEST_NOT_FOUND" }, 404); return true; }
-		if (decision === "reject") {
-			planMutationStore.remove(goalId, requestId);
-			broadcastToAll({ type: "mutation_decided", goalId, requestId, decision });
-			json({ applied: false });
-			return true;
-		}
-		// approve: apply the proposed steps and bump replanCount.
 		try {
-			await applyPlanSteps(goal, pending.proposedSteps, goalManager);
-			// Gov-1: bump replanCount AND trip the replan-overflow auto-pause
-			// via the SAME shared helper the direct fix-up path uses, so both
-			// paths have identical semantics. The helper routes the pause
-			// through executePauseForGoals (canonical entry point) and excludes
-			// the triggering agent's own session from the cascade-abort loop.
-			const { newReplanCount, autoPaused } = await applyReplanAndMaybeAutopause(
-				goal, goalManager, readCallerSessionId(),
-			);
-			planMutationStore.remove(goalId, requestId);
+			const decided = await planMutationStore.decide(goalId, requestId, async pending => {
+				if (decision === "reject") return { applied: false as const };
+
+				// approve: apply the proposed steps and bump replanCount while the
+				// request remains exclusively claimed by the store's per-goal queue.
+				await applyPlanSteps(goal, pending.proposedSteps, goalManager);
+				// Gov-1: bump replanCount AND trip the replan-overflow auto-pause
+				// via the SAME shared helper the direct fix-up path uses, so both
+				// paths have identical semantics. The helper routes the pause
+				// through executePauseForGoals (canonical entry point) and excludes
+				// the triggering agent's own session from the cascade-abort loop.
+				const { newReplanCount, autoPaused } = await applyReplanAndMaybeAutopause(
+					goal, goalManager, readCallerSessionId(),
+				);
+				return { applied: true as const, newReplanCount, autoPaused };
+			});
+			if (!decided.found) {
+				json({ error: "Mutation request not found", code: "REQUEST_NOT_FOUND" }, 404);
+				return true;
+			}
+
+			const outcome = decided.value;
+			if (!outcome.applied) {
+				broadcastToAll({ type: "mutation_decided", goalId, requestId, decision });
+				json({ applied: false });
+				return true;
+			}
+
+			const { newReplanCount, autoPaused } = outcome;
 			broadcastToAll({ type: "mutation_decided", goalId, requestId, decision, autoPaused });
 			// Cross-team propagation: when a child goal is auto-paused,
 			// notify the PARENT's team-lead — without this the parent sits

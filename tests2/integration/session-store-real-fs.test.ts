@@ -40,6 +40,90 @@ function writeJsonl(file: string, mtimeMs: number): void {
 	fs.utimesSync(file, mtimeMs / 1000, mtimeMs / 1000);
 }
 
+function deferred<T = void>() {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	const promise = new Promise<T>((r) => { resolve = r; });
+	return { promise, resolve };
+}
+
+function fsWithDeferredFirstOpen() {
+	const entered = deferred();
+	const release = deferred();
+	let opens = 0;
+	const deferredPromises = new Proxy(fs.promises, {
+		get(target, property, receiver) {
+			if (property === "open") {
+				return async (...args: Parameters<typeof fs.promises.open>) => {
+					opens++;
+					if (opens === 1) {
+						entered.resolve();
+						await release.promise;
+					}
+					return fs.promises.open(...args);
+				};
+			}
+			const value = Reflect.get(target, property, receiver);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
+	const fsImpl = new Proxy(fs, {
+		get(target, property, receiver) {
+			if (property === "promises") return deferredPromises;
+			const value = Reflect.get(target, property, receiver);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
+	return { fsImpl, entered: entered.promise, release: () => release.resolve(), opens: () => opens };
+}
+
+/**
+ * Hold the final sessions.json fingerprint read. The scheduled callback lands
+ * after the drain's final requested-state observation but before reactions on
+ * the drain promise, deterministically exercising its settlement boundary.
+ */
+function fsWithDeferredFinalFingerprint(storeFile: string) {
+	const entered = deferred();
+	const release = deferred();
+	let matchingStats = 0;
+	let boundary: Promise<fs.Stats> | undefined;
+	const resolvedStoreFile = path.resolve(storeFile);
+	const deferredPromises = new Proxy(fs.promises, {
+		get(target, property, receiver) {
+			if (property === "stat") {
+				return (...args: any[]) => {
+					const operation = fs.promises.stat(args[0]);
+					if (path.resolve(String(args[0])) === resolvedStoreFile && ++matchingStats === 2) {
+						boundary = release.promise.then(() => operation);
+						entered.resolve();
+						return boundary;
+					}
+					return operation;
+				};
+			}
+			const value = Reflect.get(target, property, receiver);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
+	const fsImpl = new Proxy(fs, {
+		get(target, property, receiver) {
+			if (property === "promises") return deferredPromises;
+			const value = Reflect.get(target, property, receiver);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
+	return {
+		fsImpl,
+		entered: entered.promise,
+		release: () => release.resolve(),
+		scheduleAtDrainSettle(callback: () => void): void {
+			assert.ok(boundary, "final fingerprint boundary must be pending");
+			void boundary.then(() => {
+				queueMicrotask(() => queueMicrotask(callback));
+			});
+		},
+	};
+}
+
 describe("SessionStore real filesystem fidelity", () => {
 	it("saveNow persists through real fs and leaves no .tmp after atomic rename", () => {
 		const root = freshRoot();
@@ -150,6 +234,97 @@ describe("SessionStore real filesystem fidelity", () => {
 		);
 	});
 
+	it("purgeAsync yields at deferred I/O and durably orders concurrent sync mutations", async () => {
+		const root = freshRoot();
+		const stateDir = path.join(root, "state");
+		const storeFile = path.join(stateDir, "sessions.json");
+		const deferredFs = fsWithDeferredFirstOpen();
+		const store = new SessionStore(stateDir, deferredFs.fsImpl as any);
+		store.put(makeSession("victim"));
+		store.archive("victim");
+
+		let settled = false;
+		const purge = store.purgeAsync("victim").then((result) => {
+			settled = true;
+			return result;
+		});
+		await deferredFs.entered;
+		let eventLoopProgressed = false;
+		await Promise.resolve().then(() => { eventLoopProgressed = true; });
+		assert.equal(eventLoopProgressed, true);
+		assert.equal(settled, false, "purge must remain pending while atomic open is deferred");
+
+		store.put(makeSession("survivor"));
+		deferredFs.release();
+		assert.equal(await purge, true);
+
+		const persisted = JSON.parse(fs.readFileSync(storeFile, "utf-8"));
+		assert.equal(persisted.epoch, 4, "purge and the folded put each advance the durable epoch");
+		assert.deepEqual(persisted.sessions.map((session: PersistedSession) => session.id), ["survivor"]);
+		const backup = JSON.parse(fs.readFileSync(`${storeFile}.bak.1`, "utf-8"));
+		assert.equal(backup.epoch, 3, ".bak.1 retains the completed purge snapshot before the folded put");
+		assert.deepEqual(backup.sessions, []);
+		assert.equal(fs.existsSync(`${storeFile}.tmp`), false);
+		assert.equal(readDeletionTombstones(stateDir, "sessions.json").has("victim"), true);
+		assert.equal(deferredFs.opens(), 2, "a concurrent synchronous mutation schedules a second serialized async save");
+	});
+
+	it("does not lose a synchronous mutation at the async drain settlement boundary", async () => {
+		const root = freshRoot();
+		const stateDir = path.join(root, "state");
+		const storeFile = path.join(stateDir, "sessions.json");
+		const deferredFs = fsWithDeferredFinalFingerprint(storeFile);
+		const store = new SessionStore(stateDir, deferredFs.fsImpl as any);
+		store.put(makeSession("victim"));
+		store.archive("victim");
+
+		const purge = store.purgeAsync("victim");
+		await deferredFs.entered;
+		deferredFs.scheduleAtDrainSettle(() => {
+			store.put(makeSession("settlement-survivor"));
+		});
+		deferredFs.release();
+		assert.equal(await purge, true);
+
+		const persisted = JSON.parse(fs.readFileSync(storeFile, "utf-8"));
+		assert.equal(persisted.epoch, 4, "the settle-boundary mutation must advance the durable epoch");
+		assert.deepEqual(
+			persisted.sessions.map((session: PersistedSession) => session.id),
+			["settlement-survivor"],
+			"a mutation scheduled between drain observation and completion must not be lost",
+		);
+		assert.equal(readDeletionTombstones(stateDir, "sessions.json").has("victim"), true);
+	});
+
+	it("purgeAsync retains the stale epoch/fingerprint refusal", async () => {
+		const root = freshRoot();
+		const stateDir = path.join(root, "state");
+		const storeFile = path.join(stateDir, "sessions.json");
+		const seed = new SessionStore(stateDir);
+		seed.put(makeSession("victim"));
+		const stale = new SessionStore(stateDir);
+		const external = {
+			version: 2,
+			epoch: 9,
+			sessions: [makeSession("external", { title: "newer external state with a different fingerprint size" })],
+		};
+		fs.writeFileSync(storeFile, JSON.stringify(external), "utf-8");
+
+		const errors: unknown[][] = [];
+		const originalError = console.error;
+		console.error = (...args: unknown[]) => { errors.push(args); };
+		try {
+			assert.equal(await stale.purgeAsync("victim"), true);
+		} finally {
+			console.error = originalError;
+		}
+
+		assert.equal(stale.isStaleGuardTripped(), true);
+		assert.deepEqual(JSON.parse(fs.readFileSync(storeFile, "utf-8")), external);
+		assert.ok(errors.some((args) => String(args[0]).includes("REFUSING to save")));
+		assert.equal(readDeletionTombstones(stateDir, "sessions.json").has("victim"), true);
+	});
+
 	it("walks real nested transcript directories and ignores tracked or old jsonl files", async () => {
 		const root = freshRoot();
 		const stateDir = path.join(root, "state");
@@ -172,10 +347,8 @@ describe("SessionStore real filesystem fidelity", () => {
 		const origWarn = console.warn;
 		console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(" ")); };
 		let result: { count: number; paths: string[] };
-		let asyncResult: { count: number; paths: string[] };
 		try {
-			result = store.scanOrphanedTranscripts(transcriptsDir);
-			asyncResult = await scanOrphanedTranscriptsAsync(
+			result = await scanOrphanedTranscriptsAsync(
 				transcriptsDir,
 				new Set([trackedFile]),
 				now - 60_000,
@@ -190,8 +363,6 @@ describe("SessionStore real filesystem fidelity", () => {
 		].sort();
 		assert.equal(result!.count, 2);
 		assert.deepEqual(result!.paths.map(p => path.relative(transcriptsDir, p)).sort(), expected);
-		assert.equal(asyncResult!.count, 2);
-		assert.deepEqual(asyncResult!.paths.map(p => path.relative(transcriptsDir, p)).sort(), expected);
 		assert.ok(warns.every(w => !w.includes("tracked.jsonl") && !w.includes("old-orphan.jsonl")));
 	});
 });

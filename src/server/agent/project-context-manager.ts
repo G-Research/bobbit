@@ -403,14 +403,12 @@ export class ProjectContextManager {
     }
   }
 
-  /** Remove a context when a project is unregistered. Runs during normal
-   *  operation (not teardown), so the async close is fire-and-forget — but we
-   *  swallow any rejection so the now-`Promise`-returning close can't surface
-   *  an unhandled rejection. */
-  remove(projectId: string): void {
+  /** Remove a context when a project is unregistered. The returned barrier
+   *  settles only after all context-owned background work has stopped. */
+  async remove(projectId: string): Promise<void> {
     const ctx = this.contexts.get(projectId);
     if (ctx) {
-      void ctx.close().catch((err) => console.warn("[pcm] context close failed:", err));
+      await ctx.close();
       this.contexts.delete(projectId);
       this.contextTopologyVersion++;
     }

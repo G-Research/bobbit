@@ -488,6 +488,7 @@ describe("CostTracker", () => {
 		it("ProjectContext.close flushes pending cost usage", async () => {
 			const calls: string[] = [];
 			const context = {
+				planMutationStore: { stopSweep: async () => { calls.push("mutations"); } },
 				sessionStore: { flush: () => calls.push("sessions") },
 				costTracker: { flush: () => calls.push("cost") },
 				bgProcessStore: { flush: () => calls.push("background") },
@@ -495,7 +496,7 @@ describe("CostTracker", () => {
 			} as unknown as ProjectContext;
 
 			await ProjectContext.prototype.close.call(context);
-			assert.deepEqual(calls, ["sessions", "cost", "background", "search"]);
+			assert.deepEqual(calls, ["mutations", "sessions", "cost", "background", "search"]);
 		});
 
 		it("survives save and reload", () => {

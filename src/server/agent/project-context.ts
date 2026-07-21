@@ -190,6 +190,9 @@ export class ProjectContext {
    *  (teardown, shutdown) can guarantee no async I/O outlives this promise —
    *  preventing the FlexSearch flush-on-close race against temp-dir removal. */
   async close(): Promise<void> {
+    // Stop future plan-mutation sweeps and wait for an active prune before
+    // closing resources or allowing this context's state directory to vanish.
+    await this.planMutationStore.stopSweep();
     this.sessionStore.flush();
     this.costTracker.flush();
     // Mirror sessionStore: flush the bg-process store so its final epoch

@@ -117,12 +117,24 @@ async function ensureArchivedRowVisible(page: Page, sessionId: string): Promise<
 }
 
 async function openArchivedSidebarMenu(page: Page, sessionId: string): Promise<void> {
-	const row = await ensureArchivedRowVisible(page, sessionId);
-	await row.hover();
-	const trigger = sidebarTrigger(row, sessionId);
-	await expect(trigger, "archived session hamburger should be visible").toBeVisible({ timeout: 5_000 });
-	await trigger.click();
-	await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+	const menu = page.locator("sidebar-actions-popover [role='menu']");
+	let lastError: unknown;
+	for (let attempt = 0; attempt < 4; attempt++) {
+		const row = await ensureArchivedRowVisible(page, sessionId);
+		const trigger = sidebarTrigger(row, sessionId);
+		try {
+			// Keyboard focus exposes the desktop action cluster without depending on a
+			// hover target that can be replaced by an asynchronous sidebar render.
+			await trigger.focus({ timeout: 1_000 });
+			await trigger.press("Enter", { timeout: 1_000 });
+			await expect(menu).toBeVisible({ timeout: 1_000 });
+			return;
+		} catch (error) {
+			lastError = error;
+			if (await menu.isVisible().catch(() => false)) return;
+		}
+	}
+	throw lastError;
 }
 
 async function openHeaderMenu(page: Page): Promise<void> {
@@ -206,15 +218,18 @@ test.describe("archived session actions", () => {
 
 		await openApp(page);
 		await navigateToHash(page, `#/session/${activeId}`);
+		await expect.poll(() => page.evaluate(() => (window as any).bobbitState?.selectedSessionId ?? null), {
+			message: "active session should finish loading before archived sidebar interactions",
+			timeout: 15_000,
+		}).toBe(activeId);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 		await showArchivedInSidebar(page);
-		const row = await ensureArchivedRowVisible(page, archivedId);
 
-		const hashBefore = await page.evaluate(() => window.location.hash);
-		const selectedBefore = await page.evaluate(() => (window as any).bobbitState?.selectedSessionId ?? null);
-		await row.hover();
-		await sidebarTrigger(row, archivedId).click();
-		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+		const { hashBefore, selectedBefore } = await page.evaluate(() => ({
+			hashBefore: window.location.hash,
+			selectedBefore: (window as any).bobbitState?.selectedSessionId ?? null,
+		}));
+		await openArchivedSidebarMenu(page, archivedId);
 		await expectArchivedSafeMenu(page);
 		await expect.poll(() => page.evaluate(() => window.location.hash), { message: "archived sidebar hamburger must not navigate" }).toBe(hashBefore);
 		await expect.poll(() => page.evaluate(() => (window as any).bobbitState?.selectedSessionId ?? null), { message: "archived sidebar hamburger must not select the row" }).toBe(selectedBefore);
@@ -233,7 +248,8 @@ test.describe("archived session actions", () => {
 		await expect.poll(() => page.evaluate(() => window.location.hash), { message: "open in new window must not navigate in-place" }).toBe(hashBefore);
 		await closePopover(page);
 
-		await row.click();
+		const archivedRow = await ensureArchivedRowVisible(page, archivedId);
+		await archivedRow.click();
 		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 15_000 }).toContain(`#/session/${archivedId}`);
 		await expect.poll(() => page.evaluate((id) => {
 			const s = (window as any).bobbitState;

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import fs from "node:fs";
+import { promises as nodeFs, type Dirent } from "node:fs";
 import path from "node:path";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import type { SessionManager, ArchivedSessionWorktreeGroup, ArchivedSessionWorktreeItem, ArchivedSessionWorktreeScanResponse, ArchivedSessionWorktreeSelectionPreset, ArchivedSessionWorktreeSession, ArchivedWorktreeReason, ArchivedWorktreeReasonCategory, ArchivedWorktreeSelectionCategory, CleanupArchivedSessionWorktreesRequest, CleanupArchivedSessionWorktreesResponse, ArchivedSessionWorktreeCleanupResult } from "./session-manager.js";
@@ -12,6 +12,7 @@ import { normalizeWorktreeHostPath } from "./worktree-reference-guard.js";
 import { branchToSlug, worktreeRoot as resolveWorktreeRoot } from "../skills/worktree-paths.js";
 import { cleanupWorktree, shouldSkipRemotePushForTests, type RemoteGitPolicy } from "../skills/git.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
+import { mapWithConcurrency, RECOVERY_IO_CONCURRENCY } from "./bounded-async-work.js";
 
 export type WorktreeInventorySource =
 	| "runtime-session"
@@ -151,11 +152,24 @@ export interface WorktreePoolSnapshot {
 	filling: boolean;
 }
 
+export interface WorktreeInventoryDirectory {
+	read(): Promise<Dirent | null>;
+	close(): Promise<void>;
+}
+
+export interface WorktreeInventoryFs {
+	access(filePath: string): Promise<void>;
+	opendir(dirPath: string): Promise<WorktreeInventoryDirectory>;
+}
+
 export interface WorktreeInventoryDeps {
 	projectContextManager: ProjectContextManager;
 	sessionManager: SessionManager;
 	clock?: () => number;
-	fs?: Pick<typeof fs, "existsSync" | "readdirSync" | "statSync">;
+	/** Promise-only filesystem seam for inventory discovery and verification. */
+	fs?: WorktreeInventoryFs;
+	/** Test seam; production uses the shared background-I/O ceiling. */
+	ioConcurrency?: number;
 	execGit?: (repoPath: string, args: readonly string[], opts?: { timeoutMs?: number }) => Promise<string>;
 	commandRunner?: CommandRunner;
 	remotePolicy?: RemoteGitPolicy;
@@ -188,6 +202,29 @@ interface GuardIndexes {
 	archivedBranches: Map<string, Map<string, Set<string>>>;
 }
 
+type CleanupSelectionPolicy = "all-safe" | "selected" | "legacy-orphaned";
+
+// Maintenance requests construct separate service instances, so the mutation
+// queue must be shared at module scope. Read-only scans may overlap; only Git
+// mutations for the same repository are serialized.
+const repoMutationTails = new Map<string, Promise<void>>();
+
+async function withRepoMutation<T>(repoPath: string, mutate: () => Promise<T>): Promise<T> {
+	const key = repoKey(repoPath);
+	const previous = repoMutationTails.get(key) ?? Promise.resolve();
+	let release!: () => void;
+	const turn = new Promise<void>(resolve => { release = resolve; });
+	const tail = previous.then(() => turn);
+	repoMutationTails.set(key, tail);
+	await previous;
+	try {
+		return await mutate();
+	} finally {
+		release();
+		if (repoMutationTails.get(key) === tail) repoMutationTails.delete(key);
+	}
+}
+
 export function isContainerInternalWorktreePath(candidatePath: string | undefined): boolean {
 	if (!candidatePath) return false;
 	const normalized = candidatePath.replace(/\\/g, "/");
@@ -210,6 +247,21 @@ function norm(p?: string): string | undefined { return normalizeWorktreeHostPath
 function repoKey(repoPath: string | undefined): string { return norm(repoPath) ?? ""; }
 function stableId(prefix: string, ...parts: Array<string | undefined>): string {
 	return `${prefix}:${createHash("sha1").update(parts.map(p => p ?? "").join("\0")).digest("hex").slice(0, 16)}`;
+}
+
+function isMissingFsError(err: unknown): boolean {
+	return (err as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
+}
+
+const realWorktreeInventoryFs: WorktreeInventoryFs = {
+	access: filePath => nodeFs.access(filePath),
+	opendir: dirPath => nodeFs.opendir(dirPath),
+};
+
+const INVENTORY_STREAM_YIELD_INTERVAL = 256;
+
+function yieldInventoryTraversal(): Promise<void> {
+	return new Promise(resolve => setImmediate(resolve));
 }
 
 export function parseGitWorktreeList(stdout: string): ParsedGitWorktree[] {
@@ -257,23 +309,25 @@ export function classifyPoolReclaimCandidate(opts: {
 export class WorktreeInventoryService {
 	private readonly deps: WorktreeInventoryDeps;
 	private readonly clock: () => number;
-	private readonly fsa: Pick<typeof fs, "existsSync" | "readdirSync" | "statSync">;
+	private readonly fsa: WorktreeInventoryFs;
+	private readonly ioConcurrency: number;
 
 	constructor(deps: WorktreeInventoryDeps) {
 		this.deps = deps;
 		this.clock = deps.clock ?? (() => Date.now());
-		this.fsa = deps.fs ?? fs;
+		this.fsa = deps.fs ?? realWorktreeInventoryFs;
+		this.ioConcurrency = deps.ioConcurrency ?? RECOVERY_IO_CONCURRENCY;
+		if (!Number.isInteger(this.ioConcurrency) || this.ioConcurrency <= 0) throw new RangeError("inventory I/O concurrency must be a positive integer");
 	}
 
 	async scan(opts?: WorktreeInventoryScanOptions): Promise<WorktreeInventoryReport> {
-		const repos = this.discoverRepos();
-		const guards = this.buildGuards();
+		const repos = await this.discoverRepos();
 		const candidates = new Map<string, Candidate>();
 		const addCandidate = (repo: RepoDescriptor, wtPath: string, source: WorktreeInventorySource, branch?: string, extra?: Partial<Candidate>) => {
 			const key = `${repo.projectId}|${repo.repo}|${norm(wtPath) ?? wtPath}`;
 			let c = candidates.get(key);
 			if (!c) {
-				c = { projectId: repo.projectId, projectName: repo.projectName, componentName: repo.componentName, repo: repo.repo, repoPath: repo.repoPath, worktreeRoot: repo.worktreeRoot, path: wtPath, branch, sources: new Set(), owners: [], pathExists: this.exists(wtPath), gitWorktreeMetadataExists: false };
+				c = { projectId: repo.projectId, projectName: repo.projectName, componentName: repo.componentName, repo: repo.repo, repoPath: repo.repoPath, worktreeRoot: repo.worktreeRoot, path: wtPath, branch, sources: new Set(), owners: [], pathExists: false, gitWorktreeMetadataExists: false };
 				candidates.set(key, c);
 			}
 			c.sources.add(source);
@@ -282,26 +336,45 @@ export class WorktreeInventoryService {
 			return c;
 		};
 
-		for (const repo of repos) {
+		const repoScans = await mapWithConcurrency(repos, this.ioConcurrency, async repo => {
+			if (!await this.exists(repo.repoPath) || !await this.exists(path.join(repo.repoPath, ".git"))) {
+				return { repo, worktrees: [] as ParsedGitWorktree[] };
+			}
 			try {
-				if (!this.exists(repo.repoPath) || !this.exists(path.join(repo.repoPath, ".git"))) continue;
 				const stdout = await this.execGit(repo.repoPath, ["worktree", "list", "--porcelain"], { timeoutMs: 10_000 });
-				for (const wt of parseGitWorktreeList(stdout)) {
-					const primary = norm(wt.path) === norm(repo.repoPath);
-					addCandidate(repo, wt.path, "git-worktree", wt.branch, { gitWorktreeMetadataExists: true, primary });
-				}
+				return { repo, worktrees: parseGitWorktreeList(stdout) };
 			} catch (err) {
-				const scanPath = path.join(repo.worktreeRoot, `.scan-error-${branchToSlug(repo.repo)}`);
-				addCandidate(repo, scanPath, "git-worktree", undefined, { scanError: { reason: "git-scan-error", detail: err instanceof Error ? err.message : String(err) } });
+				return { repo, worktrees: [] as ParsedGitWorktree[], error: err instanceof Error ? err.message : String(err) };
+			}
+		});
+		for (const result of repoScans) {
+			if (result.error !== undefined) {
+				const scanPath = path.join(result.repo.worktreeRoot, `.scan-error-${branchToSlug(result.repo.repo)}`);
+				addCandidate(result.repo, scanPath, "git-worktree", undefined, { scanError: { reason: "git-scan-error", detail: result.error } });
+				continue;
+			}
+			for (const wt of result.worktrees) {
+				const primary = norm(wt.path) === norm(result.repo.repoPath);
+				addCandidate(result.repo, wt.path, "git-worktree", wt.branch, { gitWorktreeMetadataExists: true, primary });
 			}
 		}
 
-		this.addFilesystemCandidates(repos, addCandidate);
+		await this.addFilesystemCandidates(repos, addCandidate);
 		this.addPoolCandidates(repos, addCandidate);
 		await this.addArchivedCandidates(repos, candidates);
 
-		for (const candidate of candidates.values()) this.attachOwners(candidate, guards);
-		let items = await Promise.all([...candidates.values()].map(candidate => this.classify(candidate, guards)));
+		const candidateList = [...candidates.values()];
+		await mapWithConcurrency(candidateList, this.ioConcurrency, async candidate => {
+			candidate.pathExists = await this.exists(candidate.path);
+			if (candidate.legacyArchived) candidate.legacyArchived.pathExists = candidate.pathExists;
+		});
+		const localBranches = await mapWithConcurrency(candidateList, this.ioConcurrency, candidate => this.localBranchExists(candidate.repoPath, candidate.branch));
+		// Ownership is the final asynchronous scan phase. Guard stores and pool
+		// snapshots are read only after their async repo-path prerequisites settle,
+		// so a claim arriving during any earlier filesystem/Git work is observed.
+		const guards = await this.buildGuards();
+		for (const candidate of candidateList) this.attachOwners(candidate, guards);
+		let items = candidateList.map((candidate, index) => this.classify(candidate, guards, localBranches[index] ?? false));
 		items.sort((a, b) => a.projectName.localeCompare(b.projectName) || a.repo.localeCompare(b.repo) || a.path.localeCompare(b.path));
 		if (opts?.include === "actionable") items = items.filter(item => item.actionable);
 		if (opts?.include === "troubleshooting") items = items.filter(item => !item.actionable);
@@ -352,30 +425,64 @@ export class WorktreeInventoryService {
 		response.counts.requested = selected.length + invalidIds.length;
 		for (const id of invalidIds) record({ itemId: id, status: "skipped", reason: "invalid-selection", detail: "Selection did not match a fresh cleanup candidate.", worktreeRemoved: false, branchDeleted: false });
 
-		for (const item of selected) {
-			if (item.classification === "already-cleaned") {
-				record({ itemId: item.id, path: item.path, repoPath: item.repoPath, branch: item.branch, status: "already-cleaned", reason: item.reason, detail: item.detail, worktreeRemoved: false, branchDeleted: false });
-				continue;
-			}
-			if (!item.actionable) {
-				response.counts.notActionable++;
-				record({ itemId: item.id, path: item.path, repoPath: item.repoPath, branch: item.branch, status: "skipped", reason: item.reason, detail: item.detail, worktreeRemoved: false, branchDeleted: false });
-				continue;
-			}
-			try {
-				await cleanupWorktree(item.repoPath, item.path, item.branch, false, this.deps.commandRunner ?? realCommandRunner, this.deps.remotePolicy ?? {});
-				const removed = await this.worktreeRemoved(item);
-				if (!removed) {
-					record({ itemId: item.id, path: item.path, repoPath: item.repoPath, branch: item.branch, status: "failed", reason: "git-scan-error", error: "cleanup did not remove worktree path or git metadata", worktreeRemoved: false, branchDeleted: false });
-					continue;
-				}
-				const branchDeleted = await this.deleteBranchIfStillAllowed(item);
-				record({ itemId: item.id, path: item.path, repoPath: item.repoPath, branch: item.branch, status: "cleaned", reason: item.reason, worktreeRemoved: true, branchDeleted });
-			} catch (err) {
-				record({ itemId: item.id, path: item.path, repoPath: item.repoPath, branch: item.branch, status: "failed", reason: "git-scan-error", error: err instanceof Error ? err.message : String(err), worktreeRemoved: false, branchDeleted: false });
-			}
+		const selectionPolicy: CleanupSelectionPolicy = request.mode;
+		const cleanupResults = await mapWithConcurrency(selected, this.ioConcurrency, item => this.cleanupItem(item, selectionPolicy));
+		for (const result of cleanupResults) {
+			if (result.status === "skipped" && result.reason !== "invalid-selection") response.counts.notActionable++;
+			record(result);
 		}
 		return response;
+	}
+
+	private async cleanupItem(item: WorktreeInventoryItem, policy: CleanupSelectionPolicy): Promise<CleanupWorktreeInventoryResponse["results"][number]> {
+		try {
+			const prepared = await withRepoMutation(item.repoPath, async () => {
+				const revalidated = await this.revalidateCleanupItem(item, policy);
+				if ("status" in revalidated) return revalidated;
+				// No await belongs between the fresh scan result and the mutation: the
+				// scan's final phase rebuilt every ownership and actionability guard.
+				await cleanupWorktree(revalidated.repoPath, revalidated.path, revalidated.branch, false, this.deps.commandRunner ?? realCommandRunner, this.deps.remotePolicy ?? {});
+				return revalidated;
+			});
+			if ("status" in prepared) return prepared;
+			const removed = await this.worktreeRemoved(prepared);
+			if (!removed) {
+				return { itemId: item.id, path: prepared.path, repoPath: prepared.repoPath, branch: prepared.branch, status: "failed", reason: "git-scan-error", error: "cleanup did not remove worktree path or git metadata", worktreeRemoved: false, branchDeleted: false };
+			}
+			const branchDeleted = await withRepoMutation(prepared.repoPath, () => this.deleteBranchIfStillAllowed(prepared));
+			return { itemId: item.id, path: prepared.path, repoPath: prepared.repoPath, branch: prepared.branch, status: "cleaned", reason: prepared.reason, worktreeRemoved: true, branchDeleted };
+		} catch (err) {
+			return { itemId: item.id, path: item.path, repoPath: item.repoPath, branch: item.branch, status: "failed", reason: "git-scan-error", error: err instanceof Error ? err.message : String(err), worktreeRemoved: false, branchDeleted: false };
+		}
+	}
+
+	private async revalidateCleanupItem(item: WorktreeInventoryItem, policy: CleanupSelectionPolicy): Promise<WorktreeInventoryItem | CleanupWorktreeInventoryResponse["results"][number]> {
+		// cleanupItem already runs under the outer shared ceiling. Use a serial
+		// scanner here so per-item revalidation cannot multiply that concurrency.
+		const revalidator = new WorktreeInventoryService({ ...this.deps, clock: this.clock, fs: this.fsa, ioConcurrency: 1 });
+		const report = await revalidator.scan({ include: "all" });
+		const current = report.items.find(candidate => candidate.id === item.id);
+		if (!current) {
+			const sameTarget = report.items.find(candidate => norm(candidate.repoPath) === norm(item.repoPath) && norm(candidate.path) === norm(item.path));
+			if (sameTarget) {
+				return { itemId: item.id, path: sameTarget.path, repoPath: sameTarget.repoPath, branch: sameTarget.branch, status: "skipped", reason: sameTarget.actionable ? "invalid-selection" : sameTarget.reason, detail: sameTarget.actionable ? "Candidate ownership changed during cleanup revalidation." : sameTarget.detail, worktreeRemoved: false, branchDeleted: false };
+			}
+			const repoScanError = report.items.find(candidate => norm(candidate.repoPath) === norm(item.repoPath) && candidate.classification === "scan-error");
+			if (repoScanError) {
+				return { itemId: item.id, path: item.path, repoPath: item.repoPath, branch: item.branch, status: "failed", reason: repoScanError.reason, detail: repoScanError.detail, error: repoScanError.detail, worktreeRemoved: false, branchDeleted: false };
+			}
+			return { itemId: item.id, path: item.path, repoPath: item.repoPath, branch: item.branch, status: "already-cleaned", reason: "git-worktree-metadata-missing", detail: "Worktree is already absent from the current inventory.", worktreeRemoved: false, branchDeleted: false };
+		}
+		if (current.classification === "already-cleaned") {
+			return { itemId: item.id, path: current.path, repoPath: current.repoPath, branch: current.branch, status: "already-cleaned", reason: current.reason, detail: current.detail, worktreeRemoved: false, branchDeleted: false };
+		}
+		const policyAllows = current.actionable
+			&& (policy !== "all-safe" || current.defaultSelected)
+			&& (policy !== "legacy-orphaned" || !!current.legacy?.orphanedWorktree);
+		if (!policyAllows) {
+			return { itemId: item.id, path: current.path, repoPath: current.repoPath, branch: current.branch, status: "skipped", reason: current.reason, detail: current.detail, worktreeRemoved: false, branchDeleted: false };
+		}
+		return current;
 	}
 
 	async legacyOrphanedWorktrees(): Promise<{ worktrees: Array<{ path: string; branch: string; repoPath: string }> }> {
@@ -645,31 +752,26 @@ export class WorktreeInventoryService {
 		return { requested: 0, cleaned: 0, branchDeleted: 0, skipped: 0, alreadyCleaned: 0, failed: 0, worktreeRemoved: 0, invalidSelection: 0, notActionable: 0, byStatus: {}, byReason: {} };
 	}
 
-	private discoverRepos(): RepoDescriptor[] {
-		const repos: RepoDescriptor[] = [];
-		const seen = new Set<string>();
-		const addRepo = (repo: RepoDescriptor) => {
-			const key = `${repo.projectId}|${repo.repo}|${repoKey(repo.repoPath)}`;
-			if (!repo.repoPath || seen.has(key)) return;
-			seen.add(key);
-			repos.push(repo);
-		};
-		for (const ctx of this.deps.projectContextManager.visible()) {
+	private async discoverRepos(): Promise<RepoDescriptor[]> {
+		const contexts = [...this.deps.projectContextManager.visible()];
+		const batches = await mapWithConcurrency(contexts, this.ioConcurrency, async ctx => {
+			const repos: RepoDescriptor[] = [];
 			const components = ctx.projectConfigStore.getComponents();
 			const configuredWorktreeRoot = ctx.projectConfigStore.get("worktree_root") || undefined;
 			const multiRepo = components.some(c => c.repo !== ".");
-			const worktreeRoot = resolveWorktreeRoot({ rootPath: multiRepo ? ctx.project.rootPath : this.resolveSingleRepoRoot(ctx.project.rootPath), worktreeRoot: configuredWorktreeRoot });
+			const singleRepoRoot = multiRepo ? undefined : await this.resolveSingleRepoRoot(ctx.project.rootPath);
+			const worktreeRoot = resolveWorktreeRoot({ rootPath: multiRepo ? ctx.project.rootPath : singleRepoRoot!, worktreeRoot: configuredWorktreeRoot });
 			const repoNames = new Set<string>();
 			if (components.length === 0 || !multiRepo) repoNames.add(".");
 			else for (const component of components) repoNames.add(component.repo);
 			for (const repo of repoNames) {
-				const repoPath = repo === "." ? this.resolveSingleRepoRoot(ctx.project.rootPath) : path.join(ctx.project.rootPath, repo);
-				addRepo({ projectId: ctx.project.id, projectName: ctx.project.name, repo, componentName: components.find(c => c.repo === repo)?.name, repoPath, worktreeRoot, components, primary: repo === "." });
+				const repoPath = repo === "." ? (singleRepoRoot ?? await this.resolveSingleRepoRoot(ctx.project.rootPath)) : path.join(ctx.project.rootPath, repo);
+				repos.push({ projectId: ctx.project.id, projectName: ctx.project.name, repo, componentName: components.find(c => c.repo === repo)?.name, repoPath, worktreeRoot, components, primary: repo === "." });
 			}
 			for (const session of ctx.sessionStore.getArchived() as PersistedSession[]) {
 				for (const item of this.archivedItemsForSession(session, ctx.project.name)) {
 					if (!item.repoPath) continue;
-					addRepo({
+					repos.push({
 						projectId: item.projectId ?? ctx.project.id,
 						projectName: item.projectName ?? ctx.project.name,
 						repo: item.repo,
@@ -682,37 +784,46 @@ export class WorktreeInventoryService {
 					});
 				}
 			}
+			return repos;
+		});
+		const repos: RepoDescriptor[] = [];
+		const seen = new Set<string>();
+		for (const batch of batches) {
+			for (const repo of batch) {
+				const key = `${repo.projectId}|${repo.repo}|${repoKey(repo.repoPath)}`;
+				if (!repo.repoPath || seen.has(key)) continue;
+				seen.add(key);
+				repos.push(repo);
+			}
 		}
 		return repos;
 	}
 
-	private contextRepoPaths(ctx: { project: { rootPath: string }; projectConfigStore: { getComponents: () => Component[] } }): string[] {
+	private async contextRepoPaths(ctx: { project: { rootPath: string }; projectConfigStore: { getComponents: () => Component[] } }): Promise<string[]> {
 		const components = ctx.projectConfigStore.getComponents();
 		const multiRepo = components.some(c => c.repo !== ".");
-		if (!multiRepo) return [this.resolveSingleRepoRoot(ctx.project.rootPath)];
+		if (!multiRepo) return [await this.resolveSingleRepoRoot(ctx.project.rootPath)];
 		const seen = new Set<string>();
 		const out: string[] = [];
 		for (const component of components) {
 			if (seen.has(component.repo)) continue;
 			seen.add(component.repo);
-			out.push(component.repo === "." ? this.resolveSingleRepoRoot(ctx.project.rootPath) : path.join(ctx.project.rootPath, component.repo));
+			out.push(component.repo === "." ? await this.resolveSingleRepoRoot(ctx.project.rootPath) : path.join(ctx.project.rootPath, component.repo));
 		}
 		return out;
 	}
 
-	private resolveSingleRepoRoot(projectRoot: string): string {
+	private async resolveSingleRepoRoot(projectRoot: string): Promise<string> {
 		let current = path.resolve(projectRoot);
 		for (;;) {
-			try {
-				if (this.exists(path.join(current, ".git"))) return current;
-			} catch { /* keep walking */ }
+			if (await this.exists(path.join(current, ".git"))) return current;
 			const parent = path.dirname(current);
 			if (parent === current) return path.resolve(projectRoot);
 			current = parent;
 		}
 	}
 
-	private addFilesystemCandidates(repos: RepoDescriptor[], addCandidate: (repo: RepoDescriptor, wtPath: string, source: WorktreeInventorySource, branch?: string, extra?: Partial<Candidate>) => void): void {
+	private async addFilesystemCandidates(repos: RepoDescriptor[], addCandidate: (repo: RepoDescriptor, wtPath: string, source: WorktreeInventorySource, branch?: string, extra?: Partial<Candidate>) => void): Promise<void> {
 		const reposByRoot = new Map<string, RepoDescriptor[]>();
 		for (const repo of repos) {
 			if (repo.archivedOnly) continue;
@@ -720,24 +831,78 @@ export class WorktreeInventoryService {
 			arr.push(repo);
 			reposByRoot.set(repo.worktreeRoot, arr);
 		}
+
+		// Scan roots serially so each inventory operation owns one filesystem
+		// ceiling. Within a wide multi-repo root, at most ioConcurrency component
+		// checks are retained; opendir read-ahead pauses until that batch settles.
 		for (const [root, group] of reposByRoot) {
+			let directory: WorktreeInventoryDirectory;
 			try {
-				if (!this.exists(root)) continue;
-				for (const dirent of this.fsa.readdirSync(root, { withFileTypes: true })) {
-					if (!dirent.isDirectory()) continue;
-					const container = path.join(root, dirent.name);
-					const multi = group.some(repo => repo.repo !== ".");
-					for (const repo of group) {
-						const wtPath = multi && repo.repo !== "." ? path.join(container, repo.repo) : container;
-						if (multi && !this.exists(wtPath)) continue;
-						addCandidate(repo, wtPath, "filesystem");
+				directory = await this.fsa.opendir(root);
+			} catch (err) {
+				if (!isMissingFsError(err)) this.addFilesystemScanError(root, group, err, addCandidate);
+				continue;
+			}
+
+			const multi = group.some(repo => repo.repo !== ".");
+			let pathChecks: Array<{ repo: RepoDescriptor; wtPath: string }> = [];
+			const flushPathChecks = async (): Promise<void> => {
+				if (pathChecks.length === 0) return;
+				const batch = pathChecks;
+				pathChecks = [];
+				const present = await mapWithConcurrency(batch, this.ioConcurrency, check => this.exists(check.wtPath));
+				for (let index = 0; index < batch.length; index++) {
+					if (present[index]) {
+						const check = batch[index]!;
+						addCandidate(check.repo, check.wtPath, "filesystem");
 					}
 				}
+			};
+
+			let entriesSinceYield = 0;
+			let readError: unknown;
+			try {
+				for (;;) {
+					const dirent = await directory.read();
+					if (!dirent) break;
+					entriesSinceYield++;
+					if (entriesSinceYield >= INVENTORY_STREAM_YIELD_INTERVAL) {
+						entriesSinceYield = 0;
+						await yieldInventoryTraversal();
+					}
+					if (!dirent.isDirectory()) continue;
+					const container = path.join(root, dirent.name);
+					for (const repo of group) {
+						const wtPath = multi && repo.repo !== "." ? path.join(container, repo.repo) : container;
+						if (!multi) {
+							addCandidate(repo, wtPath, "filesystem");
+							continue;
+						}
+						pathChecks.push({ repo, wtPath });
+						if (pathChecks.length >= this.ioConcurrency) await flushPathChecks();
+					}
+				}
+				await flushPathChecks();
 			} catch (err) {
-				const repo = group[0];
-				if (repo) addCandidate(repo, path.join(root, ".fs-scan-error"), "filesystem", undefined, { scanError: { reason: "fs-scan-error", detail: err instanceof Error ? err.message : String(err) } });
+				readError = err;
+			} finally {
+				try { await directory.close(); }
+				catch (err) { readError ??= err; }
 			}
+			if (readError !== undefined && !isMissingFsError(readError)) this.addFilesystemScanError(root, group, readError, addCandidate);
 		}
+	}
+
+	private addFilesystemScanError(
+		root: string,
+		group: RepoDescriptor[],
+		error: unknown,
+		addCandidate: (repo: RepoDescriptor, wtPath: string, source: WorktreeInventorySource, branch?: string, extra?: Partial<Candidate>) => void,
+	): void {
+		const repo = group[0];
+		if (!repo) return;
+		const detail = error instanceof Error ? error.message : String(error);
+		addCandidate(repo, path.join(root, ".fs-scan-error"), "filesystem", undefined, { scanError: { reason: "fs-scan-error", detail } });
 	}
 
 	private addPoolCandidates(repos: RepoDescriptor[], addCandidate: (repo: RepoDescriptor, wtPath: string, source: WorktreeInventorySource, branch?: string, extra?: Partial<Candidate>) => void): void {
@@ -768,16 +933,15 @@ export class WorktreeInventoryService {
 					const key = item.path ? `${repo.projectId}|${repo.repo}|${norm(item.path) ?? item.path}` : `archived|${item.key}`;
 					let c = candidates.get(key);
 					if (!c) {
-						c = { projectId: repo.projectId, projectName: item.projectName ?? projectName, repo: repo.repo, repoPath: item.repoPath, worktreeRoot: repo.worktreeRoot, path: item.path, branch: item.branch, sources: new Set(), owners: [], pathExists: this.exists(item.path), gitWorktreeMetadataExists: false };
+						c = { projectId: repo.projectId, projectName: item.projectName ?? projectName, repo: repo.repo, repoPath: item.repoPath, worktreeRoot: repo.worktreeRoot, path: item.path, branch: item.branch, sources: new Set(), owners: [], pathExists: false, gitWorktreeMetadataExists: false };
 						candidates.set(key, c);
 					}
 					c.sources.add("archived-session");
 					c.owners.push({ type: "archived-session", id: item.sessionId, archived: true, title: item.title });
 					const gitMetadataMatchesArchivedRecord = c.gitWorktreeMetadataExists && (!item.branch || c.branch === item.branch);
 					c.branch = c.branch ?? item.branch;
-					c.pathExists = this.exists(item.path);
 					c.gitWorktreeMetadataExists = gitMetadataMatchesArchivedRecord;
-					c.legacyArchived = { ...item, pathExists: c.pathExists, gitWorktreeMetadataExists: gitMetadataMatchesArchivedRecord };
+					c.legacyArchived = { ...item, gitWorktreeMetadataExists: gitMetadataMatchesArchivedRecord };
 				}
 			}
 		}
@@ -815,7 +979,7 @@ export class WorktreeInventoryService {
 			path: spec.worktreePath ?? "",
 			branch: spec.branch,
 			source: spec.source,
-			pathExists: this.exists(spec.worktreePath),
+			pathExists: false,
 			gitWorktreeMetadataExists: false,
 			localBranchExists: false,
 			status: "skipped",
@@ -845,7 +1009,7 @@ export class WorktreeInventoryService {
 		return categories;
 	}
 
-	private buildGuards(): GuardIndexes {
+	private async buildGuards(concurrency = this.ioConcurrency): Promise<GuardIndexes> {
 		const guards: GuardIndexes = { pathOwners: new Map(), cwdOwners: [], liveBranches: new Map(), archivedBranches: new Map() };
 		const addPath = (p: string | undefined, owner: { type: WorktreeInventorySource; id: string; archived?: boolean; title?: string }) => {
 			const n = norm(p); if (!n) return;
@@ -876,9 +1040,18 @@ export class WorktreeInventoryService {
 				for (const repoPath of branchRepoPaths) addBranch(repoPath, record.branch, !!record.archived, `${record.id}:${repoKey(repoPath)}:${norm(record.worktreePath) ?? ""}`);
 			} else addBranch(record.repoPath, record.branch, !!record.archived, `${record.id}:.:${norm(record.worktreePath) ?? ""}`);
 		};
+		const contexts = [...this.deps.projectContextManager.all()];
+		let contextRows: Array<{ ctx: typeof contexts[number]; repoPaths: string[] }>;
+		if (concurrency === 1) {
+			contextRows = [];
+			for (const ctx of contexts) contextRows.push({ ctx, repoPaths: await this.contextRepoPaths(ctx) });
+		} else {
+			contextRows = await mapWithConcurrency(contexts, concurrency, async ctx => ({ ctx, repoPaths: await this.contextRepoPaths(ctx) }));
+		}
+		// Do not snapshot mutable ownership until all async prerequisites above
+		// have settled. Everything below runs in one uninterrupted turn.
 		for (const session of this.deps.sessionManager.listSessions()) addRecord(session, session.delegateOf || session.parentSessionId || session.childKind ? "delegate" : "runtime-session");
-		for (const ctx of this.deps.projectContextManager.all()) {
-			const ctxRepoPaths = this.contextRepoPaths(ctx);
+		for (const { ctx, repoPaths: ctxRepoPaths } of contextRows) {
 			for (const session of ctx.sessionStore.getLive()) addRecord(session, session.delegateOf || session.parentSessionId || session.childKind ? "delegate" : "persisted-live-session");
 			for (const session of ctx.sessionStore.getArchived()) addRecord(session, "archived-session");
 			for (const goal of ctx.goalStore.getAll() as PersistedGoal[]) addRecord({ ...goal, archived: goal.archived }, "goal");
@@ -889,12 +1062,19 @@ export class WorktreeInventoryService {
 			}
 			for (const staff of ctx.staffStore.getAll() as PersistedStaff[]) addRecord(staff, "staff");
 		}
+		const repoPathsByProject = new Map(contextRows.map(({ ctx, repoPaths }) => [ctx.project.id, repoPaths]));
 		for (const [projectId, pool] of this.deps.sessionManager.getAllWorktreePools()) {
 			for (const entry of pool.snapshotEntries().entries) {
 				const owner = { type: "pool" as const, id: `${projectId}:${entry.branchName}` };
 				addPath(entry.worktreePath, owner);
-				if (entry.worktrees) for (const wt of entry.worktrees) addPath(wt.worktreePath, owner);
-				if (entry.worktrees) for (const wt of entry.worktrees) addBranch(wt.repoPath, entry.branchName, false, owner.id);
+				if (entry.worktrees) {
+					for (const wt of entry.worktrees) {
+						addPath(wt.worktreePath, owner);
+						addBranch(wt.repoPath, entry.branchName, false, owner.id);
+					}
+				} else {
+					for (const repoPath of repoPathsByProject.get(projectId) ?? []) addBranch(repoPath, entry.branchName, false, owner.id);
+				}
 			}
 		}
 		return guards;
@@ -913,8 +1093,8 @@ export class WorktreeInventoryService {
 		if (n) for (const cwd of guards.cwdOwners) if (cwd.path === n || cwd.path.startsWith(`${n}/`)) add(cwd.owner);
 	}
 
-	private async classify(candidate: Candidate, guards: GuardIndexes): Promise<WorktreeInventoryItem> {
-		const item = await this.baseItem(candidate, guards);
+	private classify(candidate: Candidate, guards: GuardIndexes, localBranchExists: boolean): WorktreeInventoryItem {
+		const item = this.baseItem(candidate, guards, localBranchExists);
 		const liveOwner = candidate.owners.find(o => !o.archived && o.type !== "pool");
 		const archivedOwner = candidate.owners.find(o => o.archived || o.type === "archived-session");
 		if (candidate.scanError) return { ...item, classification: "scan-error", disposition: "failed", reason: candidate.scanError.reason, detail: candidate.scanError.detail };
@@ -932,9 +1112,8 @@ export class WorktreeInventoryService {
 		return { ...item, classification: "stale-filesystem-only", disposition: "needs-attention", reason: "filesystem-only-needs-attention", detail: archivedOwner ? "Recorded path exists but no matching git worktree metadata remains; archived-session cleanup will not remove stale directories." : "Filesystem-only directory under a Bobbit worktree root requires manual attention." };
 	}
 
-	private async baseItem(candidate: Candidate, guards: GuardIndexes): Promise<WorktreeInventoryItem> {
+	private baseItem(candidate: Candidate, guards: GuardIndexes, localBranchExists: boolean): WorktreeInventoryItem {
 		const branchDeleteBlockedReason = this.branchDeleteBlockedReason(candidate.branch, candidate.repoPath, guards, candidate.legacyArchived?.key);
-		const localBranchExists = await this.localBranchExists(candidate.repoPath, candidate.branch);
 		return {
 			id: candidate.legacyArchived ? stableId("archived", candidate.legacyArchived.key) : stableId("worktree", candidate.projectId, candidate.repo, candidate.repoPath, candidate.path),
 			projectId: candidate.projectId,
@@ -1008,7 +1187,7 @@ export class WorktreeInventoryService {
 	}
 
 	private async worktreeRemoved(item: WorktreeInventoryItem): Promise<boolean> {
-		const pathExists = this.exists(item.path);
+		const pathExists = await this.exists(item.path);
 		let metadata = false;
 		try {
 			const stdout = await this.execGit(item.repoPath, ["worktree", "list", "--porcelain"], { timeoutMs: 10_000 });
@@ -1019,16 +1198,50 @@ export class WorktreeInventoryService {
 
 	private async deleteBranchIfStillAllowed(item: WorktreeInventoryItem): Promise<boolean> {
 		if (!item.willDeleteBranch || !item.branch) return false;
-		const guards = this.buildGuards();
-		if (this.branchDeleteBlockedReason(item.branch, item.repoPath, guards, item.legacy?.archivedSession?.item.key)) return false;
-		if (!(await this.localBranchExists(item.repoPath, item.branch))) return false;
 		const commandRunner = this.deps.commandRunner ?? realCommandRunner;
+		if (!(await this.localBranchExists(item.repoPath, item.branch))) return false;
+		// All potentially deferred reads precede the final guard rebuild. The local
+		// mutation starts immediately after the current ownership snapshot passes.
+		let guards = await this.buildGuards(1);
+		if (!this.branchMutationAllowed(item, guards)) return false;
 		try { await commandRunner.execFile("git", ["branch", "-D", item.branch], { cwd: item.repoPath }); } catch { /* verify below */ }
 		if (await this.localBranchExists(item.repoPath, item.branch)) return false;
-		if (!(await shouldSkipRemotePushForTests(item.repoPath, "origin", commandRunner, this.deps.remotePolicy ?? {}))) {
-			try { await commandRunner.execFile("git", ["push", "origin", "--delete", item.branch], { cwd: item.repoPath, timeout: 15_000 }); } catch { /* best-effort */ }
+		const skipRemote = await shouldSkipRemotePushForTests(item.repoPath, "origin", commandRunner, this.deps.remotePolicy ?? {});
+		if (!skipRemote) {
+			// Remote deletion is a separate mutation and therefore owns a separate
+			// final revalidation after the remote-policy I/O.
+			guards = await this.buildGuards(1);
+			if (this.branchMutationAllowed(item, guards)) {
+				try { await commandRunner.execFile("git", ["push", "origin", "--delete", item.branch], { cwd: item.repoPath, timeout: 15_000 }); } catch { /* best-effort */ }
+			}
 		}
 		return true;
+	}
+
+	private branchMutationAllowed(item: WorktreeInventoryItem, guards: GuardIndexes): boolean {
+		if (!item.branch || isContainerInternalWorktreePath(item.path) || norm(item.path) === norm(item.repoPath)) return false;
+		if (this.currentPathBlocker(item.path, guards)) return false;
+		const ownArchivedKey = item.legacy?.archivedSession?.item.key;
+		if (this.branchDeleteBlockedReason(item.branch, item.repoPath, guards, ownArchivedKey)) return false;
+		if (item.classification === "archived-owned") {
+			const ownReferences = guards.archivedBranches.get(repoKey(item.repoPath))?.get(item.branch);
+			if (!ownArchivedKey || !ownReferences?.has(ownArchivedKey)) return false;
+		}
+		return true;
+	}
+
+	private currentPathBlocker(candidatePath: string, guards: GuardIndexes): WorktreeInventoryReason | undefined {
+		const candidate = norm(candidatePath);
+		if (!candidate) return "missing-worktree-path";
+		const owners: Array<{ type: WorktreeInventorySource; archived?: boolean }> = [];
+		for (const [ownerPath, pathOwners] of guards.pathOwners) {
+			if (ownerPath === candidate || candidate.startsWith(`${ownerPath}/`)) owners.push(...pathOwners);
+		}
+		for (const cwd of guards.cwdOwners) if (cwd.path === candidate || cwd.path.startsWith(`${candidate}/`)) owners.push(cwd.owner);
+		const liveOwner = owners.find(owner => !owner.archived && owner.type !== "pool");
+		if (liveOwner) return this.ownerReason(liveOwner.type);
+		if (owners.some(owner => owner.type === "pool")) return "referenced-by-pool";
+		return undefined;
 	}
 
 	private localBranchExists(repoPath: string | undefined, branch: string | undefined): Promise<boolean> {
@@ -1042,5 +1255,13 @@ export class WorktreeInventoryService {
 		return stdout.toString();
 	}
 
-	private exists(p: string | undefined): boolean { try { return !!p && this.fsa.existsSync(p); } catch { return false; } }
+	private async exists(p: string | undefined): Promise<boolean> {
+		if (!p) return false;
+		try {
+			await this.fsa.access(p);
+			return true;
+		} catch {
+			return false;
+		}
+	}
 }

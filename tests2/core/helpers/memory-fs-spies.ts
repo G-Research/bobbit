@@ -18,12 +18,32 @@ const SYNC_METHODS = [
 	"copyFileSync",
 ] as const;
 
-/** Replace the synchronous Node filesystem surface used by these core tests with memory. */
+const ASYNC_METHODS = [
+	"access",
+	"mkdir",
+	"readFile",
+	"writeFile",
+	"appendFile",
+	"readdir",
+	"stat",
+	"lstat",
+	"rename",
+	"rm",
+	"unlink",
+	"copyFile",
+] as const;
+
+/** Replace the synchronous and promise-based Node filesystem surfaces used by these core tests with memory. */
 export function installMemoryFs(): { fs: MemFs; restore: () => void } {
 	const memoryFs = createMemFs();
-	const spies = SYNC_METHODS.map((method) =>
-		vi.spyOn(fs, method).mockImplementation((memoryFs[method] as any).bind(memoryFs)),
-	);
+	const spies = [
+		...SYNC_METHODS.map((method) =>
+			vi.spyOn(fs, method).mockImplementation((memoryFs[method] as any).bind(memoryFs)),
+		),
+		...ASYNC_METHODS.map((method) =>
+			vi.spyOn(fs.promises, method).mockImplementation((memoryFs.promises[method] as any).bind(memoryFs.promises)),
+		),
+	];
 	// Production modules use a mixture of default and named node:fs imports.
 	syncBuiltinESMExports();
 	return {

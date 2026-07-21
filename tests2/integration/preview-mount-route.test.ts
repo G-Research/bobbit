@@ -29,6 +29,7 @@ const SESSION_IDS = [
 	"22222222-3333-4444-5555-666666666666",
 	"33333333-4444-5555-6666-777777777777",
 	"44444444-5555-6666-7777-888888888888",
+	"55555555-6666-4777-8888-999999999999",
 ] as const;
 const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const pngBytes = Buffer.from([
@@ -132,8 +133,19 @@ class PreviewMountRouteFixture {
 	private sessionIndex = 0;
 
 	constructor(readonly memfs: NodeFs) {
-		previewMount.setPreviewFsForTesting(memfs);
+		const asyncFs = previewMount.createPreviewAsyncFs(memfs);
+		const hostShapedAsyncFs: previewMount.PreviewAsyncFs = {
+			...asyncFs,
+			realpath: async (value) => {
+				const real = String(await asyncFs.realpath(value)).replace(/\//g, path.sep);
+				if (process.platform !== "win32" || /^[A-Za-z]:[\\/]/.test(real)) return real;
+				const drive = path.parse(String(value)).root.slice(0, 2) || path.parse(process.cwd()).root.slice(0, 2) || "C:";
+				return path.resolve(`${drive}${real.startsWith(path.sep) ? "" : path.sep}${real}`);
+			},
+		};
+		previewMount.setPreviewFsForTesting(hostShapedAsyncFs);
 		previewMount.setPreviewRootForTesting(path.join(this.root, "state", "preview"));
+		previewArtifacts.setPreviewArtifactFsForTesting(hostShapedAsyncFs);
 		previewArtifacts.setPreviewArtifactRootForTesting(path.join(this.root, "state", "preview-artifacts"));
 		_resetPreviewThemeSnapshotCache();
 
@@ -208,7 +220,7 @@ class PreviewMountRouteFixture {
 			const sessionId = url.searchParams.get("sessionId") ?? "";
 			if (!VALID_SESSION_ID.test(sessionId)) return this.json({ error: "Invalid sessionId" }, 400);
 			try {
-				return this.json(previewArtifacts.restorePreviewArtifact(sessionId, decodeURIComponent(restore[1]!)));
+				return this.json(await previewArtifacts.restorePreviewArtifact(sessionId, decodeURIComponent(restore[1]!)));
 			} catch (error) {
 				return this.coreError(error);
 			}
@@ -217,7 +229,7 @@ class PreviewMountRouteFixture {
 		return this.json({ error: "Not found" }, 404);
 	}
 
-	private mount(sessionId: string, body: Record<string, unknown>): Response {
+	private async mount(sessionId: string, body: Record<string, unknown>): Promise<Response> {
 		if (!VALID_SESSION_ID.test(sessionId)) return this.json({ error: "Invalid sessionId" }, 400);
 		const hasArtifact = typeof body.artifactId === "string" && body.artifactId.length > 0;
 		const hasHtml = typeof body.html === "string";
@@ -231,12 +243,12 @@ class PreviewMountRouteFixture {
 		if (hasHtml && (hasAssets || hasManifest)) return this.json({ error: "assets and manifest require file" }, 400);
 
 		try {
-			if (hasArtifact) return this.json(previewArtifacts.restorePreviewArtifact(sessionId, body.artifactId as string));
+			if (hasArtifact) return this.json(await previewArtifacts.restorePreviewArtifact(sessionId, body.artifactId as string));
 
 			let result: previewMount.MountResult | previewMount.MountFileResult;
 			if (hasHtml) {
 				const entry = typeof body.entry === "string" && body.entry.length > 0 ? body.entry : undefined;
-				result = previewMount.writeInline(sessionId, body.html as string, entry);
+				result = await previewMount.writeInline(sessionId, body.html as string, entry);
 			} else {
 				const file = body.file as string;
 				if (!path.isAbsolute(file)) return this.json({ error: "file path must be absolute" }, 400);
@@ -253,25 +265,25 @@ class PreviewMountRouteFixture {
 					if (!Array.isArray(parsed.assets)) return this.json({ error: "Manifest must contain assets" }, 400);
 					declared.push(...parsed.assets as string[]);
 				}
-				result = previewMount.mountFile(sessionId, file, [...new Set(declared)]);
+				result = await previewMount.mountFile(sessionId, file, [...new Set(declared)]);
 			}
-			const artifact = previewArtifacts.persistPreviewArtifact(sessionId, result);
+			const artifact = await previewArtifacts.persistPreviewArtifact(sessionId, result);
 			return this.json({ ...result, artifactId: artifact.artifactId });
 		} catch (error) {
 			return this.coreError(error);
 		}
 	}
 
-	private currentMount(sessionId: string): Response {
+	private async currentMount(sessionId: string): Promise<Response> {
 		if (!VALID_SESSION_ID.test(sessionId)) return this.json({ error: "Invalid sessionId" }, 400);
 		try {
-			const dir = previewMount.mountDir(sessionId);
-			const entry = pickEntry(dir);
+			const dir = previewMount.mountPath(sessionId);
+			const entry = await pickEntry(dir);
 			if (!entry) return this.json({ error: "no preview mount" }, 404);
 			const entryPath = path.join(dir, entry);
-			const stat = this.memfs.statSync(entryPath);
-			const contentHash = previewMount.contentHashForMount(sessionId);
-			const artifact = previewArtifacts.findPreviewArtifactByHash(sessionId, contentHash);
+			const stat = await this.memfs.promises.stat(entryPath);
+			const contentHash = await previewMount.contentHashForMount(sessionId);
+			const artifact = await previewArtifacts.findPreviewArtifactByHash(sessionId, contentHash);
 			return this.json({
 				url: `/preview/${sessionId}/${entry}`,
 				path: entryPath,
@@ -348,6 +360,7 @@ test.afterAll(() => {
 	deleteSession(sessionId);
 	previewMount.setPreviewRootForTesting(undefined);
 	previewMount.setPreviewFsForTesting(undefined);
+	previewArtifacts.setPreviewArtifactFsForTesting(undefined);
 	previewArtifacts.setPreviewArtifactRootForTesting(undefined);
 	_resetPreviewThemeSnapshotCache();
 	restoreFs?.();
@@ -646,5 +659,30 @@ test.describe("GET /preview/<sid>/* — content origin", () => {
 			headers: { Cookie: cookie },
 		});
 		expect(resp.status).toBe(404);
+	});
+
+	test("stale GET and HEAD stay missing after preview mount deletion", async () => {
+		const deletedSessionId = createSession();
+		const mountResp = await apiFetch(`/api/preview/mount?sessionId=${deletedSessionId}`, {
+			method: "POST",
+			body: JSON.stringify({ html: "<!doctype html><body>delete me</body>" }),
+		});
+		expect(mountResp.status).toBe(200);
+
+		const deletedMount = previewMount.mountPath(deletedSessionId);
+		expect(route.memfs.existsSync(deletedMount)).toBe(true);
+		await previewMount.removeMount(deletedSessionId);
+		expect(route.memfs.existsSync(deletedMount)).toBe(false);
+
+		const cookie = await mintCookie();
+		for (const method of ["GET", "HEAD"]) {
+			const stale = await route.fetch(`${base()}/preview/${deletedSessionId}/`, {
+				method,
+				headers: { Cookie: cookie },
+			});
+			expect(stale.status).toBe(404);
+			expect(await stale.json()).toEqual({ error: "Preview mount not found" });
+			expect(route.memfs.existsSync(deletedMount)).toBe(false);
+		}
 	});
 });

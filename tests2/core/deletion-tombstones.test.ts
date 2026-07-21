@@ -7,17 +7,24 @@ import {
 	readAllDeletionTombstones,
 	readDeletionTombstones,
 	recordDeletionTombstone,
+	recordDeletionTombstoneAsync,
 } from "../../src/server/agent/deletion-tombstones.ts";
-import { installScopedMemFs } from "./helpers/scoped-memfs.js";
+import { ColorStore } from "../../src/server/agent/color-store.ts";
+import { sessionFileDelete, sessionSidecarDelete } from "../../src/server/agent/session-fs.ts";
+import { sidecarPathFor } from "../../src/server/agent/session-sidecar.ts";
+import { TeamStore, type PersistedTeamEntry } from "../../src/server/agent/team-store.ts";
+import { installScopedMemFs, type NodeFs } from "./helpers/scoped-memfs.js";
 
 const ROOT = path.resolve("/memfs/deletion-tombstones");
 let fixtureSequence = 0;
 let restoreFs: () => void;
+let memoryFs: NodeFs;
 
 beforeAll(() => {
 	const scoped = installScopedMemFs(["existsSync", "mkdirSync", "readFileSync", "writeFileSync"]);
 	restoreFs = scoped.restore;
-	scoped.fs.mkdirSync(ROOT, { recursive: true });
+	memoryFs = scoped.fs;
+	memoryFs.mkdirSync(ROOT, { recursive: true });
 });
 
 afterAll(() => restoreFs());
@@ -26,6 +33,85 @@ function tmpDir(): string {
 	const dir = path.join(ROOT, `case-${fixtureSequence++}`);
 	fs.mkdirSync(dir, { recursive: true });
 	return dir;
+}
+
+function deferred<T = void>() {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	const promise = new Promise<T>((r) => { resolve = r; });
+	return { promise, resolve };
+}
+
+function deferredWriteFs() {
+	const entered = deferred();
+	const release = deferred();
+	const promises = memoryFs.promises;
+	let writes = 0;
+	const fsImpl = {
+		existsSync: memoryFs.existsSync.bind(memoryFs),
+		mkdirSync: memoryFs.mkdirSync.bind(memoryFs),
+		readFileSync: memoryFs.readFileSync.bind(memoryFs),
+		writeFileSync: memoryFs.writeFileSync.bind(memoryFs),
+		promises: {
+			access: promises.access.bind(promises),
+			mkdir: promises.mkdir.bind(promises),
+			readFile: promises.readFile.bind(promises),
+			writeFile: async (...args: any[]) => {
+				writes++;
+				if (writes === 1) {
+					entered.resolve();
+					await release.promise;
+				}
+				return (promises.writeFile as any).apply(promises, args);
+			},
+			unlink: promises.unlink.bind(promises),
+		},
+	} as any;
+	return { fsImpl, entered: entered.promise, release: () => release.resolve(), writes: () => writes };
+}
+
+/**
+ * Holds the first async write after synchronously committing its snapshot.
+ * Registering a reaction on `releasePromise` after the writer is waiting lets
+ * a test place a mutation at the drain-settlement boundary, before a deferred
+ * promise-reaction cleanup can clear the old in-flight state.
+ */
+function settleBoundaryWriteFs() {
+	const entered = deferred();
+	const release = deferred();
+	const promises = memoryFs.promises;
+	let writes = 0;
+	const fsImpl = {
+		existsSync: memoryFs.existsSync.bind(memoryFs),
+		mkdirSync: memoryFs.mkdirSync.bind(memoryFs),
+		readFileSync: memoryFs.readFileSync.bind(memoryFs),
+		writeFileSync: memoryFs.writeFileSync.bind(memoryFs),
+		promises: {
+			access: promises.access.bind(promises),
+			mkdir: promises.mkdir.bind(promises),
+			readFile: promises.readFile.bind(promises),
+			writeFile: (...args: any[]) => {
+				writes++;
+				if (writes === 1) {
+					(memoryFs.writeFileSync as any).apply(memoryFs, args);
+					entered.resolve();
+					return release.promise;
+				}
+				return (promises.writeFile as any).apply(promises, args);
+			},
+			unlink: promises.unlink.bind(promises),
+		},
+	} as any;
+	return {
+		fsImpl,
+		entered: entered.promise,
+		releasePromise: release.promise,
+		release: () => release.resolve(),
+		writes: () => writes,
+	};
+}
+
+function teamEntry(goalId: string): PersistedTeamEntry {
+	return { goalId, teamLeadSessionId: `lead-${goalId}`, agents: [], maxConcurrent: 3 };
 }
 
 describe("deletion tombstones", () => {
@@ -80,5 +166,156 @@ describe("deletion tombstones", () => {
 		const dir = tmpDir();
 		recordDeletionTombstone(dir, "staff.json", "");
 		assert.equal(fs.existsSync(deletionTombstoneFile(dir)), false);
+	});
+
+	it("serializes deferred async writes and folds synchronous tombstones in call order", async () => {
+		const dir = tmpDir();
+		const deferredFs = deferredWriteFs();
+		let settled = false;
+		const first = recordDeletionTombstoneAsync(dir, "sessions.json", "async-a", deferredFs.fsImpl.promises)
+			.then(() => { settled = true; });
+		await deferredFs.entered;
+
+		let eventLoopProgressed = false;
+		await Promise.resolve().then(() => { eventLoopProgressed = true; });
+		assert.equal(eventLoopProgressed, true);
+		assert.equal(settled, false, "async tombstone must remain pending at deferred I/O");
+
+		const second = recordDeletionTombstoneAsync(dir, "sessions.json", "async-b", deferredFs.fsImpl.promises);
+		recordDeletionTombstone(dir, "sessions.json", "sync-c");
+		deferredFs.release();
+		await Promise.all([first, second]);
+
+		assert.deepEqual(readAllDeletionTombstones(dir)["sessions.json"], ["async-a", "async-b", "sync-c"]);
+		assert.equal(deferredFs.writes(), 2, "a mutation arriving during the held write gets a serialized follow-up write");
+	});
+
+	it("persists a synchronous tombstone queued at the async writer settle boundary", async () => {
+		const dir = tmpDir();
+		const boundaryFs = settleBoundaryWriteFs();
+		const first = recordDeletionTombstoneAsync(dir, "sessions.json", "async-a", boundaryFs.fsImpl.promises);
+		await boundaryFs.entered;
+
+		void boundaryFs.releasePromise.then(() => {
+			recordDeletionTombstone(dir, "sessions.json", "sync-boundary");
+		});
+		boundaryFs.release();
+		await first;
+
+		assert.deepEqual(readAllDeletionTombstones(dir)["sessions.json"], ["async-a", "sync-boundary"]);
+		assert.equal(boundaryFs.writes(), 1, "the boundary mutation persists after the retired async writer");
+	});
+});
+
+describe("async purge leaf persistence", () => {
+	it("ColorStore removeAsync folds a concurrent synchronous set into its durable drain", async () => {
+		const dir = tmpDir();
+		const deferredFs = deferredWriteFs();
+		const store = new ColorStore(dir, deferredFs.fsImpl);
+		store.set("remove-me", 1);
+
+		const removal = store.removeAsync("remove-me");
+		await deferredFs.entered;
+		store.set("survivor", 2);
+		deferredFs.release();
+		await removal;
+
+		const restored = new ColorStore(dir, memoryFs as any);
+		assert.equal(restored.get("remove-me"), undefined);
+		assert.equal(restored.get("survivor"), 2);
+		assert.equal(deferredFs.writes(), 2);
+	});
+
+	it("ColorStore persists a synchronous set queued at the async writer settle boundary", async () => {
+		const dir = tmpDir();
+		const boundaryFs = settleBoundaryWriteFs();
+		const store = new ColorStore(dir, boundaryFs.fsImpl);
+		store.set("remove-me", 1);
+
+		const removal = store.removeAsync("remove-me");
+		await boundaryFs.entered;
+		void boundaryFs.releasePromise.then(() => {
+			queueMicrotask(() => store.set("survivor", 2));
+		});
+		boundaryFs.release();
+		await removal;
+
+		const restored = new ColorStore(dir, memoryFs as any);
+		assert.equal(restored.get("remove-me"), undefined);
+		assert.equal(restored.get("survivor"), 2);
+		assert.equal(boundaryFs.writes(), 1);
+	});
+
+	it("TeamStore removeAsync preserves a synchronous put ordered behind deferred persistence", async () => {
+		const dir = tmpDir();
+		const deferredFs = deferredWriteFs();
+		const store = new TeamStore(dir, deferredFs.fsImpl);
+		store.put(teamEntry("remove-me"));
+
+		const removal = store.removeAsync("remove-me");
+		await deferredFs.entered;
+		store.put(teamEntry("survivor"));
+		deferredFs.release();
+		await removal;
+
+		const restored = new TeamStore(dir, memoryFs as any);
+		assert.equal(restored.get("remove-me"), undefined);
+		assert.equal(restored.get("survivor")?.teamLeadSessionId, "lead-survivor");
+		assert.equal(deferredFs.writes(), 2);
+	});
+
+	it("TeamStore persists a synchronous put queued at the async writer settle boundary", async () => {
+		const dir = tmpDir();
+		const boundaryFs = settleBoundaryWriteFs();
+		const store = new TeamStore(dir, boundaryFs.fsImpl);
+		store.put(teamEntry("remove-me"));
+
+		const removal = store.removeAsync("remove-me");
+		await boundaryFs.entered;
+		void boundaryFs.releasePromise.then(() => {
+			queueMicrotask(() => store.put(teamEntry("survivor")));
+		});
+		boundaryFs.release();
+		await removal;
+
+		const restored = new TeamStore(dir, memoryFs as any);
+		assert.equal(restored.get("remove-me"), undefined);
+		assert.equal(restored.get("survivor")?.teamLeadSessionId, "lead-survivor");
+		assert.equal(boundaryFs.writes(), 1);
+	});
+
+	it("session transcript and derived sidecar deletion yield at deferred async unlink", async () => {
+		const dir = tmpDir();
+		const transcript = path.join(dir, "trusted.jsonl");
+		const sidecar = sidecarPathFor(transcript);
+		memoryFs.writeFileSync(transcript, "{}\n", "utf-8");
+		memoryFs.writeFileSync(sidecar, "{}", "utf-8");
+
+		const entered = deferred();
+		const release = deferred();
+		const unlink = memoryFs.promises.unlink.bind(memoryFs.promises);
+		let calls = 0;
+		const deleteFs = {
+			unlink: async (target: fs.PathLike) => {
+				calls++;
+				if (calls === 1) {
+					entered.resolve();
+					await release.promise;
+				}
+				await unlink(target);
+			},
+		};
+
+		let settled = false;
+		const transcriptDelete = sessionFileDelete({ sandboxed: false }, transcript, null, deleteFs)
+			.then((result) => { settled = true; return result; });
+		await entered.promise;
+		await Promise.resolve();
+		assert.equal(settled, false);
+		release.resolve();
+		assert.equal(await transcriptDelete, true);
+		await sessionSidecarDelete(transcript, deleteFs);
+		assert.equal(memoryFs.existsSync(transcript), false);
+		assert.equal(memoryFs.existsSync(sidecar), false);
 	});
 });

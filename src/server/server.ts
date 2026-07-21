@@ -112,7 +112,7 @@ import {
 
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections, persistPromptSections } from "./agent/system-prompt.js";
 import { configureProfilingRuntime, recordElapsed } from "./agent/profiling.js";
-import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./agent/cpu-diagnostics.js";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics, type CpuDiagnostics } from "./agent/cpu-diagnostics.js";
 import { resolveGrantPolicy, computeEffectiveAllowedTools } from "./agent/tool-activation.js";
 import { parseMcpToolName } from "./mcp/mcp-meta.js";
 import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
@@ -520,7 +520,7 @@ import { CookieStore, extractCookieValue, issueCookie, tryAuth as cookieTryAuth 
 import { loadOrCreateCookieSigningKey } from "./auth/cookie-signing-key.js";
 import { classifyBrowserCookieEligibility, type BrowserCookieAuthentication } from "./auth/browser-cookie.js";
 import { authorizeChildrenMutation } from "./auth/children-mutation-authz.js";
-import { handlePreviewRequest } from "./preview/content-route.js";
+import { handlePreviewRequest, pickEntry } from "./preview/content-route.js";
 import { handlePrWalkthroughApiRoute } from "./pr-walkthrough/routes.js";
 import { normalizeTrustedHosts } from "../shared/pr-walkthrough/url-safety.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
@@ -1718,6 +1718,93 @@ export interface TlsConfig {
 	caCert?: string;  // path to CA certificate (for mkcert-based certs)
 }
 
+type PreviewSessionOperation = <T>(sessionId: string, operation: () => Promise<T>) => Promise<T>;
+
+export interface PreviewSessionOperationQueue {
+	/** Run ordinary preview work unless purge has terminally fenced the session. */
+	run: PreviewSessionOperation;
+	/** Fence ordinary work immediately, then run cleanup after prior work settles. */
+	purge: PreviewSessionOperation;
+}
+
+/**
+ * Build the one gateway-owned queue shared by preview routes and session purge.
+ * A purge fence is permanent because purged session IDs cannot be reused. Work
+ * accepted before the fence but not yet started is rejected before touching the
+ * mount; active work settles first, then cleanup runs, and later work cannot
+ * recreate preview state behind it.
+ */
+export function createPreviewSessionOperationQueue(): PreviewSessionOperationQueue {
+	const tails = new Map<string, Promise<void>>();
+	const purgedSessions = new Set<string>();
+
+	const enqueue: PreviewSessionOperation = async (sessionId, operation) => {
+		const previous = tails.get(sessionId) ?? Promise.resolve();
+		let release!: () => void;
+		const current = new Promise<void>((resolve) => { release = resolve; });
+		tails.set(sessionId, current);
+		await previous;
+		try {
+			return await operation();
+		} finally {
+			release();
+			if (tails.get(sessionId) === current) tails.delete(sessionId);
+		}
+	};
+
+	const run: PreviewSessionOperation = (sessionId, operation) => {
+		if (purgedSessions.has(sessionId)) {
+			return Promise.reject(new previewMount.PreviewMountError(404, "Session preview has been purged"));
+		}
+		return enqueue(sessionId, async () => {
+			if (purgedSessions.has(sessionId)) {
+				throw new previewMount.PreviewMountError(404, "Session preview has been purged");
+			}
+			return operation();
+		});
+	};
+
+	const purge: PreviewSessionOperation = (sessionId, operation) => {
+		purgedSessions.add(sessionId);
+		return enqueue(sessionId, operation);
+	};
+
+	return { run, purge };
+}
+
+/**
+ * Initialize post-listen project pools one at a time. Each pool owns the shared
+ * candidate-level I/O ceiling during orphan reclaim, so project-level
+ * parallelism here would multiply that bound across visible projects.
+ */
+export async function initializeBootProjectPools<T>(
+	projects: readonly T[],
+	initialize: (project: T, index: number) => Promise<void>,
+): Promise<void> {
+	for (let index = 0; index < projects.length; index++) {
+		await initialize(projects[index]!, index);
+	}
+}
+
+/** Await the final diagnostics write while retaining best-effort shutdown policy. */
+export async function shutdownCpuDiagnostics(diagnostics: Pick<CpuDiagnostics, "shutdown"> = getCpuDiagnostics()): Promise<void> {
+	try { await diagnostics.shutdown(); } catch { /* best-effort */ }
+}
+
+/**
+ * Serialize the boot-time worktree ownership transition. The sweeper rechecks
+ * live durable owners at every mutation boundary, while a pool entry must not
+ * be exposed for claim (and renamed out of the pool namespace) until its scan
+ * and deletion phase has settled. Both phases remain post-listen background work.
+ */
+export async function coordinateBootWorktreeLifecycle(
+	runSweepDeletionPhase: () => Promise<void>,
+	initializePools: () => Promise<void>,
+): Promise<void> {
+	await runSweepDeletionPhase();
+	await initializePools();
+}
+
 export interface GatewayConfig {
 	host: string;
 	port: number;
@@ -1995,6 +2082,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const sandboxTokenStore = new SandboxTokenStore();
 	const cookieSigningKey = loadOrCreateCookieSigningKey(serverSecretsDir());
 	const cookieStore = new CookieStore(cookieSigningKey, { clock: gatewayDeps.clock });
+	const previewOperations = createPreviewSessionOperationQueue();
+	const withPreviewSessionOperation = previewOperations.run;
 	const sessionManager = new SessionManager({
 		stateDir,
 		agentCliPath: config.agentCliPath,
@@ -2013,6 +2102,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		remoteGitPolicy,
 		testPreparingDelayMs: gatewayRuntimeFlags.testPreparingDelayMs,
 		worktreeSetupRuntime,
+		previewPurgeOperation: previewOperations.purge,
 	});
 	sessionManager.sandboxTokenStore = sandboxTokenStore;
 
@@ -2718,7 +2808,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -3054,14 +3144,18 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// so sidebars and dashboards update instantly. Replaces a 5s polling tick
 	// for a documented class of races (e.g. clicking a stale sidebar entry just
 	// after another tab archived the session).
-	sessionManager.addTerminationListener((sessionId, info) => {
+	sessionManager.addTerminationListener(async (sessionId, info) => {
 		try {
 			broadcastToAll({ type: "session_removed", sessionId, projectId: info.projectId, reason: info.reason });
 		} catch (err) {
 			console.error(`[broadcast] session_removed failed for ${sessionId}:`, err);
 		}
 		if (info.reason === "purged") {
-			try { previewArtifacts.removeArtifacts(sessionId); } catch (err) {
+			try {
+				await previewOperations.purge(sessionId, () => previewArtifacts.removeArtifacts(sessionId));
+			} catch (err) {
+				// This listener owns preview-artifact cleanup errors; SessionManager
+				// only awaits the listener contract and must not duplicate this log.
 				console.error(`[preview/artifacts] remove failed for ${sessionId}:`, err);
 			}
 		}
@@ -3170,6 +3264,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 
 	ck("post-VerificationHarness-to-return");
 	bootLog(`[boot] ctor total (createGateway body) ${Date.now() - __ckT0}ms`);
+	let bootBackgroundTask: Promise<void> | null = null;
 	return {
 		server,
 		deps: gatewayDeps,
@@ -3420,16 +3515,15 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// per project. Doing them before listen used to leave the gateway
 			// unreachable for many seconds on installs with stale worktrees.
 			//
-			// Concurrency note: the sweeper and the pool init operate on DISJOINT
-			// branch sets — `worktree-sweeper.ts` explicitly skips Bobbit pool
-			// branches using the shared inventory classifier helpers, and
-			// `WorktreePool.reclaimOrphaned` only inspects pool branches. So the two
-			// phases are run concurrently via `Promise.all`, and project-level pool
-			// init is also parallelised
-			// across projects (each project's pool is independent). This avoids
-			// the previous serial chain that left the pool empty for minutes on
-			// installs with many stale worktrees, forcing every new session
-			// through the cold path (full createWorktree + npm ci).
+			// Ownership ordering: the sweeper starts from a durable-owner snapshot
+			// for deterministic scan results, then refreshes visible project stores
+			// immediately before every repair or cleanup. Pool initialization still
+			// waits for the deletion phase so a claimed entry cannot be renamed out
+			// of the pool namespace while its old listing is being reconciled. Both
+			// phases run after listen(), so health and session requests remain
+			// available (sessions use the normal cold fallback until pools are ready).
+			// Project pools initialize sequentially afterwards so each reclaim scan
+			// exclusively owns the shared candidate-level I/O ceiling.
 			const runBootBackgroundTasks = async (): Promise<void> => {
 				const t0 = Date.now();
 
@@ -3457,16 +3551,60 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					const tStart = Date.now();
 					try {
 						const { sweepOrphanedWorktrees } = await import("./agent/worktree-sweeper.js");
+						type SweepOwnerSnapshot = { id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> };
+						const snapshotSweepOwnership = (): {
+							goals: SweepOwnerSnapshot[];
+							sessions: SweepOwnerSnapshot[];
+							teams: SweepOwnerSnapshot[];
+							staff: SweepOwnerSnapshot[];
+						} => {
+							const goals: SweepOwnerSnapshot[] = [];
+							const sessions: SweepOwnerSnapshot[] = [];
+							const teams: SweepOwnerSnapshot[] = [];
+							const staff: SweepOwnerSnapshot[] = [];
+							// Read the currently visible stores synchronously so no request can
+							// interleave between this snapshot and the sweeper's mutation call.
+							for (const ctx of projectContextManager.visible()) {
+								if (ctx.project.id === HEADQUARTERS_PROJECT_ID || ctx.project.kind === "headquarters") continue;
+								for (const goal of ctx.goalStore.getAll()) {
+									goals.push({
+										id: goal.id, branch: goal.branch, worktreePath: goal.worktreePath, cwd: goal.cwd, archived: !!goal.archived,
+										repoWorktrees: (goal as { repoWorktrees?: Record<string, string> }).repoWorktrees,
+									});
+								}
+								for (const session of ctx.sessionStore.getAll()) {
+									sessions.push({
+										id: session.id, branch: session.branch, worktreePath: session.worktreePath, cwd: session.cwd, archived: !!session.archived,
+										repoWorktrees: session.repoWorktrees,
+									});
+								}
+								for (const team of ctx.teamStore.getAll()) {
+									for (const agent of team.agents) {
+										teams.push({ id: agent.sessionId, branch: agent.branch, worktreePath: agent.worktreePath });
+									}
+									const lead = team.teamLeadSessionId ? ctx.sessionStore.get(team.teamLeadSessionId) : undefined;
+									if (lead) {
+										teams.push({
+											id: lead.id, branch: lead.branch, worktreePath: lead.worktreePath, cwd: lead.cwd,
+											repoWorktrees: lead.repoWorktrees,
+										});
+									}
+								}
+								for (const member of ctx.staffStore.getAll()) {
+									staff.push({
+										id: member.id, branch: member.branch, worktreePath: member.worktreePath, cwd: member.cwd,
+										repoWorktrees: member.repoWorktrees,
+									});
+								}
+							}
+							return { goals, sessions, teams, staff };
+						};
+
+						const initialOwnership = snapshotSweepOwnership();
 						const sweepProjects: Array<{ id: string; rootPath: string; repos?: string[]; worktreeRoot?: string }> = [];
-						const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
-						const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
-						const sweepTeams: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
-						const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; repoWorktrees?: Record<string, string> }> = [];
-						// Skip hidden contexts (synthetic system project) — it has
-						// no goals/sessions/staff and must never drive worktree work.
+						// Skip hidden contexts (synthetic system project) and Headquarters
+						// before Git discovery; neither may ever drive worktree work.
 						for (const ctx of projectContextManager.visible()) {
-							// Headquarters is no-worktree — never enter git discovery or the
-							// sweeper. It has no worktrees/branches to reclaim.
 							if (ctx.project.id === HEADQUARTERS_PROJECT_ID || ctx.project.kind === "headquarters") continue;
 							const repoNames = ctx.projectConfigStore.repoNames();
 							const components = ctx.projectConfigStore.getComponents();
@@ -3481,54 +3619,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 								repos: repoNames.length > 0 ? repoNames : undefined,
 								worktreeRoot: ctx.projectConfigStore.get("worktree_root") || undefined,
 							});
-							for (const g of ctx.goalStore.getAll()) {
-								sweepGoals.push({
-									id: g.id, branch: g.branch, worktreePath: g.worktreePath, cwd: g.cwd, archived: !!g.archived,
-									repoWorktrees: (g as { repoWorktrees?: Record<string, string> }).repoWorktrees,
-								});
-							}
-							for (const s of ctx.sessionStore.getAll()) {
-								sweepSessions.push({
-									id: s.id, branch: s.branch, worktreePath: s.worktreePath, cwd: s.cwd, archived: !!s.archived,
-									repoWorktrees: s.repoWorktrees,
-								});
-							}
-							for (const team of ctx.teamStore.getAll()) {
-								for (const agent of team.agents) {
-									sweepTeams.push({
-										id: agent.sessionId,
-										branch: agent.branch,
-										worktreePath: agent.worktreePath,
-									});
-								}
-								const lead = team.teamLeadSessionId ? ctx.sessionStore.get(team.teamLeadSessionId) : undefined;
-								if (lead) {
-									sweepTeams.push({
-										id: lead.id,
-										branch: lead.branch,
-										worktreePath: lead.worktreePath,
-										cwd: lead.cwd,
-										repoWorktrees: lead.repoWorktrees,
-									});
-								}
-							}
-							for (const st of ctx.staffStore.getAll()) {
-								sweepStaff.push({
-									id: st.id,
-									branch: st.branch,
-									worktreePath: st.worktreePath,
-									cwd: st.cwd,
-									repoWorktrees: st.repoWorktrees,
-								});
-							}
 						}
 						bootLog(`[boot] sweeper start (${sweepProjects.length} projects)`);
 						const result = await sweepOrphanedWorktrees({
 							projects: sweepProjects,
-							goals: sweepGoals,
-							sessions: sweepSessions,
-							teams: sweepTeams,
-							staff: sweepStaff,
+							...initialOwnership,
+							getCurrentOwnership: snapshotSweepOwnership,
 						});
 						bootLog(`[boot] sweeper done in ${Date.now() - tStart}ms (reclaimed=${result.reclaimed} cleaned=${result.cleaned} repaired=${result.repaired})`);
 					} catch (err) {
@@ -3536,7 +3632,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					}
 				})();
 
-				const poolInitTask = (async () => {
+				const initializePools = async (): Promise<void> => {
 					if (gatewayRuntimeFlags.skipWorktreePool) return;
 					// Hidden contexts (synthetic system project) must NOT seed a
 					// worktree pool. When bobbit's state dir is nested inside an
@@ -3550,7 +3646,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 						(ctx) => ctx.project.id !== HEADQUARTERS_PROJECT_ID && ctx.project.kind !== "headquarters",
 					);
 					console.log(`[boot] pool init start (${contexts.length} projects)`);
-					await Promise.all(contexts.map(async (ctx) => {
+					await initializeBootProjectPools(contexts, async (ctx) => {
 						const tStart = Date.now();
 						try {
 							const repoPath = ctx.project.rootPath;
@@ -3576,6 +3672,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 								// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
 								const poolRepoPath = isMulti ? repoPath : await getRepoRoot(repoPath, serverCommandRunner);
 								sessionManager.initWorktreePoolForProject(ctx.project.id, poolRepoPath, () => pcs.getComponents(), poolSize, wtRoot, () => pcs.get("base_ref"), () => pcs.get("worktree_setup_timeout_ms") || undefined, ctx.project.rootPath);
+								await sessionManager.getWorktreePool(ctx.project.id)?.initialize();
 								bootLog(`[boot] pool ready: project=${ctx.project.id} in ${Date.now() - tStart}ms`);
 							} else {
 								bootLog(`[boot] pool skipped (not a git repo): project=${ctx.project.id} in ${Date.now() - tStart}ms`);
@@ -3583,8 +3680,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 						} catch (err) {
 							console.warn(`[boot] pool init failed: project=${ctx.project.id} in ${Date.now() - tStart}ms (non-fatal):`, err);
 						}
-					}));
-				})();
+					});
+				};
+				const poolInitTask = coordinateBootWorktreeLifecycle(
+					() => sweeperTask,
+					initializePools,
+				);
 				await Promise.all([transcriptBackfillTask, sweeperTask, poolInitTask]);
 				bootLog(`[boot] background tasks complete in ${Date.now() - t0}ms`);
 			};
@@ -3620,7 +3721,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					});
 				});
 				const addr = server.address() as import("node:net").AddressInfo;
-				void runBootBackgroundTasks();
+				bootBackgroundTask = runBootBackgroundTasks().catch((err) => {
+					console.warn("[boot] background tasks failed (non-fatal):", err);
+				});
 				return addr.port;
 			}
 
@@ -3639,7 +3742,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					if (port !== config.port) {
 						console.log(`Port ${config.port} in use, using port ${port}`);
 					}
-					void runBootBackgroundTasks();
+					bootBackgroundTask = runBootBackgroundTasks().catch((err) => {
+						console.warn("[boot] background tasks failed (non-fatal):", err);
+					});
 					return port;
 				} catch (err: any) {
 					if (err.code === "EADDRINUSE" && port < maxPort) {
@@ -3676,8 +3781,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				triggerEngine.stop();
 				inboxNudger.stop();
 				wss.close();
+				if (bootBackgroundTask) {
+					await phase("boot-background", () => bootBackgroundTask!);
+				}
 				await phase("extension-channels", () => disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown"));
-				try { getCpuDiagnostics().shutdown(); } catch { /* best-effort */ }
+				await phase("cpu-diagnostics", () => shutdownCpuDiagnostics());
 				try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
 				// Worktree pools are intentionally NOT drained on shutdown.
 				//
@@ -3903,6 +4011,7 @@ async function handleApiRoute(
 	commandRunner?: CommandRunner,
 	fsImpl?: FsLike,
 	clock?: Clock,
+	withPreviewSessionOperation: PreviewSessionOperation = async (_sessionId, operation) => operation(),
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -5159,6 +5268,7 @@ async function handleApiRoute(
 						// pool entries land under <gitRoot>-wt/, not <projectDir>-wt/.
 						const poolRepoPath = isMulti ? body.rootPath : await getRepoRoot(body.rootPath, serverCommandRunner);
 						sessionManager.initWorktreePoolForProject(project.id, poolRepoPath, pcs ? () => pcs.getComponents() : undefined, poolSize, wtRoot, pcs ? () => pcs.get("base_ref") : undefined, pcs ? () => pcs.get("worktree_setup_timeout_ms") || undefined : undefined, project.rootPath);
+						await sessionManager.getWorktreePool(project.id)?.initialize();
 					}
 				} catch { /* best-effort */ }
 			}
@@ -5267,7 +5377,7 @@ async function handleApiRoute(
 				try { await sessionManager.terminateSession(s.id); } catch {}
 			}
 			await sessionManager.cleanupScopedMcpManagersForProject(projectId, project?.rootPath);
-			projectContextManager.remove(projectId);
+			await projectContextManager.remove(projectId);
 			if (project?.provisional) {
 				projectRegistry.removeProvisional(projectId);
 			} else {
@@ -14896,6 +15006,36 @@ async function handleApiRoute(
 		}
 	};
 
+	type PreviewMountSnapshot = {
+		url: string;
+		path: string;
+		relPath: string;
+		entry: string;
+		mtime: number;
+		contentHash: string;
+		artifactId?: string;
+	};
+	const readPreviewMountSnapshot = async (sessionId: string): Promise<PreviewMountSnapshot | null> => {
+		const dir = previewMount.mountPath(sessionId);
+		const entry = await pickEntry(dir);
+		if (!entry) return null;
+		const entryPath = path.join(dir, entry);
+		let stat: fs.Stats;
+		try { stat = await fs.promises.stat(entryPath); }
+		catch { return null; }
+		const contentHash = await previewMount.contentHashForMount(sessionId);
+		const artifact = await previewArtifacts.findPreviewArtifactByHash(sessionId, contentHash);
+		return {
+			url: `/preview/${sessionId}/${entry}`,
+			path: entryPath,
+			relPath: path.posix.join(sessionId, entry),
+			entry,
+			mtime: Math.floor(stat.mtimeMs),
+			contentHash,
+			artifactId: artifact?.artifactId,
+		};
+	};
+
 	// POST /api/preview/mount?sessionId=<sid> — v3 per-session preview mount.
 	// Accepts {html} (with optional {entry}) or {file: absolutePath}. Returns
 	// {url, path, entry, mtime, contentHash}. See docs/design/embedded-html-preview-rewrite.md §6.
@@ -14932,122 +15072,117 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			let result: previewMount.MountResult | previewMount.MountFileResult | previewArtifacts.PreviewArtifactMountResult;
-			if (hasArtifact) {
-				const restored = previewArtifacts.restorePreviewArtifact(sessionId, body.artifactId as string);
-				if (shouldOpenWorkspaceTab) await openPreviewMountWorkspaceTab(sessionId, restored);
+			await withPreviewSessionOperation(sessionId, async () => {
+				let result: previewMount.MountResult | previewMount.MountFileResult | previewArtifacts.PreviewArtifactMountResult;
+				if (hasArtifact) {
+					const restored = await previewArtifacts.restorePreviewArtifact(sessionId, body.artifactId as string);
+					if (shouldOpenWorkspaceTab) await openPreviewMountWorkspaceTab(sessionId, restored);
+					broadcastPreviewChanged(sessionId, {
+						entry: restored.entry,
+						mtime: restored.mtime,
+						url: restored.url,
+						path: restored.path,
+						contentHash: restored.contentHash,
+						artifactId: restored.artifactId,
+					});
+					json(restored);
+					return;
+				}
+				if (hasHtml) {
+					// `html` wins over `file` when both are provided.
+					let entry: string | undefined;
+					if (typeof body.entry === "string" && body.entry.length > 0) {
+						const e = body.entry;
+						if (e.includes("/") || e.includes("\\") || e.includes("..") || e.includes("\0")) {
+							json({ error: "Invalid entry name" }, 400);
+							return;
+						}
+						entry = e;
+					}
+					result = await previewMount.writeInline(sessionId, body.html as string, entry);
+				} else {
+					const filePath = body.file as string;
+					if (!path.isAbsolute(filePath)) {
+						json({ error: "file path must be absolute" }, 400);
+						return;
+					}
+					let stat: fs.Stats;
+					try { stat = await fs.promises.stat(filePath); } catch {
+						json({ error: "file not found" }, 404);
+						return;
+					}
+					if (!stat.isFile()) {
+						json({ error: "path is not a regular file" }, 404);
+						return;
+					}
+					const base = path.basename(filePath).toLowerCase();
+					if (!base.endsWith(".html") && !base.endsWith(".htm")) {
+						json({ error: "file must end in .html or .htm" }, 400);
+						return;
+					}
+					// Collect assets from inline `assets[]` and optional `manifest` JSON.
+					const declared: string[] = [];
+					if (hasAssets) {
+						for (const a of body.assets as unknown[]) {
+							if (typeof a !== "string") {
+								json({ error: "`assets[]` entries must be strings" }, 400);
+								return;
+							}
+							declared.push(a);
+						}
+					}
+					if (hasManifest) {
+						const manifestRel = body.manifest as string;
+						if (path.isAbsolute(manifestRel) || manifestRel.includes("\0") ||
+							manifestRel.includes("\\") || manifestRel.split("/").some(s => s === "..")) {
+							json({ error: "Invalid manifest path" }, 400);
+							return;
+						}
+						const manifestAbs = path.resolve(path.dirname(filePath), manifestRel);
+						let manifestParsed: any;
+						try {
+							manifestParsed = JSON.parse(await fs.promises.readFile(manifestAbs, "utf-8"));
+						} catch (err: any) {
+							if (err?.code === "ENOENT") json({ error: `Manifest '${manifestRel}' not found` }, 404);
+							else jsonError(400, err, { error: `Manifest JSON parse error: ${err?.message ?? err}` });
+							return;
+						}
+						if (!manifestParsed || !Array.isArray(manifestParsed.assets)) {
+							json({ error: "Manifest must be an object with an `assets[]` array" }, 400);
+							return;
+						}
+						for (const a of manifestParsed.assets) {
+							if (typeof a !== "string") {
+								json({ error: "Manifest `assets[]` entries must be strings" }, 400);
+								return;
+							}
+							declared.push(a);
+						}
+					}
+					// De-duplicate while preserving order.
+					const seen = new Set<string>();
+					const dedup: string[] = [];
+					for (const a of declared) {
+						const k = a.trim();
+						if (seen.has(k)) continue;
+						seen.add(k);
+						dedup.push(a);
+					}
+					result = await previewMount.mountFile(sessionId, filePath, dedup);
+				}
+				const artifact = await previewArtifacts.persistPreviewArtifact(sessionId, result);
+				const resultWithArtifact = { ...result, artifactId: artifact.artifactId };
+				if (shouldOpenWorkspaceTab) await openPreviewMountWorkspaceTab(sessionId, resultWithArtifact);
 				broadcastPreviewChanged(sessionId, {
-					entry: restored.entry,
-					mtime: restored.mtime,
-					url: restored.url,
-					path: restored.path,
-					contentHash: restored.contentHash,
-					artifactId: restored.artifactId,
+					entry: result.entry,
+					mtime: result.mtime,
+					url: result.url,
+					path: result.path,
+					contentHash: result.contentHash,
+					artifactId: artifact.artifactId,
 				});
-				json(restored);
-				return;
-			}
-			if (hasHtml) {
-				// `html` wins over `file` when both are provided.
-				let entry: string | undefined;
-				if (typeof body.entry === "string" && body.entry.length > 0) {
-					const e = body.entry;
-					if (e.includes("/") || e.includes("\\") || e.includes("..") || e.includes("\0")) {
-						json({ error: "Invalid entry name" }, 400);
-						return;
-					}
-					entry = e;
-				}
-				result = previewMount.writeInline(sessionId, body.html as string, entry);
-			} else {
-				const filePath = body.file as string;
-				if (!path.isAbsolute(filePath)) {
-					json({ error: "file path must be absolute" }, 400);
-					return;
-				}
-				if (!fs.existsSync(filePath)) {
-					json({ error: "file not found" }, 404);
-					return;
-				}
-				let stat: fs.Stats;
-				try { stat = fs.statSync(filePath); } catch {
-					json({ error: "file not found" }, 404);
-					return;
-				}
-				if (!stat.isFile()) {
-					json({ error: "path is not a regular file" }, 404);
-					return;
-				}
-				const base = path.basename(filePath).toLowerCase();
-				if (!base.endsWith(".html") && !base.endsWith(".htm")) {
-					json({ error: "file must end in .html or .htm" }, 400);
-					return;
-				}
-				// Collect assets from inline `assets[]` and optional `manifest` JSON.
-				const declared: string[] = [];
-				if (hasAssets) {
-					for (const a of body.assets as unknown[]) {
-						if (typeof a !== "string") {
-							json({ error: "`assets[]` entries must be strings" }, 400);
-							return;
-						}
-						declared.push(a);
-					}
-				}
-				if (hasManifest) {
-					const manifestRel = body.manifest as string;
-					if (path.isAbsolute(manifestRel) || manifestRel.includes("\0") ||
-						manifestRel.includes("\\") || manifestRel.split("/").some(s => s === "..")) {
-						json({ error: "Invalid manifest path" }, 400);
-						return;
-					}
-					const manifestAbs = path.resolve(path.dirname(filePath), manifestRel);
-					if (!fs.existsSync(manifestAbs)) {
-						json({ error: `Manifest '${manifestRel}' not found` }, 404);
-						return;
-					}
-					let manifestParsed: any;
-					try {
-						manifestParsed = JSON.parse(fs.readFileSync(manifestAbs, "utf-8"));
-					} catch (err: any) {
-						jsonError(400, err, { error: `Manifest JSON parse error: ${err?.message ?? err}` });
-						return;
-					}
-					if (!manifestParsed || !Array.isArray(manifestParsed.assets)) {
-						json({ error: "Manifest must be an object with an `assets[]` array" }, 400);
-						return;
-					}
-					for (const a of manifestParsed.assets) {
-						if (typeof a !== "string") {
-							json({ error: "Manifest `assets[]` entries must be strings" }, 400);
-							return;
-						}
-						declared.push(a);
-					}
-				}
-				// De-duplicate while preserving order.
-				const seen = new Set<string>();
-				const dedup: string[] = [];
-				for (const a of declared) {
-					const k = a.trim();
-					if (seen.has(k)) continue;
-					seen.add(k);
-					dedup.push(a);
-				}
-				result = previewMount.mountFile(sessionId, filePath, dedup);
-			}
-			const artifact = previewArtifacts.persistPreviewArtifact(sessionId, result);
-			const resultWithArtifact = { ...result, artifactId: artifact.artifactId };
-			if (shouldOpenWorkspaceTab) await openPreviewMountWorkspaceTab(sessionId, resultWithArtifact);
-			broadcastPreviewChanged(sessionId, {
-				entry: result.entry,
-				mtime: result.mtime,
-				url: result.url,
-				path: result.path,
-				contentHash: result.contentHash,
-				artifactId: artifact.artifactId,
+				json(resultWithArtifact);
 			});
-			json(resultWithArtifact);
 			return;
 		} catch (err: any) {
 			if (err && err instanceof previewMount.PreviewMountError) {
@@ -15083,16 +15218,18 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const restored = previewArtifacts.restorePreviewArtifact(sessionId, artifactId);
-			broadcastPreviewChanged(sessionId, {
-				entry: restored.entry,
-				mtime: restored.mtime,
-				url: restored.url,
-				path: restored.path,
-				contentHash: restored.contentHash,
-				artifactId: restored.artifactId,
+			await withPreviewSessionOperation(sessionId, async () => {
+				const restored = await previewArtifacts.restorePreviewArtifact(sessionId, artifactId);
+				broadcastPreviewChanged(sessionId, {
+					entry: restored.entry,
+					mtime: restored.mtime,
+					url: restored.url,
+					path: restored.path,
+					contentHash: restored.contentHash,
+					artifactId: restored.artifactId,
+				});
+				json(restored);
 			});
-			json(restored);
 			return;
 		} catch (err: any) {
 			if (err && err instanceof previewArtifacts.PreviewArtifactError) {
@@ -15118,30 +15255,15 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const { pickEntry } = await import("./preview/content-route.js");
-			const dir = previewMount.mountDir(sessionId);
-			const entry = pickEntry(dir);
-			if (!entry) {
+			const snapshot = await withPreviewSessionOperation(
+				sessionId,
+				() => readPreviewMountSnapshot(sessionId),
+			);
+			if (!snapshot) {
 				json({ error: "no preview mount" }, 404);
 				return;
 			}
-			const entryPath = path.join(dir, entry);
-			let stat: fs.Stats;
-			try { stat = fs.statSync(entryPath); } catch {
-				json({ error: "no preview mount" }, 404);
-				return;
-			}
-			const contentHash = previewMount.contentHashForMount(sessionId);
-			const artifact = previewArtifacts.findPreviewArtifactByHash(sessionId, contentHash);
-			json({
-				url: `/preview/${sessionId}/${entry}`,
-				path: entryPath,
-				relPath: path.posix.join(sessionId, entry),
-				entry,
-				mtime: Math.floor(stat.mtimeMs),
-				contentHash,
-				artifactId: artifact?.artifactId,
-			});
+			json(snapshot);
 			return;
 		} catch (err: any) {
 			if (err && err instanceof previewMount.PreviewMountError) {
@@ -15177,52 +15299,56 @@ async function handleApiRoute(
 		// Initial hello so the client knows the stream is live.
 		res.write(`event: hello\ndata: ${JSON.stringify({ ts: Date.now() })}\n\n`);
 
-		// Subscribe to the in-process preview-changed channel populated by the
-		// mount POST endpoint. Payload shape `{entry, mtime, url, path}` is
-		// forwarded verbatim — the client reads `entry` to seed the iframe.
-		const unsubscribe = subscribePreviewChanged(sid, payload => {
-			try {
-				res.write(`event: preview-changed\ndata: ${JSON.stringify(payload)}\n\n`);
-			} catch { /* socket closed */ }
-		});
-		// Bootstrap: if a mount already exists for this session, emit the
-		// current state synchronously so the just-connected client doesn't
-		// wait for the next agent write. Avoids a race where
-		// broadcastPreviewChanged fires between EventSource open and the
-		// subscription being registered. Payload shape `{entry, mtime, url,
-		// path}` matches broadcastPreviewChanged so the client doesn't need
-		// to distinguish bootstrap from live events.
-		try {
-			const { pickEntry } = await import("./preview/content-route.js");
-			const dir = previewMount.mountDir(sid);
-			if (fs.existsSync(dir)) {
-				const entry = pickEntry(dir);
-				if (entry) {
-					const entryPath = path.join(dir, entry);
-					const stat = fs.statSync(entryPath);
-					const contentHash = previewMount.contentHashForMount(sid);
-					const artifact = previewArtifacts.findPreviewArtifactByHash(sid, contentHash);
-					res.write(`event: preview-changed\ndata: ${JSON.stringify({
-						entry,
-						mtime: Math.floor(stat.mtimeMs),
-						url: `/preview/${sid}/${entry}`,
-						path: entryPath,
-						contentHash,
-						artifactId: artifact?.artifactId,
-					})}\n\n`);
-				}
-			}
-		} catch { /* ok — bootstrap is best-effort */ }
-		const keepalive = setInterval(() => {
-			try { res.write(":keepalive\n\n"); } catch { /* ok */ }
-		}, 25_000);
-		if (typeof keepalive.unref === "function") keepalive.unref();
+		let unsubscribe: (() => void) | undefined;
+		let keepalive: ReturnType<typeof setInterval> | undefined;
+		let closed = false;
 		const cleanup = () => {
-			clearInterval(keepalive);
-			try { unsubscribe(); } catch { /* ok */ }
+			closed = true;
+			if (keepalive) {
+				clearInterval(keepalive);
+				keepalive = undefined;
+			}
+			const currentUnsubscribe = unsubscribe;
+			unsubscribe = undefined;
+			try { currentUnsubscribe?.(); } catch { /* ok */ }
 		};
 		req.on("close", cleanup);
 		req.on("error", cleanup);
+
+		// Subscribe and bootstrap while holding the same per-session critical
+		// section as preview mutation. A writer therefore cannot publish a live
+		// event between snapshot capture and bootstrap delivery, so clients always
+		// observe bootstrap before later live state and never receive a stale
+		// bootstrap overwrite after a newer event.
+		try {
+			await withPreviewSessionOperation(sid, async () => {
+				if (closed) return;
+				unsubscribe = subscribePreviewChanged(sid, payload => {
+					if (closed) return;
+					try {
+						res.write(`event: preview-changed\ndata: ${JSON.stringify(payload)}\n\n`);
+					} catch { /* socket closed */ }
+				});
+				const snapshot = await readPreviewMountSnapshot(sid);
+				if (!snapshot || closed) return;
+				res.write(`event: preview-changed\ndata: ${JSON.stringify({
+					entry: snapshot.entry,
+					mtime: snapshot.mtime,
+					url: snapshot.url,
+					path: snapshot.path,
+					contentHash: snapshot.contentHash,
+					artifactId: snapshot.artifactId,
+				})}\n\n`);
+			});
+		} catch { /* ok — bootstrap is best-effort */ }
+		if (closed) {
+			cleanup();
+			return;
+		}
+		keepalive = setInterval(() => {
+			try { res.write(":keepalive\n\n"); } catch { /* ok */ }
+		}, 25_000);
+		if (typeof keepalive.unref === "function") keepalive.unref();
 		return;
 	}
 

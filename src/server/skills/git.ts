@@ -3,6 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
+import {
+	RECOVERY_IO_CONCURRENCY,
+	removeTree,
+	type AsyncTreeFs,
+} from "../agent/bounded-async-work.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 import type { Component } from "../agent/project-config-store.js";
 import { branchToSlug, worktreeRoot as wtRootHelper } from "./worktree-paths.js";
@@ -258,6 +263,56 @@ function comparablePath(p: string): string {
 	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
+async function pathExists(filePath: string): Promise<boolean> {
+	try {
+		await fs.promises.access(filePath);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+// Targeted worktree removals share one small process-wide I/O ceiling. Keeping
+// the limiter here prevents a bounded outer cleanup (pool drain, purge, or
+// inventory) from multiplying concurrency while walking a partial worktree.
+let targetedRemovalActive = 0;
+const targetedRemovalWaiters: Array<() => void> = [];
+
+async function withTargetedRemovalSlot<T>(operation: () => Promise<T>): Promise<T> {
+	if (targetedRemovalActive >= RECOVERY_IO_CONCURRENCY) {
+		await new Promise<void>((resolve) => targetedRemovalWaiters.push(resolve));
+	} else {
+		targetedRemovalActive++;
+	}
+	try {
+		return await operation();
+	} finally {
+		const next = targetedRemovalWaiters.shift();
+		if (next) next();
+		else targetedRemovalActive--;
+	}
+}
+
+/**
+ * Remove one exact path through the canonical bounded tree remover. It
+ * revalidates an opened directory path before using each returned child name,
+ * so replacing a verified directory with a symlink can only unlink the link;
+ * it can never redirect child deletion outside the target.
+ *
+ * The operation owns one process-wide slot for its lifetime. Concurrent
+ * worktree/pool cleanup therefore retains the shared recovery I/O ceiling
+ * without multiplying it at nested tree levels.
+ */
+export async function removeTargetedTree(
+	targetPath: string,
+	treeFs?: Pick<AsyncTreeFs, "lstat" | "opendir" | "rename" | "unlink" | "rmdir">,
+): Promise<void> {
+	await withTargetedRemovalSlot(() => removeTree(targetPath, {
+		fs: treeFs,
+		force: true,
+	}));
+}
+
 async function resolveRemotePrimary(repoPath: string, commandRunner: CommandRunner = realCommandRunner): Promise<string> {
 	try {
 		const { stdout } = await execGit(["symbolic-ref", "refs/remotes/origin/HEAD"], {
@@ -443,15 +498,15 @@ export async function getRepoRoot(cwd: string, commandRunner: CommandRunner = re
 
 /**
  * Canonicalize a path for robust equality comparison: resolve to absolute,
- * follow symlinks via `realpathSync.native` where possible (no-op when the
+ * follow symlinks via asynchronous `realpath` where possible (no-op when the
  * path doesn't exist), and lowercase on win32 where the filesystem is
  * case-insensitive. Mirrors the comparison style of
  * `worktree-pool.ts::resolveRepoToplevel`.
  */
-function canonicalizePath(p: string): string {
+async function canonicalizePath(p: string): Promise<string> {
 	let resolved = path.resolve(p);
 	try {
-		resolved = fs.realpathSync.native(resolved);
+		resolved = await fs.promises.realpath(resolved);
 	} catch {
 		// realpath fails when the path doesn't exist — fall back to resolve().
 	}
@@ -476,7 +531,7 @@ export async function isGitRepoRoot(dir: string, commandRunner: CommandRunner = 
 		const { stdout } = await execGit(["rev-parse", "--show-toplevel"], { cwd: dir }, commandRunner);
 		const toplevel = stdout.toString().trim();
 		if (!toplevel) return false;
-		return canonicalizePath(toplevel) === canonicalizePath(dir);
+		return await canonicalizePath(toplevel) === await canonicalizePath(dir);
 	} catch {
 		return false;
 	}
@@ -521,7 +576,7 @@ export async function resolveSandboxMountRoot(repoPath: string, commandRunner: C
 			}, commandRunner);
 			commonDir = stdout.toString().trim();
 		}
-		if (!commonDir) return canonicalizePath(repoPath);
+		if (!commonDir) return await canonicalizePath(repoPath);
 		if (!path.isAbsolute(commonDir)) commonDir = path.resolve(repoPath, commonDir);
 		const realCommon = await realpath(commonDir);
 		// A non-bare repo's common dir ends in `.git` — the main working tree is its parent.
@@ -531,7 +586,7 @@ export async function resolveSandboxMountRoot(repoPath: string, commandRunner: C
 		// Bare repo — the common dir itself is the canonical source.
 		return realCommon;
 	} catch {
-		return canonicalizePath(repoPath);
+		return await canonicalizePath(repoPath);
 	}
 }
 
@@ -590,9 +645,11 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 	const commandRunner = opts?.commandRunner ?? realCommandRunner;
 	const remotePolicy = opts?.remotePolicy ?? DEFAULT_REMOTE_GIT_POLICY;
 	const runGit = (args: readonly string[], options?: any) => execGit(args, options, commandRunner);
-	// Validate repoPath exists — execFile with a bad cwd throws a misleading
-	// "spawn git ENOENT" that looks like git isn't installed
-	if (!fs.existsSync(repoPath)) {
+	// Validate repoPath asynchronously — execFile with a bad cwd throws a
+	// misleading "spawn git ENOENT" that looks like git isn't installed.
+	// Existence is part of this public error contract, so this policy check is
+	// intentionally retained rather than delegated to the first Git command.
+	if (!await pathExists(repoPath)) {
 		throw new Error(`Cannot create worktree: repoPath does not exist: ${repoPath}`);
 	}
 
@@ -648,8 +705,8 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 	}
 
 	if (branchExists) {
-		const dirExists = fs.existsSync(worktreePath);
-		const gitFileExists = dirExists && fs.existsSync(path.join(worktreePath, ".git"));
+		const dirExists = await pathExists(worktreePath);
+		const gitFileExists = dirExists && await pathExists(path.join(worktreePath, ".git"));
 
 		if (dirExists && gitFileExists) {
 			// Worktree fully exists from a previous attempt — repair and reuse
@@ -660,14 +717,13 @@ export async function createWorktree(repoPath: string, branchName: string, opts?
 				// repair failed — still usable if .git exists
 			}
 		} else {
-			// Branch exists but worktree is missing or partial — clean up and re-create
+			// Branch exists but worktree is missing or partial — clean up and re-create.
+			// Both removals are exact and operation-first; a missing target succeeds.
 			const adminPath = path.join(repoPath, ".git", "worktrees", safeName);
-			if (fs.existsSync(adminPath)) {
-				try { fs.rmSync(adminPath, { recursive: true, force: true }); } catch { /* best-effort */ }
-			}
+			try { await removeTargetedTree(adminPath); } catch { /* best-effort */ }
 			if (dirExists && !gitFileExists) {
-				try { fs.rmSync(worktreePath, { recursive: true, force: true }); } catch { /* best-effort */ }
-				if (fs.existsSync(worktreePath)) {
+				try { await removeTargetedTree(worktreePath); } catch { /* best-effort */ }
+				if (await pathExists(worktreePath)) {
 					throw new Error(`Cannot create worktree: directory "${worktreePath}" exists and could not be removed (file locks?)`);
 				}
 			}
@@ -807,15 +863,16 @@ export async function createWorktreeSet(
 		return { container, worktrees: [] };
 	}
 
-	if (!fs.existsSync(container)) {
-		fs.mkdirSync(container, { recursive: true });
-	}
+	// Operation-first creation is idempotent and avoids an exists/mkdir race.
+	await fs.promises.mkdir(container, { recursive: true });
 
 	const out: Array<{ repo: string; repoPath: string; worktreePath: string }> = [];
 	for (const repo of repoList) {
 		const repoSrc = path.join(rootPath, repo);
 		const wtPath = path.join(container, repo);
-		if (!fs.existsSync(repoSrc)) {
+		// Keep the existing actionable result if the source disappears after the
+		// canonical repo-root scan and before this component is created.
+		if (!await pathExists(repoSrc)) {
 			throw new Error(`createWorktreeSet: source repo not found: ${repoSrc}`);
 		}
 		// Start-point precedence mirrors `createWorktree`:
@@ -898,27 +955,32 @@ export async function cleanupWorktree(
 	remotePolicy: RemoteGitPolicy = DEFAULT_REMOTE_GIT_POLICY,
 ): Promise<void> {
 	const runGit = (args: readonly string[], options?: any) => execGit(args, options, commandRunner);
-	if (!fs.existsSync(repoPath)) {
-		console.warn(`[git] Cannot clean up worktree: repoPath does not exist: ${repoPath}`);
-		return;
-	}
 
 	try {
+		// Operation first: a successful Git removal needs no preliminary path
+		// probe, and a missing worktree is handled by the targeted fallback below.
 		await runGit(["worktree", "remove", worktreePath, "--force"], {
 			cwd: repoPath,
 		});
 	} catch {
+		// Preserve the old missing-repository warning/early return without making
+		// every successful cleanup pay a check-then-act race.
+		if (!await pathExists(repoPath)) {
+			console.warn(`[git] Cannot clean up worktree: repoPath does not exist: ${repoPath}`);
+			return;
+		}
+
 		// If remove fails, clean up the admin entry for this specific worktree
 		// (NOT a blanket prune — that could damage other worktrees whose
-		// directories exist but have broken .git metadata).
-		try {
-			const safeName = path.basename(worktreePath);
+		// directories exist but have broken .git metadata). `basename` keeps the
+		// target to one direct admin child; an empty/root basename removes nothing.
+		const trimmedWorktreePath = worktreePath.trim();
+		const safeName = trimmedWorktreePath && trimmedWorktreePath !== "." && trimmedWorktreePath !== ".."
+			? path.basename(path.resolve(trimmedWorktreePath))
+			: "";
+		if (safeName) {
 			const adminPath = path.join(repoPath, ".git", "worktrees", safeName);
-			if (fs.existsSync(adminPath)) {
-				fs.rmSync(adminPath, { recursive: true, force: true });
-			}
-		} catch {
-			// ignore
+			try { await removeTargetedTree(adminPath); } catch { /* best-effort */ }
 		}
 	}
 

@@ -17,7 +17,7 @@
 import fs from "node:fs";
 import type http from "node:http";
 
-import { mountDir } from "./mount.js";
+import { acquirePreviewDirectoryRead, isPreviewDirectoryAvailable, mountPath, readMountDirectory } from "./mount.js";
 import { artifactMountDir } from "./artifacts.js";
 import { resolveAssetPath } from "./path-guard.js";
 import { mimeTypeFor } from "./mime.js";
@@ -61,10 +61,10 @@ function isAuthorized(req: http.IncomingMessage, opts: ContentRouteOptions): boo
  * Pick the entry file when the user requests `/preview/<sid>/`.
  * Order: `index.html` → `inline.html` → first `.html` alphabetically.
  */
-export function pickEntry(dir: string): string | null {
+export async function pickEntry(dir: string): Promise<string | null> {
 	let entries: fs.Dirent[];
 	try {
-		entries = fs.readdirSync(dir, { withFileTypes: true });
+		entries = await readMountDirectory(dir);
 	} catch {
 		return null;
 	}
@@ -117,7 +117,7 @@ export async function handlePreviewRequest(
 	// This lets the client switch between preview tabs (each backed by its own
 	// artifact) by just changing the iframe src — no POST/restore round-trip
 	// needed, since each artifact's bytes live at their own URL forever.
-	let baseDir = mountDir(sid);
+	let baseDir = mountPath(sid);
 	let baseHrefPrefix = `/preview/${sid}/`;
 	if (rel.startsWith("_artifact/")) {
 		const afterPrefix = rel.slice("_artifact/".length);
@@ -142,6 +142,13 @@ export async function handlePreviewRequest(
 		rel = artRel;
 	}
 
+	// Whole-root installs fence the exact destination through post-rename
+	// identity verification. Fail closed while that fence is active.
+	if (!isPreviewDirectoryAvailable(baseDir)) {
+		send(res, 404, JSON.stringify({ error: "Preview mount is not available" }));
+		return true;
+	}
+
 	// `/preview/<sid>` → 301 redirect to add trailing slash so relative URLs resolve.
 	if (slashIdx < 0) {
 		res.writeHead(301, { Location: `/preview/${sid}/`, "Cache-Control": "no-store" });
@@ -149,13 +156,23 @@ export async function handlePreviewRequest(
 		return true;
 	}
 
-	// `/preview/<sid>/` → pick entry and 302.
+	const releaseRead = acquirePreviewDirectoryRead(baseDir);
+	if (!releaseRead) {
+		send(res, 404, JSON.stringify({ error: "Preview mount is not available" }));
+		return true;
+	}
+	try {
+		// `/preview/<sid>/` → pick entry and 302.
 	if (rel === "") {
 		if (!fs.existsSync(baseDir)) {
 			send(res, 404, JSON.stringify({ error: "Preview mount not found" }));
 			return true;
 		}
-		const entry = pickEntry(baseDir);
+		const entry = await pickEntry(baseDir);
+		if (!isPreviewDirectoryAvailable(baseDir)) {
+			send(res, 404, JSON.stringify({ error: "Preview mount is not available" }));
+			return true;
+		}
 		if (!entry) {
 			send(res, 404, JSON.stringify({ error: "Preview mount is empty" }));
 			return true;
@@ -226,13 +243,58 @@ export async function handlePreviewRequest(
 		return true;
 	}
 	const stream = fs.createReadStream(guard.resolved);
-	stream.on("error", () => { try { res.end(); } catch { /* ignore */ } });
-	stream.pipe(res);
-	// Wait for stream to finish so the caller's `await` resolves once the response is done.
+	// Keep the read lease until exactly one terminal condition wins. A client
+	// abort/close must stop disk I/O rather than leaving the stream (and lease)
+	// alive until the file naturally reaches EOF.
 	await new Promise<void>(resolve => {
-		stream.on("end", () => resolve());
-		stream.on("close", () => resolve());
-		stream.on("error", () => resolve());
+		let settled = false;
+		const removeListener = (emitter: unknown, event: string, listener: () => void) => {
+			(emitter as { removeListener?: (name: string, fn: () => void) => void }).removeListener?.(event, listener);
+		};
+		const cleanup = () => {
+			stream.removeListener("end", onEnd);
+			stream.removeListener("close", onStreamClose);
+			stream.removeListener("error", onStreamError);
+			removeListener(req, "aborted", onAbort);
+			removeListener(req, "close", onRequestClose);
+			removeListener(res, "close", onAbort);
+		};
+		const settle = () => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			resolve();
+		};
+		const onAbort = () => {
+			if (!stream.destroyed) stream.destroy();
+			settle();
+		};
+		// IncomingMessage also emits close after an ordinary fully received GET.
+		// Only an incomplete/aborted request close represents client disconnect.
+		const onRequestClose = () => {
+			if (req.aborted || !req.complete) onAbort();
+		};
+		const onEnd = () => settle();
+		const onStreamClose = () => settle();
+		const onStreamError = () => {
+			try {
+				if (!res.destroyed && !res.writableEnded) res.end();
+			} catch { /* ignore a concurrently closed response */ }
+			settle();
+		};
+
+		stream.once("end", onEnd);
+		stream.once("close", onStreamClose);
+		stream.once("error", onStreamError);
+		if (typeof req.once === "function") {
+			req.once("aborted", onAbort);
+			req.once("close", onRequestClose);
+		}
+		if (typeof res.once === "function") res.once("close", onAbort);
+		stream.pipe(res);
 	});
 	return true;
+	} finally {
+		releaseRead();
+	}
 }
