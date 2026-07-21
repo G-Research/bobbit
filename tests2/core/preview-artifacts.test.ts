@@ -165,6 +165,28 @@ function substituteFileAtOpen(victim: string, outsideFile: string, calls: string
 	});
 }
 
+function substituteArtifactMetadataAfterLstat(
+	victim: string,
+	outsideFile: string,
+	calls: string[],
+): PreviewAsyncFs {
+	const atOpen = substituteFileAtOpen(victim, outsideFile, calls);
+	let pathnameReadSubstituted = false;
+	return {
+		...atOpen,
+		readFile: async (filePath, encoding) => {
+			const absolute = path.resolve(String(filePath));
+			if (!pathnameReadSubstituted && absolute === path.resolve(victim)) {
+				pathnameReadSubstituted = true;
+				memoryFs.unlinkSync(victim);
+				memoryFs.symlinkSync(outsideFile, victim);
+			}
+			calls.push(`read:${absolute}`);
+			return baseAsyncFs.readFile(filePath, encoding);
+		},
+	};
+}
+
 function candidateRecord(
 	artifactId: string,
 	mounted: Awaited<ReturnType<typeof writeInline>>,
@@ -261,6 +283,34 @@ describe("preview artifacts", () => {
 		assert.equal(found?.artifactId, exactOrder[0]);
 		const reused = await persistPreviewArtifact(SID, mounted);
 		assert.equal(reused.artifactId, exactOrder[0]);
+	});
+
+	it("rejects artifact metadata replaced by an external symlink before descriptor reads", async () => {
+		await resetSession();
+		const artifactId = "metaaa";
+		const mounted = await writeInline(SID, "inside", "report.html");
+		const record = candidateRecord(artifactId, mounted);
+		writeCandidate(artifactId, mounted, { metadata: record });
+
+		const metadataFile = path.join(artifactDir(SID, artifactId), "artifact.json");
+		const outsideDirectory = path.join(root, "metadata-race-outside");
+		const outsideFile = path.join(outsideDirectory, "external.json");
+		memoryFs.mkdirSync(outsideDirectory, { recursive: true });
+		memoryFs.writeFileSync(outsideFile, JSON.stringify({ ...record, createdAt: 999 }));
+		const calls: string[] = [];
+		setPreviewArtifactFsForTesting(substituteArtifactMetadataAfterLstat(metadataFile, outsideFile, calls));
+		try {
+			await assert.rejects(
+				readPreviewArtifact(SID, artifactId),
+				(error: any) => error instanceof PreviewArtifactError && error.statusCode === 500,
+			);
+			assert.ok(calls.includes(`open:${path.resolve(metadataFile)}`), "metadata substitution did not run");
+			assert.equal(calls.some(call => call.startsWith("read:")), false);
+			assert.equal(memoryFs.readFileSync(outsideFile, "utf-8"), JSON.stringify({ ...record, createdAt: 999 }));
+		} finally {
+			setPreviewArtifactFsForTesting(memoryFs);
+			memoryFs.rmSync(outsideDirectory, { recursive: true, force: true });
+		}
 	});
 
 	it("restores immutable bytes and leaves live content unchanged on validation failures", async () => {

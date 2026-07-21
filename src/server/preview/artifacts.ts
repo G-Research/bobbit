@@ -8,8 +8,13 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { bobbitStateDir } from "../bobbit-dir.js";
-import { RECOVERY_IO_CONCURRENCY } from "../agent/bounded-async-work.js";
+import {
+	readRegularFileNoFollowInChunks,
+	RECOVERY_IO_CONCURRENCY,
+	sameFileIdentity,
+} from "../agent/bounded-async-work.js";
 import * as previewMount from "./mount.js";
 
 const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -150,7 +155,30 @@ export async function readPreviewArtifact(sessionId: string, artifactId: string)
 			|| !metadataStats.isFile() || metadataStats.isSymbolicLink()) {
 			throw new PreviewArtifactError(500, "Preview artifact metadata is invalid");
 		}
-		parsed = JSON.parse(await artifactFs.readFile(file, "utf-8"));
+
+		// Anchor containment to the directory identity validated above. The file
+		// reader then opens artifact.json with no-follow semantics, compares the
+		// opened descriptor to its pathname before reading, and reads only through
+		// that descriptor in bounded chunks.
+		const canonicalDirectory = await artifactFs.realpath(directory);
+		const currentDirectoryStats = await artifactFs.stat(directory);
+		if (!currentDirectoryStats.isDirectory() || currentDirectoryStats.isSymbolicLink()
+			|| !sameFileIdentity(directoryStats, currentDirectoryStats)) {
+			throw new PreviewArtifactError(500, "Preview artifact metadata is invalid");
+		}
+		const decoder = new StringDecoder("utf8");
+		const textParts: string[] = [];
+		const openedStats = await readRegularFileNoFollowInChunks(file, chunk => {
+			textParts.push(decoder.write(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)));
+		}, {
+			fs: artifactFs,
+			containedWithin: canonicalDirectory,
+		});
+		textParts.push(decoder.end());
+		if (!sameFileIdentity(metadataStats, openedStats)) {
+			throw new PreviewArtifactError(500, "Preview artifact metadata is invalid");
+		}
+		parsed = JSON.parse(textParts.join(""));
 	} catch (err) {
 		if (err instanceof PreviewArtifactError) throw err;
 		if (isEnoent(err)) throw new PreviewArtifactError(404, "Preview artifact not found");
