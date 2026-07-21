@@ -1174,7 +1174,7 @@ export async function removeTree(root: string, options: RemoveTreeOptions = {}):
 			try { delete (error as { quarantinePath?: string }).quarantinePath; } catch { /* diagnostic only */ }
 			return;
 		}
-		if (relative.startsWith("..") || path.isAbsolute(relative)) return;
+		if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return;
 		attachQuarantineContext(error, path.join(to, relative));
 	};
 

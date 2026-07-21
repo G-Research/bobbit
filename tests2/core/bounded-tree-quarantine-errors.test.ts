@@ -209,6 +209,53 @@ describe("bounded tree quarantine failure restoration", () => {
 		assert.equal(logged.mock.calls.some(call => String(call[0]).includes(quarantine)), true);
 	});
 
+	it("relocates retained quarantine context through a restored '..name' ancestor", async () => {
+		const parent = tempRoot("nested-dot-name");
+		const root = path.join(parent, "target");
+		const dotName = path.join(root, "..name");
+		const filePath = path.join(dotName, "inside.txt");
+		fs.mkdirSync(dotName, { recursive: true });
+		fs.writeFileSync(filePath, "owned");
+		const failure = ioFailure("nested unlink");
+		let rootQuarantine = "";
+		let dotNameQuarantine = "";
+		let fileQuarantine = "";
+		let restoreDenied = false;
+		const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+		const io: AsyncTreeFs = {
+			...realAsyncTreeFs,
+			rename: async (oldPath, newPath) => {
+				const oldAbsolute = path.resolve(oldPath);
+				const newAbsolute = path.resolve(newPath);
+				if (fileQuarantine
+					&& oldAbsolute === fileQuarantine
+					&& newAbsolute === path.join(dotNameQuarantine, "inside.txt")) {
+					restoreDenied = true;
+					throw Object.assign(new Error("restore denied"), { code: "EACCES" });
+				}
+				await realAsyncTreeFs.rename(oldPath, newPath);
+				if (oldAbsolute === path.resolve(root)) rootQuarantine = newAbsolute;
+				else if (oldAbsolute === path.join(rootQuarantine, "..name")) dotNameQuarantine = newAbsolute;
+				else if (oldAbsolute === path.join(dotNameQuarantine, "inside.txt")) fileQuarantine = newAbsolute;
+			},
+			unlink: async filePathToRemove => {
+				if (fileQuarantine && path.resolve(filePathToRemove) === fileQuarantine) throw failure;
+				await realAsyncTreeFs.unlink(filePathToRemove);
+			},
+		};
+
+		await assert.rejects(removeTree(root, { fs: io }), error => error === failure);
+
+		const retained = quarantineEntries(parent);
+		assert.equal(restoreDenied, true);
+		assert.equal(retained.length, 1);
+		assert.equal(path.dirname(retained[0]!), dotName);
+		assert.equal(fs.readFileSync(retained[0]!, "utf8"), "owned");
+		assert.equal(fs.existsSync(fileQuarantine), false, "the pre-restoration quarantine path must move with its ancestors");
+		assert.equal((failure as { quarantinePath?: string }).quarantinePath, retained[0]);
+		assert.equal(logged.mock.calls.some(call => String(call[0]).includes(retained[0]!)), true);
+	});
+
 	it("preserves a mismatched quarantine identity without external deletion", async () => {
 		const parent = tempRoot("mismatch");
 		const root = path.join(parent, "target");
