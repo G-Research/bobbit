@@ -39,6 +39,15 @@
       }
     },
     {
+      "path": "tests2/core/preview-identity-guard-cost.test.ts",
+      "reason": "Deterministic counting-filesystem regression proving preview candidate/session/store identity claims remain flat and deduplicated: multi-candidate lookup, deep validation/hash, and descriptor-anchored copy retain bounded linear lstat/realpath/open counts without nested guard multiplication.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/git-targeted-cleanup-symlink-race.test.ts",
       "reason": "Deterministic native v2 regression proving targeted Git cleanup cannot traverse a directory replaced by a symlink between lstat and open, remains idempotent for a missing target, and shares the process-wide recovery I/O concurrency ceiling across roots.",
       "execution": {

@@ -142,27 +142,38 @@ export async function persistPreviewArtifact(
 	throw new PreviewArtifactError(500, "Preview artifact id collision");
 }
 
+interface BoundPreviewArtifactRecord {
+	record: PreviewArtifactRecord;
+	bound: previewMount.BoundPreviewDirectoryRoot;
+}
+
 /** Read and validate one artifact record. */
 export async function readPreviewArtifact(sessionId: string, artifactId: string): Promise<PreviewArtifactRecord> {
-	return readPreviewArtifactWithFs(sessionId, artifactId, artifactFs);
+	return (await readPreviewArtifactWithFs(sessionId, artifactId, artifactFs)).record;
 }
 
 async function readPreviewArtifactWithFs(
 	sessionId: string,
 	artifactId: string,
 	io: previewMount.PreviewAsyncFs,
-): Promise<PreviewArtifactRecord> {
+	parentRoot?: previewMount.BoundPreviewDirectoryRoot,
+): Promise<BoundPreviewArtifactRecord> {
 	validateSessionId(sessionId);
 	validateArtifactId(artifactId);
 	const directory = artifactDir(sessionId, artifactId);
 	const file = path.join(directory, "artifact.json");
 	let parsed: unknown;
+	let bound: previewMount.BoundPreviewDirectoryRoot;
 	try {
-		// Bind both the candidate and its canonical store ancestor to stable
-		// identities. The guarded filesystem brackets every metadata pathname
-		// operation so an ancestor toggle is rejected before descriptor reads.
-		const bound = await previewMount.bindPreviewDirectoryRoot(directory, {
+		// Carry candidate + session parent + trusted store identities as one flat
+		// claim set over the raw filesystem. No guarded filesystem is rebound.
+		const sessionBound = parentRoot ?? await previewMount.bindPreviewDirectoryRoot(
+			artifactSessionDir(sessionId),
+			{ fs: io, trustedRoot: artifactRoot() },
+		);
+		bound = await previewMount.bindPreviewDirectoryRoot(directory, {
 			fs: io,
+			parentRoot: sessionBound,
 			trustedRoot: artifactRoot(),
 		});
 		const metadataStats = await bound.fs.lstat(file);
@@ -177,7 +188,7 @@ async function readPreviewArtifactWithFs(
 		await readRegularFileNoFollowInChunks(file, chunk => {
 			textParts.push(decoder.write(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)));
 		}, {
-			fs: bound.fs,
+			fs: bound.descriptorFs,
 			containedWithin: bound.canonicalPath,
 			expectedStats: metadataStats,
 		});
@@ -193,7 +204,8 @@ async function readPreviewArtifactWithFs(
 	if (!record || record.sessionId !== sessionId || record.artifactId !== artifactId) {
 		throw new PreviewArtifactError(500, "Preview artifact metadata is invalid");
 	}
-	return record;
+	await bound.assertCurrent();
+	return { record, bound };
 }
 
 /** Restore a validated immutable artifact, rolling back a failed live swap. */
@@ -204,9 +216,10 @@ export async function restorePreviewArtifact(
 	validateSessionId(sessionId);
 	validateArtifactId(artifactId);
 
-	const record = await readPreviewArtifact(sessionId, artifactId);
+	const artifact = await readPreviewArtifactWithFs(sessionId, artifactId, artifactFs);
+	const record = artifact.record;
 	const sourceMount = artifactMountDir(sessionId, artifactId);
-	await validateArtifactMount(record, sourceMount);
+	await validateArtifactMount(record, sourceMount, artifactFs, artifact.bound);
 
 	const liveMount = previewMount.mountPath(sessionId);
 	const previewParent = path.dirname(liveMount);
@@ -347,13 +360,15 @@ export async function findPreviewArtifactByHash(
 			if (!ent) break;
 			if (!VALID_ARTIFACT_ID.test(ent.name)) continue;
 			try {
-				const candidateDir = artifactDir(sessionId, ent.name);
-				const candidateStats = await sessionBound.fs.lstat(candidateDir);
-				if (!candidateStats.isDirectory() || candidateStats.isSymbolicLink()) continue;
-				const record = await readPreviewArtifactWithFs(sessionId, ent.name, sessionBound.fs);
-				if (record.contentHash !== contentHash) continue;
-				await validateArtifactMount(record, artifactMountDir(sessionId, record.artifactId), sessionBound.fs);
-				return record;
+				const artifact = await readPreviewArtifactWithFs(sessionId, ent.name, artifactFs, sessionBound);
+				if (artifact.record.contentHash !== contentHash) continue;
+				await validateArtifactMount(
+					artifact.record,
+					artifactMountDir(sessionId, artifact.record.artifactId),
+					artifactFs,
+					artifact.bound,
+				);
+				return artifact.record;
 			} catch {
 				// Corrupt/mismatched entries are not reusable; leave them for maintenance.
 			}
@@ -368,17 +383,26 @@ async function validateArtifactMount(
 	record: PreviewArtifactRecord,
 	mountDir: string,
 	io: previewMount.PreviewAsyncFs = artifactFs,
+	parentRoot?: previewMount.BoundPreviewDirectoryRoot,
 ): Promise<void> {
-	if (!(await safeLstat(mountDir, io))?.isDirectory()) {
-		throw new PreviewArtifactError(500, "Preview artifact mount is missing");
+	let bound: previewMount.BoundPreviewDirectoryRoot;
+	try {
+		bound = await previewMount.bindPreviewDirectoryRoot(mountDir, {
+			fs: io,
+			parentRoot,
+			trustedRoot: artifactRoot(),
+		});
+	} catch (error) {
+		if (isEnoent(error)) throw new PreviewArtifactError(500, "Preview artifact mount is missing");
+		throw error;
 	}
-	const files = await listFiles(mountDir, artifactRoot(), io);
+	const files = await listFiles(mountDir, artifactRoot(), io, bound);
 	if (!files.includes(record.entry)) throw new PreviewArtifactError(500, "Preview artifact entry is missing");
 	const recorded = new Set(record.files);
 	if (files.length !== record.files.length || files.some(rel => !recorded.has(rel))) {
 		throw new PreviewArtifactError(500, "Preview artifact file list mismatch");
 	}
-	if (await hashDirectory(mountDir, artifactRoot(), io) !== record.contentHash) {
+	if (await hashDirectory(mountDir, artifactRoot(), io, bound) !== record.contentHash) {
 		throw new PreviewArtifactError(500, "Preview artifact hash mismatch");
 	}
 }
@@ -457,11 +481,13 @@ async function hashDirectory(
 	root: string,
 	trustedRoot: string,
 	io: previewMount.PreviewAsyncFs = artifactFs,
+	boundRoot?: previewMount.BoundPreviewDirectoryRoot,
 ): Promise<string> {
 	return previewMount.hashMountDirectory(root, {
 		fs: io,
 		concurrency: RECOVERY_IO_CONCURRENCY,
 		trustedRoot,
+		boundRoot,
 	});
 }
 
@@ -469,11 +495,13 @@ async function listFiles(
 	root: string,
 	trustedRoot: string,
 	io: previewMount.PreviewAsyncFs = artifactFs,
+	boundRoot?: previewMount.BoundPreviewDirectoryRoot,
 ): Promise<string[]> {
 	return previewMount.listMountFiles(root, {
 		fs: io,
 		concurrency: RECOVERY_IO_CONCURRENCY,
 		trustedRoot,
+		boundRoot,
 	});
 }
 

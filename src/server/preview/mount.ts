@@ -459,6 +459,10 @@ export interface PreviewTreeOptions {
 	expectedRootStats?: AsyncTreeStats;
 	/** Store root whose canonical directory must contain the traversed source. */
 	trustedRoot?: string;
+	/** Already-bound root for this exact pathname. Avoids rebinding within one operation. */
+	boundRoot?: BoundPreviewDirectoryRoot;
+	/** Stable parent namespace whose claims must be carried into a child binding. */
+	parentRoot?: BoundPreviewDirectoryRoot;
 }
 
 const UNREADABLE_TREE_STATS: AsyncTreeStats = {
@@ -471,19 +475,27 @@ const UNREADABLE_TREE_STATS: AsyncTreeStats = {
  * Adapt the preview seam to the canonical streaming walker while retaining the
  * legacy list semantics: an unreadable directory contributes no descendants.
  */
-function skippablePreviewTraversalFs(io: PreviewAsyncFs): {
+function skippablePreviewTraversalFs(io: {
+	lstat(filePath: string): Promise<AsyncTreeStats>;
+	opendir(dirPath: string): Promise<AsyncTreeDirectory>;
+}): {
 	lstat(filePath: string): Promise<AsyncTreeStats>;
 	opendir(dirPath: string): Promise<AsyncTreeDirectory>;
 } {
 	return {
 		async lstat(filePath) {
 			try { return await io.lstat(filePath); }
-			catch { return UNREADABLE_TREE_STATS; }
+			catch (error) {
+				// Identity failures are security decisions, not unreadable descendants.
+				if (error instanceof PreviewMountError) throw error;
+				return UNREADABLE_TREE_STATS;
+			}
 		},
 		async opendir(dirPath) {
-			let directory: fs.Dir;
+			let directory: AsyncTreeDirectory;
 			try { directory = await io.opendir(dirPath); }
-			catch {
+			catch (error) {
+				if (error instanceof PreviewMountError) throw error;
 				return { read: async () => null, close: async () => undefined };
 			}
 			return {
@@ -535,27 +547,101 @@ function identityGuardedTraversalFs(
 	};
 }
 
+export interface PreviewDirectoryIdentity {
+	path: string;
+	canonicalPath: string;
+	stats: AsyncTreeStats;
+}
+
 export interface BoundPreviewDirectoryRoot {
 	path: string;
 	canonicalPath: string;
 	stats: AsyncTreeStats;
-	/** Revalidate the candidate and trusted-store identities after an await. */
+	/** Raw seam used by every flat guard in this operation. */
+	rawFs: PreviewAsyncFs;
+	/** Candidate-first, pathname-deduplicated directory identities. */
+	identities: readonly PreviewDirectoryIdentity[];
+	/** Revalidate every distinct pathname/canonical claim exactly once. */
 	assertCurrent(): Promise<void>;
-	/** Source-reading filesystem that brackets path operations with root checks. */
+	/** Source-reading filesystem with one flat set of pre/post root checks. */
 	fs: PreviewAsyncFs;
+	/** Descriptor-open guard; descriptor/path/canonical checks then use the raw seam. */
+	descriptorFs: PreviewAsyncFs;
 }
 
-interface BoundDirectoryIdentity {
-	path: string;
-	canonicalPath: string;
-	stats: AsyncTreeStats;
+interface PreviewGuardScope {
+	rawFs: PreviewAsyncFs;
+	identities: readonly PreviewDirectoryIdentity[];
+}
+
+const previewGuardScopes = new WeakMap<object, PreviewGuardScope>();
+
+function normalizedIdentityPath(value: string): string {
+	const resolved = path.resolve(value);
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function mergeDirectoryIdentities(
+	...groups: ReadonlyArray<readonly PreviewDirectoryIdentity[] | undefined>
+): PreviewDirectoryIdentity[] {
+	const merged: PreviewDirectoryIdentity[] = [];
+	const indexes = new Map<string, number>();
+	for (const group of groups) {
+		for (const identity of group ?? []) {
+			const key = normalizedIdentityPath(identity.path);
+			const priorIndex = indexes.get(key);
+			if (priorIndex === undefined) {
+				indexes.set(key, merged.length);
+				merged.push(identity);
+				continue;
+			}
+			const prior = merged[priorIndex]!;
+			if (normalizedIdentityPath(prior.canonicalPath) !== normalizedIdentityPath(identity.canonicalPath)
+				|| !matchesDirectoryIdentity(prior.stats, identity.stats)) {
+				throw new PreviewMountError(500, "Preview root identity changed while claims were composed");
+			}
+		}
+	}
+	return merged;
+}
+
+function identityClaims(identities: readonly PreviewDirectoryIdentity[]): Array<{ path: string; stats: AsyncTreeStats }> {
+	const claims: Array<{ path: string; stats: AsyncTreeStats }> = [];
+	const indexes = new Map<string, number>();
+	for (const identity of identities) {
+		for (const claimPath of [identity.path, identity.canonicalPath]) {
+			const key = normalizedIdentityPath(claimPath);
+			const priorIndex = indexes.get(key);
+			if (priorIndex === undefined) {
+				indexes.set(key, claims.length);
+				claims.push({ path: path.resolve(claimPath), stats: identity.stats });
+				continue;
+			}
+			if (!matchesDirectoryIdentity(claims[priorIndex]!.stats, identity.stats)) {
+				throw new PreviewMountError(500, "Preview root identity claims conflict");
+			}
+		}
+	}
+	return claims;
+}
+
+async function assertDirectoryIdentitiesCurrent(
+	io: PreviewAsyncFs,
+	identities: readonly PreviewDirectoryIdentity[],
+): Promise<void> {
+	for (const claim of identityClaims(identities)) {
+		const current = await io.lstat(claim.path);
+		if (!matchesDirectoryIdentity(claim.stats, current)) {
+			throw new PreviewMountError(500, "Preview root changed during traversal");
+		}
+	}
 }
 
 async function bindOneDirectoryIdentity(
 	root: string,
 	io: PreviewAsyncFs,
 	label: string,
-): Promise<BoundDirectoryIdentity> {
+): Promise<PreviewDirectoryIdentity> {
 	const resolvedRoot = path.resolve(root);
 	const rootStats = await io.lstat(resolvedRoot);
 	if (!rootStats.isDirectory() || rootStats.isSymbolicLink() || !hasStableFileIdentity(rootStats)) {
@@ -568,9 +654,14 @@ async function bindOneDirectoryIdentity(
 	if (!matchesDirectoryIdentity(rootStats, canonicalStats)) {
 		throw new PreviewMountError(500, `${label} canonical target changed`);
 	}
-	const currentStats = await io.lstat(resolvedRoot);
-	if (!matchesDirectoryIdentity(rootStats, currentStats)) {
-		throw new PreviewMountError(500, `${label} changed while it was validated`);
+	// When realpath returns a distinct pathname, recheck the original no-follow
+	// pathname after validating the canonical target. For the common identical
+	// pathname case canonicalStats is already that post-realpath check.
+	if (normalizedIdentityPath(canonicalPath) !== normalizedIdentityPath(resolvedRoot)) {
+		const currentStats = await io.lstat(resolvedRoot);
+		if (!matchesDirectoryIdentity(rootStats, currentStats)) {
+			throw new PreviewMountError(500, `${label} changed while it was validated`);
+		}
 	}
 	return { path: resolvedRoot, canonicalPath, stats: rootStats };
 }
@@ -582,25 +673,29 @@ function canonicalPathIsWithin(candidate: string, trustedRoot: string): boolean 
 
 function guardPreviewSourceFs(
 	io: PreviewAsyncFs,
-	assertCurrent: () => Promise<void>,
+	identities: readonly PreviewDirectoryIdentity[],
 ): PreviewAsyncFs {
-	return {
-		...io,
+	const inherited = previewGuardScopes.get(io as object);
+	const rawFs = inherited?.rawFs ?? io;
+	const flatIdentities = mergeDirectoryIdentities(identities, inherited?.identities);
+	const assertCurrent = () => assertDirectoryIdentitiesCurrent(rawFs, flatIdentities);
+	const guarded: PreviewAsyncFs = {
+		...rawFs,
 		async lstat(filePath) {
 			await assertCurrent();
-			const result = await io.lstat(filePath);
+			const result = await rawFs.lstat(filePath);
 			await assertCurrent();
 			return result;
 		},
 		async realpath(filePath) {
 			await assertCurrent();
-			const result = await io.realpath(filePath);
+			const result = await rawFs.realpath(filePath);
 			await assertCurrent();
 			return result;
 		},
 		async opendir(filePath) {
 			await assertCurrent();
-			const directory = await io.opendir(filePath);
+			const directory = await rawFs.opendir(filePath);
 			try { await assertCurrent(); }
 			catch (error) {
 				try { await directory.close(); } catch { /* preserve identity error */ }
@@ -610,7 +705,7 @@ function guardPreviewSourceFs(
 		},
 		async open(filePath, flags, mode) {
 			await assertCurrent();
-			const handle = await io.open(filePath, flags, mode);
+			const handle = await rawFs.open(filePath, flags, mode);
 			try { await assertCurrent(); }
 			catch (error) {
 				try { await handle.close(); } catch { /* preserve identity error */ }
@@ -619,100 +714,214 @@ function guardPreviewSourceFs(
 			return handle;
 		},
 	};
+	previewGuardScopes.set(guarded, { rawFs, identities: flatIdentities });
+	return guarded;
+}
+
+function guardPreviewOpenFs(
+	io: PreviewAsyncFs,
+	identities: readonly PreviewDirectoryIdentity[],
+): PreviewAsyncFs {
+	const inherited = previewGuardScopes.get(io as object);
+	const rawFs = inherited?.rawFs ?? io;
+	const flatIdentities = mergeDirectoryIdentities(identities, inherited?.identities);
+	const assertCurrent = () => assertDirectoryIdentitiesCurrent(rawFs, flatIdentities);
+	const guarded: PreviewAsyncFs = {
+		...rawFs,
+		async open(filePath, flags, mode) {
+			await assertCurrent();
+			const handle = await rawFs.open(filePath, flags, mode);
+			try { await assertCurrent(); }
+			catch (error) {
+				try { await handle.close(); } catch { /* preserve identity error */ }
+				throw error;
+			}
+			return handle;
+		},
+	};
+	previewGuardScopes.set(guarded, { rawFs, identities: flatIdentities });
+	return guarded;
+}
+
+function rawPreviewFs(io: PreviewAsyncFs): PreviewAsyncFs {
+	return previewGuardScopes.get(io as object)?.rawFs ?? io;
+}
+
+function boundPreviewTraversal(
+	bound: BoundPreviewDirectoryRoot,
+): {
+	fs: { lstat(filePath: string): Promise<AsyncTreeStats>; opendir(dirPath: string): Promise<AsyncTreeDirectory> };
+	assertAdditional(): Promise<void>;
+} {
+	// walkTree already fences the candidate pathname as its operation root. Keep
+	// canonical aliases and parent/store identities as a separate flat set so
+	// walkTree's own root/producer/current checks do not recursively invoke them.
+	const candidatePath = normalizedIdentityPath(bound.path);
+	const additionalClaims = identityClaims(bound.identities)
+		.filter(claim => normalizedIdentityPath(claim.path) !== candidatePath);
+	const assertAdditional = async (): Promise<void> => {
+		for (const claim of additionalClaims) {
+			const current = await bound.rawFs.lstat(claim.path);
+			if (!matchesDirectoryIdentity(claim.stats, current)) {
+				throw new PreviewMountError(500, "Preview root changed during traversal");
+			}
+		}
+	};
+	return {
+		assertAdditional,
+		fs: {
+			lstat: filePath => bound.rawFs.lstat(filePath),
+			async opendir(dirPath) {
+				await assertAdditional();
+				const directory = await bound.rawFs.opendir(dirPath);
+				try { await assertAdditional(); }
+				catch (error) {
+					try { await directory.close(); } catch { /* preserve identity error */ }
+					throw error;
+				}
+				return directory;
+			},
+		},
+	};
 }
 
 /**
  * Bind a preview/artifact candidate to stable canonical directory identities.
- * When supplied, the trusted store is canonicalized independently and the
- * candidate's canonical path must remain inside it.
+ * A parent binding and any guarded filesystem claims are flattened over the raw
+ * seam, so composing candidate/session/store roots never nests guard wrappers.
  */
 export async function bindPreviewDirectoryRoot(
 	root: string,
-	options: Pick<PreviewTreeOptions, "fs" | "trustedRoot"> = {},
+	options: Pick<PreviewTreeOptions, "fs" | "trustedRoot" | "parentRoot"> = {},
 ): Promise<BoundPreviewDirectoryRoot> {
-	const io = options.fs ?? mountAsyncFs;
-	const candidate = await bindOneDirectoryIdentity(root, io, "Preview root");
-	const trusted = options.trustedRoot === undefined
+	const suppliedFs = options.fs ?? options.parentRoot?.rawFs ?? mountAsyncFs;
+	const inheritedScope = previewGuardScopes.get(suppliedFs as object);
+	const io = inheritedScope?.rawFs ?? suppliedFs;
+	if (options.parentRoot && options.parentRoot.rawFs !== io) {
+		throw new PreviewMountError(500, "Preview parent identity uses a different filesystem");
+	}
+	const inheritedIdentities = mergeDirectoryIdentities(
+		options.parentRoot?.identities,
+		inheritedScope?.identities,
+	);
+	if (inheritedIdentities.length > 0) await assertDirectoryIdentitiesCurrent(io, inheritedIdentities);
+	const validationIo = inheritedIdentities.length > 0
+		? guardPreviewSourceFs(io, inheritedIdentities)
+		: io;
+	const candidate = await bindOneDirectoryIdentity(root, validationIo, "Preview root");
+	const trustedPath = options.trustedRoot === undefined ? undefined : path.resolve(options.trustedRoot);
+	const trusted = trustedPath === undefined
 		? undefined
-		: path.resolve(options.trustedRoot) === candidate.path
+		: normalizedIdentityPath(trustedPath) === normalizedIdentityPath(candidate.path)
 			? candidate
-			: await bindOneDirectoryIdentity(options.trustedRoot, io, "Trusted preview store root");
+			: inheritedIdentities.find(identity =>
+				normalizedIdentityPath(identity.path) === normalizedIdentityPath(trustedPath))
+				?? await bindOneDirectoryIdentity(trustedPath, validationIo, "Trusted preview store root");
 	if (trusted && !canonicalPathIsWithin(candidate.canonicalPath, trusted.canonicalPath)) {
 		throw new PreviewMountError(500, "Preview root escapes its trusted canonical store");
 	}
+	if (options.parentRoot
+		&& normalizedIdentityPath(candidate.path) !== normalizedIdentityPath(options.parentRoot.path)
+		&& !canonicalPathIsWithin(candidate.canonicalPath, options.parentRoot.canonicalPath)) {
+		throw new PreviewMountError(500, "Preview root escapes its bound parent directory");
+	}
 
-	const identities = trusted && trusted.path !== candidate.path
-		? [candidate, trusted]
-		: [candidate];
-	const assertCurrent = async (): Promise<void> => {
-		for (const identity of identities) {
-			const pathnameStats = await io.lstat(identity.path);
-			if (!matchesDirectoryIdentity(identity.stats, pathnameStats)) {
-				throw new PreviewMountError(500, "Preview root changed during traversal");
-			}
-			const canonicalStats = await io.lstat(identity.canonicalPath);
-			if (!matchesDirectoryIdentity(identity.stats, canonicalStats)) {
-				throw new PreviewMountError(500, "Preview canonical root changed during traversal");
-			}
-		}
-	};
+	const identities = mergeDirectoryIdentities([candidate], inheritedIdentities, trusted ? [trusted] : undefined);
+	const assertCurrent = () => assertDirectoryIdentitiesCurrent(io, identities);
 	await assertCurrent();
 	return {
 		path: candidate.path,
 		canonicalPath: candidate.canonicalPath,
 		stats: candidate.stats,
+		rawFs: io,
+		identities,
 		assertCurrent,
-		fs: guardPreviewSourceFs(io, assertCurrent),
+		fs: guardPreviewSourceFs(io, identities),
+		descriptorFs: guardPreviewOpenFs(io, identities),
 	};
+}
+
+async function resolveBoundPreviewRoot(
+	root: string,
+	options: PreviewTreeOptions,
+): Promise<BoundPreviewDirectoryRoot> {
+	const resolvedRoot = path.resolve(root);
+	if (!options.boundRoot) return bindPreviewDirectoryRoot(root, options);
+	const bound = options.boundRoot;
+	if (normalizedIdentityPath(bound.path) !== normalizedIdentityPath(resolvedRoot)) {
+		throw new PreviewMountError(500, "Bound preview root does not match the requested pathname");
+	}
+	if (options.fs && rawPreviewFs(options.fs) !== bound.rawFs) {
+		throw new PreviewMountError(500, "Bound preview root uses a different filesystem");
+	}
+	if (options.expectedRootStats && !matchesDirectoryIdentity(options.expectedRootStats, bound.stats)) {
+		throw new PreviewMountError(500, "Preview traversal root changed from its expected identity");
+	}
+	if (options.trustedRoot) {
+		const trusted = bound.identities.find(identity =>
+			normalizedIdentityPath(identity.path) === normalizedIdentityPath(options.trustedRoot!));
+		if (!trusted || !canonicalPathIsWithin(bound.canonicalPath, trusted.canonicalPath)) {
+			throw new PreviewMountError(500, "Bound preview root lacks its trusted canonical store");
+		}
+	}
+	await bound.assertCurrent();
+	return bound;
 }
 
 /** Sorted POSIX relative regular-file paths. Directory read failures are skipped. */
 export async function listMountFiles(root: string, options: PreviewTreeOptions = {}): Promise<string[]> {
-	const io = options.fs ?? mountAsyncFs;
+	const suppliedIo = options.fs ?? mountAsyncFs;
+	const inheritedScope = previewGuardScopes.get(suppliedIo as object);
+	const io = rawPreviewFs(suppliedIo);
 	let expectedRootStats = options.expectedRootStats;
-	let traversalIo = io;
-	if (options.trustedRoot !== undefined) {
-		const bound = await bindPreviewDirectoryRoot(root, options);
-		if (expectedRootStats !== undefined && !matchesDirectoryIdentity(expectedRootStats, bound.stats)) {
-			throw new PreviewMountError(500, "Preview traversal root changed from its expected identity");
-		}
+	let bound: BoundPreviewDirectoryRoot | undefined;
+	if (options.boundRoot || options.trustedRoot !== undefined) {
+		bound = await resolveBoundPreviewRoot(root, options);
 		expectedRootStats = bound.stats;
-		traversalIo = bound.fs;
+	} else if (inheritedScope) {
+		// A guarded filesystem passed by an existing caller is an identity scope,
+		// not merely an I/O implementation. Rebind the exact requested root over
+		// its raw seam and inherit the flat claims rather than silently stripping
+		// parent/trusted-root fencing.
+		bound = await bindPreviewDirectoryRoot(root, { fs: suppliedIo });
+		expectedRootStats = bound.stats;
 	} else if (expectedRootStats !== undefined && !hasStableFileIdentity(expectedRootStats)) {
 		throw new PreviewMountError(500, "Preview traversal root has no stable identity");
 	}
 
 	const out: string[] = [];
-	const skippableFs = skippablePreviewTraversalFs(traversalIo);
-	const traversalFs = expectedRootStats === undefined
+	const boundTraversal = bound ? boundPreviewTraversal(bound) : undefined;
+	const skippableFs = skippablePreviewTraversalFs(boundTraversal?.fs ?? io);
+	const traversalFs = bound || expectedRootStats === undefined
 		? skippableFs
-		: identityGuardedTraversalFs(traversalIo, root, expectedRootStats, skippableFs);
-	await walkTree(root, (entry) => {
+		: identityGuardedTraversalFs(io, root, expectedRootStats, skippableFs);
+	await walkTree(root, async (entry) => {
+		if (boundTraversal) await boundTraversal.assertAdditional();
 		if (entry.kind === "file" && entry.relativePath) out.push(entry.relativePath);
+		if (boundTraversal) await boundTraversal.assertAdditional();
 	}, {
 		concurrency: options.concurrency ?? RECOVERY_IO_CONCURRENCY,
 		fs: traversalFs,
 	});
+	if (bound) await bound.assertCurrent();
 	return out.sort();
 }
 
 /** Stable SHA-256 of sorted path + NUL + streamed bytes + NUL records. */
 export async function hashMountDirectory(root: string, options: PreviewTreeOptions = {}): Promise<string> {
-	const bound = await bindPreviewDirectoryRoot(root, options);
+	const bound = await resolveBoundPreviewRoot(root, options);
 	const files = await listMountFiles(bound.path, {
-		fs: bound.fs,
 		concurrency: options.concurrency,
-		expectedRootStats: bound.stats,
+		boundRoot: bound,
 	});
 	const hash = crypto.createHash("sha256");
 	for (const rel of files) {
 		hash.update(rel, "utf-8");
 		hash.update("\0");
 		const absolute = path.join(bound.path, ...rel.split("/"));
-		await bound.assertCurrent();
 		const expectedStats = await bound.fs.lstat(absolute);
 		await readRegularFileNoFollowInChunks(absolute, chunk => { hash.update(chunk); }, {
-			fs: bound.fs,
+			fs: bound.descriptorFs,
 			chunkSize: HASH_READ_BUFFER_BYTES,
 			containedWithin: bound.canonicalPath,
 			expectedStats,
@@ -734,25 +943,23 @@ function matchesDirectoryIdentity(expected: AsyncTreeStats, current: AsyncTreeSt
 
 /** Copy regular files through the shared bounded streaming walker. */
 export async function copyPreviewDirectory(src: string, dst: string, options: PreviewTreeOptions = {}): Promise<void> {
-	const io = options.fs ?? mountAsyncFs;
+	const io = rawPreviewFs(options.fs ?? mountAsyncFs);
 	const limit = options.concurrency ?? RECOVERY_IO_CONCURRENCY;
 	const destinationRoot = path.resolve(dst);
-	const bound = await bindPreviewDirectoryRoot(src, options);
+	const bound = await resolveBoundPreviewRoot(src, options);
 	const sourceRoot = bound.path;
-
-	const traversalFs = identityGuardedTraversalFs(bound.fs, sourceRoot, bound.stats, {
-		lstat: filePath => bound.fs.lstat(filePath),
-		opendir: dirPath => bound.fs.opendir(dirPath),
-	});
+	const traversal = boundPreviewTraversal(bound);
 
 	await io.mkdir(path.dirname(destinationRoot), { recursive: true });
 	await io.mkdir(destinationRoot, { recursive: true });
 	const destinationBound = await bindPreviewDirectoryRoot(destinationRoot, { fs: io });
-	const assertTransferRootsCurrent = async (): Promise<void> => {
-		await bound.assertCurrent();
-		await destinationBound.assertCurrent();
-	};
-	const transferFs = guardPreviewSourceFs(bound.fs, assertTransferRootsCurrent);
+	const transferIdentities = mergeDirectoryIdentities(bound.identities, destinationBound.identities);
+	const assertTransferRootsCurrent = () => assertDirectoryIdentitiesCurrent(io, transferIdentities);
+	// copyRegularFileNoFollow validates every destination lstat/realpath/write
+	// boundary itself. Fence its descriptor opens with the source claims, but
+	// leave those destination checks on the raw seam so they are not recursively
+	// multiplied by another full root guard.
+	const transferFs = guardPreviewOpenFs(io, bound.identities);
 	await walkTree(sourceRoot, async (entry) => {
 		const target = entry.relativePath
 			? path.join(destinationRoot, ...entry.relativePath.split("/"))
@@ -760,7 +967,7 @@ export async function copyPreviewDirectory(src: string, dst: string, options: Pr
 		if (entry.kind === "directory") {
 			if (entry.relativePath) {
 				await assertTransferRootsCurrent();
-				await transferFs.mkdir(target, { recursive: false });
+				await io.mkdir(target, { recursive: false });
 				await assertTransferRootsCurrent();
 			}
 			return;
@@ -783,10 +990,14 @@ export async function copyPreviewDirectory(src: string, dst: string, options: Pr
 			expectedDestinationRootStats: destinationBound.stats,
 		});
 		await assertTransferRootsCurrent();
-		if (current.atime && current.mtime) await transferFs.utimes(target, current.atime, current.mtime);
+		if (current.atime && current.mtime) {
+			await assertTransferRootsCurrent();
+			await io.utimes(target, current.atime, current.mtime);
+			await assertTransferRootsCurrent();
+		}
 	}, {
 		concurrency: limit,
-		fs: traversalFs,
+		fs: traversal.fs,
 	});
 	await assertTransferRootsCurrent();
 }
@@ -1240,8 +1451,7 @@ export async function installPreviewDirectoryTransaction(
 	}
 	await regularPreviewEntryStats(stagingRoot, options.entry, stagedBound.fs);
 	const preInstallHash = await hashMountDirectory(stagingRoot, {
-		fs: stagedBound.fs,
-		trustedRoot: parent,
+		boundRoot: stagedBound,
 		expectedRootStats: options.stagingExpectedRootStats,
 	});
 	if (options.expectedContentHash !== undefined && preInstallHash !== options.expectedContentHash) {
@@ -1310,8 +1520,7 @@ export async function installPreviewDirectoryTransaction(
 					throw new PreviewMountError(500, "Existing live preview root changed before backup");
 				}
 				backupHash = await hashMountDirectory(destinationRoot, {
-					fs: oldBound.fs,
-					trustedRoot: parent,
+					boundRoot: oldBound,
 					expectedRootStats: oldStats,
 				});
 				await stagedBound.assertCurrent();
@@ -1463,7 +1672,9 @@ async function copyOneFile(
 	try {
 		await destinationBound.assertCurrent();
 		await copyRegularFileNoFollow(src, dst, {
-			fs: destinationBound.fs,
+			// The copy helper owns destination pathname/canonical checks. Guard its
+			// descriptor opens without recursively wrapping those same checks.
+			fs: destinationBound.descriptorFs,
 			exclusive: true,
 			chunkSize: HASH_READ_BUFFER_BYTES,
 			containedWithin: canonicalSourceRoot,
