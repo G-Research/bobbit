@@ -84,7 +84,9 @@ Slash-command skills discovered from Claude Code-compatible `SKILL.md` files.
 
 ## File References (`@`-mentions)
 
-Type `@` in the prompt composer to reference a file by path, mirroring the `/` slash-skill menu. On send the server resolves each `@path` token: text files are inlined into the model-facing prompt as `<file-reference>` blocks, images route through the `images[]` frame, and other binaries become document attachments. Unresolvable / oversized / out-of-cwd references degrade gracefully to the literal `@path`. Content is snapshotted at send time, so chips and original text replay stably via the shared skill sidecar. Backed by `GET /api/file-mentions`. See [at-mention-file-references.md](at-mention-file-references.md) for the full behaviour, caps, path-safety, and source map.
+Type `@` in the prompt composer to reference a file by path, mirroring the `/` slash-skill menu. On send, only existing filesystem targets outside Markdown fenced code, matched inline backtick spans, four-space/tab-indented code, and nested container code become references. Code-contained and genuinely missing tokens remain byte-for-byte literal with no warning, metadata, attachment, or chip. Existing targets that fail later access, containment, symlink, type, size, count, aggregate, stat, read, or race checks remain literal but render an unresolved chip and warning.
+
+Readable text is snapshotted into `<file-reference>` blocks; images use `images[]`; other binaries become document attachments for snapshot and chip parity (the current agent prompt RPC forwards text and images, not document bytes). Snapshots, punctuation boundaries, and UTF-16 chip ranges persist through reload via the shared sidecar. Whole-send admission is atomic at 8 MiB of authenticated UTF-8 prompt text, 8,192 non-code candidates, and 4,096 distinct targets; these bounds are separate from delivery limits. Backed by `GET /api/file-mentions`. See [at-mention-file-references.md](at-mention-file-references.md) for complete behavior, limits, path safety, cancellation, and ordering guarantees.
 
 ## Cost Tracking
 
