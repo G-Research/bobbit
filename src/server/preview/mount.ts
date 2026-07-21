@@ -397,6 +397,8 @@ export function watchMount(sessionId: string, onChange: () => void, options?: Wa
 export interface PreviewTreeOptions {
 	fs?: PreviewAsyncFs;
 	concurrency?: number;
+	/** Prior no-follow identity claim for a single traversal/removal root. */
+	expectedRootStats?: AsyncTreeStats;
 }
 
 const UNREADABLE_TREE_STATS: AsyncTreeStats = {
@@ -437,15 +439,55 @@ function skippablePreviewTraversalFs(io: PreviewAsyncFs): {
 	};
 }
 
+function identityGuardedTraversalFs(
+	io: PreviewAsyncFs,
+	root: string,
+	expectedRootStats: AsyncTreeStats,
+	delegate: { lstat(filePath: string): Promise<AsyncTreeStats>; opendir(dirPath: string): Promise<AsyncTreeDirectory> },
+): { lstat(filePath: string): Promise<AsyncTreeStats>; opendir(dirPath: string): Promise<AsyncTreeDirectory> } {
+	const resolvedRoot = path.resolve(root);
+	const assertRoot = async (): Promise<AsyncTreeStats> => {
+		const current = await io.lstat(resolvedRoot);
+		if (!matchesDirectoryIdentity(expectedRootStats, current)) {
+			throw new PreviewMountError(500, "Preview traversal root changed");
+		}
+		return current;
+	};
+	return {
+		async lstat(filePath) {
+			const before = await assertRoot();
+			const result = path.resolve(filePath) === resolvedRoot
+				? before
+				: await delegate.lstat(filePath);
+			await assertRoot();
+			return result;
+		},
+		async opendir(dirPath) {
+			await assertRoot();
+			const directory = await delegate.opendir(dirPath);
+			try { await assertRoot(); }
+			catch (error) {
+				try { await directory.close(); } catch { /* preserve identity error */ }
+				throw error;
+			}
+			return directory;
+		},
+	};
+}
+
 /** Sorted POSIX relative regular-file paths. Directory read failures are skipped. */
 export async function listMountFiles(root: string, options: PreviewTreeOptions = {}): Promise<string[]> {
 	const io = options.fs ?? mountAsyncFs;
 	const out: string[] = [];
+	const skippableFs = skippablePreviewTraversalFs(io);
+	const traversalFs = options.expectedRootStats === undefined
+		? skippableFs
+		: identityGuardedTraversalFs(io, root, options.expectedRootStats, skippableFs);
 	await walkTree(root, (entry) => {
 		if (entry.kind === "file" && entry.relativePath) out.push(entry.relativePath);
 	}, {
 		concurrency: options.concurrency ?? RECOVERY_IO_CONCURRENCY,
-		fs: skippablePreviewTraversalFs(io),
+		fs: traversalFs,
 	});
 	return out.sort();
 }
@@ -453,24 +495,45 @@ export async function listMountFiles(root: string, options: PreviewTreeOptions =
 /** Stable SHA-256 of sorted path + NUL + streamed bytes + NUL records. */
 export async function hashMountDirectory(root: string, options: PreviewTreeOptions = {}): Promise<string> {
 	const io = options.fs ?? mountAsyncFs;
-	const canonicalRoot = await io.realpath(root);
-	const files = await listMountFiles(root, options);
+	const resolvedRoot = path.resolve(root);
+	const rootStats = await io.lstat(resolvedRoot);
+	if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) {
+		throw new PreviewMountError(500, "Preview hash root is not a directory");
+	}
+	const canonicalRoot = await io.realpath(resolvedRoot);
+	const verifiedRootStats = await io.lstat(resolvedRoot);
+	if (!matchesDirectoryIdentity(rootStats, verifiedRootStats)) {
+		throw new PreviewMountError(500, "Preview hash root changed while it was validated");
+	}
+	const assertRoot = async (): Promise<void> => {
+		const current = await io.lstat(resolvedRoot);
+		if (!matchesDirectoryIdentity(rootStats, current)) {
+			throw new PreviewMountError(500, "Preview hash root changed during hashing");
+		}
+	};
+	const files = await listMountFiles(resolvedRoot, { ...options, expectedRootStats: rootStats });
 	const hash = crypto.createHash("sha256");
 	for (const rel of files) {
 		hash.update(rel, "utf-8");
 		hash.update("\0");
-		const absolute = path.join(root, ...rel.split("/"));
+		const absolute = path.join(resolvedRoot, ...rel.split("/"));
+		await assertRoot();
+		const expectedStats = await io.lstat(absolute);
+		await assertRoot();
 		await readRegularFileNoFollowInChunks(absolute, chunk => { hash.update(chunk); }, {
 			fs: io,
 			chunkSize: HASH_READ_BUFFER_BYTES,
 			containedWithin: canonicalRoot,
+			expectedStats,
 		});
+		await assertRoot();
 		hash.update("\0");
 	}
+	await assertRoot();
 	return hash.digest("hex");
 }
 
-function matchesDirectoryIdentity(expected: fs.Stats, current: fs.Stats): boolean {
+function matchesDirectoryIdentity(expected: AsyncTreeStats, current: AsyncTreeStats): boolean {
 	if (!current.isDirectory() || current.isSymbolicLink()) return false;
 	const expectedStable = hasStableFileIdentity(expected);
 	const currentStable = hasStableFileIdentity(current);
@@ -502,12 +565,15 @@ export async function copyPreviewDirectory(src: string, dst: string, options: Pr
 		throw new PreviewMountError(500, "Preview copy source changed while it was validated");
 	}
 
-	const checkedLstat = async (filePath: string): Promise<fs.Stats> => {
-		const stats = await io.lstat(filePath);
-		if (path.resolve(filePath) === sourceRoot && !matchesDirectoryIdentity(sourceStats, stats)) {
+	const traversalFs = identityGuardedTraversalFs(io, sourceRoot, sourceStats, {
+		lstat: filePath => io.lstat(filePath),
+		opendir: dirPath => io.opendir(dirPath),
+	});
+	const assertSourceRoot = async (): Promise<void> => {
+		const current = await io.lstat(sourceRoot);
+		if (!matchesDirectoryIdentity(sourceStats, current)) {
 			throw new PreviewMountError(500, "Preview copy source changed during traversal");
 		}
-		return stats;
 	};
 
 	await io.mkdir(path.dirname(destinationRoot), { recursive: true });
@@ -526,19 +592,19 @@ export async function copyPreviewDirectory(src: string, dst: string, options: Pr
 		}
 		// Open and validate the source descriptor after traversal. The pathname is
 		// never read again, so a final-component symlink substitution cannot leak.
+		await assertSourceRoot();
 		const current = await copyRegularFileNoFollow(entry.absolutePath, target, {
 			fs: io,
 			exclusive: true,
 			chunkSize: HASH_READ_BUFFER_BYTES,
 			containedWithin: canonicalSourceRoot,
+			expectedStats: entry.stats,
 		});
+		await assertSourceRoot();
 		if (current.atime && current.mtime) await io.utimes(target, current.atime, current.mtime);
 	}, {
 		concurrency: limit,
-		fs: {
-			lstat: checkedLstat,
-			opendir: dirPath => io.opendir(dirPath),
-		},
+		fs: traversalFs,
 	});
 }
 
@@ -564,8 +630,16 @@ export async function removePreviewTrees(
 }
 
 export async function removePreviewTree(root: string, options: PreviewTreeOptions = {}): Promise<void> {
-	const [error] = await removePreviewTrees([root], options);
-	if (error !== null) throw error;
+	const io = options.fs ?? mountAsyncFs;
+	try {
+		await removeTree(root, {
+			fs: io,
+			force: true,
+			expectedRootStats: options.expectedRootStats,
+		});
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+	}
 }
 
 /** Async directory enumeration seam used by content-route pickEntry. */
@@ -637,7 +711,11 @@ export async function movePreviewDirectoryContents(
 			// the claimed staging inode while the copy was pending.
 			throw new PreviewMountError(500, "Preview staging root changed before cleanup");
 		} else {
-			await removePreviewTree(claimedDir, { fs: io, concurrency: options.concurrency });
+			await removePreviewTree(claimedDir, {
+				fs: io,
+				concurrency: options.concurrency,
+				expectedRootStats: claimedStats,
+			});
 		}
 	} catch (cleanupError) {
 		if (!isEnoent(cleanupError) && copyError === undefined) throw cleanupError;
