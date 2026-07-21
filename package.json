@@ -72,9 +72,9 @@
     "@bobbit/binaries-win32-x64": "0.9.0"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "0.80.6",
-    "@earendil-works/pi-ai": "0.80.6",
-    "@earendil-works/pi-coding-agent": "0.80.6",
+    "@earendil-works/pi-agent-core": "0.81.1",
+    "@earendil-works/pi-ai": "0.81.1",
+    "@earendil-works/pi-coding-agent": "0.81.1",
     "@homebridge/node-pty-prebuilt-multiarch": "^0.13.1",
     "@lmstudio/sdk": "^1.5.0",
     "@mariozechner/mini-lit": "^0.2.0",
