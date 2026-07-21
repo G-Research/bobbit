@@ -152,9 +152,14 @@ export interface WorktreePoolSnapshot {
 	filling: boolean;
 }
 
+export interface WorktreeInventoryDirectory {
+	read(): Promise<Dirent | null>;
+	close(): Promise<void>;
+}
+
 export interface WorktreeInventoryFs {
 	access(filePath: string): Promise<void>;
-	readdir(dirPath: string, options: { withFileTypes: true }): Promise<Dirent[]>;
+	opendir(dirPath: string): Promise<WorktreeInventoryDirectory>;
 }
 
 export interface WorktreeInventoryDeps {
@@ -250,8 +255,14 @@ function isMissingFsError(err: unknown): boolean {
 
 const realWorktreeInventoryFs: WorktreeInventoryFs = {
 	access: filePath => nodeFs.access(filePath),
-	readdir: (dirPath, options) => nodeFs.readdir(dirPath, options),
+	opendir: dirPath => nodeFs.opendir(dirPath),
 };
+
+const INVENTORY_STREAM_YIELD_INTERVAL = 256;
+
+function yieldInventoryTraversal(): Promise<void> {
+	return new Promise(resolve => setImmediate(resolve));
+}
 
 export function parseGitWorktreeList(stdout: string): ParsedGitWorktree[] {
 	const out: ParsedGitWorktree[] = [];
@@ -820,38 +831,78 @@ export class WorktreeInventoryService {
 			arr.push(repo);
 			reposByRoot.set(repo.worktreeRoot, arr);
 		}
-		const rootGroups = [...reposByRoot].map(([root, group]) => ({ root, group }));
-		const rootScans = await mapWithConcurrency(rootGroups, this.ioConcurrency, async ({ root, group }) => {
+
+		// Scan roots serially so each inventory operation owns one filesystem
+		// ceiling. Within a wide multi-repo root, at most ioConcurrency component
+		// checks are retained; opendir read-ahead pauses until that batch settles.
+		for (const [root, group] of reposByRoot) {
+			let directory: WorktreeInventoryDirectory;
 			try {
-				const entries = await this.fsa.readdir(root, { withFileTypes: true });
-				return { root, group, entries: entries.filter(entry => entry.isDirectory()) };
+				directory = await this.fsa.opendir(root);
 			} catch (err) {
-				return { root, group, entries: [] as Dirent[], error: isMissingFsError(err) ? undefined : err instanceof Error ? err.message : String(err) };
-			}
-		});
-		const pathChecks: Array<{ repo: RepoDescriptor; wtPath: string; checkPath: boolean }> = [];
-		for (const scan of rootScans) {
-			if (scan.error !== undefined) {
-				const repo = scan.group[0];
-				if (repo) addCandidate(repo, path.join(scan.root, ".fs-scan-error"), "filesystem", undefined, { scanError: { reason: "fs-scan-error", detail: scan.error } });
+				if (!isMissingFsError(err)) this.addFilesystemScanError(root, group, err, addCandidate);
 				continue;
 			}
-			const multi = scan.group.some(repo => repo.repo !== ".");
-			for (const dirent of scan.entries) {
-				const container = path.join(scan.root, dirent.name);
-				for (const repo of scan.group) {
-					const wtPath = multi && repo.repo !== "." ? path.join(container, repo.repo) : container;
-					pathChecks.push({ repo, wtPath, checkPath: multi });
+
+			const multi = group.some(repo => repo.repo !== ".");
+			let pathChecks: Array<{ repo: RepoDescriptor; wtPath: string }> = [];
+			const flushPathChecks = async (): Promise<void> => {
+				if (pathChecks.length === 0) return;
+				const batch = pathChecks;
+				pathChecks = [];
+				const present = await mapWithConcurrency(batch, this.ioConcurrency, check => this.exists(check.wtPath));
+				for (let index = 0; index < batch.length; index++) {
+					if (present[index]) {
+						const check = batch[index]!;
+						addCandidate(check.repo, check.wtPath, "filesystem");
+					}
 				}
+			};
+
+			let entriesSinceYield = 0;
+			let readError: unknown;
+			try {
+				for (;;) {
+					const dirent = await directory.read();
+					if (!dirent) break;
+					entriesSinceYield++;
+					if (entriesSinceYield >= INVENTORY_STREAM_YIELD_INTERVAL) {
+						entriesSinceYield = 0;
+						await yieldInventoryTraversal();
+					}
+					if (!dirent.isDirectory()) continue;
+					const container = path.join(root, dirent.name);
+					for (const repo of group) {
+						const wtPath = multi && repo.repo !== "." ? path.join(container, repo.repo) : container;
+						if (!multi) {
+							addCandidate(repo, wtPath, "filesystem");
+							continue;
+						}
+						pathChecks.push({ repo, wtPath });
+						if (pathChecks.length >= this.ioConcurrency) await flushPathChecks();
+					}
+				}
+				await flushPathChecks();
+			} catch (err) {
+				readError = err;
+			} finally {
+				try { await directory.close(); }
+				catch (err) { readError ??= err; }
 			}
+			if (readError !== undefined && !isMissingFsError(readError)) this.addFilesystemScanError(root, group, readError, addCandidate);
 		}
-		const present = await mapWithConcurrency(pathChecks, this.ioConcurrency, check => check.checkPath ? this.exists(check.wtPath) : Promise.resolve(true));
-		for (let index = 0; index < pathChecks.length; index++) {
-			if (present[index]) {
-				const check = pathChecks[index]!;
-				addCandidate(check.repo, check.wtPath, "filesystem");
-			}
-		}
+	}
+
+	private addFilesystemScanError(
+		root: string,
+		group: RepoDescriptor[],
+		error: unknown,
+		addCandidate: (repo: RepoDescriptor, wtPath: string, source: WorktreeInventorySource, branch?: string, extra?: Partial<Candidate>) => void,
+	): void {
+		const repo = group[0];
+		if (!repo) return;
+		const detail = error instanceof Error ? error.message : String(error);
+		addCandidate(repo, path.join(root, ".fs-scan-error"), "filesystem", undefined, { scanError: { reason: "fs-scan-error", detail } });
 	}
 
 	private addPoolCandidates(repos: RepoDescriptor[], addCandidate: (repo: RepoDescriptor, wtPath: string, source: WorktreeInventorySource, branch?: string, extra?: Partial<Candidate>) => void): void {

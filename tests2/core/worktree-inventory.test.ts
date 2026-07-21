@@ -26,6 +26,27 @@ function makeCtx(rootPath: string, opts?: { worktreeRoot?: string; liveSessions?
 	};
 }
 
+function inventoryFsFor(filesystem: MemFs | typeof fs): WorktreeInventoryFs {
+	if (filesystem === fs) {
+		return {
+			access: filePath => fs.promises.access(filePath),
+			opendir: dirPath => fs.promises.opendir(dirPath),
+		};
+	}
+	return {
+		access: filePath => filesystem.promises.access(filePath),
+		async opendir(dirPath) {
+			const entries = await filesystem.promises.readdir(dirPath, { withFileTypes: true }) as unknown as fs.Dirent[];
+			let cursor = 0;
+			let closed = false;
+			return {
+				async read() { return closed ? null : entries[cursor++] ?? null; },
+				async close() { closed = true; },
+			};
+		},
+	};
+}
+
 function makeService(
 	ctx: any,
 	porcelain: string | ((repoPath: string, args: readonly string[]) => string | Promise<string>),
@@ -42,7 +63,7 @@ function makeService(
 		execGit: async (repoPath, args) => args[0] === "worktree" ? await (typeof porcelain === "function" ? porcelain(repoPath, args) : porcelain) : "",
 		commandRunner: opts?.commandRunner,
 		clock: () => 1,
-		fs: opts?.fs ?? ctx._inventoryFs?.promises,
+		fs: opts?.fs ?? (ctx._inventoryFs ? inventoryFsFor(ctx._inventoryFs) : undefined),
 		ioConcurrency: opts?.ioConcurrency,
 	});
 }
@@ -341,6 +362,92 @@ describe("worktree inventory classifier", () => {
 		}
 	});
 
+	it("backpressures wide multi-repo root reads behind the component-check ceiling", async () => {
+		const { root, repo, filesystem, cleanup } = tmpProject();
+		try {
+			const components = [{ name: "api", repo: "api" }, { name: "web", repo: "web" }];
+			const apiRepo = path.join(repo, "api");
+			const webRepo = path.join(repo, "web");
+			filesystem.mkdirSync(path.join(apiRepo, ".git"), { recursive: true });
+			filesystem.mkdirSync(path.join(webRepo, ".git"), { recursive: true });
+			const worktreeRoot = path.join(root, "repo-wt");
+			const names = Array.from({ length: 32 }, (_, index) => `candidate-${String(31 - index).padStart(2, "0")}`);
+			const componentPaths = new Set<string>();
+			for (const name of names) {
+				for (const component of components) {
+					const componentPath = path.join(worktreeRoot, name, component.repo);
+					filesystem.mkdirSync(componentPath, { recursive: true });
+					componentPaths.add(componentPath);
+				}
+			}
+
+			const baseFs = inventoryFsFor(filesystem);
+			const pending: Array<{ path: string; release: () => void }> = [];
+			let rootReads = 0;
+			let rootClosed = false;
+			let active = 0;
+			let maxActive = 0;
+			const asyncFs: WorktreeInventoryFs = {
+				async access(filePath) {
+					if (!componentPaths.has(filePath)) return baseFs.access(filePath);
+					active++;
+					maxActive = Math.max(maxActive, active);
+					try {
+						await new Promise<void>(resolve => pending.push({ path: filePath, release: resolve }));
+						await baseFs.access(filePath);
+					} finally {
+						active--;
+					}
+				},
+				async opendir(dirPath) {
+					if (dirPath !== worktreeRoot) return baseFs.opendir(dirPath);
+					let cursor = 0;
+					return {
+						async read() {
+							rootReads++;
+							const name = names[cursor++];
+							return name === undefined ? null : { name, isDirectory: () => true } as fs.Dirent;
+						},
+						async close() { rootClosed = true; },
+					};
+				},
+			};
+			const commandRunner: CommandRunner = { execFile: async () => { throw new Error("branch missing"); } };
+			const service = makeService(
+				makeCtx(repo, { filesystem, components }),
+				repoPath => `worktree ${repoPath}\nbranch refs/heads/master\n`,
+				new Map(),
+				{ fs: asyncFs, ioConcurrency: 2, commandRunner },
+			);
+			let settled = false;
+			const scanPromise = service.scan().finally(() => { settled = true; });
+			await waitFor(() => pending.length === 2, "inventory did not start the first bounded component-check batch");
+			await new Promise<void>(resolve => setImmediate(resolve));
+			assert.equal(rootReads, 1, "opendir must not read the next wide-root entry while the current batch is pending");
+			assert.equal(rootClosed, false);
+			assert.equal(settled, false);
+
+			while (!settled) {
+				await waitFor(() => pending.length > 0 || settled, "wide-root inventory workers stalled");
+				const wave = pending.splice(0);
+				for (const operation of wave.reverse()) operation.release();
+				await new Promise<void>(resolve => setImmediate(resolve));
+			}
+			const report = await scanPromise;
+			const filesystemItems = report.items.filter(item => componentPaths.has(item.path));
+			const expectedPaths = components.flatMap(component => names
+				.map(name => path.join(worktreeRoot, name, component.repo))
+				.sort((a, b) => a.localeCompare(b)));
+			assert.deepEqual(filesystemItems.map(item => item.path), expectedPaths);
+			assert.equal(filesystemItems.length, componentPaths.size);
+			assert.equal(report.counts.total, componentPaths.size + components.length);
+			assert.equal(report.counts.needsAttention, componentPaths.size);
+			assert.equal(rootReads, names.length + 1);
+			assert.equal(maxActive, 2);
+			assert.equal(rootClosed, true);
+		} finally { cleanup(); }
+	});
+
 	it("yields during deferred discovery, caps path checks, and sorts out-of-order results", async () => {
 		const { root, repo, filesystem, cleanup } = tmpProject();
 		try {
@@ -351,6 +458,7 @@ describe("worktree inventory classifier", () => {
 			const completionOrder: string[] = [];
 			let active = 0;
 			let maxActive = 0;
+			const baseFs = inventoryFsFor(filesystem);
 			const asyncFs: WorktreeInventoryFs = {
 				access: async filePath => {
 					if (!candidatePaths.includes(filePath)) return filesystem.promises.access(filePath);
@@ -364,7 +472,7 @@ describe("worktree inventory classifier", () => {
 						active--;
 					}
 				},
-				readdir: (dirPath, options) => filesystem.promises.readdir(dirPath, options) as any,
+				opendir: dirPath => baseFs.opendir(dirPath),
 			};
 			const commandRunner: CommandRunner = { execFile: async () => { throw new Error("branch missing"); } };
 			const service = makeService(makeCtx(repo, { filesystem }), `worktree ${repo}\nbranch refs/heads/master\n`, new Map(), { fs: asyncFs, ioConcurrency: 2, commandRunner });
@@ -401,6 +509,7 @@ describe("worktree inventory classifier", () => {
 			const completionOrder: string[] = [];
 			let active = 0;
 			let maxActive = 0;
+			const baseFs = inventoryFsFor(filesystem);
 			const asyncFs: WorktreeInventoryFs = {
 				access: async filePath => {
 					if (!removed.has(filePath)) return fs.promises.access(filePath);
@@ -414,7 +523,7 @@ describe("worktree inventory classifier", () => {
 						active--;
 					}
 				},
-				readdir: (dirPath, options) => fs.promises.readdir(dirPath, options),
+				opendir: dirPath => baseFs.opendir(dirPath),
 			};
 			const commandRunner: CommandRunner = {
 				execFile: async (_file, args) => {
@@ -435,7 +544,8 @@ describe("worktree inventory classifier", () => {
 			const service = makeService(makeCtx(repo, { filesystem }), porcelain, new Map(), { fs: asyncFs, ioConcurrency: 2, commandRunner });
 			let settled = false;
 			const cleanupPromise = service.cleanup({ mode: "all-safe" }).finally(() => { settled = true; });
-			await waitFor(() => pending.length === 2, "cleanup did not reach deferred removal verification");
+			await waitFor(() => pending.length === 2 || settled, "cleanup did not reach deferred removal verification");
+			if (settled) assert.fail(`cleanup settled before deferred verification: ${JSON.stringify(await cleanupPromise)}`);
 			await new Promise<void>(resolve => setImmediate(resolve));
 			assert.equal(settled, false);
 			while (!settled) {
