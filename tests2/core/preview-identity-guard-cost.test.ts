@@ -86,6 +86,39 @@ function catalogCountingFs(
 	};
 }
 
+function freezeLstatStamps(base: PreviewAsyncFs, filePaths: readonly string[]): PreviewAsyncFs {
+	const frozenPaths = new Set(filePaths.map(filePath => path.resolve(filePath)));
+	const stableStamps = new Map<string, Pick<fs.Stats, "dev" | "ino" | "mode" | "mtimeMs" | "ctimeMs" | "size" | "nlink">>();
+	return {
+		...base,
+		lstat: async filePath => {
+			const stats = await base.lstat(filePath);
+			const absolute = path.resolve(String(filePath));
+			if (!frozenPaths.has(absolute)) return stats;
+			let stamp = stableStamps.get(absolute);
+			if (!stamp) {
+				stamp = {
+					dev: stats.dev,
+					ino: stats.ino,
+					mode: stats.mode,
+					mtimeMs: stats.mtimeMs,
+					ctimeMs: stats.ctimeMs,
+					size: stats.size,
+					nlink: stats.nlink,
+				};
+				stableStamps.set(absolute, stamp);
+			}
+			return new Proxy(stats, {
+				get: (target, property) => {
+					if (property in stamp!) return stamp![property as keyof typeof stamp];
+					const value = Reflect.get(target, property, target);
+					return typeof value === "function" ? value.bind(target) : value;
+				},
+			});
+		},
+	};
+}
+
 function fixture(label: string): {
 	memoryFs: typeof fs;
 	baseFs: PreviewAsyncFs;
@@ -476,42 +509,114 @@ describe("bounded preview artifact catalog", () => {
 		assert.equal(counts.sessionOpendir, 2, "mount-only repair must remain visible through exact positive validation");
 	});
 
-	it("invalidates populated catalogs after removeArtifacts and successful sweep", async () => {
-		const { memoryFs, baseFs, artifactRoot } = fixture("catalog-cleanup-invalidation");
-		const sessionPaths = [SID, SID_SCALE].map(sessionId => path.resolve(path.join(artifactRoot, sessionId)));
-		for (const sessionPath of sessionPaths) memoryFs.mkdirSync(sessionPath, { recursive: true });
+	it("fences a cached negative lookup captured before an owned install", async () => {
+		const { memoryFs, baseFs, artifactRoot } = fixture("catalog-install-cached-race");
+		writeRecord(memoryFs, SID, "existing_candidate", "0".repeat(64), ["report.html"]);
+		const sessionPath = path.join(artifactRoot, SID);
 		const counts = emptyCatalogCounts();
 		const counted = catalogCountingFs(baseFs, artifactRoot, counts);
-		const stableStamps = new Map<string, Pick<fs.Stats, "dev" | "ino" | "mode" | "mtimeMs" | "ctimeMs" | "size" | "nlink">>();
-		const sameSyntheticStatsFs: PreviewAsyncFs = {
-			...counted,
+		const frozen = freezeLstatStamps(counted, [sessionPath]);
+		let holdMetadata = false;
+		let held = false;
+		const started = deferred();
+		const release = deferred();
+		const heldFs: PreviewAsyncFs = {
+			...frozen,
 			lstat: async filePath => {
-				const stats = await counted.lstat(filePath);
-				const absolute = path.resolve(String(filePath));
-				if (!sessionPaths.includes(absolute)) return stats;
-				let stamp = stableStamps.get(absolute);
-				if (!stamp) {
-					stamp = {
-						dev: stats.dev,
-						ino: stats.ino,
-						mode: stats.mode,
-						mtimeMs: stats.mtimeMs,
-						ctimeMs: stats.ctimeMs,
-						size: stats.size,
-						nlink: stats.nlink,
-					};
-					stableStamps.set(absolute, stamp);
+				if (holdMetadata && !held && path.basename(path.resolve(String(filePath))) === "artifact.json") {
+					held = true;
+					started.resolve();
+					await release.promise;
 				}
-				return new Proxy(stats, {
+				return frozen.lstat(filePath);
+			},
+		};
+		setPreviewArtifactFsForTesting(heldFs);
+		const missingHash = "f".repeat(64);
+		assert.equal(await findPreviewArtifactByHash(SID, missingHash), null);
+		assert.equal(counts.metadataOpen, 1);
+
+		const mounted = await writeInline(SID, "installed-after-cached-lookup", "report.html");
+		assert.notEqual(mounted.contentHash, missingHash);
+		holdMetadata = true;
+		const oldLookup = findPreviewArtifactByHash(SID, missingHash);
+		await started.promise;
+		const installed = await persistPreviewArtifact(SID, mounted);
+		assert.equal(counts.metadataOpen, 2, "install refresh must open only its new metadata");
+		assert.equal(counts.sessionOpendir, 2);
+
+		release.resolve();
+		assert.equal(await oldLookup, null);
+		assert.equal(counts.metadataOpen, 4, "the invalidated old lookup must rebuild both metadata entries");
+		assert.equal(counts.sessionOpendir, 3, "the old complete claim must not be touched back into the cache");
+
+		assert.equal((await findPreviewArtifactByHash(SID, mounted.contentHash))?.artifactId, installed.artifactId);
+		assert.equal(counts.metadataOpen, 5, "the rebuilt catalog must validate the selected installed artifact once");
+		assert.equal(counts.sessionOpendir, 3, "the installed artifact must be selected from the rebuilt catalog");
+	});
+
+	it("fences a cold catalog scan captured before an owned install", async () => {
+		const { memoryFs, baseFs, artifactRoot } = fixture("catalog-install-cold-race");
+		const sessionPath = path.join(artifactRoot, SID);
+		memoryFs.mkdirSync(sessionPath, { recursive: true });
+		const counts = emptyCatalogCounts();
+		const counted = catalogCountingFs(baseFs, artifactRoot, counts);
+		const frozen = freezeLstatStamps(counted, [sessionPath]);
+		let claimedColdDirectory = false;
+		let heldEof = false;
+		const started = deferred();
+		const release = deferred();
+		const heldFs: PreviewAsyncFs = {
+			...frozen,
+			opendir: async filePath => {
+				const directory = await frozen.opendir(filePath);
+				if (claimedColdDirectory || path.resolve(String(filePath)) !== path.resolve(sessionPath)) return directory;
+				claimedColdDirectory = true;
+				return new Proxy(directory, {
 					get: (target, property) => {
-						if (property in stamp!) return stamp![property as keyof typeof stamp];
+						if (property === "read") {
+							return async () => {
+								const entry = await target.read();
+								if (!entry && !heldEof) {
+									heldEof = true;
+									started.resolve();
+									await release.promise;
+								}
+								return entry;
+							};
+						}
 						const value = Reflect.get(target, property, target);
 						return typeof value === "function" ? value.bind(target) : value;
 					},
 				});
 			},
 		};
-		setPreviewArtifactFsForTesting(sameSyntheticStatsFs);
+		setPreviewArtifactFsForTesting(heldFs);
+		const oldScan = findPreviewArtifactByHash(SID, "f".repeat(64));
+		await started.promise;
+
+		const mounted = await writeInline(SID, "installed-after-cold-scan", "report.html");
+		const installed = await persistPreviewArtifact(SID, mounted);
+		assert.equal(counts.metadataOpen, 1, "post-install refresh must read the installed metadata once");
+		assert.equal(counts.sessionOpendir, 3, "cold lookup, persist lookup, and install refresh must each enumerate once");
+
+		release.resolve();
+		assert.equal(await oldScan, null);
+		assert.equal(counts.metadataOpen, 1, "the stale empty scan must not publish or reopen metadata");
+		assert.equal(counts.sessionOpendir, 3);
+
+		assert.equal((await findPreviewArtifactByHash(SID, mounted.contentHash))?.artifactId, installed.artifactId);
+		assert.equal(counts.metadataOpen, 2, "the refreshed catalog must validate the selected installed artifact once");
+		assert.equal(counts.sessionOpendir, 3, "the stale cold scan must not overwrite the refreshed catalog");
+	});
+
+	it("invalidates populated catalogs after removeArtifacts and successful sweep", async () => {
+		const { memoryFs, baseFs, artifactRoot } = fixture("catalog-cleanup-invalidation");
+		const sessionPaths = [SID, SID_SCALE].map(sessionId => path.resolve(path.join(artifactRoot, sessionId)));
+		for (const sessionPath of sessionPaths) memoryFs.mkdirSync(sessionPath, { recursive: true });
+		const counts = emptyCatalogCounts();
+		const counted = catalogCountingFs(baseFs, artifactRoot, counts);
+		setPreviewArtifactFsForTesting(freezeLstatStamps(counted, sessionPaths));
 		assert.equal(await findPreviewArtifactByHash(SID, "f".repeat(64)), null);
 		assert.equal(await findPreviewArtifactByHash(SID_SCALE, "f".repeat(64)), null);
 
