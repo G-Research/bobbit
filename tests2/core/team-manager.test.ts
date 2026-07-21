@@ -110,6 +110,15 @@ function createMockSessionManager(goals: Map<string, MockGoal> = new Map()): any
 			return session;
 		},
 		getSession: (id: string) => sessions.get(id),
+		resolveSessionAgentAuthor: (id: string) => {
+			const session = sessions.get(id);
+			if (!session) return undefined;
+			return {
+				kind: "agent",
+				id: `session:${session.id}`,
+				label: session.title || "Agent",
+			};
+		},
 		enqueuePrompt: vi.fn(async (id: string, text: string, opts?: any) => {
 			const session = sessions.get(id);
 			if (session) session.lastPromptSource = opts?.source ?? "user";
