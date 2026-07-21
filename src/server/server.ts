@@ -6473,8 +6473,8 @@ async function handleApiRoute(
 
 		const args = body?.args;
 
-		// If a roleId is provided, resolve/apply it after resolvedProjectId is known.
-		const roleId = body?.roleId;
+		// Normalize the requested role now, then resolve it after resolvedProjectId is known.
+		const requestedRoleId = typeof body?.roleId === "string" ? body.roleId.trim() : body?.roleId;
 		let createOpts: RoleCreateOptions | undefined;
 
 		// ── Worktree support ──
@@ -6678,7 +6678,12 @@ async function handleApiRoute(
 			}
 		}
 
-		if (roleId && typeof roleId === "string") {
+		// Standard sessions always start with a fully resolved role. Assistants keep
+		// their dedicated assistantRoleForType mapping when no role was requested.
+		const roleId = !assistantType && (requestedRoleId === undefined || requestedRoleId === null || requestedRoleId === "")
+			? "general"
+			: requestedRoleId;
+		if (typeof roleId === "string" && roleId.length > 0) {
 			const role = resolveRoleForProject(roleId, resolvedProjectId);
 			if (!role) {
 				json({ error: `Role "${roleId}" not found` }, 404);
