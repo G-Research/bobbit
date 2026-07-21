@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
+import type { Dirent } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it, vi } from "vitest";
-import type { FsLike } from "../../src/server/gateway-deps.ts";
-import { scanOrphanedTranscriptsAsync } from "../../src/server/agent/orphan-cleanup.ts";
+import {
+	scanOrphanedTranscriptsAsync,
+	type AsyncOrphanDirectory,
+	type AsyncOrphanScanFs,
+} from "../../src/server/agent/orphan-cleanup.ts";
 import { createMemFs, type MemFs } from "../harness/mem-fs.ts";
 
 const root = path.resolve("/memfs/orphan-async-walk/agent-sessions");
@@ -21,25 +25,62 @@ function scannerFs(options: {
 	statFailures?: Set<string>;
 	readdirFailures?: Set<string>;
 	measure?: <T>(operation: () => Promise<T>) => Promise<T>;
-} = {}): Pick<FsLike, "promises"> {
+	beforeLstat?: (target: string) => Promise<void> | void;
+	onDirectoryRead?: (target: string) => Promise<void> | void;
+	onDirectoryOpen?: (target: string) => void;
+	onDirectoryClose?: (target: string) => void;
+} = {}): AsyncOrphanScanFs {
 	const statFailures = options.statFailures ?? new Set<string>();
 	const readdirFailures = options.readdirFailures ?? new Set<string>();
 	const measure = options.measure ?? (async <T>(operation: () => Promise<T>) => operation());
-	const promises: any = {
-		...memfs.promises,
-		stat: async (target: any, statOptions: any) => measure(async () => {
+	return {
+		lstat: target => measure(async () => {
 			const resolved = path.resolve(String(target));
 			if (statFailures.has(resolved)) throw new Error("injected stat failure");
-			const stat = await (memfs.promises.stat as any)(target, statOptions);
-			return { ...stat, mtimeMs: mtimes.get(resolved) ?? stat.mtimeMs };
+			await options.beforeLstat?.(resolved);
+			const stat = await memfs.promises.lstat(target);
+			return {
+				...stat,
+				mtimeMs: mtimes.get(resolved) ?? stat.mtimeMs,
+				isSymbolicLink: () => false,
+			};
 		}),
-		readdir: async (target: any, readdirOptions: any) => measure(async () => {
+		opendir: target => measure(async () => {
 			const resolved = path.resolve(String(target));
 			if (readdirFailures.has(resolved)) throw new Error("injected readdir failure");
-			return (memfs.promises.readdir as any)(target, readdirOptions);
+			const entries = await memfs.promises.readdir(target, { withFileTypes: true }) as Dirent[];
+			let cursor = 0;
+			let closed = false;
+			options.onDirectoryOpen?.(resolved);
+			const directory: AsyncOrphanDirectory = {
+				read: () => measure(async () => {
+					if (closed) throw new Error("directory is closed");
+					await options.onDirectoryRead?.(resolved);
+					return entries[cursor++] ?? null;
+				}),
+				close: () => measure(async () => {
+					if (!closed) {
+						closed = true;
+						options.onDirectoryClose?.(resolved);
+					}
+				}),
+			};
+			return directory;
 		}),
 	};
-	return { promises } as Pick<FsLike, "promises">;
+}
+
+function deferred(): { promise: Promise<void>; resolve(): void } {
+	let resolve!: () => void;
+	const promise = new Promise<void>(settle => { resolve = settle; });
+	return { promise, resolve };
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+	for (let attempt = 0; attempt < 100 && !predicate(); attempt++) {
+		await new Promise<void>(resolve => setImmediate(resolve));
+	}
+	assert.equal(predicate(), true, "condition did not become true");
 }
 
 function sortedResolved(paths: string[]): string[] {
@@ -88,15 +129,18 @@ describe("scanOrphanedTranscriptsAsync", () => {
 		assert.deepEqual(notDirectory, { count: 0, paths: [] });
 	});
 
-	it("keeps counting after the default path and warning caps", async () => {
-		for (let index = 0; index < 75; index++) writeFile(`wide/orphan-${index}.jsonl`);
+	it("keeps counting after the default caps and returns a deterministic sorted sample", async () => {
+		const allPaths = Array.from({ length: 75 }, (_, index) => writeFile(`wide/orphan-${index}.jsonl`));
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
 		const result = await scanOrphanedTranscriptsAsync(root, new Set(), 0, { fsImpl: scannerFs() });
 
 		assert.equal(result.count, 75);
-		assert.equal(result.paths.length, 50);
-		assert.equal(warn.mock.calls.length, 20);
+		assert.deepEqual(result.paths, [...allPaths].sort().slice(0, 50));
+		assert.deepEqual(
+			warn.mock.calls.map(call => String(call[0]).replace("[session-store] WARN: orphaned transcript: ", "")),
+			[...allPaths].sort().slice(0, 20),
+		);
 	});
 
 	it("tolerates individual directory and file I/O failures without mutating the tree", async () => {
@@ -127,7 +171,7 @@ describe("scanOrphanedTranscriptsAsync", () => {
 			active++;
 			maxActive = Math.max(maxActive, active);
 			try {
-				await new Promise((resolve) => setTimeout(resolve, 2));
+				await new Promise<void>(resolve => setImmediate(resolve));
 				return await operation();
 			} finally {
 				active--;
@@ -161,5 +205,73 @@ describe("scanOrphanedTranscriptsAsync", () => {
 
 		assert.equal(result.count, 20);
 		assert.equal(result.paths.length, 5);
+	});
+
+	it("backpressures a wide streamed directory at the candidate ceiling", async () => {
+		for (let index = 0; index < 600; index++) writeFile(`wide/entry-${index}.jsonl`);
+		const wideDirectory = path.resolve(root, "wide");
+		const releaseStats = deferred();
+		let candidateStats = 0;
+		let wideReads = 0;
+		let settled = false;
+		vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		const scan = scanOrphanedTranscriptsAsync(root, new Set(), 0, {
+			concurrency: 3,
+			maxLogLines: 0,
+			fsImpl: scannerFs({
+				beforeLstat: async target => {
+					if (!target.endsWith(".jsonl")) return;
+					candidateStats++;
+					await releaseStats.promise;
+				},
+				onDirectoryRead: target => { if (target === wideDirectory) wideReads++; },
+			}),
+		}).finally(() => { settled = true; });
+
+		await waitFor(() => candidateStats === 3);
+		await new Promise<void>(resolve => setImmediate(resolve));
+		assert.equal(wideReads, 3, "scanner read past its fixed pending-candidate capacity");
+		assert.equal(settled, false, "scan should remain pending behind deferred file stats");
+
+		releaseStats.resolve();
+		const result = await scan;
+		assert.equal(result.count, 600);
+	});
+
+	it("does not read ahead through a deep tree while candidate slots are full", async () => {
+		const depth = 300;
+		let relativeDirectory = "deep";
+		for (let level = 0; level < depth; level++) {
+			writeFile(`${relativeDirectory}/orphan-${level}.jsonl`);
+			relativeDirectory = `${relativeDirectory}/level-${level}`;
+		}
+		const releaseStats = deferred();
+		let candidateStats = 0;
+		let opened = 0;
+		let closed = 0;
+		vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		const scan = scanOrphanedTranscriptsAsync(root, new Set(), 0, {
+			concurrency: 2,
+			maxLogLines: 0,
+			fsImpl: scannerFs({
+				beforeLstat: async target => {
+					if (!target.endsWith(".jsonl")) return;
+					candidateStats++;
+					await releaseStats.promise;
+				},
+				onDirectoryOpen: () => { opened++; },
+				onDirectoryClose: () => { closed++; },
+			}),
+		});
+
+		await waitFor(() => candidateStats === 2);
+		await new Promise<void>(resolve => setImmediate(resolve));
+		assert.ok(opened <= 3, `deep traversal opened ${opened} directories past backpressure`);
+		assert.equal(closed, 0, "deferred frontier should retain only its active depth frames");
+
+		releaseStats.resolve();
+		const result = await scan;
+		assert.equal(result.count, depth);
+		assert.equal(closed, opened, "all streamed directory handles must close");
 	});
 });
