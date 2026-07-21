@@ -42,6 +42,7 @@ import { ColorStore } from "./agent/color-store.js";
 import { bfsEnrichArchivedIndexed } from "./agent/archived-session-bfs.js";
 import { PrStatusStore, type PrStatusEntry } from "./agent/pr-status-store.js";
 import { SessionManager, type ExtensionChannelServices } from "./agent/session-manager.js";
+import { BACKGROUND_IO_CONCURRENCY, mapWithConcurrency } from "./agent/bounded-async-work.js";
 import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { executeCleanupWorktreesRequest } from "./maintenance/cleanup-worktrees-request.js";
 import { RateLimiter } from "./auth/rate-limit.js";
@@ -112,7 +113,7 @@ import {
 
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections, persistPromptSections } from "./agent/system-prompt.js";
 import { configureProfilingRuntime, recordElapsed } from "./agent/profiling.js";
-import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./agent/cpu-diagnostics.js";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics, type CpuDiagnostics } from "./agent/cpu-diagnostics.js";
 import { resolveGrantPolicy, computeEffectiveAllowedTools } from "./agent/tool-activation.js";
 import { parseMcpToolName } from "./mcp/mcp-meta.js";
 import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
@@ -1720,6 +1721,71 @@ export interface TlsConfig {
 
 type PreviewSessionOperation = <T>(sessionId: string, operation: () => Promise<T>) => Promise<T>;
 
+export interface PreviewSessionOperationQueue {
+	/** Run ordinary preview work unless purge has terminally fenced the session. */
+	run: PreviewSessionOperation;
+	/** Fence ordinary work immediately, then run cleanup after prior work settles. */
+	purge: PreviewSessionOperation;
+}
+
+/**
+ * Build the one gateway-owned queue shared by preview routes and session purge.
+ * A purge fence is permanent because purged session IDs cannot be reused. Work
+ * accepted before the fence but not yet started is rejected before touching the
+ * mount; active work settles first, then cleanup runs, and later work cannot
+ * recreate preview state behind it.
+ */
+export function createPreviewSessionOperationQueue(): PreviewSessionOperationQueue {
+	const tails = new Map<string, Promise<void>>();
+	const purgedSessions = new Set<string>();
+
+	const enqueue: PreviewSessionOperation = async (sessionId, operation) => {
+		const previous = tails.get(sessionId) ?? Promise.resolve();
+		let release!: () => void;
+		const current = new Promise<void>((resolve) => { release = resolve; });
+		tails.set(sessionId, current);
+		await previous;
+		try {
+			return await operation();
+		} finally {
+			release();
+			if (tails.get(sessionId) === current) tails.delete(sessionId);
+		}
+	};
+
+	const run: PreviewSessionOperation = (sessionId, operation) => {
+		if (purgedSessions.has(sessionId)) {
+			return Promise.reject(new previewMount.PreviewMountError(404, "Session preview has been purged"));
+		}
+		return enqueue(sessionId, async () => {
+			if (purgedSessions.has(sessionId)) {
+				throw new previewMount.PreviewMountError(404, "Session preview has been purged");
+			}
+			return operation();
+		});
+	};
+
+	const purge: PreviewSessionOperation = (sessionId, operation) => {
+		purgedSessions.add(sessionId);
+		return enqueue(sessionId, operation);
+	};
+
+	return { run, purge };
+}
+
+/** Run post-listen project pool initialization through the shared I/O ceiling. */
+export async function initializeBootProjectPools<T>(
+	projects: readonly T[],
+	initialize: (project: T, index: number) => Promise<void>,
+): Promise<void> {
+	await mapWithConcurrency(projects, BACKGROUND_IO_CONCURRENCY, initialize);
+}
+
+/** Await the final diagnostics write while retaining best-effort shutdown policy. */
+export async function shutdownCpuDiagnostics(diagnostics: Pick<CpuDiagnostics, "shutdown"> = getCpuDiagnostics()): Promise<void> {
+	try { await diagnostics.shutdown(); } catch { /* best-effort */ }
+}
+
 /**
  * Serialize the boot-time worktree ownership transition. The sweeper snapshots
  * durable owners before deleting stale worktrees, so a pool entry must not be
@@ -2011,6 +2077,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const sandboxTokenStore = new SandboxTokenStore();
 	const cookieSigningKey = loadOrCreateCookieSigningKey(serverSecretsDir());
 	const cookieStore = new CookieStore(cookieSigningKey, { clock: gatewayDeps.clock });
+	const previewOperations = createPreviewSessionOperationQueue();
+	const withPreviewSessionOperation = previewOperations.run;
 	const sessionManager = new SessionManager({
 		stateDir,
 		agentCliPath: config.agentCliPath,
@@ -2029,6 +2097,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		remoteGitPolicy,
 		testPreparingDelayMs: gatewayRuntimeFlags.testPreparingDelayMs,
 		worktreeSetupRuntime,
+		previewPurgeOperation: previewOperations.purge,
 	});
 	sessionManager.sandboxTokenStore = sandboxTokenStore;
 
@@ -2582,24 +2651,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// Sandbox manager — assigned in start() when sandbox=docker
 	let sandboxManager: SandboxManager | null = null;
 
-	// Preview mount mutations and snapshots share a per-session promise queue.
-	// Different sessions remain independent, while one session retains the
-	// critical section previously supplied accidentally by synchronous I/O.
-	const previewOperationTails = new Map<string, Promise<void>>();
-	const withPreviewSessionOperation: PreviewSessionOperation = async (sessionId, operation) => {
-		const previous = previewOperationTails.get(sessionId) ?? Promise.resolve();
-		let release!: () => void;
-		const current = new Promise<void>((resolve) => { release = resolve; });
-		previewOperationTails.set(sessionId, current);
-		await previous;
-		try {
-			return await operation();
-		} finally {
-			release();
-			if (previewOperationTails.get(sessionId) === current) previewOperationTails.delete(sessionId);
-		}
-	};
-
 	const requestHandler = async (req: http.IncomingMessage, res: http.ServerResponse) => {
 		const url = new URL(req.url || "/", `http://${req.headers.host}`);
 		const isLocalhostMode = !config.forceAuth && (config.host === "localhost" || config.host === "127.0.0.1" || config.host === "::1");
@@ -3096,7 +3147,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		if (info.reason === "purged") {
 			try {
-				await withPreviewSessionOperation(sessionId, () => previewArtifacts.removeArtifacts(sessionId));
+				await previewOperations.purge(sessionId, () => previewArtifacts.removeArtifacts(sessionId));
 			} catch (err) {
 				// This listener owns preview-artifact cleanup errors; SessionManager
 				// only awaits the listener contract and must not duplicate this log.
@@ -3587,7 +3638,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 						(ctx) => ctx.project.id !== HEADQUARTERS_PROJECT_ID && ctx.project.kind !== "headquarters",
 					);
 					console.log(`[boot] pool init start (${contexts.length} projects)`);
-					await Promise.all(contexts.map(async (ctx) => {
+					await initializeBootProjectPools(contexts, async (ctx) => {
 						const tStart = Date.now();
 						try {
 							const repoPath = ctx.project.rootPath;
@@ -3621,7 +3672,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 						} catch (err) {
 							console.warn(`[boot] pool init failed: project=${ctx.project.id} in ${Date.now() - tStart}ms (non-fatal):`, err);
 						}
-					}));
+					});
 				};
 				const poolInitTask = coordinateBootWorktreeLifecycle(
 					() => sweeperTask,
@@ -3726,7 +3777,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					await phase("boot-background", () => bootBackgroundTask!);
 				}
 				await phase("extension-channels", () => disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown"));
-				try { getCpuDiagnostics().shutdown(); } catch { /* best-effort */ }
+				await phase("cpu-diagnostics", () => shutdownCpuDiagnostics());
 				try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
 				// Worktree pools are intentionally NOT drained on shutdown.
 				//
