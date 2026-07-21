@@ -57,10 +57,15 @@ afterAll(() => {
 });
 
 async function resetSession(sessionId = SID): Promise<void> {
-	await removeMount(sessionId);
-	// memfs retains an empty directory after replacing the same entry via rename;
-	// discard that test-double quirk so each artifact fixture starts clean.
-	try { memoryFs.rmSync(mountPath(sessionId), { recursive: true, force: true }); } catch { /* ignore */ }
+	try {
+		await removeMount(sessionId);
+	} catch (error) {
+		// memfs can retain ghost directory entries after replacing the same entry
+		// via rename. Production cleanup must still propagate every non-ENOENT
+		// failure, so contain this test-double-only ENOTEMPTY reset here.
+		if ((error as NodeJS.ErrnoException).code !== "ENOTEMPTY") throw error;
+	}
+	memoryFs.rmSync(mountPath(sessionId), { recursive: true, force: true });
 	await removeArtifacts(sessionId);
 }
 

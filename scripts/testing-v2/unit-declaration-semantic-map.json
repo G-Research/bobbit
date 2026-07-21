@@ -334,9 +334,13 @@
       {
         "file": "tests2/integration/sidebar-actions-fork-github-link.test.ts",
         "name": "newWorktree selects repo provisioning while reuse selects the source cwd"
+      },
+      {
+        "file": "tests2/core/purge-preview-pool-shutdown-coder61c7.test.ts",
+        "name": "keeps total reclaim candidate work within one ceiling across many boot projects"
       }
     ],
-    "rationale": "The replacement moves allocation behind the fork-create seam but retains both decisions: newWorktree requests repository worktree provisioning and yields a cwd distinct from the source, while reuse omits worktree options and keeps the source cwd."
+    "rationale": "The route owner retains the provision-versus-reuse decision and distinct provisioned cwd, while the boot-pool owner proves worktree reclaim for many provisioned projects shares one candidate-operation ceiling instead of multiplying nested concurrency."
   },
   {
     "baseFile": "tests2/integration/sidebar-actions-fork-github-link.test.ts",
@@ -1056,9 +1060,13 @@
       {
         "file": "tests2/core/preview-artifacts.test.ts",
         "name": "rejects file substitutions before hash or preview-directory copy can read external bytes"
+      },
+      {
+        "file": "tests2/core/preview-artifacts.test.ts",
+        "name": "rejects artifact metadata replaced by an external symlink before descriptor reads"
       }
     ],
-    "rationale": "The bounded asynchronous preview-artifact suite consolidates this former synchronous declaration into the named owner while retaining its observable integrity, reuse, validation, or cleanup behavior."
+    "rationale": "The bounded asynchronous owners preserve exact mounted bytes and metadata while proving neither content nor artifact metadata can be replaced by an external symlink before descriptor-anchored reads."
   },
   {
     "baseFile": "tests2/core/preview-artifacts.test.ts",
@@ -1126,9 +1134,13 @@
       {
         "file": "tests2/core/preview-mount.test.ts",
         "name": "keeps mountDir validation and creates a valid mount"
+      },
+      {
+        "file": "tests2/integration/preview-mount-route.test.ts",
+        "name": "stale GET and HEAD stay missing after preview mount deletion"
       }
     ],
-    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+    "rationale": "Explicit mount creation retains the original validated-directory contract, while stale GET and HEAD requests prove read-only content lookup cannot recreate a deleted mount directory."
   },
   {
     "baseFile": "tests2/core/preview-mount.test.ts",
@@ -1428,9 +1440,13 @@
       {
         "file": "tests2/core/preview-mount.test.ts",
         "name": "stages before swap, supports reopening a mounted path, and rolls back staging errors"
+      },
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "rejects a staging-root symlink substitution without moving external contents"
       }
     ],
-    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+    "rationale": "The staged-swap owner preserves prior mounted content on ordinary failures, while the root-substitution owner proves a raced staging symlink is rejected without moving external data into the destination."
   },
   {
     "baseFile": "tests2/core/preview-mount.test.ts",
@@ -1450,9 +1466,13 @@
       {
         "file": "tests2/core/preview-mount.test.ts",
         "name": "removeMount is async and idempotent"
+      },
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "removeMount propagates non-ENOENT deletion failures"
       }
     ],
-    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+    "rationale": "The asynchronous cleanup owner remains idempotent for missing mounts, while the strict-error owner proves idempotency does not hide real non-ENOENT deletion failures."
   },
   {
     "baseFile": "tests2/core/preview-mount.test.ts",
