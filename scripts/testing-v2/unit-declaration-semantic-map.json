@@ -1150,34 +1150,54 @@
       },
       {
         "file": "tests2/core/preview-identity-guard-cost.test.ts",
-        "name": "keeps 50 unique persists to one cold metadata scan and bounded catalog lookup work"
+        "name": "keeps 50 unique persists to one cold scan while revalidating retained metadata stamps"
       },
       {
         "file": "tests2/core/preview-identity-guard-cost.test.ts",
-        "name": "keeps same-hash positive validation in stored filesystem order"
+        "name": "revalidates all metadata stamps with the shared concurrency ceiling"
       },
       {
         "file": "tests2/core/preview-identity-guard-cost.test.ts",
-        "name": "invalidates on external candidate addition and preserves filesystem first-valid selection"
+        "name": "rescans when a candidate is added while cached metadata stamps are being revalidated"
       },
       {
         "file": "tests2/core/preview-identity-guard-cost.test.ts",
-        "name": "invalidates a corrupt cached positive and rescans once to the later exact candidate"
+        "name": "rescans a complete negative when existing metadata changes without a parent mutation"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "lets an earlier candidate changed to the cached later hash regain first-valid selection"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "preserves exact candidate ordering when refreshing after an owned different-hash install"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "keeps same-hash positive validation in stored order and observes mount-only repair"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "invalidates populated catalogs after removeArtifacts and successful sweep"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "does not retain a catalog assembled before a failed persist"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "prevents an in-flight old-filesystem scan from publishing after a seam reset"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "touches a hot old session and evicts the untouched LRU entry above 64 sessions"
       },
       {
         "file": "tests2/core/preview-identity-guard-cost.test.ts",
         "name": "leaves sessions above 256 candidates uncached and retains streaming scans"
-      },
-      {
-        "file": "tests2/core/preview-identity-guard-cost.test.ts",
-        "name": "evicts the least-recently-used session above the 64-session cap"
-      },
-      {
-        "file": "tests2/core/preview-identity-guard-cost.test.ts",
-        "name": "scans cold caches, answers complete negatives, and clears on filesystem seam reset"
       }
     ],
-    "rationale": "The artifact owners retain first-exact content-hash reuse while skipping invalid candidates and prove metadata lookup reads one deterministic enumeration batch at the shared ceiling without prefetching the next batch, preserves first-valid enumeration order despite out-of-order completion, and isolates corrupt, mismatched-hash, wrong-ID, and missing metadata. The operation-cost owner preserves that selection across twenty-four mismatches plus one deep exact candidate, requires one metadata open per candidate and one content open per validated file, and compares twelve versus twenty-four misses with linear lstat/realpath ceilings so session, candidate, and trusted-root identity claims cannot multiply lookup work. The bounded-catalog owners prove fifty successful persists incrementally update one cold catalog without metadata rescans, cached positives retain stored filesystem order, external root mutation and corrupt positives force canonical rescans that still select the first valid exact candidate, sessions above 256 candidates stay on the streaming scan path, the 64-session cache evicts its least-recently-used entry, complete negative results avoid repeat metadata reads, and resetting the filesystem seam clears cached state."
+    "rationale": "The artifact owners retain first-exact content-hash reuse while skipping invalid candidates and prove metadata lookup reads one deterministic enumeration batch at the shared ceiling without prefetching the next batch, preserves first-valid enumeration order despite out-of-order completion, and isolates corrupt, mismatched-hash, wrong-ID, and missing metadata. The operation-cost owner preserves that selection across twenty-four mismatches plus one deep exact candidate, requires one metadata open per candidate and one content open per validated file, and compares twelve versus twenty-four misses with linear lstat/realpath ceilings so session, candidate, and trusted-root identity claims cannot multiply lookup work. The current bounded-catalog declarations prove fifty owned persists retain verified metadata stamps after one cold scan, stamp revalidation stays within the shared concurrency ceiling, concurrent candidate addition and descendant-only metadata changes advance catalog versions and force one canonical rescan, and an earlier candidate changed to a cached later hash regains first-valid selection. They also preserve exact order across an owned different-hash install, skip a corrupt first positive and observe its mount-only repair, invalidate same-stamp recreations after removal or sweep, discard state assembled by failed persists or an obsolete filesystem generation, touch entries for true 64-session LRU eviction, and leave sessions above 256 candidates on the streaming path."
   },
   {
     "baseFile": "tests2/core/preview-artifacts.test.ts",
