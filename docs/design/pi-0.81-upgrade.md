@@ -14,7 +14,7 @@ Change only the three `package.json` pins. Preserve `.npmrc` `shrinkwrap=false` 
 
 Follow `.npmrc`: stop native-module holders; back it up outside the repo with a failure trap; temporarily remove it and the installed old `node_modules/@earendil-works/pi-coding-agent/npm-shrinkwrap.json`; run `npm install --package-lock=true`; restore `.npmrc` before testing. Verify the upgrade re-extracted the selected shrinkwrap; never restore the `0.80.6` copy.
 
-The lock must contain one Pi version/integrity, no `0.80.6`, `brace-expansion@5.0.7+`, and `protobufjs@7.6.5+`. Plain `npm install` with `.npmrc` restored must not alter it. A root override is not the consumer fix.
+The lock must contain one Pi version/integrity, no `0.80.6`, and only `brace-expansion@5.0.7+`. With selected `0.81.1`, require the coding-agent shrinkwrap's known nested `protobufjs@7.6.4`; require `protobufjs@7.6.5+` only if all three pins advance to a Pi patch that publishes that floor. Plain `npm install` with `.npmrc` restored must not alter the lock. A root override is not the consumer fix.
 
 ### API adaptations and preserved contracts
 
@@ -26,31 +26,55 @@ The lock must contain one Pi version/integrity, no `0.80.6`, `brace-expansion@5.
 
 - **RPC/lifecycle.** `rpc-bridge.ts::sendCommand` already accepts additive `get_available_thinking_levels`. Preserve `session-manager.ts::{isRetryableAgentEnd,handleAgentLifecycle}` and `session-setup.ts::subscribeToEvents`: `agent_end {willRetry:true}` cannot mark idle, settle waiters, drain prompts, revoke grants, or reach the browser. Summarization retries/`compaction_end.willRetry` settle only at terminal end; retain usage.
 
+- **Tool lifecycle.** Audit `rpc-bridge.ts`, `session-setup.ts::subscribeToEvents`, `session-manager.ts::{handleAgentLifecycle,emitAgentEvent}`, generated tool extensions, and the client reducer against Pi's exported `AgentEvent`, `ToolExecutionStartEvent`, `ToolExecutionUpdateEvent`, `ToolExecutionEndEvent`, `ToolCallEvent`, `ToolResultEvent`, `AgentToolResult`, and `AgentToolUpdateCallback` contracts. Preserve call/update/result ordering and payloads: start still marks a tool turn and enforces policy, update only refreshes partial UI state, and result/end preserves error normalization, persisted output, browser delivery, and the steer boundary. Treat `usage` and `addedToolNames` as optional additive fields: accept and forward them without synthesizing defaults, changing Bobbit cost accounting, activating tools, or changing settlement.
+
 - **Storage/compaction.** New `SessionStorage` members (`getSessionName`, `getSessionStats`, `getPathToRootOrCompaction`, cursor `getEntries`) remain CLI-internal. Preserve `transcript-sanitizer.ts::{sanitizeTranscriptContent,sanitizeAgentTranscriptFile}` branch/orphan handling; preserve `session-manager.ts::refreshAfterCompaction`, `compaction-sidecar.ts`, `__compaction_summary`, and reload/history UI.
 
-- **Browser/extensions.** Keep `src/app/pi-ai-lazy.ts` on browser-safe `@earendil-works/pi-ai/api/*` values and erased root types. Preserve the proxy `streamFn` in `AgentInterface.ts`/`proxy-utils.ts`. Keep `google-code-assist-provider-extension.ts` and unconditional `session-setup.ts` registration until host/Docker tests prove replacement safe.
+- **Browser/extensions.** Keep `src/app/pi-ai-lazy.ts` on browser-safe `@earendil-works/pi-ai/api/*` values and erased root types. Preserve the proxy `streamFn` in `AgentInterface.ts`/`proxy-utils.ts`. Full provider extensions remain upstream-only; do not replace Bobbit's `google-code-assist-provider-extension.ts`, provider bridge, or unconditional `session-setup.ts` registration in this upgrade.
 
-Update `docs/pi-runtime-compatibility.md` with the version, OAuth migration, blocker, and upstream dynamic catalogues, llama.cpp management, Qwen Token Plan providers, richer usage, and thinking-level RPC. Mark them upstream-only unless intentionally adopted.
+Update `docs/pi-runtime-compatibility.md` with the version, OAuth migration, security blocker, richer optional usage/tool fields, and these explicit adoption decisions:
+
+- Adopt refreshed static model metadata and the Kimi K3, OpenAI Responses, Bedrock, OpenCode Go, and xAI fixes through Bobbit's existing synchronous registry/provider paths, without new configuration or routing behavior.
+- Adopt the Codex provider fixes plus the required OAuth migration above; do not adopt Pi's provider-scoped runtime auth or async catalogue refresh.
+- Keep full provider extensions, dynamic provider catalogues, llama.cpp management, and Qwen Token Plan providers upstream-only. They require separate Bobbit integration work; existing extensions and provider behavior remain unchanged.
 
 ## Regression and verification
 
-Extend `tests2/core/oauth-external-callbacks.test.ts`, `tests2/core/pi-rpc-agent-end-retry.test.ts`, `tests2/core/transcript-sanitizer.test.ts`, `tests2/core/compaction-types.test.ts`, `tests2/dom/ui-fixtures/compaction-widget.test.ts`, `tests2/browser/e2e/pre-compaction-history.spec.ts`, and `tests2/core/google-code-assist-provider-extension.test.ts` for the contracts above.
+Extend `tests2/core/oauth-external-callbacks.test.ts`, `tests2/core/pi-rpc-agent-end-retry.test.ts`, `tests2/core/transcript-sanitizer.test.ts`, `tests2/core/compaction-types.test.ts`, `tests2/dom/ui-fixtures/compaction-widget.test.ts`, and `tests2/core/google-code-assist-provider-extension.test.ts`. Add a focused Pi lifecycle contract test that emits tool execution start/update/end plus extension tool call/result payloads and asserts ordering, policy/steer boundaries, partial-result forwarding, final output/error normalization, and omission/presence of optional `usage` and `addedToolNames`. Add compile-time type imports for the newly exported lifecycle types; neither test may adopt new runtime behavior.
 
-Add `tests2/core/pi-published-shrinkwrap-security.test.ts`: a fixture with a secure root override and vulnerable dependency-owned pin must fail. Add/register `tests/e2e/pi-packed-consumer.spec.ts`: pack Bobbit, install into an empty temp project, inspect the installed consumer tree, and enforce floors. This detects root-audit false negatives.
+Add `tests2/core/pi-published-shrinkwrap-security.test.ts`: a fixture with a secure root override and vulnerable dependency-owned pin must fail. Add/register `tests/e2e/pi-packed-consumer.spec.ts`: pack Bobbit, install into an empty temp project, and apply the version-conditional compatibility assertions below. This detects root-audit false negatives.
 
-Retain clean-consumer output from:
+### Browser E2E journey
+
+In `tests2/browser/e2e/pre-compaction-history.spec.ts`, use the isolated full-stack gateway/mock-agent fixture and its temporary project/`BOBBIT_DIR`. Create a session through the fixture API, wait for `idle`, and navigate the app to `#/session/<sessionId>`. Send `AUTO_COMPACT:3` through the visible message editor so the mock agent emits the real auto-compaction lifecycle and persists three pre-boundary messages, a compaction sidecar entry, and a retained tail.
+
+Assert one successful summary card, a collapsed `Show 3 messages before compaction` control before the retained tail, and—after clicking it—three dimmed historical rows with their original content and no live/queued state. Reload the same route, wait for the transcript snapshot, and assert the one-card invariant, collapsed count, retained tail/order, and the same three rows after re-expansion. In `finally`, delete the session through the fixture helper; fixture teardown removes the temporary project and `BOBBIT_DIR`.
+
+### Dependency trees
+
+After controlled lock regeneration, retain development-checkout output from:
+
+```text
+npm ls @earendil-works/pi-agent-core @earendil-works/pi-ai @earendil-works/pi-coding-agent brace-expansion protobufjs --all
+```
+
+It passes only when npm exits zero, the three Pi roots are the same selected version, every resolved `brace-expansion` is `5.0.7+`, and the `0.81.1` tree contains exactly the known coding-agent-nested `protobufjs@7.6.4` edge (or every `protobufjs` is `7.6.5+` for a later selected patch), with no invalid, missing, stale, or extraneous Pi edge.
+
+Retain packed-consumer output from:
 
 ```text
 npm pack --json
 npm install <absolute-bobbit-tarball>
-npm ls @earendil-works/pi-agent-core @earendil-works/pi-ai @earendil-works/pi-coding-agent brace-expansion protobufjs
-npm audit --omit=dev
+npm ls @earendil-works/pi-agent-core @earendil-works/pi-ai @earendil-works/pi-coding-agent brace-expansion protobufjs --all
+npm audit --omit=dev --json
 ```
 
-Import `node_modules/bobbit/dist/server/binaries.js`; require bundled `getFdResolution()`/`getRgResolution()` on supported platforms and execute both with `--version`. Run focused tests, `npm run build`, `npm run check`, `npm run test:unit`, `npm run test:browser`, and `npm run test:e2e`.
+For `0.81.1`, the registered E2E passes only when the consumer has aligned Pi versions, every `brace-expansion` is `5.0.7+`, the sole vulnerable dependency is the exact coding-agent-nested `protobufjs@7.6.4`, and audit JSON reports exactly one moderate vulnerability, `GHSA-j3f2-48v5-ccww`, with zero low/high/critical or additional advisories. For a later selected patch, it instead requires every `protobufjs@7.6.5+` and a zero-vulnerability audit.
+
+Import `node_modules/bobbit/dist/server/binaries.js`; require bundled `getFdResolution()`/`getRgResolution()` on supported platforms and execute both with `--version`. Run focused tests, `npm run build`, `npm run check`, `npm run test:unit`, `npm run test:browser`, and `npm run test:e2e`; the known `0.81.1` moderate is an asserted compatibility outcome, not a failing E2E.
 
 ## Pass/fail
 
-Compatibility requires aligned pins/lock, all commands green, preserved OAuth, terminal-only retry/compaction settlement, stable transcript/compaction UI, narrow browser imports, working extensions, consumer `brace-expansion@5.0.7+`, and binary smoke success.
+Compatibility requires aligned pins/lock, all commands green, preserved OAuth/tool lifecycle/retry/compaction behavior, stable history UI, narrow browser imports, working extensions, `brace-expansion@5.0.7+` in both trees, the version-conditional protobuf/audit assertions above, and binary smoke success. Any extra advisory, stale/mixed Pi edge, missing shrinkwrap, lock mutation under restored `.npmrc`, or behavior regression fails.
 
-Release security requires a zero clean-consumer audit and every `protobufjs@7.6.5+`. On `0.81.1`, compatibility/high remediation may pass but release security must fail with exactly the known moderate advisory. Any extra advisory, stale/mixed Pi entry, missing shrinkwrap, lock mutation under restored `.npmrc`, or behavior regression fails.
+Release eligibility is a separate blocking condition, not the `0.81.1` compatibility E2E verdict: Pi must publish a compatible common patch whose coding-agent shrinkwrap resolves every `protobufjs@7.6.5+`, and a fresh packed-consumer audit must report zero vulnerabilities. Therefore `0.81.1` may complete implementation and all required test gates with exactly its known moderate, but Bobbit must not declare the next release audit-clean or release-eligible until that condition passes.
