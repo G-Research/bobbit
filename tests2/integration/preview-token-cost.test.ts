@@ -30,18 +30,40 @@
  * tests/preview-extension.test.ts but exercises the live server endpoint.
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, createSession, deleteSession } from "./_e2e/e2e-setup.js";
+import {
+	apiFetch,
+	createSession,
+	defaultProjectId,
+	deleteSession,
+	nonGitCwd,
+} from "./_e2e/e2e-setup.js";
 import fs from "node:fs";
 import { buildPreviewSnapshotV3Block, parseSnapshot } from "../../defaults/tools/html/snapshot.ts";
 
-let sessionId: string;
+// Keep this token-shape test at five mounts per catalog; same-session catalog
+// growth is pinned by the dedicated artifact cost tests.
+const SESSION_POOL_SIZE = 10;
+let sessionIds: string[] = [];
 
 test.beforeAll(async () => {
-	sessionId = await createSession();
+	const projectId = await defaultProjectId();
+	const cwd = nonGitCwd();
+	const creationResults = await Promise.allSettled(
+		Array.from({ length: SESSION_POOL_SIZE }, () => createSession({ projectId, cwd })),
+	);
+	sessionIds = creationResults.flatMap((result) =>
+		result.status === "fulfilled" ? [result.value] : [],
+	);
+	const failures = creationResults.flatMap((result) =>
+		result.status === "rejected" ? [result.reason] : [],
+	);
+	if (failures.length > 0) {
+		throw new AggregateError(failures, "Failed to create preview token-cost session pool");
+	}
 });
 
 test.afterAll(async () => {
-	await deleteSession(sessionId).catch(() => {});
+	await Promise.allSettled(sessionIds.map((sessionId) => deleteSession(sessionId)));
 });
 
 test("50 × 100 KB mount calls → snapshot blocks sum ≤ 12 500 B; each ≤ 250 B", async () => {
@@ -52,6 +74,7 @@ test("50 × 100 KB mount calls → snapshot blocks sum ≤ 12 500 B; each ≤ 25
 	const blocks: string[] = [];
 
 	for (let i = 0; i < 50; i++) {
+		const sessionId = sessionIds[i % SESSION_POOL_SIZE]!;
 		const resp = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`, {
 			method: "POST",
 			// Side-panel tab persistence is orthogonal to the mount response/snapshot
