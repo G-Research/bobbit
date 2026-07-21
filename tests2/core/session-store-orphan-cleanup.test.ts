@@ -10,7 +10,12 @@ import path from "node:path";
 import type { Dirent, PathLike, PathOrFileDescriptor, Stats, WriteFileOptions } from "node:fs";
 import type { FsLike } from "../../src/server/gateway-deps.ts";
 import { SessionStore, type PersistedSession } from "../../src/server/agent/session-store.ts";
-import { scanOrphanedTranscriptsAsync, shouldKeepDespiteOrphan } from "../../src/server/agent/orphan-cleanup.ts";
+import {
+	scanOrphanedTranscriptsAsync,
+	shouldKeepDespiteOrphan,
+	type AsyncOrphanDirectory,
+	type AsyncOrphanScanFs,
+} from "../../src/server/agent/orphan-cleanup.ts";
 import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 
 type SessionStoreMemFs = MemFs & {
@@ -133,8 +138,23 @@ function tracked(id: string, agentSessionFile: string, lastActivity: number): Pe
 	};
 }
 
-function asyncOrphanFs(): Pick<FsLike, "promises"> {
-	return { promises: memfs.promises } as Pick<FsLike, "promises">;
+function asyncOrphanFs(): Pick<FsLike, "promises"> & AsyncOrphanScanFs {
+	return {
+		promises: memfs.promises,
+		async lstat(target) {
+			const stats = await memfs.promises.lstat(target);
+			return { ...stats, isSymbolicLink: () => false };
+		},
+		async opendir(target) {
+			const entries = await memfs.promises.readdir(target, { withFileTypes: true }) as Dirent[];
+			let cursor = 0;
+			const directory: AsyncOrphanDirectory = {
+				async read() { return entries[cursor++] ?? null; },
+				async close() { /* no-op for in-memory unit tests */ },
+			};
+			return directory;
+		},
+	};
 }
 
 async function scanStoreSnapshot(

@@ -8,10 +8,11 @@
  * See goal `goal-goal-sessions-p-14dc3ec7` and the design doc
  * `docs/design/session-store-crash-safety.md` for context.
  */
-import type { Dirent } from "node:fs";
+import fs, { type Dirent } from "node:fs";
 import path from "node:path";
 import type { Clock, FsLike } from "../gateway-deps.js";
 import { realClock, realFs } from "../gateway-deps.js";
+import { BACKGROUND_IO_CONCURRENCY } from "./bounded-async-work.js";
 import type { PersistedSession } from "./session-store.js";
 
 const RECENT_TRANSCRIPT_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -62,26 +63,75 @@ export async function shouldKeepDespiteOrphan(
 	}
 }
 
+interface AsyncOrphanStats {
+	mtimeMs: number;
+	isDirectory(): boolean;
+	isFile(): boolean;
+	isSymbolicLink(): boolean;
+}
+
+export interface AsyncOrphanDirectory {
+	read(): Promise<Dirent | null>;
+	close(): Promise<void>;
+}
+
+/** Promise-only filesystem seam for the streaming orphan scanner. */
+export interface AsyncOrphanScanFs {
+	lstat(filePath: string): Promise<AsyncOrphanStats>;
+	opendir(dirPath: string): Promise<AsyncOrphanDirectory>;
+}
+
+const realAsyncOrphanScanFs: AsyncOrphanScanFs = {
+	lstat: filePath => fs.promises.lstat(filePath),
+	opendir: dirPath => fs.promises.opendir(dirPath),
+};
+
 export interface AsyncOrphanScanOptions {
 	maxPaths?: number;
 	maxLogLines?: number;
 	concurrency?: number;
 	/** Filesystem boundary for deterministic semantic tests. Defaults to node:fs. */
-	fsImpl?: Pick<FsLike, "promises">;
+	fsImpl?: AsyncOrphanScanFs;
 }
 
-type AsyncScanWork =
-	| { kind: "directory"; fullPath: string }
-	| { kind: "file"; fullPath: string };
+interface AsyncScanFrame {
+	fullPath: string;
+	directory: AsyncOrphanDirectory;
+}
+
+const SCAN_YIELD_INTERVAL = 256;
+
+function normalizedSampleCap(value: number | undefined, fallback: number): number {
+	if (value === undefined) return fallback;
+	return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : fallback;
+}
+
+function insertSortedBounded(sample: string[], candidate: string, cap: number): void {
+	if (cap === 0) return;
+	let low = 0;
+	let high = sample.length;
+	while (low < high) {
+		const middle = (low + high) >>> 1;
+		if (sample[middle]! < candidate) low = middle + 1;
+		else high = middle;
+	}
+	if (low >= cap) return;
+	sample.splice(low, 0, candidate);
+	if (sample.length > cap) sample.pop();
+}
+
+function yieldScanTurn(): Promise<void> {
+	return new Promise(resolve => setImmediate(resolve));
+}
 
 /**
- * Walk `<agentSessionsRoot>` for untracked `*.jsonl` transcripts using one
- * concurrency-limited worker pool.
+ * Walk `<agentSessionsRoot>` for untracked `*.jsonl` transcripts.
  *
- * Directory reads and candidate-file stats share one bounded worker pool, so
- * even a single wide directory cannot create an unbounded burst of filesystem
- * requests. The capped path/log sample may be ordered differently from the
- * synchronous scanner; filesystem enumeration order is not an API contract.
+ * `opendir().read()` streams one entry at a time. Candidate stats provide the
+ * parallelism, while their fixed-size pending set backpressures further reads;
+ * no directory-sized entry array or discovered-work queue is retained. Open
+ * directory frames grow only with traversal depth. Every filesystem operation,
+ * including reads and closes, shares the same operation-level ceiling.
  */
 export async function scanOrphanedTranscriptsAsync(
 	agentSessionsRoot: string,
@@ -89,92 +139,139 @@ export async function scanOrphanedTranscriptsAsync(
 	mostRecentLastActivity: number,
 	opts: AsyncOrphanScanOptions = {},
 ): Promise<{ count: number; paths: string[] }> {
-	const pathCap = opts.maxPaths ?? 50;
-	const logCap = opts.maxLogLines ?? 20;
-	const asyncFs = opts.fsImpl ?? realFs;
-	const requestedConcurrency = opts.concurrency ?? 8;
+	const pathCap = normalizedSampleCap(opts.maxPaths, 50);
+	const logCap = normalizedSampleCap(opts.maxLogLines, 20);
+	const sampleCap = Math.max(pathCap, logCap);
+	const asyncFs = opts.fsImpl ?? realAsyncOrphanScanFs;
+	const requestedConcurrency = opts.concurrency ?? BACKGROUND_IO_CONCURRENCY;
 	const concurrency = Number.isFinite(requestedConcurrency)
 		? Math.max(1, Math.floor(requestedConcurrency))
-		: 8;
-	const paths: string[] = [];
+		: BACKGROUND_IO_CONCURRENCY;
+	const sample: string[] = [];
+	const pendingCandidates = new Set<Promise<void>>();
+	const frames: AsyncScanFrame[] = [];
 	let count = 0;
-	let logged = 0;
+	let stepsSinceYield = 0;
 
-	try {
-		if (!(await asyncFs.promises.stat(agentSessionsRoot)).isDirectory()) {
-			return { count: 0, paths: [] };
-		}
-	} catch {
-		return { count: 0, paths: [] };
-	}
-
-	const queue: AsyncScanWork[] = [{ kind: "directory", fullPath: agentSessionsRoot }];
-	let cursor = 0;
-
-	const processWork = async (work: AsyncScanWork): Promise<void> => {
-		if (work.kind === "directory") {
-			let entries: Dirent[];
-			try {
-				entries = await asyncFs.promises.readdir(work.fullPath, { withFileTypes: true });
-			} catch {
-				return;
-			}
-			for (const entry of entries) {
-				const fullPath = path.join(work.fullPath, entry.name);
-				if (entry.isDirectory()) {
-					queue.push({ kind: "directory", fullPath });
-				} else if (entry.isFile() && entry.name.endsWith(".jsonl") && !trackedFiles.has(fullPath)) {
-					queue.push({ kind: "file", fullPath });
-				}
-			}
-			return;
-		}
-
-		let mtimeMs: number;
-		try {
-			mtimeMs = (await asyncFs.promises.stat(work.fullPath)).mtimeMs;
-		} catch {
-			return;
-		}
-		if (mtimeMs < mostRecentLastActivity) return;
-
-		count++;
-		if (paths.length < pathCap) paths.push(work.fullPath);
-		if (logged < logCap) {
-			console.warn(`[session-store] WARN: orphaned transcript: ${work.fullPath}`);
-			logged++;
+	const waitForTraversalSlot = async (): Promise<void> => {
+		if (pendingCandidates.size >= concurrency) {
+			await Promise.race(pendingCandidates);
 		}
 	};
 
-	await new Promise<void>((resolve, reject) => {
-		let active = 0;
-		let settled = false;
+	const traversalIo = async <T>(operation: () => Promise<T>): Promise<T> => {
+		await waitForTraversalSlot();
+		return operation();
+	};
 
-		const schedule = (): void => {
-			if (settled) return;
-			while (active < concurrency && cursor < queue.length) {
-				const work = queue[cursor++];
-				active++;
-				void processWork(work).then(
-					() => {
-						active--;
-						schedule();
-					},
-					(error: unknown) => {
-						active--;
-						settled = true;
-						reject(error);
-					},
-				);
+	const closeDirectory = async (directory: AsyncOrphanDirectory): Promise<void> => {
+		try { await traversalIo(() => directory.close()); } catch { /* best-effort scan */ }
+	};
+
+	const openDirectory = async (fullPath: string): Promise<AsyncOrphanDirectory | null> => {
+		let stats: AsyncOrphanStats;
+		try { stats = await traversalIo(() => asyncFs.lstat(fullPath)); }
+		catch { return null; }
+		if (!stats.isDirectory() || stats.isSymbolicLink()) return null;
+
+		let directory: AsyncOrphanDirectory;
+		try { directory = await traversalIo(() => asyncFs.opendir(fullPath)); }
+		catch { return null; }
+
+		// An entry can be replaced between lstat and opendir. Never consume an
+		// opened handle when the path now resolves to a symlink/non-directory.
+		try { stats = await traversalIo(() => asyncFs.lstat(fullPath)); }
+		catch {
+			await closeDirectory(directory);
+			return null;
+		}
+		if (!stats.isDirectory() || stats.isSymbolicLink()) {
+			await closeDirectory(directory);
+			return null;
+		}
+		return directory;
+	};
+
+	const scheduleCandidate = (fullPath: string): void => {
+		let pending: Promise<void>;
+		pending = (async () => {
+			try {
+				const stats = await asyncFs.lstat(fullPath);
+				if (!stats.isFile() || stats.isSymbolicLink() || stats.mtimeMs < mostRecentLastActivity) return;
+				count++;
+				insertSortedBounded(sample, fullPath, sampleCap);
+			} catch {
+				// One missing/unreadable transcript must not hide its siblings.
 			}
-			if (active === 0 && cursor >= queue.length) {
-				settled = true;
-				resolve();
+		})().finally(() => pendingCandidates.delete(pending));
+		pendingCandidates.add(pending);
+	};
+
+	const rootDirectory = await openDirectory(agentSessionsRoot);
+	if (!rootDirectory) return { count: 0, paths: [] };
+	frames.push({ fullPath: agentSessionsRoot, directory: rootDirectory });
+
+	try {
+		while (frames.length > 0) {
+			const frame = frames[frames.length - 1]!;
+			let entry: Dirent | null;
+			try { entry = await traversalIo(() => frame.directory.read()); }
+			catch {
+				frames.pop();
+				await closeDirectory(frame.directory);
+				continue;
 			}
-		};
 
-		schedule();
-	});
+			if (!entry) {
+				frames.pop();
+				await closeDirectory(frame.directory);
+				continue;
+			}
 
-	return { count, paths };
+			// Revalidate after reading from the handle and before joining its entry
+			// name. A path replaced by a directory symlink is closed, not traversed.
+			let frameStats: AsyncOrphanStats;
+			try { frameStats = await traversalIo(() => asyncFs.lstat(frame.fullPath)); }
+			catch {
+				frames.pop();
+				await closeDirectory(frame.directory);
+				continue;
+			}
+			if (!frameStats.isDirectory() || frameStats.isSymbolicLink()) {
+				frames.pop();
+				await closeDirectory(frame.directory);
+				continue;
+			}
+
+			const fullPath = path.join(frame.fullPath, entry.name);
+			if (!entry.isSymbolicLink() && entry.isDirectory()) {
+				const childDirectory = await openDirectory(fullPath);
+				if (childDirectory) frames.push({ fullPath, directory: childDirectory });
+			} else if (
+				!entry.isSymbolicLink()
+				&& entry.isFile()
+				&& entry.name.endsWith(".jsonl")
+				&& !trackedFiles.has(fullPath)
+			) {
+				scheduleCandidate(fullPath);
+			}
+
+			stepsSinceYield++;
+			if (stepsSinceYield >= SCAN_YIELD_INTERVAL) {
+				stepsSinceYield = 0;
+				await yieldScanTurn();
+			}
+		}
+		await Promise.all(pendingCandidates);
+	} finally {
+		await Promise.all(pendingCandidates);
+		for (let index = frames.length - 1; index >= 0; index--) {
+			await closeDirectory(frames[index]!.directory);
+		}
+	}
+
+	for (const orphanPath of sample.slice(0, logCap)) {
+		console.warn(`[session-store] WARN: orphaned transcript: ${orphanPath}`);
+	}
+	return { count, paths: sample.slice(0, pathCap) };
 }
