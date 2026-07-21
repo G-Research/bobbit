@@ -1028,6 +1028,14 @@
       {
         "file": "tests2/core/preview-artifacts.test.ts",
         "name": "stores exact bytes, sorted POSIX files, and stable nested binary hashes"
+      },
+      {
+        "file": "tests2/core/bounded-async-work.test.ts",
+        "name": "does not copy external bytes when a shared-copy source becomes a symlink at open"
+      },
+      {
+        "file": "tests2/core/preview-artifacts.test.ts",
+        "name": "rejects file substitutions before hash or preview-directory copy can read external bytes"
       }
     ],
     "rationale": "The bounded asynchronous preview-artifact suite consolidates this former synchronous declaration into the named owner while retaining its observable integrity, reuse, validation, or cleanup behavior."
@@ -1175,6 +1183,10 @@
       {
         "file": "tests2/integration/preview-mount-route.test.ts",
         "name": "file= without assets copies only entry; siblings 404"
+      },
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "rejects an entry replaced by a symlink during the direct-copy fallback"
       }
     ],
     "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
