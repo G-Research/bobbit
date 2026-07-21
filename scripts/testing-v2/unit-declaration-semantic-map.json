@@ -1116,9 +1116,13 @@
       {
         "file": "tests2/core/bounded-tree-quarantine-races.test.ts",
         "name": "discards a readlink result when the parent changes inside readlink"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "keeps deep hash and guarded copy operation counts proportional to files"
       }
     ],
-    "rationale": "The bounded asynchronous owners preserve exact mounted bytes and metadata while proving content, traversed directories, their Dirent-producing parent identities, canonical roots, opened file identities, artifact metadata, visitor hashes, and readlink results cannot be replaced or escaped before descriptor-anchored use, including queued and local-overflow work."
+    "rationale": "The bounded asynchronous owners preserve exact mounted bytes and metadata while proving content, traversed directories, their Dirent-producing parent identities, canonical roots, opened file identities, artifact metadata, visitor hashes, and readlink results cannot be replaced or escaped before descriptor-anchored use, including queued and local-overflow work. The operation-cost owner compares ten- and twenty-file deep trees, requires byte-identical hashes and exact copied bytes, and pins one hash source open plus one copy source/destination open per file with linear lstat/realpath ceilings so composed identity guards cannot multiply file work."
   },
   {
     "baseFile": "tests2/core/preview-artifacts.test.ts",
@@ -1127,9 +1131,13 @@
       {
         "file": "tests2/core/preview-artifacts.test.ts",
         "name": "reuses the first exact candidate while skipping corrupt, missing, mismatched, and hash-invalid candidates"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "keeps multi-candidate metadata lookup and deep exact validation linear"
       }
     ],
-    "rationale": "The bounded asynchronous preview-artifact suite consolidates this former synchronous declaration into the named owner while retaining its observable integrity, reuse, validation, or cleanup behavior."
+    "rationale": "The artifact owner retains first-exact content-hash reuse while skipping invalid candidates. The operation-cost owner preserves that selection across twenty-four mismatches plus one deep exact candidate, requires one metadata open per candidate and one content open per validated file, and compares twelve versus twenty-four misses with linear lstat/realpath ceilings so session, candidate, and trusted-root identity claims cannot multiply lookup work."
   },
   {
     "baseFile": "tests2/core/preview-artifacts.test.ts",
