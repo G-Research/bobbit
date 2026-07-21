@@ -1,10 +1,10 @@
 /**
  * Journey: Session Lifecycle — v2 browser smoke
- * Covers: session creation, messaging, sidebar row, reload persistence,
- *         fork via sidebar, sidebar actions menu, copy-link action.
+ * Covers: session creation, default role persistence, messaging, sidebar row,
+ *         reload persistence, fork via sidebar, sidebar actions menu, copy-link action.
  * Consolidated from: fork-session-history, copy-session-link, sidebar-session-actions, etc.
  */
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus } from "../_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createSession, createSessionViaUI, deleteSession, waitForSessionStatus } from "../_helpers/journey-fixture.js";
 import { base } from "../e2e-setup.js";
 
 // ---------------------------------------------------------------------------
@@ -33,6 +33,24 @@ async function openSidebarPopover(
 	if (!await trigger.isVisible({ timeout: 3_000 }).catch(() => false)) return false;
 	await trigger.click();
 	return page.locator("sidebar-actions-popover [role='menu']").isVisible({ timeout: 15_000 }).catch(() => false);
+}
+
+/** Open Modify Session from the row's standard quick action and return its role control. */
+async function openModifySessionRole(
+	page: import("@playwright/test").Page,
+	sessionId: string,
+) {
+	const row = sessionRow(page, sessionId);
+	await expect(row).toBeVisible({ timeout: 20_000 });
+	await row.scrollIntoViewIfNeeded();
+	await row.hover();
+	const modify = row.locator('[data-sidebar-action-id="modify"][data-sidebar-action-quick="true"]').first();
+	await expect(modify).toBeVisible({ timeout: 15_000 });
+	await modify.click();
+	await expect(page.getByText("Modify Session", { exact: true }).first()).toBeVisible({ timeout: 15_000 });
+	const roleControl = page.locator('#role-picker-container button[title="Select role"]').first();
+	await expect(roleControl).toBeVisible({ timeout: 15_000 });
+	return roleControl;
 }
 
 /** Click a copy-link action: try direct header button first, fall back to popover. */
@@ -112,6 +130,42 @@ test.describe("Journey: Session Lifecycle", () => {
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await deleteSession(sessionId);
+		}
+	});
+
+	test("quick standard session defaults to General across reload and creation picker", async ({ page }) => {
+		let sessionId = "";
+		try {
+			await openApp(page);
+			sessionId = await createSessionViaUI(page);
+			await waitForSessionStatus(sessionId, "idle");
+
+			let roleControl = await openModifySessionRole(page, sessionId);
+			await expect(roleControl).toContainText("General");
+			await page.getByRole("button", { name: "Cancel" }).click();
+
+			await page.reload();
+			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 20_000 });
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+			roleControl = await openModifySessionRole(page, sessionId);
+			await expect(roleControl).toContainText("General");
+			await page.getByRole("button", { name: "Cancel" }).click();
+
+			const quickSessionButton = page.locator('button[title="New session in default"]').first();
+			await expect(quickSessionButton).toBeVisible({ timeout: 15_000 });
+			const newSessionWithRole = quickSessionButton.locator("..").locator('button[title="New session with role"]');
+			await expect(newSessionWithRole).toBeVisible({ timeout: 15_000 });
+			await newSessionWithRole.click();
+
+			const pickerRoleControl = page.locator('#picker-role-container button[title="Select role"]').first();
+			await expect(pickerRoleControl).toBeVisible({ timeout: 15_000 });
+			await expect(pickerRoleControl).toContainText("General");
+			await pickerRoleControl.click();
+			await expect(page.locator('#picker-role-container button[title="Select General role"]')).toBeVisible();
+			await expect(page.locator('#picker-role-container button[title="No role"]')).toHaveCount(0);
+		} finally {
+			if (sessionId) await deleteSession(sessionId).catch(() => {});
 		}
 	});
 });
