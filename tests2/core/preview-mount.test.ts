@@ -257,8 +257,8 @@ describe("preview mount", () => {
 		assert.equal(victimOpens, 2, "the safe fallback must reopen and revalidate the source");
 		assert.equal(
 			fallbackDestinationOpens,
-			2,
-			"the source fallback and the staging transfer must each exclusively create their destination",
+			1,
+			"only the source fallback exclusively creates a child; the staged root is installed by rename",
 		);
 	});
 

@@ -1072,9 +1072,29 @@
       {
         "file": "tests2/core/preview-root-identity-races.test.ts",
         "name": "rejects regular artifact metadata replacement before reading its descriptor"
+      },
+      {
+        "file": "tests2/core/preview-canonical-root-races.test.ts",
+        "name": "binds a contained canonical file target to the opened descriptor before reading"
+      },
+      {
+        "file": "tests2/core/preview-canonical-root-races.test.ts",
+        "name": "fails closed when an expected file identity is unavailable"
+      },
+      {
+        "file": "tests2/core/preview-canonical-root-races.test.ts",
+        "name": "rejects a spoofed canonical preview root before enumeration or file reads"
+      },
+      {
+        "file": "tests2/core/preview-canonical-root-races.test.ts",
+        "name": "keeps preview list, hash, and copy candidates inside the canonical trusted store"
+      },
+      {
+        "file": "tests2/core/preview-canonical-root-races.test.ts",
+        "name": "binds artifact metadata directories to the canonical artifact store before opening"
       }
     ],
-    "rationale": "The bounded asynchronous owners preserve exact mounted bytes and metadata while proving content, traversed directories, and artifact metadata cannot be replaced before descriptor-anchored reads."
+    "rationale": "The bounded asynchronous owners preserve exact mounted bytes and metadata while proving content, traversed directories, canonical roots, opened file identities, and artifact metadata cannot be replaced or escaped before descriptor-anchored reads."
   },
   {
     "baseFile": "tests2/core/preview-artifacts.test.ts",
@@ -1463,10 +1483,14 @@
       },
       {
         "file": "tests2/core/preview-root-identity-races.test.ts",
-        "name": "repeated claimed-root swaps cannot copy or recursively clean the final replacement"
+        "name": "whole-root rename quarantines a raced staging replacement without external traversal"
+      },
+      {
+        "file": "tests2/core/preview-canonical-root-races.test.ts",
+        "name": "atomically quarantines a substituted staging root without traversing it"
       }
     ],
-    "rationale": "The staged-swap owner preserves prior mounted content on ordinary failures, while the root-substitution owners prove raced symlink and repeated real-directory replacements are rejected without moving or recursively deleting external data."
+    "rationale": "The staged-swap owner preserves prior mounted content on ordinary failures, while the root-substitution owners prove raced symlink and real-directory replacements are rejected and quarantined by whole-root rename without traversing or deleting external data."
   },
   {
     "baseFile": "tests2/core/preview-mount.test.ts",
@@ -1475,9 +1499,13 @@
       {
         "file": "tests2/core/preview-mount.test.ts",
         "name": "stages before swap, supports reopening a mounted path, and rolls back staging errors"
+      },
+      {
+        "file": "tests2/core/preview-canonical-root-races.test.ts",
+        "name": "waits for an acquired content read before exposing a replacement root"
       }
     ],
-    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+    "rationale": "The staged mount owner retains watcher-safe replacement behavior, while the content-read lease owner proves a whole-root install remains unavailable until acquired readers release it."
   },
   {
     "baseFile": "tests2/core/preview-mount.test.ts",

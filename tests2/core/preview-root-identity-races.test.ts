@@ -141,37 +141,46 @@ describe("preview root identity races", () => {
 		}
 	});
 
-	it("repeated claimed-root swaps cannot copy or recursively clean the final replacement", async () => {
-		const parent = path.resolve("/memfs/repeated-claims");
+	it("whole-root rename quarantines a raced staging replacement without external traversal", async () => {
+		const parent = path.resolve("/memfs/whole-root-install");
 		const { memoryFs, asyncFs } = memfsAt(parent);
 		const staging = path.join(parent, "staging");
 		const destination = path.join(parent, "destination");
+		const detached = path.join(parent, "detached-original");
+		const replacement = path.join(parent, "replacement");
 		memoryFs.mkdirSync(staging);
-		memoryFs.mkdirSync(destination);
 		memoryFs.writeFileSync(path.join(staging, "inside.html"), "inside");
-		const replacements = [1, 2, 3].map(index => {
-			const directory = path.join(parent, `replacement-${index}`);
-			memoryFs.mkdirSync(directory);
-			memoryFs.writeFileSync(path.join(directory, "EXTERNAL.txt"), `external-${index}`);
-			return directory;
-		});
-		let claimed = "";
-		let swaps = 0;
+		memoryFs.mkdirSync(replacement);
+		memoryFs.writeFileSync(path.join(replacement, "EXTERNAL.txt"), "external-sentinel");
+		const renames: Array<[string, string]> = [];
+		let quarantine = "";
+		let directoryOpens = 0;
+		let unlinks = 0;
+		let directoryRemovals = 0;
 		const raceFs: PreviewAsyncFs = {
 			...asyncFs,
 			rename: async (oldPath, newPath) => {
+				const oldResolved = resolved(oldPath);
+				const newResolved = resolved(newPath);
+				renames.push([oldResolved, newResolved]);
 				await asyncFs.rename(oldPath, newPath);
-				if (resolved(oldPath) === resolved(staging)) claimed = resolved(newPath);
-			},
-			lstat: async filePath => {
-				const stats = await asyncFs.lstat(filePath);
-				if (claimed && resolved(filePath) === claimed && swaps < replacements.length) {
-					const detached = path.join(parent, `detached-${swaps}`);
-					memoryFs.renameSync(claimed, detached);
-					memoryFs.renameSync(replacements[swaps]!, claimed);
-					swaps++;
+				if (oldResolved === resolved(staging) && newResolved === resolved(destination)) {
+					memoryFs.renameSync(destination, detached);
+					memoryFs.renameSync(replacement, destination);
 				}
-				return stats;
+				if (oldResolved === resolved(destination)) quarantine = newResolved;
+			},
+			opendir: async dirPath => {
+				directoryOpens++;
+				return asyncFs.opendir(dirPath);
+			},
+			unlink: async filePath => {
+				unlinks++;
+				return asyncFs.unlink(filePath);
+			},
+			rmdir: async dirPath => {
+				directoryRemovals++;
+				return asyncFs.rmdir(dirPath);
 			},
 		};
 
@@ -179,8 +188,15 @@ describe("preview root identity races", () => {
 			movePreviewDirectoryContents(staging, destination, { fs: raceFs, concurrency: 1 }),
 			(error: unknown) => error instanceof PreviewMountError && error.statusCode === 500,
 		);
-		assert.equal(swaps, 3);
-		assert.equal(memoryFs.readFileSync(path.join(claimed, "EXTERNAL.txt"), "utf8"), "external-3");
+		assert.deepEqual(renames[0], [resolved(staging), resolved(destination)]);
+		assert.deepEqual(renames[1], [resolved(destination), quarantine]);
+		assert.equal(renames.length, 2, "installation and quarantine must each be one whole-root rename");
+		assert.equal(directoryOpens, 0, "the external replacement must never be enumerated");
+		assert.equal(unlinks, 0, "the external replacement must never be unlinked");
+		assert.equal(directoryRemovals, 0, "the external replacement must never be recursively removed");
+		assert.ok(quarantine, "the mismatched installed root must be quarantined");
+		assert.equal(memoryFs.readFileSync(path.join(quarantine, "EXTERNAL.txt"), "utf8"), "external-sentinel");
+		assert.equal(memoryFs.readFileSync(path.join(detached, "inside.html"), "utf8"), "inside");
 		assert.equal(memoryFs.existsSync(path.join(destination, "EXTERNAL.txt")), false);
 	});
 

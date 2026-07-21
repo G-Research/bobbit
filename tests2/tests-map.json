@@ -49,7 +49,7 @@
     },
     {
       "path": "tests2/core/preview-root-identity-races.test.ts",
-      "reason": "Deterministic native and memfs regressions proving bounded preview walks and removals reject real-directory identity replacement, staging cleanup honors its claimed root identity across repeated swaps, and artifact metadata descriptors reject regular-file replacement before reading bytes.",
+      "reason": "Deterministic native and memfs regressions proving bounded preview walks and removals reject real-directory identity replacement, whole-root preview installation quarantines a raced replacement without external traversal, and artifact metadata descriptors reject regular-file replacement before reading bytes.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
