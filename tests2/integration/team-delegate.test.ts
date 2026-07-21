@@ -17,7 +17,7 @@
  * so blocking flows settle in milliseconds (never test:manual).
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, createSession, deleteSession, connectWs, type WsConnection } from "./_e2e/e2e-setup.js";
+import { apiFetch, createSession, deleteSession, connectWs, defaultProject, type WsConnection } from "./_e2e/e2e-setup.js";
 import { readAuthorSidecar } from "../../src/server/agent/author-sidecar.js";
 
 const OPUS = { provider: "anthropic", modelId: "claude-opus-4-8" };
@@ -124,10 +124,32 @@ test.describe("team_delegate — blocking one-shot (delegate parity)", () => {
 });
 
 test.describe("team_delegate — accountable kickoff author", () => {
-	test("real bare delegate persists its owner-agent author and reloads it without changing prompt bytes or role", async ({ gateway }) => {
-		const parent = await createSession();
+	test("renamed staff owner persists its current author and reloads it without changing prompt bytes or role", async ({ gateway }) => {
+		const project = await defaultProject();
+		const oldName = `Delegate Staff Old ${Date.now()}`;
+		const newName = `Delegate Staff New ${Date.now()}`;
+		const created = await apiFetch("/api/staff", {
+			method: "POST",
+			body: JSON.stringify({
+				name: oldName,
+				systemPrompt: "Own a delegate author regression.",
+				cwd: project.rootPath,
+				projectId: project.id,
+				worktree: false,
+			}),
+		});
+		expect(created.status, await created.clone().text()).toBe(201);
+		const staff = await created.json();
+		const parent = staff.currentSessionId as string;
 		let childId: string | undefined;
 		try {
+			const renamed = await apiFetch(`/api/staff/${staff.id}`, {
+				method: "PUT",
+				body: JSON.stringify({ name: newName }),
+			});
+			expect(renamed.status, await renamed.clone().text()).toBe(200);
+			expect(gateway.sessionManager.getSession(parent)?.title).toBe(oldName);
+
 			const { status, json } = await orchestrate(parent, "spawn", {
 				instructions: "delegate author lifecycle",
 			});
@@ -145,7 +167,7 @@ test.describe("team_delegate — accountable kickoff author", () => {
 			expect(binding).toMatchObject({
 				modelText: DELEGATE_KICKOFF,
 				source: "agent",
-				author: { kind: "agent", id: `session:${parent}` },
+				author: { kind: "agent", id: `staff:${staff.id}`, label: newName },
 				settlement: { outcome: "echoed" },
 			});
 
@@ -166,7 +188,7 @@ test.describe("team_delegate — accountable kickoff author", () => {
 			}
 		} finally {
 			if (childId) await orchestrate(parent, "dismiss", { childSessionId: childId }).catch(() => undefined);
-			await deleteSession(parent);
+			await apiFetch(`/api/staff/${staff.id}`, { method: "DELETE" }).catch(() => undefined);
 		}
 	});
 });

@@ -8893,6 +8893,13 @@ export class SessionManager {
 		return this.sessions.get(id);
 	}
 
+	/** Resolve the current accountable identity for an agent prompt producer. */
+	resolveSessionAgentAuthor(id: string): MessageAuthor | undefined {
+		const session = this.sessions.get(id);
+		if (!session) return undefined;
+		return agentAuthorForSession(session, this.messageAuthorDependencies(session));
+	}
+
 	/** Apply the single Bobbit-visible snapshot pipeline to Pi RPC/transcript data. */
 	buildVisibleMessageSnapshot<T>(id: string, snapshot: T): T {
 		const live = this.sessions.get(id);

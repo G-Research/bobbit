@@ -6,7 +6,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { PromptSource, SessionManager, SessionInfo } from "./session-manager.js";
-import { agentAuthorForSession } from "./message-author.js";
 import { isNonRetryableAgentError, isProviderBackoffError, isRetryableGenericAgentError, isTransientReviewError } from "./verification-logic.js";
 import { GoalManager } from "./goal-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
@@ -2272,12 +2271,12 @@ export class TeamManager {
 			const enrichedTask = workflowContext ? task + workflowContext : task;
 
 			// Send the team lead's task as the first prompt.
-			const ownerSession = entry.teamLeadSessionId
-				? this.sessionManager.getSession(entry.teamLeadSessionId)
+			const ownerAuthor = entry.teamLeadSessionId
+				? this.sessionManager.resolveSessionAgentAuthor(entry.teamLeadSessionId)
 				: undefined;
 			this.sessionManager.enqueuePrompt(session.id, enrichedTask, {
 				source: "agent",
-				author: ownerSession ? agentAuthorForSession(ownerSession) : undefined,
+				author: ownerAuthor,
 			}).catch((err: any) => {
 				console.error('[team-manager] Failed to send task prompt:', err);
 			});
