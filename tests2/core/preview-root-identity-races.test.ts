@@ -9,9 +9,12 @@ import {
 	walkTree,
 } from "../../src/server/agent/bounded-async-work.ts";
 import {
+	bindPreviewDirectoryRoot,
+	copyPreviewDirectory,
 	createPreviewAsyncFs,
 	movePreviewDirectoryContents,
 	PreviewMountError,
+	type BoundPreviewDirectoryRoot,
 	type PreviewAsyncFs,
 } from "../../src/server/preview/mount.ts";
 import {
@@ -33,6 +36,17 @@ function memfsAt(root: string): { memoryFs: typeof fs; asyncFs: PreviewAsyncFs }
 
 function resolved(value: fs.PathLike): string {
 	return path.resolve(String(value));
+}
+
+function deferred(): { promise: Promise<void>; resolve(): void } {
+	let resolve!: () => void;
+	const promise = new Promise<void>(settle => { resolve = settle; });
+	return { promise, resolve };
+}
+
+function isWithin(candidate: fs.PathLike, root: string): boolean {
+	const relative = path.relative(root, resolved(candidate));
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 afterEach(() => {
@@ -99,6 +113,96 @@ describe("preview root identity races", () => {
 			);
 			assert.equal(swapped, true);
 			assert.equal(fs.readFileSync(path.join(root, "EXTERNAL.txt"), "utf8"), "external-sentinel");
+		} finally {
+			fs.rmSync(parent, { recursive: true, force: true });
+		}
+	});
+
+	it("fences a deferred real-directory replacement before the first traversal lstat", async () => {
+		const parent = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-preview-bound-root-race-"));
+		const store = path.join(parent, "store");
+		const source = path.join(store, "source");
+		const detached = path.join(parent, "detached-source");
+		const replacement = path.join(parent, "replacement");
+		const destination = path.join(parent, "destination");
+		const sentinel = path.join(replacement, "EXTERNAL.txt");
+		fs.mkdirSync(source, { recursive: true });
+		fs.writeFileSync(path.join(source, "inside.txt"), "inside");
+		fs.mkdirSync(replacement);
+		fs.writeFileSync(sentinel, "external-sentinel");
+
+		const nativeFs = createPreviewAsyncFs(fs);
+		let replacementDirectoryOpens = 0;
+		let replacementDirectoryReads = 0;
+		let replacementSourceOpens = 0;
+		let replacementSourceByteReads = 0;
+		const observedFs: PreviewAsyncFs = {
+			...nativeFs,
+			opendir: async dirPath => {
+				const directory = await nativeFs.opendir(dirPath);
+				if (resolved(dirPath) !== resolved(source)) return directory;
+				replacementDirectoryOpens++;
+				return {
+					async read() {
+						replacementDirectoryReads++;
+						return directory.read();
+					},
+					close: () => directory.close(),
+				} as unknown as fs.Dir;
+			},
+			open: async (filePath, flags, mode) => {
+				const handle = await nativeFs.open(filePath, flags, mode);
+				if (!isWithin(filePath, source)) return handle;
+				replacementSourceOpens++;
+				return {
+					async read(...args: Parameters<typeof handle.read>) {
+						replacementSourceByteReads++;
+						return handle.read(...args);
+					},
+					write: (...args: Parameters<typeof handle.write>) => handle.write(...args),
+					stat: () => handle.stat(),
+					chmod: (mode: number) => handle.chmod(mode),
+					close: () => handle.close(),
+				} as unknown as fs.promises.FileHandle;
+			},
+		};
+
+		try {
+			const bound = await bindPreviewDirectoryRoot(source, { fs: observedFs, trustedRoot: store });
+			const boundaryReached = deferred();
+			const replacementInstalled = deferred();
+			let heldResolveAssertion = false;
+			const racedBound: BoundPreviewDirectoryRoot = {
+				...bound,
+				async assertCurrent() {
+					await bound.assertCurrent();
+					if (heldResolveAssertion) return;
+					heldResolveAssertion = true;
+					boundaryReached.resolve();
+					await replacementInstalled.promise;
+				},
+			};
+
+			const copying = copyPreviewDirectory(source, destination, {
+				fs: observedFs,
+				boundRoot: racedBound,
+				concurrency: 1,
+			});
+			await boundaryReached.promise;
+			await fs.promises.rename(source, detached);
+			await fs.promises.rename(replacement, source);
+			replacementInstalled.resolve();
+
+			await assert.rejects(
+				copying,
+				(error: unknown) => (error as NodeJS.ErrnoException).code === "ESTALE",
+			);
+			assert.equal(replacementDirectoryOpens, 0, "the replacement root must not be opened");
+			assert.equal(replacementDirectoryReads, 0, "the replacement directory must not be read");
+			assert.equal(replacementSourceOpens, 0, "no replacement visitor may open a source descriptor");
+			assert.equal(replacementSourceByteReads, 0, "no replacement source bytes may be read");
+			assert.equal(await fs.promises.readFile(path.join(source, "EXTERNAL.txt"), "utf8"), "external-sentinel");
+			assert.equal(await fs.promises.readFile(path.join(detached, "inside.txt"), "utf8"), "inside");
 		} finally {
 			fs.rmSync(parent, { recursive: true, force: true });
 		}

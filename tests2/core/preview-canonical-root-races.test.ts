@@ -10,6 +10,7 @@ import {
 } from "../../src/server/agent/bounded-async-work.ts";
 import {
 	acquirePreviewDirectoryRead,
+	bindPreviewDirectoryRoot,
 	copyPreviewDirectory,
 	createPreviewAsyncFs,
 	hashMountDirectory,
@@ -18,6 +19,7 @@ import {
 	markPreviewDirectoryVerified,
 	movePreviewDirectoryContents,
 	PreviewMountError,
+	type BoundPreviewDirectoryRoot,
 	type PreviewAsyncFs,
 } from "../../src/server/preview/mount.ts";
 import {
@@ -58,6 +60,12 @@ function memfsAt(root: string): { memoryFs: typeof fs; asyncFs: PreviewAsyncFs }
 
 function resolved(value: fs.PathLike): string {
 	return path.resolve(String(value));
+}
+
+function deferred(): { promise: Promise<void>; resolve(): void } {
+	let resolve!: () => void;
+	const promise = new Promise<void>(settle => { resolve = settle; });
+	return { promise, resolve };
 }
 
 afterEach(() => {
@@ -159,6 +167,78 @@ describe("preview canonical root and install races", () => {
 		assert.equal(directoryOpens, 0);
 		assert.equal(opens, 0);
 		assert.equal(memoryFs.readFileSync(path.join(outside, "EXTERNAL.txt"), "utf8"), "external-sentinel");
+	});
+
+	it("rejects a deferred symlink root replacement before traversal can adopt it", async () => {
+		const root = path.resolve("/memfs/deferred-symlink-root-race");
+		const { memoryFs, asyncFs } = memfsAt(root);
+		const store = path.join(root, "store");
+		const candidate = path.join(store, "candidate");
+		const detached = path.join(root, "detached-candidate");
+		const outside = path.join(root, "outside");
+		memoryFs.mkdirSync(candidate, { recursive: true });
+		memoryFs.writeFileSync(path.join(candidate, "inside.txt"), "inside");
+		memoryFs.mkdirSync(outside);
+		memoryFs.writeFileSync(path.join(outside, "EXTERNAL.txt"), "external-sentinel");
+
+		let boundaryReleased = false;
+		let replacementRootStats = 0;
+		let replacementDirectoryOpens = 0;
+		let replacementDirectoryReads = 0;
+		const observedFs: PreviewAsyncFs = {
+			...asyncFs,
+			lstat: async filePath => {
+				if (boundaryReleased && resolved(filePath) === resolved(candidate)) replacementRootStats++;
+				return asyncFs.lstat(filePath);
+			},
+			opendir: async dirPath => {
+				const directory = await asyncFs.opendir(dirPath);
+				if (resolved(dirPath) !== resolved(candidate)) return directory;
+				replacementDirectoryOpens++;
+				return {
+					async read() {
+						replacementDirectoryReads++;
+						return directory.read();
+					},
+					close: () => directory.close(),
+				} as unknown as fs.Dir;
+			},
+		};
+		const bound = await bindPreviewDirectoryRoot(candidate, { fs: observedFs, trustedRoot: store });
+		const boundaryReached = deferred();
+		const replacementInstalled = deferred();
+		let heldResolveAssertion = false;
+		const racedBound: BoundPreviewDirectoryRoot = {
+			...bound,
+			async assertCurrent() {
+				await bound.assertCurrent();
+				if (heldResolveAssertion) return;
+				heldResolveAssertion = true;
+				boundaryReached.resolve();
+				await replacementInstalled.promise;
+			},
+		};
+
+		const listing = listMountFiles(candidate, {
+			fs: observedFs,
+			boundRoot: racedBound,
+			concurrency: 1,
+		});
+		await boundaryReached.promise;
+		memoryFs.renameSync(candidate, detached);
+		memoryFs.symlinkSync(outside, candidate);
+		boundaryReleased = true;
+		replacementInstalled.resolve();
+
+		await assert.rejects(
+			listing,
+			(error: unknown) => (error as NodeJS.ErrnoException).code === "ESTALE",
+		);
+		assert.equal(replacementRootStats, 1, "the first traversal lstat must stop in its bound-root precheck");
+		assert.equal(replacementDirectoryOpens, 0, "the replacement symlink target must not be opened");
+		assert.equal(replacementDirectoryReads, 0, "the replacement symlink target must not be read");
+		assert.equal(memoryFs.readFileSync(path.join(outside, "EXTERNAL.txt"), "utf8"), "external-sentinel");
+		assert.equal(memoryFs.readFileSync(path.join(detached, "inside.txt"), "utf8"), "inside");
 	});
 
 	it("keeps preview list, hash, and copy candidates inside the canonical trusted store", async () => {

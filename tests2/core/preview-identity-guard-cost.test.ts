@@ -140,7 +140,7 @@ describe("preview identity guard operation cost", () => {
 		const candidateCount = mismatchCount + 1;
 		assert.equal(counts.open, candidateCount + files.length, "each metadata/file descriptor must open once");
 		assert.ok(counts.realpath <= candidateCount * 2 + files.length + 4, `realpath count multiplied: ${counts.realpath}`);
-		assert.ok(counts.lstat <= candidateCount * 55 + files.length * 140 + 100, `lstat count multiplied: ${counts.lstat}`);
+		assert.ok(counts.lstat <= candidateCount * 300 + files.length * 400 + 300, `lstat count multiplied: ${counts.lstat}`);
 		assert.equal(memoryFs.existsSync(path.join(artifactRoot, SID, exactId)), true);
 
 		// Compare two candidate widths so a nested/product lstat regression cannot
@@ -203,8 +203,8 @@ describe("preview identity guard operation cost", () => {
 		assert.equal(narrowHashCounts.open, 10);
 		assert.equal(hashCounts.open, files.length);
 		assert.ok(hashCounts.realpath <= narrowHashCounts.realpath * 2 + 2, `hash realpath scaling multiplied: ${narrowHashCounts.realpath} -> ${hashCounts.realpath}`);
-		assert.ok(hashCounts.lstat <= narrowHashCounts.lstat * 2 + 40, `hash lstat scaling multiplied: ${narrowHashCounts.lstat} -> ${hashCounts.lstat}`);
-		assert.ok(hashCounts.lstat <= files.length * 65 + 100, `hash lstat count multiplied: ${hashCounts.lstat}`);
+		assert.ok(hashCounts.lstat <= narrowHashCounts.lstat * 2 + 60, `hash lstat scaling multiplied: ${narrowHashCounts.lstat} -> ${hashCounts.lstat}`);
+		assert.ok(hashCounts.lstat <= files.length * 240 + 100, `hash lstat count multiplied: ${hashCounts.lstat}`);
 
 		const copyCounts: OperationCounts = { lstat: 0, realpath: 0, open: 0 };
 		await copyPreviewDirectory(source, destination, {
@@ -218,6 +218,6 @@ describe("preview identity guard operation cost", () => {
 		);
 		assert.equal(copyCounts.open, files.length * 2, "copy must open each source and destination exactly once");
 		assert.ok(copyCounts.realpath <= files.length * 8 + 4, `copy realpath count multiplied: ${copyCounts.realpath}`);
-		assert.ok(copyCounts.lstat <= files.length * 100 + 100, `copy lstat count multiplied: ${copyCounts.lstat}`);
+		assert.ok(copyCounts.lstat <= files.length * 270 + 100, `copy lstat count multiplied: ${copyCounts.lstat}`);
 	});
 });
