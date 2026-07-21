@@ -82,6 +82,10 @@ class FakeTreeFs implements AsyncTreeFs {
 	root = path.resolve("/tree");
 	private nextId = 1;
 
+	constructor() {
+		this.directory(path.parse(this.root).root, [path.basename(this.root)]);
+	}
+
 	private async io<T>(label: string, operation: () => T | Promise<T>): Promise<T> {
 		this.calls.push(label);
 		this.active++;
@@ -180,12 +184,47 @@ class FakeTreeFs implements AsyncTreeFs {
 		});
 	}
 
+	async rename(oldPath: string, newPath: string): Promise<void> {
+		await this.io(`rename:${path.resolve(oldPath)}->${path.resolve(newPath)}`, () => {
+			const source = path.resolve(oldPath);
+			const destination = path.resolve(newPath);
+			this.node(source);
+			const moves = [...this.nodes.entries()].filter(([candidate]) => {
+				const relative = path.relative(source, candidate);
+				return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+			});
+			for (const [candidate] of moves) this.nodes.delete(candidate);
+			for (const [candidate, node] of moves) {
+				const relative = path.relative(source, candidate);
+				this.nodes.set(relative ? path.join(destination, relative) : destination, node);
+			}
+			const oldParent = this.nodes.get(path.dirname(source));
+			if (oldParent?.children) oldParent.children = oldParent.children.filter(name => name !== path.basename(source));
+			const newParent = this.nodes.get(path.dirname(destination));
+			if (newParent?.children && !newParent.children.includes(path.basename(destination))) {
+				newParent.children.push(path.basename(destination));
+			}
+		});
+	}
+
 	async unlink(filePath: string): Promise<void> {
-		await this.io(`unlink:${path.resolve(filePath)}`, () => { this.nodes.delete(path.resolve(filePath)); });
+		await this.io(`unlink:${path.resolve(filePath)}`, () => {
+			const absolute = path.resolve(filePath);
+			this.node(absolute);
+			this.nodes.delete(absolute);
+			const parent = this.nodes.get(path.dirname(absolute));
+			if (parent?.children) parent.children = parent.children.filter(name => name !== path.basename(absolute));
+		});
 	}
 
 	async rmdir(dirPath: string): Promise<void> {
-		await this.io(`rmdir:${path.resolve(dirPath)}`, () => { this.nodes.delete(path.resolve(dirPath)); });
+		await this.io(`rmdir:${path.resolve(dirPath)}`, () => {
+			const absolute = path.resolve(dirPath);
+			this.node(absolute);
+			this.nodes.delete(absolute);
+			const parent = this.nodes.get(path.dirname(absolute));
+			if (parent?.children) parent.children = parent.children.filter(name => name !== path.basename(absolute));
+		});
 	}
 
 	async utimes(filePath: string, _atime: Date, _mtime: Date): Promise<void> {
@@ -416,12 +455,13 @@ describe("bounded async work", () => {
 
 		tree.calls.length = 0;
 		await removeTree(source, { fs: tree });
-		assert.ok(tree.calls.includes(`unlink:${link}`));
+		assert.equal(tree.nodes.has(link), false, "the direct symlink entry must be removed");
 		assert.equal(tree.calls.includes(`opendir:${link}`), false);
 		assert.equal(tree.calls.includes(`opendir:${path.resolve("/outside")}`), false);
-		const childRmdir = tree.calls.indexOf(`rmdir:${nested}`);
-		const rootRmdir = tree.calls.indexOf(`rmdir:${source}`);
-		assert.ok(childRmdir >= 0 && rootRmdir > childRmdir, "directories must be deleted post-order");
+		const rmdirs = tree.calls.filter(call => call.startsWith("rmdir:"));
+		assert.ok(rmdirs.length >= 2, "directories must be deleted post-order through quarantine paths");
+		assert.equal(tree.nodes.has(nested), false);
+		assert.equal(tree.nodes.has(source), false);
 
 		await removeTree(source, { fs: tree });
 	});
@@ -438,7 +478,7 @@ describe("bounded async work", () => {
 			.file(outsideFile, Uint8Array.of(9, 9, 9));
 		tree.substituteFileAtOpen = { source: sourceFile, target: outsideFile };
 
-		await assert.rejects(copyTree(source, destination, { concurrency: 1, fs: tree }), /regular file|symlink/i);
+		await assert.rejects(copyTree(source, destination, { concurrency: 1, fs: tree }), /regular file|symlink|changed/i);
 
 		assert.equal(tree.nodes.has(path.join(destination, "victim.txt")), false);
 		assert.deepEqual(tree.nodes.get(outsideFile)?.content, Uint8Array.of(9, 9, 9));

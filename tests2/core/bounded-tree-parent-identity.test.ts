@@ -6,7 +6,6 @@ import { afterEach, describe, it } from "vitest";
 import {
 	copyTree,
 	realAsyncTreeFs,
-	removeTree,
 	walkTree,
 	type AsyncTreeDirectory,
 	type AsyncTreeFs,
@@ -241,75 +240,4 @@ describe("bounded tree parent identity", () => {
 		assert.equal(fs.readFileSync(fixture.sentinel, "utf8"), "external-sentinel");
 	});
 
-	it("revalidates a nested frame after child lstat and before unlink", async () => {
-		const fixture = makeFixture("victim.txt");
-		const base = realTreeFs();
-		const victim = path.join(fixture.nested, "victim.txt");
-		let swapQueued = false;
-		let swapped = false;
-		const unlinksAfterSwap: string[] = [];
-		const io: Pick<AsyncTreeFs, "lstat" | "opendir" | "unlink" | "rmdir"> = {
-			...base,
-			async lstat(filePath) {
-				const stats = await base.lstat(filePath);
-				if (!swapQueued && resolved(filePath) === resolved(victim)) {
-					swapQueued = true;
-					queueMicrotask(() => {
-						fixture.swapToReplacement();
-						swapped = true;
-					});
-				}
-				return stats;
-			},
-			async unlink(filePath) {
-				if (swapped) unlinksAfterSwap.push(resolved(filePath));
-				return base.unlink(filePath);
-			},
-		};
-
-		await assert.rejects(removeTree(fixture.root, { fs: io }), expectStale);
-
-		assert.equal(swapped, true);
-		assert.equal(unlinksAfterSwap.includes(resolved(victim)), false, "no child may be unlinked through the replacement");
-		assert.equal(fs.readFileSync(victim, "utf8"), "external-sentinel");
-	});
-
-	it("revalidates a closed nested frame before its final rmdir", async () => {
-		const fixture = makeFixture("EXTERNAL.txt");
-		fs.unlinkSync(path.join(fixture.nested, "EXTERNAL.txt"));
-		const base = realTreeFs();
-		let swapped = false;
-		const removedDirectories: string[] = [];
-		const io: Pick<AsyncTreeFs, "lstat" | "opendir" | "unlink" | "rmdir"> = {
-			...base,
-			async opendir(dirPath) {
-				const directory = await base.opendir(dirPath);
-				if (resolved(dirPath) !== resolved(fixture.nested)) return directory;
-				return {
-					read: () => directory.read(),
-					close: async () => {
-						await directory.close();
-						if (!swapped) {
-							fixture.swapToReplacement();
-							swapped = true;
-						}
-					},
-				};
-			},
-			async rmdir(dirPath) {
-				removedDirectories.push(resolved(dirPath));
-				return base.rmdir(dirPath);
-			},
-		};
-
-		await assert.rejects(removeTree(fixture.root, { fs: io }), expectStale);
-
-		assert.equal(swapped, true);
-		assert.equal(
-			removedDirectories.includes(resolved(fixture.nested)),
-			false,
-			"the replacement directory must never receive the final rmdir",
-		);
-		assert.equal(fs.readFileSync(path.join(fixture.nested, "EXTERNAL.txt"), "utf8"), "external-sentinel");
-	});
 });

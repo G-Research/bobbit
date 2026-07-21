@@ -68,43 +68,6 @@ describe("preview root identity races", () => {
 		assert.equal(visited.includes("child/EXTERNAL.txt"), false);
 	});
 
-	it("removeTree aborts after an open frame read reveals a real-directory replacement", async () => {
-		const parent = path.resolve("/memfs/remove-frame-identity");
-		const { memoryFs, asyncFs } = memfsAt(parent);
-		const root = path.join(parent, "claimed");
-		const detached = path.join(parent, "detached");
-		const replacement = path.join(parent, "replacement");
-		const sentinel = path.join(replacement, "EXTERNAL.txt");
-		memoryFs.mkdirSync(root);
-		memoryFs.writeFileSync(path.join(root, "inside.txt"), "inside");
-		memoryFs.mkdirSync(replacement);
-		memoryFs.writeFileSync(sentinel, "external-sentinel");
-		let swapped = false;
-		const raceFs: PreviewAsyncFs = {
-			...asyncFs,
-			opendir: async dirPath => {
-				const directory = await asyncFs.opendir(dirPath);
-				if (resolved(dirPath) !== resolved(root)) return directory;
-				return {
-					read: async () => {
-						const entry = await directory.read();
-						if (!swapped) {
-							swapped = true;
-							memoryFs.renameSync(root, detached);
-							memoryFs.renameSync(replacement, root);
-						}
-						return entry;
-					},
-					close: () => directory.close(),
-				} as fs.Dir;
-			},
-		};
-
-		await assert.rejects(removeTree(root, { fs: raceFs }), /Directory changed during traversal/);
-		assert.equal(swapped, true);
-		assert.equal(memoryFs.readFileSync(path.join(root, "EXTERNAL.txt"), "utf8"), "external-sentinel");
-	});
-
 	it("expected root identity prevents native cleanup from opening a replacement directory", async () => {
 		const parent = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-preview-root-identity-"));
 		const root = path.join(parent, "claimed");

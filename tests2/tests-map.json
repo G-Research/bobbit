@@ -121,7 +121,16 @@
     },
     {
       "path": "tests2/core/bounded-tree-parent-identity.test.ts",
-      "reason": "Deterministic injected-filesystem regressions proving queued and local-DFS tree work retains its producing-parent identity, parent replacement cannot expose external entries to visitors/copy/hash, symlink ancestors are never traversed, and removal revalidates nested parents before unlink, child open, and final rmdir.",
+      "reason": "Deterministic injected-filesystem regressions proving queued and local-DFS tree work retains its producing-parent and operation-root identities, parent replacement cannot expose external entries to visitors/copy/hash, and symlink ancestors are never traversed.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/bounded-tree-quarantine-races.test.ts",
+      "reason": "Deterministic native and injected-filesystem races inside async visitors, readlink, opendir, rename, unlink, and rmdir prove full traversal claims fence copy/hash inputs, deletion detaches only verified identities into random same-parent quarantine paths, mismatched moves are restored without deletion, and preserveRoot detaches children while retaining the authorized root.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
