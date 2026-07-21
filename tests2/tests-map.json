@@ -2,9 +2,9 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1135,
+  "censusTotal": 1136,
   "buckets": {
-    "daily": 61,
+    "daily": 62,
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
@@ -15,7 +15,7 @@
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
-    "relocate": 46,
+    "relocate": 47,
     "rewrite": 145,
     "vitest-e2e": 2
   },
@@ -968,6 +968,33 @@
     {
       "path": "tests2/core/pi-rpc-agent-end-retry.test.ts",
       "reason": "Pi 0.80.5 RPC compatibility: retryable agent_end events carry willRetry=true before Pi internal auto-retry settles. Bobbit must not mark the session idle, drain queued prompts, revoke one-time grants, or resolve waitForIdle until the final non-retry agent_end.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/pi-published-shrinkwrap-security.test.ts",
+      "reason": "Deterministic fixture regression proving a dependency-owned published shrinkwrap can retain a vulnerable transitive pin despite a secure wrapper-checkout override, so consumer security validation must inspect published lock sources.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/pi-rpc-thinking-levels.test.ts",
+      "reason": "Pi 0.81 RPC compatibility coverage for the typed get_available_thinking_levels request, existing response correlation path, established state/model/thinking helpers, and restored legacy stream fallback.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/pi-tool-lifecycle-contract.test.ts",
+      "reason": "Pi 0.81 lifecycle contract coverage for typed tool call/result and execution start/update/end ordering, policy and steer boundaries, unchanged partial/final payload forwarding, error normalization, and optional usage/addedToolNames fields.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -4092,6 +4119,13 @@
         "tier": "unit",
         "project": "integration"
       }
+    },
+    {
+      "file": "tests/e2e/pi-packed-consumer.spec.ts",
+      "bucket": "daily",
+      "method": "relocate",
+      "replacement": [],
+      "rationale": "Real npm pack and clean-consumer install/audit coverage for dependency-owned shrinkwrap resolution, aligned Pi versions, secure brace-expansion edges, version-conditional protobufjs findings, and bundled fd/rg execution."
     },
     {
       "file": "tests/e2e/per-project-config-dirs.spec.ts",
