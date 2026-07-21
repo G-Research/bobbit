@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import {
 	copyTree,
 	realAsyncTreeFs,
@@ -11,11 +11,12 @@ import {
 	type AsyncTreeFs,
 } from "../../src/server/agent/bounded-async-work.ts";
 
-const cleanupRoots: string[] = [];
+let suiteRoot = "";
+let tempRootCounter = 0;
 
 function tempRoot(label: string): string {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-${label}-`));
-	cleanupRoots.push(root);
+	const root = path.join(suiteRoot, `${label}-${tempRootCounter++}`);
+	fs.mkdirSync(root);
 	return root;
 }
 
@@ -28,8 +29,12 @@ function isQuarantine(filePath: string): boolean {
 	return path.basename(filePath).startsWith(".bobbit-remove-");
 }
 
-afterEach(() => {
-	for (const root of cleanupRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+beforeAll(() => {
+	suiteRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-quarantine-races-"));
+});
+
+afterAll(() => {
+	fs.rmSync(suiteRoot, { recursive: true, force: true });
 });
 
 describe("bounded tree claim and quarantine races", () => {
