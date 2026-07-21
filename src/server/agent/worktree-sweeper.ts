@@ -13,19 +13,19 @@
  *   - A live record whose worktree path differs from git's tracking
  *     (rename-mid-shutdown) → repair via `git worktree repair`.
  *
- * The sweeper runs once at startup, before pool fill, so renamed-but-
- * orphaned worktrees from a crashed prior instance are reclaimed
- * cleanly. See docs/design/multi-repo-components.md §5.5 (historical) and
+ * The sweeper runs once after the listener starts and may overlap pool fill:
+ * pool branches are counted but never mutated here, so the branch sets remain
+ * disjoint. See docs/design/multi-repo-components.md §5.5 (historical) and
  * docs/design/remove-session-worktree-rename.md §13 (current post-upgrade
  * sweeper patterns: live `session-<id8>`, pool `pool-_pool-<id>`, legacy
  * `session-<slug>-<id8>` / `session-new-session-<id8>` orphan handling).
  */
 
 import { performance } from "node:perf_hooks";
-import fs from "node:fs";
 import path from "node:path";
-import { cleanupWorktree } from "../skills/git.js";
+import { cleanupWorktree, type RemoteGitPolicy } from "../skills/git.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
+import { mapWithConcurrency, RECOVERY_IO_CONCURRENCY, realRecoveryFs, type RecoveryFs } from "./bounded-async-work.js";
 import { isWorktreePathReferencedByLiveSession, normalizeWorktreeHostPath } from "./worktree-reference-guard.js";
 import { classifyPoolReclaimCandidate, isBobbitPoolBranch, isContainerInternalWorktreePath, parseGitWorktreeList } from "./worktree-inventory.js";
 import { worktreeRoot as resolveWorktreeRoot } from "../skills/worktree-paths.js";
@@ -84,6 +84,13 @@ export interface SweepRecord {
 	repoWorktrees?: Record<string, string>;
 }
 
+export interface SweepOwnership {
+	goals: readonly SweepRecord[];
+	sessions: readonly SweepRecord[];
+	teams?: readonly SweepRecord[];
+	staff: readonly SweepRecord[];
+}
+
 export interface SweepResult {
 	reclaimed: number;
 	cleaned: number;
@@ -94,14 +101,101 @@ type ParsedWorktree = ReturnType<typeof parseGitWorktreeList>[number];
 
 const normalize = normalizeWorktreeHostPath;
 
-function resolveSingleRepoRoot(projectRoot: string): string {
-	let current = path.resolve(projectRoot);
-	for (;;) {
-		if (fs.existsSync(path.join(current, ".git"))) return current;
-		const parent = path.dirname(current);
-		if (parent === current) return path.resolve(projectRoot);
-		current = parent;
+type SweepFs = Pick<RecoveryFs, "access">;
+type WorktreeCleanup = typeof cleanupWorktree;
+
+interface SweepRepo {
+	repoPath: string;
+	resolvedWorktreeRoot: string;
+}
+
+interface SweptWorktree extends ParsedWorktree {
+	repoPath: string;
+	resolvedWorktreeRoot: string;
+}
+
+interface OwnershipGuards {
+	ownedBranches: Set<string>;
+	ownedPaths: Set<string>;
+	archivedBranches: Set<string>;
+	teamContainerPaths: Set<string>;
+	branchToExpectedPath: Map<string, string>;
+	allRecords: SweepRecord[];
+}
+
+function buildOwnershipGuards(ownership: SweepOwnership): OwnershipGuards {
+	const ownedBranches = new Set<string>();
+	const ownedPaths = new Set<string>();
+	const archivedBranches = new Set<string>();
+	const teamContainerPaths = new Set<string>();
+	const branchToExpectedPath = new Map<string, string>();
+	const teamRecords = (ownership.teams ?? []).map(rec => ({ ...rec, archived: false }));
+	const teamIds = new Set(teamRecords.map(rec => rec.id));
+	const allRecords = [...ownership.goals, ...ownership.sessions, ...teamRecords, ...ownership.staff];
+	for (const rec of allRecords) {
+		if (rec.archived) {
+			if (rec.branch) archivedBranches.add(rec.branch);
+			continue;
+		}
+		if (rec.branch) ownedBranches.add(rec.branch);
+		const normalizedPath = normalize(rec.worktreePath);
+		if (normalizedPath) ownedPaths.add(normalizedPath);
+		const cwd = normalize(rec.cwd);
+		if (cwd) ownedPaths.add(cwd);
+		if (rec.branch && rec.worktreePath) branchToExpectedPath.set(rec.branch, rec.worktreePath);
+		// Durable team-agent records store the branch container, not per-repo
+		// worktrees. Protect component worktrees underneath that container.
+		if (normalizedPath && !rec.repoWorktrees && teamIds.has(rec.id)) teamContainerPaths.add(normalizedPath);
+		if (rec.repoWorktrees) {
+			for (const worktreePath of Object.values(rec.repoWorktrees)) {
+				const normalizedWorktreePath = normalize(worktreePath);
+				if (normalizedWorktreePath) ownedPaths.add(normalizedWorktreePath);
+			}
+		}
 	}
+	return { ownedBranches, ownedPaths, archivedBranches, teamContainerPaths, branchToExpectedPath, allRecords };
+}
+
+function ownershipForWorktree(
+	worktreePath: string,
+	branch: string | undefined,
+	guards: OwnershipGuards,
+): { ownedByBranch: boolean; ownedByPath: boolean; expectedPath?: string } {
+	const normalizedPath = normalize(worktreePath);
+	const ownedByBranch = !!(branch && guards.ownedBranches.has(branch));
+	let ownedByPath = !!normalizedPath && (
+		guards.ownedPaths.has(normalizedPath)
+		|| isWorktreePathReferencedByLiveSession(worktreePath, guards.allRecords)
+	);
+	if (!ownedByPath && normalizedPath) {
+		for (const container of guards.teamContainerPaths) {
+			if (normalizedPath.startsWith(`${container}/`)) {
+				ownedByPath = true;
+				break;
+			}
+		}
+	}
+	return {
+		ownedByBranch,
+		ownedByPath,
+		expectedPath: branch ? guards.branchToExpectedPath.get(branch) : undefined,
+	};
+}
+
+/**
+ * Git normally searches parent directories when cwd has no `.git` marker. Keep
+ * every sweeper command fenced to the configured repo even if the marker is
+ * removed between the asynchronous policy check and process start.
+ */
+function gitOptions(repoPath: string, timeout: number): Record<string, unknown> {
+	return {
+		cwd: repoPath,
+		timeout,
+		env: {
+			...process.env,
+			GIT_CEILING_DIRECTORIES: path.dirname(path.resolve(repoPath)),
+		},
+	};
 }
 
 /**
@@ -117,8 +211,19 @@ export async function sweepOrphanedWorktrees(opts: {
 	teams?: SweepRecord[];
 	staff: SweepRecord[];
 	commandRunner?: CommandRunner;
+	remotePolicy?: RemoteGitPolicy;
+	fs?: SweepFs;
+	/** Focused test seam; production always uses the shared cleanup helper. */
+	cleanupWorktreeImpl?: WorktreeCleanup;
+	/**
+	 * Return a fresh view of every durable owner. Called synchronously in the
+	 * uninterrupted turn immediately before each repair or cleanup mutation.
+	 */
+	getCurrentOwnership?: () => SweepOwnership;
 }): Promise<SweepResult> {
 	const commandRunner = opts.commandRunner ?? realCommandRunner;
+	const sweepFs = opts.fs ?? realRecoveryFs;
+	const cleanup = opts.cleanupWorktreeImpl ?? cleanupWorktree;
 	const diagEnabled = cpuDiagnosticsEnabled();
 	const diagStart = diagEnabled ? performance.now() : 0;
 	const diagCounters = diagEnabled ? {
@@ -130,154 +235,200 @@ export async function sweepOrphanedWorktrees(opts: {
 		repaired: 0,
 		errors: 0,
 	} : undefined;
-	let reclaimed = 0;
-	let cleaned = 0;
-	let repaired = 0;
 
 	try {
-		// Build the set of branches/paths owned by live records plus durable
-		// archived branch references that must survive orphan worktree cleanup.
-		const ownedBranches = new Set<string>();
-		const ownedPaths = new Set<string>();
-		const archivedBranches = new Set<string>();
-		const teamContainerPaths = new Set<string>();
-		const branchToExpectedPath = new Map<string, string>();
-		const teamRecords = (opts.teams ?? []).map(rec => ({ ...rec, archived: false }));
-		const allRecords = [...opts.goals, ...opts.sessions, ...teamRecords, ...opts.staff];
-		for (const rec of allRecords) {
-			if (rec.archived) {
-				if (rec.branch) archivedBranches.add(rec.branch);
-				continue;
-			}
-			if (rec.branch) ownedBranches.add(rec.branch);
-			const np = normalize(rec.worktreePath);
-			if (np) ownedPaths.add(np);
-			const cwd = normalize(rec.cwd);
-			if (cwd) ownedPaths.add(cwd);
-			if (rec.branch && rec.worktreePath) branchToExpectedPath.set(rec.branch, rec.worktreePath);
-			// Durable team-agent records store the branch container, not per-repo
-			// worktrees. Protect component worktrees underneath that container.
-			if (np && !rec.repoWorktrees && teamRecords.some(team => team.id === rec.id)) teamContainerPaths.add(np);
-			// Multi-repo: each per-repo worktree is separately owned. The branch is
-			// shared across repos so we only add to ownedPaths.
-			if (rec.repoWorktrees) {
-				for (const wp of Object.values(rec.repoWorktrees)) {
-					const n = normalize(wp);
-					if (n) ownedPaths.add(n);
-				}
-			}
+		// Keep the initial snapshot for deterministic candidate classification and
+		// counts. Mutable ownership is rebuilt again at each mutation boundary.
+		const initialOwnership: SweepOwnership = {
+			goals: opts.goals,
+			sessions: opts.sessions,
+			teams: opts.teams,
+			staff: opts.staff,
+		};
+		const initialGuards = buildOwnershipGuards(initialOwnership);
+		const currentOwnershipGuards = (): OwnershipGuards => buildOwnershipGuards(
+			opts.getCurrentOwnership ? opts.getCurrentOwnership() : initialOwnership,
+		);
+
+		// Resolve paths without walking upward. The caller supplies the actual Git
+		// root for subdirectory projects; every configured repo must have its own
+		// `.git` marker before Git is allowed to inspect it.
+		const repos: SweepRepo[] = [];
+		for (const project of opts.projects) {
+			if (!project.rootPath) continue;
+			const singleRepoRoot = path.resolve(project.rootPath);
+			const isMultiRepo = !!project.repos?.some(repo => repo !== ".");
+			const resolvedWorktreeRoot = resolveWorktreeRoot({
+				rootPath: isMultiRepo ? project.rootPath : singleRepoRoot,
+				worktreeRoot: project.worktreeRoot,
+			});
+			const repoPaths = project.repos?.length
+				? project.repos.map(repo => repo === "." ? singleRepoRoot : path.join(project.rootPath, repo))
+				: [singleRepoRoot];
+			for (const repoPath of repoPaths) repos.push({ repoPath, resolvedWorktreeRoot });
 		}
 
-		for (const project of opts.projects) {
-			if (!project.rootPath || !fs.existsSync(project.rootPath)) continue;
-			const singleRepoRoot = resolveSingleRepoRoot(project.rootPath);
-			const isMultiRepo = !!project.repos?.some(r => r !== ".");
-			const resolvedWorktreeRoot = resolveWorktreeRoot({ rootPath: isMultiRepo ? project.rootPath : singleRepoRoot, worktreeRoot: project.worktreeRoot });
-
-			// Multi-repo: enumerate per-repo worktrees so each repo's git metadata
-			// is reconciled against the goal/session/staff record map. Single-repo
-			// projects use the actual git root, which may be above project.rootPath.
-			const repoList = (project.repos && project.repos.length > 0)
-				? project.repos.map(r => r === "." ? singleRepoRoot : path.join(project.rootPath, r))
-				: [singleRepoRoot];
-
-			const worktrees: Array<ParsedWorktree & { repoPath: string }> = [];
-			for (const repoPath of repoList) {
-				if (diagCounters) diagCounters.reposScanned++;
-				if (!fs.existsSync(repoPath)) continue;
-				// Only sweep if THIS directory is itself a git repo (has its own .git).
-				// Without this check, `git worktree list` walks upward to find a parent
-				// repo and returns the parent's worktrees — which the sweeper would
-				// then try to clean. Catastrophic if rootPath is, say, a test fixture
-				// nested inside a real bobbit checkout.
-				if (!fs.existsSync(path.join(repoPath, ".git"))) continue;
-				try {
-					const { stdout } = await execGit(["worktree", "list", "--porcelain"], {
-						cwd: repoPath,
-						timeout: 10_000,
-					}, commandRunner);
-					for (const wt of parseGitWorktreeList(stdout)) {
-						worktrees.push({ ...wt, repoPath });
-						if (diagCounters) diagCounters.worktreesSeen++;
-					}
-				} catch {
-					// Not a git repo, or git unavailable — skip this repo.
-				}
+		// Scan repos concurrently under one shared ceiling. Result slots preserve
+		// configured project/repo order even when the underlying I/O resolves out
+		// of order. The Git ceiling also closes the `.git` check/start race.
+		const scans = await mapWithConcurrency(repos, RECOVERY_IO_CONCURRENCY, async (repo): Promise<SweptWorktree[]> => {
+			if (diagCounters) diagCounters.reposScanned++;
+			try {
+				await sweepFs.access(path.join(repo.repoPath, ".git"));
+			} catch {
+				return [];
 			}
+			try {
+				const { stdout } = await execGit(
+					["worktree", "list", "--porcelain"],
+					gitOptions(repo.repoPath, 10_000),
+					commandRunner,
+				);
+				const worktrees = parseGitWorktreeList(stdout).map(wt => ({ ...wt, ...repo }));
+				if (diagCounters) diagCounters.worktreesSeen += worktrees.length;
+				return worktrees;
+			} catch {
+				// Not a git repo, or git unavailable — skip this repo.
+				return [];
+			}
+		});
 
+		type SweepOutcome =
+			| { kind: "none" }
+			| { kind: "reclaimed" }
+			| { kind: "repaired" }
+			| { kind: "cleaned"; worktree: SweptWorktree; branch: string }
+			| { kind: "cleanup-error"; worktree: SweptWorktree; error: unknown };
+
+		// Reconcile different repos in parallel, but keep worktrees within one repo
+		// sequential. This avoids concurrent Git metadata mutations in the same repo
+		// and prevents nested concurrency multiplication.
+		const outcomesByRepo = await mapWithConcurrency(scans, RECOVERY_IO_CONCURRENCY, async (worktrees): Promise<SweepOutcome[]> => {
+			const outcomes: SweepOutcome[] = [];
 			for (const wt of worktrees) {
 				const wtPathNorm = normalize(wt.path);
-				if (!wtPathNorm) continue;
-
-				// Skip the primary worktree(s) of any configured repo.
-				if (wtPathNorm === normalize(wt.repoPath)) continue;
+				if (!wtPathNorm || wtPathNorm === normalize(wt.repoPath)) {
+					outcomes.push({ kind: "none" });
+					continue;
+				}
 
 				const branch = wt.branch;
-
-				// Container-internal paths are not host cleanup targets.
-				if (isContainerInternalWorktreePath(wt.path)) continue;
-
-				// Pool branch — leave for `WorktreePool.reclaimOrphaned` to absorb.
-				// Use the same branch/root/path classifier primitives as maintenance.
-				if (branch && isBobbitPoolBranch(branch)) {
-					const poolVerdict = classifyPoolReclaimCandidate({ resolvedWorktreeRoot, candidatePath: wt.path, branch, gitMetadataExists: true });
-					if (poolVerdict.eligible || poolVerdict.reason === "filesystem-only-needs-attention") {
-						reclaimed++;
-						if (diagCounters) diagCounters.reclaimed++;
-					}
+				if (isContainerInternalWorktreePath(wt.path)) {
+					outcomes.push({ kind: "none" });
 					continue;
 				}
 
-				// Active record owns this worktree (by branch or path).
-				const ownedByBranch = !!(branch && ownedBranches.has(branch));
-				let ownedByPath = ownedPaths.has(wtPathNorm) || isWorktreePathReferencedByLiveSession(wt.path, allRecords);
-				if (!ownedByPath) for (const container of teamContainerPaths) if (wtPathNorm.startsWith(`${container}/`)) { ownedByPath = true; break; }
+				// Pool branches belong exclusively to WorktreePool.reclaimOrphaned.
+				if (branch && isBobbitPoolBranch(branch)) {
+					const verdict = classifyPoolReclaimCandidate({
+						resolvedWorktreeRoot: wt.resolvedWorktreeRoot,
+						candidatePath: wt.path,
+						branch,
+						gitMetadataExists: true,
+					});
+					outcomes.push(verdict.eligible || verdict.reason === "filesystem-only-needs-attention"
+						? { kind: "reclaimed" }
+						: { kind: "none" });
+					continue;
+				}
 
-				if (ownedByBranch || ownedByPath) {
-					// Multi-repo: a per-repo path explicitly listed in any record's
-					// `repoWorktrees` is active in this repo — do NOT treat path drift
-					// against the record's flat container path as a repair signal.
-					if (ownedByPath) {
+				const initialOwnershipState = ownershipForWorktree(wt.path, branch, initialGuards);
+				if (initialOwnershipState.ownedByBranch || initialOwnershipState.ownedByPath) {
+					// Explicit path ownership wins over flat-container drift detection for
+					// multi-repo worktrees and shared/live-session references.
+					if (initialOwnershipState.ownedByPath) {
+						outcomes.push({ kind: "none" });
 						continue;
 					}
-					// Path drift — record says worktree is at X, git says it's at Y.
-					// Try `git worktree repair` to bring them back into sync.
-					if (ownedByBranch && branch) {
-						const expected = branchToExpectedPath.get(branch);
+					if (initialOwnershipState.ownedByBranch && branch) {
+						const expected = initialOwnershipState.expectedPath;
 						if (expected && normalize(expected) !== wtPathNorm) {
 							try {
-								await execGit(["worktree", "repair", wt.path], {
-									cwd: wt.repoPath,
-									timeout: 15_000,
-								});
-								repaired++;
-								if (diagCounters) diagCounters.repaired++;
+								// A new path/repo/team owner, archive, or changed branch owner
+								// can appear while the async repo scan is pending. Rebuild every
+								// guard in the same turn that starts the repair mutation.
+								const currentGuards = currentOwnershipGuards();
+								const current = ownershipForWorktree(wt.path, branch, currentGuards);
+								if (current.ownedByPath || !current.ownedByBranch || !current.expectedPath || normalize(current.expectedPath) === wtPathNorm) {
+									outcomes.push({ kind: "none" });
+									continue;
+								}
+								await execGit(
+									["worktree", "repair", wt.path],
+									gitOptions(wt.repoPath, 15_000),
+									commandRunner,
+								);
+								outcomes.push({ kind: "repaired" });
 							} catch {
-								// Repair failed — leave as-is; the running session will
-								// surface its own error if it tries to use a stale path.
+								// A live owner keeps the worktree even when revalidation or repair fails.
+								outcomes.push({ kind: "none" });
 							}
+							continue;
 						}
 					}
+					outcomes.push({ kind: "none" });
 					continue;
 				}
 
-				// No owner — branch is from a pre-rename crash or stale pool entry.
-				// Skip session/goal/* prefixed branches whose owner record may have
-				// been deleted; cleanup is harmless because the branch is unowned.
-				if (!branch) continue; // detached worktree; leave alone.
+				if (!branch) {
+					outcomes.push({ kind: "none" });
+					continue;
+				}
 
 				try {
-					await cleanupWorktree(wt.repoPath, wt.path, branch, !archivedBranches.has(branch), commandRunner);
-					cleaned++;
-					if (diagCounters) diagCounters.cleaned++;
-					console.log(`[sweeper] Cleaned orphan worktree: ${wt.path} (branch: ${branch}, repo: ${wt.repoPath})`);
-				} catch (err) {
-					if (diagCounters) diagCounters.errors++;
-					console.warn(`[sweeper] Failed to clean orphan worktree ${wt.path}:`, err);
+					// The scan intentionally starts from a stable snapshot, but cleanup
+					// authorization must be live: session creation remains available while
+					// this post-listen sweep yields on filesystem and Git work.
+					const currentGuards = currentOwnershipGuards();
+					const current = ownershipForWorktree(wt.path, branch, currentGuards);
+					if (current.ownedByBranch || current.ownedByPath) {
+						outcomes.push({ kind: "none" });
+						continue;
+					}
+					await cleanup(
+						wt.repoPath,
+						wt.path,
+						branch,
+						!initialGuards.archivedBranches.has(branch) && !currentGuards.archivedBranches.has(branch),
+						commandRunner,
+						opts.remotePolicy,
+					);
+					outcomes.push({ kind: "cleaned", worktree: wt, branch });
+				} catch (error) {
+					outcomes.push({ kind: "cleanup-error", worktree: wt, error });
+				}
+			}
+			return outcomes;
+		});
+
+		let reclaimed = 0;
+		let cleaned = 0;
+		let repaired = 0;
+		for (const outcomes of outcomesByRepo) {
+			for (const outcome of outcomes) {
+				switch (outcome.kind) {
+					case "reclaimed":
+						reclaimed++;
+						if (diagCounters) diagCounters.reclaimed++;
+						break;
+					case "repaired":
+						repaired++;
+						if (diagCounters) diagCounters.repaired++;
+						break;
+					case "cleaned":
+						cleaned++;
+						if (diagCounters) diagCounters.cleaned++;
+						console.log(`[sweeper] Cleaned orphan worktree: ${outcome.worktree.path} (branch: ${outcome.branch}, repo: ${outcome.worktree.repoPath})`);
+						break;
+					case "cleanup-error":
+						if (diagCounters) diagCounters.errors++;
+						console.warn(`[sweeper] Failed to clean orphan worktree ${outcome.worktree.path}:`, outcome.error);
+						break;
+					case "none":
+						break;
 				}
 			}
 		}
-
 		return { reclaimed, cleaned, repaired };
 	} finally {
 		if (diagEnabled) getCpuDiagnostics().recordTimer("worktree-sweeper:sweep", performance.now() - diagStart, diagCounters);
@@ -299,28 +450,7 @@ export function classifyWorktrees(opts: {
 	repair: ParsedWorktree[];
 } {
 	const all = parseGitWorktreeList(opts.porcelainStdout);
-	const ownedBranches = new Set<string>();
-	const ownedPaths = new Set<string>();
-	const teamContainerPaths = new Set<string>();
-	const branchToExpectedPath = new Map<string, string>();
-	const teamRecords = (opts.teams ?? []).map(rec => ({ ...rec, archived: false }));
-	const allRecords = [...opts.goals, ...opts.sessions, ...teamRecords, ...opts.staff];
-	for (const rec of allRecords) {
-		if (rec.archived) continue;
-		if (rec.branch) ownedBranches.add(rec.branch);
-		const np = normalize(rec.worktreePath);
-		if (np) ownedPaths.add(np);
-		const cwd = normalize(rec.cwd);
-		if (cwd) ownedPaths.add(cwd);
-		if (rec.branch && rec.worktreePath) branchToExpectedPath.set(rec.branch, rec.worktreePath);
-		if (np && !rec.repoWorktrees && teamRecords.some(team => team.id === rec.id)) teamContainerPaths.add(np);
-		if (rec.repoWorktrees) {
-			for (const wp of Object.values(rec.repoWorktrees)) {
-				const n = normalize(wp);
-				if (n) ownedPaths.add(n);
-			}
-		}
-	}
+	const guards = buildOwnershipGuards(opts);
 	const pool: ParsedWorktree[] = [];
 	const active: ParsedWorktree[] = [];
 	const orphan: ParsedWorktree[] = [];
@@ -333,19 +463,17 @@ export function classifyWorktrees(opts: {
 			pool.push(wt);
 			continue;
 		}
-		const ownedByBranch = !!(wt.branch && ownedBranches.has(wt.branch));
-		let ownedByPath = !!wtPathNorm && (ownedPaths.has(wtPathNorm) || isWorktreePathReferencedByLiveSession(wt.path, allRecords));
-		if (!ownedByPath && wtPathNorm) for (const container of teamContainerPaths) if (wtPathNorm.startsWith(`${container}/`)) { ownedByPath = true; break; }
-		if (ownedByBranch || ownedByPath) {
+		const ownership = ownershipForWorktree(wt.path, wt.branch, guards);
+		if (ownership.ownedByBranch || ownership.ownedByPath) {
 			// Multi-repo: a per-repo path explicitly listed in any record's
 			// `repoWorktrees` map is active even if it differs from the record's
 			// flat `worktreePath` (which holds the container in multi-repo mode).
-			if (ownedByPath) {
+			if (ownership.ownedByPath) {
 				active.push(wt);
 				continue;
 			}
-			if (ownedByBranch && wt.branch) {
-				const expected = branchToExpectedPath.get(wt.branch);
+			if (ownership.ownedByBranch && wt.branch) {
+				const expected = ownership.expectedPath;
 				if (expected && normalize(expected) !== wtPathNorm) {
 					repair.push(wt);
 					continue;

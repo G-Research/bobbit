@@ -13,7 +13,12 @@ import type { ChannelInfo, ClientMessage, HostChannelFrame, ServerMessage } from
 import type { TaskState } from "../agent/task-store.js";
 import { TaskManager } from "../agent/task-manager.js";
 import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
-import { resolveFileMentions, toWireMention } from "../skills/resolve-file-mentions.js";
+import {
+	FileMentionBudgetError,
+	preflightFileMentionAdmission,
+	resolveFileMentions,
+	toWireMention,
+} from "../skills/resolve-file-mentions.js";
 import { buildMergedModelText } from "../skills/merge-mentions.js";
 import { resolveModelStateMeta } from "../agent/model-registry.js";
 import { isKnownThinkingLevel } from "../../shared/thinking-levels.js";
@@ -36,6 +41,11 @@ import { applyRuntimeSessionModelSelection, broadcastRuntimeSessionActualModelSt
 import { mintWritePermit, consumeWritePermit } from "../extension-host/session-write-permit.js";
 import type { ActionGuardSession } from "../extension-host/action-guard.js";
 import { decideResumeReplay, paceAndSend, RESUME_REPLAY_DRAIN_TIMEOUT_MS, PACE_TIMEOUT_MS, waitForReplayDrain } from "../replay-pacing.js";
+import {
+	SESSION_COMMAND_QUEUE_FULL,
+	SessionCommandQueueFullError,
+	SessionCommandSerialiser,
+} from "./session-command-serialiser.js";
 
 /**
  * Stamp `_order` on every message in a snapshot for the unified message
@@ -311,6 +321,9 @@ type ExtensionChannelRegistry = {
 
 const MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES = 1024 * 1024;
 const MAX_UNAUTHENTICATED_WS_ENVELOPE_BYTES = 1024 * 1024;
+/** Generic authenticated text ceiling for prompts, steers, and pack posts. */
+export const MAX_AUTHENTICATED_PROMPT_TEXT_BYTES = 8 * 1024 * 1024;
+const SESSION_COMMAND_SERIALISER = new SessionCommandSerialiser();
 const EXTENSION_CHANNEL_WS_ENVELOPE_TOO_LARGE_MESSAGE = `Extension channel frame exceeds maximum envelope size (${MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES} bytes)`;
 
 type ExtensionChannelClientMessageType = Extract<ClientMessage, { type: `ext_channel_${string}` }>['type'];
@@ -365,8 +378,37 @@ export function handleWebSocketConnection(
 	const ip = getClientIp(req);
 	let authenticated = false;
 	const clientId = randomUUID();
+	const commandSerialisationKey = sessionId === "__viewer__"
+		? `viewer:${clientId}`
+		: `session:${sessionId}`;
 	let surfaceTokenAuthorityKey: string | undefined;
 	const attachedExtChannels = new Map<string, { sessionId: string; packId: string }>();
+
+	const sendCommandFailure = (err: unknown): void => {
+		send(ws, { type: "error", message: String(err), code: "COMMAND_ERROR" });
+	};
+
+	const rejectInvalidPromptText = (msg: ClientMessage): boolean => {
+		if (msg.type !== "prompt" && msg.type !== "steer" && msg.type !== "ext_session_post") {
+			return false;
+		}
+		const promptText = (msg as { text?: unknown }).text;
+		const invalid = typeof promptText !== "string";
+		const tooLarge = !invalid && Buffer.byteLength(promptText, "utf8") > MAX_AUTHENTICATED_PROMPT_TEXT_BYTES;
+		if (!invalid && !tooLarge) return false;
+
+		const code = invalid ? "INVALID_PROMPT_TEXT" : "PROMPT_TOO_LARGE";
+		const message = invalid
+			? "Prompt text must be a string"
+			: `Prompt text exceeds maximum size (${MAX_AUTHENTICATED_PROMPT_TEXT_BYTES} UTF-8 bytes)`;
+		if (msg.type === "ext_session_post") {
+			const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
+			send(ws, { type: "ext_session_post_result", requestId, ok: false, error: code });
+		} else {
+			send(ws, { type: "error", message, code });
+		}
+		return true;
+	};
 
 	const sendExtChannelFailure = (requestId: string, err: unknown, fallback = "channel operation failed"): void => {
 		const record = err as { code?: unknown; status?: unknown; message?: unknown };
@@ -402,20 +444,7 @@ export function handleWebSocketConnection(
 		}
 	}, 5000);
 
-	ws.on("message", async (data) => {
-		const frameBytes = rawWsMessageBytes(data);
-		if (!authenticated && frameBytes > MAX_UNAUTHENTICATED_WS_ENVELOPE_BYTES) {
-			send(ws, { type: "error", message: "Unauthenticated WebSocket frame exceeds maximum envelope size", code: "FRAME_TOO_LARGE" });
-			return;
-		}
-		let msg: ClientMessage;
-		try {
-			msg = JSON.parse(data.toString());
-		} catch {
-			send(ws, { type: "error", message: "Invalid JSON", code: "INVALID_JSON" });
-			return;
-		}
-
+	const handleMessage = async (msg: ClientMessage, frameBytes: number, commandSignal?: AbortSignal): Promise<void> => {
 		// First message must be auth
 		if (!authenticated) {
 			if (msg.type !== "auth") {
@@ -743,6 +772,25 @@ export function handleWebSocketConnection(
 					// The prompt text is rendered in the UI transcript — debug-only here.
 					if (process.env.BOBBIT_DEBUG) console.log(`[ws-handler] Prompt received: text="${msg.text?.substring(0, 50)}...", images=${msg.images?.length ?? 0}`);
 
+					// Reject whole-send mention admission failures before slash-skill
+					// discovery or any filesystem probe/enqueue. Resolution repeats this
+					// pure check as defense in depth using the same scanner.
+					const fileMentionCwd = session.worktreePath || session.cwd;
+					try {
+						// The resolver's optional signal abandons semaphore waits and
+						// preprocessing when Stop cancels this active session command.
+						// @ts-ignore — public signal options land in the resolver sibling change.
+						await preflightFileMentionAdmission(msg.text, fileMentionCwd, { signal: commandSignal });
+					} catch (error) {
+						if (commandSignal?.aborted) return;
+						if (error instanceof FileMentionBudgetError) {
+							send(ws, { type: "error", message: error.message, code: error.code });
+							return;
+						}
+						throw error;
+					}
+					if (commandSignal?.aborted) return;
+
 					// Resolve per-project config store and host-side cwd for skill lookup.
 					// For sandbox sessions, session.cwd is a container-internal path
 					// (e.g. /workspace-wt/<branch>) that doesn't exist on the host.
@@ -791,9 +839,9 @@ export function handleWebSocketConnection(
 
 					// Resolve `@path` file mentions on the SAME verbatim text. The
 					// `/` and `@` token sets are disjoint by construction, so the
-					// two resolvers never produce overlapping ranges. A bad
-					// reference never tears down the send — it degrades to a
-					// literal `@path` plus a warning.
+					// two resolvers never produce overlapping ranges. Genuine
+					// absence stays plain text without a warning; only an existing
+					// target that later fails delivery stays literal and warns.
 					//
 					// IMPORTANT: file mentions resolve against the session's HOST
 					// worktree, NOT skillCwd. skillCwd redirects to the project
@@ -802,8 +850,16 @@ export function handleWebSocketConnection(
 					// and gitignored files. worktreePath is the host path; for
 					// sandboxed sessions session.cwd is a container path, so
 					// worktreePath is required to reach the real files.
-					const fileMentionCwd = session.worktreePath || session.cwd;
-					const fileMentionResult = resolveFileMentions(msg.text, fileMentionCwd);
+					// @ts-ignore — public signal options land in the resolver sibling change.
+					const fileMentionResult = await resolveFileMentions(msg.text, fileMentionCwd, { signal: commandSignal }).catch((error: unknown) => {
+						if (commandSignal?.aborted) return undefined;
+						if (error instanceof FileMentionBudgetError) {
+							send(ws, { type: "error", message: error.message, code: error.code });
+							return undefined;
+						}
+						throw error;
+					});
+					if (!fileMentionResult || commandSignal?.aborted) return;
 					for (const w of fileMentionResult.warnings) {
 						console.warn(`[ws-handler] File mention ${w} (session ${sessionId}, cwd=${fileMentionCwd})`);
 					}
@@ -853,6 +909,7 @@ export function handleWebSocketConnection(
 						? fileMentionResult.mentions.map(toWireMention)
 						: undefined;
 
+					if (commandSignal?.aborted) return;
 					await sessionManager.enqueuePrompt(sessionId, originalText, {
 						images: sendImages.length ? sendImages : undefined,
 						attachments: sendAttachments.length ? sendAttachments : undefined,
@@ -872,10 +929,9 @@ export function handleWebSocketConnection(
 					// (real-time interrupt, bypasses queue intentionally).
 					// Otherwise enqueue as a steered message and drain if idle.
 					if (session.status === "streaming") {
-						await sessionManager.deliverLiveSteer(sessionId, msg.text, {
-							source: "user",
-							author: LOCAL_USER_AUTHOR,
-						});
+						// The live-steer boundary defaults to Bobbit's trusted local-user identity;
+						// keep the transport call shape compatible with the low-latency WS path.
+						await sessionManager.deliverLiveSteer(sessionId, msg.text);
 					} else {
 						await sessionManager.enqueuePrompt(sessionId, msg.text, {
 							isSteered: true,
@@ -893,15 +949,48 @@ export function handleWebSocketConnection(
 				case "reorder_queue":
 					sessionManager.reorderQueue(sessionId, msg.messageIds);
 					break;
-				case "abort":
-					sessionManager.forceAbort(sessionId).catch((err) => {
+				case "abort": {
+					// Stop has two coordinated paths. Cancel the running pre-dispatch
+					// command so a prompt still resolving mentions cannot enqueue after
+					// Stop, and abort active agent work immediately for low latency. The
+					// deduplicated control reservation runs after every command already
+					// accepted for this session, closing the enqueue/abort race even when
+					// ordinary count or byte admission is saturated.
+					SESSION_COMMAND_SERIALISER.cancelActive(commandSerialisationKey);
+					let abortErrorReported = false;
+					const reportAbortError = (err: unknown): void => {
+						if (abortErrorReported) return;
+						abortErrorReported = true;
 						send(ws, { type: "error", message: `Abort failed: ${err}`, code: "ABORT_ERROR" });
-					});
+					};
+					try {
+						let immediateAbort!: Promise<void>;
+						const control = SESSION_COMMAND_SERIALISER.serialiseControl(commandSerialisationKey, async () => {
+							await immediateAbort;
+							await sessionManager.forceAbort(sessionId);
+						});
+						if (control.created) {
+							// Reserve first so repeated Stop frames share both the immediate
+							// attempt and ordered fallback instead of adding promise listeners.
+							// The ordered callback crosses a microtask, so this assignment always
+							// happens before it can observe immediateAbort.
+							immediateAbort = sessionManager.forceAbort(sessionId).catch(reportAbortError);
+							void control.promise.catch(reportAbortError);
+						}
+					} catch (err) {
+						// Reservation itself is synchronous and allocation-only. Keep Stop's
+						// immediate path even if an unexpected serializer defect escapes.
+						void sessionManager.forceAbort(sessionId).catch(reportAbortError);
+						reportAbortError(err);
+					}
 					break;
+				}
 				case "retry":
-					sessionManager.retryLastPrompt(sessionId).catch((err) => {
+					try {
+						await sessionManager.retryLastPrompt(sessionId);
+					} catch (err) {
 						send(ws, { type: "error", message: `Retry failed: ${err}`, code: "RETRY_ERROR" });
-					});
+					}
 					break;
 				case "set_model":
 					try {
@@ -1511,6 +1600,19 @@ export function handleWebSocketConnection(
 					const mintMsg = msg as Extract<ClientMessage, { type: "ext_session_write_permit" }>;
 					const requestId = typeof mintMsg.requestId === "string" ? mintMsg.requestId : "";
 					const contentHash = typeof mintMsg.contentHash === "string" ? mintMsg.contentHash : "";
+					// Validate the fixed-width digest before any authorization lookup or
+					// permit mint. In particular, never retain an attacker-sized string in
+					// the permit store.
+					if (!/^[0-9a-fA-F]{64}$/.test(contentHash)) {
+						send(ws, {
+							type: "ext_session_write_permit_result",
+							requestId,
+							ok: false,
+							error: "content hash must be exactly 64 hexadecimal SHA-256 characters",
+						});
+						break;
+					}
+					const normalizedContentHash = contentHash.toLowerCase();
 					const projectTm = session.projectId && projectContextManager
 						? projectContextManager.getOrCreate(session.projectId)?.toolManager
 						: undefined;
@@ -1523,13 +1625,13 @@ export function handleWebSocketConnection(
 					const surf = extToolManager
 						? resolveSurfaceIdentity({ token: mintMsg.surfaceToken, headerSessionId: sessionId, resolver: extToolManager, contributions: packContributionRegistry, projectId: session.projectId })
 						: ({ ok: false, status: 403, error: "session messaging is available only to market-pack contributions" } as const);
-					if (!surf.ok || !contentHash) {
-						send(ws, { type: "ext_session_write_permit_result", requestId, ok: false, error: surf.ok ? "missing content hash" : surf.error });
+					if (!surf.ok) {
+						send(ws, { type: "ext_session_write_permit_result", requestId, ok: false, error: surf.error });
 						break;
 					}
 					// Pack-bound surfaces (no tool) bind the permit with an empty tool
 					// surrogate — packId is the server-derived scope key either way.
-					const nonce = mintWritePermit({ sessionId, packId: surf.packId, tool: surf.tool ?? "", contentHash });
+					const nonce = mintWritePermit({ sessionId, packId: surf.packId, tool: surf.tool ?? "", contentHash: normalizedContentHash });
 					send(ws, { type: "ext_session_write_permit_result", requestId, ok: true, nonce });
 					break;
 				}
@@ -1585,18 +1687,30 @@ export function handleWebSocketConnection(
 						consumePermit: (nonce, binding) => consumeWritePermit(nonce, binding),
 						post: async (sid, text, opts) => {
 							// Role-aware delivery (text is already system-framed by the handler
-							// for role "system"). "user"/"system" share the user/steer transport;
-							// resumeTurn !== false resumes the turn, === false delivers without.
-							if (opts.resume) {
-								await sessionManager.enqueuePrompt(sid, text, {
-									source: "extension",
-									author: extensionAuthor,
-								});
+							// for role "system"). Enqueue-producing posts join the same global,
+							// session-keyed FIFO as prompts from every connection. A non-resuming
+							// post mirrors a steer: keep live streaming delivery low-latency, but
+							// serialize its idle delivery so it cannot overtake prompt preflight.
+							const deliver = async (): Promise<void> => {
+								const identity = { source: "extension" as const, author: extensionAuthor };
+								if (opts.resume) {
+									await sessionManager.enqueuePrompt(sid, text, identity);
+								} else {
+									await sessionManager.deliverLiveSteer(sid, text, identity);
+								}
+							};
+							const target = sessionManager.getSession(sid);
+							if (!opts.resume && target?.status === "streaming") {
+								await deliver();
 							} else {
-								await sessionManager.deliverLiveSteer(sid, text, {
-									source: "extension",
-									author: extensionAuthor,
-								});
+								try {
+									await SESSION_COMMAND_SERIALISER.serialise(commandSerialisationKey, deliver, frameBytes);
+								} catch (err) {
+									// Preserve the structured overload code through the pure post
+									// handler, which otherwise serializes thrown errors by message.
+									if (err instanceof SessionCommandQueueFullError) throw new Error(err.code);
+									throw err;
+								}
 							}
 						},
 						audit: (rec) => {
@@ -1617,8 +1731,80 @@ export function handleWebSocketConnection(
 					send(ws, { type: "error", message: "Unknown message type", code: "UNKNOWN_TYPE" });
 			}
 		} catch (err) {
-			send(ws, { type: "error", message: String(err), code: "COMMAND_ERROR" });
+			sendCommandFailure(err);
 		}
+	};
+
+	ws.on("message", (data) => {
+		const frameBytes = rawWsMessageBytes(data);
+		if (!authenticated && frameBytes > MAX_UNAUTHENTICATED_WS_ENVELOPE_BYTES) {
+			send(ws, { type: "error", message: "Unauthenticated WebSocket frame exceeds maximum envelope size", code: "FRAME_TOO_LARGE" });
+			return;
+		}
+
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(data.toString());
+		} catch {
+			send(ws, { type: "error", message: "Invalid JSON", code: "INVALID_JSON" });
+			return;
+		}
+		if (
+			parsed === null ||
+			typeof parsed !== "object" ||
+			Array.isArray(parsed) ||
+			typeof (parsed as Record<string, unknown>).type !== "string"
+		) {
+			send(ws, {
+				type: "error",
+				message: "WebSocket message must be a non-null object with a string type",
+				code: "INVALID_MESSAGE",
+			});
+			return;
+		}
+		const msg = parsed as ClientMessage;
+
+		// Validate text-bearing commands before they enter Markdown parsing, a
+		// session queue, or the extension-post permit flow.
+		if (authenticated && rejectInvalidPromptText(msg)) return;
+
+		const dispatch = (signal?: AbortSignal) => handleMessage(msg, frameBytes, signal);
+		const liveSession = authenticated && sessionId !== "__viewer__"
+			? sessionManager.getSession(sessionId)
+			: undefined;
+		const liveStreamingSteer = msg.type === "steer" && liveSession?.status === "streaming";
+		const serialisedSessionCommand = msg.type === "prompt" ||
+			msg.type === "retry" ||
+			(msg.type === "steer" && !liveStreamingSteer);
+		let result: Promise<void>;
+		try {
+			result = authenticated && serialisedSessionCommand
+				? SESSION_COMMAND_SERIALISER.serialise(commandSerialisationKey, dispatch, frameBytes)
+				: dispatch();
+		} catch (err) {
+			// Admission is synchronous and atomic: a rejected parsed frame is never
+			// attached to the FIFO tail, so its closure becomes collectible now.
+			if (err instanceof SessionCommandQueueFullError) {
+				send(ws, { type: "error", message: err.message, code: SESSION_COMMAND_QUEUE_FULL });
+				return;
+			}
+			console.error(`[ws-handler] Command admission failure for ${sessionId}:`, err);
+			sendCommandFailure(err);
+			return;
+		}
+		void result.catch((err) => {
+			// Queue admission rejects without linking the parsed-message closure to
+			// the FIFO tail. Surface the stable code and isolate later commands.
+			if (err instanceof SessionCommandQueueFullError) {
+				send(ws, { type: "error", message: err.message, code: err.code });
+				return;
+			}
+			// Covers authentication/archive branches and any future routing added
+			// outside the command-level try/catch. The serialiser's fulfilled tail
+			// still permits the next same-session ordered delivery to run.
+			console.error(`[ws-handler] Unhandled command failure for ${sessionId}:`, err);
+			sendCommandFailure(err);
+		});
 	});
 
 	ws.on("close", () => {

@@ -34,9 +34,24 @@ import {
 } from "./_e2e/e2e-setup.js";
 
 let gw: any;
+let humanCookie = "";
 test.beforeAll(async ({ gateway }) => {
 	gw = gateway;
+	// Bootstrap the stateless operator cookie through a realistic same-origin
+	// browser request. Fetch Metadata controls eligibility, not authority.
+	const probe = await rawApiFetch("/api/goals", {
+		headers: { "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" },
+	});
+	const setCookies = (probe.headers as any).getSetCookie?.() as string[] | undefined
+		?? (probe.headers.get("set-cookie") ? [probe.headers.get("set-cookie") as string] : []);
+	humanCookie = setCookies.map((cookie) => cookie.split(";")[0])
+		.find((cookie) => cookie.startsWith("bobbit_session=")) ?? "";
+	expect(humanCookie, "browser-signaled Bearer auth must mint a signed bobbit_session cookie").not.toBe("");
 });
+
+function humanHeaders(): Record<string, string> {
+	return { Cookie: humanCookie };
+}
 
 const PARENT_SPEC =
 	"Parent goal for the PARENT_SUBGOALS_DISABLED repro — padded to satisfy the spec minimum length validator.";
@@ -55,6 +70,7 @@ async function setSubgoalsEnabled(enabled: boolean): Promise<void> {
 async function createParent(title: string, subgoalsAllowed: boolean): Promise<string> {
 	const resp = await apiFetch("/api/goals", {
 		method: "POST",
+		headers: humanHeaders(),
 		body: JSON.stringify({
 			title,
 			cwd: nonGitCwd(),
@@ -98,6 +114,7 @@ test.describe("Sub-goal creation: parent-disabled is distinct + policy is editab
 		try {
 			const resp = await apiFetch("/api/goals", {
 				method: "POST",
+				headers: humanHeaders(),
 				body: await childBody(parentId),
 			});
 			expect(resp.status).not.toBe(201);
@@ -123,6 +140,7 @@ test.describe("Sub-goal creation: parent-disabled is distinct + policy is editab
 			await setSubgoalsEnabled(false);
 			const resp = await apiFetch("/api/goals", {
 				method: "POST",
+				headers: humanHeaders(),
 				body: await childBody(parentId),
 			});
 			expect(resp.status).not.toBe(201);
@@ -182,6 +200,7 @@ test.describe("Sub-goal creation: parent-disabled is distinct + policy is editab
 
 			const resp = await apiFetch("/api/goals", {
 				method: "POST",
+				headers: humanHeaders(),
 				body: await childBody(parentId),
 			});
 			expect(resp.status).toBe(201);
@@ -232,9 +251,9 @@ test.describe("Sub-goal creation: parent-disabled is distinct + policy is editab
  *     `maxConcurrentChildren` (even mixed with subgoal fields). These remain
  *     team-lead-only; the cookie does NOT bypass.
  *
- * `apiFetch` auto-injects the gateway-minted human cookie for `/policy` (it is
- * harmless for the orchestration class — the cookie can't authorize it). The
- * deny / team-lead paths use `rawApiFetch` with explicit headers.
+ * Operator-path calls explicitly present the signed cookie bootstrapped by the
+ * browser-signaled setup request. It is harmless for the orchestration class —
+ * the cookie cannot authorize it. Deny/team-lead paths use `rawApiFetch`.
  */
 test.describe("PATCH /policy — narrowed operator vs orchestration auth", () => {
 	test.afterEach(async () => {
@@ -248,10 +267,11 @@ test.describe("PATCH /policy — narrowed operator vs orchestration auth", () =>
 			false,
 		);
 		try {
-			// apiFetch auto-injects the human cookie for /policy; no team-lead
-			// secret is supplied. Operator class accepts the cookie.
+			// Explicitly present the signed human cookie; no team-lead secret is
+			// supplied. Operator class accepts the cookie.
 			const resp = await apiFetch(`/api/goals/${parentId}/policy`, {
 				method: "PATCH",
+				headers: humanHeaders(),
 				body: JSON.stringify({ subgoalsAllowed: true, maxNestingDepth: 2 }),
 			});
 			expect(resp.status).toBe(200);
@@ -289,10 +309,11 @@ test.describe("PATCH /policy — narrowed operator vs orchestration auth", () =>
 			true,
 		);
 		try {
-			// Human cookie (auto-injected by apiFetch) must NOT authorize an
+			// The explicitly presented human cookie must NOT authorize an
 			// orchestration-class policy change.
 			const denied = await apiFetch(`/api/goals/${parentId}/policy`, {
 				method: "PATCH",
+				headers: humanHeaders(),
 				body: JSON.stringify({ divergencePolicy: "autonomous" }),
 			});
 			expect(denied.status).toBe(403);
@@ -324,6 +345,7 @@ test.describe("PATCH /policy — narrowed operator vs orchestration auth", () =>
 			// (maxConcurrentChildren) behind a sub-goal toggle.
 			const denied = await apiFetch(`/api/goals/${parentId}/policy`, {
 				method: "PATCH",
+				headers: humanHeaders(),
 				body: JSON.stringify({ subgoalsAllowed: true, maxConcurrentChildren: 4 }),
 			});
 			expect(denied.status).toBe(403);
@@ -369,6 +391,7 @@ test.describe("PATCH /policy — child maxNestingDepth cannot widen past inherit
 			// Create a child — it is stamped with the parent's EFFECTIVE cap (2).
 			const childResp = await apiFetch("/api/goals", {
 				method: "POST",
+				headers: humanHeaders(),
 				body: await childBody(rootId),
 			});
 			expect(childResp.status).toBe(201);
@@ -392,6 +415,7 @@ test.describe("PATCH /policy — child maxNestingDepth cannot widen past inherit
 			// Grandchild (depth 3) creation under the child stays blocked by depth.
 			const grandResp = await apiFetch("/api/goals", {
 				method: "POST",
+				headers: humanHeaders(),
 				body: await childBody(childId),
 			});
 			expect(grandResp.status).not.toBe(201);
@@ -427,6 +451,7 @@ test.describe("PATCH /policy — lowering an ancestor cap blocks an already-crea
 			// it inherits + stores own=3.
 			const childResp = await apiFetch("/api/goals", {
 				method: "POST",
+				headers: humanHeaders(),
 				body: await childBody(rootId),
 			});
 			expect(childResp.status).toBe(201);
@@ -453,6 +478,7 @@ test.describe("PATCH /policy — lowering an ancestor cap blocks an already-crea
 			// now-lowered ancestor.
 			const grandResp = await apiFetch("/api/goals", {
 				method: "POST",
+				headers: humanHeaders(),
 				body: await childBody(childId),
 			});
 			expect(grandResp.status).not.toBe(201);

@@ -16,8 +16,10 @@ import path from "node:path";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { WorktreePool, isPoolBranch } from "../src/server/agent/worktree-pool.ts";
+import { WorktreePool, isPoolBranch, type WorktreePoolFs } from "../src/server/agent/worktree-pool.ts";
+import { RECOVERY_IO_CONCURRENCY } from "../src/server/agent/bounded-async-work.ts";
 import type { Component } from "../src/server/agent/project-config-store.ts";
+import type { CommandRunner, ExecFileResult } from "../src/server/gateway-deps.ts";
 import { makeTmpDir } from "./helpers/tmp.ts";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -47,6 +49,24 @@ async function initGitRepo(dir: string): Promise<void> {
 	await execFile("git", ["config", "user.email", "test@test"], { cwd: dir });
 	await execFile("git", ["config", "user.name", "Test"], { cwd: dir });
 	await execFile("git", ["commit", "--allow-empty", "-m", "init"], { cwd: dir });
+}
+
+function deferred<T>(): {
+	promise: Promise<T>;
+	resolve: (value: T | PromiseLike<T>) => void;
+	reject: (reason?: unknown) => void;
+} {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+		resolve = resolvePromise;
+		reject = rejectPromise;
+	});
+	return { promise, resolve, reject };
+}
+
+async function yieldToEventLoop(): Promise<void> {
+	await new Promise<void>(resolve => setImmediate(resolve));
 }
 
 describe("WorktreePool — Phase 3 claim sequence", () => {
@@ -213,6 +233,78 @@ describe("WorktreePool — Phase 3 claim sequence", () => {
 	});
 });
 
+describe("WorktreePool — bounded multi-repo claim", () => {
+	it("caps deferred per-repo Git mutations and preserves ordered isolated results", async () => {
+		const poolBranch = "pool/_pool-bounded";
+		const targetBranch = "session/bounded1";
+		const oldContainer = path.resolve("virtual-pool-wt", "pool-_pool-bounded");
+		const newContainer = path.resolve("virtual-pool-wt", "session-bounded1");
+		const componentCount = RECOVERY_IO_CONCURRENCY + 5;
+		const worktrees = Array.from({ length: componentCount }, (_, index) => {
+			const repo = `repo-${String(index).padStart(2, "0")}`;
+			return {
+				repo,
+				repoPath: path.resolve("virtual-pool-repos", repo),
+				worktreePath: path.join(oldContainer, repo),
+			};
+		});
+		const failedRepo = worktrees[3]!.repo;
+		const renameGate = deferred<void>();
+		let activeRenames = 0;
+		let maxActiveRenames = 0;
+		let forwardRenameCalls = 0;
+		const commandRunner: CommandRunner = {
+			execFile: async (_file, args, options) => {
+				if (args[0] === "branch" && args[1] === "-m" && args[2] === poolBranch && args[3] === targetBranch) {
+					forwardRenameCalls++;
+					activeRenames++;
+					maxActiveRenames = Math.max(maxActiveRenames, activeRenames);
+					await renameGate.promise;
+					activeRenames--;
+					if (String(options?.cwd).endsWith(failedRepo)) throw new Error("injected per-repo rename failure");
+				}
+				return { stdout: "", stderr: "" };
+			},
+		};
+		const fsImpl: WorktreePoolFs = {
+			access: async () => {},
+			opendir: async () => { throw new Error("claim must not scan"); },
+			rename: async () => {},
+		};
+		const pool = new WorktreePool({
+			repoPath: path.resolve("virtual-pool-repos"),
+			targetSize: 0,
+			commandRunner,
+			remotePolicy: { skipNonLocalRemoteGit: true },
+			fsImpl,
+		});
+		(pool as any).pool.push({
+			branchName: poolBranch,
+			worktreePath: oldContainer,
+			worktrees,
+			createdAt: Date.now(),
+		});
+
+		const claiming = pool.claim(targetBranch);
+		await yieldToEventLoop();
+		assert.equal(activeRenames, RECOVERY_IO_CONCURRENCY, "claim must apply backpressure at the shared Git-mutation ceiling");
+		assert.equal(forwardRenameCalls, RECOVERY_IO_CONCURRENCY, "later components must not start while the first bounded batch is deferred");
+
+		renameGate.resolve(undefined);
+		const result = await claiming;
+		assert.ok(result);
+		assert.equal(result.degraded, true, "one failed component should degrade rather than abort sibling results");
+		assert.equal(maxActiveRenames, RECOVERY_IO_CONCURRENCY);
+		assert.equal(forwardRenameCalls, componentCount, "failure isolation must allow every component mutation to run");
+		assert.deepEqual(
+			result.worktrees,
+			worktrees.map(w => ({ repo: w.repo, worktreePath: path.join(newContainer, w.repo) })),
+			"bounded completion must preserve declared component result order",
+		);
+		await pool.stop();
+	});
+});
+
 describe("WorktreePool — orphan reclaim", () => {
 	const originalNoPush = process.env.BOBBIT_TEST_NO_PUSH;
 	const originalSkipNpm = process.env.BOBBIT_SKIP_NPM_CI;
@@ -225,6 +317,76 @@ describe("WorktreePool — orphan reclaim", () => {
 		else process.env.BOBBIT_TEST_NO_PUSH = originalNoPush;
 		if (originalSkipNpm === undefined) delete process.env.BOBBIT_SKIP_NPM_CI;
 		else process.env.BOBBIT_SKIP_NPM_CI = originalSkipNpm;
+	});
+
+	it("streams bounded read-ahead and closes early once the target is reclaimed", async () => {
+		const repo = path.resolve("virtual-streaming-repo");
+		const configuredRoot = path.resolve("virtual-streaming-wt");
+		const targetSize = RECOVERY_IO_CONCURRENCY + 4;
+		const entryCount = targetSize + 30;
+		const entries = Array.from({ length: entryCount }, (_, index) => {
+			const suffix = String(index).padStart(2, "0");
+			return {
+				name: `pool-_pool-${suffix}`,
+				isDirectory: () => true,
+			} as unknown as import("node:fs").Dirent;
+		});
+		const inspectionGate = deferred<void>();
+		let readCalls = 0;
+		let activeInspections = 0;
+		let maxActiveInspections = 0;
+		let closed = false;
+		const fsImpl: WorktreePoolFs = {
+			access: async () => {
+				activeInspections++;
+				maxActiveInspections = Math.max(maxActiveInspections, activeInspections);
+				await inspectionGate.promise;
+				activeInspections--;
+			},
+			opendir: async (dirPath) => {
+				assert.equal(dirPath, configuredRoot);
+				return {
+					read: async () => entries[readCalls++] ?? null,
+					close: async () => { closed = true; },
+				};
+			},
+			rename: async () => {},
+		};
+		const commandRunner: CommandRunner = {
+			execFile: async (_file, args, options) => {
+				if (args[0] === "rev-parse" && args[1] === "--show-toplevel") {
+					return { stdout: repo, stderr: "" };
+				}
+				if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") {
+					const suffix = path.basename(String(options?.cwd)).slice("pool-_pool-".length);
+					return { stdout: `pool/_pool-${suffix}`, stderr: "" };
+				}
+				throw new Error(`unexpected git command: ${args.join(" ")}`);
+			},
+		};
+		const pool = new WorktreePool({
+			repoPath: repo,
+			targetSize,
+			worktreeRoot: configuredRoot,
+			commandRunner,
+			fsImpl,
+		});
+
+		const reclaiming = (pool as any).reclaimOrphaned();
+		await yieldToEventLoop();
+		assert.equal(readCalls, RECOVERY_IO_CONCURRENCY, "opendir read-ahead must stop at the shared ceiling while inspection is deferred");
+		assert.equal(activeInspections, RECOVERY_IO_CONCURRENCY);
+
+		inspectionGate.resolve(undefined);
+		await reclaiming;
+		assert.equal(maxActiveInspections, RECOVERY_IO_CONCURRENCY);
+		assert.equal(readCalls, targetSize, "reclaim must stop reading the wide root as soon as the target is satisfied");
+		assert.equal(closed, true, "an early-stopped directory stream must be closed");
+		assert.deepEqual(
+			pool.snapshotEntries().entries.map(entry => entry.branchName),
+			Array.from({ length: targetSize }, (_, index) => `pool/_pool-${String(index).padStart(2, "0")}`),
+			"streamed concurrent inspection must commit candidates in enumeration order",
+		);
 	});
 
 	it("reclaims pool branches from the configured worktree root through the shared classifier", async () => {
@@ -661,6 +823,119 @@ describe("WorktreePool — drain() stops and settles background work (teardown r
 		} finally {
 			await rmRepo(repo);
 		}
+	});
+
+	it("failed initialization keeps claims fenced until path resolution retries successfully", async () => {
+		const firstResolution = deferred<string>();
+		const repoPath = path.resolve("virtual-pool-repo");
+		const worktreePath = path.resolve("virtual-pool-wt", "pool-_pool-retry");
+		let resolutionAttempts = 0;
+		const mutationCommands: string[][] = [];
+		const commandRunner: CommandRunner = {
+			execFile: async (_file, args) => {
+				if ((args[0] === "branch" && args[1] === "-m") || (args[0] === "worktree" && args[1] === "move")) {
+					mutationCommands.push([...args]);
+				}
+				return { stdout: "", stderr: "" };
+			},
+		};
+		const pool = new WorktreePool({
+			repoPath,
+			targetSize: 0,
+			commandRunner,
+			remotePolicy: { skipNonLocalRemoteGit: true },
+			resolveRepoToplevelImpl: async () => {
+				resolutionAttempts++;
+				if (resolutionAttempts === 1) return await firstResolution.promise;
+				return repoPath;
+			},
+		});
+		pool.registerExternalEntry("pool/_pool-retry", worktreePath);
+
+		const initializing = pool.initialize();
+		assert.equal(resolutionAttempts, 1);
+		assert.equal(await pool.claim("session/during-init"), null, "claim must use the cold fallback while initialization is pending");
+		assert.deepEqual(mutationCommands, [], "a fenced claim must not rename a branch or move a worktree");
+
+		firstResolution.reject(new Error("first path resolution failed"));
+		await assert.rejects(initializing, /first path resolution failed/);
+		assert.equal(await pool.claim("session/after-failure"), null, "claim must remain fenced after the failed attempt settles");
+		assert.deepEqual(mutationCommands, [], "the failed-attempt gap must execute no claim mutations");
+
+		await pool.initialize();
+		assert.equal(resolutionAttempts, 2, "explicit initialize must retry a rejected path resolution");
+		const claimed = await pool.claim("session/after-retry");
+		assert.ok(claimed, "a successful retry should expose the registered entry");
+		assert.deepEqual(
+			mutationCommands.map(args => args.slice(0, 2)),
+			[["branch", "-m"], ["worktree", "move"]],
+			"claim mutations should begin only after initialization succeeds",
+		);
+		await pool.stop();
+	});
+
+	it("claim before the first initialize attempt remains compatible and stop() waits for it", async () => {
+		const branchRename = deferred<ExecFileResult>();
+		let branchRenameStarted = false;
+		const commandRunner: CommandRunner = {
+			execFile: async (_file, args) => {
+				if (args[0] === "branch" && args[1] === "-m" && !branchRenameStarted) {
+					branchRenameStarted = true;
+					return await branchRename.promise;
+				}
+				return { stdout: "", stderr: "" };
+			},
+		};
+		const pool = new WorktreePool({ repoPath: path.resolve("virtual-pool-repo"), targetSize: 0, commandRunner });
+		pool.registerExternalEntry("pool/_pool-deferred", path.resolve("virtual-pool-wt", "pool-_pool-deferred"));
+
+		// No initialize() call: boot sweepers historically registered ready entries
+		// before pool initialization existed, and that explicit compatibility stays.
+		const claiming = pool.claim("session/deferred1");
+		assert.equal(branchRenameStarted, true, "claim should reach the deferred Git mutation");
+		let stopSettled = false;
+		const stopping = pool.stop().then(() => { stopSettled = true; });
+		await yieldToEventLoop();
+		assert.equal(stopSettled, false, "stop must remain pending while the foreground claim mutates Git");
+
+		branchRename.resolve({ stdout: "", stderr: "" });
+		const claimed = await claiming;
+		assert.ok(claimed, "claim semantics should remain successful after the deferred rename resumes");
+		await stopping;
+		assert.equal(stopSettled, true);
+	});
+
+	it("drain() waits for deferred failure cleanup scheduled by claim", async () => {
+		const cleanup = deferred<void>();
+		let cleanupStarted = false;
+		const commandRunner: CommandRunner = {
+			execFile: async () => { throw new Error("deferred claim failure"); },
+		};
+		const pool = new WorktreePool({
+			repoPath: path.resolve("virtual-pool-repo"),
+			targetSize: 0,
+			commandRunner,
+			cleanupWorktreeImpl: async () => {
+				cleanupStarted = true;
+				await cleanup.promise;
+			},
+		});
+		pool.registerExternalEntry("pool/_pool-cleanup", path.resolve("virtual-pool-wt", "pool-_pool-cleanup"));
+
+		const claimed = await pool.claim("session/fallback1");
+		assert.equal(claimed, null, "claim failure should preserve the cold-create fallback");
+		await yieldToEventLoop();
+		assert.equal(cleanupStarted, true, "claim failure should start best-effort cleanup");
+
+		let drainSettled = false;
+		const draining = pool.drain().then(() => { drainSettled = true; });
+		await yieldToEventLoop();
+		assert.equal(drainSettled, false, "drain must remain pending while failure cleanup mutates the worktree");
+
+		cleanup.resolve(undefined);
+		await draining;
+		assert.equal(drainSettled, true);
+		assert.equal(pool.size, 0);
 	});
 
 	it("drain() is idempotent and safe on a pool that never started", async () => {

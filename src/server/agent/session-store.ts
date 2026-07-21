@@ -1,15 +1,12 @@
-import type { Dirent } from "node:fs";
 import type { Clock, FsLike } from "../gateway-deps.js";
 import { realClock, realFs } from "../gateway-deps.js";
 import path from "node:path";
-import { recordDeletionTombstone } from "./deletion-tombstones.js";
+import { recordDeletionTombstone, recordDeletionTombstoneAsync } from "./deletion-tombstones.js";
 import { isMessageAuthor, LOCAL_USER_AUTHOR, type MessageAuthor } from "../../shared/message-author.js";
 import { isPromptSource, type PromptSource } from "../../shared/prompt-source.js";
 import type { QueuedMessage } from "../ws/protocol.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
 
-/** 24h in ms — recency threshold for `shouldKeepDespiteOrphan`. */
-const RECENT_TRANSCRIPT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const VERIFIER_SESSION_ID_RE = /^(?:llm-review|agent-qa)-/;
 
 function isVerifierSessionId(id: string): boolean {
@@ -18,31 +15,6 @@ function isVerifierSessionId(id: string): boolean {
 
 function defaultVerifierAccessory(id: string): string {
 	return id.startsWith("agent-qa-") ? "stamp" : "magnifier";
-}
-
-/**
- * Tightened orphan-cleanup gate. Returns true when an apparently-orphaned
- * session must NOT be archived because its worktree directory still exists
- * AND its agent JSONL has been written within the last 24h. Caller is
- * `SessionManager`'s boot orphan sweep — leave the session live; the user
- * can archive manually from the UI if it really is dead.
- *
- * `now` is injectable for testability.
- */
-export function shouldKeepDespiteOrphan(
-	ps: { worktreePath?: string; agentSessionFile?: string },
-	now: number = Date.now(),
-	fsImpl: FsLike = realFs,
-): boolean {
-	const wtAlive = !!ps.worktreePath && (() => {
-		try { return fsImpl.existsSync(ps.worktreePath!); } catch { return false; }
-	})();
-	if (!wtAlive) return false;
-	const recentTranscript = !!ps.agentSessionFile && (() => {
-		try { return now - fsImpl.statSync(ps.agentSessionFile!).mtimeMs < RECENT_TRANSCRIPT_WINDOW_MS; }
-		catch { return false; }
-	})();
-	return recentTranscript;
 }
 
 /** Legacy persisted value. Retained only so older session records remain readable. */
@@ -267,10 +239,15 @@ export type UpdatableSessionFields = Pick<
  * Simple JSON file store for gateway session metadata.
  * Allows sessions to survive server restarts.
  */
+type SessionStoreAsyncFs = FsLike["promises"] & {
+	open: typeof import("node:fs").promises.open;
+};
+
 type SessionStoreFs = FsLike & {
 	openSync: typeof import("node:fs").openSync;
 	fsyncSync: typeof import("node:fs").fsyncSync;
 	closeSync: typeof import("node:fs").closeSync;
+	promises: SessionStoreAsyncFs;
 };
 
 type DiskFingerprint = {
@@ -298,6 +275,9 @@ export class SessionStore {
 	private diskFingerprint: DiskFingerprint | null = null;
 	/** One-shot latch: once tripped, no further saveNow() writes to disk. */
 	private staleGuardTripped = false;
+	/** Active promise-based purge writer; synchronous mutations fold into it. */
+	private asyncSaveInFlight: Promise<void> | null = null;
+	private asyncSaveRequested = false;
 
 	constructor(stateDir: string, fsImpl: FsLike = realFs, clock: Clock = realClock) {
 		this.fs = fsImpl as SessionStoreFs;
@@ -492,6 +472,54 @@ export class SessionStore {
 		}
 	}
 
+	private async peekDiskEpochAsync(): Promise<number> {
+		try {
+			const raw = await this.fs.promises.readFile(this.storeFile, "utf-8");
+			const parsed = JSON.parse(raw);
+			if (Array.isArray(parsed)) return 0;
+			if (parsed && typeof parsed === "object" && typeof (parsed as { epoch?: unknown }).epoch === "number") {
+				return (parsed as { epoch: number }).epoch;
+			}
+			return -1;
+		} catch {
+			return -1;
+		}
+	}
+
+	private async currentDiskFingerprintAsync(): Promise<DiskFingerprint | null> {
+		try {
+			const stat = await this.fs.promises.stat(this.storeFile);
+			const size = Number(stat.size);
+			const mtimeMs = Number(stat.mtimeMs);
+			if (!Number.isFinite(size) || !Number.isFinite(mtimeMs)) return null;
+			const ctimeMs = Number(stat.ctimeMs);
+			return {
+				size,
+				mtimeMs,
+				...(Number.isFinite(ctimeMs) ? { ctimeMs } : {}),
+			};
+		} catch {
+			return null;
+		}
+	}
+
+	/** Promise-based backup rotation with the same oldest-first policy as saveNow(). */
+	private async rotateBackupsAsync(): Promise<void> {
+		try {
+			// Whether a primary exists is a policy decision: without it there is no
+			// new backup snapshot, so do not shift the existing recovery chain.
+			await this.fs.promises.access(this.storeFile);
+		} catch {
+			return;
+		}
+		const N = SessionStore.BACKUP_COUNT;
+		try { await this.fs.promises.unlink(this.bakPath(N)); } catch { /* non-fatal */ }
+		for (let i = N - 1; i >= 1; i--) {
+			try { await this.fs.promises.rename(this.bakPath(i), this.bakPath(i + 1)); } catch { /* non-fatal */ }
+		}
+		try { await this.fs.promises.copyFile(this.storeFile, this.bakPath(1)); } catch { /* non-fatal */ }
+	}
+
 	/** True if the most recent saveNow() refused to write due to the stale-snapshot guard. */
 	isStaleGuardTripped(): boolean {
 		return this.staleGuardTripped;
@@ -510,6 +538,12 @@ export class SessionStore {
 	/** Write sessions to disk immediately (synchronous). */
 	private saveNow(): void {
 		if (this.staleGuardTripped) return;
+		// Preserve the synchronous API while preventing a newer in-memory mutation
+		// from racing an older promise-based purge snapshot to sessions.json.
+		if (this.asyncSaveInFlight) {
+			this.asyncSaveRequested = true;
+			return;
+		}
 		try {
 			if (!this.fs.existsSync(this.storeDir)) {
 				this.fs.mkdirSync(this.storeDir, { recursive: true });
@@ -573,83 +607,82 @@ export class SessionStore {
 		}
 	}
 
-	/**
-	 * Walk `agentSessionsRoot` for `*.jsonl` transcripts that are not referenced
-	 * by any persisted session (`agentSessionFile`) and whose mtime is newer
-	 * than the most recent `lastActivity` in the store. Useful as a divergence
-	 * signal after crash recovery — the agent CLI may have written transcripts
-	 * that never made it into the session-metadata index.
-	 *
-	 * Does NOT auto-import. Caps the returned `paths` at `maxPaths` (default 50)
-	 * and emits at most 20 `[session-store] WARN: orphaned transcript: …` log
-	 * lines.
-	 */
-	scanOrphanedTranscripts(
-		agentSessionsRoot: string,
-		options: { mostRecentLastActivity?: number; maxPaths?: number; maxLogLines?: number } = {},
-	): { count: number; paths: string[] } {
-		const maxPaths = options.maxPaths ?? 50;
-		const maxLogLines = options.maxLogLines ?? 20;
-		const threshold = options.mostRecentLastActivity ?? this.computeMostRecentLastActivity();
+	/** Promise-based save preserving epoch checks, backups, fsync, and atomic rename. */
+	private async saveNowAsync(): Promise<void> {
+		if (this.staleGuardTripped) return;
+		try {
+			await this.fs.promises.mkdir(this.storeDir, { recursive: true });
 
-		const tracked = new Set<string>();
-		for (const s of this.sessions.values()) {
-			if (s.agentSessionFile) {
-				tracked.add(path.resolve(s.agentSessionFile));
-			}
-		}
-
-		const paths: string[] = [];
-		let count = 0;
-		let logged = 0;
-
-		const walk = (dir: string) => {
-			let entries: Dirent[];
-			try {
-				entries = this.fs.readdirSync(dir, { withFileTypes: true });
-			} catch {
+			const currentFingerprint = await this.currentDiskFingerprintAsync();
+			const onDiskEpoch = this.writtenEpoch > 0
+				&& SessionStore.fingerprintsEqual(currentFingerprint, this.diskFingerprint)
+				? Math.max(this.loadedEpoch, this.writtenEpoch)
+				: await this.peekDiskEpochAsync();
+			if (onDiskEpoch > this.loadedEpoch && this.writtenEpoch === 0) {
+				console.error(
+					`[session-store] REFUSING to save: on-disk epoch ${onDiskEpoch} is ` +
+					`newer than loaded epoch ${this.loadedEpoch}. Possible stale-snapshot ` +
+					`recovery (cloud sync / antivirus / .pre-migration). ` +
+					`In-memory state has ${this.sessions.size} sessions; on-disk has more recent. ` +
+					`Manual intervention required: inspect ${this.storeFile} and ${this.storeFile}.bak.*`,
+				);
+				this.staleGuardTripped = true;
 				return;
 			}
-			for (const ent of entries) {
-				const full = path.join(dir, ent.name);
-				if (ent.isDirectory()) {
-					walk(full);
-					continue;
-				}
-				if (!ent.isFile()) continue;
-				if (!ent.name.endsWith(".jsonl")) continue;
-				const resolved = path.resolve(full);
-				if (tracked.has(resolved)) continue;
-				try {
-					const st = this.fs.statSync(full);
-					if (st.mtimeMs < threshold) continue;
-				} catch {
-					continue;
-				}
-				count++;
-				if (paths.length < maxPaths) paths.push(resolved);
-				if (logged < maxLogLines) {
-					console.warn(`[session-store] WARN: orphaned transcript: ${resolved}`);
-					logged++;
-				}
+
+			const nextEpoch = Math.max(this.loadedEpoch, this.writtenEpoch, onDiskEpoch < 0 ? 0 : onDiskEpoch) + 1;
+			const payload = {
+				version: 2 as const,
+				epoch: nextEpoch,
+				sessions: Array.from(this.sessions.values()),
+			};
+			const json = JSON.stringify(payload);
+
+			await this.rotateBackupsAsync();
+
+			const tmp = `${this.storeFile}.tmp`;
+			const handle = await this.fs.promises.open(tmp, "w");
+			try {
+				await handle.writeFile(json, "utf-8");
+				try { await handle.sync(); } catch { /* non-fatal on network shares */ }
+			} finally {
+				await handle.close();
 			}
-		};
-
-		try {
-			if (this.fs.existsSync(agentSessionsRoot)) walk(agentSessionsRoot);
-		} catch {
-			// non-fatal — return whatever we collected
+			await this.fs.promises.rename(tmp, this.storeFile);
+			this.writtenEpoch = nextEpoch;
+			this.diskFingerprint = await this.currentDiskFingerprintAsync();
+		} catch (err) {
+			console.error("[session-store] Failed to save sessions:", err);
+			try { await this.fs.promises.unlink(`${this.storeFile}.tmp`); } catch { /* ignore */ }
 		}
-
-		return { count, paths };
 	}
 
-	private computeMostRecentLastActivity(): number {
-		let max = 0;
-		for (const s of this.sessions.values()) {
-			if (typeof s.lastActivity === "number" && s.lastActivity > max) max = s.lastActivity;
+	private async drainAsyncSaves(): Promise<void> {
+		try {
+			do {
+				this.asyncSaveRequested = false;
+				await this.saveNowAsync();
+			} while (this.asyncSaveRequested);
+		} finally {
+			// Publish the idle state in the drain's own final continuation, before
+			// its promise can settle. A mutation in the following microtask must
+			// either see this writer as active and request another loop iteration,
+			// or see it as idle and persist/start a new writer itself. Clearing the
+			// state from a later `.then()` leaves a window where that mutation can
+			// mark an already-completed writer and lose its save request.
+			this.asyncSaveInFlight = null;
+			if (this.asyncSaveRequested) void this.requestAsyncSave();
 		}
-		return max;
+	}
+
+	private requestAsyncSave(): Promise<void> {
+		this.asyncSaveRequested = true;
+		let task = this.asyncSaveInFlight;
+		if (!task) {
+			task = this.drainAsyncSaves();
+			this.asyncSaveInFlight = task;
+		}
+		return task;
 	}
 
 	/** Schedule a debounced save — coalesces rapid writes into one disk flush. */
@@ -801,6 +834,30 @@ export class SessionStore {
 		return true;
 	}
 
+	/**
+	 * Promise-based archive. Preserves archive()'s record mutation and immediate
+	 * durability without writing a deletion tombstone. Concurrent synchronous
+	 * mutations fold into the same serialized writer rather than racing its
+	 * snapshot.
+	 */
+	async archiveAsync(id: string): Promise<boolean> {
+		const existing = this.sessions.get(id);
+		if (!existing) {
+			if (this.asyncSaveInFlight) await this.asyncSaveInFlight;
+			return false;
+		}
+		this.generation++;
+		existing.archived = true;
+		existing.archivedAt = this.clock.now();
+		if (this.saveTimer) {
+			this.clock.clearTimeout(this.saveTimer);
+			this.saveTimer = null;
+		}
+		await this.requestAsyncSave();
+		this.onIndexUpdate?.(existing);
+		return true;
+	}
+
 	/** Get all archived sessions. */
 	getArchived(): PersistedSession[] {
 		return Array.from(this.sessions.values()).filter(s => s.archived === true);
@@ -839,6 +896,28 @@ export class SessionStore {
 		// tombstone it so the boot-time headquarters migration does not resurrect
 		// the record from a stale `.pre-headquarters-id-migration` backup.
 		recordDeletionTombstone(this.storeDir, "sessions.json", id);
+		return true;
+	}
+
+	/**
+	 * Promise-based archive purge. The store row is durably saved before its
+	 * tombstone, and synchronous mutations that arrive while either save is
+	 * pending are folded into the serialized writer rather than overwritten.
+	 */
+	async purgeAsync(id: string): Promise<boolean> {
+		const existing = this.sessions.get(id);
+		if (!existing) {
+			if (this.asyncSaveInFlight) await this.asyncSaveInFlight;
+			return false;
+		}
+		this.generation++;
+		this.sessions.delete(id);
+		if (this.saveTimer) {
+			this.clock.clearTimeout(this.saveTimer);
+			this.saveTimer = null;
+		}
+		await this.requestAsyncSave();
+		await recordDeletionTombstoneAsync(this.storeDir, "sessions.json", id, this.fs.promises);
 		return true;
 	}
 

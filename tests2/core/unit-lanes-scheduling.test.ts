@@ -259,6 +259,7 @@ describe("direct unit-stage scheduling", () => {
 				maxWorkers: 1,
 				retry: 3,
 				include: [
+					"tests2/core/file-mentions-authenticated-boundary.test.ts",
 					"tests2/core/git-lifecycle-no-publication-real-git.test.ts",
 					"tests2/core/marketplace-install.test.ts",
 					"tests2/core/orphan-tool-result-rehydration-boundaries.test.ts",

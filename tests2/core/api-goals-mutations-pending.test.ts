@@ -94,8 +94,8 @@ describe("GET /api/goals/:id/mutations/pending", () => {
 	it("returns persisted pending requests with mapped fields", async () => {
 		const store = makePlanMutationStore();
 		const now = Date.now();
-		store.put(pending("g1", "r1", now + DEFAULT_MUTATION_TTL_MS));
-		store.put(pending("g1", "r2", now + DEFAULT_MUTATION_TTL_MS));
+		await store.put(pending("g1", "r1", now + DEFAULT_MUTATION_TTL_MS));
+		await store.put(pending("g1", "r2", now + DEFAULT_MUTATION_TTL_MS));
 
 		const { handled, responses } = await getPending("g1", store);
 		assert.equal(handled, true);
@@ -117,8 +117,8 @@ describe("GET /api/goals/:id/mutations/pending", () => {
 	it("filters out entries past their TTL", async () => {
 		const store = makePlanMutationStore();
 		const now = Date.now();
-		store.put(pending("g1", "fresh", now + DEFAULT_MUTATION_TTL_MS));
-		store.put(pending("g1", "stale", now - 1)); // already expired
+		await store.put(pending("g1", "fresh", now + DEFAULT_MUTATION_TTL_MS));
+		await store.put(pending("g1", "stale", now - 1)); // already expired
 
 		const { responses } = await getPending("g1", store);
 		const list = responses[0].body.pending as any[];
@@ -142,7 +142,7 @@ describe("GET /api/goals/:id/mutations/pending", () => {
 
 	it("no-ops (handled, no body) when subgoals are disabled", async () => {
 		const store = makePlanMutationStore();
-		store.put(pending("g1", "r1", Date.now() + DEFAULT_MUTATION_TTL_MS));
+		await store.put(pending("g1", "r1", Date.now() + DEFAULT_MUTATION_TTL_MS));
 		const { handled, responses } = await getPending("g1", store, { subgoalsEnabled: false });
 		assert.equal(handled, true);
 		assert.equal(responses.length, 0);

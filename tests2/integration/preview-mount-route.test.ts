@@ -9,6 +9,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
+import { createHmac } from "node:crypto";
 import { Writable } from "node:stream";
 import type http from "node:http";
 import type { CookieStore } from "../../src/server/auth/cookie.js";
@@ -28,12 +29,14 @@ const SESSION_IDS = [
 	"22222222-3333-4444-5555-666666666666",
 	"33333333-4444-5555-6666-777777777777",
 	"44444444-5555-6666-7777-888888888888",
+	"55555555-6666-4777-8888-999999999999",
 ] as const;
 const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const pngBytes = Buffer.from([
 	0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
 	0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
 ]);
+const SIGNED_COOKIE_VALUE = String.raw`v1\.[1-9]\d*\.[1-9]\d*\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}`;
 
 interface RouteInit {
 	method?: string;
@@ -43,17 +46,45 @@ interface RouteInit {
 
 class MemoryCookieStore {
 	private readonly values = new Set<string>();
+	private readonly signingKey = Buffer.alloc(32, 0x5a);
 	private sequence = 1;
 
 	mint(): string {
-		const value = (this.sequence++).toString(16).padStart(64, "0");
+		const issuedAt = 1_700_000_000 + this.sequence;
+		const expiresAt = issuedAt + 2_592_000;
+		const nonceBytes = Buffer.alloc(16);
+		nonceBytes.writeUInt32BE(this.sequence++, 12);
+		const prefix = `v1.${issuedAt}.${expiresAt}.${nonceBytes.toString("base64url")}`;
+		const signature = createHmac("sha256", this.signingKey).update(prefix, "ascii").digest("base64url");
+		const value = `${prefix}.${signature}`;
 		this.values.add(value);
 		return value;
 	}
 
-	verify(value: string): boolean {
-		return this.values.has(value);
+	verify(value: string): { valid: true; issuedAt: number; expiresAt: number; needsRenewal: false } | undefined {
+		if (!this.values.has(value)) return undefined;
+		const [, issuedAt, expiresAt] = value.split(".");
+		return {
+			valid: true,
+			issuedAt: Number(issuedAt),
+			expiresAt: Number(expiresAt),
+			needsRenewal: false,
+		};
 	}
+}
+
+function headerValue(headers: Record<string, string> | undefined, name: string): string | undefined {
+	const match = Object.entries(headers ?? {}).find(([key]) => key.toLowerCase() === name.toLowerCase());
+	return match?.[1];
+}
+
+function hasTrustedBrowserMetadata(url: URL, headers: Record<string, string> | undefined): boolean {
+	const site = headerValue(headers, "sec-fetch-site")?.trim().toLowerCase();
+	const mode = headerValue(headers, "sec-fetch-mode")?.trim().toLowerCase();
+	const origin = headerValue(headers, "origin");
+	return site === "same-origin"
+		&& (mode === "cors" || mode === "same-origin")
+		&& (origin === undefined || origin === url.origin);
 }
 
 class MemoryServerResponse extends Writable {
@@ -102,8 +133,19 @@ class PreviewMountRouteFixture {
 	private sessionIndex = 0;
 
 	constructor(readonly memfs: NodeFs) {
-		previewMount.setPreviewFsForTesting(memfs);
+		const asyncFs = previewMount.createPreviewAsyncFs(memfs);
+		const hostShapedAsyncFs: previewMount.PreviewAsyncFs = {
+			...asyncFs,
+			realpath: async (value) => {
+				const real = String(await asyncFs.realpath(value)).replace(/\//g, path.sep);
+				if (process.platform !== "win32" || /^[A-Za-z]:[\\/]/.test(real)) return real;
+				const drive = path.parse(String(value)).root.slice(0, 2) || path.parse(process.cwd()).root.slice(0, 2) || "C:";
+				return path.resolve(`${drive}${real.startsWith(path.sep) ? "" : path.sep}${real}`);
+			},
+		};
+		previewMount.setPreviewFsForTesting(hostShapedAsyncFs);
 		previewMount.setPreviewRootForTesting(path.join(this.root, "state", "preview"));
+		previewArtifacts.setPreviewArtifactFsForTesting(hostShapedAsyncFs);
 		previewArtifacts.setPreviewArtifactRootForTesting(path.join(this.root, "state", "preview-artifacts"));
 		_resetPreviewThemeSnapshotCache();
 
@@ -142,8 +184,11 @@ class PreviewMountRouteFixture {
 
 		if (url.pathname === "/api/health") {
 			if (init.headers?.Authorization !== `Bearer ${this.token}`) return this.json({ error: "Unauthorized" }, 401);
+			if (!hasTrustedBrowserMetadata(url, init.headers)) return this.json({ ok: true });
 			const cookie = this.cookies.mint();
-			return this.json({ ok: true }, 200, { "set-cookie": `${COOKIE_NAME}=${cookie}; HttpOnly; SameSite=Lax; Path=/` });
+			return this.json({ ok: true }, 200, {
+				"set-cookie": `${COOKIE_NAME}=${cookie}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000; Secure`,
+			});
 		}
 
 		if (url.pathname.startsWith("/preview/")) {
@@ -175,7 +220,7 @@ class PreviewMountRouteFixture {
 			const sessionId = url.searchParams.get("sessionId") ?? "";
 			if (!VALID_SESSION_ID.test(sessionId)) return this.json({ error: "Invalid sessionId" }, 400);
 			try {
-				return this.json(previewArtifacts.restorePreviewArtifact(sessionId, decodeURIComponent(restore[1]!)));
+				return this.json(await previewArtifacts.restorePreviewArtifact(sessionId, decodeURIComponent(restore[1]!)));
 			} catch (error) {
 				return this.coreError(error);
 			}
@@ -184,7 +229,7 @@ class PreviewMountRouteFixture {
 		return this.json({ error: "Not found" }, 404);
 	}
 
-	private mount(sessionId: string, body: Record<string, unknown>): Response {
+	private async mount(sessionId: string, body: Record<string, unknown>): Promise<Response> {
 		if (!VALID_SESSION_ID.test(sessionId)) return this.json({ error: "Invalid sessionId" }, 400);
 		const hasArtifact = typeof body.artifactId === "string" && body.artifactId.length > 0;
 		const hasHtml = typeof body.html === "string";
@@ -198,12 +243,12 @@ class PreviewMountRouteFixture {
 		if (hasHtml && (hasAssets || hasManifest)) return this.json({ error: "assets and manifest require file" }, 400);
 
 		try {
-			if (hasArtifact) return this.json(previewArtifacts.restorePreviewArtifact(sessionId, body.artifactId as string));
+			if (hasArtifact) return this.json(await previewArtifacts.restorePreviewArtifact(sessionId, body.artifactId as string));
 
 			let result: previewMount.MountResult | previewMount.MountFileResult;
 			if (hasHtml) {
 				const entry = typeof body.entry === "string" && body.entry.length > 0 ? body.entry : undefined;
-				result = previewMount.writeInline(sessionId, body.html as string, entry);
+				result = await previewMount.writeInline(sessionId, body.html as string, entry);
 			} else {
 				const file = body.file as string;
 				if (!path.isAbsolute(file)) return this.json({ error: "file path must be absolute" }, 400);
@@ -220,25 +265,25 @@ class PreviewMountRouteFixture {
 					if (!Array.isArray(parsed.assets)) return this.json({ error: "Manifest must contain assets" }, 400);
 					declared.push(...parsed.assets as string[]);
 				}
-				result = previewMount.mountFile(sessionId, file, [...new Set(declared)]);
+				result = await previewMount.mountFile(sessionId, file, [...new Set(declared)]);
 			}
-			const artifact = previewArtifacts.persistPreviewArtifact(sessionId, result);
+			const artifact = await previewArtifacts.persistPreviewArtifact(sessionId, result);
 			return this.json({ ...result, artifactId: artifact.artifactId });
 		} catch (error) {
 			return this.coreError(error);
 		}
 	}
 
-	private currentMount(sessionId: string): Response {
+	private async currentMount(sessionId: string): Promise<Response> {
 		if (!VALID_SESSION_ID.test(sessionId)) return this.json({ error: "Invalid sessionId" }, 400);
 		try {
-			const dir = previewMount.mountDir(sessionId);
-			const entry = pickEntry(dir);
+			const dir = previewMount.mountPath(sessionId);
+			const entry = await pickEntry(dir);
 			if (!entry) return this.json({ error: "no preview mount" }, 404);
 			const entryPath = path.join(dir, entry);
-			const stat = this.memfs.statSync(entryPath);
-			const contentHash = previewMount.contentHashForMount(sessionId);
-			const artifact = previewArtifacts.findPreviewArtifactByHash(sessionId, contentHash);
+			const stat = await this.memfs.promises.stat(entryPath);
+			const contentHash = await previewMount.contentHashForMount(sessionId);
+			const artifact = await previewArtifacts.findPreviewArtifactByHash(sessionId, contentHash);
 			return this.json({
 				url: `/preview/${sessionId}/${entry}`,
 				path: entryPath,
@@ -315,22 +360,28 @@ test.afterAll(() => {
 	deleteSession(sessionId);
 	previewMount.setPreviewRootForTesting(undefined);
 	previewMount.setPreviewFsForTesting(undefined);
+	previewArtifacts.setPreviewArtifactFsForTesting(undefined);
 	previewArtifacts.setPreviewArtifactRootForTesting(undefined);
 	_resetPreviewThemeSnapshotCache();
 	restoreFs?.();
 });
 
-/** Hit an authed endpoint to provoke the cookie mint, return the raw value. */
+/** Use an authenticated, same-origin browser request to bootstrap a signed cookie. */
 async function mintCookie(): Promise<string> {
 	const resp = await route.fetch(`${base()}/api/health`, {
-		headers: { Authorization: `Bearer ${token}` },
+		headers: {
+			Authorization: `Bearer ${token}`,
+			Origin: base(),
+			"Sec-Fetch-Site": "same-origin",
+			"Sec-Fetch-Mode": "cors",
+		},
 	});
 	expect(resp.status).toBe(200);
 	const setCookie = resp.headers.get("set-cookie");
-	expect(setCookie, "Server must mint bobbit_session on Bearer auth").toBeTruthy();
-	const m = String(setCookie).match(/bobbit_session=([0-9a-f]{64})/i);
-	expect(m, `Set-Cookie did not include bobbit_session: ${setCookie}`).not.toBeNull();
-	return `bobbit_session=${m![1]}`;
+	expect(setCookie, "Server must mint bobbit_session for trusted browser auth").toBeTruthy();
+	const m = String(setCookie).match(new RegExp(`${COOKIE_NAME}=(${SIGNED_COOKIE_VALUE})(?:;|$)`));
+	expect(m, `Set-Cookie did not include a signed bobbit_session: ${setCookie}`).not.toBeNull();
+	return `${COOKIE_NAME}=${m![1]}`;
 }
 
 test.describe("POST /api/preview/mount (v3)", () => {
@@ -608,5 +659,30 @@ test.describe("GET /preview/<sid>/* — content origin", () => {
 			headers: { Cookie: cookie },
 		});
 		expect(resp.status).toBe(404);
+	});
+
+	test("stale GET and HEAD stay missing after preview mount deletion", async () => {
+		const deletedSessionId = createSession();
+		const mountResp = await apiFetch(`/api/preview/mount?sessionId=${deletedSessionId}`, {
+			method: "POST",
+			body: JSON.stringify({ html: "<!doctype html><body>delete me</body>" }),
+		});
+		expect(mountResp.status).toBe(200);
+
+		const deletedMount = previewMount.mountPath(deletedSessionId);
+		expect(route.memfs.existsSync(deletedMount)).toBe(true);
+		await previewMount.removeMount(deletedSessionId);
+		expect(route.memfs.existsSync(deletedMount)).toBe(false);
+
+		const cookie = await mintCookie();
+		for (const method of ["GET", "HEAD"]) {
+			const stale = await route.fetch(`${base()}/preview/${deletedSessionId}/`, {
+				method,
+				headers: { Cookie: cookie },
+			});
+			expect(stale.status).toBe(404);
+			expect(await stale.json()).toEqual({ error: "Preview mount not found" });
+			expect(route.memfs.existsSync(deletedMount)).toBe(false);
+		}
 	});
 });

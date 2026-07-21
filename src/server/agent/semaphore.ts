@@ -3,10 +3,26 @@
  * Used by VerificationHarness to prevent resource exhaustion when
  * multiple goals verify simultaneously.
  */
+type WaiterState = "queued" | "granted" | "aborted";
+
+interface SemaphoreWaiter {
+	resolve: () => void;
+	reject: (reason?: unknown) => void;
+	signal?: AbortSignal;
+	onAbort?: () => void;
+	state: WaiterState;
+}
+
+function abortReason(signal: AbortSignal): unknown {
+	return signal.reason === undefined
+		? new DOMException("The operation was aborted", "AbortError")
+		: signal.reason;
+}
+
 export class Semaphore {
 	private _value: number;
 	private _capacity: number;
-	private _waiters: Array<() => void> = [];
+	private _waiters: SemaphoreWaiter[] = [];
 	/**
 	 * C2: "over-subscription debt". When the capacity is shrunk below the
 	 * number of permits currently held, the surplus held permits cannot be
@@ -52,11 +68,7 @@ export class Semaphore {
 			// Pay down debt first — those slots were already "owed".
 			while (delta > 0 && this._debt > 0) { this._debt--; delta--; }
 			// Hand the rest to blocked waiters before freeing slots.
-			while (delta > 0 && this._waiters.length > 0) {
-				const w = this._waiters.shift();
-				if (w) w();
-				delta--;
-			}
+			while (delta > 0 && this._grantNextWaiter()) delta--;
 			this._value += delta;
 		} else {
 			let toRemove = -delta;
@@ -66,13 +78,29 @@ export class Semaphore {
 		}
 	}
 
-	async acquire(): Promise<void> {
+	async acquire(signal?: AbortSignal): Promise<void> {
+		// An already-cancelled request never observes or consumes capacity.
+		if (signal?.aborted) throw abortReason(signal);
 		if (this._value > 0) {
 			this._value--;
 			return;
 		}
-		return new Promise<void>(resolve => {
-			this._waiters.push(resolve);
+		return new Promise<void>((resolve, reject) => {
+			const waiter: SemaphoreWaiter = {
+				resolve,
+				reject,
+				signal,
+				state: "queued",
+			};
+			this._waiters.push(waiter);
+
+			if (signal) {
+				waiter.onAbort = () => this._abortWaiter(waiter);
+				signal.addEventListener("abort", waiter.onAbort, { once: true });
+				// Covers an abort that happened after the entry check but before the
+				// listener was installed. The state transition makes this idempotent.
+				if (signal.aborted) waiter.onAbort();
+			}
 		});
 	}
 
@@ -102,14 +130,43 @@ export class Semaphore {
 			this._debt--;
 			return;
 		}
-		const next = this._waiters.shift();
-		if (next) {
-			next();
-			return;
-		}
+		if (this._grantNextWaiter()) return;
 		if (this._value >= this._capacity) {
 			throw new Error(`Semaphore over-release: value would exceed capacity (${this._capacity})`);
 		}
 		this._value++;
+	}
+
+	private _abortWaiter(waiter: SemaphoreWaiter): void {
+		if (waiter.state !== "queued") return;
+		const index = this._waiters.indexOf(waiter);
+		if (index < 0) return;
+
+		// Remove by identity, not position captured at enqueue time: earlier
+		// grants and cancellations may already have shifted the FIFO.
+		this._waiters.splice(index, 1);
+		waiter.state = "aborted";
+		this._removeAbortListener(waiter);
+		waiter.reject(abortReason(waiter.signal!));
+	}
+
+	private _grantNextWaiter(): boolean {
+		let waiter: SemaphoreWaiter | undefined;
+		while ((waiter = this._waiters.shift())) {
+			// Cancelled waiters are removed eagerly, but the state guard keeps a
+			// grant safe if cancellation and release/resize meet at the boundary.
+			if (waiter.state !== "queued") continue;
+			waiter.state = "granted";
+			this._removeAbortListener(waiter);
+			waiter.resolve();
+			return true;
+		}
+		return false;
+	}
+
+	private _removeAbortListener(waiter: SemaphoreWaiter): void {
+		if (!waiter.signal || !waiter.onAbort) return;
+		waiter.signal.removeEventListener("abort", waiter.onAbort);
+		waiter.onAbort = undefined;
 	}
 }

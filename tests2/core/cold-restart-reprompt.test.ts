@@ -99,6 +99,7 @@ function makeManager(bridge: any): any {
 		get: () => undefined,
 		getLive: () => [],
 		archive: () => {},
+		archiveAsync: async () => {},
 	};
 	m.projectContextManager = {
 		all: () => [],
@@ -142,11 +143,21 @@ function makeMidTurnPersistedSession(id: string): any {
  * boot-resume nudge is eligible to fire. all() returns [] so restoreTeams() is
  * a no-op (we seed team entries manually).
  */
-function makeOutstandingWorkPcm(goalId: string): any {
-	const goal = { id: goalId, state: "in-progress", archived: false, paused: false };
+function makeOutstandingWorkPcm(
+	goalId: string,
+	opts: { gateStatuses?: string[]; goal?: Record<string, unknown> } = {},
+): any {
+	const goal = {
+		id: goalId,
+		state: "in-progress",
+		archived: false,
+		paused: false,
+		...opts.goal,
+	};
+	const gateStatuses = opts.gateStatuses ?? ["failed"];
 	const ctx = {
 		goalStore: { get: (id: string) => (id === goalId ? goal : undefined), getAll: () => [goal] },
-		gateStore: { getGatesForGoal: () => [{ status: "failed" }] },
+		gateStore: { getGatesForGoal: () => gateStatuses.map(status => ({ status })) },
 		taskStore: { getByGoalId: () => [] },
 		goalManager: { listLiveGoals: () => [goal] },
 		teamStore: { getAll: () => [] },
@@ -500,6 +511,74 @@ describe("cold-restart re-prompt (reproducing)", () => {
 			0,
 			`a cold-start dispatch rejection escaped as a process-level unhandled rejection (${JSON.stringify(escaped)}). The boot-resume drain must be awaited inside a try/catch so the rejection is caught and logged, never surfaced as "[gateway] Unhandled rejection".`,
 		);
+	});
+
+	it("boot-resumes a reopened goal with a pending reset gate exactly once", async () => {
+		const prompts: string[] = [];
+		const session: any = { id: "tl-reset-pending", status: "idle", rpcClient: { onEvent: () => () => {} } };
+		const sm: any = {
+			getSession: (id: string) => (id === session.id ? session : undefined),
+			enqueuePrompt: (_id: string, message: string) => {
+				prompts.push(message);
+				return Promise.resolve({ status: "dispatched" });
+			},
+			wasBootReprompted: () => false,
+		};
+		const pcm = makeOutstandingWorkPcm("goal-reset-pending", { gateStatuses: ["pending"] });
+		const tm = makeTeamManager(sm, pcm);
+		(tm.teams as Map<string, any>).set("goal-reset-pending", {
+			goalId: "goal-reset-pending",
+			teamLeadSessionId: session.id,
+			agents: [],
+		});
+
+		tm._bootResumeIdleTeamLeads();
+		tm._bootResumeIdleTeamLeads();
+		await flush();
+
+		assert.equal(prompts.length, 1, "a pending reset gate must produce exactly one boot-resume nudge");
+		assert.match(prompts[0], /1 unresolved gate/i, "boot-resume must explain the pending workflow work");
+	});
+
+	it.each([
+		["complete", { state: "complete" }],
+		["paused", { paused: true }],
+		["shelved", { state: "shelved" }],
+		["archived", { archived: true }],
+	] as const)("does not boot-resume a %s goal even with a pending gate", async (_label, goal) => {
+		const prompts: string[] = [];
+		const session: any = { id: `tl-dormant-${_label}`, status: "idle", rpcClient: { onEvent: () => () => {} } };
+		const sm: any = {
+			getSession: (id: string) => (id === session.id ? session : undefined),
+			enqueuePrompt: (_id: string, message: string) => prompts.push(message),
+			wasBootReprompted: () => false,
+		};
+		const goalId = `goal-dormant-${_label}`;
+		const tm = makeTeamManager(sm, makeOutstandingWorkPcm(goalId, { gateStatuses: ["pending"], goal }));
+		(tm.teams as Map<string, any>).set(goalId, { goalId, teamLeadSessionId: session.id, agents: [] });
+
+		tm._bootResumeIdleTeamLeads();
+		await flush();
+
+		assert.deepEqual(prompts, [], `${_label} goal must remain dormant across restart`);
+	});
+
+	it("does not duplicate pending-gate boot resume when the lead was already boot-reprompted", async () => {
+		const prompts: string[] = [];
+		const session: any = { id: "tl-reset-midturn", status: "idle", rpcClient: { onEvent: () => () => {} } };
+		const sm: any = {
+			getSession: (id: string) => (id === session.id ? session : undefined),
+			enqueuePrompt: (_id: string, message: string) => prompts.push(message),
+			wasBootReprompted: (id: string) => id === session.id,
+		};
+		const goalId = "goal-reset-midturn";
+		const tm = makeTeamManager(sm, makeOutstandingWorkPcm(goalId, { gateStatuses: ["pending"] }));
+		(tm.teams as Map<string, any>).set(goalId, { goalId, teamLeadSessionId: session.id, agents: [] });
+
+		tm._bootResumeIdleTeamLeads();
+		await flush();
+
+		assert.deepEqual(prompts, [], "mid-turn continuation already owns the one boot prompt");
 	});
 
 	it("a session that is both mid-turn and a team-lead with open work is re-prompted exactly once", async () => {

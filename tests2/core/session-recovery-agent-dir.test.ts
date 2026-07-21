@@ -51,12 +51,21 @@ function makeManager(store?: any): any {
 function makeStore(initial: any[] = []): any {
 	const records = new Map<string, any>();
 	for (const record of initial) records.set(record.id, record);
+	const archive = (id: string) => {
+		const existing = records.get(id);
+		if (!existing) return false;
+		records.set(id, { ...existing, archived: true });
+		return true;
+	};
+	const purge = (id: string) => records.delete(id);
 	return {
 		get: (id: string) => records.get(id),
 		put: (record: any) => { records.set(record.id, record); },
 		update: (id: string, fields: any) => { records.set(id, { ...records.get(id), ...fields }); },
-		archive: (id: string) => { const existing = records.get(id); if (existing) records.set(id, { ...existing, archived: true }); },
-		purge: (id: string) => records.delete(id),
+		archive,
+		archiveAsync: async (id: string) => archive(id),
+		purge,
+		purgeAsync: async (id: string) => purge(id),
 		getAll: () => [...records.values()],
 	};
 }

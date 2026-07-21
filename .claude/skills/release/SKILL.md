@@ -19,11 +19,11 @@ mid-release. Never cut it from a **session worktree** either — that's on a
 session branch, not `master`, and git won't let you check out `master` in a
 second worktree while the primary already has it. Instead, §1.5 creates a
 dedicated **detached-HEAD worktree off `origin/master`** (a sibling of the
-primary, *not* under `*-wt/`), and every mutating step runs there. This is
-why the release commit is pushed with `git push origin HEAD:master` (§8)
-rather than assuming `master` is checked out locally. The E2E harness binds
-port 0 and uses ephemeral `BOBBIT_DIR`s, so `test:e2e` won't collide with the
-running dev server.
+primary, *not* under `*-wt/`), and every mutating step runs there. The release
+commit is pushed to a `release/v<version>` branch and squash-merged through the
+repository's required PR flow (§6–§8); the resulting merge commit is what gets
+tagged. The E2E harness binds port 0 and uses ephemeral `BOBBIT_DIR`s, so
+`test:e2e` won't collide with the running dev server.
 
 ## 0. Sanity check the environment
 
@@ -85,8 +85,8 @@ git status --porcelain               # must be empty (fresh checkout)
 
 Detached HEAD is deliberate: `master` is already checked out in the primary
 worktree and git forbids the same branch in two worktrees. The release commit
-(§4) lands on this detached HEAD and is published to `master` via
-`git push origin HEAD:master` in §8.
+lands on this detached HEAD, is pushed to a release branch in §6, and reaches
+`master` through the required squash-merge PR in §8.
 
 **Run every remaining step from inside `$RELDIR`.** Its `node_modules` and
 `dist/` are independent of the dev server's.
@@ -101,16 +101,17 @@ npm audit --omit=dev            # zero high/critical in runtime deps
 npm run build                   # full build; emits declarations used by test type-checks
 npm run check                   # type-check server + web + tests against fresh dist
 npm run test:unit               # fast unit suite
-npm run test:e2e                # API + browser E2E
+npm run test:browser            # Playwright browser journeys
+npm run test:e2e                # API + worktree/Docker/MCP/restart E2E
 ```
 
 Rules:
 - **`npm audit` must show 0 vulnerabilities** (any severity, runtime deps). If it doesn't, stop and report what's flagged — do not release with known vulns. If a finding is genuinely a false positive (e.g. dev-only path), have the user explicitly acknowledge before continuing.
-- Don't skip E2E "because it's slow" — releases are the one place flakes bite users.
+- Don't skip browser or E2E tests "because they're slow" — releases are the one place flakes bite users.
 - Build must precede `check`: `tsconfig.tests2.json` follows intentional imports of emitted `dist/server/*.js` declarations, so a clean checkout cannot type-check the test graph before the build.
 - If any test fails, the failure is the bug. Fix it or abort the release; do not retry hoping it's flaky.
 
-Long-running steps (`build`, `test:e2e`) should use `bash_bg` so output stays inspectable.
+Long-running steps (`build`, `test:browser`, `test:e2e`) should use `bash_bg` so output stays inspectable.
 
 ## 3. Decide whether to bump the binary sub-packages
 
@@ -163,22 +164,46 @@ git commit -m "chore(release): v<new-version>" \
 
 If no signing key is set, drop `-S` (you already confirmed with the user in step 0).
 
-The commit lands on this worktree's detached HEAD — that's expected. It becomes a real commit on `master` once §8 runs `git push origin HEAD:master`, so `npm install bobbit@<version>`, `git checkout v<version>`, and the GitHub release notes all agree.
+The commit lands on this worktree's detached HEAD — that's expected. The
+required squash merge in §8 creates the final `master` commit; that commit,
+not the detached release commit, is what gets tagged so npm, Git, and the
+GitHub release all agree.
 
-## 6. Tag the release (signed)
+## 6. Open the release PR and clear its gates
+
+Direct pushes to `master` are blocked by repository rules, and squash is the
+only enabled merge strategy. Push the detached HEAD to a release branch and
+open a PR:
 
 ```bash
-git tag -s v<new-version> -m "Bobbit v<new-version>"
-# -s = GPG/SSH-sign the tag. If user has no signing key and explicitly
-#      opted out in step 0, use -a (annotated, unsigned) instead.
-git tag -v v<new-version>    # verify signature
+RELBRANCH="release/v<new-version>"
+git push origin HEAD:refs/heads/$RELBRANCH
+PR_URL=$(gh pr create \
+  --base master \
+  --head "$RELBRANCH" \
+  --title "chore(release): v<new-version>" \
+  --body-file <release-pr-body-file>)
+PR=$(gh pr view "$PR_URL" --json number -q .number)
 ```
 
-Do **not** push the tag yet — publish first, push after.
+The PR body must summarize the version, release notes, and gate results, and
+must end with the standard Bobbit footer. Wait for every required check and
+review before publishing:
+
+```bash
+gh pr checks "$PR" --watch
+gh pr view "$PR" --json mergeStateStatus,reviewDecision,statusCheckRollup
+```
+
+The PR must be ready to merge, but **do not merge it yet**. Publishing remains
+the last irreversible step before the source and tag become public. Do not
+create the tag before the squash merge because the pre-merge commit will not
+be the commit that lands on `master`.
 
 ## 7. Publish to npm
 
-**Pause and confirm with the user** before this step — npm publishes are
+Only enter this step after the release PR is fully green and mergeable.
+**Pause and confirm with the user** before publishing — npm publishes are
 irreversible (you can `unpublish` for 72h but the version number is burned
 either way). Use `ask_user_choices` with the exact `npm publish` commands
 about to run.
@@ -205,27 +230,40 @@ Notes:
 - npm will prompt for OTP — that's the maintainer's job; just wait.
 - If publish fails after some sub-packages went through, **do not** try to bump+republish under a new version. Re-run `npm publish` on the remaining packages with the same version once the issue is fixed.
 
-## 8. Push the tag and the release commit
+## 8. Squash-merge the release PR, then tag it
 
-From inside `$RELDIR` (detached HEAD), publish the release commit to `master`
-and push the tag:
+Immediately after npm succeeds, squash-merge the already-green release PR.
+Pin the subject and co-author trailer explicitly:
 
 ```bash
-git push origin HEAD:master       # detached HEAD -> remote master (fast-forward)
+gh pr merge "$PR" \
+  --squash \
+  --delete-branch \
+  --subject "chore(release): v<new-version>" \
+  --body "Co-authored-by: bobbit-ai <bobbit@bobbit.ai>"
+MERGE_SHA=$(gh pr view "$PR" --json mergeCommit -q .mergeCommit.oid)
+git fetch origin master --tags
+git merge-base --is-ancestor "$MERGE_SHA" origin/master
+git show "$MERGE_SHA":package.json | grep '"version": "<new-version>"'
+git diff --exit-code HEAD "$MERGE_SHA" -- \
+  package.json package-lock.json RELEASE_NOTES_v<new-version>.md
+```
+
+Tag the PR's exact squash commit, not the current `origin/master` tip (another
+PR may have merged immediately afterward):
+
+```bash
+git tag -s v<new-version> "$MERGE_SHA" -m "Bobbit v<new-version>"
+git tag -v v<new-version>
 git push origin v<new-version>
 ```
 
-`HEAD:master` (not plain `master`) because this worktree is on a detached
-HEAD, not a local `master` branch. The push fast-forwards remote `master`
-to the release commit.
+If the user explicitly opted out of signing in step 0, use `git tag -a`
+instead and inspect it with `git show --no-patch v<new-version>`.
 
-If the push is **rejected as non-fast-forward**, someone pushed to `master`
-between §1.5 and now. Do **not** force-push. The clean recovery: tear down
-this worktree (§10.5), re-create it off the new `origin/master` tip, and
-re-run from §2. The version number isn't burned until §7 (`npm publish`), so
-as long as you haven't published yet you can safely start over; if you've
-already tagged locally, delete the *local* tag first (`git tag -d v<new-version>`)
-— never delete a tag that's been pushed.
+If merging fails after npm publish, stop and repair the same release PR. Do
+not change the version, create a second release commit, force-push `master`,
+or tag the detached pre-merge commit.
 
 **Refresh the running dev server** so it picks up the release commit (its
 local `master` is now behind remote):
@@ -292,6 +330,6 @@ Report to the user:
 - **OTP is the human's job.** Pause and let them type it; don't try to read it from anywhere.
 - **Never `npm publish --force`.** If a republish is genuinely needed, bump the patch version and republish cleanly.
 - **Never delete a tag that's been pushed.** If you tagged wrong, bump the version and tag again — published version numbers are immutable.
-- **Don't squash the release commit.** It must be a real commit on `master` with the bumped `package.json` so `npm install bobbit@<version>` and `git checkout v<version>` agree.
+- **Use the required squash-merge PR flow.** Never tag the detached release commit; tag the PR's exact `mergeCommit` SHA after verifying its package version and release files.
 - **One release at a time.** Don't start a second version bump while the previous tag/publish is in flight.
 - **Stop on any test, audit, or check failure.** Releases amplify bugs — the cost of waiting a day is tiny; the cost of a bad publish is days of cleanup.

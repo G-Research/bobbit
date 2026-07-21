@@ -2,7 +2,14 @@ import type { InboxEntry } from "../agent/inbox-store.js";
 import type { MessageAuthor } from "../../shared/message-author.js";
 import type { PromptSource } from "../../shared/prompt-source.js";
 import type { VerificationTimeoutInfo } from "../agent/gate-store.js";
+import type { GoalState } from "../agent/goal-store.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
+
+export interface GateResetReopenOutcome {
+	reopened: boolean;
+	previousState: GoalState;
+	state: GoalState;
+}
 
 /** Grant policy for tool access (self-contained — not imported from role-store for protocol independence). */
 export type GrantPolicy = 'allow' | 'ask' | 'never';
@@ -251,7 +258,7 @@ export type ServerMessage =
 	| { type: "gate_verification_step_complete"; goalId: string; gateId: string; signalId: string; stepIndex: number; stepName: string; status: "passed" | "failed" | "timeout" | "skipped"; durationMs: number; output: string; sessionId?: string; timeout?: VerificationTimeoutInfo; phase?: number; seq?: number }
 	| { type: "gate_verification_complete"; goalId: string; gateId: string; signalId: string; status: string; seq?: number }
 	| { type: "gate_status_changed"; goalId: string; gateId: string; status: string }
-	| { type: "gate_reset"; goalId: string; gateId: string; affectedGateIds: string[]; changedGateIds: string[]; unchangedGateIds: string[] }
+	| { type: "gate_reset"; goalId: string; gateId: string; affectedGateIds: string[]; changedGateIds: string[]; unchangedGateIds: string[]; reopen: GateResetReopenOutcome }
 	| { type: "goal_setup_complete"; goalId: string }
 	| { type: "goal_setup_error"; goalId: string; error: string }
 	| { type: "team_agent_spawned"; goalId: string; sessionId: string; role: string; name: string }

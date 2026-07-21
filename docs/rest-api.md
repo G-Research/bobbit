@@ -1,6 +1,47 @@
 # REST API
 
-All routes require `Authorization: Bearer <token>`. Token can also be passed as `?token=` query parameter.
+Gateway routes require an authentication source accepted by that surface. Most
+programmatic API calls use `Authorization: Bearer <admin-token>`; routes that
+support it also accept `?token=`. Browser API requests and preview resources may
+instead authenticate with a valid `bobbit_session` cookie. Scoped sandbox and
+session credentials remain limited to their existing route allow-lists.
+
+`bobbit_session` is a stateless signed value:
+`v1.<iat>.<exp>.<nonce>.<signature>`. The canonical issuance and expiry Unix
+seconds and 16-byte random nonce are authenticated by a 32-byte HMAC-SHA-256
+tag over the exact ASCII `v1.<iat>.<exp>.<nonce>` prefix. Cookies have a fixed
+30-day lifetime. Verification, including fixed-size timing-safe signature
+comparison, is bounded and entirely in memory.
+
+The only cookie state persisted is the stable, exact 32-byte signing key at
+`<serverSecretsDir>/cookie-signing-key`. It is safely created or loaded once at
+gateway startup with mode `0o600` and a `0o700` parent directory where Unix
+permissions are supported. Invalid existing key material fails startup. The
+admin Bearer token is never embedded in the cookie.
+
+A legacy `<stateDir>/auth-cookies.json`, regardless of size or corruption, is
+never inspected, migrated, rewritten, or deleted. A legacy 64-hex cookie is
+invalid, but an existing UI tab self-heals when its next eligible
+Bearer-authenticated API request replaces it with a signed cookie; the legacy
+file remains untouched.
+
+Bootstrap requires admin Bearer or localhost-trusted authentication on an
+eligible browser-signaled API request. Renewal requires a qualifying API
+request authenticated by the signed cookie and occurs only at or within the
+inclusive seven-day window. A fresh valid cookie is not issued repeatedly.
+Plain Bearer traffic without the required same-origin Fetch Metadata, sandbox
+or session-bound traffic, internal callbacks, preview content, and preview SSE
+do not receive `Set-Cookie`. The [preview cookie-auth reference](preview-architecture.md#cookie-auth)
+documents the exact Fetch Metadata, Origin, Vite, credential, header, and route
+exclusions.
+
+Those browser headers classify issuance only; they do not establish authority
+or prove a human caller. Consequently, a holder of the shared admin token can
+still deliberately make an otherwise eligible browser-shaped request and
+obtain the weak operator cookie. Cookies have
+`HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000`, plus `Secure` outside
+localhost HTTP mode. Individual cookies are not independently revocable;
+rotating the signing key invalidates all of them.
 
 ### Driving the gateway from an agent
 
@@ -36,6 +77,7 @@ A small set of UI probe endpoints accept `optional=1` to represent expected abse
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/health` | Health check + session count |
+| `GET` | `/api/app-info` | Running Bobbit package version and build provenance: `{ version, buildType: "installed" | "source", commitSha? }` |
 | `GET` | `/api/connection-info` | List network interface addresses for multi-device access |
 | `GET` | `/api/ca-cert` | Download the Bobbit CA certificate for device trust |
 
@@ -1219,14 +1261,14 @@ Under the AI Gateway, the OpenAI-Codex driver model auto-selects through a fallb
 
 The preview side-panel iframe is fed by a per-session content mount served from a cookie-authed origin path. Both `html=` and `file=` arguments to the agent's `preview_open` tool converge on the same mount, so there is no longer an inline-vs-file mode distinction. Full reference: [docs/preview-architecture.md](preview-architecture.md).
 
-**Content origin — `/preview/<sid>/<rel-path>`** (no `/api/` prefix). Files are served from `<stateDir>/preview/<sid>/` with proper MIME types and `Cache-Control: no-store`. HTML responses get a `<base href="/preview/<sid>/">` and the shared theme/swipe bridge scripts injected; non-HTML assets pass through untouched. Auth is by the `bobbit_session` cookie (HttpOnly, `Path=/`, 30-day max-age, `Secure` outside localhost) — iframe loads, link navigation, and "Open in new tab" all carry it automatically. Path-traversal escapes return `403`; missing files return `404`. Method gate: `GET`/`HEAD` only.
+**Content origin — `/preview/<sid>/<rel-path>`** (no `/api/` prefix). Files are served from `<stateDir>/preview/<sid>/` with proper MIME types and `Cache-Control: no-store`. HTML responses get a `<base href="/preview/<sid>/">` and the shared theme/swipe bridge scripts injected; non-HTML assets pass through untouched. Auth is by the signed `bobbit_session` cookie (HttpOnly, `Path=/`, 30-day max-age, `Secure` outside localhost) — iframe loads, link navigation, and "Open in new tab" all carry it automatically. Preview content verifies cookies entirely in memory and never issues or renews them. Path-traversal escapes return `403`; missing files return `404`. Method gate: `GET`/`HEAD` only.
 
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/preview/mount?sessionId=<sid>` | Populate the per-session preview mount, OR restore an immutable artifact. Body is one of: `{ html, entry? }` (inline), `{ file: "/abs/path/report.html", assets?: string[], manifest?: string }` (copy entry plus explicitly declared siblings), or `{ artifactId }` (restore a previously captured artifact — mutually exclusive with `html`/`file`/`assets`/`manifest`). Returns `200 { url, path, relPath, entry, mtime, contentHash, artifactId }` for inline, plus `assets: string[]` (resolved + sorted) for the `file` form. `contentHash` is a lowercase SHA-256 hex string for the populated mount tree; `artifactId` is the id of the immutable artifact written alongside the mount (see [docs/design/side-panel-tab-contract.md](design/side-panel-tab-contract.md) and the [Preview architecture](preview-architecture.md) doc for lifecycle). `relPath` is the host-invariant `<sessionId>/<entry>` identifier (forward slashes on all OS) used by the agent tool to build the v3 snapshot marker. `400` invalid sessionId / bad entry / non-absolute file / file not `.html`/`.htm` / `assets` or `manifest` passed with `html` / invalid asset path (absolute, `..`, `\`, `\0`, `**`, `[...]`, `{a,b}`) / manifest JSON parse error / `artifactId` combined with another body field; `403` sandbox-out-of-scope or symlink escape; `404` source file / manifest file / literal asset missing / `artifactId` unknown or owned by a different session. No size cap — asset inclusion is explicit and agent-driven. On success the server fans out a `preview-changed` SSE event. |
 | `POST` | `/api/preview/artifacts/<artifactId>/restore?sessionId=<sid>` | Restore a previously captured immutable preview artifact into the session's live mount and broadcast `preview-changed`. The artifact must belong to `<sid>`; cross-session ids return `404`. Returns the same shape as the mount `POST` (`{ url, path, relPath, entry, mtime, contentHash, artifactId }`). Used by the preview-renderer Open button on historical `preview_open` tool cards. Equivalent to `POST /api/preview/mount` with `{ artifactId }` body; this dedicated route keeps the URL self-describing for the client restore path. |
 | `GET` | `/api/preview/mount?sessionId=<sid>` | Bootstrap probe used by the panel after session-select. Returns `{ url, path, relPath, entry, mtime, contentHash, artifactId? }` (artifactId present iff an artifact was persisted for the current mount), or `404 { error: "no preview mount" }` if the mount is missing or empty. |
-| `GET` | `/api/sessions/:id/preview-events` | Server-Sent Events stream for preview changes. Frames: `event: hello` on connect, `event: preview-changed` with `{entry, mtime, url, path, contentHash, artifactId?}` after every successful mount or artifact restore. Note: the SSE payload does **not** include `relPath` — only the mount REST responses do. The handler bootstraps by emitting one `preview-changed` event synchronously if a mount already exists for the session — closes the subscription race. 25 s `:keepalive` comments. Cookie auth (or admin bearer); sandbox-token requests get `403`. |
+| `GET` | `/api/sessions/:id/preview-events` | Server-Sent Events stream for preview changes. Frames: `event: hello` on connect, `event: preview-changed` with `{entry, mtime, url, path, contentHash, artifactId?}` after every successful mount or artifact restore. Note: the SSE payload does **not** include `relPath` — only the mount REST responses do. The handler bootstraps by emitting one `preview-changed` event synchronously if a mount already exists for the session — closes the subscription race. 25 s `:keepalive` comments. Cookie auth (or admin bearer); sandbox-token requests get `403`. This route authenticates but never issues or renews a cookie. |
 
 ### Maintenance
 
@@ -1594,6 +1636,11 @@ Response:
     { "gateId": "implementation", "name": "Implementation", "status": "pending" },
     { "gateId": "ready-to-merge", "name": "Ready to Merge", "status": "pending" }
   ],
+  "reopen": {
+    "reopened": true,
+    "previousState": "complete",
+    "state": "in-progress"
+  },
   "teamLeadNotified": true
 }
 ```
@@ -1606,11 +1653,43 @@ Notes:
 - Signal history, content, metadata, and verification output are preserved for audit. The gate `status` is the approval source of truth after reset.
 - `human-signoff` approvals are never reused from verification cache; each re-signal requires a fresh human decision.
 - After a fresh post-reset pass, later non-reset re-signals at the same commit may reuse that new passed output normally.
-- Active verifications for affected gates are cancelled before status changes are persisted.
-- The server emits `gate_status_changed` plus `gate_reset` WebSocket events and notifies the team lead when one is active.
+- Active verifications for affected gates are cancelled before the durable transaction begins. The route then re-reads the goal and repeats its dormant-state guards so cancellation cannot open a race with pause, shelving, or archival.
+- `reopen` is always present. `reopened` reports whether the durable transaction includes `complete` → `in-progress`; `previousState` is the state captured by that transaction; and `state` is the resulting state. Active `todo`, `in-progress`, and `blocked` goals keep their current state.
+- Reopening preserves the goal, tasks, gate audit data, branch/worktree and repository fields, and PR association. When a completed team runtime still exists, it also preserves and rearms that team and lead instead of replacing them.
+- A completed goal whose team was explicitly torn down is still resettable. The goal reopens and its gates reset, but reset does not recreate a team, lead session, subscription, or nudge timer; `teamLeadNotified` is `false`. Starting a new runtime remains a separate operator action.
+- A new successful request emits affected `gate_status_changed` events and `gate_reset` with the same `reopen` object. An actual reopen additionally emits global `goal_state_changed`. A retry that resumes a retained recovery intent suppresses duplicate events and notification.
+- The team lead is notified only when at least one gate changed or the goal reopened and a live lead exists. The notice includes the lifecycle outcome. `teamLeadNotified` reports whether delivery succeeded.
+- An exact retry after a fully finalized reset is idempotent: once all affected gates are pending and the goal is active, the response has `changedGateIds: []`, `reopen: { "reopened": false, "previousState": "in-progress", "state": "in-progress" }`, and `teamLeadNotified: false`; it does not rearm the runtime or send another lead notice.
 - Sandboxed agent tokens are forbidden from this route.
 
-Errors: 400 when the goal has no workflow; 403 for sandbox-scoped tokens; 404 for unknown goal/gate; 409 when the goal is archived.
+#### Durable reset transaction
+
+Goal lifecycle and gate state live in separate project stores. Reset coordinates them with a project-scoped write-ahead intent so a crash cannot leave the durable combination `complete` plus newly `pending` gates. After verification cancellation and lifecycle revalidation, the phases are:
+
+1. Atomically persist an intent containing the requested gate, affected DAG scope, prior statuses, prior goal state, and whether reopening is required.
+2. If required, strictly persist the goal as `in-progress`.
+3. Strictly persist the selected and dependent gates as `pending`, including cache-invalidation markers.
+4. Rearm the existing completed-team runtime, if one still exists.
+5. Atomically clear the intent.
+
+The goal and gate strict-write paths write through a temporary file and rename, propagate persistence errors, and restore their in-memory snapshot when the durable write fails. Gate observers run only after the strict gate commit; an observer failure is logged and cannot compensate the goal back to `complete` over already-pending gates.
+
+Each project constructs its reset coordinator after loading its goal and gate stores but before team restoration and boot-resume scanning. Any retained intent is replayed state-first and idempotently, then cleared. Replay therefore handles restarts after intent persistence, goal persistence, gate persistence, or finalization failure. If replay itself cannot persist, the intent remains for a later restart. A goal explicitly made archived, shelved, or paused before replay wins over the older reset intent; recovery clears the intent without resuming work.
+
+Synchronous commit failure uses controlled compensation. If strict gate persistence fails after the goal reopened, the server strictly restores the prior goal state and clears the intent before returning an error. No rearm, notification, or lifecycle/reset broadcast occurs. If either compensation write fails, the intent is deliberately retained so boot replay finishes the idempotent transaction instead of guessing which store won.
+
+Runtime rearm is also retryable. If an existing team's unsubscribe or new event-subscription callback fails, the already-durable goal/gate reset is not rolled back. The API retains the intent and returns `503 TEAM_REOPEN_FAILED` with `retryable: true`, `durableReset: true`, and the original `reopen` outcome. Repeating the same reset resumes that intent and retries rearm without duplicate prompts, timers, events, or notifications. After success, the response reports the original affected scope and reopen outcome rather than presenting the durable replay as a no-op.
+
+| Status | Code | Durable outcome |
+|---|---|---|
+| `500` | `GATE_RESET_PREPARE_FAILED` | Intent persistence failed; no goal or gate mutation occurred. `retryable: true`. |
+| `500` | `GATE_RESET_PERSIST_FAILED` | Strict goal/gate commit failed. Successful compensation restores the pre-reset state; failed compensation leaves the intent for boot replay. `retryable: true`. |
+| `503` | `TEAM_REOPEN_FAILED` | Goal and gates are durably reset, but an existing team runtime was not rearmed. Intent remains so the same request can retry. `durableReset: true`, `retryable: true`. |
+| `500` | `GATE_RESET_FINALIZE_FAILED` | Goal, gates, and any required rearm committed, but intent cleanup failed. Replay or request retry finalizes idempotently. `durableReset: true`, `retryable: true`. |
+
+Dormant goals are never reopened implicitly. Reset returns `409` before mutation for archived goals (`{ "error": "Goal is archived" }`), shelved goals (`{ "error": "Goal is shelved", "code": "GOAL_SHELVED", "goalId": "…" }`), and paused goals (`{ "error": "Goal … is paused", "code": "GOAL_PAUSED", "goalId": "…" }`). The goal must be returned to an active lifecycle through an explicit operator action before reset is allowed; reset itself never performs that recovery.
+
+Other errors: 400 when the goal has no workflow; 403 for sandbox-scoped tokens; 404 for unknown goal/gate.
 
 ### Gate bypass endpoint
 

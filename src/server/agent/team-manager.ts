@@ -360,6 +360,8 @@ export class TeamManager {
 	private leadIdleSinceByGoal = new Map<string, number>();
 	/** goalId → last stuck-nudge ms (5-min floor). */
 	private lastNudgeAtPerGoal = new Map<string, number>();
+	/** Goals whose completed team runtime has already been rearmed after a reset. */
+	private rearmedCompletedTeams = new Set<string>();
 	/** Periodic 60s sweep that detects fully-idle teams. */
 	private stuckSweepTimer: ReturnType<typeof setInterval> | null = null;
 	private verificationHarness?: VerificationHarness;
@@ -1121,15 +1123,15 @@ export class TeamManager {
 
 	/**
 	 * Detect teams whose lead is idle on boot AND that have concrete
-	 * outstanding work (a failed gate or an open task). Send a one-shot
+	 * outstanding work (an unresolved gate or an open task). Send a one-shot
 	 * boot-resume nudge so the operator doesn't have to wait for the 5-min
 	 * stuck-sweep tick before progress resumes after a gateway restart.
 	 *
 	 * Conservatism rules:
 	 *  - Skip everything `shouldSkipNudge` skips (paused/complete/shelved/
 	 *    archived/in-flight-child/nudge-pending/active-verification).
-	 *  - Skip teams with no failed gate AND no open task — a goal with all
-	 *    gates passed and no pending tasks is genuinely dormant; nudging
+	 *  - Skip teams with no unresolved gate AND no open task — a goal with all
+	 *    gates passed or bypassed and no pending tasks is genuinely dormant; nudging
 	 *    it would just re-invoke an LLM for no reason.
 	 *  - Stamp `nudgePending` + `lastNudgeAtPerGoal` so the stuck-sweep
 	 *    doesn't double-fire within STUCK_QUIET_THRESHOLD_MS.
@@ -1292,26 +1294,26 @@ export class TeamManager {
 
 	/**
 	 * Return a one-line description of a goal's concrete outstanding work,
-	 * or null if there is none. "Outstanding" = failed gate OR open task
-	 * (state in todo/in-progress). Passed gates and complete tasks don't
+	 * or null if there is none. "Outstanding" = unresolved gate OR open task
+	 * (state in todo/in-progress). Passed/bypassed gates and complete tasks don't
 	 * count; this is about "the team-lead has a concrete next action".
 	 */
 	private _outstandingWorkSummary(goalId: string): string | null {
 		const ctx = this.config.projectContextManager?.getContextForGoal(goalId);
 		if (!ctx) return null;
-		let failedGates = 0;
+		let unresolvedGates = 0;
 		try {
 			const gateStates = ctx.gateStore.getGatesForGoal(goalId);
-			failedGates = gateStates.filter(g => g.status === "failed").length;
+			unresolvedGates = gateStates.filter(g => g.status !== "passed" && g.status !== "bypassed").length;
 		} catch { /* gate store may be unavailable for a freshly-recovered goal */ }
 		let openTasks = 0;
 		try {
 			const tasks = ctx.taskStore.getByGoalId(goalId);
 			openTasks = tasks.filter(t => t.state === "todo" || t.state === "in-progress").length;
 		} catch { /* task store may be unavailable */ }
-		if (failedGates === 0 && openTasks === 0) return null;
+		if (unresolvedGates === 0 && openTasks === 0) return null;
 		const parts: string[] = [];
-		if (failedGates > 0) parts.push(`${failedGates} failed gate(s)`);
+		if (unresolvedGates > 0) parts.push(`${unresolvedGates} unresolved gate(s)`);
 		if (openTasks > 0) parts.push(`${openTasks} open task(s)`);
 		return parts.join(", ");
 	}
@@ -1660,50 +1662,68 @@ export class TeamManager {
 	 * Subscribe to the team lead session's RPC events to manage the idle-nudge timer.
 	 * On agent_end (idle): start the timer. On agent_start (streaming): clear it.
 	 */
-	private subscribeTeamLeadEvents(goalId: string): void {
+	private subscribeTeamLeadEvents(goalId: string): boolean {
 		const entry = this.teams.get(goalId);
-		if (!entry?.teamLeadSessionId) return;
+		if (!entry?.teamLeadSessionId) return false;
 
 		const session = this.sessionManager.getSession(entry.teamLeadSessionId);
-		if (!session) return;
+		if (!session) return false;
 
-		// Clean up any previous subscription
-		entry.unsubscribeTeamLeadEvents?.();
+		// Do not install a replacement unless the previous listener was definitely
+		// removed. A throwing unsubscribe may be transient; retaining it lets a
+		// later reopen retry cleanup without risking duplicate subscriptions.
+		const previousUnsubscribe = entry.unsubscribeTeamLeadEvents;
+		if (previousUnsubscribe) {
+			try {
+				previousUnsubscribe();
+			} catch (err) {
+				console.warn(`[team-manager] Failed to unsubscribe team lead events for goal ${goalId}:`, err);
+				return false;
+			}
+			if (entry.unsubscribeTeamLeadEvents === previousUnsubscribe) {
+				entry.unsubscribeTeamLeadEvents = undefined;
+			}
+		}
 
-		// If the lead is already idle at subscribe time (e.g. resubscribe after
-		// restart), seed leadIdleSinceByGoal so the stuck-team watchdog has a
-		// timestamp to compare against on its next tick.
+		let unsubscribe: (() => void) | undefined;
+		try {
+			unsubscribe = session.rpcClient.onEvent((event: any) => {
+				if (event.type === "agent_end") {
+					this.leadIdleSinceByGoal.set(goalId, this.clock.now());
+					this.startIdleNudgeTimer(goalId);
+				} else if (event.type === "agent_start") {
+					this.leadIdleSinceByGoal.delete(goalId);
+					const tl = this.sessionManager.getSession(entry.teamLeadSessionId!);
+					const lastSource = tl?.lastPromptSource ?? "user";
+					if (lastSource !== "user" && lastSource !== "system") this.confirmPendingNudgeStarted(goalId);
+					else this.clearPendingNudgeNoStart(goalId);
+					if (lastSource === "user" || lastSource === "system") {
+						// External signal — fresh idle cycle starts from base delay.
+						this.clearIdleNudgeTimer(goalId);
+					} else {
+						// Team lead is replying to its own auto-nudge / task-notification / verification.
+						// Cancel pending timers (shouldSkipNudge would block them while streaming anyway),
+						// but PRESERVE counters so backoff continues to grow across cycles.
+						const t1 = this.idleNudgeTimers.get(goalId);
+						if (t1) { this.clock.clearTimeout(t1); this.idleNudgeTimers.delete(goalId); }
+						const t2 = this.noWorkersNudgeTimers.get(goalId);
+						if (t2) { this.clock.clearTimeout(t2); this.noWorkersNudgeTimers.delete(goalId); }
+						// idleNudgeCount and noWorkersNudgeCount intentionally preserved.
+					}
+				}
+			});
+		} catch (err) {
+			console.warn(`[team-manager] Failed to subscribe to team lead events for goal ${goalId}:`, err);
+			return false;
+		}
+
+		entry.unsubscribeTeamLeadEvents = unsubscribe;
+		// Seed only after subscription succeeds so a failed attempt leaves no
+		// partial watchdog state that could make the retry appear successful.
 		if (session.status === "idle" && !this.leadIdleSinceByGoal.has(goalId)) {
 			this.leadIdleSinceByGoal.set(goalId, this.clock.now());
 		}
-
-		const unsubscribe = session.rpcClient.onEvent((event: any) => {
-			if (event.type === "agent_end") {
-				this.leadIdleSinceByGoal.set(goalId, this.clock.now());
-				this.startIdleNudgeTimer(goalId);
-			} else if (event.type === "agent_start") {
-				this.leadIdleSinceByGoal.delete(goalId);
-				const tl = this.sessionManager.getSession(entry.teamLeadSessionId!);
-				const lastSource = tl?.lastPromptSource ?? "user";
-				if (lastSource !== "user" && lastSource !== "system") this.confirmPendingNudgeStarted(goalId);
-				else this.clearPendingNudgeNoStart(goalId);
-				if (lastSource === "user" || lastSource === "system") {
-					// External signal — fresh idle cycle starts from base delay.
-					this.clearIdleNudgeTimer(goalId);
-				} else {
-					// Team lead is replying to its own auto-nudge / task-notification / verification.
-					// Cancel pending timers (shouldSkipNudge would block them while streaming anyway),
-					// but PRESERVE counters so backoff continues to grow across cycles.
-					const t1 = this.idleNudgeTimers.get(goalId);
-					if (t1) { this.clock.clearTimeout(t1); this.idleNudgeTimers.delete(goalId); }
-					const t2 = this.noWorkersNudgeTimers.get(goalId);
-					if (t2) { this.clock.clearTimeout(t2); this.noWorkersNudgeTimers.delete(goalId); }
-					// idleNudgeCount and noWorkersNudgeCount intentionally preserved.
-				}
-			}
-		});
-
-		entry.unsubscribeTeamLeadEvents = unsubscribe;
+		return true;
 	}
 
 	private get goalManager(): GoalManager {
@@ -2675,6 +2695,59 @@ export class TeamManager {
 		return entry.agents.find(a => a.sessionId === sessionId);
 	}
 
+	/** Re-read workflow truth and reject completion while any required gate is unresolved. */
+	private validateCompletionGates(goalId: string, opts?: { allowBypassedGates?: boolean }): PersistedGoal | undefined {
+		const goal = this.resolveGoal(goalId);
+		const gateStore = this.resolveGateStore(goalId);
+		const skipReqs = goal?.skipGateRequirements;
+		if (!goal?.workflow || !gateStore || skipReqs?.includes("workflow")) return goal;
+
+		const gateStates = gateStore.getGatesForGoal(goalId);
+		const statusById = new Map(gateStates.map(g => [g.gateId, g.status]));
+		const isResolved = (id: string) => statusById.get(id) === "passed" || statusById.get(id) === "bypassed";
+		const failedGates = goal.workflow.gates.filter(g => !isResolved(g.id));
+		if (failedGates.length > 0) {
+			throw new Error(`Cannot complete: gates not passed: ${failedGates.map(g => g.name).join(", ")}`);
+		}
+		const bypassedGates = goal.workflow.gates.filter(g => statusById.get(g.id) === "bypassed");
+		if (bypassedGates.length > 0 && !opts?.allowBypassedGates) {
+			throw new Error(`Cannot complete: ${bypassedGates.length} gate(s) were bypassed and require human confirmation`);
+		}
+		return goal;
+	}
+
+	/**
+	 * Rearm the existing team lead after a completed goal is explicitly reopened.
+	 * The caller owns the persisted `complete` → `in-progress` transition; this
+	 * method only restores runtime subscriptions and base-delay nudge timers.
+	 * Returns true only when this call completed the rearm. Failed attempts return
+	 * false and remain retryable; calls after a successful rearm are idempotent.
+	 */
+	reopenCompletedTeam(goalId: string): boolean {
+		if (this.rearmedCompletedTeams.has(goalId)) return false;
+
+		const entry = this.teams.get(goalId);
+		if (!entry?.teamLeadSessionId) return false;
+		const goal = this.resolveGoal(goalId);
+		if (!goal || goal.state !== "in-progress" || goal.archived || goal.paused) return false;
+
+		const lead = this.sessionManager.getSession(entry.teamLeadSessionId);
+		if (!lead || lead.status === "terminated") return false;
+
+		// Completion removes the lead subscription and clears its timers, but idle
+		// and stuck-nudge timestamps can survive. Reset all completion-era runtime
+		// state so this is a fresh base-delay cycle, then replace the subscription.
+		this.clearIdleNudgeTimer(goalId);
+		this.leadIdleSinceByGoal.delete(goalId);
+		this.lastNudgeAtPerGoal.delete(goalId);
+		if (!this.subscribeTeamLeadEvents(goalId)) return false;
+		if (lead.status === "idle") this.startIdleNudgeTimer(goalId);
+
+		this.rearmedCompletedTeams.add(goalId);
+		console.log(`[team-manager] Rearmed completed team for reopened goal ${goalId}; team lead remains ${entry.teamLeadSessionId}`);
+		return true;
+	}
+
 	/**
 	 * Complete a team: dismiss all role agents but keep the team lead alive.
 	 * The team lead remains active to await further instructions.
@@ -2690,31 +2763,15 @@ export class TeamManager {
 			await this.verificationHarness.cancelAllVerifications(goalId);
 		}
 
-		// Enforce gate requirements before allowing completion
-		const completeGateStore = this.resolveGateStore(goalId);
-		const goal = this.resolveGoal(goalId);
-		const skipReqs = goal?.skipGateRequirements;
+		// Enforce gate requirements before allowing completion.
+		let goal = this.validateCompletionGates(goalId, opts);
 
-		if (goal?.workflow && completeGateStore && (!skipReqs || !skipReqs.includes("workflow"))) {
-			const gateStates = completeGateStore.getGatesForGoal(goalId);
-			const statusById = new Map(gateStates.map(g => [g.gateId, g.status]));
-			const isResolved = (id: string) => statusById.get(id) === "passed" || statusById.get(id) === "bypassed";
-			const failedGates = goal.workflow.gates.filter(g => !isResolved(g.id));
-			if (failedGates.length > 0) {
-				throw new Error(`Cannot complete: gates not passed: ${failedGates.map(g => g.name).join(", ")}`);
-			}
-			// Bypassed gates satisfy dependency ordering but still require explicit
-			// human confirmation before the goal can be completed. An agent calling
-			// team_complete (no opts) hits this distinct error and cannot auto-finish.
-			const bypassedGates = goal.workflow.gates.filter(g => statusById.get(g.id) === "bypassed");
-			if (bypassedGates.length > 0 && !opts?.allowBypassedGates) {
-				throw new Error(`Cannot complete: ${bypassedGates.length} gate(s) were bypassed and require human confirmation`);
-			}
-		}
-
-		// Cancel idle-nudge timer and unsubscribe from team lead events
+		// Cancel idle-nudge timer and unsubscribe from team lead events. A new
+		// completion attempt invalidates any earlier reopen idempotency marker.
+		this.rearmedCompletedTeams.delete(goalId);
 		this.clearIdleNudgeTimer(goalId);
 		entry.unsubscribeTeamLeadEvents?.();
+		entry.unsubscribeTeamLeadEvents = undefined;
 
 		// Dismiss all role agents
 		const agentSessionIds = entry.agents.map((a) => a.sessionId);
@@ -2729,8 +2786,21 @@ export class TeamManager {
 		// Keep the team lead session alive — do NOT terminate it.
 		// The team lead will await further instructions.
 
-		// Update goal state
+		// Worker dismissal awaits above allow a gate reset to interleave after the
+		// first validation. Re-read workflow truth immediately before committing the
+		// completed state. If reset won the race, restore the lead runtime and leave
+		// the goal in progress rather than persisting complete with unresolved gates.
+		try {
+			goal = this.validateCompletionGates(goalId, opts);
+		} catch (err) {
+			const rearmed = this.reopenCompletedTeam(goalId);
+			if (!rearmed) {
+				console.warn(`[team-manager] Completion aborted for goal ${goalId}, but its team lead runtime could not be rearmed; a later reopen may retry`);
+			}
+			throw err;
+		}
 		await this.resolveGoalManager(goalId).updateGoal(goalId, { state: "complete" });
+		this.rearmedCompletedTeams.delete(goalId);
 
 		// Notify parent team lead when a child goal completes, regardless of workflow shape.
 		// This ensures the parent is woken up even if the child's workflow has no
@@ -2820,6 +2890,7 @@ export class TeamManager {
 		this.teams.delete(goalId);
 		this.leadIdleSinceByGoal.delete(goalId);
 		this.lastNudgeAtPerGoal.delete(goalId);
+		this.rearmedCompletedTeams.delete(goalId);
 		this.resolveTeamStore(goalId).remove(goalId);
 
 		console.log(`[team-manager] Tore down team for goal ${goalId}`);

@@ -567,16 +567,19 @@ identities — only the live mapping matters).
 
 ### Residual risk (known, tracked)
 
-The **operator** endpoints still trust the **shared admin Bearer token**: any
-holder of that token can mint a `bobbit_session` cookie and drive the operator
-verbs. This is an **inherent property of Bobbit's single shared-credential
-model** — agents and the human share one gateway token, so the cookie path
-cannot cryptographically distinguish a human operator from a token-holding
-agent. Full separation requires a dedicated human-only operator credential that
-agents never possess; that is out of scope for this work and tracked as future
-work. The orchestration/operator split plus the per-session secret remove the
-cookie bypass from the high-impact orchestration surface without claiming to
-fully isolate the operator surface.
+The **operator** endpoints still indirectly trust the **shared admin Bearer
+token**: any holder can deliberately make an eligible browser-shaped API
+request, obtain a signed `bobbit_session` cookie, and then drive the operator
+verbs. Plain Bearer, session-bound, sandbox, and internal callback traffic does
+not automatically mint that cookie, but the browser headers are spoofable
+routing metadata rather than proof of a human. This is an **inherent property
+of Bobbit's single shared-credential model** — agents and the human share one
+gateway token, so the cookie path cannot cryptographically distinguish a human
+operator from a token-holding agent. Full separation requires a dedicated
+human-only operator credential that agents never possess; that is out of scope
+for this work and tracked as future work. The orchestration/operator split plus
+the per-session secret remove the cookie bypass from the high-impact
+orchestration surface without claiming to fully isolate the operator surface.
 
 A second, accepted residual: a co-resident session in the same pre-warmed pool
 container, running as the same uid, could read another exec'd process's

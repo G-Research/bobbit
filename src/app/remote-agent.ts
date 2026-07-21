@@ -712,6 +712,9 @@ export class RemoteAgent {
 	get gatewaySessionId() {
 		return this._sessionId;
 	}
+	private _isActiveSession(): boolean {
+		return this._sessionId !== "" && state.selectedSessionId === this._sessionId;
+	}
 	get title() {
 		return this._title;
 	}
@@ -1763,20 +1766,30 @@ export class RemoteAgent {
 						this._scanLoadedProposalMessages();
 					}
 					// Rebuild review pane state from message history (same persistence as preview pane).
-					// Hydrate annotation cache from server before checking submitted state.
-					await initAnnotationStore(this._sessionId || "");
-					// Skip if the user already submitted the review for this session.
-					state.reviewDocuments = new Map();
-					state.reviewActiveTab = "";
-					state.reviewPanelOpen = false;
-					if (!isReviewSubmitted(this._sessionId || "")) {
-						for (const m of this._state.messages) {
-							await this._checkReviewToolResult(m);
+					// Annotation hydration is session-scoped and can continue for a cached
+					// background agent. The review pane itself is global, so only the still-
+					// active session may clear, rebuild, or restore it.
+					const reviewSessionId = this._sessionId;
+					await initAnnotationStore(reviewSessionId);
+					if (this._isActiveSession()) {
+						state.reviewDocuments = new Map();
+						state.reviewActiveTab = "";
+						state.reviewPanelOpen = false;
+						if (!isReviewSubmitted(reviewSessionId)) {
+							for (const m of this._state.messages) {
+								await this._checkReviewToolResult(m);
+								if (!this._isActiveSession()) break;
+							}
+						} else {
+							closeReviewWorkspaceTabs(undefined, { sessionId: reviewSessionId, select: false });
 						}
-					} else {
-						closeReviewWorkspaceTabs(undefined, { sessionId: this._sessionId || "", select: false });
+						if (this._isActiveSession()) {
+							const reviewSources = await loadReviewSources();
+							if (this._isActiveSession()) {
+								reviewSources.restorePersistedReviewDocuments(reviewSessionId, { select: true });
+							}
+						}
 					}
-					(await loadReviewSources()).restorePersistedReviewDocuments(this._sessionId || "", { select: true });
 					// Re-add compacting placeholder if compaction is still in progress
 					if (this._isCompacting) {
 						this._addCompactingPlaceholder();
@@ -2338,7 +2351,7 @@ export class RemoteAgent {
 
 			const tagKey = `${proposalType}_proposal`;
 			if (streaming) {
-				state.proposalStreamingByTag[tagKey] = true;
+				if (this._isActiveSession()) state.proposalStreamingByTag[tagKey] = true;
 				// Record the in-flight block so a mid-stream Dismiss can suppress
 				// the rest of THIS tool block (see dismissStreamingProposal).
 				if (blockId) this._streamingProposalBlockIdByTag[tagKey] = blockId;
@@ -2359,7 +2372,7 @@ export class RemoteAgent {
 			// without marking processed — so the final complete arguments always fire too.
 			if (!streaming && blockId) {
 				this._processedProposalIds.add(blockId);
-				state.proposalStreamingByTag[tagKey] = false;
+				if (this._isActiveSession()) state.proposalStreamingByTag[tagKey] = false;
 				delete this._streamingProposalBlockIdByTag[tagKey];
 				// Persist to sessionStorage so it survives page refresh
 				if (this._sessionId) {
@@ -2483,8 +2496,8 @@ export class RemoteAgent {
 	 * hydration. Mirrors the active-session check in `_onVisibilityChange`.
 	 */
 	private async _checkReviewToolResult(msg: any, isLive = false): Promise<void> {
-		const sessionId = this._sessionId || "";
-		const isActiveSession = (): boolean => !sessionId || state.selectedSessionId === sessionId;
+		const sessionId = this._sessionId;
+		const isActiveSession = (): boolean => this._isActiveSession();
 		if (!isActiveSession()) return;
 
 		// Extract review tool-result payloads. Production providers are not fully
@@ -2766,9 +2779,12 @@ export class RemoteAgent {
 				this._state.streamingMessage = null;
 				this._state.pendingToolCalls = new Set();
 				// Bulk-clear any stuck per-tag streaming flags (safety net for
-				// turns that error out or are aborted before message_end).
-				for (const k of Object.keys(state.proposalStreamingByTag)) {
-					state.proposalStreamingByTag[k] = false;
+				// turns that error out or are aborted before message_end). The map is
+				// global, so a cached background agent must not clear foreground flags.
+				if (this._isActiveSession()) {
+					for (const k of Object.keys(state.proposalStreamingByTag)) {
+						state.proposalStreamingByTag[k] = false;
+					}
 				}
 				this._streamingProposalBlockIdByTag = {};
 

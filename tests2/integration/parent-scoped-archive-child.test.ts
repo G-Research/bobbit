@@ -3,7 +3,7 @@
  * archive route.
  *
  * This endpoint is an OPERATOR-class Children mutation (the web UI drives it),
- * so the verified `bobbit_session` cookie authorizes it; otherwise the same
+ * so a verified stateless signed `bobbit_session` cookie authorizes it; otherwise the same
  * team-lead match as every other Children mutation applies. See
  * `src/server/auth/children-mutation-authz.ts` for the full threat model and
  * decision tables. (The spawn-child setup calls used to create the child are
@@ -48,17 +48,23 @@ test.beforeAll(async ({ gateway }) => {
 	token = readE2EToken();
 	gw = gateway;
 	// archive-child is an OPERATOR Children verb: the S1 authz treats a request
-	// carrying the verified `bobbit_session` cookie as a trusted human/UI
-	// operator. The gateway mints the cookie on the first authenticated
-	// request; capture it so the "human → allow" assertions can authorize.
-	const probe = await rawApiFetch("/api/goals", { headers: { Authorization: `Bearer ${token}` } });
+	// carrying a verified signed `bobbit_session` cookie as a human/UI operator.
+	// Bootstrap it only through an authenticated, same-origin browser-signaled
+	// request; Fetch Metadata controls issuance eligibility, not authority.
+	const probe = await rawApiFetch("/api/goals", {
+		headers: {
+			Authorization: `Bearer ${token}`,
+			"Sec-Fetch-Site": "same-origin",
+			"Sec-Fetch-Mode": "cors",
+		},
+	});
 	const setCookies = (probe.headers as any).getSetCookie?.() as string[] | undefined
 		?? (probe.headers.get("set-cookie") ? [probe.headers.get("set-cookie") as string] : []);
 	humanCookie = setCookies.map((c) => c.split(";")[0]).find((c) => c.startsWith("bobbit_session=")) ?? "";
-	expect(humanCookie, "harness must mint a bobbit_session cookie for the human/UI authz path").not.toBe("");
+	expect(humanCookie, "browser-signaled Bearer auth must mint a signed bobbit_session cookie").not.toBe("");
 });
 
-/** Header set including the auth token plus the human bobbit_session cookie. */
+/** Header set including the auth token plus the signed human bobbit_session cookie. */
 function humanHeaders(extra?: Record<string, string>): Record<string, string> {
 	return {
 		"Content-Type": "application/json",
@@ -76,6 +82,7 @@ function humanHeaders(extra?: Record<string, string>): Record<string, string> {
 async function createReadyGoal(label: string): Promise<{ id: string }> {
 	const resp = await apiFetch("/api/goals", {
 		method: "POST",
+		headers: humanHeaders(),
 		body: JSON.stringify({
 			title: `${label} ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
 			cwd: nonGitCwd(),

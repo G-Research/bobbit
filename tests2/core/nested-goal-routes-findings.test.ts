@@ -14,9 +14,9 @@
  *           into the stored execution plan.
  *   C2/C4 — PATCH /policy integer-normalises maxConcurrentChildren and
  *           resizes the cached per-root subgoal semaphore.
- *   S1    — mutating Children endpoints reject a caller whose
- *           X-Bobbit-Spawning-Session does not match the goal's team-lead;
- *           the team-lead and header-less (human/UI) calls are allowed.
+ *   S1    — mutating Children endpoints reject a caller whose authentic
+ *           session does not match the goal's team-lead; team-lead calls and
+ *           verified-cookie operator calls retain their distinct permissions.
  */
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
@@ -41,7 +41,7 @@ interface Harness {
 	parent: PersistedGoal;
 	resizeCalls: Array<{ rootGoalId: string; newMax: number }>;
 	teamLeadByGoal: Record<string, string | null>;
-	/** A valid `bobbit_session` cookie header value for the human/UI path. */
+	/** A verifier-accepted, signed-wire-shaped cookie header for the human/UI path. */
 	humanCookieHeader: string;
 	/**
 	 * S1: build the AUTHENTIC-caller auth headers for a given session id — the
@@ -67,7 +67,9 @@ async function makeHarness(): Promise<Harness> {
 	memfs.mkdirSync(configDir);
 
 	const goalStore = new GoalStore(stateDir, memfs);
-	const humanCookieValue = "human-cookie";
+	// Wire-shaped stateless value; this route test stubs verification because
+	// signing/expiry behavior belongs to the cookie-core suite.
+	const humanCookieValue = "v1.1700000000.1702592000.AAECAwQFBgcICQoLDA0ODw.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 	const cookieStore = { verify: (value: string) => value === humanCookieValue } as unknown as CookieStore;
 	const humanCookieHeader = `bobbit_session=${humanCookieValue}`;
 	const cfg = new ProjectConfigStore(configDir, memfs);
@@ -317,9 +319,9 @@ describe("C2/C4 — PATCH /policy integer clamp + live semaphore resize", () => 
 
 describe("S1 — ORCHESTRATION authorization on spawn-child / policy (cookie does NOT bypass)", () => {
 	it("REJECTS a human/UI cookie-only spawn-child with 403 NOT_TEAM_LEAD (orchestration: cookie does NOT bypass)", async () => {
-		// spawn-child is an orchestration verb. The cookie is mintable by any
-		// holder of the shared admin token, so it must NOT authorize an
-		// orchestration mutation — only a team-lead-matching header does.
+		// A shared-admin-token holder can obtain this cookie only through an
+		// eligible browser-shaped request, but that metadata is not an identity
+		// boundary. It must NOT authorize orchestration — only the team lead does.
 		h.teamLeadByGoal[h.parent.id] = "tl-session";
 		const r = await h.call("POST", `/api/goals/${h.parent.id}/spawn-child`, {
 			planId: "ui-spawn",

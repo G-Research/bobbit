@@ -221,6 +221,7 @@ function makeManager(ps: any, bridge: any): any {
 		update: vi.fn(() => {}),
 		put: vi.fn(() => {}),
 		archive: vi.fn(() => {}),
+		archiveAsync: vi.fn(async (id: string) => { manager._testStore.archive(id); }),
 	};
 	managers.push(manager);
 	return manager;

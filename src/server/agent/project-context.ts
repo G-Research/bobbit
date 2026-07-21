@@ -6,6 +6,7 @@ import type { GoalTriggerDispatcher } from "./goal-trigger-dispatcher.js";
 import { SessionStore } from "./session-store.js";
 import { BgProcessStore } from "./bg-process-store.js";
 import { GateStore } from "./gate-store.js";
+import { GateResetCoordinator } from "./gate-reset-intent.js";
 import { TaskStore } from "./task-store.js";
 import { TeamStore } from "./team-store.js";
 import { StaffStore } from "./staff-store.js";
@@ -47,6 +48,7 @@ export class ProjectContext {
   readonly sessionStore: SessionStore;
   readonly bgProcessStore: BgProcessStore;
   readonly gateStore: GateStore;
+  readonly gateResetCoordinator: GateResetCoordinator;
   readonly taskStore: TaskStore;
   readonly teamStore: TeamStore;
   readonly staffStore: StaffStore;
@@ -94,6 +96,9 @@ export class ProjectContext {
     this.sessionStore = new SessionStore(this.stateDir, fsImpl, clock);
     this.bgProcessStore = new BgProcessStore(this.stateDir, clock);
     this.gateStore = new GateStore(this.stateDir, fsImpl);
+    // Construct after both stores load: pending reset intents are replayed
+    // state-first before any team runtime or boot-resume logic observes them.
+    this.gateResetCoordinator = new GateResetCoordinator(this.stateDir, this.goalStore, this.gateStore, fsImpl);
     this.taskStore = new TaskStore(this.stateDir);
     this.teamStore = new TeamStore(this.stateDir);
     this.staffStore = new StaffStore(this.stateDir);
@@ -185,6 +190,9 @@ export class ProjectContext {
    *  (teardown, shutdown) can guarantee no async I/O outlives this promise —
    *  preventing the FlexSearch flush-on-close race against temp-dir removal. */
   async close(): Promise<void> {
+    // Stop future plan-mutation sweeps and wait for an active prune before
+    // closing resources or allowing this context's state directory to vanish.
+    await this.planMutationStore.stopSweep();
     this.sessionStore.flush();
     this.costTracker.flush();
     // Mirror sessionStore: flush the bg-process store so its final epoch

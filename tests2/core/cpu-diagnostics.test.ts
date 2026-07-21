@@ -6,12 +6,26 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { describe, it } from "vitest";
+import { describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cpuDiagnosticsEnabled, createCpuDiagnostics } from "../../src/server/agent/cpu-diagnostics.ts";
+
+function deferred<T>() {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	return { promise, resolve, reject };
+}
+
+function nextImmediate(): Promise<void> {
+	return new Promise(resolve => setImmediate(resolve));
+}
 
 function diagnosticsEnv(patch: Record<string, string | undefined>): NodeJS.ProcessEnv {
 	const env = { ...process.env };
@@ -24,11 +38,11 @@ function diagnosticsEnv(patch: Record<string, string | undefined>): NodeJS.Proce
 
 function tempFile(name: string): { dir: string; file: string } {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-cpu-diag-"));
-	return { dir, file: path.join(dir, name) };
+	return { dir, file: path.join(dir, "nested", name) };
 }
 
 describe("cpu diagnostics", () => {
-	it("is a disabled no-op unless BOBBIT_CPU_DIAG=1", () => {
+	it("is a disabled no-op unless BOBBIT_CPU_DIAG=1", async () => {
 		const { dir, file } = tempFile("disabled.jsonl");
 		try {
 			const env = diagnosticsEnv({
@@ -43,8 +57,8 @@ describe("cpu diagnostics", () => {
 			diag.recordWsBroadcast("server:broadcastToAll", "projects_changed", { frames: 1, recipients: 1, bytes: 10 });
 			diag.recordTimer("session-manager:statusHeartbeat", 2, { sessionsScanned: 1 });
 			diag.recordChildProcess("git status", 3, { exitCode: 0 });
-			diag.flush("unit");
-			diag.shutdown();
+			await diag.flush("unit");
+			await diag.shutdown();
 
 			assert.equal(fs.existsSync(file), false, "disabled diagnostics must not create JSONL output");
 		} finally {
@@ -52,7 +66,7 @@ describe("cpu diagnostics", () => {
 		}
 	});
 
-	it("writes JSONL snapshots and resets interval aggregation after flush", () => {
+	it("writes JSONL snapshots and resets interval aggregation after flush", async () => {
 		const { dir, file } = tempFile("enabled.jsonl");
 		try {
 			const env = diagnosticsEnv({
@@ -81,7 +95,7 @@ describe("cpu diagnostics", () => {
 			});
 			diag.recordChildProcess("git status", 12, { exitCode: 0 });
 
-			diag.flush("unit");
+			await diag.flush("unit");
 			const firstLines = fs.readFileSync(file, "utf-8").trim().split("\n");
 			assert.equal(firstLines.length, 1);
 			const first = JSON.parse(firstLines[0]);
@@ -108,7 +122,7 @@ describe("cpu diagnostics", () => {
 			assert.equal(first.child["git status"].count, 1);
 			assert.equal(first.child["git status"].metadata.exitCode["0"], 1);
 
-			diag.flush("after-reset");
+			await diag.flush("after-reset");
 			const lines = fs.readFileSync(file, "utf-8").trim().split("\n");
 			assert.equal(lines.length, 2);
 			const second = JSON.parse(lines[1]);
@@ -118,9 +132,102 @@ describe("cpu diagnostics", () => {
 			assert.deepEqual(second.timers, {});
 			assert.deepEqual(second.child, {});
 
-			diag.shutdown();
+			await diag.shutdown();
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("queues deferred writes in snapshot order and exposes a shutdown barrier", async () => {
+		const releaseFirst = deferred<void>();
+		const releaseShutdown = deferred<void>();
+		const events: string[] = [];
+		const env = diagnosticsEnv({
+			BOBBIT_CPU_DIAG: "1",
+			BOBBIT_CPU_DIAG_JSONL: path.join("virtual", "cpu.jsonl"),
+			BOBBIT_CPU_DIAG_FLUSH_MS: "60000",
+		});
+		const diag = createCpuDiagnostics({
+			env,
+			io: {
+				async mkdir() {
+					events.push("mkdir");
+				},
+				async appendFile(_filePath, data) {
+					const reason = JSON.parse(data).reason as string;
+					events.push(`${reason}:start`);
+					if (reason === "first") await releaseFirst.promise;
+					if (reason === "shutdown") await releaseShutdown.promise;
+					events.push(`${reason}:done`);
+				},
+				async writeStderr() {
+					assert.fail("JSONL diagnostics must not write stderr");
+				},
+			},
+		});
+
+		assert.deepEqual(events, [], "construction must not perform filesystem I/O");
+		const first = diag.flush("first");
+		const second = diag.flush("second");
+		await nextImmediate();
+		assert.deepEqual(events, ["mkdir", "first:start"], "the event loop progresses while the first write is pending");
+
+		releaseFirst.resolve();
+		await Promise.all([first, second]);
+		assert.deepEqual(events, ["mkdir", "first:start", "first:done", "second:start", "second:done"]);
+
+		let shutdownSettled = false;
+		const shutdown = diag.shutdown();
+		shutdown.then(
+			() => { shutdownSettled = true; },
+			() => { shutdownSettled = true; },
+		);
+		await nextImmediate();
+		assert.equal(shutdownSettled, false, "shutdown must wait for its final snapshot");
+		assert.equal(events.at(-1), "shutdown:start");
+		releaseShutdown.resolve();
+		await shutdown;
+		assert.equal(shutdownSettled, true);
+		assert.equal(events.at(-1), "shutdown:done");
+		assert.equal(events.filter(event => event === "mkdir").length, 1);
+	});
+
+	it("owns asynchronous write failures and continues later queued snapshots", async () => {
+		const error = new Error("append failed");
+		const writtenReasons: string[] = [];
+		let appendCalls = 0;
+		const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+		const env = diagnosticsEnv({
+			BOBBIT_CPU_DIAG: "1",
+			BOBBIT_CPU_DIAG_JSONL: path.join("virtual", "cpu.jsonl"),
+			BOBBIT_CPU_DIAG_FLUSH_MS: "60000",
+		});
+		const diag = createCpuDiagnostics({
+			env,
+			io: {
+				async mkdir() { /* no-op */ },
+				async appendFile(_filePath, data) {
+					appendCalls++;
+					if (appendCalls === 1) throw error;
+					writtenReasons.push(JSON.parse(data).reason as string);
+				},
+				async writeStderr() {
+					assert.fail("JSONL diagnostics must not write stderr");
+				},
+			},
+		});
+
+		try {
+			await diag.flush("failed");
+			await diag.flush("continued");
+			await diag.shutdown();
+			assert.deepEqual(writtenReasons, ["continued", "shutdown"]);
+			assert.equal(errorLog.mock.calls.length, 1);
+			assert.equal(errorLog.mock.calls[0]?.[0], "[cpu-diagnostics] Failed to write snapshot:");
+			assert.equal(errorLog.mock.calls[0]?.[1], error);
+		} finally {
+			await diag.shutdown();
+			errorLog.mockRestore();
 		}
 	});
 });

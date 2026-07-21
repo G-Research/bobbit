@@ -345,9 +345,13 @@
       {
         "file": "tests2/integration/sidebar-actions-fork-github-link.test.ts",
         "name": "newWorktree selects repo provisioning while reuse selects the source cwd"
+      },
+      {
+        "file": "tests2/core/purge-preview-pool-shutdown-coder61c7.test.ts",
+        "name": "keeps total reclaim candidate work within one ceiling across many boot projects"
       }
     ],
-    "rationale": "The replacement moves allocation behind the fork-create seam but retains both decisions: newWorktree requests repository worktree provisioning and yields a cwd distinct from the source, while reuse omits worktree options and keeps the source cwd."
+    "rationale": "The route owner retains the provision-versus-reuse decision and distinct provisioned cwd, while the boot-pool owner proves worktree reclaim for many provisioned projects shares one candidate-operation ceiling instead of multiplying nested concurrency."
   },
   {
     "baseFile": "tests2/integration/sidebar-actions-fork-github-link.test.ts",
@@ -954,5 +958,876 @@
       }
     ],
     "rationale": "The renamed test retains the non-sandboxed guard: sandboxBranch metadata must not trigger reconciliation or overwrite the seeded branch."
+  },
+  {
+    "baseFile": "tests2/core/orphan-cleanup-async-walk.test.ts",
+    "baseName": "keeps counting after the default path and warning caps",
+    "current": [
+      {
+        "file": "tests2/core/orphan-cleanup-async-walk.test.ts",
+        "name": "keeps counting after the default caps and returns a deterministic sorted sample"
+      }
+    ],
+    "rationale": "The async scanner rewrite retained the cap semantics while strengthening deterministic sampling and adding explicit backpressure coverage."
+  },
+  {
+    "baseFile": "tests2/core/plan-mutation-store.test.ts",
+    "baseName": "put / get round-trip",
+    "current": [
+      {
+        "file": "tests2/core/plan-mutation-store.test.ts",
+        "name": "put / get round-trip preserves the direct JSON shape"
+      }
+    ],
+    "rationale": "The asynchronous PlanMutationStore rewrite consolidated the original synchronous assertion into a renamed test that preserves the same observable store contract while pinning the new persistence detail."
+  },
+  {
+    "baseFile": "tests2/core/plan-mutation-store.test.ts",
+    "baseName": "get returns undefined for missing",
+    "current": [
+      {
+        "file": "tests2/core/plan-mutation-store.test.ts",
+        "name": "get returns undefined for missing without warning on ENOENT"
+      }
+    ],
+    "rationale": "The asynchronous PlanMutationStore rewrite consolidated the original synchronous assertion into a renamed test that preserves the same observable store contract while pinning the new persistence detail."
+  },
+  {
+    "baseFile": "tests2/core/plan-mutation-store.test.ts",
+    "baseName": "put twice with same requestId replaces",
+    "current": [
+      {
+        "file": "tests2/core/plan-mutation-store.test.ts",
+        "name": "replacement keeps the original append position and request count"
+      }
+    ],
+    "rationale": "The asynchronous PlanMutationStore rewrite consolidated the original synchronous assertion into a renamed test that preserves the same observable store contract while pinning the new persistence detail."
+  },
+  {
+    "baseFile": "tests2/core/plan-mutation-store.test.ts",
+    "baseName": "remove returns true on hit, false on miss",
+    "current": [
+      {
+        "file": "tests2/core/plan-mutation-store.test.ts",
+        "name": "remove returns true on hit, false on miss, and deletes an empty goal file"
+      },
+      {
+        "file": "tests2/core/api-goals-plan-mutation.test.ts",
+        "name": "approve holds the decision lock so a concurrent reject loses with REQUEST_NOT_FOUND"
+      },
+      {
+        "file": "tests2/core/api-goals-plan-mutation.test.ts",
+        "name": "double approve applies and increments the replan count exactly once"
+      },
+      {
+        "file": "tests2/core/api-goals-plan-mutation.test.ts",
+        "name": "a failed apply keeps the request pending for a successful retry"
+      }
+    ],
+    "rationale": "The async store owner retains direct hit/miss deletion semantics; the decision-route owners prove the same request is consumed exactly once only after a successful apply, with concurrent decisions serialized and failed applies left pending for retry."
+  },
+  {
+    "baseFile": "tests2/core/plan-mutation-store.test.ts",
+    "baseName": "listForGoal isolation",
+    "current": [
+      {
+        "file": "tests2/core/plan-mutation-store.test.ts",
+        "name": "listForGoal preserves append order and goal isolation"
+      }
+    ],
+    "rationale": "The asynchronous PlanMutationStore rewrite consolidated the original synchronous assertion into a renamed test that preserves the same observable store contract while pinning the new persistence detail."
+  },
+  {
+    "baseFile": "tests2/core/plan-mutation-store.test.ts",
+    "baseName": "pruneExpired removes only expired entries",
+    "current": [
+      {
+        "file": "tests2/core/plan-mutation-store.test.ts",
+        "name": "pruneExpired removes only expired entries and returns the exact count"
+      },
+      {
+        "file": "tests2/core/plan-mutation-store.test.ts",
+        "name": "streams a wide prune directory with bounded read-ahead and an exact removed count"
+      },
+      {
+        "file": "tests2/core/plan-mutation-store.test.ts",
+        "name": "cooperatively yields while streaming a wide directory of ignored entries"
+      }
+    ],
+    "rationale": "The asynchronous PlanMutationStore rewrite retains exact expiry/count semantics while the streaming regression owners pin bounded read-ahead and cooperative yielding for wide prune directories."
+  },
+  {
+    "baseFile": "tests2/core/preview-artifacts.test.ts",
+    "baseName": "stores exact mounted bytes and metadata",
+    "current": [
+      {
+        "file": "tests2/core/preview-artifacts.test.ts",
+        "name": "stores exact bytes, sorted POSIX files, and stable nested binary hashes"
+      },
+      {
+        "file": "tests2/core/bounded-async-work.test.ts",
+        "name": "does not copy external bytes when a shared-copy source becomes a symlink at open"
+      },
+      {
+        "file": "tests2/core/preview-artifacts.test.ts",
+        "name": "rejects file substitutions before hash or preview-directory copy can read external bytes"
+      },
+      {
+        "file": "tests2/core/preview-artifacts.test.ts",
+        "name": "rejects artifact metadata replaced by an external symlink before descriptor reads"
+      },
+      {
+        "file": "tests2/core/preview-root-identity-races.test.ts",
+        "name": "walkTree aborts when a visited real directory is replaced before it is opened"
+      },
+      {
+        "file": "tests2/core/preview-root-identity-races.test.ts",
+        "name": "fences a deferred real-directory replacement before the first traversal lstat"
+      },
+      {
+        "file": "tests2/core/preview-root-identity-races.test.ts",
+        "name": "rejects regular artifact metadata replacement before reading its descriptor"
+      },
+      {
+        "file": "tests2/core/preview-canonical-root-races.test.ts",
+        "name": "binds a contained canonical file target to the opened descriptor before reading"
+      },
+      {
+        "file": "tests2/core/preview-canonical-root-races.test.ts",
+        "name": "rejects a deferred symlink root replacement before traversal can adopt it"
+      },
+      {
+        "file": "tests2/core/preview-canonical-root-races.test.ts",
+        "name": "fails closed when an expected file identity is unavailable"
+      },
+      {
+        "file": "tests2/core/preview-canonical-root-races.test.ts",
+        "name": "rejects a spoofed canonical preview root before enumeration or file reads"
+      },
+      {
+        "file": "tests2/core/preview-canonical-root-races.test.ts",
+        "name": "keeps preview list, hash, and copy candidates inside the canonical trusted store"
+      },
+      {
+        "file": "tests2/core/preview-canonical-root-races.test.ts",
+        "name": "binds artifact metadata directories to the canonical artifact store before opening"
+      },
+      {
+        "file": "tests2/core/bounded-tree-parent-identity.test.ts",
+        "name": "rejects queued child work when the Dirent-producing parent is replaced"
+      },
+      {
+        "file": "tests2/core/bounded-tree-parent-identity.test.ts",
+        "name": "retains the producing-parent claim through copy queue overflow"
+      },
+      {
+        "file": "tests2/core/bounded-tree-parent-identity.test.ts",
+        "name": "rejects a replaced parent before preview hashing opens its child"
+      },
+      {
+        "file": "tests2/core/bounded-tree-parent-identity.test.ts",
+        "name": "does not open descendants after a visited directory's parent becomes a symlink"
+      },
+      {
+        "file": "tests2/core/bounded-tree-quarantine-races.test.ts",
+        "name": "does not invoke a claimed visitor hash after its parent is replaced"
+      },
+      {
+        "file": "tests2/core/bounded-tree-quarantine-races.test.ts",
+        "name": "discards a readlink result when the parent changes inside readlink"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "keeps deep hash and guarded copy operation counts proportional to files"
+      }
+    ],
+    "rationale": "The bounded asynchronous owners preserve exact mounted bytes and metadata while proving content, traversed directories, their Dirent-producing parent identities, canonical roots, opened file identities, artifact metadata, visitor hashes, and readlink results cannot be replaced or escaped before descriptor-anchored use, including queued and local-overflow work. The deferred traversal-root owners install a real-directory replacement and a symlink replacement after root resolution, then prove the bound-root precheck rejects each before opendir, directory reads, source descriptors, or replacement bytes can be adopted. The operation-cost owner compares ten- and twenty-file deep trees, requires byte-identical hashes and exact copied bytes, and pins one hash source open plus one copy source/destination open per file with linear lstat/realpath ceilings so composed identity guards cannot multiply file work."
+  },
+  {
+    "baseFile": "tests2/core/preview-artifacts.test.ts",
+    "baseName": "dedupes the same contentHash within a session",
+    "current": [
+      {
+        "file": "tests2/core/preview-artifacts.test.ts",
+        "name": "reuses the first exact candidate while skipping corrupt, missing, mismatched, and hash-invalid candidates"
+      },
+      {
+        "file": "tests2/core/preview-artifacts.test.ts",
+        "name": "batches metadata reads with bounded read-ahead while preserving first-valid order and failure isolation"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "keeps multi-candidate metadata lookup and deep exact validation linear"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "keeps 50 unique persists to one cold scan while revalidating retained metadata stamps"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "revalidates all metadata stamps with the shared concurrency ceiling"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "rescans when a candidate is added while cached metadata stamps are being revalidated"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "rescans a complete negative when existing metadata changes without a parent mutation"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "lets an earlier candidate changed to the cached later hash regain first-valid selection"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "preserves exact candidate ordering when refreshing after an owned different-hash install"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "keeps same-hash positive validation in stored order and observes mount-only repair"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "invalidates populated catalogs after removeArtifacts and successful sweep"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "does not retain a catalog assembled before a failed persist"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "prevents an in-flight old-filesystem scan from publishing after a seam reset"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "touches a hot old session and evicts the untouched LRU entry above 64 sessions"
+      },
+      {
+        "file": "tests2/core/preview-identity-guard-cost.test.ts",
+        "name": "leaves sessions above 256 candidates uncached and retains streaming scans"
+      }
+    ],
+    "rationale": "The artifact owners retain first-exact content-hash reuse while skipping invalid candidates and prove metadata lookup reads one deterministic enumeration batch at the shared ceiling without prefetching the next batch, preserves first-valid enumeration order despite out-of-order completion, and isolates corrupt, mismatched-hash, wrong-ID, and missing metadata. The operation-cost owner preserves that selection across twenty-four mismatches plus one deep exact candidate, requires one metadata open per candidate and one content open per validated file, and compares twelve versus twenty-four misses with linear lstat/realpath ceilings so session, candidate, and trusted-root identity claims cannot multiply lookup work. The current bounded-catalog declarations prove fifty owned persists retain verified metadata stamps after one cold scan, stamp revalidation stays within the shared concurrency ceiling, concurrent candidate addition and descendant-only metadata changes advance catalog versions and force one canonical rescan, and an earlier candidate changed to a cached later hash regains first-valid selection. They also preserve exact order across an owned different-hash install, skip a corrupt first positive and observe its mount-only repair, invalidate same-stamp recreations after removal or sweep, discard state assembled by failed persists or an obsolete filesystem generation, touch entries for true 64-session LRU eviction, and leave sessions above 256 candidates on the streaming path."
+  },
+  {
+    "baseFile": "tests2/core/preview-artifacts.test.ts",
+    "baseName": "restores immutable bytes without reading the original source path",
+    "current": [
+      {
+        "file": "tests2/core/preview-artifacts.test.ts",
+        "name": "restores immutable bytes and leaves live content unchanged on validation failures"
+      }
+    ],
+    "rationale": "The bounded asynchronous preview-artifact suite consolidates this former synchronous declaration into the named owner while retaining its observable integrity, reuse, validation, or cleanup behavior."
+  },
+  {
+    "baseFile": "tests2/core/preview-artifacts.test.ts",
+    "baseName": "missing, wrong-session, and corrupt artifacts fail without mutating the live mount",
+    "current": [
+      {
+        "file": "tests2/core/preview-artifacts.test.ts",
+        "name": "reuses the first exact candidate while skipping corrupt, missing, mismatched, and hash-invalid candidates"
+      },
+      {
+        "file": "tests2/core/preview-artifacts.test.ts",
+        "name": "restores immutable bytes and leaves live content unchanged on validation failures"
+      }
+    ],
+    "rationale": "The bounded asynchronous preview-artifact suite consolidates this former synchronous declaration into the named owner while retaining its observable integrity, reuse, validation, or cleanup behavior."
+  },
+  {
+    "baseFile": "tests2/core/preview-artifacts.test.ts",
+    "baseName": "removeArtifacts is idempotent",
+    "current": [
+      {
+        "file": "tests2/core/preview-artifacts.test.ts",
+        "name": "cleanup yields while deletion is deferred, is idempotent, and isolates sweep failures"
+      },
+      {
+        "file": "tests2/core/preview-root-identity-races.test.ts",
+        "name": "expected root identity prevents native cleanup from opening a replacement directory"
+      },
+      {
+        "file": "tests2/core/bounded-tree-quarantine-races.test.ts",
+        "name": "never traverses a replacement installed inside opendir"
+      },
+      {
+        "file": "tests2/core/bounded-tree-quarantine-races.test.ts",
+        "name": "restores a replacement moved by a raced root detach"
+      },
+      {
+        "file": "tests2/core/bounded-tree-quarantine-races.test.ts",
+        "name": "does not delete a replacement installed before unlink returns"
+      },
+      {
+        "file": "tests2/core/bounded-tree-quarantine-races.test.ts",
+        "name": "does not delete a replacement installed before rmdir returns"
+      },
+      {
+        "file": "tests2/core/bounded-tree-quarantine-races.test.ts",
+        "name": "preserveRoot detaches authorized children but retains the claimed root"
+      },
+      {
+        "file": "tests2/core/bounded-tree-quarantine-errors.test.ts",
+        "name": "does not overwrite a collision at the original path and reports the exact quarantine"
+      },
+      {
+        "file": "tests2/core/bounded-tree-quarantine-errors.test.ts",
+        "name": "preserves a mismatched quarantine identity without external deletion"
+      },
+      {
+        "file": "tests2/core/bounded-tree-quarantine-errors.test.ts",
+        "name": "preserves the original error when an exact quarantine cannot be renamed back"
+      },
+      {
+        "file": "tests2/core/bounded-tree-quarantine-errors.test.ts",
+        "name": "treats a parent disappearing before setup as missing only with force"
+      }
+    ],
+    "rationale": "The bounded asynchronous cleanup owners preserve idempotency and failure isolation while proving recursive deletion detaches only verified identities, rejects replacements before traversal and after destructive acts, restores exact failed quarantines for retry, never overwrites collisions or deletes mismatched external identities, reports un-restorable quarantine ownership without masking the original error, retains force-only missing-parent semantics, and keeps an authorized preserveRoot."
+  },
+  {
+    "baseFile": "tests2/core/preview-artifacts.test.ts",
+    "baseName": "sweeps only artifact directories for unknown sessions",
+    "current": [
+      {
+        "file": "tests2/core/preview-artifacts.test.ts",
+        "name": "cleanup yields while deletion is deferred, is idempotent, and isolates sweep failures"
+      }
+    ],
+    "rationale": "The bounded asynchronous preview-artifact suite consolidates this former synchronous declaration into the named owner while retaining its observable integrity, reuse, validation, or cleanup behavior."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "creates the mount directory for a valid sid",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "keeps mountDir validation and creates a valid mount"
+      },
+      {
+        "file": "tests2/integration/preview-mount-route.test.ts",
+        "name": "stale GET and HEAD stay missing after preview mount deletion"
+      }
+    ],
+    "rationale": "Explicit mount creation retains the original validated-directory contract, while stale GET and HEAD requests prove read-only content lookup cannot recreate a deleted mount directory."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "rejects an invalid sessionId with status 400",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "keeps mountDir validation and creates a valid mount"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "writes inline.html by default",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "writes inline content atomically and returns stable async hashes"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "accepts a custom single-segment entry",
+    "current": [
+      {
+        "file": "tests2/core/preview-artifacts.test.ts",
+        "name": "stores exact bytes, sorted POSIX files, and stable nested binary hashes"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "rejects an entry containing a path separator",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "rejects unsafe inline entries"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "overwrites the same entry atomically",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "writes inline content atomically and returns stable async hashes"
+      },
+      {
+        "file": "tests2/core/preview-install-transaction-races.test.ts",
+        "name": "keeps a failed write blocked until a later verified writer repairs it"
+      },
+      {
+        "file": "tests2/core/preview-install-transaction-races.test.ts",
+        "name": "serializes same-key writers before either worker can mutate"
+      }
+    ],
+    "rationale": "The async inline owner retains atomic replacement and hashing, while the transaction owners keep failed writes fenced until verified repair and serialize same-key writers before either can mutate or republish the live root."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "updates contentHash when inline content changes",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "writes inline content atomically and returns stable async hashes"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "with no assets — copies only the entry, no siblings",
+    "current": [
+      {
+        "file": "tests2/integration/preview-mount-route.test.ts",
+        "name": "file= without assets copies only entry; siblings 404"
+      },
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "rejects an entry replaced by a symlink before descriptor-anchored streaming"
+      },
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "streams through a validated destination without a hardlink optimization"
+      },
+      {
+        "file": "tests2/core/preview-transaction-edge-cases.test.ts",
+        "name": "writes zero source bytes when a staging destination ancestor is swapped outside"
+      }
+    ],
+    "rationale": "The route owner retains entry-only copy semantics, while the descriptor-streaming owners reject substituted sources before reads, bypass unsafe hardlinks, and validate the staged destination ancestry before any source byte can escape."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "with literal assets — copies entry + declared, nothing else",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "mounts only declared literals and globs with sorted asset paths"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "contentHash includes mounted assets",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "mounts only declared literals and globs with sorted asset paths"
+      },
+      {
+        "file": "tests2/core/preview-artifacts.test.ts",
+        "name": "stores exact bytes, sorted POSIX files, and stable nested binary hashes"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "with nested literal asset — preserves directory structure",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "mounts only declared literals and globs with sorted asset paths"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "with single-segment glob — expands inside the matched dir only",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "mounts only declared literals and globs with sorted asset paths"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "rejects a `..` escape in an asset path with 400",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "rejects invalid asset specs and missing literals"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "rejects an absolute asset path with 400",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "rejects invalid asset specs and missing literals"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "rejects `**` glob with 400",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "rejects invalid asset specs and missing literals"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "rejects `[abc]` and `{a,b}` globs with 400",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "rejects invalid asset specs and missing literals"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "rejects backslash in asset path with 400",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "rejects invalid asset specs and missing literals"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "missing literal asset → 404",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "rejects invalid asset specs and missing literals"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "symlink asset escaping the source dir → 403",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "does not traverse an escaping asset symlink"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "rejects non-absolute srcFile with 400",
+    "current": [
+      {
+        "file": "tests2/integration/preview-mount-route.test.ts",
+        "name": "missing html, file, and artifactId → 400"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "rejects missing srcFile",
+    "current": [
+      {
+        "file": "tests2/integration/preview-mount-route.test.ts",
+        "name": "missing html, file, and artifactId → 400"
+      },
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "rejects invalid asset specs and missing literals"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "glob with no matches is not an error",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "mounts only declared literals and globs with sorted asset paths"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "re-mounting wipes prior mount contents",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "stages before swap, supports reopening a mounted path, and rolls back staging errors"
+      },
+      {
+        "file": "tests2/core/preview-transaction-edge-cases.test.ts",
+        "name": "repairs a blocked directory symlink by rename without traversing its target"
+      }
+    ],
+    "rationale": "The staged-swap owner retains ordinary re-mount replacement, while the blocked-root owner proves a directory symlink is detached by rename and replaced without traversing or mutating its external target."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "two consecutive mountFile() calls with the same external source succeed",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "stages before swap, supports reopening a mounted path, and rolls back staging errors"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "mountFile() succeeds when srcFile is a path inside the existing mount",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "stages before swap, supports reopening a mounted path, and rolls back staging errors"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "leaves no .<sid>.tmp-* dir behind after a successful mountFile",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "stages before swap, supports reopening a mounted path, and rolls back staging errors"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "on staging failure, prior mount contents are preserved",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "stages before swap, supports reopening a mounted path, and rolls back staging errors"
+      },
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "rejects a staging-root symlink substitution without moving external contents"
+      },
+      {
+        "file": "tests2/core/preview-root-identity-races.test.ts",
+        "name": "whole-root rename quarantines a raced staging replacement without external traversal"
+      },
+      {
+        "file": "tests2/core/preview-canonical-root-races.test.ts",
+        "name": "atomically quarantines a substituted staging root without traversing it"
+      },
+      {
+        "file": "tests2/core/preview-install-transaction-races.test.ts",
+        "name": "rolls the exact backup back when staging disappears before its rename"
+      },
+      {
+        "file": "tests2/core/preview-install-transaction-races.test.ts",
+        "name": "rejects unsupported staging identity before fencing or mutating old live"
+      },
+      {
+        "file": "tests2/core/preview-transaction-edge-cases.test.ts",
+        "name": "republishes an intact verified live root after a pre-mutation hash error"
+      },
+      {
+        "file": "tests2/core/preview-transaction-edge-cases.test.ts",
+        "name": "logs an exact mismatched failed-live quarantine while preserving rollback"
+      }
+    ],
+    "rationale": "The staged-swap and identity owners preserve prior mounted content across ordinary, source-ENOENT, unsupported-identity, and pre-mutation hash failures; substitution owners quarantine raced roots without traversal, and rollback remains bound to the exact backup even when a mismatched failed live root must be preserved separately."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "watcher fires after a re-mount (handle survives the swap)",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "stages before swap, supports reopening a mounted path, and rolls back staging errors"
+      },
+      {
+        "file": "tests2/core/preview-canonical-root-races.test.ts",
+        "name": "waits for an acquired content read before exposing a replacement root"
+      },
+      {
+        "file": "tests2/core/preview-install-transaction-races.test.ts",
+        "name": "destroys an aborted non-HTML stream and releases its directory lease"
+      }
+    ],
+    "rationale": "The staged mount owner retains watcher-safe replacement behavior; the content-read owners keep replacement behind active leases and prove an aborted non-HTML stream is destroyed so its lease releases and the waiting writer can proceed."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "is idempotent",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "removeMount is async and idempotent"
+      },
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "removeMount propagates non-ENOENT deletion failures"
+      },
+      {
+        "file": "tests2/core/preview-install-transaction-races.test.ts",
+        "name": "blocked purge detaches by rename before inspecting only the owned quarantine"
+      },
+      {
+        "file": "tests2/core/preview-install-transaction-races.test.ts",
+        "name": "serializes owned quarantine cleanup and logs failures without losing ownership"
+      }
+    ],
+    "rationale": "The async cleanup owners preserve missing-mount idempotency and strict non-ENOENT errors; blocked purges first detach the exact live root, recursively inspect only their owned quarantine, and serialize bounded cleanup while explicitly logging and preserving failed quarantines."
+  },
+  {
+    "baseFile": "tests2/core/preview-mount.test.ts",
+    "baseName": "ignores invalid sessionIds silently",
+    "current": [
+      {
+        "file": "tests2/core/preview-mount.test.ts",
+        "name": "removeMount is async and idempotent"
+      }
+    ],
+    "rationale": "The asynchronous preview-mount rewrite merged the former narrow declaration into the named consolidated owner, which exercises the same validation, copy, hashing, staging, or cleanup contract."
+  },
+  {
+    "baseFile": "tests2/core/session-manager-orphan-keep.test.ts",
+    "baseName": "returns false when no worktree path is set",
+    "current": [
+      {
+        "file": "tests2/core/session-manager-orphan-keep.test.ts",
+        "name": "returns false without both persisted paths and performs no I/O"
+      }
+    ],
+    "rationale": "The orphan-preservation conversion to promise-based I/O consolidated the original case into the named async decision-matrix owner without changing the worktree-plus-recent-transcript safety result."
+  },
+  {
+    "baseFile": "tests2/core/session-manager-orphan-keep.test.ts",
+    "baseName": "returns false when the worktree directory does not exist",
+    "current": [
+      {
+        "file": "tests2/core/session-manager-orphan-keep.test.ts",
+        "name": "returns false and short-circuits transcript stat when worktree access fails"
+      }
+    ],
+    "rationale": "The orphan-preservation conversion to promise-based I/O consolidated the original case into the named async decision-matrix owner without changing the worktree-plus-recent-transcript safety result."
+  },
+  {
+    "baseFile": "tests2/core/session-manager-orphan-keep.test.ts",
+    "baseName": "returns false when worktree exists but transcript is older than 24h",
+    "current": [
+      {
+        "file": "tests2/core/session-manager-orphan-keep.test.ts",
+        "name": "keeps only transcripts whose age is strictly less than 24 hours"
+      }
+    ],
+    "rationale": "The orphan-preservation conversion to promise-based I/O consolidated the original case into the named async decision-matrix owner without changing the worktree-plus-recent-transcript safety result."
+  },
+  {
+    "baseFile": "tests2/core/session-manager-orphan-keep.test.ts",
+    "baseName": "returns false when worktree exists but no transcript file is set",
+    "current": [
+      {
+        "file": "tests2/core/session-manager-orphan-keep.test.ts",
+        "name": "returns false without both persisted paths and performs no I/O"
+      }
+    ],
+    "rationale": "The orphan-preservation conversion to promise-based I/O consolidated the original case into the named async decision-matrix owner without changing the worktree-plus-recent-transcript safety result."
+  },
+  {
+    "baseFile": "tests2/core/session-manager-orphan-keep.test.ts",
+    "baseName": "returns false when transcript path is set but file missing",
+    "current": [
+      {
+        "file": "tests2/core/session-manager-orphan-keep.test.ts",
+        "name": "returns false when transcript stat fails after a live worktree"
+      }
+    ],
+    "rationale": "The orphan-preservation conversion to promise-based I/O consolidated the original case into the named async decision-matrix owner without changing the worktree-plus-recent-transcript safety result."
+  },
+  {
+    "baseFile": "tests2/core/session-manager-orphan-keep.test.ts",
+    "baseName": "returns TRUE when worktree exists AND transcript mtime is within 24h",
+    "current": [
+      {
+        "file": "tests2/core/session-manager-orphan-keep.test.ts",
+        "name": "keeps only transcripts whose age is strictly less than 24 hours"
+      },
+      {
+        "file": "tests2/core/worktree-sweeper-multi.test.ts",
+        "name": "revalidates ownership acquired after the initial snapshot before cleanup"
+      }
+    ],
+    "rationale": "The async orphan-preservation owner retains the worktree-plus-recent-transcript safety decision, while the sweeper owner proves newly visible live ownership is revalidated at the destructive boundary and never deleted."
+  },
+  {
+    "baseFile": "tests2/core/session-manager-orphan-keep.test.ts",
+    "baseName": "returns 0 when the agent-sessions root does not exist",
+    "current": [
+      {
+        "file": "tests2/core/session-store-orphan-cleanup.test.ts",
+        "name": "returns count=0 when agentSessionsRoot does not exist"
+      }
+    ],
+    "rationale": "The removed synchronous scanner twin is now owned by the async SessionStore-snapshot suite, which retains this traversal, filtering, cap, or missing-root semantic."
+  },
+  {
+    "baseFile": "tests2/core/session-manager-orphan-keep.test.ts",
+    "baseName": "ignores tracked transcripts and old transcripts",
+    "current": [
+      {
+        "file": "tests2/core/session-store-orphan-cleanup.test.ts",
+        "name": "returns empty when every jsonl is tracked"
+      },
+      {
+        "file": "tests2/core/session-store-orphan-cleanup.test.ts",
+        "name": "ignores untracked jsonl files older than the most recent lastActivity"
+      }
+    ],
+    "rationale": "The removed synchronous scanner twin is now owned by the async SessionStore-snapshot suite, which retains this traversal, filtering, cap, or missing-root semantic."
+  },
+  {
+    "baseFile": "tests2/core/session-manager-orphan-keep.test.ts",
+    "baseName": "caps the returned paths at 50",
+    "current": [
+      {
+        "file": "tests2/core/session-store-orphan-cleanup.test.ts",
+        "name": "respects maxPaths cap but still counts all"
+      }
+    ],
+    "rationale": "The removed synchronous scanner twin is now owned by the async SessionStore-snapshot suite, which retains this traversal, filtering, cap, or missing-root semantic."
+  },
+  {
+    "baseFile": "tests2/core/session-manager-orphan-keep.test.ts",
+    "baseName": "walks subdirectories recursively",
+    "current": [
+      {
+        "file": "tests2/core/session-store-orphan-cleanup.test.ts",
+        "name": "walks subdirectories recursively"
+      }
+    ],
+    "rationale": "The removed synchronous scanner twin is now owned by the async SessionStore-snapshot suite, which retains this traversal, filtering, cap, or missing-root semantic."
   }
 ]

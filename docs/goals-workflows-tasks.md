@@ -340,7 +340,45 @@ Reset is safe to repeat:
 - verification-step cache eligibility is invalidated for both changed and already-pending affected gates;
 - only gates whose stored status actually changes are counted in `changedGateIds`.
 
-The endpoint broadcasts `gate_status_changed` for affected gates and a `gate_reset` summary event so the status widget, sidebar badge, dashboard pipeline, and team lead view refresh promptly.
+The endpoint broadcasts `gate_status_changed` for affected gates and a `gate_reset` summary event so gate consumers refresh promptly.
+
+#### Reset-driven goal reopening
+
+A human gate reset creates new workflow work even when the team previously finished. For an active goal in `complete`, Bobbit therefore persists the goal as `in-progress` before resetting the selected and downstream gates. Keeping it complete would hide the new pending work from team-lead no-workers, workers-idle, stuck-sweep, and restart recovery.
+
+This transition reuses the existing lifecycle rather than starting over. The goal ID, workflow snapshot, tasks, gate history, branch/worktree and repository metadata, and PR association remain intact. When the completed team's runtime still exists, its team record and lead session are preserved too. Reset reinstalls that lead's event subscription, clears completion-era nudge bookkeeping, and starts a fresh base-delay nudge cycle when the lead is already idle; it does not recreate dismissed role workers or replace the lead.
+
+A prior explicit `teardownTeam` is authoritative absence, not a broken completed team. Reset still reopens the goal and invalidates its gates, but it does not create a replacement team, lead, subscription, or timer. This keeps `autoStartTeam` a creation-time policy rather than an implicit resume policy; the operator can start a new team separately if the reopened work needs one.
+
+Only an active `complete` goal is reopened. Active `todo`, `in-progress`, and scheduler-managed `blocked` states are preserved. Archived, shelved, and paused goals return `409` without gate mutation, notification, or team rearm; the operator must explicitly restore their lifecycle first. Dormant intent takes precedence even if a stored goal also says `complete`.
+
+The lifecycle outcome is additive in both the reset response and `gate_reset` WebSocket event:
+
+```json
+{
+  "reopen": {
+    "reopened": true,
+    "previousState": "complete",
+    "state": "in-progress"
+  }
+}
+```
+
+`reopen` is returned for every successful reset. A new retry after a fully finalized transition reports `reopened: false` with `previousState` and `state` both `in-progress`. Rearming is likewise one-shot: retries do not replace subscriptions, duplicate timers, emit another `goal_state_changed`, or enqueue another reset notice when no gate status changed. The recovery case is intentionally distinct: if runtime rearm or intent cleanup failed, the retained transaction reports its original `complete` → `in-progress` outcome when the same reset request resumes it.
+
+On a real transition, global `goal_state_changed` makes sidebar, dashboard, widget, and other-tab goal caches refresh from the goal-list API. The status widget treats its lifecycle field as a reversible mirror, not a one-way completed latch. It watches the authoritative app goal cache while open, so completion performed by another agent or tab appears without remounting; on reset it applies the response and affected pending gates immediately, then refreshes goal, gate, and active-verification state. Its own goal-scoped viewer subscription performs the same authoritative refresh on external `goal_state_changed`, including reopen when no active chat socket is mounted.
+
+See [REST API — Gate reset endpoint](rest-api.md#gate-reset-endpoint) for the full transaction, response, and `409` shapes, and [WebSocket Protocol](websocket-protocol.md) for event fields.
+
+#### Durability and completion races
+
+The lifecycle transition and gate invalidation span separate project stores, so they are coordinated by a project-scoped write-ahead intent. The intent is persisted before either store changes; strict, fail-loud writes then persist the goal first and gate reset second. A boot-time coordinator replays any retained intent before team restoration and boot-resume scans, making crashes after intent, goal, gate, or finalization persistence converge on `in-progress` plus pending gates. The ordering exists to prevent the unsafe durable state `complete` plus pending gates, which would suppress recovery nudges.
+
+A synchronous gate-write failure is compensated by strictly restoring the prior goal state and clearing the intent. Runtime side effects, broadcasts, and lead notification happen only after the durable reset. If compensation cannot be persisted, the intent stays available for boot replay rather than hiding a partial commit. If the reset committed but an existing team's unsubscribe or event-subscription callback fails, the API returns a retryable durable-reset error and retains the intent; a repeated request retries rearm without installing partial or duplicate runtime state.
+
+Completion has the opposite interleaving hazard. `completeTeam` checks workflow truth before dismissing workers, but worker dismissal is asynchronous and a human reset can win during those awaits. It therefore re-reads every required gate immediately after dismissal and before writing `complete`. If any gate became unresolved, completion aborts, leaves the goal `in-progress`, and rearms the lead runtime so the reset work remains nudge-eligible.
+
+Dormant lifecycle changes win during recovery. Archived, shelved, or paused goals are never reopened by an old reset intent. See [REST API — Durable reset transaction](rest-api.md#durable-reset-transaction) for the failure codes and retry contract.
 
 #### History and audit preservation
 
@@ -352,15 +390,16 @@ After a fresh post-reset signal passes, normal cache behavior resumes from that 
 
 #### Team lead notification
 
-After a reset, Bobbit sends the team lead session a system-origin message when a live team lead exists. The message names:
+After a reset changes at least one gate or reopens the goal, Bobbit sends the live team lead a system-origin message. The message names:
 
+- the goal lifecycle outcome, including `complete` → `in-progress` when reopened;
 - the selected gate that was reset;
 - downstream dependent gates invalidated by the DAG traversal;
 - which gates had passed state cleared;
 - which affected gates were already not passed;
 - why downstream implementation, review, or verification work may need to be revisited.
 
-If the team lead is streaming, the server delivers the notice as a live steer; otherwise it queues it as a steered prompt. The reset response includes `teamLeadNotified` so callers can tell whether a live lead received the message. Goals without an active team lead still reset normally.
+If the team lead is streaming, the server delivers the notice as a live steer; otherwise it queues it as a steered prompt. The reset response includes `teamLeadNotified` so callers can tell whether a live lead received the message. Goals without an active team lead still reset normally. An exact no-op retry sends no duplicate notice.
 
 #### Usage and test coverage
 

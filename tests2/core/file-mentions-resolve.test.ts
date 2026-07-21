@@ -9,33 +9,38 @@
  * Strategy: build a tmp tree with real files of various kinds and point the
  * pure resolver at it. Mirrors tests/skill-resolve.test.ts.
  */
-import { describe, it, beforeAll, afterAll } from "vitest";
+import { describe, it, beforeAll, afterAll, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { marked } from "marked";
+
+const NOTES_CONTENT = "hello world\nline two";
+const SOURCE_CONTENT = "export const x = 1;";
+const PIXEL_BYTES = Buffer.from(
+	"89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c6360000002000100ffff03000006000557bfabd40000000049454e44ae426082",
+	"hex",
+);
+const BINARY_BYTES = Buffer.from([0, 1, 2, 3, 0, 255, 254]);
 
 let cwdDir: string;
 
 beforeAll(() => {
 	cwdDir = fs.mkdtempSync(path.join(os.tmpdir(), "file-mentions-test-"));
 	fs.mkdirSync(path.join(cwdDir, "src"), { recursive: true });
-	fs.writeFileSync(path.join(cwdDir, "notes.txt"), "hello world\nline two", "utf-8");
-	fs.writeFileSync(path.join(cwdDir, "src", "a.ts"), "export const x = 1;", "utf-8");
-	// A tiny 1x1 PNG (binary, image extension).
-	const png = Buffer.from(
-		"89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c6360000002000100ffff03000006000557bfabd40000000049454e44ae426082",
-		"hex",
-	);
-	fs.writeFileSync(path.join(cwdDir, "pixel.png"), png);
-	// A non-image binary (NUL bytes, .bin extension).
-	fs.writeFileSync(path.join(cwdDir, "data.bin"), Buffer.from([0, 1, 2, 3, 0, 255, 254]));
+	fs.writeFileSync(path.join(cwdDir, "notes.txt"), NOTES_CONTENT, "utf-8");
+	fs.writeFileSync(path.join(cwdDir, "src", "a.ts"), SOURCE_CONTENT, "utf-8");
+	fs.writeFileSync(path.join(cwdDir, "pixel.png"), PIXEL_BYTES);
+	fs.writeFileSync(path.join(cwdDir, "data.bin"), BINARY_BYTES);
 });
 
 afterAll(() => {
 	try { fs.rmSync(cwdDir, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
+const resolverModule = await import("../../src/server/skills/resolve-file-mentions.ts");
 const {
 	resolveFileMentions,
 	buildFileReferenceBlock,
@@ -44,224 +49,1364 @@ const {
 	MAX_MENTION_FILE_BYTES,
 	MAX_MENTION_AGGREGATE_BYTES,
 	MAX_MENTIONS_PER_SEND,
-} = await import("../../src/server/skills/resolve-file-mentions.ts");
+} = resolverModule;
+const itOnWin32 = process.platform === "win32" ? it : it.skip;
+const itOnPosix = process.platform === "win32" ? it.skip : it;
+
+interface Deferred<T> {
+	promise: Promise<T>;
+	resolve: (value: T) => void;
+	reject: (error: unknown) => void;
+}
+
+function deferred<T>(): Deferred<T> {
+	let resolve!: (value: T) => void;
+	let reject!: (error: unknown) => void;
+	const promise = new Promise<T>((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	return { promise, resolve, reject };
+}
+
+async function drainMicrotasksUntil(predicate: () => boolean, label: string): Promise<void> {
+	for (let turn = 0; turn < 1_000; turn++) {
+		if (predicate()) return;
+		await Promise.resolve();
+	}
+	assert.fail(`microtask condition not reached: ${label}`);
+}
+
+function missingPathError(): NodeJS.ErrnoException {
+	return Object.assign(new Error("missing fixture"), { code: "ENOENT" });
+}
 
 describe("resolveFileMentions", () => {
-	it("exports the documented cap constants", () => {
+	it("exports the documented delivery cap constants", async () => {
 		assert.equal(MAX_INLINE_TEXT_BYTES, 256 * 1024);
 		assert.equal(MAX_MENTION_FILE_BYTES, 10 * 1024 * 1024);
 		assert.equal(MAX_MENTION_AGGREGATE_BYTES, 20 * 1024 * 1024);
 		assert.equal(MAX_MENTIONS_PER_SEND, 50);
 	});
 
-	it("no mentions → text unchanged, empty mentions", () => {
-		const r = resolveFileMentions("just a normal message", cwdDir);
-		assert.equal(r.modelText, "just a normal message");
-		assert.equal(r.mentions.length, 0);
-		assert.equal(r.warnings.length, 0);
+	it("no mentions → text unchanged, empty mentions", async () => {
+		const text = "just a normal message";
+		const r = await resolveFileMentions(text, cwdDir);
+		assert.equal(r.originalText, text);
+		assert.equal(r.modelText, text);
+		assert.deepEqual(r.mentions, []);
+		assert.deepEqual(r.warnings, []);
 	});
 
-	it("FOLLOW-UP-D: resolver sets internal absPath; toWireMention strips it", () => {
-		const r = resolveFileMentions("@notes.txt", cwdDir);
+	it("nonexistent identifiers and relative paths remain literal without mention metadata", async () => {
+		const text = "use @variableName then @missing/file.ts and @nope.txt";
+		const r = await resolveFileMentions(text, cwdDir);
+		assert.equal(r.originalText, text);
+		assert.equal(r.modelText, text);
+		assert.deepEqual(r.mentions, [], "nonexistent targets must not become file mentions");
+		assert.deepEqual(r.warnings, [], "nonexistent targets must not produce warnings");
+	});
+
+	it("a nonexistent traversal target remains ordinary text instead of an outside-cwd failure", async () => {
+		const token = `@../definitely-missing-${path.basename(cwdDir)}.txt`;
+		const text = `keep ${token} literal`;
+		const r = await resolveFileMentions(text, cwdDir);
+		assert.equal(r.modelText, text);
+		assert.deepEqual(r.mentions, []);
+		assert.deepEqual(r.warnings, []);
+	});
+
+	it("ignores candidates inside matched Markdown fenced code blocks", async () => {
+		const cases = [
+			[
+				"before",
+				"```ts",
+				"const value = @variableName;",
+				"read @notes.txt",
+				"```",
+				"after",
+			].join("\n"),
+			[
+				"before",
+				"~~~text",
+				"@notes.txt and @src/a.ts",
+				"~~~",
+				"after",
+			].join("\n"),
+		];
+
+		for (const text of cases) {
+			const r = await resolveFileMentions(text, cwdDir);
+			assert.equal(r.originalText, text);
+			assert.equal(r.modelText, text, "fenced Markdown code must remain byte-for-byte unchanged");
+			assert.deepEqual(r.mentions, [], "fenced Markdown code must not produce file mentions");
+			assert.deepEqual(r.warnings, []);
+		}
+	});
+
+	it.each([
+		["LF", "\n"],
+		["CRLF", "\r\n"],
+		["CR", "\r"],
+	])("ignores four-space and tab-indented Markdown code with %s endings", async (_label, eol) => {
+		const text = [
+			"    existing @notes.txt; missing @variableName and @missing/four-space.ts",
+			"    preserve this entire indented block",
+			"",
+			"\texisting @notes.txt; missing @tabVariable and @missing/tab.ts",
+			"\tpreserve this tab-indented block too",
+			"",
+			"😀 prose resolves @src/a.ts.",
+		].join(eol);
+		const token = "@src/a.ts";
+		const start = text.lastIndexOf(token);
+		const lstatSpy = vi.spyOn(fs.promises, "lstat");
+
+		try {
+			const r = await resolveFileMentions(text, cwdDir);
+			const referenceBlock = buildFileReferenceBlock("src/a.ts", SOURCE_CONTENT);
+
+			assert.equal(r.originalText, text);
+			assert.deepEqual(
+				r.mentions.map((mention) => ({ kind: mention.kind, path: mention.path, range: mention.range })),
+				[{ kind: "text", path: "src/a.ts", range: [start, start + token.length] }],
+				"only the valid prose reference may resolve",
+			);
+			assert.equal(
+				r.modelText,
+				text.slice(0, start) + referenceBlock + text.slice(start + token.length),
+				"indented code must remain byte-for-byte literal around the exact prose splice",
+			);
+			assert.equal(r.modelText.slice(0, start), text.slice(0, start), "both indented code blocks must remain literal");
+			assert.deepEqual(r.warnings, []);
+			assert.deepEqual(
+				lstatSpy.mock.calls.map(([target]) => path.resolve(String(target))),
+				[path.resolve(cwdDir, "src/a.ts")],
+				"code-contained existing and missing candidates must not trigger filesystem probes",
+			);
+		} finally {
+			lstatSpy.mockRestore();
+		}
+	});
+
+	it.each([
+		{
+			label: "four-space blockquote with LF",
+			eol: "\n",
+			lines: ["> quoted", ">", ">     @notes.txt", ">     @missing-quoted.txt"],
+		},
+		{
+			label: "tab-indented blockquote with CRLF",
+			eol: "\r\n",
+			lines: ["> quoted", ">", "> \t@notes.txt", "> \t@missing-tab.txt"],
+		},
+		{
+			label: "list item with CR",
+			eol: "\r",
+			lines: ["- item", "", "      @notes.txt", "      @missing-list.txt"],
+		},
+		{
+			label: "list then blockquote nesting with LF",
+			eol: "\n",
+			lines: ["- > quoted", "  >", "  >     @notes.txt", "  >     @missing-nested.txt"],
+		},
+	])("ignores Marked-recognized indented code in $label", async ({ eol, lines }) => {
+		const containerCode = lines.join(eol);
+		const text = `${containerCode}${eol}${eol}😀 prose resolves @src/a.ts.`;
+		const token = "@src/a.ts";
+		const start = text.indexOf(token);
+		const lstatSpy = vi.spyOn(fs.promises, "lstat");
+
+		try {
+			assert.match(
+				String(marked.parse(containerCode, { async: false })),
+				/<pre><code>@notes\.txt/,
+				"the fixture must be an indented code block according to the production Markdown parser",
+			);
+			assert.equal(
+				[...text.slice(0, start)].length,
+				start - 1,
+				"the astral prose prefix must distinguish UTF-16 ranges from code-point offsets",
+			);
+
+			const r = await resolveFileMentions(text, cwdDir);
+			const referenceBlock = buildFileReferenceBlock("src/a.ts", SOURCE_CONTENT);
+
+			assert.equal(r.originalText, text);
+			assert.deepEqual(
+				r.mentions.map((mention) => ({ kind: mention.kind, path: mention.path, range: mention.range })),
+				[{ kind: "text", path: "src/a.ts", range: [start, start + token.length] }],
+				"only the prose reference outside container code may resolve",
+			);
+			assert.equal(
+				r.modelText,
+				text.slice(0, start) + referenceBlock + text.slice(start + token.length),
+				"existing and missing code-contained tokens must remain byte-for-byte literal",
+			);
+			assert.equal(r.modelText.slice(0, start), text.slice(0, start));
+			assert.deepEqual(r.warnings, []);
+			assert.deepEqual(
+				lstatSpy.mock.calls.map(([target]) => path.resolve(String(target))),
+				[path.resolve(cwdDir, "src/a.ts")],
+				"container-code candidates must not consume probes; only prose may reach the filesystem",
+			);
+		} finally {
+			lstatSpy.mockRestore();
+		}
+	});
+
+	it("ignores candidates inside matched single- and multi-backtick inline code spans", async () => {
+		const text = "before `use @notes.txt and @variableName` middle ``keep @src/a.ts and a ` tick`` after";
+		const r = await resolveFileMentions(text, cwdDir);
+		assert.equal(r.originalText, text);
+		assert.equal(r.modelText, text, "inline Markdown code must remain byte-for-byte unchanged");
+		assert.deepEqual(r.mentions, [], "matched inline code must not produce file mentions");
+		assert.deepEqual(r.warnings, []);
+	});
+
+	it("resolves a prose mention immediately adjacent to matched inline-code delimiters", async () => {
+		const cases = [
+			"😀 resolve @notes.txt`keep @src/a.ts literal` after",
+			"😀 resolve @notes.txt;``keep @src/a.ts and a ` tick literal`` after",
+		];
+		const token = "@notes.txt";
+
+		for (const text of cases) {
+			const start = text.indexOf(token);
+			const codeStart = text.indexOf("`", start + token.length);
+			assert.ok(codeStart >= start + token.length, "fixture must place inline code directly after the prose token or its punctuation");
+			assert.equal(
+				[...text.slice(0, start)].length,
+				start - 1,
+				"the astral prefix must distinguish UTF-16 ranges from code-point offsets",
+			);
+
+			const r = await resolveFileMentions(text, cwdDir);
+			const referenceBlock = buildFileReferenceBlock("notes.txt", NOTES_CONTENT);
+			assert.equal(r.originalText, text);
+			assert.deepEqual(
+				r.mentions.map((mention) => ({ kind: mention.kind, path: mention.path, range: mention.range })),
+				[{ kind: "text", path: "notes.txt", range: [start, start + token.length] }],
+				text,
+			);
+			assert.equal(
+				r.modelText,
+				text.slice(0, start) + referenceBlock + text.slice(start + token.length),
+				"only the prose token may be spliced; adjacent punctuation and inline code must remain literal",
+			);
+			assert.equal(
+				r.modelText.slice(start + referenceBlock.length),
+				text.slice(start + token.length),
+				"the complete delimiter-adjacent suffix must remain byte-for-byte literal",
+			);
+			assert.deepEqual(r.warnings, []);
+		}
+	});
+
+	it("does not treat backslash-escaped backticks as inline code delimiters", async () => {
+		const text = "escaped \\` marker @notes.txt and another \\` marker";
+		const start = text.indexOf("@notes.txt");
+		const r = await resolveFileMentions(text, cwdDir);
+
+		assert.equal(r.mentions.length, 1);
+		assert.equal(r.mentions[0].kind, "text");
+		assert.equal(r.mentions[0].path, "notes.txt");
+		assert.deepEqual(r.mentions[0].range, [start, start + "@notes.txt".length]);
+		assert.equal(
+			r.modelText,
+			text.slice(0, start) + buildFileReferenceBlock("notes.txt", NOTES_CONTENT) + text.slice(start + "@notes.txt".length),
+		);
+		assert.deepEqual(r.warnings, []);
+	});
+
+	it("treats a backslash before an inline-code closer as literal code content", async () => {
+		const text = "inline `keep @notes.txt then\\` resolve @src/a.ts";
+		const start = text.indexOf("@src/a.ts");
+		const r = await resolveFileMentions(text, cwdDir);
+
+		assert.equal(r.mentions.length, 1, "the existing target inside code must stay literal");
+		assert.equal(r.mentions[0].kind, "text");
+		assert.equal(r.mentions[0].path, "src/a.ts");
+		assert.deepEqual(r.mentions[0].range, [start, start + "@src/a.ts".length]);
+		assert.equal(
+			r.modelText,
+			text.slice(0, start) + buildFileReferenceBlock("src/a.ts", SOURCE_CONTENT) + text.slice(start + "@src/a.ts".length),
+		);
+		assert.deepEqual(r.warnings, []);
+	});
+
+	it.each([
+		"partially escaped \\``keep @notes.txt here` then resolve @src/a.ts",
+		"partially escaped \\```keep @notes.txt here`` then resolve @src/a.ts",
+	])("uses the unescaped suffix of a partially escaped multi-backtick run: %s", async (text) => {
+		const start = text.indexOf("@src/a.ts");
+		const r = await resolveFileMentions(text, cwdDir);
+		assert.equal(r.mentions.length, 1, text);
+		assert.equal(r.mentions[0].kind, "text", text);
+		assert.equal(r.mentions[0].path, "src/a.ts", text);
+		assert.deepEqual(r.mentions[0].range, [start, start + "@src/a.ts".length], text);
+		assert.equal(
+			r.modelText,
+			text.slice(0, start) + buildFileReferenceBlock("src/a.ts", SOURCE_CONTENT) + text.slice(start + "@src/a.ts".length),
+			text,
+		);
+		assert.deepEqual(r.warnings, [], text);
+	});
+
+	it("does not suppress mentions after unmatched backtick runs", async () => {
+		const cases = [
+			"an unmatched ` run before @notes.txt",
+			"different unmatched ` and `` runs before @notes.txt",
+		];
+
+		for (const text of cases) {
+			const start = text.indexOf("@notes.txt");
+			const r = await resolveFileMentions(text, cwdDir);
+			assert.equal(r.mentions.length, 1, text);
+			assert.equal(r.mentions[0].path, "notes.txt");
+			assert.deepEqual(r.mentions[0].range, [start, start + "@notes.txt".length]);
+		}
+	});
+
+	it("does not pair unmatched backtick runs across Markdown paragraphs or list items", async () => {
+		const cases = [
+			[
+				"first paragraph has an unmatched ` run",
+				"",
+				"second paragraph has @notes.txt before another unmatched ` run",
+			].join("\n"),
+			[
+				"- first item has an unmatched ` run",
+				"- second item has @notes.txt before another unmatched ` run",
+			].join("\n"),
+		];
+
+		for (const text of cases) {
+			const start = text.indexOf("@notes.txt");
+			const r = await resolveFileMentions(text, cwdDir);
+			assert.equal(r.mentions.length, 1, text);
+			assert.equal(r.mentions[0].kind, "text");
+			assert.equal(r.mentions[0].path, "notes.txt");
+			assert.deepEqual(r.mentions[0].range, [start, start + "@notes.txt".length]);
+		}
+	});
+
+	it("keeps a non-interrupting ordered marker in its active paragraph code span", async () => {
+		const text = [
+			"paragraph `inline code continues",
+			"2. keep @notes.txt literal` then resolve @src/a.ts",
+		].join("\n");
+		const start = text.indexOf("@src/a.ts");
+		const r = await resolveFileMentions(text, cwdDir);
+
+		assert.equal(r.mentions.length, 1, "an ordered marker starting at 2 cannot interrupt the paragraph");
+		assert.equal(r.mentions[0].kind, "text");
+		assert.equal(r.mentions[0].path, "src/a.ts");
+		assert.deepEqual(r.mentions[0].range, [start, start + "@src/a.ts".length]);
+		assert.equal(
+			r.modelText,
+			text.slice(0, start) + buildFileReferenceBlock("src/a.ts", SOURCE_CONTENT) + text.slice(start + "@src/a.ts".length),
+		);
+		assert.deepEqual(r.warnings, []);
+	});
+
+	it("does not pair backticks across a list-item heading and its following paragraph", async () => {
+		const text = [
+			"- # heading has an unmatched ` run",
+			"  following paragraph resolves @notes.txt before another unmatched ` run",
+		].join("\n");
+		const start = text.indexOf("@notes.txt");
+		const r = await resolveFileMentions(text, cwdDir);
+
+		assert.equal(r.mentions.length, 1, "the heading and following paragraph are distinct inline blocks");
+		assert.equal(r.mentions[0].kind, "text");
+		assert.equal(r.mentions[0].path, "notes.txt");
+		assert.deepEqual(r.mentions[0].range, [start, start + "@notes.txt".length]);
+		assert.equal(
+			r.modelText,
+			text.slice(0, start) + buildFileReferenceBlock("notes.txt", NOTES_CONTENT) + text.slice(start + "@notes.txt".length),
+		);
+		assert.deepEqual(r.warnings, []);
+	});
+
+	it("ignores fenced code inside common blockquote and list containers", async () => {
+		const cases = [
+			["> ~~~text", "> @notes.txt", "> ~~~", "outside @src/a.ts"].join("\n"),
+			["- ~~~text", "  @notes.txt", "  ~~~", "outside @src/a.ts"].join("\n"),
+			["1. ~~~text", "   @notes.txt", "   ~~~", "outside @src/a.ts"].join("\n"),
+		];
+
+		for (const text of cases) {
+			const start = text.lastIndexOf("@src/a.ts");
+			const r = await resolveFileMentions(text, cwdDir);
+			assert.equal(r.mentions.length, 1, text);
+			assert.equal(r.mentions[0].path, "src/a.ts");
+			assert.deepEqual(r.mentions[0].range, [start, start + "@src/a.ts".length]);
+			assert.equal(
+				r.modelText,
+				text.slice(0, start) + buildFileReferenceBlock("src/a.ts", SOURCE_CONTENT) + text.slice(start + "@src/a.ts".length),
+			);
+		}
+	});
+
+	it("ignores a fenced code block nested list then blockquote", async () => {
+		const text = [
+			"- > ~~~text",
+			"  > @notes.txt",
+			"  > ~~~",
+			"outside @src/a.ts",
+		].join("\n");
+		const start = text.indexOf("@src/a.ts");
+		const r = await resolveFileMentions(text, cwdDir);
+
+		assert.equal(r.mentions.length, 1, "the existing target inside the nested fence must stay literal");
+		assert.equal(r.mentions[0].kind, "text");
+		assert.equal(r.mentions[0].path, "src/a.ts");
+		assert.deepEqual(r.mentions[0].range, [start, start + "@src/a.ts".length]);
+		assert.equal(
+			r.modelText,
+			text.slice(0, start) + buildFileReferenceBlock("src/a.ts", SOURCE_CONTENT) + text.slice(start + "@src/a.ts".length),
+		);
+		assert.deepEqual(r.warnings, []);
+	});
+
+	it("keeps long same-line nested-marker fences structurally bounded", async () => {
+		const depth = 2_048;
+		const indentation = "  ".repeat(depth);
+		const text = [
+			`${"- ".repeat(depth)}~~~text`,
+			`${indentation}@notes.txt`,
+			`${indentation}~~~`,
+			"outside @src/a.ts",
+		].join("\n");
+		const start = text.indexOf("@src/a.ts");
+		const r = await resolveFileMentions(text, cwdDir);
+
+		assert.equal(r.originalText, text);
+		assert.equal(r.mentions.length, 1, "only the prose reference after the deeply nested fence may resolve");
+		assert.equal(r.mentions[0].kind, "text");
+		assert.equal(r.mentions[0].path, "src/a.ts");
+		assert.deepEqual(r.mentions[0].range, [start, start + "@src/a.ts".length]);
+		assert.equal(
+			r.modelText,
+			text.slice(0, start) + buildFileReferenceBlock("src/a.ts", SOURCE_CONTENT) + text.slice(start + "@src/a.ts".length),
+		);
+		assert.deepEqual(r.warnings, []);
+	});
+
+	it("recognizes fenced code with CR-only, LF, and CRLF line endings", async () => {
+		for (const eol of ["\r", "\n", "\r\n"]) {
+			const text = ["before", "~~~text", "@notes.txt", "~~~", "after @src/a.ts"].join(eol);
+			const start = text.indexOf("@src/a.ts");
+			const r = await resolveFileMentions(text, cwdDir);
+			assert.equal(r.mentions.length, 1, `line ending ${JSON.stringify(eol)}`);
+			assert.equal(r.mentions[0].path, "src/a.ts");
+			assert.deepEqual(r.mentions[0].range, [start, start + "@src/a.ts".length]);
+			assert.equal(
+				r.modelText,
+				text.slice(0, start) + buildFileReferenceBlock("src/a.ts", SOURCE_CONTENT) + text.slice(start + "@src/a.ts".length),
+			);
+		}
+	});
+
+	it("keeps mentions literal inside an unterminated fenced code block", async () => {
+		const text = ["before", "~~~text", "@notes.txt", "still fenced @src/a.ts"].join("\n");
+		const r = await resolveFileMentions(text, cwdDir);
+		assert.equal(r.originalText, text);
+		assert.equal(r.modelText, text);
+		assert.deepEqual(r.mentions, []);
+		assert.deepEqual(r.warnings, []);
+	});
+
+	it("accepts a longer fence run as a valid closing fence", async () => {
+		const cases = [
+			["before", "```ts", "@notes.txt", "````", "after @src/a.ts"].join("\n"),
+			["before", "~~~text", "@notes.txt", "~~~~~", "after @src/a.ts"].join("\n"),
+		];
+
+		for (const text of cases) {
+			const start = text.indexOf("@src/a.ts");
+			const r = await resolveFileMentions(text, cwdDir);
+			assert.equal(r.mentions.length, 1, text);
+			assert.equal(r.mentions[0].path, "src/a.ts");
+			assert.deepEqual(r.mentions[0].range, [start, start + "@src/a.ts".length]);
+		}
+	});
+
+	it("resolves only the existing prose target in mixed valid, missing, inline-code, and fenced-code text", async () => {
+		const text = [
+			"😀 resolve @notes.txt; keep @variableName and @missing/path.ts.",
+			"inline `leave @src/a.ts literal`",
+			"```text",
+			"fenced @pixel.png",
+			"```",
+			"done",
+		].join("\n");
+		const start = text.indexOf("@notes.txt");
+		const block = buildFileReferenceBlock("notes.txt", NOTES_CONTENT);
+		const r = await resolveFileMentions(text, cwdDir);
+
+		assert.equal(r.originalText, text);
+		assert.equal(
+			r.modelText,
+			text.slice(0, start) + block + text.slice(start + "@notes.txt".length),
+			"only the valid prose reference may change model-facing text",
+		);
+		assert.equal(r.mentions.length, 1);
+		assert.equal(r.mentions[0].path, "notes.txt");
+		assert.equal(r.mentions[0].kind, "text");
+		assert.deepEqual(r.mentions[0].range, [start, start + "@notes.txt".length]);
+		assert.deepEqual(r.warnings, []);
+	});
+
+	it("uses UTF-16 code-unit ranges when an astral character precedes a real mention", async () => {
+		const text = "😀 @src/a.ts";
+		const r = await resolveFileMentions(text, cwdDir);
+		assert.equal(text.indexOf("@src/a.ts"), 3, "fixture must distinguish UTF-16 units from code points");
+		assert.deepEqual(r.mentions[0].range, [3, 12]);
+		assert.equal(r.mentions[0].path, "src/a.ts");
+	});
+
+	it("FOLLOW-UP-D: resolver sets internal absPath; toWireMention strips it", async () => {
+		const r = await resolveFileMentions("@notes.txt", cwdDir);
 		assert.ok(r.mentions[0].absPath, "resolver keeps canonical absPath internally");
 		const wire = toWireMention(r.mentions[0]);
 		assert.equal(wire.absPath, undefined, "wire mention must not carry absPath");
-		assert.equal(wire.path, "notes.txt"); // other fields preserved
+		assert.equal(wire.path, "notes.txt");
 		assert.equal(wire.kind, "text");
 	});
 
-	it("inline text file → inlined with <file-reference> header; range covers @path", () => {
+	it("inline text file → snapshotted and inlined with a <file-reference> header", async () => {
 		const text = "see @notes.txt please";
-		const r = resolveFileMentions(text, cwdDir);
+		const r = await resolveFileMentions(text, cwdDir);
 		assert.equal(r.mentions.length, 1);
 		const m = r.mentions[0];
 		assert.equal(m.kind, "text");
 		assert.equal(m.path, "notes.txt");
-		assert.equal(m.content, "hello world\nline two");
+		assert.equal(m.content, NOTES_CONTENT);
 		assert.deepEqual(m.range, [4, 4 + "@notes.txt".length]);
-		const block = buildFileReferenceBlock("notes.txt", "hello world\nline two");
-		assert.equal(r.modelText, "see " + block + " please");
+		assert.equal(r.modelText, "see " + buildFileReferenceBlock("notes.txt", NOTES_CONTENT) + " please");
+		assert.deepEqual(r.warnings, []);
 	});
 
-	it("bare @path whole-message works through inline scan", () => {
-		const r = resolveFileMentions("@src/a.ts", cwdDir);
+	it("bare @path whole-message works through inline scan", async () => {
+		const r = await resolveFileMentions("@src/a.ts", cwdDir);
 		assert.equal(r.mentions.length, 1);
 		assert.equal(r.mentions[0].kind, "text");
 		assert.equal(r.mentions[0].path, "src/a.ts");
-		assert.equal(r.mentions[0].content, "export const x = 1;");
+		assert.equal(r.mentions[0].content, SOURCE_CONTENT);
 	});
 
-	it("multiple mentions → right-to-left splice preserves earlier indices", () => {
+	it("multiple text mentions are spliced right-to-left without corrupting earlier ranges", async () => {
 		const text = "x @notes.txt y @src/a.ts z";
-		const r = resolveFileMentions(text, cwdDir);
+		const r = await resolveFileMentions(text, cwdDir);
 		assert.equal(r.mentions.length, 2);
 		assert.equal(r.mentions[0].path, "notes.txt");
 		assert.equal(r.mentions[1].path, "src/a.ts");
-		const b1 = buildFileReferenceBlock("notes.txt", "hello world\nline two");
-		const b2 = buildFileReferenceBlock("src/a.ts", "export const x = 1;");
+		assert.deepEqual(r.mentions[0].range, [2, 12]);
+		assert.deepEqual(r.mentions[1].range, [15, 24]);
+		const b1 = buildFileReferenceBlock("notes.txt", NOTES_CONTENT);
+		const b2 = buildFileReferenceBlock("src/a.ts", SOURCE_CONTENT);
 		assert.equal(r.modelText, "x " + b1 + " y " + b2 + " z");
 	});
 
-	it("content snapshot is captured at resolve time (later mutation ignored)", () => {
-		const tmp = path.join(cwdDir, "mutating.txt");
-		fs.writeFileSync(tmp, "ORIGINAL", "utf-8");
-		const r = resolveFileMentions("@mutating.txt", cwdDir);
-		fs.writeFileSync(tmp, "CHANGED", "utf-8");
+	it("text content snapshot is stable after the source file changes", async () => {
+		const file = path.join(cwdDir, "mutating.txt");
+		fs.writeFileSync(file, "ORIGINAL", "utf-8");
+		const r = await resolveFileMentions("@mutating.txt", cwdDir);
+		fs.writeFileSync(file, "CHANGED", "utf-8");
 		assert.equal(r.mentions[0].content, "ORIGINAL");
+		assert.equal(r.modelText, buildFileReferenceBlock("mutating.txt", "ORIGINAL"));
 	});
 
-	it("image by extension → kind image, base64 data, modelText unchanged", () => {
-		const text = "look @pixel.png ok";
-		const r = resolveFileMentions(text, cwdDir);
+	it("image bytes are snapshotted as base64 while modelText remains literal", async () => {
+		const file = path.join(cwdDir, "snapshot.png");
+		const initial = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01, 0x02, 0x03]);
+		fs.writeFileSync(file, initial);
+		const text = "look @snapshot.png ok";
+		const r = await resolveFileMentions(text, cwdDir);
+		fs.writeFileSync(file, Buffer.from([0xff]));
+
 		assert.equal(r.mentions.length, 1);
 		const m = r.mentions[0];
 		assert.equal(m.kind, "image");
 		assert.equal(m.mimeType, "image/png");
-		assert.ok(m.data && m.data.length > 0);
+		assert.equal(m.data, initial.toString("base64"));
+		assert.equal(m.bytes, initial.length);
 		assert.equal(m.content, undefined);
-		assert.equal(r.modelText, text); // literal @path left in place
+		assert.equal(r.modelText, text);
 	});
 
-	it("non-image binary (NUL bytes) → kind binary, base64 data, modelText unchanged", () => {
-		const text = "@data.bin";
-		const r = resolveFileMentions(text, cwdDir);
-		assert.equal(r.mentions[0].kind, "binary");
-		assert.ok(r.mentions[0].data && r.mentions[0].data.length > 0);
-		assert.equal(r.mentions[0].mimeType, "application/octet-stream");
-		assert.equal(r.modelText, text); // literal @path left (not inlined)
+	it("non-image binary bytes are snapshotted as an attachment while modelText remains literal", async () => {
+		const file = path.join(cwdDir, "snapshot.bin");
+		const initial = Buffer.from([0, 1, 2, 3, 0, 255]);
+		fs.writeFileSync(file, initial);
+		const text = "attach @snapshot.bin";
+		const r = await resolveFileMentions(text, cwdDir);
+		fs.writeFileSync(file, Buffer.from("now text", "utf-8"));
+
+		assert.equal(r.mentions.length, 1);
+		const m = r.mentions[0];
+		assert.equal(m.kind, "binary");
+		assert.equal(m.mimeType, "application/octet-stream");
+		assert.equal(m.data, initial.toString("base64"));
+		assert.equal(m.bytes, initial.length);
+		assert.equal(m.content, undefined);
+		assert.equal(r.modelText, text);
 	});
 
-	it("binary mimeType is ext-derived when known (.pdf)", () => {
+	it("binary mimeType is extension-derived when known (.pdf)", async () => {
 		fs.writeFileSync(path.join(cwdDir, "doc.pdf"), Buffer.from([0x25, 0x50, 0x44, 0x46, 0x00, 0x01]));
-		const r = resolveFileMentions("@doc.pdf", cwdDir);
+		const r = await resolveFileMentions("@doc.pdf", cwdDir);
 		assert.equal(r.mentions[0].kind, "binary");
 		assert.equal(r.mentions[0].mimeType, "application/pdf");
 	});
 
-	it("FOLLOW-UP-C: invalid UTF-8 without NUL bytes → kind binary, not inlined as text", () => {
-		// Lone 0xFF / 0xFE continuation bytes are not valid UTF-8 and contain no NUL.
+	it("FOLLOW-UP-C: invalid UTF-8 without NUL bytes → kind binary, not inlined as text", async () => {
 		fs.writeFileSync(path.join(cwdDir, "invalid-utf8.dat"), Buffer.from([0xff, 0xfe, 0x41, 0xc0, 0x80]));
-		const r = resolveFileMentions("@invalid-utf8.dat", cwdDir);
+		const r = await resolveFileMentions("@invalid-utf8.dat", cwdDir);
 		assert.equal(r.mentions[0].kind, "binary");
 		assert.equal(r.mentions[0].content, undefined);
 		assert.equal(r.modelText, "@invalid-utf8.dat");
 	});
 
-	it("missing file → unresolved, literal token preserved, reason set", () => {
-		const text = "see @nope.txt here";
-		const r = resolveFileMentions(text, cwdDir);
-		assert.equal(r.mentions[0].kind, "unresolved");
-		assert.equal(r.mentions[0].reason, "missing");
-		assert.equal(r.modelText, text);
-		assert.ok(r.warnings.length >= 1);
+	it("an existing file that cannot be read remains an unresolved mention with a warning", async () => {
+		const file = path.join(cwdDir, "unreadable.txt");
+		fs.writeFileSync(file, "private", "utf-8");
+		const readSpy = vi.spyOn(fs, "readSync").mockImplementation((() => {
+			throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+		}) as typeof fs.readSync);
+
+		try {
+			const r = await resolveFileMentions("open @unreadable.txt", cwdDir);
+			assert.equal(r.mentions.length, 1);
+			assert.equal(r.mentions[0].kind, "unresolved");
+			assert.equal(r.mentions[0].reason, "unreadable");
+			assert.equal(r.mentions[0].content, undefined);
+			assert.equal(r.mentions[0].data, undefined);
+			assert.equal(r.modelText, "open @unreadable.txt");
+			assert.equal(r.warnings.length, 1);
+			assert.match(r.warnings[0], /unreadable/);
+		} finally {
+			readSpy.mockRestore();
+		}
 	});
 
-	it("outside-cwd traversal → unresolved (outside-cwd), no throw", () => {
-		const r = resolveFileMentions("@../secret.txt", cwdDir);
-		assert.equal(r.mentions[0].kind, "unresolved");
-		assert.equal(r.mentions[0].reason, "outside-cwd");
+
+	itOnPosix("classifies an existing FIFO as unresolved without opening or reading it", async () => {
+		const fifo = path.join(cwdDir, "non-regular-fifo");
+		execFileSync("mkfifo", [fifo]);
+		const openSpy = vi.spyOn(fs, "openSync").mockImplementation((() => {
+			throw new Error("FIFO reached openSync");
+		}) as typeof fs.openSync);
+		const readSpy = vi.spyOn(fs, "readSync");
+
+		try {
+			const text = "inspect @non-regular-fifo";
+			const result = await resolveFileMentions(text, cwdDir);
+			assert.equal(result.originalText, text);
+			assert.equal(result.modelText, text);
+			assert.equal(result.mentions.length, 1);
+			assert.equal(result.mentions[0].kind, "unresolved");
+			assert.equal(result.mentions[0].reason, "unreadable");
+			assert.deepEqual(result.warnings, ["@non-regular-fifo: unreadable"]);
+			assert.equal(openSpy.mock.calls.length, 0, "FIFO classification must reject before openSync");
+			assert.equal(readSpy.mock.calls.length, 0, "FIFO classification must reject before readSync");
+		} finally {
+			readSpy.mockRestore();
+			openSpy.mockRestore();
+			fs.rmSync(fifo, { force: true });
+		}
 	});
 
-	it("oversized text (per-file text cap) → unresolved too-large, literal preserved", () => {
-		const big = path.join(cwdDir, "big.txt");
-		fs.writeFileSync(big, "x".repeat(2048), "utf-8");
-		const r = resolveFileMentions("@big.txt", cwdDir, { maxFileBytes: 1024 });
-		assert.equal(r.mentions[0].kind, "unresolved");
-		assert.equal(r.mentions[0].reason, "too-large");
-		assert.equal(r.modelText, "@big.txt");
+	it("keeps an existing candidate unresolved when realpath fails with EACCES", async () => {
+		const file = path.join(cwdDir, "realpath-denied.txt");
+		fs.writeFileSync(file, "private", "utf-8");
+		const lookupPath = path.resolve(file);
+		const originalRealpathNative = fs.realpathSync.native;
+		const realpathSpy = vi.spyOn(fs.realpathSync, "native").mockImplementation(((target: unknown, ...args: unknown[]) => {
+			if (path.resolve(String(target)) === lookupPath) {
+				throw Object.assign(new Error("permission denied during realpath"), { code: "EACCES" });
+			}
+			return (originalRealpathNative as (...callArgs: unknown[]) => unknown)(target, ...args);
+		}) as typeof fs.realpathSync.native);
+
+		try {
+			const text = "open @realpath-denied.txt";
+			const r = await resolveFileMentions(text, cwdDir);
+			assert.equal(r.mentions.length, 1);
+			assert.equal(r.mentions[0].kind, "unresolved");
+			assert.equal(r.mentions[0].reason, "unreadable");
+			assert.equal(r.modelText, text);
+			assert.equal(r.warnings.length, 1);
+			assert.match(r.warnings[0], /unreadable/);
+		} finally {
+			realpathSpy.mockRestore();
+		}
 	});
 
-	it("aggregate cap → later mentions become unresolved (aggregate-cap)", () => {
+	itOnPosix("rejects an opened descriptor that resolves outside cwd before reading and closes it", async () => {
+		const file = path.join(cwdDir, "descriptor-containment.txt");
+		const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "file-mention-fd-outside-"));
+		const outsideFile = path.join(outsideDir, "outside.txt");
+		fs.writeFileSync(file, "inside bytes must not be read", "utf-8");
+		fs.writeFileSync(outsideFile, "outside bytes must not be read", "utf-8");
+		const canonicalFile = fs.realpathSync.native(file);
+		const canonicalOutside = fs.realpathSync.native(outsideFile);
+		const originalRealpathNative = fs.realpathSync.native;
+		const realpathSpy = vi.spyOn(fs.realpathSync, "native").mockImplementation(((target: unknown, ...args: unknown[]) => {
+			const normalized = String(target).replace(/\\/g, "/");
+			if (/\/(?:proc\/self\/fd|dev\/fd)\/\d+$/.test(normalized)) return canonicalOutside;
+			return (originalRealpathNative as (...callArgs: unknown[]) => unknown)(target, ...args);
+		}) as typeof fs.realpathSync.native);
+		const openSpy = vi.spyOn(fs, "openSync");
+		const readSpy = vi.spyOn(fs, "readSync");
+		const closeSpy = vi.spyOn(fs, "closeSync");
+
+		try {
+			const text = "@descriptor-containment.txt";
+			const result = await resolveFileMentions(text, cwdDir);
+			const openIndex = openSpy.mock.calls.findIndex(
+				(call, index) => path.resolve(String(call[0])) === canonicalFile
+					&& openSpy.mock.results[index].type === "return",
+			);
+			assert.notEqual(openIndex, -1, "the contained path must be opened before descriptor validation");
+			const descriptor = openSpy.mock.results[openIndex].value as number;
+			assert.ok(
+				realpathSpy.mock.calls.some(([target]) => {
+					const normalized = String(target).replace(/\\/g, "/");
+					return /\/(?:proc\/self\/fd|dev\/fd)\/\d+$/.test(normalized);
+				}),
+				"the opened descriptor itself must be canonicalized",
+			);
+			assert.equal(result.mentions.length, 1);
+			assert.equal(result.mentions[0].kind, "unresolved");
+			assert.equal(result.modelText, text);
+			assert.ok(
+				!readSpy.mock.calls.some((call) => call[0] === descriptor),
+				"an outside descriptor must be rejected before any payload read",
+			);
+			assert.ok(closeSpy.mock.calls.some((call) => call[0] === descriptor));
+		} finally {
+			closeSpy.mockRestore();
+			readSpy.mockRestore();
+			openSpy.mockRestore();
+			realpathSpy.mockRestore();
+			fs.rmSync(outsideDir, { recursive: true, force: true });
+			fs.rmSync(file, { force: true });
+		}
+	});
+
+	itOnWin32("rejects a fallback post-open path identity mismatch before reading and closes it", async () => {
+		const file = path.join(cwdDir, "fallback-identity.txt");
+		fs.writeFileSync(file, "identity bytes must not be read", "utf-8");
+		const canonicalFile = fs.realpathSync.native(file);
+		const originalStat = fs.statSync.bind(fs);
+		const originalPromiseStat = fs.promises.stat.bind(fs.promises);
+		const withMismatchedIdentity = (stat: fs.Stats): fs.Stats => ({
+			...stat,
+			ino: stat.ino + 1,
+			isFile: () => stat.isFile(),
+			isDirectory: () => stat.isDirectory(),
+			isBlockDevice: () => stat.isBlockDevice(),
+			isCharacterDevice: () => stat.isCharacterDevice(),
+			isSymbolicLink: () => stat.isSymbolicLink(),
+			isFIFO: () => stat.isFIFO(),
+			isSocket: () => stat.isSocket(),
+		});
+		const statSpy = vi.spyOn(fs, "statSync").mockImplementation(((target: fs.PathLike) => {
+			const stat = originalStat(target);
+			return path.resolve(String(target)) === canonicalFile ? withMismatchedIdentity(stat) : stat;
+		}) as typeof fs.statSync);
+		const promiseStatSpy = vi.spyOn(fs.promises, "stat").mockImplementation(async (target: fs.PathLike) => {
+			const stat = await originalPromiseStat(target);
+			return path.resolve(String(target)) === canonicalFile ? withMismatchedIdentity(stat) : stat;
+		});
+		const openSpy = vi.spyOn(fs, "openSync");
+		const readSpy = vi.spyOn(fs, "readSync");
+		const closeSpy = vi.spyOn(fs, "closeSync");
+
+		try {
+			const text = "@fallback-identity.txt";
+			const result = await resolveFileMentions(text, cwdDir);
+			const openIndex = openSpy.mock.calls.findIndex(
+				(call, index) => path.resolve(String(call[0])) === canonicalFile
+					&& openSpy.mock.results[index].type === "return",
+			);
+			assert.notEqual(openIndex, -1, "the fallback path must be opened before identity validation");
+			const descriptor = openSpy.mock.results[openIndex].value as number;
+			assert.ok(
+				statSpy.mock.calls.some(([target]) => path.resolve(String(target)) === canonicalFile)
+					|| promiseStatSpy.mock.calls.some(([target]) => path.resolve(String(target)) === canonicalFile),
+				"the fallback must compare the opened descriptor with post-open path identity",
+			);
+			assert.equal(result.mentions.length, 1);
+			assert.equal(result.mentions[0].kind, "unresolved");
+			assert.equal(result.modelText, text);
+			assert.ok(
+				!readSpy.mock.calls.some((call) => call[0] === descriptor),
+				"an identity mismatch must be rejected before any payload read",
+			);
+			assert.ok(closeSpy.mock.calls.some((call) => call[0] === descriptor));
+		} finally {
+			closeSpy.mockRestore();
+			readSpy.mockRestore();
+			openSpy.mockRestore();
+			promiseStatSpy.mockRestore();
+			statSpy.mockRestore();
+			fs.rmSync(file, { force: true });
+		}
+	});
+
+	it("keeps post-open fstat EACCES and ENOENT failures unresolved", async () => {
+		const file = path.join(cwdDir, "stat-race.txt");
+		fs.writeFileSync(file, "present during existence classification", "utf-8");
+
+		for (const errorCode of ["EACCES", "ENOENT"] as const) {
+			const statSpy = vi.spyOn(fs, "fstatSync").mockImplementation((() => {
+				throw Object.assign(new Error(`fstat failed with ${errorCode}`), { code: errorCode });
+			}) as typeof fs.fstatSync);
+
+			try {
+				const text = "open @stat-race.txt";
+				const r = await resolveFileMentions(text, cwdDir);
+				assert.equal(r.mentions.length, 1, errorCode);
+				assert.equal(r.mentions[0].kind, "unresolved", errorCode);
+				assert.equal(typeof r.mentions[0].reason, "string", errorCode);
+				if (errorCode === "EACCES") assert.equal(r.mentions[0].reason, "unreadable");
+				assert.equal(r.modelText, text, errorCode);
+				assert.equal(r.warnings.length, 1, errorCode);
+			} finally {
+				statSpy.mockRestore();
+			}
+		}
+	});
+
+	it("opens with no-follow when available and reads content only through the opened descriptor", async () => {
+		const file = path.join(cwdDir, "descriptor-safe.txt");
+		fs.writeFileSync(file, "descriptor content", "utf-8");
+		const canonicalFile = fs.realpathSync.native(file);
+		const openSpy = vi.spyOn(fs, "openSync");
+		const readSpy = vi.spyOn(fs, "readSync");
+		const pathReadSpy = vi.spyOn(fs, "readFileSync");
+		const closeSpy = vi.spyOn(fs, "closeSync");
+
+		try {
+			const r = await resolveFileMentions("@descriptor-safe.txt", cwdDir);
+			assert.equal(r.mentions[0].kind, "text");
+			assert.equal(r.mentions[0].content, "descriptor content");
+			const openIndex = openSpy.mock.calls.findIndex(
+				(call, index) => path.resolve(String(call[0])) === canonicalFile && openSpy.mock.results[index].type === "return",
+			);
+			assert.notEqual(openIndex, -1, "the validated path must be bound to a descriptor");
+			const descriptor = openSpy.mock.results[openIndex].value as number;
+			const flags = openSpy.mock.calls[openIndex][1];
+			assert.equal(typeof flags, "number");
+			if (typeof fs.constants.O_NOFOLLOW === "number" && fs.constants.O_NOFOLLOW !== 0) {
+				assert.equal(
+					(flags as number) & fs.constants.O_NOFOLLOW,
+					fs.constants.O_NOFOLLOW,
+					"the first successful descriptor open must reject symlink following",
+				);
+			}
+			assert.ok(readSpy.mock.calls.some((call) => call[0] === descriptor), "file bytes must be read from the bound fd");
+			assert.ok(
+				!pathReadSpy.mock.calls.some((call) => path.resolve(String(call[0])) === canonicalFile),
+				"content must never be re-opened by pathname",
+			);
+			assert.ok(closeSpy.mock.calls.some((call) => call[0] === descriptor));
+		} finally {
+			closeSpy.mockRestore();
+			pathReadSpy.mockRestore();
+			readSpy.mockRestore();
+			openSpy.mockRestore();
+		}
+	});
+
+	it("closes the opened descriptor when fstat fails", async () => {
+		const file = path.join(cwdDir, "fstat-close.txt");
+		fs.writeFileSync(file, "close me", "utf-8");
+		const canonicalFile = fs.realpathSync.native(file);
+		const openSpy = vi.spyOn(fs, "openSync");
+		const closeSpy = vi.spyOn(fs, "closeSync");
+		const fstatSpy = vi.spyOn(fs, "fstatSync").mockImplementation((() => {
+			throw Object.assign(new Error("fstat denied"), { code: "EACCES" });
+		}) as typeof fs.fstatSync);
+
+		try {
+			const r = await resolveFileMentions("@fstat-close.txt", cwdDir);
+			assert.equal(r.mentions[0].kind, "unresolved");
+			assert.equal(r.mentions[0].reason, "unreadable");
+			const openIndex = openSpy.mock.calls.findIndex(
+				(call, index) => path.resolve(String(call[0])) === canonicalFile && openSpy.mock.results[index].type === "return",
+			);
+			assert.notEqual(openIndex, -1);
+			const descriptor = openSpy.mock.results[openIndex].value as number;
+			assert.ok(closeSpy.mock.calls.some((call) => call[0] === descriptor), "fstat failure must close the fd");
+		} finally {
+			fstatSpy.mockRestore();
+			closeSpy.mockRestore();
+			openSpy.mockRestore();
+		}
+	});
+
+	it("closes the opened descriptor when a content read fails", async () => {
+		const file = path.join(cwdDir, "read-close.txt");
+		fs.writeFileSync(file, "close me too", "utf-8");
+		const canonicalFile = fs.realpathSync.native(file);
+		const openSpy = vi.spyOn(fs, "openSync");
+		const closeSpy = vi.spyOn(fs, "closeSync");
+		const readSpy = vi.spyOn(fs, "readSync").mockImplementation((() => {
+			throw Object.assign(new Error("read denied"), { code: "EIO" });
+		}) as typeof fs.readSync);
+
+		try {
+			const r = await resolveFileMentions("@read-close.txt", cwdDir);
+			assert.equal(r.mentions[0].kind, "unresolved");
+			assert.equal(r.mentions[0].reason, "unreadable");
+			const openIndex = openSpy.mock.calls.findIndex(
+				(call, index) => path.resolve(String(call[0])) === canonicalFile && openSpy.mock.results[index].type === "return",
+			);
+			assert.notEqual(openIndex, -1);
+			const descriptor = openSpy.mock.results[openIndex].value as number;
+			assert.ok(closeSpy.mock.calls.some((call) => call[0] === descriptor), "read failure must close the fd");
+		} finally {
+			readSpy.mockRestore();
+			closeSpy.mockRestore();
+			openSpy.mockRestore();
+		}
+	});
+
+
+	it("existing text and binary files over their per-file caps remain unresolved", async () => {
+		fs.writeFileSync(path.join(cwdDir, "big.txt"), "x".repeat(2048), "utf-8");
+		fs.writeFileSync(path.join(cwdDir, "big.bin"), Buffer.alloc(2048, 0));
+
+		const textResult = await resolveFileMentions("@big.txt", cwdDir, { maxFileBytes: 1024 });
+		assert.equal(textResult.mentions[0].kind, "unresolved");
+		assert.equal(textResult.mentions[0].reason, "too-large");
+		assert.equal(textResult.modelText, "@big.txt");
+		assert.equal(textResult.warnings.length, 1);
+
+		const binaryResult = await resolveFileMentions("@big.bin", cwdDir, { maxMentionFileBytes: 1024 });
+		assert.equal(binaryResult.mentions[0].kind, "unresolved");
+		assert.equal(binaryResult.mentions[0].reason, "too-large");
+		assert.equal(binaryResult.mentions[0].data, undefined);
+		assert.equal(binaryResult.modelText, "@big.bin");
+		assert.equal(binaryResult.warnings.length, 1);
+	});
+
+	itOnWin32("keeps Windows network and device namespace tokens literal without metadata or target I/O", async () => {
+		const candidates = [
+			"//attacker.example/share/file.txt",
+			"\\\\attacker.example\\share\\file.txt",
+			"\\\\?\\C:\\secret.txt",
+			"\\\\.\\PhysicalDrive0",
+			"NUL",
+			"CON.txt",
+			"COM1",
+			"LPT9.log",
+		];
+		const text = candidates.map((candidate) => `@${candidate}`).join(" ");
+		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockRejectedValue(
+			Object.assign(new Error("namespace target must not be probed"), { code: "EACCES" }),
+		);
+		const promiseOpenSpy = vi.spyOn(fs.promises, "open");
+		const openSpy = vi.spyOn(fs, "openSync");
+
+		try {
+			const result = await resolveFileMentions(text, cwdDir);
+			assert.equal(result.originalText, text);
+			assert.equal(result.modelText, text);
+			assert.deepEqual(result.mentions, []);
+			assert.deepEqual(result.warnings, []);
+			assert.equal(lstatSpy.mock.calls.length, 0, "namespace tokens must not reach lstat");
+			assert.equal(promiseOpenSpy.mock.calls.length, 0, "namespace tokens must not reach promises.open");
+			assert.equal(openSpy.mock.calls.length, 0, "namespace tokens must not reach openSync");
+		} finally {
+			openSpy.mockRestore();
+			promiseOpenSpy.mockRestore();
+			lstatSpy.mockRestore();
+		}
+	});
+
+	itOnPosix("treats an existing double-slash absolute target as outside cwd", async () => {
+		const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "file-mention-double-absolute-"));
+		const outsideFile = path.join(outsideDir, "outside.txt");
+		fs.writeFileSync(outsideFile, "DO NOT INLINE", "utf-8");
+		const doubleSlashPath = `//${outsideFile.replace(/^\/+/, "")}`;
+		const text = `read @${doubleSlashPath}`;
+
+		try {
+			assert.equal(path.isAbsolute(doubleSlashPath), true);
+			const result = await resolveFileMentions(text, cwdDir);
+			assert.equal(result.originalText, text);
+			assert.equal(result.modelText, text);
+			assert.deepEqual(
+				result.mentions.map((mention) => ({ kind: mention.kind, path: mention.path, reason: mention.reason })),
+				[{ kind: "unresolved", path: doubleSlashPath, reason: "outside-cwd" }],
+			);
+			assert.equal(result.warnings.length, 1);
+			assert.match(result.warnings[0], /outside-cwd/);
+			assert.ok(!JSON.stringify(result).includes("DO NOT INLINE"));
+		} finally {
+			fs.rmSync(outsideDir, { recursive: true, force: true });
+		}
+	});
+
+	itOnPosix("resolves in-cwd files named NUL and CON.txt normally", async () => {
+		const nulPath = path.join(cwdDir, "NUL");
+		const conPath = path.join(cwdDir, "CON.txt");
+		fs.writeFileSync(nulPath, "posix nul file", "utf-8");
+		fs.writeFileSync(conPath, "posix con file", "utf-8");
+		const text = "read @NUL then @CON.txt.";
+
+		try {
+			const result = await resolveFileMentions(text, cwdDir);
+			assert.deepEqual(
+				result.mentions.map((mention) => ({ kind: mention.kind, path: mention.path })),
+				[
+					{ kind: "text", path: "NUL" },
+					{ kind: "text", path: "CON.txt" },
+				],
+			);
+			assert.equal(
+				result.modelText,
+				`read ${buildFileReferenceBlock("NUL", "posix nul file")} then ${buildFileReferenceBlock("CON.txt", "posix con file")}.`,
+			);
+			assert.deepEqual(result.warnings, []);
+		} finally {
+			fs.rmSync(conPath, { force: true });
+			fs.rmSync(nulPath, { force: true });
+		}
+	});
+
+	it("an existing target outside cwd remains unresolved (outside-cwd)", async () => {
+		const fileName = `outside-${path.basename(cwdDir)}.txt`;
+		const outsideFile = path.join(path.dirname(cwdDir), fileName);
+		fs.writeFileSync(outsideFile, "DO NOT INLINE", "utf-8");
+		try {
+			const text = `read @../${fileName}`;
+			const r = await resolveFileMentions(text, cwdDir);
+			assert.equal(r.mentions.length, 1);
+			assert.equal(r.mentions[0].kind, "unresolved");
+			assert.equal(r.mentions[0].reason, "outside-cwd");
+			assert.equal(r.mentions[0].content, undefined);
+			assert.equal(r.mentions[0].data, undefined);
+			assert.equal(r.modelText, text);
+			assert.equal(r.warnings.length, 1);
+			assert.match(r.warnings[0], /outside-cwd/);
+		} finally {
+			fs.rmSync(outsideFile, { force: true });
+		}
+	});
+
+	it("HIGH-1: a symlink inside cwd pointing outside cwd is unresolved without leaking bytes", async (t) => {
+		const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "file-mentions-outside-"));
+		const secret = path.join(outsideDir, "secret.txt");
+		const link = path.join(cwdDir, "link-to-secret.txt");
+		fs.writeFileSync(secret, "TOPSECRET", "utf-8");
+		try {
+			try {
+				fs.symlinkSync(secret, link);
+			} catch {
+				t.skip("symlink creation not permitted on this platform");
+				return;
+			}
+			const text = "@link-to-secret.txt";
+			const r = await resolveFileMentions(text, cwdDir);
+			assert.equal(r.mentions.length, 1);
+			assert.equal(r.mentions[0].kind, "unresolved");
+			assert.equal(r.mentions[0].reason, "outside-cwd");
+			assert.equal(r.mentions[0].content, undefined);
+			assert.equal(r.mentions[0].data, undefined);
+			assert.equal(r.modelText, text);
+			assert.equal(r.warnings.length, 1);
+			assert.ok(!JSON.stringify(r).includes("TOPSECRET"), "secret must not be snapshotted");
+		} finally {
+			fs.rmSync(link, { force: true });
+			fs.rmSync(outsideDir, { recursive: true, force: true });
+		}
+	});
+
+	it("aggregate cap leaves later existing mentions unresolved and literal", async () => {
 		fs.writeFileSync(path.join(cwdDir, "p.txt"), "aaaa", "utf-8");
 		fs.writeFileSync(path.join(cwdDir, "q.txt"), "bbbb", "utf-8");
-		const r = resolveFileMentions("@p.txt @q.txt", cwdDir, { maxAggregateBytes: 5 });
+		const text = "@p.txt @q.txt";
+		const r = await resolveFileMentions(text, cwdDir, { maxAggregateBytes: 5 });
 		assert.equal(r.mentions[0].kind, "text");
 		assert.equal(r.mentions[1].kind, "unresolved");
 		assert.equal(r.mentions[1].reason, "aggregate-cap");
+		assert.equal(r.mentions[1].content, undefined);
+		assert.equal(r.mentions[1].data, undefined);
+		assert.equal(r.modelText, `${buildFileReferenceBlock("p.txt", "aaaa")} @q.txt`);
+		assert.equal(r.warnings.length, 1);
 	});
 
-	it("BLOCKER-B: once aggregate is exhausted, a subsequent large mention is aggregate-cap with NO data (not read)", () => {
-		fs.writeFileSync(path.join(cwdDir, "first.txt"), "aaaa", "utf-8"); // 4 bytes
-		// A large file that would be expensive to read; must NOT be read once the
-		// budget is gone. Image extension so it would otherwise base64-encode.
+	it("BLOCKER-B: aggregate exhaustion does not read or encode a subsequent large mention", async () => {
+		fs.writeFileSync(path.join(cwdDir, "first.txt"), "aaaa", "utf-8");
 		fs.writeFileSync(path.join(cwdDir, "huge.png"), Buffer.alloc(1024, 1));
-		const r = resolveFileMentions("@first.txt @huge.png", cwdDir, { maxAggregateBytes: 5 });
+		const r = await resolveFileMentions("@first.txt @huge.png", cwdDir, { maxAggregateBytes: 5 });
 		assert.equal(r.mentions[0].kind, "text");
 		const big = r.mentions[1];
 		assert.equal(big.kind, "unresolved");
 		assert.equal(big.reason, "aggregate-cap");
-		assert.equal(big.data, undefined, "oversized mention must not be read/encoded");
+		assert.equal(big.data, undefined, "over-budget mention must not be read/encoded");
 		assert.equal(big.content, undefined);
 	});
 
-	it("trailing punctuation is trimmed from the token (see @notes.txt.)", () => {
-		const r = resolveFileMentions("see @notes.txt.", cwdDir);
-		assert.equal(r.mentions.length, 1);
-		assert.equal(r.mentions[0].path, "notes.txt");
-		// Range must cover exactly "@notes.txt" (not the trailing dot).
-		assert.deepEqual(r.mentions[0].range, [4, 4 + "@notes.txt".length]);
+
+	it("preserves token order and exact UTF-16 ranges when lstat completions arrive in reverse", async () => {
+		const text = "😀 @src/a.ts then @notes.txt, repeat @src/a.ts; attach @pixel.png.";
+		const originalLstat = fs.promises.lstat.bind(fs.promises);
+		const calls: Array<{ target: fs.PathLike; gate: Deferred<fs.Stats> }> = [];
+		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockImplementation(((target: fs.PathLike) => {
+			const gate = deferred<fs.Stats>();
+			calls.push({ target, gate });
+			return gate.promise;
+		}) as typeof fs.promises.lstat);
+		const resolution = resolveFileMentions(text, cwdDir);
+
+		try {
+			await drainMicrotasksUntil(() => calls.length === 3, "all distinct token classifications");
+			for (const call of [...calls].reverse()) {
+				call.gate.resolve(await originalLstat(call.target));
+			}
+			const r = await resolution;
+			const expectedPaths = ["src/a.ts", "notes.txt", "src/a.ts", "pixel.png"];
+			let cursor = 0;
+			const expectedRanges = expectedPaths.map((mentionPath) => {
+				const token = `@${mentionPath}`;
+				const start = text.indexOf(token, cursor);
+				cursor = start + token.length;
+				return [start, cursor];
+			});
+
+			assert.equal(text.indexOf("@src/a.ts"), 3, "the first range must count the astral prefix as two UTF-16 units");
+			assert.deepEqual(r.mentions.map((mention) => mention.path), expectedPaths);
+			assert.deepEqual(r.mentions.map((mention) => mention.range), expectedRanges);
+			assert.deepEqual(
+				r.mentions.map((mention) => mention.kind),
+				["text", "text", "text", "image"],
+			);
+			assert.equal(
+				calls.filter((call) => path.resolve(String(call.target)) === path.join(cwdDir, "src", "a.ts")).length,
+				1,
+				"the repeated lexical path must share one lstat promise",
+			);
+			assert.deepEqual(r.warnings, []);
+		} finally {
+			for (const call of calls) call.gate.reject(missingPathError());
+			lstatSpy.mockRestore();
+		}
 	});
 
-	it("LOW-SEC: buildFileReferenceBlock escapes XML attribute chars in the path", () => {
+
+	it("more than MAX_MENTIONS_PER_SEND existing targets leaves extras unresolved", async () => {
+		const n = MAX_MENTIONS_PER_SEND + 3;
+		const text = Array.from({ length: n }, () => "@notes.txt").join(" ");
+		const r = await resolveFileMentions(text, cwdDir);
+		assert.equal(r.mentions.length, n);
+		assert.equal(r.mentions[MAX_MENTIONS_PER_SEND - 1].kind, "text");
+		assert.equal(r.mentions[MAX_MENTIONS_PER_SEND].kind, "unresolved");
+		assert.equal(r.mentions[MAX_MENTIONS_PER_SEND].reason, "too-many-mentions");
+		assert.equal(r.mentions[n - 1].reason, "too-many-mentions");
+		assert.equal(r.warnings.length, 3);
+	});
+
+	it("nonexistent candidates do not consume the existing-reference count limit", async () => {
+		const missing = Array.from(
+			{ length: MAX_MENTIONS_PER_SEND + 3 },
+			(_, index) => `@missing-${index}.txt`,
+		).join(" ");
+		const text = `${missing} @notes.txt`;
+		const r = await resolveFileMentions(text, cwdDir);
+		assert.equal(r.mentions.length, 1, "only the existing target should count as a mention");
+		assert.equal(r.mentions[0].kind, "text");
+		assert.equal(r.mentions[0].path, "notes.txt");
+		assert.deepEqual(r.warnings, []);
+	});
+
+	it("a missing candidate after the existing-reference limit stays ordinary text", async () => {
+		const existing = Array.from({ length: MAX_MENTIONS_PER_SEND }, () => "@notes.txt").join(" ");
+		const missing = "@missing-after-limit.txt";
+		const text = `${existing} ${missing}`;
+		const r = await resolveFileMentions(text, cwdDir);
+
+		assert.equal(r.mentions.length, MAX_MENTIONS_PER_SEND);
+		assert.ok(r.mentions.every((mention) => mention.kind === "text" && mention.path === "notes.txt"));
+		assert.ok(!r.mentions.some((mention) => mention.path === "missing-after-limit.txt"));
+		assert.ok(r.modelText.endsWith(` ${missing}`), "missing token must remain literal after resolved mentions");
+		assert.deepEqual(r.warnings, []);
+	});
+
+	it("trims all supported trailing punctuation from range and replacement", async () => {
+		const block = buildFileReferenceBlock("notes.txt", NOTES_CONTENT);
+		for (const punctuation of [".", ",", ")", ":", ";"]) {
+			const text = `see @notes.txt${punctuation}`;
+			const r = await resolveFileMentions(text, cwdDir);
+			assert.equal(r.mentions.length, 1);
+			assert.equal(r.mentions[0].path, "notes.txt");
+			assert.deepEqual(r.mentions[0].range, [4, 4 + "@notes.txt".length]);
+			assert.equal(r.modelText, `see ${block}${punctuation}`);
+		}
+	});
+
+	it("LOW-SEC: buildFileReferenceBlock escapes XML attribute chars in the path", async () => {
 		const block = buildFileReferenceBlock('a"><x>&.txt', "BODY");
-		// The raw quote/angle/amp must not appear unescaped inside the attribute.
 		assert.ok(block.startsWith('<file-reference path="'));
 		assert.ok(block.includes("&quot;"));
 		assert.ok(block.includes("&gt;"));
 		assert.ok(block.includes("&lt;"));
 		assert.ok(block.includes("&amp;"));
-		// No stray closing-bracket from the path can terminate the opening tag early.
 		const openTag = block.slice(0, block.indexOf("\n"));
 		assert.equal((openTag.match(/>/g) || []).length, 1, "opening tag has exactly one '>'");
 	});
 
-	it("backslash path normalised for lookup (header uses forward slashes)", () => {
-		const r = resolveFileMentions("@src\\a.ts", cwdDir);
+	it("backslash path is normalized for lookup and the model-facing header", async () => {
+		const r = await resolveFileMentions("@src\\a.ts", cwdDir);
 		assert.equal(r.mentions[0].kind, "text");
 		assert.ok(r.modelText.includes('path="src/a.ts"'));
 	});
 
-	it("never throws on a mix of good and bad references", () => {
-		const text = "@notes.txt @nope.txt @../x @pixel.png";
-		const r = resolveFileMentions(text, cwdDir);
-		assert.equal(r.mentions.length, 4);
+	it("never throws on a mix of existing and nonexistent references", async () => {
+		const text = "@notes.txt @nope.txt @pixel.png @missing/path.ts";
+		const r = await resolveFileMentions(text, cwdDir);
+		assert.equal(r.mentions.length, 2);
 		assert.deepEqual(
 			r.mentions.map((m) => m.kind),
-			["text", "unresolved", "unresolved", "image"],
+			["text", "image"],
 		);
+		assert.deepEqual(r.warnings, []);
 	});
+	it("preserves large flat mixed-run Markdown fidelity across LF, CRLF, and CR source offsets", async () => {
+		const backtick = "`";
+		const missingToken = "@flat-scanner-missing.txt";
+		const validToken = "@notes.txt";
+		const lstatSpy = vi.spyOn(fs.promises, "lstat");
 
-	it("HIGH-1: symlink inside cwd pointing outside cwd is rejected (outside-cwd), no leak", (t) => {
-		const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "file-mentions-outside-"));
-		const secret = path.join(outsideDir, "secret.txt");
-		fs.writeFileSync(secret, "TOPSECRET", "utf-8");
-		const link = path.join(cwdDir, "link-to-secret.txt");
 		try {
-			fs.symlinkSync(secret, link);
-		} catch {
-			// Creating symlinks can throw EPERM on unprivileged Windows — skip
-			// so the suite stays green there.
-			t.skip("symlink creation not permitted on this platform");
-			fs.rmSync(outsideDir, { recursive: true, force: true });
-			return;
+			for (const eol of ["\n", "\r\n", "\r"]) {
+				const sections: string[] = [];
+				for (let repetition = 0; repetition < 32; repetition++) {
+					for (let runLength = 1; runLength <= 12; runLength++) {
+						const run = backtick.repeat(runLength);
+						const shorterRun = backtick.repeat(Math.max(0, runLength - 1));
+						sections.push(
+							`matched ${run}keep ${shorterRun} ${validToken} literal${run}`,
+							`multiline ${run}first line${eol}second ${validToken} literal${run}`,
+							`unmatched ${run} stays prose with ${missingToken}`,
+							"",
+						);
+					}
+				}
+
+				const three = backtick.repeat(3);
+				const five = backtick.repeat(5);
+				const deepInline = `${"- ".repeat(4_096)}${backtick}deep ${validToken} literal${backtick}`;
+				const text = [
+					...sections,
+					three + "text",
+					`${validToken} ${"x".repeat(192 * 1024)}`,
+					five,
+					`container fences ${eol}> ${three}text${eol}> ${validToken}${eol}> ${three}`,
+					`- ${five}text${eol}  ${validToken}${eol}  ${five}`,
+					`    indented ${validToken}`,
+					deepInline,
+					`😀 outside ${validToken}; missing ${missingToken}.`,
+				].join(eol);
+				const start = text.lastIndexOf(validToken);
+				const firstLstatCall = lstatSpy.mock.calls.length;
+
+				assert.ok(text.length > 256 * 1024, "fixture must exercise a large flat Markdown scan");
+				assert.throws(
+					() => marked.lexer(deepInline, { async: false }),
+					(error: unknown) => error instanceof RangeError && /call stack/i.test(error.message),
+					"the terminal container must exercise the non-recursive deep-list fallback",
+				);
+				assert.equal(
+					Buffer.byteLength(text.slice(0, start), "utf8"),
+					start + 2,
+					"the final astral prefix must preserve UTF-16 rather than byte offsets",
+				);
+
+				const result = await resolveFileMentions(text, cwdDir);
+				assert.equal(result.originalText, text);
+				assert.deepEqual(
+					result.mentions.map((mention) => ({
+						kind: mention.kind,
+						path: mention.path,
+						range: mention.range,
+					})),
+					[{ kind: "text", path: "notes.txt", range: [start, start + validToken.length] }],
+				);
+				assert.equal(
+					result.modelText,
+					text.slice(0, start)
+						+ buildFileReferenceBlock("notes.txt", NOTES_CONTENT)
+						+ text.slice(start + validToken.length),
+					"matched inline spans, multiline spans, fences, indentation, and fallback containers must stay literal",
+				);
+				assert.deepEqual(result.warnings, []);
+				assert.deepEqual(
+					lstatSpy.mock.calls.slice(firstLstatCall)
+						.map(([target]) => path.resolve(String(target)))
+						.sort(),
+					[
+						path.join(cwdDir, "flat-scanner-missing.txt"),
+						path.join(cwdDir, "notes.txt"),
+					].sort(),
+					"only the repeated unmatched prose token and final valid token may reach the filesystem",
+				);
+			}
+		} finally {
+			lstatSpy.mockRestore();
 		}
-		const r = resolveFileMentions("@link-to-secret.txt", cwdDir);
-		assert.equal(r.mentions[0].kind, "unresolved");
-		assert.equal(r.mentions[0].reason, "outside-cwd");
-		assert.ok(!(r.mentions[0].content ?? "").includes("TOPSECRET"), "secret must not be snapshotted");
-		fs.rmSync(link, { force: true });
-		fs.rmSync(outsideDir, { recursive: true, force: true });
 	});
 
-	it("HIGH-5: more than MAX_MENTIONS_PER_SEND tokens → extras unresolved (too-many-mentions)", () => {
-		const n = MAX_MENTIONS_PER_SEND + 3;
-		const text = Array.from({ length: n }, () => "@notes.txt").join(" ");
-		const r = resolveFileMentions(text, cwdDir);
-		assert.equal(r.mentions.length, n);
-		// First MAX are resolved (text); extras degrade without fs work.
-		assert.equal(r.mentions[MAX_MENTIONS_PER_SEND - 1].kind, "text");
-		assert.equal(r.mentions[MAX_MENTIONS_PER_SEND].kind, "unresolved");
-		assert.equal(r.mentions[MAX_MENTIONS_PER_SEND].reason, "too-many-mentions");
-		assert.equal(r.mentions[n - 1].reason, "too-many-mentions");
+
+	it("maps nested CRLF code compactly while preserving an outside UTF-16 mention range", async () => {
+		const nestedCodeLine = "  > ` keep @notes.txt and @nested-code-missing.txt literal\r\n";
+		const text = [
+			"- > ```text\r\n",
+			nestedCodeLine.repeat(2_048),
+			"  > ```\r\n",
+			"\r\n",
+			"unmatched ` marker\r\n",
+			"\r\n",
+			"😀 outside @notes.txt; missing @nested-map-missing.txt",
+		].join("");
+		const token = "@notes.txt";
+		const start = text.lastIndexOf(token);
+		const lstatSpy = vi.spyOn(fs.promises, "lstat");
+		const openSpy = vi.spyOn(fs, "openSync");
+
+		try {
+			const result = await resolveFileMentions(text, cwdDir);
+			assert.equal(result.originalText, text);
+			assert.equal(
+				Buffer.byteLength(text.slice(0, start), "utf8"),
+				start + 2,
+				"the astral prefix must distinguish UTF-8 bytes from UTF-16 code units",
+			);
+			assert.deepEqual(
+				result.mentions.map((mention) => ({ kind: mention.kind, path: mention.path, range: mention.range })),
+				[{ kind: "text", path: "notes.txt", range: [start, start + token.length] }],
+			);
+			assert.equal(
+				result.modelText,
+				text.slice(0, start) + buildFileReferenceBlock("notes.txt", NOTES_CONTENT) + text.slice(start + token.length),
+				"nested code and the missing outside token must remain byte-for-byte literal",
+			);
+			assert.deepEqual(result.warnings, []);
+			assert.equal(lstatSpy.mock.calls.length, 2, "only the two outside-code targets may be classified");
+			assert.equal(openSpy.mock.calls.length, 1, "the missing outside target must never be opened");
+			assert.match(String(openSpy.mock.calls[0][0]), /notes\.txt$/);
+		} finally {
+			openSpy.mockRestore();
+			lstatSpy.mockRestore();
+		}
 	});
+
+
 });

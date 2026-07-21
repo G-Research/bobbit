@@ -1,5 +1,6 @@
-import fs from "node:fs";
 import path from "node:path";
+import type { FsLike } from "../gateway-deps.js";
+import { realFs } from "../gateway-deps.js";
 
 /**
  * Migration mappings between palette versions. Each maps old index → new index.
@@ -47,17 +48,21 @@ export class ColorStore {
 	private colors: Map<string, number> = new Map();
 	private readonly storeDir: string;
 	private readonly storeFile: string;
+	private readonly fs: FsLike;
+	private asyncSaveInFlight: Promise<void> | null = null;
+	private asyncSaveRequested = false;
 
-	constructor(stateDir: string) {
+	constructor(stateDir: string, fsImpl: FsLike = realFs) {
 		this.storeDir = stateDir;
 		this.storeFile = path.join(stateDir, "session-colors.json");
+		this.fs = fsImpl;
 		this.load();
 	}
 
 	private load(): void {
 		try {
-			if (fs.existsSync(this.storeFile)) {
-				const data = JSON.parse(fs.readFileSync(this.storeFile, "utf-8"));
+			if (this.fs.existsSync(this.storeFile)) {
+				const data = JSON.parse(this.fs.readFileSync(this.storeFile, "utf-8"));
 				if (data && typeof data === "object" && !Array.isArray(data)) {
 					for (const [id, idx] of Object.entries(data)) {
 						if (id.startsWith("_")) continue; // skip metadata keys
@@ -101,15 +106,56 @@ export class ColorStore {
 	}
 
 	private save(): void {
+		// A synchronous mutation cannot await an active purge write. Fold it into
+		// the async drain instead so the older purge snapshot cannot overwrite it.
+		if (this.asyncSaveInFlight) {
+			this.asyncSaveRequested = true;
+			return;
+		}
 		try {
-			if (!fs.existsSync(this.storeDir)) {
-				fs.mkdirSync(this.storeDir, { recursive: true });
+			if (!this.fs.existsSync(this.storeDir)) {
+				this.fs.mkdirSync(this.storeDir, { recursive: true });
 			}
 			const data: Record<string, number> = { _paletteVersion: PALETTE_VERSION, ...Object.fromEntries(this.colors) };
-			fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
+			this.fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
 		} catch (err) {
 			console.error("[color-store] Failed to save session colors:", err);
 		}
+	}
+
+	private async saveAsyncOnce(): Promise<void> {
+		try {
+			await this.fs.promises.mkdir(this.storeDir, { recursive: true });
+			const data: Record<string, number> = { _paletteVersion: PALETTE_VERSION, ...Object.fromEntries(this.colors) };
+			await this.fs.promises.writeFile(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
+		} catch (err) {
+			console.error("[color-store] Failed to save session colors:", err);
+		}
+	}
+
+	private async drainAsyncSaves(): Promise<void> {
+		try {
+			do {
+				this.asyncSaveRequested = false;
+				await this.saveAsyncOnce();
+			} while (this.asyncSaveRequested);
+		} finally {
+			// Clear before this promise settles. A mutation cannot then observe a
+			// settled writer, enqueue against it, and lose its requested save in a
+			// later promise reaction.
+			this.asyncSaveInFlight = null;
+			if (this.asyncSaveRequested) {
+				this.asyncSaveInFlight = this.drainAsyncSaves();
+			}
+		}
+	}
+
+	private requestAsyncSave(): Promise<void> {
+		this.asyncSaveRequested = true;
+		if (!this.asyncSaveInFlight) {
+			this.asyncSaveInFlight = this.drainAsyncSaves();
+		}
+		return this.asyncSaveInFlight;
 	}
 
 	get(sessionId: string): number | undefined {
@@ -128,5 +174,11 @@ export class ColorStore {
 	remove(sessionId: string): void {
 		this.colors.delete(sessionId);
 		this.save();
+	}
+
+	/** Promise-based, serialized removal used by archive purge. */
+	async removeAsync(sessionId: string): Promise<void> {
+		this.colors.delete(sessionId);
+		await this.requestAsyncSave();
 	}
 }
