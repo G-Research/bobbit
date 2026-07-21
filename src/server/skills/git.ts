@@ -3,7 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
-import { RECOVERY_IO_CONCURRENCY } from "../agent/bounded-async-work.js";
+import {
+	RECOVERY_IO_CONCURRENCY,
+	removeTree,
+	type AsyncTreeFs,
+} from "../agent/bounded-async-work.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 import type { Component } from "../agent/project-config-store.js";
 import { branchToSlug, worktreeRoot as wtRootHelper } from "./worktree-paths.js";
@@ -259,10 +263,6 @@ function comparablePath(p: string): string {
 	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
-function isErrnoCode(err: unknown, code: string): boolean {
-	return (err as NodeJS.ErrnoException | null)?.code === code;
-}
-
 async function pathExists(filePath: string): Promise<boolean> {
 	try {
 		await fs.promises.access(filePath);
@@ -294,75 +294,23 @@ async function withTargetedRemovalSlot<T>(operation: () => Promise<T>): Promise<
 }
 
 /**
- * Remove one exact path without following directory symlinks or invoking an
- * unbounded recursive filesystem primitive. Directory handles are closed
- * before descending and entries are read in small batches, so deep/wide
- * partial worktrees cannot retain the whole tree or one handle per level.
+ * Remove one exact path through the canonical bounded tree remover. It
+ * revalidates an opened directory path before using each returned child name,
+ * so replacing a verified directory with a symlink can only unlink the link;
+ * it can never redirect child deletion outside the target.
+ *
+ * The operation owns one process-wide slot for its lifetime. Concurrent
+ * worktree/pool cleanup therefore retains the shared recovery I/O ceiling
+ * without multiplying it at nested tree levels.
  */
-async function removeTargetedTree(targetPath: string): Promise<void> {
-	let firstError: unknown;
-	const recordError = (err: unknown): void => {
-		if (!isErrnoCode(err, "ENOENT") && firstError === undefined) firstError = err;
-	};
-
-	const removeNode = async (nodePath: string): Promise<void> => {
-		let stats: fs.Stats;
-		try {
-			stats = await withTargetedRemovalSlot(() => fs.promises.lstat(nodePath));
-		} catch (err) {
-			recordError(err);
-			return;
-		}
-
-		if (!stats.isDirectory() || stats.isSymbolicLink()) {
-			try {
-				await withTargetedRemovalSlot(() => fs.promises.unlink(nodePath));
-			} catch (err) {
-				recordError(err);
-			}
-			return;
-		}
-
-		while (true) {
-			let dir: fs.Dir | undefined;
-			const names: string[] = [];
-			try {
-				dir = await withTargetedRemovalSlot(() => fs.promises.opendir(nodePath));
-				while (names.length < RECOVERY_IO_CONCURRENCY) {
-					const entry = await withTargetedRemovalSlot(() => dir!.read());
-					if (!entry) break;
-					names.push(entry.name);
-				}
-			} catch (err) {
-				recordError(err);
-				return;
-			} finally {
-				if (dir) {
-					try {
-						await withTargetedRemovalSlot(() => dir!.close());
-					} catch (err) {
-						recordError(err);
-					}
-				}
-			}
-
-			if (names.length === 0) break;
-			for (const name of names) await removeNode(path.join(nodePath, name));
-			// A locked/unreadable child would be returned by the next reopened
-			// directory batch forever. Preserve the first failure and stop retrying
-			// this target; callers retain their existing best-effort ownership.
-			if (firstError !== undefined) return;
-		}
-
-		try {
-			await withTargetedRemovalSlot(() => fs.promises.rmdir(nodePath));
-		} catch (err) {
-			recordError(err);
-		}
-	};
-
-	await removeNode(targetPath);
-	if (firstError !== undefined) throw firstError;
+export async function removeTargetedTree(
+	targetPath: string,
+	treeFs?: Pick<AsyncTreeFs, "lstat" | "opendir" | "unlink" | "rmdir">,
+): Promise<void> {
+	await withTargetedRemovalSlot(() => removeTree(targetPath, {
+		fs: treeFs,
+		force: true,
+	}));
 }
 
 async function resolveRemotePrimary(repoPath: string, commandRunner: CommandRunner = realCommandRunner): Promise<string> {
