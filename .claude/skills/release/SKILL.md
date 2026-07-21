@@ -101,16 +101,17 @@ npm audit --omit=dev            # zero high/critical in runtime deps
 npm run build                   # full build; emits declarations used by test type-checks
 npm run check                   # type-check server + web + tests against fresh dist
 npm run test:unit               # fast unit suite
-npm run test:e2e                # API + browser E2E
+npm run test:browser            # Playwright browser journeys
+npm run test:e2e                # API + worktree/Docker/MCP/restart E2E
 ```
 
 Rules:
 - **`npm audit` must show 0 vulnerabilities** (any severity, runtime deps). If it doesn't, stop and report what's flagged — do not release with known vulns. If a finding is genuinely a false positive (e.g. dev-only path), have the user explicitly acknowledge before continuing.
-- Don't skip E2E "because it's slow" — releases are the one place flakes bite users.
+- Don't skip browser or E2E tests "because they're slow" — releases are the one place flakes bite users.
 - Build must precede `check`: `tsconfig.tests2.json` follows intentional imports of emitted `dist/server/*.js` declarations, so a clean checkout cannot type-check the test graph before the build.
 - If any test fails, the failure is the bug. Fix it or abort the release; do not retry hoping it's flaky.
 
-Long-running steps (`build`, `test:e2e`) should use `bash_bg` so output stays inspectable.
+Long-running steps (`build`, `test:browser`, `test:e2e`) should use `bash_bg` so output stays inspectable.
 
 ## 3. Decide whether to bump the binary sub-packages
 
