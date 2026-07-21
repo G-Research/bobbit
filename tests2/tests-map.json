@@ -120,6 +120,15 @@
       }
     },
     {
+      "path": "tests2/core/bounded-tree-parent-identity.test.ts",
+      "reason": "Deterministic injected-filesystem regressions proving queued and local-DFS tree work retains its producing-parent identity, parent replacement cannot expose external entries to visitors/copy/hash, symlink ancestors are never traversed, and removal revalidates nested parents before unlink, child open, and final rmdir.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/aigw-wellknown-config-atomic.test.ts",
       "reason": "Unit coverage for atomic AIGW models/configuration failure behavior.",
       "execution": {
