@@ -6442,9 +6442,9 @@
       "bucket": "daily",
       "method": "adapter",
       "replacement": [
-        "tests2/browser/fixtures/pre-compaction-history.spec.ts"
+        "tests2/browser/e2e/pre-compaction-history.spec.ts"
       ],
-      "rationale": "Browser E2E uses IntersectionObserver at tests/e2e/ui/pre-compaction-history.spec.ts:258 â€” needs Chromium real-browser fidelity.",
+      "rationale": "Authoritative e2e:v2 Group C coverage drives real mock-agent AUTO_COMPACT:3 through the visible editor, verifies ordered dimmed read-only history, reload persistence, and per-test session cleanup in Chromium.",
       "migrated": true,
       "v2Path": "tests2/browser/e2e/pre-compaction-history.spec.ts",
       "execution": {
