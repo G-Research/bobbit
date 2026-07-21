@@ -217,6 +217,41 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(delegateBinding.source, "system");
 		assert.deepEqual(delegateBinding.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
 
+		const ownerAuthor = { kind: "agent", id: "session:delegate-owner", label: "Delegate owner" } as const;
+		const ownerPrompt = vi.fn(async (_text: string) => {
+			ownerDelegate.status = "streaming";
+			return { success: true };
+		});
+		const { session: ownerDelegate } = putSession(manager, {
+			id: "s-owner-delegate-producer",
+			rpcClient: { prompt: ownerPrompt },
+		});
+		await sendDelegatePrompt(ownerDelegate, "still not model-facing", 1_000, {
+			source: "agent",
+			author: ownerAuthor,
+		});
+		assert.deepEqual(ownerPrompt.mock.calls[0], [delegateText]);
+		const ownerBinding = readAuthorSidecar(ownerDelegate.id)[0];
+		assert.equal(ownerBinding.modelText, delegateText);
+		assert.equal(ownerBinding.source, "agent");
+		assert.deepEqual(ownerBinding.author, ownerAuthor);
+
+		const malformedPrompt = vi.fn(async (_text: string) => {
+			malformedDelegate.status = "streaming";
+			return { success: true };
+		});
+		const { session: malformedDelegate } = putSession(manager, {
+			id: "s-malformed-delegate-producer",
+			rpcClient: { prompt: malformedPrompt },
+		});
+		await sendDelegatePrompt(malformedDelegate, "still not model-facing", 1_000, {
+			source: "agent",
+			author: { kind: "system", id: "system:forged", label: "Forged" },
+		});
+		const malformedBinding = readAuthorSidecar(malformedDelegate.id)[0];
+		assert.equal(malformedBinding.source, "system");
+		assert.deepEqual(malformedBinding.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
+
 		const verificationText = "Return the verification_result now.";
 		const verificationPrompt = vi.fn(async () => ({ success: true }));
 		const { session: verificationSession } = putSession(manager, {

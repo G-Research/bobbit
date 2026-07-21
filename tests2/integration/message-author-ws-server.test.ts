@@ -1,7 +1,9 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
 import {
+	apiFetch,
 	connectWs,
 	createSession,
+	defaultProject,
 	messageEndPredicate,
 	type WsConnection,
 } from "./_e2e/e2e-setup.js";
@@ -9,6 +11,7 @@ import { gatewaySync } from "./_e2e/runtime.js";
 import { attachLocalMockAgentClock } from "./helpers/local-mock-agent-clock.js";
 
 const HUMAN_PROMPT = "AUTHOR_HUMAN_LIVE_SNAPSHOT_RECONNECT";
+const STAFF_PROMPT = "AUTHOR_STAFF_RENAME_LIVE_SNAPSHOT";
 const SYSTEM_PROMPT = "AUTHOR_SYSTEM_TASK_NOTIFICATION";
 
 function messageText(message: any): string {
@@ -84,6 +87,63 @@ test("human WS author survives live echo, snapshot, and reconnect without changi
 		expect(reconnectSnapshot.assistant.author).toEqual(liveSnapshot!.assistant.author);
 	} finally {
 		reconnected.close();
+	}
+});
+
+test("renamed staff uses the same current label in live assistant events and reload snapshots", async ({ gateway }) => {
+	const project = await defaultProject();
+	const oldName = `Author Staff Old ${Date.now()}`;
+	const newName = `Author Staff New ${Date.now()}`;
+	const created = await apiFetch("/api/staff", {
+		method: "POST",
+		body: JSON.stringify({
+			name: oldName,
+			systemPrompt: "Answer author identity regression prompts.",
+			cwd: project.rootPath,
+			projectId: project.id,
+			worktree: false,
+		}),
+	});
+	expect(created.status, await created.clone().text()).toBe(201);
+	const staff = await created.json();
+	const sessionId = staff.currentSessionId as string;
+	let conn: WsConnection | undefined;
+
+	try {
+		const liveSession = gateway.sessionManager.getSession(sessionId);
+		expect(liveSession?.title).toBe(oldName);
+		expect(liveSession?.staffId).toBe(staff.id);
+
+		const renamed = await apiFetch(`/api/staff/${staff.id}`, {
+			method: "PUT",
+			body: JSON.stringify({ name: newName }),
+		});
+		expect(renamed.status, await renamed.clone().text()).toBe(200);
+		// Preserve the review finding's exact condition: the staff record changes,
+		// while the already-running session retains its original title.
+		expect(gateway.sessionManager.getSession(sessionId)?.title).toBe(oldName);
+
+		const agentClock = attachLocalMockAgentClock(gateway, sessionId);
+		conn = await connectWs(sessionId);
+		conn.send({ type: "prompt", text: STAFF_PROMPT });
+		const liveUser = await conn.waitFor(messageEndPredicate("user"));
+		expect(liveUser.data.message.role).toBe("user");
+		expect(messageText(liveUser.data.message)).toBe(STAFF_PROMPT);
+
+		await agentClock.settleCurrentPrompt();
+		const liveAssistant = conn.messages.find(messageEndPredicate("assistant"))?.data.message;
+		expect(liveAssistant).toMatchObject({
+			role: "assistant",
+			author: { kind: "agent", id: `staff:${staff.id}`, label: newName },
+		});
+
+		const snapshot = authoredTurn(await getMessages(conn), STAFF_PROMPT);
+		expect(snapshot.assistant.role).toBe("assistant");
+		expect(snapshot.assistant.author).toEqual(liveAssistant.author);
+		expect(snapshot.assistant.author.label).toBe(newName);
+	} finally {
+		conn?.close();
+		await apiFetch(`/api/staff/${staff.id}`, { method: "DELETE" }).catch(() => undefined);
 	}
 });
 

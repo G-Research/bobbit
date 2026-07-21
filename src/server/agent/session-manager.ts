@@ -40,6 +40,7 @@ import {
 	agentAuthorForSession,
 	normalizeVisibleAgentEvent,
 	resolvePromptAuthor,
+	type AgentAuthorDependencies,
 } from "./message-author.js";
 import { resolveReadablePersistedAgentSessionFile, resolveSafeSessionsPath, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
 import { isOrphanToolResultOrderingError } from "./poisoned-history.js";
@@ -1003,11 +1004,12 @@ function stripArchivedSnapshotCorrelations<T>(snapshot: T): T {
  * while creating the same durable author binding as SessionManager queues.
  * A late negative acknowledgement cannot cancel a turn Pi already observed.
  */
-export async function dispatchTrackedSystemPrompt(
+export async function dispatchTrackedPrompt(
 	session: SessionInfo,
 	text: string,
 	opts: {
-		source?: SystemPromptSource;
+		source?: PromptSource;
+		author?: MessageAuthor;
 		whenReady?: boolean;
 		now?: () => number;
 	} = {},
@@ -1016,7 +1018,7 @@ export async function dispatchTrackedSystemPrompt(
 	const now = opts.now ?? Date.now;
 	const promptId = `prompt:${randomUUID()}`;
 	const observedBeforeDispatch = session.agentObservedTurnVersion ?? 0;
-	const author = resolveAcceptedPromptAuthor(source, BOBBIT_SYSTEM_AUTHOR);
+	const author = resolveAcceptedPromptAuthor(source, opts.author);
 	session.lastPromptSource = source;
 	recordPromptAuthorBinding(session, promptId, text, source, author, now());
 
@@ -1030,12 +1032,28 @@ export async function dispatchTrackedSystemPrompt(
 		return response;
 	} catch (error) {
 		if ((session.agentObservedTurnVersion ?? 0) !== observedBeforeDispatch) {
-			console.warn(`[session-manager] tracked system prompt for ${session.id} reported a failure after the agent observed the turn; treating the dispatch as accepted`);
+			console.warn(`[session-manager] tracked prompt for ${session.id} reported a failure after the agent observed the turn; treating the dispatch as accepted`);
 			return { success: true };
 		}
 		cancelPromptAuthorBinding(session, promptId, now());
 		throw error;
 	}
+}
+
+/** Bobbit-generated prompt wrapper that cannot be attributed to a user or agent. */
+export function dispatchTrackedSystemPrompt(
+	session: SessionInfo,
+	text: string,
+	opts: {
+		source?: SystemPromptSource;
+		whenReady?: boolean;
+		now?: () => number;
+	} = {},
+): Promise<unknown> {
+	return dispatchTrackedPrompt(session, text, {
+		...opts,
+		author: BOBBIT_SYSTEM_AUTHOR,
+	});
 }
 
 function sameAuthor(left: MessageAuthor, right: MessageAuthor): boolean {
@@ -1166,7 +1184,11 @@ function rewriteUserMessageText(message: any, newText: string): any {
  * Stamp Bobbit-owned author metadata before lifecycle tracking and emission.
  * The raw Pi event is never mutated and the message content/role is unchanged.
  */
-export function prepareVisibleAgentEvent(session: SessionInfo, event: unknown): unknown {
+export function prepareVisibleAgentEvent(
+	session: SessionInfo,
+	event: unknown,
+	agentDeps: AgentAuthorDependencies = {},
+): unknown {
 	if (!event || typeof event !== "object") return event;
 	const raw = event as any;
 	if ((raw.type !== "message_update" && raw.type !== "message_end") || !raw.message || typeof raw.message !== "object") {
@@ -1218,21 +1240,22 @@ export function prepareVisibleAgentEvent(session: SessionInfo, event: unknown): 
 		}
 	}
 
+	const sessionAuthor = agentAuthorForSession(session, agentDeps);
 	if (stableBinding) {
 		author = stableBinding.author;
 	} else if (pendingIndex !== -1) {
 		author = session.pendingPromptAuthors![pendingIndex].author;
 	} else if (message.role === "assistant") {
-		author = agentAuthorForSession(session);
+		author = sessionAuthor;
 	} else {
 		author = normalizeVisibleAgentEvent(session, raw, {
-			agentAuthor: agentAuthorForSession(session),
+			agentAuthor: sessionAuthor,
 			systemAuthor: BOBBIT_SYSTEM_AUTHOR,
 		}).message.author;
 	}
 
 	const prepared = normalizeVisibleAgentEvent(session, raw, {
-		agentAuthor: agentAuthorForSession(session),
+		agentAuthor: sessionAuthor,
 		systemAuthor: BOBBIT_SYSTEM_AUTHOR,
 		promptAuthor: author,
 	});
@@ -2503,6 +2526,7 @@ export class SessionManager {
 			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts),
 
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
+			prepareVisibleAgentEvent: (session, event) => this.prepareVisibleAgentEvent(session, event),
 			handleAgentLifecycle: (session, event) => this.handleAgentLifecycle(session, event),
 			trackCostFromEvent: (session, event) => this.trackCostFromEvent(session, event),
 			recordPiExtensionDiagnostic: (session, diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension),
@@ -3542,6 +3566,15 @@ export class SessionManager {
 		}
 
 		return { args, env: activation.env, runtimeExtensions: piExtensionActivation.runtimeExtensions };
+	}
+
+	private messageAuthorDependencies(
+		session?: Pick<SessionInfo, "assistantType" | "projectId">,
+	): AgentAuthorDependencies {
+		return {
+			getStaff: this.staffRecordSource ? (staffId) => this.staffRecordSource!.getStaff(staffId) : undefined,
+			getRole: (name) => this.resolveSessionRole(name, session?.assistantType, session?.projectId),
+		};
 	}
 
 	private resolveSessionRole(roleName?: string, assistantType?: string, projectId?: string): import("./role-store.js").Role | undefined {
@@ -6548,7 +6581,7 @@ export class SessionManager {
 	 * Pinned by tests2/core/pi-rpc-agent-end-retry.test.ts.
 	 */
 	private prepareVisibleAgentEvent(session: SessionInfo, event: unknown): unknown {
-		return prepareVisibleAgentEvent(session, event);
+		return prepareVisibleAgentEvent(session, event, this.messageAuthorDependencies(session));
 	}
 
 	private emitAgentEvent(session: SessionInfo, event: unknown): void {
@@ -7924,6 +7957,10 @@ export class SessionManager {
 		 * ONLY — it never widens the child's sandbox or project (credential) scope.
 		 */
 		env?: Record<string, string>;
+		/** Initial prompt provenance. Only a valid owner-agent pair is accepted;
+		 * omitted or inconsistent metadata falls back to Bobbit system identity. */
+		source?: PromptSource;
+		author?: MessageAuthor;
 	}): Promise<SessionInfo> {
 		const id = randomUUID();
 		// Resolve projectId from parent session
@@ -8056,8 +8093,13 @@ export class SessionManager {
 			console.error(`[session-manager] Failed to persist delegate session ${id}:`, err);
 		}).finally(() => { session.pendingMetadataPersist = undefined; });
 
-		// Send delegate prompt with 30s timeout
-		await sendDelegatePrompt(session, opts.instructions, DELEGATE_SPAWN_TIMEOUT_MS);
+		// Preserve an authenticated owner's identity for orchestration-created
+		// delegates. Direct/server-created delegates omit provenance and remain
+		// system-authored; sendDelegatePrompt validates the pair fail-closed.
+		await sendDelegatePrompt(session, opts.instructions, DELEGATE_SPAWN_TIMEOUT_MS, {
+			source: opts.source,
+			author: opts.author,
+		});
 
 		console.log(`[session-manager] Created delegate session ${id} (parent: ${parentSessionId}, status: ${session.status})`);
 		return session;
@@ -8865,10 +8907,7 @@ export class SessionManager {
 				role: identity?.role,
 				staffId: identity?.staffId,
 			},
-			agentDeps: {
-				getStaff: this.staffRecordSource ? (staffId) => this.staffRecordSource!.getStaff(staffId) : undefined,
-				getRole: (name) => this.resolveSessionRole(name, identity?.assistantType, identity?.projectId),
-			},
+			agentDeps: this.messageAuthorDependencies(identity),
 			latestMessageUpdate: live?.latestMessageUpdate,
 			inFlightSteerTexts: live?.inFlightSteerTexts,
 		});
