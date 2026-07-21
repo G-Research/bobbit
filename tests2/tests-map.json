@@ -39,6 +39,24 @@
       }
     },
     {
+      "path": "tests2/core/git-targeted-cleanup-symlink-race.test.ts",
+      "reason": "Deterministic native v2 regression proving targeted Git cleanup cannot traverse a directory replaced by a symlink between lstat and open, remains idempotent for a missing target, and shares the process-wide recovery I/O concurrency ceiling across roots.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/purge-preview-pool-shutdown-coder61c7.test.ts",
+      "reason": "Deterministic native v2 coverage for coalesced immediate and expiry archive purges, stale-snapshot fencing, serialized preview purge cleanup, bounded boot pool initialization, and awaited CPU diagnostics shutdown.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/archive-purge-async.test.ts",
       "reason": "Deterministic native v2 coverage for bounded deferred archive stats, event-loop progress, scheduled purge single-flight behavior, stop barriers that cancel future ticks and join active cleanup, and awaited failure-isolated termination listeners.",
       "execution": {
