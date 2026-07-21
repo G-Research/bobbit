@@ -9,6 +9,14 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import type {
+	AgentHarnessEvent,
+	BranchSummaryEntry as HarnessBranchSummaryEntry,
+	CompactionEntry as HarnessCompactionEntry,
+	SessionEntryCursorOptions,
+	SessionStorage,
+} from "@earendil-works/pi-agent-core";
+import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import {
 	COMPACTION_ACTIVE_ID,
 	COMPACTION_ACTIVE_TOOLCALL_ID,
@@ -16,6 +24,18 @@ import {
 	buildInProgressCompactionPayload,
 	parseOverflowTokenCount,
 } from "../../src/app/compaction-types.ts";
+import { readOrphanedBeforeCompaction } from "../../src/server/agent/transcript-reader.ts";
+
+const RICH_USAGE = {
+	input: 11,
+	output: 7,
+	cacheRead: 3,
+	cacheWrite: 2,
+	cacheWrite1h: 1,
+	reasoning: 4,
+	totalTokens: 23,
+	cost: { input: 0.1, output: 0.2, cacheRead: 0.01, cacheWrite: 0.02, total: 0.33 },
+};
 
 describe("compaction-types", () => {
 	it("parseOverflowTokenCount: canonical Anthropic 400 string", () => {
@@ -78,5 +98,131 @@ describe("compaction-types", () => {
 		assert.strictEqual(rInProg.isError, false);
 		assert.strictEqual(rDone.isError, false);
 		assert.strictEqual(rErr.isError, true);
+	});
+});
+
+describe("Pi 0.81 compaction contracts", () => {
+	it("accepts retained-tail checkpoints, summary usage, and the expanded SessionStorage API", async () => {
+		const compaction: HarnessCompactionEntry = {
+			type: "compaction",
+			id: "compact",
+			parentId: "before",
+			timestamp: "2026-07-21T00:00:00.000Z",
+			summary: "summary",
+			tokensBefore: 100,
+			retainedTail: [{ role: "user", content: "kept", timestamp: 1 }],
+			usage: RICH_USAGE,
+			details: { additive: true },
+		};
+		const branchSummary: HarnessBranchSummaryEntry = {
+			type: "branch_summary",
+			id: "branch",
+			parentId: "compact",
+			timestamp: "2026-07-21T00:00:01.000Z",
+			fromId: "abandoned",
+			summary: "branch summary",
+			usage: RICH_USAGE,
+		};
+		const cursor = { afterEntrySeq: 4, limit: 2 } satisfies SessionEntryCursorOptions;
+		const storage = {
+			getSessionName: async () => "fixture",
+			getSessionStats: async () => ({
+				messageCount: 1,
+				cachedTokens: 3,
+				uncachedTokens: 13,
+				totalTokens: 23,
+				costTotal: 0.33,
+			}),
+			getPathToRootOrCompaction: async (_leafId: string | null) => [compaction, branchSummary],
+			getEntries: async (_options?: SessionEntryCursorOptions) => [compaction, branchSummary],
+		} satisfies Pick<SessionStorage,
+			"getSessionName" | "getSessionStats" | "getPathToRootOrCompaction" | "getEntries">;
+
+		assert.equal(compaction.firstKeptEntryId, undefined, "retainedTail makes the legacy boundary optional");
+		assert.equal(compaction.retainedTail?.[0].role, "user");
+		assert.equal(branchSummary.usage?.reasoning, 4);
+		assert.deepEqual(cursor, { afterEntrySeq: 4, limit: 2 });
+		assert.equal(await storage.getSessionName(), "fixture");
+		assert.equal((await storage.getSessionStats()).totalTokens, 23);
+		assert.deepEqual(await storage.getPathToRootOrCompaction("branch"), [compaction, branchSummary]);
+		assert.deepEqual(await storage.getEntries(cursor), [compaction, branchSummary]);
+	});
+
+	it("accepts compaction and branch-summary retry lifecycle events without dropping terminal usage", () => {
+		const harnessRetryEvents = [
+			{
+				type: "retry_scheduled",
+				operation: "compaction",
+				attempt: 1,
+				maxAttempts: 3,
+				delayMs: 50,
+				errorMessage: "transient",
+			},
+			{ type: "retry_attempt_start", operation: "branch_summary" },
+			{ type: "retry_finished", operation: "compaction" },
+		] satisfies AgentHarnessEvent[];
+		const codingAgentEvents = [
+			{
+				type: "summarization_retry_scheduled",
+				attempt: 1,
+				maxAttempts: 3,
+				delayMs: 50,
+				errorMessage: "transient",
+			},
+			{ type: "summarization_retry_attempt_start", source: "compaction", reason: "overflow" },
+			{ type: "summarization_retry_attempt_start", source: "branchSummary" },
+			{ type: "summarization_retry_finished" },
+			{
+				type: "compaction_end",
+				reason: "overflow",
+				result: {
+					summary: "summary",
+					firstKeptEntryId: "kept",
+					tokensBefore: 100,
+					estimatedTokensAfter: 40,
+					usage: RICH_USAGE,
+				},
+				aborted: false,
+				willRetry: true,
+			},
+		] satisfies AgentSessionEvent[];
+
+		assert.deepEqual(harnessRetryEvents.map((event) => event.type), [
+			"retry_scheduled", "retry_attempt_start", "retry_finished",
+		]);
+		const terminal = codingAgentEvents[codingAgentEvents.length - 1];
+		assert.equal(terminal.type, "compaction_end");
+		if (terminal.type !== "compaction_end") assert.fail("expected compaction_end");
+		assert.equal(terminal.willRetry, true);
+		assert.equal(terminal.result?.usage?.reasoning, 4);
+	});
+
+	it("prefers an in-file firstKeptEntryId when a sidecar boundary is absent or stale", async () => {
+		const content = [
+			JSON.stringify({ type: "session", version: 3, id: "session", timestamp: "2026-07-21T00:00:00.000Z", cwd: "/fixture" }),
+			JSON.stringify({ type: "message", id: "pre", parentId: null, message: { role: "user", content: "summarized" } }),
+			JSON.stringify({ type: "message", id: "kept", parentId: "pre", message: { role: "user", content: "kept" } }),
+			JSON.stringify({ type: "message", id: "kept-reply", parentId: "kept", message: { role: "assistant", content: "kept reply" } }),
+			JSON.stringify({
+				type: "compaction", id: "compact", parentId: "kept-reply", summary: "summary",
+				firstKeptEntryId: "kept", retainedTail: [
+					{ role: "user", content: "kept" },
+					{ role: "assistant", content: "kept reply" },
+				],
+			}),
+		].join("\n");
+
+		for (const firstKeptEntryId of [null, "stale-sidecar-id"]) {
+			const envelope = await readOrphanedBeforeCompaction(
+				{ compactionId: "sidecar" },
+				{ readContent: async () => content, firstKeptEntryId },
+			);
+			assert.equal(envelope.total, 1);
+			assert.equal(envelope.returned, 1);
+			const message = envelope.messages[0];
+			assert.equal(message.role, "user");
+			if (!("text" in message)) assert.fail("expected compact transcript message");
+			assert.equal(message.text, "summarized");
+		}
 	});
 });
