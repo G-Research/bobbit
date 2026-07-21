@@ -347,6 +347,8 @@ export interface OrchestrationSessionView {
 	waitForIdle(sessionId: string, timeoutMs: number): Promise<void>;
 	getSessionOutput(sessionId: string): Promise<string>;
 	getSession(id: string): OrchestrationSessionLike | undefined;
+	/** Current accountable producer identity, including live staff/role metadata. */
+	resolveSessionAgentAuthor?(id: string): MessageAuthor | undefined;
 	getPersistedSession(id: string): PersistedSessionLike | undefined;
 	terminateSession(id: string): Promise<boolean>;
 	forceAbort(id: string, gracePeriodMs?: number): Promise<void>;
@@ -524,6 +526,11 @@ export class OrchestrationCore {
 	}
 
 	private resolveOwnerAuthor(ownerId: string): MessageAuthor | undefined {
+		if (this.deps.sessionManager.resolveSessionAgentAuthor) {
+			return this.deps.sessionManager.resolveSessionAgentAuthor(ownerId);
+		}
+		// Structural test/extension views predating the resolver retain the legacy
+		// live-session fallback. Production SessionManager always takes the branch above.
 		const owner = this.deps.sessionManager.getSession(ownerId);
 		return owner ? agentAuthorForSession(owner) : undefined;
 	}

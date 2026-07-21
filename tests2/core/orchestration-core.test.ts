@@ -39,6 +39,7 @@ class FakeView implements OrchestrationSessionView {
 	delegateCalls: Array<{ parentSessionId: string; opts: any }> = [];
 	createSessionCalls: Array<{ cwd: string; opts: any }> = [];
 	prompts: Array<{ sessionId: string; text: string; opts?: any }> = [];
+	resolvedAuthors = new Map<string, { kind: "agent"; id: string; label: string }>();
 	terminated: string[] = [];
 	aborted: string[] = [];
 	markedTerminal: string[] = [];
@@ -91,6 +92,12 @@ class FakeView implements OrchestrationSessionView {
 	}
 	async getSessionOutput(sessionId: string): Promise<string> { return this.live.get(sessionId)?.output ?? ""; }
 	getSession(id: string): OrchestrationSessionLike | undefined { return this.live.get(id); }
+	resolveSessionAgentAuthor(id: string) {
+		const resolved = this.resolvedAuthors.get(id);
+		if (resolved) return resolved;
+		const session = this.live.get(id);
+		return session ? { kind: "agent" as const, id: `session:${id}`, label: session.title ?? "Agent" } : undefined;
+	}
 	getPersistedSession(id: string): PersistedSessionLike | undefined { return this.persisted.get(id); }
 	async terminateSession(id: string): Promise<boolean> { this.terminated.push(id); return true; }
 	async forceAbort(id: string): Promise<void> { this.aborted.push(id); }
@@ -409,6 +416,26 @@ describe("OrchestrationCore.spawn — lifecycle selection (Decision A.1)", () =>
 		await core.spawn({ ownerSessionId: "owner-1", instructions: "x", readOnly: true });
 		assert.equal(view.delegateCalls.length, 1, "read-only with no lifecycle still goes bare");
 		assert.equal(view.createSessionCalls.length, 0);
+	});
+});
+
+describe("OrchestrationCore owner prompt authors", () => {
+	it("uses the shared current-author resolver for renamed-staff delegate prompts without changing bytes", async () => {
+		const view = new FakeView();
+		view.owner("owner-staff", { title: "Old staff name" });
+		const currentAuthor = { kind: "agent", id: "staff:staff-1", label: "Renamed staff" } as const;
+		view.resolvedAuthors.set("owner-staff", currentAuthor);
+		const core = makeCore(view);
+
+		const child = await core.spawn({ ownerSessionId: "owner-staff", instructions: "delegate task bytes" });
+		assert.equal(view.delegateCalls[0].opts.instructions, "delegate task bytes");
+		assert.equal(view.delegateCalls[0].opts.source, "agent");
+		assert.deepEqual(view.delegateCalls[0].opts.author, currentAuthor);
+
+		await core.prompt("owner-staff", child.sessionId, "follow-up bytes");
+		assert.equal(view.prompts[0].text, "follow-up bytes");
+		assert.equal(view.prompts[0].opts.source, "agent");
+		assert.deepEqual(view.prompts[0].opts.author, currentAuthor);
 	});
 });
 
