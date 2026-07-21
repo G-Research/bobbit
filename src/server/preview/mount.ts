@@ -324,8 +324,13 @@ export async function contentHashForMount(sessionId: string): Promise<string> {
 
 export async function removeMount(sessionId: string): Promise<void> {
 	if (!sessionId || !VALID_SESSION_ID.test(sessionId)) return;
-	try { await removePreviewTree(path.join(previewRoot(), sessionId), { fs: mountAsyncFs }); }
-	catch { /* preserve cleanup-local idempotency */ }
+	try {
+		await removePreviewTree(path.join(previewRoot(), sessionId), { fs: mountAsyncFs });
+	} catch (error) {
+		// A missing mount is the only idempotent success. Permission, I/O, and
+		// traversal failures belong to the purge owner and must remain observable.
+		if (!isEnoent(error)) throw error;
+	}
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -465,18 +470,54 @@ export async function hashMountDirectory(root: string, options: PreviewTreeOptio
 	return hash.digest("hex");
 }
 
+function matchesDirectoryIdentity(expected: fs.Stats, current: fs.Stats): boolean {
+	if (!current.isDirectory() || current.isSymbolicLink()) return false;
+	const expectedStable = hasStableFileIdentity(expected);
+	const currentStable = hasStableFileIdentity(current);
+	if (expectedStable || currentStable) {
+		return expectedStable && currentStable && sameFileIdentity(expected, current);
+	}
+	// Some network and virtual filesystems expose no usable inode. Type and
+	// no-follow checks still reject the symlink substitution this path defends.
+	return true;
+}
+
 /** Copy regular files through the shared bounded streaming walker. */
 export async function copyPreviewDirectory(src: string, dst: string, options: PreviewTreeOptions = {}): Promise<void> {
 	const io = options.fs ?? mountAsyncFs;
 	const limit = options.concurrency ?? RECOVERY_IO_CONCURRENCY;
-	const canonicalSourceRoot = await io.realpath(src);
-	await io.mkdir(path.dirname(dst), { recursive: true });
-	await walkTree(src, async (entry) => {
+	const sourceRoot = path.resolve(src);
+	const destinationRoot = path.resolve(dst);
+
+	// Classify the root before deriving its canonical containment path and retain
+	// its inode where the filesystem exposes one. Every later root probe rejects
+	// symlinks and, when possible, an identity-changing replacement.
+	const sourceStats = await io.lstat(sourceRoot);
+	if (!sourceStats.isDirectory() || sourceStats.isSymbolicLink()) {
+		throw new PreviewMountError(500, "Preview copy source is not a directory");
+	}
+	const canonicalSourceRoot = await io.realpath(sourceRoot);
+	const verifiedSourceStats = await io.lstat(sourceRoot);
+	if (!matchesDirectoryIdentity(sourceStats, verifiedSourceStats)) {
+		throw new PreviewMountError(500, "Preview copy source changed while it was validated");
+	}
+
+	const checkedLstat = async (filePath: string): Promise<fs.Stats> => {
+		const stats = await io.lstat(filePath);
+		if (path.resolve(filePath) === sourceRoot && !matchesDirectoryIdentity(sourceStats, stats)) {
+			throw new PreviewMountError(500, "Preview copy source changed during traversal");
+		}
+		return stats;
+	};
+
+	await io.mkdir(path.dirname(destinationRoot), { recursive: true });
+	await walkTree(sourceRoot, async (entry) => {
 		const target = entry.relativePath
-			? path.join(dst, ...entry.relativePath.split("/"))
-			: dst;
+			? path.join(destinationRoot, ...entry.relativePath.split("/"))
+			: destinationRoot;
 		if (entry.kind === "directory") {
-			await io.mkdir(target, { recursive: false });
+			// Staging transfers copy into an already-created, freshly-wiped mount.
+			await io.mkdir(target, { recursive: entry.relativePath === "" });
 			return;
 		}
 		if (entry.kind !== "file") {
@@ -495,7 +536,7 @@ export async function copyPreviewDirectory(src: string, dst: string, options: Pr
 	}, {
 		concurrency: limit,
 		fs: {
-			lstat: filePath => io.lstat(filePath),
+			lstat: checkedLstat,
 			opendir: dirPath => io.opendir(dirPath),
 		},
 	});
@@ -551,52 +592,57 @@ export async function movePreviewDirectoryContents(
 	options: PreviewTreeOptions = {},
 ): Promise<void> {
 	const io = options.fs ?? mountAsyncFs;
-	let directory: fs.Dir;
-	let canonicalSourceRoot: string;
+	const claimedDir = path.join(
+		path.dirname(srcDir),
+		`.preview-claim-${process.pid}-${crypto.randomBytes(12).toString("hex")}`,
+	);
+
+	// Claim the root atomically as the first filesystem operation. rename does
+	// not follow a final-component symlink: a substitution at the caller-known
+	// staging path moves only that link to this private name, where validation
+	// rejects it before any traversal or live-mount exposure.
 	try {
-		const sourceStats = await io.lstat(srcDir);
-		if (!sourceStats.isDirectory() || sourceStats.isSymbolicLink()) return;
-		canonicalSourceRoot = await io.realpath(srcDir);
-		directory = await io.opendir(srcDir);
-	} catch { return; }
-	await io.mkdir(dstDir, { recursive: true });
-	try {
-		for (;;) {
-			const ent = await directory.read();
-			if (!ent) break;
-			const from = path.join(srcDir, ent.name);
-			const to = path.join(dstDir, ent.name);
-			const current = await io.lstat(from);
-			if ((!current.isDirectory() && !current.isFile()) || current.isSymbolicLink()) {
-				throw new PreviewMountError(500, "Preview staging contains an unsupported filesystem entry");
-			}
-			try {
-				await io.rename(from, to);
-				const moved = await io.lstat(to);
-				if (moved.isSymbolicLink() || moved.isDirectory() !== current.isDirectory() || moved.isFile() !== current.isFile()) {
-					await removePreviewTree(to, { fs: io, concurrency: options.concurrency });
-					throw new PreviewMountError(500, "Preview staging changed while it was moved");
-				}
-			} catch (renameError) {
-				if (renameError instanceof PreviewMountError) throw renameError;
-				await removePreviewTree(to, { fs: io, concurrency: options.concurrency });
-				const fallbackStats = await io.lstat(from);
-				if (fallbackStats.isSymbolicLink()) {
-					throw new PreviewMountError(500, "Preview staging contains an unsupported filesystem entry");
-				}
-				if (fallbackStats.isDirectory()) {
-					await copyPreviewDirectory(from, to, { fs: io, concurrency: options.concurrency });
-				} else if (fallbackStats.isFile()) {
-					await copyOneFile(from, to, canonicalSourceRoot, io);
-				} else {
-					throw new PreviewMountError(500, "Preview staging contains an unsupported filesystem entry");
-				}
-				await removePreviewTree(from, { fs: io, concurrency: options.concurrency });
-			}
-		}
-	} finally {
-		try { await directory.close(); } catch { /* read failure may already close the handle */ }
+		await io.rename(srcDir, claimedDir);
+	} catch (error) {
+		if (isEnoent(error)) return;
+		throw error;
 	}
+
+	let claimedStats: fs.Stats | undefined;
+	let copyError: unknown;
+	try {
+		claimedStats = await io.lstat(claimedDir);
+		if (!claimedStats.isDirectory() || claimedStats.isSymbolicLink()) {
+			throw new PreviewMountError(500, "Preview staging root is not a directory");
+		}
+		// Never rename children out of a staging pathname after awaiting its
+		// validation. Copy regular files through validated descriptors instead.
+		await copyPreviewDirectory(claimedDir, dstDir, {
+			fs: io,
+			concurrency: options.concurrency,
+		});
+	} catch (error) {
+		copyError = error;
+	}
+
+	try {
+		const currentStats = await io.lstat(claimedDir);
+		if (!currentStats.isDirectory() || currentStats.isSymbolicLink()) {
+			// unlink removes a substituted link or non-directory entry itself; it
+			// never traverses an external target.
+			try { await io.unlink(claimedDir); }
+			catch (error) { if (!isEnoent(error)) throw error; }
+		} else if (!claimedStats || !matchesDirectoryIdentity(claimedStats, currentStats)) {
+			// Never recursively remove an unexpected real directory that replaced
+			// the claimed staging inode while the copy was pending.
+			throw new PreviewMountError(500, "Preview staging root changed before cleanup");
+		} else {
+			await removePreviewTree(claimedDir, { fs: io, concurrency: options.concurrency });
+		}
+	} catch (cleanupError) {
+		if (!isEnoent(cleanupError) && copyError === undefined) throw cleanupError;
+	}
+	if (copyError !== undefined) throw copyError;
 }
 
 async function copyOneFile(
