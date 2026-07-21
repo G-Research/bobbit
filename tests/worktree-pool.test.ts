@@ -825,7 +825,56 @@ describe("WorktreePool — drain() stops and settles background work (teardown r
 		}
 	});
 
-	it("stop() waits for a foreground claim mutation", async () => {
+	it("failed initialization keeps claims fenced until path resolution retries successfully", async () => {
+		const firstResolution = deferred<string>();
+		const repoPath = path.resolve("virtual-pool-repo");
+		const worktreePath = path.resolve("virtual-pool-wt", "pool-_pool-retry");
+		let resolutionAttempts = 0;
+		const mutationCommands: string[][] = [];
+		const commandRunner: CommandRunner = {
+			execFile: async (_file, args) => {
+				if ((args[0] === "branch" && args[1] === "-m") || (args[0] === "worktree" && args[1] === "move")) {
+					mutationCommands.push([...args]);
+				}
+				return { stdout: "", stderr: "" };
+			},
+		};
+		const pool = new WorktreePool({
+			repoPath,
+			targetSize: 0,
+			commandRunner,
+			remotePolicy: { skipNonLocalRemoteGit: true },
+			resolveRepoToplevelImpl: async () => {
+				resolutionAttempts++;
+				if (resolutionAttempts === 1) return await firstResolution.promise;
+				return repoPath;
+			},
+		});
+		pool.registerExternalEntry("pool/_pool-retry", worktreePath);
+
+		const initializing = pool.initialize();
+		assert.equal(resolutionAttempts, 1);
+		assert.equal(await pool.claim("session/during-init"), null, "claim must use the cold fallback while initialization is pending");
+		assert.deepEqual(mutationCommands, [], "a fenced claim must not rename a branch or move a worktree");
+
+		firstResolution.reject(new Error("first path resolution failed"));
+		await assert.rejects(initializing, /first path resolution failed/);
+		assert.equal(await pool.claim("session/after-failure"), null, "claim must remain fenced after the failed attempt settles");
+		assert.deepEqual(mutationCommands, [], "the failed-attempt gap must execute no claim mutations");
+
+		await pool.initialize();
+		assert.equal(resolutionAttempts, 2, "explicit initialize must retry a rejected path resolution");
+		const claimed = await pool.claim("session/after-retry");
+		assert.ok(claimed, "a successful retry should expose the registered entry");
+		assert.deepEqual(
+			mutationCommands.map(args => args.slice(0, 2)),
+			[["branch", "-m"], ["worktree", "move"]],
+			"claim mutations should begin only after initialization succeeds",
+		);
+		await pool.stop();
+	});
+
+	it("claim before the first initialize attempt remains compatible and stop() waits for it", async () => {
 		const branchRename = deferred<ExecFileResult>();
 		let branchRenameStarted = false;
 		const commandRunner: CommandRunner = {
@@ -840,6 +889,8 @@ describe("WorktreePool — drain() stops and settles background work (teardown r
 		const pool = new WorktreePool({ repoPath: path.resolve("virtual-pool-repo"), targetSize: 0, commandRunner });
 		pool.registerExternalEntry("pool/_pool-deferred", path.resolve("virtual-pool-wt", "pool-_pool-deferred"));
 
+		// No initialize() call: boot sweepers historically registered ready entries
+		// before pool initialization existed, and that explicit compatibility stays.
 		const claiming = pool.claim("session/deferred1");
 		assert.equal(branchRenameStarted, true, "claim should reach the deferred Git mutation");
 		let stopSettled = false;

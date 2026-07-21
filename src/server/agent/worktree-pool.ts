@@ -145,6 +145,7 @@ export interface WorktreePoolOptions {
 	worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string };
 	fsImpl?: WorktreePoolFs;
 	cleanupWorktreeImpl?: typeof cleanupWorktree;
+	resolveRepoToplevelImpl?: (repoPath: string, commandRunner: CommandRunner) => Promise<string>;
 }
 
 /** Whether a branch name belongs to a pool entry (current or legacy form). */
@@ -270,8 +271,10 @@ export class WorktreePool {
 	private commandRunner: CommandRunner;
 	private readonly fsImpl: WorktreePoolFs;
 	private readonly cleanupWorktreeImpl: typeof cleanupWorktree;
+	private readonly resolveRepoToplevelImpl: (repoPath: string, commandRunner: CommandRunner) => Promise<string>;
 	private pathsResolved = false;
 	private pathsResolution?: Promise<void>;
+	private initializationStarted = false;
 	private initialized = false;
 	private initialization?: Promise<void>;
 
@@ -327,6 +330,7 @@ export class WorktreePool {
 		this.worktreeSetupRuntime = opts.worktreeSetupRuntime ?? {};
 		this.fsImpl = opts.fsImpl ?? realWorktreePoolFs;
 		this.cleanupWorktreeImpl = opts.cleanupWorktreeImpl ?? cleanupWorktree;
+		this.resolveRepoToplevelImpl = opts.resolveRepoToplevelImpl ?? resolveRepoToplevel;
 	}
 
 	private execGit(args: readonly string[], options?: any): Promise<{ stdout: string; stderr: string }> {
@@ -376,8 +380,8 @@ export class WorktreePool {
 		if (this.pathsResolved) return Promise.resolve();
 		if (this.pathsResolution) return this.pathsResolution;
 
-		this.pathsResolution = (async () => {
-			const resolvedRepoPath = await resolveRepoToplevel(this.inputRepoPath, this.commandRunner);
+		const operation = (async () => {
+			const resolvedRepoPath = await this.resolveRepoToplevelImpl(this.inputRepoPath, this.commandRunner);
 			this.repoPath = resolvedRepoPath;
 			// Resolve a relative override once against the registered project root,
 			// never against the discovered/component repo path. Passing this absolute
@@ -389,7 +393,17 @@ export class WorktreePool {
 			});
 			this.pathsResolved = true;
 		})();
-		return this.pathsResolution;
+		let resolution: Promise<void>;
+		resolution = operation.catch((error) => {
+			// A transient resolver failure must not poison every explicit initialize()
+			// retry with the same cached rejection.
+			if (!this.pathsResolved && this.pathsResolution === resolution) {
+				this.pathsResolution = undefined;
+			}
+			throw error;
+		});
+		this.pathsResolution = resolution;
+		return resolution;
 	}
 
 	/**
@@ -405,6 +419,10 @@ export class WorktreePool {
 		}
 		if (this.initialization) return this.initialization;
 
+		// Once boot initialization has ever begun, legacy registered entries stay
+		// hidden through both the in-flight window and any failed-attempt gap. Only
+		// a successful explicit retry may expose them again.
+		this.initializationStarted = true;
 		const operation = (async () => {
 			await this.resolveRepositoryPaths();
 			await this.reclaimOrphaned(activeWorktreePaths);
@@ -517,8 +535,8 @@ export class WorktreePool {
 		// Initialization owns repo-root discovery and orphan selection. Do not let
 		// a concurrent request observe a partially reclaimed pool; it takes the
 		// existing cold createWorktree fallback instead. Explicit legacy entries
-		// registered before initialization remain claimable for compatibility.
-		if (this.stopped || (!this.initialized && this.initialization)) return null;
+		// remain claimable only before the first initialization attempt begins.
+		if (this.stopped || (this.initializationStarted && !this.initialized)) return null;
 
 		const diagEnabled = cpuDiagnosticsEnabled();
 		const diagStart = diagEnabled ? performance.now() : 0;
