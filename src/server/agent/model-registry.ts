@@ -24,6 +24,18 @@ import { getOpenAIModelAdditions } from "./openai-model-additions.js";
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
 import { GOOGLE_GEMINI_CLI_PROVIDER, hasGoogleCodeAssistSpawnCredential } from "./google-code-assist.js";
 
+// These Pi providers require credential/runtime integration Bobbit does not yet
+// forward to host or sandbox agents. Keep the denylist provider-scoped so future
+// catalog additions cannot accidentally make their models selectable.
+const UPSTREAM_ONLY_BUILTIN_PROVIDERS = new Set([
+	"qwen-token-plan",
+	"qwen-token-plan-cn",
+]);
+
+function getBobbitBuiltInProviders(): ReturnType<typeof getBuiltinProviders> {
+	return getBuiltinProviders().filter((provider) => !UPSTREAM_ONLY_BUILTIN_PROVIDERS.has(String(provider)));
+}
+
 // ── Types ──────────────────────────────────────────────────────────
 
 export interface ApiModel {
@@ -198,7 +210,7 @@ export function resolveModelStateMeta(provider: string | undefined, modelId: str
  * Results are cached for 5 seconds.
  */
 export function getBuiltInProviderIds(): string[] {
-	return getBuiltinProviders().map((provider) => String(provider));
+	return getBobbitBuiltInProviders().map((provider) => String(provider));
 }
 
 export async function getAvailableModels(prefs: PreferencesStore): Promise<ApiModel[]> {
@@ -267,7 +279,7 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 	if (!aigwExclusive) {
 		// 1. Built-in providers from pi-ai
 		try {
-			const providers = getBuiltinProviders();
+			const providers = getBobbitBuiltInProviders();
 			for (const providerId of providers) {
 				const models = getBuiltinModels(providerId as any);
 				const isAuth = detectProviderAuth(providerId as string, prefs);

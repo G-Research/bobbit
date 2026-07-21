@@ -18,7 +18,7 @@ const stateDir = path.resolve("/memfs/models-test");
 
 // Import after setup
 const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
-const { getAvailableModels } = await import("../../src/server/agent/model-registry.ts");
+const { getAvailableModels, getBuiltInProviderIds, invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
 
 const prefs = new PreferencesStore(stateDir, memfs);
 
@@ -158,9 +158,34 @@ describe("Model registry", () => {
 		const bedrock = requireModel("amazon-bedrock", "xai.grok-4.3");
 		assert.equal(bedrock.api, "bedrock-converse-stream");
 		assert.equal(bedrock.contextWindow, 1_000_000);
+	});
 
-		const providers = new Set(models.map((model) => model.provider));
-		assert.ok(providers.has("qwen-token-plan"), "Pi 0.81 Qwen Token Plan catalog should be visible");
-		assert.ok(providers.has("qwen-token-plan-cn"), "Pi 0.81 Qwen Token Plan China catalog should be visible");
+	it("keeps Qwen Token Plan providers upstream-only regardless of stored credentials", async () => {
+		const unsupportedProviders = ["qwen-token-plan", "qwen-token-plan-cn"];
+		const builtInProviderIds = new Set(getBuiltInProviderIds());
+		for (const provider of unsupportedProviders) {
+			assert.equal(builtInProviderIds.has(provider), false, `${provider} should not be exposed as a Bobbit provider`);
+		}
+
+		try {
+			for (const provider of unsupportedProviders) prefs.set(`providerKey.${provider}`, `stored-${provider}-key`);
+			invalidateModelCache();
+			const modelsWithStoredQwenKeys = await getAvailableModels(prefs);
+			for (const provider of unsupportedProviders) {
+				assert.equal(
+					modelsWithStoredQwenKeys.some((model) => model.provider === provider),
+					false,
+					`${provider} models should remain unavailable when a provider key is stored`,
+				);
+			}
+			assert.deepEqual(
+				modelsWithStoredQwenKeys,
+				models,
+				"unsupported Qwen credentials must not alter other providers or their authentication state",
+			);
+		} finally {
+			for (const provider of unsupportedProviders) prefs.remove(`providerKey.${provider}`);
+			invalidateModelCache();
+		}
 	});
 });
