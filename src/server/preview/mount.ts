@@ -21,7 +21,6 @@ import {
 	copyRegularFileNoFollow,
 	hasStableFileIdentity,
 	mapWithConcurrency,
-	openRegularFileNoFollow,
 	readRegularFileNoFollowInChunks,
 	RECOVERY_IO_CONCURRENCY,
 	sameFileIdentity,
@@ -261,9 +260,17 @@ export async function mountFile(
 	const tmpRoot = path.join(previewRoot(), tmpName);
 	await mountAsyncFs.mkdir(tmpRoot, { recursive: true });
 	let stagingExpectedRootStats: fs.Stats | undefined;
+	let stagingBound: BoundPreviewDirectoryRoot;
 	try {
 		stagingExpectedRootStats = await mountAsyncFs.lstat(tmpRoot);
 		assertStablePreviewDirectory(stagingExpectedRootStats, "Preview staging root");
+		stagingBound = await bindPreviewDirectoryRoot(tmpRoot, {
+			fs: mountAsyncFs,
+			trustedRoot: previewRoot(),
+		});
+		if (!matchesDirectoryIdentity(stagingExpectedRootStats, stagingBound.stats)) {
+			throw new PreviewMountError(500, "Preview staging root changed while it was bound");
+		}
 	} catch (error) {
 		// A filesystem without stable directory identity cannot participate in an
 		// atomic install. The live mount has not been fenced or mutated yet. A
@@ -273,8 +280,15 @@ export async function mountFile(
 	}
 
 	const resolvedAssets = new Set<string>();
+	const copiedDestinations = new Set<string>();
+	const copyIntoStaging = async (source: string, destination: string): Promise<void> => {
+		const key = previewInstallKey(destination);
+		if (copiedDestinations.has(key)) return;
+		await copyOneFile(source, destination, srcRoot, stagingBound);
+		copiedDestinations.add(key);
+	};
 	try {
-		await copyOneFile(entryReal, path.join(tmpRoot, entry), srcRoot);
+		await copyIntoStaging(entryReal, path.join(tmpRoot, entry));
 		for (const spec of specs) {
 			if (isGlob(spec)) {
 				const matches = await expandGlob(srcRoot, spec);
@@ -287,8 +301,9 @@ export async function mountFile(
 					try { st = await mountAsyncFs.stat(real); } catch { continue; }
 					if (!st.isFile()) continue;
 					const dst = path.join(tmpRoot, rel);
-					await mountAsyncFs.mkdir(path.dirname(dst), { recursive: true });
-					await copyOneFile(real, dst, srcRoot);
+					await stagingBound.fs.mkdir(path.dirname(dst), { recursive: true });
+					await stagingBound.assertCurrent();
+					await copyIntoStaging(real, dst);
 					resolvedAssets.add(rel.split(path.sep).join("/"));
 				}
 			} else {
@@ -304,8 +319,9 @@ export async function mountFile(
 				catch { throw new PreviewMountError(404, `Asset '${rel}' not found`); }
 				if (!st.isFile()) throw new PreviewMountError(404, `Asset '${rel}' is not a regular file`);
 				const dst = path.join(tmpRoot, rel);
-				await mountAsyncFs.mkdir(path.dirname(dst), { recursive: true });
-				await copyOneFile(real, dst, srcRoot);
+				await stagingBound.fs.mkdir(path.dirname(dst), { recursive: true });
+				await stagingBound.assertCurrent();
+				await copyIntoStaging(real, dst);
 				resolvedAssets.add(rel);
 			}
 		}
@@ -730,35 +746,49 @@ export async function copyPreviewDirectory(src: string, dst: string, options: Pr
 	});
 
 	await io.mkdir(path.dirname(destinationRoot), { recursive: true });
+	await io.mkdir(destinationRoot, { recursive: true });
+	const destinationBound = await bindPreviewDirectoryRoot(destinationRoot, { fs: io });
+	const assertTransferRootsCurrent = async (): Promise<void> => {
+		await bound.assertCurrent();
+		await destinationBound.assertCurrent();
+	};
+	const transferFs = guardPreviewSourceFs(bound.fs, assertTransferRootsCurrent);
 	await walkTree(sourceRoot, async (entry) => {
 		const target = entry.relativePath
 			? path.join(destinationRoot, ...entry.relativePath.split("/"))
 			: destinationRoot;
 		if (entry.kind === "directory") {
-			// Staging transfers copy into an already-created, freshly-wiped mount.
-			await io.mkdir(target, { recursive: entry.relativePath === "" });
+			if (entry.relativePath) {
+				await assertTransferRootsCurrent();
+				await transferFs.mkdir(target, { recursive: false });
+				await assertTransferRootsCurrent();
+			}
 			return;
 		}
 		if (entry.kind !== "file") {
 			if (!entry.relativePath) throw new Error("Preview copy source is not a directory");
 			return;
 		}
-		// Open and validate the source descriptor after traversal. The pathname is
-		// never read again, so a final-component symlink substitution cannot leak.
-		await bound.assertCurrent();
+		// Validate both descriptor-anchored endpoints and both bound roots before
+		// the first source byte can be read or written.
+		await assertTransferRootsCurrent();
 		const current = await copyRegularFileNoFollow(entry.absolutePath, target, {
-			fs: bound.fs,
+			fs: transferFs,
 			exclusive: true,
 			chunkSize: HASH_READ_BUFFER_BYTES,
 			containedWithin: bound.canonicalPath,
 			expectedStats: entry.stats,
+			destinationContainedWithin: destinationBound.canonicalPath,
+			destinationRoot: destinationBound.path,
+			expectedDestinationRootStats: destinationBound.stats,
 		});
-		await bound.assertCurrent();
-		if (current.atime && current.mtime) await io.utimes(target, current.atime, current.mtime);
+		await assertTransferRootsCurrent();
+		if (current.atime && current.mtime) await transferFs.utimes(target, current.atime, current.mtime);
 	}, {
 		concurrency: limit,
 		fs: traversalFs,
 	});
+	await assertTransferRootsCurrent();
 }
 
 /**
@@ -912,10 +942,15 @@ export interface QuarantinedPreviewDirectory {
 	stats: fs.Stats;
 }
 
+export interface QuarantinePreviewDirectoryOptions extends Pick<PreviewTreeOptions, "fs"> {
+	/** Internal transaction hook invoked immediately after the live rename. */
+	onRename?: () => void;
+}
+
 /** Remove an unknown live root from its serving pathname by rename only. */
 export async function quarantinePreviewDirectory(
 	directory: string,
-	options: Pick<PreviewTreeOptions, "fs"> = {},
+	options: QuarantinePreviewDirectoryOptions = {},
 ): Promise<QuarantinedPreviewDirectory | null> {
 	const io = options.fs ?? mountAsyncFs;
 	const root = path.resolve(directory);
@@ -939,12 +974,10 @@ export async function quarantinePreviewDirectory(
 		await parentBound.assertCurrent();
 		return null;
 	}
+	options.onRename?.();
 	try {
 		await parentBound.assertCurrent();
 		const stats = await io.lstat(quarantine);
-		if (!hasStableFileIdentity(stats)) {
-			throw new PreviewMountError(500, "Quarantined preview root has no stable identity");
-		}
 		await parentBound.assertCurrent();
 		return { path: quarantine, stats };
 	} catch (error) {
@@ -987,8 +1020,12 @@ function finishPreviewInstall(install: { key: string; token: symbol }): void {
 	if (tokens?.size === 0) activePreviewInstalls.delete(install.key);
 }
 
+function isStablePreviewDirectory(stats: AsyncTreeStats): boolean {
+	return stats.isDirectory() && !stats.isSymbolicLink() && hasStableFileIdentity(stats);
+}
+
 function assertStablePreviewDirectory(stats: AsyncTreeStats, label: string): void {
-	if (!stats.isDirectory() || stats.isSymbolicLink() || !hasStableFileIdentity(stats)) {
+	if (!isStablePreviewDirectory(stats)) {
 		throw new PreviewMountError(500, `${label} is not a stable directory`);
 	}
 }
@@ -1019,8 +1056,19 @@ async function cleanupOwnedPreviewDirectory(
 	label: string,
 ): Promise<void> {
 	await runOwnedPreviewCleanup(async () => {
+		if (!isStablePreviewDirectory(detached.stats)) {
+			// Node exposes no identity-bound unlinkat operation. The serving pathname
+			// is already repaired; preserve and name this detached non-directory or
+			// unstable identity rather than risk unlinking a raced replacement.
+			console.error(`[preview/mount] preserving ${label} at ${detached.path}: detached root is not a stable directory`);
+			return;
+		}
 		try {
 			await withPreviewDirectoryUnavailable(detached.path, async () => {
+				const current = await io.lstat(detached.path);
+				if (!hasStableFileIdentity(current) || !sameFileIdentity(detached.stats, current)) {
+					throw new PreviewMountError(500, "Detached preview identity changed before cleanup");
+				}
 				await removePreviewTree(detached.path, { fs: io, expectedRootStats: detached.stats });
 				await assertPreviewDirectoryAbsent(detached.path, io);
 				markPreviewDirectoryVerified(detached.path);
@@ -1036,6 +1084,8 @@ export interface MovePreviewDirectoryOptions extends PreviewTreeOptions {
 	expectedRootStats: AsyncTreeStats;
 	/** Internal transaction escape hatch: destination fence is already held. */
 	alreadyFenced?: boolean;
+	/** Internal transaction hook invoked immediately after the root rename. */
+	onRename?: () => void;
 }
 
 async function movePreviewDirectoryContentsCore(
@@ -1075,6 +1125,7 @@ async function movePreviewDirectoryContentsCore(
 	}
 	await parentBound.assertCurrent();
 	await io.rename(sourceRoot, destinationRoot);
+	options.onRename?.();
 	await parentBound.assertCurrent();
 	let installedStats: fs.Stats;
 	try { installedStats = await io.lstat(destinationRoot); }
@@ -1086,8 +1137,12 @@ async function movePreviewDirectoryContentsCore(
 		|| !matchesDirectoryIdentity(options.expectedRootStats, installedStats)) {
 		// The installed pathname is now untrusted. Detach it with one whole-root
 		// rename, but never recursively inspect or delete that unknown identity.
-		try { await quarantinePreviewDirectory(destinationRoot, { fs: io }); }
-		catch (error) {
+		try {
+			const quarantined = await quarantinePreviewDirectory(destinationRoot, { fs: io });
+			if (quarantined) {
+				console.error(`[preview/mount] mismatched preview install preserved at ${quarantined.path}`);
+			}
+		} catch (error) {
 			console.error("[preview/mount] failed to detach preview install with mismatched identity", error);
 		}
 		throw new PreviewMountError(500, "Preview install identity verification failed");
@@ -1198,35 +1253,41 @@ export async function installPreviewDirectoryTransaction(
 	let backupStats: fs.Stats | undefined;
 	let backupHash: string | undefined;
 	let backupReady = false;
-	let liveMutationAttempted = false;
+	let fenceWasBlocked = false;
+	let liveRenameOccurred = false;
+	let originalLiveStats: fs.Stats | undefined;
+	let originalLiveWasAbsent = false;
 	let installed: InstalledPreviewDirectory | undefined;
+	const noteLiveRename = (): void => { liveRenameOccurred = true; };
 
 	await withPreviewDirectoryUnavailable(destinationRoot, async fence => {
-		// Close the final preflight-to-mutation gap while holding the same-key
-		// writer fence. Failure here leaves the old live root untouched and blocked.
-		await stagedBound.assertCurrent();
-		const currentStaging = await io.lstat(stagingRoot);
-		if (!matchesDirectoryIdentity(options.stagingExpectedRootStats, currentStaging)) {
-			throw new PreviewMountError(500, "Preview staging root changed before live mutation");
-		}
-
+		fenceWasBlocked = fence.wasBlocked;
 		try {
-			let oldStats: fs.Stats | undefined;
 			try {
-				oldStats = await io.lstat(destinationRoot);
+				originalLiveStats = await io.lstat(destinationRoot);
 			} catch (error) {
 				if (!isEnoent(error)) throw error;
+				originalLiveWasAbsent = true;
 			}
-			if (oldStats !== undefined) {
-				assertStablePreviewDirectory(oldStats, "Existing live preview root");
-				if (fence.wasBlocked) {
-					// Never traverse a root left unverified by a failed writer. Claim its
-					// no-follow identity, detach it first, then hash only the renamed root.
-					liveMutationAttempted = true;
-					const detached = await quarantinePreviewDirectory(destinationRoot, { fs: io });
-					if (!detached || !matchesDirectoryIdentity(oldStats, detached.stats)) {
-						throw new PreviewMountError(500, "Blocked live preview identity changed during detach");
-					}
+
+			// Close the final preflight-to-mutation gap while holding the same-key
+			// writer fence. These checks must not strand a previously verified root.
+			await stagedBound.assertCurrent();
+			const currentStaging = await io.lstat(stagingRoot);
+			if (!matchesDirectoryIdentity(options.stagingExpectedRootStats, currentStaging)) {
+				throw new PreviewMountError(500, "Preview staging root changed before live mutation");
+			}
+
+			if (fence.wasBlocked) {
+				// A blocked pathname is untrusted regardless of its current type. Rename
+				// the entry itself first; only the detached post-rename identity can
+				// authorize hashing or rollback.
+				const detached = await quarantinePreviewDirectory(destinationRoot, {
+					fs: io,
+					onRename: noteLiveRename,
+				});
+				await assertPreviewDirectoryAbsent(destinationRoot, io);
+				if (detached && isStablePreviewDirectory(detached.stats)) {
 					backupDir = detached.path;
 					backupStats = detached.stats;
 					backupReady = true;
@@ -1236,55 +1297,59 @@ export async function installPreviewDirectoryTransaction(
 						expectedRootStats: backupStats,
 					});
 					markPreviewDirectoryVerified(backupDir);
-				} else {
-					const oldBound = await bindPreviewDirectoryRoot(destinationRoot, { fs: io, trustedRoot: parent });
-					if (!matchesDirectoryIdentity(oldStats, oldBound.stats)) {
-						throw new PreviewMountError(500, "Existing live preview root changed before backup");
-					}
-					backupHash = await hashMountDirectory(destinationRoot, {
-						fs: oldBound.fs,
-						trustedRoot: parent,
-						expectedRootStats: oldStats,
-					});
-					await stagedBound.assertCurrent();
-					await oldBound.assertCurrent();
-					backupDir = path.join(parent, `.preview-backup-${process.pid}-${crypto.randomBytes(12).toString("hex")}`);
-					liveMutationAttempted = true;
-					try {
-						backupStats = await movePreviewDirectoryContents(destinationRoot, backupDir, {
-							fs: io,
-							expectedRootStats: oldStats,
-						});
-						backupReady = true;
-					} catch (error) {
-						// A post-rename failure may still have moved the exact old inode. Claim
-						// it only by identity so rollback can recover it.
-						const moved = await currentMatchingStats(backupDir, oldStats, io);
-						if (moved) {
-							backupStats = moved;
-							backupReady = true;
-						} else if (await currentMatchingStats(destinationRoot, oldStats, io)) {
-							liveMutationAttempted = false;
-						}
-						throw error;
-					}
-					const movedBackupHash = await hashMountDirectory(backupDir, {
-						fs: io,
-						trustedRoot: parent,
-						expectedRootStats: backupStats,
-					});
-					if (movedBackupHash !== backupHash) {
-						throw new PreviewMountError(500, "Preview backup content changed during detach");
-					}
-					markPreviewDirectoryVerified(backupDir);
+				} else if (detached) {
+					// Non-directories and identity-unstable roots are never traversed or
+					// restored. Consume the quarantine as a detached cleanup owner.
+					await cleanupOwnedPreviewDirectory(detached, io, "blocked preview replacement");
 				}
+			} else if (originalLiveStats !== undefined) {
+				const oldStats = originalLiveStats;
+				assertStablePreviewDirectory(oldStats, "Existing live preview root");
+				const oldBound = await bindPreviewDirectoryRoot(destinationRoot, { fs: io, trustedRoot: parent });
+				if (!matchesDirectoryIdentity(oldStats, oldBound.stats)) {
+					throw new PreviewMountError(500, "Existing live preview root changed before backup");
+				}
+				backupHash = await hashMountDirectory(destinationRoot, {
+					fs: oldBound.fs,
+					trustedRoot: parent,
+					expectedRootStats: oldStats,
+				});
+				await stagedBound.assertCurrent();
+				await oldBound.assertCurrent();
+				backupDir = path.join(parent, `.preview-backup-${process.pid}-${crypto.randomBytes(12).toString("hex")}`);
+				try {
+					backupStats = await movePreviewDirectoryContents(destinationRoot, backupDir, {
+						fs: io,
+						expectedRootStats: oldStats,
+						onRename: noteLiveRename,
+					});
+					backupReady = true;
+				} catch (error) {
+					// A post-rename failure may still have moved the exact old inode. Claim
+					// it only by identity so rollback can recover it.
+					const moved = await currentMatchingStats(backupDir, oldStats, io);
+					if (moved) {
+						backupStats = moved;
+						backupReady = true;
+					}
+					throw error;
+				}
+				const movedBackupHash = await hashMountDirectory(backupDir, {
+					fs: io,
+					trustedRoot: parent,
+					expectedRootStats: backupStats,
+				});
+				if (movedBackupHash !== backupHash) {
+					throw new PreviewMountError(500, "Preview backup content changed during detach");
+				}
+				markPreviewDirectoryVerified(backupDir);
 			}
 
-			liveMutationAttempted = true;
 			await movePreviewDirectoryContents(stagingRoot, destinationRoot, {
 				fs: io,
 				expectedRootStats: options.stagingExpectedRootStats,
 				alreadyFenced: true,
+				onRename: noteLiveRename,
 			});
 			const entryStats = await regularPreviewEntryStats(destinationRoot, options.entry, io);
 			const installedHash = await hashMountDirectory(destinationRoot, {
@@ -1299,8 +1364,24 @@ export async function installPreviewDirectoryTransaction(
 			markPreviewDirectoryVerified(destinationRoot);
 			installed = { entryStats, contentHash: installedHash };
 		} catch (operationError) {
+			// The fence itself is not a mutation. If this path was available before
+			// entry and its exact original root (or verified absence) still remains,
+			// explicitly republish it after any preflight/hash/identity failure.
+			if (!fenceWasBlocked && !liveRenameOccurred) {
+				try {
+					if (originalLiveStats !== undefined) {
+						if (await currentMatchingStats(destinationRoot, originalLiveStats, io)) {
+							markPreviewDirectoryVerified(destinationRoot);
+						}
+					} else if (originalLiveWasAbsent) {
+						await assertPreviewDirectoryAbsent(destinationRoot, io);
+						markPreviewDirectoryVerified(destinationRoot);
+					}
+				} catch { /* retain the operation error and leave an uncertain path blocked */ }
+			}
+
 			let failedLive: QuarantinedPreviewDirectory | null = null;
-			if (liveMutationAttempted) {
+			if (liveRenameOccurred) {
 				try { failedLive = await quarantinePreviewDirectory(destinationRoot, { fs: io }); }
 				catch (error) {
 					console.error("[preview/mount] failed to detach invalid live preview before rollback", error);
@@ -1313,6 +1394,7 @@ export async function installPreviewDirectoryTransaction(
 						fs: io,
 						expectedRootStats: backupStats,
 						alreadyFenced: true,
+						onRename: noteLiveRename,
 					});
 					if (backupHash !== undefined) {
 						const restoredHash = await hashMountDirectory(destinationRoot, {
@@ -1336,7 +1418,11 @@ export async function installPreviewDirectoryTransaction(
 					try {
 						if (!(await currentMatchingStats(backupDir, backupStats, io))) {
 							const preserved = await quarantinePreviewDirectory(destinationRoot, { fs: io });
-							if (preserved && matchesDirectoryIdentity(backupStats, preserved.stats)) preservedPath = preserved.path;
+							if (preserved && matchesDirectoryIdentity(backupStats, preserved.stats)) {
+								preservedPath = preserved.path;
+							} else if (preserved) {
+								console.error(`[preview/mount] mismatched rollback quarantine preserved at ${preserved.path}`);
+							}
 						}
 					} catch { /* retain the original rollback error and backup path */ }
 					console.error(
@@ -1346,8 +1432,12 @@ export async function installPreviewDirectoryTransaction(
 				}
 			}
 
-			if (failedLive && matchesDirectoryIdentity(options.stagingExpectedRootStats, failedLive.stats)) {
-				await cleanupOwnedPreviewDirectory(failedLive, io, "failed preview install");
+			if (failedLive) {
+				if (matchesDirectoryIdentity(options.stagingExpectedRootStats, failedLive.stats)) {
+					await cleanupOwnedPreviewDirectory(failedLive, io, "failed preview install");
+				} else {
+					console.error(`[preview/mount] mismatched failed preview preserved at ${failedLive.path}`);
+				}
 			}
 			throw operationError;
 		}
@@ -1368,84 +1458,22 @@ async function copyOneFile(
 	src: string,
 	dst: string,
 	canonicalSourceRoot: string,
-	io = mountAsyncFs,
+	destinationBound: BoundPreviewDirectoryRoot,
 ): Promise<void> {
-	let opened: Awaited<ReturnType<typeof openRegularFileNoFollow>>;
-	try { opened = await openRegularFileNoFollow(src, io, canonicalSourceRoot); }
-	catch (error) { throw new PreviewMountError(500, `Copy failed: ${(error as Error).message}`); }
-
-	try { await io.unlink(dst); }
-	catch (error) {
-		if (!isEnoent(error)) {
-			try { await opened.handle.close(); } catch { /* preserve the unlink error */ }
-			throw error;
-		}
-	}
-
-	// Retain the same-filesystem hardlink fast path only when its result can be
-	// proven to refer to the descriptor validated above. Otherwise stream-copy.
-	let linkError: unknown;
-	if (hasStableFileIdentity(opened.stats)) {
-		try { await io.link(src, dst); }
-		catch (error) { linkError = error; }
-	} else {
-		linkError = new Error("source filesystem has no stable file identity");
-	}
-
-	if (linkError === undefined) {
-		let validationError: unknown;
-		let identityMatches = false;
-		try {
-			const copiedStats = await io.lstat(dst);
-			if (!copiedStats.isFile() || copiedStats.isSymbolicLink()) {
-				throw new PreviewMountError(500, "Copy destination does not match the opened source file");
-			}
-			identityMatches = sameFileIdentity(opened.stats, copiedStats);
-		} catch (error) {
-			validationError = error;
-		}
-
-		let closeError: unknown;
-		try { await opened.handle.close(); }
-		catch (error) { closeError = error; }
-		if (validationError !== undefined) {
-			try { await io.unlink(dst); } catch { /* preserve the validation error */ }
-			throw validationError;
-		}
-		if (closeError !== undefined) {
-			try { await io.unlink(dst); } catch { /* preserve the close error */ }
-			throw closeError;
-		}
-		if (identityMatches) return;
-
-		// The pathname may have been atomically replaced between opening it and
-		// linking it. Remove the wrong inode and safely reopen the current source
-		// through the same descriptor-anchored fallback used for EXDEV.
-		try { await io.unlink(dst); }
-		catch (error) { if (!isEnoent(error)) throw error; }
-	} else {
-		try { await opened.handle.close(); }
-		catch (error) { throw new PreviewMountError(500, `Copy failed: ${(error as Error).message}`); }
-	}
 	try {
+		await destinationBound.assertCurrent();
 		await copyRegularFileNoFollow(src, dst, {
-			fs: io,
+			fs: destinationBound.fs,
 			exclusive: true,
 			chunkSize: HASH_READ_BUFFER_BYTES,
 			containedWithin: canonicalSourceRoot,
+			destinationContainedWithin: destinationBound.canonicalPath,
+			destinationRoot: destinationBound.path,
+			expectedDestinationRootStats: destinationBound.stats,
 		});
+		await destinationBound.assertCurrent();
 	} catch (error) {
 		throw new PreviewMountError(500, `Copy failed: ${(error as Error).message}`);
-	}
-
-	try {
-		const copiedStats = await io.lstat(dst);
-		if (!copiedStats.isFile() || copiedStats.isSymbolicLink()) {
-			throw new PreviewMountError(500, "Copy destination is not a regular file");
-		}
-	} catch (error) {
-		try { await io.unlink(dst); } catch { /* preserve the validation error */ }
-		throw error;
 	}
 }
 

@@ -2,11 +2,11 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1136,
+  "censusTotal": 1137,
   "buckets": {
     "daily": 61,
     "v2-browser": 216,
-    "v2-core": 513,
+    "v2-core": 514,
     "v2-dom": 144,
     "v2-integration": 202
   },
@@ -68,6 +68,15 @@
     {
       "path": "tests2/core/preview-install-transaction-races.test.ts",
       "reason": "Deterministic deferred regressions for source-ENOENT rollback, stable staging preflight, persistent failed-write fencing, same-key writer serialization, rename-first blocked purge, aborted stream lease release, and serialized owned-quarantine cleanup logging.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/preview-transaction-edge-cases.test.ts",
+      "reason": "Deterministic transaction regressions proving pre-mutation failures republish intact verified mounts, blocked non-directory roots detach without traversal, mismatched quarantines retain explicit cleanup ownership, rollback backups remain authoritative, and destination-ancestor swaps receive zero source bytes.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

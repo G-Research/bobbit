@@ -633,55 +633,159 @@ export interface CopyRegularFileOptions {
 	exclusive?: boolean;
 	/** Destination create mode before the source mode is applied. */
 	createMode?: number;
+	/** Canonical destination root that must contain the created file. */
+	destinationContainedWithin: string;
+	/** No-follow pathname for the bound destination root. */
+	destinationRoot: string;
+	/** Stable identity captured while binding the destination root. */
+	expectedDestinationRootStats: AsyncTreeStats;
+}
+
+async function assertCopyDestinationRootCurrent(
+	fileSystem: RegularFileCopyFs,
+	root: string,
+	canonicalRoot: string,
+	expected: AsyncTreeStats,
+): Promise<void> {
+	for (const candidate of new Set([path.resolve(root), path.resolve(canonicalRoot)])) {
+		const current = await fileSystem.lstat(candidate);
+		if (!current.isDirectory()
+			|| current.isSymbolicLink()
+			|| !hasStableFileIdentity(current)
+			|| !sameFileIdentity(expected, current)) {
+			throw new Error(`Copy destination root changed: ${root}`);
+		}
+	}
+}
+
+async function assertOpenedCopyDestinationCurrent(
+	fileSystem: RegularFileCopyFs,
+	destination: string,
+	destinationStats: AsyncTreeStats,
+	root: string,
+	canonicalRoot: string,
+	expectedRootStats: AsyncTreeStats,
+): Promise<void> {
+	await assertCopyDestinationRootCurrent(fileSystem, root, canonicalRoot, expectedRootStats);
+	const pathnameStats = await fileSystem.lstat(destination);
+	if (!pathnameStats.isFile()
+		|| pathnameStats.isSymbolicLink()
+		|| !sameFileIdentity(destinationStats, pathnameStats)) {
+		throw new Error(`Copy destination changed after open: ${destination}`);
+	}
+	const canonicalDestination = await fileSystem.realpath(destination);
+	if (!isContainedPath(canonicalDestination, canonicalRoot)) {
+		throw new Error(`Copy destination escapes its expected root: ${destination}`);
+	}
+	const canonicalStats = await fileSystem.lstat(canonicalDestination);
+	if (!canonicalStats.isFile()
+		|| canonicalStats.isSymbolicLink()
+		|| !sameFileIdentity(destinationStats, canonicalStats)) {
+		throw new Error(`Canonical destination does not match the opened regular file: ${destination}`);
+	}
+	await assertCopyDestinationRootCurrent(fileSystem, root, canonicalRoot, expectedRootStats);
 }
 
 /**
- * Copy through bounded source/destination descriptors. A failed copy removes
- * only the exclusively-created destination and always preserves the primary
- * read/write/close error over best-effort cleanup failures.
+ * Copy through bounded source/destination descriptors. The destination handle,
+ * canonical containment, and bound root identity are all validated before the
+ * first source read. Failed copies unlink only a validated owned destination.
  */
 export async function copyRegularFileNoFollow(
 	source: string,
 	destination: string,
-	options: CopyRegularFileOptions = {},
+	options: CopyRegularFileOptions,
 ): Promise<AsyncTreeStats> {
 	const fileSystem = options.fs ?? realAsyncTreeFs;
+	const destinationRoot = path.resolve(options.destinationRoot);
+	const canonicalDestinationRoot = path.resolve(options.destinationContainedWithin);
+	if (!hasStableFileIdentity(options.expectedDestinationRootStats)
+		|| !options.expectedDestinationRootStats.isDirectory()
+		|| options.expectedDestinationRootStats.isSymbolicLink()) {
+		throw new Error(`Copy destination root is not a stable directory: ${destinationRoot}`);
+	}
+	const chunkSize = options.chunkSize ?? 64 * 1024;
+	if (!Number.isInteger(chunkSize) || chunkSize <= 0) {
+		throw new RangeError("chunk size must be a positive integer");
+	}
+	if (options.exclusive === false) {
+		throw new RangeError("descriptor-anchored destination copies must be exclusive");
+	}
 	const opened = await openRegularFileNoFollow(
 		source,
 		fileSystem,
 		options.containedWithin,
 		options.expectedStats,
 	);
-	const chunkSize = options.chunkSize ?? 64 * 1024;
-	if (!Number.isInteger(chunkSize) || chunkSize <= 0) {
-		try { await opened.handle.close(); } catch { /* preserve the option error */ }
-		throw new RangeError("chunk size must be a positive integer");
-	}
 
 	let destinationHandle: AsyncTreeFileHandle | undefined;
-	let destinationCreated = false;
+	let destinationStats: AsyncTreeStats | undefined;
+	let destinationValidated = false;
 	let operationError: unknown;
 	try {
-		if (options.exclusive === false) {
-			try { await fileSystem.unlink(destination); }
-			catch (error) { if (!isMissing(error)) throw error; }
-		}
+		await assertCopyDestinationRootCurrent(
+			fileSystem,
+			destinationRoot,
+			canonicalDestinationRoot,
+			options.expectedDestinationRootStats,
+		);
 		// The string form maps to native O_CREAT|O_EXCL without baking one
 		// platform's numeric flag values into an injected/portable filesystem.
 		destinationHandle = await fileSystem.open(destination, "wx", options.createMode ?? 0o666);
-		destinationCreated = true;
+		destinationStats = await destinationHandle.stat();
+		if (!destinationStats.isFile()
+			|| destinationStats.isSymbolicLink()
+			|| !hasStableFileIdentity(destinationStats)) {
+			throw new Error(`Copy destination is not an opened stable regular file: ${destination}`);
+		}
+		await assertOpenedCopyDestinationCurrent(
+			fileSystem,
+			destination,
+			destinationStats,
+			destinationRoot,
+			canonicalDestinationRoot,
+			options.expectedDestinationRootStats,
+		);
+		destinationValidated = true;
+
 		const buffer = new Uint8Array(chunkSize);
 		let position = 0;
 		let chunksSinceYield = 0;
 		for (;;) {
+			await assertOpenedCopyDestinationCurrent(
+				fileSystem,
+				destination,
+				destinationStats,
+				destinationRoot,
+				canonicalDestinationRoot,
+				options.expectedDestinationRootStats,
+			);
 			const { bytesRead } = await opened.handle.read(buffer, 0, buffer.length, position);
 			if (bytesRead === 0) break;
+			// A destination-ancestor swap during the source read is rejected before
+			// any of the buffered source bytes can reach the destination descriptor.
+			await assertOpenedCopyDestinationCurrent(
+				fileSystem,
+				destination,
+				destinationStats,
+				destinationRoot,
+				canonicalDestinationRoot,
+				options.expectedDestinationRootStats,
+			);
 			let written = 0;
 			while (written < bytesRead) {
 				const result = await destinationHandle.write(buffer, written, bytesRead - written, position + written);
 				if (result.bytesWritten <= 0) throw new Error(`Copy made no write progress: ${destination}`);
 				written += result.bytesWritten;
 			}
+			await assertOpenedCopyDestinationCurrent(
+				fileSystem,
+				destination,
+				destinationStats,
+				destinationRoot,
+				canonicalDestinationRoot,
+				options.expectedDestinationRootStats,
+			);
 			position += bytesRead;
 			chunksSinceYield++;
 			if (chunksSinceYield >= COOPERATIVE_YIELD_INTERVAL) {
@@ -689,7 +793,17 @@ export async function copyRegularFileNoFollow(
 				await yieldToEventLoop();
 			}
 		}
-		if (opened.stats.mode !== undefined) await destinationHandle.chmod(opened.stats.mode & 0o7777);
+		if (opened.stats.mode !== undefined) {
+			await destinationHandle.chmod(opened.stats.mode & 0o7777);
+			await assertOpenedCopyDestinationCurrent(
+				fileSystem,
+				destination,
+				destinationStats,
+				destinationRoot,
+				canonicalDestinationRoot,
+				options.expectedDestinationRootStats,
+			);
+		}
 	} catch (error) {
 		operationError = error;
 	}
@@ -701,8 +815,15 @@ export async function copyRegularFileNoFollow(
 	try { await opened.handle.close(); }
 	catch (closeError) { operationError ??= closeError; }
 	if (operationError !== undefined) {
-		if (destinationCreated) {
-			try { await fileSystem.unlink(destination); } catch { /* preserve the copy error */ }
+		if (destinationValidated && destinationStats) {
+			try {
+				const current = await fileSystem.lstat(destination);
+				if (current.isFile()
+					&& !current.isSymbolicLink()
+					&& sameFileIdentity(destinationStats, current)) {
+					await fileSystem.unlink(destination);
+				}
+			} catch { /* preserve the copy error */ }
 		}
 		throw operationError;
 	}
@@ -788,14 +909,41 @@ export async function copyTree(source: string, destination: string, options: Cop
 		error.code = "ENOTSUP";
 		throw error;
 	}
+	if ((copyFileMode & fs.constants.COPYFILE_EXCL) === 0) {
+		throw new RangeError("bounded tree copies require exclusive destinations");
+	}
 	await treeFs.mkdir(path.dirname(destinationRoot), { recursive: true });
+	await treeFs.mkdir(destinationRoot, { recursive: false });
+	const destinationRootStats = await treeFs.lstat(destinationRoot);
+	if (!destinationRootStats.isDirectory()
+		|| destinationRootStats.isSymbolicLink()
+		|| !hasStableFileIdentity(destinationRootStats)) {
+		throw new Error(`Copy destination root is not a stable directory: ${destinationRoot}`);
+	}
+	const canonicalDestinationRoot = await treeFs.realpath(destinationRoot);
+	const canonicalDestinationRootStats = await treeFs.lstat(canonicalDestinationRoot);
+	if (!canonicalDestinationRootStats.isDirectory()
+		|| canonicalDestinationRootStats.isSymbolicLink()
+		|| !sameFileIdentity(destinationRootStats, canonicalDestinationRootStats)) {
+		throw new Error(`Copy destination canonical root changed: ${destinationRoot}`);
+	}
+	const assertDestinationCurrent = () => assertCopyDestinationRootCurrent(
+		treeFs,
+		destinationRoot,
+		canonicalDestinationRoot,
+		destinationRootStats,
+	);
 
 	await walkTree(sourceRoot, async (entry) => {
 		const target = entry.relativePath
 			? path.join(destinationRoot, ...entry.relativePath.split("/"))
 			: destinationRoot;
 		if (entry.kind === "directory") {
-			await treeFs.mkdir(target, { recursive: false });
+			if (entry.relativePath) {
+				await assertDestinationCurrent();
+				await treeFs.mkdir(target, { recursive: false });
+				await assertDestinationCurrent();
+			}
 			return;
 		}
 		if (entry.kind === "file") {
@@ -803,17 +951,24 @@ export async function copyTree(source: string, destination: string, options: Cop
 				fs: treeFs,
 				containedWithin: canonicalSourceRoot,
 				expectedStats: entry.stats,
-				exclusive: (copyFileMode & fs.constants.COPYFILE_EXCL) !== 0,
+				exclusive: true,
+				destinationContainedWithin: canonicalDestinationRoot,
+				destinationRoot,
+				expectedDestinationRootStats: destinationRootStats,
 			});
 			if (preserveTimestamps && sourceStats.atime && sourceStats.mtime) {
+				await assertDestinationCurrent();
 				await treeFs.utimes(target, sourceStats.atime, sourceStats.mtime);
+				await assertDestinationCurrent();
 			}
 			return;
 		}
 		if (entry.kind === "symlink") {
 			if (symlinks === "copy") {
 				const linkTarget = await treeFs.readlink(entry.absolutePath);
+				await assertDestinationCurrent();
 				await treeFs.symlink(linkTarget, target);
+				await assertDestinationCurrent();
 			}
 			return;
 		}

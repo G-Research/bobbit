@@ -157,7 +157,7 @@ describe("preview mount", () => {
 		}
 	});
 
-	it("rejects an entry replaced by a symlink during the direct-copy fallback", async () => {
+	it("rejects an entry replaced by a symlink before descriptor-anchored streaming", async () => {
 		await removeMount(SID_B);
 		const src = makeSource();
 		const outside = makeDir("fallback-outside");
@@ -179,7 +179,7 @@ describe("preview mount", () => {
 				const absolute = path.resolve(String(filePath));
 				if (absolute === path.resolve(victim)) {
 					victimOpens++;
-					if (!substituted && victimOpens === 2) {
+					if (!substituted && victimOpens === 1) {
 						substituted = true;
 						testFs.unlinkSync(victim);
 						testFs.symlinkSync(secret, victim);
@@ -208,7 +208,7 @@ describe("preview mount", () => {
 			setPreviewFsForTesting(testFs);
 		}
 
-		assert.equal(victimOpens, 2, "the EXDEV fallback must reopen the source for descriptor-anchored streaming");
+		assert.equal(victimOpens, 1, "descriptor-anchored streaming must open the source exactly once");
 		assert.equal(reads, 0, "the followed secret descriptor must be rejected before reading");
 		assert.equal(testFs.readFileSync(secret, "utf-8"), "external-secret");
 		assert.equal(testFs.existsSync(path.join(mountPath(SID_B), "report.html")), false);
@@ -218,7 +218,7 @@ describe("preview mount", () => {
 		await removeMount(SID_B);
 	});
 
-	it("falls back to a descriptor-anchored copy when a successful hardlink has the wrong identity", async () => {
+	it("streams through a validated destination without a hardlink optimization", async () => {
 		await removeMount(SID_B);
 		const src = makeSource();
 		const victim = path.join(src, "report.html");
@@ -252,13 +252,13 @@ describe("preview mount", () => {
 			await removeMount(SID_B);
 		}
 
-		assert.equal(producedDifferentIdentity, true, "the injected successful link must produce a different inode");
-		assert.equal(linkCalls, 1);
-		assert.equal(victimOpens, 2, "the safe fallback must reopen and revalidate the source");
+		assert.equal(producedDifferentIdentity, false, "the unsafe hardlink path must not run");
+		assert.equal(linkCalls, 0);
+		assert.equal(victimOpens, 1, "descriptor streaming opens and validates the source once");
 		assert.equal(
 			fallbackDestinationOpens,
 			1,
-			"only the source fallback exclusively creates a child; the staged root is installed by rename",
+			"the destination is exclusively created once and the staged root is installed by rename",
 		);
 	});
 
