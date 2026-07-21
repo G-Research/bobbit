@@ -243,13 +243,55 @@ export async function handlePreviewRequest(
 		return true;
 	}
 	const stream = fs.createReadStream(guard.resolved);
-	stream.on("error", () => { try { res.end(); } catch { /* ignore */ } });
-	stream.pipe(res);
-	// Wait for stream to finish so the caller's `await` resolves once the response is done.
+	// Keep the read lease until exactly one terminal condition wins. A client
+	// abort/close must stop disk I/O rather than leaving the stream (and lease)
+	// alive until the file naturally reaches EOF.
 	await new Promise<void>(resolve => {
-		stream.on("end", () => resolve());
-		stream.on("close", () => resolve());
-		stream.on("error", () => resolve());
+		let settled = false;
+		const removeListener = (emitter: unknown, event: string, listener: () => void) => {
+			(emitter as { removeListener?: (name: string, fn: () => void) => void }).removeListener?.(event, listener);
+		};
+		const cleanup = () => {
+			stream.removeListener("end", onEnd);
+			stream.removeListener("close", onStreamClose);
+			stream.removeListener("error", onStreamError);
+			removeListener(req, "aborted", onAbort);
+			removeListener(req, "close", onRequestClose);
+			removeListener(res, "close", onAbort);
+		};
+		const settle = () => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			resolve();
+		};
+		const onAbort = () => {
+			if (!stream.destroyed) stream.destroy();
+			settle();
+		};
+		// IncomingMessage also emits close after an ordinary fully received GET.
+		// Only an incomplete/aborted request close represents client disconnect.
+		const onRequestClose = () => {
+			if (req.aborted || !req.complete) onAbort();
+		};
+		const onEnd = () => settle();
+		const onStreamClose = () => settle();
+		const onStreamError = () => {
+			try {
+				if (!res.destroyed && !res.writableEnded) res.end();
+			} catch { /* ignore a concurrently closed response */ }
+			settle();
+		};
+
+		stream.once("end", onEnd);
+		stream.once("close", onStreamClose);
+		stream.once("error", onStreamError);
+		if (typeof req.once === "function") {
+			req.once("aborted", onAbort);
+			req.once("close", onRequestClose);
+		}
+		if (typeof res.once === "function") res.once("close", onAbort);
+		stream.pipe(res);
 	});
 	return true;
 	} finally {

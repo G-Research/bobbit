@@ -11,9 +11,9 @@ import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { bobbitStateDir } from "../bobbit-dir.js";
 import {
+	hasStableFileIdentity,
 	readRegularFileNoFollowInChunks,
 	RECOVERY_IO_CONCURRENCY,
-	type AsyncTreeStats,
 } from "../agent/bounded-async-work.js";
 import * as previewMount from "./mount.js";
 
@@ -208,96 +208,60 @@ export async function restorePreviewArtifact(
 	const sourceMount = artifactMountDir(sessionId, artifactId);
 	await validateArtifactMount(record, sourceMount);
 
-	let liveMount = "";
-	let tmpRestore = "";
-	let backupDir = "";
-	let hadLiveMount = false;
-	let tmpInstallAttempted = false;
-	let backupReady = false;
-	let backupInstallAttempted = false;
-	let preserveBackup = false;
-	let backupRootStats: AsyncTreeStats | undefined;
+	const liveMount = previewMount.mountPath(sessionId);
+	const previewParent = path.dirname(liveMount);
+	const tmpRestore = path.join(previewParent, `.restore-${sessionId}-${process.pid}-${Date.now()}-${randomSuffix()}`);
+	let stagingCreated = false;
+	let stagingExpectedRootStats: fs.Stats | undefined;
 	try {
-		liveMount = previewMount.mountPath(sessionId);
-		const previewParent = path.dirname(liveMount);
 		await artifactFs.mkdir(previewParent, { recursive: true });
-		tmpRestore = path.join(previewParent, `.restore-${sessionId}-${process.pid}-${Date.now()}-${randomSuffix()}`);
+		await artifactFs.mkdir(tmpRestore, { recursive: false });
+		stagingCreated = true;
+		stagingExpectedRootStats = await artifactFs.lstat(tmpRestore);
+		if (!stagingExpectedRootStats.isDirectory()
+			|| stagingExpectedRootStats.isSymbolicLink()
+			|| !hasStableFileIdentity(stagingExpectedRootStats)) {
+			throw new PreviewArtifactError(500, "Preview artifact staging root has no stable identity");
+		}
 		await copyDirectory(sourceMount, tmpRestore, artifactRoot());
-		if (await hashDirectory(tmpRestore, previewParent) !== record.contentHash) {
-			throw new PreviewArtifactError(500, "Preview artifact staged hash mismatch");
-		}
-		const stagedEntry = await safeLstat(path.join(tmpRestore, record.entry));
-		if (!stagedEntry?.isFile() || stagedEntry.isSymbolicLink()) {
-			throw new PreviewArtifactError(500, "Preview artifact staged entry missing");
-		}
-
-		await previewMount.withPreviewDirectoryUnavailable(liveMount, async () => {
-			// This check is a policy decision: only an existing live mount receives a backup.
-			hadLiveMount = (await safeLstat(liveMount))?.isDirectory() === true;
-			backupDir = path.join(previewParent, `.restore-backup-${sessionId}-${process.pid}-${Date.now()}-${randomSuffix()}`);
-			if (hadLiveMount) {
-				// Detach the whole live root instead of preserving and traversing it.
-				// This makes the install destination absent and gives rollback the exact
-				// prior inode, including filesystem-specific directory state.
-				backupRootStats = await previewMount.movePreviewDirectoryContents(liveMount, backupDir, { fs: artifactFs });
-				backupReady = backupRootStats !== undefined;
-			} else {
-				await previewMount.removePreviewTree(liveMount, { fs: artifactFs });
-			}
-
-			try {
-				tmpInstallAttempted = true;
-				await previewMount.movePreviewDirectoryContents(tmpRestore, liveMount, { fs: artifactFs });
-			} catch (err) {
-				try {
-					// The failed install may be the exact mismatched root that move could
-					// not quarantine. Rename it away; never recursively inspect it.
-					await previewMount.quarantinePreviewDirectory(liveMount, { fs: artifactFs });
-					if (backupReady && (await safeLstat(backupDir))?.isDirectory()) {
-						backupInstallAttempted = true;
-						await previewMount.movePreviewDirectoryContents(backupDir, liveMount, { fs: artifactFs });
-					}
-				} catch (restoreErr) {
-					preserveBackup = true;
-					console.error("[preview/artifacts] failed to roll back live preview mount after restore error", restoreErr);
-				}
-				throw err;
-			}
+		const installed = await previewMount.installPreviewDirectoryTransaction(tmpRestore, liveMount, {
+			fs: artifactFs,
+			entry: record.entry,
+			stagingExpectedRootStats,
+			expectedContentHash: record.contentHash,
 		});
+		const entryPath = path.join(liveMount, record.entry);
+		return {
+			url: `/preview/${sessionId}/${record.entry}`,
+			path: entryPath,
+			relPath: path.posix.join(sessionId, record.entry),
+			entry: record.entry,
+			mtime: Math.floor(installed.entryStats.mtimeMs),
+			contentHash: installed.contentHash,
+			artifactId: record.artifactId,
+		};
 	} catch (err) {
 		if (err instanceof PreviewArtifactError) throw err;
 		throw new PreviewArtifactError(500, `Preview artifact restore failed: ${errorMessage(err)}`);
 	} finally {
-		if (tmpRestore && !tmpInstallAttempted) {
-			try { await previewMount.removePreviewTree(tmpRestore, { fs: artifactFs }); } catch { /* ignore cleanup */ }
-		}
-		if (backupReady && !backupInstallAttempted && !preserveBackup) {
+		if (stagingCreated) {
 			try {
-				await previewMount.removePreviewTree(backupDir, {
-					fs: artifactFs,
-					expectedRootStats: backupRootStats,
-				});
-			} catch { /* preserve restore result; identity mismatch is never traversed */ }
+				if (stagingExpectedRootStats && hasStableFileIdentity(stagingExpectedRootStats)) {
+					await previewMount.removePreviewTree(tmpRestore, {
+						fs: artifactFs,
+						expectedRootStats: stagingExpectedRootStats,
+					});
+				} else {
+					// Stable identity failed before copy; rmdir cannot traverse anything.
+					await artifactFs.rmdir(tmpRestore);
+				}
+			} catch (error) {
+				if (!isEnoent(error)) {
+					console.error(`[preview/artifacts] failed to clean owned restore staging root ${tmpRestore}`, error);
+				}
+			}
 		}
 	}
-
-	const entryPath = path.join(liveMount, record.entry);
-	let stat: fs.Stats;
-	try {
-		stat = await artifactFs.lstat(entryPath);
-		if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("restored entry is not a regular file");
-	} catch (err) {
-		throw new PreviewArtifactError(500, `Preview artifact restored entry missing: ${errorMessage(err)}`);
-	}
-	return {
-		url: `/preview/${sessionId}/${record.entry}`,
-		path: entryPath,
-		relPath: path.posix.join(sessionId, record.entry),
-		entry: record.entry,
-		mtime: Math.floor(stat.mtimeMs),
-		contentHash: record.contentHash,
-		artifactId: record.artifactId,
-	};
 }
 
 /** Delete all artifacts for a session. Invalid IDs and missing roots are no-ops. */

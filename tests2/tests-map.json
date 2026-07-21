@@ -66,6 +66,15 @@
       }
     },
     {
+      "path": "tests2/core/preview-install-transaction-races.test.ts",
+      "reason": "Deterministic deferred regressions for source-ENOENT rollback, stable staging preflight, persistent failed-write fencing, same-key writer serialization, rename-first blocked purge, aborted stream lease release, and serialized owned-quarantine cleanup logging.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/purge-preview-pool-shutdown-coder61c7.test.ts",
       "reason": "Deterministic native v2 coverage for coalesced immediate and expiry archive purges, stale-snapshot fencing, serialized preview purge cleanup, a single reclaim-candidate concurrency ceiling across many boot projects, and awaited CPU diagnostics shutdown.",
       "execution": {

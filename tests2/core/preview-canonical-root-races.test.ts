@@ -15,6 +15,7 @@ import {
 	hashMountDirectory,
 	isPreviewDirectoryAvailable,
 	listMountFiles,
+	markPreviewDirectoryVerified,
 	movePreviewDirectoryContents,
 	PreviewMountError,
 	type PreviewAsyncFs,
@@ -261,8 +262,9 @@ describe("preview canonical root and install races", () => {
 		memoryFs.writeFileSync(path.join(source, "inside.html"), "inside");
 		const releaseRead = acquirePreviewDirectoryRead(destination);
 		assert.ok(releaseRead);
+		const expectedRootStats = await asyncFs.lstat(source);
 		let settled = false;
-		const install = movePreviewDirectoryContents(source, destination, { fs: asyncFs })
+		const install = movePreviewDirectoryContents(source, destination, { fs: asyncFs, expectedRootStats })
 			.finally(() => { settled = true; });
 		await new Promise<void>(resolve => setImmediate(resolve));
 		assert.equal(settled, false);
@@ -271,6 +273,8 @@ describe("preview canonical root and install races", () => {
 		releaseRead();
 		await install;
 		assert.equal(memoryFs.readFileSync(path.join(destination, "inside.html"), "utf8"), "inside");
+		assert.equal(isPreviewDirectoryAvailable(destination), false, "identity alone cannot publish an un-hashed install");
+		markPreviewDirectoryVerified(destination);
 		assert.equal(isPreviewDirectoryAvailable(destination), true);
 	});
 
@@ -292,6 +296,7 @@ describe("preview canonical root and install races", () => {
 		let directoryOpens = 0;
 		let unlinks = 0;
 		let directoryRemovals = 0;
+		const expectedRootStats = await asyncFs.lstat(source);
 		const raceFs: PreviewAsyncFs = {
 			...asyncFs,
 			rename: async (oldPath, newPath) => {
@@ -328,7 +333,7 @@ describe("preview canonical root and install races", () => {
 		};
 
 		await assert.rejects(
-			movePreviewDirectoryContents(source, destination, { fs: raceFs }),
+			movePreviewDirectoryContents(source, destination, { fs: raceFs, expectedRootStats }),
 			(error: unknown) => error instanceof PreviewMountError && error.statusCode === 500,
 		);
 		assert.equal(unavailableObserved, true, "content must stay fenced until destination identity verification");
@@ -339,6 +344,8 @@ describe("preview canonical root and install races", () => {
 		assert.ok(quarantine, "the mismatched installed root must be quarantined by rename");
 		assert.equal(memoryFs.readFileSync(path.join(quarantine, "EXTERNAL.txt"), "utf8"), "external-sentinel");
 		assert.equal(memoryFs.readFileSync(path.join(detached, "inside.html"), "utf8"), "inside");
-		assert.equal(isPreviewDirectoryAvailable(destination), true, "an absent destination is safe after quarantine");
+		assert.equal(isPreviewDirectoryAvailable(destination), false, "failed installs remain persistently fenced");
+		markPreviewDirectoryVerified(destination);
+		assert.equal(isPreviewDirectoryAvailable(destination), true, "explicitly verified absence may clear the fence");
 	});
 });

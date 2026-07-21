@@ -152,6 +152,7 @@ describe("preview root identity races", () => {
 		memoryFs.writeFileSync(path.join(staging, "inside.html"), "inside");
 		memoryFs.mkdirSync(replacement);
 		memoryFs.writeFileSync(path.join(replacement, "EXTERNAL.txt"), "external-sentinel");
+		const expectedRootStats = await asyncFs.lstat(staging);
 		const renames: Array<[string, string]> = [];
 		let quarantine = "";
 		let directoryOpens = 0;
@@ -185,7 +186,7 @@ describe("preview root identity races", () => {
 		};
 
 		await assert.rejects(
-			movePreviewDirectoryContents(staging, destination, { fs: raceFs, concurrency: 1 }),
+			movePreviewDirectoryContents(staging, destination, { fs: raceFs, concurrency: 1, expectedRootStats }),
 			(error: unknown) => error instanceof PreviewMountError && error.statusCode === 500,
 		);
 		assert.deepEqual(renames[0], [resolved(staging), resolved(destination)]);

@@ -269,8 +269,10 @@ describe("preview mount", () => {
 		const sentinel = path.join(outside, "KEEP.txt");
 		testFs.writeFileSync(path.join(staging, "inside.html"), "inside");
 		testFs.writeFileSync(sentinel, "external-sentinel");
+		testFs.rmdirSync(destination); // whole-root installation requires absence
 
 		const baseFs = createPreviewAsyncFs(testFs);
+		const expectedRootStats = await baseFs.lstat(staging);
 		let substituted = false;
 		const renameSources: string[] = [];
 		const raceFs: PreviewAsyncFs = {
@@ -289,21 +291,25 @@ describe("preview mount", () => {
 					testFs.symlinkSync(linkTarget, String(newPath));
 					return;
 				}
+				if (substituted && source === path.resolve(destination)) {
+					const linkTarget = testFs.readlinkSync(destination);
+					testFs.unlinkSync(destination);
+					testFs.symlinkSync(linkTarget, String(newPath));
+					return;
+				}
 				return baseFs.rename(oldPath, newPath);
 			},
 		};
 
 		try {
 			await assert.rejects(
-				movePreviewDirectoryContents(staging, destination, { fs: raceFs, concurrency: 1 }),
+				movePreviewDirectoryContents(staging, destination, { fs: raceFs, concurrency: 1, expectedRootStats }),
 				(error: unknown) => error instanceof PreviewMountError && error.statusCode === 500,
 			);
 			assert.equal(substituted, true, "the deterministic root substitution must run");
-			assert.deepEqual(
-				renameSources,
-				[path.resolve(staging)],
-				"only the initial no-follow root claim may rename through the caller-known staging path",
-			);
+			assert.equal(renameSources[0], path.resolve(staging));
+			assert.equal(renameSources[1], path.resolve(destination));
+			assert.equal(renameSources.length, 2, "the raced install is detached only through its destination path");
 			assert.equal(testFs.readFileSync(sentinel, "utf-8"), "external-sentinel");
 			assert.equal(testFs.existsSync(path.join(destination, "KEEP.txt")), false);
 			assert.equal(testFs.existsSync(staging), false, "the substituted symlink should be safely unlinked");
