@@ -42,7 +42,6 @@ import { ColorStore } from "./agent/color-store.js";
 import { bfsEnrichArchivedIndexed } from "./agent/archived-session-bfs.js";
 import { PrStatusStore, type PrStatusEntry } from "./agent/pr-status-store.js";
 import { SessionManager, type ExtensionChannelServices } from "./agent/session-manager.js";
-import { BACKGROUND_IO_CONCURRENCY, mapWithConcurrency } from "./agent/bounded-async-work.js";
 import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { executeCleanupWorktreesRequest } from "./maintenance/cleanup-worktrees-request.js";
 import { RateLimiter } from "./auth/rate-limit.js";
@@ -1773,12 +1772,18 @@ export function createPreviewSessionOperationQueue(): PreviewSessionOperationQue
 	return { run, purge };
 }
 
-/** Run post-listen project pool initialization through the shared I/O ceiling. */
+/**
+ * Initialize post-listen project pools one at a time. Each pool owns the shared
+ * candidate-level I/O ceiling during orphan reclaim, so project-level
+ * parallelism here would multiply that bound across visible projects.
+ */
 export async function initializeBootProjectPools<T>(
 	projects: readonly T[],
 	initialize: (project: T, index: number) => Promise<void>,
 ): Promise<void> {
-	await mapWithConcurrency(projects, BACKGROUND_IO_CONCURRENCY, initialize);
+	for (let index = 0; index < projects.length; index++) {
+		await initialize(projects[index]!, index);
+	}
 }
 
 /** Await the final diagnostics write while retaining best-effort shutdown policy. */
@@ -3517,7 +3522,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// of the pool namespace while its old listing is being reconciled. Both
 			// phases run after listen(), so health and session requests remain
 			// available (sessions use the normal cold fallback until pools are ready).
-			// Independent project pools are initialized in parallel afterwards.
+			// Project pools initialize sequentially afterwards so each reclaim scan
+			// exclusively owns the shared candidate-level I/O ceiling.
 			const runBootBackgroundTasks = async (): Promise<void> => {
 				const t0 = Date.now();
 
