@@ -1108,9 +1108,17 @@
       {
         "file": "tests2/core/bounded-tree-parent-identity.test.ts",
         "name": "does not open descendants after a visited directory's parent becomes a symlink"
+      },
+      {
+        "file": "tests2/core/bounded-tree-quarantine-races.test.ts",
+        "name": "does not invoke a claimed visitor hash after its parent is replaced"
+      },
+      {
+        "file": "tests2/core/bounded-tree-quarantine-races.test.ts",
+        "name": "discards a readlink result when the parent changes inside readlink"
       }
     ],
-    "rationale": "The bounded asynchronous owners preserve exact mounted bytes and metadata while proving content, traversed directories, their Dirent-producing parent identities, canonical roots, opened file identities, and artifact metadata cannot be replaced or escaped before descriptor-anchored reads, including queued and local-overflow work."
+    "rationale": "The bounded asynchronous owners preserve exact mounted bytes and metadata while proving content, traversed directories, their Dirent-producing parent identities, canonical roots, opened file identities, artifact metadata, visitor hashes, and readlink results cannot be replaced or escaped before descriptor-anchored use, including queued and local-overflow work."
   },
   {
     "baseFile": "tests2/core/preview-artifacts.test.ts",
@@ -1159,22 +1167,30 @@
       },
       {
         "file": "tests2/core/preview-root-identity-races.test.ts",
-        "name": "removeTree aborts after an open frame read reveals a real-directory replacement"
-      },
-      {
-        "file": "tests2/core/preview-root-identity-races.test.ts",
         "name": "expected root identity prevents native cleanup from opening a replacement directory"
       },
       {
-        "file": "tests2/core/bounded-tree-parent-identity.test.ts",
-        "name": "revalidates a nested frame after child lstat and before unlink"
+        "file": "tests2/core/bounded-tree-quarantine-races.test.ts",
+        "name": "never traverses a replacement installed inside opendir"
       },
       {
-        "file": "tests2/core/bounded-tree-parent-identity.test.ts",
-        "name": "revalidates a closed nested frame before its final rmdir"
+        "file": "tests2/core/bounded-tree-quarantine-races.test.ts",
+        "name": "restores a replacement moved by a raced root detach"
+      },
+      {
+        "file": "tests2/core/bounded-tree-quarantine-races.test.ts",
+        "name": "does not delete a replacement installed before unlink returns"
+      },
+      {
+        "file": "tests2/core/bounded-tree-quarantine-races.test.ts",
+        "name": "does not delete a replacement installed before rmdir returns"
+      },
+      {
+        "file": "tests2/core/bounded-tree-quarantine-races.test.ts",
+        "name": "preserveRoot detaches authorized children but retains the claimed root"
       }
     ],
-    "rationale": "The bounded asynchronous cleanup owners preserve idempotency and failure isolation while proving recursive deletion rejects root, in-frame, and producing-parent identity replacement before child unlink or final directory removal."
+    "rationale": "The bounded asynchronous cleanup owners preserve idempotency and failure isolation while proving recursive deletion detaches only verified identities, rejects replacements before traversal and after destructive acts, restores mismatched moves, and retains an authorized preserveRoot."
   },
   {
     "baseFile": "tests2/core/preview-artifacts.test.ts",
