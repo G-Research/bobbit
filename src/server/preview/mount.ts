@@ -605,8 +605,13 @@ function mergeDirectoryIdentities(
 	return merged;
 }
 
-function identityClaims(identities: readonly PreviewDirectoryIdentity[]): Array<{ path: string; stats: AsyncTreeStats }> {
-	const claims: Array<{ path: string; stats: AsyncTreeStats }> = [];
+interface PreviewDirectoryIdentityClaim {
+	path: string;
+	stats: AsyncTreeStats;
+}
+
+function identityClaims(identities: readonly PreviewDirectoryIdentity[]): PreviewDirectoryIdentityClaim[] {
+	const claims: PreviewDirectoryIdentityClaim[] = [];
 	const indexes = new Map<string, number>();
 	for (const identity of identities) {
 		for (const claimPath of [identity.path, identity.canonicalPath]) {
@@ -625,16 +630,32 @@ function identityClaims(identities: readonly PreviewDirectoryIdentity[]): Array<
 	return claims;
 }
 
+function stalePreviewRootError(): PreviewMountError & NodeJS.ErrnoException {
+	const error = new PreviewMountError(500, "Preview root changed during traversal") as PreviewMountError & NodeJS.ErrnoException;
+	error.code = "ESTALE";
+	return error;
+}
+
+async function assertDirectoryClaimsCurrent(
+	io: PreviewAsyncFs,
+	claims: readonly PreviewDirectoryIdentityClaim[],
+	observedPath?: string,
+): Promise<AsyncTreeStats | undefined> {
+	const observedKey = observedPath === undefined ? undefined : normalizedIdentityPath(observedPath);
+	let observedStats: AsyncTreeStats | undefined;
+	for (const claim of claims) {
+		const current = await io.lstat(claim.path);
+		if (!matchesDirectoryIdentity(claim.stats, current)) throw stalePreviewRootError();
+		if (observedKey === normalizedIdentityPath(claim.path)) observedStats = current;
+	}
+	return observedStats;
+}
+
 async function assertDirectoryIdentitiesCurrent(
 	io: PreviewAsyncFs,
 	identities: readonly PreviewDirectoryIdentity[],
 ): Promise<void> {
-	for (const claim of identityClaims(identities)) {
-		const current = await io.lstat(claim.path);
-		if (!matchesDirectoryIdentity(claim.stats, current)) {
-			throw new PreviewMountError(500, "Preview root changed during traversal");
-		}
-	}
+	await assertDirectoryClaimsCurrent(io, identityClaims(identities));
 }
 
 async function bindOneDirectoryIdentity(
@@ -751,30 +772,24 @@ function boundPreviewTraversal(
 	bound: BoundPreviewDirectoryRoot,
 ): {
 	fs: { lstat(filePath: string): Promise<AsyncTreeStats>; opendir(dirPath: string): Promise<AsyncTreeDirectory> };
-	assertAdditional(): Promise<void>;
 } {
-	// walkTree already fences the candidate pathname as its operation root. Keep
-	// canonical aliases and parent/store identities as a separate flat set so
-	// walkTree's own root/producer/current checks do not recursively invoke them.
-	const candidatePath = normalizedIdentityPath(bound.path);
-	const additionalClaims = identityClaims(bound.identities)
-		.filter(claim => normalizedIdentityPath(claim.path) !== candidatePath);
-	const assertAdditional = async (): Promise<void> => {
-		for (const claim of additionalClaims) {
-			const current = await bound.rawFs.lstat(claim.path);
-			if (!matchesDirectoryIdentity(claim.stats, current)) {
-				throw new PreviewMountError(500, "Preview root changed during traversal");
-			}
-		}
-	};
+	// These claims stay flat over rawFs. In particular, the pre-bound candidate
+	// must be checked before walkTree's first lstat: that lstat establishes the
+	// walker's root claim and therefore cannot be allowed to adopt a replacement.
+	const claims = identityClaims(bound.identities);
+	const assertCurrent = (observedPath?: string) => assertDirectoryClaimsCurrent(bound.rawFs, claims, observedPath);
 	return {
-		assertAdditional,
 		fs: {
-			lstat: filePath => bound.rawFs.lstat(filePath),
+			async lstat(filePath) {
+				const claimedStats = await assertCurrent(filePath);
+				const stats = claimedStats ?? await bound.rawFs.lstat(filePath);
+				await assertCurrent();
+				return stats;
+			},
 			async opendir(dirPath) {
-				await assertAdditional();
+				await assertCurrent();
 				const directory = await bound.rawFs.opendir(dirPath);
-				try { await assertAdditional(); }
+				try { await assertCurrent(); }
 				catch (error) {
 					try { await directory.close(); } catch { /* preserve identity error */ }
 					throw error;
@@ -895,10 +910,10 @@ export async function listMountFiles(root: string, options: PreviewTreeOptions =
 	const traversalFs = bound || expectedRootStats === undefined
 		? skippableFs
 		: identityGuardedTraversalFs(io, root, expectedRootStats, skippableFs);
-	await walkTree(root, async (entry) => {
-		if (boundTraversal) await boundTraversal.assertAdditional();
+	await walkTree(root, (entry) => {
+		// walkTree brackets the visitor with traversalFs.lstat; the bound traversal
+		// guard therefore checks the complete flat claim set on both sides.
 		if (entry.kind === "file" && entry.relativePath) out.push(entry.relativePath);
-		if (boundTraversal) await boundTraversal.assertAdditional();
 	}, {
 		concurrency: options.concurrency ?? RECOVERY_IO_CONCURRENCY,
 		fs: traversalFs,
