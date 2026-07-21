@@ -128,6 +128,43 @@ function substituteDirectoryAfterEnumeration(
 	};
 }
 
+function substitutePathAtOpen(
+	victim: string,
+	calls: string[],
+	substitute: () => void,
+): PreviewAsyncFs {
+	let substituted = false;
+	return {
+		...baseAsyncFs,
+		open: async (filePath, flags, mode) => {
+			const absolute = path.resolve(String(filePath));
+			calls.push(`open:${absolute}`);
+			if (!substituted && absolute === path.resolve(victim)) {
+				substituted = true;
+				substitute();
+			}
+			const handle = await baseAsyncFs.open(filePath, flags, mode);
+			return {
+				read: async (...args: Parameters<typeof handle.read>) => {
+					calls.push(`read:${absolute}`);
+					return handle.read(...args);
+				},
+				write: (...args: Parameters<typeof handle.write>) => handle.write(...args),
+				stat: (...args: Parameters<typeof handle.stat>) => handle.stat(...args),
+				chmod: (newMode: number) => handle.chmod(newMode),
+				close: () => handle.close(),
+			} as unknown as fs.promises.FileHandle;
+		},
+	};
+}
+
+function substituteFileAtOpen(victim: string, outsideFile: string, calls: string[]): PreviewAsyncFs {
+	return substitutePathAtOpen(victim, calls, () => {
+		memoryFs.unlinkSync(victim);
+		memoryFs.symlinkSync(outsideFile, victim);
+	});
+}
+
 function candidateRecord(
 	artifactId: string,
 	mounted: Awaited<ReturnType<typeof writeInline>>,
@@ -406,6 +443,62 @@ describe("preview artifacts", () => {
 		memoryFs.rmSync(hashTree.tree, { recursive: true, force: true });
 		memoryFs.rmSync(copyTree.tree, { recursive: true, force: true });
 		memoryFs.rmSync(copyTarget, { recursive: true, force: true });
+		memoryFs.rmSync(outside, { recursive: true, force: true });
+	});
+
+	it("rejects file substitutions before hash or preview-directory copy can read external bytes", async () => {
+		const outside = path.join(root, "race-file-outside");
+		const outsideFile = path.join(outside, "secret.txt");
+		memoryFs.mkdirSync(outside, { recursive: true });
+		memoryFs.writeFileSync(outsideFile, "outside-secret");
+
+		const hashTree = path.join(root, "race-file-hash");
+		const hashVictim = path.join(hashTree, "victim.txt");
+		memoryFs.mkdirSync(hashTree, { recursive: true });
+		memoryFs.writeFileSync(hashVictim, "inside");
+		const hashCalls: string[] = [];
+		await assert.rejects(hashMountDirectory(hashTree, {
+			fs: substituteFileAtOpen(hashVictim, outsideFile, hashCalls),
+			concurrency: 1,
+		}), /regular file|symbolic link|symlink/i);
+		assert.equal(hashCalls.some(call => call.startsWith("read:")), false);
+
+		const copyTree = path.join(root, "race-file-copy");
+		const copyVictim = path.join(copyTree, "victim.txt");
+		const copyTarget = path.join(root, "race-file-copy-target");
+		memoryFs.mkdirSync(copyTree, { recursive: true });
+		memoryFs.writeFileSync(copyVictim, "inside");
+		const copyCalls: string[] = [];
+		await assert.rejects(copyPreviewDirectory(copyTree, copyTarget, {
+			fs: substituteFileAtOpen(copyVictim, outsideFile, copyCalls),
+			concurrency: 1,
+		}), /regular file|symbolic link|symlink/i);
+		assert.equal(copyCalls.some(call => call.startsWith("read:")), false);
+		assert.equal(memoryFs.existsSync(path.join(copyTarget, "victim.txt")), false);
+		assert.equal(memoryFs.readFileSync(outsideFile, "utf-8"), "outside-secret");
+
+		const ancestorTree = path.join(root, "race-file-ancestor");
+		const ancestorParent = path.join(ancestorTree, "nested");
+		const ancestorVictim = path.join(ancestorParent, "victim.txt");
+		const outsideVictim = path.join(outside, "victim.txt");
+		memoryFs.mkdirSync(ancestorParent, { recursive: true });
+		memoryFs.writeFileSync(ancestorVictim, "inside");
+		memoryFs.writeFileSync(outsideVictim, "ancestor-secret");
+		const ancestorCalls: string[] = [];
+		await assert.rejects(hashMountDirectory(ancestorTree, {
+			fs: substitutePathAtOpen(ancestorVictim, ancestorCalls, () => {
+				memoryFs.rmSync(ancestorParent, { recursive: true, force: true });
+				memoryFs.symlinkSync(outside, ancestorParent);
+			}),
+			concurrency: 1,
+		}), /expected root|regular file|symbolic link|symlink/i);
+		assert.equal(ancestorCalls.some(call => call.startsWith("read:")), false);
+		assert.equal(memoryFs.readFileSync(outsideVictim, "utf-8"), "ancestor-secret");
+
+		memoryFs.rmSync(hashTree, { recursive: true, force: true });
+		memoryFs.rmSync(copyTree, { recursive: true, force: true });
+		memoryFs.rmSync(copyTarget, { recursive: true, force: true });
+		memoryFs.rmSync(ancestorTree, { recursive: true, force: true });
 		memoryFs.rmSync(outside, { recursive: true, force: true });
 	});
 

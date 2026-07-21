@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
 import { describe, it } from "vitest";
 import {
@@ -42,18 +43,23 @@ type FakeKind = "directory" | "file" | "symlink";
 
 interface FakeNode {
 	kind: FakeKind;
+	id: number;
+	mode?: number;
 	children?: string[];
 	content?: Uint8Array;
 	linkTarget?: string;
 }
 
-function stats(kind: FakeKind): AsyncTreeStats {
+function stats(node: FakeNode): AsyncTreeStats {
 	return {
 		atime: new Date(1_000),
 		mtime: new Date(2_000),
-		isDirectory: () => kind === "directory",
-		isFile: () => kind === "file",
-		isSymbolicLink: () => kind === "symlink",
+		dev: 1,
+		ino: node.id,
+		mode: node.mode ?? 0o644,
+		isDirectory: () => node.kind === "directory",
+		isFile: () => node.kind === "file",
+		isSymbolicLink: () => node.kind === "symlink",
 	};
 }
 
@@ -72,7 +78,9 @@ class FakeTreeFs implements AsyncTreeFs {
 	active = 0;
 	maxActive = 0;
 	deferLstatBelowRoot: Deferred | undefined;
+	substituteFileAtOpen: { source: string; target: string; done?: boolean } | undefined;
 	root = path.resolve("/tree");
+	private nextId = 1;
 
 	private async io<T>(label: string, operation: () => T | Promise<T>): Promise<T> {
 		this.calls.push(label);
@@ -96,17 +104,17 @@ class FakeTreeFs implements AsyncTreeFs {
 	}
 
 	directory(filePath: string, children: string[]): this {
-		this.nodes.set(path.resolve(filePath), { kind: "directory", children });
+		this.nodes.set(path.resolve(filePath), { kind: "directory", id: this.nextId++, children });
 		return this;
 	}
 
 	file(filePath: string, content = new Uint8Array()): this {
-		this.nodes.set(path.resolve(filePath), { kind: "file", content });
+		this.nodes.set(path.resolve(filePath), { kind: "file", id: this.nextId++, mode: 0o640, content });
 		return this;
 	}
 
 	symlinkNode(filePath: string, target: string): this {
-		this.nodes.set(path.resolve(filePath), { kind: "symlink", linkTarget: target });
+		this.nodes.set(path.resolve(filePath), { kind: "symlink", id: this.nextId++, linkTarget: target });
 		return this;
 	}
 
@@ -115,7 +123,7 @@ class FakeTreeFs implements AsyncTreeFs {
 			if (this.deferLstatBelowRoot && path.resolve(filePath) !== this.root) {
 				await this.deferLstatBelowRoot.promise;
 			}
-			return stats(this.node(filePath).kind);
+			return stats(this.node(filePath));
 		});
 	}
 
@@ -146,7 +154,7 @@ class FakeTreeFs implements AsyncTreeFs {
 				error.code = "EEXIST";
 				throw error;
 			}
-			this.nodes.set(absolute, { kind: "directory", children: [] });
+			this.nodes.set(absolute, { kind: "directory", id: this.nextId++, children: [] });
 		});
 	}
 
@@ -155,6 +163,8 @@ class FakeTreeFs implements AsyncTreeFs {
 			const sourceNode = this.node(source);
 			this.nodes.set(path.resolve(destination), {
 				kind: "file",
+				id: this.nextId++,
+				mode: sourceNode.mode,
 				content: sourceNode.content ? Uint8Array.from(sourceNode.content) : new Uint8Array(),
 			});
 		});
@@ -166,7 +176,7 @@ class FakeTreeFs implements AsyncTreeFs {
 
 	async symlink(target: string, filePath: string): Promise<void> {
 		await this.io(`symlink:${target}->${path.resolve(filePath)}`, () => {
-			this.nodes.set(path.resolve(filePath), { kind: "symlink", linkTarget: target });
+			this.nodes.set(path.resolve(filePath), { kind: "symlink", id: this.nextId++, linkTarget: target });
 		});
 	}
 
@@ -182,16 +192,85 @@ class FakeTreeFs implements AsyncTreeFs {
 		await this.io(`utimes:${path.resolve(filePath)}`, () => { this.node(filePath); });
 	}
 
-	async open(filePath: string, _flags: "r"): Promise<AsyncTreeFileHandle> {
+	async realpath(filePath: string): Promise<string> {
+		return this.io(`realpath:${path.resolve(filePath)}`, () => {
+			const absolute = path.resolve(filePath);
+			const parsed = path.parse(absolute);
+			let current = parsed.root;
+			for (const segment of absolute.slice(parsed.root.length).split(path.sep).filter(Boolean)) {
+				const candidate = path.join(current, segment);
+				const node = this.node(candidate);
+				current = node.kind === "symlink"
+					? path.resolve(path.dirname(candidate), node.linkTarget ?? "")
+					: candidate;
+			}
+			return current;
+		});
+	}
+
+	async open(filePath: string, flags: string | number, mode?: number): Promise<AsyncTreeFileHandle> {
 		return this.io(`open:${path.resolve(filePath)}`, () => {
-			const content = this.node(filePath).content ?? new Uint8Array();
+			const absolute = path.resolve(filePath);
+			if (this.substituteFileAtOpen
+				&& !this.substituteFileAtOpen.done
+				&& absolute === path.resolve(this.substituteFileAtOpen.source)) {
+				this.substituteFileAtOpen.done = true;
+				this.nodes.set(absolute, {
+					kind: "symlink",
+					id: this.nextId++,
+					linkTarget: path.resolve(this.substituteFileAtOpen.target),
+				});
+			}
+
+			const numericFlags = typeof flags === "number" ? flags : 0;
+			const creating = typeof flags === "string"
+				? flags.includes("w") || flags.includes("a")
+				: (numericFlags & fs.constants.O_CREAT) !== 0;
+			const exclusive = typeof flags === "string"
+				? flags.includes("x")
+				: (numericFlags & fs.constants.O_EXCL) !== 0;
+			let openedPath = absolute;
+			let openedNode: FakeNode;
+			if (creating) {
+				if (exclusive && this.nodes.has(absolute)) {
+					const error = new Error("exists") as NodeJS.ErrnoException;
+					error.code = "EEXIST";
+					throw error;
+				}
+				openedNode = { kind: "file", id: this.nextId++, mode: mode ?? 0o666, content: new Uint8Array() };
+				this.nodes.set(absolute, openedNode);
+			} else {
+				openedNode = this.node(absolute);
+				if (openedNode.kind === "symlink") {
+					const noFollow = (fs.constants as Record<string, number | undefined>).O_NOFOLLOW;
+					if (typeof noFollow === "number" && noFollow !== 0 && (numericFlags & noFollow) !== 0) {
+						const error = new Error("symlink") as NodeJS.ErrnoException;
+						error.code = "ELOOP";
+						throw error;
+					}
+					openedPath = path.resolve(path.dirname(absolute), openedNode.linkTarget ?? "");
+					openedNode = this.node(openedPath);
+				}
+			}
+
 			return {
 				read: async (buffer, offset, length, position) => this.io(`file-read:${position}:${length}`, () => {
+					const content = openedNode.content ?? new Uint8Array();
 					const bytesRead = Math.min(length, Math.max(0, content.length - position));
 					buffer.set(content.subarray(position, position + bytesRead), offset);
 					return { bytesRead };
 				}),
-				close: async () => this.io(`file-close:${path.resolve(filePath)}`, () => {}),
+				write: async (buffer, offset, length, position) => this.io(`file-write:${position}:${length}`, () => {
+					const prior = openedNode.content ?? new Uint8Array();
+					const content = new Uint8Array(Math.max(prior.length, position + length));
+					content.set(prior);
+					content.set(buffer.subarray(offset, offset + length), position);
+					openedNode.content = content;
+					return { bytesWritten: length };
+				}),
+				stat: async () => this.io(`file-stat:${openedPath}`, () => stats(openedNode)),
+				chmod: async newMode => this.io(`file-chmod:${openedPath}`, () => { openedNode.mode = newMode; }),
+				close: async () => this.io(`file-close:${openedPath}`, () => {}),
 			};
 		});
 	}
@@ -345,5 +424,24 @@ describe("bounded async work", () => {
 		assert.ok(childRmdir >= 0 && rootRmdir > childRmdir, "directories must be deleted post-order");
 
 		await removeTree(source, { fs: tree });
+	});
+
+	it("does not copy external bytes when a shared-copy source becomes a symlink at open", async () => {
+		const tree = new FakeTreeFs();
+		const source = tree.root;
+		const sourceFile = path.join(source, "victim.txt");
+		const outsideFile = path.resolve("/outside/secret.txt");
+		const destination = path.resolve("/copy-race");
+		tree.directory(source, ["victim.txt"])
+			.file(sourceFile, Uint8Array.of(1, 2, 3))
+			.directory(path.dirname(outsideFile), [path.basename(outsideFile)])
+			.file(outsideFile, Uint8Array.of(9, 9, 9));
+		tree.substituteFileAtOpen = { source: sourceFile, target: outsideFile };
+
+		await assert.rejects(copyTree(source, destination, { concurrency: 1, fs: tree }), /regular file|symlink/i);
+
+		assert.equal(tree.nodes.has(path.join(destination, "victim.txt")), false);
+		assert.deepEqual(tree.nodes.get(outsideFile)?.content, Uint8Array.of(9, 9, 9));
+		assert.equal(tree.calls.some(call => call.startsWith("file-read:")), false, "the followed descriptor must be rejected before reading");
 	});
 });

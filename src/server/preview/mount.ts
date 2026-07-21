@@ -18,8 +18,13 @@ import * as path from "node:path";
 import * as crypto from "node:crypto";
 import { bobbitStateDir } from "../bobbit-dir.js";
 import {
+	copyRegularFileNoFollow,
+	hasStableFileIdentity,
 	mapWithConcurrency,
+	openRegularFileNoFollow,
+	readRegularFileNoFollowInChunks,
 	RECOVERY_IO_CONCURRENCY,
+	sameFileIdentity,
 	removeTree,
 	walkTree,
 	type AsyncTreeDirectory,
@@ -72,7 +77,7 @@ export interface PreviewAsyncFs {
 	realpath(filePath: fs.PathLike): Promise<string>;
 	readdir(filePath: fs.PathLike, options: { withFileTypes: true }): Promise<fs.Dirent[]>;
 	opendir(filePath: fs.PathLike): Promise<fs.Dir>;
-	open(filePath: fs.PathLike, flags: "r"): Promise<fs.promises.FileHandle>;
+	open(filePath: fs.PathLike, flags: string | number, mode?: number): Promise<fs.promises.FileHandle>;
 	copyFile(src: fs.PathLike, dest: fs.PathLike, mode?: number): Promise<void>;
 	link(existingPath: fs.PathLike, newPath: fs.PathLike): Promise<void>;
 	utimes(filePath: fs.PathLike, atime: string | number | Date, mtime: string | number | Date): Promise<void>;
@@ -92,7 +97,7 @@ export function createPreviewAsyncFs(fsImpl: typeof fs | PreviewAsyncFs): Previe
 		realpath: filePath => candidate.realpath(filePath) as Promise<string>,
 		readdir: (filePath, options) => candidate.readdir(filePath, options) as Promise<fs.Dirent[]>,
 		opendir: filePath => candidate.opendir(filePath) as Promise<fs.Dir>,
-		open: (filePath, flags) => candidate.open(filePath, flags) as Promise<fs.promises.FileHandle>,
+		open: (filePath, flags, mode) => candidate.open(filePath, flags, mode) as Promise<fs.promises.FileHandle>,
 		copyFile: (src, dest, mode) => candidate.copyFile(src, dest, mode),
 		link: (existingPath, newPath) => candidate.link(existingPath, newPath),
 		utimes: (filePath, atime, mtime) => candidate.utimes(filePath, atime, mtime),
@@ -251,7 +256,7 @@ export async function mountFile(
 	const resolvedAssets = new Set<string>();
 
 	try {
-		await copyOneFile(entryReal, path.join(tmpRoot, entry));
+		await copyOneFile(entryReal, path.join(tmpRoot, entry), srcRoot);
 		for (const spec of specs) {
 			if (isGlob(spec)) {
 				const matches = await expandGlob(srcRoot, spec);
@@ -265,7 +270,7 @@ export async function mountFile(
 					if (!st.isFile()) continue;
 					const dst = path.join(tmpRoot, rel);
 					await mountAsyncFs.mkdir(path.dirname(dst), { recursive: true });
-					await copyOneFile(real, dst);
+					await copyOneFile(real, dst, srcRoot);
 					resolvedAssets.add(rel.split(path.sep).join("/"));
 				}
 			} else {
@@ -282,7 +287,7 @@ export async function mountFile(
 				if (!st.isFile()) throw new PreviewMountError(404, `Asset '${rel}' is not a regular file`);
 				const dst = path.join(tmpRoot, rel);
 				await mountAsyncFs.mkdir(path.dirname(dst), { recursive: true });
-				await copyOneFile(real, dst);
+				await copyOneFile(real, dst, srcRoot);
 				resolvedAssets.add(rel);
 			}
 		}
@@ -443,27 +448,18 @@ export async function listMountFiles(root: string, options: PreviewTreeOptions =
 /** Stable SHA-256 of sorted path + NUL + streamed bytes + NUL records. */
 export async function hashMountDirectory(root: string, options: PreviewTreeOptions = {}): Promise<string> {
 	const io = options.fs ?? mountAsyncFs;
+	const canonicalRoot = await io.realpath(root);
 	const files = await listMountFiles(root, options);
 	const hash = crypto.createHash("sha256");
-	const buffer = Buffer.allocUnsafe(HASH_READ_BUFFER_BYTES);
 	for (const rel of files) {
 		hash.update(rel, "utf-8");
 		hash.update("\0");
 		const absolute = path.join(root, ...rel.split("/"));
-		const current = await io.lstat(absolute);
-		if (!current.isFile()) throw new Error(`Preview hash source is no longer a regular file: ${rel}`);
-		const handle = await io.open(absolute, "r");
-		try {
-			let position = 0;
-			for (;;) {
-				const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
-				if (bytesRead === 0) break;
-				hash.update(buffer.subarray(0, bytesRead));
-				position += bytesRead;
-			}
-		} finally {
-			await handle.close();
-		}
+		await readRegularFileNoFollowInChunks(absolute, chunk => { hash.update(chunk); }, {
+			fs: io,
+			chunkSize: HASH_READ_BUFFER_BYTES,
+			containedWithin: canonicalRoot,
+		});
 		hash.update("\0");
 	}
 	return hash.digest("hex");
@@ -473,6 +469,7 @@ export async function hashMountDirectory(root: string, options: PreviewTreeOptio
 export async function copyPreviewDirectory(src: string, dst: string, options: PreviewTreeOptions = {}): Promise<void> {
 	const io = options.fs ?? mountAsyncFs;
 	const limit = options.concurrency ?? RECOVERY_IO_CONCURRENCY;
+	const canonicalSourceRoot = await io.realpath(src);
 	await io.mkdir(path.dirname(dst), { recursive: true });
 	await walkTree(src, async (entry) => {
 		const target = entry.relativePath
@@ -486,14 +483,15 @@ export async function copyPreviewDirectory(src: string, dst: string, options: Pr
 			if (!entry.relativePath) throw new Error("Preview copy source is not a directory");
 			return;
 		}
-		// Classification from the queued traversal is not trusted after awaits.
-		// Revalidate immediately before copy so a substituted link is not read.
-		const current = await io.lstat(entry.absolutePath);
-		if (!current.isFile() || current.isSymbolicLink()) {
-			throw new Error(`Preview copy source is no longer a regular file: ${entry.relativePath}`);
-		}
-		await io.copyFile(entry.absolutePath, target, fs.constants.COPYFILE_EXCL);
-		await io.utimes(target, current.atime, current.mtime);
+		// Open and validate the source descriptor after traversal. The pathname is
+		// never read again, so a final-component symlink substitution cannot leak.
+		const current = await copyRegularFileNoFollow(entry.absolutePath, target, {
+			fs: io,
+			exclusive: true,
+			chunkSize: HASH_READ_BUFFER_BYTES,
+			containedWithin: canonicalSourceRoot,
+		});
+		if (current.atime && current.mtime) await io.utimes(target, current.atime, current.mtime);
 	}, {
 		concurrency: limit,
 		fs: {
@@ -554,9 +552,11 @@ export async function movePreviewDirectoryContents(
 ): Promise<void> {
 	const io = options.fs ?? mountAsyncFs;
 	let directory: fs.Dir;
+	let canonicalSourceRoot: string;
 	try {
 		const sourceStats = await io.lstat(srcDir);
 		if (!sourceStats.isDirectory() || sourceStats.isSymbolicLink()) return;
+		canonicalSourceRoot = await io.realpath(srcDir);
 		directory = await io.opendir(srcDir);
 	} catch { return; }
 	await io.mkdir(dstDir, { recursive: true });
@@ -587,7 +587,7 @@ export async function movePreviewDirectoryContents(
 				if (fallbackStats.isDirectory()) {
 					await copyPreviewDirectory(from, to, { fs: io, concurrency: options.concurrency });
 				} else if (fallbackStats.isFile()) {
-					await copyOneFile(from, to, io);
+					await copyOneFile(from, to, canonicalSourceRoot, io);
 				} else {
 					throw new PreviewMountError(500, "Preview staging contains an unsupported filesystem entry");
 				}
@@ -599,23 +599,72 @@ export async function movePreviewDirectoryContents(
 	}
 }
 
-async function copyOneFile(src: string, dst: string, io = mountAsyncFs): Promise<void> {
-	const sourceStats = await io.lstat(src);
-	if (!sourceStats.isFile() || sourceStats.isSymbolicLink()) {
-		throw new PreviewMountError(500, "Copy source is no longer a regular file");
-	}
+async function copyOneFile(
+	src: string,
+	dst: string,
+	canonicalSourceRoot: string,
+	io = mountAsyncFs,
+): Promise<void> {
+	let opened: Awaited<ReturnType<typeof openRegularFileNoFollow>>;
+	try { opened = await openRegularFileNoFollow(src, io, canonicalSourceRoot); }
+	catch (error) { throw new PreviewMountError(500, `Copy failed: ${(error as Error).message}`); }
+
 	try { await io.unlink(dst); }
-	catch (err) { if (!isEnoent(err)) throw err; }
-	try {
-		await io.link(src, dst);
-	} catch {
-		try { await io.copyFile(src, dst); }
-		catch (err) { throw new PreviewMountError(500, `Copy failed: ${(err as Error).message}`); }
+	catch (error) {
+		if (!isEnoent(error)) {
+			try { await opened.handle.close(); } catch { /* preserve the unlink error */ }
+			throw error;
+		}
 	}
-	const copiedStats = await io.lstat(dst);
-	if (!copiedStats.isFile() || copiedStats.isSymbolicLink()) {
-		try { await io.unlink(dst); } catch { /* preserve the integrity error */ }
-		throw new PreviewMountError(500, "Copy destination is not a regular file");
+
+	// Retain the same-filesystem hardlink fast path only when its result can be
+	// proven to refer to the descriptor validated above. Otherwise stream-copy.
+	let linkError: unknown;
+	if (hasStableFileIdentity(opened.stats)) {
+		try { await io.link(src, dst); }
+		catch (error) { linkError = error; }
+	} else {
+		linkError = new Error("source filesystem has no stable file identity");
+	}
+
+	if (linkError === undefined) {
+		let validationError: unknown;
+		try {
+			const copiedStats = await io.lstat(dst);
+			if (!copiedStats.isFile() || copiedStats.isSymbolicLink() || !sameFileIdentity(opened.stats, copiedStats)) {
+				throw new PreviewMountError(500, "Copy destination does not match the opened source file");
+			}
+		} catch (error) {
+			validationError = error;
+		}
+		try { await opened.handle.close(); }
+		catch (closeError) { validationError ??= closeError; }
+		if (validationError === undefined) return;
+		try { await io.unlink(dst); } catch { /* preserve the validation error */ }
+		throw validationError;
+	}
+
+	try { await opened.handle.close(); }
+	catch (error) { throw new PreviewMountError(500, `Copy failed: ${(error as Error).message}`); }
+	try {
+		await copyRegularFileNoFollow(src, dst, {
+			fs: io,
+			exclusive: true,
+			chunkSize: HASH_READ_BUFFER_BYTES,
+			containedWithin: canonicalSourceRoot,
+		});
+	} catch (error) {
+		throw new PreviewMountError(500, `Copy failed: ${(error as Error).message}`);
+	}
+
+	try {
+		const copiedStats = await io.lstat(dst);
+		if (!copiedStats.isFile() || copiedStats.isSymbolicLink()) {
+			throw new PreviewMountError(500, "Copy destination is not a regular file");
+		}
+	} catch (error) {
+		try { await io.unlink(dst); } catch { /* preserve the validation error */ }
+		throw error;
 	}
 }
 

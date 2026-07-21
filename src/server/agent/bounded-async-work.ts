@@ -212,6 +212,11 @@ export const realRecoveryFs: RecoveryFs = {
 export interface AsyncTreeStats {
 	atime?: Date;
 	mtime?: Date;
+	/** File identity used by the portable no-follow fallback. */
+	dev?: number | bigint;
+	ino?: number | bigint;
+	/** Permission bits copied when the filesystem exposes them. */
+	mode?: number;
 	isDirectory(): boolean;
 	isFile(): boolean;
 	isSymbolicLink(): boolean;
@@ -236,6 +241,14 @@ export interface AsyncTreeFileHandle {
 		length: number,
 		position: number,
 	): Promise<{ bytesRead: number }>;
+	write(
+		buffer: Uint8Array,
+		offset: number,
+		length: number,
+		position: number,
+	): Promise<{ bytesWritten: number }>;
+	stat(): Promise<AsyncTreeStats>;
+	chmod(mode: number): Promise<void>;
 	close(): Promise<void>;
 }
 
@@ -250,7 +263,8 @@ export interface AsyncTreeFs {
 	unlink(filePath: string): Promise<void>;
 	rmdir(dirPath: string): Promise<void>;
 	utimes(filePath: string, atime: Date, mtime: Date): Promise<void>;
-	open(filePath: string, flags: "r"): Promise<AsyncTreeFileHandle>;
+	realpath(filePath: string): Promise<string>;
+	open(filePath: string, flags: string | number, mode?: number): Promise<AsyncTreeFileHandle>;
 }
 
 export const realAsyncTreeFs: AsyncTreeFs = {
@@ -265,7 +279,8 @@ export const realAsyncTreeFs: AsyncTreeFs = {
 	unlink: (filePath) => fs.promises.unlink(filePath),
 	rmdir: (dirPath) => fs.promises.rmdir(dirPath),
 	utimes: (filePath, atime, mtime) => fs.promises.utimes(filePath, atime, mtime),
-	open: (filePath, flags) => fs.promises.open(filePath, flags),
+	realpath: filePath => fs.promises.realpath(filePath),
+	open: (filePath, flags, mode) => fs.promises.open(filePath, flags, mode),
 };
 
 export type AsyncTreeEntryKind = "directory" | "file" | "symlink" | "other";
@@ -400,6 +415,233 @@ export async function listTreeFiles(root: string, options: WalkTreeOptions = {})
 	return files.sort();
 }
 
+type RegularFileReadFs = Pick<AsyncTreeFs, "lstat" | "open" | "realpath">;
+type RegularFileCopyFs = Pick<AsyncTreeFs, "lstat" | "open" | "realpath" | "unlink">;
+
+export interface OpenedRegularFile {
+	handle: AsyncTreeFileHandle;
+	stats: AsyncTreeStats;
+}
+
+function noFollowUnsupported(error: unknown): boolean {
+	const code = (error as NodeJS.ErrnoException | undefined)?.code;
+	return code === "EINVAL" || code === "ENOSYS" || code === "ENOTSUP" || code === "EOPNOTSUPP";
+}
+
+function identityOf(stats: AsyncTreeStats): string | undefined {
+	if (stats.dev === undefined || stats.ino === undefined) return undefined;
+	const ino = String(stats.ino);
+	// Some filesystems expose a placeholder zero rather than a stable file ID.
+	if (ino === "0") return undefined;
+	return `${String(stats.dev)}:${ino}`;
+}
+
+/** True when stats expose a stable descriptor identity usable for comparisons. */
+export function hasStableFileIdentity(stats: AsyncTreeStats): boolean {
+	return identityOf(stats) !== undefined;
+}
+
+/** True only when both stats expose the same stable descriptor identity. */
+export function sameFileIdentity(left: AsyncTreeStats, right: AsyncTreeStats): boolean {
+	const leftIdentity = identityOf(left);
+	return leftIdentity !== undefined && leftIdentity === identityOf(right);
+}
+
+function isContainedPath(filePath: string, root: string): boolean {
+	const relative = path.relative(path.resolve(root), path.resolve(filePath));
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+async function closeAfterError(handle: AsyncTreeFileHandle, operationError: unknown): Promise<never> {
+	try { await handle.close(); } catch { /* preserve the validation error */ }
+	throw operationError;
+}
+
+/**
+ * Open a regular source file without following a substituted final-component
+ * symlink. POSIX uses O_NOFOLLOW; every platform also compares descriptor and
+ * pathname identities before any bytes are read. When a canonical root is
+ * supplied, a post-open realpath check rejects ancestor-symlink substitution.
+ * The descriptor anchors every later read.
+ */
+export async function openRegularFileNoFollow(
+	filePath: string,
+	fileSystem: RegularFileReadFs = realAsyncTreeFs,
+	containedWithin?: string,
+): Promise<OpenedRegularFile> {
+	const noFollow = (fs.constants as Record<string, number | undefined>).O_NOFOLLOW;
+	let handle: AsyncTreeFileHandle;
+	let noFollowEnforced = false;
+	if (typeof noFollow === "number" && noFollow !== 0) {
+		try {
+			handle = await fileSystem.open(filePath, fs.constants.O_RDONLY | noFollow);
+			noFollowEnforced = true;
+		} catch (error) {
+			if (!noFollowUnsupported(error)) throw error;
+			handle = await fileSystem.open(filePath, "r");
+		}
+	} else {
+		handle = await fileSystem.open(filePath, "r");
+	}
+
+	let descriptorStats: AsyncTreeStats;
+	try {
+		descriptorStats = await handle.stat();
+	} catch (error) {
+		return closeAfterError(handle, error);
+	}
+	if (!descriptorStats.isFile() || descriptorStats.isSymbolicLink()) {
+		return closeAfterError(handle, new Error(`Source is not an opened regular file: ${filePath}`));
+	}
+
+	let pathnameStats: AsyncTreeStats;
+	try {
+		pathnameStats = await fileSystem.lstat(filePath);
+	} catch (error) {
+		return closeAfterError(handle, error);
+	}
+	const descriptorIdentity = identityOf(descriptorStats);
+	const pathnameIdentity = identityOf(pathnameStats);
+	if (pathnameStats.isSymbolicLink()
+		|| !pathnameStats.isFile()
+		|| (descriptorIdentity !== undefined && descriptorIdentity !== pathnameIdentity)
+		|| (!noFollowEnforced && (descriptorIdentity === undefined || pathnameIdentity === undefined))) {
+		return closeAfterError(handle, new Error(`Source changed or is not a regular file: ${filePath}`));
+	}
+	if (containedWithin !== undefined) {
+		let canonicalPath: string;
+		try { canonicalPath = await fileSystem.realpath(filePath); }
+		catch (error) { return closeAfterError(handle, error); }
+		if (!isContainedPath(canonicalPath, containedWithin)) {
+			return closeAfterError(handle, new Error(`Source escapes its expected root: ${filePath}`));
+		}
+	}
+	return { handle, stats: descriptorStats };
+}
+
+export interface ReadRegularFileChunksOptions {
+	fs?: RegularFileReadFs;
+	chunkSize?: number;
+	/** Canonical source root that the opened file must remain within. */
+	containedWithin?: string;
+}
+
+/** Stream bounded chunks from one validated, descriptor-anchored source. */
+export async function readRegularFileNoFollowInChunks(
+	filePath: string,
+	onChunk: (chunk: Uint8Array) => Promise<void> | void,
+	options: ReadRegularFileChunksOptions = {},
+): Promise<AsyncTreeStats> {
+	const chunkSize = options.chunkSize ?? 64 * 1024;
+	if (!Number.isInteger(chunkSize) || chunkSize <= 0) {
+		throw new RangeError("chunk size must be a positive integer");
+	}
+	const opened = await openRegularFileNoFollow(filePath, options.fs, options.containedWithin);
+	const buffer = new Uint8Array(chunkSize);
+	let position = 0;
+	let chunksSinceYield = 0;
+	let operationError: unknown;
+	try {
+		for (;;) {
+			const { bytesRead } = await opened.handle.read(buffer, 0, buffer.length, position);
+			if (bytesRead === 0) break;
+			await onChunk(buffer.subarray(0, bytesRead));
+			position += bytesRead;
+			chunksSinceYield++;
+			if (chunksSinceYield >= COOPERATIVE_YIELD_INTERVAL) {
+				chunksSinceYield = 0;
+				await yieldToEventLoop();
+			}
+		}
+	} catch (error) {
+		operationError = error;
+	}
+	try { await opened.handle.close(); }
+	catch (closeError) { operationError ??= closeError; }
+	if (operationError !== undefined) throw operationError;
+	return opened.stats;
+}
+
+export interface CopyRegularFileOptions {
+	fs?: RegularFileCopyFs;
+	chunkSize?: number;
+	/** Canonical source root that the opened file must remain within. */
+	containedWithin?: string;
+	/** Fail if the destination exists (default true). */
+	exclusive?: boolean;
+	/** Destination create mode before the source mode is applied. */
+	createMode?: number;
+}
+
+/**
+ * Copy through bounded source/destination descriptors. A failed copy removes
+ * only the exclusively-created destination and always preserves the primary
+ * read/write/close error over best-effort cleanup failures.
+ */
+export async function copyRegularFileNoFollow(
+	source: string,
+	destination: string,
+	options: CopyRegularFileOptions = {},
+): Promise<AsyncTreeStats> {
+	const fileSystem = options.fs ?? realAsyncTreeFs;
+	const opened = await openRegularFileNoFollow(source, fileSystem, options.containedWithin);
+	const chunkSize = options.chunkSize ?? 64 * 1024;
+	if (!Number.isInteger(chunkSize) || chunkSize <= 0) {
+		try { await opened.handle.close(); } catch { /* preserve the option error */ }
+		throw new RangeError("chunk size must be a positive integer");
+	}
+
+	let destinationHandle: AsyncTreeFileHandle | undefined;
+	let destinationCreated = false;
+	let operationError: unknown;
+	try {
+		if (options.exclusive === false) {
+			try { await fileSystem.unlink(destination); }
+			catch (error) { if (!isMissing(error)) throw error; }
+		}
+		// The string form maps to native O_CREAT|O_EXCL without baking one
+		// platform's numeric flag values into an injected/portable filesystem.
+		destinationHandle = await fileSystem.open(destination, "wx", options.createMode ?? 0o666);
+		destinationCreated = true;
+		const buffer = new Uint8Array(chunkSize);
+		let position = 0;
+		let chunksSinceYield = 0;
+		for (;;) {
+			const { bytesRead } = await opened.handle.read(buffer, 0, buffer.length, position);
+			if (bytesRead === 0) break;
+			let written = 0;
+			while (written < bytesRead) {
+				const result = await destinationHandle.write(buffer, written, bytesRead - written, position + written);
+				if (result.bytesWritten <= 0) throw new Error(`Copy made no write progress: ${destination}`);
+				written += result.bytesWritten;
+			}
+			position += bytesRead;
+			chunksSinceYield++;
+			if (chunksSinceYield >= COOPERATIVE_YIELD_INTERVAL) {
+				chunksSinceYield = 0;
+				await yieldToEventLoop();
+			}
+		}
+		if (opened.stats.mode !== undefined) await destinationHandle.chmod(opened.stats.mode & 0o7777);
+	} catch (error) {
+		operationError = error;
+	}
+
+	if (destinationHandle) {
+		try { await destinationHandle.close(); }
+		catch (closeError) { operationError ??= closeError; }
+	}
+	try { await opened.handle.close(); }
+	catch (closeError) { operationError ??= closeError; }
+	if (operationError !== undefined) {
+		if (destinationCreated) {
+			try { await fileSystem.unlink(destination); } catch { /* preserve the copy error */ }
+		}
+		throw operationError;
+	}
+	return opened.stats;
+}
+
 export interface ReadFileChunksOptions {
 	fs?: Pick<AsyncTreeFs, "open">;
 	chunkSize?: number;
@@ -470,9 +712,15 @@ export async function copyTree(source: string, destination: string, options: Cop
 	}
 
 	const treeFs = options.fs ?? realAsyncTreeFs;
+	const canonicalSourceRoot = await treeFs.realpath(sourceRoot);
 	const symlinks = options.symlinks ?? "copy";
 	const preserveTimestamps = options.preserveTimestamps ?? true;
 	const copyFileMode = options.copyFileMode ?? fs.constants.COPYFILE_EXCL;
+	if ((copyFileMode & fs.constants.COPYFILE_FICLONE_FORCE) !== 0) {
+		const error = new Error("Descriptor-anchored copy cannot require copy-on-write cloning") as NodeJS.ErrnoException;
+		error.code = "ENOTSUP";
+		throw error;
+	}
 	await treeFs.mkdir(path.dirname(destinationRoot), { recursive: true });
 
 	await walkTree(sourceRoot, async (entry) => {
@@ -484,9 +732,13 @@ export async function copyTree(source: string, destination: string, options: Cop
 			return;
 		}
 		if (entry.kind === "file") {
-			await treeFs.copyFile(entry.absolutePath, target, copyFileMode);
-			if (preserveTimestamps && entry.stats.atime && entry.stats.mtime) {
-				await treeFs.utimes(target, entry.stats.atime, entry.stats.mtime);
+			const sourceStats = await copyRegularFileNoFollow(entry.absolutePath, target, {
+				fs: treeFs,
+				containedWithin: canonicalSourceRoot,
+				exclusive: (copyFileMode & fs.constants.COPYFILE_EXCL) !== 0,
+			});
+			if (preserveTimestamps && sourceStats.atime && sourceStats.mtime) {
+				await treeFs.utimes(target, sourceStats.atime, sourceStats.mtime);
 			}
 			return;
 		}

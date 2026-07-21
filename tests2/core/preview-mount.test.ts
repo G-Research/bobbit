@@ -1,10 +1,12 @@
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
 import { createFsFromVolume, Volume } from "memfs";
 import {
 	DEFAULT_INLINE_ENTRY,
 	contentHashForMount,
+	createPreviewAsyncFs,
 	mountDir,
 	mountFile,
 	mountPath,
@@ -13,13 +15,14 @@ import {
 	setPreviewFsForTesting,
 	setPreviewRootForTesting,
 	writeInline,
+	type PreviewAsyncFs,
 } from "../../src/server/preview/mount.ts";
 
 const SID = "11111111-2222-3333-4444-555555555555";
 const SID_B = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const SID_C = "99999999-8888-7777-6666-555555555555";
 let root: string;
-let testFs: typeof import("node:fs");
+let testFs: typeof fs;
 let sequence = 0;
 
 function makeDir(label: string): string {
@@ -29,16 +32,16 @@ function makeDir(label: string): string {
 }
 
 beforeAll(() => {
-	const volumeFs = createFsFromVolume(new Volume()) as unknown as typeof import("node:fs");
+	const volumeFs = createFsFromVolume(new Volume()) as unknown as typeof fs;
 	const drive = path.parse(process.cwd()).root.slice(0, 2);
 	const normalizeRealpath = (value: string) => {
 		const canonical = value.replace(/\//g, path.sep);
 		return path.resolve(`${drive}${canonical}`);
 	};
 	const rawRealpathSync = volumeFs.realpathSync.bind(volumeFs);
-	volumeFs.realpathSync = ((value: import("node:fs").PathLike) => normalizeRealpath(String(rawRealpathSync(value)))) as typeof volumeFs.realpathSync;
+	volumeFs.realpathSync = ((value: fs.PathLike) => normalizeRealpath(String(rawRealpathSync(value)))) as typeof volumeFs.realpathSync;
 	const rawRealpath = volumeFs.promises.realpath.bind(volumeFs.promises);
-	volumeFs.promises.realpath = (async (value: import("node:fs").PathLike) => normalizeRealpath(String(await rawRealpath(value)))) as typeof volumeFs.promises.realpath;
+	volumeFs.promises.realpath = (async (value: fs.PathLike) => normalizeRealpath(String(await rawRealpath(value)))) as typeof volumeFs.promises.realpath;
 	testFs = volumeFs;
 	root = path.resolve("/memfs/preview-mount");
 	testFs.mkdirSync(root, { recursive: true });
@@ -151,6 +154,67 @@ describe("preview mount", () => {
 			testFs.rmSync(outside, { recursive: true, force: true });
 			await removeMount(SID_B);
 		}
+	});
+
+	it("rejects an entry replaced by a symlink during the direct-copy fallback", async () => {
+		await removeMount(SID_B);
+		const src = makeSource();
+		const outside = makeDir("fallback-outside");
+		const victim = path.join(src, "report.html");
+		const secret = path.join(outside, "secret.txt");
+		testFs.writeFileSync(secret, "external-secret");
+		const baseFs = createPreviewAsyncFs(testFs);
+		let victimOpens = 0;
+		let substituted = false;
+		let reads = 0;
+		const raceFs: PreviewAsyncFs = {
+			...baseFs,
+			link: async () => {
+				const error = new Error("cross-device") as NodeJS.ErrnoException;
+				error.code = "EXDEV";
+				throw error;
+			},
+			open: async (filePath, flags, mode) => {
+				const absolute = path.resolve(String(filePath));
+				if (absolute === path.resolve(victim)) {
+					victimOpens++;
+					if (!substituted && victimOpens === 2) {
+						substituted = true;
+						testFs.unlinkSync(victim);
+						testFs.symlinkSync(secret, victim);
+					}
+				}
+				const handle = await baseFs.open(filePath, flags, mode);
+				return {
+					read: async (...args: Parameters<typeof handle.read>) => {
+						reads++;
+						return handle.read(...args);
+					},
+					write: (...args: Parameters<typeof handle.write>) => handle.write(...args),
+					stat: (...args: Parameters<typeof handle.stat>) => handle.stat(...args),
+					chmod: (newMode: number) => handle.chmod(newMode),
+					close: () => handle.close(),
+				} as unknown as fs.promises.FileHandle;
+			},
+		};
+		setPreviewFsForTesting(raceFs);
+		try {
+			await assert.rejects(
+				mountFile(SID_B, victim),
+				(error: unknown) => error instanceof PreviewMountError && error.statusCode === 500,
+			);
+		} finally {
+			setPreviewFsForTesting(testFs);
+		}
+
+		assert.equal(victimOpens, 2, "the EXDEV fallback must reopen the source for descriptor-anchored streaming");
+		assert.equal(reads, 0, "the followed secret descriptor must be rejected before reading");
+		assert.equal(testFs.readFileSync(secret, "utf-8"), "external-secret");
+		assert.equal(testFs.existsSync(path.join(mountPath(SID_B), "report.html")), false);
+		assert.deepEqual(testFs.readdirSync(root).filter(name => name.startsWith(`.${SID_B}.tmp-`)), []);
+		testFs.rmSync(src, { recursive: true, force: true });
+		testFs.rmSync(outside, { recursive: true, force: true });
+		await removeMount(SID_B);
 	});
 
 	it("stages before swap, supports reopening a mounted path, and rolls back staging errors", async () => {
