@@ -40,7 +40,7 @@
     },
     {
       "path": "tests2/core/preview-identity-guard-cost.test.ts",
-      "reason": "Deterministic counting-filesystem regression proving preview candidate/session/store identity claims remain flat and deduplicated: multi-candidate lookup, deep validation/hash, and descriptor-anchored copy retain bounded linear lstat/realpath/open counts without nested guard multiplication.",
+      "reason": "Deterministic counting-filesystem regressions proving preview identity claims remain flat while the complete artifact catalog stays bounded to 256 candidates and 64 LRU sessions, caches negative hashes without metadata rescans, revalidates positive candidates in filesystem order, invalidates on root mutation/corruption/filesystem-seam reset, and leaves oversized stores on the canonical bounded batch path.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

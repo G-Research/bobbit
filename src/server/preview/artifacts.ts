@@ -14,6 +14,7 @@ import {
 	hasStableFileIdentity,
 	mapWithConcurrency,
 	readRegularFileNoFollowInChunks,
+	sameFileIdentity,
 	RECOVERY_IO_CONCURRENCY,
 } from "../agent/bounded-async-work.js";
 import * as previewMount from "./mount.js";
@@ -44,11 +45,39 @@ export class PreviewArtifactError extends Error {
 	}
 }
 
+const PREVIEW_ARTIFACT_CATALOG_SESSION_LIMIT = 64;
+const PREVIEW_ARTIFACT_CATALOG_CANDIDATE_LIMIT = 256;
+
+interface PreviewArtifactCatalogEntry {
+	artifactId: string;
+	contentHash?: string;
+}
+
+interface PreviewArtifactSessionRootStamp {
+	dev: string;
+	ino: string;
+	type: number;
+	mtimeMs: number;
+	ctimeMs: number;
+	size: number;
+	nlink: number;
+}
+
+interface PreviewArtifactCatalog {
+	stamp: PreviewArtifactSessionRootStamp;
+	/** Every syntactically valid candidate ID, in filesystem enumeration order. */
+	entries: readonly PreviewArtifactCatalogEntry[];
+	/** Ordered entry indexes; total indexes across the map never exceeds 256. */
+	byHash: ReadonlyMap<string, readonly number[]>;
+}
+
 let _artifactRootOverride: string | undefined;
 let artifactFs: previewMount.PreviewAsyncFs = previewMount.createPreviewAsyncFs(fs);
+const previewArtifactCatalogs = new Map<string, PreviewArtifactCatalog>();
 
 export function setPreviewArtifactRootForTesting(dir: string | undefined): void {
 	_artifactRootOverride = dir;
+	previewArtifactCatalogs.clear();
 }
 
 /** Install a promise-only filesystem test double for metadata and artifact trees. */
@@ -56,6 +85,7 @@ export function setPreviewArtifactFsForTesting(
 	fsImpl: typeof fs | previewMount.PreviewAsyncFs | undefined,
 ): void {
 	artifactFs = previewMount.createPreviewAsyncFs(fsImpl ?? fs);
+	previewArtifactCatalogs.clear();
 }
 
 function artifactRoot(): string {
@@ -103,7 +133,12 @@ export async function persistPreviewArtifact(
 	if (existing) return existing;
 
 	const sessionDir = artifactSessionDir(sessionId);
-	await artifactFs.mkdir(sessionDir, { recursive: true });
+	try {
+		await artifactFs.mkdir(sessionDir, { recursive: true });
+	} catch (error) {
+		invalidatePreviewArtifactCatalog(sessionId);
+		throw error;
+	}
 	for (let attempt = 0; attempt < 5; attempt++) {
 		const artifactId = createArtifactId();
 		const finalDir = path.join(sessionDir, artifactId);
@@ -131,8 +166,10 @@ export async function persistPreviewArtifact(
 			};
 			await writeJsonAtomic(path.join(tmpDir, "artifact.json"), record);
 			await artifactFs.rename(tmpDir, finalDir);
+			await refreshPreviewArtifactCatalogAfterInstall(sessionId, record);
 			return record;
 		} catch (err) {
+			invalidatePreviewArtifactCatalog(sessionId);
 			try { await previewMount.removePreviewTree(tmpDir, { fs: artifactFs }); } catch { /* ignore cleanup */ }
 			if (err instanceof PreviewArtifactError) throw err;
 			const code = (err as NodeJS.ErrnoException)?.code;
@@ -281,6 +318,7 @@ export async function restorePreviewArtifact(
 /** Delete all artifacts for a session. Invalid IDs and missing roots are no-ops. */
 export async function removeArtifacts(sessionId: string): Promise<void> {
 	if (!VALID_SESSION_ID.test(sessionId || "")) return;
+	invalidatePreviewArtifactCatalog(sessionId);
 	await previewMount.removePreviewTree(path.join(artifactRoot(), sessionId), { fs: artifactFs });
 }
 
@@ -311,7 +349,10 @@ export async function sweepOrphanArtifacts(
 			{ fs: artifactFs, concurrency: RECOVERY_IO_CONCURRENCY },
 		);
 		for (let index = 0; index < batch.length; index++) {
-			if (outcomes[index] === null) removed.push(batch[index]!);
+			if (outcomes[index] === null) {
+				invalidatePreviewArtifactCatalog(batch[index]!);
+				removed.push(batch[index]!);
+			}
 		}
 	};
 	try {
@@ -347,51 +388,200 @@ export async function findPreviewArtifactByHash(
 ): Promise<PreviewArtifactRecord | null> {
 	validateSessionId(sessionId);
 	validateContentHash(contentHash);
-	const sessionDir = artifactSessionDir(sessionId);
-	let directory: fs.Dir;
-	let sessionBound: previewMount.BoundPreviewDirectoryRoot;
+
+	const sessionBound = await bindArtifactSessionRoot(sessionId);
+	if (!sessionBound) return null;
+	const stamp = await currentArtifactSessionStamp(sessionId, sessionBound);
+	if (!stamp) {
+		invalidatePreviewArtifactCatalog(sessionId);
+		return scanPreviewArtifactsByHash(sessionId, contentHash, sessionBound, undefined);
+	}
+
+	const catalog = peekPreviewArtifactCatalog(sessionId);
+	if (catalog && sameArtifactSessionStamp(catalog.stamp, stamp)) {
+		touchPreviewArtifactCatalog(sessionId, catalog);
+		const matchingIndexes = catalog.byHash.get(contentHash);
+		if (!matchingIndexes) return null;
+
+		for (const index of matchingIndexes) {
+			const entry = catalog.entries[index]!;
+			try {
+				// Cached metadata is only an index. Positive reuse always reopens the
+				// no-follow metadata descriptor and validates the immutable tree.
+				const artifact = await readPreviewArtifactWithFs(
+					sessionId,
+					entry.artifactId,
+					artifactFs,
+					sessionBound,
+				);
+				if (artifact.record.contentHash !== contentHash) throw staleArtifactCatalogError();
+				await validateArtifactMount(
+					artifact.record,
+					artifactMountDir(sessionId, entry.artifactId),
+					artifactFs,
+					artifact.bound,
+				);
+				const finalStamp = await currentArtifactSessionStamp(sessionId, sessionBound);
+				if (!finalStamp || !sameArtifactSessionStamp(catalog.stamp, finalStamp)) {
+					throw staleArtifactCatalogError();
+				}
+				return artifact.record;
+			} catch {
+				// Any stale/corrupt positive invalidates the complete claim. A single
+				// canonical rescan then skips it and can find the next exact candidate.
+				invalidatePreviewArtifactCatalog(sessionId);
+				return scanPreviewArtifactsByHash(sessionId, contentHash);
+			}
+		}
+	}
+
+	invalidatePreviewArtifactCatalog(sessionId);
+	return scanPreviewArtifactsByHash(sessionId, contentHash, sessionBound, stamp);
+}
+
+async function bindArtifactSessionRoot(
+	sessionId: string,
+): Promise<previewMount.BoundPreviewDirectoryRoot | null> {
 	try {
-		sessionBound = await previewMount.bindPreviewDirectoryRoot(sessionDir, {
+		return await previewMount.bindPreviewDirectoryRoot(artifactSessionDir(sessionId), {
 			fs: artifactFs,
 			trustedRoot: artifactRoot(),
 		});
-		directory = await sessionBound.fs.opendir(sessionDir);
-	} catch { return null; }
+	} catch {
+		invalidatePreviewArtifactCatalog(sessionId);
+		return null;
+	}
+}
 
-	const inspectBatch = async (artifactIds: readonly string[]): Promise<PreviewArtifactRecord | null> => {
+async function currentArtifactSessionStamp(
+	sessionId: string,
+	sessionBound: previewMount.BoundPreviewDirectoryRoot,
+): Promise<PreviewArtifactSessionRootStamp | null> {
+	try {
 		await sessionBound.assertCurrent();
-		const outcomes = await mapWithConcurrency(
-			artifactIds,
-			RECOVERY_IO_CONCURRENCY,
-			async (artifactId): Promise<PreviewArtifactReadOutcome> => {
+		const current = await sessionBound.rawFs.lstat(artifactSessionDir(sessionId));
+		await sessionBound.assertCurrent();
+		if (!current.isDirectory()
+			|| current.isSymbolicLink()
+			|| !sameFileIdentity(sessionBound.stats, current)) {
+			return null;
+		}
+		return artifactSessionStamp(current);
+	} catch {
+		return null;
+	}
+}
+
+function artifactSessionStamp(stats: fs.Stats): PreviewArtifactSessionRootStamp | null {
+	if (!hasStableFileIdentity(stats)
+		|| !stats.isDirectory()
+		|| stats.isSymbolicLink()
+		|| !Number.isFinite(stats.mode)
+		|| !Number.isFinite(stats.mtimeMs)
+		|| !Number.isFinite(stats.ctimeMs)
+		|| !Number.isFinite(stats.size)
+		|| !Number.isFinite(stats.nlink)) {
+		return null;
+	}
+	return {
+		dev: String(stats.dev),
+		ino: String(stats.ino),
+		type: stats.mode & 0o170000,
+		mtimeMs: stats.mtimeMs,
+		ctimeMs: stats.ctimeMs,
+		size: stats.size,
+		nlink: stats.nlink,
+	};
+}
+
+function sameArtifactSessionIdentity(
+	left: PreviewArtifactSessionRootStamp,
+	right: PreviewArtifactSessionRootStamp,
+): boolean {
+	return left.dev === right.dev && left.ino === right.ino && left.type === right.type;
+}
+
+function sameArtifactSessionStamp(
+	left: PreviewArtifactSessionRootStamp,
+	right: PreviewArtifactSessionRootStamp,
+): boolean {
+	return sameArtifactSessionIdentity(left, right)
+		&& left.mtimeMs === right.mtimeMs
+		&& left.ctimeMs === right.ctimeMs
+		&& left.size === right.size
+		&& left.nlink === right.nlink;
+}
+
+async function readPreviewArtifactBatch(
+	sessionId: string,
+	artifactIds: readonly string[],
+	sessionBound: previewMount.BoundPreviewDirectoryRoot,
+): Promise<PreviewArtifactReadOutcome[]> {
+	await sessionBound.assertCurrent();
+	const outcomes = await mapWithConcurrency(
+		artifactIds,
+		RECOVERY_IO_CONCURRENCY,
+		async (artifactId): Promise<PreviewArtifactReadOutcome> => {
+			try {
+				await sessionBound.assertCurrent();
+				const artifact = await readPreviewArtifactWithFs(
+					sessionId,
+					artifactId,
+					artifactFs,
+					sessionBound,
+				);
+				await sessionBound.assertCurrent();
+				return { ok: true, artifact };
+			} catch (error) {
+				// One corrupt candidate must not reject the ordered batch. Recheck the
+				// shared parent so a replaced root still aborts at the batch boundary.
 				try {
 					await sessionBound.assertCurrent();
-					const artifact = await readPreviewArtifactWithFs(
-						sessionId,
-						artifactId,
-						artifactFs,
-						sessionBound,
-					);
-					await sessionBound.assertCurrent();
-					return { ok: true, artifact };
-				} catch (error) {
-					// One corrupt candidate must not reject the ordered batch. Recheck the
-					// shared parent on the error path too; the batch boundary assertion
-					// below will propagate a changed session root after every worker settles.
-					try {
-						await sessionBound.assertCurrent();
-					} catch (rootError) {
-						return { ok: false, error: rootError };
-					}
-					return { ok: false, error };
+				} catch (rootError) {
+					return { ok: false, error: rootError };
 				}
-			},
-		);
-		await sessionBound.assertCurrent();
+				return { ok: false, error };
+			}
+		},
+	);
+	await sessionBound.assertCurrent();
+	return outcomes;
+}
 
-		// Metadata may finish out of order, but exact tree validation stays
-		// sequential. This preserves first-valid selection without prefetching the
-		// next directory batch while a matching candidate is being validated.
+async function scanPreviewArtifactsByHash(
+	sessionId: string,
+	contentHash: string,
+	existingBound?: previewMount.BoundPreviewDirectoryRoot,
+	existingStamp?: PreviewArtifactSessionRootStamp,
+): Promise<PreviewArtifactRecord | null> {
+	const sessionBound = existingBound ?? await bindArtifactSessionRoot(sessionId);
+	if (!sessionBound) return null;
+	const scanStamp = existingStamp ?? await currentArtifactSessionStamp(sessionId, sessionBound) ?? undefined;
+	const sessionDir = artifactSessionDir(sessionId);
+	let directory: fs.Dir;
+	try {
+		directory = await sessionBound.fs.opendir(sessionDir);
+	} catch {
+		invalidatePreviewArtifactCatalog(sessionId);
+		return null;
+	}
+
+	let catalogEntries: PreviewArtifactCatalogEntry[] | undefined = scanStamp ? [] : undefined;
+	let candidateCount = 0;
+	const inspectBatch = async (artifactIds: readonly string[]): Promise<PreviewArtifactRecord | null> => {
+		const outcomes = await readPreviewArtifactBatch(sessionId, artifactIds, sessionBound);
+		if (catalogEntries) {
+			for (let index = 0; index < artifactIds.length; index++) {
+				const outcome = outcomes[index]!;
+				catalogEntries.push({
+					artifactId: artifactIds[index]!,
+					...(outcome.ok ? { contentHash: outcome.artifact.record.contentHash } : {}),
+				});
+			}
+		}
+
+		// Metadata may finish out of order, but exact tree validation remains
+		// sequential. No later directory batch is prefetched during validation.
 		for (const outcome of outcomes) {
 			await sessionBound.assertCurrent();
 			if (!outcome.ok || outcome.artifact.record.contentHash !== contentHash) continue;
@@ -405,9 +595,7 @@ export async function findPreviewArtifactByHash(
 				await sessionBound.assertCurrent();
 				return outcome.artifact.record;
 			} catch {
-				// Corrupt/mismatched entries are not reusable; leave them for maintenance.
-				// Reasserting the shared parent distinguishes candidate corruption from a
-				// stale session-root claim, which must abort the scan.
+				// Corrupt/mismatched entries remain in place for maintenance.
 				await sessionBound.assertCurrent();
 			}
 		}
@@ -420,8 +608,20 @@ export async function findPreviewArtifactByHash(
 			await sessionBound.assertCurrent();
 			const ent = await directory.read();
 			await sessionBound.assertCurrent();
-			if (!ent) break;
+			if (!ent) {
+				const exact = artifactIds.length > 0 ? await inspectBatch(artifactIds) : null;
+				if (catalogEntries && scanStamp) {
+					await installPreviewArtifactCatalogIfStable(sessionId, sessionBound, scanStamp, catalogEntries);
+				}
+				return exact;
+			}
 			if (!VALID_ARTIFACT_ID.test(ent.name)) continue;
+			candidateCount++;
+			if (candidateCount > PREVIEW_ARTIFACT_CATALOG_CANDIDATE_LIMIT) {
+				// Release bounded metadata immediately. The canonical batch scan keeps
+				// streaming, but this oversized session is deliberately left uncached.
+				catalogEntries = undefined;
+			}
 			artifactIds.push(ent.name);
 			if (artifactIds.length < RECOVERY_IO_CONCURRENCY) continue;
 			const batch = artifactIds;
@@ -429,11 +629,148 @@ export async function findPreviewArtifactByHash(
 			const exact = await inspectBatch(batch);
 			if (exact) return exact;
 		}
-		if (artifactIds.length > 0) return await inspectBatch(artifactIds);
-		return null;
 	} finally {
 		try { await directory.close(); } catch { /* read failure may close the handle */ }
 	}
+}
+
+async function installPreviewArtifactCatalogIfStable(
+	sessionId: string,
+	sessionBound: previewMount.BoundPreviewDirectoryRoot,
+	scanStamp: PreviewArtifactSessionRootStamp,
+	entries: readonly PreviewArtifactCatalogEntry[],
+): Promise<void> {
+	if (entries.length > PREVIEW_ARTIFACT_CATALOG_CANDIDATE_LIMIT) return;
+	const finalStamp = await currentArtifactSessionStamp(sessionId, sessionBound);
+	if (!finalStamp || !sameArtifactSessionStamp(scanStamp, finalStamp)) {
+		invalidatePreviewArtifactCatalog(sessionId);
+		return;
+	}
+	setPreviewArtifactCatalog(sessionId, createPreviewArtifactCatalog(finalStamp, entries));
+}
+
+function createPreviewArtifactCatalog(
+	stamp: PreviewArtifactSessionRootStamp,
+	entries: readonly PreviewArtifactCatalogEntry[],
+): PreviewArtifactCatalog {
+	const ownedEntries = entries.map(entry => ({ ...entry }));
+	const byHash = new Map<string, number[]>();
+	for (let index = 0; index < ownedEntries.length; index++) {
+		const hash = ownedEntries[index]!.contentHash;
+		if (!hash) continue;
+		const indexes = byHash.get(hash);
+		if (indexes) indexes.push(index);
+		else byHash.set(hash, [index]);
+	}
+	return { stamp, entries: ownedEntries, byHash };
+}
+
+function artifactCatalogKey(sessionId: string): string {
+	const resolved = path.resolve(artifactSessionDir(sessionId));
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function peekPreviewArtifactCatalog(sessionId: string): PreviewArtifactCatalog | undefined {
+	return previewArtifactCatalogs.get(artifactCatalogKey(sessionId));
+}
+
+function touchPreviewArtifactCatalog(sessionId: string, catalog: PreviewArtifactCatalog): void {
+	const key = artifactCatalogKey(sessionId);
+	previewArtifactCatalogs.delete(key);
+	previewArtifactCatalogs.set(key, catalog);
+}
+
+function setPreviewArtifactCatalog(sessionId: string, catalog: PreviewArtifactCatalog): void {
+	touchPreviewArtifactCatalog(sessionId, catalog);
+	while (previewArtifactCatalogs.size > PREVIEW_ARTIFACT_CATALOG_SESSION_LIMIT) {
+		const oldest = previewArtifactCatalogs.keys().next().value as string | undefined;
+		if (oldest === undefined) break;
+		previewArtifactCatalogs.delete(oldest);
+	}
+}
+
+function invalidatePreviewArtifactCatalog(sessionId: string): void {
+	if (!VALID_SESSION_ID.test(sessionId || "")) return;
+	previewArtifactCatalogs.delete(artifactCatalogKey(sessionId));
+}
+
+async function refreshPreviewArtifactCatalogAfterInstall(
+	sessionId: string,
+	record: PreviewArtifactRecord,
+): Promise<void> {
+	try {
+		const prior = peekPreviewArtifactCatalog(sessionId);
+		const sessionBound = await bindArtifactSessionRoot(sessionId);
+		if (!sessionBound) return;
+		const startStamp = await currentArtifactSessionStamp(sessionId, sessionBound);
+		if (!startStamp) {
+			invalidatePreviewArtifactCatalog(sessionId);
+			return;
+		}
+		const artifactIds = await enumerateArtifactCandidateIds(sessionBound);
+		if (!artifactIds) {
+			invalidatePreviewArtifactCatalog(sessionId);
+			return;
+		}
+
+		let entries: PreviewArtifactCatalogEntry[];
+		if (prior && sameArtifactSessionIdentity(prior.stamp, startStamp)) {
+			const priorById = new Map(prior.entries.map(entry => [entry.artifactId, entry]));
+			if (priorById.has(record.artifactId)
+				|| artifactIds.length !== prior.entries.length + 1
+				|| !artifactIds.includes(record.artifactId)
+				|| artifactIds.some(id => id !== record.artifactId && !priorById.has(id))) {
+				invalidatePreviewArtifactCatalog(sessionId);
+				return;
+			}
+			entries = artifactIds.map(artifactId => artifactId === record.artifactId
+				? { artifactId, contentHash: record.contentHash }
+				: { ...priorById.get(artifactId)! });
+		} else if (artifactIds.length === 1 && artifactIds[0] === record.artifactId) {
+			// A newly-created session proves the only candidate is the owned install.
+			entries = [{ artifactId: record.artifactId, contentHash: record.contentHash }];
+		} else {
+			invalidatePreviewArtifactCatalog(sessionId);
+			return;
+		}
+
+		await installPreviewArtifactCatalogIfStable(sessionId, sessionBound, startStamp, entries);
+	} catch {
+		// Artifact installation has already committed. Cache ambiguity must not
+		// turn that durable success into an API failure.
+		invalidatePreviewArtifactCatalog(sessionId);
+	}
+}
+
+async function enumerateArtifactCandidateIds(
+	sessionBound: previewMount.BoundPreviewDirectoryRoot,
+): Promise<string[] | null> {
+	let directory: fs.Dir;
+	try {
+		directory = await sessionBound.fs.opendir(sessionBound.path);
+	} catch {
+		return null;
+	}
+	const artifactIds: string[] = [];
+	try {
+		for (;;) {
+			await sessionBound.assertCurrent();
+			const ent = await directory.read();
+			await sessionBound.assertCurrent();
+			if (!ent) return artifactIds;
+			if (!VALID_ARTIFACT_ID.test(ent.name)) continue;
+			artifactIds.push(ent.name);
+			if (artifactIds.length > PREVIEW_ARTIFACT_CATALOG_CANDIDATE_LIMIT) return null;
+		}
+	} finally {
+		try { await directory.close(); } catch { /* read failure may close the handle */ }
+	}
+}
+
+function staleArtifactCatalogError(): Error {
+	const error = new Error("Preview artifact catalog is stale") as NodeJS.ErrnoException;
+	error.code = "ESTALE";
+	return error;
 }
 
 async function validateArtifactMount(
