@@ -995,9 +995,21 @@
       {
         "file": "tests2/core/plan-mutation-store.test.ts",
         "name": "remove returns true on hit, false on miss, and deletes an empty goal file"
+      },
+      {
+        "file": "tests2/core/api-goals-plan-mutation.test.ts",
+        "name": "approve holds the decision lock so a concurrent reject loses with REQUEST_NOT_FOUND"
+      },
+      {
+        "file": "tests2/core/api-goals-plan-mutation.test.ts",
+        "name": "double approve applies and increments the replan count exactly once"
+      },
+      {
+        "file": "tests2/core/api-goals-plan-mutation.test.ts",
+        "name": "a failed apply keeps the request pending for a successful retry"
       }
     ],
-    "rationale": "The asynchronous PlanMutationStore rewrite consolidated the original synchronous assertion into a renamed test that preserves the same observable store contract while pinning the new persistence detail."
+    "rationale": "The async store owner retains direct hit/miss deletion semantics; the decision-route owners prove the same request is consumed exactly once only after a successful apply, with concurrent decisions serialized and failed applies left pending for retry."
   },
   {
     "baseFile": "tests2/core/plan-mutation-store.test.ts",
@@ -1515,9 +1527,13 @@
       {
         "file": "tests2/core/session-manager-orphan-keep.test.ts",
         "name": "keeps only transcripts whose age is strictly less than 24 hours"
+      },
+      {
+        "file": "tests2/core/worktree-sweeper-multi.test.ts",
+        "name": "revalidates ownership acquired after the initial snapshot before cleanup"
       }
     ],
-    "rationale": "The orphan-preservation conversion to promise-based I/O consolidated the original case into the named async decision-matrix owner without changing the worktree-plus-recent-transcript safety result."
+    "rationale": "The async orphan-preservation owner retains the worktree-plus-recent-transcript safety decision, while the sweeper owner proves newly visible live ownership is revalidated at the destructive boundary and never deleted."
   },
   {
     "baseFile": "tests2/core/session-manager-orphan-keep.test.ts",
