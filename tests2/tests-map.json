@@ -2,11 +2,11 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1137,
+  "censusTotal": 1135,
   "buckets": {
     "daily": 61,
     "v2-browser": 216,
-    "v2-core": 514,
+    "v2-core": 512,
     "v2-dom": 144,
     "v2-integration": 202
   },
@@ -1260,6 +1260,33 @@
         "runner": "playwright",
         "tier": "browser",
         "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/file-mentions-authenticated-boundary.test.ts",
+      "reason": "Exact authenticated 8 MiB code-dense and deep-list Markdown resource coverage runs in a constrained child Node heap so an AST-allocation regression cannot crash the unit coordinator.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
+      "path": "tests2/core/file-mentions-resource-limits.test.ts",
+      "reason": "Structural resource, admission, concurrency, and non-regular-target coverage split from the semantic file-mention resolver suite to keep both within the tier-1 per-file wall budget.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/ws-session-command-serialiser.test.ts",
+      "reason": "Pure unit coverage for per-session WebSocket command ordering, cross-session concurrency, rejection isolation, and idle-key cleanup using deterministic deferred promises.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
       }
     }
   ],

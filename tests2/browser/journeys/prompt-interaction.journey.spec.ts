@@ -3,7 +3,7 @@
  * Covers: journey-prompt-interaction, journey-bg-wait-steer
  * Consolidated from: prompt-tool-renderer-*, bg-wait-*, steer-*, etc.
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../_helpers/journey-fixture.js";
@@ -157,18 +157,28 @@ test.describe("Journey: Prompt Interaction", () => {
 		}
 	});
 
-	// Ported from at-mention.spec.ts (audit: prompt-interaction GAP / BR56): an
-	// @text-file mention in a SENT message renders as a file-mention chip
-	// (.file-mention-chip-pill) in the user bubble and survives reload (the
-	// authoritative snapshot path carries fileMentions).
-	test("an @-mention in a sent message renders a file-mention chip that survives reload", async ({ page }) => {
+	// Ported from at-mention.spec.ts (audit: prompt-interaction GAP / BR56): only
+	// existing files outside Markdown code render as file-mention chips, and the
+	// authoritative snapshot preserves that distinction across reload.
+	test("a mixed sent prompt resolves only the existing file outside Markdown code", async ({ page }) => {
 		test.setTimeout(90_000);
-		const cwd = join(tmpdir(), `bobbit-v2-atchip-${process.env.E2E_PORT ?? "0"}-${Date.now()}`);
-		mkdirSync(cwd, { recursive: true });
-		writeFileSync(join(cwd, "notes.md"), "# notes\n");
+		const cwd = mkdtempSync(join(tmpdir(), `bobbit-v2-atchip-${process.env.E2E_PORT ?? "0"}-`));
+		const proseFile = "prose-reference.txt";
+		const inlineCodeFile = "inline-code-reference.txt";
+		const fencedCodeFile = "fenced-code-reference.txt";
+		const mixedPrompt = [
+			`Please read @${proseFile} while leaving @variableName and @missing/path.txt literal.`,
+			`Inline existing file: \`@${inlineCodeFile}\`.`,
+			"```text",
+			`Fenced existing file: @${fencedCodeFile}`,
+			"```",
+		].join("\n");
 		let sessionId = "";
 		let projectId = "";
 		try {
+			writeFileSync(join(cwd, proseFile), "prose mention fixture\n", "utf8");
+			writeFileSync(join(cwd, inlineCodeFile), "inline code fixture\n", "utf8");
+			writeFileSync(join(cwd, fencedCodeFile), "fenced code fixture\n", "utf8");
 			const projResp = await apiFetch("/api/projects", {
 				method: "POST",
 				body: JSON.stringify({ name: `v2-atchip-${Date.now()}`, rootPath: cwd }),
@@ -185,19 +195,32 @@ test.describe("Journey: Prompt Interaction", () => {
 			await openApp(page);
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
-			await sendMessage(page, "please read @notes.md carefully");
+			await sendMessage(page, mixedPrompt);
 
-			const bubble = page.locator("user-message").first();
-			await expect(bubble).toBeVisible({ timeout: 15_000 });
-			await expect(bubble).toContainText("@notes.md", { timeout: 15_000 });
+			const expectMixedPrompt = async () => {
+				const bubble = page.locator("user-message").first();
+				await expect(bubble).toBeVisible({ timeout: 20_000 });
+				await expect(bubble).toContainText("@variableName");
+				await expect(bubble).toContainText("@missing/path.txt");
+				await expect(bubble).toContainText(`@${inlineCodeFile}`);
+				await expect(bubble).toContainText(`@${fencedCodeFile}`);
 
-			// Reload takes the authoritative snapshot path; the mention must render as a chip.
+				const chips = bubble.locator(".file-mention-chip-pill");
+				await expect(chips).toHaveCount(1);
+				await expect(chips).toHaveText(`@${proseFile}`);
+				await expect(chips).toHaveAttribute("title", `File: @${proseFile}`);
+				await expect(chips.filter({ hasText: `@${inlineCodeFile}` })).toHaveCount(0);
+				await expect(chips.filter({ hasText: `@${fencedCodeFile}` })).toHaveCount(0);
+			};
+
+			await expectMixedPrompt();
+
 			await page.reload();
-			await expect(page.locator("user-message").first()).toBeVisible({ timeout: 20_000 });
-			await expect(page.locator(".file-mention-chip-pill").first()).toBeVisible({ timeout: 15_000 });
+			await expectMixedPrompt();
 		} finally {
 			if (sessionId) await deleteSession(sessionId).catch(() => {});
 			if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
+			rmSync(cwd, { recursive: true, force: true });
 		}
 	});
 
