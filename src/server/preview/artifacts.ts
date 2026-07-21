@@ -11,10 +11,8 @@ import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { bobbitStateDir } from "../bobbit-dir.js";
 import {
-	hasStableFileIdentity,
 	readRegularFileNoFollowInChunks,
 	RECOVERY_IO_CONCURRENCY,
-	sameFileIdentity,
 	type AsyncTreeStats,
 } from "../agent/bounded-async-work.js";
 import * as previewMount from "./mount.js";
@@ -88,13 +86,14 @@ export async function persistPreviewArtifact(
 	validateContentHash(mountResult.contentHash);
 
 	const liveMount = previewMount.mountPath(sessionId);
+	const liveStoreRoot = path.dirname(liveMount);
 	const liveEntry = path.join(liveMount, mountResult.entry);
 	const entryStat = await safeLstat(liveEntry);
 	if (!entryStat?.isFile() || entryStat.isSymbolicLink()) {
 		throw new PreviewArtifactError(500, "Preview entry missing before artifact capture");
 	}
 
-	const liveHash = await hashDirectory(liveMount);
+	const liveHash = await hashDirectory(liveMount, liveStoreRoot);
 	if (liveHash !== mountResult.contentHash) {
 		throw new PreviewArtifactError(500, "Preview mount changed before artifact capture");
 	}
@@ -111,12 +110,12 @@ export async function persistPreviewArtifact(
 		try {
 			await artifactFs.mkdir(tmpDir, { recursive: false });
 			const tmpMount = path.join(tmpDir, "mount");
-			await copyDirectory(liveMount, tmpMount);
-			const copiedHash = await hashDirectory(tmpMount);
+			await copyDirectory(liveMount, tmpMount, liveStoreRoot);
+			const copiedHash = await hashDirectory(tmpMount, artifactRoot());
 			if (copiedHash !== mountResult.contentHash) {
 				throw new PreviewArtifactError(500, "Preview artifact copy hash mismatch");
 			}
-			const files = await listFiles(tmpMount);
+			const files = await listFiles(tmpMount, artifactRoot());
 			if (!files.includes(mountResult.entry)) {
 				throw new PreviewArtifactError(500, "Preview artifact copy missing entry");
 			}
@@ -145,30 +144,29 @@ export async function persistPreviewArtifact(
 
 /** Read and validate one artifact record. */
 export async function readPreviewArtifact(sessionId: string, artifactId: string): Promise<PreviewArtifactRecord> {
+	return readPreviewArtifactWithFs(sessionId, artifactId, artifactFs);
+}
+
+async function readPreviewArtifactWithFs(
+	sessionId: string,
+	artifactId: string,
+	io: previewMount.PreviewAsyncFs,
+): Promise<PreviewArtifactRecord> {
 	validateSessionId(sessionId);
 	validateArtifactId(artifactId);
 	const directory = artifactDir(sessionId, artifactId);
 	const file = path.join(directory, "artifact.json");
 	let parsed: unknown;
 	try {
-		// Establish and revalidate the real directory identity around realpath
-		// before deriving or opening artifact.json through that ancestor.
-		const directoryStats = await artifactFs.lstat(directory);
-		if (!directoryStats.isDirectory() || directoryStats.isSymbolicLink()) {
-			throw new PreviewArtifactError(500, "Preview artifact metadata is invalid");
-		}
-		const canonicalDirectory = await artifactFs.realpath(directory);
-		const canonicalDirectoryStats = await artifactFs.lstat(directory);
-		if (!matchesDirectoryIdentity(directoryStats, canonicalDirectoryStats)) {
-			throw new PreviewArtifactError(500, "Preview artifact metadata is invalid");
-		}
-
-		const metadataStats = await artifactFs.lstat(file);
+		// Bind both the candidate and its canonical store ancestor to stable
+		// identities. The guarded filesystem brackets every metadata pathname
+		// operation so an ancestor toggle is rejected before descriptor reads.
+		const bound = await previewMount.bindPreviewDirectoryRoot(directory, {
+			fs: io,
+			trustedRoot: artifactRoot(),
+		});
+		const metadataStats = await bound.fs.lstat(file);
 		if (!metadataStats.isFile() || metadataStats.isSymbolicLink()) {
-			throw new PreviewArtifactError(500, "Preview artifact metadata is invalid");
-		}
-		const currentDirectoryStats = await artifactFs.lstat(directory);
-		if (!matchesDirectoryIdentity(directoryStats, currentDirectoryStats)) {
 			throw new PreviewArtifactError(500, "Preview artifact metadata is invalid");
 		}
 
@@ -179,10 +177,11 @@ export async function readPreviewArtifact(sessionId: string, artifactId: string)
 		await readRegularFileNoFollowInChunks(file, chunk => {
 			textParts.push(decoder.write(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)));
 		}, {
-			fs: artifactFs,
-			containedWithin: canonicalDirectory,
+			fs: bound.fs,
+			containedWithin: bound.canonicalPath,
 			expectedStats: metadataStats,
 		});
+		await bound.assertCurrent();
 		textParts.push(decoder.end());
 		parsed = JSON.parse(textParts.join(""));
 	} catch (err) {
@@ -213,13 +212,18 @@ export async function restorePreviewArtifact(
 	let tmpRestore = "";
 	let backupDir = "";
 	let hadLiveMount = false;
+	let tmpInstallAttempted = false;
+	let backupReady = false;
+	let backupInstallAttempted = false;
+	let preserveBackup = false;
+	let backupRootStats: AsyncTreeStats | undefined;
 	try {
 		liveMount = previewMount.mountPath(sessionId);
 		const previewParent = path.dirname(liveMount);
 		await artifactFs.mkdir(previewParent, { recursive: true });
 		tmpRestore = path.join(previewParent, `.restore-${sessionId}-${process.pid}-${Date.now()}-${randomSuffix()}`);
-		await copyDirectory(sourceMount, tmpRestore);
-		if (await hashDirectory(tmpRestore) !== record.contentHash) {
+		await copyDirectory(sourceMount, tmpRestore, artifactRoot());
+		if (await hashDirectory(tmpRestore, previewParent) !== record.contentHash) {
 			throw new PreviewArtifactError(500, "Preview artifact staged hash mismatch");
 		}
 		const stagedEntry = await safeLstat(path.join(tmpRestore, record.entry));
@@ -227,35 +231,53 @@ export async function restorePreviewArtifact(
 			throw new PreviewArtifactError(500, "Preview artifact staged entry missing");
 		}
 
-		// This check is a policy decision: only an existing live mount receives a backup.
-		hadLiveMount = (await safeLstat(liveMount))?.isDirectory() === true;
-		backupDir = path.join(previewParent, `.restore-backup-${sessionId}-${process.pid}-${Date.now()}-${randomSuffix()}`);
-		if (hadLiveMount) await copyDirectory(liveMount, backupDir);
-
-		try {
-			await artifactFs.mkdir(liveMount, { recursive: true });
-			await previewMount.wipePreviewDirectory(liveMount, { fs: artifactFs });
-			await previewMount.movePreviewDirectoryContents(tmpRestore, liveMount, { fs: artifactFs });
-		} catch (err) {
-			try {
-				await previewMount.wipePreviewDirectory(liveMount, { fs: artifactFs });
-				if (hadLiveMount && (await safeLstat(backupDir))?.isDirectory()) {
-					await previewMount.movePreviewDirectoryContents(backupDir, liveMount, { fs: artifactFs });
-				}
-			} catch (restoreErr) {
-				console.error("[preview/artifacts] failed to roll back live preview mount after restore error", restoreErr);
+		await previewMount.withPreviewDirectoryUnavailable(liveMount, async () => {
+			// This check is a policy decision: only an existing live mount receives a backup.
+			hadLiveMount = (await safeLstat(liveMount))?.isDirectory() === true;
+			backupDir = path.join(previewParent, `.restore-backup-${sessionId}-${process.pid}-${Date.now()}-${randomSuffix()}`);
+			if (hadLiveMount) {
+				// Detach the whole live root instead of preserving and traversing it.
+				// This makes the install destination absent and gives rollback the exact
+				// prior inode, including filesystem-specific directory state.
+				backupRootStats = await previewMount.movePreviewDirectoryContents(liveMount, backupDir, { fs: artifactFs });
+				backupReady = backupRootStats !== undefined;
+			} else {
+				await previewMount.removePreviewTree(liveMount, { fs: artifactFs });
 			}
-			throw err;
-		}
+
+			try {
+				tmpInstallAttempted = true;
+				await previewMount.movePreviewDirectoryContents(tmpRestore, liveMount, { fs: artifactFs });
+			} catch (err) {
+				try {
+					// The failed install may be the exact mismatched root that move could
+					// not quarantine. Rename it away; never recursively inspect it.
+					await previewMount.quarantinePreviewDirectory(liveMount, { fs: artifactFs });
+					if (backupReady && (await safeLstat(backupDir))?.isDirectory()) {
+						backupInstallAttempted = true;
+						await previewMount.movePreviewDirectoryContents(backupDir, liveMount, { fs: artifactFs });
+					}
+				} catch (restoreErr) {
+					preserveBackup = true;
+					console.error("[preview/artifacts] failed to roll back live preview mount after restore error", restoreErr);
+				}
+				throw err;
+			}
+		});
 	} catch (err) {
 		if (err instanceof PreviewArtifactError) throw err;
 		throw new PreviewArtifactError(500, `Preview artifact restore failed: ${errorMessage(err)}`);
 	} finally {
-		if (tmpRestore) {
+		if (tmpRestore && !tmpInstallAttempted) {
 			try { await previewMount.removePreviewTree(tmpRestore, { fs: artifactFs }); } catch { /* ignore cleanup */ }
 		}
-		if (backupDir) {
-			try { await previewMount.removePreviewTree(backupDir, { fs: artifactFs }); } catch { /* ignore cleanup */ }
+		if (backupReady && !backupInstallAttempted && !preserveBackup) {
+			try {
+				await previewMount.removePreviewTree(backupDir, {
+					fs: artifactFs,
+					expectedRootStats: backupRootStats,
+				});
+			} catch { /* preserve restore result; identity mismatch is never traversed */ }
 		}
 	}
 
@@ -345,23 +367,28 @@ export async function findPreviewArtifactByHash(
 	validateContentHash(contentHash);
 	const sessionDir = artifactSessionDir(sessionId);
 	let directory: fs.Dir;
+	let sessionBound: previewMount.BoundPreviewDirectoryRoot;
 	try {
-		const sessionStats = await artifactFs.lstat(sessionDir);
-		if (!sessionStats.isDirectory() || sessionStats.isSymbolicLink()) return null;
-		directory = await artifactFs.opendir(sessionDir);
+		sessionBound = await previewMount.bindPreviewDirectoryRoot(sessionDir, {
+			fs: artifactFs,
+			trustedRoot: artifactRoot(),
+		});
+		directory = await sessionBound.fs.opendir(sessionDir);
 	} catch { return null; }
 	try {
 		for (;;) {
+			await sessionBound.assertCurrent();
 			const ent = await directory.read();
+			await sessionBound.assertCurrent();
 			if (!ent) break;
 			if (!VALID_ARTIFACT_ID.test(ent.name)) continue;
 			try {
 				const candidateDir = artifactDir(sessionId, ent.name);
-				const candidateStats = await artifactFs.lstat(candidateDir);
+				const candidateStats = await sessionBound.fs.lstat(candidateDir);
 				if (!candidateStats.isDirectory() || candidateStats.isSymbolicLink()) continue;
-				const record = await readPreviewArtifact(sessionId, ent.name);
+				const record = await readPreviewArtifactWithFs(sessionId, ent.name, sessionBound.fs);
 				if (record.contentHash !== contentHash) continue;
-				await validateArtifactMount(record, artifactMountDir(sessionId, record.artifactId));
+				await validateArtifactMount(record, artifactMountDir(sessionId, record.artifactId), sessionBound.fs);
 				return record;
 			} catch {
 				// Corrupt/mismatched entries are not reusable; leave them for maintenance.
@@ -373,17 +400,21 @@ export async function findPreviewArtifactByHash(
 	}
 }
 
-async function validateArtifactMount(record: PreviewArtifactRecord, mountDir: string): Promise<void> {
-	if (!(await safeLstat(mountDir))?.isDirectory()) {
+async function validateArtifactMount(
+	record: PreviewArtifactRecord,
+	mountDir: string,
+	io: previewMount.PreviewAsyncFs = artifactFs,
+): Promise<void> {
+	if (!(await safeLstat(mountDir, io))?.isDirectory()) {
 		throw new PreviewArtifactError(500, "Preview artifact mount is missing");
 	}
-	const files = await listFiles(mountDir);
+	const files = await listFiles(mountDir, artifactRoot(), io);
 	if (!files.includes(record.entry)) throw new PreviewArtifactError(500, "Preview artifact entry is missing");
 	const recorded = new Set(record.files);
 	if (files.length !== record.files.length || files.some(rel => !recorded.has(rel))) {
 		throw new PreviewArtifactError(500, "Preview artifact file list mismatch");
 	}
-	if (await hashDirectory(mountDir) !== record.contentHash) {
+	if (await hashDirectory(mountDir, artifactRoot(), io) !== record.contentHash) {
 		throw new PreviewArtifactError(500, "Preview artifact hash mismatch");
 	}
 }
@@ -439,10 +470,11 @@ function randomSuffix(): string {
 	return crypto.randomBytes(4).toString("hex");
 }
 
-async function copyDirectory(src: string, dst: string): Promise<void> {
+async function copyDirectory(src: string, dst: string, trustedRoot: string): Promise<void> {
 	await previewMount.copyPreviewDirectory(src, dst, {
 		fs: artifactFs,
 		concurrency: RECOVERY_IO_CONCURRENCY,
+		trustedRoot,
 	});
 }
 
@@ -457,26 +489,28 @@ async function writeJsonAtomic(file: string, value: unknown): Promise<void> {
 	}
 }
 
-async function hashDirectory(root: string): Promise<string> {
+async function hashDirectory(
+	root: string,
+	trustedRoot: string,
+	io: previewMount.PreviewAsyncFs = artifactFs,
+): Promise<string> {
 	return previewMount.hashMountDirectory(root, {
-		fs: artifactFs,
+		fs: io,
 		concurrency: RECOVERY_IO_CONCURRENCY,
+		trustedRoot,
 	});
 }
 
-async function listFiles(root: string): Promise<string[]> {
+async function listFiles(
+	root: string,
+	trustedRoot: string,
+	io: previewMount.PreviewAsyncFs = artifactFs,
+): Promise<string[]> {
 	return previewMount.listMountFiles(root, {
-		fs: artifactFs,
+		fs: io,
 		concurrency: RECOVERY_IO_CONCURRENCY,
+		trustedRoot,
 	});
-}
-
-function matchesDirectoryIdentity(expected: AsyncTreeStats, current: AsyncTreeStats): boolean {
-	if (!current.isDirectory() || current.isSymbolicLink()) return false;
-	const expectedStable = hasStableFileIdentity(expected);
-	const currentStable = hasStableFileIdentity(current);
-	if (!expectedStable && !currentStable) return true;
-	return expectedStable && currentStable && sameFileIdentity(expected, current);
 }
 
 function isSafeRelativeFile(rel: string): boolean {
@@ -485,8 +519,11 @@ function isSafeRelativeFile(rel: string): boolean {
 	return rel.split("/").every(seg => seg.length > 0 && seg !== "." && seg !== "..");
 }
 
-async function safeLstat(file: string): Promise<fs.Stats | null> {
-	try { return await artifactFs.lstat(file); } catch { return null; }
+async function safeLstat(
+	file: string,
+	io: previewMount.PreviewAsyncFs = artifactFs,
+): Promise<fs.Stats | null> {
+	try { return await io.lstat(file); } catch { return null; }
 }
 
 function isEnoent(error: unknown): boolean {

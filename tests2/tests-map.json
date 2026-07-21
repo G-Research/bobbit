@@ -57,6 +57,15 @@
       }
     },
     {
+      "path": "tests2/core/preview-canonical-root-races.test.ts",
+      "reason": "Deterministic injected-filesystem regressions proving canonical preview and artifact roots stay identity-bound within trusted stores, opened canonical files match descriptor identities before reads, missing stable expectations fail closed, and whole-root staging substitution is quarantined without traversal or deletion.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/purge-preview-pool-shutdown-coder61c7.test.ts",
       "reason": "Deterministic native v2 coverage for coalesced immediate and expiry archive purges, stale-snapshot fencing, serialized preview purge cleanup, a single reclaim-candidate concurrency ceiling across many boot projects, and awaited CPU diagnostics shutdown.",
       "execution": {

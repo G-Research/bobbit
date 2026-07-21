@@ -467,7 +467,7 @@ function isExpectedRegularFile(expected: AsyncTreeStats, current: AsyncTreeStats
 		&& !expected.isSymbolicLink()
 		&& current.isFile()
 		&& !current.isSymbolicLink()
-		&& matchesIdentityWhenAvailable(expected, current);
+		&& sameFileIdentity(expected, current);
 }
 
 /** True when stats expose a stable descriptor identity usable for comparisons. */
@@ -554,6 +554,19 @@ export async function openRegularFileNoFollow(
 		catch (error) { return closeAfterError(handle, error); }
 		if (!isContainedPath(canonicalPath, containedWithin)) {
 			return closeAfterError(handle, new Error(`Source escapes its expected root: ${filePath}`));
+		}
+
+		// `realpath()` returns another pathname, not a capability. Bind that
+		// returned target back to the descriptor before any caller can read it;
+		// otherwise a toggled ancestor can make containment validate one file
+		// while the already-open descriptor identifies another.
+		let canonicalStats: AsyncTreeStats;
+		try { canonicalStats = await fileSystem.lstat(canonicalPath); }
+		catch (error) { return closeAfterError(handle, error); }
+		if (!canonicalStats.isFile()
+			|| canonicalStats.isSymbolicLink()
+			|| !sameFileIdentity(descriptorStats, canonicalStats)) {
+			return closeAfterError(handle, new Error(`Canonical source does not match the opened regular file: ${filePath}`));
 		}
 	}
 	return { handle, stats: descriptorStats };
@@ -851,6 +864,13 @@ export async function removeTree(root: string, options: RemoveTreeOptions = {}):
 		return;
 	}
 	if (options.expectedRootStats !== undefined) {
+		if (!hasStableFileIdentity(options.expectedRootStats)
+			|| !hasStableFileIdentity(rootStats)
+			|| !sameFileIdentity(options.expectedRootStats, rootStats)) {
+			const error = new Error(`Directory changed during traversal: ${root}`) as NodeJS.ErrnoException;
+			error.code = "ESTALE";
+			throw error;
+		}
 		isAuthorizedDirectory(options.expectedRootStats, rootStats, root);
 	}
 
