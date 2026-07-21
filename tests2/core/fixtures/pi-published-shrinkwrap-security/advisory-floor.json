@@ -1,0 +1,5 @@
+{
+  "package": "protobufjs",
+  "advisory": "GHSA-j3f2-48v5-ccww",
+  "minimumVersion": "7.6.5"
+}
