@@ -1787,10 +1787,10 @@ export async function shutdownCpuDiagnostics(diagnostics: Pick<CpuDiagnostics, "
 }
 
 /**
- * Serialize the boot-time worktree ownership transition. The sweeper snapshots
- * durable owners before deleting stale worktrees, so a pool entry must not be
- * exposed for claim (and renamed out of the pool namespace) until that deletion
- * phase has settled. Both phases remain post-listen background work.
+ * Serialize the boot-time worktree ownership transition. The sweeper rechecks
+ * live durable owners at every mutation boundary, while a pool entry must not
+ * be exposed for claim (and renamed out of the pool namespace) until its scan
+ * and deletion phase has settled. Both phases remain post-listen background work.
  */
 export async function coordinateBootWorktreeLifecycle(
 	runSweepDeletionPhase: () => Promise<void>,
@@ -3510,14 +3510,14 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// per project. Doing them before listen used to leave the gateway
 			// unreachable for many seconds on installs with stale worktrees.
 			//
-			// Ownership ordering: the sweeper snapshots durable owners before it
-			// scans and deletes. Pool initialization must therefore wait for the
-			// deletion phase: once an entry is exposed, a request may claim it and
-			// rename its branch out of the pool namespace, making the stale snapshot
-			// misclassify it as unowned. Both phases still run after listen(), so
-			// health and session requests remain available (sessions use the normal
-			// cold fallback until pools are ready). Independent project pools are
-			// initialized in parallel after the sweep settles.
+			// Ownership ordering: the sweeper starts from a durable-owner snapshot
+			// for deterministic scan results, then refreshes visible project stores
+			// immediately before every repair or cleanup. Pool initialization still
+			// waits for the deletion phase so a claimed entry cannot be renamed out
+			// of the pool namespace while its old listing is being reconciled. Both
+			// phases run after listen(), so health and session requests remain
+			// available (sessions use the normal cold fallback until pools are ready).
+			// Independent project pools are initialized in parallel afterwards.
 			const runBootBackgroundTasks = async (): Promise<void> => {
 				const t0 = Date.now();
 
@@ -3545,16 +3545,60 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					const tStart = Date.now();
 					try {
 						const { sweepOrphanedWorktrees } = await import("./agent/worktree-sweeper.js");
+						type SweepOwnerSnapshot = { id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> };
+						const snapshotSweepOwnership = (): {
+							goals: SweepOwnerSnapshot[];
+							sessions: SweepOwnerSnapshot[];
+							teams: SweepOwnerSnapshot[];
+							staff: SweepOwnerSnapshot[];
+						} => {
+							const goals: SweepOwnerSnapshot[] = [];
+							const sessions: SweepOwnerSnapshot[] = [];
+							const teams: SweepOwnerSnapshot[] = [];
+							const staff: SweepOwnerSnapshot[] = [];
+							// Read the currently visible stores synchronously so no request can
+							// interleave between this snapshot and the sweeper's mutation call.
+							for (const ctx of projectContextManager.visible()) {
+								if (ctx.project.id === HEADQUARTERS_PROJECT_ID || ctx.project.kind === "headquarters") continue;
+								for (const goal of ctx.goalStore.getAll()) {
+									goals.push({
+										id: goal.id, branch: goal.branch, worktreePath: goal.worktreePath, cwd: goal.cwd, archived: !!goal.archived,
+										repoWorktrees: (goal as { repoWorktrees?: Record<string, string> }).repoWorktrees,
+									});
+								}
+								for (const session of ctx.sessionStore.getAll()) {
+									sessions.push({
+										id: session.id, branch: session.branch, worktreePath: session.worktreePath, cwd: session.cwd, archived: !!session.archived,
+										repoWorktrees: session.repoWorktrees,
+									});
+								}
+								for (const team of ctx.teamStore.getAll()) {
+									for (const agent of team.agents) {
+										teams.push({ id: agent.sessionId, branch: agent.branch, worktreePath: agent.worktreePath });
+									}
+									const lead = team.teamLeadSessionId ? ctx.sessionStore.get(team.teamLeadSessionId) : undefined;
+									if (lead) {
+										teams.push({
+											id: lead.id, branch: lead.branch, worktreePath: lead.worktreePath, cwd: lead.cwd,
+											repoWorktrees: lead.repoWorktrees,
+										});
+									}
+								}
+								for (const member of ctx.staffStore.getAll()) {
+									staff.push({
+										id: member.id, branch: member.branch, worktreePath: member.worktreePath, cwd: member.cwd,
+										repoWorktrees: member.repoWorktrees,
+									});
+								}
+							}
+							return { goals, sessions, teams, staff };
+						};
+
+						const initialOwnership = snapshotSweepOwnership();
 						const sweepProjects: Array<{ id: string; rootPath: string; repos?: string[]; worktreeRoot?: string }> = [];
-						const sweepGoals: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
-						const sweepSessions: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
-						const sweepTeams: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> }> = [];
-						const sweepStaff: Array<{ id: string; branch?: string; worktreePath?: string; cwd?: string; repoWorktrees?: Record<string, string> }> = [];
-						// Skip hidden contexts (synthetic system project) — it has
-						// no goals/sessions/staff and must never drive worktree work.
+						// Skip hidden contexts (synthetic system project) and Headquarters
+						// before Git discovery; neither may ever drive worktree work.
 						for (const ctx of projectContextManager.visible()) {
-							// Headquarters is no-worktree — never enter git discovery or the
-							// sweeper. It has no worktrees/branches to reclaim.
 							if (ctx.project.id === HEADQUARTERS_PROJECT_ID || ctx.project.kind === "headquarters") continue;
 							const repoNames = ctx.projectConfigStore.repoNames();
 							const components = ctx.projectConfigStore.getComponents();
@@ -3569,54 +3613,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 								repos: repoNames.length > 0 ? repoNames : undefined,
 								worktreeRoot: ctx.projectConfigStore.get("worktree_root") || undefined,
 							});
-							for (const g of ctx.goalStore.getAll()) {
-								sweepGoals.push({
-									id: g.id, branch: g.branch, worktreePath: g.worktreePath, cwd: g.cwd, archived: !!g.archived,
-									repoWorktrees: (g as { repoWorktrees?: Record<string, string> }).repoWorktrees,
-								});
-							}
-							for (const s of ctx.sessionStore.getAll()) {
-								sweepSessions.push({
-									id: s.id, branch: s.branch, worktreePath: s.worktreePath, cwd: s.cwd, archived: !!s.archived,
-									repoWorktrees: s.repoWorktrees,
-								});
-							}
-							for (const team of ctx.teamStore.getAll()) {
-								for (const agent of team.agents) {
-									sweepTeams.push({
-										id: agent.sessionId,
-										branch: agent.branch,
-										worktreePath: agent.worktreePath,
-									});
-								}
-								const lead = team.teamLeadSessionId ? ctx.sessionStore.get(team.teamLeadSessionId) : undefined;
-								if (lead) {
-									sweepTeams.push({
-										id: lead.id,
-										branch: lead.branch,
-										worktreePath: lead.worktreePath,
-										cwd: lead.cwd,
-										repoWorktrees: lead.repoWorktrees,
-									});
-								}
-							}
-							for (const st of ctx.staffStore.getAll()) {
-								sweepStaff.push({
-									id: st.id,
-									branch: st.branch,
-									worktreePath: st.worktreePath,
-									cwd: st.cwd,
-									repoWorktrees: st.repoWorktrees,
-								});
-							}
 						}
 						bootLog(`[boot] sweeper start (${sweepProjects.length} projects)`);
 						const result = await sweepOrphanedWorktrees({
 							projects: sweepProjects,
-							goals: sweepGoals,
-							sessions: sweepSessions,
-							teams: sweepTeams,
-							staff: sweepStaff,
+							...initialOwnership,
+							getCurrentOwnership: snapshotSweepOwnership,
 						});
 						bootLog(`[boot] sweeper done in ${Date.now() - tStart}ms (reclaimed=${result.reclaimed} cleaned=${result.cleaned} repaired=${result.repaired})`);
 					} catch (err) {
