@@ -22,7 +22,10 @@ import { LOCAL_USER_AUTHOR, type MessageAuthor } from "../../src/shared/message-
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-snapshot-memo-"));
 
 beforeAll(() => {
-	initAuthorSidecarDir(stateDir);
+	initAuthorSidecarDir(stateDir, {
+		secretsDir: path.join(stateDir, "private-secrets"),
+		hmacKey: Buffer.alloc(32, 0x32),
+	});
 	initCompactionSidecarDir(stateDir);
 	initSkillSidecarDir(stateDir);
 });

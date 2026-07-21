@@ -6,6 +6,7 @@ import { it } from "vitest";
 
 import {
 	initAuthorSidecarDir,
+	promptAuthorBindingMatchesText,
 	readAuthorSidecar,
 } from "../../src/server/agent/author-sidecar.ts";
 import {
@@ -19,7 +20,10 @@ it("VerificationHarness persists its actual resumed-review reminder as verificat
 	const promptCalls: unknown[][] = [];
 	let harness: VerificationHarness;
 	try {
-		initAuthorSidecarDir(stateDir);
+		initAuthorSidecarDir(stateDir, {
+			secretsDir: path.join(stateDir, "private-secrets"),
+			hmacKey: Buffer.alloc(32, 0x33),
+		});
 		const dispatchPrompt = async (text: string, options?: unknown) => {
 			promptCalls.push([text, options]);
 			const resolver = (harness as any).pendingResults.get(sessionId);
@@ -79,7 +83,9 @@ it("VerificationHarness persists its actual resumed-review reminder as verificat
 		);
 		const bindings = readAuthorSidecar(sessionId);
 		assert.equal(bindings.length, 1);
-		assert.equal(bindings[0].modelText, VERIFICATION_RESULT_REMINDER);
+		assert.equal(bindings[0].schemaVersion, 2);
+		assert.equal(bindings[0].modelText, undefined);
+		assert.equal(promptAuthorBindingMatchesText(bindings[0], VERIFICATION_RESULT_REMINDER), true);
 		assert.equal(bindings[0].source, "verification");
 		assert.deepEqual(bindings[0].author, {
 			kind: "system",

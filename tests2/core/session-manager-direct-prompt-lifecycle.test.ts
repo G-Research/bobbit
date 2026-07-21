@@ -7,7 +7,10 @@ import { createManualClock } from "../harness/clock.js";
 
 const VIRTUAL_STATE_DIR = path.resolve("/.bobbit-test/session-direct-prompt");
 const VIRTUAL_SIDECAR_DIR = path.join(VIRTUAL_STATE_DIR, "author-sidecar");
+const VIRTUAL_HMAC_KEY = Buffer.alloc(32, 0x36);
 const virtualSidecarFiles = new Map<string, string>();
+const virtualFds = new Map<number, { path: string; flags: number }>();
+let nextVirtualFd = 10_000;
 
 function virtualPath(value: fs.PathLike): string {
 	return path.resolve(String(value));
@@ -31,14 +34,23 @@ const {
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,
 	initAuthorSidecarDir,
+	promptAuthorBindingMatchesText,
 	purgeAuthorSidecar,
 	readAuthorSidecar,
 } = await import("../../src/server/agent/author-sidecar.ts");
 
-// Author persistence is exercised through the real sidecar API, backed by a
-// tiny in-memory filesystem. Unexpected file access fails instead of silently
-// touching Defender-scanned disk in this tier-1 logic suite.
-const fsSpies = [
+// Author persistence is exercised through the real secure sidecar API, backed
+// by a descriptor-aware in-memory filesystem. Unexpected paths fail closed.
+const fsSpies: Array<{ mockRestore(): void }> = [];
+const virtualStats = (isDirectory: boolean) => ({
+	isDirectory: () => isDirectory,
+	isFile: () => !isDirectory,
+	isSymbolicLink: () => false,
+	mode: (isDirectory ? 0o040000 | 0o700 : 0o100000 | 0o600),
+}) as fs.Stats;
+const enoent = (target: string) => Object.assign(new Error(`ENOENT: ${target}`), { code: "ENOENT" });
+
+fsSpies.push(
 	vi.spyOn(fs, "existsSync").mockImplementation((target) => {
 		if (!isVirtualSidecarPath(target)) throw new Error(`unexpected filesystem read: ${String(target)}`);
 		const key = virtualPath(target);
@@ -48,25 +60,71 @@ const fsSpies = [
 		if (!isVirtualSidecarPath(target)) throw new Error(`unexpected filesystem write: ${String(target)}`);
 		return undefined;
 	}) as typeof fs.mkdirSync),
-	vi.spyOn(fs, "appendFileSync").mockImplementation(((target: fs.PathOrFileDescriptor, data: string | Uint8Array) => {
-		if (typeof target === "number" || !isVirtualSidecarPath(target)) {
-			throw new Error(`unexpected filesystem write: ${String(target)}`);
-		}
+	vi.spyOn(fs, "lstatSync").mockImplementation(((target: fs.PathLike) => {
+		if (!isVirtualSidecarPath(target)) throw new Error(`unexpected filesystem read: ${String(target)}`);
 		const key = virtualPath(target);
-		virtualSidecarFiles.set(key, `${virtualSidecarFiles.get(key) ?? ""}${String(data)}`);
-	}) as typeof fs.appendFileSync),
+		if (key === VIRTUAL_SIDECAR_DIR) return virtualStats(true);
+		if (virtualSidecarFiles.has(key)) return virtualStats(false);
+		throw enoent(key);
+	}) as typeof fs.lstatSync),
+	vi.spyOn(fs, "chmodSync").mockImplementation(((target: fs.PathLike) => {
+		if (!isVirtualSidecarPath(target)) throw new Error(`unexpected filesystem write: ${String(target)}`);
+	}) as typeof fs.chmodSync),
+	vi.spyOn(fs, "openSync").mockImplementation(((target: fs.PathLike, flags: number) => {
+		if (!isVirtualSidecarPath(target)) throw new Error(`unexpected filesystem open: ${String(target)}`);
+		const key = virtualPath(target);
+		const exists = virtualSidecarFiles.has(key);
+		if ((flags & fs.constants.O_EXCL) !== 0 && exists) throw Object.assign(new Error(`EEXIST: ${key}`), { code: "EEXIST" });
+		if ((flags & fs.constants.O_CREAT) !== 0 && !exists) virtualSidecarFiles.set(key, "");
+		if (!virtualSidecarFiles.has(key)) throw enoent(key);
+		const fd = nextVirtualFd++;
+		virtualFds.set(fd, { path: key, flags });
+		return fd;
+	}) as typeof fs.openSync),
+	vi.spyOn(fs, "fstatSync").mockImplementation(((fd: number) => {
+		if (!virtualFds.has(fd)) throw new Error(`unexpected descriptor stat: ${fd}`);
+		return virtualStats(false);
+	}) as typeof fs.fstatSync),
+	vi.spyOn(fs, "fchmodSync").mockImplementation(((fd: number) => {
+		if (!virtualFds.has(fd)) throw new Error(`unexpected descriptor chmod: ${fd}`);
+	}) as typeof fs.fchmodSync),
+	vi.spyOn(fs, "writeSync").mockImplementation(((fd: number, data: Uint8Array, offset: number, length: number) => {
+		const descriptor = virtualFds.get(fd);
+		if (!descriptor) throw new Error(`unexpected descriptor write: ${fd}`);
+		const chunk = Buffer.from(data.buffer, data.byteOffset + offset, length).toString("utf8");
+		const current = virtualSidecarFiles.get(descriptor.path) ?? "";
+		virtualSidecarFiles.set(descriptor.path, (descriptor.flags & fs.constants.O_APPEND) !== 0 ? current + chunk : chunk);
+		return length;
+	}) as typeof fs.writeSync),
+	vi.spyOn(fs, "fsyncSync").mockImplementation(((fd: number) => {
+		if (!virtualFds.has(fd)) throw new Error(`unexpected descriptor fsync: ${fd}`);
+	}) as typeof fs.fsyncSync),
+	vi.spyOn(fs, "closeSync").mockImplementation(((fd: number) => {
+		if (!virtualFds.delete(fd)) throw new Error(`unexpected descriptor close: ${fd}`);
+	}) as typeof fs.closeSync),
 	vi.spyOn(fs, "readFileSync").mockImplementation(((target: fs.PathOrFileDescriptor) => {
-		if (typeof target === "number" || !isVirtualSidecarPath(target)) {
-			throw new Error(`unexpected filesystem read: ${String(target)}`);
-		}
-		return virtualSidecarFiles.get(virtualPath(target)) ?? "";
+		const key = typeof target === "number" ? virtualFds.get(target)?.path : virtualPath(target);
+		if (!key || !isVirtualSidecarPath(key)) throw new Error(`unexpected filesystem read: ${String(target)}`);
+		if (!virtualSidecarFiles.has(key)) throw enoent(key);
+		return virtualSidecarFiles.get(key)!;
 	}) as typeof fs.readFileSync),
+	vi.spyOn(fs, "renameSync").mockImplementation(((from: fs.PathLike, to: fs.PathLike) => {
+		if (!isVirtualSidecarPath(from) || !isVirtualSidecarPath(to)) throw new Error("unexpected filesystem rename");
+		const source = virtualPath(from);
+		const destination = virtualPath(to);
+		if (!virtualSidecarFiles.has(source)) throw enoent(source);
+		virtualSidecarFiles.set(destination, virtualSidecarFiles.get(source)!);
+		virtualSidecarFiles.delete(source);
+	}) as typeof fs.renameSync),
 	vi.spyOn(fs, "unlinkSync").mockImplementation((target) => {
 		if (!isVirtualSidecarPath(target)) throw new Error(`unexpected filesystem write: ${String(target)}`);
 		virtualSidecarFiles.delete(virtualPath(target));
 	}),
-];
-initAuthorSidecarDir(VIRTUAL_STATE_DIR);
+);
+initAuthorSidecarDir(VIRTUAL_STATE_DIR, {
+	secretsDir: VIRTUAL_STATE_DIR,
+	hmacKey: VIRTUAL_HMAC_KEY,
+});
 
 const AUTH_SECRET = "sk-or-retry-secret-never-leak";
 const AUTH_ERROR = `No API key found for openrouter: ${AUTH_SECRET}`;
@@ -191,6 +249,7 @@ async function flushAsyncWork(): Promise<void> {
 afterEach(() => {
 	while (managers.length > 0) cleanupManager(managers.pop());
 	virtualSidecarFiles.clear();
+	virtualFds.clear();
 });
 
 afterAll(() => {
@@ -213,7 +272,8 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		await sendDelegatePrompt(delegateSession, "not model-facing", 1_000);
 		assert.deepEqual(delegatePrompt.mock.calls[0], [delegateText]);
 		const delegateBinding = readAuthorSidecar(delegateSession.id)[0];
-		assert.equal(delegateBinding.modelText, delegateText);
+		assert.equal(delegateBinding.modelText, undefined);
+		assert.equal(promptAuthorBindingMatchesText(delegateBinding, delegateText), true);
 		assert.equal(delegateBinding.source, "system");
 		assert.deepEqual(delegateBinding.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
 
@@ -232,7 +292,8 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		});
 		assert.deepEqual(ownerPrompt.mock.calls[0], [delegateText]);
 		const ownerBinding = readAuthorSidecar(ownerDelegate.id)[0];
-		assert.equal(ownerBinding.modelText, delegateText);
+		assert.equal(ownerBinding.modelText, undefined);
+		assert.equal(promptAuthorBindingMatchesText(ownerBinding, delegateText), true);
 		assert.equal(ownerBinding.source, "agent");
 		assert.deepEqual(ownerBinding.author, ownerAuthor);
 
@@ -264,7 +325,8 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		});
 		assert.deepEqual(verificationPrompt.mock.calls[0], [verificationText]);
 		const verificationBinding = readAuthorSidecar(verificationSession.id)[0];
-		assert.equal(verificationBinding.modelText, verificationText);
+		assert.equal(verificationBinding.modelText, undefined);
+		assert.equal(promptAuthorBindingMatchesText(verificationBinding, verificationText), true);
 		assert.equal(verificationBinding.source, "verification");
 		assert.deepEqual(verificationBinding.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
 
@@ -278,7 +340,8 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		const restartText = restartPrompt.mock.calls[0][0];
 		assert.match(restartText, /infrastructure server restarted while you were mid-turn/i);
 		const restartBinding = readAuthorSidecar(restartSession.id)[0];
-		assert.equal(restartBinding.modelText, restartText);
+		assert.equal(restartBinding.modelText, undefined);
+		assert.equal(promptAuthorBindingMatchesText(restartBinding, restartText), true);
 		assert.equal(restartBinding.source, "system");
 		assert.deepEqual(restartBinding.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
 	});

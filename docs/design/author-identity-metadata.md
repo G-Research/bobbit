@@ -186,33 +186,33 @@ The `PromptSource` mapping does not change the separate nudge-counter reset tabl
 
 Add `src/server/agent/author-sidecar.ts` with:
 
-- `initAuthorSidecarDir(stateDir)`;
+- `initAuthorSidecarDir(stateDir, { secretsDir, hmacKey })`;
 - `appendPromptAuthorDispatch(sessionId, record)`;
 - `appendPromptAuthorSettlement(sessionId, settlement)`;
 - `readAuthorSidecar(sessionId)`;
 - `mergeAuthorSidecarIntoMessages(entries, messages, context)`;
-- `copyAuthorSidecar(fromSessionId, toSessionId)`;
+- `copyAuthorSidecar(fromSessionId, toSessionId, { transcript })`;
 - `purgeAuthorSidecar(sessionId)`.
 
-Storage is `<stateDir>/author-sidecar/<sanitized-sessionId>.jsonl`. Initialize it in `src/server/server.ts` beside `initSkillSidecarDir` and `initCompactionSidecarDir`.
+Storage is `<serverSecretsDir>/author-sidecar/<sanitized-sessionId>.jsonl`, outside project roots, with `0700` directory and `0600` file modes on POSIX. `src/server/server.ts` initializes it with stable private key material. Startup migrates former `<stateDir>/author-sidecar` v1 plaintext ledgers to v2 and removes each reachable source only after preservation.
 
 ### 5.2 Versioned append-only schema
 
-Use two v1 line variants:
+Use two v2 line variants:
 
 ```ts
 interface PromptAuthorDispatchRecord {
-  schemaVersion: 1;
+  schemaVersion: 2;
   type: "prompt-author";
-  promptId: string;       // queue id, steer-batch id, or generated direct id
-  dispatchedAt: number;   // epoch ms
-  modelText: string;      // exact text sent to Pi; lookup only, never rendered
+  promptId: string;             // queue id, steer-batch id, or generated direct id
+  dispatchedAt: number;         // epoch ms
+  modelTextDigest: string;      // domain-separated keyed HMAC; never plaintext
   source: PromptSource;
   author: MessageAuthor;
 }
 
 interface PromptAuthorSettlementRecord {
-  schemaVersion: 1;
+  schemaVersion: 2;
   type: "prompt-author-settlement";
   promptId: string;
   settledAt: number;
@@ -230,15 +230,15 @@ Rationale:
 - redispatch can reuse the same queue/batch `promptId`; readers fold by prompt id and use the latest dispatch plus latest settlement;
 - malformed lines, unknown versions/types, invalid authors, and settlements without a dispatch are skipped.
 
-Do not store images, attachments, or rewritten display text. `modelText` is already persisted in Pi JSONL and is needed only as a fallback correlation key. Sidecar I/O is best-effort: log and continue with inference if append/read fails.
+Do not store prompt plaintext, images, attachments, or rewritten display text. In-memory call inputs still contain exact `modelText`, but persistence immediately replaces it with a keyed digest derived from stable private server key material. Runtime sidecar I/O is best-effort: log and continue with inference if append/read fails. Legacy plaintext removal during startup migration fails closed.
 
 ### 5.3 Matching algorithm
 
 `readAuthorSidecar` folds records into active and echoed prompt-author bindings. Snapshot/transcript merge matches user-prompt rows in this order:
 
 1. exact `message.id === settlement.messageId`;
-2. exact message timestamp/settlement timestamp within 2 seconds plus exact `modelText`;
-3. exact `modelText`, FIFO by `dispatchedAt`, consuming each sidecar record once.
+2. exact message timestamp/settlement timestamp within 2 seconds plus keyed text-digest equality;
+3. keyed text-digest equality, FIFO by `dispatchedAt`, consuming each sidecar record once.
 
 Live and restore replay additionally use stable occurrence keys from Pi id aliases on either the message or outer event. A keyed occurrence retains one binding across updates and repeated terminal frames, so a duplicate cannot advance to the next same-text prompt.
 
@@ -248,7 +248,7 @@ The safety invariant is stronger than best-effort attribution: a historical repl
 
 Cancelled records never match. Snapshot/transcript duplicates remain distinct because matching consumes a multiset, not a `Set`. When compaction removes an earlier duplicate, timestamp/id binding prevents the retained duplicate from consuming the removed prompt's author.
 
-The merge clones only changed message objects and is idempotent. The replay guard is in-memory correlation state: it adds no v1 sidecar fields or record variants, synthesizes no Pi ids, and changes neither Pi JSONL nor model/provider roles, content, or schemas.
+The merge clones only changed message objects and is idempotent. The replay guard is in-memory correlation state: it adds no v2 sidecar fields or record variants, synthesizes no Pi ids, and changes neither Pi JSONL nor model/provider roles, content, or schemas.
 
 ## 6. Queue and in-flight state
 
@@ -359,7 +359,7 @@ Pi snapshot
   -> stampSnapshotOrder (WS boundary only)
 ```
 
-Author merge runs before skill display-text rewriting because the sidecar key is exact `modelText`. Existing `author` fields survive truncation and skill rewriting via object spread.
+Author merge runs before skill display-text rewriting because the sidecar key is a keyed digest of exact `modelText`. Existing `author` fields survive truncation and skill rewriting via object spread.
 
 Use the helper from:
 
@@ -392,7 +392,7 @@ The REST response remains additive. Older clients ignore `author`.
 
 ### 8.4 Fork and continue
 
-The fork and continue routes in `src/server/server.ts` copy Pi JSONL at the `destJsonl` paths around the existing `sessionFileCopy` calls. After the destination Bobbit session id is known, call `copyAuthorSidecar(sourceSessionId, destinationSessionId)`. Failure is non-fatal and produces legacy inference on the clone. Failed-fork cleanup removes the destination author sidecar together with cloned transcript state.
+The fork and continue routes in `src/server/server.ts` copy Pi JSONL at the `destJsonl` paths around the existing `sessionFileCopy` calls. After the destination Bobbit session id is known, call `copyAuthorSidecar(sourceSessionId, destinationSessionId, { transcript: clonedTranscript })`. Copy only echoed bindings confirmed in that transcript; unresolved/cancelled source dispatches must not enter the destination ledger. Failure is non-fatal and produces legacy inference on the clone. Failed-fork cleanup removes the destination author sidecar together with cloned transcript state.
 
 ### 8.5 Search
 

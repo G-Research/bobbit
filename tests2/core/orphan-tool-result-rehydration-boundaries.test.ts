@@ -31,7 +31,10 @@ const { initPromptDirs } = await import("../../src/server/agent/system-prompt.ts
 const { loadOrCreateToken } = await import("../../src/server/auth/token.ts");
 
 initPromptDirs(stateDir);
-initAuthorSidecarDir(stateDir);
+initAuthorSidecarDir(stateDir, {
+	secretsDir: path.join(tmpRoot, "secrets"),
+	hmacKey: Buffer.alloc(32, 0x31),
+});
 loadOrCreateToken();
 
 const managers: any[] = [];

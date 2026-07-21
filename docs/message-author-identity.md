@@ -99,22 +99,19 @@ The fallback label is `<pack-id>/<tool-or-surface>`. The WebSocket handler deriv
 
 ## Host-side author sidecar
 
-Pi does not preserve arbitrary Bobbit fields reliably, and sandbox transcripts may live inside a container. Bobbit therefore never writes `author` into the Pi JSONL transcript. Prompt attribution is stored on the host at:
+Pi does not preserve arbitrary Bobbit fields reliably, and sandbox transcripts may live inside a container. Bobbit therefore never writes `author` into the Pi JSONL transcript. Prompt attribution is stored outside project roots in private server state at:
 
 ```text
-<stateDir>/author-sidecar/<sessionId>.jsonl
+<serverSecretsDir>/author-sidecar/<sessionId>.jsonl
 ```
 
-`src/server/agent/author-sidecar.ts` implements an append-only, versioned ledger with two record types:
+The directory is owner-only (`0700`) and ledger files are owner-only (`0600`) on POSIX. Schema v2 dispatch records store `promptId`, dispatch time, a domain-separated keyed HMAC of the exact model text, `PromptSource`, and resolved author. They never store prompt plaintext. Settlement records mark prompts as `echoed` or `cancelled` and may include the echoed message id and timestamp. The HMAC subkey is derived from stable private server key material, so correlation remains stable across gateway restarts without exposing prompt text.
 
-- a dispatch record stores `promptId`, dispatch time, exact model text, `PromptSource`, and resolved author;
-- a settlement record marks that prompt as `echoed` or `cancelled` and may include the echoed message id and timestamp.
+At startup, Bobbit migrates valid v1 rows from the former project-reachable `<stateDir>/author-sidecar` path into digest-only v2 records. It removes each plaintext source only after valid records have been preserved; malformed and partial rows degrade to inference. Failure to remove a reachable plaintext ledger fails startup closed. Pi JSONL is never read back into or rewritten by this migration.
 
-A redispatch with the same prompt id replaces the earlier folded binding. Cancelled dispatches are never correlated to transcript rows.
+A redispatch with the same prompt id replaces the earlier folded binding. Cancelled dispatches are never correlated to transcript rows. Runtime writes occur immediately before prompt or steer delivery and are best-effort. A write failure is logged but never delays or rejects delivery. Reads skip malformed lines, partial crash tails, invalid records, and unsupported schema versions. A missing or unreadable sidecar behaves like an empty sidecar and falls back to role/content inference.
 
-Writes occur immediately before prompt or steer delivery and are best-effort. A write failure is logged but never delays or rejects delivery. Reads skip malformed lines, partial crash tails, invalid records, and unsupported schema versions. A missing or unreadable sidecar behaves like an empty sidecar and falls back to role/content inference. The Pi transcript is never repaired or rewritten.
-
-Stable occurrence keys take precedence over text. Live and replayed events read Pi entry-id aliases from either the message or its outer event; once an occurrence is bound, its updates and duplicate terminal frames reuse that binding. Snapshot and transcript correlation then matches eligible user-role echoes by settled message id, timestamp plus exact model text, and finally FIFO exact text. Tool-result-only user-role rows are excluded, and matching runs before display-text rewriting.
+Stable occurrence keys take precedence over text. Live and replayed events read Pi entry-id aliases from either the message or its outer event; once an occurrence is bound, its updates and duplicate terminal frames reuse that binding. Snapshot and transcript correlation then matches eligible user-role echoes by settled message id, timestamp plus keyed text digest, and finally FIFO keyed text digest. Tool-result-only user-role rows are excluded, and matching runs before display-text rewriting.
 
 Legacy replay can contain user echoes with neither an id nor a timestamp. During `switch_session`, Bobbit therefore keeps a restore-only ordered view of every non-cancelled sidecar occurrence, including settled rows. A settled same-text occurrence remains a guard for the replay window, and consecutive duplicate keyless ends reuse its binding. Outside replay, that last-terminal guard lasts only until Bobbit accepts another dispatch: a newly accepted same-text prompt starts a new occurrence and its keyless echo binds the new pending record.
 
@@ -122,7 +119,7 @@ This enforces the ledger-safety invariant: a historical replay echo must never s
 
 The replay guard is runtime correlation state, not persisted data. Force-abort recovery hydrates it immediately before the bounded transcript replay and clears it when that replay exits, whether successfully or by error. It adds no sidecar fields or record types, does not synthesize Pi ids, and does not change Pi events, transcript rows, prompt bytes, or provider schemas.
 
-Fork and continue operations copy the sidecar after the destination session exists. A hard purge removes it. Ordinary archive operations retain it with the session history.
+Fork and continue operations copy only echoed bindings confirmed to exist in the cloned transcript. Unresolved and cancelled source dispatches are never copied, so a same-text prompt accepted later in the destination cannot inherit a foreign author. A hard purge removes the private ledger; ordinary archive operations retain it with the session history.
 
 ## Message lifecycle
 

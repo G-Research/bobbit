@@ -985,7 +985,7 @@
     },
     {
       "path": "tests2/core/author-sidecar.test.ts",
-      "reason": "Subprocess-free memfs core coverage for Bobbit-owned prompt-author sidecar persistence, corruption tolerance, settlement correlation, duplicate consumption, copy/purge, and accountable tool-result inference.",
+      "reason": "Focused secure-v2 coverage for private author-sidecar placement, digest-only rows, stable-key restart correlation, POSIX modes, v1 plaintext migration/removal, transcript-confirmed settled copy, corruption tolerance, correlation, and purge.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

@@ -234,8 +234,10 @@ async function boot(): Promise<BootedGateway> {
 
 	const stateDir = join(bobbitDir, "state");
 	const agentDir = join(bobbitDir, "agent");
+	const secretsDir = join(bobbitDir, "secrets");
 	mkdirSync(stateDir, { recursive: true });
 	mkdirSync(agentDir, { recursive: true });
+	mkdirSync(secretsDir, { recursive: true });
 	mkdirSync(join(stateDir, "session-prompts"), { recursive: true });
 
 	const defaultProjectRoot = join(bobbitDir, "default-project");
@@ -251,6 +253,7 @@ async function boot(): Promise<BootedGateway> {
 	// production by cli.ts) — NOT test-only flags. Everything else is config.
 	process.env.BOBBIT_DIR = bobbitDir;
 	process.env.BOBBIT_AGENT_DIR = agentDir;
+	process.env.BOBBIT_SECRETS_DIR = secretsDir;
 
 	// Seed inline workflows at both cascade levels BEFORE boot (mirrors harness).
 	const yaml = projectYaml();
@@ -345,6 +348,7 @@ async function boot(): Promise<BootedGateway> {
 	const restoreAgentDirRuntime = (): void => {
 		process.env.BOBBIT_DIR = bobbitDir;
 		process.env.BOBBIT_AGENT_DIR = agentDir;
+		process.env.BOBBIT_SECRETS_DIR = secretsDir;
 		setProjectRoot(bobbitDir);
 		try {
 			const state = getAgentDirState();

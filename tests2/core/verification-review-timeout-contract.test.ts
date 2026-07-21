@@ -9,6 +9,7 @@ import path from "node:path";
 import type { VerifyStep } from "../../src/server/agent/workflow-store.js";
 import {
 	initAuthorSidecarDir,
+	promptAuthorBindingMatchesText,
 	readAuthorSidecar,
 } from "../../src/server/agent/author-sidecar.ts";
 import {
@@ -34,7 +35,10 @@ function makeStateDir(prefix: string): string {
 	tempRoots.push(root);
 	const stateDir = path.join(root, "state");
 	fs.mkdirSync(stateDir, { recursive: true });
-	initAuthorSidecarDir(stateDir);
+	initAuthorSidecarDir(stateDir, {
+		secretsDir: path.join(root, "private-secrets"),
+		hmacKey: Buffer.alloc(32, 0x35),
+	});
 	return stateDir;
 }
 
@@ -294,7 +298,10 @@ describe("recovery windows and provider exclusion", () => {
 		assert.deepEqual(explicit.streamingTimeouts, [10_000, 10_000], `${MARKER}: restart stream settles must stay fixed`);
 		assert.ok(!explicit.idleTimeouts.includes(180_000) && !explicit.idleTimeouts.includes(120_000));
 		assert.deepEqual(explicit.promptTexts, [VERIFICATION_RESTART_RESUME_PROMPT, VERIFICATION_RESULT_REMINDER], `${MARKER}: tracked restart dispatch must preserve exact prompt bytes`);
-		assert.deepEqual(explicit.bindings.map(binding => binding.modelText), explicit.promptTexts);
+		assert.ok(explicit.bindings.every(binding => binding.schemaVersion === 2 && binding.modelText === undefined));
+		assert.ok(explicit.bindings.every((binding, index) =>
+			promptAuthorBindingMatchesText(binding, explicit.promptTexts[index]),
+		));
 		assert.ok(explicit.bindings.every(binding => binding.source === "verification"));
 		for (const binding of explicit.bindings) {
 			assert.deepEqual(binding.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
@@ -304,7 +311,10 @@ describe("recovery windows and provider exclusion", () => {
 		assert.deepEqual(legacy.idleTimeouts, [1_200_000, 1_200_000], `${MARKER}: legacy rows without a resolvable step fall back to 1200s per turn`);
 		assert.deepEqual(legacy.streamingTimeouts, [10_000]);
 		assert.deepEqual(legacy.promptTexts, [VERIFICATION_RESULT_REMINDER], `${MARKER}: legacy resume must preserve exact reminder bytes`);
-		assert.deepEqual(legacy.bindings.map(binding => binding.modelText), legacy.promptTexts);
+		assert.ok(legacy.bindings.every(binding => binding.schemaVersion === 2 && binding.modelText === undefined));
+		assert.ok(legacy.bindings.every((binding, index) =>
+			promptAuthorBindingMatchesText(binding, legacy.promptTexts[index]),
+		));
 		assert.ok(legacy.bindings.every(binding => binding.source === "verification"));
 		for (const binding of legacy.bindings) {
 			assert.deepEqual(binding.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });

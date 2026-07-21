@@ -30,6 +30,7 @@ import {
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,
 	extractPromptModelText,
+	promptAuthorBindingMatchesText,
 	readAuthorSidecar,
 	type PromptAuthorBinding,
 } from "./author-sidecar.js";
@@ -595,7 +596,9 @@ export type { InFlightSteerRecord } from "./session-store.js";
 export interface PendingPromptAuthorRecord {
 	promptId: string;
 	dispatchedAt: number;
-	modelText: string;
+	/** Exact text exists only for current-process dispatches. Restored v2 rows use the digest. */
+	modelText?: string;
+	modelTextDigest?: string;
 	source: PromptSource;
 	author: MessageAuthor;
 }
@@ -607,7 +610,9 @@ interface LivePromptAuthorMessageBinding {
 }
 
 interface ReplayPromptAuthorBinding extends LivePromptAuthorMessageBinding {
-	modelText: string;
+	/** Exact text is memory-only; restart replay correlates with the stable v2 digest. */
+	modelText?: string;
+	modelTextDigest?: string;
 }
 
 export interface SessionInfo {
@@ -896,9 +901,10 @@ function recordPromptAuthorBinding(
 	// terminal guard. Restore replay guards remain authoritative until replay ends.
 	session.lastKeylessPromptAuthorEnd = undefined;
 	void appendPromptAuthorDispatch(session.id, {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		type: "prompt-author",
 		...pending,
+		modelText,
 	});
 	return pending;
 }
@@ -907,7 +913,7 @@ function cancelPromptAuthorBinding(session: SessionInfo, promptId: string, now: 
 	const idx = session.pendingPromptAuthors?.findIndex((record) => record.promptId === promptId) ?? -1;
 	if (idx !== -1) session.pendingPromptAuthors!.splice(idx, 1);
 	void appendPromptAuthorSettlement(session.id, {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		type: "prompt-author-settlement",
 		promptId,
 		settledAt: now,
@@ -1113,10 +1119,11 @@ type PromptAuthorEventBinding = { promptId: string; alreadySettled: boolean };
 export function restorePromptAuthorBindings(session: SessionInfo, entries: PromptAuthorBinding[]): number {
 	session.pendingPromptAuthors = entries
 		.filter((entry) => entry.settlement === undefined)
-		.map(({ promptId, dispatchedAt, modelText, source, author }) => ({
+		.map(({ promptId, dispatchedAt, modelText, modelTextDigest, source, author }) => ({
 			promptId,
 			dispatchedAt,
-			modelText,
+			...(modelText === undefined ? {} : { modelText }),
+			...(modelTextDigest === undefined ? {} : { modelTextDigest }),
 			source,
 			author,
 		}));
@@ -1140,7 +1147,8 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 		.filter((entry) => entry.settlement?.outcome !== "cancelled")
 		.map((entry) => ({
 			promptId: entry.promptId,
-			modelText: entry.modelText,
+			...(entry.modelText === undefined ? {} : { modelText: entry.modelText }),
+			...(entry.modelTextDigest === undefined ? {} : { modelTextDigest: entry.modelTextDigest }),
 			author: entry.author,
 			settled: entry.settlement?.outcome === "echoed",
 		}));
@@ -1203,7 +1211,9 @@ export function prepareVisibleAgentEvent(
 	const userRole = message.role === "user" || message.role === "user-with-attachments";
 	const modelText = userRole ? extractUserMessageText(message) : "";
 	const messageKey = userRole ? promptAuthorMessageKey(message, raw) : undefined;
-	if (!userRole || messageKey || raw.type === "message_update" || session.lastKeylessPromptAuthorEnd?.modelText !== modelText) {
+	if (!userRole || messageKey || raw.type === "message_update"
+		|| (session.lastKeylessPromptAuthorEnd
+			&& !promptAuthorBindingMatchesText(session.lastKeylessPromptAuthorEnd, modelText))) {
 		session.lastKeylessPromptAuthorEnd = undefined;
 	}
 	let stableBinding = messageKey ? session.promptAuthorMessageBindings?.get(messageKey) : undefined;
@@ -1217,7 +1227,7 @@ export function prepareVisibleAgentEvent(
 		// otherwise information-theoretically indistinguishable from the newer
 		// occurrence and could erase its durable steer ledger.
 		stableBinding = session.promptAuthorReplayBindings?.find((binding) =>
-			binding.modelText === modelText,
+			promptAuthorBindingMatchesText(binding, modelText),
 		);
 	}
 	let pendingIndex = stableBinding && !stableBinding.settled
@@ -1230,7 +1240,7 @@ export function prepareVisibleAgentEvent(
 				.map((binding) => binding.promptId),
 		);
 		pendingIndex = session.pendingPromptAuthors.findIndex((record) =>
-			record.modelText === modelText && !reservedPromptIds.has(record.promptId),
+			promptAuthorBindingMatchesText(record, modelText) && !reservedPromptIds.has(record.promptId),
 		);
 		if (pendingIndex !== -1 && messageKey) {
 			const pending = session.pendingPromptAuthors[pendingIndex];
@@ -1282,14 +1292,16 @@ export function prepareVisibleAgentEvent(
 		if (!messageKey) {
 			session.lastKeylessPromptAuthorEnd = {
 				promptId: pending.promptId,
-				modelText: pending.modelText,
+				// A restored v2 pending row contains only a digest. The echo itself
+				// safely supplies memory-only exact text for duplicate terminal guards.
+				modelText,
 				author: pending.author,
 				settled: true,
 			};
 		}
 		const messageId = promptAuthorMessageId(message, raw);
 		void appendPromptAuthorSettlement(session.id, {
-			schemaVersion: 1,
+			schemaVersion: 2,
 			type: "prompt-author-settlement",
 			promptId: pending.promptId,
 			settledAt: sessionManagerModuleClock.now(),

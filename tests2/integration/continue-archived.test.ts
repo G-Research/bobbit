@@ -12,8 +12,22 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, nonGitCwd, createSession as createSessionFromHarness } from "./_e2e/e2e-setup.js";
+import {
+	apiFetch,
+	connectWs,
+	createSession as createSessionFromHarness,
+	messageEndPredicate,
+	nonGitCwd,
+} from "./_e2e/e2e-setup.js";
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
+import {
+	appendPromptAuthorDispatch,
+	appendPromptAuthorSettlement,
+	promptAuthorBindingMatchesText,
+	readAuthorSidecar,
+} from "../../src/server/agent/author-sidecar.js";
+import { LOCAL_USER_AUTHOR } from "../../src/shared/message-author.js";
+import { attachLocalMockAgentClock } from "./helpers/local-mock-agent-clock.js";
 import {
 	createSessionTracker,
 	localApiFetch,
@@ -59,32 +73,40 @@ async function trackContinuedSession(resp: Response): Promise<void> {
 const SYSTEM_AUTHOR = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
 
 function authorSidecarPath(gateway: any, sessionId: string): string {
-	return path.join(gateway.bobbitDir, "state", "author-sidecar", `${sessionId}.jsonl`);
+	return path.join(gateway.bobbitDir, "secrets", "author-sidecar", `${sessionId}.jsonl`);
 }
 
-function seedSystemAuthorSidecar(gateway: any, sessionId: string, modelText: string): void {
+function rawAuthorSidecarRecords(gateway: any, sessionId: string): any[] {
 	const target = authorSidecarPath(gateway, sessionId);
-	fs.mkdirSync(path.dirname(target), { recursive: true });
+	if (!fs.existsSync(target)) return [];
+	return fs.readFileSync(target, "utf8")
+		.split(/\r?\n/)
+		.filter(line => line.trim())
+		.map(line => JSON.parse(line));
+}
+
+function seedSystemAuthorSidecar(
+	_gateway: any,
+	sessionId: string,
+	modelText: string,
+	options: { settled?: boolean } = {},
+): string {
 	const promptId = `prompt-${sessionId}`;
 	const dispatchedAt = Date.now();
-	fs.writeFileSync(target, [
-		{
-			schemaVersion: 1,
-			type: "prompt-author",
-			promptId,
-			dispatchedAt,
-			modelText,
-			source: "task-notification",
-			author: SYSTEM_AUTHOR,
-		},
-		{
-			schemaVersion: 1,
-			type: "prompt-author-settlement",
-			promptId,
-			settledAt: dispatchedAt + 1,
-			outcome: "echoed",
-		},
-	].map(record => JSON.stringify(record)).join("\n") + "\n");
+	expect(appendPromptAuthorDispatch(sessionId, {
+		promptId,
+		dispatchedAt,
+		modelText,
+		source: "task-notification",
+		author: SYSTEM_AUTHOR,
+	})).toBe(true);
+	if (options.settled === false) return promptId;
+	expect(appendPromptAuthorSettlement(sessionId, {
+		promptId,
+		settledAt: dispatchedAt + 1,
+		outcome: "echoed",
+	})).toBe(true);
+	return promptId;
 }
 
 function messageText(message: any): string {
@@ -96,7 +118,12 @@ function messageText(message: any): string {
 		.join("\n");
 }
 
-function expectBufferedSystemReplay(gateway: any, sessionId: string, marker: string): void {
+function expectBufferedReplayAuthor(
+	gateway: any,
+	sessionId: string,
+	marker: string,
+	author: typeof SYSTEM_AUTHOR | typeof LOCAL_USER_AUTHOR,
+): void {
 	const session = gateway.sessionManager.getSession(sessionId);
 	const replay = session?.eventBuffer.getAll()
 		.map((entry: any) => entry.event)
@@ -104,7 +131,11 @@ function expectBufferedSystemReplay(gateway: any, sessionId: string, marker: str
 			&& event.message?.role === "user"
 			&& messageText(event.message) === marker);
 	expect(replay, `EventBuffer contains replayed prompt ${marker}`).toBeTruthy();
-	expect(replay.message.author).toEqual(SYSTEM_AUTHOR);
+	expect(replay.message.author).toEqual(author);
+}
+
+function expectBufferedSystemReplay(gateway: any, sessionId: string, marker: string): void {
+	expectBufferedReplayAuthor(gateway, sessionId, marker, SYSTEM_AUTHOR);
 }
 
 /** Make the in-process bridge mirror Pi's switch_session replay events. */
@@ -347,6 +378,81 @@ test.describe("fork/continue author replay lifecycle", () => {
 
 		expectBufferedSystemReplay(gateway, fork.id, marker);
 		expect(fs.existsSync(authorSidecarPath(gateway, fork.id))).toBe(true);
+	});
+
+	test("live fork keeps a new same-text human prompt local when the source binding is unresolved", async ({ gateway }) => {
+		const marker = "FORK_UNRESOLVED_SAME_TEXT_STAYS_USER";
+		const sourceId = sessions.add(await createSessionFromHarness());
+		const sourceTranscript = seedSessionTranscript(gateway, sourceId, [
+			{ role: "user", text: "SOURCE_HISTORY_WITH_NO_RACE_MARKER" },
+		]);
+
+		const foreignPromptId = seedSystemAuthorSidecar(gateway, sourceId, marker, { settled: false });
+		const [sourceBinding] = readAuthorSidecar(sourceId);
+		if (!sourceBinding) throw new Error("unresolved source author binding was not persisted");
+		expect(sourceBinding).toMatchObject({
+			promptId: foreignPromptId,
+			author: SYSTEM_AUTHOR,
+		});
+		expect(sourceBinding.settlement).toBeUndefined();
+		expect(promptAuthorBindingMatchesText(sourceBinding, marker)).toBe(true);
+		expect(fs.readFileSync(sourceTranscript, "utf8")).not.toContain(marker);
+
+		const response = await withSwitchReplayEvents(() => localApiFetch(gateway, `/api/sessions/${sourceId}/fork`, {
+			method: "POST",
+			body: JSON.stringify({ newWorktree: false }),
+		}));
+		expect(response.status, await response.clone().text()).toBe(201);
+		const fork = await response.json();
+		sessions.add(fork.id);
+
+		// The unresolved source dispatch is not transcript history and must not
+		// become destination correlation state before the new human occurrence.
+		expect(readAuthorSidecar(fork.id)).toEqual([]);
+		expect(rawAuthorSidecarRecords(gateway, fork.id)).toEqual([]);
+
+		const agentClock = attachLocalMockAgentClock(gateway, fork.id);
+		const conn = await connectWs(fork.id);
+		try {
+			const liveCursor = conn.messageCount();
+			conn.send({ type: "prompt", text: marker });
+			const liveUser = await conn.waitForFrom(liveCursor, (message) =>
+				messageEndPredicate("user")(message)
+				&& messageText(message.data.message) === marker,
+			);
+			expect(liveUser.data.message.author).toEqual(LOCAL_USER_AUTHOR);
+
+			await agentClock.settleCurrentPrompt();
+			const snapshotCursor = conn.messageCount();
+			conn.send({ type: "get_messages" });
+			const snapshotFrame = await conn.waitForFrom(snapshotCursor, message => message.type === "messages");
+			const snapshotMessages = Array.isArray(snapshotFrame.data)
+				? snapshotFrame.data
+				: snapshotFrame.data?.messages ?? [];
+			const snapshotUser = snapshotMessages.find((message: any) =>
+				message.role === "user" && messageText(message) === marker,
+			);
+			expect(snapshotUser, "fork snapshot contains the newly accepted human prompt").toBeTruthy();
+			expect(snapshotUser.author).toEqual(LOCAL_USER_AUTHOR);
+		} finally {
+			conn.close();
+		}
+
+		const destinationBindings = readAuthorSidecar(fork.id);
+		const localBinding = destinationBindings.find(binding => promptAuthorBindingMatchesText(binding, marker));
+		expect(localBinding).toMatchObject({
+			author: LOCAL_USER_AUTHOR,
+			settlement: { outcome: "echoed" },
+		});
+		expect(localBinding?.promptId).not.toBe(foreignPromptId);
+
+		const destinationRecords = rawAuthorSidecarRecords(gateway, fork.id);
+		expect(destinationRecords.some(record =>
+			record.type === "prompt-author" && record.promptId === foreignPromptId,
+		), "foreign source dispatch is not copied").toBe(false);
+		expect(destinationRecords.some(record =>
+			record.type === "prompt-author-settlement" && record.promptId === foreignPromptId,
+		), "foreign source prompt is not settled in the destination").toBe(false);
 	});
 
 	test("continue copies author bindings before switch_session replay reaches EventBuffer", async ({ gateway }) => {

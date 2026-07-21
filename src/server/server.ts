@@ -1934,6 +1934,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		serverRunDir: getProjectRoot(),
 	});
 	fs.mkdirSync(stateDir, { recursive: true });
+	// The author ledger reuses the stable cookie key through a domain-separated
+	// derivation and lives under this same private, owner-only server root.
+	const secretsDir = serverSecretsDir();
+	const cookieSigningKey = loadOrCreateCookieSigningKey(secretsDir);
 	// Ensure API-only/test gateways also get a startup-resolved agent dir even when
 	// they do not enter through cli.ts. This is a no-op after CLI initialization.
 	globalAgentDir();
@@ -1943,7 +1947,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	initPromptDirs(stateDir);
 	initSkillSidecarDir(stateDir);
 	initCompactionSidecarDir(stateDir);
-	initAuthorSidecarDir(stateDir);
+	initAuthorSidecarDir(stateDir, { secretsDir, hmacKey: cookieSigningKey });
 	initAssistantRegistry(configDir);
 
 	// Project registry — persisted at server level. Every server exposes the
@@ -2089,7 +2093,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	ck("getPackStore");
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
 	const sandboxTokenStore = new SandboxTokenStore();
-	const cookieSigningKey = loadOrCreateCookieSigningKey(serverSecretsDir());
 	const cookieStore = new CookieStore(cookieSigningKey, { clock: gatewayDeps.clock });
 	const previewOperations = createPreviewSessionOperationQueue();
 	const withPreviewSessionOperation = previewOperations.run;
@@ -12608,8 +12611,10 @@ async function handleApiRoute(
 
 		const srcCtx = sessionFsContextForAgentFile(ps, sourceJsonl);
 		const dstCtx = sessionFsContextForAgentFile({ sandboxed: !!ps.sandboxed, projectId }, destJsonl);
+		let clonedTranscript: string | null = null;
 		try {
 			await sessionFileCopy(srcCtx, sourceJsonl, dstCtx, destJsonl, sandboxManager ?? null);
+			clonedTranscript = await sessionFileRead(dstCtx, destJsonl, sandboxManager ?? null);
 		} catch (err) {
 			if (err instanceof CrossRealmCopyError) { json({ error: "cross-realm fork not supported" }, 422); return; }
 			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
@@ -12627,7 +12632,7 @@ async function handleApiRoute(
 			// The destination id is fixed before creation. Copy author bindings now so
 			// switch_session replay is normalized correctly on its first pass and the
 			// resulting EventBuffer never captures fallback authors.
-			copyAuthorSidecar(sourceId, forkId);
+			copyAuthorSidecar(sourceId, forkId, { transcript: clonedTranscript });
 			const launched = await launchSidebarSessionFork({
 				forkId,
 				projectId,
@@ -13184,8 +13189,10 @@ async function handleApiRoute(
 		// Copy the source `.jsonl`. Cross-realm → 422; any other failure → 500.
 		const srcCtx = sessionFsContextForAgentFile(ps, sourceJsonl);
 		const dstCtx = sessionFsContextForAgentFile(ps, destJsonl);
+		let clonedTranscript: string | null = null;
 		try {
 			await sessionFileCopy(srcCtx, sourceJsonl, dstCtx, destJsonl, sandboxManager ?? null);
+			clonedTranscript = await sessionFileRead(dstCtx, destJsonl, sandboxManager ?? null);
 		} catch (err) {
 			if (err instanceof CrossRealmCopyError) {
 				json({ error: "cross-realm continue not supported" }, 422);
@@ -13255,7 +13262,7 @@ async function handleApiRoute(
 			// createSession synchronously rehydrates the cloned transcript. Seed the
 			// already-known destination id first so replayed events resolve against the
 			// copied author ledger instead of being frozen with fallback identities.
-			copyAuthorSidecar(archivedId, newSessionId);
+			copyAuthorSidecar(archivedId, newSessionId, { transcript: clonedTranscript });
 			newSession = await sessionManager.createSession(
 				projCwd, undefined, undefined, ps.assistantType, createOpts,
 			);

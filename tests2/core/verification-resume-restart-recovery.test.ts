@@ -33,6 +33,7 @@ import os from "node:os";
 import path from "node:path";
 import {
 	initAuthorSidecarDir,
+	promptAuthorBindingMatchesText,
 	readAuthorSidecar,
 } from "../../src/server/agent/author-sidecar.ts";
 import {
@@ -53,7 +54,10 @@ function makeStateDir(): string {
 	tempRoots.push(root);
 	const stateDir = path.join(root, "state");
 	fs.mkdirSync(stateDir, { recursive: true });
-	initAuthorSidecarDir(stateDir);
+	initAuthorSidecarDir(stateDir, {
+		secretsDir: path.join(root, "private-secrets"),
+		hmacKey: Buffer.alloc(32, 0x34),
+	});
 	return stateDir;
 }
 
@@ -206,7 +210,9 @@ test("(a) a slow-to-init reviewer is waited on (waitForReady before prompt) and 
 	assert.deepEqual(promptTexts, [VERIFICATION_RESULT_REMINDER], "Resume tracking must not change the model-facing reminder bytes");
 	const bindings = readAuthorSidecar(sessionId);
 	assert.equal(bindings.length, 1, "The accepted resume reminder must have one durable author binding");
-	assert.equal(bindings[0].modelText, VERIFICATION_RESULT_REMINDER);
+	assert.equal(bindings[0].schemaVersion, 2);
+	assert.equal(bindings[0].modelText, undefined);
+	assert.equal(promptAuthorBindingMatchesText(bindings[0], VERIFICATION_RESULT_REMINDER), true);
 	assert.equal(bindings[0].source, "verification");
 	assert.deepEqual(bindings[0].author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
 
@@ -278,7 +284,9 @@ test("(c) a transient resume failure routes into the rerun-from-scratch fallback
 	assert.deepEqual(promptTexts, [VERIFICATION_RESULT_REMINDER], "Failed resume tracking must not change the attempted reminder bytes");
 	const bindings = readAuthorSidecar(sessionId);
 	assert.equal(bindings.length, 1, "The failed resume attempt must leave an auditable binding");
-	assert.equal(bindings[0].modelText, VERIFICATION_RESULT_REMINDER);
+	assert.equal(bindings[0].schemaVersion, 2);
+	assert.equal(bindings[0].modelText, undefined);
+	assert.equal(promptAuthorBindingMatchesText(bindings[0], VERIFICATION_RESULT_REMINDER), true);
 	assert.equal(bindings[0].source, "verification");
 	assert.deepEqual(bindings[0].author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
 	assert.equal(bindings[0].settlement?.outcome, "cancelled");

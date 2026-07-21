@@ -18,7 +18,10 @@
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, createSession, deleteSession, connectWs, defaultProject, type WsConnection } from "./_e2e/e2e-setup.js";
-import { readAuthorSidecar } from "../../src/server/agent/author-sidecar.js";
+import {
+	promptAuthorBindingMatchesText,
+	readAuthorSidecar,
+} from "../../src/server/agent/author-sidecar.js";
 
 const OPUS = { provider: "anthropic", modelId: "claude-opus-4-8" };
 const DELEGATE_KICKOFF = "Execute the task described in your system prompt. Follow the instructions carefully.";
@@ -163,9 +166,12 @@ test.describe("team_delegate — accountable kickoff author", () => {
 				label: "delegate kickoff settled",
 			});
 
-			const binding = readAuthorSidecar(childId!).find((entry) => entry.modelText === DELEGATE_KICKOFF);
+			const binding = readAuthorSidecar(childId!).find((entry) =>
+				promptAuthorBindingMatchesText(entry, DELEGATE_KICKOFF),
+			);
 			expect(binding).toMatchObject({
-				modelText: DELEGATE_KICKOFF,
+				schemaVersion: 2,
+				modelTextDigest: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
 				source: "agent",
 				author: { kind: "agent", id: `staff:${staff.id}`, label: newName },
 				settlement: { outcome: "echoed" },
