@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 
-import { BACKGROUND_IO_CONCURRENCY } from "../../src/server/agent/bounded-async-work.ts";
+import { BACKGROUND_IO_CONCURRENCY, mapWithConcurrency } from "../../src/server/agent/bounded-async-work.ts";
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
 import {
 	createPreviewSessionOperationQueue,
@@ -222,27 +222,41 @@ describe("purge, preview, pool, and diagnostics lifecycle regressions", () => {
 		await manager.shutdown();
 	});
 
-	it("caps post-listen visible-project pool initializers at the shared ceiling", async () => {
+	it("keeps total reclaim candidate work within one ceiling across many boot projects", async () => {
 		const projects = Array.from({ length: BACKGROUND_IO_CONCURRENCY * 3 + 1 }, (_, index) => index);
+		const candidates = Array.from({ length: BACKGROUND_IO_CONCURRENCY * 2 }, (_, index) => index);
 		const release = deferred<void>();
-		let started = 0;
-		let active = 0;
-		let maxActive = 0;
-		const initialization = initializeBootProjectPools(projects, async () => {
-			started++;
-			active++;
-			maxActive = Math.max(maxActive, active);
-			await release.promise;
-			active--;
+		const projectStartOrder: number[] = [];
+		const projectFinishOrder: number[] = [];
+		let candidateOperationsStarted = 0;
+		let pendingCandidateOperations = 0;
+		let maxPendingCandidateOperations = 0;
+		const initialization = initializeBootProjectPools(projects, async (project) => {
+			projectStartOrder.push(project);
+			await mapWithConcurrency(candidates, BACKGROUND_IO_CONCURRENCY, async () => {
+				candidateOperationsStarted++;
+				pendingCandidateOperations++;
+				maxPendingCandidateOperations = Math.max(maxPendingCandidateOperations, pendingCandidateOperations);
+				await release.promise;
+				pendingCandidateOperations--;
+			});
+			projectFinishOrder.push(project);
 		});
 
-		await waitFor(() => started === BACKGROUND_IO_CONCURRENCY, "bounded pool initializers");
-		assert.equal(started, BACKGROUND_IO_CONCURRENCY);
-		assert.equal(maxActive, BACKGROUND_IO_CONCURRENCY);
+		await waitFor(
+			() => candidateOperationsStarted >= BACKGROUND_IO_CONCURRENCY,
+			"first boot project's bounded reclaim batch",
+		);
+		assert.deepEqual(projectStartOrder, [projects[0]], "another project must not multiply candidate concurrency");
+		assert.equal(pendingCandidateOperations, BACKGROUND_IO_CONCURRENCY);
+		assert.equal(maxPendingCandidateOperations, BACKGROUND_IO_CONCURRENCY);
+
 		release.resolve();
 		await initialization;
-		assert.equal(started, projects.length);
-		assert.ok(maxActive <= BACKGROUND_IO_CONCURRENCY);
+		assert.deepEqual(projectStartOrder, projects);
+		assert.deepEqual(projectFinishOrder, projects);
+		assert.equal(candidateOperationsStarted, projects.length * candidates.length);
+		assert.ok(maxPendingCandidateOperations <= BACKGROUND_IO_CONCURRENCY);
 	});
 
 	it("does not finish gateway CPU diagnostics shutdown before the final write settles", async () => {

@@ -49,7 +49,7 @@
     },
     {
       "path": "tests2/core/purge-preview-pool-shutdown-coder61c7.test.ts",
-      "reason": "Deterministic native v2 coverage for coalesced immediate and expiry archive purges, stale-snapshot fencing, serialized preview purge cleanup, bounded boot pool initialization, and awaited CPU diagnostics shutdown.",
+      "reason": "Deterministic native v2 coverage for coalesced immediate and expiry archive purges, stale-snapshot fencing, serialized preview purge cleanup, a single reclaim-candidate concurrency ceiling across many boot projects, and awaited CPU diagnostics shutdown.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
