@@ -885,6 +885,15 @@
       }
     },
     {
+      "path": "tests2/integration/default-standard-session-role.test.ts",
+      "reason": "Reproducing integration coverage for default standard-session role wiring: omitted, empty, and null creation roles plus real worktree creation resolve the project-scoped general role across POST, live state, persistence, detail, and list; full resolved spawn configuration is applied while explicit custom and assistant roles remain unchanged.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
       "path": "tests2/integration/session-store-real-fs.test.ts",
       "reason": "Canonical real-filesystem fidelity for SessionStore atomic rename cleanup, backup rotation/restore after corrupt primary, and recursive orphan transcript traversal.",
       "execution": {
