@@ -152,15 +152,19 @@ test.describe("Journey: Session Lifecycle", () => {
 			await expect(roleControl).toContainText("General");
 			await page.getByRole("button", { name: "Cancel" }).click();
 
-			const quickSessionButton = page.locator('button[title="New session in default"]').first();
-			await expect(quickSessionButton).toBeVisible({ timeout: 15_000 });
-			const newSessionWithRole = quickSessionButton.locator("..").locator('button[title="New session with role"]');
+			const roleTriggers = page.locator('button[title="New session with role"]');
+			if (await roleTriggers.count() === 0) {
+				const projectHeader = page.locator('[data-testid="project-header"]').first();
+				await expect(projectHeader).toBeVisible({ timeout: 15_000 });
+				await projectHeader.click();
+			}
+			const newSessionWithRole = roleTriggers.first();
 			await expect(newSessionWithRole).toBeVisible({ timeout: 15_000 });
 			await newSessionWithRole.click();
 
 			const pickerPanel = page
 				.locator("div.fixed.z-50")
-				.filter({ hasText: "Create New Session in default" })
+				.filter({ has: page.locator("#picker-role-container") })
 				.last();
 			await expect(pickerPanel).toBeVisible({ timeout: 15_000 });
 			const pickerRoleControl = pickerPanel.locator('#picker-role-container button[title="Select role"]');
