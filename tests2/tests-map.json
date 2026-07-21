@@ -138,6 +138,15 @@
       }
     },
     {
+      "path": "tests2/core/bounded-tree-quarantine-errors.test.ts",
+      "reason": "Deterministic quarantine lifecycle failures prove root and child opendir/read/unlink/rmdir errors restore the exact remaining identity for visible retry, partial cleanup remains visible, collisions never overwrite, impossible restoration reports and logs its quarantine path, missing parents retain force semantics, and mismatched external identities are never deleted.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/aigw-wellknown-config-atomic.test.ts",
       "reason": "Unit coverage for atomic AIGW models/configuration failure behavior.",
       "execution": {

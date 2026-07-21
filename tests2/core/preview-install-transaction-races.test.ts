@@ -300,6 +300,7 @@ describe("preview install transaction races", () => {
 		const holdFirstOpen = deferred();
 		const firstOpenStarted = deferred();
 		const quarantines: string[] = [];
+		const cleanupQuarantines = new Map<string, string>();
 		let activeOpens = 0;
 		let maximumOpens = 0;
 		let openCalls = 0;
@@ -307,11 +308,16 @@ describe("preview install transaction races", () => {
 		const controlledFs: PreviewAsyncFs = {
 			...asyncFs,
 			rename: async (oldPath, newPath) => {
-				if ([resolved(liveA), resolved(liveB)].includes(resolved(oldPath))) quarantines.push(resolved(newPath));
+				const oldResolved = resolved(oldPath);
+				const newResolved = resolved(newPath);
+				if ([resolved(liveA), resolved(liveB)].includes(oldResolved)) quarantines.push(newResolved);
+				if (quarantines.includes(oldResolved) && path.basename(newResolved).startsWith(".bobbit-remove-")) {
+					cleanupQuarantines.set(oldResolved, newResolved);
+				}
 				return asyncFs.rename(oldPath, newPath);
 			},
 			opendir: async filePath => {
-				if (resolved(filePath).includes(".preview-quarantine-")) {
+				if ([...cleanupQuarantines.values()].includes(resolved(filePath))) {
 					openCalls++;
 					activeOpens++;
 					maximumOpens = Math.max(maximumOpens, activeOpens);
@@ -324,7 +330,8 @@ describe("preview install transaction races", () => {
 				return asyncFs.opendir(filePath);
 			},
 			rmdir: async filePath => {
-				if (quarantines[0] && resolved(filePath) === quarantines[0]) throw cleanupFailure;
+				const firstCleanup = quarantines[0] ? cleanupQuarantines.get(quarantines[0]) : undefined;
+				if (firstCleanup && resolved(filePath) === firstCleanup) throw cleanupFailure;
 				return asyncFs.rmdir(filePath);
 			},
 		};
