@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -260,6 +261,7 @@ export interface AsyncTreeFs {
 	copyFile(source: string, destination: string, mode?: number): Promise<void>;
 	readlink(filePath: string): Promise<string>;
 	symlink(target: string, filePath: string): Promise<void>;
+	rename(oldPath: string, newPath: string): Promise<void>;
 	unlink(filePath: string): Promise<void>;
 	rmdir(dirPath: string): Promise<void>;
 	utimes(filePath: string, atime: Date, mtime: Date): Promise<void>;
@@ -276,6 +278,7 @@ export const realAsyncTreeFs: AsyncTreeFs = {
 		: fs.promises.copyFile(source, destination, mode),
 	readlink: (filePath) => fs.promises.readlink(filePath),
 	symlink: (target, filePath) => fs.promises.symlink(target, filePath),
+	rename: (oldPath, newPath) => fs.promises.rename(oldPath, newPath),
 	unlink: (filePath) => fs.promises.unlink(filePath),
 	rmdir: (dirPath) => fs.promises.rmdir(dirPath),
 	utimes: (filePath, atime, mtime) => fs.promises.utimes(filePath, atime, mtime),
@@ -292,6 +295,13 @@ export interface AsyncTreeEntry {
 	depth: number;
 	kind: AsyncTreeEntryKind;
 	stats: AsyncTreeStats;
+	/** Revalidate the root-to-entry pathname claim before further pathname I/O. */
+	assertCurrent(): Promise<void>;
+	/**
+	 * Fence one pathname operation with root-to-entry identity checks. Callers
+	 * must use this around pathname reads whose result drives a later side effect.
+	 */
+	withCurrentClaim<T>(operation: () => Promise<T> | T): Promise<T>;
 }
 
 export interface WalkTreeOptions {
@@ -299,19 +309,25 @@ export interface WalkTreeOptions {
 	fs?: Pick<AsyncTreeFs, "lstat" | "opendir">;
 }
 
+interface TreeClaim {
+	absolutePath: string;
+	authorizedStats: AsyncTreeStats;
+	/** Immediate producing-directory claim. */
+	parent?: TreeClaim;
+	/** Stable operation root retained without copying an O(depth) claim array. */
+	rootClaim?: TreeClaim;
+}
+
 interface TreeWork {
 	absolutePath: string;
 	relativePath: string;
 	depth: number;
-	/** Directory pathname that produced this work item. Absent only for the root. */
-	parentAbsolutePath?: string;
-	/** Stable identity captured from the producing directory frame. */
-	parentAuthorizedStats?: AsyncTreeStats;
+	/** Complete producing-directory claim, shared by queued/local DFS children. */
+	parentClaim?: TreeClaim;
 }
 
 interface TreeFrame extends TreeWork {
-	/** The no-follow lstat identity that authorized opening this frame. */
-	authorizedStats: AsyncTreeStats;
+	claim: TreeClaim;
 	directory: AsyncTreeDirectory;
 }
 
@@ -328,71 +344,60 @@ function staleDirectoryError(filePath: string): NodeJS.ErrnoException {
 	return error;
 }
 
-function assertAuthorizedDirectory(
-	expected: AsyncTreeStats,
-	current: AsyncTreeStats,
-	filePath: string,
-): void {
-	if (!isAuthorizedDirectory(expected, current, filePath)) throw staleDirectoryError(filePath);
-}
-
-async function assertTreeParentCurrent(
-	treeFs: Pick<AsyncTreeFs, "lstat">,
-	work: TreeWork,
-): Promise<void> {
-	if (work.parentAbsolutePath === undefined && work.parentAuthorizedStats === undefined) return;
-	if (work.parentAbsolutePath === undefined || work.parentAuthorizedStats === undefined) {
-		throw new Error(`Incomplete traversal parent claim: ${work.absolutePath}`);
-	}
-	const parentStats = await treeFs.lstat(work.parentAbsolutePath);
-	assertAuthorizedDirectory(work.parentAuthorizedStats, parentStats, work.parentAbsolutePath);
-}
-
 /**
- * Revalidate a directory together with the exact producing parent on both
- * sides of the pathname lstat. The repeated parent check makes a queued child
- * claim fail closed if its ancestor changes while another worker owns it.
+ * Validate the operation root, immediate producer, and current pathname. An
+ * intermediate ancestor can resolve to the same immediate directory only by
+ * reaching that exact authorized inode, so retaining more path claims adds
+ * quadratic deep-tree I/O without strengthening the leaf authorization.
  */
-async function assertTreeDirectoryCurrent(
+async function assertTreeClaimCurrent(
 	treeFs: Pick<AsyncTreeFs, "lstat">,
-	work: TreeWork,
-	authorizedStats: AsyncTreeStats,
+	claim: TreeClaim | undefined,
 ): Promise<void> {
-	await assertTreeParentCurrent(treeFs, work);
-	const currentStats = await treeFs.lstat(work.absolutePath);
-	assertAuthorizedDirectory(authorizedStats, currentStats, work.absolutePath);
-	await assertTreeParentCurrent(treeFs, work);
+	if (!claim) return;
+	const claims = new Set<TreeClaim>();
+	if (claim.rootClaim) claims.add(claim.rootClaim);
+	if (claim.parent) claims.add(claim.parent);
+	claims.add(claim);
+	for (const currentClaim of claims) {
+		const currentStats = await treeFs.lstat(currentClaim.absolutePath);
+		if (entryKind(currentClaim.authorizedStats) !== entryKind(currentStats)
+			|| !matchesIdentityWhenAvailable(currentClaim.authorizedStats, currentStats)) {
+			throw staleDirectoryError(currentClaim.absolutePath);
+		}
+	}
+}
+
+async function withTreeClaim<T>(
+	treeFs: Pick<AsyncTreeFs, "lstat">,
+	claim: TreeClaim,
+	operation: () => Promise<T> | T,
+): Promise<T> {
+	await assertTreeClaimCurrent(treeFs, claim);
+	let result: T;
+	try {
+		result = await operation();
+	} catch (operationError) {
+		// Prefer the identity failure when the namespace changed during I/O.
+		await assertTreeClaimCurrent(treeFs, claim);
+		throw operationError;
+	}
+	await assertTreeClaimCurrent(treeFs, claim);
+	return result;
 }
 
 async function openClaimedTreeDirectory(
 	treeFs: Pick<AsyncTreeFs, "lstat" | "opendir">,
-	work: TreeWork,
-	authorizedStats: AsyncTreeStats,
+	claim: TreeClaim,
 ): Promise<AsyncTreeDirectory> {
-	await assertTreeDirectoryCurrent(treeFs, work, authorizedStats);
-	let directory: AsyncTreeDirectory;
-	try {
-		directory = await treeFs.opendir(work.absolutePath);
-	} catch (openError) {
-		// Prefer the identity failure when the pathname changed during open.
-		await assertTreeDirectoryCurrent(treeFs, work, authorizedStats);
-		throw openError;
-	}
-	try {
-		await assertTreeDirectoryCurrent(treeFs, work, authorizedStats);
-	} catch (error) {
-		try { await directory.close(); } catch { /* preserve the identity error */ }
-		throw error;
-	}
-	return directory;
+	return withTreeClaim(treeFs, claim, () => treeFs.opendir(claim.absolutePath));
 }
 
 /**
  * Walk a tree through one bounded operation-level queue. Every entry is
  * classified with `lstat`; directory symlinks are reported as symlinks and are
- * never opened or traversed. `opendir().read()` streams directory entries, and
- * overflow beyond the small pending queue is handled by an iterative local DFS
- * rather than an unbounded tree-node queue.
+ * never opened or traversed. Every queued entry retains a linked root-to-parent
+ * claim, and visitor pathname I/O can use `withCurrentClaim` for bracketing.
  */
 export async function walkTree(
 	root: string,
@@ -415,37 +420,37 @@ export async function walkTree(
 					if (next) {
 						const current = next;
 						next = undefined;
-						// A queued/local-DFS child remains authorized only while the frame
-						// that emitted its Dirent is still the same directory.
-						await assertTreeParentCurrent(treeFs, current);
+						await assertTreeClaimCurrent(treeFs, current.parentClaim);
 						const stats = await treeFs.lstat(current.absolutePath);
-						await assertTreeParentCurrent(treeFs, current);
+						await assertTreeClaimCurrent(treeFs, current.parentClaim);
+						const claim: TreeClaim = {
+							absolutePath: current.absolutePath,
+							authorizedStats: stats,
+							parent: current.parentClaim,
+							rootClaim: current.parentClaim?.rootClaim ?? current.parentClaim,
+						};
 						const kind = entryKind(stats);
-						await visitor({
+						const entry: AsyncTreeEntry = {
 							absolutePath: current.absolutePath,
 							relativePath: current.relativePath,
 							depth: current.depth,
 							kind,
 							stats,
-						});
+							assertCurrent: () => assertTreeClaimCurrent(treeFs, claim),
+							withCurrentClaim: operation => withTreeClaim(treeFs, claim, operation),
+						};
+						// Fence even synchronous visitors. Async visitors that perform a
+						// pathname read before a later side effect additionally bracket that
+						// read with entry.withCurrentClaim().
+						await withTreeClaim(treeFs, claim, () => visitor(entry));
 						if (kind === "directory") {
-							// Visitors may await destination I/O. Revalidate the directory and
-							// its producing parent immediately before and after opendir. An open
-							// handle obtained during a race is closed before any read occurs.
-							const directory = await openClaimedTreeDirectory(treeFs, current, stats);
-							frames.push({
-								...current,
-								authorizedStats: stats,
-								directory,
-							});
+							const directory = await openClaimedTreeDirectory(treeFs, claim);
+							frames.push({ ...current, claim, directory });
 						}
 					} else {
 						const frame = frames[frames.length - 1]!;
 						const dirent = await frame.directory.read();
-						// The open handle may still enumerate the original directory after
-						// its pathname or an ancestor has been replaced. Revalidate both the
-						// frame and its producing parent before deriving child work.
-						await assertTreeDirectoryCurrent(treeFs, frame, frame.authorizedStats);
+						await assertTreeClaimCurrent(treeFs, frame.claim);
 						if (!dirent) {
 							frames.pop();
 							await frame.directory.close();
@@ -456,11 +461,8 @@ export async function walkTree(
 									? `${frame.relativePath}/${dirent.name}`
 									: dirent.name,
 								depth: frame.depth + 1,
-								parentAbsolutePath: frame.absolutePath,
-								parentAuthorizedStats: frame.authorizedStats,
+								parentClaim: frame.claim,
 							};
-							// The complete parent claim stays on both queued work and overflow
-							// retained for the worker's iterative local DFS.
 							if (!queue.tryEnqueue(child)) next = child;
 						}
 					}
@@ -516,21 +518,6 @@ function matchesIdentityWhenAvailable(expected: AsyncTreeStats, current: AsyncTr
 	const currentIdentity = identityOf(current);
 	if (expectedIdentity === undefined && currentIdentity === undefined) return true;
 	return expectedIdentity !== undefined && expectedIdentity === currentIdentity;
-}
-
-/**
- * Return false when the path is no longer a real directory. A different real
- * directory is an unsafe replacement and aborts the operation rather than
- * authorizing traversal from type alone.
- */
-function isAuthorizedDirectory(
-	expected: AsyncTreeStats,
-	current: AsyncTreeStats,
-	filePath: string,
-): boolean {
-	if (!current.isDirectory() || current.isSymbolicLink()) return false;
-	if (matchesIdentityWhenAvailable(expected, current)) return true;
-	throw staleDirectoryError(filePath);
 }
 
 function isExpectedRegularFile(expected: AsyncTreeStats, current: AsyncTreeStats): boolean {
@@ -1036,7 +1023,11 @@ export async function copyTree(source: string, destination: string, options: Cop
 		}
 		if (entry.kind === "symlink") {
 			if (symlinks === "copy") {
-				const linkTarget = await treeFs.readlink(entry.absolutePath);
+				// `readlink` is pathname-based. Do not let its result escape the
+				// source claim when a parent changes while the read is pending.
+				const linkTarget = await entry.withCurrentClaim(
+					() => treeFs.readlink(entry.absolutePath),
+				);
 				await assertDestinationCurrent();
 				await treeFs.symlink(linkTarget, target);
 				await assertDestinationCurrent();
@@ -1047,8 +1038,11 @@ export async function copyTree(source: string, destination: string, options: Cop
 	}, { concurrency: options.concurrency, fs: treeFs });
 }
 
+type RemoveTreeFs = Pick<AsyncTreeFs, "lstat" | "opendir" | "unlink" | "rmdir">
+	& Partial<Pick<AsyncTreeFs, "rename">>;
+
 export interface RemoveTreeOptions {
-	fs?: Pick<AsyncTreeFs, "lstat" | "opendir" | "unlink" | "rmdir">;
+	fs?: RemoveTreeFs;
 	/** Ignore a missing root or entries removed concurrently (default true). */
 	force?: boolean;
 	/** Delete descendants while retaining the root directory (default false). */
@@ -1061,288 +1055,302 @@ function isMissing(error: unknown): boolean {
 	return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
 }
 
+interface RemovalClaim {
+	absolutePath: string;
+	authorizedStats: AsyncTreeStats;
+	parent?: RemovalClaim;
+	rootClaim?: RemovalClaim;
+}
+
+interface RemovalFrame {
+	claim: RemovalClaim;
+	directory: AsyncTreeDirectory;
+	removeAtEnd: boolean;
+}
+
 /**
- * Remove a tree post-order without recursive rm. The iterative opendir walk
- * retains only active directory frames, never follows a symlink, and has at
- * most one filesystem promise pending. Use `mapWithConcurrency` around
- * independent roots when wider deletion is safe for the caller's policy.
+ * Remove a tree without ever recursively deleting the caller-owned pathname.
+ * A non-preserved root is first renamed to an unguessable same-parent sibling;
+ * preserved roots detach each child the same way. Every moved identity is
+ * verified before traversal or deletion, and a mismatched move is restored
+ * best-effort and reported as ESTALE without being deleted.
  */
 export async function removeTree(root: string, options: RemoveTreeOptions = {}): Promise<void> {
 	const treeFs = options.fs ?? realAsyncTreeFs;
+	const rename = treeFs.rename?.bind(treeFs);
 	const force = options.force ?? true;
 	const preserveRoot = options.preserveRoot ?? false;
+	const absoluteRoot = path.resolve(root);
+	const quarantinePaths = new Set<string>();
+	let stepsSinceYield = 0;
 
-	type DirectoryClaimState =
-		| { kind: "current"; stats: AsyncTreeStats }
-		| { kind: "replacement"; stats: AsyncTreeStats }
-		| { kind: "missing" };
-
-	const lstatForRemoval = async (filePath: string): Promise<AsyncTreeStats | undefined> => {
+	const lstatIfPresent = async (
+		filePath: string,
+		allowMissing: boolean,
+	): Promise<AsyncTreeStats | undefined> => {
 		try { return await treeFs.lstat(filePath); }
 		catch (error) {
-			if (force && isMissing(error)) return undefined;
+			if (allowMissing && isMissing(error)) return undefined;
 			throw error;
 		}
 	};
 
-	const parentClaimCurrent = async (work: TreeWork): Promise<boolean> => {
-		if (work.parentAbsolutePath === undefined && work.parentAuthorizedStats === undefined) return true;
-		if (work.parentAbsolutePath === undefined || work.parentAuthorizedStats === undefined) {
-			throw new Error(`Incomplete removal parent claim: ${work.absolutePath}`);
-		}
-		const parentStats = await lstatForRemoval(work.parentAbsolutePath);
-		if (parentStats === undefined) return false;
-		assertAuthorizedDirectory(work.parentAuthorizedStats, parentStats, work.parentAbsolutePath);
-		return true;
-	};
-
-	const inspectDirectoryClaim = async (
-		work: TreeWork,
-		authorizedStats: AsyncTreeStats,
-	): Promise<DirectoryClaimState> => {
-		if (!await parentClaimCurrent(work)) return { kind: "missing" };
-		const currentStats = await lstatForRemoval(work.absolutePath);
-		if (currentStats === undefined) return { kind: "missing" };
-		if (!await parentClaimCurrent(work)) return { kind: "missing" };
-		return isAuthorizedDirectory(authorizedStats, currentStats, work.absolutePath)
-			? { kind: "current", stats: currentStats }
-			: { kind: "replacement", stats: currentStats };
-	};
-
-	const assertSameLeafClaim = (
+	const assertExactIdentity = (
 		expected: AsyncTreeStats,
 		current: AsyncTreeStats,
 		filePath: string,
 	): void => {
-		if (current.isDirectory() && !current.isSymbolicLink()) throw staleDirectoryError(filePath);
-		if (entryKind(expected) !== entryKind(current)
-			|| !matchesIdentityWhenAvailable(expected, current)) {
+		if (!hasStableFileIdentity(expected)
+			|| !hasStableFileIdentity(current)
+			|| !sameFileIdentity(expected, current)
+			|| entryKind(expected) !== entryKind(current)) {
 			throw staleDirectoryError(filePath);
 		}
 	};
 
-	/** Unlink only a revalidated leaf while its producing directory is current. */
-	const unlinkClaimedLeaf = async (
-		work: TreeWork,
-		authorizedStats: AsyncTreeStats,
-	): Promise<void> => {
-		if (!await parentClaimCurrent(work)) return;
-		let currentStats = await lstatForRemoval(work.absolutePath);
-		if (currentStats === undefined) return;
-		assertSameLeafClaim(authorizedStats, currentStats, work.absolutePath);
-		if (!await parentClaimCurrent(work)) return;
-		// Re-read the leaf immediately before unlink so an identity replacement
-		// cannot inherit the earlier authorization.
-		currentStats = await lstatForRemoval(work.absolutePath);
-		if (currentStats === undefined) return;
-		assertSameLeafClaim(authorizedStats, currentStats, work.absolutePath);
-		if (!await parentClaimCurrent(work)) return;
-		try { await treeFs.unlink(work.absolutePath); }
-		catch (error) { if (!force || !isMissing(error)) throw error; }
+	const assertClaimCurrent = async (claim: RemovalClaim | undefined): Promise<boolean> => {
+		if (!claim) return true;
+		const claims = new Set<RemovalClaim>();
+		if (claim.rootClaim) claims.add(claim.rootClaim);
+		if (claim.parent) claims.add(claim.parent);
+		claims.add(claim);
+		for (const currentClaim of claims) {
+			const current = await lstatIfPresent(currentClaim.absolutePath, force);
+			if (current === undefined) return false;
+			assertExactIdentity(currentClaim.authorizedStats, current, currentClaim.absolutePath);
+		}
+		return true;
 	};
 
-	const rootWork: TreeWork = { absolutePath: root, relativePath: "", depth: 0 };
-	const initialRootStats = await lstatForRemoval(root);
-	if (initialRootStats === undefined) return;
-
-	if (!initialRootStats.isDirectory() || initialRootStats.isSymbolicLink()) {
-		// Preserve direct-leaf rm semantics: lstat classified the requested root
-		// itself, so unlink the final component rather than resolving a child path.
-		try { await treeFs.unlink(root); }
-		catch (error) { if (!force || !isMissing(error)) throw error; }
-		return;
-	}
-	if (options.expectedRootStats !== undefined) {
-		if (!hasStableFileIdentity(options.expectedRootStats)
-			|| !hasStableFileIdentity(initialRootStats)
-			|| !sameFileIdentity(options.expectedRootStats, initialRootStats)) {
-			throw staleDirectoryError(root);
+	const makeQuarantinePath = async (originalPath: string): Promise<string> => {
+		for (let attempt = 0; attempt < 8; attempt++) {
+			const candidate = path.join(path.dirname(originalPath), `.bobbit-remove-${randomUUID()}`);
+			if (await lstatIfPresent(candidate, true) !== undefined) continue;
+			quarantinePaths.add(candidate);
+			return candidate;
 		}
-		assertAuthorizedDirectory(options.expectedRootStats, initialRootStats, root);
-	}
+		throw new Error(`Could not allocate removal quarantine beside ${originalPath}`);
+	};
 
-	// Bind the root immediately before and after open. A final-component symlink
-	// replacement remains a directly-unlinked leaf; a different real directory
-	// raises ESTALE and is never enumerated or removed.
-	const preOpenRoot = await inspectDirectoryClaim(rootWork, initialRootStats);
-	if (preOpenRoot.kind === "missing") return;
-	if (preOpenRoot.kind === "replacement") {
-		await unlinkClaimedLeaf(rootWork, preOpenRoot.stats);
-		return;
-	}
+	/** Reverse an unauthorized move only inside a stable current parent. */
+	const restoreMismatchedDetach = async (
+		originalPath: string,
+		quarantinePath: string,
+		movedStats: AsyncTreeStats,
+	): Promise<void> => {
+		if (!rename || !hasStableFileIdentity(movedStats)) return;
+		try {
+			const parentPath = path.dirname(originalPath);
+			const parentStats = await treeFs.lstat(parentPath);
+			if (!parentStats.isDirectory()
+				|| parentStats.isSymbolicLink()
+				|| !hasStableFileIdentity(parentStats)) return;
+			const currentParent = (): Promise<boolean> => assertClaimCurrent({
+				absolutePath: parentPath,
+				authorizedStats: parentStats,
+			});
+			if (!await currentParent()) return;
+			const movedCurrent = await lstatIfPresent(quarantinePath, true);
+			if (movedCurrent === undefined) return;
+			assertExactIdentity(movedStats, movedCurrent, quarantinePath);
+			if (await lstatIfPresent(originalPath, true) !== undefined) return;
+			if (!await currentParent()) return;
+			const movedBeforeRestore = await lstatIfPresent(quarantinePath, true);
+			if (movedBeforeRestore === undefined) return;
+			assertExactIdentity(movedStats, movedBeforeRestore, quarantinePath);
+			await rename(quarantinePath, originalPath);
+			const restored = await lstatIfPresent(originalPath, true);
+			if (restored === undefined) return;
+			assertExactIdentity(movedStats, restored, originalPath);
+			await currentParent();
+		} catch {
+			// Restoration is best-effort. The mismatched identity is never deleted.
+		}
+	};
 
-	let rootDirectory: AsyncTreeDirectory;
-	try {
-		rootDirectory = await treeFs.opendir(root);
-	} catch (openError) {
-		const failedOpenRoot = await inspectDirectoryClaim(rootWork, initialRootStats);
-		if (failedOpenRoot.kind === "missing") return;
-		if (failedOpenRoot.kind === "replacement") {
-			await unlinkClaimedLeaf(rootWork, failedOpenRoot.stats);
+	const detachClaimed = async (claim: RemovalClaim): Promise<RemovalClaim | undefined> => {
+		if (!rename) throw new Error("Bounded tree removal requires an asynchronous rename implementation");
+		if (!await assertClaimCurrent(claim)) return undefined;
+		const quarantinePath = await makeQuarantinePath(claim.absolutePath);
+		if (!await assertClaimCurrent(claim)) return undefined;
+		try {
+			await rename(claim.absolutePath, quarantinePath);
+		} catch (error) {
+			if (force && isMissing(error)) return undefined;
+			throw error;
+		}
+
+		const movedStats = await lstatIfPresent(quarantinePath, true);
+		if (movedStats === undefined) throw staleDirectoryError(claim.absolutePath);
+		try {
+			assertExactIdentity(claim.authorizedStats, movedStats, quarantinePath);
+		} catch {
+			await restoreMismatchedDetach(claim.absolutePath, quarantinePath, movedStats);
+			throw staleDirectoryError(claim.absolutePath);
+		}
+		if (!await assertClaimCurrent(claim.parent)) {
+			// The authorized object moved, but its containing namespace no longer
+			// matches. Leave it quarantined rather than restoring into a replacement.
+			throw staleDirectoryError(claim.absolutePath);
+		}
+		const detached: RemovalClaim = {
+			absolutePath: quarantinePath,
+			authorizedStats: claim.authorizedStats,
+			parent: claim.parent,
+			rootClaim: claim.rootClaim,
+		};
+		if (!await assertClaimCurrent(detached)) throw staleDirectoryError(claim.absolutePath);
+		return detached;
+	};
+
+	const unlinkDetached = async (claim: RemovalClaim): Promise<void> => {
+		if (!await assertClaimCurrent(claim)) return;
+		try {
+			await treeFs.unlink(claim.absolutePath);
+		} catch (error) {
+			const afterError = await lstatIfPresent(claim.absolutePath, true);
+			if (afterError !== undefined) assertExactIdentity(claim.authorizedStats, afterError, claim.absolutePath);
+			if (!force || !isMissing(error)) throw error;
 			return;
 		}
-		throw openError;
-	}
-	let postOpenRoot: DirectoryClaimState;
-	try {
-		postOpenRoot = await inspectDirectoryClaim(rootWork, initialRootStats);
-	} catch (error) {
-		try { await rootDirectory.close(); } catch { /* preserve the identity error */ }
-		throw error;
-	}
-	if (postOpenRoot.kind !== "current") {
-		await rootDirectory.close();
-		if (postOpenRoot.kind === "replacement") {
-			await unlinkClaimedLeaf(rootWork, postOpenRoot.stats);
+		const after = await lstatIfPresent(claim.absolutePath, true);
+		if (after !== undefined) throw staleDirectoryError(claim.absolutePath);
+		await assertClaimCurrent(claim.parent);
+	};
+
+	const rmdirDetached = async (claim: RemovalClaim): Promise<void> => {
+		if (!await assertClaimCurrent(claim)) return;
+		try {
+			await treeFs.rmdir(claim.absolutePath);
+		} catch (error) {
+			const afterError = await lstatIfPresent(claim.absolutePath, true);
+			if (afterError !== undefined) assertExactIdentity(claim.authorizedStats, afterError, claim.absolutePath);
+			if (!force || !isMissing(error)) throw error;
+			return;
 		}
+		const after = await lstatIfPresent(claim.absolutePath, true);
+		if (after !== undefined) throw staleDirectoryError(claim.absolutePath);
+		await assertClaimCurrent(claim.parent);
+	};
+
+	const openClaimedDirectory = async (claim: RemovalClaim): Promise<AsyncTreeDirectory | undefined> => {
+		if (!await assertClaimCurrent(claim)) return undefined;
+		let directory: AsyncTreeDirectory;
+		try {
+			directory = await treeFs.opendir(claim.absolutePath);
+		} catch (openError) {
+			if (!await assertClaimCurrent(claim)) return undefined;
+			throw openError;
+		}
+		try {
+			if (!await assertClaimCurrent(claim)) {
+				await directory.close();
+				return undefined;
+			}
+		} catch (error) {
+			try { await directory.close(); } catch { /* preserve the identity error */ }
+			throw error;
+		}
+		return directory;
+	};
+
+	const removeClaimedDirectory = async (
+		rootClaim: RemovalClaim,
+		removeRootAtEnd: boolean,
+	): Promise<void> => {
+		const rootDirectory = await openClaimedDirectory(rootClaim);
+		if (!rootDirectory) return;
+		const frames: RemovalFrame[] = [{
+			claim: rootClaim,
+			directory: rootDirectory,
+			removeAtEnd: removeRootAtEnd,
+		}];
+		try {
+			while (frames.length > 0) {
+				const frame = frames[frames.length - 1]!;
+				const dirent = await frame.directory.read();
+				if (!await assertClaimCurrent(frame.claim)) {
+					frames.pop();
+					await frame.directory.close();
+					continue;
+				}
+				if (!dirent) {
+					frames.pop();
+					await frame.directory.close();
+					if (frame.removeAtEnd) await rmdirDetached(frame.claim);
+				} else {
+					const childPath = path.join(frame.claim.absolutePath, dirent.name);
+					// Some directory implementations may return a quarantine name that
+					// was created and removed after this handle opened. Never treat it as
+					// fresh caller-owned work.
+					if (quarantinePaths.has(childPath)) continue;
+					const childStats = await lstatIfPresent(childPath, force);
+					if (childStats === undefined) continue;
+					if (!await assertClaimCurrent(frame.claim)) throw staleDirectoryError(frame.claim.absolutePath);
+					const childClaim: RemovalClaim = {
+						absolutePath: childPath,
+						authorizedStats: childStats,
+						parent: frame.claim,
+						rootClaim: frame.claim.rootClaim ?? frame.claim,
+					};
+					const detached = await detachClaimed(childClaim);
+					if (!detached) continue;
+					if (detached.authorizedStats.isDirectory()
+						&& !detached.authorizedStats.isSymbolicLink()) {
+						const directory = await openClaimedDirectory(detached);
+						if (directory) frames.push({ claim: detached, directory, removeAtEnd: true });
+					} else {
+						await unlinkDetached(detached);
+					}
+				}
+
+				stepsSinceYield++;
+				if (stepsSinceYield >= COOPERATIVE_YIELD_INTERVAL) {
+					stepsSinceYield = 0;
+					await yieldToEventLoop();
+				}
+			}
+		} finally {
+			for (let index = frames.length - 1; index >= 0; index--) {
+				try { await frames[index]!.directory.close(); } catch { /* preserve the removal error */ }
+			}
+		}
+	};
+
+	const initialRootStats = await lstatIfPresent(absoluteRoot, force);
+	if (initialRootStats === undefined) return;
+	if (options.expectedRootStats !== undefined) {
+		assertExactIdentity(options.expectedRootStats, initialRootStats, absoluteRoot);
+	}
+	const parentPath = path.dirname(absoluteRoot);
+	if (parentPath === absoluteRoot) throw new RangeError("refusing to remove a filesystem root");
+	const parentStats = await treeFs.lstat(parentPath);
+	if (!parentStats.isDirectory()
+		|| parentStats.isSymbolicLink()
+		|| !hasStableFileIdentity(parentStats)) {
+		throw staleDirectoryError(parentPath);
+	}
+	const parentClaim: RemovalClaim = {
+		absolutePath: parentPath,
+		authorizedStats: parentStats,
+	};
+	const rootClaim: RemovalClaim = {
+		absolutePath: absoluteRoot,
+		authorizedStats: initialRootStats,
+		parent: parentClaim,
+		rootClaim: parentClaim,
+	};
+	if (!await assertClaimCurrent(rootClaim)) return;
+
+	if (!initialRootStats.isDirectory() || initialRootStats.isSymbolicLink()) {
+		const detached = await detachClaimed(rootClaim);
+		if (detached) await unlinkDetached(detached);
 		return;
 	}
-
-	const frames: TreeFrame[] = [{
-		...rootWork,
-		authorizedStats: initialRootStats,
-		directory: rootDirectory,
-	}];
-	const detachTopFrame = async (
-		frame: TreeFrame,
-		state: Exclude<DirectoryClaimState, { kind: "current" }>,
-	): Promise<void> => {
-		if (frames[frames.length - 1] !== frame) throw new Error("Removal frame stack changed unexpectedly");
-		frames.pop();
-		await frame.directory.close();
-		if (state.kind === "replacement") await unlinkClaimedLeaf(frame, state.stats);
-	};
-	let stepsSinceYield = 0;
-	try {
-		while (frames.length > 0) {
-			const frame = frames[frames.length - 1]!;
-			const dirent = await frame.directory.read();
-			// A handle can keep reading a detached directory. Check both this frame
-			// and the identity of the parent that produced it after every read.
-			const afterRead = await inspectDirectoryClaim(frame, frame.authorizedStats);
-			if (afterRead.kind !== "current") {
-				await detachTopFrame(frame, afterRead);
-				continue;
-			}
-
-			if (!dirent) {
-				frames.pop();
-				await frame.directory.close();
-				if (!preserveRoot || frame.depth > 0) {
-					// Closing the descriptor is another async race window. Revalidate the
-					// frame and producing parent immediately before the final operation.
-					const finalClaim = await inspectDirectoryClaim(frame, frame.authorizedStats);
-					if (finalClaim.kind === "replacement") {
-						await unlinkClaimedLeaf(frame, finalClaim.stats);
-					} else if (finalClaim.kind === "current") {
-						try { await treeFs.rmdir(frame.absolutePath); }
-						catch (error) { if (!force || !isMissing(error)) throw error; }
-					}
-				}
-			} else {
-				const child: TreeWork = {
-					absolutePath: path.join(frame.absolutePath, dirent.name),
-					relativePath: "",
-					depth: frame.depth + 1,
-					parentAbsolutePath: frame.absolutePath,
-					parentAuthorizedStats: frame.authorizedStats,
-				};
-
-				// Revalidate the frame and its own producing parent on both sides of
-				// the child lstat. No child pathname is used after an ancestor swap.
-				const beforeChild = await inspectDirectoryClaim(frame, frame.authorizedStats);
-				if (beforeChild.kind !== "current") {
-					await detachTopFrame(frame, beforeChild);
-					continue;
-				}
-				const childStats = await lstatForRemoval(child.absolutePath);
-				if (childStats === undefined) continue;
-				const afterChild = await inspectDirectoryClaim(frame, frame.authorizedStats);
-				if (afterChild.kind !== "current") {
-					await detachTopFrame(frame, afterChild);
-					continue;
-				}
-
-				if (childStats.isDirectory() && !childStats.isSymbolicLink()) {
-					const beforeChildOpenParent = await inspectDirectoryClaim(frame, frame.authorizedStats);
-					if (beforeChildOpenParent.kind !== "current") {
-						await detachTopFrame(frame, beforeChildOpenParent);
-						continue;
-					}
-					const beforeChildOpen = await inspectDirectoryClaim(child, childStats);
-					if (beforeChildOpen.kind === "missing") continue;
-					if (beforeChildOpen.kind === "replacement") {
-						await unlinkClaimedLeaf(child, beforeChildOpen.stats);
-						continue;
-					}
-
-					let childDirectory: AsyncTreeDirectory;
-					try {
-						childDirectory = await treeFs.opendir(child.absolutePath);
-					} catch (openError) {
-						const failedOpenParent = await inspectDirectoryClaim(frame, frame.authorizedStats);
-						if (failedOpenParent.kind !== "current") {
-							await detachTopFrame(frame, failedOpenParent);
-							continue;
-						}
-						const failedOpenChild = await inspectDirectoryClaim(child, childStats);
-						if (failedOpenChild.kind === "missing") continue;
-						if (failedOpenChild.kind === "replacement") {
-							await unlinkClaimedLeaf(child, failedOpenChild.stats);
-							continue;
-						}
-						throw openError;
-					}
-
-					let postOpenParent: DirectoryClaimState;
-					let postOpenChild: DirectoryClaimState;
-					try {
-						postOpenParent = await inspectDirectoryClaim(frame, frame.authorizedStats);
-						postOpenChild = postOpenParent.kind === "current"
-							? await inspectDirectoryClaim(child, childStats)
-							: { kind: "missing" };
-					} catch (error) {
-						try { await childDirectory.close(); } catch { /* preserve the identity error */ }
-						throw error;
-					}
-					if (postOpenParent.kind !== "current") {
-						await childDirectory.close();
-						await detachTopFrame(frame, postOpenParent);
-						continue;
-					}
-					if (postOpenChild.kind !== "current") {
-						await childDirectory.close();
-						if (postOpenChild.kind === "replacement") {
-							await unlinkClaimedLeaf(child, postOpenChild.stats);
-						}
-						continue;
-					}
-					frames.push({
-						...child,
-						authorizedStats: childStats,
-						directory: childDirectory,
-					});
-				} else {
-					// The frame/grandparent claim is checked immediately before the leaf
-					// helper revalidates the immediate parent and child identity.
-					const beforeUnlink = await inspectDirectoryClaim(frame, frame.authorizedStats);
-					if (beforeUnlink.kind !== "current") {
-						await detachTopFrame(frame, beforeUnlink);
-						continue;
-					}
-					await unlinkClaimedLeaf(child, childStats);
-				}
-			}
-
-			stepsSinceYield++;
-			if (stepsSinceYield >= COOPERATIVE_YIELD_INTERVAL) {
-				stepsSinceYield = 0;
-				await yieldToEventLoop();
-			}
-		}
-	} finally {
-		for (let index = frames.length - 1; index >= 0; index--) {
-			try { await frames[index]!.directory.close(); } catch { /* preserve the removal error */ }
-		}
+	if (preserveRoot) {
+		await removeClaimedDirectory(rootClaim, false);
+		return;
 	}
+	const detachedRoot = await detachClaimed(rootClaim);
+	if (detachedRoot) await removeClaimedDirectory(detachedRoot, true);
 }
