@@ -60,13 +60,18 @@ async function resetSession(sessionId = SID): Promise<void> {
 	try {
 		await removeMount(sessionId);
 	} catch (error) {
-		// memfs can retain ghost directory entries after replacing the same entry
-		// via rename. Production cleanup must still propagate every non-ENOENT
-		// failure, so contain this test-double-only ENOTEMPTY reset here.
-		if ((error as NodeJS.ErrnoException).code !== "ENOTEMPTY") throw error;
+		// memfs both retains ghost entries and implements symlink rename as a
+		// target move. Production cleanup must still propagate these failures, so
+		// contain only this test-double reset incompatibility here.
+		if (!["ENOTEMPTY", "ESTALE"].includes(String((error as NodeJS.ErrnoException).code))) throw error;
 	}
 	memoryFs.rmSync(mountPath(sessionId), { recursive: true, force: true });
-	await removeArtifacts(sessionId);
+	try {
+		await removeArtifacts(sessionId);
+	} catch (error) {
+		if (!["ENOTEMPTY", "ESTALE"].includes(String((error as NodeJS.ErrnoException).code))) throw error;
+	}
+	memoryFs.rmSync(path.join(artifactRoot, sessionId), { recursive: true, force: true });
 }
 
 function readLive(sessionId: string, rel: string): string {
@@ -98,20 +103,54 @@ function substituteDirectoryAfterEnumeration(
 	calls: string[],
 ): PreviewAsyncFs {
 	let substituted = false;
+	let currentTreeRoot = path.resolve(treeRoot);
+	const victimRelative = path.relative(path.resolve(treeRoot), path.resolve(victim));
+	const identityOverrides = new Map<string, { dev: number | bigint; ino: number | bigint }>();
 	return {
 		...baseAsyncFs,
+		lstat: async filePath => {
+			const absolute = path.resolve(String(filePath));
+			const stats = await baseAsyncFs.lstat(filePath);
+			const identity = identityOverrides.get(absolute);
+			return identity
+				? new Proxy(stats, {
+					get: (target, property) => {
+						if (property === "dev" || property === "ino") return identity[property];
+						const value = Reflect.get(target, property, target);
+						return typeof value === "function" ? value.bind(target) : value;
+					},
+				})
+				: stats;
+		},
+		rename: async (oldPath, newPath) => {
+			const oldAbsolute = path.resolve(String(oldPath));
+			const newAbsolute = path.resolve(String(newPath));
+			const oldStats = await baseAsyncFs.lstat(oldPath);
+			if (oldStats.isSymbolicLink()) {
+				// memfs rename follows a symlink and moves its target, unlike Node. Keep
+				// this injected race Node-faithful and retain the claimed link identity.
+				const linkTarget = await memoryFs.promises.readlink(oldPath);
+				await baseAsyncFs.unlink(oldPath);
+				await memoryFs.promises.symlink(linkTarget, newPath);
+				identityOverrides.set(newAbsolute, { dev: oldStats.dev, ino: oldStats.ino });
+			} else {
+				await baseAsyncFs.rename(oldPath, newPath);
+			}
+			if (oldAbsolute === currentTreeRoot) currentTreeRoot = newAbsolute;
+		},
 		opendir: async filePath => {
 			const absolute = path.resolve(String(filePath));
 			calls.push(`opendir:${absolute}`);
 			const directory = await baseAsyncFs.opendir(filePath);
-			if (absolute !== path.resolve(treeRoot)) return directory;
+			if (absolute !== currentTreeRoot) return directory;
 			return {
 				read: async () => {
 					const entry = await directory.read();
 					if (!substituted && entry?.name === path.basename(victim)) {
 						substituted = true;
-						memoryFs.rmSync(victim, { recursive: true, force: true });
-						memoryFs.symlinkSync(outside, victim);
+						const currentVictim = path.join(currentTreeRoot, victimRelative);
+						memoryFs.rmSync(currentVictim, { recursive: true, force: true });
+						memoryFs.symlinkSync(outside, currentVictim);
 					}
 					return entry;
 				},
@@ -503,11 +542,17 @@ describe("preview artifacts", () => {
 
 	it("rejects file substitutions before hash or preview-directory copy can read external bytes", async () => {
 		const outside = path.join(root, "race-file-outside");
+		const hashTree = path.join(root, "race-file-hash");
+		const copyTree = path.join(root, "race-file-copy");
+		const copyTarget = path.join(root, "race-file-copy-target");
+		const ancestorTree = path.join(root, "race-file-ancestor");
+		for (const candidate of [outside, hashTree, copyTree, copyTarget, ancestorTree]) {
+			memoryFs.rmSync(candidate, { recursive: true, force: true });
+		}
 		const outsideFile = path.join(outside, "secret.txt");
 		memoryFs.mkdirSync(outside, { recursive: true });
 		memoryFs.writeFileSync(outsideFile, "outside-secret");
 
-		const hashTree = path.join(root, "race-file-hash");
 		const hashVictim = path.join(hashTree, "victim.txt");
 		memoryFs.mkdirSync(hashTree, { recursive: true });
 		memoryFs.writeFileSync(hashVictim, "inside");
@@ -515,24 +560,21 @@ describe("preview artifacts", () => {
 		await assert.rejects(hashMountDirectory(hashTree, {
 			fs: substituteFileAtOpen(hashVictim, outsideFile, hashCalls),
 			concurrency: 1,
-		}), /regular file|symbolic link|symlink/i);
+		}), /regular file|symbolic link|symlink|changed during traversal/i);
 		assert.equal(hashCalls.some(call => call.startsWith("read:")), false);
 
-		const copyTree = path.join(root, "race-file-copy");
 		const copyVictim = path.join(copyTree, "victim.txt");
-		const copyTarget = path.join(root, "race-file-copy-target");
 		memoryFs.mkdirSync(copyTree, { recursive: true });
 		memoryFs.writeFileSync(copyVictim, "inside");
 		const copyCalls: string[] = [];
 		await assert.rejects(copyPreviewDirectory(copyTree, copyTarget, {
 			fs: substituteFileAtOpen(copyVictim, outsideFile, copyCalls),
 			concurrency: 1,
-		}), /regular file|symbolic link|symlink/i);
+		}), /regular file|symbolic link|symlink|changed during traversal/i);
 		assert.equal(copyCalls.some(call => call.startsWith("read:")), false);
 		assert.equal(memoryFs.existsSync(path.join(copyTarget, "victim.txt")), false);
 		assert.equal(memoryFs.readFileSync(outsideFile, "utf-8"), "outside-secret");
 
-		const ancestorTree = path.join(root, "race-file-ancestor");
 		const ancestorParent = path.join(ancestorTree, "nested");
 		const ancestorVictim = path.join(ancestorParent, "victim.txt");
 		const outsideVictim = path.join(outside, "victim.txt");
@@ -561,6 +603,8 @@ describe("preview artifacts", () => {
 		const tree = path.join(root, "race-delete");
 		const victim = path.join(tree, "switch");
 		const outside = path.join(root, "race-outside-delete");
+		memoryFs.rmSync(tree, { recursive: true, force: true });
+		memoryFs.rmSync(outside, { recursive: true, force: true });
 		memoryFs.mkdirSync(victim, { recursive: true });
 		memoryFs.writeFileSync(path.join(victim, "inside.txt"), "inside");
 		memoryFs.mkdirSync(outside, { recursive: true });
@@ -574,7 +618,11 @@ describe("preview artifacts", () => {
 		assert.equal(memoryFs.readFileSync(path.join(outside, "secret.txt"), "utf-8"), "outside-secret");
 		assert.equal(calls.includes(`opendir:${path.resolve(victim)}`), false);
 		assert.equal(calls.some(call => call.includes("secret.txt")), false);
-		assert.ok(calls.includes(`unlink:${path.resolve(victim)}`));
+		assert.equal(
+			calls.some(call => call.startsWith("unlink:") && path.basename(call.slice("unlink:".length)).startsWith(".bobbit-remove-")),
+			true,
+			"the substituted link must be unlinked only after its own quarantine detach",
+		);
 		memoryFs.rmSync(outside, { recursive: true, force: true });
 	});
 
@@ -586,10 +634,18 @@ describe("preview artifacts", () => {
 
 		const gate = deferred();
 		let held = false;
+		let sidQuarantine = "";
 		const deferredFs: PreviewAsyncFs = {
 			...baseAsyncFs,
+			rename: async (oldPath, newPath) => {
+				await baseAsyncFs.rename(oldPath, newPath);
+				if (path.resolve(String(oldPath)) === path.resolve(path.join(artifactRoot, SID))) {
+					sidQuarantine = path.resolve(String(newPath));
+				}
+			},
 			unlink: async filePath => {
-				if (!held && String(filePath).includes(SID)) {
+				const absolute = path.resolve(String(filePath));
+				if (!held && sidQuarantine && absolute.startsWith(`${sidQuarantine}${path.sep}`)) {
 					held = true;
 					await gate.promise;
 				}
@@ -606,10 +662,17 @@ describe("preview artifacts", () => {
 		await removal;
 		await removeArtifacts(SID);
 
+		let failingQuarantine = "";
 		const failingFs: PreviewAsyncFs = {
 			...baseAsyncFs,
+			rename: async (oldPath, newPath) => {
+				await baseAsyncFs.rename(oldPath, newPath);
+				if (path.resolve(String(oldPath)) === path.resolve(path.join(artifactRoot, SID_B))) {
+					failingQuarantine = path.resolve(String(newPath));
+				}
+			},
 			rmdir: async filePath => {
-				if (String(filePath) === path.join(artifactRoot, SID_B)) {
+				if (failingQuarantine && path.resolve(String(filePath)) === failingQuarantine) {
 					const error = new Error("denied") as NodeJS.ErrnoException;
 					error.code = "EACCES";
 					throw error;

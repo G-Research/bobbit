@@ -1038,8 +1038,7 @@ export async function copyTree(source: string, destination: string, options: Cop
 	}, { concurrency: options.concurrency, fs: treeFs });
 }
 
-type RemoveTreeFs = Pick<AsyncTreeFs, "lstat" | "opendir" | "unlink" | "rmdir">
-	& Partial<Pick<AsyncTreeFs, "rename">>;
+type RemoveTreeFs = Pick<AsyncTreeFs, "lstat" | "opendir" | "rename" | "unlink" | "rmdir">;
 
 export interface RemoveTreeOptions {
 	fs?: RemoveTreeFs;
@@ -1062,6 +1061,12 @@ interface RemovalClaim {
 	rootClaim?: RemovalClaim;
 }
 
+interface DetachedRemovalClaim extends RemovalClaim {
+	/** Caller-visible pathname from which this exact identity was detached. */
+	originalPath: string;
+	state: "detached" | "restored" | "removed";
+}
+
 interface RemovalFrame {
 	claim: RemovalClaim;
 	directory: AsyncTreeDirectory;
@@ -1074,6 +1079,12 @@ interface RemovalFrame {
  * preserved roots detach each child the same way. Every moved identity is
  * verified before traversal or deletion, and a mismatched move is restored
  * best-effort and reported as ESTALE without being deleted.
+ *
+ * Portable Node exposes pathname-based rename/unlink/rmdir, not an openat-style
+ * identity-bound operation. Random owner-only quarantine names plus exact
+ * dev/ino/type checks immediately before and after every pathname mutation
+ * bound that portability gap, but cannot provide within-syscall exclusion
+ * against a malicious ABA rename. Do not weaken either side of that fence.
  */
 export async function removeTree(root: string, options: RemoveTreeOptions = {}): Promise<void> {
 	const treeFs = options.fs ?? realAsyncTreeFs;
@@ -1132,105 +1143,232 @@ export async function removeTree(root: string, options: RemoveTreeOptions = {}):
 		throw new Error(`Could not allocate removal quarantine beside ${originalPath}`);
 	};
 
-	/** Reverse an unauthorized move only inside a stable current parent. */
-	const restoreMismatchedDetach = async (
-		originalPath: string,
-		quarantinePath: string,
-		movedStats: AsyncTreeStats,
-	): Promise<void> => {
-		if (!rename || !hasStableFileIdentity(movedStats)) return;
+	const errorQuarantinePath = (error: unknown): string | undefined => {
+		if ((typeof error !== "object" && typeof error !== "function") || error === null) return undefined;
+		const candidate = (error as { quarantinePath?: unknown }).quarantinePath;
+		return typeof candidate === "string" ? candidate : undefined;
+	};
+
+	const attachQuarantineContext = (error: unknown, quarantinePath: string): void => {
+		if ((typeof error !== "object" && typeof error !== "function") || error === null) {
+			console.error(`[bounded-async-work] failed cleanup preserved quarantine at ${quarantinePath}`, error);
+			return;
+		}
 		try {
-			const parentPath = path.dirname(originalPath);
-			const parentStats = await treeFs.lstat(parentPath);
-			if (!parentStats.isDirectory()
-				|| parentStats.isSymbolicLink()
-				|| !hasStableFileIdentity(parentStats)) return;
-			const currentParent = (): Promise<boolean> => assertClaimCurrent({
-				absolutePath: parentPath,
-				authorizedStats: parentStats,
+			Object.defineProperty(error, "quarantinePath", {
+				value: quarantinePath,
+				writable: true,
+				configurable: true,
+				enumerable: true,
 			});
-			if (!await currentParent()) return;
-			const movedCurrent = await lstatIfPresent(quarantinePath, true);
-			if (movedCurrent === undefined) return;
-			assertExactIdentity(movedStats, movedCurrent, quarantinePath);
-			if (await lstatIfPresent(originalPath, true) !== undefined) return;
-			if (!await currentParent()) return;
-			const movedBeforeRestore = await lstatIfPresent(quarantinePath, true);
-			if (movedBeforeRestore === undefined) return;
-			assertExactIdentity(movedStats, movedBeforeRestore, quarantinePath);
-			await rename(quarantinePath, originalPath);
-			const restored = await lstatIfPresent(originalPath, true);
-			if (restored === undefined) return;
-			assertExactIdentity(movedStats, restored, originalPath);
-			await currentParent();
 		} catch {
-			// Restoration is best-effort. The mismatched identity is never deleted.
+			console.error(`[bounded-async-work] failed cleanup preserved quarantine at ${quarantinePath}`, error);
 		}
 	};
 
-	const detachClaimed = async (claim: RemovalClaim): Promise<RemovalClaim | undefined> => {
-		if (!rename) throw new Error("Bounded tree removal requires an asynchronous rename implementation");
-		if (!await assertClaimCurrent(claim)) return undefined;
-		const quarantinePath = await makeQuarantinePath(claim.absolutePath);
-		if (!await assertClaimCurrent(claim)) return undefined;
-		try {
-			await rename(claim.absolutePath, quarantinePath);
-		} catch (error) {
-			if (force && isMissing(error)) return undefined;
-			throw error;
+	const relocateQuarantineContext = (error: unknown, from: string, to: string): void => {
+		const current = errorQuarantinePath(error);
+		if (!current) return;
+		const relative = path.relative(from, current);
+		if (relative === "") {
+			try { delete (error as { quarantinePath?: string }).quarantinePath; } catch { /* diagnostic only */ }
+			return;
 		}
+		if (relative.startsWith("..") || path.isAbsolute(relative)) return;
+		attachQuarantineContext(error, path.join(to, relative));
+	};
 
-		const movedStats = await lstatIfPresent(quarantinePath, true);
-		if (movedStats === undefined) throw staleDirectoryError(claim.absolutePath);
+	type RestoreOutcome = "restored" | "removed" | "unsafe";
+
+	/**
+	 * Restore one exact remaining quarantine identity without overwriting the
+	 * original pathname. All authorization comes from the parent claim captured
+	 * before detach; a replacement parent is never accepted after the fact.
+	 */
+	const restoreExactQuarantine = async (
+		originalPath: string,
+		quarantinePath: string,
+		expectedStats: AsyncTreeStats,
+		parentClaim: RemovalClaim | undefined,
+	): Promise<RestoreOutcome> => {
+		if (!hasStableFileIdentity(expectedStats)) return "unsafe";
+		let renameIssued = false;
 		try {
-			assertExactIdentity(claim.authorizedStats, movedStats, quarantinePath);
+			if (!await assertClaimCurrent(parentClaim)) return "unsafe";
+			const current = await lstatIfPresent(quarantinePath, true);
+			if (current === undefined) return "removed";
+			assertExactIdentity(expectedStats, current, quarantinePath);
+			// Node rename replaces an existing destination on POSIX. The explicit
+			// absence checks are therefore mandatory even though the random source
+			// name and pre/post identity checks cannot emulate renameat2(RENAME_NOREPLACE).
+			if (await lstatIfPresent(originalPath, true) !== undefined) return "unsafe";
+			if (!await assertClaimCurrent(parentClaim)) return "unsafe";
+			const beforeRestore = await lstatIfPresent(quarantinePath, true);
+			if (beforeRestore === undefined) return "removed";
+			assertExactIdentity(expectedStats, beforeRestore, quarantinePath);
+			renameIssued = true;
+			await rename(quarantinePath, originalPath);
+			const restored = await lstatIfPresent(originalPath, true);
+			if (restored === undefined) return "unsafe";
+			assertExactIdentity(expectedStats, restored, originalPath);
+			if (await lstatIfPresent(quarantinePath, true) !== undefined) return "unsafe";
+			if (!await assertClaimCurrent(parentClaim)) return "unsafe";
+			return "restored";
 		} catch {
-			await restoreMismatchedDetach(claim.absolutePath, quarantinePath, movedStats);
-			throw staleDirectoryError(claim.absolutePath);
+			// A test double or filesystem wrapper may complete rename and then reject.
+			// Accept that restoration only after the same full post-identity fence.
+			if (renameIssued) {
+				try {
+					const restored = await lstatIfPresent(originalPath, true);
+					if (restored !== undefined) assertExactIdentity(expectedStats, restored, originalPath);
+					if (restored !== undefined
+						&& await lstatIfPresent(quarantinePath, true) === undefined
+						&& await assertClaimCurrent(parentClaim)) return "restored";
+				} catch { /* unsafe below */ }
+			}
+			// Restoration is deliberately best-effort. Never follow up with removal:
+			// the pathname may now name a different identity.
+			return "unsafe";
 		}
-		if (!await assertClaimCurrent(claim.parent)) {
-			// The authorized object moved, but its containing namespace no longer
-			// matches. Leave it quarantined rather than restoring into a replacement.
-			throw staleDirectoryError(claim.absolutePath);
+	};
+
+	const restoreDetachedAfterFailure = async (
+		claim: DetachedRemovalClaim,
+		error: unknown,
+	): Promise<void> => {
+		if (claim.state !== "detached") return;
+		const quarantinePath = claim.absolutePath;
+		const outcome = await restoreExactQuarantine(
+			claim.originalPath,
+			quarantinePath,
+			claim.authorizedStats,
+			claim.parent,
+		);
+		if (outcome === "restored") {
+			claim.state = "restored";
+			claim.absolutePath = claim.originalPath;
+			relocateQuarantineContext(error, quarantinePath, claim.originalPath);
+			return;
 		}
-		const detached: RemovalClaim = {
+		if (outcome === "removed") {
+			claim.state = "removed";
+			return;
+		}
+		attachQuarantineContext(error, quarantinePath);
+	};
+
+	const detachClaimed = async (claim: RemovalClaim): Promise<DetachedRemovalClaim | undefined> => {
+		if (!await assertClaimCurrent(claim)) return undefined;
+		const originalPath = claim.absolutePath;
+		const quarantinePath = await makeQuarantinePath(originalPath);
+		if (!await assertClaimCurrent(claim)) return undefined;
+		const detached: DetachedRemovalClaim = {
 			absolutePath: quarantinePath,
+			originalPath,
 			authorizedStats: claim.authorizedStats,
 			parent: claim.parent,
 			rootClaim: claim.rootClaim,
+			state: "detached",
 		};
-		if (!await assertClaimCurrent(detached)) throw staleDirectoryError(claim.absolutePath);
+		try {
+			await rename(originalPath, quarantinePath);
+		} catch (error) {
+			// A pathname implementation may complete a move and still reject. Probe
+			// only the random quarantine identity and restore it when exact.
+			let moved: AsyncTreeStats | undefined;
+			try { moved = await lstatIfPresent(quarantinePath, true); }
+			catch { attachQuarantineContext(error, quarantinePath); throw error; }
+			if (moved !== undefined) {
+				let expected = claim.authorizedStats;
+				try { assertExactIdentity(expected, moved, quarantinePath); }
+				catch { expected = moved; }
+				const outcome = await restoreExactQuarantine(originalPath, quarantinePath, expected, claim.parent);
+				if (outcome === "unsafe") attachQuarantineContext(error, quarantinePath);
+				else if (outcome === "restored") detached.state = "restored";
+				else detached.state = "removed";
+			}
+			if (force && isMissing(error) && moved === undefined) return undefined;
+			throw error;
+		}
+
+		let movedStats: AsyncTreeStats;
+		try {
+			const moved = await lstatIfPresent(quarantinePath, true);
+			if (moved === undefined) throw staleDirectoryError(originalPath);
+			movedStats = moved;
+		} catch (error) {
+			await restoreDetachedAfterFailure(detached, error);
+			throw error;
+		}
+		try {
+			assertExactIdentity(claim.authorizedStats, movedStats, quarantinePath);
+		} catch {
+			const stale = staleDirectoryError(originalPath);
+			const outcome = await restoreExactQuarantine(
+				originalPath,
+				quarantinePath,
+				movedStats,
+				claim.parent,
+			);
+			if (outcome === "unsafe") attachQuarantineContext(stale, quarantinePath);
+			throw stale;
+		}
+		try {
+			if (!await assertClaimCurrent(claim.parent)) throw staleDirectoryError(originalPath);
+			if (!await assertClaimCurrent(detached)) throw staleDirectoryError(originalPath);
+		} catch (error) {
+			await restoreDetachedAfterFailure(detached, error);
+			throw error;
+		}
 		return detached;
 	};
 
-	const unlinkDetached = async (claim: RemovalClaim): Promise<void> => {
-		if (!await assertClaimCurrent(claim)) return;
+	const unlinkDetached = async (claim: DetachedRemovalClaim): Promise<void> => {
 		try {
-			await treeFs.unlink(claim.absolutePath);
+			if (!await assertClaimCurrent(claim)) return;
+			try {
+				await treeFs.unlink(claim.absolutePath);
+			} catch (error) {
+				try {
+					const afterError = await lstatIfPresent(claim.absolutePath, true);
+					if (afterError === undefined) claim.state = "removed";
+					else assertExactIdentity(claim.authorizedStats, afterError, claim.absolutePath);
+				} catch { /* preserve the unlink error; restoration revalidates again */ }
+				if (!force || !isMissing(error)) throw error;
+				return;
+			}
+			const after = await lstatIfPresent(claim.absolutePath, true);
+			if (after !== undefined) throw staleDirectoryError(claim.absolutePath);
+			claim.state = "removed";
+			await assertClaimCurrent(claim.parent);
 		} catch (error) {
-			const afterError = await lstatIfPresent(claim.absolutePath, true);
-			if (afterError !== undefined) assertExactIdentity(claim.authorizedStats, afterError, claim.absolutePath);
-			if (!force || !isMissing(error)) throw error;
-			return;
+			await restoreDetachedAfterFailure(claim, error);
+			throw error;
 		}
-		const after = await lstatIfPresent(claim.absolutePath, true);
-		if (after !== undefined) throw staleDirectoryError(claim.absolutePath);
-		await assertClaimCurrent(claim.parent);
 	};
 
-	const rmdirDetached = async (claim: RemovalClaim): Promise<void> => {
-		if (!await assertClaimCurrent(claim)) return;
+	const rmdirDetached = async (claim: DetachedRemovalClaim): Promise<void> => {
 		try {
-			await treeFs.rmdir(claim.absolutePath);
+			if (!await assertClaimCurrent(claim)) return;
+			try {
+				await treeFs.rmdir(claim.absolutePath);
+			} catch (error) {
+				try {
+					const afterError = await lstatIfPresent(claim.absolutePath, true);
+					if (afterError === undefined) claim.state = "removed";
+					else assertExactIdentity(claim.authorizedStats, afterError, claim.absolutePath);
+				} catch { /* preserve the rmdir error; restoration revalidates again */ }
+				if (!force || !isMissing(error)) throw error;
+				return;
+			}
+			const after = await lstatIfPresent(claim.absolutePath, true);
+			if (after !== undefined) throw staleDirectoryError(claim.absolutePath);
+			claim.state = "removed";
+			await assertClaimCurrent(claim.parent);
 		} catch (error) {
-			const afterError = await lstatIfPresent(claim.absolutePath, true);
-			if (afterError !== undefined) assertExactIdentity(claim.authorizedStats, afterError, claim.absolutePath);
-			if (!force || !isMissing(error)) throw error;
-			return;
+			await restoreDetachedAfterFailure(claim, error);
+			throw error;
 		}
-		const after = await lstatIfPresent(claim.absolutePath, true);
-		if (after !== undefined) throw staleDirectoryError(claim.absolutePath);
-		await assertClaimCurrent(claim.parent);
 	};
 
 	const openClaimedDirectory = async (claim: RemovalClaim): Promise<AsyncTreeDirectory | undefined> => {
@@ -1239,7 +1377,10 @@ export async function removeTree(root: string, options: RemoveTreeOptions = {}):
 		try {
 			directory = await treeFs.opendir(claim.absolutePath);
 		} catch (openError) {
-			if (!await assertClaimCurrent(claim)) return undefined;
+			// Preserve the actual opendir failure. A failed ownership recheck is
+			// relevant to restoration, but must not replace the public I/O error.
+			try { await assertClaimCurrent(claim); } catch { /* preserve openError */ }
+			if (force && isMissing(openError)) return undefined;
 			throw openError;
 		}
 		try {
@@ -1254,30 +1395,33 @@ export async function removeTree(root: string, options: RemoveTreeOptions = {}):
 		return directory;
 	};
 
+	const isDetachedClaim = (claim: RemovalClaim): claim is DetachedRemovalClaim => (
+		"originalPath" in claim && "state" in claim
+	);
+
 	const removeClaimedDirectory = async (
 		rootClaim: RemovalClaim,
 		removeRootAtEnd: boolean,
 	): Promise<void> => {
-		const rootDirectory = await openClaimedDirectory(rootClaim);
-		if (!rootDirectory) return;
-		const frames: RemovalFrame[] = [{
-			claim: rootClaim,
-			directory: rootDirectory,
-			removeAtEnd: removeRootAtEnd,
-		}];
+		const frames: RemovalFrame[] = [];
 		try {
+			const rootDirectory = await openClaimedDirectory(rootClaim);
+			if (!rootDirectory) return;
+			frames.push({ claim: rootClaim, directory: rootDirectory, removeAtEnd: removeRootAtEnd });
 			while (frames.length > 0) {
 				const frame = frames[frames.length - 1]!;
 				const dirent = await frame.directory.read();
 				if (!await assertClaimCurrent(frame.claim)) {
-					frames.pop();
 					await frame.directory.close();
+					frames.pop();
 					continue;
 				}
 				if (!dirent) {
-					frames.pop();
 					await frame.directory.close();
-					if (frame.removeAtEnd) await rmdirDetached(frame.claim);
+					frames.pop();
+					if (frame.removeAtEnd && isDetachedClaim(frame.claim)) {
+						await rmdirDetached(frame.claim);
+					}
 				} else {
 					const childPath = path.join(frame.claim.absolutePath, dirent.name);
 					// Some directory implementations may return a quarantine name that
@@ -1297,8 +1441,13 @@ export async function removeTree(root: string, options: RemoveTreeOptions = {}):
 					if (!detached) continue;
 					if (detached.authorizedStats.isDirectory()
 						&& !detached.authorizedStats.isSymbolicLink()) {
-						const directory = await openClaimedDirectory(detached);
-						if (directory) frames.push({ claim: detached, directory, removeAtEnd: true });
+						try {
+							const directory = await openClaimedDirectory(detached);
+							if (directory) frames.push({ claim: detached, directory, removeAtEnd: true });
+						} catch (error) {
+							await restoreDetachedAfterFailure(detached, error);
+							throw error;
+						}
 					} else {
 						await unlinkDetached(detached);
 					}
@@ -1310,6 +1459,20 @@ export async function removeTree(root: string, options: RemoveTreeOptions = {}):
 					await yieldToEventLoop();
 				}
 			}
+		} catch (error) {
+			// These are the iterative equivalent of nested catch blocks: restore the
+			// deepest failed child first, then each detached parent up to the root.
+			const activeClaims = frames.map(frame => frame.claim);
+			for (let index = frames.length - 1; index >= 0; index--) {
+				try { await frames[index]!.directory.close(); } catch { /* preserve error */ }
+			}
+			frames.length = 0;
+			if (!activeClaims.includes(rootClaim)) activeClaims.unshift(rootClaim);
+			for (let index = activeClaims.length - 1; index >= 0; index--) {
+				const claim = activeClaims[index]!;
+				if (isDetachedClaim(claim)) await restoreDetachedAfterFailure(claim, error);
+			}
+			throw error;
 		} finally {
 			for (let index = frames.length - 1; index >= 0; index--) {
 				try { await frames[index]!.directory.close(); } catch { /* preserve the removal error */ }
@@ -1317,40 +1480,49 @@ export async function removeTree(root: string, options: RemoveTreeOptions = {}):
 		}
 	};
 
-	const initialRootStats = await lstatIfPresent(absoluteRoot, force);
-	if (initialRootStats === undefined) return;
-	if (options.expectedRootStats !== undefined) {
-		assertExactIdentity(options.expectedRootStats, initialRootStats, absoluteRoot);
-	}
-	const parentPath = path.dirname(absoluteRoot);
-	if (parentPath === absoluteRoot) throw new RangeError("refusing to remove a filesystem root");
-	const parentStats = await treeFs.lstat(parentPath);
-	if (!parentStats.isDirectory()
-		|| parentStats.isSymbolicLink()
-		|| !hasStableFileIdentity(parentStats)) {
-		throw staleDirectoryError(parentPath);
-	}
-	const parentClaim: RemovalClaim = {
-		absolutePath: parentPath,
-		authorizedStats: parentStats,
-	};
-	const rootClaim: RemovalClaim = {
-		absolutePath: absoluteRoot,
-		authorizedStats: initialRootStats,
-		parent: parentClaim,
-		rootClaim: parentClaim,
-	};
-	if (!await assertClaimCurrent(rootClaim)) return;
+	try {
+		const initialRootStats = await lstatIfPresent(absoluteRoot, force);
+		if (initialRootStats === undefined) return;
+		if (options.expectedRootStats !== undefined) {
+			assertExactIdentity(options.expectedRootStats, initialRootStats, absoluteRoot);
+		}
+		const parentPath = path.dirname(absoluteRoot);
+		if (parentPath === absoluteRoot) throw new RangeError("refusing to remove a filesystem root");
+		const parentStats = await lstatIfPresent(parentPath, force);
+		if (parentStats === undefined) return;
+		if (!parentStats.isDirectory()
+			|| parentStats.isSymbolicLink()
+			|| !hasStableFileIdentity(parentStats)) {
+			throw staleDirectoryError(parentPath);
+		}
+		const parentClaim: RemovalClaim = {
+			absolutePath: parentPath,
+			authorizedStats: parentStats,
+		};
+		const rootClaim: RemovalClaim = {
+			absolutePath: absoluteRoot,
+			authorizedStats: initialRootStats,
+			parent: parentClaim,
+			rootClaim: parentClaim,
+		};
+		if (!await assertClaimCurrent(rootClaim)) return;
 
-	if (!initialRootStats.isDirectory() || initialRootStats.isSymbolicLink()) {
-		const detached = await detachClaimed(rootClaim);
-		if (detached) await unlinkDetached(detached);
-		return;
+		if (!initialRootStats.isDirectory() || initialRootStats.isSymbolicLink()) {
+			const detached = await detachClaimed(rootClaim);
+			if (detached) await unlinkDetached(detached);
+			return;
+		}
+		if (preserveRoot) {
+			await removeClaimedDirectory(rootClaim, false);
+			return;
+		}
+		const detachedRoot = await detachClaimed(rootClaim);
+		if (detachedRoot) await removeClaimedDirectory(detachedRoot, true);
+	} catch (error) {
+		const quarantinePath = errorQuarantinePath(error);
+		if (quarantinePath) {
+			console.error(`[bounded-async-work] cleanup failed; quarantine remains at ${quarantinePath}`, error);
+		}
+		throw error;
 	}
-	if (preserveRoot) {
-		await removeClaimedDirectory(rootClaim, false);
-		return;
-	}
-	const detachedRoot = await detachClaimed(rootClaim);
-	if (detachedRoot) await removeClaimedDirectory(detachedRoot, true);
 }

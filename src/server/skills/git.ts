@@ -305,7 +305,7 @@ async function withTargetedRemovalSlot<T>(operation: () => Promise<T>): Promise<
  */
 export async function removeTargetedTree(
 	targetPath: string,
-	treeFs?: Pick<AsyncTreeFs, "lstat" | "opendir" | "unlink" | "rmdir">,
+	treeFs?: Pick<AsyncTreeFs, "lstat" | "opendir" | "rename" | "unlink" | "rmdir">,
 ): Promise<void> {
 	await withTargetedRemovalSlot(() => removeTree(targetPath, {
 		fs: treeFs,
