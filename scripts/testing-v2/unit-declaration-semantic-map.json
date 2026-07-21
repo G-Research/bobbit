@@ -1141,11 +1141,15 @@
         "name": "reuses the first exact candidate while skipping corrupt, missing, mismatched, and hash-invalid candidates"
       },
       {
+        "file": "tests2/core/preview-artifacts.test.ts",
+        "name": "batches metadata reads with bounded read-ahead while preserving first-valid order and failure isolation"
+      },
+      {
         "file": "tests2/core/preview-identity-guard-cost.test.ts",
         "name": "keeps multi-candidate metadata lookup and deep exact validation linear"
       }
     ],
-    "rationale": "The artifact owner retains first-exact content-hash reuse while skipping invalid candidates. The operation-cost owner preserves that selection across twenty-four mismatches plus one deep exact candidate, requires one metadata open per candidate and one content open per validated file, and compares twelve versus twenty-four misses with linear lstat/realpath ceilings so session, candidate, and trusted-root identity claims cannot multiply lookup work."
+    "rationale": "The artifact owners retain first-exact content-hash reuse while skipping invalid candidates and prove metadata lookup reads one deterministic enumeration batch at the shared ceiling without prefetching the next batch, preserves first-valid enumeration order despite out-of-order completion, and isolates corrupt, mismatched-hash, wrong-ID, and missing metadata. The operation-cost owner preserves that selection across twenty-four mismatches plus one deep exact candidate, requires one metadata open per candidate and one content open per validated file, and compares twelve versus twenty-four misses with linear lstat/realpath ceilings so session, candidate, and trusted-root identity claims cannot multiply lookup work."
   },
   {
     "baseFile": "tests2/core/preview-artifacts.test.ts",
