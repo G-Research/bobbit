@@ -1064,9 +1064,17 @@
       {
         "file": "tests2/core/preview-artifacts.test.ts",
         "name": "rejects artifact metadata replaced by an external symlink before descriptor reads"
+      },
+      {
+        "file": "tests2/core/preview-root-identity-races.test.ts",
+        "name": "walkTree aborts when a visited real directory is replaced before it is opened"
+      },
+      {
+        "file": "tests2/core/preview-root-identity-races.test.ts",
+        "name": "rejects regular artifact metadata replacement before reading its descriptor"
       }
     ],
-    "rationale": "The bounded asynchronous owners preserve exact mounted bytes and metadata while proving neither content nor artifact metadata can be replaced by an external symlink before descriptor-anchored reads."
+    "rationale": "The bounded asynchronous owners preserve exact mounted bytes and metadata while proving content, traversed directories, and artifact metadata cannot be replaced before descriptor-anchored reads."
   },
   {
     "baseFile": "tests2/core/preview-artifacts.test.ts",
@@ -1112,9 +1120,17 @@
       {
         "file": "tests2/core/preview-artifacts.test.ts",
         "name": "cleanup yields while deletion is deferred, is idempotent, and isolates sweep failures"
+      },
+      {
+        "file": "tests2/core/preview-root-identity-races.test.ts",
+        "name": "removeTree aborts after an open frame read reveals a real-directory replacement"
+      },
+      {
+        "file": "tests2/core/preview-root-identity-races.test.ts",
+        "name": "expected root identity prevents native cleanup from opening a replacement directory"
       }
     ],
-    "rationale": "The bounded asynchronous preview-artifact suite consolidates this former synchronous declaration into the named owner while retaining its observable integrity, reuse, validation, or cleanup behavior."
+    "rationale": "The bounded asynchronous cleanup owners preserve idempotency and failure isolation while proving recursive deletion rejects both in-frame and root directory identity replacement."
   },
   {
     "baseFile": "tests2/core/preview-artifacts.test.ts",
@@ -1444,9 +1460,13 @@
       {
         "file": "tests2/core/preview-mount.test.ts",
         "name": "rejects a staging-root symlink substitution without moving external contents"
+      },
+      {
+        "file": "tests2/core/preview-root-identity-races.test.ts",
+        "name": "repeated claimed-root swaps cannot copy or recursively clean the final replacement"
       }
     ],
-    "rationale": "The staged-swap owner preserves prior mounted content on ordinary failures, while the root-substitution owner proves a raced staging symlink is rejected without moving external data into the destination."
+    "rationale": "The staged-swap owner preserves prior mounted content on ordinary failures, while the root-substitution owners prove raced symlink and repeated real-directory replacements are rejected without moving or recursively deleting external data."
   },
   {
     "baseFile": "tests2/core/preview-mount.test.ts",
