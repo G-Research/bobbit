@@ -217,6 +217,46 @@ describe("preview mount", () => {
 		await removeMount(SID_B);
 	});
 
+	it("falls back to a descriptor-anchored copy when a successful hardlink has the wrong identity", async () => {
+		await removeMount(SID_B);
+		const src = makeSource();
+		const victim = path.join(src, "report.html");
+		const baseFs = createPreviewAsyncFs(testFs);
+		let linkCalls = 0;
+		let victimOpens = 0;
+		let fallbackDestinationOpens = 0;
+		let producedDifferentIdentity = false;
+		const mismatchFs: PreviewAsyncFs = {
+			...baseFs,
+			link: async (existingPath, newPath) => {
+				linkCalls++;
+				await baseFs.copyFile(existingPath, newPath, fs.constants.COPYFILE_EXCL);
+				const sourceStats = await baseFs.lstat(existingPath);
+				const destinationStats = await baseFs.lstat(newPath);
+				producedDifferentIdentity = sourceStats.dev !== destinationStats.dev || sourceStats.ino !== destinationStats.ino;
+			},
+			open: async (filePath, flags, mode) => {
+				if (path.resolve(String(filePath)) === path.resolve(victim)) victimOpens++;
+				if (flags === "wx") fallbackDestinationOpens++;
+				return baseFs.open(filePath, flags, mode);
+			},
+		};
+		setPreviewFsForTesting(mismatchFs);
+		try {
+			const result = await mountFile(SID_B, victim);
+			assert.equal(testFs.readFileSync(result.path, "utf-8"), "<h1>r</h1>");
+		} finally {
+			setPreviewFsForTesting(testFs);
+			testFs.rmSync(src, { recursive: true, force: true });
+			await removeMount(SID_B);
+		}
+
+		assert.equal(producedDifferentIdentity, true, "the injected successful link must produce a different inode");
+		assert.equal(linkCalls, 1);
+		assert.equal(victimOpens, 2, "the safe fallback must reopen and revalidate the source");
+		assert.equal(fallbackDestinationOpens, 1, "the safe fallback must exclusively recreate the destination");
+	});
+
 	it("stages before swap, supports reopening a mounted path, and rolls back staging errors", async () => {
 		const src = makeSource();
 		try {

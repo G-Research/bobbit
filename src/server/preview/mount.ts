@@ -629,23 +629,39 @@ async function copyOneFile(
 
 	if (linkError === undefined) {
 		let validationError: unknown;
+		let identityMatches = false;
 		try {
 			const copiedStats = await io.lstat(dst);
-			if (!copiedStats.isFile() || copiedStats.isSymbolicLink() || !sameFileIdentity(opened.stats, copiedStats)) {
+			if (!copiedStats.isFile() || copiedStats.isSymbolicLink()) {
 				throw new PreviewMountError(500, "Copy destination does not match the opened source file");
 			}
+			identityMatches = sameFileIdentity(opened.stats, copiedStats);
 		} catch (error) {
 			validationError = error;
 		}
-		try { await opened.handle.close(); }
-		catch (closeError) { validationError ??= closeError; }
-		if (validationError === undefined) return;
-		try { await io.unlink(dst); } catch { /* preserve the validation error */ }
-		throw validationError;
-	}
 
-	try { await opened.handle.close(); }
-	catch (error) { throw new PreviewMountError(500, `Copy failed: ${(error as Error).message}`); }
+		let closeError: unknown;
+		try { await opened.handle.close(); }
+		catch (error) { closeError = error; }
+		if (validationError !== undefined) {
+			try { await io.unlink(dst); } catch { /* preserve the validation error */ }
+			throw validationError;
+		}
+		if (closeError !== undefined) {
+			try { await io.unlink(dst); } catch { /* preserve the close error */ }
+			throw closeError;
+		}
+		if (identityMatches) return;
+
+		// The pathname may have been atomically replaced between opening it and
+		// linking it. Remove the wrong inode and safely reopen the current source
+		// through the same descriptor-anchored fallback used for EXDEV.
+		try { await io.unlink(dst); }
+		catch (error) { if (!isEnoent(error)) throw error; }
+	} else {
+		try { await opened.handle.close(); }
+		catch (error) { throw new PreviewMountError(500, `Copy failed: ${(error as Error).message}`); }
+	}
 	try {
 		await copyRegularFileNoFollow(src, dst, {
 			fs: io,
