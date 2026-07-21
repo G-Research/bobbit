@@ -20,7 +20,7 @@
  *     background after returning the worktree to the caller.
  *   - `setComponents()` accepts the project's component list. When the
  *     components imply multi-repo, `_fill()` builds multi-repo pool sets
- *     via `createWorktreeSet` and `claim()` parallelises rename + move
+ *     via `createWorktreeSet` and `claim()` bounds rename + move work
  *     across repos.
  */
 
@@ -113,16 +113,22 @@ export interface PoolComponent {
 
 const POOL_BRANCH_PREFIX = "pool/_pool-";
 
+/** Promise-only streaming directory seam for bounded startup reclaim. */
+export interface WorktreePoolDirectory {
+	read(): Promise<Dirent | null>;
+	close(): Promise<void>;
+}
+
 /** Promise-only filesystem seam for pool lifecycle tests and gateway I/O. */
 export interface WorktreePoolFs {
 	access(filePath: string, mode?: number): Promise<void>;
-	readdir(dirPath: string): Promise<Dirent[]>;
+	opendir(dirPath: string): Promise<WorktreePoolDirectory>;
 	rename(oldPath: string, newPath: string): Promise<void>;
 }
 
 const realWorktreePoolFs: WorktreePoolFs = {
 	access: (filePath, mode) => fs.access(filePath, mode),
-	readdir: async (dirPath) => await fs.readdir(dirPath, { withFileTypes: true }),
+	opendir: async (dirPath) => await fs.opendir(dirPath),
 	rename: (oldPath, newPath) => fs.rename(oldPath, newPath),
 };
 
@@ -453,6 +459,17 @@ export class WorktreePool {
 		this.trackOperation(cleanup);
 	}
 
+	private scheduleFailureCleanups(worktrees: readonly { repoPath: string; worktreePath: string }[], branchName: string): void {
+		const cleanup = mapWithConcurrency(worktrees, RECOVERY_IO_CONCURRENCY, async (worktree) => {
+			try {
+				await this.cleanupWorktreeImpl(worktree.repoPath, worktree.worktreePath, branchName, true, this.commandRunner, this.remotePolicy);
+			} catch {
+				// Best-effort and isolated per repository; claim already logged the owning failure.
+			}
+		});
+		this.trackOperation(cleanup);
+	}
+
 	/**
 	 * Stop scheduling new work and await every in-flight mutation, including
 	 * foreground claims and failure cleanups. Idempotent. The loop is required
@@ -616,10 +633,10 @@ export class WorktreePool {
 	}
 
 	/**
-	 * Multi-repo claim: rename the container dir then `Promise.all` per-repo
-	 * `git branch -m` + `git worktree move` so each repo's admin pointer
-	 * tracks the new path. Per-repo failures are independent — a repo where
-	 * the move fails ends up degraded for that repo only.
+	 * Multi-repo claim: rename the container dir then run bounded per-repo
+	 * `git branch -m` + `git worktree repair` so each repo's admin pointer
+	 * tracks the new path. Results retain component order and failures remain
+	 * independent — a repo where a mutation fails is degraded for that repo only.
 	 */
 	private async _claimMultiRepo(entry: PoolEntry, targetBranch: string): Promise<PoolClaimResult | null> {
 		const targetSlug = branchToSlug(targetBranch);
@@ -640,16 +657,15 @@ export class WorktreePool {
 				finalContainer = newContainer;
 			} catch (err) {
 				console.warn(`[worktree-pool] multi-repo claim aborted: container rename ${entry.worktreePath} → ${newContainer} failed: ${err instanceof Error ? err.message : err}`);
-				for (const w of worktrees) {
-					this.scheduleFailureCleanup(w.repoPath, w.worktreePath, entry.branchName);
-				}
+				this.scheduleFailureCleanups(worktrees, entry.branchName);
 				return null;
 			}
 		}
 
 		// 2. Per-repo: rename the branch, clear any inherited upstream, and repair
-		// worktree pointers in parallel. No remote probes run on the claim path.
-		const perRepo = await Promise.all(worktrees.map(async (w) => {
+		// worktree pointers under the shared background-I/O ceiling. No remote probes
+		// run on the foreground claim path. mapWithConcurrency keeps result order.
+		const perRepo = await mapWithConcurrency(worktrees, RECOVERY_IO_CONCURRENCY, async (w) => {
 			const oldWtPath = w.worktreePath;
 			const newWtPath = finalContainer === entry.worktreePath
 				? oldWtPath
@@ -688,12 +704,14 @@ export class WorktreePool {
 				}
 			}
 			return { repo: w.repo, worktreePath: newWtPath, renamed };
-		}));
+		});
 
-		// Background freshen for each successfully renamed repo (independent).
-		for (const r of perRepo) {
-			if (r.renamed) this.freshenInBackground(r.worktreePath, targetBranch);
-		}
+		// Background freshen remains independent per successful repo, but scheduling
+		// the batch as one tracked operation prevents a second unbounded Git burst.
+		this.freshenManyInBackground(
+			perRepo.filter(r => r.renamed).map(r => r.worktreePath),
+			targetBranch,
+		);
 
 		const degraded = perRepo.some(r => !r.renamed);
 		console.log(`[worktree-pool] Claimed multi-repo worktree set: ${targetBranch} at ${finalContainer}${degraded ? " (degraded)" : ""} (pool: ${this.pool.length}/${this.targetSize})`);
@@ -717,6 +735,18 @@ export class WorktreePool {
 	private freshenInBackground(worktreePath: string, branch: string): void {
 		if (this.stopped) return;
 		this.trackOperation(this.freshen(worktreePath, branch).catch(() => { /* swallow — already logged */ }));
+	}
+
+	private freshenManyInBackground(worktreePaths: readonly string[], branch: string): void {
+		if (this.stopped || worktreePaths.length === 0) return;
+		const operation = mapWithConcurrency(worktreePaths, RECOVERY_IO_CONCURRENCY, async (worktreePath) => {
+			try {
+				await this.freshen(worktreePath, branch);
+			} catch {
+				// Each freshen owns and logs its non-fatal failures.
+			}
+		});
+		this.trackOperation(operation);
 	}
 
 	/**
@@ -870,9 +900,10 @@ export class WorktreePool {
 	 * a pool branch (i.e. it was never claimed by a session/goal).
 	 *
 	 * Accepts both the new `pool/_pool-*` and legacy `session/_pool-*` prefixes.
-	 * Candidate inspection is bounded, while candidates are committed to the pool
-	 * strictly in directory-enumeration order. Batches never exceed the remaining
-	 * target capacity, so reclaim stops without selecting extra later candidates.
+	 * Candidate inspection and directory read-ahead are bounded, while candidates
+	 * are committed to the pool strictly in directory-enumeration order. Batches
+	 * never exceed the remaining target capacity, so reclaim closes the directory
+	 * stream as soon as the target is satisfied without reading later candidates.
 	 *
 	 * @param activeWorktreePaths — Paths owned by live sessions; skip these even if
 	 *   the branch name looks like a pool branch (the session may not have renamed it
@@ -886,9 +917,9 @@ export class WorktreePool {
 			await this.resolveRepositoryPaths();
 			if (this.pool.length >= this.targetSize) return;
 			const wtRoot = this.resolvedWorktreeRoot;
-			let entries: Dirent[];
+			let directory: WorktreePoolDirectory;
 			try {
-				entries = await this.fsImpl.readdir(wtRoot);
+				directory = await this.fsImpl.opendir(wtRoot);
 			} catch (err) {
 				if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
 					if (counters) counters.rootMissing = 1;
@@ -897,41 +928,53 @@ export class WorktreePool {
 				throw err;
 			}
 
-			const components = this.componentsResolver?.() ?? [];
-			const multi = this.isMultiRepo(components);
-			let cursor = 0;
-			while (cursor < entries.length && this.pool.length < this.targetSize) {
-				const remainingCapacity = this.targetSize - this.pool.length;
-				const batchSize = Math.min(RECOVERY_IO_CONCURRENCY, remainingCapacity, entries.length - cursor);
-				const batch = entries.slice(cursor, cursor + batchSize);
-				cursor += batch.length;
-				if (counters) counters.entriesScanned += batch.length;
-
-				const inspected = await mapWithConcurrency(batch, RECOVERY_IO_CONCURRENCY, async (entry) => {
-					try {
-						return await this.inspectReclaimCandidate(entry, wtRoot, components, multi, activeWorktreePaths);
-					} catch {
-						// Per-candidate Git/filesystem failures never abort later candidates.
-						return {};
+			try {
+				const components = this.componentsResolver?.() ?? [];
+				const multi = this.isMultiRepo(components);
+				let exhausted = false;
+				while (!exhausted && this.pool.length < this.targetSize) {
+					const remainingCapacity = this.targetSize - this.pool.length;
+					const readAhead = Math.min(RECOVERY_IO_CONCURRENCY, remainingCapacity);
+					const batch: Dirent[] = [];
+					while (batch.length < readAhead) {
+						const entry = await directory.read();
+						if (!entry) {
+							exhausted = true;
+							break;
+						}
+						batch.push(entry);
 					}
-				});
+					if (batch.length === 0) break;
+					if (counters) counters.entriesScanned += batch.length;
 
-				for (const result of inspected) {
-					if (result.activeSkipped && counters) counters.activeSkipped++;
-					if (result.gitMissing && counters) counters.gitMissing++;
-					const candidate = result.candidate;
-					if (!candidate || this.pool.length >= this.targetSize) continue;
-					if (this.hasPoolEntry(candidate.branch, candidate.container, candidate.worktrees)) continue;
-					this.pool.push({
-						branchName: candidate.branch,
-						worktreePath: candidate.container,
-						worktrees: candidate.worktrees,
-						createdAt: Date.now(),
+					const inspected = await mapWithConcurrency(batch, RECOVERY_IO_CONCURRENCY, async (entry) => {
+						try {
+							return await this.inspectReclaimCandidate(entry, wtRoot, components, multi, activeWorktreePaths);
+						} catch {
+							// Per-candidate Git/filesystem failures never abort later candidates.
+							return {};
+						}
 					});
-					if (counters) counters.reclaimed++;
-					const multiLabel = candidate.worktrees ? " multi-repo" : "";
-					console.log(`[worktree-pool] Reclaimed orphaned${multiLabel}: ${candidate.branch} at ${candidate.container} (pool: ${this.pool.length}/${this.targetSize})`);
+
+					for (const result of inspected) {
+						if (result.activeSkipped && counters) counters.activeSkipped++;
+						if (result.gitMissing && counters) counters.gitMissing++;
+						const candidate = result.candidate;
+						if (!candidate || this.pool.length >= this.targetSize) continue;
+						if (this.hasPoolEntry(candidate.branch, candidate.container, candidate.worktrees)) continue;
+						this.pool.push({
+							branchName: candidate.branch,
+							worktreePath: candidate.container,
+							worktrees: candidate.worktrees,
+							createdAt: Date.now(),
+						});
+						if (counters) counters.reclaimed++;
+						const multiLabel = candidate.worktrees ? " multi-repo" : "";
+						console.log(`[worktree-pool] Reclaimed orphaned${multiLabel}: ${candidate.branch} at ${candidate.container} (pool: ${this.pool.length}/${this.targetSize})`);
+					}
 				}
+			} finally {
+				await directory.close();
 			}
 		} catch (err) {
 			if (counters) counters.errors = 1;
