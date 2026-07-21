@@ -10,6 +10,7 @@ import {
 	mountDir,
 	mountFile,
 	mountPath,
+	movePreviewDirectoryContents,
 	PreviewMountError,
 	removeMount,
 	setPreviewFsForTesting,
@@ -254,7 +255,63 @@ describe("preview mount", () => {
 		assert.equal(producedDifferentIdentity, true, "the injected successful link must produce a different inode");
 		assert.equal(linkCalls, 1);
 		assert.equal(victimOpens, 2, "the safe fallback must reopen and revalidate the source");
-		assert.equal(fallbackDestinationOpens, 1, "the safe fallback must exclusively recreate the destination");
+		assert.equal(
+			fallbackDestinationOpens,
+			2,
+			"the source fallback and the staging transfer must each exclusively create their destination",
+		);
+	});
+
+	it("rejects a staging-root symlink substitution without moving external contents", async () => {
+		const staging = makeDir("staging-race");
+		const destination = makeDir("staging-race-destination");
+		const outside = makeDir("staging-race-outside");
+		const sentinel = path.join(outside, "KEEP.txt");
+		testFs.writeFileSync(path.join(staging, "inside.html"), "inside");
+		testFs.writeFileSync(sentinel, "external-sentinel");
+
+		const baseFs = createPreviewAsyncFs(testFs);
+		let substituted = false;
+		const renameSources: string[] = [];
+		const raceFs: PreviewAsyncFs = {
+			...baseFs,
+			rename: async (oldPath, newPath) => {
+				const source = path.resolve(String(oldPath));
+				renameSources.push(source);
+				if (!substituted && source === path.resolve(staging)) {
+					substituted = true;
+					testFs.rmSync(staging, { recursive: true, force: true });
+					testFs.symlinkSync(outside, staging);
+					// memfs rename follows a directory symlink; model the native rename(2)
+					// contract explicitly so only the link itself moves to the claim path.
+					const linkTarget = testFs.readlinkSync(staging);
+					testFs.unlinkSync(staging);
+					testFs.symlinkSync(linkTarget, String(newPath));
+					return;
+				}
+				return baseFs.rename(oldPath, newPath);
+			},
+		};
+
+		try {
+			await assert.rejects(
+				movePreviewDirectoryContents(staging, destination, { fs: raceFs, concurrency: 1 }),
+				(error: unknown) => error instanceof PreviewMountError && error.statusCode === 500,
+			);
+			assert.equal(substituted, true, "the deterministic root substitution must run");
+			assert.deepEqual(
+				renameSources,
+				[path.resolve(staging)],
+				"only the initial no-follow root claim may rename through the caller-known staging path",
+			);
+			assert.equal(testFs.readFileSync(sentinel, "utf-8"), "external-sentinel");
+			assert.equal(testFs.existsSync(path.join(destination, "KEEP.txt")), false);
+			assert.equal(testFs.existsSync(staging), false, "the substituted symlink should be safely unlinked");
+		} finally {
+			testFs.rmSync(staging, { recursive: true, force: true });
+			testFs.rmSync(destination, { recursive: true, force: true });
+			testFs.rmSync(outside, { recursive: true, force: true });
+		}
 	});
 
 	it("stages before swap, supports reopening a mounted path, and rolls back staging errors", async () => {
@@ -279,5 +336,31 @@ describe("preview mount", () => {
 		await removeMount(SID_C);
 		await removeMount("not-a-uuid");
 		assert.equal(testFs.existsSync(mountPath(SID_C)), false);
+	});
+
+	it("removeMount propagates non-ENOENT deletion failures", async () => {
+		await writeInline(SID_C, "x", "z.html");
+		const target = path.resolve(mountPath(SID_C));
+		const baseFs = createPreviewAsyncFs(testFs);
+		const failure = Object.assign(new Error("mount deletion denied"), { code: "EACCES" });
+		let deletionAttempted = false;
+		const failingFs: PreviewAsyncFs = {
+			...baseFs,
+			lstat: async filePath => {
+				if (path.resolve(String(filePath)) === target) {
+					deletionAttempted = true;
+					throw failure;
+				}
+				return baseFs.lstat(filePath);
+			},
+		};
+		setPreviewFsForTesting(failingFs);
+		try {
+			await assert.rejects(removeMount(SID_C), (error: unknown) => error === failure);
+			assert.equal(deletionAttempted, true);
+		} finally {
+			setPreviewFsForTesting(testFs);
+			await removeMount(SID_C);
+		}
 	});
 });
