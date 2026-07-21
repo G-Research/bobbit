@@ -1,4 +1,5 @@
-import type { Api, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import type { AgentOptions } from "@earendil-works/pi-agent-core";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { streamSimplePiAi } from "../../app/pi-ai-lazy.js";
 
 /**
@@ -119,8 +120,8 @@ export function isCorsError(error: unknown): boolean {
  * @param getProxyUrl - Async function to get current proxy URL (or undefined if disabled)
  * @returns A streamFn compatible with Agent's streamFn option
  */
-export function createStreamFn(getProxyUrl: () => Promise<string | undefined>) {
-	return async (model: Model<any>, context: Context, options?: SimpleStreamOptions) => {
+export function createStreamFn(getProxyUrl: () => Promise<string | undefined>): AgentOptions["streamFn"] {
+	return async (model, context, options) => {
 		const apiKey = options?.apiKey;
 		const proxyUrl = await getProxyUrl();
 

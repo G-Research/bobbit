@@ -1046,19 +1046,20 @@ export class AgentInterface extends LitElement {
 		// phase `load` handler, both of which call `_scrollToBottomNow`.
 		this.updateComplete.then(() => this._pinIfSticking());
 
-		// Set default streamFn with proxy support if not already set.
-		// We can't identity-compare against pi-ai's `streamSimple` without
-		// statically importing it (which pulls the 553 kB model catalog into
-		// the entry chunk — see src/app/pi-ai-lazy.ts). Instead, mark our
-		// wrapper with `__isDefault` at construction and re-check the flag
-		// on subsequent renders to avoid re-wrapping.
-		if (!(this.session.streamFn as { __isDefault?: boolean } | undefined)?.__isDefault) {
+		// Set the Agent's stream function with proxy support if not already set.
+		// Pi 0.81 takes `streamFn` in AgentOptions and exposes it on Agent as
+		// `streamFunction`. We can't identity-compare against pi-ai's `streamSimple`
+		// without statically importing it (which pulls the 553 kB model catalog into
+		// the entry chunk — see src/app/pi-ai-lazy.ts). Instead, mark our wrapper with
+		// `__isDefault` at construction and re-check the flag on subsequent renders
+		// to avoid re-wrapping.
+		if (!(this.session.streamFunction as { __isDefault?: boolean } | undefined)?.__isDefault) {
 			const wrapped = createStreamFn(async () => {
 				const enabled = await getAppStorage().settings.get<boolean>("proxy.enabled");
 				return enabled ? (await getAppStorage().settings.get<string>("proxy.url")) || undefined : undefined;
 			});
 			(wrapped as { __isDefault?: boolean }).__isDefault = true;
-			this.session.streamFn = wrapped;
+			this.session.streamFunction = wrapped;
 		}
 
 		// Set default getApiKey if not already set
