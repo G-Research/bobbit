@@ -88,13 +88,12 @@ describe("Model registry", () => {
 		assert.equal(model.contextWindow, 272_000);
 	});
 
-	it("exposes Pi 0.80.6 GPT-5.6 catalog entries including routed variants", () => {
+	it("exposes Pi 0.81.1 GPT-5.6 catalog entries including corrected Codex metadata", () => {
 		const requireModel = (provider: string, id: string) => {
 			const model = models.find((m) => m.provider === provider && m.id === id);
 			assert.ok(model, `${provider}/${id} should be available`);
 			assert.equal(model.reasoning, true, `${provider}/${id} should be reasoning-capable`);
 			assert.ok(model.thinkingLevelMap?.xhigh, `${provider}/${id} should expose xhigh metadata`);
-			assert.ok(model.thinkingLevelMap?.max, `${provider}/${id} should expose max metadata`);
 			return model;
 		};
 
@@ -102,15 +101,66 @@ describe("Model registry", () => {
 			const openai = requireModel("openai", id);
 			assert.equal(openai.api, "openai-responses");
 			assert.equal(openai.contextWindow, 272_000);
+			assert.equal(openai.thinkingLevelMap?.max, "max");
+			assert.equal(openai.thinkingLevelMap?.off, "none");
 
 			const codex = requireModel("openai-codex", id);
 			assert.equal(codex.api, "openai-codex-responses");
-			assert.equal(codex.contextWindow, 372_000);
+			// Pi 0.81 fixes Codex's default window to the 272K short-context tier.
+			assert.equal(codex.contextWindow, 272_000);
+			assert.equal(codex.thinkingLevelMap?.max, "max");
+			assert.equal(codex.thinkingLevelMap?.minimal, "low");
 		}
 
 		for (const id of ["openai/gpt-5.6-luna", "openai/gpt-5.6-sol", "openai/gpt-5.6-terra"]) {
-			assert.ok(models.some((m) => m.provider === "openrouter" && m.id === id), `openrouter/${id} should be available`);
-			assert.ok(models.some((m) => m.provider === "vercel-ai-gateway" && m.id === id), `vercel-ai-gateway/${id} should be available`);
+			const openrouter = requireModel("openrouter", id);
+			assert.equal(openrouter.api, "openai-completions");
+			assert.equal(openrouter.contextWindow, 1_050_000);
+			assert.equal(openrouter.thinkingLevelMap?.max, "max");
+
+			const vercel = requireModel("vercel-ai-gateway", id);
+			assert.equal(vercel.api, "anthropic-messages");
+			assert.equal(vercel.contextWindow, 1_050_000);
+			// Preserve the refreshed catalog exactly; Bobbit must not synthesize max.
+			assert.equal(vercel.thinkingLevelMap?.max, undefined);
 		}
+	});
+
+	it("adopts Pi 0.81.1 provider catalog and routing fixes through the synchronous registry", () => {
+		const requireModel = (provider: string, id: string) => {
+			const model = models.find((m) => m.provider === provider && m.id === id);
+			assert.ok(model, `${provider}/${id} should be available`);
+			return model;
+		};
+		const compat = (provider: string, id: string) =>
+			requireModel(provider, id).compat as Record<string, unknown> | undefined;
+
+		for (const provider of ["moonshotai", "moonshotai-cn"]) {
+			const kimi = requireModel(provider, "kimi-k3");
+			assert.equal(kimi.api, "openai-completions");
+			assert.equal(kimi.contextWindow, 1_048_576);
+			assert.deepEqual(
+				{ low: kimi.thinkingLevelMap?.low, high: kimi.thinkingLevelMap?.high, max: kimi.thinkingLevelMap?.max },
+				{ low: "low", high: "high", max: "max" },
+			);
+			assert.equal(compat(provider, "kimi-k3")?.thinkingFormat, "openai");
+			assert.equal(compat(provider, "kimi-k3")?.supportsReasoningEffort, true);
+		}
+
+		const openCodeGo = requireModel("opencode-go", "grok-4.5");
+		assert.equal(openCodeGo.api, "openai-responses");
+		assert.equal(compat("opencode-go", "grok-4.5")?.sessionAffinityFormat, "openai-nosession");
+
+		const xai = requireModel("xai", "grok-4.5");
+		assert.equal(xai.api, "openai-responses");
+		assert.equal(xai.contextWindow, 500_000);
+
+		const bedrock = requireModel("amazon-bedrock", "xai.grok-4.3");
+		assert.equal(bedrock.api, "bedrock-converse-stream");
+		assert.equal(bedrock.contextWindow, 1_000_000);
+
+		const providers = new Set(models.map((model) => model.provider));
+		assert.ok(providers.has("qwen-token-plan"), "Pi 0.81 Qwen Token Plan catalog should be visible");
+		assert.ok(providers.has("qwen-token-plan-cn"), "Pi 0.81 Qwen Token Plan China catalog should be visible");
 	});
 });

@@ -1,6 +1,6 @@
 // v2-native — Pi runtime browser boundary canary. Listed in tests-map.json `v2Native`.
 //
-// Pi 0.80 exposes browser-compatible runtime modules under
+// Pi 0.81.1 exposes browser-compatible runtime modules under
 // `@earendil-works/pi-ai/api/*` for streamSimple and provider modules under
 // `@earendil-works/pi-ai/providers/*`; legacy direct subpaths such as
 // `@earendil-works/pi-ai/anthropic` are not package exports. Keep Bobbit's UI
@@ -96,6 +96,22 @@ describe("src/app/pi-ai-lazy.ts browser pi-ai boundary", () => {
 				...offenders.map((specifier) => `  - ${specifier}`),
 			].join("\n"),
 		).toEqual([]);
+	});
+
+	it("resolves every lazy runtime module to a Pi 0.81.1 streamSimple export", async () => {
+		const runtimePiImports = [...new Set(
+			dynamicImports(source).filter((specifier) => specifier.startsWith("@earendil-works/pi-ai")),
+		)];
+		expect(runtimePiImports.length).toBeGreaterThan(0);
+
+		for (const specifier of runtimePiImports) {
+			// `import.meta.resolve` applies the package's ESM `import` export condition;
+			// importing the resolved module then verifies that the browser boundary's
+			// expected value export still exists in the selected Pi patch.
+			const resolved = import.meta.resolve(specifier);
+			const module = await import(resolved);
+			expect(typeof module.streamSimple, `${specifier} must export streamSimple`).toBe("function");
+		}
 	});
 
 	it("does not introduce a bare pi-ai runtime value import while updating api/provider subpaths", () => {

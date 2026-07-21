@@ -32,6 +32,8 @@ import { pathToFileURL } from "node:url";
 import { describe, it, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import assert from "node:assert/strict";
 import ts from "typescript";
+import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import {
 	CODE_ASSIST_PROVIDER_BASE_URL,
@@ -186,6 +188,79 @@ describe("generateGoogleCodeAssistProviderExtension", () => {
 			else process.env.PI_CODING_AGENT_DIR = prevPiDir;
 			if (prevAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
 			else process.env.BOBBIT_AGENT_DIR = prevAgentDir;
+		}
+	});
+
+	it("Pi 0.81.1 legacy registerProvider keeps pre-auth hidden and upgrades synchronously", async () => {
+		const stubDir = path.join(tmpDir, "node_modules", "@earendil-works", "pi-ai");
+		fs.mkdirSync(stubDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(stubDir, "package.json"),
+			JSON.stringify({ name: "@earendil-works/pi-ai", version: "0.0.0", main: "index.js" }),
+			"utf-8",
+		);
+		fs.writeFileSync(
+			path.join(stubDir, "index.js"),
+			"exports.createAssistantMessageEventStream = () => ({ push() {}, end() {} });\n",
+			"utf-8",
+		);
+
+		const loadConfig = async (authenticatedAtSpawn: boolean, suffix: string): Promise<any> => {
+			const generated = generateGoogleCodeAssistProviderExtension(
+				`sess-runtime-${suffix}`,
+				sampleModels,
+				authenticatedAtSpawn,
+			);
+			const transpiled = ts.transpileModule(generated, {
+				compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+			});
+			const file = path.join(tmpDir, `gca-provider-runtime-${suffix}-${Date.now()}.cjs`);
+			fs.writeFileSync(file, transpiled.outputText, "utf-8");
+			const mod = await import(pathToFileURL(file).href);
+			let config: any;
+			mod.default({ registerProvider: (_name: string, value: any) => { config = value; } });
+			return config;
+		};
+
+		const authDir = fs.mkdtempSync(path.join(tmpDir, "runtime-no-auth-"));
+		const prevPiDir = process.env.PI_CODING_AGENT_DIR;
+		const prevAgentDir = process.env.BOBBIT_AGENT_DIR;
+		const prevEnvTok = process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
+		process.env.PI_CODING_AGENT_DIR = authDir;
+		delete process.env.BOBBIT_AGENT_DIR;
+		delete process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
+		try {
+			const preAuthConfig = await loadConfig(false, "preauth");
+			const authenticatedConfig = await loadConfig(true, "authenticated");
+			const runtime = await ModelRuntime.create({
+				credentials: new InMemoryCredentialStore(),
+				modelsPath: null,
+				allowModelNetwork: false,
+			});
+
+			runtime.registerProvider("google-gemini-cli", preAuthConfig);
+			assert.equal(runtime.getModels("google-gemini-cli").length, 0);
+			assert.equal(
+				runtime.getAvailableSnapshot().some((model) => model.provider === "google-gemini-cli"),
+				false,
+				"pre-auth legacy registration must not create a default candidate",
+			);
+
+			// Pi 0.81 retains the name/config overload and merges a late registration
+			// immediately, even though its canonical provider/auth refresh APIs are async.
+			runtime.registerProvider("google-gemini-cli", authenticatedConfig);
+			const registered = runtime.getModel("google-gemini-cli", "gemini-2.5-pro");
+			assert.equal(registered?.api, "google-code-assist");
+			assert.equal(authenticatedConfig.apiKey, "code-assist-runtime");
+			const asynchronouslyChecked = await runtime.getAvailable("google-gemini-cli");
+			assert.equal(asynchronouslyChecked.some((model) => model.id === "gemini-2.5-pro"), true);
+		} finally {
+			if (prevPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = prevPiDir;
+			if (prevAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
+			else process.env.BOBBIT_AGENT_DIR = prevAgentDir;
+			if (prevEnvTok === undefined) delete process.env.GOOGLE_CLOUD_ACCESS_TOKEN;
+			else process.env.GOOGLE_CLOUD_ACCESS_TOKEN = prevEnvTok;
 		}
 	});
 
