@@ -1112,6 +1112,9 @@ export interface SessionTerminationInfo {
 
 export type SessionTerminationListener = (sessionId: string, info: SessionTerminationInfo) => void | Promise<void>;
 
+/** Purge-only entry into the gateway's per-session preview operation queue. */
+export type SessionPreviewPurgeOperation = <T>(sessionId: string, operation: () => Promise<T>) => Promise<T>;
+
 export interface SessionManagerOptions {
 	/** Override the path to pi-coding-agent cli.js */
 	agentCliPath?: string;
@@ -1158,6 +1161,12 @@ export interface SessionManagerOptions {
 	bootRestoreLagSampler?: () => number;
 	/** Promise-only seam for bounded expired-archive transcript stats. */
 	archiveStat?: (filePath: string) => Promise<{ size: number }>;
+	/**
+	 * Purge-only entry into the server-owned preview queue. Production marks the
+	 * session terminal before awaiting this operation so later preview requests
+	 * cannot recreate a mount after deletion.
+	 */
+	previewPurgeOperation?: SessionPreviewPurgeOperation;
 }
 
 type SessionReplacementToken = {
@@ -1289,7 +1298,10 @@ export class SessionManager {
 	private _testTaskManager: TaskManager | null = null;
 	private purgeInterval: ReturnType<typeof setInterval> | null = null;
 	private archivePurgeInFlight: Promise<void> | null = null;
+	/** Per-session destructive purge owner shared by immediate and expiry paths. */
+	private sessionPurgesInFlight = new Map<string, Promise<void>>();
 	private readonly archiveStat: (filePath: string) => Promise<{ size: number }>;
+	private readonly previewPurgeOperation: SessionPreviewPurgeOperation;
 	/** Heartbeat timer: re-broadcasts the current `session_status` for every
 	 *  active session every STATUS_HEARTBEAT_INTERVAL_MS, WITHOUT bumping
 	 *  `statusVersion`. Self-heals any client that missed a transition frame.
@@ -1776,6 +1788,7 @@ export class SessionManager {
 		this.stateDir = options?.stateDir ?? bobbitStateDir();
 		this._bootRestoreLagSampler = options?.bootRestoreLagSampler;
 		this.archiveStat = options?.archiveStat ?? ((filePath) => fsp.stat(filePath));
+		this.previewPurgeOperation = options?.previewPurgeOperation ?? (async (_sessionId, operation) => operation());
 		sessionManagerModuleClock = this.clock;
 		this.agentCliPath = options?.agentCliPath;
 		this.systemPromptPath = options?.systemPromptPath;
@@ -9619,9 +9632,17 @@ export class SessionManager {
 
 	/** Permanently purge a single archived session immediately. */
 	async purgeArchivedSession(id: string): Promise<boolean> {
+		// Join before consulting the store: the owning purge removes its row before
+		// awaited termination listeners run, so an overlapping request in that
+		// window must still wait for the same destructive owner.
+		const pending = this.sessionPurgesInFlight.get(id);
+		if (pending) {
+			await pending;
+			return true;
+		}
 		const ps = this.resolveStoreForId(id)?.get(id);
 		if (!ps?.archived) return false;
-		await this.purgeOneSession(ps);
+		await this.coalescePurgeOneSession(ps);
 		return true;
 	}
 
@@ -9637,8 +9658,9 @@ export class SessionManager {
 			for (const ps of archived) {
 				if (ps.archivedAt && ps.archivedAt < cutoff) {
 					try {
-						await this.purgeOneSession(ps);
-						console.log(`[session-manager] Purged expired archive: "${ps.title}" (${ps.id})`);
+						if (await this.coalescePurgeOneSession(ps)) {
+							console.log(`[session-manager] Purged expired archive: "${ps.title}" (${ps.id})`);
+						}
 					} catch (err) {
 						console.error(`[session-manager] Failed to purge archive ${ps.id}:`, err);
 					}
@@ -10364,7 +10386,38 @@ export class SessionManager {
 			.catch(() => false);
 	}
 
-	/** Internal: purge a single archived session — delete files, worktree, store entry. */
+	/**
+	 * Coalesce every immediate and scheduled destructive purge for one session.
+	 * The owner is installed synchronously before callers can overlap, and is
+	 * removed only after cleanup and listeners have settled.
+	 */
+	private async coalescePurgeOneSession(ps: PersistedSession): Promise<boolean> {
+		const existing = this.sessionPurgesInFlight.get(ps.id);
+		if (existing) {
+			await existing;
+			return true;
+		}
+
+		// An expiry sweep holds an ordered snapshot. An immediate purge can finish
+		// while that sweep is still processing an earlier row, leaving this stale
+		// object behind after its per-session owner has settled. Re-resolve before
+		// installing a new owner so the old snapshot cannot run cleanup twice.
+		const current = this.resolveStoreForId(ps.id)?.get(ps.id);
+		if (!current?.archived) return false;
+
+		const run = this.purgeOneSession(current);
+		let tracked!: Promise<void>;
+		tracked = run.finally(() => {
+			if (this.sessionPurgesInFlight.get(ps.id) === tracked) {
+				this.sessionPurgesInFlight.delete(ps.id);
+			}
+		});
+		this.sessionPurgesInFlight.set(ps.id, tracked);
+		await tracked;
+		return true;
+	}
+
+	/** Internal purge body — entered only through the per-session owner above. */
 	private async purgeOneSession(ps: PersistedSession): Promise<void> {
 		// SAFETY: refuse to destroy a team-lead session that the team-store
 		// still references for a non-archived goal. Symptom this prevents:
@@ -10450,9 +10503,13 @@ export class SessionManager {
 			console.warn(`[session-manager] proposal-drafts purge failed for ${ps.id}:`, err);
 		}
 
-		// Delete session prompt file and preview mount.
+		// Delete the prompt and mount while holding the same per-session preview
+		// operation queue used by POST, restore, snapshot, SSE bootstrap, and
+		// artifact cleanup. The production queue terminally fences ordinary work
+		// before awaiting prior operations, so the mount cannot be recreated after
+		// this deletion completes.
 		try {
-			await cleanupSessionPromptAsync(ps.id, this.stateDir);
+			await this.previewPurgeOperation(ps.id, () => cleanupSessionPromptAsync(ps.id, this.stateDir));
 		} catch (err) {
 			console.error(`[session-manager] Failed to cleanup prompt for ${ps.id}:`, err);
 		}
@@ -10843,6 +10900,15 @@ export class SessionManager {
 		}
 		const inFlight = this.archivePurgeInFlight;
 		if (inFlight) await inFlight;
+
+		// Immediate DELETE purges share the same per-session owners but are not
+		// necessarily part of the expiry sweep. Join them as an awaited shutdown
+		// barrier without starting more work or changing per-item error ownership.
+		while (this.sessionPurgesInFlight.size > 0) {
+			const pending = this.sessionPurgesInFlight.values().next().value as Promise<void> | undefined;
+			if (!pending) break;
+			try { await pending; } catch { /* the initiating request owns the error */ }
+		}
 	}
 
 	addClient(sessionId: string, ws: WebSocket): boolean {
