@@ -48,6 +48,15 @@
       }
     },
     {
+      "path": "tests2/core/preview-root-identity-races.test.ts",
+      "reason": "Deterministic native and memfs regressions proving bounded preview walks and removals reject real-directory identity replacement, staging cleanup honors its claimed root identity across repeated swaps, and artifact metadata descriptors reject regular-file replacement before reading bytes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/purge-preview-pool-shutdown-coder61c7.test.ts",
       "reason": "Deterministic native v2 coverage for coalesced immediate and expiry archive purges, stale-snapshot fencing, serialized preview purge cleanup, a single reclaim-candidate concurrency ceiling across many boot projects, and awaited CPU diagnostics shutdown.",
       "execution": {

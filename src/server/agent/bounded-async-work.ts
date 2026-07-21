@@ -309,6 +309,8 @@ interface TreeFrame {
 	absolutePath: string;
 	relativePath: string;
 	depth: number;
+	/** The no-follow lstat identity that authorized opening this frame. */
+	authorizedStats: AsyncTreeStats;
 	directory: AsyncTreeDirectory;
 }
 
@@ -352,12 +354,13 @@ export async function walkTree(
 						await visitor({ ...current, kind, stats });
 						if (kind === "directory") {
 							// Visitors may await destination I/O. Reclassify at the point of
-							// traversal so a directory substituted during that wait is not
-							// opened as a symlink.
+							// traversal and require the same stable directory identity. Merely
+							// checking the type would authorize an attacker-controlled replacement.
 							const traversalStats = await treeFs.lstat(current.absolutePath);
-							if (traversalStats.isDirectory() && !traversalStats.isSymbolicLink()) {
+							if (isAuthorizedDirectory(stats, traversalStats, current.absolutePath)) {
 								frames.push({
 									...current,
+									authorizedStats: stats,
 									directory: await treeFs.opendir(current.absolutePath),
 								});
 							}
@@ -366,11 +369,10 @@ export async function walkTree(
 						const frame = frames[frames.length - 1]!;
 						const dirent = await frame.directory.read();
 						// The open handle may still enumerate the original directory after
-						// its path has been replaced. Revalidate the frame path before using
-						// a returned name, otherwise joining that name could follow a newly
-						// substituted directory symlink outside the tree.
+						// its path has been replaced. Revalidate both type and stable identity
+						// after every read and before deriving a child pathname.
 						const frameStats = await treeFs.lstat(frame.absolutePath);
-						if (!frameStats.isDirectory() || frameStats.isSymbolicLink()) {
+						if (!isAuthorizedDirectory(frame.authorizedStats, frameStats, frame.absolutePath)) {
 							frames.pop();
 							await frame.directory.close();
 						} else if (!dirent) {
@@ -436,6 +438,38 @@ function identityOf(stats: AsyncTreeStats): string | undefined {
 	return `${String(stats.dev)}:${ino}`;
 }
 
+function matchesIdentityWhenAvailable(expected: AsyncTreeStats, current: AsyncTreeStats): boolean {
+	const expectedIdentity = identityOf(expected);
+	const currentIdentity = identityOf(current);
+	if (expectedIdentity === undefined && currentIdentity === undefined) return true;
+	return expectedIdentity !== undefined && expectedIdentity === currentIdentity;
+}
+
+/**
+ * Return false when the path is no longer a real directory. A different real
+ * directory is an unsafe replacement and aborts the operation rather than
+ * authorizing traversal from type alone.
+ */
+function isAuthorizedDirectory(
+	expected: AsyncTreeStats,
+	current: AsyncTreeStats,
+	filePath: string,
+): boolean {
+	if (!current.isDirectory() || current.isSymbolicLink()) return false;
+	if (matchesIdentityWhenAvailable(expected, current)) return true;
+	const error = new Error(`Directory changed during traversal: ${filePath}`) as NodeJS.ErrnoException;
+	error.code = "ESTALE";
+	throw error;
+}
+
+function isExpectedRegularFile(expected: AsyncTreeStats, current: AsyncTreeStats): boolean {
+	return expected.isFile()
+		&& !expected.isSymbolicLink()
+		&& current.isFile()
+		&& !current.isSymbolicLink()
+		&& matchesIdentityWhenAvailable(expected, current);
+}
+
 /** True when stats expose a stable descriptor identity usable for comparisons. */
 export function hasStableFileIdentity(stats: AsyncTreeStats): boolean {
 	return identityOf(stats) !== undefined;
@@ -468,6 +502,7 @@ export async function openRegularFileNoFollow(
 	filePath: string,
 	fileSystem: RegularFileReadFs = realAsyncTreeFs,
 	containedWithin?: string,
+	expectedStats?: AsyncTreeStats,
 ): Promise<OpenedRegularFile> {
 	const noFollow = (fs.constants as Record<string, number | undefined>).O_NOFOLLOW;
 	let handle: AsyncTreeFileHandle;
@@ -492,6 +527,11 @@ export async function openRegularFileNoFollow(
 	}
 	if (!descriptorStats.isFile() || descriptorStats.isSymbolicLink()) {
 		return closeAfterError(handle, new Error(`Source is not an opened regular file: ${filePath}`));
+	}
+	// Enforce a caller's prior claim immediately after handle.stat(). This must
+	// precede pathname validation and, critically, every descriptor read.
+	if (expectedStats !== undefined && !isExpectedRegularFile(expectedStats, descriptorStats)) {
+		return closeAfterError(handle, new Error(`Source changed from its expected regular file identity: ${filePath}`));
 	}
 
 	let pathnameStats: AsyncTreeStats;
@@ -524,6 +564,8 @@ export interface ReadRegularFileChunksOptions {
 	chunkSize?: number;
 	/** Canonical source root that the opened file must remain within. */
 	containedWithin?: string;
+	/** Prior no-follow lstat that the opened descriptor must still identify. */
+	expectedStats?: AsyncTreeStats;
 }
 
 /** Stream bounded chunks from one validated, descriptor-anchored source. */
@@ -536,7 +578,12 @@ export async function readRegularFileNoFollowInChunks(
 	if (!Number.isInteger(chunkSize) || chunkSize <= 0) {
 		throw new RangeError("chunk size must be a positive integer");
 	}
-	const opened = await openRegularFileNoFollow(filePath, options.fs, options.containedWithin);
+	const opened = await openRegularFileNoFollow(
+		filePath,
+		options.fs,
+		options.containedWithin,
+		options.expectedStats,
+	);
 	const buffer = new Uint8Array(chunkSize);
 	let position = 0;
 	let chunksSinceYield = 0;
@@ -567,6 +614,8 @@ export interface CopyRegularFileOptions {
 	chunkSize?: number;
 	/** Canonical source root that the opened file must remain within. */
 	containedWithin?: string;
+	/** Prior no-follow lstat that the opened source must still identify. */
+	expectedStats?: AsyncTreeStats;
 	/** Fail if the destination exists (default true). */
 	exclusive?: boolean;
 	/** Destination create mode before the source mode is applied. */
@@ -584,7 +633,12 @@ export async function copyRegularFileNoFollow(
 	options: CopyRegularFileOptions = {},
 ): Promise<AsyncTreeStats> {
 	const fileSystem = options.fs ?? realAsyncTreeFs;
-	const opened = await openRegularFileNoFollow(source, fileSystem, options.containedWithin);
+	const opened = await openRegularFileNoFollow(
+		source,
+		fileSystem,
+		options.containedWithin,
+		options.expectedStats,
+	);
 	const chunkSize = options.chunkSize ?? 64 * 1024;
 	if (!Number.isInteger(chunkSize) || chunkSize <= 0) {
 		try { await opened.handle.close(); } catch { /* preserve the option error */ }
@@ -735,6 +789,7 @@ export async function copyTree(source: string, destination: string, options: Cop
 			const sourceStats = await copyRegularFileNoFollow(entry.absolutePath, target, {
 				fs: treeFs,
 				containedWithin: canonicalSourceRoot,
+				expectedStats: entry.stats,
 				exclusive: (copyFileMode & fs.constants.COPYFILE_EXCL) !== 0,
 			});
 			if (preserveTimestamps && sourceStats.atime && sourceStats.mtime) {
@@ -759,6 +814,8 @@ export interface RemoveTreeOptions {
 	force?: boolean;
 	/** Delete descendants while retaining the root directory (default false). */
 	preserveRoot?: boolean;
+	/** Prior no-follow lstat claim required before recursively opening the root. */
+	expectedRootStats?: AsyncTreeStats;
 }
 
 function isMissing(error: unknown): boolean {
@@ -775,6 +832,12 @@ export async function removeTree(root: string, options: RemoveTreeOptions = {}):
 	const treeFs = options.fs ?? realAsyncTreeFs;
 	const force = options.force ?? true;
 	const preserveRoot = options.preserveRoot ?? false;
+
+	const unlinkMissingSafe = async (filePath: string): Promise<void> => {
+		try { await treeFs.unlink(filePath); }
+		catch (error) { if (!force || !isMissing(error)) throw error; }
+	};
+
 	let rootStats: AsyncTreeStats;
 	try {
 		rootStats = await treeFs.lstat(root);
@@ -784,11 +847,25 @@ export async function removeTree(root: string, options: RemoveTreeOptions = {}):
 	}
 
 	if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) {
-		try {
-			await treeFs.unlink(root);
-		} catch (error) {
-			if (!force || !isMissing(error)) throw error;
-		}
+		await unlinkMissingSafe(root);
+		return;
+	}
+	if (options.expectedRootStats !== undefined) {
+		isAuthorizedDirectory(options.expectedRootStats, rootStats, root);
+	}
+
+	// Revalidate the identity that authorized traversal immediately before open.
+	// A link/non-directory substitution is removed as an entry; a different real
+	// directory is never opened or recursively removed.
+	let traversalRootStats: AsyncTreeStats;
+	try {
+		traversalRootStats = await treeFs.lstat(root);
+	} catch (error) {
+		if (force && isMissing(error)) return;
+		throw error;
+	}
+	if (!isAuthorizedDirectory(rootStats, traversalRootStats, root)) {
+		await unlinkMissingSafe(root);
 		return;
 	}
 
@@ -803,6 +880,7 @@ export async function removeTree(root: string, options: RemoveTreeOptions = {}):
 		absolutePath: root,
 		relativePath: "",
 		depth: 0,
+		authorizedStats: rootStats,
 		directory: rootDirectory,
 	}];
 	let stepsSinceYield = 0;
@@ -812,9 +890,8 @@ export async function removeTree(root: string, options: RemoveTreeOptions = {}):
 			const dirent = await frame.directory.read();
 			let frameStats: AsyncTreeStats;
 			try {
-				// An open directory handle survives a rename/replacement. Check the
-				// path again after every streamed read before joining a child name;
-				// a substituted symlink must be unlinked, never traversed.
+				// Open directory handles survive rename/replacement. Validate the
+				// exact directory identity after every read before deriving children.
 				frameStats = await treeFs.lstat(frame.absolutePath);
 			} catch (error) {
 				if (!force || !isMissing(error)) throw error;
@@ -822,14 +899,10 @@ export async function removeTree(root: string, options: RemoveTreeOptions = {}):
 				await frame.directory.close();
 				continue;
 			}
-			if (!frameStats.isDirectory() || frameStats.isSymbolicLink()) {
+			if (!isAuthorizedDirectory(frame.authorizedStats, frameStats, frame.absolutePath)) {
 				frames.pop();
 				await frame.directory.close();
-				try {
-					await treeFs.unlink(frame.absolutePath);
-				} catch (error) {
-					if (!force || !isMissing(error)) throw error;
-				}
+				await unlinkMissingSafe(frame.absolutePath);
 				continue;
 			}
 			if (!dirent) {
@@ -837,13 +910,11 @@ export async function removeTree(root: string, options: RemoveTreeOptions = {}):
 				await frame.directory.close();
 				if (!preserveRoot || frame.depth > 0) {
 					try {
-						// Revalidate immediately before deletion so a directory changed to
-						// a symlink is removed with unlink rather than left or followed.
 						const deletionStats = await treeFs.lstat(frame.absolutePath);
-						if (deletionStats.isDirectory() && !deletionStats.isSymbolicLink()) {
+						if (isAuthorizedDirectory(frame.authorizedStats, deletionStats, frame.absolutePath)) {
 							await treeFs.rmdir(frame.absolutePath);
 						} else {
-							await treeFs.unlink(frame.absolutePath);
+							await unlinkMissingSafe(frame.absolutePath);
 						}
 					} catch (error) {
 						if (!force || !isMissing(error)) throw error;
@@ -859,6 +930,17 @@ export async function removeTree(root: string, options: RemoveTreeOptions = {}):
 					throw error;
 				}
 				if (childStats.isDirectory() && !childStats.isSymbolicLink()) {
+					let traversalChildStats: AsyncTreeStats;
+					try {
+						traversalChildStats = await treeFs.lstat(childPath);
+					} catch (error) {
+						if (force && isMissing(error)) continue;
+						throw error;
+					}
+					if (!isAuthorizedDirectory(childStats, traversalChildStats, childPath)) {
+						await unlinkMissingSafe(childPath);
+						continue;
+					}
 					let childDirectory: AsyncTreeDirectory;
 					try {
 						childDirectory = await treeFs.opendir(childPath);
@@ -870,14 +952,11 @@ export async function removeTree(root: string, options: RemoveTreeOptions = {}):
 						absolutePath: childPath,
 						relativePath: "",
 						depth: frame.depth + 1,
+						authorizedStats: childStats,
 						directory: childDirectory,
 					});
 				} else {
-					try {
-						await treeFs.unlink(childPath);
-					} catch (error) {
-						if (!force || !isMissing(error)) throw error;
-					}
+					await unlinkMissingSafe(childPath);
 				}
 			}
 

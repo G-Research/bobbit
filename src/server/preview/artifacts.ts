@@ -11,9 +11,11 @@ import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { bobbitStateDir } from "../bobbit-dir.js";
 import {
+	hasStableFileIdentity,
 	readRegularFileNoFollowInChunks,
 	RECOVERY_IO_CONCURRENCY,
 	sameFileIdentity,
+	type AsyncTreeStats,
 } from "../agent/bounded-async-work.js";
 import * as previewMount from "./mount.js";
 
@@ -149,35 +151,39 @@ export async function readPreviewArtifact(sessionId: string, artifactId: string)
 	const file = path.join(directory, "artifact.json");
 	let parsed: unknown;
 	try {
+		// Establish and revalidate the real directory identity around realpath
+		// before deriving or opening artifact.json through that ancestor.
 		const directoryStats = await artifactFs.lstat(directory);
-		const metadataStats = await artifactFs.lstat(file);
-		if (!directoryStats.isDirectory() || directoryStats.isSymbolicLink()
-			|| !metadataStats.isFile() || metadataStats.isSymbolicLink()) {
+		if (!directoryStats.isDirectory() || directoryStats.isSymbolicLink()) {
+			throw new PreviewArtifactError(500, "Preview artifact metadata is invalid");
+		}
+		const canonicalDirectory = await artifactFs.realpath(directory);
+		const canonicalDirectoryStats = await artifactFs.lstat(directory);
+		if (!matchesDirectoryIdentity(directoryStats, canonicalDirectoryStats)) {
 			throw new PreviewArtifactError(500, "Preview artifact metadata is invalid");
 		}
 
-		// Anchor containment to the directory identity validated above. The file
-		// reader then opens artifact.json with no-follow semantics, compares the
-		// opened descriptor to its pathname before reading, and reads only through
-		// that descriptor in bounded chunks.
-		const canonicalDirectory = await artifactFs.realpath(directory);
-		const currentDirectoryStats = await artifactFs.stat(directory);
-		if (!currentDirectoryStats.isDirectory() || currentDirectoryStats.isSymbolicLink()
-			|| !sameFileIdentity(directoryStats, currentDirectoryStats)) {
+		const metadataStats = await artifactFs.lstat(file);
+		if (!metadataStats.isFile() || metadataStats.isSymbolicLink()) {
 			throw new PreviewArtifactError(500, "Preview artifact metadata is invalid");
 		}
+		const currentDirectoryStats = await artifactFs.lstat(directory);
+		if (!matchesDirectoryIdentity(directoryStats, currentDirectoryStats)) {
+			throw new PreviewArtifactError(500, "Preview artifact metadata is invalid");
+		}
+
+		// The expected no-follow metadata identity is checked immediately after
+		// open/handle.stat, before the first descriptor read or onChunk callback.
 		const decoder = new StringDecoder("utf8");
 		const textParts: string[] = [];
-		const openedStats = await readRegularFileNoFollowInChunks(file, chunk => {
+		await readRegularFileNoFollowInChunks(file, chunk => {
 			textParts.push(decoder.write(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)));
 		}, {
 			fs: artifactFs,
 			containedWithin: canonicalDirectory,
+			expectedStats: metadataStats,
 		});
 		textParts.push(decoder.end());
-		if (!sameFileIdentity(metadataStats, openedStats)) {
-			throw new PreviewArtifactError(500, "Preview artifact metadata is invalid");
-		}
 		parsed = JSON.parse(textParts.join(""));
 	} catch (err) {
 		if (err instanceof PreviewArtifactError) throw err;
@@ -463,6 +469,14 @@ async function listFiles(root: string): Promise<string[]> {
 		fs: artifactFs,
 		concurrency: RECOVERY_IO_CONCURRENCY,
 	});
+}
+
+function matchesDirectoryIdentity(expected: AsyncTreeStats, current: AsyncTreeStats): boolean {
+	if (!current.isDirectory() || current.isSymbolicLink()) return false;
+	const expectedStable = hasStableFileIdentity(expected);
+	const currentStable = hasStableFileIdentity(current);
+	if (!expectedStable && !currentStable) return true;
+	return expectedStable && currentStable && sameFileIdentity(expected, current);
 }
 
 function isSafeRelativeFile(rel: string): boolean {
