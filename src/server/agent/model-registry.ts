@@ -12,6 +12,10 @@
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
+// Pi 0.81 also exposes provider-scoped `Models` with async catalog refresh/auth.
+// Bobbit intentionally stays on these synchronous static-catalog reads: its own
+// registry composes that snapshot with AI Gateway and local-provider discovery,
+// while credential refresh remains owned by the spawned coding-agent runtime.
 import { getBuiltinProviders, getBuiltinModels, getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import type { PreferencesStore } from "./preferences-store.js";
 import { globalAuthPath } from "../bobbit-dir.js";
@@ -41,9 +45,7 @@ export interface ApiModel {
 	authenticated: boolean;
 	/**
 	 * When `false`, the model is authenticated but MUST NOT be bound to an agent
-	 * session: the pi-coding-agent runtime has no provider/api capable of running
-	 * it (e.g. `google-gemini-cli` Code Assist models, whose Code Assist adapter is
-	 * only wired into server-side completion, not the session runtime). The
+	 * session because Bobbit has no runnable agent-side provider path for it. The
 	 * ModelSelector renders these visibly unavailable-for-sessions and refuses to
 	 * select them. Undefined/true means selectable. Single source of truth for
 	 * session-selectability lives where each model is emitted.
