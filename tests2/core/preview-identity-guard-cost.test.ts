@@ -4,13 +4,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, it } from "vitest";
 import { createFsFromVolume, Volume } from "memfs";
+import { RECOVERY_IO_CONCURRENCY } from "../../src/server/agent/bounded-async-work.ts";
 import {
 	artifactDir,
 	artifactMountDir,
 	findPreviewArtifactByHash,
 	persistPreviewArtifact,
+	removeArtifacts,
 	setPreviewArtifactFsForTesting,
 	setPreviewArtifactRootForTesting,
+	sweepOrphanArtifacts,
 	type PreviewArtifactRecord,
 } from "../../src/server/preview/artifacts.ts";
 import {
@@ -33,6 +36,7 @@ interface OperationCounts {
 }
 
 interface CatalogOperationCounts {
+	metadataLstat: number;
 	metadataOpen: number;
 	sessionLstat: number;
 	sessionOpendir: number;
@@ -68,6 +72,7 @@ function catalogCountingFs(
 		...base,
 		lstat: async filePath => {
 			if (isSessionRoot(filePath)) counts.sessionLstat++;
+			if (path.basename(path.resolve(String(filePath))) === "artifact.json") counts.metadataLstat++;
 			return base.lstat(filePath);
 		},
 		opendir: async filePath => {
@@ -150,6 +155,35 @@ function writeValidArtifact(
 
 function generatedSessionId(index: number): string {
 	return `${index.toString(16).padStart(8, "0")}-1111-2222-3333-${index.toString(16).padStart(12, "0")}`;
+}
+
+function emptyCatalogCounts(): CatalogOperationCounts {
+	return { metadataLstat: 0, metadataOpen: 0, sessionLstat: 0, sessionOpendir: 0 };
+}
+
+function rewriteRecord(
+	memoryFs: typeof fs,
+	sessionId: string,
+	artifactId: string,
+	update: (record: PreviewArtifactRecord) => PreviewArtifactRecord,
+): void {
+	const metadataPath = path.join(artifactDir(sessionId, artifactId), "artifact.json");
+	const record = JSON.parse(memoryFs.readFileSync(metadataPath, "utf-8")) as PreviewArtifactRecord;
+	memoryFs.writeFileSync(metadataPath, JSON.stringify(update(record)));
+}
+
+function deferred<T = void>() {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	const promise = new Promise<T>(r => { resolve = r; });
+	return { promise, resolve };
+}
+
+async function waitUntil(predicate: () => boolean, attempts = 1_000): Promise<void> {
+	for (let attempt = 0; attempt < attempts; attempt++) {
+		if (predicate()) return;
+		await new Promise<void>(resolve => setImmediate(resolve));
+	}
+	throw new Error("condition did not become true");
 }
 
 afterEach(() => {
@@ -274,10 +308,10 @@ describe("preview identity guard operation cost", () => {
 });
 
 describe("bounded preview artifact catalog", () => {
-	it("keeps 50 unique persists to one cold metadata scan and bounded catalog lookup work", async () => {
+	it("keeps 50 unique persists to one cold scan while revalidating retained metadata stamps", async () => {
 		const { memoryFs, baseFs, artifactRoot } = fixture("catalog-persists");
 		writeRecord(memoryFs, SID, "initial_candidate", "0".repeat(64), ["report.html"]);
-		const counts: CatalogOperationCounts = { metadataOpen: 0, sessionLstat: 0, sessionOpendir: 0 };
+		const counts = emptyCatalogCounts();
 		setPreviewArtifactFsForTesting(catalogCountingFs(baseFs, artifactRoot, counts));
 
 		assert.equal(await findPreviewArtifactByHash(SID, "f".repeat(64)), null);
@@ -287,64 +321,286 @@ describe("bounded preview artifact catalog", () => {
 			await persistPreviewArtifact(SID, mounted);
 		}
 
-		assert.equal(counts.metadataOpen, 1, "negative hash lookups must use the complete catalog");
+		assert.equal(counts.metadataOpen, 51, "each owned install must capture its verified metadata stamp once");
 		assert.ok(counts.sessionOpendir <= 52, `persist catalog unexpectedly rescanned metadata roots: ${counts.sessionOpendir}`);
-		assert.ok(counts.sessionLstat <= 5_000, `catalog root checks multiplied: ${counts.sessionLstat}`);
+		assert.ok(counts.sessionLstat <= 8_000, `catalog root checks multiplied: ${counts.sessionLstat}`);
 	});
 
-	it("keeps same-hash positive validation in stored filesystem order", async () => {
-		const { memoryFs, baseFs, artifactRoot } = fixture("catalog-order");
-		const hash = writeValidArtifact(memoryFs, SID, "same_hash_a", "same");
-		writeValidArtifact(memoryFs, SID, "same_hash_b", "same");
-		const ordered = memoryFs.readdirSync(path.join(artifactRoot, SID), { withFileTypes: true })
-			.filter(entry => entry.name.startsWith("same_hash_"))
-			.map(entry => entry.name);
-		const counts: CatalogOperationCounts = { metadataOpen: 0, sessionLstat: 0, sessionOpendir: 0 };
-		setPreviewArtifactFsForTesting(catalogCountingFs(baseFs, artifactRoot, counts));
+	it("revalidates all metadata stamps with the shared concurrency ceiling", async () => {
+		const { memoryFs, baseFs, artifactRoot } = fixture("catalog-revalidation-bound");
+		for (let index = 0; index < RECOVERY_IO_CONCURRENCY * 2 + 1; index++) {
+			writeRecord(memoryFs, SID, `bounded_${String(index).padStart(3, "0")}`, "0".repeat(64), ["report.html"]);
+		}
+		let hold = false;
+		let active = 0;
+		let maximum = 0;
+		let started = 0;
+		const release = deferred();
+		const heldFs: PreviewAsyncFs = {
+			...baseFs,
+			lstat: async filePath => {
+				if (hold && path.basename(path.resolve(String(filePath))) === "artifact.json") {
+					started++;
+					active++;
+					maximum = Math.max(maximum, active);
+					try { await release.promise; }
+					finally { active--; }
+				}
+				return baseFs.lstat(filePath);
+			},
+		};
+		setPreviewArtifactFsForTesting(heldFs);
+		assert.equal(await findPreviewArtifactByHash(SID, "e".repeat(64)), null);
 
-		assert.equal(await findPreviewArtifactByHash(SID, "f".repeat(64)), null);
-		assert.equal(counts.metadataOpen, 2);
-		const found = await findPreviewArtifactByHash(SID, hash);
-		assert.equal(found?.artifactId, ordered[0]);
-		assert.equal(counts.metadataOpen, 3, "a cached positive must reopen only the first matching metadata record");
+		hold = true;
+		const lookup = findPreviewArtifactByHash(SID, "f".repeat(64));
+		await waitUntil(() => started === RECOVERY_IO_CONCURRENCY);
+		assert.equal(active, RECOVERY_IO_CONCURRENCY);
+		assert.equal(maximum, RECOVERY_IO_CONCURRENCY);
+		release.resolve();
+		assert.equal(await lookup, null);
+		assert.equal(started, RECOVERY_IO_CONCURRENCY * 2 + 1);
+		assert.ok(maximum <= RECOVERY_IO_CONCURRENCY);
+		assert.equal(memoryFs.existsSync(path.join(artifactRoot, SID)), true);
 	});
 
-	it("invalidates on external candidate addition and preserves filesystem first-valid selection", async () => {
-		const { memoryFs, baseFs, artifactRoot } = fixture("catalog-external-add");
-		writeRecord(memoryFs, SID, "prior_candidate", "0".repeat(64), ["report.html"]);
-		const counts: CatalogOperationCounts = { metadataOpen: 0, sessionLstat: 0, sessionOpendir: 0 };
+	it("rescans when a candidate is added while cached metadata stamps are being revalidated", async () => {
+		const { memoryFs, baseFs, artifactRoot } = fixture("catalog-revalidation-root-race");
+		writeRecord(memoryFs, SID, "existing_candidate", "0".repeat(64), ["report.html"]);
+		let hold = false;
+		let held = false;
+		const started = deferred();
+		const release = deferred();
+		const heldFs: PreviewAsyncFs = {
+			...baseFs,
+			lstat: async filePath => {
+				if (hold && !held && path.basename(path.resolve(String(filePath))) === "artifact.json") {
+					held = true;
+					started.resolve();
+					await release.promise;
+				}
+				return baseFs.lstat(filePath);
+			},
+		};
+		setPreviewArtifactFsForTesting(heldFs);
+		assert.equal(await findPreviewArtifactByHash(SID, "e".repeat(64)), null);
+		const expectedHash = crypto.createHash("sha256")
+			.update("report.html", "utf-8")
+			.update("\0")
+			.update("late")
+			.update("\0")
+			.digest("hex");
+
+		hold = true;
+		const lookup = findPreviewArtifactByHash(SID, expectedHash);
+		await started.promise;
+		assert.equal(writeValidArtifact(memoryFs, SID, "late_candidate", "late"), expectedHash);
+		release.resolve();
+		assert.equal((await lookup)?.artifactId, "late_candidate");
+		assert.equal(memoryFs.existsSync(path.join(artifactRoot, SID, "late_candidate")), true);
+	});
+
+	it("rescans a complete negative when existing metadata changes without a parent mutation", async () => {
+		const { memoryFs, baseFs, artifactRoot } = fixture("catalog-descendant-negative");
+		const artifactId = "metadata_candidate";
+		writeRecord(memoryFs, SID, artifactId, "0".repeat(64), ["report.html"]);
+		const counts = emptyCatalogCounts();
 		setPreviewArtifactFsForTesting(catalogCountingFs(baseFs, artifactRoot, counts));
 		assert.equal(await findPreviewArtifactByHash(SID, "f".repeat(64)), null);
 
-		const hash = writeValidArtifact(memoryFs, SID, "external_a", "external");
-		writeValidArtifact(memoryFs, SID, "external_b", "external");
+		// Rewrite only the existing descendant and deliberately leave the session
+		// directory timestamp untouched.
+		rewriteRecord(memoryFs, SID, artifactId, record => ({ ...record, contentHash: "e".repeat(64) }));
 		const future = new Date(Date.now() + 60_000);
-		memoryFs.utimesSync(path.join(artifactRoot, SID), future, future);
-		const exactOrder = memoryFs.readdirSync(path.join(artifactRoot, SID), { withFileTypes: true })
-			.filter(entry => entry.name.startsWith("external_"))
-			.map(entry => entry.name);
+		memoryFs.utimesSync(path.join(artifactDir(SID, artifactId), "artifact.json"), future, future);
 
-		const found = await findPreviewArtifactByHash(SID, hash);
-		assert.equal(found?.artifactId, exactOrder[0]);
-		assert.equal(counts.sessionOpendir, 2, "the changed root stamp must force one canonical rescan");
+		assert.equal(await findPreviewArtifactByHash(SID, "f".repeat(64)), null);
+		assert.equal(counts.sessionOpendir, 2, "a changed artifact.json stamp must force one canonical rescan");
+		assert.equal(counts.metadataOpen, 2);
 	});
 
-	it("invalidates a corrupt cached positive and rescans once to the later exact candidate", async () => {
-		const { memoryFs, baseFs, artifactRoot } = fixture("catalog-corrupt-positive");
+	it("lets an earlier candidate changed to the cached later hash regain first-valid selection", async () => {
+		const { memoryFs, baseFs, artifactRoot } = fixture("catalog-descendant-order");
+		const hash = writeValidArtifact(memoryFs, SID, "reorder_a", "same");
+		writeValidArtifact(memoryFs, SID, "reorder_b", "same");
+		const ordered = memoryFs.readdirSync(path.join(artifactRoot, SID), { withFileTypes: true })
+			.filter(entry => entry.name.startsWith("reorder_"))
+			.map(entry => entry.name);
+		rewriteRecord(memoryFs, SID, ordered[0]!, record => ({ ...record, contentHash: "0".repeat(64) }));
+		const counts = emptyCatalogCounts();
+		setPreviewArtifactFsForTesting(catalogCountingFs(baseFs, artifactRoot, counts));
+
+		assert.equal(await findPreviewArtifactByHash(SID, "f".repeat(64)), null);
+		assert.equal((await findPreviewArtifactByHash(SID, hash))?.artifactId, ordered[1]);
+		rewriteRecord(memoryFs, SID, ordered[0]!, record => ({ ...record, contentHash: hash }));
+		const future = new Date(Date.now() + 60_000);
+		memoryFs.utimesSync(path.join(artifactDir(SID, ordered[0]!), "artifact.json"), future, future);
+
+		assert.equal((await findPreviewArtifactByHash(SID, hash))?.artifactId, ordered[0]);
+		assert.equal(counts.sessionOpendir, 2, "metadata reorder must invalidate and canonically rescan once");
+	});
+
+	it("preserves exact candidate ordering when refreshing after an owned different-hash install", async () => {
+		const { memoryFs, baseFs, artifactRoot } = fixture("catalog-owned-order");
+		const retainedHash = writeValidArtifact(memoryFs, SID, "retained_a", "retained");
+		writeValidArtifact(memoryFs, SID, "retained_b", "retained");
+		const retainedOrder = memoryFs.readdirSync(path.join(artifactRoot, SID), { withFileTypes: true })
+			.filter(entry => entry.name.startsWith("retained_"))
+			.map(entry => entry.name);
+		const counts = emptyCatalogCounts();
+		setPreviewArtifactFsForTesting(catalogCountingFs(baseFs, artifactRoot, counts));
+		assert.equal(await findPreviewArtifactByHash(SID, "f".repeat(64)), null);
+
+		const different = await writeInline(SID, "owned-different", "report.html");
+		await persistPreviewArtifact(SID, different);
+		assert.equal((await findPreviewArtifactByHash(SID, retainedHash))?.artifactId, retainedOrder[0]);
+		assert.equal(counts.sessionOpendir, 2, "owned refresh must carry verified entries without a canonical rescan");
+	});
+
+	it("keeps same-hash positive validation in stored order and observes mount-only repair", async () => {
+		const { memoryFs, baseFs, artifactRoot } = fixture("catalog-mount-repair");
 		const hash = writeValidArtifact(memoryFs, SID, "cached_same_a", "stable");
 		writeValidArtifact(memoryFs, SID, "cached_same_b", "stable");
 		const ordered = memoryFs.readdirSync(path.join(artifactRoot, SID), { withFileTypes: true })
 			.filter(entry => entry.name.startsWith("cached_same_"))
 			.map(entry => entry.name);
-		const counts: CatalogOperationCounts = { metadataOpen: 0, sessionLstat: 0, sessionOpendir: 0 };
+		const counts = emptyCatalogCounts();
 		setPreviewArtifactFsForTesting(catalogCountingFs(baseFs, artifactRoot, counts));
 		assert.equal(await findPreviewArtifactByHash(SID, "f".repeat(64)), null);
 		memoryFs.writeFileSync(path.join(artifactMountDir(SID, ordered[0]!), "report.html"), "corrupt");
 
-		const found = await findPreviewArtifactByHash(SID, hash);
-		assert.equal(found?.artifactId, ordered[1]);
+		assert.equal((await findPreviewArtifactByHash(SID, hash))?.artifactId, ordered[1]);
 		assert.equal(counts.sessionOpendir, 2, "stale positive must perform exactly one canonical rescan");
-		assert.equal(counts.metadataOpen, 5, "rescan must reread both candidates after cached validation fails");
+		memoryFs.writeFileSync(path.join(artifactMountDir(SID, ordered[0]!), "report.html"), "stable");
+		assert.equal((await findPreviewArtifactByHash(SID, hash))?.artifactId, ordered[0]);
+		assert.equal(counts.sessionOpendir, 2, "mount-only repair must remain visible through exact positive validation");
+	});
+
+	it("invalidates populated catalogs after removeArtifacts and successful sweep", async () => {
+		const { memoryFs, baseFs, artifactRoot } = fixture("catalog-cleanup-invalidation");
+		const sessionPaths = [SID, SID_SCALE].map(sessionId => path.resolve(path.join(artifactRoot, sessionId)));
+		for (const sessionPath of sessionPaths) memoryFs.mkdirSync(sessionPath, { recursive: true });
+		const counts = emptyCatalogCounts();
+		const counted = catalogCountingFs(baseFs, artifactRoot, counts);
+		const stableStamps = new Map<string, Pick<fs.Stats, "dev" | "ino" | "mode" | "mtimeMs" | "ctimeMs" | "size" | "nlink">>();
+		const sameSyntheticStatsFs: PreviewAsyncFs = {
+			...counted,
+			lstat: async filePath => {
+				const stats = await counted.lstat(filePath);
+				const absolute = path.resolve(String(filePath));
+				if (!sessionPaths.includes(absolute)) return stats;
+				let stamp = stableStamps.get(absolute);
+				if (!stamp) {
+					stamp = {
+						dev: stats.dev,
+						ino: stats.ino,
+						mode: stats.mode,
+						mtimeMs: stats.mtimeMs,
+						ctimeMs: stats.ctimeMs,
+						size: stats.size,
+						nlink: stats.nlink,
+					};
+					stableStamps.set(absolute, stamp);
+				}
+				return new Proxy(stats, {
+					get: (target, property) => {
+						if (property in stamp!) return stamp![property as keyof typeof stamp];
+						const value = Reflect.get(target, property, target);
+						return typeof value === "function" ? value.bind(target) : value;
+					},
+				});
+			},
+		};
+		setPreviewArtifactFsForTesting(sameSyntheticStatsFs);
+		assert.equal(await findPreviewArtifactByHash(SID, "f".repeat(64)), null);
+		assert.equal(await findPreviewArtifactByHash(SID_SCALE, "f".repeat(64)), null);
+
+		await removeArtifacts(SID);
+		memoryFs.mkdirSync(sessionPaths[0]!, { recursive: true });
+		const afterRemove = counts.sessionOpendir;
+		assert.equal(await findPreviewArtifactByHash(SID, "f".repeat(64)), null);
+		assert.equal(counts.sessionOpendir, afterRemove + 1, "removeArtifacts must leave even a same-stamp recreation cold");
+		const swept = await sweepOrphanArtifacts([SID]);
+		assert.deepEqual(swept.removed, [SID_SCALE]);
+		memoryFs.mkdirSync(sessionPaths[1]!, { recursive: true });
+		const afterSweep = counts.sessionOpendir;
+		assert.equal(await findPreviewArtifactByHash(SID_SCALE, "f".repeat(64)), null);
+		assert.equal(counts.sessionOpendir, afterSweep + 1, "successful sweep must leave even a same-stamp recreation cold");
+	});
+
+	it("does not retain a catalog assembled before a failed persist", async () => {
+		const { memoryFs, baseFs, artifactRoot } = fixture("catalog-failed-persist");
+		writeRecord(memoryFs, SID, "existing_candidate", "0".repeat(64), ["report.html"]);
+		const mounted = await writeInline(SID, "persist-must-fail", "report.html");
+		const counts = emptyCatalogCounts();
+		const counted = catalogCountingFs(baseFs, artifactRoot, counts);
+		const failingFs: PreviewAsyncFs = {
+			...counted,
+			mkdir: async (directory, options) => {
+				if (path.basename(path.resolve(String(directory))).startsWith(".tmp-")) {
+					throw Object.assign(new Error("injected persist failure"), { code: "EIO" });
+				}
+				return counted.mkdir(directory, options);
+			},
+		};
+		setPreviewArtifactFsForTesting(failingFs);
+
+		await assert.rejects(persistPreviewArtifact(SID, mounted), /injected persist failure/);
+		assert.equal(await findPreviewArtifactByHash(SID, "f".repeat(64)), null);
+		assert.equal(counts.sessionOpendir, 2, "the failed persist must invalidate its freshly populated catalog");
+	});
+
+	it("prevents an in-flight old-filesystem scan from publishing after a seam reset", async () => {
+		const { memoryFs, baseFs, artifactRoot } = fixture("catalog-inflight-seam");
+		writeRecord(memoryFs, SID, "held_candidate", "0".repeat(64), ["report.html"]);
+		const oldCounts = emptyCatalogCounts();
+		const oldCounted = catalogCountingFs(baseFs, artifactRoot, oldCounts);
+		const started = deferred();
+		const release = deferred();
+		let held = false;
+		const oldFs: PreviewAsyncFs = {
+			...oldCounted,
+			lstat: async filePath => {
+				if (!held && path.basename(path.resolve(String(filePath))) === "artifact.json") {
+					held = true;
+					started.resolve();
+					await release.promise;
+				}
+				return oldCounted.lstat(filePath);
+			},
+		};
+		setPreviewArtifactFsForTesting(oldFs);
+		const oldScan = findPreviewArtifactByHash(SID, "f".repeat(64));
+		await started.promise;
+
+		const newCounts = emptyCatalogCounts();
+		setPreviewArtifactFsForTesting(catalogCountingFs(baseFs, artifactRoot, newCounts));
+		release.resolve();
+		assert.equal(await oldScan, null);
+		assert.equal(await findPreviewArtifactByHash(SID, "f".repeat(64)), null);
+		assert.equal(newCounts.sessionOpendir, 1, "the old seam must not repopulate the cleared catalog");
+		assert.equal(newCounts.metadataOpen, 1);
+	});
+
+	it("touches a hot old session and evicts the untouched LRU entry above 64 sessions", async () => {
+		const { memoryFs, baseFs, artifactRoot } = fixture("catalog-session-cap");
+		const sessionIds = Array.from({ length: 65 }, (_, index) => generatedSessionId(index + 1));
+		for (const sessionId of sessionIds) memoryFs.mkdirSync(path.join(artifactRoot, sessionId), { recursive: true });
+		const counts = emptyCatalogCounts();
+		setPreviewArtifactFsForTesting(catalogCountingFs(baseFs, artifactRoot, counts));
+
+		for (const sessionId of sessionIds.slice(0, 64)) {
+			assert.equal(await findPreviewArtifactByHash(sessionId, "f".repeat(64)), null);
+		}
+		const hot = sessionIds[0]!;
+		const untouched = sessionIds[1]!;
+		assert.equal(await findPreviewArtifactByHash(hot, "e".repeat(64)), null);
+		assert.equal(counts.sessionOpendir, 64, "touching a complete negative must be a cache hit");
+		assert.equal(await findPreviewArtifactByHash(sessionIds[64]!, "f".repeat(64)), null);
+		assert.equal(await findPreviewArtifactByHash(hot, "d".repeat(64)), null);
+		assert.equal(counts.sessionOpendir, 65, "the touched session must remain hot");
+		assert.equal(await findPreviewArtifactByHash(untouched, "f".repeat(64)), null);
+		assert.equal(counts.sessionOpendir, 66, "the untouched oldest session must be evicted");
 	});
 
 	it("leaves sessions above 256 candidates uncached and retains streaming scans", async () => {
@@ -358,45 +614,12 @@ describe("bounded preview artifact catalog", () => {
 				["report.html"],
 			);
 		}
-		const counts: CatalogOperationCounts = { metadataOpen: 0, sessionLstat: 0, sessionOpendir: 0 };
+		const counts = emptyCatalogCounts();
 		setPreviewArtifactFsForTesting(catalogCountingFs(baseFs, artifactRoot, counts));
 
 		assert.equal(await findPreviewArtifactByHash(SID, "f".repeat(64)), null);
 		assert.equal(await findPreviewArtifactByHash(SID, "f".repeat(64)), null);
 		assert.equal(counts.metadataOpen, 514);
 		assert.equal(counts.sessionOpendir, 2, "oversized catalogs must use the canonical scan again");
-	});
-
-	it("evicts the least-recently-used session above the 64-session cap", async () => {
-		const { memoryFs, baseFs, artifactRoot } = fixture("catalog-session-cap");
-		const sessionIds = Array.from({ length: 65 }, (_, index) => generatedSessionId(index + 1));
-		for (const sessionId of sessionIds) memoryFs.mkdirSync(path.join(artifactRoot, sessionId), { recursive: true });
-		const counts: CatalogOperationCounts = { metadataOpen: 0, sessionLstat: 0, sessionOpendir: 0 };
-		setPreviewArtifactFsForTesting(catalogCountingFs(baseFs, artifactRoot, counts));
-
-		for (const sessionId of sessionIds) {
-			assert.equal(await findPreviewArtifactByHash(sessionId, "f".repeat(64)), null);
-		}
-		assert.equal(counts.sessionOpendir, 65);
-		assert.equal(await findPreviewArtifactByHash(sessionIds[0]!, "f".repeat(64)), null);
-		assert.equal(counts.sessionOpendir, 66, "the oldest session must be cold after LRU eviction");
-	});
-
-	it("scans cold caches, answers complete negatives, and clears on filesystem seam reset", async () => {
-		const { memoryFs, baseFs, artifactRoot } = fixture("catalog-seam-reset");
-		writeRecord(memoryFs, SID, "cold_candidate", "0".repeat(64), ["report.html"]);
-		const counts: CatalogOperationCounts = { metadataOpen: 0, sessionLstat: 0, sessionOpendir: 0 };
-		const countedFs = catalogCountingFs(baseFs, artifactRoot, counts);
-		setPreviewArtifactFsForTesting(countedFs);
-
-		assert.equal(await findPreviewArtifactByHash(SID, "e".repeat(64)), null);
-		assert.equal(await findPreviewArtifactByHash(SID, "f".repeat(64)), null);
-		assert.equal(counts.metadataOpen, 1);
-		assert.equal(counts.sessionOpendir, 1);
-
-		setPreviewArtifactFsForTesting(countedFs);
-		assert.equal(await findPreviewArtifactByHash(SID, "f".repeat(64)), null);
-		assert.equal(counts.metadataOpen, 2);
-		assert.equal(counts.sessionOpendir, 2);
 	});
 });
