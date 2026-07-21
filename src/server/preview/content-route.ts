@@ -17,7 +17,7 @@
 import fs from "node:fs";
 import type http from "node:http";
 
-import { mountDir, readMountDirectory } from "./mount.js";
+import { mountPath, readMountDirectory } from "./mount.js";
 import { artifactMountDir } from "./artifacts.js";
 import { resolveAssetPath } from "./path-guard.js";
 import { mimeTypeFor } from "./mime.js";
@@ -117,7 +117,7 @@ export async function handlePreviewRequest(
 	// This lets the client switch between preview tabs (each backed by its own
 	// artifact) by just changing the iframe src — no POST/restore round-trip
 	// needed, since each artifact's bytes live at their own URL forever.
-	let baseDir = mountDir(sid);
+	let baseDir = mountPath(sid);
 	let baseHrefPrefix = `/preview/${sid}/`;
 	if (rel.startsWith("_artifact/")) {
 		const afterPrefix = rel.slice("_artifact/".length);

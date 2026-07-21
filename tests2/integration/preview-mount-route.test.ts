@@ -29,6 +29,7 @@ const SESSION_IDS = [
 	"22222222-3333-4444-5555-666666666666",
 	"33333333-4444-5555-6666-777777777777",
 	"44444444-5555-6666-7777-888888888888",
+	"55555555-6666-4777-8888-999999999999",
 ] as const;
 const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const pngBytes = Buffer.from([
@@ -658,5 +659,30 @@ test.describe("GET /preview/<sid>/* — content origin", () => {
 			headers: { Cookie: cookie },
 		});
 		expect(resp.status).toBe(404);
+	});
+
+	test("stale GET and HEAD stay missing after preview mount deletion", async () => {
+		const deletedSessionId = createSession();
+		const mountResp = await apiFetch(`/api/preview/mount?sessionId=${deletedSessionId}`, {
+			method: "POST",
+			body: JSON.stringify({ html: "<!doctype html><body>delete me</body>" }),
+		});
+		expect(mountResp.status).toBe(200);
+
+		const deletedMount = previewMount.mountPath(deletedSessionId);
+		expect(route.memfs.existsSync(deletedMount)).toBe(true);
+		await previewMount.removeMount(deletedSessionId);
+		expect(route.memfs.existsSync(deletedMount)).toBe(false);
+
+		const cookie = await mintCookie();
+		for (const method of ["GET", "HEAD"]) {
+			const stale = await route.fetch(`${base()}/preview/${deletedSessionId}/`, {
+				method,
+				headers: { Cookie: cookie },
+			});
+			expect(stale.status).toBe(404);
+			expect(await stale.json()).toEqual({ error: "Preview mount not found" });
+			expect(route.memfs.existsSync(deletedMount)).toBe(false);
+		}
 	});
 });
