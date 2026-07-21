@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { createFsFromVolume, Volume } from "memfs";
+import { RECOVERY_IO_CONCURRENCY } from "../../src/server/agent/bounded-async-work.ts";
 import {
 	contentHashForMount,
 	copyPreviewDirectory,
@@ -327,6 +328,116 @@ describe("preview artifacts", () => {
 		assert.equal(found?.artifactId, exactOrder[0]);
 		const reused = await persistPreviewArtifact(SID, mounted);
 		assert.equal(reused.artifactId, exactOrder[0]);
+	});
+
+	it("batches metadata reads with bounded read-ahead while preserving first-valid order and failure isolation", async () => {
+		await resetSession();
+		const mounted = await writeInline(SID, "batched-exact", "report.html");
+		const candidateIds = Array.from(
+			{ length: RECOVERY_IO_CONCURRENCY + 2 },
+			(_, index) => `batch_${String(index).padStart(2, "0")}`,
+		);
+		for (const artifactId of candidateIds) {
+			writeCandidate(artifactId, mounted, {
+				metadata: candidateRecord(artifactId, mounted, { contentHash: "f".repeat(64) }),
+			});
+		}
+		const candidateSet = new Set(candidateIds);
+		const orderedIds = memoryFs.readdirSync(path.join(artifactRoot, SID), { withFileTypes: true })
+			.filter(ent => candidateSet.has(ent.name))
+			.map(ent => ent.name);
+		assert.equal(orderedIds.length, candidateIds.length);
+		const firstBatch = orderedIds.slice(0, RECOVERY_IO_CONCURRENCY);
+		const metadataPath = (artifactId: string): string => path.join(artifactDir(SID, artifactId), "artifact.json");
+
+		// Every failure shape is isolated inside the first batch. The two exact
+		// candidates establish that completion order cannot replace enumeration
+		// order as the reuse contract.
+		memoryFs.writeFileSync(metadataPath(firstBatch[0]!), "{");
+		memoryFs.writeFileSync(metadataPath(firstBatch[1]!), JSON.stringify(candidateRecord(firstBatch[1]!, mounted, {
+			contentHash: "0".repeat(64),
+		})));
+		memoryFs.writeFileSync(metadataPath(firstBatch[2]!), JSON.stringify(candidateRecord("wrong_id", mounted)));
+		memoryFs.unlinkSync(metadataPath(firstBatch[3]!));
+		memoryFs.writeFileSync(metadataPath(firstBatch[4]!), JSON.stringify(candidateRecord(firstBatch[4]!, mounted)));
+		memoryFs.writeFileSync(metadataPath(firstBatch[5]!), JSON.stringify(candidateRecord(firstBatch[5]!, mounted)));
+
+		const gates = new Map(orderedIds.map(artifactId => [artifactId, deferred()]));
+		const metadataStarted: string[] = [];
+		const metadataFinished: string[] = [];
+		let activeMetadataReads = 0;
+		let maximumMetadataReads = 0;
+		let sessionDirectoryReads = 0;
+		const sessionDir = path.resolve(path.join(artifactRoot, SID));
+		const heldFs: PreviewAsyncFs = {
+			...baseAsyncFs,
+			opendir: async filePath => {
+				const directory = await baseAsyncFs.opendir(filePath);
+				if (path.resolve(String(filePath)) !== sessionDir) return directory;
+				return {
+					read: async () => {
+						sessionDirectoryReads++;
+						return directory.read();
+					},
+					close: () => directory.close(),
+				} as fs.Dir;
+			},
+			lstat: async filePath => {
+				const absolute = path.resolve(String(filePath));
+				if (path.basename(absolute) !== "artifact.json" || !absolute.startsWith(`${sessionDir}${path.sep}`)) {
+					return baseAsyncFs.lstat(filePath);
+				}
+				const artifactId = path.basename(path.dirname(absolute));
+				if (metadataStarted.includes(artifactId)) return baseAsyncFs.lstat(filePath);
+				const gate = gates.get(artifactId);
+				assert.ok(gate, `unexpected metadata candidate ${artifactId}`);
+				metadataStarted.push(artifactId);
+				activeMetadataReads++;
+				maximumMetadataReads = Math.max(maximumMetadataReads, activeMetadataReads);
+				try {
+					await gate.promise;
+					return await baseAsyncFs.lstat(filePath);
+				} finally {
+					activeMetadataReads--;
+					metadataFinished.push(artifactId);
+				}
+			},
+		};
+		setPreviewArtifactFsForTesting(heldFs);
+		let scanSettled = false;
+		const scan = findPreviewArtifactByHash(SID, mounted.contentHash).finally(() => { scanSettled = true; });
+		try {
+			await waitUntil(() => metadataStarted.length === RECOVERY_IO_CONCURRENCY);
+			assert.equal(activeMetadataReads, RECOVERY_IO_CONCURRENCY);
+			assert.equal(maximumMetadataReads, RECOVERY_IO_CONCURRENCY);
+			assert.deepEqual(new Set(metadataStarted), new Set(firstBatch));
+			assert.equal(sessionDirectoryReads, RECOVERY_IO_CONCURRENCY, "the next batch must not be prefetched");
+
+			// Complete a later exact candidate before the earlier exact candidate,
+			// then all other later candidates before the first corrupt candidate.
+			for (const index of [5, 1, 2, 3, 6, 7, 4]) {
+				gates.get(firstBatch[index]!)!.resolve();
+				await waitUntil(() => metadataFinished.includes(firstBatch[index]!));
+			}
+			assert.ok(
+				metadataFinished.indexOf(firstBatch[5]!) < metadataFinished.indexOf(firstBatch[4]!),
+				"the later exact metadata must finish first for this ordering regression",
+			);
+			assert.equal(scanSettled, false);
+			assert.equal(metadataStarted.length, RECOVERY_IO_CONCURRENCY);
+			assert.equal(sessionDirectoryReads, RECOVERY_IO_CONCURRENCY);
+
+			gates.get(firstBatch[0]!)!.resolve();
+			const found = await scan;
+			assert.equal(found?.artifactId, firstBatch[4]);
+			assert.equal(metadataStarted.length, RECOVERY_IO_CONCURRENCY, "exact validation must not read the next batch");
+			assert.equal(sessionDirectoryReads, RECOVERY_IO_CONCURRENCY);
+			assert.ok(maximumMetadataReads <= RECOVERY_IO_CONCURRENCY);
+		} finally {
+			for (const gate of gates.values()) gate.resolve();
+			await scan.catch(() => undefined);
+			setPreviewArtifactFsForTesting(memoryFs);
+		}
 	});
 
 	it("rejects artifact metadata replaced by an external symlink before descriptor reads", async () => {

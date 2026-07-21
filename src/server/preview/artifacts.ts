@@ -12,6 +12,7 @@ import { StringDecoder } from "node:string_decoder";
 import { bobbitStateDir } from "../bobbit-dir.js";
 import {
 	hasStableFileIdentity,
+	mapWithConcurrency,
 	readRegularFileNoFollowInChunks,
 	RECOVERY_IO_CONCURRENCY,
 } from "../agent/bounded-async-work.js";
@@ -335,6 +336,10 @@ export async function sweepOrphanArtifacts(
 	return { removed: removed.sort(), kept: kept.sort() };
 }
 
+type PreviewArtifactReadOutcome =
+	| { ok: true; artifact: BoundPreviewArtifactRecord }
+	| { ok: false; error: unknown };
+
 /** Return the first valid matching artifact in filesystem enumeration order. */
 export async function findPreviewArtifactByHash(
 	sessionId: string,
@@ -352,27 +357,79 @@ export async function findPreviewArtifactByHash(
 		});
 		directory = await sessionBound.fs.opendir(sessionDir);
 	} catch { return null; }
+
+	const inspectBatch = async (artifactIds: readonly string[]): Promise<PreviewArtifactRecord | null> => {
+		await sessionBound.assertCurrent();
+		const outcomes = await mapWithConcurrency(
+			artifactIds,
+			RECOVERY_IO_CONCURRENCY,
+			async (artifactId): Promise<PreviewArtifactReadOutcome> => {
+				try {
+					await sessionBound.assertCurrent();
+					const artifact = await readPreviewArtifactWithFs(
+						sessionId,
+						artifactId,
+						artifactFs,
+						sessionBound,
+					);
+					await sessionBound.assertCurrent();
+					return { ok: true, artifact };
+				} catch (error) {
+					// One corrupt candidate must not reject the ordered batch. Recheck the
+					// shared parent on the error path too; the batch boundary assertion
+					// below will propagate a changed session root after every worker settles.
+					try {
+						await sessionBound.assertCurrent();
+					} catch (rootError) {
+						return { ok: false, error: rootError };
+					}
+					return { ok: false, error };
+				}
+			},
+		);
+		await sessionBound.assertCurrent();
+
+		// Metadata may finish out of order, but exact tree validation stays
+		// sequential. This preserves first-valid selection without prefetching the
+		// next directory batch while a matching candidate is being validated.
+		for (const outcome of outcomes) {
+			await sessionBound.assertCurrent();
+			if (!outcome.ok || outcome.artifact.record.contentHash !== contentHash) continue;
+			try {
+				await validateArtifactMount(
+					outcome.artifact.record,
+					artifactMountDir(sessionId, outcome.artifact.record.artifactId),
+					artifactFs,
+					outcome.artifact.bound,
+				);
+				await sessionBound.assertCurrent();
+				return outcome.artifact.record;
+			} catch {
+				// Corrupt/mismatched entries are not reusable; leave them for maintenance.
+				// Reasserting the shared parent distinguishes candidate corruption from a
+				// stale session-root claim, which must abort the scan.
+				await sessionBound.assertCurrent();
+			}
+		}
+		return null;
+	};
+
 	try {
+		let artifactIds: string[] = [];
 		for (;;) {
 			await sessionBound.assertCurrent();
 			const ent = await directory.read();
 			await sessionBound.assertCurrent();
 			if (!ent) break;
 			if (!VALID_ARTIFACT_ID.test(ent.name)) continue;
-			try {
-				const artifact = await readPreviewArtifactWithFs(sessionId, ent.name, artifactFs, sessionBound);
-				if (artifact.record.contentHash !== contentHash) continue;
-				await validateArtifactMount(
-					artifact.record,
-					artifactMountDir(sessionId, artifact.record.artifactId),
-					artifactFs,
-					artifact.bound,
-				);
-				return artifact.record;
-			} catch {
-				// Corrupt/mismatched entries are not reusable; leave them for maintenance.
-			}
+			artifactIds.push(ent.name);
+			if (artifactIds.length < RECOVERY_IO_CONCURRENCY) continue;
+			const batch = artifactIds;
+			artifactIds = [];
+			const exact = await inspectBatch(batch);
+			if (exact) return exact;
 		}
+		if (artifactIds.length > 0) return await inspectBatch(artifactIds);
 		return null;
 	} finally {
 		try { await directory.close(); } catch { /* read failure may close the handle */ }

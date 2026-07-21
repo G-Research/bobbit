@@ -11178,7 +11178,7 @@
       "bucket": "v2-core",
       "method": "codemod",
       "replacement": [],
-      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks).",
+      "rationale": "Vitest preview-artifact logic suite, including deterministic deferred metadata batches that prove the shared eight-operation ceiling, bounded directory read-ahead, ordered first-valid reuse despite out-of-order completion, and corrupt/mismatched/missing candidate isolation.",
       "migrated": true,
       "v2Path": "tests2/core/preview-artifacts.test.ts",
       "execution": {
