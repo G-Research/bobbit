@@ -84,6 +84,13 @@ export interface SweepRecord {
 	repoWorktrees?: Record<string, string>;
 }
 
+export interface SweepOwnership {
+	goals: readonly SweepRecord[];
+	sessions: readonly SweepRecord[];
+	teams?: readonly SweepRecord[];
+	staff: readonly SweepRecord[];
+}
+
 export interface SweepResult {
 	reclaimed: number;
 	cleaned: number;
@@ -105,6 +112,74 @@ interface SweepRepo {
 interface SweptWorktree extends ParsedWorktree {
 	repoPath: string;
 	resolvedWorktreeRoot: string;
+}
+
+interface OwnershipGuards {
+	ownedBranches: Set<string>;
+	ownedPaths: Set<string>;
+	archivedBranches: Set<string>;
+	teamContainerPaths: Set<string>;
+	branchToExpectedPath: Map<string, string>;
+	allRecords: SweepRecord[];
+}
+
+function buildOwnershipGuards(ownership: SweepOwnership): OwnershipGuards {
+	const ownedBranches = new Set<string>();
+	const ownedPaths = new Set<string>();
+	const archivedBranches = new Set<string>();
+	const teamContainerPaths = new Set<string>();
+	const branchToExpectedPath = new Map<string, string>();
+	const teamRecords = (ownership.teams ?? []).map(rec => ({ ...rec, archived: false }));
+	const teamIds = new Set(teamRecords.map(rec => rec.id));
+	const allRecords = [...ownership.goals, ...ownership.sessions, ...teamRecords, ...ownership.staff];
+	for (const rec of allRecords) {
+		if (rec.archived) {
+			if (rec.branch) archivedBranches.add(rec.branch);
+			continue;
+		}
+		if (rec.branch) ownedBranches.add(rec.branch);
+		const normalizedPath = normalize(rec.worktreePath);
+		if (normalizedPath) ownedPaths.add(normalizedPath);
+		const cwd = normalize(rec.cwd);
+		if (cwd) ownedPaths.add(cwd);
+		if (rec.branch && rec.worktreePath) branchToExpectedPath.set(rec.branch, rec.worktreePath);
+		// Durable team-agent records store the branch container, not per-repo
+		// worktrees. Protect component worktrees underneath that container.
+		if (normalizedPath && !rec.repoWorktrees && teamIds.has(rec.id)) teamContainerPaths.add(normalizedPath);
+		if (rec.repoWorktrees) {
+			for (const worktreePath of Object.values(rec.repoWorktrees)) {
+				const normalizedWorktreePath = normalize(worktreePath);
+				if (normalizedWorktreePath) ownedPaths.add(normalizedWorktreePath);
+			}
+		}
+	}
+	return { ownedBranches, ownedPaths, archivedBranches, teamContainerPaths, branchToExpectedPath, allRecords };
+}
+
+function ownershipForWorktree(
+	worktreePath: string,
+	branch: string | undefined,
+	guards: OwnershipGuards,
+): { ownedByBranch: boolean; ownedByPath: boolean; expectedPath?: string } {
+	const normalizedPath = normalize(worktreePath);
+	const ownedByBranch = !!(branch && guards.ownedBranches.has(branch));
+	let ownedByPath = !!normalizedPath && (
+		guards.ownedPaths.has(normalizedPath)
+		|| isWorktreePathReferencedByLiveSession(worktreePath, guards.allRecords)
+	);
+	if (!ownedByPath && normalizedPath) {
+		for (const container of guards.teamContainerPaths) {
+			if (normalizedPath.startsWith(`${container}/`)) {
+				ownedByPath = true;
+				break;
+			}
+		}
+	}
+	return {
+		ownedByBranch,
+		ownedByPath,
+		expectedPath: branch ? guards.branchToExpectedPath.get(branch) : undefined,
+	};
 }
 
 /**
@@ -140,6 +215,11 @@ export async function sweepOrphanedWorktrees(opts: {
 	fs?: SweepFs;
 	/** Focused test seam; production always uses the shared cleanup helper. */
 	cleanupWorktreeImpl?: WorktreeCleanup;
+	/**
+	 * Return a fresh view of every durable owner. Called synchronously in the
+	 * uninterrupted turn immediately before each repair or cleanup mutation.
+	 */
+	getCurrentOwnership?: () => SweepOwnership;
 }): Promise<SweepResult> {
 	const commandRunner = opts.commandRunner ?? realCommandRunner;
 	const sweepFs = opts.fs ?? realRecoveryFs;
@@ -157,38 +237,18 @@ export async function sweepOrphanedWorktrees(opts: {
 	} : undefined;
 
 	try {
-		// Build the set of branches/paths owned by live records plus durable
-		// archived branch references that must survive orphan worktree cleanup.
-		const ownedBranches = new Set<string>();
-		const ownedPaths = new Set<string>();
-		const archivedBranches = new Set<string>();
-		const teamContainerPaths = new Set<string>();
-		const branchToExpectedPath = new Map<string, string>();
-		const teamRecords = (opts.teams ?? []).map(rec => ({ ...rec, archived: false }));
-		const allRecords = [...opts.goals, ...opts.sessions, ...teamRecords, ...opts.staff];
-		for (const rec of allRecords) {
-			if (rec.archived) {
-				if (rec.branch) archivedBranches.add(rec.branch);
-				continue;
-			}
-			if (rec.branch) ownedBranches.add(rec.branch);
-			const np = normalize(rec.worktreePath);
-			if (np) ownedPaths.add(np);
-			const cwd = normalize(rec.cwd);
-			if (cwd) ownedPaths.add(cwd);
-			if (rec.branch && rec.worktreePath) branchToExpectedPath.set(rec.branch, rec.worktreePath);
-			// Durable team-agent records store the branch container, not per-repo
-			// worktrees. Protect component worktrees underneath that container.
-			if (np && !rec.repoWorktrees && teamRecords.some(team => team.id === rec.id)) teamContainerPaths.add(np);
-			// Multi-repo: each per-repo worktree is separately owned. The branch is
-			// shared across repos so we only add to ownedPaths.
-			if (rec.repoWorktrees) {
-				for (const wp of Object.values(rec.repoWorktrees)) {
-					const n = normalize(wp);
-					if (n) ownedPaths.add(n);
-				}
-			}
-		}
+		// Keep the initial snapshot for deterministic candidate classification and
+		// counts. Mutable ownership is rebuilt again at each mutation boundary.
+		const initialOwnership: SweepOwnership = {
+			goals: opts.goals,
+			sessions: opts.sessions,
+			teams: opts.teams,
+			staff: opts.staff,
+		};
+		const initialGuards = buildOwnershipGuards(initialOwnership);
+		const currentOwnershipGuards = (): OwnershipGuards => buildOwnershipGuards(
+			opts.getCurrentOwnership ? opts.getCurrentOwnership() : initialOwnership,
+		);
 
 		// Resolve paths without walking upward. The caller supplies the actual Git
 		// root for subdirectory projects; every configured repo must have its own
@@ -272,29 +332,27 @@ export async function sweepOrphanedWorktrees(opts: {
 					continue;
 				}
 
-				const ownedByBranch = !!(branch && ownedBranches.has(branch));
-				let ownedByPath = ownedPaths.has(wtPathNorm)
-					|| isWorktreePathReferencedByLiveSession(wt.path, allRecords);
-				if (!ownedByPath) {
-					for (const container of teamContainerPaths) {
-						if (wtPathNorm.startsWith(`${container}/`)) {
-							ownedByPath = true;
-							break;
-						}
-					}
-				}
-
-				if (ownedByBranch || ownedByPath) {
+				const initialOwnershipState = ownershipForWorktree(wt.path, branch, initialGuards);
+				if (initialOwnershipState.ownedByBranch || initialOwnershipState.ownedByPath) {
 					// Explicit path ownership wins over flat-container drift detection for
 					// multi-repo worktrees and shared/live-session references.
-					if (ownedByPath) {
+					if (initialOwnershipState.ownedByPath) {
 						outcomes.push({ kind: "none" });
 						continue;
 					}
-					if (ownedByBranch && branch) {
-						const expected = branchToExpectedPath.get(branch);
+					if (initialOwnershipState.ownedByBranch && branch) {
+						const expected = initialOwnershipState.expectedPath;
 						if (expected && normalize(expected) !== wtPathNorm) {
 							try {
+								// A new path/repo/team owner, archive, or changed branch owner
+								// can appear while the async repo scan is pending. Rebuild every
+								// guard in the same turn that starts the repair mutation.
+								const currentGuards = currentOwnershipGuards();
+								const current = ownershipForWorktree(wt.path, branch, currentGuards);
+								if (current.ownedByPath || !current.ownedByBranch || !current.expectedPath || normalize(current.expectedPath) === wtPathNorm) {
+									outcomes.push({ kind: "none" });
+									continue;
+								}
 								await execGit(
 									["worktree", "repair", wt.path],
 									gitOptions(wt.repoPath, 15_000),
@@ -302,7 +360,7 @@ export async function sweepOrphanedWorktrees(opts: {
 								);
 								outcomes.push({ kind: "repaired" });
 							} catch {
-								// A live owner keeps the worktree even when repair fails.
+								// A live owner keeps the worktree even when revalidation or repair fails.
 								outcomes.push({ kind: "none" });
 							}
 							continue;
@@ -318,11 +376,20 @@ export async function sweepOrphanedWorktrees(opts: {
 				}
 
 				try {
+					// The scan intentionally starts from a stable snapshot, but cleanup
+					// authorization must be live: session creation remains available while
+					// this post-listen sweep yields on filesystem and Git work.
+					const currentGuards = currentOwnershipGuards();
+					const current = ownershipForWorktree(wt.path, branch, currentGuards);
+					if (current.ownedByBranch || current.ownedByPath) {
+						outcomes.push({ kind: "none" });
+						continue;
+					}
 					await cleanup(
 						wt.repoPath,
 						wt.path,
 						branch,
-						!archivedBranches.has(branch),
+						!initialGuards.archivedBranches.has(branch) && !currentGuards.archivedBranches.has(branch),
 						commandRunner,
 						opts.remotePolicy,
 					);
@@ -383,28 +450,7 @@ export function classifyWorktrees(opts: {
 	repair: ParsedWorktree[];
 } {
 	const all = parseGitWorktreeList(opts.porcelainStdout);
-	const ownedBranches = new Set<string>();
-	const ownedPaths = new Set<string>();
-	const teamContainerPaths = new Set<string>();
-	const branchToExpectedPath = new Map<string, string>();
-	const teamRecords = (opts.teams ?? []).map(rec => ({ ...rec, archived: false }));
-	const allRecords = [...opts.goals, ...opts.sessions, ...teamRecords, ...opts.staff];
-	for (const rec of allRecords) {
-		if (rec.archived) continue;
-		if (rec.branch) ownedBranches.add(rec.branch);
-		const np = normalize(rec.worktreePath);
-		if (np) ownedPaths.add(np);
-		const cwd = normalize(rec.cwd);
-		if (cwd) ownedPaths.add(cwd);
-		if (rec.branch && rec.worktreePath) branchToExpectedPath.set(rec.branch, rec.worktreePath);
-		if (np && !rec.repoWorktrees && teamRecords.some(team => team.id === rec.id)) teamContainerPaths.add(np);
-		if (rec.repoWorktrees) {
-			for (const wp of Object.values(rec.repoWorktrees)) {
-				const n = normalize(wp);
-				if (n) ownedPaths.add(n);
-			}
-		}
-	}
+	const guards = buildOwnershipGuards(opts);
 	const pool: ParsedWorktree[] = [];
 	const active: ParsedWorktree[] = [];
 	const orphan: ParsedWorktree[] = [];
@@ -417,19 +463,17 @@ export function classifyWorktrees(opts: {
 			pool.push(wt);
 			continue;
 		}
-		const ownedByBranch = !!(wt.branch && ownedBranches.has(wt.branch));
-		let ownedByPath = !!wtPathNorm && (ownedPaths.has(wtPathNorm) || isWorktreePathReferencedByLiveSession(wt.path, allRecords));
-		if (!ownedByPath && wtPathNorm) for (const container of teamContainerPaths) if (wtPathNorm.startsWith(`${container}/`)) { ownedByPath = true; break; }
-		if (ownedByBranch || ownedByPath) {
+		const ownership = ownershipForWorktree(wt.path, wt.branch, guards);
+		if (ownership.ownedByBranch || ownership.ownedByPath) {
 			// Multi-repo: a per-repo path explicitly listed in any record's
 			// `repoWorktrees` map is active even if it differs from the record's
 			// flat `worktreePath` (which holds the container in multi-repo mode).
-			if (ownedByPath) {
+			if (ownership.ownedByPath) {
 				active.push(wt);
 				continue;
 			}
-			if (ownedByBranch && wt.branch) {
-				const expected = branchToExpectedPath.get(wt.branch);
+			if (ownership.ownedByBranch && wt.branch) {
+				const expected = ownership.expectedPath;
 				if (expected && normalize(expected) !== wtPathNorm) {
 					repair.push(wt);
 					continue;

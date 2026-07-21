@@ -257,6 +257,63 @@ describe("worktree-sweeper — bounded asynchronous sweep", () => {
 		assert.ok(maxActive <= RECOVERY_IO_CONCURRENCY);
 	});
 
+	it("revalidates ownership acquired after the initial snapshot before cleanup", async () => {
+		const repo = path.resolve("virtual-live-owner", "repo");
+		const worktreePath = path.resolve("virtual-live-owner-wt", "new-session");
+		const branch = "session/new-live-owner";
+		const listingStarted = new Deferred();
+		const releaseListing = new Deferred();
+		const cleanupCalls: string[] = [];
+		let ownershipReads = 0;
+		const currentSessions: Array<{
+			id: string;
+			branch?: string;
+			worktreePath?: string;
+			repoWorktrees?: Record<string, string>;
+		}> = [];
+		const runner: CommandRunner = {
+			async execFile(file, args) {
+				assert.equal(file, "git");
+				if (args[0] === "worktree" && args[1] === "list") {
+					listingStarted.resolve();
+					await releaseListing.promise;
+					return {
+						stdout: [porcelainWorktree(repo, "master"), porcelainWorktree(worktreePath, branch)].join("\n"),
+						stderr: "",
+					};
+				}
+				return { stdout: "", stderr: "" };
+			},
+		};
+
+		const sweep = sweepOrphanedWorktrees({
+			projects: [{ id: "project", rootPath: repo }],
+			goals: [],
+			sessions: [],
+			staff: [],
+			fs: { access: async () => {} },
+			commandRunner: runner,
+			getCurrentOwnership: () => {
+				ownershipReads++;
+				return { goals: [], sessions: currentSessions, teams: [], staff: [] };
+			},
+			cleanupWorktreeImpl: async (_repoPath, candidatePath) => { cleanupCalls.push(candidatePath); },
+		});
+
+		await listingStarted.promise;
+		currentSessions.push({
+			id: "new-session",
+			branch,
+			worktreePath,
+			repoWorktrees: { app: worktreePath },
+		});
+		releaseListing.resolve();
+
+		assert.deepEqual(await sweep, { reclaimed: 0, cleaned: 0, repaired: 0 });
+		assert.equal(ownershipReads, 1, "the destructive candidate must read current visible-store ownership");
+		assert.deepEqual(cleanupCalls, [], "a worktree claimed after the initial snapshot must never be deleted");
+	});
+
 	it("bounds cleanup across repos while keeping each repo sequential", async () => {
 		const roots = Array.from(
 			{ length: RECOVERY_IO_CONCURRENCY * 2 + 1 },
