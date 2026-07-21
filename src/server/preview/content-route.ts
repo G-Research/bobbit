@@ -17,7 +17,7 @@
 import fs from "node:fs";
 import type http from "node:http";
 
-import { mountPath, readMountDirectory } from "./mount.js";
+import { acquirePreviewDirectoryRead, isPreviewDirectoryAvailable, mountPath, readMountDirectory } from "./mount.js";
 import { artifactMountDir } from "./artifacts.js";
 import { resolveAssetPath } from "./path-guard.js";
 import { mimeTypeFor } from "./mime.js";
@@ -142,6 +142,13 @@ export async function handlePreviewRequest(
 		rel = artRel;
 	}
 
+	// Whole-root installs fence the exact destination through post-rename
+	// identity verification. Fail closed while that fence is active.
+	if (!isPreviewDirectoryAvailable(baseDir)) {
+		send(res, 404, JSON.stringify({ error: "Preview mount is not available" }));
+		return true;
+	}
+
 	// `/preview/<sid>` → 301 redirect to add trailing slash so relative URLs resolve.
 	if (slashIdx < 0) {
 		res.writeHead(301, { Location: `/preview/${sid}/`, "Cache-Control": "no-store" });
@@ -149,13 +156,23 @@ export async function handlePreviewRequest(
 		return true;
 	}
 
-	// `/preview/<sid>/` → pick entry and 302.
+	const releaseRead = acquirePreviewDirectoryRead(baseDir);
+	if (!releaseRead) {
+		send(res, 404, JSON.stringify({ error: "Preview mount is not available" }));
+		return true;
+	}
+	try {
+		// `/preview/<sid>/` → pick entry and 302.
 	if (rel === "") {
 		if (!fs.existsSync(baseDir)) {
 			send(res, 404, JSON.stringify({ error: "Preview mount not found" }));
 			return true;
 		}
 		const entry = await pickEntry(baseDir);
+		if (!isPreviewDirectoryAvailable(baseDir)) {
+			send(res, 404, JSON.stringify({ error: "Preview mount is not available" }));
+			return true;
+		}
 		if (!entry) {
 			send(res, 404, JSON.stringify({ error: "Preview mount is empty" }));
 			return true;
@@ -235,4 +252,7 @@ export async function handlePreviewRequest(
 		stream.on("error", () => resolve());
 	});
 	return true;
+	} finally {
+		releaseRead();
+	}
 }
