@@ -171,6 +171,7 @@ const ROOT_SPECS: RootSpec[] = [
 		"put",
 		"get",
 		"remove",
+		"decide",
 		"listForGoal",
 		"pruneExpired",
 	].map((name) => ({

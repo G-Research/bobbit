@@ -37,6 +37,10 @@ export interface PendingMutation {
 	expiresAt: number;
 }
 
+export type PlanMutationDecisionResult<T> =
+	| { found: true; value: T }
+	| { found: false };
+
 /** 24h TTL — see SUBGOALS-SPEC §3.6. */
 export const DEFAULT_MUTATION_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -219,6 +223,29 @@ export class PlanMutationStore {
 			list.splice(idx, 1);
 			await this.writeFile(goalId, list);
 			return true;
+		});
+	}
+
+	/**
+	 * Atomically decide one pending request for a goal. The per-goal mutation
+	 * queue remains held while `decision` runs, so no competing decision can
+	 * read or remove the same request. The request is removed only after the
+	 * callback resolves; a rejected callback leaves it pending for retry.
+	 */
+	decide<T>(
+		goalId: string,
+		requestId: string,
+		decision: (pending: PendingMutation) => Promise<T>,
+	): Promise<PlanMutationDecisionResult<T>> {
+		return this.mutateGoal(goalId, async () => {
+			const list = await this.readFile(goalId);
+			const idx = list.findIndex(m => m.requestId === requestId);
+			if (idx < 0) return { found: false } as const;
+
+			const value = await decision(list[idx]);
+			list.splice(idx, 1);
+			await this.writeFile(goalId, list);
+			return { found: true, value } as const;
 		});
 	}
 

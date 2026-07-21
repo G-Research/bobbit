@@ -459,3 +459,241 @@ describe("Pre/post-freeze: PATCH /plan classifies only after goal-plan freeze", 
 		assert.deepEqual(verify.map((v: any) => v.subgoal.planId), ["a"]);
 	});
 });
+
+/**
+ * Decision requests hold the PlanMutationStore's per-goal queue through plan
+ * application and replan bookkeeping. Deferred goal persistence makes the
+ * losing request overlap the winner without relying on timing benchmarks.
+ */
+describe("mutation decision serialization", () => {
+	const TEAM_LEAD = "tl-mutation-decision";
+
+	interface Deferred {
+		promise: Promise<void>;
+		resolve(): void;
+	}
+
+	function deferred(): Deferred {
+		let resolve!: () => void;
+		const promise = new Promise<void>(res => { resolve = res; });
+		return { promise, resolve };
+	}
+
+	async function nextTurn(): Promise<void> {
+		await new Promise<void>(resolve => setImmediate(resolve));
+	}
+
+	async function makeDecisionHarness(
+		onReplan?: (attempt: number) => Promise<void>,
+	): Promise<{
+		goal: any;
+		store: PlanMutationStore;
+		events: any[];
+		planApplyCalls(): number;
+		replanCalls(): number;
+		call(decision: "approve" | "reject"): Promise<{ status: number; body: any }>;
+	}> {
+		const goalId = `g-decision-${randomUUID().slice(0, 8)}`;
+		const requestId = `r-${randomUUID().slice(0, 8)}`;
+		const goal: any = {
+			id: goalId,
+			rootGoalId: goalId,
+			replanCount: 0,
+			paused: false,
+			workflow: {
+				id: "parent",
+				gates: [{
+					id: "execution",
+					verify: [{
+						name: "t-a",
+						type: "subgoal",
+						phase: 1,
+						subgoal: { planId: "a", title: "t-a", spec: "spec-a" },
+					}],
+				}],
+			},
+		};
+		const store = makePlanMutationStore();
+		await store.put({
+			goalId,
+			requestId,
+			kind: "expansion",
+			proposedSteps: [step("a", 1), step("b", 2)],
+			summary: "expansion pending",
+			diff: { added: ["b"], removed: [], modified: [], phaseChanges: [] },
+			createdAt: Date.now(),
+			expiresAt: Date.now() + DEFAULT_MUTATION_TTL_MS,
+		});
+
+		let planApplyCalls = 0;
+		let replanCalls = 0;
+		const goalManager: any = {
+			getGoalStore: () => ({
+				update: (_id: string, partial: any) => {
+					planApplyCalls++;
+					Object.assign(goal, partial);
+				},
+			}),
+			updateGoal: async (_id: string, partial: any) => {
+				replanCalls++;
+				await onReplan?.(replanCalls);
+				Object.assign(goal, partial);
+			},
+		};
+		const events: any[] = [];
+		const ctx: any = { planMutationStore: store, goalManager };
+
+		async function call(decision: "approve" | "reject"): Promise<{ status: number; body: any }> {
+			let response: { status: number; body: any } | undefined;
+			const deps: any = {
+				projectContextManager: { getContextForGoal: () => ctx },
+				verificationHarness: {},
+				teamManager: { getTeamState: () => ({ teamLeadSessionId: TEAM_LEAD }) },
+				sessionManager: { sessionSecretStore: identitySecretStore },
+				cookieStore: unauthenticatedCookieStore,
+				requireSubgoalsEnabled: () => true,
+				getGoalAcrossProjects: () => goal,
+				getGoalManagerForGoal: () => goalManager,
+				readBody: async () => ({ decision }),
+				json: (body: any, status = 200) => { response = { body, status }; },
+				jsonError: (status: number, err: unknown) => {
+					response = { status, body: { error: String((err as Error)?.message ?? err) } };
+				},
+				broadcastToAll: (event: any) => { events.push(event); },
+				getSubgoalNestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 3 }),
+			};
+			const req: any = {
+				method: "POST",
+				headers: {
+					"x-bobbit-spawning-session": TEAM_LEAD,
+					"x-bobbit-session-secret": TEAM_LEAD,
+				},
+			};
+			const handled = await tryHandleNestedGoalRoute(
+				req,
+				new URL(`http://x/api/goals/${goalId}/mutation/${requestId}/decision`),
+				deps,
+			);
+			assert.equal(handled, true);
+			assert.ok(response);
+			return response;
+		}
+
+		return {
+			goal,
+			store,
+			events,
+			planApplyCalls: () => planApplyCalls,
+			replanCalls: () => replanCalls,
+			call,
+		};
+	}
+
+	it("approve holds the decision lock so a concurrent reject loses with REQUEST_NOT_FOUND", async () => {
+		const applyEntered = deferred();
+		const releaseApply = deferred();
+		const h = await makeDecisionHarness(async attempt => {
+			if (attempt === 1) {
+				applyEntered.resolve();
+				await releaseApply.promise;
+			}
+		});
+
+		const approve = h.call("approve");
+		await applyEntered.promise;
+		let rejectSettled = false;
+		const reject = h.call("reject").then(result => {
+			rejectSettled = true;
+			return result;
+		});
+		await nextTurn();
+		assert.equal(rejectSettled, false, "reject must wait for the active apply decision");
+		assert.equal(h.planApplyCalls(), 1);
+		assert.equal(h.replanCalls(), 1);
+
+		releaseApply.resolve();
+		assert.deepEqual(await approve, {
+			status: 200,
+			body: { applied: true, replanCount: 1, autoPaused: false },
+		});
+		assert.deepEqual(await reject, {
+			status: 404,
+			body: { error: "Mutation request not found", code: "REQUEST_NOT_FOUND" },
+		});
+		assert.deepEqual(await h.store.listForGoal(h.goal.id), []);
+		assert.equal(h.events.filter(e => e.type === "mutation_decided").length, 1);
+		assert.equal(h.events.find(e => e.type === "mutation_decided")?.decision, "approve");
+	});
+
+	it("double approve applies and increments the replan count exactly once", async () => {
+		const applyEntered = deferred();
+		const releaseApply = deferred();
+		const h = await makeDecisionHarness(async attempt => {
+			if (attempt === 1) {
+				applyEntered.resolve();
+				await releaseApply.promise;
+			}
+		});
+
+		const first = h.call("approve");
+		await applyEntered.promise;
+		let secondSettled = false;
+		const second = h.call("approve").then(result => {
+			secondSettled = true;
+			return result;
+		});
+		await nextTurn();
+		assert.equal(secondSettled, false, "second approve must wait for the active decision");
+		assert.equal(h.planApplyCalls(), 1, "only the lock winner may apply the plan");
+		assert.equal(h.replanCalls(), 1);
+
+		releaseApply.resolve();
+		assert.deepEqual(await first, {
+			status: 200,
+			body: { applied: true, replanCount: 1, autoPaused: false },
+		});
+		assert.deepEqual(await second, {
+			status: 404,
+			body: { error: "Mutation request not found", code: "REQUEST_NOT_FOUND" },
+		});
+		assert.equal(h.planApplyCalls(), 1);
+		assert.equal(h.replanCalls(), 1);
+		assert.equal(h.goal.replanCount, 1);
+		assert.equal(h.events.filter(e => e.type === "mutation_decided").length, 1);
+	});
+
+	it("a failed apply keeps the request pending for a successful retry", async () => {
+		const applyEntered = deferred();
+		const releaseFailure = deferred();
+		const h = await makeDecisionHarness(async attempt => {
+			if (attempt === 1) {
+				applyEntered.resolve();
+				await releaseFailure.promise;
+				throw new Error("deferred apply failure");
+			}
+		});
+
+		let failedSettled = false;
+		const failed = h.call("approve").then(result => {
+			failedSettled = true;
+			return result;
+		});
+		await applyEntered.promise;
+		await nextTurn();
+		assert.equal(failedSettled, false);
+		releaseFailure.resolve();
+		assert.equal((await failed).status, 500);
+		assert.ok((await h.store.listForGoal(h.goal.id))[0], "failed decision must remain pending");
+		assert.equal(h.events.filter(e => e.type === "mutation_decided").length, 0);
+
+		assert.deepEqual(await h.call("approve"), {
+			status: 200,
+			body: { applied: true, replanCount: 1, autoPaused: false },
+		});
+		assert.deepEqual(await h.store.listForGoal(h.goal.id), []);
+		assert.equal(h.planApplyCalls(), 2, "retry reapplies the idempotent plan replacement");
+		assert.equal(h.replanCalls(), 2);
+		assert.equal(h.goal.replanCount, 1);
+		assert.equal(h.events.filter(e => e.type === "mutation_decided").length, 1);
+	});
+});
