@@ -8,6 +8,7 @@
 import { beforeEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
+import type { Dirent } from "node:fs";
 
 import {
 	PlanMutationStore,
@@ -27,8 +28,27 @@ function makeStore(): PlanMutationStore {
 	return new PlanMutationStore(stateDir, { startSweep: false }, memfs);
 }
 
+function installStreamingOpendir(filesystem: MemFs): void {
+	(filesystem.promises as any).opendir = async (dirPath: string) => {
+		const entries = await filesystem.promises.readdir(dirPath, { withFileTypes: true }) as unknown as Dirent[];
+		let cursor = 0;
+		let closed = false;
+		return {
+			async read(): Promise<Dirent | null> {
+				assert.equal(closed, false, "cannot read a closed fake directory");
+				return entries[cursor++] ?? null;
+			},
+			async close(): Promise<void> {
+				assert.equal(closed, false, "fake directory is closed exactly once");
+				closed = true;
+			},
+		};
+	};
+}
+
 beforeEach(() => {
 	memfs = createMemFs();
+	installStreamingOpendir(memfs);
 	memfs.mkdirSync(stateDir);
 });
 
@@ -219,13 +239,13 @@ describe("PlanMutationStore", () => {
 
 	it("lets the event loop progress while prune directory I/O is pending", async () => {
 		const store = makeStore();
-		const readdirGate = deferred<void>();
-		const originalReaddir = memfs.promises.readdir.bind(memfs.promises) as any;
+		const opendirGate = deferred<void>();
+		const originalOpendir = (memfs.promises as any).opendir.bind(memfs.promises);
 		let ioStarted = false;
-		(memfs.promises as any).readdir = async (...args: any[]) => {
+		(memfs.promises as any).opendir = async (...args: any[]) => {
 			ioStarted = true;
-			await readdirGate.promise;
-			return originalReaddir(...args);
+			await opendirGate.promise;
+			return originalOpendir(...args);
 		};
 
 		let pruneSettled = false;
@@ -246,7 +266,7 @@ describe("PlanMutationStore", () => {
 		assert.equal(immediateRan, true);
 		assert.equal(pruneSettled, false, "prune must remain pending until fake I/O is released");
 
-		readdirGate.resolve(undefined);
+		opendirGate.resolve(undefined);
 		assert.equal(await pruning, 0);
 	});
 
@@ -296,13 +316,32 @@ describe("PlanMutationStore", () => {
 		assert.deepEqual((await store.listForGoal("g1")).map((entry) => entry.requestId), ["r1", "r2", "r3"]);
 	});
 
-	it("bounds cross-goal prune reads by PLAN_MUTATION_PRUNE_CONCURRENCY", async () => {
+	it("streams a wide prune directory with bounded read-ahead and an exact removed count", async () => {
 		const store = makeStore();
 		const now = Date.now();
 		const goalCount = PLAN_MUTATION_PRUNE_CONCURRENCY * 2 + 1;
 		await Promise.all(Array.from({ length: goalCount }, (_, index) =>
 			store.put(makeMutation(`g${index}`, `r${index}`, { expiresAt: now - 1 })),
 		));
+
+		const originalOpendir = (memfs.promises as any).opendir.bind(memfs.promises);
+		let streamedEntries = 0;
+		let completedReads = 0;
+		let maxReadAhead = 0;
+		(memfs.promises as any).opendir = async (...args: any[]) => {
+			const directory = await originalOpendir(...args);
+			return {
+				async read(): Promise<Dirent | null> {
+					const entry = await directory.read();
+					if (entry) {
+						streamedEntries++;
+						maxReadAhead = Math.max(maxReadAhead, streamedEntries - completedReads);
+					}
+					return entry;
+				},
+				close: () => directory.close(),
+			};
+		};
 
 		const originalReadFile = memfs.promises.readFile.bind(memfs.promises) as any;
 		const readGates: Deferred<void>[] = [];
@@ -318,6 +357,7 @@ describe("PlanMutationStore", () => {
 				return await originalReadFile(...args);
 			} finally {
 				activeReads--;
+				completedReads++;
 			}
 		};
 
@@ -326,6 +366,7 @@ describe("PlanMutationStore", () => {
 			() => readGates.length === PLAN_MUTATION_PRUNE_CONCURRENCY,
 			"prune workers did not fill the exported concurrency ceiling",
 		);
+		assert.equal(streamedEntries, PLAN_MUTATION_PRUNE_CONCURRENCY, "the scanner must stop reading while its bounded batch is pending");
 		assert.equal(activeReads, PLAN_MUTATION_PRUNE_CONCURRENCY);
 		assert.equal(maxActiveReads, PLAN_MUTATION_PRUNE_CONCURRENCY);
 
@@ -337,40 +378,76 @@ describe("PlanMutationStore", () => {
 			released = end;
 		}
 		assert.equal(await pruning, goalCount);
+		assert.equal(streamedEntries, goalCount, "each directory entry is consumed exactly once");
 		assert.equal(readGates.length, goalCount, "each goal file is read exactly once");
+		assert.equal(maxReadAhead, PLAN_MUTATION_PRUNE_CONCURRENCY);
 		assert.equal(maxActiveReads, PLAN_MUTATION_PRUNE_CONCURRENCY);
 		assert.equal(activeReads, 0);
 
 		(memfs.promises as any).readFile = originalReadFile;
+		(memfs.promises as any).opendir = originalOpendir;
 		assert.equal(await store.pruneExpired(now), 0, "all expired entries were removed exactly once");
+	});
+
+	it("cooperatively yields while streaming a wide directory of ignored entries", async () => {
+		const store = makeStore();
+		const entryCount = 1_024;
+		let entriesRead = 0;
+		let goalReads = 0;
+		let closed = false;
+		(memfs.promises as any).readFile = async () => {
+			goalReads++;
+			throw new Error("ignored entries must not be opened");
+		};
+		(memfs.promises as any).opendir = async () => ({
+			async read(): Promise<Dirent | null> {
+				if (entriesRead === entryCount) return null;
+				return { name: `ignored-${entriesRead++}.txt` } as Dirent;
+			},
+			async close(): Promise<void> { closed = true; },
+		});
+
+		let settled = false;
+		const pruning = store.pruneExpired().then(count => {
+			settled = true;
+			return count;
+		});
+		await new Promise<void>(resolve => setImmediate(resolve));
+
+		assert.equal(settled, false, "a wide scan must yield before consuming the whole directory");
+		assert.ok(entriesRead > 0 && entriesRead < entryCount);
+		assert.equal(await pruning, 0);
+		assert.equal(entriesRead, entryCount);
+		assert.equal(goalReads, 0, "only .json filenames are prune candidates");
+		assert.equal(closed, true);
 	});
 
 	it("coalesces two overlapping scheduled ticks into one prune run", async () => {
 		const timer = manualSweepClock();
-		const readdirGate = deferred<void>();
-		const originalReaddir = memfs.promises.readdir.bind(memfs.promises) as any;
-		let readdirCalls = 0;
-		(memfs.promises as any).readdir = async (...args: any[]) => {
-			readdirCalls++;
-			if (readdirCalls === 1) await readdirGate.promise;
-			return originalReaddir(...args);
+		const opendirGate = deferred<void>();
+		const originalOpendir = (memfs.promises as any).opendir.bind(memfs.promises);
+		let opendirCalls = 0;
+		(memfs.promises as any).opendir = async (...args: any[]) => {
+			opendirCalls++;
+			if (opendirCalls === 1) await opendirGate.promise;
+			return originalOpendir(...args);
 		};
 		const store = new PlanMutationStore(stateDir, undefined, memfs, timer.clock);
-		assert.equal(readdirCalls, 0, "constructing the timer must not run a startup prune");
+		assert.equal(opendirCalls, 0, "constructing the timer must not run a startup prune");
 		assert.equal(timer.unrefCalls, 1);
 
 		timer.fire();
 		const firstRun = (store as any).sweepRun as Promise<number>;
 		timer.fire();
-		assert.equal(readdirCalls, 1, "overlapping ticks must share one prune");
+		assert.equal(opendirCalls, 1, "overlapping ticks must share one prune");
 		assert.strictEqual((store as any).sweepRun, firstRun);
 
-		readdirGate.resolve(undefined);
+		opendirGate.resolve(undefined);
 		assert.equal(await firstRun, 0);
 		await Promise.resolve();
 		timer.fire();
 		const laterRun = (store as any).sweepRun as Promise<number>;
-		assert.equal(readdirCalls, 2, "a later tick may run after the first settles");
+		assert.equal(opendirCalls, 2, "a later tick may run after the first settles");
 		assert.equal(await laterRun, 0);
 		await store.stopSweep();
 		assert.equal(timer.clearCalls, 1);
@@ -378,18 +455,18 @@ describe("PlanMutationStore", () => {
 
 	it("stopSweep clears future ticks and waits for the in-flight scheduled run", async () => {
 		const timer = manualSweepClock();
-		const readdirGate = deferred<void>();
-		const originalReaddir = memfs.promises.readdir.bind(memfs.promises) as any;
-		let readdirCalls = 0;
-		(memfs.promises as any).readdir = async (...args: any[]) => {
-			readdirCalls++;
-			await readdirGate.promise;
-			return originalReaddir(...args);
+		const opendirGate = deferred<void>();
+		const originalOpendir = (memfs.promises as any).opendir.bind(memfs.promises);
+		let opendirCalls = 0;
+		(memfs.promises as any).opendir = async (...args: any[]) => {
+			opendirCalls++;
+			await opendirGate.promise;
+			return originalOpendir(...args);
 		};
 		const store = new PlanMutationStore(stateDir, { sweepIntervalMs: 1234 }, memfs, timer.clock);
 		assert.equal(timer.intervalMs, 1234);
 		timer.fire();
-		assert.equal(readdirCalls, 1);
+		assert.equal(opendirCalls, 1);
 
 		let stopSettled = false;
 		const stopping = store.stopSweep().then(() => { stopSettled = true; });
@@ -397,7 +474,7 @@ describe("PlanMutationStore", () => {
 		await new Promise<void>((resolve) => setImmediate(resolve));
 		assert.equal(stopSettled, false, "stop must remain pending with the active prune");
 
-		readdirGate.resolve(undefined);
+		opendirGate.resolve(undefined);
 		await stopping;
 		assert.equal(stopSettled, true);
 		await store.stopSweep();
@@ -406,11 +483,11 @@ describe("PlanMutationStore", () => {
 
 	it("ignores an already-queued interval callback after stopSweep settles", async () => {
 		const timer = manualSweepClock();
-		let readdirCalls = 0;
-		const originalReaddir = memfs.promises.readdir.bind(memfs.promises) as any;
-		(memfs.promises as any).readdir = async (...args: any[]) => {
-			readdirCalls++;
-			return originalReaddir(...args);
+		let opendirCalls = 0;
+		const originalOpendir = (memfs.promises as any).opendir.bind(memfs.promises);
+		(memfs.promises as any).opendir = async (...args: any[]) => {
+			opendirCalls++;
+			return originalOpendir(...args);
 		};
 
 		const store = new PlanMutationStore(stateDir, undefined, memfs, timer.clock);
@@ -420,7 +497,7 @@ describe("PlanMutationStore", () => {
 
 		queuedBeforeClear();
 		await new Promise<void>((resolve) => setImmediate(resolve));
-		assert.equal(readdirCalls, 0, "a stale callback must not perform I/O after the shutdown barrier");
+		assert.equal(opendirCalls, 0, "a stale callback must not perform I/O after the shutdown barrier");
 		assert.equal((store as any).sweepRun, undefined);
 	});
 });

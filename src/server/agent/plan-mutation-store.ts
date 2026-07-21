@@ -21,6 +21,7 @@
 import type { Clock, FsLike } from "../gateway-deps.js";
 import { realClock, realFs } from "../gateway-deps.js";
 import path from "node:path";
+import type { Dirent } from "node:fs";
 import type { ClassifierPlanStep, ClassifyMutationDiff, MutationKind } from "./plan-mutation.js";
 
 export interface PendingMutation {
@@ -45,8 +46,23 @@ export const DEFAULT_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 /** Keep a wide mutation directory from issuing unbounded concurrent I/O. */
 export const PLAN_MUTATION_PRUNE_CONCURRENCY = 4;
 
+const PLAN_MUTATION_PRUNE_YIELD_INTERVAL = 256;
+
+interface PlanMutationDirectory {
+	read(): Promise<Dirent | null>;
+	close(): Promise<void>;
+}
+
+type PlanMutationAsyncFs = FsLike["promises"] & {
+	opendir(dirPath: string): Promise<PlanMutationDirectory>;
+};
+
 function isEnoent(err: unknown): boolean {
 	return !!err && typeof err === "object" && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT";
+}
+
+function yieldPruneTraversal(): Promise<void> {
+	return new Promise(resolve => setImmediate(resolve));
 }
 
 export class PlanMutationStore {
@@ -216,44 +232,62 @@ export class PlanMutationStore {
 	 * goals are logged and skipped.
 	 */
 	async pruneExpired(now: number = this.clock.now()): Promise<number> {
-		let entries: string[];
+		let directory: PlanMutationDirectory;
 		try {
-			entries = await this.fs.promises.readdir(this.dir) as string[];
+			directory = await (this.fs.promises as PlanMutationAsyncFs).opendir(this.dir);
 		} catch (err) {
 			if (!isEnoent(err)) console.warn("[plan-mutation-store] pruneExpired failed:", err);
 			return 0;
 		}
 
-		const goalIds = entries
-			.filter(name => name.endsWith(".json"))
-			.map(name => name.slice(0, -".json".length));
-		if (goalIds.length === 0) return 0;
+		let removedTotal = 0;
+		let entriesSinceYield = 0;
+		let exhausted = false;
+		try {
+			while (!exhausted) {
+				const goalIds: string[] = [];
+				while (goalIds.length < PLAN_MUTATION_PRUNE_CONCURRENCY) {
+					const entry = await directory.read();
+					if (entry === null) {
+						exhausted = true;
+						break;
+					}
 
-		const removedByGoal = new Array<number>(goalIds.length).fill(0);
-		let nextIndex = 0;
-		const worker = async (): Promise<void> => {
-			while (nextIndex < goalIds.length) {
-				const index = nextIndex++;
-				const goalId = goalIds[index];
-				try {
-					removedByGoal[index] = await this.mutateGoal(goalId, async () => {
-						const list = await this.readFile(goalId);
-						const kept = list.filter(m => m.expiresAt > now);
-						const removed = list.length - kept.length;
-						if (removed > 0) await this.writeFile(goalId, kept);
-						return removed;
-					});
-				} catch (err) {
-					console.warn(`[plan-mutation-store] Failed to prune mutations for ${goalId}:`, err);
+					entriesSinceYield++;
+					if (entry.name.endsWith(".json")) {
+						goalIds.push(entry.name.slice(0, -".json".length));
+					}
+					if (entriesSinceYield >= PLAN_MUTATION_PRUNE_YIELD_INTERVAL) {
+						entriesSinceYield = 0;
+						await yieldPruneTraversal();
+					}
 				}
-			}
-		};
 
-		const workers = Array.from(
-			{ length: Math.min(PLAN_MUTATION_PRUNE_CONCURRENCY, goalIds.length) },
-			() => worker(),
-		);
-		await Promise.all(workers);
-		return removedByGoal.reduce((total, count) => total + count, 0);
+				const removedBatch = await Promise.all(goalIds.map(async goalId => {
+					try {
+						return await this.mutateGoal(goalId, async () => {
+							const list = await this.readFile(goalId);
+							const kept = list.filter(m => m.expiresAt > now);
+							const removed = list.length - kept.length;
+							if (removed > 0) await this.writeFile(goalId, kept);
+							return removed;
+						});
+					} catch (err) {
+						console.warn(`[plan-mutation-store] Failed to prune mutations for ${goalId}:`, err);
+						return 0;
+					}
+				}));
+				for (const removed of removedBatch) removedTotal += removed;
+			}
+		} catch (err) {
+			if (!isEnoent(err)) console.warn("[plan-mutation-store] pruneExpired failed:", err);
+		} finally {
+			try {
+				await directory.close();
+			} catch (err) {
+				if (!isEnoent(err)) console.warn("[plan-mutation-store] Failed to close prune directory:", err);
+			}
+		}
+		return removedTotal;
 	}
 }
