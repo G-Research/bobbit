@@ -1092,9 +1092,25 @@
       {
         "file": "tests2/core/preview-canonical-root-races.test.ts",
         "name": "binds artifact metadata directories to the canonical artifact store before opening"
+      },
+      {
+        "file": "tests2/core/bounded-tree-parent-identity.test.ts",
+        "name": "rejects queued child work when the Dirent-producing parent is replaced"
+      },
+      {
+        "file": "tests2/core/bounded-tree-parent-identity.test.ts",
+        "name": "retains the producing-parent claim through copy queue overflow"
+      },
+      {
+        "file": "tests2/core/bounded-tree-parent-identity.test.ts",
+        "name": "rejects a replaced parent before preview hashing opens its child"
+      },
+      {
+        "file": "tests2/core/bounded-tree-parent-identity.test.ts",
+        "name": "does not open descendants after a visited directory's parent becomes a symlink"
       }
     ],
-    "rationale": "The bounded asynchronous owners preserve exact mounted bytes and metadata while proving content, traversed directories, canonical roots, opened file identities, and artifact metadata cannot be replaced or escaped before descriptor-anchored reads."
+    "rationale": "The bounded asynchronous owners preserve exact mounted bytes and metadata while proving content, traversed directories, their Dirent-producing parent identities, canonical roots, opened file identities, and artifact metadata cannot be replaced or escaped before descriptor-anchored reads, including queued and local-overflow work."
   },
   {
     "baseFile": "tests2/core/preview-artifacts.test.ts",
@@ -1148,9 +1164,17 @@
       {
         "file": "tests2/core/preview-root-identity-races.test.ts",
         "name": "expected root identity prevents native cleanup from opening a replacement directory"
+      },
+      {
+        "file": "tests2/core/bounded-tree-parent-identity.test.ts",
+        "name": "revalidates a nested frame after child lstat and before unlink"
+      },
+      {
+        "file": "tests2/core/bounded-tree-parent-identity.test.ts",
+        "name": "revalidates a closed nested frame before its final rmdir"
       }
     ],
-    "rationale": "The bounded asynchronous cleanup owners preserve idempotency and failure isolation while proving recursive deletion rejects both in-frame and root directory identity replacement."
+    "rationale": "The bounded asynchronous cleanup owners preserve idempotency and failure isolation while proving recursive deletion rejects root, in-frame, and producing-parent identity replacement before child unlink or final directory removal."
   },
   {
     "baseFile": "tests2/core/preview-artifacts.test.ts",
