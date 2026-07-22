@@ -50,6 +50,12 @@ process.env.BOBBIT_DIR = tmpRoot;
 const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
+const { initAuthorSidecarDir } = await import("../../src/server/agent/author-sidecar.ts");
+
+initAuthorSidecarDir(tmpRoot, {
+	secretsDir: path.join(tmpRoot, "private-secrets"),
+	hmacKey: Buffer.alloc(32, 0x45),
+});
 
 // ── Policy under test ──────────────────────────────────────────────────────
 
@@ -319,13 +325,16 @@ describe("SessionManager generic unexpected auto-retry policy", () => {
 	it("uses the pending timer to call the existing auto retry path after the first 1s generic retry", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout"] });
 		const manager = makeManager();
+		const baseText = "please retry this user request";
 		const { session, prompt } = putRetryStateSession(manager, {
-			lastPromptText: "please retry this user request",
+			lastPromptText: baseText,
 		});
 
 		manager.maybeAutoRetryTransient(session);
 
 		assert.ok(session.pendingAutoRetryTimer, "expected a pending auto-retry timer for generic unexpected errors");
+		assert.equal(session.transientRetryAttempts, 1, "the pending timer should retain the first retry attempt");
+		assert.equal(session.lastPromptText, baseText, "retry bookkeeping should retain the unprefixed base text");
 		vi.advanceTimersByTime(999);
 		assert.equal(prompt.mock.calls.length, 0, "auto retry should not fire before its 1s delay");
 
@@ -334,7 +343,15 @@ describe("SessionManager generic unexpected auto-retry policy", () => {
 		await Promise.resolve();
 
 		assert.equal(prompt.mock.calls.length, 1, "generic auto retry should dispatch through retryLastPrompt(..., { auto: true })");
-		assert.equal(prompt.mock.calls[0][0], "please retry this user request");
+		assert.equal(
+			prompt.mock.calls[0][0],
+			`[System]: ${baseText}`,
+			"the system-owned retry should prefix only the exact provider-facing text",
+		);
+		assert.equal(session.pendingAutoRetryTimer, undefined, "the fired auto-retry timer should be cleared");
+		assert.equal(session.transientRetryAttempts, 1, "the auto retry should preserve its bounded retry attempt state");
+		assert.equal(session.lastPromptText, baseText, "the provider prefix must not enter retry bookkeeping");
+		assert.equal(session.promptQueue.length, 0, "the provider prefix must not create a durable queue row");
 		assert.equal(session.lastTurnErrored, false, "retryLastPrompt should clear error state once the auto retry starts");
 		assert.equal(session.status, "streaming");
 	});
