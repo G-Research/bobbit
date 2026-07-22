@@ -152,9 +152,11 @@ Add `src/ui/message-author-presentation.ts` without app-state imports:
 
 ```ts
 export interface PromptAuthorDisplayMode {
-  showLabels: boolean;
-  distinctHumanIds: readonly string[];
+  readonly showLabels: boolean;
+  readonly distinctHumanIds: readonly string[];
 }
+
+export const NO_PROMPT_AUTHOR_LABELS: Readonly<PromptAuthorDisplayMode>;
 
 export function selectPromptAuthorDisplayMode(
   messages: readonly unknown[],
@@ -174,6 +176,7 @@ export function presentPromptAuthor(
 
 Selector rules:
 
+- `NO_PROMPT_AUTHOR_LABELS` is the frozen empty/all-human default used only before a transcript owner supplies a computed mode;
 - inspect only rows accepted by `isAccountablePromptMessage()`;
 - ignore missing/invalid authors via `isMessageAuthor()`;
 - `showLabels` is true if and only if at least one inspected prompt author is `agent` or `system`;
@@ -265,28 +268,51 @@ Those inputs select canonical colour pixels, `EYE_POSITIONS.center`, open eyes, 
 
 The avatar wrapper is decorative (`aria-hidden="true"`). The badge itself carries the semantic accessible name.
 
-### 5.3 Data flow through components
+### 5.3 One transcript-wide display mode
 
-`AgentInterface.renderMessages()` already computes the partially loaded `visibleMessages`. Add a stable callback that reads the current `appState.gatewaySessions`, `appState.archivedSessions`, `appState.staffList`, and the existing `sessionColorMap`, and pass it to `MessageList`:
+`AgentInterface.renderMessages()` already computes the partially loaded main `visibleMessages` and is the transcript owner above every inline pre-compaction slice. It, not an individual `MessageList`, owns the single prompt-author display mode for that rendered transcript.
+
+`AgentInterface` keeps a reactive, per-current-session map from `compactionId` to the hydrated messages in each currently loaded pre-compaction slice. A stable reporter passed down the component tree adds or replaces a slice after its first page or an older page loads, and removes it when those rows are cleared, the component disconnects, or the session changes. Collapsing an already loaded slice does not discard its `_rows`, so it remains part of the partially loaded history and mode until unmounted or cleared. The reporter includes the source `sessionId`; `AgentInterface` rejects late reports from a previous session and clears the map when the current session changes. Updating either the main `visibleMessages` array or any registered slice therefore recomputes:
+
+```ts
+const promptAuthorDisplayMode = selectPromptAuthorDisplayMode([
+  ...visibleMessages,
+  ...Array.from(preCompactionPromptAuthorSlices.values()).flat(),
+]);
+```
+
+Only hydrated rows actually fetched during this UI runtime belong to the pre-compaction union; a count probe alone contributes no messages. Loading or prepending rows can turn the shared mode on. Map updates replace the map rather than mutating it in place so Lit observes every slice change, while an unchanged re-render does not re-report the slice or loop updates.
+
+Add immutable properties/callbacks along this path:
 
 ```ts
 @property({ attribute: false })
+promptAuthorDisplayMode: PromptAuthorDisplayMode = NO_PROMPT_AUTHOR_LABELS;
+
+@property({ attribute: false })
 resolvePromptAuthorAppearance?: (author: unknown) => PromptAuthorAppearance;
+
+@property({ attribute: false })
+reportPromptAuthorSlice?: (
+  sessionId: string,
+  compactionId: string,
+  messages: readonly unknown[] | undefined,
+) => void;
 ```
 
-`MessageList.buildRenderItems()` computes `selectPromptAuthorDisplayMode(this.messages)` once. Only its existing user/user-with-attachments branch passes:
+`AgentInterface` passes the **same `PromptAuthorDisplayMode` object** plus its stable appearance resolver and slice reporter to the main `MessageList`. `MessageList` consumes that mode and never calls `selectPromptAuthorDisplayMode()` over its own rows. It forwards all three properties to every `bobbit-pre-compaction-history`; `PreCompactionHistory` reports its hydrated rows and passes the unchanged shared mode and appearance resolver to its nested `MessageList`.
+
+Only the existing user/user-with-attachments branch passes:
 
 ```ts
 <user-message
   .message=${msg}
-  .showAuthorLabel=${mode.showLabels && isAccountablePromptMessage(msg)}
+  .showAuthorLabel=${this.promptAuthorDisplayMode.showLabels && isAccountablePromptMessage(msg)}
   .authorAppearance=${this.resolvePromptAuthorAppearance?.(msg.author)}
 ></user-message>
 ```
 
-Assistant/tool/custom branches and user-role tool-result-only rows do not receive or render prompt-label state.
-
-Forward the same resolver through the `bobbit-pre-compaction-history` property and its nested `<message-list>` so an expanded archived slice can resolve loaded agent appearance. Each `MessageList` makes its display decision over the rows it currently owns; loading more rows can turn labels on at the next render.
+Assistant/tool/custom branches and user-role tool-result-only rows do not receive or render prompt-label state. Thus an agent/system trigger in the main slice labels valid human prompts in an expanded pre-compaction slice, and a trigger in that slice labels valid main-list prompts; there is no independently computed nested-list mode.
 
 ### 5.4 `UserMessage` markup and exact labels
 
@@ -404,11 +430,24 @@ Thread the same optional field through:
 - `restorePromptAuthorBindings()`;
 - `copyAuthorSidecar()`.
 
-Validation accepts absent legacy values. A present `modelPrefix` must be a bounded, non-empty, one-line string in the generated prefix shape. A malformed present field invalidates that dispatch record; preserving literal transcript text is safer than correlating a record that cannot safely project it.
+Validation binds a present prefix to the same record's trusted author rather than accepting syntax alone. After `isMessageAuthor(record.author)` succeeds, both `isDispatchRecord()` and `isPromptAuthorBinding()` use one exact helper equivalent to:
 
-`appendPromptAuthorDispatch()` receives `modelText: piText`, computes `modelTextDigest` from exact `piText`, and persists only the exact prefix plus the existing author/source metadata. It never stores `baseModelText`, `piText`, attachments, images, or skill-expanded plaintext.
+```ts
+function hasValidModelPrefix(record: {
+  author: MessageAuthor;
+  modelPrefix?: unknown;
+}): boolean {
+  if (record.modelPrefix === undefined) return true; // legacy/unprefixed
+  const expected = modelPrefixForPromptAuthor(record.author);
+  return expected !== undefined && record.modelPrefix === expected;
+}
+```
 
-V1 migration creates records with no `modelPrefix`. Existing v2 records with the field absent remain valid. Copy/fork/continue preserves the field only on transcript-confirmed echoed bindings. Archive retention and hard-purge behavior stay unchanged.
+Consequently a present `modelPrefix` is accepted only when it exactly equals `modelPrefixForPromptAuthor(record.author)`, including every normalized label/ID character and trailing space. A valid user author, an unprefixable author, or any author for which the formatter returns `undefined` requires the field to be absent. An invalid `author` still invalidates the record before this check. Do not normalize, repair, or infer a stored prefix during validation or canonicalization. A syntactically plausible prefix with the wrong agent label/ID, an agent/system kind mismatch, or any user prefix invalidates the entire dispatch/binding so it cannot correlate and transcript content remains literal.
+
+`appendPromptAuthorDispatch()` receives `modelText: piText`, computes `modelTextDigest` from exact `piText`, and persists only the exact prefix plus the existing author/source metadata. Newly appended records use the formatter result directly, so system/agent records with a desired prefix cannot persist a missing or mismatched value. It never stores `baseModelText`, `piText`, attachments, images, or skill-expanded plaintext.
+
+V1 migration creates records with no `modelPrefix`. Existing v2 records with the field absent remain valid for every otherwise valid author as legacy/unprefixed occurrences and authorize no stripping. Copy/fork/continue preserves the field only on transcript-confirmed echoed bindings, and copied/restored bindings pass the same exact author-prefix validation. Archive retention and hard-purge behavior stay unchanged.
 
 ## 8. Single dispatch-time prefix boundary
 
@@ -628,8 +667,8 @@ Once Bobbit has a trusted human principal, a follow-up may add a per-runtime `Se
 3. **Write-before-prefix.** If the exact prefixed dispatch cannot be persisted, that occurrence is sent unprefixed.
 4. **Digest exactness.** `modelTextDigest` covers exact `piText`, including author prefix, existing recovery framing, expanded skill text, and synthesized attachment text.
 5. **No prompt plaintext in the private ledger.** `modelPrefix` contains only normalized label/display ID or `System`; body text remains HMAC-only.
-6. **Invalid record safety.** Malformed optional prefix data invalidates the record. Missing data means no stripping.
-7. **Projection safety.** Only one exact leading copy at the first text boundary can be removed; mismatch means no change.
+6. **Invalid record safety.** A present prefix must exactly equal the prefix derived from that record's validated trusted author. Wrong label/ID, agent/system mismatch, user prefix, malformed data, or invalid author invalidates the record; a missing legacy prefix means no stripping.
+7. **Projection safety.** Only one exact leading copy at the first text boundary can be removed by a validated binding; content mismatch means no change.
 8. **Appearance safety.** Resolution is loaded-state-only and read-only. Missing staff/session/colour/accessory data returns the canonical static fallback.
 9. **UI safety.** Invalid authors do not throw and do not receive fabricated labels. Long valid labels are visually ellipsized but remain available to assistive technology.
 10. **No hidden payload prefixing.** Only accountable prompt/steer RPC text at the four audited dispatch sites is prefixed. Assistant output, tool results, system prompt assembly, provider lifecycle context blocks, and hidden orchestration payloads that are not visible prompts remain untouched.
@@ -640,16 +679,16 @@ Once Bobbit has a trusted human principal, a follow-up may add a per-runtime `Se
 |---|---|
 | `src/shared/message-author.ts` | Centralize component sanitization; add one-line label/display-author-ID formatters and the shared accountable-prompt/tool-result-only predicate. |
 | `src/server/agent/message-author.ts` | Re-export sanitizer; add `modelPrefixForPromptAuthor()`. |
-| `src/ui/message-author-presentation.ts` | Add pure loaded-history selector and exact badge presentation. |
+| `src/ui/message-author-presentation.ts` | Add pure loaded-history selector, frozen no-label default, and exact badge presentation. |
 | `src/app/message-author-appearance.ts` | Add pure live/archived/staff-current-session appearance resolver with frozen fallback. |
 | `src/ui/bobbit-render.ts` | Add canonical accessory resolver and fixed static open-eye renderer wrapper. |
 | `src/app/session-colors.ts` | Delegate accessory lookup and reuse canonical hue rotation data. |
-| `src/ui/components/AgentInterface.ts` | Pass a stable loaded-state appearance callback into `MessageList`. |
-| `src/ui/components/MessageList.ts` | Compute one display mode for loaded prompt rows; pass label/appearance only to `UserMessage`; forward resolver to pre-compaction history. |
-| `src/ui/components/PreCompactionHistory.ts` | Forward appearance resolver to its nested `MessageList`. |
+| `src/ui/components/AgentInterface.ts` | Own the per-session pre-compaction slice registry; compute one display mode over main plus every currently loaded hydrated slice; pass the same mode, stable slice reporter, and loaded-state appearance callback into `MessageList`. |
+| `src/ui/components/MessageList.ts` | Consume the owner-supplied display mode without recomputing it; pass label/appearance only to `UserMessage`; forward the unchanged mode, resolver, and slice reporter to pre-compaction history. |
+| `src/ui/components/PreCompactionHistory.ts` | Register/update/unregister its fetched hydrated slice with the transcript owner (retaining it while collapsed) and forward the owner-supplied mode/appearance resolver to its nested `MessageList`. |
 | `src/ui/components/Messages.ts` | Render conditional badge and static agent sprite without changing unlabelled markup/body flow. |
 | `src/ui/app.css` | Add top-left overlay, intrinsic sizing, ellipsis, timestamp-safe and mobile-safe styles. |
-| `src/server/agent/author-sidecar.ts` | Add optional `modelPrefix`, exact Pi digest, binding-returning stream correlation, exact projection, copy/restore support. |
+| `src/server/agent/author-sidecar.ts` | Add optional `modelPrefix`, require any present value to exactly match the trusted record author formatter in dispatch/binding validation, retain exact Pi digest, and add binding-returning stream correlation, exact projection, and copy/restore support. |
 | `src/server/agent/session-manager.ts` | Prepare exact RPC text at four dispatch sites; retain unprefixed durable/recovery text; carry prefix through live/replay bindings; project before visible event flow and full-history title generation. |
 | `src/server/agent/session-store.ts` | Update in-flight text documentation only; persisted shape remains base text/source/author. |
 | `src/server/agent/visible-message-snapshot.ts` | Keep correlation/projection before skill/file rewriting and document the new invariant. |
@@ -693,7 +732,9 @@ Render the actual canvas/template wrapper under Happy DOM in `tests2/dom/message
 Extend `tests2/core/author-sidecar.test.ts`:
 
 - v2 row stores exact `modelPrefix`, digest matches prefixed Pi text, and raw file contains no body plaintext;
-- absent legacy prefix remains valid; malformed present prefix is ignored as an invalid record;
+- absent legacy prefix remains valid and authorizes no stripping, including otherwise valid legacy agent/system rows;
+- dispatch-record and folded-binding validation accept an exact formatter-derived prefix and reject malformed present values;
+- syntactically valid but wrong agent label, wrong agent ID, agent author with `[System]: `, system author with an agent prefix, and user author with any prefix each invalidate the record/binding and leave raw transcript content literal;
 - exact projection for string and image-first/split-text array content;
 - images/unrelated blocks retain identity; only the first text block is cloned;
 - prefix-shaped base content removes one injected copy only;
@@ -725,6 +766,8 @@ Add `tests2/dom/message-author-labels.test.ts` using the real `MessageList`/`Use
 
 - all-human loaded messages produce no `.prompt-author-badge` and retain the old unlabelled row structure/classes;
 - an agent/system prompt causes badges on every valid prompt row, including the human context row;
+- in independent cases, one owner-supplied mode is used across the main and expanded pre-compaction `MessageList` instances: main human plus pre-compaction agent/system labels both slices, and main agent/system plus pre-compaction human labels both slices;
+- asynchronous first-page/load-older reports recompute both lists together; collapse retains the fetched slice in the partially loaded-history mode, while row clearing/unmount removes it; no rendered slice remains divergent;
 - exact label text and accessible names; assistant/tool rows never get badges;
 - invalid/missing legacy authors do not throw or fabricate a badge;
 - long agent labels keep full `title`/`aria-label` while the visual name span has ellipsis CSS hooks;
@@ -762,10 +805,12 @@ Update `tests2/browser/journeys/author-metadata.journey.spec.ts` and rename its 
 
 1. all-human live/reload remains badge-free;
 2. system/agent arrival turns labels on for earlier valid human rows;
-3. exact `User`, `System`, and `<label> | Agent` presentation survives reload;
-4. source agent uses a distinctive loaded colour/accessory; prompt sprite matches those sidebar inputs but stays open-eyed/static while the sidebar may sleep/animate;
-5. repeat at a narrow viewport with timestamps enabled and a long label; assert no horizontal overflow and usable chips/attachments;
-6. assert the literal model prefix is absent from bubble text and page search-visible text.
+3. expand fixture-seeded pre-compaction history and exercise both cross-slice directions in independent fixture states: a main human with an agent/system trigger only in the expanded slice labels both lists, and a main agent/system trigger with only human prompts in the expanded slice also labels both lists;
+4. loading another pre-compaction page recomputes the single mode; collapse/re-expansion retains the fetched slice's mode, and unmount/removal clears it rather than leaving stale labels;
+5. exact `User`, `System`, and `<label> | Agent` presentation survives reload and re-expansion;
+6. source agent uses a distinctive loaded colour/accessory; prompt sprite matches those sidebar inputs but stays open-eyed/static while the sidebar may sleep/animate;
+7. repeat at a narrow viewport with timestamps enabled and a long label; assert no horizontal overflow and usable chips/attachments;
+8. assert the literal model prefix is absent from bubble text and page search-visible text.
 
 ### 13.5 E2E gate
 
@@ -812,8 +857,9 @@ Do not add an `AGENTS.md` recipe; the maintainer reference and this design are s
 
 ## 15. Acceptance checklist
 
-- [ ] All-human loaded history, including synthetic distinct human IDs, has no badges.
-- [ ] Any validated agent/system prompt turns badges on for all valid loaded accountable prompt rows only; user-role tool-result-only rows neither trigger nor receive badges.
+- [ ] All-human loaded history, including synthetic distinct human IDs and fetched pre-compaction slices, has no badges.
+- [ ] `AgentInterface` computes one mode over the main list plus every currently loaded hydrated pre-compaction slice and passes that same mode to every `MessageList`; no nested list computes an independent mode.
+- [ ] A validated agent/system prompt in either the main or a loaded pre-compaction slice turns badges on for all valid accountable prompt rows in both directions; first-page/load-more recomputes, collapse retains loaded-history mode, and row clearing/unmount/session changes clear their slice, while user-role tool-result-only rows neither trigger nor receive badges.
 - [ ] Human label is `User`; system is `System`; agent is `<normalized label> | Agent`.
 - [ ] Agent avatar uses loaded sidebar hue/accessory and canonical static open-eye rendering.
 - [ ] Long/narrow/timestamp/attachment/chip layouts remain usable without horizontal clipping.
@@ -821,6 +867,7 @@ Do not add an `AGENTS.md` recipe; the maintainer reference and this design are s
 - [ ] System/agent Pi prompt or steer has exactly one expected prefix.
 - [ ] Queue, retry, recovery, in-flight ledger, and `lastPromptText` remain unprefixed.
 - [ ] Sidecar stores exact prefix and digest of exact Pi text, never prompt plaintext.
+- [ ] Every present `modelPrefix` exactly equals `modelPrefixForPromptAuthor(record.author)`; wrong label/ID, agent/system mismatch, and user-with-prefix rows invalidate both record and binding and leave transcript text literal, while missing legacy prefixes remain valid and remove nothing.
 - [ ] Sidecar failure sends that occurrence unprefixed.
 - [ ] Correlated live/snapshot/transcript/pre-compaction/archive/extension/search/title projections remove exactly one authorized leading copy.
 - [ ] Prefix-looking base content survives intact.
