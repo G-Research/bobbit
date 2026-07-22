@@ -465,6 +465,44 @@ A notable config key is `base_ref` — the branch ref new worktrees branch off a
 
 **Settings UI**: The settings page has a two-tier layout. The top scope row selects System or a specific project. Sub-tabs within each scope show the relevant settings. Per-project tabs show inherited system values as placeholders with an "(inherited)" badge; overrides show normal text with a "×" reset button. URL scheme: `#/settings/<scope>/<tab>` where scope is `system` or a project UUID (backwards-compatible: `#/settings/shortcuts` maps to `#/settings/system/shortcuts`).
 
+#### Agent-finish sound override
+
+A client can observe foreground and background sessions from several projects at once. Agent-finish audio therefore follows the project that owns the session producing the notification, not the project open in the UI. This prevents a background completion from accidentally using the visible project's mute policy.
+
+In **Project Settings → General**, use the **Agent finish sound** control in the Notifications section:
+
+| Selection | Raw `PUT /api/projects/:id/config` value | Effective behavior |
+|---|---|---|
+| **Inherit global** | `{ "play_agent_finish_sound": null }` | Remove the project key and follow the global preference. This is the default for existing projects. |
+| **On** | `{ "play_agent_finish_sound": "true" }` | Play the project's finish beeps even when the global preference is off. |
+| **Off** | `{ "play_agent_finish_sound": "false" }` | Silence the project's finish beeps even when the global preference is on. |
+
+The raw key is exactly `play_agent_finish_sound`, and its explicit values are the strings `"true"` and `"false"`, not JSON booleans. `null` is the canonical clear value and removes the key from `project.yaml`; no `"inherit"` sentinel is stored. Missing or unrecognized raw values inherit defensively. Read this key from the raw project-config endpoint, not `/config/resolved`, because its fallback lives in the global preferences store rather than the normal project-config cascade.
+
+Selections autosave and become visible to the audio resolver immediately, before the write completes. The in-memory project value survives navigation in the same client, while the raw project config restores it after reload. A failed save reverts to the last confirmed selection and offers a retry, so an optimistic choice does not masquerade as persisted state.
+
+The effective resolver uses this precedence:
+
+1. the source session project's explicit `"true"` or `"false"` override;
+2. the global `/api/preferences` value `playAgentFinishSound`;
+3. **on** when the global preference is absent.
+
+Foreground `agent_end` handling resolves the session attached to that `RemoteAgent`; background polling passes the session whose status changed. The active route, selected Settings scope, and currently viewed project do not participate. A session with no usable project id, or a project whose raw config cannot be resolved, falls back to the global preference. Project config may load asynchronously, but favicon badges and other notification work are not delayed while audio waits for its source-project decision.
+
+The header Bell remains strictly global. Its icon, tooltip, and click action reflect only `playAgentFinishSound`, and it writes only `/api/preferences`. A project override must not update the global document dataset or the global preference-change event. Project muting gates only the Web Audio beep; favicon badges, unread indicators, and notification-policy decisions remain independent.
+
+Maintainer entry points:
+
+| Concern | Entry point |
+|---|---|
+| Raw-value parsing, project cache/write ordering, and the shared effective resolver | `src/app/play-finish-sound.ts` |
+| Project Settings loading, rendering, optimistic save, rollback, and retry | `src/app/settings-page.ts` |
+| Foreground `agent_end` and the audio primitive | `src/app/remote-agent.ts` |
+| Background session-transition notifications | `src/app/api.ts` (`refreshSessions`) |
+| Global-only Bell behavior | `src/ui/components/BellToggle.ts` |
+
+Regression coverage is split by contract: `tests2/core/play-finish-sound.test.ts` pins precedence, fallback, raw parsing, and concurrent cache/write behavior; the `tests2/dom/project-audio-*.test.ts` suites pin Settings behavior and foreground/background source routing; `tests2/dom/bell-toggle.test.ts` pins the global-only Bell; `tests2/integration/project-config-api.test.ts` pins persistence and removal across store reloads; and `tests2/browser/journeys/project-settings.journey.spec.ts` covers the end-to-end user flow, reload, source-session audio, and unaffected badges.
+
 **Per-component editors**: The project Settings tab renders one card per component with editable `commands` and `config` key-value tables (sibling editors with the same shape - add/delete row controls, key/value inputs). Both tables persist via the same `PUT /api/projects/:id/config` payload by sending the `components` array with the edited entry. There are no longer top-level `qa_*` fields on the Settings page - QA settings live exclusively under the relevant component's `config:` map (see [Multi-repo & components](#multi-repo--components)).
 
 **Sidebar shortcut**: Project headers in the sidebar show a gear icon on hover that navigates directly to `#/settings/<project-id>/project`.
