@@ -1015,23 +1015,13 @@ export function isRetryableAgentEnd(event: unknown): boolean {
 		&& (event as { willRetry?: unknown }).willRetry === true;
 }
 
-/** True for a non-terminal Pi compaction end. Pi 0.81 can attach usage to
- *  these retry notifications, so callers must still account for the event but
- *  must not persist or emit a completed compaction until a terminal end. */
-export function isRetryableCompactionEnd(event: unknown): boolean {
-	if (!event || typeof event !== "object") return false;
-	const type = (event as { type?: unknown }).type;
-	return (type === "compaction_end" || type === "auto_compaction_end")
-		&& (event as { willRetry?: unknown }).willRetry === true;
-}
-
 /** Push a raw event into the session's EventBuffer (assigning seq/ts) and
  *  broadcast the `{type:"event"}` frame to all clients with seq/ts attached.
  *  This is the single emit path for live agent events — every call site that
  *  used to do `eventBuffer.push(ev); broadcast(clients, {type:"event", data:ev})`
  *  must route through here so envelope fields stay consistent.
- *  Retryable terminal-shaped events are suppressed by callers before reaching
- *  here so clients never settle a turn or compaction prematurely.
+ *  Retryable agent_end events (`isRetryableAgentEnd`) are suppressed by callers
+ *  before reaching here so clients never see a non-terminal turn-end.
  *  See docs/design/streaming-dedup-reorder.md §4.2. */
 export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[]; fileMentions?: FileMention[] }> }, truncated: unknown): void {
 	const normalized = normalizeToolResultErrorEvent(truncated);
@@ -4787,12 +4777,9 @@ export class SessionManager {
 				};
 			}
 		} else if (event.type === "auto_compaction_end" || event.type === "compaction_end") {
-			// Pi 0.81 emits terminal-shaped compaction events while its internal
-			// summarization retry is still in flight. Preserve the start state and
-			// pending id so the eventual terminal end owns sidecar persistence,
-			// client completion, and transcript refresh. Cost tracking still runs
-			// after this lifecycle handler and accounts for result.usage.
-			if (isRetryableCompactionEnd(event)) return;
+			// `willRetry:true` means a successful overflow compaction completed and
+			// Pi will retry the surrounding agent turn. No later compaction_end is
+			// emitted, so completion must still persist and reach the client here.
 			session.isCompacting = false;
 			const pending = (session as any)._pendingCompactionStart as
 				| { startedAtMs: number; trigger: "auto" | "overflow"; compactionId: string }
@@ -6028,13 +6015,12 @@ export class SessionManager {
 	}
 
 	/**
-	 * Emit a live agent event to clients, suppressing retryable Pi end events.
-	 * Both agent and compaction retry notifications are terminal-shaped, so
-	 * forwarding either would settle client state before Pi's retry completes.
+	 * Emit a live agent event to clients, suppressing retryable Pi agent_end
+	 * events while forwarding completed compaction events independently.
 	 * Pinned by tests2/core/pi-rpc-agent-end-retry.test.ts.
 	 */
 	private emitAgentEvent(session: SessionInfo, event: unknown): void {
-		if (isRetryableAgentEnd(event) || isRetryableCompactionEnd(event)) return;
+		if (isRetryableAgentEnd(event)) return;
 		emitSessionEvent(session, truncateLargeToolContent(event));
 	}
 
@@ -6045,7 +6031,7 @@ export class SessionManager {
 	private trackCostFromEvent(session: SessionInfo, event: any): void {
 		// Message updates repeat the same usage on every streaming chunk, so only
 		// completed assistant messages are accounted. Pi 0.81 additionally reports
-		// summarizer usage once on compaction end events, including retryable ends.
+		// summarizer usage once on each completed compaction event.
 		const assistantMessageEnd = event.type === "message_end" && event.message?.role === "assistant";
 		const compactionEnd = event.type === "compaction_end" || event.type === "auto_compaction_end";
 		if (!assistantMessageEnd && !compactionEnd) return;

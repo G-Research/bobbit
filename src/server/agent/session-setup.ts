@@ -15,7 +15,7 @@ import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
 import type { CommandRunner } from "../gateway-deps.js";
 import type { SessionInfo } from "./session-manager.js";
-import { emitSessionEvent, broadcastStatus, isRetryableAgentEnd, isRetryableCompactionEnd, switchSessionPathForAgent } from "./session-manager.js";
+import { emitSessionEvent, broadcastStatus, isRetryableAgentEnd, switchSessionPathForAgent } from "./session-manager.js";
 import type { RpcBridgeOptions, RuntimePiExtensionInfo } from "./rpc-bridge.js";
 import { RpcBridge } from "./rpc-bridge.js";
 import { rebaseAgentTranscriptCwdMetadataFile, sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
@@ -1012,13 +1012,11 @@ export function subscribeToEvents(session: SessionInfo, ctx: PipelineContext): (
 		session.lastActivity = Date.now();
 		ctx.store.update(session.id, { lastActivity: session.lastActivity });
 		ctx.handleAgentLifecycle(session, event);
-		// Suppress Pi retryable terminal-shaped events before they reach clients
-		// or EventBuffer. A retryable agent end would clear the active turn, while
-		// a retryable compaction end would complete the summary card prematurely.
-		// Cost tracking intentionally still sees both events after this guard so
-		// Pi 0.81 summarizer usage is retained.
+		// Suppress retryable agent_end before it reaches clients/EventBuffer.
+		// Compaction ends remain visible even with willRetry:true: that flag means
+		// Pi retries the surrounding agent turn after compaction has completed.
 		// Pinned by tests2/core/pi-rpc-agent-end-retry.test.ts.
-		if (!isRetryableAgentEnd(event) && !isRetryableCompactionEnd(event)) {
+		if (!isRetryableAgentEnd(event)) {
 			const truncated = truncateLargeToolContent(event);
 			emitSessionEvent(session, truncated);
 		}
