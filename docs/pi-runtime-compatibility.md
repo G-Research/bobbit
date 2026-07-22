@@ -28,7 +28,7 @@ Do not describe `0.81.1` as audit-clean. The packed-consumer E2E treats the know
 The controlled development-checkout regeneration produced this result:
 
 - all root and nested Pi copies resolve to `0.81.1`, with no stale or mixed Pi version;
-- Pi's `brace-expansion` 5.x edge and the other 5.x checkout edge resolve to `5.0.7`; the unrelated legacy 1.x development edge resolves to its fixed `1.1.16` release;
+- every development-checkout `brace-expansion` occurrence resolves to `5.0.7` or newer; the legacy `shx`/ShellJS 1.x edge has been removed;
 - the root `@google/genai` tree resolves `protobufjs@7.6.5`, while coding-agent's shrinkwrap-owned nested tree resolves the known `protobufjs@7.6.4` edge;
 - `npm ls` exits successfully with no invalid, missing, stale, or extraneous Pi edge; and
 - a plain `npm install` with the repository `.npmrc` restored leaves `package-lock.json` unchanged.
@@ -125,7 +125,7 @@ Pinned coverage: `tests2/core/model-state-meta-resolver.test.ts` and `tests2/int
 
 ## Stream function and browser-safe boundary
 
-Pi `0.81` makes `streamFn` explicit in agent-core APIs. Pi `0.81.1` restores the pre-`0.81` runtime fallback with `setDefaultStreamFn(streamSimple)`, which keeps already-compiled callers compatible. Bobbit still supplies its own stream function where behavior depends on the browser proxy: `AgentInterface` assigns the `proxy-utils` wrapper to Pi's `streamFunction`, and that wrapper delegates to the lazy browser-safe streaming helper. Do not remove the bridge merely because the upstream fallback exists.
+Pi `0.81` makes `streamFn` explicit in agent-core APIs. Pi `0.81.1` restores the pre-`0.81` runtime fallback with `setDefaultStreamFn(streamSimple)`, which keeps already-compiled callers compatible. Bobbit still supplies its own proxy-aware stream function, but the assignment target depends on the session implementation: gateway-backed `RemoteAgent` exposes Bobbit's `streamFn` property, while a real Pi `Agent` exposes `streamFunction`. `AgentInterface` must detect that distinction and assign the `proxy-utils` wrapper to the matching property; both paths delegate to the lazy browser-safe streaming helper. Do not write a Pi-only `streamFunction` property onto `RemoteAgent`, and do not remove either bridge merely because the upstream fallback exists.
 
 Browser code must not use runtime value imports from the bare `@earendil-works/pi-ai` package. The bare index traverses Node-oriented paths such as environment API-key probing, which makes Vite externalize Node modules into browser builds. Type-only root imports are safe because TypeScript erases them.
 
@@ -166,9 +166,9 @@ Pinned coverage: `tests2/core/pi-rpc-agent-end-retry.test.ts`.
 
 ### Summarization and compaction retries
 
-Pi `0.81.1` adds retry policies and lifecycle events for compaction and branch summarization, including `summarization_retry_scheduled`, `summarization_retry_attempt_start`, and `summarization_retry_finished`. Bobbit forwards these additive events and preserves terminal summary usage.
+Pi `0.81.1` adds retry policies and lifecycle events for compaction and branch summarization, including `summarization_retry_scheduled`, `summarization_retry_attempt_start`, and `summarization_retry_finished`. Bobbit forwards these additive events and retains summary usage across retries.
 
-A `compaction_end` with `willRetry: true` can finish that compaction attempt and refresh its visible state, but it does not settle the surrounding agent turn. Waiters, queued prompts, grants, and completed-turn accounting remain pending until the terminal `agent_end`. This prevents a summarizer retry from creating a false idle boundary.
+A `compaction_end` or `auto_compaction_end` with `willRetry: true` is a non-terminal continuation. Bobbit retains its usage but keeps `isCompacting` true and does not write a sidecar, attach `compactionId`, refresh the transcript, or tell clients that compaction completed. Those completion effects run only for the terminal compaction event where `willRetry !== true`. Turn waiters, queued prompts, grants, and completed-turn accounting remain pending beyond that event until the terminal `agent_end`. This prevents a summarizer retry from creating a false compaction or idle boundary.
 
 Pinned coverage: `tests2/core/pi-rpc-agent-end-retry.test.ts`, `tests2/core/compaction-types.test.ts`, `tests2/dom/ui-fixtures/compaction-widget.test.ts`, and the full-stack `tests/e2e/ui/pre-compaction-history.spec.ts` reload journey.
 
