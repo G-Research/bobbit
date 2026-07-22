@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +7,7 @@ import {
 	appendPromptAuthorSettlement,
 	copyAuthorSidecar,
 	digestPromptModelText,
+	extractPromptModelText,
 	initAuthorSidecarDir,
 	mergeAuthorSidecarIntoMessages,
 	promptAuthorBindingMatchesText,
@@ -117,6 +118,38 @@ describe("author sidecar v2 persistence", () => {
 		expect(fs.statSync(sidecarPath(sessionId)).mode & 0o777).toBe(0o600);
 	});
 
+	it("confines canonical network-derived metadata to a digest-only private ledger", () => {
+		const sessionId = "../../network\r\nsession";
+		const safeSessionId = sessionId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 160);
+		const promptText = "UNTRUSTED_NETWORK_PROMPT_must_be_hashed";
+		const injectedExtra = "UNTRUSTED_EXTRA_FIELD_must_be_dropped";
+		const networkAuthor = {
+			kind: "system",
+			id: "system:network",
+			label: "Network request",
+			uploadedBody: injectedExtra,
+		} as MessageAuthor;
+		expect(appendPromptAuthorDispatch(sessionId, dispatch("network-prompt", promptText, networkAuthor))).toBe(true);
+
+		const ledgerRoot = path.join(secretsDir, "author-sidecar");
+		const ledger = sidecarPath(safeSessionId);
+		expect(path.dirname(ledger)).toBe(ledgerRoot);
+		expect(path.relative(ledgerRoot, ledger)).not.toMatch(/^(?:\.\.[/\\]|[/\\])/);
+		const persisted = fs.readFileSync(ledger, "utf8");
+		const [record] = persisted.trim().split("\n").map((line) => JSON.parse(line));
+		expect(record).toEqual({
+			schemaVersion: 2,
+			type: "prompt-author",
+			promptId: "network-prompt",
+			dispatchedAt: 1_000,
+			modelTextDigest: digestPromptModelText(promptText),
+			source: "system",
+			author: { kind: "system", id: "system:network", label: "Network request" },
+		});
+		expect(persisted).not.toContain(promptText);
+		expect(persisted).not.toContain(injectedExtra);
+	});
+
 	it("keeps settled digest correlation stable when re-initialized with the same key", () => {
 		const sessionId = "same-key-reinit";
 		const text = "stable restart correlation";
@@ -164,6 +197,28 @@ describe("author sidecar v2 persistence", () => {
 		expect(readAuthorSidecar("missing")).toEqual([]);
 		expect(appendPromptAuthorDispatch("invalid", { ...dispatch("", "text"), promptId: "" })).toBe(false);
 		expect(readAuthorSidecar("invalid")).toEqual([]);
+	});
+
+	it("uses a static format with escaped and bounded read-failure diagnostics", () => {
+		const sessionId = `diagnostic\r\n[forged]%s${"x".repeat(600)}`;
+		const safeSessionId = sessionId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 160);
+		const unreadableLedger = sidecarPath(safeSessionId);
+		fs.mkdirSync(unreadableLedger);
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		try {
+			expect(readAuthorSidecar(sessionId)).toEqual([]);
+			expect(warning).toHaveBeenCalledOnce();
+			const [format, sessionDiagnostic, errorDiagnostic] = warning.mock.calls[0];
+			expect(format).toBe("[author-sidecar] Read failed for session %s: %s");
+			expect(sessionDiagnostic).toBe(JSON.stringify(sessionId).slice(0, 512));
+			expect(sessionDiagnostic).not.toMatch(/[\r\n]/);
+			expect(String(sessionDiagnostic).length).toBeLessThanOrEqual(512);
+			expect(errorDiagnostic).not.toMatch(/[\r\n]/);
+			expect(String(errorDiagnostic).length).toBeLessThanOrEqual(512);
+		} finally {
+			warning.mockRestore();
+			fs.rmSync(unreadableLedger, { recursive: true, force: true });
+		}
 	});
 
 	it("migrates valid v1 rows from a corrupt partial ledger and removes the plaintext source", () => {
@@ -478,19 +533,42 @@ describe("author sidecar v2 correlation", () => {
 		expect(rows[0].author).toEqual(agentAuthor);
 	});
 
+	it("correlates the exact Pi text sequence across adjacent text blocks without rewriting content", () => {
+		const sessionId = "split-text-blocks";
+		const content = [
+			{ type: "text", text: "abc" },
+			{ type: "text", text: "def" },
+			{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+		];
+		appendPromptAuthorDispatch(sessionId, dispatch("p1", "abcdef", systemAuthor));
+		appendPromptAuthorSettlement(sessionId, { promptId: "p1", settledAt: 1_100, outcome: "echoed" });
+
+		expect(extractPromptModelText({ role: "user", content })).toBe("abcdef");
+		const [row] = mergeAuthorSidecarIntoMessages(
+			readAuthorSidecar(sessionId),
+			[{ role: "user", content }],
+		);
+		expect(row.author).toEqual(systemAuthor);
+		expect(row.content).toBe(content);
+		expect(row.content).toEqual(content);
+	});
+
 	it("does not claim provider-history user-role tool result blocks", () => {
 		const sessionId = "tool-result";
-		appendPromptAuthorDispatch(sessionId, dispatch("p1", "", systemAuthor));
+		appendPromptAuthorDispatch(sessionId, dispatch("p1", "result", systemAuthor));
+		appendPromptAuthorSettlement(sessionId, { promptId: "p1", settledAt: 1_100, outcome: "echoed" });
+		const toolResultContent = [{ type: "tool_result", content: "result" }];
 		const rows = mergeAuthorSidecarIntoMessages(
 			readAuthorSidecar(sessionId),
 			[
 				{ role: "assistant", content: "called tool" },
-				{ role: "user", content: [{ type: "tool_result", content: "result" }] },
+				{ role: "user", content: toolResultContent },
 			],
 			{ session: { id: "target", title: "Target" } },
 		);
 		expect(rows[1].author).toEqual({ kind: "agent", id: "session:target", label: "Target" });
 		expect(rows[1].author?.kind).not.toBe("tool");
+		expect(rows[1].content).toBe(toolResultContent);
 	});
 
 	it("is idempotent after authors have been merged", () => {

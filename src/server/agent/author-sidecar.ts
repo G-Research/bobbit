@@ -123,6 +123,7 @@ interface LegacyPromptAuthorSettlementRecord {
 
 const CORRELATION_TOLERANCE_MS = 2_000;
 const MAX_KEY_LENGTH = 256;
+const MAX_DIAGNOSTIC_VALUE_LENGTH = 512;
 const DIGEST_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const SIDECAR_KEY_DOMAIN = "bobbit/author-sidecar/v2/key\0";
 const PROMPT_DIGEST_DOMAIN = "bobbit/author-sidecar/v2/prompt-text\0";
@@ -140,6 +141,12 @@ function validTimestamp(value: unknown): value is number {
 
 function validDigest(value: unknown): value is string {
 	return typeof value === "string" && DIGEST_PATTERN.test(value);
+}
+
+/** Quote, control-character escape, and bound values before plain-text logging. */
+function diagnosticValue(value: unknown): string {
+	const text = value instanceof Error ? `${value.name}: ${value.message}` : String(value);
+	return JSON.stringify(text).slice(0, MAX_DIAGNOSTIC_VALUE_LENGTH);
 }
 
 function isDispatchRecord(value: unknown): value is PromptAuthorDispatchRecord {
@@ -321,6 +328,9 @@ function secureFileDescriptor(fd: number): void {
 function writeAll(fd: number, value: Buffer): void {
 	let offset = 0;
 	while (offset < value.length) {
+		// Only canonical v2 ledger JSON reaches this private, non-executable file;
+		// paths are server-rooted and prompt bodies have already become keyed HMACs.
+		// codeql[js/http-to-file-access] Intentional bounded metadata ledger write, not an arbitrary upload.
 		const written = fs.writeSync(fd, value, offset, value.length - offset, null);
 		if (!Number.isSafeInteger(written) || written <= 0) throw new Error("Author-sidecar write was incomplete");
 		offset += written;
@@ -347,6 +357,9 @@ function fsyncDirectory(target: string): void {
 	if (sidecarPlatform === "win32") return;
 	let fd: number | undefined;
 	try {
+		// O_RDONLY cannot create a temporary file; this directory descriptor only
+		// makes the preceding rename/unlink durable.
+		// codeql[js/insecure-temporary-file] Non-creating directory fsync open.
 		fd = fs.openSync(target, fs.constants.O_RDONLY);
 		fs.fsyncSync(fd);
 	} catch (error) {
@@ -461,6 +474,9 @@ interface LegacyFileSnapshot {
 function readClaimedLegacyFile(legacyFile: string): LegacyFileSnapshot {
 	let fd: number | undefined;
 	try {
+		// O_RDONLY cannot create a temporary file; O_NOFOLLOW additionally rejects
+		// a raced symlink before this claimed legacy inode is read and unlinked.
+		// codeql[js/insecure-temporary-file] Non-creating, no-follow migration read.
 		fd = fs.openSync(legacyFile, secureOpenFlags(fs.constants.O_RDONLY));
 		const stat = fs.fstatSync(fd);
 		if (!stat.isFile()) throw new Error("Claimed legacy author sidecar is not a regular file");
@@ -685,7 +701,11 @@ export function readAuthorSidecar(sessionId: string): PromptAuthorBinding[] {
 		const text = readSecureText(target);
 		return text === undefined ? [] : foldAuthorSidecarRecords(recordsFromText(text));
 	} catch (error) {
-		console.warn(`[author-sidecar] Read failed for session ${sessionId}:`, error);
+		console.warn(
+			"[author-sidecar] Read failed for session %s: %s",
+			diagnosticValue(sessionId),
+			diagnosticValue(error),
+		);
 		return [];
 	}
 }
@@ -699,7 +719,10 @@ export function extractPromptModelText(message: Record<string, unknown>): string
 		const candidate = block as Record<string, unknown>;
 		if (candidate.type === "text" && typeof candidate.text === "string") parts.push(candidate.text);
 	}
-	return parts.length > 0 ? parts.join("\n") : undefined;
+	// Pi 0.80.6 represents user content as an ordered TextContent/ImageContent
+	// sequence. Adjacent text blocks are consecutive fragments; inserting a
+	// separator here would change the exact text whose digest was dispatched.
+	return parts.length > 0 ? parts.join("") : undefined;
 }
 
 function messageId(message: Record<string, unknown>): string | undefined {
