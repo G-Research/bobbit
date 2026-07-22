@@ -1211,9 +1211,13 @@ export function prepareVisibleAgentEvent(
 	const userRole = message.role === "user" || message.role === "user-with-attachments";
 	const modelText = userRole ? extractUserMessageText(message) : "";
 	const messageKey = userRole ? promptAuthorMessageKey(message, raw) : undefined;
-	if (!userRole || messageKey || raw.type === "message_update"
-		|| (session.lastKeylessPromptAuthorEnd
-			&& !promptAuthorBindingMatchesText(session.lastKeylessPromptAuthorEnd, modelText))) {
+	const liveKeylessTerminalGuard = session.lastKeylessPromptAuthorEnd;
+	// Assistant streaming is part of the turn guarded by the preceding keyless
+	// user terminal. It must not erase that guard: Pi can replay the terminal
+	// after assistant updates, while a concurrent same-text steer is pending.
+	if (userRole && (messageKey || raw.type === "message_update"
+		|| (liveKeylessTerminalGuard
+			&& !promptAuthorBindingMatchesText(liveKeylessTerminalGuard, modelText)))) {
 		session.lastKeylessPromptAuthorEnd = undefined;
 	}
 	let stableBinding = messageKey ? session.promptAuthorMessageBindings?.get(messageKey) : undefined;
@@ -1280,7 +1284,19 @@ export function prepareVisibleAgentEvent(
 			alreadySettled: true,
 		} satisfies PromptAuthorEventBinding;
 		if (!messageKey) {
-			session.lastKeylessPromptAuthorEnd = { ...stableBinding, modelText };
+			const hasConcurrentSameTextPrompt = session.pendingPromptAuthors?.some((record) =>
+				record.promptId !== stableBinding!.promptId
+				&& promptAuthorBindingMatchesText(record, modelText),
+			) ?? false;
+			// A live guard protects one otherwise-indistinguishable duplicate. Once
+			// it does, release a concurrent newer occurrence so its real echo can
+			// bind next. Restore replay guards remain authoritative for the complete
+			// replay window and are never consumed this way.
+			session.lastKeylessPromptAuthorEnd = stableBinding === liveKeylessTerminalGuard
+				&& hasConcurrentSameTextPrompt
+				&& !session.promptAuthorReplayBindings
+				? undefined
+				: { ...stableBinding, modelText };
 		}
 	} else if (raw.type === "message_end" && pendingIndex !== -1) {
 		const [pending] = session.pendingPromptAuthors!.splice(pendingIndex, 1);
