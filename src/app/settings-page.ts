@@ -51,7 +51,18 @@ import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } 
 import { renderWorkflowPage, loadWorkflowPageData } from "./workflow-page.js";
 import { setConfigScope, getConfigScope, getConfigApiProjectId } from "./config-scope.js";
 import { gatewayFetch, fetchSandboxStatus, fetchHarnessStatus, requestHarnessRestart, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
-import { PLAY_FINISH_SOUND_CHANGED, isPlayFinishSoundEnabled, setPlayFinishSoundEnabled } from "./play-finish-sound.js";
+import {
+	PLAY_FINISH_SOUND_CHANGED,
+	PROJECT_PLAY_FINISH_SOUND_KEY,
+	captureProjectPlayFinishSoundRead,
+	getProjectPlayFinishSoundOverride,
+	isPlayFinishSoundEnabled,
+	isProjectPlayFinishSoundOverrideLoaded,
+	primeProjectPlayFinishSoundOverride,
+	setPlayFinishSoundEnabled,
+	setProjectPlayFinishSoundOverride,
+	type ProjectPlayFinishSoundOverride,
+} from "./play-finish-sound.js";
 import { applyProjectPalette } from "./session-manager.js";
 import { setPerfInstrumentationEnabled, isPerfInstrumentationEnabled } from "./boot-timing.js";
 import { isClientDebugEnabled, setClientDebugEnabled } from "./client-debug.js";
@@ -213,6 +224,87 @@ const projectScopeConfigCache = new Map<string, {
 
 let projectScopeSaveStatus: "" | "saving" | "saved" | "error" = "";
 const _projectScopePending = new Map<string, Record<string, any>>();
+
+type ProjectSoundSaveStatus = "" | "saving" | "saved" | "error";
+interface ProjectSoundSaveState {
+	status: ProjectSoundSaveStatus;
+	failedDesired?: ProjectPlayFinishSoundOverride;
+	requestId: number;
+	clearTimer?: ReturnType<typeof setTimeout>;
+}
+
+/** Sound autosave state is project-owned so navigation never shows another project's request. */
+const _projectSoundSaveStates = new Map<string, ProjectSoundSaveState>();
+const _projectSoundConfigReadStates = new Map<string, "loading" | "settled" | "error">();
+let _projectSoundGlobalListenerInstalled = false;
+
+function ensureProjectSoundGlobalListener(): void {
+	if (_projectSoundGlobalListenerInstalled || typeof window === "undefined") return;
+	_projectSoundGlobalListenerInstalled = true;
+	window.addEventListener(PLAY_FINISH_SOUND_CHANGED, () => {
+		const scope = getActiveScope();
+		if (scope !== "system" && getActiveTab() === "general") renderApp();
+	});
+}
+
+function getProjectSoundSaveState(projectId: string): ProjectSoundSaveState {
+	let save = _projectSoundSaveStates.get(projectId);
+	if (!save) {
+		save = { status: "", requestId: 0 };
+		_projectSoundSaveStates.set(projectId, save);
+	}
+	return save;
+}
+
+function projectSoundOverrideLabel(value: ProjectPlayFinishSoundOverride): string {
+	if (value === "on") return "On";
+	if (value === "off") return "Off";
+	return "Inherit global";
+}
+
+async function saveProjectPlayFinishSound(
+	projectId: string,
+	desired: ProjectPlayFinishSoundOverride,
+): Promise<void> {
+	const save = getProjectSoundSaveState(projectId);
+	if (save.clearTimer) clearTimeout(save.clearTimer);
+	const requestId = ++save.requestId;
+	save.status = "saving";
+	save.failedDesired = desired;
+
+	// The shared setter enqueues synchronously, so rendering after invocation shows
+	// the immediately-effective optimistic value while its independent PUT runs.
+	const request = setProjectPlayFinishSoundOverride(projectId, desired);
+	renderApp();
+
+	let succeeded = false;
+	try {
+		succeeded = await request;
+	} catch {
+		// The shared helper is non-throwing, but keep the Settings surface resilient.
+	}
+
+	const current = getProjectSoundSaveState(projectId);
+	if (current.requestId !== requestId) return;
+	if (!succeeded) {
+		current.status = "error";
+		renderApp();
+		return;
+	}
+
+	current.status = "saved";
+	current.failedDesired = undefined;
+	current.clearTimer = setTimeout(() => {
+		const latest = _projectSoundSaveStates.get(projectId);
+		if (latest?.requestId === requestId && latest.status === "saved") {
+			latest.status = "";
+			latest.clearTimer = undefined;
+			renderApp();
+		}
+	}, 2000);
+	renderApp();
+}
+
 /** Per-project structured `base_ref` validation error from the most recent save.
  *  Populated by `saveProjectScopeConfig` when the server returns HTTP 400 with
  *  `{ field: "base_ref", error, details? }`. Cleared on successful save or when
@@ -290,18 +382,39 @@ function loadProjectScopeConfig(projectId: string): void {
 	if (cached?.loaded) return;
 	if (cached) return; // loading in progress
 	projectScopeConfigCache.set(projectId, { resolved: {}, raw: {}, loaded: false });
+	_projectSoundConfigReadStates.set(projectId, "loading");
 	(async () => {
+		// Capture immediately before the raw request starts. A concurrent project
+		// sound write advances this revision and makes the eventual GET stale.
+		const soundReadRevision = captureProjectPlayFinishSoundRead(projectId);
 		try {
 			const [resolvedRes, rawRes] = await Promise.all([
 				gatewayFetch(`/api/projects/${projectId}/config/resolved`),
 				gatewayFetch(`/api/projects/${projectId}/config`),
 			]);
-			if (resolvedRes.ok && rawRes.ok) {
+			let raw: Record<string, any> | undefined;
+			if (rawRes.ok) {
+				const body = await rawRes.json();
+				raw = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+				primeProjectPlayFinishSoundOverride(
+					projectId,
+					raw[PROJECT_PLAY_FINISH_SOUND_KEY],
+					soundReadRevision,
+				);
+				_projectSoundConfigReadStates.set(projectId, "settled");
+			} else {
+				_projectSoundConfigReadStates.set(projectId, "error");
+			}
+			if (resolvedRes.ok && raw) {
 				const resolved = await resolvedRes.json();
-				const raw = await rawRes.json();
 				projectScopeConfigCache.set(projectId, { resolved, raw, loaded: true });
 			}
-		} catch {}
+		} catch {
+			_projectSoundConfigReadStates.set(
+				projectId,
+				isProjectPlayFinishSoundOverrideLoaded(projectId) ? "settled" : "error",
+			);
+		}
 		renderApp();
 	})();
 }
@@ -3340,6 +3453,7 @@ function renderProjectScopeTab(projectId: string) {
 	// canonical editor for component build/test commands. Showing them here would create
 	// two competing UIs. Migration auto-folds them into components[0].commands.{build,test,...}.
 	const HIDDEN_KEYS = new Set([
+		PROJECT_PLAY_FINISH_SOUND_KEY,
 		"sandbox", "sandbox_image",
 		"sandbox_tokens", "sandbox_credentials", "sandbox_github_token", "sandbox_host_token_overrides", "sandbox_mounts",
 		"worktree_pool_size",
@@ -3492,6 +3606,114 @@ function renderProjectScopeTab(projectId: string) {
 	`;
 }
 
+function retryProjectPlayFinishSoundLoad(projectId: string): void {
+	projectScopeConfigCache.delete(projectId);
+	_projectSoundConfigReadStates.delete(projectId);
+	loadProjectScopeConfig(projectId);
+	renderApp();
+}
+
+function renderProjectPlayFinishSoundSetting(projectId: string, projectName: string) {
+	ensureProjectSoundGlobalListener();
+	const loaded = isProjectPlayFinishSoundOverrideLoaded(projectId);
+	const override = getProjectPlayFinishSoundOverride(projectId) ?? "inherit";
+	const save = getProjectSoundSaveState(projectId);
+	const saving = save.status === "saving";
+	const globalEnabled = isPlayFinishSoundEnabled();
+	const effectiveEnabled = override === "on" || (override === "inherit" && globalEnabled);
+	const readState = _projectSoundConfigReadStates.get(projectId);
+	const loadFailed = !loaded && (readState === "error" || readState === "settled");
+
+	const overrideHelp = override === "on"
+		? html`<strong class="text-foreground font-medium">On:</strong> Always play a finish beep for ${projectName} sessions, even when the global setting is off.`
+		: override === "off"
+			? html`<strong class="text-foreground font-medium">Off:</strong> Never play a finish beep for ${projectName} sessions, even when the global setting is on.`
+			: html`<strong class="text-foreground font-medium">Inherit global:</strong> Use the header bell setting, currently <strong class="text-foreground font-medium">${globalEnabled ? "On" : "Off"}</strong>.`;
+	const effectiveSource = override === "on"
+		? "forced on for this project"
+		: override === "off"
+			? "forced off for this project"
+			: `inherited from global (${globalEnabled ? "On" : "Off"})`;
+
+	return html`
+		<section class="flex flex-col gap-2" aria-labelledby="project-play-finish-sound-heading">
+			<div id="project-play-finish-sound-heading" class="text-[11px] text-muted-foreground uppercase tracking-wider font-medium">Notifications</div>
+			<p class="text-xs text-muted-foreground -mt-1">Choose how this project handles agent-finish audio.</p>
+			<div class="flex items-center gap-3">
+				<label for="project-play-finish-sound" class="text-sm font-medium text-foreground w-28 sm:w-44 shrink-0">Agent finish sound</label>
+				<select
+					id="project-play-finish-sound"
+					data-testid="project-play-finish-sound"
+					class="w-full max-w-56 min-w-0 px-2 py-1 rounded-md border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
+					.value=${live(override)}
+					?disabled=${!loaded || saving}
+					aria-busy=${!loaded || saving ? "true" : "false"}
+					aria-describedby="project-play-finish-sound-help project-play-finish-sound-effective project-play-finish-sound-audio project-play-finish-sound-status"
+					@change=${(event: Event) => {
+						const desired = (event.target as HTMLSelectElement).value as ProjectPlayFinishSoundOverride;
+						if (desired === "inherit" || desired === "on" || desired === "off") {
+							void saveProjectPlayFinishSound(projectId, desired);
+						}
+					}}
+				>
+					<option value="inherit">Inherit global</option>
+					<option value="on">On</option>
+					<option value="off">Off</option>
+				</select>
+			</div>
+			<p id="project-play-finish-sound-help" class="text-[11px] text-muted-foreground ml-[calc(7rem+0.75rem)] sm:ml-[calc(11rem+0.75rem)]">
+				${overrideHelp} Sessions owned by ${projectName} use this setting even when another project is open.
+			</p>
+			<div
+				id="project-play-finish-sound-effective"
+				class="inline-flex items-center gap-1.5 self-start px-2 py-0.5 rounded-full border border-border bg-secondary/30 text-[11px] text-muted-foreground ml-[calc(7rem+0.75rem)] sm:ml-[calc(11rem+0.75rem)]"
+			>
+				<span class="w-1.5 h-1.5 rounded-full ${effectiveEnabled ? "bg-green-500" : "bg-muted-foreground"}" aria-hidden="true"></span>
+				<span>Effective: <strong class="text-foreground font-medium">${effectiveEnabled ? "On" : "Off"}</strong> — ${effectiveSource}.</span>
+			</div>
+			<p id="project-play-finish-sound-audio" class="text-[11px] text-muted-foreground ml-[calc(7rem+0.75rem)] sm:ml-[calc(11rem+0.75rem)]">
+				Audio only. Favicon badges, unread indicators, and other notifications are unaffected.
+			</p>
+			<div
+				id="project-play-finish-sound-status"
+				data-testid="project-play-finish-sound-status"
+				class="min-h-5 ml-[calc(7rem+0.75rem)] sm:ml-[calc(11rem+0.75rem)] text-xs"
+				role="status"
+				aria-live="polite"
+				aria-atomic="true"
+			>
+				${!loaded && !loadFailed ? html`<span class="text-muted-foreground">Loading sound setting…</span>` : ""}
+				${loadFailed ? html`
+					<span class="inline-flex items-center gap-2 text-destructive" role="alert">
+						Couldn’t load the sound setting.
+						<button
+							type="button"
+							data-testid="project-play-finish-sound-retry"
+							class="px-2 py-0.5 rounded border border-input text-foreground hover:bg-secondary transition-colors"
+							@click=${() => retryProjectPlayFinishSoundLoad(projectId)}
+						>Retry</button>
+					</span>
+				` : ""}
+				${loaded && save.status === "saving" ? html`<span class="text-muted-foreground">Saving…</span>` : ""}
+				${loaded && save.status === "saved" ? html`<span class="text-green-600">Saved.</span>` : ""}
+				${loaded && save.status === "error" ? html`
+					<span class="inline-flex items-center gap-2 text-destructive" role="alert">
+						Couldn’t save. Reverted to ${projectSoundOverrideLabel(override)}.
+						<button
+							type="button"
+							data-testid="project-play-finish-sound-retry"
+							class="px-2 py-0.5 rounded border border-input text-foreground hover:bg-secondary transition-colors"
+							@click=${() => {
+								if (save.failedDesired) void saveProjectPlayFinishSound(projectId, save.failedDesired);
+							}}
+						>Retry</button>
+					</span>
+				` : ""}
+			</div>
+		</section>
+	`;
+}
+
 function renderProjectGeneralTab(projectId: string) {
 	const project = (state.projects || []).find((p: any) => p.id === projectId);
 
@@ -3532,6 +3754,10 @@ function renderProjectGeneralTab(projectId: string) {
 					The directory used when creating new sessions and goals for this project.
 				</p>
 			</div>
+
+			<hr class="border-border" />
+
+			${renderProjectPlayFinishSoundSetting(projectId, project?.name || "this project")}
 
 			<hr class="border-border" />
 
