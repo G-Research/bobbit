@@ -1373,6 +1373,14 @@
       "type": "smoke-journey"
     },
     {
+      "path": "tests2/browser/journeys/project-onboarding-preflight.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/project-onboarding-repositories.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
       "path": "tests2/browser/journeys/project-settings.journey.spec.ts",
       "type": "smoke-journey"
     },
