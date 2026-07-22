@@ -1,6 +1,11 @@
-import { describe, expect, it } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { beforeAll, describe, expect, it } from "vitest";
 
 import {
+	digestPromptModelText,
+	initAuthorSidecarDir,
 	mergeAuthorSidecarIntoMessages,
 	type PromptAuthorBinding,
 } from "../../src/server/agent/author-sidecar.ts";
@@ -9,6 +14,15 @@ import { LOCAL_USER_AUTHOR, type MessageAuthor } from "../../src/shared/message-
 
 const SYSTEM_AUTHOR: MessageAuthor = { kind: "system", id: "system:bobbit", label: "Bobbit" };
 const AGENT_AUTHOR: MessageAuthor = { kind: "agent", id: "session:relay", label: "Relay" };
+
+beforeAll(() => {
+	const root = path.join(os.tmpdir(), `splice-author-${process.pid}-${Date.now()}`);
+	initAuthorSidecarDir(path.join(root, "legacy"), {
+		secretsDir: path.join(root, "secrets"),
+		hmacKey: Buffer.alloc(32, 0x5a),
+	});
+	return () => fs.rmSync(root, { recursive: true, force: true });
+});
 
 function userRow(id: string, text: string, author: MessageAuthor = LOCAL_USER_AUTHOR) {
 	return { id, role: "user", content: [{ type: "text", text }], author };
@@ -20,21 +34,23 @@ function steer(text: string, promptId: string, author: MessageAuthor = SYSTEM_AU
 
 function binding(
 	promptId: string,
-	text: string,
+	rawModelText: string,
 	messageId?: string,
 	messageTimestamp?: number,
 	author: MessageAuthor = SYSTEM_AUTHOR,
+	modelPrefix?: string,
 ): PromptAuthorBinding {
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		type: "prompt-author",
 		promptId,
 		dispatchedAt: 10_000,
-		modelText: text,
+		modelTextDigest: digestPromptModelText(rawModelText)!,
+		...(modelPrefix ? { modelPrefix } : {}),
 		source: author.kind === "agent" ? "agent" : "system",
 		author,
 		settlement: {
-			schemaVersion: 1,
+			schemaVersion: 2,
 			type: "prompt-author-settlement",
 			promptId,
 			settledAt: 11_000,
@@ -42,7 +58,7 @@ function binding(
 			...(messageId ? { messageId } : {}),
 			...(messageTimestamp === undefined ? {} : { messageTimestamp }),
 		},
-	};
+	} as PromptAuthorBinding;
 }
 
 function unresolvedBinding(promptId: string, text: string, author: MessageAuthor): PromptAuthorBinding {
@@ -84,12 +100,19 @@ describe("spliceInFlightSteers occurrence correlation", () => {
 		expect(result[1].id).toBe("inflight-steer:agent-steer");
 	});
 
-	it("suppresses only the structured occurrence proven echoed by its settlement id", () => {
+	it("suppresses a raw prefixed echo only when its sidecar digest and settlement id prove the occurrence", () => {
 		const messages = [
 			userRow("old-user", "reroute"),
-			userRow("current-echo", "reroute", SYSTEM_AUTHOR),
+			userRow("current-echo", "[System]: reroute", SYSTEM_AUTHOR),
 		];
-		const bindings = [binding("new-system-steer", "reroute", "current-echo")];
+		const bindings = [binding(
+			"new-system-steer",
+			"[System]: reroute",
+			"current-echo",
+			undefined,
+			SYSTEM_AUTHOR,
+			"[System]: ",
+		)];
 
 		const result = spliceInFlightSteers(
 			messages,
@@ -98,6 +121,30 @@ describe("spliceInFlightSteers occurrence correlation", () => {
 		);
 
 		expect(result).toBe(messages);
+	});
+
+	it("does not suppress a structured row when settlement identity matches but raw digest does not", () => {
+		const messages = [userRow("current-echo", "[System]: changed", SYSTEM_AUTHOR)];
+		const bindings = [binding(
+			"new-system-steer",
+			"[System]: reroute",
+			"current-echo",
+			undefined,
+			SYSTEM_AUTHOR,
+			"[System]: ",
+		)];
+
+		const result = spliceInFlightSteers(
+			messages,
+			[steer("reroute", "new-system-steer")],
+			bindings,
+		);
+
+		expect(result).toHaveLength(2);
+		expect(result[1]).toMatchObject({
+			id: "inflight-steer:new-system-steer",
+			content: [{ type: "text", text: "reroute" }],
+		});
 	});
 
 	it("does not use another same-text prompt's settlement as occurrence evidence", () => {

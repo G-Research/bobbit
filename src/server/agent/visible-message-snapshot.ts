@@ -44,8 +44,10 @@ function transformMessages(messages: any[], context: VisibleMessageSnapshotConte
 		authorBindings,
 	);
 	const withCompaction = mergeCompactionSidecarIntoMessages(context.sessionId, withInFlight);
-	// Author correlation must see exact model text, before skill/file sidecars
-	// replace it with the user-facing original text.
+	// This is the raw-content boundary. Binding-aware author correlation must
+	// see exact Pi model text so its digest can authorize removal of one injected
+	// prefix. Run it before truncation, cloning/order fields, or skill/file
+	// sidecars replace content with the user-facing original text.
 	const withAuthors = mergeAuthorSidecarIntoMessages(
 		authorBindings,
 		withCompaction,
@@ -65,8 +67,9 @@ function transformMessages(messages: any[], context: VisibleMessageSnapshotConte
 
 /**
  * Build the Bobbit-visible snapshot without mutating Pi-owned messages.
- * Author metadata is added only after all model-facing RPC work is complete;
- * this function never feeds its result back to Pi or a provider.
+ * Author metadata and digest-gated prefix projection are applied only after all
+ * model-facing RPC work is complete; this result is an outward view and must
+ * never be fed back to Pi or a provider.
  */
 export function buildVisibleMessageSnapshot<T>(snapshot: T, context: VisibleMessageSnapshotContext): T {
 	const normalized = normalizeToolResultErrorSnapshot(snapshot);
