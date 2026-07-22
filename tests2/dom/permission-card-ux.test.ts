@@ -3,6 +3,7 @@ import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 
 import assert from "node:assert/strict";
+import { Agent } from "@earendil-works/pi-agent-core";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import "../../src/app/session-manager.js";
 import { setRenderApp } from "../../src/app/state.js";
@@ -144,8 +145,7 @@ class FixtureSession {
 	async prompt() {}
 }
 
-async function mountAgentInterface(messages: any[]) {
-	const session = new FixtureSession(messages);
+async function mountSession<T>(session: T) {
 	const el = document.createElement("agent-interface") as any;
 	el.session = session;
 	el.gitRepoKnown = "no";
@@ -153,6 +153,10 @@ async function mountAgentInterface(messages: any[]) {
 	await el.updateComplete;
 	await settle(el);
 	return { el: el as HTMLElement & { requestUpdate: () => void; updateComplete: Promise<unknown> }, session };
+}
+
+async function mountAgentInterface(messages: any[]) {
+	return mountSession(new FixtureSession(messages));
 }
 
 function pinnedCards(root: ParentNode): HTMLElement[] {
@@ -169,6 +173,33 @@ function clickButton(card: HTMLElement, label: RegExp) {
 	assert.ok(button, `button ${label} not found`);
 	button.click();
 }
+
+describe("AgentInterface stream bridge", () => {
+	it("installs the proxy wrapper on RemoteAgent.streamFn without repeated wrapping", async () => {
+		const session = new RemoteAgent() as RemoteAgent & { streamFn?: { __isDefault?: boolean } };
+		const { el } = await mountSession(session);
+
+		const wrapped = session.streamFn;
+		assert.equal(typeof wrapped, "function");
+		assert.equal(wrapped.__isDefault, true);
+		assert.equal("streamFunction" in session, false, "RemoteAgent should keep using its streamFn bridge");
+
+		(el as any).setupSessionSubscription();
+		assert.equal(session.streamFn, wrapped, "re-subscribing must preserve the existing default wrapper");
+	});
+
+	it("installs the proxy wrapper on Pi Agent.streamFunction without repeated wrapping", async () => {
+		const session = new Agent({ streamFn: (() => undefined) as never });
+		const { el } = await mountSession(session);
+
+		const wrapped = session.streamFunction as typeof session.streamFunction & { __isDefault?: boolean };
+		assert.equal(wrapped.__isDefault, true);
+		assert.equal("streamFn" in session, false, "Pi Agent should keep using its streamFunction property");
+
+		(el as any).setupSessionSubscription();
+		assert.equal(session.streamFunction, wrapped, "re-subscribing must preserve the existing default wrapper");
+	});
+});
 
 describe("Permission Card UX reproductions", () => {
 	it("renders a committed permission-blocked tool call as pending/blocked, not complete/success", async () => {
