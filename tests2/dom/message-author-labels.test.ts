@@ -252,6 +252,32 @@ describe("AgentInterface transcript-owner mode", () => {
 		expect(badgeText(nestedOwner.querySelector(".prompt-author-badge")!)).toBe("User");
 	});
 
+	it("unregisters a disconnected hydrated slice and re-registers it on reconnect", async () => {
+		const reports: Array<readonly unknown[] | undefined> = [];
+		const nestedOwner = document.createElement("bobbit-pre-compaction-history") as any;
+		nestedOwner.sessionId = "owner-session";
+		nestedOwner.compactionId = "slice-1";
+		nestedOwner._countLoaded = true;
+		nestedOwner._rows = [{ message: prompt("nested-agent", AGENT) }];
+		nestedOwner.reportPromptAuthorSlice = (
+			_sessionId: string,
+			_compactionId: string,
+			messages: readonly unknown[] | undefined,
+		) => reports.push(messages);
+
+		document.body.appendChild(nestedOwner);
+		await nestedOwner.updateComplete;
+		await Promise.resolve();
+		expect(reports.at(-1)).toHaveLength(1);
+
+		nestedOwner.remove();
+		expect(reports.at(-1)).toBeUndefined();
+
+		document.body.appendChild(nestedOwner);
+		await Promise.resolve();
+		expect(reports.at(-1)).toHaveLength(1);
+	});
+
 	it("rejects stale slice reports from the previous session", async () => {
 		const element = owner([prompt("main-human", USER)]);
 		element._reportPromptAuthorSlice("previous-session", "slice-1", [prompt("stale-agent", AGENT)]);

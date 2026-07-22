@@ -103,6 +103,12 @@ export class PreCompactionHistory extends LitElement {
 
 	override connectedCallback() {
 		super.connectedCallback();
+		// A previously hydrated instance can be detached and reinserted by a
+		// keyed/deferred transcript render. Re-register it after connection;
+		// first-mount property updates will harmlessly replace the same slice.
+		queueMicrotask(() => {
+			if (this.isConnected) this._syncPromptAuthorReport();
+		});
 		// Lazy count fetch on first viewport hit. Prefetch slack via
 		// rootMargin keeps cards just below the fold from showing a flash
 		// of the affordance after scrolling.
