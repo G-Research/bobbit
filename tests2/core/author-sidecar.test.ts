@@ -118,6 +118,38 @@ describe("author sidecar v2 persistence", () => {
 		expect(fs.statSync(sidecarPath(sessionId)).mode & 0o777).toBe(0o600);
 	});
 
+	it("confines canonical network-derived metadata to a digest-only private ledger", () => {
+		const sessionId = "../../network\r\nsession";
+		const safeSessionId = sessionId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 160);
+		const promptText = "UNTRUSTED_NETWORK_PROMPT_must_be_hashed";
+		const injectedExtra = "UNTRUSTED_EXTRA_FIELD_must_be_dropped";
+		const networkAuthor = {
+			kind: "system",
+			id: "system:network",
+			label: "Network request",
+			uploadedBody: injectedExtra,
+		} as MessageAuthor;
+		expect(appendPromptAuthorDispatch(sessionId, dispatch("network-prompt", promptText, networkAuthor))).toBe(true);
+
+		const ledgerRoot = path.join(secretsDir, "author-sidecar");
+		const ledger = sidecarPath(safeSessionId);
+		expect(path.dirname(ledger)).toBe(ledgerRoot);
+		expect(path.relative(ledgerRoot, ledger)).not.toMatch(/^(?:\.\.[/\\]|[/\\])/);
+		const persisted = fs.readFileSync(ledger, "utf8");
+		const [record] = persisted.trim().split("\n").map((line) => JSON.parse(line));
+		expect(record).toEqual({
+			schemaVersion: 2,
+			type: "prompt-author",
+			promptId: "network-prompt",
+			dispatchedAt: 1_000,
+			modelTextDigest: digestPromptModelText(promptText),
+			source: "system",
+			author: { kind: "system", id: "system:network", label: "Network request" },
+		});
+		expect(persisted).not.toContain(promptText);
+		expect(persisted).not.toContain(injectedExtra);
+	});
+
 	it("keeps settled digest correlation stable when re-initialized with the same key", () => {
 		const sessionId = "same-key-reinit";
 		const text = "stable restart correlation";

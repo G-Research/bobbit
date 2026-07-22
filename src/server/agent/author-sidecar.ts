@@ -328,6 +328,9 @@ function secureFileDescriptor(fd: number): void {
 function writeAll(fd: number, value: Buffer): void {
 	let offset = 0;
 	while (offset < value.length) {
+		// Only canonical v2 ledger JSON reaches this private, non-executable file;
+		// paths are server-rooted and prompt bodies have already become keyed HMACs.
+		// codeql[js/http-to-file-access] Intentional bounded metadata ledger write, not an arbitrary upload.
 		const written = fs.writeSync(fd, value, offset, value.length - offset, null);
 		if (!Number.isSafeInteger(written) || written <= 0) throw new Error("Author-sidecar write was incomplete");
 		offset += written;
@@ -354,6 +357,9 @@ function fsyncDirectory(target: string): void {
 	if (sidecarPlatform === "win32") return;
 	let fd: number | undefined;
 	try {
+		// O_RDONLY cannot create a temporary file; this directory descriptor only
+		// makes the preceding rename/unlink durable.
+		// codeql[js/insecure-temporary-file] Non-creating directory fsync open.
 		fd = fs.openSync(target, fs.constants.O_RDONLY);
 		fs.fsyncSync(fd);
 	} catch (error) {
@@ -468,6 +474,9 @@ interface LegacyFileSnapshot {
 function readClaimedLegacyFile(legacyFile: string): LegacyFileSnapshot {
 	let fd: number | undefined;
 	try {
+		// O_RDONLY cannot create a temporary file; O_NOFOLLOW additionally rejects
+		// a raced symlink before this claimed legacy inode is read and unlinked.
+		// codeql[js/insecure-temporary-file] Non-creating, no-follow migration read.
 		fd = fs.openSync(legacyFile, secureOpenFlags(fs.constants.O_RDONLY));
 		const stat = fs.fstatSync(fd);
 		if (!stat.isFile()) throw new Error("Claimed legacy author sidecar is not a regular file");
