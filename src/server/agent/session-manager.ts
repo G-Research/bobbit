@@ -759,9 +759,9 @@ export interface SessionInfo {
 	/** Stable Pi-message-id bindings. Retained after settlement so duplicate
 	 * update/end replay cannot consume a later identical-text prompt record. */
 	promptAuthorMessageBindings?: Map<string, LivePromptAuthorMessageBinding>;
-	/** Restore-only FIFO of non-cancelled prompt occurrences. Settled keyless
-	 * rows remain guards for the whole Pi transcript replay because a legacy
-	 * frame has no occurrence identity with which to distinguish duplicates. */
+	/** Restore-only FIFO cursor of non-cancelled prompt occurrences. A completed
+	 * replay occurrence is removed only at its terminal frame; its last-terminal
+	 * guard still makes duplicate keyless ends idempotent until the next start. */
 	promptAuthorReplayBindings?: ReplayPromptAuthorBinding[];
 	/** Last keyless terminal occurrence within one live lifecycle boundary. */
 	lastKeylessPromptAuthorEnd?: ReplayPromptAuthorBinding;
@@ -1202,6 +1202,13 @@ export function prepareVisibleAgentEvent(
 	if ((raw.type !== "message_update" && raw.type !== "message_end") || !raw.message || typeof raw.message !== "object") {
 		if (raw.type === "agent_start" || raw.type === "agent_end") {
 			session.lastKeylessPromptAuthorEnd = undefined;
+		} else if (raw.type === "message_start"
+			&& (raw.message?.role === "user" || raw.message?.role === "user-with-attachments")) {
+			// Pi's start frame is the only occurrence boundary available when a
+			// legacy transcript row has neither an id nor a timestamp. Advance may
+			// now use the next replay binding; duplicate terminal frames (which have
+			// no intervening start) continue to reuse the completed occurrence.
+			session.lastKeylessPromptAuthorEnd = undefined;
 		}
 		return event;
 	}
@@ -1225,11 +1232,10 @@ export function prepareVisibleAgentEvent(
 		stableBinding = session.lastKeylessPromptAuthorEnd;
 	}
 	if (!stableBinding && userRole && !messageKey && modelText) {
-		// During switch_session replay, settled legacy rows without an id or
-		// timestamp must win over unresolved identical-text rows. Keep settled
-		// rows as guards until replay completes: duplicate keyless frames are
-		// otherwise information-theoretically indistinguishable from the newer
-		// occurrence and could erase its durable steer ledger.
+		// The restore-only array is an occurrence cursor in transcript order. A
+		// terminal frame removes the occurrence below, while lastKeylessPromptAuthorEnd
+		// retains its binding until the next message_start so an immediate duplicate
+		// end cannot advance into a newer identical-text prompt.
 		stableBinding = session.promptAuthorReplayBindings?.find((binding) =>
 			promptAuthorBindingMatchesText(binding, modelText),
 		);
@@ -1273,10 +1279,11 @@ export function prepareVisibleAgentEvent(
 		systemAuthor: BOBBIT_SYSTEM_AUTHOR,
 		promptAuthor: author,
 	});
-	if (raw.type === "message_end" && messageKey && stableBinding) {
-		session.promptAuthorReplayBindings = session.promptAuthorReplayBindings?.filter(
-			(binding) => binding.promptId !== stableBinding!.promptId,
+	if (raw.type === "message_end" && stableBinding && session.promptAuthorReplayBindings) {
+		const replayIndex = session.promptAuthorReplayBindings.findIndex(
+			(binding) => binding.promptId === stableBinding!.promptId,
 		);
+		if (replayIndex !== -1) session.promptAuthorReplayBindings.splice(replayIndex, 1);
 	}
 	if (raw.type === "message_end" && stableBinding?.settled) {
 		(prepared as any)[PROMPT_AUTHOR_EVENT_BINDING] = {

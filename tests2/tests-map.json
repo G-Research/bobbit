@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/session-manager-keyless-replay-cursor.test.ts",
+      "reason": "Deterministic cold-restore and force-abort regression proving ordered keyless replay advances from settled p1 to crash-unsettled persisted p2, while duplicate terminal frames remain idempotent and p2 is never requeued.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/session-manager-keyless-guard-lifecycle.test.ts",
       "reason": "Deterministic regression proving an assistant stream cannot clear the live keyless terminal guard before a duplicate same-text p1 end, while preserving p2's author and steer settlement plus genuine new-dispatch supersession.",
       "execution": {
