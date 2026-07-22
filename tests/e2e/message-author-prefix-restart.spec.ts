@@ -216,6 +216,13 @@ test.describe.serial("message author prefix restart projection", () => {
 	test("trusted agent/system prefixes remain raw-only across EventBuffer replay, projection re-entry, search rebuild, and gateway restart", async ({ gateway }) => {
 		test.setTimeout(120_000);
 		const project = await defaultProject();
+		// Fresh E2E state schedules a delayed empty-index rebuild. Let that settle
+		// before the mock's live-only messages begin so this projection test cannot
+		// race a rebuild that read the mock transcript before get_state flushed it.
+		await pollUntil(
+			() => searchLastRebuildAt(project.id),
+			{ timeoutMs: 20_000, intervalMs: 150, label: "initial search rebuild completion" },
+		);
 		const callerId = await createSession({ projectId: project.id });
 		const targetId = await createSession({ projectId: project.id });
 		const nonce = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;

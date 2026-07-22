@@ -226,20 +226,21 @@ export class ProjectContextManager {
       rawResults.push(...results);
     }
 
-    // Orphan filter + weak-match drop (message-only).
-    const dropped: SearchResult[] = [];
+    // Orphan filter + weak-match drop (message-only). Weak metadata matches
+    // are valid index rows that happened to rank for this query, so omit them
+    // from this response without deleting their parent session's message index.
+    const orphaned: SearchResult[] = [];
     const filtered = rawResults.filter((hit) => {
-      if (!this._hitExists(hit)) { dropped.push(hit); return false; }
+      if (!this._hitExists(hit)) { orphaned.push(hit); return false; }
       if (hit.type === "message" && hit.matchedOn === "metadata") {
         // Phantom match — token hit metadata only, user can't see why.
-        dropped.push(hit);
         return false;
       }
       return true;
     });
 
-    // Opportunistic cleanup — fire-and-forget.
-    if (dropped.length > 0) this._scheduleOpportunisticCleanup(dropped);
+    // Opportunistic cleanup is only for rows whose backing entity is gone.
+    if (orphaned.length > 0) this._scheduleOpportunisticCleanup(orphaned);
 
     // Sort by timestamp descending (most recent first) and apply pagination.
     filtered.sort((a, b) => b.timestamp - a.timestamp);
