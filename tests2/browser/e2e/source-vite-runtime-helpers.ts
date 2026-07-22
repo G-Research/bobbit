@@ -202,6 +202,23 @@ export function startSourceVite(options: SourceViteOptions): RunningSourceProces
 	return captureProcess(child, "Vite source server");
 }
 
+export async function waitForSourceGateway(baseUrl: string, runtime: RunningSourceProcess, timeoutMs = 120_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	let lastError = "not attempted";
+	while (Date.now() < deadline) {
+		if (runtime.child.exitCode !== null) throw processFailure(runtime, `exited ${runtime.child.exitCode} before readiness`);
+		try {
+			const response = await fetch(`${baseUrl}/api/health`);
+			if (response.ok) return;
+			lastError = `${response.status} ${response.statusText}`;
+		} catch (error) {
+			lastError = String(error);
+		}
+		await new Promise(resolveDelay => setTimeout(resolveDelay, 250));
+	}
+	throw processFailure(runtime, `readiness timed out: ${lastError}`);
+}
+
 export async function waitForSourceVite(baseUrl: string, runtime: RunningSourceProcess, timeoutMs = 120_000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	let lastError = "not attempted";

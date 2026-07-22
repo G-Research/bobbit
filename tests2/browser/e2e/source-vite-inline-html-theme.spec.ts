@@ -7,13 +7,13 @@ import {
 	getFreePort,
 	promptSession,
 	readToken,
-	waitForHealth,
 } from "./packaged-runtime-helpers.js";
 import {
 	processFailure,
 	startIsolatedSourceGateway,
 	startSourceVite,
 	stopSourceProcess,
+	waitForSourceGateway,
 	waitForSourceVite,
 	writeSourceViteAgent,
 	type RunningSourceProcess,
@@ -169,10 +169,15 @@ test.describe("source Vite inline HTML theme runtime", () => {
 				agentPath,
 				port: gatewayPort,
 			});
-			await waitForHealth(gatewayBaseUrl, gateway, 120_000);
+			await waitForSourceGateway(gatewayBaseUrl, gateway);
 			const token = await readToken(join(tempRoot, "secrets"));
+			const preferenceResponse = await fetch(`${gatewayBaseUrl}/api/preferences`, {
+				method: "PUT",
+				headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+				body: JSON.stringify({ palette: "ocean" }),
+			});
+			expect(preferenceResponse.ok, `failed to seed ocean palette: ${preferenceResponse.status} ${await preferenceResponse.text()}`).toBe(true);
 			const sessionId = await createProjectAndSession(gatewayBaseUrl, token, workspaceDir);
-			await promptSession(gatewayWsUrl, sessionId, token);
 
 			vite = startSourceVite({
 				repoRoot: REPO_ROOT,
@@ -203,6 +208,11 @@ test.describe("source Vite inline HTML theme runtime", () => {
 				localStorage.setItem("theme", "light");
 				localStorage.setItem("palette", "ocean");
 			});
+			// Emit the focused Write call only after the source UI has reached the
+			// known host state. Whether the root view already connected this sole
+			// session or the hash navigation restores it historically, iframe parse
+			// now necessarily happens against the same light/ocean host.
+			await promptSession(gatewayWsUrl, sessionId, token);
 			await page.evaluate(id => { window.location.hash = `#/session/${id}`; }, sessionId);
 
 			const iframe = page.locator('iframe[title="theme-card.html"]');
