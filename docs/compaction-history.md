@@ -85,16 +85,28 @@ Module: `src/server/agent/compaction-sidecar.ts`.
 
 ### Append points
 
-The sidecar entry is appended once per compaction, after the upstream
-agent acknowledges the operation:
+For successful manual, automatic, and overflow compactions, Pi's
+`compaction_end` event is the authoritative completion boundary.
+`SessionManager` appends the sidecar synchronously before
+`refreshAfterCompaction`, stamps the shared `compactionId`, and then lets the
+refreshed transcript and completion event reach clients. The same ordering
+applies to `compaction_end { willRetry: true }`: the compaction has completed,
+but the surrounding agent turn will retry. Pi emits no later terminal
+`compaction_end` for that operation.
 
-- **Manual `/compact`** — appended next to the `compaction_end` broadcast
-  in `src/server/ws/handler.ts`. Both success and failure paths write an
-  entry; failure rows carry `success: false` and `error`.
-- **Auto / overflow** — appended in
-  `src/server/agent/session-manager.ts` when the agent emits
-  `auto_compaction_end`. `startedAt` is stashed at the corresponding
-  `*_start` event so `durationMs` can be computed.
+- **Manual `/compact` success** — the WebSocket handler stashes the id before
+  calling `compact()`. `SessionManager` uses the successful `compaction_end`
+  result to write the row before transcript refresh. The handler writes a
+  failure row if the RPC rejects without a successful completion event, and
+  retains a success fallback if the event path could not write the row.
+- **Auto / overflow** — `SessionManager` stashes the start metadata at
+  `compaction_start`, then writes the completion row from `compaction_end`,
+  including the successful overflow form with `willRetry: true`. The legacy
+  `auto_compaction_end` event name remains accepted as a compatibility input,
+  not as the only automatic-compaction completion signal.
+
+Failed rows carry `success: false` and `error`; only successful rows create an
+orphan-history boundary for the live card.
 
 ## Snapshot splice — making the card survive reload
 
@@ -282,18 +294,18 @@ Lifecycle:
    button at the bottom drives further pages.
 5. The same chevron collapses the section.
 
-#### Count-probe retry — covering the manual `/compact` sidecar race
+#### Count-probe retry — bounded resilience
 
-The live card mounts on the `compaction_end` event, but on the manual
-`/compact` path the sidecar row is appended only *after* the `compact()`
-RPC resolves (see *Append points* above). The count probe can therefore
-fire a beat before the sidecar exists and get a `404`
-(`compaction_not_found`). Before this fix the widget treated that `404`
-as "no history" and permanently cached `total = 0`, hiding the affordance
-until reload.
+The normal successful path does not race the manual `compact()` RPC:
+`SessionManager` writes the sidecar while handling `compaction_end`, before it
+refreshes the transcript or forwards completion to the live card. This also
+holds for automatic and overflow completions, including
+`compaction_end { willRetry: true }`.
 
-Now a transient `404` (and any network / transport error) is retryable
-with bounded backoff:
+The widget still treats a transient `404` (`compaction_not_found`) or network /
+transport error as retryable. This protects the UI from short propagation
+delays, compatibility fallbacks, and temporarily unavailable state without
+permanently caching `total = 0`:
 
 - The component keeps `_total === null` (its no-render "loading" state)
   while retries are pending — it never flashes the affordance and never
@@ -314,8 +326,9 @@ empty immediately. `refreshCount()` (the public test/refresh hook)
 clears any pending retry timer and resets the retry counter before
 re-running the probe from scratch.
 
-This is a client-only change — no server compaction behaviour, reducer
-dedup, or reload persistence is affected.
+The bounded retry remains a client-side resilience measure; the server-side
+sidecar-before-refresh ordering is the primary guarantee. Reducer dedup and
+reload persistence are unchanged.
 
 The component renders OUTSIDE the reducer-owned message list, so it
 does not perturb the reducer's `_order` invariants documented in
@@ -331,8 +344,8 @@ Test hooks (used by the browser E2Es):
 | Concern | File |
 | --- | --- |
 | Sidecar storage + synthetic-row construction + snapshot splice | `src/server/agent/compaction-sidecar.ts` |
-| Sidecar append (manual path) + `get_messages` splice + manual `compactionId` stash | `src/server/ws/handler.ts` |
-| Sidecar append (auto / overflow path) + `refreshAfterCompaction` splice + shared `compactionId` mint/stamp | `src/server/agent/session-manager.ts` |
+| Manual RPC failure/fallback append + `get_messages` splice + manual `compactionId` stash | `src/server/ws/handler.ts` |
+| Successful manual / auto / overflow append before `refreshAfterCompaction` + shared `compactionId` mint/stamp | `src/server/agent/session-manager.ts` |
 | Live card carries `compactionId`; reducer dedups persisted vs live by `compactionId` | `src/app/remote-agent.ts`, `src/app/message-reducer.ts` |
 | Pre-compaction reader + branch-split logic | `src/server/agent/transcript-reader.ts` — `readOrphanedBeforeCompaction` |
 | Sandbox-aware transcript read | `src/server/agent/session-fs.ts` — `sessionFileRead` |
@@ -340,8 +353,8 @@ Test hooks (used by the browser E2Es):
 | Pre-compaction history component + count-probe retry | `src/ui/components/PreCompactionHistory.ts` |
 | Renderer integration (mounts the child when `compactionId` is set) | `src/ui/tools/renderers/CompactionSummaryRenderer.ts` |
 | Payload type (adds `compactionId?: string`) | `src/app/compaction-types.ts` |
-| API E2E (endpoint contract) | `tests/e2e/transcript-before-compaction.spec.ts` |
-| Browser E2E (persistence + expand + `@live-compaction-affordance` live-session affordance + count-probe transient-404 retry) | `tests/e2e/ui/compaction-persistence.spec.ts`, `tests/e2e/ui/pre-compaction-history.spec.ts` |
+| API integration (endpoint contract) | `tests2/integration/transcript-before-compaction.test.ts` |
+| Browser E2E (persistence + expand + `@live-compaction-affordance` live-session affordance + count-probe transient-404 retry) | `tests2/browser/e2e/pre-compaction-history.spec.ts` |
 | Full design rationale | [docs/design/persist-compaction-history.md](design/persist-compaction-history.md) |
 
 ## See also

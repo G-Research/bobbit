@@ -2,7 +2,7 @@
 
 Bobbit consumes Pi for model metadata, agent process control, and provider adapters. The Pi `0.77.0` upgrade adds first-class Claude Opus 4.8 metadata and changes enough adjacent runtime behaviour that Bobbit pins the integration with model-ranking, thinking-level, spawn, transcript, Bedrock, and RPC lifecycle tests.
 
-This page documents the shipped Bobbit-side contract for that upgrade. For current Pi runtime compatibility boundaries and the Pi `0.80.x` upgrade notes, see [Pi runtime compatibility](pi-runtime-compatibility.md).
+This page documents the shipped Bobbit-side contract for that upgrade. For current Pi runtime compatibility boundaries and the Pi `0.81.1` upgrade notes, see [Pi runtime compatibility](pi-runtime-compatibility.md).
 
 ## Package and model support
 

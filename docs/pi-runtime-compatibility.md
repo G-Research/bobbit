@@ -172,7 +172,7 @@ By contrast, `compaction_end { willRetry: true }` means the compaction itself su
 
 Bobbit must therefore complete the compaction boundary on that event: clear `isCompacting`, persist the sidecar, attach the `compactionId`, refresh the transcript, forward the completion to clients, and retain `result.usage`. `willRetry` applies only to turn settlement. Turn waiters, queued prompts, one-time grants, idle status, and completed-turn accounting remain pending until the final `agent_end`. Keeping these boundaries separate prevents lost compaction history without dispatching queued work during the retried turn.
 
-Pinned coverage: `tests2/core/pi-rpc-agent-end-retry.test.ts`, `tests2/core/compaction-types.test.ts`, `tests2/dom/ui-fixtures/compaction-widget.test.ts`, and the full-stack `tests/e2e/ui/pre-compaction-history.spec.ts` reload journey.
+Pinned coverage: `tests2/core/pi-rpc-agent-end-retry.test.ts`, `tests2/core/compaction-types.test.ts`, `tests2/dom/ui-fixtures/compaction-widget.test.ts`, and the full-stack `tests2/browser/e2e/pre-compaction-history.spec.ts` reload journey.
 
 ## Tool lifecycle and optional result fields
 
@@ -202,7 +202,7 @@ Bobbit does read Pi-owned JSONL. It must preserve new `retainedTail`, optional `
 
 Session-tree metadata such as `active_tools_change`, `leaf`, `branch_summary`, and hidden `custom_message` rows is not chat content or Bobbit runtime metadata. Sanitization and cwd rebasing leave it intact. Only Bobbit-owned runtime headers are eligible for cwd rebasing during fork and continue-archived flows.
 
-Pinned coverage: `tests2/core/transcript-sanitizer.test.ts`, `tests2/core/compaction-types.test.ts`, and `tests/e2e/ui/pre-compaction-history.spec.ts`.
+Pinned coverage: `tests2/core/transcript-sanitizer.test.ts`, `tests2/core/compaction-types.test.ts`, and `tests2/browser/e2e/pre-compaction-history.spec.ts`.
 
 ## Orphan tool-result persistence and recovery
 

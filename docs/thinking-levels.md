@@ -51,8 +51,8 @@ export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 
 Ranked low→high. `off` is available unless upstream explicitly disables it
 with `off: null` (forced adaptive thinking). `xhigh` is supported by Opus
-4.6+ and some GPT 5.x families. `max` is the Pi `0.80.6` addition for models
-whose upstream `thinkingLevelMap` explicitly includes it.
+4.6+ and some GPT 5.x families. `max` is exposed by the Pi `0.81.1` catalog
+for models whose upstream `thinkingLevelMap` explicitly includes it.
 
 The canonical `ThinkingLevel` type, the `ModelLike` shape consumed by
 capability detection, and the helpers below all live in
