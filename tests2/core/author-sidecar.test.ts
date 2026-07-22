@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -165,6 +165,28 @@ describe("author sidecar v2 persistence", () => {
 		expect(readAuthorSidecar("missing")).toEqual([]);
 		expect(appendPromptAuthorDispatch("invalid", { ...dispatch("", "text"), promptId: "" })).toBe(false);
 		expect(readAuthorSidecar("invalid")).toEqual([]);
+	});
+
+	it("uses a static format with escaped and bounded read-failure diagnostics", () => {
+		const sessionId = `diagnostic\r\n[forged]%s${"x".repeat(600)}`;
+		const safeSessionId = sessionId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 160);
+		const unreadableLedger = sidecarPath(safeSessionId);
+		fs.mkdirSync(unreadableLedger);
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		try {
+			expect(readAuthorSidecar(sessionId)).toEqual([]);
+			expect(warning).toHaveBeenCalledOnce();
+			const [format, sessionDiagnostic, errorDiagnostic] = warning.mock.calls[0];
+			expect(format).toBe("[author-sidecar] Read failed for session %s: %s");
+			expect(sessionDiagnostic).toBe(JSON.stringify(sessionId).slice(0, 512));
+			expect(sessionDiagnostic).not.toMatch(/[\r\n]/);
+			expect(String(sessionDiagnostic).length).toBeLessThanOrEqual(512);
+			expect(errorDiagnostic).not.toMatch(/[\r\n]/);
+			expect(String(errorDiagnostic).length).toBeLessThanOrEqual(512);
+		} finally {
+			warning.mockRestore();
+			fs.rmSync(unreadableLedger, { recursive: true, force: true });
+		}
 	});
 
 	it("migrates valid v1 rows from a corrupt partial ledger and removes the plaintext source", () => {

@@ -123,6 +123,7 @@ interface LegacyPromptAuthorSettlementRecord {
 
 const CORRELATION_TOLERANCE_MS = 2_000;
 const MAX_KEY_LENGTH = 256;
+const MAX_DIAGNOSTIC_VALUE_LENGTH = 512;
 const DIGEST_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const SIDECAR_KEY_DOMAIN = "bobbit/author-sidecar/v2/key\0";
 const PROMPT_DIGEST_DOMAIN = "bobbit/author-sidecar/v2/prompt-text\0";
@@ -140,6 +141,12 @@ function validTimestamp(value: unknown): value is number {
 
 function validDigest(value: unknown): value is string {
 	return typeof value === "string" && DIGEST_PATTERN.test(value);
+}
+
+/** Quote, control-character escape, and bound values before plain-text logging. */
+function diagnosticValue(value: unknown): string {
+	const text = value instanceof Error ? `${value.name}: ${value.message}` : String(value);
+	return JSON.stringify(text).slice(0, MAX_DIAGNOSTIC_VALUE_LENGTH);
 }
 
 function isDispatchRecord(value: unknown): value is PromptAuthorDispatchRecord {
@@ -685,7 +692,11 @@ export function readAuthorSidecar(sessionId: string): PromptAuthorBinding[] {
 		const text = readSecureText(target);
 		return text === undefined ? [] : foldAuthorSidecarRecords(recordsFromText(text));
 	} catch (error) {
-		console.warn(`[author-sidecar] Read failed for session ${sessionId}:`, error);
+		console.warn(
+			"[author-sidecar] Read failed for session %s: %s",
+			diagnosticValue(sessionId),
+			diagnosticValue(error),
+		);
 		return [];
 	}
 }
