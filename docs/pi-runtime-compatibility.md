@@ -164,11 +164,13 @@ Bobbit therefore keeps the session streaming and does not revoke one-time tool g
 
 Pinned coverage: `tests2/core/pi-rpc-agent-end-retry.test.ts`.
 
-### Summarization and compaction retries
+### Summarization retries and post-compaction turn retry
 
-Pi `0.81.1` adds retry policies and lifecycle events for compaction and branch summarization, including `summarization_retry_scheduled`, `summarization_retry_attempt_start`, and `summarization_retry_finished`. Bobbit forwards these additive events and retains summary usage across retries.
+Pi `0.81.1` has two distinct retry scopes. `summarization_retry_scheduled`, `summarization_retry_attempt_start`, and `summarization_retry_finished` describe summarizer retry attempts; for compaction, those attempts run *inside* `compact()`. Bobbit forwards these additive events and preserves summary usage.
 
-A `compaction_end` or `auto_compaction_end` with `willRetry: true` is a non-terminal continuation. Bobbit retains its usage but keeps `isCompacting` true and does not write a sidecar, attach `compactionId`, refresh the transcript, or tell clients that compaction completed. Those completion effects run only for the terminal compaction event where `willRetry !== true`. Turn waiters, queued prompts, grants, and completed-turn accounting remain pending beyond that event until the terminal `agent_end`. This prevents a summarizer retry from creating a false compaction or idle boundary.
+By contrast, `compaction_end { willRetry: true }` means the compaction itself succeeded and the aborted overflow turn will retry afterward. The installed `0.81.1` runtime has already appended the compaction entry and rebuilt agent state before emitting this event; it then returns to continue the agent turn. It does not emit a later terminal `compaction_end` for the same operation.
+
+Bobbit must therefore complete the compaction boundary on that event: clear `isCompacting`, persist the sidecar, attach the `compactionId`, refresh the transcript, forward the completion to clients, and retain `result.usage`. `willRetry` applies only to turn settlement. Turn waiters, queued prompts, one-time grants, idle status, and completed-turn accounting remain pending until the final `agent_end`. Keeping these boundaries separate prevents lost compaction history without dispatching queued work during the retried turn.
 
 Pinned coverage: `tests2/core/pi-rpc-agent-end-retry.test.ts`, `tests2/core/compaction-types.test.ts`, `tests2/dom/ui-fixtures/compaction-widget.test.ts`, and the full-stack `tests/e2e/ui/pre-compaction-history.spec.ts` reload journey.
 
