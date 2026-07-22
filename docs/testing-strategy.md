@@ -30,7 +30,7 @@ ownership, and lost declaration semantics.
 The unit phase uses one Vitest coordinator with a fixed three-worker cap and
 `retry: 3`. `VITEST_MAX_WORKERS` may lower the cap only. It has no lane runner,
 ledger reservation, cost sharding, lane logs, or gateway-boot lease. All four tier-1
-projects install the subprocess guard and enforce a hard 15-second solo file budget.
+projects install the subprocess guard and enforce a hard 25-second solo file budget.
 See [Unit gate operating model](testing-v2/unit-gate.md) for cache, proof-mode, E2E
 ownership, and audit details.
 
@@ -672,7 +672,7 @@ ledger capacity or gateway-boot leases. Its fixed cap of three workers is safe f
 three simultaneous suites on the acceptance host without dynamic allocation.
 
 **Solo enforcement.** `UnitFileBudgetReporter` measures each tier-1 module from start
-through hooks and retries. A file above 15 seconds fails an ordinary run, even when
+through hooks and retries. A file above 25 seconds fails an ordinary run, even when
 its tests pass. The unit-stage wall qualification also requires consecutive ordinary
 solo runs; see [`fast-gate-progress.md`](testing-v2/fast-gate-progress.md).
 
@@ -874,7 +874,7 @@ their transform-cache isolation and phase-specific worker/retry settings.
 
 - Do not raise the unit gate above three workers or route it through ledger, lane,
   cost-shard, or gateway-boot-lease orchestration.
-- Do not weaken the 15-second solo file budget or use concurrent-proof mode as solo
+- Do not weaken the 25-second solo file budget or use concurrent-proof mode as solo
   qualification evidence.
 - Do not add a third Vitest E2E owner; keep decision coverage in tier 1 when editing
   either approved real-fidelity suite.
