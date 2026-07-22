@@ -395,10 +395,11 @@ function loadProjectScopeConfig(projectId: string): void {
 			let raw: Record<string, any> | undefined;
 			if (rawRes.ok) {
 				const body = await rawRes.json();
-				raw = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+				const parsedRaw: Record<string, any> = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+				raw = parsedRaw;
 				primeProjectPlayFinishSoundOverride(
 					projectId,
-					raw[PROJECT_PLAY_FINISH_SOUND_KEY],
+					parsedRaw[PROJECT_PLAY_FINISH_SOUND_KEY],
 					soundReadRevision,
 				);
 				_projectSoundConfigReadStates.set(projectId, "settled");
