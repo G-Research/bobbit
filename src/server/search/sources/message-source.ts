@@ -28,6 +28,7 @@ import {
 	type PromptAuthorBinding,
 } from "../../agent/author-sidecar.js";
 import {
+	isToolResultOnlyMessage,
 	normalizeVisibleMessage,
 	type NormalizeVisibleMessageContext,
 } from "../../agent/message-author.js";
@@ -192,15 +193,34 @@ export class MessageIndexSource implements IndexSource {
 			}
 
 			let precedingAuthor: MessageAuthor | undefined;
+			let precedingAuthorIsUnknown = false;
 			for await (const row of streamTranscriptRows(filePath, session.lastActivity ?? 0)) {
 				const promptAuthor = correlation.resolve(row.message, row.msgIdx);
+				const isToolResult = isToolResultOnlyMessage(row.message);
+				const isOrdinaryPrompt = !isToolResult
+					&& (row.message.role === "user" || row.message.role === "user-with-attachments");
+				// Once compact correlation exceeds its cap, role alone cannot distinguish
+				// human prompts from sidecar-authored system/agent prompts. Omit rather
+				// than persisting the normalizer's legacy local-user fallback as fact.
+				const authorDependsOnDegradedCorrelation = correlation.degraded
+					&& ((isOrdinaryPrompt && !isMessageAuthor(promptAuthor))
+						|| (isToolResult && precedingAuthorIsUnknown));
 				const msg = normalizeVisibleMessage(row.message, {
 					...normalizationContext,
 					existingAuthorIsTrusted: false,
 					promptAuthor,
 					precedingAuthor,
 				});
-				if (isMessageAuthor(msg.author)) precedingAuthor = msg.author;
+				const indexedAuthor = !authorDependsOnDegradedCorrelation && isMessageAuthor(msg.author)
+					? msg.author
+					: undefined;
+				if (authorDependsOnDegradedCorrelation) {
+					precedingAuthor = undefined;
+					precedingAuthorIsUnknown = true;
+				} else if (indexedAuthor) {
+					precedingAuthor = indexedAuthor;
+					precedingAuthorIsUnknown = false;
+				}
 
 				const hit = extractForIndexing(msg);
 				for (const entry of hit.entries) {
@@ -213,10 +233,10 @@ export class MessageIndexSource implements IndexSource {
 					};
 					if (goalTitle) metadata.goalTitle = goalTitle;
 					if (displayTitle) metadata.sessionTitle = displayTitle;
-					if (isMessageAuthor(msg.author)) {
-						metadata.authorKind = msg.author.kind;
-						metadata.authorId = msg.author.id;
-						metadata.authorLabel = msg.author.label;
+					if (indexedAuthor) {
+						metadata.authorKind = indexedAuthor.kind;
+						metadata.authorId = indexedAuthor.id;
+						metadata.authorLabel = indexedAuthor.label;
 					}
 					yield {
 						id,

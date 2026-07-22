@@ -569,7 +569,7 @@ describe("MessageIndexSource", () => {
 		}
 	});
 
-	test("safely degrades sidecar attribution when compact binding state exceeds its cap", async () => {
+	test("omits ambiguous prompt authors when compact sidecar correlation exceeds its cap", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "msg-source-binding-cap-"));
 		const file = path.join(dir, "session.jsonl");
 		fs.writeFileSync(file, [
@@ -577,6 +577,23 @@ describe("MessageIndexSource", () => {
 				role: "user",
 				content: "SystemBindingCapToken",
 				author: { kind: "agent", id: "session:forged", label: "Forged" },
+			} }),
+			JSON.stringify({ id: "ambiguous-tool-row", message: {
+				role: "user",
+				content: [{ type: "tool_result", content: "AmbiguousToolResultToken" }],
+				author: { kind: "user", id: "user:forged", label: "Forged" },
+			} }),
+			JSON.stringify({ id: "assistant-row", message: {
+				role: "assistant",
+				content: [
+					{ type: "text", text: "SafeAssistantToken" },
+					{ type: "tool_use", name: "read", input: { path: "safe.txt" } },
+				],
+				author: { kind: "system", id: "system:forged", label: "Forged" },
+			} }),
+			JSON.stringify({ id: "safe-tool-row", message: {
+				role: "user",
+				content: [{ type: "tool_result", content: "SafeToolResultToken" }],
 			} }),
 			JSON.stringify({ id: "agent-row", message: {
 				role: "user",
@@ -623,10 +640,33 @@ describe("MessageIndexSource", () => {
 			}));
 
 			expect(readBindings).toHaveBeenCalledOnce();
-			expect(messages.map((message) => message.text)).toEqual(["SystemBindingCapToken", "AgentBindingCapToken"]);
-			expect(messages.map((message) => message.metadata.msgIdx)).toEqual([0, 1]);
-			expect(messages.map((message) => message.metadata.authorKind)).toEqual(["user", "user"]);
-			expect(messages.map((message) => message.metadata.authorId)).toEqual(["user:local", "user:local"]);
+			expect(messages.map(({ text, role, metadata }) => ({
+				text,
+				role,
+				msgIdx: metadata.msgIdx,
+				blockKey: metadata.blockKey,
+			}))).toEqual([
+				{ text: "SystemBindingCapToken", role: "user", msgIdx: 0, blockKey: "text:0" },
+				{ text: "AmbiguousToolResultToken", role: "tool_result", msgIdx: 1, blockKey: "tool_result:0" },
+				{ text: "SafeAssistantToken", role: "assistant", msgIdx: 2, blockKey: "text:0" },
+				{ text: "read {\"path\":\"safe.txt\"}", role: "tool_call", msgIdx: 2, blockKey: "tool_use:1" },
+				{ text: "SafeToolResultToken", role: "tool_result", msgIdx: 3, blockKey: "tool_result:0" },
+				{ text: "AgentBindingCapToken", role: "user", msgIdx: 4, blockKey: "text:0" },
+			]);
+			const authors = messages.map(({ metadata }) => ({
+				kind: metadata.authorKind,
+				id: metadata.authorId,
+				label: metadata.authorLabel,
+			}));
+			expect(authors).toEqual([
+				{ kind: undefined, id: undefined, label: undefined },
+				{ kind: undefined, id: undefined, label: undefined },
+				{ kind: "agent", id: "session:binding-cap-session", label: "Binding cap chat" },
+				{ kind: "agent", id: "session:binding-cap-session", label: "Binding cap chat" },
+				{ kind: "agent", id: "session:binding-cap-session", label: "Binding cap chat" },
+				{ kind: undefined, id: undefined, label: undefined },
+			]);
+			expect(messages.some((message) => String(message.metadata.authorId).includes("forged"))).toBe(false);
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
