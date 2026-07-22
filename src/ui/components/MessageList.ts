@@ -23,7 +23,12 @@ import {
 	isPerfFlagEnabled,
 	PERF_FLAG_DEFER_OFFSCREEN_RENDER,
 } from "../../app/perf-flags.js";
-import type { BobbitMessage } from "../../shared/message-author.js";
+import { isAccountablePromptMessage, type BobbitMessage } from "../../shared/message-author.js";
+import type { PromptAuthorAppearance } from "../../app/message-author-appearance.js";
+import {
+	NO_PROMPT_AUTHOR_LABELS,
+	type PromptAuthorDisplayMode,
+} from "../message-author-presentation.js";
 
 /** Number of items at the bottom of the transcript that render eagerly
  *  even when the defer-offscreen perf flag is on. The transcript auto-scrolls
@@ -144,6 +149,14 @@ export class MessageList extends LitElement {
 	 *  compaction card appears in the transcript, so the inline expand
 	 *  affordance can call the orphan-transcript API. */
 	@property({ type: String }) sessionId: string = "";
+	/** One immutable decision owned by AgentInterface for every loaded slice. */
+	@property({ attribute: false }) promptAuthorDisplayMode: PromptAuthorDisplayMode = NO_PROMPT_AUTHOR_LABELS;
+	@property({ attribute: false }) resolvePromptAuthorAppearance?: (author: unknown) => PromptAuthorAppearance;
+	@property({ attribute: false }) reportPromptAuthorSlice?: (
+		sessionId: string,
+		compactionId: string,
+		messages: readonly unknown[] | undefined,
+	) => void;
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
 		return this;
@@ -194,6 +207,9 @@ export class MessageList extends LitElement {
 					template: html`<bobbit-pre-compaction-history
 						compaction-id=${compactionId}
 						session-id=${this.sessionId}
+						.promptAuthorDisplayMode=${this.promptAuthorDisplayMode}
+						.resolvePromptAuthorAppearance=${this.resolvePromptAuthorAppearance}
+						.reportPromptAuthorSlice=${this.reportPromptAuthorSlice}
 					></bobbit-pre-compaction-history>`,
 				});
 			}
@@ -255,9 +271,16 @@ export class MessageList extends LitElement {
 			}
 
 			if (msg.role === "user" || msg.role === "user-with-attachments") {
+				const isAccountablePrompt = isAccountablePromptMessage(msg);
 				items.push({
 					key: keyFor(msg),
-					template: html`<user-message .message=${msg}></user-message>`,
+					template: html`<user-message
+						.message=${msg}
+						.showAuthorLabel=${this.promptAuthorDisplayMode.showLabels && isAccountablePrompt}
+						.authorAppearance=${isAccountablePrompt
+							? this.resolvePromptAuthorAppearance?.(msg.author)
+							: undefined}
+					></user-message>`,
 				});
 				i++;
 				continue;
