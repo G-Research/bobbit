@@ -417,106 +417,204 @@ describe("MessageIndexSource", () => {
 		}
 	});
 
-	test("streams attachment-heavy rows past the byte cap with trusted author inference", async () => {
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "msg-source-byte-cap-"));
+	test("streams oversized same-text rows with sidecar authors and reserved later keys", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "msg-source-stream-authors-"));
 		const file = path.join(dir, "session.jsonl");
+		const repeatedText = "OversizedSameTextSearchToken";
 		const transcript = [
 			{
-				id: "oversized-user",
+				id: "older-fifo-user",
 				message: {
 					role: "user",
 					content: [
-						{ type: "text", text: "OversizedAttachmentSearchToken" },
-						{ type: "image", data: "a".repeat(512), mimeType: "image/png" },
+						{ type: "text", text: repeatedText },
+						{ type: "image", data: "a".repeat(2_048), mimeType: "image/png" },
 					],
-					attachments: [{ type: "image", content: "b".repeat(512) }],
-					timestamp: 1_700_000_100_000,
+					attachments: [{ type: "image", content: "b".repeat(2_048) }],
 					author: { kind: "system", id: "system:forged", label: "Forged" },
 				},
 			},
 			{
-				id: "following-assistant",
+				id: "tool-result",
 				message: {
-					role: "assistant",
-					content: "FollowingAssistantSearchToken",
-					timestamp: 1_700_000_200_000,
+					role: "user",
+					content: [{ type: "tool_result", content: "AccountableToolResultToken" }],
 				},
+			},
+			{
+				id: "timestamp-agent",
+				message: {
+					role: "user",
+					content: repeatedText,
+					timestamp: 5_000,
+					author: { kind: "user", id: "user:forged", label: "Forged" },
+				},
+			},
+			{
+				id: "later-exact-system",
+				message: {
+					role: "user",
+					content: repeatedText,
+					timestamp: 9_000,
+					author: { kind: "user", id: "user:forged", label: "Forged" },
+				},
+			},
+			{
+				id: "following-assistant",
+				message: { role: "assistant", content: "FollowingAssistantSearchToken" },
 			},
 		].map((row) => JSON.stringify(row)).join("\n") + "\n";
 		fs.writeFileSync(file, transcript, "utf-8");
-		const readBindings = vi.fn((_sessionId: string) => []);
+
+		const systemAuthor = { kind: "system" as const, id: "system:bobbit", label: "Bobbit" };
+		const callerAuthor = { kind: "agent" as const, id: "session:caller", label: "Caller" };
+		const localAuthor = { kind: "user" as const, id: "user:local", label: "User" };
+		const bindings = [
+			{
+				schemaVersion: 1 as const,
+				type: "prompt-author" as const,
+				promptId: "later-system",
+				dispatchedAt: 100,
+				modelText: repeatedText,
+				source: "system" as const,
+				author: systemAuthor,
+				settlement: {
+					schemaVersion: 1 as const,
+					type: "prompt-author-settlement" as const,
+					promptId: "later-system",
+					settledAt: 9_100,
+					outcome: "echoed" as const,
+					messageId: "later-exact-system",
+				},
+			},
+			{
+				schemaVersion: 1 as const,
+				type: "prompt-author" as const,
+				promptId: "older-user",
+				dispatchedAt: 200,
+				modelText: repeatedText,
+				source: "user" as const,
+				author: localAuthor,
+				settlement: {
+					schemaVersion: 1 as const,
+					type: "prompt-author-settlement" as const,
+					promptId: "older-user",
+					settledAt: 50_000,
+					outcome: "echoed" as const,
+				},
+			},
+			{
+				schemaVersion: 1 as const,
+				type: "prompt-author" as const,
+				promptId: "timestamp-agent",
+				dispatchedAt: 300,
+				modelText: repeatedText,
+				source: "agent" as const,
+				author: callerAuthor,
+				settlement: {
+					schemaVersion: 1 as const,
+					type: "prompt-author-settlement" as const,
+					promptId: "timestamp-agent",
+					settledAt: 5_100,
+					outcome: "echoed" as const,
+					messageTimestamp: 5_000,
+				},
+			},
+		];
+		const readBindings = vi.fn((_sessionId: string) => bindings);
+		const ctx = makeCtx({
+			sessions: [{
+				id: "oversized-session",
+				title: "Oversized chat",
+				cwd: "/tmp",
+				agentSessionFile: file,
+				createdAt: 1,
+				lastActivity: 2,
+			}],
+		});
 
 		try {
-			const messages = await collect(new MessageIndexSource(readBindings, {
-				maxRetainedBytes: 128,
-				maxRetainedRows: 100,
-			}), makeCtx({
-				sessions: [{
-					id: "oversized-session",
-					title: "Oversized chat",
-					cwd: "/tmp",
-					agentSessionFile: file,
-					createdAt: 1,
-					lastActivity: 2,
-				}],
-			}));
+			const normal = await collect(new MessageIndexSource(readBindings), ctx);
+			const lowCap = await collect(new MessageIndexSource(readBindings, {
+				maxRetainedBytes: 1,
+				maxRetainedRows: 1,
+				maxAuthorBindings: 3,
+				maxAuthorBindingBytes: 4_096,
+			}), ctx);
 
-			expect(readBindings, "oversized transcripts must bypass full-sequence sidecar matching").not.toHaveBeenCalled();
-			expect(messages.map(({ id, text, timestamp }) => ({ id, text, timestamp }))).toEqual([
-				{
-					id: "message:oversized-session:0:text:0",
-					text: "OversizedAttachmentSearchToken",
-					timestamp: 1_700_000_100_000,
-				},
-				{
-					id: "message:oversized-session:1:text:0",
-					text: "FollowingAssistantSearchToken",
-					timestamp: 1_700_000_200_000,
-				},
+			expect(readBindings).toHaveBeenCalledTimes(2);
+			expect(lowCap.map(({ id, text, role }) => ({ id, text, role }))).toEqual([
+				{ id: "message:oversized-session:0:text:0", text: repeatedText, role: "user" },
+				{ id: "message:oversized-session:1:tool_result:0", text: "AccountableToolResultToken", role: "tool_result" },
+				{ id: "message:oversized-session:2:text:0", text: repeatedText, role: "user" },
+				{ id: "message:oversized-session:3:text:0", text: repeatedText, role: "user" },
+				{ id: "message:oversized-session:4:text:0", text: "FollowingAssistantSearchToken", role: "assistant" },
 			]);
-			expect(messages[0].metadata).toMatchObject({
-				sessionId: "oversized-session",
-				msgIdx: 0,
-				sessionTitle: "Oversized chat",
-				authorKind: "user",
-				authorId: "user:local",
-				authorLabel: "User",
-			});
-			expect(messages[1].metadata).toMatchObject({
-				authorKind: "agent",
-				authorId: "session:oversized-session",
-				authorLabel: "Oversized chat",
-			});
-			expect(messages.some((message) => message.metadata.authorId === "system:forged")).toBe(false);
+			const authors = (rows: Indexable[]) => rows.map((message) => ({
+				kind: message.metadata.authorKind,
+				id: message.metadata.authorId,
+				label: message.metadata.authorLabel,
+			}));
+			expect(authors(lowCap)).toEqual([
+				{ kind: "user", id: "user:local", label: "User" },
+				{ kind: "user", id: "user:local", label: "User" },
+				{ kind: "agent", id: "session:caller", label: "Caller" },
+				{ kind: "system", id: "system:bobbit", label: "Bobbit" },
+				{ kind: "agent", id: "session:oversized-session", label: "Oversized chat" },
+			]);
+			expect(authors(lowCap)).toEqual(authors(normal));
+			expect(lowCap.some((message) => String(message.metadata.authorId).includes("forged"))).toBe(false);
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
 	});
 
-	test("switches the complete session to streaming inference past the row cap", async () => {
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "msg-source-row-cap-"));
+	test("safely degrades sidecar attribution when compact binding state exceeds its cap", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "msg-source-binding-cap-"));
 		const file = path.join(dir, "session.jsonl");
 		fs.writeFileSync(file, [
-			JSON.stringify({ id: "first", message: { role: "user", content: "FirstRowCapToken" } }),
-			JSON.stringify({
-				id: "second",
-				message: {
-					role: "user",
-					content: "SecondRowCapToken",
-					author: { kind: "agent", id: "session:forged", label: "Forged" },
-				},
-			}),
+			JSON.stringify({ id: "system-row", message: {
+				role: "user",
+				content: "SystemBindingCapToken",
+				author: { kind: "agent", id: "session:forged", label: "Forged" },
+			} }),
+			JSON.stringify({ id: "agent-row", message: {
+				role: "user",
+				content: "AgentBindingCapToken",
+				author: { kind: "system", id: "system:forged", label: "Forged" },
+			} }),
 		].join("\n") + "\n", "utf-8");
-		const readBindings = vi.fn((_sessionId: string) => []);
+		const binding = (promptId: string, text: string, messageId: string, kind: "system" | "agent") => ({
+			schemaVersion: 1 as const,
+			type: "prompt-author" as const,
+			promptId,
+			dispatchedAt: 1,
+			modelText: text,
+			source: kind,
+			author: kind === "system"
+				? { kind, id: "system:bobbit", label: "Bobbit" }
+				: { kind, id: "session:caller", label: "Caller" },
+			settlement: {
+				schemaVersion: 1 as const,
+				type: "prompt-author-settlement" as const,
+				promptId,
+				settledAt: 2,
+				outcome: "echoed" as const,
+				messageId,
+			},
+		});
+		const readBindings = vi.fn(() => [
+			binding("system", "SystemBindingCapToken", "system-row", "system"),
+			binding("agent", "AgentBindingCapToken", "agent-row", "agent"),
+		]);
 
 		try {
 			const messages = await collect(new MessageIndexSource(readBindings, {
-				maxRetainedBytes: 64 * 1024,
-				maxRetainedRows: 1,
+				maxAuthorBindings: 1,
 			}), makeCtx({
 				sessions: [{
-					id: "row-cap-session",
-					title: "Row cap chat",
+					id: "binding-cap-session",
+					title: "Binding cap chat",
 					cwd: "/tmp",
 					agentSessionFile: file,
 					createdAt: 1,
@@ -524,8 +622,8 @@ describe("MessageIndexSource", () => {
 				}],
 			}));
 
-			expect(readBindings, "row overflow must not partially apply sidecar attribution").not.toHaveBeenCalled();
-			expect(messages.map((message) => message.text)).toEqual(["FirstRowCapToken", "SecondRowCapToken"]);
+			expect(readBindings).toHaveBeenCalledOnce();
+			expect(messages.map((message) => message.text)).toEqual(["SystemBindingCapToken", "AgentBindingCapToken"]);
 			expect(messages.map((message) => message.metadata.msgIdx)).toEqual([0, 1]);
 			expect(messages.map((message) => message.metadata.authorKind)).toEqual(["user", "user"]);
 			expect(messages.map((message) => message.metadata.authorId)).toEqual(["user:local", "user:local"]);

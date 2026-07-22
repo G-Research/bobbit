@@ -23,8 +23,8 @@ import { extractForIndexing } from "../content-policy.js";
 import { contentHashOf } from "./hash.js";
 import { formatSessionSearchTitle } from "./session-title.js";
 import {
+	createPromptAuthorStreamCorrelation,
 	readAuthorSidecar,
-	mergeAuthorSidecarIntoMessages,
 	type PromptAuthorBinding,
 } from "../../agent/author-sidecar.js";
 import {
@@ -32,26 +32,24 @@ import {
 	type NormalizeVisibleMessageContext,
 } from "../../agent/message-author.js";
 
-const DEFAULT_MAX_RETAINED_ROWS = 10_000;
-const DEFAULT_MAX_RETAINED_BYTES = 8 * 1024 * 1024;
-
 export interface MessageIndexSourceOptions {
-	/** Raw transcript rows retained solely for full-sequence sidecar matching. */
+	/**
+	 * Legacy low-cap test/config seam. Raw transcript rows are no longer retained,
+	 * so the streamed implementation remains below either positive cap.
+	 */
 	maxRetainedRows?: number;
-	/** UTF-8 transcript bytes retained solely for full-sequence sidecar matching. */
+	/** See `maxRetainedRows`; raw transcript bytes retained between rows are zero. */
 	maxRetainedBytes?: number;
+	/** Maximum compact author-sidecar bindings retained for one session. */
+	maxAuthorBindings?: number;
+	/** Maximum estimated UTF-8 bytes retained by compact author correlation state. */
+	maxAuthorBindingBytes?: number;
 }
 
 interface ParsedRow {
 	msgIdx: number;
 	message: Record<string, unknown>;
 	timestamp: number;
-}
-
-function positiveInteger(value: number | undefined, fallback: number): number {
-	return typeof value === "number" && Number.isFinite(value) && value > 0
-		? Math.floor(value)
-		: fallback;
 }
 
 function parseTranscriptLine(
@@ -99,18 +97,48 @@ function parseTranscriptLine(
 	};
 }
 
+/**
+ * Read one transcript pass while retaining only the current parsed row. Errors
+ * end the pass after its complete prefix, preserving the historical best-effort
+ * indexing contract without accumulating raw JSON, attachment, or tool blobs.
+ */
+async function* streamTranscriptRows(
+	filePath: string,
+	fallbackTimestamp: number,
+): AsyncIterable<ParsedRow> {
+	let stream: fs.ReadStream;
+	try {
+		stream = fs.createReadStream(filePath, { encoding: "utf-8" });
+	} catch {
+		return;
+	}
+	const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+	let msgIdx = 0;
+	try {
+		for await (let line of rl) {
+			let row = parseTranscriptLine(line, msgIdx, fallbackTimestamp);
+			// Release the raw JSON string before handing the compact row onward.
+			line = "";
+			if (!row) continue;
+			msgIdx++;
+			yield row;
+			row = undefined;
+		}
+	} catch {
+		// Unreadable mid-stream — consumers keep the complete prefix already read.
+	} finally {
+		rl.close();
+		try { stream.close(); } catch { /* ignore */ }
+	}
+}
+
 export class MessageIndexSource implements IndexSource {
 	readonly sourceId = "messages" as const;
-	private readonly maxRetainedRows: number;
-	private readonly maxRetainedBytes: number;
 
 	constructor(
 		private readonly readAuthorBindings: (sessionId: string) => PromptAuthorBinding[] = readAuthorSidecar,
-		options: MessageIndexSourceOptions = {},
-	) {
-		this.maxRetainedRows = positiveInteger(options.maxRetainedRows, DEFAULT_MAX_RETAINED_ROWS);
-		this.maxRetainedBytes = positiveInteger(options.maxRetainedBytes, DEFAULT_MAX_RETAINED_BYTES);
-	}
+		private readonly options: MessageIndexSourceOptions = {},
+	) {}
 
 	async *iterate(ctx: IndexSourceContext): AsyncIterable<Indexable> {
 		const sessions = ctx.sessionStore.getAll();
@@ -130,31 +158,50 @@ export class MessageIndexSource implements IndexSource {
 				continue;
 			}
 
-			let stream: fs.ReadStream;
-			try {
-				stream = fs.createReadStream(filePath, { encoding: "utf-8" });
-			} catch {
-				continue;
-			}
-
 			const sessionTitle = (session.title ?? "").trim();
 			const goalTitle = session.goalId
 				? goalTitleMap.get(session.goalId) ?? ""
 				: "";
 			const displayTitle = formatSessionSearchTitle(sessionTitle, goalTitle);
-
-			const rl = readline.createInterface({
-				input: stream,
-				crlfDelay: Infinity,
-			});
 			const normalizationContext: NormalizeVisibleMessageContext = {
 				session,
 				agentDeps: {
 					getStaff: (id: string) => typeof ctx.staffStore.get === "function" ? ctx.staffStore.get(id) : undefined,
 				},
 			};
-			const toIndexables = (row: ParsedRow, msg: Record<string, unknown>): Indexable[] => {
-				const output: Indexable[] = [];
+
+			let bindings: PromptAuthorBinding[] = [];
+			try {
+				bindings = this.readAuthorBindings(session.id);
+			} catch {
+				// Author precision is best-effort and never gates search indexing.
+			}
+			const correlation = createPromptAuthorStreamCorrelation(bindings, {
+				maxBindings: this.options.maxAuthorBindings,
+				maxBindingBytes: this.options.maxAuthorBindingBytes,
+			});
+			bindings = [];
+
+			// The compact first pass reserves later exact id/timestamp occurrences.
+			// This makes FIFO deterministic in pass two without retaining raw rows.
+			// Sessions without usable sidecar state remain a single streamed pass.
+			if (correlation.retainedBindings > 0) {
+				for await (const row of streamTranscriptRows(filePath, session.lastActivity ?? 0)) {
+					correlation.reserve(row.message, row.msgIdx);
+				}
+			}
+
+			let precedingAuthor: MessageAuthor | undefined;
+			for await (const row of streamTranscriptRows(filePath, session.lastActivity ?? 0)) {
+				const promptAuthor = correlation.resolve(row.message, row.msgIdx);
+				const msg = normalizeVisibleMessage(row.message, {
+					...normalizationContext,
+					existingAuthorIsTrusted: false,
+					promptAuthor,
+					precedingAuthor,
+				});
+				if (isMessageAuthor(msg.author)) precedingAuthor = msg.author;
+
 				const hit = extractForIndexing(msg);
 				for (const entry of hit.entries) {
 					const id = `message:${session.id}:${row.msgIdx}:${entry.blockKey}`;
@@ -171,7 +218,7 @@ export class MessageIndexSource implements IndexSource {
 						metadata.authorId = msg.author.id;
 						metadata.authorLabel = msg.author.label;
 					}
-					output.push({
+					yield {
 						id,
 						sourceId: "messages",
 						text: entry.text,
@@ -188,90 +235,7 @@ export class MessageIndexSource implements IndexSource {
 						weight: entry.weight,
 						role: entry.role,
 						display: { title: displayTitle },
-					});
-				}
-				return output;
-			};
-
-			let precedingAuthor: MessageAuthor | undefined;
-			const inferAndIndex = (row: ParsedRow): Indexable[] => {
-				const msg = normalizeVisibleMessage(row.message, {
-					...normalizationContext,
-					existingAuthorIsTrusted: false,
-					precedingAuthor,
-				});
-				if (isMessageAuthor(msg.author)) precedingAuthor = msg.author;
-				return toIndexables(row, msg);
-			};
-
-			let streamingInference = false;
-			try {
-				// A size preflight keeps even the first oversized row out of the
-				// full-sequence author-matching buffer. Races are covered again below.
-				streamingInference = fs.statSync(filePath).size > this.maxRetainedBytes;
-			} catch {
-				// Preserve the existing best-effort stream behavior when stat fails.
-			}
-			let parsedRows: ParsedRow[] = [];
-			let retainedBytes = 0;
-			let msgIdx = 0;
-			try {
-				for await (let line of rl) {
-					const lineBytes = Buffer.byteLength(line, "utf8");
-					let row = parseTranscriptLine(line, msgIdx, session.lastActivity ?? 0);
-					// Drop the raw JSON string before yielding. In streaming mode only
-					// compact search output, never attachment/image blobs, survives a yield.
-					line = "";
-					if (!row) continue;
-					msgIdx++;
-
-					if (!streamingInference && (
-						parsedRows.length >= this.maxRetainedRows
-						|| retainedBytes + lineBytes > this.maxRetainedBytes
-					)) {
-						streamingInference = true;
-						// Once either cap is crossed, deliberately avoid all sidecar
-						// sequence matching for this session. Convert the bounded prefix and
-						// current row to compact output before the first yield, then release
-						// their raw message objects.
-						const pending: Indexable[] = [];
-						for (const buffered of parsedRows) pending.push(...inferAndIndex(buffered));
-						parsedRows = [];
-						retainedBytes = 0;
-						pending.push(...inferAndIndex(row));
-						row = undefined;
-						for (const indexable of pending) yield indexable;
-						continue;
-					}
-
-					if (streamingInference) {
-						const indexables = inferAndIndex(row);
-						row = undefined;
-						for (const indexable of indexables) yield indexable;
-						continue;
-					}
-
-					parsedRows.push(row);
-					retainedBytes += lineBytes;
-				}
-			} catch {
-				// Unreadable mid-stream — index the complete prefix already read.
-			} finally {
-				rl.close();
-				try { stream.close(); } catch { /* ignore */ }
-			}
-
-			if (streamingInference) continue;
-
-			// Bounded histories retain exact id/timestamp/FIFO sidecar correlation.
-			const authoredMessages = mergeAuthorSidecarIntoMessages(
-				this.readAuthorBindings(session.id),
-				parsedRows.map((row) => row.message),
-				normalizationContext,
-			);
-			for (let rowIndex = 0; rowIndex < parsedRows.length; rowIndex++) {
-				for (const indexable of toIndexables(parsedRows[rowIndex], authoredMessages[rowIndex])) {
-					yield indexable;
+					};
 				}
 			}
 		}

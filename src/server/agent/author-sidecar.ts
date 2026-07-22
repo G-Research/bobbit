@@ -758,6 +758,257 @@ function sameAuthor(left: unknown, right: MessageAuthor): boolean {
 		&& left.label === right.label;
 }
 
+const DEFAULT_STREAM_CORRELATION_BINDINGS = 10_000;
+const DEFAULT_STREAM_CORRELATION_BYTES = 8 * 1024 * 1024;
+
+export interface PromptAuthorStreamCorrelationOptions {
+	/** Maximum compact sidecar bindings retained for one streamed transcript. */
+	maxBindings?: number;
+	/** Maximum estimated UTF-8 bytes retained by compact binding state. */
+	maxBindingBytes?: number;
+}
+
+export interface PromptAuthorStreamCorrelation {
+	/** True when sidecar state exceeded a cap and correlation safely fell back. */
+	readonly degraded: boolean;
+	/** Number of compact sidecar bindings retained by this resolver. */
+	readonly retainedBindings: number;
+	/** First-pass reservation of exact id/timestamp matches. */
+	reserve(message: Record<string, unknown>, rowIndex: number): void;
+	/** Second-pass resolution, including deterministic FIFO fallback. */
+	resolve(message: Record<string, unknown>, rowIndex: number): MessageAuthor | undefined;
+}
+
+interface StreamBindingRef {
+	binding: PromptAuthorBinding;
+	order: number;
+	consumed: boolean;
+}
+
+interface StreamBindingBuckets {
+	byDigest: Map<string, StreamBindingRef[]>;
+	byText: Map<string, StreamBindingRef[]>;
+}
+
+interface StreamReservation {
+	ref: StreamBindingRef;
+	kind: "id" | "timestamp";
+	messageId?: string;
+}
+
+function positiveLimit(value: number | undefined, fallback: number): number {
+	return typeof value === "number" && Number.isFinite(value) && value > 0
+		? Math.floor(value)
+		: fallback;
+}
+
+function utf8Length(value: unknown): number {
+	return typeof value === "string" ? Buffer.byteLength(value, "utf8") : 0;
+}
+
+/** Estimate compact resolver state without serializing or retaining transcript content. */
+function streamBindingBytes(binding: PromptAuthorBinding): number {
+	return 128
+		+ utf8Length(binding.promptId)
+		+ utf8Length(binding.modelTextDigest)
+		+ utf8Length(binding.modelText)
+		+ utf8Length(binding.source)
+		+ utf8Length(binding.author.id)
+		+ utf8Length(binding.author.label)
+		+ utf8Length(binding.settlement?.messageId);
+}
+
+function createBuckets(): StreamBindingBuckets {
+	return { byDigest: new Map(), byText: new Map() };
+}
+
+function appendBucket(map: Map<string, StreamBindingRef[]>, key: string, ref: StreamBindingRef): void {
+	const bucket = map.get(key);
+	if (bucket) bucket.push(ref);
+	else map.set(key, [ref]);
+}
+
+function addBindingToBuckets(buckets: StreamBindingBuckets, ref: StreamBindingRef): void {
+	if (validDigest(ref.binding.modelTextDigest)) {
+		appendBucket(buckets.byDigest, ref.binding.modelTextDigest, ref);
+	} else if (typeof ref.binding.modelText === "string") {
+		appendBucket(buckets.byText, ref.binding.modelText, ref);
+	}
+}
+
+function earlierRef(left: StreamBindingRef | undefined, right: StreamBindingRef): StreamBindingRef {
+	if (!left) return right;
+	if (right.binding.dispatchedAt < left.binding.dispatchedAt) return right;
+	if (right.binding.dispatchedAt === left.binding.dispatchedAt && right.order < left.order) return right;
+	return left;
+}
+
+function firstMatchingRef(
+	buckets: StreamBindingBuckets,
+	modelText: string,
+	predicate: (ref: StreamBindingRef) => boolean = () => true,
+): StreamBindingRef | undefined {
+	let match: StreamBindingRef | undefined;
+	const digest = digestPromptModelText(modelText);
+	const candidates = [
+		...(digest ? [buckets.byDigest.get(digest)] : []),
+		buckets.byText.get(modelText),
+	];
+	for (const bucket of candidates) {
+		if (!bucket) continue;
+		for (const ref of bucket) {
+			if (ref.consumed || !predicate(ref)) continue;
+			match = earlierRef(match, ref);
+			// Buckets are dispatch ordered, so only the first eligible row in each
+			// representation can beat the other representation's candidate.
+			break;
+		}
+	}
+	return match;
+}
+
+function firstUnconsumed(refs: StreamBindingRef[] | undefined): StreamBindingRef | undefined {
+	return refs?.find((ref) => !ref.consumed);
+}
+
+function emptyStreamCorrelation(degraded: boolean): PromptAuthorStreamCorrelation {
+	return {
+		degraded,
+		retainedBindings: 0,
+		reserve: () => undefined,
+		resolve: () => undefined,
+	};
+}
+
+/**
+ * Build bounded two-pass correlation state for transcript streams.
+ *
+ * Pass one reserves exact settled ids and timestamp+digest matches globally.
+ * Pass two can therefore consume remaining same-text occurrences FIFO without
+ * letting an older duplicate steal a later exact binding. Only compact sidecar
+ * refs and at most one reservation per binding are retained; message bodies,
+ * images, attachments, and tool payloads are never retained here.
+ */
+export function createPromptAuthorStreamCorrelation(
+	entries: PromptAuthorBinding[],
+	options: PromptAuthorStreamCorrelationOptions = {},
+): PromptAuthorStreamCorrelation {
+	if (!Array.isArray(entries) || entries.length === 0) return emptyStreamCorrelation(false);
+	const maxBindings = positiveLimit(options.maxBindings, DEFAULT_STREAM_CORRELATION_BINDINGS);
+	const maxBindingBytes = positiveLimit(options.maxBindingBytes, DEFAULT_STREAM_CORRELATION_BYTES);
+	if (entries.length > maxBindings) return emptyStreamCorrelation(true);
+
+	let retainedBytes = 0;
+	const bindings = entries
+		.filter(isPromptAuthorBinding)
+		.sort((left, right) => left.dispatchedAt - right.dispatchedAt);
+	for (const binding of bindings) {
+		retainedBytes += streamBindingBytes(binding);
+		if (retainedBytes > maxBindingBytes) return emptyStreamCorrelation(true);
+	}
+	if (bindings.length > maxBindings) return emptyStreamCorrelation(true);
+
+	const exactMessageIds = new Map<string, StreamBindingRef[]>();
+	const exactPromptIds = new Map<string, StreamBindingRef[]>();
+	const timestampBindings = createBuckets();
+	const fifoBindings = createBuckets();
+	const refs: StreamBindingRef[] = [];
+
+	for (const binding of bindings) {
+		if (binding.settlement?.outcome === "cancelled") continue;
+		const ref: StreamBindingRef = { binding, order: refs.length, consumed: false };
+		refs.push(ref);
+		appendBucket(exactPromptIds, binding.promptId, ref);
+		if (binding.settlement?.outcome !== "echoed") continue;
+		const settledMessageId = binding.settlement.messageId;
+		if (settledMessageId) {
+			// Exact ids remain reserved even if the transcript changes between passes;
+			// an earlier same-text FIFO row must never steal their author.
+			appendBucket(exactMessageIds, settledMessageId, ref);
+			continue;
+		}
+		addBindingToBuckets(timestampBindings, ref);
+		if (binding.settlement.messageTimestamp === undefined) {
+			// Keyless settlements retain deterministic FIFO fallback after the first
+			// pass has had a chance to reserve the settledAt timestamp heuristic.
+			addBindingToBuckets(fifoBindings, ref);
+		}
+	}
+
+	const reservations = new Map<number, StreamReservation>();
+	const reserve = (message: Record<string, unknown>, rowIndex: number): void => {
+		if (!eligiblePromptMessage(message) || reservations.has(rowIndex)) return;
+		const id = messageId(message);
+		const exact = id ? firstUnconsumed(exactMessageIds.get(id)) : undefined;
+		if (exact) {
+			exact.consumed = true;
+			reservations.set(rowIndex, { ref: exact, kind: "id", messageId: id });
+			return;
+		}
+		const text = extractPromptModelText(message);
+		const timestamp = messageTimestamp(message);
+		if (text === undefined || timestamp === undefined) return;
+		const timed = firstMatchingRef(timestampBindings, text, (ref) => {
+			const settlement = ref.binding.settlement;
+			const settledTimestamp = settlement?.messageTimestamp ?? settlement?.settledAt;
+			return settledTimestamp !== undefined
+				&& Math.abs(timestamp - settledTimestamp) <= CORRELATION_TOLERANCE_MS;
+		});
+		if (!timed) return;
+		timed.consumed = true;
+		reservations.set(rowIndex, { ref: timed, kind: "timestamp" });
+	};
+
+	const resolve = (message: Record<string, unknown>, rowIndex: number): MessageAuthor | undefined => {
+		if (!eligiblePromptMessage(message)) return undefined;
+		const reservation = reservations.get(rowIndex);
+		if (reservation) {
+			if (reservation.kind === "id") {
+				return messageId(message) === reservation.messageId
+					? reservation.ref.binding.author
+					: undefined;
+			}
+			const text = extractPromptModelText(message);
+			const timestamp = messageTimestamp(message);
+			const settlement = reservation.ref.binding.settlement;
+			const settledTimestamp = settlement?.messageTimestamp ?? settlement?.settledAt;
+			return text !== undefined
+				&& timestamp !== undefined
+				&& settledTimestamp !== undefined
+				&& Math.abs(timestamp - settledTimestamp) <= CORRELATION_TOLERANCE_MS
+				&& promptAuthorBindingMatchesText(reservation.ref.binding, text)
+				? reservation.ref.binding.author
+				: undefined;
+		}
+
+		// Unresolved dispatches are never allowed into digest/FIFO matching. The
+		// sole supported occurrence is Bobbit's exact synthetic in-flight steer id.
+		const id = messageId(message);
+		if (message._inFlightSteer === true && id?.startsWith("inflight-steer:")) {
+			const promptId = id.slice("inflight-steer:".length);
+			const direct = firstUnconsumed(exactPromptIds.get(promptId));
+			if (direct) {
+				direct.consumed = true;
+				return direct.binding.author;
+			}
+		}
+
+		const text = extractPromptModelText(message);
+		if (text === undefined) return undefined;
+		const fifo = firstMatchingRef(fifoBindings, text);
+		if (!fifo) return undefined;
+		fifo.consumed = true;
+		return fifo.binding.author;
+	};
+
+	return {
+		degraded: false,
+		retainedBindings: refs.length,
+		reserve,
+		resolve,
+	};
+}
+
 /**
  * Correlate sidecar bindings before inference. Matching is global by phase so
  * an early legacy duplicate cannot consume a later row's exact id binding.
