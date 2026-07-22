@@ -38,10 +38,9 @@ const FileMentionBudgetError = Reflect.get(resolverModule, "FileMentionBudgetErr
 const EXPECTED_RAW_CANDIDATE_LIMIT = 8_192;
 const EXPECTED_UNIQUE_PROBE_LIMIT = 4_096;
 const EXPECTED_AUTHENTICATED_PROMPT_TEXT_LIMIT_BYTES = 8 * 1024 * 1024;
-// The exact 8 MiB form takes longer than this tier's hard 15 s file wall on
-// the vulnerable object-per-CRLF map. This bounded form still forces 65k+
-// normalization discontinuities without destabilizing later cases; the WS
-// integration suite separately pins the exact authenticated byte ceiling.
+// Keep the exact 8 MiB form in the WS integration suite that pins the
+// authenticated byte ceiling. This bounded tier-1 form still forces 65k+
+// normalization discontinuities without destabilizing later cases.
 const BOUNDED_CRLF_MAP_STRESS_BYTES = 192 * 1024;
 const FILE_MENTION_RESOLUTION_CONCURRENCY = (
 	Reflect.get(resolverModule, "FILE_MENTION_RESOLUTION_CONCURRENCY")

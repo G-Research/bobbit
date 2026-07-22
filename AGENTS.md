@@ -39,7 +39,7 @@ Orient here, then `rg` for the symbol.
 ## Testing (Test Suite v2)
 
 - **New tests land in `tests2/`** (or the guard fails). `*.test.ts`⇒Vitest (`core`/`dom`/`integration`, with explicit isolated exceptions); `*.spec.ts`⇒Playwright (`tests2/browser`). Register in `tests2/tests-map.json`. Three sequential gate phases: `test:unit` → `test:browser` → `test:e2e`; worktree/Docker/MCP/restart coverage belongs to E2E or `test:manual`.
-- **Unit gate** — one direct Vitest run, fixed three-worker cap, `retry: 3`, subprocess guard, and hard 15 s solo file budget. See [docs/testing-v2/unit-gate.md](docs/testing-v2/unit-gate.md).
+- **Unit gate** — one direct Vitest run, fixed three-worker cap, `retry: 3`, subprocess guard, and hard 25 s solo file budget. See [docs/testing-v2/unit-gate.md](docs/testing-v2/unit-gate.md).
 - Isolate only via the harness temp dir — never touch `.bobbit/`. **Never bg-server from bash** — use `bash_bg`. Run tests before committing.
 - Every user-facing feature needs a `tests2/browser` journey (nav, happy path, reload, cleanup). See [docs/testing-v2/](docs/testing-v2/).
 

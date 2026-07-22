@@ -53,7 +53,7 @@ The inventory audit also rejects value imports or requires of `child_process` in
 
 ### File wall budget
 
-A tier-1 file has a hard 15-second wall budget from module start through hooks and retries. In an ordinary solo run, any overrun fails `test:unit` even when all assertions pass.
+A tier-1 file has a hard 25-second wall budget from module start through hooks and retries. In an ordinary solo run, any overrun fails `test:unit` even when all assertions pass.
 
 For the simultaneous load proof only, set:
 

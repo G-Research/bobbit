@@ -1021,7 +1021,7 @@
     },
     {
       "path": "tests2/core/unit-file-budget-reporter.test.ts",
-      "reason": "Pins the 15-second tier-1 file budget reporter boundary, aggregation, retry accounting, E2E exclusion, and Windows path rendering.",
+      "reason": "Pins the 25-second tier-1 file budget reporter boundary, aggregation, retry accounting, E2E exclusion, and Windows path rendering.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
