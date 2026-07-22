@@ -29,7 +29,28 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { initAuthorSidecarDir } from "../../src/server/agent/author-sidecar.ts";
 import { VerificationHarness, VERIFICATION_RESTART_RESUME_PROMPT, VERIFICATION_RESULT_REMINDER } from "../../src/server/agent/verification-harness.ts";
+
+const SYSTEM_MODEL_PREFIX = "[System]: ";
+
+function modelFacingSystemPrompt(baseText: string): string {
+	return `${SYSTEM_MODEL_PREFIX}${baseText}`;
+}
+
+function assertSingleSystemPrefix(piText: string, context: string): string {
+	assert.ok(piText.startsWith(SYSTEM_MODEL_PREFIX), `${context}: provider text must start with the system prefix`);
+	const baseText = piText.slice(SYSTEM_MODEL_PREFIX.length);
+	assert.ok(!baseText.startsWith(SYSTEM_MODEL_PREFIX), `${context}: provider text must contain exactly one leading system prefix`);
+	return baseText;
+}
+
+function initVerificationAuthorSidecar(stateDir: string): void {
+	initAuthorSidecarDir(stateDir, {
+		secretsDir: path.join(stateDir, "private-secrets"),
+		hmacKey: Buffer.alloc(32, 0x36),
+	});
+}
 
 /**
  * `SessionManager` transitively pulls in flexsearch (via search-service),
@@ -100,6 +121,7 @@ function waitForIdle(session: FakeSession, timeoutMs: number): Promise<void> {
 
 async function captureResumePromptForRestoredReviewer(opts: { restoreStartupWasStreaming: boolean }): Promise<string[]> {
 	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-restart-resume-prompt-"));
+	initVerificationAuthorSidecar(stateDir);
 	const sessionId = opts.restoreStartupWasStreaming ? "restart-interrupted-reviewer" : "ordinary-idle-reviewer";
 	const prompts: string[] = [];
 	let harness: VerificationHarness;
@@ -157,6 +179,7 @@ async function captureResumePromptForRestoredReviewer(opts: { restoreStartupWasS
 
 async function runRestartContinuationFallback(opts: { jsonValidationErrorDuringContinuation?: boolean } = {}) {
 	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-post-continuation-fallback-"));
+	initVerificationAuthorSidecar(stateDir);
 	const sessionId = "restart-continuation-fallback-reviewer";
 	const prompts: string[] = [];
 	const calls: string[] = [];
@@ -325,28 +348,34 @@ describe("verification reminder race — Bug 2 (resumed reviewer terminated earl
 		const firstPrompt = prompts[0] ?? "";
 
 		assert.equal(prompts.length, 1, `RESTART_RESUME_REGRESSION: expected exactly one first post-restart prompt, got ${prompts.length}: ${JSON.stringify(prompts)}`);
+		const firstBasePrompt = assertSingleSystemPrefix(firstPrompt, "restart-aware continuation");
+		assert.equal(
+			firstBasePrompt,
+			VERIFICATION_RESTART_RESUME_PROMPT,
+			`RESTART_RESUME_REGRESSION: provider prefixing must retain the exact restart-aware continuation text. prompt=${JSON.stringify(firstPrompt)}`,
+		);
 		assert.notEqual(
-			firstPrompt,
+			firstBasePrompt,
 			VERIFICATION_RESULT_REMINDER,
 			`RESTART_RESUME_REGRESSION: restored idle nonInteractive verifier with restoreStartupWasStreaming=true received VERIFICATION_RESULT_REMINDER as the first post-restart prompt instead of restart-aware continuation instructions. prompt=${JSON.stringify(firstPrompt)}`,
 		);
 		assert.match(
-			firstPrompt,
+			firstBasePrompt,
 			/restart|restarted/i,
 			`RESTART_RESUME_REGRESSION: restart-aware continuation prompt must mention that infrastructure restarted mid-turn. prompt=${JSON.stringify(firstPrompt)}`,
 		);
 		assert.match(
-			firstPrompt,
+			firstBasePrompt,
 			/transcript|context/i,
 			`RESTART_RESUME_REGRESSION: restart-aware continuation prompt must tell the reviewer to use preserved transcript/context. prompt=${JSON.stringify(firstPrompt)}`,
 		);
 		assert.match(
-			firstPrompt,
+			firstBasePrompt,
 			/continue/i,
 			`RESTART_RESUME_REGRESSION: restart-aware continuation prompt must tell the reviewer to continue the interrupted review. prompt=${JSON.stringify(firstPrompt)}`,
 		);
 		assert.match(
-			firstPrompt,
+			firstBasePrompt,
 			/verification_result[\s\S]*complete|complete[\s\S]*verification_result/i,
 			`RESTART_RESUME_REGRESSION: restart-aware continuation prompt must reserve verification_result for when review is complete. prompt=${JSON.stringify(firstPrompt)}`,
 		);
@@ -357,8 +386,8 @@ describe("verification reminder race — Bug 2 (resumed reviewer terminated earl
 
 		assert.deepEqual(
 			prompts,
-			[VERIFICATION_RESULT_REMINDER],
-			`Ordinary non-restart idle-without-result verifier should still receive VERIFICATION_RESULT_REMINDER. prompts=${JSON.stringify(prompts)}`,
+			[modelFacingSystemPrompt(VERIFICATION_RESULT_REMINDER)],
+			`Ordinary non-restart idle-without-result verifier should receive exactly one system prefix followed by VERIFICATION_RESULT_REMINDER. prompts=${JSON.stringify(prompts)}`,
 		);
 	});
 
@@ -367,8 +396,11 @@ describe("verification reminder race — Bug 2 (resumed reviewer terminated earl
 
 		assert.deepEqual(
 			prompts,
-			[VERIFICATION_RESTART_RESUME_PROMPT, VERIFICATION_RESULT_REMINDER],
-			`Restart-aware continuation must only be the first post-restart prompt; a no-result continuation turn should receive the normal reminder next. prompts=${JSON.stringify(prompts)}`,
+			[
+				modelFacingSystemPrompt(VERIFICATION_RESTART_RESUME_PROMPT),
+				modelFacingSystemPrompt(VERIFICATION_RESULT_REMINDER),
+			],
+			`Restart-aware continuation and fallback reminder must each reach the provider with exactly one system prefix and unchanged base text. prompts=${JSON.stringify(prompts)}`,
 		);
 		assert.deepEqual(
 			calls.slice(0, 6),
@@ -383,10 +415,12 @@ describe("verification reminder race — Bug 2 (resumed reviewer terminated earl
 	it("post-restart continuation JSON glitch falls back to JSON retry instead of another restart prompt", async () => {
 		const { prompts, calls, result } = await runRestartContinuationFallback({ jsonValidationErrorDuringContinuation: true });
 
-		assert.equal(prompts[0], VERIFICATION_RESTART_RESUME_PROMPT);
-		assert.notEqual(prompts[1], VERIFICATION_RESTART_RESUME_PROMPT, "restart-aware continuation prompt must not be reused after the first post-restart turn");
-		assert.notEqual(prompts[1], VERIFICATION_RESULT_REMINDER, "a validation error during the continuation turn should use the targeted JSON retry fallback");
-		assert.match(prompts[1], /Validation failed for tool|Expected property name in JSON/i);
+		const continuationBase = assertSingleSystemPrefix(prompts[0] ?? "", "restart JSON-glitch continuation");
+		const fallbackBase = assertSingleSystemPrefix(prompts[1] ?? "", "restart JSON-glitch fallback");
+		assert.equal(continuationBase, VERIFICATION_RESTART_RESUME_PROMPT);
+		assert.notEqual(fallbackBase, VERIFICATION_RESTART_RESUME_PROMPT, "restart-aware continuation prompt must not be reused after the first post-restart turn");
+		assert.notEqual(fallbackBase, VERIFICATION_RESULT_REMINDER, "a validation error during the continuation turn should use the targeted JSON retry fallback");
+		assert.match(fallbackBase, /Validation failed for tool|Expected property name in JSON/i);
 		assert.deepEqual(
 			calls.slice(0, 6),
 			["prompt:1", "waitForStreaming:1", "waitForIdle:1", "prompt:2", "waitForStreaming:2", "waitForIdle:2"],

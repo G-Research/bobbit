@@ -43,7 +43,12 @@ import {
 
 const GOAL_ID = "goal-test";
 const GATE_ID = "documentation";
+const SYSTEM_MODEL_PREFIX = "[System]: ";
 const tempRoots: string[] = [];
+
+function modelFacingSystemPrompt(baseText: string): string {
+	return `${SYSTEM_MODEL_PREFIX}${baseText}`;
+}
 
 afterAll(() => {
 	for (const root of tempRoots) fs.rmSync(root, { recursive: true, force: true });
@@ -207,12 +212,15 @@ test("(a) a slow-to-init reviewer is waited on (waitForReady before prompt) and 
 		order.some(o => o.startsWith("prompt:") && Number(o.split(":")[1]) > 30_000),
 		`The resume reminder prompt must use a generous timeout (>30s), not the 30s default. order=${JSON.stringify(order)}`,
 	);
-	assert.deepEqual(promptTexts, [VERIFICATION_RESULT_REMINDER], "Resume tracking must not change the model-facing reminder bytes");
+	const expectedPiText = modelFacingSystemPrompt(VERIFICATION_RESULT_REMINDER);
+	assert.deepEqual(promptTexts, [expectedPiText], "The provider must receive exactly one system prefix followed by the unchanged reminder text");
 	const bindings = readAuthorSidecar(sessionId);
 	assert.equal(bindings.length, 1, "The accepted resume reminder must have one durable author binding");
 	assert.equal(bindings[0].schemaVersion, 2);
 	assert.equal(bindings[0].modelText, undefined);
-	assert.equal(promptAuthorBindingMatchesText(bindings[0], VERIFICATION_RESULT_REMINDER), true);
+	assert.equal(bindings[0].modelPrefix, SYSTEM_MODEL_PREFIX);
+	assert.equal(promptAuthorBindingMatchesText(bindings[0], expectedPiText), true);
+	assert.equal(promptAuthorBindingMatchesText(bindings[0], VERIFICATION_RESULT_REMINDER), false);
 	assert.equal(bindings[0].source, "verification");
 	assert.deepEqual(bindings[0].author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
 
@@ -281,12 +289,15 @@ test("(c) a transient resume failure routes into the rerun-from-scratch fallback
 	// the rerun arm (the resume itself failed transiently).
 	await resumeWithDeadline(harness);
 
-	assert.deepEqual(promptTexts, [VERIFICATION_RESULT_REMINDER], "Failed resume tracking must not change the attempted reminder bytes");
+	const expectedPiText = modelFacingSystemPrompt(VERIFICATION_RESULT_REMINDER);
+	assert.deepEqual(promptTexts, [expectedPiText], "The failed provider attempt must retain the reminder text after exactly one system prefix");
 	const bindings = readAuthorSidecar(sessionId);
 	assert.equal(bindings.length, 1, "The failed resume attempt must leave an auditable binding");
 	assert.equal(bindings[0].schemaVersion, 2);
 	assert.equal(bindings[0].modelText, undefined);
-	assert.equal(promptAuthorBindingMatchesText(bindings[0], VERIFICATION_RESULT_REMINDER), true);
+	assert.equal(bindings[0].modelPrefix, SYSTEM_MODEL_PREFIX);
+	assert.equal(promptAuthorBindingMatchesText(bindings[0], expectedPiText), true);
+	assert.equal(promptAuthorBindingMatchesText(bindings[0], VERIFICATION_RESULT_REMINDER), false);
 	assert.equal(bindings[0].source, "verification");
 	assert.deepEqual(bindings[0].author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
 	assert.equal(bindings[0].settlement?.outcome, "cancelled");
