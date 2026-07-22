@@ -14,7 +14,7 @@ import {
 	VERIFICATION_RESULT_REMINDER,
 } from "../../src/server/agent/verification-harness.ts";
 
-it("VerificationHarness persists its actual resumed-review reminder as verification-authored without changing prompt bytes", async () => {
+it("VerificationHarness prefixes its resumed-review reminder only at the provider boundary", async () => {
 	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-author-producer-"));
 	const sessionId = "verification-author-producer-session";
 	const promptCalls: unknown[][] = [];
@@ -76,16 +76,19 @@ it("VerificationHarness persists its actual resumed-review reminder as verificat
 		);
 
 		assert.equal(result.passed, true);
+		const piText = `[System]: ${VERIFICATION_RESULT_REMINDER}`;
 		assert.deepEqual(
 			promptCalls,
-			[[VERIFICATION_RESULT_REMINDER, undefined]],
-			"VerificationHarness must deliver the exact pre-existing reminder bytes and RPC argument shape",
+			[[piText, undefined]],
+			"only the provider RPC receives the exact author prefix",
 		);
 		const bindings = readAuthorSidecar(sessionId);
 		assert.equal(bindings.length, 1);
 		assert.equal(bindings[0].schemaVersion, 2);
 		assert.equal(bindings[0].modelText, undefined);
-		assert.equal(promptAuthorBindingMatchesText(bindings[0], VERIFICATION_RESULT_REMINDER), true);
+		assert.equal(bindings[0].modelPrefix, "[System]: ");
+		assert.equal(promptAuthorBindingMatchesText(bindings[0], piText), true);
+		assert.equal(promptAuthorBindingMatchesText(bindings[0], VERIFICATION_RESULT_REMINDER), false);
 		assert.equal(bindings[0].source, "verification");
 		assert.deepEqual(bindings[0].author, {
 			kind: "system",
