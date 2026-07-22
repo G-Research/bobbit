@@ -886,7 +886,43 @@
     },
     {
       "path": "tests2/integration/default-standard-session-role.test.ts",
-      "reason": "Reproducing integration coverage for default standard-session role wiring: omitted, empty, and null creation roles plus real worktree creation resolve the project-scoped general role across POST, live state, persistence, detail, and list; full resolved spawn configuration is applied while explicit custom and assistant roles remain unchanged.",
+      "reason": "Budget-safe reproducer: an omitted role on non-worktree standard-session creation resolves general across POST, live state, persistence, detail, and list.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/default-standard-session-role-inputs.test.ts",
+      "reason": "Default standard-session role input coverage: empty and null roles resolve general, while boolean, numeric, and object role values are rejected without creating a session.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/default-standard-session-role-assistant.test.ts",
+      "reason": "Assistant session creation preserves its assistant role and accessory mapping instead of receiving the standard-session general default.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/default-standard-session-role-config.test.ts",
+      "reason": "Project-resolved general and explicit custom roles apply their prompt substitutions, conditionals, tool policies, model, thinking, accessory, and persisted metadata at initial non-worktree spawn.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/default-standard-session-role-worktree.test.ts",
+      "reason": "Real worktree standard-session creation with an omitted role applies and persists the full project-resolved general role configuration.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
