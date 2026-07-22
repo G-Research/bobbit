@@ -4045,14 +4045,13 @@ async function handleApiRoute(
 			console.error(`[broadcast] staff_changed failed for ${event.staffId}:`, err);
 		}
 	};
-	type RoleCreateOptions = { rolePrompt?: string; roleName: string; role: string; accessory?: string; initialModel?: string; initialThinkingLevel?: string };
+	type RoleCreateOptions = { roleName: string; role: string; accessory?: string; initialModel?: string; initialThinkingLevel?: string };
 	const roleCreateOptions = (role: Role): RoleCreateOptions => {
 		const initialModel = typeof role.model === "string" && /^[^/]+\/.+$/.test(role.model) && isSessionSelectableModelString(role.model)
 			? role.model
 			: undefined;
 		const initialThinkingLevel = clampRoleThinking(role.thinkingLevel, initialModel);
 		return {
-			rolePrompt: role.promptTemplate,
 			roleName: role.name,
 			role: role.name,
 			accessory: role.accessory,
@@ -6439,7 +6438,13 @@ async function handleApiRoute(
 			return;
 		}
 
-		// ── Normal session creation ──
+		// ── Normal/assistant session creation ──
+		// Keep this after the delegate early-return: delegate role mappings are owned
+		// by createDelegateSession and must not inherit this route's role contract.
+		if (body?.roleId !== undefined && body.roleId !== null && typeof body.roleId !== "string") {
+			json({ error: "roleId must be a string or null" }, 400);
+			return;
+		}
 		const goalId = body?.goalId;
 
 		// Accept both new assistantType and legacy boolean fields
@@ -6474,7 +6479,7 @@ async function handleApiRoute(
 		const args = body?.args;
 
 		// Normalize the requested role now, then resolve it after resolvedProjectId is known.
-		const requestedRoleId = typeof body?.roleId === "string" ? body.roleId.trim() : body?.roleId;
+		const requestedRoleId: string | null | undefined = typeof body?.roleId === "string" ? body.roleId.trim() : body?.roleId;
 		let createOpts: RoleCreateOptions | undefined;
 
 		// ── Worktree support ──
