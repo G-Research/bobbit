@@ -1124,6 +1124,9 @@ describe("executable SessionManager rehydration boundaries", () => {
 
 		const retry = manager.retryLastPrompt(ps.id);
 		await vi.waitFor(() => expect(oldBridge.stop).toHaveBeenCalledTimes(1));
+		expect(manager.sessions.get(ps.id)?.promptQueue.toArray().map((row: any) => row.text))
+			.toEqual(["retry me once"]);
+		expect(ps.messageQueue.map((row: any) => row.text)).toEqual(["retry me once"]);
 		const restart = manager.restartAgent(ps.id);
 		oldStopGate.resolve();
 
@@ -1131,7 +1134,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(factory).toHaveBeenCalledTimes(2);
 		expect(poisonBridge.prompt).not.toHaveBeenCalled();
 		expect(restartBridge.prompt).toHaveBeenCalledTimes(1);
-		expect(restartBridge.prompt).toHaveBeenCalledWith("retry me once", undefined);
+		expect(restartBridge.prompt).toHaveBeenCalledWith("[System]: retry me once", undefined);
 		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(restartBridge);
 	});
 
@@ -1809,6 +1812,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			? expectedAfterFailure
 			: ["parked queue intent"];
 		expect(rollback.promptQueue.toArray().map((message: any) => message.text)).toEqual(expectedAfterFailure);
+		expect(ps.messageQueue.map((message: any) => message.text)).toEqual(expectedAfterFailure);
 		expect(rollback.lastPromptText).toBe("original user intent");
 		expect(rollback.modelId).toBe("claude-sonnet-4-5");
 		expect(rollback.thinkingLevel).toBe("high");
@@ -1841,6 +1845,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(restored.title).toBe(`Visible ${realm} history`);
 		expect(restored.clients.has(client)).toBe(true);
 		expect(restored.promptQueue.toArray().map((message: any) => message.text)).toEqual(expectedAfterSuccess);
+		expect(ps.messageQueue.map((message: any) => message.text)).toEqual(expectedAfterSuccess);
 		expect(restored.spawnPinnedModel).toBe("anthropic/claude-sonnet-4-5");
 		expect(restored.spawnPinnedThinkingLevel).toBe("high");
 		expect(restored.allowedTools).toEqual(["read", "grep", "bash"]);
@@ -1849,8 +1854,9 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(restored.sandboxed).toBe(sandboxed);
 		expect(restored.cwd).toBe(ps.cwd);
 		expect(successfulPrompts).toEqual([
-			laterAction === "retry" ? "original user intent" : "later follow-up intent",
+			laterAction === "retry" ? "[System]: original user intent" : "later follow-up intent",
 		]);
+		expect(oldBridge.prompt).not.toHaveBeenCalled();
 		expect(switchTimeouts).toEqual(timeout === undefined ? [] : [timeout]);
 		expect(successfulSwitches).toEqual([
 			sandboxed ? switchSessionPathForAgent(ps) : file,
@@ -1960,8 +1966,16 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(rollback.eventBuffer.lastSeq).toBe(rollbackLastSeq);
 		expect(rollback.lastPromptText).toBe("original sandbox retry intent");
 		expect(rollback.turnHadToolCalls).toBe(false);
-		expect(rollback.pendingSkillExpansions).toHaveLength(1);
+		expect(rollback.pendingSkillExpansions).toEqual([{
+			modelText: "expanded retry intent",
+			originalText: "/fixture retry intent",
+			skillExpansions: [],
+		}]);
 		expect(rollback.promptQueue.toArray().map((message: any) => message.text)).toEqual([
+			"original sandbox retry intent",
+			"parked sandbox intent",
+		]);
+		expect(ps.messageQueue.map((message: any) => message.text)).toEqual([
 			"original sandbox retry intent",
 			"parked sandbox intent",
 		]);
@@ -1986,9 +2000,14 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(restored.spawnPinnedThinkingLevel).toBe("high");
 		expect(restored.sessionOnlyGrantedTools).toEqual(["grep"]);
 		expect(restored.oneTimeGrantedTools).toEqual(["bash"]);
-		expect(restored.pendingSkillExpansions).toHaveLength(1);
+		expect(restored.pendingSkillExpansions).toEqual([{
+			modelText: "expanded retry intent",
+			originalText: "/fixture retry intent",
+			skillExpansions: [],
+		}]);
 		expect(restored.promptQueue.toArray().map((message: any) => message.text)).toEqual(["parked sandbox intent"]);
-		expect(successfulPrompts).toEqual(["original sandbox retry intent"]);
+		expect(ps.messageQueue.map((message: any) => message.text)).toEqual(["parked sandbox intent"]);
+		expect(successfulPrompts).toEqual(["[System]: original sandbox retry intent"]);
 		expect(oldPrompts).toEqual([]);
 		expect(factory).toHaveBeenCalledTimes(1);
 		expect(manager.applySandboxWiring).toHaveBeenCalledTimes(2);
