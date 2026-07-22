@@ -20,6 +20,7 @@ import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } fro
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { dispatchGateStatusCacheUpdated } from "./gate-status-events.js";
 import { showHeaderToast } from "./header-toast.js";
+import { ensureProjectPlayFinishSoundOverride } from "./play-finish-sound.js";
 export { errorFromResponse, errorDetails };
 // `dialogs.ts` is heavy (~90 kB) and only needed once the user opens a dialog;
 // route these through `dialogs-lazy.js` so it stays out of the eager
@@ -509,6 +510,12 @@ export async function refreshSessions(): Promise<void> {
 			sessionsChanged = true;
 			const newSessions: GatewaySession[] = sessionsData.sessions || [];
 
+			// Warm each source-project override without delaying session state,
+			// transitions, badges, or completion of this refresh.
+			for (const projectId of new Set(newSessions.map((session) => session.projectId))) {
+				if (projectId) void ensureProjectPlayFinishSoundOverride(projectId);
+			}
+
 			// Beep when a non-active background session finishes streaming
 			const activeId = state.remoteAgent?.gatewaySessionId;
 			for (const s of newSessions) {
@@ -518,7 +525,7 @@ export async function refreshSessions(): Promise<void> {
 					const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
 					if (needsHumanAttentionOnIdleTransition(s, goal, newSessions, state.gateStatusCache)
 						|| needsImmediateHumanAttention(s, state.gateStatusCache)) {
-						RemoteAgent.playNotificationBeep();
+						void RemoteAgent.playNotificationBeep(s);
 						showFaviconBadge();
 					}
 				}

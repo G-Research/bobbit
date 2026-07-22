@@ -45,6 +45,7 @@ import { state, renderApp, setProjectsIfChanged } from "./state.js";
 import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanelWorkspaceTab } from "./preview-panel.js";
 import { loadReviewSources } from "./review-sources-lazy.js";
 import { showFaviconBadge } from "./favicon-badge.js";
+import { isEffectivePlayFinishSoundEnabled, type FinishSoundSource } from "./play-finish-sound.js";
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
 import { scheduleGateStatusRefreshForGoal, refreshSessions, scheduleSessionListRefreshFromPush, scheduleStaffListRefreshFromPush } from "./remote-agent-refresh.js";
 import { applySidePanelWorkspaceFromServer, getSidePanelWorkspace, hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
@@ -704,12 +705,8 @@ export class RemoteAgent {
 	}
 
 	/** Play a short two-tone beep using the Web Audio API (no file needed). */
-	static playNotificationBeep(): void {
-		// Gated by user preference (Settings → General). Default ON; only "false" silences.
-		if (typeof document !== "undefined"
-			&& document.documentElement.dataset.playAgentFinishSound === "false") {
-			return;
-		}
+	static async playNotificationBeep(source?: FinishSoundSource): Promise<void> {
+		if (!(await isEffectivePlayFinishSoundEnabled(source))) return;
 		try {
 			const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
 			const now = ctx.currentTime;
@@ -2772,14 +2769,14 @@ export class RemoteAgent {
 						const goal = goalId ? state.goals.find(g => g.id === goalId) : undefined;
 						if (needsHumanAttentionOnIdleTransition(sess, goal, state.gatewaySessions, state.gateStatusCache)
 							|| needsImmediateHumanAttention(sess, state.gateStatusCache)) {
-							RemoteAgent.playNotificationBeep();
+							void RemoteAgent.playNotificationBeep(sess);
 							showFaviconBadge();
 						}
 					} else {
 						// Session not in the cache yet — fall back to today's behaviour
 						// (notify) so we never *silently swallow* a standalone session's
 						// finish cue during the brief window before the poll lands.
-						RemoteAgent.playNotificationBeep();
+						void RemoteAgent.playNotificationBeep(undefined);
 						showFaviconBadge();
 					}
 				}
