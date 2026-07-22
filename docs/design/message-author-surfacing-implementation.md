@@ -41,7 +41,7 @@ Test Coordinator | Agent
 1. Show top-left prompt badges only when the currently loaded prompt history contains a validated agent or system author.
 2. Render the agent author's static, forward-facing Bobbit using the same loaded session hue and accessory as its sidebar identity.
 3. Prefix trusted system and agent prompts immediately before the Pi `prompt`/`steer` RPC, while every queue, retry, recovery, and in-flight ledger continues to hold unprefixed base model text.
-4. Correlate exact prefixed Pi echoes with the existing private author sidecar and remove only the sidecar-authorized leading prefix from all Bobbit-visible projections.
+4. Correlate prefixed Pi echoes with the existing private author sidecar, stamp the correlated author, and remove a leading prefix only when the candidate's canonical raw text exactly proves the binding's `modelTextDigest`.
 5. Keep human prompts, visible/searchable text, attachments, chips, title inputs, and content hashes unchanged.
 6. Degrade conservatively when author, appearance, sidecar, or correlation data is absent or malformed.
 
@@ -98,7 +98,11 @@ This is the only persistence system to extend. The digest must change from the b
 - Streamed search rebuild: `src/server/search/sources/message-source.ts` through `createPromptAuthorStreamCorrelation()`.
 - Skill/file display rewriting runs after author correlation in snapshot/live paths.
 
-Prefix removal must be added to those same correlation boundaries, before any skill/file display rewrite. Two raw-transcript consumers currently bypass those boundaries and must be brought into the same projection: extension Host API transcript/tool-call reads in `src/server/server.ts`, and full-history title generation in `SessionManager.generateTitleForAnySession()` / `autoGenerateTitle()`.
+Prefix removal must be added to those same correlation boundaries, before any skill/file display rewrite. Correlation selects the accountable author occurrence; it does **not** by itself authorize a text mutation. Every removal independently proves that the candidate still has the exact raw Pi text by comparing its canonical text with the binding's `modelTextDigest`. This distinction is required because stable IDs survive clones and replay even after content has already been projected.
+
+`EventBuffer` is an outward-view boundary: live ingestion projects the raw Pi event before buffering, then skill/file display rewriting produces the event retained by the buffer. Resume sends that retained visible event verbatim and does not correlate or project it again. A resume gap instead fetches a fresh raw Pi snapshot and uses the snapshot projection pipeline. Spread clones, `structuredClone`, JSON serialization, and reconstructed stable-ID rows require no projection marker: a pre-projection clone still matches the raw digest, while a post-projection clone does not.
+
+Two raw-transcript consumers currently bypass those boundaries and must be brought into the same projection: extension Host API transcript/tool-call reads in `src/server/server.ts`, and full-history title generation in `SessionManager.generateTitleForAnySession()` / `autoGenerateTitle()`.
 
 ## 4. Shared formatting and selection primitives
 
@@ -538,22 +542,26 @@ Add to `src/server/agent/author-sidecar.ts`:
 ```ts
 export function projectCorrelatedPromptMessage<T extends Record<string, unknown>>(
   message: T,
-  binding: Pick<PromptAuthorBinding, "author" | "modelPrefix">,
+  binding: Pick<
+    PromptAuthorBinding,
+    "author" | "modelPrefix" | "modelTextDigest"
+  >,
 ): T & { author: MessageAuthor };
 ```
 
-It is called only after existing authoritative sidecar/live correlation has selected a binding.
+It is called only after existing authoritative sidecar/live correlation has selected a binding. Binding selection authorizes attribution; only an exact raw-text digest match authorizes prefix removal.
 
-Behavior:
+Behavior, in this order:
 
-1. Stamp the binding's validated author.
-2. If `modelPrefix` is absent, do not change content.
-3. For string content, remove exactly one leading `modelPrefix` only when `content.startsWith(modelPrefix)`.
-4. For array content, locate the first model-visible `{ type: "text", text: string }` block. Remove exactly one leading copy only when that block's text starts with the full exact prefix. Clone only the message, content array, and changed text block; preserve images and every unrelated block/reference.
-5. If the prefix is absent, split across blocks, malformed, or not at offset zero, remove nothing.
-6. Never use a regular expression and never derive a removable string from visible text or author fields at read time.
+1. Before cloning, stamping the author, or changing content, extract `candidateModelText` with the same `extractPromptModelText()` canonicalization used by sidecar correlation: string content as-is, or all ordered text blocks concatenated without separators.
+2. Establish `rawTextProven` only when the binding has a valid `modelTextDigest`, digesting `candidateModelText` succeeds, and a timing-safe comparison exactly matches the binding's digest. Do not use the memory-only legacy `modelText` fallback for this decision. A missing digest, unavailable digest key, absent text boundary, or mismatch means `rawTextProven = false`.
+3. Stamp the binding's validated author **regardless of `rawTextProven`**. Stable-ID correlation remains authoritative for authorship even when the candidate is an already-projected clone, a partial live update, or otherwise has different display content.
+4. If `modelPrefix` is absent or `rawTextProven` is false, return the author-stamped message without changing content.
+5. If proof succeeded, remove exactly one leading `modelPrefix` from string content only when `content.startsWith(modelPrefix)`.
+6. For array content, locate the first model-visible `{ type: "text", text: string }` block and remove one leading copy only when that block's text starts with the full exact prefix. Clone only the message, content array, and changed text block; preserve images and every unrelated block/reference. The digest covers the canonical concatenation of all text blocks, while the prefix must still occupy the first block at offset zero.
+7. If the prefix is absent, split across blocks, malformed, or not at offset zero, remove nothing. Never use a regular expression or derive a removable string from visible text or author fields at read time.
 
-Define a private non-enumerable `Symbol` marker and have the helper refuse a second text removal from an already-projected object. Stamp the marker on the final returned clone after author assignment. This is required for exact prefix-shaped user text: `[System]: [System]: hello` projects once to `[System]: hello`, never to `hello`, even if the same correlated object is passed through the helper twice in-process. The marker is an implementation guard only; it is not serialized or treated as correlation authority. Fresh Pi snapshots correlate against the digest each time.
+There is no `Symbol`, `WeakSet`, object-identity flag, enumerable marker, or serialized projection state. Idempotence follows from content proof: raw `[System]: [System]: hello` matches the dispatch digest and projects to `[System]: hello`; that projected content, including any spread/structured/JSON clone carrying the same stable message ID, no longer matches the raw digest, so a second correlation stamps `System` but leaves `[System]: hello` intact. Conversely, cloning raw Pi content before projection preserves the digest proof and still permits the one removal.
 
 ### 9.2 Snapshot/full-array correlation
 
@@ -564,31 +572,32 @@ Change `mergeAuthorSidecarIntoMessages()` assignments from `Map<number, MessageA
 2. timestamp plus exact keyed digest;
 3. echoed FIFO exact keyed digest.
 
-All matching uses the raw Pi-prefixed text. After a binding wins, call `projectCorrelatedPromptMessage()`, then run normal legacy inference for unassigned rows. Cancelled rows never match; unresolved rows still match only the exact synthetic in-flight ID.
+Digest/timestamp/FIFO matching uses raw Pi-prefixed text. Stable message-ID matching may also select the same binding for a projected clone whose content no longer matches, so binding selection and stripping proof remain deliberately separate. After a binding wins, call `projectCorrelatedPromptMessage()`; it always stamps the correlated author and strips only after its independent exact `modelTextDigest` proof. Then run normal legacy inference for unassigned rows. Cancelled rows never match; unresolved rows still match only the exact synthetic in-flight ID.
 
 This ordering is required in `visible-message-snapshot.ts`:
 
 ```text
 raw Pi snapshot
  -> in-flight/compaction splice
- -> author correlation + exact prefix projection
+ -> author correlation + digest-gated exact prefix projection
  -> truncation
  -> skill/file display rewrite
  -> client
 ```
 
-The synthetic in-flight steer contains unprefixed ledger text. It can still bind by its exact `inflight-steer:<promptId>` ID; the helper sees that it does not start with `modelPrefix` and removes nothing.
+The synthetic in-flight steer contains unprefixed ledger text. It can still bind by its exact `inflight-steer:<promptId>` ID; the helper stamps the correlated author, but its canonical text cannot match the binding's raw prefixed `modelTextDigest`, so it removes nothing even if the base text itself begins with a prefix-shaped string.
 
 ### 9.3 Live event correlation
 
-`prepareVisibleAgentEvent()` must correlate using the raw Pi event text before cloning it for display. Add `modelPrefix` to every live/pending/replay binding shape and carry it through stable ID/timestamp maps and keyless replay guards.
+`prepareVisibleAgentEvent()` normally receives raw Pi event text. Add `modelPrefix` and `modelTextDigest` to every live/pending/replay binding shape and carry them through stable ID/timestamp maps and keyless replay guards. A stable ID can also select a binding when a cloned/reconstructed event is already visible text; the projection helper's digest check, not the stable ID or object identity, decides whether content may be stripped.
 
 After the binding is selected:
 
-1. project its message with `projectCorrelatedPromptMessage()`;
-2. retain the existing private `PROMPT_AUTHOR_EVENT_BINDING` prompt ID marker;
-3. settle using the raw occurrence/binding;
-4. pass only the projected event to lifecycle tracking, `latestMessageUpdate`, live search indexing, `EventBuffer`, skill/file splicing, and broadcast.
+1. retain the untouched candidate message long enough for `projectCorrelatedPromptMessage()` to compute and compare its exact canonical raw-text digest;
+2. project its message; this stamps the author on both digest match and mismatch, but removes the prefix only on a match;
+3. retain the existing private `PROMPT_AUTHOR_EVENT_BINDING` prompt ID marker solely for settlement/steer deduplication, never as proof that text is raw or removable;
+4. settle using the raw occurrence/binding;
+5. pass only the projected event to lifecycle tracking, `latestMessageUpdate`, live search indexing, skill/file splicing, `EventBuffer`, and broadcast.
 
 `_consumeSteerEcho()` should continue preferring the correlated prompt ID. It must not compare a prefixed Pi echo against the unprefixed in-flight ledger after projection. On the degraded no-sidecar path the echo is unprefixed, so its existing text fallback remains valid.
 
@@ -596,7 +605,21 @@ After the binding is selected:
 
 Skill/file splicing then sees the restored expanded base text and continues to match its existing unprefixed `pendingSkillExpansions.modelText`.
 
-### 9.4 Streamed search correlation
+### 9.4 EventBuffer, reconnect, and clone boundaries
+
+The implementation must preserve these explicit ownership boundaries:
+
+| Boundary | Content entering it | Required behavior |
+|---|---|---|
+| Live Pi `message_update` / `message_end` | Raw or partial Pi content | Correlate first. Stamp the correlated author on every selected binding; strip only if the candidate's canonical full text exactly matches `modelTextDigest`. Then apply outward skill/file rewriting and buffer/broadcast the visible event. |
+| `EventBuffer.push()` and reconnect `resume` | Already projected and display-rewritten event | Retain the outward event. `resume` sends `entry.event` verbatim with its original `seq`/`ts`; it does not call correlation/projection. JSON wire serialization need not preserve any private marker. |
+| Reconnect `resume_gap` / `get_messages` | Fresh raw Pi snapshot | Run `buildVisibleMessageSnapshot()` once from raw rows, then add `_order` and serialize. Any clone made after projection remains safe because its visible text cannot prove the raw digest. |
+| `switch_session`, restart, and force-abort Pi replay | Re-emitted raw Pi transcript events | Route each event through live correlation/projection. Stable-ID replay may reselect a settled binding; removal still requires the exact digest, so both genuine raw replay and an accidentally re-entered visible clone are safe. |
+| Transcript/archive/search/title/extension readers and fork/continue destination reads | Raw JSONL/snapshot rows, sometimes cloned before use | Preserve IDs/timestamps through correlation. A clone made before projection matches the raw digest and projects once. A clone/serialization made after projection does not match and is author-stamped without further stripping. |
+
+`PROMPT_AUTHOR_EVENT_BINDING` may remain a private process-local settlement marker, but projection correctness must not depend on it surviving a spread, `structuredClone`, JSON round trip, EventBuffer replay, gateway restart, or fork/continue copy. No projected event is fed back into Pi, the durable queue, the transcript, or the author sidecar.
+
+### 9.5 Streamed search correlation
 
 Keep the existing bounded two-pass resolver but add a binding-returning method:
 
@@ -615,12 +638,12 @@ interface PromptAuthorStreamCorrelation {
 
 The compact resolver retains `modelPrefix` in its byte estimate. Normal correlated rows reach `extractForIndexing()` with exactly the pre-feature base text, so snippets, role weights, and `contentHashOf()` remain unchanged. If sidecar correlation degrades because its configured byte/record bound is exceeded, search rebuild must not index any unprojected accountable prompt row from that transcript: omit those ambiguous prompt entries rather than either guessing at a prefix or making injected attribution searchable. Assistant/tool entries remain indexable. Missing/corrupt/uncorrelated legacy rows within a non-degraded resolver remain literal, as required by the no-guess rule.
 
-### 9.5 Transcript, pre-compaction, archive, replay, extension, and copy
+### 9.6 Transcript, pre-compaction, archive, replay, extension, and copy
 
-The projection helper must be reached by:
+The projection helper must be reached by every raw-content reader or replay path:
 
-- active and archived `get_messages` snapshots;
-- reconnect snapshots and EventBuffer replay;
+- active and archived `get_messages` snapshots, including reconnect fallback snapshots after `resume_gap`;
+- raw Pi `switch_session`, restart, and force-abort replay events before any new `EventBuffer.push()`; reconnect `resume` itself re-sends already-visible buffer entries verbatim and does not project them;
 - refresh-after-compaction and role/agent refresh snapshots;
 - `readTranscript()` and `readOrphanedBeforeCompaction()` before filtering/pagination/rendering;
 - extension Host API `readOwnTranscript`, `/api/ext/session/transcript`, and `/api/ext/session/tool-call` before `transcriptToHostMessages()` / `transcriptToToolCall()` and their pattern filter;
@@ -641,9 +664,9 @@ async function projectOwnTranscriptJsonl(
 
 It parses message envelopes with their IDs/timestamps intact, performs the same sidecar correlation and exact prefix projection, and serializes only the in-memory copy passed to extension contract adapters. It must remove private `author`/correlation markers before returning the frozen Host API shape and must not rewrite the on-disk transcript. Both server-host `readOwnTranscript` callbacks and both `/api/ext/session/*` endpoints call this one helper; an extension must not be able to filter for or receive an injected prefix.
 
-Fork/continue confirmation compares the cloned transcript's raw prefixed text to the copied digest and preserves `modelPrefix` on confirmed dispatch records. Visible destination replay removes it through the same helper. Failed copy cleanup and hard purge continue to remove the destination sidecar.
+Fork/continue confirmation compares the cloned transcript's raw prefixed text to the copied digest and preserves both `modelTextDigest` and `modelPrefix` on confirmed dispatch records. Visible destination replay removes it through the same helper. A raw clone with the copied stable ID still proves the raw digest and strips once; re-projecting a visible destination clone with that same ID stamps the author but cannot prove the raw digest and leaves prefix-shaped base text intact. Failed copy cleanup and hard purge continue to remove the destination sidecar.
 
-### 9.6 Title generation
+### 9.7 Title generation
 
 `SessionManager.generateTitleForAnySession()` (live and archived branches) and `autoGenerateTitle()` currently pass raw Pi messages to `generateSessionTitle()`. Route those arrays through the same correlated prefix-projection stage before title generation, but before skill/file display rewriting, so the title model continues to receive the existing expanded base model text rather than the new author decoration. Keep `autoGenerateTitleFromText()` unchanged because its explicit caller-supplied `userText` is already unprefixed. Preserve transcript envelope IDs/timestamps until correlation completes in the archived branch.
 
@@ -663,12 +686,12 @@ Once Bobbit has a trusted human principal, a follow-up may add a per-runtime `Se
 ## 11. Security and degradation
 
 1. **Trust boundary unchanged.** Browser commands still cannot assert `author`; agent and extension identities remain server-derived.
-2. **No content-pattern authority.** Prefix-looking user content never authorizes stripping. Only a correlated private sidecar binding with its exact `modelPrefix` does.
+2. **No content-pattern authority.** Prefix-looking user content never authorizes stripping. Correlation selects the author, but removal additionally requires a valid exact `modelPrefix` and a timing-safe match between the candidate's canonical raw text digest and the binding's `modelTextDigest`.
 3. **Write-before-prefix.** If the exact prefixed dispatch cannot be persisted, that occurrence is sent unprefixed.
-4. **Digest exactness.** `modelTextDigest` covers exact `piText`, including author prefix, existing recovery framing, expanded skill text, and synthesized attachment text.
+4. **Digest exactness.** `modelTextDigest` covers exact `piText`, including author prefix, existing recovery framing, expanded skill text, and synthesized attachment text, and is the sole proof that a correlated candidate is still raw enough to strip. Stable ID, timestamp, object identity, or a process-local marker is insufficient.
 5. **No prompt plaintext in the private ledger.** `modelPrefix` contains only normalized label/display ID or `System`; body text remains HMAC-only.
 6. **Invalid record safety.** A present prefix must exactly equal the prefix derived from that record's validated trusted author. Wrong label/ID, agent/system mismatch, user prefix, malformed data, or invalid author invalidates the record; a missing legacy prefix means no stripping.
-7. **Projection safety.** Only one exact leading copy at the first text boundary can be removed by a validated binding; content mismatch means no change.
+7. **Projection safety.** Correlated authors are stamped even when raw-text proof fails. Only one exact leading copy at the first text boundary can be removed after exact digest proof; partial, projected, cloned-after-projection, mismatched, or unverifiable content is never altered.
 8. **Appearance safety.** Resolution is loaded-state-only and read-only. Missing staff/session/colour/accessory data returns the canonical static fallback.
 9. **UI safety.** Invalid authors do not throw and do not receive fabricated labels. Long valid labels are visually ellipsized but remain available to assistive technology.
 10. **No hidden payload prefixing.** Only accountable prompt/steer RPC text at the four audited dispatch sites is prefixed. Assistant output, tool results, system prompt assembly, provider lifecycle context blocks, and hidden orchestration payloads that are not visible prompts remain untouched.
@@ -688,10 +711,12 @@ Once Bobbit has a trusted human principal, a follow-up may add a per-runtime `Se
 | `src/ui/components/PreCompactionHistory.ts` | Register/update/unregister its fetched hydrated slice with the transcript owner (retaining it while collapsed) and forward the owner-supplied mode/appearance resolver to its nested `MessageList`. |
 | `src/ui/components/Messages.ts` | Render conditional badge and static agent sprite without changing unlabelled markup/body flow. |
 | `src/ui/app.css` | Add top-left overlay, intrinsic sizing, ellipsis, timestamp-safe and mobile-safe styles. |
-| `src/server/agent/author-sidecar.ts` | Add optional `modelPrefix`, require any present value to exactly match the trusted record author formatter in dispatch/binding validation, retain exact Pi digest, and add binding-returning stream correlation, exact projection, and copy/restore support. |
-| `src/server/agent/session-manager.ts` | Prepare exact RPC text at four dispatch sites; retain unprefixed durable/recovery text; carry prefix through live/replay bindings; project before visible event flow and full-history title generation. |
+| `src/server/agent/author-sidecar.ts` | Add optional `modelPrefix`, require any present value to exactly match the trusted record author formatter in dispatch/binding validation, retain exact Pi digest, and add binding-returning stream correlation, copy/restore support, and projection that stamps correlated authors but strips only after exact canonical raw-text digest proof. |
+| `src/server/agent/session-manager.ts` | Prepare exact RPC text at four dispatch sites; retain unprefixed durable/recovery text; carry prefix and digest through live/replay bindings; project raw Pi events before visible flow/EventBuffer and full-history title generation; never use the settlement symbol as strip proof. |
 | `src/server/agent/session-store.ts` | Update in-flight text documentation only; persisted shape remains base text/source/author. |
-| `src/server/agent/visible-message-snapshot.ts` | Keep correlation/projection before skill/file rewriting and document the new invariant. |
+| `src/server/agent/event-buffer.ts` | Keep outward projected events only; document that reconnect resume replays them verbatim and requires no projection marker. |
+| `src/server/ws/handler.ts` | Keep resume as verbatim `EventBuffer` replay; route only resume-gap snapshot recovery through fresh raw snapshot projection. |
+| `src/server/agent/visible-message-snapshot.ts` | Keep raw correlation/digest-gated projection before post-projection clones, `_order`, and skill/file rewriting; document the new invariant. |
 | `src/server/search/sources/message-source.ts` | Resolve full binding and project before extraction/hash generation; omit ambiguous prompt entries on bounded-resolver degradation. |
 | `src/server/agent/transcript-reader.ts` | Synchronize projected `fullMessage.content` into `RawMessage.content` before filtering/compact/verbose output; expose the shared in-memory JSONL projection used by extension reads. |
 | `src/server/agent/splice-inflight-message.ts` | Keep synthetic steer content unprefixed; make structured occurrence detection prove raw prefixed echoes with the settled sidecar digest before ID/timestamp matching. |
@@ -735,11 +760,14 @@ Extend `tests2/core/author-sidecar.test.ts`:
 - absent legacy prefix remains valid and authorizes no stripping, including otherwise valid legacy agent/system rows;
 - dispatch-record and folded-binding validation accept an exact formatter-derived prefix and reject malformed present values;
 - syntactically valid but wrong agent label, wrong agent ID, agent author with `[System]: `, system author with an agent prefix, and user author with any prefix each invalidate the record/binding and leave raw transcript content literal;
-- exact projection for string and image-first/split-text array content;
+- exact projection for string and image-first/split-text array content, with digest proof over the canonical concatenated raw text before the first block is changed;
 - images/unrelated blocks retain identity; only the first text block is cloned;
 - prefix-shaped base content removes one injected copy only;
+- a correlated digest mismatch still stamps the binding's author while leaving every content block unchanged;
+- stable-ID correlation of raw `[System]: [System]: hello` projects to `[System]: hello`; spread, `structuredClone`, and JSON-round-trip clones of that projected row retain the same ID, re-correlate to the same binding, and remain `[System]: hello` without any object marker;
+- cloning the raw stable-ID row before projection still matches `modelTextDigest` and removes exactly one copy;
 - repeated identical prompts with different authors/prefixes remain occurrence-correct;
-- mismatch/uncorrelated/cancelled/missing-sidecar records remove nothing;
+- uncorrelated/cancelled/missing-sidecar records do not stamp or strip; correlated missing-digest/legacy and digest-mismatch bindings stamp the author but remove nothing;
 - copy/fork confirmation preserves `modelPrefix` only for echoed transcript-confirmed bindings;
 - stream correlation returns the binding and includes prefix bytes in bounds.
 
@@ -750,7 +778,9 @@ Add focused dispatch/lifecycle coverage (new dependency-light suite if importing
 - queue, `lastPromptText`, in-flight steer ledger, rejection recovery, retry, and force-abort requeue never contain the injected prefix;
 - same-author steer batch prefixes once; all-user batches remain unprefixed; human-plus-agent/system aggregate prefixes once as System;
 - retry/replay/reconnect/re-dispatch do not stack prefixes;
-- live user echo is projected before `EventBuffer` and skill/file splicing;
+- a raw stable-ID prefix-shaped live echo is projected before skill/file splicing and `EventBuffer`; reconnect `resume` returns the buffered `[System]: hello` verbatim;
+- JSON-cloning that buffered visible event and defensively re-entering stable-ID correlation stamps the author but remains `[System]: hello` because its text no longer matches the raw digest;
+- a `resume_gap` fresh raw snapshot independently proves the digest and also projects to `[System]: hello` once;
 - raw split text/image content remains structured;
 - existing error-recovery framing follows the author prefix.
 
@@ -784,6 +814,8 @@ Extend `tests2/integration/message-author-ws-server.test.ts` with mock-bridge RP
 - normal human RPC and visible echo are both unprefixed;
 - system and authenticated agent RPCs contain exact prefixes;
 - live event, `get_messages`, and reconnect snapshot expose unchanged base text plus trusted author;
+- for prefix-shaped base content, a stable-ID live raw echo becomes `[System]: hello` in `EventBuffer`, reconnect resume replays that value verbatim, and full snapshot fallback independently projects fresh raw content to the same value;
+- a JSON-cloned/reconstructed projected event with the same stable ID can pass correlation again without becoming `hello`, and retains/restores the correlated system author on digest mismatch;
 - array/image prompt preserves images while visible first text is projected;
 - same-author steers prefix once, distinct synthetic all-user rows remain unprefixed, and human-plus-agent/system aggregation prefixes once as System;
 - sidecar append-failure occurrence dispatches/echoes unprefixed and remains usable;
@@ -821,7 +853,8 @@ Add `tests/e2e/message-author-prefix-restart.spec.ts` and register it in the v2 
 - assert the private sidecar contains `modelPrefix` and a digest but not prompt plaintext;
 - assert WS snapshot/transcript/search surfaces contain the original base text;
 - restart the gateway, reconnect, and repeat visible/search assertions;
-- cover a prefix-shaped base prompt to prove only the injected copy is removed.
+- additionally deliver a system-authored prefix-shaped base prompt with a stable Pi message ID across live delivery, EventBuffer resume, gateway replay, and fresh snapshot fallback; every visible form remains `[System]: hello` while the raw transcript remains `[System]: [System]: hello`;
+- clone/serialize a once-projected stable-ID row through the test replay hook and prove re-correlation stamps the author without removing the prefix-shaped base copy.
 
 Existing full E2E coverage remains the owner for general queue, sandbox, fork/continue, and restart infrastructure; this new case pins the cross-process prefix proof specifically.
 
@@ -869,8 +902,9 @@ Do not add an `AGENTS.md` recipe; the maintainer reference and this design are s
 - [ ] Sidecar stores exact prefix and digest of exact Pi text, never prompt plaintext.
 - [ ] Every present `modelPrefix` exactly equals `modelPrefixForPromptAuthor(record.author)`; wrong label/ID, agent/system mismatch, and user-with-prefix rows invalidate both record and binding and leave transcript text literal, while missing legacy prefixes remain valid and remove nothing.
 - [ ] Sidecar failure sends that occurrence unprefixed.
-- [ ] Correlated live/snapshot/transcript/pre-compaction/archive/extension/search/title projections remove exactly one authorized leading copy.
-- [ ] Prefix-looking base content survives intact.
+- [ ] Correlated live/snapshot/transcript/pre-compaction/archive/extension/search/title projections stamp the trusted author, but remove one leading copy only when the candidate's canonical raw text timing-safely matches the binding's exact `modelTextDigest`.
+- [ ] Stable ID/timestamp correlation, `PROMPT_AUTHOR_EVENT_BINDING`, and object identity never independently authorize stripping; correlated digest mismatch still stamps the author and preserves content.
+- [ ] Prefix-looking base content survives same-object re-entry, spread/structured/JSON clones, EventBuffer resume, stable-ID Pi replay, reconnect snapshot fallback, restart, and fork/continue.
 - [ ] Visible/search/title/hash text remains the pre-prefix base text.
 - [ ] Retry, replay, reconnect, restart, force-abort, fork/continue, compaction, and steer batching do not stack or leak prefixes.
 - [ ] Browser/REST payloads still cannot assert arbitrary author metadata.
