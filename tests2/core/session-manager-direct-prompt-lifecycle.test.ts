@@ -257,9 +257,11 @@ afterAll(() => {
 });
 
 describe("SessionManager direct idle prompt lifecycle", () => {
-	it("durably tracks direct delegate, verification, and restart system producers without changing bytes", async () => {
+	it("durably tracks direct delegate, verification, and restart system producers with exact provider prefixes", async () => {
 		const manager = makeManager();
 		const delegateText = "Execute the task described in your system prompt. Follow the instructions carefully.";
+		const systemPrefix = "[System]: ";
+		const delegatePiText = `${systemPrefix}${delegateText}`;
 		const delegatePrompt = vi.fn(async (_text: string) => {
 			delegateSession.status = "streaming";
 			return { success: true };
@@ -270,14 +272,17 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		});
 
 		await sendDelegatePrompt(delegateSession, "not model-facing", 1_000);
-		assert.deepEqual(delegatePrompt.mock.calls[0], [delegateText]);
+		assert.deepEqual(delegatePrompt.mock.calls[0], [delegatePiText]);
 		const delegateBinding = readAuthorSidecar(delegateSession.id)[0];
 		assert.equal(delegateBinding.modelText, undefined);
-		assert.equal(promptAuthorBindingMatchesText(delegateBinding, delegateText), true);
+		assert.equal(delegateBinding.modelPrefix, systemPrefix);
+		assert.equal(promptAuthorBindingMatchesText(delegateBinding, delegatePiText), true);
 		assert.equal(delegateBinding.source, "system");
 		assert.deepEqual(delegateBinding.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
 
 		const ownerAuthor = { kind: "agent", id: "session:delegate-owner", label: "Delegate owner" } as const;
+		const ownerPrefix = "[Delegate owner (delega)]: ";
+		const ownerPiText = `${ownerPrefix}${delegateText}`;
 		const ownerPrompt = vi.fn(async (_text: string) => {
 			ownerDelegate.status = "streaming";
 			return { success: true };
@@ -290,10 +295,11 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 			source: "agent",
 			author: ownerAuthor,
 		});
-		assert.deepEqual(ownerPrompt.mock.calls[0], [delegateText]);
+		assert.deepEqual(ownerPrompt.mock.calls[0], [ownerPiText]);
 		const ownerBinding = readAuthorSidecar(ownerDelegate.id)[0];
 		assert.equal(ownerBinding.modelText, undefined);
-		assert.equal(promptAuthorBindingMatchesText(ownerBinding, delegateText), true);
+		assert.equal(ownerBinding.modelPrefix, ownerPrefix);
+		assert.equal(promptAuthorBindingMatchesText(ownerBinding, ownerPiText), true);
 		assert.equal(ownerBinding.source, "agent");
 		assert.deepEqual(ownerBinding.author, ownerAuthor);
 
@@ -309,11 +315,15 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 			source: "agent",
 			author: { kind: "system", id: "system:forged", label: "Forged" },
 		});
+		assert.deepEqual(malformedPrompt.mock.calls[0], [delegatePiText]);
 		const malformedBinding = readAuthorSidecar(malformedDelegate.id)[0];
+		assert.equal(malformedBinding.modelPrefix, systemPrefix);
+		assert.equal(promptAuthorBindingMatchesText(malformedBinding, delegatePiText), true);
 		assert.equal(malformedBinding.source, "system");
 		assert.deepEqual(malformedBinding.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
 
 		const verificationText = "Return the verification_result now.";
+		const verificationPiText = `${systemPrefix}${verificationText}`;
 		const verificationPrompt = vi.fn(async () => ({ success: true }));
 		const { session: verificationSession } = putSession(manager, {
 			id: "s-verification-producer",
@@ -323,10 +333,11 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 			source: "verification",
 			now: () => manager._testClock.now(),
 		});
-		assert.deepEqual(verificationPrompt.mock.calls[0], [verificationText]);
+		assert.deepEqual(verificationPrompt.mock.calls[0], [verificationPiText]);
 		const verificationBinding = readAuthorSidecar(verificationSession.id)[0];
 		assert.equal(verificationBinding.modelText, undefined);
-		assert.equal(promptAuthorBindingMatchesText(verificationBinding, verificationText), true);
+		assert.equal(verificationBinding.modelPrefix, systemPrefix);
+		assert.equal(promptAuthorBindingMatchesText(verificationBinding, verificationPiText), true);
 		assert.equal(verificationBinding.source, "verification");
 		assert.deepEqual(verificationBinding.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
 
@@ -337,11 +348,12 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		});
 		assert.equal(await manager._dispatchBootContinuation(restartSession), true);
 		assert.equal(restartPrompt.mock.calls.length, 1);
-		const restartText = restartPrompt.mock.calls[0][0];
-		assert.match(restartText, /infrastructure server restarted while you were mid-turn/i);
+		const restartPiText = restartPrompt.mock.calls[0][0];
+		assert.match(restartPiText, /^\[System\]: .*infrastructure server restarted while you were mid-turn/i);
 		const restartBinding = readAuthorSidecar(restartSession.id)[0];
 		assert.equal(restartBinding.modelText, undefined);
-		assert.equal(promptAuthorBindingMatchesText(restartBinding, restartText), true);
+		assert.equal(restartBinding.modelPrefix, systemPrefix);
+		assert.equal(promptAuthorBindingMatchesText(restartBinding, restartPiText), true);
 		assert.equal(restartBinding.source, "system");
 		assert.deepEqual(restartBinding.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
 	});
@@ -366,16 +378,23 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 
 			manager.drainQueue(session);
 			assert.equal(prompt.mock.calls.length, 1);
-			assert.deepEqual(prompt.mock.calls[0], [text, undefined]);
+			const expectedPrefix = author.kind === "system" ? "[System]: " : "[Caller (caller)]: ";
+			const piText = `${expectedPrefix}${text}`;
+			assert.deepEqual(prompt.mock.calls[0], [piText, undefined]);
+			assert.equal(session.promptQueue.length, 0, "the durable base-text row is consumed while Pi receives the prefixed text");
+			const dispatched = readAuthorSidecar(session.id).find((row) => row.promptId === queued.id);
+			assert.equal(dispatched?.modelPrefix, expectedPrefix);
+			assert.equal(promptAuthorBindingMatchesText(dispatched, piText), true);
 
 			if (ordering === "agent-start-before-echo") {
 				manager.handleAgentLifecycle(session, { type: "agent_start" });
 			} else {
 				const echo: any = manager.prepareVisibleAgentEvent(session, {
 					type: "message_end",
-					message: { id: `m-${ordering}`, role: "user", content: text },
+					message: { id: `m-${ordering}`, role: "user", content: piText },
 				});
 				assert.deepEqual(echo.message.author, author);
+				assert.equal(echo.message.content, text, "the provider echo projects back to the durable base text");
 				manager.handleAgentLifecycle(session, echo);
 			}
 
@@ -389,9 +408,10 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 			if (ordering === "agent-start-before-echo") {
 				const echo: any = manager.prepareVisibleAgentEvent(session, {
 					type: "message_end",
-					message: { id: `m-${ordering}`, role: "user", content: text },
+					message: { id: `m-${ordering}`, role: "user", content: piText },
 				});
 				assert.deepEqual(echo.message.author, author);
+				assert.equal(echo.message.content, text, "the provider echo projects back to the durable base text");
 				manager.handleAgentLifecycle(session, echo);
 			}
 			assert.equal(
@@ -571,8 +591,9 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		await Promise.resolve();
 
 		assert.equal(prompt.mock.calls.length, 2, "expected only the initial failure plus one auto retry dispatch");
-		assert.equal((prompt.mock.calls[1] as any[])[0], "retry once without duplicate queue replay");
-		assert.equal(session.promptQueue.length, 0, "auto retry should consume the recovered row before redispatching");
+		assert.equal((prompt.mock.calls[0] as any[])[0], "retry once without duplicate queue replay", "the original human dispatch stays unprefixed");
+		assert.equal((prompt.mock.calls[1] as any[])[0], "[System]: retry once without duplicate queue replay");
+		assert.equal(session.promptQueue.length, 0, "auto retry should consume the recovered base-text row before redispatching");
 		assert.equal(session.status, "streaming");
 	});
 
@@ -640,9 +661,14 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 
 		assert.equal(prompt.mock.calls.length, 2, "expected initial failed delivery plus one auto retry");
 		assert.equal(
-			(prompt.mock.calls[1] as any[])[0],
+			(prompt.mock.calls[0] as any[])[0],
 			"retry the newly failed prompt, not old tool work",
-			"auto retry should re-send the recovered failed prompt",
+			"the original human dispatch stays unprefixed",
+		);
+		assert.equal(
+			(prompt.mock.calls[1] as any[])[0],
+			"[System]: retry the newly failed prompt, not old tool work",
+			"the system-owned auto retry prefixes the recovered base prompt only at provider dispatch",
 		);
 		assert.doesNotMatch(
 			(prompt.mock.calls[1] as any[])[0],
@@ -927,9 +953,11 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 
 		await manager.deliverLiveSteer(session.id, text);
 		const p1 = session.inFlightSteerTexts[0].promptId;
+		const firstPiText = (steer.mock.calls[0] as any[])[0];
+		assert.equal(firstPiText, text, "human steers stay provider-visible byte-for-byte");
 		const first: any = manager.prepareVisibleAgentEvent(session, {
 			type: "message_end",
-			message: { role: "user", content: text },
+			message: { role: "user", content: firstPiText },
 		});
 		manager.handleAgentLifecycle(session, first);
 		assert.deepEqual(first.message.author, { kind: "user", id: "user:local", label: "User" });
@@ -938,15 +966,18 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		await manager.deliverLiveSteer(session.id, text, { source: "agent", author: agentAuthor });
 		const p2 = session.inFlightSteerTexts[0].promptId;
 		assert.notEqual(p2, p1);
+		const secondPiText = (steer.mock.calls[1] as any[])[0];
+		assert.equal(secondPiText, `[Caller (caller)]: ${text}`);
+		assert.equal(session.inFlightSteerTexts[0].text, text, "the in-flight ledger retains unprefixed base text");
 		const second: any = manager.prepareVisibleAgentEvent(session, {
 			type: "message_end",
-			message: { role: "user", content: text },
+			message: { role: "user", content: secondPiText },
 		});
 		manager.handleAgentLifecycle(session, second);
 
 		assert.deepEqual(second.message.author, agentAuthor, "the new occurrence must not inherit p1's author");
 		assert.equal(second.message.role, "user");
-		assert.equal(second.message.content, text, "author correlation must not change model-facing bytes");
+		assert.equal(second.message.content, text, "the raw prefixed provider echo projects back to visible base text");
 		assert.equal(session.pendingPromptAuthors.length, 0);
 		assert.equal(session.inFlightSteerTexts.length, 0, "p2's ledger is consumed by p2 exactly once");
 		const settled = readAuthorSidecar(session.id);
@@ -955,10 +986,11 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 
 		const duplicate: any = manager.prepareVisibleAgentEvent(session, {
 			type: "message_end",
-			message: { role: "user", content: text },
+			message: { role: "user", content: secondPiText },
 		});
 		manager.handleAgentLifecycle(session, duplicate);
 		assert.deepEqual(duplicate.message.author, agentAuthor);
+		assert.equal(duplicate.message.content, text);
 		assert.deepEqual(readAuthorSidecar(session.id), settled, "duplicate p2 end must not append another settlement");
 	});
 
