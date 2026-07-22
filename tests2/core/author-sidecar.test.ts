@@ -7,6 +7,7 @@ import {
 	appendPromptAuthorSettlement,
 	copyAuthorSidecar,
 	digestPromptModelText,
+	extractPromptModelText,
 	initAuthorSidecarDir,
 	mergeAuthorSidecarIntoMessages,
 	promptAuthorBindingMatchesText,
@@ -478,19 +479,42 @@ describe("author sidecar v2 correlation", () => {
 		expect(rows[0].author).toEqual(agentAuthor);
 	});
 
+	it("correlates the exact Pi text sequence across adjacent text blocks without rewriting content", () => {
+		const sessionId = "split-text-blocks";
+		const content = [
+			{ type: "text", text: "abc" },
+			{ type: "text", text: "def" },
+			{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+		];
+		appendPromptAuthorDispatch(sessionId, dispatch("p1", "abcdef", systemAuthor));
+		appendPromptAuthorSettlement(sessionId, { promptId: "p1", settledAt: 1_100, outcome: "echoed" });
+
+		expect(extractPromptModelText({ role: "user", content })).toBe("abcdef");
+		const [row] = mergeAuthorSidecarIntoMessages(
+			readAuthorSidecar(sessionId),
+			[{ role: "user", content }],
+		);
+		expect(row.author).toEqual(systemAuthor);
+		expect(row.content).toBe(content);
+		expect(row.content).toEqual(content);
+	});
+
 	it("does not claim provider-history user-role tool result blocks", () => {
 		const sessionId = "tool-result";
-		appendPromptAuthorDispatch(sessionId, dispatch("p1", "", systemAuthor));
+		appendPromptAuthorDispatch(sessionId, dispatch("p1", "result", systemAuthor));
+		appendPromptAuthorSettlement(sessionId, { promptId: "p1", settledAt: 1_100, outcome: "echoed" });
+		const toolResultContent = [{ type: "tool_result", content: "result" }];
 		const rows = mergeAuthorSidecarIntoMessages(
 			readAuthorSidecar(sessionId),
 			[
 				{ role: "assistant", content: "called tool" },
-				{ role: "user", content: [{ type: "tool_result", content: "result" }] },
+				{ role: "user", content: toolResultContent },
 			],
 			{ session: { id: "target", title: "Target" } },
 		);
 		expect(rows[1].author).toEqual({ kind: "agent", id: "session:target", label: "Target" });
 		expect(rows[1].author?.kind).not.toBe("tool");
+		expect(rows[1].content).toBe(toolResultContent);
 	});
 
 	it("is idempotent after authors have been merged", () => {

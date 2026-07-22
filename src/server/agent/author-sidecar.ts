@@ -699,7 +699,10 @@ export function extractPromptModelText(message: Record<string, unknown>): string
 		const candidate = block as Record<string, unknown>;
 		if (candidate.type === "text" && typeof candidate.text === "string") parts.push(candidate.text);
 	}
-	return parts.length > 0 ? parts.join("\n") : undefined;
+	// Pi 0.80.6 represents user content as an ordered TextContent/ImageContent
+	// sequence. Adjacent text blocks are consecutive fragments; inserting a
+	// separator here would change the exact text whose digest was dispatched.
+	return parts.length > 0 ? parts.join("") : undefined;
 }
 
 function messageId(message: Record<string, unknown>): string | undefined {
