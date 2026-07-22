@@ -45,6 +45,11 @@ import { getAppStorage } from "../storage/app-storage.js";
 import "./StreamingMessageContainer.js";
 import "./BellToggle.js";
 import { state as appState, renderApp, type GatewaySession } from "../../app/state.js";
+import {
+	resolvePromptAuthorAppearance,
+	type PromptAuthorAppearance,
+} from "../../app/message-author-appearance.js";
+import { sessionColorMap } from "../../app/session-colors.js";
 import { copyTextToClipboard, gatewayFetch } from "../../app/api.js";
 import { selectProposalWorkspaceTab } from "../../app/preview-panel.js";
 import { setHashRoute } from "../../app/routing.js";
@@ -57,6 +62,7 @@ import { createStreamFn } from "../utils/proxy-utils.js";
 import type { UserMessageWithAttachments } from "./Messages.js";
 import type { StreamingMessageContainer } from "./StreamingMessageContainer.js";
 import type { GitRepoKnown } from "../../app/git-status-refresh.js";
+import { selectPromptAuthorDisplayMode } from "../message-author-presentation.js";
 
 @customElement("agent-interface")
 export class AgentInterface extends LitElement {
@@ -389,6 +395,35 @@ export class AgentInterface extends LitElement {
 	/** Whether initial render is done (skip animations on first paint) */
 	private _pillsInitialized = false;
 	private _unsubscribeSession?: () => void;
+
+	/** Hydrated pre-compaction slices currently owned by this transcript. */
+	@state() private _preCompactionPromptAuthorSlices = new Map<string, readonly unknown[]>();
+	private readonly _reportPromptAuthorSlice = (
+		sessionId: string,
+		compactionId: string,
+		messages: readonly unknown[] | undefined,
+	): void => {
+		if (!sessionId || sessionId !== this.session?.sessionId || !compactionId) return;
+		const current = this._preCompactionPromptAuthorSlices.get(compactionId);
+		if (!messages || messages.length === 0) {
+			if (!current) return;
+			const next = new Map(this._preCompactionPromptAuthorSlices);
+			next.delete(compactionId);
+			this._preCompactionPromptAuthorSlices = next;
+			return;
+		}
+		if (current === messages) return;
+		const next = new Map(this._preCompactionPromptAuthorSlices);
+		next.set(compactionId, Object.freeze([...messages]));
+		this._preCompactionPromptAuthorSlices = next;
+	};
+	private readonly _resolvePromptAuthorAppearance = (author: unknown): PromptAuthorAppearance =>
+		resolvePromptAuthorAppearance(author, {
+			liveSessions: appState.gatewaySessions,
+			archivedSessions: appState.archivedSessions,
+			staff: appState.staffList,
+			sessionColorIndexes: sessionColorMap,
+		});
 
 	// Tracks host container width <640px for compact label rendering. This catches
 	// both the mobile viewport case AND desktop with a side panel open shrinking
@@ -800,6 +835,7 @@ export class AgentInterface extends LitElement {
 		// Re-subscribe when session property changes
 		if (changedProperties.has("session")) {
 			this.setupSessionSubscription();
+			this._preCompactionPromptAuthorSlices = new Map();
 			const newSid = this.session?.sessionId;
 			// Restore the per-session composer attachment draft (lifted out of the
 			// transient <message-editor>) whenever the bound session changes —
@@ -1834,6 +1870,10 @@ export class AgentInterface extends LitElement {
 			if (streamingMessage && m === streamingMessage) return false;
 			return !streamingMessageId || m.id !== streamingMessageId;
 		});
+		const promptAuthorDisplayMode = selectPromptAuthorDisplayMode([
+			...visibleMessages,
+			...Array.from(this._preCompactionPromptAuthorSlices.values()).flat(),
+		]);
 		return html`
 			<div class="flex flex-col gap-3">
 				<!-- Stable messages list - won't re-render during streaming -->
@@ -1846,6 +1886,9 @@ export class AgentInterface extends LitElement {
 					.hasStreamMessage=${!!state.streamingMessage}
 					.toolPartialResults=${(state as any).toolPartialResults}
 					.hideActionablePermissionRows=${true}
+					.promptAuthorDisplayMode=${promptAuthorDisplayMode}
+					.resolvePromptAuthorAppearance=${this._resolvePromptAuthorAppearance}
+					.reportPromptAuthorSlice=${this._reportPromptAuthorSlice}
 					.onCostClick=${this.onCostClick}
 					.onDismissError=${(id: string) => {
 						if (!this.session) return;

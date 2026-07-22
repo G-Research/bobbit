@@ -1,6 +1,11 @@
-import { LitElement, html, nothing } from "lit";
+import { LitElement, html, nothing, type PropertyValues } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { gatewayFetch } from "../../app/gateway-fetch.js";
+import type { PromptAuthorAppearance } from "../../app/message-author-appearance.js";
+import {
+	NO_PROMPT_AUTHOR_LABELS,
+	type PromptAuthorDisplayMode,
+} from "../message-author-presentation.js";
 import "./MessageList.js";
 
 /**
@@ -45,6 +50,13 @@ interface OrphanEnvelope {
 export class PreCompactionHistory extends LitElement {
 	@property({ type: String, attribute: "compaction-id" }) compactionId: string = "";
 	@property({ type: String, attribute: "session-id" }) sessionId: string = "";
+	@property({ attribute: false }) promptAuthorDisplayMode: PromptAuthorDisplayMode = NO_PROMPT_AUTHOR_LABELS;
+	@property({ attribute: false }) resolvePromptAuthorAppearance?: (author: unknown) => PromptAuthorAppearance;
+	@property({ attribute: false }) reportPromptAuthorSlice?: (
+		sessionId: string,
+		compactionId: string,
+		messages: readonly unknown[] | undefined,
+	) => void;
 
 	@state() private _total: number | null = null;
 	@state() private _loading = false;
@@ -70,6 +82,11 @@ export class PreCompactionHistory extends LitElement {
 	private _retryTimer: ReturnType<typeof setTimeout> | null = null;
 	/** Number of transient-404 retries attempted so far. */
 	private _countRetries = 0;
+	private _reportedSlice?: {
+		reporter: NonNullable<PreCompactionHistory["reportPromptAuthorSlice"]>;
+		sessionId: string;
+		compactionId: string;
+	};
 	/** Bounded retry budget for a freshly-minted compactionId whose sidecar
 	 *  is written a beat AFTER the client mounts this widget (the live manual
 	 *  `/compact` race: the card mounts on the `compaction_end` event, which
@@ -118,12 +135,72 @@ export class PreCompactionHistory extends LitElement {
 
 	override disconnectedCallback() {
 		super.disconnectedCallback();
+		this._clearPromptAuthorReport();
 		this._observer?.disconnect();
 		this._observer = null;
 		if (this._retryTimer) {
 			clearTimeout(this._retryTimer);
 			this._retryTimer = null;
 		}
+	}
+
+	protected override updated(changedProperties: PropertyValues<this>): void {
+		if (
+			changedProperties.has("_rows" as never)
+			|| changedProperties.has("sessionId")
+			|| changedProperties.has("compactionId")
+			|| changedProperties.has("reportPromptAuthorSlice")
+		) {
+			this._syncPromptAuthorReport();
+		}
+	}
+
+	private _clearPromptAuthorReport(): void {
+		const reported = this._reportedSlice;
+		if (!reported) return;
+		this._reportedSlice = undefined;
+		reported.reporter(reported.sessionId, reported.compactionId, undefined);
+	}
+
+	private _syncPromptAuthorReport(): void {
+		const reporter = this.reportPromptAuthorSlice;
+		const identityChanged = !!this._reportedSlice && (
+			this._reportedSlice.reporter !== reporter
+			|| this._reportedSlice.sessionId !== this.sessionId
+			|| this._reportedSlice.compactionId !== this.compactionId
+		);
+		if (identityChanged) this._clearPromptAuthorReport();
+
+		const messages = this._hydrateMessages();
+		if (!reporter || !this.sessionId || !this.compactionId || messages.length === 0) {
+			this._clearPromptAuthorReport();
+			return;
+		}
+
+		reporter(this.sessionId, this.compactionId, messages);
+		this._reportedSlice = {
+			reporter,
+			sessionId: this.sessionId,
+			compactionId: this.compactionId,
+		};
+	}
+
+	private _hydrateMessages(): Record<string, unknown>[] {
+		return this._rows
+			.map((r) => r.message)
+			.filter((m): m is Record<string, unknown> => !!m)
+			.map((m, i) => {
+				const content = typeof m.content === "string"
+					? [{ type: "text", text: m.content }]
+					: m.content;
+				return {
+					...m,
+					content,
+					id: typeof m.id === "string" && m.id.length > 0
+						? `orphan:${this.compactionId}:${m.id}`
+						: `orphan:${this.compactionId}:${i}`,
+				};
+			});
 	}
 
 	/** Public test/refresh hook: re-runs the count fetch from scratch.
@@ -282,21 +359,7 @@ export class PreCompactionHistory extends LitElement {
 		// agent rows write `content: "hi"` directly) to the canonical
 		// `[{ type: "text", text: ... }]` shape `<assistant-message>` expects.
 		// Stamp a synthetic id so `<message-list>`'s diff key is stable.
-		const hydratedMessages = this._rows
-			.map((r) => r.message)
-			.filter((m): m is Record<string, unknown> => !!m)
-			.map((m, i) => {
-				const content = typeof m.content === "string"
-					? [{ type: "text", text: m.content }]
-					: m.content;
-				return {
-					...m,
-					content,
-					id: typeof m.id === "string" && m.id.length > 0
-						? `orphan:${this.compactionId}:${m.id}`
-						: `orphan:${this.compactionId}:${i}`,
-				};
-			});
+		const hydratedMessages = this._hydrateMessages();
 		return html`
 			<div
 				data-testid="pre-compaction-history"
@@ -342,6 +405,8 @@ export class PreCompactionHistory extends LitElement {
 								.messages=${hydratedMessages as any}
 								.isStreaming=${false}
 								.hasStreamMessage=${false}
+								.promptAuthorDisplayMode=${this.promptAuthorDisplayMode}
+								.resolvePromptAuthorAppearance=${this.resolvePromptAuthorAppearance}
 							></message-list>
 						</div>
 					`
