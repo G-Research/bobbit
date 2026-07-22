@@ -1015,13 +1015,23 @@ export function isRetryableAgentEnd(event: unknown): boolean {
 		&& (event as { willRetry?: unknown }).willRetry === true;
 }
 
+/** True for a non-terminal Pi compaction end. Pi 0.81 can attach usage to
+ *  these retry notifications, so callers must still account for the event but
+ *  must not persist or emit a completed compaction until a terminal end. */
+export function isRetryableCompactionEnd(event: unknown): boolean {
+	if (!event || typeof event !== "object") return false;
+	const type = (event as { type?: unknown }).type;
+	return (type === "compaction_end" || type === "auto_compaction_end")
+		&& (event as { willRetry?: unknown }).willRetry === true;
+}
+
 /** Push a raw event into the session's EventBuffer (assigning seq/ts) and
  *  broadcast the `{type:"event"}` frame to all clients with seq/ts attached.
  *  This is the single emit path for live agent events — every call site that
  *  used to do `eventBuffer.push(ev); broadcast(clients, {type:"event", data:ev})`
  *  must route through here so envelope fields stay consistent.
- *  Retryable agent_end events (`isRetryableAgentEnd`) are suppressed by callers
- *  before reaching here so clients never see a non-terminal turn-end.
+ *  Retryable terminal-shaped events are suppressed by callers before reaching
+ *  here so clients never settle a turn or compaction prematurely.
  *  See docs/design/streaming-dedup-reorder.md §4.2. */
 export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: Array<{ modelText: string; originalText: string; skillExpansions: SkillExpansion[]; fileMentions?: FileMention[] }> }, truncated: unknown): void {
 	const normalized = normalizeToolResultErrorEvent(truncated);
@@ -4777,6 +4787,12 @@ export class SessionManager {
 				};
 			}
 		} else if (event.type === "auto_compaction_end" || event.type === "compaction_end") {
+			// Pi 0.81 emits terminal-shaped compaction events while its internal
+			// summarization retry is still in flight. Preserve the start state and
+			// pending id so the eventual terminal end owns sidecar persistence,
+			// client completion, and transcript refresh. Cost tracking still runs
+			// after this lifecycle handler and accounts for result.usage.
+			if (isRetryableCompactionEnd(event)) return;
 			session.isCompacting = false;
 			const pending = (session as any)._pendingCompactionStart as
 				| { startedAtMs: number; trigger: "auto" | "overflow"; compactionId: string }
@@ -6012,17 +6028,13 @@ export class SessionManager {
 	}
 
 	/**
-	 * Emit a live agent event to clients, suppressing retryable Pi agent_end
-	 * (see `isRetryableAgentEnd`). Pi 0.80+ emits a non-terminal `agent_end`
-	 * ({ willRetry:true }) before each internal auto-retry; clients treat every
-	 * agent_end as terminal and would clear the streaming message/tool calls, so
-	 * these must never reach clients. Shared by every `rpcClient.onEvent` path so
-	 * the suppression contract is applied uniformly; only real terminal
-	 * (willRetry:false) agent_end events are emitted/replayed.
+	 * Emit a live agent event to clients, suppressing retryable Pi end events.
+	 * Both agent and compaction retry notifications are terminal-shaped, so
+	 * forwarding either would settle client state before Pi's retry completes.
 	 * Pinned by tests2/core/pi-rpc-agent-end-retry.test.ts.
 	 */
 	private emitAgentEvent(session: SessionInfo, event: unknown): void {
-		if (isRetryableAgentEnd(event)) return;
+		if (isRetryableAgentEnd(event) || isRetryableCompactionEnd(event)) return;
 		emitSessionEvent(session, truncateLargeToolContent(event));
 	}
 
@@ -6031,12 +6043,15 @@ export class SessionManager {
 	 * Broadcasts a cost_update to connected clients if cost data is found.
 	 */
 	private trackCostFromEvent(session: SessionInfo, event: any): void {
-		// Only track cost on message_end (fires once per completed message).
-		// message_update fires on every streaming chunk with the same usage
-		// object, which would multiply costs by ~30-40x.
-		if (event.type !== "message_end") return;
-		if (event.message?.role !== "assistant") return;
-		const usage = event.message?.usage ?? event.usage;
+		// Message updates repeat the same usage on every streaming chunk, so only
+		// completed assistant messages are accounted. Pi 0.81 additionally reports
+		// summarizer usage once on compaction end events, including retryable ends.
+		const assistantMessageEnd = event.type === "message_end" && event.message?.role === "assistant";
+		const compactionEnd = event.type === "compaction_end" || event.type === "auto_compaction_end";
+		if (!assistantMessageEnd && !compactionEnd) return;
+		const usage = assistantMessageEnd
+			? (event.message?.usage ?? event.usage)
+			: (event.result?.usage ?? event.usage);
 		if (!usage) return;
 
 		// Usage cost can be either a number (usage.cost) or an object (usage.cost.total)
