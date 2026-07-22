@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:f
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AuthInteraction, Credential, Models, OAuthCredential } from "@earendil-works/pi-ai";
+import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 
 const piMocks = {
 	login: vi.fn(),
@@ -29,6 +30,7 @@ const agentDir = path.join(tmp, "agent");
 const authPath = path.join(agentDir, "auth.json");
 mkdirSync(agentDir, { recursive: true });
 process.env.BOBBIT_AGENT_DIR = agentDir;
+resetAgentDirStateForTests();
 
 const {
 	oauthComplete,
