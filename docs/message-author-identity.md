@@ -113,11 +113,13 @@ A redispatch with the same prompt id replaces the earlier folded binding. Cancel
 
 Stable occurrence keys take precedence over text. Live and replayed events read Pi entry-id aliases from either the message or its outer event; once an occurrence is bound, its updates and duplicate terminal frames reuse that binding. Snapshot and transcript correlation then matches eligible user-role echoes by settled message id, timestamp plus keyed text digest, and finally FIFO keyed text digest. Tool-result-only user-role rows are excluded, and matching runs before display-text rewriting.
 
-Legacy replay can contain user echoes with neither an id nor a timestamp. During `switch_session`, Bobbit therefore keeps a restore-only ordered view of every non-cancelled sidecar occurrence, including settled rows. A settled same-text occurrence remains a guard for the replay window, and consecutive duplicate keyless ends reuse its binding. Outside replay, that last-terminal guard lasts only until Bobbit accepts another dispatch: a newly accepted same-text prompt starts a new occurrence and its keyless echo binds the new pending record.
+For array-shaped Pi user content, digest correlation reconstructs the dispatched text sequence without changing the message: ordered text-block fragments are concatenated with no inserted separator, while image and other non-text blocks are ignored only for matching. The original content array remains intact. This matters for prompts split across adjacent text blocks, where inserting a newline would produce a different digest and lose the sidecar author.
 
-This enforces the ledger-safety invariant: a historical replay echo must never settle a newer unresolved same-text prompt or remove that prompt's in-flight steer record, while a real live echo after a newer accepted dispatch must settle that newer prompt exactly once. Only an echo bound to the unresolved occurrence may consume that record; anything still unresolved after replay is requeued with its original text, source, and author. When replayed keyless occurrences are otherwise indistinguishable, preserving durable intent takes priority over guessing a newer binding.
+Legacy replay can contain user echoes with neither an id nor a timestamp. During the bounded `switch_session` replay, Bobbit therefore keeps a restore-only cursor over every non-cancelled sidecar occurrence, including settled rows. For each keyless user occurrence, the first remaining same-text binding in dispatch order wins. Its terminal frame removes that binding from the cursor, while a last-terminal guard keeps repeated `message_end` frames idempotent. The next user `message_start` clears that guard and advances the next occurrence, even when its text is identical.
 
-The replay guard is runtime correlation state, not persisted data. Force-abort recovery hydrates it immediately before the bounded transcript replay and clears it when that replay exits, whether successfully or by error. It adds no sidecar fields or record types, does not synthesize Pi ids, and does not change Pi events, transcript rows, prompt bytes, or provider schemas.
+This ordered boundary distinguishes a settled old occurrence from a crash-unsettled newer occurrence: replaying the old end cannot settle or remove the newer steer, but a later `message_start` followed by the newer end settles that newer prompt exactly once. If the newer occurrence is absent from replay, its ledger row remains unresolved and is requeued with its original text, source, and author. Outside replay, accepting a new dispatch clears the live last-terminal guard so its genuine echo can bind normally.
+
+The replay cursor and terminal guard are runtime correlation state, not persisted data. Force-abort recovery hydrates them immediately before transcript replay and clears them when replay exits, whether successfully or by error. They add no sidecar fields or record types, synthesize no Pi ids, and change neither Pi events, transcript rows, prompt bytes, nor provider schemas.
 
 Fork and continue operations copy only echoed bindings confirmed to exist in the cloned transcript. Unresolved and cancelled source dispatches are never copied, so a same-text prompt accepted later in the destination cannot inherit a foreign author. A hard purge removes the private ledger; ordinary archive operations retain it with the session history.
 
@@ -167,7 +169,19 @@ Direct transcript-reader callers that provide no session context do not invent `
 
 ### Search
 
-Message indexing normalizes the complete ordered transcript with the author sidecar before extracting searchable blocks. Search records add `authorKind`, `authorId`, and `authorLabel` to schemaless result metadata. These values are not added to indexed text, snippets, or content hashes, so author labels do not change query matching.
+Message indexing streams transcript rows from disk rather than retaining the complete history, attachments, images, or tool payloads in memory. When sidecar state is within its configured count and byte budgets, a bounded two-pass resolver preserves full-sequence attribution: the first pass reserves settled message-id and timestamp-plus-digest matches across the transcript; the second revalidates those reservations, then consumes eligible keyless settlements by dispatch-ordered FIFO. This prevents an earlier same-text row from stealing a later exact binding.
+
+The streamed boundary remains fail-safe:
+
+- transcript-provided `author` fields are discarded as untrusted;
+- cancelled bindings never match, and unresolved dispatches cannot claim historical rows through digest or FIFO matching;
+- an unresolved binding is used only for Bobbit's exact synthetic in-flight-steer id;
+- only compact sidecar references and at most one reservation per binding are retained;
+- if compact sidecar state exceeds either budget, Bobbit abandons correlation for that session and continues indexing every row, but omits `authorKind`, `authorId`, and `authorLabel` for ambiguous user-role rows rather than fabricating `user:local`.
+
+Search extraction happens after message-level normalization. Oversized transcripts still retain exact sidecar authors when their compact binding state is within budget; transcript size alone does not discard attribution. Every searchable block from a message, including separate adjacent text blocks, receives the same resolved author metadata. Search records add `authorKind`, `authorId`, and `authorLabel` to schemaless result metadata when attribution is known. These values are not added to indexed text, snippets, weights, or content hashes, so attribution and labels do not change query matching.
+
+The over-budget case is intentionally distinct from a legacy session with no sidecar. Legacy absence may use the documented read-time fallback, but an over-budget sidecar proves that authoritative bindings exist and cannot be correlated safely within the memory bound. Treating those ambiguous prompts as local-human input would be false attribution. Forged transcript `author` fields remain stripped in both cases.
 
 ### Client state and UI
 
@@ -199,13 +213,13 @@ These boundaries keep provider/model input byte-equivalent to the pre-author pat
 
 Author tests are split by architectural boundary so failures identify the broken contract rather than depending on a full external-agent run:
 
-- pure and memory-filesystem tests pin identity mapping, legacy/tool-result inference, queue and steer restore, transcript projection, and sidecar corruption/correlation behavior;
-- lifecycle tests use mocked RPCs, deferred promises, and a manual clock to reproduce dispatch, echo, retry, abort, and restore races without wall-clock sleeps; they pin a newly accepted same-text keyless occurrence superseding the prior live terminal guard, an immediate duplicate terminal remaining idempotent, and settled-old/unresolved-new same-text replay;
+- pure and memory-filesystem tests pin identity mapping, legacy/tool-result inference, queue and steer restore, transcript projection, sidecar corruption/correlation behavior, and exact adjacent-text-block matching without content rewriting;
+- lifecycle tests use mocked RPCs, deferred promises, and a manual clock to reproduce dispatch, echo, retry, abort, and restore races without wall-clock sleeps; they pin live last-terminal replacement, duplicate terminal idempotence, settled-old-only replay, and ordered settled-old-then-crash-unsettled replay across `message_start` boundaries;
 - in-process gateway tests use the real WebSocket and snapshot paths with a mock agent bridge and session-local virtual clock, proving live/snapshot/reconnect equality for both human and system prompts while keeping roles and text unchanged;
-- DOM and search-source tests pin client preservation, provider conversion stripping, and metadata-only indexing;
+- DOM and search-source tests pin client preservation, provider conversion stripping, metadata-only indexing, bounded streamed correlation, later exact-binding reservation, rejection of forged transcript authors, exact attribution for oversized transcripts within the compact budget, and omission of ambiguous user authors when sidecar state exceeds that budget;
 - the Chromium journey verifies stable user/assistant authors across reload and confirms that ordinary bubbles render no new identity label.
 
-The restart-sensitive steer tests restore from the persisted ledger through `SessionManager` with a fresh mock bridge instead of restarting an operating-system process. They assert exact-once ordered recovery and the keyless safety case: replaying an older settled same-text echo leaves the newer prompt pending, leaves its sidecar unsettled and its steer ledger intact, and allows reconciliation to requeue it unchanged. Live lifecycle cases separately prove that a newly accepted dispatch supersedes the prior keyless terminal guard and that an immediate duplicate with no newer dispatch remains idempotent. Broader process-level E2E remains responsible for gateway restart infrastructure.
+The restart-sensitive steer tests restore from the persisted ledger through `SessionManager` with a fresh mock bridge instead of restarting an operating-system process. They assert both ordered outcomes: if replay contains only an older settled same-text occurrence, the newer prompt remains pending and is requeued unchanged; if replay contains a subsequent occurrence boundary and the newer echo, the cursor advances, settles it once, and prevents requeue. Duplicate terminal frames do not advance the cursor. Live lifecycle cases separately prove that a newly accepted dispatch supersedes the prior keyless terminal guard. Broader process-level E2E remains responsible for gateway restart infrastructure.
 
 See the [implemented design](design/author-identity-metadata.md#13-deterministic-verification-strategy) for the rationale behind these deterministic seams.
 
@@ -216,10 +230,10 @@ See the [implemented design](design/author-identity-metadata.md#13-deterministic
 | Shared public types and validation | `src/shared/message-author.ts` |
 | Internal provenance enum | `src/shared/prompt-source.ts` |
 | Identity construction and inference | `src/server/agent/message-author.ts` |
-| Host-side dispatch ledger and correlation | `src/server/agent/author-sidecar.ts` |
+| Host-side dispatch ledger, split-block matching, and stream correlation | `src/server/agent/author-sidecar.ts` |
 | Queue and in-flight persistence | `src/server/agent/prompt-queue.ts`, `session-store.ts` |
 | Live acceptance and event stamping | `src/server/agent/session-manager.ts` |
 | Snapshot pipeline | `src/server/agent/visible-message-snapshot.ts` |
 | Transcript projections | `src/server/agent/transcript-reader.ts` |
-| Search metadata | `src/server/search/` |
+| Bounded streamed search attribution | `src/server/search/` |
 | Client preservation and provider conversion | `src/app/remote-agent.ts`, `message-reducer.ts`, `src/ui/components/Messages.ts` |
