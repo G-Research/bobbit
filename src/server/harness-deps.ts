@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 interface PackageManifest {
 	dependencies?: Record<string, string>;
@@ -110,6 +111,32 @@ function describeValidationFailure(result: Exclude<DependencyValidationResult, {
 	return details.join("\n");
 }
 
+export interface DependencyValidationCliDeps {
+	validate?: (projectRoot: string) => DependencyValidationResult;
+	report?: (message: string) => void;
+}
+
+/**
+ * Read-only pre-build entry point for `npm run dev:harness`.
+ *
+ * Returning an exit code keeps the production wrapper and focused tests on the
+ * same validation policy without exposing a command/package-manager seam.
+ */
+export function runDependencyValidationCli(
+	projectRoot: string,
+	deps: DependencyValidationCliDeps = {},
+): number {
+	let result: DependencyValidationResult;
+	try {
+		result = (deps.validate ?? validateDependencies)(projectRoot);
+	} catch (error) {
+		result = invalidResult(`Dependency validation failed: ${errorMessage(error)}.`);
+	}
+	if (result.ok) return 0;
+	(deps.report ?? console.error)(`[harness] ${describeValidationFailure(result)}`);
+	return 1;
+}
+
 /**
  * Apply dependency validation consistently at each harness lifecycle entry.
  * Unknown properties on the injected dependency object are intentionally
@@ -143,4 +170,9 @@ export async function runHarnessLifecycle(
 	}
 
 	await deps.launch();
+}
+
+const invokedPath = process.argv[1];
+if (invokedPath && path.resolve(invokedPath) === path.resolve(fileURLToPath(import.meta.url))) {
+	process.exitCode = runDependencyValidationCli(process.cwd());
 }

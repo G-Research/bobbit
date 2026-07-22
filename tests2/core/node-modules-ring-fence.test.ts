@@ -1,10 +1,13 @@
 import childProcess from "node:child_process";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { PassThrough } from "node:stream";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as rpcBridgeModule from "../../src/server/agent/rpc-bridge.js";
+import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 import * as harnessDepsModule from "../../src/server/harness-deps.js";
 
 const POLICY_PREFIX = "NFS_STARTUP_POLICY";
@@ -62,6 +65,10 @@ function dependencyValidator(): AnyFunction {
 
 function lifecycleRunner(): AnyFunction {
 	return requireExport(harnessExports, lifecycleNames, "LIFECYCLE_CONTRACT");
+}
+
+function dependencyValidationCli(): AnyFunction {
+	return requireExport(harnessExports, ["runDependencyValidationCli"], "VALIDATION_CLI_CONTRACT");
 }
 
 function validationText(result: ValidationResult): string {
@@ -134,6 +141,29 @@ function observeLegacyRuntimeAccess(runtimeDir: string): { accesses: string[]; r
 	}
 	return { accesses, restore: () => vi.restoreAllMocks() };
 }
+
+function makeStableRpcChild(): childProcess.ChildProcess {
+	const child = new EventEmitter() as childProcess.ChildProcess;
+	Object.assign(child, {
+		pid: 123,
+		stdin: new PassThrough(),
+		stdout: new PassThrough(),
+		stderr: new PassThrough(),
+		kill: () => true,
+	});
+	return child;
+}
+
+const immediateClock = {
+	now: () => 0,
+	setTimeout: (handler: () => void) => {
+		queueMicrotask(handler);
+		return 0 as unknown as ReturnType<typeof globalThis.setTimeout>;
+	},
+	setInterval: () => 0 as unknown as ReturnType<typeof globalThis.setInterval>,
+	clearTimeout: () => undefined,
+	clearInterval: () => undefined,
+};
 
 function trapMutationAndSubprocesses(): { writes: string[]; commands: string[]; restore: () => void } {
 	const writes: string[] = [];
@@ -271,10 +301,15 @@ describe.skipIf(!desiredContractAvailable)("direct-host Pi resolution without a 
 		expect(resolved).toEqual({ modulesDir, cliPath });
 	});
 
-	it("never probes or mutates a legacy state/runtime tree for restored or later direct launches", async () => {
+	it("never probes or mutates a legacy state/runtime tree during real direct bridge starts", async () => {
 		const root = makeTempDir("bobbit-no-runtime-access-");
-		const stateDir = path.join(root, "state");
-		const runtimeDir = path.join(stateDir, "runtime");
+		const previousBobbitDir = process.env.BOBBIT_DIR;
+		const previousAgentDir = process.env.BOBBIT_AGENT_DIR;
+		process.env.BOBBIT_DIR = root;
+		process.env.BOBBIT_AGENT_DIR = path.join(root, "agent");
+		resetAgentDirStateForTests();
+
+		const runtimeDir = path.join(root, "state", "runtime");
 		const sentinel = path.join(runtimeDir, "node_modules.partial", "sentinel.txt");
 		fs.mkdirSync(path.dirname(sentinel), { recursive: true });
 		fs.writeFileSync(sentinel, "legacy-runtime-must-remain-byte-identical", "utf-8");
@@ -289,21 +324,44 @@ describe.skipIf(!desiredContractAvailable)("direct-host Pi resolution without a 
 		fs.writeFileSync(cliPath, "// fake Pi CLI\n", "utf-8");
 
 		const observer = observeLegacyRuntimeAccess(runtimeDir);
+		const spawnCalls: Array<{ command: string; args: readonly string[] }> = [];
+		const resolvedSpecifiers: string[] = [];
 		try {
 			for (const route of ["pre-listen restored direct session", "later direct agent/verification"] as const) {
-				const resolved = await Promise.resolve(directRuntimeResolver()({
-					resolve: () => pathToFileURL(entryPath).href,
-					stateDir,
-					route,
-				}));
-				expect(resolved, `${POLICY_PREFIX}_DIRECT_ROUTE_RESOLUTION: ${route}`).toEqual({ modulesDir, cliPath });
+				const spawnDirect = ((command: string, args: readonly string[] = []) => {
+					spawnCalls.push({ command, args: [...args] });
+					return makeStableRpcChild();
+				}) as typeof childProcess.spawn;
+				const bridge = new rpcBridgeModule.RpcBridge({
+					cwd: root,
+					args: ["--no-extensions"],
+					clock: immediateClock,
+				}, {
+					resolvePackage: (specifier: string) => {
+						resolvedSpecifiers.push(specifier);
+						return pathToFileURL(entryPath).href;
+					},
+					spawnDirect,
+				});
+
+				await bridge.start();
+				const call = spawnCalls.at(-1);
+				expect(call, `${POLICY_PREFIX}_DIRECT_ROUTE_START: ${route}`).toBeDefined();
+				expect(call!.command).toBe(process.execPath);
+				expect(call!.args[0]).toBe(cliPath);
 			}
+			expect(resolvedSpecifiers).toEqual([PI_PACKAGE, PI_PACKAGE]);
 			expect(
 				observer.accesses,
-				`${POLICY_PREFIX}_LEGACY_RUNTIME_ACCESS: direct resolution must perform zero reads, stats, traversals, writes, creates, renames, or deletes below <stateDir>/runtime`,
+				`${POLICY_PREFIX}_LEGACY_RUNTIME_ACCESS: direct start must perform zero reads, stats, traversals, writes, creates, renames, or deletes below <stateDir>/runtime`,
 			).toEqual([]);
 		} finally {
 			observer.restore();
+			if (previousBobbitDir === undefined) delete process.env.BOBBIT_DIR;
+			else process.env.BOBBIT_DIR = previousBobbitDir;
+			if (previousAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
+			else process.env.BOBBIT_AGENT_DIR = previousAgentDir;
+			resetAgentDirStateForTests();
 		}
 
 		expect(fs.readFileSync(sentinel)).toEqual(beforeBytes);
@@ -331,6 +389,41 @@ describe.skipIf(!desiredContractAvailable)("direct-host Pi resolution without a 
 				throw Object.assign(new Error("Cannot find package"), { code: "ERR_MODULE_NOT_FOUND" });
 			},
 		}))).rejects.toThrow(/install\s+@earendil-works\/pi-coding-agent[\s\S]*--agent-cli\s+\/path\/to\/cli\.js/i);
+	});
+});
+
+describe.skipIf(!desiredContractAvailable)("development harness pre-build validation wrapper", () => {
+	it("runs the read-only validator before build:server in the real dev:harness script", () => {
+		const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+		const manifest = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "package.json"), "utf-8")) as {
+			scripts?: Record<string, string>;
+		};
+		const steps = manifest.scripts?.["dev:harness"]?.split(/\s*&&\s*/) ?? [];
+
+		expect(steps[0], `${POLICY_PREFIX}_WRAPPER_VALIDATION_FIRST`).toBe("node src/server/harness-deps.ts");
+		expect(steps[1], `${POLICY_PREFIX}_WRAPPER_BUILD_SECOND`).toBe("npm run build:server");
+		expect(steps.join(" && ")).not.toMatch(/npm\s+(?:install|ci)|pnpm\s+install|yarn\s+install/i);
+	});
+
+	it("fails non-zero with actionable diagnostics without writes or package-manager subprocesses", () => {
+		const root = makeTempDir("bobbit-wrapper-validation-");
+		writeJson(path.join(root, "package.json"), {
+			dependencies: { "wrapper-missing": "1.0.0" },
+		});
+		const reports: string[] = [];
+		const traps = trapMutationAndSubprocesses();
+		let exitCode: number;
+		try {
+			exitCode = dependencyValidationCli()(root, {
+				report: (message: string) => reports.push(message),
+			});
+		} finally {
+			traps.restore();
+		}
+
+		expect(exitCode!).toBeGreaterThan(0);
+		expect(reports.join("\n")).toMatch(/wrapper-missing[\s\S]*stop Bobbit[\s\S]*npm install[\s\S]*(?:retry|restart)/i);
+		expect({ writes: traps.writes, commands: traps.commands }).toEqual({ writes: [], commands: [] });
 	});
 });
 

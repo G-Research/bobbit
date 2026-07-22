@@ -131,6 +131,13 @@ export interface RpcBridgeOptions {
 	clock?: Clock;
 }
 
+export interface RpcBridgeStartDeps {
+	/** `import.meta.resolve`-compatible package resolver used by direct starts. */
+	resolvePackage?: (specifier: string, parent?: string | URL) => string;
+	/** Direct child spawn seam. Docker continues to use its existing spawn path. */
+	spawnDirect?: typeof spawn;
+}
+
 export type RpcEventListener = (event: any) => void;
 
 /**
@@ -359,7 +366,10 @@ export class RpcBridge {
 	private stderrTail: string[] = [];
 	private readonly clock: Clock = realClock;
 
-	constructor(private options: RpcBridgeOptions = {}) {
+	constructor(
+		private options: RpcBridgeOptions = {},
+		private readonly startDeps: RpcBridgeStartDeps = {},
+	) {
 		// If a test-registered factory claims this options object, return that
 		// instance instead of the default child-process bridge. This lets the
 		// E2E harness swap in an in-process mock without modifying any callers.
@@ -381,7 +391,10 @@ export class RpcBridge {
 		// spawns resolve Bobbit's installed package (or an explicit CLI override).
 		const cliPath = this.options.containerId
 			? ""
-			: resolveDirectHostPiRuntime({ cliPath: this.options.cliPath }).cliPath;
+			: resolveDirectHostPiRuntime({
+				cliPath: this.options.cliPath,
+				resolve: this.startDeps.resolvePackage,
+			}).cliPath;
 		const args = buildAgentArgs(this.options);
 
 		// Disable pi's internal builtin tools and re-register the file-tool subset
@@ -497,7 +510,8 @@ export class RpcBridge {
 			const tlsEnv = fs.existsSync(caCert)
 				? { NODE_EXTRA_CA_CERTS: caCert }
 				: { NODE_TLS_REJECT_UNAUTHORIZED: "0" };
-			this.process = spawn(process.execPath, [cliPath, ...args], {
+			const spawnDirect = this.startDeps.spawnDirect ?? spawn;
+			this.process = spawnDirect(process.execPath, [cliPath, ...args], {
 				stdio: ["pipe", "pipe", "pipe"],
 				cwd: this.options.cwd,
 				env: {
