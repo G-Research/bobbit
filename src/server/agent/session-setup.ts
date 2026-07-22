@@ -1024,7 +1024,9 @@ export function subscribeToEvents(session: SessionInfo, ctx: PipelineContext): (
 		// Suppress Pi retryable agent_end ({ willRetry:true }) before it reaches
 		// clients/EventBuffer. Pi 0.80+ emits a non-terminal agent_end before each
 		// internal auto-retry; clients treat every agent_end as terminal and would
-		// clear the streaming message/tool calls. This mirrors SessionManager's
+		// clear the streaming message/tool calls. Compaction ends remain visible
+		// even with willRetry:true: that flag means Pi retries the surrounding turn
+		// after compaction has completed. This mirrors SessionManager's
 		// emitAgentEvent() so every rpcClient.onEvent path shares one contract.
 		// Pinned by tests2/core/pi-rpc-agent-end-retry.test.ts.
 		if (!isRetryableAgentEnd(preparedEvent)) {

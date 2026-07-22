@@ -1,0 +1,19 @@
+{
+  "name": "@bobbit-fixture/published-agent",
+  "version": "1.0.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "@bobbit-fixture/published-agent",
+      "version": "1.0.0",
+      "dependencies": {
+        "protobufjs": "^7.6.4"
+      }
+    },
+    "node_modules/protobufjs": {
+      "version": "7.6.4",
+      "resolved": "file:../protobufjs-vulnerable"
+    }
+  }
+}

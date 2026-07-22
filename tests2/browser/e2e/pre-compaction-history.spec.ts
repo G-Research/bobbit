@@ -1,18 +1,162 @@
 /**
- * Browser E2E: pre-compaction history expand affordance.
+ * Browser E2E: pre-compaction history affordance and persistence.
  *
- * Sidecar plus a hand-crafted `.jsonl` whose entries pre-date the
- * `firstKeptEntryId` boundary. Asserts the "Show N messages before
- * compaction" affordance appears, expanding it reveals dimmed read-only
- * rows, and the affordance still works after a page reload.
+ * Covers seeded transcript behavior, the authoritative live AUTO_COMPACT:3
+ * journey through reload, manual compaction, and transient count-probe recovery.
  *
  * See docs/design/persist-compaction-history.md \u00a76.3.
  */
+import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
-import { createSession, waitForSessionStatus, readE2EToken } from "../e2e-setup.js";
+import {
+	createSession,
+	deleteSession,
+	waitForSessionStatus,
+	readE2EToken,
+} from "../e2e-setup.js";
 import { openApp, navigateToHash, sendMessage } from "./ui-helpers.js";
 import fs from "node:fs";
 import path from "node:path";
+
+const HISTORY_TEXTS = ["pre-msg-0", "pre-msg-1", "pre-msg-2"];
+const RETAINED_TAIL = "Resuming work after the summary.";
+
+const cardSelector = "[data-testid='compaction-summary-card']";
+const historySelector = "[data-testid='pre-compaction-history']";
+const rowsSelector = "[data-testid='pre-compaction-rows']";
+const toggleSelector = "[data-testid='pre-compaction-toggle']";
+
+async function refreshHistoryCount(page: Page): Promise<void> {
+	await page.evaluate(async () => {
+		const history = document.querySelector(
+			"bobbit-pre-compaction-history",
+		) as any;
+		if (!history || typeof history.refreshCount !== "function") {
+			throw new Error("pre-compaction history refresh hook is unavailable");
+		}
+		await history.refreshCount();
+	});
+}
+
+async function expectCollapsedSummaryBeforeTail(page: Page): Promise<void> {
+	const cards = page.locator(cardSelector);
+	const history = page.locator(historySelector);
+	const tail = page
+		.locator("assistant-message")
+		.filter({ hasText: RETAINED_TAIL });
+
+	await expect(cards).toHaveCount(1, { timeout: 20_000 });
+	await expect(cards.first()).toHaveAttribute("data-state", "complete", {
+		timeout: 20_000,
+	});
+	await expect(cards.first().locator("[data-test='verdict']")).toHaveAttribute(
+		"data-verdict",
+		"ok",
+		{ timeout: 15_000 },
+	);
+	await expect(history).toHaveCount(1, { timeout: 20_000 });
+	await refreshHistoryCount(page);
+	await expect(history).toHaveAttribute("data-state", "collapsed", {
+		timeout: 20_000,
+	});
+	await expect(page.locator(toggleSelector)).toHaveText(
+		/Show 3 messages before compaction/,
+		{ timeout: 15_000 },
+	);
+	await expect(tail).toHaveCount(1, { timeout: 15_000 });
+
+	const order = await page.evaluate(
+		({ cardSelector, historySelector, retainedTail }) => {
+			const card = document.querySelector(cardSelector);
+			const history = document.querySelector(historySelector);
+			const tail =
+				Array.from(document.querySelectorAll("assistant-message")).find(
+					(element) => element.textContent?.includes(retainedTail),
+				) ?? null;
+			const comesBefore = (first: Element | null, second: Element | null) =>
+				!!first &&
+				!!second &&
+				(first.compareDocumentPosition(second) &
+					Node.DOCUMENT_POSITION_FOLLOWING) !==
+					0;
+			return {
+				historyBeforeCard: comesBefore(history, card),
+				cardBeforeTail: comesBefore(card, tail),
+			};
+		},
+		{ cardSelector, historySelector, retainedTail: RETAINED_TAIL },
+	);
+
+	expect(
+		order,
+		"collapsed history, summary, and retained tail must stay in transcript order",
+	).toEqual({
+		historyBeforeCard: true,
+		cardBeforeTail: true,
+	});
+}
+
+async function expandAndExpectHistoricalRows(page: Page): Promise<void> {
+	const history = page.locator(historySelector);
+	await page.locator(toggleSelector).click();
+	await expect(history).toHaveAttribute("data-state", "expanded", {
+		timeout: 15_000,
+	});
+
+	const container = page.locator(rowsSelector);
+	const rows = container.locator(":scope :is(user-message, assistant-message)");
+	await expect(rows).toHaveCount(HISTORY_TEXTS.length, { timeout: 15_000 });
+	await expect
+		.poll(
+			async () => (await rows.allTextContents()).map((text) => text.trim()),
+			{
+				message:
+					"historical rows should retain their original content and order",
+			},
+		)
+		.toEqual(HISTORY_TEXTS);
+
+	const presentation = await container.evaluate((element) => {
+		const list = element.querySelector("message-list") as any;
+		const rowElements = Array.from(
+			element.querySelectorAll("user-message, assistant-message"),
+		) as any[];
+		return {
+			opacity: Number.parseFloat(getComputedStyle(element).opacity),
+			isStreaming: list?.isStreaming,
+			hasStreamMessage: list?.hasStreamMessage,
+			rowIds: rowElements.map((row) => row.message?.id),
+		};
+	});
+	expect(
+		presentation.opacity,
+		"historical rows should be visually dimmed",
+	).toBeLessThan(1);
+	expect(presentation.isStreaming).toBe(false);
+	expect(presentation.hasStreamMessage).toBe(false);
+	expect(presentation.rowIds).toHaveLength(HISTORY_TEXTS.length);
+	expect(
+		presentation.rowIds.every(
+			(id: unknown) => typeof id === "string" && id.startsWith("orphan:"),
+		),
+	).toBe(true);
+
+	await expect(container.locator("streaming-message-container")).toHaveCount(0);
+	await expect(page.locator("message-editor .queue-pill")).toHaveCount(0);
+	const liveTranscriptTexts = await page.evaluate(() => {
+		const messages =
+			(window as any).__bobbitState?.remoteAgent?.state?.messages ?? [];
+		return messages.flatMap((message: any) =>
+			Array.isArray(message?.content)
+				? message.content
+						.filter((part: any) => part?.type === "text")
+						.map((part: any) => part.text)
+				: [],
+		);
+	});
+	for (const text of HISTORY_TEXTS)
+		expect(liveTranscriptTexts).not.toContain(text);
+}
 
 function makeJsonl(entries: Array<{
 	id: string;
@@ -232,105 +376,34 @@ test.describe("Pre-compaction history affordance", () => {
 		).toHaveCount(3, { timeout: 15_000 });
 	});
 
-	// Live-session repro (no reload): drives a real mock-agent auto compaction
-	// via the AUTO_COMPACT trigger and asserts the pre-compaction affordance is
-	// present — with exactly ONE compaction summary card — in the same session,
-	// before any reload. Pre-fix this fails: the in-flight `compact_active` card
-	// carries no compactionId (so it never mounts the affordance), and the
-	// server splices a SECOND persisted sidecar card into the post-compaction
-	// snapshot — leaving two stacked cards (issue-analysis findings #1, #3).
-	test("@live-compaction-affordance live compaction surfaces the affordance with exactly one card (no reload)", async ({ page }) => {
+	// Authoritative full-stack journey: drive real mock-agent auto compaction,
+	// assert the live ordering/read-only history, then prove the same persisted
+	// transcript survives a reload. This v2 target is selected by e2e:v2 Group C.
+	test("@live-compaction-affordance live auto-compaction history persists across reload", async ({ page }) => {
+		test.setTimeout(60_000);
 		const sessionId = await createSession();
-		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await waitForSessionStatus(sessionId, "idle");
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea")).toBeVisible({
+				timeout: 15_000,
+			});
 
-		await openApp(page);
-		await navigateToHash(page, `#/session/${sessionId}`);
-		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+			await sendMessage(page, "AUTO_COMPACT:3");
+			await waitForSessionStatus(sessionId, "idle", 20_000);
+			await expectCollapsedSummaryBeforeTail(page);
+			await expandAndExpectHistoricalRows(page);
 
-		// Drive a live auto/threshold compaction with 3 pre-compaction messages.
-		await sendMessage(page, "AUTO_COMPACT:3");
-
-		// The compaction card lifecycle begins; wait for at least one card.
-		const cards = page.locator("[data-testid='compaction-summary-card']");
-		await expect(cards.first()).toBeVisible({ timeout: 20_000 });
-
-		// The live auto/threshold compaction must resolve to a SUCCESSFUL card.
-		// This is the deterministic (mock-agent, no-LLM) coverage of the terminal
-		// state formerly asserted only by the real-LLM manual `compaction-pressure`
-		// spec: server-side auto_compaction_start/end lifecycle -> sidecar +
-		// broadcast -> client renders the summary card as complete/ok.
-		await expect(cards.first()).toHaveAttribute("data-state", "complete", { timeout: 20_000 });
-		await expect(cards.first().locator("[data-test='verdict']"))
-			.toHaveAttribute("data-verdict", "ok", { timeout: 15_000 });
-
-		// The affordance must surface in the live session. Proactively kick the
-		// count fetch (headless IntersectionObserver can be flaky) and wait for
-		// the resolved collapsed state with the correct count. Reaching this
-		// state proves the post-compaction snapshot + sidecar have landed.
-		const widget = page.locator("[data-testid='pre-compaction-history']");
-		await expect(widget).toHaveCount(1, { timeout: 20_000 });
-		await page.evaluate(() => {
-			const el = document.querySelector("bobbit-pre-compaction-history") as any;
-			el?.refreshCount?.();
-		});
-		await expect(widget).toHaveAttribute("data-state", "collapsed", { timeout: 20_000 });
-		await expect(page.locator("[data-testid='pre-compaction-toggle']"))
-			.toContainText(/Show 3 messages before compaction/, { timeout: 15_000 });
-
-		// Single-card invariant: exactly one compaction summary card. Pre-fix
-		// there are two (live `compact_active` + spliced sidecar card). This
-		// assertion is the primary repro signal.
-		await expect(cards).toHaveCount(1, { timeout: 8_000 });
-
-		// DOM-ORDER regression (docs/design/fix-compaction-ordering.md §3.2):
-		// in the SAME live session the compaction card + pre-compaction-history
-		// affordance must render BEFORE the preserved recent tail message. The
-		// mock keeps a single active-branch tail ("Resuming work after the
-		// summary."). Pre-fix the live `compact_active` card retains a positive
-		// reducer `_order` while the preserved-tail snapshot row gets a negative
-		// order, so the card sorts AFTER the tail (the reported bug); only a
-		// reload/navigate-away fixes it. We compare DOM document order (robust to
-		// scroll/layout) rather than y-coordinates.
-		const domOrder = await page.evaluate(() => {
-			const card = document.querySelector("[data-testid='compaction-summary-card']");
-			const widget = document.querySelector("[data-testid='pre-compaction-history']");
-			const tail = Array.from(document.querySelectorAll("assistant-message"))
-				.find((el) => (el.textContent || "").includes("Resuming work after the summary")) || null;
-			const before = (a: Element | null, b: Element | null): boolean | null => {
-				if (!a || !b) return null;
-				// DOCUMENT_POSITION_FOLLOWING (4) set => b follows a in document order.
-				return (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
-			};
-			return {
-				hasCard: !!card,
-				hasWidget: !!widget,
-				hasTail: !!tail,
-				cardBeforeTail: before(card, tail),
-				widgetBeforeTail: before(widget, tail),
-			};
-		});
-		expect(
-			domOrder.hasCard && domOrder.hasWidget && domOrder.hasTail,
-			`card/affordance/tail must all be present in DOM: ${JSON.stringify(domOrder)}`,
-		).toBe(true);
-		expect(
-			domOrder.cardBeforeTail,
-			"compaction summary card must appear BEFORE the preserved recent message in DOM order",
-		).toBe(true);
-		expect(
-			domOrder.widgetBeforeTail,
-			"pre-compaction-history affordance must appear BEFORE the preserved recent message in DOM order",
-		).toBe(true);
-
-		// Expanding reveals the 3 orphaned pre-compaction rows.
-		await page.locator("[data-testid='pre-compaction-toggle']").click();
-		await expect(widget).toHaveAttribute("data-state", "expanded", { timeout: 15_000 });
-		const rows = page.locator(
-			"[data-testid='pre-compaction-rows'] :is(user-message, assistant-message)",
-		);
-		await expect(rows).toHaveCount(3, { timeout: 15_000 });
-		await expect(rows.first()).toContainText("pre-msg-0");
-		await expect(rows.last()).toContainText("pre-msg-2");
+			await page.reload();
+			await expect(page.locator("message-editor textarea")).toBeVisible({
+				timeout: 20_000,
+			});
+			await expectCollapsedSummaryBeforeTail(page);
+			await expandAndExpectHistoricalRows(page);
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+		}
 	});
 
 	// Manual `/compact` slash-command path (deterministic, mock agent, no LLM).

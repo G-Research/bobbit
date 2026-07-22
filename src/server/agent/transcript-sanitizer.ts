@@ -116,6 +116,14 @@ interface ParsedTranscriptLine {
 	parentId: string | null;
 }
 
+interface ProjectedTranscriptRecord {
+	/** JSONL line containing this record (and owning it when retainedTailIndex is set). */
+	lineIndex: number;
+	/** Position inside the owning Pi 0.81 compaction's `retainedTail`, when embedded. */
+	retainedTailIndex?: number;
+	entry: any;
+}
+
 function parseTranscriptLines(lines: string[]): ParsedTranscriptLine[] {
 	const parsed: ParsedTranscriptLine[] = [];
 	for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
@@ -139,22 +147,31 @@ function parseTranscriptLines(lines: string[]): ParsedTranscriptLine[] {
 
 /**
  * Return the parent-linked branch ending at Pi's current leaf. Session headers
- * are not tree entries; the last parsed, id-bearing non-header record is the
- * leaf. Missing parents and cycles terminate the walk conservatively.
+ * are not tree entries. Ordinarily the last parsed, id-bearing non-header
+ * record is the leaf. Pi 0.81 harness JSONL can instead end in a `leaf` control
+ * record whose `targetId` selects an earlier entry (or null for an empty
+ * branch); the control record itself is not part of the active branch.
+ * Missing targets/parents and cycles terminate the walk conservatively.
  */
 function activeTranscriptBranch(parsed: ParsedTranscriptLine[]): ParsedTranscriptLine[] {
-	let leaf: ParsedTranscriptLine | undefined;
+	let leafId: string | null = null;
 	const byId = new Map<string, ParsedTranscriptLine>();
 	for (const record of parsed) {
 		if (!record.id || record.entry.type === "session") continue;
 		byId.set(record.id, record);
-		leaf = record;
+		if (record.entry.type === "leaf") {
+			leafId = typeof record.entry.targetId === "string" && record.entry.targetId.length > 0
+				? record.entry.targetId
+				: null;
+		} else {
+			leafId = record.id;
+		}
 	}
-	if (!leaf) return [];
+	if (!leafId) return [];
 
 	const reverseBranch: ParsedTranscriptLine[] = [];
 	const visited = new Set<string>();
-	let current: ParsedTranscriptLine | undefined = leaf;
+	let current: ParsedTranscriptLine | undefined = byId.get(leafId);
 	while (current?.id && !visited.has(current.id)) {
 		reverseBranch.push(current);
 		visited.add(current.id);
@@ -163,7 +180,7 @@ function activeTranscriptBranch(parsed: ParsedTranscriptLine[]): ParsedTranscrip
 	return reverseBranch.reverse();
 }
 
-function projectedContextBranch(branch: ParsedTranscriptLine[]): ParsedTranscriptLine[] {
+function projectedContextBranch(branch: ParsedTranscriptLine[]): ProjectedTranscriptRecord[] {
 	let compactionIndex = -1;
 	for (let i = 0; i < branch.length; i++) {
 		if (branch[i].entry.type === "compaction") compactionIndex = i;
@@ -171,6 +188,19 @@ function projectedContextBranch(branch: ParsedTranscriptLine[]): ParsedTranscrip
 	if (compactionIndex < 0) return branch;
 
 	const compaction = branch[compactionIndex].entry;
+	if (Array.isArray(compaction.retainedTail)) {
+		// Pi 0.81 harness compactions treat retainedTail as a self-contained
+		// checkpoint, even when a compatibility firstKeptEntryId is also present.
+		// Retain the owning line and embedded index so an orphan can be filtered
+		// without discarding any other message or additive compaction field.
+		const retainedTail = compaction.retainedTail.map((message: unknown, retainedTailIndex: number) => ({
+			lineIndex: branch[compactionIndex].lineIndex,
+			retainedTailIndex,
+			entry: { type: "message", message },
+		}));
+		return [...retainedTail, ...branch.slice(compactionIndex + 1)];
+	}
+
 	const firstKeptId = typeof compaction.firstKeptEntryId === "string"
 		? compaction.firstKeptEntryId
 		: "";
@@ -178,9 +208,10 @@ function projectedContextBranch(branch: ParsedTranscriptLine[]): ParsedTranscrip
 		? branch.findIndex((record, index) => index < compactionIndex && record.id === firstKeptId)
 		: -1;
 
-	// Pi projects the latest summary ahead of its preserved tail. The compaction
-	// record is metadata, not a conversation message. When its boundary cannot
-	// be resolved, only descendants written after compaction are known-active.
+	// Legacy Pi projections place the latest summary ahead of the preserved
+	// top-level tail. The compaction record is metadata, not a conversation
+	// message. When its boundary cannot be resolved, only descendants written
+	// after compaction are known-active.
 	const keptTail = firstKeptIndex >= 0
 		? branch.slice(firstKeptIndex, compactionIndex)
 		: [];
@@ -214,8 +245,16 @@ function assistantToolCallIds(content: unknown): Set<string> {
 	return ids;
 }
 
-function orphanToolResultLineIndexes(branch: ParsedTranscriptLine[]): Set<number> {
-	const orphanLines = new Set<number>();
+interface OrphanToolResultLocations {
+	lineIndexes: Set<number>;
+	retainedTailIndexesByLine: Map<number, Set<number>>;
+}
+
+function orphanToolResultLocations(branch: ParsedTranscriptLine[]): OrphanToolResultLocations {
+	const locations: OrphanToolResultLocations = {
+		lineIndexes: new Set<number>(),
+		retainedTailIndexesByLine: new Map<number, Set<number>>(),
+	};
 	let pendingToolCallIds: Set<string> | null = null;
 
 	for (const record of projectedContextBranch(branch)) {
@@ -245,7 +284,16 @@ function orphanToolResultLineIndexes(branch: ParsedTranscriptLine[]): Set<number
 		if (isMessageLevelToolResultRole(message.role)) {
 			const toolCallId = persistedToolUseId(message);
 			if (!toolCallId || !pendingToolCallIds?.has(toolCallId)) {
-				orphanLines.add(record.lineIndex);
+				if (record.retainedTailIndex === undefined) {
+					locations.lineIndexes.add(record.lineIndex);
+				} else {
+					let indexes = locations.retainedTailIndexesByLine.get(record.lineIndex);
+					if (!indexes) {
+						indexes = new Set<number>();
+						locations.retainedTailIndexesByLine.set(record.lineIndex, indexes);
+					}
+					indexes.add(record.retainedTailIndex);
+				}
 			} else {
 				// One result settles one call. Repeated results for the same id are
 				// structurally invalid even when the assistant originally called it.
@@ -258,7 +306,7 @@ function orphanToolResultLineIndexes(branch: ParsedTranscriptLine[]): Set<number
 		pendingToolCallIds = null;
 	}
 
-	return orphanLines;
+	return locations;
 }
 
 /**
@@ -273,8 +321,15 @@ function repairOrphanToolResults(content: string): SanitizeResult {
 	const lines = content.split("\n");
 	const parsed = parseTranscriptLines(lines);
 	const activeBranch = activeTranscriptBranch(parsed);
-	const removedLineIndexes = orphanToolResultLineIndexes(activeBranch);
-	if (removedLineIndexes.size === 0) return { content, changed: false, rewritten: 0 };
+	const orphanLocations = orphanToolResultLocations(activeBranch);
+	const removedLineIndexes = orphanLocations.lineIndexes;
+	let embeddedRemovalCount = 0;
+	for (const indexes of orphanLocations.retainedTailIndexesByLine.values()) {
+		embeddedRemovalCount += indexes.size;
+	}
+	if (removedLineIndexes.size === 0 && embeddedRemovalCount === 0) {
+		return { content, changed: false, rewritten: 0 };
+	}
 
 	const removedParents = new Map<string, string | null>();
 	for (const record of activeBranch) {
@@ -289,14 +344,45 @@ function repairOrphanToolResults(content: string): SanitizeResult {
 	// dangling parentId and make them impossible for Pi to resume later.
 	for (const record of parsed) {
 		if (removedLineIndexes.has(record.lineIndex)) continue;
+		let changed = false;
+
+		const removedRetainedTailIndexes = orphanLocations.retainedTailIndexesByLine.get(record.lineIndex);
+		if (removedRetainedTailIndexes && Array.isArray(record.entry.retainedTail)) {
+			record.entry.retainedTail = record.entry.retainedTail.filter(
+				(_message: unknown, index: number) => !removedRetainedTailIndexes.has(index),
+			);
+			changed = true;
+		}
+
 		let parentId = record.parentId;
-		const visited = new Set<string>();
-		while (parentId && removedParents.has(parentId) && !visited.has(parentId)) {
-			visited.add(parentId);
+		const visitedParents = new Set<string>();
+		while (parentId && removedParents.has(parentId) && !visitedParents.has(parentId)) {
+			visitedParents.add(parentId);
 			parentId = removedParents.get(parentId) ?? null;
 		}
-		if (parentId === record.parentId) continue;
-		record.entry.parentId = parentId;
+		if (parentId !== record.parentId) {
+			record.entry.parentId = parentId;
+			changed = true;
+		}
+
+		// Pi 0.81 harness persists branch selection as a leaf control record.
+		// If it targets a removed active orphan, advance the control pointer to
+		// the same nearest retained ancestor or the reloaded session would keep a
+		// dangling active-leaf id.
+		if (record.entry.type === "leaf" && typeof record.entry.targetId === "string") {
+			let targetId: string | null = record.entry.targetId;
+			const visitedTargets = new Set<string>();
+			while (targetId && removedParents.has(targetId) && !visitedTargets.has(targetId)) {
+				visitedTargets.add(targetId);
+				targetId = removedParents.get(targetId) ?? null;
+			}
+			if (targetId !== record.entry.targetId) {
+				record.entry.targetId = targetId;
+				changed = true;
+			}
+		}
+
+		if (!changed) continue;
 		const carriageReturn = lines[record.lineIndex].endsWith("\r") ? "\r" : "";
 		lines[record.lineIndex] = JSON.stringify(record.entry) + carriageReturn;
 	}
@@ -305,7 +391,7 @@ function repairOrphanToolResults(content: string): SanitizeResult {
 	return {
 		content: repairedLines.join("\n"),
 		changed: true,
-		rewritten: removedLineIndexes.size,
+		rewritten: removedLineIndexes.size + embeddedRemovalCount,
 	};
 }
 

@@ -1,26 +1,37 @@
 # Google Account Auth — Settings / UX Design
 
-**Status:** Design artifact (UX spec). No production code in this doc.
-**Scope of this file:** the Settings → Account row for Google, API-key fallback
-discoverability, model-selector authenticated/unauthenticated states, copy for
-official Google API limitations, reload persistence, re-auth, logout, error
-states, accessibility, and test selectors.
+> **Archived design artifact — superseded.** This file preserves the pre-implementation UX
+> proposal for historical rationale only. It is not the current specification, and its file
+> references, state descriptions, and checklists are not authoritative implementation targets.
+> All future-tense requirements below describe the historical proposal. See
+> [Google OAuth & Gemini models](../google-oauth-models.md) for the shipped account-vs-key,
+> Code Assist, and session-selection behavior, and [Pi runtime compatibility](../pi-runtime-compatibility.md)
+> for the current Pi authentication boundary.
 
-This document is the **spec**: an implementation engineer should be able to match
-it exactly. It references the real components/functions in the current app so the
-work lands in the right place and reuses existing primitives.
+**Current implementation:** Google account login is implemented through Bobbit's native PKCE
+flow and Code Assist runtime, and account-backed Gemini models are session-selectable. OpenAI
+Codex uses `builtinModels()` plus `Models.login("openai-codex", "oauth", interaction)` with an
+`AuthInteraction`; it does not use the removed `getOAuthProvider` or `OAuthLoginCallbacks`
+contracts.
+
+## Historical proposal (pre-implementation)
+
+The retained proposal covered the Settings → Account row, API-key fallback discoverability,
+model-selector states, limitation copy, reload persistence, re-authentication, logout, errors,
+accessibility, and test selectors. It references the app structure as it existed when the design
+was written.
 
 ---
 
-## 1. Current-state audit (where everything lives)
+## 1. Historical state audit at proposal time
 
-The app has **two** settings surfaces. Only one is wired into the live UI.
+The app had **two** settings surfaces. Only one was wired into the live UI.
 
 | Surface | File | Wired into live UI? |
 |---|---|---|
-| **Current** Settings page (hash-routed `#settings`) | `src/app/settings-page.ts` | ✅ Yes — `SYSTEM_TABS` / `PROJECT_TABS` |
+| **Then-current** Settings page (hash-routed `#settings`) | `src/app/settings-page.ts` | ✅ Yes — `SYSTEM_TABS` / `PROJECT_TABS` |
 | **Legacy** `<settings-dialog>` + `ApiKeysTab` / `ProxyTab` | `src/ui/dialogs/SettingsDialog.ts` | ❌ Not in `SYSTEM_TABS`; orphaned |
-| **Legacy** "Providers & Models" tab (`<provider-key-input>` per provider) | `src/ui/dialogs/ProvidersModelsTab.ts` | ❌ Not reachable from current Settings |
+| **Legacy** "Providers & Models" tab (`<provider-key-input>` per provider) | `src/ui/dialogs/ProvidersModelsTab.ts` | ❌ Not reachable from the then-current Settings |
 
 ### 1.1 The Account tab (the row we extend)
 
@@ -49,8 +60,8 @@ The app has **two** settings surfaces. Only one is wired into the live UI.
   disabled for ALL providers while any one is mid-flow** (`disabled:
   accountReauthing !== null`) to prevent concurrent `pendingFlows` collisions.
 
-> There is currently **no logout / disconnect** control in this tab. Section 6
-> specifies adding one (requires a new server endpoint).
+> At proposal time there was **no logout / disconnect** control in this tab. Section 6
+> recorded the proposed addition of one and its server endpoint.
 
 ### 1.2 The OAuth dialog
 
@@ -62,8 +73,8 @@ The app has **two** settings surfaces. Only one is wired into the live UI.
   const providerName = provider === "openai-codex" || provider === "openai" ? "OpenAI" : "Anthropic";
   ```
 
-  **This must gain a Google branch** (anything that is not anthropic/openai
-  would otherwise be mislabelled "Anthropic").
+  The proposal called for a Google branch because anything that was not Anthropic/OpenAI
+  would otherwise have been mislabelled "Anthropic".
 - It opens the auth URL in a new tab (`window.open`), polls
   `GET /api/oauth/flow-status` when `callbackServer` is true, and also offers a
   **manual paste** field ("Paste redirect URL or code" / "Paste code here
@@ -79,13 +90,13 @@ The app has **two** settings surfaces. Only one is wired into the live UI.
 - `src/server/auth/oauth.ts`:
   - `OAuthProviderId = "anthropic" | "openai-codex"` (~L21) and
     `OAUTH_PROVIDER_LABELS` (~L23) — **add canonical `google-gemini-cli` here**.
-  - `normalizeProvider()` (~L102) throws on unknown providers — **must accept
-    `google-gemini-cli`, plus inbound aliases `google` / `gemini`, and collapse
-    them to canonical `google-gemini-cli`** for provider isolation.
-  - Anthropic uses a built-in PKCE flow; non-anthropic providers delegate to
-    `oauthStartExternal()` → pi-ai `getOAuthProvider(provider)`. Google account
-    auth uses Bobbit's native Google PKCE flow because installed pi-ai has no
-    Gemini Code Assist OAuth provider.
+  - The proposal required `normalizeProvider()` to accept `google-gemini-cli` plus the
+    inbound aliases `google` / `gemini`, then collapse them to canonical
+    `google-gemini-cli` for provider isolation.
+  - The proposal retained Anthropic's built-in PKCE flow and selected a native Bobbit Google
+    PKCE flow because Pi had no Gemini Code Assist runtime. Current OpenAI Codex auth instead
+    constructs `builtinModels()` and calls `Models.login("openai-codex", "oauth", interaction)`
+    with an `AuthInteraction`; see [Pi runtime compatibility](../pi-runtime-compatibility.md#openai-codex-oauth-migration).
   - Credentials are written to `auth.json` keyed by canonical provider
     (`storeOAuthCredentials`, ~L147), so Google account OAuth is stored only at
     `auth.json["google-gemini-cli"]`; `oauthStatus()` (~L402) returns only
@@ -97,20 +108,19 @@ The app has **two** settings surfaces. Only one is wired into the live UI.
 
 ### 1.4 The drift bug (acceptance-critical)
 
-- `renderModelsTab()` (`src/app/settings-page.ts` ~L2004) contains **AI Gateway**
-  and **Default Models** only. There is **no per-provider API-key entry** in the
-  live Settings.
+- At proposal time, `renderModelsTab()` contained **AI Gateway** and **Default Models**
+  only, with no per-provider API-key entry in the live Settings.
 - The model picker tooltip points users at a **dead path**: in
   `src/ui/dialogs/ModelSelector.ts` (~L373) the unauthenticated tooltip reads
-  *"API key required — set up in Settings > Providers"*. There is no "Providers"
-  tab in the current Settings. **This is the regression the goal calls out** and
-  must be fixed (Section 4) and covered by a test (Section 9).
+  *"API key required — set up in Settings > Providers"*. There was no "Providers"
+  tab in the then-current Settings. The proposal identified this as the goal's
+  regression and called for the fix in Section 4 plus coverage in Section 9.
 
 ---
 
-## 2. Google Account row — Settings → Account
+## 2. Historical proposal: Google Account row — Settings → Account
 
-Add a **third** entry to `ACCOUNT_PROVIDERS`, rendered by the *same*
+The proposal called for a **third** entry in `ACCOUNT_PROVIDERS`, rendered by the *same*
 `renderAccountTab()` loop. No new layout, card, or component is introduced — the
 row is structurally identical to Anthropic/OpenAI so it inherits every state,
 spacing token, and affordance.
@@ -188,7 +198,8 @@ pointer, §5 limitations note), and both reuse existing muted-text styling.
 
 ## 3. OAuth dialog — Google branch
 
-`openOAuthDialog("google-gemini-cli")` reuses the entire existing flow. Required changes:
+The proposal reused the existing `openOAuthDialog("google-gemini-cli")` flow and listed these
+historical changes:
 
 - **Display name:** replace the ternary in `src/app/dialogs.ts` (~L484) with a
   lookup that maps `"google-gemini-cli"` (and inbound aliases `"google"` /
@@ -198,8 +209,8 @@ pointer, §5 limitations note), and both reuse existing muted-text styling.
   paste-code exchange. The existing dialog already supports both the
   `callbackServer` polling path and the manual paste path, so **no new dialog
   states are needed**. If Google uses a loopback redirect (`callbackServer:
-  true`), polling auto-completes; otherwise the user pastes the code, exactly
-  like the OpenAI path today.
+  true`), polling auto-completes; otherwise the user pastes the code, matching
+  the OpenAI path at proposal time.
 - **Paste-field placeholder:** keep the existing conditional copy. For Google,
   the `code#state` hint applies if no callback server; the redirect-URL hint
   applies if there is one.
@@ -211,9 +222,9 @@ fixed.
 
 ## 4. API-key fallback discoverability (fix the drift)
 
-The goal requires that **either** a clear API-key entry point exists in current
-Settings, **or** stale UI/docs are corrected so users are not sent to a
-nonexistent screen. Recommendation: **do both** — add a minimal API-key entry to
+The historical goal required either a clear API-key entry point in the then-current
+Settings or corrected UI/docs so users were not sent to a nonexistent screen. The proposal
+recommended both: add a minimal API-key entry to
 the live **Models** tab and fix the dead tooltip.
 
 ### 4.1 Add a "Provider API Keys" section to the Models tab
@@ -298,8 +309,8 @@ must remain.
 
 ## 6. Logout / disconnect
 
-The Account tab has no disconnect control today. Add one for **all three**
-providers (consistent), gated on `authenticated === true`.
+At proposal time, the Account tab had no disconnect control. The proposal added one for
+all three providers, gated on `authenticated === true`.
 
 ### 6.1 UI
 
@@ -321,8 +332,8 @@ Re-authenticate:
 
 ### 6.2 Server (new)
 
-There is no clear endpoint today (only Anthropic self-clears on revoked token in
-`oauth.ts` ~L498). Add:
+At proposal time there was no clear endpoint; only Anthropic self-cleared on a revoked
+token. The proposal added:
 
 - `POST /api/oauth/logout` `{ provider }` → normalizes the provider, deletes that
   canonical provider key from `auth.json`, calls `clearOAuthCache()`, returns
@@ -392,7 +403,9 @@ returns only `{ authenticated, expires }`; error bodies are truncated in
   token contrast; do not hardcode new colors — use existing tokens
   (`text-muted-foreground`, `text-destructive`, `text-green-600 dark:text-green-400`).
 
-### 9.2 Test selectors (add `data-testid`s — currently the rows have none)
+### 9.2 Historical proposed test selectors
+
+At proposal time the rows had no stable `data-testid` hooks.
 
 To make the Account rows testable (browser E2E per AGENTS.md), add stable hooks.
 Recommended naming (kebab, provider-scoped):
@@ -424,7 +437,7 @@ The model-selector item already exposes `data-model-item` / `data-model-id`
    tooltip does **not** contain the string "Settings > Providers", and that the
    Models tab renders the `provider-keys-section`. This pins the acceptance
    criterion *"tests cover the regression where a user is told to use a settings
-   path that is not present in the current app."*
+   path that is not present in the app."*
 3. **Unit/API E2E:** `normalizeProvider("google-gemini-cli")` resolves, inbound
    alias `normalizeProvider("google")` canonicalizes to `google-gemini-cli`,
    `oauthStatus("google-gemini-cli")` never returns the token, and provider
@@ -433,7 +446,7 @@ The model-selector item already exposes `data-model-item` / `data-model-id`
 
 ---
 
-## 10. Implementation handoff checklist (UI/UX surface only)
+## 10. Historical handoff checklist (completed or superseded; not current work)
 
 - [ ] Add `"google-gemini-cli"` to `AccountProviderId` + a `Google OAuth` entry
       in `ACCOUNT_PROVIDERS` (`settings-page.ts`); keep plain `google` reserved

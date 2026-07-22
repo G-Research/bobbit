@@ -1,0 +1,8 @@
+{
+  "name": "@bobbit-fixture/consumer",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@bobbit-fixture/wrapper": "file:../wrapper"
+  }
+}

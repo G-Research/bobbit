@@ -1,40 +1,47 @@
 # Test Plan — Google account (`google-gemini-cli`) session models
 
-Status: test plan (no production code or tests changed in this document).
-Goal: `Google Session Models` — make Google-account-authenticated Gemini (`google-gemini-cli` /
-Code Assist) models usable as normal Bobbit agent session models, not just gateway-side helper
-models.
+> **Archived test plan — implemented and superseded.** This file preserves the pre-implementation
+> coverage audit and proposed test inventory for historical traceability. It is not the current test
+> map or a list of unfinished work. References below to `sessionSelectable: false`,
+> `NON_SESSION_SELECTABLE_PROVIDERS`, missing streaming/tool/multi-turn support, old `tests/` paths,
+> and tests that pinned the gate-on state describe planning-time facts only. See
+> [Google OAuth & Gemini models](../google-oauth-models.md) for shipped behavior and
+> [Pi runtime compatibility](../pi-runtime-compatibility.md) for the current Pi boundary.
 
-This is the output of the test-planning task. It audits the **current** test coverage around the
-`google-gemini-cli` provider and specifies the **exact** unit / API / browser / manual tests the
-implementation must add or invert to prove the acceptance criteria. File paths and assertions below
-are concrete targets for the test-writing follow-up; no code is written here.
+**Current implementation and coverage:** account-backed `google-gemini-cli` models are
+session-selectable through the generated Code Assist provider extension and support streaming, tool
+calls and results, and multi-turn context. Current v2 tests cover conversion and selectability,
+provider-extension streaming and auth transitions, registry isolation, the session token endpoint,
+and selectable model UI in `tests2/core/google-code-assist*.test.ts`,
+`tests2/integration/google-code-assist-token-api.test.ts`, and
+`tests2/dom/ui-fixtures/model-selector-fixture.test.ts`. Google OAuth, logout, sandbox auth, and
+Settings UI have additional v2 coverage in their corresponding core, integration, and DOM suites.
 
-> **Convention used below.** Each proposed item is tagged **[INVERT]** (an existing test whose
-> assertion must flip once the runtime gains support), **[NEW]** (a brand-new test), or
-> **[KEEP]** (an existing guard that must continue to pass unchanged — the isolation invariants).
+## Historical test-planning context
+
+Goal `Google Session Models` asked for Google-account-authenticated Gemini models to become normal
+agent session models rather than gateway-helper-only models. The plan below audited the tests that
+existed before implementation and proposed additions or inversions. Its **[INVERT]**, **[NEW]**, and
+**[KEEP]** tags describe that historical work plan, not current outstanding tasks.
 
 ---
 
-## 0. The contract under test
+## 0. Proposed contract at planning time
 
-After Google OAuth (`Settings → Account → Google`) succeeds:
+The plan required a successful Google OAuth account to provide:
 
-1. `google-gemini-cli/*` Gemini models become **session-selectable** (today they are emitted with
-   `sessionSelectable: false` and rejected at every binding choke point).
-2. A session bound to such a model can **answer, stream, call tools, receive tool results, and
-   continue multi-turn** context.
-3. Selection **persists** across reload and server restart with **no fallback** to another model.
-4. An expired/invalid Google token **refreshes** or fails with a **clear re-auth** message.
-5. The API-key-only `google` (Gemini Developer API) provider and Anthropic/OpenAI models are
-   **unaffected** — and the OAuth↔API-key isolation invariant still holds.
+1. session-selectable `google-gemini-cli/*` models, replacing the then-current
+   `sessionSelectable: false` gate;
+2. streaming answers, tool calls and results, and multi-turn context;
+3. selection persistence across reload and restart without fallback;
+4. token refresh or a clear re-authentication error; and
+5. continued isolation from API-key `google` and other providers.
 
-The crux for testing: the gate today is enforced in **four places that all funnel through two
-helpers** in `src/server/agent/google-code-assist.ts`:
+At planning time, the gate was enforced through two shared contracts:
 
-- `isSessionSelectableProvider(provider)` / `isSessionSelectableModelString(modelString)` — backed
-  by `NON_SESSION_SELECTABLE_PROVIDERS = { "google-gemini-cli" }`.
-- Per-model `sessionSelectable: false` emitted in `src/server/agent/google-code-assist-models.ts`.
+- `isSessionSelectableProvider(provider)` / `isSessionSelectableModelString(modelString)`, backed by
+  `NON_SESSION_SELECTABLE_PROVIDERS = { "google-gemini-cli" }`; and
+- per-model `sessionSelectable: false` from the Code Assist model emitter.
 
 Choke points that consume them (each has a test):
 
@@ -43,46 +50,33 @@ Choke points that consume them (each has a test):
 | Model registry emission | `google-code-assist-models.ts` | `tests/google-code-assist-registry.test.ts` |
 | Binding helper (role override / `default.sessionModel` / spawn / picker) | `review-model-override.ts::applyModelString` | `tests/review-model-override.test.ts` |
 | WS `set_model` | `src/server/ws/handler.ts` | *(none — gap)* |
-| Session-manager fallback (role + `default.sessionModel`) | `session-manager.ts` ~L4941/5016/5050 | *(none — gap)* |
+| Session-manager fallback (role + `default.sessionModel`) | session-manager model preference resolution | *(none — gap)* |
 | Selector UI | `src/ui/dialogs/ModelSelector.ts` | `tests/ui-fixtures/model-selector-fixture.spec.ts` |
 
-When the runtime gains real support, the implementation flips the gate. **Every test that pins the
-gate-on contract must be inverted in lockstep**, and new tests must prove the runtime actually runs
-the model. The drift cross-check in `google-code-assist.test.ts` (`every emitted … model is
-sessionSelectable:false AND fails the guard`) is the canary: it will fail the moment the gate flips,
-forcing the inversion.
+The plan required the implementation and its gate-on tests to flip in lockstep. Its drift
+cross-check intentionally served as a canary: changing runtime selectability without changing the
+old test contract would fail immediately.
 
 ---
 
-## 1. Audit of existing coverage
+## 1. Coverage audit captured at planning time
 
 ### 1.1 Unit — pure adapter + registry
 
-- **`tests/google-code-assist.test.ts`**
-  - `buildGenerateContentBody` / `extractCodeAssistText` — pure request/response conversion (system
-    instruction, project, thinking budget, wrapped-vs-bare candidates, empty payloads).
-  - `codeAssistComplete` — single-turn completion via injected `fetch`: posts to `:generateContent`,
-    returns text, throws "No Google account credential", surfaces+redacts HTTP error bodies, honours
-    `timeoutMs` (aborts, threads `AbortSignal`).
-  - `ensureCodeAssistProject` — `loadCodeAssist` happy path + `onboardUser` polling.
-  - `hasGoogleCodeAssistCredential` / `getGoogleAccessToken` — fresh token, stale-token last-resort.
-  - **session-selectability guard** — `isSessionSelectableProvider/ModelString` return **false** for
-    `google-gemini-cli`, **true** for `google`/`anthropic`; drift cross-check vs emitted models.
-  - **Coverage gaps:** only **single-turn text**; no streaming, no tool calls/results, no multi-turn
-    `contents` array, no token-refresh-on-401 path, no project-env (`GOOGLE_CLOUD_PROJECT`) selection.
+- **`tests/google-code-assist.test.ts`** then covered request/response conversion, single-turn
+  completion, project onboarding, credential detection, and token lookup. Its session-selectability
+  assertions returned **false** for `google-gemini-cli`, and its drift check compared that rejection
+  with emitted models. It had no streaming, tool-call/result, multi-turn, usage, or project override
+  coverage at planning time.
 
-- **`tests/google-code-assist-registry.test.ts`**
-  - `isOAuthCapableProvider` includes `google-gemini-cli`, excludes API-key `google`.
-  - Emits `google-gemini-cli` Code Assist models only when a credential is present; each is
-    `api: "google-code-assist"`, `authenticated: true`, `id` matches `^gemini-`.
-  - **Pins gate-on:** every account model is `sessionSelectable: false` with
-    `sessionUnavailableReason`.
-  - **Isolation [KEEP]:** API-key `google` stays selectable; a generic OAuth token does **not**
-    authenticate `google`.
+- **`tests/google-code-assist-registry.test.ts`** then verified OAuth-provider isolation and emitted
+  account models only when a credential existed. It **pinned the old gate-on state** by requiring
+  `sessionSelectable: false` and `sessionUnavailableReason`, while preserving the independent
+  API-key `google` provider.
 
-- **`tests/review-model-override.test.ts`**
-  - `applyModelString` session-selectability guard rejects `google-gemini-cli/...` before `setModel`
-    is called; still binds a normal model. **Pins gate-on.**
+- **`tests/review-model-override.test.ts`** then verified that `applyModelString` rejected
+  `google-gemini-cli/...` before `setModel` while still binding an ordinary model. This was another
+  old gate-on pin.
 
 - **`tests/sandbox-google-auth.test.ts`** — sandbox `auth.json` propagation (sanitized OAuth fields
   only, never email/profile/scope; policy opt-in via `GOOGLE_CLOUD_ACCESS_TOKEN`; Codex/Google
@@ -97,12 +91,12 @@ forcing the inversion.
 
 ### 1.2 Browser fixtures (file://)
 
-- **`tests/ui-fixtures/model-selector-fixture.spec.ts`** — a `google-gemini-cli` model renders with
-  `data-session-unavailable="true"`, `cursor-not-allowed`, "can't run in agent sessions" tooltip,
-  and clicking it does **not** select. **Pins gate-on.**
-- **`tests/ui-fixtures/settings-account-tab.spec.ts`** — Google OAuth row: log-in / authenticated /
-  reload-persistence / logout, plus the "can't run Gemini through your Google account yet"
-  limitation note + API-key cross-link. **Partially pins gate-on** (the limitation copy).
+- **`tests/ui-fixtures/model-selector-fixture.spec.ts`** then expected a
+  `google-gemini-cli` row to be disabled with the old "can't run in agent sessions" state and not
+  select on click.
+- **`tests/ui-fixtures/settings-account-tab.spec.ts`** then covered login, authentication, reload,
+  and logout while pinning the old "can't run Gemini through your Google account yet" limitation
+  copy and API-key cross-link.
 
 ### 1.3 API / E2E
 
@@ -114,23 +108,18 @@ forcing the inversion.
 ### 1.4 Manual integration (real agents + Docker)
 
 - **`tests/manual-integration/agent-tool-use.spec.ts`** — real agent runs a tool. Pattern to clone.
-- **`tests/manual-integration/manual-test-model-seeding.ts`** — seeds `default.sessionModel` from
-  `MANUAL_TEST_MODEL`. The seam for a live Google-account run. **No Google coverage today.**
+- **`tests/manual-integration/manual-test-model-seeding.ts`** provided a
+  `MANUAL_TEST_MODEL` seam, but the audit found no live Google account coverage at planning time.
 
-### 1.5 Summary of gaps (what proves the new behaviour)
+### 1.5 Gaps identified at planning time
 
-1. No runtime test that a `google-gemini-cli` model can be **bound** to a session and **run**
-   (stream / tools / multi-turn).
-2. No WS `set_model` test (accept-now / reject-before contract).
-3. No session-manager fallback test for the role + `default.sessionModel` paths.
-4. No token-refresh-on-401 unit test for the Code Assist adapter.
-5. No browser E2E proving an authenticated Google model is **selectable, binds, persists across
-   reload, and survives restart**.
-6. No manual/live path for a real Google account.
+The audit recorded no runtime proof of Google account streaming, tools, or multi-turn behavior; no
+WebSocket or session-preference binding coverage; no token-refresh-on-401 test; no browser journey
+for selection and persistence; and no real-account manual path.
 
 ---
 
-## 2. Proposed tests
+## 2. Tests proposed by the historical plan
 
 ### Phase A — Unit (`npm run test:unit`, `node:test`)
 
@@ -190,16 +179,16 @@ forcing the inversion.
 
 #### A3. `tests/review-model-override.test.ts` — invert (same file)
 
-- **[INVERT]** "rejects a not-session-selectable provider" → `applyModelString(rpc,
-  "google-gemini-cli/gemini-2.5-pro", …)` now **binds**: assert
+- **[INVERT]** The old rejection case would become a successful
+  `applyModelString(rpc, "google-gemini-cli/gemini-2.5-pro", …)` bind: assert
   `rpc.setModelCalls` contains `["google-gemini-cli", "gemini-2.5-pro"]` and read-back succeeds.
 - **[KEEP]** the read-back-mismatch hard-fail contract (catches a silent fallback to another model —
   directly guards acceptance criterion "no fallback").
 
 #### A4. `tests/google-code-assist-session-bind.test.ts` — NEW file (session-manager fallback)
 
-Covers `session-manager.ts` model resolution (~L4941/5016/5050) which currently **skips**
-`google-gemini-cli` for role-model + `default.sessionModel`.
+The plan noted that session model resolution then **skipped** `google-gemini-cli` for role-model and
+`default.sessionModel` preferences.
 
 - **[INVERT/NEW]** With `default.sessionModel = "google-gemini-cli/gemini-2.5-pro"` and a credential
   present, assert the resolver **returns** that model (no fallback / no warn-skip).
@@ -211,7 +200,8 @@ Covers `session-manager.ts` model resolution (~L4941/5016/5050) which currently 
 
 #### A5. `tests/ws-set-model-google.test.ts` — NEW file (WS `set_model` contract)
 
-Today `handler.ts::set_model` rejects with `MODEL_NOT_SESSION_SELECTABLE` for `google-gemini-cli`.
+At planning time, `handler.ts::set_model` rejected `google-gemini-cli` with
+`MODEL_NOT_SESSION_SELECTABLE`.
 
 - **[INVERT]** With a credential present, `set_model {provider:"google-gemini-cli", modelId:"gemini-2.5-pro"}`
   calls `rpcClient.setModel`, persists via `persistSessionModel`, and emits **no**
@@ -268,10 +258,9 @@ Google account is needed.
 
 #### C3. `tests/ui-fixtures/settings-account-tab.spec.ts` — update copy assertion (same file)
 
-- **[INVERT]** The "can't run Gemini through your Google account yet" / "official model API"
-  limitation note must change once sessions can run Google models. Update the assertion to match the
-  new copy (e.g. a caution about account-risk/terms rather than "not usable"). Keep the API-key
-  cross-link assertion.
+- **[INVERT]** The plan called for replacing the "can't run Gemini through your Google account yet"
+  limitation with account-risk/terms guidance once session support shipped, while retaining the
+  API-key cross-link assertion.
 
 ### Phase D — Manual integration (`npm run test:manual`, gate-exempt, real LLM + Docker)
 
@@ -301,7 +290,7 @@ CI never requires a Google account:
 
 ---
 
-## 3. Isolation invariants that MUST keep passing (regression guard)
+## 3. Isolation invariants the plan required preserving
 
 These are the "do not break `google` API-key or Anthropic/OpenAI" acceptance criteria. None should
 change when the gate flips; if any breaks, the implementation regressed isolation:
@@ -319,7 +308,7 @@ OAuth credential and an API key authenticate two **distinct** providers simultan
 
 ---
 
-## 4. Phase mapping & invariants
+## 4. Historical phase mapping and invariants
 
 | Test file | Phase | Type pin (`tests/test-phase-invariant.test.ts`) |
 |---|---|---|
@@ -341,7 +330,7 @@ may commit credentials or leave artifacts in the repo.
 
 ---
 
-## 5. Sequencing for the implementer
+## 5. Historical implementation sequence
 
 1. Land the runtime adapter (streaming + tools + multi-turn + refresh) → **Phase A1** new conversion
    tests can be written first and TDD'd against the pure helpers (no network).

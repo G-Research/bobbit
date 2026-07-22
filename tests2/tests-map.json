@@ -2,9 +2,9 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1135,
+  "censusTotal": 1136,
   "buckets": {
-    "daily": 61,
+    "daily": 62,
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
@@ -15,7 +15,7 @@
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
-    "relocate": 46,
+    "relocate": 47,
     "rewrite": 145,
     "vitest-e2e": 2
   },
@@ -1409,6 +1409,33 @@
     {
       "path": "tests2/core/ws-session-command-serialiser.test.ts",
       "reason": "Pure unit coverage for per-session WebSocket command ordering, cross-session concurrency, rejection isolation, and idle-key cleanup using deterministic deferred promises.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/pi-published-shrinkwrap-security.test.ts",
+      "reason": "Deterministic fixture regression proving a dependency-owned published shrinkwrap can retain a vulnerable transitive pin despite a secure wrapper-checkout override, so consumer security validation must inspect published lock sources.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/pi-rpc-thinking-levels.test.ts",
+      "reason": "Pi 0.81 RPC compatibility coverage for the typed get_available_thinking_levels request, existing response correlation path, established state/model/thinking helpers, and restored legacy stream fallback.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/pi-tool-lifecycle-contract.test.ts",
+      "reason": "Pi 0.81 lifecycle contract coverage for typed tool call/result and execution start/update/end ordering, policy and steer boundaries, unchanged partial/final payload forwarding, error normalization, and optional usage/addedToolNames fields.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -5606,7 +5633,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding-preflight.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-repositories.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -5616,7 +5643,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding-preflight.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-repositories.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -5636,7 +5663,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding-preflight.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-repositories.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -6542,9 +6569,9 @@
       "bucket": "daily",
       "method": "adapter",
       "replacement": [
-        "tests2/browser/fixtures/pre-compaction-history.spec.ts"
+        "tests2/browser/e2e/pre-compaction-history.spec.ts"
       ],
-      "rationale": "Browser E2E uses IntersectionObserver at tests/e2e/ui/pre-compaction-history.spec.ts:258 â€” needs Chromium real-browser fidelity.",
+      "rationale": "Authoritative e2e:v2 Group C coverage drives real mock-agent AUTO_COMPACT:3 through the visible editor, verifies ordered dimmed read-only history, reload persistence, and per-test session cleanup in Chromium.",
       "migrated": true,
       "v2Path": "tests2/browser/e2e/pre-compaction-history.spec.ts",
       "execution": {
@@ -16383,6 +16410,13 @@
       "method": "relocate",
       "replacement": [],
       "rationale": "API-only real-gateway E2E covering session loading across graceful restart, eager restoration, WebSocket snapshots, archived pagination, cost persistence, and task reassignment."
+    },
+    {
+      "file": "tests/e2e/pi-packed-consumer.spec.ts",
+      "bucket": "daily",
+      "method": "relocate",
+      "replacement": [],
+      "rationale": "Real npm pack and clean-consumer install/audit coverage for dependency-owned shrinkwrap resolution, aligned Pi versions, secure brace-expansion edges, version-conditional protobufjs findings, and bundled fd/rg execution."
     }
   ]
 }

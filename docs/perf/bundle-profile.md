@@ -84,7 +84,7 @@ Build-size and build-warning checks live in the repo:
    600 KB raw. Pinned thresholds, raise only after a measured win.
 3. **`tests2/core/clean-build-warnings-regression.test.ts`** and `tests2/core/pi-ai-browser-boundary.test.ts` — pin warning
    classes that are easy to miss in green builds: no browser runtime
-   bare imports from `@earendil-works/pi-ai`, Pi `0.80.x` streaming imports limited to package-exported API/provider subpaths, no misleading dynamic
+   bare imports from `@earendil-works/pi-ai`, Pi `0.81.1` streaming imports limited to package-exported API/provider subpaths, no misleading dynamic
    import of modules already statically imported, and quiet expected
    primary-branch fallback logging for temp test repos.
 4. **The eye test** — when a chunk size jumps, re-run the profiler and

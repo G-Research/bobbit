@@ -1,56 +1,60 @@
 # Google account (Code Assist) models as agent session models
 
-Status: **implemented** (was the design-doc gate artifact). The plan below shipped: account
-`google-gemini-cli` models are now session-selectable and run through the generated Code Assist
-provider extension. For current behavior and operator guidance see
-[`docs/google-oauth-models.md`](../google-oauth-models.md). This document is retained as the
-design record; every path/function/symbol named below was an exact target for the implementation.
+> **Archived design artifact — implemented and superseded.** This document preserves the
+> pre-implementation proposal for historical rationale only. It is not an authoritative description
+> of current behavior or an active implementation plan. In particular, references below to
+> `sessionSelectable: false`, `NON_SESSION_SELECTABLE_PROVIDERS`, a missing provider/stream/tool/
+> multi-turn runtime, Pi `0.79.x`, and tests that pinned the old gate describe the proposal-time
+> system. See [Google OAuth & Gemini models](../google-oauth-models.md) for shipped behavior and
+> [Pi runtime compatibility](../pi-runtime-compatibility.md) for the current Pi boundary.
 
-Goal: `Google Session Models` (`google-session-09851872`). Make `google-gemini-cli` (Google account
-OAuth / Gemini Code Assist) models selectable and runnable as normal Bobbit agent **session** models,
-not just gateway-side helper completions.
+**Current implementation:** account-backed `google-gemini-cli` models are session-selectable and run
+through Bobbit's generated Code Assist provider extension. Sessions stream responses, call tools,
+receive tool results, and preserve multi-turn context. Current v2 coverage pins the adapter and
+selectability, generated provider runtime, registry isolation, token endpoint, and model-selector UI
+in `tests2/core/google-code-assist*.test.ts`,
+`tests2/integration/google-code-assist-token-api.test.ts`, and
+`tests2/dom/ui-fixtures/model-selector-fixture.test.ts`.
 
-Companion / predecessor doc: [`docs/design/google-oauth-model-auth.md`](google-oauth-model-auth.md)
-(the OAuth login + gateway-helper-completion design that already shipped). This doc only closes the
-**agent-session runtime** gap §4.4(b) left open.
+## Historical proposal (pre-implementation)
+
+Goal `Google Session Models` (`google-session-09851872`) proposed making Google account OAuth /
+Gemini Code Assist models selectable and runnable as normal Bobbit agent **session** models, rather
+than limiting them to gateway-side helper completions.
+
+Companion / predecessor: [`google-oauth-model-auth.md`](google-oauth-model-auth.md), the earlier OAuth
+login and gateway-helper-completion proposal. The retained plan below addressed the agent-session
+runtime gap that proposal left open.
 
 ---
 
-## 1. Where we are today (audit)
+## 1. Historical audit captured before implementation
 
-### 1.1 What already works
+### 1.1 What worked before session support
 
-- **OAuth + credential storage** (`src/server/auth/oauth.ts`): `google-gemini-cli` is a first-class
-  OAuth provider. `auth.json["google-gemini-cli"] = { type:"oauth", access, refresh, expires, email? }`.
-  Provider-partitioned status/refresh/logout already exist.
-- **Gateway-side Code Assist adapter** (`src/server/agent/google-code-assist.ts`): single-turn
-  `codeAssistComplete()` against `cloudcode-pa.googleapis.com/v1internal:generateContent` with a
-  Bearer token. Pure, unit-tested helpers: `buildGenerateContentBody()`, `extractCodeAssistText()`,
-  `ensureCodeAssistProject()` (loadCodeAssist/onboardUser → projectId, cached + persisted),
-  `getGoogleAccessToken()` (reads/refreshes the stored token). Already wired into
-  `completeModelText()` (title/name/connection-test helpers) in
-  `src/server/agent/model-completion.ts`.
-- **Model emission** (`src/server/agent/google-code-assist-models.ts`): when a Google credential is
-  present, Gemini ids are re-emitted under provider `google-gemini-cli` with
-  `api: "google-code-assist"`, `baseUrl: cloudcode-pa…`, but **`sessionSelectable: false`** plus
-  `sessionUnavailableReason` copy.
-- **Session-selectability guard** (`google-code-assist.ts`): `NON_SESSION_SELECTABLE_PROVIDERS =
-  { "google-gemini-cli" }`, plus `isSessionSelectableProvider()` / `isSessionSelectableModelString()`.
-  Enforced at every bind path: WS handler (`src/server/ws/handler.ts:669`), review-model override
-  (`review-model-override.ts:109`), and the UI picker (`src/ui/dialogs/ModelSelector.ts:233-237`,
-  which renders `sessionSelectable === false` rows disabled).
-- **Sandbox credential propagation** (`src/server/agent/host-tokens.ts`): already wired —
-  `PROVIDER_TOKENS` has `{ envVar:"GOOGLE_CLOUD_ACCESS_TOKEN", provider:"google-gemini-cli" }`;
-  `GOOGLE_GEMINI_CLI_SANDBOX_AUTH_TOKEN_KEYS`; `buildSandboxAgentAuthJson()` emits a sanitized
-  `google-gemini-cli` entry when policy allows; `resolveHostTokenValue("GOOGLE_CLOUD_ACCESS_TOKEN")`
-  returns the stored access token. `docker-args.ts` mounts the scoped `auth.json` and injects allowed
-  tokens as `-e KEY=VALUE`.
+- **OAuth + credential storage** (`src/server/auth/oauth.ts`): `google-gemini-cli` was already a
+  first-class OAuth provider. The proposal observed provider-partitioned status, refresh, and logout
+  around `auth.json["google-gemini-cli"]`.
+- **Gateway-side Code Assist adapter** (`src/server/agent/google-code-assist.ts`): a single-turn
+  `codeAssistComplete()` path already called `cloudcode-pa.googleapis.com/v1internal:generateContent`
+  with a Bearer token. Its pure helpers handled request bodies, text extraction, project onboarding,
+  and token refresh, and `completeModelText()` used it for title, name, and connection-test helpers.
+- **Model emission** (`src/server/agent/google-code-assist-models.ts`): when a Google credential was
+  present, Gemini ids were re-emitted under provider `google-gemini-cli` with
+  `api: "google-code-assist"` and `baseUrl: cloudcode-pa…`, but the proposal-time rows carried
+  **`sessionSelectable: false`** and `sessionUnavailableReason`.
+- **Session-selectability guard** (`google-code-assist.ts`): the proposal-time
+  `NON_SESSION_SELECTABLE_PROVIDERS` contained `"google-gemini-cli"`; its helpers rejected that
+  provider at the binding paths, while the UI rendered `sessionSelectable === false` rows disabled.
+- **Sandbox credential propagation** (`src/server/agent/host-tokens.ts`): the proposal found the
+  `GOOGLE_CLOUD_ACCESS_TOKEN` mapping, sanitized `google-gemini-cli` auth entry, scoped `auth.json`
+  mount, and allowed-token environment injection already scaffolded.
 
-### 1.2 The one missing piece
+### 1.2 Runtime gap at proposal time
 
-Agent sessions are run by a **separate `pi-coding-agent` process** (local child process, or
-`docker exec` inside the sandbox — `rpc-bridge.ts:380-607`). That process drives turns through
-`@earendil-works/pi-ai`'s `stream()` / `streamSimple()`, which dispatch on `model.api`:
+Agent sessions ran in a **separate `pi-coding-agent` process**, either as a local child process or
+inside the sandbox. That process drove turns through the then-installed `@earendil-works/pi-ai`
+`stream()` / `streamSimple()` dispatcher:
 
 ```js
 // pi-ai/dist/stream.js
@@ -61,76 +65,61 @@ function resolveApiProvider(api) {
 }
 ```
 
-pi-ai 0.79.x ships api providers for `anthropic-messages`, `openai-completions`, `openai-responses`,
-`openai-codex-responses`, `azure-openai-responses`, `mistral-conversations`, `bedrock-converse-stream`,
-`google-generative-ai`, `google-vertex` — **but not `google-code-assist`**, and its `./oauth`
-registry has no `google-gemini-cli` provider (`getOAuthProvider("google-gemini-cli") → undefined`).
-So binding a `google-gemini-cli/*` model to a session would make the agent throw *"No API provider
-registered for api: google-code-assist"* on the first turn. That is exactly why the models are
-emitted `sessionSelectable: false` today. Closing this gap is the whole job.
+The then-installed pi-ai `0.79.x` shipped providers for its built-in APIs, but **not
+`google-code-assist`**, and its OAuth registry had no `google-gemini-cli` provider. Binding a
+`google-gemini-cli/*` model at that time would therefore have failed on the first turn with *"No API
+provider registered for api: google-code-assist"*. That proposal-time runtime gap explained the
+historical `sessionSelectable: false` gate.
 
-### 1.3 pi runtime capabilities verified against the installed dist (0.79.6)
+### 1.3 Historical Pi runtime capabilities verified against installed `0.79.6`
 
-These are the load-bearing facts the recommendation depends on; all confirmed by reading
-`node_modules/@earendil-works/{pi-ai,pi-coding-agent}/dist`:
+The recommendation depended on the following facts, which were confirmed against the installed
+`0.79.6` distribution during design research:
 
-1. **`Api` is an open string type.** `pi-ai/dist/types.d.ts`: `export type Api = KnownApi | (string & {})`.
-   A custom `api: "google-code-assist"` is legal end-to-end.
-2. **pi-ai exposes a public api-registry.** `registerApiProvider({ api, stream, streamSimple }, sourceId?)`,
-   `getApiProvider`, `unregisterApiProviders`, `clearApiProviders` (`pi-ai/dist/api-registry.d.ts`).
-3. **pi-coding-agent exposes a first-class extension hook to register providers.**
-   `ExtensionAPI.registerProvider(name, config: ProviderConfig)` and `unregisterProvider(name)`
-   (`pi-coding-agent/dist/core/extensions/types.d.ts:946,960`). `ProviderConfig` accepts a custom
-   `api`, `baseUrl`, `apiKey` (literal / `$ENV` / `${ENV}` / leading `!command`), `headers`,
-   `authHeader`, a `models[]` list, an **`oauth`** provider impl (`login`/`refreshToken`/`getApiKey`/
-   `modifyModels`), and — critically — a **`streamSimple` handler** for custom APIs:
+1. **`Api` was an open string type.** The `0.79.6` declaration used
+   `export type Api = KnownApi | (string & {})`, so a custom `api: "google-code-assist"` was legal.
+2. **pi-ai exposed a public API registry.** The audited distribution exported
+   `registerApiProvider`, `getApiProvider`, `unregisterApiProviders`, and `clearApiProviders`.
+3. **pi-coding-agent exposed a first-class provider-registration extension hook.** Its
+   `ExtensionAPI.registerProvider(name, config)` and `unregisterProvider(name)` contracts accepted a
+   custom API, URL, key resolver, headers, model list, OAuth implementation, and—critically—a
+   **`streamSimple` handler** for custom APIs:
    ```ts
    streamSimple?: (model: Model<Api>, context: Context, options?: SimpleStreamOptions)
                   => AssistantMessageEventStream;
    ```
-   Internally (`pi-coding-agent/dist/core/model-registry.js:721-740`) this calls
+   Internally, the audited pi-coding-agent model registry called
    `registerApiProvider({ api, stream: streamSimple, streamSimple }, "provider:<name>")` on the
    agent's **own** pi-ai singleton, and the doc comment notes the call "takes effect immediately…
    safe to call from command handlers or event callbacks." This is the supported, version-stable
    injection point — no monkey-patching of pi-ai dist required.
-4. **Extensions are already how Bobbit injects code into the agent process**, and they run in the
-   Docker sandbox too. Bobbit extensions import `@earendil-works/pi-coding-agent` /
-   `@sinclair/typebox` and are loaded via `--extension <path>` (`rpc-bridge.ts`,
-   `session-setup.ts:404-424`, `session-manager.ts:1736-1810`). The agent resolves those imports
-   against its own `node_modules`, so an extension can also import
-   `createAssistantMessageEventStream` from `@earendil-works/pi-ai` and get the **same**
-   `AssistantMessageEventStream` class the turn loop consumes (same module instance → instanceof
-   holds). Existing precedents: `defaults/tools/tasks/extension.ts`,
-   `src/server/agent/provider-bridge-extension.ts` (generated, gateway-callback), tool-guard.
-5. **models.json config values are resolved at runtime**, including a leading `!command`
-   (`pi-coding-agent/dist/core/resolve-config-value.*`, used for the existing aigw
-   `x-opencode-session` header). `apiKey` supports `$ENV`/`!cmd`. **`baseUrl` is taken literally**
-   (not run through `resolveConfigValue`) — important: a models.json `baseUrl` cannot be an env
-   placeholder, which is why a "point the agent at a local gateway proxy" design is awkward (see
-   §3 option C).
-6. **pi-coding-agent's `AuthStorage.getApiKey()` cannot refresh a `google-gemini-cli` oauth entry**
-   on its own, because `getOAuthProvider("google-gemini-cli")` is `undefined` in the agent's pi-ai
-   (`pi-coding-agent/dist/core/auth-storage` → "Unknown OAuth provider, can't get API key"). So
-   token freshness for the agent must come from either (a) a `ProviderConfig.oauth` impl we supply
-   via the extension, or (b) an `apiKey: "!command"` that fetches a fresh token, or (c) an env var
-   we refresh at spawn. We use (b)+(a) — see §4.4.
+4. **Extensions were already Bobbit's agent-process injection mechanism**, including in the Docker
+   sandbox. The audit found that extension imports resolved against the agent's own `node_modules`,
+   allowing the generated provider to use the same `AssistantMessageEventStream` instance as the
+   turn loop. Existing task, provider-bridge, and tool-guard extensions supplied precedents.
+5. **`models.json` config values were resolved at runtime**, including leading `!command` values,
+   while **`baseUrl` was literal**. The lack of environment substitution made a local gateway proxy
+   awkward because host and Docker agents needed different addresses.
+6. **The audited `AuthStorage.getApiKey()` could not refresh a `google-gemini-cli` OAuth entry**
+   because the `0.79.6` OAuth registry returned no provider. The design therefore evaluated an
+   extension-supplied OAuth implementation, a fresh-token command, or a spawn-time environment token.
 
 ---
 
-## 2. Options evaluated
+## 2. Historical options evaluated
 
 | # | Option | Verdict |
 |---|---|---|
-| A | **Upgrade / patch `@earendil-works/pi-ai`** to add a first-party `google-code-assist` provider. | **Rejected (now).** 0.79.6 has no such provider and none on the published surface; we'd be patching dist (like `pi-ai-bedrock-headers-patch.ts`). A dist patch must be re-applied to *two* copies (top-level + `pi-coding-agent/node_modules/@earendil-works/pi-ai`) and, crucially, **does not reach the Docker sandbox image** (prebuilt). Brittle across upgrades. Keep as a possible upstream contribution, not the mechanism. |
+| A | **Upgrade / patch `@earendil-works/pi-ai`** to add a first-party `google-code-assist` provider. | **Rejected at design time.** The installed `0.79.6` line had no such provider, so this option would have patched two distribution copies without reaching the prebuilt Docker image. It remained a possible upstream contribution, not the proposed Bobbit mechanism. |
 | B | **Bobbit-native pi provider via the supported `pi.registerProvider` extension hook.** A generated pi-coding-agent extension registers `api:"google-code-assist"` with our own `streamSimple` (Code Assist HTTP + Gemini↔pi conversion). | **RECOMMENDED.** Officially supported hook (§1.3.3), runs in both local and Docker sandbox via the existing `--extension` plumbing, no dist patching, full native Gemini fidelity (function calls, thinking, `thoughtSignature`), fixed public `baseUrl` (`cloudcode-pa`) so no local-gateway-URL problem. Reuses the gateway's already-shipped Code Assist pure helpers. |
 | C | **Gateway-hosted OpenAI-compatible proxy.** Expose a local `…/v1/chat/completions` endpoint backed by Code Assist; write a `google-gemini-cli` provider into `models.json` with `api:"openai-completions"` pointed at it. | **Rejected as primary.** Two blockers: (1) **`baseUrl` is static in `models.json`** (§1.3.5) but the Bobbit gateway URL differs between local (`127.0.0.1:port`) and Docker (`host.docker.internal`/LAN) — there is no per-host env substitution for `baseUrl`, so a single shared `models.json` can't address both. (2) Lossy OpenAI↔Gemini round-trip drops Gemini `thoughtSignature`, degrading Gemini-3 multi-turn tool use (Bobbit is tool-heavy). Upside (reuses pi-ai's openai client, gateway-only creds) is real but doesn't outweigh the blockers. Kept as the fallback if B's fidelity ever regresses. |
 | D | **Gemini CLI backend runtime** (OpenClaw-style CLI-backed session). | **Rejected.** A whole alternate session runtime is far larger than this goal and orthogonal to pi-coding-agent. Not justified. |
 
-**Recommendation: Option B.**
+**Design-time recommendation: Option B.**
 
 ---
 
-## 3. Recommended architecture (Option B)
+## 3. Proposed architecture (Option B)
 
 ```
 ┌────────────────────────── Bobbit gateway (host) ──────────────────────────┐
@@ -156,22 +145,22 @@ These are the load-bearing facts the recommendation depends on; all confirmed by
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Key properties:
-- The `streamSimple` handler is **our code**, running in the agent, talking **directly** to the
-  fixed public Code Assist endpoint. No local-gateway `baseUrl` problem, no OpenAI round-trip.
-- The **only** thing the agent needs from the gateway at runtime is a **fresh Bearer token +
-  projectId**. That is fetched per request from a new authenticated gateway endpoint (same callback
-  pattern as `provider-bridge-extension.ts`), which keeps refresh logic single-sourced on the
-  gateway and solves mid-session token expiry. The token never has to be persisted in the sandbox.
+Proposed properties:
+- The `streamSimple` handler would be Bobbit code running inside the agent and talking directly to
+  the fixed public Code Assist endpoint, avoiding a local-gateway URL and OpenAI translation.
+- The agent would request only a fresh Bearer token and project id from an authenticated gateway
+  endpoint. Per-request lookup would keep refresh logic gateway-owned and avoid persisting the token
+  in the sandbox.
 
 ---
 
-## 4. Implementation plan (exact files / functions)
+## 4. Historical implementation plan (exact proposal-time targets)
 
 ### 4.1 Promote the conversion/streaming core in `src/server/agent/google-code-assist.ts`
 
-Today this file has single-turn pure helpers. Extend it (keep it dependency-light and unit-testable;
-**no pi-ai import** so it can be shared verbatim by the gateway and embedded into the extension):
+At design time this file had single-turn pure helpers. The proposal called for extending it while
+keeping it dependency-light and free of pi-ai imports so the gateway and embedded extension could
+share the implementation:
 
 1. `convertContextToCodeAssist(args)` — generalize `buildGenerateContentBody()` to **multi-turn +
    tools**. Input: an array of normalized messages (`{role:"user"|"assistant"|"tool", text?,
@@ -270,25 +259,23 @@ emit `start`, then per content block `*_start`/`*_delta`/`*_end` (text / thinkin
 terminate with exactly one `done` (`reason ∈ {stop,length,toolUse}`) **or** `error`
 (`reason ∈ {aborted,error}` with `errorMessage`). The `partial`/`message` carry the accumulating
 `AssistantMessage` (`content: (TextContent|ThinkingContent|ToolCall)[]`, `api`, `usage`). Mirror the
-emission shape in `pi-ai/dist/providers/google.js` (lines ~41–212) — it is the closest existing
-reference and uses the identical event types.
+emission shape in pi-ai's Google provider implementation, which was the closest existing reference
+and used the identical event types.
 
 Notes:
 - `models[]` must stay in sync with `getGoogleCodeAssistModels()`. Factor the id/metadata list into a
   shared pure function (e.g. `codeAssistModelDescriptors()` in `google-code-assist-models.ts`) used by
   both the registry emitter and the extension generator, and add a pinning test that they match
-  (mirrors the existing `NON_SESSION_SELECTABLE_PROVIDERS` ↔ per-model lockstep test).
-- Token strategy decision: we fetch the token **inside `streamSimple`** (not via `apiKey`/`!command`)
-  so a single network call yields both a fresh token *and* the projectId, refresh stays gateway-side,
-  and nothing Google-account-scoped is persisted in the sandbox. The `apiKey:"none"` keeps
-  pi-coding-agent's `validateProviderConfig` happy (it requires `apiKey` or `oauth` when models are
-  defined). Optionally also pass an `oauth` impl so `/login` works inside a bare pi session, but the
-  Bobbit session path does not need it.
+  (mirroring the proposal-time `NON_SESSION_SELECTABLE_PROVIDERS` ↔ per-model lockstep test).
+- The proposal chose to fetch the token **inside `streamSimple`** rather than through
+  `apiKey`/`!command`, so one request would return a fresh token and project id while keeping refresh
+  gateway-side and avoiding persisted Google account material in the sandbox. It proposed the
+  placeholder `apiKey:"none"` only to satisfy the then-current provider validation contract.
 
 ### 4.4 Wire the extension into spawn — `session-setup.ts` + `session-manager.ts`
 
-- In the same place the provider-bridge / tool-guard extensions are appended
-  (`session-setup.ts:680-701`, `session-manager.ts:1775-1810`), conditionally append
+- In the same session setup and manager paths that appended the provider-bridge and tool-guard
+  extensions, conditionally append
   `--extension <writeGoogleCodeAssistExtension(sessionId)>` **iff** `hasGoogleCodeAssistCredential()`.
   Gate on credential presence so non-Google users pay zero overhead (mirrors the bridge's
   `hasProviderBridgeHooks` gate).
@@ -304,28 +291,24 @@ Notes:
 
 ### 4.5 Flip session-selectability — `google-code-assist.ts` + `google-code-assist-models.ts`
 
-Only after §4.1–4.4 land and the manual-integration spike (§6) is green:
-- Remove `"google-gemini-cli"` from `NON_SESSION_SELECTABLE_PROVIDERS` (or delete the set and make
-  `isSessionSelectableProvider` always-true if it becomes empty — keep the exported function for the
-  WS/review-override call sites so they need no change).
-- In `getGoogleCodeAssistModels()`: set `sessionSelectable: true` and drop
-  `sessionUnavailableReason` (and update `GOOGLE_CODE_ASSIST_SESSION_UNAVAILABLE_REASON` usage / the
-  test that pins it). The ModelSelector then renders them as normal selectable rows.
-- No change needed in `ModelSelector.ts`, `ws/handler.ts`, or `review-model-override.ts` — they read
-  the flag/guard and will simply start allowing the provider.
+The proposal deferred the gate flip until the runtime and manual-integration spike passed. It then
+called for:
 
-### 4.6 Persistence / restore
+- removing `"google-gemini-cli"` from `NON_SESSION_SELECTABLE_PROVIDERS`, or making
+  `isSessionSelectableProvider` always true if that left the set empty;
+- setting emitted models to `sessionSelectable: true` and removing `sessionUnavailableReason`; and
+- leaving the UI, WebSocket, and review-override consumers unchanged because they already respected
+  the shared flag and guard.
 
-No new work: the selected model is persisted as the `provider/modelId` preference and pinned at spawn
-via `--model google-gemini-cli/<id>` (`rpc-bridge.ts:221`, `session-setup.ts:380-395`). Because the
-extension re-registers the provider every spawn (including restore/respawn), a restored session
-re-binds cleanly. The acceptance criterion "restart/reload preserves the model without fallback" is
-met as long as §4.5's `sessionSelectable` stays true (a fallback only triggers when a pinned model is
-absent/unselectable).
+### 4.6 Proposed persistence and restore behavior
+
+The proposal expected the selected `provider/modelId` preference to be pinned at each spawn through
+`--model google-gemini-cli/<id>`. Re-registering the extension on restore and respawn would then bind
+the persisted model again rather than silently falling back.
 
 ---
 
-## 5. Cross-cutting behaviors
+## 5. Proposed cross-cutting behaviors
 
 - **Streaming**: native SSE from `:streamGenerateContent?alt=sse` → pi event stream (§4.3). Partial
   text/thinking/tool-call deltas surface in the UI exactly like other providers.
@@ -351,7 +334,7 @@ absent/unselectable).
 
 ---
 
-## 6. Risks & mitigations
+## 6. Risks and mitigations assessed during design
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
@@ -364,7 +347,7 @@ absent/unselectable).
 
 ---
 
-## 7. Test hooks (authoritative plan owned by the tester; listed for traceability)
+## 7. Proposed test hooks (retained for traceability)
 
 - **Unit (node)**: `convertContextToCodeAssist` (multi-turn, tools, images, system, thinking,
   `thoughtSignature` passthrough); `parseCodeAssistStreamChunk` (text/thinking/toolcall/usage/finish
@@ -385,7 +368,7 @@ absent/unselectable).
 
 ---
 
-## 8. Acceptance-criteria traceability
+## 8. Historical acceptance-criteria traceability
 
 | Goal AC | Covered by |
 |---|---|
@@ -396,10 +379,8 @@ absent/unselectable).
 | `google` API-key models remain separate and unaffected | Distinct provider/api/endpoint; no edits to the `google` path (§1.1, §2 option C rejected) |
 | Tests pin that authenticated-but-unusable models no longer appear disabled | §7 unit + browser E2E once runtime exists (§4.5) |
 
-## 9. Out of scope
+## 9. Historical out of scope
 
 - Upstreaming a `cloudcode-pa` provider to pi-ai (Option A) — possible later contribution.
 - The OpenAI-compatible proxy (Option C) — documented fallback only.
 - Vertex AI (`google-vertex`) and `gemini.google.com` web-cookie scraping (explicitly avoided).
-</content>
-</invoke>

@@ -125,8 +125,8 @@ interface RawMessage {
 	 *  null for legacy files whose entries lacked an explicit `id`. */
 	entryId: string | null;
 	/** Pi-coding-agent's entry `type` field (e.g. "message", "compaction").
-	 *  Used by `readOrphanedBeforeCompaction` to spot the legacy in-jsonl
-	 *  compaction marker when the sidecar doesn't carry firstKeptEntryId. */
+	 *  Used by `readOrphanedBeforeCompaction` to spot the in-jsonl compaction
+	 *  checkpoint when the sidecar doesn't carry firstKeptEntryId. */
 	entryType: string;
 	/** Full `entry.message` object — captured for the verbose orphan path
 	 *  which needs toolCallId/toolName/etc. for `<message-list>` rendering.
@@ -647,8 +647,9 @@ export interface ReadOrphanedEnvelope {
 
 export interface ReadOrphanedOptions {
 	readContent: () => Promise<string | null>;
-	/** First-kept entry id from the sidecar. When null, fall back to
-	 *  scanning the jsonl for an in-file `type:"compaction"` marker. */
+	/** First-kept entry id from the sidecar. When null or stale, prefer the
+	 *  same field on the in-file compaction entry before using that entry as
+	 *  the fallback checkpoint. */
 	firstKeptEntryId: string | null;
 	/** Optional session and sidecar context for precise agent/system attribution. */
 	authorContext?: TranscriptAuthorResolutionContext;
@@ -662,11 +663,12 @@ export interface ReadOrphanedOptions {
  *  - If `firstKeptEntryId` is non-null: scan parsed entries for the entry
  *    whose `id` matches. Everything strictly before that index is
  *    orphaned.
- *  - If `firstKeptEntryId` is null (legacy sidecar entries written before
- *    the field was plumbed through, or hard failures): fall back to
- *    finding the FIRST `type:"compaction"` entry in the jsonl. Pi-coding-
- *    agent appends that compaction entry to mark the boundary; everything
- *    BEFORE it on the active branch is what was rolled into the summary.
+ *  - If the sidecar boundary is null or stale: inspect the FIRST in-file
+ *    `type:"compaction"` checkpoint. Prefer its compatibility
+ *    `firstKeptEntryId` when resolvable; otherwise use the checkpoint itself.
+ *    Pi 0.81 harness checkpoints may instead carry a materialized
+ *    `retainedTail`, so the checkpoint remains the only reliable top-level
+ *    boundary when no first-kept id was persisted.
  *  - If neither resolves: return total=0 (no fabricated history).
  */
 export async function readOrphanedBeforeCompaction(
@@ -703,8 +705,17 @@ export async function readOrphanedBeforeCompaction(
 		splitIdx = allEntries.findIndex((e) => e.entry?.id === opts.firstKeptEntryId);
 	}
 	if (splitIdx < 0) {
-		// Legacy fallback: first `type:"compaction"` entry marks the boundary.
-		splitIdx = allEntries.findIndex((e) => e.entry?.type === "compaction");
+		const compactionIdx = allEntries.findIndex((e) => e.entry?.type === "compaction");
+		if (compactionIdx >= 0) {
+			const inFileFirstKeptId = allEntries[compactionIdx].entry?.firstKeptEntryId;
+			if (typeof inFileFirstKeptId === "string" && inFileFirstKeptId.length > 0) {
+				splitIdx = allEntries.findIndex((e) => e.entry?.id === inFileFirstKeptId);
+			}
+			// With retainedTail-only Pi 0.81 checkpoints there is no stable id
+			// for the original tail boundary. Falling back to the checkpoint is
+			// conservative and preserves the existing no-fabrication behavior.
+			if (splitIdx < 0) splitIdx = compactionIdx;
+		}
 	}
 	if (splitIdx <= 0) {
 		return { total: 0, returned: 0, nextCursor: null, messages: [] };

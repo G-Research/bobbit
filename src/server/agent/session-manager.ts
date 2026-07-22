@@ -5360,6 +5360,9 @@ export class SessionManager {
 				};
 			}
 		} else if (event.type === "auto_compaction_end" || event.type === "compaction_end") {
+			// `willRetry:true` means a successful overflow compaction completed and
+			// Pi will retry the surrounding agent turn. No later compaction_end is
+			// emitted, so completion must still persist and reach the client here.
 			session.isCompacting = false;
 			const pending = (session as any)._pendingCompactionStart as
 				| { startedAtMs: number; trigger: "auto" | "overflow"; compactionId: string }
@@ -6607,12 +6610,7 @@ export class SessionManager {
 
 	/**
 	 * Emit a live agent event to clients, suppressing retryable Pi agent_end
-	 * (see `isRetryableAgentEnd`). Pi 0.80+ emits a non-terminal `agent_end`
-	 * ({ willRetry:true }) before each internal auto-retry; clients treat every
-	 * agent_end as terminal and would clear the streaming message/tool calls, so
-	 * these must never reach clients. Shared by every `rpcClient.onEvent` path so
-	 * the suppression contract is applied uniformly; only real terminal
-	 * (willRetry:false) agent_end events are emitted/replayed.
+	 * events while forwarding completed compaction events independently.
 	 * Pinned by tests2/core/pi-rpc-agent-end-retry.test.ts.
 	 */
 	private prepareVisibleAgentEvent(session: SessionInfo, event: unknown): unknown {
@@ -6629,12 +6627,15 @@ export class SessionManager {
 	 * Broadcasts a cost_update to connected clients if cost data is found.
 	 */
 	private trackCostFromEvent(session: SessionInfo, event: any): void {
-		// Only track cost on message_end (fires once per completed message).
-		// message_update fires on every streaming chunk with the same usage
-		// object, which would multiply costs by ~30-40x.
-		if (event.type !== "message_end") return;
-		if (event.message?.role !== "assistant") return;
-		const usage = event.message?.usage ?? event.usage;
+		// Message updates repeat the same usage on every streaming chunk, so only
+		// completed assistant messages are accounted. Pi 0.81 additionally reports
+		// summarizer usage once on each completed compaction event.
+		const assistantMessageEnd = event.type === "message_end" && event.message?.role === "assistant";
+		const compactionEnd = event.type === "compaction_end" || event.type === "auto_compaction_end";
+		if (!assistantMessageEnd && !compactionEnd) return;
+		const usage = assistantMessageEnd
+			? (event.message?.usage ?? event.usage)
+			: (event.result?.usage ?? event.usage);
 		if (!usage) return;
 
 		// Usage cost can be either a number (usage.cost) or an object (usage.cost.total)

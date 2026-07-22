@@ -12,7 +12,7 @@
  * See `docs/design/shrink-initial-bundle.md` (Task A) for the full design.
  */
 
-import type { Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import type { AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { gatewayFetch } from "./api.js";
 
 export async function getPiAiProviders(): Promise<string[]> {
@@ -40,7 +40,11 @@ export async function testPiAiProviderKey(provider: string, modelId: string, api
 	return body.ok === true;
 }
 
-export async function streamSimplePiAi(model: Model<any>, context: Context, options?: SimpleStreamOptions): Promise<any> {
+export async function streamSimplePiAi(
+	model: Model<any>,
+	context: Context,
+	options?: SimpleStreamOptions,
+): Promise<AssistantMessageEventStream> {
 	switch (model.api) {
 		case "anthropic-messages": {
 			const { streamSimple } = await import("@earendil-works/pi-ai/api/anthropic-messages");
