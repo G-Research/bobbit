@@ -290,14 +290,20 @@ describe.skipIf(!desiredContractAvailable)("direct-host Pi resolution without a 
 		writeJson(path.join(packageRoot, "package.json"), { name: PI_PACKAGE, type: "module" });
 
 		const specifiers: string[] = [];
+		const availabilityChecks: string[] = [];
 		const resolved = await Promise.resolve(directRuntimeResolver()({
 			resolve: (specifier: string) => {
 				specifiers.push(specifier);
 				return pathToFileURL(entryPath).href;
 			},
+			exists: (file: string) => {
+				availabilityChecks.push(file);
+				return fs.existsSync(file);
+			},
 		}));
 
 		expect(specifiers, `${POLICY_PREFIX}_NODE_RESOLVE_SEMANTICS: resolve the package through the injected import.meta.resolve-compatible seam`).toEqual([PI_PACKAGE]);
+		expect(availabilityChecks, `${POLICY_PREFIX}_PI_RUNTIME_AVAILABILITY: verify the resolved entry and derived CLI`).toEqual([entryPath, cliPath]);
 		expect(resolved).toEqual({ modulesDir, cliPath });
 	});
 
@@ -368,18 +374,26 @@ describe.skipIf(!desiredContractAvailable)("direct-host Pi resolution without a 
 		expect(statIdentity(sentinel)).toEqual(beforeStat);
 	});
 
-	it("keeps an explicit CLI override first and does not invoke automatic resolution", async () => {
+	it("keeps an explicit CLI override first and does not invoke automatic resolution or availability checks", async () => {
 		const explicitCli = path.join(makeTempDir("bobbit-explicit-pi-"), "custom-cli.js");
 		let resolutionCalls = 0;
+		let availabilityChecks = 0;
 		const resolved = await Promise.resolve(directRuntimeResolver()({
 			cliPath: explicitCli,
 			resolve: () => {
 				resolutionCalls++;
 				throw new Error("automatic resolution must not run for an explicit CLI");
 			},
+			exists: () => {
+				availabilityChecks++;
+				return false;
+			},
 		}));
 
-		expect(resolutionCalls, `${POLICY_PREFIX}_EXPLICIT_CLI_PRECEDENCE`).toBe(0);
+		expect({ resolutionCalls, availabilityChecks }, `${POLICY_PREFIX}_EXPLICIT_CLI_PRECEDENCE`).toEqual({
+			resolutionCalls: 0,
+			availabilityChecks: 0,
+		});
 		expect(resolved.cliPath).toBe(explicitCli);
 	});
 
@@ -390,20 +404,49 @@ describe.skipIf(!desiredContractAvailable)("direct-host Pi resolution without a 
 			},
 		}))).rejects.toThrow(/install\s+@earendil-works\/pi-coding-agent[\s\S]*--agent-cli\s+\/path\/to\/cli\.js/i);
 	});
+
+	it.each([
+		{ unavailable: "resolved package entry", entryAvailable: false },
+		{ unavailable: "derived dist/cli.js", entryAvailable: true },
+	])("turns an unavailable $unavailable into actionable partial-install guidance", async ({ entryAvailable }) => {
+		const root = makeTempDir("bobbit-partial-pi-");
+		const packageRoot = path.join(root, "node_modules", "@earendil-works", "pi-coding-agent");
+		const entryPath = path.join(packageRoot, "dist", "index.js");
+		const cliPath = path.join(packageRoot, "dist", "cli.js");
+		const availabilityChecks: string[] = [];
+
+		await expect(async () => Promise.resolve(directRuntimeResolver()({
+			resolve: () => pathToFileURL(entryPath).href,
+			exists: (file: string) => {
+				availabilityChecks.push(file);
+				return file === entryPath && entryAvailable;
+			},
+		}))).rejects.toThrow(/(?:missing|incomplete)[\s\S]*install\s+@earendil-works\/pi-coding-agent[\s\S]*--agent-cli\s+\/path\/to\/cli\.js/i);
+
+		expect(availabilityChecks, `${POLICY_PREFIX}_PARTIAL_PI_AVAILABILITY`).toEqual(
+			entryAvailable ? [entryPath, cliPath] : [entryPath],
+		);
+	});
 });
 
 describe.skipIf(!desiredContractAvailable)("development harness pre-build validation wrapper", () => {
-	it("runs the read-only validator before build:server in the real dev:harness script", () => {
-		const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-		const manifest = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "package.json"), "utf-8")) as {
-			scripts?: Record<string, string>;
-		};
-		const steps = manifest.scripts?.["dev:harness"]?.split(/\s*&&\s*/) ?? [];
+	it.each(["dev:harness", "dev:nord", "dev:watchdog"])(
+		"runs the read-only validator before build:server in the real %s script without dependency repair",
+		(scriptName) => {
+			const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+			const manifest = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "package.json"), "utf-8")) as {
+				scripts?: Record<string, string>;
+			};
+			const script = manifest.scripts?.[scriptName] ?? "";
+			const steps = script.split(/\s*&&\s*/);
 
-		expect(steps[0], `${POLICY_PREFIX}_WRAPPER_VALIDATION_FIRST`).toBe("node src/server/harness-deps.ts");
-		expect(steps[1], `${POLICY_PREFIX}_WRAPPER_BUILD_SECOND`).toBe("npm run build:server");
-		expect(steps.join(" && ")).not.toMatch(/npm\s+(?:install|ci)|pnpm\s+install|yarn\s+install/i);
-	});
+			expect(steps[0], `${POLICY_PREFIX}_WRAPPER_VALIDATION_FIRST:${scriptName}`).toBe("node src/server/harness-deps.ts");
+			expect(steps[1], `${POLICY_PREFIX}_WRAPPER_BUILD_SECOND:${scriptName}`).toBe("npm run build:server");
+			expect(script, `${POLICY_PREFIX}_WRAPPER_NO_DEPENDENCY_REPAIR:${scriptName}`).not.toMatch(
+				/\b(?:npm\s+(?:install|i|ci|update|uninstall|remove|rm|prune|audit\s+fix)|pnpm\s+(?:install|i|add|update|up|remove)|yarn\s+(?:install|add|upgrade|remove)|bun\s+(?:install|add|update|remove))\b/i,
+			);
+		},
+	);
 
 	it("fails non-zero with actionable diagnostics without writes or package-manager subprocesses", () => {
 		const root = makeTempDir("bobbit-wrapper-validation-");

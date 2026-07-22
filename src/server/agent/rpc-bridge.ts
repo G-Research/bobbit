@@ -1176,6 +1176,8 @@ export interface ResolveDirectHostPiRuntimeOptions {
 	cliPath?: string;
 	/** `import.meta.resolve`-compatible seam for focused tests. */
 	resolve?: (specifier: string, parent?: string | URL) => string;
+	/** Read-only availability seam for focused partial-install tests. */
+	exists?: (file: string) => boolean;
 }
 
 function piPackageRootFromEntry(entryPath: string): string {
@@ -1209,15 +1211,23 @@ export function resolveDirectHostPiRuntime(
 
 	try {
 		const resolve = opts.resolve ?? ((specifier: string, parent?: string | URL) => import.meta.resolve(specifier, parent));
+		const exists = opts.exists ?? ((file: string) => fs.existsSync(file));
 		const entryPath = fileURLToPath(resolve(PI_CODING_AGENT_PACKAGE));
+		if (!exists(entryPath)) {
+			throw new Error(`Resolved package entry is unavailable: ${entryPath}`);
+		}
 		const packageRoot = piPackageRootFromEntry(entryPath);
+		const cliPath = path.join(packageRoot, "dist", "cli.js");
+		if (!exists(cliPath)) {
+			throw new Error(`Resolved package CLI is unavailable: ${cliPath}`);
+		}
 		return {
 			modulesDir: path.dirname(path.dirname(packageRoot)),
-			cliPath: path.join(packageRoot, "dist", "cli.js"),
+			cliPath,
 		};
 	} catch (cause) {
 		throw new Error(
-			`Could not resolve ${PI_CODING_AGENT_PACKAGE} for a direct host agent. `
+			`Could not use ${PI_CODING_AGENT_PACKAGE} for a direct host agent because the package is missing or incomplete. `
 			+ `Install ${PI_CODING_AGENT_PACKAGE} or pass --agent-cli /path/to/cli.js.`,
 			{ cause },
 		);
