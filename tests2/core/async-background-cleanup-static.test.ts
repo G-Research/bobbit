@@ -610,7 +610,7 @@ function createScopedProgram(): ts.Program {
 	// Root production source explicitly and disable dependency expansion. This
 	// retains one cross-file TypeChecker for aliases, destructuring, methods and
 	// wrappers while avoiding the cost of loading/checking every third-party
-	// declaration pulled in by server.ts. The static guard must fit the 15 s solo
+	// declaration pulled in by server.ts. The static guard must fit the 25 s solo
 	// unit-file budget on Windows as well as Linux.
 	const rootNames = productionTypeScriptFiles(path.resolve("src/server"));
 	const sharedRoot = path.resolve("src/shared");
