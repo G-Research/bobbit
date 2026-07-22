@@ -11,14 +11,29 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "orphan-tool-recovery-"));
 process.env.BOBBIT_DIR = tmpRoot;
 process.env.BOBBIT_AGENT_DIR = path.join(tmpRoot, "agent");
 
-const { SessionManager, classifyErroredPromptRecovery, emitSessionEvent } = await import("../../src/server/agent/session-manager.ts");
+const {
+	SessionManager,
+	classifyErroredPromptRecovery,
+	emitSessionEvent,
+	prepareVisibleAgentEvent,
+} = await import("../../src/server/agent/session-manager.ts");
 const { deliverSessionPrompt } = await import("../../src/server/agent/session-prompt-delivery.ts");
 const { isOrphanToolResultOrderingError } = await import("../../src/server/agent/poisoned-history.ts");
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
+const { initAuthorSidecarDir } = await import("../../src/server/agent/author-sidecar.ts");
+
+const legacyStateDir = path.join(tmpRoot, "state");
+fs.mkdirSync(legacyStateDir, { recursive: true });
+initAuthorSidecarDir(legacyStateDir, {
+	secretsDir: path.join(tmpRoot, "private-secrets"),
+	hmacKey: Buffer.alloc(32, 0x5a),
+});
 
 const ORPHAN_ERROR =
 	"400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"messages.88.content.0: unexpected tool_use_id found in tool_result blocks: toolu_fixture. Each tool_result block must have a corresponding tool_use block in the previous message.\"}}";
+const SYSTEM_MODEL_PREFIX = "[System]: ";
+const systemProviderText = (baseText: string): string => `${SYSTEM_MODEL_PREFIX}${baseText}`;
 
 const managers: any[] = [];
 afterEach(() => {
@@ -207,7 +222,7 @@ describe("SessionManager poisoned-history recovery", () => {
 
 		assert.equal(h.respawns(), 1);
 		assert.deepEqual(h.oldPrompts, [], "poisoned Pi process must never receive the redrive");
-		assert.deepEqual(h.newPrompts.map((entry) => entry.text), ["original user intent"]);
+		assert.deepEqual(h.newPrompts.map((entry) => entry.text), [systemProviderText("original user intent")]);
 		const restored = h.manager.sessions.get(h.session.id);
 		assert.equal(restored.id, "session-fixture");
 		assert.equal(restored.modelId, "claude-sonnet-4-5");
@@ -225,8 +240,11 @@ describe("SessionManager poisoned-history recovery", () => {
 
 		assert.equal(h.respawns(), 1);
 		assert.equal(h.newPrompts.length, 1);
-		assert.match(h.newPrompts[0].text, /continue where you left off/i);
-		assert.doesNotMatch(h.newPrompts[0].text, /original user intent/);
+		assert.equal(h.newPrompts[0].text.slice(0, SYSTEM_MODEL_PREFIX.length), SYSTEM_MODEL_PREFIX);
+		const baseContinuation = h.newPrompts[0].text.slice(SYSTEM_MODEL_PREFIX.length);
+		assert.match(baseContinuation, /continue where you left off/i);
+		assert.doesNotMatch(baseContinuation, /^\[System\]: /, "provider prefix must be injected exactly once");
+		assert.doesNotMatch(baseContinuation, /original user intent/);
 	});
 
 	it("repairs before the error cap and dispatches a normal follow-up ahead of parked queue rows", async () => {
@@ -295,6 +313,7 @@ describe("SessionManager poisoned-history recovery", () => {
 		h.session.oneTimeGrantedTools = ["one-turn-grant"];
 		const originalText = "/mockup rollback";
 		const modelText = "expanded rollback recovery";
+		const piText = systemProviderText(modelText);
 		const skillExpansions = [{
 			name: "mockup",
 			args: "rollback",
@@ -377,9 +396,10 @@ describe("SessionManager poisoned-history recovery", () => {
 		await new Promise((resolve) => setTimeout(resolve, 0));
 
 		assert.equal(h.newPrompts.length, 3);
-		assert.equal(h.newPrompts[0].text, modelText);
+		assert.equal(h.newPrompts[0].text, piText);
+		assert.doesNotMatch(h.newPrompts[1].text, /^\[System\]: /, "human follow-up must not gain an author prefix");
 		assert.match(h.newPrompts[1].text, /later generic follow-up$/);
-		assert.equal(h.newPrompts[2].text, modelText);
+		assert.equal(h.newPrompts[2].text, piText);
 		assert.deepEqual(restored.promptQueue.toArray().map((row: any) => row.text), ["older parked intent"]);
 		assert.equal(restored.recoveredPromptDispatchQueueIds, undefined);
 		assert.equal(restored.poisonRecoveryPromptDispatchQueueIds, undefined);
@@ -392,7 +412,7 @@ describe("SessionManager poisoned-history recovery", () => {
 		});
 		h.manager.handleAgentLifecycle(restored, { type: "agent_end", messages: [] });
 		await new Promise((resolve) => setTimeout(resolve, 0));
-		assert.equal(h.newPrompts.filter((entry) => entry.text === modelText).length, 2);
+		assert.equal(h.newPrompts.filter((entry) => entry.text === piText).length, 2);
 		assert.equal(h.newPrompts.at(-1)?.text, "older parked intent");
 	});
 
@@ -415,6 +435,7 @@ describe("SessionManager poisoned-history recovery", () => {
 		h.session.oneTimeGrantedTools = ["one-turn-grant"];
 		const poisonOriginalText = initiator === "follow-up" ? "/mockup poison" : "original user intent";
 		const poisonModelText = initiator === "follow-up" ? "expanded poison recovery" : "original user intent";
+		const poisonPiText = systemProviderText(poisonModelText);
 		const poisonSkillExpansions = [{
 			name: "mockup",
 			args: "poison",
@@ -458,8 +479,9 @@ describe("SessionManager poisoned-history recovery", () => {
 		assert.deepEqual(restored.sessionOnlyGrantedTools, ["session-grant"]);
 		assert.deepEqual(restored.oneTimeGrantedTools, ["one-turn-grant"]);
 		assert.equal(h.newPrompts.length, 2);
-		assert.equal(h.newPrompts[0].text, poisonModelText);
-		assert.match(h.newPrompts[1].text, /later generic follow-up$/);
+		assert.equal(h.newPrompts[0].text, poisonPiText);
+		assert.doesNotMatch(h.newPrompts[1].text, /^\[System\]: /, "human follow-up must not gain an author prefix");
+		assert.match(h.newPrompts[1].text, new RegExp(`${laterText}$`));
 		assert.equal(
 			restored.pendingSkillExpansions?.some((entry: any) => entry.modelText === poisonModelText) ?? false,
 			initiator === "follow-up",
@@ -474,18 +496,20 @@ describe("SessionManager poisoned-history recovery", () => {
 		await new Promise((resolve) => setTimeout(resolve, 0));
 
 		assert.equal(h.newPrompts.length, 3);
-		assert.equal(h.newPrompts[0].text, poisonModelText);
-		assert.match(h.newPrompts[1].text, /later generic follow-up$/);
-		assert.equal(h.newPrompts[2].text, poisonModelText);
+		assert.equal(h.newPrompts[0].text, poisonPiText);
+		assert.doesNotMatch(h.newPrompts[1].text, /^\[System\]: /, "human follow-up must not gain an author prefix");
+		assert.match(h.newPrompts[1].text, new RegExp(`${laterText}$`));
+		assert.equal(h.newPrompts[2].text, poisonPiText);
 		assert.deepEqual(restored.promptQueue.toArray().map((row: any) => row.text), ["older parked intent"]);
 		assert.equal(restored.recoveredPromptDispatchQueueIds, undefined);
 		assert.equal(restored.poisonRecoveryPromptDispatchQueueIds, undefined);
 		assert.deepEqual(restored.sessionOnlyGrantedTools, ["session-grant"]);
 		if (initiator === "follow-up") {
-			emitSessionEvent(restored, {
+			const rawPoisonEcho = {
 				type: "message_end",
-				message: { role: "user", content: [{ type: "text", text: poisonModelText }] },
-			});
+				message: { role: "user", content: [{ type: "text", text: poisonPiText }] },
+			};
+			emitSessionEvent(restored, prepareVisibleAgentEvent(restored, rawPoisonEcho));
 			const poisonEcho: any = restored.eventBuffer.getAll().at(-1)?.event;
 			assert.equal(poisonEcho.message.content[0].text, poisonOriginalText);
 			assert.deepEqual(poisonEcho.message.skillExpansions, poisonSkillExpansions);
@@ -499,9 +523,9 @@ describe("SessionManager poisoned-history recovery", () => {
 		});
 		h.manager.handleAgentLifecycle(restored, { type: "agent_end", messages: [] });
 		await new Promise((resolve) => setTimeout(resolve, 0));
-		assert.deepEqual(h.newPrompts.map((entry) => entry.text).filter((text) => text === poisonModelText), [
-			poisonModelText,
-			poisonModelText,
+		assert.deepEqual(h.newPrompts.map((entry) => entry.text).filter((text) => text === poisonPiText), [
+			poisonPiText,
+			poisonPiText,
 		]);
 		assert.equal(h.newPrompts.at(-1)?.text, "older parked intent");
 	});
@@ -610,7 +634,7 @@ describe("SessionManager poisoned-history recovery", () => {
 
 		await h.manager.retryLastPrompt(h.session.id);
 
-		assert.deepEqual(h.newPrompts.map((entry) => entry.text), ["original user intent"]);
+		assert.deepEqual(h.newPrompts.map((entry) => entry.text), [systemProviderText("original user intent")]);
 		const restored = h.manager.sessions.get(h.session.id);
 		const rows = restored.promptQueue.toArray();
 		assert.deepEqual(rows.map((row: any) => row.text), ["original user intent"]);
@@ -694,7 +718,9 @@ describe("SessionManager poisoned-history recovery", () => {
 		h.manager.drainQueue(rollback);
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		h.manager.drainQueue(rollback);
-		assert.deepEqual(h.oldPrompts.map((entry) => entry.text), ["expanded mockup instructions\n\nhero"]);
+		assert.deepEqual(h.oldPrompts.map((entry) => entry.text), [
+			systemProviderText("expanded mockup instructions\n\nhero"),
+		]);
 		assert.equal(rollback.promptQueue.isEmpty, true);
 		assert.deepEqual(h.persistedRecord.messageQueue, []);
 	});
