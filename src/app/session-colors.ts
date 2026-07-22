@@ -1,6 +1,15 @@
 import { patchSession } from "./api.js";
 import { activeSessionId, renderApp } from "./state.js";
-import { renderSidebarBobbitCanvas, ACCESSORY_DEFS, NO_ACCESSORY, type AccessoryDef } from "../ui/bobbit-render.js";
+import {
+	ACCESSORY_DEFS,
+	BOBBIT_HUE_ROTATIONS,
+	NO_ACCESSORY,
+	getAccessoryDef,
+	renderSidebarBobbitCanvas,
+	type AccessoryDef,
+} from "../ui/bobbit-render.js";
+
+export { BOBBIT_HUE_ROTATIONS };
 
 // ============================================================================
 // ACCESSORY REGISTRY (derived from canonical sprite data)
@@ -25,20 +34,8 @@ export const ACCESSORY_IDS = Object.keys(ACCESSORIES) as string[];
 
 /** Resolve an accessory ID, falling back to "none" */
 export function getAccessory(id: string | undefined): AccessoryDefinition {
-	return (id && ACCESSORIES[id]) || ACCESSORIES.none;
+	return getAccessoryDef(id);
 }
-
-// ============================================================================
-// AURORA BOREALIS PALETTE
-// ============================================================================
-
-/**
- * 14 curated hue-rotate offsets from canonical green (90°).
- * Selected for beautiful bobbit colours with non-muddy flask tones.
- */
-export const BOBBIT_HUE_ROTATIONS = [
-	-110, -85, -60, -35, -10, 0, 15, 25, 40, 50, 65, 75, 100, 125,
-];
 
 /** Map of session ID → assigned palette index, loaded from server */
 export const sessionColorMap = new Map<string, number>();
