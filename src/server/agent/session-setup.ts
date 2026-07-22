@@ -15,7 +15,7 @@ import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
 import type { CommandRunner } from "../gateway-deps.js";
 import type { SessionInfo } from "./session-manager.js";
-import { emitSessionEvent, broadcastStatus, isRetryableAgentEnd, switchSessionPathForAgent } from "./session-manager.js";
+import { emitSessionEvent, broadcastStatus, isRetryableAgentEnd, isRetryableCompactionEnd, switchSessionPathForAgent } from "./session-manager.js";
 import type { RpcBridgeOptions, RuntimePiExtensionInfo } from "./rpc-bridge.js";
 import { RpcBridge } from "./rpc-bridge.js";
 import { rebaseAgentTranscriptCwdMetadataFile, sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
@@ -1012,13 +1012,13 @@ export function subscribeToEvents(session: SessionInfo, ctx: PipelineContext): (
 		session.lastActivity = Date.now();
 		ctx.store.update(session.id, { lastActivity: session.lastActivity });
 		ctx.handleAgentLifecycle(session, event);
-		// Suppress Pi retryable agent_end ({ willRetry:true }) before it reaches
-		// clients/EventBuffer. Pi 0.80+ emits a non-terminal agent_end before each
-		// internal auto-retry; clients treat every agent_end as terminal and would
-		// clear the streaming message/tool calls. This mirrors SessionManager's
-		// emitAgentEvent() so every rpcClient.onEvent path shares one contract.
+		// Suppress Pi retryable terminal-shaped events before they reach clients
+		// or EventBuffer. A retryable agent end would clear the active turn, while
+		// a retryable compaction end would complete the summary card prematurely.
+		// Cost tracking intentionally still sees both events after this guard so
+		// Pi 0.81 summarizer usage is retained.
 		// Pinned by tests2/core/pi-rpc-agent-end-retry.test.ts.
-		if (!isRetryableAgentEnd(event)) {
+		if (!isRetryableAgentEnd(event) && !isRetryableCompactionEnd(event)) {
 			const truncated = truncateLargeToolContent(event);
 			emitSessionEvent(session, truncated);
 		}

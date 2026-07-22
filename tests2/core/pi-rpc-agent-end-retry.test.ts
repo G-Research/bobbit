@@ -12,15 +12,19 @@ guardProcessEnv();
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-rpc-agent-end-retry-"));
 process.env.BOBBIT_DIR = tmpRoot;
 
-const { SessionManager, isRetryableAgentEnd } = await import("../../src/server/agent/session-manager.ts");
+const { SessionManager, isRetryableAgentEnd, isRetryableCompactionEnd } = await import("../../src/server/agent/session-manager.ts");
 const { subscribeToEvents } = await import("../../src/server/agent/session-setup.ts");
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
+const { initCompactionSidecarDir, purgeCompactionSidecar, readCompactionSidecarEntries } = await import("../../src/server/agent/compaction-sidecar.ts");
 const { createManualClock } = await import("../harness/clock.js");
+
+initCompactionSidecarDir(tmpRoot);
 
 const managers: any[] = [];
 
 afterEach(() => {
+	purgeCompactionSidecar("s-pi-retry");
 	for (const manager of managers.splice(0)) {
 		if (manager._statusHeartbeatTimer) {
 			manager._testClock?.clearInterval?.(manager._statusHeartbeatTimer);
@@ -115,7 +119,7 @@ describe("Pi RPC agent_end retry contract", () => {
 		expect(prompt.mock.calls[0][0]).toBe("queued until Pi settles");
 	});
 
-	it("isRetryableAgentEnd only matches agent_end with willRetry:true", () => {
+	it("retry predicates only match their end event with willRetry:true", () => {
 		expect(isRetryableAgentEnd({ type: "agent_end", willRetry: true })).toBe(true);
 		expect(isRetryableAgentEnd({ type: "agent_end", willRetry: false })).toBe(false);
 		expect(isRetryableAgentEnd({ type: "agent_end", messages: [] })).toBe(false);
@@ -123,25 +127,30 @@ describe("Pi RPC agent_end retry contract", () => {
 		expect(isRetryableAgentEnd(undefined)).toBe(false);
 		expect(isRetryableAgentEnd(null)).toBe(false);
 		expect(isRetryableAgentEnd("agent_end")).toBe(false);
+
+		expect(isRetryableCompactionEnd({ type: "compaction_end", willRetry: true })).toBe(true);
+		expect(isRetryableCompactionEnd({ type: "auto_compaction_end", willRetry: true })).toBe(true);
+		expect(isRetryableCompactionEnd({ type: "compaction_end", willRetry: false })).toBe(false);
+		expect(isRetryableCompactionEnd({ type: "compaction_start", willRetry: true })).toBe(false);
+		expect(isRetryableCompactionEnd(undefined)).toBe(false);
 	});
 
-	it("emitAgentEvent suppresses retryable agent_end but emits the terminal one to clients", () => {
+	it("emitAgentEvent suppresses retryable agent and compaction ends but emits terminal ends", () => {
 		const manager = makeManager();
 		const session = putSession(manager);
 
-		// Retryable agent_end must NOT reach the event buffer (clients treat any
-		// agent_end as terminal and would clear the streaming message/tool calls).
 		manager.emitAgentEvent(session, { type: "agent_end", willRetry: true, messages: [] });
+		manager.emitAgentEvent(session, { type: "compaction_end", willRetry: true, result: { usage: { input: 1 } } });
 		expect(session.eventBuffer.size).toBe(0);
 
 		// Non-terminal streaming events still flow through.
 		manager.emitAgentEvent(session, { type: "message_update", message: { id: "m1", role: "assistant" } });
 		expect(session.eventBuffer.size).toBe(1);
 
-		// The real terminal agent_end is emitted so clients end the turn.
+		manager.emitAgentEvent(session, { type: "compaction_end", willRetry: false, result: {} });
 		manager.emitAgentEvent(session, { type: "agent_end", willRetry: false, messages: [] });
 		const events = session.eventBuffer.getAll().map((e: any) => e.event.type);
-		expect(events).toEqual(["message_update", "agent_end"]);
+		expect(events).toEqual(["message_update", "compaction_end", "agent_end"]);
 	});
 
 	it("subscribeToEvents (session-setup pipeline) suppresses retryable agent_end before client/EventBuffer broadcast", () => {
@@ -184,114 +193,161 @@ describe("Pi RPC agent_end retry contract", () => {
 		unsub();
 	});
 
-	it("keeps summarization retries and compaction continuations streaming until terminal agent_end", async () => {
-		const manager = makeManager();
-		const listeners = new Set<(event: AgentSessionEvent) => void>();
-		const prompt = vi.fn(async () => ({ success: true }));
-		const session = putSession(manager, {
-			isCompacting: true,
-			allowedTools: ["read", "write"],
-			oneTimeGrantedTools: ["read"],
-			rpcClient: {
-				onEvent: (fn: (event: AgentSessionEvent) => void) => {
-					listeners.add(fn);
-					return () => { listeners.delete(fn); };
+	it.each(["compaction_end", "auto_compaction_end"] as const)(
+		"keeps %s retry non-terminal and settles only on the later terminal end",
+		async (endType) => {
+			const manager = makeManager();
+			const listeners = new Set<(event: any) => void>();
+			const prompt = vi.fn(async () => ({ success: true }));
+			const recordUsage = vi.fn(() => ({ inputTokens: 11, outputTokens: 13, cacheReadTokens: 17, cacheWriteTokens: 19, totalCost: 1 }));
+			manager._testCostTracker = { recordUsage };
+			const session = putSession(manager, {
+				isCompacting: false,
+				allowedTools: ["read", "write"],
+				oneTimeGrantedTools: ["read"],
+				rpcClient: {
+					onEvent: (fn: (event: any) => void) => {
+						listeners.add(fn);
+						return () => { listeners.delete(fn); };
+					},
+					prompt,
+					getState: vi.fn(async () => ({ success: true, data: {} })),
 				},
-				prompt,
-				getState: vi.fn(async () => ({ success: true, data: {} })),
-			},
-		});
-		session.promptQueue.enqueue("dispatch only after terminal settlement");
-		manager.refreshAfterCompaction = vi.fn();
+			});
+			session.promptQueue.enqueue("dispatch only after terminal settlement");
+			manager.refreshAfterCompaction = vi.fn();
 
-		const trackCostFromEvent = vi.fn();
-		const unsub = subscribeToEvents(session, {
-			store: manager._testStore,
-			handleAgentLifecycle: (current: any, event: AgentSessionEvent) => manager.handleAgentLifecycle(current, event),
-			trackCostFromEvent,
-		} as any);
-		let idleResolved = false;
-		const wait = manager.waitForIdle(session.id, 10_000).then(() => { idleResolved = true; });
-		const emit = (event: AgentSessionEvent) => {
-			for (const listener of [...listeners]) listener(event);
-		};
+			const trackCostFromEvent = vi.fn((current: any, event: any) => manager.trackCostFromEvent(current, event));
+			const unsub = subscribeToEvents(session, {
+				store: manager._testStore,
+				handleAgentLifecycle: (current: any, event: any) => manager.handleAgentLifecycle(current, event),
+				trackCostFromEvent,
+			} as any);
+			let idleResolved = false;
+			const wait = manager.waitForIdle(session.id, 10_000).then(() => { idleResolved = true; });
+			const emit = (event: any) => {
+				for (const listener of [...listeners]) listener(event);
+			};
 
-		const scheduled: AgentSessionEvent = {
-			type: "summarization_retry_scheduled",
-			attempt: 1,
-			maxAttempts: 3,
-			delayMs: 250,
-			errorMessage: "temporary summarizer disconnect",
-		};
-		const attemptStart: AgentSessionEvent = {
-			type: "summarization_retry_attempt_start",
-			source: "compaction",
-			reason: "overflow",
-		};
-		const retryFinished: AgentSessionEvent = { type: "summarization_retry_finished" };
-		const compactionUsage = {
-			input: 11,
-			output: 13,
-			cacheRead: 17,
-			cacheWrite: 19,
-			totalTokens: 60,
-			cost: { input: 0.1, output: 0.2, cacheRead: 0.3, cacheWrite: 0.4, total: 1 },
-		};
-		const compactionEnd: AgentSessionEvent = {
-			type: "compaction_end",
-			reason: "overflow",
-			result: {
-				summary: "compacted after retry",
-				firstKeptEntryId: "entry-2",
-				tokensBefore: 1_000,
-				estimatedTokensAfter: 100,
-				usage: compactionUsage,
-			},
-			aborted: false,
-			willRetry: true,
-		};
+			const scheduled: AgentSessionEvent = {
+				type: "summarization_retry_scheduled",
+				attempt: 1,
+				maxAttempts: 3,
+				delayMs: 250,
+				errorMessage: "temporary summarizer disconnect",
+			};
+			const attemptStart: AgentSessionEvent = {
+				type: "summarization_retry_attempt_start",
+				source: "compaction",
+				reason: "overflow",
+			};
+			const retryFinished: AgentSessionEvent = { type: "summarization_retry_finished" };
+			const compactionUsage = {
+				input: 11,
+				output: 13,
+				cacheRead: 17,
+				cacheWrite: 19,
+				totalTokens: 60,
+				cost: { input: 0.1, output: 0.2, cacheRead: 0.3, cacheWrite: 0.4, total: 1 },
+			};
+			const retryEnd = {
+				type: endType,
+				reason: "overflow",
+				result: {
+					summary: "retry attempt summary",
+					firstKeptEntryId: "entry-retry",
+					tokensBefore: 1_000,
+					estimatedTokensAfter: 100,
+					usage: compactionUsage,
+				},
+				aborted: false,
+				willRetry: true,
+			};
 
-		emit(scheduled);
-		emit(attemptStart);
-		emit(retryFinished);
-		emit(compactionEnd);
-		await flush();
+			emit({ type: endType === "auto_compaction_end" ? "auto_compaction_start" : "compaction_start", reason: "overflow" });
+			const pendingId = session._pendingCompactionStart?.compactionId;
+			expect(pendingId).toMatch(/^c_/);
+			emit(scheduled);
+			emit(attemptStart);
+			emit(retryFinished);
+			emit(retryEnd);
+			await flush();
 
-		expect(idleResolved).toBe(false);
-		expect(session.status).toBe("streaming");
-		expect(session.isCompacting).toBe(false);
-		expect(session.completedTurnCount ?? 0).toBe(0);
-		expect(session.allowedTools).toEqual(["read", "write"]);
-		expect(session.oneTimeGrantedTools).toEqual(["read"]);
-		expect(prompt).not.toHaveBeenCalled();
-		expect(trackCostFromEvent).toHaveBeenCalledTimes(4);
+			expect(idleResolved).toBe(false);
+			expect(session.status).toBe("streaming");
+			expect(session.isCompacting).toBe(true);
+			expect(session._pendingCompactionStart?.compactionId).toBe(pendingId);
+			expect(retryEnd).not.toHaveProperty("compactionId");
+			expect(readCompactionSidecarEntries(session.id)).toEqual([]);
+			expect(manager.refreshAfterCompaction).not.toHaveBeenCalled();
+			expect(session.completedTurnCount ?? 0).toBe(0);
+			expect(session.allowedTools).toEqual(["read", "write"]);
+			expect(session.oneTimeGrantedTools).toEqual(["read"]);
+			expect(prompt).not.toHaveBeenCalled();
 
-		const continuationEvents = session.eventBuffer.getAll().map((entry: any) => entry.event);
-		expect(continuationEvents.map((event: any) => event.type)).toEqual([
-			"summarization_retry_scheduled",
-			"summarization_retry_attempt_start",
-			"summarization_retry_finished",
-			"compaction_end",
-		]);
-		expect(continuationEvents[3].willRetry).toBe(true);
-		assert.equal(continuationEvents[3].result.usage, compactionUsage, "summary usage must be forwarded, not synthesized or dropped");
+			const continuationEvents = session.eventBuffer.getAll().map((entry: any) => entry.event);
+			expect(continuationEvents.map((event: any) => event.type)).toEqual([
+				endType === "auto_compaction_end" ? "auto_compaction_start" : "compaction_start",
+				"summarization_retry_scheduled",
+				"summarization_retry_attempt_start",
+				"summarization_retry_finished",
+			]);
+			expect(trackCostFromEvent).toHaveBeenCalledWith(session, retryEnd);
+			expect(recordUsage).toHaveBeenCalledTimes(1);
+			expect(recordUsage).toHaveBeenCalledWith(session.id, {
+				inputTokens: 11,
+				outputTokens: 13,
+				cacheReadTokens: 17,
+				cacheWriteTokens: 19,
+				cost: 1,
+			}, undefined);
+			assert.equal((trackCostFromEvent.mock.calls.at(-1)?.[1] as any).result.usage, compactionUsage,
+				"retry usage must be accounted without synthesizing or dropping it");
 
-		emit({ type: "agent_end", messages: [], willRetry: false });
-		await wait;
-		await flush();
+			const terminalEnd = {
+				type: endType,
+				reason: "overflow",
+				result: {
+					summary: "terminal compaction summary",
+					firstKeptEntryId: "entry-terminal",
+					tokensBefore: 1_000,
+					estimatedTokensAfter: 100,
+				},
+				aborted: false,
+				willRetry: false,
+			};
+			emit(terminalEnd);
+			await flush();
 
-		expect(idleResolved).toBe(true);
-		// The terminal boundary briefly settles idle and then drains the queued
-		// prompt, whose optimistic dispatch transition makes the session streaming.
-		expect(session.status).toBe("streaming");
-		expect(session.completedTurnCount).toBe(1);
-		expect(session.allowedTools).toEqual(["write"]);
-		expect(session.oneTimeGrantedTools).toEqual([]);
-		expect(prompt).toHaveBeenCalledTimes(1);
-		expect(prompt).toHaveBeenCalledWith("dispatch only after terminal settlement", undefined);
+			expect(session.isCompacting).toBe(false);
+			expect(session._pendingCompactionStart).toBeUndefined();
+			expect(terminalEnd).toHaveProperty("compactionId", pendingId);
+			expect(readCompactionSidecarEntries(session.id)).toMatchObject([{
+				id: pendingId,
+				success: true,
+				firstKeptEntryId: "entry-terminal",
+			}]);
+			expect(manager.refreshAfterCompaction).toHaveBeenCalledTimes(1);
+			const terminalEvents = session.eventBuffer.getAll().map((entry: any) => entry.event);
+			expect(terminalEvents.at(-1)).toBe(terminalEnd);
 
-		unsub();
-	});
+			emit({ type: "agent_end", messages: [], willRetry: false });
+			await wait;
+			await flush();
+
+			expect(idleResolved).toBe(true);
+			// The terminal turn boundary briefly settles idle and then drains the
+			// queued prompt, whose optimistic dispatch makes the session streaming.
+			expect(session.status).toBe("streaming");
+			expect(session.completedTurnCount).toBe(1);
+			expect(session.allowedTools).toEqual(["write"]);
+			expect(session.oneTimeGrantedTools).toEqual([]);
+			expect(prompt).toHaveBeenCalledTimes(1);
+			expect(prompt).toHaveBeenCalledWith("dispatch only after terminal settlement", undefined);
+
+			unsub();
+		},
+	);
 
 	it("waitForIdle ignores retryable Pi agent_end and resolves on the final agent_end", async () => {
 		const manager = makeManager();
