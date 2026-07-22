@@ -502,9 +502,8 @@ export async function toggleRolePicker(e: Event, goalId?: string, opts?: { proje
 		_pickerAnchorRect = { top: r.top, right: r.right, bottom: r.bottom };
 	}
 	if (state.roles.length === 0) await fetchRoles();
-	// Pre-select the "general" role (server default) if it exists
-	const generalRole = state.roles.find(r => r.name === "general");
-	_pickerRole = generalRole ? "general" : "";
+	// New standard sessions always default to the server-resolved general role.
+	_pickerRole = "general";
 	_pickerRoleDropdownOpen = false;
 	_pickerFocusIndex = -1;
 	state.rolePickerOpen = true;
@@ -575,7 +574,7 @@ export function renderRolePickerDropdown() {
 					? html`<div class="py-1 text-muted-foreground">No roles defined</div>`
 					: (() => {
 						const selectedRoleObj = allRoles.find(r => r.name === _pickerRole);
-						const selectedLabel = selectedRoleObj?.label || "None";
+						const selectedLabel = selectedRoleObj?.label || "General";
 						const selectedAccessory = selectedRoleObj?.accessory ?? "none";
 						const focused = isFocused("role", "role");
 						return html`
@@ -590,13 +589,6 @@ export function renderRolePickerDropdown() {
 							</button>
 							${_pickerRoleDropdownOpen ? html`
 								<div class="absolute z-50 w-full rounded-md border border-border bg-popover text-popover-foreground shadow-lg py-1 overflow-y-auto ${_pickerRoleDropdownUp ? "bottom-full mb-1" : "top-full mt-1"}" style="max-height: ${_pickerRoleDropdownMaxH}px;">
-									<button
-										class="w-full text-left px-3 py-2 text-sm text-popover-foreground/60 hover:bg-accent hover:text-accent-foreground transition-colors flex items-center gap-2.5 ${!_pickerRole ? "bg-accent/50" : ""}"
-										@click=${(e: Event) => { e.stopPropagation(); selectRole(""); }}
-										title="No role">
-										<span class="shrink-0">${statusBobbit("idle", false, undefined, false, false, false, false, "none", true)}</span>
-										<span>None</span>
-									</button>
 									${allRoles.map(role => html`
 										<button
 											class="w-full text-left px-3 py-2 text-sm text-popover-foreground hover:bg-accent hover:text-accent-foreground transition-colors flex items-center gap-2.5 ${_pickerRole === role.name ? "bg-accent/50" : ""}"

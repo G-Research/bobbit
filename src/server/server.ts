@@ -4058,14 +4058,13 @@ async function handleApiRoute(
 			console.error(`[broadcast] staff_changed failed for ${event.staffId}:`, err);
 		}
 	};
-	type RoleCreateOptions = { rolePrompt?: string; roleName: string; role: string; accessory?: string; initialModel?: string; initialThinkingLevel?: string };
+	type RoleCreateOptions = { roleName: string; role: string; accessory?: string; initialModel?: string; initialThinkingLevel?: string };
 	const roleCreateOptions = (role: Role): RoleCreateOptions => {
 		const initialModel = typeof role.model === "string" && /^[^/]+\/.+$/.test(role.model) && isSessionSelectableModelString(role.model)
 			? role.model
 			: undefined;
 		const initialThinkingLevel = clampRoleThinking(role.thinkingLevel, initialModel);
 		return {
-			rolePrompt: role.promptTemplate,
 			roleName: role.name,
 			role: role.name,
 			accessory: role.accessory,
@@ -6452,7 +6451,13 @@ async function handleApiRoute(
 			return;
 		}
 
-		// ── Normal session creation ──
+		// ── Normal/assistant session creation ──
+		// Keep this after the delegate early-return: delegate role mappings are owned
+		// by createDelegateSession and must not inherit this route's role contract.
+		if (body?.roleId !== undefined && body.roleId !== null && typeof body.roleId !== "string") {
+			json({ error: "roleId must be a string or null" }, 400);
+			return;
+		}
 		const goalId = body?.goalId;
 
 		// Accept both new assistantType and legacy boolean fields
@@ -6486,8 +6491,8 @@ async function handleApiRoute(
 
 		const args = body?.args;
 
-		// If a roleId is provided, resolve/apply it after resolvedProjectId is known.
-		const roleId = body?.roleId;
+		// Normalize the requested role now, then resolve it after resolvedProjectId is known.
+		const requestedRoleId: string | null | undefined = typeof body?.roleId === "string" ? body.roleId.trim() : body?.roleId;
 		let createOpts: RoleCreateOptions | undefined;
 
 		// ── Worktree support ──
@@ -6691,7 +6696,15 @@ async function handleApiRoute(
 			}
 		}
 
-		if (roleId && typeof roleId === "string") {
+		// Standard sessions always start with a fully resolved role. Assistants keep
+		// their dedicated assistantRoleForType mapping when no role was requested.
+		// Keep this lookup ahead of worktree capability resolution below: that step
+		// only probes support, while actual provisioning begins in createSession().
+		// An unknown role must return without either worktree or session side effects.
+		const roleId = !assistantType && (requestedRoleId === undefined || requestedRoleId === null || requestedRoleId === "")
+			? "general"
+			: requestedRoleId;
+		if (typeof roleId === "string" && roleId.length > 0) {
 			const role = resolveRoleForProject(roleId, resolvedProjectId);
 			if (!role) {
 				json({ error: `Role "${roleId}" not found` }, 404);
