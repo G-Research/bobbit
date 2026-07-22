@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, it, vi } from "vitest";
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
 import {
 	appendPromptAuthorDispatch,
+	appendPromptAuthorSettlement,
 	initAuthorSidecarDir,
 } from "../../src/server/agent/author-sidecar.ts";
 import {
@@ -161,6 +162,13 @@ describe("SessionManager snapshot memo", () => {
 			modelText: "expanded system prompt",
 			source: "system",
 			author: systemAuthor,
+		}), true);
+		assert.equal(appendPromptAuthorSettlement(live.id, {
+			promptId: "system-base",
+			settledAt: 1_001,
+			outcome: "echoed",
+			messageId: "base",
+			messageTimestamp: 1_000,
 		}), true);
 		assert.equal(appendSkillSidecarEntry(live.id, {
 			ts: 1_000,

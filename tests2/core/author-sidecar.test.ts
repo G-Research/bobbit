@@ -16,7 +16,11 @@ import {
 } from "../../src/server/agent/author-sidecar.ts";
 import { readTranscript } from "../../src/server/agent/transcript-reader.ts";
 import { buildVisibleMessageSnapshot } from "../../src/server/agent/visible-message-snapshot.ts";
-import { LOCAL_USER_AUTHOR, type MessageAuthor } from "../../src/shared/message-author.ts";
+import {
+	LOCAL_USER_AUTHOR,
+	type BobbitMessage,
+	type MessageAuthor,
+} from "../../src/shared/message-author.ts";
 
 const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-author-sidecar-v2-"));
 const stateDir = path.join(rootDir, "state");
@@ -408,7 +412,9 @@ describe("author sidecar v2 correlation", () => {
 		const sessionId = `unresolved-${author.kind}`;
 		const text = "same text as a pending dispatch";
 		appendPromptAuthorDispatch(sessionId, dispatch(`pending-${author.kind}`, text, author));
-		const legacyRows = [{ id: `legacy-${author.kind}`, role: "user", content: text }];
+		const legacyRows: BobbitMessage<{ id: string; role: string; content: string }>[] = [
+			{ id: `legacy-${author.kind}`, role: "user", content: text },
+		];
 
 		const merged = mergeAuthorSidecarIntoMessages(readAuthorSidecar(sessionId), legacyRows);
 		expect(merged[0].author).toEqual(LOCAL_USER_AUTHOR);

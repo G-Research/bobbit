@@ -374,6 +374,14 @@ describe("MessageIndexSource", () => {
 				modelText: "SystemPromptSearchToken",
 				source: "task-notification",
 				author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
+				settlement: {
+					schemaVersion: 1,
+					type: "prompt-author-settlement",
+					promptId: "system-prompt",
+					settledAt: 101,
+					outcome: "echoed",
+					messageId: "system-message",
+				},
 			}]);
 
 			const messages = await collect(source, makeCtx({
