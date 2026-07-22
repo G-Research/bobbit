@@ -6685,6 +6685,9 @@ async function handleApiRoute(
 
 		// Standard sessions always start with a fully resolved role. Assistants keep
 		// their dedicated assistantRoleForType mapping when no role was requested.
+		// Keep this lookup ahead of worktree capability resolution below: that step
+		// only probes support, while actual provisioning begins in createSession().
+		// An unknown role must return without either worktree or session side effects.
 		const roleId = !assistantType && (requestedRoleId === undefined || requestedRoleId === null || requestedRoleId === "")
 			? "general"
 			: requestedRoleId;

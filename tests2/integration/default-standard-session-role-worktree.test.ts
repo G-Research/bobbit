@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import { copyGitTemplate } from "../harness/git-template.js";
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
@@ -18,13 +18,21 @@ import {
 	generalOverride,
 	purgeSession,
 	putProjectRole,
+	readJson,
 	removeProjectRole,
+	sessionIdsBySurface,
 	type CreatedSession,
 } from "./default-standard-session-role-helper.js";
 
 let worktreeProject: { id: string; rootPath: string };
 let worktreeFixtureRoot = "";
 let restoreCommandRunner: (() => void) | undefined;
+const gitCalls: Array<{ cwd: string; args: string[] }> = [];
+
+function directorySnapshot(directoryPath: string): { exists: boolean; entries: string[] } {
+	const exists = existsSync(directoryPath);
+	return { exists, entries: exists ? readdirSync(directoryPath).sort() : [] };
+}
 
 function mkdirWorktree(worktreePath: string): void {
 	const gitMarker = join(worktreePath, ".git");
@@ -35,6 +43,7 @@ function mkdirWorktree(worktreePath: string): void {
 }
 
 function cannedGit(cwd: string, args: readonly string[]): string {
+	gitCalls.push({ cwd, args: [...args] });
 	const key = args.join(" ");
 	if (key === "rev-parse --show-toplevel") return cwd;
 	if (key === "rev-parse --is-inside-work-tree") return "true";
@@ -134,6 +143,42 @@ test.afterAll(async () => {
 	}
 	if (worktreeFixtureRoot) rmSync(worktreeFixtureRoot, { recursive: true, force: true });
 	restoreCommandRunner?.();
+});
+
+test("unknown explicit role is rejected before worktree resolution or provisioning", async ({ gateway }) => {
+	const sourceRepo = worktreeProject.rootPath;
+	const worktreeRoot = join(dirname(sourceRepo), `${basename(sourceRepo)}-wt`);
+	const unknownRole = "missing-worktree-role";
+	const beforeSessions = await sessionIdsBySurface(gateway, worktreeProject.id);
+	const beforeDirectory = directorySnapshot(worktreeRoot);
+	const beforeGitCallCount = gitCalls.length;
+	const beforeWorktreeAddCount = gitCalls.filter(call => call.args[0] === "worktree" && call.args[1] === "add").length;
+	let unexpectedSessionId: string | undefined;
+
+	try {
+		expect(existsSync(join(sourceRepo, ".git")), "fixture project must be a worktree-capable Git repository").toBe(true);
+		const response = await apiFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({ cwd: sourceRepo, projectId: worktreeProject.id, worktree: true, roleId: unknownRole }),
+		});
+		const payload = await readJson(response);
+		unexpectedSessionId = typeof payload.id === "string" ? payload.id : undefined;
+
+		expect(response.status, `unknown explicit role must be rejected; body=${JSON.stringify(payload)}`).toBe(404);
+		expect(payload).toEqual({ error: `Role "${unknownRole}" not found` });
+		expect(gitCalls, "role rejection must precede worktree capability resolution").toHaveLength(beforeGitCallCount);
+		expect(
+			gitCalls.filter(call => call.args[0] === "worktree" && call.args[1] === "add"),
+			"role rejection must not invoke git worktree add",
+		).toHaveLength(beforeWorktreeAddCount);
+		expect(directorySnapshot(worktreeRoot), "role rejection must not provision a worktree directory").toEqual(beforeDirectory);
+		expect(
+			await sessionIdsBySurface(gateway, worktreeProject.id),
+			"role rejection must not create a live, persisted, or API-visible session",
+		).toEqual(beforeSessions);
+	} finally {
+		await purgeSession(unexpectedSessionId);
+	}
 });
 
 test("genuine worktree creation with omitted role gets the full resolved general configuration", async ({ gateway }) => {
