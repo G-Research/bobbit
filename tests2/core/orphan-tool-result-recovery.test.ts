@@ -212,7 +212,7 @@ describe("SessionManager poisoned-history recovery", () => {
 		assert.equal(restored.id, "session-fixture");
 		assert.equal(restored.modelId, "claude-sonnet-4-5");
 		assert.equal(restored.thinkingLevel, "high");
-		assert.equal(restored.lastPromptSource, "user");
+		assert.equal(restored.lastPromptSource, "system");
 		assert.equal(restored.lastTurnErrored, false);
 		assert.match(info.mock.calls.flat().join(" "), /session=session-fixture boundary=retry repairedRecords=0 sandboxed=false project=project-fixture/);
 	});

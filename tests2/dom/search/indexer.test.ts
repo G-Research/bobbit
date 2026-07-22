@@ -15,10 +15,14 @@ __syncBeforeAll(() => __syncCE());
  * Design reference: docs/design/portable-search.md §3, §6, §13.
  */
 import { expect, test } from "vitest";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { FlexSearchStore } from "../../../src/server/search/flex-store.ts";
+import {
+	FLEX_EXPORT_BUNDLE_FILE,
+	FlexSearchStore,
+} from "../../../src/server/search/flex-store.ts";
 import { Indexer } from "../../../src/server/search/indexer.ts";
 import { ProgressBus } from "../../../src/server/search/progress-bus.ts";
 import type {
@@ -86,6 +90,82 @@ test("upsertEntries pushes docs into the store", async () => {
 	expect(store.count()).toBe(3);
 	expect(indexer.backlog).toBe(0);
 	await store.close();
+}, 60_000);
+
+test("author metadata survives Indexer → disk → search while legacy docs remain compatible", async () => {
+	const { store, dir } = await openStore();
+	const indexer = new Indexer({
+		store,
+		progressBus: new ProgressBus(),
+		projectId: "p1",
+		progressDebounceMs: 0,
+	});
+
+	await indexer.upsertEntries([
+		makeIndexable("authored", {
+			text: "AuthorRoundTripToken",
+			metadata: {
+				session_id: "s1",
+				authorKind: "system",
+				authorId: "system:bobbit",
+				authorLabel: "Bobbit",
+			},
+		}),
+		makeIndexable("legacy", {
+			text: "LegacyAuthorlessToken",
+			metadata: { session_id: "s1" },
+		}),
+	]);
+	await store.close();
+
+	const docsPath = path.join(dir, "index", "__docs__.json");
+	const docs = JSON.parse(fs.readFileSync(docsPath, "utf-8")) as Array<Record<string, unknown>>;
+	const authoredDoc = docs.find((doc) => doc.id === "authored");
+	expect(authoredDoc).toMatchObject({
+		author_kind: "system",
+		author_id: "system:bobbit",
+		author_label: "Bobbit",
+	});
+
+	// Emulate a mirror row written by a pre-author index. Keep the export
+	// bundle coherent so reopen exercises the normal disk-restore path.
+	const legacyDoc = docs.find((doc) => doc.id === "legacy")!;
+	delete legacyDoc.author_kind;
+	delete legacyDoc.author_id;
+	delete legacyDoc.author_label;
+	const legacyDocsJson = JSON.stringify(docs);
+	fs.writeFileSync(docsPath, legacyDocsJson, "utf-8");
+	const bundlePath = path.join(dir, "index", FLEX_EXPORT_BUNDLE_FILE);
+	const bundle = JSON.parse(fs.readFileSync(bundlePath, "utf-8")) as Record<string, unknown>;
+	bundle.docsHash = createHash("sha256").update(legacyDocsJson).digest("hex");
+	fs.writeFileSync(bundlePath, JSON.stringify(bundle), "utf-8");
+
+	const reopened = await FlexSearchStore.open({ dataDir: dir });
+	try {
+		expect(reopened.getById("authored")).toMatchObject({
+			author_kind: "system",
+			author_id: "system:bobbit",
+			author_label: "Bobbit",
+		});
+		expect(reopened.getById("legacy")).toMatchObject({
+			author_kind: null,
+			author_id: null,
+			author_label: null,
+		});
+
+		const authored = await reopened.search({ q: "AuthorRoundTripToken" });
+		expect(authored.results[0]).toMatchObject({
+			authorKind: "system",
+			authorId: "system:bobbit",
+			authorLabel: "Bobbit",
+		});
+		const legacy = await reopened.search({ q: "LegacyAuthorlessToken" });
+		expect(legacy.results[0]?.authorKind).toBeUndefined();
+		expect(legacy.results[0]?.authorId).toBeUndefined();
+		expect(legacy.results[0]?.authorLabel).toBeUndefined();
+	} finally {
+		await reopened.close();
+	}
 }, 60_000);
 
 test("upsertEntries skips entries whose contentHash is already stored", async () => {

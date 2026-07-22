@@ -8,9 +8,16 @@ import path from "node:path";
 
 import type { VerifyStep } from "../../src/server/agent/workflow-store.js";
 import {
+	initAuthorSidecarDir,
+	promptAuthorBindingMatchesText,
+	readAuthorSidecar,
+} from "../../src/server/agent/author-sidecar.ts";
+import {
 	DEFAULT_LLM_REVIEW_TIMEOUT_S,
 	MIN_LLM_REVIEW_TIMEOUT_S,
 	VerificationHarness,
+	VERIFICATION_RESTART_RESUME_PROMPT,
+	VERIFICATION_RESULT_REMINDER,
 	resolveCommandStepTimeoutSec,
 	resolveReviewStepTimeoutSec,
 } from "../../src/server/agent/verification-harness.js";
@@ -28,6 +35,10 @@ function makeStateDir(prefix: string): string {
 	tempRoots.push(root);
 	const stateDir = path.join(root, "state");
 	fs.mkdirSync(stateDir, { recursive: true });
+	initAuthorSidecarDir(stateDir, {
+		secretsDir: path.join(root, "private-secrets"),
+		hmacKey: Buffer.alloc(32, 0x35),
+	});
 	return stateDir;
 }
 
@@ -74,8 +85,9 @@ function makeReviewHarness(args: {
 		getContextForGoal: (id: string) => id === goalId ? ctx : null,
 		all: () => [ctx],
 	};
+	const stateDir = makeStateDir("review-timeout-contract-");
 	const harness = new VerificationHarness(
-		makeStateDir("review-timeout-contract-"),
+		stateDir,
 		undefined,
 		() => {},
 		roleStore as any,
@@ -87,7 +99,7 @@ function makeReviewHarness(args: {
 		undefined,
 		{ clock: args.clock },
 	) as any;
-	return { harness, goalId, roleStore, projectContextManager };
+	return { harness, goalId, roleStore, projectContextManager, stateDir };
 }
 
 async function runLlmSession(harness: any, goalId: string, timeoutMs: number, sessionId = "llm-review-timeout-session") {
@@ -245,11 +257,20 @@ describe("recovery windows and provider exclusion", () => {
 		async function exercise(timeoutSec: number | undefined, restartContinuation: boolean) {
 			const idleTimeouts: number[] = [];
 			const streamingTimeouts: number[] = [];
+			const promptTexts: string[] = [];
+			const sessionId = restartContinuation ? "reviewer-resume-restart" : "reviewer-resume-legacy";
 			const session = {
+				id: sessionId,
 				status: "streaming",
 				restoreStartupWasStreaming: restartContinuation,
 				lastTurnErrored: false,
-				rpcClient: { onEvent: () => () => {}, promptWhenReady: async () => {} },
+				rpcClient: {
+					onEvent: () => () => {},
+					promptWhenReady: async (text: string) => {
+						promptTexts.push(text);
+						return { success: true };
+					},
+				},
 			};
 			const sessionManager = {
 				getSession: () => session,
@@ -265,21 +286,39 @@ describe("recovery windows and provider exclusion", () => {
 					type: "llm-review",
 					status: "running",
 					startedAt: Date.now(),
-					sessionId: "reviewer-resume",
+					sessionId,
 					...(timeoutSec === undefined ? {} : { timeoutSec }),
 				},
 			);
-			return { idleTimeouts, streamingTimeouts };
+			return { idleTimeouts, streamingTimeouts, promptTexts, bindings: readAuthorSidecar(sessionId) };
 		}
 
 		const explicit = await exercise(7, true);
 		assert.deepEqual(explicit.idleTimeouts, [7_000, 7_000, 7_000], `${MARKER}: restart continuation/fallback each need a fresh persisted allowance`);
 		assert.deepEqual(explicit.streamingTimeouts, [10_000, 10_000], `${MARKER}: restart stream settles must stay fixed`);
 		assert.ok(!explicit.idleTimeouts.includes(180_000) && !explicit.idleTimeouts.includes(120_000));
+		assert.deepEqual(explicit.promptTexts, [VERIFICATION_RESTART_RESUME_PROMPT, VERIFICATION_RESULT_REMINDER], `${MARKER}: tracked restart dispatch must preserve exact prompt bytes`);
+		assert.ok(explicit.bindings.every(binding => binding.schemaVersion === 2 && binding.modelText === undefined));
+		assert.ok(explicit.bindings.every((binding, index) =>
+			promptAuthorBindingMatchesText(binding, explicit.promptTexts[index]),
+		));
+		assert.ok(explicit.bindings.every(binding => binding.source === "verification"));
+		for (const binding of explicit.bindings) {
+			assert.deepEqual(binding.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
+		}
 
 		const legacy = await exercise(undefined, false);
 		assert.deepEqual(legacy.idleTimeouts, [1_200_000, 1_200_000], `${MARKER}: legacy rows without a resolvable step fall back to 1200s per turn`);
 		assert.deepEqual(legacy.streamingTimeouts, [10_000]);
+		assert.deepEqual(legacy.promptTexts, [VERIFICATION_RESULT_REMINDER], `${MARKER}: legacy resume must preserve exact reminder bytes`);
+		assert.ok(legacy.bindings.every(binding => binding.schemaVersion === 2 && binding.modelText === undefined));
+		assert.ok(legacy.bindings.every((binding, index) =>
+			promptAuthorBindingMatchesText(binding, legacy.promptTexts[index]),
+		));
+		assert.ok(legacy.bindings.every(binding => binding.source === "verification"));
+		for (const binding of legacy.bindings) {
+			assert.deepEqual(binding.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
+		}
 	});
 
 	it("keeps LLM review routing session-only after direct-path removal", () => {

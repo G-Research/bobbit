@@ -14,8 +14,12 @@ import path from "node:path";
 import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
 import type { CommandRunner } from "../gateway-deps.js";
+import { isMessageAuthor, type MessageAuthor } from "../../shared/message-author.js";
+import type { PromptSource } from "../../shared/prompt-source.js";
 import type { SessionInfo } from "./session-manager.js";
-import { emitSessionEvent, broadcastStatus, isRetryableAgentEnd, switchSessionPathForAgent } from "./session-manager.js";
+import { dispatchTrackedPrompt, emitSessionEvent, broadcastStatus, isRetryableAgentEnd, prepareVisibleAgentEvent, restorePromptAuthorBindings, switchSessionPathForAgent } from "./session-manager.js";
+import { readAuthorSidecar } from "./author-sidecar.js";
+import { BOBBIT_SYSTEM_AUTHOR } from "./message-author.js";
 import type { RpcBridgeOptions, RuntimePiExtensionInfo } from "./rpc-bridge.js";
 import { RpcBridge } from "./rpc-bridge.js";
 import { rebaseAgentTranscriptCwdMetadataFile, sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
@@ -358,6 +362,8 @@ export interface PipelineContext {
 	assemblePrompt: (id: string, parts: PromptParts) => string | undefined;
 
 	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: SandboxWiringOptions) => Promise<boolean>;
+	/** SessionManager-owned author normalization, including current staff/role lookup. */
+	prepareVisibleAgentEvent?: (session: SessionInfo, event: unknown) => unknown;
 	handleAgentLifecycle: (session: SessionInfo, event: any) => void;
 	trackCostFromEvent: (session: SessionInfo, event: any) => void;
 	recordPiExtensionDiagnostic?: (session: SessionInfo, diagnostic: import("./rpc-bridge.js").RuntimePiExtensionDiagnostic, extension: RuntimePiExtensionInfo) => void;
@@ -1011,18 +1017,21 @@ export function subscribeToEvents(session: SessionInfo, ctx: PipelineContext): (
 	return session.rpcClient.onEvent((event: any) => {
 		session.lastActivity = Date.now();
 		ctx.store.update(session.id, { lastActivity: session.lastActivity });
-		ctx.handleAgentLifecycle(session, event);
+		const preparedEvent = ctx.prepareVisibleAgentEvent
+			? ctx.prepareVisibleAgentEvent(session, event)
+			: prepareVisibleAgentEvent(session, event);
+		ctx.handleAgentLifecycle(session, preparedEvent);
 		// Suppress Pi retryable agent_end ({ willRetry:true }) before it reaches
 		// clients/EventBuffer. Pi 0.80+ emits a non-terminal agent_end before each
 		// internal auto-retry; clients treat every agent_end as terminal and would
 		// clear the streaming message/tool calls. This mirrors SessionManager's
 		// emitAgentEvent() so every rpcClient.onEvent path shares one contract.
 		// Pinned by tests2/core/pi-rpc-agent-end-retry.test.ts.
-		if (!isRetryableAgentEnd(event)) {
-			const truncated = truncateLargeToolContent(event);
+		if (!isRetryableAgentEnd(preparedEvent)) {
+			const truncated = truncateLargeToolContent(preparedEvent);
 			emitSessionEvent(session, truncated);
 		}
-		ctx.trackCostFromEvent(session, event);
+		ctx.trackCostFromEvent(session, preparedEvent);
 	});
 }
 
@@ -1418,6 +1427,10 @@ export async function executeWorktreeAsync(
 
 	// Continue-Archived: rehydrate from the cloned JSONL before persisting.
 	if (plan.preExistingAgentSessionFile) {
+		// Fork/continue routes copy the destination sidecar before createSession.
+		// Hydrate immediately before switch_session so replay events and their
+		// EventBuffer entries retain the source prompt identities.
+		restorePromptAuthorBindings(session, readAuthorSidecar(session.id));
 		// The continue handler pre-computes the cloned-.jsonl path against the
 		// project-root cwd. For worktree-backed sessions, the agent CLI boots
 		// with cwd=offsetCwd (the worktree path), and `formatAgentSessionFilePath`
@@ -1487,6 +1500,10 @@ export async function executeWorktreeAsync(
 			await rpcClient.stop().catch(() => {});
 			throw new Error(`switch_session failed: ${switchResp.error}`);
 		}
+		// Text-only replay guards are scoped to this switch. Keeping them would let
+		// an unrelated future same-text prompt inherit an historical author.
+		session.promptAuthorReplayBindings = undefined;
+		session.lastKeylessPromptAuthorEnd = undefined;
 	}
 
 	// Persist agentSessionFile to disk BEFORE flipping status to idle. Otherwise
@@ -1610,6 +1627,8 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 	// Continue-Archived: tell the agent CLI to rehydrate from the cloned JSONL
 	// before we persist or flip to idle. Same RPC the restart-resume path uses.
 	if (plan.preExistingAgentSessionFile) {
+		// See the worktree path above: this must precede switch_session replay.
+		restorePromptAuthorBindings(session, readAuthorSidecar(session.id));
 		const transcriptFsCtx = sessionFsContextForAgentFile(plan, plan.preExistingAgentSessionFile);
 		if (plan.preExistingAgentSessionOldCwds?.length) {
 			await rebaseAgentTranscriptCwdMetadataFile(
@@ -1637,6 +1656,8 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 			await rpcClient.stop().catch(() => {});
 			throw new Error(`switch_session failed: ${switchResp.error}`);
 		}
+		session.promptAuthorReplayBindings = undefined;
+		session.lastKeylessPromptAuthorEnd = undefined;
 	}
 
 	// Add to live-sessions map so persistSessionMetadata can resolve via getState.
@@ -1686,9 +1707,22 @@ export async function sendDelegatePrompt(
 	session: SessionInfo,
 	_instructions: string,
 	timeoutMs: number,
+	provenance: { source?: PromptSource; author?: MessageAuthor } = {},
 ): Promise<void> {
-	await session.rpcClient.prompt(
+	// Only a coherent owner-agent pair can opt out of the system default. This
+	// keeps direct REST/server delegate creation fail-closed while preserving the
+	// authenticated owner identity supplied by OrchestrationCore's bare path.
+	const ownerAgent = provenance.source === "agent"
+		&& isMessageAuthor(provenance.author)
+		&& provenance.author.kind === "agent"
+		? provenance.author
+		: undefined;
+	await dispatchTrackedPrompt(
+		session,
 		"Execute the task described in your system prompt. Follow the instructions carefully.",
+		ownerAgent
+			? { source: "agent", author: ownerAgent }
+			: { source: "system", author: BOBBIT_SYSTEM_AUTHOR },
 	);
 
 	// Wait for agent_start event (session.status becomes "streaming")
@@ -1742,6 +1776,7 @@ export function handleSetupFailure(
 			type: "message_end",
 			message: {
 				role: "assistant",
+				author: BOBBIT_SYSTEM_AUTHOR,
 				content: [{ type: "text", text: `Session setup failed: ${safeErrorMessage}` }],
 				stopReason: "error",
 				errorMessage: safeErrorMessage,

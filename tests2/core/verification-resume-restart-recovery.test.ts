@@ -26,24 +26,43 @@
  * so a regression can't hang the unit-test runner.
  */
 
-import { test } from "vitest";
+import { afterAll, test } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-
-const TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "verif-resume-recovery-test-"));
-const STATE_DIR = path.join(TEST_DIR, "state");
-fs.mkdirSync(STATE_DIR, { recursive: true });
-
-const { VerificationHarness } = await import("../../src/server/agent/verification-harness.js");
+import {
+	initAuthorSidecarDir,
+	promptAuthorBindingMatchesText,
+	readAuthorSidecar,
+} from "../../src/server/agent/author-sidecar.ts";
+import {
+	VerificationHarness,
+	VERIFICATION_RESULT_REMINDER,
+} from "../../src/server/agent/verification-harness.ts";
 
 const GOAL_ID = "goal-test";
 const GATE_ID = "documentation";
-const SESSION_ID = "reviewer-sess-1";
+const tempRoots: string[] = [];
 
-function seedPersistedReviewer(signalId: string): void {
-	const persistPath = path.join(STATE_DIR, "active-verifications.json");
+afterAll(() => {
+	for (const root of tempRoots) fs.rmSync(root, { recursive: true, force: true });
+});
+
+function makeStateDir(): string {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "verif-resume-recovery-test-"));
+	tempRoots.push(root);
+	const stateDir = path.join(root, "state");
+	fs.mkdirSync(stateDir, { recursive: true });
+	initAuthorSidecarDir(stateDir, {
+		secretsDir: path.join(root, "private-secrets"),
+		hmacKey: Buffer.alloc(32, 0x34),
+	});
+	return stateDir;
+}
+
+function seedPersistedReviewer(stateDir: string, signalId: string, sessionId: string): void {
+	const persistPath = path.join(stateDir, "active-verifications.json");
 	const startedAt = Date.now() - 60_000; // 1 min ago
 	const data = {
 		verifications: [
@@ -60,7 +79,7 @@ function seedPersistedReviewer(signalId: string): void {
 						type: "llm-review",
 						status: "running",
 						startedAt,
-						sessionId: SESSION_ID,
+						sessionId,
 					},
 				],
 			},
@@ -91,8 +110,10 @@ async function resumeWithDeadline(harness: any, deadlineMs = 10_000): Promise<vo
 }
 
 test("(a) a slow-to-init reviewer is waited on (waitForReady before prompt) and resumes to PASSED", async () => {
-	const SIGNAL_ID = "sig-recovery-slow-init";
-	seedPersistedReviewer(SIGNAL_ID);
+	const signalId = "sig-recovery-slow-init";
+	const sessionId = "reviewer-recovery-slow-init";
+	const stateDir = makeStateDir();
+	seedPersistedReviewer(stateDir, signalId, sessionId);
 
 	const calls: Array<{ kind: string; args: any[] }> = [];
 	const stubGateStore = {
@@ -103,17 +124,20 @@ test("(a) a slow-to-init reviewer is waited on (waitForReady before prompt) and 
 	} as any;
 	const roleStore = { get: () => undefined, getAll: () => [] } as any;
 
-	// Track call ordering to prove waitForReady precedes the reminder prompt.
+	// Track call ordering and exact bytes while modelling RpcBridge's cold-start defaults.
 	const order: string[] = [];
-	let pendingResolver: ((r: any) => void) | null = null;
+	const promptTexts: string[] = [];
+	let harness: any;
 
 	const fakeSession = {
+		id: sessionId,
+		status: "idle",
 		rpcClient: {
 			onEvent: (_fn: (event: any) => void) => () => {},
 			// Cold reviewer: readiness check resolves only after a short delay,
 			// mimicking model + MCP init. Must be awaited before prompting.
-			waitForReady: (_ms?: number) => {
-				order.push("waitForReady");
+			waitForReady: (ms?: number) => {
+				order.push(`waitForReady:${ms}`);
 				return new Promise<void>(res => {
 					const t = setTimeout(res, 20);
 					if (typeof (t as any).unref === "function") (t as any).unref();
@@ -122,12 +146,14 @@ test("(a) a slow-to-init reviewer is waited on (waitForReady before prompt) and 
 			// The reminder prompt succeeds with the longer resume timeout. When it
 			// lands, the agent (eventually) calls verification_result — modelled by
 			// resolving the harness's pending result deferred with a passing verdict.
-			prompt: (_text: string, _images?: unknown, timeoutMs?: number) => {
+			prompt: (text: string, _images?: unknown, timeoutMs?: number) => {
+				promptTexts.push(text);
 				order.push(`prompt:${timeoutMs}`);
 				// Resolve the pending verification_result so the SECOND race in
 				// _tryResumeFromSession picks the "result" branch.
-				if (pendingResolver) pendingResolver({ verdict: true, summary: "Docs look good." });
-				return Promise.resolve();
+				const resolver = harness.pendingResults.get(sessionId);
+				resolver?.({ verdict: true, summary: "Docs look good." });
+				return Promise.resolve({ success: true });
 			},
 			// Mirror RpcBridge.promptWhenReady: wait for ready, then prompt with the
 			// generous resume timeout. Method shorthand so `this` binds to rpcClient.
@@ -157,25 +183,15 @@ test("(a) a slow-to-init reviewer is waited on (waitForReady before prompt) and 
 		unregisterReviewerSession: (..._a: any[]) => Promise.resolve(),
 	} as any;
 
-	const harness = new VerificationHarness(
-		STATE_DIR, stubGateStore, () => {}, roleStore, undefined,
+	harness = new VerificationHarness(
+		stateDir, stubGateStore, () => {}, roleStore, undefined,
 		stubSessionManager, stubTeamManager, undefined, undefined, undefined,
 	) as any;
 
-	// Surface the pending-result resolver to the prompt stub the moment the
-	// resume path registers it. The deferred is set synchronously at the top of
-	// _tryResumeFromSession, so a short poll catches it before the prompt fires.
-	const grab = setInterval(() => {
-		const r = harness.pendingResults.get(SESSION_ID);
-		if (r) { pendingResolver = r; clearInterval(grab); }
-	}, 1);
-	if (typeof (grab as any).unref === "function") (grab as any).unref();
-
 	await resumeWithDeadline(harness);
-	clearInterval(grab);
 
 	// waitForReady must have been invoked BEFORE the reminder prompt.
-	const readyIdx = order.indexOf("waitForReady");
+	const readyIdx = order.findIndex(o => o.startsWith("waitForReady:"));
 	const promptIdx = order.findIndex(o => o.startsWith("prompt:"));
 	assert.ok(readyIdx >= 0, `waitForReady was never called before the resume prompt. order=${JSON.stringify(order)}`);
 	assert.ok(
@@ -184,9 +200,21 @@ test("(a) a slow-to-init reviewer is waited on (waitForReady before prompt) and 
 	);
 	// And the prompt must use a longer-than-default (>30s) timeout.
 	assert.ok(
+		order.some(o => o === "waitForReady:90000"),
+		`The resume reminder must preserve the generous 90s readiness timeout. order=${JSON.stringify(order)}`,
+	);
+	assert.ok(
 		order.some(o => o.startsWith("prompt:") && Number(o.split(":")[1]) > 30_000),
 		`The resume reminder prompt must use a generous timeout (>30s), not the 30s default. order=${JSON.stringify(order)}`,
 	);
+	assert.deepEqual(promptTexts, [VERIFICATION_RESULT_REMINDER], "Resume tracking must not change the model-facing reminder bytes");
+	const bindings = readAuthorSidecar(sessionId);
+	assert.equal(bindings.length, 1, "The accepted resume reminder must have one durable author binding");
+	assert.equal(bindings[0].schemaVersion, 2);
+	assert.equal(bindings[0].modelText, undefined);
+	assert.equal(promptAuthorBindingMatchesText(bindings[0], VERIFICATION_RESULT_REMINDER), true);
+	assert.equal(bindings[0].source, "verification");
+	assert.deepEqual(bindings[0].author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
 
 	const statuses = gateStatusCalls(calls);
 	assert.strictEqual(
@@ -197,8 +225,10 @@ test("(a) a slow-to-init reviewer is waited on (waitForReady before prompt) and 
 });
 
 test("(c) a transient resume failure routes into the rerun-from-scratch fallback (_rerunLlmReviewStep) and the gate ends PASSED", async () => {
-	const SIGNAL_ID = "sig-recovery-rerun";
-	seedPersistedReviewer(SIGNAL_ID);
+	const signalId = "sig-recovery-rerun";
+	const sessionId = "reviewer-recovery-rerun";
+	const stateDir = makeStateDir();
+	seedPersistedReviewer(stateDir, signalId, sessionId);
 
 	const calls: Array<{ kind: string; args: any[] }> = [];
 	const stubGateStore = {
@@ -212,11 +242,17 @@ test("(c) a transient resume failure routes into the rerun-from-scratch fallback
 	// Revived reviewer that can't be re-attached: the reminder prompt times out
 	// (cold-agent RPC timeout). This produces a transient + restart-interrupt
 	// resume failure, which must route into _rerunLlmReviewStep.
+	const promptTexts: string[] = [];
 	const fakeSession = {
+		id: sessionId,
+		status: "idle",
 		rpcClient: {
 			onEvent: (_fn: (event: any) => void) => () => {},
 			waitForReady: (_ms?: number) => Promise.resolve(),
-			prompt: (_text: string) => Promise.reject(new Error("Command timed out: prompt")),
+			prompt: (text: string) => {
+				promptTexts.push(text);
+				return Promise.reject(new Error("Command timed out: prompt"));
+			},
 			async promptWhenReady(text: string, _images?: unknown, opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number }) {
 				await this.waitForReady(opts?.readyTimeoutMs ?? 90_000);
 				return this.prompt(text);
@@ -235,7 +271,7 @@ test("(c) a transient resume failure routes into the rerun-from-scratch fallback
 	} as any;
 
 	const harness = new VerificationHarness(
-		STATE_DIR, stubGateStore, () => {}, roleStore, undefined,
+		stateDir, stubGateStore, () => {}, roleStore, undefined,
 		stubSessionManager, stubTeamManager, undefined, undefined, undefined,
 		{ skipLlmReview: true },
 	) as any;
@@ -244,6 +280,16 @@ test("(c) a transient resume failure routes into the rerun-from-scratch fallback
 	// without spawning a real agent — so a PASSED gate can ONLY have come from
 	// the rerun arm (the resume itself failed transiently).
 	await resumeWithDeadline(harness);
+
+	assert.deepEqual(promptTexts, [VERIFICATION_RESULT_REMINDER], "Failed resume tracking must not change the attempted reminder bytes");
+	const bindings = readAuthorSidecar(sessionId);
+	assert.equal(bindings.length, 1, "The failed resume attempt must leave an auditable binding");
+	assert.equal(bindings[0].schemaVersion, 2);
+	assert.equal(bindings[0].modelText, undefined);
+	assert.equal(promptAuthorBindingMatchesText(bindings[0], VERIFICATION_RESULT_REMINDER), true);
+	assert.equal(bindings[0].source, "verification");
+	assert.deepEqual(bindings[0].author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
+	assert.equal(bindings[0].settlement?.outcome, "cancelled");
 
 	const statuses = gateStatusCalls(calls);
 	assert.strictEqual(

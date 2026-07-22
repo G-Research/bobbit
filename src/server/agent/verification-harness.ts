@@ -165,6 +165,7 @@ import {
 	type CommandRecoveryMode,
 } from "./verification-logic.js";
 import { nextBackoffDelay } from "./session-setup.js";
+import { dispatchTrackedSystemPrompt } from "./session-manager.js";
 import { Semaphore } from "./semaphore.js";
 import { ChildTeamScheduler } from "./child-team-scheduler.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
@@ -2208,7 +2209,11 @@ export class VerificationHarness {
 			// `pending` when the rerun context is unavailable).
 			let reminderStarted = false;
 			try {
-				await session.rpcClient.promptWhenReady(reminderPrompt, undefined);
+				await dispatchTrackedSystemPrompt(session, reminderPrompt, {
+					source: "verification",
+					whenReady: true,
+					now: () => this.clock.now(),
+				});
 				// Reminder dispatch is fire-and-forget on the RPC channel; the session
 				// stays `idle` for a tick before transitioning to `streaming`. This fixed
 				// settle is outside the fresh active-turn allowance.
@@ -2268,7 +2273,11 @@ export class VerificationHarness {
 				console.log(`[verification] Restart continuation for resumed session ${step.sessionId} ended without verification_result, sending ${fallbackKind} fallback reminder...`);
 				let fallbackStarted = false;
 				try {
-					await session.rpcClient.promptWhenReady(fallbackPrompt, undefined);
+					await dispatchTrackedSystemPrompt(session, fallbackPrompt, {
+						source: "verification",
+						whenReady: true,
+						now: () => this.clock.now(),
+					});
 					fallbackStarted = await this.sessionManager!.waitForStreaming(step.sessionId, 10_000).then(() => true).catch(() => false);
 				} catch (resumeErr) {
 					const msg = (resumeErr as Error)?.message || String(resumeErr);
@@ -4257,11 +4266,11 @@ export class VerificationHarness {
 				const session = sessionManager.getSession(args.sessionId);
 				if (!session?.rpcClient) throw new Error("Session missing after same-session resurrection");
 
-				if (typeof session.rpcClient.promptWhenReady === "function") {
-					await session.rpcClient.promptWhenReady(args.prompt, undefined);
-				} else {
-					await session.rpcClient.prompt(args.prompt);
-				}
+				await dispatchTrackedSystemPrompt(session, args.prompt, {
+					source: "verification",
+					whenReady: typeof session.rpcClient.promptWhenReady === "function",
+					now: () => this.clock.now(),
+				});
 
 				// Readiness, restart, prompt delivery, and this fixed settle window are
 				// outside the fresh active-turn allowance.
@@ -4500,7 +4509,10 @@ export class VerificationHarness {
 			});
 
 			// Send kickoff prompt
-			await session.rpcClient.prompt(kickoff);
+			await dispatchTrackedSystemPrompt(session, kickoff, {
+				source: "verification",
+				now: () => this.clock.now(),
+			});
 
 			// Kickoff transport is outside the allowance. Once dispatched, distinguish
 			// a real idle turn from expiry of the full active-thinking window.
@@ -4543,7 +4555,10 @@ export class VerificationHarness {
 				const jsonErr = lastErroredToolOutput ? detectJsonValidationError(lastErroredToolOutput) : null;
 				const reminderPrompt = jsonErr ? buildJsonRetryPrompt(jsonErr) : buildContextRichReminder(kickoff);
 				console.log(`[verification][reviewer-lifecycle] reminder ${reminderNum}/${MAX_REVIEWER_REMINDERS} to ${sessionId} for "${step.name}" (${jsonErr ? "JSON-retry" : "context-rich"}) — re-nudging same session (context preserved).`);
-				await session.rpcClient.prompt(reminderPrompt);
+				await dispatchTrackedSystemPrompt(session, reminderPrompt, {
+					source: "verification",
+					now: () => this.clock.now(),
+				});
 				// Wait for the agent to actually pick up the reminder before racing
 				// against waitForIdle — see _tryResumeFromSession for rationale. Give
 				// it a fair settle window; if it never starts streaming we still loop
@@ -4933,7 +4948,10 @@ export class VerificationHarness {
 			});
 
 			// Send kickoff prompt
-			await session.rpcClient.prompt(kickoff);
+			await dispatchTrackedSystemPrompt(session, kickoff, {
+				source: "verification",
+				now: () => this.clock.now(),
+			});
 
 			// Kickoff transport is outside the allowance. Each active QA turn gets
 			// the full resolved window once the prompt has been dispatched.
@@ -4978,7 +4996,10 @@ export class VerificationHarness {
 				const qaJsonErr = qaLastErroredToolOutput ? detectJsonValidationError(qaLastErroredToolOutput) : null;
 				const qaReminderPrompt = qaJsonErr ? buildJsonRetryPrompt(qaJsonErr) : buildContextRichReminder(kickoff);
 				console.log(`[verification][verifier-lifecycle] QA reminder ${reminderNum}/${MAX_REVIEWER_REMINDERS} to ${qaSessionId} for "${step.name}" (${qaJsonErr ? "JSON-retry" : "context-rich"}) — re-nudging same session (context preserved).`);
-				await session.rpcClient.prompt(qaReminderPrompt);
+				await dispatchTrackedSystemPrompt(session, qaReminderPrompt, {
+					source: "verification",
+					now: () => this.clock.now(),
+				});
 				const started = await this.sessionManager!.waitForStreaming(qaSessionId, REVIEWER_REMINDER_STREAM_SETTLE_MS).then(() => true).catch(() => false);
 				if (!started) continue;
 				const result2 = await this.waitForReviewTurn(qaSessionId, resultPromise, timeoutMs);

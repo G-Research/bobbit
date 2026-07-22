@@ -23,6 +23,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { createHash } from "node:crypto";
 import { Document as FlexDocument } from "flexsearch";
+import { isMessageAuthor, type MessageAuthorKind } from "../../shared/message-author.js";
 import { profileAsync } from "../agent/profiling.js";
 import { highlight } from "./snippet.js";
 import {
@@ -122,6 +123,10 @@ export interface FlexDoc {
 	goal_id: string | null;
 	session_id: string | null;
 	session_title: string | null;
+	/** Optional for backward compatibility with indexes written before author metadata. */
+	author_kind?: MessageAuthorKind | null;
+	author_id?: string | null;
+	author_label?: string | null;
 	file_path: string | null;
 	start_line: number | null;
 	end_line: number | null;
@@ -656,7 +661,10 @@ export class FlexSearchStore {
 			loadedDocsHash = createHash("sha256").update(raw).digest("hex");
 			const parsed = JSON.parse(raw) as FlexDoc[];
 			for (const d of parsed) {
-				if (d && typeof d.id === "string") this._docs.set(d.id, d);
+				if (d && typeof d.id === "string") {
+					const prepared = this._prepare(d);
+					this._docs.set(prepared.id, prepared);
+				}
 			}
 		} catch {
 			// Missing / corrupt — caller detects via needsRebuild when meta
@@ -764,7 +772,20 @@ export class FlexSearchStore {
 				: extractIdentifierTokens(
 					[d.title ?? "", d.text ?? ""].filter((s) => s.length > 0).join(" "),
 				);
-		return { ...d, archived_tag, identifier_text };
+		const authorCandidate = {
+			kind: d.author_kind,
+			id: d.author_id,
+			label: d.author_label,
+		};
+		const author = isMessageAuthor(authorCandidate) ? authorCandidate : null;
+		return {
+			...d,
+			archived_tag,
+			identifier_text,
+			author_kind: author?.kind ?? null,
+			author_id: author?.id ?? null,
+			author_label: author?.label ?? null,
+		};
 	}
 }
 
@@ -805,6 +826,16 @@ export function toSearchResult(doc: FlexDoc, query: string, finalScore: number):
 	if (doc.session_id) result.sessionId = doc.session_id;
 	if (doc.session_title) result.sessionTitle = doc.session_title;
 	if (doc.project_id) result.projectId = doc.project_id;
+	const authorCandidate = {
+		kind: doc.author_kind,
+		id: doc.author_id,
+		label: doc.author_label,
+	};
+	if (isMessageAuthor(authorCandidate)) {
+		result.authorKind = authorCandidate.kind;
+		result.authorId = authorCandidate.id;
+		result.authorLabel = authorCandidate.label;
+	}
 	if (doc.file_path) result.filePath = doc.file_path;
 	if (doc.start_line != null) result.startLine = doc.start_line;
 	if (doc.end_line != null) result.endLine = doc.end_line;
