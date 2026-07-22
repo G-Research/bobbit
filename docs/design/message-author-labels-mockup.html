@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Conditional prompt author labels</title>
+<!--
+  Visual design artifact only. The inline Bobbit silhouette makes this mock
+  self-contained; production must use the canonical sprite renderer/data from
+  src/ui/bobbit-render.ts and must not copy the inline mock sprite.
+-->
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:var(--background);color:var(--foreground)}
+body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.page{max-width:1080px;margin:auto;padding:24px}
+.kicker{font-size:11px;font-weight:750;letter-spacing:.09em;text-transform:uppercase;color:var(--muted-foreground)}
+h1{font-size:28px;line-height:1.15;letter-spacing:-.025em;margin:6px 0}
+.lead{max-width:760px;margin:0;color:var(--muted-foreground);font-size:14px;line-height:1.5}
+.toolbar{display:flex;align-items:center;gap:6px;margin:20px 0 14px;padding:7px;border:1px solid var(--border);border-radius:10px;background:var(--card)}
+.toolbar-label{padding:0 5px;color:var(--muted-foreground);font-size:11px;font-weight:650}
+.tab{border:1px solid transparent;border-radius:7px;padding:6px 10px;background:transparent;color:var(--muted-foreground);font:inherit;font-size:12px;cursor:pointer}
+.tab:hover{background:var(--accent);color:var(--foreground)}
+.tab.active{border-color:var(--border);background:var(--secondary);color:var(--secondary-foreground);box-shadow:0 1px 2px color-mix(in oklch,var(--foreground) 8%,transparent)}
+.comparison{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.panel{overflow:hidden;border:1px solid var(--border);border-radius:12px;background:var(--card);box-shadow:0 10px 28px color-mix(in oklch,var(--foreground) 5%,transparent)}
+.panel-head{display:flex;align-items:center;justify-content:space-between;min-height:52px;padding:10px 14px;border-bottom:1px solid var(--border)}
+.panel-title{font-size:13px;font-weight:750}
+.panel-desc{margin-top:2px;color:var(--muted-foreground);font-size:10px}
+.badge{border:1px solid color-mix(in oklch,var(--primary) 30%,var(--border));border-radius:99px;padding:3px 7px;background:color-mix(in oklch,var(--primary) 9%,transparent);color:var(--primary);font-size:9px;font-weight:750}
+.chat{min-height:438px;background:color-mix(in oklch,var(--background) 78%,var(--card))}
+.chat-head{display:flex;align-items:center;gap:9px;height:43px;padding:0 14px;border-bottom:1px solid var(--border);background:var(--card)}
+.logo{display:grid;place-items:center;width:23px;height:23px;border-radius:6px;background:var(--primary);color:var(--primary-foreground);font-size:10px;font-weight:850}
+.session strong{display:block;font-size:11px}
+.session span{display:block;color:var(--muted-foreground);font-size:9px}
+.messages{display:flex;flex-direction:column;gap:18px;padding:19px 14px}
+.exchange{display:flex;flex-direction:column;gap:8px}
+.prompt-wrap{display:flex;flex-direction:column;align-items:flex-start;max-width:96%}
+.prompt{position:relative;max-width:100%;padding:9px 13px 9px 27px;border:1px solid color-mix(in oklch,var(--primary) 12%,var(--border));border-radius:6px;background:linear-gradient(135deg,color-mix(in oklch,var(--primary) 9%,var(--card)),color-mix(in oklch,var(--primary) 4%,var(--card)));box-shadow:0 2px 8px color-mix(in oklch,var(--primary) 8%,transparent)}
+.prompt:before{content:"❯";position:absolute;left:9px;top:13px;color:var(--primary);font-size:11px;font-weight:850}
+.prompt.labelled{margin-top:7px;padding-top:14px}
+.prompt.labelled:before{top:18px}
+.prompt-text{font-size:12px;line-height:1.5}
+.reply{padding:0 8px;color:var(--muted-foreground);font-size:11px;line-height:1.45}
+.author{position:absolute;z-index:2;top:0;left:10px;transform:translateY(-56%);display:flex;align-items:center;gap:5px;width:max-content;max-width:calc(100% - 18px);min-height:22px;padding:1px 7px 1px 3px;border:1px solid var(--border);border-radius:6px;background:var(--card);box-shadow:0 2px 5px color-mix(in oklch,var(--foreground) 9%,transparent);color:var(--muted-foreground)}
+.letter-avatar{display:grid;place-items:center;flex:none;width:16px;height:16px;border:1px solid var(--border);border-radius:4px;background:var(--secondary);color:var(--secondary-foreground);font-size:7px;font-weight:850}
+.sprite-avatar{display:grid;place-items:center;flex:none;width:20px;height:17px;overflow:visible}
+.bobbit-sprite{display:block;width:16px;height:14.4px;overflow:visible;filter:hue-rotate(var(--sprite-hue,0deg))}
+.name{max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--foreground);font-size:10px;font-weight:670}
+.kind{padding-left:6px;border-left:1px solid var(--border);font-size:8px;letter-spacing:.07em;text-transform:uppercase}
+.current .author{display:none}
+.current .prompt.labelled{margin-top:0;padding-top:9px}
+.current .prompt.labelled:before{top:13px}
+.rules{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-top:12px}
+.rule{display:flex;gap:10px;align-items:flex-start;padding:12px;border:1px solid var(--border);border-radius:9px;background:var(--card)}
+.rule-num{display:grid;place-items:center;flex:none;width:21px;height:21px;border-radius:6px;background:var(--secondary);color:var(--secondary-foreground);font-size:10px;font-weight:800}
+.rule strong{display:block;font-size:11px}
+.rule p{margin:4px 0 0;color:var(--muted-foreground);font-size:10px;line-height:1.45}
+.note{margin-top:10px;padding:10px 11px;border:1px solid var(--border);border-radius:8px;background:color-mix(in oklch,var(--muted) 55%,transparent);color:var(--muted-foreground);font-size:10px;line-height:1.5}
+.note code{color:var(--foreground)}
+@media(max-width:760px){.page{padding:16px}.comparison{grid-template-columns:1fr}.current{display:none}.rules{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main class="page">
+<div class="kicker">Message attribution · identity-matched avatars</div>
+<h1>Only show identity when it helps</h1>
+<p class="lead">Agent labels reuse the same Bobbit hue and accessory as their sidebar entry. Human and system labels stay neutral.</p>
+<div class="toolbar"><span class="toolbar-label">Chat scenario</span><button class="tab active" data-scenario="mixed">Mixed authors</button><button class="tab" data-scenario="single">Single human</button></div>
+<section class="comparison">
+<article class="panel current"><header class="panel-head"><div><div class="panel-title">Current</div><div class="panel-desc">No author labels</div></div></header><div class="chat"><div class="chat-head"><div class="logo">B</div><div class="session"><strong>Author metadata review</strong><span>General · idle</span></div></div><div class="messages" id="currentMessages"></div></div></article>
+<article class="panel"><header class="panel-head"><div><div class="panel-title">Proposed</div><div class="panel-desc" id="scenarioDescription">Labels identify mixed prompt sources</div></div><span class="badge">Top-left</span></header><div class="chat"><div class="chat-head"><div class="logo">B</div><div class="session"><strong id="sessionTitle">Author metadata review</strong><span>General · idle</span></div></div><div class="messages" id="proposedMessages"></div></div></article>
+</section>
+<section class="rules">
+<div class="rule"><span class="rule-num">1</span><div><strong>Agent</strong><p>Reuse its sidebar Bobbit identity with static forward-facing eyes.</p></div></div>
+<div class="rule"><span class="rule-num">2</span><div><strong>System-generated</strong><p>Show “System” only; do not label system prompts “Bobbit.”</p></div></div>
+<div class="rule"><span class="rule-num">3</span><div><strong>Single-human chat</strong><p>Hide all author labels because there is no ambiguity.</p></div></div>
+</section>
+<div class="note">Production must reuse the canonical static Bobbit renderer with the author session’s hue and accessory. It must not copy the mock sprite data.</div>
+</main>
+<script>
+const BODY=[['','','','K','K','K','K','K','',''],['','','K','M','M','M','L','L','K',''],['','K','M','M','M','M','M','L','M','K'],['K','M','M','M','M','M','M','M','M','K'],['K','M','M','M','M','M','M','M','M','K'],['K','M','M','M','M','M','M','M','M','K'],['K','D','M','M','M','M','M','M','M','K'],['','K','D','M','M','M','M','M','K',''],['','','K','K','K','K','K','K','','']];
+function sprite(hue=-35){let rects='';for(let y=0;y<9;y++)for(let x=0;x<10;x++){const key=BODY[y][x];if(!key)continue;const eye=(x===3||x===6)&&(y===4||y===5);const fill=eye||key==='K'?'#000':key==='M'?'#8ec63f':key==='L'?'#b5d98a':'#6b9930';rects+=`<rect x="${x}" y="${y}" width="1" height="1" fill="${fill}"/>`}return `<span class="sprite-avatar"><svg class="bobbit-sprite" style="--sprite-hue:${hue}deg" viewBox="0 0 10 9" aria-hidden="true">${rects}</svg></span>`}
+const mixed=[
+{initials:'U',name:'User',kind:'',id:'user:local',text:'Can we keep normal conversations visually quiet?',reply:'Yes. Attribution can remain secondary to the prompt.'},
+{sprite:true,hue:-35,name:'Test Coordinator',kind:'Agent',id:'staff:test-coordinator',text:'Please verify author attribution survives a reconnect.',reply:'I’ll test live events, reload, and restored history.'},
+{initials:'S',name:'System',kind:'',id:'system:bobbit',text:'Verification completed: all author metadata checks passed.',reply:'The result is recorded and ready for review.'}
+];
+const single=[
+{initials:'U',name:'User',kind:'',id:'user:local',text:'Can we keep normal conversations visually quiet?',reply:'Yes. There is only one prompt author in this chat.'},
+{initials:'U',name:'User',kind:'',id:'user:local',text:'Does that mean the label disappears completely?',reply:'Correct. The bubble keeps its existing compact layout.'},
+{initials:'U',name:'User',kind:'',id:'user:local',text:'Great, that avoids repeating my name on every message.',reply:'Exactly.'}
+];
+let scenario='mixed';
+function avatar(row){return row.sprite?sprite(row.hue):`<span class="letter-avatar">${row.initials}</span>`}
+function author(row){return `<div class="author" title="${row.id}">${avatar(row)}<span class="name">${row.name}</span>${row.kind?`<span class="kind">${row.kind}</span>`:''}</div>`}
+function messageRow(row,show){return `<div class="exchange"><div class="prompt-wrap"><div class="prompt ${show?'labelled':''}">${show?author(row):''}<div class="prompt-text">${row.text}</div></div></div><div class="reply">${row.reply}</div></div>`}
+function render(){const rows=scenario==='mixed'?mixed:single;const show=scenario==='mixed';document.getElementById('currentMessages').innerHTML=rows.map(row=>messageRow(row,true)).join('');document.getElementById('proposedMessages').innerHTML=rows.map(row=>messageRow(row,show)).join('');document.querySelectorAll('.tab').forEach(element=>element.classList.toggle('active',element.dataset.scenario===scenario));document.getElementById('scenarioDescription').textContent=show?'Labels identify mixed prompt sources':'No labels when every prompt is from one human';document.getElementById('sessionTitle').textContent=show?'Author metadata review':'General conversation'}
+document.querySelectorAll('.tab').forEach(element=>element.onclick=()=>{scenario=element.dataset.scenario;render()});
+render();
+</script>
+</body>
+</html>
