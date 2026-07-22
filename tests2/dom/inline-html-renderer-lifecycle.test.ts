@@ -8,6 +8,10 @@ import { render } from "lit";
 import { PREVIEW_SWIPE_SCRIPT, PREVIEW_THEME_BRIDGE } from "../../src/shared/preview-bridge-scripts.js";
 import { EditRenderer } from "../../src/ui/tools/renderers/EditRenderer.js";
 import { HtmlRenderer } from "../../src/ui/tools/renderers/HtmlRenderer.js";
+import {
+	INLINE_HTML_THEME_BRIDGE_ATTRIBUTE,
+	prepareInlineHtml,
+} from "../../src/ui/tools/renderers/prepare-inline-html.js";
 import { WriteRenderer } from "../../src/ui/tools/renderers/WriteRenderer.js";
 
 const okResult = {
@@ -215,6 +219,30 @@ describe("inline HtmlRenderer preparation", () => {
 			expect(originalSource(mounted.container)).toBe(fragment);
 			mounted.container.remove();
 		}
+	});
+
+	it("injects beside an authored marker collision and stays idempotent on repeated preparation", () => {
+		const collision = `<!doctype html><html><head>
+<script ${INLINE_HTML_THEME_BRIDGE_ATTRIBUTE}></script>
+<script id="authored-after-marker">window.__authoredAfterMarker = true;</script>
+</head><body>marker collision</body></html>`;
+
+		const preparedOnce = prepareInlineHtml(collision);
+		const preparedDocument = new DOMParser().parseFromString(preparedOnce, "text/html");
+		const markedScripts = preparedDocument.querySelectorAll<HTMLScriptElement>(
+			`script[${INLINE_HTML_THEME_BRIDGE_ATTRIBUTE}]`,
+		);
+		expect(markedScripts).toHaveLength(2);
+		expect(bridgeScripts(preparedDocument)).toHaveLength(1);
+		expect(preparedDocument.querySelector("head > script")?.textContent?.trim()).toBe(canonicalBridgeBody());
+		expect(Array.from(markedScripts).some(script => script.textContent === "")).toBe(true);
+		expect(preparedDocument.querySelector("#authored-after-marker")?.textContent).toContain("__authoredAfterMarker");
+
+		const preparedTwice = prepareInlineHtml(preparedOnce);
+		expect(preparedTwice).toBe(preparedOnce);
+		const repeatedDocument = new DOMParser().parseFromString(preparedTwice, "text/html");
+		expect(bridgeScripts(repeatedDocument)).toHaveLength(1);
+		expect(repeatedDocument.querySelectorAll(`script[${INLINE_HTML_THEME_BRIDGE_ATTRIBUTE}]`)).toHaveLength(2);
 	});
 
 	it("keeps a historical completed iframe stable across equivalent parent renders", () => {
