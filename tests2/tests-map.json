@@ -1405,7 +1405,11 @@
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/project-onboarding.journey.spec.ts",
+      "path": "tests2/browser/journeys/project-onboarding-dialog.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/project-onboarding-preflight.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
@@ -5511,7 +5515,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-dialog.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -5553,7 +5557,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-preflight.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -5563,7 +5567,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-preflight.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -5573,7 +5577,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-preflight.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -5583,7 +5587,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-preflight.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -5593,7 +5597,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-dialog.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -5603,7 +5607,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-preflight.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -6386,7 +6390,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-dialog.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -6584,7 +6588,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-dialog.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -6728,7 +6732,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-dialog.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -7205,7 +7209,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-dialog.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -7235,7 +7239,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-dialog.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -7245,7 +7249,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-dialog.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
