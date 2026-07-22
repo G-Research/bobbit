@@ -21,57 +21,75 @@ export const PREVIEW_THEME_BRIDGE = `<script>
 		   Embedded iframes (parent !== window) continue past this guard so live
 		   theme toggles in the host app flow through. */
 		if (parent === window) return;
+
+		/* A repeated canonical bridge in the same document must not install
+		   another observer. document.open() keeps the Window but replaces the
+		   root, so streaming rewrites intentionally install for the new root. */
+		var installKey = '__bobbitPreviewThemeBridgeInstalled_v1__';
 		var root = document.documentElement;
-		var parentRoot = parent.document.documentElement;
-		var parentStyles = parent.getComputedStyle(parentRoot);
+		var previousInstall = window[installKey];
+		if (previousInstall && previousInstall.root === root) return;
+		if (previousInstall && previousInstall.observer) {
+			try { previousInstall.observer.disconnect(); } catch(e) {}
+		}
+		var install = { root: root, observer: null };
+		window[installKey] = install;
+
+		var parentDocument = parent.document;
+		var parentRoot = parentDocument.documentElement;
 
 		function sync() {
-			/* Mirror dark class */
-			root.classList.toggle('dark', parentRoot.classList.contains('dark'));
-
-			/* Mirror data-palette attribute */
-			var palette = parentRoot.getAttribute('data-palette');
-			if (palette) root.setAttribute('data-palette', palette);
-			else root.removeAttribute('data-palette');
-
-			/* Copy all CSS custom properties from the app stylesheet */
-			var vars = [];
 			try {
-				for (var s = 0; s < parent.document.styleSheets.length; s++) {
-					var sheet = parent.document.styleSheets[s];
-					try {
-						var rules = sheet.cssRules || sheet.rules;
-						for (var r = 0; r < rules.length; r++) {
-							var rule = rules[r];
-							if (rule.style) {
-								for (var i = 0; i < rule.style.length; i++) {
-									var name = rule.style[i];
-									if (name.startsWith('--')) vars.push(name);
+				var parentStyles = parent.getComputedStyle(parentRoot);
+
+				/* Mirror dark class */
+				root.classList.toggle('dark', parentRoot.classList.contains('dark'));
+
+				/* Mirror data-palette attribute */
+				var palette = parentRoot.getAttribute('data-palette');
+				if (palette) root.setAttribute('data-palette', palette);
+				else root.removeAttribute('data-palette');
+
+				/* Copy all CSS custom properties from the app stylesheet */
+				var vars = [];
+				try {
+					for (var s = 0; s < parentDocument.styleSheets.length; s++) {
+						var sheet = parentDocument.styleSheets[s];
+						try {
+							var rules = sheet.cssRules || sheet.rules;
+							for (var r = 0; r < rules.length; r++) {
+								var rule = rules[r];
+								if (rule.style) {
+									for (var i = 0; i < rule.style.length; i++) {
+										var name = rule.style[i];
+										if (name.startsWith('--')) vars.push(name);
+									}
 								}
 							}
-						}
-					} catch(e) { /* cross-origin sheet, skip */ }
+						} catch(e) { /* cross-origin sheet, skip */ }
+					}
+				} catch(e) {}
+
+				/* Deduplicate and copy computed values */
+				var seen = {};
+				for (var v = 0; v < vars.length; v++) {
+					if (seen[vars[v]]) continue;
+					seen[vars[v]] = true;
+					var val = parentStyles.getPropertyValue(vars[v]);
+					if (val) root.style.setProperty(vars[v], val);
 				}
-			} catch(e) {}
 
-			/* Deduplicate and copy computed values */
-			var seen = {};
-			for (var v = 0; v < vars.length; v++) {
-				if (seen[vars[v]]) continue;
-				seen[vars[v]] = true;
-				var val = parentStyles.getPropertyValue(vars[v]);
-				if (val) root.style.setProperty(vars[v], val);
-			}
+				/* Copy the app font stack alongside every live theme sync. */
+				root.style.fontFamily = parentStyles.fontFamily;
+			} catch(e) { /* transient parent/style access failure — keep authored HTML running */ }
 		}
-
-		/* Copy the app font stack */
-		root.style.fontFamily = parentStyles.fontFamily;
 
 		/* Initial sync */
 		sync();
 
 		/* Watch for class/attribute changes on the parent root element */
 		var observer = new MutationObserver(sync);
+		install.observer = observer;
 		observer.observe(parentRoot, { attributes: true, attributeFilter: ['class', 'data-palette', 'style'] });
 	} catch(e) { /* cross-origin or other error — degrade gracefully */ }
 })();

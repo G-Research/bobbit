@@ -4,6 +4,7 @@ import { createRef, ref } from "lit/directives/ref.js";
 import { AppWindow } from "lucide";
 import { renderCollapsibleHeader, renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
+import { prepareInlineHtml } from "./prepare-inline-html.js";
 
 interface HtmlWriteParams {
 	path: string;
@@ -49,17 +50,18 @@ export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 	private _writeToIframe(content: string) {
 		const iframe = this._iframe;
 		if (!iframe) return;
+		const preparedContent = prepareInlineHtml(content);
 		try {
 			const doc = iframe.contentDocument;
 			if (doc) {
 				doc.open();
-				doc.write(content);
+				doc.write(preparedContent);
 				doc.close();
 				this._lastAppliedContent = content;
 				this._autoResize(iframe);
 			}
 		} catch {
-			iframe.srcdoc = content;
+			iframe.srcdoc = preparedContent;
 			this._lastAppliedContent = content;
 		}
 	}
@@ -150,6 +152,7 @@ export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 		// so parent re-renders won't cause iframe reloads.
 		if (isComplete) {
 			this._resetStreamingState();
+			const preparedHtml = prepareInlineHtml(htmlContent);
 
 			const onLoad = (e: Event) => {
 				const iframe = e.target as HTMLIFrameElement;
@@ -162,10 +165,10 @@ export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 						${renderCollapsibleHeader(state, AppWindow, headerText, contentRef, chevronRef, false)}
 						<div class="mt-3 rounded-lg border border-border overflow-hidden" style="position: relative;">
 							<iframe
-								.srcdoc=${htmlContent}
+								.srcdoc=${preparedHtml}
 								sandbox="allow-scripts allow-same-origin"
 								@load=${onLoad}
-								style="width: 100%; height: 300px; border: none; background: #0c0c1a;"
+								style="width: 100%; height: 300px; border: none; background: var(--background, Canvas);"
 								title=${params?.path || "HTML preview"}
 							></iframe>
 						</div>
@@ -213,12 +216,12 @@ export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 						<iframe
 							${ref(streamingIframeSetup)}
 							sandbox="allow-scripts allow-same-origin"
-							style="width: 100%; height: 300px; border: none; background: #0c0c1a;"
+							style="width: 100%; height: 300px; border: none; background: var(--background, Canvas);"
 							title=${params?.path || "HTML preview"}
 						></iframe>
 						<div style="
 							position: absolute; inset: 0; z-index: 10;
-							background: rgba(10, 10, 20, 0.2);
+							background: color-mix(in oklch, var(--background, Canvas) 20%, transparent);
 							display: flex; align-items: center; justify-content: center;
 							pointer-events: none;
 						">
@@ -229,8 +232,8 @@ export class HtmlRenderer implements ToolRenderer<HtmlWriteParams, any> {
 							</style>
 							<div style="
 								width: 20px; height: 20px;
-								border: 2px solid rgba(255,255,255,0.15);
-								border-top-color: rgba(255,255,255,0.6);
+								border: 2px solid color-mix(in oklch, var(--foreground, CanvasText) 15%, transparent);
+								border-top-color: color-mix(in oklch, var(--foreground, CanvasText) 60%, transparent);
 								border-radius: 50%;
 								animation: html-renderer-spin 0.8s linear infinite;
 							"></div>
