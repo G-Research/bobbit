@@ -4092,7 +4092,6 @@ html {
 .prompt-author-kind {
 	font-size: 8px;
 	letter-spacing: 0.07em;
-	text-transform: uppercase;
 }
 
 .prompt-row--labelled > .message-timestamp {
