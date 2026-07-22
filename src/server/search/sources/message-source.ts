@@ -24,6 +24,7 @@ import { contentHashOf } from "./hash.js";
 import { formatSessionSearchTitle } from "./session-title.js";
 import {
 	createPromptAuthorStreamCorrelation,
+	projectCorrelatedPromptMessage,
 	readAuthorSidecar,
 	type PromptAuthorBinding,
 } from "../../agent/author-sidecar.js";
@@ -195,17 +196,29 @@ export class MessageIndexSource implements IndexSource {
 			let precedingAuthor: MessageAuthor | undefined;
 			let precedingAuthorIsUnknown = false;
 			for await (const row of streamTranscriptRows(filePath, session.lastActivity ?? 0)) {
-				const promptAuthor = correlation.resolve(row.message, row.msgIdx);
+				// Resolve once while content is still the exact raw Pi text. Stable
+				// id/timestamp correlation selects accountability; the projection helper
+				// independently requires the raw digest before removing a prefix.
+				const promptBinding = correlation.resolveBinding(row.message, row.msgIdx);
+				const promptAuthor = promptBinding?.author;
 				const isToolResult = isToolResultOnlyMessage(row.message);
 				const isOrdinaryPrompt = !isToolResult
 					&& (row.message.role === "user" || row.message.role === "user-with-attachments");
 				// Once compact correlation exceeds its cap, role alone cannot distinguish
-				// human prompts from sidecar-authored system/agent prompts. Omit rather
-				// than persisting the normalizer's legacy local-user fallback as fact.
+				// a human prompt from raw prefixed system/agent content. Never make that
+				// injected attribution searchable. Assistant and tool rows remain safe.
+				if (correlation.degraded && isOrdinaryPrompt) {
+					precedingAuthor = undefined;
+					precedingAuthorIsUnknown = true;
+					continue;
+				}
+				const projectedMessage = promptBinding
+					? projectCorrelatedPromptMessage(row.message, promptBinding)
+					: row.message;
 				const authorDependsOnDegradedCorrelation = correlation.degraded
-					&& ((isOrdinaryPrompt && !isMessageAuthor(promptAuthor))
-						|| (isToolResult && precedingAuthorIsUnknown));
-				const msg = normalizeVisibleMessage(row.message, {
+					&& isToolResult
+					&& precedingAuthorIsUnknown;
+				const msg = normalizeVisibleMessage(projectedMessage, {
 					...normalizationContext,
 					existingAuthorIsTrusted: false,
 					promptAuthor,

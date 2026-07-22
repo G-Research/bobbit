@@ -1,5 +1,9 @@
 import { isMessageAuthor, LOCAL_USER_AUTHOR, type MessageAuthor } from "../../shared/message-author.js";
-import type { PromptAuthorBinding } from "./author-sidecar.js";
+import {
+	extractPromptModelText,
+	promptAuthorBindingMatchesText,
+	type PromptAuthorBinding,
+} from "./author-sidecar.js";
 import type { InFlightSteerRecord, PersistedInFlightSteer } from "./session-store.js";
 
 /**
@@ -93,10 +97,16 @@ function hasStructuredSteerOccurrence(
 	);
 	if (!binding?.settlement) return false;
 
+	// The durable steer ledger intentionally keeps unprefixed base text, while a
+	// trusted agent/system echo may contain a dispatch-only model prefix. Prove
+	// the exact raw Pi occurrence against the settled sidecar digest before using
+	// its id/timestamp. Base-text equality must never authorize a prefixed echo.
+	if (typeof binding.modelTextDigest !== "string") return false;
 	const { messageId, messageTimestamp } = binding.settlement;
 	return messages.some((message) => {
 		if (!message || (message.role !== "user" && message.role !== "user-with-attachments")) return false;
-		if (extractUserText(message) !== record.text) return false;
+		const rawModelText = extractPromptModelText(message);
+		if (rawModelText === undefined || !promptAuthorBindingMatchesText(binding, rawModelText)) return false;
 		if (messageId && userMessageId(message) === messageId) return true;
 		if (messageTimestamp === undefined) return false;
 		const timestamp = epochMilliseconds(message.timestamp) ?? epochMilliseconds(message.ts);
