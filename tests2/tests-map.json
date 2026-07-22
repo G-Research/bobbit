@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/inline-html-theme-bridge-repro.test.ts",
+      "reason": "Fast failing-first regression proving completed srcdoc and streaming document.write inline HTML payloads are prepared through the canonical preview theme bridge in the compiled UI dependency graph.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/dom/project-audio-notification-paths.test.ts",
       "reason": "Deterministic foreground/background notification regressions proving agent-finish audio resolves from the source session project while favicon badges remain independent and non-blocking.",
       "execution": {
