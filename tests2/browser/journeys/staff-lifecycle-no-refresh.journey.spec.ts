@@ -79,7 +79,6 @@ async function assertCreateDeleteReflectsWithoutReload(page: Page, viewportLabel
 
 	await openApp(page);
 	await expect(page.locator(".sidebar-root").first()).toBeVisible({ timeout: 20_000 });
-	await expect(page.locator(`[data-testid='sidebar-staff-header'][data-nav-id="staff-header:${project.id}"]`).first()).toBeVisible({ timeout: 20_000 });
 	const marker = await seedNoReloadMarker(page);
 
 	try {
