@@ -87,6 +87,28 @@ async function openAddProjectDialog(page: import("@playwright/test").Page): Prom
 	await expect(page.locator(ADD_PROJECT.pickerInput)).toBeVisible({ timeout: 15_000 });
 }
 
+/**
+ * Commit an already-complete path through the picker's public selection event.
+ * This intentionally bypasses the typeahead debounce: the select-all journey
+ * verifies the scan controls, while the dedicated typeahead journey owns typed
+ * path/debounce coverage.
+ */
+async function selectCompletedProjectPath(
+	page: import("@playwright/test").Page,
+	path: string,
+): Promise<void> {
+	await page.locator(ADD_PROJECT.picker).evaluate((element, selectedPath) => {
+		const picker = element as HTMLElement & { setCompletedPath?: (value: string) => void };
+		picker.setCompletedPath?.(selectedPath);
+		picker.dispatchEvent(new CustomEvent("directory-select", {
+			bubbles: true,
+			composed: true,
+			detail: { path: selectedPath, source: "browse" },
+		}));
+	}, path);
+	await expect(page.locator(ADD_PROJECT.pickerInput)).toHaveValue(path);
+}
+
 test.describe("Journey: Project Onboarding", () => {
 	test.afterEach(async () => {
 		await clearAddedProjects();
@@ -341,7 +363,20 @@ test.describe("Journey: Project Onboarding", () => {
 			await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
 			await openAddProjectDialog(page);
 
-			await page.locator(ADD_PROJECT.pickerInput).fill(root);
+			const preflightResponse = page.waitForResponse((response) => {
+				try {
+					const url = new URL(response.url());
+					return url.pathname === "/api/projects/preflight"
+						&& url.searchParams.get("path") === root
+						&& response.request().method() === "GET";
+				} catch {
+					return false;
+				}
+			}, { timeout: 15_000 });
+			await selectCompletedProjectPath(page, root);
+			const response = await preflightResponse;
+			expect(response.ok(), `preflight request failed with HTTP ${response.status()}`).toBe(true);
+
 			const preflight = page.locator(ADD_PROJECT.preflightPanel);
 			await expect(preflight).toBeVisible({ timeout: 15_000 });
 			await expect.poll(
