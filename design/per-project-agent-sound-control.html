@@ -1,0 +1,629 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Per-project agent sound control prototype</title>
+<style>
+	/*
+		Per-project agent sound control — UX prototype
+
+		Consistency rationale
+		- The control sits in Project Settings → General, after Working Directory and
+		  before Worktree. It uses the existing 11px uppercase section heading, 14px
+		  field label, 11rem desktop label column, and native select styling already
+		  used by Project General → Docker Sandbox → Sandbox Mode.
+		- A select is preferred over a new segmented-control pattern: it is already
+		  present on this surface, has native keyboard behavior, and keeps the section
+		  as compact as the adjacent project configuration rows.
+		- This one preference saves immediately because its effect is expected to be
+		  immediate. It does not join the page-level pendingChanges/Save workflow.
+		- The header bell is intentionally backed only by mock global state. Changing
+		  a project override never changes its icon, tooltip, or action.
+
+		State and accessibility rationale
+		- The select has a programmatic label and described-by relationship to base,
+		  effective-value, and audio-only help text.
+		- Native select interaction supplies Tab focus, Up/Down option movement,
+		  Enter/Space opening, and platform-consistent screen-reader output.
+		- Saving/saved messages use a polite atomic live region. Save failures use
+		  role=alert, revert to the last persisted state, and provide a Retry action.
+		- Focus remains on the select after a change or error; no toast steals focus.
+		- Scope buttons and the header bell are native buttons with visible focus.
+		- Reduced-motion users receive no spinner rotation or animated transitions.
+	*/
+	* { box-sizing: border-box; }
+	html { min-height: 100%; background: var(--background); color: var(--foreground); }
+	body {
+		margin: 0;
+		min-height: 100vh;
+		background: var(--background);
+		color: var(--foreground);
+		font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif);
+		font-size: 14px;
+	}
+	button, select, input { font: inherit; }
+	button, select { color: inherit; }
+	button:focus-visible,
+	select:focus-visible,
+	input:focus-visible,
+	summary:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+	button { cursor: pointer; }
+	button:disabled, select:disabled { cursor: not-allowed; opacity: 0.56; }
+	.sr-only {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		margin: -1px;
+		overflow: hidden;
+		clip: rect(0, 0, 0, 0);
+		white-space: nowrap;
+		border: 0;
+	}
+	.prototype-page { min-height: 100vh; padding: 20px; }
+	.app-shell {
+		max-width: 1060px;
+		min-height: calc(100vh - 40px);
+		margin: 0 auto;
+		border: 1px solid var(--border);
+		border-radius: 12px;
+		overflow: hidden;
+		background: var(--background);
+		box-shadow: 0 18px 50px color-mix(in oklch, var(--foreground) 10%, transparent);
+	}
+	.app-bar,
+	.settings-header,
+	.scope-row,
+	.tab-row {
+		display: flex;
+		align-items: center;
+		border-bottom: 1px solid var(--border);
+	}
+	.app-bar {
+		height: 40px;
+		padding: 0 12px 0 16px;
+		justify-content: space-between;
+		background: var(--sidebar);
+		color: var(--sidebar-foreground, var(--foreground));
+	}
+	.brand { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 650; }
+	.brand-mark {
+		width: 15px;
+		height: 15px;
+		border: 1.5px solid var(--primary);
+		border-radius: 50%;
+		position: relative;
+	}
+	.brand-mark::after {
+		content: "";
+		position: absolute;
+		inset: 3px;
+		border-radius: 50%;
+		background: var(--primary);
+	}
+	.app-actions { display: flex; align-items: center; gap: 2px; }
+	.icon-button,
+	.back-button {
+		width: 30px;
+		height: 30px;
+		display: inline-grid;
+		place-items: center;
+		padding: 0;
+		border: 0;
+		border-radius: 6px;
+		background: transparent;
+		color: var(--muted-foreground);
+		transition: color 120ms ease, background 120ms ease;
+	}
+	.icon-button:hover,
+	.back-button:hover {
+		background: var(--secondary);
+		color: var(--foreground);
+	}
+	.icon-button svg,
+	.back-button svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+	.settings-header { min-height: 57px; padding: 10px 16px; gap: 12px; }
+	.settings-header h1 { margin: 0; font-size: 18px; line-height: 1.3; font-weight: 650; }
+	.scope-row,
+	.tab-row {
+		gap: 4px;
+		padding: 8px 16px;
+		overflow-x: auto;
+		scrollbar-width: thin;
+	}
+	.tab-row { background: color-mix(in oklch, var(--secondary) 20%, transparent); }
+	.scope-button,
+	.tab-button {
+		flex: none;
+		min-height: 32px;
+		padding: 6px 12px;
+		border: 1px solid transparent;
+		border-radius: 6px;
+		background: transparent;
+		color: var(--muted-foreground);
+		white-space: nowrap;
+		transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+	}
+	.scope-button { display: inline-flex; align-items: center; gap: 7px; }
+	.scope-button:hover,
+	.tab-button:hover { background: color-mix(in oklch, var(--secondary) 50%, transparent); color: var(--foreground); }
+	.scope-button[aria-current="true"],
+	.tab-button[aria-current="page"] {
+		border-color: var(--border);
+		background: var(--background);
+		color: var(--foreground);
+		box-shadow: 0 1px 2px color-mix(in oklch, var(--foreground) 7%, transparent);
+	}
+	.project-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--chart-3); }
+	.scope-button[data-project="acme"] .project-dot { background: var(--chart-1); }
+	.hq-icon { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.7; }
+	.settings-content { overflow-y: auto; min-height: 610px; }
+	.content-inner { width: min(100%, 768px); margin: 0 auto; padding: 16px; }
+	.project-name { margin: 0 0 24px; font-size: 14px; line-height: 1.4; font-weight: 500; }
+	.section { display: flex; flex-direction: column; gap: 8px; }
+	.section-kicker {
+		font-size: 11px;
+		line-height: 1.2;
+		font-weight: 550;
+		letter-spacing: 0.075em;
+		text-transform: uppercase;
+		color: var(--muted-foreground);
+	}
+	.section-intro,
+	.field-help,
+	.field-note,
+	.muted-copy {
+		margin: 0;
+		color: var(--muted-foreground);
+		line-height: 1.45;
+	}
+	.section-intro { font-size: 12px; margin-top: -4px; }
+	.field-row { display: flex; align-items: center; gap: 12px; }
+	.field-label { width: 176px; flex: none; font-size: 14px; font-weight: 500; color: var(--foreground); }
+	.text-input,
+	.sound-select {
+		min-width: 0;
+		padding: 4px 8px;
+		border: 1px solid var(--input);
+		border-radius: 6px;
+		background: var(--background);
+		color: var(--foreground);
+		line-height: 1.45;
+	}
+	.text-input { flex: 1; color: var(--foreground); }
+	.sound-select { width: 224px; min-height: 32px; }
+	.text-input:hover,
+	.sound-select:hover { border-color: color-mix(in oklch, var(--foreground) 26%, var(--input)); }
+	.sound-select[aria-busy="true"] { color: var(--muted-foreground); }
+	.field-help,
+	.field-note,
+	.save-feedback { margin-left: 188px; font-size: 11px; }
+	.field-help strong { color: var(--foreground); font-weight: 550; }
+	.field-note { display: flex; align-items: flex-start; gap: 6px; }
+	.field-note svg { width: 13px; height: 13px; margin-top: 1px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; }
+	.effective {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		width: fit-content;
+		margin-left: 188px;
+		padding: 3px 8px;
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		background: color-mix(in oklch, var(--secondary) 45%, transparent);
+		color: var(--muted-foreground);
+		font-size: 11px;
+		line-height: 1.3;
+	}
+	.effective-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted-foreground); }
+	.effective[data-effective="on"] .effective-dot { background: var(--positive); }
+	.effective strong { color: var(--foreground); font-weight: 600; }
+	hr { margin: 22px 0; border: 0; border-top: 1px solid var(--border); }
+	.save-feedback { min-height: 18px; display: flex; align-items: center; gap: 7px; }
+	.status-line { display: inline-flex; align-items: center; gap: 6px; color: var(--muted-foreground); }
+	.status-line[data-state="saved"] { color: var(--positive); }
+	.spinner {
+		width: 12px;
+		height: 12px;
+		border: 1.5px solid var(--border);
+		border-top-color: var(--primary);
+		border-radius: 50%;
+		animation: spin 700ms linear infinite;
+	}
+	@keyframes spin { to { transform: rotate(360deg); } }
+	.error-box {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 7px;
+		width: fit-content;
+		padding: 7px 9px;
+		border: 1px solid color-mix(in oklch, var(--negative) 45%, var(--border));
+		border-radius: 6px;
+		background: color-mix(in oklch, var(--negative) 9%, transparent);
+		color: var(--negative);
+	}
+	.retry-button {
+		padding: 2px 7px;
+		border: 1px solid color-mix(in oklch, var(--negative) 50%, var(--border));
+		border-radius: 5px;
+		background: var(--background);
+		color: var(--foreground);
+		font-size: 11px;
+	}
+	.retry-button:hover { background: color-mix(in oklch, var(--negative) 10%, var(--background)); }
+	.loading-state { min-height: 260px; display: flex; align-items: flex-start; gap: 8px; padding-top: 12px; color: var(--muted-foreground); }
+	.prototype-controls {
+		width: min(1060px, calc(100vw - 40px));
+		margin: 14px auto 20px;
+		border: 1px solid var(--border);
+		border-radius: 9px;
+		background: var(--popover);
+		color: var(--popover-foreground, var(--foreground));
+		box-shadow: 0 16px 42px color-mix(in oklch, var(--foreground) 16%, transparent);
+	}
+	.prototype-controls summary {
+		list-style: none;
+		padding: 9px 11px;
+		font-size: 12px;
+		font-weight: 600;
+		cursor: pointer;
+	}
+	.prototype-controls summary::-webkit-details-marker { display: none; }
+	.prototype-controls summary::after { content: "+"; float: right; color: var(--muted-foreground); }
+	.prototype-controls[open] summary::after { content: "−"; }
+	.control-body { display: flex; flex-direction: column; gap: 10px; padding: 0 11px 11px; border-top: 1px solid var(--border); }
+	.control-copy { margin: 9px 0 0; font-size: 11px; color: var(--muted-foreground); line-height: 1.45; }
+	.control-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; }
+	.control-select {
+		max-width: 180px;
+		min-height: 29px;
+		padding: 3px 7px;
+		border: 1px solid var(--input);
+		border-radius: 5px;
+		background: var(--background);
+	}
+	.secondary-button,
+	.simulate-button {
+		padding: 5px 9px;
+		border: 1px solid var(--border);
+		border-radius: 5px;
+		background: var(--background);
+		color: var(--foreground);
+		font-size: 12px;
+	}
+	.secondary-button:hover,
+	.simulate-button:hover { background: var(--secondary); }
+	.control-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+	.sim-result {
+		min-height: 36px;
+		padding: 7px 8px;
+		border: 1px solid var(--border);
+		border-radius: 5px;
+		background: color-mix(in oklch, var(--secondary) 35%, transparent);
+		font-size: 11px;
+		line-height: 1.45;
+		color: var(--muted-foreground);
+	}
+	.sim-result strong { color: var(--foreground); }
+	.static-placeholder { color: var(--muted-foreground); }
+
+	@media (max-width: 620px) {
+		.prototype-page { padding: 0; }
+		.app-shell { min-height: 100vh; border: 0; border-radius: 0; box-shadow: none; }
+		.content-inner { padding: 12px; }
+		.scope-row, .tab-row { padding-inline: 12px; }
+		.field-row { align-items: stretch; flex-direction: column; gap: 5px; }
+		.field-label { width: auto; }
+		.text-input, .sound-select { width: 100%; }
+		.field-help, .field-note, .save-feedback, .effective { margin-left: 0; }
+		.prototype-controls { width: calc(100vw - 20px); margin: 10px auto; }
+	}
+	@media (prefers-reduced-motion: reduce) {
+		*, *::before, *::after { animation-duration: 1ms !important; transition-duration: 1ms !important; }
+	}
+</style>
+</head>
+<body>
+<div class="prototype-page">
+	<main class="app-shell" aria-label="Bobbit project settings prototype">
+		<header class="app-bar">
+			<div class="brand"><span class="brand-mark" aria-hidden="true"></span><span>Bobbit</span></div>
+			<div class="app-actions">
+				<button id="global-bell" class="icon-button" type="button"></button>
+				<button class="icon-button" type="button" title="Change theme" aria-label="Change theme">
+					<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"></path></svg>
+				</button>
+			</div>
+		</header>
+
+		<div class="settings-header">
+			<button class="back-button" type="button" title="Back" aria-label="Back">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"></path></svg>
+			</button>
+			<h1>Settings</h1>
+		</div>
+
+		<nav class="scope-row" aria-label="Settings scope">
+			<button class="scope-button" type="button" data-project="headquarters">
+				<svg class="hq-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 21h14M7 21V9l5-5 5 5v12M9 13h6M9 17h6"></path></svg>
+				Headquarters
+			</button>
+			<button class="scope-button" type="button" data-project="bobbit"><span class="project-dot" aria-hidden="true"></span>Bobbit</button>
+			<button class="scope-button" type="button" data-project="acme"><span class="project-dot" aria-hidden="true"></span>Acme Analytics</button>
+		</nav>
+
+		<nav class="tab-row" aria-label="Project settings sections">
+			<button class="tab-button" type="button" aria-current="page">General</button>
+			<button class="tab-button" type="button">Commands</button>
+			<button class="tab-button" type="button">Components</button>
+			<button class="tab-button" type="button">Workflows</button>
+			<button class="tab-button" type="button">Config Directories</button>
+			<button class="tab-button" type="button">Appearance</button>
+		</nav>
+
+		<div class="settings-content">
+			<div class="content-inner" id="settings-content"></div>
+		</div>
+	</main>
+</div>
+
+<details class="prototype-controls">
+	<summary>Prototype controls</summary>
+	<div class="control-body">
+		<p class="control-copy">Use these controls to inspect async states, reload persistence, source-project resolution, and non-audio notifications.</p>
+		<label class="control-row" for="save-outcome">
+			<span>Next project save</span>
+			<select class="control-select" id="save-outcome">
+				<option value="success">Succeed</option>
+				<option value="failure">Fail once</option>
+				<option value="slow">Succeed slowly</option>
+			</select>
+		</label>
+		<label class="control-row" for="source-session">
+			<span>Finish source</span>
+			<select class="control-select" id="source-session">
+				<option value="bobbit">Bobbit session</option>
+				<option value="acme">Acme Analytics session</option>
+				<option value="unknown">Unknown project</option>
+			</select>
+		</label>
+		<div class="control-actions">
+			<button class="simulate-button" id="simulate-finish" type="button">Simulate agent finish</button>
+			<button class="secondary-button" id="reload-demo" type="button">Reload</button>
+			<button class="secondary-button" id="reset-demo" type="button">Reset demo</button>
+		</div>
+		<div class="sim-result" id="sim-result" role="status" aria-live="polite">No finish event simulated.</div>
+	</div>
+</details>
+
+<script>
+(() => {
+	const STORE = "bobbit-prototype-per-project-sound-v1";
+	const defaults = {
+		globalEnabled: true,
+		overrides: { bobbit: "inherit", acme: "off" }
+	};
+	let persisted;
+	try {
+		persisted = JSON.parse(localStorage.getItem(STORE) || "null") || structuredClone(defaults);
+	} catch {
+		persisted = JSON.parse(JSON.stringify(defaults));
+	}
+	persisted.overrides = { ...defaults.overrides, ...(persisted.overrides || {}) };
+	let runtime = JSON.parse(JSON.stringify(persisted));
+	let activeProject = "bobbit";
+	let loading = false;
+	const projectSave = {
+		bobbit: { state: "idle", failedDesired: null, timer: null },
+		acme: { state: "idle", failedDesired: null, timer: null }
+	};
+	const projects = {
+		bobbit: { name: "Bobbit", root: "C:\\Users\\jsubr\\w\\bobbit" },
+		acme: { name: "Acme Analytics", root: "C:\\Users\\jsubr\\w\\acme-analytics" }
+	};
+
+	const content = document.getElementById("settings-content");
+	const bell = document.getElementById("global-bell");
+	const saveOutcome = document.getElementById("save-outcome");
+	const sourceSession = document.getElementById("source-session");
+	const simResult = document.getElementById("sim-result");
+
+	function clone(value) { return JSON.parse(JSON.stringify(value)); }
+	function persist() {
+		try { localStorage.setItem(STORE, JSON.stringify(persisted)); } catch { /* mock storage is best-effort */ }
+	}
+	function effectiveFor(projectId) {
+		const override = runtime.overrides[projectId];
+		if (override === "on") return true;
+		if (override === "off") return false;
+		return runtime.globalEnabled;
+	}
+	function sourceDescription(projectId) {
+		const override = runtime.overrides[projectId];
+		if (override === "on") return "forced on for this project";
+		if (override === "off") return "forced off for this project";
+		return `inherited from global (${runtime.globalEnabled ? "On" : "Off"})`;
+	}
+	function bellSvg(enabled) {
+		return enabled
+			? `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"></path><path d="M10 21h4"></path></svg>`
+			: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.73 21a2 2 0 0 1-3.46 0"></path><path d="M18.63 18H3c0-2 3-2 3-9a6 6 0 0 1 .35-2.02"></path><path d="M8.54 3.69A6 6 0 0 1 18 8c0 2.17.29 3.71.69 4.84"></path><path d="m2 2 20 20"></path></svg>`;
+	}
+	function updateBell() {
+		const action = runtime.globalEnabled ? "Mute agent finish beeps" : "Unmute agent finish beeps";
+		bell.innerHTML = bellSvg(runtime.globalEnabled);
+		bell.title = action;
+		bell.setAttribute("aria-label", action);
+		bell.setAttribute("aria-pressed", String(!runtime.globalEnabled));
+	}
+	function overrideHelp(value, projectName) {
+		if (value === "on") return `<strong>On:</strong> Always play a finish beep for ${projectName} sessions, even when the global setting is off.`;
+		if (value === "off") return `<strong>Off:</strong> Never play a finish beep for ${projectName} sessions, even when the global setting is on.`;
+		return `<strong>Inherit global:</strong> Use the header bell setting, currently <strong>${runtime.globalEnabled ? "On" : "Off"}</strong>.`;
+	}
+	function saveFeedback(projectId) {
+		const save = projectSave[projectId];
+		if (save.state === "saving") {
+			return `<div class="save-feedback" id="sound-save-status" role="status" aria-live="polite" aria-atomic="true"><span class="status-line"><span class="spinner" aria-hidden="true"></span>Saving…</span></div>`;
+		}
+		if (save.state === "saved") {
+			return `<div class="save-feedback" id="sound-save-status" role="status" aria-live="polite" aria-atomic="true"><span class="status-line" data-state="saved"><span aria-hidden="true">✓</span>Saved.</span></div>`;
+		}
+		if (save.state === "error") {
+			const reverted = persisted.overrides[projectId] || "inherit";
+			const revertedLabel = reverted === "inherit" ? "Inherit global" : reverted === "on" ? "On" : "Off";
+			return `<div class="save-feedback" id="sound-save-status"><div class="error-box" role="alert"><span>Couldn’t save. Reverted to ${revertedLabel}.</span><button class="retry-button" id="retry-save" type="button">Retry</button></div></div>`;
+		}
+		return `<div class="save-feedback" id="sound-save-status" role="status" aria-live="polite" aria-atomic="true"></div>`;
+	}
+	function renderLoading() {
+		content.innerHTML = `<div class="loading-state" role="status"><span class="spinner" aria-hidden="true"></span><span>Loading project configuration…</span></div>`;
+	}
+	function render() {
+		updateBell();
+		document.querySelectorAll(".scope-button[data-project]").forEach(button => {
+			const selected = button.dataset.project === activeProject;
+			if (selected) button.setAttribute("aria-current", "true");
+			else button.removeAttribute("aria-current");
+		});
+		if (loading) { renderLoading(); return; }
+		const project = projects[activeProject];
+		const override = runtime.overrides[activeProject] || "inherit";
+		const save = projectSave[activeProject];
+		const effective = effectiveFor(activeProject);
+		content.innerHTML = `
+			<h2 class="project-name">${project.name}</h2>
+
+			<section class="section" aria-labelledby="working-directory-heading">
+				<div class="section-kicker" id="working-directory-heading">Working Directory</div>
+				<div class="field-row">
+					<label class="sr-only" for="working-directory">Working Directory</label>
+					<input class="text-input" id="working-directory" type="text" value="${project.root}" />
+				</div>
+				<p class="section-intro">The directory used when creating new sessions and goals for this project.</p>
+			</section>
+
+			<hr />
+
+			<section class="section" aria-labelledby="notifications-heading">
+				<div class="section-kicker" id="notifications-heading">Notifications</div>
+				<p class="section-intro">Choose how this project handles agent-finish audio.</p>
+				<div class="field-row">
+					<label class="field-label" for="project-agent-finish-sound">Agent finish sound</label>
+					<select
+						class="sound-select"
+						id="project-agent-finish-sound"
+						data-testid="project-agent-finish-sound"
+						aria-describedby="sound-base-help sound-effective sound-audio-note sound-save-status"
+						aria-busy="${save.state === "saving"}"
+						${save.state === "saving" ? "disabled" : ""}
+					>
+						<option value="inherit" ${override === "inherit" ? "selected" : ""}>Inherit global</option>
+						<option value="on" ${override === "on" ? "selected" : ""}>On</option>
+						<option value="off" ${override === "off" ? "selected" : ""}>Off</option>
+					</select>
+				</div>
+				<p class="field-help" id="sound-base-help">${overrideHelp(override, project.name)} Sessions owned by ${project.name} use this setting even when another project is open.</p>
+				<div class="effective" id="sound-effective" data-effective="${effective ? "on" : "off"}"><span class="effective-dot" aria-hidden="true"></span><span>Effective: <strong>${effective ? "On" : "Off"}</strong> — ${sourceDescription(activeProject)}.</span></div>
+				<p class="field-note" id="sound-audio-note">
+					<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v5M12 8h.01"></path></svg>
+					<span>Audio only. Favicon badges, unread indicators, and other notifications are unaffected.</span>
+				</p>
+				${saveFeedback(activeProject)}
+			</section>
+
+			<hr />
+
+			<section class="section" aria-labelledby="worktree-heading">
+				<div class="section-kicker" id="worktree-heading">Worktree</div>
+				<p class="section-intro">Each session and goal gets its own git worktree under a parent directory. Pre-built worktrees make new sessions start instantly.</p>
+				<div class="field-row"><span class="field-label">Worktree Root</span><input class="text-input static-placeholder" type="text" placeholder="&lt;rootPath&gt;-wt/ (default)" /></div>
+				<div class="field-row"><span class="field-label">Base Ref</span><input class="text-input static-placeholder" type="text" placeholder="origin/master (default)" /></div>
+				<div class="field-row"><span class="field-label">Pool Size</span><input class="text-input static-placeholder" style="max-width:80px" type="number" placeholder="2" /></div>
+			</section>
+		`;
+
+		const soundSelect = document.getElementById("project-agent-finish-sound");
+		soundSelect?.addEventListener("change", event => beginSave(activeProject, event.target.value));
+		document.getElementById("retry-save")?.addEventListener("click", () => {
+			const desired = projectSave[activeProject].failedDesired;
+			if (desired) beginSave(activeProject, desired, true);
+		});
+	}
+	function beginSave(projectId, desired, isRetry = false) {
+		const save = projectSave[projectId];
+		if (save.timer) clearTimeout(save.timer);
+		save.failedDesired = desired;
+		save.state = "saving";
+		// Immediate behavior: the source project's effective audio updates before the mock request resolves.
+		runtime.overrides[projectId] = desired;
+		render();
+		const outcome = isRetry ? "success" : saveOutcome.value;
+		if (!isRetry && outcome === "failure") saveOutcome.value = "success";
+		const delay = outcome === "slow" ? 2600 : 750;
+		save.timer = setTimeout(() => {
+			if (outcome === "failure") {
+				// Avoid optimistic/persisted drift: restore both displayed and effective state.
+				runtime.overrides[projectId] = persisted.overrides[projectId] || "inherit";
+				save.state = "error";
+			} else {
+				persisted.overrides[projectId] = desired;
+				runtime.overrides[projectId] = desired;
+				persist();
+				save.failedDesired = null;
+				save.state = "saved";
+				setTimeout(() => {
+					if (save.state === "saved") { save.state = "idle"; render(); }
+				}, 2000);
+			}
+			save.timer = null;
+			render();
+		}, delay);
+	}
+	function switchProject(projectId) {
+		if (!projects[projectId] || projectId === activeProject) return;
+		activeProject = projectId;
+		loading = true;
+		render();
+		setTimeout(() => { loading = false; render(); }, 420);
+	}
+
+	bell.addEventListener("click", () => {
+		runtime.globalEnabled = !runtime.globalEnabled;
+		persisted.globalEnabled = runtime.globalEnabled;
+		persist();
+		// Project overrides are deliberately untouched. Inherit recalculates only its effective value.
+		render();
+	});
+	document.querySelectorAll(".scope-button[data-project]").forEach(button => {
+		button.addEventListener("click", () => switchProject(button.dataset.project));
+	});
+	document.querySelectorAll(".tab-button:not([aria-current])").forEach(button => {
+		button.addEventListener("click", () => { simResult.textContent = `${button.textContent.trim()} is outside this prototype; General remains selected.`; });
+	});
+	document.getElementById("simulate-finish").addEventListener("click", () => {
+		const source = sourceSession.value;
+		const sourceName = source === "unknown" ? "Unknown-project" : projects[source].name;
+		const enabled = source === "unknown" ? runtime.globalEnabled : effectiveFor(source);
+		const reason = source === "unknown"
+			? `global fallback (${runtime.globalEnabled ? "On" : "Off"})`
+			: sourceDescription(source);
+		simResult.innerHTML = `<strong>${sourceName} finish:</strong> audio ${enabled ? "beeped" : "stayed silent"} — ${reason}. <strong>Unread indicator still shown.</strong>`;
+	});
+	document.getElementById("reload-demo").addEventListener("click", () => location.reload());
+	document.getElementById("reset-demo").addEventListener("click", () => {
+		try { localStorage.removeItem(STORE); } catch { /* no-op */ }
+		location.reload();
+	});
+
+	updateBell();
+	render();
+})();
+</script>
+</body>
+</html>
