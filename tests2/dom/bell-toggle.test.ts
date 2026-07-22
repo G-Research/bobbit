@@ -7,11 +7,30 @@ __syncBeforeAll(() => __syncCE());
 // persisted via gatewayFetch → window.fetch, which we stub to capture the PUT.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "../../src/ui/components/BellToggle.js";
+import {
+	__test as finishSoundTest,
+	captureProjectPlayFinishSoundRead,
+	getProjectPlayFinishSoundOverride,
+	primeProjectPlayFinishSoundOverride,
+} from "../../src/app/play-finish-sound.js";
+import { state } from "../../src/app/state.js";
 
 const SLASH_PATH = 'svg path[d="m2 2 20 20"]';
 let putCalls: Array<{ url: string; method: string; body: string }>;
+let originalActiveProjectId: typeof state.activeProjectId;
+let projectSequence = 0;
+
+function setActiveProjectOverride(rawValue: "true" | "false") {
+	const projectId = `bell-project-${++projectSequence}`;
+	state.activeProjectId = projectId;
+	const revision = captureProjectPlayFinishSoundRead(projectId);
+	expect(primeProjectPlayFinishSoundOverride(projectId, rawValue, revision)).toBe(true);
+	return projectId;
+}
 
 beforeEach(() => {
+	finishSoundTest.resetProjectOverrides();
+	originalActiveProjectId = state.activeProjectId;
 	delete document.documentElement.dataset.playAgentFinishSound; // unset ⇒ default ON
 	putCalls = [];
 	vi.stubGlobal("fetch", async (url: any, init: any = {}) => {
@@ -23,6 +42,8 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 	document.body.innerHTML = "";
 	delete document.documentElement.dataset.playAgentFinishSound;
+	state.activeProjectId = originalActiveProjectId;
+	finishSoundTest.resetProjectOverrides();
 });
 
 async function mount() {
@@ -65,5 +86,44 @@ describe("<bell-toggle>", () => {
 
 		expect(el.querySelector("button")!.getAttribute("title")).toMatch(/Unmute/);
 		expect(el.querySelectorAll(SLASH_PATH).length).toBe(1);
+	});
+
+	it("stays globally on when the active project explicitly forces sound Off", async () => {
+		const projectId = setActiveProjectOverride("false");
+		document.documentElement.dataset.playAgentFinishSound = "true";
+		const el = await mount();
+
+		expect(getProjectPlayFinishSoundOverride(projectId)).toBe("off");
+		expect(el.querySelector("button")!.getAttribute("title")).toBe("Mute agent finish beeps");
+		expect(el.querySelectorAll(SLASH_PATH)).toHaveLength(0);
+		expect(document.documentElement.dataset.playAgentFinishSound).toBe("true");
+	});
+
+	it("stays globally off when the active project explicitly forces sound On", async () => {
+		const projectId = setActiveProjectOverride("true");
+		document.documentElement.dataset.playAgentFinishSound = "false";
+		const el = await mount();
+
+		expect(getProjectPlayFinishSoundOverride(projectId)).toBe("on");
+		expect(el.querySelector("button")!.getAttribute("title")).toBe("Unmute agent finish beeps");
+		expect(el.querySelectorAll(SLASH_PATH)).toHaveLength(1);
+		expect(document.documentElement.dataset.playAgentFinishSound).toBe("false");
+	});
+
+	it("clicking under an opposite project override PUTs only the global preference", async () => {
+		const projectId = setActiveProjectOverride("false");
+		document.documentElement.dataset.playAgentFinishSound = "true";
+		const el = await mount();
+
+		(el.querySelector("button") as HTMLButtonElement).click();
+		await (el as any).updateComplete;
+
+		expect(getProjectPlayFinishSoundOverride(projectId)).toBe("off");
+		expect(document.documentElement.dataset.playAgentFinishSound).toBe("false");
+		expect(putCalls).toHaveLength(1);
+		expect(putCalls[0].url).toMatch(/\/api\/preferences$/);
+		expect(putCalls[0].method).toBe("PUT");
+		expect(JSON.parse(putCalls[0].body)).toEqual({ playAgentFinishSound: false });
+		expect(putCalls.some((call) => /\/api\/projects\//.test(call.url))).toBe(false);
 	});
 });
