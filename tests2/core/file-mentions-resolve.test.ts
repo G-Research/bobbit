@@ -14,7 +14,6 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 import { marked } from "marked";
 
 const NOTES_CONTENT = "hello world\nline two";
@@ -695,7 +694,22 @@ describe("resolveFileMentions", () => {
 
 	itOnPosix("classifies an existing FIFO as unresolved without opening or reading it", async () => {
 		const fifo = path.join(cwdDir, "non-regular-fifo");
-		execFileSync("mkfifo", [fifo]);
+		// mkfifo(1) would trip the tier-1 subprocess guard and node exposes no
+		// FIFO-creating API. lstat is the resolver's existence-and-type probe
+		// (lstatWithGlobalPermit), so reporting a FIFO there drives the same
+		// non-regular rejection branch the real device file would.
+		fs.writeFileSync(fifo, "", "utf-8");
+		const fifoPath = path.resolve(fifo);
+		const originalLstat = fs.promises.lstat;
+		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockImplementation((async (target: unknown, ...args: unknown[]) => {
+			const stats = await (originalLstat as (...callArgs: unknown[]) => Promise<fs.Stats>)(target, ...args);
+			if (path.resolve(String(target)) !== fifoPath) return stats;
+			const asFifo = Object.create(stats) as fs.Stats;
+			asFifo.isFile = () => false;
+			asFifo.isSymbolicLink = () => false;
+			asFifo.isFIFO = () => true;
+			return asFifo;
+		}) as typeof fs.promises.lstat);
 		const openSpy = vi.spyOn(fs, "openSync").mockImplementation((() => {
 			throw new Error("FIFO reached openSync");
 		}) as typeof fs.openSync);
@@ -715,6 +729,7 @@ describe("resolveFileMentions", () => {
 		} finally {
 			readSpy.mockRestore();
 			openSpy.mockRestore();
+			lstatSpy.mockRestore();
 			fs.rmSync(fifo, { force: true });
 		}
 	});
