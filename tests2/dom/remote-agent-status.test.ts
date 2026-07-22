@@ -22,7 +22,7 @@ let beepSpy: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
 	// Intercept the audio side effect so agent_end doesn't touch AudioContext and
 	// so we can count beeps faithfully (the real notification cue).
-	beepSpy = vi.spyOn(RemoteAgent, "playNotificationBeep").mockImplementation(() => {});
+	beepSpy = vi.spyOn(RemoteAgent, "playNotificationBeep").mockImplementation(async () => {});
 });
 afterEach(() => {
 	vi.restoreAllMocks();
