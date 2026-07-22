@@ -45,6 +45,8 @@ beforeAll(async () => {
 		putImageData() {}, drawImage() {}, save() {}, restore() {}, translate() {}, rotate() {}, scale() {},
 	});
 	(HTMLCanvasElement.prototype as any).toDataURL = () => "data:image/png;base64,static-bobbit";
+	(HTMLElement.prototype as any).getAnimations ??= () => [];
+	(HTMLCanvasElement.prototype as any).getAnimations = () => [];
 });
 
 afterEach(() => {
