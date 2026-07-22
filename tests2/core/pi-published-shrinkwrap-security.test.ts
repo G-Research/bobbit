@@ -8,6 +8,7 @@ interface LockPackage {
 	name?: string;
 	version?: string;
 	resolved?: string;
+	devDependencies?: Record<string, string>;
 }
 
 interface Lockfile {
@@ -28,9 +29,14 @@ interface LockSource {
 const FIXTURE_ROOT = fileURLToPath(
 	new URL("./fixtures/pi-published-shrinkwrap-security/", import.meta.url),
 );
+const REPOSITORY_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
 function readJson<T>(relativePath: string): T {
 	return JSON.parse(readFileSync(path.join(FIXTURE_ROOT, relativePath), "utf8")) as T;
+}
+
+function readRepositoryJson<T>(relativePath: string): T {
+	return JSON.parse(readFileSync(path.join(REPOSITORY_ROOT, relativePath), "utf8")) as T;
 }
 
 function packageNameFromLockPath(lockPath: string, entry: LockPackage): string | undefined {
@@ -97,6 +103,30 @@ function assertLocalResolutionFixture(lock: Lockfile): void {
 }
 
 describe("published dependency shrinkwrap security", () => {
+	it("keeps every development-checkout brace-expansion edge at the secure floor", () => {
+		const manifest = readRepositoryJson<{
+			devDependencies: Record<string, string>;
+			overrides?: Record<string, string>;
+		}>("package.json");
+		const rootLock = readRepositoryJson<Lockfile>("package-lock.json");
+		const braceFloor: AdvisoryFloor = {
+			package: "brace-expansion",
+			advisory: "development-checkout brace-expansion floor",
+			minimumVersion: "5.0.7",
+		};
+
+		assert.equal(manifest.devDependencies.shx, "^0.4.0");
+		assert.equal(rootLock.packages[""]?.devDependencies?.shx, manifest.devDependencies.shx);
+		assert.equal(manifest.overrides?.[braceFloor.package], undefined, "the secure tree must not depend on a root override");
+		assert.ok(
+			resolvedVersions(rootLock, braceFloor.package).length > 0,
+			"the root lock must contain at least one brace-expansion edge",
+		);
+		assert.doesNotThrow(() =>
+			enforcePublishedDependencyFloor([{ label: "package-lock.json", lock: rootLock }], braceFloor),
+		);
+	});
+
 	it("rejects a dependency-owned vulnerable pin hidden by the wrapper checkout override", () => {
 		const floor = readJson<AdvisoryFloor>("advisory-floor.json");
 		const wrapperManifest = readJson<{ overrides: Record<string, string> }>("wrapper/package.json");
