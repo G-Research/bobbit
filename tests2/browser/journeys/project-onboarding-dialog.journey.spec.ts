@@ -1,7 +1,8 @@
 /**
- * Journey: Project Onboarding — navigation and browse smoke
+ * Journey: Project Onboarding — settings, dialog, and directory browser
  * Covers: journey-project-onboarding
- * Consolidated from: add-project-browse-modal and related specs.
+ * Consolidated from: add-project-browse-modal, add-project-symlink,
+ *   project-management, and related specs.
  */
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -10,7 +11,7 @@ import {
 	ADD_PROJECT,
 	clearAddedProjects,
 	uniqueDir,
-} from "./project-onboarding.helpers.js";
+} from "../_helpers/project-onboarding.js";
 
 test.describe("Journey: Project Onboarding", () => {
 	test.afterEach(async () => {

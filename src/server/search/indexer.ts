@@ -17,6 +17,7 @@
  * Design reference: docs/design/portable-search.md §3, §6, §13.
  */
 
+import { isMessageAuthor } from "../../shared/message-author.js";
 import type { Indexable, IndexSource, IndexSourceContext } from "./types.js";
 import { FlexSearchStore, FLEX_VERSION, type FlexDoc } from "./flex-store.js";
 import type { ProgressBus } from "./progress-bus.js";
@@ -292,6 +293,12 @@ export function indexableToDoc(e: Indexable, text: string, parentId: string | nu
 	const goalId = pickString(md.goal_id ?? md.goalId);
 	const sessionId = pickString(md.session_id ?? md.sessionId);
 	const sessionTitle = pickString(md.session_title ?? md.sessionTitle);
+	const authorCandidate = {
+		kind: md.author_kind ?? md.authorKind,
+		id: md.author_id ?? md.authorId,
+		label: md.author_label ?? md.authorLabel,
+	};
+	const author = isMessageAuthor(authorCandidate) ? authorCandidate : null;
 
 	const title = e.display?.title ?? null;
 	const filePath = e.display?.filePath ?? null;
@@ -317,6 +324,9 @@ export function indexableToDoc(e: Indexable, text: string, parentId: string | nu
 		goal_id: goalId,
 		session_id: sessionId,
 		session_title: sessionTitle,
+		author_kind: author?.kind ?? null,
+		author_id: author?.id ?? null,
+		author_label: author?.label ?? null,
 		file_path: filePath,
 		start_line: startLine,
 		end_line: endLine,

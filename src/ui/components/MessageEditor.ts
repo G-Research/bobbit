@@ -13,6 +13,8 @@ import { gatewayFetch } from "../../app/gateway-fetch.js";
 import { listLauncherEntrypoints, runLauncherEntrypoint } from "../../app/pack-entrypoints.js";
 import "./AttachmentTile.js";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { MessageAuthor } from "../../shared/message-author.js";
+import type { PromptSource } from "../../shared/prompt-source.js";
 
 /** Slash skill metadata from the server */
 async function loadAttachmentLazy(source: string | File | Blob | ArrayBuffer, fileName?: string): Promise<Attachment> {
@@ -48,6 +50,8 @@ export interface QueuedMessage {
 	attachments?: unknown[];
 	isSteered: boolean;
 	dispatched?: boolean;
+	source?: PromptSource;
+	author?: MessageAuthor;
 	createdAt: number;
 }
 

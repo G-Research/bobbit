@@ -21,6 +21,12 @@ Bobbit has three layers:
 
 3. **UI components** (`src/ui/`) — Lit-based component library (forked from pi-web-ui). Message rendering, specialised tool call renderers, model selection, settings, and more.
 
+## Message attribution boundary
+
+Bobbit-visible messages carry optional `user`, `agent`, or `system` author metadata independently of their Pi role. This separation matters because a provider-facing `user` row may originate from a human, another agent, or Bobbit orchestration; role must remain a protocol concern rather than an accountability signal.
+
+The gateway derives trusted identities, persists dispatched-prompt attribution in a host-side sidecar, and normalizes legacy rows at read time. The browser preserves that metadata without adding labels to ordinary chat, while Pi transcripts and model/provider input remain unchanged. See [Message author identity](message-author-identity.md) for the lifecycle, fallback, and verification boundaries.
+
 ## Client routing
 
 Bobbit's browser UI is primarily hash-routed so it can run as a static single-page app behind the gateway, Vite, or a remote reverse proxy. Session routes support both forms:
@@ -101,4 +107,5 @@ dist/
 - [Networking](networking.md) — remote access and multi-device setup
 - [Per-model thinking-level capabilities](thinking-levels.md) — how the reasoning-level selector adapts to the active model
 - [Pi runtime compatibility](pi-runtime-compatibility.md) — browser imports, model catalog subpaths, RPC lifecycle, transcript normalization, orphan tool-result transcript repair and recovery, and upgrade checks
+- [Message author identity](message-author-identity.md) — accountable user, agent, and system metadata across live events, persistence, transcripts, search, and client state
 - [Pi 0.77 / Claude Opus 4.8 compatibility](pi-0.77-opus-4.8.md) — historical Opus 4.8-specific model, ranking, and spawn notes

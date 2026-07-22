@@ -15,6 +15,12 @@ process.env.BOBBIT_AGENT_DIR = path.join(tmpRoot, "agent");
 fs.mkdirSync(stateDir, { recursive: true });
 
 const { activeAgentSessionsDir } = await import("../../src/server/agent/agent-session-path.ts");
+const {
+	appendPromptAuthorDispatch,
+	appendPromptAuthorSettlement,
+	initAuthorSidecarDir,
+	readAuthorSidecar,
+} = await import("../../src/server/agent/author-sidecar.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { containerPathToHost, registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
@@ -25,6 +31,10 @@ const { initPromptDirs } = await import("../../src/server/agent/system-prompt.ts
 const { loadOrCreateToken } = await import("../../src/server/auth/token.ts");
 
 initPromptDirs(stateDir);
+initAuthorSidecarDir(stateDir, {
+	secretsDir: path.join(tmpRoot, "secrets"),
+	hmacKey: Buffer.alloc(32, 0x31),
+});
 loadOrCreateToken();
 
 const managers: any[] = [];
@@ -535,7 +545,10 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(factory).toHaveBeenCalledTimes(2);
 		expect(restoreBridge.promptWhenReady).toHaveBeenCalledTimes(1);
 		expect(roleBridge.promptWhenReady).toHaveBeenCalledTimes(1);
-		expect(roleBridge.promptWhenReady).toHaveBeenCalledWith(expect.stringMatching(/server restarted while you were mid-turn/i));
+		expect(roleBridge.promptWhenReady).toHaveBeenCalledWith(
+			expect.stringMatching(/server restarted while you were mid-turn/i),
+			undefined,
+		);
 		expect(roleBridge.prompt).not.toHaveBeenCalled();
 		const canonical = manager.sessions.get(ps.id);
 		expect(canonical?.rpcClient).toBe(roleBridge);
@@ -1583,6 +1596,79 @@ describe("executable SessionManager rehydration boundaries", () => {
 		);
 		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(replacement);
 		assertOrphanRewritten(fs.readFileSync(file, "utf8"));
+	});
+
+	it("keeps a newer same-text steer recoverable when force-abort replays a settled keyless occurrence", async () => {
+		const file = hostTranscript("force-abort-keyless-author-replay");
+		const sessionId = "force-abort-keyless-author-replay";
+		const text = "identical force-abort steer bytes";
+		const userAuthor = { kind: "user", id: "user:local", label: "User" } as const;
+		const systemAuthor = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
+		appendPromptAuthorDispatch(sessionId, {
+			promptId: "p1", dispatchedAt: 1, modelText: text, source: "user", author: userAuthor,
+		});
+		appendPromptAuthorSettlement(sessionId, {
+			promptId: "p1", settledAt: 2, outcome: "echoed",
+		});
+		appendPromptAuthorDispatch(sessionId, {
+			promptId: "p2", dispatchedAt: 3, modelText: text, source: "system", author: systemAuthor,
+		});
+
+		let listener: ((event: any) => void) | undefined;
+		const replacement = recordingBridge(() => {});
+		replacement.onEvent = vi.fn((next: (event: any) => void) => {
+			listener = next;
+			return () => { listener = undefined; };
+		});
+		replacement.sendCommand = vi.fn(async (command: any) => {
+			if (command?.type === "switch_session") {
+				listener?.({
+					type: "message_end",
+					message: { role: "user", content: text },
+				});
+			}
+			return { success: true };
+		});
+		const ps = persisted(sessionId, file, { lastActivity: 654_321 });
+		const manager = makeManager(ps, replacement);
+		manager.drainQueue = vi.fn();
+		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
+		oldBridge.getState = async () => ({ success: true, data: { sessionFile: file } });
+		oldBridge.abort = async () => new Promise(() => {});
+		const original = liveSession(sessionId, oldBridge, {
+			status: "streaming",
+			streamingStartedAt: Date.now(),
+			lastActivity: ps.lastActivity,
+			inFlightSteerTexts: [{ text, promptId: "p2", source: "system", author: systemAuthor }],
+		});
+		const client = { readyState: 1, bufferedAmount: 0, send: vi.fn() };
+		original.clients.add(client);
+		manager.sessions.set(sessionId, original);
+		const prepareSpy = vi.spyOn(manager, "prepareVisibleAgentEvent");
+
+		await manager.forceAbort(sessionId, 5);
+
+		expect(prepareSpy).toHaveBeenCalledTimes(1);
+		const preparedReplay = prepareSpy.mock.results[0]?.value as any;
+		expect(preparedReplay.message.author).toEqual(userAuthor);
+		expect(preparedReplay.message.role).toBe("user");
+		expect(preparedReplay.message.content).toBe(text);
+		expect(original.promptQueue.toArray()).toMatchObject([{
+			text,
+			isSteered: true,
+			source: "system",
+			author: systemAuthor,
+		}]);
+		expect(original.inFlightSteerTexts).toEqual([]);
+		expect(original.promptAuthorReplayBindings).toBeUndefined();
+		expect(original.lastKeylessPromptAuthorEnd).toBeUndefined();
+		expect(original.lastActivity).toBe(654_321);
+		expect(readAuthorSidecar(sessionId).find((row) => row.promptId === "p2")?.settlement?.outcome)
+			.toBe("cancelled");
+		const emittedMessageEnds = client.send.mock.calls
+			.map((call: any[]) => JSON.parse(call[0]))
+			.filter((frame: any) => frame.type === "event" && frame.data.type === "message_end");
+		expect(emittedMessageEnds).toEqual([]);
 	});
 
 	it("fails closed when hard force-abort cannot read declared durable history", async () => {

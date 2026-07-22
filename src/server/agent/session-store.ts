@@ -2,6 +2,8 @@ import type { Clock, FsLike } from "../gateway-deps.js";
 import { realClock, realFs } from "../gateway-deps.js";
 import path from "node:path";
 import { recordDeletionTombstone, recordDeletionTombstoneAsync } from "./deletion-tombstones.js";
+import { isMessageAuthor, LOCAL_USER_AUTHOR, type MessageAuthor } from "../../shared/message-author.js";
+import { isPromptSource, type PromptSource } from "../../shared/prompt-source.js";
 import type { QueuedMessage } from "../ws/protocol.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
 
@@ -17,6 +19,60 @@ function defaultVerifierAccessory(id: string): string {
 
 /** Legacy persisted value. Retained only so older session records remain readable. */
 export type WorktreePushPolicy = "local-only" | "publish";
+
+/** A steer accepted for dispatch but not yet echoed into the Pi transcript. */
+export interface InFlightSteerRecord {
+	/** Exact text sent to Pi. Never decorate or normalize this value. */
+	text: string;
+	/** Stable dispatch identity used to correlate the eventual user-role echo. */
+	promptId: string;
+	source?: PromptSource;
+	author?: MessageAuthor;
+}
+
+/** The persisted boundary accepts legacy string-only steer ledgers. */
+export type PersistedInFlightSteer = string | InFlightSteerRecord;
+
+/**
+ * Normalize the persisted steer ledger for runtime use. Legacy strings are
+ * human-authored because they predate caller provenance and only the browser
+ * could create them. Malformed optional metadata is discarded safely.
+ */
+export function normalizePersistedInFlightSteers(
+	entries: readonly PersistedInFlightSteer[] | undefined,
+): InFlightSteerRecord[] | undefined {
+	if (!entries || entries.length === 0) return undefined;
+	const records: InFlightSteerRecord[] = [];
+	for (let index = 0; index < entries.length; index++) {
+		const entry = entries[index];
+		if (typeof entry === "string") {
+			if (entry.length === 0) continue;
+			records.push({
+				text: entry,
+				promptId: `legacy-inflight-steer:${index}`,
+				source: "user",
+				author: { ...LOCAL_USER_AUTHOR },
+			});
+			continue;
+		}
+		if (!entry || typeof entry !== "object" || typeof entry.text !== "string" || entry.text.length === 0) {
+			continue;
+		}
+		const record: InFlightSteerRecord = {
+			text: entry.text,
+			promptId: typeof entry.promptId === "string" && entry.promptId.length > 0
+				? entry.promptId
+				: `legacy-inflight-steer:${index}`,
+		};
+		if (isPromptSource(entry.source)) record.source = entry.source;
+		if (isMessageAuthor(entry.author)) {
+			record.author = entry.author;
+			if (record.source === undefined) record.source = entry.author.kind;
+		}
+		records.push(record);
+	}
+	return records.length > 0 ? records : undefined;
+}
 
 /** Persisted metadata for a single gateway session */
 export interface PersistedSession {
@@ -92,8 +148,8 @@ export interface PersistedSession {
 	preview?: boolean;
 	/** Persisted prompt queue */
 	messageQueue?: QueuedMessage[];
-	/** Steer texts accepted for dispatch but not yet echoed as user messages. */
-	inFlightSteerTexts?: string[];
+	/** Steers accepted for dispatch but not yet echoed; strings are legacy rows. */
+	inFlightSteerTexts?: PersistedInFlightSteer[];
 	/** Server-side draft storage, keyed by draft type (e.g. "prompt", "goal", "role") */
 	drafts?: Record<string, unknown>;
 	/** Goal ID this session is re-attempting (for goal assistant sessions) */
@@ -255,6 +311,11 @@ export class SessionStore {
 				if (s.goalAssistant) s.assistantType = "goal";
 				else if (s.roleAssistant) s.assistantType = "role";
 				else if (s.toolAssistant) s.assistantType = "tool";
+			}
+			if (Array.isArray(s.inFlightSteerTexts)) {
+				s.inFlightSteerTexts = normalizePersistedInFlightSteers(s.inFlightSteerTexts);
+			} else if (s.inFlightSteerTexts !== undefined) {
+				s.inFlightSteerTexts = undefined;
 			}
 			this.sessions.set(s.id, s);
 		}

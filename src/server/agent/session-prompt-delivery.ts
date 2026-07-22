@@ -1,3 +1,4 @@
+import type { MessageAuthor } from "../../shared/message-author.js";
 import type { ErroredPromptRecoveryDecision, PromptSource } from "./session-manager.js";
 
 export type SessionPromptMode = "prompt" | "steer";
@@ -15,14 +16,14 @@ export interface DeliverSessionPromptDeps {
 	enqueuePrompt(
 		id: string,
 		message: string,
-		opts?: { isSteered?: boolean; source?: PromptSource },
+		opts?: { isSteered?: boolean; source?: PromptSource; author?: MessageAuthor },
 	): Promise<{ status: "dispatched" | "queued" }>;
-	deliverLiveSteer(id: string, message: string, opts?: { source?: PromptSource }): Promise<unknown>;
+	deliverLiveSteer(id: string, message: string, opts?: { source?: PromptSource; author?: MessageAuthor }): Promise<unknown>;
 	getErroredPromptRecoveryDecision?(id: string): ErroredPromptRecoveryDecision;
 	enqueuePromptForRetryRecovery?(
 		id: string,
 		message: string,
-		opts?: { isSteered?: boolean; source?: PromptSource },
+		opts?: { isSteered?: boolean; source?: PromptSource; author?: MessageAuthor },
 	): Promise<{ status: "queued"; queuedId?: string }> | { status: "queued"; queuedId?: string };
 	retryLastPrompt?(id: string, opts?: { auto?: boolean; preserveQueueIds?: string[] }): Promise<void>;
 }
@@ -32,6 +33,8 @@ export interface DeliverSessionPromptOptions {
 	defaultMode: SessionPromptMode;
 	allowPromptNonInteractive?: boolean;
 	source?: PromptSource;
+	/** Trusted author resolved by the server; never accepted from browser payloads. */
+	author?: MessageAuthor;
 }
 
 export interface DeliverSessionPromptTarget {
@@ -72,8 +75,13 @@ function recoveryBlockedMessage(decision: Exclude<ErroredPromptRecoveryDecision,
 	return `Cannot recover errored session prompt automatically: ${decision.message}`;
 }
 
-function queuePromptOptions(mode: SessionPromptMode, source?: PromptSource): { isSteered?: boolean; source?: PromptSource } {
-	return mode === "steer" ? { isSteered: true, source } : { source };
+function queuePromptOptions(
+	mode: SessionPromptMode,
+	source?: PromptSource,
+	author?: MessageAuthor,
+): { isSteered?: boolean; source?: PromptSource; author?: MessageAuthor } {
+	const base = mode === "steer" ? { isSteered: true, source } : { source };
+	return author ? { ...base, author } : base;
 }
 
 export async function deliverSessionPrompt(
@@ -114,7 +122,9 @@ export async function deliverSessionPrompt(
 	}
 
 	if (mode === "steer" && session.status === "streaming") {
-		await deps.deliverLiveSteer(sessionId, message, { source: opts.source });
+		await deps.deliverLiveSteer(sessionId, message, opts.author
+			? { source: opts.source, author: opts.author }
+			: { source: opts.source });
 		return { ok: true, mode, dispatched: true, target };
 	}
 
@@ -136,7 +146,7 @@ export async function deliverSessionPrompt(
 		// prompt, and do not call retryLastPrompt(auto:true): poison recovery must
 		// never be an automatic retry loop.
 		if (recovery.reason === "poisoned-history") {
-			const delivered = await deps.enqueuePrompt(sessionId, message, queuePromptOptions(mode, opts.source));
+			const delivered = await deps.enqueuePrompt(sessionId, message, queuePromptOptions(mode, opts.source, opts.author));
 			return {
 				ok: true,
 				mode,
@@ -150,7 +160,7 @@ export async function deliverSessionPrompt(
 				target,
 			};
 		}
-		const queued = await deps.enqueuePromptForRetryRecovery!(sessionId, message, queuePromptOptions(mode, opts.source));
+		const queued = await deps.enqueuePromptForRetryRecovery!(sessionId, message, queuePromptOptions(mode, opts.source, opts.author));
 		await deps.retryLastPrompt!(sessionId, { auto: true, preserveQueueIds: queued.queuedId ? [queued.queuedId] : undefined });
 		return {
 			ok: true,
@@ -167,6 +177,6 @@ export async function deliverSessionPrompt(
 		};
 	}
 
-	const result = await deps.enqueuePrompt(sessionId, message, queuePromptOptions(mode, opts.source));
+	const result = await deps.enqueuePrompt(sessionId, message, queuePromptOptions(mode, opts.source, opts.author));
 	return { ok: true, mode, status: result.status, target };
 }

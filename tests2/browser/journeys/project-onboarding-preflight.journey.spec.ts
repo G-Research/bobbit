@@ -12,7 +12,7 @@ import {
 	clearAddedProjects,
 	openAddProjectDialog,
 	uniqueDir,
-} from "./project-onboarding.helpers.js";
+} from "../_helpers/project-onboarding.js";
 
 test.describe("Journey: Project Onboarding — preflight and typeahead", () => {
 	test.afterEach(async () => {
@@ -96,7 +96,7 @@ test.describe("Journey: Project Onboarding — preflight and typeahead", () => {
 						.evaluateAll((els) => els.map((el) => el.getAttribute("data-path") ?? ""));
 					return paths.filter((p) => p.includes("alpha-")).length;
 				},
-					{ timeout: 8_000 },
+				{ timeout: 8_000 },
 			).toBeGreaterThanOrEqual(1);
 		} finally {
 			try { rmSync(parent, { recursive: true, force: true }); } catch { /* best-effort */ }

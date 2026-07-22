@@ -3,7 +3,8 @@ import type { IncomingMessage } from "node:http";
 import type { WebSocket } from "ws";
 import type { SessionManager } from "../agent/session-manager.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
-import { spliceInFlightMessage, spliceInFlightSteers } from "../agent/splice-inflight-message.js";
+import { extensionSystemAuthor } from "../agent/message-author.js";
+import { LOCAL_USER_AUTHOR } from "../../shared/message-author.js";
 import type { RateLimiter } from "../auth/rate-limit.js";
 import { validateToken } from "../auth/token.js";
 import type { SandboxTokenStore } from "../auth/sandbox-token.js";
@@ -22,12 +23,9 @@ import { buildMergedModelText } from "../skills/merge-mentions.js";
 import { resolveModelStateMeta } from "../agent/model-registry.js";
 import { isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "../agent/thinking-level-clamp.js";
-import { truncateLargeToolContentInMessages } from "../agent/truncate-large-content.js";
-import { readSkillSidecarEntries, mergeSidecarEntriesIntoMessages } from "../skills/skill-sidecar.js";
 import {
 	appendCompactionSidecarEntry,
 	makeCompactionId,
-	mergeCompactionSidecarIntoMessages,
 } from "../agent/compaction-sidecar.js";
 import { EventBuffer } from "../agent/event-buffer.js";
 import { latestRev, listProposalFiles, parseProposalFile } from "../proposals/proposal-files.js";
@@ -78,67 +76,6 @@ function stampSnapshotOrder(data: unknown): unknown {
 // patchModelContextWindow removed — live model-state frames now resolve context
 // windows, reasoning, and thinkingLevelMap via resolveModelStateMeta() (registry
 // cache → pi-ai catalog → inferMeta), matching the ModelSelector dropdown.
-
-/**
- * Merge persisted skill-expansion sidecar entries into a list of agent
- * messages. For each user message whose text body equals a sidecar
- * `modelText`, rewrite the body to `originalText` and attach
- * `skillExpansions` AND `fileMentions` (mirroring the live broadcast splice
- * in `spliceSkillExpansionsIntoEvent`, so @-mention chips survive reload /
- * the authoritative post-turn snapshot). Idempotent: messages without
- * matching sidecar entries pass through unchanged.
- */
-function mergeSkillSidecarIntoMessages(sessionId: string, messages: any[]): any[] {
-	if (!Array.isArray(messages) || messages.length === 0) return messages;
-	const entries = readSkillSidecarEntries(sessionId);
-	if (entries.length === 0) return messages;
-	return mergeSidecarEntriesIntoMessages(entries, messages);
-}
-
-export interface LiveSnapshotTransformCollaborators {
-	mergeCompactionSidecar?: (sessionId: string, messages: any[]) => any[];
-	mergeSkillSidecar?: (sessionId: string, messages: any[]) => any[];
-}
-
-/**
- * Apply the mutable/live half of snapshot assembly to a fresh shallow copy.
- * The memoized base must never receive `_order`, overlay, truncation, or
- * sidecar mutations: cache hits deliberately rerun all of this work.
- */
-export function applyLiveSnapshotTransforms(
-	sessionId: string,
-	session: { latestMessageUpdate?: { id?: string; message: any }; inFlightSteerTexts?: string[] },
-	rawBase: any,
-	collaborators: LiveSnapshotTransformCollaborators = {},
-): any {
-	const mergeCompaction = collaborators.mergeCompactionSidecar ?? mergeCompactionSidecarIntoMessages;
-	const mergeSkill = collaborators.mergeSkillSidecar ?? mergeSkillSidecarIntoMessages;
-	const cloneMessages = (messages: any[]): any[] => messages.map((message) =>
-		message && typeof message === "object" ? { ...message } : message,
-	);
-
-	if (Array.isArray(rawBase)) {
-		const base = cloneMessages(rawBase);
-		const spliced = spliceInFlightSteers(
-			spliceInFlightMessage(base, session.latestMessageUpdate),
-			session.inFlightSteerTexts,
-		);
-		const withCompaction = mergeCompaction(sessionId, spliced);
-		return mergeSkill(sessionId, truncateLargeToolContentInMessages(withCompaction));
-	}
-	if (rawBase && typeof rawBase === "object" && Array.isArray(rawBase.messages)) {
-		const base = { ...rawBase, messages: cloneMessages(rawBase.messages) };
-		const spliced = spliceInFlightSteers(
-			spliceInFlightMessage(base.messages, session.latestMessageUpdate),
-			session.inFlightSteerTexts,
-		);
-		const withCompaction = mergeCompaction(sessionId, spliced);
-		const truncated = truncateLargeToolContentInMessages(withCompaction);
-		const merged = mergeSkill(sessionId, truncated);
-		return { ...base, messages: merged };
-	}
-	return rawBase;
-}
 
 const isPositiveNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
 
@@ -731,7 +668,8 @@ export function handleWebSocketConnection(
 				case "get_messages": {
 					sendSessionCostUpdate(ws, sessionManager, sessionId);
 					const messages = await sessionManager.getArchivedMessages(sessionId);
-					send(ws, { type: "messages", data: stampSnapshotOrder(messages) as unknown[] });
+					const visible = sessionManager.buildVisibleMessageSnapshot(sessionId, messages);
+					send(ws, { type: "messages", data: stampSnapshotOrder(visible) as unknown[] });
 					break;
 				}
 				case "ping":
@@ -978,6 +916,9 @@ export function handleWebSocketConnection(
 						skillExpansions: expansions.length ? expansions : undefined,
 						fileMentions: wireFileMentions,
 						modelText: modelChanged ? mergedModelText : undefined,
+						// Browser clients cannot assert identity: this authenticated WS path is human input.
+						source: "user",
+						author: LOCAL_USER_AUTHOR,
 						// Assistant auto-kickoff prompts opt out of first-message title-gen.
 						suppressTitleGen: msg.suppressTitleGen === true,
 					});
@@ -988,9 +929,15 @@ export function handleWebSocketConnection(
 					// (real-time interrupt, bypasses queue intentionally).
 					// Otherwise enqueue as a steered message and drain if idle.
 					if (session.status === "streaming") {
+						// The live-steer boundary defaults to Bobbit's trusted local-user identity;
+						// keep the transport call shape compatible with the low-latency WS path.
 						await sessionManager.deliverLiveSteer(sessionId, msg.text);
 					} else {
-						await sessionManager.enqueuePrompt(sessionId, msg.text, { isSteered: true });
+						await sessionManager.enqueuePrompt(sessionId, msg.text, {
+							isSteered: true,
+							source: "user",
+							author: LOCAL_USER_AUTHOR,
+						});
 					}
 					break;
 				case "steer_queued":
@@ -1245,9 +1192,9 @@ export function handleWebSocketConnection(
 					}
 					const tRpc = perf ? performance.now() : 0;
 					if (msgsResp.success) {
-						// The memo covers only RPC + normalization. Mutable overlays,
-						// sidecars, truncation and order stamps are rebuilt on every hit.
-						const data = applyLiveSnapshotTransforms(sessionId, session, msgsResp.data as any);
+						// The memo covers only RPC + normalization. Bobbit-owned author metadata,
+						// mutable overlays, sidecars, truncation and ordering are rebuilt on every hit.
+						const data = sessionManager.buildVisibleMessageSnapshot(sessionId, msgsResp.data as any);
 						const tPipeline = perf ? performance.now() : 0;
 						const stamped = stampSnapshotOrder(data);
 						const tStamp = perf ? performance.now() : 0;
@@ -1350,8 +1297,7 @@ export function handleWebSocketConnection(
 							sessionManager.getMessagesSnapshotBase(restored)
 								.then((msgs: any) => {
 									if (!msgs) return;
-									const raw = msgs.data ?? msgs;
-									const data = applyLiveSnapshotTransforms(sessionId, restored, raw);
+									const data = sessionManager.buildVisibleMessageSnapshot(sessionId, msgs.data ?? msgs);
 									send(ws, { type: "messages", data: stampSnapshotOrder(data) as unknown[] });
 								})
 								.catch(() => {});
@@ -1724,6 +1670,7 @@ export function handleWebSocketConnection(
 						send(ws, { type: "ext_session_post_result", requestId, ok: false, error: surf.error });
 						break;
 					}
+					const extensionAuthor = extensionSystemAuthor(surf.packId, surf.tool ?? "surface");
 					const result = await handleSessionPost({
 						tool: surf.tool,
 						packId: surf.packId,
@@ -1745,10 +1692,11 @@ export function handleWebSocketConnection(
 							// post mirrors a steer: keep live streaming delivery low-latency, but
 							// serialize its idle delivery so it cannot overtake prompt preflight.
 							const deliver = async (): Promise<void> => {
+								const identity = { source: "extension" as const, author: extensionAuthor };
 								if (opts.resume) {
-									await sessionManager.enqueuePrompt(sid, text, { source: "extension" });
+									await sessionManager.enqueuePrompt(sid, text, identity);
 								} else {
-									await sessionManager.deliverLiveSteer(sid, text, { source: "extension" });
+									await sessionManager.deliverLiveSteer(sid, text, identity);
 								}
 							};
 							const target = sessionManager.getSession(sid);

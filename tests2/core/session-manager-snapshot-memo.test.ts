@@ -1,8 +1,39 @@
 import assert from "node:assert/strict";
-import { describe, it, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterAll, beforeAll, describe, it, vi } from "vitest";
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
+import {
+	appendPromptAuthorDispatch,
+	appendPromptAuthorSettlement,
+	initAuthorSidecarDir,
+} from "../../src/server/agent/author-sidecar.ts";
+import {
+	appendCompactionSidecarEntry,
+	initCompactionSidecarDir,
+} from "../../src/server/agent/compaction-sidecar.ts";
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
-import { applyLiveSnapshotTransforms } from "../../src/server/ws/handler.ts";
+import {
+	appendSkillSidecarEntry,
+	initSkillSidecarDir,
+} from "../../src/server/skills/skill-sidecar.ts";
+import { LOCAL_USER_AUTHOR, type MessageAuthor } from "../../src/shared/message-author.ts";
+
+const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-snapshot-memo-"));
+
+beforeAll(() => {
+	initAuthorSidecarDir(stateDir, {
+		secretsDir: path.join(stateDir, "private-secrets"),
+		hmacKey: Buffer.alloc(32, 0x32),
+	});
+	initCompactionSidecarDir(stateDir);
+	initSkillSidecarDir(stateDir);
+});
+
+afterAll(() => {
+	fs.rmSync(stateDir, { recursive: true, force: true });
+});
 
 function deferred<T>() {
 	let resolve!: (value: T) => void;
@@ -12,7 +43,10 @@ function deferred<T>() {
 }
 
 function manager(): any {
-	return Object.create(SessionManager.prototype);
+	const value = Object.create(SessionManager.prototype);
+	value.sessions = new Map();
+	value.resolveStoreForId = () => undefined;
+	return value;
 }
 
 function session(getMessages: () => Promise<any>): any {
@@ -89,41 +123,119 @@ describe("SessionManager snapshot memo", () => {
 		assert.equal(getMessages.mock.calls.length, 2);
 	});
 
-	it("keeps cached bases immutable while overlays and both sidecar transforms are recomputed fresh", async () => {
-		const baseMessage = { id: "base", role: "assistant", content: "base" };
+	it("keeps cached bases immutable while the production snapshot chokepoint rebuilds fresh structured overlays", async () => {
+		const baseMessage = {
+			id: "base",
+			role: "user",
+			content: "expanded system prompt",
+			timestamp: 1_000,
+		};
 		const getMessages = vi.fn(async () => ({ success: true, data: [baseMessage] }));
 		const value = manager();
-		const live = session(getMessages);
+		const live = { ...session(getMessages), title: "Snapshot Agent" };
+		value.sessions.set(live.id, live);
 		const cached = await value.getMessagesSnapshotBase(live);
-		let compactionMessages: any[] = [];
-		let skillMessages: any[] = [];
-		const mergeCompactionSidecar = vi.fn((_sessionId: string, messages: any[]) => [...messages, ...compactionMessages]);
-		const mergeSkillSidecar = vi.fn((_sessionId: string, messages: any[]) => [...messages, ...skillMessages]);
-		const collaborators = { mergeCompactionSidecar, mergeSkillSidecar };
 
-		const first = applyLiveSnapshotTransforms(live.id, live, cached.data, collaborators);
+		const first = value.buildVisibleMessageSnapshot(live.id, cached.data) as any[];
 		assert.equal(first.length, 1);
-		assert.deepEqual(baseMessage, { id: "base", role: "assistant", content: "base" });
+		assert.deepEqual(first[0].author, LOCAL_USER_AUTHOR);
+		assert.deepEqual(baseMessage, {
+			id: "base",
+			role: "user",
+			content: "expanded system prompt",
+			timestamp: 1_000,
+		});
 
+		const systemAuthor: MessageAuthor = {
+			kind: "system",
+			id: "system:bobbit:test",
+			label: "Bobbit Test",
+		};
+		const agentAuthor: MessageAuthor = {
+			kind: "agent",
+			id: `session:${live.id}`,
+			label: "Snapshot Agent",
+		};
+		assert.equal(appendPromptAuthorDispatch(live.id, {
+			promptId: "system-base",
+			dispatchedAt: 1_000,
+			modelText: "expanded system prompt",
+			source: "system",
+			author: systemAuthor,
+		}), true);
+		assert.equal(appendPromptAuthorSettlement(live.id, {
+			promptId: "system-base",
+			settledAt: 1_001,
+			outcome: "echoed",
+			messageId: "base",
+			messageTimestamp: 1_000,
+		}), true);
+		assert.equal(appendSkillSidecarEntry(live.id, {
+			ts: 1_000,
+			modelText: "expanded system prompt",
+			originalText: "/remind",
+			skillExpansions: [],
+		}), true);
+		assert.equal(appendCompactionSidecarEntry(live.id, {
+			schemaVersion: 1,
+			id: "compaction-fresh",
+			trigger: "manual",
+			tokensBefore: 100,
+			tokensAfter: 50,
+			durationMs: 1,
+			startedAt: new Date(900).toISOString(),
+			endedAt: new Date(901).toISOString(),
+			success: true,
+			firstKeptEntryId: "base",
+		}), true);
 		live.latestMessageUpdate = {
 			id: "streaming",
-			message: { id: "streaming", role: "assistant", content: "fresh overlay" },
+			message: {
+				id: "streaming",
+				role: "assistant",
+				content: "fresh overlay",
+				author: agentAuthor,
+			},
 		};
-		compactionMessages = [{ id: "compaction-fresh", role: "tool", content: "compaction" }];
-		skillMessages = [{ id: "skill-fresh", role: "tool", content: "skill" }];
-		const second = applyLiveSnapshotTransforms(
-			live.id,
-			live,
-			(await value.getMessagesSnapshotBase(live)).data,
-			collaborators,
-		);
+		live.inFlightSteerTexts = [{
+			text: "fresh structured steer",
+			promptId: "structured-steer",
+			source: "system",
+			author: systemAuthor,
+		}];
+
+		const cacheHit = await value.getMessagesSnapshotBase(live);
+		const second = value.buildVisibleMessageSnapshot(live.id, cacheHit.data) as any[];
 
 		assert.equal(getMessages.mock.calls.length, 1, "base remains memoized");
-		assert.ok(second.some((message: any) => message.id === "streaming"), "live overlay is fresh");
-		assert.ok(second.some((message: any) => message.id === "compaction-fresh"), "compaction sidecar is fresh");
-		assert.ok(second.some((message: any) => message.id === "skill-fresh"), "skill sidecar is fresh");
-		assert.equal(mergeCompactionSidecar.mock.calls.length, 2);
-		assert.equal(mergeSkillSidecar.mock.calls.length, 2);
-		assert.deepEqual(baseMessage, { id: "base", role: "assistant", content: "base" });
+		assert.equal(cacheHit, cached, "production transforms do not replace the memoized RPC response");
+		const restoredBase = second.find((message) => message.id === "base");
+		assert.equal(restoredBase?.content, "/remind");
+		assert.deepEqual(
+			restoredBase?.author,
+			systemAuthor,
+			"author correlation runs against model text before the fresh skill overlay",
+		);
+		assert.deepEqual(
+			second.find((message) => message.id === "streaming")?.author,
+			agentAuthor,
+			"in-flight assistant overlay is fresh",
+		);
+		assert.deepEqual(
+			second.find((message) => message.id === "inflight-steer:structured-steer")?.author,
+			systemAuthor,
+			"structured steer author is preserved",
+		);
+		assert.ok(second.some((message) => message.id === "compaction-fresh"), "compaction sidecar is fresh");
+		assert.ok(second.every((message, index) =>
+			!message || typeof message !== "object"
+				|| message._order === EventBuffer.SNAPSHOT_ORDER_FLOOR + index,
+		), "production chokepoint stamps snapshot order");
+		assert.deepEqual(baseMessage, {
+			id: "base",
+			role: "user",
+			content: "expanded system prompt",
+			timestamp: 1_000,
+		});
 	});
 });

@@ -35,7 +35,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { SessionManager } from "../../src/server/agent/session-manager.js";
+import { LifecycleHub } from "../../src/server/agent/lifecycle-hub.js";
+import type { ModuleHost, InvokeRequest } from "../../src/server/extension-host/module-host-worker.js";
+import type { ContextTraceStore } from "../../src/server/agent/context-trace-store.js";
+import type { ProviderContribution } from "../../src/server/agent/pack-contributions.js";
+import type { PackContributionRegistry } from "../../src/server/extension-host/pack-contribution-registry.js";
 import { makeTmpDir } from "../../tests/helpers/tmp.js";
+import { installScopedMemFs } from "./helpers/scoped-memfs.js";
 
 const CONTAINER_WORKTREE = "/workspace-wt/goal-g1-coder-x";
 
@@ -180,7 +186,111 @@ describe("applySandboxWiring — goalProvisioned dispatch uses host coordinates"
 	});
 });
 
-// The real ModuleHost/provider filesystem proof lives in lifecycle-hub.test.ts.
-// That suite is intentionally isolated because its worker resolver mutates
-// NODE_OPTIONS; keeping the pure sandbox wiring checks here prevents shared-core
-// worker state from disabling the .js-to-.ts resolver during a full unit run.
+// A marker provider must ACTUALLY write its file into the host worktree — not
+// merely have the dispatcher called. Keep the production SessionManager →
+// LifecycleHub routing, but inject ModuleHost's documented invocation seam and a
+// scoped memory filesystem. Worker startup and host filesystem timing belong to
+// ModuleHost's isolation tests, not this under-15-second wiring unit.
+describe("applySandboxWiring — goalProvisioned marker actually writes host-side", () => {
+	const MARKER = ".goal-provisioned-marker.json";
+
+	function fixtureProvider(packRoot: string): ProviderContribution {
+		return {
+			id: "marker",
+			kind: "memory",
+			module: "marker.mjs",
+			hooks: ["goalProvisioned"],
+			budget: { maxTokens: 400, timeoutMs: 5_000 },
+			config: { enabled: true },
+			listName: "marker",
+			sourceFile: path.join(packRoot, "pack.yaml"),
+			packRoot,
+		} as ProviderContribution;
+	}
+
+	it("writes the marker file into the HOST worktree, never the container path", async () => {
+		const scopedFs = installScopedMemFs(["mkdirSync", "readFileSync", "writeFileSync", "existsSync"]);
+		const memoryFs = scopedFs.fs;
+		const hostWorktree = path.resolve("/memfs/host-wt/goal-g1-coder-x");
+		const providerRoot = path.resolve("/memfs/providers/marker");
+		memoryFs.mkdirSync(hostWorktree, { recursive: true });
+		memoryFs.mkdirSync(providerRoot, { recursive: true });
+
+		const invocations: InvokeRequest[] = [];
+		const moduleHost = {
+			invoke: async (request: InvokeRequest) => {
+				invocations.push(request);
+				const ctx = request.ctx as unknown as {
+					goalId: string;
+					worktreePath: string;
+					cwd: string;
+					branch?: string;
+				};
+				memoryFs.writeFileSync(path.join(ctx.cwd, MARKER), JSON.stringify({
+					goalId: ctx.goalId,
+					worktreePath: ctx.worktreePath,
+					branch: ctx.branch,
+				}), "utf-8");
+			},
+			dispose: () => {},
+		} as unknown as ModuleHost;
+
+		try {
+			// Construct only the method surface exercised by this unit. This avoids
+			// SessionManager store/timer boot while retaining its production methods.
+			const sm: any = Object.create(SessionManager.prototype);
+			sm.projectConfigStore = {
+				get: (key: string) => (key === "sandbox" ? "docker" : undefined),
+				getSandboxTokens: () => [],
+			};
+			sm.preferencesStore = undefined;
+			sm.projectContextManager = null;
+			sm.sandboxTokenStore = {
+				register: () => "scoped-token",
+				addSession: () => {},
+				addGoal: () => {},
+			};
+			sm.readGatewayUrlForAgent = () => "https://127.0.0.1:3001";
+			sm.sandboxManager = {
+				ensureForProject: async () => {},
+				get: () => ({
+					getContainerId: async () => "container-xyz",
+					createWorktree: async () => CONTAINER_WORKTREE,
+				}),
+			};
+
+			const registry = { listProviders: () => [fixtureProvider(providerRoot)] } as unknown as PackContributionRegistry;
+			sm.lifecycleHub = new LifecycleHub({
+				registry,
+				moduleHost,
+				trace: {} as ContextTraceStore,
+				gatewayInfo: () => ({ baseUrl: "https://gateway.test", token: "tok" }),
+			});
+
+			const bridgeOptions: any = { env: {}, cwd: hostWorktree };
+			const ok = await sm.applySandboxWiring(bridgeOptions, "sess-fs", {
+				projectId: "proj-1",
+				goalId: "goal-g1",
+				sandboxBranch: "goal/g1/coder-x",
+			});
+			assert.equal(ok, true);
+			assert.equal(bridgeOptions.cwd, CONTAINER_WORKTREE, "agent runtime cwd stays container-internal");
+
+			assert.equal(invocations.length, 1, "marker provider must run exactly once");
+			assert.equal(invocations[0].workingDir, hostWorktree, "provider worker seam uses the host working directory");
+			const invokedCtx = invocations[0].ctx as unknown as { cwd: string; worktreePath: string };
+			assert.equal(invokedCtx.cwd, hostWorktree);
+			assert.equal(invokedCtx.worktreePath, hostWorktree);
+
+			const markerPath = path.join(hostWorktree, MARKER);
+			assert.ok(memoryFs.existsSync(markerPath), `marker must be written into the host worktree (${markerPath})`);
+			const parsed = JSON.parse(memoryFs.readFileSync(markerPath, "utf-8"));
+			assert.equal(parsed.goalId, "goal-g1");
+			assert.equal(parsed.worktreePath, hostWorktree, "provider received the host worktree path");
+			assert.equal(parsed.branch, "goal/g1/coder-x");
+			assert.ok(!memoryFs.existsSync(path.join(CONTAINER_WORKTREE, MARKER)), "no marker at the container path");
+		} finally {
+			scopedFs.restore();
+		}
+	});
+});

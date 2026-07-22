@@ -58,6 +58,20 @@ function regularSessionRows(page: Page, sessionId: string) {
 	return page.locator(`.sidebar-root [data-session-id="${sessionId}"]`);
 }
 
+async function openAppWithStaffPushReady(page: Page): Promise<void> {
+	const pushReady = page
+		.waitForEvent("websocket", (socket) => new URL(socket.url()).pathname === "/ws/viewer")
+		.then((socket) => socket.waitForEvent("framereceived", ({ payload }) => {
+			try {
+				return JSON.parse(String(payload))?.type === "auth_ok";
+			} catch {
+				return false;
+			}
+		}));
+	await openApp(page);
+	await pushReady;
+}
+
 async function seedNoReloadMarker(page: Page): Promise<string> {
 	const marker = `staff-lifecycle-${Date.now()}-${Math.random()}`;
 	await page.evaluate((value) => { (window as any).__staffLifecycleNoRefreshMarker = value; }, marker);
@@ -77,8 +91,11 @@ async function assertCreateDeleteReflectsWithoutReload(page: Page, viewportLabel
 	let staffId = "";
 	let sessionId = "";
 
-	await openApp(page);
+	await openAppWithStaffPushReady(page);
 	await expect(page.locator(".sidebar-root").first()).toBeVisible({ timeout: 20_000 });
+	// A fresh mobile project intentionally renders the empty-state splash until
+	// its first session exists, so its nested Staff header is not a boot-readiness
+	// signal. The authenticated viewer socket above is the actual push precondition.
 	const marker = await seedNoReloadMarker(page);
 
 	try {

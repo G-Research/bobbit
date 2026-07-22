@@ -515,7 +515,7 @@ export class TeamManager {
 			"merge a finished branch, mark a task complete, or signal the next gate.\n" +
 			"If all gates have passed, call `team_complete`.";
 
-		if (!this.enqueueAutoNudge(goalId, entry.teamLeadSessionId!, message, { isSteered: true }, "Stuck-team watchdog")) return;
+		if (!this.enqueueAutoNudge(goalId, entry.teamLeadSessionId!, message, { isSteered: true, source: "auto-nudge" }, "Stuck-team watchdog")) return;
 		this.lastNudgeAtPerGoal.set(goalId, now);
 		console.log(`[team-manager] Stuck-team watchdog fired for goal ${goalId} after ${minutes}m idle`);
 	}
@@ -1160,7 +1160,7 @@ export class TeamManager {
 			// queue it awaits dispatchDirectPrompt → rpcClient.prompt(), which on
 			// a cold agent rejects with the cold-start timeout. The helper owns
 			// async rejection handling so it never escapes as `[gateway] Unhandled rejection`.
-			if (!this.enqueueAutoNudge(goalId, entry.teamLeadSessionId, msg, { isSteered: true, coldStart: true }, "Boot-resume nudge")) continue;
+			if (!this.enqueueAutoNudge(goalId, entry.teamLeadSessionId, msg, { isSteered: true, source: "system", coldStart: true }, "Boot-resume nudge")) continue;
 			this.lastNudgeAtPerGoal.set(goalId, now);
 			resumed++;
 			console.log(`[team-manager] Boot-resume nudge sent for goal=${goalId} (${summary})`);
@@ -1174,7 +1174,7 @@ export class TeamManager {
 		goalId: string,
 		sessionId: string,
 		message: string,
-		opts: { isSteered: true; source?: PromptSource; coldStart?: boolean },
+		opts: { isSteered: true; source: PromptSource; coldStart?: boolean },
 		label: string,
 		accounting?: { onStarted?: () => void; onNoStart?: () => void },
 	): boolean {
@@ -1931,7 +1931,10 @@ export class TeamManager {
 		const kickoff = specBody
 			? `# Goal Spec\n\n${specBody}\n\n---\n\nExecute the task described in your system prompt. Follow the instructions carefully.`
 			: "Execute the task described in your system prompt. Follow the instructions carefully.";
-		session.rpcClient.prompt(kickoff).catch((err: any) => {
+		this.sessionManager.enqueuePrompt(session.id, kickoff, {
+			source: "system",
+			suppressTitleGen: true,
+		}).catch((err: any) => {
 			console.error("[team-manager] Failed to send team lead kickoff prompt:", err);
 		});
 
@@ -2244,8 +2247,8 @@ export class TeamManager {
 			//     the worktree (worktreeOpts) — a different, double-creating strategy.
 			//   • Dropped fields: rolePrompt (resolved template text), workflowContext,
 			//     sandboxBaseBranch and `sandboxed` are goal-specific and absent from
-			//     SpawnOpts; the live `session` object (rpcClient.prompt + event
-			//     subscription below) is needed back, not just a ChildHandle.
+			//     SpawnOpts; the live `session` object and its event subscription below
+			//     are needed back, not just a ChildHandle.
 			// The core still OWNS tracking/lifecycle/reap for this child via
 			// registerChild: it is keyed on the team-lead in the shared index, so the
 			// unified orchestration verbs, archive cascade-reap and restart rebuild all
@@ -2267,8 +2270,14 @@ export class TeamManager {
 			// Enrich task prompt with upstream dependency context if available
 			const enrichedTask = workflowContext ? task + workflowContext : task;
 
-			// Send the task as the first prompt
-			session.rpcClient.prompt(enrichedTask).catch((err: any) => {
+			// Send the team lead's task as the first prompt.
+			const ownerAuthor = entry.teamLeadSessionId
+				? this.sessionManager.resolveSessionAgentAuthor(entry.teamLeadSessionId)
+				: undefined;
+			this.sessionManager.enqueuePrompt(session.id, enrichedTask, {
+				source: "agent",
+				author: ownerAuthor,
+			}).catch((err: any) => {
 				console.error('[team-manager] Failed to send task prompt:', err);
 			});
 
@@ -2405,11 +2414,11 @@ export class TeamManager {
 			`content changes your plan, requires new tasks, or invalidates an upstream gate signal.`;
 
 		if (teamLeadSession.status === "streaming") {
-			this.sessionManager.deliverLiveSteer(entry.teamLeadSessionId, message).catch((err: any) => {
+			this.sessionManager.deliverLiveSteer(entry.teamLeadSessionId, message, { source: "system" }).catch((err: any) => {
 				console.error(`[team-manager] Failed to steer team lead on spec change for goal ${goalId}:`, err);
 			});
 		} else {
-			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId, message, { isSteered: true });
+			this.sessionManager.enqueuePrompt(entry.teamLeadSessionId, message, { isSteered: true, source: "system" });
 		}
 		if (process.env.BOBBIT_DEBUG) console.log(`[team-manager] Notified team lead of spec change for goal ${goalId} (${prevLen} → ${newLen} chars)`);
 	}

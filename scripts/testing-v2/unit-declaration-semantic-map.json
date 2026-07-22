@@ -1,5 +1,16 @@
 [
   {
+    "baseFile": "tests2/core/session-manager-snapshot-memo.test.ts",
+    "baseName": "keeps cached bases immutable while overlays and both sidecar transforms are recomputed fresh",
+    "current": [
+      {
+        "file": "tests2/core/session-manager-snapshot-memo.test.ts",
+        "name": "keeps cached bases immutable while the production snapshot chokepoint rebuilds fresh structured overlays"
+      }
+    ],
+    "rationale": "The snapshot assertion now exercises the unified production transform chokepoint rather than manually applying individual overlays. It preserves the original immutable memoized-base and freshly recomputed sidecar semantics while additionally pinning structured steer authors and snapshot ordering."
+  },
+  {
     "baseFile": "tests2/core/ledger-lease-bridge-interop.test.ts",
     "baseName": "caps standalone vitest below parent-ledger grants",
     "current": [

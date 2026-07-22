@@ -41,6 +41,7 @@ function makeGoal(overrides: Partial<MockGoal> = {}): MockGoal {
 
 function makeSessionManager(goals: Map<string, MockGoal>) {
 	const sessions = new Map<string, any>();
+	const resolvedAuthors = new Map<string, { kind: "agent"; id: string; label: string }>();
 	let sequence = 0;
 	const sandboxExec = vi.fn(async () => "0123456789abcdef0123456789abcdef01234567\n");
 	return {
@@ -72,6 +73,18 @@ function makeSessionManager(goals: Map<string, MockGoal>) {
 			return session;
 		}),
 		getSession: (id: string) => sessions.get(id),
+		resolveSessionAgentAuthor: (id: string) => {
+			const resolved = resolvedAuthors.get(id);
+			if (resolved) return resolved;
+			const session = sessions.get(id);
+			return session ? { kind: "agent" as const, id: `session:${id}`, label: session.title } : undefined;
+		},
+		enqueuePrompt: vi.fn(async (id: string, text: string, opts?: any) => {
+			const session = sessions.get(id);
+			if (session) session.lastPromptSource = opts?.source ?? "user";
+			await session?.rpcClient.prompt(text);
+			return { status: "dispatched" as const };
+		}),
 		getPersistedSession: (_id: string) => undefined,
 		setTitle: (id: string, title: string) => {
 			const session = sessions.get(id);
@@ -91,6 +104,7 @@ function makeSessionManager(goals: Map<string, MockGoal>) {
 		isSandboxEnabled: true,
 		getSandboxManager: () => ({ get: () => ({ exec: sandboxExec }) }),
 		_sessions: sessions,
+		_resolvedAuthors: resolvedAuthors,
 		_sandboxExec: sandboxExec,
 	};
 }
@@ -173,7 +187,7 @@ describe("TeamManager seam decisions", () => {
 	it("spawns a role without a host worktree and preserves role policy in session metadata", async () => {
 		const { goals } = addGoal();
 		const { manager, sessions } = makeTeam(goals);
-		await manager.startTeam("goal-1");
+		const lead = await manager.startTeam("goal-1");
 
 		const result = await manager.spawnRole("goal-1", "coder", "Implement the decision path");
 		const session = sessions.getSession(result.sessionId)!;
@@ -190,6 +204,45 @@ describe("TeamManager seam decisions", () => {
 		assert.equal(agent.task, "Implement the decision path");
 		assert.equal(agent.baseSha, "0123456789abcdef0123456789abcdef01234567");
 		assert.equal(sessions._sandboxExec.mock.calls.length, 1, "base SHA should use the injected sandbox seam");
+		assert.deepEqual(
+			sessions.enqueuePrompt.mock.calls,
+			[
+				[
+					lead.id,
+					"# Goal Spec\n\nExercise orchestration decisions\n\n---\n\nExecute the task described in your system prompt. Follow the instructions carefully.",
+					{ source: "system", suppressTitleGen: true },
+				],
+				[
+					result.sessionId,
+					"Implement the decision path",
+					{
+						source: "agent",
+						author: { kind: "agent", id: `session:${lead.id}`, label: lead.title },
+					},
+				],
+			],
+			"kickoff and worker task prompts must retain their system and accountable-agent provenance",
+		);
+	});
+
+	it("uses the shared current-author resolver for a renamed-staff team lead's worker task", async () => {
+		const { goals } = addGoal();
+		const { manager, sessions } = makeTeam(goals);
+		const lead = await manager.startTeam("goal-1");
+		lead.staffId = "staff-1";
+		lead.title = "Old staff name";
+		const currentAuthor = { kind: "agent", id: "staff:staff-1", label: "Renamed staff" } as const;
+		sessions._resolvedAuthors.set(lead.id, currentAuthor);
+		sessions.enqueuePrompt.mockClear();
+
+		const worker = await manager.spawnRole("goal-1", "coder", "worker task bytes");
+
+		assert.deepEqual(sessions.enqueuePrompt.mock.calls, [[
+			worker.sessionId,
+			"worker task bytes",
+			{ source: "agent", author: currentAuthor },
+		]]);
+		assert.equal(lead.title, "Old staff name", "producer resolution must not depend on the stale live-session title");
 	});
 
 	it("rejects unknown and team-lead roles before creating a worker session", async () => {

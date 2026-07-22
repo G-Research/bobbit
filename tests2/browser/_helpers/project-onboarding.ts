@@ -1,8 +1,8 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Page } from "@playwright/test";
-import { apiFetch, expect } from "../_helpers/journey-fixture.js";
+import { apiFetch, expect } from "./journey-fixture.js";
 
 /** Stable selectors from tests/e2e/ui/add-project-helpers.ts */
 export const ADD_PROJECT = {
@@ -50,11 +50,11 @@ export function makeMultiRepoFixture(label: string, names: readonly string[]): s
 	return root;
 }
 
-let _dirCounter = 0;
+let dirCounter = 0;
 export function uniqueDir(label: string): string {
 	const dir = join(
 		tmpdir(),
-		`bobbit-v2-onb-${label}-${process.env.E2E_PORT ?? "0"}-${process.pid}-${Date.now()}-${++_dirCounter}`,
+		`bobbit-v2-onb-${label}-${process.env.E2E_PORT ?? "0"}-${Date.now()}-${++dirCounter}`,
 	);
 	mkdirSync(dir, { recursive: true });
 	return dir;
@@ -65,9 +65,9 @@ export async function clearAddedProjects(): Promise<void> {
 		const res = await apiFetch("/api/projects");
 		const data = await res.json();
 		const projects: Array<{ id: string; name: string }> = data.projects || data || [];
-		for (const p of projects) {
-			if (p.name === "default") continue;
-			await apiFetch(`/api/projects/${p.id}`, { method: "DELETE" }).catch(() => {});
+		for (const project of projects) {
+			if (project.name === "default") continue;
+			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 		}
 	} catch {
 		// best-effort cleanup
@@ -79,4 +79,23 @@ export async function openAddProjectDialog(page: Page): Promise<void> {
 	await page.locator("button").filter({ hasText: "Add Project" }).first().click();
 	await expect(page.locator(ADD_PROJECT.dialog)).toBeVisible({ timeout: 15_000 });
 	await expect(page.locator(ADD_PROJECT.pickerInput)).toBeVisible({ timeout: 15_000 });
+}
+
+/**
+ * Commit an already-complete path through the picker's public selection event.
+ * This intentionally bypasses the typeahead debounce: the select-all journey
+ * verifies the scan controls, while the dedicated typeahead journey owns typed
+ * path/debounce coverage.
+ */
+export async function selectCompletedProjectPath(page: Page, path: string): Promise<void> {
+	await page.locator(ADD_PROJECT.picker).evaluate((element, selectedPath) => {
+		const picker = element as HTMLElement & { setCompletedPath?: (value: string) => void };
+		picker.setCompletedPath?.(selectedPath);
+		picker.dispatchEvent(new CustomEvent("directory-select", {
+			bubbles: true,
+			composed: true,
+			detail: { path: selectedPath, source: "browse" },
+		}));
+	}, path);
+	await expect(page.locator(ADD_PROJECT.pickerInput)).toHaveValue(path);
 }
