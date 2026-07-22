@@ -1,4 +1,6 @@
 import type { InboxEntry } from "../agent/inbox-store.js";
+import type { MessageAuthor } from "../../shared/message-author.js";
+import type { PromptSource } from "../../shared/prompt-source.js";
 import type { VerificationTimeoutInfo } from "../agent/gate-store.js";
 import type { GoalState } from "../agent/goal-store.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
@@ -64,6 +66,10 @@ export interface QueuedMessage {
 	attachments?: unknown[];
 	isSteered: boolean;
 	createdAt: number;
+	/** Internal prompt provenance; absent on legacy persisted queue rows. */
+	source?: PromptSource;
+	/** Accountable author resolved by the server; absent on legacy rows. */
+	author?: MessageAuthor;
 	/**
 	 * When true, this prompt must NOT trigger first-message auto-title
 	 * generation (used for assistant auto-kickoff prompts so naming fires on

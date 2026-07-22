@@ -8,7 +8,8 @@
 import type { Server } from "node:http";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { getOAuthProvider, OPENAI_CODEX_BROWSER_LOGIN_METHOD, type OAuthCredentials } from "@earendil-works/pi-ai/oauth";
+import type { AuthInteraction, Models, OAuthCredentials } from "@earendil-works/pi-ai";
+import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { clearOAuthCache } from "../agent/model-registry.js";
 import { redactSensitive } from "./redact.js";
@@ -71,7 +72,7 @@ interface PendingExternalOAuth {
 	provider: "openai-codex";
 	createdAt: number;
 	submitCode: (code: string) => void;
-	rejectCode: (err: Error) => void;
+	cancelLogin: (err: Error) => void;
 	loginPromise: Promise<void>;
 	completed: boolean;
 	error?: string;
@@ -161,7 +162,7 @@ function cleanupExpiredFlows(): void {
 	for (const [id, flow] of entries) {
 		if (now - flow.createdAt > FLOW_TTL_MS) {
 			if (flow.provider === "openai-codex") {
-				flow.rejectCode(new Error("OAuth flow expired"));
+				flow.cancelLogin(new Error("OAuth flow expired"));
 			} else if (flow.provider === "google-gemini-cli") {
 				closeGoogleFlowServer(flow);
 			}
@@ -204,7 +205,11 @@ function storeOAuthCredentials(provider: OAuthProviderId, credentials: OAuthCred
 /**
  * Start an OAuth flow. Returns the authorization URL and a flow ID.
  */
-export async function oauthStart(providerInput?: string, fetchImpl: typeof fetch = defaultFetch): Promise<{ flowId: string; url: string; provider: OAuthProviderId; callbackServer?: boolean; instructions?: string }> {
+export async function oauthStart(
+	providerInput?: string,
+	fetchImpl: typeof fetch = defaultFetch,
+	externalModels?: Pick<Models, "login">,
+): Promise<{ flowId: string; url: string; provider: OAuthProviderId; callbackServer?: boolean; instructions?: string }> {
 	cleanupExpiredFlows();
 	ensureFlowCleanupTimer();
 
@@ -213,7 +218,7 @@ export async function oauthStart(providerInput?: string, fetchImpl: typeof fetch
 		return oauthStartGoogle(fetchImpl);
 	}
 	if (provider !== "anthropic") {
-		return oauthStartExternal(provider);
+		return oauthStartExternal(provider, externalModels ?? builtinModels());
 	}
 
 	const { randomBytes } = await import("node:crypto");
@@ -237,14 +242,14 @@ export async function oauthStart(providerInput?: string, fetchImpl: typeof fetch
 	return { flowId, url: `${AUTHORIZE_URL}?${params.toString()}`, provider };
 }
 
-async function oauthStartExternal(provider: "openai-codex"): Promise<{ flowId: string; url: string; provider: OAuthProviderId; callbackServer?: boolean; instructions?: string }> {
-	const oauthProvider = getOAuthProvider(provider);
-	if (!oauthProvider) throw new Error(`OAuth provider unavailable: ${provider}`);
-	await Promise.all([import("node:crypto"), import("node:http")]);
-
+async function oauthStartExternal(
+	provider: "openai-codex",
+	models: Pick<Models, "login">,
+): Promise<{ flowId: string; url: string; provider: OAuthProviderId; callbackServer?: boolean; instructions?: string }> {
 	const { randomBytes } = await import("node:crypto");
 	const flowId = randomBytes(16).toString("hex");
 	const createdAt = Date.now();
+	const loginAbort = new AbortController();
 
 	let submitCode!: (code: string) => void;
 	let rejectCode!: (err: Error) => void;
@@ -252,6 +257,30 @@ async function oauthStartExternal(provider: "openai-codex"): Promise<{ flowId: s
 		submitCode = resolve;
 		rejectCode = reject;
 	});
+	const waitForManualCode = (signal?: AbortSignal): Promise<string> => {
+		if (!signal) return manualCodePromise;
+		return new Promise<string>((resolve, reject) => {
+			const onAbort = () => {
+				signal.removeEventListener("abort", onAbort);
+				reject(signal.reason instanceof Error ? signal.reason : new Error("OAuth prompt cancelled"));
+			};
+			signal.addEventListener("abort", onAbort, { once: true });
+			if (signal.aborted) {
+				onAbort();
+				return;
+			}
+			void manualCodePromise.then(
+				(code) => {
+					signal.removeEventListener("abort", onAbort);
+					resolve(code);
+				},
+				(err) => {
+					signal.removeEventListener("abort", onAbort);
+					reject(err);
+				},
+			);
+		});
+	};
 
 	let resolveStarted!: (info: { url: string; instructions?: string }) => void;
 	let rejectStarted!: (err: Error) => void;
@@ -260,17 +289,24 @@ async function oauthStartExternal(provider: "openai-codex"): Promise<{ flowId: s
 		rejectStarted = reject;
 	});
 
-	// `started` can only resolve once. Wrap so that whichever of `onAuth` /
-	// `onDeviceCode` fires first wins; subsequent calls are logged only. This
-	// matches the documented contract that Bobbit surfaces the *initial*
-	// browser URL or device-code prompt to the UI dialog, and avoids the
-	// unhandled-rejection / silent-drop hazard that comes from calling a
-	// settled resolver again.
-	let startedResolved = false;
+	// Only the first auth/device notification or pre-start error settles the
+	// response. Later lifecycle notifications remain safe no-ops for this
+	// one-shot UI contract.
+	let startedSettled = false;
 	const safeResolveStarted = (info: { url: string; instructions?: string }) => {
-		if (startedResolved) return;
-		startedResolved = true;
+		if (startedSettled) return;
+		startedSettled = true;
 		resolveStarted(info);
+	};
+	const safeRejectStarted = (err: Error) => {
+		if (startedSettled) return;
+		startedSettled = true;
+		rejectStarted(err);
+	};
+
+	const cancelLogin = (err: Error): void => {
+		rejectCode(err);
+		if (!loginAbort.signal.aborted) loginAbort.abort(err);
 	};
 
 	// Initialise the flow record up-front so the `loginPromise.then/catch`
@@ -280,65 +316,70 @@ async function oauthStartExternal(provider: "openai-codex"): Promise<{ flowId: s
 		provider,
 		createdAt,
 		submitCode,
-		rejectCode,
+		cancelLogin,
 		loginPromise: Promise.resolve(), // overwritten below
 		completed: false,
 	};
 
-	// Construct the real loginPromise; the .then/.catch callbacks reference
-	// `flow` (already in scope above) without TDZ risk.
-	const loginPromise = oauthProvider.login({
-		onAuth: (info) => safeResolveStarted(info),
-		onDeviceCode: (info) => {
-			// Device Authorization Grant: surface user-code + verification URI
-			// both to the server log AND through the started promise so the UI
-			// dialog can display them. Bobbit does not currently render a
-			// dedicated device-code dialog, so we reuse the existing
-			// { url, instructions } shape by pointing url at the verification
-			// URI and packing the user code into instructions.
-			const instructions = `Visit ${info.verificationUri} and enter code ${info.userCode}`;
-			console.log(`[oauth] ${OAUTH_PROVIDER_LABELS[provider]}: ${redactSensitive(instructions)}`);
-			safeResolveStarted({ url: info.verificationUri, instructions });
-		},
-		onPrompt: async () => manualCodePromise,
-		onManualCodeInput: async () => manualCodePromise,
-		onSelect: async (prompt) => {
-			// Bobbit has no generic OAuth selection UI today, so resolve the
-			// selection deterministically:
-			//  1. A single option is safe to auto-pick — there is nothing for the
-			//     user to choose.
-			//  2. With multiple options (e.g. Codex's "Select OpenAI Codex login
-			//     method" prompt), prefer the browser-login method. Browser login
-			//     uses Bobbit's existing local-callback-server flow and already has
-			//     the click-the-URL (onAuth) and paste-the-code (onPrompt /
-			//     onManualCodeInput) fallbacks wired up, preserving the current UX.
-			//     Match the exported id first, then fall back to an id/label
-			//     heuristic so we still pick browser if the id ever changes.
-			//  3. Otherwise fail loudly so the flow surfaces a clear error rather
-			//     than hanging on a UI that does not exist.
-			if (prompt.options.length === 1) return prompt.options[0].id;
-			const browserOption =
-				prompt.options.find((o) => o.id === OPENAI_CODEX_BROWSER_LOGIN_METHOD) ??
-				prompt.options.find(
-					(o) =>
-						o.id.toLowerCase().includes("browser") ||
-						(o.label?.toLowerCase().includes("browser") ?? false),
+	const interaction: AuthInteraction = {
+		signal: loginAbort.signal,
+		prompt: async (prompt) => {
+			if (prompt.type === "text" || prompt.type === "manual_code") {
+				return waitForManualCode(prompt.signal);
+			}
+			if (prompt.type === "select") {
+				// Bobbit has no generic OAuth selection UI. A single option is
+				// deterministic; for Codex's multi-option login prompt preserve the
+				// existing browser/callback-server flow. Keep the heuristic fallback
+				// in case Pi changes the option id while retaining its label.
+				if (prompt.options.length === 1) return prompt.options[0].id;
+				const browserOption =
+					prompt.options.find((option) => option.id === "browser") ??
+					prompt.options.find(
+						(option) =>
+							option.id.toLowerCase().includes("browser") ||
+							option.label.toLowerCase().includes("browser"),
+					);
+				if (browserOption) return browserOption.id;
+				const available = prompt.options.map((option) => option.label).join(", ");
+				throw new Error(
+					`OAuth provider requested a selection Bobbit does not support yet ("${prompt.message}"; options: ${available || "none"})`,
 				);
-			if (browserOption) return browserOption.id;
-			const available = prompt.options.map((o) => o.label).join(", ");
+			}
 			throw new Error(
-				`OAuth provider requested a selection Bobbit does not support yet (\"${prompt.message}\"; options: ${available || "none"})`,
+				`OAuth provider requested an unsupported ${prompt.type} prompt Bobbit does not support yet ("${prompt.message}")`,
 			);
 		},
-		onProgress: (message) => console.log(`[oauth] ${OAUTH_PROVIDER_LABELS[provider]}: ${redactSensitive(message)}`),
-	}).then((credentials) => {
-		storeOAuthCredentials(provider, credentials);
+		notify: (event) => {
+			switch (event.type) {
+				case "auth_url":
+					safeResolveStarted({ url: event.url, instructions: event.instructions });
+					return;
+				case "device_code": {
+					const instructions = `Visit ${event.verificationUri} and enter code ${event.userCode}`;
+					console.log(`[oauth] ${OAUTH_PROVIDER_LABELS[provider]}: ${redactSensitive(instructions)}`);
+					safeResolveStarted({ url: event.verificationUri, instructions });
+					return;
+				}
+				case "info":
+				case "progress":
+					console.log(`[oauth] ${OAUTH_PROVIDER_LABELS[provider]}: ${redactSensitive(event.message)}`);
+					return;
+			}
+		},
+	};
+
+	const loginPromise = models.login(provider, "oauth", interaction).then((credential) => {
+		if (credential.type !== "oauth") {
+			throw new Error(`OAuth provider returned a non-OAuth credential: ${provider}`);
+		}
+		storeOAuthCredentials(provider, credential);
 		flow.completed = true;
 	}).catch((err) => {
-		const raw = err instanceof Error ? err.message : String(err);
-		flow.error = redactSensitive(raw);
-		rejectStarted(err instanceof Error ? err : new Error(String(err)));
-		throw err;
+		const error = err instanceof Error ? err : new Error(String(err));
+		flow.error = redactSensitive(error.message);
+		safeRejectStarted(error);
+		throw error;
 	});
 	void loginPromise.catch(() => {});
 	flow.loginPromise = loginPromise;
@@ -350,7 +391,7 @@ async function oauthStartExternal(provider: "openai-codex"): Promise<{ flowId: s
 		flowId,
 		url: info.url,
 		provider,
-		callbackServer: !!oauthProvider.usesCallbackServer,
+		callbackServer: true,
 		instructions: info.instructions,
 	};
 }
@@ -587,7 +628,7 @@ export async function oauthComplete(
 
 	if (Date.now() - flow.createdAt > FLOW_TTL_MS) {
 		if (flow.provider === "openai-codex") {
-			flow.rejectCode(new Error("OAuth flow expired"));
+			flow.cancelLogin(new Error("OAuth flow expired"));
 		} else if (flow.provider === "google-gemini-cli") {
 			closeGoogleFlowServer(flow);
 		}

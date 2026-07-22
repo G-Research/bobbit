@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 
 import { guardProcessEnv } from "./helpers/env-guard.js";
 
@@ -15,11 +16,15 @@ const { SessionManager, isRetryableAgentEnd } = await import("../../src/server/a
 const { subscribeToEvents } = await import("../../src/server/agent/session-setup.ts");
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
+const { initCompactionSidecarDir, purgeCompactionSidecar, readCompactionSidecarEntries } = await import("../../src/server/agent/compaction-sidecar.ts");
 const { createManualClock } = await import("../harness/clock.js");
+
+initCompactionSidecarDir(tmpRoot);
 
 const managers: any[] = [];
 
 afterEach(() => {
+	purgeCompactionSidecar("s-pi-retry");
 	for (const manager of managers.splice(0)) {
 		if (manager._statusHeartbeatTimer) {
 			manager._testClock?.clearInterval?.(manager._statusHeartbeatTimer);
@@ -124,23 +129,19 @@ describe("Pi RPC agent_end retry contract", () => {
 		expect(isRetryableAgentEnd("agent_end")).toBe(false);
 	});
 
-	it("emitAgentEvent suppresses retryable agent_end but emits the terminal one to clients", () => {
+	it("emitAgentEvent suppresses retryable agent_end but emits completed compaction with willRetry:true", () => {
 		const manager = makeManager();
 		const session = putSession(manager);
 
-		// Retryable agent_end must NOT reach the event buffer (clients treat any
-		// agent_end as terminal and would clear the streaming message/tool calls).
 		manager.emitAgentEvent(session, { type: "agent_end", willRetry: true, messages: [] });
 		expect(session.eventBuffer.size).toBe(0);
 
-		// Non-terminal streaming events still flow through.
+		// Compaction has completed even though Pi will retry the surrounding turn.
+		manager.emitAgentEvent(session, { type: "compaction_end", willRetry: true, result: { usage: { input: 1 } } });
 		manager.emitAgentEvent(session, { type: "message_update", message: { id: "m1", role: "assistant" } });
-		expect(session.eventBuffer.size).toBe(1);
-
-		// The real terminal agent_end is emitted so clients end the turn.
 		manager.emitAgentEvent(session, { type: "agent_end", willRetry: false, messages: [] });
 		const events = session.eventBuffer.getAll().map((e: any) => e.event.type);
-		expect(events).toEqual(["message_update", "agent_end"]);
+		expect(events).toEqual(["compaction_end", "message_update", "agent_end"]);
 	});
 
 	it("subscribeToEvents (session-setup pipeline) suppresses retryable agent_end before client/EventBuffer broadcast", () => {
@@ -179,6 +180,148 @@ describe("Pi RPC agent_end retry contract", () => {
 		// Lifecycle + cost tracking still see every event, including the retryable one.
 		expect(handleAgentLifecycle).toHaveBeenCalledTimes(3);
 		expect(trackCostFromEvent).toHaveBeenCalledTimes(3);
+
+		unsub();
+	});
+
+	it("completes overflow compaction before retrying and settles only on the final agent_end", async () => {
+		const manager = makeManager();
+		const listeners = new Set<(event: any) => void>();
+		const prompt = vi.fn(async () => ({ success: true }));
+		const recordUsage = vi.fn(() => ({ inputTokens: 11, outputTokens: 13, cacheReadTokens: 17, cacheWriteTokens: 19, totalCost: 1 }));
+		manager._testCostTracker = { recordUsage };
+		const session = putSession(manager, {
+			isCompacting: false,
+			allowedTools: ["read", "write"],
+			oneTimeGrantedTools: ["read"],
+			rpcClient: {
+				onEvent: (fn: (event: any) => void) => {
+					listeners.add(fn);
+					return () => { listeners.delete(fn); };
+				},
+				prompt,
+				getState: vi.fn(async () => ({ success: true, data: {} })),
+			},
+		});
+		session.promptQueue.enqueue("dispatch only after terminal settlement");
+		manager.refreshAfterCompaction = vi.fn();
+
+		const trackCostFromEvent = vi.fn((current: any, event: any) => manager.trackCostFromEvent(current, event));
+		const unsub = subscribeToEvents(session, {
+			store: manager._testStore,
+			handleAgentLifecycle: (current: any, event: any) => manager.handleAgentLifecycle(current, event),
+			trackCostFromEvent,
+		} as any);
+		let idleResolved = false;
+		const wait = manager.waitForIdle(session.id, 10_000).then(() => { idleResolved = true; });
+		const emit = (event: any) => {
+			for (const listener of [...listeners]) listener(event);
+		};
+
+		const scheduled: AgentSessionEvent = {
+			type: "summarization_retry_scheduled",
+			attempt: 1,
+			maxAttempts: 3,
+			delayMs: 250,
+			errorMessage: "temporary summarizer disconnect",
+		};
+		const attemptStart: AgentSessionEvent = {
+			type: "summarization_retry_attempt_start",
+			source: "compaction",
+			reason: "overflow",
+		};
+		const retryFinished: AgentSessionEvent = { type: "summarization_retry_finished" };
+		const compactionUsage = {
+			input: 11,
+			output: 13,
+			cacheRead: 17,
+			cacheWrite: 19,
+			totalTokens: 60,
+			cost: { input: 0.1, output: 0.2, cacheRead: 0.3, cacheWrite: 0.4, total: 1 },
+		};
+		const compactionEnd = {
+			type: "compaction_end",
+			reason: "overflow",
+			result: {
+				summary: "compacted after summarizer retry",
+				firstKeptEntryId: "entry-kept",
+				tokensBefore: 1_000,
+				estimatedTokensAfter: 100,
+				usage: compactionUsage,
+			},
+			aborted: false,
+			// Pi's _runAutoCompaction has already appended the compaction. This flag
+			// announces agent.continue(); it does not announce another compaction_end.
+			willRetry: true,
+		};
+
+		emit({ type: "compaction_start", reason: "overflow" });
+		const pendingId = session._pendingCompactionStart?.compactionId;
+		expect(pendingId).toMatch(/^c_/);
+		emit(scheduled);
+		emit(attemptStart);
+		emit(retryFinished);
+		emit(compactionEnd);
+		await flush();
+
+		// Compaction itself is complete and visible exactly once.
+		expect(session.isCompacting).toBe(false);
+		expect(session._pendingCompactionStart).toBeUndefined();
+		expect(compactionEnd).toHaveProperty("compactionId", pendingId);
+		expect(readCompactionSidecarEntries(session.id)).toMatchObject([{
+			id: pendingId,
+			success: true,
+			firstKeptEntryId: "entry-kept",
+		}]);
+		expect(manager.refreshAfterCompaction).toHaveBeenCalledTimes(1);
+		const compactionEvents = session.eventBuffer.getAll().map((entry: any) => entry.event);
+		expect(compactionEvents.map((event: any) => event.type)).toEqual([
+			"compaction_start",
+			"summarization_retry_scheduled",
+			"summarization_retry_attempt_start",
+			"summarization_retry_finished",
+			"compaction_end",
+		]);
+		expect(compactionEvents.at(-1)).toBe(compactionEnd);
+
+		// The surrounding turn is still live until Pi's retried agent run ends.
+		expect(idleResolved).toBe(false);
+		expect(session.status).toBe("streaming");
+		expect(session.completedTurnCount ?? 0).toBe(0);
+		expect(session.allowedTools).toEqual(["read", "write"]);
+		expect(session.oneTimeGrantedTools).toEqual(["read"]);
+		expect(prompt).not.toHaveBeenCalled();
+
+		// Summarizer usage is retained even though willRetry describes the agent turn.
+		expect(trackCostFromEvent).toHaveBeenCalledWith(session, compactionEnd);
+		expect(recordUsage).toHaveBeenCalledTimes(1);
+		expect(recordUsage).toHaveBeenCalledWith(session.id, {
+			inputTokens: 11,
+			outputTokens: 13,
+			cacheReadTokens: 17,
+			cacheWriteTokens: 19,
+			cost: 1,
+		}, undefined);
+		assert.equal((trackCostFromEvent.mock.calls.at(-1)?.[1] as any).result.usage, compactionUsage,
+			"compaction usage must be accounted without synthesizing or dropping it");
+
+		// _runAutoCompaction returns true, so Pi calls agent.continue(). There is no
+		// second compaction_end; the next agent_end is the terminal turn boundary.
+		emit({ type: "agent_start" });
+		emit({ type: "agent_end", messages: [], willRetry: false });
+		await wait;
+		await flush();
+
+		expect(idleResolved).toBe(true);
+		expect(session.eventBuffer.getAll().filter((entry: any) => entry.event.type === "compaction_end")).toHaveLength(1);
+		// The terminal turn boundary briefly settles idle and then drains the
+		// queued prompt, whose optimistic dispatch makes the session streaming.
+		expect(session.status).toBe("streaming");
+		expect(session.completedTurnCount).toBe(1);
+		expect(session.allowedTools).toEqual(["write"]);
+		expect(session.oneTimeGrantedTools).toEqual([]);
+		expect(prompt).toHaveBeenCalledTimes(1);
+		expect(prompt).toHaveBeenCalledWith("dispatch only after terminal settlement", undefined);
 
 		unsub();
 	});

@@ -1,0 +1,7 @@
+{
+  "name": "@bobbit-fixture/published-agent",
+  "version": "1.0.0",
+  "dependencies": {
+    "protobufjs": "^7.6.4"
+  }
+}

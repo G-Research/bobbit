@@ -41,7 +41,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { bfsEnrichArchivedIndexed } from "./agent/archived-session-bfs.js";
 import { PrStatusStore, type PrStatusEntry } from "./agent/pr-status-store.js";
-import { SessionManager, type ExtensionChannelServices } from "./agent/session-manager.js";
+import { SessionManager, type ExtensionChannelServices, type SessionInfo } from "./agent/session-manager.js";
 import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { executeCleanupWorktreesRequest } from "./maintenance/cleanup-worktrees-request.js";
 import { RateLimiter } from "./auth/rate-limit.js";
@@ -116,6 +116,14 @@ import { cpuDiagnosticsEnabled, getCpuDiagnostics, type CpuDiagnostics } from ".
 import { resolveGrantPolicy, computeEffectiveAllowedTools } from "./agent/tool-activation.js";
 import { parseMcpToolName } from "./mcp/mcp-meta.js";
 import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
+import {
+	copyAuthorSidecar,
+	initAuthorSidecarDir,
+	purgeAuthorSidecar,
+	readAuthorSidecar,
+} from "./agent/author-sidecar.js";
+import { agentAuthorForSession, BOBBIT_SYSTEM_AUTHOR } from "./agent/message-author.js";
+import { LOCAL_USER_AUTHOR } from "../shared/message-author.js";
 import {
 	initCompactionSidecarDir,
 	findCompactionSidecarEntry,
@@ -1926,6 +1934,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		serverRunDir: getProjectRoot(),
 	});
 	fs.mkdirSync(stateDir, { recursive: true });
+	// The author ledger reuses the stable cookie key through a domain-separated
+	// derivation and lives under this same private, owner-only server root.
+	const secretsDir = serverSecretsDir();
+	const cookieSigningKey = loadOrCreateCookieSigningKey(secretsDir);
 	// Ensure API-only/test gateways also get a startup-resolved agent dir even when
 	// they do not enter through cli.ts. This is a no-op after CLI initialization.
 	globalAgentDir();
@@ -1935,6 +1947,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	initPromptDirs(stateDir);
 	initSkillSidecarDir(stateDir);
 	initCompactionSidecarDir(stateDir);
+	initAuthorSidecarDir(stateDir, { secretsDir, hmacKey: cookieSigningKey });
 	initAssistantRegistry(configDir);
 
 	// Project registry — persisted at server level. Every server exposes the
@@ -2080,7 +2093,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	ck("getPackStore");
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
 	const sandboxTokenStore = new SandboxTokenStore();
-	const cookieSigningKey = loadOrCreateCookieSigningKey(serverSecretsDir());
 	const cookieStore = new CookieStore(cookieSigningKey, { clock: gatewayDeps.clock });
 	const previewOperations = createPreviewSessionOperationQueue();
 	const withPreviewSessionOperation = previewOperations.run;
@@ -3151,6 +3163,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			console.error(`[broadcast] session_removed failed for ${sessionId}:`, err);
 		}
 		if (info.reason === "purged") {
+			purgeAuthorSidecar(sessionId);
 			try {
 				await previewOperations.purge(sessionId, () => previewArtifacts.removeArtifacts(sessionId));
 			} catch (err) {
@@ -4045,14 +4058,13 @@ async function handleApiRoute(
 			console.error(`[broadcast] staff_changed failed for ${event.staffId}:`, err);
 		}
 	};
-	type RoleCreateOptions = { rolePrompt?: string; roleName: string; role: string; accessory?: string; initialModel?: string; initialThinkingLevel?: string };
+	type RoleCreateOptions = { roleName: string; role: string; accessory?: string; initialModel?: string; initialThinkingLevel?: string };
 	const roleCreateOptions = (role: Role): RoleCreateOptions => {
 		const initialModel = typeof role.model === "string" && /^[^/]+\/.+$/.test(role.model) && isSessionSelectableModelString(role.model)
 			? role.model
 			: undefined;
 		const initialThinkingLevel = clampRoleThinking(role.thinkingLevel, initialModel);
 		return {
-			rolePrompt: role.promptTemplate,
 			roleName: role.name,
 			role: role.name,
 			accessory: role.accessory,
@@ -6439,7 +6451,13 @@ async function handleApiRoute(
 			return;
 		}
 
-		// ── Normal session creation ──
+		// ── Normal/assistant session creation ──
+		// Keep this after the delegate early-return: delegate role mappings are owned
+		// by createDelegateSession and must not inherit this route's role contract.
+		if (body?.roleId !== undefined && body.roleId !== null && typeof body.roleId !== "string") {
+			json({ error: "roleId must be a string or null" }, 400);
+			return;
+		}
 		const goalId = body?.goalId;
 
 		// Accept both new assistantType and legacy boolean fields
@@ -6473,8 +6491,8 @@ async function handleApiRoute(
 
 		const args = body?.args;
 
-		// If a roleId is provided, resolve/apply it after resolvedProjectId is known.
-		const roleId = body?.roleId;
+		// Normalize the requested role now, then resolve it after resolvedProjectId is known.
+		const requestedRoleId: string | null | undefined = typeof body?.roleId === "string" ? body.roleId.trim() : body?.roleId;
 		let createOpts: RoleCreateOptions | undefined;
 
 		// ── Worktree support ──
@@ -6678,7 +6696,15 @@ async function handleApiRoute(
 			}
 		}
 
-		if (roleId && typeof roleId === "string") {
+		// Standard sessions always start with a fully resolved role. Assistants keep
+		// their dedicated assistantRoleForType mapping when no role was requested.
+		// Keep this lookup ahead of worktree capability resolution below: that step
+		// only probes support, while actual provisioning begins in createSession().
+		// An unknown role must return without either worktree or session side effects.
+		const roleId = !assistantType && (requestedRoleId === undefined || requestedRoleId === null || requestedRoleId === "")
+			? "general"
+			: requestedRoleId;
+		if (typeof roleId === "string" && roleId.length > 0) {
 			const role = resolveRoleForProject(roleId, resolvedProjectId);
 			if (!role) {
 				json({ error: `Role "${roleId}" not found` }, 404);
@@ -11804,6 +11830,20 @@ async function handleApiRoute(
 			typeof secret === "string" && secret.trim() ? secret.trim() : undefined,
 		);
 	};
+	const authorForAgentSession = (caller: SessionInfo) => agentAuthorForSession(caller, {
+		getStaff: (id) => staffManager.getStaff(id),
+		getRole: (name) => resolveRoleForProject(name, caller.projectId),
+	});
+	const resolveRequestPromptIdentity = () => {
+		const callerSessionId = resolveAuthenticCallerFromSessionSecret();
+		const callerSession = callerSessionId ? sessionManager.getSession(callerSessionId) : undefined;
+		if (callerSession) return { source: "agent" as const, author: authorForAgentSession(callerSession) };
+		// A sandbox-authenticated agent that omitted its session secret must never
+		// be misattributed as the local human. Preserve the existing authorization
+		// decision, but use Bobbit's safe system fallback for accountability.
+		if (sandboxScope) return { source: "system" as const, author: BOBBIT_SYSTEM_AUTHOR };
+		return { source: "user" as const, author: LOCAL_USER_AUTHOR };
+	};
 	const denyDismissNotOwned = (sessionId: string, message = "Caller session is not the team lead for this goal") => json({
 		ok: false,
 		status: "not-owned",
@@ -12163,7 +12203,7 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			await sessionManager.deliverLiveSteer(session.id, body.message);
+			await sessionManager.deliverLiveSteer(session.id, body.message, resolveRequestPromptIdentity());
 			json({ ok: true, dispatched: true });
 		} catch (err) {
 			jsonError(500, err);
@@ -12297,6 +12337,7 @@ async function handleApiRoute(
 					message = ctx + "\n\n---\n\n" + message;
 				}
 			}
+			const requestIdentity = resolveRequestPromptIdentity();
 			const result = ownChildOwner
 				? await orchestrationCore.prompt(ownChildOwner, body.sessionId, message, { mode })
 				: await deliverSessionPrompt({
@@ -12306,7 +12347,11 @@ async function handleApiRoute(
 					getErroredPromptRecoveryDecision: (id) => sessionManager.getErroredPromptRecoveryDecision(id),
 					enqueuePromptForRetryRecovery: (id, text, opts) => sessionManager.enqueuePromptForRetryRecovery(id, text, opts),
 					retryLastPrompt: (id, opts) => sessionManager.retryLastPrompt(id, opts),
-				}, body.sessionId, message, { mode, defaultMode: "steer" });
+				}, body.sessionId, message, {
+					mode,
+					defaultMode: "steer",
+					...requestIdentity,
+				});
 			json(result);
 		} catch (err) {
 			if (err instanceof SessionPromptDeliveryError || err instanceof OrchestrationCoreError) {
@@ -12579,8 +12624,10 @@ async function handleApiRoute(
 
 		const srcCtx = sessionFsContextForAgentFile(ps, sourceJsonl);
 		const dstCtx = sessionFsContextForAgentFile({ sandboxed: !!ps.sandboxed, projectId }, destJsonl);
+		let clonedTranscript: string | null = null;
 		try {
 			await sessionFileCopy(srcCtx, sourceJsonl, dstCtx, destJsonl, sandboxManager ?? null);
+			clonedTranscript = await sessionFileRead(dstCtx, destJsonl, sandboxManager ?? null);
 		} catch (err) {
 			if (err instanceof CrossRealmCopyError) { json({ error: "cross-realm fork not supported" }, 422); return; }
 			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
@@ -12595,6 +12642,10 @@ async function handleApiRoute(
 		}
 
 		try {
+			// The destination id is fixed before creation. Copy author bindings now so
+			// switch_session replay is normalized correctly on its first pass and the
+			// resulting EventBuffer never captures fallback authors.
+			copyAuthorSidecar(sourceId, forkId, { transcript: clonedTranscript });
 			const launched = await launchSidebarSessionFork({
 				forkId,
 				projectId,
@@ -12667,6 +12718,7 @@ async function handleApiRoute(
 			}, 201);
 		} catch (err) {
 			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
+			purgeAuthorSidecar(forkId);
 			jsonError(500, err, { error: `failed to fork session: ${err instanceof Error ? err.message : String(err)}` });
 		}
 		return;
@@ -12715,7 +12767,12 @@ async function handleApiRoute(
 				getErroredPromptRecoveryDecision: (id) => sessionManager.getErroredPromptRecoveryDecision(id),
 				enqueuePromptForRetryRecovery: (id, text, opts) => sessionManager.enqueuePromptForRetryRecovery(id, text, opts),
 				retryLastPrompt: (id, opts) => sessionManager.retryLastPrompt(id, opts),
-			}, targetSessionId, body.message, { mode: body.mode, defaultMode: "prompt" });
+			}, targetSessionId, body.message, {
+				mode: body.mode,
+				defaultMode: "prompt",
+				source: "agent",
+				author: authorForAgentSession(callerSession),
+			});
 			json(result);
 		} catch (err) {
 			if (err instanceof SessionPromptDeliveryError) {
@@ -13145,8 +13202,10 @@ async function handleApiRoute(
 		// Copy the source `.jsonl`. Cross-realm → 422; any other failure → 500.
 		const srcCtx = sessionFsContextForAgentFile(ps, sourceJsonl);
 		const dstCtx = sessionFsContextForAgentFile(ps, destJsonl);
+		let clonedTranscript: string | null = null;
 		try {
 			await sessionFileCopy(srcCtx, sourceJsonl, dstCtx, destJsonl, sandboxManager ?? null);
+			clonedTranscript = await sessionFileRead(dstCtx, destJsonl, sandboxManager ?? null);
 		} catch (err) {
 			if (err instanceof CrossRealmCopyError) {
 				json({ error: "cross-realm continue not supported" }, 422);
@@ -13213,6 +13272,10 @@ async function handleApiRoute(
 
 		let newSession;
 		try {
+			// createSession synchronously rehydrates the cloned transcript. Seed the
+			// already-known destination id first so replayed events resolve against the
+			// copied author ledger instead of being frozen with fallback identities.
+			copyAuthorSidecar(archivedId, newSessionId, { transcript: clonedTranscript });
 			newSession = await sessionManager.createSession(
 				projCwd, undefined, undefined, ps.assistantType, createOpts,
 			);
@@ -13222,6 +13285,7 @@ async function handleApiRoute(
 			if (failedRecord?.agentSessionFile && failedRecord.agentSessionFile !== destJsonl) {
 				cleanupFailedContinue(destJsonl, newSessionId, bobbitStateDir());
 			}
+			purgeAuthorSidecar(newSessionId);
 			jsonError(500, err, { error: `failed to create session: ${err instanceof Error ? err.message : String(err)}` });
 			return;
 		}
@@ -14153,6 +14217,14 @@ async function handleApiRoute(
 			const ctx = sessionFsContextForAgentFile(targetPs, targetPs.agentSessionFile);
 			const envelope = await readTranscript(params, {
 				readContent: () => sessionFileRead(ctx, targetPs.agentSessionFile, sandboxManager),
+				authorContext: {
+					session: targetPs,
+					sidecarEntries: readAuthorSidecar(targetId),
+					agentDeps: {
+						getStaff: (id) => staffManager.getStaff(id),
+						getRole: (name) => resolveRoleForProject(name, targetPs.projectId),
+					},
+				},
 			});
 			json(envelope);
 		} catch (err) {
@@ -14223,6 +14295,14 @@ async function handleApiRoute(
 				{
 					readContent: () => sessionFileRead(ctx2, targetPs.agentSessionFile!, sandboxManager),
 					firstKeptEntryId: entry.firstKeptEntryId,
+					authorContext: {
+						session: targetPs,
+						sidecarEntries: readAuthorSidecar(targetId),
+						agentDeps: {
+							getStaff: (id) => staffManager.getStaff(id),
+							getRole: (name) => resolveRoleForProject(name, targetPs.projectId),
+						},
+					},
 				},
 			);
 			json(envelope);
@@ -16500,7 +16580,10 @@ async function handleApiRoute(
 		// duplicate /submit is rejected deterministically.
 		askSubmittedToolUseIds.add(dedupKey);
 		try {
-			await sessionManager.enqueuePrompt(sessionId, envelope);
+			await sessionManager.enqueuePrompt(sessionId, envelope, {
+				source: "user",
+				author: LOCAL_USER_AUTHOR,
+			});
 		} catch (e: any) {
 			// Roll back the dedup flag so the caller can retry.
 			askSubmittedToolUseIds.delete(dedupKey);

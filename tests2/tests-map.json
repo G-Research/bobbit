@@ -2,9 +2,9 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1135,
+  "censusTotal": 1136,
   "buckets": {
-    "daily": 61,
+    "daily": 62,
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
@@ -15,7 +15,7 @@
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
-    "relocate": 46,
+    "relocate": 47,
     "rewrite": 145,
     "vitest-e2e": 2
   },
@@ -36,6 +36,24 @@
         "runner": "vitest",
         "tier": "unit",
         "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/core/session-manager-keyless-replay-cursor.test.ts",
+      "reason": "Deterministic cold-restore and force-abort regression proving ordered keyless replay advances from settled p1 to crash-unsettled persisted p2, while duplicate terminal frames remain idempotent and p2 is never requeued.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/session-manager-keyless-guard-lifecycle.test.ts",
+      "reason": "Deterministic regression proving an assistant stream cannot clear the live keyless terminal guard before a duplicate same-text p1 end, while preserving p2's author and steer settlement plus genuine new-dispatch supersession.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
       }
     },
     {
@@ -903,6 +921,51 @@
       }
     },
     {
+      "path": "tests2/integration/default-standard-session-role.test.ts",
+      "reason": "Budget-safe reproducer: an omitted role on non-worktree standard-session creation resolves general across POST, live state, persistence, detail, and list.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/default-standard-session-role-inputs.test.ts",
+      "reason": "Default standard-session role input coverage: empty and null roles resolve general, while boolean, numeric, and object role values are rejected without creating a session.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/default-standard-session-role-assistant.test.ts",
+      "reason": "Assistant session creation preserves its assistant role and accessory mapping instead of receiving the standard-session general default.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/default-standard-session-role-config.test.ts",
+      "reason": "Project-resolved general and explicit custom roles apply their prompt substitutions, conditionals, tool policies, model, thinking, accessory, and persisted metadata at initial non-worktree spawn.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/default-standard-session-role-worktree.test.ts",
+      "reason": "Real worktree standard-session creation with an omitted role applies and persists the full project-resolved general role configuration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
       "path": "tests2/integration/session-store-real-fs.test.ts",
       "reason": "Canonical real-filesystem fidelity for SessionStore atomic rename cleanup, backup rotation/restore after corrupt primary, and recursive orphan transcript traversal.",
       "execution": {
@@ -1002,6 +1065,60 @@
       }
     },
     {
+      "path": "tests2/core/author-sidecar.test.ts",
+      "reason": "Focused secure-v2 coverage for private author-sidecar placement, digest-only rows, stable-key restart correlation, POSIX modes, v1 plaintext migration/removal, transcript-confirmed settled copy, corruption tolerance, correlation, and purge.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/verification-author-producer.test.ts",
+      "reason": "Deterministic in-process core regression proving the actual VerificationHarness resumed-review reminder call site persists source=verification with Bobbit's system author while preserving the exact prompt bytes and RPC argument shape.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/message-author.test.ts",
+      "reason": "Subprocess-free pure/memfs core coverage for PromptSource mapping, identity construction, legacy/tool-result inference, queue and in-flight steer restore compatibility, and authored assistant/steer snapshot splices.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/client-message-author.test.ts",
+      "reason": "Happy-dom client coverage for preserving server authors through reducer snapshots/live updates, stamping optimistic human rows, and stripping Bobbit-only metadata at Pi model conversion boundaries.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/integration/message-author-ws-server.test.ts",
+      "reason": "Deterministic in-process gateway integration coverage for human and server-generated author identity across live websocket events, reconnects, and get_messages snapshots without changing message roles or text.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/author-metadata.journey.spec.ts",
+      "reason": "Chromium browser acceptance journey proving user/assistant author identities survive reload in client state while ordinary one-human chat renders no noisy author labels.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/core/marketplace-install-decisions.test.ts",
       "reason": "Tier-1 seam-based marketplace routing, validation, source-store, gitRunner, and MCP gateway decision coverage retained alongside the real-fidelity E2E owner.",
       "execution": {
@@ -1039,7 +1156,7 @@
     },
     {
       "path": "tests2/core/unit-file-budget-reporter.test.ts",
-      "reason": "Pins the 15-second tier-1 file budget reporter boundary, aggregation, retry accounting, E2E exclusion, and Windows path rendering.",
+      "reason": "Pins the 25-second tier-1 file budget reporter boundary, aggregation, retry accounting, E2E exclusion, and Windows path rendering.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -1210,7 +1327,16 @@
     },
     {
       "path": "tests2/core/session-manager-snapshot-memo.test.ts",
-      "reason": "Native v2 core coverage for sequence-keyed snapshot coalescing, invalidation, failure retry, and stale-promise fencing.",
+      "reason": "Native v2 core coverage for sequence-keyed snapshot coalescing, invalidation, failure retry, stale-promise fencing, and immutable memoized bases with fresh author/steer/compaction/display overlays.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/splice-inflight-steer-occurrence.test.ts",
+      "reason": "Native v2 core coverage for occurrence-aware in-flight steer splicing: historical same-text rows cannot hide newer structured steers, settled ids suppress only their own occurrence, repeated authors remain distinct, and legacy string multiset behavior remains compatible.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -1306,6 +1432,33 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/core/pi-published-shrinkwrap-security.test.ts",
+      "reason": "Deterministic fixture regression proving a dependency-owned published shrinkwrap can retain a vulnerable transitive pin despite a secure wrapper-checkout override, so consumer security validation must inspect published lock sources.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/pi-rpc-thinking-levels.test.ts",
+      "reason": "Pi 0.81 RPC compatibility coverage for the typed get_available_thinking_levels request, existing response correlation path, established state/model/thinking helpers, and restored legacy stream fallback.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/pi-tool-lifecycle-contract.test.ts",
+      "reason": "Pi 0.81 lifecycle contract coverage for typed tool call/result and execution start/update/end ordering, policy and steer boundaries, unchanged partial/final payload forwarding, error normalization, and optional usage/addedToolNames fields.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [
@@ -1342,7 +1495,15 @@
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/project-onboarding.journey.spec.ts",
+      "path": "tests2/browser/journeys/project-onboarding-dialog.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/project-onboarding-preflight.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/project-onboarding-repositories.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
@@ -5448,7 +5609,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-dialog.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -5490,7 +5651,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-repositories.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -5500,7 +5661,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-repositories.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -5510,7 +5671,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-preflight.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -5520,7 +5681,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-repositories.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -5530,7 +5691,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-dialog.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -5540,7 +5701,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-preflight.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -6323,7 +6484,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-dialog.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -6426,9 +6587,9 @@
       "bucket": "daily",
       "method": "adapter",
       "replacement": [
-        "tests2/browser/fixtures/pre-compaction-history.spec.ts"
+        "tests2/browser/e2e/pre-compaction-history.spec.ts"
       ],
-      "rationale": "Browser E2E uses IntersectionObserver at tests/e2e/ui/pre-compaction-history.spec.ts:258 â€” needs Chromium real-browser fidelity.",
+      "rationale": "Authoritative e2e:v2 Group C coverage drives real mock-agent AUTO_COMPACT:3 through the visible editor, verifies ordered dimmed read-only history, reload persistence, and per-test session cleanup in Chromium.",
       "migrated": true,
       "v2Path": "tests2/browser/e2e/pre-compaction-history.spec.ts",
       "execution": {
@@ -6521,7 +6682,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-dialog.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -6665,7 +6826,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-dialog.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -7142,7 +7303,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-dialog.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -7172,7 +7333,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-dialog.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -7182,7 +7343,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-dialog.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -16267,6 +16428,13 @@
       "method": "relocate",
       "replacement": [],
       "rationale": "API-only real-gateway E2E covering session loading across graceful restart, eager restoration, WebSocket snapshots, archived pagination, cost persistence, and task reassignment."
+    },
+    {
+      "file": "tests/e2e/pi-packed-consumer.spec.ts",
+      "bucket": "daily",
+      "method": "relocate",
+      "replacement": [],
+      "rationale": "Real npm pack and clean-consumer install/audit coverage for dependency-owned shrinkwrap resolution, aligned Pi versions, secure brace-expansion edges, version-conditional protobufjs findings, and bundled fd/rg execution."
     }
   ]
 }

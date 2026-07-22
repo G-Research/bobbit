@@ -154,7 +154,7 @@ describe("sanitizeTranscriptContent", () => {
 		assert.equal(content, file);
 	});
 
-	it("leaves Pi 0.80.x session-tree metadata entries byte-identical", () => {
+	it("leaves Pi session-tree metadata entries byte-identical", () => {
 		const entries = [
 			JSON.stringify({ type: "active_tools_change", id: "tools-1", parentId: null, timestamp: "2026-01-01T00:00:00.000Z", activeToolNames: ["read", "write"] }),
 			JSON.stringify({ type: "leaf", id: "leaf-1", parentId: "tools-1", timestamp: "2026-01-01T00:00:01.000Z", targetId: "msg-1" }),
@@ -164,6 +164,180 @@ describe("sanitizeTranscriptContent", () => {
 		assert.equal(changed, false);
 		assert.equal(rewritten, 0);
 		assert.equal(content, entries);
+	});
+
+	it("honors a Pi 0.81 retainedTail checkpoint and preserves its additive fields byte-for-byte", () => {
+		const usage = {
+			input: 11,
+			output: 7,
+			cacheRead: 3,
+			cacheWrite: 2,
+			cacheWrite1h: 1,
+			reasoning: 4,
+			totalTokens: 23,
+			cost: { input: 0.1, output: 0.2, cacheRead: 0.01, cacheWrite: 0.02, total: 0.33 },
+		};
+		const entries = [
+			JSON.stringify({
+				type: "message", id: "old-a", parentId: null, timestamp: "2026-01-01T00:00:00.000Z",
+				message: { role: "assistant", content: [{ type: "text", text: "old text-only response" }] },
+			}),
+			JSON.stringify({
+				type: "message", id: "old-orphan", parentId: "old-a", timestamp: "2026-01-01T00:00:01.000Z",
+				message: { role: "toolResult", toolCallId: "old-missing", toolName: "read", content: "old" },
+			}),
+			JSON.stringify({
+				type: "compaction", id: "compact", parentId: "old-orphan", timestamp: "2026-01-01T00:00:02.000Z",
+				summary: "summary", firstKeptEntryId: "old-a", tokensBefore: 100,
+				retainedTail: [{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "retained-call", name: "read", arguments: { path: "fixture" } }],
+					api: "anthropic-messages", provider: "anthropic", model: "fixture", usage, stopReason: "toolUse", timestamp: 1,
+				}],
+				usage,
+				details: { readFiles: ["fixture"], additiveProviderData: { retained: true } },
+				futureAccounting: { retryAttempts: 2 },
+			}),
+			JSON.stringify({
+				type: "message", id: "retained-result", parentId: "compact", timestamp: "2026-01-01T00:00:03.000Z",
+				message: { role: "toolResult", toolCallId: "retained-call", toolName: "read", content: "ok", usage },
+			}),
+			JSON.stringify({
+				type: "branch_summary", id: "branch", parentId: "retained-result", timestamp: "2026-01-01T00:00:04.000Z",
+				fromId: "abandoned", summary: "branch summary", usage, details: { future: "preserve" }, fromHook: false,
+			}),
+		].join("\n") + "\n";
+
+		assert.deepEqual(
+			sanitizeTranscriptContent(entries),
+			{ content: entries, changed: false, rewritten: 0 },
+		);
+	});
+
+	it("removes only embedded retainedTail orphans and preserves the owning compaction structure", () => {
+		const usage = {
+			input: 13,
+			output: 8,
+			reasoning: 5,
+			totalTokens: 26,
+			cost: { input: 0.13, output: 0.24, total: 0.37 },
+		};
+		const orphanResult = {
+			role: "toolResult",
+			toolCallId: "missing-call",
+			toolName: "read",
+			content: "poison",
+			usage: { output: 1 },
+		};
+		const validAssistant = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "valid-call", name: "read", arguments: { path: "kept" } }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "fixture",
+			usage,
+			stopReason: "toolUse",
+			timestamp: 2,
+			additiveMessageField: { preserved: true },
+		};
+		const validResult = {
+			role: "toolResult",
+			toolCallId: "valid-call",
+			toolName: "read",
+			content: "kept result",
+			usage: { input: 2, output: 3 },
+			additiveResultField: ["preserve", 1],
+		};
+		const compaction = {
+			type: "compaction",
+			id: "compact",
+			parentId: "root",
+			timestamp: "2026-01-01T00:00:02.000Z",
+			summary: "summary",
+			firstKeptEntryId: "root",
+			tokensBefore: 100,
+			retainedTail: [orphanResult, validAssistant, validResult],
+			usage,
+			details: { readFiles: ["kept"], additiveProviderData: { retained: true } },
+			futureAccounting: { retryAttempts: 2 },
+			additiveCompactionField: { nested: [1, { preserved: true }] },
+		};
+		const sessionLine = `  ${JSON.stringify({ type: "session", id: "session", version: 3 })}  `;
+		const rootLine = JSON.stringify({
+			type: "message", id: "root", parentId: null, timestamp: "2026-01-01T00:00:00.000Z",
+			message: { role: "assistant", content: [{ type: "text", text: "before compaction" }] },
+		});
+		const content = [sessionLine, rootLine, ` ${JSON.stringify(compaction)} `].join("\r\n") + "\r\n";
+
+		const repaired = sanitizeTranscriptContent(content);
+		assert.equal(repaired.changed, true);
+		assert.equal(repaired.rewritten, 1, "the embedded removal contributes to the repair count");
+		assert.ok(repaired.content.endsWith("\r\n"), "CRLF trailing-newline shape is preserved");
+		const repairedLines = repaired.content.split("\n");
+		assert.equal(repairedLines[0], sessionLine + "\r", "unrelated session line remains byte-identical");
+		assert.equal(repairedLines[1], rootLine + "\r", "unrelated transcript line remains byte-identical");
+		assert.equal(repairedLines[2].endsWith("\r"), true, "rewritten compaction retains its CR");
+		assert.deepEqual(JSON.parse(repairedLines[2]), {
+			...compaction,
+			retainedTail: [validAssistant, validResult],
+		});
+
+		assert.deepEqual(
+			sanitizeTranscriptContent(repaired.content),
+			{ content: repaired.content, changed: false, rewritten: 0 },
+			"embedded orphan repair is idempotent",
+		);
+	});
+
+	it("uses Pi 0.81 leaf targetId rather than sanitizing the abandoned branch", () => {
+		const entries = [
+			JSON.stringify({
+				type: "message", id: "root", parentId: null, timestamp: "2026-01-01T00:00:00.000Z",
+				message: { role: "assistant", content: [{ type: "text", text: "text only" }] },
+			}),
+			JSON.stringify({
+				type: "message", id: "abandoned-orphan", parentId: "root", timestamp: "2026-01-01T00:00:01.000Z",
+				message: { role: "toolResult", toolCallId: "missing", toolName: "read", content: "old branch" },
+			}),
+			JSON.stringify({
+				type: "leaf", id: "leaf-control", parentId: "abandoned-orphan", timestamp: "2026-01-01T00:00:02.000Z",
+				targetId: "root", additiveCursor: { afterEntrySeq: 2 },
+			}),
+		].join("\n");
+
+		assert.deepEqual(
+			sanitizeTranscriptContent(entries),
+			{ content: entries, changed: false, rewritten: 0 },
+		);
+	});
+
+	it("rebases a Pi 0.81 leaf target when its active orphan is removed", () => {
+		const root = JSON.stringify({
+			type: "message", id: "root", parentId: null, timestamp: "2026-01-01T00:00:00.000Z",
+			message: { role: "assistant", content: [{ type: "text", text: "text only" }] },
+		});
+		const orphan = JSON.stringify({
+			type: "message", id: "active-orphan", parentId: "root", timestamp: "2026-01-01T00:00:01.000Z",
+			message: { role: "toolResult", toolCallId: "missing", toolName: "read", content: "poison" },
+		});
+		const inactive = JSON.stringify({
+			type: "custom", id: "inactive", parentId: "root", timestamp: "2026-01-01T00:00:02.000Z",
+			customType: "future-extension", data: { preserve: true },
+		});
+		const leaf = JSON.stringify({
+			type: "leaf", id: "leaf-control", parentId: "inactive", timestamp: "2026-01-01T00:00:03.000Z",
+			targetId: "active-orphan", additiveCursor: { afterEntrySeq: 3 },
+		});
+
+		const repaired = sanitizeTranscriptContent([root, orphan, inactive, leaf].join("\n"));
+		assert.equal(repaired.changed, true);
+		assert.equal(repaired.rewritten, 1);
+		const repairedLines = repaired.content.split("\n");
+		assert.equal(repairedLines[0], root);
+		assert.equal(repairedLines[1], inactive, "unrelated inactive entry remains byte-identical");
+		const repairedLeaf = JSON.parse(repairedLines[2]);
+		assert.equal(repairedLeaf.targetId, "root");
+		assert.deepEqual(repairedLeaf.additiveCursor, { afterEntrySeq: 3 });
 	});
 
 	it("empty input is a no-op", () => {

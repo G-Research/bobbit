@@ -17,9 +17,30 @@
  * so blocking flows settle in milliseconds (never test:manual).
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, createSession, deleteSession, connectWs } from "./_e2e/e2e-setup.js";
+import { apiFetch, createSession, deleteSession, connectWs, defaultProject, type WsConnection } from "./_e2e/e2e-setup.js";
+import {
+	promptAuthorBindingMatchesText,
+	readAuthorSidecar,
+} from "../../src/server/agent/author-sidecar.js";
 
 const OPUS = { provider: "anthropic", modelId: "claude-opus-4-8" };
+const DELEGATE_KICKOFF = "Execute the task described in your system prompt. Follow the instructions carefully.";
+
+function messageText(message: any): string {
+	if (typeof message?.content === "string") return message.content;
+	if (!Array.isArray(message?.content)) return "";
+	return message.content
+		.filter((part: any) => part?.type === "text" && typeof part.text === "string")
+		.map((part: any) => part.text)
+		.join("\n");
+}
+
+async function getMessages(conn: WsConnection): Promise<any[]> {
+	const cursor = conn.messageCount();
+	conn.send({ type: "get_messages" });
+	const frame = await conn.waitForFrom(cursor, (message) => message.type === "messages");
+	return Array.isArray(frame.data) ? frame.data : frame.data?.messages ?? [];
+}
 
 /** Poll a predicate until it returns a truthy value, or throw on timeout. */
 async function pollUntil<T>(
@@ -101,6 +122,79 @@ test.describe("team_delegate — blocking one-shot (delegate parity)", () => {
 			expect(await listChildren(parent)).toHaveLength(0);
 		} finally {
 			await deleteSession(parent);
+		}
+	});
+});
+
+test.describe("team_delegate — accountable kickoff author", () => {
+	test("renamed staff owner persists its current author and reloads it without changing prompt bytes or role", async ({ gateway }) => {
+		const project = await defaultProject();
+		const oldName = `Delegate Staff Old ${Date.now()}`;
+		const newName = `Delegate Staff New ${Date.now()}`;
+		const created = await apiFetch("/api/staff", {
+			method: "POST",
+			body: JSON.stringify({
+				name: oldName,
+				systemPrompt: "Own a delegate author regression.",
+				cwd: project.rootPath,
+				projectId: project.id,
+				worktree: false,
+			}),
+		});
+		expect(created.status, await created.clone().text()).toBe(201);
+		const staff = await created.json();
+		const parent = staff.currentSessionId as string;
+		let childId: string | undefined;
+		try {
+			const renamed = await apiFetch(`/api/staff/${staff.id}`, {
+				method: "PUT",
+				body: JSON.stringify({ name: newName }),
+			});
+			expect(renamed.status, await renamed.clone().text()).toBe(200);
+			expect(gateway.sessionManager.getSession(parent)?.title).toBe(oldName);
+
+			const { status, json } = await orchestrate(parent, "spawn", {
+				instructions: "delegate author lifecycle",
+			});
+			expect(status).toBe(201);
+			childId = json.childSessionId as string;
+			expect(childId).toBeTruthy();
+
+			await pollUntil(() => gateway.sessionManager.getSession(childId!)?.status === "idle", {
+				timeoutMs: 5_000,
+				intervalMs: 25,
+				label: "delegate kickoff settled",
+			});
+
+			const binding = readAuthorSidecar(childId!).find((entry) =>
+				promptAuthorBindingMatchesText(entry, DELEGATE_KICKOFF),
+			);
+			expect(binding).toMatchObject({
+				schemaVersion: 2,
+				modelTextDigest: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+				source: "agent",
+				author: { kind: "agent", id: `staff:${staff.id}`, label: newName },
+				settlement: { outcome: "echoed" },
+			});
+
+			// Attach only after the turn has settled: get_messages must reconstruct
+			// this persisted transcript row from the Bobbit sidecar, not a live ledger.
+			const reloaded = await connectWs(childId!);
+			try {
+				const messages = await getMessages(reloaded);
+				const kickoff = messages.find((message) => message.role === "user" && messageText(message) === DELEGATE_KICKOFF);
+				expect(kickoff).toMatchObject({
+					role: "user",
+					author: binding!.author,
+				});
+				expect(messageText(kickoff)).toBe(DELEGATE_KICKOFF);
+				expect(messages.some((message) => message.role === "assistant")).toBe(true);
+			} finally {
+				reloaded.close();
+			}
+		} finally {
+			if (childId) await orchestrate(parent, "dismiss", { childSessionId: childId }).catch(() => undefined);
+			await apiFetch(`/api/staff/${staff.id}`, { method: "DELETE" }).catch(() => undefined);
 		}
 	});
 });

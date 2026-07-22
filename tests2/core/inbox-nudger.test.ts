@@ -16,9 +16,7 @@
  * Pinned by docs/design/staff-inbox.md §3.3, §5, §13.
  */
 import path from "node:path";
-import { describe, it, vi, afterEach } from "vitest";
-// __v2_realtimers_net: forks are shared (isolate:false) — never leak fake timers.
-afterEach(() => { vi.useRealTimers(); });
+import { describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import { InboxStore } from "../../src/server/agent/inbox-store.ts";
 import { InboxNudger } from "../../src/server/agent/inbox-nudger.ts";
@@ -26,6 +24,10 @@ import { createManualClock } from "../harness/clock.js";
 import { createMemFs } from "../harness/mem-fs.js";
 
 let dirSeq = 0;
+
+async function flushMicrotasks(): Promise<void> {
+	for (let i = 0; i < 6; i++) await Promise.resolve();
+}
 
 type StaffStatus = "idle" | "streaming" | "starting" | "terminated";
 
@@ -106,14 +108,16 @@ describe("InboxNudger — periodic tick", () => {
 
 		h.clock.advance(15_000);
 		// Yield so microtasks (poke / applyPolicyThenNudge) settle.
-		await new Promise((r) => setImmediate(r));
-		await new Promise((r) => setImmediate(r));
+		await flushMicrotasks();
 
 		assert.equal(h.enqueuePrompt.mock.calls.length, 1);
 		const call = h.enqueuePrompt.mock.calls[0];
 		assert.equal(call[0], h.session.id);
-		assert.match(call[1], /\[INBOX\] You have 1 pending item\./);
-		assert.deepEqual(call[2], { isSteered: true });
+		assert.equal(
+			call[1],
+			"[INBOX] You have 1 pending item. Use inbox_list to inspect, then process each with inbox_complete or inbox_dismiss.",
+		);
+		assert.deepEqual(call[2], { isSteered: true, source: "system" });
 
 		h.nudger.stop();
 	});
@@ -126,8 +130,7 @@ describe("InboxNudger — periodic tick", () => {
 		h.nudger.start();
 
 		h.clock.advance(15_000);
-		await new Promise((r) => setImmediate(r));
-		await new Promise((r) => setImmediate(r));
+		await flushMicrotasks();
 
 		assert.equal(h.enqueuePrompt.mock.calls.length, 1);
 		assert.match(h.enqueuePrompt.mock.calls[0][1], /3 pending items/);
@@ -140,7 +143,7 @@ describe("InboxNudger — periodic tick", () => {
 		h.nudger.start();
 
 		h.clock.advance(15_000);
-		await new Promise((r) => setImmediate(r));
+		await flushMicrotasks();
 		assert.equal(h.enqueuePrompt.mock.calls.length, 0);
 		h.nudger.stop();
 	});
@@ -151,7 +154,7 @@ describe("InboxNudger — periodic tick", () => {
 		h.nudger.start();
 
 		h.clock.advance(15_000);
-		await new Promise((r) => setImmediate(r));
+		await flushMicrotasks();
 		assert.equal(h.enqueuePrompt.mock.calls.length, 0);
 		h.nudger.stop();
 	});
@@ -161,7 +164,7 @@ describe("InboxNudger — periodic tick", () => {
 		h.nudger.start();
 
 		h.clock.advance(15_000);
-		await new Promise((r) => setImmediate(r));
+		await flushMicrotasks();
 		assert.equal(h.enqueuePrompt.mock.calls.length, 0);
 		h.nudger.stop();
 	});
@@ -172,7 +175,7 @@ describe("InboxNudger — periodic tick", () => {
 		h.nudger.start();
 
 		h.clock.advance(15_000);
-		await new Promise((r) => setImmediate(r));
+		await flushMicrotasks();
 		assert.equal(h.enqueuePrompt.mock.calls.length, 0);
 		h.nudger.stop();
 	});
@@ -183,7 +186,7 @@ describe("InboxNudger — periodic tick", () => {
 		h.nudger.start();
 
 		h.clock.advance(15_000);
-		await new Promise((r) => setImmediate(r));
+		await flushMicrotasks();
 		assert.equal(h.enqueuePrompt.mock.calls.length, 0);
 		h.nudger.stop();
 	});
@@ -194,21 +197,19 @@ describe("InboxNudger — periodic tick", () => {
 		h.nudger.start();
 
 		h.clock.advance(15_000);
-		await new Promise((r) => setImmediate(r));
-		await new Promise((r) => setImmediate(r));
+		await flushMicrotasks();
 		assert.equal(h.enqueuePrompt.mock.calls.length, 1, "first tick wakes once");
 
 		// Add another pending entry; without clearing the guard, no second wake.
 		enqueueDirect(h.inboxStore, h.staff.id, "e2");
 		h.clock.advance(15_000);
-		await new Promise((r) => setImmediate(r));
+		await flushMicrotasks();
 		assert.equal(h.enqueuePrompt.mock.calls.length, 1, "guard suppresses the second wake");
 
 		// Simulate the agent starting its turn — clears the guard.
 		h.nudger.onAgentStart(h.session.id);
 		h.clock.advance(15_000);
-		await new Promise((r) => setImmediate(r));
-		await new Promise((r) => setImmediate(r));
+		await flushMicrotasks();
 		assert.equal(h.enqueuePrompt.mock.calls.length, 2, "post-agent_start tick wakes again");
 
 		h.nudger.stop();
@@ -228,9 +229,7 @@ describe("InboxNudger — contextPolicy", () => {
 		h.enqueuePrompt.mockImplementation(async () => { order.push("enqueue"); });
 
 		h.clock.advance(15_000);
-		await new Promise((r) => setImmediate(r));
-		await new Promise((r) => setImmediate(r));
-		await new Promise((r) => setImmediate(r));
+		await flushMicrotasks();
 
 		assert.equal(h.session.rpcClient.compact.mock.calls.length, 1);
 		assert.equal(h.session.rpcClient.compact.mock.calls[0][0], 120_000);
@@ -244,8 +243,7 @@ describe("InboxNudger — contextPolicy", () => {
 		h.nudger.start();
 
 		h.clock.advance(15_000);
-		await new Promise((r) => setImmediate(r));
-		await new Promise((r) => setImmediate(r));
+		await flushMicrotasks();
 
 		assert.equal(h.session.rpcClient.compact.mock.calls.length, 0);
 		assert.equal(h.enqueuePrompt.mock.calls.length, 1);
@@ -260,8 +258,7 @@ describe("InboxNudger — contextPolicy", () => {
 		h.nudger.start();
 
 		h.clock.advance(15_000);
-		await new Promise((r) => setImmediate(r));
-		await new Promise((r) => setImmediate(r));
+		await flushMicrotasks();
 
 		// Still nudges — the missing compact is treated as a no-op.
 		assert.equal(h.enqueuePrompt.mock.calls.length, 1);
@@ -277,11 +274,8 @@ describe("InboxNudger.poke fast-path", () => {
 		// Note: nudger.start() is NOT called — poke should still fire tickOne.
 
 		h.nudger.poke(h.staff.id);
-		// Microtask scheduled inside poke. Flush microtasks; then any pending
-		// promise from enqueuePrompt.
-		await Promise.resolve();
-		await Promise.resolve();
-		await new Promise((r) => setImmediate(r));
+		// Flush the queued poke and the enqueuePrompt promise chain.
+		await flushMicrotasks();
 
 		assert.equal(h.enqueuePrompt.mock.calls.length, 1);
 	});
@@ -290,8 +284,7 @@ describe("InboxNudger.poke fast-path", () => {
 		const h = makeHarness({ sessionStatus: "streaming" });
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.poke(h.staff.id);
-		await Promise.resolve();
-		await new Promise((r) => setImmediate(r));
+		await flushMicrotasks();
 		assert.equal(h.enqueuePrompt.mock.calls.length, 0);
 	});
 });
@@ -304,7 +297,7 @@ describe("InboxNudger.start/stop", () => {
 		h.nudger.stop();
 
 		h.clock.advance(15_000 * 5);
-		await new Promise((r) => setImmediate(r));
+		await flushMicrotasks();
 		assert.equal(h.enqueuePrompt.mock.calls.length, 0);
 	});
 
@@ -315,8 +308,7 @@ describe("InboxNudger.start/stop", () => {
 		h.nudger.start();
 
 		h.clock.advance(15_000);
-		await new Promise((r) => setImmediate(r));
-		await new Promise((r) => setImmediate(r));
+		await flushMicrotasks();
 		assert.equal(h.enqueuePrompt.mock.calls.length, 1);
 
 		h.nudger.stop();

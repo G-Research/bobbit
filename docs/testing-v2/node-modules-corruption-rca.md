@@ -112,9 +112,16 @@ when deps are already **missing**. No other server code path writes the primary 
 live: every npm invocation in the experiments emitted
 `npm warn config shrinkwrap Use the --package-lock setting instead.`, and no
 `package-lock.json` was written after `npm install` (experiment A). This **freezes the
-committed lockfile** so a stray `npm install` cannot regenerate it with the vulnerable
-bundled `ws@8.20.1` / `protobufjs@7.5.9` from pi-coding-agent's bundled shrinkwrap. Any
-fix **must not** weaken this (do not re-enable the lockfile, do not regenerate it).
+committed lockfile during routine installs**, preventing an incidental `npm install` from
+regenerating it from dependency-owned shrinkwraps. The `ws@8.20.1` and
+`protobufjs@7.5.9` versions cited in the original experiment are historical context, not a
+claim about the current dependency tree.
+
+Preserve this routine-install protection. Intentional dependency updates may regenerate the
+lock only through the repository's current controlled `.npmrc` procedure, including restoring
+`.npmrc` before verification and proving an ordinary install leaves the lock unchanged. See
+[Pi runtime compatibility — Lockfile invariant](../pi-runtime-compatibility.md#lockfile-invariant)
+for the current procedure and consumer-tree rationale.
 
 ---
 

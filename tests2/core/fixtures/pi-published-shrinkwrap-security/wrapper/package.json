@@ -1,0 +1,11 @@
+{
+  "name": "@bobbit-fixture/wrapper",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@bobbit-fixture/published-agent": "file:../packages/published-agent"
+  },
+  "overrides": {
+    "protobufjs": "file:../packages/protobufjs-fixed"
+  }
+}

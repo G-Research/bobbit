@@ -10,6 +10,17 @@
  * HTTP surface and design doc for the contract.
  */
 
+import type { MessageAuthor } from "../../shared/message-author.js";
+import {
+	isToolResultOnlyMessage,
+	normalizeVisibleMessage,
+	type NormalizeVisibleMessageContext,
+} from "./message-author.js";
+import {
+	mergeAuthorSidecarIntoMessages,
+	type PromptAuthorBinding,
+} from "./author-sidecar.js";
+
 // ── Types ──
 
 export interface ReadTranscriptParams {
@@ -57,6 +68,7 @@ export interface CompactMessage {
 	role: string;
 	ts: string | null;
 	text: string;
+	author?: MessageAuthor;
 	toolUses?: CompactToolUse[];
 	toolResults?: CompactToolResult[];
 }
@@ -66,6 +78,7 @@ export interface VerboseMessage {
 	role: string;
 	ts: string | null;
 	content: unknown;
+	author?: MessageAuthor;
 	/** Full pi-coding-agent message object (`entry.message`). Carries
 	 *  toolCallId/toolName/details/isError for toolResult rows and any
 	 *  other fields the renderer-side `<message-list>` component expects.
@@ -112,13 +125,16 @@ interface RawMessage {
 	 *  null for legacy files whose entries lacked an explicit `id`. */
 	entryId: string | null;
 	/** Pi-coding-agent's entry `type` field (e.g. "message", "compaction").
-	 *  Used by `readOrphanedBeforeCompaction` to spot the legacy in-jsonl
-	 *  compaction marker when the sidecar doesn't carry firstKeptEntryId. */
+	 *  Used by `readOrphanedBeforeCompaction` to spot the in-jsonl compaction
+	 *  checkpoint when the sidecar doesn't carry firstKeptEntryId. */
 	entryType: string;
 	/** Full `entry.message` object — captured for the verbose orphan path
 	 *  which needs toolCallId/toolName/etc. for `<message-list>` rendering.
 	 *  Other paths read `content` directly. */
 	fullMessage: Record<string, unknown>;
+	/** Resolved Bobbit author. Kept separately so compact projections do not
+	 *  need to expose transcript correlation fields. */
+	author?: MessageAuthor;
 }
 
 const TEXT_LIMIT = 800;
@@ -393,6 +409,7 @@ function toCompact(m: RawMessage, options: RenderOptions = DEFAULT_RENDER_OPTION
 	if (text.length > TEXT_LIMIT) text = text.slice(0, TEXT_LIMIT) + "…";
 
 	const out: CompactMessage = { index: m.index, role: m.role, ts: m.ts, text };
+	if (m.author) out.author = m.author;
 	if (toolUses.length > 0) out.toolUses = toolUses;
 	if (toolResults.length > 0) out.toolResults = toolResults;
 	return out;
@@ -440,7 +457,12 @@ function toVerbose(
 	options: RenderOptions = DEFAULT_RENDER_OPTIONS,
 ): VerboseMessage {
 	const out: VerboseMessage = { index: m.index, role: m.role, ts: m.ts, content: redactVerboseContent(m.content, m, options) };
-	if (includeFullMessage) out.message = m.fullMessage;
+	if (m.author) out.author = m.author;
+	if (includeFullMessage) {
+		out.message = m.author && m.fullMessage.author !== m.author
+			? { ...m.fullMessage, author: m.author }
+			: m.fullMessage;
+	}
 	return out;
 }
 
@@ -488,11 +510,90 @@ function buildMatchList(
 	return { matchCount: matches.length, expanded };
 }
 
+// ── Author normalization ──
+
+function isTranscriptSystemRow(message: Record<string, unknown>): boolean {
+	if (message.customType === "bobbit:dynamic-context" || message.display === false) return true;
+	if (message.role === "system-notification" || message.role === "mutation-pending" || message.role === "custom") return true;
+	if (message.toolName === "__compaction_summary" || message.name === "__compaction_summary") return true;
+	return Array.isArray(message.content) && message.content.some((block) => {
+		if (!block || typeof block !== "object") return false;
+		const candidate = block as Record<string, unknown>;
+		return candidate.name === "__compaction_summary" || candidate.toolName === "__compaction_summary";
+	});
+}
+
+/**
+ * Attach authors before filtering/pagination so predecessor and duplicate
+ * correlation follow transcript order. Correlation-only entry fields never
+ * leak into compact/verbose projections.
+ */
+function resolveRawMessageAuthors(
+	messages: RawMessage[],
+	context?: TranscriptAuthorResolutionContext,
+): RawMessage[] {
+	if (messages.length === 0) return messages;
+	const correlationRows: Array<Record<string, unknown>> = messages.map((raw) => {
+		// Pi transcript author fields are not authoritative. Only a validated
+		// Bobbit sidecar or read-time inference can supply the projected author.
+		const { author: _untrustedAuthor, ...message } = raw.fullMessage;
+		return {
+			...message,
+			...(raw.entryId ? { entryId: raw.entryId } : {}),
+			...(raw.ts ? { ts: raw.ts } : {}),
+		};
+	});
+
+	let authoredRows: Array<Record<string, unknown>>;
+	if (context) {
+		const { sidecarEntries = [], ...normalizationContext } = context;
+		authoredRows = mergeAuthorSidecarIntoMessages(
+			sidecarEntries,
+			correlationRows,
+			normalizationContext,
+		);
+	} else {
+		// Direct library callers lack a target-session identity. Infer only
+		// session-independent human/system rows; do not invent session:unknown
+		// for assistant or orphan tool-result rows.
+		let precedingAuthor: MessageAuthor | undefined;
+		authoredRows = correlationRows.map((row) => {
+			const toolResult = isToolResultOnlyMessage(row);
+			const ordinaryUser = (row.role === "user" || row.role === "user-with-attachments")
+				&& !toolResult;
+			let resolved = ordinaryUser || isTranscriptSystemRow(row)
+				? normalizeVisibleMessage(row)
+				: row;
+			if (toolResult && precedingAuthor) resolved = { ...row, author: precedingAuthor };
+			if (resolved.author) precedingAuthor = resolved.author as MessageAuthor;
+			return resolved;
+		});
+	}
+
+	return messages.map((raw, index) => {
+		const resolved = authoredRows[index];
+		const author = resolved.author as MessageAuthor | undefined;
+		const { entryId: _entryId, ts: _ts, ...fullMessage } = resolved;
+		return {
+			...raw,
+			fullMessage,
+			...(author ? { author } : {}),
+		};
+	});
+}
+
 // ── Public API ──
+
+export interface TranscriptAuthorResolutionContext extends NormalizeVisibleMessageContext {
+	/** Folded Bobbit-owned prompt bindings for this session. */
+	sidecarEntries?: PromptAuthorBinding[];
+}
 
 export interface ReadTranscriptOptions {
 	/** Async loader returning the raw JSONL contents. */
 	readContent: () => Promise<string | null>;
+	/** Optional session and sidecar context for precise agent/system attribution. */
+	authorContext?: TranscriptAuthorResolutionContext;
 }
 
 /**
@@ -546,9 +647,12 @@ export interface ReadOrphanedEnvelope {
 
 export interface ReadOrphanedOptions {
 	readContent: () => Promise<string | null>;
-	/** First-kept entry id from the sidecar. When null, fall back to
-	 *  scanning the jsonl for an in-file `type:"compaction"` marker. */
+	/** First-kept entry id from the sidecar. When null or stale, prefer the
+	 *  same field on the in-file compaction entry before using that entry as
+	 *  the fallback checkpoint. */
 	firstKeptEntryId: string | null;
+	/** Optional session and sidecar context for precise agent/system attribution. */
+	authorContext?: TranscriptAuthorResolutionContext;
 }
 
 /**
@@ -559,11 +663,12 @@ export interface ReadOrphanedOptions {
  *  - If `firstKeptEntryId` is non-null: scan parsed entries for the entry
  *    whose `id` matches. Everything strictly before that index is
  *    orphaned.
- *  - If `firstKeptEntryId` is null (legacy sidecar entries written before
- *    the field was plumbed through, or hard failures): fall back to
- *    finding the FIRST `type:"compaction"` entry in the jsonl. Pi-coding-
- *    agent appends that compaction entry to mark the boundary; everything
- *    BEFORE it on the active branch is what was rolled into the summary.
+ *  - If the sidecar boundary is null or stale: inspect the FIRST in-file
+ *    `type:"compaction"` checkpoint. Prefer its compatibility
+ *    `firstKeptEntryId` when resolvable; otherwise use the checkpoint itself.
+ *    Pi 0.81 harness checkpoints may instead carry a materialized
+ *    `retainedTail`, so the checkpoint remains the only reliable top-level
+ *    boundary when no first-kept id was persisted.
  *  - If neither resolves: return total=0 (no fabricated history).
  */
 export async function readOrphanedBeforeCompaction(
@@ -600,8 +705,17 @@ export async function readOrphanedBeforeCompaction(
 		splitIdx = allEntries.findIndex((e) => e.entry?.id === opts.firstKeptEntryId);
 	}
 	if (splitIdx < 0) {
-		// Legacy fallback: first `type:"compaction"` entry marks the boundary.
-		splitIdx = allEntries.findIndex((e) => e.entry?.type === "compaction");
+		const compactionIdx = allEntries.findIndex((e) => e.entry?.type === "compaction");
+		if (compactionIdx >= 0) {
+			const inFileFirstKeptId = allEntries[compactionIdx].entry?.firstKeptEntryId;
+			if (typeof inFileFirstKeptId === "string" && inFileFirstKeptId.length > 0) {
+				splitIdx = allEntries.findIndex((e) => e.entry?.id === inFileFirstKeptId);
+			}
+			// With retainedTail-only Pi 0.81 checkpoints there is no stable id
+			// for the original tail boundary. Falling back to the checkpoint is
+			// conservative and preserves the existing no-fabrication behavior.
+			if (splitIdx < 0) splitIdx = compactionIdx;
+		}
 	}
 	if (splitIdx <= 0) {
 		return { total: 0, returned: 0, nextCursor: null, messages: [] };
@@ -628,10 +742,11 @@ export async function readOrphanedBeforeCompaction(
 		});
 	}
 
-	const total = orphaned.length;
+	const authoredOrphaned = resolveRawMessageAuthors(orphaned, opts.authorContext);
+	const total = authoredOrphaned.length;
 	const start = Math.min(cursor, total);
 	const end = Math.min(total, start + limit);
-	const window = orphaned.slice(start, end);
+	const window = authoredOrphaned.slice(start, end);
 	const messages = params.verbose
 		? window.map((m) => toVerbose(m, /* includeFullMessage */ true))
 		: window.map((m) => toCompact(m));
@@ -675,7 +790,7 @@ export async function readTranscript(
 		throw new TranscriptReaderError("transcript_unavailable", "transcript file missing or empty");
 	}
 
-	const all = parseJsonl(content);
+	const all = resolveRawMessageAuthors(parseJsonl(content), opts.authorContext);
 	const total = all.length;
 	const renderOptions: RenderOptions = { includeToolResults, toolNameById: buildToolNameMap(all) };
 

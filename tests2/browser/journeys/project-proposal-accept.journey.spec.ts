@@ -650,6 +650,13 @@ test.describe("Journey: real project proposal acceptance", () => {
 				message: "project assistant acceptance should promote exactly one project in place",
 			}).toBe(true);
 			await expectProjectConfigValue(provisionalProjectId!, "test_command", "echo promoted-config");
+			await expect.poll(
+				() => mutations.includes(`PUT /api/projects/${provisionalProjectId}/config`),
+				{
+					timeout: 10_000,
+					message: "successful provisional acceptance should expose its config mutation to the page request listener",
+				},
+			).toBe(true);
 			expect(mutations).toContain(`POST /api/projects/${provisionalProjectId}/promote`);
 			expect(mutations).toContain(`PUT /api/projects/${provisionalProjectId}/config`);
 			expect(mutations).not.toContain("POST /api/projects");

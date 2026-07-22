@@ -10,6 +10,8 @@
  * See docs/design/portable-search.md for the authoritative blueprint.
  */
 
+import type { MessageAuthorKind } from "../../shared/message-author.js";
+
 // ── Versioning ───────────────────────────────────────────────────────
 
 /**
@@ -105,6 +107,10 @@ export interface SearchResult {
 	sessionTitle?: string;
 	projectId?: string;
 	projectName?: string;
+	/** Accountable author metadata for message hits, when known. */
+	authorKind?: MessageAuthorKind;
+	authorId?: string;
+	authorLabel?: string;
 	filePath?: string;
 	startLine?: number;
 	endLine?: number;

@@ -1,4 +1,5 @@
 import type { Model } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
 import { bootMark, bootTimingMeta, bootTimingReport } from "./boot-timing.js";
 import { loadSavedBindings } from "./shortcut-registry.js";
@@ -68,6 +69,18 @@ import {
 	type CompactionTrigger,
 } from "./compaction-types.js";
 import type { AutoRetryPendingEvent, ProviderAuthRequiredEvent, ProviderAuthRecoveryAction } from "../server/ws/protocol.js";
+import { LOCAL_USER_AUTHOR, type BobbitMessage, type MessageAuthor } from "../shared/message-author.js";
+import type { PromptSource } from "../shared/prompt-source.js";
+
+const CLIENT_SYSTEM_AUTHOR: MessageAuthor = {
+	kind: "system",
+	id: "system:bobbit",
+	label: "Bobbit",
+};
+
+function withClientSystemAuthor<T extends object>(message: T): BobbitMessage<T> {
+	return { ...message, author: CLIENT_SYSTEM_AUTHOR };
+}
 
 function createSystemNotification(
 	message: string,
@@ -80,6 +93,7 @@ function createSystemNotification(
 		variant,
 		category,
 		timestamp: new Date().toISOString(),
+		author: CLIENT_SYSTEM_AUTHOR,
 	};
 }
 
@@ -268,6 +282,8 @@ export interface QueuedMessage {
 	isSteered: boolean;
 	/** Legacy optional flag from the pre-ledger queue model; current server rows omit it. */
 	dispatched?: boolean;
+	source?: PromptSource;
+	author?: MessageAuthor;
 	/** True for a client-side outbox row not yet delivered to the server (S2):
 	 *  issued while the WS was reconnecting; flushed on auth_ok. Lets the pill
 	 *  strip render it distinctly ("waiting to send") and the client reconcile it. */
@@ -619,7 +635,7 @@ export class RemoteAgent {
 			isCompacting: false,
 			archivedAt: null as number | null,
 			serverCost: null as { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; totalCost: number; cacheHitRate?: number | null } | null,
-			streamingMessage: null as any,
+			streamingMessage: null as BobbitMessage<AgentMessage> | null,
 			pendingToolCalls: new Set<string>(),
 			error: undefined as string | undefined,
 			turnStartTime: null as number | null,
@@ -1029,6 +1045,7 @@ export class RemoteAgent {
 				content: [{ type: "text", text }],
 				timestamp: Date.now(),
 				id: optimisticId,
+				author: LOCAL_USER_AUTHOR,
 				...(attachments?.length ? { attachments } : {}),
 				...(this._pendingSkillExpansions?.length
 					? { skillExpansions: this._pendingSkillExpansions }
@@ -1061,6 +1078,7 @@ export class RemoteAgent {
 				content: [{ type: "text", text }],
 				timestamp: Date.now(),
 				id: optimisticId,
+				author: LOCAL_USER_AUTHOR,
 			};
 			this.apply({ type: "optimistic-steer", message: optimisticMsg });
 			this.emit({ type: "message_end", message: optimisticMsg });
@@ -1132,7 +1150,7 @@ export class RemoteAgent {
 		if (tokensBefore != null) this._lastKnownContextTokens = tokensBefore;
 		const payload = buildInProgressCompactionPayload(trigger, tokensBefore);
 		const { message } = buildCompactionSummaryMessages(payload);
-		this.apply({ type: "compaction-placeholder", message });
+		this.apply({ type: "compaction-placeholder", message: withClientSystemAuthor(message) });
 	}
 
 	/**
@@ -1160,9 +1178,9 @@ export class RemoteAgent {
 		const { message: am, toolResult: atr } = buildCompactionSummaryMessages(amended);
 		this.apply({
 			type: "compaction-result",
-			message: am,
+			message: withClientSystemAuthor(am),
 			success: amended.success,
-			toolResult: atr,
+			toolResult: withClientSystemAuthor(atr),
 		});
 		this._lastKnownContextTokens = totalAfter;
 		this._pendingCompactionAmend = null;
@@ -1363,9 +1381,12 @@ export class RemoteAgent {
 	}
 
 	appendMessage(msg: any): void {
-		// Treated as a system-notification-shaped append — lands at
-		// (highestSeq + 0.5) so it renders chronologically.
-		this.apply({ type: "system-notification", message: msg });
+		// This path currently appends local user commands such as `/compact`.
+		// Preserve an explicit server author, otherwise use the local-human fallback.
+		this.apply({
+			type: "system-notification",
+			message: { author: LOCAL_USER_AUTHOR, ...msg },
+		});
 	}
 
 	setTitle(title: string): void {
@@ -1580,6 +1601,8 @@ export class RemoteAgent {
 					text: msg.text,
 					isSteered: msg.type === "steer",
 					unsent: true,
+					source: "user",
+					author: LOCAL_USER_AUTHOR,
 					createdAt: Date.now(),
 					...(Array.isArray(msg.images) && msg.images.length ? { images: msg.images } : {}),
 					...(Array.isArray(msg.attachments) && msg.attachments.length ? { attachments: msg.attachments } : {}),
@@ -2160,6 +2183,7 @@ export class RemoteAgent {
 					id: typeof perm.id === "string" ? perm.id : `perm_${seq ?? Date.now()}_${perm.toolName}`,
 					status: "active",
 					actionable: true,
+					author: CLIENT_SYSTEM_AUTHOR,
 				};
 				this.apply({ type: "permission-needed", card: permCard, seq, ts });
 				this.emit({ type: "render" });
@@ -2215,6 +2239,7 @@ export class RemoteAgent {
 						code: msg.code,
 						timestamp: Date.now(),
 						id: `err_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+						author: CLIENT_SYSTEM_AUTHOR,
 					},
 				});
 				this._appendNotification(msg.message || "Unknown server error", "error");
@@ -2666,6 +2691,7 @@ export class RemoteAgent {
 			summary: opts.summary,
 			timestamp: new Date().toISOString(),
 			id: `mut_${opts.requestId}`,
+			author: CLIENT_SYSTEM_AUTHOR,
 		};
 		this.apply({ type: "mutation-pending", message: card });
 		this.emit({ type: "message_end", message: card });
@@ -3171,7 +3197,12 @@ export class RemoteAgent {
 				const { message, toolResult } = buildCompactionSummaryMessages(payload);
 				const elapsedSinceStart = startedAtMs != null ? nowMs - startedAtMs : COMPACT_CARD_MIN_DURATION;
 				const transitionCard = () => {
-					this.apply({ type: "compaction-result", message, success: displaySuccess, toolResult });
+					this.apply({
+						type: "compaction-result",
+						message: withClientSystemAuthor(message),
+						success: displaySuccess,
+						toolResult: withClientSystemAuthor(toolResult),
+					});
 					// Queue this card for tokens-after amendment on the next clean
 					// assistant `message_end` carrying usage.
 					this._pendingCompactionAmend = payload;
