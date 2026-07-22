@@ -74,14 +74,14 @@ async function runPrompt(text) {
 	emit({ type: "session_status", status: "streaming" });
 	const toolId = "packed-inline-theme-write";
 	const input = { path: "theme-card.html", content: html };
-	emit({ type: "tool_execution_start", toolName: "Write", toolId, input });
-	emit({ type: "tool_execution_update", toolName: "Write", toolId, status: "complete", output: "Wrote packaged inline theme fixture" });
-	emit({ type: "tool_execution_end", toolName: "Write", toolCallId: toolId, isError: false });
+	emit({ type: "tool_execution_start", toolName: "write", toolId, input });
+	emit({ type: "tool_execution_update", toolName: "write", toolId, status: "complete", output: "Wrote packaged inline theme fixture" });
+	emit({ type: "tool_execution_end", toolName: "write", toolCallId: toolId, isError: false });
 	const assistant = { role: "assistant", content: [
-		{ type: "toolCall", id: toolId, name: "Write", arguments: input, input },
+		{ type: "toolCall", id: toolId, name: "write", arguments: input, input },
 		{ type: "text", text: "Rendered packaged inline HTML." }
 	] };
-	const result = { role: "toolResult", toolCallId: toolId, toolName: "Write", isError: false, content: [{ type: "text", text: "Wrote packaged inline theme fixture" }] };
+	const result = { role: "toolResult", toolCallId: toolId, toolName: "write", isError: false, content: [{ type: "text", text: "Wrote packaged inline theme fixture" }] };
 	messages.push(assistant, result);
 	emit({ type: "message_end", message: assistant });
 	emit({ type: "message_end", message: result });

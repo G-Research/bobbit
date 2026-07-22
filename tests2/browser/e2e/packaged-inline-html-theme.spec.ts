@@ -20,7 +20,7 @@ import {
 } from "./packaged-runtime-helpers.js";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
-const CANONICAL_BRIDGE_SIGNATURE = "parent.document.styleSheets";
+const CANONICAL_BRIDGE_SIGNATURE = "data-bobbit-inline-theme-bridge";
 const SOURCE_BRIDGE_PATH = "src/shared/preview-bridge-scripts.ts";
 const THEME_TOKENS = ["--background", "--foreground", "--card", "--positive", "--chart-1"] as const;
 
@@ -134,7 +134,7 @@ async function iframeTheme(page: Page): Promise<{
 		}) | null;
 		const documentRoot = iframe.contentDocument!.documentElement;
 		const style = iframe.contentWindow!.getComputedStyle(documentRoot);
-		const scripts = [...iframe.contentDocument!.scripts].map(script => script.textContent ?? "");
+		const scripts = [...iframe.contentDocument!.scripts];
 		return {
 			capture: frameWindow?.__packedThemeCapture ?? null,
 			current: {
@@ -148,8 +148,8 @@ async function iframeTheme(page: Page): Promise<{
 				palette: documentRoot.getAttribute("data-palette"),
 			},
 			authoredScriptRan: documentRoot.getAttribute("data-authored-script-ran") === "true",
-			canonicalBridgeCount: scripts.filter(script => script.includes("parent.document.styleSheets")).length,
-			swipeBridgeCount: scripts.filter(script => script.includes("preview-swipe-start")).length,
+			canonicalBridgeCount: scripts.filter(script => script.hasAttribute("data-bobbit-inline-theme-bridge")).length,
+			swipeBridgeCount: scripts.filter(script => (script.textContent ?? "").includes("preview-swipe-start")).length,
 			identity: frameWindow?.__packedFrameIdentity ?? null,
 		};
 	});
