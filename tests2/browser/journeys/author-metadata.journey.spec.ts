@@ -285,7 +285,9 @@ test.describe("Journey: Author metadata", () => {
 			await waitForSessionStatus(targetSessionId, "idle", 20_000);
 			await waitForAuthoredExchange(page, humanPrompt);
 
-			const humanBubble = promptBubble(page, humanPrompt);
+			const humanBubble = page.locator("user-message")
+				.filter({ has: page.getByRole("button", { name: "/qa-check", exact: true }) })
+				.last();
 			await expect(humanBubble).toBeVisible();
 			await expect(humanBubble.locator("skill-chip .skill-chip-pill")).toBeVisible();
 			await expect(humanBubble.locator(".file-mention-chip-pill")).toHaveText("@fixture.txt");
@@ -334,7 +336,7 @@ test.describe("Journey: Author metadata", () => {
 
 			const skillButton = humanBubble.locator("skill-chip .skill-chip-pill");
 			await skillButton.click();
-			await expect(humanBubble.locator(".skill-chip-expansion")).toBeVisible();
+			await expect(humanBubble.getByText("Expanded QA instructions", { exact: true })).toBeVisible();
 			await expect(humanBubble.locator("attachment-tile")).toBeVisible();
 			await expect(humanBubble.locator(".file-mention-chip-pill")).toBeVisible();
 
