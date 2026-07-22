@@ -39,10 +39,15 @@ const { PreferencesStore } = await import("../../src/server/agent/preferences-st
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
 const { registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
+const { initAuthorSidecarDir } = await import("../../src/server/agent/author-sidecar.ts");
 const { initPromptDirs } = await import("../../src/server/agent/system-prompt.ts");
 const { loadOrCreateToken } = await import("../../src/server/auth/token.ts");
 
 initPromptDirs(stateDir);
+initAuthorSidecarDir(stateDir, {
+	secretsDir: path.join(tmpRoot, "private-secrets"),
+	hmacKey: Buffer.alloc(32, 0x4f),
+});
 loadOrCreateToken(); // seed admin token so direct-agent spawns find it (mirrors server boot)
 
 const FAKE_OPENROUTER_KEY = "sk-or-repro-openrouter-key-never-persist";
@@ -418,13 +423,25 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 		manager.sessions.set(session.id, session);
 
 		await assert.rejects(() => manager.enqueuePrompt(session.id, "retry me"), /OpenRouter provider authentication failure \(missing-api-key\)/);
+		assert.deepEqual(promptCalls, ["retry me"], "the initial human-authored provider dispatch must remain unprefixed");
 		assert.equal(session.promptQueue.length, 1, "failed auth dispatch should be recoverable before retry");
+		assert.equal(session.promptQueue.peek()?.text, "retry me", "the recovered durable queue row must retain unprefixed base text");
 
 		await manager.retryLastPrompt(session.id);
+		assert.deepEqual(
+			promptCalls,
+			["retry me", "[System]: retry me"],
+			"the system-authored retry must add its prefix only at provider dispatch",
+		);
+		assert.equal(session.lastPromptText, "retry me", "retry state must retain unprefixed base text");
 		assert.equal(session.promptQueue.length, 0, "retry should consume the recovered queued prompt before dispatching");
 
 		manager.handleAgentLifecycle(session, { type: "agent_end", messages: [] });
-		assert.deepEqual(promptCalls, ["retry me", "retry me"], "agent_end drain must not resend the recovered prompt after retry succeeds");
+		assert.deepEqual(
+			promptCalls,
+			["retry me", "[System]: retry me"],
+			"agent_end drain must not resend the recovered prompt after retry succeeds",
+		);
 	});
 
 	it("redacts provider-auth agent-turn message_end before client/EventBuffer broadcast", () => {
