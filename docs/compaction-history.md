@@ -30,10 +30,9 @@ hooks) see [docs/compaction.md](compaction.md).
   for copy, but there are no retry buttons, permission cards, or
   thinking-block toggles. The agent's context is not affected; those
   entries are abandoned from its perspective.
-- **Empty case is silent.** When the agent's `.jsonl` has no orphaned
-  entries for the compaction (legacy session, or a `firstKeptEntryId`
-  that can't be resolved), the card renders without the affordance — the
-  user never sees a broken expand button.
+- **Empty case is silent.** When the agent's `.jsonl` has no recoverable
+  pre-compaction messages or no usable compaction checkpoint, the card renders
+  without the affordance — the user never sees a broken expand button.
 
 The card itself is the same `__compaction_summary` synthetic tool render
 documented in [compaction.md](compaction.md#the-rich-summary-card); the
@@ -81,7 +80,7 @@ Module: `src/server/agent/compaction-sidecar.ts`.
 | `startedAt` / `endedAt` | ISO-8601 strings | Source of the rendered timestamp. |
 | `success` | boolean | False ⇒ `error` is set. |
 | `error` | string? | Failure detail; only set on `success: false`. |
-| `firstKeptEntryId` | `string \| null` | Pi-coding-agent's first-kept entry id from `CompactionResult`. Drives the pre-compaction slice (see below). May be `null` for legacy entries or hard failures — the legacy fallback covers that case. |
+| `firstKeptEntryId` | `string \| null` | Pi-coding-agent's first-kept entry id from `CompactionResult`. Drives the pre-compaction slice (see below). May be `null` for legacy entries or hard failures; the in-file id and marker-checkpoint fallbacks cover that case. |
 
 ### Append points
 
@@ -236,19 +235,19 @@ Route-specific structured errors are `session_not_found` (404),
 `invalid_params` (400), and `internal_error` (500).
 
 Implementation: `readOrphanedBeforeCompaction` in
-`src/server/agent/transcript-reader.ts`. Branch-split rules:
+`src/server/agent/transcript-reader.ts`. The reader resolves the split in this
+order:
 
-- **Primary**: when the sidecar's `firstKeptEntryId` is non-null, the
-  reader walks the parsed `.jsonl` and locates the entry whose `id`
-  matches. Everything strictly before that index is orphaned.
-- **Legacy fallback**: when `firstKeptEntryId` is `null` (legacy sidecar
-  rows written before the field was plumbed through, or hard failures),
-  the reader scans forward for the first entry with
-  `type: "compaction"` — pi-coding-agent appends one of those to mark
-  the boundary in-line. The orphaned slice is everything before that
-  index.
-- **Neither resolves**: the envelope returns `total: 0`. The card just
-  hides the expand affordance — no fabricated history.
+1. **Sidecar id** — resolve the sidecar entry's `firstKeptEntryId` against the
+   parsed `.jsonl`; everything strictly before the matched entry is orphaned.
+2. **In-file id** — if the sidecar id is absent or stale, find the first in-file
+   `type: "compaction"` entry and resolve that entry's `firstKeptEntryId`.
+3. **Marker checkpoint** — if the in-file id is absent or unresolvable, use the
+   compaction marker itself as the split. This covers Pi `0.81` checkpoints that
+   materialize only `retainedTail`, as well as stale compatibility ids.
+
+If no split resolves, the envelope returns `total: 0`; the card hides the expand
+affordance rather than fabricating history.
 
 Only `type: "message"` entries from the orphaned slice are surfaced.
 The compaction marker entry itself, and any non-message entries that

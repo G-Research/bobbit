@@ -1,17 +1,28 @@
 # Google OAuth for Gemini models
 
-Status: design (no production code in this change)
-Goal: `google-oauth-m-d4c9a4df` — add first-class Google account authentication for Gemini
-models alongside the existing Anthropic and OpenAI account login flows.
+> **Archived design artifact — superseded.** This document preserves the pre-implementation
+> proposal for historical rationale only. It is not an authoritative description of current
+> behavior or an exact implementation plan. All future-tense requirements below belong to that
+> historical proposal, not to current work. See [Google OAuth & Gemini models](../google-oauth-models.md)
+> for the shipped account-vs-key and Code Assist behavior, and [Pi runtime compatibility](../pi-runtime-compatibility.md)
+> for the current Pi authentication boundary.
 
-This document is the authoritative implementation plan. It is the output of the `design-doc`
-gate. It deliberately edits **only** `docs/design/google-oauth-model-auth.md`; no `src/`,
-tests, package files, or `AGENTS.md` are touched. All file paths/functions named below are the
-exact targets for the follow-up implementation task.
+**Current implementation:** Google account authentication is shipped through Bobbit's native
+PKCE flow and Code Assist provider extension, and its account-backed Gemini models are
+session-selectable. OpenAI Codex creates Pi's `Models` service with `builtinModels()` and calls
+`Models.login("openai-codex", "oauth", interaction)`, where `interaction` implements
+`AuthInteraction`; it does not use the removed `getOAuthProvider` or `OAuthLoginCallbacks`
+contracts.
+
+## Historical proposal (pre-implementation)
+
+Goal `google-oauth-m-d4c9a4df` proposed first-class Google account authentication for Gemini
+models alongside the existing Anthropic and OpenAI account login flows. The sections below are
+retained as proposal history and may describe source structure that has since changed.
 
 ---
 
-## 1. Audit of the existing auth pipeline
+## 1. Historical audit captured before implementation
 
 ### 1.1 OAuth handler — `src/server/auth/oauth.ts`
 
@@ -22,19 +33,19 @@ exact targets for the follow-up implementation task.
   - **Anthropic (native):** PKCE generated server-side (`generatePKCE`), authorize URL built in
     `oauthStart`, code→token exchanged directly in `oauthComplete` against `TOKEN_URL`
     (`https://console.anthropic.com/v1/oauth/token`). Refresh in `refreshOAuthToken()`.
-  - **External (pi-ai):** `oauthStartExternal(provider)` calls `getOAuthProvider(provider)` from
-    `@earendil-works/pi-ai/oauth` and drives the `OAuthLoginCallbacks` (`onAuth`, `onDeviceCode`,
-    `onPrompt`, `onManualCodeInput`, `onSelect`, `onProgress`). Credentials are persisted by
-    `storeOAuthCredentials(provider, credentials)`.
+  - **OpenAI Codex (superseded detail):** the proposal described an earlier pi-ai callback
+    registry contract. The current implementation uses `builtinModels()` and
+    `Models.login("openai-codex", "oauth", interaction)` with an `AuthInteraction`, as described
+    above and in [Pi runtime compatibility](../pi-runtime-compatibility.md#openai-codex-oauth-migration).
 - Storage: `globalAuthPath()` → active `<agentDir>/auth.json`, written 0600 via `writeAuthData`,
   which calls `clearOAuthCache()`. Shape per provider key: `{ type: "oauth", access, refresh,
   expires, ... }`. Anthropic bakes a 5-minute safety buffer into `expires`.
 - `oauthStatus(provider)` returns only `{ authenticated, expires, provider }` — **never echoes
   token material** ("strict-OAuth contract"). `oauthFlowStatus(flowId, provider)` cross-checks the
   flow's stored provider against the query param to avoid cross-provider status leaks.
-- `refreshOAuthToken()` is **Anthropic-only today** (`authData.anthropic`). It only clears
-  credentials on definitive auth failures (400/401/403); transient 5xx/429/network errors keep the
-  stored credential.
+- At proposal time, `refreshOAuthToken()` was **Anthropic-only** (`authData.anthropic`). It
+  cleared credentials only on definitive auth failures (400/401/403); transient
+  5xx/429/network errors kept the stored credential.
 - In-memory `pendingFlows` map (5-min TTL, swept by `ensureFlowCleanupTimer`). Anthropic flows hold
   a `verifier`; external flows hold `submitCode`/`rejectCode`/`loginPromise`/`completed`/`error`.
 
@@ -63,13 +74,11 @@ exact targets for the follow-up implementation task.
   manual "paste the full redirect URL or authorization code" field that posts to
   `/api/oauth/complete`. `providerName` is derived: `openai-codex|openai → "OpenAI"` else
   `"Anthropic"`.
-- **Settings drift (goal requirement #9):** the current Models tab (`renderModelsTab`, line ~2004)
-  renders only **AI Gateway** + custom-provider config. It contains **no per-provider API-key
-  input** — `grep -c "ProviderKeyInput|provider-key" src/app/settings-page.ts` → `0`. The legacy
-  per-provider key UI lives in `src/ui/dialogs/ProvidersModelsTab.ts` (uses
-  `src/ui/components/ProviderKeyInput.ts` + `/api/provider-keys`) but is **not wired into any
-  current settings tab** (`getTabsForScope`). So a user told to "enter a Gemini API key in
-  Providers & Models" lands on a screen that no longer exists.
+- **Settings drift at proposal time (goal requirement #9):** the then-current Models tab
+  rendered only **AI Gateway** + custom-provider config and had no reachable per-provider API-key
+  input. The proposal identified a legacy provider-key UI that was not wired into the live
+  settings tabs, so users were being sent to a screen that no longer existed. The shipped
+  resolution is documented in [Google OAuth & Gemini models](../google-oauth-models.md#settings--models-provider-api-keys-the-fallback).
 
 ### 1.4 Model registry — `src/server/agent/model-registry.ts`
 
@@ -79,8 +88,8 @@ exact targets for the follow-up implementation task.
   or `process.env[ENV_MAP[p]]`, or `hasOAuthCredentials(p)` (reads `auth.json`, 10s cache via
   `oauthCache` / `clearOAuthCache`). `ENV_MAP` already contains `google → GOOGLE_API_KEY`,
   `google-gemini-cli → GOOGLE_API_KEY`, `google-vertex → GOOGLE_APPLICATION_CREDENTIALS`.
-- `hasOAuthCredentials(provider)` currently returns true if `authData[provider]` exists — so a new
-  `auth.json` key is automatically honored once present.
+- At proposal time, `hasOAuthCredentials(provider)` returned true when `authData[provider]`
+  existed, which informed the proposed provider-isolation design.
 - Gemini ranking already exists in the priority function (`gemini-3.1-pro`, `gemini-2.5-pro`, …).
 
 ### 1.5 Runtime completion — `src/server/agent/model-completion.ts`
@@ -101,8 +110,8 @@ exact targets for the follow-up implementation task.
 ### 1.6 Sandbox credential propagation
 
 - `src/server/agent/host-tokens.ts`:
-  - `PROVIDER_TOKENS` maps provider → sandbox env var. Google entry today: `{ envVar:
-    "GEMINI_API_KEY", provider: "google", envKeys: ["GEMINI_API_KEY"] }`.
+  - At proposal time, `PROVIDER_TOKENS` mapped the Google API-key provider to
+    `{ envVar: "GEMINI_API_KEY", provider: "google", envKeys: ["GEMINI_API_KEY"] }`.
   - `detectHostTokens(prefs)` / `resolveHostTokenValue(envVar, prefs)` resolve a token value from
     env → `providerKey.<provider>` → `auth.json` (`oauth.access` or `api_key.key`).
   - `buildSandboxAgentAuthJson()` / `ensureSandboxAgentAuthFile()` write a **scoped, sanitized**
@@ -113,13 +122,12 @@ exact targets for the follow-up implementation task.
   `/home/node/.bobbit/agent/auth.json`; never mounts the full host agent dir. Sandbox credentials
   are also injected as `-e KEY=VALUE` env vars (validated key regex).
 
-### 1.7 pi-ai OAuth capability (verified against installed dist)
+### 1.7 Historical pi-ai capability assessment
 
-`@earendil-works/pi-ai/oauth` exports providers for **Anthropic, GitHub Copilot, OpenAI Codex
-only**. `getOAuthProvider(id)` returns `undefined` for `"google"`. There is `registerOAuthProvider`
-to add a custom provider implementing `OAuthProviderInterface` (`login`, `refreshToken`,
-`getApiKey`, optional `modifyModels`, `usesCallbackServer`). pi-ai runtime providers are `google`
-(`google-generative-ai`) and `google-vertex` — **no Code Assist / `cloudcode-pa` provider exists**.
+At proposal time, Pi did not provide a Google Code Assist OAuth/runtime integration. It did
+provide the API-key `google` and ADC/service-account `google-vertex` providers. That gap led to
+the proposal for a Bobbit-native Code Assist path. Current Codex integration and the retained
+Pi boundaries are documented in [Pi runtime compatibility](../pi-runtime-compatibility.md).
 
 ---
 
@@ -215,19 +223,16 @@ Gemini subscription cannot be used via an official model API, surface that clear
 - The runtime is implemented **natively in Bobbit** (option B below), not via pi-ai, because pi-ai
   ships no Code Assist provider and we should not block on an upstream change.
 
-Provider-id / flow decision (recorded so it is not re-litigated): native Bobbit flow in `oauth.ts`
-rather than the existing pi-ai external-provider path. Reason: the installed pi-ai OAuth registry has
-no Google / Gemini Code Assist provider (`getOAuthProvider("google")` returns `undefined`) and no
-Code Assist runtime, while Bobbit's gateway already owns the Account-tab loopback/manual-paste UX and
-provider-partitioned status endpoints. The implementation should still reuse the existing
-`pendingFlows` map, TTL cleanup, provider mismatch checks, and redaction helpers; it should add a
-Google flow record shape, not a parallel untracked lifecycle. pi-ai's `registerOAuthProvider` remains
-available only for later agent-session parity (§4.4), after Bobbit has a working Code Assist
-runtime.
+Historical provider-id / flow decision: the proposal chose a native Bobbit flow in `oauth.ts`
+because Pi did not provide a Google Code Assist runtime, while Bobbit's gateway already owned the
+Account-tab loopback/manual-paste UX and provider-partitioned status endpoints. It proposed reusing
+the existing pending-flow lifecycle rather than creating a parallel untracked flow. The shipped
+native PKCE and Code Assist implementation is documented in
+[Google OAuth & Gemini models](../google-oauth-models.md).
 
 ---
 
-## 4. Implementation plan (exact files / functions)
+## 4. Historical proposed implementation outline
 
 ### 4.1 OAuth flow — `src/server/auth/oauth.ts`
 
@@ -267,11 +272,9 @@ runtime.
    id; returns `{ authenticated, expires, provider }` only. Add `email` to the returned shape **only
    if** we decide to show the signed-in account; it is non-secret. Tokens stay omitted.
 8. `oauthFlowStatus`: generic; the provider cross-check already guards isolation.
-9. **Refresh implementation: keep the existing no-arg Anthropic API stable and add a new Google-
-   specific helper.** Do **not** change the public signature of `refreshOAuthToken()` in this
-   iteration; current callers are `src/server/agent/model-completion.ts`,
-   `src/server/agent/name-generator.ts`, and `src/server/agent/title-generator.ts`, all of which are
-   Anthropic-oriented today and must keep working unchanged. Add `refreshOAuthTokenForProvider(provider)`
+9. **Proposed refresh implementation:** keep the existing no-arg Anthropic API stable and add a
+   Google-specific helper. The proposal assumed the callers in model completion, name generation,
+   and title generation were Anthropic-oriented and should remain unchanged. Add `refreshOAuthTokenForProvider(provider)`
    or `refreshGoogleOAuthToken()` as an internal provider-aware helper, then optionally make the
    existing no-arg function delegate to it with `provider="anthropic"`. For `google-gemini-cli`: skip
    if `Date.now() < expires`; else POST `grant_type=refresh_token, refresh_token, client_id,
@@ -343,9 +346,9 @@ as the upstream-parity alternative:
      long-term; out of this goal's control. Until then, ship (i) or scope agent-session Gemini to
      API-key `google`.
 
-The follow-up implementation task should treat §4.1/§4.2/§4.3/§4.6 (auth, REST, UI, fallback) as
-**must-ship**, and §4.4 runtime as the substantive engineering item, implemented as (a) for gateway
-helpers first, then (b)(i) for agent sessions. If (b)(i) proves too large for one iteration, the UI
+The historical handoff ranked §4.1/§4.2/§4.3/§4.6 (auth, REST, UI, fallback) as
+must-ship and §4.4 runtime as the substantive engineering item, with gateway helpers before
+agent-session support. It noted that if the agent-session path proved too large for one iteration, the UI
 copy from §4.3 already tells the user the credential targets the Code Assist API, and API-key
 `google` remains the working inference path — acceptance criterion "API-key Google auth remains
 possible and discoverable" is still met.
@@ -375,7 +378,7 @@ possible and discoverable" is still met.
   the legacy component `src/ui/components/ProviderKeyInput.ts` and the existing `/api/provider-keys`
   endpoints. Include at minimum Anthropic, OpenAI, **Google (`google`, Gemini Developer API key)**,
   xAI, Groq, Mistral, OpenRouter — i.e. salvage the rows from `src/ui/dialogs/ProvidersModelsTab.ts`
-  into the current tab so the entry point exists where users are sent.
+  into the then-current tab so the entry point would exist where users were sent.
 - Add an explicit helper line distinguishing the two Google options:
   - "**Google account (Gemini)**" → Settings → Account → Google (OAuth / Code Assist).
   - "**Google AI Studio API key**" → this Models tab field (provider `google`).
@@ -413,7 +416,7 @@ possible and discoverable" is still met.
 
 ---
 
-## 5. Test plan (for the tester / follow-up tasks — not written in this change)
+## 5. Historical proposed test plan
 
 Unit (node, `tests/*.test.ts`):
 - `normalizeProvider` accepts `google`/`google-gemini-cli`/`gemini` → canonical id; rejects unknown.
@@ -437,7 +440,7 @@ Browser E2E (`tests/e2e/ui/settings.spec.ts` pattern):
   dialog (stub `/api/oauth/*`); status flips to Authenticated; **persists across reload**.
 - Models tab now renders a Google AI Studio API-key field; entering/removing a key round-trips via
   `/api/provider-keys` and persists across reload. **Regression test for goal AC #5** — assert the
-  API-key entry point is present in the current Settings (guards the drift from re-appearing).
+  API-key entry point would be present in the live Settings (guarding the drift from reappearing).
 
 Manual integration (`tests/manual-integration/`, gate-exempt): real Google account → Account login →
 reload persists → a Gemini model is selectable and (when §4.4 runtime lands) returns a completion
