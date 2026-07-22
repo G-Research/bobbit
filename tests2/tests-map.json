@@ -21,6 +21,24 @@
   },
   "v2Native": [
     {
+      "path": "tests2/dom/project-audio-notification-paths.test.ts",
+      "reason": "Deterministic foreground/background notification regressions proving agent-finish audio resolves from the source session project while favicon badges remain independent and non-blocking.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/dom/project-audio-settings.test.ts",
+      "reason": "DOM coverage for the per-project Inherit/On/Off settings control, immediate optimistic application, stale-read fencing, serialized failures, navigation retention, and raw null clearing.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
       "path": "tests2/core/session-manager-keyless-replay-cursor.test.ts",
       "reason": "Deterministic cold-restore and force-abort regression proving ordered keyless replay advances from settled p1 to crash-unsettled persisted p2, while duplicate terminal frames remain idempotent and p2 is never requeued.",
       "execution": {

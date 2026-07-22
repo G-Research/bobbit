@@ -238,4 +238,47 @@ test.describe("Project config API — mid-session proposal field coverage", () =
 		const cfg = await (await apiFetch(`/api/projects/${id}/config`)).json();
 		expect(cfg.my_custom_key).toBe("value-1");
 	});
+
+	test("raw project sound override round-trips exact string values across store reloads", async () => {
+		const { id, apiFetch } = registerTmpProject("sound-override-strings");
+
+		for (const value of ["true", "false"] as const) {
+			const putRes = await apiFetch(`/api/projects/${id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({ play_agent_finish_sound: value }),
+			});
+			expect(putRes.status).toBe(200);
+
+			const raw = await (await apiFetch(`/api/projects/${id}/config`)).json();
+			expect(raw.play_agent_finish_sound).toBe(value);
+
+			// Reconstructing the fixture creates a fresh ProjectConfigStore over the
+			// same in-memory filesystem, mirroring a process/store reload.
+			const reloaded = registerTmpProject("sound-override-strings-reloaded");
+			const persisted = await (await reloaded.apiFetch(`/api/projects/${id}/config`)).json();
+			expect(persisted.play_agent_finish_sound).toBe(value);
+		}
+	});
+
+	test("null removes the raw project sound override and the removal survives reload", async () => {
+		const { id, apiFetch } = registerTmpProject("sound-override-clear");
+		await apiFetch(`/api/projects/${id}/config`, {
+			method: "PUT",
+			body: JSON.stringify({ play_agent_finish_sound: "true" }),
+		});
+
+		const clearRes = await apiFetch(`/api/projects/${id}/config`, {
+			method: "PUT",
+			body: JSON.stringify({ play_agent_finish_sound: null }),
+		});
+		expect(clearRes.status).toBe(200);
+
+		const cleared = await (await apiFetch(`/api/projects/${id}/config`)).json();
+		expect(cleared).not.toHaveProperty("play_agent_finish_sound");
+
+		const reloaded = registerTmpProject("sound-override-clear-reloaded");
+		const persisted = await (await reloaded.apiFetch(`/api/projects/${id}/config`)).json();
+		expect(persisted).not.toHaveProperty("play_agent_finish_sound");
+		expect([...memoryFs.files.values()].join("\n")).not.toContain("play_agent_finish_sound");
+	});
 });
