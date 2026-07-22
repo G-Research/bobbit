@@ -1,23 +1,23 @@
 # RCA: primary `node_modules` half-wipe (general / dev-time)
 
 > **Scope.** This doc has **two** parts:
-> 1. **The general / dev-time half-wipe** (§1–§12) — the primary `node_modules`
->    (`C:\Users\jsubr\w\bobbit\node_modules`) intermittently gets half-wiped while the
->    dev stack is live, bricking every agent + verification spawn. This is the **new,
->    instrumented RCA** produced for goal *Ring-fence node_modules*.
+> 1. **The general / dev-time half-wipe** (§1–§12) — the primary checkout's
+>    `node_modules` intermittently gets half-wiped while the dev stack is live, bricking
+>    every direct host-side agent and verification spawn. Sections §1–§10 record the
+>    confirmed experiments and refined RCA from the original investigation.
 > 2. **The distinct chaos.mjs test-only vector** (§13) — fixed by PR #956
 >    (`goal/fix-chaos-node-10b9c9aa`). Preserved verbatim below. **It is a DIFFERENT
 >    mechanism and must NOT be reverted or weakened.**
 >
-> **Implementation status.** The safe-repair path and direct-spawn runtime ring-fence are
-> implemented. The implementation lives in `src/server/harness-deps.ts`
-> (`missingDependencies()`, `healDependencies()`), `src/server/harness.ts` (`ensureDeps()`
-> structured before/after logging), `src/server/agent/runtime-ringfence.ts`
-> (`ensureRuntimeSnapshot()`, `resolveAgentRuntimeModulesDir()`), and
-> `src/server/agent/rpc-bridge.ts` (`findAgentCli()`, `resolveAgentModulesDir()`). The
-> pinning coverage is `tests2/core/node-modules-ring-fence.test.ts`. Sections §1–§10 remain
-> the confirmed RCA; §11–§12 describe the implemented design and test invariant. The
-> chaos.mjs vector in §13 is still a distinct, already-fixed mechanism.
+> **Implementation status.** Automatic dependency healing and the direct-spawn runtime
+> ring-fence are retired. The harness now validates dependencies without writes or
+> subprocesses before build/launch, leaving repair to the operator. Direct host spawns use
+> Bobbit's installed Pi package through Node's normal resolution semantics. The old recursive
+> snapshot traversal was the NFS startup-hang mechanism; ordinary `npm install` was not.
+> Legacy `<stateDir>/runtime` snapshots and partial trees are never probed and are removable
+> manually only while Bobbit is fully stopped. Sections §11–§12 describe the current policy
+> and its focused regression coverage. The chaos.mjs vector in §13 remains a distinct,
+> already-fixed mechanism.
 
 ---
 
@@ -45,64 +45,61 @@ dev stack holds native `.node` files locked** — specifically:
 
 - ❌ "Plain `npm install` under `package-lock=false` recomputes the ideal tree and
   **prunes extraneous** packages." — **False** on npm 11.8.0 (experiments A, B).
-- ❌ "The `ensureDeps()` self-heal `npm install` is the **prime trigger** of new
-  half-wipes." — **Downgraded.** Its `npm install` is *additive* and does **not** prune;
-  in the actual repair scenario (some deps missing) it adds the missing packages and
-  leaves healthy ones untouched (experiment D). It is the **repair**, not the primary
-  trigger. It carries a *residual* risk only when it must rewrite a locked package (§8).
+- ❌ "The former `ensureDeps()` self-heal `npm install` was the **prime trigger** of new
+  half-wipes." — **Downgraded.** Its `npm install` was *additive* and did **not** prune;
+  in the actual repair scenario (some deps missing) it added the missing packages and
+  left healthy ones untouched (experiment D). It was the **repair**, not the primary
+  trigger. The path is now retired by operator-ownership policy; its historical residual
+  risks are recorded in §8.
 - ❌ "npm unlinks the other packages first, then aborts with EPERM on the locked file,
   leaving a half-wiped tree." — **Not how modern npm behaves on a graceful lock error**:
   it retires-then-rolls-back and leaves the tree intact (experiment F). The half-wipe
   needs the reify to be **destructive** (npm ci / prune) **or interrupted** (experiment H).
 
-The gateway is catastrophically *exposed* to any half-wipe because it resolves the agent
-runtime from the primary tree at spawn time (§3) — that exposure is real and is what the
-ring-fence (§11b) addresses, independent of which npm op did the wiping.
+The gateway remains exposed to an installed-runtime half-wipe because automatic direct host
+spawns resolve Bobbit's installed Pi package in place. The current harness reduces startup
+risk by validating declared dependencies before build or launch; it does not create a second
+runtime tree or conceal a damaged installation.
 
 ---
 
 ## 2. The runtime-dependency exposure (direct-spawn path)
 
 The running gateway resolves the pi-coding-agent runtime from **its own install** for
-**every** direct (non-sandbox) agent + verification spawn:
+**every** automatic direct (non-sandbox) agent and verification spawn. The direct-host
+runtime resolver delegates package lookup to `import.meta.resolve`, converts the resolved
+entry URL to a filesystem path, and derives the package's `node_modules` root and `dist/cli.js`.
+This preserves Node's package and subpath semantics. An explicit `--agent-cli` / `cliPath`
+override takes precedence and does not invoke automatic resolution.
 
-- `src/server/agent/rpc-bridge.ts:1135` `findAgentCli()` →
-  `import.meta.resolve("@earendil-works/pi-coding-agent")` (`:1138`) → the `cli.js` next to
-  the resolved package main. Called on every `RpcBridge.start()` at `:379`
-  (`this.options.cliPath || findAgentCli()`).
-- `src/server/agent/rpc-bridge.ts:1123` `resolveAgentModulesDir()` — same
-  `import.meta.resolve` (`:1124`) — resolves the `node_modules` dir the runtime lives in.
-
-If that tree loses `@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, or any
-transitive dep, `import.meta.resolve` throws / the spawned `cli.js` fails its own imports,
-and the spawn dies. Because this is the shared primary tree, a single half-wipe bricks
-**all** direct spawns at once.
+If the installed tree loses `@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, or a
+transitive dependency, package resolution or the spawned CLI's imports fail. A missing Pi
+package produces actionable guidance to install it or pass `--agent-cli /path/to/cli.js`.
+Because automatic resolution uses the shared installed tree in place, a half-wipe can brick
+all direct spawns at once. It never consults `<stateDir>/runtime`.
 
 ### The Docker path is NOT exposed
 
-The Docker sandbox path does **not** mount the host `node_modules`:
-
-- `src/server/agent/docker-args.ts:180-181` — "pi-coding-agent is baked into the Docker
-  image … No node_modules mount needed."
-- `src/server/agent/rpc-bridge.ts:789` — `spawnDockerExec` runs
-  `/node_modules/@earendil-works/pi-coding-agent/dist/cli.js` **from the image**, not the host.
-
-So a half-wiped host tree cannot break sandboxed spawns. **The live gateway-bricking
-exposure is exclusively the direct-spawn path.** (Confirmed against the code, per the
-goal's request.)
+The Docker sandbox path does **not** mount the host `node_modules`. Its Pi runtime and CLI
+are baked into the image, so a half-wiped host tree cannot break sandboxed spawns. The
+Docker behavior is unchanged; the live gateway-bricking exposure is exclusively the
+direct-spawn path.
 
 ---
 
-## 3. The only automatic server-side writer of the primary tree
+## 3. Historical automatic writer (now retired)
 
-`ensureDeps()` in `src/server/harness.ts:225`, called on **every** boot and restart
-(`:391` initial, `:304` on restart). It runs `missingDependencies(PROJECT_ROOT)`
-(`src/server/harness-deps.ts:46` — checks each declared dep's `package.json` exists on
-disk) and, **only if some are missing**, runs `execSync("npm install", …)`
-(`src/server/harness.ts:234`, `INSTALL_TIMEOUT_MS = 180_000` at `:75`).
+At the time of the experiments, `ensureDeps()` ran on harness boot and restart. It checked
+declared package-manifest presence and invoked plain `npm install` only after dependencies
+were already missing. This is important to the RCA: experiment D confirmed that invocation
+was additive repair, not the NFS hang or the primary cause of a fresh half-wipe.
 
-Critically for the RCA: `ensureDeps` runs a **plain `npm install`**, and it only fires
-when deps are already **missing**. No other server code path writes the primary tree.
+That writer has been removed. The harness now performs pure, read-only validation of
+`dependencies` and `devDependencies`; `optionalDependencies` remain optional. It fails an
+unreadable, malformed, or structurally invalid root `package.json`. Validation neither
+writes to the filesystem nor spawns a subprocess or package manager. Initial boot,
+sentinel restart, and automatic crash relaunch all validate before any applicable build or
+launch step.
 
 ---
 
@@ -136,7 +133,7 @@ Environment: **npm 11.8.0, node v24.13.1**, Windows. All experiments ran in isol
 | **A** | declare `is-number`; install; plant an **extraneous** top-level pkg | `npm install` | `up to date`; extraneous **PRESENT** | plain install does **not** prune extraneous |
 | **B** | install `is-odd` (pulls transitive `is-number`); then empty `dependencies` | `npm install` | `up to date`; both `is-odd` + `is-number` **PRESENT** | plain install does **not** prune orphaned deps |
 | **C** | install `is-number@7`; overwrite on-disk to fake `v6` + `SENTINEL.txt` | `npm install` | `changed 1 package`; on-disk now `7.0.0`; **SENTINEL gone** | plain install **re-extracts** a version-drifted pkg (retire-rename) |
-| **D** | install `is-number@7` + `is-odd`; `rm -rf` `is-number` (simulate half-wipe); mark `is-odd` | `npm install` | `added 1 package`; `is-number` **RESTORED**; `is-odd` sentinel **survived** | the **ensureDeps repair path** is additive & leaves healthy pkgs untouched |
+| **D** | install `is-number@7` + `is-odd`; `rm -rf` `is-number` (simulate half-wipe); mark `is-odd` | `npm install` | `added 1 package`; `is-number` **RESTORED**; `is-odd` sentinel **survived** | the **historical ensureDeps repair scenario** was additive and left healthy packages untouched |
 | **E** | install with lockfile; plant extraneous pkg | `npm ci` | extraneous **PRUNED** | `npm ci` is destructive (wipe + prune) |
 | **F** | force `is-number` rewrite (v6→v7) while an **exclusive no-share Windows handle** is held on `is-number/locked.node` | `npm install` | `npm error code EBUSY … syscall rename … errno -4082` on `locked.node`; **`is-number` fully intact at v6, `is-odd` intact** | modern npm reify **retires-then-rolls-back**; a locked file → **clean rollback, NO half-wipe** |
 | **H** | install 120-pkg tree with lockfile; tight 10 ms Node poll of top-level count during `npm ci` | `npm ci` | count dipped **120 → 2** then back to 120 | `npm ci` **bulk-removes first**; an interrupt in that window = **half-wipe** |
@@ -189,8 +186,10 @@ tree**, i.e. one of:
    field-observed mechanism.
 
 A plain, uninterrupted `npm install` on a **healthy** tree does **not** half-wipe it
-(experiments A, B: no prune) and **rolls back** on a locked-file rewrite (experiment F). So
-the automatic `ensureDeps` install is not a primary trigger of *new* half-wipes.
+(experiments A, B: no prune) and **rolls back** on a locked-file rewrite (experiment F).
+The former automatic `ensureDeps` install was therefore not a primary trigger of new
+half-wipes. It has since been removed as an operator-ownership decision, not because the
+experiments implicated it as the NFS hang or primary half-wipe cause.
 
 ---
 
@@ -199,17 +198,16 @@ the automatic `ensureDeps` install is not a primary trigger of *new* half-wipes.
 **Ruled IN (primary tree):**
 - Human/agent running `npm ci` / `npm install --force` / `npm audit fix --force` in the
   primary checkout while `npm run dev:harness` / vite is live. (The `release` skill
-  *explicitly warns* never to do this in the primary worktree —
-  `.claude/skills/release/SKILL.md:16` — confirming it is a known footgun, not an automated
-  path.)
+  explicitly warns never to do this in the primary worktree, confirming it is a known
+  footgun rather than an automated path.)
 - Any reify (including a worktree `npm ci`) **interrupted by resource exhaustion / a box
-  crash** — the mechanism `docs/testing-v2/LEAD-STATE.md` and
-  `docs/testing-v2/head-to-head.md:252` attribute the 2026-07-08 incident to.
+  crash** — the mechanism the testing-v2 lead-state and head-to-head records attribute to
+  the 2026-07-08 incident.
 
 **Ruled OUT / downgraded:**
-- `ensureDeps()`'s automatic `npm install` as a **primary trigger** — it is additive, does
-  not prune (experiments A, B, D), and rolls back on locks (F). Repair, not trigger.
-  (Residual risk in §8.)
+- The former `ensureDeps()` automatic `npm install` as a **primary trigger** — it was
+  additive, did not prune (experiments A, B, D), and rolled back on locks (F). It was repair,
+  not the trigger, and is now retired. Historical residual risk is recorded in §8.
 - The "`npm install` prunes/rewrites the whole tree under `package-lock=false`" theory —
   disproved (A, B).
 - The "npm unlinks siblings first, then EPERMs, leaving a half-wipe" mechanism for the
@@ -217,63 +215,46 @@ the automatic `ensureDeps` install is not a primary trigger of *new* half-wipes.
 - The **chaos.mjs junction-delete-through** vector — real but **distinct and test-only**,
   already fixed by PR #956 (§13). Not the general/dev-time cause.
 
-**Grep of the repo** for destructive npm invocations (`rg "npm ci|--force|audit fix"`) shows
+**Grep of the repo** for destructive npm invocations (`rg "npm ci|--force|audit fix"`) found
 them only in: per-worktree `worktree_setup_command` (separate trees, not primary), the
 `release` skill (with an explicit "not in primary" warning), `e2e:v2`/chaos test scripts
-(separate worktrees), and docs. **No automated code path runs a destructive npm op against
-the primary tree** — confirming the trigger is human/agent action or an interrupted reify,
-not gateway code.
+(separate worktrees), and docs. This confirmed the observed trigger was human/agent action
+or an interrupted reify, not gateway code. The current harness goes further: it invokes no
+package manager at all.
 
 ---
 
-## 8. Why `ensureDeps` is the repair — and its residual risk
+## 8. Why the additive repair was retired
 
-`ensureDeps` only fires when deps are already missing, and runs a plain additive
-`npm install` that (experiment D) restores the missing packages without touching healthy
-ones. It is fundamentally the **recovery** step.
+The former `ensureDeps` path fired only after dependencies were already missing. Its plain
+`npm install` restored missing packages without touching healthy ones in experiment D, so it
+was fundamentally **recovery**, not the origin of a fresh half-wipe on a healthy tree.
 
-Residual risk (real but secondary):
-1. **Rewrite-under-lock.** If the primary tree has **version drift** (not just missing
-   deps), `npm install` will *re-extract* the drifted package (experiment C) via
-   retire-rename. If that package's native file is locked by live vite, the rename
-   `EBUSY`s (experiment F). Modern npm rolls back, so no half-wipe — **but the repair
-   FAILS** and the tree stays broken. `ensureDeps` currently swallows this in a generic
-   `catch` (`harness.ts:249`) and prints a generic message; it does **not** surface the
-   exact locked file npm named, so the operator can't act.
-2. **Interrupted repair.** `ensureDeps` runs inside the restart path, right after
-   `killServer()`. If a *second* restart or a crash interrupts the `npm install`
-   mid-reify, experiment H's window applies and the repair itself can leave the tree worse.
-3. **Auto-fire while vite holds locks.** It runs on **every** restart with vite still live
-   (only the gateway is killed by `restart-server`), so any rewrite it attempts races the
-   lock.
+It still had secondary operational risks:
 
-These motivate "make the repair safe + fail-loud" (§11a) — but note the repair is not the
-*origin* of a fresh half-wipe on a healthy tree.
+1. **Rewrite under lock.** Version drift can make plain install re-extract a package
+   (experiment C). A locked native file makes that repair fail, even though modern npm rolls
+   back cleanly (experiment F).
+2. **Interrupted repair.** Interrupting any reify can expose experiment H's incomplete-tree
+   window.
+3. **Automatic timing.** Running repair during a restart leaves the operator unable to
+   guarantee that every process holding native files is stopped.
+
+The harness therefore no longer repairs dependencies automatically. It reports validation
+failures and manual recovery instructions instead. The operator must stop Bobbit and the
+entire development stack, run plain `npm install` manually, and then retry or restart. This
+keeps mutation and lock coordination under operator control without changing the confirmed
+additive-install conclusion.
 
 ---
 
-## 9. Instrumentation design (proposed — NOT wired in this phase)
+## 9. Retired instrumentation proposal
 
-To make the trigger **provable in the field** (rather than inferred), the restart path
-should be instrumented around `ensureDeps()` in `src/server/harness.ts`:
-
-1. **Log every npm invocation** the harness makes: full argv, `cwd`, and the resolved npm
-   version, with a stable `[harness][deps]` prefix and a timestamp.
-2. **Before/after snapshot** around the `execSync("npm install")`: call
-   `missingDependencies(PROJECT_ROOT)` immediately **before** and **after**, and log both
-   sets plus the delta (`repaired`, `stillMissing`, and — the red flag — any dep that was
-   present before and **missing after**, which would prove the repair itself removed it).
-3. **Capture npm's exit + stderr tail** verbatim, and on `EBUSY`/`EPERM` extract and log
-   the `npm error path` (the exact locked file) at `error` level.
-4. **Emit a one-line structured summary** (`before=N after=M repaired=[…] regressed=[…]
-   lockedFile=…`) so a field log conclusively shows whether a wipe grew, shrank, or was
-   caused during a restart.
-5. Optionally, a lightweight periodic `missingDependencies()` probe (not just at restart)
-   would timestamp *when* the tree first went missing relative to any npm activity — pinning
-   whether the wipe precedes or follows an `ensureDeps` run.
-
-This is *observability only*; it changes no install behavior and is safe to land before the
-functional fix.
+The investigation originally proposed before/after logging around the harness's automatic
+`npm install`. That proposal is obsolete because the harness no longer invokes npm or any
+other package manager. Current diagnostics report the invalid root manifest or every missing
+declared dependency and include the stopped-stack manual recovery procedure. The isolated
+experiments in §5 remain the evidence for the historical additive-repair conclusion.
 
 ---
 
@@ -292,74 +273,75 @@ functional fix.
    observe the dip toward empty. `SIGKILL` npm during the dip → observe a **half-wiped**
    tree (the destructive/interrupted case).
 
-**B. Prove the gateway exposure (conceptual, matches the field symptom):**
-1. With the dev stack live, remove `@earendil-works/pi-ai` from the primary
-   `node_modules`.
-2. Trigger any direct (non-sandbox) agent/verification spawn → `import.meta.resolve`
-   (`rpc-bridge.ts:1124/1138`) throws and **every** direct spawn fails, while Docker spawns
-   (baked-in image) keep working.
+**B. Verify the gateway exposure without touching the installed tree:**
+1. Create a temporary fake Pi package and inject an `import.meta.resolve`-compatible seam
+   into the direct-host resolver.
+2. Resolve the healthy fixture, then make the injected resolver report Pi as missing. The
+   direct path must return actionable install/`--agent-cli` guidance; no real dependency is
+   removed.
+3. Place a sentinel under a temporary `<stateDir>/runtime` and assert both healthy and
+   missing-package resolution perform zero access beneath it. Docker remains outside this
+   resolver because its runtime is baked into the image.
 
 ---
 
-## 11. Implemented fix
+## 11. Implemented startup policy
 
-The landed fix has two layers: make the automatic repair observable and fail-loud, then
-remove the direct-spawn runtime's dependency on the mutable working tree.
+The current policy removes both automatic dependency mutation and runtime snapshotting.
+This avoids synchronous recursive filesystem work during direct-session restoration and
+keeps dependency repair under operator control on every platform and filesystem.
 
-### Safe, fail-loud repair
+### Read-only dependency validation
 
-`ensureDeps()` still runs only when declared dependencies are physically missing from
-`node_modules`. It delegates to `healDependencies()`, which:
+The harness validates the root manifest and installed package manifests before all lifecycle
+entries:
 
-- runs the repair through an injected command seam (`npm install` in production), preserving
-  the `.npmrc` `shrinkwrap=false` / frozen-lockfile invariant;
-- snapshots declared dependency presence before and after repair with `missingDependencies()`;
-- reports `restored`, `stillMissing`, and `regressed` dependency sets;
-- extracts the exact locked file from npm's `EBUSY` / `EPERM` output when available; and
-- throws a `DependencyHealError` if npm fails or if any dependency that was present before
-  repair is missing afterward.
+- `dependencies` and `devDependencies` must each be valid dependency maps, and every declared
+  package must have a manifest under `node_modules`;
+- `optionalDependencies` remain optional;
+- unreadable, malformed, or structurally invalid root manifests fail validation; and
+- validation performs reads only, with no repair callback, filesystem writes, subprocesses,
+  or package-manager invocation.
 
-The harness logs a one-line before/after summary and catches repair failures, so a bad heal
-is visible but does not crash the dev-harness boot path. If npm names a locked native file,
-the log tells the operator to stop vite/gateway and rerun `npm install`.
+A validation failure reports its cause and tells the operator to stop Bobbit and the
+development stack, run `npm install` manually, then retry or restart. Initial startup exits
+non-zero before build or launch. Sentinel restart and automatic crash relaunch skip build and
+launch but keep the harness alive for a later operator-triggered retry. Healthy initial and
+sentinel paths validate, build, and launch; a healthy crash relaunch validates and launches
+without rebuilding. A failed sentinel build never launches stale output and remains retryable.
 
-### Runtime ring-fence
+### Installed direct-host Pi runtime
 
-Direct host-side agent spawns now prefer a ring-fenced runtime snapshot over the mutable
-working-tree `node_modules`:
+Automatic direct host resolution uses Bobbit's installed
+`@earendil-works/pi-coding-agent` package in place through `import.meta.resolve`. The explicit
+CLI override remains first choice. Missing Pi produces an actionable install or `--agent-cli`
+error. Docker sandbox behavior remains unchanged because its Pi runtime is baked into the
+image.
 
-- `ensureRuntimeSnapshot()` builds a hardlink-farm snapshot under `<stateDir>/runtime` from
-  the working `node_modules`. It falls back to file copies when hardlinks are unavailable.
-- Snapshot versions are fingerprinted from the snapshot schema plus `package.json` and
-  `package-lock.json`, so refresh happens only when dependency inputs change or the current
-  snapshot is missing/incomplete.
-- A new version is built in a temporary directory, then published by atomically switching a
-  pointer file. The stable `<stateDir>/runtime/node_modules` link is best-effort; the pointer
-  file is authoritative.
-- Any snapshot failure is non-fatal. The resolver falls back to the working tree when it is
-  intact, or to the last intact snapshot when the working tree has already been half-wiped.
-- `resolveAgentModulesDir()` and `findAgentCli()` use the snapshot for direct spawns while
-  preserving `import.meta.resolve` as the working-tree fallback for Node `exports` and subpath
-  behavior.
-
-Docker sandbox spawns remain unchanged: the pi-coding-agent runtime is baked into the image
-and is not mounted from host `node_modules`.
+The retired ring-fence previously copied or hardlinked the installed tree recursively into
+`<stateDir>/runtime`; on high-latency NFS that synchronous traversal could delay gateway port
+binding for minutes. Resolution now performs no probe, traversal, creation, update, or cleanup
+under `<stateDir>/runtime`. Existing snapshots and partial `.tmp-*` trees are ignored and left
+untouched. They may be deleted manually to reclaim space, but only while Bobbit is fully
+stopped.
 
 ---
 
-## 12. Implemented reproducing test
+## 12. Focused regression coverage
 
-`tests2/core/node-modules-ring-fence.test.ts` pins the two critical invariants with temp-FS
-fixtures and injected seams; it does not run real npm, git, or networked installs.
+`tests2/core/node-modules-ring-fence.test.ts` retains its historical filename but now pins the
+NFS-safe startup policy with temporary fixtures and injected seams. It does not simulate NFS,
+run real npm, access the network, or mutate the repository's installed dependencies.
 
-The test simulates a destructive/interrupted repair that removes a previously healthy
-package and then throws an `EBUSY` error naming a locked native-addon file. It asserts that
-`healDependencies()` fails loudly with both the regressed dependency name and the exact locked
-file path.
+Coverage verifies:
 
-The same test creates an intact snapshot `node_modules` and a gutted working `node_modules`,
-then asserts `resolveAgentRuntimeModulesDir()` prefers the snapshot and that the resolved
-runtime still contains `@earendil-works/pi-coding-agent/package.json`.
+- automatic direct-host resolution uses the installed Pi entry and never accesses a sentinel
+  legacy `<stateDir>/runtime` tree;
+- an explicit CLI override takes precedence and missing Pi produces actionable guidance;
+- validation checks production and development dependency manifests, ignores optional
+  dependencies, rejects invalid root manifests, and performs no writes or subprocess calls;
+- unhealthy initial boot, sentinel restart, and crash relaunch do not build or launch; and
+- the still-running harness can validate and proceed after a later manual repair and retry.
 
 ---
 

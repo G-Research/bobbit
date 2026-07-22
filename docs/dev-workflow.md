@@ -39,11 +39,13 @@ npm run dev:harness
 
 Same two-process setup, but the gateway is wrapped in a **restart harness** (`src/server/harness.ts`). The harness:
 
-- Watches a sentinel file at `.bobbit/state/gateway-restart`
-- On signal: kills the server, waits for the port to free, **self-heals `node_modules`** (see below), runs `npm run build:server`, relaunches
-- Auto-restarts on unexpected crashes
-- On every boot/restart it checks that each declared dependency is physically present in `node_modules` and, only if some are missing, runs a non-destructive `npm install` to restore them (a healthy tree is a no-op)
-- Sessions survive restarts (persisted to `.bobbit/state/sessions.json`)
+- Watches a sentinel file at `.bobbit/state/gateway-restart`.
+- Validates installed dependencies before initial build/launch, sentinel-triggered rebuild/launch, and automatic crash relaunch. Validation only reads package manifests; it never runs a package manager or repairs `node_modules`.
+- On a healthy sentinel restart: kills the server, waits for the port to free, validates dependencies, runs `npm run build:server`, and relaunches.
+- On a healthy unexpected-crash relaunch: validates dependencies and relaunches without rebuilding, preserving the existing crash-relaunch policy.
+- On initial validation failure: reports the missing dependencies or invalid root manifest, gives manual recovery instructions, and exits non-zero before build or launch.
+- On restart/relaunch validation failure: reports the same diagnostics, skips build and launch, and keeps the harness available for a later operator-triggered retry.
+- Preserves sessions across restarts in `.bobbit/state/sessions.json`.
 
 To trigger a restart:
 
@@ -63,7 +65,7 @@ When the gateway was launched by this harness, the Settings page also shows a to
 |---|---|
 | `src/ui/**` or `src/app/**` | Nothing — Vite hot-reloads automatically |
 | `src/server/**` | Run `npm run restart-server` (if using harness) or manually `npm run build:server` + restart |
-| `package.json` (new dependency) | `npm install`, then restart server |
+| `package.json` (new dependency) | Stop Bobbit and the development stack, run `npm install` manually, then restart |
 | `vite.config.ts` | Restart Vite (kill and re-run `npm run dev:harness`) |
 | `tsconfig.*.json` | Restart server; may need to restart Vite for web config changes |
 | `.bobbit/config/system-prompt.md` | Restart server (the path is resolved at startup and passed to agents) |
@@ -98,36 +100,37 @@ The half-wipe needs either:
 Those paths can leave `node_modules` partially repopulated with core runtime
 packages missing.
 
-**Why it used to brick every spawn**: direct host-side agent and verification
-spawns resolved `@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai` from
-the primary working tree at spawn time. If that tree was half-wiped, every direct
-spawn failed. Docker spawns were not exposed because the sandbox image already
-contains the agent runtime and does not bind-mount host `node_modules` for it.
+**Why it bricks direct spawns**: automatic direct host-side agent and verification
+spawns resolve Bobbit's installed `@earendil-works/pi-coding-agent` package in place
+using Node's normal package-resolution semantics. If that installation is half-wiped,
+direct spawns fail with guidance to install the package or supply an explicit
+`--agent-cli` path. Docker spawns are not exposed because the sandbox image contains
+its own Pi runtime and does not bind-mount host `node_modules` for it.
 
-**Protection**: the gateway now resolves the direct-spawn agent runtime from a
-ring-fenced snapshot under `<stateDir>/runtime` when available, with
-`<stateDir>/runtime/node_modules` as the best-effort stable link. The snapshot is
-a fingerprinted hardlink farm of the working `node_modules`, rebuilt only when
-dependency inputs change, written to a versioned directory, and switched
-atomically via a pointer. If snapshot creation fails or the snapshot is incomplete,
-the resolver falls back to the working tree instead of blocking boot.
+**Current policy**: the runtime ring-fence and automatic dependency healing are
+retired on every platform. The harness performs read-only validation of declared
+`dependencies` and `devDependencies` by checking their installed package manifests;
+`optionalDependencies` remain optional. An unreadable, malformed, or structurally
+invalid root `package.json` also fails validation. The harness never runs `npm install`
+or another package manager. Invalid dependencies prevent build and gateway launch;
+a failed restart or crash relaunch leaves the harness available so the operator can
+repair the installation and trigger another restart.
 
-The dev harness self-heal is also fail-loud and non-destructive. `ensureDeps()`
-checks declared dependency presence with `missingDependencies()` and, only if
-some are missing, calls `healDependencies()` to run plain `npm install`. It logs
-before/after counts, restored/still-missing/regressed deps, and the exact locked
-file reported by npm on `EBUSY`/`EPERM`. A failed heal is logged and boot
-continues; it does not silently leave a worse tree unidentified.
+Direct host Pi resolution never probes or modifies `<stateDir>/runtime`. Legacy
+snapshots and partial trees there are ignored and left untouched. They may be removed
+manually to reclaim space, but only while Bobbit and the development harness are fully
+stopped.
 
 **Avoid**: never run `npm ci`, `npm install --force`, or `npm audit fix --force`
 while the dev stack (`npm run dev:harness` / vite) is up. Stop it first, run the
 destructive command, then restart.
 
-**Recover**: a plain `npm install` is still the recovery path. It is additive in
-the missing-dependency case and preserves the `.npmrc` `shrinkwrap=false`
-lockfile-freeze invariant, so it restores missing packages without regenerating
-`package-lock.json`. If npm reports a locked native file, stop vite/the gateway
-and run `npm install` again.
+**Recover**: dependency repair is operator-owned. Stop Bobbit and the entire
+development stack first, run plain `npm install` manually, then start or restart the
+harness. Plain install was confirmed to be additive in the missing-dependency case and
+preserves the `.npmrc` `shrinkwrap=false` lockfile-freeze invariant, so it restores
+missing packages without regenerating `package-lock.json`. It was not the NFS startup
+hang or the primary half-wipe trigger.
 
 For the full RCA, experiments, and regression coverage, see
 [docs/testing-v2/node-modules-corruption-rca.md](testing-v2/node-modules-corruption-rca.md).
