@@ -745,9 +745,14 @@ export function mergeAuthorSidecarIntoMessages<T extends object>(
 	context: NormalizeVisibleMessageContext = {},
 ): Array<T & { author?: MessageAuthor }> {
 	if (!Array.isArray(messages)) return messages;
-	const available = entries
+	const directPromptBindings = entries
 		.filter((entry) => isPromptAuthorBinding(entry) && entry.settlement?.outcome !== "cancelled")
 		.sort((left, right) => left.dispatchedAt - right.dispatchedAt);
+	// Persisted transcript rows exist only after Pi echoes a prompt. An unresolved
+	// same-text dispatch may match only Bobbit's synthetic row by its prompt id;
+	// letting it enter weaker transcript phases can relabel older human history.
+	const echoedTranscriptBindings = directPromptBindings
+		.filter((entry) => entry.settlement?.outcome === "echoed");
 	const consumed = new Set<PromptAuthorBinding>();
 	const assignments = new Map<number, MessageAuthor>();
 	const rows = messages as Array<T & Record<string, unknown>>;
@@ -759,7 +764,7 @@ export function mergeAuthorSidecarIntoMessages<T extends object>(
 		const id = messageId(row);
 		if (!id?.startsWith("inflight-steer:")) continue;
 		const promptId = id.slice("inflight-steer:".length);
-		const binding = available.find((candidate) => !consumed.has(candidate) && candidate.promptId === promptId);
+		const binding = directPromptBindings.find((candidate) => !consumed.has(candidate) && candidate.promptId === promptId);
 		if (!binding) continue;
 		assignments.set(index, binding.author);
 		consumed.add(binding);
@@ -771,7 +776,7 @@ export function mergeAuthorSidecarIntoMessages<T extends object>(
 		if (!eligiblePromptMessage(row)) continue;
 		const id = messageId(row);
 		if (!id) continue;
-		const binding = available.find((candidate) =>
+		const binding = echoedTranscriptBindings.find((candidate) =>
 			!consumed.has(candidate) && candidate.settlement?.messageId === id,
 		);
 		if (!binding) continue;
@@ -787,7 +792,7 @@ export function mergeAuthorSidecarIntoMessages<T extends object>(
 		const text = extractPromptModelText(row);
 		const timestamp = messageTimestamp(row);
 		if (text === undefined || timestamp === undefined) continue;
-		const binding = available.find((candidate) => {
+		const binding = echoedTranscriptBindings.find((candidate) => {
 			if (consumed.has(candidate) || !promptAuthorBindingMatchesText(candidate, text)) return false;
 			const settledTimestamp = candidate.settlement?.messageTimestamp ?? candidate.settlement?.settledAt;
 			return settledTimestamp !== undefined
@@ -805,7 +810,7 @@ export function mergeAuthorSidecarIntoMessages<T extends object>(
 		if (!eligiblePromptMessage(row)) continue;
 		const text = extractPromptModelText(row);
 		if (text === undefined) continue;
-		const binding = available.find((candidate) =>
+		const binding = echoedTranscriptBindings.find((candidate) =>
 			!consumed.has(candidate) && promptAuthorBindingMatchesText(candidate, text),
 		);
 		if (!binding) continue;

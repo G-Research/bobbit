@@ -14,6 +14,8 @@ import {
 	readAuthorSidecar,
 	type PromptAuthorDispatchInput,
 } from "../../src/server/agent/author-sidecar.ts";
+import { readTranscript } from "../../src/server/agent/transcript-reader.ts";
+import { buildVisibleMessageSnapshot } from "../../src/server/agent/visible-message-snapshot.ts";
 import { LOCAL_USER_AUTHOR, type MessageAuthor } from "../../src/shared/message-author.ts";
 
 const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-author-sidecar-v2-"));
@@ -111,10 +113,11 @@ describe("author sidecar v2 persistence", () => {
 		expect(fs.statSync(sidecarPath(sessionId)).mode & 0o777).toBe(0o600);
 	});
 
-	it("keeps digest correlation stable when re-initialized with the same key", () => {
+	it("keeps settled digest correlation stable when re-initialized with the same key", () => {
 		const sessionId = "same-key-reinit";
 		const text = "stable restart correlation";
 		appendPromptAuthorDispatch(sessionId, dispatch("p1", text, systemAuthor));
+		appendPromptAuthorSettlement(sessionId, { promptId: "p1", settledAt: 1_100, outcome: "echoed" });
 		const before = readAuthorSidecar(sessionId)[0].modelTextDigest;
 
 		initialize(stateDir, secretsDir, Buffer.from(hmacKey));
@@ -398,10 +401,40 @@ describe("author sidecar v2 correlation", () => {
 		expect(rows[0].author).toEqual(LOCAL_USER_AUTHOR);
 	});
 
-	it("consumes duplicate identical prompt digests FIFO", () => {
+	it.each([
+		["system", systemAuthor],
+		["agent", agentAuthor],
+	] as const)("does not let an unresolved %s dispatch relabel an older same-text human row", async (_kind, author) => {
+		const sessionId = `unresolved-${author.kind}`;
+		const text = "same text as a pending dispatch";
+		appendPromptAuthorDispatch(sessionId, dispatch(`pending-${author.kind}`, text, author));
+		const legacyRows = [{ id: `legacy-${author.kind}`, role: "user", content: text }];
+
+		const merged = mergeAuthorSidecarIntoMessages(readAuthorSidecar(sessionId), legacyRows);
+		expect(merged[0].author).toEqual(LOCAL_USER_AUTHOR);
+
+		const snapshot = buildVisibleMessageSnapshot(legacyRows, {
+			sessionId,
+			session: { id: sessionId, title: "Target" },
+		});
+		expect(snapshot[0].author).toEqual(LOCAL_USER_AUTHOR);
+
+		const transcript = await readTranscript({}, {
+			readContent: async () => transcriptRow(text, { id: `legacy-${author.kind}` }),
+			authorContext: {
+				session: { id: sessionId, title: "Target" },
+				sidecarEntries: readAuthorSidecar(sessionId),
+			},
+		});
+		expect(transcript.messages[0].author).toEqual(LOCAL_USER_AUTHOR);
+	});
+
+	it("consumes settled duplicate identical prompt digests FIFO", () => {
 		const sessionId = "duplicates";
 		appendPromptAuthorDispatch(sessionId, dispatch("p1", "same", systemAuthor, 100));
+		appendPromptAuthorSettlement(sessionId, { promptId: "p1", settledAt: 110, outcome: "echoed" });
 		appendPromptAuthorDispatch(sessionId, dispatch("p2", "same", agentAuthor, 200));
+		appendPromptAuthorSettlement(sessionId, { promptId: "p2", settledAt: 210, outcome: "echoed" });
 		const rows = mergeAuthorSidecarIntoMessages(
 			readAuthorSidecar(sessionId),
 			[{ role: "user", content: "same" }, { role: "user", content: "same" }],
