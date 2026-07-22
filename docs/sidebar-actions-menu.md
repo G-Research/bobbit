@@ -58,7 +58,7 @@ Open-session mobile view is different: its header keeps icon-only quick actions 
 
 | Action | Placement | Availability | Behavior |
 |---|---|---|---|
-| `Modify` | Quick + menu | Plain live session | Opens the existing rename dialog. |
+| `Modify` | Quick + menu | Plain live session | Opens **Modify Session** for title, colour, and role changes. |
 | `Edit staff` | Quick + menu | Staff-backed live session | Navigates to that staff page. |
 | `Terminate` | Quick + menu | Plain live session | Opens the existing terminate confirmation. |
 | `End team` | Quick + menu | Team-lead session | Opens the existing team-end confirmation with goal context. |
@@ -71,6 +71,22 @@ Open-session mobile view is different: its header keeps icon-only quick actions 
 Archived sessions and unsupported live session kinds do not expose `Refresh agent` or `Fork`. The server also enforces this for both actions so clients cannot bypass UI availability checks.
 
 This table follows the canonical session action order defined in [Unified Session Actions](session-actions.md#built-in-order).
+
+#### Session role controls
+
+The **Create New Session** picker starts on **General** and lists the resolved
+roles for the selected project. It does not offer **None**: a newly created
+standard session must receive a complete role configuration from its first
+spawn, rather than begin with role-less runtime state. Quick-create surfaces
+that do not open this picker may omit `roleId`; the server still resolves the
+project-scoped `general` role under the same contract.
+
+**Modify Session** remains a separate role-management surface. Its role menu
+still offers **None** / **Remove role**, so users can clear a role from an
+existing session. Existing role-less sessions also remain role-less and may
+continue to display **None**; opening or reloading them does not migrate them to
+General. See [REST API — Standard session role resolution](rest-api.md#standard-session-role-resolution)
+for the creation-only API semantics and role-mapping boundaries.
 
 #### Refresh agent
 
