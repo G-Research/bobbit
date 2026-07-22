@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -14,6 +14,19 @@ const MODEL = "anthropic/claude-opus-4-8";
 const THINKING = "xhigh";
 const GENERAL_PROMPT_MARKER = "DEFAULT_GENERAL_ROLE_PROMPT_MARKER";
 const CUSTOM_PROMPT_MARKER = "EXPLICIT_PROJECT_ROLE_PROMPT_MARKER";
+const AGENT_CONTEXT_PREFIX = "RESOLVED_AGENT_CONTEXT=";
+const AVAILABLE_ROLE_CONTEXT = "RESOLVED_AVAILABLE_ROLE_CONTEXT";
+const CONDITIONAL_CONTEXT = "SUBGOALS_ENABLED_ROLE_CONTEXT";
+
+function rolePromptFixture(marker: string): string {
+	return [
+		marker,
+		`${AGENT_CONTEXT_PREFIX}{{AGENT_ID}}`,
+		AVAILABLE_ROLE_CONTEXT,
+		"{{AVAILABLE_ROLES}}",
+		`{if:subGoalsEnabled}${CONDITIONAL_CONTEXT}{endif:subGoalsEnabled}`,
+	].join("\n");
+}
 
 let project: { id: string; rootPath: string };
 let worktreeProject: { id: string; rootPath: string };
@@ -42,7 +55,7 @@ interface RoleFixture {
 const generalOverride: RoleFixture = {
 	name: GENERAL_ROLE,
 	label: "General",
-	promptTemplate: GENERAL_PROMPT_MARKER,
+	promptTemplate: rolePromptFixture(GENERAL_PROMPT_MARKER),
 	accessory: "flask",
 	toolPolicies: { Shell: "never", "File System": "ask" },
 	model: MODEL,
@@ -52,7 +65,7 @@ const generalOverride: RoleFixture = {
 const customRole: RoleFixture = {
 	name: CUSTOM_ROLE,
 	label: "Project Role Fixture",
-	promptTemplate: CUSTOM_PROMPT_MARKER,
+	promptTemplate: rolePromptFixture(CUSTOM_PROMPT_MARKER),
 	accessory: "magnifier",
 	toolPolicies: { Shell: "never", "File System": "ask" },
 	model: MODEL,
@@ -200,7 +213,23 @@ function expectInitialRoleConfiguration(
 	expect(live.accessory).toBe(expected.accessory);
 	expect(persisted?.role).toBe(expected.role);
 	expect(persisted?.accessory).toBe(expected.accessory);
-	expect(String(promptParts?.rolePrompt ?? ""), "resolved role prompt must reach initial prompt assembly").toContain(expected.promptMarker);
+	const initialPromptPath = (live.rpcClient as any)?.options?.systemPromptPath as string | undefined;
+	expect(initialPromptPath, "initial spawn must receive an assembled system prompt file").toBeTruthy();
+	const prompts = {
+		assembled: readFileSync(initialPromptPath!, "utf8"),
+		reconstructed: String(promptParts?.rolePrompt ?? ""),
+	};
+	for (const [surface, prompt] of Object.entries(prompts)) {
+		expect(prompt, `${surface} role prompt must contain its project-resolved marker`).toContain(expected.promptMarker);
+		expect(prompt, `${surface} role prompt must substitute AGENT_ID`).toContain(
+			`${AGENT_CONTEXT_PREFIX}${expected.role}-${sessionId.slice(0, 8)}`,
+		);
+		expect(prompt, `${surface} role prompt must contain resolved available-role context`).toContain(AVAILABLE_ROLE_CONTEXT);
+		expect(prompt, `${surface} role prompt must substitute AVAILABLE_ROLES with role context`).toContain("**general**");
+		expect(prompt, `${surface} role prompt must not retain AGENT_ID`).not.toContain("{{AGENT_ID}}");
+		expect(prompt, `${surface} role prompt must not retain AVAILABLE_ROLES`).not.toContain("{{AVAILABLE_ROLES}}");
+		expect(prompt, `${surface} role prompt must not retain conditional delimiters`).not.toMatch(/\{(?:if|endif):subGoalsEnabled\}/);
+	}
 	expect(live.spawnPinnedModel, "resolved role model must reach initial spawn").toBe(MODEL);
 	expect(live.spawnPinnedThinkingLevel, "resolved role thinking level must reach initial spawn").toBe(THINKING);
 	expect(live.allowedTools, "resolved role tool policies must produce an initial allowlist").toContain("read");
@@ -243,6 +272,23 @@ async function waitForInitialRoleConfiguration(gateway: any, sessionId: string, 
 		await new Promise(resolve => setTimeout(resolve, 25));
 	}
 	expect(false, `resolved role configuration did not reach worktree initial spawn; observed=${JSON.stringify(observed)}`).toBe(true);
+}
+
+async function sessionIdsBySurface(gateway: any, projectId: string): Promise<Record<string, string[]>> {
+	const listResponse = await apiFetch(`/api/sessions?projectId=${encodeURIComponent(projectId)}`);
+	const listBody = await readJson(listResponse);
+	expect(listResponse.status, JSON.stringify(listBody)).toBe(200);
+	return {
+		live: gateway.sessionManager.listSessions()
+			.filter((session: any) => session.projectId === projectId)
+			.map((session: any) => session.id)
+			.sort(),
+		persisted: gateway.projectContextManager.getAllSessions()
+			.filter((session: any) => session.projectId === projectId)
+			.map((session: any) => session.id)
+			.sort(),
+		api: (listBody.sessions ?? listBody).map((session: any) => session.id).sort(),
+	};
 }
 
 async function expectProjectRoles(projectId: string, roleNames: string[]): Promise<void> {
@@ -329,6 +375,34 @@ test.describe("POST /api/sessions defaults new standard sessions to the resolved
 			}
 		});
 	}
+
+	test("boolean, number, and object roleId values return 400 without creating a role-less session", async ({ gateway }) => {
+		for (const [label, roleId] of [
+			["boolean", true],
+			["number", 42],
+			["object", { name: GENERAL_ROLE }],
+		] as const) {
+			const before = await sessionIdsBySurface(gateway, project.id);
+			let unexpectedSessionId: string | undefined;
+			try {
+				const response = await apiFetch("/api/sessions", {
+					method: "POST",
+					body: JSON.stringify({ cwd: nonGitCwd(), projectId: project.id, worktree: false, roleId }),
+				});
+				const payload = await readJson(response);
+				unexpectedSessionId = typeof payload.id === "string" ? payload.id : undefined;
+				expect(response.status, `${label} roleId must be rejected; body=${JSON.stringify(payload)}`).toBe(400);
+				expect(payload.error).toBe("roleId must be a string or null");
+				expect(payload.id, `${label} roleId rejection must not return a created session`).toBeUndefined();
+				expect(
+					await sessionIdsBySurface(gateway, project.id),
+					`${label} roleId rejection must not add a live, persisted, or API-visible role-less session`,
+				).toEqual(before);
+			} finally {
+				await purgeSession(unexpectedSessionId);
+			}
+		}
+	});
 
 	test("genuine worktree creation with omitted role spawns and persists as general", async ({ gateway }) => {
 		let created: CreatedSession | undefined;
