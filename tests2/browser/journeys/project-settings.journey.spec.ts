@@ -7,7 +7,17 @@ import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Page, Route } from "@playwright/test";
-import { test, expect, openApp, apiFetch, registerProject, navigateToHash } from "../_helpers/journey-fixture.js";
+import {
+	test,
+	expect,
+	openApp,
+	apiFetch,
+	registerProject,
+	navigateToHash,
+	createSession,
+	deleteSession,
+	waitForSessionStatus,
+} from "../_helpers/journey-fixture.js";
 
 let _projCounter = 0;
 function uniqueProjectDir(): string {
@@ -18,6 +28,123 @@ function uniqueProjectDir(): string {
 
 async function deleteProject(id: string): Promise<void> {
 	await apiFetch(`/api/projects/${id}`, { method: "DELETE" }).catch(() => {});
+}
+
+const PROJECT_SOUND_KEY = "play_agent_finish_sound";
+type ProjectSoundState = "inherit" | "on" | "off";
+
+async function installFinishSoundInstrumentation(page: Page): Promise<void> {
+	await page.addInitScript(() => {
+		const target = window as any;
+		target.__finishSoundAudioContexts = 0;
+		target.__finishSoundBadgeCalls = 0;
+
+		class InstrumentedAudioContext {
+			readonly currentTime = 0;
+			readonly destination = {};
+
+			constructor() {
+				target.__finishSoundAudioContexts++;
+			}
+
+			createOscillator() {
+				return {
+					type: "sine",
+					frequency: { value: 0 },
+					connect: (node: unknown) => node,
+					start: () => {},
+					stop: () => {},
+				};
+			}
+
+			createGain() {
+				return {
+					gain: {
+						setValueAtTime: () => {},
+						exponentialRampToValueAtTime: () => {},
+					},
+					connect: (node: unknown) => node,
+				};
+			}
+
+			close() {
+				return Promise.resolve();
+			}
+		}
+
+		Object.defineProperty(window, "AudioContext", {
+			configurable: true,
+			value: InstrumentedAudioContext,
+		});
+		Object.defineProperty(window, "webkitAudioContext", {
+			configurable: true,
+			value: InstrumentedAudioContext,
+		});
+		Object.defineProperty(navigator, "setAppBadge", {
+			configurable: true,
+			value: async () => { target.__finishSoundBadgeCalls++; },
+		});
+		Object.defineProperty(navigator, "clearAppBadge", {
+			configurable: true,
+			value: async () => {},
+		});
+	});
+}
+
+async function completedTurnCount(sessionId: string): Promise<number> {
+	const response = await apiFetch(`/api/sessions/${sessionId}`);
+	if (!response.ok) throw new Error(`session ${sessionId} returned ${response.status}`);
+	return Number((await response.json()).completedTurnCount ?? 0);
+}
+
+async function finishSourceSessionTurn(
+	page: Page,
+	sessionId: string,
+	prompt: string,
+): Promise<{ audioContexts: number; badgeCalls: number }> {
+	// A visible visibilitychange clears the module's prior favicon-badge latch,
+	// allowing every turn in this serial journey to prove badge preservation.
+	await page.evaluate(() => {
+		document.dispatchEvent(new Event("visibilitychange"));
+		(window as any).__finishSoundAudioContexts = 0;
+		(window as any).__finishSoundBadgeCalls = 0;
+	});
+	const turnsBefore = await completedTurnCount(sessionId);
+	const editor = page.locator("message-editor textarea").first();
+	await expect(editor).toBeVisible({ timeout: 15_000 });
+	await editor.fill(prompt);
+	await editor.press("Enter");
+
+	await expect.poll(() => completedTurnCount(sessionId), {
+		timeout: 30_000,
+		message: `source session should finish turn for ${prompt}`,
+	}).toBeGreaterThan(turnsBefore);
+	await expect.poll(
+		() => page.evaluate(() => Number((window as any).__finishSoundBadgeCalls ?? 0)),
+		{ timeout: 15_000, message: "favicon/PWA badge should remain independent of audio" },
+	).toBeGreaterThan(0);
+	await page.waitForTimeout(100);
+	return page.evaluate(() => ({
+		audioContexts: Number((window as any).__finishSoundAudioContexts ?? 0),
+		badgeCalls: Number((window as any).__finishSoundBadgeCalls ?? 0),
+	}));
+}
+
+async function selectProjectSound(page: Page, projectId: string, value: ProjectSoundState): Promise<void> {
+	const select = page.getByTestId("project-play-finish-sound");
+	await expect(select).toBeVisible({ timeout: 15_000 });
+	await expect(select).toBeEnabled({ timeout: 15_000 });
+	const responsePromise = page.waitForResponse(response =>
+		response.request().method() === "PUT"
+		&& response.url().includes(`/api/projects/${projectId}/config`),
+	);
+	await select.selectOption(value);
+	const response = await responsePromise;
+	expect(response.ok()).toBe(true);
+	expect(response.request().postDataJSON()).toEqual({
+		[PROJECT_SOUND_KEY]: value === "inherit" ? null : value === "on" ? "true" : "false",
+	});
+	await expect(select).toHaveValue(value, { timeout: 15_000 });
 }
 
 test.describe("Journey: Project Settings", () => {
@@ -118,6 +245,105 @@ test.describe("Journey: Project Settings", () => {
 			await expect(page.getByText("v2-settings-proj-gamma").first()).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await deleteProject(projectId);
+		}
+	});
+
+	test("project sound override controls source-session audio while the Bell stays global", async ({ page }) => {
+		test.setTimeout(120_000);
+		const rootPath = uniqueProjectDir();
+		let projectId = "";
+		let sessionId = "";
+		const preferencesResponse = await apiFetch("/api/preferences");
+		expect(preferencesResponse.ok).toBe(true);
+		const originalPreferences = await preferencesResponse.json();
+		const originalGlobal = Object.prototype.hasOwnProperty.call(originalPreferences, "playAgentFinishSound")
+			? originalPreferences.playAgentFinishSound as boolean
+			: undefined;
+
+		try {
+			const globalOn = await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ playAgentFinishSound: true }),
+			});
+			expect(globalOn.ok).toBe(true);
+
+			projectId = (await registerProject({
+				name: `v2-project-sound-${Date.now()}`,
+				rootPath,
+				seedWorkflows: false,
+			})).id;
+			sessionId = await createSession({ projectId, cwd: rootPath });
+			await waitForSessionStatus(sessionId, "idle", 30_000);
+			await installFinishSoundInstrumentation(page);
+			await openApp(page);
+			await navigateToHash(page, `#/settings/${projectId}/general`);
+
+			const soundSelect = page.getByTestId("project-play-finish-sound");
+			await expect(soundSelect).toBeVisible({ timeout: 15_000 });
+			await expect(soundSelect).toHaveValue("inherit");
+			await expect(page.locator('bell-toggle button[title="Mute agent finish beeps"]').first())
+				.toBeVisible({ timeout: 15_000 });
+
+			await selectProjectSound(page, projectId, "off");
+			let raw = await (await apiFetch(`/api/projects/${projectId}/config`)).json();
+			expect(raw[PROJECT_SOUND_KEY]).toBe("false");
+
+			// A hard reload reconstructs client state from the raw project config.
+			await page.reload({ waitUntil: "domcontentloaded" });
+			await expect(page.getByTestId("project-play-finish-sound")).toHaveValue("off", { timeout: 20_000 });
+			await expect(page.locator('bell-toggle button[title="Mute agent finish beeps"]').first())
+				.toBeVisible({ timeout: 15_000 });
+
+			await navigateToHash(page, `#/session/${sessionId}`);
+			const mutedTurn = await finishSourceSessionTurn(page, sessionId, "PROJECT_SOUND_OFF");
+			expect(mutedTurn.audioContexts, "project Off must silence its source session").toBe(0);
+			expect(mutedTurn.badgeCalls, "project Off must not suppress non-audio notification state").toBeGreaterThan(0);
+			await expect(page.locator('bell-toggle button[title="Mute agent finish beeps"]').first())
+				.toBeVisible({ timeout: 15_000 });
+
+			await navigateToHash(page, `#/settings/${projectId}/general`);
+			await expect(page.getByTestId("project-play-finish-sound")).toHaveValue("off", { timeout: 15_000 });
+			const bell = page.locator('bell-toggle button[title="Mute agent finish beeps"]').first();
+			const globalOffResponse = page.waitForResponse(response =>
+				response.request().method() === "PUT" && response.url().endsWith("/api/preferences"),
+			);
+			await bell.click();
+			const bellSave = await globalOffResponse;
+			expect(bellSave.ok()).toBe(true);
+			expect(bellSave.request().postDataJSON()).toEqual({ playAgentFinishSound: false });
+			await expect(page.locator('bell-toggle button[title="Unmute agent finish beeps"]').first())
+				.toBeVisible({ timeout: 15_000 });
+
+			// The explicit project On selection applies to the very next turn even
+			// though the global Bell remains off.
+			await selectProjectSound(page, projectId, "on");
+			raw = await (await apiFetch(`/api/projects/${projectId}/config`)).json();
+			expect(raw[PROJECT_SOUND_KEY]).toBe("true");
+			await navigateToHash(page, `#/session/${sessionId}`);
+			const forcedOnTurn = await finishSourceSessionTurn(page, sessionId, "PROJECT_SOUND_ON");
+			expect(forcedOnTurn.audioContexts, "project On must override global Off").toBeGreaterThan(0);
+			await expect(page.locator('bell-toggle button[title="Unmute agent finish beeps"]').first())
+				.toBeVisible({ timeout: 15_000 });
+
+			// Clearing to Inherit removes the raw key and immediately follows the
+			// still-off global preference for another source-session completion.
+			await navigateToHash(page, `#/settings/${projectId}/general`);
+			await selectProjectSound(page, projectId, "inherit");
+			raw = await (await apiFetch(`/api/projects/${projectId}/config`)).json();
+			expect(raw).not.toHaveProperty(PROJECT_SOUND_KEY);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			const inheritedTurn = await finishSourceSessionTurn(page, sessionId, "PROJECT_SOUND_INHERIT");
+			expect(inheritedTurn.audioContexts, "Inherit must immediately fall back to global Off").toBe(0);
+			await expect(page.locator('bell-toggle button[title="Unmute agent finish beeps"]').first())
+				.toBeVisible({ timeout: 15_000 });
+		} finally {
+			if (sessionId) await deleteSession(sessionId).catch(() => {});
+			if (projectId) await deleteProject(projectId);
+			await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ playAgentFinishSound: originalGlobal ?? null }),
+			}).catch(() => {});
+			try { rmSync(rootPath, { recursive: true, force: true }); } catch { /* best-effort */ }
 		}
 	});
 

@@ -21,6 +21,24 @@
   },
   "v2Native": [
     {
+      "path": "tests2/dom/project-audio-notification-paths.test.ts",
+      "reason": "Deterministic foreground/background notification regressions proving agent-finish audio resolves from the source session project while favicon badges remain independent and non-blocking.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/dom/project-audio-settings.test.ts",
+      "reason": "DOM coverage for the per-project Inherit/On/Off settings control, immediate optimistic application, stale-read fencing, serialized failures, navigation retention, and raw null clearing.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
       "path": "tests2/core/server-boot-worktree-ordering.test.ts",
       "reason": "Deterministic deferred regression proving the post-listen orphan-worktree sweep settles before pool initialization can expose claimable entries, while unrelated request work remains responsive.",
       "execution": {
