@@ -18,6 +18,23 @@ function serializeHtmlDocument(document: Document): string {
 }
 
 /**
+ * A marker is only an idempotence hint: authored HTML may legitimately use the
+ * same attribute. Verify that the marked element is the canonical bridge,
+ * including executable script attributes, before skipping injection.
+ */
+function isCanonicalMarkedBridge(candidate: HTMLScriptElement, canonical: HTMLScriptElement): boolean {
+	if (candidate.textContent !== canonical.textContent) return false;
+
+	const candidateAttributes = Array.from(candidate.attributes)
+		.filter(attribute => attribute.name !== INLINE_HTML_THEME_BRIDGE_ATTRIBUTE);
+	if (candidateAttributes.length !== canonical.attributes.length) return false;
+
+	return candidateAttributes.every(attribute =>
+		canonical.getAttribute(attribute.name) === attribute.value,
+	);
+}
+
+/**
  * Prepare authored HTML for an inline `srcdoc` preview.
  *
  * DOMParser provides the insertion point rather than a raw closing-tag search,
@@ -32,11 +49,16 @@ export function prepareInlineHtml(content: string): string {
 
 		const parser = new DOMParser();
 		const document = parser.parseFromString(content, "text/html");
-		if (document.querySelector(`script[${INLINE_HTML_THEME_BRIDGE_ATTRIBUTE}]`)) return content;
-
 		const bridgeDocument = parser.parseFromString(PREVIEW_THEME_BRIDGE, "text/html");
-		const canonicalBridge = bridgeDocument.querySelector("script");
+		const canonicalBridge = bridgeDocument.querySelector<HTMLScriptElement>("script");
 		if (!canonicalBridge || !document.head) return content;
+
+		const markedBridges = document.querySelectorAll<HTMLScriptElement>(
+			`script[${INLINE_HTML_THEME_BRIDGE_ATTRIBUTE}]`,
+		);
+		if (Array.from(markedBridges).some(candidate => isCanonicalMarkedBridge(candidate, canonicalBridge))) {
+			return content;
+		}
 
 		const bridge = document.importNode(canonicalBridge, true);
 		bridge.setAttribute(INLINE_HTML_THEME_BRIDGE_ATTRIBUTE, "");
