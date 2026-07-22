@@ -822,7 +822,8 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		const manager = makeManager();
 		const systemAuthor = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
 		const agentAuthor = { kind: "agent", id: "session:caller", label: "Caller" } as const;
-		const text = "part one\npart two";
+		const textBlocks = ["part one", "part two"] as const;
+		const text = textBlocks.join("");
 		const { session } = putSession(manager, {
 			pendingPromptAuthors: [
 				{ promptId: "p1", dispatchedAt: 1, modelText: text, source: "system", author: systemAuthor },
@@ -832,7 +833,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		const message = (id: string) => ({
 			role: "user",
 			id,
-			content: [{ type: "text", text: "part one" }, { type: "text", text: "part two" }],
+			content: textBlocks.map((part) => ({ type: "text", text: part })),
 		});
 
 		const update1: any = manager.prepareVisibleAgentEvent(session, { type: "message_update", message: message("m1") });
