@@ -417,6 +417,123 @@ describe("MessageIndexSource", () => {
 		}
 	});
 
+	test("streams attachment-heavy rows past the byte cap with trusted author inference", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "msg-source-byte-cap-"));
+		const file = path.join(dir, "session.jsonl");
+		const transcript = [
+			{
+				id: "oversized-user",
+				message: {
+					role: "user",
+					content: [
+						{ type: "text", text: "OversizedAttachmentSearchToken" },
+						{ type: "image", data: "a".repeat(512), mimeType: "image/png" },
+					],
+					attachments: [{ type: "image", content: "b".repeat(512) }],
+					timestamp: 1_700_000_100_000,
+					author: { kind: "system", id: "system:forged", label: "Forged" },
+				},
+			},
+			{
+				id: "following-assistant",
+				message: {
+					role: "assistant",
+					content: "FollowingAssistantSearchToken",
+					timestamp: 1_700_000_200_000,
+				},
+			},
+		].map((row) => JSON.stringify(row)).join("\n") + "\n";
+		fs.writeFileSync(file, transcript, "utf-8");
+		const readBindings = vi.fn((_sessionId: string) => []);
+
+		try {
+			const messages = await collect(new MessageIndexSource(readBindings, {
+				maxRetainedBytes: 128,
+				maxRetainedRows: 100,
+			}), makeCtx({
+				sessions: [{
+					id: "oversized-session",
+					title: "Oversized chat",
+					cwd: "/tmp",
+					agentSessionFile: file,
+					createdAt: 1,
+					lastActivity: 2,
+				}],
+			}));
+
+			expect(readBindings, "oversized transcripts must bypass full-sequence sidecar matching").not.toHaveBeenCalled();
+			expect(messages.map(({ id, text, timestamp }) => ({ id, text, timestamp }))).toEqual([
+				{
+					id: "message:oversized-session:0:text:0",
+					text: "OversizedAttachmentSearchToken",
+					timestamp: 1_700_000_100_000,
+				},
+				{
+					id: "message:oversized-session:1:text:0",
+					text: "FollowingAssistantSearchToken",
+					timestamp: 1_700_000_200_000,
+				},
+			]);
+			expect(messages[0].metadata).toMatchObject({
+				sessionId: "oversized-session",
+				msgIdx: 0,
+				sessionTitle: "Oversized chat",
+				authorKind: "user",
+				authorId: "user:local",
+				authorLabel: "User",
+			});
+			expect(messages[1].metadata).toMatchObject({
+				authorKind: "agent",
+				authorId: "session:oversized-session",
+				authorLabel: "Oversized chat",
+			});
+			expect(messages.some((message) => message.metadata.authorId === "system:forged")).toBe(false);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("switches the complete session to streaming inference past the row cap", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "msg-source-row-cap-"));
+		const file = path.join(dir, "session.jsonl");
+		fs.writeFileSync(file, [
+			JSON.stringify({ id: "first", message: { role: "user", content: "FirstRowCapToken" } }),
+			JSON.stringify({
+				id: "second",
+				message: {
+					role: "user",
+					content: "SecondRowCapToken",
+					author: { kind: "agent", id: "session:forged", label: "Forged" },
+				},
+			}),
+		].join("\n") + "\n", "utf-8");
+		const readBindings = vi.fn((_sessionId: string) => []);
+
+		try {
+			const messages = await collect(new MessageIndexSource(readBindings, {
+				maxRetainedBytes: 64 * 1024,
+				maxRetainedRows: 1,
+			}), makeCtx({
+				sessions: [{
+					id: "row-cap-session",
+					title: "Row cap chat",
+					cwd: "/tmp",
+					agentSessionFile: file,
+					createdAt: 1,
+					lastActivity: 2,
+				}],
+			}));
+
+			expect(readBindings, "row overflow must not partially apply sidecar attribution").not.toHaveBeenCalled();
+			expect(messages.map((message) => message.text)).toEqual(["FirstRowCapToken", "SecondRowCapToken"]);
+			expect(messages.map((message) => message.metadata.msgIdx)).toEqual([0, 1]);
+			expect(messages.map((message) => message.metadata.authorKind)).toEqual(["user", "user"]);
+			expect(messages.map((message) => message.metadata.authorId)).toEqual(["user:local", "user:local"]);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test("denormalizes goal-prefixed session title metadata for message result round-trip", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "msg-title-source-"));
 		const file = path.join(dir, "session.jsonl");

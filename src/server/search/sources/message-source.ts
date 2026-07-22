@@ -17,6 +17,7 @@
 
 import * as fs from "node:fs";
 import * as readline from "node:readline";
+import { isMessageAuthor, type MessageAuthor } from "../../../shared/message-author.js";
 import type { IndexSource, IndexSourceContext, Indexable } from "../types.js";
 import { extractForIndexing } from "../content-policy.js";
 import { contentHashOf } from "./hash.js";
@@ -26,13 +27,90 @@ import {
 	mergeAuthorSidecarIntoMessages,
 	type PromptAuthorBinding,
 } from "../../agent/author-sidecar.js";
+import {
+	normalizeVisibleMessage,
+	type NormalizeVisibleMessageContext,
+} from "../../agent/message-author.js";
+
+const DEFAULT_MAX_RETAINED_ROWS = 10_000;
+const DEFAULT_MAX_RETAINED_BYTES = 8 * 1024 * 1024;
+
+export interface MessageIndexSourceOptions {
+	/** Raw transcript rows retained solely for full-sequence sidecar matching. */
+	maxRetainedRows?: number;
+	/** UTF-8 transcript bytes retained solely for full-sequence sidecar matching. */
+	maxRetainedBytes?: number;
+}
+
+interface ParsedRow {
+	msgIdx: number;
+	message: Record<string, unknown>;
+	timestamp: number;
+}
+
+function positiveInteger(value: number | undefined, fallback: number): number {
+	return typeof value === "number" && Number.isFinite(value) && value > 0
+		? Math.floor(value)
+		: fallback;
+}
+
+function parseTranscriptLine(
+	line: string,
+	msgIdx: number,
+	fallbackTimestamp: number,
+): ParsedRow | undefined {
+	const trimmed = line.trim();
+	if (!trimmed) return undefined;
+	let entry: unknown;
+	try {
+		entry = JSON.parse(trimmed);
+	} catch {
+		return undefined;
+	}
+	if (!entry || typeof entry !== "object" || Array.isArray(entry)) return undefined;
+
+	// Agent session files wrap the actual message in `{ message: {...} }`
+	// for tool events; fall back to the envelope itself otherwise.
+	const envelope = entry as Record<string, unknown>;
+	const wrappedMessage = envelope.message;
+	const rawMessage = wrappedMessage && typeof wrappedMessage === "object" && !Array.isArray(wrappedMessage)
+		? wrappedMessage as Record<string, unknown>
+		: envelope;
+
+	// Timestamp precedence: per-message timestamp if present, else envelope
+	// timestamp, else session lastActivity.
+	const rawTs = rawMessage.timestamp ?? envelope.timestamp;
+	const timestamp =
+		typeof rawTs === "number"
+			? rawTs
+			: typeof rawTs === "string"
+				? Date.parse(rawTs) || fallbackTimestamp
+				: fallbackTimestamp;
+	// Pi/transcript metadata is not a trusted author boundary.
+	const { author: _untrustedAuthor, ...message } = rawMessage;
+	return {
+		msgIdx,
+		timestamp,
+		message: {
+			...message,
+			...(typeof envelope.id === "string" ? { entryId: envelope.id } : {}),
+			...(rawTs !== undefined ? { timestamp: rawTs } : {}),
+		},
+	};
+}
 
 export class MessageIndexSource implements IndexSource {
 	readonly sourceId = "messages" as const;
+	private readonly maxRetainedRows: number;
+	private readonly maxRetainedBytes: number;
 
 	constructor(
 		private readonly readAuthorBindings: (sessionId: string) => PromptAuthorBinding[] = readAuthorSidecar,
-	) {}
+		options: MessageIndexSourceOptions = {},
+	) {
+		this.maxRetainedRows = positiveInteger(options.maxRetainedRows, DEFAULT_MAX_RETAINED_ROWS);
+		this.maxRetainedBytes = positiveInteger(options.maxRetainedBytes, DEFAULT_MAX_RETAINED_BYTES);
+	}
 
 	async *iterate(ctx: IndexSourceContext): AsyncIterable<Indexable> {
 		const sessions = ctx.sessionStore.getAll();
@@ -69,88 +147,31 @@ export class MessageIndexSource implements IndexSource {
 				input: stream,
 				crlfDelay: Infinity,
 			});
-
-			interface ParsedRow {
-				msgIdx: number;
-				message: Record<string, unknown>;
-				timestamp: number;
-			}
-			const parsedRows: ParsedRow[] = [];
-			let msgIdx = 0;
-			try {
-				for await (const line of rl) {
-					const trimmed = line.trim();
-					if (!trimmed) continue;
-					let entry: unknown;
-					try {
-						entry = JSON.parse(trimmed);
-					} catch {
-						continue;
-					}
-					// Agent session files wrap the actual message in `{ message: {...} }`
-					// for tool events; fall back to the envelope itself otherwise.
-					const envelope = entry as Record<string, unknown>;
-					const rawMessage = (envelope.message as Record<string, unknown> | undefined) ?? envelope;
-
-					// Timestamp precedence: per-message timestamp if present, else
-					// envelope timestamp, else session lastActivity.
-					const rawTs = rawMessage.timestamp ?? envelope.timestamp;
-					const timestamp =
-						typeof rawTs === "number"
-							? rawTs
-							: typeof rawTs === "string"
-								? Date.parse(rawTs) || (session.lastActivity ?? 0)
-								: session.lastActivity ?? 0;
-					const { author: _untrustedAuthor, ...message } = rawMessage;
-					parsedRows.push({
-						msgIdx: msgIdx++,
-						timestamp,
-						message: {
-							...message,
-							...(typeof envelope.id === "string" ? { entryId: envelope.id } : {}),
-							...(rawTs !== undefined ? { timestamp: rawTs } : {}),
-						},
-					});
-				}
-			} catch {
-				// Unreadable mid-stream — index the complete prefix already read.
-			} finally {
-				rl.close();
-				try { stream.close(); } catch { /* ignore */ }
-			}
-
-			// Fold the host-side sidecar once per session, then normalize the full
-			// ordered sequence so duplicate prompt and tool-result attribution is stable.
-			const authoredMessages = mergeAuthorSidecarIntoMessages(
-				this.readAuthorBindings(session.id),
-				parsedRows.map((row) => row.message),
-				{
-					session,
-					agentDeps: {
-						getStaff: (id: string) => typeof ctx.staffStore.get === "function" ? ctx.staffStore.get(id) : undefined,
-					},
+			const normalizationContext: NormalizeVisibleMessageContext = {
+				session,
+				agentDeps: {
+					getStaff: (id: string) => typeof ctx.staffStore.get === "function" ? ctx.staffStore.get(id) : undefined,
 				},
-			);
-			for (let rowIndex = 0; rowIndex < parsedRows.length; rowIndex++) {
-				const { msgIdx: index, timestamp } = parsedRows[rowIndex];
-				const msg = authoredMessages[rowIndex];
+			};
+			const toIndexables = (row: ParsedRow, msg: Record<string, unknown>): Indexable[] => {
+				const output: Indexable[] = [];
 				const hit = extractForIndexing(msg);
 				for (const entry of hit.entries) {
-					const id = `message:${session.id}:${index}:${entry.blockKey}`;
+					const id = `message:${session.id}:${row.msgIdx}:${entry.blockKey}`;
 					const metadata: Record<string, string | number | boolean> = {
 						sessionId: session.id,
-						msgIdx: index,
+						msgIdx: row.msgIdx,
 						blockKey: entry.blockKey,
 						...(session.goalId ? { goalId: session.goalId } : {}),
 					};
 					if (goalTitle) metadata.goalTitle = goalTitle;
 					if (displayTitle) metadata.sessionTitle = displayTitle;
-					if (msg.author) {
+					if (isMessageAuthor(msg.author)) {
 						metadata.authorKind = msg.author.kind;
 						metadata.authorId = msg.author.id;
 						metadata.authorLabel = msg.author.label;
 					}
-					const indexable: Indexable = {
+					output.push({
 						id,
 						sourceId: "messages",
 						text: entry.text,
@@ -159,15 +180,97 @@ export class MessageIndexSource implements IndexSource {
 							`${entry.text}\n${displayTitle}`,
 							entry.weight,
 							entry.role,
-							timestamp,
+							row.timestamp,
 						),
-						timestamp,
+						timestamp: row.timestamp,
 						projectId: session.projectId ?? ctx.projectId,
 						archived: session.archived === true,
 						weight: entry.weight,
 						role: entry.role,
 						display: { title: displayTitle },
-					};
+					});
+				}
+				return output;
+			};
+
+			let precedingAuthor: MessageAuthor | undefined;
+			const inferAndIndex = (row: ParsedRow): Indexable[] => {
+				const msg = normalizeVisibleMessage(row.message, {
+					...normalizationContext,
+					existingAuthorIsTrusted: false,
+					precedingAuthor,
+				});
+				if (isMessageAuthor(msg.author)) precedingAuthor = msg.author;
+				return toIndexables(row, msg);
+			};
+
+			let streamingInference = false;
+			try {
+				// A size preflight keeps even the first oversized row out of the
+				// full-sequence author-matching buffer. Races are covered again below.
+				streamingInference = fs.statSync(filePath).size > this.maxRetainedBytes;
+			} catch {
+				// Preserve the existing best-effort stream behavior when stat fails.
+			}
+			let parsedRows: ParsedRow[] = [];
+			let retainedBytes = 0;
+			let msgIdx = 0;
+			try {
+				for await (let line of rl) {
+					const lineBytes = Buffer.byteLength(line, "utf8");
+					let row = parseTranscriptLine(line, msgIdx, session.lastActivity ?? 0);
+					// Drop the raw JSON string before yielding. In streaming mode only
+					// compact search output, never attachment/image blobs, survives a yield.
+					line = "";
+					if (!row) continue;
+					msgIdx++;
+
+					if (!streamingInference && (
+						parsedRows.length >= this.maxRetainedRows
+						|| retainedBytes + lineBytes > this.maxRetainedBytes
+					)) {
+						streamingInference = true;
+						// Once either cap is crossed, deliberately avoid all sidecar
+						// sequence matching for this session. Convert the bounded prefix and
+						// current row to compact output before the first yield, then release
+						// their raw message objects.
+						const pending: Indexable[] = [];
+						for (const buffered of parsedRows) pending.push(...inferAndIndex(buffered));
+						parsedRows = [];
+						retainedBytes = 0;
+						pending.push(...inferAndIndex(row));
+						row = undefined;
+						for (const indexable of pending) yield indexable;
+						continue;
+					}
+
+					if (streamingInference) {
+						const indexables = inferAndIndex(row);
+						row = undefined;
+						for (const indexable of indexables) yield indexable;
+						continue;
+					}
+
+					parsedRows.push(row);
+					retainedBytes += lineBytes;
+				}
+			} catch {
+				// Unreadable mid-stream — index the complete prefix already read.
+			} finally {
+				rl.close();
+				try { stream.close(); } catch { /* ignore */ }
+			}
+
+			if (streamingInference) continue;
+
+			// Bounded histories retain exact id/timestamp/FIFO sidecar correlation.
+			const authoredMessages = mergeAuthorSidecarIntoMessages(
+				this.readAuthorBindings(session.id),
+				parsedRows.map((row) => row.message),
+				normalizationContext,
+			);
+			for (let rowIndex = 0; rowIndex < parsedRows.length; rowIndex++) {
+				for (const indexable of toIndexables(parsedRows[rowIndex], authoredMessages[rowIndex])) {
 					yield indexable;
 				}
 			}
