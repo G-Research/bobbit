@@ -214,6 +214,81 @@ describe("sanitizeTranscriptContent", () => {
 		);
 	});
 
+	it("removes only embedded retainedTail orphans and preserves the owning compaction structure", () => {
+		const usage = {
+			input: 13,
+			output: 8,
+			reasoning: 5,
+			totalTokens: 26,
+			cost: { input: 0.13, output: 0.24, total: 0.37 },
+		};
+		const orphanResult = {
+			role: "toolResult",
+			toolCallId: "missing-call",
+			toolName: "read",
+			content: "poison",
+			usage: { output: 1 },
+		};
+		const validAssistant = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "valid-call", name: "read", arguments: { path: "kept" } }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "fixture",
+			usage,
+			stopReason: "toolUse",
+			timestamp: 2,
+			additiveMessageField: { preserved: true },
+		};
+		const validResult = {
+			role: "toolResult",
+			toolCallId: "valid-call",
+			toolName: "read",
+			content: "kept result",
+			usage: { input: 2, output: 3 },
+			additiveResultField: ["preserve", 1],
+		};
+		const compaction = {
+			type: "compaction",
+			id: "compact",
+			parentId: "root",
+			timestamp: "2026-01-01T00:00:02.000Z",
+			summary: "summary",
+			firstKeptEntryId: "root",
+			tokensBefore: 100,
+			retainedTail: [orphanResult, validAssistant, validResult],
+			usage,
+			details: { readFiles: ["kept"], additiveProviderData: { retained: true } },
+			futureAccounting: { retryAttempts: 2 },
+			additiveCompactionField: { nested: [1, { preserved: true }] },
+		};
+		const sessionLine = `  ${JSON.stringify({ type: "session", id: "session", version: 3 })}  `;
+		const rootLine = JSON.stringify({
+			type: "message", id: "root", parentId: null, timestamp: "2026-01-01T00:00:00.000Z",
+			message: { role: "assistant", content: [{ type: "text", text: "before compaction" }] },
+		});
+		const content = [sessionLine, rootLine, ` ${JSON.stringify(compaction)} `].join("\r\n") + "\r\n";
+
+		const repaired = sanitizeTranscriptContent(content);
+		assert.equal(repaired.changed, true);
+		assert.equal(repaired.rewritten, 1, "the embedded removal contributes to the repair count");
+		assert.ok(repaired.content.endsWith("\r\n"), "CRLF trailing-newline shape is preserved");
+		const repairedLines = repaired.content.split("\n");
+		assert.equal(repairedLines[0], sessionLine + "\r", "unrelated session line remains byte-identical");
+		assert.equal(repairedLines[1], rootLine + "\r", "unrelated transcript line remains byte-identical");
+		assert.equal(repairedLines[2].endsWith("\r"), true, "rewritten compaction retains its CR");
+		assert.deepEqual(JSON.parse(repairedLines[2]), {
+			...compaction,
+			retainedTail: [validAssistant, validResult],
+		});
+
+		assert.deepEqual(
+			sanitizeTranscriptContent(repaired.content),
+			{ content: repaired.content, changed: false, rewritten: 0 },
+			"embedded orphan repair is idempotent",
+		);
+	});
+
 	it("uses Pi 0.81 leaf targetId rather than sanitizing the abandoned branch", () => {
 		const entries = [
 			JSON.stringify({

@@ -117,8 +117,10 @@ interface ParsedTranscriptLine {
 }
 
 interface ProjectedTranscriptRecord {
-	/** Null for messages materialized inside a Pi 0.81 `retainedTail`. */
-	lineIndex: number | null;
+	/** JSONL line containing this record (and owning it when retainedTailIndex is set). */
+	lineIndex: number;
+	/** Position inside the owning Pi 0.81 compaction's `retainedTail`, when embedded. */
+	retainedTailIndex?: number;
 	entry: any;
 }
 
@@ -189,11 +191,11 @@ function projectedContextBranch(branch: ParsedTranscriptLine[]): ProjectedTransc
 	if (Array.isArray(compaction.retainedTail)) {
 		// Pi 0.81 harness compactions treat retainedTail as a self-contained
 		// checkpoint, even when a compatibility firstKeptEntryId is also present.
-		// Model those messages for tool-call ordering without rewriting the
-		// compaction line: it may carry additive usage/details fields which the
-		// sanitizer must preserve byte-for-byte.
-		const retainedTail = compaction.retainedTail.map((message: unknown) => ({
-			lineIndex: null,
+		// Retain the owning line and embedded index so an orphan can be filtered
+		// without discarding any other message or additive compaction field.
+		const retainedTail = compaction.retainedTail.map((message: unknown, retainedTailIndex: number) => ({
+			lineIndex: branch[compactionIndex].lineIndex,
+			retainedTailIndex,
 			entry: { type: "message", message },
 		}));
 		return [...retainedTail, ...branch.slice(compactionIndex + 1)];
@@ -243,8 +245,16 @@ function assistantToolCallIds(content: unknown): Set<string> {
 	return ids;
 }
 
-function orphanToolResultLineIndexes(branch: ParsedTranscriptLine[]): Set<number> {
-	const orphanLines = new Set<number>();
+interface OrphanToolResultLocations {
+	lineIndexes: Set<number>;
+	retainedTailIndexesByLine: Map<number, Set<number>>;
+}
+
+function orphanToolResultLocations(branch: ParsedTranscriptLine[]): OrphanToolResultLocations {
+	const locations: OrphanToolResultLocations = {
+		lineIndexes: new Set<number>(),
+		retainedTailIndexesByLine: new Map<number, Set<number>>(),
+	};
 	let pendingToolCallIds: Set<string> | null = null;
 
 	for (const record of projectedContextBranch(branch)) {
@@ -274,10 +284,16 @@ function orphanToolResultLineIndexes(branch: ParsedTranscriptLine[]): Set<number
 		if (isMessageLevelToolResultRole(message.role)) {
 			const toolCallId = persistedToolUseId(message);
 			if (!toolCallId || !pendingToolCallIds?.has(toolCallId)) {
-				// retainedTail messages are embedded in the compaction record. They
-				// participate in Pi's context ordering, but are not independently
-				// removable JSONL records.
-				if (record.lineIndex !== null) orphanLines.add(record.lineIndex);
+				if (record.retainedTailIndex === undefined) {
+					locations.lineIndexes.add(record.lineIndex);
+				} else {
+					let indexes = locations.retainedTailIndexesByLine.get(record.lineIndex);
+					if (!indexes) {
+						indexes = new Set<number>();
+						locations.retainedTailIndexesByLine.set(record.lineIndex, indexes);
+					}
+					indexes.add(record.retainedTailIndex);
+				}
 			} else {
 				// One result settles one call. Repeated results for the same id are
 				// structurally invalid even when the assistant originally called it.
@@ -290,7 +306,7 @@ function orphanToolResultLineIndexes(branch: ParsedTranscriptLine[]): Set<number
 		pendingToolCallIds = null;
 	}
 
-	return orphanLines;
+	return locations;
 }
 
 /**
@@ -305,8 +321,15 @@ function repairOrphanToolResults(content: string): SanitizeResult {
 	const lines = content.split("\n");
 	const parsed = parseTranscriptLines(lines);
 	const activeBranch = activeTranscriptBranch(parsed);
-	const removedLineIndexes = orphanToolResultLineIndexes(activeBranch);
-	if (removedLineIndexes.size === 0) return { content, changed: false, rewritten: 0 };
+	const orphanLocations = orphanToolResultLocations(activeBranch);
+	const removedLineIndexes = orphanLocations.lineIndexes;
+	let embeddedRemovalCount = 0;
+	for (const indexes of orphanLocations.retainedTailIndexesByLine.values()) {
+		embeddedRemovalCount += indexes.size;
+	}
+	if (removedLineIndexes.size === 0 && embeddedRemovalCount === 0) {
+		return { content, changed: false, rewritten: 0 };
+	}
 
 	const removedParents = new Map<string, string | null>();
 	for (const record of activeBranch) {
@@ -322,6 +345,15 @@ function repairOrphanToolResults(content: string): SanitizeResult {
 	for (const record of parsed) {
 		if (removedLineIndexes.has(record.lineIndex)) continue;
 		let changed = false;
+
+		const removedRetainedTailIndexes = orphanLocations.retainedTailIndexesByLine.get(record.lineIndex);
+		if (removedRetainedTailIndexes && Array.isArray(record.entry.retainedTail)) {
+			record.entry.retainedTail = record.entry.retainedTail.filter(
+				(_message: unknown, index: number) => !removedRetainedTailIndexes.has(index),
+			);
+			changed = true;
+		}
+
 		let parentId = record.parentId;
 		const visitedParents = new Set<string>();
 		while (parentId && removedParents.has(parentId) && !visitedParents.has(parentId)) {
@@ -359,7 +391,7 @@ function repairOrphanToolResults(content: string): SanitizeResult {
 	return {
 		content: repairedLines.join("\n"),
 		changed: true,
-		rewritten: removedLineIndexes.size,
+		rewritten: removedLineIndexes.size + embeddedRemovalCount,
 	};
 }
 
