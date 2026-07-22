@@ -57,6 +57,15 @@
       }
     },
     {
+      "path": "tests2/browser/e2e/source-vite-inline-html-theme.spec.ts",
+      "reason": "Real Vite development-runtime smoke against an isolated focused-write-agent gateway proving the actual chat WriteRenderer receives parse-time and live same-iframe theme, palette, font, surface, semantic, and chart state from the canonical source bridge without swipe forwarding, compiled dist/ui, or the standalone server-filesystem snapshot path.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/browser/e2e/packaged-inline-html-theme.spec.ts",
       "reason": "Clean-consumer npm tarball smoke proving the packaged CLI serves compiled dist/ui with the canonical bridge bundled, ships canonical src/ui/app.css and referenced UI assets, and renders an inline HTML write whose parse-time and live theme state follows the host without iframe recreation or source-module runtime requests.",
       "execution": {
