@@ -209,39 +209,45 @@ test.describe("Journey: Project Onboarding", () => {
 	});
 
 	test("Browse modal shows directory entries and Up button", async ({ page }) => {
-		// Create a temp dir with a subdirectory so there's something to navigate
+		// Create a temp dir with a subdirectory so there's something to navigate.
 		const parent = uniqueDir("browse-entries");
-		const child = join(parent, "child-dir");
-		mkdirSync(child, { recursive: true });
+		mkdirSync(join(parent, "child-dir"), { recursive: true });
 
-		await openApp(page);
-		await page.evaluate(() => { window.location.hash = "#/settings/projects"; });
-		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
+		try {
+			await openApp(page);
+			await page.evaluate(() => { window.location.hash = "#/settings/projects"; });
+			await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
 
-		const addBtn = page.getByRole("button", { name: /add project/i }).first();
-		await expect(addBtn).toBeVisible({ timeout: 15_000 });
-		await addBtn.click();
-		await expect(page.locator(ADD_PROJECT.dialog)).toBeVisible({ timeout: 15_000 });
+			const addBtn = page.getByRole("button", { name: /add project/i }).first();
+			await expect(addBtn).toBeVisible({ timeout: 15_000 });
+			await addBtn.click();
+			const dialog = page.locator(ADD_PROJECT.dialog);
+			await expect(dialog).toBeVisible({ timeout: 15_000 });
 
-		// Seed the picker with the parent path so the browse modal opens there
-		await page.locator(ADD_PROJECT.pickerInput).fill(parent);
-		await page.locator(ADD_PROJECT.pickerBrowse).click();
-		const modal = page.locator(ADD_PROJECT.browseDialog);
-		await expect(modal).toBeVisible({ timeout: 15_000 });
+			// Seed the picker with the parent path so the browse modal opens there.
+			await dialog.locator(ADD_PROJECT.pickerInput).fill(parent);
+			await dialog.locator(ADD_PROJECT.pickerBrowse).click();
+			const modal = page.locator(ADD_PROJECT.browseDialog);
+			await expect(modal).toBeVisible({ timeout: 15_000 });
 
-		// Wait for entries to load — browse-list or browse-entry should appear
-		const browseList = modal.locator(ADD_PROJECT.browseList);
-		const browseEntry = modal.locator(ADD_PROJECT.browseEntry);
-		const listOrEntry = await browseList.isVisible({ timeout: 15_000 }).catch(() => false)
-			|| await browseEntry.first().isVisible({ timeout: 15_000 }).catch(() => false);
-		expect(listOrEntry, "browse modal should show a directory list or entries").toBe(true);
+			// The list shell renders before its request settles. Wait for our exact
+			// seeded entry and enabled Up action so close cannot race a re-render.
+			const browseList = modal.locator(ADD_PROJECT.browseList);
+			await expect(browseList).toBeVisible({ timeout: 15_000 });
+			await expect(
+				browseList.locator(ADD_PROJECT.browseEntry).filter({ hasText: "child-dir" }),
+			).toBeVisible({ timeout: 15_000 });
+			const upButton = modal.locator(ADD_PROJECT.browseUp);
+			await expect(upButton).toBeVisible({ timeout: 15_000 });
+			await expect(upButton).toBeEnabled({ timeout: 15_000 });
 
-		// Up button should exist (for navigating to parent directory)
-		await expect(modal.locator(ADD_PROJECT.browseUp)).toBeVisible({ timeout: 15_000 });
-
-		// Close with Escape
-		await page.keyboard.press("Escape");
-		await expect(modal).toHaveCount(0, { timeout: 15_000 });
+			// Use the modal-scoped action; Escape behavior is covered independently.
+			await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+			await expect(modal).toHaveCount(0, { timeout: 15_000 });
+			await expect(dialog).toBeVisible();
+		} finally {
+			try { rmSync(parent, { recursive: true, force: true }); } catch { /* best-effort */ }
+		}
 	});
 
 	// Ported from add-project-preflight.spec.ts (audit: project-onboarding GAP):
