@@ -1,5 +1,32 @@
 import { randomUUID } from "node:crypto";
+import { isMessageAuthor, type MessageAuthor } from "../../shared/message-author.js";
+import { isPromptSource, type PromptSource } from "../../shared/prompt-source.js";
 import type { QueuedMessage } from "../ws/protocol.js";
+
+interface PromptQueueEnqueueOptions {
+	images?: Array<{ type: "image"; data: string; mimeType: string }>;
+	attachments?: unknown[];
+	isSteered?: boolean;
+	suppressTitleGen?: boolean;
+	source?: PromptSource;
+	author?: MessageAuthor;
+}
+
+function normalizeQueuedMessage(message: QueuedMessage): QueuedMessage {
+	const normalized = { ...message };
+	if (normalized.author !== undefined && !isMessageAuthor(normalized.author)) {
+		delete normalized.author;
+	}
+	if (normalized.source !== undefined && !isPromptSource(normalized.source)) {
+		delete normalized.source;
+	}
+	// Older partial records may carry the accountable author without source.
+	// Recover the coarser source rather than defaulting an agent/system row to user.
+	if (normalized.source === undefined && isMessageAuthor(normalized.author)) {
+		normalized.source = normalized.author.kind;
+	}
+	return normalized;
+}
 
 /**
  * Server-side prompt queue for a single session.
@@ -11,17 +38,12 @@ export class PromptQueue {
 	/** Create a queue, optionally restoring from persisted data. */
 	constructor(initial?: QueuedMessage[]) {
 		if (initial) {
-			this.queue = [...initial];
+			this.queue = initial.map(normalizeQueuedMessage);
 		}
 	}
 
 	/** Add a message to the end of the queue. Returns the queued message. */
-	enqueue(text: string, opts?: {
-		images?: Array<{ type: "image"; data: string; mimeType: string }>;
-		attachments?: unknown[];
-		isSteered?: boolean;
-		suppressTitleGen?: boolean;
-	}): QueuedMessage {
+	enqueue(text: string, opts?: PromptQueueEnqueueOptions): QueuedMessage {
 		const msg: QueuedMessage = {
 			id: randomUUID(),
 			text,
@@ -31,6 +53,8 @@ export class PromptQueue {
 		if (opts?.images?.length) msg.images = opts.images;
 		if (opts?.attachments?.length) msg.attachments = opts.attachments;
 		if (opts?.suppressTitleGen) msg.suppressTitleGen = true;
+		if (opts?.source) msg.source = opts.source;
+		if (opts?.author && isMessageAuthor(opts.author)) msg.author = opts.author;
 
 		this.queue.push(msg);
 		if (msg.isSteered) this.reorder();
@@ -78,11 +102,7 @@ export class PromptQueue {
 	 * (e.g. RPC failure rollback) that need to put a row back at index 0.
 	 * Calls reorder() so the steered group still sorts first.
 	 */
-	enqueueAtFront(text: string, opts?: {
-		images?: Array<{ type: "image"; data: string; mimeType: string }>;
-		attachments?: unknown[];
-		isSteered?: boolean;
-	}): QueuedMessage {
+	enqueueAtFront(text: string, opts?: PromptQueueEnqueueOptions): QueuedMessage {
 		const msg: QueuedMessage = {
 			id: randomUUID(),
 			text,
@@ -91,6 +111,9 @@ export class PromptQueue {
 		};
 		if (opts?.images?.length) msg.images = opts.images;
 		if (opts?.attachments?.length) msg.attachments = opts.attachments;
+		if (opts?.suppressTitleGen) msg.suppressTitleGen = true;
+		if (opts?.source) msg.source = opts.source;
+		if (opts?.author && isMessageAuthor(opts.author)) msg.author = opts.author;
 		this.queue.unshift(msg);
 		this.reorder();
 		return msg;

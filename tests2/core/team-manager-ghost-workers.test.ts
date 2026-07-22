@@ -96,6 +96,12 @@ function createMockSessionManager(goals = new Map<string, any>()): any {
 			return session;
 		}),
 		getSession: (id: string) => sessions.get(id),
+		resolveSessionAgentAuthor: (id: string) => {
+			const session = sessions.get(id);
+			return session
+				? { kind: "agent" as const, id: `session:${id}`, label: session.title || "Agent" }
+				: undefined;
+		},
 		setTitle: (id: string, title: string) => {
 			const session = sessions.get(id);
 			if (session) session.title = title;
@@ -136,11 +142,17 @@ function createMockRoleStore() {
 }
 
 function createConfig(overrides: Record<string, any> = {}) {
+	const orchestrationCore = {
+		registerChild: vi.fn((_child: any) => {}),
+		forgetChild: vi.fn((_sessionId: string) => {}),
+		...(overrides.orchestrationCore ?? {}),
+	};
 	return {
 		roleStore: createMockRoleStore(),
 		colorStore: { get: () => undefined, set: () => {}, remove: () => {}, getAll: () => ({}) },
 		taskManager: { getTasksByGoal: () => [], getTasksForSession: () => [], createTask: (_goalId: string, task: any) => task, getTask: () => undefined, updateTask: () => true, deleteTask: () => true },
 		...overrides,
+		orchestrationCore,
 	};
 }
 

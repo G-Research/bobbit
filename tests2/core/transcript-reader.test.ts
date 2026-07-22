@@ -6,6 +6,7 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
 	readTranscript,
+	readOrphanedBeforeCompaction,
 	parseJsonl,
 	resolveOffset,
 	TranscriptReaderError,
@@ -28,7 +29,7 @@ const sample = makeJsonl([
 	{ role: "user", content: "final" },
 ]);
 
-const reader = (s: string) => ({ readContent: async () => s });
+const memoryTranscript = (content: string) => ({ readContent: async () => content });
 
 describe("transcript-reader / parseJsonl", () => {
 	it("skips blank and malformed lines", () => {
@@ -76,7 +77,7 @@ describe("transcript-reader / resolveOffset", () => {
 
 describe("transcript-reader / readTranscript", () => {
 	it("default offset/limit returns first 20", async () => {
-		const env = await readTranscript({}, reader(sample));
+		const env = await readTranscript({}, memoryTranscript(sample));
 		assert.equal(env.total, 7);
 		assert.equal(env.returned, 7);
 		assert.equal(env.offsetStart, 0);
@@ -84,27 +85,27 @@ describe("transcript-reader / readTranscript", () => {
 	});
 
 	it("positive slicing", async () => {
-		const env = await readTranscript({ offset: 2, limit: 3 }, reader(sample));
+		const env = await readTranscript({ offset: 2, limit: 3 }, memoryTranscript(sample));
 		assert.equal(env.returned, 3);
 		assert.equal(env.offsetStart, 2);
 		assert.equal(env.offsetEnd, 4);
 	});
 
 	it("negative offset (tail)", async () => {
-		const env = await readTranscript({ offset: -2, limit: 2 }, reader(sample));
+		const env = await readTranscript({ offset: -2, limit: 2 }, memoryTranscript(sample));
 		assert.equal(env.returned, 2);
 		assert.equal(env.offsetStart, 5);
 		assert.equal(env.offsetEnd, 6);
 	});
 
 	it("offset = -1 returns last message only", async () => {
-		const env = await readTranscript({ offset: -1, limit: 1 }, reader(sample));
+		const env = await readTranscript({ offset: -1, limit: 1 }, memoryTranscript(sample));
 		assert.equal(env.returned, 1);
 		assert.equal(env.offsetStart, 6);
 	});
 
 	it("out-of-range positive offset returns empty + total", async () => {
-		const env = await readTranscript({ offset: 100, limit: 5 }, reader(sample));
+		const env = await readTranscript({ offset: 100, limit: 5 }, memoryTranscript(sample));
 		assert.equal(env.total, 7);
 		assert.equal(env.returned, 0);
 		assert.equal(env.offsetStart, -1);
@@ -121,7 +122,7 @@ describe("transcript-reader / readTranscript", () => {
 				{ type: "tool_result", content: "y".repeat(500) },
 			] },
 		]);
-		const env = await readTranscript({}, reader(j));
+		const env = await readTranscript({}, memoryTranscript(j));
 		const m = env.messages[0] as any;
 		assert.ok(m.text.length <= 800 + 1, `text length=${m.text.length}`);
 		assert.equal(m.toolUses.length, 1);
@@ -138,7 +139,7 @@ describe("transcript-reader / readTranscript", () => {
 			{ role: "user", ts: "2026-05-04T00:00:01Z", content: [{ type: "tool_result", tool_use_id: "tu-redact", content: secret, is_error: false }] },
 		]);
 
-		const env = await readTranscript({ offset: 1, limit: 1, includeToolResults: false }, reader(j));
+		const env = await readTranscript({ offset: 1, limit: 1, includeToolResults: false }, memoryTranscript(j));
 		assert.equal(JSON.stringify(env).includes(secret), false);
 		const m = env.messages[0] as any;
 		assert.equal(m.index, 1);
@@ -163,7 +164,7 @@ describe("transcript-reader / readTranscript", () => {
 			JSON.stringify({ type: "message", message: { role: "toolResult", toolCallId: "tu-pi", toolName: "bash", isError: false, content: secret } }),
 		].join("\n") + "\n";
 
-		const compact = await readTranscript({ offset: 1, limit: 1, includeToolResults: false }, reader(j));
+		const compact = await readTranscript({ offset: 1, limit: 1, includeToolResults: false }, memoryTranscript(j));
 		assert.equal(JSON.stringify(compact).includes(secret), false);
 		const result = (compact.messages[0] as any).toolResults[0];
 		assert.equal(result.name, "bash");
@@ -171,7 +172,7 @@ describe("transcript-reader / readTranscript", () => {
 		assert.equal(result.omitted, true);
 		assert.equal(result.size.chars, secret.length);
 
-		const verbose = await readTranscript({ offset: 1, limit: 1, verbose: true, includeToolResults: false }, reader(j));
+		const verbose = await readTranscript({ offset: 1, limit: 1, verbose: true, includeToolResults: false }, memoryTranscript(j));
 		assert.equal(JSON.stringify(verbose).includes(secret), false);
 		assert.equal((verbose.messages[0] as any).content[0].contentOmitted, true);
 	});
@@ -194,7 +195,7 @@ describe("transcript-reader / readTranscript", () => {
 			}] },
 		]);
 
-		const compact = await readTranscript({ offset: 1, limit: 1, includeToolResults: false }, reader(j));
+		const compact = await readTranscript({ offset: 1, limit: 1, includeToolResults: false }, memoryTranscript(j));
 		for (const secret of [outputSecret, resultSecret, responseSecret, textSecret]) {
 			assert.equal(JSON.stringify(compact).includes(secret), false);
 		}
@@ -207,7 +208,7 @@ describe("transcript-reader / readTranscript", () => {
 		assert.equal(result.size.chars, outputSecret.length);
 		assert.equal(result.size.lines, 2);
 
-		const verbose = await readTranscript({ offset: 1, limit: 1, verbose: true, includeToolResults: false }, reader(j));
+		const verbose = await readTranscript({ offset: 1, limit: 1, verbose: true, includeToolResults: false }, memoryTranscript(j));
 		for (const secret of [outputSecret, resultSecret, responseSecret, textSecret]) {
 			assert.equal(JSON.stringify(verbose).includes(secret), false);
 		}
@@ -233,7 +234,7 @@ describe("transcript-reader / readTranscript", () => {
 				JSON.stringify({ type: "message", message: { role, toolCallId: id, toolName: "bash", isError: false, ...body } }),
 			].join("\n") + "\n";
 
-			const compact = await readTranscript({ offset: 1, limit: 1, includeToolResults: false }, reader(j));
+			const compact = await readTranscript({ offset: 1, limit: 1, includeToolResults: false }, memoryTranscript(j));
 			assert.equal(JSON.stringify(compact).includes(secret), false);
 			const result = (compact.messages[0] as any).toolResults[0];
 			assert.equal(result.name, "bash");
@@ -241,7 +242,7 @@ describe("transcript-reader / readTranscript", () => {
 			assert.equal(result.omitted, true);
 			assert.equal(result.size.chars, secret.length);
 
-			const verbose = await readTranscript({ offset: 1, limit: 1, verbose: true, includeToolResults: false }, reader(j));
+			const verbose = await readTranscript({ offset: 1, limit: 1, verbose: true, includeToolResults: false }, memoryTranscript(j));
 			assert.equal(JSON.stringify(verbose).includes(secret), false);
 			const block = (verbose.messages[0] as any).content[0];
 			assert.equal(block.type, "tool_result");
@@ -266,7 +267,7 @@ describe("transcript-reader / readTranscript", () => {
 			] },
 		]);
 
-		const compact = await readTranscript({ offset: 1, limit: 1, includeToolResults: false }, reader(j));
+		const compact = await readTranscript({ offset: 1, limit: 1, includeToolResults: false }, memoryTranscript(j));
 		assert.equal(JSON.stringify(compact).includes(typeSecret), false);
 		assert.equal(JSON.stringify(compact).includes(roleSecret), false);
 		const compactMessage = compact.messages[0] as any;
@@ -283,12 +284,12 @@ describe("transcript-reader / readTranscript", () => {
 		assert.equal(compactMessage.toolResults[1].status, "error");
 		assert.equal(compactMessage.toolResults[1].size.chars, roleSecret.length);
 
-		const pattern = await readTranscript({ pattern: roleSecret, includeToolResults: false }, reader(j));
+		const pattern = await readTranscript({ pattern: roleSecret, includeToolResults: false }, memoryTranscript(j));
 		assert.equal(pattern.matchCount, 1);
 		assert.equal(pattern.messages[0].index, 1);
 		assert.equal(JSON.stringify(pattern).includes(roleSecret), false);
 
-		const verbose = await readTranscript({ offset: 1, limit: 1, verbose: true, includeToolResults: false }, reader(j));
+		const verbose = await readTranscript({ offset: 1, limit: 1, verbose: true, includeToolResults: false }, memoryTranscript(j));
 		assert.equal(JSON.stringify(verbose).includes(typeSecret), false);
 		assert.equal(JSON.stringify(verbose).includes(roleSecret), false);
 		const blocks = (verbose.messages[0] as any).content;
@@ -312,7 +313,7 @@ describe("transcript-reader / readTranscript", () => {
 			{ role: "user", content: [{ type: "tool_result", tool_use_id: "tu-include", content: secret }] },
 		]);
 
-		const env = await readTranscript({ offset: 1, limit: 1, includeToolResults: true }, reader(j));
+		const env = await readTranscript({ offset: 1, limit: 1, includeToolResults: true }, memoryTranscript(j));
 		const result = (env.messages[0] as any).toolResults[0];
 		assert.equal(result.name, "grep");
 		assert.equal(result.preview, secret);
@@ -326,7 +327,7 @@ describe("transcript-reader / readTranscript", () => {
 			{ role: "user", content: [{ type: "tool_result", tool_use_id: "tu-verbose", content: secret, is_error: true }] },
 		]);
 
-		const env = await readTranscript({ offset: 1, limit: 1, verbose: true, includeToolResults: false }, reader(j));
+		const env = await readTranscript({ offset: 1, limit: 1, verbose: true, includeToolResults: false }, memoryTranscript(j));
 		assert.equal(JSON.stringify(env).includes(secret), false);
 		const block = (env.messages[0] as any).content[0];
 		assert.equal(block.type, "tool_result");
@@ -345,7 +346,7 @@ describe("transcript-reader / readTranscript", () => {
 			{ role: "user", content: [{ type: "tool_result", tool_use_id: "tu-raw", content: secret }] },
 		]);
 
-		const env = await readTranscript({ offset: 1, limit: 1, verbose: true, includeToolResults: true }, reader(j));
+		const env = await readTranscript({ offset: 1, limit: 1, verbose: true, includeToolResults: true }, memoryTranscript(j));
 		const block = (env.messages[0] as any).content[0];
 		assert.equal(block.content, secret);
 		assert.equal(block.contentOmitted, undefined);
@@ -358,12 +359,12 @@ describe("transcript-reader / readTranscript", () => {
 			{ role: "user", content: [{ type: "tool_result", tool_use_id: "tu-pattern", content: secret }] },
 		]);
 
-		const redacted = await readTranscript({ pattern: secret, includeToolResults: false }, reader(j));
+		const redacted = await readTranscript({ pattern: secret, includeToolResults: false }, memoryTranscript(j));
 		assert.equal(redacted.matchCount, 1);
 		assert.equal(redacted.messages[0].index, 1);
 		assert.equal(JSON.stringify(redacted).includes(secret), false);
 
-		const raw = await readTranscript({ offset: 1, limit: 1, verbose: true, includeToolResults: true }, reader(j));
+		const raw = await readTranscript({ offset: 1, limit: 1, verbose: true, includeToolResults: true }, memoryTranscript(j));
 		assert.equal((raw.messages[0] as any).content[0].content, secret);
 	});
 
@@ -373,19 +374,19 @@ describe("transcript-reader / readTranscript", () => {
 			{ role: "user", content: [{ type: "tool_result", tool_use_id: "tu-boundary", content: "boundary output" }] },
 		]);
 
-		const env = await readTranscript({ offset: 1, limit: 1, includeToolResults: false }, reader(j));
+		const env = await readTranscript({ offset: 1, limit: 1, includeToolResults: false }, memoryTranscript(j));
 		assert.equal((env.messages[0] as any).toolResults[0].name, "bash");
 	});
 
 	it("verbose returns raw content", async () => {
-		const env = await readTranscript({ offset: 1, limit: 1, verbose: true }, reader(sample));
+		const env = await readTranscript({ offset: 1, limit: 1, verbose: true }, memoryTranscript(sample));
 		const m = env.messages[0] as any;
 		assert.ok(Array.isArray(m.content));
 		assert.equal(m.content[0].type, "text");
 	});
 
 	it("pattern filters to matches and reports matchCount", async () => {
-		const env = await readTranscript({ pattern: "error" }, reader(sample));
+		const env = await readTranscript({ pattern: "error" }, memoryTranscript(sample));
 		assert.equal(env.total, 7);
 		assert.equal(env.matchCount, 2);
 		assert.equal(env.returned, 2);
@@ -394,14 +395,14 @@ describe("transcript-reader / readTranscript", () => {
 	});
 
 	it("pattern with case_sensitive misses lowercase", async () => {
-		const env = await readTranscript({ pattern: "ERROR", caseSensitive: true }, reader(sample));
+		const env = await readTranscript({ pattern: "ERROR", caseSensitive: true }, memoryTranscript(sample));
 		assert.equal(env.matchCount, 1);
 		assert.equal(env.returned, 1);
 		assert.equal(env.messages[0].index, 2);
 	});
 
 	it("pattern + window: last 1 of 2 matches", async () => {
-		const env = await readTranscript({ pattern: "error", offset: -1, limit: 1 }, reader(sample));
+		const env = await readTranscript({ pattern: "error", offset: -1, limit: 1 }, memoryTranscript(sample));
 		assert.equal(env.matchCount, 2);
 		assert.equal(env.returned, 1);
 		assert.equal(env.messages[0].index, 5);
@@ -409,7 +410,7 @@ describe("transcript-reader / readTranscript", () => {
 
 	it("pattern + context expands neighbours and dedupes", async () => {
 		// matches at 2 and 5; ±1 context expands to {1,2,3,4,5,6}
-		const env = await readTranscript({ pattern: "error", context: 1 }, reader(sample));
+		const env = await readTranscript({ pattern: "error", context: 1 }, memoryTranscript(sample));
 		assert.equal(env.matchCount, 2);
 		const indices = env.messages.map((m) => m.index);
 		assert.deepEqual(indices, [1, 2, 3, 4, 5, 6]);
@@ -417,32 +418,32 @@ describe("transcript-reader / readTranscript", () => {
 
 	it("invalid regex throws invalid_regex", async () => {
 		await assert.rejects(
-			() => readTranscript({ pattern: "(" }, reader(sample)),
+			() => readTranscript({ pattern: "(" }, memoryTranscript(sample)),
 			(err: unknown) => err instanceof TranscriptReaderError && err.code === "invalid_regex",
 		);
 	});
 
 	it("limit out of range throws invalid_params", async () => {
 		await assert.rejects(
-			() => readTranscript({ limit: 0 }, reader(sample)),
+			() => readTranscript({ limit: 0 }, memoryTranscript(sample)),
 			(err: unknown) => err instanceof TranscriptReaderError && err.code === "invalid_params",
 		);
 		await assert.rejects(
-			() => readTranscript({ limit: 1000 }, reader(sample)),
+			() => readTranscript({ limit: 1000 }, memoryTranscript(sample)),
 			(err: unknown) => err instanceof TranscriptReaderError && err.code === "invalid_params",
 		);
 	});
 
 	it("context > 5 throws invalid_params", async () => {
 		await assert.rejects(
-			() => readTranscript({ pattern: "x", context: 6 }, reader(sample)),
+			() => readTranscript({ pattern: "x", context: 6 }, memoryTranscript(sample)),
 			(err: unknown) => err instanceof TranscriptReaderError && err.code === "invalid_params",
 		);
 	});
 
 	it("empty content throws transcript_unavailable", async () => {
 		await assert.rejects(
-			() => readTranscript({}, reader("")),
+			() => readTranscript({}, memoryTranscript("")),
 			(err: unknown) => err instanceof TranscriptReaderError && err.code === "transcript_unavailable",
 		);
 	});
@@ -455,9 +456,9 @@ describe("transcript-reader / readTranscript", () => {
 	});
 
 	it("envelope exposes matchCount only when pattern is set", async () => {
-		const noPattern = await readTranscript({}, reader(sample));
+		const noPattern = await readTranscript({}, memoryTranscript(sample));
 		assert.equal((noPattern as ReadTranscriptEnvelope).matchCount, undefined);
-		const withPattern = await readTranscript({ pattern: "x" }, reader(sample));
+		const withPattern = await readTranscript({ pattern: "x" }, memoryTranscript(sample));
 		assert.equal(typeof withPattern.matchCount, "number");
 	});
 
@@ -470,10 +471,83 @@ describe("transcript-reader / readTranscript", () => {
 			{ type: "active_tools_change", activeToolNames: [] },
 		].map((entry) => JSON.stringify(entry)).join("\n") + "\n";
 
-		const env = await readTranscript({ offset: -1, limit: 1 }, reader(text));
+		const env = await readTranscript({ offset: -1, limit: 1 }, memoryTranscript(text));
 		assert.equal(env.total, 2);
 		assert.equal(env.returned, 1);
 		assert.equal(env.offsetStart, 1);
 		assert.equal(env.messages[0].role, "assistant");
+	});
+
+	it("infers legacy authors sequentially without treating tool output as human/tool-authored", async () => {
+		const text = makeJsonl([
+			{ role: "user", content: "question" },
+			{ role: "assistant", content: [{ type: "text", text: "calling" }] },
+			{ role: "user", content: [{ type: "tool_result", content: "output" }] },
+		]);
+		const env = await readTranscript({}, {
+			...memoryTranscript(text),
+			authorContext: { session: { id: "target", title: "Target agent" } },
+		});
+		assert.deepEqual(env.messages.map((message: any) => message.author), [
+			{ kind: "user", id: "user:local", label: "User" },
+			{ kind: "agent", id: "session:target", label: "Target agent" },
+			{ kind: "agent", id: "session:target", label: "Target agent" },
+		]);
+		assert.notEqual((env.messages[2] as any).author.kind, "tool");
+	});
+
+	it("uses a sidecar binding to distinguish a system prompt from a human prompt", async () => {
+		const text = JSON.stringify({
+			type: "message",
+			id: "message-system",
+			message: { role: "user", content: "notification" },
+		}) + "\n";
+		const env = await readTranscript({}, {
+			...memoryTranscript(text),
+			authorContext: {
+				session: { id: "target", title: "Target" },
+				sidecarEntries: [{
+					schemaVersion: 1,
+					type: "prompt-author",
+					promptId: "prompt-system",
+					dispatchedAt: 100,
+					modelText: "notification",
+					source: "task-notification",
+					author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
+					settlement: {
+						schemaVersion: 1,
+						type: "prompt-author-settlement",
+						promptId: "prompt-system",
+						settledAt: 110,
+						outcome: "echoed",
+						messageId: "message-system",
+					},
+				}],
+			},
+		});
+		assert.deepEqual((env.messages[0] as any).author, {
+			kind: "system", id: "system:bobbit", label: "Bobbit",
+		});
+	});
+});
+
+describe("transcript-reader / pre-compaction authors", () => {
+	it("adds the same inferred author to the verbose envelope and renderable message", async () => {
+		const text = [
+			{ type: "message", id: "old-user", message: { role: "user", content: "before" } },
+			{ type: "message", id: "old-agent", message: { role: "assistant", content: "answer" } },
+			{ type: "message", id: "first-kept", message: { role: "user", content: "after" } },
+		].map((entry) => JSON.stringify(entry)).join("\n") + "\n";
+		const env = await readOrphanedBeforeCompaction(
+			{ compactionId: "compaction-1", verbose: true },
+			{
+				...memoryTranscript(text),
+				firstKeptEntryId: "first-kept",
+				authorContext: { session: { id: "target", title: "Target" } },
+			},
+		);
+		const assistant = env.messages[1] as any;
+		assert.deepEqual(assistant.author, { kind: "agent", id: "session:target", label: "Target" });
+		assert.deepEqual(assistant.message.author, assistant.author);
 	});
 });

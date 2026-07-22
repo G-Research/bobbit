@@ -97,7 +97,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/sessions` | List sessions. Supports `?since=N` generation counter for conditional fetch. `?include=archived` adds archived rows; `q` filters the archived corpus by title/role before pagination. Response includes `archivedDelegates` array (see below). See [Archived session list and query search](#archived-session-list-and-query-search) |
-| `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId) |
+| `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId). Standard sessions use the [default role contract](#standard-session-role-resolution). |
 | `POST` | `/api/sessions/:id/fork` | Fork a live session: clone its transcript (+ tool-content / proposal drafts) into a new session and preserve its context. Body `{ newWorktree?: boolean }` (default `true`). See [Fork session endpoint](#fork-session-endpoint) |
 | `POST` | `/api/sessions/:id/restart` | Restart a live session's agent process in place. Body `{ force?: boolean }`. See [Restart session agent endpoint](#restart-session-agent-endpoint) |
 | `GET` | `/api/sessions/:id` | Get session details |
@@ -129,6 +129,45 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `POST` | `/api/sessions/:id/provider-hooks/before-compact` | Per-turn dispatch from the provider-bridge extension before transcript compaction. Dispatches `beforeCompact` and returns `{}` once provider flushes settle (bounded by per-provider timeouts). `404` for unknown session. |
 | `GET` | `/api/sessions/:id/context-trace?limit=N` | Per-turn provider-dispatch trace for diagnostics. Returns `{ entries }` oldest→newest from `ContextTraceStore`; `limit` keeps the most recent N (clamped to 1000). Each entry records the hook, timestamp, and per-provider timing / blocks-kept / omitted / error. See [docs/lifecycle-hub.md](lifecycle-hub.md#the-trace-store). |
 | `GET` | `/api/sessions/:id/google-code-assist/token` | Short-lived runtime material for the agent-side Code Assist (`google-gemini-cli`) provider extension: `{ accessToken, projectId }`. Refreshes the stored Google OAuth token per request; **never** returns the OAuth refresh token. `401 { code: "GOOGLE_CODE_ASSIST_REAUTH" }` when no account is signed in or the token can't be refreshed (prompts re-auth, not an API key); `502 { code: "GOOGLE_CODE_ASSIST_PROJECT" }` when the token is valid but project onboarding failed. `projectId` honors `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_PROJECT_ID` when set. See [Google OAuth & Gemini models](google-oauth-models.md#per-request-token--project-endpoint). |
+
+### Standard session role resolution
+
+`POST /api/sessions` resolves a standard session's role before initial setup. The
+server owns this default so quick-create buttons, keyboard shortcuts, project and
+goal actions, Headquarters, and direct API clients all spawn the same agent even
+when they omit `roleId`. Resolving before spawn also prevents a session from
+merely displaying **General** while missing that role's runtime configuration.
+
+After resolving the request's project, standard creation normalizes `roleId` as
+follows:
+
+| `roleId` input | Result |
+|---|---|
+| Omitted, `null`, or a string that is empty after trimming | Resolve `general` in the selected project's role cascade. |
+| Non-empty string | Trim and resolve that explicit role; it is not replaced by `general`. Unknown roles return `404`. |
+| Present, non-`null`, non-string value | Return `400 { "error": "roleId must be a string or null" }` without creating a session. |
+
+The resolved role enters the shared setup pipeline for both worktree and
+non-worktree sessions. Its prompt template and substitutions, effective tool
+policies, model and thinking defaults, and accessory are therefore applied to
+the first agent process. The role and accessory are also written to live state
+and the persisted session record; the create response, session detail, and
+session list consequently report `role: "general"` for the default case.
+Project-scoped overrides win through the normal [config cascade](internals.md#config-cascade).
+
+This default is intentionally narrow:
+
+- Assistant sessions keep their assistant-type role mapping when no role is
+  requested.
+- Delegate creation exits through its own role-mapping path before this standard
+  default is applied.
+- Team and staff spawners keep their explicit, separately managed role mappings.
+- Existing persisted sessions with no role are not rewritten. The rule applies
+  only when creating a new standard session; later role management, including
+  removing a role in **Modify Session**, is unchanged.
+
+See [Sidebar Actions Menu — Session role controls](sidebar-actions-menu.md#session-role-controls)
+for the creation and modification UI boundary.
 
 ### Transcript reader and `read_session`
 

@@ -1368,9 +1368,9 @@ export async function tryHandleNestedGoalRoute(
 							const tlSess = sessionManager.getSession(team.teamLeadSessionId);
 							if (tlSess && tlSess.status !== "terminated") {
 								if (tlSess.status === "streaming") {
-									sessionManager.deliverLiveSteer(team.teamLeadSessionId, parentNotify.message).catch(() => {});
+									sessionManager.deliverLiveSteer(team.teamLeadSessionId, parentNotify.message, { source: "system" }).catch(() => {});
 								} else {
-									sessionManager.enqueuePrompt(team.teamLeadSessionId, parentNotify.message, { isSteered: true }).catch(() => {});
+									sessionManager.enqueuePrompt(team.teamLeadSessionId, parentNotify.message, { isSteered: true, source: "system" }).catch(() => {});
 								}
 							}
 						}
