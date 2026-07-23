@@ -349,7 +349,12 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(await manager._dispatchBootContinuation(restartSession), true);
 		assert.equal(restartPrompt.mock.calls.length, 1);
 		const restartPiText = restartPrompt.mock.calls[0][0];
-		assert.match(restartPiText, /^\[System\]: .*infrastructure server restarted while you were mid-turn/i);
+		const restartBaseText =
+			"The infrastructure server restarted while you were mid-turn. " +
+			"Your previous work has been preserved. Please continue where you left off. " +
+			"Do NOT start over — review your recent messages and resume from the exact point of interruption.";
+		assert.equal(restartPiText, `${systemPrefix}${restartBaseText}`);
+		assert.equal(restartPiText.match(/\[System\]:/g)?.length, 1, "system author prefix appears exactly once");
 		const restartBinding = readAuthorSidecar(restartSession.id)[0];
 		assert.equal(restartBinding.modelText, undefined);
 		assert.equal(restartBinding.modelPrefix, systemPrefix);

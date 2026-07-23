@@ -94,6 +94,8 @@ async function spriteDetails(root: import("@playwright/test").Locator) {
 		if (!sprite) return null;
 		const images = Array.from(sprite.querySelectorAll(":scope > img")) as HTMLImageElement[];
 		const hue = /hue-rotate\((-?\d+)deg\)/.exec(sprite.getAttribute("style") ?? "")?.[1];
+		const rootRect = node.getBoundingClientRect();
+		const spriteRect = sprite.getBoundingClientRect();
 		return {
 			hue: hue === undefined ? undefined : Number(hue),
 			imageCount: images.length,
@@ -102,6 +104,8 @@ async function spriteDetails(root: import("@playwright/test").Locator) {
 				.map((element) => getComputedStyle(element).animationName),
 			hasBlinkLayer: !!sprite.querySelector(".bobbit-sidebar-unread-blink"),
 			hasSaturation: /saturate\(/.test(sprite.getAttribute("style") ?? ""),
+			rootHeight: rootRect.height,
+			verticalCenterDelta: (spriteRect.top + spriteRect.height / 2) - (rootRect.top + rootRect.height / 2),
 		};
 	});
 }
@@ -157,6 +161,8 @@ async function expectStaticSpriteMatchesSidebar(
 	expect(avatar!.animationNames.every((name) => name === "none")).toBe(true);
 	expect(avatar!.hasBlinkLayer).toBe(false);
 	expect(avatar!.hasSaturation).toBe(false);
+	expect(avatar!.rootHeight).toBeCloseTo(20, 1);
+	expect(Math.abs(avatar!.verticalCenterDelta)).toBeLessThanOrEqual(1);
 	await expectOpenCenterEyes(decorativeAvatar);
 
 	if (expectedAccessorySrc) {
@@ -172,13 +178,26 @@ async function expectStaticSpriteMatchesSidebar(
 	return avatar!.accessorySrc!;
 }
 
-async function expectNoHorizontalOverflow(page: Page): Promise<void> {
+async function expectAuthorBadgeGeometry(page: Page): Promise<void> {
 	const geometry = await page.evaluate(() => ({
 		viewportWidth: window.innerWidth,
 		documentWidth: document.documentElement.scrollWidth,
 		rows: Array.from(document.querySelectorAll("user-message .prompt-row--labelled")).map((row) => {
-			const rect = row.getBoundingClientRect();
-			return { left: rect.left, right: rect.right, width: rect.width };
+			const rowRect = row.getBoundingClientRect();
+			const badgeRect = row.querySelector(".prompt-author-badge")!.getBoundingClientRect();
+			const bubble = row.querySelector(".user-message-container--labelled")!;
+			const bubbleRect = bubble.getBoundingClientRect();
+			return {
+				left: rowRect.left,
+				right: rowRect.right,
+				width: rowRect.width,
+				badgeTop: badgeRect.top,
+				badgeHeight: badgeRect.height,
+				rowTop: rowRect.top,
+				badgeBottom: badgeRect.bottom,
+				bubbleTop: bubbleRect.top,
+				chevronTop: getComputedStyle(bubble, "::before").top,
+			};
 		}),
 	}));
 	expect(geometry.rows.length).toBeGreaterThanOrEqual(3);
@@ -187,6 +206,10 @@ async function expectNoHorizontalOverflow(page: Page): Promise<void> {
 		expect(row.left).toBeGreaterThanOrEqual(-0.5);
 		expect(row.right).toBeLessThanOrEqual(geometry.viewportWidth + 0.5);
 		expect(row.width).toBeGreaterThan(0);
+		expect(row.badgeTop).toBeGreaterThanOrEqual(row.rowTop);
+		expect(row.badgeBottom).toBeGreaterThan(row.bubbleTop);
+		expect(row.badgeHeight).toBeCloseTo(24, 1);
+		expect(row.chevronTop).toBe("19px");
 	}
 }
 
@@ -251,7 +274,7 @@ test.describe("Journey: Author metadata", () => {
 				body: JSON.stringify({
 					title: AGENT_LABEL,
 					colorIndex: AGENT_COLOR_INDEX,
-					accessory: "headset",
+					accessory: "crown",
 				}),
 			});
 			expect(appearancePatch.status, await appearancePatch.clone().text()).toBe(200);
@@ -315,7 +338,9 @@ test.describe("Journey: Author metadata", () => {
 
 			const systemBubble = promptBubble(page, systemPrompt);
 			await expectBadgeText(systemBubble, "System");
-			await expect(systemBubble.locator('.prompt-author-badge [aria-hidden="true"]')).toHaveCount(0);
+			await expect(humanBubble.locator(".prompt-author-initial")).toHaveAttribute("data-initial", "U");
+			await expect(systemBubble.locator(".prompt-author-initial")).toHaveAttribute("data-initial", "S");
+			await expect(systemBubble.locator(".prompt-author-avatar")).toHaveCount(0);
 			await expect(page.locator("assistant-message .prompt-author-badge")).toHaveCount(0);
 			expect(normalizedText(await humanBubble.locator(".prompt-author-badge").innerText())).not.toContain("Human");
 			expect(normalizedText(await systemBubble.locator(".prompt-author-badge").innerText())).not.toContain("Bobbit");
@@ -332,7 +357,7 @@ test.describe("Journey: Author metadata", () => {
 				return { overflow: style.overflow, textOverflow: style.textOverflow, whiteSpace: style.whiteSpace };
 			});
 			expect(nameStyle).toEqual({ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
-			await expectNoHorizontalOverflow(page);
+			await expectAuthorBadgeGeometry(page);
 
 			const skillButton = humanBubble.locator("skill-chip .skill-chip-pill");
 			await skillButton.click();
@@ -352,8 +377,13 @@ test.describe("Journey: Author metadata", () => {
 			await expect(reloadedHuman.locator(".file-mention-chip-pill")).toBeVisible();
 			await expect(reloadedHuman.locator("attachment-tile")).toBeVisible();
 			await expectStaticSpriteMatchesSidebar(page, sourceSessionId, reloadedAgent, accessorySrc);
-			await expectNoHorizontalOverflow(page);
+			await expectAuthorBadgeGeometry(page);
 			expect(await page.locator("body").innerText()).not.toContain(modelPrefix);
+
+			const originLink = reloadedAgent.locator("a.prompt-author-badge");
+			await expect(originLink).toHaveAttribute("href", `#/session/${sourceSessionId}`);
+			await originLink.click();
+			await expect(page).toHaveURL(new RegExp(`#/session/${sourceSessionId}$`));
 		} finally {
 			restoreEcho?.();
 			await apiFetch("/api/preferences", {

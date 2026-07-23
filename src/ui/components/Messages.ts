@@ -308,28 +308,47 @@ export class UserMessage extends LitElement {
 		}
 
 		const isAgent = presentation.kind === "agent";
+		const authorBadgeContent = isAgent ? html`
+			<span class="prompt-author-avatar" aria-hidden="true">
+				${renderStaticSidebarBobbitCanvas({
+					hueRotate: this.authorAppearance?.hueRotate ?? 0,
+					accessory: getAccessoryDef(this.authorAppearance?.accessoryId),
+				})}
+			</span>
+			<span class="prompt-author-name">${presentation.normalizedAgentLabel}</span>
+			<span class="prompt-author-divider" aria-hidden="true">|</span>
+			<span class="prompt-author-kind">Agent</span>
+		` : html`
+			<span
+				class="prompt-author-initial"
+				aria-hidden="true"
+				data-initial=${presentation.kind === "user" ? "U" : "S"}
+			></span>
+			<span class="prompt-author-name">${presentation.visibleName}</span>
+		`;
+		const originSessionId = isAgent ? this.authorAppearance?.sessionId : undefined;
+		const authorBadge = originSessionId ? html`
+			<a
+				class="prompt-author-badge prompt-author-badge--link"
+				href=${`#/session/${encodeURIComponent(originSessionId)}`}
+				aria-label=${presentation.accessibleName}
+				title=${presentation.visibleName}
+			>
+				${authorBadgeContent}
+			</a>
+		` : html`
+			<div
+				class="prompt-author-badge"
+				aria-label=${presentation.accessibleName}
+				title=${presentation.visibleName}
+			>
+				${authorBadgeContent}
+			</div>
+		`;
 		return html`
 			<div class="prompt-row prompt-row--labelled flex justify-start mx-2 sm:mx-4 my-1">
 				<div class="prompt-bubble-shell">
-					<div
-						class="prompt-author-badge"
-						aria-label=${presentation.accessibleName}
-						title=${presentation.visibleName}
-					>
-						${isAgent ? html`
-							<span class="prompt-author-avatar" aria-hidden="true">
-								${renderStaticSidebarBobbitCanvas({
-									hueRotate: this.authorAppearance?.hueRotate ?? 0,
-									accessory: getAccessoryDef(this.authorAppearance?.accessoryId),
-								})}
-							</span>
-							<span class="prompt-author-name">${presentation.normalizedAgentLabel}</span>
-							<span class="prompt-author-divider" aria-hidden="true">|</span>
-							<span class="prompt-author-kind">Agent</span>
-						` : html`
-							<span class="prompt-author-name">${presentation.visibleName}</span>
-						`}
-					</div>
+					${authorBadge}
 					<div class="user-message-container user-message-container--labelled py-2 px-3 sm:px-4">
 						${body}
 						${attachments}
