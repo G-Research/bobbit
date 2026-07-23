@@ -1,0 +1,5 @@
+id: Experiments
+kind: composer-slash
+label: Experiments
+target:
+  panelId: experiment-runner.panel
