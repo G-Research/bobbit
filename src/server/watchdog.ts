@@ -16,7 +16,7 @@
  *   npm run dev:watchdog [-- -- ...args]
  *
  * The watchdog itself is a lightweight loop with no dependencies on the
- * gateway code beyond port detection and pi-dir resolution.
+ * gateway code beyond port detection, path resolution, and dependency validation.
  */
 
 import { spawn, execSync, type ChildProcess } from "node:child_process";
@@ -25,6 +25,127 @@ import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { bobbitStateDir } from "./bobbit-dir.js";
+import { validateDependencies, type DependencyValidationResult } from "./harness-deps.js";
+
+export type WatchdogRecoveryDecision =
+	| { action: "none"; previousFailures?: number }
+	| { action: "preserve-live-harness"; validation: Exclude<DependencyValidationResult, { ok: true }> }
+	| { action: "restart-live-harness" }
+	| { action: "wait-for-dependencies"; validation: Exclude<DependencyValidationResult, { ok: true }> }
+	| { action: "launch-dead-harness" };
+
+export interface WatchdogRecoveryPolicyOptions {
+	failureThreshold: number;
+	validate: () => DependencyValidationResult;
+}
+
+export interface WatchdogRecoveryActions {
+	preserveLiveHarness: (validation: Exclude<DependencyValidationResult, { ok: true }>) => void | Promise<void>;
+	restartLiveHarness: () => void | Promise<void>;
+	waitForDependencies: (validation: Exclude<DependencyValidationResult, { ok: true }>) => void | Promise<void>;
+	launchDeadHarness: () => void | Promise<void>;
+}
+
+export async function applyWatchdogRecoveryDecision(
+	decision: WatchdogRecoveryDecision,
+	actions: WatchdogRecoveryActions,
+): Promise<void> {
+	switch (decision.action) {
+		case "preserve-live-harness":
+			await actions.preserveLiveHarness(decision.validation);
+			break;
+		case "restart-live-harness":
+			await actions.restartLiveHarness();
+			break;
+		case "wait-for-dependencies":
+			await actions.waitForDependencies(decision.validation);
+			break;
+		case "launch-dead-harness":
+			await actions.launchDeadHarness();
+			break;
+	}
+}
+
+const MANUAL_RECOVERY = "Stop Bobbit and the development stack, run `npm install` manually, then retry or restart.";
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Pure watchdog recovery policy. Process launches and timers stay with the
+ * executable wiring below; tests can drive this state machine with an injected
+ * read-only validator and no OS side effects.
+ */
+export class WatchdogRecoveryPolicy {
+	private failures = 0;
+	private waitingForDependencies = false;
+
+	constructor(private readonly options: WatchdogRecoveryPolicyOptions) {
+		if (!Number.isInteger(options.failureThreshold) || options.failureThreshold < 1) {
+			throw new Error("failureThreshold must be a positive integer");
+		}
+	}
+
+	get consecutiveFailures(): number {
+		return this.failures;
+	}
+
+	get isWaitingForDependencies(): boolean {
+		return this.waitingForDependencies;
+	}
+
+	recordHealthProbe(healthy: boolean): WatchdogRecoveryDecision {
+		if (healthy) {
+			const previousFailures = this.failures;
+			this.failures = 0;
+			this.waitingForDependencies = false;
+			return previousFailures > 0 ? { action: "none", previousFailures } : { action: "none" };
+		}
+
+		this.failures++;
+		if (this.failures < this.options.failureThreshold) return { action: "none" };
+
+		// Reaching the threshold consumes the accumulated pressure regardless of
+		// validation outcome. An invalid install must not immediately retrigger a
+		// kill on the next health tick.
+		this.failures = 0;
+		const validation = this.validateSafely();
+		if (!validation.ok) {
+			return { action: "preserve-live-harness", validation };
+		}
+		return { action: "restart-live-harness" };
+	}
+
+	markHarnessExited(): void {
+		this.failures = 0;
+		this.waitingForDependencies = true;
+	}
+
+	markHarnessLaunched(): void {
+		this.failures = 0;
+		this.waitingForDependencies = false;
+	}
+
+	pollDeadHarness(): WatchdogRecoveryDecision {
+		if (!this.waitingForDependencies) return { action: "none" };
+		const validation = this.validateSafely();
+		if (!validation.ok) return { action: "wait-for-dependencies", validation };
+		this.waitingForDependencies = false;
+		return { action: "launch-dead-harness" };
+	}
+
+	private validateSafely(): DependencyValidationResult {
+		try {
+			return this.options.validate();
+		} catch (error) {
+			return {
+				ok: false,
+				message: `Dependency validation failed: ${errorMessage(error)}. ${MANUAL_RECOVERY}`,
+			};
+		}
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -112,15 +233,26 @@ const FAILURE_THRESHOLD = 3;
 /** Grace period after launching harness before probing starts (ms) */
 const STARTUP_GRACE_MS = 120_000;
 
+/** Delay before checking whether an unexpectedly exited harness can relaunch. */
+const UNEXPECTED_EXIT_RETRY_DELAY_MS = 3_000;
+
+/** Bounded polling cadence while manual dependency repair is required. */
+const DEPENDENCY_RECHECK_INTERVAL_MS = 30_000;
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
 let harnessChild: ChildProcess | null = null;
-let consecutiveFailures = 0;
 let isRestarting = false;
 let lastLaunchTime = 0;
 let shuttingDown = false;
+let dependencyRecheckTimer: ReturnType<typeof setTimeout> | null = null;
+
+const recoveryPolicy = new WatchdogRecoveryPolicy({
+	failureThreshold: FAILURE_THRESHOLD,
+	validate: () => validateDependencies(PROJECT_ROOT),
+});
 
 // ---------------------------------------------------------------------------
 // Health probe
@@ -171,14 +303,19 @@ function probeHealth(): Promise<boolean> {
 function launchHarness(): void {
 	console.log(`\n[watchdog] Launching harness (port ${PORT})...`);
 
-	harnessChild = spawn(process.execPath, [HARNESS_PATH, ...forwardedArgs], {
+	if (dependencyRecheckTimer) {
+		clearTimeout(dependencyRecheckTimer);
+		dependencyRecheckTimer = null;
+	}
+
+	const child = spawn(process.execPath, [HARNESS_PATH, ...forwardedArgs], {
 		cwd: PROJECT_ROOT,
 		stdio: "inherit",
 		env: { ...process.env },
 	});
-
+	harnessChild = child;
+	recoveryPolicy.markHarnessLaunched();
 	lastLaunchTime = Date.now();
-	consecutiveFailures = 0;
 
 	// Re-resolve probe host after the server has time to write gateway-url
 	setTimeout(() => {
@@ -189,49 +326,78 @@ function launchHarness(): void {
 		}
 	}, STARTUP_GRACE_MS + 2000);
 
-	harnessChild.on("exit", (code, signal) => {
+	child.on("exit", (code, signal) => {
 		const reason = signal ? `signal ${signal}` : `code ${code}`;
 		console.log(`[watchdog] Harness exited (${reason})`);
+
+		// A timed-out kill can finish after a replacement has launched. Never let
+		// that stale exit clear or schedule recovery for the current child.
+		if (harnessChild !== child) return;
 		harnessChild = null;
 
 		if (!shuttingDown && !isRestarting) {
-			console.log("[watchdog] Harness died unexpectedly — restarting in 3s...");
-			setTimeout(() => {
-				if (!shuttingDown) launchHarness();
-			}, 3000);
+			recoveryPolicy.markHarnessExited();
+			console.log("[watchdog] Harness died unexpectedly — validating before relaunch...");
+			scheduleDeadHarnessRecovery(UNEXPECTED_EXIT_RETRY_DELAY_MS);
 		}
 	});
 
 	writeState();
 }
 
+function describeValidationFailure(result: Exclude<DependencyValidationResult, { ok: true }>): string {
+	return [result.message, ...(result.diagnostics ?? [])].join("\n");
+}
+
+function scheduleDeadHarnessRecovery(delayMs = DEPENDENCY_RECHECK_INTERVAL_MS): void {
+	if (dependencyRecheckTimer || shuttingDown || harnessChild) return;
+	dependencyRecheckTimer = setTimeout(async () => {
+		dependencyRecheckTimer = null;
+		if (shuttingDown || harnessChild) return;
+
+		try {
+			const decision = recoveryPolicy.pollDeadHarness();
+			await applyWatchdogRecoveryDecision(decision, recoveryActions);
+		} catch (error) {
+			console.error("[watchdog] Dead-harness recovery failed:", error);
+			if (!harnessChild && !shuttingDown) {
+				recoveryPolicy.markHarnessExited();
+				scheduleDeadHarnessRecovery(UNEXPECTED_EXIT_RETRY_DELAY_MS);
+			}
+		} finally {
+			writeState();
+		}
+	}, delayMs);
+}
+
 function killHarness(): Promise<void> {
-	if (!harnessChild) return Promise.resolve();
+	const child = harnessChild;
+	if (!child) return Promise.resolve();
 
 	return new Promise<void>((resolve) => {
 		const timeout = setTimeout(() => {
 			console.log("[watchdog] Force-killing harness...");
-			harnessChild?.kill("SIGKILL");
+			child.kill("SIGKILL");
 			resolve();
 		}, 8000);
 
-		harnessChild!.on("exit", () => {
+		child.on("exit", () => {
 			clearTimeout(timeout);
-			harnessChild = null;
+			if (harnessChild === child) harnessChild = null;
 			resolve();
 		});
 
 		if (process.platform === "win32") {
 			try {
-				execSync(`taskkill /pid ${harnessChild!.pid} /T /F`, {
+				execSync(`taskkill /pid ${child.pid} /T /F`, {
 					stdio: "ignore",
 					shell: true as unknown as string,
 				});
 			} catch {
-				harnessChild?.kill("SIGKILL");
+				child.kill("SIGKILL");
 			}
 		} else {
-			harnessChild!.kill("SIGTERM");
+			child.kill("SIGTERM");
 		}
 	});
 }
@@ -240,7 +406,7 @@ function killHarness(): Promise<void> {
 // Restart cycle
 // ---------------------------------------------------------------------------
 
-async function restartHarness(): Promise<void> {
+async function restartHarnessAfterValidation(): Promise<void> {
 	if (isRestarting || shuttingDown) return;
 	isRestarting = true;
 
@@ -255,12 +421,28 @@ async function restartHarness(): Promise<void> {
 		launchHarness();
 	} catch (err) {
 		console.error("[watchdog] Restart failed:", err);
-		// Try launching anyway
-		launchHarness();
+		if (!harnessChild && !shuttingDown) {
+			recoveryPolicy.markHarnessExited();
+			scheduleDeadHarnessRecovery(UNEXPECTED_EXIT_RETRY_DELAY_MS);
+		}
 	} finally {
 		isRestarting = false;
 	}
 }
+
+const recoveryActions: WatchdogRecoveryActions = {
+	preserveLiveHarness: (validation) => {
+		console.error(`[watchdog] ${describeValidationFailure(validation)}`);
+		console.log("[watchdog] Dependency validation failed; leaving the live harness and sentinel watcher untouched.");
+	},
+	restartLiveHarness: restartHarnessAfterValidation,
+	waitForDependencies: (validation) => {
+		console.error(`[watchdog] ${describeValidationFailure(validation)}`);
+		console.log(`[watchdog] Harness remains stopped; dependencies will be checked again in ${DEPENDENCY_RECHECK_INTERVAL_MS / 1000}s.`);
+		scheduleDeadHarnessRecovery();
+	},
+	launchDeadHarness: launchHarness,
+};
 
 // ---------------------------------------------------------------------------
 // State file (for external observability)
@@ -273,7 +455,8 @@ function writeState(): void {
 			harnessPid: harnessChild?.pid ?? null,
 			port: PORT,
 			lastLaunch: new Date(lastLaunchTime).toISOString(),
-			consecutiveFailures,
+			consecutiveFailures: recoveryPolicy.consecutiveFailures,
+			waitingForDependencies: recoveryPolicy.isWaitingForDependencies,
 		};
 		fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), "utf-8");
 	} catch {
@@ -300,25 +483,40 @@ async function probeLoop(): Promise<void> {
 		return;
 	}
 
+	if (!harnessChild) {
+		recoveryPolicy.markHarnessExited();
+		scheduleDeadHarnessRecovery(0);
+		writeState();
+		scheduleNextProbe();
+		return;
+	}
+
 	const healthy = await probeHealth();
+	if (!harnessChild) {
+		recoveryPolicy.markHarnessExited();
+		scheduleDeadHarnessRecovery(0);
+		writeState();
+		scheduleNextProbe();
+		return;
+	}
+
+	const priorFailures = recoveryPolicy.consecutiveFailures;
+	const decision = recoveryPolicy.recordHealthProbe(healthy);
 
 	if (healthy) {
-		if (consecutiveFailures > 0) {
-			console.log(`[watchdog] Server recovered after ${consecutiveFailures} failed probe(s)`);
+		if (decision.action === "none" && decision.previousFailures) {
+			console.log(`[watchdog] Server recovered after ${decision.previousFailures} failed probe(s)`);
 		}
-		consecutiveFailures = 0;
 	} else {
-		consecutiveFailures++;
 		console.log(
-			`[watchdog] Probe failed (${consecutiveFailures}/${FAILURE_THRESHOLD})`,
+			`[watchdog] Probe failed (${priorFailures + 1}/${FAILURE_THRESHOLD})`,
 		);
-
-		if (consecutiveFailures >= FAILURE_THRESHOLD) {
+		if (decision.action === "restart-live-harness") {
 			console.log(
-				`[watchdog] ${FAILURE_THRESHOLD} consecutive failures — restarting harness`,
+				`[watchdog] ${FAILURE_THRESHOLD} consecutive failures with healthy dependencies — restarting harness`,
 			);
-			await restartHarness();
 		}
+		await applyWatchdogRecoveryDecision(decision, recoveryActions);
 	}
 
 	writeState();
@@ -338,6 +536,10 @@ function scheduleNextProbe(): void {
 async function shutdown(): Promise<void> {
 	if (shuttingDown) return;
 	shuttingDown = true;
+	if (dependencyRecheckTimer) {
+		clearTimeout(dependencyRecheckTimer);
+		dependencyRecheckTimer = null;
+	}
 
 	console.log("\n[watchdog] Shutting down...");
 	await killHarness();
@@ -350,19 +552,26 @@ async function shutdown(): Promise<void> {
 	process.exit(0);
 }
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
-
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
-console.log("[watchdog] Dev harness watchdog starting");
-console.log(`[watchdog] Probe host:        ${probeHost}`);
-console.log(`[watchdog] Port:              ${PORT}`);
-console.log(`[watchdog] Probe interval:    ${PROBE_INTERVAL_MS / 1000}s`);
-console.log(`[watchdog] Failure threshold: ${FAILURE_THRESHOLD} consecutive failures`);
-console.log(`[watchdog] Startup grace:     ${STARTUP_GRACE_MS / 1000}s`);
+function main(): void {
+	process.on("SIGINT", shutdown);
+	process.on("SIGTERM", shutdown);
 
-launchHarness();
-scheduleNextProbe();
+	console.log("[watchdog] Dev harness watchdog starting");
+	console.log(`[watchdog] Probe host:        ${probeHost}`);
+	console.log(`[watchdog] Port:              ${PORT}`);
+	console.log(`[watchdog] Probe interval:    ${PROBE_INTERVAL_MS / 1000}s`);
+	console.log(`[watchdog] Failure threshold: ${FAILURE_THRESHOLD} consecutive failures`);
+	console.log(`[watchdog] Startup grace:     ${STARTUP_GRACE_MS / 1000}s`);
+
+	launchHarness();
+	scheduleNextProbe();
+}
+
+const invokedPath = process.argv[1];
+if (invokedPath && path.resolve(invokedPath) === path.resolve(fileURLToPath(import.meta.url))) {
+	main();
+}

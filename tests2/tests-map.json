@@ -10945,7 +10945,7 @@
       "bucket": "v2-core",
       "method": "rewrite",
       "replacement": [],
-      "rationale": "Core-tier TDD reproducing test for the node_modules ring-fence goal: temp-FS + injected seams pin that repair cannot half-wipe declared deps and agent runtime resolution prefers an intact ring-fenced snapshot over a gutted working node_modules.",
+      "rationale": "Focused core regression for NFS-safe startup policy: temp fixtures and injected seams pin installed direct Pi resolution without probing legacy runtime snapshots, read-only dependency validation with no automatic package-manager repair, and lifecycle block/retry behavior for unhealthy initial boot, sentinel restart, and crash relaunch.",
       "migrated": true,
       "v2Path": "tests2/core/node-modules-ring-fence.test.ts",
       "execution": {
