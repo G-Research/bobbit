@@ -178,7 +178,7 @@ async function cleanupCreatedWorktreeSet(
 				worktree.repoPath,
 				worktree.worktreePath,
 				branchName,
-				true,
+				result.createdBranchRepos?.has(worktree.repo) === true,
 				commandRunner,
 				{ skipRemotePush: true },
 			);
@@ -2279,6 +2279,15 @@ export class TeamManager {
 				undefined,
 				{
 					rolePrompt, roleName: role, workflowContext, sandboxed: memberSandboxed,
+					// A host multi-repo worker is already fully provisioned. Thread its
+					// ordinary-cleanup coordinates into createSession so the initial
+					// persisted session row owns them before createSession returns.
+					...(workerRepoWorktrees ? {
+						worktreePath: worktreeResult?.worktreePath,
+						repoPath: goal.repoPath,
+						branch: branchName,
+						repoWorktrees: workerRepoWorktrees,
+					} : {}),
 					// Pass branch info so applySandboxWiring creates the worktree inside the container.
 					// The base branch is local-ref-first because sandbox goal branches may be unpublished.
 					sandboxBranch: memberSandboxed && branchName ? branchName : undefined,

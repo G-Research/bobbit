@@ -267,6 +267,7 @@ export interface SessionSetupPlan {
 	worktreePath?: string;
 	repoPath?: string;
 	branch?: string;
+	repoWorktrees?: Record<string, string>;
 	sandboxed?: boolean;
 	role?: string;
 	staffId?: string;
@@ -1059,6 +1060,7 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		worktreePath: plan.worktreePath,
 		repoPath: plan.repoPath,
 		branch: plan.branch,
+		repoWorktrees: plan.repoWorktrees,
 		taskId: plan.taskId,
 		staffId: plan.staffId,
 		accessory: plan.accessory,
@@ -1589,6 +1591,16 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		role: plan.role ?? plan.roleName,
 		accessory: plan.accessory,
 		nonInteractive: plan.nonInteractive,
+		...(plan.repoWorktrees && plan.repoPath ? {
+			worktreePath: plan.worktreePath,
+			repoPath: plan.repoPath,
+			branch: plan.branch,
+			repoWorktrees: Object.entries(plan.repoWorktrees).map(([repo, worktreePath]) => ({
+				repo,
+				repoPath: repo === "." ? plan.repoPath! : path.join(plan.repoPath!, repo),
+				worktreePath,
+			})),
+		} : {}),
 		promptQueue: new PromptQueue(),
 		spawnPinnedModel,
 		spawnPinnedThinkingLevel,

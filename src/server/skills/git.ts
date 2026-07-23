@@ -875,7 +875,12 @@ export async function createWorktreeSet(
 	branchName: string,
 	baseBranch?: string,
 	opts?: CreateWorktreeSetOptions,
-): Promise<{ container: string; worktrees: Array<{ repo: string; repoPath: string; worktreePath: string }> }> {
+): Promise<{
+	container: string;
+	worktrees: Array<{ repo: string; repoPath: string; worktreePath: string }>;
+	/** Multi-repo components whose local branch was created by this call. */
+	createdBranchRepos?: ReadonlySet<string>;
+}> {
 	// Per-component worktree setup is the caller's responsibility — invoke
 	// `runComponentSetups()` after this function returns.
 	// Distinct repos in declared order.
@@ -1037,7 +1042,7 @@ export async function createWorktreeSet(
 		throw err;
 	}
 
-	return { container, worktrees: out };
+	return { container, worktrees: out, createdBranchRepos };
 }
 
 /**
