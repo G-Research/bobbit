@@ -116,9 +116,11 @@ test("direct and REST team spawn preserve exact local component HEADs across col
 	let goalId: string | undefined;
 	let teamLeadSessionId: string | undefined;
 	let collisionWorkerId: string | undefined;
+	let postSpawnFailedSessionId: string | undefined;
 	let directWorkerId: string | undefined;
 	let restWorkerId: string | undefined;
 	let originalExecFile: CommandRunner["execFile"] | undefined;
+	let originalTryAutoSelectModel: any;
 	let originalUpdateSessionMeta: any;
 	let originalSessionStorePut: any;
 	let interceptedSessionStore: any;
@@ -395,6 +397,132 @@ test("direct and REST team spawn preserve exact local component HEADs across col
 		}
 		await git(runner, join(projectRoot, FAILED_COMPONENT), ["branch", "-D", collidingBranch!]);
 
+		// Drive the real createSession pipeline through agent spawn, then fail its
+		// awaited post-spawn model setup. SessionManager must not treat either
+		// non-Git container as a single-repo cleanup owner; TeamManager retains sole
+		// ownership of the already-provisioned component worktrees and container.
+		originalExecFile = runner.execFile;
+		originalTryAutoSelectModel = (gateway.sessionManager as any).tryAutoSelectModel;
+		const postSpawnGitCalls: Array<{ cwd: string; args: string[] }> = [];
+		const postSpawnWorktrees: Partial<Record<ComponentName, string>> = {};
+		let postSpawnBranch: string | undefined;
+		let postSpawnContainer: string | undefined;
+		let postSpawnAgentState: any;
+		let postSpawnSessionShape: any;
+		let postSpawnSessionWasLive = false;
+		let componentsExistedDuringPostSpawn: Partial<Record<ComponentName, boolean>> = {};
+		(runner as any).execFile = async (file: string, args: string[], options: any) => {
+			const gitCommand = file.toLowerCase().replace(/\.exe$/, "") === "git";
+			const cwd = String(options?.cwd ?? "");
+			if (gitCommand) postSpawnGitCalls.push({ cwd, args: [...args] });
+			const result = await originalExecFile!.call(runner, file, args, options);
+			if (gitCommand && args[0] === "worktree" && args[1] === "add") {
+				const branchIndex = args.indexOf("-b");
+				const branch = String(branchIndex >= 0 ? args[branchIndex + 1] : args[3]);
+				const target = String(branchIndex >= 0 ? args[branchIndex + 2] : args[2]);
+				if (branch.startsWith(`goal/${goalId!.slice(0, 8)}/coder-`)) {
+					postSpawnBranch = branch;
+					for (const repo of COMPONENTS) {
+						if (normalized(cwd) === normalized(join(projectRoot, repo))) {
+							postSpawnWorktrees[repo] = target;
+						}
+					}
+					if (normalized(cwd) === normalized(join(projectRoot, NESTED_COMPONENT))) {
+						postSpawnContainer = resolve(
+							target,
+							...NESTED_COMPONENT.split("/").map(() => ".."),
+						);
+					}
+				}
+			}
+			return result;
+		};
+		(gateway.sessionManager as any).tryAutoSelectModel = async (session: any) => {
+			if (session.goalId === goalId && session.role === "coder") {
+				postSpawnFailedSessionId = session.id;
+				postSpawnSessionWasLive = gateway.sessionManager.getSession(session.id) === session;
+				postSpawnSessionShape = {
+					cwd: session.cwd,
+					worktreePath: session.worktreePath,
+					repoPath: session.repoPath,
+					branch: session.branch,
+					repoWorktrees: liveRepoWorktrees(session),
+				};
+				componentsExistedDuringPostSpawn = Object.fromEntries(
+					COMPONENTS.map(repo => [repo, existsSync(postSpawnSessionShape.repoWorktrees[repo])]),
+				);
+				postSpawnAgentState = await session.rpcClient.getState();
+				throw new Error(`${REPRO}_POST_SPAWN_SETUP_FAILURE`);
+			}
+			return originalTryAutoSelectModel.call(gateway.sessionManager, session);
+		};
+
+		let postSpawnFailure: unknown;
+		try {
+			await gateway.teamManager.spawnRole(goalId!, "coder", "Fail only after the real worker agent spawns");
+		} catch (error) {
+			postSpawnFailure = error;
+		} finally {
+			(runner as any).execFile = originalExecFile;
+			originalExecFile = undefined;
+			(gateway.sessionManager as any).tryAutoSelectModel = originalTryAutoSelectModel;
+			originalTryAutoSelectModel = undefined;
+		}
+		const postSpawnFailureMessage = postSpawnFailure instanceof Error
+			? postSpawnFailure.message
+			: String(postSpawnFailure ?? "spawn succeeded");
+		if (!postSpawnFailureMessage.includes(`${REPRO}_POST_SPAWN_SETUP_FAILURE`)) {
+			throw new Error(`${REPRO}: expected actual post-spawn setup failure, received: ${postSpawnFailureMessage}`);
+		}
+		expect(postSpawnFailedSessionId, "post-spawn injection must observe the real worker session").toBeTruthy();
+		expect(postSpawnSessionWasLive, "worker must enter SessionManager's live map before post-spawn setup").toBe(true);
+		expect(postSpawnAgentState?.success, "worker RPC must answer get_state after agent spawn").toBe(true);
+		expect(postSpawnContainer, "real component provisioning must create one worker branch container").toBeTruthy();
+		expect(postSpawnBranch, "real component provisioning must use a worker branch").toBeTruthy();
+		expect(normalized(postSpawnSessionShape?.cwd), "worker cwd must be the pre-provisioned branch container").toBe(normalized(postSpawnContainer!));
+		expect(normalized(postSpawnSessionShape?.worktreePath), "flat setup worktreePath must remain the branch container").toBe(normalized(postSpawnContainer!));
+		expect(normalized(postSpawnSessionShape?.repoPath), "flat setup repoPath must remain the non-Git project root").toBe(normalized(projectRoot));
+		expect(postSpawnSessionShape?.branch).toBe(postSpawnBranch);
+		expect(Object.keys(postSpawnSessionShape?.repoWorktrees ?? {}).sort()).toEqual([...COMPONENTS].sort());
+		for (const repo of COMPONENTS) {
+			expect(postSpawnWorktrees[repo], `${repo} must be provisioned before createSession post-spawn setup`).toBeTruthy();
+			expect(postSpawnSessionShape?.repoWorktrees?.[repo], `${repo} cleanup coordinate must reach the live session`).toBe(postSpawnWorktrees[repo]);
+			expect(componentsExistedDuringPostSpawn[repo], `${repo} must exist when post-spawn setup fails`).toBe(true);
+		}
+		expect(existsSync(join(projectRoot, ".git")), "post-spawn failure must leave the project root non-Git").toBe(false);
+		expect(existsSync(join(postSpawnContainer!, ".git")), "post-spawn failure container must never become a Git repository").toBe(false);
+
+		const invalidContainerGitCalls = postSpawnGitCalls.filter(call => {
+			const cwd = normalized(call.cwd);
+			return cwd === normalized(projectRoot) || cwd === normalized(postSpawnContainer!);
+		});
+		if (invalidContainerGitCalls.length > 0) {
+			throw new Error(
+				`${REPRO}_POST_SPAWN_NON_GIT_CLEANUP: session setup invoked Git against a non-Git root/container: `
+				+ invalidContainerGitCalls.map(call => `${call.cwd} :: git ${call.args.join(" ")}`).join("; "),
+			);
+		}
+		const worktreeRemoveCalls = postSpawnGitCalls.filter(call => call.args[0] === "worktree" && call.args[1] === "remove");
+		for (const repo of COMPONENTS) {
+			const componentCleanupCalls = worktreeRemoveCalls.filter(call =>
+				normalized(call.cwd) === normalized(join(projectRoot, repo))
+				&& normalized(String(call.args[2])) === normalized(postSpawnWorktrees[repo]!),
+			);
+			expect(
+				componentCleanupCalls,
+				`${repo}: TeamManager must issue exactly one component-owned cleanup with component-specific diagnostics`,
+			).toHaveLength(1);
+			expect(existsSync(postSpawnWorktrees[repo]!), `${repo}: TeamManager must remove the created component worktree`).toBe(false);
+			expect(
+				await gitRefExists(runner, join(projectRoot, repo), `refs/heads/${postSpawnBranch}`),
+				`${repo}: TeamManager must remove the branch created by this failed attempt`,
+			).toBe(false);
+			expect(await git(runner, goal.repoWorktrees[repo], ["rev-parse", "HEAD"]), `${repo} goal HEAD must survive post-spawn rollback`).toBe(goalHeads[repo]);
+		}
+		expect(existsSync(dirname(postSpawnWorktrees[NESTED_COMPONENT]!)), "post-spawn rollback must remove the nested repo-key directory").toBe(false);
+		expect(existsSync(postSpawnContainer!), "TeamManager must remove the empty worker branch container").toBe(false);
+		expect(gateway.sessionManager.getSession(postSpawnFailedSessionId!), "setup-failed worker must leave the live session map").toBeUndefined();
+
 		// Direct production call: this is the primary host-side regression boundary.
 		// Observe the project SessionStore boundary so the first durable worker
 		// record can be distinguished from TeamManager's later metadata update.
@@ -508,6 +636,7 @@ test("direct and REST team spawn preserve exact local component HEADs across col
 		});
 	} finally {
 		if (originalExecFile) (runner as any).execFile = originalExecFile;
+		if (originalTryAutoSelectModel) (gateway.sessionManager as any).tryAutoSelectModel = originalTryAutoSelectModel;
 		if (originalUpdateSessionMeta) (gateway.sessionManager as any).updateSessionMeta = originalUpdateSessionMeta;
 		if (originalSessionStorePut && interceptedSessionStore) interceptedSessionStore.put = originalSessionStorePut;
 		for (const workerId of [collisionWorkerId, directWorkerId, restWorkerId]) {
@@ -517,7 +646,11 @@ test("direct and REST team spawn preserve exact local component HEADs across col
 		}
 		if (goalId) await teardownTeam(goalId).catch(() => undefined);
 		if (teamLeadSessionId) await apiFetch(`/api/sessions/${teamLeadSessionId}?purge=true`, { method: "DELETE" }).catch(() => undefined);
+		// The failed session retains worker cleanup coordinates for diagnostics. Purge
+		// it only after GoalManager has removed the goal component worktrees, because
+		// both nested worktree basenames are intentionally identical in this fixture.
 		if (goalId) await deleteGoal(goalId).catch(() => undefined);
+		if (postSpawnFailedSessionId) await apiFetch(`/api/sessions/${postSpawnFailedSessionId}?purge=true`, { method: "DELETE" }).catch(() => undefined);
 		if (projectId) await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => undefined);
 		rmSync(fixtureRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
