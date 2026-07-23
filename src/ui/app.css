@@ -4009,6 +4009,7 @@ html {
 	align-items: flex-end;
 	min-width: 0;
 	max-width: 100%;
+	padding-top: 2px;
 }
 
 .prompt-bubble-shell {
@@ -4030,12 +4031,13 @@ html {
 	width: fit-content;
 	min-width: 0;
 	max-width: 100%;
-	margin-top: 7px;
+	/* Keep the floating badge fully inside paint containment while overlapping the bubble. */
+	margin-top: 14px;
 	padding-top: 14px;
 }
 
 .user-message-container--labelled::before {
-	top: 18px;
+	top: 19px;
 }
 
 .prompt-author-badge {
@@ -4048,16 +4050,35 @@ html {
 	width: max-content;
 	max-width: calc(100% - 18px);
 	min-width: 0;
-	min-height: 22px;
+	height: 24px;
 	margin-left: 10px;
 	padding: 1px 7px 1px 3px;
-	transform: translateY(-56%);
 	border: 1px solid var(--border);
 	border-radius: 6px;
 	background: var(--card);
-	box-shadow: 0 2px 5px color-mix(in oklch, var(--foreground) 9%, transparent);
+	box-shadow: 0 1px 4px color-mix(in oklch, var(--foreground) 8%, transparent);
 	color: var(--muted-foreground);
+	line-height: 1;
+}
+
+.prompt-author-badge:not(.prompt-author-badge--link) {
 	pointer-events: none;
+}
+
+.prompt-author-badge--link {
+	cursor: pointer;
+	text-decoration: none;
+	transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.prompt-author-badge--link:hover {
+	border-color: color-mix(in oklch, var(--primary) 40%, var(--border));
+	box-shadow: 0 1px 5px color-mix(in oklch, var(--foreground) 12%, transparent);
+}
+
+.prompt-author-badge--link:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 2px;
 }
 
 .prompt-author-avatar {
@@ -4065,8 +4086,30 @@ html {
 	place-items: center;
 	flex: none;
 	width: 20px;
-	height: 17px;
+	height: 20px;
 	overflow: visible;
+}
+
+.prompt-author-avatar > span {
+	display: contents;
+}
+
+.prompt-author-initial {
+	display: grid;
+	place-items: center;
+	flex: none;
+	width: 16px;
+	height: 16px;
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	background: var(--secondary);
+	color: var(--secondary-foreground);
+	font-size: 7px;
+	font-weight: 850;
+}
+
+.prompt-author-initial::before {
+	content: attr(data-initial);
 }
 
 .prompt-author-name {
@@ -4078,6 +4121,7 @@ html {
 	color: var(--foreground);
 	font-size: 10px;
 	font-weight: 670;
+	line-height: 1.3;
 }
 
 .prompt-author-divider,
@@ -4086,7 +4130,11 @@ html {
 }
 
 .prompt-author-divider {
-	color: var(--border);
+	width: 1px;
+	height: 12px;
+	overflow: hidden;
+	background: var(--border);
+	color: transparent;
 }
 
 .prompt-author-kind {

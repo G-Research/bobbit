@@ -7167,9 +7167,9 @@ export class SessionManager {
 		};
 		try {
 			const continuationPrompt =
-				"[SYSTEM: The infrastructure server restarted while you were mid-turn. " +
+				"The infrastructure server restarted while you were mid-turn. " +
 				"Your previous work has been preserved. Please continue where you left off. " +
-				"Do NOT start over — review your recent messages and resume from the exact point of interruption.]";
+				"Do NOT start over — review your recent messages and resume from the exact point of interruption.";
 			await dispatchTrackedSystemPrompt(session, continuationPrompt, {
 				source: "system",
 				whenReady: true,

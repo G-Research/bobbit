@@ -57,6 +57,8 @@ export interface SidebarBobbitOptions {
 	unread?: boolean;
 	/** Disable the idle breathing loop for actual sidebar session/staff rows. */
 	disableIdleBreathing?: boolean;
+	/** Center the complete sprite group in its fixed-width container. */
+	centerInContainer?: boolean;
 }
 
 // ============================================================================
@@ -675,13 +677,14 @@ export function renderStaticSidebarBobbitCanvas(opts: {
 		unread: false,
 		noDesaturate: true,
 		disableIdleBreathing: true,
+		centerInContainer: true,
 		hueRotate: opts.hueRotate,
 		accessory: opts.accessory,
 	})}</span>`;
 }
 
 export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateResult {
-	const { status, isCompacting = false, hueRotate = 0, isSelected = false, isAborting = false, noDesaturate = false, unread = false, disableIdleBreathing = false } = opts;
+	const { status, isCompacting = false, hueRotate = 0, isSelected = false, isAborting = false, noDesaturate = false, unread = false, disableIdleBreathing = false, centerInContainer = false } = opts;
 	const acc = opts.accessory ?? NO_ACCESSORY;
 	const hasAccessory = acc.id !== "none";
 	const addsHeight = acc.addsHeight;
@@ -797,8 +800,8 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 	let accCssW = 0;
 	let accCssH = 0;
 	let accLeft = 0;
-	let sidebarOriginX = 0;
 	const sidebarContainerWidth = 20;
+	let sidebarOriginX = centerInContainer ? (sidebarContainerWidth - cssW) / 2 : 0;
 	if (hasAccessory) {
 		const spriteData = SPRITE_ACCESSORIES[acc.id];
 		if (spriteData && spriteData.pixels.length > 0) {
@@ -814,11 +817,10 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 			const srcW = maxX - xShift + 1;
 			const srcH = maxY - yShift + 1;
 
-			// Preserve coordinate alignment between body + accessory, but use spare
-			// sidebar wrapper width when an accessory has left-of-body pixels (e.g.
-			// headset at x=-1). Other accessories keep the historical x=0 body origin
-			// so right-hand tools don't shift further into the clipped edge.
-			if (xShift < 0) {
+			// Preserve coordinate alignment between body + accessory. Static author
+			// avatars center the complete group; sidebar rows retain their historical
+			// left alignment except for accessories with left-of-body pixels.
+			if (centerInContainer || xShift < 0) {
 				const groupRight = Math.max(BODY_WIDTH, maxX + 1);
 				const groupWidth = (groupRight - xShift) * S;
 				const groupLeft = groupWidth <= sidebarContainerWidth

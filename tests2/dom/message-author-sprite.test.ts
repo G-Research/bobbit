@@ -99,4 +99,13 @@ describe("message author Bobbit sprite", () => {
 		);
 		expect(contexts[0]?.drawCalls).toEqual(expectedBodyDraws);
 	});
+
+	it("centers an unaccessorized author sprite in its fixed-width avatar slot", () => {
+		render(renderStaticSidebarBobbitCanvas(), host);
+
+		const sprite = host.firstElementChild?.firstElementChild as HTMLElement | null;
+		const body = sprite?.querySelector("img") as HTMLImageElement | null;
+		expect(sprite?.style.width).toBe("20px");
+		expect(body?.style.left).toBe("2px");
+	});
 });

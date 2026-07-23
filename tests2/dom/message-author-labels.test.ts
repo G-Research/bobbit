@@ -154,6 +154,11 @@ describe("prompt author badge DOM", () => {
 		]);
 		expect(list.textContent).not.toContain("Human");
 		expect(badges[1].textContent).not.toContain("Bobbit");
+		expect(badges[0].querySelector(".prompt-author-initial")?.getAttribute("data-initial")).toBe("U");
+		expect(badges[1].querySelector(".prompt-author-initial")?.getAttribute("data-initial")).toBe("S");
+		expect(badges[2].querySelector(".prompt-author-initial")).toBeNull();
+		expect(badges.map((badge) => badge.tagName)).toEqual(["DIV", "DIV", "A"]);
+		expect(badges[2].getAttribute("href")).toBe("#/session/1ae73f53-dc48-4ca4");
 		expect(badges[2].getAttribute("title")).toBe("Test Coordinator | Agent");
 	});
 
