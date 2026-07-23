@@ -10,8 +10,9 @@
  * Lifecycle on restart signal:
  *   1. Kill the running server child process
  *   2. Wait for the port to become free
- *   3. Rebuild server TypeScript
- *   4. Re-launch the server
+ *   3. Validate installed dependencies
+ *   4. Rebuild server TypeScript
+ *   5. Re-launch the server
  *
  * Usage:
  *   node dist/server/harness.js [-- ...args forwarded to cli.js]
@@ -23,7 +24,7 @@ import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { restartSentinelPath } from "./harness-signal.js";
-import { DependencyHealError, healDependencies, missingDependencies, type HealResult } from "./harness-deps.js";
+import { runHarnessLifecycle, validateDependencies } from "./harness-deps.js";
 import { windowsGatewayKillArgs } from "./harness-kill.js";
 
 // ---------------------------------------------------------------------------
@@ -72,7 +73,6 @@ const PORT = detectPort();
 const PORT_WAIT_TIMEOUT_MS = 10_000;
 const PORT_POLL_INTERVAL_MS = 250;
 const BUILD_TIMEOUT_MS = 30_000;
-const INSTALL_TIMEOUT_MS = 180_000;
 
 /**
  * Crash-loop guard.
@@ -145,7 +145,11 @@ function launchServer(): void {
 			}
 
 			console.log("[harness] Unexpected exit — restarting in 1s...");
-			setTimeout(() => launchServer(), 1000);
+			setTimeout(() => {
+				void applyLifecycle("crash-relaunch").catch((err) => {
+					console.error("[harness] Automatic crash relaunch failed:", err);
+				});
+			}, 1000);
 		}
 	});
 }
@@ -207,73 +211,8 @@ async function waitForPortFree(port: number): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Build
+// Build and lifecycle policy
 // ---------------------------------------------------------------------------
-
-/**
- * Non-destructive dependency self-heal — runs on every server (re)start.
- *
- * A destructive npm op (`npm ci`, `npm install --force`, `npm audit fix
- * --force`) run while the dev stack is live can half-wipe `node_modules`: it
- * removes additive deps, then aborts with EPERM when it can't unlink a native
- * `.node` file the running stack holds open (e.g. lightningcss on Windows).
- * That leaves core runtime packages (e.g. @earendil-works/pi-ai) missing and
- * breaks the gateway. We cheaply detect that drift and repair it with a plain
- * additive `npm install` (which never pre-wipes the tree). A healthy tree is a
- * no-op, so the common restart path stays fast. See docs/dev-workflow.md.
- */
-function summarizeList(values: string[]): string {
-	return values.length === 0 ? "[]" : `[${values.join(",")}]`;
-}
-
-function logHealSummary(result: HealResult): void {
-	console.log(
-		`[harness] dependency-self-heal summary before=${result.beforeMissing.length} after=${result.afterMissing.length} ` +
-		`restored=${summarizeList(result.restored)} stillMissing=${summarizeList(result.stillMissing)} ` +
-		`regressed=${summarizeList(result.regressed)} lockedFile=${result.lockedFile ?? ""}`,
-	);
-}
-
-function ensureDeps(): void {
-	const missing = missingDependencies(PROJECT_ROOT);
-	if (missing.length === 0) return;
-
-	const preview = missing.slice(0, 8).join(", ");
-	const suffix = missing.length > 8 ? `, +${missing.length - 8} more` : "";
-	console.log(`[harness] ${missing.length} dependency(ies) missing from node_modules: ${preview}${suffix}`);
-	console.log("[harness] Self-healing with non-destructive `npm install`...");
-	try {
-		const result = healDependencies(PROJECT_ROOT, {
-			log: (msg) => console.log(msg),
-			exec: (argv, cwd) => {
-				const command = argv.join(" ");
-				console.log(`[harness] npm invocation argv=${argv.join(" ")} cwd=${cwd}`);
-				const stdout = execSync(command, {
-					cwd,
-					encoding: "utf-8",
-					maxBuffer: 20 * 1024 * 1024,
-					stdio: "pipe",
-					timeout: INSTALL_TIMEOUT_MS,
-					shell: true as unknown as string,
-				});
-				if (stdout) process.stdout.write(stdout);
-			},
-		});
-		logHealSummary(result);
-		if (result.stillMissing.length > 0) {
-			console.error(
-				`[harness] ${result.stillMissing.length} dependency(ies) still missing after npm install. ` +
-				`Stop the dev stack (vite/gateway) and run \`npm install\` manually — a native file may be locked.`,
-			);
-		} else {
-			console.log("[harness] Dependencies restored.");
-		}
-	} catch (err) {
-		if (err instanceof DependencyHealError) logHealSummary(err.result);
-		console.error("[harness] `npm install` self-heal failed:", err instanceof Error ? err.message : err);
-		console.error("[harness] Stop vite/gateway, then retry `npm install`.");
-	}
-}
 
 function buildServer(): void {
 	console.log("[harness] Building server...");
@@ -289,6 +228,16 @@ function buildServer(): void {
 		console.error("[harness] Build failed:", err);
 		throw err;
 	}
+}
+
+async function applyLifecycle(trigger: "initial" | "sentinel-restart" | "crash-relaunch"): Promise<void> {
+	await runHarnessLifecycle(trigger, {
+		validate: () => validateDependencies(PROJECT_ROOT),
+		build: buildServer,
+		launch: launchServer,
+		report: (message) => console.error(`[harness] ${message}`),
+		exit: (code) => process.exit(code),
+	});
 }
 
 // ---------------------------------------------------------------------------
@@ -323,16 +272,12 @@ async function restart(): Promise<void> {
 		console.log(`[harness] Waiting for port ${PORT} to be free...`);
 		await waitForPortFree(PORT);
 
-		// 3. Self-heal node_modules (cheap no-op when healthy), then rebuild
-		ensureDeps();
-		buildServer();
-
-		// 4. Relaunch
-		launchServer();
+		// 3. Validate dependencies, then rebuild and relaunch when healthy.
+		// Invalid dependencies or a failed build leave this watcher alive for a
+		// later operator-triggered retry; stale output is never launched.
+		await applyLifecycle("sentinel-restart");
 	} catch (err) {
 		console.error("[harness] Restart failed:", err);
-		console.log("[harness] Attempting to launch server anyway...");
-		launchServer();
 	} finally {
 		restarting = false;
 	}
@@ -404,20 +349,18 @@ process.on("SIGTERM", shutdown);
 // Main
 // ---------------------------------------------------------------------------
 
-console.log("[harness] Dev server harness starting");
-console.log(`[harness] Project root: ${PROJECT_ROOT}`);
-console.log(`[harness] Server port:  ${PORT}`);
-console.log(`[harness] Sentinel:     ${SENTINEL}`);
-console.log(`[harness] Trigger restart: npm run restart-server`);
+async function main(): Promise<void> {
+	console.log("[harness] Dev server harness starting");
+	console.log(`[harness] Project root: ${PROJECT_ROOT}`);
+	console.log(`[harness] Server port:  ${PORT}`);
+	console.log(`[harness] Sentinel:     ${SENTINEL}`);
+	console.log(`[harness] Trigger restart: npm run restart-server`);
 
-// Initial self-heal + build + launch
-ensureDeps();
-try {
-	buildServer();
-} catch {
-	console.error("[harness] Initial build failed — exiting.");
-	process.exit(1);
+	await applyLifecycle("initial");
+	watchSentinel();
 }
 
-launchServer();
-watchSentinel();
+void main().catch((err) => {
+	console.error("[harness] Initial startup failed — exiting:", err);
+	process.exit(1);
+});

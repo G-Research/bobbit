@@ -1,181 +1,178 @@
-/**
- * Dev-harness dependency self-heal.
- *
- * Why this exists
- * ---------------
- * A running Bobbit dev stack (vite, and the gateway itself) loads native
- * `.node` addons into memory — e.g. `lightningcss.win32-x64-msvc.node`,
- * `@mariozechner/clipboard-*`, `photon-node`. On Windows you cannot `unlink`
- * a native module file while a live process has it loaded.
- *
- * So when a *destructive* npm operation runs while the stack is up
- * (`npm ci`, `npm install --force`, `npm audit fix --force`), npm wipes and
- * rewrites `node_modules`, removes additive deps as planned, then aborts with
- * `EPERM` the moment it tries to unlink the locked native binary. The result
- * is a half-wiped `node_modules` with core runtime packages (e.g.
- * `@earendil-works/pi-ai`) missing — and the gateway can no longer import
- * them, so the app stops functioning.
- *
- * The fix is a cheap, non-destructive self-heal on every server (re)start: we
- * verify each declared dependency is physically present and, only if some are
- * missing, run a plain additive `npm install` (which never pre-wipes the tree,
- * so it restores the missing packages around any locked native file). A
- * healthy tree skips the install entirely, keeping the common restart fast.
- *
- * See docs/dev-workflow.md ("node_modules gets wiped while the dev server is
- * running").
- */
-
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 interface PackageManifest {
 	dependencies?: Record<string, string>;
 	devDependencies?: Record<string, string>;
 }
 
-/**
- * Return the names of declared (prod + dev) dependencies that are NOT
- * physically present in `<projectRoot>/node_modules`.
- *
- * "Present" means the package's own `package.json` exists on disk — a bare
- * directory left behind by a partial wipe does not count. Returns an empty
- * array (and never throws) if the project manifest can't be read, so callers
- * can treat a result of `[]` as "nothing to heal".
- */
-export function missingDependencies(projectRoot: string): string[] {
-	let pkg: PackageManifest;
-	try {
-		pkg = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf-8")) as PackageManifest;
-	} catch {
-		return [];
-	}
-
-	const declared = [
-		...Object.keys(pkg.dependencies ?? {}),
-		...Object.keys(pkg.devDependencies ?? {}),
-	];
-
-	return declared.filter(
-		(name) => !fs.existsSync(path.join(projectRoot, "node_modules", name, "package.json")),
-	);
+export interface DependencyValidationReads {
+	readFile?: (file: string) => string | Buffer;
+	exists?: (file: string) => boolean;
 }
 
-export interface HealDependenciesDeps {
-	exec: (argv: string[], cwd: string) => void;
-	log?: (msg: string) => void;
+export type DependencyValidationResult =
+	| { ok: true }
+	| {
+		ok: false;
+		message: string;
+		missing?: string[];
+		diagnostics?: string[];
+	};
+
+const MANUAL_RECOVERY = "Stop Bobbit and the development stack, run `npm install` manually, then retry or restart.";
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
 
-export interface HealResult {
-	beforeMissing: string[];
-	afterMissing: string[];
-	restored: string[];
-	stillMissing: string[];
-	regressed: string[];
-	lockedFile?: string;
-}
-
-export class DependencyHealError extends Error {
-	constructor(message: string, public readonly result: HealResult, public readonly cause?: unknown) {
-		super(message);
-		this.name = "DependencyHealError";
-	}
-}
-
-function errorText(err: unknown): string {
-	if (!err) return "";
-	const parts: string[] = [];
-	if (err instanceof Error) parts.push(err.message);
-	if (typeof err === "object") {
-		const record = err as Record<string, unknown>;
-		for (const key of ["stderr", "stdout"]) {
-			const value = record[key];
-			if (Buffer.isBuffer(value)) parts.push(value.toString("utf-8"));
-			else if (typeof value === "string") parts.push(value);
-		}
-		const output = record.output;
-		if (Array.isArray(output)) {
-			for (const value of output) {
-				if (Buffer.isBuffer(value)) parts.push(value.toString("utf-8"));
-				else if (typeof value === "string") parts.push(value);
-			}
-		}
-	}
-	return parts.filter(Boolean).join("\n");
-}
-
-export function extractNpmLockedFile(err: unknown): string | undefined {
-	if (err && typeof err === "object") {
-		const maybePath = (err as { path?: unknown }).path;
-		if (typeof maybePath === "string" && maybePath.trim()) return maybePath.trim();
-	}
-
-	const text = errorText(err);
-	const pathLine = text.match(/(?:^|\n)\s*npm\s+(?:ERR!|error)\s+path\s+(.+?)\s*(?:\n|$)/i);
-	if (pathLine?.[1]) return pathLine[1].trim();
-	const syscallLine = text.match(/(?:^|\n)\s*path\s*[:=]\s*(.+?)\s*(?:\n|$)/i);
-	if (syscallLine?.[1]) return syscallLine[1].trim();
-	return undefined;
-}
-
-function isBusyOrPermError(err: unknown): boolean {
-	const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
-	if (typeof code === "string" && /^(EBUSY|EPERM)$/i.test(code)) return true;
-	return /\b(?:EBUSY|EPERM)\b/i.test(errorText(err));
-}
-
-function buildResult(beforeMissing: string[], afterMissing: string[], lockedFile?: string): HealResult {
+function invalidResult(message: string, missing?: string[]): DependencyValidationResult {
 	return {
-		beforeMissing,
-		afterMissing,
-		restored: beforeMissing.filter((name) => !afterMissing.includes(name)),
-		stillMissing: afterMissing.filter((name) => beforeMissing.includes(name)),
-		regressed: afterMissing.filter((name) => !beforeMissing.includes(name)),
-		lockedFile,
+		ok: false,
+		message: `${message} ${MANUAL_RECOVERY}`,
+		...(missing && missing.length > 0 ? { missing } : {}),
 	};
 }
 
-function describeList(names: string[]): string {
-	return names.length === 0 ? "none" : names.join(", ");
+function isDependencyMap(value: unknown): value is Record<string, string> {
+	return value !== null
+		&& typeof value === "object"
+		&& !Array.isArray(value)
+		&& Object.values(value).every(version => typeof version === "string");
 }
 
 /**
- * Testable dependency-repair seam for the dev harness.
- *
- * Runs only the injected safe repair command (`npm install` in production),
- * snapshots declared dependency presence before/after, and fails loud if repair
- * makes the tree worse. EBUSY/EPERM errors include npm's exact locked native
- * file path plus the stop-vite/gateway instruction.
+ * Validate the installed manifests for all declared production and development
+ * dependencies. This phase is deliberately read-only: dependency repair is an
+ * operator action and never part of harness startup or restart.
  */
-export function healDependencies(projectRoot: string, deps: HealDependenciesDeps): HealResult {
-	const beforeMissing = missingDependencies(projectRoot);
-	let execError: unknown;
-	let lockedFile: string | undefined;
+export function validateDependencies(
+	projectRoot: string,
+	reads: DependencyValidationReads = {},
+): DependencyValidationResult {
+	const manifestPath = path.join(projectRoot, "package.json");
+	const readFile = reads.readFile ?? ((file: string) => fs.readFileSync(file, "utf-8"));
+	const exists = reads.exists ?? ((file: string) => fs.existsSync(file));
 
-	deps.log?.(`[harness] dependency self-heal argv=npm install cwd=${projectRoot}`);
+	let parsed: unknown;
 	try {
-		deps.exec(["npm", "install"], projectRoot);
-	} catch (err) {
-		execError = err;
-		if (isBusyOrPermError(err)) lockedFile = extractNpmLockedFile(err);
+		const contents = readFile(manifestPath);
+		parsed = JSON.parse(Buffer.isBuffer(contents) ? contents.toString("utf-8") : contents);
+	} catch (error) {
+		const detail = errorMessage(error);
+		const isSyntaxError = error instanceof SyntaxError;
+		return invalidResult(isSyntaxError
+			? `Root package.json contains invalid JSON and could not be parsed: ${detail}.`
+			: `Root package.json could not be read: ${detail}.`);
 	}
 
-	const afterMissing = missingDependencies(projectRoot);
-	const result = buildResult(beforeMissing, afterMissing, lockedFile);
-
-	if (result.regressed.length > 0 || execError) {
-		const parts: string[] = ["Dependency self-heal failed."];
-		if (result.regressed.length > 0) {
-			parts.push(`Repair regressed declared dependencies that were present before repair: ${describeList(result.regressed)}.`);
-		}
-		if (lockedFile) {
-			parts.push(`npm reported a locked native file: ${lockedFile}. Stop vite/gateway, then retry \`npm install\`.`);
-		} else if (execError) {
-			parts.push("The npm install repair command failed. Stop vite/gateway, then retry `npm install`.");
-		}
-		parts.push(`beforeMissing=${beforeMissing.length} afterMissing=${afterMissing.length}`);
-		throw new DependencyHealError(parts.join(" "), result, execError);
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+		return invalidResult("Root package.json has an invalid structure: expected a JSON object.");
 	}
 
-	return result;
+	const manifest = parsed as PackageManifest;
+	for (const field of ["dependencies", "devDependencies"] as const) {
+		const value = manifest[field];
+		if (value !== undefined && !isDependencyMap(value)) {
+			return invalidResult(`Root package.json has an invalid ${field} field: expected an object whose values are version strings.`);
+		}
+	}
+
+	const declared = new Set([
+		...Object.keys(manifest.dependencies ?? {}),
+		...Object.keys(manifest.devDependencies ?? {}),
+	]);
+	const missing = [...declared].filter(name =>
+		!exists(path.join(projectRoot, "node_modules", name, "package.json")),
+	);
+
+	if (missing.length > 0) {
+		return invalidResult(`Missing declared dependencies: ${missing.join(", ")}.`, missing);
+	}
+	return { ok: true };
+}
+
+export type HarnessLifecycleTrigger = "initial" | "sentinel-restart" | "crash-relaunch";
+
+export interface HarnessLifecycleDeps {
+	validate: () => DependencyValidationResult | Promise<DependencyValidationResult>;
+	build: () => void | Promise<void>;
+	launch: () => void | Promise<void>;
+	report: (message: string) => void;
+	exit: (code: number) => void;
+}
+
+function describeValidationFailure(result: Exclude<DependencyValidationResult, { ok: true }>): string {
+	const details = [result.message, ...(result.diagnostics ?? [])];
+	if (result.missing?.length && !details.some(detail => result.missing!.every(name => detail.includes(name)))) {
+		details.push(`Missing dependencies: ${result.missing.join(", ")}.`);
+	}
+	return details.join("\n");
+}
+
+export interface DependencyValidationCliDeps {
+	validate?: (projectRoot: string) => DependencyValidationResult;
+	report?: (message: string) => void;
+}
+
+/**
+ * Read-only pre-build entry point for `npm run dev:harness`.
+ *
+ * Returning an exit code keeps the production wrapper and focused tests on the
+ * same validation policy without exposing a command/package-manager seam.
+ */
+export function runDependencyValidationCli(
+	projectRoot: string,
+	deps: DependencyValidationCliDeps = {},
+): number {
+	let result: DependencyValidationResult;
+	try {
+		result = (deps.validate ?? validateDependencies)(projectRoot);
+	} catch (error) {
+		result = invalidResult(`Dependency validation failed: ${errorMessage(error)}.`);
+	}
+	if (result.ok) return 0;
+	(deps.report ?? console.error)(`[harness] ${describeValidationFailure(result)}`);
+	return 1;
+}
+
+/**
+ * Apply dependency validation consistently at each harness lifecycle entry.
+ * Unknown properties on the injected dependency object are intentionally
+ * ignored, so no legacy repair or package-manager callback can be reached.
+ */
+export async function runHarnessLifecycle(
+	trigger: HarnessLifecycleTrigger,
+	deps: HarnessLifecycleDeps,
+): Promise<void> {
+	let validation: DependencyValidationResult;
+	try {
+		validation = await deps.validate();
+	} catch (error) {
+		validation = invalidResult(`Dependency validation failed: ${errorMessage(error)}.`);
+	}
+
+	if (!validation.ok) {
+		deps.report(describeValidationFailure(validation));
+		if (trigger === "initial") deps.exit(1);
+		return;
+	}
+
+	if (trigger !== "crash-relaunch") {
+		try {
+			await deps.build();
+		} catch (error) {
+			deps.report(`Harness build failure: ${errorMessage(error)}.`);
+			if (trigger === "initial") deps.exit(1);
+			return;
+		}
+	}
+
+	await deps.launch();
+}
+
+const invokedPath = process.argv[1];
+if (invokedPath && path.resolve(invokedPath) === path.resolve(fileURLToPath(import.meta.url))) {
+	process.exitCode = runDependencyValidationCli(process.cwd());
 }

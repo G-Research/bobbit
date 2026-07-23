@@ -88,18 +88,21 @@ function rawAuthorSidecarRecords(gateway: any, sessionId: string): any[] {
 function seedSystemAuthorSidecar(
 	_gateway: any,
 	sessionId: string,
-	modelText: string,
+	baseModelText: string,
 	options: { settled?: boolean } = {},
 ): string {
 	const promptId = `prompt-${sessionId}`;
 	const dispatchedAt = Date.now();
+	const modelPrefix = "[System]: ";
+	const modelText = `${modelPrefix}${baseModelText}`;
 	expect(appendPromptAuthorDispatch(sessionId, {
 		promptId,
 		dispatchedAt,
 		modelText,
+		modelPrefix,
 		source: "task-notification",
 		author: SYSTEM_AUTHOR,
-	})).toBe(true);
+	} as Parameters<typeof appendPromptAuthorDispatch>[1])).toBe(true);
 	if (options.settled === false) return promptId;
 	expect(appendPromptAuthorSettlement(sessionId, {
 		promptId,
@@ -136,6 +139,24 @@ function expectBufferedReplayAuthor(
 
 function expectBufferedSystemReplay(gateway: any, sessionId: string, marker: string): void {
 	expectBufferedReplayAuthor(gateway, sessionId, marker, SYSTEM_AUTHOR);
+}
+
+function expectCopiedSystemBinding(gateway: any, sessionId: string, marker: string): void {
+	const rawModelText = `[System]: ${marker}`;
+	const binding = readAuthorSidecar(sessionId).find(entry =>
+		promptAuthorBindingMatchesText(entry, rawModelText),
+	);
+	expect(binding).toMatchObject({
+		modelPrefix: "[System]: ",
+		author: SYSTEM_AUTHOR,
+		settlement: { outcome: "echoed" },
+	});
+	expect(promptAuthorBindingMatchesText(binding!, marker),
+		"copied binding digest remains keyed to exact prefixed Pi text").toBe(false);
+	const dispatch = rawAuthorSidecarRecords(gateway, sessionId).find(record =>
+		record.type === "prompt-author" && record.promptId === binding?.promptId,
+	);
+	expect(dispatch).toMatchObject({ modelPrefix: "[System]: ", author: SYSTEM_AUTHOR });
 }
 
 /** Make the in-process bridge mirror Pi's switch_session replay events. */
@@ -365,7 +386,7 @@ test.describe("fork/continue author replay lifecycle", () => {
 	test("fork copies author bindings before switch_session replay reaches EventBuffer", async ({ gateway }) => {
 		const marker = "FORK_SYSTEM_AUTHOR_REPLAY";
 		const sourceId = sessions.add(await createSessionFromHarness());
-		seedSessionTranscript(gateway, sourceId, [{ role: "user", text: marker }]);
+		seedSessionTranscript(gateway, sourceId, [{ role: "user", text: `[System]: ${marker}` }]);
 		seedSystemAuthorSidecar(gateway, sourceId, marker);
 
 		const response = await withSwitchReplayEvents(() => localApiFetch(gateway, `/api/sessions/${sourceId}/fork`, {
@@ -378,6 +399,7 @@ test.describe("fork/continue author replay lifecycle", () => {
 
 		expectBufferedSystemReplay(gateway, fork.id, marker);
 		expect(fs.existsSync(authorSidecarPath(gateway, fork.id))).toBe(true);
+		expectCopiedSystemBinding(gateway, fork.id, marker);
 	});
 
 	test("live fork keeps a new same-text human prompt local when the source binding is unresolved", async ({ gateway }) => {
@@ -395,7 +417,9 @@ test.describe("fork/continue author replay lifecycle", () => {
 			author: SYSTEM_AUTHOR,
 		});
 		expect(sourceBinding.settlement).toBeUndefined();
-		expect(promptAuthorBindingMatchesText(sourceBinding, marker)).toBe(true);
+		expect((sourceBinding as any).modelPrefix).toBe("[System]: ");
+		expect(promptAuthorBindingMatchesText(sourceBinding, `[System]: ${marker}`)).toBe(true);
+		expect(promptAuthorBindingMatchesText(sourceBinding, marker)).toBe(false);
 		expect(fs.readFileSync(sourceTranscript, "utf8")).not.toContain(marker);
 
 		const response = await withSwitchReplayEvents(() => localApiFetch(gateway, `/api/sessions/${sourceId}/fork`, {
@@ -457,7 +481,7 @@ test.describe("fork/continue author replay lifecycle", () => {
 
 	test("continue copies author bindings before switch_session replay reaches EventBuffer", async ({ gateway }) => {
 		const marker = "CONTINUE_SYSTEM_AUTHOR_REPLAY";
-		const archivedId = await makeArchivedSourceSession(gateway, { promptText: marker });
+		const archivedId = await makeArchivedSourceSession(gateway, { promptText: `[System]: ${marker}` });
 		seedSystemAuthorSidecar(gateway, archivedId, marker);
 
 		const response = await withSwitchReplayEvents(() => localApiFetch(gateway, `/api/sessions/${archivedId}/continue`, {
@@ -470,24 +494,29 @@ test.describe("fork/continue author replay lifecycle", () => {
 
 		expectBufferedSystemReplay(gateway, continued.id, marker);
 		expect(fs.existsSync(authorSidecarPath(gateway, continued.id))).toBe(true);
+		expectCopiedSystemBinding(gateway, continued.id, marker);
 	});
 
 	test("failed fork and continue setup purge their pre-copied destination sidecars", async ({ gateway }) => {
 		const forkMarker = "FORK_FAILED_SETUP_AUTHOR";
 		const forkSourceId = sessions.add(await createSessionFromHarness());
-		seedSessionTranscript(gateway, forkSourceId, [{ role: "user", text: forkMarker }]);
+		seedSessionTranscript(gateway, forkSourceId, [{ role: "user", text: `[System]: ${forkMarker}` }]);
 		seedSystemAuthorSidecar(gateway, forkSourceId, forkMarker);
 
 		const continueMarker = "CONTINUE_FAILED_SETUP_AUTHOR";
-		const archivedId = await makeArchivedSourceSession(gateway, { promptText: continueMarker });
+		const archivedId = await makeArchivedSourceSession(gateway, { promptText: `[System]: ${continueMarker}` });
 		seedSystemAuthorSidecar(gateway, archivedId, continueMarker);
 
 		const sessionManager = gateway.sessionManager;
 		const originalCreateSession = sessionManager.createSession;
 		const failedDestinationIds: string[] = [];
+		const bindingsBeforeFailure: any[][] = [];
 		sessionManager.createSession = async (...args: any[]) => {
 			const destinationId = args[4]?.sessionId;
-			if (typeof destinationId === "string") failedDestinationIds.push(destinationId);
+			if (typeof destinationId === "string") {
+				failedDestinationIds.push(destinationId);
+				bindingsBeforeFailure.push(readAuthorSidecar(destinationId));
+			}
 			throw new Error("fixture setup failure after sidecar copy");
 		};
 		try {
@@ -507,6 +536,11 @@ test.describe("fork/continue author replay lifecycle", () => {
 		}
 
 		expect(failedDestinationIds).toHaveLength(2);
+		expect(bindingsBeforeFailure).toHaveLength(2);
+		for (const copied of bindingsBeforeFailure) {
+			expect(copied, "destination sidecar was copied before setup failed").toHaveLength(1);
+			expect(copied[0].modelPrefix).toBe("[System]: ");
+		}
 		for (const destinationId of failedDestinationIds) {
 			expect(fs.existsSync(authorSidecarPath(gateway, destinationId))).toBe(false);
 		}

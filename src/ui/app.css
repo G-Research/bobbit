@@ -4003,6 +4003,101 @@ html {
 	line-height: 1;
 }
 
+/* Prompt author attribution. The badge and bubble share one grid cell so the
+   badge participates in intrinsic width while remaining over the top border. */
+.prompt-row--labelled {
+	align-items: flex-end;
+	min-width: 0;
+	max-width: 100%;
+}
+
+.prompt-bubble-shell {
+	position: relative;
+	display: inline-grid;
+	grid-template-areas: "prompt-stack";
+	flex: 0 1 auto;
+	width: fit-content;
+	min-width: 0;
+	max-width: 100%;
+}
+
+.prompt-bubble-shell > .prompt-author-badge,
+.prompt-bubble-shell > .user-message-container--labelled {
+	grid-area: prompt-stack;
+}
+
+.user-message-container--labelled {
+	width: fit-content;
+	min-width: 0;
+	max-width: 100%;
+	margin-top: 7px;
+	padding-top: 14px;
+}
+
+.user-message-container--labelled::before {
+	top: 18px;
+}
+
+.prompt-author-badge {
+	z-index: 2;
+	align-self: start;
+	justify-self: start;
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	width: max-content;
+	max-width: calc(100% - 18px);
+	min-width: 0;
+	min-height: 22px;
+	margin-left: 10px;
+	padding: 1px 7px 1px 3px;
+	transform: translateY(-56%);
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	background: var(--card);
+	box-shadow: 0 2px 5px color-mix(in oklch, var(--foreground) 9%, transparent);
+	color: var(--muted-foreground);
+	pointer-events: none;
+}
+
+.prompt-author-avatar {
+	display: grid;
+	place-items: center;
+	flex: none;
+	width: 20px;
+	height: 17px;
+	overflow: visible;
+}
+
+.prompt-author-name {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--foreground);
+	font-size: 10px;
+	font-weight: 670;
+}
+
+.prompt-author-divider,
+.prompt-author-kind {
+	flex: none;
+}
+
+.prompt-author-divider {
+	color: var(--border);
+}
+
+.prompt-author-kind {
+	font-size: 8px;
+	letter-spacing: 0.07em;
+}
+
+.prompt-row--labelled > .message-timestamp {
+	flex-shrink: 0;
+}
+
 /* Message timestamps — hidden by default, shown when preference enabled */
 .message-timestamp {
 	display: none;

@@ -14,7 +14,6 @@ import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
 import { resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { scopePaths } from "./pack-types.js";
 import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
-import { currentRuntimeSnapshotModulesDir, ensureRuntimeSnapshot, resolveAgentRuntimeModulesDir } from "./runtime-ringfence.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** Builtin tools directory — dist/server/defaults/tools/ (read-only, shipped with Bobbit). */
@@ -130,6 +129,13 @@ export interface RpcBridgeOptions {
 	initialThinkingLevel?: string;
 	/** Timer/clock implementation. Defaults to real timers. */
 	clock?: Clock;
+}
+
+export interface RpcBridgeStartDeps {
+	/** `import.meta.resolve`-compatible package resolver used by direct starts. */
+	resolvePackage?: (specifier: string, parent?: string | URL) => string;
+	/** Direct child spawn seam. Docker continues to use its existing spawn path. */
+	spawnDirect?: typeof spawn;
 }
 
 export type RpcEventListener = (event: any) => void;
@@ -360,7 +366,10 @@ export class RpcBridge {
 	private stderrTail: string[] = [];
 	private readonly clock: Clock = realClock;
 
-	constructor(private options: RpcBridgeOptions = {}) {
+	constructor(
+		private options: RpcBridgeOptions = {},
+		private readonly startDeps: RpcBridgeStartDeps = {},
+	) {
 		// If a test-registered factory claims this options object, return that
 		// instance instead of the default child-process bridge. This lets the
 		// E2E harness swap in an in-process mock without modifying any callers.
@@ -378,7 +387,14 @@ export class RpcBridge {
 	}
 
 	async start(): Promise<void> {
-		const cliPath = this.options.cliPath || findAgentCli();
+		// Docker uses the Pi runtime baked into the sandbox image. Only direct host
+		// spawns resolve Bobbit's installed package (or an explicit CLI override).
+		const cliPath = this.options.containerId
+			? ""
+			: resolveDirectHostPiRuntime({
+				cliPath: this.options.cliPath,
+				resolve: this.startDeps.resolvePackage,
+			}).cliPath;
 		const args = buildAgentArgs(this.options);
 
 		// Disable pi's internal builtin tools and re-register the file-tool subset
@@ -494,7 +510,8 @@ export class RpcBridge {
 			const tlsEnv = fs.existsSync(caCert)
 				? { NODE_EXTRA_CA_CERTS: caCert }
 				: { NODE_TLS_REJECT_UNAUTHORIZED: "0" };
-			this.process = spawn(process.execPath, [cliPath, ...args], {
+			const spawnDirect = this.startDeps.spawnDirect ?? spawn;
+			this.process = spawnDirect(process.execPath, [cliPath, ...args], {
 				stdio: ["pipe", "pipe", "pipe"],
 				cwd: this.options.cwd,
 				env: {
@@ -1146,74 +1163,80 @@ export function hostPathToContainer(hostPath: string, opts: MountTableOptions = 
 	return tryHostPathToContainer(hostPath, opts) ?? remapUnknownProjectMarketPackPath(hostPath) ?? hostPath;
 }
 
-interface WorkingAgentInstall {
-	mainPath: string;
-	modulesDir: string;
+const PI_CODING_AGENT_PACKAGE = "@earendil-works/pi-coding-agent";
+
+export interface DirectHostPiRuntime {
+	/** Present for automatic package resolution; an explicit CLI may live anywhere. */
+	modulesDir?: string;
 	cliPath: string;
 }
 
-function resolveWorkingAgentInstall(): WorkingAgentInstall {
-	// import.meta.resolve is the fallback source of truth for Node exports/subpath
-	// behavior when the ring-fenced snapshot is absent or incomplete.
-	const mainUrl = import.meta.resolve("@earendil-works/pi-coding-agent");
-	const mainPath = fileURLToPath(mainUrl);
-	// mainPath = .../node_modules/@earendil-works/pi-coding-agent/dist/index.js
-	// Package root = .../node_modules/@earendil-works/pi-coding-agent
-	const pkgRoot = path.resolve(path.dirname(mainPath), "..");
-	return {
-		mainPath,
-		modulesDir: path.resolve(pkgRoot, "..", ".."),
-		cliPath: path.join(path.dirname(mainPath), "cli.js"),
-	};
+export interface ResolveDirectHostPiRuntimeOptions {
+	/** Explicit CLI overrides automatic package resolution. */
+	cliPath?: string;
+	/** `import.meta.resolve`-compatible seam for focused tests. */
+	resolve?: (specifier: string, parent?: string | URL) => string;
+	/** Read-only availability seam for focused partial-install tests. */
+	exists?: (file: string) => boolean;
 }
 
-function resolveSnapshotModulesDir(workingModulesDir?: string): string | undefined {
-	if (workingModulesDir) return ensureRuntimeSnapshot({ workingModulesDir });
-	return currentRuntimeSnapshotModulesDir();
+function piPackageRootFromEntry(entryPath: string): string {
+	let candidate = path.dirname(entryPath);
+	while (true) {
+		if (
+			path.basename(candidate) === "pi-coding-agent"
+			&& path.basename(path.dirname(candidate)) === "@earendil-works"
+		) {
+			return candidate;
+		}
+		const parent = path.dirname(candidate);
+		if (parent === candidate) break;
+		candidate = parent;
+	}
+	throw new Error(`Resolved ${PI_CODING_AGENT_PACKAGE} entry is outside its package directory: ${entryPath}`);
 }
 
 /**
- * Resolve the node_modules root used by direct host-side agent spawns.
- * Prefer the ring-fenced immutable snapshot; fall back to import.meta.resolve's
- * working-tree install if the snapshot is absent/incomplete. Docker spawns do
- * not use this host snapshot: the pi-coding-agent runtime is baked into the
- * sandbox image and runs from the image's /node_modules path.
+ * Resolve the Pi runtime used by direct host-side agent spawns.
+ *
+ * Automatic resolution deliberately delegates to Node's `import.meta.resolve`
+ * semantics and uses Bobbit's installed package in place. It never consults or
+ * mutates legacy state-directory runtime snapshots. Docker spawns bypass this
+ * helper because their Pi runtime is baked into the sandbox image.
  */
-export function resolveAgentModulesDir(): string {
-	let working: WorkingAgentInstall | undefined;
-	let workingError: unknown;
-	try {
-		working = resolveWorkingAgentInstall();
-	} catch (err) {
-		workingError = err;
-	}
+export function resolveDirectHostPiRuntime(
+	opts: ResolveDirectHostPiRuntimeOptions = {},
+): DirectHostPiRuntime {
+	if (opts.cliPath) return { cliPath: opts.cliPath };
 
-	const snapshotModulesDir = resolveSnapshotModulesDir(working?.modulesDir);
-	if (snapshotModulesDir) {
-		return resolveAgentRuntimeModulesDir({ workingModulesDir: working?.modulesDir ?? snapshotModulesDir, snapshotModulesDir });
+	try {
+		const resolve = opts.resolve ?? ((specifier: string, parent?: string | URL) => import.meta.resolve(specifier, parent));
+		const exists = opts.exists ?? ((file: string) => fs.existsSync(file));
+		const entryPath = fileURLToPath(resolve(PI_CODING_AGENT_PACKAGE));
+		if (!exists(entryPath)) {
+			throw new Error(`Resolved package entry is unavailable: ${entryPath}`);
+		}
+		const packageRoot = piPackageRootFromEntry(entryPath);
+		const cliPath = path.join(packageRoot, "dist", "cli.js");
+		if (!exists(cliPath)) {
+			throw new Error(`Resolved package CLI is unavailable: ${cliPath}`);
+		}
+		return {
+			modulesDir: path.dirname(path.dirname(packageRoot)),
+			cliPath,
+		};
+	} catch (cause) {
+		throw new Error(
+			`Could not use ${PI_CODING_AGENT_PACKAGE} for a direct host agent because the package is missing or incomplete. `
+			+ `Install ${PI_CODING_AGENT_PACKAGE} or pass --agent-cli /path/to/cli.js.`,
+			{ cause },
+		);
 	}
-	if (working) return working.modulesDir;
-	throw workingError instanceof Error ? workingError : new Error(String(workingError));
 }
 
-/** Resolve the pi-coding-agent cli.js path from the installed package */
-function findAgentCli(): string {
-	let working: WorkingAgentInstall | undefined;
-	try {
-		working = resolveWorkingAgentInstall();
-	} catch {
-		// If the working tree was half-wiped after a previous successful boot, the
-		// snapshot pointer can still keep direct spawns alive.
-	}
-
-	const snapshotModulesDir = resolveSnapshotModulesDir(working?.modulesDir);
-	if (snapshotModulesDir) {
-		const cliPath = path.join(snapshotModulesDir, "@earendil-works", "pi-coding-agent", "dist", "cli.js");
-		if (fs.existsSync(cliPath)) return cliPath;
-	}
-	if (working) return working.cliPath;
-	throw new Error(
-		"Could not find pi-coding-agent CLI. " +
-			"Either install @earendil-works/pi-coding-agent or pass --agent-cli /path/to/cli.js",
-	);
+/** Resolve the node_modules root used by direct host-side agent spawns. */
+export function resolveAgentModulesDir(): string {
+	const runtime = resolveDirectHostPiRuntime();
+	if (runtime.modulesDir) return runtime.modulesDir;
+	throw new Error(`Automatic ${PI_CODING_AGENT_PACKAGE} resolution did not return a node_modules directory.`);
 }

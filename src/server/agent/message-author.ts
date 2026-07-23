@@ -1,10 +1,22 @@
 import {
 	LOCAL_USER_AUTHOR,
 	MAX_MESSAGE_AUTHOR_LABEL_LENGTH,
+	formatDisplayAuthorId,
 	isMessageAuthor,
+	isToolResultOnlyMessage,
+	normalizeMessageAuthorLabel,
+	sanitizeAuthorIdComponent,
 	type BobbitMessage,
 	type MessageAuthor,
 	type MessageAuthorKind,
+} from "../../shared/message-author.js";
+
+export {
+	isToolResultBlock,
+	isToolResultMessage,
+	isToolResultOnlyMessage,
+	isToolResultRole,
+	sanitizeAuthorIdComponent,
 } from "../../shared/message-author.js";
 import type { PromptSource } from "../../shared/prompt-source.js";
 import type { PersistedStaff } from "./staff-store.js";
@@ -46,26 +58,13 @@ function nonEmpty(value: unknown): string | undefined {
 	return trimmed || undefined;
 }
 
-/** Sanitize one identity component; author ids are metadata, never path names. */
-export function sanitizeAuthorIdComponent(
-	value: string,
-	fallback = "unknown",
-	maxLength = 64,
-): string {
-	const normalized = value
-		.trim()
-		.toLowerCase()
-		.replace(/[^a-z0-9_-]+/g, "-")
-		.replace(/-+/g, "-")
-		.replace(/^[-_]+|[-_]+$/g, "")
-		.slice(0, Math.max(1, maxLength));
-	if (normalized) return normalized;
-	const safeFallback = fallback
-		.toLowerCase()
-		.replace(/[^a-z0-9_-]+/g, "-")
-		.replace(/^[-_]+|[-_]+$/g, "")
-		.slice(0, Math.max(1, maxLength));
-	return safeFallback || "unknown";
+/** Format the exact dispatch-time prefix for a trusted accountable prompt author. */
+export function modelPrefixForPromptAuthor(author: unknown): string | undefined {
+	if (!isMessageAuthor(author) || author.kind === "user") return undefined;
+	if (author.kind === "system") return "[System]: ";
+	const label = normalizeMessageAuthorLabel(author.label);
+	const displayId = formatDisplayAuthorId(author);
+	return label && displayId ? `[${label} (${displayId})]: ` : undefined;
 }
 
 function boundedLabel(value: string): string {
@@ -144,45 +143,6 @@ export function resolvePromptAuthor(
 	}
 	return BOBBIT_SYSTEM_AUTHOR;
 }
-
-export function isToolResultRole(role: unknown): boolean {
-	return role === "toolResult" || role === "tool_result" || role === "tool";
-}
-
-export function isToolResultBlock(value: unknown): boolean {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-	const block = value as Record<string, unknown>;
-	return block.type === "tool_result"
-		|| block.type === "toolResult"
-		|| isToolResultRole(block.role);
-}
-
-/** Provider histories may encode tool output as a user-role message of tool-result blocks. */
-export function isToolResultOnlyMessage(message: unknown): boolean {
-	if (!message || typeof message !== "object" || Array.isArray(message)) return false;
-	const candidate = message as Record<string, unknown>;
-	if (isToolResultRole(candidate.role)) return true;
-	if (candidate.role !== "user" || !Array.isArray(candidate.content)) return false;
-	let foundToolResult = false;
-	for (const block of candidate.content) {
-		if (isToolResultBlock(block)) {
-			foundToolResult = true;
-			continue;
-		}
-		if (
-			block
-			&& typeof block === "object"
-			&& !Array.isArray(block)
-			&& (block as Record<string, unknown>).type === "text"
-			&& typeof (block as Record<string, unknown>).text === "string"
-			&& ((block as Record<string, unknown>).text as string).trim() === ""
-		) continue;
-		return false;
-	}
-	return foundToolResult;
-}
-
-export const isToolResultMessage = isToolResultOnlyMessage;
 
 function isCompactionSyntheticMessage(message: Record<string, unknown>): boolean {
 	if (message.toolName === "__compaction_summary" || message.name === "__compaction_summary") return true;

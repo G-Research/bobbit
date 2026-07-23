@@ -2,16 +2,16 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1136,
+  "censusTotal": 1137,
   "buckets": {
     "daily": 62,
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
-    "v2-integration": 202
+    "v2-integration": 203
   },
   "methods": {
-    "adapter": 275,
+    "adapter": 276,
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
@@ -1119,8 +1119,62 @@
       }
     },
     {
+      "path": "tests2/core/message-author-surfacing.test.ts",
+      "reason": "Pure core coverage for accountable-prompt visibility, exact human/system/agent badge presentation, safe label normalization, deterministic display IDs, and model-prefix formatting that leaves human prompts unprefixed.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/message-author-appearance.test.ts",
+      "reason": "Pure loaded-state coverage for sanitized live, archived, and staff author appearance resolution, canonical sidebar hue/accessory reuse, and immutable fallback behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/message-author-dispatch.test.ts",
+      "reason": "Deterministic dispatch and replay coverage for exact system/agent Pi prefixes, unprefixed human and durable base text, append-failure degradation, steer batching, EventBuffer resume, fresh snapshots, and idempotent digest-proven projection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/message-author-sprite.test.ts",
+      "reason": "Happy-dom coverage proving prompt badges render the canonical sidebar-matched Bobbit sprite with fixed open eyes, decorative semantics, and no status, animation, or timer behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/dom/message-author-labels.test.ts",
+      "reason": "Happy-dom MessageList coverage for conditional prompt-only author badges, exact labels, transcript-wide cross-slice mode, safe legacy degradation, unchanged bubble content, and responsive long-label layout hooks.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/integration/message-author-extension-projection.test.ts",
+      "reason": "In-process extension-host integration coverage proving correlated raw prefixes are digest-projected before transcript and tool-call reads, filters never match injected attribution, and missing sidecars preserve literal content.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
       "path": "tests2/core/author-sidecar.test.ts",
-      "reason": "Focused secure-v2 coverage for private author-sidecar placement, digest-only rows, stable-key restart correlation, POSIX modes, v1 plaintext migration/removal, transcript-confirmed settled copy, corruption tolerance, correlation, and purge.",
+      "reason": "Focused secure-v2 coverage for exact modelPrefix and digest-only author rows, semantic prefix validation, digest-proven idempotent projection of string and structured prompts, restart correlation, confirmed copy/fork lifecycle, corruption tolerance, and purge without prompt plaintext.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -1156,7 +1210,7 @@
     },
     {
       "path": "tests2/integration/message-author-ws-server.test.ts",
-      "reason": "Deterministic in-process gateway integration coverage for human and server-generated author identity across live websocket events, reconnects, and get_messages snapshots without changing message roles or text.",
+      "reason": "Deterministic in-process gateway integration coverage for unprefixed human and exactly prefixed system/agent Pi RPCs, same/mixed-author steers, append-failure degradation, and digest-projected live, resume, snapshot, transcript, title, and search-visible content.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -1165,7 +1219,7 @@
     },
     {
       "path": "tests2/browser/journeys/author-metadata.journey.spec.ts",
-      "reason": "Chromium browser acceptance journey proving user/assistant author identities survive reload in client state while ordinary one-human chat renders no noisy author labels.",
+      "reason": "Chromium acceptance coverage for all-human label suppression and conditional User/System/Agent badges across live delivery, reload, pre-compaction slices, narrow layouts, and a static sidebar-matched agent sprite without exposing model prefixes.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
@@ -4178,6 +4232,13 @@
       "method": "relocate",
       "replacement": [],
       "rationale": "Spawns a real MCP subprocess to exercise tool permissions."
+    },
+    {
+      "file": "tests/e2e/message-author-prefix-restart.spec.ts",
+      "bucket": "v2-integration",
+      "method": "adapter",
+      "replacement": [],
+      "rationale": "Gateway restart integration coverage for exact-once raw Pi author prefixes, digest-only private sidecar proof, and unchanged websocket, transcript, replay, and search-visible base text."
     },
     {
       "file": "tests/e2e/models-api.spec.ts",
@@ -10938,7 +10999,7 @@
       "bucket": "v2-core",
       "method": "rewrite",
       "replacement": [],
-      "rationale": "Core-tier TDD reproducing test for the node_modules ring-fence goal: temp-FS + injected seams pin that repair cannot half-wipe declared deps and agent runtime resolution prefers an intact ring-fenced snapshot over a gutted working node_modules.",
+      "rationale": "Focused core regression for NFS-safe startup policy: temp fixtures and injected seams pin installed direct Pi resolution without probing legacy runtime snapshots, read-only dependency validation with no automatic package-manager repair, and lifecycle block/retry behavior for unhealthy initial boot, sentinel restart, and crash relaunch.",
       "migrated": true,
       "v2Path": "tests2/core/node-modules-ring-fence.test.ts",
       "execution": {

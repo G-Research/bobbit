@@ -6,13 +6,17 @@ import {
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,
 	copyAuthorSidecar,
+	createPromptAuthorStreamCorrelation,
 	digestPromptModelText,
 	extractPromptModelText,
+	foldAuthorSidecarRecords,
 	initAuthorSidecarDir,
 	mergeAuthorSidecarIntoMessages,
+	projectCorrelatedPromptMessage,
 	promptAuthorBindingMatchesText,
 	purgeAuthorSidecar,
 	readAuthorSidecar,
+	type PromptAuthorBinding,
 	type PromptAuthorDispatchInput,
 } from "../../src/server/agent/author-sidecar.ts";
 import { readTranscript } from "../../src/server/agent/transcript-reader.ts";
@@ -49,6 +53,8 @@ afterAll(() => {
 
 const systemAuthor: MessageAuthor = { kind: "system", id: "system:bobbit", label: "Bobbit" };
 const agentAuthor: MessageAuthor = { kind: "agent", id: "session:caller", label: "Caller" };
+const systemPrefix = "[System]: ";
+const agentPrefix = "[Caller (caller)]: ";
 
 function dispatch(
 	promptId: string,
@@ -65,6 +71,33 @@ function transcriptRow(text: string, extras: Record<string, unknown> = {}): stri
 		...extras,
 		message: { role: "user", content: [{ type: "text", text }] },
 	})}\n`;
+}
+
+function echoedBinding(
+	promptId: string,
+	piText: string,
+	author: MessageAuthor,
+	modelPrefix?: string,
+	messageId = `message-${promptId}`,
+): PromptAuthorBinding {
+	return {
+		schemaVersion: 2,
+		type: "prompt-author",
+		promptId,
+		dispatchedAt: 1_000,
+		modelTextDigest: digestPromptModelText(piText),
+		source: author.kind === "system" ? "system" : author.kind,
+		author,
+		...(modelPrefix === undefined ? {} : { modelPrefix }),
+		settlement: {
+			schemaVersion: 2,
+			type: "prompt-author-settlement",
+			promptId,
+			settledAt: 1_100,
+			outcome: "echoed",
+			messageId,
+		},
+	};
 }
 
 describe("author sidecar v2 persistence", () => {
@@ -108,6 +141,71 @@ describe("author sidecar v2 persistence", () => {
 		expect(rawRows[0]).not.toHaveProperty("modelText");
 		expect(rawRows[0]).toMatchObject({ modelTextDigest: digest });
 		expect(fs.existsSync(path.join(stateDir, "author-sidecar"))).toBe(false);
+	});
+
+	it("stores an author-bound prefix and digests the exact Pi text without body plaintext", () => {
+		const sessionId = "prefixed-roundtrip";
+		const body = "PREFIXED_BODY_SECRET_must_never_reach_disk";
+		const piText = `${agentPrefix}${body}`;
+		expect(appendPromptAuthorDispatch(sessionId, {
+			...dispatch("prefixed", piText, agentAuthor),
+			modelPrefix: agentPrefix,
+		})).toBe(true);
+
+		const [binding] = readAuthorSidecar(sessionId);
+		expect(binding).toMatchObject({
+			author: agentAuthor,
+			modelPrefix: agentPrefix,
+			modelTextDigest: digestPromptModelText(piText),
+		});
+		expect(promptAuthorBindingMatchesText(binding, piText)).toBe(true);
+		expect(promptAuthorBindingMatchesText(binding, body)).toBe(false);
+		const persisted = fs.readFileSync(sidecarPath(sessionId), "utf8");
+		expect(persisted).not.toContain(body);
+		expect(JSON.parse(persisted)).toMatchObject({
+			modelPrefix: agentPrefix,
+			modelTextDigest: digestPromptModelText(piText),
+		});
+	});
+
+	it("accepts only exact formatter-derived prefixes bound to the record author", () => {
+		const exactCases = [
+			["system", systemAuthor, systemPrefix],
+			["agent", agentAuthor, agentPrefix],
+		] as const;
+		for (const [name, author, modelPrefix] of exactCases) {
+			expect(appendPromptAuthorDispatch(`valid-prefix-${name}`, {
+				...dispatch("valid", `${modelPrefix}body`, author),
+				modelPrefix,
+			})).toBe(true);
+		}
+
+		const invalidCases: Array<[string, MessageAuthor, string]> = [
+			["wrong-agent-label", agentAuthor, "[Other (caller)]: "],
+			["wrong-agent-id", agentAuthor, "[Caller (other1)]: "],
+			["agent-as-system", agentAuthor, systemPrefix],
+			["system-as-agent", systemAuthor, agentPrefix],
+			["user-prefix", LOCAL_USER_AUTHOR, "[User (local)]: "],
+			["missing-space", systemAuthor, "[System]:"],
+		];
+		for (const [name, author, modelPrefix] of invalidCases) {
+			const invalidRecord = {
+				schemaVersion: 2 as const,
+				type: "prompt-author" as const,
+				promptId: "invalid",
+				dispatchedAt: 1_000,
+				modelTextDigest: digestPromptModelText(`${modelPrefix}body`) ?? "",
+				source: author.kind === "system" ? "system" as const : author.kind,
+				author,
+				modelPrefix,
+			};
+			expect(appendPromptAuthorDispatch(`invalid-prefix-${name}`, {
+				...dispatch("invalid", `${modelPrefix}body`, author),
+				modelPrefix,
+			})).toBe(false);
+			expect(readAuthorSidecar(`invalid-prefix-${name}`)).toEqual([]);
+			expect(foldAuthorSidecarRecords([invalidRecord])).toEqual([]);
+		}
 	});
 
 	it("enforces POSIX 0700 directory and 0600 ledger modes", () => {
@@ -288,6 +386,7 @@ describe("author sidecar v2 persistence", () => {
 				},
 			]);
 			expect(migratedRows.every((row) => !Object.hasOwn(row, "modelText"))).toBe(true);
+			expect(migratedRows.every((row) => !Object.hasOwn(row, "modelPrefix"))).toBe(true);
 			for (const leakedText of [plaintext, invalidPlaintext, futurePlaintext, partialPlaintext]) {
 				expect(migratedText).not.toContain(leakedText);
 			}
@@ -319,7 +418,7 @@ describe("author sidecar v2 persistence", () => {
 		const legacyFile = path.join(legacyDir, "legacy-v2-session.jsonl");
 		const plaintext = "EXTRA_V2_MODELTEXT_PLAINTEXT_remove_me";
 		const nestedAuthorPlaintext = "EXTRA_V2_AUTHOR_MODELTEXT_PLAINTEXT_remove_me";
-		const modelTextDigest = digestPromptModelText("canonical v2 prompt");
+		const modelTextDigest = digestPromptModelText(`${systemPrefix}canonical v2 prompt`);
 		const row = {
 			schemaVersion: 2,
 			type: "prompt-author",
@@ -327,6 +426,7 @@ describe("author sidecar v2 persistence", () => {
 			dispatchedAt: 700,
 			modelTextDigest,
 			modelText: plaintext,
+			modelPrefix: systemPrefix,
 			source: "system",
 			author: { ...systemAuthor, modelText: nestedAuthorPlaintext },
 		};
@@ -345,6 +445,7 @@ describe("author sidecar v2 persistence", () => {
 				modelTextDigest,
 				source: "system",
 				author: systemAuthor,
+				modelPrefix: systemPrefix,
 			}]);
 			expect(migratedRows[0].author).toEqual(systemAuthor);
 			expect(migratedRows[0]).not.toHaveProperty("modelText");
@@ -410,9 +511,12 @@ describe("author sidecar v2 persistence", () => {
 		expect(fs.existsSync(sidecarPath(destination))).toBe(false);
 	});
 
-	it("copies only echoed bindings confirmed by the cloned transcript, then purges", () => {
+	it("copies only echoed bindings confirmed by the cloned transcript, preserving prefixes, then purges", () => {
 		const source = "copy-source";
-		appendPromptAuthorDispatch(source, dispatch("settled-present", "copy me", agentAuthor, 100));
+		appendPromptAuthorDispatch(source, {
+			...dispatch("settled-present", `${agentPrefix}copy me`, agentAuthor, 100),
+			modelPrefix: agentPrefix,
+		});
 		appendPromptAuthorSettlement(source, {
 			promptId: "settled-present", settledAt: 110, outcome: "echoed", messageId: "message-present",
 		});
@@ -427,7 +531,7 @@ describe("author sidecar v2 persistence", () => {
 		});
 
 		const transcript = [
-			transcriptRow("copy me", { id: "message-present" }),
+			transcriptRow(`${agentPrefix}copy me`, { id: "message-present" }),
 			transcriptRow("unresolved"),
 			transcriptRow("cancelled"),
 		].join("");
@@ -438,12 +542,164 @@ describe("author sidecar v2 persistence", () => {
 			schemaVersion: 2,
 			promptId: "settled-present",
 			author: agentAuthor,
+			modelPrefix: agentPrefix,
 			settlement: { schemaVersion: 2, outcome: "echoed", messageId: "message-present" },
 		});
-		expect(promptAuthorBindingMatchesText(copied[0], "copy me")).toBe(true);
+		expect(promptAuthorBindingMatchesText(copied[0], `${agentPrefix}copy me`)).toBe(true);
+		expect(promptAuthorBindingMatchesText(copied[0], "copy me")).toBe(false);
 		expect(fs.readFileSync(sidecarPath("copy-destination"), "utf8")).not.toContain("copy me");
 		purgeAuthorSidecar("copy-destination");
 		expect(readAuthorSidecar("copy-destination")).toEqual([]);
+	});
+});
+
+describe("author sidecar prefix projection", () => {
+	it("removes one exact prefix from raw string content and is replay-safe across stable-id clones", () => {
+		const piText = `${systemPrefix}${systemPrefix}hello`;
+		const binding = echoedBinding("prefix-shaped", piText, systemAuthor, systemPrefix, "stable-message");
+		const raw = { id: "stable-message", role: "user", content: piText };
+		const rawClone = structuredClone(raw);
+
+		const [projected] = mergeAuthorSidecarIntoMessages([binding], [raw]);
+		expect(projected).toEqual({
+			id: "stable-message",
+			role: "user",
+			content: `${systemPrefix}hello`,
+			author: systemAuthor,
+		});
+		const projectedClones = [
+			{ ...projected },
+			structuredClone(projected),
+			JSON.parse(JSON.stringify(projected)),
+		];
+		for (const clone of projectedClones) {
+			const [replayed] = mergeAuthorSidecarIntoMessages([binding], [clone]);
+			expect(replayed.content).toBe(`${systemPrefix}hello`);
+			expect(replayed.author).toEqual(systemAuthor);
+		}
+
+		const [projectedRawClone] = mergeAuthorSidecarIntoMessages([binding], [rawClone]);
+		expect(projectedRawClone.content).toBe(`${systemPrefix}hello`);
+		expect(projectedRawClone.author).toEqual(systemAuthor);
+	});
+
+	it("proves the concatenated raw digest before cloning only the first prefixed text block", () => {
+		const image = { type: "image", data: "aW1hZ2U=", mimeType: "image/png" };
+		const firstText = { type: "text", text: `${agentPrefix}hello`, marker: "first" };
+		const secondText = { type: "text", text: " world", marker: "second" };
+		const unrelated = { type: "metadata", value: 42 };
+		const content = [image, firstText, secondText, unrelated];
+		const binding = echoedBinding(
+			"structured",
+			`${agentPrefix}hello world`,
+			agentAuthor,
+			agentPrefix,
+		);
+
+		const projected = projectCorrelatedPromptMessage({ role: "user", content }, binding);
+		expect(projected.author).toEqual(agentAuthor);
+		expect(projected.content).not.toBe(content);
+		const projectedContent = projected.content as typeof content;
+		expect(projectedContent[0]).toBe(image);
+		expect(projectedContent[1]).not.toBe(firstText);
+		expect(projectedContent[1]).toEqual({ ...firstText, text: "hello" });
+		expect(projectedContent[2]).toBe(secondText);
+		expect(projectedContent[3]).toBe(unrelated);
+		expect(extractPromptModelText(projected)).toBe("hello world");
+	});
+
+	it("does not strip when an exact prefix is split across text blocks", () => {
+		const content = [
+			{ type: "image", data: "image" },
+			{ type: "text", text: "[Sys" },
+			{ type: "text", text: "tem]: body" },
+		];
+		const binding = echoedBinding("split-prefix", `${systemPrefix}body`, systemAuthor, systemPrefix);
+		const projected = projectCorrelatedPromptMessage({ role: "user", content }, binding);
+		expect(projected.author).toEqual(systemAuthor);
+		expect(projected.content).toBe(content);
+	});
+
+	it("stamps correlated authors but preserves content on digest mismatch or absent legacy proof", () => {
+		const binding = echoedBinding("mismatch", `${systemPrefix}raw`, systemAuthor, systemPrefix);
+		const mismatchContent = [{ type: "text", text: `${systemPrefix}already projected` }];
+		const mismatch = projectCorrelatedPromptMessage(
+			{ role: "user", content: mismatchContent },
+			binding,
+		);
+		expect(mismatch.author).toEqual(systemAuthor);
+		expect(mismatch.content).toBe(mismatchContent);
+
+		const legacyContent = `${systemPrefix}literal legacy text`;
+		const legacy = projectCorrelatedPromptMessage(
+			{ role: "user", content: legacyContent },
+			{ author: systemAuthor, modelPrefix: systemPrefix, modelTextDigest: undefined },
+		);
+		expect(legacy.author).toEqual(systemAuthor);
+		expect(legacy.content).toBe(legacyContent);
+
+		const noPrefixBinding = echoedBinding("no-prefix", legacyContent, systemAuthor);
+		const noPrefix = projectCorrelatedPromptMessage(
+			{ role: "user", content: legacyContent },
+			noPrefixBinding,
+		);
+		expect(noPrefix.author).toEqual(systemAuthor);
+		expect(noPrefix.content).toBe(legacyContent);
+	});
+
+	it("rejects semantically invalid binding prefixes before stable-id attribution or stripping", () => {
+		const raw = { id: "invalid-binding-message", role: "user", content: `${systemPrefix}literal` };
+		const invalid = {
+			...echoedBinding(
+				"invalid-binding",
+				raw.content,
+				agentAuthor,
+				systemPrefix,
+				"invalid-binding-message",
+			),
+			modelPrefix: systemPrefix,
+		};
+		const [projected] = mergeAuthorSidecarIntoMessages([invalid], [raw]);
+		expect(projected.author).toEqual(LOCAL_USER_AUTHOR);
+		expect(projected.content).toBe(raw.content);
+	});
+
+	it("keeps repeated prefixed occurrences correlated to their distinct authors", () => {
+		const systemPiText = `${systemPrefix}same base`;
+		const agentPiText = `${agentPrefix}same base`;
+		const bindings = [
+			echoedBinding("repeat-system", systemPiText, systemAuthor, systemPrefix),
+			{ ...echoedBinding("repeat-agent", agentPiText, agentAuthor, agentPrefix), dispatchedAt: 2_000 },
+		];
+		const rows = mergeAuthorSidecarIntoMessages(bindings, [
+			{ role: "user", content: systemPiText },
+			{ role: "user", content: agentPiText },
+		]);
+		expect(rows.map((row) => [row.content, row.author])).toEqual([
+			["same base", systemAuthor],
+			["same base", agentAuthor],
+		]);
+	});
+
+	it("returns full stream bindings and includes prefix bytes in the resolver bound", () => {
+		const piText = `${agentPrefix}streamed`;
+		const binding = echoedBinding("stream", piText, agentAuthor, agentPrefix, "stream-message");
+		const row = { id: "stream-message", role: "user", content: piText };
+		const correlation = createPromptAuthorStreamCorrelation([binding]);
+		correlation.reserve(row, 0);
+		expect(correlation.resolveBinding(row, 0)).toBe(binding);
+
+		const withoutPrefix: PromptAuthorBinding = { ...binding };
+		delete withoutPrefix.modelPrefix;
+		const baseBytes = 128
+			+ Buffer.byteLength(binding.promptId)
+			+ Buffer.byteLength(binding.modelTextDigest ?? "")
+			+ Buffer.byteLength(binding.source)
+			+ Buffer.byteLength(binding.author.id)
+			+ Buffer.byteLength(binding.author.label)
+			+ Buffer.byteLength(binding.settlement?.messageId ?? "");
+		expect(createPromptAuthorStreamCorrelation([withoutPrefix], { maxBindingBytes: baseBytes }).degraded).toBe(false);
+		expect(createPromptAuthorStreamCorrelation([binding], { maxBindingBytes: baseBytes }).degraded).toBe(true);
 	});
 });
 

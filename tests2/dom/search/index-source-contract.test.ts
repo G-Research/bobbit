@@ -29,6 +29,11 @@ import { SessionIndexSource } from "../../../src/server/search/sources/session-s
 import { StaffIndexSource } from "../../../src/server/search/sources/staff-source.ts";
 import { MessageIndexSource } from "../../../src/server/search/sources/message-source.ts";
 import { FilesIndexSourceStub } from "../../../src/server/search/sources/files-source.stub.ts";
+import {
+	digestPromptModelText,
+	initAuthorSidecarDir,
+	type PromptAuthorBinding,
+} from "../../../src/server/agent/author-sidecar.ts";
 import { formatSessionSearchTitle } from "../../../src/server/search/sources/session-title.ts";
 import { indexableToDoc } from "../../../src/server/search/indexer.ts";
 import { toSearchResult } from "../../../src/server/search/flex-store.ts";
@@ -417,6 +422,80 @@ describe("MessageIndexSource", () => {
 		}
 	});
 
+	test("projects an injected prefix before extraction so text, weight, and content hash stay unchanged", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "msg-source-prefix-projection-"));
+		const file = path.join(dir, "session.jsonl");
+		const baseText = "PrefixProjectionSearchToken";
+		const modelPrefix = "[System]: ";
+		const session = {
+			id: "prefix-projection-session",
+			title: "Projection chat",
+			cwd: "/tmp",
+			agentSessionFile: file,
+			createdAt: 1,
+			lastActivity: 2,
+		};
+		const ctx = makeCtx({ sessions: [session] });
+		initAuthorSidecarDir(path.join(dir, "legacy"), {
+			secretsDir: path.join(dir, "secrets"),
+			hmacKey: Buffer.alloc(32, 0x39),
+		});
+
+		try {
+			fs.writeFileSync(file, JSON.stringify({
+				id: "system-message",
+				message: { role: "user", content: baseText, timestamp: 100 },
+			}) + "\n", "utf-8");
+			const [baseline] = await collect(new MessageIndexSource(() => []), ctx);
+
+			const piText = modelPrefix + baseText;
+			fs.writeFileSync(file, JSON.stringify({
+				id: "system-message",
+				message: { role: "user", content: piText, timestamp: 100 },
+			}) + "\n", "utf-8");
+			const binding = {
+				schemaVersion: 2,
+				type: "prompt-author",
+				promptId: "system-prompt",
+				dispatchedAt: 90,
+				modelTextDigest: digestPromptModelText(piText)!,
+				modelPrefix,
+				source: "system",
+				author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
+				settlement: {
+					schemaVersion: 2,
+					type: "prompt-author-settlement",
+					promptId: "system-prompt",
+					settledAt: 101,
+					outcome: "echoed",
+					messageId: "system-message",
+				},
+			} as PromptAuthorBinding;
+			const [projected] = await collect(new MessageIndexSource(() => [binding]), ctx);
+
+			expect(projected).toMatchObject({
+				text: baseText,
+				role: baseline.role,
+				weight: baseline.weight,
+				contentHash: baseline.contentHash,
+			});
+			expect(projected.text).not.toContain(modelPrefix.trim());
+			expect(projected.metadata).toMatchObject({
+				authorKind: "system",
+				authorId: "system:bobbit",
+			});
+			const result = toSearchResult(
+				indexableToDoc(projected, projected.text, "prefix-projection-session"),
+				"PrefixProjectionSearchToken",
+				1,
+			);
+			expect(result.snippet).toContain(baseText);
+			expect(result.snippet).not.toContain(modelPrefix.trim());
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test("streams oversized same-text rows with sidecar authors and reserved later keys", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "msg-source-stream-authors-"));
 		const file = path.join(dir, "session.jsonl");
@@ -646,12 +725,13 @@ describe("MessageIndexSource", () => {
 				msgIdx: metadata.msgIdx,
 				blockKey: metadata.blockKey,
 			}))).toEqual([
-				{ text: "SystemBindingCapToken", role: "user", msgIdx: 0, blockKey: "text:0" },
+				// Prompt rows are omitted when bounded correlation degrades: raw
+				// injected prefixes must never become searchable. Tool/assistant rows
+				// remain safe and indexable.
 				{ text: "AmbiguousToolResultToken", role: "tool_result", msgIdx: 1, blockKey: "tool_result:0" },
 				{ text: "SafeAssistantToken", role: "assistant", msgIdx: 2, blockKey: "text:0" },
 				{ text: "read {\"path\":\"safe.txt\"}", role: "tool_call", msgIdx: 2, blockKey: "tool_use:1" },
 				{ text: "SafeToolResultToken", role: "tool_result", msgIdx: 3, blockKey: "tool_result:0" },
-				{ text: "AgentBindingCapToken", role: "user", msgIdx: 4, blockKey: "text:0" },
 			]);
 			const authors = messages.map(({ metadata }) => ({
 				kind: metadata.authorKind,
@@ -660,11 +740,9 @@ describe("MessageIndexSource", () => {
 			}));
 			expect(authors).toEqual([
 				{ kind: undefined, id: undefined, label: undefined },
-				{ kind: undefined, id: undefined, label: undefined },
 				{ kind: "agent", id: "session:binding-cap-session", label: "Binding cap chat" },
 				{ kind: "agent", id: "session:binding-cap-session", label: "Binding cap chat" },
 				{ kind: "agent", id: "session:binding-cap-session", label: "Binding cap chat" },
-				{ kind: undefined, id: undefined, label: undefined },
 			]);
 			expect(messages.some((message) => String(message.metadata.authorId).includes("forged"))).toBe(false);
 		} finally {

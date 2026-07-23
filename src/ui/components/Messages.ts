@@ -27,6 +27,9 @@ import "./FileMentionChip.js";
 import type { FileMentionChipData, FileMentionKind } from "./FileMentionChip.js";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { BobbitMessage, MessageAuthor } from "../../shared/message-author.js";
+import type { PromptAuthorAppearance } from "../../app/message-author-appearance.js";
+import { getAccessoryDef, renderStaticSidebarBobbitCanvas } from "../bobbit-render.js";
+import { presentPromptAuthor } from "../message-author-presentation.js";
 
 /** Format a message timestamp for display (locale-appropriate time). */
 export function formatTimestamp(ts: number | string | undefined): string {
@@ -240,6 +243,8 @@ function buildChipItems(
 @customElement("user-message")
 export class UserMessage extends LitElement {
 	@property({ type: Object }) message!: BobbitMessage<UserMessageWithAttachments | UserMessageType>;
+	@property({ type: Boolean }) showAuthorLabel = false;
+	@property({ attribute: false }) authorAppearance?: PromptAuthorAppearance;
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
 		return this;
@@ -266,33 +271,69 @@ export class UserMessage extends LitElement {
 			chipItems.length
 				? renderTextWithChips(rawContent, chipItems)
 				: html`<markdown-block .content=${content}></markdown-block>`;
+		// Rich attachments (optimistic preview / restored) win; otherwise derive
+		// tiles from server-authoritative image content blocks so a bare role:user
+		// echo still renders its image live (WP1 / RC2 / S6).
+		const richAttachments =
+			this.message.role === "user-with-attachments" && this.message.attachments
+				? this.message.attachments
+				: [];
+		const tiles = richAttachments.length > 0
+			? richAttachments
+			: imageAttachmentsFromContent(this.message.content);
+		const attachments = tiles.length > 0
+			? html`
+				<div class="mt-3 flex flex-wrap gap-2">
+					${tiles.map(
+						(attachment) => html` <attachment-tile .attachment=${attachment}></attachment-tile> `,
+					)}
+				</div>
+			`
+			: "";
 
+		const presentation = this.showAuthorLabel
+			? presentPromptAuthor(this.message.author)
+			: undefined;
+		if (!presentation) {
+			// Keep the historical all-human/legacy markup and compact geometry exact.
+			return html`
+				<div class="flex justify-start mx-2 sm:mx-4 my-1">
+					<div class="user-message-container py-2 px-3 sm:px-4">
+						${body}
+						${attachments}
+					</div>
+					<span class="message-timestamp">${formatTimestamp(this.message.timestamp)}</span>
+				</div>
+			`;
+		}
+
+		const isAgent = presentation.kind === "agent";
 		return html`
-			<div class="flex justify-start mx-2 sm:mx-4 my-1">
-				<div class="user-message-container py-2 px-3 sm:px-4">
-					${body}
-					${(() => {
-						// Rich attachments (optimistic preview / restored) win; otherwise
-						// derive tiles from server-authoritative image content blocks so a
-						// bare role:"user" echo still renders its image live (WP1 / RC2 / S6).
-						const richAttachments =
-							this.message.role === "user-with-attachments" && this.message.attachments
-								? this.message.attachments
-								: [];
-						const tiles =
-							richAttachments.length > 0
-								? richAttachments
-								: imageAttachmentsFromContent(this.message.content);
-						return tiles.length > 0
-							? html`
-								<div class="mt-3 flex flex-wrap gap-2">
-									${tiles.map(
-										(attachment) => html` <attachment-tile .attachment=${attachment}></attachment-tile> `,
-									)}
-								</div>
-							`
-							: "";
-					})()}
+			<div class="prompt-row prompt-row--labelled flex justify-start mx-2 sm:mx-4 my-1">
+				<div class="prompt-bubble-shell">
+					<div
+						class="prompt-author-badge"
+						aria-label=${presentation.accessibleName}
+						title=${presentation.visibleName}
+					>
+						${isAgent ? html`
+							<span class="prompt-author-avatar" aria-hidden="true">
+								${renderStaticSidebarBobbitCanvas({
+									hueRotate: this.authorAppearance?.hueRotate ?? 0,
+									accessory: getAccessoryDef(this.authorAppearance?.accessoryId),
+								})}
+							</span>
+							<span class="prompt-author-name">${presentation.normalizedAgentLabel}</span>
+							<span class="prompt-author-divider" aria-hidden="true">|</span>
+							<span class="prompt-author-kind">Agent</span>
+						` : html`
+							<span class="prompt-author-name">${presentation.visibleName}</span>
+						`}
+					</div>
+					<div class="user-message-container user-message-container--labelled py-2 px-3 sm:px-4">
+						${body}
+						${attachments}
+					</div>
 				</div>
 				<span class="message-timestamp">${formatTimestamp(this.message.timestamp)}</span>
 			</div>
