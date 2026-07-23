@@ -993,6 +993,17 @@ export async function createWorktreeSet(
 				branchExists = true;
 			} catch { /* not present */ }
 
+			// Exact per-repo starts are authoritative and identify a fresh coordinated
+			// worker allocation. Reusing an existing branch could silently attach a
+			// stale commit and later delete a branch this attempt did not create. Reject
+			// it before attaching a worktree or changing its upstream; the outer rollback
+			// removes only earlier components created by this attempt.
+			if (exactStart !== undefined && branchExists) {
+				throw new Error(
+					`createWorktreeSet: validate exact start failed for component "${repo}": branch "${branchName}" already exists`,
+				);
+			}
+
 			try {
 				if (branchExists) {
 					await runGit(["worktree", "add", wtPath, branchName], { cwd: repoSrc });
