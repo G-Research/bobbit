@@ -168,6 +168,11 @@ export const ACCESSORY_DEFS: Record<string, AccessoryDef> = Object.fromEntries(
 	Object.entries(SPRITE_ACCESSORIES).map(([k, v]) => [k, spriteToAccessoryDef(v)])
 );
 
+/** Resolve an accessory through the canonical sprite-data-derived registry. */
+export function getAccessoryDef(id: string | undefined): AccessoryDef {
+	return (id && ACCESSORY_DEFS[id]) || NO_ACCESSORY;
+}
+
 // ============================================================================
 // IDLE BLOB (role manager / large display context)
 // ============================================================================
@@ -658,6 +663,23 @@ function sidebarStatusBucket(status: string): "starting" | "terminated" | "canon
  * Draws body, eyes, and accessories to off-screen canvases displayed via <img>.
  * Animations (bob, shimmer, eye blink) still use CSS on the container.
  */
+export function renderStaticSidebarBobbitCanvas(opts: {
+	hueRotate?: number;
+	accessory?: AccessoryDef;
+} = {}): TemplateResult {
+	return html`<span aria-hidden="true">${renderSidebarBobbitCanvas({
+		status: "idle",
+		isCompacting: false,
+		isSelected: false,
+		isAborting: false,
+		unread: false,
+		noDesaturate: true,
+		disableIdleBreathing: true,
+		hueRotate: opts.hueRotate,
+		accessory: opts.accessory,
+	})}</span>`;
+}
+
 export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateResult {
 	const { status, isCompacting = false, hueRotate = 0, isSelected = false, isAborting = false, noDesaturate = false, unread = false, disableIdleBreathing = false } = opts;
 	const acc = opts.accessory ?? NO_ACCESSORY;

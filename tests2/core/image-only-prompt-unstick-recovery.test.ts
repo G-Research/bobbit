@@ -35,6 +35,12 @@ const { SessionManager } = await import("../../src/server/agent/session-manager.
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
 const { registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
+const { initAuthorSidecarDir } = await import("../../src/server/agent/author-sidecar.ts");
+
+initAuthorSidecarDir(tmpRoot, {
+	secretsDir: path.join(tmpRoot, "private-secrets"),
+	hmacKey: Buffer.alloc(32, 0x45),
+});
 
 type RecordedPrompt = { text: string; images?: unknown };
 
@@ -52,12 +58,16 @@ afterEach(() => {
 	}
 });
 
-function makeBridge(recorded: RecordedPrompt[]): any {
+function makeBridge(recorded: RecordedPrompt[], onPrompt?: () => void): any {
 	return {
 		running: true,
 		async start() {},
 		async stop() {},
-		prompt(text: string, images?: unknown) { recorded.push({ text, images }); return Promise.resolve({ success: true }); },
+		prompt(text: string, images?: unknown) {
+			onPrompt?.();
+			recorded.push({ text, images });
+			return Promise.resolve({ success: true });
+		},
 		steer() { return Promise.resolve({ success: true }); },
 		abort() { return Promise.resolve({ success: true }); },
 		getState() { return Promise.resolve({ success: true }); },
@@ -139,9 +149,10 @@ describe("blank-text poison: follow-up prompt via enqueuePrompt recovers against
 		);
 	});
 
-	it("retryLastPrompt: legacy attachment-only (no image) stuck session recovers with 'Attachments:' (not blank)", async () => {
+	it("retryLastPrompt: legacy attachment-only system retry prefixes only provider text while recovering", async () => {
 		const oldRecorded: RecordedPrompt[] = [];
 		const newRecorded: RecordedPrompt[] = [];
+		let durableRetryTextsAtDispatch: string[] = [];
 		const oldBridge = makeBridge(oldRecorded);
 		registerRpcBridgeFactory(() => oldBridge);
 
@@ -181,7 +192,9 @@ describe("blank-text poison: follow-up prompt via enqueuePrompt recovers against
 		let respawnCalled = 0;
 		manager._respawnAgentInPlace = async (sess: any) => {
 			respawnCalled++;
-			sess.rpcClient = makeBridge(newRecorded);
+			sess.rpcClient = makeBridge(newRecorded, () => {
+				durableRetryTextsAtDispatch = sess.promptQueue.toArray().map((row: any) => row.text);
+			});
 			sess.lastTurnErrored = false;
 			sess.lastTurnErrorMessage = undefined;
 			return sess;
@@ -194,8 +207,18 @@ describe("blank-text poison: follow-up prompt via enqueuePrompt recovers against
 		assert.equal(newRecorded.length, 1, "retry must dispatch to the rehydrated process");
 		assert.equal(
 			newRecorded[0].text,
+			"[System]: Attachments:",
+			"attachment-only system retry must prefix the exact provider-facing fallback text",
+		);
+		assert.deepEqual(
+			durableRetryTextsAtDispatch,
+			["Attachments:"],
+			"the durable retry row must retain the unprefixed synthesized base text during recovery",
+		);
+		assert.equal(
+			session.lastPromptText,
 			"Attachments:",
-			"attachment-only retry with empty text + no images must fall back to 'Attachments:', not blank",
+			"retry bookkeeping must retain the unprefixed base text",
 		);
 	});
 

@@ -127,7 +127,7 @@ describe("SessionManager snapshot memo", () => {
 		const baseMessage = {
 			id: "base",
 			role: "user",
-			content: "expanded system prompt",
+			content: "[System]: expanded system prompt",
 			timestamp: 1_000,
 		};
 		const getMessages = vi.fn(async () => ({ success: true, data: [baseMessage] }));
@@ -142,7 +142,7 @@ describe("SessionManager snapshot memo", () => {
 		assert.deepEqual(baseMessage, {
 			id: "base",
 			role: "user",
-			content: "expanded system prompt",
+			content: "[System]: expanded system prompt",
 			timestamp: 1_000,
 		});
 
@@ -159,7 +159,8 @@ describe("SessionManager snapshot memo", () => {
 		assert.equal(appendPromptAuthorDispatch(live.id, {
 			promptId: "system-base",
 			dispatchedAt: 1_000,
-			modelText: "expanded system prompt",
+			modelText: "[System]: expanded system prompt",
+			modelPrefix: "[System]: ",
 			source: "system",
 			author: systemAuthor,
 		}), true);
@@ -234,7 +235,7 @@ describe("SessionManager snapshot memo", () => {
 		assert.deepEqual(baseMessage, {
 			id: "base",
 			role: "user",
-			content: "expanded system prompt",
+			content: "[System]: expanded system prompt",
 			timestamp: 1_000,
 		});
 	});

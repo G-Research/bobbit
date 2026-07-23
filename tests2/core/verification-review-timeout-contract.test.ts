@@ -23,8 +23,13 @@ import {
 } from "../../src/server/agent/verification-harness.js";
 
 const MARKER = "REVIEW_TIMEOUT_CONTRACT";
+const SYSTEM_MODEL_PREFIX = "[System]: ";
 const HARNESS_SOURCE = fs.readFileSync(path.resolve("src/server/agent/verification-harness.ts"), "utf8");
 const tempRoots: string[] = [];
+
+function modelFacingSystemPrompt(baseText: string): string {
+	return `${SYSTEM_MODEL_PREFIX}${baseText}`;
+}
 
 afterAll(() => {
 	for (const root of tempRoots) fs.rmSync(root, { recursive: true, force: true });
@@ -297,11 +302,18 @@ describe("recovery windows and provider exclusion", () => {
 		assert.deepEqual(explicit.idleTimeouts, [7_000, 7_000, 7_000], `${MARKER}: restart continuation/fallback each need a fresh persisted allowance`);
 		assert.deepEqual(explicit.streamingTimeouts, [10_000, 10_000], `${MARKER}: restart stream settles must stay fixed`);
 		assert.ok(!explicit.idleTimeouts.includes(180_000) && !explicit.idleTimeouts.includes(120_000));
-		assert.deepEqual(explicit.promptTexts, [VERIFICATION_RESTART_RESUME_PROMPT, VERIFICATION_RESULT_REMINDER], `${MARKER}: tracked restart dispatch must preserve exact prompt bytes`);
+		const explicitPiTexts = [
+			modelFacingSystemPrompt(VERIFICATION_RESTART_RESUME_PROMPT),
+			modelFacingSystemPrompt(VERIFICATION_RESULT_REMINDER),
+		];
+		assert.deepEqual(explicit.promptTexts, explicitPiTexts, `${MARKER}: restart continuation and fallback must each have exactly one system prefix and retain their base text`);
 		assert.ok(explicit.bindings.every(binding => binding.schemaVersion === 2 && binding.modelText === undefined));
+		assert.ok(explicit.bindings.every(binding => binding.modelPrefix === SYSTEM_MODEL_PREFIX));
 		assert.ok(explicit.bindings.every((binding, index) =>
-			promptAuthorBindingMatchesText(binding, explicit.promptTexts[index]),
+			promptAuthorBindingMatchesText(binding, explicitPiTexts[index]),
 		));
+		assert.equal(promptAuthorBindingMatchesText(explicit.bindings[0], VERIFICATION_RESTART_RESUME_PROMPT), false);
+		assert.equal(promptAuthorBindingMatchesText(explicit.bindings[1], VERIFICATION_RESULT_REMINDER), false);
 		assert.ok(explicit.bindings.every(binding => binding.source === "verification"));
 		for (const binding of explicit.bindings) {
 			assert.deepEqual(binding.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
@@ -310,11 +322,12 @@ describe("recovery windows and provider exclusion", () => {
 		const legacy = await exercise(undefined, false);
 		assert.deepEqual(legacy.idleTimeouts, [1_200_000, 1_200_000], `${MARKER}: legacy rows without a resolvable step fall back to 1200s per turn`);
 		assert.deepEqual(legacy.streamingTimeouts, [10_000]);
-		assert.deepEqual(legacy.promptTexts, [VERIFICATION_RESULT_REMINDER], `${MARKER}: legacy resume must preserve exact reminder bytes`);
+		const legacyPiText = modelFacingSystemPrompt(VERIFICATION_RESULT_REMINDER);
+		assert.deepEqual(legacy.promptTexts, [legacyPiText], `${MARKER}: legacy resume must have exactly one system prefix and retain the reminder text`);
 		assert.ok(legacy.bindings.every(binding => binding.schemaVersion === 2 && binding.modelText === undefined));
-		assert.ok(legacy.bindings.every((binding, index) =>
-			promptAuthorBindingMatchesText(binding, legacy.promptTexts[index]),
-		));
+		assert.ok(legacy.bindings.every(binding => binding.modelPrefix === SYSTEM_MODEL_PREFIX));
+		assert.ok(legacy.bindings.every(binding => promptAuthorBindingMatchesText(binding, legacyPiText)));
+		assert.ok(legacy.bindings.every(binding => !promptAuthorBindingMatchesText(binding, VERIFICATION_RESULT_REMINDER)));
 		assert.ok(legacy.bindings.every(binding => binding.source === "verification"));
 		for (const binding of legacy.bindings) {
 			assert.deepEqual(binding.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });

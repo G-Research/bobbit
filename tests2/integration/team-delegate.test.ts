@@ -22,6 +22,7 @@ import {
 	promptAuthorBindingMatchesText,
 	readAuthorSidecar,
 } from "../../src/server/agent/author-sidecar.js";
+import { sanitizeAuthorIdComponent } from "../../src/server/agent/message-author.js";
 
 const OPUS = { provider: "anthropic", modelId: "claude-opus-4-8" };
 const DELEGATE_KICKOFF = "Execute the task described in your system prompt. Follow the instructions carefully.";
@@ -166,16 +167,28 @@ test.describe("team_delegate — accountable kickoff author", () => {
 				label: "delegate kickoff settled",
 			});
 
+			const sanitizedStaffId = sanitizeAuthorIdComponent(staff.id, "unknown", 128);
+			const agentAuthor = { kind: "agent", id: `staff:${sanitizedStaffId}`, label: newName };
+			const modelPrefix = `[${newName} (${sanitizedStaffId.slice(0, 6)})]: `;
+			const piKickoff = `${modelPrefix}${DELEGATE_KICKOFF}`;
+			const rawMessages = gateway.sessionManager.getSession(childId!)?.rpcClient?._agent?.conversationMessages;
+			expect(Array.isArray(rawMessages), "delegate child exposes the in-process Pi transcript").toBe(true);
+			expect(rawMessages.filter((message: any) => message.role === "user" && messageText(message) === piKickoff),
+				"authenticated owner agent prefix is injected exactly once at Pi").toHaveLength(1);
+
 			const binding = readAuthorSidecar(childId!).find((entry) =>
-				promptAuthorBindingMatchesText(entry, DELEGATE_KICKOFF),
+				promptAuthorBindingMatchesText(entry, piKickoff),
 			);
 			expect(binding).toMatchObject({
 				schemaVersion: 2,
 				modelTextDigest: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+				modelPrefix,
 				source: "agent",
-				author: { kind: "agent", id: `staff:${staff.id}`, label: newName },
+				author: agentAuthor,
 				settlement: { outcome: "echoed" },
 			});
+			expect(promptAuthorBindingMatchesText(binding!, DELEGATE_KICKOFF),
+				"delegate sidecar digest covers decorated Pi text, not visible text").toBe(false);
 
 			// Attach only after the turn has settled: get_messages must reconstruct
 			// this persisted transcript row from the Bobbit sidecar, not a live ledger.

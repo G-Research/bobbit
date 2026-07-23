@@ -16,6 +16,7 @@ import { serverSecretsDir } from "../bobbit-dir.js";
 import { loadOrCreateCookieSigningKey } from "../auth/cookie-signing-key.js";
 import {
 	isToolResultOnlyMessage,
+	modelPrefixForPromptAuthor,
 	normalizeVisibleMessages,
 	type NormalizeVisibleMessageContext,
 } from "./message-author.js";
@@ -25,9 +26,12 @@ export interface PromptAuthorDispatchRecord {
 	type: "prompt-author";
 	promptId: string;
 	dispatchedAt: number;
+	/** Keyed digest of the exact text sent to Pi, including any author prefix. */
 	modelTextDigest: string;
 	source: PromptSource;
 	author: MessageAuthor;
+	/** Exact dispatch-time author prefix. Never contains message-body text. */
+	modelPrefix?: string;
 }
 
 export interface PromptAuthorSettlementRecord {
@@ -48,9 +52,12 @@ export interface PromptAuthorDispatchInput {
 	type?: "prompt-author";
 	promptId: string;
 	dispatchedAt: number;
+	/** Exact text that will be sent to Pi; append immediately hashes it. */
 	modelText: string;
 	source: PromptSource;
 	author: MessageAuthor;
+	/** Exact formatter-derived prefix included at the start of `modelText`. */
+	modelPrefix?: string;
 }
 
 export interface PromptAuthorSettlementInput {
@@ -76,6 +83,7 @@ export interface PromptAuthorBinding {
 	modelTextDigest?: string;
 	source: PromptSource;
 	author: MessageAuthor;
+	modelPrefix?: string;
 	settlement?: {
 		schemaVersion: 1 | 2;
 		type: "prompt-author-settlement";
@@ -149,6 +157,13 @@ function diagnosticValue(value: unknown): string {
 	return JSON.stringify(text).slice(0, MAX_DIAGNOSTIC_VALUE_LENGTH);
 }
 
+/** A stored prefix is trusted only when the same record's author derives it exactly. */
+function hasValidModelPrefix(record: { author: MessageAuthor; modelPrefix?: unknown }): boolean {
+	if (record.modelPrefix === undefined) return true;
+	const expected = modelPrefixForPromptAuthor(record.author);
+	return expected !== undefined && record.modelPrefix === expected;
+}
+
 function isDispatchRecord(value: unknown): value is PromptAuthorDispatchRecord {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
 	const record = value as Record<string, unknown>;
@@ -158,7 +173,8 @@ function isDispatchRecord(value: unknown): value is PromptAuthorDispatchRecord {
 		&& validTimestamp(record.dispatchedAt)
 		&& validDigest(record.modelTextDigest)
 		&& isPromptSource(record.source)
-		&& isMessageAuthor(record.author);
+		&& isMessageAuthor(record.author)
+		&& hasValidModelPrefix({ author: record.author, modelPrefix: record.modelPrefix });
 }
 
 function isSettlementRecord(value: unknown): value is PromptAuthorSettlementRecord {
@@ -211,6 +227,7 @@ function canonicalDispatchRecord(record: PromptAuthorDispatchRecord): PromptAuth
 		modelTextDigest: record.modelTextDigest,
 		source: record.source,
 		author: canonicalAuthor(record.author),
+		...(record.modelPrefix === undefined ? {} : { modelPrefix: record.modelPrefix }),
 	};
 }
 
@@ -240,7 +257,8 @@ function isPromptAuthorBinding(value: unknown): value is PromptAuthorBinding {
 		|| !validKey(record.promptId)
 		|| !validTimestamp(record.dispatchedAt)
 		|| !isPromptSource(record.source)
-		|| !isMessageAuthor(record.author)) return false;
+		|| !isMessageAuthor(record.author)
+		|| !hasValidModelPrefix({ author: record.author, modelPrefix: record.modelPrefix })) return false;
 	const hasLegacyText = typeof record.modelText === "string";
 	const hasDigest = validDigest(record.modelTextDigest);
 	return hasLegacyText || hasDigest;
@@ -262,17 +280,26 @@ export function digestPromptModelText(modelText: string): string | undefined {
 		.digest("base64url");
 }
 
+/** Prove exact raw Pi text against a persisted v2 digest, without legacy fallback. */
+function promptAuthorBindingDigestMatchesText(
+	binding: Pick<PromptAuthorBinding, "modelTextDigest">,
+	modelText: string,
+): boolean {
+	if (!validDigest(binding.modelTextDigest)) return false;
+	const candidate = digestPromptModelText(modelText);
+	if (!candidate) return false;
+	const left = Buffer.from(binding.modelTextDigest, "base64url");
+	const right = Buffer.from(candidate, "base64url");
+	return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
 /** Compare exact in-memory legacy text or a v2 HMAC without revealing disk text. */
 export function promptAuthorBindingMatchesText(
 	binding: Pick<PromptAuthorBinding, "modelText" | "modelTextDigest">,
 	modelText: string,
 ): boolean {
 	if (validDigest(binding.modelTextDigest)) {
-		const candidate = digestPromptModelText(modelText);
-		if (!candidate) return false;
-		const left = Buffer.from(binding.modelTextDigest, "base64url");
-		const right = Buffer.from(candidate, "base64url");
-		return left.length === right.length && crypto.timingSafeEqual(left, right);
+		return promptAuthorBindingDigestMatchesText(binding, modelText);
 	}
 	return typeof binding.modelText === "string" && binding.modelText === modelText;
 }
@@ -655,6 +682,7 @@ export function appendPromptAuthorDispatch(
 		modelTextDigest: modelTextDigest ?? "",
 		source: input.source,
 		author: isMessageAuthor(input.author) ? canonicalAuthor(input.author) : input.author,
+		...(input.modelPrefix === undefined ? {} : { modelPrefix: input.modelPrefix }),
 	};
 	if (!isDispatchRecord(record)) return false;
 	return appendRecord(sessionId, record);
@@ -725,6 +753,56 @@ export function extractPromptModelText(message: Record<string, unknown>): string
 	return parts.length > 0 ? parts.join("") : undefined;
 }
 
+/**
+ * Stamp an author selected by trusted correlation and remove its dispatch-time
+ * prefix only when this candidate still proves the exact raw Pi text digest.
+ */
+export function projectCorrelatedPromptMessage<T extends Record<string, unknown>>(
+	message: T,
+	binding: Pick<PromptAuthorBinding, "author" | "modelPrefix" | "modelTextDigest">,
+): T & { author: MessageAuthor } {
+	const candidateModelText = extractPromptModelText(message);
+	const rawTextProven = candidateModelText !== undefined
+		&& promptAuthorBindingDigestMatchesText(binding, candidateModelText);
+	const modelPrefix = typeof binding.modelPrefix === "string"
+		&& hasValidModelPrefix(binding)
+		? binding.modelPrefix
+		: undefined;
+
+	let projectedContent = message.content;
+	let contentChanged = false;
+	if (rawTextProven && modelPrefix !== undefined) {
+		if (typeof message.content === "string") {
+			if (message.content.startsWith(modelPrefix)) {
+				projectedContent = message.content.slice(modelPrefix.length);
+				contentChanged = true;
+			}
+		} else if (Array.isArray(message.content)) {
+			for (let index = 0; index < message.content.length; index++) {
+				const block = message.content[index];
+				if (!block || typeof block !== "object" || Array.isArray(block)) continue;
+				const textBlock = block as Record<string, unknown>;
+				if (textBlock.type !== "text" || typeof textBlock.text !== "string") continue;
+				if (textBlock.text.startsWith(modelPrefix)) {
+					const nextContent = message.content.slice();
+					nextContent[index] = { ...textBlock, text: textBlock.text.slice(modelPrefix.length) };
+					projectedContent = nextContent;
+					contentChanged = true;
+				}
+				break;
+			}
+		}
+	}
+
+	const authorChanged = !sameAuthor(message.author, binding.author);
+	if (!contentChanged && !authorChanged) return message as T & { author: MessageAuthor };
+	return {
+		...message,
+		...(contentChanged ? { content: projectedContent } : {}),
+		author: binding.author,
+	};
+}
+
 function messageId(message: Record<string, unknown>): string | undefined {
 	for (const key of ["id", "entryId", "_entryId", "_bobbitEntryId"]) {
 		const value = message[key];
@@ -775,8 +853,10 @@ export interface PromptAuthorStreamCorrelation {
 	readonly retainedBindings: number;
 	/** First-pass reservation of exact id/timestamp matches. */
 	reserve(message: Record<string, unknown>, rowIndex: number): void;
-	/** Second-pass resolution, including deterministic FIFO fallback. */
+	/** Second-pass compatibility resolution, including deterministic FIFO fallback. */
 	resolve(message: Record<string, unknown>, rowIndex: number): MessageAuthor | undefined;
+	/** Second-pass resolution retaining the trusted binding needed for projection. */
+	resolveBinding(message: Record<string, unknown>, rowIndex: number): PromptAuthorBinding | undefined;
 }
 
 interface StreamBindingRef {
@@ -812,6 +892,7 @@ function streamBindingBytes(binding: PromptAuthorBinding): number {
 		+ utf8Length(binding.promptId)
 		+ utf8Length(binding.modelTextDigest)
 		+ utf8Length(binding.modelText)
+		+ utf8Length(binding.modelPrefix)
 		+ utf8Length(binding.source)
 		+ utf8Length(binding.author.id)
 		+ utf8Length(binding.author.label)
@@ -877,6 +958,7 @@ function emptyStreamCorrelation(degraded: boolean): PromptAuthorStreamCorrelatio
 		retainedBindings: 0,
 		reserve: () => undefined,
 		resolve: () => undefined,
+		resolveBinding: () => undefined,
 	};
 }
 
@@ -959,13 +1041,16 @@ export function createPromptAuthorStreamCorrelation(
 		reservations.set(rowIndex, { ref: timed, kind: "timestamp" });
 	};
 
-	const resolve = (message: Record<string, unknown>, rowIndex: number): MessageAuthor | undefined => {
+	const resolveBinding = (
+		message: Record<string, unknown>,
+		rowIndex: number,
+	): PromptAuthorBinding | undefined => {
 		if (!eligiblePromptMessage(message)) return undefined;
 		const reservation = reservations.get(rowIndex);
 		if (reservation) {
 			if (reservation.kind === "id") {
 				return messageId(message) === reservation.messageId
-					? reservation.ref.binding.author
+					? reservation.ref.binding
 					: undefined;
 			}
 			const text = extractPromptModelText(message);
@@ -977,7 +1062,7 @@ export function createPromptAuthorStreamCorrelation(
 				&& settledTimestamp !== undefined
 				&& Math.abs(timestamp - settledTimestamp) <= CORRELATION_TOLERANCE_MS
 				&& promptAuthorBindingMatchesText(reservation.ref.binding, text)
-				? reservation.ref.binding.author
+				? reservation.ref.binding
 				: undefined;
 		}
 
@@ -989,7 +1074,7 @@ export function createPromptAuthorStreamCorrelation(
 			const direct = firstUnconsumed(exactPromptIds.get(promptId));
 			if (direct) {
 				direct.consumed = true;
-				return direct.binding.author;
+				return direct.binding;
 			}
 		}
 
@@ -998,14 +1083,17 @@ export function createPromptAuthorStreamCorrelation(
 		const fifo = firstMatchingRef(fifoBindings, text);
 		if (!fifo) return undefined;
 		fifo.consumed = true;
-		return fifo.binding.author;
+		return fifo.binding;
 	};
+	const resolve = (message: Record<string, unknown>, rowIndex: number): MessageAuthor | undefined =>
+		resolveBinding(message, rowIndex)?.author;
 
 	return {
 		degraded: false,
 		retainedBindings: refs.length,
 		reserve,
 		resolve,
+		resolveBinding,
 	};
 }
 
@@ -1028,7 +1116,7 @@ export function mergeAuthorSidecarIntoMessages<T extends object>(
 	const echoedTranscriptBindings = directPromptBindings
 		.filter((entry) => entry.settlement?.outcome === "echoed");
 	const consumed = new Set<PromptAuthorBinding>();
-	const assignments = new Map<number, MessageAuthor>();
+	const assignments = new Map<number, PromptAuthorBinding>();
 	const rows = messages as Array<T & Record<string, unknown>>;
 
 	// Phase 0: Bobbit's synthetic in-flight steer row encodes the dispatch id.
@@ -1040,7 +1128,7 @@ export function mergeAuthorSidecarIntoMessages<T extends object>(
 		const promptId = id.slice("inflight-steer:".length);
 		const binding = directPromptBindings.find((candidate) => !consumed.has(candidate) && candidate.promptId === promptId);
 		if (!binding) continue;
-		assignments.set(index, binding.author);
+		assignments.set(index, binding);
 		consumed.add(binding);
 	}
 
@@ -1054,7 +1142,7 @@ export function mergeAuthorSidecarIntoMessages<T extends object>(
 			!consumed.has(candidate) && candidate.settlement?.messageId === id,
 		);
 		if (!binding) continue;
-		assignments.set(index, binding.author);
+		assignments.set(index, binding);
 		consumed.add(binding);
 	}
 
@@ -1073,7 +1161,7 @@ export function mergeAuthorSidecarIntoMessages<T extends object>(
 				&& Math.abs(timestamp - settledTimestamp) <= CORRELATION_TOLERANCE_MS;
 		});
 		if (!binding) continue;
-		assignments.set(index, binding.author);
+		assignments.set(index, binding);
 		consumed.add(binding);
 	}
 
@@ -1088,7 +1176,7 @@ export function mergeAuthorSidecarIntoMessages<T extends object>(
 			!consumed.has(candidate) && promptAuthorBindingMatchesText(candidate, text),
 		);
 		if (!binding) continue;
-		assignments.set(index, binding.author);
+		assignments.set(index, binding);
 		consumed.add(binding);
 	}
 
@@ -1096,10 +1184,14 @@ export function mergeAuthorSidecarIntoMessages<T extends object>(
 	if (assignments.size > 0) {
 		let changed = false;
 		authored = messages.map((row, index) => {
-			const author = assignments.get(index);
-			if (!author || sameAuthor((row as T & { author?: unknown }).author, author)) return row;
-			changed = true;
-			return { ...row, author };
+			const binding = assignments.get(index);
+			if (!binding) return row;
+			const projected = projectCorrelatedPromptMessage(
+				row as T & Record<string, unknown>,
+				binding,
+			);
+			if (projected !== row) changed = true;
+			return projected;
 		});
 		if (!changed) authored = messages;
 	}
@@ -1211,6 +1303,7 @@ export function copyAuthorSidecar(
 				modelTextDigest: binding.modelTextDigest,
 				source: binding.source,
 				author: binding.author,
+				...(binding.modelPrefix === undefined ? {} : { modelPrefix: binding.modelPrefix }),
 			});
 			records.push({
 				schemaVersion: 2,

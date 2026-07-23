@@ -29,7 +29,10 @@ import { writeSessionSidecar, buildSessionSidecar } from "./session-sidecar.js";
 import {
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,
+	digestPromptModelText,
 	extractPromptModelText,
+	mergeAuthorSidecarIntoMessages,
+	projectCorrelatedPromptMessage,
 	promptAuthorBindingMatchesText,
 	readAuthorSidecar,
 	type PromptAuthorBinding,
@@ -39,9 +42,11 @@ import {
 	BATCH_SYSTEM_AUTHOR,
 	BOBBIT_SYSTEM_AUTHOR,
 	agentAuthorForSession,
+	modelPrefixForPromptAuthor,
 	normalizeVisibleAgentEvent,
 	resolvePromptAuthor,
 	type AgentAuthorDependencies,
+	type AgentSessionIdentity,
 } from "./message-author.js";
 import { resolveReadablePersistedAgentSessionFile, resolveSafeSessionsPath, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
 import { isOrphanToolResultOrderingError } from "./poisoned-history.js";
@@ -596,9 +601,11 @@ export type { InFlightSteerRecord } from "./session-store.js";
 export interface PendingPromptAuthorRecord {
 	promptId: string;
 	dispatchedAt: number;
-	/** Exact text exists only for current-process dispatches. Restored v2 rows use the digest. */
+	/** Exact Pi text exists only for current-process dispatches. Restored v2 rows use the digest. */
 	modelText?: string;
 	modelTextDigest?: string;
+	/** Exact author prefix injected into `modelText`; absent for unprefixed/degraded dispatches. */
+	modelPrefix?: string;
 	source: PromptSource;
 	author: MessageAuthor;
 }
@@ -607,13 +614,13 @@ interface LivePromptAuthorMessageBinding {
 	promptId: string;
 	author: MessageAuthor;
 	settled: boolean;
-}
-
-interface ReplayPromptAuthorBinding extends LivePromptAuthorMessageBinding {
-	/** Exact text is memory-only; restart replay correlates with the stable v2 digest. */
+	/** Exact Pi text is retained only in memory for live occurrence matching. */
 	modelText?: string;
 	modelTextDigest?: string;
+	modelPrefix?: string;
 }
+
+type ReplayPromptAuthorBinding = LivePromptAuthorMessageBinding;
 
 export interface SessionInfo {
 	id: string;
@@ -880,18 +887,49 @@ function resolveAcceptedPromptAuthor(source: PromptSource, explicit?: MessageAut
 	});
 }
 
-function recordPromptAuthorBinding(
+export interface PreparedPromptAuthorDispatch {
+	promptId: string;
+	/** Exact text for this one Pi RPC. Durable queues and recovery state keep the base text. */
+	piText: string;
+	modelPrefix?: string;
+	pending: PendingPromptAuthorRecord;
+	sidecarPersisted: boolean;
+}
+
+/**
+ * Persist the exact accountable Pi text before exposing an author prefix to Pi.
+ * If persistence is unavailable, dispatch this occurrence with its unprefixed
+ * base text and retain only a best-effort in-memory author binding.
+ */
+export function preparePromptAuthorDispatch(
 	session: SessionInfo,
 	promptId: string,
-	modelText: string,
+	baseModelText: string,
 	source: PromptSource,
 	author: MessageAuthor,
 	now: number,
-): PendingPromptAuthorRecord {
+): PreparedPromptAuthorDispatch {
+	const desiredPrefix = modelPrefixForPromptAuthor(author);
+	const desiredPiText = desiredPrefix ? `${desiredPrefix}${baseModelText}` : baseModelText;
+	const sidecarPersisted = appendPromptAuthorDispatch(session.id, {
+		schemaVersion: 2,
+		type: "prompt-author",
+		promptId,
+		dispatchedAt: now,
+		modelText: desiredPiText,
+		source,
+		author,
+		...(desiredPrefix === undefined ? {} : { modelPrefix: desiredPrefix }),
+	});
+	const piText = sidecarPersisted ? desiredPiText : baseModelText;
+	const modelPrefix = sidecarPersisted ? desiredPrefix : undefined;
+	const modelTextDigest = digestPromptModelText(piText);
 	const pending: PendingPromptAuthorRecord = {
 		promptId,
 		dispatchedAt: now,
-		modelText,
+		modelText: piText,
+		...(modelTextDigest === undefined ? {} : { modelTextDigest }),
+		...(modelPrefix === undefined ? {} : { modelPrefix }),
 		source,
 		author,
 	};
@@ -900,13 +938,13 @@ function recordPromptAuthorBinding(
 	// A newly accepted same-text occurrence supersedes only the live keyless
 	// terminal guard. Restore replay guards remain authoritative until replay ends.
 	session.lastKeylessPromptAuthorEnd = undefined;
-	void appendPromptAuthorDispatch(session.id, {
-		schemaVersion: 2,
-		type: "prompt-author",
-		...pending,
-		modelText,
-	});
-	return pending;
+	return {
+		promptId,
+		piText,
+		...(modelPrefix === undefined ? {} : { modelPrefix }),
+		pending,
+		sidecarPersisted,
+	};
 }
 
 function cancelPromptAuthorBinding(session: SessionInfo, promptId: string, now: number): void {
@@ -1005,10 +1043,23 @@ function stripArchivedSnapshotCorrelations<T>(snapshot: T): T {
 	return snapshot;
 }
 
+/** Restore base model text before full-history title generation sees Pi rows. */
+export function projectPromptAuthorMessagesForTitle<T extends object>(
+	sessionId: string,
+	messages: T[],
+	identity: AgentSessionIdentity = { id: sessionId },
+	agentDeps: AgentAuthorDependencies = {},
+): T[] {
+	return mergeAuthorSidecarIntoMessages(readAuthorSidecar(sessionId), messages, {
+		session: identity,
+		agentDeps,
+	}) as T[];
+}
+
 /**
- * Dispatch a Bobbit-generated prompt through Pi without changing its bytes,
- * while creating the same durable author binding as SessionManager queues.
- * A late negative acknowledgement cannot cancel a turn Pi already observed.
+ * Dispatch a Bobbit-generated prompt through the write-before-prefix boundary.
+ * Durable/retry text remains untouched, and a late negative acknowledgement
+ * cannot cancel a turn Pi already observed.
  */
 export async function dispatchTrackedPrompt(
 	session: SessionInfo,
@@ -1026,12 +1077,12 @@ export async function dispatchTrackedPrompt(
 	const observedBeforeDispatch = session.agentObservedTurnVersion ?? 0;
 	const author = resolveAcceptedPromptAuthor(source, opts.author);
 	session.lastPromptSource = source;
-	recordPromptAuthorBinding(session, promptId, text, source, author, now());
+	const prepared = preparePromptAuthorDispatch(session, promptId, text, source, author, now());
 
 	try {
 		const response = opts.whenReady
-			? await session.rpcClient.promptWhenReady(text, undefined)
-			: await session.rpcClient.prompt(text);
+			? await session.rpcClient.promptWhenReady(prepared.piText, undefined)
+			: await session.rpcClient.prompt(prepared.piText);
 		if ((response as any)?.success === false) {
 			throw new Error((response as any).error || "prompt dispatch rejected");
 		}
@@ -1067,7 +1118,16 @@ function sameAuthor(left: MessageAuthor, right: MessageAuthor): boolean {
 }
 
 function authorForSteerRows(rows: QueuedMessage[]): MessageAuthor {
-	const authors = rows.map((row) => resolveAcceptedPromptAuthor(row.source ?? "user", row.author));
+	const authors = rows.map((row) => {
+		const source = row.source ?? "user";
+		if (source === "user" && isMessageAuthor(row.author) && row.author.kind === "user") {
+			return row.author;
+		}
+		return resolveAcceptedPromptAuthor(source, row.author);
+	});
+	// Human identity prefixing is deliberately inactive. Even synthetic legacy
+	// rows with different user ids remain an all-human, unprefixed batch.
+	if (authors.every((author) => author.kind === "user")) return authors[0];
 	return authors.every((author) => sameAuthor(author, authors[0])) ? authors[0] : BATCH_SYSTEM_AUTHOR;
 }
 
@@ -1119,21 +1179,25 @@ type PromptAuthorEventBinding = { promptId: string; alreadySettled: boolean };
 export function restorePromptAuthorBindings(session: SessionInfo, entries: PromptAuthorBinding[]): number {
 	session.pendingPromptAuthors = entries
 		.filter((entry) => entry.settlement === undefined)
-		.map(({ promptId, dispatchedAt, modelText, modelTextDigest, source, author }) => ({
+		.map(({ promptId, dispatchedAt, modelText, modelTextDigest, modelPrefix, source, author }) => ({
 			promptId,
 			dispatchedAt,
 			...(modelText === undefined ? {} : { modelText }),
 			...(modelTextDigest === undefined ? {} : { modelTextDigest }),
+			...(modelPrefix === undefined ? {} : { modelPrefix }),
 			source,
 			author,
 		}));
 	const messageBindings = new Map<string, LivePromptAuthorMessageBinding>();
 	for (const entry of entries) {
 		if (entry.settlement?.outcome !== "echoed") continue;
-		const binding = {
+		const binding: LivePromptAuthorMessageBinding = {
 			promptId: entry.promptId,
 			author: entry.author,
 			settled: true,
+			...(entry.modelText === undefined ? {} : { modelText: entry.modelText }),
+			...(entry.modelTextDigest === undefined ? {} : { modelTextDigest: entry.modelTextDigest }),
+			...(entry.modelPrefix === undefined ? {} : { modelPrefix: entry.modelPrefix }),
 		};
 		if (entry.settlement.messageId) {
 			messageBindings.set(`id:${entry.settlement.messageId}`, binding);
@@ -1149,6 +1213,7 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 			promptId: entry.promptId,
 			...(entry.modelText === undefined ? {} : { modelText: entry.modelText }),
 			...(entry.modelTextDigest === undefined ? {} : { modelTextDigest: entry.modelTextDigest }),
+			...(entry.modelPrefix === undefined ? {} : { modelPrefix: entry.modelPrefix }),
 			author: entry.author,
 			settled: entry.settlement?.outcome === "echoed",
 		}));
@@ -1254,17 +1319,24 @@ export function prepareVisibleAgentEvent(
 		);
 		if (pendingIndex !== -1 && messageKey) {
 			const pending = session.pendingPromptAuthors[pendingIndex];
-			stableBinding = { promptId: pending.promptId, author: pending.author, settled: false };
+			stableBinding = {
+				promptId: pending.promptId,
+				author: pending.author,
+				settled: false,
+				...(pending.modelText === undefined ? {} : { modelText: pending.modelText }),
+				...(pending.modelTextDigest === undefined ? {} : { modelTextDigest: pending.modelTextDigest }),
+				...(pending.modelPrefix === undefined ? {} : { modelPrefix: pending.modelPrefix }),
+			};
 			if (!session.promptAuthorMessageBindings) session.promptAuthorMessageBindings = new Map();
 			session.promptAuthorMessageBindings.set(messageKey, stableBinding);
 		}
 	}
 
+	const selectedPromptBinding = stableBinding
+		?? (pendingIndex === -1 ? undefined : session.pendingPromptAuthors![pendingIndex]);
 	const sessionAuthor = agentAuthorForSession(session, agentDeps);
-	if (stableBinding) {
-		author = stableBinding.author;
-	} else if (pendingIndex !== -1) {
-		author = session.pendingPromptAuthors![pendingIndex].author;
+	if (selectedPromptBinding) {
+		author = selectedPromptBinding.author;
 	} else if (message.role === "assistant") {
 		author = sessionAuthor;
 	} else {
@@ -1274,7 +1346,12 @@ export function prepareVisibleAgentEvent(
 		}).message.author;
 	}
 
-	const prepared = normalizeVisibleAgentEvent(session, raw, {
+	// Correlation chooses the accountable occurrence. The sidecar projection
+	// independently proves exact raw Pi text before removing one stored prefix.
+	const projectedRaw = userRole && selectedPromptBinding
+		? { ...raw, message: projectCorrelatedPromptMessage(message, selectedPromptBinding) }
+		: raw;
+	const prepared = normalizeVisibleAgentEvent(session, projectedRaw, {
 		agentAuthor: sessionAuthor,
 		systemAuthor: BOBBIT_SYSTEM_AUTHOR,
 		promptAuthor: author,
@@ -1315,9 +1392,11 @@ export function prepareVisibleAgentEvent(
 		if (!messageKey) {
 			session.lastKeylessPromptAuthorEnd = {
 				promptId: pending.promptId,
-				// A restored v2 pending row contains only a digest. The echo itself
+				// A restored v2 pending row contains only a digest. The raw echo itself
 				// safely supplies memory-only exact text for duplicate terminal guards.
 				modelText,
+				...(pending.modelTextDigest === undefined ? {} : { modelTextDigest: pending.modelTextDigest }),
+				...(pending.modelPrefix === undefined ? {} : { modelPrefix: pending.modelPrefix }),
 				author: pending.author,
 				settled: true,
 			};
@@ -4558,14 +4637,14 @@ export class SessionManager {
 		return true;
 	}
 
-	private recordPromptAuthorDispatch(
+	private preparePromptAuthorDispatch(
 		session: SessionInfo,
 		promptId: string,
-		modelText: string,
+		baseModelText: string,
 		source: PromptSource,
 		author: MessageAuthor,
-	): PendingPromptAuthorRecord {
-		return recordPromptAuthorBinding(session, promptId, modelText, source, author, this.clock.now());
+	): PreparedPromptAuthorDispatch {
+		return preparePromptAuthorDispatch(session, promptId, baseModelText, source, author, this.clock.now());
 	}
 
 	private cancelPromptAuthorDispatch(session: SessionInfo, promptId: string): void {
@@ -4589,10 +4668,12 @@ export class SessionManager {
 		if (bg) bg.abortAllWaits(session.id);
 		const batchText = rows.map(r => r.text).join("\n");
 		const promptId = batchPromptId("steer", rows);
-		const source = rows.every((row) => (row.source ?? "user") === (rows[0].source ?? "user"))
-			? (rows[0].source ?? "user")
-			: "system";
 		const author = authorForSteerRows(rows);
+		const source = author === BATCH_SYSTEM_AUTHOR
+			? "system"
+			: rows.every((row) => (row.source ?? "user") === (rows[0].source ?? "user"))
+				? (rows[0].source ?? "user")
+				: "system";
 		const ledgerRecord: InFlightSteerRecord = { text: batchText, promptId, source, author };
 
 		// Record on the shadow ledger BEFORE persisting queue removal. The store
@@ -4604,11 +4685,11 @@ export class SessionManager {
 		// the rows at front of promptQueue, so the next drain redispatches.
 		if (!session.inFlightSteerTexts) session.inFlightSteerTexts = [];
 		session.inFlightSteerTexts.push(ledgerRecord);
-		this.recordPromptAuthorDispatch(session, promptId, batchText, source, author);
+		const prepared = this.preparePromptAuthorDispatch(session, promptId, batchText, source, author);
 		for (const r of rows) session.promptQueue.remove(r.id);
 		this.broadcastQueue(session, { includeInFlightSteers: true });
 		try {
-			const steerResp = await session.rpcClient.steer(batchText);
+			const steerResp = await session.rpcClient.steer(prepared.piText);
 			if ((steerResp as any)?.success === false) {
 				throw new Error((steerResp as any)?.error || "steer rejected");
 			}
@@ -4927,7 +5008,7 @@ export class SessionManager {
 		};
 
 		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered, source, author }];
-		this.recordPromptAuthorDispatch(session, promptId, text, source, author);
+		const prepared = this.preparePromptAuthorDispatch(session, promptId, text, source, author);
 		let recovered = false;
 		let cancelled = false;
 		try {
@@ -4935,8 +5016,8 @@ export class SessionManager {
 			// generous timeout so a boot-resume nudge lands instead of timing out
 			// on the default 30s. Everything else (recovery, rethrow) is identical.
 			const resp = coldStart
-				? await session.rpcClient.promptWhenReady(text, images)
-				: await session.rpcClient.prompt(text, images);
+				? await session.rpcClient.promptWhenReady(prepared.piText, images)
+				: await session.rpcClient.prompt(prepared.piText, images);
 			if (resp && (resp as any).success === false) {
 				const reason = (resp as any).error || "unknown";
 				if (acceptedBeforeAckFailure(reason)) return;
@@ -4983,9 +5064,11 @@ export class SessionManager {
 		if (steered.length > 0) {
 			const batchText = steered.map(m => m.text).join('\n');
 			const batchAuthor = authorForSteerRows(steered);
-			const batchSource: PromptSource = steered.every((row) => (row.source ?? "user") === (steered[0].source ?? "user"))
-				? (steered[0].source ?? "user")
-				: "system";
+			const batchSource: PromptSource = batchAuthor === BATCH_SYSTEM_AUTHOR
+				? "system"
+				: steered.every((row) => (row.source ?? "user") === (steered[0].source ?? "user"))
+					? (steered[0].source ?? "user")
+					: "system";
 			next = { ...steered[0], text: batchText, source: batchSource, author: batchAuthor };
 		} else {
 			// Skip already-dispatched messages (steered mid-turn), then pop the next
@@ -5046,8 +5129,8 @@ export class SessionManager {
 			);
 		};
 
-		this.recordPromptAuthorDispatch(session, promptId, next.text, promptSource, promptAuthor);
-		const dispatchPromise = session.rpcClient.prompt(next.text, next.images);
+		const prepared = this.preparePromptAuthorDispatch(session, promptId, next.text, promptSource, promptAuthor);
+		const dispatchPromise = session.rpcClient.prompt(prepared.piText, next.images);
 		dispatchPromise
 			.then((resp: any) => {
 				// The bridge resolves with `{success:false, error}` when the agent
@@ -9687,7 +9770,13 @@ export class SessionManager {
 			if (!msgsResp.success) return null;
 			const rawMessages = msgsResp.data?.messages || msgsResp.data;
 			if (!Array.isArray(rawMessages) || rawMessages.length === 0) return null;
-			const messages = spliceInFlightMessage(rawMessages, live.latestMessageUpdate);
+			const withInFlight = spliceInFlightMessage(rawMessages, live.latestMessageUpdate);
+			const messages = projectPromptAuthorMessagesForTitle(
+				id,
+				withInFlight,
+				live,
+				this.messageAuthorDependencies(live),
+			);
 			const title = await generateSessionTitle(messages, this.getTitleGenOptions());
 			if (!title) return null;
 			live.title = title;
@@ -9708,13 +9797,18 @@ export class SessionManager {
 			const ctx = sessionFsContextForAgentFile(ps, safeFile);
 			const content = await sessionFileRead(ctx, safeFile, this.sandboxManager);
 			if (content) {
+				const entries: unknown[] = [];
 				for (const line of content.trim().split("\n")) {
 					if (!line.trim()) continue;
-					try {
-						const entry = JSON.parse(line);
-						if (entry.type === "message" && entry.message) messages.push(entry.message);
-					} catch { /* skip malformed */ }
+					try { entries.push(JSON.parse(line)); } catch { /* skip malformed */ }
 				}
+				const correlated = applyArchivedSnapshotCorrelations(prepareArchivedMessageSnapshot(entries));
+				messages = stripArchivedSnapshotCorrelations(projectPromptAuthorMessagesForTitle(
+					id,
+					correlated as object[],
+					ps,
+					this.messageAuthorDependencies(ps),
+				));
 			}
 		} catch {
 			messages = [];
@@ -9733,7 +9827,13 @@ export class SessionManager {
 
 			const rawMessages = msgsResp.data?.messages || msgsResp.data;
 			if (!Array.isArray(rawMessages) || rawMessages.length === 0) return;
-			const messages = spliceInFlightMessage(rawMessages, session.latestMessageUpdate);
+			const withInFlight = spliceInFlightMessage(rawMessages, session.latestMessageUpdate);
+			const messages = projectPromptAuthorMessagesForTitle(
+				session.id,
+				withInFlight,
+				session,
+				this.messageAuthorDependencies(session),
+			);
 
 			const title = await generateSessionTitle(messages, this.getTitleGenOptions());
 			if (title) {

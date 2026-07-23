@@ -128,7 +128,7 @@ import {
 	initCompactionSidecarDir,
 	findCompactionSidecarEntry,
 } from "./agent/compaction-sidecar.js";
-import { readOrphanedBeforeCompaction } from "./agent/transcript-reader.js";
+import { projectOwnTranscriptJsonl, readOrphanedBeforeCompaction } from "./agent/transcript-reader.js";
 import { buildActivationHeader } from "./skills/skill-manifest.js";
 import type { PersistedTask, TaskState } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
@@ -8140,12 +8140,14 @@ async function handleApiRoute(
 		const ident = resolvePackIdentityForTool(sessionToolManager, tool);
 		// Slice B2: own-session transcript reader for ctx.host.session.read*. Reads the
 		// HEADER-BOUND session only (single-sourced identity) via the same own-session
-		// read the transcript endpoint uses.
+		// read the transcript endpoint uses. Project the in-memory copy before the Host
+		// API adapter can expose or filter model-only author prefixes.
 		const readOwnTranscript = async (): Promise<string | null> => {
 			const ps = sessionManager.getPersistedSession(guard.sessionId);
 			if (!ps?.agentSessionFile) return null;
 			const fsCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
-			return sessionFileRead(fsCtx, ps.agentSessionFile, sandboxManager);
+			const jsonl = await sessionFileRead(fsCtx, ps.agentSessionFile, sandboxManager);
+			return projectOwnTranscriptJsonl(guard.sessionId, jsonl);
 		};
 		const host = createServerHostApi({
 			sessionId: guard.sessionId,
@@ -8451,6 +8453,7 @@ async function handleApiRoute(
 			const fsCtx = sessionFsContextForAgentFile(extPs, extPs.agentSessionFile);
 			extJsonl = await sessionFileRead(fsCtx, extPs.agentSessionFile, sandboxManager);
 		}
+		extJsonl = await projectOwnTranscriptJsonl(extGuard.sessionId, extJsonl);
 		if (extSessionToolCall) {
 			const toolUseId = url.searchParams.get("toolUseId");
 			if (!toolUseId) { json({ error: "toolUseId required" }, 400); return; }
@@ -8554,7 +8557,8 @@ async function handleApiRoute(
 			const ps = sessionManager.getPersistedSession(guard.sessionId);
 			if (!ps?.agentSessionFile) return null;
 			const fsCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
-			return sessionFileRead(fsCtx, ps.agentSessionFile, sandboxManager);
+			const jsonl = await sessionFileRead(fsCtx, ps.agentSessionFile, sandboxManager);
+			return projectOwnTranscriptJsonl(guard.sessionId, jsonl);
 		};
 		const host = createServerHostApi({
 			sessionId: guard.sessionId,

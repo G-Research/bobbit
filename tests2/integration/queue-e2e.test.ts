@@ -4,7 +4,11 @@
  * agent process, or real elapsed-time window is needed to exercise queue order,
  * fan-out, drain, abort, and error-cap behavior.
  */
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { afterAll, afterEach, beforeAll, expect, it, test, vi } from "vitest";
+import { initAuthorSidecarDir } from "../../src/server/agent/author-sidecar.ts";
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
 import { PromptQueue } from "../../src/server/agent/prompt-queue.ts";
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
@@ -19,6 +23,7 @@ type TestClient = {
 
 let manager: any;
 let sequence = 0;
+let stateDir = "";
 
 function client(): TestClient {
 	return {
@@ -74,6 +79,11 @@ function endTurn(value: any): void {
 }
 
 beforeAll(() => {
+	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "queue-e2e-author-sidecar-"));
+	initAuthorSidecarDir(stateDir, {
+		secretsDir: path.join(stateDir, "private-secrets"),
+		hmacKey: Buffer.alloc(32, 0x36),
+	});
 	const clock = createManualClock();
 	manager = new SessionManager({ clock, skipTitleGeneration: true });
 	clock.clearInterval(manager._statusHeartbeatTimer);
@@ -82,7 +92,10 @@ beforeAll(() => {
 });
 
 afterEach(() => manager.sessions.clear());
-afterAll(() => manager.sessions.clear());
+afterAll(() => {
+	manager.sessions.clear();
+	fs.rmSync(stateDir, { recursive: true, force: true });
+});
 
 test.describe("Queue E2E", () => {
 	it("receives queue_update on connect (initially empty)", () => {
@@ -194,12 +207,13 @@ test.describe("Queue E2E", () => {
 		value.lastTurnErrorMessage = "mock provider error";
 		value.consecutiveErrorTurns = 3;
 		await manager.enqueuePrompt(value.id, "queued msg after cap");
-		expect(value.promptQueue.length).toBe(1);
+		expect(value.promptQueue.toArray().map((row: any) => row.text)).toEqual(["queued msg after cap"]);
 		await manager.retryLastPrompt(value.id);
+		expect(value.promptQueue.toArray().map((row: any) => row.text)).toEqual(["queued msg after cap"]);
 		endTurn(value);
 		await Promise.resolve();
 		expect(value.promptQueue.length).toBe(0);
-		expect(prompt.mock.calls.map((call: any[]) => call[0])).toEqual(["failed turn", "queued msg after cap"]);
+		expect(prompt.mock.calls.map((call: any[]) => call[0])).toEqual(["[System]: failed turn", "queued msg after cap"]);
 	});
 
 	it("story 37 (updated): error state — implicit unstick dispatches new message (under cap)", async () => {

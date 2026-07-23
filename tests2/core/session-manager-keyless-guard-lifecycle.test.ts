@@ -11,6 +11,7 @@ const {
 } = await import("../../src/server/agent/session-manager.ts");
 const {
 	appendPromptAuthorDispatch,
+	digestPromptModelText,
 	initAuthorSidecarDir,
 	readAuthorSidecar,
 } = await import("../../src/server/agent/author-sidecar.ts");
@@ -18,6 +19,8 @@ const {
 const userAuthor = { kind: "user", id: "user:local", label: "User" } as const;
 const agentAuthor = { kind: "agent", id: "session:caller", label: "Caller" } as const;
 const text = "concurrent duplicate bytes";
+const agentPrefix = "[Caller (caller)]: ";
+const agentPiText = `${agentPrefix}${text}`;
 
 function session(overrides: Record<string, unknown> = {}): any {
 	return {
@@ -31,8 +34,8 @@ function session(overrides: Record<string, unknown> = {}): any {
 	};
 }
 
-function userEnd(): any {
-	return { type: "message_end", message: { role: "user", content: text } };
+function userEnd(rawModelText = text): any {
+	return { type: "message_end", message: { role: "user", content: rawModelText } };
 }
 
 function consumeSteerEcho(target: any, event: any): void {
@@ -61,12 +64,18 @@ describe("SessionManager keyless terminal guard lifecycle", () => {
 			promptId: "p1", dispatchedAt: 1, modelText: text, source: "user", author: userAuthor,
 		});
 		appendPromptAuthorDispatch("keyless-guard-session", {
-			promptId: "p2", dispatchedAt: 2, modelText: text, source: "agent", author: agentAuthor,
+			promptId: "p2", dispatchedAt: 2, modelText: agentPiText, modelPrefix: agentPrefix,
+			source: "agent", author: agentAuthor,
 		});
+		const agentModelTextDigest = digestPromptModelText(agentPiText);
 		const target = session({
 			pendingPromptAuthors: [
 				{ promptId: "p1", dispatchedAt: 1, modelText: text, source: "user", author: userAuthor },
-				{ promptId: "p2", dispatchedAt: 2, modelText: text, source: "agent", author: agentAuthor },
+				{
+					promptId: "p2", dispatchedAt: 2, modelText: agentPiText,
+					modelTextDigest: agentModelTextDigest, modelPrefix: agentPrefix,
+					source: "agent", author: agentAuthor,
+				},
 			],
 			inFlightSteerTexts: [
 				{ text, promptId: "p2", source: "agent", author: agentAuthor },
@@ -100,7 +109,7 @@ describe("SessionManager keyless terminal guard lifecycle", () => {
 		assert.deepEqual(target.pendingPromptAuthors.map((row: any) => row.promptId), ["p2"]);
 		assert.deepEqual(target.inFlightSteerTexts.map((row: any) => row.promptId), ["p2"], "duplicate p1 cannot consume p2 steer");
 
-		const p2Terminal: any = prepareVisibleAgentEvent(target, userEnd());
+		const p2Terminal: any = prepareVisibleAgentEvent(target, userEnd(agentPiText));
 		consumeSteerEcho(target, p2Terminal);
 		assert.deepEqual(p2Terminal.message.author, agentAuthor, "p2 real echo keeps p2 author");
 		assert.equal(p2Terminal.message.role, "user");
@@ -117,7 +126,9 @@ describe("SessionManager keyless terminal guard lifecycle", () => {
 		appendPromptAuthorDispatch("keyless-guard-session", {
 			promptId: "p1", dispatchedAt: 1, modelText: text, source: "user", author: userAuthor,
 		});
+		const prompt = vi.fn(async () => ({ success: true }));
 		const target = session({
+			rpcClient: { prompt },
 			pendingPromptAuthors: [
 				{ promptId: "p1", dispatchedAt: 1, modelText: text, source: "user", author: userAuthor },
 			],
@@ -130,11 +141,14 @@ describe("SessionManager keyless terminal guard lifecycle", () => {
 			author: agentAuthor,
 			now: () => 2,
 		});
+		assert.deepEqual(prompt.mock.calls, [[agentPiText]], "Pi receives the accountable prefixed text");
 		const p2 = target.pendingPromptAuthors[0];
 		assert.ok(p2?.promptId);
+		assert.equal(p2.modelText, agentPiText);
+		assert.equal(p2.modelPrefix, agentPrefix);
 		assert.equal(target.lastKeylessPromptAuthorEnd, undefined, "new acceptance supersedes p1 guard");
 
-		const p2Terminal: any = prepareVisibleAgentEvent(target, userEnd());
+		const p2Terminal: any = prepareVisibleAgentEvent(target, userEnd(agentPiText));
 		assert.deepEqual(p2Terminal.message.author, agentAuthor);
 		assert.equal(p2Terminal.message.role, "user");
 		assert.equal(p2Terminal.message.content, text);

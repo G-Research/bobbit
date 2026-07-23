@@ -22,7 +22,7 @@ export type WorktreePushPolicy = "local-only" | "publish";
 
 /** A steer accepted for dispatch but not yet echoed into the Pi transcript. */
 export interface InFlightSteerRecord {
-	/** Exact text sent to Pi. Never decorate or normalize this value. */
+	/** Unprefixed durable base model text. The author sidecar proves any per-RPC decoration. */
 	text: string;
 	/** Stable dispatch identity used to correlate the eventual user-role echo. */
 	promptId: string;

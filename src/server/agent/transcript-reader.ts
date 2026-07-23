@@ -18,6 +18,7 @@ import {
 } from "./message-author.js";
 import {
 	mergeAuthorSidecarIntoMessages,
+	readAuthorSidecar,
 	type PromptAuthorBinding,
 } from "./author-sidecar.js";
 
@@ -576,6 +577,10 @@ function resolveRawMessageAuthors(
 		const { entryId: _entryId, ts: _ts, ...fullMessage } = resolved;
 		return {
 			...raw,
+			// Compact rendering, verbose rendering, and regex filtering all read
+			// RawMessage.content. Keep it synchronized with the digest-gated
+			// sidecar projection performed on fullMessage above.
+			content: fullMessage.content,
 			fullMessage,
 			...(author ? { author } : {}),
 		};
@@ -594,6 +599,79 @@ export interface ReadTranscriptOptions {
 	readContent: () => Promise<string | null>;
 	/** Optional session and sidecar context for precise agent/system attribution. */
 	authorContext?: TranscriptAuthorResolutionContext;
+}
+
+/**
+ * Project a raw Pi transcript for extension-facing adapters without mutating the
+ * on-disk JSONL. Correlation runs over the complete message sequence before any
+ * line is rewritten, preserving duplicate-occurrence ordering. Only visible
+ * content is copied back: private author metadata and correlation fields never
+ * cross the extension boundary.
+ */
+export async function projectOwnTranscriptJsonl(
+	sessionId: string,
+	jsonl: string | null,
+	context: Omit<TranscriptAuthorResolutionContext, "sidecarEntries"> = {},
+): Promise<string | null> {
+	if (jsonl === null || jsonl === "") return jsonl;
+
+	const lines = jsonl.split(/\r?\n/);
+	const parsed = new Map<number, Record<string, unknown>>();
+	const rows: Array<Record<string, unknown>> = [];
+	const lineIndexes: number[] = [];
+	for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+		const line = lines[lineIndex].trim();
+		if (!line) continue;
+		let envelope: Record<string, unknown>;
+		try {
+			const candidate = JSON.parse(line) as unknown;
+			if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+			envelope = candidate as Record<string, unknown>;
+		} catch {
+			continue;
+		}
+		const wrapped = envelope.message;
+		if (!wrapped || typeof wrapped !== "object" || Array.isArray(wrapped)) continue;
+		const { author: _untrustedAuthor, ...message } = wrapped as Record<string, unknown>;
+		rows.push({
+			...message,
+			...(typeof envelope.id === "string" ? { entryId: envelope.id } : {}),
+			...(envelope.ts !== undefined ? { ts: envelope.ts } : {}),
+			...(envelope.timestamp !== undefined && message.timestamp === undefined
+				? { timestamp: envelope.timestamp }
+				: {}),
+		});
+		parsed.set(lineIndex, envelope);
+		lineIndexes.push(lineIndex);
+	}
+	if (rows.length === 0) return jsonl;
+
+	const projected = mergeAuthorSidecarIntoMessages(
+		readAuthorSidecar(sessionId),
+		rows,
+		{
+			...context,
+			session: context.session ?? { id: sessionId },
+		},
+	);
+	for (let index = 0; index < projected.length; index++) {
+		const lineIndex = lineIndexes[index];
+		const envelope = parsed.get(lineIndex);
+		if (!envelope) continue;
+		const wrapped = envelope.message as Record<string, unknown>;
+		const { author: _author, entryId: _entryId, ts: _ts, ...visible } = projected[index];
+		// Keep Pi-owned message metadata byte-equivalent at the object level and
+		// replace only projected content. Any transcript-supplied author is removed.
+		const { author: _rawAuthor, ...rawWithoutAuthor } = wrapped;
+		envelope.message = {
+			...rawWithoutAuthor,
+			...(Object.prototype.hasOwnProperty.call(visible, "content")
+				? { content: visible.content }
+				: {}),
+		};
+		lines[lineIndex] = JSON.stringify(envelope);
+	}
+	return lines.join("\n");
 }
 
 /**

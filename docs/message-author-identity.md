@@ -1,12 +1,17 @@
 # Message author identity
 
-Bobbit attaches accountable author metadata to messages that cross its server, search, transcript, and browser boundaries. This answers **who caused a visible message** without changing the message's Pi role, content, rendering category, or model semantics.
+Bobbit tracks **who caused a message** independently of the Pi role used to carry it. This matters because a Pi `user` row can come from a human, another agent, Bobbit orchestration, or an extension.
 
-The metadata is Bobbit-owned. Pi transcripts and provider requests remain the source of truth for conversation content; Bobbit stores prompt attribution separately and derives safe values when older data has none.
+The feature has two deliberately separate views:
 
-## Public model
+- **Bobbit-visible view:** trusted author metadata and, only when the loaded transcript is ambiguous, a prompt-bubble label. Message text remains the user's original text.
+- **Model view:** trusted system and agent prompts receive a short dispatch-time text prefix. Human prompts remain byte-for-byte unprefixed.
 
-The shared contract is defined in `src/shared/message-author.ts`:
+The private author sidecar connects those views without adding author fields to Pi JSONL or storing prompt plaintext.
+
+## Public author model
+
+The shared contract lives in `src/shared/message-author.ts`:
 
 ```ts
 export type MessageAuthorKind = "user" | "agent" | "system";
@@ -17,223 +22,254 @@ export interface MessageAuthor {
   label: string;
 }
 
-export type BobbitMessage<T extends object = Record<string, unknown>> = T & {
-  author?: MessageAuthor;
-};
+export type BobbitMessage<T extends object = Record<string, unknown>> =
+  T & { author?: MessageAuthor };
 ```
 
-`author` is optional at persistence, wire, transcript-reader, and client boundaries. This is intentional: sessions created before author metadata was introduced remain valid and are normalized when read.
+`author` remains optional across storage, wire, transcript, and client boundaries so legacy sessions remain readable. The three kinds are intentionally small:
 
-The three kinds are deliberately small:
-
-- `user` — a human. Local Bobbit uses `{ kind: "user", id: "user:local", label: "User" }`.
+- `user` — human input. The current local identity is `user:local`, labelled `User`.
 - `agent` — an LLM-backed Bobbit session, including staff, team, delegate, reviewer, and other agent sessions.
-- `system` — Bobbit-generated or extension-generated session input and Bobbit UI notifications.
+- `system` — Bobbit orchestration, notifications, dynamic context, mixed-author batches, and extension session writes.
 
-Tools and extensions are not additional author kinds. Extensions act through Bobbit and therefore use `system`; tool output inherits an accountable `user`, `agent`, or `system` author.
+Tools and extensions are producers, not additional author kinds. Tool results inherit the closest accountable author; extensions act as server-derived system identities.
 
-Author metadata received from storage or wire data is accepted only when its kind is valid and its `id` and `label` are bounded, non-empty strings. Invalid metadata is discarded before normalization.
+Author and role answer different questions. `role` continues to control Pi/provider semantics and rendering shape. `author` is Bobbit-owned accountability metadata. Never infer human authorship from `role: "user"`.
 
-## Author and role are independent
+### Validation and display formatting
 
-Pi roles still describe the message's protocol and rendering shape: `user`, `assistant`, `toolResult`, and Bobbit custom roles keep their existing meanings. `author` describes accountability.
+`isMessageAuthor()` accepts only a known kind and bounded, non-empty string `id` and `label`. Pi transcript fields and browser payloads are not trusted merely because they have that shape.
 
-Consequently:
+Display formatting is centralized:
 
-- an ordinary browser prompt has `role: "user"` and `author.kind: "user"`;
-- an agent-to-agent prompt is still delivered and echoed with `role: "user"`, but has `author.kind: "agent"`;
-- a Bobbit notification or extension write can use the existing user-prompt transport while having `author.kind: "system"`;
-- an assistant response normally has `role: "assistant"` and `author.kind: "agent"`;
-- a synthesized setup failure may retain its existing assistant-shaped row while being authored by `system`.
+- `normalizeMessageAuthorLabel()` removes control characters, trims, and collapses whitespace onto one line. It does not modify the stored `MessageAuthor`.
+- `formatDisplayAuthorId()` removes a leading `user:`, `staff:`, or `session:` namespace. A human remainder is preserved; an agent remainder is normalized with the canonical author-ID sanitizer and shortened to six characters. Systems have no display ID.
+- An unusable label or ID returns no agent prefix or presentation instead of fabricating attribution.
 
-Do not infer human authorship from `role: "user"`. Use `author.kind` when accountability matters, and continue to use `role` for rendering and provider semantics.
+The user-ID branch is a future compatibility seam. Bobbit does not currently collect a stable human principal, so no human prefix is emitted in this release.
 
-## Prompt provenance mapping
+## Trusted identity construction
 
-`PromptSource` remains the more granular internal delivery provenance. It is defined in `src/shared/prompt-source.ts` and mapped to the public kind as follows:
+The gateway derives authors from authenticated server context. Browser `prompt` and `steer` frames cannot submit arbitrary author metadata.
 
-| `PromptSource` | Public kind | Typical producer |
+`PromptSource` remains the internal producer provenance:
+
+| Source | Accountable kind | Typical producer |
 |---|---|---|
 | `user` | `user` | Browser prompt, steer, or ask response |
-| `agent` | `agent` | Authenticated caller-session relay, owner-to-child prompt |
-| `auto-nudge` | `system` | Team idle or watchdog nudge |
-| `task-notification` | `system` | Task completion notice |
-| `verification` | `system` | Verification result notice |
-| `system` | `system` | Retry, restart, setup, orchestration, or context message |
-| `child-complete` | `system` | Child-goal completion notice |
-| `extension` | `system` | `host.session.postMessage` |
+| `agent` | `agent` | Authenticated caller-session relay |
+| `auto-nudge`, `task-notification`, `verification`, `system`, `child-complete` | `system` | Bobbit orchestration |
+| `extension` | `system` | Authenticated extension surface |
 
-The server resolves the author from trusted call-site context. Browser prompt and steer frames cannot submit an author identity. An `agent` source without a valid trusted caller identity falls back to Bobbit's system identity rather than being misattributed to a human or fabricated agent.
+An agent source without a valid trusted caller falls back to Bobbit's system identity; it is never relabelled as a human or invented agent.
 
-## Stable identities
+Stable IDs are constructed in the server message-author module:
 
-The construction helpers live in `src/server/agent/message-author.ts`.
+- staff-backed session: `staff:<staff-id>`;
+- other agent session: `session:<session-id>`;
+- Bobbit core: `system:bobbit`;
+- dynamic context: `system:bobbit:dynamic-context`;
+- mixed-author steer batch: `system:bobbit:batch`;
+- extension write: `system:extension:<pack-id>:<surface>`.
 
-### Users
+Agent labels prefer staff name, session title, role label/name, then `Agent`. IDs remain stable when a title changes. Extension identities come from the server-minted surface token, not pack or tool names asserted by the client.
 
-Current local sessions use the stable fallback identity:
+## Conditional prompt labels
 
-```ts
-{ kind: "user", id: "user:local", label: "User" }
-```
+The browser computes one display mode over the currently loaded transcript slices. It includes the main history and any hydrated pre-compaction slices, so nested history and the main list cannot disagree.
 
-This leaves room for hosted human identities without changing the three-kind model.
+Labels follow these rules:
 
-### Agents
+- Only accountable `user` and `user-with-attachments` prompt rows are eligible. Assistant replies and tool-result-only rows never receive a label.
+- Any loaded prompt with a validated `agent` or `system` author enables labels for the chat.
+- Once enabled, every eligible loaded prompt with a valid author is labelled for context, including human prompts.
+- All-human loaded history remains label-free, even if optional metadata contains multiple human IDs. Multi-human triggering is deferred until Bobbit has real human principals.
+- Missing or invalid legacy metadata produces no badge on that row.
 
-Agent identity uses `staff:<staffId>` when the session belongs to persisted staff; other sessions use `session:<sessionId>`. Components are sanitized before becoming metadata ids.
+Visible text is exact:
 
-Labels prefer the staff name, then the session title, then the resolved role label or name, and finally `Agent`. The id is the durable key; labels are display metadata and can change as a session or staff record is renamed.
+| Kind | Prompt badge |
+|---|---|
+| Human | `User` |
+| System | `System` |
+| Agent | `<normalized label> | Agent` |
 
-### Systems and extensions
+The human badge never appends `Human`. The system badge never exposes the internal `Bobbit` label. The badge overlays the bubble's top-left border; intrinsic sizing, ellipsis, timestamp spacing, and mobile-width constraints keep long labels, attachments, file mentions, and slash-skill chips usable. The historical unlabelled markup remains unchanged when labels are suppressed.
 
-Core Bobbit messages use `system:bobbit` with label `Bobbit`. Dynamic context uses `system:bobbit:dynamic-context`; a steer batch containing different accountable authors uses `system:bobbit:batch`.
+### Static agent identity appearance
 
-Extension session writes use a server-derived identity:
+Only agent badges include a Bobbit avatar. `resolvePromptAuthorAppearance()` resolves:
+
+- `session:*` against already-loaded live sessions, then archived sessions;
+- `staff:*` through the loaded staff row's current session, again preferring live over archived state.
+
+The avatar uses the same session color index/hue rotation and canonical accessory definition as the sidebar. It is rendered through the existing Bobbit canvas/sprite pipeline with the canonical palette and forward-facing open eyes. It has no status input, animation class, timer, blinking, breathing, bobbing, transient desaturation, or abort/compaction treatment.
+
+If the author, session, staff row, color index, or accessory cannot be resolved safely, the renderer uses the frozen canonical fallback: default hue and no accessory. It never allocates a new color or guesses a session.
+
+## Model-facing prompt prefixes
+
+Prefixing happens at one trusted boundary immediately before a Pi `prompt` or `steer` RPC:
 
 ```text
-system:extension:<pack-id>:<tool-or-surface>
+human:  A normal user prompt
+system: [System]: A Bobbit-generated prompt
+agent:  [Test Coordinator (1ae73f)]: A prompt from another agent
 ```
 
-The fallback label is `<pack-id>/<tool-or-surface>`. The WebSocket handler derives both components from the server-minted surface token; it does not trust caller-supplied pack or tool identity. Both extension `role: "user"` and `role: "system"` writes are accountable to this `system` author. Existing extension delivery shaping, including the system-reminder framing for `role: "system"`, is unchanged by author metadata.
+Current rules:
 
-## Host-side author sidecar
+- human prompts are always unprefixed;
+- systems use exactly `[System]: `, regardless of the internal system label or ID;
+- agents use `[<normalized label> (<six-character display ID>)]: `;
+- a same-author steer batch is prefixed once for that author;
+- an existing mixed-author batch keeps `system:bobbit:batch` and is prefixed once as system;
+- an all-human batch remains unprefixed.
 
-Pi does not preserve arbitrary Bobbit fields reliably, and sandbox transcripts may live inside a container. Bobbit therefore never writes `author` into the Pi JSONL transcript. Prompt attribution is stored outside project roots in private server state at:
+The prefix is placed before the exact final model text. Existing recovery framing, skill expansion, attachment synthesis, and newline batching therefore follow it. Images and other non-text blocks are not rewritten; when Pi returns structured content, projection treats the first model-visible text block as the prefix boundary.
+
+Only accountable visible prompts use this mechanism. Assistant output, tool results, hidden non-prompt orchestration payloads, indexed display text, and browser-side provider conversion do not receive author prefixes.
+
+### Final-dispatch invariant
+
+Queued, in-flight, retry, force-abort recovery, and restored text stays as unprefixed `baseModelText`. Each dispatch occurrence performs this sequence:
+
+1. Derive `desiredPrefix` from the trusted author.
+2. Form `desiredPiText = desiredPrefix + baseModelText`, or just `baseModelText` when no prefix applies.
+3. Append the dispatch record for that exact Pi text to the private author sidecar.
+4. Only if the append succeeds, send `desiredPiText` to Pi.
+5. If the append fails, send unprefixed `baseModelText` and retain only a best-effort in-memory binding for that occurrence.
+
+This write-before-prefix rule prevents Bobbit from placing text in Pi history that it cannot later prove was injected. Retry, reconnect, queue restore, provider-auth recovery, force-abort recovery, and gateway restart all re-enter the same final-dispatch boundary rather than persisting decorated text.
+
+## Private author sidecar
+
+Pi does not reliably preserve arbitrary Bobbit fields, and sandbox transcripts may live inside a container. Prompt attribution is therefore stored outside project roots at:
 
 ```text
 <serverSecretsDir>/author-sidecar/<sessionId>.jsonl
 ```
 
-The directory is owner-only (`0700`) and ledger files are owner-only (`0600`) on POSIX. Schema v2 dispatch records store `promptId`, dispatch time, a domain-separated keyed HMAC of the exact model text, `PromptSource`, and resolved author. They never store prompt plaintext. Settlement records mark prompts as `echoed` or `cancelled` and may include the echoed message id and timestamp. The HMAC subkey is derived from stable private server key material, so correlation remains stable across gateway restarts without exposing prompt text.
+The directory and files use owner-only permissions where the platform supports them. The v2 ledger has dispatch and settlement records. A dispatch record contains:
 
-At startup, Bobbit migrates valid v1 rows from the former project-reachable `<stateDir>/author-sidecar` path into digest-only v2 records. It removes each plaintext source only after valid records have been preserved; malformed and partial rows degrade to inference. Failure to remove a reachable plaintext ledger fails startup closed. Pi JSONL is never read back into or rewritten by this migration.
+```ts
+interface PromptAuthorDispatchRecord {
+  schemaVersion: 2;
+  type: "prompt-author";
+  promptId: string;
+  dispatchedAt: number;
+  modelTextDigest: string; // keyed digest of exact Pi text
+  source: PromptSource;
+  author: MessageAuthor;
+  modelPrefix?: string;    // exact injected prefix, never body text
+}
+```
 
-A redispatch with the same prompt id replaces the earlier folded binding. Cancelled dispatches are never correlated to transcript rows. Runtime writes occur immediately before prompt or steer delivery and are best-effort. A write failure is logged but never delays or rejects delivery. Reads skip malformed lines, partial crash tails, invalid records, and unsupported schema versions. A missing or unreadable sidecar behaves like an empty sidecar and falls back to role/content inference.
+The sidecar never stores base text, Pi text, attachments, images, recovery text, or skill-expanded plaintext. `modelTextDigest` is a domain-separated keyed HMAC of the exact dispatched Pi text, including any author prefix. Settlement rows mark a dispatch `echoed` or `cancelled` and may retain the Pi message ID/timestamp.
 
-Stable occurrence keys take precedence over text. Live and replayed events read Pi entry-id aliases from either the message or its outer event; once an occurrence is bound, its updates and duplicate terminal frames reuse that binding. Snapshot and transcript correlation then matches eligible user-role echoes by settled message id, timestamp plus keyed text digest, and finally FIFO keyed text digest. Tool-result-only user-role rows are excluded, and matching runs before display-text rewriting.
+A present `modelPrefix` is semantically validated, not merely type-checked: it must exactly equal the prefix currently derived from that record's validated author, including normalized label, display ID, punctuation, and trailing space. A mismatched agent label or ID, a user record with a prefix, or an agent/system mismatch invalidates the record. An absent field remains valid for legacy and unprefixed occurrences but authorizes no stripping.
 
-For array-shaped Pi user content, digest correlation reconstructs the dispatched text sequence without changing the message: ordered text-block fragments are concatenated with no inserted separator, while image and other non-text blocks are ignored only for matching. The original content array remains intact. This matters for prompts split across adjacent text blocks, where inserting a newline would produce a different digest and lose the sidecar author.
+Redispatch folds by prompt ID, with the latest dispatch resetting earlier settlement. Cancelled and unresolved records cannot claim ordinary historical rows. Reads skip malformed, partial, unsupported, or semantically invalid records. Archive retains the sidecar; hard purge removes it.
 
-Legacy replay can contain user echoes with neither an id nor a timestamp. During the bounded `switch_session` replay, Bobbit therefore keeps a restore-only cursor over every non-cancelled sidecar occurrence, including settled rows. For each keyless user occurrence, the first remaining same-text binding in dispatch order wins. Its terminal frame removes that binding from the cursor, while a last-terminal guard keeps repeated `message_end` frames idempotent. The next user `message_start` clears that guard and advances the next occurrence, even when its text is identical.
+## Correlation and replay-safe projection
 
-This ordered boundary distinguishes a settled old occurrence from a crash-unsettled newer occurrence: replaying the old end cannot settle or remove the newer steer, but a later `message_start` followed by the newer end settles that newer prompt exactly once. If the newer occurrence is absent from replay, its ledger row remains unresolved and is requeued with its original text, source, and author. Outside replay, accepting a new dispatch clears the live last-terminal guard so its genuine echo can bind normally.
+Correlation chooses **which occurrence and author** a Pi user-role row belongs to. Projection separately decides whether the row still contains raw model text that Bobbit may alter.
 
-The replay cursor and terminal guard are runtime correlation state, not persisted data. Force-abort recovery hydrates them immediately before transcript replay and clears them when replay exits, whether successfully or by error. They add no sidecar fields or record types, synthesize no Pi ids, and change neither Pi events, transcript rows, prompt bytes, nor provider schemas.
+Correlation prefers stable Pi/message IDs, then timestamp plus exact digest, then dispatch-ordered exact-digest FIFO. Structured prompt text is canonicalized by concatenating ordered text blocks without separators; image and unrelated blocks are ignored for matching but retained in the message. Restore replay also maintains its bounded keyless occurrence cursor and terminal guard so repeated identical prompts and duplicate terminal frames do not consume the wrong dispatch.
 
-Fork and continue operations copy only echoed bindings confirmed to exist in the cloned transcript. Unresolved and cancelled source dispatches are never copied, so a same-text prompt accepted later in the destination cannot inherit a foreign author. A hard purge removes the private ledger; ordinary archive operations retain it with the session history.
+`projectCorrelatedPromptMessage()` applies the safety check:
 
-## Message lifecycle
+1. Reconstruct the candidate's canonical raw model text.
+2. Compare its keyed digest with the binding's `modelTextDigest` using a timing-safe comparison.
+3. Stamp the correlated trusted author even when raw-text proof fails.
+4. Strip content only when the stored `modelPrefix` is semantically valid, the raw digest matches, and the string or first text block starts with that exact prefix.
+5. Remove exactly one leading copy. Never use a regular expression or infer a prefix from visible content.
 
-### Acceptance, queue, and restore
+This makes projection replay-safe without relying on object identity or a process-local marker:
 
-`SessionManager` resolves `source` and `author` when it accepts a prompt. Both optional fields travel with `QueuedMessage`, are broadcast in `queue_update`, and persist in `PersistedSession.messageQueue`. `PromptQueue` validates restored metadata, preserves it through priority changes and recovery re-enqueues, and can recover a missing source from a valid author's kind. Legacy rows without either field retain the historical local-user default.
+- a fresh raw clone still matches the raw digest and projects once;
+- a clone made after projection no longer matches the raw digest, so it is author-stamped but not stripped again;
+- prefix-shaped user content is preserved. A base message `[System]: hello` sent by the system becomes `[System]: [System]: hello` in Pi, and only the injected first copy is removed from the visible projection.
 
-The in-flight steer ledger persists structured `{ text, promptId, source?, author? }` records until Pi echoes them or abort reconciliation returns them to the queue. Legacy string-only steer entries normalize as local-user prompts. When steers are combined into the existing newline-joined batch, a common author is retained; a mixed-author batch receives the Bobbit batch-system identity. The prompt text and batching behavior do not change.
+## Projection surfaces
 
-A hard force-abort keeps this ledger intact after stopping the old bridge because an echo may already be durable even if the live listener missed it. Immediately before the replacement runs `switch_session`, Bobbit reloads author bindings, removes ledger rows already proven echoed by the sidecar, and enables the keyless replay guard. Replay events pass through normal author preparation, then only correlated steer-echo consumption; they do not update activity or lifecycle state and are not buffered, costed, or broadcast. After replay, abort reconciliation cancels and requeues only unresolved rows. The replacement coordinator drains them only after the final bridge commits; if replacement setup fails, the same reconciliation preserves them as queued intent for a later recovery.
+Every consumer that can expose or derive user-visible text must project before display rewriting or extraction:
 
-### Live events
-
-All message-bearing Pi `message_update` and `message_end` events pass through one normalization boundary before lifecycle tracking, buffering, replay, or broadcast. Assistant events receive the session agent identity. User-role echoes correlate by stable occurrence key when Pi supplies one, with exact model text used only for ordered fallback; a newly resolved terminal occurrence is then settled into the sidecar. Other visible rows use the inference rules below.
-
-Because normalization happens before the event buffer and `latestMessageUpdate` tracking, reconnect replay and in-flight assistant snapshots preserve the same metadata as the original live stream.
-
-### Snapshots
-
-`src/server/agent/visible-message-snapshot.ts` is the shared pipeline for active, archived, reconnect, refresh, role-switch, and compaction snapshots. It:
-
-1. normalizes tool-result error shapes;
-2. splices the latest in-flight assistant row and un-echoed steer rows;
-3. merges compaction history;
-4. correlates the author sidecar and infers remaining authors;
-5. truncates large tool display content;
-6. applies slash-skill and file-mention display metadata;
-7. stamps snapshot ordering metadata.
-
-The result is Bobbit-visible data only and is never sent back to Pi. In-flight synthetic steer rows carry their ledger author when available; the later real echo replaces them through the normal client reducer path.
-
-### Transcript and pre-compaction history
-
-The transcript reader applies author correlation to the full ordered message sequence before filtering, pagination, or compact/verbose projection. Pre-compaction history uses the same path. Any arbitrary `author` field found in Pi JSONL is discarded as untrusted; only the Bobbit sidecar and read-time inference supply the projected author.
-
-Legacy inference follows these rules:
-
-- Bobbit hidden, dynamic-context, notification, compaction-summary, and custom rows are `system`;
-- assistant rows are the session agent;
-- ordinary user rows are the matched prompt author, or local user when no binding exists;
-- tool-result rows inherit the closest preceding accountable author, falling back to the session agent when session context is available;
-- unknown Bobbit custom rows are `system`.
-
-Direct transcript-reader callers that provide no session context do not invent `session:unknown` for assistant or orphan tool-result rows.
-
-### Search
-
-Message indexing streams transcript rows from disk rather than retaining the complete history, attachments, images, or tool payloads in memory. When sidecar state is within its configured count and byte budgets, a bounded two-pass resolver preserves full-sequence attribution: the first pass reserves settled message-id and timestamp-plus-digest matches across the transcript; the second revalidates those reservations, then consumes eligible keyless settlements by dispatch-ordered FIFO. This prevents an earlier same-text row from stealing a later exact binding.
-
-The streamed boundary remains fail-safe:
-
-- transcript-provided `author` fields are discarded as untrusted;
-- cancelled bindings never match, and unresolved dispatches cannot claim historical rows through digest or FIFO matching;
-- an unresolved binding is used only for Bobbit's exact synthetic in-flight-steer id;
-- only compact sidecar references and at most one reservation per binding are retained;
-- if compact sidecar state exceeds either budget, Bobbit abandons correlation for that session and continues indexing every row, but omits `authorKind`, `authorId`, and `authorLabel` for ambiguous user-role rows rather than fabricating `user:local`.
-
-Search extraction happens after message-level normalization. Oversized transcripts still retain exact sidecar authors when their compact binding state is within budget; transcript size alone does not discard attribution. Every searchable block from a message, including separate adjacent text blocks, receives the same resolved author metadata. Search records add `authorKind`, `authorId`, and `authorLabel` to schemaless result metadata when attribution is known. These values are not added to indexed text, snippets, weights, or content hashes, so attribution and labels do not change query matching.
-
-The over-budget case is intentionally distinct from a legacy session with no sidecar. Legacy absence may use the documented read-time fallback, but an over-budget sidecar proves that authoritative bindings exist and cannot be correlated safely within the memory bound. Treating those ambiguous prompts as local-human input would be false attribution. Forged transcript `author` fields remain stripped in both cases.
-
-### Client state and UI
-
-`RemoteAgent`, the unified message reducer, custom message types, and UI message shapes preserve optional authors from snapshots and live events. Optimistic prompts and steers use the local-user identity; client-created Bobbit notifications, permission cards, errors, and mutation cards use the core system identity.
-
-The renderer does not add author labels to ordinary chat bubbles. This keeps current single-human sessions visually unchanged while making identity available to diagnostics and future ambiguous-session UI.
-
-## Tool-result attribution
-
-A tool is a producer, not an accountable author. Bobbit recognizes dedicated `toolResult`, `tool_result`, and `tool` roles as well as provider histories that encode tool output as a user-role message containing only tool-result blocks.
-
-During sequential normalization, a tool result inherits the closest preceding accountable message author. If none is available and the session is known, it falls back to that session's agent identity. Existing `toolName`, `toolCallId`, role, block, and error metadata remain intact. No path can produce `author.kind: "tool"`.
-
-## Provider and model equivalence
-
-Author identity is an additive Bobbit display and indexing concern. The implementation does not:
-
-- change Pi or provider roles;
-- prefix or inject author labels into message text;
-- map author data to provider name or source fields;
-- rewrite Pi transcript rows;
-- alter existing prompt, steer, tool-result, or batching content.
-
-Live normalization copies Pi event objects without changing their role or content. Snapshot normalization runs only after `getMessages()` returns and its result is never fed back into the agent. `defaultConvertToLlm()` defensively removes `author` from standard messages, while attachment messages are reconstructed from their existing role/content fields without copying it.
-
-These boundaries keep provider/model input byte-equivalent to the pre-author path. Any existing transformation—such as skill expansion, error-recovery framing, attachment synthesis, steer newline batching, or extension system-reminder framing—continues to operate exactly where it did before and is not affected by author metadata.
-
-## Verification strategy
-
-Author tests are split by architectural boundary so failures identify the broken contract rather than depending on a full external-agent run:
-
-- pure and memory-filesystem tests pin identity mapping, legacy/tool-result inference, queue and steer restore, transcript projection, sidecar corruption/correlation behavior, and exact adjacent-text-block matching without content rewriting;
-- lifecycle tests use mocked RPCs, deferred promises, and a manual clock to reproduce dispatch, echo, retry, abort, and restore races without wall-clock sleeps; they pin live last-terminal replacement, duplicate terminal idempotence, settled-old-only replay, and ordered settled-old-then-crash-unsettled replay across `message_start` boundaries;
-- in-process gateway tests use the real WebSocket and snapshot paths with a mock agent bridge and session-local virtual clock, proving live/snapshot/reconnect equality for both human and system prompts while keeping roles and text unchanged;
-- DOM and search-source tests pin client preservation, provider conversion stripping, metadata-only indexing, bounded streamed correlation, later exact-binding reservation, rejection of forged transcript authors, exact attribution for oversized transcripts within the compact budget, and omission of ambiguous user authors when sidecar state exceeds that budget;
-- the Chromium journey verifies stable user/assistant authors across reload and confirms that ordinary bubbles render no new identity label.
-
-The restart-sensitive steer tests restore from the persisted ledger through `SessionManager` with a fresh mock bridge instead of restarting an operating-system process. They assert both ordered outcomes: if replay contains only an older settled same-text occurrence, the newer prompt remains pending and is requeued unchanged; if replay contains a subsequent occurrence boundary and the newer echo, the cursor advances, settles it once, and prevents requeue. Duplicate terminal frames do not advance the cursor. Live lifecycle cases separately prove that a newly accepted dispatch supersedes the prior keyless terminal guard. Broader process-level E2E remains responsible for gateway restart infrastructure.
-
-See the [implemented design](design/author-identity-metadata.md#13-deterministic-verification-strategy) for the rationale behind these deterministic seams.
-
-## Maintainer map
-
-| Area | Module |
+| Surface | Boundary |
 |---|---|
-| Shared public types and validation | `src/shared/message-author.ts` |
-| Internal provenance enum | `src/shared/prompt-source.ts` |
-| Identity construction and inference | `src/server/agent/message-author.ts` |
-| Host-side dispatch ledger, split-block matching, and stream correlation | `src/server/agent/author-sidecar.ts` |
-| Queue and in-flight persistence | `src/server/agent/prompt-queue.ts`, `session-store.ts` |
-| Live acceptance and event stamping | `src/server/agent/session-manager.ts` |
-| Snapshot pipeline | `src/server/agent/visible-message-snapshot.ts` |
-| Transcript projections | `src/server/agent/transcript-reader.ts` |
-| Bounded streamed search attribution | `src/server/search/` |
-| Client preservation and provider conversion | `src/app/remote-agent.ts`, `message-reducer.ts`, `src/ui/components/Messages.ts` |
+| Live events | Correlate and project before lifecycle tracking, EventBuffer storage, reconnect replay, or WebSocket broadcast. |
+| Active and archived snapshots | Project before truncation, ordering fields, slash-skill restoration, and file-mention restoration. |
+| Transcript and pre-compaction reads | Resolve over the full ordered sequence before filtering, pagination, compact/verbose conversion, or rendering. |
+| Session title generation | Project full-history Pi rows before passing them to the naming model. First-prompt title generation already uses unprefixed accepted base text. |
+| Search | Resolve and project raw transcript rows before extraction, snippets, weights, and content hashes. Author kind/ID/label remain metadata only. |
+| Extension transcript/tool-call APIs | Project an in-memory JSONL copy before filtering or host-contract conversion, then remove private author/correlation fields. On-disk Pi JSONL is unchanged. |
+| Fork and continue | Copy only echoed, transcript-confirmed sidecar bindings, preserving both raw digest and exact `modelPrefix`; destination replay uses the same projection. Failed setup purges the destination copy. |
+
+The browser bubble, transcript APIs, pre-compaction history, archived reads, copied visible text, search snippets, search weights, and content hashes therefore use the original base text. Prefixes exist intentionally in raw Pi JSONL and provider-visible input only.
+
+Search remains bounded. If compact sidecar correlation exceeds its record or byte budget, Bobbit skips ambiguous ordinary prompt rows rather than indexing an injected prefix or guessing an author; dependent tool attribution is omitted as needed. Legacy absence follows normal safe inference, but an authoritative set that cannot be correlated is not treated as local-human history.
+
+## Failure and security behavior
+
+The system prefers preserving literal content over guessing and deleting it:
+
+- Browser, REST, extension, and Pi transcript payloads cannot assert an authoritative author. The server derives identity from session secrets, authenticated ownership, or server-minted surface tokens.
+- IDs and labels are metadata, not authorization principals.
+- A sidecar append failure sends that occurrence unprefixed.
+- Missing, unreadable, corrupt, semantically invalid, or uncorrelated sidecar data never authorizes stripping. Raw transcript text remains literal, even if it resembles a Bobbit prefix.
+- A digest mismatch, missing digest key, absent first text boundary, split prefix, or prefix at a nonzero offset leaves content unchanged.
+- Sidecar correlation can still stamp a stable-ID-bound author when content is already projected; stable identity alone never authorizes deletion.
+- Pi JSONL is never rewritten by normal projection. Startup migration of legacy plaintext ledgers preserves valid digest-only records and fails closed if reachable plaintext cannot be removed.
+
+These degradation rules may leave a model-only prefix visible when its proof has been lost. That is safer than deleting prefix-shaped user text.
+
+## Future multi-human seam
+
+Bobbit currently has one local human fallback and does not collect a stable user ID or display name. Consequently:
+
+- all-human loaded history remains label-free;
+- every human prompt remains model-facing byte-for-byte unprefixed;
+- `user:local` is not treated as evidence of multi-user participation;
+- no sticky multi-human runtime flag exists.
+
+The shared selector already returns ordered distinct validated human IDs, and the display-ID formatter preserves a future human ID remainder. A follow-up can add trusted human principals and a runtime `multiHumanSeen` flag, then enable labels and prefixes together after a second human is observed. It must not retroactively rewrite Pi history.
+
+## Maintainer source map
+
+| Responsibility | Source |
+|---|---|
+| Author types, validation, label normalization, display IDs, accountable-prompt predicate | `src/shared/message-author.ts` |
+| Trusted identity construction, source mapping, and model-prefix formatter | `src/server/agent/message-author.ts` |
+| Dispatch/settlement persistence, semantic prefix validation, correlation, digest-gated projection, copy/purge | `src/server/agent/author-sidecar.ts` |
+| Final `prompt`/`steer` boundary, retries, replay bindings, title projection | `src/server/agent/session-manager.ts` |
+| Central active/archived snapshot projection | `src/server/agent/visible-message-snapshot.ts` |
+| Transcript, pre-compaction, and extension-facing JSONL projection | `src/server/agent/transcript-reader.ts` |
+| Streamed search projection and metadata indexing | `src/server/search/sources/message-source.ts` |
+| Loaded-history label selector and exact badge presentation | `src/ui/message-author-presentation.ts` |
+| Live/archived/staff appearance resolution | `src/app/message-author-appearance.ts` |
+| Chat-level slice aggregation and appearance context | `src/ui/components/AgentInterface.ts`, `PreCompactionHistory.ts` |
+| Prompt-only label/avatar rendering | `src/ui/components/MessageList.ts`, `Messages.ts` |
+| Canonical static Bobbit sprite and responsive badge styling | `src/ui/bobbit-render.ts`, `src/ui/app.css` |
+| Extension routes and fork/continue lifecycle wiring | `src/server/server.ts` |
+
+## Verification map
+
+The authoritative registration and rationale live in `tests2/tests-map.json`.
+
+| Contract | Primary coverage |
+|---|---|
+| Selector, exact strings, label/ID normalization, no human prefix | `tests2/core/message-author-surfacing.test.ts` |
+| Loaded-state hue/accessory resolution and safe fallback | `tests2/core/message-author-appearance.test.ts` |
+| Final dispatch, write-before-prefix, batching, recovery base text, replay/title projection | `tests2/core/message-author-dispatch.test.ts` |
+| Sidecar plaintext exclusion, semantic `modelPrefix` validation, raw-digest idempotence, structured blocks, corruption, copy/purge | `tests2/core/author-sidecar.test.ts` |
+| Prompt-only DOM labels and transcript-wide main/pre-compaction mode | `tests2/dom/message-author-labels.test.ts` |
+| Canonical open-eye sprite pixels, shared hue/accessory registries, and no timers/animation | `tests2/dom/message-author-sprite.test.ts` |
+| Pi versus live/snapshot/transcript/title/search text, mixed batches, and append-failure degradation | `tests2/integration/message-author-ws-server.test.ts` |
+| Extension transcript and tool-call projection/filtering | `tests2/integration/message-author-extension-projection.test.ts` |
+| Fork/continue binding copy, replay ordering, and failed-setup cleanup | `tests2/integration/continue-archived.test.ts` |
+| Live/reload/narrow-layout labels and sidebar-matched static avatar | `tests2/browser/journeys/author-metadata.journey.spec.ts` |
+| Raw Pi persistence, EventBuffer/reconnect idempotence, search rebuild, and gateway restart | `tests/e2e/message-author-prefix-restart.spec.ts` |
+
+Retry, attachment, queue, provider-auth, force-abort, rehydration, and verification suites also pin that durable/recovery text stays unprefixed and each later RPC re-applies the final-dispatch contract.
+
+For the original metadata-only design and its superseding addendum, see [Author Identity Metadata](design/author-identity-metadata.md).
