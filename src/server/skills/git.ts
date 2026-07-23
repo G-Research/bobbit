@@ -615,11 +615,10 @@ export interface CreateWorktreeSetOptions {
 	skipPush?: boolean;
 }
 
-interface WorktreeSetRollbackEntry {
+interface WorktreeSetEntry {
 	repo: string;
 	repoPath: string;
 	worktreePath: string;
-	deleteBranch: boolean;
 }
 
 /**
@@ -660,7 +659,8 @@ export async function removeEmptyWorktreeSetContainer(
 }
 
 async function rollbackWorktreeSet(
-	entries: WorktreeSetRollbackEntry[],
+	entries: WorktreeSetEntry[],
+	createdBranchRepos: ReadonlySet<string>,
 	container: string,
 	branchName: string,
 	commandRunner: CommandRunner,
@@ -673,7 +673,7 @@ async function rollbackWorktreeSet(
 				entry.repoPath,
 				entry.worktreePath,
 				branchName,
-				entry.deleteBranch,
+				createdBranchRepos.has(entry.repo),
 				commandRunner,
 				{ ...remotePolicy, skipRemotePush: true },
 			);
@@ -952,8 +952,8 @@ export async function createWorktreeSet(
 	// Operation-first creation is idempotent and avoids an exists/mkdir race.
 	await fs.promises.mkdir(container, { recursive: true });
 
-	const out: Array<{ repo: string; repoPath: string; worktreePath: string }> = [];
-	const rollbackEntries: WorktreeSetRollbackEntry[] = [];
+	const out: WorktreeSetEntry[] = [];
+	const createdBranchRepos = new Set<string>();
 	try {
 		for (const repo of repoList) {
 			const repoSrc = path.join(rootPath, repo);
@@ -987,7 +987,6 @@ export async function createWorktreeSet(
 				await runGit(["rev-parse", "--verify", branchName], { cwd: repoSrc });
 				branchExists = true;
 			} catch { /* not present */ }
-			rollbackEntries.push({ repo, repoPath: repoSrc, worktreePath: wtPath, deleteBranch: !branchExists });
 
 			try {
 				if (branchExists) {
@@ -1006,6 +1005,12 @@ export async function createWorktreeSet(
 				throw new Error(`createWorktreeSet: git worktree add failed for component "${repo}" at ${wtPath}: ${err instanceof Error ? err.message : err}`);
 			}
 
+			// Only successfully-created worktrees are eligible for rollback. Recording
+			// the entry after `git worktree add` prevents cleanup from probing the
+			// failed component path while still covering later upstream setup failures.
+			out.push({ repo, repoPath: repoSrc, worktreePath: wtPath });
+			if (!branchExists) createdBranchRepos.add(repo);
+
 			// When the project has a configured `base_ref`, set it as the per-branch
 			// upstream so each component's `@{u}` reflects the integration target.
 			if (configuredBaseRefTrimmed) {
@@ -1023,10 +1028,9 @@ export async function createWorktreeSet(
 				}
 			}
 
-			out.push({ repo, repoPath: repoSrc, worktreePath: wtPath });
 		}
 	} catch (err) {
-		const rollbackFailures = await rollbackWorktreeSet(rollbackEntries, container, branchName, commandRunner, remotePolicy);
+		const rollbackFailures = await rollbackWorktreeSet(out, createdBranchRepos, container, branchName, commandRunner, remotePolicy);
 		if (rollbackFailures.length > 0) {
 			throw new Error(`${err instanceof Error ? err.message : String(err)}; rollback failures: ${rollbackFailures.join("; ")}`);
 		}
