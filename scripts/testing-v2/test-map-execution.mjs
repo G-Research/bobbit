@@ -12,6 +12,7 @@ export const APPROVED_E2E_VITEST_PATHS = Object.freeze([
 	"tests2/core/marketplace-install.test.ts",
 	"tests2/core/orphan-tool-result-rehydration-boundaries.test.ts",
 	"tests2/core/team-manager.test.ts",
+	"tests2/integration/team-spawn-multi-repo-real-git.test.ts",
 ]);
 
 export const ISOLATED_VITEST_FILES = Object.freeze({

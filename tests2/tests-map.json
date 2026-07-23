@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/integration/team-spawn-multi-repo-real-git.test.ts",
+      "reason": "Focused real-Git regression for a non-Git two-component project: drives direct TeamManager.spawnRole and one REST team/spawn request from unpublished local goal-component HEADs, verifies one common worker branch container and repo-key layout, and injects a second-component failure to prove first-component rollback.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
       "path": "tests2/core/inline-html-theme-bridge-repro.test.ts",
       "reason": "Fast failing-first regression proving completed srcdoc and streaming document.write inline HTML payloads are prepared through the canonical preview theme bridge in the compiled UI dependency graph.",
       "execution": {
