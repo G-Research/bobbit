@@ -22,7 +22,7 @@
   "v2Native": [
     {
       "path": "tests2/integration/team-spawn-multi-repo-real-git.test.ts",
-      "reason": "Focused real-Git regression for a non-Git two-component project: drives direct TeamManager.spawnRole and one REST team/spawn request from unpublished local goal-component HEADs; verifies common branch-container layout, partial rollback, preservation of a pre-existing component branch without remote deletion after later failure, and cleanup coordinates in createSession's first durable write.",
+      "reason": "Focused real-Git regression for a non-Git two-component project: drives direct TeamManager.spawnRole and one REST team/spawn request from unpublished divergent local goal-component HEADs; verifies exact-start branch-collision rejection before worktree attachment/upstream or remote mutation, rollback of an earlier component while preserving the divergent colliding branch, common branch-container layout, injected partial rollback, and cleanup coordinates in createSession's first durable write.",
       "execution": {
         "runner": "vitest",
         "tier": "e2e",

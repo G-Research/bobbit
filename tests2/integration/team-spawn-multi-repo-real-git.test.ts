@@ -106,7 +106,7 @@ function assertWorkerShape(opts: {
 // Real-Git fidelity owner. The project root is deliberately not a repository;
 // GoalManager provisions one goal worktree per configured component first, then
 // TeamManager must use those persisted component paths as authoritative starts.
-test("direct and REST team spawn create coordinated workers from local component HEADs and roll back partial creation", async ({ gateway }) => {
+test("direct and REST team spawn preserve exact local component HEADs across collisions, rollback, and cleanup", async ({ gateway }) => {
 	await prepareGitTemplate();
 	const fixtureRoot = mkdtempSync(join(gateway.bobbitDir, "team-multi-minimal-"));
 	const projectRoot = join(fixtureRoot, "project");
@@ -115,10 +115,10 @@ test("direct and REST team spawn create coordinated workers from local component
 	let projectId: string | undefined;
 	let goalId: string | undefined;
 	let teamLeadSessionId: string | undefined;
+	let collisionWorkerId: string | undefined;
 	let directWorkerId: string | undefined;
 	let restWorkerId: string | undefined;
 	let originalExecFile: CommandRunner["execFile"] | undefined;
-	let originalCreateSession: any;
 	let originalUpdateSessionMeta: any;
 	let originalSessionStorePut: any;
 	let interceptedSessionStore: any;
@@ -261,108 +261,139 @@ test("direct and REST team spawn create coordinated workers from local component
 			).toBe(goalHeads[repo]);
 		}
 
-		// A later session-creation failure owns only resources created by that
-		// attempt. Attach the nested component to a branch that already existed,
-		// let beta create the same branch freshly, then fail after both real Git
-		// worktrees exist. Cleanup must remove both attachments while preserving
-		// the pre-existing nested-component branch and never deleting remotely.
+		// Pin the exact-start collision boundary after one earlier component has
+		// already been created. The second component owns a worker-named branch at
+		// its source HEAD, deliberately divergent from its unpublished goal HEAD.
+		// Provisioning must reject before attaching or mutating that branch, roll
+		// back only the first component it created, and perform no remote mutation.
+		const projectContext = gateway.projectContextManager.getContextForGoal(goalId!);
+		expect(projectContext, "multi-repo goal must retain its project context").toBeTruthy();
+		projectContext!.projectConfigStore.set("base_ref", "master");
 		originalExecFile = runner.execFile;
-		originalCreateSession = (gateway.sessionManager as any).createSession;
-		let preExistingBranch: string | undefined;
-		let failedSessionContainer: string | undefined;
-		const attachedWorktrees: Partial<Record<ComponentName, string>> = {};
+		let collidingBranch: string | undefined;
+		let collidingBranchHead: string | undefined;
+		let collisionContainer: string | undefined;
+		let firstCreatedWorktree: string | undefined;
+		let collidingWorktree: string | undefined;
+		const collisionWorktreeAddTargets: string[] = [];
+		const rollbackWorktreeRemoveTargetsForCollision: string[] = [];
+		const upstreamMutationCalls: Array<{ cwd: string; args: string[] }> = [];
 		const localBranchDeleteCalls: Array<{ cwd: string; branch: string }> = [];
-		const remoteBranchDeleteCalls: Array<{ cwd: string; args: string[] }> = [];
+		const remoteMutationCalls: Array<{ cwd: string; args: string[] }> = [];
 		(runner as any).execFile = async (file: string, args: string[], options: any) => {
 			const gitCommand = file.toLowerCase().replace(/\.exe$/, "") === "git";
 			const cwd = String(options?.cwd ?? "");
-			const candidateBranch = args[0] === "rev-parse" && args[1] === "--verify"
-				? String(args[2] ?? "")
-				: "";
-			if (
-				gitCommand
-				&& !preExistingBranch
-				&& candidateBranch.startsWith(`goal/${goalId!.slice(0, 8)}/coder-`)
-				&& normalized(cwd) === normalized(join(projectRoot, NESTED_COMPONENT))
-			) {
-				preExistingBranch = candidateBranch;
-				await originalExecFile!.call(runner, "git", ["branch", preExistingBranch, goalHeads[NESTED_COMPONENT]], {
-					cwd,
-					encoding: "utf-8",
-					timeout: 10_000,
-				});
+			if (gitCommand && args[0] === "worktree" && args[1] === "remove") {
+				rollbackWorktreeRemoveTargetsForCollision.push(String(args[2]));
+			}
+			if (gitCommand && args[0] === "branch" && args.some(arg => arg.startsWith("--set-upstream-to="))) {
+				upstreamMutationCalls.push({ cwd, args: [...args] });
+			}
+			if (gitCommand && args[0] === "branch" && args[1] === "-D") {
+				localBranchDeleteCalls.push({ cwd, branch: String(args[2]) });
+			}
+			if (gitCommand && args[0] === "push") {
+				remoteMutationCalls.push({ cwd, args: [...args] });
 			}
 
 			if (gitCommand && args[0] === "worktree" && args[1] === "add") {
 				const branchIndex = args.indexOf("-b");
 				const branch = String(branchIndex >= 0 ? args[branchIndex + 1] : args[3]);
 				const target = String(branchIndex >= 0 ? args[branchIndex + 2] : args[2]);
-				if (branch === preExistingBranch) {
-					if (normalized(cwd) === normalized(join(projectRoot, NESTED_COMPONENT))) {
-						attachedWorktrees[NESTED_COMPONENT] = target;
-						failedSessionContainer = resolve(
-							target,
-							...NESTED_COMPONENT.split("/").map(() => ".."),
-						);
-					}
-					if (normalized(cwd) === normalized(join(projectRoot, FAILED_COMPONENT))) {
-						attachedWorktrees[FAILED_COMPONENT] = target;
+				const workerAdd = branch.startsWith(`goal/${goalId!.slice(0, 8)}/coder-`);
+				if (workerAdd && normalized(cwd) === normalized(join(projectRoot, NESTED_COMPONENT))) {
+					firstCreatedWorktree = target;
+					collisionContainer = resolve(
+						target,
+						...NESTED_COMPONENT.split("/").map(() => ".."),
+					);
+					if (!collidingBranch) {
+						collidingBranch = branch;
+						const result = await originalExecFile!.call(runner, "git", ["rev-parse", "HEAD"], {
+							cwd: join(projectRoot, FAILED_COMPONENT),
+							encoding: "utf-8",
+							timeout: 10_000,
+						});
+						collidingBranchHead = String(result.stdout).trim();
+						await originalExecFile!.call(runner, "git", ["branch", collidingBranch, collidingBranchHead], {
+							cwd: join(projectRoot, FAILED_COMPONENT),
+							encoding: "utf-8",
+							timeout: 10_000,
+						});
 					}
 				}
-			}
-			if (gitCommand && args[0] === "branch" && args[1] === "-D") {
-				localBranchDeleteCalls.push({ cwd, branch: String(args[2]) });
-			}
-			if (gitCommand && args[0] === "push" && args.includes("--delete")) {
-				remoteBranchDeleteCalls.push({ cwd, args: [...args] });
+				if (workerAdd && normalized(cwd) === normalized(join(projectRoot, FAILED_COMPONENT))) {
+					collidingWorktree = target;
+					collisionWorktreeAddTargets.push(target);
+				}
 			}
 			return originalExecFile!.call(runner, file, args, options);
 		};
-		(gateway.sessionManager as any).createSession = async (...args: any[]) => {
-			const opts = args[4];
-			if (args[2] === goalId && opts?.roleName === "coder") {
-				throw new Error("injected worker session creation failure");
-			}
-			return originalCreateSession.apply(gateway.sessionManager, args);
-		};
 
-		let sessionCreationFailure: unknown;
+		let collisionFailure: unknown;
 		try {
-			await gateway.teamManager.spawnRole(goalId!, "coder", "Preserve a pre-existing branch on later failure");
+			const result = await gateway.teamManager.spawnRole(goalId!, "coder", "Reject a divergent exact-start branch collision");
+			collisionWorkerId = result.sessionId;
 		} catch (error) {
-			sessionCreationFailure = error;
+			collisionFailure = error;
 		} finally {
 			(runner as any).execFile = originalExecFile;
 			originalExecFile = undefined;
-			(gateway.sessionManager as any).createSession = originalCreateSession;
-			originalCreateSession = undefined;
 		}
-		expect(sessionCreationFailure).toBeInstanceOf(Error);
-		expect((sessionCreationFailure as Error).message).toContain("injected worker session creation failure");
-		expect(preExistingBranch, "fixture must create the worker branch before its nested-component attach").toBeTruthy();
-		for (const repo of COMPONENTS) {
-			expect(attachedWorktrees[repo], `${repo} worker attachment must exist before session creation fails`).toBeTruthy();
-			expect(existsSync(attachedWorktrees[repo]!), `${repo} newly attached worktree must be cleaned`).toBe(false);
+		const collisionFailureMessage = collisionFailure instanceof Error
+			? collisionFailure.message
+			: String(collisionFailure ?? "spawn succeeded");
+		if (
+			!/component\s+["']?beta["']?/i.test(collisionFailureMessage)
+			|| !/(?:exact start|does not match|mismatch|collision|differs)/i.test(collisionFailureMessage)
+		) {
+			throw new Error(`${REPRO}: expected beta exact-start branch collision rejection, received: ${collisionFailureMessage}`);
 		}
-		expect(existsSync(dirname(attachedWorktrees[NESTED_COMPONENT]!)), "nested repo-key directory must be cleaned after session failure").toBe(false);
-		expect(failedSessionContainer && existsSync(failedSessionContainer), "branch container must be cleaned after session failure").toBe(false);
-		let preservedBranchHead: string | undefined;
-		try {
-			preservedBranchHead = await git(runner, join(projectRoot, NESTED_COMPONENT), ["rev-parse", preExistingBranch!]);
-		} catch { /* assertion below owns the missing-ref failure */ }
-		expect.soft(
-			preservedBranchHead,
-			"cleanup must preserve the exact pre-existing local branch",
-		).toBe(goalHeads[NESTED_COMPONENT]);
-		expect.soft(
-			localBranchDeleteCalls.some(call => normalized(call.cwd) === normalized(join(projectRoot, NESTED_COMPONENT)) && call.branch === preExistingBranch),
-			"cleanup must not ask Git to delete the pre-existing component branch",
+		expect(collidingBranch, "fixture must create beta's colliding worker branch after alpha starts").toBeTruthy();
+		expect(collidingBranchHead, "fixture must retain the divergent beta branch HEAD").toBeTruthy();
+		expect(collidingBranchHead, "beta collision must differ from its authoritative unpublished goal HEAD").not.toBe(goalHeads[FAILED_COMPONENT]);
+		expect(firstCreatedWorktree, "collision must be detected only after the first component was created").toBeTruthy();
+		expect(collisionContainer, "first component must reveal the worker branch container").toBeTruthy();
+		const expectedCollidingWorktree = join(collisionContainer!, FAILED_COMPONENT);
+		expect(firstCreatedWorktree && existsSync(firstCreatedWorktree), "earlier nested component worktree must be rolled back").toBe(false);
+		expect(firstCreatedWorktree && existsSync(dirname(firstCreatedWorktree)), "earlier nested repo-key directory must be rolled back").toBe(false);
+		expect(existsSync(collisionContainer!), "empty collision-attempt container must be rolled back").toBe(false);
+		expect(rollbackWorktreeRemoveTargetsForCollision.map(normalized)).toContain(normalized(firstCreatedWorktree!));
+		expect(collisionWorktreeAddTargets, "beta collision must be rejected before git worktree add can attach it").toEqual([]);
+		expect(collidingWorktree, "beta collision must never produce a worker worktree target").toBeUndefined();
+		expect(existsSync(expectedCollidingWorktree), "beta collision path must never be created").toBe(false);
+		expect(
+			await git(runner, join(projectRoot, FAILED_COMPONENT), ["rev-parse", `refs/heads/${collidingBranch}`]),
+			"collision rejection must preserve beta's divergent local branch HEAD exactly",
+		).toBe(collidingBranchHead);
+		expect(
+			await git(runner, join(projectRoot, FAILED_COMPONENT), ["worktree", "list", "--porcelain"]),
+			"collision rejection must not leave beta's branch attached to any worktree",
+		).not.toContain(`branch refs/heads/${collidingBranch}`);
+		expect(
+			await git(runner, join(projectRoot, FAILED_COMPONENT), ["for-each-ref", "--format=%(upstream)", `refs/heads/${collidingBranch}`]),
+			"collision rejection must not assign an upstream to beta's pre-existing branch",
+		).toBe("");
+		expect(
+			upstreamMutationCalls.some(call => normalized(call.cwd) === normalized(expectedCollidingWorktree)),
+			"collision rejection must occur before beta's upstream mutation step",
 		).toBe(false);
 		expect(
-			await gitRefExists(runner, join(projectRoot, FAILED_COMPONENT), `refs/heads/${preExistingBranch}`),
-			"cleanup must still delete the beta branch created by this failed attempt",
+			localBranchDeleteCalls.some(call => normalized(call.cwd) === normalized(join(projectRoot, FAILED_COMPONENT)) && call.branch === collidingBranch),
+			"rollback must not ask Git to delete beta's pre-existing colliding branch",
 		).toBe(false);
-		expect(remoteBranchDeleteCalls, "failed local provisioning/session creation must never delete a remote branch").toEqual([]);
+		expect(remoteMutationCalls, "collision rejection and rollback must not mutate any remote").toEqual([]);
+		expect(
+			await gitRefExists(runner, join(projectRoot, NESTED_COMPONENT), `refs/heads/${collidingBranch}`),
+			"rollback must delete the earlier alpha branch created by this attempt",
+		).toBe(false);
+		for (const repo of COMPONENTS) {
+			expect(
+				await git(runner, goal.repoWorktrees[repo], ["rev-parse", "HEAD"]),
+				`${repo} goal component must remain at its authoritative HEAD after collision rollback`,
+			).toBe(goalHeads[repo]);
+		}
+		await git(runner, join(projectRoot, FAILED_COMPONENT), ["branch", "-D", collidingBranch!]);
 
 		// Direct production call: this is the primary host-side regression boundary.
 		// Observe the project SessionStore boundary so the first durable worker
@@ -477,10 +508,9 @@ test("direct and REST team spawn create coordinated workers from local component
 		});
 	} finally {
 		if (originalExecFile) (runner as any).execFile = originalExecFile;
-		if (originalCreateSession) (gateway.sessionManager as any).createSession = originalCreateSession;
 		if (originalUpdateSessionMeta) (gateway.sessionManager as any).updateSessionMeta = originalUpdateSessionMeta;
 		if (originalSessionStorePut && interceptedSessionStore) interceptedSessionStore.put = originalSessionStorePut;
-		for (const workerId of [directWorkerId, restWorkerId]) {
+		for (const workerId of [collisionWorkerId, directWorkerId, restWorkerId]) {
 			if (!workerId || !goalId) continue;
 			await gateway.teamManager.dismissRoleForGoal(goalId, workerId).catch(() => undefined);
 			await apiFetch(`/api/sessions/${workerId}?purge=true`, { method: "DELETE" }).catch(() => undefined);
