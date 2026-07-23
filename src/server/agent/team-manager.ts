@@ -9,7 +9,7 @@ import type { PromptSource, SessionManager, SessionInfo } from "./session-manage
 import { isNonRetryableAgentError, isProviderBackoffError, isRetryableGenericAgentError, isTransientReviewError } from "./verification-logic.js";
 import { GoalManager } from "./goal-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
-import { createWorktree, createWorktreeSet, cleanupWorktree } from "../skills/git.js";
+import { createWorktree, createWorktreeSet, cleanupWorktree, removeEmptyWorktreeSetContainer } from "../skills/git.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 import type { RoleStore, Role } from "./role-store.js";
 import { resolveRole, listAvailableRoles, type RoleSource } from "./resolve-role.js";
@@ -191,11 +191,12 @@ async function cleanupCreatedWorktreeSet(
 		}
 	}
 	try {
-		await fs.promises.rmdir(result.container);
-	} catch (err: any) {
-		if (err?.code !== "ENOENT") {
-			console.error(`[team-manager] Failed to remove worker branch container ${result.container}:`, err);
-		}
+		await removeEmptyWorktreeSetContainer(
+			result.container,
+			result.worktrees.map(worktree => worktree.worktreePath),
+		);
+	} catch (err) {
+		console.error(`[team-manager] Failed to remove worker branch container ${result.container}:`, err);
 	}
 }
 

@@ -622,6 +622,43 @@ interface WorktreeSetRollbackEntry {
 	deleteBranch: boolean;
 }
 
+/**
+ * Remove only the known empty repo-key ancestors and branch container left
+ * after a multi-repo worktree set has been cleaned. This deliberately uses
+ * non-recursive rmdir calls so unexpected files are never removed.
+ */
+export async function removeEmptyWorktreeSetContainer(
+	container: string,
+	worktreePaths: Iterable<string>,
+): Promise<void> {
+	const containerPath = path.resolve(container);
+	const ancestors = new Set<string>();
+	for (const worktreePath of worktreePaths) {
+		const relative = path.relative(containerPath, path.resolve(worktreePath));
+		if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
+		const parts = relative.split(path.sep);
+		for (let i = 1; i < parts.length; i++) {
+			ancestors.add(path.join(containerPath, ...parts.slice(0, i)));
+		}
+	}
+
+	const failures: string[] = [];
+	const targets = [...ancestors].sort((a, b) => b.length - a.length);
+	targets.push(containerPath);
+	for (const target of targets) {
+		try {
+			await fs.promises.rmdir(target);
+		} catch (err: any) {
+			if (err?.code !== "ENOENT") {
+				failures.push(`${target}: ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
+	}
+	if (failures.length > 0) {
+		throw new Error(failures.join("; "));
+	}
+}
+
 async function rollbackWorktreeSet(
 	entries: WorktreeSetRollbackEntry[],
 	container: string,
@@ -648,11 +685,9 @@ async function rollbackWorktreeSet(
 		}
 	}
 	try {
-		await fs.promises.rmdir(container);
-	} catch (err: any) {
-		if (err?.code !== "ENOENT") {
-			failures.push(`branch container cleanup failed at ${container}: ${err instanceof Error ? err.message : String(err)}`);
-		}
+		await removeEmptyWorktreeSetContainer(container, entries.map(entry => entry.worktreePath));
+	} catch (err) {
+		failures.push(`branch container cleanup failed at ${container}: ${err instanceof Error ? err.message : String(err)}`);
 	}
 	return failures;
 }

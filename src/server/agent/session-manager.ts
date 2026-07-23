@@ -11242,7 +11242,7 @@ export class SessionManager {
 		// Skip delegates — they share the parent's worktree and must never remove it.
 		if (ps.worktreePath && ps.repoPath && !ps.worktreePath.startsWith("/workspace") && !ps.delegateOf) {
 			try {
-				const { cleanupWorktree } = await import("../skills/git.js");
+				const { cleanupWorktree, removeEmptyWorktreeSetContainer } = await import("../skills/git.js");
 				const allPersisted = this.getAllPersistedSessionsForWorktreeGuard();
 				// Multi-repo: clean each repo's worktree with the shared background-I/O
 				// ceiling + delete the shared branch from each repo's remote (Phase 4a).
@@ -11264,11 +11264,9 @@ export class SessionManager {
 						}
 					});
 					try {
-						await fsp.rmdir(ps.worktreePath);
-					} catch (err: any) {
-						if (err?.code !== "ENOENT") {
-							console.error(`[session-manager] Failed to remove multi-repo branch container for ${ps.id}: ${ps.worktreePath}`, err);
-						}
+						await removeEmptyWorktreeSetContainer(ps.worktreePath, Object.values(ps.repoWorktrees));
+					} catch (err) {
+						console.error(`[session-manager] Failed to remove multi-repo branch container for ${ps.id}: ${ps.worktreePath}`, err);
 					}
 				} else if (!isWorktreePathReferencedByLiveSession(ps.worktreePath, allPersisted, { ignoreSessionId: ps.id })) {
 					await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
