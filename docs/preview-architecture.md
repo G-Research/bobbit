@@ -4,7 +4,9 @@ The preview side-panel renders agent-authored HTML alongside the chat. This
 document covers the v3 architecture introduced by the embedded-html-preview
 rewrite — a per-session content mount served from a cookie-authed origin path,
 with SSE-driven hot reload. The browser renders that mount inside the dynamic
-per-session side-panel workspace shared by regular and assistant sessions.
+per-session side-panel workspace shared by regular and assistant sessions. It
+also defines the theming boundary with `.html` / `.htm` files rendered directly
+inside chat cards.
 
 ## Mental model
 
@@ -274,8 +276,10 @@ Behaviour by path shape:
 | Method other than `GET`/`HEAD` | `405` |
 
 **Theme bridge.** `injectBaseAndScripts(body, baseTag, PREVIEW_BRIDGE_SCRIPTS)`
-adds the `<base href>` and the bridge scripts only when the response is
-`text/html`. Static assets pass through untouched.
+adds the `<base href>`, server theme snapshot, and shared theme/swipe scripts
+only when the response is `text/html`. Static assets pass through untouched.
+This is the side-panel content path; inline chat-card HTML has a separate
+browser-side injection path described below.
 
 **MIME lookup.** `src/server/preview/mime.ts`. Minimal table covering the
 HTML-report long tail (HTML, CSS, JS, images, fonts, video, JSON, etc.); the
@@ -623,6 +627,82 @@ break old archived sessions. Those legacy flows preserve historical-tab
 semantics even though the unified mount endpoint now returns `contentHash`.
 Only v3 markers opt into live-tab collapse by content identity.
 
+## HTML theme surfaces
+
+The canonical live implementation is `PREVIEW_THEME_BRIDGE` in
+`src/shared/preview-bridge-scripts.ts`. Both embedded HTML surfaces use it so
+Bobbit has one definition of theme inheritance, but their injection and gesture
+contracts differ:
+
+| Surface | Injection and theme behaviour |
+|---|---|
+| Inline `.html` / `.htm` chat card | `HtmlRenderer` prepares the browser `srcdoc` with `PREVIEW_THEME_BRIDGE` only. It live-mirrors the host and never receives the side-panel swipe script or server snapshot. |
+| Embedded side-panel iframe | The preview content route injects a `<base>`, server snapshot, and `PREVIEW_BRIDGE_SCRIPTS` (theme plus swipe). The live bridge overrides the snapshot from the host. |
+| Standalone side-panel URL | The same server response carries the snapshot, but the live bridge returns when `parent === window`; its values remain fixed until the document is reloaded. |
+
+### Inline chat-card path
+
+`WriteRenderer` delegates `.html` and `.htm` writes to `HtmlRenderer`, including
+historical completed calls. During streaming, prepared HTML is applied through
+the existing debounced `document.open()` / `write()` / `close()` path; completion
+switches to the declarative `srcdoc` binding. A successful HTML edit fetches the
+resulting file snapshot and delegates to the same completed renderer. Thus write,
+edit, streaming, and completed cards share one preparation helper rather than
+separate theme implementations.
+
+The helper parses authored input inertly with the browser HTML parser, inserts a
+parsed copy of the canonical bridge as the first node in `<head>`, and serializes the
+document with its doctype and document-level nodes. Parser-backed insertion is
+required: tag-shaped text inside scripts, comments, styles, textareas, and other
+raw-text content must not become an injection point. First-in-head execution
+also means an authored initialization script can synchronously read Bobbit's
+theme state while the document is parsing. The iframe receives the prepared
+payload, while the collapsed source view retains the original authored HTML.
+Authored script order and auto-resize behaviour are unchanged, and the iframe
+sandbox remains `allow-scripts allow-same-origin`.
+
+On initial execution and every relevant host-root mutation, the bridge mirrors
+the `dark` class, `data-palette`, font stack, and the computed values of all CSS
+custom properties declared by accessible host stylesheets. The existing iframe
+therefore follows light/dark and palette changes without recreating the tool
+call. Stylesheets whose rules cannot be read are skipped.
+
+Preparation and execution are idempotent. Preparation only accepts a marked
+script as already installed when its content and executable attributes match
+the canonical bridge; an unrelated authored marker does not suppress
+injection. At runtime, one observer is installed per document root. A streaming
+rewrite replaces the root, disconnects the old observer, and installs one for
+the replacement. Parser, serializer, parent-document, style, or observer
+failures are caught so authored HTML continues to render even when theming is
+unavailable.
+
+The inline iframe backdrop, streaming veil, and spinner use host surface and
+foreground tokens with browser-system fallbacks. This keeps the card chrome
+readable in either theme without coupling it to the authored document.
+
+### Author contract
+
+Inline and side-panel documents should consume Bobbit variables such as
+`--background`, `--foreground`, `--card`, semantic status tokens, and chart
+tokens rather than hardcoding a mode. Authors do not need to include a bridge,
+and must not add the side-panel swipe bridge to inline content. See the
+[canonical HTML rendering guide](../defaults/docs/html-rendering.md) for token
+usage and contrast rules.
+
+### Build and package boundary
+
+The inline preparation helper statically imports `PREVIEW_THEME_BRIDGE`. Vite
+therefore includes the canonical script through its dependency graph in both
+the source development server and compiled `dist/ui` assets; a packaged browser
+must not resolve a TypeScript source path at runtime. The npm package ships the
+built UI used by `npx bobbit` for this path.
+
+The server theme snapshot is deliberately separate. It reads canonical
+`src/ui/app.css` from the package root to provide defaults for standalone
+side-panel URLs, so npm packages must continue to include that source CSS as
+well as `dist/ui`. Inline `srcdoc` preparation must not call or reproduce this
+server filesystem mechanism.
+
 ## Theme-token snapshot for standalone tabs
 
 Single source of truth: `src/server/preview/theme-snapshot.ts`.
@@ -640,8 +720,8 @@ and the preview document has no theme vars of its own, so every
 `var(--background)` / `var(--chart-N)` resolved to empty and the page
 rendered unstyled.
 
-**How.** At server startup `theme-snapshot.ts` parses the `:root` and `.dark`
-blocks of `src/ui/app.css` once, extracts every `--*` declaration, and caches
+**How.** On first use, `theme-snapshot.ts` parses the `:root` and `.dark`
+blocks of `src/ui/app.css`, extracts every `--*` declaration, and caches
 a ready-to-emit `<style data-bobbit-preview-theme="snapshot">…</style>`
 string. `content-route.ts` injects this snapshot for every served HTML
 response — the `data-bobbit-preview-theme="snapshot"` marker is the debugging
@@ -720,7 +800,8 @@ back the preview tree sees the same bytes the gateway just wrote.
 | File | Responsibility |
 |---|---|
 | `src/server/preview/mount.ts` | Per-session mount lifecycle, atomic writes, `mountFile` (explicit asset opt-in), `contentHash` calculation, watcher |
-| `src/server/preview/content-route.ts` | `/preview/<sid>/<rel>` handler (live mount) and `/preview/<sid>/_artifact/<id>/<rel>` (per-artifact stable URL), entry pick, `<base>` + bridge injection |
+| `src/server/preview/content-route.ts` | `/preview/<sid>/<rel>` handler (live mount) and `/preview/<sid>/_artifact/<id>/<rel>` (per-artifact stable URL), entry pick, `<base>` + snapshot + bridge injection |
+| `src/server/preview/theme-snapshot.ts` | Cached `src/ui/app.css` token snapshot for standalone side-panel URLs |
 | `src/server/preview/path-guard.ts` | Path-traversal defence (realpath-based) |
 | `src/server/preview/mime.ts` | MIME-type lookup |
 | `src/server/preview/events.ts` | Per-session `preview-changed` channel carrying mount identity payloads |
@@ -729,7 +810,10 @@ back the preview tree sees the same bytes the gateway just wrote.
 | `src/server/auth/browser-cookie.ts` | Central browser bootstrap/renewal eligibility classifier |
 | `src/server/server.ts` | `POST/GET /api/preview/mount`, SSE route, broadcast on success |
 | `src/server/agent/docker-args.ts` | Sandbox bind mounts (`/bobbit/preview`, `/bobbit/preview-root`) |
-| `src/shared/preview-bridge-scripts.ts` | Theme/swipe bridge scripts injected into HTML responses |
+| `src/shared/preview-bridge-scripts.ts` | Canonical live theme bridge plus the side-panel-only swipe bridge |
+| `src/ui/tools/renderers/prepare-inline-html.ts` | Parser-backed, early theme-bridge preparation for inline `srcdoc` HTML |
+| `src/ui/tools/renderers/HtmlRenderer.ts` | Completed and streaming inline iframe lifecycle; original-source disclosure and themed chrome |
+| `src/ui/tools/renderers/WriteRenderer.ts`, `EditRenderer.ts` | `.html` / `.htm` write and successful-edit delegation into `HtmlRenderer` |
 | `defaults/tools/html/extension.ts` | `preview_open` tool — POSTs to `/api/preview/mount`, stamps v3 marker with optional `contentHash` |
 | `defaults/tools/html/snapshot.ts` | Marker constants, `buildPreviewSnapshotV3Block`, `parseSnapshot`, 250-byte v3 cap |
 | `src/server/preview/artifacts.ts` | Immutable artifact store — capture, restore, hash-based dedupe, orphan sweep |

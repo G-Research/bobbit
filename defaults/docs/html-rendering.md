@@ -101,8 +101,9 @@ Full architecture: [docs/preview-architecture.md](../../docs/preview-architectur
 
 ## Theme integration is mandatory
 
-Bobbit injects a theme-bridge script (`src/shared/preview-bridge-scripts.ts`)
-into every preview iframe. The bridge mirrors:
+Bobbit injects the shared theme bridge (`src/shared/preview-bridge-scripts.ts`)
+into both side-panel previews and inline `.html` / `.htm` chat cards produced by
+`write` or `edit`. The bridge mirrors:
 
 - the parent's `dark` class
 - the parent's `data-palette` attribute
@@ -231,9 +232,9 @@ mode), **not** a text colour. If you alias it to a foreground:
 the live bridge mirrors the real `--muted` (the light surface) as an **inline**
 style on the iframe root, and inline styles **beat your `:root` alias**. So
 `color: var(--muted)` resolves to the light surface colour → light-on-light →
-invisible. This only manifests with the live bridge (the **preview pane**);
-standalone / inline render has no bridge to clobber the alias, so it looks fine
-— *the exact "fine inline, broken in preview" signature.*
+invisible. This manifests in both embedded surfaces—the side-panel iframe and
+inline chat-card render—because both use the live bridge. A standalone
+side-panel tab uses the server snapshot instead.
 
 **Rule: never name a custom property after a real token** (`--muted`,
 `--card`, `--border`, `--accent`, `--ring`, `--primary`, `--secondary`,
@@ -275,31 +276,28 @@ body { background: var(--background); color: var(--foreground); }
 ```
 
 **Do not add a surface-token fallback at all for anything rendered inside
-Bobbit** (`preview_open`, inline `.html` render). Both surfaces inject a
-complete, contrast-correct, *palette-matched* `:root`/`.dark` snapshot, and the
-live bridge mirrors the app's tokens on top. A standalone fallback can only
-make things worse here — see the next rule. The single exception is an HTML
-file that will *only ever* be opened directly from disk **outside** Bobbit
-(never via `preview_open` or inline render); only then supply a **matched
-`:root` + `.dark` pair** so light and dark stay internally consistent (never a
-lone single-mode hex). If there is any chance the file is previewed in Bobbit,
-omit it.
+Bobbit** (`preview_open`, inline `.html` render). The live bridge supplies the
+host's complete computed token set to embedded surfaces; a standalone
+side-panel URL receives the server's contrast-safe `:root` / `.dark` snapshot.
+A standalone fallback can only make things worse here—see the next rule. The
+single exception is an HTML file that will *only ever* be opened directly from
+disk **outside** Bobbit (never via `preview_open` or inline render); only then
+supply a **matched `:root` + `.dark` pair** so light and dark stay internally
+consistent (never a lone single-mode hex). If there is any chance the file is
+previewed in Bobbit, omit it.
 
-### ❌ Never override the snapshot from your own `:root{}`
+### ❌ Never override Bobbit surface tokens in `:root{}`
 
-The server injects a complete, contrast-correct, palette-matched `:root`/`.dark`
-theme snapshot *before* your `<style>`. A surface token you redeclare in your
-own `:root{}`/`.dark{}` block comes **later in source order at equal
-specificity, so it silently wins** — replacing the real palette (e.g.
-`--background: oklch(0.935 0.012 148)` for the forest theme) with your flat
-hardcode (`#ffffff`). The inline-render surface masks this (its live bridge
-sets values *inline*, which beat your `:root`), but the preview pane relies on
-the snapshot, so the **same document renders correctly inline yet off-theme /
-broken in the preview pane.** Keep your `:root{}` block limited to **chart and
-semantic tokens only** (see previous section); never put `--background`,
-`--foreground`, `--card`, `--muted-foreground`, or `--border` in `:root`/`.dark`.
-Reference them directly with `var(--…)` and let the snapshot + bridge supply
-the values.
+In embedded side-panel and inline chat-card iframes, the live bridge sets theme
+variables as inline root styles, which beat authored `:root` declarations. A
+standalone side-panel URL instead receives the server snapshot before authored
+styles, so a later authored declaration can replace its value. Either behaviour
+makes a custom `--background`, `--foreground`, or other Bobbit token inconsistent
+across surfaces. Keep your `:root` block limited to **chart and semantic fallback
+tokens only** (see the previous section); never put `--background`,
+`--foreground`, `--card`, `--muted-foreground`, or `--border` in `:root` / `.dark`.
+Reference them directly with `var(--…)` and let the live bridge or standalone
+snapshot supply the values.
 
 ### Self-check before you ship
 
@@ -387,11 +385,11 @@ Visual work is iterative by nature. Optimise the loop:
 
 ## Tailwind
 
-Full Tailwind 4 is available in the preview iframe via the same-origin Vite
-dev server. Add `<link rel="stylesheet" href="/src/ui/app.css">` to use
-component classes (`bg-card`, `text-foreground`, `border-border`, etc.).
-This also pulls in every theme variable directly, useful when you'd rather
-write `class="bg-card"` than `style="background: var(--card)"`.
+Do not link `/src/ui/app.css` from authored HTML. That source URL is a Vite
+development detail and is not part of the compiled or packaged UI contract.
+The bridge supplies theme variables, not Bobbit's generated utility classes;
+write local CSS that consumes `var(--…)` so the same document works in source,
+built, and `npx bobbit` runtimes.
 
 ## Anti-patterns — do not do these
 

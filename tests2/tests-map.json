@@ -21,6 +21,60 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/inline-html-theme-bridge-repro.test.ts",
+      "reason": "Fast failing-first regression proving completed srcdoc and streaming document.write inline HTML payloads are prepared through the canonical preview theme bridge in the compiled UI dependency graph.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/preview-theme-bridge-runtime.test.ts",
+      "reason": "Deterministic VM coverage proving the canonical preview theme bridge mirrors representative tokens, font, dark state, and palette live; installs only one observer when executed twice; skips inaccessible stylesheets; and fails open when parent or browser seams are unavailable.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/inline-html-renderer-lifecycle.test.ts",
+      "reason": "DOM coverage for parser-safe first-head theme-bridge preparation, idempotence, hostile authored syntax, fragments and SVG, completed and historical iframe stability, debounced streaming-to-complete behavior, theme-backed chrome, and shared .html/.htm write and edit delegation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/browser/fixtures/inline-html-theme-source.spec.ts",
+      "reason": "Real-browser source-module coverage proving WriteRenderer and EditRenderer statically bundle the canonical bridge without server snapshot code, resolve light and dark palette tokens at parse time, update the same iframe live, preserve streaming/edit/source behavior, and omit side-panel swipe forwarding.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/source-vite-inline-html-theme.spec.ts",
+      "reason": "Real Vite development-runtime smoke against an isolated focused-write-agent gateway proving the actual chat WriteRenderer receives parse-time and live same-iframe theme, palette, font, surface, semantic, and chart state from the canonical source bridge without swipe forwarding, compiled dist/ui, or the standalone server-filesystem snapshot path.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/packaged-inline-html-theme.spec.ts",
+      "reason": "Clean-consumer npm tarball smoke proving the packaged CLI serves compiled dist/ui with the canonical bridge bundled, ships canonical src/ui/app.css and referenced UI assets, and renders an inline HTML write whose parse-time and live theme state follows the host without iframe recreation or source-module runtime requests.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/dom/project-audio-notification-paths.test.ts",
       "reason": "Deterministic foreground/background notification regressions proving agent-finish audio resolves from the source session project while favicon badges remain independent and non-blocking.",
       "execution": {
