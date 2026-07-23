@@ -9,6 +9,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as rpcBridgeModule from "../../src/server/agent/rpc-bridge.js";
 import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 import * as harnessDepsModule from "../../src/server/harness-deps.js";
+import {
+	applyWatchdogRecoveryDecision,
+	WatchdogRecoveryPolicy,
+	type WatchdogRecoveryActions,
+	type WatchdogRecoveryDecision,
+} from "../../src/server/watchdog.js";
 
 const POLICY_PREFIX = "NFS_STARTUP_POLICY";
 const PI_PACKAGE = "@earendil-works/pi-coding-agent";
@@ -547,6 +553,138 @@ describe.skipIf(!desiredContractAvailable)("read-only harness dependency validat
 			const result = await Promise.resolve(dependencyValidator()(root)) as ValidationResult;
 			expectManualRecovery(result, fixture.cause);
 		}
+	});
+});
+
+interface WatchdogPolicyCounters {
+	validate: number;
+	repair: number;
+	build: number;
+	launch: number;
+	restart: number;
+	harnessAlive: boolean;
+	sentinelWatcherAlive: boolean;
+}
+
+function watchdogActions(counters: WatchdogPolicyCounters): WatchdogRecoveryActions {
+	return {
+		preserveLiveHarness: () => undefined,
+		restartLiveHarness: () => { counters.restart++; },
+		waitForDependencies: () => undefined,
+		launchDeadHarness: () => {
+			counters.launch++;
+			counters.harnessAlive = true;
+			counters.sentinelWatcherAlive = true;
+		},
+	};
+}
+
+async function applyWatchdogDecision(decision: WatchdogRecoveryDecision, counters: WatchdogPolicyCounters): Promise<void> {
+	await applyWatchdogRecoveryDecision(decision, watchdogActions(counters));
+}
+
+describe("watchdog dependency-aware recovery policy", () => {
+	it("preserves a live harness and sentinel watcher when health-restart validation fails", async () => {
+		const counters: WatchdogPolicyCounters = {
+			validate: 0,
+			repair: 0,
+			build: 0,
+			launch: 0,
+			restart: 0,
+			harnessAlive: true,
+			sentinelWatcherAlive: true,
+		};
+		const policy = new WatchdogRecoveryPolicy({
+			failureThreshold: 3,
+			validate: () => {
+				counters.validate++;
+				return unhealthy;
+			},
+		});
+
+		await applyWatchdogDecision(policy.recordHealthProbe(false), counters);
+		await applyWatchdogDecision(policy.recordHealthProbe(false), counters);
+		const decision = policy.recordHealthProbe(false);
+		await applyWatchdogDecision(decision, counters);
+
+		expect(decision.action).toBe("preserve-live-harness");
+		expect(policy.consecutiveFailures, `${POLICY_PREFIX}_WATCHDOG_FAILURE_PRESSURE_RESET`).toBe(0);
+		expect(counters, `${POLICY_PREFIX}_WATCHDOG_LIVE_INVALID_PRESERVED`).toEqual({
+			validate: 1,
+			repair: 0,
+			build: 0,
+			launch: 0,
+			restart: 0,
+			harnessAlive: true,
+			sentinelWatcherAlive: true,
+		});
+
+		policy.recordHealthProbe(false);
+		expect(policy.consecutiveFailures, `${POLICY_PREFIX}_WATCHDOG_FAILURE_PRESSURE_RESTARTS_FROM_ONE`).toBe(1);
+		expect(counters.validate).toBe(1);
+	});
+
+	it("polls validation while the harness is dead without spawning until manual repair", async () => {
+		let repaired = false;
+		const counters: WatchdogPolicyCounters = {
+			validate: 0,
+			repair: 0,
+			build: 0,
+			launch: 0,
+			restart: 0,
+			harnessAlive: false,
+			sentinelWatcherAlive: false,
+		};
+		const policy = new WatchdogRecoveryPolicy({
+			failureThreshold: 3,
+			validate: () => {
+				counters.validate++;
+				return repaired ? healthy : unhealthy;
+			},
+		});
+		policy.markHarnessExited();
+
+		for (let poll = 0; poll < 3; poll++) {
+			const decision = policy.pollDeadHarness();
+			expect(decision.action).toBe("wait-for-dependencies");
+			await applyWatchdogDecision(decision, counters);
+		}
+		expect(counters, `${POLICY_PREFIX}_WATCHDOG_DEAD_INVALID_NO_RESPAWN`).toMatchObject({
+			validate: 3,
+			repair: 0,
+			build: 0,
+			launch: 0,
+			restart: 0,
+			harnessAlive: false,
+		});
+		expect(policy.isWaitingForDependencies).toBe(true);
+
+		repaired = true;
+		const recovered = policy.pollDeadHarness();
+		expect(recovered.action).toBe("launch-dead-harness");
+		await applyWatchdogDecision(recovered, counters);
+		policy.markHarnessLaunched();
+		await applyWatchdogDecision(policy.pollDeadHarness(), counters);
+
+		expect(counters, `${POLICY_PREFIX}_WATCHDOG_MANUAL_REPAIR_SINGLE_RESPAWN`).toMatchObject({
+			validate: 4,
+			repair: 0,
+			build: 0,
+			launch: 1,
+			restart: 0,
+			harnessAlive: true,
+			sentinelWatcherAlive: true,
+		});
+		expect(policy.isWaitingForDependencies).toBe(false);
+	});
+
+	it("preserves healthy live restart and dead-harness recovery decisions", () => {
+		const policy = new WatchdogRecoveryPolicy({ failureThreshold: 2, validate: () => healthy });
+		expect(policy.recordHealthProbe(false).action).toBe("none");
+		expect(policy.recordHealthProbe(false).action).toBe("restart-live-harness");
+
+		policy.markHarnessExited();
+		expect(policy.pollDeadHarness().action).toBe("launch-dead-harness");
 	});
 });
 
