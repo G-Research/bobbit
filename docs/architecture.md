@@ -23,9 +23,11 @@ Bobbit has three layers:
 
 ## Message attribution boundary
 
-Bobbit-visible messages carry optional `user`, `agent`, or `system` author metadata independently of their Pi role. This separation matters because a provider-facing `user` row may originate from a human, another agent, or Bobbit orchestration; role must remain a protocol concern rather than an accountability signal.
+Bobbit-visible messages carry optional `user`, `agent`, or `system` author metadata independently of their Pi role. This separation matters because a Pi `user` row may originate from a human, another agent, or Bobbit orchestration; role remains a protocol concern rather than an accountability signal.
 
-The gateway derives trusted identities, persists dispatched-prompt attribution in a host-side sidecar, and normalizes legacy rows at read time. The browser preserves that metadata without adding labels to ordinary chat, while Pi transcripts and model/provider input remain unchanged. See [Message author identity](message-author-identity.md) for the lifecycle, fallback, and verification boundaries.
+The gateway derives trusted identities and stores prompt correlation in a private host-side sidecar. When loaded history includes an agent- or system-authored prompt, the browser labels all accountable prompt rows for context and gives agent labels a static sidebar-matched Bobbit avatar; all-human history keeps its existing unlabelled layout.
+
+At the final Pi dispatch boundary, trusted system and agent prompts receive a model-facing prefix, while human prompts remain unprefixed. The sidecar is written first and records only the exact prefix plus a keyed digest of exact Pi text, never prompt plaintext. Digest-gated projection restores base text before live/snapshot/transcript, title, search, extension, and fork/continue views, making retry and replay idempotent without rewriting raw Pi JSONL. See [Message author identity](message-author-identity.md) for the prefix, projection, degradation, and verification contracts.
 
 ## Client routing
 

@@ -1,10 +1,116 @@
 # Author Identity Metadata
 
-**Status:** implemented decision record
+**Status:** implemented historical decision record, superseded in part by the addendum below
 
-The imperative language below records the constraints followed by the implementation; it does not describe pending work. For the concise maintainer reference, see [Message author identity](../message-author-identity.md).
+The original imperative language records the metadata-only implementation that preceded message-author surfacing. It remains here as historical rationale rather than pending work. For the current maintainer contract, see [Message author identity](../message-author-identity.md).
 
-**Scope:** Bobbit-visible message metadata only; Pi 0.80.6 roles, transcript schema, and model/provider input remain unchanged.
+**Original scope:** Bobbit-visible message metadata only; Pi 0.80.6 roles, transcript schema, and model/provider input remained unchanged at that stage.
+
+## Superseding addendum: author surfacing and model prefixes
+
+**Status:** implemented, July 2026
+
+This addendum supersedes only the original claims that prompt authors had no visible chrome, provider/model text was byte-equivalent, the dispatch schema had no prefix field, sidecar failure affected attribution only, and title/extension/search consumers could operate directly on raw Pi prompt text. The original identity construction, trusted producer mapping, queue/in-flight provenance, sidecar lifecycle, tool-result inheritance, and legacy inference decisions still apply.
+
+### Updated outcome
+
+Bobbit now uses the existing `MessageAuthor` metadata in two distinct views:
+
+- The browser labels prompt bubbles only when the currently loaded history contains a validated agent- or system-authored prompt. The chat-level decision also includes hydrated pre-compaction slices. All-human loaded history remains unchanged.
+- Immediately before a Pi `prompt` or `steer` RPC, trusted systems receive `[System]: ` and trusted agents receive `[<normalized label> (<display ID>)]: `. Human prompts remain unprefixed.
+
+This is not a second identity system. Both presentation and model attribution derive from the author already resolved by the server and correlated through the existing private sidecar.
+
+### Conditional presentation
+
+Only accountable `user` and `user-with-attachments` prompt rows are eligible. Assistant replies and tool-result-only rows never receive labels.
+
+A validated agent or system prompt enables one display mode for all loaded transcript slices. Eligible human rows then show `User` for context; system rows show exactly `System`; agent rows show `<label> | Agent`. Missing or invalid legacy authors produce no fabricated badge. Even two distinct optional human IDs do not enable labels in this release because Bobbit does not yet collect trusted human principals.
+
+Agent badges resolve `session:*` and `staff:*` identities against loaded live, archived, and staff-current-session state. Their avatar reuses the sidebar session hue and canonical accessory. The canonical Bobbit renderer supplies fixed center-facing open eyes with no status, animation, blink, breathing, bobbing, desaturation, or timers. Missing appearance data uses the default-hue/no-accessory fallback.
+
+### Updated dispatch record
+
+The existing v2 dispatch row gained one optional field:
+
+```ts
+interface PromptAuthorDispatchRecord {
+  schemaVersion: 2;
+  type: "prompt-author";
+  promptId: string;
+  dispatchedAt: number;
+  modelTextDigest: string; // keyed digest of exact Pi text
+  source: PromptSource;
+  author: MessageAuthor;
+  modelPrefix?: string;    // exact injected prefix; never body text
+}
+```
+
+`modelPrefix` is accepted only when it exactly equals the current formatter output for the same validated author. This semantic check rejects a wrong label, wrong display ID, user prefix, agent/system mismatch, malformed spacing, and unprefixable agent metadata. An absent field remains valid for legacy or unprefixed dispatches but authorizes no content removal.
+
+The sidecar still stores no prompt plaintext. `modelTextDigest` now covers exact `piText`, including the prefix and any existing recovery, skill, attachment, or batching transformation. Fork/continue copy preserves the digest and prefix only for echoed bindings confirmed in the cloned transcript.
+
+### Write before prefix
+
+Queues, in-flight steers, retry rows, recovery state, and restored state retain unprefixed base model text. Each final dispatch:
+
+1. derives the desired prefix from the trusted author;
+2. forms the exact desired Pi text;
+3. persists the dispatch record before the RPC;
+4. sends prefixed text only after a successful append;
+5. otherwise sends the unprefixed base text for that occurrence.
+
+Same-author steer batches receive one prefix. Existing mixed-author aggregate batches keep `system:bobbit:batch` and receive one system prefix. All-human batches remain unprefixed. Images and non-text blocks are unchanged.
+
+### Raw-digest projection
+
+Author correlation and prefix removal are separate decisions. Stable ID/timestamp/digest/FIFO correlation selects the accountable binding. The shared projection helper then:
+
+1. reconstructs canonical raw text by concatenating ordered text blocks without separators;
+2. timing-safely matches it against the binding's persisted `modelTextDigest`;
+3. stamps the trusted author even if raw-text proof fails;
+4. removes exactly one leading, semantically valid stored `modelPrefix` only from the string or first model-visible text block.
+
+It never strips by regular expression or from author fields alone. A raw clone can prove the digest and project once. An already-projected clone cannot prove the raw digest, so replay, serialization, EventBuffer resume, reconnect, and gateway restart do not double-strip. Prefix-shaped base text remains intact.
+
+Projection runs before display rewriting or extraction on:
+
+- live events, before lifecycle tracking, buffering, and broadcast;
+- active, reconnect, archived, and compaction snapshots;
+- transcript and pre-compaction readers;
+- full-history title generation;
+- streamed search, before snippets, weights, and content hashes;
+- extension transcript/tool-call reads and server-host transcript callbacks;
+- fork/continue destination replay.
+
+The in-memory visible copy regains the original base text. Raw Pi JSONL and provider/model input intentionally retain the prefix. Search author fields remain metadata only, and labels/prefixes do not enter indexed text or hashes. If bounded search correlation degrades, ambiguous prompt rows are omitted rather than indexing injected attribution. Extension projection removes private author/correlation fields after restoring visible content. Failed fork/continue setup purges a pre-copied destination sidecar.
+
+### Security and degradation
+
+Browser and extension payloads still cannot assert an authoritative author. Identity comes from authenticated session context or a server-minted surface token; labels and IDs remain metadata rather than authorization principals.
+
+Missing, corrupt, semantically invalid, legacy-without-prefix, or uncorrelated sidecars never authorize deletion. Digest mismatch, an absent first text boundary, a split prefix, or a prefix at a nonzero offset also leaves content untouched. This can expose literal model text after attribution proof is lost, but preserving content is safer than deleting user-authored prefix-shaped text.
+
+### Deferred multi-human behavior
+
+The formatter and UI selector retain an extensibility seam for human IDs, but this implementation adds neither human prefixing nor sticky multi-human runtime tracking. `user:local` is not a real principal. A follow-up must first introduce trusted human identity, then update UI triggering and model-prefix policy together; it must not retroactively rewrite earlier Pi history.
+
+### Updated source and verification map
+
+Current implementation ownership is:
+
+- shared validation/formatters and accountable-prompt detection: `src/shared/message-author.ts`;
+- trusted prefix formatting: `src/server/agent/message-author.ts`;
+- sidecar schema, semantic validation, digest correlation/projection, and copy: `src/server/agent/author-sidecar.ts`;
+- final dispatch and replay/title boundaries: `src/server/agent/session-manager.ts`;
+- snapshot, transcript, extension, and search projection: the visible-snapshot, transcript-reader, server extension-route, and message-search source modules;
+- label selection/presentation, appearance resolution, and static rendering: the message-author presentation, app appearance, message-list/message, and Bobbit-render modules.
+
+Focused verification is registered in `tests2/tests-map.json`. The core author-surfacing, appearance, dispatch, and sidecar suites pin formatting, write-before-prefix, semantic validation, replay safety, structured content, and failure paths. DOM suites pin exact badge text and the static canonical sprite. Gateway and extension integration suites pin raw Pi versus visible/title/search/extension content. Continue/fork integration pins copied bindings. The browser journey covers conditional labels and responsive appearance; the process E2E covers raw persistence, search rebuild, and gateway restart.
+
+## Original metadata-only decision record
+
+Everything below records the earlier phase and should be read subject to this addendum.
 
 ## 1. Problem and goals
 
