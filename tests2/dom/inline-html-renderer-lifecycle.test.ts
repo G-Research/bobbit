@@ -3,14 +3,16 @@ import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 
 import vm from "node:vm";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "lit";
 import { PREVIEW_SWIPE_SCRIPT, PREVIEW_THEME_BRIDGE } from "../../src/shared/preview-bridge-scripts.js";
 import { EditRenderer } from "../../src/ui/tools/renderers/EditRenderer.js";
 import { HtmlRenderer } from "../../src/ui/tools/renderers/HtmlRenderer.js";
 import {
+	INLINE_HTML_PREPARATION_CACHE_LIMITS,
 	INLINE_HTML_THEME_BRIDGE_ATTRIBUTE,
 	prepareInlineHtml,
+	resetInlineHtmlPreparationCacheForTests,
 } from "../../src/ui/tools/renderers/prepare-inline-html.js";
 import { WriteRenderer } from "../../src/ui/tools/renderers/WriteRenderer.js";
 
@@ -134,6 +136,10 @@ function expectPreparedInlineFrame(iframe: HTMLIFrameElement): Document {
 	return doc;
 }
 
+beforeEach(() => {
+	resetInlineHtmlPreparationCacheForTests();
+});
+
 afterEach(() => {
 	vi.useRealTimers();
 	vi.restoreAllMocks();
@@ -141,6 +147,105 @@ afterEach(() => {
 	document.body.innerHTML = "";
 	localStorage.clear();
 	window.location.hash = "";
+});
+
+describe("inline HTML preparation memoization", () => {
+	function fixture(id: string, body = id): string {
+		return `<!doctype html><html><head><title>${id}</title></head><body>${body}</body></html>`;
+	}
+
+	it("reuses several prepared documents while parsing the canonical bridge only once", () => {
+		const parse = vi.spyOn(DOMParser.prototype, "parseFromString");
+		const first = fixture("first");
+		const changed = fixture("changed");
+
+		const preparedFirst = prepareInlineHtml(first);
+		expect(preparedFirst).toContain(INLINE_HTML_THEME_BRIDGE_ATTRIBUTE);
+		expect(parse).toHaveBeenCalledTimes(2); // canonical bridge + authored document
+
+		expect(prepareInlineHtml(first)).toBe(preparedFirst);
+		expect(parse).toHaveBeenCalledTimes(2);
+
+		const preparedChanged = prepareInlineHtml(changed);
+		expect(preparedChanged).toContain("changed");
+		expect(parse).toHaveBeenCalledTimes(3); // changed authored document only
+
+		// This is a bounded multi-entry cache, not a single last-value shortcut.
+		expect(prepareInlineHtml(first)).toBe(preparedFirst);
+		expect(parse).toHaveBeenCalledTimes(3);
+	});
+
+	it("evicts the least-recently-used document at the entry bound", () => {
+		const parse = vi.spyOn(DOMParser.prototype, "parseFromString");
+		const documents = Array.from(
+			{ length: INLINE_HTML_PREPARATION_CACHE_LIMITS.maxEntries + 1 },
+			(_, index) => fixture(`entry-${index}`),
+		);
+
+		for (const content of documents.slice(0, INLINE_HTML_PREPARATION_CACHE_LIMITS.maxEntries)) {
+			prepareInlineHtml(content);
+		}
+		expect(parse).toHaveBeenCalledTimes(INLINE_HTML_PREPARATION_CACHE_LIMITS.maxEntries + 1);
+
+		prepareInlineHtml(documents[0]); // promote the oldest entry
+		expect(parse).toHaveBeenCalledTimes(INLINE_HTML_PREPARATION_CACHE_LIMITS.maxEntries + 1);
+
+		prepareInlineHtml(documents.at(-1)!); // evicts entry 1, not promoted entry 0
+		expect(parse).toHaveBeenCalledTimes(INLINE_HTML_PREPARATION_CACHE_LIMITS.maxEntries + 2);
+		prepareInlineHtml(documents[1]);
+		expect(parse).toHaveBeenCalledTimes(INLINE_HTML_PREPARATION_CACHE_LIMITS.maxEntries + 3);
+	});
+
+	it("evicts by retained input-plus-output size below the entry bound", () => {
+		const parse = vi.spyOn(DOMParser.prototype, "parseFromString");
+		const payloadCharacters = Math.floor(INLINE_HTML_PREPARATION_CACHE_LIMITS.maxRetainedBytes / 10);
+		const documents = Array.from(
+			{ length: 3 },
+			(_, index) => fixture(`sized-${index}`, `${index}${"x".repeat(payloadCharacters)}`),
+		);
+		expect(documents).toHaveLength(3);
+		expect(documents.length).toBeLessThan(INLINE_HTML_PREPARATION_CACHE_LIMITS.maxEntries);
+		expect(documents.every(content => content.length * 2 < INLINE_HTML_PREPARATION_CACHE_LIMITS.maxCacheableContentBytes)).toBe(true);
+
+		for (const content of documents) prepareInlineHtml(content);
+		expect(parse).toHaveBeenCalledTimes(4); // canonical bridge + three documents
+
+		// Three input/output pairs exceed the byte budget, so the first is gone.
+		prepareInlineHtml(documents[0]);
+		expect(parse).toHaveBeenCalledTimes(5);
+	});
+
+	it("does not retain oversized authored documents", () => {
+		const parse = vi.spyOn(DOMParser.prototype, "parseFromString");
+		const oversized = fixture(
+			"oversized",
+			"x".repeat(Math.floor(INLINE_HTML_PREPARATION_CACHE_LIMITS.maxCacheableContentBytes / 2) + 1),
+		);
+		expect(oversized.length * 2).toBeGreaterThan(INLINE_HTML_PREPARATION_CACHE_LIMITS.maxCacheableContentBytes);
+
+		const prepared = prepareInlineHtml(oversized);
+		expect(prepared).toContain(INLINE_HTML_THEME_BRIDGE_ATTRIBUTE);
+		expect(parse).toHaveBeenCalledTimes(2);
+		expect(prepareInlineHtml(oversized)).toBe(prepared);
+		expect(parse).toHaveBeenCalledTimes(3); // canonical descriptor is warm; authored HTML is not
+	});
+
+	it("does not cache a fail-open raw return and recovers when browser APIs return", () => {
+		const NativeXMLSerializer = XMLSerializer;
+		const parse = vi.spyOn(DOMParser.prototype, "parseFromString");
+		const content = fixture("api-recovery");
+
+		vi.stubGlobal("XMLSerializer", undefined);
+		expect(prepareInlineHtml(content)).toBe(content);
+		expect(parse).not.toHaveBeenCalled();
+
+		vi.stubGlobal("XMLSerializer", NativeXMLSerializer);
+		const recovered = prepareInlineHtml(content);
+		expect(recovered).toContain(INLINE_HTML_THEME_BRIDGE_ATTRIBUTE);
+		expect(parse).toHaveBeenCalledTimes(2);
+		expect(prepareInlineHtml(content)).toBe(recovered);
+		expect(parse).toHaveBeenCalledTimes(2);
+	});
 });
 
 describe("inline HtmlRenderer preparation", () => {
