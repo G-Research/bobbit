@@ -7729,7 +7729,7 @@ export class SessionManager {
 		}
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; allowSessionReuse?: boolean; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePath?: string; repoPath?: string; branch?: string; repoWorktrees?: Record<string, string>; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; allowSessionReuse?: boolean; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		// Guard against silently clobbering an existing session's transcript. A
 		// caller-supplied sessionId that already maps to a LIVE session (or an
@@ -7977,6 +7977,13 @@ export class SessionManager {
 			childKind: opts?.childKind,
 			readOnly: opts?.readOnly,
 			sessionScopedAllowedTools,
+			// Prebuilt host multi-repo worktrees already have all ordinary-cleanup
+			// coordinates. Carry them into persistOnce instead of adding them only
+			// after createSession returns.
+			worktreePath: opts?.worktreePath,
+			repoPath: opts?.repoPath,
+			branch: opts?.branch,
+			repoWorktrees: opts?.repoWorktrees,
 			// Load-bearing wire: same contract as the worktree branch above.
 			// Pinned by `tests/staff-session-staffid-persistence.test.ts`.
 			staffId: opts?.staffId,
@@ -10822,8 +10829,9 @@ export class SessionManager {
 			for (const team of projectCtx.teamStore.getAll()) {
 				const ownerGoal = goalsById.get(team.goalId);
 				for (const agent of team.agents) {
-					teamRefs.push({ id: agent.sessionId, repoPath: ownerGoal?.repoPath ?? projectCtx.project.rootPath, worktreePath: agent.worktreePath, branch: agent.branch });
-					addBranchGuard(ownerGoal?.repoPath ?? projectCtx.project.rootPath, agent.branch);
+					const repoPath = ownerGoal?.repoPath ?? projectCtx.project.rootPath;
+					teamRefs.push({ id: agent.sessionId, repoPath, worktreePath: agent.worktreePath, branch: agent.branch, repoWorktrees: agent.repoWorktrees });
+					addRepoBranches(repoPath, agent.branch, agent.repoWorktrees);
 				}
 				const lead = team.teamLeadSessionId ? projectCtx.sessionStore.get(team.teamLeadSessionId) : undefined;
 				if (lead) {
@@ -11241,7 +11249,7 @@ export class SessionManager {
 		// Skip delegates — they share the parent's worktree and must never remove it.
 		if (ps.worktreePath && ps.repoPath && !ps.worktreePath.startsWith("/workspace") && !ps.delegateOf) {
 			try {
-				const { cleanupWorktree } = await import("../skills/git.js");
+				const { cleanupWorktree, removeEmptyWorktreeSetContainer } = await import("../skills/git.js");
 				const allPersisted = this.getAllPersistedSessionsForWorktreeGuard();
 				// Multi-repo: clean each repo's worktree with the shared background-I/O
 				// ceiling + delete the shared branch from each repo's remote (Phase 4a).
@@ -11254,8 +11262,19 @@ export class SessionManager {
 						const repoPath = repo === "." ? ps.repoPath! : path.join(ps.repoPath!, repo);
 						try {
 							await cleanupWorktree(repoPath, wt, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
-						} catch { /* preserve per-repo all-settled isolation */ }
+							try {
+								await fsp.access(wt);
+								console.error(`[session-manager] Component "${repo}" cleanup left worktree for ${ps.id}: ${wt}`);
+							} catch { /* removed */ }
+						} catch (err) {
+							console.error(`[session-manager] Failed to clean up component "${repo}" worktree for ${ps.id}:`, err);
+						}
 					});
+					try {
+						await removeEmptyWorktreeSetContainer(ps.worktreePath, Object.values(ps.repoWorktrees));
+					} catch (err) {
+						console.error(`[session-manager] Failed to remove multi-repo branch container for ${ps.id}: ${ps.worktreePath}`, err);
+					}
 				} else if (!isWorktreePathReferencedByLiveSession(ps.worktreePath, allPersisted, { ignoreSessionId: ps.id })) {
 					await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
 				} else {

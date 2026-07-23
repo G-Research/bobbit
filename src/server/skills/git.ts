@@ -607,10 +607,89 @@ export interface CreateWorktreeSetOptions {
 	configuredBaseRef?: string;
 	commandRunner?: CommandRunner;
 	remotePolicy?: RemoteGitPolicy;
+	/** Exact authoritative start commit/ref for each repository key. */
+	startPointsByRepo?: Record<string, string>;
 	/** @deprecated Ignored. Worktree creation is always local-only. */
 	pushPolicy?: "local-only" | "publish";
 	/** @deprecated Ignored. Worktree creation is always local-only. */
 	skipPush?: boolean;
+}
+
+interface WorktreeSetEntry {
+	repo: string;
+	repoPath: string;
+	worktreePath: string;
+}
+
+/**
+ * Remove only the known empty repo-key ancestors and branch container left
+ * after a multi-repo worktree set has been cleaned. This deliberately uses
+ * non-recursive rmdir calls so unexpected files are never removed.
+ */
+export async function removeEmptyWorktreeSetContainer(
+	container: string,
+	worktreePaths: Iterable<string>,
+): Promise<void> {
+	const containerPath = path.resolve(container);
+	const ancestors = new Set<string>();
+	for (const worktreePath of worktreePaths) {
+		const relative = path.relative(containerPath, path.resolve(worktreePath));
+		if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
+		const parts = relative.split(path.sep);
+		for (let i = 1; i < parts.length; i++) {
+			ancestors.add(path.join(containerPath, ...parts.slice(0, i)));
+		}
+	}
+
+	const failures: string[] = [];
+	const targets = [...ancestors].sort((a, b) => b.length - a.length);
+	targets.push(containerPath);
+	for (const target of targets) {
+		try {
+			await fs.promises.rmdir(target);
+		} catch (err: any) {
+			if (err?.code !== "ENOENT") {
+				failures.push(`${target}: ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
+	}
+	if (failures.length > 0) {
+		throw new Error(failures.join("; "));
+	}
+}
+
+async function rollbackWorktreeSet(
+	entries: WorktreeSetEntry[],
+	createdBranchRepos: ReadonlySet<string>,
+	container: string,
+	branchName: string,
+	commandRunner: CommandRunner,
+	remotePolicy: RemoteGitPolicy,
+): Promise<string[]> {
+	const failures: string[] = [];
+	for (const entry of [...entries].reverse()) {
+		try {
+			await cleanupWorktree(
+				entry.repoPath,
+				entry.worktreePath,
+				branchName,
+				createdBranchRepos.has(entry.repo),
+				commandRunner,
+				{ ...remotePolicy, skipRemotePush: true },
+			);
+			if (await pathExists(entry.worktreePath)) {
+				failures.push(`component "${entry.repo}" cleanup left worktree at ${entry.worktreePath}`);
+			}
+		} catch (err) {
+			failures.push(`component "${entry.repo}" cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+	try {
+		await removeEmptyWorktreeSetContainer(container, entries.map(entry => entry.worktreePath));
+	} catch (err) {
+		failures.push(`branch container cleanup failed at ${container}: ${err instanceof Error ? err.message : String(err)}`);
+	}
+	return failures;
 }
 
 export interface WorktreeResult {
@@ -796,7 +875,12 @@ export async function createWorktreeSet(
 	branchName: string,
 	baseBranch?: string,
 	opts?: CreateWorktreeSetOptions,
-): Promise<{ container: string; worktrees: Array<{ repo: string; repoPath: string; worktreePath: string }> }> {
+): Promise<{
+	container: string;
+	worktrees: Array<{ repo: string; repoPath: string; worktreePath: string }>;
+	/** Multi-repo components whose local branch was created by this call. */
+	createdBranchRepos?: ReadonlySet<string>;
+}> {
 	// Per-component worktree setup is the caller's responsibility — invoke
 	// `runComponentSetups()` after this function returns.
 	// Distinct repos in declared order.
@@ -811,6 +895,7 @@ export async function createWorktreeSet(
 	const configuredBaseRefTrimmed = (opts?.configuredBaseRef ?? "").trim();
 	const commandRunner = opts?.commandRunner ?? realCommandRunner;
 	const remotePolicy = opts?.remotePolicy ?? DEFAULT_REMOTE_GIT_POLICY;
+	const startPointsByRepo = opts?.startPointsByRepo;
 	const runGit = (args: readonly string[], options?: any) => execGit(args, options, commandRunner);
 
 	// Single-repo path collapses to existing behavior. `configuredBaseRef`
@@ -842,11 +927,17 @@ export async function createWorktreeSet(
 	const repoList: string[] = [];
 	for (const repo of repos) {
 		const repoSrc = path.join(rootPath, repo === "." ? "" : repo);
-		if (!(await isGitRepoRoot(repoSrc, commandRunner))) continue;
+		const hasExactStart = !!startPointsByRepo && Object.prototype.hasOwnProperty.call(startPointsByRepo, repo);
+		if (!(await isGitRepoRoot(repoSrc, commandRunner))) {
+			if (hasExactStart) {
+				throw new Error(`createWorktreeSet: validate source repo failed for component "${repo}": ${repoSrc} is not a Git repository root`);
+			}
+			continue;
+		}
 		// When no explicit start point/base_ref is configured, this component would
 		// fall back to literal HEAD. Skip unborn repos before git worktree sees an
-		// invalid start point; explicit base refs still surface their normal errors.
-		if (!baseBranch && !configuredBaseRefTrimmed && !(await hasResolvedHead(repoSrc, commandRunner))) continue;
+		// invalid start point; explicit per-repo starts remain authoritative.
+		if (!hasExactStart && !baseBranch && !configuredBaseRefTrimmed && !(await hasResolvedHead(repoSrc, commandRunner))) continue;
 		repoList.push(repo);
 	}
 
@@ -866,80 +957,103 @@ export async function createWorktreeSet(
 	// Operation-first creation is idempotent and avoids an exists/mkdir race.
 	await fs.promises.mkdir(container, { recursive: true });
 
-	const out: Array<{ repo: string; repoPath: string; worktreePath: string }> = [];
-	for (const repo of repoList) {
-		const repoSrc = path.join(rootPath, repo);
-		const wtPath = path.join(container, repo);
-		// Keep the existing actionable result if the source disappears after the
-		// canonical repo-root scan and before this component is created.
-		if (!await pathExists(repoSrc)) {
-			throw new Error(`createWorktreeSet: source repo not found: ${repoSrc}`);
-		}
-		// Start-point precedence mirrors `createWorktree`:
-		//   1. explicit `baseBranch` arg            (per-call override)
-		//   2. `opts.configuredBaseRef` (non-empty) (project's `base_ref` setting)
-		//   3. `resolveRemotePrimary(repoSrc)`     (today's fallback)
-		let startPoint: string;
-		let startPointFromConfiguredBase = false;
-		if (baseBranch) {
-			startPoint = baseBranch;
-		} else if (configuredBaseRefTrimmed) {
-			startPoint = parseBaseRef(configuredBaseRefTrimmed).ref;
-			startPointFromConfiguredBase = true;
-		} else {
-			startPoint = await resolveRemotePrimary(repoSrc, commandRunner);
-		}
-
-		// Branch may already exist from a prior partial attempt.
-		let branchExists = false;
-		try {
-			await runGit(["rev-parse", "--verify", branchName], { cwd: repoSrc });
-			branchExists = true;
-		} catch { /* not present */ }
-
-		try {
-			if (branchExists) {
-				await runGit(["worktree", "add", wtPath, branchName], { cwd: repoSrc });
+	const out: WorktreeSetEntry[] = [];
+	const createdBranchRepos = new Set<string>();
+	try {
+		for (const repo of repoList) {
+			const repoSrc = path.join(rootPath, repo);
+			const wtPath = path.join(container, repo);
+			// Keep the existing actionable result if the source disappears after the
+			// canonical repo-root scan and before this component is created.
+			if (!await pathExists(repoSrc)) {
+				throw new Error(`createWorktreeSet: validate source repo failed for component "${repo}": source repo not found at ${repoSrc}`);
+			}
+			// An exact per-repo start takes precedence over every shared fallback.
+			const exactStart = startPointsByRepo && Object.prototype.hasOwnProperty.call(startPointsByRepo, repo)
+				? startPointsByRepo[repo].trim()
+				: undefined;
+			let startPoint: string;
+			let startPointFromConfiguredBase = false;
+			if (exactStart !== undefined) {
+				if (!exactStart) throw new Error(`createWorktreeSet: resolve exact start failed for component "${repo}": start point is empty`);
+				startPoint = exactStart;
+			} else if (baseBranch) {
+				startPoint = baseBranch;
+			} else if (configuredBaseRefTrimmed) {
+				startPoint = parseBaseRef(configuredBaseRefTrimmed).ref;
+				startPointFromConfiguredBase = true;
 			} else {
-				await runGit(["worktree", "add", "-b", branchName, wtPath, startPoint], { cwd: repoSrc });
+				startPoint = await resolveRemotePrimary(repoSrc, commandRunner);
 			}
-		} catch (err) {
-			if (startPointFromConfiguredBase && !branchExists) {
-				// Configured base ref disappeared between save and creation in this
-				// component repo. Emit the design-spec'd actionable message naming
-				// the repo so the user knows which one to `git fetch origin` in.
-				throw new Error(
-					`Failed to create worktree: base_ref '${configuredBaseRefTrimmed}' no longer exists in repo '${repo}'. ` +
-					`It may have been deleted on the remote since the project was configured. ` +
-					`Run 'git fetch origin' to refresh, then update the base_ref setting if the branch was renamed.`,
-				);
-			}
-			throw new Error(`createWorktreeSet: git worktree add failed for repo "${repo}" at ${wtPath}: ${err instanceof Error ? err.message : err}`);
-		}
 
-		// When the project has a configured `base_ref`, set it as the per-branch
-		// upstream so each component's `@{u}` reflects the integration target.
-		// Single-repo path delegates to `createWorktree` above, which handles
-		// this; the multi-repo loop must do it explicitly per worktree.
-		if (configuredBaseRefTrimmed) {
+			// Branch may already exist from a prior partial attempt.
+			let branchExists = false;
 			try {
-				await runGit(["branch", `--set-upstream-to=${configuredBaseRefTrimmed}`, branchName], {
-					cwd: wtPath,
-					timeout: 10_000,
-				});
-			} catch (err) {
-				const stderr = err instanceof Error ? err.message : String(err);
+				await runGit(["rev-parse", "--verify", branchName], { cwd: repoSrc });
+				branchExists = true;
+			} catch { /* not present */ }
+
+			// Exact per-repo starts are authoritative and identify a fresh coordinated
+			// worker allocation. Reusing an existing branch could silently attach a
+			// stale commit and later delete a branch this attempt did not create. Reject
+			// it before attaching a worktree or changing its upstream; the outer rollback
+			// removes only earlier components created by this attempt.
+			if (exactStart !== undefined && branchExists) {
 				throw new Error(
-					`Failed to set upstream for branch '${branchName}' to '${configuredBaseRefTrimmed}' in repo '${repo}': ${stderr}. ` +
-					`Check that the ref is still a valid branch.`,
+					`createWorktreeSet: validate exact start failed for component "${repo}": branch "${branchName}" already exists`,
 				);
 			}
-		}
 
-		out.push({ repo, repoPath: repoSrc, worktreePath: wtPath });
+			try {
+				if (branchExists) {
+					await runGit(["worktree", "add", wtPath, branchName], { cwd: repoSrc });
+				} else {
+					await runGit(["worktree", "add", "-b", branchName, wtPath, startPoint], { cwd: repoSrc });
+				}
+			} catch (err) {
+				if (startPointFromConfiguredBase && !branchExists) {
+					throw new Error(
+						`Failed to create worktree for component "${repo}": base_ref '${configuredBaseRefTrimmed}' no longer exists. ` +
+						`It may have been deleted on the remote since the project was configured. ` +
+						`Run 'git fetch origin' to refresh, then update the base_ref setting if the branch was renamed.`,
+					);
+				}
+				throw new Error(`createWorktreeSet: git worktree add failed for component "${repo}" at ${wtPath}: ${err instanceof Error ? err.message : err}`);
+			}
+
+			// Only successfully-created worktrees are eligible for rollback. Recording
+			// the entry after `git worktree add` prevents cleanup from probing the
+			// failed component path while still covering later upstream setup failures.
+			out.push({ repo, repoPath: repoSrc, worktreePath: wtPath });
+			if (!branchExists) createdBranchRepos.add(repo);
+
+			// When the project has a configured `base_ref`, set it as the per-branch
+			// upstream so each component's `@{u}` reflects the integration target.
+			if (configuredBaseRefTrimmed) {
+				try {
+					await runGit(["branch", `--set-upstream-to=${configuredBaseRefTrimmed}`, branchName], {
+						cwd: wtPath,
+						timeout: 10_000,
+					});
+				} catch (err) {
+					const stderr = err instanceof Error ? err.message : String(err);
+					throw new Error(
+						`Failed to set upstream for branch '${branchName}' to '${configuredBaseRefTrimmed}' in component "${repo}": ${stderr}. ` +
+						`Check that the ref is still a valid branch.`,
+					);
+				}
+			}
+
+		}
+	} catch (err) {
+		const rollbackFailures = await rollbackWorktreeSet(out, createdBranchRepos, container, branchName, commandRunner, remotePolicy);
+		if (rollbackFailures.length > 0) {
+			throw new Error(`${err instanceof Error ? err.message : String(err)}; rollback failures: ${rollbackFailures.join("; ")}`);
+		}
+		throw err;
 	}
 
-	return { container, worktrees: out };
+	return { container, worktrees: out, createdBranchRepos };
 }
 
 /**

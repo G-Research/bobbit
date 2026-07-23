@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/integration/team-spawn-multi-repo-real-git.test.ts",
+      "reason": "Focused real-Git regression for a non-Git two-component project: drives direct TeamManager.spawnRole and one REST team/spawn request from unpublished divergent local goal-component HEADs; verifies exact-start branch-collision rejection before worktree attachment/upstream or remote mutation, rollback of an earlier component while preserving the divergent colliding branch, actual createSession agent-spawn then post-spawn setup failure without Git probes against either non-Git container, TeamManager-owned component/container cleanup, common branch-container layout, injected partial rollback, and cleanup coordinates in createSession's first durable write.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
       "path": "tests2/core/inline-html-theme-bridge-repro.test.ts",
       "reason": "Fast failing-first regression proving completed srcdoc and streaming document.write inline HTML payloads are prepared through the canonical preview theme bridge in the compiled UI dependency graph.",
       "execution": {
