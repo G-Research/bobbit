@@ -9,7 +9,7 @@ import type { PromptSource, SessionManager, SessionInfo } from "./session-manage
 import { isNonRetryableAgentError, isProviderBackoffError, isRetryableGenericAgentError, isTransientReviewError } from "./verification-logic.js";
 import { GoalManager } from "./goal-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
-import { createWorktree, cleanupWorktree } from "../skills/git.js";
+import { createWorktree, createWorktreeSet, cleanupWorktree } from "../skills/git.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 import type { RoleStore, Role } from "./role-store.js";
 import { resolveRole, listAvailableRoles, type RoleSource } from "./resolve-role.js";
@@ -165,6 +165,40 @@ async function resolveTeamMemberStartPoint(goal: PersistedGoal): Promise<string 
 	return undefined;
 }
 
+type CreatedWorktreeSet = Awaited<ReturnType<typeof createWorktreeSet>>;
+
+async function cleanupCreatedWorktreeSet(
+	result: CreatedWorktreeSet,
+	branchName: string | undefined,
+	commandRunner: CommandRunner,
+): Promise<void> {
+	for (const worktree of [...result.worktrees].reverse()) {
+		try {
+			await cleanupWorktree(
+				worktree.repoPath,
+				worktree.worktreePath,
+				branchName,
+				true,
+				commandRunner,
+				{ skipRemotePush: true },
+			);
+			try {
+				await fs.promises.access(worktree.worktreePath);
+				console.error(`[team-manager] Component "${worktree.repo}" cleanup left worktree at ${worktree.worktreePath}`);
+			} catch { /* removed */ }
+		} catch (err) {
+			console.error(`[team-manager] Failed to clean up component "${worktree.repo}" worktree ${worktree.worktreePath}:`, err);
+		}
+	}
+	try {
+		await fs.promises.rmdir(result.container);
+	} catch (err: any) {
+		if (err?.code !== "ENOENT") {
+			console.error(`[team-manager] Failed to remove worker branch container ${result.container}:`, err);
+		}
+	}
+}
+
 function splitWorkerResultSummary(resultSummary: string): { summary?: string; branch?: string; commit?: string; checks?: string } {
 	let rest = resultSummary.trim();
 	let branch: string | undefined;
@@ -247,6 +281,8 @@ export interface TeamAgent {
 	/** In-memory marker for pre-kind reviewer records that need legacy safeguards. */
 	legacyMissingKind?: boolean;
 	worktreePath?: string;
+	/** Per-component worktree paths for a multi-repo worker. */
+	repoWorktrees?: Record<string, string>;
 	branch?: string;
 	baseSha?: string;
 	task: string;
@@ -579,6 +615,7 @@ export class TeamManager {
 				role: a.role,
 				kind: a.kind,
 				worktreePath: a.worktreePath,
+				repoWorktrees: a.repoWorktrees,
 				branch: a.branch,
 				baseSha: a.baseSha,
 				task: a.task,
@@ -1005,6 +1042,7 @@ export class TeamManager {
 						kind: (a.kind === "reviewer" ? "reviewer" : "worker"),
 						legacyMissingKind: !hasPersistedKind && a.role === "reviewer" ? true : undefined,
 						worktreePath: a.worktreePath,
+						repoWorktrees: a.repoWorktrees,
 						branch: a.branch,
 						baseSha: a.baseSha,
 						task: a.task,
@@ -2069,6 +2107,11 @@ export class TeamManager {
 		// Headquarters never gets member worktrees, even if a legacy goal record
 		// still has repo/branch fields from the pre-split implementation.
 		const useWorktree = !isHeadquartersProject(goal.projectId) && !!goal.repoPath && !!goal.branch;
+		const goalRepoWorktrees = goal.repoWorktrees;
+		const distinctGoalRepoWorktrees = goalRepoWorktrees
+			? new Set(Object.values(goalRepoWorktrees).map(worktreePath => path.resolve(worktreePath)))
+			: new Set<string>();
+		const isMultiRepoGoal = distinctGoalRepoWorktrees.size >= 2;
 
 		// Enforce gate dependency check: upstream gates must be passed before spawning for a gate
 		const resolvedWorkflowGateId = opts?.workflowGateId ?? this.extractWorkflowGateId(task, goalId);
@@ -2088,6 +2131,9 @@ export class TeamManager {
 		// so the on-disk directory is `goal-<goalId8>-<role>-<short4>`.
 		const shortId = randomUUID().slice(0, 4);
 		let worktreeResult: { worktreePath: string; branchName: string } | undefined;
+		let multiRepoWorktreeResult: CreatedWorktreeSet | undefined;
+		let workerRepoWorktrees: Record<string, string> | undefined;
+		let multiRepoStartPoints: Record<string, string> | undefined;
 		let branchName: string | undefined;
 		let agentCwd: string;
 		let memberStartPoint: string | undefined;
@@ -2097,7 +2143,9 @@ export class TeamManager {
 			const goalId8 = goalId.slice(0, 8);
 			branchName = `goal/${goalId8}/${role}-${shortId}`;
 
-			memberStartPoint = await resolveTeamMemberStartPoint(goal);
+			if (!isMultiRepoGoal) {
+				memberStartPoint = await resolveTeamMemberStartPoint(goal);
+			}
 
 			// Compute subdirectory offset from the goal's worktree root to its cwd.
 			// If the project rootPath is a subdirectory of the repo, goal.cwd includes
@@ -2111,6 +2159,59 @@ export class TeamManager {
 				// Sandboxed: worktree created inside the container by applySandboxWiring
 				// via ProjectSandbox.createWorktree(). Use goal.cwd as placeholder.
 				agentCwd = goal.cwd; // placeholder — sandbox wiring overrides this
+			} else if (isMultiRepoGoal && goalRepoWorktrees) {
+				// A true multi-repo goal is identified by its persisted component
+				// worktrees, not by probing the non-Git project container.
+				const projectContext = this.config.projectContextManager?.getContextForGoal(goalId);
+				if (!projectContext) {
+					throw new Error(`Cannot resolve project components for multi-repo team member goal "${goalId}"`);
+				}
+				const configuredComponents = projectContext.projectConfigStore.getComponents();
+				const configuredRepos = new Set(configuredComponents.map(component => component.repo));
+				for (const repo of Object.keys(goalRepoWorktrees)) {
+					if (!configuredRepos.has(repo)) {
+						throw new Error(`Cannot resolve project component "${repo}" for multi-repo team member goal "${goalId}"`);
+					}
+				}
+				const components = configuredComponents.filter(component =>
+					Object.prototype.hasOwnProperty.call(goalRepoWorktrees, component.repo),
+				);
+				multiRepoStartPoints = {};
+				for (const [repo, goalWorktreePath] of Object.entries(goalRepoWorktrees)) {
+					try {
+						const { stdout } = await this.commandRunner.execFile("git", ["rev-parse", "HEAD"], {
+							cwd: goalWorktreePath,
+							timeout: 5_000,
+						});
+						const head = stdout.toString().trim();
+						if (!head) throw new Error("git returned an empty commit SHA");
+						multiRepoStartPoints[repo] = head;
+					} catch (err) {
+						throw new Error(
+							`Cannot run git rev-parse HEAD for multi-repo team member component "${repo}" at ${goalWorktreePath}: ` +
+							`${err instanceof Error ? err.message : String(err)}`,
+						);
+					}
+				}
+
+				multiRepoWorktreeResult = await createWorktreeSet(goal.repoPath!, components, branchName, undefined, {
+					worktreeRoot: projectContext.projectConfigStore.get("worktree_root") || undefined,
+					configuredBaseRef: projectContext.projectConfigStore.get("base_ref") || undefined,
+					commandRunner: this.commandRunner,
+					startPointsByRepo: multiRepoStartPoints,
+				});
+				const createdRepos = new Set(multiRepoWorktreeResult.worktrees.map(worktree => worktree.repo));
+				for (const repo of Object.keys(multiRepoStartPoints)) {
+					if (!createdRepos.has(repo)) {
+						await cleanupCreatedWorktreeSet(multiRepoWorktreeResult, branchName, this.commandRunner);
+						throw new Error(`createWorktreeSet did not create multi-repo team member component "${repo}"`);
+					}
+				}
+				workerRepoWorktrees = Object.fromEntries(
+					multiRepoWorktreeResult.worktrees.map(worktree => [worktree.repo, worktree.worktreePath]),
+				);
+				worktreeResult = { worktreePath: multiRepoWorktreeResult.container, branchName };
+				agentCwd = multiRepoWorktreeResult.container;
 			} else {
 				// Non-sandboxed: create the member worktree from local goal state. Goal
 				// branches may be unpublished, so prefer local refs before origin refs.
@@ -2136,13 +2237,20 @@ export class TeamManager {
 		// and is created later by applySandboxWiring, which fires the hook itself
 		// (with the actual container worktree path). Non-fatal.
 		if (worktreeResult) {
-			await this.sessionManager.dispatchGoalProvisionedForWorktree({
-				goalId,
-				projectId: goal.projectId,
-				worktreePath: worktreeResult.worktreePath,
-				cwd: agentCwd,
-				branch: branchName,
-			});
+			try {
+				await this.sessionManager.dispatchGoalProvisionedForWorktree({
+					goalId,
+					projectId: goal.projectId,
+					worktreePath: worktreeResult.worktreePath,
+					cwd: agentCwd,
+					branch: branchName,
+				});
+			} catch (err) {
+				if (multiRepoWorktreeResult) {
+					await cleanupCreatedWorktreeSet(multiRepoWorktreeResult, branchName, this.commandRunner);
+				}
+				throw err;
+			}
 		}
 
 		try {
@@ -2195,6 +2303,11 @@ export class TeamManager {
 				role,
 				teamGoalId: goalId,
 				worktreePath: actualWorktreePath,
+				...(workerRepoWorktrees ? {
+					repoPath: goal.repoPath,
+					branch: branchName,
+					repoWorktrees: workerRepoWorktrees,
+				} : {}),
 				accessory: roleAccessory,
 				teamLeadSessionId: entry.teamLeadSessionId ?? undefined,
 			};
@@ -2203,19 +2316,21 @@ export class TeamManager {
 			// Resolve baseSha from the agent's working directory.
 			// For sandboxed sessions, run git inside the container.
 			let baseSha: string | undefined;
-			try {
-				const effectiveCwd = actualWorktreePath || session.cwd || agentCwd;
-				if (memberSandboxed && this.sessionManager.getSandboxManager()) {
-					const sandbox = this.sessionManager.getSandboxManager()!.get(goal.projectId || "");
-					if (sandbox) {
-						const output = await sandbox.exec(["git", "rev-parse", "HEAD"], { cwd: effectiveCwd });
-						baseSha = output.trim() || undefined;
+			if (!multiRepoStartPoints) {
+				try {
+					const effectiveCwd = actualWorktreePath || session.cwd || agentCwd;
+					if (memberSandboxed && this.sessionManager.getSandboxManager()) {
+						const sandbox = this.sessionManager.getSandboxManager()!.get(goal.projectId || "");
+						if (sandbox) {
+							const output = await sandbox.exec(["git", "rev-parse", "HEAD"], { cwd: effectiveCwd });
+							baseSha = output.trim() || undefined;
+						}
+					} else {
+						const { stdout } = await execFile("git", ["rev-parse", "HEAD"], { cwd: effectiveCwd, timeout: 5_000 });
+						baseSha = stdout.trim() || undefined;
 					}
-				} else {
-					const { stdout } = await execFile("git", ["rev-parse", "HEAD"], { cwd: effectiveCwd, timeout: 5_000 });
-					baseSha = stdout.trim() || undefined;
-				}
-			} catch { /* non-fatal — baseSha stays undefined */ }
+				} catch { /* non-fatal — baseSha stays undefined */ }
+			}
 
 			// Track the agent
 			const agent: TeamAgent = {
@@ -2223,6 +2338,7 @@ export class TeamManager {
 				role,
 				kind: "worker",
 				worktreePath: actualWorktreePath,
+				repoWorktrees: workerRepoWorktrees,
 				branch: branchName,
 				baseSha,
 				task,
@@ -2298,8 +2414,10 @@ export class TeamManager {
 
 			return { sessionId: session.id, worktreePath: worktreeResult?.worktreePath };
 		} catch (err) {
-			// Clean up the orphaned worktree on failure (only if one was created)
-			if (worktreeResult && goal.repoPath) {
+			// Clean up orphaned worktrees if worker-session creation fails.
+			if (multiRepoWorktreeResult) {
+				await cleanupCreatedWorktreeSet(multiRepoWorktreeResult, branchName, this.commandRunner);
+			} else if (worktreeResult && goal.repoPath) {
 				try {
 					await cleanupWorktree(goal.repoPath, worktreeResult.worktreePath, branchName, true);
 					console.log(`[team-manager] Cleaned up orphaned worktree after spawnRole failure: ${worktreeResult.worktreePath}`);
@@ -2524,13 +2642,24 @@ export class TeamManager {
 			this.sessionManager.updateSessionMeta(sessionId, {
 				worktreePath: agent.worktreePath,
 				teamGoalId: goalId,
+				...(agent.repoWorktrees ? {
+					repoPath: goal.repoPath,
+					branch: agent.branch,
+					repoWorktrees: agent.repoWorktrees,
+				} : {}),
 			} as any);
-			// Store repoPath and branch in the session store for later purge cleanup
+			// Store repo coordinates for later purge cleanup. Multi-repo workers
+			// retain their component map so purge never probes the branch container.
 			const projectCtx = goalId && this.config.projectContextManager
 				? this.config.projectContextManager.getContextForGoal(goalId)
 				: null;
 			if (projectCtx) {
-				projectCtx.sessionStore.update(sessionId, { repoPath: goal.repoPath, branch: agent.branch, teamGoalId: goalId } as any);
+				projectCtx.sessionStore.update(sessionId, {
+					repoPath: goal.repoPath,
+					branch: agent.branch,
+					teamGoalId: goalId,
+					...(agent.repoWorktrees ? { repoWorktrees: agent.repoWorktrees } : {}),
+				} as any);
 			}
 		}
 

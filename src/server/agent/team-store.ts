@@ -15,6 +15,8 @@ export interface PersistedTeamEntry {
 		 */
 		kind?: "worker" | "reviewer";
 		worktreePath?: string;
+		/** Per-component worktree paths for a multi-repo worker. */
+		repoWorktrees?: Record<string, string>;
 		branch?: string;
 		baseSha?: string;
 		task: string;

@@ -10822,8 +10822,9 @@ export class SessionManager {
 			for (const team of projectCtx.teamStore.getAll()) {
 				const ownerGoal = goalsById.get(team.goalId);
 				for (const agent of team.agents) {
-					teamRefs.push({ id: agent.sessionId, repoPath: ownerGoal?.repoPath ?? projectCtx.project.rootPath, worktreePath: agent.worktreePath, branch: agent.branch });
-					addBranchGuard(ownerGoal?.repoPath ?? projectCtx.project.rootPath, agent.branch);
+					const repoPath = ownerGoal?.repoPath ?? projectCtx.project.rootPath;
+					teamRefs.push({ id: agent.sessionId, repoPath, worktreePath: agent.worktreePath, branch: agent.branch, repoWorktrees: agent.repoWorktrees });
+					addRepoBranches(repoPath, agent.branch, agent.repoWorktrees);
 				}
 				const lead = team.teamLeadSessionId ? projectCtx.sessionStore.get(team.teamLeadSessionId) : undefined;
 				if (lead) {
@@ -11254,8 +11255,21 @@ export class SessionManager {
 						const repoPath = repo === "." ? ps.repoPath! : path.join(ps.repoPath!, repo);
 						try {
 							await cleanupWorktree(repoPath, wt, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
-						} catch { /* preserve per-repo all-settled isolation */ }
+							try {
+								await fsp.access(wt);
+								console.error(`[session-manager] Component "${repo}" cleanup left worktree for ${ps.id}: ${wt}`);
+							} catch { /* removed */ }
+						} catch (err) {
+							console.error(`[session-manager] Failed to clean up component "${repo}" worktree for ${ps.id}:`, err);
+						}
 					});
+					try {
+						await fsp.rmdir(ps.worktreePath);
+					} catch (err: any) {
+						if (err?.code !== "ENOENT") {
+							console.error(`[session-manager] Failed to remove multi-repo branch container for ${ps.id}: ${ps.worktreePath}`, err);
+						}
+					}
 				} else if (!isWorktreePathReferencedByLiveSession(ps.worktreePath, allPersisted, { ignoreSessionId: ps.id })) {
 					await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
 				} else {
