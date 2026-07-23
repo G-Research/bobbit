@@ -8,7 +8,9 @@ import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, deleteGoal, registerProject, teardownTeam } from "./_e2e/e2e-setup.js";
 
 const REPRO = "MULTI_REPO_TEAM_SPAWN_REGRESSION";
-const COMPONENTS = ["alpha", "beta"] as const;
+const NESTED_COMPONENT = "packages/alpha" as const;
+const FAILED_COMPONENT = "beta" as const;
+const COMPONENTS = [NESTED_COMPONENT, FAILED_COMPONENT] as const;
 type ComponentName = typeof COMPONENTS[number];
 
 async function git(runner: CommandRunner, cwd: string, args: string[]): Promise<string> {
@@ -81,10 +83,11 @@ function assertWorkerShape(opts: {
 	expect(normalized(session.worktreePath), "flat worker worktreePath must be the branch container").toBe(normalized(worktreePath));
 	expect(normalized(session.repoPath), "worker cleanup must retain the non-Git project root as its repo container").toBe(normalized(projectRoot));
 	expect(existsSync(join(worktreePath, ".git")), "worker branch container must remain non-Git").toBe(false);
-	expect(Object.keys(repoWorktrees).sort()).toEqual([...COMPONENTS]);
-	expect(new Set(COMPONENTS.map(repo => normalized(dirname(repoWorktrees[repo]))))).toEqual(
-		new Set([normalized(worktreePath)]),
-	);
+	expect(Object.keys(repoWorktrees).sort()).toEqual([...COMPONENTS].sort());
+	expect(new Set(COMPONENTS.map(repo => normalized(resolve(
+		repoWorktrees[repo],
+		...repo.split("/").map(() => ".."),
+	))))).toEqual(new Set([normalized(worktreePath)]));
 
 	for (const repo of COMPONENTS) {
 		expect(normalized(repoWorktrees[repo]), `${repo} must retain the configured repo-key layout`).toBe(
@@ -126,7 +129,7 @@ test("direct and REST team spawn create coordinated workers from local component
 		const project = await registerProject({
 			name: `team-multi-minimal-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
 			rootPath: projectRoot,
-			components: COMPONENTS.map(repo => ({ name: repo, repo })),
+			components: COMPONENTS.map(repo => ({ name: repo.split("/").at(-1)!, repo })),
 			workflows: {
 				general: {
 					name: "General",
@@ -164,7 +167,7 @@ test("direct and REST team spawn create coordinated workers from local component
 		const goal = await waitForGoalReady(goalId!);
 		expect(goal.setupStatus, `${REPRO}: goal setup failed: ${goal.setupError ?? "unknown"}`).toBe("ready");
 		expect(normalized(goal.repoPath)).toBe(normalized(projectRoot));
-		expect(Object.keys(goal.repoWorktrees ?? {}).sort()).toEqual([...COMPONENTS]);
+		expect(Object.keys(goal.repoWorktrees ?? {}).sort()).toEqual([...COMPONENTS].sort());
 		expect(existsSync(join(goal.worktreePath, ".git")), "goal branch container must remain non-Git").toBe(false);
 
 		const goalHeads = {} as Record<ComponentName, string>;
@@ -175,21 +178,28 @@ test("direct and REST team spawn create coordinated workers from local component
 			goalHeads[repo] = await git(runner, goalWorktree, ["rev-parse", "HEAD"]);
 			expect(await git(runner, join(projectRoot, repo), ["remote"]), `${repo} goal commit must be unpublished`).toBe("");
 		}
-		expect(goalHeads.alpha).not.toBe(goalHeads.beta);
+		expect(goalHeads[NESTED_COMPONENT]).not.toBe(goalHeads[FAILED_COMPONENT]);
 
 		const startResponse = await apiFetch(`/api/goals/${goalId}/team/start`, { method: "POST" });
 		const startBody = await readJson(startResponse);
 		expect(startResponse.status, `${REPRO}: team lead start failed: ${JSON.stringify(startBody)}`).toBe(201);
 		teamLeadSessionId = startBody.sessionId;
 
-		// Inject failure only after alpha's real worktree add has completed. The
-		// rejected direct spawn must remove alpha's worktree, branch, and container.
+		// Inject failure only after the nested component's real worktree add has
+		// completed. The rejected direct spawn must remove that worktree, its
+		// intermediate repo-key directory, branch, and container. It must never
+		// attempt cleanup against beta's failed, never-created target.
 		originalExecFile = runner.execFile;
 		let failedBranch: string | undefined;
 		let failedContainer: string | undefined;
 		let firstComponentWorktree: string | undefined;
+		let failedComponentWorktree: string | undefined;
+		const rollbackWorktreeRemoveTargets: string[] = [];
 		(runner as any).execFile = async (file: string, args: string[], options: any) => {
 			const gitCommand = file.toLowerCase().replace(/\.exe$/, "") === "git";
+			if (gitCommand && args[0] === "worktree" && args[1] === "remove") {
+				rollbackWorktreeRemoveTargets.push(String(args[2]));
+			}
 			const branchIndex = args.indexOf("-b");
 			const branch = branchIndex >= 0 ? args[branchIndex + 1] : undefined;
 			const target = branchIndex >= 0 ? args[branchIndex + 2] : args[2];
@@ -197,12 +207,13 @@ test("direct and REST team spawn create coordinated workers from local component
 				&& args[0] === "worktree"
 				&& args[1] === "add"
 				&& branch?.startsWith(`goal/${goalId!.slice(0, 8)}/coder-`);
-			if (workerAdd && normalized(String(options?.cwd ?? "")) === normalized(join(projectRoot, "alpha"))) {
+			if (workerAdd && normalized(String(options?.cwd ?? "")) === normalized(join(projectRoot, NESTED_COMPONENT))) {
 				failedBranch = branch;
 				firstComponentWorktree = target;
-				failedContainer = dirname(target);
+				failedContainer = dirname(dirname(target));
 			}
-			if (workerAdd && normalized(String(options?.cwd ?? "")) === normalized(join(projectRoot, "beta"))) {
+			if (workerAdd && normalized(String(options?.cwd ?? "")) === normalized(join(projectRoot, FAILED_COMPONENT))) {
+				failedComponentWorktree = target;
 				const error = new Error("injected beta git worktree add failure");
 				(error as any).stderr = "injected beta git worktree add failure";
 				throw error;
@@ -224,9 +235,21 @@ test("direct and REST team spawn create coordinated workers from local component
 			throw new Error(`${REPRO}: expected beta git worktree add failure, received: ${failureMessage}`);
 		}
 		expect(failedBranch, "injection must run after the first component worktree add").toBeTruthy();
-		expect(firstComponentWorktree && existsSync(firstComponentWorktree), "alpha partial worktree must be rolled back").toBe(false);
+		expect(firstComponentWorktree, "nested first-component target must be observed").toBeTruthy();
+		expect(failedComponentWorktree, "failed second-component target must be observed").toBeTruthy();
+		expect(firstComponentWorktree && existsSync(firstComponentWorktree), "nested first-component worktree must be rolled back").toBe(false);
+		expect(firstComponentWorktree && existsSync(dirname(firstComponentWorktree)), "nested repo-key intermediate directory must be rolled back").toBe(false);
 		expect(failedContainer && existsSync(failedContainer), "empty worker branch container must be rolled back").toBe(false);
-		expect(await gitRefExists(runner, join(projectRoot, "alpha"), `refs/heads/${failedBranch}`), "alpha partial branch must be rolled back").toBe(false);
+		expect(failedComponentWorktree && existsSync(failedComponentWorktree), "failed second-component target must never be created").toBe(false);
+		expect(rollbackWorktreeRemoveTargets.map(normalized)).toContain(normalized(firstComponentWorktree!));
+		expect(
+			rollbackWorktreeRemoveTargets.map(normalized),
+			"rollback must not invoke git worktree remove for the failed, never-created component",
+		).not.toContain(normalized(failedComponentWorktree!));
+		expect(
+			await gitRefExists(runner, join(projectRoot, NESTED_COMPONENT), `refs/heads/${failedBranch}`),
+			"nested first-component branch must be rolled back",
+		).toBe(false);
 		for (const repo of COMPONENTS) {
 			expect(
 				await git(runner, goal.repoWorktrees[repo], ["rev-parse", "HEAD"]),
@@ -264,6 +287,10 @@ test("direct and REST team spawn create coordinated workers from local component
 			async () => COMPONENTS.every(repo => !existsSync(directPaths[repo])) && !existsSync(directResult.worktreePath!) ? true : null,
 			{ timeoutMs: 15_000, intervalMs: 50, label: "direct worker component purge" },
 		);
+		expect(
+			existsSync(dirname(directPaths[NESTED_COMPONENT])),
+			"ordinary purge must remove the nested repo-key intermediate directory",
+		).toBe(false);
 		directWorkerId = undefined;
 
 		// Exactly one REST team/spawn request proves the HTTP route reaches the same
