@@ -1817,7 +1817,9 @@ export function handleSetupFailure(
 	broadcastStatus(session, "terminated");
 
 	// 6. Background worktree cleanup (slow, non-blocking)
-	if (plan.worktreePath && plan.repoPath && plan.branch) {
+	// Pre-provisioned multi-repo workers are cleaned component-by-component by
+	// TeamManager after createSession rejects; their flat paths are non-Git containers.
+	if ((!plan.repoWorktrees || Object.keys(plan.repoWorktrees).length === 0) && plan.worktreePath && plan.repoPath && plan.branch) {
 		const persistedSessions = ctx.listPersistedSessionsForWorktreeGuard?.() ?? ctx.store.getAll();
 		if (!isWorktreePathReferencedByLiveSession(plan.worktreePath, persistedSessions, { ignoreSessionId: session.id })) {
 			cleanupWorktree(plan.repoPath, plan.worktreePath, plan.branch, true, ctx.commandRunner, ctx.remoteGitPolicy).catch(() => {});
