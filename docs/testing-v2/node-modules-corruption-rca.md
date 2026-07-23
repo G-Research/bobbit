@@ -10,14 +10,15 @@
 >    mechanism and must NOT be reverted or weakened.**
 >
 > **Implementation status.** Automatic dependency healing and the direct-spawn runtime
-> ring-fence are retired. The harness now validates dependencies without writes or
-> subprocesses before build/launch, leaving repair to the operator. Direct host spawns use
-> Bobbit's installed Pi package through Node's normal resolution semantics. The old recursive
-> snapshot traversal was the NFS startup-hang mechanism; ordinary `npm install` was not.
-> Legacy `<stateDir>/runtime` snapshots and partial trees are never probed and are removable
-> manually only while Bobbit is fully stopped. Sections §11–§12 describe the current policy
-> and its focused regression coverage. The chaos.mjs vector in §13 remains a distinct,
-> already-fixed mechanism.
+> ring-fence are retired. Every harness-backed development wrapper validates dependencies
+> without writes or subprocesses before its initial build, and harness/watchdog recovery
+> paths validate before rebuild or relaunch. Repair is operator-owned. Direct host spawns use
+> Bobbit's installed Pi package through Node's normal resolution semantics and reject missing
+> or partial installations. The old recursive snapshot traversal was the NFS startup-hang
+> mechanism; ordinary `npm install` was not. Legacy `<stateDir>/runtime` snapshots and partial
+> trees are never probed and are removable manually only while Bobbit is fully stopped.
+> Sections §11–§12 describe the current policy and its focused regression coverage. The
+> chaos.mjs vector in §13 remains a distinct, already-fixed mechanism.
 
 ---
 
@@ -68,15 +69,18 @@ runtime tree or conceal a damaged installation.
 The running gateway resolves the pi-coding-agent runtime from **its own install** for
 **every** automatic direct (non-sandbox) agent and verification spawn. The direct-host
 runtime resolver delegates package lookup to `import.meta.resolve`, converts the resolved
-entry URL to a filesystem path, and derives the package's `node_modules` root and `dist/cli.js`.
-This preserves Node's package and subpath semantics. An explicit `--agent-cli` / `cliPath`
-override takes precedence and does not invoke automatic resolution.
+entry URL to a filesystem path, derives the package's `node_modules` root and `dist/cli.js`,
+and verifies that both the resolved entry and derived CLI exist. This preserves Node's
+package and subpath semantics while turning a partial installation into the same actionable
+failure as a missing package. An explicit `--agent-cli` / `cliPath` override takes precedence
+and does not invoke automatic resolution or its availability checks.
 
-If the installed tree loses `@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, or a
-transitive dependency, package resolution or the spawned CLI's imports fail. A missing Pi
-package produces actionable guidance to install it or pass `--agent-cli /path/to/cli.js`.
-Because automatic resolution uses the shared installed tree in place, a half-wipe can brick
-all direct spawns at once. It never consults `<stateDir>/runtime`.
+If the installed tree loses `@earendil-works/pi-coding-agent`, its CLI, `@earendil-works/pi-ai`,
+or a transitive dependency, package resolution, the completeness check, or the spawned CLI's
+imports fail. A missing or incomplete Pi package produces guidance to install it or pass
+`--agent-cli /path/to/cli.js`. Because automatic resolution uses the shared installed tree in
+place, a half-wipe can brick all direct spawns at once. It never consults
+`<stateDir>/runtime` and has no legacy-snapshot fallback.
 
 ### The Docker path is NOT exposed
 
@@ -291,39 +295,70 @@ The current policy removes both automatic dependency mutation and runtime snapsh
 This avoids synchronous recursive filesystem work during direct-session restoration and
 keeps dependency repair under operator control on every platform and filesystem.
 
-### Read-only dependency validation
+### Validation-first launch wrappers
 
-The harness validates the root manifest and installed package manifests before all lifecycle
-entries:
+`dev:harness`, `dev:nord`, and `dev:watchdog` all run the read-only validator before their
+initial `build:server`. Invalid dependencies terminate the command chain non-zero before any
+build, harness/watchdog, Vite, NordLynx setup, or gateway launch. This wrapper gate is needed
+because validation inside an already-built harness cannot protect the build that creates that
+harness. Once started, the harness applies the same policy at each lifecycle boundary.
+
+Validation checks:
 
 - `dependencies` and `devDependencies` must each be valid dependency maps, and every declared
   package must have a manifest under `node_modules`;
 - `optionalDependencies` remain optional;
 - unreadable, malformed, or structurally invalid root manifests fail validation; and
-- validation performs reads only, with no repair callback, filesystem writes, subprocesses,
+- the validator performs reads only, with no repair callback, filesystem writes, subprocesses,
   or package-manager invocation.
 
-A validation failure reports its cause and tells the operator to stop Bobbit and the
-development stack, run `npm install` manually, then retry or restart. Initial startup exits
-non-zero before build or launch. Sentinel restart and automatic crash relaunch skip build and
-launch but keep the harness alive for a later operator-triggered retry. Healthy initial and
-sentinel paths validate, build, and launch; a healthy crash relaunch validates and launches
-without rebuilding. A failed sentinel build never launches stale output and remains retryable.
+### Harness and watchdog recovery
+
+A validation failure reports its cause and tells the operator to stop Bobbit and the full
+development stack, run `npm install` manually, then retry or restart. The runtime policies are:
+
+- **Initial harness startup:** exit non-zero before build or gateway launch.
+- **Sentinel restart:** after stopping the old gateway, skip build and launch while invalid;
+  keep the harness and sentinel watcher alive so a later restart can revalidate. A build
+  failure likewise never launches stale output and remains retryable.
+- **Unexpected gateway crash:** revalidate before automatic relaunch. Invalid dependencies
+  leave the harness and sentinel watcher alive without building or launching; a later sentinel
+  retry revalidates and rebuilds. Healthy crash recovery relaunches without rebuilding.
+- **Watchdog, live harness:** validate after the health-failure threshold and before replacing
+  the harness. Invalid dependencies preserve the existing harness and sentinel watcher rather
+  than killing them or starting a replacement.
+- **Watchdog, dead harness:** keep the watchdog alive, launch nothing while invalid, and
+  revalidate periodically. After manual repair, launch one replacement harness, whose own
+  startup policy validates and builds before gateway launch.
+
+The standard repair remains operator-owned: stop Bobbit and every development process before
+mutating `node_modules`, run plain `npm install` manually, and then restart. Keep-alive behavior
+exists to prevent stale launches and support controlled retries; it does not authorize package
+mutation under live processes.
 
 ### Installed direct-host Pi runtime
 
 Automatic direct host resolution uses Bobbit's installed
-`@earendil-works/pi-coding-agent` package in place through `import.meta.resolve`. The explicit
-CLI override remains first choice. Missing Pi produces an actionable install or `--agent-cli`
-error. Docker sandbox behavior remains unchanged because its Pi runtime is baked into the
-image.
+`@earendil-works/pi-coding-agent` package in place through `import.meta.resolve`. It verifies
+the resolved entry and derived `dist/cli.js`; a missing or partial package produces actionable
+install or `--agent-cli` guidance. The explicit CLI override remains first choice and bypasses
+automatic resolution.
 
 The retired ring-fence previously copied or hardlinked the installed tree recursively into
 `<stateDir>/runtime`; on high-latency NFS that synchronous traversal could delay gateway port
 binding for minutes. Resolution now performs no probe, traversal, creation, update, or cleanup
-under `<stateDir>/runtime`. Existing snapshots and partial `.tmp-*` trees are ignored and left
-untouched. They may be deleted manually to reclaim space, but only while Bobbit is fully
-stopped.
+under `<stateDir>/runtime`, including on failure. Existing snapshots and partial `.tmp-*` trees
+are ignored and left untouched. They may be deleted manually to reclaim space, but only while
+Bobbit, its harness/watchdog, and the development stack are fully stopped.
+
+### Scope boundaries
+
+Docker sandbox behavior is unchanged: its Pi runtime remains baked into the image. Support
+Assistant offline grounding is also independent of the retired runtime tree: the `package.json`
+`files` allowlist, `src/server/agent/bundled-paths.ts`, prompt path substitution, and
+`tests2/core/support-packaging.test.ts` remain unchanged. The chaos junction-safety
+implementation and `tests2/core/chaos-worktree-safety.test.ts` address the separate mechanism
+preserved in §13 and must not be weakened.
 
 ---
 
@@ -335,13 +370,21 @@ run real npm, access the network, or mutate the repository's installed dependenc
 
 Coverage verifies:
 
-- automatic direct-host resolution uses the installed Pi entry and never accesses a sentinel
-  legacy `<stateDir>/runtime` tree;
-- an explicit CLI override takes precedence and missing Pi produces actionable guidance;
+- automatic direct-host resolution uses the installed Pi entry, rejects an unavailable entry
+  or derived CLI as a partial install, and never accesses a sentinel legacy
+  `<stateDir>/runtime` tree;
+- an explicit CLI override takes precedence and missing/partial Pi failures produce actionable
+  guidance;
+- `dev:harness`, `dev:nord`, and `dev:watchdog` place read-only validation before their initial
+  build and contain no package-manager repair step;
 - validation checks production and development dependency manifests, ignores optional
   dependencies, rejects invalid root manifests, and performs no writes or subprocess calls;
-- unhealthy initial boot, sentinel restart, and crash relaunch do not build or launch; and
-- the still-running harness can validate and proceed after a later manual repair and retry.
+- unhealthy initial boot, sentinel restart, and crash relaunch do not build or launch, while a
+  later sentinel retry can validate, build, and launch on the same harness;
+- watchdog recovery preserves a live harness when validation fails, keeps a dead harness down
+  while rechecking, and launches only after the fixture is manually repaired; and
+- the unchanged Support Assistant packaging and chaos junction-safety tests continue to pin
+  their independent behavior.
 
 ---
 

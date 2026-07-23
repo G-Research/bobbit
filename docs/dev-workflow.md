@@ -33,18 +33,37 @@ UI changes (`src/ui/`, `src/app/`) hot-reload instantly in the browser. Server c
 
 ### Dev with harness (recommended)
 
+Bobbit provides three harness-backed development commands:
+
 ```bash
-npm run dev:harness
+npm run dev:harness   # restart harness + Vite
+npm run dev:nord      # restart harness + Vite on NordLynx
+npm run dev:watchdog  # external watchdog + restart harness + Vite
 ```
 
-Same two-process setup, but the gateway is wrapped in a **restart harness** (`src/server/harness.ts`). The harness:
+All three command wrappers run the same read-only dependency validator **before** their
+initial `build:server` step. A failure exits non-zero and stops the command chain before any
+build, harness/watchdog, Vite, NordLynx setup, or gateway launch. A healthy wrapper proceeds
+to the build and selected launcher; the harness then applies the same validation policy at
+its own lifecycle boundaries.
+
+The harness (`src/server/harness.ts`):
 
 - Watches a sentinel file at `.bobbit/state/gateway-restart`.
-- Validates installed dependencies before initial build/launch, sentinel-triggered rebuild/launch, and automatic crash relaunch. Validation only reads package manifests; it never runs a package manager or repairs `node_modules`.
-- On a healthy sentinel restart: kills the server, waits for the port to free, validates dependencies, runs `npm run build:server`, and relaunches.
-- On a healthy unexpected-crash relaunch: validates dependencies and relaunches without rebuilding, preserving the existing crash-relaunch policy.
-- On initial validation failure: reports the missing dependencies or invalid root manifest, gives manual recovery instructions, and exits non-zero before build or launch.
-- On restart/relaunch validation failure: reports the same diagnostics, skips build and launch, and keeps the harness available for a later operator-triggered retry.
+- Checks the root manifest and the installed package-manifest presence for declared
+  `dependencies` and `devDependencies`; `optionalDependencies` remain optional. The validator
+  performs no writes, repairs, or package-manager subprocesses.
+- On a healthy sentinel restart: kills the gateway, waits for the port to free, validates,
+  rebuilds, and relaunches.
+- On a healthy unexpected gateway crash: validates and relaunches without rebuilding,
+  preserving the existing crash-relaunch policy.
+- On initial validation failure: reports the missing dependencies or invalid root manifest,
+  gives manual recovery instructions, and exits non-zero before build or launch.
+- On sentinel or crash-relaunch validation failure: reports the same diagnostics, performs no
+  build or launch, and leaves the harness and sentinel watcher alive. After repair, a later
+  `npm run restart-server` revalidates before rebuilding and launching.
+- On a sentinel build failure: does not launch stale output; the watcher remains available for
+  another restart after the build is fixed.
 - Preserves sessions across restarts in `.bobbit/state/sessions.json`.
 
 To trigger a restart:
@@ -56,6 +75,22 @@ npm run restart-server
 This touches the sentinel file. The harness picks it up within ~500ms (polled on Windows, `fs.watch` elsewhere) and begins the restart cycle.
 
 When the gateway was launched by this harness, the Settings page also shows a top-right **Restart Server** button. The button is hidden in production and in `npm run dev` because those modes do not set `BOBBIT_DEV_HARNESS=1` and cannot be restarted safely by the harness. Clicking it calls `POST /api/harness/restart`, which is server-gated and touches the same `.bobbit/state/gateway-restart` sentinel as `npm run restart-server`.
+
+`dev:watchdog` adds recovery around the harness without bypassing validation:
+
+- Before replacing a still-running harness after repeated gateway health failures, the
+  watchdog validates dependencies. Invalid dependencies leave that harness and its sentinel
+  watcher untouched; no replacement harness, build, or gateway is started.
+- If the harness process has already died, the watchdog remains alive and periodically
+  revalidates. It launches no replacement while validation fails, then starts one after manual
+  repair; the new harness performs its own validation/build/launch policy.
+- A live harness with a stopped gateway can still recover through a sentinel restart. After
+  repair, another health-failure threshold can also revalidate successfully and permit a
+  harness replacement.
+
+These keep-alive paths prevent a damaged installation from triggering a stale launch. The
+standard repair procedure still requires stopping Bobbit and the full development stack
+before changing `node_modules`.
 
 ---
 
@@ -102,24 +137,30 @@ packages missing.
 
 **Why it bricks direct spawns**: automatic direct host-side agent and verification
 spawns resolve Bobbit's installed `@earendil-works/pi-coding-agent` package in place
-using Node's normal package-resolution semantics. If that installation is half-wiped,
-direct spawns fail with guidance to install the package or supply an explicit
-`--agent-cli` path. Docker spawns are not exposed because the sandbox image contains
-its own Pi runtime and does not bind-mount host `node_modules` for it.
+using Node's normal package-resolution semantics. Resolution verifies both the resolved
+package entry and its derived `dist/cli.js`, so a missing **or partial** installation fails
+with guidance to install the package or supply an explicit `--agent-cli` path. An explicit
+CLI override remains first choice. Docker spawns are not exposed because the sandbox image
+contains its own Pi runtime and does not bind-mount host `node_modules` for it.
 
 **Current policy**: the runtime ring-fence and automatic dependency healing are
-retired on every platform. The harness performs read-only validation of declared
-`dependencies` and `devDependencies` by checking their installed package manifests;
-`optionalDependencies` remain optional. An unreadable, malformed, or structurally
-invalid root `package.json` also fails validation. The harness never runs `npm install`
-or another package manager. Invalid dependencies prevent build and gateway launch;
-a failed restart or crash relaunch leaves the harness available so the operator can
-repair the installation and trigger another restart.
+retired on every platform. The `dev:harness`, `dev:nord`, and `dev:watchdog` wrappers
+validate before their initial build, and harness sentinel/crash paths revalidate before
+any applicable build or launch. Validation checks declared `dependencies` and
+`devDependencies` by installed package-manifest presence; `optionalDependencies` remain
+optional. An unreadable, malformed, or structurally invalid root `package.json` also fails.
+No validation or lifecycle path runs `npm install` or another package manager. Invalid
+dependencies therefore never trigger a build or gateway launch.
 
-Direct host Pi resolution never probes or modifies `<stateDir>/runtime`. Legacy
-snapshots and partial trees there are ignored and left untouched. They may be removed
-manually to reclaim space, but only while Bobbit and the development harness are fully
+Direct host Pi resolution never probes or modifies `<stateDir>/runtime`, including as a
+fallback for missing or partial installed Pi packages. Legacy snapshots and partial `.tmp-*`
+trees there are ignored and left untouched. They may be removed manually to reclaim space,
+but only while Bobbit, the harness/watchdog, and the rest of the development stack are fully
 stopped.
+
+This retirement does not change Docker's baked-in Pi runtime or Support Assistant offline
+grounding. Support packaging, bundled documentation/source path resolution, and prompt path
+substitution are independent of `<stateDir>/runtime`.
 
 **Avoid**: never run `npm ci`, `npm install --force`, or `npm audit fix --force`
 while the dev stack (`npm run dev:harness` / vite) is up. Stop it first, run the
@@ -167,7 +208,10 @@ After `npm run restart-server`, watch for the harness output:
 [harness] Launching server (port 3001)...
 ```
 
-If the build fails, the harness logs the error and attempts to launch the old build anyway. Fix the compilation error and run `npm run restart-server` again.
+If validation or the build fails, the harness logs the error and does **not** launch the old
+build. For a validation failure, follow the stopped-stack manual repair procedure above and
+restart the development command. For a compilation failure, fix the code and run
+`npm run restart-server` again; the live watcher retries the build before launching.
 
 ### Type-checking without restarting
 
