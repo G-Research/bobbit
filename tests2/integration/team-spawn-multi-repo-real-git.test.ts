@@ -118,6 +118,10 @@ test("direct and REST team spawn create coordinated workers from local component
 	let directWorkerId: string | undefined;
 	let restWorkerId: string | undefined;
 	let originalExecFile: CommandRunner["execFile"] | undefined;
+	let originalCreateSession: any;
+	let originalUpdateSessionMeta: any;
+	let originalSessionStorePut: any;
+	let interceptedSessionStore: any;
 
 	try {
 		for (const repo of COMPONENTS) copyGitTemplate(join(projectRoot, repo));
@@ -257,8 +261,153 @@ test("direct and REST team spawn create coordinated workers from local component
 			).toBe(goalHeads[repo]);
 		}
 
+		// A later session-creation failure owns only resources created by that
+		// attempt. Attach the nested component to a branch that already existed,
+		// let beta create the same branch freshly, then fail after both real Git
+		// worktrees exist. Cleanup must remove both attachments while preserving
+		// the pre-existing nested-component branch and never deleting remotely.
+		originalExecFile = runner.execFile;
+		originalCreateSession = (gateway.sessionManager as any).createSession;
+		let preExistingBranch: string | undefined;
+		let failedSessionContainer: string | undefined;
+		const attachedWorktrees: Partial<Record<ComponentName, string>> = {};
+		const localBranchDeleteCalls: Array<{ cwd: string; branch: string }> = [];
+		const remoteBranchDeleteCalls: Array<{ cwd: string; args: string[] }> = [];
+		(runner as any).execFile = async (file: string, args: string[], options: any) => {
+			const gitCommand = file.toLowerCase().replace(/\.exe$/, "") === "git";
+			const cwd = String(options?.cwd ?? "");
+			const candidateBranch = args[0] === "rev-parse" && args[1] === "--verify"
+				? String(args[2] ?? "")
+				: "";
+			if (
+				gitCommand
+				&& !preExistingBranch
+				&& candidateBranch.startsWith(`goal/${goalId!.slice(0, 8)}/coder-`)
+				&& normalized(cwd) === normalized(join(projectRoot, NESTED_COMPONENT))
+			) {
+				preExistingBranch = candidateBranch;
+				await originalExecFile!.call(runner, "git", ["branch", preExistingBranch, goalHeads[NESTED_COMPONENT]], {
+					cwd,
+					encoding: "utf-8",
+					timeout: 10_000,
+				});
+			}
+
+			if (gitCommand && args[0] === "worktree" && args[1] === "add") {
+				const branchIndex = args.indexOf("-b");
+				const branch = String(branchIndex >= 0 ? args[branchIndex + 1] : args[3]);
+				const target = String(branchIndex >= 0 ? args[branchIndex + 2] : args[2]);
+				if (branch === preExistingBranch) {
+					if (normalized(cwd) === normalized(join(projectRoot, NESTED_COMPONENT))) {
+						attachedWorktrees[NESTED_COMPONENT] = target;
+						failedSessionContainer = resolve(
+							target,
+							...NESTED_COMPONENT.split("/").map(() => ".."),
+						);
+					}
+					if (normalized(cwd) === normalized(join(projectRoot, FAILED_COMPONENT))) {
+						attachedWorktrees[FAILED_COMPONENT] = target;
+					}
+				}
+			}
+			if (gitCommand && args[0] === "branch" && args[1] === "-D") {
+				localBranchDeleteCalls.push({ cwd, branch: String(args[2]) });
+			}
+			if (gitCommand && args[0] === "push" && args.includes("--delete")) {
+				remoteBranchDeleteCalls.push({ cwd, args: [...args] });
+			}
+			return originalExecFile!.call(runner, file, args, options);
+		};
+		(gateway.sessionManager as any).createSession = async (...args: any[]) => {
+			const opts = args[4];
+			if (args[2] === goalId && opts?.roleName === "coder") {
+				throw new Error("injected worker session creation failure");
+			}
+			return originalCreateSession.apply(gateway.sessionManager, args);
+		};
+
+		let sessionCreationFailure: unknown;
+		try {
+			await gateway.teamManager.spawnRole(goalId!, "coder", "Preserve a pre-existing branch on later failure");
+		} catch (error) {
+			sessionCreationFailure = error;
+		} finally {
+			(runner as any).execFile = originalExecFile;
+			originalExecFile = undefined;
+			(gateway.sessionManager as any).createSession = originalCreateSession;
+			originalCreateSession = undefined;
+		}
+		expect(sessionCreationFailure).toBeInstanceOf(Error);
+		expect((sessionCreationFailure as Error).message).toContain("injected worker session creation failure");
+		expect(preExistingBranch, "fixture must create the worker branch before its nested-component attach").toBeTruthy();
+		for (const repo of COMPONENTS) {
+			expect(attachedWorktrees[repo], `${repo} worker attachment must exist before session creation fails`).toBeTruthy();
+			expect(existsSync(attachedWorktrees[repo]!), `${repo} newly attached worktree must be cleaned`).toBe(false);
+		}
+		expect(existsSync(dirname(attachedWorktrees[NESTED_COMPONENT]!)), "nested repo-key directory must be cleaned after session failure").toBe(false);
+		expect(failedSessionContainer && existsSync(failedSessionContainer), "branch container must be cleaned after session failure").toBe(false);
+		let preservedBranchHead: string | undefined;
+		try {
+			preservedBranchHead = await git(runner, join(projectRoot, NESTED_COMPONENT), ["rev-parse", preExistingBranch!]);
+		} catch { /* assertion below owns the missing-ref failure */ }
+		expect.soft(
+			preservedBranchHead,
+			"cleanup must preserve the exact pre-existing local branch",
+		).toBe(goalHeads[NESTED_COMPONENT]);
+		expect.soft(
+			localBranchDeleteCalls.some(call => normalized(call.cwd) === normalized(join(projectRoot, NESTED_COMPONENT)) && call.branch === preExistingBranch),
+			"cleanup must not ask Git to delete the pre-existing component branch",
+		).toBe(false);
+		expect(
+			await gitRefExists(runner, join(projectRoot, FAILED_COMPONENT), `refs/heads/${preExistingBranch}`),
+			"cleanup must still delete the beta branch created by this failed attempt",
+		).toBe(false);
+		expect(remoteBranchDeleteCalls, "failed local provisioning/session creation must never delete a remote branch").toEqual([]);
+
 		// Direct production call: this is the primary host-side regression boundary.
-		const directResult = await gateway.teamManager.spawnRole(goalId!, "coder", "Direct coordinated spawn");
+		// Observe the project SessionStore boundary so the first durable worker
+		// record can be distinguished from TeamManager's later metadata update.
+		const sessionWriteEvents: Array<{ kind: "put" | "update"; id: string; value: any }> = [];
+		interceptedSessionStore = gateway.projectContextManager.getContextForGoal(goalId!)!.sessionStore;
+		originalSessionStorePut = interceptedSessionStore.put;
+		originalUpdateSessionMeta = (gateway.sessionManager as any).updateSessionMeta;
+		interceptedSessionStore.put = (persisted: any) => {
+			if (persisted.goalId === goalId && persisted.role === "coder") {
+				sessionWriteEvents.push({
+					kind: "put",
+					id: persisted.id,
+					value: {
+						...persisted,
+						repoWorktrees: persisted.repoWorktrees ? { ...persisted.repoWorktrees } : undefined,
+					},
+				});
+			}
+			return originalSessionStorePut.call(interceptedSessionStore, persisted);
+		};
+		(gateway.sessionManager as any).updateSessionMeta = (id: string, updates: any) => {
+			if (updates?.role === "coder" && updates?.teamGoalId === goalId) {
+				sessionWriteEvents.push({
+					kind: "update",
+					id,
+					value: {
+						...updates,
+						repoWorktrees: updates.repoWorktrees ? { ...updates.repoWorktrees } : undefined,
+					},
+				});
+			}
+			return originalUpdateSessionMeta.call(gateway.sessionManager, id, updates);
+		};
+
+		let directResult: Awaited<ReturnType<typeof gateway.teamManager.spawnRole>>;
+		try {
+			directResult = await gateway.teamManager.spawnRole(goalId!, "coder", "Direct coordinated spawn");
+		} finally {
+			interceptedSessionStore.put = originalSessionStorePut;
+			originalSessionStorePut = undefined;
+			(gateway.sessionManager as any).updateSessionMeta = originalUpdateSessionMeta;
+			originalUpdateSessionMeta = undefined;
+			interceptedSessionStore = undefined;
+		}
 		directWorkerId = directResult.sessionId;
 		expect(directResult.worktreePath).toBeTruthy();
 		const directPaths = assertWorkerShape({
@@ -271,7 +420,17 @@ test("direct and REST team spawn create coordinated workers from local component
 			worktreePath: directResult.worktreePath!,
 		});
 		const directBranch = gateway.teamManager.findAgentBySessionId(directWorkerId!)!.branch!;
+		const firstDurableWriteIndex = sessionWriteEvents.findIndex(event => event.kind === "put" && event.id === directWorkerId);
+		const laterTeamMetaIndex = sessionWriteEvents.findIndex(event => event.kind === "update" && event.id === directWorkerId);
+		expect(firstDurableWriteIndex, "createSession must make a durable worker write").toBeGreaterThanOrEqual(0);
+		expect(laterTeamMetaIndex, "TeamManager must retain its later worker metadata update").toBeGreaterThan(firstDurableWriteIndex);
+		const firstDurableWorker = firstDurableWriteIndex >= 0 ? sessionWriteEvents[firstDurableWriteIndex].value : {};
+		expect.soft(firstDurableWorker.worktreePath, "first durable write must already own the branch container").toBe(directResult.worktreePath!);
+		expect.soft(firstDurableWorker.repoPath, "first durable write must already own the non-Git repo container").toBe(projectRoot);
+		expect.soft(firstDurableWorker.branch, "first durable write must already own the worker branch").toBe(directBranch);
+		expect.soft(Object.keys(firstDurableWorker.repoWorktrees ?? {}).sort(), "first durable write must already own both component cleanup paths").toEqual([...COMPONENTS].sort());
 		for (const repo of COMPONENTS) {
+			expect.soft(firstDurableWorker.repoWorktrees?.[repo], `${repo} cleanup coordinate must exist in the first durable write`).toBe(directPaths[repo]);
 			expect(await git(runner, directPaths[repo], ["rev-parse", "HEAD"]), `${repo} must start at its exact local goal HEAD`).toBe(goalHeads[repo]);
 			expect(await git(runner, directPaths[repo], ["branch", "--show-current"]), `${repo} must use the common worker branch`).toBe(directBranch);
 		}
@@ -318,6 +477,9 @@ test("direct and REST team spawn create coordinated workers from local component
 		});
 	} finally {
 		if (originalExecFile) (runner as any).execFile = originalExecFile;
+		if (originalCreateSession) (gateway.sessionManager as any).createSession = originalCreateSession;
+		if (originalUpdateSessionMeta) (gateway.sessionManager as any).updateSessionMeta = originalUpdateSessionMeta;
+		if (originalSessionStorePut && interceptedSessionStore) interceptedSessionStore.put = originalSessionStorePut;
 		for (const workerId of [directWorkerId, restWorkerId]) {
 			if (!workerId || !goalId) continue;
 			await gateway.teamManager.dismissRoleForGoal(goalId, workerId).catch(() => undefined);
