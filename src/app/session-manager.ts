@@ -2421,6 +2421,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// including for a now-cached session, before stale-invocation teardown.
 		await remote.reconcileSubmittedReviewWorkspace();
 		if (isStale()) { cleanupRemote(remote); return; }
+		// The earlier restore runs before hydration so it cannot see cold-loaded
+		// review tabs. Restore again only after submitted tabs have been removed;
+		// unsubmitted persisted documents now have authoritative tabs to bind to.
+		reviewSources.restorePersistedReviewDocuments(sessionId, { select: true });
 
 		// Listen for suggest-goal events from assistant messages
 		state.chatPanel.addEventListener('suggest-goal', () => {
