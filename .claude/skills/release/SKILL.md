@@ -1,13 +1,15 @@
 ---
 name: release
-description: Cut a Bobbit release — preflight checks, version bump, signed tag, npm publish (with optional binary sub-packages), GitHub release with generated notes.
+description: Cut a Bobbit release — preflight checks, version bump, signed tag (CI publishes the root to npm via OIDC on tag push), optional binary sub-packages, GitHub release with generated notes.
 argument-hint: [major|minor|patch|<explicit-version>]
 ---
 
 Drive an end-to-end release of Bobbit. The maintainer (human) must be at the
-keyboard for `npm login` / OTP prompts and to sign the tag — pause and ask
-when the flow needs them. **Never** run `npm publish` non-interactively or
-behind their back.
+keyboard to sign the tag, and for `npm login` / OTP prompts **only when
+republishing binary sub-packages** — pause and ask when the flow needs them.
+The root `bobbit` package publishes automatically via CI (npm trusted
+publishing / OIDC) when the signed tag is pushed; **never** run a manual root
+`npm publish`.
 
 Single source of truth for release mechanics: [`docs/releasing.md`](../../../docs/releasing.md).
 This skill orchestrates that doc + version bump + notes + GitHub release.
@@ -37,8 +39,8 @@ git rev-parse origin/master              # sha we'll release from
 git tag --sort=-v:refname | head -5      # find previous tag
 git log --oneline <prev-tag>..origin/master | head    # must be non-empty (something to release)
 node -v                                  # must satisfy engines.node (>=22.19.0)
-npm whoami                               # must succeed; if not -> ask user to `npm login`
-gh auth status                           # must be authed for SuuBro/bobbit
+npm whoami                               # only needed if republishing binary sub-packages (§3); root ships via CI
+gh auth status                           # must be authed for G-Research/bobbit
 git config --get user.signingkey || echo "NO_SIGNING_KEY"
 git config --get commit.gpgsign || echo "commit.gpgsign=unset"
 ```
@@ -50,7 +52,7 @@ so the session/primary worktree state is irrelevant. What matters is that
 
 **Stop and ask the user** if any of:
 - `origin/master` has nothing new since the previous tag (nothing to release), or it isn't the commit they expect to ship.
-- `npm whoami` fails — ask them to run `npm login` (and enable 2FA if not already; npm requires OTP for publishes on this scope).
+- `npm whoami` fails **and** step 3 will republish binary sub-packages — ask them to run `npm login` (and enable 2FA if not already; npm requires OTP for those sub-package publishes). The root `bobbit` publish needs no npm login — it goes through CI/OIDC.
 - `gh auth status` not logged in — ask them to run `gh auth login`.
 - No GPG/SSH signing key configured — confirm whether to proceed with **unsigned** tag or wait until they set one up. Default to waiting.
 
@@ -202,15 +204,19 @@ the last irreversible step before the source and tag become public. Do not
 create the tag before the squash merge because the pre-merge commit will not
 be the commit that lands on `master`.
 
-## 7. Publish to npm
+## 7. Publish binary sub-packages (only if step 3 bumped binaries)
 
-Only enter this step after the release PR is fully green and mergeable.
-**Pause and confirm with the user** before publishing — npm publishes are
-irreversible (you can `unpublish` for 72h but the version number is burned
-either way). Use `ask_user_choices` with the exact `npm publish` commands
-about to run.
+**The root `bobbit` package is NOT published here.** It publishes automatically
+via the `.github/workflows/release-publish.yml` workflow (npm trusted publishing
+/ OIDC, with provenance) when the signed tag is pushed in §8 — there is no manual
+root `npm publish`. Skip straight to §8 unless step 3 bumped the binary
+sub-packages.
 
-If step 3 bumped binaries:
+If step 3 bumped binaries, publish the sub-packages now — **before** the tag push
+in §8, so they are on npm before the root that pins them. **Pause and confirm with
+the user** first; npm publishes are irreversible (you can `unpublish` for 72h but
+the version number is burned either way). Use `ask_user_choices` with the exact
+commands:
 
 ```bash
 npm publish ./binaries/binaries-darwin-arm64
@@ -220,21 +226,14 @@ npm publish ./binaries/binaries-linux-arm64
 npm publish ./binaries/binaries-win32-x64
 ```
 
-Then the root:
-
-```bash
-npm publish --provenance
-```
-
 Notes:
-- `--provenance` attaches a signed npm provenance attestation (sigstore) so users can verify the package came from this repo. Requires the maintainer to be running npm ≥9.5 from a machine where the npm CLI can reach Sigstore. If the env doesn't support it (rare; older corp networks), drop the flag and tell the user the publish is unattested.
 - `publishConfig.access: "public"` is baked into each sub-package, so `--access public` is not needed.
 - npm will prompt for OTP — that's the maintainer's job; just wait.
 - If publish fails after some sub-packages went through, **do not** try to bump+republish under a new version. Re-run `npm publish` on the remaining packages with the same version once the issue is fixed.
 
-## 8. Squash-merge the release PR, then tag it
+## 8. Squash-merge the release PR, then tag it (this triggers the npm publish)
 
-Immediately after npm succeeds, squash-merge the already-green release PR.
+Once the release PR is fully green and mergeable, squash-merge it.
 Pin the subject and co-author trailer explicitly:
 
 ```bash
@@ -252,20 +251,32 @@ git diff --exit-code HEAD "$MERGE_SHA" -- \
 ```
 
 Tag the PR's exact squash commit, not the current `origin/master` tip (another
-PR may have merged immediately afterward):
+PR may have merged immediately afterward). **Pushing the tag triggers the root
+npm publish** (`.github/workflows/release-publish.yml`) and is irreversible —
+pause and confirm with the user before the `git push`:
 
 ```bash
 git tag -s v<new-version> "$MERGE_SHA" -m "Bobbit v<new-version>"
 git tag -v v<new-version>
-git push origin v<new-version>
+git push origin v<new-version>       # -> release-publish.yml publishes bobbit to npm (OIDC + provenance)
 ```
 
 If the user explicitly opted out of signing in step 0, use `git tag -a`
 instead and inspect it with `git show --no-patch v<new-version>`.
 
-If merging fails after npm publish, stop and repair the same release PR. Do
-not change the version, create a second release commit, force-push `master`,
-or tag the detached pre-merge commit.
+Then watch the publish workflow and confirm it succeeds before moving on:
+
+```bash
+gh run watch "$(gh run list --workflow release-publish.yml --branch v<new-version> --limit 1 --json databaseId -q '.[0].databaseId')" --exit-status
+```
+
+If the publish job fails (e.g. transient registry error), **re-run the same
+workflow run** for the same version — do not bump the version or re-tag; the
+tag is already public and the version number is immutable.
+
+If merging fails, stop and repair the same release PR. Do not change the
+version, create a second release commit, force-push `master`, or tag the
+detached pre-merge commit.
 
 **Refresh the running dev server** so it picks up the release commit (its
 local `master` is now behind remote):
@@ -319,8 +330,7 @@ the same checkout.
 
 Report to the user:
 - Version + tag + GitHub release URL (`gh release view v<new-version> --json url -q .url`)
-- npm package URL (`https://www.npmjs.com/package/bobbit/v/<new-version>`)
-- Whether provenance was attached
+- npm package URL (`https://www.npmjs.com/package/bobbit/v/<new-version>`) — provenance is attached automatically by CI
 - Whether binaries were republished, and which versions
 - Root and packed-consumer audit results (both must be clean)
 
@@ -328,9 +338,9 @@ Report to the user:
 
 - **Signed tag, always.** Use `git tag -s`. Only fall back to `-a` if the maintainer explicitly opted out in step 0.
 - **Signed commit if a signing key is configured.** Add `-S` to `git commit`. Never override `user.name` / `user.email`; never silently disable signing.
-- **`--provenance` on the root publish** whenever the environment supports it.
-- **OTP is the human's job.** Pause and let them type it; don't try to read it from anywhere.
-- **Never `npm publish --force`.** If a republish is genuinely needed, bump the patch version and republish cleanly.
+- **The root publish is CI-only.** It runs via `release-publish.yml` (OIDC trusted publishing) on the tag push, with provenance automatic. Never run a manual root `npm publish`.
+- **OTP is the human's job** — but only for the binary sub-package publishes. Pause and let them type it; don't try to read it from anywhere. The root publish uses no OTP.
+- **Never `npm publish --force`.** If a sub-package republish is genuinely needed, bump the patch version and republish cleanly. If the CI root publish fails, re-run the same workflow run for the same version.
 - **Never delete a tag that's been pushed.** If you tagged wrong, bump the version and tag again — published version numbers are immutable.
 - **Use the required squash-merge PR flow.** Never tag the detached release commit; tag the PR's exact `mergeCommit` SHA after verifying its package version and release files.
 - **One release at a time.** Don't start a second version bump while the previous tag/publish is in flight.

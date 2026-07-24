@@ -1,6 +1,6 @@
 # Releasing Bobbit
 
-This doc covers the Bobbit release checks that cannot be inferred from a normal development checkout: the installed consumer's security report and the bundled `fd`/`rg` binaries.
+This doc covers the Bobbit release checks that cannot be inferred from a normal development checkout: the installed consumer's security report and the bundled `fd`/`rg` binaries. The root `bobbit` package itself is published automatically by [`.github/workflows/release-publish.yml`](../.github/workflows/release-publish.yml) (npm trusted publishing / OIDC, with provenance) when a `v*` tag is pushed; only the binary sub-packages below are published manually.
 
 ## Required packed-consumer audit
 
@@ -82,17 +82,18 @@ changes.
    (the build script no longer auto-bumps these). Update the matching
    pin in the root `package.json` `optionalDependencies` block to the
    new version.
-7. Publish each sub-package, then the root:
+7. Publish each sub-package (the root is not published here — it ships via
+   CI on the tag push):
    ```bash
    npm publish ./binaries/binaries-darwin-arm64
    npm publish ./binaries/binaries-darwin-x64
    npm publish ./binaries/binaries-linux-x64
    npm publish ./binaries/binaries-linux-arm64
    npm publish ./binaries/binaries-win32-x64
-   npm publish
    ```
-   `publishConfig.access: "public"` is baked into each sub-package, so
-   `--access public` is no longer needed on the CLI.
+   Do this **before** pushing the release tag, so the sub-packages are on npm
+   before the root that pins them. `publishConfig.access: "public"` is baked
+   into each sub-package, so `--access public` is not needed on the CLI.
 
 ### Decoupled versioning
 
