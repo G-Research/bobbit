@@ -22,6 +22,7 @@ import {
 	uncacheSession,
 } from "../../src/app/session-manager.js";
 import { RemoteAgent } from "../../src/app/remote-agent.js";
+import type { SidePanelWorkspace } from "../../src/app/side-panel-workspace.js";
 import {
 	GW_SESSION_KEY,
 	GW_TOKEN_KEY,
@@ -60,9 +61,22 @@ interface DeferredGate {
 	settled: boolean;
 }
 
+interface WorkspaceDeleteAttempt {
+	tabId: string;
+	baseRevision?: number;
+}
+
+type WorkspaceDeleteOutcome =
+	| { kind: "confirmed-204" }
+	| { kind: "conflict-409"; current: SidePanelWorkspace }
+	| { kind: "network-error"; message: string };
+
 const timeline: TimelineEntry[] = [];
 const workspaceGates = new Map<string, DeferredGate>();
 const workspaceFetchCount = new Map<string, number>();
+const authoritativeWorkspaces = new Map<string, SidePanelWorkspace>();
+const workspaceDeleteOutcomes = new Map<string, WorkspaceDeleteOutcome[]>();
+const workspaceDeleteAttempts = new Map<string, WorkspaceDeleteAttempt[]>();
 const transcripts = new Map<string, any[]>();
 let sessionListGate: DeferredGate | null = null;
 let sessionListFetchCount = 0;
@@ -113,7 +127,7 @@ function transcriptFor(sessionId: string): any[] {
 	}));
 }
 
-function workspaceFor(sessionId: string) {
+function workspaceFor(sessionId: string): SidePanelWorkspace {
 	const stamp = sessionId === SESSION_A ? 10 : 20;
 	return {
 		version: 1,
@@ -160,6 +174,55 @@ function workspaceFor(sessionId: string) {
 	};
 }
 
+function cloneWorkspace(workspace: SidePanelWorkspace): SidePanelWorkspace {
+	return JSON.parse(JSON.stringify(workspace)) as SidePanelWorkspace;
+}
+
+function authoritativeWorkspace(sessionId: string): SidePanelWorkspace {
+	let workspace = authoritativeWorkspaces.get(sessionId);
+	if (!workspace) {
+		workspace = workspaceFor(sessionId);
+		authoritativeWorkspaces.set(sessionId, workspace);
+	}
+	return workspace;
+}
+
+function conflictWorkspace(sessionId: string, revision: number, marker: string): SidePanelWorkspace {
+	const workspace = workspaceFor(sessionId);
+	const reviewId = `review:${sessionId}-review`;
+	return {
+		...workspace,
+		revision,
+		tabs: workspace.tabs.map((tab) => tab.kind === "review"
+			? { ...tab, title: `${sessionId} review ${marker}`, label: `Review ${marker}`, updatedAt: revision }
+			: { ...tab, title: `${tab.title} ${marker}`, updatedAt: revision }),
+		activeTabId: reviewId,
+		sizeMode: "split",
+		updatedAt: revision,
+	};
+}
+
+function requestBaseRevision(input: RequestInfo | URL, init: RequestInit | undefined, url: URL): number | undefined {
+	const headers = new Headers(input instanceof Request ? input.headers : undefined);
+	new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
+	const ifMatch = headers.get("if-match")?.trim().replace(/^W\//, "").replace(/^"|"$/g, "");
+	if (ifMatch) {
+		const parsed = Number(ifMatch);
+		if (Number.isInteger(parsed) && parsed >= 0) return parsed;
+	}
+	const queryRevision = Number(url.searchParams.get("baseRevision"));
+	if (url.searchParams.has("baseRevision") && Number.isInteger(queryRevision) && queryRevision >= 0) return queryRevision;
+	if (typeof init?.body === "string") {
+		try {
+			const parsed = JSON.parse(init.body) as { baseRevision?: unknown };
+			if (typeof parsed.baseRevision === "number" && Number.isInteger(parsed.baseRevision) && parsed.baseRevision >= 0) {
+				return parsed.baseRevision;
+			}
+		} catch { /* no JSON revision */ }
+	}
+	return undefined;
+}
+
 function sessionIdFromPath(path: string): string | undefined {
 	return /^\/api\/sessions\/([^/?]+)/.exec(path)?.[1];
 }
@@ -171,10 +234,44 @@ async function fetchFixture(input: RequestInfo | URL, init?: RequestInit): Promi
 	const sessionId = sessionIdFromPath(url.pathname);
 	timeline.push({ kind: "rest", path: `${url.pathname}${url.search}`, method, ...(sessionId ? { sessionId } : {}) });
 
+	const deleteTabMatch = url.pathname.match(/\/side-panel-workspace\/tabs\/([^/]+)$/);
+	if (deleteTabMatch && sessionId && method === "DELETE") {
+		const attempt: WorkspaceDeleteAttempt = {
+			tabId: decodeURIComponent(deleteTabMatch[1]),
+			baseRevision: requestBaseRevision(input, init, url),
+		};
+		const attempts = workspaceDeleteAttempts.get(sessionId) || [];
+		attempts.push(attempt);
+		workspaceDeleteAttempts.set(sessionId, attempts);
+		const outcomes = workspaceDeleteOutcomes.get(sessionId) || [];
+		const outcome = outcomes.shift() || { kind: "confirmed-204" as const };
+		if (outcome.kind === "network-error") throw new TypeError(outcome.message);
+		if (outcome.kind === "conflict-409") {
+			authoritativeWorkspaces.set(sessionId, cloneWorkspace(outcome.current));
+			return Response.json({
+				error: "Stale side-panel workspace revision",
+				code: "STALE_REVISION",
+				workspace: cloneWorkspace(outcome.current),
+			}, { status: 409 });
+		}
+		const current = authoritativeWorkspace(sessionId);
+		const tabs = current.tabs.filter((tab) => tab.id !== attempt.tabId);
+		const activeTabId = tabs.some((tab) => tab.id === current.activeTabId)
+			? current.activeTabId
+			: tabs[0]?.id || "";
+		authoritativeWorkspaces.set(sessionId, {
+			...current,
+			revision: current.revision + 1,
+			tabs,
+			activeTabId,
+			updatedAt: current.updatedAt + 1,
+		});
+		return new Response(null, { status: 204 });
+	}
 	if (url.pathname.endsWith("/side-panel-workspace") && sessionId) {
 		workspaceFetchCount.set(sessionId, (workspaceFetchCount.get(sessionId) || 0) + 1);
 		await gateFor(sessionId).promise;
-		return Response.json(workspaceFor(sessionId));
+		return Response.json(cloneWorkspace(authoritativeWorkspace(sessionId)));
 	}
 	if (url.pathname.endsWith("/draft") && method === "GET") return new Response(null, { status: 204 });
 	if (url.pathname.endsWith("/git-status")) {
@@ -344,18 +441,60 @@ function finalTranscriptRow(sessionId: string): HTMLElement | null {
 	);
 }
 
+function workspaceMirrorShape(workspace: SidePanelWorkspace | undefined) {
+	if (!workspace) return undefined;
+	return {
+		sessionId: workspace.sessionId,
+		revision: workspace.revision,
+		tabs: workspace.tabs.map((tab) => ({ id: tab.id, kind: tab.kind, title: tab.title, label: tab.label })),
+		activeTabId: workspace.activeTabId,
+		sizeMode: workspace.sizeMode,
+	};
+}
+
+function expectServerConsistentWorkspaceMirrors(sessionId: string, failureToken: string): void {
+	const authoritative = authoritativeWorkspace(sessionId);
+	const expectedShape = workspaceMirrorShape(authoritative);
+	expect.soft(
+		workspaceMirrorShape(state.sidePanelWorkspaceBySession[sessionId]),
+		`${failureToken}: keyed workspace diverged from the authoritative server workspace`,
+	).toEqual(expectedShape);
+	expect.soft(
+		workspaceMirrorShape((state as any).panelWorkspace as SidePanelWorkspace | undefined),
+		`${failureToken}: foreground panelWorkspace diverged from the authoritative server workspace`,
+	).toEqual(expectedShape);
+	expect.soft(
+		state.lastWorkspaceRevisionBySession[sessionId],
+		`${failureToken}: tracked revision diverged from the authoritative server revision`,
+	).toBe(authoritative.revision);
+	expect.soft(
+		state.panelTabs.map((tab) => ({ id: tab.id, kind: tab.kind, title: tab.title, label: tab.label })),
+		`${failureToken}: foreground panel tabs diverged from the authoritative server tabs`,
+	).toEqual(authoritative.tabs.map((tab) => ({ id: tab.id, kind: tab.kind, title: tab.title, label: tab.label })));
+	expect.soft(state.activePanelTabId, `${failureToken}: foreground active tab diverged from the server`).toBe(authoritative.activeTabId);
+	expect.soft(state.previewPanelFullscreen, `${failureToken}: foreground size mode diverged from the server`).toBe(
+		authoritative.sizeMode === "fullscreen",
+	);
+}
+
 beforeEach(() => {
 	(window as any).happyDOM?.setURL?.("http://localhost/#/");
 	setRenderApp(() => {});
 	timeline.length = 0;
 	workspaceGates.clear();
 	workspaceFetchCount.clear();
+	authoritativeWorkspaces.clear();
+	workspaceDeleteOutcomes.clear();
+	workspaceDeleteAttempts.clear();
 	sessionListGate = null;
 	sessionListFetchCount = 0;
 	sessionListResponseSessions = null;
 	ControlledWebSocket.instances.length = 0;
 	transcripts.clear();
-	for (const sessionId of trackedSessions) transcripts.set(sessionId, transcriptFor(sessionId));
+	for (const sessionId of trackedSessions) {
+		transcripts.set(sessionId, transcriptFor(sessionId));
+		authoritativeWorkspaces.set(sessionId, workspaceFor(sessionId));
+	}
 
 	vi.stubGlobal("WebSocket", ControlledWebSocket);
 	vi.stubGlobal("fetch", vi.fn(fetchFixture));
@@ -686,6 +825,95 @@ describe("cold session transcript/workspace ordering", () => {
 			await pendingConnect.catch(() => {});
 			await clearReviewSubmitted(SESSION_A);
 		}
+	});
+
+	it("reconciles a submitted review through one confirmed 204 delete with a coherent revision", async () => {
+		workspaceDeleteOutcomes.set(SESSION_A, [{ kind: "confirmed-204" }]);
+		await markReviewSubmitted(SESSION_A);
+		gateFor(SESSION_A).release();
+		await connectToSession(SESSION_A, true);
+
+		expect(
+			workspaceDeleteAttempts.get(SESSION_A),
+			"SUBMITTED_REVIEW_DELETE_204_RECONCILIATION_REGRESSION: cleanup must issue exactly one normal DELETE",
+		).toEqual([{ tabId: `review:${SESSION_A}-review`, baseRevision: undefined }]);
+		expect(
+			workspaceFetchCount.get(SESSION_A),
+			"SUBMITTED_REVIEW_DELETE_204_RECONCILIATION_REGRESSION: confirmed 204 must not trigger a stale workspace refetch",
+		).toBe(1);
+		expect(
+			authoritativeWorkspace(SESSION_A).revision,
+			"SUBMITTED_REVIEW_DELETE_204_RECONCILIATION_REGRESSION: fixture authority did not advance after confirmed delete",
+		).toBe(11);
+		expect(
+			authoritativeWorkspace(SESSION_A).tabs.some((tab) => tab.kind === "review"),
+			"SUBMITTED_REVIEW_DELETE_204_RECONCILIATION_REGRESSION: confirmed server delete retained the review",
+		).toBe(false);
+		expectServerConsistentWorkspaceMirrors(SESSION_A, "SUBMITTED_REVIEW_DELETE_204_RECONCILIATION_REGRESSION");
+		expect.soft(state.reviewDocuments.has(`${SESSION_A} review`)).toBe(false);
+		expect.soft(state.reviewPanelOpen).toBe(false);
+	});
+
+	it("bounds submitted-review conflict retry and preserves the newest 409 workspace", async () => {
+		const conflictAt11 = conflictWorkspace(SESSION_A, 11, "server-v11");
+		const conflictAt12 = conflictWorkspace(SESSION_A, 12, "server-v12");
+		workspaceDeleteOutcomes.set(SESSION_A, [
+			{ kind: "conflict-409", current: conflictAt11 },
+			{ kind: "conflict-409", current: conflictAt12 },
+		]);
+		await markReviewSubmitted(SESSION_A);
+		gateFor(SESSION_A).release();
+		await connectToSession(SESSION_A, true);
+
+		expect(
+			workspaceDeleteAttempts.get(SESSION_A),
+			"SUBMITTED_REVIEW_DELETE_409_AUTHORITY_REGRESSION: cleanup must retry once against the newer revision and then stop",
+		).toEqual([
+			{ tabId: `review:${SESSION_A}-review`, baseRevision: undefined },
+			{ tabId: `review:${SESSION_A}-review`, baseRevision: 11 },
+		]);
+		expect(
+			workspaceFetchCount.get(SESSION_A),
+			"SUBMITTED_REVIEW_DELETE_409_AUTHORITY_REGRESSION: 409 bodies already carry current workspace and must not refetch",
+		).toBe(1);
+		expect(
+			authoritativeWorkspace(SESSION_A).revision,
+			"SUBMITTED_REVIEW_DELETE_409_AUTHORITY_REGRESSION: second conflict did not become authoritative",
+		).toBe(12);
+		expect(
+			authoritativeWorkspace(SESSION_A).tabs.some((tab) => tab.kind === "review"),
+			"SUBMITTED_REVIEW_DELETE_409_AUTHORITY_REGRESSION: conflict authority fixture unexpectedly removed the review",
+		).toBe(true);
+		expectServerConsistentWorkspaceMirrors(SESSION_A, "SUBMITTED_REVIEW_DELETE_409_AUTHORITY_REGRESSION");
+		expect.soft(state.panelTabs.some((tab) => tab.kind === "review")).toBe(true);
+		expect.soft(state.reviewDocuments.has(`${SESSION_A} review`)).toBe(false);
+		expect.soft(state.reviewPanelOpen).toBe(false);
+	});
+
+	it("keeps an authoritative review after submitted-review delete network failure and refetch", async () => {
+		workspaceDeleteOutcomes.set(SESSION_A, [
+			{ kind: "network-error", message: "fixture submitted-review DELETE network failure" },
+		]);
+		await markReviewSubmitted(SESSION_A);
+		gateFor(SESSION_A).release();
+		await connectToSession(SESSION_A, true);
+
+		expect(
+			workspaceDeleteAttempts.get(SESSION_A),
+			"SUBMITTED_REVIEW_DELETE_NETWORK_ROLLBACK_REGRESSION: network failure must not cause blind delete retries",
+		).toEqual([{ tabId: `review:${SESSION_A}-review`, baseRevision: undefined }]);
+		expect(
+			workspaceFetchCount.get(SESSION_A),
+			"SUBMITTED_REVIEW_DELETE_NETWORK_ROLLBACK_REGRESSION: network failure must perform one authoritative refetch",
+		).toBe(2);
+		expect(
+			authoritativeWorkspace(SESSION_A).tabs.some((tab) => tab.kind === "review"),
+			"SUBMITTED_REVIEW_DELETE_NETWORK_ROLLBACK_REGRESSION: refetch fixture unexpectedly removed the review",
+		).toBe(true);
+		expectServerConsistentWorkspaceMirrors(SESSION_A, "SUBMITTED_REVIEW_DELETE_NETWORK_ROLLBACK_REGRESSION");
+		expect.soft(state.panelTabs.some((tab) => tab.kind === "review")).toBe(true);
+		expect.soft(state.reviewDocuments.has(`${SESSION_A} review`)).toBe(false);
+		expect.soft(state.reviewPanelOpen).toBe(false);
 	});
 
 	it("keeps the exact cached A agent and panel connected after A to B to A before A hydration releases", async () => {
