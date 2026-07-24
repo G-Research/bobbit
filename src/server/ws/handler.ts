@@ -326,6 +326,69 @@ export const MAX_AUTHENTICATED_PROMPT_TEXT_BYTES = 8 * 1024 * 1024;
 const SESSION_COMMAND_SERIALISER = new SessionCommandSerialiser();
 const EXTENSION_CHANNEL_WS_ENVELOPE_TOO_LARGE_MESSAGE = `Extension channel frame exceeds maximum envelope size (${MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES} bytes)`;
 
+type SessionMessageWrite = Extract<ClientMessage, {
+	type: "prompt" | "steer" | "steer_queued" | "remove_queued" | "reorder_queue";
+}>;
+
+function isSessionMessageWrite(msg: ClientMessage): msg is SessionMessageWrite {
+	return msg.type === "prompt"
+		|| msg.type === "steer"
+		|| msg.type === "steer_queued"
+		|| msg.type === "remove_queued"
+		|| msg.type === "reorder_queue";
+}
+
+/**
+ * Enforce persisted session interaction policy at the authenticated transport
+ * boundary. UI flags are presentation only: a crafted frame must not prompt a
+ * read-only reviewer or start/queue work for an automated reviewer. Persisted
+ * `true` wins over a stale live field; the live field closes the inverse window
+ * while a metadata update is being flushed.
+ */
+function rejectSessionMessageWrite(
+	ws: WebSocket,
+	msg: SessionMessageWrite,
+	session: { status: string; readOnly?: boolean; nonInteractive?: boolean },
+	persisted?: { readOnly?: boolean; nonInteractive?: boolean },
+): boolean {
+	if (session.readOnly === true || persisted?.readOnly === true) {
+		send(ws, {
+			type: "error",
+			message: "This session is read-only and does not accept prompts or queue changes.",
+			code: "SESSION_READ_ONLY",
+		});
+		return true;
+	}
+
+	if (session.nonInteractive !== true && persisted?.nonInteractive !== true) return false;
+	if (msg.type === "prompt") {
+		send(ws, {
+			type: "error",
+			message: "Cannot prompt a non-interactive (automated review) session.",
+			code: "NON_INTERACTIVE_PROMPT",
+		});
+		return true;
+	}
+	if (msg.type === "steer") {
+		// Automated reviewers intentionally remain redirectable during an active
+		// stream, but an idle/queued steer would start new reviewer work.
+		if (session.status === "streaming") return false;
+		send(ws, {
+			type: "error",
+			message: "Cannot enqueue a steered prompt for a non-interactive (automated review) session; steer can only redirect it while streaming.",
+			code: "NON_INTERACTIVE_STEER",
+		});
+		return true;
+	}
+
+	send(ws, {
+		type: "error",
+		message: "Cannot modify the prompt queue for a non-interactive (automated review) session.",
+		code: "NON_INTERACTIVE_QUEUE_CONTROL",
+	});
+	return true;
+}
+
 type ExtensionChannelClientMessageType = Extract<ClientMessage, { type: `ext_channel_${string}` }>['type'];
 
 const EXTENSION_CHANNEL_CLIENT_MESSAGE_TYPES: ReadonlySet<ExtensionChannelClientMessageType> = new Set([
@@ -706,7 +769,8 @@ export function handleWebSocketConnection(
 					send(ws, { type: "messages", data: stampSnapshotOrder([]) as unknown[] });
 					return;
 				case "prompt":
-					// Allow prompts — they'll be queued by enqueuePrompt since status != idle
+					// Allow ordinary prompts — they'll be queued by enqueuePrompt since status
+					// != idle. Session interaction policy is still enforced immediately below.
 					break;
 				case "ext_surface_token":
 					// Pack-bound Host API calls (session-menu launchers, panels) may be clicked
@@ -721,6 +785,16 @@ export function handleWebSocketConnection(
 					return;
 			}
 		}
+
+		if (
+			isSessionMessageWrite(msg)
+			&& rejectSessionMessageWrite(
+				ws,
+				msg,
+				session,
+				sessionManager.getPersistedSession(sessionId),
+			)
+		) return;
 
 		try {
 			const mintPackSurfaceToken = (tokenMsg: Extract<ClientMessage, { type: "ext_surface_token" }>): { ok: true; token: string } | { ok: false; error: string } => {

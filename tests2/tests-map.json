@@ -507,6 +507,15 @@
       }
     },
     {
+      "path": "tests2/integration/session-ws-write-policy.test.ts",
+      "reason": "Authenticated WebSocket integration coverage proving persisted read-only and non-interactive session policy is enforced before prompt or queue mutation, while snapshot/ping reads and intentional streaming-only reviewer steer remain available.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
       "path": "tests2/browser/journeys/portrait-session-cache.journey.spec.ts",
       "reason": "Portrait 375x667 real-harness regression journey for session A→list→B→list→A caching, using a pre-click MutationObserver plus stable pi-chat-panel identity and WebSocket creation counts to prove healthy reuse without a loader; also pins stale cached-socket fresh fallback with transcript hydration, landscape direct-switch parity, reload-only cache loss, and deterministic session cleanup.",
       "execution": {
