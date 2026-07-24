@@ -1582,26 +1582,18 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		await remote.connect(url, token, sessionId);
 		if (isStale()) { remote.disconnect(); return; }
-		installConfirmedSessionModelPersistence(remote, sessionId);
-		await hydrateSidePanelWorkspace(sessionId);
-		if (isStale()) { remote.disconnect(); return; }
 
-		// ── Fire the transcript snapshot request the INSTANT the WS is
-		// authenticated — before the refreshSessions()/setAgent() awaits below.
-		// Profiling (boot-timing) showed those awaits stall the snapshot request
-		// by ~700ms on a cold reload, even though the server builds the snapshot
-		// in ~200ms. The reducer applies the snapshot to remote.state
-		// independently of the ChatPanel binding, so the request can fly in
-		// parallel with all the connect setup; the panel renders the messages
-		// when setAgent() binds. Proposal checking is deferred here and released
-		// by runDeferredProposalCheck() after draft restores complete — so an
-		// early snapshot can't fill form state before drafts restore.
-		// (Previously this lived ~250 lines below, AFTER those awaits, which
-		// defeated the "fire early" intent.)
+		// ── Fire the transcript snapshot request as the first post-auth action.
+		// No side-panel, proposal, draft, git, or session-list REST hydration may
+		// start first. The reducer can apply an early snapshot to remote.state;
+		// setAgent() below binds and paints it before workspace hydration waits.
+		// Proposal checking remains deferred until draft restores complete.
 		if (isExisting) {
 			remote.deferProposalCheck();
 			remote.requestMessages();
 		}
+
+		installConfirmedSessionModelPersistence(remote, sessionId);
 
 		// Auto-prompt for new assistant sessions — fire IMMEDIATELY after connect
 		// before any draft-restore awaits that could yield and race
@@ -2361,6 +2353,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		});
 		if (isStale()) { cleanupRemote(remote); return; }
 
+		// Initial workspace hydration has one owner and starts only after the
+		// transcript-bearing agent is bound, so REST latency cannot delay paint.
+		await hydrateSidePanelWorkspace(sessionId);
+		if (isStale()) { cleanupRemote(remote); return; }
+
 		// Listen for suggest-goal events from assistant messages
 		state.chatPanel.addEventListener('suggest-goal', () => {
 			if (state.remoteAgent) {
@@ -2554,10 +2551,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			setHashRoute("session", sessionId, true);
 		}
 
-		// (Snapshot request + proposal-check deferral were hoisted to fire
-		// immediately after connect() resolves — see the block right after
-		// `await remote.connect(...)` above. Firing here, after the
-		// refreshSessions()/setAgent() awaits, added ~700ms to every reload.)
+		// (Snapshot request + proposal-check deferral fire immediately after
+		// connect() resolves. Initial workspace hydration runs only after setAgent
+		// binds, so neither the request nor transcript paint waits on REST.)
 
 		// Initial git status and bg process fetch (fire-and-forget). Seed the
 		// tri-state from the client-side repo-cache so known git-less/empty sessions

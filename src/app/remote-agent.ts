@@ -843,7 +843,9 @@ export class RemoteAgent {
 						this._reconnectAttempt = 0;
 						this._setConnectionStatus("connected");
 						resolve();
-						void hydrateSidePanelWorkspace(this._sessionId);
+						// Initial hydration is owned by connectToSession after ChatPanel
+						// binding. Reconnects still refresh the server workspace here.
+						if (!initial) void hydrateSidePanelWorkspace(this._sessionId);
 						// S2: deliver any prompts/steers/retries the user issued while
 						// the socket was reconnecting, before resume/snapshot traffic.
 						this._flushOutbox();
