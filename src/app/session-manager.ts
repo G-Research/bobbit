@@ -168,6 +168,32 @@ interface CachedSession {
 const sessionCache = new Map<string, CachedSession>();
 const SESSION_CACHE_MAX = 10;
 
+type InteractionModeTarget = {
+	readOnly?: boolean;
+	nonInteractive?: boolean;
+};
+
+/** Apply every interaction restriction already known without ever clearing one. */
+function applyKnownSessionInteractionMode(
+	target: InteractionModeTarget,
+	records: ReadonlyArray<Partial<GatewaySession> | undefined>,
+	options?: { explicitReadOnly?: boolean; remoteArchived?: boolean },
+): void {
+	const nonInteractive = records.some((record) => record?.nonInteractive === true);
+	if (nonInteractive) target.nonInteractive = true;
+	if (
+		options?.explicitReadOnly
+		|| options?.remoteArchived
+		|| nonInteractive
+		|| records.some((record) => record?.readOnly === true
+			|| record?.archived === true
+			|| record?.status === "archived"
+			|| record?.status === "terminated")
+	) {
+		target.readOnly = true;
+	}
+}
+
 function cacheSession(sessionId: string, chatPanel: ChatPanel, remoteAgent: RemoteAgent): void {
 	sessionCache.set(sessionId, { chatPanel, remoteAgent, cachedAt: Date.now() });
 	// Evict oldest if over limit
@@ -1372,6 +1398,16 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		sessionCache.delete(sessionId); // Take ownership
 		state.chatPanel = cached.chatPanel;
 		state.remoteAgent = cached.remoteAgent;
+		// The cached panel becomes visible as soon as ownership is restored. Apply
+		// explicit/list-backed restrictions before any await in this fast path.
+		const cachedKnownSession = state.gatewaySessions.find((s) => s.id === sessionId)
+			|| state.archivedSessions.find((s) => s.id === sessionId);
+		if (state.chatPanel.agentInterface) {
+			applyKnownSessionInteractionMode(state.chatPanel.agentInterface, [cachedKnownSession], {
+				explicitReadOnly: options?.readOnly === true,
+				remoteArchived: cached.remoteAgent.state?.isArchived === true,
+			});
+		}
 		state.remoteAgent.registerHostApiTransports();
 		state.connectionStatus = "connected";
 		state.connectingSessionId = null;
@@ -1474,9 +1510,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				ai.delegateOf = s.delegateOf;
 				ai.teamGoalId = s.teamGoalId;
 				ai.assistantType = s.assistantType;
-				if (s.archived || s.status === "terminated" || s.status === "archived") {
-					ai.readOnly = true;
-				}
+				applyKnownSessionInteractionMode(ai, [s], {
+					explicitReadOnly: options?.readOnly === true,
+					remoteArchived: cached.remoteAgent.state?.isArchived === true,
+				});
 			};
 			applyFrom(sessionData);
 			const archivedMatch: any = state.archivedSessions?.find((s: any) => s.id === sessionId);
@@ -1560,12 +1597,15 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 	// Phase 2: async hydrate
 	const gen = state.switchGeneration;
 	const isStale = () => state.switchGeneration !== gen;
-	// Only null out state.remoteAgent if it's still OUR remote instance.
-	// A concurrent connectToSession() for a different session may have already
-	// replaced it — blindly nulling would wipe the newer session's agent.
+	// A stale connect invocation may have transferred its now-bound remote into
+	// the cache, or that exact remote may already be active again after A→B→A.
+	// In either case ownership outlives this invocation and cleanup must not
+	// disconnect it. Only truly abandoned instances are disposable here.
 	const cleanupRemote = (remote: RemoteAgent) => {
+		const retained = state.remoteAgent === remote
+			|| [...sessionCache.values()].some((entry) => entry.remoteAgent === remote);
+		if (retained) return;
 		remote.disconnect();
-		if (state.remoteAgent === remote) state.remoteAgent = null;
 	};
 
 	state.connectingSessionId = sessionId;
@@ -2341,21 +2381,38 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		if (sessionData?.staffId) startInboxSubscription(sessionId, sessionData.staffId);
 		else stopInboxSubscription();
 
-		// Bind draft autosave before setAgent can render an interactive editor;
-		// setAgent awaits lazy imports after assigning agentInterface, so Lit can
-		// paint the textarea before setAgent returns under load.
+		// Resolve every list-backed restriction already available before setAgent;
+		// a direct-record fetch remains a best-effort fallback after hydration.
+		let sessionDataAny: any = sessionData
+			|| state.archivedSessions?.find((s: any) => s.id === sessionId);
+
+		// Bind draft autosave before setAgent can render an interactive editor.
 		_bindPromptDraftSession(sessionId);
 
 		// ── Bind the agent to the early ChatPanel (created before connect
-		// to show the "Connecting…" shell instantly).
-		await state.chatPanel!.setAgent(remote as any, {
+		// to show the "Connecting…" shell instantly). setAgent assigns its
+		// AgentInterface synchronously before its first lazy-import await. Apply
+		// known restrictions in that same task, before Lit can paint a composer.
+		const bindingPanel = state.chatPanel!;
+		const setAgentPromise = bindingPanel.setAgent(remote as any, {
 			onApiKeyRequired: async () => true,
 		});
+		if (bindingPanel.agentInterface) {
+			applyKnownSessionInteractionMode(bindingPanel.agentInterface, [sessionDataAny], {
+				explicitReadOnly: options?.readOnly === true,
+				remoteArchived: remote.state.isArchived === true,
+			});
+		}
+		await setAgentPromise;
 		if (isStale()) { cleanupRemote(remote); return; }
 
 		// Initial workspace hydration has one owner and starts only after the
 		// transcript-bearing agent is bound, so REST latency cannot delay paint.
 		await hydrateSidePanelWorkspace(sessionId);
+		// Transcript replay may have observed the submitted-review marker before
+		// any server tabs existed locally. Replay that cleanup after hydration,
+		// including for a now-cached session, before stale-invocation teardown.
+		remote.reconcileSubmittedReviewWorkspace();
 		if (isStale()) { cleanupRemote(remote); return; }
 
 		// Listen for suggest-goal events from assistant messages
@@ -2370,8 +2427,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// gatewaySessions — look there as a fallback so the scope-gate fields
 		// (goalId / delegateOf / teamGoalId / assistantType) that gate the
 		// "Continue in new session" footer are threaded through.
-	let sessionDataAny: any = sessionData
-			|| state.archivedSessions?.find((s: any) => s.id === sessionId);
 		// Archived sessions re-opened directly (no prior sidebar load) aren't in
 		// either cache — fetch the record so the scope-gate fields threaded to
 		// AgentInterface (goalId / delegateOf / teamGoalId / assistantType) are
@@ -2398,20 +2453,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			}
 		}
 
-		// Disable input for archived or explicitly read-only sessions.
-		// Also honour the REST session record — when re-opening a terminated
-		// session directly, remote.state.isArchived hasn't settled yet but the
-		// PersistedSession's `archived` / `status=="terminated"` flags are
-		// authoritative.
-		const recordArchived = !!sessionDataAny && (sessionDataAny.archived || sessionDataAny.status === "terminated");
-		if (state.chatPanel.agentInterface && (remote.state.isArchived || recordArchived || options?.readOnly)) {
-			state.chatPanel.agentInterface.readOnly = true;
-		}
-
-		// Non-interactive sessions (e.g. verification reviewers) — show editor only while streaming (steer-only)
-		if (state.chatPanel.agentInterface && sessionData?.nonInteractive) {
-			state.chatPanel.agentInterface.readOnly = true;
-			state.chatPanel.agentInterface.nonInteractive = true;
+		// Reconcile any record discovered by the fallback fetch. The common case
+		// already applied these flags synchronously during setAgent above.
+		if (state.chatPanel.agentInterface) {
+			applyKnownSessionInteractionMode(state.chatPanel.agentInterface, [sessionDataAny], {
+				explicitReadOnly: options?.readOnly === true,
+				remoteArchived: remote.state.isArchived === true,
+			});
 		}
 
 		// Set up bg process kill/dismiss handlers
