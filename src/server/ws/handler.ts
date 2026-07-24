@@ -326,44 +326,31 @@ export const MAX_AUTHENTICATED_PROMPT_TEXT_BYTES = 8 * 1024 * 1024;
 const SESSION_COMMAND_SERIALISER = new SessionCommandSerialiser();
 const EXTENSION_CHANNEL_WS_ENVELOPE_TOO_LARGE_MESSAGE = `Extension channel frame exceeds maximum envelope size (${MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES} bytes)`;
 
+const SESSION_WORK_MESSAGE_TYPES = [
+	"prompt",
+	"steer",
+	"steer_queued",
+	"remove_queued",
+	"reorder_queue",
+	"retry",
+	"restart_agent",
+	"set_model",
+	"set_image_model",
+	"set_thinking_level",
+	"compact",
+	"grant_tool_permission",
+	"ext_session_write_permit",
+	"ext_session_post",
+] as const satisfies readonly ClientMessage["type"][];
+
 type SessionWorkMessage = Extract<ClientMessage, {
-	type:
-		| "prompt"
-		| "steer"
-		| "steer_queued"
-		| "remove_queued"
-		| "reorder_queue"
-		| "retry"
-		| "restart_agent"
-		| "set_model"
-		| "set_image_model"
-		| "set_thinking_level"
-		| "compact"
-		| "grant_tool_permission"
-		| "ext_session_write_permit"
-		| "ext_session_post";
+	type: typeof SESSION_WORK_MESSAGE_TYPES[number];
 }>;
 
+const SESSION_WORK_MESSAGE_TYPE_SET: ReadonlySet<ClientMessage["type"]> = new Set(SESSION_WORK_MESSAGE_TYPES);
+
 function isSessionWorkMessage(msg: ClientMessage): msg is SessionWorkMessage {
-	switch (msg.type) {
-		case "prompt":
-		case "steer":
-		case "steer_queued":
-		case "remove_queued":
-		case "reorder_queue":
-		case "retry":
-		case "restart_agent":
-		case "set_model":
-		case "set_image_model":
-		case "set_thinking_level":
-		case "compact":
-		case "grant_tool_permission":
-		case "ext_session_write_permit":
-		case "ext_session_post":
-			return true;
-		default:
-			return false;
-	}
+	return SESSION_WORK_MESSAGE_TYPE_SET.has(msg.type);
 }
 
 function sendSessionWorkPolicyError(
