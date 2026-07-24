@@ -184,6 +184,10 @@ function spyOnTaskControlPaths(gateway: any) {
 	};
 }
 
+function clearTaskControlSpies(spies: ReturnType<typeof spyOnTaskControlPaths>): void {
+	for (const spy of Object.values(spies)) spy.mockClear();
+}
+
 function expectNoTaskControlPaths(spies: ReturnType<typeof spyOnTaskControlPaths>): void {
 	for (const spy of Object.values(spies)) expect(spy).not.toHaveBeenCalled();
 }
@@ -237,7 +241,9 @@ test.describe("authenticated WebSocket session write policy", () => {
 			}
 			await expectModelControlsRejected(conn, "SESSION_READ_ONLY");
 			await expectTitleControlsRejected(conn, "SESSION_READ_ONLY");
+			clearTaskControlSpies(taskControlSpies);
 			await expectTaskControlsRejected(conn, "SESSION_READ_ONLY");
+			expectNoTaskControlPaths(taskControlSpies);
 			await expectExtensionWritesRejected(conn, "SESSION_READ_ONLY", "read-only");
 
 			expect(enqueuePrompt).not.toHaveBeenCalled();
@@ -251,7 +257,6 @@ test.describe("authenticated WebSocket session write policy", () => {
 			expect(compact).not.toHaveBeenCalled();
 			expectNoModelControlMutations(modelControlSpies);
 			await expectNoTitleControlMutations(titleControlSpies);
-			expectNoTaskControlPaths(taskControlSpies);
 			await expectReadFramesStillWork(conn);
 		} finally {
 			live.status = "idle";
@@ -304,10 +309,11 @@ test.describe("authenticated WebSocket session write policy", () => {
 			}
 			await expectModelControlsRejected(conn, "NON_INTERACTIVE_WORK_CONTROL");
 			await expectTitleControlsRejected(conn, "NON_INTERACTIVE_WORK_CONTROL");
+			clearTaskControlSpies(taskControlSpies);
 			await expectTaskControlsRejected(conn, "NON_INTERACTIVE_WORK_CONTROL");
+			expectNoTaskControlPaths(taskControlSpies);
 			expectNoModelControlMutations(modelControlSpies);
 			await expectNoTitleControlMutations(titleControlSpies);
-			expectNoTaskControlPaths(taskControlSpies);
 
 			await expectReadFramesStillWork(conn);
 
@@ -332,7 +338,6 @@ test.describe("authenticated WebSocket session write policy", () => {
 			expect(compact).not.toHaveBeenCalled();
 			expectNoModelControlMutations(modelControlSpies);
 			await expectNoTitleControlMutations(titleControlSpies);
-			expectNoTaskControlPaths(taskControlSpies);
 		} finally {
 			live.status = "idle";
 			enqueuePrompt.mockRestore();
