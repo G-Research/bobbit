@@ -1,17 +1,18 @@
 # Boot/reload performance instrumentation
 
-Opt-in instrumentation that measures the cost of a full page reload with hard
-numbers, so we can reason about reload disruption (e.g. while an agent is
-editing UI code under Vite) with data instead of estimates.
+Opt-in instrumentation that measures full-page reload and session transcript
+hydration costs with hard numbers, so reload and cold-navigation changes can be
+evaluated with data instead of estimates.
 
 ## Why
 
 A full reload under Vite dev re-does two expensive things: re-evaluating the
 unbundled module graph (the dev module waterfall) and rehydrating session state
-(WebSocket reconnect + `get_state` snapshot replay + full `MessageList`
-re-render). Both resist a small time budget, and the snapshot replay scales with
-transcript length. Rather than guess, this feature records named milestones
-across a reload and writes them somewhere agents can inspect.
+(WebSocket reconnect + `get_messages` transcript snapshot replay + full
+`MessageList` re-render). Cold session navigation uses the same transcript path.
+Both resist a small time budget, and snapshot rendering scales with transcript
+length. Rather than guess, this feature records named milestones and writes them
+somewhere agents can inspect.
 
 ## Surface
 
@@ -35,10 +36,10 @@ across a reload and writes them somewhere agents can inspect.
   `initApp-start`, `first-render-call` (main.ts), `first-paint`
   (`pwa-lifecycle.ts::finalizeBoot`, when `#app` actually paints), `ws-open`,
   `auth-ok` (WS auth handshake done — splits the ws-open→snapshot window into
-  handshake vs. server-side snapshot wait), `snapshot-received(N msgs)`,
-  `snapshot-applied`, `post-snapshot-paint` (`remote-agent.ts`). The raw
-  snapshot frame size is captured as `snapshotChars` to distinguish payload
-  transfer cost from server-side assembly.
+  handshake vs. server-side snapshot wait), `get-messages-sent`,
+  `snapshot-received(N msgs)`, `snapshot-applied`, `post-snapshot-paint`
+  (`remote-agent.ts`). The raw snapshot frame size is captured as `snapshotChars`
+  to distinguish payload transfer cost from server-side assembly.
 - **Server-side snapshot breakdown** (dev harness only): the `get_messages`
   handler attaches a `SnapshotServerTiming` (`rpcMs` agent assembly /
   `pipelineMs` server transform / `stampMs` / `stringifyMs` / `bytes` /
@@ -69,13 +70,123 @@ Each JSONL line carries `reason`, `isReload`, `total_ms`, `route`, `sessionId`,
 `Δ prev (ms)` deltas — the delta column shows where the time actually goes
 (module waterfall vs. first paint vs. snapshot replay).
 
+## Cold session navigation invariant
+
+A cold switch to an existing session must start transcript transfer before
+unrelated REST work. `connectToSession` in the session manager therefore owns
+the initial sequence:
+
+1. After initial WebSocket authentication resolves, call
+   `RemoteAgent.requestMessages()` as the first post-auth action. This emits
+   `get-messages-sent` and sends `get_messages`.
+2. Only then may side-panel workspace, proposal, draft, git, project/goal, or
+   session-list REST hydration start.
+3. Bind the transcript-bearing agent to the chat panel, then perform the single
+   initial side-panel workspace hydration.
+
+This ordering matters because the transcript is the primary session content;
+side-panel latency must not hold it behind an independent REST request. The
+initial `RemoteAgent` auth handler does not hydrate the workspace. `RemoteAgent`
+retains ownership of workspace hydration after non-initial authentication, so
+reconnects still refresh server state without duplicating the normal cold-load
+fetch.
+
+Workspace responses remain session-keyed. They can refresh the abandoned
+session's keyed cache, but compatibility/foreground mirrors update only when
+that session is still active. The session manager also checks the captured
+switch generation and selected session after asynchronous boundaries. Together,
+these guards prevent a late A response from overwriting B during an A→B switch,
+while preserving the exact cached agent and panel on A→B→A switch-back. The
+scheduling change does not remove hydration: side-panel tabs, active tab, size
+mode, proposals, and review documents still restore through their existing
+guarded paths. Workspace revision and conflict rules are unchanged.
+
+`tests2/dom/cold-session-workspace-ordering-repro.test.ts` pins this contract. It
+holds workspace hydration open while verifying that all 321 transcript rows
+render, `get_messages` precedes relevant REST requests, and only one initial
+workspace GET occurs. It also covers rapid navigation, pre-bind stale responses,
+workspace/review restoration, reconnect hydration, and cached switch-back.
+
+## Controlled cold-navigation measurement
+
+This is an auditable historical comparison, not a timing threshold for arbitrary
+hosts. The fixed tree was
+`a4a811d75d05c76aabdab2108863a42c2b058cb5`; the measured pre-fix tree was
+`3ee000bb06b12e1f3bc5b80573cca9a67bafa427`. In that pre-fix tree,
+`connectToSession` awaited workspace hydration before requesting messages, while
+the initial `RemoteAgent` auth handler independently started a second workspace
+hydration.
+
+### Environment and method
+
+- Windows 11 `10.0.26200` x64; AMD Ryzen AI 9 HX 370; 24 logical CPUs; 63.1 GiB
+  RAM.
+- Node 24.13.1 / V8 13.6; Vitest 4.1.10 with happy-dom; one worker and
+  `retry: 0`.
+- A 321-record transcript and a real 250 ms `setTimeout` in the workspace
+  endpoint were used for seven sequential cold samples per variant. Controlled
+  WebSocket snapshots were delivered in a microtask, intentionally removing
+  real server and network transfer variance.
+- The navigation clock started immediately before `connectToSession`. Production
+  code emitted `auth-ok`, `get-messages-sent`, `snapshot-received(321 msgs)`, and
+  `snapshot-applied`. Ready meant that transcript row 321 was present in the DOM
+  and two `requestAnimationFrame` turns had completed, matching the
+  post-snapshot-paint boundary.
+- Baseline assertions required auth→request to be at least 235 ms and observed
+  two workspace GETs in every baseline sample. This proved the fixture was
+  exercising the blocking and duplicate-hydration regression rather than merely
+  comparing noisy runs.
+
+### Raw samples
+
+All timing values are milliseconds; values within each cell are in run order.
+
+| Metric | Pre-fix | Fixed |
+|---|---|---|
+| auth→request | `[255.375, 251.248, 253.282, 255.059, 259.189, 254.873, 261.206]` | `[0.471, 0.017, 0.011, 0.015, 0.015, 0.022, 0.014]` |
+| auth→snapshot | `[255.935, 251.566, 254.032, 255.401, 259.689, 255.894, 261.578]` | `[1.063, 0.290, 0.256, 0.254, 0.260, 0.543, 0.329]` |
+| navigation→ready | `[271.247, 258.330, 260.970, 259.569, 267.590, 269.112, 267.751]` | `[16.519, 5.747, 7.079, 3.856, 6.813, 5.835, 4.090]` |
+| Workspace GETs | `2` in every sample | `1` in every sample |
+
+### Median result
+
+| Metric | Pre-fix | Fixed | Change |
+|---|---:|---:|---:|
+| auth→request | 255.059 ms | 0.015 ms | −255.044 ms |
+| auth→snapshot | 255.894 ms | 0.290 ms | −255.605 ms (−99.9%) |
+| navigation→ready | 267.590 ms | 5.835 ms | −261.756 ms (−97.8%) |
+| Workspace GETs | 2 | 1 | one initial owner |
+
+The fixed transcript became ready about 244 ms before the delayed workspace
+response. For the fixed 321-record case, the median request→receipt time was
+0.273 ms, snapshot receipt→apply was 0.252 ms, and receipt→ready was 4.862 ms.
+The result isolates the intended change: transcript startup no longer inherits
+workspace latency, and duplicate initial hydration is gone.
+
+### Transcript-size scaling
+
+Fixed-tree medians from the same controlled setup show the remaining local cost:
+
+| Records | request→receipt | receipt→apply | receipt→ready | navigation→ready |
+|---:|---:|---:|---:|---:|
+| 1 | 0.084 ms | 0.025 ms | 0.565 ms | 1.057 ms |
+| 101 | 0.174 ms | 0.104 ms | 1.939 ms | 2.558 ms |
+| 321 | 0.273 ms | 0.252 ms | 4.862 ms | 5.835 ms |
+| 641 | 0.430 ms | 0.440 ms | 12.840 ms | 13.681 ms |
+
+This controlled DOM benchmark excludes real server assembly and network transfer
+latency, both of which remain after the request is sent immediately. Within the
+controlled path, rendering is now the dominant transcript-size-dependent local
+cost. This fix intentionally makes no snapshot protocol change. If real large
+histories show material latency, evaluate pagination or streaming for transfer
+and virtualized rendering for local paint as follow-up work.
+
 ## Tests
 
-- `tests/dev-boot-timing.test.ts` — sink: append/parse, dir creation, limit,
-  rejection of non-object/oversized samples, byte-cap trimming, malformed-line
-  skipping.
-- `tests/e2e/dev-boot-timing-api.spec.ts` — endpoint gating (403 off-harness),
-  write+read-back under the harness, 422 on a non-object body.
-- `tests/e2e/ui/perf-instrumentation-toggle.spec.ts` — toggle hidden without the
-  harness; visible/toggles/persists-across-reload and arms reload
-  instrumentation under the harness.
+- `tests2/dom/cold-session-workspace-ordering-repro.test.ts` — cold transcript
+  ordering, one initial workspace owner, stale navigation, reconnect, and cache
+  preservation.
+- `tests2/core/dev-boot-timing.test.ts` — sink append/parse, directory creation,
+  limits, malformed entries, and trimming.
+- `tests2/integration/dev-boot-timing-api.test.ts` — endpoint gating, write/read
+  under the harness, and invalid-body rejection.
