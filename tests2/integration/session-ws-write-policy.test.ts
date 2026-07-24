@@ -1,4 +1,5 @@
 import { vi } from "vitest";
+import { TaskManager } from "../../src/server/agent/task-manager.js";
 import { expect, test } from "./_e2e/in-process-harness.js";
 import {
 	connectWs,
@@ -112,6 +113,26 @@ const TITLE_CONTROL_FRAMES: ReadonlyArray<Record<string, unknown>> = [
 	{ type: "set_title", title: "forbidden title" },
 ];
 
+const TASK_CONTROL_FRAMES: ReadonlyArray<Record<string, unknown>> = [
+	{
+		type: "task_create",
+		goalId: "11111111-1111-4111-8111-111111111111",
+		title: "Cross-goal crafted task",
+		taskType: "implementation",
+		parentTaskId: "22222222-2222-4222-8222-222222222222",
+		dependsOn: ["33333333-3333-4333-8333-333333333333"],
+	},
+	{
+		type: "task_update",
+		taskId: "44444444-4444-4444-8444-444444444444",
+		updates: { title: "Cross-goal crafted update", state: "in-progress" },
+	},
+	{
+		type: "task_delete",
+		taskId: "55555555-5555-4555-8555-555555555555",
+	},
+];
+
 function spyOnModelControlMutations(gateway: any, live: any) {
 	return {
 		setModel: vi.spyOn(live.rpcClient, "setModel"),
@@ -150,12 +171,37 @@ function restoreTitleControlSpies(spies: ReturnType<typeof spyOnTitleControlMuta
 	for (const spy of Object.values(spies)) spy.mockRestore();
 }
 
+function spyOnTaskControlPaths(gateway: any) {
+	const projectContexts = gateway.sessionManager.getProjectContextManager();
+	expect(projectContexts, "gateway has project contexts for task routing").toBeTruthy();
+	return {
+		resolveProjectContexts: vi.spyOn(gateway.sessionManager, "getProjectContextManager"),
+		resolveGoal: vi.spyOn(projectContexts, "getContextForGoal"),
+		scanProjects: vi.spyOn(projectContexts, "all"),
+		createTask: vi.spyOn(TaskManager.prototype, "createTask"),
+		updateTask: vi.spyOn(TaskManager.prototype, "updateTask"),
+		deleteTask: vi.spyOn(TaskManager.prototype, "deleteTask"),
+	};
+}
+
+function expectNoTaskControlPaths(spies: ReturnType<typeof spyOnTaskControlPaths>): void {
+	for (const spy of Object.values(spies)) expect(spy).not.toHaveBeenCalled();
+}
+
+function restoreTaskControlSpies(spies: ReturnType<typeof spyOnTaskControlPaths>): void {
+	for (const spy of Object.values(spies)) spy.mockRestore();
+}
+
 async function expectModelControlsRejected(conn: WsConnection, code: string): Promise<void> {
 	for (const frame of MODEL_CONTROL_FRAMES) await expectPolicyError(conn, frame, code);
 }
 
 async function expectTitleControlsRejected(conn: WsConnection, code: string): Promise<void> {
 	for (const frame of TITLE_CONTROL_FRAMES) await expectPolicyError(conn, frame, code);
+}
+
+async function expectTaskControlsRejected(conn: WsConnection, code: string): Promise<void> {
+	for (const frame of TASK_CONTROL_FRAMES) await expectPolicyError(conn, frame, code);
 }
 
 test.describe("authenticated WebSocket session write policy", () => {
@@ -179,6 +225,7 @@ test.describe("authenticated WebSocket session write policy", () => {
 		const compact = vi.spyOn(live.rpcClient, "compact").mockRejectedValue(new Error("policy guard missed compact"));
 		const modelControlSpies = spyOnModelControlMutations(gateway, live);
 		const titleControlSpies = spyOnTitleControlMutations(gateway);
+		const taskControlSpies = spyOnTaskControlPaths(gateway);
 		try {
 			await expectPolicyError(conn, { type: "prompt", text: "must not run" }, "SESSION_READ_ONLY");
 			// A read-only session has no streaming-steer carve-out.
@@ -190,6 +237,7 @@ test.describe("authenticated WebSocket session write policy", () => {
 			}
 			await expectModelControlsRejected(conn, "SESSION_READ_ONLY");
 			await expectTitleControlsRejected(conn, "SESSION_READ_ONLY");
+			await expectTaskControlsRejected(conn, "SESSION_READ_ONLY");
 			await expectExtensionWritesRejected(conn, "SESSION_READ_ONLY", "read-only");
 
 			expect(enqueuePrompt).not.toHaveBeenCalled();
@@ -203,6 +251,7 @@ test.describe("authenticated WebSocket session write policy", () => {
 			expect(compact).not.toHaveBeenCalled();
 			expectNoModelControlMutations(modelControlSpies);
 			await expectNoTitleControlMutations(titleControlSpies);
+			expectNoTaskControlPaths(taskControlSpies);
 			await expectReadFramesStillWork(conn);
 		} finally {
 			live.status = "idle";
@@ -217,6 +266,7 @@ test.describe("authenticated WebSocket session write policy", () => {
 			compact.mockRestore();
 			restoreModelControlSpies(modelControlSpies);
 			restoreTitleControlSpies(titleControlSpies);
+			restoreTaskControlSpies(taskControlSpies);
 			conn.close();
 			await deleteSession(sessionId);
 		}
@@ -242,6 +292,7 @@ test.describe("authenticated WebSocket session write policy", () => {
 		const compact = vi.spyOn(live.rpcClient, "compact").mockRejectedValue(new Error("policy guard missed compact"));
 		const modelControlSpies = spyOnModelControlMutations(gateway, live);
 		const titleControlSpies = spyOnTitleControlMutations(gateway);
+		const taskControlSpies = spyOnTaskControlPaths(gateway);
 		try {
 			await expectPolicyError(conn, { type: "prompt", text: "must not start review" }, "NON_INTERACTIVE_PROMPT");
 			await expectPolicyError(conn, { type: "steer", text: "must not queue review" }, "NON_INTERACTIVE_STEER");
@@ -253,8 +304,10 @@ test.describe("authenticated WebSocket session write policy", () => {
 			}
 			await expectModelControlsRejected(conn, "NON_INTERACTIVE_WORK_CONTROL");
 			await expectTitleControlsRejected(conn, "NON_INTERACTIVE_WORK_CONTROL");
+			await expectTaskControlsRejected(conn, "NON_INTERACTIVE_WORK_CONTROL");
 			expectNoModelControlMutations(modelControlSpies);
 			await expectNoTitleControlMutations(titleControlSpies);
+			expectNoTaskControlPaths(taskControlSpies);
 
 			await expectReadFramesStillWork(conn);
 
@@ -279,6 +332,7 @@ test.describe("authenticated WebSocket session write policy", () => {
 			expect(compact).not.toHaveBeenCalled();
 			expectNoModelControlMutations(modelControlSpies);
 			await expectNoTitleControlMutations(titleControlSpies);
+			expectNoTaskControlPaths(taskControlSpies);
 		} finally {
 			live.status = "idle";
 			enqueuePrompt.mockRestore();
@@ -292,6 +346,7 @@ test.describe("authenticated WebSocket session write policy", () => {
 			compact.mockRestore();
 			restoreModelControlSpies(modelControlSpies);
 			restoreTitleControlSpies(titleControlSpies);
+			restoreTaskControlSpies(taskControlSpies);
 			conn.close();
 			await deleteSession(sessionId);
 		}
