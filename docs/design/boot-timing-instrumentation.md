@@ -105,17 +105,28 @@ guarded paths. Workspace revision and conflict rules are unchanged.
 holds workspace hydration open while verifying that all 321 transcript rows
 render, `get_messages` precedes relevant REST requests, and only one initial
 workspace GET occurs. It also covers rapid navigation, pre-bind stale responses,
-workspace/review restoration, reconnect hydration, and cached switch-back.
+workspace/review restoration, reconnect hydration, and cached switch-back. The
+committed test pins the 321-row render-before-workspace and single-fetch behavior;
+it does not run the seven timing samples, impose the benchmark's 250 ms delay, or
+assert the measurements below.
 
-## Controlled cold-navigation measurement
+## Controlled one-off cold-navigation evidence
 
-This is an auditable historical comparison, not a timing threshold for arbitrary
-hosts. The fixed tree was
-`a4a811d75d05c76aabdab2108863a42c2b058cb5`; the measured pre-fix tree was
-`3ee000bb06b12e1f3bc5b80573cca9a67bafa427`. In that pre-fix tree,
-`connectToSession` awaited workspace hydration before requesting messages, while
-the initial `RemoteAgent` auth handler independently started a second workspace
-hydration.
+The following numbers are controlled one-off benchmark evidence, not a
+repository-reproducible benchmark or a timing threshold for arbitrary hosts. The
+fixed tree was `a4a811d75d05c76aabdab2108863a42c2b058cb5`; the measured
+pre-fix tree was `3ee000bb06b12e1f3bc5b80573cca9a67bafa427`. In the pre-fix
+tree, `connectToSession` awaited workspace hydration before requesting messages,
+while the initial `RemoteAgent` auth handler independently started a second
+workspace hydration.
+
+The exact source SHAs, environment, raw values, and method keep the result
+interpretable. However, the measurement harness and Vitest config lived under
+ignored `.bobbit/tmp` paths and were not retained in the repository. Re-running
+this comparison requires recreating that temporary fixture from the committed
+DOM regression test and running it against the actual fixed and pre-fix source
+trees; the commands below are therefore historical invocation records, not
+turnkey repeat commands.
 
 ### Environment and method
 
@@ -123,19 +134,44 @@ hydration.
   RAM.
 - Node 24.13.1 / V8 13.6; Vitest 4.1.10 with happy-dom; one worker and
   `retry: 0`.
-- A 321-record transcript and a real 250 ms `setTimeout` in the workspace
-  endpoint were used for seven sequential cold samples per variant. Controlled
-  WebSocket snapshots were delivered in a microtask, intentionally removing
-  real server and network transfer variance.
-- The navigation clock started immediately before `connectToSession`. Production
-  code emitted `auth-ok`, `get-messages-sent`, `snapshot-received(321 msgs)`, and
-  `snapshot-applied`. Ready meant that transcript row 321 was present in the DOM
-  and two `requestAnimationFrame` turns had completed, matching the
-  post-snapshot-paint boundary.
+- The ignored fixture was derived from
+  `tests2/dom/cold-session-workspace-ordering-repro.test.ts`. It used a
+  321-record transcript and a real 250 ms `setTimeout` in the workspace endpoint
+  for seven sequential cold samples per variant.
+- Controlled WebSocket snapshots were delivered in a microtask. This excludes
+  real network latency, server assembly, and transport time so the comparison
+  isolates client request ordering and local rendering.
+- The clock started immediately before `connectToSession`, so this was a DOM cold
+  session switch—not a full app reload or deep-link. In contrast, the normal
+  full reload/deep-link instrumentation described above begins at browser
+  navigation, includes module and app boot, and writes its completed samples to
+  the JSONL sink.
+- Production code emitted `auth-ok`, `get-messages-sent`,
+  `snapshot-received(321 msgs)`, and `snapshot-applied`. Ready meant transcript
+  row 321 was present in the DOM and two `requestAnimationFrame` turns had
+  completed, matching the post-snapshot-paint boundary.
 - Baseline assertions required auth→request to be at least 235 ms and observed
-  two workspace GETs in every baseline sample. This proved the fixture was
-  exercising the blocking and duplicate-hydration regression rather than merely
-  comparing noisy runs.
+  two workspace GETs in every baseline sample. This proved the fixture exercised
+  the blocking and duplicate-hydration regression rather than merely comparing
+  noisy runs.
+
+### Recorded commands
+
+Fixed variant:
+
+```bash
+MEASURE_VARIANT=fixed MEASURE_SOURCE_SHA=a4a811d75d05c76aabdab2108863a42c2b058cb5 MEASURE_TRANSCRIPT_SIZE=321 MEASURE_SAMPLE_COUNT=7 MEASURE_WORKSPACE_DELAY_MS=250 node node_modules/vitest/vitest.mjs run --config .bobbit/tmp/cold-load-measure/vitest.measure.config.ts
+```
+
+Baseline variant, run from a temporary detached worktree at the pre-fix SHA:
+
+```bash
+MEASURE_ROOT=.bobbit/tmp/cold-baseline MEASURE_VARIANT=baseline MEASURE_SOURCE_SHA=3ee000bb06b12e1f3bc5b80573cca9a67bafa427 MEASURE_TRANSCRIPT_SIZE=321 MEASURE_SAMPLE_COUNT=7 MEASURE_WORKSPACE_DELAY_MS=250 node node_modules/vitest/vitest.mjs run --config .bobbit/tmp/cold-baseline/.bobbit/tmp/cold-load-measure/vitest.measure.config.ts
+```
+
+The referenced configs, generated measurement test, and temporary baseline
+worktree are absent from the repository. Recreate them before using these
+invocations.
 
 ### Raw samples
 
