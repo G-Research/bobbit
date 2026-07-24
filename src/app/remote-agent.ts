@@ -732,31 +732,17 @@ export class RemoteAgent {
 			.map((tab) => tab.id);
 		if (reviewTabIds.length === 0) return;
 
-		// Use the normal mutation path first so successful deletes retain all
-		// server revision/conflict semantics. Some compatible endpoints return
-		// 204 for DELETE; the workspace helper then refetches and may receive a
-		// stale pre-delete snapshot. Reapply the submitted-review policy to that
-		// settled snapshot below without inventing a new revision.
+		// Keep every deletion on the normal mutation path. A confirmed compatible
+		// 204 settles the optimistic close, while a 409 workspace remains
+		// authoritative and may be retried once at its newer revision. Refetches,
+		// network failures, and rollbacks are never locally filtered afterward.
 		for (const tabId of reviewTabIds) {
 			try {
-				await closeSidePanelTab(tabId, { sessionId });
+				await closeSidePanelTab(tabId, { sessionId, retryConflictOnce: true });
 			} catch (err) {
 				console.warn("[RemoteAgent] submitted-review workspace cleanup failed:", err);
 			}
 		}
-		if (!isReviewSubmitted(sessionId)) return;
-		const settled = getSidePanelWorkspace(sessionId);
-		const tabs = settled.tabs.filter((tab) => !isReviewTab(tab));
-		if (tabs.length === settled.tabs.length) return;
-		const activeTabId = tabs.some((tab) => tab.id === settled.activeTabId)
-			? settled.activeTabId
-			: tabs[0]?.id || "";
-		applySidePanelWorkspaceFromServer({
-			...settled,
-			tabs,
-			activeTabId,
-			updatedAt: Date.now(),
-		}, { source: "rest", force: true });
 	}
 	private _isActiveSession(): boolean {
 		return this._sessionId !== "" && state.selectedSessionId === this._sessionId;

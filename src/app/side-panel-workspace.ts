@@ -71,6 +71,11 @@ export interface SidePanelMutationOptions {
 	skipRender?: boolean;
 }
 
+export interface CloseSidePanelTabOptions extends SidePanelMutationOptions {
+	sessionId?: string;
+	retryConflictOnce?: boolean;
+}
+
 type PendingMutation = {
 	id: string;
 	baseRevision: number;
@@ -574,11 +579,20 @@ function fixtureInitialWorkspace(sessionId: string): SidePanelWorkspace | undefi
 	};
 }
 
-async function workspaceRequest(sessionId: string, path: string, init: RequestInit = {}): Promise<SidePanelWorkspace> {
+async function workspaceRequest(
+	sessionId: string,
+	path: string,
+	init: RequestInit = {},
+	options: { confirmedNoContentWorkspace?: SidePanelWorkspace } = {},
+): Promise<SidePanelWorkspace> {
 	const res = await gatewayFetch(`/api/sessions/${encodeComponent(sessionId)}/side-panel-workspace${path}`, init);
 	const body = await readJsonSafe(res);
 	const workspace = workspaceFromResponseBody(body, sessionId);
 	if (!res.ok) throw new WorkspaceRequestError(`Side-panel workspace request failed: ${res.status}`, res.status, workspace);
+	// Older/compatible workspace endpoints confirm DELETE with an empty 204
+	// rather than the current JSON workspace response. Only callers that supply
+	// the exact optimistic result may use that response as a successful commit.
+	if (res.status === 204 && options.confirmedNoContentWorkspace) return options.confirmedNoContentWorkspace;
 	if (!workspace) throw new WorkspaceRequestError("Invalid side-panel workspace response", res.status);
 	return workspace;
 }
@@ -593,7 +607,12 @@ async function fetchWorkspace(sessionId: string): Promise<SidePanelWorkspace | u
 	return workspace;
 }
 
-async function settleMutation(sessionId: string, mutationId: string, request: Promise<SidePanelWorkspace>): Promise<SidePanelWorkspace> {
+async function settleMutation(
+	sessionId: string,
+	mutationId: string,
+	request: Promise<SidePanelWorkspace>,
+	onAuthoritativeConflict?: (workspace: SidePanelWorkspace) => void,
+): Promise<SidePanelWorkspace> {
 	const sid = panelWorkspaceSessionKey(sessionId);
 	try {
 		const workspace = await request;
@@ -605,7 +624,11 @@ async function settleMutation(sessionId: string, mutationId: string, request: Pr
 		const ownsPending = pending?.id === mutationId;
 		if (ownsPending) mutationState.delete(sid);
 		const latest = err instanceof WorkspaceRequestError ? err.workspace : undefined;
-		if (latest) return applySidePanelWorkspaceFromServer(latest, { source: "rest", force: ownsPending });
+		if (latest) {
+			const authoritative = applySidePanelWorkspaceFromServer(latest, { source: "rest", force: ownsPending });
+			if (err instanceof WorkspaceRequestError && err.status === 409) onAuthoritativeConflict?.(authoritative);
+			return authoritative;
+		}
 		try {
 			const refetched = await fetchWorkspace(sessionId);
 			if (refetched) return applySidePanelWorkspaceFromServer(refetched, { source: "hydrate", force: ownsPending });
@@ -697,14 +720,45 @@ export async function updateSidePanelTab(tabId: string, patch: Partial<SidePanel
 	}));
 }
 
-export async function closeSidePanelTab(tabId: string, options: SidePanelMutationOptions & { sessionId?: string } = {}): Promise<SidePanelWorkspace> {
+export async function closeSidePanelTab(tabId: string, options: CloseSidePanelTabOptions = {}): Promise<SidePanelWorkspace> {
 	const sessionId = options.sessionId || activeSessionId() || state.selectedSessionId || "";
 	const base = mutationBaseWorkspace(sessionId);
 	const tabs = base.tabs.filter((tab) => tab.id !== tabId);
 	const optimistic = withWorkspaceUpdate(base, { tabs, activeTabId: nextActiveAfterClose(base.tabs, tabId, base.activeTabId) });
 	if (!useServerWorkspaceApi()) return applyFixtureWorkspace(optimistic, options);
 	const mutationId = applyOptimisticWorkspace(optimistic, base, options);
-	return settleMutation(base.sessionId, mutationId, workspaceRequest(base.sessionId, `/tabs/${encodeComponent(tabId)}`, { method: "DELETE" }));
+	const sid = panelWorkspaceSessionKey(base.sessionId);
+	const confirmedNoContentWorkspace = withWorkspaceUpdate(optimistic, {
+		revision: Math.max(base.revision, state.lastWorkspaceRevisionBySession[sid] ?? base.revision) + 1,
+	});
+	const conflict = { workspace: undefined as SidePanelWorkspace | undefined };
+	const requestHeaders = options.baseRevision == null
+		? undefined
+		: { "If-Match": `"${options.baseRevision}"` };
+	const settled = await settleMutation(
+		base.sessionId,
+		mutationId,
+		workspaceRequest(
+			base.sessionId,
+			`/tabs/${encodeComponent(tabId)}`,
+			{ method: "DELETE", headers: requestHeaders },
+			{ confirmedNoContentWorkspace },
+		),
+		(workspace) => { conflict.workspace = workspace; },
+	);
+	const authoritative = conflict.workspace;
+	if (!options.retryConflictOnce
+		|| !authoritative
+		|| authoritative.revision <= base.revision
+		|| !authoritative.tabs.some((tab) => tab.id === tabId)) {
+		return settled;
+	}
+	return closeSidePanelTab(tabId, {
+		...options,
+		baseRevision: authoritative.revision,
+		strictRevision: true,
+		retryConflictOnce: false,
+	});
 }
 
 export async function setActiveSidePanelTab(tabId: string, options: SidePanelMutationOptions & { sessionId?: string } = {}): Promise<SidePanelWorkspace> {
