@@ -376,6 +376,13 @@ beforeEach(() => {
 	vi.spyOn(reviewSourcesLazy, "loadReviewSources").mockResolvedValue({
 		restorePersistedReviewDocuments: (sessionId: string) => {
 			if (state.selectedSessionId !== sessionId || isReviewSubmitted(sessionId)) return;
+			const documentId = `${sessionId}-review`;
+			const hasMatchingWorkspaceTab = state.sidePanelWorkspaceBySession[sessionId]?.tabs.some((tab) => {
+				if (tab.kind !== "review") return false;
+				const source = tab.source as Record<string, unknown> | undefined;
+				return source?.documentId === documentId || tab.id === `review:${documentId}`;
+			});
+			if (!hasMatchingWorkspaceTab) return;
 			const title = `${sessionId} review`;
 			state.reviewDocuments = new Map([[title, { title, markdown: `# ${title}` } as any]]);
 			state.reviewActiveTab = title;
@@ -494,6 +501,10 @@ describe("cold session transcript/workspace ordering", () => {
 			);
 			expect(finalTranscriptRow(SESSION_A)?.textContent).toBe(`${SESSION_A} transcript row ${TRANSCRIPT_SIZE - 1}`);
 			expect(gateFor(SESSION_A).settled).toBe(false);
+			expect(
+				state.reviewDocuments.has(`${SESSION_A} review`),
+				"PERSISTED_REVIEW_HYDRATION_REGRESSION: persisted review restored before its matching workspace tab hydrated",
+			).toBe(false);
 		} finally {
 			gateFor(SESSION_A).release();
 			await pendingConnect.catch(() => {});
@@ -506,7 +517,10 @@ describe("cold session transcript/workspace ordering", () => {
 		]);
 		expect(state.activePanelTabId).toBe("preview:entry:index.html");
 		expect(state.previewPanelFullscreen).toBe(true);
-		expect(state.reviewDocuments.has(`${SESSION_A} review`)).toBe(true);
+		expect(
+			state.reviewDocuments.has(`${SESSION_A} review`),
+			"PERSISTED_REVIEW_HYDRATION_REGRESSION: persisted review was not restored after workspace hydration",
+		).toBe(true);
 		expect(finalTranscriptRow(SESSION_A)?.textContent).toBe(`${SESSION_A} transcript row ${TRANSCRIPT_SIZE - 1}`);
 	});
 
