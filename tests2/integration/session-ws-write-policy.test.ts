@@ -106,6 +106,12 @@ const MODEL_CONTROL_FRAMES: ReadonlyArray<Record<string, unknown>> = [
 	{ type: "set_image_model", provider: "openai", modelId: "gpt-image-2" },
 ];
 
+const TITLE_CONTROL_FRAMES: ReadonlyArray<Record<string, unknown>> = [
+	{ type: "generate_title" },
+	{ type: "summarize_goal_title", goalTitle: "Attacker controlled goal title" },
+	{ type: "set_title", title: "forbidden title" },
+];
+
 function spyOnModelControlMutations(gateway: any, live: any) {
 	return {
 		setModel: vi.spyOn(live.rpcClient, "setModel"),
@@ -125,8 +131,31 @@ function restoreModelControlSpies(spies: ReturnType<typeof spyOnModelControlMuta
 	for (const spy of Object.values(spies)) spy.mockRestore();
 }
 
+function spyOnTitleControlMutations(gateway: any) {
+	return {
+		autoGenerateTitle: vi.spyOn(gateway.sessionManager, "autoGenerateTitle").mockRejectedValue(new Error("policy guard missed auto title")),
+		generateGoalTitle: vi.spyOn(gateway.sessionManager, "generateGoalTitle").mockImplementation(() => undefined),
+		setTitle: vi.spyOn(gateway.sessionManager, "setTitle").mockReturnValue(false),
+	};
+}
+
+async function expectNoTitleControlMutations(spies: ReturnType<typeof spyOnTitleControlMutations>): Promise<void> {
+	// Title generation is fire-and-forget. Cross an event-loop turn so a handler
+	// that incorrectly defers either generation call cannot escape the assertion.
+	await new Promise<void>(resolve => setImmediate(resolve));
+	for (const spy of Object.values(spies)) expect(spy).not.toHaveBeenCalled();
+}
+
+function restoreTitleControlSpies(spies: ReturnType<typeof spyOnTitleControlMutations>): void {
+	for (const spy of Object.values(spies)) spy.mockRestore();
+}
+
 async function expectModelControlsRejected(conn: WsConnection, code: string): Promise<void> {
 	for (const frame of MODEL_CONTROL_FRAMES) await expectPolicyError(conn, frame, code);
+}
+
+async function expectTitleControlsRejected(conn: WsConnection, code: string): Promise<void> {
+	for (const frame of TITLE_CONTROL_FRAMES) await expectPolicyError(conn, frame, code);
 }
 
 test.describe("authenticated WebSocket session write policy", () => {
@@ -149,6 +178,7 @@ test.describe("authenticated WebSocket session write policy", () => {
 		const grantToolPermission = vi.spyOn(gateway.sessionManager, "grantToolPermission").mockRejectedValue(new Error("policy guard missed grant"));
 		const compact = vi.spyOn(live.rpcClient, "compact").mockRejectedValue(new Error("policy guard missed compact"));
 		const modelControlSpies = spyOnModelControlMutations(gateway, live);
+		const titleControlSpies = spyOnTitleControlMutations(gateway);
 		try {
 			await expectPolicyError(conn, { type: "prompt", text: "must not run" }, "SESSION_READ_ONLY");
 			// A read-only session has no streaming-steer carve-out.
@@ -159,6 +189,7 @@ test.describe("authenticated WebSocket session write policy", () => {
 				await expectPolicyError(conn, frame, "SESSION_READ_ONLY");
 			}
 			await expectModelControlsRejected(conn, "SESSION_READ_ONLY");
+			await expectTitleControlsRejected(conn, "SESSION_READ_ONLY");
 			await expectExtensionWritesRejected(conn, "SESSION_READ_ONLY", "read-only");
 
 			expect(enqueuePrompt).not.toHaveBeenCalled();
@@ -171,6 +202,7 @@ test.describe("authenticated WebSocket session write policy", () => {
 			expect(grantToolPermission).not.toHaveBeenCalled();
 			expect(compact).not.toHaveBeenCalled();
 			expectNoModelControlMutations(modelControlSpies);
+			await expectNoTitleControlMutations(titleControlSpies);
 			await expectReadFramesStillWork(conn);
 		} finally {
 			live.status = "idle";
@@ -184,6 +216,7 @@ test.describe("authenticated WebSocket session write policy", () => {
 			grantToolPermission.mockRestore();
 			compact.mockRestore();
 			restoreModelControlSpies(modelControlSpies);
+			restoreTitleControlSpies(titleControlSpies);
 			conn.close();
 			await deleteSession(sessionId);
 		}
@@ -208,6 +241,7 @@ test.describe("authenticated WebSocket session write policy", () => {
 		const grantToolPermission = vi.spyOn(gateway.sessionManager, "grantToolPermission").mockRejectedValue(new Error("policy guard missed grant"));
 		const compact = vi.spyOn(live.rpcClient, "compact").mockRejectedValue(new Error("policy guard missed compact"));
 		const modelControlSpies = spyOnModelControlMutations(gateway, live);
+		const titleControlSpies = spyOnTitleControlMutations(gateway);
 		try {
 			await expectPolicyError(conn, { type: "prompt", text: "must not start review" }, "NON_INTERACTIVE_PROMPT");
 			await expectPolicyError(conn, { type: "steer", text: "must not queue review" }, "NON_INTERACTIVE_STEER");
@@ -218,7 +252,9 @@ test.describe("authenticated WebSocket session write policy", () => {
 				await expectPolicyError(conn, frame, "NON_INTERACTIVE_WORK_CONTROL");
 			}
 			await expectModelControlsRejected(conn, "NON_INTERACTIVE_WORK_CONTROL");
+			await expectTitleControlsRejected(conn, "NON_INTERACTIVE_WORK_CONTROL");
 			expectNoModelControlMutations(modelControlSpies);
+			await expectNoTitleControlMutations(titleControlSpies);
 
 			await expectReadFramesStillWork(conn);
 
@@ -242,6 +278,7 @@ test.describe("authenticated WebSocket session write policy", () => {
 			expect(grantToolPermission).not.toHaveBeenCalled();
 			expect(compact).not.toHaveBeenCalled();
 			expectNoModelControlMutations(modelControlSpies);
+			await expectNoTitleControlMutations(titleControlSpies);
 		} finally {
 			live.status = "idle";
 			enqueuePrompt.mockRestore();
@@ -254,6 +291,7 @@ test.describe("authenticated WebSocket session write policy", () => {
 			grantToolPermission.mockRestore();
 			compact.mockRestore();
 			restoreModelControlSpies(modelControlSpies);
+			restoreTitleControlSpies(titleControlSpies);
 			conn.close();
 			await deleteSession(sessionId);
 		}
