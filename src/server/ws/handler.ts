@@ -326,66 +326,127 @@ export const MAX_AUTHENTICATED_PROMPT_TEXT_BYTES = 8 * 1024 * 1024;
 const SESSION_COMMAND_SERIALISER = new SessionCommandSerialiser();
 const EXTENSION_CHANNEL_WS_ENVELOPE_TOO_LARGE_MESSAGE = `Extension channel frame exceeds maximum envelope size (${MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES} bytes)`;
 
-type SessionMessageWrite = Extract<ClientMessage, {
-	type: "prompt" | "steer" | "steer_queued" | "remove_queued" | "reorder_queue";
+type SessionWorkMessage = Extract<ClientMessage, {
+	type:
+		| "prompt"
+		| "steer"
+		| "steer_queued"
+		| "remove_queued"
+		| "reorder_queue"
+		| "retry"
+		| "restart_agent"
+		| "compact"
+		| "grant_tool_permission"
+		| "ext_session_write_permit"
+		| "ext_session_post";
 }>;
 
-function isSessionMessageWrite(msg: ClientMessage): msg is SessionMessageWrite {
-	return msg.type === "prompt"
-		|| msg.type === "steer"
-		|| msg.type === "steer_queued"
-		|| msg.type === "remove_queued"
-		|| msg.type === "reorder_queue";
+function isSessionWorkMessage(msg: ClientMessage): msg is SessionWorkMessage {
+	switch (msg.type) {
+		case "prompt":
+		case "steer":
+		case "steer_queued":
+		case "remove_queued":
+		case "reorder_queue":
+		case "retry":
+		case "restart_agent":
+		case "compact":
+		case "grant_tool_permission":
+		case "ext_session_write_permit":
+		case "ext_session_post":
+			return true;
+		default:
+			return false;
+	}
+}
+
+function sendSessionWorkPolicyError(
+	ws: WebSocket,
+	msg: SessionWorkMessage,
+	code: string,
+	message: string,
+): void {
+	// Extension session-write callers wait for their request-correlated result;
+	// a generic error frame would leave the Host API call hanging until timeout.
+	if (msg.type === "ext_session_write_permit") {
+		const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
+		send(ws, { type: "ext_session_write_permit_result", requestId, ok: false, error: code });
+		return;
+	}
+	if (msg.type === "ext_session_post") {
+		const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
+		send(ws, { type: "ext_session_post_result", requestId, ok: false, error: code });
+		return;
+	}
+	send(ws, { type: "error", message, code });
 }
 
 /**
  * Enforce persisted session interaction policy at the authenticated transport
- * boundary. UI flags are presentation only: a crafted frame must not prompt a
- * read-only reviewer or start/queue work for an automated reviewer. Persisted
- * `true` wins over a stale live field; the live field closes the inverse window
- * while a metadata update is being flushed.
+ * boundary. UI flags are presentation only: a crafted frame must not enqueue,
+ * redirect, retry, restart, compact, grant-and-resume, or extension-post work
+ * in a restricted session. Stop/deny controls remain available because they
+ * only halt active work. Persisted `true` wins over a stale live field; the live
+ * field closes the inverse window while a metadata update is being flushed.
  */
-function rejectSessionMessageWrite(
+function rejectRestrictedSessionWork(
 	ws: WebSocket,
-	msg: SessionMessageWrite,
+	msg: SessionWorkMessage,
 	session: { status: string; readOnly?: boolean; nonInteractive?: boolean },
 	persisted?: { readOnly?: boolean; nonInteractive?: boolean },
 ): boolean {
 	if (session.readOnly === true || persisted?.readOnly === true) {
-		send(ws, {
-			type: "error",
-			message: "This session is read-only and does not accept prompts or queue changes.",
-			code: "SESSION_READ_ONLY",
-		});
+		sendSessionWorkPolicyError(
+			ws,
+			msg,
+			"SESSION_READ_ONLY",
+			"This session is read-only and does not accept agent work commands.",
+		);
 		return true;
 	}
 
 	if (session.nonInteractive !== true && persisted?.nonInteractive !== true) return false;
 	if (msg.type === "prompt") {
-		send(ws, {
-			type: "error",
-			message: "Cannot prompt a non-interactive (automated review) session.",
-			code: "NON_INTERACTIVE_PROMPT",
-		});
+		sendSessionWorkPolicyError(
+			ws,
+			msg,
+			"NON_INTERACTIVE_PROMPT",
+			"Cannot prompt a non-interactive (automated review) session.",
+		);
 		return true;
 	}
 	if (msg.type === "steer") {
 		// Automated reviewers intentionally remain redirectable during an active
 		// stream, but an idle/queued steer would start new reviewer work.
 		if (session.status === "streaming") return false;
-		send(ws, {
-			type: "error",
-			message: "Cannot enqueue a steered prompt for a non-interactive (automated review) session; steer can only redirect it while streaming.",
-			code: "NON_INTERACTIVE_STEER",
-		});
+		sendSessionWorkPolicyError(
+			ws,
+			msg,
+			"NON_INTERACTIVE_STEER",
+			"Cannot enqueue a steered prompt for a non-interactive (automated review) session; steer can only redirect it while streaming.",
+		);
+		return true;
+	}
+	if (
+		msg.type === "steer_queued"
+		|| msg.type === "remove_queued"
+		|| msg.type === "reorder_queue"
+	) {
+		sendSessionWorkPolicyError(
+			ws,
+			msg,
+			"NON_INTERACTIVE_QUEUE_CONTROL",
+			"Cannot modify the prompt queue for a non-interactive (automated review) session.",
+		);
 		return true;
 	}
 
-	send(ws, {
-		type: "error",
-		message: "Cannot modify the prompt queue for a non-interactive (automated review) session.",
-		code: "NON_INTERACTIVE_QUEUE_CONTROL",
-	});
+	sendSessionWorkPolicyError(
+		ws,
+		msg,
+		"NON_INTERACTIVE_WORK_CONTROL",
+		"Cannot start or alter agent work for a non-interactive (automated review) session.",
+	);
 	return true;
 }
 
@@ -751,6 +812,19 @@ export function handleWebSocketConnection(
 			return;
 		}
 
+		// Enforce durable interaction policy before lifecycle-specific routing so
+		// restricted work frames always receive the same policy response, including
+		// while the agent is preparing or starting.
+		if (
+			isSessionWorkMessage(msg)
+			&& rejectRestrictedSessionWork(
+				ws,
+				msg,
+				session,
+				sessionManager.getPersistedSession(sessionId),
+			)
+		) return;
+
 		// Block commands while session is still preparing (worktree being created)
 		// or starting (agent process launched but setup commands still running).
 		// Return safe responses for read-only commands; let prompts through to
@@ -770,7 +844,7 @@ export function handleWebSocketConnection(
 					return;
 				case "prompt":
 					// Allow ordinary prompts — they'll be queued by enqueuePrompt since status
-					// != idle. Session interaction policy is still enforced immediately below.
+					// != idle. Restricted-session policy was already enforced above.
 					break;
 				case "ext_surface_token":
 					// Pack-bound Host API calls (session-menu launchers, panels) may be clicked
@@ -785,16 +859,6 @@ export function handleWebSocketConnection(
 					return;
 			}
 		}
-
-		if (
-			isSessionMessageWrite(msg)
-			&& rejectSessionMessageWrite(
-				ws,
-				msg,
-				session,
-				sessionManager.getPersistedSession(sessionId),
-			)
-		) return;
 
 		try {
 			const mintPackSurfaceToken = (tokenMsg: Extract<ClientMessage, { type: "ext_surface_token" }>): { ok: true; token: string } | { ok: false; error: string } => {
