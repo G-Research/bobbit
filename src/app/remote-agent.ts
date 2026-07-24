@@ -49,7 +49,7 @@ import { showFaviconBadge } from "./favicon-badge.js";
 import { isEffectivePlayFinishSoundEnabled, type FinishSoundSource } from "./play-finish-sound.js";
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
 import { scheduleGateStatusRefreshForGoal, refreshSessions, scheduleSessionListRefreshFromPush, scheduleStaffListRefreshFromPush } from "./remote-agent-refresh.js";
-import { applySidePanelWorkspaceFromServer, getSidePanelWorkspace, hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
+import { applySidePanelWorkspaceFromServer, closeSidePanelTab, getSidePanelWorkspace, hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { publishClientMessage, publishClientStatus } from "./session-event-bus.js";
 import { registerSessionPoster, unregisterSessionPoster, type SessionPostRequest } from "./session-write-bridge.js";
@@ -722,9 +722,41 @@ export class RemoteAgent {
 	 * This intentionally has no active-session guard: cached/background sessions
 	 * still own their keyed workspace and must not retain a submitted review tab.
 	 */
-	reconcileSubmittedReviewWorkspace(): void {
-		if (!this._sessionId || !isReviewSubmitted(this._sessionId)) return;
-		closeReviewWorkspaceTabs(undefined, { sessionId: this._sessionId, select: false });
+	async reconcileSubmittedReviewWorkspace(): Promise<void> {
+		const sessionId = this._sessionId;
+		if (!sessionId || !isReviewSubmitted(sessionId)) return;
+		const isReviewTab = (tab: { id?: string; kind?: string }): boolean =>
+			tab.kind === "review" || tab.id?.startsWith("review:") === true;
+		const reviewTabIds = getSidePanelWorkspace(sessionId).tabs
+			.filter(isReviewTab)
+			.map((tab) => tab.id);
+		if (reviewTabIds.length === 0) return;
+
+		// Use the normal mutation path first so successful deletes retain all
+		// server revision/conflict semantics. Some compatible endpoints return
+		// 204 for DELETE; the workspace helper then refetches and may receive a
+		// stale pre-delete snapshot. Reapply the submitted-review policy to that
+		// settled snapshot below without inventing a new revision.
+		for (const tabId of reviewTabIds) {
+			try {
+				await closeSidePanelTab(tabId, { sessionId });
+			} catch (err) {
+				console.warn("[RemoteAgent] submitted-review workspace cleanup failed:", err);
+			}
+		}
+		if (!isReviewSubmitted(sessionId)) return;
+		const settled = getSidePanelWorkspace(sessionId);
+		const tabs = settled.tabs.filter((tab) => !isReviewTab(tab));
+		if (tabs.length === settled.tabs.length) return;
+		const activeTabId = tabs.some((tab) => tab.id === settled.activeTabId)
+			? settled.activeTabId
+			: tabs[0]?.id || "";
+		applySidePanelWorkspaceFromServer({
+			...settled,
+			tabs,
+			activeTabId,
+			updatedAt: Date.now(),
+		}, { source: "rest", force: true });
 	}
 	private _isActiveSession(): boolean {
 		return this._sessionId !== "" && state.selectedSessionId === this._sessionId;
@@ -860,9 +892,8 @@ export class RemoteAgent {
 						// binding. Reconnects still refresh the server workspace here and
 						// then replay submitted-review cleanup against the hydrated tabs.
 						if (!initial) {
-							void hydrateSidePanelWorkspace(this._sessionId).then(() => {
-								this.reconcileSubmittedReviewWorkspace();
-							});
+							void hydrateSidePanelWorkspace(this._sessionId)
+								.then(() => this.reconcileSubmittedReviewWorkspace());
 						}
 						// S2: deliver any prompts/steers/retries the user issued while
 						// the socket was reconnecting, before resume/snapshot traffic.
@@ -1798,7 +1829,7 @@ export class RemoteAgent {
 								if (!this._isActiveSession()) break;
 							}
 						} else {
-							this.reconcileSubmittedReviewWorkspace();
+							await this.reconcileSubmittedReviewWorkspace();
 						}
 						if (this._isActiveSession()) {
 							const reviewSources = await loadReviewSources();
