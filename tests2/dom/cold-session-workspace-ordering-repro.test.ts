@@ -39,6 +39,11 @@ import * as packRenderers from "../../src/app/pack-renderers.js";
 import * as reviewSourcesLazy from "../../src/app/review-sources-lazy.js";
 import { stopPreviewSubscription } from "../../src/app/preview-panel.js";
 import { stopInboxSubscription } from "../../src/app/inbox-panel.js";
+import {
+	clearReviewSubmitted,
+	isReviewSubmitted,
+	markReviewSubmitted,
+} from "../../src/ui/components/review/AnnotationStore.js";
 
 const SESSION_A = "cold-session-a";
 const SESSION_B = "cold-session-b";
@@ -259,7 +264,11 @@ function renderTranscript(sessionId: string, agent: any): void {
 function installChatPanelHarness(): void {
 	vi.spyOn(ChatPanel.prototype, "setAgent").mockImplementation(async function (this: ChatPanel, agent: any) {
 		this.agent = agent;
-		this.agentInterface = {
+		let agentInterface: any;
+		const composer = {
+			onSend: async (input: string) => agent.prompt(input),
+		};
+		agentInterface = {
 			session: agent,
 			projectId: undefined,
 			cwd: "",
@@ -269,8 +278,14 @@ function installChatPanelHarness(): void {
 			requestUpdate: vi.fn(),
 			addEventListener: vi.fn(),
 			removeEventListener: vi.fn(),
-			querySelector: vi.fn(),
-		} as any;
+			querySelector: vi.fn((selector: string) => {
+				if (selector !== "message-editor") return null;
+				const composerHidden = agentInterface.readOnly
+					&& !(agentInterface.nonInteractive && agent.state.isStreaming);
+				return composerHidden ? null : composer;
+			}),
+		};
+		this.agentInterface = agentInterface;
 		const sessionId = agent.gatewaySessionId as string;
 		let scheduled = false;
 		const draw = () => {
@@ -337,7 +352,7 @@ beforeEach(() => {
 	vi.spyOn(packEntrypoints, "reconcilePackEntrypointsForProject").mockResolvedValue();
 	vi.spyOn(reviewSourcesLazy, "loadReviewSources").mockResolvedValue({
 		restorePersistedReviewDocuments: (sessionId: string) => {
-			if (state.selectedSessionId !== sessionId) return;
+			if (state.selectedSessionId !== sessionId || isReviewSubmitted(sessionId)) return;
 			const title = `${sessionId} review`;
 			state.reviewDocuments = new Map([[title, { title, markdown: `# ${title}` } as any]]);
 			state.reviewActiveTab = title;
@@ -405,7 +420,10 @@ afterEach(async () => {
 	try { stopPreviewSubscription(); } catch { /* singleton cleanup */ }
 	try { stopInboxSubscription(); } catch { /* singleton cleanup */ }
 	try { disconnectGateway(); } catch { /* singleton cleanup */ }
-	for (const sessionId of trackedSessions) uncacheSession(sessionId);
+	for (const sessionId of trackedSessions) {
+		await clearReviewSubmitted(sessionId);
+		uncacheSession(sessionId);
+	}
 	state.selectedSessionId = null;
 	state.connectingSessionId = null;
 	state.chatPanel = null;
@@ -500,6 +518,146 @@ describe("cold session transcript/workspace ordering", () => {
 		expect(state.reviewDocuments.has(`${SESSION_B} review`)).toBe(true);
 		expect(finalTranscriptRow(SESSION_B)?.textContent).toBe(`${SESSION_B} transcript row ${TRANSCRIPT_SIZE - 1}`);
 		expect(state.sidePanelWorkspaceBySession[SESSION_A]?.sessionId).toBe(SESSION_A);
+	});
+
+	it("does not reopen a submitted review tab when delayed workspace hydration settles", async () => {
+		await markReviewSubmitted(SESSION_A);
+		const pendingConnect = connectToSession(SESSION_A, true);
+
+		try {
+			await waitFor(
+				() => (workspaceFetchCount.get(SESSION_A) || 0) > 0,
+				"SUBMITTED_REVIEW_HYDRATION_REGRESSION: delayed workspace hydration did not start",
+			);
+			expect(isReviewSubmitted(SESSION_A)).toBe(true);
+			expect(state.reviewDocuments.has(`${SESSION_A} review`)).toBe(false);
+			expect(gateFor(SESSION_A).settled).toBe(false);
+
+			gateFor(SESSION_A).release();
+			await pendingConnect;
+
+			expect.soft(
+				state.sidePanelWorkspaceBySession[SESSION_A]?.tabs.some((tab) => tab.kind === "review"),
+				"SUBMITTED_REVIEW_HYDRATION_REGRESSION: delayed workspace hydration resurrected a submitted review tab",
+			).toBe(false);
+			expect.soft(
+				state.panelTabs.some((tab) => tab.kind === "review"),
+				"SUBMITTED_REVIEW_HYDRATION_REGRESSION: submitted review leaked into foreground panel tabs",
+			).toBe(false);
+			expect.soft(state.reviewDocuments.has(`${SESSION_A} review`)).toBe(false);
+			expect.soft(state.reviewPanelOpen).toBe(false);
+		} finally {
+			gateFor(SESSION_A).release();
+			await pendingConnect.catch(() => {});
+			await clearReviewSubmitted(SESSION_A);
+		}
+	});
+
+	it("keeps the exact cached A agent and panel connected after A to B to A before A hydration releases", async () => {
+		const originalConnectA = connectToSession(SESSION_A, true);
+		let connectB: Promise<void> | undefined;
+
+		try {
+			await waitFor(
+				() => (workspaceFetchCount.get(SESSION_A) || 0) > 0 && finalTranscriptRow(SESSION_A) !== null,
+				"CACHE_REACTIVATION_HYDRATION_REGRESSION: original A connection did not bind before hydration",
+			);
+			const cachedPanelA = state.chatPanel;
+			const cachedAgentA = state.remoteAgent;
+			expect(cachedPanelA).not.toBeNull();
+			expect(cachedAgentA).not.toBeNull();
+			expect(gateFor(SESSION_A).settled).toBe(false);
+
+			connectB = connectToSession(SESSION_B, true);
+			await waitFor(
+				() => (workspaceFetchCount.get(SESSION_B) || 0) > 0,
+				"CACHE_REACTIVATION_HYDRATION_REGRESSION: B hydration did not start",
+			);
+			gateFor(SESSION_B).release();
+			await connectB;
+
+			await connectToSession(SESSION_A, true);
+			expect(state.chatPanel).toBe(cachedPanelA);
+			expect(state.remoteAgent).toBe(cachedAgentA);
+			expect(cachedAgentA?.connected).toBe(true);
+
+			gateFor(SESSION_A).release();
+			await originalConnectA;
+
+			expect.soft(state.selectedSessionId).toBe(SESSION_A);
+			expect.soft(
+				state.remoteAgent === cachedAgentA,
+				"CACHE_REACTIVATION_HYDRATION_REGRESSION: stale original A completion detached the reactivated cached agent",
+			).toBe(true);
+			expect.soft(
+				state.chatPanel === cachedPanelA,
+				"CACHE_REACTIVATION_HYDRATION_REGRESSION: stale original A completion replaced the reactivated cached panel",
+			).toBe(true);
+			expect.soft(cachedAgentA?.connected).toBe(true);
+			expect.soft(state.chatPanel?.agent === cachedAgentA).toBe(true);
+		} finally {
+			gateFor(SESSION_A).release();
+			gateFor(SESSION_B).release();
+			await Promise.allSettled([originalConnectA, ...(connectB ? [connectB] : [])]);
+		}
+	});
+
+	it("applies readOnly and nonInteractive restrictions before held hydration and blocks composer submission", async () => {
+		state.gatewaySessions = state.gatewaySessions.map((session) => {
+			if (session.id === SESSION_A) return { ...session, readOnly: true };
+			if (session.id === SESSION_B) return { ...session, nonInteractive: true };
+			return session;
+		});
+		const connectReadOnly = connectToSession(SESSION_A, true, { readOnly: true });
+		let connectNonInteractive: Promise<void> | undefined;
+
+		try {
+			await waitFor(
+				() => (workspaceFetchCount.get(SESSION_A) || 0) > 0,
+				"SESSION_RESTRICTION_HYDRATION_REGRESSION: read-only hydration did not start",
+			);
+			const readOnlyInterface = state.chatPanel?.agentInterface as any;
+			expect(readOnlyInterface).toBeTruthy();
+			expect(gateFor(SESSION_A).settled).toBe(false);
+
+			connectNonInteractive = connectToSession(SESSION_B, true);
+			await waitFor(
+				() => (workspaceFetchCount.get(SESSION_B) || 0) > 0,
+				"SESSION_RESTRICTION_HYDRATION_REGRESSION: non-interactive hydration did not start",
+			);
+			const nonInteractiveInterface = state.chatPanel?.agentInterface as any;
+			expect(nonInteractiveInterface).toBeTruthy();
+			expect(gateFor(SESSION_B).settled).toBe(false);
+
+			const readOnlyComposer = readOnlyInterface.querySelector("message-editor") as { onSend: (input: string) => Promise<void> } | null;
+			const nonInteractiveComposer = nonInteractiveInterface.querySelector("message-editor") as { onSend: (input: string) => Promise<void> } | null;
+			await readOnlyComposer?.onSend("read-only composer must not submit");
+			await nonInteractiveComposer?.onSend("non-interactive composer must not submit");
+
+			expect.soft(
+				readOnlyInterface.readOnly,
+				"SESSION_RESTRICTION_HYDRATION_REGRESSION: readOnly was deferred until workspace hydration settled",
+			).toBe(true);
+			expect.soft(readOnlyComposer).toBeNull();
+			expect.soft(
+				nonInteractiveInterface.readOnly,
+				"SESSION_RESTRICTION_HYDRATION_REGRESSION: nonInteractive readOnly was deferred until workspace hydration settled",
+			).toBe(true);
+			expect.soft(nonInteractiveInterface.nonInteractive).toBe(true);
+			expect.soft(nonInteractiveComposer).toBeNull();
+			for (const sessionId of [SESSION_A, SESSION_B]) {
+				const promptFrames = timeline.filter((entry) =>
+					entry.kind === "ws" && entry.sessionId === sessionId && entry.frame.type === "prompt");
+				expect.soft(
+					promptFrames,
+					`SESSION_RESTRICTION_HYDRATION_REGRESSION: ${sessionId} submitted through a restricted composer`,
+				).toHaveLength(0);
+			}
+		} finally {
+			gateFor(SESSION_A).release();
+			gateFor(SESSION_B).release();
+			await Promise.allSettled([connectReadOnly, ...(connectNonInteractive ? [connectNonInteractive] : [])]);
+		}
 	});
 
 	it("retains one reconnect workspace hydration and the zero-seq snapshot fallback", async () => {
