@@ -64,6 +64,9 @@ const timeline: TimelineEntry[] = [];
 const workspaceGates = new Map<string, DeferredGate>();
 const workspaceFetchCount = new Map<string, number>();
 const transcripts = new Map<string, any[]>();
+let sessionListGate: DeferredGate | null = null;
+let sessionListFetchCount = 0;
+let sessionListResponseSessions: GatewaySession[] | null = null;
 
 function deferredGate(): DeferredGate {
 	let releasePromise!: () => void;
@@ -181,6 +184,12 @@ async function fetchFixture(input: RequestInfo | URL, init?: RequestInit): Promi
 	if (url.pathname.endsWith("/pr-status")) return new Response(null, { status: 204 });
 	if (url.pathname === "/api/preview/mount") return new Response(null, { status: 404 });
 	if (url.pathname === "/api/sessions") {
+		sessionListFetchCount++;
+		const delayedList = sessionListGate;
+		if (delayedList && sessionListFetchCount === 1) await delayedList.promise;
+		if (sessionListResponseSessions) {
+			return Response.json({ changed: true, generation: 2, sessions: sessionListResponseSessions });
+		}
 		return Response.json({ changed: false, generation: 1, sessions: state.gatewaySessions });
 	}
 	if (url.pathname === "/api/goals") {
@@ -314,8 +323,19 @@ function getMessagesIndex(sessionId: string): number {
 		entry.kind === "ws" && entry.sessionId === sessionId && entry.frame.type === "get_messages");
 }
 
-function firstSessionRestIndex(sessionId: string): number {
-	return timeline.findIndex((entry) => entry.kind === "rest" && entry.sessionId === sessionId);
+const FIXTURE_BOOTSTRAP_REST_PATHS = new Set([
+	"/api/preview/mount",
+]);
+
+function isRelevantHydrationRestPath(path: string): boolean {
+	const pathname = path.split("?", 1)[0];
+	if (FIXTURE_BOOTSTRAP_REST_PATHS.has(pathname)) return false;
+	if (pathname === "/api/sessions" || pathname === "/api/projects" || pathname === "/api/goals") return true;
+	return /^\/api\/sessions\/[^/]+\/(?:side-panel-workspace|draft|git-status)$/.test(pathname);
+}
+
+function firstRelevantRestIndex(): number {
+	return timeline.findIndex((entry) => entry.kind === "rest" && isRelevantHydrationRestPath(entry.path));
 }
 
 function finalTranscriptRow(sessionId: string): HTMLElement | null {
@@ -330,6 +350,9 @@ beforeEach(() => {
 	timeline.length = 0;
 	workspaceGates.clear();
 	workspaceFetchCount.clear();
+	sessionListGate = null;
+	sessionListFetchCount = 0;
+	sessionListResponseSessions = null;
 	ControlledWebSocket.instances.length = 0;
 	transcripts.clear();
 	for (const sessionId of trackedSessions) transcripts.set(sessionId, transcriptFor(sessionId));
@@ -414,6 +437,7 @@ beforeEach(() => {
 
 afterEach(async () => {
 	for (const gate of workspaceGates.values()) gate.release();
+	sessionListGate?.release();
 	await Promise.resolve();
 	try { backToSessions(); } catch { /* singleton cleanup */ }
 	try { flushAndTeardownDraft(); } catch { /* singleton cleanup */ }
@@ -450,10 +474,14 @@ describe("cold session transcript/workspace ordering", () => {
 				requestIndex,
 				"COLD_SESSION_LOAD_ORDERING_REGRESSION: get_messages was blocked by pending side-panel workspace hydration",
 			).toBeGreaterThanOrEqual(0);
-			const restIndex = firstSessionRestIndex(SESSION_A);
+			const restIndex = firstRelevantRestIndex();
+			expect(
+				restIndex,
+				"COLD_SESSION_LOAD_ORDERING_REGRESSION: the fixture must observe a relevant REST hydration request",
+			).toBeGreaterThanOrEqual(0);
 			expect(
 				requestIndex,
-				"COLD_SESSION_LOAD_ORDERING_REGRESSION: get_messages must precede every session-scoped REST hydration request",
+				"COLD_SESSION_LOAD_ORDERING_REGRESSION: get_messages must precede the first relevant REST request globally (session-list, projects, goals, workspace, draft, or git)",
 			).toBeLessThan(restIndex);
 			expect(
 				workspaceFetchCount.get(SESSION_A),
@@ -518,6 +546,99 @@ describe("cold session transcript/workspace ordering", () => {
 		expect(state.reviewDocuments.has(`${SESSION_B} review`)).toBe(true);
 		expect(finalTranscriptRow(SESSION_B)?.textContent).toBe(`${SESSION_B} transcript row ${TRANSCRIPT_SIZE - 1}`);
 		expect(state.sidePanelWorkspaceBySession[SESSION_A]?.sessionId).toBe(SESSION_A);
+	});
+
+	it("does not let A cross a delayed session-list await and bind into B's foreground state", async () => {
+		const sessionA = { ...gatewaySession(SESSION_A), assistantType: "goal" };
+		const sessionB = { ...gatewaySession(SESSION_B), assistantType: "support" };
+		state.gatewaySessions = [sessionB];
+		sessionListResponseSessions = [sessionA, sessionB];
+		const delayedSessionList = deferredGate();
+		sessionListGate = delayedSessionList;
+
+		const connectA = connectToSession(SESSION_A, true);
+		let connectB: Promise<void> | undefined;
+
+		try {
+			await waitFor(
+				() => sessionListFetchCount === 1,
+				"PRE_BIND_STALE_NAVIGATION_REGRESSION: A never reached delayed session-list hydration",
+			);
+			expect(getMessagesIndex(SESSION_A)).toBeGreaterThanOrEqual(0);
+			expect(delayedSessionList.settled).toBe(false);
+			expect(gateFor(SESSION_A).settled).toBe(false);
+
+			const abandonedPanelA = state.chatPanel;
+			expect((abandonedPanelA?.agent as any)?.gatewaySessionId).toBeUndefined();
+			connectB = connectToSession(SESSION_B, true);
+			await waitFor(
+				() => (workspaceFetchCount.get(SESSION_B) || 0) > 0,
+				"PRE_BIND_STALE_NAVIGATION_REGRESSION: B workspace hydration did not start",
+			);
+			gateFor(SESSION_B).release();
+			await connectB;
+			await waitFor(
+				() => finalTranscriptRow(SESSION_B) !== null,
+				"PRE_BIND_STALE_NAVIGATION_REGRESSION: B transcript did not render",
+			);
+
+			const panelB = state.chatPanel;
+			const remoteB = state.remoteAgent;
+			expect(panelB).not.toBe(abandonedPanelA);
+			expect(panelB?.agent as unknown).toBe(remoteB);
+			expect(state.reviewDocuments.has(`${SESSION_B} review`)).toBe(true);
+
+			const inboxB = [{ id: "b-inbox-entry", state: "pending", title: "B inbox" }] as any[];
+			state.inboxEntries = inboxB;
+			state.inboxPanelOpen = true;
+			state.assistantType = "support";
+			state.assistantTab = "preview";
+			state.assistantHasProposal = true;
+
+			delayedSessionList.release();
+			await connectA;
+
+			expect.soft(state.remoteAgent, "PRE_BIND_STALE_NAVIGATION_REGRESSION: delayed A replaced B's remote").toBe(remoteB);
+			expect.soft(state.chatPanel, "PRE_BIND_STALE_NAVIGATION_REGRESSION: delayed A replaced B's ChatPanel").toBe(panelB);
+			expect.soft(
+				(panelB?.agent as any)?.gatewaySessionId,
+				"PRE_BIND_STALE_NAVIGATION_REGRESSION: delayed A bound into B's ChatPanel",
+			).toBe(SESSION_B);
+			expect.soft({
+				selectedSessionId: state.selectedSessionId,
+				visibleBTranscript: finalTranscriptRow(SESSION_B)?.textContent,
+				visibleATranscript: document.querySelector(`[data-cold-transcript="${SESSION_A}"]`) !== null,
+				panelWorkspaceSessionId: (state as any).panelWorkspace?.sessionId,
+				panelTabsOwnedByB: state.panelTabs.every((tab) => (tab.source as any).sessionId === SESSION_B),
+				reviewDocumentTitles: [...state.reviewDocuments.keys()],
+				reviewActiveTab: state.reviewActiveTab,
+				reviewPanelOpen: state.reviewPanelOpen,
+				inboxEntryIds: state.inboxEntries.map((entry) => entry.id),
+				inboxPanelOpen: state.inboxPanelOpen,
+				assistantType: state.assistantType,
+				assistantTab: state.assistantTab,
+				assistantHasProposal: state.assistantHasProposal,
+			}, "PRE_BIND_STALE_NAVIGATION_REGRESSION: delayed A overwrote B's panel, review, inbox, or assistant state").toEqual({
+				selectedSessionId: SESSION_B,
+				visibleBTranscript: `${SESSION_B} transcript row ${TRANSCRIPT_SIZE - 1}`,
+				visibleATranscript: false,
+				panelWorkspaceSessionId: SESSION_B,
+				panelTabsOwnedByB: true,
+				reviewDocumentTitles: [`${SESSION_B} review`],
+				reviewActiveTab: `${SESSION_B} review`,
+				reviewPanelOpen: true,
+				inboxEntryIds: inboxB.map((entry) => entry.id),
+				inboxPanelOpen: true,
+				assistantType: "support",
+				assistantTab: "preview",
+				assistantHasProposal: true,
+			});
+		} finally {
+			delayedSessionList.release();
+			gateFor(SESSION_A).release();
+			gateFor(SESSION_B).release();
+			await Promise.allSettled([connectA, ...(connectB ? [connectB] : [])]);
+		}
 	});
 
 	it("does not reopen a submitted review tab when delayed workspace hydration settles", async () => {
