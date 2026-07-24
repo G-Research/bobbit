@@ -335,6 +335,9 @@ type SessionWorkMessage = Extract<ClientMessage, {
 		| "reorder_queue"
 		| "retry"
 		| "restart_agent"
+		| "set_model"
+		| "set_image_model"
+		| "set_thinking_level"
 		| "compact"
 		| "grant_tool_permission"
 		| "ext_session_write_permit"
@@ -350,6 +353,9 @@ function isSessionWorkMessage(msg: ClientMessage): msg is SessionWorkMessage {
 		case "reorder_queue":
 		case "retry":
 		case "restart_agent":
+		case "set_model":
+		case "set_image_model":
+		case "set_thinking_level":
 		case "compact":
 		case "grant_tool_permission":
 		case "ext_session_write_permit":

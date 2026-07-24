@@ -100,6 +100,35 @@ const WORK_CONTROL_FRAMES: ReadonlyArray<Record<string, unknown>> = [
 	{ type: "grant_tool_permission", toolName: "bash", scope: "tool", mode: "session-only" },
 ];
 
+const MODEL_CONTROL_FRAMES: ReadonlyArray<Record<string, unknown>> = [
+	{ type: "set_model", provider: "anthropic", modelId: "claude-sonnet-4-20250514" },
+	{ type: "set_thinking_level", level: "high" },
+	{ type: "set_image_model", provider: "openai", modelId: "gpt-image-2" },
+];
+
+function spyOnModelControlMutations(gateway: any, live: any) {
+	return {
+		setModel: vi.spyOn(live.rpcClient, "setModel"),
+		setThinkingLevel: vi.spyOn(live.rpcClient, "setThinkingLevel"),
+		persistSessionModel: vi.spyOn(gateway.sessionManager, "persistSessionModel"),
+		updateModelNameFile: vi.spyOn(gateway.sessionManager, "updateModelNameFile"),
+		persistSessionImageModel: vi.spyOn(gateway.sessionManager, "persistSessionImageModel"),
+		validateImageModel: vi.spyOn(gateway.sessionManager, "isKnownImageModel"),
+	};
+}
+
+function expectNoModelControlMutations(spies: ReturnType<typeof spyOnModelControlMutations>): void {
+	for (const spy of Object.values(spies)) expect(spy).not.toHaveBeenCalled();
+}
+
+function restoreModelControlSpies(spies: ReturnType<typeof spyOnModelControlMutations>): void {
+	for (const spy of Object.values(spies)) spy.mockRestore();
+}
+
+async function expectModelControlsRejected(conn: WsConnection, code: string): Promise<void> {
+	for (const frame of MODEL_CONTROL_FRAMES) await expectPolicyError(conn, frame, code);
+}
+
 test.describe("authenticated WebSocket session write policy", () => {
 	test("persisted read-only policy rejects every agent work frame while reads remain available", async ({ gateway }) => {
 		const sessionId = await createSession();
@@ -119,6 +148,7 @@ test.describe("authenticated WebSocket session write policy", () => {
 		const restartAgent = vi.spyOn(gateway.sessionManager, "restartAgent").mockRejectedValue(new Error("policy guard missed restart"));
 		const grantToolPermission = vi.spyOn(gateway.sessionManager, "grantToolPermission").mockRejectedValue(new Error("policy guard missed grant"));
 		const compact = vi.spyOn(live.rpcClient, "compact").mockRejectedValue(new Error("policy guard missed compact"));
+		const modelControlSpies = spyOnModelControlMutations(gateway, live);
 		try {
 			await expectPolicyError(conn, { type: "prompt", text: "must not run" }, "SESSION_READ_ONLY");
 			// A read-only session has no streaming-steer carve-out.
@@ -128,6 +158,7 @@ test.describe("authenticated WebSocket session write policy", () => {
 			for (const frame of [...QUEUE_CONTROL_FRAMES, ...WORK_CONTROL_FRAMES]) {
 				await expectPolicyError(conn, frame, "SESSION_READ_ONLY");
 			}
+			await expectModelControlsRejected(conn, "SESSION_READ_ONLY");
 			await expectExtensionWritesRejected(conn, "SESSION_READ_ONLY", "read-only");
 
 			expect(enqueuePrompt).not.toHaveBeenCalled();
@@ -139,6 +170,7 @@ test.describe("authenticated WebSocket session write policy", () => {
 			expect(restartAgent).not.toHaveBeenCalled();
 			expect(grantToolPermission).not.toHaveBeenCalled();
 			expect(compact).not.toHaveBeenCalled();
+			expectNoModelControlMutations(modelControlSpies);
 			await expectReadFramesStillWork(conn);
 		} finally {
 			live.status = "idle";
@@ -151,6 +183,7 @@ test.describe("authenticated WebSocket session write policy", () => {
 			restartAgent.mockRestore();
 			grantToolPermission.mockRestore();
 			compact.mockRestore();
+			restoreModelControlSpies(modelControlSpies);
 			conn.close();
 			await deleteSession(sessionId);
 		}
@@ -174,6 +207,7 @@ test.describe("authenticated WebSocket session write policy", () => {
 		const restartAgent = vi.spyOn(gateway.sessionManager, "restartAgent").mockRejectedValue(new Error("policy guard missed restart"));
 		const grantToolPermission = vi.spyOn(gateway.sessionManager, "grantToolPermission").mockRejectedValue(new Error("policy guard missed grant"));
 		const compact = vi.spyOn(live.rpcClient, "compact").mockRejectedValue(new Error("policy guard missed compact"));
+		const modelControlSpies = spyOnModelControlMutations(gateway, live);
 		try {
 			await expectPolicyError(conn, { type: "prompt", text: "must not start review" }, "NON_INTERACTIVE_PROMPT");
 			await expectPolicyError(conn, { type: "steer", text: "must not queue review" }, "NON_INTERACTIVE_STEER");
@@ -183,6 +217,8 @@ test.describe("authenticated WebSocket session write policy", () => {
 			for (const frame of WORK_CONTROL_FRAMES) {
 				await expectPolicyError(conn, frame, "NON_INTERACTIVE_WORK_CONTROL");
 			}
+			await expectModelControlsRejected(conn, "NON_INTERACTIVE_WORK_CONTROL");
+			expectNoModelControlMutations(modelControlSpies);
 
 			await expectReadFramesStillWork(conn);
 
@@ -205,6 +241,7 @@ test.describe("authenticated WebSocket session write policy", () => {
 			expect(restartAgent).not.toHaveBeenCalled();
 			expect(grantToolPermission).not.toHaveBeenCalled();
 			expect(compact).not.toHaveBeenCalled();
+			expectNoModelControlMutations(modelControlSpies);
 		} finally {
 			live.status = "idle";
 			enqueuePrompt.mockRestore();
@@ -216,6 +253,36 @@ test.describe("authenticated WebSocket session write policy", () => {
 			restartAgent.mockRestore();
 			grantToolPermission.mockRestore();
 			compact.mockRestore();
+			restoreModelControlSpies(modelControlSpies);
+			conn.close();
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("live restricted metadata blocks model controls before RPC, validation, or persistence", async ({ gateway }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		const live = gateway.sessionManager.getSession(sessionId);
+		expect(live).toBeTruthy();
+		const persisted = gateway.sessionManager.getPersistedSession(sessionId);
+		expect(persisted?.readOnly).not.toBe(true);
+		expect(persisted?.nonInteractive).not.toBe(true);
+
+		const conn = await connectWs(sessionId);
+		const modelControlSpies = spyOnModelControlMutations(gateway, live);
+		try {
+			live.readOnly = true;
+			await expectModelControlsRejected(conn, "SESSION_READ_ONLY");
+
+			live.readOnly = false;
+			live.nonInteractive = true;
+			await expectModelControlsRejected(conn, "NON_INTERACTIVE_WORK_CONTROL");
+
+			expectNoModelControlMutations(modelControlSpies);
+		} finally {
+			live.readOnly = false;
+			live.nonInteractive = false;
+			restoreModelControlSpies(modelControlSpies);
 			conn.close();
 			await deleteSession(sessionId);
 		}
