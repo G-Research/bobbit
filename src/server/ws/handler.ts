@@ -326,6 +326,8 @@ export const MAX_AUTHENTICATED_PROMPT_TEXT_BYTES = 8 * 1024 * 1024;
 const SESSION_COMMAND_SERIALISER = new SessionCommandSerialiser();
 const EXTENSION_CHANNEL_WS_ENVELOPE_TOO_LARGE_MESSAGE = `Extension channel frame exceeds maximum envelope size (${MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES} bytes)`;
 
+// Restricted-session work includes agent work, metadata writes, and durable task
+// mutations; safety controls, reads, and transport-authorized operations stay separate.
 const SESSION_WORK_MESSAGE_TYPES = [
 	"prompt",
 	"steer",
@@ -337,6 +339,9 @@ const SESSION_WORK_MESSAGE_TYPES = [
 	"set_title",
 	"generate_title",
 	"summarize_goal_title",
+	"task_create",
+	"task_update",
+	"task_delete",
 	"set_model",
 	"set_image_model",
 	"set_thinking_level",
