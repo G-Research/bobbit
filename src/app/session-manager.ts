@@ -1386,6 +1386,19 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 	// Phase 1: synchronous select
 	selectSession(sessionId, replaceHistory);
 
+	// Every connection-setup continuation must still own this selection before
+	// mutating foreground state or capturing the active ChatPanel. Exact remotes
+	// already transferred into the cache (or reactivated after A→B→A) remain
+	// owned and must not be disconnected by an older invocation winding down.
+	const gen = state.switchGeneration;
+	const isStale = () => state.switchGeneration !== gen || state.selectedSessionId !== sessionId;
+	const cleanupRemote = (remote: RemoteAgent) => {
+		const retained = state.remoteAgent === remote
+			|| [...sessionCache.values()].some((entry) => entry.remoteAgent === remote);
+		if (retained) return;
+		remote.disconnect();
+	};
+
 	// Fast path: reuse cached session (instant switch-back). If the cached agent's
 	// WebSocket is no longer open, drop it and fall through to a fresh connect so
 	// pack-bound Host API surfaces can re-register their trusted WS minter.
@@ -1440,8 +1453,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		let sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
 		if (!sessionData) {
 			await refreshSessions().catch(() => { /* fall back to cached list */ });
+			if (isStale()) { cleanupRemote(cached.remoteAgent); return; }
 			sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
 		}
+		const reviewSources = await loadReviewSources();
+		if (isStale()) { cleanupRemote(cached.remoteAgent); return; }
 		state.assistantType = sessionData?.assistantType
 			|| (sessionData?.goalAssistant ? "goal"
 			: sessionData?.roleAssistant ? "role"
@@ -1485,7 +1501,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
-		(await loadReviewSources()).restorePersistedReviewDocuments(sessionId, { select: true });
+		reviewSources.restorePersistedReviewDocuments(sessionId, { select: true });
 		state.inboxEntries = [];
 		if (state.isPreviewSession) startPreviewPolling();
 		else stopPreviewPolling();
@@ -1595,19 +1611,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 	void reconcilePackEntrypointsForProject(sessionForPalette?.projectId).catch(() => {});
 
 	// Phase 2: async hydrate
-	const gen = state.switchGeneration;
-	const isStale = () => state.switchGeneration !== gen;
-	// A stale connect invocation may have transferred its now-bound remote into
-	// the cache, or that exact remote may already be active again after A→B→A.
-	// In either case ownership outlives this invocation and cleanup must not
-	// disconnect it. Only truly abandoned instances are disposable here.
-	const cleanupRemote = (remote: RemoteAgent) => {
-		const retained = state.remoteAgent === remote
-			|| [...sessionCache.values()].some((entry) => entry.remoteAgent === remote);
-		if (retained) return;
-		remote.disconnect();
-	};
-
 	state.connectingSessionId = sessionId;
 
 	// Show the chat UI shell immediately with a "Connecting..." state
@@ -1621,7 +1624,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		const remote = new RemoteAgent();
 
 		await remote.connect(url, token, sessionId);
-		if (isStale()) { remote.disconnect(); return; }
+		if (isStale()) { cleanupRemote(remote); return; }
 
 		// ── Fire the transcript snapshot request as the first post-auth action.
 		// No side-panel, proposal, draft, git, or session-list REST hydration may
@@ -1665,6 +1668,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			} else {
 				autoPrompt = AUTO_PROMPTS[options.assistantType];
 			}
+			if (isStale()) { cleanupRemote(remote); return; }
 			// The kickoff is the assistant's FIRST message. Flag it non-title-generating
 			// so auto-naming keys off the first GENUINE user message, not the kickoff.
 			if (autoPrompt) remote.prompt(autoPrompt, undefined, { suppressTitleGen: true });
@@ -2342,7 +2346,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			origDisconnect();
 		};
 
-		if (isStale()) { remote.disconnect(); return; }
+		if (isStale()) { cleanupRemote(remote); return; }
 
 		state.connectionStatus = "connected";
 		state.remoteAgent = remote;
@@ -2356,8 +2360,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		let sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
 		if (!sessionData) {
 			await refreshSessions().catch(() => { /* fall back to cached list */ });
+			if (isStale()) { cleanupRemote(remote); return; }
 			sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
 		}
+		const reviewSources = await loadReviewSources();
+		if (isStale()) { cleanupRemote(remote); return; }
 		state.assistantType = options?.assistantType
 			|| sessionData?.assistantType
 			|| (options?.isGoalAssistant || sessionData?.goalAssistant ? "goal"
@@ -2374,7 +2381,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
-		(await loadReviewSources()).restorePersistedReviewDocuments(sessionId, { select: true });
+		reviewSources.restorePersistedReviewDocuments(sessionId, { select: true });
 		state.inboxEntries = [];
 		if (state.isPreviewSession) startPreviewPolling();
 		else stopPreviewPolling();
