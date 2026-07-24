@@ -354,8 +354,8 @@ function syncCompatibilityMirrors(workspace: SidePanelWorkspace): void {
 		state.previewPanelFullscreen = workspace.sizeMode === "fullscreen";
 		state.inboxPanelOpen = workspace.tabs.some((tab) => tab.id === INBOX_PANEL_TAB_ID && tab.kind === "inbox");
 		hydrateActivePreviewMirror(workspace, legacyTabs);
+		(state as unknown as { panelWorkspace?: SidePanelWorkspace }).panelWorkspace = workspace;
 	}
-	(state as unknown as { panelWorkspace?: SidePanelWorkspace }).panelWorkspace = workspace;
 }
 
 export function getSidePanelWorkspace(sessionId?: string | null): SidePanelWorkspace {
