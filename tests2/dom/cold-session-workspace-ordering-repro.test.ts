@@ -1,0 +1,545 @@
+import { beforeAll as __syncBeforeAll } from "vitest";
+import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+__syncBeforeAll(() => __syncCE());
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const annotationStoreMocks = vi.hoisted(() => ({
+	initAnnotationStore: vi.fn(),
+}));
+
+vi.mock("../../src/ui/components/review/AnnotationStore.js", async (importOriginal) => ({
+	...await importOriginal<typeof import("../../src/ui/components/review/AnnotationStore.js")>(),
+	initAnnotationStore: annotationStoreMocks.initAnnotationStore,
+}));
+
+import {
+	backToSessions,
+	connectToSession,
+	disconnectGateway,
+	flushAndTeardownDraft,
+	selectSession,
+	uncacheSession,
+} from "../../src/app/session-manager.js";
+import { RemoteAgent } from "../../src/app/remote-agent.js";
+import {
+	GW_SESSION_KEY,
+	GW_TOKEN_KEY,
+	GW_URL_KEY,
+	setRenderApp,
+	state,
+	type GatewaySession,
+} from "../../src/app/state.js";
+import { ChatPanel } from "../../src/ui/ChatPanel.js";
+import { storage } from "../../src/app/storage.js";
+import * as dialogsLazy from "../../src/app/dialogs-lazy.js";
+import * as packEntrypoints from "../../src/app/pack-entrypoints.js";
+import * as packPanels from "../../src/app/pack-panels.js";
+import * as packRenderers from "../../src/app/pack-renderers.js";
+import * as reviewSourcesLazy from "../../src/app/review-sources-lazy.js";
+import { stopPreviewSubscription } from "../../src/app/preview-panel.js";
+import { stopInboxSubscription } from "../../src/app/inbox-panel.js";
+
+const SESSION_A = "cold-session-a";
+const SESSION_B = "cold-session-b";
+const TRANSCRIPT_SIZE = 321;
+const trackedSessions = [SESSION_A, SESSION_B] as const;
+
+type TimelineEntry =
+	| { kind: "ws"; sessionId: string; frame: Record<string, unknown> }
+	| { kind: "rest"; sessionId?: string; path: string; method: string };
+
+interface DeferredGate {
+	promise: Promise<void>;
+	release: () => void;
+	settled: boolean;
+}
+
+const timeline: TimelineEntry[] = [];
+const workspaceGates = new Map<string, DeferredGate>();
+const workspaceFetchCount = new Map<string, number>();
+const transcripts = new Map<string, any[]>();
+
+function deferredGate(): DeferredGate {
+	let releasePromise!: () => void;
+	const gate: DeferredGate = {
+		promise: new Promise<void>((resolve) => { releasePromise = resolve; }),
+		release: () => {},
+		settled: false,
+	};
+	gate.release = () => {
+		if (gate.settled) return;
+		gate.settled = true;
+		releasePromise();
+	};
+	return gate;
+}
+
+function gateFor(sessionId: string): DeferredGate {
+	let gate = workspaceGates.get(sessionId);
+	if (!gate) {
+		gate = deferredGate();
+		workspaceGates.set(sessionId, gate);
+	}
+	return gate;
+}
+
+function gatewaySession(id: string): GatewaySession {
+	return {
+		id,
+		title: id,
+		cwd: `/fixture/${id}`,
+		status: "idle",
+		createdAt: 1,
+		lastActivity: 1,
+		clientCount: 1,
+	};
+}
+
+function transcriptFor(sessionId: string): any[] {
+	return Array.from({ length: TRANSCRIPT_SIZE }, (_, index) => ({
+		id: `${sessionId}-message-${index}`,
+		role: index % 2 === 0 ? "user" : "assistant",
+		content: `${sessionId} transcript row ${index}`,
+		timestamp: new Date(1_700_000_000_000 + index).toISOString(),
+	}));
+}
+
+function workspaceFor(sessionId: string) {
+	const stamp = sessionId === SESSION_A ? 10 : 20;
+	return {
+		version: 1,
+		sessionId,
+		revision: stamp,
+		tabs: [
+			{
+				id: "preview:entry:index.html",
+				kind: "preview",
+				title: `${sessionId} preview`,
+				label: "index.html",
+				source: { type: "preview", sessionId, entry: "index.html", live: true },
+				state: { contentHash: `${sessionId}-preview-hash`, mtime: stamp },
+				updatedAt: stamp,
+			},
+			{
+				id: "proposal:goal",
+				kind: "proposal",
+				title: `${sessionId} proposal`,
+				label: "Goal",
+				source: { type: "proposal", sessionId, proposalType: "goal" },
+				state: { fields: { title: `${sessionId} restored goal`, spec: "restored spec" } },
+				updatedAt: stamp,
+			},
+			{
+				id: `review:${sessionId}-review`,
+				kind: "review",
+				title: `${sessionId} review`,
+				label: "Review",
+				source: {
+					type: "review",
+					sessionId,
+					documentId: `${sessionId}-review`,
+					title: `${sessionId} review`,
+				},
+				state: { markdown: `# ${sessionId} review` },
+				updatedAt: stamp,
+			},
+		],
+		activeTabId: "preview:entry:index.html",
+		sizeMode: "fullscreen",
+		metadata: { migratedFromLocalStorageAt: stamp },
+		updatedAt: stamp,
+	};
+}
+
+function sessionIdFromPath(path: string): string | undefined {
+	return /^\/api\/sessions\/([^/?]+)/.exec(path)?.[1];
+}
+
+async function fetchFixture(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+	const rawUrl = input instanceof Request ? input.url : String(input);
+	const url = new URL(rawUrl, "http://localhost");
+	const method = (init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
+	const sessionId = sessionIdFromPath(url.pathname);
+	timeline.push({ kind: "rest", path: `${url.pathname}${url.search}`, method, ...(sessionId ? { sessionId } : {}) });
+
+	if (url.pathname.endsWith("/side-panel-workspace") && sessionId) {
+		workspaceFetchCount.set(sessionId, (workspaceFetchCount.get(sessionId) || 0) + 1);
+		await gateFor(sessionId).promise;
+		return Response.json(workspaceFor(sessionId));
+	}
+	if (url.pathname.endsWith("/draft") && method === "GET") return new Response(null, { status: 204 });
+	if (url.pathname.endsWith("/git-status")) {
+		return Response.json({ branch: "master", status: [], clean: true });
+	}
+	if (url.pathname.endsWith("/bg-processes")) return Response.json({ processes: [] });
+	if (url.pathname.endsWith("/pr-status")) return new Response(null, { status: 204 });
+	if (url.pathname === "/api/preview/mount") return new Response(null, { status: 404 });
+	if (url.pathname === "/api/sessions") {
+		return Response.json({ changed: false, generation: 1, sessions: state.gatewaySessions });
+	}
+	if (url.pathname === "/api/goals") {
+		return Response.json({ changed: false, generation: 1, goals: [] });
+	}
+	if (url.pathname === "/api/projects") return Response.json({ projects: [] });
+	if (method === "DELETE") return new Response(null, { status: 204 });
+	return Response.json({
+		changed: false,
+		generation: 1,
+		sessions: state.gatewaySessions,
+		goals: [],
+		projects: [],
+		entries: [],
+		processes: [],
+		proposals: [],
+	});
+}
+
+class ControlledWebSocket {
+	static readonly CONNECTING = 0;
+	static readonly OPEN = 1;
+	static readonly CLOSING = 2;
+	static readonly CLOSED = 3;
+	static instances: ControlledWebSocket[] = [];
+
+	readonly sessionId: string;
+	readyState = ControlledWebSocket.OPEN;
+	onopen: (() => void) | null = null;
+	onmessage: ((event: { data: string }) => void) | null = null;
+	onclose: (() => void) | null = null;
+	onerror: (() => void) | null = null;
+
+	constructor(url: string) {
+		this.sessionId = decodeURIComponent(new URL(url).pathname.split("/").pop() || "");
+		ControlledWebSocket.instances.push(this);
+		queueMicrotask(() => {
+			if (this.readyState !== ControlledWebSocket.OPEN) return;
+			this.onopen?.();
+			queueMicrotask(() => this.receive({ type: "auth_ok" }));
+		});
+	}
+
+	send(raw: string): void {
+		const frame = JSON.parse(raw) as Record<string, unknown>;
+		timeline.push({ kind: "ws", sessionId: this.sessionId, frame });
+		if (frame.type === "get_messages") {
+			const data = transcripts.get(this.sessionId) || [];
+			queueMicrotask(() => this.receive({ type: "messages", data }));
+		}
+	}
+
+	receive(frame: Record<string, unknown>): void {
+		if (this.readyState !== ControlledWebSocket.OPEN) return;
+		this.onmessage?.({ data: JSON.stringify(frame) });
+	}
+
+	close(): void {
+		this.readyState = ControlledWebSocket.CLOSED;
+	}
+}
+
+function renderTranscript(sessionId: string, agent: any): void {
+	let host = document.querySelector(`[data-cold-transcript="${sessionId}"]`) as HTMLElement | null;
+	if (!host) {
+		document.querySelectorAll("[data-cold-transcript]").forEach((node) => node.remove());
+		host = document.createElement("section");
+		host.dataset.coldTranscript = sessionId;
+		document.body.append(host);
+	}
+	const fragment = document.createDocumentFragment();
+	for (const message of agent.state.messages || []) {
+		const row = document.createElement("div");
+		row.dataset.messageId = message.id;
+		row.textContent = typeof message.content === "string" ? message.content : JSON.stringify(message.content);
+		fragment.append(row);
+	}
+	host.replaceChildren(fragment);
+}
+
+function installChatPanelHarness(): void {
+	vi.spyOn(ChatPanel.prototype, "setAgent").mockImplementation(async function (this: ChatPanel, agent: any) {
+		this.agent = agent;
+		this.agentInterface = {
+			session: agent,
+			projectId: undefined,
+			cwd: "",
+			gitRepoKnown: "unknown",
+			gitStatusLoading: false,
+			bgProcesses: [],
+			requestUpdate: vi.fn(),
+			addEventListener: vi.fn(),
+			removeEventListener: vi.fn(),
+			querySelector: vi.fn(),
+		} as any;
+		const sessionId = agent.gatewaySessionId as string;
+		let scheduled = false;
+		const draw = () => {
+			scheduled = false;
+			renderTranscript(sessionId, agent);
+		};
+		draw();
+		agent.subscribe((event: any) => {
+			if (event?.type !== "message_end" || scheduled) return;
+			scheduled = true;
+			queueMicrotask(draw);
+		});
+	});
+}
+
+async function waitFor(predicate: () => boolean, failure: string): Promise<void> {
+	for (let attempt = 0; attempt < 250; attempt++) {
+		if (predicate()) return;
+		await new Promise<void>((resolve) => setTimeout(resolve, 0));
+	}
+	throw new Error(failure);
+}
+
+function getMessagesIndex(sessionId: string): number {
+	return timeline.findIndex((entry) =>
+		entry.kind === "ws" && entry.sessionId === sessionId && entry.frame.type === "get_messages");
+}
+
+function firstSessionRestIndex(sessionId: string): number {
+	return timeline.findIndex((entry) => entry.kind === "rest" && entry.sessionId === sessionId);
+}
+
+function finalTranscriptRow(sessionId: string): HTMLElement | null {
+	return document.querySelector(
+		`[data-cold-transcript="${sessionId}"] [data-message-id="${sessionId}-message-${TRANSCRIPT_SIZE - 1}"]`,
+	);
+}
+
+beforeEach(() => {
+	(window as any).happyDOM?.setURL?.("http://localhost/#/");
+	setRenderApp(() => {});
+	timeline.length = 0;
+	workspaceGates.clear();
+	workspaceFetchCount.clear();
+	ControlledWebSocket.instances.length = 0;
+	transcripts.clear();
+	for (const sessionId of trackedSessions) transcripts.set(sessionId, transcriptFor(sessionId));
+
+	vi.stubGlobal("WebSocket", ControlledWebSocket);
+	vi.stubGlobal("fetch", vi.fn(fetchFixture));
+	vi.stubGlobal("setInterval", vi.fn(() => 1));
+	vi.stubGlobal("clearInterval", vi.fn());
+	vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+		queueMicrotask(() => callback(performance.now()));
+		return 1;
+	}));
+	vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+	installChatPanelHarness();
+	vi.spyOn(storage.providerKeys, "set").mockResolvedValue();
+	vi.spyOn(dialogsLazy, "showConnectionError").mockImplementation(() => {});
+	vi.spyOn(packRenderers, "reconcilePackRenderersForProject").mockResolvedValue();
+	vi.spyOn(packPanels, "reconcilePackPanelsForProject").mockResolvedValue();
+	vi.spyOn(packEntrypoints, "reconcilePackEntrypointsForProject").mockResolvedValue();
+	vi.spyOn(reviewSourcesLazy, "loadReviewSources").mockResolvedValue({
+		restorePersistedReviewDocuments: (sessionId: string) => {
+			if (state.selectedSessionId !== sessionId) return;
+			const title = `${sessionId} review`;
+			state.reviewDocuments = new Map([[title, { title, markdown: `# ${title}` } as any]]);
+			state.reviewActiveTab = title;
+			state.reviewPanelOpen = true;
+		},
+	} as any);
+	annotationStoreMocks.initAnnotationStore.mockReset();
+	annotationStoreMocks.initAnnotationStore.mockResolvedValue(undefined);
+
+	localStorage.clear();
+	sessionStorage.clear();
+	localStorage.setItem(GW_URL_KEY, "http://localhost");
+	localStorage.setItem(GW_TOKEN_KEY, "fixture-token");
+
+	state.sessionsGeneration = 1;
+	state.goalsGeneration = 1;
+	state.gatewaySessions = trackedSessions.map(gatewaySession);
+	state.archivedSessions = [];
+	state.goals = [];
+	state.projects = [];
+	state.selectedSessionId = null;
+	state.connectingSessionId = null;
+	state.switchGeneration = 0;
+	state.chatPanel = null;
+	state.remoteAgent = null;
+	state.connectionStatus = "disconnected";
+	state.appView = "authenticated";
+	state.activeProjectId = null;
+	state.activeProposals = {};
+	state.projectProposalAcceptedBySessionId = {};
+	state.assistantType = null;
+	state.assistantTab = "chat";
+	state.assistantHasProposal = false;
+	state.isPreviewSession = false;
+	state.previewPanelMtime = 0;
+	state.previewPanelEntry = "";
+	state.previewPanelContentHash = "";
+	state.previewPanelArtifactId = "";
+	state.previewPanelFullscreen = false;
+	state.previewPanelActiveTab = "preview";
+	state.previewPanelTab = "chat";
+	state.panelTabsBySession = {};
+	state.panelTabs = [];
+	state.activePanelTabId = "chat";
+	state.panelWorkspaceActiveBySession = {};
+	state.sidePanelWorkspaceBySession = {};
+	state.lastWorkspaceRevisionBySession = {};
+	delete (state as any).panelWorkspace;
+	delete (state as any).__lastSidePanelUserActiveSelection;
+	state.reviewDocuments = new Map();
+	state.reviewActiveTab = "";
+	state.reviewPanelOpen = false;
+	state.inboxEntries = [];
+	state.inboxPanelOpen = false;
+	state.inboxAddDialogOpen = false;
+	state.cwdDropdownOpen = false;
+	document.body.replaceChildren();
+});
+
+afterEach(async () => {
+	for (const gate of workspaceGates.values()) gate.release();
+	await Promise.resolve();
+	try { backToSessions(); } catch { /* singleton cleanup */ }
+	try { flushAndTeardownDraft(); } catch { /* singleton cleanup */ }
+	try { stopPreviewSubscription(); } catch { /* singleton cleanup */ }
+	try { stopInboxSubscription(); } catch { /* singleton cleanup */ }
+	try { disconnectGateway(); } catch { /* singleton cleanup */ }
+	for (const sessionId of trackedSessions) uncacheSession(sessionId);
+	state.selectedSessionId = null;
+	state.connectingSessionId = null;
+	state.chatPanel = null;
+	state.remoteAgent = null;
+	setRenderApp(() => {});
+	document.body.replaceChildren();
+	localStorage.clear();
+	sessionStorage.clear();
+	vi.restoreAllMocks();
+	vi.unstubAllGlobals();
+});
+
+describe("cold session transcript/workspace ordering", () => {
+	it("requests and renders 321 transcript rows before the single initial workspace fetch settles", async () => {
+		const pendingConnect = connectToSession(SESSION_A, true);
+		await waitFor(
+			() => (workspaceFetchCount.get(SESSION_A) || 0) > 0,
+			"COLD_SESSION_LOAD_ORDERING_REGRESSION: initial workspace hydration never started",
+		);
+
+		try {
+			const requestIndex = getMessagesIndex(SESSION_A);
+			expect(
+				requestIndex,
+				"COLD_SESSION_LOAD_ORDERING_REGRESSION: get_messages was blocked by pending side-panel workspace hydration",
+			).toBeGreaterThanOrEqual(0);
+			const restIndex = firstSessionRestIndex(SESSION_A);
+			expect(
+				requestIndex,
+				"COLD_SESSION_LOAD_ORDERING_REGRESSION: get_messages must precede every session-scoped REST hydration request",
+			).toBeLessThan(restIndex);
+			expect(
+				workspaceFetchCount.get(SESSION_A),
+				"COLD_SESSION_LOAD_ORDERING_REGRESSION: a cold connection must have one initial workspace owner",
+			).toBe(1);
+
+			await waitFor(
+				() => finalTranscriptRow(SESSION_A) !== null,
+				"COLD_SESSION_LOAD_ORDERING_REGRESSION: the 321st transcript row did not render while workspace hydration was pending",
+			);
+			expect(finalTranscriptRow(SESSION_A)?.textContent).toBe(`${SESSION_A} transcript row ${TRANSCRIPT_SIZE - 1}`);
+			expect(gateFor(SESSION_A).settled).toBe(false);
+		} finally {
+			gateFor(SESSION_A).release();
+			await pendingConnect.catch(() => {});
+		}
+
+		expect(state.sidePanelWorkspaceBySession[SESSION_A]?.tabs.map((tab) => tab.kind)).toEqual([
+			"preview",
+			"proposal",
+			"review",
+		]);
+		expect(state.activePanelTabId).toBe("preview:entry:index.html");
+		expect(state.previewPanelFullscreen).toBe(true);
+		expect(state.reviewDocuments.has(`${SESSION_A} review`)).toBe(true);
+		expect(finalTranscriptRow(SESSION_A)?.textContent).toBe(`${SESSION_A} transcript row ${TRANSCRIPT_SIZE - 1}`);
+	});
+
+	it("keeps B foreground mirrors and transcript when A workspace completes after a rapid A to B switch", async () => {
+		const connectA = connectToSession(SESSION_A, true);
+		await waitFor(
+			() => (workspaceFetchCount.get(SESSION_A) || 0) > 0,
+			"STALE_WORKSPACE_FOREGROUND_REGRESSION: A hydration did not start",
+		);
+
+		const connectB = connectToSession(SESSION_B, true);
+		await waitFor(
+			() => (workspaceFetchCount.get(SESSION_B) || 0) > 0,
+			"STALE_WORKSPACE_FOREGROUND_REGRESSION: B hydration did not start",
+		);
+		gateFor(SESSION_B).release();
+		await connectB;
+		await waitFor(
+			() => finalTranscriptRow(SESSION_B) !== null,
+			"STALE_WORKSPACE_FOREGROUND_REGRESSION: B transcript did not render",
+		);
+
+		expect((state as any).panelWorkspace?.sessionId).toBe(SESSION_B);
+		gateFor(SESSION_A).release();
+		await connectA;
+
+		expect(state.selectedSessionId).toBe(SESSION_B);
+		expect(state.remoteAgent?.gatewaySessionId).toBe(SESSION_B);
+		expect(
+			(state as any).panelWorkspace?.sessionId,
+			"STALE_WORKSPACE_FOREGROUND_REGRESSION: abandoned A workspace replaced B's foreground mirror",
+		).toBe(SESSION_B);
+		expect(state.panelTabs.every((tab) => (tab.source as any).sessionId === SESSION_B)).toBe(true);
+		expect(state.activePanelTabId).toBe("preview:entry:index.html");
+		expect(state.previewPanelFullscreen).toBe(true);
+		expect(state.previewPanelEntry).toBe("index.html");
+		expect(state.reviewDocuments.has(`${SESSION_B} review`)).toBe(true);
+		expect(finalTranscriptRow(SESSION_B)?.textContent).toBe(`${SESSION_B} transcript row ${TRANSCRIPT_SIZE - 1}`);
+		expect(state.sidePanelWorkspaceBySession[SESSION_A]?.sessionId).toBe(SESSION_A);
+	});
+
+	it("retains one reconnect workspace hydration and the zero-seq snapshot fallback", async () => {
+		state.selectedSessionId = SESSION_A;
+		const remote = new RemoteAgent() as any;
+		remote._gatewayUrl = "http://localhost";
+		remote._authToken = "fixture-token";
+		remote._sessionId = SESSION_A;
+
+		await remote._connectWs(false);
+		await waitFor(
+			() => (workspaceFetchCount.get(SESSION_A) || 0) === 1,
+			"RECONNECT_WORKSPACE_REGRESSION: reconnect hydration did not run exactly once",
+		);
+		const frames = timeline
+			.filter((entry): entry is Extract<TimelineEntry, { kind: "ws" }> => entry.kind === "ws" && entry.sessionId === SESSION_A)
+			.map((entry) => entry.frame.type);
+		expect(frames).toContain("get_messages");
+		expect(frames).toContain("get_state");
+		expect(workspaceFetchCount.get(SESSION_A)).toBe(1);
+
+		gateFor(SESSION_A).release();
+		remote.disconnect();
+	});
+
+	it("reuses the exact cached panel and agent without another socket or workspace fetch", async () => {
+		gateFor(SESSION_A).release();
+		await connectToSession(SESSION_A, true);
+		const cachedPanel = state.chatPanel;
+		const cachedAgent = state.remoteAgent;
+		const socketCount = ControlledWebSocket.instances.length;
+		const workspaceCount = workspaceFetchCount.get(SESSION_A);
+
+		selectSession(SESSION_B);
+		await connectToSession(SESSION_A, true);
+
+		expect(state.chatPanel).toBe(cachedPanel);
+		expect(state.remoteAgent).toBe(cachedAgent);
+		expect(ControlledWebSocket.instances).toHaveLength(socketCount);
+		expect(workspaceFetchCount.get(SESSION_A)).toBe(workspaceCount);
+		expect(localStorage.getItem(GW_SESSION_KEY)).toBe(SESSION_A);
+	});
+});

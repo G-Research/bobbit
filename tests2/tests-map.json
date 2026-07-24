@@ -498,6 +498,15 @@
       }
     },
     {
+      "path": "tests2/dom/cold-session-workspace-ordering-repro.test.ts",
+      "reason": "Failing-first deterministic DOM regression around real connectToSession and RemoteAgent handshakes: a controlled WebSocket and delayed side-panel workspace fetch prove get_messages and a 321-row transcript do not wait for REST hydration, initial hydration has one owner, late abandoned-session workspace responses cannot replace foreground mirrors, reconnect hydration remains intact, and cached switch-back creates no new socket or workspace request. Failure token COLD_SESSION_LOAD_ORDERING_REGRESSION.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
       "path": "tests2/browser/journeys/portrait-session-cache.journey.spec.ts",
       "reason": "Portrait 375x667 real-harness regression journey for session A→list→B→list→A caching, using a pre-click MutationObserver plus stable pi-chat-panel identity and WebSocket creation counts to prove healthy reuse without a loader; also pins stale cached-socket fresh fallback with transcript hydration, landscape direct-switch parity, reload-only cache loss, and deterministic session cleanup.",
       "execution": {
