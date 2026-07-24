@@ -2412,7 +2412,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// Transcript replay may have observed the submitted-review marker before
 		// any server tabs existed locally. Replay that cleanup after hydration,
 		// including for a now-cached session, before stale-invocation teardown.
-		remote.reconcileSubmittedReviewWorkspace();
+		await remote.reconcileSubmittedReviewWorkspace();
 		if (isStale()) { cleanupRemote(remote); return; }
 
 		// Listen for suggest-goal events from assistant messages
