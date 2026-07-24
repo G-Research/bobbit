@@ -713,6 +713,19 @@ export class RemoteAgent {
 	get gatewaySessionId() {
 		return this._sessionId;
 	}
+	/**
+	 * Remove review tabs restored from the server after this session's review
+	 * was already submitted. Initial/reconnect workspace hydration can finish
+	 * after transcript replay performed the same cleanup against an empty local
+	 * workspace, so callers replay it at the workspace-apply boundary.
+	 *
+	 * This intentionally has no active-session guard: cached/background sessions
+	 * still own their keyed workspace and must not retain a submitted review tab.
+	 */
+	reconcileSubmittedReviewWorkspace(): void {
+		if (!this._sessionId || !isReviewSubmitted(this._sessionId)) return;
+		closeReviewWorkspaceTabs(undefined, { sessionId: this._sessionId, select: false });
+	}
 	private _isActiveSession(): boolean {
 		return this._sessionId !== "" && state.selectedSessionId === this._sessionId;
 	}
@@ -844,8 +857,13 @@ export class RemoteAgent {
 						this._setConnectionStatus("connected");
 						resolve();
 						// Initial hydration is owned by connectToSession after ChatPanel
-						// binding. Reconnects still refresh the server workspace here.
-						if (!initial) void hydrateSidePanelWorkspace(this._sessionId);
+						// binding. Reconnects still refresh the server workspace here and
+						// then replay submitted-review cleanup against the hydrated tabs.
+						if (!initial) {
+							void hydrateSidePanelWorkspace(this._sessionId).then(() => {
+								this.reconcileSubmittedReviewWorkspace();
+							});
+						}
 						// S2: deliver any prompts/steers/retries the user issued while
 						// the socket was reconnecting, before resume/snapshot traffic.
 						this._flushOutbox();
@@ -1780,7 +1798,7 @@ export class RemoteAgent {
 								if (!this._isActiveSession()) break;
 							}
 						} else {
-							closeReviewWorkspaceTabs(undefined, { sessionId: reviewSessionId, select: false });
+							this.reconcileSubmittedReviewWorkspace();
 						}
 						if (this._isActiveSession()) {
 							const reviewSources = await loadReviewSources();
