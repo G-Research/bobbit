@@ -594,7 +594,10 @@ describe("cold session transcript/workspace ordering", () => {
 				"CACHE_REACTIVATION_HYDRATION_REGRESSION: stale original A completion replaced the reactivated cached panel",
 			).toBe(true);
 			expect.soft(cachedAgentA?.connected).toBe(true);
-			expect.soft(state.chatPanel?.agent === cachedAgentA).toBe(true);
+			expect.soft(
+				state.chatPanel?.agent as unknown,
+				"CACHE_REACTIVATION_HYDRATION_REGRESSION: reactivated panel no longer references the exact cached RemoteAgent",
+			).toBe(cachedAgentA);
 		} finally {
 			gateFor(SESSION_A).release();
 			gateFor(SESSION_B).release();
