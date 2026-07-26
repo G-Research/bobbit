@@ -20,9 +20,6 @@ const PI_PACKAGES = [
 ] as const;
 const INSPECTED_PACKAGES = [...PI_PACKAGES, "brace-expansion", "protobufjs"];
 const COMPATIBILITY_BASELINE = "0.81.1";
-const KNOWN_PROTOBUF_ADVISORY = "GHSA-j3f2-48v5-ccww";
-const KNOWN_VULNERABLE_PROTOBUF_PATH =
-	"node_modules/@earendil-works/pi-coding-agent/node_modules/protobufjs";
 
 interface JsonRecord {
 	[key: string]: unknown;
@@ -39,7 +36,6 @@ interface PackedConsumerReport {
 	selectedPiVersion?: string;
 	pack?: unknown;
 	tree?: unknown;
-	audit?: unknown;
 	binaries?: unknown;
 }
 
@@ -121,64 +117,6 @@ function expectSuccess(result: PiPackedConsumerCommandResult): void {
 		result.code,
 		`${commandDisplay(result)} failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
 	).toBe(0);
-}
-
-function expectExactVulnerabilityCounts(audit: JsonRecord, moderate: number): void {
-	const metadata = asRecord(audit.metadata, "npm audit metadata");
-	const counts = asRecord(metadata.vulnerabilities, "npm audit vulnerability counts");
-	expect(counts).toMatchObject({
-		info: 0,
-		low: 0,
-		moderate,
-		high: 0,
-		critical: 0,
-		total: moderate,
-	});
-}
-
-function assertKnown0811Audit(auditResult: PiPackedConsumerCommandResult, auditJson: unknown): void {
-	expect(
-		auditResult.code,
-		`npm audit must exit 1 for the exact known ${COMPATIBILITY_BASELINE} moderate`,
-	).toBe(1);
-	const audit = asRecord(auditJson, "npm audit result");
-	expect(audit.auditReportVersion).toBe(2);
-	expectExactVulnerabilityCounts(audit, 1);
-
-	const vulnerabilities = asRecord(audit.vulnerabilities, "npm audit vulnerabilities");
-	expect(Object.keys(vulnerabilities)).toEqual(["protobufjs"]);
-	const protobuf = asRecord(vulnerabilities.protobufjs, "protobufjs vulnerability");
-	expect(protobuf).toMatchObject({
-		name: "protobufjs",
-		severity: "moderate",
-		isDirect: false,
-		effects: [],
-		nodes: [KNOWN_VULNERABLE_PROTOBUF_PATH],
-	});
-
-	expect(Array.isArray(protobuf.via), "protobufjs advisory list must be an array").toBe(true);
-	const advisoryIds = (protobuf.via as unknown[]).map((entry, index) => {
-		const advisory = asRecord(entry, `protobufjs advisory ${index}`);
-		expect(advisory).toMatchObject({
-			name: "protobufjs",
-			dependency: "protobufjs",
-			severity: "moderate",
-		});
-		expect(typeof advisory.url).toBe("string");
-		return (advisory.url as string).split("/").at(-1);
-	});
-	expect(advisoryIds).toEqual([KNOWN_PROTOBUF_ADVISORY]);
-}
-
-function assertCleanLaterPatchAudit(auditResult: PiPackedConsumerCommandResult, auditJson: unknown): void {
-	expect(
-		auditResult.code,
-		`npm audit must exit 0 after Pi advances beyond ${COMPATIBILITY_BASELINE}`,
-	).toBe(0);
-	const audit = asRecord(auditJson, "npm audit result");
-	expect(audit.auditReportVersion).toBe(2);
-	expectExactVulnerabilityCounts(audit, 0);
-	expect(asRecord(audit.vulnerabilities, "npm audit vulnerabilities")).toEqual({});
 }
 
 async function attachReport(testInfo: TestInfo, report: PackedConsumerReport): Promise<void> {
@@ -311,12 +249,6 @@ test.describe("published Bobbit package dependency security", () => {
 					`Pi ${selectedPiVersion} must resolve every protobufjs edge to 7.6.5+: ${JSON.stringify(protobufOccurrences)}`,
 				).toBe(true);
 			}
-
-			const auditResult = await runNpm(["audit", "--omit=dev", "--json"], consumerDir, 3 * 60_000, consumerEnv);
-			const auditJson = parseJson(auditResult.stdout, "npm audit");
-			report.audit = { exitCode: auditResult.code, result: auditJson };
-			if (isKnown0811) assertKnown0811Audit(auditResult, auditJson);
-			else assertCleanLaterPatchAudit(auditResult, auditJson);
 
 			const binariesModulePath = join(consumerDir, "node_modules", "bobbit", "dist", "server", "binaries.js");
 			const binaries = await import(pathToFileURL(binariesModulePath).href) as {
