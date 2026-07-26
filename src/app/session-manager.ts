@@ -168,6 +168,32 @@ interface CachedSession {
 const sessionCache = new Map<string, CachedSession>();
 const SESSION_CACHE_MAX = 10;
 
+type InteractionModeTarget = {
+	readOnly?: boolean;
+	nonInteractive?: boolean;
+};
+
+/** Apply every interaction restriction already known without ever clearing one. */
+function applyKnownSessionInteractionMode(
+	target: InteractionModeTarget,
+	records: ReadonlyArray<Partial<GatewaySession> | undefined>,
+	options?: { explicitReadOnly?: boolean; remoteArchived?: boolean },
+): void {
+	const nonInteractive = records.some((record) => record?.nonInteractive === true);
+	if (nonInteractive) target.nonInteractive = true;
+	if (
+		options?.explicitReadOnly
+		|| options?.remoteArchived
+		|| nonInteractive
+		|| records.some((record) => record?.readOnly === true
+			|| record?.archived === true
+			|| record?.status === "archived"
+			|| record?.status === "terminated")
+	) {
+		target.readOnly = true;
+	}
+}
+
 function cacheSession(sessionId: string, chatPanel: ChatPanel, remoteAgent: RemoteAgent): void {
 	sessionCache.set(sessionId, { chatPanel, remoteAgent, cachedAt: Date.now() });
 	// Evict oldest if over limit
@@ -1360,6 +1386,19 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 	// Phase 1: synchronous select
 	selectSession(sessionId, replaceHistory);
 
+	// Every connection-setup continuation must still own this selection before
+	// mutating foreground state or capturing the active ChatPanel. Exact remotes
+	// already transferred into the cache (or reactivated after A→B→A) remain
+	// owned and must not be disconnected by an older invocation winding down.
+	const gen = state.switchGeneration;
+	const isStale = () => state.switchGeneration !== gen || state.selectedSessionId !== sessionId;
+	const cleanupRemote = (remote: RemoteAgent) => {
+		const retained = state.remoteAgent === remote
+			|| [...sessionCache.values()].some((entry) => entry.remoteAgent === remote);
+		if (retained) return;
+		remote.disconnect();
+	};
+
 	// Fast path: reuse cached session (instant switch-back). If the cached agent's
 	// WebSocket is no longer open, drop it and fall through to a fresh connect so
 	// pack-bound Host API surfaces can re-register their trusted WS minter.
@@ -1372,6 +1411,16 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		sessionCache.delete(sessionId); // Take ownership
 		state.chatPanel = cached.chatPanel;
 		state.remoteAgent = cached.remoteAgent;
+		// The cached panel becomes visible as soon as ownership is restored. Apply
+		// explicit/list-backed restrictions before any await in this fast path.
+		const cachedKnownSession = state.gatewaySessions.find((s) => s.id === sessionId)
+			|| state.archivedSessions.find((s) => s.id === sessionId);
+		if (state.chatPanel.agentInterface) {
+			applyKnownSessionInteractionMode(state.chatPanel.agentInterface, [cachedKnownSession], {
+				explicitReadOnly: options?.readOnly === true,
+				remoteArchived: cached.remoteAgent.state?.isArchived === true,
+			});
+		}
 		state.remoteAgent.registerHostApiTransports();
 		state.connectionStatus = "connected";
 		state.connectingSessionId = null;
@@ -1404,8 +1453,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		let sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
 		if (!sessionData) {
 			await refreshSessions().catch(() => { /* fall back to cached list */ });
+			if (isStale()) { cleanupRemote(cached.remoteAgent); return; }
 			sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
 		}
+		const reviewSources = await loadReviewSources();
+		if (isStale()) { cleanupRemote(cached.remoteAgent); return; }
 		state.assistantType = sessionData?.assistantType
 			|| (sessionData?.goalAssistant ? "goal"
 			: sessionData?.roleAssistant ? "role"
@@ -1449,7 +1501,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
-		(await loadReviewSources()).restorePersistedReviewDocuments(sessionId, { select: true });
+		reviewSources.restorePersistedReviewDocuments(sessionId, { select: true });
 		state.inboxEntries = [];
 		if (state.isPreviewSession) startPreviewPolling();
 		else stopPreviewPolling();
@@ -1474,9 +1526,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				ai.delegateOf = s.delegateOf;
 				ai.teamGoalId = s.teamGoalId;
 				ai.assistantType = s.assistantType;
-				if (s.archived || s.status === "terminated" || s.status === "archived") {
-					ai.readOnly = true;
-				}
+				applyKnownSessionInteractionMode(ai, [s], {
+					explicitReadOnly: options?.readOnly === true,
+					remoteArchived: cached.remoteAgent.state?.isArchived === true,
+				});
 			};
 			applyFrom(sessionData);
 			const archivedMatch: any = state.archivedSessions?.find((s: any) => s.id === sessionId);
@@ -1558,16 +1611,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 	void reconcilePackEntrypointsForProject(sessionForPalette?.projectId).catch(() => {});
 
 	// Phase 2: async hydrate
-	const gen = state.switchGeneration;
-	const isStale = () => state.switchGeneration !== gen;
-	// Only null out state.remoteAgent if it's still OUR remote instance.
-	// A concurrent connectToSession() for a different session may have already
-	// replaced it — blindly nulling would wipe the newer session's agent.
-	const cleanupRemote = (remote: RemoteAgent) => {
-		remote.disconnect();
-		if (state.remoteAgent === remote) state.remoteAgent = null;
-	};
-
 	state.connectingSessionId = sessionId;
 
 	// Show the chat UI shell immediately with a "Connecting..." state
@@ -1581,27 +1624,19 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		const remote = new RemoteAgent();
 
 		await remote.connect(url, token, sessionId);
-		if (isStale()) { remote.disconnect(); return; }
-		installConfirmedSessionModelPersistence(remote, sessionId);
-		await hydrateSidePanelWorkspace(sessionId);
-		if (isStale()) { remote.disconnect(); return; }
+		if (isStale()) { cleanupRemote(remote); return; }
 
-		// ── Fire the transcript snapshot request the INSTANT the WS is
-		// authenticated — before the refreshSessions()/setAgent() awaits below.
-		// Profiling (boot-timing) showed those awaits stall the snapshot request
-		// by ~700ms on a cold reload, even though the server builds the snapshot
-		// in ~200ms. The reducer applies the snapshot to remote.state
-		// independently of the ChatPanel binding, so the request can fly in
-		// parallel with all the connect setup; the panel renders the messages
-		// when setAgent() binds. Proposal checking is deferred here and released
-		// by runDeferredProposalCheck() after draft restores complete — so an
-		// early snapshot can't fill form state before drafts restore.
-		// (Previously this lived ~250 lines below, AFTER those awaits, which
-		// defeated the "fire early" intent.)
+		// ── Fire the transcript snapshot request as the first post-auth action.
+		// No side-panel, proposal, draft, git, or session-list REST hydration may
+		// start first. The reducer can apply an early snapshot to remote.state;
+		// setAgent() below binds and paints it before workspace hydration waits.
+		// Proposal checking remains deferred until draft restores complete.
 		if (isExisting) {
 			remote.deferProposalCheck();
 			remote.requestMessages();
 		}
+
+		installConfirmedSessionModelPersistence(remote, sessionId);
 
 		// Auto-prompt for new assistant sessions — fire IMMEDIATELY after connect
 		// before any draft-restore awaits that could yield and race
@@ -1633,6 +1668,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			} else {
 				autoPrompt = AUTO_PROMPTS[options.assistantType];
 			}
+			if (isStale()) { cleanupRemote(remote); return; }
 			// The kickoff is the assistant's FIRST message. Flag it non-title-generating
 			// so auto-naming keys off the first GENUINE user message, not the kickoff.
 			if (autoPrompt) remote.prompt(autoPrompt, undefined, { suppressTitleGen: true });
@@ -2310,7 +2346,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			origDisconnect();
 		};
 
-		if (isStale()) { remote.disconnect(); return; }
+		if (isStale()) { cleanupRemote(remote); return; }
 
 		state.connectionStatus = "connected";
 		state.remoteAgent = remote;
@@ -2324,8 +2360,11 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		let sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
 		if (!sessionData) {
 			await refreshSessions().catch(() => { /* fall back to cached list */ });
+			if (isStale()) { cleanupRemote(remote); return; }
 			sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
 		}
+		const reviewSources = await loadReviewSources();
+		if (isStale()) { cleanupRemote(remote); return; }
 		state.assistantType = options?.assistantType
 			|| sessionData?.assistantType
 			|| (options?.isGoalAssistant || sessionData?.goalAssistant ? "goal"
@@ -2342,24 +2381,50 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
-		(await loadReviewSources()).restorePersistedReviewDocuments(sessionId, { select: true });
+		reviewSources.restorePersistedReviewDocuments(sessionId, { select: true });
 		state.inboxEntries = [];
 		if (state.isPreviewSession) startPreviewPolling();
 		else stopPreviewPolling();
 		if (sessionData?.staffId) startInboxSubscription(sessionId, sessionData.staffId);
 		else stopInboxSubscription();
 
-		// Bind draft autosave before setAgent can render an interactive editor;
-		// setAgent awaits lazy imports after assigning agentInterface, so Lit can
-		// paint the textarea before setAgent returns under load.
+		// Resolve every list-backed restriction already available before setAgent;
+		// a direct-record fetch remains a best-effort fallback after hydration.
+		let sessionDataAny: any = sessionData
+			|| state.archivedSessions?.find((s: any) => s.id === sessionId);
+
+		// Bind draft autosave before setAgent can render an interactive editor.
 		_bindPromptDraftSession(sessionId);
 
 		// ── Bind the agent to the early ChatPanel (created before connect
-		// to show the "Connecting…" shell instantly).
-		await state.chatPanel!.setAgent(remote as any, {
+		// to show the "Connecting…" shell instantly). setAgent assigns its
+		// AgentInterface synchronously before its first lazy-import await. Apply
+		// known restrictions in that same task, before Lit can paint a composer.
+		const bindingPanel = state.chatPanel!;
+		const setAgentPromise = bindingPanel.setAgent(remote as any, {
 			onApiKeyRequired: async () => true,
 		});
+		if (bindingPanel.agentInterface) {
+			applyKnownSessionInteractionMode(bindingPanel.agentInterface, [sessionDataAny], {
+				explicitReadOnly: options?.readOnly === true,
+				remoteArchived: remote.state.isArchived === true,
+			});
+		}
+		await setAgentPromise;
 		if (isStale()) { cleanupRemote(remote); return; }
+
+		// Initial workspace hydration has one owner and starts only after the
+		// transcript-bearing agent is bound, so REST latency cannot delay paint.
+		await hydrateSidePanelWorkspace(sessionId);
+		// Transcript replay may have observed the submitted-review marker before
+		// any server tabs existed locally. Replay that cleanup after hydration,
+		// including for a now-cached session, before stale-invocation teardown.
+		await remote.reconcileSubmittedReviewWorkspace();
+		if (isStale()) { cleanupRemote(remote); return; }
+		// The earlier restore runs before hydration so it cannot see cold-loaded
+		// review tabs. Restore again only after submitted tabs have been removed;
+		// unsubmitted persisted documents now have authoritative tabs to bind to.
+		reviewSources.restorePersistedReviewDocuments(sessionId, { select: true });
 
 		// Listen for suggest-goal events from assistant messages
 		state.chatPanel.addEventListener('suggest-goal', () => {
@@ -2373,8 +2438,6 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// gatewaySessions — look there as a fallback so the scope-gate fields
 		// (goalId / delegateOf / teamGoalId / assistantType) that gate the
 		// "Continue in new session" footer are threaded through.
-	let sessionDataAny: any = sessionData
-			|| state.archivedSessions?.find((s: any) => s.id === sessionId);
 		// Archived sessions re-opened directly (no prior sidebar load) aren't in
 		// either cache — fetch the record so the scope-gate fields threaded to
 		// AgentInterface (goalId / delegateOf / teamGoalId / assistantType) are
@@ -2401,20 +2464,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			}
 		}
 
-		// Disable input for archived or explicitly read-only sessions.
-		// Also honour the REST session record — when re-opening a terminated
-		// session directly, remote.state.isArchived hasn't settled yet but the
-		// PersistedSession's `archived` / `status=="terminated"` flags are
-		// authoritative.
-		const recordArchived = !!sessionDataAny && (sessionDataAny.archived || sessionDataAny.status === "terminated");
-		if (state.chatPanel.agentInterface && (remote.state.isArchived || recordArchived || options?.readOnly)) {
-			state.chatPanel.agentInterface.readOnly = true;
-		}
-
-		// Non-interactive sessions (e.g. verification reviewers) — show editor only while streaming (steer-only)
-		if (state.chatPanel.agentInterface && sessionData?.nonInteractive) {
-			state.chatPanel.agentInterface.readOnly = true;
-			state.chatPanel.agentInterface.nonInteractive = true;
+		// Reconcile any record discovered by the fallback fetch. The common case
+		// already applied these flags synchronously during setAgent above.
+		if (state.chatPanel.agentInterface) {
+			applyKnownSessionInteractionMode(state.chatPanel.agentInterface, [sessionDataAny], {
+				explicitReadOnly: options?.readOnly === true,
+				remoteArchived: remote.state.isArchived === true,
+			});
 		}
 
 		// Set up bg process kill/dismiss handlers
@@ -2554,10 +2610,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			setHashRoute("session", sessionId, true);
 		}
 
-		// (Snapshot request + proposal-check deferral were hoisted to fire
-		// immediately after connect() resolves — see the block right after
-		// `await remote.connect(...)` above. Firing here, after the
-		// refreshSessions()/setAgent() awaits, added ~700ms to every reload.)
+		// (Snapshot request + proposal-check deferral fire immediately after
+		// connect() resolves. Initial workspace hydration runs only after setAgent
+		// binds, so neither the request nor transcript paint waits on REST.)
 
 		// Initial git status and bg process fetch (fire-and-forget). Seed the
 		// tri-state from the client-side repo-cache so known git-less/empty sessions

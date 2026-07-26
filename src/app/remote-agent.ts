@@ -49,7 +49,7 @@ import { showFaviconBadge } from "./favicon-badge.js";
 import { isEffectivePlayFinishSoundEnabled, type FinishSoundSource } from "./play-finish-sound.js";
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
 import { scheduleGateStatusRefreshForGoal, refreshSessions, scheduleSessionListRefreshFromPush, scheduleStaffListRefreshFromPush } from "./remote-agent-refresh.js";
-import { applySidePanelWorkspaceFromServer, getSidePanelWorkspace, hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
+import { applySidePanelWorkspaceFromServer, closeSidePanelTab, getSidePanelWorkspace, hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { publishClientMessage, publishClientStatus } from "./session-event-bus.js";
 import { registerSessionPoster, unregisterSessionPoster, type SessionPostRequest } from "./session-write-bridge.js";
@@ -713,6 +713,37 @@ export class RemoteAgent {
 	get gatewaySessionId() {
 		return this._sessionId;
 	}
+	/**
+	 * Remove review tabs restored from the server after this session's review
+	 * was already submitted. Initial/reconnect workspace hydration can finish
+	 * after transcript replay performed the same cleanup against an empty local
+	 * workspace, so callers replay it at the workspace-apply boundary.
+	 *
+	 * This intentionally has no active-session guard: cached/background sessions
+	 * still own their keyed workspace and must not retain a submitted review tab.
+	 */
+	async reconcileSubmittedReviewWorkspace(): Promise<void> {
+		const sessionId = this._sessionId;
+		if (!sessionId || !isReviewSubmitted(sessionId)) return;
+		const isReviewTab = (tab: { id?: string; kind?: string }): boolean =>
+			tab.kind === "review" || tab.id?.startsWith("review:") === true;
+		const reviewTabIds = getSidePanelWorkspace(sessionId).tabs
+			.filter(isReviewTab)
+			.map((tab) => tab.id);
+		if (reviewTabIds.length === 0) return;
+
+		// Keep every deletion on the normal mutation path. A confirmed compatible
+		// 204 settles the optimistic close, while a 409 workspace remains
+		// authoritative and may be retried once at its newer revision. Refetches,
+		// network failures, and rollbacks are never locally filtered afterward.
+		for (const tabId of reviewTabIds) {
+			try {
+				await closeSidePanelTab(tabId, { sessionId, retryConflictOnce: true });
+			} catch (err) {
+				console.warn("[RemoteAgent] submitted-review workspace cleanup failed:", err);
+			}
+		}
+	}
 	private _isActiveSession(): boolean {
 		return this._sessionId !== "" && state.selectedSessionId === this._sessionId;
 	}
@@ -843,7 +874,13 @@ export class RemoteAgent {
 						this._reconnectAttempt = 0;
 						this._setConnectionStatus("connected");
 						resolve();
-						void hydrateSidePanelWorkspace(this._sessionId);
+						// Initial hydration is owned by connectToSession after ChatPanel
+						// binding. Reconnects still refresh the server workspace here and
+						// then replay submitted-review cleanup against the hydrated tabs.
+						if (!initial) {
+							void hydrateSidePanelWorkspace(this._sessionId)
+								.then(() => this.reconcileSubmittedReviewWorkspace());
+						}
 						// S2: deliver any prompts/steers/retries the user issued while
 						// the socket was reconnecting, before resume/snapshot traffic.
 						this._flushOutbox();
@@ -1778,7 +1815,7 @@ export class RemoteAgent {
 								if (!this._isActiveSession()) break;
 							}
 						} else {
-							closeReviewWorkspaceTabs(undefined, { sessionId: reviewSessionId, select: false });
+							await this.reconcileSubmittedReviewWorkspace();
 						}
 						if (this._isActiveSession()) {
 							const reviewSources = await loadReviewSources();

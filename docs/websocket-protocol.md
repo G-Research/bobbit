@@ -47,6 +47,80 @@ Bobbit keeps normal streaming responsive by bounding payloads before they enter 
 
 Overflow diagnostics include `outerType`, `innerType` for `{ type: "event" }` frames, serialized `bytes`, recipient kind, and context such as `goalId`. These fields are the first place to look when a reconnect storm follows verification or reviewer activity.
 
+## Authenticated session work policy
+
+Live session sockets enforce `readOnly` and `nonInteractive` at the authenticated
+transport boundary, not only in the browser UI. The server checks both the live
+session and its persisted row; `true` in either source activates the restriction.
+This closes the window where one representation has updated before the other.
+If both restrictions apply, `readOnly` takes precedence.
+
+The guarded work classifier contains these frames:
+
+- Agent and queue work: `prompt`, `steer`, `steer_queued`, `remove_queued`,
+  `reorder_queue`, `retry`, `restart_agent`, `compact`.
+- Metadata and model writes: `set_title`, `generate_title`,
+  `summarize_goal_title`, `set_model`, `set_image_model`,
+  `set_thinking_level`.
+- Durable task and permission writes: `task_create`, `task_update`,
+  `task_delete`, `grant_tool_permission`.
+- Extension session writes: `ext_session_write_permit`, `ext_session_post`.
+
+### Read-only sessions
+
+Every guarded frame is rejected with `SESSION_READ_ONLY`. Ordinary guarded
+frames receive the generic error envelope:
+
+```json
+{ "type": "error", "code": "SESSION_READ_ONLY", "message": "..." }
+```
+
+Extension session-write callers require a correlated response so their Host API
+call does not wait for a generic error until timeout. They receive:
+
+```json
+{ "type": "ext_session_write_permit_result", "requestId": "...", "ok": false, "error": "SESSION_READ_ONLY" }
+```
+
+or:
+
+```json
+{ "type": "ext_session_post_result", "requestId": "...", "ok": false, "error": "SESSION_READ_ONLY" }
+```
+
+A read-only session has no streaming-steer exception.
+
+### Non-interactive sessions
+
+The response code identifies the rejected class:
+
+| Frame | Policy code |
+|---|---|
+| `prompt` | `NON_INTERACTIVE_PROMPT` |
+| `steer` while the current status is not `streaming` | `NON_INTERACTIVE_STEER` |
+| `steer_queued`, `remove_queued`, `reorder_queue` | `NON_INTERACTIVE_QUEUE_CONTROL` |
+| Every other guarded frame | `NON_INTERACTIVE_WORK_CONTROL` |
+
+A direct `steer` is permitted only while the session's current status is
+`streaming`; this allows an active automated review to be redirected without
+starting or queueing new reviewer work. The exception does not extend to
+`retry`, queue controls, extension posts, or any other guarded frame.
+
+Ordinary frames receive `{ "type": "error", "code": "<policy-code>",
+"message": "..." }`. As with read-only policy, `ext_session_write_permit` and
+`ext_session_post` instead return their respective request-correlated result
+envelope with the policy code in `error`.
+
+### Classifier scope
+
+`get_state`, `get_messages`, and `ping` remain available under these policies.
+`abort` and `deny_tool_permission` also remain outside the guarded work
+classifier because they decrease or stop active work. `resume` and the
+separately authorized extension channel and surface operations are likewise not
+classified here. This section documents only the session-work policy; those
+frames can still be rejected by their own authentication, authorization,
+lifecycle, validation, size, or replay rules.
+
 ## Client → Server
 
 | Type | Fields | Description |
