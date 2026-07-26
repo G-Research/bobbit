@@ -117,9 +117,8 @@ test.describe("Search/preview/archive API migrations", () => {
 			expect(mountResponse.status).toBe(200);
 			const mounted = await mountResponse.json() as { artifactId: string; contentHash: string };
 
-			// Add a second byte-identical valid candidate. The production contract is
-			// filesystem enumeration order, so derive the expected exact winner from
-			// the same raw enumeration rather than assuming lexical ordering.
+			// Add a second byte-identical valid candidate. The injected root stream is
+			// explicitly reverse lexical so a hidden sort cannot satisfy this contract.
 			const cloneId = `clone_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
 			const cloneDir = previewArtifacts.artifactDir(sessionId, cloneId);
 			await fs.promises.cp(previewArtifacts.artifactDir(sessionId, mounted.artifactId), cloneDir, { recursive: true });
@@ -127,18 +126,37 @@ test.describe("Search/preview/archive API migrations", () => {
 			const cloneMetadata = JSON.parse(await fs.promises.readFile(cloneMetadataPath, "utf-8"));
 			cloneMetadata.artifactId = cloneId;
 			await fs.promises.writeFile(cloneMetadataPath, JSON.stringify(cloneMetadata, null, 2), "utf-8");
-			const candidateOrder = (await fs.promises.readdir(previewArtifacts.artifactSessionDir(sessionId), { withFileTypes: true }))
-				.filter(entry => entry.isDirectory() && (entry.name === mounted.artifactId || entry.name === cloneId))
-				.map(entry => entry.name);
-			expect(candidateOrder).toHaveLength(2);
+			const artifactSessionDir = previewArtifacts.artifactSessionDir(sessionId);
+			const candidateEntries = (await fs.promises.readdir(artifactSessionDir, { withFileTypes: true }))
+				.filter(entry => entry.isDirectory() && (entry.name === mounted.artifactId || entry.name === cloneId));
+			expect(candidateEntries).toHaveLength(2);
+			const candidateEntriesById = new Map(candidateEntries.map(entry => [entry.name, entry]));
+			const lexicalCandidateIds = [mounted.artifactId, cloneId].sort();
+			const streamedCandidateIds = [...lexicalCandidateIds].reverse();
+			const streamedCandidateEntries = streamedCandidateIds.map((artifactId) => {
+				const entry = candidateEntriesById.get(artifactId);
+				expect(entry, `missing real candidate directory ${artifactId}`).toBeDefined();
+				return entry!;
+			});
+			expect(streamedCandidateIds[0]).not.toBe(lexicalCandidateIds[0]);
 
 			const baseFs = previewMount.createPreviewAsyncFs(fs);
 			const hashStarted = deferred();
 			let held = false;
 			previewArtifacts.setPreviewArtifactFsForTesting({
 				...baseFs,
+				opendir: async (filePath: fs.PathLike) => {
+					if (path.resolve(String(filePath)) !== path.resolve(artifactSessionDir)) {
+						return baseFs.opendir(filePath);
+					}
+					let index = 0;
+					return {
+						read: async () => streamedCandidateEntries[index++] ?? null,
+						close: async () => {},
+					} as fs.Dir;
+				},
 				open: async (filePath: fs.PathLike, flags: "r") => {
-					if (!held && under(previewArtifacts.artifactSessionDir(sessionId), filePath)) {
+					if (!held && under(artifactSessionDir, filePath)) {
 						held = true;
 						hashStarted.resolve();
 						await releaseHash.promise;
@@ -171,7 +189,10 @@ test.describe("Search/preview/archive API migrations", () => {
 			expect(scanResponse.status).toBe(200);
 			const snapshot = await scanResponse.json() as { artifactId?: string; contentHash?: string };
 			expect(snapshot.contentHash).toBe(mounted.contentHash);
-			expect(snapshot.artifactId).toBe(candidateOrder[0]);
+			expect(
+				snapshot.artifactId,
+				"artifact reuse must choose the first valid candidate from the controlled opendir stream",
+			).toBe(streamedCandidateIds[0]);
 			const mutationResponse = await mutationPromise;
 			expect(mutationResponse.status).toBe(200);
 			const mutated = await mutationResponse.json() as { contentHash?: string };

@@ -51,7 +51,7 @@ Missing entries are handled at the operation that owns them. `ENOENT` remains su
 | One-root deletion | `removeTree` is an iterative streaming lane over an identity-detached root, not a recursive promise tree. |
 | Multi-root deletion | `removePreviewTrees` and `sweepOrphanArtifacts` run no more than the shared number of independent root lanes. Preview backup/quarantine cleanup also uses a single global ownership lane. |
 
-Metadata reads may settle concurrently within one candidate batch, but results are processed in filesystem enumeration order. Exact mount validation is sequential and the next batch is not prefetched during validation. This preserves the first valid matching candidate even when metadata reads complete out of order.
+Here, filesystem enumeration order means the `Dirent` sequence emitted by this lookup's own `opendir()`/`Dir.read()` stream. A separate `readdir()` call—or even a separate stream—is not an ordering oracle: no cross-call, cross-API, or lexical equivalence is promised. Metadata reads may settle concurrently within one candidate batch, but the bounded mapper retains each stream index. Exact mount validation then consumes those indexed results sequentially, without prefetching the next batch, so reuse remains the first valid matching candidate from the lookup's own stream.
 
 A candidate is reusable only when:
 
@@ -199,7 +199,7 @@ A missing worktree short-circuits the transcript stat; missing paths and I/O err
 Asynchrony does not change public selection or response semantics:
 
 - bounded maps retain input result order; inventories apply their existing final sort;
-- artifact metadata may finish out of order, but reuse remains first-valid filesystem order;
+- artifact metadata may finish out of order, but reuse remains first-valid order from that lookup's own `Dir.read()` stream;
 - hashes and metadata file lists remain stable and sorted;
 - orphan cleanup returns an exact count and deterministic bounded samples;
 - mutation prune and archive stats retain exact count rules;
@@ -219,10 +219,10 @@ Behavioral coverage is split by invariant:
 - Preview unit suites cover wide/deep traversal, ordered batched candidates, corruption and missing entries, exact hash/file-list parity, catalog bounds and generation races, descriptor/root/parent identity substitution, transactional install/rollback, quarantine restoration, cleanup idempotency, and per-item failure isolation.
 - Worktree suites cover deferred event-loop progress, shared ceilings, pure pool construction and initialization/stop/drain barriers, boot sweep-before-pool ordering, deterministic inventory results, live ownership arriving during a scan, archived-branch and shared/container/pool protections, and targeted symlink-safe deletion.
 - Plan-mutation, archive-purge, and orphan suites use deferred fake I/O to pin event-loop progress, bounded read-ahead, goal serialization, atomic decisions, timer single-flight, stale callback fencing, awaited stop/shutdown, retention boundaries, listener ownership, scanner sampling, and every orphan-preservation decision.
-- `tests2/integration/search-preview-api.test.ts` holds artifact validation and purge deletion while `GET /api/health` and `POST /api/sessions` complete, then proves the preview operation itself still waits and selects the exact artifact. It also pins SSE bootstrap-before-live ordering.
+- `tests2/integration/search-preview-api.test.ts` holds artifact validation and purge deletion while `GET /api/health` and `POST /api/sessions` complete, then proves the preview operation itself still waits and selects the first valid artifact from a controlled `Dir.read()` stream. It also pins SSE bootstrap-before-live ordering.
 - `tests2/integration/preview-purge-listener-error.test.ts` proves the awaited listener owns an artifact deletion failure without making the gateway unhealthy. Existing preview route and browser journeys preserve POST, restore, reload, and historical artifact behavior.
 
-The tests use deferred ordering and observed concurrency, not machine-speed thresholds.
+The tests use deferred ordering and observed concurrency, not machine-speed thresholds. Readiness comes from an explicit signal at the operation boundary under test; a finite number of event-loop turns cannot prove that earlier asynchronous filesystem work has reached that boundary under contention. Test-owned deferreds that can hold a stop or listener barrier are released in failure-safe cleanup before awaiting the barrier. Otherwise an earlier assertion failure can skip the normal release and make correct production teardown wait indefinitely for the test's hold.
 
 ## Deferred synchronous-I/O areas
 

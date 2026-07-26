@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it, vi } from "vitest";
 import { BACKGROUND_IO_CONCURRENCY } from "../../src/server/agent/bounded-async-work.ts";
-import { SessionManager } from "../../src/server/agent/session-manager.ts";
+import {
+	SessionManager,
+	type SessionPreviewPurgeOperation,
+} from "../../src/server/agent/session-manager.ts";
 import { createManualClock, type ManualClock } from "../harness/clock.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
@@ -19,12 +22,12 @@ function deferred<T = void>(): Deferred<T> {
 	return { promise, resolve, reject };
 }
 
-async function waitFor(predicate: () => boolean, label: string): Promise<void> {
-	for (let attempt = 0; attempt < 1_000; attempt++) {
-		if (predicate()) return;
-		await new Promise<void>(resolve => setImmediate(resolve));
-	}
-	throw new Error(`timed out waiting for ${label}`);
+const heldDeferredReleases: Array<() => void> = [];
+
+function heldDeferred(): Deferred<void> {
+	const hold = deferred<void>();
+	heldDeferredReleases.push(() => hold.resolve());
+	return hold;
 }
 
 function archivedSession(id: string, now: number, agentSessionFile?: string): any {
@@ -46,6 +49,7 @@ function makeManager(options: {
 	clock?: ManualClock;
 	archiveStat?: (filePath: string) => Promise<{ size: number }>;
 	purgeAsync?: (id: string) => Promise<void>;
+	previewPurgeOperation?: SessionPreviewPurgeOperation;
 }): { manager: SessionManager; records: Map<string, any>; clock: ManualClock } {
 	const clock = options.clock ?? createManualClock(20 * DAY_MS);
 	const records = new Map(options.records.map(record => [record.id, record]));
@@ -77,6 +81,7 @@ function makeManager(options: {
 		clock,
 		projectContextManager: projectContextManager as any,
 		archiveStat: options.archiveStat,
+		previewPurgeOperation: options.previewPurgeOperation,
 	});
 	const internal = manager as any;
 	if (internal._statusHeartbeatTimer) {
@@ -89,8 +94,12 @@ function makeManager(options: {
 const managers: SessionManager[] = [];
 
 afterEach(async () => {
-	vi.restoreAllMocks();
-	await Promise.all(managers.splice(0).map(manager => manager.stopPurgeSchedule()));
+	for (const release of heldDeferredReleases.splice(0)) release();
+	try {
+		await Promise.all(managers.splice(0).map(manager => manager.stopPurgeSchedule()));
+	} finally {
+		vi.restoreAllMocks();
+	}
 });
 
 describe("asynchronous archive purge lifecycle", () => {
@@ -99,7 +108,8 @@ describe("asynchronous archive purge lifecycle", () => {
 		const count = BACKGROUND_IO_CONCURRENCY * 2 + 1;
 		const records = Array.from({ length: count }, (_, index) =>
 			archivedSession(`archive-${index}`, now, `/transcripts/${index}.jsonl`));
-		const release = deferred<void>();
+		const release = heldDeferred();
+		const workersStarted = deferred<void>();
 		let calls = 0;
 		let active = 0;
 		let maxActive = 0;
@@ -110,26 +120,35 @@ describe("asynchronous archive purge lifecycle", () => {
 				calls++;
 				active++;
 				maxActive = Math.max(maxActive, active);
-				await release.promise;
-				active--;
-				return { size: Number(/(\d+)\.jsonl$/.exec(filePath)?.[1] ?? 0) + 1 };
+				if (calls === BACKGROUND_IO_CONCURRENCY) workersStarted.resolve();
+				try {
+					await release.promise;
+					return { size: Number(/(\d+)\.jsonl$/.exec(filePath)?.[1] ?? 0) + 1 };
+				} finally {
+					active--;
+				}
 			},
 		});
 		managers.push(manager);
 
 		let settled = false;
+		let stats: Awaited<ReturnType<typeof manager.getExpiredArchiveStats>> | undefined;
 		const statsPromise = manager.getExpiredArchiveStats().then(value => { settled = true; return value; });
-		let unrelatedWorkRan = false;
-		setImmediate(() => { unrelatedWorkRan = true; });
-		await waitFor(() => calls === BACKGROUND_IO_CONCURRENCY && unrelatedWorkRan, "bounded archive stat workers");
+		const unrelatedWork = deferred<void>();
+		setImmediate(() => unrelatedWork.resolve());
+		try {
+			await Promise.all([workersStarted.promise, unrelatedWork.promise]);
+			assert.equal(settled, false);
+			assert.equal(active, BACKGROUND_IO_CONCURRENCY);
+			assert.equal(maxActive, BACKGROUND_IO_CONCURRENCY);
+			assert.equal(calls, BACKGROUND_IO_CONCURRENCY, "no work above the shared ceiling starts while every worker is held");
 
-		assert.equal(settled, false);
-		assert.equal(active, BACKGROUND_IO_CONCURRENCY);
-		assert.equal(maxActive, BACKGROUND_IO_CONCURRENCY);
-		assert.equal(calls, BACKGROUND_IO_CONCURRENCY, "no work above the shared ceiling starts while every worker is held");
-
-		release.resolve();
-		const stats = await statsPromise;
+			release.resolve();
+			stats = await statsPromise;
+		} finally {
+			release.resolve();
+			await statsPromise.catch(() => undefined);
+		}
 		assert.deepEqual(stats, {
 			count,
 			totalSizeBytes: count * (count + 1) / 2,
@@ -140,49 +159,100 @@ describe("asynchronous archive purge lifecycle", () => {
 
 	it("coalesces scheduled purge ticks and stopPurgeSchedule joins the active run", async () => {
 		const now = 20 * DAY_MS;
-		const releasePurge = deferred<void>();
+		const releasePurge = heldDeferred();
+		const purgeStarted = deferred<void>();
 		let purgeCalls = 0;
 		const { manager, clock } = makeManager({
 			records: [archivedSession("archive-held", now)],
 			clock: createManualClock(now),
 			purgeAsync: async () => {
 				purgeCalls++;
+				purgeStarted.resolve();
 				await releasePurge.promise;
 			},
 		});
 		managers.push(manager);
 		manager.startPurgeSchedule();
 
-		clock.advance(DAY_MS);
-		await waitFor(() => purgeCalls === 1, "first scheduled purge");
-		clock.advance(DAY_MS);
-		await new Promise<void>(resolve => setImmediate(resolve));
-		assert.equal(purgeCalls, 1, "a second timer tick must join, not overlap, the active purge");
+		let stop: Promise<void> | undefined;
+		try {
+			clock.advance(DAY_MS);
+			await purgeStarted.promise;
+			assert.equal(purgeCalls, 1);
 
-		let stopSettled = false;
-		const stop = manager.stopPurgeSchedule().then(() => { stopSettled = true; });
-		let unrelatedWorkRan = false;
-		setImmediate(() => { unrelatedWorkRan = true; });
-		await waitFor(() => unrelatedWorkRan, "event-loop work during purge stop barrier");
-		assert.equal(stopSettled, false, "stop must await the in-flight purge");
-		assert.equal(clock.pending(), 0, "stop must cancel the future interval before joining");
+			clock.advance(DAY_MS);
+			await new Promise<void>(resolve => setImmediate(resolve));
+			assert.equal(purgeCalls, 1, "a second timer tick must join, not overlap, the active purge");
 
-		releasePurge.resolve();
-		await stop;
+			let stopSettled = false;
+			stop = manager.stopPurgeSchedule().then(() => { stopSettled = true; });
+			const unrelatedWork = deferred<void>();
+			setImmediate(() => unrelatedWork.resolve());
+			await unrelatedWork.promise;
+			assert.equal(stopSettled, false, "stop must await the in-flight purge");
+			assert.equal(clock.pending(), 0, "stop must cancel the future interval before joining");
+		} finally {
+			releasePurge.resolve();
+			await (stop ?? manager.stopPurgeSchedule());
+		}
+
 		clock.advance(2 * DAY_MS);
 		await new Promise<void>(resolve => setImmediate(resolve));
 		assert.equal(purgeCalls, 1, "no stale timer callback may start cleanup after stop");
 	});
 
+	it("waits for explicit purge readiness after more than 1,000 event-loop turns", async () => {
+		const now = 20 * DAY_MS;
+		const previewCleanupStarted = deferred<void>();
+		const allowPreviewCleanup = heldDeferred();
+		const purgeStarted = deferred<void>();
+		let purgeStartedFlag = false;
+		const { manager, clock } = makeManager({
+			records: [archivedSession("archive-delayed-readiness", now)],
+			clock: createManualClock(now),
+			previewPurgeOperation: async (_sessionId, operation) => {
+				previewCleanupStarted.resolve();
+				await allowPreviewCleanup.promise;
+				return operation();
+			},
+			purgeAsync: async () => {
+				purgeStartedFlag = true;
+				purgeStarted.resolve();
+			},
+		});
+		managers.push(manager);
+		manager.startPurgeSchedule();
+
+		clock.advance(DAY_MS);
+		await previewCleanupStarted.promise;
+		const releaseAfterControlledDelay = (async () => {
+			for (let turn = 0; turn < 1_001; turn++) {
+				await new Promise<void>(resolve => setImmediate(resolve));
+			}
+			allowPreviewCleanup.resolve();
+		})();
+
+		try {
+			await purgeStarted.promise;
+			assert.equal(purgeStartedFlag, true);
+		} finally {
+			allowPreviewCleanup.resolve();
+			await releaseAfterControlledDelay;
+			await manager.stopPurgeSchedule();
+		}
+	});
+
 	it("awaits termination listeners and isolates a rejected purge listener", async () => {
 		const now = 20 * DAY_MS;
-		const listenerRelease = deferred<void>();
+		const listenerRelease = heldDeferred();
+		const listenerStarted = deferred<void>();
 		const order: string[] = [];
 		const { manager } = makeManager({ records: [archivedSession("archive-listener", now)] });
 		managers.push(manager);
 		manager.addTerminationListener(async (_id, info) => {
 			assert.equal(info.reason, "purged");
 			order.push("first-start");
+			listenerStarted.resolve();
 			await listenerRelease.promise;
 			order.push("first-end");
 		});
@@ -193,15 +263,22 @@ describe("asynchronous archive purge lifecycle", () => {
 		const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
 		let settled = false;
+		let purgeResult: boolean | undefined;
 		const purge = manager.purgeArchivedSession("archive-listener").then(value => { settled = true; return value; });
-		await waitFor(() => order.includes("first-start"), "first purge listener");
-		let unrelatedWorkRan = false;
-		setImmediate(() => { unrelatedWorkRan = true; });
-		await waitFor(() => unrelatedWorkRan, "event-loop work during listener barrier");
-		assert.equal(settled, false, "purge completion must await its async listener contract");
+		try {
+			await listenerStarted.promise;
+			const unrelatedWork = deferred<void>();
+			setImmediate(() => unrelatedWork.resolve());
+			await unrelatedWork.promise;
+			assert.equal(settled, false, "purge completion must await its async listener contract");
 
-		listenerRelease.resolve();
-		assert.equal(await purge, true);
+			listenerRelease.resolve();
+			purgeResult = await purge;
+		} finally {
+			listenerRelease.resolve();
+			await purge.catch(() => undefined);
+		}
+		assert.equal(purgeResult, true);
 		assert.deepEqual(order, ["first-start", "first-end", "second"]);
 		assert.ok(errors.mock.calls.some(args => String(args[0]).includes("purge listener failed")));
 	});

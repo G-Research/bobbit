@@ -12,16 +12,16 @@ Keep all three packages pinned exactly to the same Pi patch. A mixed Pi line can
 
 ## Compatibility and release eligibility
 
-Pi `0.81.1` is the compatibility baseline selected on 2026-07-21. It removes the high-severity `brace-expansion` finding from Pi's published dependency tree, but **the next Bobbit release is not audit-clean or release-eligible**.
+Pi `0.81.1` is the compatibility baseline selected on 2026-07-21. It removes the targeted high-severity `brace-expansion` edge from Pi's published dependency tree, but **the next Bobbit release is not audit-clean or release-eligible**.
 
-`@earendil-works/pi-coding-agent@0.81.1` publishes its own `npm-shrinkwrap.json`. That shrinkwrap pins `protobufjs@7.6.4`, which is affected by the moderate advisory [`GHSA-j3f2-48v5-ccww`](https://github.com/advisories/GHSA-j3f2-48v5-ccww). A Bobbit root override can make the development checkout resolve `protobufjs@7.6.5`, but npm ignores that override when Bobbit is installed as a dependency and honors coding-agent's published shrinkwrap. The root checkout can consequently report zero audit findings while the packed consumer remains vulnerable; root `npm audit` output is not consumer evidence.
+`@earendil-works/pi-coding-agent@0.81.1` publishes its own `npm-shrinkwrap.json`. That shrinkwrap pins `protobufjs@7.6.4`, below the required `7.6.5` floor. At selection time the registry associated that edge with [`GHSA-j3f2-48v5-ccww`](https://github.com/advisories/GHSA-j3f2-48v5-ccww). A Bobbit root override can make the development checkout resolve `protobufjs@7.6.5`, but npm ignores a dependency's override and honors coding-agent's shrinkwrap when Bobbit is installed as a package. Root `npm audit` output is therefore not evidence about the installed consumer graph.
 
 Compatibility and release eligibility are separate decisions:
 
-- **Compatibility may pass for `0.81.1`** when all behavior gates pass and the packed consumer has exactly the one known moderate advisory, with no low, high, critical, or additional moderate findings.
-- **Release eligibility remains blocked** until a compatible common Pi patch publishes coding-agent with every `protobufjs` edge at `7.6.5` or newer, all three Pi pins advance together, and a fresh packed-consumer audit reports zero vulnerabilities.
+- **Compatibility may pass for `0.81.1`** when behavior gates and deterministic packed-consumer checks pass. Those checks cover graph validity, consumer lock creation and dependency-owned shrinkwrap presence, coordinated Pi versions, known version/path floors, and bundled binaries.
+- **Release eligibility remains blocked** until a compatible common Pi patch publishes coding-agent with every `protobufjs` edge at `7.6.5` or newer, all three Pi pins advance together, and the required release-only packed-consumer audit reports zero vulnerabilities.
 
-Do not describe `0.81.1` as audit-clean. The packed-consumer E2E treats the known moderate as an asserted compatibility outcome, not as a security exception for release.
+Normal unit, browser, and E2E suites deliberately do not query or assert the mutable registry advisory feed. Advisory data can change independently of the code under test, so using it as a normal gate makes compatibility results nondeterministic. Live consumer advisory enforcement instead runs only during release preflight through `npm run audit:packed-consumer`; every severity must be zero, with no exceptions. Do not describe `0.81.1` as audit-clean or release-eligible.
 
 ### Verified dependency outcomes
 
@@ -33,15 +33,15 @@ The controlled development-checkout regeneration produced this result:
 - `npm ls` exits successfully with no invalid, missing, stale, or extraneous Pi edge; and
 - a plain `npm install` with the repository `.npmrc` restored leaves `package-lock.json` unchanged.
 
-A clean project installing the packed Bobbit tarball under normal consumer npm settings produced this result:
+A clean project installing the packed Bobbit tarball under normal consumer npm settings deterministically verifies that:
 
 - all three Pi packages remain aligned at `0.81.1`;
+- the consumer creates and owns its `package-lock.json`, while coding-agent retains its published shrinkwrap;
 - every packed-consumer `brace-expansion` occurrence is `5.0.7` or newer;
-- exactly one `protobufjs@7.6.4` occurrence exists under coding-agent's published shrinkwrap;
-- `npm audit --omit=dev --json` exits nonzero with exactly one moderate finding, `GHSA-j3f2-48v5-ccww`, and zero low, high, or critical findings; and
+- exactly one `protobufjs@7.6.4` occurrence exists under coding-agent's published shrinkwrap; and
 - Bobbit's bundled `fd` and `rg` resolve from the installed package and execute `--version` on supported platforms.
 
-The `brace-expansion@5.0.7+` floor fixes the targeted high advisory. It does not resolve the separate protobuf release blocker.
+These package-graph facts remain stable test inputs; registry advisory output does not. The `brace-expansion@5.0.7+` floor addresses the targeted high advisory, but the deterministic protobuf floor still blocks release eligibility for `0.81.1`.
 
 ### Lockfile invariant
 
@@ -315,6 +315,10 @@ Run `npm run test:manual` when credentials and Docker are available. Also retain
 npm ls @earendil-works/pi-agent-core @earendil-works/pi-ai @earendil-works/pi-coding-agent brace-expansion protobufjs --all
 ```
 
-For release evaluation, the packed-consumer path must build and pack Bobbit, install the tarball into an empty project under normal npm settings, inspect the same dependency tree, parse `npm audit --omit=dev --json` even when it exits nonzero, and smoke the installed `fd`/`rg` binaries. `tests2/core/pi-published-shrinkwrap-security.test.ts` separately pins why a clean root audit cannot replace that consumer test.
+`tests/e2e/pi-packed-consumer.spec.ts` builds and packs Bobbit, installs the tarball into an empty project under normal consumer lock settings, inspects the dependency graph and shrinkwrap-owned paths, and smokes the installed `fd`/`rg` binaries. It intentionally does not call `npm audit`; normal unit, browser, and E2E gates must remain independent of mutable registry advisory output.
+
+For release evaluation, first build Bobbit, then run `npm run audit:packed-consumer`. The command packs the built package and installs it into a clean temporary consumer, then runs `npm audit --omit=dev --json` against the public registry. Its child npm processes use fresh home/config/cache/temp directories, do not inherit registry credentials or auth tokens, and disable lifecycle scripts. Publication is blocked unless the audit exits successfully and every severity and total count is zero; an unavailable advisory service also blocks rather than bypasses the check. See [Releasing Bobbit](releasing.md#required-packed-consumer-audit).
+
+`tests2/core/pi-published-shrinkwrap-security.test.ts` uses local fixtures to pin why a clean root audit cannot replace consumer evidence without querying the registry.
 
 Historical upgrade note: [Pi 0.77 / Claude Opus 4.8 compatibility](pi-0.77-opus-4.8.md) records the Opus-specific model, thinking-level, spawn, and sandbox auth contracts from that earlier Pi line.

@@ -97,8 +97,9 @@ Run, in this order, and **stop on any failure**:
 
 ```bash
 npm ci                          # clean install, lockfile authoritative
-npm audit --omit=dev            # zero high/critical in runtime deps
+npm audit --omit=dev            # zero vulnerabilities in root runtime deps
 npm run build                   # full build; emits declarations used by test type-checks
+npm run audit:packed-consumer   # zero vulnerabilities in a fresh tarball consumer
 npm run check                   # type-check server + web + tests against fresh dist
 npm run test:unit               # fast unit suite
 npm run test:browser            # Playwright browser journeys
@@ -106,12 +107,13 @@ npm run test:e2e                # API + worktree/Docker/MCP/restart E2E
 ```
 
 Rules:
-- **`npm audit` must show 0 vulnerabilities** (any severity, runtime deps). If it doesn't, stop and report what's flagged — do not release with known vulns. If a finding is genuinely a false positive (e.g. dev-only path), have the user explicitly acknowledge before continuing.
+- **Both audits must show 0 vulnerabilities** at every severity. The packed-consumer command installs the just-built tarball under normal npm settings because a clean root audit cannot see dependency-owned shrinkwrap findings. Any finding blocks publish; there are no release exceptions.
+- Registry advisory availability is deliberately release-only, not part of normal unit, browser, or E2E gates. If the advisory service or clean consumer install is unavailable, stop the release rather than skipping the packed-consumer audit.
 - Don't skip browser or E2E tests "because they're slow" — releases are the one place flakes bite users.
-- Build must precede `check`: `tsconfig.tests2.json` follows intentional imports of emitted `dist/server/*.js` declarations, so a clean checkout cannot type-check the test graph before the build.
+- Build must precede both `audit:packed-consumer` and `check`: the audit packs built output, while `tsconfig.tests2.json` follows intentional imports of emitted `dist/server/*.js` declarations.
 - If any test fails, the failure is the bug. Fix it or abort the release; do not retry hoping it's flaky.
 
-Long-running steps (`build`, `test:browser`, `test:e2e`) should use `bash_bg` so output stays inspectable.
+Long-running steps (`build`, `audit:packed-consumer`, `test:browser`, `test:e2e`) should use `bash_bg` so output stays inspectable.
 
 ## 3. Decide whether to bump the binary sub-packages
 
@@ -320,7 +322,7 @@ Report to the user:
 - npm package URL (`https://www.npmjs.com/package/bobbit/v/<new-version>`)
 - Whether provenance was attached
 - Whether binaries were republished, and which versions
-- Any audit findings that were explicitly accepted
+- Root and packed-consumer audit results (both must be clean)
 
 ## Rules / best practices
 
