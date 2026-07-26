@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it, vi } from "vitest";
 import { BACKGROUND_IO_CONCURRENCY } from "../../src/server/agent/bounded-async-work.ts";
-import { SessionManager } from "../../src/server/agent/session-manager.ts";
+import {
+	SessionManager,
+	type SessionPreviewPurgeOperation,
+} from "../../src/server/agent/session-manager.ts";
 import { createManualClock, type ManualClock } from "../harness/clock.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
@@ -46,6 +49,7 @@ function makeManager(options: {
 	clock?: ManualClock;
 	archiveStat?: (filePath: string) => Promise<{ size: number }>;
 	purgeAsync?: (id: string) => Promise<void>;
+	previewPurgeOperation?: SessionPreviewPurgeOperation;
 }): { manager: SessionManager; records: Map<string, any>; clock: ManualClock } {
 	const clock = options.clock ?? createManualClock(20 * DAY_MS);
 	const records = new Map(options.records.map(record => [record.id, record]));
@@ -77,6 +81,7 @@ function makeManager(options: {
 		clock,
 		projectContextManager: projectContextManager as any,
 		archiveStat: options.archiveStat,
+		previewPurgeOperation: options.previewPurgeOperation,
 	});
 	const internal = manager as any;
 	if (internal._statusHeartbeatTimer) {
@@ -172,6 +177,53 @@ describe("asynchronous archive purge lifecycle", () => {
 		clock.advance(2 * DAY_MS);
 		await new Promise<void>(resolve => setImmediate(resolve));
 		assert.equal(purgeCalls, 1, "no stale timer callback may start cleanup after stop");
+	});
+
+	it("does not assume purge readiness within a fixed number of event-loop turns", async () => {
+		const now = 20 * DAY_MS;
+		const previewCleanupStarted = deferred<void>();
+		const allowPreviewCleanup = deferred<void>();
+		const purgeStarted = deferred<void>();
+		let purgeStartedFlag = false;
+		const { manager, clock } = makeManager({
+			records: [archivedSession("archive-delayed-readiness", now)],
+			clock: createManualClock(now),
+			previewPurgeOperation: async (_sessionId, operation) => {
+				previewCleanupStarted.resolve();
+				await allowPreviewCleanup.promise;
+				return operation();
+			},
+			purgeAsync: async () => {
+				purgeStartedFlag = true;
+				purgeStarted.resolve();
+			},
+		});
+		managers.push(manager);
+		manager.startPurgeSchedule();
+
+		clock.advance(DAY_MS);
+		await previewCleanupStarted.promise;
+		const releaseAfterFinitePoll = (async () => {
+			for (let turn = 0; turn < 1_001; turn++) {
+				await new Promise<void>(resolve => setImmediate(resolve));
+			}
+			allowPreviewCleanup.resolve();
+		})();
+
+		try {
+			await waitFor(
+				() => purgeStartedFlag,
+				"archive purge readiness after controlled 1001-turn cleanup",
+			);
+		} finally {
+			// Never strand the production stop barrier when the readiness assertion
+			// fails: release the test-owned hold, prove the purge eventually starts,
+			// and join it before Vitest enters afterEach.
+			allowPreviewCleanup.resolve();
+			await releaseAfterFinitePoll;
+			await purgeStarted.promise;
+			await manager.stopPurgeSchedule();
+		}
 	});
 
 	it("awaits termination listeners and isolates a rejected purge listener", async () => {
