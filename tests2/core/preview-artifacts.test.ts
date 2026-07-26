@@ -266,6 +266,17 @@ function writeCandidate(
 	}
 }
 
+function directoryEntriesInOrder(directory: string, orderedNames: readonly string[]): fs.Dirent[] {
+	const entries = memoryFs.readdirSync(directory, { withFileTypes: true });
+	const entriesByName = new Map(entries.map(entry => [entry.name, entry]));
+	return orderedNames.map((name) => {
+		const entry = entriesByName.get(name);
+		assert.ok(entry, `missing controlled directory entry ${name}`);
+		assert.equal(entry.isDirectory(), true, `controlled entry is not a directory: ${name}`);
+		return entry;
+	});
+}
+
 describe("preview artifacts", () => {
 	it("stores exact bytes, sorted POSIX files, and stable nested binary hashes", async () => {
 		await resetSession();
@@ -321,13 +332,29 @@ describe("preview artifacts", () => {
 		writeCandidate("ffffff", mounted, { metadata: candidateRecord("ffffff", mounted) });
 		writeCandidate("gggggg", mounted, { metadata: candidateRecord("gggggg", mounted) });
 
-		const exactOrder = memoryFs.readdirSync(path.join(artifactRoot, SID), { withFileTypes: true })
-			.filter(ent => ent.isDirectory() && (ent.name === "ffffff" || ent.name === "gggggg"))
-			.map(ent => ent.name);
-		const found = await findPreviewArtifactByHash(SID, mounted.contentHash);
-		assert.equal(found?.artifactId, exactOrder[0]);
-		const reused = await persistPreviewArtifact(SID, mounted);
-		assert.equal(reused.artifactId, exactOrder[0]);
+		const sessionDir = path.resolve(path.join(artifactRoot, SID));
+		const streamedIds = ["aaaaaa", "bbbbbb", "cccccc", "dddddd", "eeeeee", "ffffff", "gggggg"];
+		const streamedEntries = directoryEntriesInOrder(sessionDir, streamedIds);
+		const orderedFs: PreviewAsyncFs = {
+			...baseAsyncFs,
+			opendir: async filePath => {
+				if (path.resolve(String(filePath)) !== sessionDir) return baseAsyncFs.opendir(filePath);
+				let index = 0;
+				return {
+					read: async () => streamedEntries[index++] ?? null,
+					close: async () => {},
+				} as fs.Dir;
+			},
+		};
+		setPreviewArtifactFsForTesting(orderedFs);
+		try {
+			const found = await findPreviewArtifactByHash(SID, mounted.contentHash);
+			assert.equal(found?.artifactId, "ffffff", "lookup must skip invalid streamed candidates in order");
+			const reused = await persistPreviewArtifact(SID, mounted);
+			assert.equal(reused.artifactId, "ffffff", "catalog reuse must retain the streamed candidate order");
+		} finally {
+			setPreviewArtifactFsForTesting(memoryFs);
+		}
 	});
 
 	it("batches metadata reads with bounded read-ahead while preserving first-valid order and failure isolation", async () => {
@@ -342,12 +369,10 @@ describe("preview artifacts", () => {
 				metadata: candidateRecord(artifactId, mounted, { contentHash: "f".repeat(64) }),
 			});
 		}
-		const candidateSet = new Set(candidateIds);
-		const orderedIds = memoryFs.readdirSync(path.join(artifactRoot, SID), { withFileTypes: true })
-			.filter(ent => candidateSet.has(ent.name))
-			.map(ent => ent.name);
-		assert.equal(orderedIds.length, candidateIds.length);
-		const firstBatch = orderedIds.slice(0, RECOVERY_IO_CONCURRENCY);
+		const streamedIds = [...candidateIds].reverse();
+		assert.deepEqual(streamedIds, [...candidateIds].sort().reverse(), "controlled stream must be reverse lexical");
+		const streamedEntries = directoryEntriesInOrder(path.join(artifactRoot, SID), streamedIds);
+		const firstBatch = streamedIds.slice(0, RECOVERY_IO_CONCURRENCY);
 		const metadataPath = (artifactId: string): string => path.join(artifactDir(SID, artifactId), "artifact.json");
 
 		// Every failure shape is isolated inside the first batch. The two exact
@@ -362,7 +387,7 @@ describe("preview artifacts", () => {
 		memoryFs.writeFileSync(metadataPath(firstBatch[4]!), JSON.stringify(candidateRecord(firstBatch[4]!, mounted)));
 		memoryFs.writeFileSync(metadataPath(firstBatch[5]!), JSON.stringify(candidateRecord(firstBatch[5]!, mounted)));
 
-		const gates = new Map(orderedIds.map(artifactId => [artifactId, deferred()]));
+		const gates = new Map(streamedIds.map(artifactId => [artifactId, deferred()]));
 		const metadataStarted: string[] = [];
 		const metadataFinished: string[] = [];
 		let activeMetadataReads = 0;
@@ -372,14 +397,14 @@ describe("preview artifacts", () => {
 		const heldFs: PreviewAsyncFs = {
 			...baseAsyncFs,
 			opendir: async filePath => {
-				const directory = await baseAsyncFs.opendir(filePath);
-				if (path.resolve(String(filePath)) !== sessionDir) return directory;
+				if (path.resolve(String(filePath)) !== sessionDir) return baseAsyncFs.opendir(filePath);
+				let index = 0;
 				return {
 					read: async () => {
 						sessionDirectoryReads++;
-						return directory.read();
+						return streamedEntries[index++] ?? null;
 					},
-					close: () => directory.close(),
+					close: async () => {},
 				} as fs.Dir;
 			},
 			lstat: async filePath => {
@@ -429,7 +454,11 @@ describe("preview artifacts", () => {
 
 			gates.get(firstBatch[0]!)!.resolve();
 			const found = await scan;
-			assert.equal(found?.artifactId, firstBatch[4]);
+			assert.equal(
+				found?.artifactId,
+				firstBatch[4],
+				"the earlier valid opendir index must win when later metadata finishes first",
+			);
 			assert.equal(metadataStarted.length, RECOVERY_IO_CONCURRENCY, "exact validation must not read the next batch");
 			assert.equal(sessionDirectoryReads, RECOVERY_IO_CONCURRENCY);
 			assert.ok(maximumMetadataReads <= RECOVERY_IO_CONCURRENCY);

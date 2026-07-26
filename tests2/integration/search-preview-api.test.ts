@@ -117,8 +117,8 @@ test.describe("Search/preview/archive API migrations", () => {
 			expect(mountResponse.status).toBe(200);
 			const mounted = await mountResponse.json() as { artifactId: string; contentHash: string };
 
-			// Add a second byte-identical valid candidate, then deliberately make the
-			// streamed lookup order disagree with this separate bulk-readdir oracle.
+			// Add a second byte-identical valid candidate. The injected root stream is
+			// explicitly reverse lexical so a hidden sort cannot satisfy this contract.
 			const cloneId = `clone_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
 			const cloneDir = previewArtifacts.artifactDir(sessionId, cloneId);
 			await fs.promises.cp(previewArtifacts.artifactDir(sessionId, mounted.artifactId), cloneDir, { recursive: true });
@@ -129,10 +129,16 @@ test.describe("Search/preview/archive API migrations", () => {
 			const artifactSessionDir = previewArtifacts.artifactSessionDir(sessionId);
 			const candidateEntries = (await fs.promises.readdir(artifactSessionDir, { withFileTypes: true }))
 				.filter(entry => entry.isDirectory() && (entry.name === mounted.artifactId || entry.name === cloneId));
-			const candidateOrder = candidateEntries.map(entry => entry.name);
-			expect(candidateOrder).toHaveLength(2);
-			const streamedCandidateEntries = [...candidateEntries].reverse();
-			expect(streamedCandidateEntries[0]?.name).not.toBe(candidateOrder[0]);
+			expect(candidateEntries).toHaveLength(2);
+			const candidateEntriesById = new Map(candidateEntries.map(entry => [entry.name, entry]));
+			const lexicalCandidateIds = [mounted.artifactId, cloneId].sort();
+			const streamedCandidateIds = [...lexicalCandidateIds].reverse();
+			const streamedCandidateEntries = streamedCandidateIds.map((artifactId) => {
+				const entry = candidateEntriesById.get(artifactId);
+				expect(entry, `missing real candidate directory ${artifactId}`).toBeDefined();
+				return entry!;
+			});
+			expect(streamedCandidateIds[0]).not.toBe(lexicalCandidateIds[0]);
 
 			const baseFs = previewMount.createPreviewAsyncFs(fs);
 			const hashStarted = deferred();
@@ -185,8 +191,8 @@ test.describe("Search/preview/archive API migrations", () => {
 			expect(snapshot.contentHash).toBe(mounted.contentHash);
 			expect(
 				snapshot.artifactId,
-				"deterministic invalid oracle: bulk readdir first candidate must win over reversed opendir stream",
-			).toBe(candidateOrder[0]);
+				"artifact reuse must choose the first valid candidate from the controlled opendir stream",
+			).toBe(streamedCandidateIds[0]);
 			const mutationResponse = await mutationPromise;
 			expect(mutationResponse.status).toBe(200);
 			const mutated = await mutationResponse.json() as { contentHash?: string };
