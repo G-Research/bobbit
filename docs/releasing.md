@@ -1,8 +1,24 @@
 # Releasing Bobbit
 
-This doc covers the parts of a Bobbit release that are easy to get wrong.
-For now it focuses on the **bundled fd/rg binaries** — the rest of the
-release flow (changelog, version bump, `npm publish`) is conventional.
+This doc covers the Bobbit release checks that cannot be inferred from a normal development checkout: the installed consumer's security report and the bundled `fd`/`rg` binaries.
+
+## Required packed-consumer audit
+
+A root audit and a packed-consumer audit are both required before publication:
+
+```bash
+npm audit --omit=dev
+npm run build
+npm run audit:packed-consumer
+```
+
+The build must precede `audit:packed-consumer` because the command packs the built Bobbit package. It then installs that tarball into a clean private consumer with normal lockfile ownership and runs `npm audit --omit=dev --json`. Publication is blocked unless npm exits successfully and the report contains zero `info`, `low`, `moderate`, `high`, `critical`, and total vulnerabilities. An install, advisory-service, malformed-report, or cleanup failure is also blocking; do not skip or waive the preflight.
+
+The command runs npm with fresh home, config, cache, and temporary directories; empty user/global npm configuration; and the public npm registry. It does not inherit auth tokens or custom registry credentials, and pack/install lifecycle scripts are disabled. This isolates release evidence from developer credentials and prevents a package lifecycle hook from executing during the security check.
+
+Normal unit, browser, and E2E suites intentionally do not query or assert registry advisory output because that feed can change without a source change. The packed-consumer E2E remains deterministic: it verifies consumer lock creation, dependency-owned shrinkwrap presence, installed graph validity, coordinated Pi versions, known dependency version/path floors, and bundled binary resolution/smoke behavior. Live advisory enforcement belongs only to this required release preflight.
+
+A clean root audit is still useful, but it is not consumer evidence. npm may honor a dependency's published `npm-shrinkwrap.json` only after Bobbit is installed as a package, so the consumer can resolve a different tree from the repository checkout. See [Pi runtime compatibility](pi-runtime-compatibility.md#compatibility-and-release-eligibility) for the current dependency constraints.
 
 ## Bundled fd/rg binaries
 

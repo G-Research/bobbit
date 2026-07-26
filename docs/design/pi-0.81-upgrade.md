@@ -1,10 +1,12 @@
 # Pi 0.81 upgrade design
 
+**Status:** Implemented historical design. The dependency selection records the `0.81.1` upgrade; the verification sections below reflect the current policy that live advisory checks are release-only.
+
 ## Decision
 
 Pin `@earendil-works/pi-agent-core`, `@earendil-works/pi-ai`, and `@earendil-works/pi-coding-agent` exactly to `0.81.1`, the latest common release on 2026-07-21. It restores the pre-0.81 `streamFn` fallback via coding-agent's `setDefaultStreamFn(streamSimple)`. If a compatible patch appears first, advance all three pins together and repeat every check; mixed versions are invalid.
 
-Only coding-agent publishes a shrinkwrap: it fixes `brace-expansion` at `5.0.7` but pins vulnerable `protobufjs@7.6.4`. Clean consumers ignore Bobbit's override and report sole moderate `GHSA-j3f2-48v5-ccww`. Prefer a Pi patch with `protobufjs@7.6.5+`; until then `0.81.1` fixes the high advisory but is not release-audit-clean.
+Only coding-agent publishes a shrinkwrap: it fixes `brace-expansion` at `5.0.7` but pins `protobufjs@7.6.4`, below the required `7.6.5` floor. At upgrade selection time the registry reported the moderate `GHSA-j3f2-48v5-ccww` for that edge. Prefer a Pi patch with `protobufjs@7.6.5+`; until then `0.81.1` fixes the targeted high advisory but is not release-audit-clean or release-eligible.
 
 ## Implementation
 
@@ -44,7 +46,7 @@ Extend `tests2/core/oauth-external-callbacks.test.ts`, `tests2/core/pi-rpc-agent
 
 Add `tests2/core/pi-tool-lifecycle-contract.test.ts`: emit tool execution start/update/end plus extension tool call/result payloads and assert ordering, policy/steer boundaries, partial-result forwarding, final output/error normalization, and omission/presence of optional `usage` and `addedToolNames`. Include compile-time type imports for the newly exported lifecycle types without adopting new runtime behavior.
 
-Add `tests2/core/pi-published-shrinkwrap-security.test.ts`: a fixture with a secure root override and vulnerable dependency-owned pin must fail. Explicitly register both `tests2/core/pi-tool-lifecycle-contract.test.ts` and `tests2/core/pi-published-shrinkwrap-security.test.ts` in `tests2/tests-map.json` under the core unit suite. Add/register `tests/e2e/pi-packed-consumer.spec.ts`: pack Bobbit, install into an empty temp project, and apply the version-conditional compatibility assertions below. This detects root-audit false negatives.
+Add `tests2/core/pi-published-shrinkwrap-security.test.ts`: a local fixture with a secure root override and below-floor dependency-owned pin must fail. Explicitly register both `tests2/core/pi-tool-lifecycle-contract.test.ts` and `tests2/core/pi-published-shrinkwrap-security.test.ts` in `tests2/tests-map.json` under the core unit suite. Add/register `tests/e2e/pi-packed-consumer.spec.ts`: pack Bobbit, install it into an empty temporary project, and apply the version-conditional graph assertions below. These deterministic checks expose the root-only false negative without querying mutable registry advisory data.
 
 ### Browser E2E journey
 
@@ -62,21 +64,29 @@ npm ls @earendil-works/pi-agent-core @earendil-works/pi-ai @earendil-works/pi-co
 
 It passes only when npm exits zero, the three Pi roots are the same selected version, every resolved `brace-expansion` is `5.0.7+`, and the `0.81.1` tree contains exactly the known coding-agent-nested `protobufjs@7.6.4` edge (or every `protobufjs` is `7.6.5+` for a later selected patch), with no invalid, missing, stale, or extraneous Pi edge.
 
-Retain packed-consumer output from:
+Retain deterministic packed-consumer output from:
 
 ```text
 npm pack --json
 npm install <absolute-bobbit-tarball>
 npm ls @earendil-works/pi-agent-core @earendil-works/pi-ai @earendil-works/pi-coding-agent brace-expansion protobufjs --all
-npm audit --omit=dev --json
 ```
 
-The packed-consumer audit helper must capture stdout and parse its JSON even when `npm audit` exits nonzero. For `0.81.1`, it accepts a nonzero exit only when the parsed result has the exact expected single-moderate-advisory shape: the consumer has aligned Pi versions, every `brace-expansion` is `5.0.7+`, the sole vulnerable dependency is the coding-agent-nested `protobufjs@7.6.4`, the only advisory is `GHSA-j3f2-48v5-ccww`, and the counts are exactly one moderate with zero low, high, or critical vulnerabilities. It must fail infrastructure/command-spawn errors, missing or malformed stdout, JSON parse errors, and any divergent exit status, advisory, count, package, version, or dependency path. For a later selected patch, it instead requires a zero exit, every `protobufjs@7.6.5+`, and a zero-vulnerability audit.
+The normal E2E verifies consumer lock creation, coding-agent shrinkwrap presence, a valid installed graph, aligned Pi versions, `brace-expansion@5.0.7+`, and the version-conditional protobuf version/path floor. Import `node_modules/bobbit/dist/server/binaries.js`; require bundled `getFdResolution()`/`getRgResolution()` on supported platforms and execute both with `--version`. These deterministic checks remain in normal CI, but unit, browser, and E2E suites do not run or assert `npm audit` because registry advisory output can change independently of the source revision.
 
-Import `node_modules/bobbit/dist/server/binaries.js`; require bundled `getFdResolution()`/`getRgResolution()` on supported platforms and execute both with `--version`. Run focused tests, `npm run build`, `npm run check`, `npm run test:unit`, `npm run test:browser`, and `npm run test:e2e`; the known `0.81.1` moderate is an asserted compatibility outcome, not a failing E2E.
+The current release-only policy adds this required preflight after the build:
+
+```bash
+npm run build
+npm run audit:packed-consumer
+```
+
+The command packs Bobbit, installs it into a clean consumer, and runs `npm audit --omit=dev --json`. It isolates npm behind fresh home/config/cache/temp directories, an explicit public registry, no inherited auth or registry credentials, and disabled lifecycle scripts. Publication is blocked unless the audit exits zero and every severity and total count is zero; an advisory-service or install failure is also blocking. A root audit remains required but cannot replace this consumer check because it does not install dependency-owned shrinkwraps.
+
+Run focused tests, `npm run check`, `npm run test:unit`, `npm run test:browser`, and `npm run test:e2e` as normal.
 
 ## Pass/fail
 
-Compatibility requires aligned pins/lock, all commands green, preserved OAuth/tool lifecycle/retry/compaction behavior, stable history UI, narrow browser imports, working extensions, `brace-expansion@5.0.7+` in both trees, the version-conditional protobuf/audit assertions above, and binary smoke success. Any extra advisory, stale/mixed Pi edge, missing shrinkwrap, lock mutation under restored `.npmrc`, or behavior regression fails.
+Compatibility requires aligned pins/lock, all commands green, preserved OAuth/tool lifecycle/retry/compaction behavior, stable history UI, narrow browser imports, working extensions, `brace-expansion@5.0.7+` in both trees, the version-conditional protobuf graph assertions above, and binary smoke success. A stale or mixed Pi edge, missing shrinkwrap, lock mutation under restored `.npmrc`, below-floor unexpected path, or behavior regression fails.
 
-Release eligibility is a separate blocking condition, not the `0.81.1` compatibility E2E verdict: Pi must publish a compatible common patch whose coding-agent shrinkwrap resolves every `protobufjs@7.6.5+`, and a fresh packed-consumer audit must report zero vulnerabilities. Therefore `0.81.1` may complete implementation and all required test gates with exactly its known moderate, but Bobbit must not declare the next release audit-clean or release-eligible until that condition passes.
+Release eligibility is a separate blocking condition, not the normal E2E verdict: Pi must publish a compatible common patch whose coding-agent shrinkwrap resolves every `protobufjs@7.6.5+`, and the required release-only packed-consumer audit must report zero vulnerabilities. Therefore `0.81.1` may complete implementation and normal test gates, but Bobbit must not declare it audit-clean or release-eligible.

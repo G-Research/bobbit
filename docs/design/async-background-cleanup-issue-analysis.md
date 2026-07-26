@@ -79,7 +79,7 @@ POST /api/preview/mount
   -> JSON response
 ```
 
-`persistPreviewArtifact` is synchronous today. The route does not broadcast or return success when artifact persistence fails, although the live mount has already been written. Reuse is per session and returns the first valid matching candidate in filesystem enumeration order.
+`persistPreviewArtifact` is synchronous today. The route does not broadcast or return success when artifact persistence fails, although the live mount has already been written. Reuse is per session and returns the first valid matching candidate in the order produced by that lookup's own candidate enumeration.
 
 #### Restore
 
@@ -152,7 +152,7 @@ Direct immutable artifact serving in `src/server/preview/content-route.ts::handl
 | `restorePreviewArtifact` | sync copy/list/hash/stat/rename/remove | Stage and validate before wipe; backup only when live mount existed; rollback on swap failure |
 | `removeArtifacts` | `rmSync({ recursive: true })` | Invalid session ID is a no-op; missing tree is success; idempotent |
 | `sweepOrphanArtifacts` | `existsSync`, `readdirSync`, per-directory `rmSync` | Keep valid known session IDs case-insensitively; delete every other directory, including non-session directory names; ignore non-directories; sorted `removed`/`kept` results; per-item failure isolation |
-| `findPreviewArtifactByHash` | `existsSync`, `readdirSync`, then sync read/list/hash per candidate | Preserve `readdir` candidate order and first valid reuse; corrupt/mismatched candidates are skipped, not deleted |
+| `findPreviewArtifactByHash` | `existsSync`, `readdirSync`, then sync read/list/hash per candidate | Preserve the sequence returned to that lookup and first valid reuse; never infer order from a separate enumeration; corrupt/mismatched candidates are skipped, not deleted |
 | `validateArtifactMount` | sync stat/list/hash | Entry present, exact file-set equality, then content hash equality |
 | `copyDirectory`, `writeJsonAtomic`, `hashDirectory`, `listFiles`, `safeStat`, `wipeContents`, `moveContents` | all filesystem work is synchronous; recursive listing can overflow/defer for a deep/wide tree | Preserve sorted POSIX relative paths and fallback copy-on-rename-failure behavior |
 | `src/server/preview/mount.ts::mountDir` as called above | injected `mountFs.mkdirSync` | Do not create a mount merely to test whether it existed during restore |
@@ -179,7 +179,7 @@ Directories and non-files are not hashed. Directory-read failure currently contr
 5. Serialize preview mutation/persist/restore by session ID. Synchronous code currently gives these operations an implicit critical section; converting them independently would allow a second mount write to change the live tree while the first request is hashing or copying it. The lock must cover mount mutation through artifact persistence and cover the whole restore swap/rollback.
 6. GET mount snapshot takes the same session lock so entry, mtime, content hash, and artifact ID describe one tree version.
 7. For SSE, wait for the session lock, subscribe while holding it, take/write the bootstrap snapshot, then release. Events that occurred before the lock are represented by the snapshot; mutations cannot broadcast a newer event until bootstrap is written. This preserves bootstrap-before-live ordering without a missed-event window.
-8. Candidate validation in `findPreviewArtifactByHash` remains sequential in the `readdir` result order. Internal traversal/hash work is bounded, but candidates must not race for “first valid match.”
+8. Candidate validation in `findPreviewArtifactByHash` remains sequential in the order emitted by that lookup's own enumeration. After migration, this is the `Dirent` sequence from its `opendir()`/`Dir.read()` stream; no equivalence is promised with a separate `readdir()` call, another stream, or lexical sorting. Concurrent metadata work retains stream indexes, but exact validation must not race for “first valid match.”
 9. `sweepOrphanArtifacts` may delete independent session directories through the bounded mapper. Collect outcomes in enumeration order and sort both public arrays at the end exactly as today.
 10. Bounded removal must propagate non-`ENOENT` errors to the owning purge listener. `force`/missing remains idempotent. This makes the existing listener error log meaningful instead of hiding every removal failure inside `removeArtifacts`.
 
@@ -474,7 +474,7 @@ Missing acceptance coverage:
 
 - wide/deep artifact stores and traversal ceiling;
 - event-loop progress while lookup/hash/copy/delete is deferred;
-- several candidates in a controlled enumeration order;
+- several candidates in a controlled lookup stream order;
 - invalid session/artifact metadata, wrong hash, extra/missing files and missing entry as independent skip cases;
 - exact first valid reuse selection when multiple candidates match;
 - stable hash parity for nested/binary/empty files and sorted record file names;
@@ -553,7 +553,7 @@ Do not scan all of `server.ts::handleApiRoute` as one root, which would pull unr
 
 ### 9.2 Deterministic unit tests
 
-Use deferred promise filesystem/command-runner fakes. Start an operation, queue an unrelated microtask/`setImmediate`, assert it runs while I/O is held, then release the I/O and assert the result. Do not use wall-clock performance thresholds.
+Use deferred promise filesystem/command-runner fakes. Start an operation, queue an unrelated microtask/`setImmediate`, assert it runs while I/O is held, then release the I/O and assert the result. Do not use wall-clock performance thresholds. Signal readiness explicitly from the operation boundary being observed; a finite number of event-loop turns is not proof that prerequisite asynchronous work has reached that boundary. Register every test-owned hold for failure-safe cleanup, release it before awaiting stop/listener barriers, and also release it in the test's `finally` path so an earlier assertion cannot strand teardown.
 
 Add focused tests for:
 
@@ -572,7 +572,7 @@ Add an in-process integration test with injectable/deferred preview I/O:
 2. start a preview bootstrap/reuse scan and hold a deep metadata/hash read;
 3. concurrently issue `GET /api/health` and `POST /api/sessions`;
 4. assert both requests complete before releasing the artifact traversal;
-5. release and assert exact artifact selection.
+5. release and assert selection of the first valid artifact from that controlled stream.
 
 Repeat the ordering assertion for purge-triggered mount/artifact deletion: hold deletion, prove health/session creation complete, then release and assert the purge response waits for cleanup. Use existing browser preview journeys to verify POST, SSE, historical artifact switching, reload restoration, and cleanup still work; add a browser-v2 journey only if those existing journeys cannot exercise the new awaited route seams.
 
@@ -596,7 +596,7 @@ No excluded finding is declared safe; it is simply not part of this focused firs
 Implementation and review should explicitly confirm:
 
 - preview hashes and sorted file lists are byte-for-byte stable;
-- first valid artifact candidate selection is unchanged;
+- first valid artifact candidate selection follows the lookup's own streamed enumeration order;
 - corrupt artifacts are skipped, never reused or auto-deleted by lookup;
 - restore validation precedes mutation and rollback remains available;
 - all cleanup APIs remain idempotent and response shapes/counts remain unchanged;
