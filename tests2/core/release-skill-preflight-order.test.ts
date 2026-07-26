@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { describe, it } from "vitest";
 import {
+	buildRestrictedNpmEnv,
 	evaluatePackedConsumerAudit,
+	packedConsumerInstallArgs,
+	packedConsumerPackArgs,
 	parseAuditJson,
+	runPackedConsumerAudit,
 } from "../../scripts/release-packed-consumer-audit.mjs";
 
 const skill = readFileSync(resolve(process.cwd(), ".claude/skills/release/SKILL.md"), "utf8");
@@ -46,6 +50,177 @@ describe("release skill pre-flight order", () => {
 	it("keeps mutable advisory availability release-only and blocks every finding", () => {
 		assert.match(skill, /Registry advisory availability is deliberately release-only/);
 		assert.match(skill, /Any finding blocks publish; there are no release exceptions/);
+	});
+});
+
+describe("packed-consumer audit subprocess isolation", () => {
+	it("disables lifecycle scripts for both pack and consumer installation", () => {
+		const packArgs = packedConsumerPackArgs("isolated-pack-dir");
+		assert.equal(packArgs[0], "pack");
+		assert.equal(packArgs.filter((arg: string) => arg === "--ignore-scripts").length, 1);
+
+		assert.deepEqual(packedConsumerInstallArgs("bobbit.tgz"), [
+			"install",
+			"--ignore-scripts",
+			"bobbit.tgz",
+		]);
+	});
+
+	it("wires the restricted environment into every npm child without contacting the registry", async () => {
+		const secretEnv = {
+			NPM_TOKEN: "publish-secret",
+			NODE_AUTH_TOKEN: "node-auth-secret",
+			_auth: "legacy-auth-secret",
+			_authToken: "legacy-token-secret",
+			npm_config__auth: "config-auth-secret",
+			npm_config__authToken: "config-token-secret",
+			"npm_config_//registry.npmjs.org/:_authToken": "scoped-token-secret",
+			npm_config_userconfig: resolve("credentials/npmrc"),
+			npm_config_globalconfig: resolve("credentials/global-npmrc"),
+			npm_config_registry: "https://private-registry.example.invalid/",
+			npm_config_always_auth: "true",
+			npm_config_otp: "123456",
+			GITHUB_TOKEN: "github-secret",
+		};
+		const previousEnv = new Map(Object.keys(secretEnv).map(key => [key, process.env[key]]));
+		const calls: Array<{
+			args: string[];
+			cwd: string;
+			env: Record<string, string>;
+		}> = [];
+		const npmRunner = async (
+			args: string[],
+			options: { cwd: string; env: Record<string, string> },
+		) => {
+			assert.equal(readFileSync(options.env.npm_config_userconfig, "utf8"), "\n");
+			assert.equal(readFileSync(options.env.npm_config_globalconfig, "utf8"), "\n");
+			calls.push({ args, cwd: options.cwd, env: { ...options.env } });
+			const result = { code: 0, stdout: "", stderr: "", rendered: `npm ${args.join(" ")}` };
+			if (args[0] === "pack") {
+				const packDir = args[args.indexOf("--pack-destination") + 1];
+				writeFileSync(join(packDir, "bobbit-test.tgz"), "fake tarball");
+				result.stdout = JSON.stringify([{ filename: "bobbit-test.tgz" }]);
+			} else if (args[0] === "config") {
+				result.stdout = "true\n";
+			} else if (args[0] === "install") {
+				writeFileSync(join(options.cwd, "package-lock.json"), "{}\n");
+			} else if (args[0] === "audit") {
+				result.stdout = JSON.stringify({
+					auditReportVersion: 2,
+					vulnerabilities: {},
+					metadata: { vulnerabilities: zeroCounts },
+				});
+			} else {
+				assert.fail(`unexpected npm command: ${args[0]}`);
+			}
+			return result;
+		};
+
+		try {
+			Object.assign(process.env, secretEnv);
+			await runPackedConsumerAudit({ npmRunner });
+
+			assert.deepEqual(calls.map(call => call.args[0]), ["pack", "config", "install", "audit"]);
+			assert.notEqual(calls[0].cwd, resolve(process.cwd()), "pack must not inherit repository project config");
+			for (const call of calls) {
+				const childKeys = new Set(Object.keys(call.env).map(key => key.toLowerCase()));
+				for (const forbiddenKey of Object.keys(secretEnv).map(key => key.toLowerCase())) {
+					if (["npm_config_userconfig", "npm_config_globalconfig", "npm_config_registry"].includes(forbiddenKey)) {
+						continue;
+					}
+					assert.equal(childKeys.has(forbiddenKey), false, `${forbiddenKey} reached ${call.args[0]}`);
+				}
+				assert.equal(call.env.npm_config_registry, "https://registry.npmjs.org/");
+				assert.equal(call.env.npm_config_ignore_scripts, "true");
+				assert.notEqual(call.env.npm_config_userconfig, secretEnv.npm_config_userconfig);
+				assert.notEqual(call.env.npm_config_globalconfig, secretEnv.npm_config_globalconfig);
+				assert.match(call.env.npm_config_userconfig, /user\.npmrc$/);
+				assert.match(call.env.npm_config_globalconfig, /global\.npmrc$/);
+				assert.ok(call.env.npm_config_cache);
+				assert.ok(call.env.HOME);
+				assert.equal(call.env.USERPROFILE, call.env.HOME);
+			}
+			assert.ok(calls[0].args.includes("--ignore-scripts"));
+			assert.ok(calls[2].args.includes("--ignore-scripts"));
+		} finally {
+			for (const [key, value] of previousEnv) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	});
+
+	it("passes only process essentials and public network settings without inherited credentials", () => {
+		const paths = {
+			homeDir: resolve("isolated/home"),
+			cacheDir: resolve("isolated/cache"),
+			tempDir: resolve("isolated/tmp"),
+			appDataDir: resolve("isolated/home/AppData/Roaming"),
+			localAppDataDir: resolve("isolated/home/AppData/Local"),
+			xdgConfigDir: resolve("isolated/home/.config"),
+			userConfigPath: resolve("isolated/config/user.npmrc"),
+			globalConfigPath: resolve("isolated/config/global.npmrc"),
+		};
+		const inherited = {
+			Path: "safe-bin-path",
+			SystemRoot: "safe-system-root",
+			HTTPS_PROXY: "https://proxy.example.invalid",
+			NODE_EXTRA_CA_CERTS: resolve("public-network-ca.pem"),
+			NPM_TOKEN: "publish-secret",
+			NODE_AUTH_TOKEN: "node-auth-secret",
+			_auth: "legacy-auth-secret",
+			_authToken: "legacy-token-secret",
+			npm_config__auth: "config-auth-secret",
+			npm_config__authToken: "config-token-secret",
+			"npm_config_//registry.npmjs.org/:_authToken": "scoped-token-secret",
+			npm_config_always_auth: "true",
+			npm_config_otp: "123456",
+			npm_config_userconfig: resolve("credentials/npmrc"),
+			npm_config_globalconfig: resolve("credentials/global-npmrc"),
+			npm_config_registry: "https://private-registry.example.invalid/",
+			GITHUB_TOKEN: "github-secret",
+			GH_TOKEN: "gh-secret",
+			AWS_SECRET_ACCESS_KEY: "aws-secret",
+			NODE_OPTIONS: "--require=credential-stealer.cjs",
+			INIT_CWD: resolve("credential-bearing-release-worktree"),
+			npm_lifecycle_event: "publish",
+			UNRELATED_SETTING: "not-an-essential",
+		};
+
+		const childEnv = buildRestrictedNpmEnv(inherited, paths);
+		assert.equal(childEnv.PATH, inherited.Path);
+		assert.equal(childEnv.SystemRoot, inherited.SystemRoot);
+		assert.equal(childEnv.HTTPS_PROXY, inherited.HTTPS_PROXY);
+		assert.equal(childEnv.NODE_EXTRA_CA_CERTS, inherited.NODE_EXTRA_CA_CERTS);
+		assert.equal(childEnv.HOME, paths.homeDir);
+		assert.equal(childEnv.USERPROFILE, paths.homeDir);
+		assert.equal(childEnv.npm_config_userconfig, paths.userConfigPath);
+		assert.equal(childEnv.npm_config_globalconfig, paths.globalConfigPath);
+		assert.equal(childEnv.npm_config_cache, paths.cacheDir);
+		assert.equal(childEnv.npm_config_registry, "https://registry.npmjs.org/");
+		assert.equal(childEnv.npm_config_ignore_scripts, "true");
+
+		const childKeys = new Set(Object.keys(childEnv).map(key => key.toLowerCase()));
+		for (const forbiddenKey of [
+			"npm_token",
+			"node_auth_token",
+			"_auth",
+			"_authtoken",
+			"npm_config__auth",
+			"npm_config__authtoken",
+			"npm_config_//registry.npmjs.org/:_authtoken",
+			"npm_config_always_auth",
+			"npm_config_otp",
+			"github_token",
+			"gh_token",
+			"aws_secret_access_key",
+			"node_options",
+			"init_cwd",
+			"npm_lifecycle_event",
+			"unrelated_setting",
+		]) {
+			assert.equal(childKeys.has(forbiddenKey), false, `${forbiddenKey} must not reach npm children`);
+		}
 	});
 });
 

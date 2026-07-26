@@ -10,6 +10,35 @@ import { fileURLToPath } from "node:url";
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const AUDIT_SEVERITIES = ["info", "low", "moderate", "high", "critical"];
 const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
+const PUBLIC_NPM_REGISTRY = "https://registry.npmjs.org/";
+const CHILD_ENV_PASSTHROUGH = [
+	// Executable lookup and Windows process startup essentials.
+	"PATH",
+	"SystemRoot",
+	"WINDIR",
+	"COMSPEC",
+	"PATHEXT",
+	// Locale-only process settings.
+	"LANG",
+	"LC_ALL",
+	"LC_CTYPE",
+	"TZ",
+	// Public-network routing and trust settings. Auth and registry settings are
+	// deliberately not inherited; the public registry is pinned below.
+	"HTTP_PROXY",
+	"HTTPS_PROXY",
+	"NO_PROXY",
+	"ALL_PROXY",
+	"NODE_EXTRA_CA_CERTS",
+	"SSL_CERT_FILE",
+	"SSL_CERT_DIR",
+	"NPM_CONFIG_PROXY",
+	"NPM_CONFIG_HTTPS_PROXY",
+	"NPM_CONFIG_NOPROXY",
+	"NPM_CONFIG_STRICT_SSL",
+	"NPM_CONFIG_CAFILE",
+	"NPM_CONFIG_CA",
+];
 
 function isRecord(value) {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -43,7 +72,10 @@ function terminateProcessTree(child) {
 	}
 }
 
-function runCommand(command, args, { cwd, env = process.env, timeoutMs }) {
+function runCommand(command, args, { cwd, env, timeoutMs }) {
+	if (!env || typeof env !== "object") {
+		throw new Error(`Refusing to spawn ${command} without an explicit restricted environment`);
+	}
 	const rendered = displayCommand(command, args);
 	return new Promise((resolvePromise, reject) => {
 		const child = spawn(command, args, {
@@ -127,33 +159,83 @@ function runNpm(args, options) {
 	return runCommand(invocation.command, invocation.args, options);
 }
 
-function normalConsumerNpmEnv(cwd) {
-	const env = { ...process.env };
-	const projectScopedKeys = new Set([
-		"npm_config_local_prefix",
-		"npm_config_package_lock",
-		"npm_config_shrinkwrap",
-		"npm_config_workspace",
-		"npm_config_workspaces",
-		"npm_config_include_workspace_root",
-		"npm_config_ignore_scripts",
-		"npm_config_omit",
-		"npm_config_include",
-		"npm_config_optional",
-		"npm_config_audit_level",
-		"npm_config_dry_run",
-	]);
-	for (const key of Object.keys(env)) {
-		const lower = key.toLowerCase();
-		if (projectScopedKeys.has(lower) || lower.startsWith("npm_package_") || lower.startsWith("npm_lifecycle_")) {
-			delete env[key];
-		}
+function inheritedEnvValue(sourceEnv, expectedKey) {
+	const expected = expectedKey.toLowerCase();
+	for (const [key, value] of Object.entries(sourceEnv)) {
+		if (key.toLowerCase() === expected && typeof value === "string" && value !== "") return value;
 	}
-	delete env.INIT_CWD;
-	delete env.init_cwd;
-	// Dependency lifecycle scripts should see the clean consumer as their initiator.
-	env.INIT_CWD = cwd;
+	return undefined;
+}
+
+export function buildRestrictedNpmEnv(sourceEnv, paths) {
+	const env = {};
+	for (const key of CHILD_ENV_PASSTHROUGH) {
+		const value = inheritedEnvValue(sourceEnv, key);
+		if (value !== undefined) env[key] = value;
+	}
+
+	Object.assign(env, {
+		HOME: paths.homeDir,
+		USERPROFILE: paths.homeDir,
+		APPDATA: paths.appDataDir,
+		LOCALAPPDATA: paths.localAppDataDir,
+		XDG_CONFIG_HOME: paths.xdgConfigDir,
+		XDG_CACHE_HOME: paths.cacheDir,
+		TMPDIR: paths.tempDir,
+		TMP: paths.tempDir,
+		TEMP: paths.tempDir,
+		npm_config_userconfig: paths.userConfigPath,
+		npm_config_globalconfig: paths.globalConfigPath,
+		npm_config_cache: paths.cacheDir,
+		npm_config_registry: PUBLIC_NPM_REGISTRY,
+		npm_config_ignore_scripts: "true",
+		npm_config_update_notifier: "false",
+		npm_config_fund: "false",
+	});
 	return env;
+}
+
+async function prepareRestrictedNpmEnv(tempRoot) {
+	const homeDir = join(tempRoot, "home");
+	const cacheDir = join(tempRoot, "cache");
+	const tempDir = join(tempRoot, "tmp");
+	const configDir = join(tempRoot, "config");
+	const appDataDir = join(homeDir, "AppData", "Roaming");
+	const localAppDataDir = join(homeDir, "AppData", "Local");
+	const xdgConfigDir = join(homeDir, ".config");
+	const userConfigPath = join(configDir, "user.npmrc");
+	const globalConfigPath = join(configDir, "global.npmrc");
+	await Promise.all([
+		mkdir(homeDir, { recursive: true }),
+		mkdir(cacheDir, { recursive: true }),
+		mkdir(tempDir, { recursive: true }),
+		mkdir(configDir, { recursive: true }),
+		mkdir(appDataDir, { recursive: true }),
+		mkdir(localAppDataDir, { recursive: true }),
+		mkdir(xdgConfigDir, { recursive: true }),
+	]);
+	await Promise.all([
+		writeFile(userConfigPath, "\n", { mode: 0o600 }),
+		writeFile(globalConfigPath, "\n", { mode: 0o600 }),
+	]);
+	return buildRestrictedNpmEnv(process.env, {
+		homeDir,
+		cacheDir,
+		tempDir,
+		appDataDir,
+		localAppDataDir,
+		xdgConfigDir,
+		userConfigPath,
+		globalConfigPath,
+	});
+}
+
+export function packedConsumerPackArgs(packDir) {
+	return ["pack", "--ignore-scripts", "--json", "--pack-destination", packDir, REPO_ROOT];
+}
+
+export function packedConsumerInstallArgs(tarballPath) {
+	return ["install", "--ignore-scripts", tarballPath];
 }
 
 function requireSuccess(label, result) {
@@ -296,7 +378,7 @@ function parsePackedTarball(stdout, packDir) {
 	return tarballPath;
 }
 
-async function performPackedConsumerAudit(tempRoot) {
+async function performPackedConsumerAudit(tempRoot, npmRunner) {
 	const packDir = join(tempRoot, "pack");
 	const consumerDir = join(tempRoot, "consumer");
 	await mkdir(packDir, { recursive: true });
@@ -306,20 +388,23 @@ async function performPackedConsumerAudit(tempRoot) {
 		version: "1.0.0",
 		private: true,
 	}, null, 2)}\n`);
+	const restrictedNpmEnv = await prepareRestrictedNpmEnv(tempRoot);
 
 	console.log("[audit:packed-consumer] Packing the built Bobbit package...");
-	const packed = await runNpm(["pack", "--json", "--pack-destination", packDir], {
-		cwd: REPO_ROOT,
+	const packed = await npmRunner(packedConsumerPackArgs(packDir), {
+		// Invoking from the empty temporary root prevents repository .npmrc
+		// settings from becoming project configuration for this npm process.
+		cwd: tempRoot,
+		env: restrictedNpmEnv,
 		timeoutMs: 3 * 60_000,
 	});
 	requireSuccess("npm pack", packed);
 	const tarballPath = parsePackedTarball(packed.stdout, packDir);
 	await stat(tarballPath);
 
-	const consumerEnv = normalConsumerNpmEnv(consumerDir);
-	const lockConfig = await runNpm(["config", "get", "package-lock"], {
+	const lockConfig = await npmRunner(["config", "get", "package-lock"], {
 		cwd: consumerDir,
-		env: consumerEnv,
+		env: restrictedNpmEnv,
 		timeoutMs: 30_000,
 	});
 	requireSuccess("npm config get package-lock", lockConfig);
@@ -331,18 +416,18 @@ async function performPackedConsumerAudit(tempRoot) {
 	}
 
 	console.log("[audit:packed-consumer] Installing the tarball into a clean private consumer...");
-	const installed = await runNpm(["install", tarballPath], {
+	const installed = await npmRunner(packedConsumerInstallArgs(tarballPath), {
 		cwd: consumerDir,
-		env: consumerEnv,
+		env: restrictedNpmEnv,
 		timeoutMs: 10 * 60_000,
 	});
 	requireSuccess("clean consumer install", installed);
 	await stat(join(consumerDir, "package-lock.json"));
 
 	console.log("[audit:packed-consumer] Querying the registry advisory service...");
-	const audited = await runNpm(["audit", "--omit=dev", "--json"], {
+	const audited = await npmRunner(["audit", "--omit=dev", "--json"], {
 		cwd: consumerDir,
-		env: consumerEnv,
+		env: restrictedNpmEnv,
 		timeoutMs: 3 * 60_000,
 	});
 	// npm intentionally exits nonzero for vulnerability findings. Always parse
@@ -360,11 +445,11 @@ async function performPackedConsumerAudit(tempRoot) {
 	console.log("[audit:packed-consumer] PASS: the freshly installed consumer reports zero runtime vulnerabilities.");
 }
 
-export async function runPackedConsumerAudit() {
+export async function runPackedConsumerAudit({ npmRunner = runNpm } = {}) {
 	const tempRoot = await mkdtemp(join(tmpdir(), "bobbit-release-packed-audit-"));
 	let operationError;
 	try {
-		await performPackedConsumerAudit(tempRoot);
+		await performPackedConsumerAudit(tempRoot, npmRunner);
 	} catch (error) {
 		operationError = error;
 	}
