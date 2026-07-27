@@ -663,6 +663,45 @@ describe("cold session transcript/workspace ordering", () => {
 		expect(finalTranscriptRow(SESSION_A)?.textContent).toBe(`${SESSION_A} transcript row ${TRANSCRIPT_SIZE - 1}`);
 	});
 
+	it("preserves a server project proposal that arrives before an empty draft restore settles", async () => {
+		state.gatewaySessions = state.gatewaySessions.map((session) =>
+			session.id === SESSION_A ? { ...session, assistantType: "project" } : session);
+		const pendingConnect = connectToSession(SESSION_A, true);
+
+		try {
+			await waitFor(
+				() => (workspaceFetchCount.get(SESSION_A) || 0) > 0
+					&& typeof state.remoteAgent?.onProposal === "function",
+				"PROJECT_PROPOSAL_DRAFT_RESTORE_RACE: project callback was not ready while workspace hydration was pending",
+			);
+			expect(gateFor(SESSION_A).settled).toBe(false);
+
+			const fields = {
+				name: "Server project proposal",
+				root_path: "/fixture/server-project-proposal",
+				test_command: "npm test",
+			};
+			state.remoteAgent?.onProposal?.("project", fields, false, 1, "rehydrate");
+			expect(state.activeProposals.project).toMatchObject({
+				sessionId: SESSION_A,
+				fields,
+				rev: 1,
+			});
+
+			gateFor(SESSION_A).release();
+			await pendingConnect;
+
+			expect(
+				state.activeProposals.project,
+				"PROJECT_PROPOSAL_DRAFT_RESTORE_RACE: an empty client draft response erased the newer server proposal",
+			).toMatchObject({ sessionId: SESSION_A, fields, rev: 1 });
+			expect(state.assistantHasProposal).toBe(true);
+		} finally {
+			gateFor(SESSION_A).release();
+			await pendingConnect.catch(() => {});
+		}
+	});
+
 	it("keeps B foreground mirrors and transcript when A workspace completes after a rapid A to B switch", async () => {
 		const connectA = connectToSession(SESSION_A, true);
 		await waitFor(

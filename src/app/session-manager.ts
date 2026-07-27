@@ -915,10 +915,14 @@ const projectDraft = createDraftManager({
 					rev: typeof p.rev === "number" ? p.rev : 1,
 				};
 			}
-		} else {
+		} else if (state.activeProposals.project?.sessionId !== _sessionId) {
+			// A server proposal may arrive while the client-draft request is in
+			// flight. An empty stored draft cannot erase that newer current-session
+			// slot; only discard a proposal left over from another session.
 			delete state.activeProposals.project;
 		}
-		state.assistantHasProposal = dismissed ? false : (draft.hasReceivedProposal ?? false);
+		const hasCurrentProposal = state.activeProposals.project?.sessionId === _sessionId;
+		state.assistantHasProposal = dismissed ? false : (hasCurrentProposal || (draft.hasReceivedProposal ?? false));
 		state.assistantTab = draft.assistantTab ?? "chat";
 		if (draft.accepted === true) {
 			state.projectProposalAcceptedBySessionId[_sessionId] = true;
@@ -2713,10 +2717,15 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			} else if (state.assistantType === "project" || state.assistantType === "project-scaffolding") {
 				const restored = await restoreProjectDraft(sessionId);
 				if (isStale()) return;
-				if (!restored) {
+				const liveProposal = liveProposalSlotForSession("project", sessionId);
+				if (!restored && !liveProposal) {
 					state.assistantTab = "chat";
 					delete state.activeProposals.project;
 					state.assistantHasProposal = false;
+				} else if (liveProposal) {
+					// proposal_update can land while the empty draft request is pending.
+					// Preserve the server-owned slot and its visible proposal state.
+					state.assistantHasProposal = true;
 				}
 			}
 		})();
