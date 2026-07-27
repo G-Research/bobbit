@@ -1,6 +1,7 @@
 /** Compact, agent-facing projections for Bobbit gateway tool responses. */
 
 export const COMPACT_TEXT_PREVIEW_CHARS = 200;
+export const COMPACT_SESSION_ERROR_PREVIEW_CODE_UNITS = 512;
 export const COMPACT_TRUNCATION_SUFFIX = "…(truncated; pass verbose:true)";
 
 export type BobbitToolName = "bobbit_read" | "bobbit_orchestrate" | "bobbit_admin";
@@ -48,10 +49,13 @@ const PROFILE_FIELDS: Readonly<Record<Exclude<ProfileName, "generic" | "identity
 		"archivedAt", "createdAt", "updatedAt", "spec",
 	]),
 	session: new Set([
-		"id", "title", "status", "assistantType", "role", "projectId", "goalId",
-		"teamGoalId", "taskId", "delegateOf", "parentSessionId", "archived",
-		"archivedAt", "createdAt", "lastActivity", "lastTurnErrored",
-		"consecutiveErrorTurns", "completedTurnCount", "restoreError",
+		"id", "title", "status", "archived", "childTerminal",
+		"createdAt", "lastActivity", "archivedAt", "terminalAt",
+		"assistantType", "role", "nonInteractive",
+		"projectId", "goalId", "reattemptGoalId", "teamGoalId", "taskId", "staffId",
+		"delegateOf", "parentSessionId", "teamLeadSessionId", "childKind", "readOnly",
+		"lastTurnErrored", "consecutiveErrorTurns", "completedTurnCount",
+		"restoreError", "lastTurnErrorMessage",
 	]),
 	searchHit: new Set([
 		"id", "type", "title", "score", "projectId", "state", "status", "archived",
@@ -110,7 +114,8 @@ const PROFILE_FIELDS: Readonly<Record<Exclude<ProfileName, "generic" | "identity
 
 const CANONICAL_ID_FIELDS = new Set([
 	"id", "projectId", "goalId", "gateId", "taskId", "workflowId", "sessionId",
-	"staffId", "teamGoalId", "parentGoalId", "parentTaskId", "parentSessionId", "roleId",
+	"staffId", "teamGoalId", "reattemptGoalId", "parentGoalId", "parentTaskId",
+	"parentSessionId", "teamLeadSessionId", "roleId",
 ]);
 
 const MACHINE_STRING_FIELDS = new Set([
@@ -148,6 +153,17 @@ function previewString(value: string): string {
 	return chars.length <= COMPACT_TEXT_PREVIEW_CHARS
 		? value
 		: `${chars.slice(0, COMPACT_TEXT_PREVIEW_CHARS).join("")}${COMPACT_TRUNCATION_SUFFIX}`;
+}
+
+function previewSessionError(value: string): string {
+	if (value.length <= COMPACT_SESSION_ERROR_PREVIEW_CODE_UNITS) return value;
+	let end = COMPACT_SESSION_ERROR_PREVIEW_CODE_UNITS;
+	const lastCodeUnit = value.charCodeAt(end - 1);
+	const nextCodeUnit = value.charCodeAt(end);
+	if (lastCodeUnit >= 0xD800 && lastCodeUnit <= 0xDBFF && nextCodeUnit >= 0xDC00 && nextCodeUnit <= 0xDFFF) {
+		end -= 1;
+	}
+	return `${value.slice(0, end)}${COMPACT_TRUNCATION_SUFFIX}`;
 }
 
 function compactString(field: string | undefined, value: string): string {
@@ -202,6 +218,10 @@ function projectEntity(value: unknown, profile: Exclude<ProfileName, "generic" |
 		if (!allowed.has(key) && !UNIVERSAL_KEEP_FIELDS.has(key)) continue;
 		if (profile === "workflowDetail" && key === "gates" && Array.isArray(child)) {
 			out.gates = child.map((gate) => projectEntity(gate, "workflowGate"));
+			continue;
+		}
+		if (profile === "session" && (key === "restoreError" || key === "lastTurnErrorMessage") && typeof child === "string") {
+			out[key] = previewSessionError(child);
 			continue;
 		}
 		out[key] = sanitizeGeneric(child, key);
