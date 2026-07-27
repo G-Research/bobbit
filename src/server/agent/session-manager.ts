@@ -7480,31 +7480,28 @@ export class SessionManager {
 		}
 
 		// Pin model + thinking level at spawn so pi-coding-agent doesn't emit a
-		// redundant initial `model_change` event with its hardcoded default.
-		// Prefer the persisted model if known (avoids surprising changes after
-		// restart); fall back to role/preference resolution.
+		// redundant initial `model_change` event with its hardcoded default. A durable
+		// or role/default candidate must still exist in Bobbit's current selectable
+		// catalog; otherwise initial setup uses the deterministic catalog default.
 		const psPersistedModel = ps.modelProvider && ps.modelId ? normalizeAigwModelString(`${ps.modelProvider}/${ps.modelId}`) : undefined;
-		// Keep an explicit, still-runnable persisted pin (incl. authenticated Code
-		// Assist), but fall back to role/pref resolution when the persisted model is
-		// no longer spawn-pinnable — e.g. a Code Assist model whose Google credential
-		// was removed/expired, which Pi could not resolve as `--model`.
+		// Preserve the pre-validation candidate ordering pinned by the legacy restore
+		// canary; resolveCurrentCatalogSpawnModel below is the final spawn authority.
 		if (psPersistedModel && isSpawnPinnableModelString(psPersistedModel)) {
 			bridgeOptions.initialModel = psPersistedModel;
+		}
+		const restoreInitialModel = this.resolveInitialModel(ps.role, ps.projectId);
+		const restoreDefaultModel = this.resolveInitialModel(undefined, ps.projectId);
+		bridgeOptions.initialModel = await this.resolveCurrentCatalogSpawnModel([
+			bridgeOptions.initialModel,
+			restoreInitialModel,
+			restoreDefaultModel,
+		]);
+		if (bridgeOptions.initialModel === psPersistedModel && psPersistedModel) {
 			const slash = psPersistedModel.indexOf("/");
 			const normalizedProvider = psPersistedModel.slice(0, slash);
 			const normalizedModelId = psPersistedModel.slice(slash + 1);
 			if (normalizedProvider !== ps.modelProvider || normalizedModelId !== ps.modelId) {
 				this.resolveStoreForSession(ps.id).update(ps.id, { modelProvider: normalizedProvider, modelId: normalizedModelId });
-			}
-		} else {
-			const initModel = this.resolveInitialModel(ps.role, ps.projectId);
-			if (initModel) {
-				bridgeOptions.initialModel = initModel;
-			} else if (!psPersistedModel) {
-				// Legacy rows predate durable model tuples. Resolve the same deterministic
-				// current-catalog default as a fresh Bobbit-owned spawn rather than letting
-				// a newly published hidden Pi provider become the restore default.
-				bridgeOptions.initialModel = await this.resolveCurrentCatalogFallbackModel();
 			}
 		}
 		const initThinking = this.resolveThinkingLevelForModel(
@@ -7514,7 +7511,8 @@ export class SessionManager {
 			ps.effectiveThinkingLevel,
 		);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
-		this.applyDirectProviderEnv(bridgeOptions, !!ps.sandboxed, ps.modelProvider);
+		const restoreSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
+		this.applyDirectProviderEnv(bridgeOptions, !!ps.sandboxed, restoreSpawnProvider);
 
 		const rpcClient = new RpcBridge(bridgeOptions);
 		const eventBuffer = new EventBuffer();
@@ -7829,16 +7827,15 @@ export class SessionManager {
 		let currentModels: Awaited<ReturnType<typeof getAvailableModels>> | undefined;
 		// A normal Bobbit spawn must bind one of Bobbit's current catalog rows
 		// explicitly rather than letting Pi choose a newly published hidden provider.
-		// The team lead's extension-only args are Bobbit-owned setup, not generic raw
-		// Pi arguments; every other non-empty agentArgs input keeps the legacy exemption.
-		const teamExtensionOnlySpawn = initialRole === "team-lead"
-			&& !!goalId
+		// Goal/team extension-only args are Bobbit-owned setup, not generic raw Pi
+		// arguments; every other non-empty agentArgs input keeps the legacy exemption.
+		const bobbitOwnedExtensionSpawn = !!(goalId || opts?.teamGoalId || opts?.teamLeadSessionId)
 			&& !!agentArgs?.length
 			&& agentArgs.length % 2 === 0
 			&& agentArgs.every((arg, index) => index % 2 === 0 ? arg === "--extension" : arg.length > 0);
-		if (!rawSelectedSpawnModel && !opts?.skipAutoModel && (!agentArgs?.length || teamExtensionOnlySpawn) && this.preferencesStore) {
+		if (!rawSelectedSpawnModel && !opts?.skipAutoModel && (!agentArgs?.length || bobbitOwnedExtensionSpawn) && this.preferencesStore) {
 			currentModels = await getAvailableModels(this.preferencesStore);
-			rawSelectedSpawnModel = await this.resolveCurrentCatalogFallbackModel(currentModels);
+			rawSelectedSpawnModel = await this.resolveCurrentCatalogSpawnModel([], currentModels);
 		}
 		const selectedSpawnModel = rawSelectedSpawnModel
 			? normalizeAigwModelString(rawSelectedSpawnModel)
@@ -8693,16 +8690,30 @@ export class SessionManager {
 	}
 
 	/**
-	 * Resolve the authenticated-first, shared-rank model used only by Bobbit-owned
-	 * initial setup when no explicit durable/role/preference model exists.
+	 * Resolve the first still-current preferred model, otherwise the authenticated-
+	 * first/shared-rank catalog default used only by Bobbit-owned initial setup.
 	 */
-	private async resolveCurrentCatalogFallbackModel(
+	private async resolveCurrentCatalogSpawnModel(
+		preferredModels: readonly (string | undefined)[],
 		models?: Awaited<ReturnType<typeof getAvailableModels>>,
-	): Promise<string | undefined> {
-		if (!this.preferencesStore) return undefined;
+	): Promise<string> {
+		if (!this.preferencesStore) {
+			throw new Error("No model is currently available for session selection");
+		}
+
 		const currentModels = models ?? await getAvailableModels(this.preferencesStore);
+		for (const preferred of preferredModels) {
+			if (!preferred) continue;
+			const normalized = normalizeAigwModelString(preferred);
+			const slash = normalized.indexOf("/");
+			if (slash <= 0 || slash === normalized.length - 1 || !isSpawnPinnableModelString(normalized)) continue;
+			if (findSessionSelectableModel(currentModels, normalized.slice(0, slash), normalized.slice(slash + 1))) {
+				return normalized;
+			}
+		}
+
 		const catalogDefault = currentModels
-			.filter((model) => model.sessionSelectable !== false)
+			.filter((model) => model.sessionSelectable !== false && isSpawnPinnableModelString(`${model.provider}/${model.id}`))
 			.sort((a, b) => {
 				const authDelta = Number(Boolean(b.authenticated)) - Number(Boolean(a.authenticated));
 				if (authDelta !== 0) return authDelta;
@@ -9740,21 +9751,15 @@ export class SessionManager {
 		const roleModel = rawRoleModel && /^[^/]+\/.+$/.test(rawRoleModel)
 			? normalizeAigwModelString(rawRoleModel)
 			: undefined;
-		const roleModelPinned = !!roleModel && isSpawnPinnableModelString(roleModel);
-		if (roleModel && roleModelPinned) {
-			bridgeOptions.initialModel = roleModel;
-		} else if (respawnPersistedModel && isSpawnPinnableModelString(respawnPersistedModel)) {
-			// See spawn path: skip a persisted pin that is no longer spawn-pinnable
-			// (e.g. unauthenticated Code Assist) so the respawn falls back cleanly.
-			bridgeOptions.initialModel = respawnPersistedModel;
-		} else {
-			const initModel = this.resolveInitialModel(role.name, session.projectId);
-			if (initModel) {
-				bridgeOptions.initialModel = initModel;
-			} else if (!respawnPersistedModel) {
-				bridgeOptions.initialModel = await this.resolveCurrentCatalogFallbackModel();
-			}
-		}
+		const roleInitialModel = this.resolveInitialModel(role.name, session.projectId);
+		const roleDefaultModel = this.resolveInitialModel(undefined, session.projectId);
+		bridgeOptions.initialModel = await this.resolveCurrentCatalogSpawnModel([
+			roleModel,
+			respawnPersistedModel,
+			roleInitialModel,
+			roleDefaultModel,
+		]);
+		const roleModelPinned = !!roleModel && bridgeOptions.initialModel === roleModel;
 		const initThinking = this.resolveThinkingLevelForModel(
 			bridgeOptions.initialModel,
 			role.name,
@@ -9782,7 +9787,7 @@ export class SessionManager {
 			this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
 		}
 		const spawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
-		this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, spawnProvider || respawnPersisted?.modelProvider);
+		this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, spawnProvider);
 
 		// Build and fully validate the replacement while the original bridge stays
 		// subscribed and usable. Role assignment is a two-phase swap: start,
@@ -12169,20 +12174,15 @@ export class SessionManager {
 			const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);
 			const forceRespawnPersistedModel =
 				forceRespawnPersisted?.modelProvider && forceRespawnPersisted?.modelId
-					? `${forceRespawnPersisted.modelProvider}/${forceRespawnPersisted.modelId}`
+					? normalizeAigwModelString(`${forceRespawnPersisted.modelProvider}/${forceRespawnPersisted.modelId}`)
 					: undefined;
-			// See spawn path: skip a persisted pin that is no longer spawn-pinnable
-			// (e.g. unauthenticated Code Assist) so the force-respawn falls back cleanly.
-			if (forceRespawnPersistedModel && isSpawnPinnableModelString(forceRespawnPersistedModel)) {
-				bridgeOptions.initialModel = forceRespawnPersistedModel;
-			} else {
-				const initModel = this.resolveInitialModel(session.role, session.projectId);
-				if (initModel) {
-					bridgeOptions.initialModel = initModel;
-				} else if (!forceRespawnPersistedModel) {
-					bridgeOptions.initialModel = await this.resolveCurrentCatalogFallbackModel();
-				}
-			}
+			const forceInitialModel = this.resolveInitialModel(session.role, session.projectId);
+			const forceDefaultModel = this.resolveInitialModel(undefined, session.projectId);
+			bridgeOptions.initialModel = await this.resolveCurrentCatalogSpawnModel([
+				forceRespawnPersistedModel,
+				forceInitialModel,
+				forceDefaultModel,
+			]);
 			const initThinking = this.resolveThinkingLevelForModel(
 				bridgeOptions.initialModel,
 				session.role,
@@ -12190,7 +12190,8 @@ export class SessionManager {
 				forceRespawnPersisted?.effectiveThinkingLevel,
 			);
 			if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
-			this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, forceRespawnPersisted?.modelProvider);
+			const forceSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
+			this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, forceSpawnProvider);
 
 			const rpcClient = new RpcBridge(bridgeOptions);
 			let switchingSession = true;
