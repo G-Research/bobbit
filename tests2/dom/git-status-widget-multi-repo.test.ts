@@ -119,11 +119,29 @@ describe("GitStatusWidget — multi-repo collapsibles", () => {
 		expect(text).not.toContain("↓");
 	});
 
-	it("single-repo (one entry) does NOT trigger multi-repo rendering", async () => {
+	it("sole root entry stays flat for single-repo compatibility", async () => {
 		const el = await mount({ clean: true, statusFiles: [], repos: { ".": { statusFiles: [], clean: true } } });
 		expect(el.querySelector('[data-testid="pill-multi-repo-aggregate"]')).toBeNull();
 		await openDropdown(el);
 		expect(dd()!.querySelector('[data-testid="multi-repo-sections"]')).toBeNull();
+	});
+
+	it("sole named component renders as multi-repo with its repository section", async () => {
+		const el = await mount({
+			repos: {
+				api: { status: [{ file: "src/only.ts", status: "M" }], clean: false },
+			},
+		});
+
+		expect(el.querySelector('[data-testid="pill-multi-repo-aggregate"]')!.textContent).toMatch(/1 changed across 1 repo/);
+		await openDropdown(el);
+
+		const sections = dd()!.querySelectorAll('[data-testid="multi-repo-entry"]');
+		expect(sections).toHaveLength(1);
+		expect(sections[0].getAttribute("data-repo-name")).toBe("api");
+		expect(sections[0].querySelector('[data-testid="repo-name"]')!.textContent!.trim()).toBe("api");
+		expect(sections[0].textContent).toContain("src/only.ts");
+		expect(dd()!.querySelector('[data-testid="multi-repo-badge"]')!.textContent!.trim()).toBe("1 repo");
 	});
 
 	it("dropdown shows one per-repo section per entry, with names and counts", async () => {

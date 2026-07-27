@@ -89,10 +89,10 @@ export class GitStatusWidget extends LitElement {
     };
 
     /**
-     * Multi-repo aware envelope. When set with >1 entry, the widget renders
-     * per-repo collapsible sections inside the dropdown and shows an aggregate
-     * count in the pill (e.g. "3 changed across 2 repos"). Single-key
-     * (`"."`) cases use the flat render and the pill stays simple.
+     * Multi-repo aware envelope. Multiple entries or a sole named component
+     * render per-repo collapsible sections inside the dropdown and show an
+     * aggregate count in the pill (e.g. "3 changed across 2 repos"). Only a
+     * sole root (`"."`) entry uses the flat render and keeps the pill simple.
      *
      * Per-repo entries accept the canonical server envelope from
      * `GET /api/goals/:id/git-status`: each value carries either `statusFiles`
@@ -124,11 +124,11 @@ export class GitStatusWidget extends LitElement {
         return n;
     }
 
-    /** True if this widget is rendering multi-repo data (>1 entry, ignoring "." alone). */
+    /** True for multiple repos or any sole named component; only "." stays flat. */
     private _isMultiRepo(): boolean {
         if (!this.repos) return false;
         const keys = Object.keys(this.repos);
-        return keys.length > 1;
+        return keys.length > 1 || (keys.length === 1 && keys[0] !== '.');
     }
 
     /** Helper: how many distinct repos this widget has data for. */
@@ -993,7 +993,7 @@ export class GitStatusWidget extends LitElement {
         const totalDirty = this._aggregateDirtyCount();
         const headerText = totalDirty > 0
             ? `${totalDirty} changed across ${dirtyRepoCount || entries.length} repo${(dirtyRepoCount || entries.length) === 1 ? '' : 's'}`
-            : `${entries.length} repos clean`;
+            : `${entries.length} repo${entries.length === 1 ? '' : 's'} clean`;
         return html`
             <div class="border-t border-border pt-2 mt-2 flex flex-col gap-1.5" data-testid="multi-repo-sections">
                 <div class="text-[12px] text-muted-foreground uppercase tracking-wider font-medium flex items-center justify-between" data-testid="multi-repo-header">
@@ -1047,7 +1047,7 @@ export class GitStatusWidget extends LitElement {
             <div class="flex items-center gap-1.5 mb-2 text-foreground font-medium text-sm">
                 <span>⎇</span>
                 <span class="break-all">${this.branch}</span>
-                ${multiRepoSections ? html`<span class="ml-auto text-[11px] text-muted-foreground" data-testid="multi-repo-badge">${Object.keys(this.repos!).length} repos</span>` : ''}
+                ${multiRepoSections ? html`<span class="ml-auto text-[11px] text-muted-foreground" data-testid="multi-repo-badge">${Object.keys(this.repos!).length} repo${Object.keys(this.repos!).length === 1 ? '' : 's'}</span>` : ''}
             </div>
 
             <div class="flex flex-col gap-1 mb-2">
@@ -1121,8 +1121,8 @@ export class GitStatusWidget extends LitElement {
         if (!this.branch) return nothing;
 
         const segments = this._pillSegments();
-        // Multi-repo aggregate: when we have a per-repo envelope with >1
-        // entries, override the dirty-file count in the pill to reflect
+        // Multi-repo aggregate: when we have multiple entries or a sole named
+        // component, override the dirty-file count in the pill to reflect
         // the sum across repos (the flat `statusFiles` only covers the
         // goal worktree's own repo). Match the design's mock: e.g.
         // "3 changed across 2 repos".
