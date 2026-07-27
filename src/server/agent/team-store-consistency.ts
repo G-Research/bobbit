@@ -154,6 +154,7 @@ export interface OrphanTeamRecoveryInput {
 		worktreePath?: string;
 		repoPath?: string;
 		branch?: string;
+		repoWorktrees?: Record<string, string>;
 		sandboxed?: boolean;
 		archived?: boolean;
 	};
@@ -182,6 +183,7 @@ export interface ReconstructedTeamLeadRecord {
 	worktreePath?: string;
 	repoPath?: string;
 	branch?: string;
+	repoWorktrees?: Record<string, string>;
 	agentSessionFile: string;
 	sandboxed?: boolean;
 	accessory: "crown";
@@ -214,6 +216,11 @@ export function reconstructTeamLeadSessionRecord(input: OrphanTeamRecoveryInput)
 		worktreePath: goal.worktreePath,
 		repoPath: goal.repoPath,
 		branch: goal.branch,
+		// Host polyrepo leads borrow the goal-owned component set. Sandboxed leads
+		// retain their container-owned restoration path and never borrow host paths.
+		...(!goal.sandboxed && goal.repoWorktrees && Object.keys(goal.repoWorktrees).length > 0
+			? { repoWorktrees: goal.repoWorktrees }
+			: {}),
 		agentSessionFile: chosenJsonl.jsonlPath,
 		sandboxed: !!goal.sandboxed,
 		accessory: "crown",
