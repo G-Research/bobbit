@@ -14,6 +14,8 @@
  * (which is now obsolete now that `defaults/workflows/*.yaml` is gone).
  */
 
+import { SYSTEMS_INTERACTION_REVIEW_PROMPT_ID } from "../agent/systems-interaction-review-contract.js";
+
 export interface SeededVerifyStep {
 	name: string;
 	type: "command" | "llm-review" | "agent-qa" | "subgoal";
@@ -22,6 +24,8 @@ export interface SeededVerifyStep {
 	run?: string;
 	role?: string;
 	prompt?: string;
+	promptRef?: string;
+	reviewGroup?: string;
 	phase?: number;
 	timeout?: number;
 	expect?: "success" | "failure";
@@ -59,6 +63,19 @@ export interface SeededWorkflow {
 
 /** Ralph-loop description applied to canonical implementation gates. */
 export const RALPH_LOOP_DESCRIPTION = "Ralph loop: implement the design, then run the verification suite. Failures circle the agent back to fix-and-retry until the gate passes.";
+
+/** Build the mandatory specialist-phase Systems Interaction Review step. */
+export function systemsInteractionReviewStep(): SeededVerifyStep {
+	return {
+		name: "Systems interaction review",
+		type: "llm-review",
+		role: "systems-reviewer",
+		phase: 2,
+		reviewGroup: "specialist",
+		promptRef: SYSTEMS_INTERACTION_REVIEW_PROMPT_ID,
+		optional: false,
+	};
+}
 
 /** Standard "Ready to Merge" verification gate — identical across all four flows. */
 export function readyToMergeGate(): SeededGate {
@@ -337,6 +354,7 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 					{ name: "Gap analysis", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
 					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
 					{ name: "Bug hunt", type: "llm-review", role: "bug-hunter", phase: 2, prompt: BUG_HUNT_PROMPT },
+					systemsInteractionReviewStep(),
 				],
 			},
 			{
@@ -380,6 +398,7 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
 					{ name: "Bug hunt", type: "llm-review", role: "bug-hunter", phase: 2, prompt: BUG_HUNT_PROMPT },
 					{ name: "Security review", type: "llm-review", role: "security-reviewer", phase: 2, prompt: SECURITY_REVIEW_PROMPT },
+					systemsInteractionReviewStep(),
 					{
 						name: "QA testing",
 						type: "agent-qa",
@@ -451,6 +470,7 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
 					{ name: "Bug hunt", type: "llm-review", role: "bug-hunter", phase: 2, prompt: BUG_HUNT_PROMPT },
 					{ name: "Security review", type: "llm-review", role: "security-reviewer", phase: 2, prompt: SECURITY_REVIEW_PROMPT },
+					systemsInteractionReviewStep(),
 				],
 			},
 			{
@@ -481,6 +501,7 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
 					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
 					{ name: "Bug hunt", type: "llm-review", role: "bug-hunter", phase: 2, prompt: BUG_HUNT_PROMPT },
+					systemsInteractionReviewStep(),
 				],
 			},
 			// quick-fix has no documentation gate — wire ready-to-merge directly off implementation.

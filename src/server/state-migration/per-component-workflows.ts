@@ -16,6 +16,7 @@ import type { Component } from "../agent/project-config-store.js";
 import {
 	buildDefaultWorkflows,
 	readyToMergeGate,
+	systemsInteractionReviewStep,
 	DESIGN_REVIEW_PROMPT,
 	GAP_ANALYSIS_DESIGN_PROMPT,
 	GAP_ANALYSIS_IMPL_PROMPT,
@@ -57,7 +58,7 @@ export function buildPerComponentWorkflow(
  * Phases:
  *   - phase 0: build (one step per component)
  *   - phase 1: check + unit + e2e (one step per (component, command))
- *   - phase 2: gap-analysis (post-impl), code-quality review, bug hunt
+ *   - phase 2: gap-analysis, code-quality, bug hunt, systems interaction review
  *
  * Workflow id: `all-components`.
  */
@@ -130,6 +131,7 @@ export function buildAllComponentsWorkflow(components: Component[]): SeededWorkf
 		phase: 2,
 		prompt: BUG_HUNT_PROMPT,
 	});
+	verify.push(systemsInteractionReviewStep());
 
 	return {
 		id: "all-components",
