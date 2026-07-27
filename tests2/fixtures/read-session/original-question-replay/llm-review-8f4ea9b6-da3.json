@@ -1,0 +1,158 @@
+{
+  "fixtureRevision": 1,
+  "candidateId": "llm-review-8f4ea9b6-da3",
+  "candidateKind": "workflow-gap-analysis",
+  "provenance": "minimal synthetic replay evidence derived from the captured workflow verdict and captured revision comparison",
+  "metadata": {
+    "id": "llm-review-8f4ea9b6-da3",
+    "title": "Workflow gap analysis",
+    "status": "idle",
+    "role": "reviewer",
+    "projectId": "b0699584-4bd4-4176-aa78-fc1c5cef8e66",
+    "createdAt": 1785171800000,
+    "lastActivity": 1785171900000,
+    "completedTurnCount": 1,
+    "lastTurnErrored": false,
+    "consecutiveErrorTurns": 0,
+    "model": {
+      "availability": "unknown",
+      "value": "unknown"
+    }
+  },
+  "rows": [
+    {
+      "rowId": "workflow-gap-meta-model",
+      "kind": "metadata",
+      "entry": {
+        "type": "message",
+        "id": "workflow-gap-entry-0",
+        "ts": "2026-07-20T00:00:50.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Comparable workflow model and reasoning metadata were not captured; their value is explicitly unknown."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-gap-prompt-gate",
+      "kind": "prompt",
+      "entry": {
+        "type": "message",
+        "id": "workflow-gap-entry-1",
+        "ts": "2026-07-20T00:00:51.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Gap-analysis gate: inspect documented scope and partial-result behavior independently."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-gap-call-partials",
+      "kind": "tool_call",
+      "entry": {
+        "type": "message",
+        "id": "workflow-gap-entry-2",
+        "ts": "2026-07-20T00:00:52.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "workflow-gap-call",
+              "name": "read",
+              "arguments": {
+                "path": "sole-root partial-result aggregation and captured revision digest table"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-gap-result-partials",
+      "kind": "tool_result",
+      "entry": {
+        "type": "message",
+        "id": "workflow-gap-entry-3",
+        "ts": "2026-07-20T00:00:53.000Z",
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "workflow-gap-call",
+          "toolName": "read",
+          "status": "ok",
+          "isError": false,
+          "content": [
+            {
+              "type": "text",
+              "text": "The sole-root aggregate can suppress a sibling partial result. Captured production paths have matching SHA-256 digests at both reviewed revisions."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-gap-finding-sole-root",
+      "kind": "finding",
+      "entry": {
+        "type": "message",
+        "id": "workflow-gap-entry-4",
+        "ts": "2026-07-20T00:00:54.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "FORMAL WORKFLOW FINDING: sole-root aggregation can hide a sibling component's partial-result state."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-gap-finding-identical-production",
+      "kind": "finding",
+      "entry": {
+        "type": "message",
+        "id": "workflow-gap-entry-5",
+        "ts": "2026-07-20T00:00:55.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "CAPTURED REVISION FACT: all audited production implementation paths have identical SHA-256 digests at the standalone PR head and workflow revision; only workflow configuration and design documentation differ."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-gap-verdict-independent",
+      "kind": "verdict",
+      "entry": {
+        "type": "message",
+        "id": "workflow-gap-entry-6",
+        "ts": "2026-07-20T00:00:56.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Independent gap verdict reported sole-root partial-result behavior but did not formally identify aggregate Git action routing or first-component merged-state semantics, and no cross-gate synthesis was performed."
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

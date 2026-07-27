@@ -1,0 +1,123 @@
+{
+  "fixtureRevision": 1,
+  "candidateId": "llm-review-889950f7-e15",
+  "candidateKind": "workflow-bug-hunt",
+  "provenance": "minimal synthetic replay evidence derived from the captured workflow verdict",
+  "metadata": {
+    "id": "llm-review-889950f7-e15",
+    "title": "Workflow bug hunt",
+    "status": "idle",
+    "role": "bug-hunter",
+    "projectId": "b0699584-4bd4-4176-aa78-fc1c5cef8e66",
+    "createdAt": 1785171000000,
+    "lastActivity": 1785171100000,
+    "completedTurnCount": 1,
+    "lastTurnErrored": false,
+    "consecutiveErrorTurns": 0,
+    "model": {
+      "availability": "unknown",
+      "value": "unknown"
+    }
+  },
+  "rows": [
+    {
+      "rowId": "workflow-bug-meta-model",
+      "kind": "metadata",
+      "entry": {
+        "type": "message",
+        "id": "workflow-bug-entry-0",
+        "ts": "2026-07-20T00:00:10.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Comparable workflow model and reasoning metadata were not captured; their value is explicitly unknown."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-bug-prompt-threshold",
+      "kind": "prompt",
+      "entry": {
+        "type": "message",
+        "id": "workflow-bug-entry-1",
+        "ts": "2026-07-20T00:00:11.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Bug-hunt gate: report only verifiable high-severity defects in the assigned gate scope."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-bug-call-scope",
+      "kind": "tool_call",
+      "entry": {
+        "type": "message",
+        "id": "workflow-bug-entry-2",
+        "ts": "2026-07-20T00:00:12.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "workflow-bug-call",
+              "name": "grep",
+              "arguments": {
+                "pattern": "high severity regression",
+                "path": "changed files"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-bug-result-scope",
+      "kind": "tool_result",
+      "entry": {
+        "type": "message",
+        "id": "workflow-bug-entry-3",
+        "ts": "2026-07-20T00:00:13.000Z",
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "workflow-bug-call",
+          "toolName": "grep",
+          "status": "ok",
+          "isError": false,
+          "content": [
+            {
+              "type": "text",
+              "text": "The scoped scan completed successfully and did not traverse aggregate Git actions through the UI semantics."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-bug-verdict-independent",
+      "kind": "verdict",
+      "entry": {
+        "type": "message",
+        "id": "workflow-bug-entry-4",
+        "ts": "2026-07-20T00:00:14.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "PASS for this independent bug-hunt gate. No qualifying high-severity issue was reported; aggregate Git action routing and aggregate merged-state semantics were not formally identified, and no cross-gate synthesis followed."
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
