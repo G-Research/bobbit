@@ -737,6 +737,7 @@ export class TeamManager {
 										worktreePath: goal.worktreePath,
 										repoPath: goal.repoPath,
 										branch: goal.branch,
+										repoWorktrees: goal.repoWorktrees,
 										sandboxed: goal.sandboxed,
 										archived: goal.archived,
 									},
@@ -838,6 +839,7 @@ export class TeamManager {
 								worktreePath: goal.worktreePath,
 								repoPath: goal.repoPath,
 								branch: goal.branch,
+								repoWorktrees: goal.repoWorktrees,
 								sandboxed: goal.sandboxed,
 								archived: goal.archived,
 							},
@@ -1902,6 +1904,17 @@ export class TeamManager {
 		// The extension registers first-class tools (team_spawn, task_create, etc.) in the agent.
 		// When sandboxed, create a worktree inside the per-project container for the goal branch.
 		const sandboxed = goal.sandboxed ?? this.sessionManager.isSandboxEnabled;
+		const goalOwnedWorktreeMeta = !sandboxed
+			&& !headquartersGoal
+			&& goal.repoWorktrees
+			&& Object.keys(goal.repoWorktrees).length > 0
+			? {
+				worktreePath: goal.worktreePath,
+				repoPath: goal.repoPath,
+				branch: goal.branch,
+				repoWorktrees: goal.repoWorktrees,
+			}
+			: undefined;
 
 		// Resolve team-lead extension via cascade (ToolManager) or fall back to deprecated TOOLS_DIR
 		let teamLeadExtPath: string;
@@ -1928,6 +1941,9 @@ export class TeamManager {
 				// Empty string falls through to undefined → system default.
 				initialModel: storedRole.model || undefined,
 				initialThinkingLevel: storedRole.thinkingLevel || undefined,
+				// A non-sandboxed polyrepo lead borrows the goal-owned component set;
+				// passing coordinates here persists them without provisioning another worktree.
+				...goalOwnedWorktreeMeta,
 			},
 		);
 
@@ -1941,6 +1957,7 @@ export class TeamManager {
 			role: "team-lead",
 			teamGoalId: goalId,
 			worktreePath: headquartersGoal ? undefined : goal.worktreePath,
+			...goalOwnedWorktreeMeta,
 			accessory: teamLeadAccessory,
 		});
 
