@@ -65,6 +65,7 @@ const agentDir = process.env.BOBBIT_AGENT_DIR || process.cwd();
 fs.mkdirSync(agentDir, { recursive: true });
 const sessionFile = path.join(agentDir, "source-vite-inline-theme-session.jsonl");
 const model = { provider: "mock", id: "source-vite-write-agent", contextWindow: 128000, maxTokens: 16384, reasoning: false };
+let thinkingLevel = "off";
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 const persist = () => fs.writeFileSync(sessionFile, messages.map((message) => JSON.stringify({ type: "message", message })).join("\\n") + (messages.length ? "\\n" : ""));
 const emit = (event) => send(event);
@@ -104,7 +105,12 @@ rl.on("line", (line) => {
 	}
 	if (message.type === "get_state") {
 		persist();
-		send({ type: "response", id: message.id, success: true, data: { status: "idle", sessionFile, model } });
+		send({ type: "response", id: message.id, success: true, data: { status: "idle", sessionFile, model, thinkingLevel } });
+		return;
+	}
+	if (message.type === "set_thinking_level") {
+		thinkingLevel = message.level;
+		send({ type: "response", id: message.id, success: true });
 		return;
 	}
 	if (message.type === "get_messages") {
