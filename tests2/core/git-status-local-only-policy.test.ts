@@ -40,9 +40,13 @@ describe("session git-status read-only contract", () => {
 
 		expect(envelopeSource).not.toMatch(/publishCurrentBranchToOrigin|sessionGitStatusAutoPublishDecision|remotePublication/);
 		expect(aggregateSource).toContain("const aggregate: GitStatusResult");
-		for (const field of ["branch", "primaryBranch", "primaryRef", "isOnPrimary", "hasUpstream", "mergedIntoPrimary"]) {
+		for (const field of ["branch", "primaryBranch", "primaryRef", "isOnPrimary", "hasUpstream"]) {
 			expect(aggregateSource).toMatch(new RegExp(`${field}:\\s*base\\.${field}`));
 		}
+		expect(aggregateSource).toMatch(
+			/mergedIntoPrimary:\s*!partial\s*&&\s*results\.every\(\s*\(result\)\s*=>\s*result\.mergedIntoPrimary\s*\)/,
+		);
+		expect(aggregateSource).not.toMatch(/mergedIntoPrimary:\s*base\.mergedIntoPrimary/);
 		expect(aggregateSource).toMatch(/components\.length === 1[\s\S]*target\.repo === "\."/);
 		expect(aggregateSource).toMatch(/envelope:\s*\{\s*\.\.\.result,\s*aggregate:\s*result,\s*repos\s*\}/);
 		expect(aggregateSource).toMatch(/envelope:\s*\{\s*\.\.\.aggregate,\s*aggregate,\s*repos\s*\}/);
