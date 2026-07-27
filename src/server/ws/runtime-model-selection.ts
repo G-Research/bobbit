@@ -167,9 +167,9 @@ async function recoverRuntimeTupleMutation(
 	mutationStarted: boolean,
 ): Promise<void> {
 	const liveAfterFailure = await readRuntimeModelSnapshot(session);
-	const actualAfterFailure = completeTuple(liveAfterFailure);
-	if (actualAfterFailure && broadcastModelState) {
-		broadcastTuple(session, actualAfterFailure, broadcastModelState);
+	const correctionAfterFailure = completeTuple(liveAfterFailure) ?? durable;
+	if (correctionAfterFailure && broadcastModelState) {
+		broadcastTuple(session, correctionAfterFailure, broadcastModelState);
 	}
 
 	if (!mutationStarted) return;

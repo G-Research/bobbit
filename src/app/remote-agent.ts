@@ -2250,7 +2250,7 @@ export class RemoteAgent {
 
 			case "error":
 				console.error(`[RemoteAgent] Server error: ${msg.message} (${msg.code})`);
-				if ((msg as any).code === "SET_MODEL_FAILED") {
+				if ((msg as any).code === "SET_MODEL_FAILED" || (msg as any).code === "SET_THINKING_LEVEL_FAILED") {
 					this.send({ type: "get_state" });
 				}
 				if ((msg as any).code === "GRANT_ERROR") {
