@@ -8182,9 +8182,8 @@ export class SessionManager {
 		const delegateInitialModel = opts.initialModel
 			?? parentDurableModel
 			?? this.resolveInitialModel(opts.role, parentProjectId);
-		const delegateThinkingCandidate = opts.role
-			? opts.initialThinkingLevel
-			: parentMeta?.effectiveThinkingLevel ?? opts.initialThinkingLevel;
+		const delegateThinkingCandidate = opts.initialThinkingLevel
+			?? (opts.role ? undefined : parentMeta?.effectiveThinkingLevel);
 		const delegateInitialThinking = this.resolveThinkingLevelForModel(
 			delegateInitialModel,
 			opts.role,
