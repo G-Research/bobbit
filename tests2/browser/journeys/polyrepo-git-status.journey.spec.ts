@@ -121,6 +121,16 @@ async function expectNamedRepoSections(
   for (const name of expectedNames) {
     await expect(dropdown.locator(`[data-repo-name="${name}"]`)).toBeVisible();
   }
+
+  // Named-component envelopes are aggregate status only: the branch/counts
+  // remain visible, but root-targeting actions and history links do not.
+  await expect(dropdown.locator('[data-testid="git-root-action"]')).toHaveCount(0);
+  await expect(
+    dropdown.locator('[data-testid="git-commit-history-trigger"]'),
+  ).toHaveCount(0);
+  await expect(
+    dropdown.locator('[data-testid="git-aggregate-status-count"]').first(),
+  ).toBeVisible();
 }
 
 async function expectExplicitFetch(
@@ -154,7 +164,7 @@ test.describe("Journey: Polyrepo Git status widgets", () => {
         aheadOfPrimary: 1,
         insertionsVsPrimary: 8,
       }),
-      "string-lib": repoStatus([]),
+      "string-lib": repoStatus([], { behindPrimary: 1 }),
       "hello-cli": repoStatus([{ file: "src/index.ts", status: "A" }], {
         ahead: 2,
         aheadOfPrimary: 2,
@@ -197,6 +207,90 @@ test.describe("Journey: Polyrepo Git status widgets", () => {
         page.locator("pi-chat-panel git-status-widget").first(),
         names,
       );
+    } finally {
+      await deleteSession(sessionId);
+    }
+  });
+
+  test("sole-dot session keeps flat root Git actions and dispatches them", async ({
+    page,
+  }) => {
+    test.setTimeout(60_000);
+    const sessionId = await createSession();
+    await waitForSessionStatus(sessionId, "idle");
+    await installGitStatusRoute(
+      page,
+      `/api/sessions/${sessionId}/git-status`,
+      componentEnvelope({
+        ".": repoStatus([], {
+          aheadOfPrimary: 2,
+          behindPrimary: 1,
+          insertionsVsPrimary: 4,
+        }),
+      }),
+    );
+    const rebaseRequests: string[] = [];
+    const commitRequests: string[] = [];
+    await page.route(
+      new RegExp(`/api/sessions/${sessionId}/git-merge-primary$`),
+      async (route: Route) => {
+        rebaseRequests.push(route.request().url());
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({}),
+        });
+      },
+    );
+    await page.route(
+      new RegExp(`/api/sessions/${sessionId}/commits(?:\\?.*)?$`),
+      async (route: Route) => {
+        commitRequests.push(route.request().url());
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ commits: [] }),
+        });
+      },
+    );
+
+    try {
+      await openApp(page);
+      await navigateToHash(page, `#/session/${sessionId}`);
+      await expect(page.locator("message-editor textarea").first()).toBeVisible(
+        { timeout: 20_000 },
+      );
+
+      const widget = page.locator("pi-chat-panel git-status-widget").first();
+      await expect(widget).toBeVisible({ timeout: 20_000 });
+      await widget.evaluate((node) => {
+        node.addEventListener(
+          "git-merge-primary",
+          () => node.setAttribute("data-rebase-event", "seen"),
+          { once: true },
+        );
+      });
+      await widget.locator("button[data-state='ready']").first().click();
+
+      const dropdown = page.locator("#git-status-dropdown");
+      await expect(dropdown).toBeVisible();
+      await expect(dropdown.locator('[data-testid="multi-repo-sections"]')).toHaveCount(0);
+      await expect(
+        dropdown.locator('[data-testid="git-commit-history-trigger"]'),
+      ).toHaveCount(2);
+      const rebase = dropdown.locator(
+        '[data-testid="git-root-action"][data-git-action="rebase-primary"]',
+      );
+      await expect(rebase).toBeVisible();
+      await rebase.click();
+      await expect(widget).toHaveAttribute("data-rebase-event", "seen");
+      await expect.poll(() => rebaseRequests.length).toBe(1);
+
+      await dropdown
+        .locator('[data-testid="git-commit-history-trigger"]')
+        .first()
+        .click();
+      await expect.poll(() => commitRequests.length).toBe(1);
     } finally {
       await deleteSession(sessionId);
     }
