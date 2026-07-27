@@ -30,6 +30,24 @@
       }
     },
     {
+      "path": "tests2/dom/read-session-renderer.test.ts",
+      "reason": "Focused DOM coverage proving ReadSessionRenderer parses canonical content JSON instead of duplicated details messages, resolves author dictionaries, renders bounded calls plus canonical result status/metrics/omission/excerpts/continuations, keeps legacy compact rows compatible, escapes output, and advances the direct REST modal using returned/nextOffset.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/browser/fixtures/read-session-renderer.spec.ts",
+      "reason": "Chromium renderer journey proving the canonical read_session card preserves session navigation, attribution, bounded result metadata and partial state, opens the escaped direct REST transcript modal, never exposes duplicated raw details, and survives reload.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/core/git-status-envelope.test.ts",
       "reason": "Pure aggregation contract coverage for component-authoritative Git status envelopes: sums numeric counters, derives boolean and partial fields, preserves named and sole-dot compatibility, isolates failed siblings, distinguishes terminal non-repositories from retryable errors, and deduplicates fetch/invalidation targets.",
       "execution": {
