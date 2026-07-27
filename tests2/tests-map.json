@@ -868,7 +868,7 @@
     },
     {
       "path": "tests2/browser/journeys/pi-runtime-upgrade.journey.spec.ts",
-      "reason": "Pi 0.80.6 and AIGW browser journey coverage: pins GPT 5.6 catalog selection, upstream-provider badge/search, stable non-AIGW labels, bare AIGW preference persistence across reload, browser-safe pi-ai provider/key-test routes, and session reload/restore after transcript parsing.",
+      "reason": "Pi 0.82.1 and AIGW browser journey coverage: selects authoritative Anthropic Opus 5 metadata and all thinking levels, sends the combined xhigh tuple through a real gateway/mock session, verifies persistence/reload/cleanup, preserves AIGW provenance preferences, exercises browser-safe pi-ai key routes, and restores a mock transcript.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
@@ -1593,6 +1593,33 @@
         "runner": "vitest",
         "tier": "unit",
         "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/client-combined-model-thinking-selection.test.ts",
+      "reason": "Focused DOM contract for one clamped combined model/thinking request, optimistic tuple correction from authoritative state, and legacy standalone-thinking compatibility.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/core/server-pi082-tuple-boundary-coder5d34.test.ts",
+      "reason": "Focused server boundary coverage for durable-first Opus 5 thinking inheritance, exact-model clamping, supported Kimi-named IDs, and shared tuple resolution at orchestration/fork/continue call sites.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/server-model-boundary-coder5d34.test.ts",
+      "reason": "Real-gateway coverage that Bobbit-owned defaults and roles reject exact deferred provider kimi-coding while preserving Kimi-named IDs under supported custom/local providers.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
       }
     }
   ],
