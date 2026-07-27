@@ -37,11 +37,15 @@ export function generateToolGuardExtension(
 	// 'allow' tools don't need the guard.
 	const askPolicies: Record<string, ToolPolicyEntry> = {};
 	const neverPolicies: Record<string, ToolPolicyEntry> = {};
+	let readSessionProtected = false;
 	for (const [name, entry] of Object.entries(policies)) {
 		if (entry.policy === 'ask') {
 			askPolicies[name] = entry;
 		} else if (entry.policy === 'never') {
 			neverPolicies[name] = entry;
+		}
+		if (name.toLowerCase() === "read_session" && entry.policy !== "never") {
+			readSessionProtected = true;
 		}
 	}
 
@@ -58,6 +62,12 @@ export default function(pi) {
   // can still appear in the agent's tool registry — the guard rejects it here.
   const neverPolicies = ${JSON.stringify(neverPolicies)};
 
+  // Unlike ordinary allow-policy tools, read_session always needs this
+  // immutable pre-handler guard. Config/project overrides can replace its
+  // execute implementation, but cannot replace this gateway-owned extension.
+  const readSessionProtected = ${JSON.stringify(readSessionProtected)};
+  const contextHeavyErrorCode = "CONTEXT_HEAVY_LIMIT_REQUIRED";
+
   const askPolicyNamesByLower = new Map(Object.keys(askPolicies).map((name) => [name.toLowerCase(), name]));
   const neverPolicyNamesByLower = new Map(Object.keys(neverPolicies).map((name) => [name.toLowerCase(), name]));
 
@@ -65,6 +75,33 @@ export default function(pi) {
     if (map[toolName]) return { canonicalName: toolName, entry: map[toolName] };
     const canonicalName = namesByLower.get(String(toolName || "").toLowerCase());
     return canonicalName ? { canonicalName, entry: map[canonicalName] } : undefined;
+  }
+
+  function isObject(value) {
+    return !!value && typeof value === "object" && !Array.isArray(value);
+  }
+
+  function toolCallInput(event) {
+    if (isObject(event && event.input)) return event.input;
+    if (isObject(event && event.arguments)) return event.arguments;
+    return {};
+  }
+
+  function contextHeavyReadError(input) {
+    const flags = ["verbose", "include_tool_results"].filter((flag) => input[flag] === true);
+    if (flags.length === 0) return undefined;
+    const limit = input.limit;
+    if (typeof limit === "number" && Number.isFinite(limit) && Number.isInteger(limit) && limit >= 1 && limit <= 10) {
+      return undefined;
+    }
+    const formattedFlags = flags.map((flag) => "\u0060" + flag + "\u0060").join(", ");
+    return {
+      error: "You should not typically pull this much data from the API. " +
+        "Context-heavy flag(s) " + formattedFlags + " require an explicit limit at or below 10. " +
+        "Call again with limit <= 10 and fetch in smaller batches only if you REALLY need full verbosity. " +
+        "Keep an eye on token consumption.",
+      code: contextHeavyErrorCode,
+    };
   }
 
   // In-memory grant set — tools that have been granted during this session
@@ -81,6 +118,16 @@ export default function(pi) {
 
   pi.on("tool_call", async (event) => {
     const toolName = event.toolName || event.tool;
+
+    // This check deliberately precedes both permission long-polling and the
+    // resolved tool handler, so an invalid heavy read cannot reach fetch even
+    // when a stale server/project extension won normal provider resolution.
+    if (readSessionProtected && String(toolName || "").toLowerCase() === "read_session") {
+      const heavyError = contextHeavyReadError(toolCallInput(event));
+      if (heavyError) {
+        return { block: true, reason: JSON.stringify(heavyError) };
+      }
+    }
 
     // Hard-block 'never' tools immediately with a clear reason. The agent sees
     // this as a tool error so it can adapt (e.g. reviewers falling back to

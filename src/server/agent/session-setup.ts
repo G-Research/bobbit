@@ -961,7 +961,10 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools, toolScope);
 	const piExtensionActivation = resolveMarketplacePiExtensionActivation(ctx.marketplacePiExtensionResolver, plan.projectId, plan.cwd);
 
-	plan.bridgeOptions.args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args, ...(plan.bridgeOptions.args || [])]);
+	plan.bridgeOptions.args = prependToolResultErrorBridge(
+		[...activation.args, ...piExtensionActivation.args, ...(plan.bridgeOptions.args || [])],
+		activation.readSessionAvailable,
+	);
 	plan.bridgeOptions.piExtensions = [...(plan.bridgeOptions.piExtensions ?? []), ...piExtensionActivation.runtimeExtensions];
 	plan.bridgeOptions.env = { ...(plan.bridgeOptions.env || {}), ...activation.env };
 
