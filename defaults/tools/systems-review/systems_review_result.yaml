@@ -1,0 +1,11 @@
+name: systems_review_result
+description: "Submit a receipt-bound Systems review checkpoint or the final structured synthesis."
+summary: "Submit Systems review progress or final synthesis"
+params: [operation, execution_id, snapshot_digest, contract_digest, previous_checkpoint_digest?, chunk_id?, coverage_cursor?, processed_change_ids?, receipt_tokens?, behaviors?, coverage_mappings?, findings?, unresolved_links?, resolved_links?, final_checkpoint_digest?]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Systems Review
+grantPolicy: never
+docs: |-
+  `checkpoint` appends validated immutable trace/finding fragments for one evidence chunk and cannot pass the review. `final` is accepted only after the gap-free checkpoint chain covers every repository change and coverage item and closes every cross-chunk link. The server derives the report and verdict; this tool accepts no generic summary or caller-selected verdict.
