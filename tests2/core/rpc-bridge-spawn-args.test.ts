@@ -6,8 +6,9 @@
  * Unit test: RpcBridge agent arg construction.
  *
  * Verifies that initialModel/initialThinkingLevel options are translated into
- * `--model <provider>/<modelId>` and `--thinking <level>` CLI flags, ordered
- * before caller-supplied args, so pi-coding-agent boots straight into the
+ * separate `--provider <provider>`, `--model <modelId>`, and
+ * `--thinking <level>` CLI flags, ordered before caller-supplied args, so
+ * pi-coding-agent boots straight into the
  * configured model and never emits the redundant initial `model_change` event
  * with its hardcoded default.
  *
@@ -103,12 +104,16 @@ describe("buildAgentArgs", () => {
 		assert.ok(!args.includes("--approve"), "caller --approve stripped");
 		assert.ok(!args.includes("-na"), "caller -na stripped");
 		assert.equal(args.filter((a) => a === "--no-approve").length, 1, "single --no-approve");
-		// Non-trust args survive untouched, in order, after --model.
+		// Non-trust args survive untouched, in order, after the provider/model tuple.
+		const idxProvider = args.indexOf("--provider");
 		const idxModel = args.indexOf("--model");
 		const idxExt = args.indexOf("--extension");
 		const idxTools = args.indexOf("--tools");
-		assert.ok(idxModel >= 0 && idxExt >= 0 && idxTools >= 0);
-		assert.ok(idxModel < idxExt && idxExt < idxTools, `expected --model < --extension < --tools, got: ${args.join(" ")}`);
+		assert.ok(idxProvider >= 0 && idxModel >= 0 && idxExt >= 0 && idxTools >= 0);
+		assert.ok(
+			idxProvider < idxModel && idxModel < idxExt && idxExt < idxTools,
+			`expected --provider < --model < --extension < --tools, got: ${args.join(" ")}`,
+		);
 		assert.equal(args[idxExt + 1], "/foo.ts", "--extension value preserved");
 		assert.equal(args[idxTools + 1], "read", "--tools value preserved");
 	});
@@ -140,50 +145,58 @@ describe("buildAgentArgs", () => {
 		);
 		assert.deepEqual(args, [
 			"--mode", "rpc", "--no-approve", "--no-context-files",
-			"--model", "anthropic/claude-3-5-sonnet",
+			"--provider", "anthropic",
+			"--model", "claude-3-5-sonnet",
 			"--tools", "read",
 			"--extension", "/foo.ts",
 		]);
 	});
 
-	it("includes --model and --thinking when initialModel/initialThinkingLevel are set", () => {
+	it("includes an exact provider/model/thinking tuple with all existing flags", () => {
 		const args = buildAgentArgs({
-			initialModel: "anthropic/claude-3-5-sonnet",
-			initialThinkingLevel: "high",
+			systemPromptPath: "/tmp/p.md",
+			initialModel: "anthropic/claude-opus-5",
+			initialThinkingLevel: "xhigh",
+			args: ["--tools", "read,write", "--extension", "/foo.ts"],
 		});
 		assert.deepEqual(args, [
 			"--mode", "rpc", "--no-approve", "--no-context-files",
-			"--model", "anthropic/claude-3-5-sonnet",
-			"--thinking", "high",
+			"--system-prompt", "/tmp/p.md",
+			"--provider", "anthropic",
+			"--model", "claude-opus-5",
+			"--thinking", "xhigh",
+			"--tools", "read,write",
+			"--extension", "/foo.ts",
 		]);
 	});
 
-	it("places --model before caller-supplied args (so caller-supplied overrides win)", () => {
+	it("places the tuple before caller-supplied args so existing raw overrides still win", () => {
 		const args = buildAgentArgs({
-			initialModel: "anthropic/claude-3-5-sonnet",
-			args: ["--tools", "read,write", "--extension", "/foo.ts"],
+			initialModel: "anthropic/claude-opus-5",
+			initialThinkingLevel: "xhigh",
+			args: ["--provider", "custom", "--model", "nested/override", "--thinking", "low"],
 		});
-		const idxModel = args.indexOf("--model");
-		const idxTools = args.indexOf("--tools");
-		const idxExt = args.indexOf("--extension");
-		assert.ok(idxModel >= 0);
-		assert.ok(idxModel < idxTools, "--model must come before caller --tools");
-		assert.ok(idxModel < idxExt, "--model must come before caller --extension");
+		assert.equal(args.indexOf("--provider") < args.lastIndexOf("--provider"), true);
+		assert.equal(args.indexOf("--model") < args.lastIndexOf("--model"), true);
+		assert.equal(args.indexOf("--thinking") < args.lastIndexOf("--thinking"), true);
+		assert.deepEqual(args.slice(-6), ["--provider", "custom", "--model", "nested/override", "--thinking", "low"]);
 	});
 
-	it("places --system-prompt before --model (system-prompt is pi-internal, model is post-system)", () => {
+	it("places --system-prompt before the explicit provider/model tuple", () => {
 		const args = buildAgentArgs({
 			systemPromptPath: "/tmp/p.md",
 			initialModel: "openai/gpt-4o",
 		});
 		const idxSys = args.indexOf("--system-prompt");
+		const idxProvider = args.indexOf("--provider");
 		const idxModel = args.indexOf("--model");
-		assert.ok(idxSys >= 0 && idxModel >= 0);
-		assert.ok(idxSys < idxModel);
+		assert.ok(idxSys >= 0 && idxProvider >= 0 && idxModel >= 0);
+		assert.ok(idxSys < idxProvider && idxProvider < idxModel);
 	});
 
-	it("omits --model when initialModel is missing", () => {
+	it("omits --provider and --model when initialModel is missing", () => {
 		const args = buildAgentArgs({});
+		assert.ok(!args.includes("--provider"));
 		assert.ok(!args.includes("--model"));
 		assert.ok(!args.includes("--thinking"));
 	});
@@ -191,6 +204,7 @@ describe("buildAgentArgs", () => {
 	it("ignores malformed initialModel (no slash, leading slash, trailing slash)", () => {
 		for (const bad of ["no-slash-here", "/leading", "trailing/", "/", ""]) {
 			const args = buildAgentArgs({ initialModel: bad });
+			assert.ok(!args.includes("--provider"), `should ignore "${bad}", got: ${args.join(" ")}`);
 			assert.ok(!args.includes("--model"), `should ignore "${bad}", got: ${args.join(" ")}`);
 		}
 	});
@@ -211,18 +225,61 @@ describe("buildAgentArgs", () => {
 		}
 	});
 
-	it("spawn-pins Claude Opus 4.8 with xhigh thinking without falling back", () => {
+	it("spawn-pins Anthropic Claude Opus 5 with xhigh thinking", () => {
 		const args = buildAgentArgs({
-			initialModel: "anthropic/claude-opus-4-8",
+			initialModel: "anthropic/claude-opus-5",
 			initialThinkingLevel: "xhigh",
 		});
 
 		assert.deepEqual(args, [
 			"--mode", "rpc", "--no-approve", "--no-context-files",
-			"--model", "anthropic/claude-opus-4-8",
+			"--provider", "anthropic",
+			"--model", "claude-opus-5",
 			"--thinking", "xhigh",
 		]);
-		assert.ok(!args.includes("anthropic/claude-opus-4-7"), "must not substitute the older Pi default");
-		assert.ok(!args.includes("anthropic/claude-opus-4-6"), "must not substitute Bobbit's archived placeholder");
+	});
+
+	it("preserves dotted Bedrock profile IDs and max thinking", () => {
+		const args = buildAgentArgs({
+			initialModel: "amazon-bedrock/eu.anthropic.claude-opus-5",
+			initialThinkingLevel: "max",
+		});
+
+		assert.deepEqual(args, [
+			"--mode", "rpc", "--no-approve", "--no-context-files",
+			"--provider", "amazon-bedrock",
+			"--model", "eu.anthropic.claude-opus-5",
+			"--thinking", "max",
+		]);
+	});
+
+	it("splits at only the first slash so nested model IDs stay intact", () => {
+		const args = buildAgentArgs({
+			initialModel: "openrouter/anthropic/claude-opus-5",
+			initialThinkingLevel: "high",
+		});
+
+		assert.deepEqual(args, [
+			"--mode", "rpc", "--no-approve", "--no-context-files",
+			"--provider", "openrouter",
+			"--model", "anthropic/claude-opus-5",
+			"--thinking", "high",
+		]);
+	});
+
+	it("uses the same tuple builder for direct-host and sandbox options", () => {
+		const tuple = {
+			initialModel: "amazon-bedrock/eu.anthropic.claude-opus-5",
+			initialThinkingLevel: "xhigh",
+		};
+		const hostArgs = buildAgentArgs(tuple);
+		const sandboxArgs = buildAgentArgs({ ...tuple, containerId: "sandbox-1", sandboxed: true });
+
+		assert.deepEqual(sandboxArgs, hostArgs);
+		assert.deepEqual(hostArgs.slice(-6), [
+			"--provider", "amazon-bedrock",
+			"--model", "eu.anthropic.claude-opus-5",
+			"--thinking", "xhigh",
+		]);
 	});
 });
