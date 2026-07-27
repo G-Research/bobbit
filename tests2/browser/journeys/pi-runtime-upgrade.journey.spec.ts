@@ -186,6 +186,7 @@ test.describe("Journey: Pi Runtime Upgrade", () => {
 
 	test("AIGW provenance is searchable, badges stay stable, and bare preference survives reload", async ({ page }) => {
 		const aigwId = "gpt-5.6-sol";
+		const registryProviderId = `pi-runtime-aigw-${Date.now()}`;
 		const models = [
 			{
 				id: aigwId,
@@ -220,6 +221,18 @@ test.describe("Journey: Pi Runtime Upgrade", () => {
 		});
 
 		try {
+			const registered = await apiFetch("/api/custom-providers", {
+				method: "POST",
+				body: JSON.stringify({
+					id: registryProviderId,
+					name: "aigw",
+					type: "manual",
+					baseUrl: "http://127.0.0.1:9",
+					models: [{ id: aigwId, name: "GPT 5.6 Sol" }],
+				}),
+			});
+			expect(registered.status, await registered.clone().text()).toBe(200);
+
 			await apiFetch("/api/preferences", {
 				method: "PUT",
 				body: JSON.stringify({ "default.sessionModel": null }),
@@ -256,6 +269,7 @@ test.describe("Journey: Pi Runtime Upgrade", () => {
 				method: "PUT",
 				body: JSON.stringify({ "default.sessionModel": null }),
 			});
+			await apiFetch(`/api/custom-providers/${encodeURIComponent(registryProviderId)}`, { method: "DELETE" });
 			await page.unroute("**/api/models");
 		}
 	});
