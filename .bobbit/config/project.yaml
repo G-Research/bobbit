@@ -126,6 +126,7 @@ workflows:
             command: e2e
           - name: Gap analysis
             type: llm-review
+            reviewGroup: specialist
             role: spec-auditor
             phase: 4
             prompt: >-
@@ -167,6 +168,7 @@ workflows:
               relative to the spec and design.
           - name: Code quality review
             type: llm-review
+            reviewGroup: specialist
             role: code-reviewer
             phase: 4
             prompt: >-
@@ -207,6 +209,7 @@ workflows:
               5. Test coverage — are new behaviors tested?
           - name: E2E user journey coverage
             type: llm-review
+            reviewGroup: specialist
             phase: 4
             prompt: >-
               Verify that the implementation includes browser-based E2E tests
@@ -229,6 +232,7 @@ workflows:
               user-facing behavior, or if persistence/cleanup are skipped.
           - name: Bug hunt
             type: llm-review
+            reviewGroup: specialist
             role: bug-hunter
             phase: 4
             prompt: Review the implementation on branch {{branch}} vs origin/{{baseBranch}}
@@ -239,6 +243,7 @@ workflows:
               it is a bug.
           - name: Security review
             type: llm-review
+            reviewGroup: specialist
             role: security-reviewer
             phase: 4
             prompt: >-
@@ -252,6 +257,12 @@ workflows:
 
               Check injection risks, auth/authz, data validation, secrets
               handling, and dependency risks.
+          - name: Systems interaction review
+            type: llm-review
+            role: systems-reviewer
+            phase: 4
+            reviewGroup: specialist
+            promptRef: bobbit:systems-interaction-review/v1
       - id: documentation
         name: Documentation
         depends_on:
@@ -482,6 +493,7 @@ workflows:
             command: e2e
           - name: Gap analysis
             type: llm-review
+            reviewGroup: specialist
             role: spec-auditor
             phase: 4
             prompt: >-
@@ -496,6 +508,7 @@ workflows:
               {{goal_spec}}
           - name: Code quality review
             type: llm-review
+            reviewGroup: specialist
             role: code-reviewer
             phase: 4
             prompt: Review the code changes on branch {{branch}} vs origin/{{baseBranch}}
@@ -503,6 +516,7 @@ workflows:
               style, and test coverage.
           - name: Bug hunt
             type: llm-review
+            reviewGroup: specialist
             role: bug-hunter
             phase: 4
             prompt: Review the implementation on branch {{branch}} vs origin/{{baseBranch}}
@@ -513,11 +527,18 @@ workflows:
               it is a bug.
           - name: Security review
             type: llm-review
+            reviewGroup: specialist
             role: security-reviewer
             phase: 4
             prompt: Security review of changes on branch {{branch}} vs
               origin/{{baseBranch}}. Check injection, auth/authz, validation,
               secrets, and dependency risks.
+          - name: Systems interaction review
+            type: llm-review
+            role: systems-reviewer
+            phase: 4
+            reviewGroup: specialist
+            promptRef: bobbit:systems-interaction-review/v1
           - name: QA testing
             type: agent-qa
             role: qa-tester
@@ -640,6 +661,7 @@ workflows:
             command: e2e
           - name: Gap analysis
             type: llm-review
+            reviewGroup: specialist
             role: spec-auditor
             phase: 4
             prompt: >-
@@ -653,6 +675,7 @@ workflows:
               {{goal_spec}}
           - name: Code quality review
             type: llm-review
+            reviewGroup: specialist
             role: code-reviewer
             phase: 4
             prompt: Review the code changes on branch {{branch}} vs {{baseBranch}} for
@@ -660,12 +683,14 @@ workflows:
               regression risk, and test coverage.
           - name: Regression test coverage
             type: llm-review
+            reviewGroup: specialist
             phase: 4
             prompt: Verify that the bug fix includes a regression test that would catch
               reintroduction. PASS if at least one unit, fixture, or E2E test
               covers the fixed behavior; FAIL if no regression test was added.
           - name: Bug hunt
             type: llm-review
+            reviewGroup: specialist
             role: bug-hunter
             phase: 4
             prompt: Review the implementation on branch {{branch}} vs {{baseBranch}} for
@@ -676,10 +701,17 @@ workflows:
               bug.
           - name: Security review
             type: llm-review
+            reviewGroup: specialist
             role: security-reviewer
             phase: 4
             prompt: Security review of changes on branch {{branch}} vs {{baseBranch}}. Check
               injection, auth/authz, validation, secrets, and dependency risks.
+          - name: Systems interaction review
+            type: llm-review
+            role: systems-reviewer
+            phase: 4
+            reviewGroup: specialist
+            promptRef: bobbit:systems-interaction-review/v1
           - name: QA testing
             type: agent-qa
             role: qa-tester
@@ -761,6 +793,7 @@ workflows:
             command: e2e
           - name: Gap analysis
             type: llm-review
+            reviewGroup: specialist
             role: spec-auditor
             phase: 4
             prompt: >-
@@ -775,6 +808,7 @@ workflows:
               {{goal_spec}}
           - name: Code quality review
             type: llm-review
+            reviewGroup: specialist
             role: code-reviewer
             phase: 4
             prompt: Review the code changes on branch {{branch}} vs {{baseBranch}} for
@@ -782,6 +816,7 @@ workflows:
               minimality, and test coverage.
           - name: Bug hunt
             type: llm-review
+            reviewGroup: specialist
             role: bug-hunter
             phase: 4
             prompt: Review the implementation on branch {{branch}} vs {{baseBranch}} for
@@ -790,6 +825,12 @@ workflows:
               behavior. Fail only for critical/high actionable bugs; include
               file:line, reproduction conditions, consequence, and why it is a
               bug.
+          - name: Systems interaction review
+            type: llm-review
+            role: systems-reviewer
+            phase: 4
+            reviewGroup: specialist
+            promptRef: bobbit:systems-interaction-review/v1
       - id: ready-to-merge
         name: Ready to Merge
         depends_on:
@@ -847,6 +888,7 @@ workflows:
             phase: 0
           - name: Bug hunt
             type: llm-review
+            reviewGroup: specialist
             role: bug-hunter
             phase: 1
             prompt: Review the implementation on branch {{branch}} vs {{baseBranch}} for
@@ -855,6 +897,12 @@ workflows:
               behavior. Fail only for critical/high actionable bugs; include
               file:line, reproduction conditions, consequence, and why it is a
               bug.
+          - name: Systems interaction review
+            type: llm-review
+            role: systems-reviewer
+            phase: 1
+            reviewGroup: specialist
+            promptRef: bobbit:systems-interaction-review/v1
       - id: ready-to-merge
         name: Ready to Merge
         depends_on:
