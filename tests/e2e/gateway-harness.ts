@@ -323,10 +323,23 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
 		// Default the system-scope Subgoals (Experimental) flag ON for browser
 		// E2E tests. The OFF path is exercised explicitly by
-		// tests/e2e/ui/subgoals-experimental-toggle.spec.ts.
+		// tests/e2e/ui/subgoals-experimental-toggle.spec.ts. Register the mock
+		// agent's exact tuple through the same manual-provider preferences that
+		// production model validation reads, before the gateway boots.
 		writeFileSync(
 			join(bobbitDir, "state", "preferences.json"),
-			JSON.stringify({ subgoalsEnabled: true }, null, 2),
+			JSON.stringify({
+				subgoalsEnabled: true,
+				customProviders: [{
+					id: "mock",
+					name: "mock",
+					type: "manual",
+					baseUrl: "http://127.0.0.1",
+					models: [{ id: "mock-model", name: "mock-model" }],
+				}],
+				"default.sessionModel": "mock/mock-model",
+				"default.sessionThinkingLevel": "off",
+			}, null, 2),
 		);
 
 		// Create a fake agent dir with auth.json so the UI skips OAuth prompts.
