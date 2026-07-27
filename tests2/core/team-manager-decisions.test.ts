@@ -41,6 +41,7 @@ function makeGoal(overrides: Partial<MockGoal> = {}): MockGoal {
 
 function makeSessionManager(goals: Map<string, MockGoal>) {
 	const sessions = new Map<string, any>();
+	const persistedSessions = new Map<string, any>();
 	const resolvedAuthors = new Map<string, { kind: "agent"; id: string; label: string }>();
 	let sequence = 0;
 	const sandboxExec = vi.fn(async () => "0123456789abcdef0123456789abcdef01234567\n");
@@ -85,7 +86,7 @@ function makeSessionManager(goals: Map<string, MockGoal>) {
 			await session?.rpcClient.prompt(text);
 			return { status: "dispatched" as const };
 		}),
-		getPersistedSession: (_id: string) => undefined,
+		getPersistedSession: (id: string) => persistedSessions.get(id),
 		setTitle: (id: string, title: string) => {
 			const session = sessions.get(id);
 			if (!session) return false;
@@ -104,6 +105,7 @@ function makeSessionManager(goals: Map<string, MockGoal>) {
 		isSandboxEnabled: true,
 		getSandboxManager: () => ({ get: () => ({ exec: sandboxExec }) }),
 		_sessions: sessions,
+		_persistedSessions: persistedSessions,
 		_resolvedAuthors: resolvedAuthors,
 		_sandboxExec: sandboxExec,
 	};
@@ -223,6 +225,78 @@ describe("TeamManager seam decisions", () => {
 			],
 			"kickoff and worker task prompts must retain their system and accountable-agent provenance",
 		);
+	});
+
+	for (const sandboxed of [false, true]) {
+		it(`inherits the lead's durable Opus 5/xhigh tuple for a ${sandboxed ? "sandbox" : "host"} worker`, async () => {
+			const { goals } = addGoal({ sandboxed, repoPath: undefined });
+			const { manager, sessions } = makeTeam(goals);
+			const lead = await manager.startTeam("goal-1");
+			sessions._persistedSessions.set(lead.id, {
+				modelProvider: "anthropic",
+				modelId: "claude-opus-5",
+				effectiveThinkingLevel: "xhigh",
+			});
+			lead.spawnPinnedModel = "stale/placeholder";
+			lead.spawnPinnedThinkingLevel = "low";
+
+			const worker = await manager.spawnRole("goal-1", "coder", "inherit exact tuple");
+			const createOpts = sessions.getSession(worker.sessionId)!.createOpts;
+
+			assert.equal(createOpts.sandboxed, sandboxed);
+			assert.equal(createOpts.initialModel, "anthropic/claude-opus-5");
+			assert.equal(createOpts.initialThinkingLevel, "xhigh");
+		});
+	}
+
+	it("applies field-level role precedence and clamps the resulting exact pair", async () => {
+		const { goals } = addGoal({ sandboxed: false, repoPath: undefined });
+		const { manager, sessions } = makeTeam(goals);
+		const lead = await manager.startTeam("goal-1");
+		sessions._persistedSessions.set(lead.id, {
+			modelProvider: "anthropic",
+			modelId: "claude-opus-5",
+			effectiveThinkingLevel: "xhigh",
+		});
+
+		const coderRole = (manager as any).config.roleStore.get("coder");
+		coderRole.model = "anthropic/claude-sonnet-4-5";
+		const modelOverride = await manager.spawnRole("goal-1", "coder", "clamp inherited thinking");
+		assert.equal(sessions.getSession(modelOverride.sessionId)!.createOpts.initialModel, "anthropic/claude-sonnet-4-5");
+		assert.equal(
+			sessions.getSession(modelOverride.sessionId)!.createOpts.initialThinkingLevel,
+			"high",
+			"the lead's xhigh level must clamp against the role-overridden Sonnet model",
+		);
+
+		const reviewerRole = (manager as any).config.roleStore.get("reviewer");
+		reviewerRole.thinkingLevel = "medium";
+		const thinkingOverride = await manager.spawnRole("goal-1", "reviewer", "override thinking only");
+		assert.equal(sessions.getSession(thinkingOverride.sessionId)!.createOpts.initialModel, "anthropic/claude-opus-5");
+		assert.equal(sessions.getSession(thinkingOverride.sessionId)!.createOpts.initialThinkingLevel, "medium");
+	});
+
+	it("preserves Kimi-named AIGW model IDs but rejects the exact deferred provider", async () => {
+		const { goals } = addGoal({ sandboxed: false, repoPath: undefined });
+		const { manager, sessions } = makeTeam(goals);
+		const lead = await manager.startTeam("goal-1");
+		sessions._persistedSessions.set(lead.id, {
+			modelProvider: "aigw",
+			modelId: "vendor/kimi/claude-opus-5",
+			effectiveThinkingLevel: "xhigh",
+		});
+
+		const inherited = await manager.spawnRole("goal-1", "coder", "preserve gateway identity");
+		assert.equal(sessions.getSession(inherited.sessionId)!.createOpts.initialModel, "aigw/vendor/kimi/claude-opus-5");
+		assert.equal(sessions.getSession(inherited.sessionId)!.createOpts.initialThinkingLevel, "high");
+
+		const reviewerRole = (manager as any).config.roleStore.get("reviewer");
+		reviewerRole.model = "kimi-coding/k2p5";
+		await assert.rejects(
+			() => manager.spawnRole("goal-1", "reviewer", "reject deferred provider"),
+			/not session-selectable/i,
+		);
+		assert.equal(sessions.createSession.mock.calls.length, 2, "rejection must happen before a deferred worker session is created");
 	});
 
 	it("uses the shared current-author resolver for a renamed-staff team lead's worker task", async () => {
