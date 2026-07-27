@@ -1605,7 +1605,7 @@
       }
     },
     {
-      "path": "tests2/core/server-pi082-tuple-boundary-coder5d34.test.ts",
+      "path": "tests2/core/server-model-tuple-inheritance.test.ts",
       "reason": "Focused server boundary coverage for durable-first Opus 5 thinking inheritance, exact-model clamping, supported Kimi-named IDs, and shared tuple resolution at orchestration/fork/continue call sites.",
       "execution": {
         "runner": "vitest",
@@ -1614,7 +1614,7 @@
       }
     },
     {
-      "path": "tests2/integration/server-model-boundary-coder5d34.test.ts",
+      "path": "tests2/integration/deferred-provider-selection-boundary.test.ts",
       "reason": "Real-gateway coverage that Bobbit-owned defaults and roles reject exact deferred provider kimi-coding while preserving Kimi-named IDs under supported custom/local providers.",
       "execution": {
         "runner": "vitest",

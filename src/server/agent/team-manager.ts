@@ -2106,18 +2106,24 @@ export class TeamManager {
 		if (goal.paused) throw new GoalPausedError(goalId);
 
 		// A worker role overrides each field independently; otherwise inherit the
-		// lead's verified durable tuple. Resolve and clamp the pair here so host and
-		// sandbox workers receive the same exact model/effective-thinking selection.
-		const persistedTeamLead = entry.teamLeadSessionId
-			? this.sessionManager.getPersistedSession(entry.teamLeadSessionId) as {
+		// lead's verified durable tuple. Narrow SessionManager test doubles may not
+		// expose persistence, so fall back to the existing live spawn mirror while
+		// production continues to prefer verified durable state.
+		const liveTeamLead = entry.teamLeadSessionId
+			? this.sessionManager.getSession(entry.teamLeadSessionId)
+			: undefined;
+		const getPersistedSession = (this.sessionManager as Partial<SessionManager>).getPersistedSession;
+		const persistedTeamLead = entry.teamLeadSessionId && typeof getPersistedSession === "function"
+			? getPersistedSession.call(this.sessionManager, entry.teamLeadSessionId) as {
 				modelProvider?: string;
 				modelId?: string;
 				effectiveThinkingLevel?: string;
 			} | undefined
 			: undefined;
-		const inheritedModel = persistedTeamLead?.modelProvider && persistedTeamLead.modelId
+		const durableModel = persistedTeamLead?.modelProvider && persistedTeamLead.modelId
 			? `${persistedTeamLead.modelProvider}/${persistedTeamLead.modelId}`
 			: undefined;
+		const inheritedModel = durableModel || liveTeamLead?.spawnPinnedModel;
 		const initialModel = storedRoleDef.model || inheritedModel;
 		const modelSlash = initialModel?.indexOf("/") ?? -1;
 		const modelProvider = initialModel && modelSlash > 0 ? initialModel.slice(0, modelSlash) : undefined;
@@ -2125,7 +2131,9 @@ export class TeamManager {
 			throw new Error(`Team worker model "${initialModel}" is not session-selectable`);
 		}
 		let initialThinkingLevel = initialModel
-			? storedRoleDef.thinkingLevel || persistedTeamLead?.effectiveThinkingLevel
+			? storedRoleDef.thinkingLevel
+				|| persistedTeamLead?.effectiveThinkingLevel
+				|| liveTeamLead?.spawnPinnedThinkingLevel
 			: undefined;
 		if (initialModel && modelProvider && initialThinkingLevel) {
 			initialThinkingLevel = clampThinkingLevelForModel(

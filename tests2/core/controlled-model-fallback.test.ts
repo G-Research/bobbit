@@ -653,11 +653,19 @@ describe("controlled model fallback policy — restore/respawn lifecycle", () =>
 		const forkRoute = extractRouteSlice(src, "// POST /api/sessions/:id/fork", "// POST /api/sessions/:id/wait");
 		const continueRoute = extractRouteSlice(src, "// POST /api/sessions/:archivedId/continue", "// GET /api/sessions/:id/output");
 
-		for (const [label, route] of [["fork", forkRoute], ["continue", continueRoute]] as const) {
+		for (const [label, route, tupleName, resolverArgs] of [
+			["fork", forkRoute, "forkSourceTuple", "ps, source"],
+			["continue", continueRoute, "continueSourceTuple", "ps"],
+		] as const) {
 			assert.match(
 				route,
-				/if \(ps\.modelProvider && ps\.modelId\)[\s\S]*createOpts\.initialModel = `\$\{ps\.modelProvider\}\/\$\{ps\.modelId\}`/,
-				`${label}: persisted model should still be spawn-pinned as the explicit selected model`,
+				new RegExp(`const ${tupleName} = resolveServerInitialModelTuple\\(${resolverArgs}\\)`),
+				`${label}: persisted model and effective thinking must resolve through the shared exact-tuple path`,
+			);
+			assert.match(
+				route,
+				new RegExp(`if \\(${tupleName}\\.initialModel\\) \\{[\\s\\S]*Object\\.assign\\(createOpts, ${tupleName}\\)`),
+				`${label}: the resolved persisted tuple must be spawn-pinned after role options are applied`,
 			);
 			assert.doesNotMatch(
 				route,
