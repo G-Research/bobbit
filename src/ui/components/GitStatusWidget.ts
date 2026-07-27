@@ -137,6 +137,15 @@ export class GitStatusWidget extends LitElement {
         return Object.keys(this.repos).length;
     }
 
+    /**
+     * Aggregate component status has no unambiguous repository action target.
+     * Only the flat shape (including a sole `"."` envelope) may invoke the
+     * historical root Git actions and commit-history endpoints.
+     */
+    private _canTargetRootGitActions(): boolean {
+        return !this._isMultiRepo();
+    }
+
     @state() private expanded = false;
     @state() private merging = false;
     @state() private mergeError = '';
@@ -336,27 +345,64 @@ export class GitStatusWidget extends LitElement {
         return segments;
     }
 
+    private _renderHistoryCount(
+        count: number,
+        label: string,
+        direction: 'ahead' | 'behind',
+        className: string,
+        vs?: 'primary',
+    ) {
+        if (!this._canTargetRootGitActions()) {
+            return html`<span
+                class=${className}
+                data-testid="git-aggregate-status-count"
+                data-direction=${direction}
+                data-comparison=${vs ?? 'remote'}
+            >${count} ${label}</span>`;
+        }
+        const openHistory = (e: Event) => {
+            e.stopPropagation();
+            this._fetchCommits(direction, vs);
+        };
+        return html`<span
+            class=${className}
+            style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted"
+            role="button"
+            tabindex="0"
+            data-testid="git-commit-history-trigger"
+            data-direction=${direction}
+            data-comparison=${vs ?? 'remote'}
+            @click=${openHistory}
+            @keydown=${(e: KeyboardEvent) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                e.preventDefault();
+                openHistory(e);
+            }}
+        >${count} ${label}</span>`;
+    }
+
     private _renderRemoteStatus() {
         // Remote status and controls are only relevant on the primary branch.
         if (!this.isOnPrimary) return nothing;
 
-        // On primary branch only: show ahead/behind remote (edge case)
+        // On primary branch only: show ahead/behind remote (edge case).
+        // Component aggregates remain readable, but cannot target root actions.
         if (this.ahead > 0 && this.behind > 0) {
             return html`<div class="text-muted-foreground">
-                Remote: <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead'); }}>${this.ahead} ahead</span>,
-                <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind'); }}>${this.behind} behind</span>
+                Remote: ${this._renderHistoryCount(this.ahead, 'ahead', 'ahead', 'text-amber-600 dark:text-amber-400')},
+                ${this._renderHistoryCount(this.behind, 'behind', 'behind', 'text-amber-600 dark:text-amber-400')}
                 ${this._renderPullButton()}
             </div>`;
         }
         if (this.ahead > 0) {
             return html`<div class="text-muted-foreground">
-                <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead'); }}>${this.ahead} unpushed</span> to remote
+                ${this._renderHistoryCount(this.ahead, 'unpushed', 'ahead', 'text-amber-600 dark:text-amber-400')} to remote
                 ${this._renderPushButton()}
             </div>`;
         }
         if (this.behind > 0) {
             return html`<div class="text-muted-foreground">
-                <span class="text-amber-600 dark:text-amber-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind'); }}>${this.behind} behind</span> remote
+                ${this._renderHistoryCount(this.behind, 'behind', 'behind', 'text-amber-600 dark:text-amber-400')} remote
                 ${this._renderPullButton()}
             </div>`;
         }
@@ -375,15 +421,15 @@ export class GitStatusWidget extends LitElement {
         }
         if (this.aheadOfPrimary > 0 && this.behindPrimary > 0) {
             return html`<div class="text-muted-foreground">
-                <span class="text-blue-600 dark:text-blue-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead', 'primary'); }}>${this.aheadOfPrimary} ahead</span>,
-                <span class="text-red-600 dark:text-red-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind', 'primary'); }}>${this.behindPrimary} behind</span>
+                ${this._renderHistoryCount(this.aheadOfPrimary, 'ahead', 'ahead', 'text-blue-600 dark:text-blue-400', 'primary')},
+                ${this._renderHistoryCount(this.behindPrimary, 'behind', 'behind', 'text-red-600 dark:text-red-400', 'primary')}
                 ${this.primaryRef}
                 ${this._renderMergePrimaryButton()}
             </div>`;
         }
         if (this.aheadOfPrimary > 0) {
             return html`<div class="text-muted-foreground">
-                <span class="text-blue-600 dark:text-blue-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('ahead', 'primary'); }}>${this.aheadOfPrimary} ahead</span>
+                ${this._renderHistoryCount(this.aheadOfPrimary, 'ahead', 'ahead', 'text-blue-600 dark:text-blue-400', 'primary')}
                 of ${this.primaryRef}
                 ${!this.prState ? this._renderAskPrButton() : nothing}
                 ${!this.prState && this.viewerIsAdmin ? this._renderSquashPushButton() : nothing}
@@ -391,7 +437,7 @@ export class GitStatusWidget extends LitElement {
         }
         if (this.behindPrimary > 0) {
             return html`<div class="text-muted-foreground">
-                <span class="text-red-600 dark:text-red-400" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" @click=${(e: MouseEvent) => { e.stopPropagation(); this._fetchCommits('behind', 'primary'); }}>${this.behindPrimary} behind</span>
+                ${this._renderHistoryCount(this.behindPrimary, 'behind', 'behind', 'text-red-600 dark:text-red-400', 'primary')}
                 ${this.primaryRef}
                 ${this._renderMergePrimaryButton()}
             </div>`;
@@ -512,11 +558,14 @@ export class GitStatusWidget extends LitElement {
     }
 
     private _renderMergePrimaryButton() {
+        if (!this._canTargetRootGitActions()) return nothing;
         // Label uses the bare branch name to stay compact ("Rebase on dev");
         // tooltip carries the full resolved ref (`origin/dev` or local `dev`)
         // so the user can see exactly what the rebase will target.
         return html`<button
             style="font-size:12px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500;margin-left:4px"
+            data-testid="git-root-action"
+            data-git-action="rebase-primary"
             ?disabled=${this.mergingPrimary}
             @click=${(e: MouseEvent) => { e.stopPropagation(); this._handleMergePrimary(); }}
             title="Rebase this branch on top of ${this.primaryRef}"
@@ -524,6 +573,7 @@ export class GitStatusWidget extends LitElement {
     }
 
     private _handleMergePrimary() {
+        if (!this._canTargetRootGitActions()) return;
         this.mergingPrimary = true;
         this.mergePrimaryError = '';
         this.dispatchEvent(new CustomEvent('git-merge-primary', {
@@ -555,8 +605,11 @@ export class GitStatusWidget extends LitElement {
     @state() private squashPushError = '';
 
     private _renderSquashPushButton() {
+        if (!this._canTargetRootGitActions()) return nothing;
         return html`<button
             style="font-size:12px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 145 / 0.12);color:oklch(0.55 0.12 145);cursor:pointer;font-weight:500;margin-left:4px"
+            data-testid="git-root-action"
+            data-git-action="squash-push"
             ?disabled=${this.squashPushing}
             @click=${(e: MouseEvent) => { e.stopPropagation(); this._handleSquashPush(); }}
             title="Squash all branch commits into one and push directly to ${this.primaryBranch}"
@@ -564,6 +617,7 @@ export class GitStatusWidget extends LitElement {
     }
 
     private _handleSquashPush() {
+        if (!this._canTargetRootGitActions()) return;
         this.squashPushing = true;
         this.squashPushError = '';
         this.dispatchEvent(new CustomEvent('git-squash-push', {
@@ -578,14 +632,18 @@ export class GitStatusWidget extends LitElement {
     }
 
     private _renderPullButton() {
+        if (!this._canTargetRootGitActions()) return nothing;
         return html`<button
             style="font-size:12px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 250 / 0.12);color:oklch(0.55 0.12 250);cursor:pointer;font-weight:500;margin-left:4px"
+            data-testid="git-root-action"
+            data-git-action="pull"
             ?disabled=${this.pulling}
             @click=${() => this._handlePull()}
         >${this.pulling ? 'Pulling\u2026' : 'Pull'}</button>${this.pullError ? html`<span style="font-size:11px;color:var(--destructive);margin-left:4px">${this.pullError}</span>` : nothing}`;
     }
 
     private _handlePull() {
+        if (!this._canTargetRootGitActions()) return;
         this.pulling = true;
         this.pullError = '';
         this.dispatchEvent(new CustomEvent('git-pull', {
@@ -601,14 +659,18 @@ export class GitStatusWidget extends LitElement {
     }
 
     private _renderPushButton() {
+        if (!this._canTargetRootGitActions()) return nothing;
         return html`<button
             style="font-size:12px;padding:1px 8px;border-radius:4px;border:1px solid var(--border);background:oklch(0.55 0.12 145 / 0.12);color:oklch(0.55 0.12 145);cursor:pointer;font-weight:500;margin-left:4px"
+            data-testid="git-root-action"
+            data-git-action="push"
             ?disabled=${this.pushing}
             @click=${() => this._handlePush()}
         >${this.pushing ? 'Pushing\u2026' : 'Push'}</button>${this.pushError ? html`<span style="font-size:11px;color:var(--destructive);margin-left:4px">${this.pushError}</span>` : nothing}`;
     }
 
     private _handlePush() {
+        if (!this._canTargetRootGitActions()) return;
         this.pushing = true;
         this.pushError = '';
         this.dispatchEvent(new CustomEvent('git-push', {
@@ -777,6 +839,7 @@ export class GitStatusWidget extends LitElement {
     }
 
     private async _fetchCommits(direction: 'ahead' | 'behind' = 'ahead', vs?: 'primary') {
+        if (!this._canTargetRootGitActions()) return;
         this._commitsLoading = true;
         this._commits = [];
         this._expandedCommits = new Set();

@@ -16,6 +16,14 @@ if (!customElements.get("git-status-widget")) customElements.define("git-status-
 
 const dd = () => document.getElementById("git-status-dropdown");
 const pill = (el: HTMLElement) => el.querySelector("button")!;
+const rootAction = (root: ParentNode, action: string) =>
+	root.querySelector(`[data-testid="git-root-action"][data-git-action="${action}"]`) as HTMLButtonElement | null;
+
+function recordEvents(el: HTMLElement, types: string[]) {
+	const events: string[] = [];
+	for (const type of types) el.addEventListener(type, () => events.push(type));
+	return events;
+}
 
 const baseProps = {
 	loading: false,
@@ -142,6 +150,125 @@ describe("GitStatusWidget — multi-repo collapsibles", () => {
 		expect(sections[0].querySelector('[data-testid="repo-name"]')!.textContent!.trim()).toBe("api");
 		expect(sections[0].textContent).toContain("src/only.ts");
 		expect(dd()!.querySelector('[data-testid="multi-repo-badge"]')!.textContent!.trim()).toBe("1 repo");
+	});
+
+	it("named component aggregates keep status readable but expose no root Git actions or history triggers", async () => {
+		const fetchSpy = vi.fn(async () => new Response("{}", { status: 200 }));
+		vi.stubGlobal("fetch", fetchSpy);
+		const el = await mount({
+			branch: "goal/component-actions",
+			isOnPrimary: false,
+			aheadOfPrimary: 3,
+			behindPrimary: 2,
+			viewerIsAdmin: true,
+			repos: {
+				api: { statusFiles: [], clean: true, aheadOfPrimary: 3, behindPrimary: 2 },
+				web: { statusFiles: [], clean: true },
+			},
+		});
+		const events = recordEvents(el, ["git-pull", "git-push", "git-merge-primary", "git-squash-push"]);
+		await openDropdown(el);
+
+		expect(dd()!.textContent).toContain("3 ahead");
+		expect(dd()!.textContent).toContain("2 behind");
+		expect(dd()!.querySelectorAll('[data-testid="git-aggregate-status-count"]')).toHaveLength(2);
+		expect(dd()!.querySelector('[data-testid="git-commit-history-trigger"]')).toBeNull();
+		expect(dd()!.querySelector('[data-testid="git-root-action"]')).toBeNull();
+
+		// Exercise the direct-push and remote pull/push render branches while the
+		// portal is open. Every aggregate count remains a read-only span.
+		Object.assign(el, { aheadOfPrimary: 3, behindPrimary: 0 });
+		await (el as any).updateComplete;
+		expect(rootAction(dd()!, "squash-push")).toBeNull();
+		expect(dd()!.querySelector('[data-testid="git-commit-history-trigger"]')).toBeNull();
+
+		Object.assign(el, { isOnPrimary: true, ahead: 2, behind: 1 });
+		await (el as any).updateComplete;
+		expect(rootAction(dd()!, "pull")).toBeNull();
+		expect(dd()!.querySelectorAll('[data-testid="git-aggregate-status-count"]')).toHaveLength(2);
+
+		Object.assign(el, { ahead: 2, behind: 0 });
+		await (el as any).updateComplete;
+		expect(rootAction(dd()!, "push")).toBeNull();
+		Object.assign(el, { ahead: 0, behind: 2 });
+		await (el as any).updateComplete;
+		expect(rootAction(dd()!, "pull")).toBeNull();
+
+		for (const count of dd()!.querySelectorAll('[data-testid="git-aggregate-status-count"]')) {
+			(count as HTMLElement).click();
+		}
+		expect(events).toEqual([]);
+		expect(fetchSpy).not.toHaveBeenCalled();
+		expect(document.getElementById("git-commits-modal")).toBeNull();
+	});
+
+	it("named component aggregates retain safe PR display and merge behavior", async () => {
+		const el = await mount({
+			branch: "goal/component-pr",
+			isOnPrimary: false,
+			prState: "OPEN",
+			prNumber: 42,
+			prTitle: "Polyrepo change",
+			prUrl: "https://github.com/example/polyrepo/pull/42",
+			prMergeable: "MERGEABLE",
+			repos: { api: { statusFiles: [], clean: true } },
+		});
+		const events = recordEvents(el, ["pr-merge"]);
+		await openDropdown(el);
+
+		expect(dd()!.querySelector('[data-testid="git-root-action"]')).toBeNull();
+		const merge = Array.from(dd()!.querySelectorAll("button"))
+			.find((button) => button.textContent!.trim() === "Merge PR") as HTMLButtonElement;
+		expect(merge).toBeTruthy();
+		merge.click();
+		expect(events).toEqual(["pr-merge"]);
+	});
+
+	it("a sole root entry retains flat Git action buttons and events", async () => {
+		const repos = { ".": { statusFiles: [], clean: true } };
+
+		let el = await mount({
+			branch: "feature/ahead",
+			isOnPrimary: false,
+			aheadOfPrimary: 2,
+			behindPrimary: 0,
+			viewerIsAdmin: true,
+			repos,
+		});
+		let events = recordEvents(el, ["git-squash-push"]);
+		await openDropdown(el);
+		expect(rootAction(dd()!, "squash-push")).toBeTruthy();
+		expect(dd()!.querySelectorAll('[data-testid="git-commit-history-trigger"]')).toHaveLength(1);
+		rootAction(dd()!, "squash-push")!.click();
+		expect(events).toEqual(["git-squash-push"]);
+
+		el = await mount({
+			branch: "feature/diverged",
+			isOnPrimary: false,
+			aheadOfPrimary: 2,
+			behindPrimary: 1,
+			repos,
+		});
+		events = recordEvents(el, ["git-merge-primary"]);
+		await openDropdown(el);
+		expect(rootAction(dd()!, "rebase-primary")).toBeTruthy();
+		expect(dd()!.querySelectorAll('[data-testid="git-commit-history-trigger"]')).toHaveLength(2);
+		rootAction(dd()!, "rebase-primary")!.click();
+		expect(events).toEqual(["git-merge-primary"]);
+
+		el = await mount({ branch: "master", isOnPrimary: true, ahead: 2, behind: 0, repos });
+		events = recordEvents(el, ["git-push"]);
+		await openDropdown(el);
+		expect(rootAction(dd()!, "push")).toBeTruthy();
+		rootAction(dd()!, "push")!.click();
+		expect(events).toEqual(["git-push"]);
+
+		el = await mount({ branch: "master", isOnPrimary: true, ahead: 0, behind: 2, repos });
+		events = recordEvents(el, ["git-pull"]);
+		await openDropdown(el);
+		expect(rootAction(dd()!, "pull")).toBeTruthy();
+		rootAction(dd()!, "pull")!.click();
+		expect(events).toEqual(["git-pull"]);
 	});
 
 	it("dropdown shows one per-repo section per entry, with names and counts", async () => {
