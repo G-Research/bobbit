@@ -1020,9 +1020,9 @@ The top level spreads `aggregate` for callers that still read flat fields. Each 
 Aggregation follows these rules:
 
 1. **Successful configured components are authoritative.** If any configured component succeeds, `repos` contains the successful components and the root result is not counted. This avoids duplicate or contradictory data when the root is Git or `cwd` is inside a component.
-2. **Identity is deterministic.** The first successful component in configured order supplies `branch`, `primaryBranch`, `primaryRef`, `isOnPrimary`, `hasUpstream`, and `mergedIntoPrimary`.
+2. **Identity is deterministic.** The first successful component in configured order supplies `branch`, `primaryBranch`, `primaryRef`, `isOnPrimary`, and `hasUpstream`.
 3. **Counters are additive.** `ahead`, `behind`, `aheadOfPrimary`, `behindPrimary`, `insertionsVsPrimary`, and `deletionsVsPrimary` are summed across successful components.
-4. **State is collective.** `clean` is true only when every successful component is clean; `unpushed` is true when any is unpushed. The synthesized `status` is empty because per-repository file lists are authoritative, and `summary` is `"<N> repo(s)"`.
+4. **State is collective.** `clean` is true only when every successful component is clean; `unpushed` is true when any is unpushed. `mergedIntoPrimary` is true only when the aggregate is complete and every successful component reports merged; a partial aggregate always reports false so missing or incomplete comparisons cannot imply that the whole polyrepo is merged. The synthesized `status` is empty because per-repository file lists are authoritative, and `summary` is `"<N> repo(s)"`.
 5. **Incomplete data stays visible.** A failed component is omitted from `repos`, successful siblings remain, and `partial` becomes true. A component's own partial result also propagates. `untrackedIncluded` is true only when every configured component succeeded with complete untracked data.
 6. **Root is fallback, not winner.** The root result is used only when no configured component succeeds. If configured components were attempted, the root fallback is marked partial and untracked-incomplete. With no component targets, the root result remains byte-compatible with the flat single-repo response.
 
@@ -1063,6 +1063,8 @@ Fetch and status remain read-only. They do not push, pull, merge, rename branche
 Both the session header and goal dashboard consume the top-level aggregate while forwarding `repos` to `GitStatusWidget`. A component-only response still has a top-level branch, so the normal reveal logic keeps the widget visible when the root container is non-Git.
 
 The widget uses per-repository mode for multiple entries or a sole named key; only a sole `"."` key stays flat. It shows summed dirty and primary-comparison segments in the pill, renders one collapsible section per successful repository, opens dirty sections by default, and leaves clean sections collapsed. A partially failed sibling therefore does not hide valid sections. Opening the widget requests explicit fetch and full untracked status, and navigation reload refetches the envelope, so both multiple-component and sole-named sections reappear after reload.
+
+A named-component envelope is aggregate status, not an action target. Pull, Push, rebase on primary, squash-push, and commit-history controls are therefore hidden until their APIs accept an explicit repository identity; otherwise they would ambiguously target the non-Git container or an arbitrary component. A sole `"."` repository retains these single-repo controls. PR display and merge remain available because their existing PR identity is independent of the aggregate Git-action target.
 
 ### 13.6 Per-repository diff routing
 
