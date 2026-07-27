@@ -16355,6 +16355,76 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/internal/systems-review/read-branch-diff
+	if (url.pathname === "/api/internal/systems-review/read-branch-diff" && req.method === "POST") {
+		const body = await readBody(req);
+		const secretHeader = Array.isArray(req.headers["x-bobbit-session-secret"])
+			? req.headers["x-bobbit-session-secret"][0]
+			: req.headers["x-bobbit-session-secret"];
+		const sessionId = sessionManager.sessionSecretStore.resolveSessionIdBySecret(secretHeader);
+		if (!sessionId) {
+			json({ error: "A valid X-Bobbit-Session-Secret is required", code: "SYSTEMS_REVIEW_SESSION_SECRET_REQUIRED" }, 403);
+			return;
+		}
+		if (typeof body?.sessionId === "string" && body.sessionId !== sessionId) {
+			json({ error: "Submission session does not match the authentic caller", code: "SYSTEMS_REVIEW_SESSION_MISMATCH" }, 403);
+			return;
+		}
+		if (typeof body?.operation !== "string") {
+			json({ error: "Missing required field: operation" }, 400);
+			return;
+		}
+		try {
+			const request = { ...body };
+			delete request.sessionId;
+			const page = await verificationHarness.readSystemsReviewBranchDiff(sessionId, request as any);
+			json(page);
+		} catch (err: any) {
+			const status = Number.isInteger(err?.status)
+				? err.status
+				: /^(STALE_|REPO_MOVED)/.test(String(err?.code || "")) ? 409 : 400;
+			json({ error: err?.message || String(err), code: err?.code, details: err?.details }, status);
+		}
+		return;
+	}
+
+	// POST /api/internal/systems-review/result
+	if (url.pathname === "/api/internal/systems-review/result" && req.method === "POST") {
+		const body = await readBody(req);
+		const secretHeader = Array.isArray(req.headers["x-bobbit-session-secret"])
+			? req.headers["x-bobbit-session-secret"][0]
+			: req.headers["x-bobbit-session-secret"];
+		const sessionId = sessionManager.sessionSecretStore.resolveSessionIdBySecret(secretHeader);
+		if (!sessionId) {
+			json({ error: "A valid X-Bobbit-Session-Secret is required", code: "SYSTEMS_REVIEW_SESSION_SECRET_REQUIRED" }, 403);
+			return;
+		}
+		if (typeof body?.sessionId === "string" && body.sessionId !== sessionId) {
+			json({ error: "Submission session does not match the authentic caller", code: "SYSTEMS_REVIEW_SESSION_MISMATCH" }, 403);
+			return;
+		}
+		if (body?.operation !== "checkpoint" && body?.operation !== "final") {
+			json({ error: "Missing or invalid required field: operation" }, 400);
+			return;
+		}
+		if ("verdict" in body || "summary" in body) {
+			json({ error: "systems_review_result accepts no caller-selected verdict or generic summary" }, 400);
+			return;
+		}
+		try {
+			const submission = { ...body };
+			delete submission.sessionId;
+			const accepted = await verificationHarness.submitSystemsReviewResult(sessionId, submission as any);
+			json(accepted);
+		} catch (err: any) {
+			const status = Number.isInteger(err?.status)
+				? err.status
+				: /^(STALE_|REPO_MOVED)/.test(String(err?.code || "")) ? 409 : 400;
+			json({ error: err?.message || String(err), code: err?.code, details: err?.details }, status);
+		}
+		return;
+	}
+
 	// POST /api/internal/verification-result
 	if (url.pathname === "/api/internal/verification-result" && req.method === "POST") {
 		const body = await readBody(req);
