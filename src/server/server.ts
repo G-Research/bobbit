@@ -541,7 +541,7 @@ import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest
 import { aigwUserAgentHeaders } from "./agent/aigw-user-agent.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
-import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds } from "./agent/model-registry.js";
+import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, findSessionSelectableModel } from "./agent/model-registry.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels } from "./agent/image-generation.js";
@@ -4094,6 +4094,27 @@ async function handleApiRoute(
 			...(initialThinkingLevel ? { initialThinkingLevel } : {}),
 		};
 	};
+	const requireCurrentSessionModel = async (modelString: string, contextLabel: string): Promise<boolean> => {
+		const slash = modelString.indexOf("/");
+		if (slash <= 0 || slash === modelString.length - 1) {
+			json({ error: `${contextLabel} must use provider/modelId format`, code: "MODEL_UNAVAILABLE" }, 400);
+			return false;
+		}
+		const provider = modelString.slice(0, slash);
+		const modelId = modelString.slice(slash + 1);
+		try {
+			const models = await getAvailableModels(preferencesStore);
+			if (findSessionSelectableModel(models, provider, modelId)) return true;
+			json({
+				error: `${contextLabel} "${modelString}" is not currently available for session selection`,
+				code: "MODEL_UNAVAILABLE",
+			}, 400);
+			return false;
+		} catch (err) {
+			jsonError(500, err, { error: `Failed to validate ${contextLabel}` });
+			return false;
+		}
+	};
 	// Roles/tools resolution is recomputed per call; the slash-skills TTL cache
 	// and the ToolManager mtime-keyed scan cache both need busting after a
 	// marketplace pack-list mutation (design §9.1 / finding #1) so newly
@@ -6422,7 +6443,7 @@ async function handleApiRoute(
 				}
 			}
 			const parentSession = sessionManager.getSession(parentId);
-			const parentPersisted = parentSession ? undefined : sessionManager.getPersistedSession(parentId);
+			const parentPersisted = sessionManager.getPersistedSession(parentId);
 			if (!parentSession && !parentPersisted) {
 				json({ error: "Delegate parent session not found" }, 404);
 				return;
@@ -6449,6 +6470,8 @@ async function handleApiRoute(
 			const cwd = requestedCwd ?? parentSession?.cwd ?? parentPersisted?.cwd ?? parentProject.project.rootPath;
 			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, parentProjectId, cwd, { kind: "session", sessionId: parentId });
 			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
+			const parentInitialModel = resolveServerInitialModelTuple(parentPersisted, parentSession).initialModel;
+			if (parentInitialModel && !(await requireCurrentSessionModel(parentInitialModel, "Delegate parent model"))) return;
 			try {
 				const session = await sessionManager.createDelegateSession(parentId, {
 					instructions: body.instructions,
@@ -6734,6 +6757,12 @@ async function handleApiRoute(
 			}
 			createOpts = roleCreateOptions(role);
 		}
+		const configuredDefaultModel = preferencesStore.get("default.sessionModel");
+		const routeInitialModel = createOpts?.initialModel
+			?? (typeof configuredDefaultModel === "string" && /^[^/]+\/.+$/.test(configuredDefaultModel)
+				? configuredDefaultModel
+				: undefined);
+		if (routeInitialModel && !(await requireCurrentSessionModel(routeInitialModel, "Initial session model"))) return;
 
 		// Now that `resolvedProjectId` is known, resolve `worktreeOpts`.
 		// Multi-repo (poly-repo) short-circuit mirrors goal-manager.ts::createGoal:
@@ -8900,6 +8929,16 @@ async function handleApiRoute(
 			}, 400);
 			return;
 		}
+		for (const key of ["default.sessionModel", "default.reviewModel", "default.namingModel"] as const) {
+			if (!Object.prototype.hasOwnProperty.call(body, key)) continue;
+			const value = (body as Record<string, unknown>)[key];
+			if (value === null || value === undefined || value === "") continue;
+			if (typeof value !== "string") {
+				json({ error: `${key} must be a provider/modelId string or null`, code: "MODEL_UNAVAILABLE" }, 400);
+				return;
+			}
+			if (!(await requireCurrentSessionModel(value.trim(), key))) return;
+		}
 		const headquartersVisibilityChanged = Object.prototype.hasOwnProperty.call(body, "showHeadquartersInProjectLists");
 		for (const [key, value] of Object.entries(body)) {
 			if (key === "githubTrustedHosts") {
@@ -10269,6 +10308,9 @@ async function handleApiRoute(
 			if (!resolvedTarget.ok) { writeConfigProjectScopeError(resolvedTarget); return; }
 			const target = resolvedTarget.target;
 			const modelStr = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined;
+			// Preserve legacy malformed-value dropping, but reject every well-formed
+			// model that is absent from Bobbit's current session-selectable catalog.
+			if (modelStr && /^[^/]+\/.+$/.test(modelStr) && !(await requireCurrentSessionModel(modelStr, "Role model"))) return;
 			if (target.scope === "server") {
 				const role = target.manager.createRole({
 					name: body?.name,
@@ -10384,6 +10426,10 @@ async function handleApiRoute(
 			const resolvedTarget = resolveRoleMutationTarget(body.projectId ?? url.searchParams.get("projectId"));
 			if (!resolvedTarget.ok) { writeConfigProjectScopeError(resolvedTarget); return; }
 			const target = resolvedTarget.target;
+			const requestedModel = body.model !== undefined && typeof body.model === "string" && body.model.trim()
+				? body.model.trim()
+				: undefined;
+			if (requestedModel && /^[^/]+\/.+$/.test(requestedModel) && !(await requireCurrentSessionModel(requestedModel, "Role model"))) return;
 			if (target.scope === "project") {
 				const existing = target.store.get(name);
 				if (!existing) { json({ error: "Role not found in project" }, 404); return; }
@@ -12612,6 +12658,12 @@ async function handleApiRoute(
 			json({ error: "source project no longer registered" }, 410);
 			return;
 		}
+		const forkSourceTuple = resolveServerInitialModelTuple(ps, source);
+		const forkStaff = ps.staffId ? staffManager.getStaff(ps.staffId) : undefined;
+		const forkRole = !forkStaff && ps.role ? resolveRoleForProject(ps.role, projectId) : undefined;
+		const forkInitialModel = forkSourceTuple.initialModel
+			?? (typeof forkRole?.model === "string" && /^[^/]+\/.+$/.test(forkRole.model) ? forkRole.model : undefined);
+		if (forkInitialModel && !(await requireCurrentSessionModel(forkInitialModel, "Fork model"))) return;
 
 		const goal = ps.goalId ? getGoalAcrossProjects(ps.goalId) : undefined;
 		if (ps.goalId && !goal) { json({ error: "source goal not found" }, 410); return; }
@@ -12707,16 +12759,14 @@ async function handleApiRoute(
 						createOpts.sandboxBranch = `session/${forkId.slice(0, 8)}`;
 					}
 
-					const staff = ps.staffId ? staffManager.getStaff(ps.staffId) : undefined;
-					if (staff) {
-						createOpts.rolePrompt = buildStaffSystemPrompt(staff, roleManager, resolveRoleForProject);
-						createOpts.roleName = staff.roleId;
-						createOpts.accessory = staff.accessory;
+					if (forkStaff) {
+						createOpts.rolePrompt = buildStaffSystemPrompt(forkStaff, roleManager, resolveRoleForProject);
+						createOpts.roleName = forkStaff.roleId;
+						createOpts.accessory = forkStaff.accessory;
 						createOpts.env = { BOBBIT_STAFF_ID: ps.staffId };
 					} else {
-						const role = ps.role ? resolveRoleForProject(ps.role, projectId) : undefined;
-						if (role) {
-							const opts = roleCreateOptions(role);
+						if (forkRole) {
+							const opts = roleCreateOptions(forkRole);
 							if (createOpts.initialModel) delete opts.initialModel;
 							Object.assign(createOpts, opts);
 						} else if (ps.role) {
@@ -12727,10 +12777,9 @@ async function handleApiRoute(
 							createOpts.accessory = ps.accessory;
 						}
 					}
-					const sourceTuple = resolveServerInitialModelTuple(ps, source);
-					if (sourceTuple.initialModel) {
+					if (forkSourceTuple.initialModel) {
 						delete createOpts.initialThinkingLevel;
-						Object.assign(createOpts, sourceTuple);
+						Object.assign(createOpts, forkSourceTuple);
 					}
 					return createOpts;
 				},
@@ -12924,6 +12973,10 @@ async function handleApiRoute(
 		try {
 			// POST /orchestrate/spawn — non-blocking spawn (single or parallel).
 			if (verb === "spawn") {
+				const childModel = typeof body?.model === "string"
+					? body.model.trim()
+					: resolveServerInitialModelTuple(sessionManager.getPersistedSession(ownerId), sessionManager.getSession(ownerId)).initialModel;
+				if (childModel && !(await requireCurrentSessionModel(childModel, "Requested child model"))) return;
 				const lifecycle: "full" | undefined = body?.lifecycle === "full" ? "full" : undefined;
 				const baseOpts = {
 					ownerSessionId: ownerId,
@@ -13017,6 +13070,10 @@ async function handleApiRoute(
 			// → auto-dismiss EVERY child in finally → aggregate. Always 2xx once
 			// children settle; server owns the chunked heartbeat (undici parity).
 			if (verb === "delegate") {
+				const delegateModel = typeof body?.model === "string"
+					? body.model.trim()
+					: resolveServerInitialModelTuple(sessionManager.getPersistedSession(ownerId), sessionManager.getSession(ownerId)).initialModel;
+				if (delegateModel && !(await requireCurrentSessionModel(delegateModel, "Requested delegate model"))) return;
 				const timeoutMs = body?.timeout_ms ?? 600_000;
 				// Reject empty/missing instructions (and empty `parallel`) up front for
 				// direct callers — matches the team_delegate tool wrapper's guard.
@@ -13169,6 +13226,11 @@ async function handleApiRoute(
 			json({ error: "source project no longer registered" }, 410);
 			return;
 		}
+		const continueRole = ps.role ? resolveRoleForProject(ps.role, ps.projectId) : undefined;
+		const continueSourceTuple = resolveServerInitialModelTuple(ps);
+		const continueInitialModel = continueSourceTuple.initialModel
+			?? (typeof continueRole?.model === "string" && /^[^/]+\/.+$/.test(continueRole.model) ? continueRole.model : undefined);
+		if (continueInitialModel && !(await requireCurrentSessionModel(continueInitialModel, "Continue model"))) return;
 
 		// Resolve source `.jsonl` path — fall back to the recovery scan for legacy
 		// sessions whose persisted `agentSessionFile` was never populated.
@@ -13263,7 +13325,6 @@ async function handleApiRoute(
 			console.warn(`[continue-archived] proposal-dir copy failed (non-fatal): ${err}`);
 		}
 
-		const role = ps.role ? resolveRoleForProject(ps.role, ps.projectId) : undefined;
 		const oldTranscriptCwds = Array.from(new Set([ps.cwd, ps.worktreePath]
 			.filter((v): v is string => typeof v === "string" && v.length > 0)));
 		const createOpts: any = {
@@ -13280,8 +13341,8 @@ async function handleApiRoute(
 			awaitWorktreeSetup: !!worktreeOpts,
 			bypassWorktreePool: !!worktreeOpts && !!ps.sandboxed,
 		};
-		if (role) {
-			const opts = roleCreateOptions(role);
+		if (continueRole) {
+			const opts = roleCreateOptions(continueRole);
 			if (createOpts.initialModel) delete opts.initialModel;
 			Object.assign(createOpts, opts);
 		} else if (ps.role) {
@@ -13295,10 +13356,9 @@ async function handleApiRoute(
 			createOpts.accessory = ps.accessory;
 		}
 		// Persisted verified selection wins over a role/default selected after archive.
-		const sourceTuple = resolveServerInitialModelTuple(ps);
-		if (sourceTuple.initialModel) {
+		if (continueSourceTuple.initialModel) {
 			delete createOpts.initialThinkingLevel;
-			Object.assign(createOpts, sourceTuple);
+			Object.assign(createOpts, continueSourceTuple);
 		}
 
 		let newSession;
