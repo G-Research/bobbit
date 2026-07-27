@@ -1,23 +1,40 @@
 name: read_session
-description: "Paginated, regex-filterable transcript read of another session"
-summary: "Read another session's transcript, paginated"
-params: [session_id, offset?, limit?, pattern?, context?, verbose?, include_tool_results?]
+description: "Compact-first, paginated transcript diagnostics with regex filtering and bounded result slices"
+summary: "Inspect another session compact-first"
+params: [session_id, offset?, limit?, pattern?, case_sensitive?, context?, verbose?, include_tool_results?, result_handle?, result_cursor?, result_limit?]
 provider:
   type: bobbit-extension
   extension: extension.ts
 group: Agent
 renderer: src/ui/tools/renderers/ReadSessionRenderer.ts
 docs: |-
-  Read transcripts in a token-efficient way. `offset`/`limit` paginate; negative `offset` indexes from end (-1 = last). `pattern` filters to a regex match list before paginating; `context` expands ±N neighbours around each match. By default, tool result bodies are omitted and replaced with compact metadata placeholders. Either `verbose: true` or `include_tool_results: true` requires an explicit `limit <= 10`; fetch additional raw content in smaller batches and watch token consumption.
+  Inspect another session without loading its full transcript. Start with a small compact tail or regex page; use indexes, tool names, normalized statuses, and accurate result sizes to narrow the question. Result bodies are omitted by default. Retrieve only a bounded excerpt using a returned `result_handle`, then continue from its `nextCursor` only when necessary. `verbose: true` or `include_tool_results: true` requires an explicit integer `limit <= 10`; neither flag permits an unbounded result body.
 detail_docs: >-
   ## Purpose
 
 
-  Read the conversation transcript of another Bobbit session on the same
-  gateway — a peer team agent, a delegate session, a session from another
-  project, or an archived session. The tool resolves the session's JSONL file
-  server-side so callers never deal with paths, sandbox remapping, or
-  filesystem permissions.
+  `read_session` is the agent-facing, compact-first transcript reader. It reads
+  another session on the same gateway without exposing transcript paths. Direct
+  REST/UI transcript behavior is separate and remains backward compatible.
+
+
+  ## Progressive workflow
+
+
+  1. Fetch compact session metadata once with `bobbit_read(get_session)`.
+
+  2. Read a small compact tail, or search a stable regex with a small `limit`.
+
+  3. Narrow using message indexes, canonical tool names, normalized statuses,
+  and result `chars`/`lines`/`bytes`.
+
+  4. Follow only the returned page continuation; avoid overlapping windows.
+
+  5. If metadata is insufficient, request one bounded excerpt with its returned
+  `result_handle`, then continue from `excerpt.nextCursor` only if required.
+
+  6. Stop when the question is answered. Verbose mode is not a discovery
+  default.
 
 
   ## Parameters
@@ -29,127 +46,90 @@ detail_docs: >-
 
   | `session_id` | string | yes | Target session ID. |
 
-  | `offset` | number | no | Default `0`. Negative indexes from the end (Python-style). `-1` is the last message; `-20` is the start of the last 20. |
+  | `offset` | number | no | Default `0`. Negative values index from the end; `-1` selects the last message. With a regex, paging applies to the filtered/context-expanded list. |
 
-  | `limit` | number | no | Ordinary reads default to `20` and accept `[1, 200]`. Either context-heavy flag requires an explicit integer in `[1, 10]`. |
+  | `limit` | number | no | Ordinary compact reads default to `20`. A heavy flag requires an explicit integer in `[1,10]`. |
 
-  | `pattern` | string | no | Regex to filter messages. Matches against the flattened text (text blocks + tool inputs + tool results). |
+  | `pattern` | string | no | Regex over server-side visible text, canonical tool names/full arguments, and full result text. Matching omitted content does not return it. |
 
   | `case_sensitive` | boolean | no | Default `false`. |
 
-  | `context` | number | no | `0..5`. Only meaningful with `pattern`. Expands each match by ±N neighbours; the deduplicated match-with-context list is what `offset`/`limit` then paginate. |
+  | `context` | number | no | `0..5`; expands each regex hit by neighbouring transcript messages before paging. |
 
-  | `verbose` | boolean | no | Default `false`. Returns full content blocks; requires explicit `limit <= 10`. Tool result bodies remain omitted unless separately enabled. |
+  | `verbose` | boolean | no | Expanded semantic message blocks. Requires an explicit integer `limit <= 10`; provider replay/signature blobs remain omitted. |
 
-  | `include_tool_results` | boolean | no | Default `false`. Includes raw tool result bodies/previews; requires explicit `limit <= 10`. Subject to the 32 KB tool-result cap (with lazy-load). |
+  | `include_tool_results` | boolean | no | Adds only bounded, self-describing result excerpts. Requires an explicit integer `limit <= 10`; never returns an unbounded result body. |
 
+  | `result_handle` | string | no | Stable handle from result metadata selecting one result for a targeted excerpt. |
 
-  ## Context-heavy reads
+  | `result_cursor` | number | no | UTF-16 code-unit offset for `result_handle`; default `0`. Use the prior `excerpt.nextCursor` for exact continuation. |
 
-
-  This agent-tool policy rejects `verbose: true` or
-  `include_tool_results: true` when `limit` is omitted or exceeds `10`, even
-  though ordinary reads default to `20`. Narrow first, then fetch full content
-  in batches of at most 10 while monitoring token consumption. The REST API's
-  existing paging behavior is unchanged.
+  | `result_limit` | number | no | Requested UTF-16 code units; integer `[1,8192]`, default `4096`. A slice may be shorter to satisfy the transport budget. |
 
 
-  ## Indexing & filter semantics
+  ## Result metadata and excerpts
 
 
-  - **Indexing** is 0-based in transcript order. Negative `offset` resolves
-  Python-style: `offset=-1, limit=1` is the last message; `offset=-20,
-  limit=20` is the last 20 messages. Out-of-range windows return `messages:
-  []` with `total` populated — never an error.
-
-  - **When `pattern` is set**, the `offset`/`limit` window applies over the
-  deduplicated match-with-context list, **not** the raw transcript. The
-  `matchCount` field reports how many true hits exist (pre-context
-  expansion).
+  Compact rows retain canonical tool-call names and bounded argument previews.
+  Every tool result has one canonical `name`, `status` (`ok`, `error`, or
+  `unknown`), accurate `size`, `omitted`, and a retrieval `handle`. Excerpts are
+  half-open UTF-16 ranges and include `start`, `end`, `text`, `nextCursor`, and
+  `complete`. Raw provider correlation IDs, duplicate aliases, opaque provider
+  metadata, and prose omission markers are not returned.
 
 
-  ## Output envelope
+  A successful page may be partial when the serialized transport budget is
+  reached. Follow its exact `continuationRequest`: a page continuation supplies
+  the next `offset`; a result-slice continuation supplies `result_handle`,
+  `result_cursor`, and `result_limit`. Do not infer a continuation or reread an
+  overlapping range.
 
 
-  ```json
-
-  {
-    "total": 142,
-    "matchCount": 17,
-    "returned": 20,
-    "offsetStart": 122,
-    "offsetEnd": 141,
-    "messages": [
-      {
-        "index": 122,
-        "role": "assistant",
-        "ts": "2026-05-04T12:34:56Z",
-        "text": "compact text up to ~800 chars",
-        "toolUses":    [{ "name": "bash", "inputPreview": "{\"cmd\":\"…\"}" }],
-        "toolResults": [{ "name": "bash", "omitted": true, "status": "ok", "size": { "type": "string", "chars": 1200, "lines": 42, "bytes": 1200 } }]
-      }
-    ]
-  }
-
-  ```
+  ## Context-heavy guard
 
 
-  In `verbose: true` mode each message carries a full `content` array of
-  `{ type, text|tool_use|tool_result, … }` blocks instead of `text` /
-  `toolUses` / `toolResults`. By default, verbose `tool_result` blocks use
-  `contentOmitted: true`, a stable omission marker in `content`, and
-  `resultSize` metadata instead of the raw body. Pass
-  `include_tool_results: true` to include raw result content.
+  `verbose: true` or `include_tool_results: true` is rejected before fetching
+  unless `limit` is explicitly supplied as an integer from 1 through 10.
+  Ordinary compact reads keep their normal paging defaults. Prefer targeted
+  result-handle slices over broad result-including pages.
 
 
-  When `messages` is empty, both `offsetStart` and `offsetEnd` are `-1`.
-
-  `matchCount` is omitted when no `pattern` is supplied.
+  ## Structured errors
 
 
-  ## Errors
-
-
-  All errors return structured codes (not prose):
-
-
-  | Code | HTTP | Cause |
-
-  |------|------|-------|
-
-  | `session_not_found` | 404 | No session with that id. |
-
-  | `transcript_unavailable` | 404 | Session exists but its `agentSessionFile` is missing or empty. |
-
-  | `invalid_regex` | 400 | `pattern` failed to compile. |
-
-  | `invalid_params` | 400 | REST parameter validation failed (`limit` outside `[1, 200]`, `context` outside `[0, 5]`, etc.). |
-
-  | `CONTEXT_HEAVY_LIMIT_REQUIRED` | tool layer | A context-heavy flag lacks an explicit integer `limit` in `[1, 10]`; no request is sent. |
+  Transcript errors preserve the established `{ error, detail? }` tool result.
+  Existing codes include `session_not_found`, `transcript_unavailable`,
+  `invalid_regex`, and `invalid_params`. Result slicing adds
+  `INVALID_RESULT_HANDLE`, `RESULT_NOT_FOUND`, `STALE_RESULT_HANDLE`,
+  `INVALID_RESULT_CURSOR`, and `INVALID_RESULT_LIMIT`. Heavy-read rejection uses
+  `{ error, code: "CONTEXT_HEAVY_LIMIT_REQUIRED" }` and sends no request.
 
 
   ## Examples
 
 
-  ```
+  ```text
 
-  # Tail the last 20 messages
+  # Small compact tail
+  read_session(session_id="abc-123", offset=-8, limit=8)
 
-  read_session(session_id="abc-123", offset=-20, limit=20)
+  # Search compact metadata before reading any result text
+  read_session(session_id="abc-123", pattern="TypeError|failed", context=1, limit=6)
 
+  # Retrieve one bounded excerpt from a returned handle
+  read_session(
+    session_id="abc-123",
+    result_handle="rs1:m6h:b0:NUBAzC7icgMYwEPyuR8OFQyx29U",
+    result_cursor=0,
+    result_limit=2048
+  )
 
-  # Find the last 5 errors
-
-  read_session(session_id="abc-123", pattern="error", offset=-5, limit=5)
-
-
-  # Show context around each "TypeError"
-
-  read_session(session_id="abc-123", pattern="TypeError", context=2)
-
-
-  # Inspect one raw tool output after narrowing to a specific message
-
-  read_session(session_id="abc-123", offset=42, limit=1, verbose=true, include_tool_results=true)
+  # Continue only if the first excerpt was insufficient
+  read_session(
+    session_id="abc-123",
+    result_handle="rs1:m6h:b0:NUBAzC7icgMYwEPyuR8OFQyx29U",
+    result_cursor=2048,
+    result_limit=2048
+  )
 
   ```
