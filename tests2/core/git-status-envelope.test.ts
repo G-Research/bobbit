@@ -62,15 +62,48 @@ describe("aggregateGitStatusProbes", () => {
 		expect(Object.keys(collected.envelope.repos)).toEqual(["api", "web"]);
 	});
 
+	it("reports merged when every successful component has a complete merged comparison", () => {
+		const collected = aggregateGitStatusProbes(notRepo(), [
+			{ target: { repo: "api", worktreePath: "/api" }, probe: ok(status({ mergedIntoPrimary: true })) },
+			{ target: { repo: "web", worktreePath: "/web" }, probe: ok(status({ mergedIntoPrimary: true })) },
+		]);
+		expect(collected.kind).toBe("success");
+		if (collected.kind !== "success") return;
+		expect(collected.envelope.aggregate.mergedIntoPrimary).toBe(true);
+	});
+
+	it("does not copy merged state from an untouched first component when a later component is ahead", () => {
+		const collected = aggregateGitStatusProbes(notRepo(), [
+			{ target: { repo: "api", worktreePath: "/api" }, probe: ok(status({ mergedIntoPrimary: true })) },
+			{ target: { repo: "web", worktreePath: "/web" }, probe: ok(status({ aheadOfPrimary: 1, mergedIntoPrimary: false })) },
+		]);
+		expect(collected.kind).toBe("success");
+		if (collected.kind !== "success") return;
+		expect(collected.envelope.aggregate.aheadOfPrimary).toBe(1);
+		expect(collected.envelope.aggregate.mergedIntoPrimary).toBe(false);
+	});
+
+	it("does not report merged when a successful component comparison is partial", () => {
+		const collected = aggregateGitStatusProbes(notRepo(), [
+			{ target: { repo: "api", worktreePath: "/api" }, probe: ok(status({ mergedIntoPrimary: true })) },
+			{ target: { repo: "web", worktreePath: "/web" }, probe: ok(status({ mergedIntoPrimary: true, partial: true })) },
+		]);
+		expect(collected.kind).toBe("success");
+		if (collected.kind !== "success") return;
+		expect(collected.envelope.aggregate.partial).toBe(true);
+		expect(collected.envelope.aggregate.mergedIntoPrimary).toBe(false);
+	});
+
 	it("keeps valid siblings and marks a failed configured component partial", () => {
 		const collected = aggregateGitStatusProbes(notRepo(), [
-			{ target: { repo: "api", worktreePath: "/api" }, probe: ok(status()) },
+			{ target: { repo: "api", worktreePath: "/api" }, probe: ok(status({ mergedIntoPrimary: true })) },
 			{ target: { repo: "missing", worktreePath: "/missing" }, probe: failed("missing") },
 		]);
 		expect(collected.kind).toBe("success");
 		if (collected.kind !== "success") return;
 		expect(Object.keys(collected.envelope.repos)).toEqual(["api"]);
 		expect(collected.envelope.aggregate.partial).toBe(true);
+		expect(collected.envelope.aggregate.mergedIntoPrimary).toBe(false);
 		expect(collected.envelope.aggregate.untrackedIncluded).toBe(false);
 	});
 
