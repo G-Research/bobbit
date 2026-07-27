@@ -940,7 +940,7 @@
     },
     {
       "path": "tests2/core/release-skill-preflight-order.test.ts",
-      "reason": "Pins the clean-release pre-flight order so the build emits dist/server declarations before tsconfig.tests2 follows intentional runtime imports of those artifacts.",
+      "reason": "Pins the scoped npm identity used by release verification/reporting and the clean-release pre-flight order required by emitted test declarations.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

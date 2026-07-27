@@ -13,6 +13,7 @@ import {
 
 const skill = readFileSync(resolve(process.cwd(), ".claude/skills/release/SKILL.md"), "utf8");
 const packageJson = JSON.parse(readFileSync(resolve(process.cwd(), "package.json"), "utf8")) as {
+	name?: string;
 	scripts?: Record<string, string>;
 };
 const preflight = skill.match(/## 2\. Pre-flight quality gates[\s\S]*?```bash\n([\s\S]*?)\n```/)?.[1];
@@ -32,6 +33,21 @@ function position(command: string): number {
 	assert.notEqual(index, -1, `pre-flight command is missing: ${command}`);
 	return index;
 }
+
+describe("release skill scoped package identity", () => {
+	it("verifies and reports the package published by CI", () => {
+		assert.equal(packageJson.name, "@gresearch/bobbit");
+		assert.match(skill, /npm install @gresearch\/bobbit@<new-version>/);
+		assert.match(skill, /import\('@gresearch\/bobbit\/dist\/server\/binaries\.js'\)/);
+		assert.match(
+			skill,
+			/https:\/\/www\.npmjs\.com\/package\/@gresearch\/bobbit\/v\/<new-version>/,
+		);
+		assert.doesNotMatch(skill, /npm install bobbit@/);
+		assert.doesNotMatch(skill, /import\('bobbit\//);
+		assert.doesNotMatch(skill, /npmjs\.com\/package\/bobbit\//);
+	});
+});
 
 describe("release skill pre-flight order", () => {
 	it("audits the built tarball consumer before type-checking and tests", () => {

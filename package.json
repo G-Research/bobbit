@@ -1,7 +1,18 @@
 {
-  "name": "bobbit",
+  "name": "@gresearch/bobbit",
   "version": "0.15.0",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/G-Research/bobbit.git"
+  },
+  "homepage": "https://github.com/G-Research/bobbit#readme",
+  "bugs": {
+    "url": "https://github.com/G-Research/bobbit/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=22.19.0"
   },
