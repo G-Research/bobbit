@@ -1,0 +1,17 @@
+name: systems_review_result
+description: "Submit a receipt-bound Systems review checkpoint or final structured synthesis"
+summary: "Submit Systems review progress or final synthesis"
+params: [operation, execution_id, snapshot_digest, contract_digest, previous_checkpoint_digest?, chunk_id?, coverage_cursor?, processed_change_ids?, receipt_tokens?, behaviors?, coverage_mappings?, findings?, unresolved_links?, resolved_links?, final_checkpoint_digest?]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Gates
+grantPolicy: never
+docs: |
+  Submit structured progress for the active Systems Interaction Review. A `checkpoint` appends validated, receipt-bound evidence for one immutable chunk and can never pass the review. A `final` is accepted only after the full checkpoint chain covers every changed object and coverage item and closes every cross-chunk link.
+
+  The server derives both the final markdown report and verdict. This tool intentionally accepts no generic summary or caller-selected verdict.
+detail_docs: |
+  Use `operation: "checkpoint"` with the execution, snapshot, contract, chunk, coverage, receipt, behavior, mapping, finding, and unresolved-link fields returned or required by the immutable review contract. Repeating the identical checkpoint is idempotent; a conflicting duplicate is rejected.
+
+  Use `operation: "final"` only after processing every chunk. Supply the last accepted checkpoint digest and the links closed by final synthesis. Invalid submissions are correctable and do not end the review; submissions after cancellation, supersession, or completion are rejected.
