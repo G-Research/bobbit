@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import type { CommandRunner } from "../../src/server/gateway-deps.js";
-import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
+import { awaitableRm, pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 import { copyGitTemplate, prepareGitTemplate } from "../harness/git-template.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, deleteGoal, registerProject, teardownTeam } from "./_e2e/e2e-setup.js";
@@ -957,7 +957,9 @@ test("team lead borrows goal-owned polyrepo coordinates and both git-status rout
 			await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => undefined);
 		}
 		// Restored agent and Git child processes can release Windows directory
-		// handles a few ticks after their awaited shutdown completes.
-		rmSync(fixtureRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+		// handles a few ticks after their awaited shutdown completes. Use the
+		// harness's async bounded retry, whose best-effort result cannot mask an
+		// earlier assertion or turn behaviorally green coverage red.
+		await awaitableRm(fixtureRoot, { maxAttempts: 6, backoffMs: 100 });
 	}
 });
