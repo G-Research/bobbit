@@ -277,6 +277,16 @@ test.describe("Journey: Dashboard Fanout — behavioral assertions", () => {
 
 // Behavioral assertions ported from dashboard-mutation-pending.spec.ts
 test.describe("Journey: Dashboard Mutation Pending — behavioral assertions", () => {
+	test.beforeEach(async () => {
+		// The mutation card is Subgoals-gated. Pin the system preference instead
+		// of inheriting another journey's global toggle state within the worker.
+		const prefs = await apiFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ subgoalsEnabled: true }),
+		});
+		expect(prefs.status, `enable subgoals for mutation dashboard: ${await prefs.clone().text()}`).toBe(200);
+	});
+
 	test("pending mutation card renders from route-mocked endpoint on load", async ({ page }) => {
 		const goal = await createGoal({ title: "v2-mutation-card-smoke", team: false });
 		const goalId = goal.id as string;
