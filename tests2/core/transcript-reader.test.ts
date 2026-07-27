@@ -8,6 +8,7 @@ import {
 	readTranscript,
 	readOrphanedBeforeCompaction,
 	parseJsonl,
+	READ_SESSION_AGENT_ENVELOPE_MAX_BYTES,
 	resolveOffset,
 	TranscriptReaderError,
 	type ReadTranscriptEnvelope,
@@ -528,6 +529,156 @@ describe("transcript-reader / readTranscript", () => {
 		assert.deepEqual((env.messages[0] as any).author, {
 			kind: "system", id: "system:bobbit", label: "Bobbit",
 		});
+	});
+});
+
+describe("transcript-reader / agent timestamp budgets", () => {
+	const safeTimestampPrefix = "x".repeat(63);
+	const oversizedTimestamp = safeTimestampPrefix + "😀" + "y".repeat(100 * 1024);
+
+	it("caps ts/timestamp in normal and summary rows while pagination makes exact progress", async () => {
+		const oversizedCalls = Array.from({ length: 64 }, (_, index) => ({
+			type: "toolCall",
+			id: `call-${index}`,
+			name: "read",
+			arguments: { path: `fixture-${index}` },
+		}));
+		const text = [
+			{
+				type: "message",
+				timestamp: oversizedTimestamp,
+				message: { role: "assistant", content: oversizedCalls },
+			},
+			{
+				type: "message",
+				ts: oversizedTimestamp,
+				message: { role: "assistant", content: "next row" },
+			},
+		].map((entry) => JSON.stringify(entry)).join("\n") + "\n";
+		const options = {
+			...memoryTranscript(text),
+			projection: "agent" as const,
+			sessionId: "timestamp-page",
+			serializedBudgetBytes: 512,
+		};
+
+		const first = await readTranscript({ limit: 2, includeToolResults: false }, options);
+		assert.ok(Buffer.byteLength(JSON.stringify(first), "utf8") <= 512);
+		assert.equal(first.returned, 1);
+		assert.equal(first.offsetStart, 0);
+		assert.equal(first.offsetEnd, 0);
+		const summary = first.messages[0] as any;
+		assert.equal(summary.projectionOmitted, true);
+		assert.equal(summary.toolCallCount, oversizedCalls.length);
+		assert.equal(summary.ts, safeTimestampPrefix);
+		assert.equal(summary.tsTruncated, true);
+		assert.equal(first.nextOffset, 1);
+		assert.ok(first.nextOffset! > first.offsetEnd, "page continuation must advance past the summarized row");
+		assert.deepEqual(first.continuationRequest, { kind: "page", offset: 1 });
+
+		const second = await readTranscript({ offset: first.nextOffset, limit: 1, includeToolResults: false }, options);
+		assert.ok(Buffer.byteLength(JSON.stringify(second), "utf8") <= 512);
+		assert.equal(second.returned, 1);
+		assert.equal(second.offsetStart, 1);
+		assert.equal(second.offsetEnd, 1);
+		assert.equal(second.nextOffset, undefined);
+		const normal = second.messages[0] as any;
+		assert.equal(normal.projectionOmitted, undefined);
+		assert.equal(normal.text, "next row");
+		assert.equal(normal.ts, safeTimestampPrefix);
+		assert.equal(normal.tsTruncated, true);
+	});
+
+	it("omits invalid timestamp scalars only from the agent projection", async () => {
+		const invalidTimestamp = "\ud800";
+		const text = JSON.stringify({
+			type: "message",
+			ts: invalidTimestamp,
+			message: { role: "assistant", content: "answer" },
+		}) + "\n";
+
+		const agent = await readTranscript({ limit: 1 }, {
+			...memoryTranscript(text),
+			projection: "agent",
+			sessionId: "invalid-timestamp",
+		});
+		assert.equal((agent.messages[0] as any).ts, null);
+		assert.equal((agent.messages[0] as any).tsInvalid, true);
+
+		const legacy = await readTranscript({ limit: 1 }, memoryTranscript(text));
+		assert.equal((legacy.messages[0] as any).ts, invalidTimestamp);
+		assert.equal((legacy.messages[0] as any).tsInvalid, undefined);
+	});
+
+	it("keeps a huge-timestamp result slice canonical, bounded, and progressing", async () => {
+		const body = "slice-body-".repeat(4096);
+		const text = JSON.stringify({
+			type: "message",
+			ts: oversizedTimestamp,
+			message: {
+				role: "toolResult",
+				toolCallId: "call-result",
+				name: "read",
+				status: "ok",
+				content: body,
+			},
+		}) + "\n";
+		const options = {
+			...memoryTranscript(text),
+			projection: "agent" as const,
+			sessionId: "timestamp-result-slice",
+			serializedBudgetBytes: 1200,
+		};
+		const page = await readTranscript({ limit: 1, includeToolResults: false }, options);
+		const metadata = (page.messages[0] as any).toolResults[0];
+
+		const first = await readTranscript({
+			resultHandle: metadata.handle,
+			resultCursor: 0,
+			resultLimit: 8192,
+		}, options);
+		assert.ok(Buffer.byteLength(JSON.stringify(first), "utf8") <= 1200);
+		assert.ok(Buffer.byteLength(JSON.stringify(first), "utf8") <= READ_SESSION_AGENT_ENVELOPE_MAX_BYTES);
+		const firstRow = first.messages[0] as any;
+		const firstResult = firstRow.toolResults[0];
+		assert.equal(firstRow.ts, safeTimestampPrefix);
+		assert.equal(firstRow.tsTruncated, true);
+		assert.equal(firstResult.name, "read");
+		assert.equal(firstResult.status, "ok");
+		assert.deepEqual(firstResult.size, metadata.size);
+		assert.equal(firstResult.handle, metadata.handle);
+		assert.equal(firstResult.omitted, false);
+		assert.equal(firstResult.excerpt.start, 0);
+		assert.ok(firstResult.excerpt.end > firstResult.excerpt.start);
+		assert.equal(firstResult.excerpt.nextCursor, firstResult.excerpt.end);
+		assert.equal(firstResult.excerpt.complete, false);
+		assert.equal(first.partial, true);
+		assert.equal(first.truncatedBy, "transport_budget");
+		assert.deepEqual(first.continuationRequest, {
+			kind: "result_slice",
+			result_handle: metadata.handle,
+			result_cursor: firstResult.excerpt.end,
+			result_limit: 8192,
+		});
+
+		const second = await readTranscript({
+			resultHandle: metadata.handle,
+			resultCursor: firstResult.excerpt.nextCursor,
+			resultLimit: 8192,
+		}, options);
+		assert.ok(Buffer.byteLength(JSON.stringify(second), "utf8") <= 1200);
+		const secondResult = (second.messages[0] as any).toolResults[0];
+		assert.equal(secondResult.name, firstResult.name);
+		assert.equal(secondResult.status, firstResult.status);
+		assert.deepEqual(secondResult.size, firstResult.size);
+		assert.equal(secondResult.handle, firstResult.handle);
+		assert.equal(secondResult.excerpt.start, firstResult.excerpt.nextCursor);
+		assert.ok(secondResult.excerpt.end > secondResult.excerpt.start, "slice continuation must advance");
+		assert.equal(
+			firstResult.excerpt.text + secondResult.excerpt.text,
+			body.slice(0, secondResult.excerpt.end),
+			"continued slices must be exact and non-overlapping",
+		);
 	});
 });
 

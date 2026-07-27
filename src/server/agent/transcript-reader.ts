@@ -133,6 +133,10 @@ export interface AgentTranscriptMessage {
 	role: string;
 	roleTruncated?: boolean;
 	ts: string | null;
+	/** The persisted timestamp exceeded the agent projection cap. */
+	tsTruncated?: boolean;
+	/** The persisted timestamp contained an unpaired UTF-16 surrogate and was omitted. */
+	tsInvalid?: boolean;
 	text: string;
 	textTruncated?: boolean;
 	thinking?: string;
@@ -923,6 +927,7 @@ const AGENT_COMPACT_TEXT_LIMIT = 800;
 const AGENT_VERBOSE_TEXT_LIMIT = 4096;
 const AGENT_THINKING_LIMIT = 512;
 const AGENT_ROLE_LIMIT = 32;
+const AGENT_TIMESTAMP_LIMIT = 64;
 const AGENT_TOOL_NAME_LIMIT = 128;
 const RESULT_HANDLE_DOMAIN = "bobbit.read-session.result-handle.v1\0";
 
@@ -1381,6 +1386,16 @@ function projectedResult(
 	return projected;
 }
 
+function projectAgentTimestamp(timestamp: string | null): Pick<AgentTranscriptMessage, "ts" | "tsTruncated" | "tsInvalid"> {
+	if (timestamp === null) return { ts: null };
+	if (!isWellFormedUnicode(timestamp)) return { ts: null, tsInvalid: true };
+	const ts = scalarSafePrefix(timestamp, AGENT_TIMESTAMP_LIMIT);
+	return {
+		ts,
+		...(ts.length < timestamp.length ? { tsTruncated: true } : {}),
+	};
+}
+
 function projectAgentMessage(
 	message: RawMessage,
 	index: CanonicalTranscriptIndex,
@@ -1395,7 +1410,7 @@ function projectAgentMessage(
 		index: message.index,
 		role,
 		...(role.length < message.role.length ? { roleTruncated: true } : {}),
-		ts: message.ts,
+		...projectAgentTimestamp(message.ts),
 		text,
 		...(text.length < fullText.length ? { textTruncated: true } : {}),
 	};
@@ -1497,7 +1512,7 @@ function summaryRow(message: RawMessage, index: CanonicalTranscriptIndex): Agent
 	return {
 		index: message.index,
 		role: scalarSafePrefix(isWellFormedUnicode(message.role) ? message.role : "unknown", AGENT_ROLE_LIMIT),
-		ts: message.ts,
+		...projectAgentTimestamp(message.ts),
 		text: "",
 		projectionOmitted: true,
 		toolCallCount: (index.callsByMessage.get(message.index) ?? []).length,
@@ -1634,7 +1649,7 @@ function readTargetedResultSlice(
 			index: raw.index,
 			role,
 			...(role.length < raw.role.length ? { roleTruncated: true } : {}),
-			ts: raw.ts,
+			...projectAgentTimestamp(raw.ts),
 			text: "",
 			toolResults: [projectedResult(result, state, true, cursor, limit)],
 		};
