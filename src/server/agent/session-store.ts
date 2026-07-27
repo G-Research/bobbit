@@ -6,6 +6,7 @@ import { isMessageAuthor, LOCAL_USER_AUTHOR, type MessageAuthor } from "../../sh
 import { isPromptSource, type PromptSource } from "../../shared/prompt-source.js";
 import type { QueuedMessage } from "../ws/protocol.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
+import type { ThinkingLevel } from "../../shared/thinking-levels.js";
 
 const VERIFIER_SESSION_ID_RE = /^(?:llm-review|agent-qa)-/;
 
@@ -172,6 +173,8 @@ export interface PersistedSession {
 	modelProvider?: string;
 	/** Model ID (e.g. "claude-sonnet-4-20250514") — persisted so archived sessions can display model info */
 	modelId?: string;
+	/** Effective thinking level verified with the exact persisted provider/model pair. */
+	effectiveThinkingLevel?: ThinkingLevel;
 	/** Image generation model provider for this session, if overridden from the default. */
 	imageModelProvider?: string;
 	/** Image generation model ID for this session, if overridden from the default. */
@@ -227,6 +230,7 @@ export type UpdatableSessionFields = Pick<
 	| "reattemptGoalId"
 	| "modelProvider"
 	| "modelId"
+	| "effectiveThinkingLevel"
 	| "imageModelProvider"
 	| "imageModelId"
 	| "sandboxed"
@@ -746,7 +750,7 @@ export class SessionStore {
 		"parentSessionId", "childKind", "readOnly", "childTerminal", "terminalAt",
 		"role", "assistantType", "taskId", "staffId",
 		"teamGoalId", "teamLeadSessionId",
-		"modelProvider", "modelId",
+		"modelProvider", "modelId", "effectiveThinkingLevel",
 		"inFlightSteerTexts",
 		"sidePanelWorkspace",
 	];
