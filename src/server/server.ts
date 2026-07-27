@@ -14101,6 +14101,13 @@ async function handleApiRoute(
 		if (!targetPs) { json({ error: "session_not_found" }, 404); return; }
 		if (!targetPs.agentSessionFile) { json({ error: "transcript_unavailable" }, 404); return; }
 
+		// A caller identity is trusted for response shaping only when it resolves to
+		// a real session. Browser/direct callers (including spoofed stale IDs) retain
+		// the legacy REST contract and its result-including default.
+		const callerHeader = req.headers["x-bobbit-session-id"];
+		const callerId = Array.isArray(callerHeader) ? callerHeader[0] : callerHeader;
+		const agentBound = typeof callerId === "string"
+			&& !!(sessionManager.getSession(callerId) ?? sessionManager.getPersistedSession(callerId));
 
 		// Parse query params.
 		const qp = url.searchParams;
@@ -14127,14 +14134,45 @@ async function handleApiRoute(
 			throw new TranscriptReaderError("invalid_params", `${foundName} must be a boolean`);
 		}
 		try {
+			const verbose = agentBound
+				? (parseBoolParam("verbose") ?? false)
+				: qp.get("verbose") === "1" || qp.get("verbose") === "true";
+			const includeToolResults = parseBoolParam("include_tool_results", "includeToolResults");
+
+			// Defense in depth for authenticated custom/stale agent clients. This check
+			// intentionally runs before readTranscript can invoke sessionFileRead.
+			const heavyFlags = [
+				...(verbose ? ["verbose"] : []),
+				...(includeToolResults === true ? ["include_tool_results"] : []),
+			];
+			const rawLimit = qp.get("limit");
+			const heavyLimit = rawLimit === null ? undefined : Number(rawLimit);
+			if (agentBound && heavyFlags.length > 0
+				&& (typeof heavyLimit !== "number" || !Number.isFinite(heavyLimit)
+					|| !Number.isInteger(heavyLimit) || heavyLimit < 1 || heavyLimit > 10)) {
+				const formattedFlags = heavyFlags.map((flag) => `\`${flag}\``).join(", ");
+				json({
+					error: "You should not typically pull this much data from the API. "
+						+ `Context-heavy flag(s) ${formattedFlags} require an explicit limit at or below 10. `
+						+ "Call again with limit <= 10 and fetch in smaller batches only if you REALLY need full verbosity. "
+						+ "Keep an eye on token consumption.",
+					code: "CONTEXT_HEAVY_LIMIT_REQUIRED",
+				}, 400);
+				return;
+			}
+			const limit = parseIntParam("limit");
+
 			const params = {
 				offset: parseIntParam("offset"),
-				limit: parseIntParam("limit"),
+				limit,
 				pattern: qp.get("pattern") ?? undefined,
 				caseSensitive: qp.get("case_sensitive") === "1" || qp.get("case_sensitive") === "true",
 				context: parseIntParam("context"),
-				verbose: qp.get("verbose") === "1" || qp.get("verbose") === "true",
-				includeToolResults: parseBoolParam("include_tool_results", "includeToolResults"),
+				verbose,
+				includeToolResults,
+				resultHandle: qp.get("result_handle") ?? undefined,
+				resultCursor: parseIntParam("result_cursor"),
+				resultLimit: parseIntParam("result_limit"),
 			};
 			const ctx = sessionFsContextForAgentFile(targetPs, targetPs.agentSessionFile);
 			const envelope = await readTranscript(params, {
@@ -14147,6 +14185,11 @@ async function handleApiRoute(
 						getRole: (name) => resolveRoleForProject(name, targetPs.projectId),
 					},
 				},
+				...(agentBound ? {
+					projection: "agent" as const,
+					sessionId: targetId,
+					serializedBudgetBytes: 50 * 1024,
+				} : {}),
 			});
 			json(envelope);
 		} catch (err) {
