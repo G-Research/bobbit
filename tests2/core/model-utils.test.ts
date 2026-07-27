@@ -13,7 +13,8 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { inferMeta } from "../../src/server/agent/aigw-manager.ts";
-import { modelRecencyRank } from "../../src/server/agent/model-registry.ts";
+import { modelRecencyRank as serverModelRecencyRank } from "../../src/server/agent/model-registry.ts";
+import { modelRecencyRank } from "../../src/shared/model-ranks.ts";
 
 // ── inferMeta tests ────────────────────────────────────────────────
 
@@ -213,28 +214,53 @@ describe("inferMeta()", () => {
 
 // ── Pi model catalog tests ─────────────────────────────────────────
 
-const piAnthropicOpus48 = (() => {
-	try {
-		return getBuiltinModels("anthropic").find((model) => model.id.includes("claude-opus-4-8"));
-	} catch {
-		return undefined;
-	}
-})();
-
 describe("pi-ai model catalog", () => {
-	it("exposes Claude Opus 4.8 metadata", { skip: !piAnthropicOpus48 }, () => {
-		const model = piAnthropicOpus48!;
-		assert.match(model.id, /claude-opus-4-8/);
-		assert.equal(model.name, "Claude Opus 4.8");
+	it("exposes Pi 0.82.1's authoritative direct Claude Opus 5 metadata", () => {
+		const model = getBuiltinModels("anthropic").find((candidate) => candidate.id === "claude-opus-5");
+		assert.ok(model, "anthropic/claude-opus-5 should exist in the Pi catalog");
+		assert.equal(model.name, "Claude Opus 5");
+		assert.equal(model.api, "anthropic-messages");
+		assert.equal(model.provider, "anthropic");
+		assert.equal(model.baseUrl, "https://api.anthropic.com");
 		assert.equal(model.contextWindow, 1_000_000);
 		assert.equal(model.maxTokens, 128_000);
 		assert.equal(model.reasoning, true);
+		assert.deepEqual(model.input, ["text", "image"]);
+		assert.deepEqual(model.cost, { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 });
+		assert.deepEqual(model.thinkingLevelMap, { xhigh: "xhigh", max: "max" });
+		assert.deepEqual((model as any).compat, {
+			forceAdaptiveThinking: true,
+			supportsTemperature: false,
+			supportsStrictTools: true,
+		});
 	});
 });
 
 // ── modelRecencyRank tests ─────────────────────────────────────────
 
 describe("modelRecencyRank()", () => {
+	it("keeps the server re-export aligned with the shared implementation", () => {
+		for (const id of ["claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-opus-4-100", "gpt-5.5"]) {
+			assert.equal(serverModelRecencyRank(id), modelRecencyRank(id), id);
+		}
+	});
+
+	it("orders Fable 5 > Opus 5 > Sonnet 5 > every older Opus", () => {
+		assert.equal(modelRecencyRank("claude-fable-5"), 113);
+		assert.equal(modelRecencyRank("claude-opus-5"), 112);
+		assert.equal(modelRecencyRank("claude-sonnet-5"), 111);
+		assert.equal(modelRecencyRank("eu.anthropic.claude-opus-5"), 112);
+		assert.equal(modelRecencyRank("amazon-bedrock/us.anthropic.claude-opus-5"), 112);
+		assert.equal(modelRecencyRank("anthropic/claude-opus-5"), 112);
+		assert.equal(modelRecencyRank("claude-opus-4-100"), 110);
+		assert.ok(modelRecencyRank("claude-sonnet-5") > modelRecencyRank("claude-opus-4-100"));
+	});
+
+	it("does not assign Claude 5 ranks to arbitrary containing text", () => {
+		assert.notEqual(modelRecencyRank("vendor-super-opus-5-model"), 112);
+		assert.notEqual(modelRecencyRank("vendor.claude-opus-5"), 112);
+	});
+
 	it("Claude: opus-4-6 > sonnet-4-6 > opus-4-5", () => {
 		const opus46 = modelRecencyRank("claude-opus-4-6");
 		const sonnet46 = modelRecencyRank("claude-sonnet-4-6");
