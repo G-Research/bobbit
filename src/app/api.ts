@@ -1522,7 +1522,7 @@ export async function refreshPrStatusCache(skipRender = false): Promise<boolean>
 // GIT STATUS
 // ============================================================================
 
-export interface GitStatusData {
+export interface GitStatusEntry {
 	branch: string;
 	primaryBranch: string;
 	/**
@@ -1546,6 +1546,19 @@ export interface GitStatusData {
 	deletionsVsPrimary: number;
 	unpushed: boolean;
 	status: Array<{ file: string; status: string }>;
+	partial?: boolean;
+	untrackedIncluded?: boolean;
+}
+
+export type GitStatusRepoEntry = Partial<GitStatusEntry> & {
+	/** Client-normalized alias used by the widget and untracked-file merge path. */
+	statusFiles?: Array<{ file: string; status: string }>;
+};
+
+/** Flat-compatible git status response with its canonical per-repository envelope. */
+export interface GitStatusData extends GitStatusEntry {
+	aggregate?: GitStatusEntry;
+	repos?: Record<string, GitStatusRepoEntry>;
 }
 
 /**
@@ -1554,7 +1567,7 @@ export interface GitStatusData {
  * transient failure (retry-eligible) and from success.
  */
 export type GitStatusResult =
-	| { kind: 'ok'; data: GitStatusData & { partial?: boolean; untrackedIncluded?: boolean } }
+	| { kind: 'ok'; data: GitStatusData }
 	| { kind: 'not-a-repo' }
 	| { kind: 'error'; status?: number; message: string };
 
