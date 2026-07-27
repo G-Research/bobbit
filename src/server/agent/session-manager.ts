@@ -107,7 +107,7 @@ import { getAigwUrl, discoverAigwModels, deriveName, normalizeAigwModelString, w
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { modelRecencyRank, resolveModelStateMeta } from "./model-registry.js";
 import { isSessionSelectableModelString, isSpawnPinnableModelString } from "./google-code-assist.js";
-import { isKnownThinkingLevel } from "../../shared/thinking-levels.js";
+import { isKnownThinkingLevel, type ThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
 import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
@@ -7500,7 +7500,12 @@ export class SessionManager {
 			const initModel = this.resolveInitialModel(ps.role, ps.projectId);
 			if (initModel) bridgeOptions.initialModel = initModel;
 		}
-		const initThinking = this.resolveInitialThinkingLevel(ps.role, ps.projectId);
+		const initThinking = this.resolveThinkingLevelForModel(
+			bridgeOptions.initialModel,
+			ps.role,
+			ps.projectId,
+			ps.effectiveThinkingLevel,
+		);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 		this.applyDirectProviderEnv(bridgeOptions, !!ps.sandboxed, ps.modelProvider);
 
@@ -7664,6 +7669,20 @@ export class SessionManager {
 			await rpcClient.stop();
 			throw err;
 		}
+		try {
+			await this.tryApplyDefaultThinkingLevel(session);
+		} catch (err) {
+			// Rows created before effectiveThinkingLevel was persisted have no exact
+			// thinking contract to enforce. Keep them readable and let a later complete
+			// state frame migrate them; a verified durable tuple must fail closed.
+			if (ps.effectiveThinkingLevel === undefined) {
+				console.warn(`[session-manager] Legacy session ${ps.id} could not verify effective thinking during restore:`, err);
+			} else {
+				try { unsub(); } catch { /* best-effort listener cleanup */ }
+				await rpcClient.stop();
+				throw err;
+			}
+		}
 
 		// For sandbox sessions, resolve the container ID so git-status and other
 		// host-side operations can run commands inside the container via docker exec.
@@ -7797,6 +7816,17 @@ export class SessionManager {
 		const directGatewayEnv = !effectiveSandboxed
 			? this.scopedGatewayEnvForDirectAgent(id, projectId, goalId ?? opts?.teamGoalId ?? opts?.env?.BOBBIT_GOAL_ID)
 			: undefined;
+		const initialRole = opts?.role ?? opts?.roleName;
+		const selectedSpawnModel = opts?.initialModel
+			?? (!opts?.skipAutoModel ? this.resolveInitialModel(initialRole, projectId) : undefined);
+		const exactInitialThinkingLevel = opts?.skipAutoThinking && !opts?.initialThinkingLevel
+			? undefined
+			: this.resolveThinkingLevelForModel(
+				selectedSpawnModel,
+				initialRole,
+				projectId,
+				opts?.initialThinkingLevel,
+			);
 
 		// ── Worktree: return a "preparing" session immediately, launch agent async ──
 		if (worktreeOpts) {
@@ -7912,7 +7942,7 @@ export class SessionManager {
 				skipAutoModel: opts?.skipAutoModel,
 				skipAutoThinking: opts?.skipAutoThinking,
 				initialModel: opts?.initialModel,
-				initialThinkingLevel: opts?.initialThinkingLevel,
+				initialThinkingLevel: exactInitialThinkingLevel,
 				preExistingAgentSessionFile: opts?.preExistingAgentSessionFile,
 				preExistingAgentSessionOldCwds: opts?.preExistingAgentSessionOldCwds,
 				bridgeOptions: { cwd },
@@ -8005,7 +8035,7 @@ export class SessionManager {
 			skipAutoModel: opts?.skipAutoModel,
 			skipAutoThinking: opts?.skipAutoThinking,
 			initialModel: opts?.initialModel,
-			initialThinkingLevel: opts?.initialThinkingLevel,
+			initialThinkingLevel: exactInitialThinkingLevel,
 			preExistingAgentSessionFile: opts?.preExistingAgentSessionFile,
 			preExistingAgentSessionOldCwds: opts?.preExistingAgentSessionOldCwds,
 			bridgeOptions: { cwd },
@@ -8146,6 +8176,21 @@ export class SessionManager {
 		const directGatewayEnv = !delegateSandboxed
 			? this.scopedGatewayEnvForDirectAgent(id, parentProjectId, parentEffectiveGoalId)
 			: undefined;
+		const parentDurableModel = parentMeta?.modelProvider && parentMeta.modelId
+			? normalizeAigwModelString(`${parentMeta.modelProvider}/${parentMeta.modelId}`)
+			: undefined;
+		const delegateInitialModel = opts.initialModel
+			?? parentDurableModel
+			?? this.resolveInitialModel(opts.role, parentProjectId);
+		const delegateThinkingCandidate = opts.role
+			? opts.initialThinkingLevel
+			: parentMeta?.effectiveThinkingLevel ?? opts.initialThinkingLevel;
+		const delegateInitialThinking = this.resolveThinkingLevelForModel(
+			delegateInitialModel,
+			opts.role,
+			parentProjectId,
+			delegateThinkingCandidate,
+		);
 
 		// Role injection (§Gap 2): resolve the role prompt cascade-first, mirroring
 		// createSession, so a `team_delegate(role: X)` child carries role X's
@@ -8194,8 +8239,8 @@ export class SessionManager {
 			projectId: parentProjectId,
 			// Model inheritance (§2.2): forward the resolved owner model/thinking
 			// level so a delegate no longer silently drops to the system default.
-			initialModel: opts.initialModel,
-			initialThinkingLevel: opts.initialThinkingLevel,
+			initialModel: delegateInitialModel,
+			initialThinkingLevel: delegateInitialThinking,
 			// Caller toolEnv is non-secret metadata. directGatewayEnv is minted by the
 			// gateway and spread last so user-supplied env cannot widen the inherited
 			// project/session scope.
@@ -8606,39 +8651,45 @@ export class SessionManager {
 		return undefined;
 	}
 
+	/** Resolve and clamp a spawn thinking level against the exact chosen model. */
+	private resolveThinkingLevelForModel(
+		model: string | undefined,
+		role: string | undefined,
+		projectId: string | undefined,
+		preferred?: string,
+	): ThinkingLevel | undefined {
+		let candidate = isKnownThinkingLevel(preferred);
+		if (!candidate && role) {
+			candidate = isKnownThinkingLevel(this.resolveRoleThinkingLevelValue(role, projectId));
+		}
+		if (!candidate) {
+			candidate = isKnownThinkingLevel(
+				this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined,
+			);
+		}
+		if (!candidate) candidate = "medium";
+		if (!model) return candidate;
+		const slash = model.indexOf("/");
+		if (slash <= 0 || slash === model.length - 1) return candidate;
+		return clampThinkingLevelForModel(
+			candidate,
+			model.slice(0, slash),
+			model.slice(slash + 1),
+		);
+	}
+
 	/**
 	 * Resolve the thinking level to pin at spawn time for a session.
 	 * Mirrors `tryApplyDefaultThinkingLevel`: role override →
-	 * `default.sessionThinkingLevel` pref → "medium". Returns `undefined`
-	 * for invalid values so the agent's built-in default applies.
+	 * `default.sessionThinkingLevel` pref → "medium", clamped against the
+	 * exact model selected by the same role/preferences resolution.
 	 */
 	resolveInitialThinkingLevel(role: string | undefined, projectId: string | undefined): string | undefined {
-		let candidate: string | undefined;
-		if (role) {
-			const t = this.resolveRoleThinkingLevelValue(role, projectId);
-			const known = isKnownThinkingLevel(t);
-			if (known) candidate = known;
-		}
-		if (!candidate) {
-			const pref = this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined;
-			const known = isKnownThinkingLevel(pref);
-			if (known) candidate = known;
-		}
-		if (!candidate) candidate = "medium";
-		// Defensive clamp against the resolved spawn model (if known). For
-		// non-reasoning models this collapses to "off"; for older Opus models
-		// "xhigh" falls back to "high". When no model is resolvable, leave the
-		// candidate as-is — the per-session clamp at apply time handles it.
-		const initialModelStr = this.resolveInitialModel(role, projectId);
-		if (initialModelStr) {
-			const slash = initialModelStr.indexOf("/");
-			if (slash > 0) {
-				const provider = initialModelStr.slice(0, slash);
-				const modelId = initialModelStr.slice(slash + 1);
-				return clampThinkingLevelForModel(candidate, provider, modelId);
-			}
-		}
-		return candidate;
+		return this.resolveThinkingLevelForModel(
+			this.resolveInitialModel(role, projectId),
+			role,
+			projectId,
+		);
 	}
 
 	/**
@@ -8888,57 +8939,47 @@ export class SessionManager {
 		}
 	}
 
-	/** Apply default thinking level from preferences (per-model). */
+	/** Apply, read back, and atomically persist thinking with the exact live model. */
 	private async tryApplyDefaultThinkingLevel(session: SessionInfo): Promise<void> {
-		// 0. Role override (highest non-explicit precedence). Failure is non-fatal
-		// — matches the existing thinking-level fallback behaviour.
-		const spawnPinnedThinking = session.spawnPinnedThinkingLevel;
-		const roleThinking = this.resolveRoleThinkingLevel(session);
-		if (roleThinking) {
-			if (spawnPinnedThinking === roleThinking) {
-				if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Role thinking level "${roleThinking}" already pinned at spawn for ${session.id}`);
-				return;
-			}
-			try {
-				await session.rpcClient.setThinkingLevel(roleThinking);
-				console.log(`[session-manager] Applied role thinking level "${roleThinking}" for session ${session.id} (role=${session.role})`);
-				return;
-			} catch (err) {
-				console.warn(`[session-manager] Role thinking level "${roleThinking}" failed for ${session.id}:`, err);
-				// Fall through to global default — thinking-level mismatch is non-fatal
-			}
-		}
+		const persisted = this.resolveStoreForSession(session.id).get(session.id);
+		const spawnPinnedThinking = isKnownThinkingLevel(session.spawnPinnedThinkingLevel);
+		const roleThinking = isKnownThinkingLevel(this.resolveRoleThinkingLevel(session));
+		const durableThinking = isKnownThinkingLevel(persisted?.effectiveThinkingLevel);
+		const preferenceThinking = isKnownThinkingLevel(
+			this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined,
+		);
+		const requested = spawnPinnedThinking ?? roleThinking ?? durableThinking ?? preferenceThinking ?? "medium";
 
-		// Use the per-model thinking preference (system-scope), default to "medium".
-		let level: string | undefined;
-		if (this.preferencesStore) {
-			level = this.preferencesStore.get("default.sessionThinkingLevel") as string | undefined;
-		}
-		// Default to "medium" when not configured — matches the Settings page
-		// display default and ensures team/delegate agents get an explicit level
-		// instead of relying on the agent's built-in default.
-		if (!level) level = "medium";
-		const knownLevel = isKnownThinkingLevel(level);
-		if (!knownLevel) return;
-		level = knownLevel;
-		// Clamp against the session's current model when known so xhigh on a
-		// non-supporting model degrades to high (etc.) at apply time.
-		try {
-			const persisted = this.resolveStoreForSession(session.id).get(session.id);
-			if (persisted?.modelId) {
-				const clamped = clampThinkingLevelForModel(level, persisted.modelProvider, persisted.modelId);
-				if (clamped) level = clamped;
+		const applyAndVerify = async (candidate: ThinkingLevel): Promise<ThinkingLevel> => {
+			const beforeResp = await session.rpcClient.getState();
+			if (beforeResp?.success === false) throw new Error("get_state failed before thinking selection");
+			const before = beforeResp?.data ?? beforeResp;
+			const provider = typeof before?.model?.provider === "string" ? before.model.provider : undefined;
+			const modelId = typeof before?.model?.id === "string" ? before.model.id : undefined;
+			if (!provider || !modelId) throw new Error("get_state returned no exact model before thinking selection");
+			const effective = clampThinkingLevelForModel(candidate, provider, modelId);
+			if (!effective) throw new Error(`thinking level "${candidate}" could not be normalized`);
+			if (before?.thinkingLevel !== effective) {
+				const setResp = await session.rpcClient.setThinkingLevel(effective);
+				if (setResp?.success === false) throw new Error(`thinking level "${effective}" was rejected`);
 			}
-		} catch { /* best-effort */ }
-		if (spawnPinnedThinking === level) {
-			if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Default thinking level "${level}" already pinned at spawn for ${session.id}`);
-			return;
-		}
-		try {
-			await session.rpcClient.setThinkingLevel(level);
-			console.log(`[session-manager] Applied default thinking level "${level}" for session ${session.id}`);
-		} catch (err) {
-			console.warn(`[session-manager] Failed to apply default thinking level for ${session.id}:`, err);
+
+			const verifiedResp = await session.rpcClient.getState();
+			if (verifiedResp?.success === false) throw new Error("get_state failed after thinking selection");
+			const verified = verifiedResp?.data ?? verifiedResp;
+			const verifiedProvider = verified?.model?.provider;
+			const verifiedModelId = verified?.model?.id;
+			const verifiedThinking = isKnownThinkingLevel(verified?.thinkingLevel);
+			if (verifiedProvider !== provider || verifiedModelId !== modelId || verifiedThinking !== effective) {
+				throw new Error(`thinking selection read-back mismatch for ${provider}/${modelId}`);
+			}
+			this.persistSessionModel(session.id, provider, modelId, effective);
+			return effective;
+		};
+
+		const effective = await applyAndVerify(requested);
+		if (process.env.BOBBIT_DEBUG) {
+			console.log(`[session-manager] Verified effective thinking level "${effective}" for session ${session.id}`);
 		}
 	}
 
@@ -9211,6 +9252,7 @@ export class SessionManager {
 		projectId?: string;
 		spawnPinnedModel?: string;
 		spawnPinnedThinkingLevel?: string;
+		effectiveThinkingLevel?: ThinkingLevel;
 		repoPath?: string;
 		branch?: string;
 		repoWorktrees?: Record<string, string>;
@@ -9256,6 +9298,7 @@ export class SessionManager {
 				projectId: ps?.projectId || s.projectId,
 				spawnPinnedModel: s.spawnPinnedModel,
 				spawnPinnedThinkingLevel: s.spawnPinnedThinkingLevel,
+				effectiveThinkingLevel: ps?.effectiveThinkingLevel,
 				repoPath: ps?.repoPath || s.repoPath,
 				branch: ps?.branch || s.branch,
 				repoWorktrees: ps?.repoWorktrees || (s.repoWorktrees ? Object.fromEntries(s.repoWorktrees.map(w => [w.repo, w.worktreePath])) : undefined),
@@ -9585,7 +9628,12 @@ export class SessionManager {
 			const initModel = this.resolveInitialModel(role.name, session.projectId);
 			if (initModel) bridgeOptions.initialModel = initModel;
 		}
-		const initThinking = this.resolveInitialThinkingLevel(role.name, session.projectId);
+		const initThinking = this.resolveThinkingLevelForModel(
+			bridgeOptions.initialModel,
+			role.name,
+			session.projectId,
+			respawnPersisted?.effectiveThinkingLevel,
+		);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 
 		// Role assignment is an in-place rehydration, so the replacement must stay
@@ -9659,6 +9707,12 @@ export class SessionManager {
 				await this.switchSessionForRehydration(rpcClient, rolePs, agentSessionFile);
 			}
 			await this.tryAutoSelectModel(stagedSession);
+			try {
+				await this.tryApplyDefaultThinkingLevel(stagedSession);
+			} catch (err) {
+				if (respawnPersisted?.effectiveThinkingLevel !== undefined) throw err;
+				console.warn(`[session-manager] Legacy session ${id} could not verify effective thinking during role replacement:`, err);
+			}
 
 			// Another lifecycle replacement may have won while this bridge was being
 			// prepared. Never stop or overwrite that newer canonical session; the catch
@@ -9896,9 +9950,13 @@ export class SessionManager {
 		this._writeModelNameFile(sessionId, modelId);
 	}
 
-	/** Persist model provider/id so archived sessions can display model info. */
-	persistSessionModel(sessionId: string, provider: string, modelId: string): void {
-		this.resolveStoreForSession(sessionId).update(sessionId, { modelProvider: provider, modelId });
+	/** Persist a verified provider/model/effective-thinking tuple atomically. */
+	persistSessionModel(sessionId: string, provider: string, modelId: string, effectiveThinkingLevel?: ThinkingLevel): void {
+		this.resolveStoreForSession(sessionId).update(sessionId, {
+			modelProvider: provider,
+			modelId,
+			...(effectiveThinkingLevel !== undefined ? { effectiveThinkingLevel } : {}),
+		});
 	}
 
 	/** Persist per-session image generation model override. Validates against the
@@ -11961,7 +12019,12 @@ export class SessionManager {
 				const initModel = this.resolveInitialModel(session.role, session.projectId);
 				if (initModel) bridgeOptions.initialModel = initModel;
 			}
-			const initThinking = this.resolveInitialThinkingLevel(session.role, session.projectId);
+			const initThinking = this.resolveThinkingLevelForModel(
+				bridgeOptions.initialModel,
+				session.role,
+				session.projectId,
+				forceRespawnPersisted?.effectiveThinkingLevel,
+			);
 			if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 			this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, forceRespawnPersisted?.modelProvider);
 
@@ -12047,6 +12110,12 @@ export class SessionManager {
 
 			try {
 				await this.tryAutoSelectModel(session);
+				try {
+					await this.tryApplyDefaultThinkingLevel(session);
+				} catch (err) {
+					if (forceRespawnPersisted?.effectiveThinkingLevel !== undefined) throw err;
+					console.warn(`[session-manager] Legacy session ${id} could not verify effective thinking during force-abort recovery:`, err);
+				}
 			} catch (err) {
 				unsub();
 				await rpcClient.stop().catch(() => {});
