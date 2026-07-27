@@ -18,9 +18,9 @@ import {
 	type NormalizeVisibleMessageContext,
 } from "./message-author.js";
 import {
-	canonicalToolCallArguments,
+	canonicalToolCallArgumentDetails,
 	canonicalToolCallName,
-	canonicalToolResultBody,
+	canonicalToolResultBodyDetails,
 	CanonicalTranscriptValueError,
 	isWellFormedUnicode,
 	scalarSafePrefix,
@@ -137,6 +137,10 @@ export interface AgentTranscriptMessage {
 	textTruncated?: boolean;
 	thinking?: string;
 	thinkingTruncated?: boolean;
+	stopReason?: string;
+	stopReasonTruncated?: boolean;
+	errorSummary?: string;
+	errorSummaryTruncated?: boolean;
 	/** Legacy type compatibility only; canonical agent rows use authorRef. */
 	author?: MessageAuthor;
 	authorRef?: string;
@@ -1126,7 +1130,7 @@ function buildCanonicalTranscriptIndex(
 			if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
 			const block = candidate as Record<string, unknown>;
 			if (block.type !== "tool_use" && block.type !== "toolCall") continue;
-			const args = canonicalToolCallArguments(block);
+			const args = canonicalToolCallArgumentDetails(block);
 			const call: CanonicalCall = {
 				messageIndex: message.index,
 				blockIndex,
@@ -1166,7 +1170,7 @@ function buildCanonicalTranscriptIndex(
 			const correlatedCall = correlationId
 				? findNearestPrecedingCall(allCallsById.get(correlationId) ?? [], message.index, source.blockIndex)
 				: undefined;
-			const canonical = canonicalToolResultBody(source.direct);
+			const canonical = canonicalToolResultBodyDetails(source.direct);
 			const size: ToolResultSize = {
 				type: canonical.type,
 				...(canonical.blocks !== undefined ? { blocks: canonical.blocks } : {}),
@@ -1396,6 +1400,18 @@ function projectAgentMessage(
 		...(text.length < fullText.length ? { textTruncated: true } : {}),
 	};
 	if (message.author) out.authorRef = refForAuthor(message.author, state);
+	const stopReason = ownValidString(message.fullMessage, "stopReason")
+		?? ownValidString(message.fullMessage, "stop_reason");
+	if (stopReason) {
+		out.stopReason = scalarSafePrefix(stopReason, AGENT_ROLE_LIMIT);
+		if (out.stopReason.length < stopReason.length) out.stopReasonTruncated = true;
+	}
+	const fullError = ownValidString(message.fullMessage, "errorMessage")
+		?? ownValidString(message.fullMessage, "error_message");
+	if (fullError) {
+		out.errorSummary = scalarSafePrefix(fullError, AGENT_THINKING_LIMIT);
+		if (out.errorSummary.length < fullError.length) out.errorSummaryTruncated = true;
+	}
 	if (options.verbose) {
 		const fullThinking = thinkingSegments(message).join("\n");
 		if (fullThinking) {

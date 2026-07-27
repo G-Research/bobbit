@@ -169,7 +169,7 @@ function appendCanonicalLeaves(value: unknown, leaves: string[]): void {
 	leaves.push(stableTranscriptJson(block));
 }
 
-export interface CanonicalToolResultBody {
+export interface CanonicalToolResultBodyDetails {
 	text: string;
 	type: CanonicalResultOuterType;
 	blocks?: number;
@@ -190,7 +190,7 @@ function outerType(value: unknown, found: boolean): CanonicalResultOuterType {
  * excerpts must all consume the returned `text` rather than re-traversing raw
  * provider blocks.
  */
-export function canonicalToolResultBody(result: Record<string, unknown>): CanonicalToolResultBody {
+export function canonicalToolResultBodyDetails(result: Record<string, unknown>): CanonicalToolResultBodyDetails {
 	const selected = firstOwnDefined(result, RESULT_BODY_KEYS);
 	const leaves: string[] = [];
 	if (selected.found) appendCanonicalLeaves(selected.value, leaves);
@@ -204,6 +204,11 @@ export function canonicalToolResultBody(result: Record<string, unknown>): Canoni
 	};
 }
 
+/** Canonical text used verbatim by search, metrics, digests, and slices. */
+export function canonicalToolResultBody(result: Record<string, unknown>): string {
+	return canonicalToolResultBodyDetails(result).text;
+}
+
 function validSemanticString(value: unknown): value is string {
 	return typeof value === "string" && value.length > 0 && isWellFormedUnicode(value);
 }
@@ -215,16 +220,22 @@ export function canonicalToolCallName(call: Record<string, unknown>): string {
 	return "unknown";
 }
 
-export interface CanonicalToolCallArguments {
+export interface CanonicalToolCallArgumentDetails {
 	present: boolean;
 	text: string;
 }
 
-export function canonicalToolCallArguments(call: Record<string, unknown>): CanonicalToolCallArguments {
+export function canonicalToolCallArgumentDetails(call: Record<string, unknown>): CanonicalToolCallArgumentDetails {
 	const selected = firstOwnDefined(call, ["arguments", "input"]);
 	if (!selected.found) return { present: false, text: "" };
 	if (typeof selected.value === "string") {
 		return { present: true, text: requireWellFormedUnicode(selected.value, "tool call arguments") };
 	}
 	return { present: true, text: stableTranscriptJson(selected.value) };
+}
+
+/** Undefined means that neither provider argument field was present. */
+export function canonicalToolCallArguments(call: Record<string, unknown>): string | undefined {
+	const details = canonicalToolCallArgumentDetails(call);
+	return details.present ? details.text : undefined;
 }
