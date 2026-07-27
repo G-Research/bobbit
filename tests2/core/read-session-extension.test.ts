@@ -27,12 +27,14 @@ type ExecuteFn = (
 	ctx?: unknown,
 ) => Promise<any>;
 
-function makeStubApi(): { api: any; getExecute: () => ExecuteFn } {
+function makeStubApi(): { api: any; getExecute: () => ExecuteFn; getConfig: () => any } {
 	let captured: ExecuteFn | null = null;
+	let capturedConfig: any;
 	const api = {
 		registerTool(config: any) {
 			if (config?.name === "read_session" && typeof config?.execute === "function") {
 				captured = config.execute.bind(config);
+				capturedConfig = config;
 			}
 		},
 	};
@@ -41,6 +43,10 @@ function makeStubApi(): { api: any; getExecute: () => ExecuteFn } {
 		getExecute: () => {
 			if (!captured) throw new Error("read_session execute was not registered");
 			return captured;
+		},
+		getConfig: () => {
+			if (!capturedConfig) throw new Error("read_session config was not registered");
+			return capturedConfig;
 		},
 	};
 }
@@ -110,8 +116,12 @@ describe("shared context-heavy guard", () => {
 
 describe("read_session extension context-heavy guard", () => {
 	let execute: ExecuteFn;
+	let toolConfig: any;
 	const envBackup: Record<string, string | undefined> = {};
 	let realFetch: typeof globalThis.fetch;
+	let responseOk = true;
+	let responseStatus = 200;
+	let responseBody: any;
 	const seenUrls: string[] = [];
 
 	beforeAll(() => {
@@ -126,21 +136,25 @@ describe("read_session extension context-heavy guard", () => {
 		globalThis.fetch = (async (url: any) => {
 			seenUrls.push(String(url));
 			return {
-				ok: true,
-				status: 200,
+				ok: responseOk,
+				status: responseStatus,
 				async json() {
-					return { total: 1, returned: 1, offsetStart: 0, offsetEnd: 0, messages: [] };
+					return responseBody;
 				},
 			} as any;
 		}) as any;
 
-		const { api, getExecute } = makeStubApi();
+		const { api, getExecute, getConfig } = makeStubApi();
 		registerAgentExtension(api);
 		execute = getExecute();
+		toolConfig = getConfig();
 	});
 
 	beforeEach(() => {
 		seenUrls.length = 0;
+		responseOk = true;
+		responseStatus = 200;
+		responseBody = { total: 1, returned: 0, offsetStart: -1, offsetEnd: -1, messages: [] };
 	});
 
 	afterAll(() => {
@@ -160,6 +174,93 @@ describe("read_session extension context-heavy guard", () => {
 		assert.equal(url.searchParams.has("limit"), false);
 		assert.equal(url.searchParams.has("verbose"), false);
 		assert.equal(url.searchParams.get("include_tool_results"), "0");
+		assert.equal(url.searchParams.has("result_handle"), false);
+		assert.equal(url.searchParams.has("result_cursor"), false);
+		assert.equal(url.searchParams.has("result_limit"), false);
+	});
+
+	it("registers result-slice parameters and compact-first guidance", () => {
+		assert.deepEqual(
+			Object.keys(toolConfig.parameters.properties).filter((key) => key.startsWith("result_")),
+			["result_handle", "result_cursor", "result_limit"],
+		);
+		const guidance = toolConfig.promptGuidelines.join(" ");
+		assert.match(guidance, /small compact tail or regex page/i);
+		assert.match(guidance, /result_handle/);
+		assert.match(guidance, /nextCursor/);
+		assert.match(guidance, /without overlapping/i);
+		assert.match(guidance, /stop as soon as/i);
+	});
+
+	it("forwards a targeted result handle, zero cursor, and bounded slice limit", async () => {
+		const result = await execute("toolu_READ", {
+			session_id: "target-session",
+			result_handle: "rs1:m6h:b0:NUBAzC7icgMYwEPyuR8OFQyx29U",
+			result_cursor: 0,
+			result_limit: 8192,
+		});
+		assert.notEqual(result.isError, true);
+		assert.equal(seenUrls.length, 1);
+		const url = new URL(seenUrls[0]);
+		assert.equal(url.searchParams.get("result_handle"), "rs1:m6h:b0:NUBAzC7icgMYwEPyuR8OFQyx29U");
+		assert.equal(url.searchParams.get("result_cursor"), "0");
+		assert.equal(url.searchParams.get("result_limit"), "8192");
+	});
+
+	it("returns canonical partial envelopes once and keeps details scalar-only", async () => {
+		const messages = [{
+			index: 7,
+			role: "assistant",
+			toolResults: [{ name: "bash", status: "ok", omitted: true }],
+		}];
+		responseBody = {
+			total: 12,
+			matchCount: 3,
+			returned: 1,
+			offsetStart: 7,
+			offsetEnd: 7,
+			nextOffset: 2,
+			messages,
+			partial: true,
+			truncatedBy: "transport_budget",
+			continuationRequest: { kind: "page", offset: 2 },
+			authors: { a1: { kind: "agent", label: "Reviewer" } },
+			correlations: { t1: { name: "bash", messageIndex: 7, blockIndex: 0 } },
+		};
+		const sessionId = `${"x".repeat(63)}😀suffix`;
+
+		const result = await execute("toolu_READ", { session_id: sessionId });
+
+		assert.deepEqual(JSON.parse(result.content[0].text), responseBody);
+		assert.deepEqual(result.details, {
+			session_id: "x".repeat(63),
+			sessionIdTruncated: true,
+			total: 12,
+			matchCount: 3,
+			returned: 1,
+			offsetStart: 7,
+			offsetEnd: 7,
+			nextOffset: 2,
+		});
+		assert.equal("messages" in result.details, false);
+		assert.equal("authors" in result.details, false);
+		assert.equal("correlations" in result.details, false);
+		assert.equal(JSON.stringify(result.details).includes("toolResults"), false);
+	});
+
+	it("preserves structured gateway errors for result slices", async () => {
+		responseOk = false;
+		responseStatus = 400;
+		responseBody = { error: "INVALID_RESULT_CURSOR", detail: "cursor splits a Unicode scalar" };
+
+		const result = await execute("toolu_READ", {
+			session_id: "target-session",
+			result_handle: "rs1:m0:b0:invalid",
+			result_cursor: 2,
+		});
+
+		assert.deepEqual(parseToolError(result), responseBody);
+		assert.equal(seenUrls.length, 1);
 	});
 
 	it.each([
@@ -195,6 +296,21 @@ describe("read_session extension context-heavy guard", () => {
 		assert.equal(error.error, formatContextHeavyLimitGuidance([flag]));
 	});
 
+	it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "10"])(
+		"rejects non-integer or non-number heavy limit %s before fetching",
+		async (limit) => {
+			const result = await execute("toolu_READ", {
+				session_id: "target-session",
+				limit,
+				verbose: true,
+			});
+			const error = parseToolError(result);
+			assert.equal(seenUrls.length, 0);
+			assert.equal(error.code, CONTEXT_HEAVY_ERROR_CODE);
+			assert.equal(error.error, formatContextHeavyLimitGuidance(["verbose"]));
+		},
+	);
+
 	it("names both active flags in canonical order", async () => {
 		const result = await execute("toolu_READ", {
 			session_id: "target-session",
@@ -212,6 +328,7 @@ describe("read_session extension context-heavy guard", () => {
 	it.each([
 		["verbose", { verbose: true }, "1", "0"],
 		["include_tool_results", { include_tool_results: true }, null, "1"],
+		["both heavy flags", { verbose: true, include_tool_results: true }, "1", "1"],
 	] as const)("allows %s at the cap and forwards it unchanged", async (_flag, heavyParams, verbose, toolResults) => {
 		const result = await execute("toolu_READ", {
 			session_id: "target-session",

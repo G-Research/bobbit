@@ -147,6 +147,61 @@ interface ReadSessionParams {
 	context?: number;
 	verbose?: boolean;
 	include_tool_results?: boolean;
+	result_handle?: string;
+	result_cursor?: number;
+	result_limit?: number;
+}
+
+interface ReadSessionDetails {
+	session_id: string;
+	sessionIdTruncated: boolean;
+	total?: number;
+	matchCount?: number;
+	returned?: number;
+	offsetStart?: number;
+	offsetEnd?: number;
+	nextOffset?: number | null;
+}
+
+const READ_SESSION_DETAILS_SESSION_ID_MAX_CHARS = 64;
+
+/** Bound renderer-only identity without splitting an astral Unicode scalar. */
+function boundedSessionId(value: string): { value: string; truncated: boolean } {
+	if (value.length <= READ_SESSION_DETAILS_SESSION_ID_MAX_CHARS) {
+		return { value, truncated: false };
+	}
+	let end = READ_SESSION_DETAILS_SESSION_ID_MAX_CHARS;
+	const previous = value.charCodeAt(end - 1);
+	const next = value.charCodeAt(end);
+	if (previous >= 0xD800 && previous <= 0xDBFF && next >= 0xDC00 && next <= 0xDFFF) {
+		end -= 1;
+	}
+	return { value: value.slice(0, end), truncated: true };
+}
+
+/**
+ * Keep renderer details intentionally small. The canonical envelope lives only
+ * in content[0].text; duplicating messages here previously doubled persisted
+ * tool-result size. Unknown/non-scalar envelope fields are never copied.
+ */
+function readSessionDetails(params: ReadSessionParams, envelope: unknown): ReadSessionDetails {
+	const sessionId = boundedSessionId(params.session_id);
+	const details: ReadSessionDetails = {
+		session_id: sessionId.value,
+		sessionIdTruncated: sessionId.truncated,
+	};
+	if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) return details;
+
+	const source = envelope as Record<string, unknown>;
+	for (const key of ["total", "matchCount", "returned", "offsetStart", "offsetEnd"] as const) {
+		const value = source[key];
+		if (typeof value === "number" && Number.isSafeInteger(value)) details[key] = value;
+	}
+	const nextOffset = source.nextOffset;
+	if (nextOffset === null || (typeof nextOffset === "number" && Number.isSafeInteger(nextOffset))) {
+		details.nextOffset = nextOffset;
+	}
+	return details;
 }
 
 type SessionPromptMode = "prompt" | "steer";
@@ -173,6 +228,9 @@ async function callReadSessionEndpoint(
 	if (params.context !== undefined) qs.set("context", String(params.context));
 	if (params.verbose) qs.set("verbose", "1");
 	qs.set("include_tool_results", params.include_tool_results ? "1" : "0");
+	if (params.result_handle !== undefined) qs.set("result_handle", params.result_handle);
+	if (params.result_cursor !== undefined) qs.set("result_cursor", String(params.result_cursor));
+	if (params.result_limit !== undefined) qs.set("result_limit", String(params.result_limit));
 	const suffix = qs.toString() ? `?${qs.toString()}` : "";
 	const headers: Record<string, string> = {
 		"Authorization": `Bearer ${token}`,
@@ -306,25 +364,27 @@ const extension: ExtensionFactory = (pi) => {
 	pi.registerTool({
 		name: "read_session",
 		label: "Read Session",
-		description: "Read another session's transcript. Paginated, regex-filterable.",
+		description: "Read another session's transcript compact-first, with regex paging and bounded result slices.",
 		promptSnippet:
-			"read_session - Read another session's transcript with pagination and regex filtering.",
+			"read_session - Inspect another session compact-first; narrow by regex/index, then slice one result by handle if needed.",
 		promptGuidelines: [
-			"Default omits tool result bodies; use include_tool_results:true only for narrow, deliberate raw-output reads",
-			"verbose:true or include_tool_results:true requires an explicit limit <= 10; fetch additional raw content in smaller batches and watch token use",
-			"Use verbose:true for full message blocks; it still omits tool results unless include_tool_results:true is also set",
-			"Tail with offset:-N, limit:N (e.g. -20, 20 for the last 20 messages)",
-			"Find specific events with pattern (regex), then use context:1..5 to expand matches by ±N neighbours",
+			"Fetch session metadata once, then start with a small compact tail or regex page; compact rows include tool names, statuses, indexes, and result sizes",
+			"Follow returned page offsets without overlapping prior windows, and stop as soon as the diagnostic question is answered",
+			"Retrieve result text only by returned result_handle with a bounded result_cursor/result_limit slice; continue from excerpt.nextCursor only if needed",
+			"verbose:true or include_tool_results:true requires an explicit integer limit <= 10; neither flag permits an unbounded result body",
 		],
 		parameters: Type.Object({
 			session_id: Type.String(),
 			offset: Type.Optional(Type.Number({ description: "Default 0. Negative indexes from end." })),
-			limit: Type.Optional(Type.Number({ description: "Default 20; heavy flags require explicit 1..10." })),
-			pattern: Type.Optional(Type.String({ description: "Regex filter on message text and tool blocks." })),
+			limit: Type.Optional(Type.Number({ description: "Default 20; heavy flags require an explicit integer 1..10." })),
+			pattern: Type.Optional(Type.String({ description: "Regex filter over full server-side message, call, and result search text." })),
 			case_sensitive: Type.Optional(Type.Boolean()),
 			context: Type.Optional(Type.Number({ description: "Expand each match by ±N neighbours (0..5)." })),
-			verbose: Type.Optional(Type.Boolean({ description: "Full content blocks; requires explicit limit <= 10." })),
-			include_tool_results: Type.Optional(Type.Boolean({ description: "Raw tool results; default false. Requires explicit limit <= 10." })),
+			verbose: Type.Optional(Type.Boolean({ description: "Expanded semantic blocks; requires explicit integer limit <= 10." })),
+			include_tool_results: Type.Optional(Type.Boolean({ description: "Bounded result excerpts; default false. Requires explicit integer limit <= 10." })),
+			result_handle: Type.Optional(Type.String({ description: "Handle from result metadata for one targeted bounded excerpt." })),
+			result_cursor: Type.Optional(Type.Number({ description: "UTF-16 cursor for result_handle; default 0." })),
+			result_limit: Type.Optional(Type.Number({ description: "Requested UTF-16 units for a result slice; default 4096, range 1..8192." })),
 		}),
 
 		async execute(_toolCallId, params) {
@@ -357,15 +417,7 @@ const extension: ExtensionFactory = (pi) => {
 			const envelope = result.body;
 			return {
 				content: [{ type: "text", text: JSON.stringify(envelope) }],
-				details: {
-					session_id: (params as ReadSessionParams).session_id,
-					total: envelope?.total,
-					matchCount: envelope?.matchCount,
-					returned: envelope?.returned,
-					offsetStart: envelope?.offsetStart,
-					offsetEnd: envelope?.offsetEnd,
-					messages: envelope?.messages,
-				},
+				details: readSessionDetails(params as ReadSessionParams, envelope),
 			};
 		},
 	});
