@@ -1,6 +1,6 @@
 # Releasing Bobbit
 
-This doc covers the Bobbit release checks that cannot be inferred from a normal development checkout: the installed consumer's security report and the bundled `fd`/`rg` binaries. The root `bobbit` package itself is published automatically by [`.github/workflows/release-publish.yml`](../.github/workflows/release-publish.yml) (npm trusted publishing / OIDC, with provenance) when a `v*` tag is pushed; only the binary sub-packages below are published manually.
+This doc covers the Bobbit release checks that cannot be inferred from a normal development checkout: the installed consumer's security report and the bundled `fd`/`rg` binaries. The root `@gresearch/bobbit` package itself is published automatically by [`.github/workflows/release-publish.yml`](../.github/workflows/release-publish.yml) (npm trusted publishing / OIDC, with provenance) when a `v*` tag is pushed; only the binary sub-packages below are published manually.
 
 ## Required packed-consumer audit
 
@@ -146,7 +146,7 @@ npm pack ./binaries/binaries-$(node -e 'console.log(process.platform+"-"+process
 mkdir /tmp/bobbit-smoke && cd /tmp/bobbit-smoke && npm init -y
 npm install /path/to/bobbit-*.tgz
 ls node_modules/@bobbit/binaries-*/bin/
-node -e "import('bobbit/dist/server/binaries.js').then(m => console.log(m.getFdPath(), m.getRgPath()))"
+node -e "import('@gresearch/bobbit/dist/server/binaries.js').then(m => console.log(m.getFdPath(), m.getRgPath()))"
 ```
 
 ### Docker sandbox

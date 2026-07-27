@@ -7,9 +7,9 @@ argument-hint: [major|minor|patch|<explicit-version>]
 Drive an end-to-end release of Bobbit. The maintainer (human) must be at the
 keyboard to sign the tag, and for `npm login` / OTP prompts **only when
 republishing binary sub-packages** — pause and ask when the flow needs them.
-The root `bobbit` package publishes automatically via CI (npm trusted
-publishing / OIDC) when the signed tag is pushed; **never** run a manual root
-`npm publish`.
+The root `@gresearch/bobbit` package publishes automatically via CI (npm
+trusted publishing / OIDC) when the signed tag is pushed; **never** run a
+manual root `npm publish`.
 
 Single source of truth for release mechanics: [`docs/releasing.md`](../../../docs/releasing.md).
 This skill orchestrates that doc + version bump + notes + GitHub release.
@@ -52,7 +52,7 @@ so the session/primary worktree state is irrelevant. What matters is that
 
 **Stop and ask the user** if any of:
 - `origin/master` has nothing new since the previous tag (nothing to release), or it isn't the commit they expect to ship.
-- `npm whoami` fails **and** step 3 will republish binary sub-packages — ask them to run `npm login` (and enable 2FA if not already; npm requires OTP for those sub-package publishes). The root `bobbit` publish needs no npm login — it goes through CI/OIDC.
+- `npm whoami` fails **and** step 3 will republish binary sub-packages — ask them to run `npm login` (and enable 2FA if not already; npm requires OTP for those sub-package publishes). The root `@gresearch/bobbit` publish needs no npm login — it goes through CI/OIDC.
 - `gh auth status` not logged in — ask them to run `gh auth login`.
 - No GPG/SSH signing key configured — confirm whether to proceed with **unsigned** tag or wait until they set one up. Default to waiting.
 
@@ -206,7 +206,7 @@ be the commit that lands on `master`.
 
 ## 7. Publish binary sub-packages (only if step 3 bumped binaries)
 
-**The root `bobbit` package is NOT published here.** It publishes automatically
+**The root `@gresearch/bobbit` package is NOT published here.** It publishes automatically
 via the `.github/workflows/release-publish.yml` workflow (npm trusted publishing
 / OIDC, with provenance) when the signed tag is pushed in §8 — there is no manual
 root `npm publish`. Skip straight to §8 unless step 3 bumped the binary
@@ -258,7 +258,7 @@ pause and confirm with the user before the `git push`:
 ```bash
 git tag -s v<new-version> "$MERGE_SHA" -m "Bobbit v<new-version>"
 git tag -v v<new-version>
-git push origin v<new-version>       # -> release-publish.yml publishes bobbit to npm (OIDC + provenance)
+git push origin v<new-version>       # -> release-publish.yml publishes @gresearch/bobbit to npm (OIDC + provenance)
 ```
 
 If the user explicitly opted out of signing in step 0, use `git tag -a`
@@ -305,9 +305,9 @@ In a scratch directory, prove the published artefact actually installs and resol
 
 ```bash
 cd $(mktemp -d) && npm init -y >/dev/null
-npm install bobbit@<new-version>
+npm install @gresearch/bobbit@<new-version>
 ls node_modules/@bobbit/binaries-*/bin/
-node -e "import('bobbit/dist/server/binaries.js').then(m => console.log(m.getFdPath(), m.getRgPath()))"
+node -e "import('@gresearch/bobbit/dist/server/binaries.js').then(m => console.log(m.getFdPath(), m.getRgPath()))"
 ```
 
 Both paths should print a real file. If they're `undefined`, the platform sub-package didn't install — investigate before announcing the release.
@@ -330,7 +330,7 @@ the same checkout.
 
 Report to the user:
 - Version + tag + GitHub release URL (`gh release view v<new-version> --json url -q .url`)
-- npm package URL (`https://www.npmjs.com/package/bobbit/v/<new-version>`) — provenance is attached automatically by CI
+- npm package URL (`https://www.npmjs.com/package/@gresearch/bobbit/v/<new-version>`) — provenance is attached automatically by CI
 - Whether binaries were republished, and which versions
 - Root and packed-consumer audit results (both must be clean)
 

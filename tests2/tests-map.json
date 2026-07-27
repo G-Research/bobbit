@@ -499,7 +499,7 @@
     },
     {
       "path": "tests2/dom/cold-session-workspace-ordering-repro.test.ts",
-      "reason": "Failing-first deterministic DOM regression around real connectToSession and RemoteAgent handshakes: a controlled WebSocket and delayed side-panel workspace fetch prove get_messages and a 321-row transcript do not wait for REST hydration, initial hydration has one owner, late abandoned-session workspace responses cannot replace foreground mirrors, reconnect hydration remains intact, and cached switch-back creates no new socket or workspace request. Failure token COLD_SESSION_LOAD_ORDERING_REGRESSION.",
+      "reason": "Failing-first deterministic DOM regression around real connectToSession and RemoteAgent handshakes: a controlled WebSocket and delayed side-panel workspace fetch prove get_messages and a 321-row transcript do not wait for REST hydration, initial hydration has one owner, server project proposals survive empty and stale nonempty client-draft restore races, late abandoned-session workspace responses cannot replace foreground mirrors, reconnect hydration remains intact, and cached switch-back creates no new socket or workspace request. Failure tokens COLD_SESSION_LOAD_ORDERING_REGRESSION and PROJECT_PROPOSAL_DRAFT_RESTORE_RACE.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -940,7 +940,7 @@
     },
     {
       "path": "tests2/core/release-skill-preflight-order.test.ts",
-      "reason": "Pins the clean-release pre-flight order so the build emits dist/server declarations before tsconfig.tests2 follows intentional runtime imports of those artifacts.",
+      "reason": "Pins the scoped npm identity used by release verification/reporting and the clean-release pre-flight order required by emitted test declarations.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

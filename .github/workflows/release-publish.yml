@@ -40,5 +40,5 @@ jobs:
             *-*) DIST_TAG=next ;;
             *)   DIST_TAG=latest ;;
           esac
-          echo "publishing bobbit to dist-tag: $DIST_TAG"
+          echo "publishing @gresearch/bobbit to dist-tag: $DIST_TAG"
           npm publish --provenance --tag "$DIST_TAG" --loglevel verbose
