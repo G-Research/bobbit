@@ -116,7 +116,9 @@ export interface RpcBridgeOptions {
 	/** Tool manager for resolving extension paths (optional — falls back to TOOLS_DIR). */
 	toolManager?: ToolManager;
 	/**
-	 * Pin the agent's model at spawn time via `--model <provider>/<modelId>`.
+	 * Pin the agent's exact provider/model at spawn time via separate
+	 * `--provider <provider> --model <modelId>` flags. The `<provider>/<modelId>`
+	 * value is split at only the first slash so nested model IDs remain intact.
 	 * Avoids the redundant initial `model_change` event that pi-coding-agent
 	 * emits when booting with its hardcoded default before Bobbit calls
 	 * `setModel`. Silently ignored if malformed.
@@ -124,7 +126,7 @@ export interface RpcBridgeOptions {
 	initialModel?: string;
 	/**
 	 * Pin the agent's thinking level at spawn time via `--thinking <level>`.
-	 * Valid: off|minimal|low|medium|high. Silently ignored otherwise.
+	 * Valid: off|minimal|low|medium|high|xhigh|max. Silently ignored otherwise.
 	 */
 	initialThinkingLevel?: string;
 	/** Timer/clock implementation. Defaults to real timers. */
@@ -241,9 +243,9 @@ export function registerRpcBridgeFactory(factory: RpcBridgeFactory | null): void
  * Build the pi-coding-agent CLI arg list from RpcBridgeOptions.
  *
  * Exported for unit testing (mocking child_process.spawn is brittle).
- * Order matters: --model and --thinking are inserted BEFORE caller-supplied
- * `options.args` so any explicit override in `args` (e.g. `--model x` from
- * a custom flow) wins over the spawn-time pin.
+ * Order matters: --provider, --model, and --thinking are inserted BEFORE
+ * caller-supplied `options.args` so any explicit override in `args` (e.g.
+ * `--model x` from a custom flow) wins over the spawn-time pin.
  *
  * `--no-approve` (pi 0.79.0 project-trust gate) is ALWAYS present AND
  * NON-OVERRIDABLE: Bobbit injects all config via ~/.bobbit/agent + RPC args and
@@ -316,7 +318,9 @@ export function buildAgentArgs(options: RpcBridgeOptions): string[] {
 	if (options.initialModel) {
 		const slash = options.initialModel.indexOf("/");
 		if (slash > 0 && slash < options.initialModel.length - 1) {
-			args.push("--model", options.initialModel);
+			const provider = options.initialModel.slice(0, slash);
+			const modelId = options.initialModel.slice(slash + 1);
+			args.push("--provider", provider, "--model", modelId);
 		}
 	}
 	if (options.initialThinkingLevel) {

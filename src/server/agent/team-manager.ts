@@ -48,6 +48,8 @@ import {
 	type RecoveryFs,
 } from "./bounded-async-work.js";
 import { isHeadquartersProject } from "./project-registry.js";
+import { isSessionSelectableModelString } from "./google-code-assist.js";
+import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
 
 const execFile = promisify(execFileCb);
 
@@ -2103,6 +2105,36 @@ export class TeamManager {
 		// invoking the team_spawn MCP tool) bypass REST. Defense-in-depth.
 		if (goal.paused) throw new GoalPausedError(goalId);
 
+		// A worker role overrides each field independently; otherwise inherit the
+		// lead's verified durable tuple. Resolve and clamp the pair here so host and
+		// sandbox workers receive the same exact model/effective-thinking selection.
+		const persistedTeamLead = entry.teamLeadSessionId
+			? this.sessionManager.getPersistedSession(entry.teamLeadSessionId) as {
+				modelProvider?: string;
+				modelId?: string;
+				effectiveThinkingLevel?: string;
+			} | undefined
+			: undefined;
+		const inheritedModel = persistedTeamLead?.modelProvider && persistedTeamLead.modelId
+			? `${persistedTeamLead.modelProvider}/${persistedTeamLead.modelId}`
+			: undefined;
+		const initialModel = storedRoleDef.model || inheritedModel;
+		const modelSlash = initialModel?.indexOf("/") ?? -1;
+		const modelProvider = initialModel && modelSlash > 0 ? initialModel.slice(0, modelSlash) : undefined;
+		if (initialModel && (modelProvider === "kimi-coding" || !isSessionSelectableModelString(initialModel))) {
+			throw new Error(`Team worker model "${initialModel}" is not session-selectable`);
+		}
+		let initialThinkingLevel = initialModel
+			? storedRoleDef.thinkingLevel || persistedTeamLead?.effectiveThinkingLevel
+			: undefined;
+		if (initialModel && modelProvider && initialThinkingLevel) {
+			initialThinkingLevel = clampThinkingLevelForModel(
+				initialThinkingLevel,
+				modelProvider,
+				initialModel.slice(modelSlash + 1),
+			);
+		}
+
 		// repoPath is only set when the goal's cwd is inside a git repo.
 		// If absent, skip worktree creation and use the goal's cwd directly.
 		// Headquarters never gets member worktrees, even if a legacy goal record
@@ -2292,10 +2324,10 @@ export class TeamManager {
 					// The base branch is local-ref-first because sandbox goal branches may be unpublished.
 					sandboxBranch: memberSandboxed && branchName ? branchName : undefined,
 					sandboxBaseBranch: memberSandboxed && branchName ? memberStartPoint : undefined,
-					// Honour role-level model / thinking-level override (cascade-resolved above).
-					// Empty string falls through to undefined → system default.
-					initialModel: storedRoleDef.model || undefined,
-					initialThinkingLevel: storedRoleDef.thinkingLevel || undefined,
+					// Role overrides win field-by-field; otherwise forward the lead's
+					// verified durable tuple, clamped together above.
+					initialModel,
+					initialThinkingLevel,
 				},
 			);
 

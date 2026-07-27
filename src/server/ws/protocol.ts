@@ -121,7 +121,7 @@ export type ClientMessage =
 	| { type: "remove_queued"; messageId: string }
 	| { type: "abort" }
 	| { type: "retry" }
-	| { type: "set_model"; provider: string; modelId: string }
+	| { type: "set_model"; provider: string; modelId: string; thinkingLevel?: string }
 	| { type: "set_image_model"; provider: string; modelId: string }
 	| { type: "set_thinking_level"; level: string }
 	| { type: "compact" }

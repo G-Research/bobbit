@@ -18,7 +18,7 @@ const stateDir = path.resolve("/memfs/models-test");
 
 // Import after setup
 const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
-const { getAvailableModels, getBuiltInProviderIds, invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
+const { findSessionSelectableModel, getAvailableModels, getBuiltInProviderIds, invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
 
 const prefs = new PreferencesStore(stateDir, memfs);
 
@@ -64,6 +64,43 @@ describe("Model registry", () => {
 		}
 	});
 
+	it("preserves exact Pi 0.82.1 Anthropic and Bedrock Claude Opus 5 catalog metadata", () => {
+		const cases = [
+			{ provider: "anthropic", id: "claude-opus-5", name: "Claude Opus 5", api: "anthropic-messages", baseUrl: "https://api.anthropic.com", cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 } },
+			{ provider: "amazon-bedrock", id: "au.anthropic.claude-opus-5", name: "Claude Opus 5 (AU)", api: "bedrock-converse-stream", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 } },
+			{ provider: "amazon-bedrock", id: "eu.anthropic.claude-opus-5", name: "Claude Opus 5 (EU)", api: "bedrock-converse-stream", baseUrl: "https://bedrock-runtime.eu-central-1.amazonaws.com", cost: { input: 5.5, output: 27.5, cacheRead: 0.55, cacheWrite: 6.875 } },
+			{ provider: "amazon-bedrock", id: "global.anthropic.claude-opus-5", name: "Claude Opus 5 (Global)", api: "bedrock-converse-stream", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 } },
+			{ provider: "amazon-bedrock", id: "jp.anthropic.claude-opus-5", name: "Claude Opus 5 (JP)", api: "bedrock-converse-stream", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 } },
+			{ provider: "amazon-bedrock", id: "us.anthropic.claude-opus-5", name: "Claude Opus 5 (US)", api: "bedrock-converse-stream", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 } },
+		] as const;
+
+		for (const expected of cases) {
+			const matches = models.filter((model) => model.provider === expected.provider && model.id === expected.id);
+			assert.equal(matches.length, 1, `${expected.provider}/${expected.id} should occur exactly once`);
+			const model = matches[0];
+			assert.equal(model.name, expected.name);
+			assert.equal(model.api, expected.api);
+			assert.equal(model.baseUrl, expected.baseUrl);
+			assert.equal(model.contextWindow, 1_000_000);
+			assert.equal(model.maxTokens, 128_000);
+			assert.equal(model.reasoning, true);
+			assert.deepEqual(model.input, ["text", "image"]);
+			assert.deepEqual(model.cost, expected.cost);
+			assert.deepEqual(model.thinkingLevelMap, { xhigh: "xhigh", max: "max" });
+			assert.notEqual(model.sessionSelectable, false);
+			if (expected.provider === "amazon-bedrock") {
+				assert.equal(model.compat, undefined, "Bedrock rows must not gain invented compat metadata");
+			}
+		}
+
+		const anthropic = models.find((model) => model.provider === "anthropic" && model.id === "claude-opus-5")!;
+		assert.deepEqual(anthropic.compat, {
+			forceAdaptiveThinking: true,
+			supportsTemperature: false,
+			supportsStrictTools: true,
+		});
+	});
+
 	it("built-in providers include known providers", () => {
 		const providers = new Set(models.map((m) => m.provider));
 		const hasKnown = providers.has("anthropic") || providers.has("amazon-bedrock");
@@ -88,7 +125,7 @@ describe("Model registry", () => {
 		assert.equal(model.contextWindow, 272_000);
 	});
 
-	it("exposes Pi 0.81.1 GPT-5.6 catalog entries including corrected Codex metadata", () => {
+	it("retains Pi 0.82.1 GPT-5.6 catalog entries including corrected Codex metadata", () => {
 		const requireModel = (provider: string, id: string) => {
 			const model = models.find((m) => m.provider === provider && m.id === id);
 			assert.ok(model, `${provider}/${id} should be available`);
@@ -106,7 +143,7 @@ describe("Model registry", () => {
 
 			const codex = requireModel("openai-codex", id);
 			assert.equal(codex.api, "openai-codex-responses");
-			// Pi 0.81 fixes Codex's default window to the 272K short-context tier.
+			// Pi retains Codex's corrected 272K short-context tier.
 			assert.equal(codex.contextWindow, 272_000);
 			assert.equal(codex.thinkingLevelMap?.max, "max");
 			assert.equal(codex.thinkingLevelMap?.minimal, "low");
@@ -126,7 +163,7 @@ describe("Model registry", () => {
 		}
 	});
 
-	it("adopts Pi 0.81.1 provider catalog and routing fixes through the synchronous registry", () => {
+	it("retains supported Pi 0.82.1 catalog and routing fixes through the synchronous registry", () => {
 		const requireModel = (provider: string, id: string) => {
 			const model = models.find((m) => m.provider === provider && m.id === id);
 			assert.ok(model, `${provider}/${id} should be available`);
@@ -158,6 +195,40 @@ describe("Model registry", () => {
 		const bedrock = requireModel("amazon-bedrock", "xai.grok-4.3");
 		assert.equal(bedrock.api, "bedrock-converse-stream");
 		assert.equal(bedrock.contextWindow, 1_000_000);
+	});
+
+	it("filters only exact deferred kimi-coding while preserving Kimi-named supported models", async () => {
+		assert.equal(getBuiltInProviderIds().includes("kimi-coding"), false);
+		assert.equal(models.some((model) => model.provider === "kimi-coding"), false);
+
+		for (const provider of ["moonshotai", "moonshotai-cn"]) {
+			const kimi = findSessionSelectableModel(models, provider, "kimi-k3");
+			assert.ok(kimi, `${provider}/kimi-k3 should remain session-selectable`);
+			assert.equal(kimi.provider, provider);
+		}
+
+		const supportedKimiId = { ...models[0], provider: "custom", id: "aigw/moonshotai/kimi-k3" };
+		assert.equal(
+			findSessionSelectableModel([supportedKimiId], "custom", "aigw/moonshotai/kimi-k3"),
+			supportedKimiId,
+			"the fence must not inspect model IDs",
+		);
+		assert.equal(findSessionSelectableModel([supportedKimiId], "kimi-coding", supportedKimiId.id), undefined);
+		assert.equal(
+			findSessionSelectableModel([{ ...supportedKimiId, sessionSelectable: false }], "custom", supportedKimiId.id),
+			undefined,
+			"catalog rows explicitly unavailable for sessions must remain unavailable",
+		);
+
+		try {
+			prefs.set("providerKey.kimi-coding", "deferred-provider-key");
+			invalidateModelCache();
+			const withStoredKey = await getAvailableModels(prefs);
+			assert.equal(withStoredKey.some((model) => model.provider === "kimi-coding"), false);
+		} finally {
+			prefs.remove("providerKey.kimi-coding");
+			invalidateModelCache();
+		}
 	});
 
 	it("keeps Qwen Token Plan providers upstream-only regardless of stored credentials", async () => {
