@@ -1,0 +1,87 @@
+{
+  "fixtureRevision": 1,
+  "reviewedRevisions": {
+    "workflow": "62d3ca6d4feaa3849a1830ad39ff3bf97cfcd8fd",
+    "standalonePrHead": "62e12dfd04e2673063cf219da991878f7ce23207"
+  },
+  "productionIdentity": {
+    "identicalAt": [
+      "62d3ca6d4feaa3849a1830ad39ff3bf97cfcd8fd",
+      "62e12dfd04e2673063cf219da991878f7ce23207"
+    ],
+    "paths": [
+      {
+        "path": "src/server/server.ts",
+        "sha256": "b67caed47f33743d47fc6db02a6784720efb1e3cee32f4df95348703cd34c0ec"
+      },
+      {
+        "path": "src/server/skills/git-status-envelope.ts",
+        "sha256": "3aa4b39a195c25a1b4fa6f0f67e64d31b95875e0e2283d99095794dc798e1e1e"
+      },
+      {
+        "path": "src/ui/components/GitStatusWidget.ts",
+        "sha256": "c824aed18371275197c18610e120997397b93c6a97cc437a6efb476e207f28a9"
+      },
+      {
+        "path": "src/app/api.ts",
+        "sha256": "ed711c590f48b74edf285fdcc86d4d6ca09118e139e305be2d40ab696efddba0"
+      }
+    ],
+    "nonProductionDifferences": [
+      ".github/workflows/build-unit-gate.yml",
+      ".github/workflows/codeql.yml",
+      "docs/design/multi-repo-components.md"
+    ]
+  },
+  "standaloneModel": {
+    "availability": "known",
+    "provider": "recorded-provider",
+    "id": "recorded-standalone-model",
+    "reasoning": "recorded"
+  },
+  "workflowModel": "unknown",
+  "candidates": [
+    {
+      "id": "e6717bf3-5768-4b09-9bdb-f7c26cc4fd49",
+      "kind": "standalone-pr-review",
+      "file": "e6717bf3-5768-4b09-9bdb-f7c26cc4fd49.json",
+      "metadataRowId": "standalone-meta-model-github",
+      "sha256": "8ce9b6c02560e66641ef84aea85e84758878caf005b641f8450fbcd2ad632c74"
+    },
+    {
+      "id": "llm-review-889950f7-e15",
+      "kind": "workflow-bug-hunt",
+      "file": "llm-review-889950f7-e15.json",
+      "metadataRowId": "workflow-bug-meta-model",
+      "sha256": "05931f7dd918df4fe6d184a9aa321d6d7a6db3124c0479034dbced3445e67736"
+    },
+    {
+      "id": "llm-review-0072b056-b90",
+      "kind": "workflow-code-quality",
+      "file": "llm-review-0072b056-b90.json",
+      "metadataRowId": "workflow-quality-meta-model",
+      "sha256": "e3986fd2df673aefeea3d40de1eb62f5a630d389d9bae146ebc52ef4c19e9f0a"
+    },
+    {
+      "id": "llm-review-624e3bde-d6a",
+      "kind": "workflow-regression-coverage",
+      "file": "llm-review-624e3bde-d6a.json",
+      "metadataRowId": "workflow-regression-meta-model",
+      "sha256": "04c843919b9f733b6d5445ecb797c5535d045c52cbf571f30999024bc307a3c6"
+    },
+    {
+      "id": "llm-review-464b420c-062",
+      "kind": "workflow-security",
+      "file": "llm-review-464b420c-062.json",
+      "metadataRowId": "workflow-security-meta-model",
+      "sha256": "a9e6a0339a3edff83e5b4a9f79412a8f802e4cc0df62a58d8731629a14f7011f"
+    },
+    {
+      "id": "llm-review-8f4ea9b6-da3",
+      "kind": "workflow-gap-analysis",
+      "file": "llm-review-8f4ea9b6-da3.json",
+      "metadataRowId": "workflow-gap-meta-model",
+      "sha256": "3589b430cc9a9a805f5d496883e512b76e0bfaab3f47da861ebc079abb37703b"
+    }
+  ]
+}

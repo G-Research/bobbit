@@ -1,0 +1,141 @@
+{
+  "fixtureRevision": 1,
+  "candidateId": "llm-review-464b420c-062",
+  "candidateKind": "workflow-security",
+  "provenance": "minimal synthetic replay evidence derived from the captured workflow verdict",
+  "metadata": {
+    "id": "llm-review-464b420c-062",
+    "title": "Workflow security",
+    "status": "idle",
+    "role": "security-reviewer",
+    "projectId": "b0699584-4bd4-4176-aa78-fc1c5cef8e66",
+    "createdAt": 1785171600000,
+    "lastActivity": 1785171700000,
+    "completedTurnCount": 1,
+    "lastTurnErrored": false,
+    "consecutiveErrorTurns": 0,
+    "model": {
+      "availability": "unknown",
+      "value": "unknown"
+    }
+  },
+  "rows": [
+    {
+      "rowId": "workflow-security-meta-model",
+      "kind": "metadata",
+      "entry": {
+        "type": "message",
+        "id": "workflow-security-entry-0",
+        "ts": "2026-07-20T00:00:40.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Comparable workflow model and reasoning metadata were not captured; their value is explicitly unknown."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-security-prompt-gate",
+      "kind": "prompt",
+      "entry": {
+        "type": "message",
+        "id": "workflow-security-entry-1",
+        "ts": "2026-07-20T00:00:41.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Security gate: inspect disclosure and trust-boundary risks in the assigned change."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-security-call-diagnostics",
+      "kind": "tool_call",
+      "entry": {
+        "type": "message",
+        "id": "workflow-security-entry-2",
+        "ts": "2026-07-20T00:00:42.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "workflow-security-call",
+              "name": "grep",
+              "arguments": {
+                "pattern": "diagnostic path disclosure",
+                "path": "src/server"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-security-result-diagnostics",
+      "kind": "tool_result",
+      "entry": {
+        "type": "message",
+        "id": "workflow-security-entry-3",
+        "ts": "2026-07-20T00:00:43.000Z",
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "workflow-security-call",
+          "toolName": "grep",
+          "status": "ok",
+          "isError": false,
+          "content": [
+            {
+              "type": "text",
+              "text": "A diagnostic response exposes internal runtime path detail beyond the caller's need."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-security-finding-disclosure",
+      "kind": "finding",
+      "entry": {
+        "type": "message",
+        "id": "workflow-security-entry-4",
+        "ts": "2026-07-20T00:00:44.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "FORMAL WORKFLOW FINDING: diagnostic-disclosure output reveals internal runtime path details."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-security-verdict-independent",
+      "kind": "verdict",
+      "entry": {
+        "type": "message",
+        "id": "workflow-security-entry-5",
+        "ts": "2026-07-20T00:00:45.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Independent security verdict reported diagnostic disclosure but did not formally identify aggregate Git action routing or first-component merged-state semantics; it was not synthesized with other gates."
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

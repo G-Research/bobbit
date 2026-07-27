@@ -1,0 +1,123 @@
+{
+  "fixtureRevision": 1,
+  "candidateId": "llm-review-624e3bde-d6a",
+  "candidateKind": "workflow-regression-coverage",
+  "provenance": "minimal synthetic replay evidence derived from the captured workflow verdict",
+  "metadata": {
+    "id": "llm-review-624e3bde-d6a",
+    "title": "Workflow regression coverage",
+    "status": "idle",
+    "role": "tester",
+    "projectId": "b0699584-4bd4-4176-aa78-fc1c5cef8e66",
+    "createdAt": 1785171400000,
+    "lastActivity": 1785171500000,
+    "completedTurnCount": 1,
+    "lastTurnErrored": false,
+    "consecutiveErrorTurns": 0,
+    "model": {
+      "availability": "unknown",
+      "value": "unknown"
+    }
+  },
+  "rows": [
+    {
+      "rowId": "workflow-regression-meta-model",
+      "kind": "metadata",
+      "entry": {
+        "type": "message",
+        "id": "workflow-regression-entry-0",
+        "ts": "2026-07-20T00:00:30.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Comparable workflow model and reasoning metadata were not captured; their value is explicitly unknown."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-regression-prompt-gate",
+      "kind": "prompt",
+      "entry": {
+        "type": "message",
+        "id": "workflow-regression-entry-1",
+        "ts": "2026-07-20T00:00:31.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Regression-coverage gate: assess tests for the documented component aggregation behavior."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-regression-call-tests",
+      "kind": "tool_call",
+      "entry": {
+        "type": "message",
+        "id": "workflow-regression-entry-2",
+        "ts": "2026-07-20T00:00:32.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "workflow-regression-call",
+              "name": "grep",
+              "arguments": {
+                "pattern": "first component mergedIntoPrimary tests",
+                "path": "tests docs/design"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-regression-result-tests",
+      "kind": "tool_result",
+      "entry": {
+        "type": "message",
+        "id": "workflow-regression-entry-3",
+        "ts": "2026-07-20T00:00:33.000Z",
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "workflow-regression-call",
+          "toolName": "grep",
+          "status": "ok",
+          "isError": false,
+          "content": [
+            {
+              "type": "text",
+              "text": "Existing tests passed for homogeneous component states. No mixed ahead/unmerged polyrepo action-routing case was exercised."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-regression-verdict-independent",
+      "kind": "verdict",
+      "entry": {
+        "type": "message",
+        "id": "workflow-regression-entry-4",
+        "ts": "2026-07-20T00:00:34.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "PASS for the independent regression gate. Reassuring tests were incomplete for mixed component states, while design text encoded the faulty first-component aggregate rule; neither cross-layer defect was formally identified."
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

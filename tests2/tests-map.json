@@ -30,6 +30,15 @@
       }
     },
     {
+      "path": "tests2/core/read-session-original-question-replay.test.ts",
+      "reason": "Objective six-candidate compact-first replay of the audited bug-discovery comparison, pinning fixture hashes, the exact seven findings and row citations, and metadata/read/slice/overlap/final-Pi byte/stop ledger bounds through real compact projections and the immutable read_session result boundary.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/dom/read-session-renderer.test.ts",
       "reason": "Focused DOM coverage proving ReadSessionRenderer parses canonical content JSON instead of duplicated details messages, resolves author dictionaries, renders bounded calls plus canonical result status/metrics/omission/excerpts/continuations, keeps legacy compact rows compatible, escapes output, and advances the direct REST modal using returned/nextOffset.",
       "execution": {

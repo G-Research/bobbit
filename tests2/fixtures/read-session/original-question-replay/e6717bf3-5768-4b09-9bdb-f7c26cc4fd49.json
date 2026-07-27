@@ -1,0 +1,161 @@
+{
+  "fixtureRevision": 1,
+  "candidateId": "e6717bf3-5768-4b09-9bdb-f7c26cc4fd49",
+  "candidateKind": "standalone-pr-review",
+  "provenance": "minimal synthetic replay evidence derived from the captured standalone review",
+  "metadata": {
+    "id": "e6717bf3-5768-4b09-9bdb-f7c26cc4fd49",
+    "title": "Standalone PR review",
+    "status": "idle",
+    "role": "general",
+    "projectId": "b0699584-4bd4-4176-aa78-fc1c5cef8e66",
+    "createdAt": 1785170231028,
+    "lastActivity": 1785176925384,
+    "completedTurnCount": 1,
+    "lastTurnErrored": false,
+    "consecutiveErrorTurns": 0,
+    "model": {
+      "availability": "known",
+      "provider": "recorded-provider",
+      "id": "recorded-standalone-model",
+      "reasoning": "recorded"
+    }
+  },
+  "rows": [
+    {
+      "rowId": "standalone-meta-model-github",
+      "kind": "metadata",
+      "entry": {
+        "type": "message",
+        "id": "standalone-entry-0",
+        "ts": "2026-07-20T00:00:00.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Captured session metadata records a known standalone model and reasoning setting. GitHub access was used to improve code and history navigation."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "standalone-prompt-open-audit",
+      "kind": "prompt",
+      "entry": {
+        "type": "message",
+        "id": "standalone-entry-1",
+        "ts": "2026-07-20T00:00:01.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Review the complete change as an open-ended coordinated adversarial audit. Find any verifiable bugs or malicious code, trace behavior across layers, and synthesize severity."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "standalone-call-trace-git",
+      "kind": "tool_call",
+      "entry": {
+        "type": "message",
+        "id": "standalone-entry-2",
+        "ts": "2026-07-20T00:00:02.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "standalone-call-git",
+              "name": "grep",
+              "arguments": {
+                "pattern": "git history actions mergedIntoPrimary",
+                "path": "src/server src/ui src/app"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "standalone-result-trace-git",
+      "kind": "tool_result",
+      "entry": {
+        "type": "message",
+        "id": "standalone-entry-3",
+        "ts": "2026-07-20T00:00:03.000Z",
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "standalone-call-git",
+          "toolName": "grep",
+          "status": "ok",
+          "isError": false,
+          "content": [
+            {
+              "type": "text",
+              "text": "Cross-layer trace reached aggregate REST routes, session.cwd command targets, Git status aggregation, and the merged-state widget. The bounded result metadata is sufficient to locate the formal findings."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "standalone-finding-action-routing",
+      "kind": "finding",
+      "entry": {
+        "type": "message",
+        "id": "standalone-entry-4",
+        "ts": "2026-07-20T00:00:04.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "FORMAL BUG: aggregate Git actions and commit history omit a repository selector. They therefore execute at session.cwd, which is the polyrepo container root and can be the wrong repository or a non-Git directory."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "standalone-finding-merged-aggregate",
+      "kind": "finding",
+      "entry": {
+        "type": "message",
+        "id": "standalone-entry-5",
+        "ts": "2026-07-20T00:00:05.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "FORMAL BUG: aggregate mergedIntoPrimary is copied from the first component. The UI can display Merged even while another component remains ahead and unmerged."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "standalone-verdict-synthesis",
+      "kind": "verdict",
+      "entry": {
+        "type": "message",
+        "id": "standalone-entry-6",
+        "ts": "2026-07-20T00:00:06.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Parent synthesis combined overlapping server, action-routing, aggregation, and UI traces from coordinated adversarial reviewers, then promoted both cross-layer defects by severity."
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

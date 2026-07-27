@@ -1,0 +1,140 @@
+{
+  "fixtureRevision": 1,
+  "candidateId": "llm-review-0072b056-b90",
+  "candidateKind": "workflow-code-quality",
+  "provenance": "minimal synthetic replay evidence derived from the captured workflow verdict",
+  "metadata": {
+    "id": "llm-review-0072b056-b90",
+    "title": "Workflow code quality",
+    "status": "idle",
+    "role": "reviewer",
+    "projectId": "b0699584-4bd4-4176-aa78-fc1c5cef8e66",
+    "createdAt": 1785171200000,
+    "lastActivity": 1785171300000,
+    "completedTurnCount": 1,
+    "lastTurnErrored": false,
+    "consecutiveErrorTurns": 0,
+    "model": {
+      "availability": "unknown",
+      "value": "unknown"
+    }
+  },
+  "rows": [
+    {
+      "rowId": "workflow-quality-meta-model",
+      "kind": "metadata",
+      "entry": {
+        "type": "message",
+        "id": "workflow-quality-entry-0",
+        "ts": "2026-07-20T00:00:20.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Comparable workflow model and reasoning metadata were not captured; their value is explicitly unknown."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-quality-prompt-gate",
+      "kind": "prompt",
+      "entry": {
+        "type": "message",
+        "id": "workflow-quality-entry-1",
+        "ts": "2026-07-20T00:00:21.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Code-quality gate: inspect maintainability and component consistency in the assigned change."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-quality-call-components",
+      "kind": "tool_call",
+      "entry": {
+        "type": "message",
+        "id": "workflow-quality-entry-2",
+        "ts": "2026-07-20T00:00:22.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "workflow-quality-call",
+              "name": "read",
+              "arguments": {
+                "path": "component state update path"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-quality-result-components",
+      "kind": "tool_result",
+      "entry": {
+        "type": "message",
+        "id": "workflow-quality-entry-3",
+        "ts": "2026-07-20T00:00:23.000Z",
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "workflow-quality-call",
+          "toolName": "read",
+          "status": "ok",
+          "isError": false,
+          "content": [
+            {
+              "type": "text",
+              "text": "One component can retain stale state after a sibling refresh; the result was localized to component consistency."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-quality-finding-stale-component",
+      "kind": "finding",
+      "entry": {
+        "type": "message",
+        "id": "workflow-quality-entry-4",
+        "ts": "2026-07-20T00:00:24.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "FORMAL WORKFLOW FINDING: a stale-component update can leave one repository's displayed state behind its refreshed sibling."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "rowId": "workflow-quality-verdict-independent",
+      "kind": "verdict",
+      "entry": {
+        "type": "message",
+        "id": "workflow-quality-entry-5",
+        "ts": "2026-07-20T00:00:25.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Independent code-quality verdict reported the stale-component defect but did not formally identify aggregate Git action routing or first-component merged-state semantics; it was not synthesized with other gates."
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
