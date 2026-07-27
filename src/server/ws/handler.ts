@@ -5,6 +5,7 @@ import type { SessionManager } from "../agent/session-manager.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
 import { extensionSystemAuthor } from "../agent/message-author.js";
 import { LOCAL_USER_AUTHOR } from "../../shared/message-author.js";
+import type { ThinkingLevel } from "../../shared/thinking-levels.js";
 import type { RateLimiter } from "../auth/rate-limit.js";
 import { validateToken } from "../auth/token.js";
 import type { SandboxTokenStore } from "../auth/sandbox-token.js";
@@ -149,6 +150,9 @@ function sendFallbackModelState(ws: WebSocket, sessionManager: SessionManager, s
 	const data: Record<string, unknown> = {};
 	if (persisted?.modelProvider && persisted?.modelId) {
 		data.model = buildResolvedModelStateModel(persisted.modelProvider, persisted.modelId);
+		if (persisted.effectiveThinkingLevel !== undefined) {
+			data.thinkingLevel = persisted.effectiveThinkingLevel;
+		}
 	}
 	const imageModel = sessionManager.getImageModelForSession(sessionId);
 	if (imageModel) {
@@ -182,7 +186,7 @@ function sendSessionCostUpdate(ws: WebSocket, sessionManager: SessionManager, se
  * `getState()` push.
  */
 function buildArchivedStateData(
-	archived: { archivedAt?: number; title: string; modelProvider?: string; modelId?: string },
+	archived: { archivedAt?: number; title: string; modelProvider?: string; modelId?: string; effectiveThinkingLevel?: ThinkingLevel },
 	sessionManager: SessionManager,
 	sessionId: string,
 ): Record<string, unknown> {
@@ -195,6 +199,9 @@ function buildArchivedStateData(
 	};
 	if (archived.modelProvider && archived.modelId) {
 		data.model = buildResolvedModelStateModel(archived.modelProvider, archived.modelId);
+		if (archived.effectiveThinkingLevel !== undefined) {
+			data.thinkingLevel = archived.effectiveThinkingLevel;
+		}
 	}
 	const imageModel = sessionManager.getImageModelForSession(sessionId);
 	if (imageModel) data.imageGenerationModel = imageModel;
