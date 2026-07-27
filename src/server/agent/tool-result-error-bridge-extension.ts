@@ -503,7 +503,9 @@ function resolvedPageStart(candidate, params) {
   if (isSafeInteger(params.offset)) {
     if (params.offset >= 0) return params.offset;
     if (typeof params.pattern !== "string" || params.pattern.length === 0) return Math.max(0, candidate.total + params.offset);
-    if (candidate.returned < -params.offset) return 0;
+    // A completed filtered tail has no upstream nextOffset. Re-resolve its
+    // negative offset against the filtered count instead of restarting at 0.
+    if (isNonNegativeInteger(candidate.matchCount)) return Math.max(0, candidate.matchCount + params.offset);
   }
   return 0;
 }

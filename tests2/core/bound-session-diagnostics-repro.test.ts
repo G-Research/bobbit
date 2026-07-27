@@ -330,6 +330,8 @@ describe("Bound Session Diagnostics reproductions", () => {
 				const invalid = [
 					{ verbose: true },
 					{ include_tool_results: true, limit: 11 },
+					{ includeToolResults: true },
+					{ includeToolResults: true, limit: 11 },
 					{ verbose: true, include_tool_results: true, limit: "10" },
 					{ verbose: true, limit: 1.5 },
 				];
@@ -344,8 +346,9 @@ describe("Bound Session Diagnostics reproductions", () => {
 
 				await invokeResolved({ session_id: "target" });
 				await invokeResolved({ session_id: "target", include_tool_results: true, limit: 10 });
-				assert.equal(fetchCount, 2,
-					`${REPRO}: generated guard must preserve ordinary and valid limit=10 resolved reads`);
+				await invokeResolved({ session_id: "target", includeToolResults: true, limit: 1 });
+				assert.equal(fetchCount, 3,
+					`${REPRO}: generated guard must preserve ordinary and valid snake/camel heavy reads`);
 			});
 		} finally {
 			globalThis.fetch = originalFetch;
