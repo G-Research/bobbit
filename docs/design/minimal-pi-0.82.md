@@ -178,7 +178,7 @@ This single function drives picker ordering and server AIGW/default auto-selecti
 2. Export a small exact-provider/catalog predicate from `model-registry.ts`; do not create a provider-policy module.
 3. Validate Bobbit model preferences (`default.sessionModel`, `default.reviewModel`, and `default.namingModel`), role model writes, runtime `set_model`, team/delegate inputs, and any explicit `initialModel` against the current Bobbit catalog or the exact deferred-provider predicate before Pi sees them.
 4. A normal session without an explicit role/default model resolves a current Bobbit-exposed, session-selectable model using existing authenticated-first ordering plus the shared rank, then passes it explicitly to Pi. It must not allow Pi to choose a hidden default.
-5. If an explicit requested model is no longer in the current selectable catalog, use the existing actionable unavailable-model/setup failure (and the existing opt-in controlled fallback where already applicable). Never silently strip it and launch on Pi's default.
+5. A live explicit `set_model` for a model outside the current selectable catalog fails with the existing actionable unavailable-model response; it must not invoke or accept controlled fallback. Controlled fallback remains permitted only at existing initial-setup call sites that already opt into it. Neither path may silently strip the request and launch on Pi's hidden default.
 
 Filtering is by exact provider identity. Models whose IDs contain `kimi` remain valid under an actual supported provider, including `moonshotai`, `moonshotai-cn`, AIGW, and custom/local providers. A legacy AIGW wire ID such as `aigw/moonshotai/kimi-k3` must continue to work. Exact provider `kimi-coding` remains absent/rejected even if a model ID looks otherwise valid.
 
@@ -191,7 +191,7 @@ Do not add Kimi or OpenRouter login UI, OAuth handlers, credential scrubbing, pe
 | Built-in and merged catalog | `model-registry.ts::{assembleModels,getAvailableModels,resolveModelStateMeta}` | Adopt Pi rows; filter deferred exact provider; expose selectable lookup. |
 | Picker | `ModelSelector.loadModels()` | Consume shared rank; otherwise unchanged. |
 | Thinking metadata | `shared/thinking-levels.ts`, `thinking-level-clamp.ts` | Reuse unchanged. |
-| Model mutation verification | `review-model-override.ts::applyModelString` | Call without a persister during a combined request so a model-only partial mutation is never durable. |
+| Model mutation verification | `review-model-override.ts::applyModelString` | Call without a persister during a combined request, require exact requested provider/model read-back, and treat any helper-selected fallback as failure. Only existing initial setup may accept controlled fallback. |
 | Runtime selection | `ws/runtime-model-selection.ts` | Extend the existing focused helper for one combined bounded operation. |
 | Per-session command ordering | `handler.ts`'s existing `SessionCommandSerialiser` | Serialize model/thinking frames with existing session commands; no new queue/coordinator. |
 | Durable state | `SessionStore` and `SessionManager.persistSessionModel` | Add normalized effective thinking and write the verified triple together. |
@@ -219,28 +219,28 @@ The standalone thinking selector keeps `set_thinking_level`, but its server path
 
 Add `set_model` and `set_thinking_level` to the existing per-session `SessionCommandSerialiser` decision in `handler.ts`. That reuse prevents a prompt or later pick from overtaking an in-flight selection; it is not a model-transition coordinator.
 
-### Success path
+### Live success path
 
 `applyRuntimeSessionModelSelection()` owns the bounded request:
 
 1. Capture the previous durable verified triple. Do not modify it yet.
 2. Resolve the requested provider/ID in current `getAvailableModels()` and require `sessionSelectable !== false`; reject `kimi-coding` before RPC.
-3. Normalize the requested/current thinking token and clamp it against that exact catalog row.
-4. Call existing `applyModelString()` without `sessionManager`/`sessionId`, preserving its exact provider/ID read-back and existing controlled fallback behavior without persisting a model-only intermediate state.
-5. Read the actual model after model binding. If existing controlled fallback selected `default.sessionModel`, resolve that exact returned row and clamp thinking against the fallback row, not the failed request.
-6. Call `setThinkingLevel(effective)` and then `getState()`. Require exact returned provider, model ID, and thinking level.
-7. Only after exact read-back, atomically persist `{modelProvider, modelId, effectiveThinkingLevel}`, update `spawnPinnedModel` and `spawnPinnedThinkingLevel` as live mirrors, update the model-name file, and broadcast one full authoritative `state` frame containing the model metadata and `thinkingLevel`.
+3. Normalize the requested/current thinking token and clamp it against that exact requested catalog row.
+4. Call existing `applyModelString()` without `sessionManager`/`sessionId`, so no model-only intermediate state is persisted. Controlled fallback is not a live-selection success condition; only existing initial setup may accept it.
+5. Immediately read the actual model after model binding and require its provider and model ID to equal the explicit request. Any different model—including `default.sessionModel` returned by `applyModelString()`—enters the failure path before thinking is applied. Do not clamp against, accept, or persist the unrequested row.
+6. Call `setThinkingLevel(effective)` and then `getState()`. Require the final provider/model to still equal the explicit request and thinking to equal the normalized effective level.
+7. Only after that exact requested-triple read-back, atomically persist `{modelProvider, modelId, effectiveThinkingLevel}`, update `spawnPinnedModel` and `spawnPinnedThinkingLevel` as live mirrors, update the model-name file, and broadcast one full authoritative `state` frame containing the model metadata and `thinkingLevel`.
 
-No successful result is inferred from RPC command acknowledgment alone.
+No successful result is inferred from RPC command acknowledgment alone, and no live explicit request succeeds as an unrequested fallback tuple.
 
 For an older `set_model` frame without `thinkingLevel`, use the previous durable effective level when present, otherwise the current authoritative state/default, and clamp it against the selected exact model.
 
 ### Failure, rollback, and existing recovery
 
-The failure contract is intentionally local to this request:
+The failure contract is intentionally local to this request. A provider/model read-back that differs from the explicit request is a mutation failure even when `applyModelString()` reports success or names a configured default:
 
-1. Retain the previous durable verified triple. Never persist the requested model or thinking after only one mutation succeeds.
-2. Read `getState()` and, when complete, broadcast its actual provider/model/thinking so both optimistic client fields are corrected.
+1. Retain the previous durable verified triple. Never persist the requested model, requested thinking, or an unrequested returned fallback after only one mutation succeeds.
+2. Read `getState()` and, when complete, broadcast its actual provider/model/thinking as a failure correction so both optimistic client fields are replaced together. This is not a success commit for the returned model.
 3. If the request may have mutated Pi, make one bounded attempt to restore the previous durable provider/model and thinking using existing setters, then require exact `getState()` verification. On success broadcast the restored triple; durable state was never changed.
 4. If state is incomplete, the bridge is unreachable, either rollback write fails, or rollback cannot be verified exactly, call existing `SessionManager.restartAgent(session.id)`. That path rehydrates from the unchanged durable triple. Do not continue using the partially mutated live bridge.
 5. After successful existing-path restart, broadcast the replacement's authoritative state, then send the request error. If restart fails, surface the existing terminated/recovery error; do not fabricate state.
@@ -295,7 +295,7 @@ In `restoreSession()` and existing force-abort/role replacement spawn sites:
 3. Clamp against the exact spawn model before constructing argv.
 4. Pass explicit provider/model/thinking through existing `RpcBridgeOptions`.
 5. Require post-spawn `getState()` to match before updating durability or broadcasting idle.
-6. If the persisted model is unavailable, use only the existing actionable unavailable-model/controlled-fallback path. Never delegate to Pi's hidden default.
+6. If the persisted model is unavailable, use the existing actionable unavailable-model path. Only when execution is already in an existing initial-setup call site that explicitly opts into controlled fallback may that setup accept its configured fallback; live `set_model` never may. Never delegate to Pi's hidden default.
 
 A stale persisted `xhigh` on a model that now supports only `high` normalizes to `high` before spawn and becomes durable only after verification. A stale thinking value alone does not cause a model fallback.
 
@@ -377,6 +377,8 @@ Do not add a second Opus lifecycle browser test.
 
 The optimistic correction test must start with a verified old triple, optimistically select a different model/thinking pair, inject a server failure, deliver the authoritative corrective `state`, and assert both client fields equal the server result.
 
+Add this deterministic A10 fallback case: begin with durable verified model `C` at `high`; issue a combined explicit request for model `B` at `xhigh`; configure `applyModelString()` to report/select configured fallback model `A` instead of `B`. Assert that the provider/model mismatch enters failure before `xhigh` is applied, `A` is never accepted or persisted as the live request's success, neither `B/xhigh` nor any `A/<level>` tuple changes durability, and the old durable `C/high` remains. The failure path must publish complete authoritative model-and-thinking correction, attempt the single bounded rollback to `C/high`, and end at verified `C/high`; if that rollback cannot be verified, it must invoke `restartAgent()` exactly once and rehydrate `C/high` from unchanged durability. In both branches the client receives an error, never a successful `A` selection.
+
 The partial-write test must make model application succeed, make thinking/final read-back unverifiable, and assert:
 
 - the old durable triple is unchanged;
@@ -407,7 +409,7 @@ Change only assertions proven version-specific by the Phase 0 delta. New `0.82.1
 - Custom/local models preserve their supplied provider and metadata. An ID containing `kimi` is allowed unless its exact provider is deferred `kimi-coding`.
 - Explicit `null` thinking-map entries remain exclusions; missing ordinary entries remain provider defaults; missing `xhigh`/`max` remain unsupported.
 - A legacy persisted row without effective thinking is normalized once and remains backward compatible.
-- An unavailable model causes existing actionable setup/fallback behavior, never Pi default selection.
+- An unavailable live model selection fails actionably without fallback. Only an existing initial-setup call site may use its current opt-in configured fallback; neither path delegates to Pi's hidden default.
 - A model succeeds but thinking fails: durability remains old, actual state is read back, bounded rollback is attempted, and unverifiable state restarts through the existing path.
 - A reconnect during failure consumes authoritative server state; it never trusts the optimistic client snapshot.
 - Archived/fallback state without a live bridge uses the durable verified triple.
