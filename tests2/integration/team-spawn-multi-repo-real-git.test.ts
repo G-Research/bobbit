@@ -1,11 +1,18 @@
 import { appendFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
+import { vi } from "vitest";
+
 import type { CommandRunner } from "../../src/server/gateway-deps.js";
 import { awaitableRm, pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 import { copyGitTemplate, prepareGitTemplate } from "../harness/git-template.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, deleteGoal, registerProject, teardownTeam } from "./_e2e/e2e-setup.js";
+
+// The E2E Vitest lane defaults to 30s. Give this real-Git lifecycle file the
+// same budget as the integration lane so Windows process and filesystem
+// contention cannot pre-empt its bounded provisioning and restoration checks.
+vi.setConfig({ testTimeout: 60_000 });
 
 const REPRO = "MULTI_REPO_TEAM_SPAWN_REGRESSION";
 const STATUS_REPRO = "POLYREPO_TEAM_LEAD_STATUS_REPRO";
