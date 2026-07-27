@@ -1724,7 +1724,10 @@ describe("executable SessionManager rehydration boundaries", () => {
 		const successfulReplacement = recordingBridge((sessionPath) => successfulSwitches.push(sessionPath));
 		successfulReplacement.getState = vi.fn(async () => ({
 			success: true,
-			data: { model: { provider: "anthropic", id: "claude-sonnet-4-5" } },
+			data: {
+				model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+				thinkingLevel: "high",
+			},
 		}));
 		successfulReplacement.prompt = vi.fn(async (text: string) => {
 			successfulPrompts.push(text);
@@ -1743,6 +1746,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			cwd: sandboxed ? "/workspace" : tmpRoot,
 			modelProvider: "anthropic",
 			modelId: "claude-sonnet-4-5",
+			effectiveThinkingLevel: "high",
 			allowedTools: ["read"],
 		});
 		const manager: any = new SessionManager();
@@ -1875,7 +1879,10 @@ describe("executable SessionManager rehydration boundaries", () => {
 		const replacement = recordingBridge(() => {});
 		replacement.getState = vi.fn(async () => ({
 			success: true,
-			data: { model: { provider: "anthropic", id: "claude-sonnet-4-5" } },
+			data: {
+				model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+				thinkingLevel: "high",
+			},
 		}));
 		replacement.prompt = vi.fn(async (text: string) => {
 			successfulPrompts.push(text);
@@ -1890,6 +1897,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			cwd: "/workspace",
 			modelProvider: "anthropic",
 			modelId: "claude-sonnet-4-5",
+			effectiveThinkingLevel: "high",
 			allowedTools: ["read"],
 		});
 		const manager: any = new SessionManager();

@@ -181,10 +181,23 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 		// existing nested-goal specs keep working unchanged. The flag's OFF path
 		// is covered by tests/e2e/ui/subgoals-experimental-toggle.spec.ts and the
 		// server-unit + helper unit tests. See
-		// docs/design/subgoals-experimental-toggle.md §9.
+		// docs/design/subgoals-experimental-toggle.md §9. Register the mock agent's
+		// exact tuple through the same manual-provider preferences that production
+		// model validation reads, before the gateway boots.
 		writeFileSync(
 			join(bobbitDir, "state", "preferences.json"),
-			JSON.stringify({ subgoalsEnabled: true }, null, 2),
+			JSON.stringify({
+				subgoalsEnabled: true,
+				customProviders: [{
+					id: "mock",
+					name: "mock",
+					type: "manual",
+					baseUrl: "http://127.0.0.1",
+					models: [{ id: "mock-model", name: "mock-model" }],
+				}],
+				"default.sessionModel": "mock/mock-model",
+				"default.sessionThinkingLevel": "off",
+			}, null, 2),
 		);
 
 		// Set BOBBIT_DIR env BEFORE importing server modules.
