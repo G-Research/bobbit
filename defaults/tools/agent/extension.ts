@@ -204,6 +204,644 @@ function readSessionDetails(params: ReadSessionParams, envelope: unknown): ReadS
 	return details;
 }
 
+/**
+ * The server pre-fits agent transcript envelopes, and the immutable registration
+ * wrapper remains authoritative for stale/overridden extensions. Keep the
+ * builtin safe on its own as well: its complete Pi value includes a second JSON
+ * encoding plus renderer details, so fitting the route body alone is not enough.
+ */
+const READ_SESSION_FINAL_RESULT_MAX_BYTES = 50 * 1024;
+const READ_SESSION_RESULT_EXCERPT_DEFAULT = 4096;
+const READ_SESSION_RESULT_EXCERPT_MAX = 8192;
+type ReadSessionRecord = Record<string, any>;
+interface ReadSessionPiValue {
+	content: Array<{ type: "text"; text: string }>;
+	details: ReadSessionDetails;
+}
+
+function isReadSessionRecord(value: unknown): value is ReadSessionRecord {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasReadSessionKey(value: unknown, key: string): boolean {
+	return isReadSessionRecord(value) && Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function isSafeInteger(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value);
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+	return isSafeInteger(value) && value >= 0;
+}
+
+function isWellFormedString(value: unknown): value is string {
+	if (typeof value !== "string") return false;
+	for (let index = 0; index < value.length; index += 1) {
+		const unit = value.charCodeAt(index);
+		if (unit >= 0xD800 && unit <= 0xDBFF) {
+			const low = value.charCodeAt(index + 1);
+			if (low < 0xDC00 || low > 0xDFFF) return false;
+			index += 1;
+		} else if (unit >= 0xDC00 && unit <= 0xDFFF) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function scalarSafePrefix(value: string, maxUnits: number, guaranteeProgress = false): string {
+	if (!isWellFormedString(value) || maxUnits < 0) return "";
+	if (value.length <= maxUnits) return value;
+	let end = Math.max(0, Math.min(value.length, maxUnits));
+	if (end > 0) {
+		const last = value.charCodeAt(end - 1);
+		if (last >= 0xD800 && last <= 0xDBFF) end -= 1;
+	}
+	if (end === 0 && guaranteeProgress && value.length >= 2) {
+		const high = value.charCodeAt(0);
+		const low = value.charCodeAt(1);
+		if (high >= 0xD800 && high <= 0xDBFF && low >= 0xDC00 && low <= 0xDFFF) end = 2;
+	}
+	return value.slice(0, end);
+}
+
+function boundedReadSessionString(value: unknown, maxUnits: number): { text: string; truncated: boolean } | undefined {
+	if (!isWellFormedString(value)) return undefined;
+	const text = scalarSafePrefix(value, maxUnits);
+	return { text, truncated: text.length !== value.length };
+}
+
+function readSessionSerializedBytes(value: unknown): number {
+	try {
+		const serialized = JSON.stringify(value);
+		return typeof serialized === "string" ? Buffer.byteLength(serialized, "utf8") : Number.MAX_SAFE_INTEGER;
+	} catch {
+		return Number.MAX_SAFE_INTEGER;
+	}
+}
+
+function readSessionPiValue(params: ReadSessionParams, envelope: ReadSessionRecord): ReadSessionPiValue | undefined {
+	try {
+		return {
+			content: [{ type: "text" as const, text: JSON.stringify(envelope) }],
+			details: readSessionDetails(params, envelope),
+		};
+	} catch {
+		return undefined;
+	}
+}
+
+function readSessionValueFits(value: unknown): boolean {
+	return readSessionSerializedBytes(value) <= READ_SESSION_FINAL_RESULT_MAX_BYTES;
+}
+
+function validRetryContinuation(value: unknown): boolean {
+	if (!isReadSessionRecord(value) || value.kind !== "retry" || value.retrySameRequest !== true) return false;
+	const allowed = new Set([
+		"kind", "retrySameRequest", "session_id", "sessionIdTruncated", "offset", "limit",
+		"case_sensitive", "verbose", "include_tool_results", "context", "patternOmitted",
+	]);
+	if (Object.keys(value).some((key) => !allowed.has(key))) return false;
+	if (hasReadSessionKey(value, "session_id") && !isWellFormedString(value.session_id)) return false;
+	if (hasReadSessionKey(value, "sessionIdTruncated") && typeof value.sessionIdTruncated !== "boolean") return false;
+	for (const key of ["offset", "limit"]) {
+		if (hasReadSessionKey(value, key) && !isSafeInteger(value[key])) return false;
+	}
+	for (const key of ["case_sensitive", "verbose", "include_tool_results", "patternOmitted"]) {
+		if (hasReadSessionKey(value, key) && typeof value[key] !== "boolean") return false;
+	}
+	return !hasReadSessionKey(value, "context")
+		|| (isSafeInteger(value.context) && value.context >= 0 && value.context <= 5);
+}
+
+function resultSliceContinuations(messages: unknown[]): Array<{ result: ReadSessionRecord; cursor: number }> {
+	const found: Array<{ result: ReadSessionRecord; cursor: number }> = [];
+	for (const message of messages) {
+		if (!isReadSessionRecord(message) || !Array.isArray(message.toolResults)) continue;
+		for (const result of message.toolResults) {
+			if (isReadSessionRecord(result) && isReadSessionRecord(result.excerpt)
+				&& isNonNegativeInteger(result.excerpt.nextCursor)) {
+				found.push({ result, cursor: result.excerpt.nextCursor });
+			}
+		}
+	}
+	return found;
+}
+
+/** Validate the successful union before trusting its pagination semantics. */
+function isCanonicalReadSessionEnvelope(value: unknown): value is ReadSessionRecord {
+	if (!isReadSessionRecord(value)
+		|| !isNonNegativeInteger(value.total)
+		|| !isNonNegativeInteger(value.returned)
+		|| !isSafeInteger(value.offsetStart)
+		|| !isSafeInteger(value.offsetEnd)
+		|| !Array.isArray(value.messages)
+		|| value.returned !== value.messages.length) return false;
+	if (value.messages.some((message: unknown) => !isReadSessionRecord(message)
+		|| !isNonNegativeInteger(message.index) || !isWellFormedString(message.role))) return false;
+	if (hasReadSessionKey(value, "matchCount") && !isNonNegativeInteger(value.matchCount)) return false;
+	if (hasReadSessionKey(value, "nextOffset") && value.nextOffset !== null && !isSafeInteger(value.nextOffset)) return false;
+
+	if (value.partial === undefined || value.partial === false) {
+		return !hasReadSessionKey(value, "truncatedBy")
+			&& !hasReadSessionKey(value, "continuationRequest")
+			&& !hasReadSessionKey(value, "wrapperDiagnostics");
+	}
+	if (value.partial !== true || !isReadSessionRecord(value.continuationRequest)) return false;
+	if (value.truncatedBy === "transport_budget") {
+		const continuation = value.continuationRequest;
+		if (continuation.kind === "page") {
+			return isNonNegativeInteger(continuation.offset) && value.nextOffset === continuation.offset;
+		}
+		if (continuation.kind === "result_slice") {
+			if (!isWellFormedString(continuation.result_handle)
+				|| !isNonNegativeInteger(continuation.result_cursor)
+				|| !isSafeInteger(continuation.result_limit)
+				|| continuation.result_limit < 1
+				|| continuation.result_limit > READ_SESSION_RESULT_EXCERPT_MAX
+				|| hasReadSessionKey(value, "nextOffset")) return false;
+			const slices = resultSliceContinuations(value.messages);
+			return slices.length === 1
+				&& slices[0].cursor === continuation.result_cursor
+				&& slices[0].result.handle === continuation.result_handle;
+		}
+		return false;
+	}
+	return value.truncatedBy === "extension_return_unrecognized"
+		&& value.total === 0 && value.returned === 0
+		&& value.offsetStart === -1 && value.offsetEnd === -1
+		&& value.messages.length === 0
+		&& validRetryContinuation(value.continuationRequest)
+		&& isReadSessionRecord(value.wrapperDiagnostics)
+		&& value.wrapperDiagnostics.omitted === true
+		&& isNonNegativeInteger(value.wrapperDiagnostics.actualBytes);
+}
+
+function sanitizeReadSessionSize(value: unknown): ReadSessionRecord {
+	const allowedTypes = new Set(["string", "array", "object", "null", "missing", "other"]);
+	if (!isReadSessionRecord(value) || !allowedTypes.has(value.type)) return { type: "missing" };
+	const size: ReadSessionRecord = { type: value.type };
+	for (const key of ["chars", "lines", "bytes", "blocks"]) {
+		if (isNonNegativeInteger(value[key])) size[key] = value[key];
+	}
+	return size;
+}
+
+function sanitizeReadSessionExcerpt(value: unknown, size: ReadSessionRecord, limit: number, targeted: boolean): ReadSessionRecord | undefined {
+	if (!isReadSessionRecord(value)
+		|| !isNonNegativeInteger(value.start)
+		|| !isNonNegativeInteger(value.end)
+		|| value.end < value.start
+		|| !isWellFormedString(value.text)
+		|| value.end - value.start !== value.text.length) return undefined;
+	const text = scalarSafePrefix(value.text, limit, targeted);
+	const end = value.start + text.length;
+	const complete = isNonNegativeInteger(size.chars)
+		? end >= size.chars
+		: text.length === value.text.length && value.complete === true;
+	return { start: value.start, end, text, nextCursor: complete ? null : end, complete };
+}
+
+interface SanitizedReadSessionProjection {
+	messages: ReadSessionRecord[];
+	authors: Map<string, ReadSessionRecord>;
+	correlations: Map<string, ReadSessionRecord>;
+	targeted: boolean;
+	excerptLimit: number;
+}
+
+function sanitizeReadSessionProjection(envelope: ReadSessionRecord, params: ReadSessionParams): SanitizedReadSessionProjection {
+	const authors = new Map<string, ReadSessionRecord>();
+	if (isReadSessionRecord(envelope.authors)) {
+		for (const [ref, raw] of Object.entries(envelope.authors)) {
+			if (!isReadSessionRecord(raw)) continue;
+			const boundedRef = boundedReadSessionString(ref, 64);
+			if (!boundedRef?.text) continue;
+			const author: ReadSessionRecord = {};
+			for (const [key, cap] of [["kind", 32], ["id", 64], ["label", 128]] as const) {
+				const bounded = boundedReadSessionString(raw[key], cap);
+				if (bounded?.text) author[key] = bounded.text;
+			}
+			if (Object.keys(author).length > 0) authors.set(boundedRef.text, author);
+		}
+	}
+	const correlations = new Map<string, ReadSessionRecord>();
+	if (isReadSessionRecord(envelope.correlations)) {
+		for (const [ref, raw] of Object.entries(envelope.correlations)) {
+			if (!isReadSessionRecord(raw)) continue;
+			const boundedRef = boundedReadSessionString(ref, 64);
+			if (!boundedRef?.text) continue;
+			const correlation: ReadSessionRecord = {};
+			const name = boundedReadSessionString(raw.name, 128);
+			if (name?.text) correlation.name = name.text;
+			if (isNonNegativeInteger(raw.messageIndex)) correlation.messageIndex = raw.messageIndex;
+			if (isNonNegativeInteger(raw.blockIndex) && raw.blockIndex <= 0xFFFFFFFF) correlation.blockIndex = raw.blockIndex;
+			if (Object.keys(correlation).length > 0) correlations.set(boundedRef.text, correlation);
+		}
+	}
+
+	const targeted = typeof params.result_handle === "string";
+	const includeResults = params.include_tool_results === true || targeted;
+	const excerptLimit = isSafeInteger(params.result_limit)
+		&& params.result_limit >= 1 && params.result_limit <= READ_SESSION_RESULT_EXCERPT_MAX
+		? params.result_limit : READ_SESSION_RESULT_EXCERPT_DEFAULT;
+	let callCounter = 1;
+	let resultCounter = 1;
+	const messages = envelope.messages.map((raw: ReadSessionRecord) => {
+		const role = boundedReadSessionString(raw.role, 32);
+		const message: ReadSessionRecord = { index: raw.index, role: role?.text || "unknown" };
+		if (raw.projectionOmitted === true) {
+			message.projectionOmitted = true;
+			message.toolCallCount = isNonNegativeInteger(raw.toolCallCount) ? raw.toolCallCount : 0;
+			message.toolResultCount = isNonNegativeInteger(raw.toolResultCount) ? raw.toolResultCount : 0;
+			return message;
+		}
+		if (raw.ts === null) message.ts = null;
+		else {
+			const ts = boundedReadSessionString(raw.ts, 64);
+			if (ts) message.ts = ts.text;
+		}
+		const text = boundedReadSessionString(raw.text, params.verbose === true ? 4096 : 800);
+		if (text) {
+			message.text = text.text;
+			if (text.truncated || raw.textTruncated === true) message.textTruncated = true;
+		}
+		for (const [sourceKey, targetKey, cap, truncatedKey] of [
+			["thinking", "thinking", 512, "thinkingTruncated"],
+			["thinkingSummary", "thinking", 512, "thinkingTruncated"],
+			["error", "error", 512, "errorTruncated"],
+			["errorSummary", "error", 512, "errorTruncated"],
+			["stopReason", "stopReason", 128, "stopReasonTruncated"],
+		] as const) {
+			if (hasReadSessionKey(message, targetKey)) continue;
+			const bounded = boundedReadSessionString(raw[sourceKey], cap);
+			if (bounded) {
+				message[targetKey] = bounded.text;
+				if (bounded.truncated || raw[truncatedKey] === true) message[truncatedKey] = true;
+			}
+		}
+		if (raw.status === "ok" || raw.status === "error" || raw.status === "unknown") message.status = raw.status;
+		const authorRef = boundedReadSessionString(raw.authorRef, 64);
+		if (authorRef?.text) message.authorRef = authorRef.text;
+
+		const rawCalls = Array.isArray(raw.toolCalls) ? raw.toolCalls : [];
+		const calls: ReadSessionRecord[] = [];
+		for (const rawCall of rawCalls) {
+			if (!isReadSessionRecord(rawCall)) continue;
+			const name = boundedReadSessionString(rawCall.name, 128);
+			const preview = boundedReadSessionString(rawCall.argumentsPreview, 512);
+			const ref = boundedReadSessionString(rawCall.ref, 64);
+			calls.push({
+				ref: ref?.text || `t${callCounter++}`,
+				name: name?.text || "unknown",
+				argumentsPreview: preview?.text || "",
+				argumentsTruncated: rawCall.argumentsTruncated === true || !!name?.truncated || !!preview?.truncated,
+			});
+		}
+		if (calls.length > 0) message.toolCalls = calls;
+
+		const results: ReadSessionRecord[] = [];
+		if (Array.isArray(raw.toolResults)) {
+			for (const rawResult of raw.toolResults) {
+				if (!isReadSessionRecord(rawResult)) continue;
+				const ref = boundedReadSessionString(rawResult.ref, 64);
+				const name = boundedReadSessionString(rawResult.name, 128);
+				const size = sanitizeReadSessionSize(rawResult.size);
+				const result: ReadSessionRecord = {
+					ref: ref?.text || `r${resultCounter++}`,
+					name: name?.text || "unknown",
+					status: rawResult.status === "ok" || rawResult.status === "error" || rawResult.status === "unknown"
+						? rawResult.status : "unknown",
+					size,
+					omitted: true,
+				};
+				const handle = boundedReadSessionString(rawResult.handle, 64);
+				if (handle?.text) result.handle = handle.text;
+				if (includeResults) {
+					const excerpt = sanitizeReadSessionExcerpt(rawResult.excerpt, size, excerptLimit, targeted);
+					if (excerpt) {
+						result.excerpt = excerpt;
+						result.omitted = false;
+					}
+				}
+				results.push(result);
+			}
+		}
+		if (results.length > 0) message.toolResults = results;
+		return message;
+	});
+	return { messages, authors, correlations, targeted, excerptLimit };
+}
+
+function rebuildReadSessionDictionaries(envelope: ReadSessionRecord, projection: SanitizedReadSessionProjection): void {
+	const authorRefs = new Set<string>();
+	const correlationRefs = new Set<string>();
+	for (const message of envelope.messages) {
+		if (typeof message.authorRef === "string") authorRefs.add(message.authorRef);
+		if (Array.isArray(message.toolCalls)) {
+			for (const call of message.toolCalls) if (typeof call.ref === "string") correlationRefs.add(call.ref);
+		}
+		if (Array.isArray(message.toolResults)) {
+			for (const result of message.toolResults) if (typeof result.ref === "string") correlationRefs.add(result.ref);
+		}
+	}
+	const authors: ReadSessionRecord = {};
+	for (const ref of authorRefs) {
+		const author = projection.authors.get(ref);
+		if (author) authors[ref] = author;
+	}
+	const correlations: ReadSessionRecord = {};
+	for (const ref of correlationRefs) {
+		const correlation = projection.correlations.get(ref);
+		if (correlation) correlations[ref] = correlation;
+	}
+	if (Object.keys(authors).length > 0) envelope.authors = authors;
+	if (Object.keys(correlations).length > 0) envelope.correlations = correlations;
+}
+
+function commonReadSessionEnvelope(
+	source: ReadSessionRecord,
+	messages: ReadSessionRecord[],
+	projection: SanitizedReadSessionProjection,
+): ReadSessionRecord {
+	const envelope: ReadSessionRecord = {
+		total: source.total,
+		returned: messages.length,
+		offsetStart: messages.length > 0 ? messages[0].index : -1,
+		offsetEnd: messages.length > 0 ? messages[messages.length - 1].index : -1,
+		messages,
+	};
+	if (isNonNegativeInteger(source.matchCount)) envelope.matchCount = source.matchCount;
+	rebuildReadSessionDictionaries(envelope, projection);
+	return envelope;
+}
+
+function firstReadSessionExcerpt(envelope: ReadSessionRecord): { result: ReadSessionRecord; excerpt: ReadSessionRecord } | undefined {
+	for (const message of envelope.messages) {
+		if (!Array.isArray(message.toolResults)) continue;
+		for (const result of message.toolResults) {
+			if (isReadSessionRecord(result) && isReadSessionRecord(result.excerpt)) {
+				return { result, excerpt: result.excerpt };
+			}
+		}
+	}
+	return undefined;
+}
+
+function preserveReadSessionCompletion(
+	source: ReadSessionRecord,
+	messages: ReadSessionRecord[],
+	projection: SanitizedReadSessionProjection,
+): ReadSessionRecord {
+	const envelope = commonReadSessionEnvelope(source, messages, projection);
+	if (hasReadSessionKey(source, "nextOffset")) envelope.nextOffset = source.nextOffset;
+	if (source.partial === false) envelope.partial = false;
+	if (source.partial === true) {
+		envelope.partial = true;
+		envelope.truncatedBy = source.truncatedBy;
+		if (source.continuationRequest.kind === "page") {
+			envelope.continuationRequest = { kind: "page", offset: source.continuationRequest.offset };
+		} else if (source.continuationRequest.kind === "result_slice") {
+			const target = firstReadSessionExcerpt(envelope);
+			const cursor = isNonNegativeInteger(target?.excerpt.nextCursor)
+				? target.excerpt.nextCursor : source.continuationRequest.result_cursor;
+			envelope.continuationRequest = {
+				kind: "result_slice",
+				result_handle: target?.result.handle || source.continuationRequest.result_handle,
+				result_cursor: cursor,
+				result_limit: source.continuationRequest.result_limit,
+			};
+		} else {
+			envelope.continuationRequest = { ...source.continuationRequest };
+			envelope.wrapperDiagnostics = {
+				omitted: true,
+				actualBytes: source.wrapperDiagnostics.actualBytes,
+			};
+		}
+	} else if (projection.targeted) {
+		const target = firstReadSessionExcerpt(envelope);
+		if (target && isNonNegativeInteger(target.excerpt.nextCursor) && typeof target.result.handle === "string") {
+			envelope.partial = true;
+			envelope.truncatedBy = "transport_budget";
+			envelope.continuationRequest = {
+				kind: "result_slice",
+				result_handle: target.result.handle,
+				result_cursor: target.excerpt.nextCursor,
+				result_limit: projection.excerptLimit,
+			};
+		}
+	}
+	return envelope;
+}
+
+function resolvedReadSessionPageStart(source: ReadSessionRecord, params: ReadSessionParams): number {
+	if (isSafeInteger(source.nextOffset)) return Math.max(0, source.nextOffset - source.returned);
+	if (isSafeInteger(params.offset)) {
+		if (params.offset >= 0) return params.offset;
+		if (typeof params.pattern !== "string" || params.pattern.length === 0) return Math.max(0, source.total + params.offset);
+		if (source.returned < -params.offset) return 0;
+	}
+	return 0;
+}
+
+function readSessionPagePartial(
+	source: ReadSessionRecord,
+	messages: ReadSessionRecord[],
+	projection: SanitizedReadSessionProjection,
+	params: ReadSessionParams,
+	consumed: number,
+): ReadSessionRecord {
+	const envelope = commonReadSessionEnvelope(source, messages, projection);
+	const nextOffset = resolvedReadSessionPageStart(source, params) + consumed;
+	envelope.partial = true;
+	envelope.truncatedBy = "transport_budget";
+	envelope.nextOffset = nextOffset;
+	envelope.continuationRequest = { kind: "page", offset: nextOffset };
+	return envelope;
+}
+
+function minimizedReadSessionMessage(message: ReadSessionRecord): ReadSessionRecord {
+	const minimized = structuredClone(message);
+	if (Array.isArray(minimized.toolCalls)) {
+		minimized.toolCalls = minimized.toolCalls.map((call: ReadSessionRecord) => ({
+			...call,
+			argumentsPreview: "",
+			argumentsTruncated: true,
+		}));
+	}
+	if (Array.isArray(minimized.toolResults)) {
+		minimized.toolResults = minimized.toolResults.map((result: ReadSessionRecord) => {
+			const bounded: ReadSessionRecord = { ...result, omitted: true };
+			delete bounded.excerpt;
+			return bounded;
+		});
+	}
+	return minimized;
+}
+
+function summaryReadSessionMessage(message: ReadSessionRecord): ReadSessionRecord {
+	return {
+		index: message.index,
+		role: message.role,
+		projectionOmitted: true,
+		toolCallCount: Array.isArray(message.toolCalls) ? message.toolCalls.length : 0,
+		toolResultCount: Array.isArray(message.toolResults) ? message.toolResults.length : 0,
+	};
+}
+
+function cloneReadSessionEnvelope(envelope: ReadSessionRecord): ReadSessionRecord {
+	return JSON.parse(JSON.stringify(envelope));
+}
+
+function readSessionEnvelopeWithExcerpt(
+	envelope: ReadSessionRecord,
+	prefixUnits: number,
+	requestedLimit: number,
+): ReadSessionRecord {
+	const next = cloneReadSessionEnvelope(envelope);
+	delete next.nextOffset;
+	delete next.wrapperDiagnostics;
+	delete next.partial;
+	delete next.truncatedBy;
+	delete next.continuationRequest;
+	const target = firstReadSessionExcerpt(next);
+	if (!target) return next;
+	const text = scalarSafePrefix(target.excerpt.text, prefixUnits, true);
+	const end = target.excerpt.start + text.length;
+	target.excerpt.text = text;
+	target.excerpt.end = end;
+	const complete = isNonNegativeInteger(target.result.size?.chars) && end >= target.result.size.chars;
+	target.excerpt.complete = complete;
+	target.excerpt.nextCursor = complete ? null : end;
+	if (!complete) {
+		next.partial = true;
+		next.truncatedBy = "transport_budget";
+		next.continuationRequest = {
+			kind: "result_slice",
+			result_handle: target.result.handle,
+			result_cursor: end,
+			result_limit: requestedLimit,
+		};
+	}
+	return next;
+}
+
+function fitTargetedReadSessionValue(
+	envelope: ReadSessionRecord,
+	params: ReadSessionParams,
+	requestedLimit: number,
+): ReadSessionPiValue | undefined {
+	const target = firstReadSessionExcerpt(envelope);
+	if (!target || typeof target.result.handle !== "string") return undefined;
+	let low = 0;
+	let high = target.excerpt.text.length;
+	let best: ReadSessionPiValue | undefined;
+	while (low <= high) {
+		const middle = Math.floor((low + high) / 2);
+		const candidateEnvelope = readSessionEnvelopeWithExcerpt(envelope, middle, requestedLimit);
+		const candidateValue = readSessionPiValue(params, candidateEnvelope);
+		if (candidateValue && readSessionValueFits(candidateValue)) {
+			const candidateTarget = firstReadSessionExcerpt(candidateEnvelope);
+			if (target.excerpt.text.length === 0
+				|| (candidateTarget && candidateTarget.excerpt.end > candidateTarget.excerpt.start)) best = candidateValue;
+			low = middle + 1;
+		} else {
+			high = middle - 1;
+		}
+	}
+	return best;
+}
+
+function fitReadSessionPageValue(
+	source: ReadSessionRecord,
+	projection: SanitizedReadSessionProjection,
+	params: ReadSessionParams,
+): ReadSessionPiValue | undefined {
+	const retained: ReadSessionRecord[] = [];
+	let consumed = 0;
+	for (let index = 0; index < projection.messages.length; index += 1) {
+		const sourceMessage = projection.messages[index];
+		const isLast = index === projection.messages.length - 1;
+		const attempt = (message: ReadSessionRecord) => {
+			const messages = [...retained, message];
+			const envelope = isLast
+				? preserveReadSessionCompletion(source, messages, projection)
+				: readSessionPagePartial(source, messages, projection, params, consumed + 1);
+			return { messages, value: readSessionPiValue(params, envelope) };
+		};
+		let candidate = attempt(sourceMessage);
+		if (!candidate.value || !readSessionValueFits(candidate.value)) candidate = attempt(minimizedReadSessionMessage(sourceMessage));
+		if (candidate.value && readSessionValueFits(candidate.value)) {
+			retained.splice(0, retained.length, ...candidate.messages);
+			consumed += 1;
+			if (isLast) return candidate.value;
+			continue;
+		}
+		if (retained.length > 0) {
+			return readSessionPiValue(params, readSessionPagePartial(source, retained, projection, params, consumed));
+		}
+		const summary = summaryReadSessionMessage(sourceMessage);
+		const summaryEnvelope = readSessionPagePartial(source, [summary], projection, params, 1);
+		const summaryValue = readSessionPiValue(params, summaryEnvelope);
+		return summaryValue && readSessionValueFits(summaryValue) ? summaryValue : undefined;
+	}
+	return readSessionPiValue(params, preserveReadSessionCompletion(source, [], projection));
+}
+
+function readSessionRetryRequest(params: ReadSessionParams): ReadSessionRecord {
+	const retry: ReadSessionRecord = { kind: "retry", retrySameRequest: true };
+	const sessionId = boundedReadSessionString(params.session_id, 64);
+	if (sessionId) {
+		retry.session_id = sessionId.text;
+		retry.sessionIdTruncated = sessionId.truncated;
+	}
+	for (const key of ["offset", "limit"] as const) if (isSafeInteger(params[key])) retry[key] = params[key];
+	for (const key of ["case_sensitive", "verbose", "include_tool_results"] as const) {
+		if (typeof params[key] === "boolean") retry[key] = params[key];
+	}
+	if (isSafeInteger(params.context)) retry.context = Math.max(0, Math.min(5, params.context));
+	if (hasReadSessionKey(params, "pattern")) retry.patternOmitted = true;
+	return retry;
+}
+
+function unrecognizedReadSessionValue(params: ReadSessionParams, body: unknown): ReadSessionPiValue {
+	const envelope: ReadSessionRecord = {
+		total: 0,
+		returned: 0,
+		offsetStart: -1,
+		offsetEnd: -1,
+		messages: [],
+		partial: true,
+		truncatedBy: "extension_return_unrecognized",
+		continuationRequest: readSessionRetryRequest(params),
+		wrapperDiagnostics: { omitted: true, actualBytes: readSessionSerializedBytes(body) },
+	};
+	return readSessionPiValue(params, envelope)!;
+}
+
+/** Deterministically fit the complete successful value, including JSON escaping. */
+function fitReadSessionPiValue(params: ReadSessionParams, body: unknown): ReadSessionPiValue {
+	if (isReadSessionRecord(body)) {
+		const direct = readSessionPiValue(params, body);
+		if (direct && readSessionValueFits(direct)) return direct;
+	}
+	if (!isCanonicalReadSessionEnvelope(body)) return unrecognizedReadSessionValue(params, body);
+
+	const projection = sanitizeReadSessionProjection(body, params);
+	const canonical = preserveReadSessionCompletion(body, projection.messages, projection);
+	const bounded = readSessionPiValue(params, canonical);
+	if (bounded && readSessionValueFits(bounded)) return bounded;
+
+	if (projection.targeted) {
+		const targeted = fitTargetedReadSessionValue(canonical, params, projection.excerptLimit);
+		if (targeted && readSessionValueFits(targeted)) return targeted;
+	}
+	const page = fitReadSessionPageValue(body, projection, params);
+	if (page && readSessionValueFits(page)) return page;
+	return unrecognizedReadSessionValue(params, body);
+}
+
 type SessionPromptMode = "prompt" | "steer";
 
 interface SessionPromptParams {
@@ -414,11 +1052,7 @@ const extension: ExtensionFactory = (pi) => {
 					details: undefined,
 				};
 			}
-			const envelope = result.body;
-			return {
-				content: [{ type: "text", text: JSON.stringify(envelope) }],
-				details: readSessionDetails(params as ReadSessionParams, envelope),
-			};
+			return fitReadSessionPiValue(params as ReadSessionParams, result.body);
 		},
 	});
 
