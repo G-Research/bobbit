@@ -231,7 +231,7 @@ function makeReviewRpc(failModels: string[] = []): ReviewModelRpc & {
 }
 
 const DURABLE_MODEL = { provider: "anthropic", id: "claude-sonnet-4-20250514" };
-const REQUESTED_MODEL = { provider: "anthropic", id: "claude-opus-4-6" };
+const REQUESTED_MODEL = { provider: "anthropic", id: "claude-opus-5" };
 const FALLBACK_MODEL = { provider: "anthropic", id: "claude-haiku-4-5" };
 
 type RuntimeTuple = { provider: string; id: string; thinkingLevel: string };
@@ -500,6 +500,8 @@ describe("controlled model fallback policy — exact runtime tuple", () => {
 			effectiveThinkingLevel: "xhigh",
 		}]);
 		assert.deepEqual(harness.modelFiles, [`${REQUESTED_MODEL.provider}/${REQUESTED_MODEL.id}`]);
+		assert.equal((harness.session as any).spawnPinnedModel, `${REQUESTED_MODEL.provider}/${REQUESTED_MODEL.id}`);
+		assert.equal((harness.session as any).spawnPinnedThinkingLevel, "xhigh");
 		assert.equal(harness.messages.at(-1)?.data?.model?.provider, REQUESTED_MODEL.provider);
 		assert.equal(harness.messages.at(-1)?.data?.model?.id, REQUESTED_MODEL.id);
 		assert.equal(harness.messages.at(-1)?.data?.thinkingLevel, "xhigh");
@@ -593,6 +595,8 @@ describe("controlled model fallback policy — exact runtime tuple", () => {
 			modelId: DURABLE_MODEL.id,
 			effectiveThinkingLevel: "medium",
 		}]);
+		assert.equal((harness.session as any).spawnPinnedModel, `${DURABLE_MODEL.provider}/${DURABLE_MODEL.id}`);
+		assert.equal((harness.session as any).spawnPinnedThinkingLevel, "medium");
 		assert.equal(harness.messages.at(-1)?.data?.model?.provider, DURABLE_MODEL.provider);
 		assert.equal(harness.messages.at(-1)?.data?.model?.id, DURABLE_MODEL.id);
 		assert.equal(harness.messages.at(-1)?.data?.thinkingLevel, "medium");
@@ -601,7 +605,7 @@ describe("controlled model fallback policy — exact runtime tuple", () => {
 	it("handler combines thinking with set_model and serialises both tuple mutation frames", () => {
 		const src = readFileSync(WS_HANDLER_SOURCE, "utf-8");
 		const setModelCase = extractRouteSlice(src, 'case "set_model":', 'case "set_image_model":');
-		assert.match(setModelCase, /msg\.thinkingLevel/);
+		assert.match(setModelCase, /combined\.thinkingLevel/);
 		assert.match(setModelCase, /SET_MODEL_FAILED/);
 
 		const serialisationSlice = extractRouteSlice(src, "const serialisedSessionCommand", "let result: Promise<void>");

@@ -21,8 +21,6 @@ import {
 } from "../skills/resolve-file-mentions.js";
 import { buildMergedModelText } from "../skills/merge-mentions.js";
 import { resolveModelStateMeta } from "../agent/model-registry.js";
-import { isKnownThinkingLevel } from "../../shared/thinking-levels.js";
-import { clampThinkingLevelForModel } from "../agent/thinking-level-clamp.js";
 import {
 	appendCompactionSidecarEntry,
 	makeCompactionId,
@@ -37,7 +35,7 @@ import { mintSurfaceToken, resolveSurfaceIdentity } from "../extension-host/surf
 import type { PackContributionResolver } from "../extension-host/pack-contribution-registry.js";
 import { handleSessionPost } from "../extension-host/session-write.js";
 import type { PreferencesStore } from "../agent/preferences-store.js";
-import { applyRuntimeSessionModelSelection, broadcastRuntimeSessionActualModelState } from "./runtime-model-selection.js";
+import { applyRuntimeSessionModelSelection, applyRuntimeSessionThinkingSelection } from "./runtime-model-selection.js";
 import { mintWritePermit, consumeWritePermit } from "../extension-host/session-write-permit.js";
 import type { ActionGuardSession } from "../extension-host/action-guard.js";
 import { decideResumeReplay, paceAndSend, RESUME_REPLAY_DRAIN_TIMEOUT_MS, PACE_TIMEOUT_MS, waitForReplayDrain } from "../replay-pacing.js";
@@ -1133,15 +1131,20 @@ export function handleWebSocketConnection(
 					break;
 				case "set_model":
 					try {
-						await applyRuntimeSessionModelSelection(sessionManager, session, msg.provider, msg.modelId, preferencesStore, broadcast);
+						const combined = msg as typeof msg & { thinkingLevel?: string };
+						await applyRuntimeSessionModelSelection(
+							sessionManager,
+							session,
+							msg.provider,
+							msg.modelId,
+							combined.thinkingLevel,
+							preferencesStore,
+							broadcast,
+						);
 					} catch (err: any) {
-						// Surface set_model failures to the UI instead of silently swallowing
-						// them — otherwise the client keeps showing the new model while the
-						// agent stays bound to the previous one and subsequent prompts go
-						// to the wrong model. First broadcast the authoritative actual model
-						// so optimistic clients reconcile before seeing the failure banner.
+						// The runtime helper has already corrected both optimistic tuple fields
+						// and either verified rollback or replaced an unverifiable bridge.
 						console.error(`[ws-handler] set_model failed for session ${session.id} (${msg.provider}/${msg.modelId}):`, err?.message || err);
-						await broadcastRuntimeSessionActualModelState(sessionManager, session, broadcast);
 						send(ws, { type: "error", message: `Failed to switch model: ${err?.message || err}`, code: "SET_MODEL_FAILED" });
 					}
 					break;
@@ -1163,18 +1166,16 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "set_thinking_level": {
-					// Defence in depth: drop unknown tokens; clamp against the
-					// session's current model so xhigh on a non-supporting model
-					// degrades to high (etc.) at the server boundary.
-					const known = isKnownThinkingLevel(msg.level);
-					if (!known) break;
-					let level: string = known;
-					const persisted = sessionManager.getPersistedSession(session.id);
-					if (persisted?.modelId) {
-						const clamped = clampThinkingLevelForModel(level, persisted.modelProvider, persisted.modelId);
-						if (clamped) level = clamped;
+					try {
+						await applyRuntimeSessionThinkingSelection(sessionManager, session, msg.level, broadcast);
+					} catch (err: any) {
+						console.error(`[ws-handler] set_thinking_level failed for session ${session.id} (${msg.level}):`, err?.message || err);
+						send(ws, {
+							type: "error",
+							message: `Failed to switch thinking level: ${err?.message || err}`,
+							code: "SET_THINKING_LEVEL_FAILED",
+						});
 					}
-					await session.rpcClient.setThinkingLevel(level);
 					break;
 				}
 				case "compact": {
@@ -1914,6 +1915,8 @@ export function handleWebSocketConnection(
 		const liveStreamingSteer = msg.type === "steer" && liveSession?.status === "streaming";
 		const serialisedSessionCommand = msg.type === "prompt" ||
 			msg.type === "retry" ||
+			msg.type === "set_model" ||
+			msg.type === "set_thinking_level" ||
 			(msg.type === "steer" && !liveStreamingSteer);
 		let result: Promise<void>;
 		try {
