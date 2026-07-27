@@ -78,6 +78,7 @@ const authoritativeWorkspaces = new Map<string, SidePanelWorkspace>();
 const workspaceDeleteOutcomes = new Map<string, WorkspaceDeleteOutcome[]>();
 const workspaceDeleteAttempts = new Map<string, WorkspaceDeleteAttempt[]>();
 const transcripts = new Map<string, any[]>();
+const projectDrafts = new Map<string, Record<string, unknown>>();
 let sessionListGate: DeferredGate | null = null;
 let sessionListFetchCount = 0;
 let sessionListResponseSessions: GatewaySession[] | null = null;
@@ -273,7 +274,14 @@ async function fetchFixture(input: RequestInfo | URL, init?: RequestInit): Promi
 		await gateFor(sessionId).promise;
 		return Response.json(cloneWorkspace(authoritativeWorkspace(sessionId)));
 	}
-	if (url.pathname.endsWith("/draft") && method === "GET") return new Response(null, { status: 204 });
+	if (url.pathname.endsWith("/draft") && method === "GET") {
+		const projectDraft = sessionId && url.searchParams.get("type") === "project"
+			? projectDrafts.get(sessionId)
+			: undefined;
+		return projectDraft
+			? Response.json({ data: projectDraft })
+			: new Response(null, { status: 204 });
+	}
 	if (url.pathname.endsWith("/git-status")) {
 		return Response.json({ branch: "master", status: [], clean: true });
 	}
@@ -486,6 +494,7 @@ beforeEach(() => {
 	authoritativeWorkspaces.clear();
 	workspaceDeleteOutcomes.clear();
 	workspaceDeleteAttempts.clear();
+	projectDrafts.clear();
 	sessionListGate = null;
 	sessionListFetchCount = 0;
 	sessionListResponseSessions = null;
@@ -695,6 +704,56 @@ describe("cold session transcript/workspace ordering", () => {
 				state.activeProposals.project,
 				"PROJECT_PROPOSAL_DRAFT_RESTORE_RACE: an empty client draft response erased the newer server proposal",
 			).toMatchObject({ sessionId: SESSION_A, fields, rev: 1 });
+			expect(state.assistantHasProposal).toBe(true);
+		} finally {
+			gateFor(SESSION_A).release();
+			await pendingConnect.catch(() => {});
+		}
+	});
+
+	it("preserves a newer server project proposal over a stale nonempty draft restore", async () => {
+		state.gatewaySessions = state.gatewaySessions.map((session) =>
+			session.id === SESSION_A ? { ...session, assistantType: "project" } : session);
+		const staleFields = {
+			name: "Stale draft project proposal",
+			root_path: "/fixture/stale-draft-project-proposal",
+		};
+		projectDrafts.set(SESSION_A, {
+			activeProjectProposal: {
+				sessionId: SESSION_A,
+				fields: staleFields,
+				streaming: false,
+				rev: 1,
+			},
+			hasReceivedProposal: true,
+			assistantTab: "preview",
+			accepted: true,
+		});
+		const pendingConnect = connectToSession(SESSION_A, true);
+
+		try {
+			await waitFor(
+				() => (workspaceFetchCount.get(SESSION_A) || 0) > 0
+					&& typeof state.remoteAgent?.onProposal === "function",
+				"PROJECT_PROPOSAL_DRAFT_RESTORE_RACE: project callback was not ready before a stale draft restore",
+			);
+			const fields = {
+				name: "Current server project proposal",
+				root_path: "/fixture/current-server-project-proposal",
+				test_command: "npm run test:unit",
+			};
+			state.remoteAgent?.onProposal?.("project", fields, false, 2, "rehydrate");
+			expect(state.activeProposals.project).toMatchObject({ sessionId: SESSION_A, fields, rev: 2 });
+
+			gateFor(SESSION_A).release();
+			await pendingConnect;
+
+			expect(
+				state.activeProposals.project,
+				"PROJECT_PROPOSAL_DRAFT_RESTORE_RACE: a stale nonempty draft overwrote the newer server proposal",
+			).toMatchObject({ sessionId: SESSION_A, fields, rev: 2 });
+			expect(state.activeProposals.project?.fields).not.toEqual(staleFields);
+			expect(state.projectProposalAcceptedBySessionId[SESSION_A]).toBeUndefined();
 			expect(state.assistantHasProposal).toBe(true);
 		} finally {
 			gateFor(SESSION_A).release();

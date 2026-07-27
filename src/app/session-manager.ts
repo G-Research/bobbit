@@ -891,12 +891,28 @@ const projectDraft = createDraftManager({
 	},
 	restore: (_sessionId, draft: any) => {
 		let dismissed = false;
+		let preservedCurrentProposal = false;
 		if (draft.activeProjectProposal) {
 			const p = draft.activeProjectProposal as any;
-			const fields = (p.fields ?? {}) as Record<string, unknown>;
+			const storedFields = (p.fields ?? {}) as Record<string, unknown>;
+			const storedRev = typeof p.rev === "number" && Number.isFinite(p.rev)
+				? Math.max(0, Math.trunc(p.rev))
+				: 1;
+			const existing = state.activeProposals.project?.sessionId === _sessionId
+				? state.activeProposals.project
+				: undefined;
+			const existingRev = typeof existing?.rev === "number" && Number.isFinite(existing.rev)
+				? Math.max(0, Math.trunc(existing.rev))
+				: 0;
+			const keepExisting = existing !== undefined && existingRev >= storedRev;
+			const fields = keepExisting ? existing!.fields : storedFields;
 			if (isProposalDismissedTyped(_sessionId, "project", fields)) {
 				delete state.activeProposals.project;
 				dismissed = true;
+			} else if (keepExisting) {
+				// proposal_update can land while a nonempty draft request is pending.
+				// The current-session slot is authoritative at an equal or newer rev.
+				preservedCurrentProposal = true;
 			} else {
 				// `projectId` was the legacy name for source provenance. It is read
 				// only during restoration and is never serialized again.
@@ -912,22 +928,26 @@ const projectDraft = createDraftManager({
 						? { createdProjectId: p.createdProjectId.trim() }
 						: {}),
 					streaming: typeof p.streaming === "boolean" ? p.streaming : false,
-					rev: typeof p.rev === "number" ? p.rev : 1,
+					rev: storedRev,
 				};
 			}
-		} else if (state.activeProposals.project?.sessionId !== _sessionId) {
+		} else if (state.activeProposals.project?.sessionId === _sessionId) {
 			// A server proposal may arrive while the client-draft request is in
 			// flight. An empty stored draft cannot erase that newer current-session
 			// slot; only discard a proposal left over from another session.
+			preservedCurrentProposal = true;
+		} else {
 			delete state.activeProposals.project;
 		}
 		const hasCurrentProposal = state.activeProposals.project?.sessionId === _sessionId;
 		state.assistantHasProposal = dismissed ? false : (hasCurrentProposal || (draft.hasReceivedProposal ?? false));
 		state.assistantTab = draft.assistantTab ?? "chat";
-		if (draft.accepted === true) {
-			state.projectProposalAcceptedBySessionId[_sessionId] = true;
-		} else {
-			delete state.projectProposalAcceptedBySessionId[_sessionId];
+		if (!preservedCurrentProposal) {
+			if (draft.accepted === true) {
+				state.projectProposalAcceptedBySessionId[_sessionId] = true;
+			} else {
+				delete state.projectProposalAcceptedBySessionId[_sessionId];
+			}
 		}
 	},
 });
