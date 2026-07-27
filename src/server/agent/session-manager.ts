@@ -7498,7 +7498,14 @@ export class SessionManager {
 			}
 		} else {
 			const initModel = this.resolveInitialModel(ps.role, ps.projectId);
-			if (initModel) bridgeOptions.initialModel = initModel;
+			if (initModel) {
+				bridgeOptions.initialModel = initModel;
+			} else if (!psPersistedModel) {
+				// Legacy rows predate durable model tuples. Resolve the same deterministic
+				// current-catalog default as a fresh Bobbit-owned spawn rather than letting
+				// a newly published hidden Pi provider become the restore default.
+				bridgeOptions.initialModel = await this.resolveCurrentCatalogFallbackModel();
+			}
 		}
 		const initThinking = this.resolveThinkingLevelForModel(
 			bridgeOptions.initialModel,
@@ -7822,22 +7829,16 @@ export class SessionManager {
 		let currentModels: Awaited<ReturnType<typeof getAvailableModels>> | undefined;
 		// A normal Bobbit spawn must bind one of Bobbit's current catalog rows
 		// explicitly rather than letting Pi choose a newly published hidden provider.
-		// Non-empty generic agent args retain their legacy/raw CLI semantics.
-		if (!rawSelectedSpawnModel && !opts?.skipAutoModel && !agentArgs?.length && this.preferencesStore) {
+		// The team lead's extension-only args are Bobbit-owned setup, not generic raw
+		// Pi arguments; every other non-empty agentArgs input keeps the legacy exemption.
+		const teamExtensionOnlySpawn = initialRole === "team-lead"
+			&& !!goalId
+			&& !!agentArgs?.length
+			&& agentArgs.length % 2 === 0
+			&& agentArgs.every((arg, index) => index % 2 === 0 ? arg === "--extension" : arg.length > 0);
+		if (!rawSelectedSpawnModel && !opts?.skipAutoModel && (!agentArgs?.length || teamExtensionOnlySpawn) && this.preferencesStore) {
 			currentModels = await getAvailableModels(this.preferencesStore);
-			const catalogDefault = currentModels
-				.filter((model) => model.sessionSelectable !== false)
-				.sort((a, b) => {
-					const authDelta = Number(Boolean(b.authenticated)) - Number(Boolean(a.authenticated));
-					if (authDelta !== 0) return authDelta;
-					const rankDelta = modelRecencyRank(b.id) - modelRecencyRank(a.id);
-					if (rankDelta !== 0) return rankDelta;
-					return a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id);
-				})[0];
-			if (!catalogDefault) {
-				throw new Error("No model is currently available for session selection");
-			}
-			rawSelectedSpawnModel = `${catalogDefault.provider}/${catalogDefault.id}`;
+			rawSelectedSpawnModel = await this.resolveCurrentCatalogFallbackModel(currentModels);
 		}
 		const selectedSpawnModel = rawSelectedSpawnModel
 			? normalizeAigwModelString(rawSelectedSpawnModel)
@@ -8691,6 +8692,30 @@ export class SessionManager {
 		return undefined;
 	}
 
+	/**
+	 * Resolve the authenticated-first, shared-rank model used only by Bobbit-owned
+	 * initial setup when no explicit durable/role/preference model exists.
+	 */
+	private async resolveCurrentCatalogFallbackModel(
+		models?: Awaited<ReturnType<typeof getAvailableModels>>,
+	): Promise<string | undefined> {
+		if (!this.preferencesStore) return undefined;
+		const currentModels = models ?? await getAvailableModels(this.preferencesStore);
+		const catalogDefault = currentModels
+			.filter((model) => model.sessionSelectable !== false)
+			.sort((a, b) => {
+				const authDelta = Number(Boolean(b.authenticated)) - Number(Boolean(a.authenticated));
+				if (authDelta !== 0) return authDelta;
+				const rankDelta = modelRecencyRank(b.id) - modelRecencyRank(a.id);
+				if (rankDelta !== 0) return rankDelta;
+				return a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id);
+			})[0];
+		if (!catalogDefault) {
+			throw new Error("No model is currently available for session selection");
+		}
+		return `${catalogDefault.provider}/${catalogDefault.id}`;
+	}
+
 	/** Resolve and clamp a spawn thinking level against the exact chosen model. */
 	private resolveThinkingLevelForModel(
 		model: string | undefined,
@@ -8994,6 +9019,23 @@ export class SessionManager {
 	private async tryApplyDefaultThinkingLevel(session: SessionInfo): Promise<void> {
 		const persisted = this.resolveStoreForSession(session.id).get(session.id);
 		const spawnPinnedThinking = isKnownThinkingLevel(session.spawnPinnedThinkingLevel);
+		const spawnPinnedModel = session.spawnPinnedModel
+			? normalizeAigwModelString(session.spawnPinnedModel)
+			: undefined;
+		const spawnModelSlash = spawnPinnedModel?.indexOf("/") ?? -1;
+		// tryAutoSelectModel has already read back and atomically persisted this exact
+		// spawn tuple. Return before the first await so the normal setup path cannot
+		// leave a detached redundant thinking read that races a newer live selection.
+		if (
+			spawnPinnedThinking
+			&& spawnPinnedModel
+			&& spawnModelSlash > 0
+			&& persisted?.modelProvider === spawnPinnedModel.slice(0, spawnModelSlash)
+			&& persisted?.modelId === spawnPinnedModel.slice(spawnModelSlash + 1)
+			&& persisted?.effectiveThinkingLevel === spawnPinnedThinking
+		) {
+			return;
+		}
 		const roleThinking = isKnownThinkingLevel(this.resolveRoleThinkingLevel(session));
 		const durableThinking = isKnownThinkingLevel(persisted?.effectiveThinkingLevel);
 		const preferenceThinking = isKnownThinkingLevel(
@@ -9707,7 +9749,11 @@ export class SessionManager {
 			bridgeOptions.initialModel = respawnPersistedModel;
 		} else {
 			const initModel = this.resolveInitialModel(role.name, session.projectId);
-			if (initModel) bridgeOptions.initialModel = initModel;
+			if (initModel) {
+				bridgeOptions.initialModel = initModel;
+			} else if (!respawnPersistedModel) {
+				bridgeOptions.initialModel = await this.resolveCurrentCatalogFallbackModel();
+			}
 		}
 		const initThinking = this.resolveThinkingLevelForModel(
 			bridgeOptions.initialModel,
@@ -12131,7 +12177,11 @@ export class SessionManager {
 				bridgeOptions.initialModel = forceRespawnPersistedModel;
 			} else {
 				const initModel = this.resolveInitialModel(session.role, session.projectId);
-				if (initModel) bridgeOptions.initialModel = initModel;
+				if (initModel) {
+					bridgeOptions.initialModel = initModel;
+				} else if (!forceRespawnPersistedModel) {
+					bridgeOptions.initialModel = await this.resolveCurrentCatalogFallbackModel();
+				}
 			}
 			const initThinking = this.resolveThinkingLevelForModel(
 				bridgeOptions.initialModel,
