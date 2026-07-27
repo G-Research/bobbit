@@ -666,9 +666,13 @@ test("team lead borrows goal-owned polyrepo coordinates and both git-status rout
 	const fixtureRoot = mkdtempSync(join(gateway.bobbitDir, "team-lead-status-polyrepo-"));
 	const projectRoot = join(fixtureRoot, "project");
 	const worktreeRoot = join(fixtureRoot, "worktrees");
+	const runner = gateway.sessionManager.commandRunner as CommandRunner;
 	let projectId: string | undefined;
 	let goalId: string | undefined;
 	let teamLeadSessionId: string | undefined;
+	let originalRestoreOneSession: any;
+	let teamTornDown = false;
+	let leadPurged = false;
 
 	try {
 		for (const repo of COMPONENTS) copyGitTemplate(join(projectRoot, repo));
@@ -732,10 +736,21 @@ test("team lead borrows goal-owned polyrepo coordinates and both git-status rout
 			throw new Error(`polyrepo status fixture produced invalid goal coordinates: ${JSON.stringify(goal)}`);
 		}
 
-		// Make every named component observably dirty so aggregate cleanliness and
-		// line counts cannot pass through an all-zero placeholder.
+		// Make every named component observably and asymmetrically dirty so the
+		// aggregate line count is pinned to a real sum, not an all-zero placeholder
+		// or one arbitrarily selected component.
+		const expectedInsertionsByRepo: Record<ComponentName, number> = {
+			[NESTED_COMPONENT]: 2,
+			[FAILED_COMPONENT]: 3,
+		};
+		const expectedComponentHeads = {} as Record<ComponentName, string>;
 		for (const repo of COMPONENTS) {
-			appendFileSync(join(goal.repoWorktrees[repo], "README.md"), `status reproduction ${repo}\n`, "utf8");
+			expectedComponentHeads[repo] = await git(runner, goal.repoWorktrees[repo], ["rev-parse", "HEAD"]);
+			const lines = Array.from(
+				{ length: expectedInsertionsByRepo[repo] },
+				(_, index) => `status reproduction ${repo} ${index + 1}\n`,
+			).join("");
+			appendFileSync(join(goal.repoWorktrees[repo], "README.md"), lines, "utf8");
 		}
 
 		const startResponse = await apiFetch(`/api/goals/${goalId}/team/start`, { method: "POST" });
@@ -754,7 +769,15 @@ test("team lead borrows goal-owned polyrepo coordinates and both git-status rout
 		const leadStatus = await readJson(leadStatusResponse);
 
 		const problems: string[] = [];
-		const expectedRepoWorktrees = goal.repoWorktrees as Record<string, string>;
+		const expectedRepoWorktrees = goal.repoWorktrees as Record<ComponentName, string>;
+		const expectedAggregateCounters = {
+			ahead: 0,
+			behind: 0,
+			aheadOfPrimary: 0,
+			behindPrimary: 0,
+			insertionsVsPrimary: Object.values(expectedInsertionsByRepo).reduce((sum, count) => sum + count, 0),
+			deletionsVsPrimary: 0,
+		};
 		const sortedEntries = (value: Record<string, string> | undefined) =>
 			Object.entries(value ?? {}).sort(([a], [b]) => a.localeCompare(b));
 		const checkCoordinates = (label: string, actual: any, repoWorktrees: Record<string, string>) => {
@@ -796,38 +819,145 @@ test("team lead borrows goal-owned polyrepo coordinates and both git-status rout
 				problems.push(`${label}.aggregate.branch=${JSON.stringify(aggregate?.branch)} top=${JSON.stringify(body?.branch)}`);
 				return;
 			}
+			for (const repo of COMPONENTS) {
+				const result = body.repos[repo];
+				if (result.branch !== goal.branch) problems.push(`${label}.repos[${repo}].branch=${JSON.stringify(result.branch)}`);
+				if (result.clean !== false) problems.push(`${label}.repos[${repo}].clean=${JSON.stringify(result.clean)}`);
+				if (result.unpushed !== false) problems.push(`${label}.repos[${repo}].unpushed=${JSON.stringify(result.unpushed)}`);
+				if (result.insertionsVsPrimary !== expectedInsertionsByRepo[repo]) {
+					problems.push(`${label}.repos[${repo}].insertionsVsPrimary=${JSON.stringify(result.insertionsVsPrimary)}`);
+				}
+				if (result.deletionsVsPrimary !== 0) problems.push(`${label}.repos[${repo}].deletionsVsPrimary=${JSON.stringify(result.deletionsVsPrimary)}`);
+			}
 			for (const field of summedFields) {
 				if (repoResults.some(result => typeof result?.[field] !== "number")) {
 					problems.push(`${label}.repos missing numeric ${field}`);
 					continue;
 				}
-				const expected = repoResults.reduce((sum, result) => sum + result[field], 0);
-				if (aggregate[field] !== expected || body[field] !== expected) {
-					problems.push(`${label}.${field}=${JSON.stringify(aggregate[field])}, expected ${expected}`);
+				const expectedSum = repoResults.reduce((sum, result) => sum + result[field], 0);
+				const pinnedValue = expectedAggregateCounters[field];
+				if (expectedSum !== pinnedValue || aggregate[field] !== pinnedValue || body[field] !== pinnedValue) {
+					problems.push(
+						`${label}.${field}=aggregate:${JSON.stringify(aggregate[field])},top:${JSON.stringify(body[field])},repos:${expectedSum},expected:${pinnedValue}`,
+					);
 				}
 			}
-			const expectedClean = repoResults.every(result => result.clean === true);
-			const expectedUnpushed = repoResults.some(result => result.unpushed === true);
-			if (aggregate.clean !== expectedClean || body.clean !== expectedClean) problems.push(`${label}.clean is not the component AND`);
-			if (aggregate.unpushed !== expectedUnpushed || body.unpushed !== expectedUnpushed) problems.push(`${label}.unpushed is not the component OR`);
-			if (aggregate.clean !== false) problems.push(`${label}.aggregate did not retain dirty component state`);
-			if (!(aggregate.insertionsVsPrimary > 0)) problems.push(`${label}.aggregate did not retain component line counts`);
+			if (aggregate.clean !== false || body.clean !== false) problems.push(`${label}.clean must be the dirty-component AND`);
+			if (aggregate.unpushed !== false || body.unpushed !== false) problems.push(`${label}.unpushed must be the component OR`);
+			if (!Array.isArray(aggregate.status) || aggregate.status.length !== 0) problems.push(`${label}.aggregate.status must defer to per-repo sections`);
 		};
 		checkStatusEnvelope("goal", goalStatusResponse, goalStatus);
 		checkStatusEnvelope("team lead", leadStatusResponse, leadStatus);
+
+		// Simulate the established gateway restart boundary: tear down the live
+		// SessionInfo, remove it from the in-memory map, and drive the same
+		// restoreSessions primitive used during boot. Other harness sessions remain
+		// live, so restrict only the per-session restore dispatch to this lead.
+		const sessionManager = gateway.sessionManager as any;
+		const liveBeforeRestart = sessionManager.sessions.get(teamLeadSessionId!);
+		if (!liveBeforeRestart) {
+			problems.push("team lead is not live before restoreSessions restart");
+		} else {
+			try {
+				liveBeforeRestart.unsubscribe();
+				try { await liveBeforeRestart.rpcClient.stop(); } catch { /* already stopped */ }
+				sessionManager.sessions.delete(teamLeadSessionId!);
+				originalRestoreOneSession = sessionManager.restoreOneSession;
+				sessionManager.restoreOneSession = async (persisted: any) => {
+					if (persisted.id === teamLeadSessionId) {
+						return originalRestoreOneSession.call(sessionManager, persisted);
+					}
+				};
+				await sessionManager.restoreSessions();
+			} catch (error) {
+				problems.push(`restoreSessions failed: ${error instanceof Error ? error.message : String(error)}`);
+			} finally {
+				if (originalRestoreOneSession) {
+					sessionManager.restoreOneSession = originalRestoreOneSession;
+					originalRestoreOneSession = undefined;
+				}
+			}
+		}
+
+		const restoredLiveLead = gateway.sessionManager.getSession(teamLeadSessionId!);
+		const restoredPersistedLead = context?.sessionStore.get(teamLeadSessionId!);
+		if (!sessionManager.isSessionLive(teamLeadSessionId!)) problems.push("restored team lead is not live");
+		checkCoordinates("restored live lead", restoredLiveLead, liveRepoWorktrees(restoredLiveLead));
+		checkCoordinates("restored persisted lead", restoredPersistedLead, restoredPersistedLead?.repoWorktrees ?? {});
+		const restoredLeadStatusResponse = await apiFetch(`/api/sessions/${teamLeadSessionId}/git-status`);
+		const restoredLeadStatus = await readJson(restoredLeadStatusResponse);
+		checkStatusEnvelope("restored team lead", restoredLeadStatusResponse, restoredLeadStatus);
+
+		const checkGoalComponentsUsable = async (label: string) => {
+			for (const repo of COMPONENTS) {
+				const worktreePath = expectedRepoWorktrees[repo];
+				if (!existsSync(worktreePath)) {
+					problems.push(`${label}: ${repo} goal-owned directory was removed`);
+					continue;
+				}
+				try {
+					const head = await git(runner, worktreePath, ["rev-parse", "HEAD"]);
+					if (head !== expectedComponentHeads[repo]) problems.push(`${label}: ${repo} HEAD changed to ${head}`);
+					const branch = await git(runner, worktreePath, ["branch", "--show-current"]);
+					if (branch !== goal.branch) problems.push(`${label}: ${repo} branch changed to ${branch}`);
+					const porcelain = await git(runner, worktreePath, ["status", "--porcelain", "--", "README.md"]);
+					if (!porcelain.includes("README.md")) problems.push(`${label}: ${repo} no longer reports its dirty README`);
+					const registrations = await git(runner, join(projectRoot, repo), ["worktree", "list", "--porcelain"]);
+					const registeredPaths = registrations
+						.split(/\r?\n/)
+						.filter(line => line.startsWith("worktree "))
+						.map(line => normalized(line.slice("worktree ".length)));
+					if (!registeredPaths.includes(normalized(worktreePath))) {
+						problems.push(`${label}: ${repo} lost Git worktree registration for ${worktreePath}`);
+					}
+				} catch (error) {
+					problems.push(`${label}: ${repo} is unusable: ${error instanceof Error ? error.message : String(error)}`);
+				}
+			}
+		};
+
+		// Team teardown archives the lead and removes the team-store owner. Purging
+		// that archived lead through the public DELETE route must consume only the
+		// borrowed session metadata, never the goal-owned directories/registrations.
+		try {
+			await gateway.teamManager.teardownTeam(goalId!);
+			teamTornDown = true;
+		} catch (error) {
+			problems.push(`team teardown failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		const archivedLead = context?.sessionStore.get(teamLeadSessionId!);
+		if (!archivedLead?.archived) problems.push("team teardown did not archive the team lead");
+		checkCoordinates("archived lead", archivedLead, archivedLead?.repoWorktrees ?? {});
+		await checkGoalComponentsUsable("after team-lead archive");
+
+		const purgeLeadResponse = await apiFetch(`/api/sessions/${teamLeadSessionId}?purge=true`, { method: "DELETE" });
+		const purgeLeadBody = await readJson(purgeLeadResponse);
+		if (purgeLeadResponse.status !== 200) {
+			problems.push(`team-lead purge=${purgeLeadResponse.status} ${JSON.stringify(purgeLeadBody)}`);
+		}
+		leadPurged = !context?.sessionStore.get(teamLeadSessionId!);
+		if (!leadPurged) problems.push("team-lead persisted record survived purge");
+		if (gateway.sessionManager.getSession(teamLeadSessionId!)) problems.push("team-lead live record survived purge");
+		await checkGoalComponentsUsable("after team-lead purge");
 
 		if (problems.length > 0) {
 			throw new Error(`${STATUS_REPRO}: ${problems.join("; ")}`);
 		}
 	} finally {
-		if (goalId) await teardownTeam(goalId).catch(() => undefined);
-		if (teamLeadSessionId) {
+		if (originalRestoreOneSession) {
+			(gateway.sessionManager as any).restoreOneSession = originalRestoreOneSession;
+			originalRestoreOneSession = undefined;
+		}
+		if (goalId && !teamTornDown) await teardownTeam(goalId).catch(() => undefined);
+		if (teamLeadSessionId && !leadPurged) {
 			await apiFetch(`/api/sessions/${teamLeadSessionId}?purge=true`, { method: "DELETE" }).catch(() => undefined);
 		}
 		if (goalId) await deleteGoal(goalId).catch(() => undefined);
 		if (projectId) {
 			await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => undefined);
 		}
-		rmSync(fixtureRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+		// Restored agent and Git child processes can release Windows directory
+		// handles a few ticks after their awaited shutdown completes.
+		rmSync(fixtureRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 	}
 });
