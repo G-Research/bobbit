@@ -17,7 +17,6 @@ import { runFixtureCommand } from "../../tests2/harness/spawn-with-retry.js";
 test.use({ enableWorktreePool: true });
 
 type RuntimeCwdRecord = { type: "system" | "session"; cwd: string };
-type RuntimeCwdLine = RuntimeCwdRecord & { raw: string };
 
 async function sendPromptAndWait(id: string, text: string): Promise<void> {
 	const ws = await connectWs(id);
@@ -62,50 +61,21 @@ function findClonedJsonl(slugDir: string, sessionId: string): string | null {
 	return match ? join(slugDir, match) : null;
 }
 
-function readRuntimeCwdLines(jsonlPath: string): RuntimeCwdLine[] {
-	const records: RuntimeCwdLine[] = [];
+function readRuntimeCwdRecords(jsonlPath: string): RuntimeCwdRecord[] {
+	const records: RuntimeCwdRecord[] = [];
 	for (const line of readFileSync(jsonlPath, "utf8").split("\n")) {
 		const trimmed = line.trim();
 		if (!trimmed) continue;
 		try {
 			const parsed = JSON.parse(trimmed);
 			if ((parsed?.type === "system" || parsed?.type === "session") && typeof parsed.cwd === "string") {
-				records.push({ type: parsed.type, cwd: parsed.cwd, raw: trimmed });
+				records.push({ type: parsed.type, cwd: parsed.cwd });
 			}
 		} catch {
 			// Ignore malformed transcript lines; the mock agent does the same.
 		}
 	}
 	return records;
-}
-
-function readRuntimeCwdRecords(jsonlPath: string): RuntimeCwdRecord[] {
-	return readRuntimeCwdLines(jsonlPath).map(({ type, cwd }) => ({ type, cwd }));
-}
-
-function preserveRuntimeCwdMetadataAcrossMockStateReads(rpcClient: any): () => void {
-	if (!rpcClient?._agent) return () => {};
-	const prototype = Object.getPrototypeOf(rpcClient);
-	const originalSendCommand = prototype?.sendCommand;
-	if (typeof originalSendCommand !== "function") return () => {};
-
-	async function preservingSendCommand(this: any, command: any, ...args: any[]): Promise<any> {
-		if (command?.type !== "get_state") return originalSendCommand.call(this, command, ...args);
-		const sessionFile = this?._agent?.sessionFilePath;
-		const before = sessionFile && existsSync(sessionFile) ? readRuntimeCwdLines(sessionFile) : [];
-		const response = await originalSendCommand.call(this, command, ...args);
-		if (before.length > 0 && sessionFile && existsSync(sessionFile)) {
-			const after = readRuntimeCwdRecords(sessionFile);
-			const missing = before.filter((record) => !after.some((current) => current.type === record.type && current.cwd === record.cwd));
-			if (missing.length > 0) appendFileSync(sessionFile, `${missing.map((record) => record.raw).join("\n")}\n`);
-		}
-		return response;
-	}
-
-	prototype.sendCommand = preservingSendCommand;
-	return () => {
-		if (prototype.sendCommand === preservingSendCommand) prototype.sendCommand = originalSendCommand;
-	};
 }
 
 function hasRuntimeCwdRecord(jsonlPath: string, type: RuntimeCwdRecord["type"], cwd: string): boolean {
@@ -144,7 +114,6 @@ test.describe("Continue-Archived multi-repo worktree support", () => {
 		let projectId: string | undefined;
 		let srcId: string | undefined;
 		let newId: string | undefined;
-		let restoreMockStateReads = () => {};
 
 		try {
 			mkdirSync(rootPath, { recursive: true });
@@ -193,12 +162,6 @@ test.describe("Continue-Archived multi-repo worktree support", () => {
 			const sourceJsonl = await persistedJsonl(gateway, srcId);
 			ensureRuntimeCwdMetadata(sourceJsonl, srcRec.cwd, srcId);
 			ensureRuntimeCwdMetadata(sourceJsonl, srcRec.worktreePath, srcId);
-			// Pi 0.82 exact tuple verification reads state after switch_session. The
-			// in-process mock serializes only loaded messages on get_state, unlike Pi,
-			// so retain the runtime headers that production rebases for this canary.
-			restoreMockStateReads = preserveRuntimeCwdMetadataAcrossMockStateReads(
-				gateway.sessionManager.getSession(srcId)?.rpcClient,
-			);
 
 			const archiveResp = await apiFetch(`/api/sessions/${srcId}`, { method: "DELETE" });
 			expect(archiveResp.ok).toBe(true);
@@ -258,7 +221,6 @@ test.describe("Continue-Archived multi-repo worktree support", () => {
 			expect(clonedCwds, "continued runtime cwd metadata should not retain the archived source cwd").not.toContain(srcRec.cwd);
 			expect(clonedCwds, "continued runtime cwd metadata should not retain the archived source worktree container").not.toContain(srcRec.worktreePath);
 		} finally {
-			restoreMockStateReads();
 			if (newId) await apiFetch(`/api/sessions/${newId}`, { method: "DELETE" }).catch(() => {});
 			if (srcId) await apiFetch(`/api/sessions/${srcId}`, { method: "DELETE" }).catch(() => {});
 			if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
