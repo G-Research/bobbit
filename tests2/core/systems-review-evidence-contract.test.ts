@@ -35,6 +35,14 @@ function declarationBody(text: string, typeName: string): string {
 	return text.slice(start, end + 1);
 }
 
+function interfaceDeclaration(text: string, interfaceName: string): string {
+	const start = text.indexOf(`export interface ${interfaceName} {`);
+	expect(start, `missing ${interfaceName}`).toBeGreaterThanOrEqual(0);
+	const end = text.indexOf("\n}", start);
+	expect(end, `unterminated ${interfaceName}`).toBeGreaterThan(start);
+	return text.slice(start, end + 2);
+}
+
 describe("Systems review evidence/result contract", () => {
 	it("ships only two default-denied tools in the dedicated group", () => {
 		const files = fs.readdirSync(TOOL_DIR).filter((file) => /\.ya?ml$/.test(file)).sort();
@@ -90,8 +98,12 @@ describe("Systems review evidence/result contract", () => {
 			"coverageItemIds", "mixedStateMatrix", "conservativeAggregateInvariant", "targetInvariant",
 			"exactTargetAssertionId", "receiptTokens", "processedChangeIds", "unresolvedLinks",
 		]) expect(types).toContain(field);
-		expect(types).not.toMatch(/SystemsReview(?:Checkpoint|Final)Submission[\s\S]{0,1200}\bverdict\??:/);
-		expect(types).not.toMatch(/SystemsReview(?:Checkpoint|Final)Submission[\s\S]{0,1200}\bsummary\??:/);
+		const submissions = [
+			interfaceDeclaration(types, "SystemsReviewCheckpointSubmission"),
+			interfaceDeclaration(types, "SystemsReviewFinalSubmission"),
+		].join("\n");
+		expect(submissions).not.toMatch(/\bverdict\??\s*:/);
+		expect(submissions).not.toMatch(/\bsummary\??\s*:/);
 	});
 
 	it("keeps checkpoint/final submissions discriminated and server-rendered", () => {
