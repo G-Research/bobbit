@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/integration/bound-session-resolved-lifecycle.test.ts",
+      "reason": "Production-resolved lifecycle proof for Bound Session Diagnostics: real SessionManager session creation and restart through the RpcBridge factory boundary spawn fresh Pi-compatible child agents that load stale server and project/sandbox winners, enforce snake/camel heavy-read guards before gateway fetch, remap immutable sandbox extensions, and keep quote/emoji/nested-result tool_execution_end plus persisted JSONL values identical and within 50 KiB.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
       "path": "tests2/core/bound-session-diagnostics-repro.test.ts",
       "reason": "Failing-first mixed Anthropic/Pi transcript reproductions for Bound Session Diagnostics: compact tool-only calls, nested Unicode result metrics, path-scoped provider replay scrubbing and canonical result aliases, the complete 50 KiB Pi return ceiling, and override-independent heavy-read rejection through a real ToolManager-resolved stale extension. Failure token BOUND_SESSION_DIAGNOSTICS_REPRO.",
       "execution": {
