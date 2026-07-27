@@ -22,7 +22,10 @@ import {
 	applyReviewModelOverrides,
 	type ReviewModelRpc,
 } from "../../src/server/agent/review-model-override.js";
-import { applyRuntimeSessionModelSelection, broadcastRuntimeSessionActualModelState } from "../../src/server/ws/runtime-model-selection.js";
+import {
+	applyRuntimeSessionModelSelection,
+	applyRuntimeSessionThinkingSelection,
+} from "../../src/server/ws/runtime-model-selection.js";
 import { generateImage } from "../../src/server/agent/image-generation.js";
 import { fallbackProviderAllowlistFromPrefs, resolveHostAgentProviderEnv } from "../../src/server/agent/host-tokens.js";
 import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
@@ -227,53 +230,93 @@ function makeReviewRpc(failModels: string[] = []): ReviewModelRpc & {
 	} as any;
 }
 
+const DURABLE_MODEL = { provider: "anthropic", id: "claude-sonnet-4-20250514" };
+const REQUESTED_MODEL = { provider: "anthropic", id: "claude-opus-5" };
+const FALLBACK_MODEL = { provider: "anthropic", id: "claude-haiku-4-5" };
+
+type RuntimeTuple = { provider: string; id: string; thinkingLevel: string };
+
 function makeRuntimeHarness(options: {
-	prefs?: Prefs;
-	failModels?: string[];
-	readBack?: { provider: string; id: string };
-	readBackSequence?: Array<{ provider: string; id: string }>;
+	initial?: RuntimeTuple;
+	modelResults?: Record<string, RuntimeTuple>;
+	failThinkingLevels?: string[];
 } = {}) {
+	const initial = options.initial ?? { ...DURABLE_MODEL, thinkingLevel: "high" };
+	let durable = { ...initial };
+	let bound = { ...initial };
 	const setModelCalls: ModelPair[] = [];
-	const persisted: Array<{ sessionId: string; provider: string; modelId: string }> = [];
+	const setThinkingCalls: string[] = [];
+	const persisted: Array<{ sessionId: string; provider: string; modelId: string; effectiveThinkingLevel: string }> = [];
 	const modelFiles: string[] = [];
 	const messages: any[] = [];
-	let bound: { provider: string; id: string } | undefined;
-	const readBackSequence = [...(options.readBackSequence ?? [])];
-	const fail = new Set(options.failModels ?? []);
-	const sessionManager = {
-		persistSessionModel(sessionId: string, provider: string, modelId: string) {
-			persisted.push({ sessionId, provider, modelId });
+	let restartCalls = 0;
+	const failThinking = new Set(options.failThinkingLevels ?? []);
+	const client = { readyState: 1, send: (raw: string) => messages.push(JSON.parse(raw)) };
+	const session = {
+		id: "runtime-session",
+		clients: new Set([client]),
+		rpcClient: {
+			async setModel(provider: string, modelId: string) {
+				setModelCalls.push([provider, modelId]);
+				bound = options.modelResults?.[`${provider}/${modelId}`]
+					? { ...options.modelResults[`${provider}/${modelId}`] }
+					: { provider, id: modelId, thinkingLevel: bound.thinkingLevel };
+			},
+			async setThinkingLevel(level: string) {
+				setThinkingCalls.push(level);
+				if (failThinking.has(level)) throw new Error(`thinking unavailable: ${level}`);
+				bound.thinkingLevel = level;
+			},
+			async getState() {
+				return { data: { model: { provider: bound.provider, id: bound.id }, thinkingLevel: bound.thinkingLevel } };
+			},
 		},
-		getPersistedSession(sessionId: string) {
-			const match = [...persisted].reverse().find((entry) => entry.sessionId === sessionId);
-			return match ? { modelProvider: match.provider, modelId: match.modelId } : undefined;
+	};
+	const sessionManager = {
+		persistSessionModel(sessionId: string, provider: string, modelId: string, effectiveThinkingLevel: string) {
+			persisted.push({ sessionId, provider, modelId, effectiveThinkingLevel });
+			durable = { provider, id: modelId, thinkingLevel: effectiveThinkingLevel };
+		},
+		getPersistedSession() {
+			return {
+				modelProvider: durable.provider,
+				modelId: durable.id,
+				effectiveThinkingLevel: durable.thinkingLevel,
+			};
 		},
 		updateModelNameFile(_sessionId: string, modelName: string) {
 			modelFiles.push(modelName);
 		},
-	};
-	const session = {
-		id: "runtime-session",
-		clients: new Set([{ readyState: 1, send: (raw: string) => messages.push(JSON.parse(raw)) }]),
-		rpcClient: {
-			async setModel(provider: string, modelId: string) {
-				setModelCalls.push([provider, modelId]);
-				const key = `${provider}/${modelId}`;
-				if (fail.has(key)) throw new Error(`controlled model fallback policy fixture: unavailable ${key}`);
-				bound = { provider, id: modelId };
-			},
-			async getState() {
-				return { model: readBackSequence.shift() ?? options.readBack ?? bound ?? { provider: "unset", id: "unset" } };
-			},
+		async restartAgent() {
+			restartCalls++;
+			bound = { ...durable };
+		},
+		getSession() {
+			return session;
 		},
 	};
 	const prefs = {
 		get(key: string) {
-			return options.prefs?.[key];
+			return (options as any).prefs?.[key];
+		},
+		getAll() {
+			return {};
 		},
 	};
 	const broadcast = (_clients: any, msg: any) => messages.push(msg);
-	return { sessionManager, session, prefs, broadcast, setModelCalls, persisted, modelFiles, messages };
+	return {
+		sessionManager,
+		session,
+		prefs,
+		broadcast,
+		setModelCalls,
+		setThinkingCalls,
+		persisted,
+		modelFiles,
+		messages,
+		get restartCalls() { return restartCalls; },
+		get bound() { return bound; },
+	};
 }
 
 function tempPrefs(): { prefs: PreferencesStore; cleanup: () => void } {
@@ -433,143 +476,141 @@ describe("controlled model fallback policy — session auto-selection", () => {
 	});
 });
 
-describe("controlled model fallback policy — runtime WS set_model", () => {
-	it("fallback off: delayed read-back settle succeeds, persists, and broadcasts selected model", async () => {
-		const harness = makeRuntimeHarness({
-			readBackSequence: [
-				{ provider: "anthropic", id: "old-model" },
-				{ provider: "anthropic", id: "selected-new" },
-			],
-		});
+describe("controlled model fallback policy — exact runtime tuple", () => {
+	it("persists and broadcasts the model/thinking tuple only after exact final read-back", async () => {
+		const harness = makeRuntimeHarness();
 
 		const actual = await applyRuntimeSessionModelSelection(
 			harness.sessionManager as any,
 			harness.session as any,
-			"anthropic",
-			"selected-new",
+			REQUESTED_MODEL.provider,
+			REQUESTED_MODEL.id,
+			"xhigh",
 			harness.prefs as any,
 			harness.broadcast,
 		);
 
-		assert.deepEqual(actual, { provider: "anthropic", id: "selected-new" });
-		assert.deepEqual(harness.setModelCalls, [["anthropic", "selected-new"]]);
-		assert.deepEqual(harness.persisted, [{ sessionId: "runtime-session", provider: "anthropic", modelId: "selected-new" }]);
-		assert.deepEqual(harness.modelFiles, ["anthropic/selected-new"]);
-		assert.deepEqual(harness.messages.map((msg) => msg?.data?.model?.provider), ["anthropic"]);
-		assert.deepEqual(harness.messages.map((msg) => msg?.data?.model?.id), ["selected-new"]);
+		assert.deepEqual(actual, { ...REQUESTED_MODEL, thinkingLevel: "xhigh" });
+		assert.deepEqual(harness.setModelCalls, [[REQUESTED_MODEL.provider, REQUESTED_MODEL.id]]);
+		assert.deepEqual(harness.setThinkingCalls, ["xhigh"]);
+		assert.deepEqual(harness.persisted, [{
+			sessionId: "runtime-session",
+			provider: REQUESTED_MODEL.provider,
+			modelId: REQUESTED_MODEL.id,
+			effectiveThinkingLevel: "xhigh",
+		}]);
+		assert.deepEqual(harness.modelFiles, [`${REQUESTED_MODEL.provider}/${REQUESTED_MODEL.id}`]);
+		assert.equal((harness.session as any).spawnPinnedModel, `${REQUESTED_MODEL.provider}/${REQUESTED_MODEL.id}`);
+		assert.equal((harness.session as any).spawnPinnedThinkingLevel, "xhigh");
+		assert.equal(harness.messages.at(-1)?.data?.model?.provider, REQUESTED_MODEL.provider);
+		assert.equal(harness.messages.at(-1)?.data?.model?.id, REQUESTED_MODEL.id);
+		assert.equal(harness.messages.at(-1)?.data?.thinkingLevel, "xhigh");
 	});
 
-	it("fallback off: read-back mismatch rejects and does not persist, broadcast, or update model file", async () => {
+	it("never accepts a live fallback and restarts once when rollback cannot verify", async () => {
 		const harness = makeRuntimeHarness({
-			readBack: { provider: "anthropic", id: "still-old" },
-		});
-
-		await assert.rejects(
-			applyRuntimeSessionModelSelection(
-				harness.sessionManager as any,
-				harness.session as any,
-				"anthropic",
-				"selected-new",
-				harness.prefs as any,
-				harness.broadcast,
-			),
-			/read-back mismatch|mismatch/i,
-		);
-
-		assert.deepEqual(harness.setModelCalls, [["anthropic", "selected-new"]]);
-		assert.deepEqual(harness.persisted, [], "runtime set_model mismatch must not persist the selected model");
-		assert.deepEqual(harness.modelFiles, [], "runtime set_model mismatch must not update .model state");
-		assert.deepEqual(harness.messages, [], "runtime set_model mismatch must not broadcast a successful model state");
-	});
-
-	it("fallback off: failed set_model reconciliation broadcasts the actual RPC-bound model", async () => {
-		const harness = makeRuntimeHarness({
-			readBack: { provider: "anthropic", id: "still-old" },
-		});
-
-		await assert.rejects(
-			applyRuntimeSessionModelSelection(
-				harness.sessionManager as any,
-				harness.session as any,
-				"anthropic",
-				"selected-new",
-				harness.prefs as any,
-				harness.broadcast,
-			),
-			/read-back mismatch|mismatch/i,
-		);
-		const actual = await broadcastRuntimeSessionActualModelState(
-			harness.sessionManager as any,
-			harness.session as any,
-			harness.broadcast,
-		);
-
-		assert.deepEqual(actual, { provider: "anthropic", id: "still-old" });
-		assert.deepEqual(harness.persisted, [], "reconciliation must not persist the rejected selected model");
-		assert.deepEqual(harness.modelFiles, [], "reconciliation must not update .model state");
-		assert.deepEqual(harness.messages.map((msg) => msg?.data?.model?.provider), ["anthropic"]);
-		assert.deepEqual(harness.messages.map((msg) => msg?.data?.model?.id), ["still-old"]);
-	});
-
-	it("fallback on: failed non-default runtime selection falls back only to default.sessionModel and displays that actual model", async () => {
-		const harness = makeRuntimeHarness({
-			prefs: {
-				allowSessionModelFallback: true,
-				"default.sessionModel": "openai/fallback-session",
+			modelResults: {
+				[`${REQUESTED_MODEL.provider}/${REQUESTED_MODEL.id}`]: { ...FALLBACK_MODEL, thinkingLevel: "high" },
+				[`${DURABLE_MODEL.provider}/${DURABLE_MODEL.id}`]: { ...FALLBACK_MODEL, thinkingLevel: "high" },
 			},
-			failModels: ["anthropic/dead-selected"],
-		});
-
-		const actual = await applyRuntimeSessionModelSelection(
-			harness.sessionManager as any,
-			harness.session as any,
-			"anthropic",
-			"dead-selected",
-			harness.prefs as any,
-			harness.broadcast,
-		);
-
-		assert.deepEqual(actual, { provider: "openai", id: "fallback-session" });
-		assert.deepEqual(harness.setModelCalls, [["anthropic", "dead-selected"], ["openai", "fallback-session"]]);
-		assert.deepEqual(harness.persisted, [{ sessionId: "runtime-session", provider: "openai", modelId: "fallback-session" }]);
-		assert.deepEqual(harness.modelFiles, ["openai/fallback-session"]);
-		assert.deepEqual(harness.messages.map((msg) => msg?.data?.model?.provider), ["openai"]);
-		assert.deepEqual(harness.messages.map((msg) => msg?.data?.model?.id), ["fallback-session"]);
-	});
-
-	it("fallback on: same-as-selected default.sessionModel rejects without trying another fallback or persisting stale state", async () => {
-		const harness = makeRuntimeHarness({
-			prefs: {
-				allowSessionModelFallback: true,
-				"default.sessionModel": "anthropic/dead-selected",
-			},
-			failModels: ["anthropic/dead-selected"],
 		});
 
 		await assert.rejects(
 			applyRuntimeSessionModelSelection(
 				harness.sessionManager as any,
 				harness.session as any,
-				"anthropic",
-				"dead-selected",
+				REQUESTED_MODEL.provider,
+				REQUESTED_MODEL.id,
+				"xhigh",
 				harness.prefs as any,
 				harness.broadcast,
 			),
-			/same as failed model|fallback rejected/i,
+			/read-back mismatch|exact requested model/i,
 		);
 
-		assert.deepEqual(harness.setModelCalls, [["anthropic", "dead-selected"]]);
-		assert.deepEqual(harness.persisted, []);
+		assert.deepEqual(harness.setModelCalls, [
+			[REQUESTED_MODEL.provider, REQUESTED_MODEL.id],
+			[DURABLE_MODEL.provider, DURABLE_MODEL.id],
+		]);
+		assert.deepEqual(harness.setThinkingCalls, [], "fallback mismatch must fail before requested thinking is applied");
+		assert.deepEqual(harness.persisted, [], "neither requested nor fallback tuple may become durable");
 		assert.deepEqual(harness.modelFiles, []);
+		assert.equal(harness.restartCalls, 1, "unverifiable partial mutation must use the existing restart path exactly once");
+		assert.deepEqual(harness.bound, { ...DURABLE_MODEL, thinkingLevel: "high" });
+		assert.deepEqual(
+			harness.messages.map((msg) => ({
+				provider: msg?.data?.model?.provider,
+				id: msg?.data?.model?.id,
+				thinkingLevel: msg?.data?.thinkingLevel,
+			})),
+			[
+				{ ...FALLBACK_MODEL, thinkingLevel: "high" },
+				{ ...DURABLE_MODEL, thinkingLevel: "high" },
+			],
+			"failure correction must include both actual model and thinking before and after replacement",
+		);
 	});
 
-	it("handler emits authoritative state before SET_MODEL_FAILED on runtime set_model failure", () => {
+	it("rolls a partial model/thinking failure back to the durable tuple without persisting it", async () => {
+		const harness = makeRuntimeHarness({ failThinkingLevels: ["xhigh"] });
+
+		await assert.rejects(
+			applyRuntimeSessionModelSelection(
+				harness.sessionManager as any,
+				harness.session as any,
+				REQUESTED_MODEL.provider,
+				REQUESTED_MODEL.id,
+				"xhigh",
+				harness.prefs as any,
+				harness.broadcast,
+			),
+			/thinking unavailable/i,
+		);
+
+		assert.deepEqual(harness.persisted, []);
+		assert.equal(harness.restartCalls, 0, "an exactly verified bounded rollback may keep the bridge live");
+		assert.deepEqual(harness.bound, { ...DURABLE_MODEL, thinkingLevel: "high" });
+		assert.deepEqual(harness.setThinkingCalls, ["xhigh", "high"]);
+		assert.equal(harness.messages.at(-1)?.data?.model?.provider, DURABLE_MODEL.provider);
+		assert.equal(harness.messages.at(-1)?.data?.model?.id, DURABLE_MODEL.id);
+		assert.equal(harness.messages.at(-1)?.data?.thinkingLevel, "high");
+	});
+
+	it("standalone thinking selection verifies and atomically persists the unchanged model tuple", async () => {
+		const harness = makeRuntimeHarness();
+
+		const actual = await applyRuntimeSessionThinkingSelection(
+			harness.sessionManager as any,
+			harness.session as any,
+			"medium",
+			harness.broadcast,
+		);
+
+		assert.deepEqual(actual, { ...DURABLE_MODEL, thinkingLevel: "medium" });
+		assert.deepEqual(harness.setModelCalls, []);
+		assert.deepEqual(harness.setThinkingCalls, ["medium"]);
+		assert.deepEqual(harness.persisted, [{
+			sessionId: "runtime-session",
+			provider: DURABLE_MODEL.provider,
+			modelId: DURABLE_MODEL.id,
+			effectiveThinkingLevel: "medium",
+		}]);
+		assert.equal((harness.session as any).spawnPinnedModel, `${DURABLE_MODEL.provider}/${DURABLE_MODEL.id}`);
+		assert.equal((harness.session as any).spawnPinnedThinkingLevel, "medium");
+		assert.equal(harness.messages.at(-1)?.data?.model?.provider, DURABLE_MODEL.provider);
+		assert.equal(harness.messages.at(-1)?.data?.model?.id, DURABLE_MODEL.id);
+		assert.equal(harness.messages.at(-1)?.data?.thinkingLevel, "medium");
+	});
+
+	it("handler combines thinking with set_model and serialises both tuple mutation frames", () => {
 		const src = readFileSync(WS_HANDLER_SOURCE, "utf-8");
 		const setModelCase = extractRouteSlice(src, 'case "set_model":', 'case "set_image_model":');
-		const reconcileIdx = setModelCase.indexOf("await broadcastRuntimeSessionActualModelState(sessionManager, session, broadcast)");
-		const errorIdx = setModelCase.indexOf("SET_MODEL_FAILED");
-		assert.ok(reconcileIdx >= 0, "set_model failure must broadcast the authoritative actual model");
-		assert.ok(errorIdx > reconcileIdx, "SET_MODEL_FAILED should be sent after the corrective model state frame");
+		assert.match(setModelCase, /combined\.thinkingLevel/);
+		assert.match(setModelCase, /SET_MODEL_FAILED/);
+
+		const serialisationSlice = extractRouteSlice(src, "const serialisedSessionCommand", "let result: Promise<void>");
+		assert.match(serialisationSlice, /msg\.type === "set_model"/);
+		assert.match(serialisationSlice, /msg\.type === "set_thinking_level"/);
 	});
 });
 
