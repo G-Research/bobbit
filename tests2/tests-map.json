@@ -21,8 +21,44 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/git-status-envelope.test.ts",
+      "reason": "Pure aggregation contract coverage for component-authoritative Git status envelopes: sums numeric counters, derives boolean and partial fields, preserves named and sole-dot compatibility, isolates failed siblings, distinguishes terminal non-repositories from retryable errors, and deduplicates fetch/invalidation targets.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/git-status-native-classification.test.ts",
+      "reason": "Deterministic CommandRunner-seam coverage for host and container Git-status probe classification: only definitive outside-repository diagnostics become terminal, infrastructure and permission failures stay retryable, optional probe failures mark successful results partial, and the legacy nullable wrapper remains compatible.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/git-status-polyrepo-fetch-policy.test.ts",
+      "reason": "In-process gateway coverage proving goal and session Git-status fetches tolerate non-Git roots, fetch and invalidate every component's summary and untracked cache variants, and return component-authoritative envelopes with summed aggregates.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/polyrepo-git-status.journey.spec.ts",
+      "reason": "Chromium journey proving session and goal-dashboard Git-status widgets remain visible for component-only envelopes, render named per-repository sections including a sole named component, explicitly refresh details, and survive page reload.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/integration/team-spawn-multi-repo-real-git.test.ts",
-      "reason": "Focused real-Git regression for a non-Git two-component project: drives direct TeamManager.spawnRole and one REST team/spawn request from unpublished divergent local goal-component HEADs; verifies exact-start branch-collision rejection before worktree attachment/upstream or remote mutation, rollback of an earlier component while preserving the divergent colliding branch, actual createSession agent-spawn then post-spawn setup failure without Git probes against either non-Git container, TeamManager-owned component/container cleanup, common branch-container layout, injected partial rollback, and cleanup coordinates in createSession's first durable write.",
+      "reason": "Focused real-Git regression for a non-Git two-component project: covers direct and REST worker spawn from unpublished divergent component HEADs, collision rejection, partial and post-spawn rollback, component-owned cleanup, and first-write cleanup coordinates; also proves the team lead borrows the goal's live and persisted worktree metadata, retains it across session restoration, returns summed per-component goal/session Git-status envelopes, and can be archived and purged without removing goal-owned component worktrees.",
       "execution": {
         "runner": "vitest",
         "tier": "e2e",
