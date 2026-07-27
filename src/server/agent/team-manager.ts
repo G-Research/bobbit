@@ -1891,6 +1891,14 @@ export class TeamManager {
 		if (!storedRole) {
 			throw new Error('Role "team-lead" not found. Ensure roles/team-lead.yaml exists.');
 		}
+		const teamLeadModel = storedRole.model || undefined;
+		const teamLeadModelSlash = teamLeadModel?.indexOf("/") ?? -1;
+		const teamLeadModelProvider = teamLeadModel && teamLeadModelSlash > 0
+			? teamLeadModel.slice(0, teamLeadModelSlash)
+			: undefined;
+		if (teamLeadModel && (teamLeadModelProvider === "kimi-coding" || !isSessionSelectableModelString(teamLeadModel))) {
+			throw new Error(`Team lead model "${teamLeadModel}" is not session-selectable`);
+		}
 		const teamLeadPromptTemplate = storedRole.promptTemplate;
 		const teamLeadPrompt = applyPromptConditionals(
 			teamLeadPromptTemplate
@@ -1928,7 +1936,7 @@ export class TeamManager {
 				sandboxBranch: sandboxed && !headquartersGoal && goal.branch ? goal.branch : undefined,
 				// Honour role-level model / thinking-level override (cascade-resolved above).
 				// Empty string falls through to undefined → system default.
-				initialModel: storedRole.model || undefined,
+				initialModel: teamLeadModel,
 				initialThinkingLevel: storedRole.thinkingLevel || undefined,
 			},
 		);
