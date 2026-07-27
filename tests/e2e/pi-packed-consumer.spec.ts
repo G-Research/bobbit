@@ -13,6 +13,8 @@ import {
 } from "./test-utils/pi-packed-consumer-command.js";
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const BOBBIT_PACKAGE_NAME = "@gresearch/bobbit";
+const BOBBIT_PACKAGE_PATH = BOBBIT_PACKAGE_NAME.split("/");
 const PI_PACKAGES = [
 	"@earendil-works/pi-agent-core",
 	"@earendil-works/pi-ai",
@@ -164,7 +166,7 @@ test.describe("published Bobbit package dependency security", () => {
 			expect(Array.isArray(packJson), "npm pack must report one-element JSON array").toBe(true);
 			expect(packJson).toHaveLength(1);
 			const packEntry = asRecord((packJson as unknown[])[0], "npm pack entry");
-			expect(packEntry.name).toBe("bobbit");
+			expect(packEntry.name).toBe(BOBBIT_PACKAGE_NAME);
 			expect(typeof packEntry.filename).toBe("string");
 			const tarballPath = resolve(packDir, packEntry.filename as string);
 			expect(existsSync(tarballPath), `npm pack did not create ${tarballPath}`).toBe(true);
@@ -188,8 +190,9 @@ test.describe("published Bobbit package dependency security", () => {
 				"published pi-coding-agent must include its dependency-owned shrinkwrap",
 			).toBe(true);
 
+			const installedRoot = join(consumerDir, "node_modules", ...BOBBIT_PACKAGE_PATH);
 			const installedManifest = JSON.parse(await readFile(
-				join(consumerDir, "node_modules", "bobbit", "package.json"),
+				join(installedRoot, "package.json"),
 				"utf8",
 			)) as { dependencies?: Record<string, string> };
 			const piPins = PI_PACKAGES.map(name => installedManifest.dependencies?.[name]);
@@ -220,7 +223,7 @@ test.describe("published Bobbit package dependency security", () => {
 					`${piPackage} must not have mixed or stale versions`,
 				).toEqual([selectedPiVersion]);
 				expect(
-					piOccurrences.every(entry => entry.path.includes("bobbit")),
+					piOccurrences.every(entry => entry.path.includes(BOBBIT_PACKAGE_NAME)),
 					`${piPackage} must resolve through the installed Bobbit package`,
 				).toBe(true);
 			}
@@ -250,7 +253,7 @@ test.describe("published Bobbit package dependency security", () => {
 				).toBe(true);
 			}
 
-			const binariesModulePath = join(consumerDir, "node_modules", "bobbit", "dist", "server", "binaries.js");
+			const binariesModulePath = join(installedRoot, "dist", "server", "binaries.js");
 			const binaries = await import(pathToFileURL(binariesModulePath).href) as {
 				expectedBinaryPackage(): string | null;
 				getFdResolution(): { source: string; path: string | null; expectedPackage: string };

@@ -20,6 +20,8 @@ import {
 } from "./packaged-runtime-helpers.js";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
+const BOBBIT_PACKAGE_NAME = "@gresearch/bobbit";
+const BOBBIT_PACKAGE_PATH = BOBBIT_PACKAGE_NAME.split("/");
 const CANONICAL_BRIDGE_SIGNATURE = "data-bobbit-inline-theme-bridge";
 const SOURCE_BRIDGE_PATH = "src/shared/preview-bridge-scripts.ts";
 const THEME_TOKENS = ["--background", "--foreground", "--card", "--positive", "--chart-1"] as const;
@@ -213,7 +215,7 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			report.commands.push(packed);
 			expect(packed.code, commandFailure(packed)).toBe(0);
 			const pack = parsePackResult(packed.stdout);
-			expect(pack.name).toBe("bobbit");
+			expect(pack.name).toBe(BOBBIT_PACKAGE_NAME);
 			expect(typeof pack.filename).toBe("string");
 			report.packFiles = normalizedPackagePaths(pack);
 			expect(report.packFiles).toContain("dist/server/cli.js");
@@ -237,7 +239,7 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			report.commands.push(install);
 			expect(install.code, commandFailure(install)).toBe(0);
 
-			const installedRoot = join(consumerDir, "node_modules", "bobbit");
+			const installedRoot = join(consumerDir, "node_modules", ...BOBBIT_PACKAGE_PATH);
 			const installedManifest = JSON.parse(await readFile(join(installedRoot, "package.json"), "utf8")) as {
 				bin?: Record<string, string>;
 			};
@@ -269,6 +271,43 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			expect(await rootResponse.text()).toMatch(/assets\//);
 
 			const token = await readToken(secretsDir);
+			const preferenceHeaders = {
+				Authorization: `Bearer ${token}`,
+				"Content-Type": "application/json",
+			};
+			const providerSeed = await fetch(`${baseUrl}/api/preferences`, {
+				method: "PUT",
+				headers: preferenceHeaders,
+				body: JSON.stringify({
+					customProviders: [{
+						id: "mock",
+						name: "mock",
+						type: "manual",
+						baseUrl: "http://127.0.0.1",
+						models: [{ id: "mock-model", name: "mock-model" }],
+					}],
+				}),
+			});
+			expect(
+				providerSeed.ok,
+				`failed to register packaged mock provider: ${providerSeed.status} ${await providerSeed.clone().text()}`,
+			).toBe(true);
+			const defaultSeed = await fetch(`${baseUrl}/api/preferences`, {
+				method: "PUT",
+				headers: preferenceHeaders,
+				body: JSON.stringify({
+					"default.sessionModel": "mock/mock-model",
+					"default.sessionThinkingLevel": "off",
+				}),
+			});
+			expect(
+				defaultSeed.ok,
+				`failed to select packaged mock default: ${defaultSeed.status} ${await defaultSeed.clone().text()}`,
+			).toBe(true);
+			expect(await defaultSeed.json()).toMatchObject({
+				"default.sessionModel": "mock/mock-model",
+				"default.sessionThinkingLevel": "off",
+			});
 			const sessionId = await createProjectAndSession(baseUrl, token, workspaceDir);
 			await promptSession(wsBaseUrl, sessionId, token);
 
