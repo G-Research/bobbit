@@ -2,13 +2,53 @@
 
 Bobbit depends on Pi for provider metadata, browser-side first-message streaming helpers, and the `pi-coding-agent` process that runs agent turns. Pi upgrades are runtime compatibility changes, not simple package bumps: they can affect browser bundle safety, model catalog reads, authentication, RPC lifecycle events, tool-result shapes, transcript metadata, compaction, sandbox credentials, and provider default selection.
 
-This page records the durable Bobbit-side contracts added or reaffirmed for the selected Pi `0.81.1` line:
+This page records the durable Bobbit-side contracts added or reaffirmed across Pi runtime upgrades. Keep all three direct Pi packages pinned exactly to the same patch: a mixed Pi line can compile while still breaking the spawned-agent runtime contract.
 
-- `@earendil-works/pi-agent-core@0.81.1`
-- `@earendil-works/pi-ai@0.81.1`
-- `@earendil-works/pi-coding-agent@0.81.1`
+## Pi `0.82.1` dependency-only Phase 0 baseline
 
-Keep all three packages pinned exactly to the same Pi patch. A mixed Pi line can compile while still breaking the spawned-agent runtime contract.
+The dependency-only baseline was measured on 2026-07-27 before any feature production or test change.
+
+- Current `origin/master`: `60aa0d4099f58070217e9ef0c8fe7a683d955d30`.
+- Design-only parent: `94f71d2f7db96f0da319692fdd9ea683a4599d0c` (the current master plus the approved design commits).
+- Dependency-only commit: `df799ab7cc1075b6f884c960c4e38c04b88c45fe`.
+- Exact direct pins: `@earendil-works/pi-agent-core@0.82.1`, `@earendil-works/pi-ai@0.82.1`, and `@earendil-works/pi-coding-agent@0.82.1`.
+
+### Controlled lock regeneration and graph
+
+The lock was regenerated using [the `0.82.1` design procedure](design/minimal-pi-0.82.md#fresh-base-and-exact-lock-regeneration): `.npmrc` was backed up outside the worktree and removed, the installed old coding-agent shrinkwrap was deleted, and `npm install --package-lock=true` freshly extracted `node_modules/@earendil-works/pi-coding-agent/npm-shrinkwrap.json` at `0.82.1`. `.npmrc` was restored byte-for-byte before testing. A following plain `npm install` with `shrinkwrap=false` left `package.json`, `package-lock.json`, and `.npmrc` byte-identical.
+
+The parsed command
+
+```bash
+npm ls @earendil-works/pi-agent-core @earendil-works/pi-ai @earendil-works/pi-coding-agent @earendil-works/pi-tui brace-expansion protobufjs --all --json
+```
+
+exited zero with no invalid, missing, stale, or extraneous edge. All eight reported Pi occurrences are exactly `0.82.1`: two agent-core, four pi-ai, one coding-agent, and one pi-tui. The development graph reports `protobufjs@7.6.5` on both paths, `brace-expansion@5.0.7` below coding-agent, and the unrelated development-only `brace-expansion@5.0.8` path below c8. The published coding-agent shrinkwrap itself contains aligned Pi `0.82.1`, `protobufjs@7.6.5`, and `brace-expansion@5.0.7`.
+
+### Dependency-only compatibility results
+
+| Boundary | Result |
+|---|---|
+| `npm run check` | Passed after generating the ignored `dist/server` type-import prerequisite with `npm run build:server`; a subsequent direct `npm run check` passed. |
+| Design's nine-file core Pi canary command | 9 files passed; 92 tests passed and 1 platform-specific transcript test skipped. |
+| Extended OAuth, RPC lifecycle, tool normalization, transcript reader, Pi extension, binary, shrinkwrap-fixture, and sandbox-status canaries | 13 files passed; 167 tests passed and 1 platform-specific extension test skipped. |
+| Compaction DOM canary | 1 file passed; 2 tests passed. |
+| Sandbox missing/stale-image coverage | The existing two-test `sandbox-status` Docker-context canary passed. No focused image-version canary exists in `tests2/` or `tests/`; no dependency-only edit to `sandbox-status.ts` is justified. |
+| Packed-consumer graph/binary canary | Reached the unchanged assertion expecting package name `bobbit`, but `npm pack` returns the current manifest name `@gresearch/bobbit`. Both the manifest name and canary are byte-identical to `origin/master`, so this pre-existing failure occurs before any Pi graph or binary assertion and is not a dependency-bump delta. |
+
+### Deterministic failure ledger
+
+**No deterministic dependency-only failures.** There are no `D*` entries and therefore no compatibility production change is justified by the `0.82.1` bump.
+
+The fresh-worktree `npm run check` prerequisite and stale packed-consumer package-name assertion above reproduce independently of the Pi pins and are explicitly excluded from this ledger. Timeouts, network behavior, and mutable advisory-feed results are likewise not compatibility deltas.
+
+### Dependency audit evidence
+
+At `2026-07-27T15:15:55Z`, root `npm audit --omit=dev --json` exited zero and reported zero vulnerabilities. That root result does not inspect the dependency-owned coding-agent shrinkwrap and is not packed-consumer evidence.
+
+`npm run audit:packed-consumer` successfully packed and installed Bobbit in its isolated clean consumer, then exited 1 with exactly one high finding: coding-agent's immutable `brace-expansion@5.0.7` edge is affected by [`GHSA-mh99-v99m-4gvg`](https://github.com/advisories/GHSA-mh99-v99m-4gvg). This is class C upstream Pi packaging. Compatibility Phase 0 passes, but release eligibility remains **false** until a compatible aligned Pi release removes the finding and the packed-consumer audit exits zero. No audit fix, override, vendoring, fork, or upstream Pi repack was used.
+
+The remaining sections document the preceding `0.81.1` compatibility line and its durable Bobbit-side contracts. Feature-level `0.82.1` results are added only after the narrow implementation is complete.
 
 ## Compatibility and release eligibility
 
