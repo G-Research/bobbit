@@ -439,7 +439,17 @@ export async function runVerificationPhaseSteps<T, R>(
 	phaseSteps: readonly T[],
 	runStep: (phaseStep: T) => Promise<R>,
 ): Promise<R[]> {
-	return Promise.all(phaseSteps.map(phaseStep => runStep(phaseStep)));
+	// Dispatch every peer before awaiting any one outcome. Promise.all() also
+	// starts peers eagerly, but rejects as soon as the first peer rejects; that
+	// let the gate finalize while slower reviewers in the same phase were still
+	// running. The barrier must settle the full phase before propagating an
+	// unexpected runner error.
+	const settled = await Promise.allSettled(phaseSteps.map(phaseStep => runStep(phaseStep)));
+	const rejected = settled.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+	if (rejected.length > 0) {
+		throw new AggregateError(rejected.map(result => result.reason), `${rejected.length} verification phase step(s) rejected`);
+	}
+	return settled.map(result => (result as PromiseFulfilledResult<R>).value);
 }
 
 export interface VerificationPushSafetyVars {
@@ -3547,6 +3557,7 @@ export class VerificationHarness {
 				const phaseResults = await runVerificationPhaseSteps(
 					phaseSteps,
 					async ({ step, index }) => {
+						try {
 						const cached = cachedSteps.get(step.name);
 						if (cached) {
 							const cachedStatus = terminalStatusForStep(cached);
@@ -3962,6 +3973,35 @@ export class VerificationHarness {
 						if (artifact) stepResult.artifact = artifact;
 						if (result.diagnostics) stepResult.diagnostics = result.diagnostics;
 						return { index, stepResult };
+						} catch (err) {
+							// Convert an unexpected peer exception into that peer's failed
+							// result. Other same-phase reviewers continue to completion and
+							// persist their own outputs before phase aggregation.
+							const output = `Verification step failed unexpectedly: ${(err as Error)?.message || String(err)}`;
+							const duration_ms = Date.now() - (active.steps[index]?.startedAt || Date.now());
+							const stepResult: GateSignalStep = {
+								name: step.name,
+								type: step.type,
+								passed: false,
+								status: "failed",
+								phase,
+								output,
+								duration_ms,
+								expect: step.expect,
+							};
+							const av = this.activeVerifications.get(signal.id);
+							if (av?.steps[index]) {
+								av.steps[index] = { ...av.steps[index], status: "failed", phase, durationMs: duration_ms, output };
+								this._persistActive();
+							}
+							if (!active.cancelled) this.broadcastFn(signal.goalId, {
+								type: "gate_verification_step_complete",
+								goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
+								stepIndex: index, stepName: step.name,
+								status: "failed", durationMs: duration_ms, output, phase,
+							});
+							return { index, stepResult };
+						}
 					},
 				);
 
