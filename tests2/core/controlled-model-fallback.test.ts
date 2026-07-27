@@ -37,6 +37,7 @@ const SESSION_MANAGER_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session
 const SESSION_SETUP_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-setup.ts");
 const SERVER_SOURCE = path.join(PROJECT_ROOT, "src/server/server.ts");
 const WS_HANDLER_SOURCE = path.join(PROJECT_ROOT, "src/server/ws/handler.ts");
+const REMOTE_AGENT_SOURCE = path.join(PROJECT_ROOT, "src/app/remote-agent.ts");
 
 type Prefs = Record<string, unknown>;
 type ModelPair = [string, string];
@@ -300,6 +301,7 @@ function makeRuntimeHarness(options: {
 	initial?: RuntimeTuple;
 	modelResults?: Record<string, RuntimeTuple>;
 	failThinkingLevels?: string[];
+	incompleteStateReads?: number[];
 } = {}) {
 	const initial = options.initial ?? { ...DURABLE_MODEL, thinkingLevel: "high" };
 	let durable = { ...initial };
@@ -310,7 +312,9 @@ function makeRuntimeHarness(options: {
 	const modelFiles: string[] = [];
 	const messages: any[] = [];
 	let restartCalls = 0;
+	let stateReadCalls = 0;
 	const failThinking = new Set(options.failThinkingLevels ?? []);
+	const incompleteStateReads = new Set(options.incompleteStateReads ?? []);
 	const client = { readyState: 1, send: (raw: string) => messages.push(JSON.parse(raw)) };
 	const session = {
 		id: "runtime-session",
@@ -328,6 +332,8 @@ function makeRuntimeHarness(options: {
 				bound.thinkingLevel = level;
 			},
 			async getState() {
+				stateReadCalls++;
+				if (incompleteStateReads.has(stateReadCalls)) return { data: {} };
 				return { data: { model: { provider: bound.provider, id: bound.id }, thinkingLevel: bound.thinkingLevel } };
 			},
 		},
@@ -676,6 +682,66 @@ describe("controlled model fallback policy — exact runtime tuple", () => {
 		assert.equal(harness.messages.at(-1)?.data?.model?.provider, DURABLE_MODEL.provider);
 		assert.equal(harness.messages.at(-1)?.data?.model?.id, DURABLE_MODEL.id);
 		assert.equal(harness.messages.at(-1)?.data?.thinkingLevel, "high");
+	});
+
+	it("broadcasts the durable tuple when a rejected model request has an incomplete live correction read-back", async () => {
+		const harness = makeRuntimeHarness({ incompleteStateReads: [2] });
+
+		await assert.rejects(
+			applyRuntimeSessionModelSelection(
+				harness.sessionManager as any,
+				harness.session as any,
+				"kimi-coding",
+				"hidden-model",
+				"xhigh",
+				harness.prefs as any,
+				harness.broadcast,
+			),
+			/unavailable/i,
+		);
+
+		assert.deepEqual(harness.persisted, [], "a rejected optimistic request must not change durability");
+		assert.deepEqual(
+			harness.messages.map((msg) => ({
+				provider: msg?.data?.model?.provider,
+				id: msg?.data?.model?.id,
+				thinkingLevel: msg?.data?.thinkingLevel,
+			})),
+			[{ ...DURABLE_MODEL, thinkingLevel: "high" }],
+			"incomplete live state must fall back to a complete durable correction for both optimistic fields",
+		);
+	});
+
+	it("broadcasts the durable tuple when a rejected thinking request has an incomplete live correction read-back", async () => {
+		const harness = makeRuntimeHarness({ incompleteStateReads: [2] });
+
+		await assert.rejects(
+			applyRuntimeSessionThinkingSelection(
+				harness.sessionManager as any,
+				harness.session as any,
+				"not-a-thinking-level",
+				harness.broadcast,
+			),
+			/unknown thinking level/i,
+		);
+
+		assert.deepEqual(harness.persisted, [], "a rejected optimistic request must not change durability");
+		assert.equal(harness.messages.at(-1)?.data?.model?.provider, DURABLE_MODEL.provider);
+		assert.equal(harness.messages.at(-1)?.data?.model?.id, DURABLE_MODEL.id);
+		assert.equal(harness.messages.at(-1)?.data?.thinkingLevel, "high");
+	});
+
+	it("RemoteAgent requests authoritative state after both tuple selection error codes", () => {
+		const src = readFileSync(REMOTE_AGENT_SOURCE, "utf-8");
+		const errorCase = extractRouteSlice(src, 'case "error":', "\n\t/**\n\t * Move any deferred assistant message");
+
+		assert.match(errorCase, /SET_MODEL_FAILED/, "RemoteAgent must refresh after model selection failure");
+		assert.match(
+			errorCase,
+			/SET_THINKING_LEVEL_FAILED/,
+			"RemoteAgent must request get_state after SET_THINKING_LEVEL_FAILED",
+		);
+		assert.match(errorCase, /this\.send\(\{\s*type:\s*"get_state"\s*\}\)/);
 	});
 
 	it("standalone thinking selection verifies and atomically persists the unchanged model tuple", async () => {
