@@ -24,6 +24,31 @@ function makeRemoteAgent() {
 }
 
 describe("combined client model and thinking selection", () => {
+	it("preserves clamped thinking when an application wrapper forwards only the model", () => {
+		const selectedModel = {
+			provider: "anthropic",
+			id: "claude-selected",
+			reasoning: true,
+			thinkingLevelMap: { xhigh: null, max: null },
+		};
+		const { agent, sent } = makeRemoteAgent();
+		agent._state.thinkingLevel = "xhigh";
+		const originalSetModel = agent.setModel.bind(agent);
+		agent.setModel = (model: any) => originalSetModel(model);
+		const ui = document.createElement("agent-interface") as AgentInterface;
+
+		(ui as any)._applyModelSelection(agent, selectedModel);
+
+		expect(agent.state.model).toBe(selectedModel);
+		expect(agent.state.thinkingLevel).toBe("high");
+		expect(sent).toEqual([{
+			type: "set_model",
+			provider: "anthropic",
+			modelId: "claude-selected",
+			thinkingLevel: "high",
+		}]);
+	});
+
 	it("clamps once, sends one combined frame, and corrects both optimistic fields", async () => {
 		const selectedModel = {
 			provider: "anthropic",
@@ -80,12 +105,13 @@ describe("combined client model and thinking selection", () => {
 		agent.setThinkingLevel("medium");
 		expect(sent.at(-1)).toEqual({ type: "set_thinking_level", level: "medium" });
 
-		const legacy = makeRemoteAgent();
-		legacy.agent.setModel(selectedModel);
-		expect(legacy.sent).toEqual([{
+		const oneArgFallback = makeRemoteAgent();
+		oneArgFallback.agent.setModel(selectedModel);
+		expect(oneArgFallback.sent).toEqual([{
 			type: "set_model",
 			provider: "anthropic",
 			modelId: "claude-selected",
+			thinkingLevel: "medium",
 		}]);
 	});
 });

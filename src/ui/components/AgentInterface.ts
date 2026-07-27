@@ -1675,11 +1675,14 @@ export class AgentInterface extends LitElement {
 	/** Apply one picker choice as an exact model/effective-thinking tuple. */
 	private _applyModelSelection(session: any, model: any): void {
 		const effectiveThinking = clampThinkingLevel(session.state?.thinkingLevel, model as any) ?? "off";
+		// Stage the clamped value before calling through application wrappers that
+		// still forward only the model argument. RemoteAgent uses this optimistic
+		// effective state to keep the request combined.
+		session.state.thinkingLevel = effectiveThinking;
 		if (typeof session.setModel === "function") {
 			session.setModel(model, effectiveThinking);
 		} else {
 			session.state.model = model;
-			session.state.thinkingLevel = effectiveThinking;
 		}
 	}
 
