@@ -10,12 +10,21 @@
  * HTTP surface and design doc for the contract.
  */
 
+import { createHash } from "node:crypto";
 import type { MessageAuthor } from "../../shared/message-author.js";
 import {
 	isToolResultOnlyMessage,
 	normalizeVisibleMessage,
 	type NormalizeVisibleMessageContext,
 } from "./message-author.js";
+import {
+	canonicalToolCallArguments,
+	canonicalToolCallName,
+	canonicalToolResultBody,
+	CanonicalTranscriptValueError,
+	isWellFormedUnicode,
+	scalarSafePrefix,
+} from "./canonical-tool-result-body.js";
 import {
 	mergeAuthorSidecarIntoMessages,
 	readAuthorSidecar,
@@ -36,6 +45,12 @@ export interface ReadTranscriptParams {
 	 * The agent-facing read_session tool passes false unless explicitly opted in.
 	 */
 	includeToolResults?: boolean;
+	/** Agent-only stable handle for one targeted result excerpt. */
+	resultHandle?: string;
+	/** Agent-only UTF-16 cursor into the canonical result body. */
+	resultCursor?: number;
+	/** Agent-only maximum UTF-16 units for a result excerpt. */
+	resultLimit?: number;
 }
 
 export interface CompactToolUse {
@@ -90,7 +105,49 @@ export interface VerboseMessage {
 	message?: Record<string, unknown>;
 }
 
-export type TranscriptMessage = CompactMessage | VerboseMessage;
+export interface ProjectedToolCall {
+	ref: string;
+	name: string;
+	argumentsPreview: string;
+	argumentsTruncated: boolean;
+}
+
+export interface ProjectedToolResult {
+	ref: string;
+	name: string;
+	status: ToolResultStatus;
+	size: ToolResultSize;
+	omitted: boolean;
+	handle: string;
+	excerpt?: {
+		start: number;
+		end: number;
+		text: string;
+		nextCursor: number | null;
+		complete: boolean;
+	};
+}
+
+export interface AgentTranscriptMessage {
+	index: number;
+	role: string;
+	roleTruncated?: boolean;
+	ts: string | null;
+	text: string;
+	textTruncated?: boolean;
+	thinking?: string;
+	thinkingTruncated?: boolean;
+	/** Legacy type compatibility only; canonical agent rows use authorRef. */
+	author?: MessageAuthor;
+	authorRef?: string;
+	toolCalls?: ProjectedToolCall[];
+	toolResults?: ProjectedToolResult[];
+	projectionOmitted?: true;
+	toolCallCount?: number;
+	toolResultCount?: number;
+}
+
+export type TranscriptMessage = CompactMessage | VerboseMessage | AgentTranscriptMessage;
 
 export interface ReadTranscriptEnvelope {
 	total: number;
@@ -98,14 +155,28 @@ export interface ReadTranscriptEnvelope {
 	returned: number;
 	offsetStart: number;
 	offsetEnd: number;
+	nextOffset?: number | null;
 	messages: TranscriptMessage[];
+	authors?: Record<string, MessageAuthor>;
+	correlations?: Record<string, Record<string, unknown>>;
+	partial?: boolean;
+	truncatedBy?: "transport_budget";
+	continuationRequest?:
+		| { kind: "page"; offset: number }
+		| { kind: "result_slice"; result_handle: string; result_cursor: number; result_limit: number };
 }
 
 export type ReadTranscriptError =
 	| "transcript_unavailable"
 	| "invalid_regex"
 	| "invalid_params"
-	| "compaction_not_found";
+	| "compaction_not_found"
+	| "INVALID_RESULT_BODY"
+	| "INVALID_RESULT_HANDLE"
+	| "RESULT_NOT_FOUND"
+	| "STALE_RESULT_HANDLE"
+	| "INVALID_RESULT_CURSOR"
+	| "INVALID_RESULT_LIMIT";
 
 export class TranscriptReaderError extends Error {
 	code: ReadTranscriptError;
@@ -599,6 +670,12 @@ export interface ReadTranscriptOptions {
 	readContent: () => Promise<string | null>;
 	/** Optional session and sidecar context for precise agent/system attribution. */
 	authorContext?: TranscriptAuthorResolutionContext;
+	/** Legacy/direct projection remains the compatibility default. */
+	projection?: "legacy" | "agent";
+	/** Target session identity used to bind agent result handles. */
+	sessionId?: string;
+	/** Agent envelope ceiling. The default is the 50 KiB tool transport ceiling. */
+	serializedBudgetBytes?: number;
 }
 
 /**
@@ -832,6 +909,821 @@ export async function readOrphanedBeforeCompaction(
 	return { total, returned: messages.length, nextCursor, messages };
 }
 
+// ── Canonical agent projection ──
+
+export const READ_SESSION_AGENT_ENVELOPE_MAX_BYTES = 50 * 1024;
+const AGENT_ARGUMENT_PREVIEW_LIMIT = 512;
+const AGENT_RESULT_EXCERPT_DEFAULT = 4096;
+const AGENT_RESULT_EXCERPT_MAX = 8192;
+const AGENT_COMPACT_TEXT_LIMIT = 800;
+const AGENT_VERBOSE_TEXT_LIMIT = 4096;
+const AGENT_THINKING_LIMIT = 512;
+const AGENT_ROLE_LIMIT = 32;
+const AGENT_TOOL_NAME_LIMIT = 128;
+const RESULT_HANDLE_DOMAIN = "bobbit.read-session.result-handle.v1\0";
+
+interface CanonicalCall {
+	messageIndex: number;
+	blockIndex: number;
+	block: Record<string, unknown>;
+	id?: string;
+	name: string;
+	argumentsText: string;
+	argumentsPresent: boolean;
+}
+
+interface CanonicalResult {
+	messageIndex: number;
+	blockIndex: number;
+	direct: Record<string, unknown>;
+	message: Record<string, unknown>;
+	correlationId?: string;
+	correlatedCall?: CanonicalCall;
+	name: string;
+	status: ToolResultStatus;
+	body: string;
+	size: ToolResultSize;
+	handle: string;
+}
+
+interface CanonicalTranscriptIndex {
+	callsByMessage: Map<number, CanonicalCall[]>;
+	resultsByMessage: Map<number, CanonicalResult[]>;
+	resultByLocation: Map<string, CanonicalResult>;
+	searchSegmentsByMessage: Map<number, string[]>;
+}
+
+function ownValidString(source: Record<string, unknown>, key: string): string | undefined {
+	if (!Object.prototype.hasOwnProperty.call(source, key)) return undefined;
+	const value = source[key];
+	return typeof value === "string" && value.length > 0 && isWellFormedUnicode(value) ? value : undefined;
+}
+
+function firstOwnValidString(source: Record<string, unknown>, keys: readonly string[]): string | undefined {
+	for (const key of keys) {
+		const value = ownValidString(source, key);
+		if (value !== undefined) return value;
+	}
+	return undefined;
+}
+
+function canonicalCallId(call: Record<string, unknown>): string | undefined {
+	return firstOwnValidString(call, ["id", "toolCallId", "tool_call_id", "toolUseId", "tool_use_id"]);
+}
+
+function canonicalResultCorrelationId(
+	direct: Record<string, unknown>,
+	message: Record<string, unknown>,
+	messageLevel: boolean,
+): string | undefined {
+	const aliases = ["tool_use_id", "toolUseId", "toolCallId", "tool_call_id"] as const;
+	const directAlias = firstOwnValidString(direct, aliases);
+	if (directAlias) return directAlias;
+	if (!messageLevel) {
+		const messageAlias = firstOwnValidString(message, aliases);
+		if (messageAlias) return messageAlias;
+	}
+	if ((direct.type === "tool_result" || direct.type === "toolResult")) return ownValidString(direct, "id");
+	return undefined;
+}
+
+function canonicalResultName(
+	direct: Record<string, unknown>,
+	message: Record<string, unknown>,
+	messageLevel: boolean,
+	call?: CanonicalCall,
+): string {
+	return ownValidString(direct, "name")
+		?? ownValidString(direct, "toolName")
+		?? (!messageLevel ? ownValidString(message, "name") : undefined)
+		?? (!messageLevel ? ownValidString(message, "toolName") : undefined)
+		?? call?.name
+		?? "unknown";
+}
+
+function validStatusCandidate(source: Record<string, unknown>): ToolResultStatus | undefined {
+	if (Object.prototype.hasOwnProperty.call(source, "status")) {
+		const status = source.status;
+		if (status === "ok" || status === "error" || status === "unknown") return status;
+	}
+	for (const key of ["isError", "is_error"] as const) {
+		if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+		if (typeof source[key] === "boolean") return source[key] ? "error" : "ok";
+	}
+	return undefined;
+}
+
+function canonicalResultStatus(
+	direct: Record<string, unknown>,
+	message: Record<string, unknown>,
+	messageLevel: boolean,
+): ToolResultStatus {
+	return validStatusCandidate(direct)
+		?? (!messageLevel ? validStatusCandidate(message) : undefined)
+		?? "unknown";
+}
+
+function visibleTextSegments(message: RawMessage): string[] {
+	if (isMessageLevelToolResult(message)) return [];
+	if (typeof message.content === "string") {
+		return isWellFormedUnicode(message.content) ? [message.content] : [];
+	}
+	if (!Array.isArray(message.content)) return [];
+	const segments: string[] = [];
+	for (const candidate of message.content) {
+		if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+		const block = candidate as Record<string, unknown>;
+		if (isToolResultBlock(block)) continue;
+		if (block.type === "text" && typeof block.text === "string" && isWellFormedUnicode(block.text)) {
+			segments.push(block.text);
+		}
+	}
+	return segments;
+}
+
+function thinkingSegments(message: RawMessage): string[] {
+	if (!Array.isArray(message.content)) return [];
+	const segments: string[] = [];
+	for (const candidate of message.content) {
+		if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+		const block = candidate as Record<string, unknown>;
+		if (block.type !== "thinking" && block.type !== "reasoning") continue;
+		const value = typeof block.thinking === "string" ? block.thinking
+			: typeof block.text === "string" ? block.text
+			: undefined;
+		if (value !== undefined && isWellFormedUnicode(value)) segments.push(value);
+	}
+	return segments;
+}
+
+function u32(value: number): Buffer {
+	const buffer = Buffer.allocUnsafe(4);
+	buffer.writeUInt32BE(value, 0);
+	return buffer;
+}
+
+function u64(value: number): Buffer {
+	const buffer = Buffer.allocUnsafe(8);
+	buffer.writeBigUInt64BE(BigInt(value), 0);
+	return buffer;
+}
+
+/** Stable, content-bound handle for a canonical tool result body. */
+export function createTranscriptResultHandle(
+	sessionId: string,
+	messageIndex: number,
+	blockIndex: number,
+	canonicalBody: string,
+): string {
+	if (!isWellFormedUnicode(sessionId) || !isWellFormedUnicode(canonicalBody)) {
+		throw new TranscriptReaderError("INVALID_RESULT_BODY", "result handle input contains invalid Unicode");
+	}
+	if (!Number.isSafeInteger(messageIndex) || messageIndex < 0
+		|| !Number.isInteger(blockIndex) || blockIndex < 0 || blockIndex > 0xffff_ffff) {
+		throw new TranscriptReaderError("INVALID_RESULT_BODY", "result handle location is invalid");
+	}
+	const sessionBytes = Buffer.from(sessionId, "utf8");
+	const bodyBytes = Buffer.from(canonicalBody, "utf8");
+	const hash = createHash("sha256");
+	hash.update(Buffer.from(RESULT_HANDLE_DOMAIN, "utf8"));
+	hash.update(u32(sessionBytes.length));
+	hash.update(sessionBytes);
+	hash.update(u64(messageIndex));
+	hash.update(u32(blockIndex));
+	hash.update(u64(bodyBytes.length));
+	hash.update(bodyBytes);
+	const suffix = hash.digest().subarray(0, 20).toString("base64url");
+	return `rs1:m${messageIndex.toString(36)}:b${blockIndex.toString(36)}:${suffix}`;
+}
+
+function resultLocationKey(messageIndex: number, blockIndex: number): string {
+	return `${messageIndex}:${blockIndex}`;
+}
+
+function callPrecedes(call: CanonicalCall, messageIndex: number, blockIndex: number): boolean {
+	return call.messageIndex < messageIndex
+		|| (call.messageIndex === messageIndex && call.blockIndex < blockIndex);
+}
+
+function findNearestPrecedingCall(calls: CanonicalCall[], messageIndex: number, blockIndex: number): CanonicalCall | undefined {
+	for (let index = calls.length - 1; index >= 0; index--) {
+		if (callPrecedes(calls[index], messageIndex, blockIndex)) return calls[index];
+	}
+	return undefined;
+}
+
+function buildCanonicalTranscriptIndex(
+	messages: RawMessage[],
+	sessionId: string,
+): CanonicalTranscriptIndex {
+	const callsByMessage = new Map<number, CanonicalCall[]>();
+	const allCallsById = new Map<string, CanonicalCall[]>();
+
+	for (const message of messages) {
+		if (!Array.isArray(message.content)) continue;
+		for (let blockIndex = 0; blockIndex < message.content.length; blockIndex++) {
+			const candidate = message.content[blockIndex];
+			if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+			const block = candidate as Record<string, unknown>;
+			if (block.type !== "tool_use" && block.type !== "toolCall") continue;
+			const args = canonicalToolCallArguments(block);
+			const call: CanonicalCall = {
+				messageIndex: message.index,
+				blockIndex,
+				block,
+				...(canonicalCallId(block) ? { id: canonicalCallId(block) } : {}),
+				name: canonicalToolCallName(block),
+				argumentsText: args.text,
+				argumentsPresent: args.present,
+			};
+			const messageCalls = callsByMessage.get(message.index) ?? [];
+			messageCalls.push(call);
+			callsByMessage.set(message.index, messageCalls);
+			if (call.id) {
+				const byId = allCallsById.get(call.id) ?? [];
+				byId.push(call);
+				allCallsById.set(call.id, byId);
+			}
+		}
+	}
+
+	const resultsByMessage = new Map<number, CanonicalResult[]>();
+	const resultByLocation = new Map<string, CanonicalResult>();
+	for (const message of messages) {
+		const sources: Array<{ direct: Record<string, unknown>; blockIndex: number; messageLevel: boolean }> = [];
+		if (isMessageLevelToolResult(message)) {
+			sources.push({ direct: message.fullMessage, blockIndex: 0, messageLevel: true });
+		} else if (Array.isArray(message.content)) {
+			for (let blockIndex = 0; blockIndex < message.content.length; blockIndex++) {
+				const candidate = message.content[blockIndex];
+				if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+				const direct = candidate as Record<string, unknown>;
+				if (isToolResultBlock(direct)) sources.push({ direct, blockIndex, messageLevel: false });
+			}
+		}
+		for (const source of sources) {
+			const correlationId = canonicalResultCorrelationId(source.direct, message.fullMessage, source.messageLevel);
+			const correlatedCall = correlationId
+				? findNearestPrecedingCall(allCallsById.get(correlationId) ?? [], message.index, source.blockIndex)
+				: undefined;
+			const canonical = canonicalToolResultBody(source.direct);
+			const size: ToolResultSize = {
+				type: canonical.type,
+				...(canonical.blocks !== undefined ? { blocks: canonical.blocks } : {}),
+				chars: canonical.text.length,
+				lines: stringLineCount(canonical.text),
+				bytes: Buffer.byteLength(canonical.text, "utf8"),
+			};
+			const result: CanonicalResult = {
+				messageIndex: message.index,
+				blockIndex: source.blockIndex,
+				direct: source.direct,
+				message: message.fullMessage,
+				...(correlationId ? { correlationId } : {}),
+				...(correlatedCall ? { correlatedCall } : {}),
+				name: canonicalResultName(source.direct, message.fullMessage, source.messageLevel, correlatedCall),
+				status: canonicalResultStatus(source.direct, message.fullMessage, source.messageLevel),
+				body: canonical.text,
+				size,
+				handle: createTranscriptResultHandle(sessionId, message.index, source.blockIndex, canonical.text),
+			};
+			const messageResults = resultsByMessage.get(message.index) ?? [];
+			messageResults.push(result);
+			resultsByMessage.set(message.index, messageResults);
+			resultByLocation.set(resultLocationKey(message.index, source.blockIndex), result);
+		}
+	}
+
+	const searchSegmentsByMessage = new Map<number, string[]>();
+	for (const message of messages) {
+		const segments = visibleTextSegments(message);
+		for (const call of callsByMessage.get(message.index) ?? []) {
+			segments.push(call.name);
+			if (call.argumentsPresent) segments.push(call.argumentsText);
+		}
+		for (const result of resultsByMessage.get(message.index) ?? []) segments.push(result.body);
+		searchSegmentsByMessage.set(message.index, segments);
+	}
+	return { callsByMessage, resultsByMessage, resultByLocation, searchSegmentsByMessage };
+}
+
+function regexMatchesAny(regex: RegExp, segments: string[]): boolean {
+	for (const segment of segments) {
+		regex.lastIndex = 0;
+		if (regex.test(segment)) return true;
+	}
+	return false;
+}
+
+function buildAgentMatchList(
+	messages: RawMessage[],
+	index: CanonicalTranscriptIndex,
+	pattern: string,
+	caseSensitive: boolean,
+	context: number,
+): { matchCount: number; expanded: number[] } {
+	let regex: RegExp;
+	try {
+		regex = new RegExp(pattern, caseSensitive ? "" : "i");
+	} catch (error) {
+		throw new TranscriptReaderError("invalid_regex", error instanceof Error ? error.message : String(error));
+	}
+	const matches: number[] = [];
+	for (const message of messages) {
+		if (regexMatchesAny(regex, index.searchSegmentsByMessage.get(message.index) ?? [])) matches.push(message.index);
+	}
+	if (context <= 0) return { matchCount: matches.length, expanded: matches };
+	const expanded = new Set<number>();
+	for (const messageIndex of matches) {
+		for (let candidate = Math.max(0, messageIndex - context);
+			candidate <= Math.min(messages.length - 1, messageIndex + context);
+			candidate++) expanded.add(candidate);
+	}
+	return { matchCount: matches.length, expanded: [...expanded].sort((a, b) => a - b) };
+}
+
+function authorDictionaryKey(author: MessageAuthor): string {
+	return `${author.kind}\0${author.id}\0${author.label}`;
+}
+
+interface AgentProjectionState {
+	callRefs: Map<CanonicalCall, string>;
+	resultRefs: Map<CanonicalResult, string>;
+	authorRefs: Map<string, string>;
+	authors: Record<string, MessageAuthor>;
+	correlations: Record<string, Record<string, unknown>>;
+	nextToolRef: number;
+	nextResultRef: number;
+	nextAuthorRef: number;
+}
+
+function newAgentProjectionState(): AgentProjectionState {
+	return {
+		callRefs: new Map(),
+		resultRefs: new Map(),
+		authorRefs: new Map(),
+		authors: {},
+		correlations: {},
+		nextToolRef: 1,
+		nextResultRef: 1,
+		nextAuthorRef: 1,
+	};
+}
+
+function refForCall(call: CanonicalCall, state: AgentProjectionState): string {
+	const existing = state.callRefs.get(call);
+	if (existing) return existing;
+	const ref = `t${state.nextToolRef++}`;
+	state.callRefs.set(call, ref);
+	state.correlations[ref] = {
+		name: scalarSafePrefix(call.name, AGENT_TOOL_NAME_LIMIT),
+		messageIndex: call.messageIndex,
+		blockIndex: call.blockIndex,
+	};
+	return ref;
+}
+
+function refForResult(result: CanonicalResult, state: AgentProjectionState): string {
+	if (result.correlatedCall) return refForCall(result.correlatedCall, state);
+	const existing = state.resultRefs.get(result);
+	if (existing) return existing;
+	const ref = `r${state.nextResultRef++}`;
+	state.resultRefs.set(result, ref);
+	state.correlations[ref] = {
+		name: scalarSafePrefix(result.name, AGENT_TOOL_NAME_LIMIT),
+		messageIndex: result.messageIndex,
+		blockIndex: result.blockIndex,
+	};
+	return ref;
+}
+
+function refForAuthor(author: MessageAuthor, state: AgentProjectionState): string {
+	const key = authorDictionaryKey(author);
+	const existing = state.authorRefs.get(key);
+	if (existing) return existing;
+	const ref = `a${state.nextAuthorRef++}`;
+	state.authorRefs.set(key, ref);
+	state.authors[ref] = {
+		kind: author.kind,
+		id: scalarSafePrefix(author.id, 256),
+		label: scalarSafePrefix(author.label, 128),
+	};
+	return ref;
+}
+
+function canonicalSliceEnd(text: string, start: number, limit: number): number {
+	let end = Math.min(text.length, start + limit);
+	if (end > start && end < text.length) {
+		const previous = text.charCodeAt(end - 1);
+		const next = text.charCodeAt(end);
+		if (previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end--;
+	}
+	if (end === start && start < text.length) {
+		const current = text.charCodeAt(start);
+		const next = text.charCodeAt(start + 1);
+		if (current >= 0xd800 && current <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) return start + 2;
+		return start + 1;
+	}
+	return end;
+}
+
+function validateResultCursor(text: string, cursor: unknown): number {
+	if (!Number.isInteger(cursor) || (cursor as number) < 0 || (cursor as number) > text.length) {
+		throw new TranscriptReaderError("INVALID_RESULT_CURSOR", "result_cursor must be an integer within the result body");
+	}
+	const value = cursor as number;
+	if (value > 0 && value < text.length) {
+		const previous = text.charCodeAt(value - 1);
+		const current = text.charCodeAt(value);
+		if (previous >= 0xd800 && previous <= 0xdbff && current >= 0xdc00 && current <= 0xdfff) {
+			throw new TranscriptReaderError("INVALID_RESULT_CURSOR", "result_cursor splits a Unicode scalar value");
+		}
+	}
+	return value;
+}
+
+function validateResultLimit(value: unknown): number {
+	if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > AGENT_RESULT_EXCERPT_MAX) {
+		throw new TranscriptReaderError("INVALID_RESULT_LIMIT", `result_limit must be an integer in [1, ${AGENT_RESULT_EXCERPT_MAX}]`);
+	}
+	return value as number;
+}
+
+function projectedResult(
+	result: CanonicalResult,
+	state: AgentProjectionState,
+	includeExcerpt: boolean,
+	cursor = 0,
+	limit = AGENT_RESULT_EXCERPT_DEFAULT,
+): ProjectedToolResult {
+	const projected: ProjectedToolResult = {
+		ref: refForResult(result, state),
+		name: scalarSafePrefix(result.name, AGENT_TOOL_NAME_LIMIT),
+		status: result.status,
+		size: result.size,
+		omitted: !includeExcerpt,
+		handle: result.handle,
+	};
+	if (includeExcerpt) {
+		const end = canonicalSliceEnd(result.body, cursor, limit);
+		projected.excerpt = {
+			start: cursor,
+			end,
+			text: result.body.slice(cursor, end),
+			nextCursor: end < result.body.length ? end : null,
+			complete: end === result.body.length,
+		};
+	}
+	return projected;
+}
+
+function projectAgentMessage(
+	message: RawMessage,
+	index: CanonicalTranscriptIndex,
+	state: AgentProjectionState,
+	options: { verbose: boolean; includeToolResults: boolean; omitOptional?: boolean },
+): AgentTranscriptMessage {
+	const role = scalarSafePrefix(isWellFormedUnicode(message.role) ? message.role : "unknown", AGENT_ROLE_LIMIT);
+	const fullText = visibleTextSegments(message).join("\n");
+	const textLimit = options.verbose ? AGENT_VERBOSE_TEXT_LIMIT : AGENT_COMPACT_TEXT_LIMIT;
+	const text = scalarSafePrefix(fullText, textLimit);
+	const out: AgentTranscriptMessage = {
+		index: message.index,
+		role,
+		...(role.length < message.role.length ? { roleTruncated: true } : {}),
+		ts: message.ts,
+		text,
+		...(text.length < fullText.length ? { textTruncated: true } : {}),
+	};
+	if (message.author) out.authorRef = refForAuthor(message.author, state);
+	if (options.verbose) {
+		const fullThinking = thinkingSegments(message).join("\n");
+		if (fullThinking) {
+			const thinking = scalarSafePrefix(fullThinking, AGENT_THINKING_LIMIT);
+			out.thinking = thinking;
+			if (thinking.length < fullThinking.length) out.thinkingTruncated = true;
+		}
+	}
+	const calls = index.callsByMessage.get(message.index) ?? [];
+	if (calls.length > 0) {
+		out.toolCalls = calls.map((call) => {
+			const preview = options.omitOptional ? "" : scalarSafePrefix(call.argumentsText, AGENT_ARGUMENT_PREVIEW_LIMIT);
+			return {
+				ref: refForCall(call, state),
+				name: scalarSafePrefix(call.name, AGENT_TOOL_NAME_LIMIT),
+				argumentsPreview: preview,
+				argumentsTruncated: options.omitOptional
+					? call.argumentsText.length > 0
+					: preview.length < call.argumentsText.length,
+			};
+		});
+	}
+	const results = index.resultsByMessage.get(message.index) ?? [];
+	if (results.length > 0) {
+		out.toolResults = results.map((result) => projectedResult(
+			result,
+			state,
+			options.includeToolResults && !options.omitOptional,
+		));
+	}
+	return out;
+}
+
+function referencedDictionary<T>(
+	dictionary: Record<string, T>,
+	refs: Set<string>,
+): Record<string, T> | undefined {
+	const entries = Object.entries(dictionary).filter(([ref]) => refs.has(ref));
+	return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+function envelopeForAgentRows(
+	total: number,
+	matchCount: number | undefined,
+	rows: AgentTranscriptMessage[],
+	state: AgentProjectionState,
+	nextOffset: number | undefined,
+	partial = false,
+	continuationRequest?: ReadTranscriptEnvelope["continuationRequest"],
+): ReadTranscriptEnvelope {
+	const authorRefs = new Set<string>();
+	const correlationRefs = new Set<string>();
+	for (const row of rows) {
+		if (row.authorRef) authorRefs.add(row.authorRef);
+		for (const call of row.toolCalls ?? []) correlationRefs.add(call.ref);
+		for (const result of row.toolResults ?? []) correlationRefs.add(result.ref);
+	}
+	const authors = referencedDictionary(state.authors, authorRefs);
+	const correlations = referencedDictionary(state.correlations, correlationRefs);
+	return {
+		total,
+		...(matchCount !== undefined ? { matchCount } : {}),
+		returned: rows.length,
+		offsetStart: rows.length > 0 ? rows[0].index : -1,
+		offsetEnd: rows.length > 0 ? rows[rows.length - 1].index : -1,
+		...(nextOffset !== undefined ? { nextOffset } : {}),
+		messages: rows,
+		...(authors ? { authors } : {}),
+		...(correlations ? { correlations } : {}),
+		...(partial ? {
+			partial: true,
+			truncatedBy: "transport_budget" as const,
+			...(continuationRequest ? { continuationRequest } : {}),
+		} : {}),
+	};
+}
+
+function serializedBytes(value: unknown): number {
+	return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+function summaryRow(message: RawMessage, index: CanonicalTranscriptIndex): AgentTranscriptMessage {
+	return {
+		index: message.index,
+		role: scalarSafePrefix(isWellFormedUnicode(message.role) ? message.role : "unknown", AGENT_ROLE_LIMIT),
+		ts: message.ts,
+		text: "",
+		projectionOmitted: true,
+		toolCallCount: (index.callsByMessage.get(message.index) ?? []).length,
+		toolResultCount: (index.resultsByMessage.get(message.index) ?? []).length,
+	};
+}
+
+function fitAgentPage(
+	all: RawMessage[],
+	index: CanonicalTranscriptIndex,
+	workingIndices: number[],
+	start: number,
+	limit: number,
+	verbose: boolean,
+	includeToolResults: boolean,
+	matchCount: number | undefined,
+	budget: number,
+): ReadTranscriptEnvelope {
+	const requestedIndices = workingIndices.slice(start, Math.min(workingIndices.length, start + limit));
+	const state = newAgentProjectionState();
+	const rows: AgentTranscriptMessage[] = [];
+	let transportStopped = false;
+
+	for (let relative = 0; relative < requestedIndices.length; relative++) {
+		const raw = all[requestedIndices[relative]];
+		let row = projectAgentMessage(raw, index, state, { verbose, includeToolResults });
+		const reserveOffset = start + relative + 1;
+		let trial = envelopeForAgentRows(
+			all.length,
+			matchCount,
+			[...rows, row],
+			state,
+			reserveOffset,
+			true,
+			{ kind: "page", offset: reserveOffset },
+		);
+		if (serializedBytes(trial) > budget) {
+			row = projectAgentMessage(raw, index, state, { verbose, includeToolResults, omitOptional: true });
+			trial = envelopeForAgentRows(
+				all.length,
+				matchCount,
+				[...rows, row],
+				state,
+				reserveOffset,
+				true,
+				{ kind: "page", offset: reserveOffset },
+			);
+		}
+		if (serializedBytes(trial) > budget) {
+			if (rows.length === 0) {
+				row = summaryRow(raw, index);
+				trial = envelopeForAgentRows(
+					all.length,
+					matchCount,
+					[row],
+					state,
+					reserveOffset,
+					true,
+					{ kind: "page", offset: reserveOffset },
+				);
+				if (serializedBytes(trial) <= budget) rows.push(row);
+			}
+			transportStopped = true;
+			break;
+		}
+		rows.push(row);
+	}
+
+	if (transportStopped || rows.length < requestedIndices.length) {
+		const nextOffset = start + rows.length;
+		return envelopeForAgentRows(
+			all.length,
+			matchCount,
+			rows,
+			state,
+			nextOffset,
+			true,
+			{ kind: "page", offset: nextOffset },
+		);
+	}
+	const endPosition = start + rows.length;
+	return envelopeForAgentRows(
+		all.length,
+		matchCount,
+		rows,
+		state,
+		endPosition < workingIndices.length ? endPosition : undefined,
+	);
+}
+
+interface ParsedResultHandle {
+	messageIndex: number;
+	blockIndex: number;
+}
+
+function parseResultHandle(handle: unknown): ParsedResultHandle {
+	if (typeof handle !== "string" || !isWellFormedUnicode(handle)) {
+		throw new TranscriptReaderError("INVALID_RESULT_HANDLE", "result_handle must be a canonical result handle");
+	}
+	const match = /^rs1:m([0-9a-z]+):b([0-9a-z]+):([A-Za-z0-9_-]{27})$/.exec(handle);
+	if (!match) throw new TranscriptReaderError("INVALID_RESULT_HANDLE", "result_handle is malformed");
+	const messageIndex = Number.parseInt(match[1], 36);
+	const blockIndex = Number.parseInt(match[2], 36);
+	if (!Number.isSafeInteger(messageIndex) || messageIndex < 0 || messageIndex.toString(36) !== match[1]
+		|| !Number.isInteger(blockIndex) || blockIndex < 0 || blockIndex > 0xffff_ffff
+		|| blockIndex.toString(36) !== match[2]) {
+		throw new TranscriptReaderError("INVALID_RESULT_HANDLE", "result_handle location is malformed");
+	}
+	return { messageIndex, blockIndex };
+}
+
+function readTargetedResultSlice(
+	all: RawMessage[],
+	index: CanonicalTranscriptIndex,
+	params: ReadTranscriptParams,
+	budget: number,
+): ReadTranscriptEnvelope {
+	const location = parseResultHandle(params.resultHandle);
+	const raw = all[location.messageIndex];
+	if (!raw || raw.index !== location.messageIndex) {
+		throw new TranscriptReaderError("RESULT_NOT_FOUND", "result handle message does not exist");
+	}
+	const result = index.resultByLocation.get(resultLocationKey(location.messageIndex, location.blockIndex));
+	if (!result) throw new TranscriptReaderError("RESULT_NOT_FOUND", "result handle block does not exist");
+	if (result.handle !== params.resultHandle) {
+		throw new TranscriptReaderError("STALE_RESULT_HANDLE", "result body changed after this handle was issued");
+	}
+	const cursor = validateResultCursor(result.body, params.resultCursor ?? 0);
+	const requestedLimit = validateResultLimit(params.resultLimit ?? AGENT_RESULT_EXCERPT_DEFAULT);
+	const requestedEnd = canonicalSliceEnd(result.body, cursor, requestedLimit);
+	const makeTargetRow = (state: AgentProjectionState, limit: number): AgentTranscriptMessage => {
+		const role = scalarSafePrefix(isWellFormedUnicode(raw.role) ? raw.role : "unknown", AGENT_ROLE_LIMIT);
+		const row: AgentTranscriptMessage = {
+			index: raw.index,
+			role,
+			...(role.length < raw.role.length ? { roleTruncated: true } : {}),
+			ts: raw.ts,
+			text: "",
+			toolResults: [projectedResult(result, state, true, cursor, limit)],
+		};
+		if (raw.author) row.authorRef = refForAuthor(raw.author, state);
+		return row;
+	};
+	const state = newAgentProjectionState();
+	const base = makeTargetRow(state, requestedLimit);
+	let envelope = envelopeForAgentRows(all.length, undefined, [base], state, undefined);
+	if (serializedBytes(envelope) <= budget) return envelope;
+
+	let low = 1;
+	let high = Math.max(1, requestedEnd - cursor);
+	let best: ReadTranscriptEnvelope | undefined;
+	while (low <= high) {
+		const units = Math.floor((low + high) / 2);
+		const candidateState = newAgentProjectionState();
+		const candidate = makeTargetRow(candidateState, units);
+		const actualEnd = candidate.toolResults![0].excerpt!.end;
+		const partial = actualEnd < requestedEnd;
+		const projected = envelopeForAgentRows(
+			all.length,
+			undefined,
+			[candidate],
+			candidateState,
+			undefined,
+			partial,
+			partial ? {
+				kind: "result_slice",
+				result_handle: result.handle,
+				result_cursor: actualEnd,
+				result_limit: requestedLimit,
+			} : undefined,
+		);
+		if (serializedBytes(projected) <= budget) {
+			best = projected;
+			low = units + 1;
+		} else {
+			high = units - 1;
+		}
+	}
+	if (best) return best;
+	throw new TranscriptReaderError("invalid_params", "serialized transcript budget is too small for result metadata");
+}
+
+function readAgentTranscript(
+	params: ReadTranscriptParams,
+	all: RawMessage[],
+	opts: ReadTranscriptOptions,
+	validated: { offset: number; limit: number; context: number },
+): ReadTranscriptEnvelope {
+	const sessionId = opts.sessionId ?? opts.authorContext?.session?.id ?? "unknown";
+	const budget = opts.serializedBudgetBytes ?? READ_SESSION_AGENT_ENVELOPE_MAX_BYTES;
+	if (!Number.isSafeInteger(budget) || budget < 512 || budget > READ_SESSION_AGENT_ENVELOPE_MAX_BYTES) {
+		throw new TranscriptReaderError("invalid_params", `serializedBudgetBytes must be an integer in [512, ${READ_SESSION_AGENT_ENVELOPE_MAX_BYTES}]`);
+	}
+	try {
+		const index = buildCanonicalTranscriptIndex(all, sessionId);
+		if (params.resultHandle !== undefined) return readTargetedResultSlice(all, index, params, budget);
+		if (params.resultCursor !== undefined) {
+			throw new TranscriptReaderError("INVALID_RESULT_HANDLE", "result_handle is required with result_cursor");
+		}
+		if (params.resultLimit !== undefined) {
+			throw new TranscriptReaderError("INVALID_RESULT_HANDLE", "result_handle is required with result_limit");
+		}
+		let workingIndices: number[];
+		let matchCount: number | undefined;
+		if (params.pattern && params.pattern.length > 0) {
+			const matched = buildAgentMatchList(all, index, params.pattern, !!params.caseSensitive, validated.context);
+			workingIndices = matched.expanded;
+			matchCount = matched.matchCount;
+		} else {
+			workingIndices = all.map((_, position) => position);
+		}
+		const start = resolveOffset(validated.offset, workingIndices.length);
+		if (start >= workingIndices.length) {
+			return {
+				total: all.length,
+				...(matchCount !== undefined ? { matchCount } : {}),
+				returned: 0,
+				offsetStart: -1,
+				offsetEnd: -1,
+				messages: [],
+			};
+		}
+		return fitAgentPage(
+			all,
+			index,
+			workingIndices,
+			start,
+			validated.limit,
+			!!params.verbose,
+			params.includeToolResults === true,
+			matchCount,
+			budget,
+		);
+	} catch (error) {
+		if (error instanceof TranscriptReaderError) throw error;
+		if (error instanceof CanonicalTranscriptValueError) {
+			throw new TranscriptReaderError("INVALID_RESULT_BODY", error.message);
+		}
+		throw error;
+	}
+}
+
 export async function readTranscript(
 	params: ReadTranscriptParams,
 	opts: ReadTranscriptOptions,
@@ -869,6 +1761,9 @@ export async function readTranscript(
 	}
 
 	const all = resolveRawMessageAuthors(parseJsonl(content), opts.authorContext);
+	if (opts.projection === "agent") {
+		return readAgentTranscript(params, all, opts, { offset, limit, context });
+	}
 	const total = all.length;
 	const renderOptions: RenderOptions = { includeToolResults, toolNameById: buildToolNameMap(all) };
 
