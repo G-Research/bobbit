@@ -8,6 +8,7 @@ guardProcessEnv();
 import { beforeAll, describe, expect, it } from "vitest";
 import {
 	BOBBIT_COMPACT_PROJECTIONS,
+	COMPACT_SESSION_ERROR_PREVIEW_CODE_UNITS,
 	COMPACT_TEXT_PREVIEW_CHARS,
 	COMPACT_TRUNCATION_SUFFIX,
 	projectBobbitResponse,
@@ -249,6 +250,137 @@ describe("bobbit compact projections", () => {
 			nextCursor: "session-cursor-1",
 			mode: "cursor",
 		});
+	});
+
+	it("projects get_session to exact diagnostic metadata while verbose preserves the gateway payload", async () => {
+		const restoreError = `restore-error-sentinel:${"r".repeat(700)}`;
+		const lastTurnErrorMessage = `last-turn-error-sentinel:${"t".repeat(700)}`;
+		const session = {
+			id: "session-detail-id-sentinel",
+			title: "Session detail title sentinel",
+			status: "archived",
+			archived: true,
+			childTerminal: true,
+			createdAt: 1_725_000_000_001,
+			lastActivity: 1_725_000_000_002,
+			archivedAt: 1_725_000_000_003,
+			terminalAt: 1_725_000_000_004,
+			assistantType: "role",
+			role: "reviewer-role-sentinel",
+			nonInteractive: true,
+			projectId: "project-link-sentinel",
+			goalId: "goal-link-sentinel",
+			reattemptGoalId: "reattempt-goal-link-sentinel",
+			teamGoalId: "team-goal-link-sentinel",
+			taskId: "task-link-sentinel",
+			staffId: "staff-link-sentinel",
+			delegateOf: "delegate-parent-link-sentinel",
+			parentSessionId: "parent-session-link-sentinel",
+			teamLeadSessionId: "team-lead-session-link-sentinel",
+			childKind: "pr-walkthrough-child-kind-sentinel",
+			readOnly: true,
+			lastTurnErrored: false,
+			consecutiveErrorTurns: 0,
+			completedTurnCount: 0,
+			restoreError,
+			lastTurnErrorMessage,
+
+			cwd: "/omitted/cwd-sentinel",
+			worktreePath: "/omitted/worktree-path-sentinel",
+			repoPath: "/omitted/repo-path-sentinel",
+			repoWorktrees: { web: "/omitted/repo-worktree-map-sentinel" },
+			agentSessionFile: "/omitted/agent-transcript-sentinel.jsonl",
+			clientCount: 17,
+			lastReadAt: 1_725_000_000_005,
+			isCompacting: true,
+			wasStreaming: true,
+			streamingStartedAt: 1_725_000_000_006,
+			messageQueue: [{ id: "omitted-message-queue-sentinel", text: "private queued prompt" }],
+			inFlightSteerTexts: [{ id: "omitted-steer-sentinel", text: "private steer" }],
+			instructions: "omitted-instructions-sentinel",
+			context: { secret: "omitted-context-sentinel" },
+			allowedTools: ["omitted-allowed-tool-sentinel"],
+			drafts: { goal: { spec: "omitted-draft-sentinel" } },
+			sidePanelWorkspace: { tabs: [{ id: "omitted-side-panel-workspace-sentinel" }] },
+			proposalWorkspace: { draft: "omitted-proposal-workspace-sentinel" },
+			previewWorkspace: { html: "omitted-preview-workspace-sentinel" },
+			modelProvider: "omitted-model-provider-sentinel",
+			modelId: "omitted-model-id-sentinel",
+			spawnPinnedModel: "omitted-spawn-model-sentinel",
+			spawnPinnedThinkingLevel: "omitted-thinking-level-sentinel",
+			imageGenerationModel: "omitted-image-generation-model-sentinel",
+			imageModelProvider: "omitted-image-provider-sentinel",
+			imageModelId: "omitted-image-model-id-sentinel",
+			sandboxed: true,
+			preview: true,
+			accessory: "omitted-accessory-sentinel",
+			colorIndex: 23,
+			generation: 29,
+			displayFlags: { expanded: "omitted-display-flag-sentinel" },
+			goalAssistant: false,
+			roleAssistant: true,
+			toolAssistant: false,
+			branch: "omitted/repository-branch-sentinel",
+			worktreePushPolicy: "omitted-worktree-push-policy-sentinel",
+			remotePublicationPolicy: "omitted-publication-policy-sentinel",
+		};
+		const calls = stubFetch(() => ({ body: session }));
+
+		const compact = resultJson(await tools.get("bobbit_read")!.execute("compact", {
+			operation: "get_session",
+			sessionId: session.id,
+		}));
+		const verbose = resultJson(await tools.get("bobbit_read")!.execute("verbose", {
+			operation: "get_session",
+			sessionId: session.id,
+			verbose: true,
+		}));
+
+		expect(calls).toHaveLength(2);
+		expect(compact).toEqual({
+			id: session.id,
+			title: session.title,
+			status: session.status,
+			archived: session.archived,
+			childTerminal: session.childTerminal,
+			createdAt: session.createdAt,
+			lastActivity: session.lastActivity,
+			archivedAt: session.archivedAt,
+			terminalAt: session.terminalAt,
+			assistantType: session.assistantType,
+			role: session.role,
+			nonInteractive: session.nonInteractive,
+			projectId: session.projectId,
+			goalId: session.goalId,
+			reattemptGoalId: session.reattemptGoalId,
+			teamGoalId: session.teamGoalId,
+			taskId: session.taskId,
+			staffId: session.staffId,
+			delegateOf: session.delegateOf,
+			parentSessionId: session.parentSessionId,
+			teamLeadSessionId: session.teamLeadSessionId,
+			childKind: session.childKind,
+			readOnly: session.readOnly,
+			lastTurnErrored: false,
+			consecutiveErrorTurns: 0,
+			completedTurnCount: 0,
+			restoreError: `${restoreError.slice(0, COMPACT_SESSION_ERROR_PREVIEW_CODE_UNITS)}${COMPACT_TRUNCATION_SUFFIX}`,
+			lastTurnErrorMessage: `${lastTurnErrorMessage.slice(0, COMPACT_SESSION_ERROR_PREVIEW_CODE_UNITS)}${COMPACT_TRUNCATION_SUFFIX}`,
+		});
+		for (const omittedField of [
+			"cwd", "worktreePath", "repoPath", "repoWorktrees", "agentSessionFile",
+			"clientCount", "lastReadAt", "isCompacting", "wasStreaming", "streamingStartedAt",
+			"messageQueue", "inFlightSteerTexts", "instructions", "context", "allowedTools",
+			"drafts", "sidePanelWorkspace", "proposalWorkspace", "previewWorkspace",
+			"modelProvider", "modelId", "spawnPinnedModel", "spawnPinnedThinkingLevel",
+			"imageGenerationModel", "imageModelProvider", "imageModelId", "sandboxed",
+			"preview", "accessory", "colorIndex", "generation", "displayFlags",
+			"goalAssistant", "roleAssistant", "toolAssistant", "branch", "worktreePushPolicy",
+			"remotePublicationPolicy",
+		] as const) {
+			expect(compact, omittedField).not.toHaveProperty(omittedField);
+		}
+		expect(verbose).toEqual(session);
 	});
 
 	it("compacts search hits and truncates snippets without losing ranking or pagination", async () => {
@@ -610,6 +742,7 @@ describe("bobbit verbose behavior and conservative limit guard", () => {
 describe("bobbit compact projection catalogue", () => {
 	it("pins the shared preview contract", () => {
 		expect(COMPACT_TEXT_PREVIEW_CHARS).toBe(200);
+		expect(COMPACT_SESSION_ERROR_PREVIEW_CODE_UNITS).toBe(512);
 		expect(COMPACT_TRUNCATION_SUFFIX).toBe("…(truncated; pass verbose:true)");
 		expect(CONTEXT_HEAVY_LIMIT).toBe(10);
 	});
