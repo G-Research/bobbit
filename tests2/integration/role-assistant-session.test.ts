@@ -28,14 +28,18 @@ test.beforeAll(() => {
 	bogusCwd = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-role-assistant-"));
 });
 
-test.afterAll(async () => {
-	for (const id of createdSessionIds) {
-		await rawApiFetch(`/api/sessions/${id}`, { method: "DELETE" }).catch(() => {});
-	}
+test.afterAll(() => {
 	try { fs.rmSync(bogusCwd, { recursive: true, force: true }); } catch { /* best-effort */ }
 });
 
 test.describe("POST /api/sessions — server-scope vs project-scoped assistants", () => {
+	test.afterEach(async () => {
+		for (const id of createdSessionIds.splice(0).reverse()) {
+			const resp = await rawApiFetch(`/api/sessions/${id}?purge=true`, { method: "DELETE" });
+			expect([200, 404]).toContain(resp.status);
+		}
+	});
+
 	for (const assistantType of ["role", "tool"] as const) {
 		test(`${assistantType} assistant without projectId — 201 (server-scope, no project needed)`, async () => {
 			const resp = await rawApiFetch("/api/sessions", {
