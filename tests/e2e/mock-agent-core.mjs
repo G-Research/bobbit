@@ -172,6 +172,9 @@ export class MockAgentCore {
 		this._onEvent = options.onEvent || (() => {});
 		this.conversationMessages = [];
 		this.currentModel = mockModelFromString(options.initialModel) || { ...DEFAULT_MODEL };
+		// Pi initializes sessions at its default thinking level and reports the
+		// effective value through get_state after every runtime mutation.
+		this.currentThinkingLevel = "medium";
 		this.sessionFilePath = null;
 		// When an AUTO_COMPACT turn has run, this holds the FULL on-disk
 		// transcript (orphaned pre-compaction entries + a compaction marker +
@@ -2697,6 +2700,7 @@ export class MockAgentCore {
 						status: "idle",
 						sessionFile: sf,
 						model: this.currentModel,
+						thinkingLevel: this.currentThinkingLevel,
 					},
 				};
 			}
@@ -2710,6 +2714,10 @@ export class MockAgentCore {
 				this.currentModel = mockModelFromString(`${provider}/${modelId}`) || { ...DEFAULT_MODEL };
 				return { success: true };
 			}
+
+			case "set_thinking_level":
+				this.currentThinkingLevel = msg.level;
+				return { success: true };
 
 			case "compact":
 				// Manual /compact: mirror pi 0.74+ by emitting compaction_start/end
