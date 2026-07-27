@@ -47,14 +47,12 @@ function expectNoStaleModelBeforeOpus5(messages: WsMsg[], context: string) {
 	expect(staleBeforeTarget, `${context}: stale/placeholder Opus state must not appear before ${OPUS_5.id}`).toEqual([]);
 }
 
-async function waitForPersistedOpus5Xhigh(sessionId: string) {
+async function waitForPersistedOpus5Xhigh(gateway: any, sessionId: string) {
 	await pollUntil(async () => {
-		const resp = await apiFetch(`/api/sessions/${sessionId}`);
-		if (!resp.ok) return false;
-		const data = await resp.json();
-		return data.modelProvider === OPUS_5.provider
-			&& data.modelId === OPUS_5.id
-			&& data.effectiveThinkingLevel === OPUS_5.thinkingLevel;
+		const persisted = gateway.sessionManager.getPersistedSession(sessionId);
+		return persisted?.modelProvider === OPUS_5.provider
+			&& persisted.modelId === OPUS_5.id
+			&& persisted.effectiveThinkingLevel === OPUS_5.thinkingLevel;
 	}, { timeoutMs: 5_000, intervalMs: 50, label: "Opus 5/xhigh tuple persisted" });
 }
 
@@ -117,7 +115,7 @@ test.describe("model state after reconnect", () => {
 		ws2.close();
 	});
 
-	test("combined Opus 5/xhigh selection persists and reconnects without a stale model flash", async () => {
+	test("combined Opus 5/xhigh selection persists and reconnects without a stale model flash", async ({ gateway }) => {
 		const ws1 = await connectWs(sessionId);
 
 		// One combined request crosses the real gateway/mock-agent path. The exact
@@ -139,7 +137,7 @@ test.describe("model state after reconnect", () => {
 			thinkingLevelMap: { xhigh: "xhigh", max: "max" },
 		});
 		expectNoStaleModelBeforeOpus5(ws1.messages.slice(selectionCursor), "after combined selection");
-		await waitForPersistedOpus5Xhigh(sessionId);
+		await waitForPersistedOpus5Xhigh(gateway, sessionId);
 
 		// Populate the event buffer so reconnect exercises authoritative live-state
 		// hydration rather than only the persisted fallback response.
@@ -150,7 +148,7 @@ test.describe("model state after reconnect", () => {
 		const ws2 = await connectWs(sessionId);
 		await ws2.waitFor(isOpus5XhighState, 10_000);
 		expectNoStaleModelBeforeOpus5(ws2.messages, "reconnect initial state");
-		await waitForPersistedOpus5Xhigh(sessionId);
+		await waitForPersistedOpus5Xhigh(gateway, sessionId);
 		ws2.close();
 	});
 });

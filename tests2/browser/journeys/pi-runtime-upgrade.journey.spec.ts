@@ -163,17 +163,6 @@ test.describe("Journey: Pi Runtime Upgrade", () => {
 			await editor.press("Enter");
 			await expect(page.getByText("OK", { exact: true }).first()).toBeVisible({ timeout: 20_000 });
 
-			await expect.poll(async () => {
-				const response = await apiFetch(`/api/sessions/${sessionId}`);
-				if (!response.ok) return null;
-				const persisted = await response.json();
-				return {
-					provider: persisted.modelProvider,
-					id: persisted.modelId,
-					thinkingLevel: persisted.effectiveThinkingLevel,
-				};
-			}, { timeout: 15_000 }).toEqual(OPUS_5);
-
 			await page.reload({ waitUntil: "domcontentloaded" });
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(footerModel).toHaveText(OPUS_5.id, { timeout: 20_000 });

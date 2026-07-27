@@ -18,7 +18,7 @@
  * capability the owner lacks. Deterministic mock agent → e2e phase, not manual.
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { createSession, deleteSession, connectWs, apiFetch } from "./_e2e/e2e-setup.js";
+import { createSession, deleteSession, connectWs } from "./_e2e/e2e-setup.js";
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
 
 let createServerHostApi: typeof import("../../src/server/extension-host/server-host-api.js").createServerHostApi;
@@ -58,17 +58,15 @@ function buildHost(gateway: any, ownerId: string): any {
 }
 
 /** Set a session's model via WS and wait until it persists. */
-async function setSessionModel(sessionId: string, provider: string, modelId: string, thinkingLevel: string): Promise<void> {
+async function setSessionModel(gateway: any, sessionId: string, provider: string, modelId: string, thinkingLevel: string): Promise<void> {
 	const conn = await connectWs(sessionId);
 	try {
 		conn.send({ type: "set_model", provider, modelId, thinkingLevel });
 		await pollUntil(async () => {
-			const resp = await apiFetch(`/api/sessions/${sessionId}`);
-			if (!resp.ok) return false;
-			const data = await resp.json();
-			return data.modelProvider === provider
-				&& data.modelId === modelId
-				&& data.effectiveThinkingLevel === thinkingLevel ? true : null;
+			const persisted = gateway.sessionManager.getPersistedSession(sessionId);
+			return persisted?.modelProvider === provider
+				&& persisted.modelId === modelId
+				&& persisted.effectiveThinkingLevel === thinkingLevel ? true : null;
 		}, { timeoutMs: 5_000, intervalMs: 50, label: "owner model/thinking tuple persisted" });
 	} finally {
 		conn.close();
@@ -81,7 +79,7 @@ test.describe("host.agents — sandbox / credential inheritance (no escalation)"
 		const host = buildHost(gateway, owner);
 		let childId: string | undefined;
 		try {
-			await setSessionModel(owner, OPUS.provider, OPUS.modelId, OPUS.thinkingLevel);
+			await setSessionModel(gateway, owner, OPUS.provider, OPUS.modelId, OPUS.thinkingLevel);
 			const ownerPs = gateway.sessionManager.getPersistedSession(owner);
 
 			const ha = await host.agents.spawn({ instructions: "inherit-scope child" });

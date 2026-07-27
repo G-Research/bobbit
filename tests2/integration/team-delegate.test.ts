@@ -78,17 +78,15 @@ async function listChildren(ownerId: string): Promise<any[]> {
 }
 
 /** Set a session's model via WS and wait until it persists. */
-async function setSessionModel(sessionId: string, provider: string, modelId: string, thinkingLevel: string): Promise<void> {
+async function setSessionModel(gateway: any, sessionId: string, provider: string, modelId: string, thinkingLevel: string): Promise<void> {
 	const conn = await connectWs(sessionId);
 	try {
 		conn.send({ type: "set_model", provider, modelId, thinkingLevel });
 		await pollUntil(async () => {
-			const resp = await apiFetch(`/api/sessions/${sessionId}`);
-			if (!resp.ok) return false;
-			const data = await resp.json();
-			return data.modelProvider === provider
-				&& data.modelId === modelId
-				&& data.effectiveThinkingLevel === thinkingLevel ? true : null;
+			const persisted = gateway.sessionManager.getPersistedSession(sessionId);
+			return persisted?.modelProvider === provider
+				&& persisted.modelId === modelId
+				&& persisted.effectiveThinkingLevel === thinkingLevel ? true : null;
 		}, { timeoutMs: 5_000, intervalMs: 50, label: `tuple ${provider}/${modelId}/${thinkingLevel} persisted` });
 	} finally {
 		conn.close();
@@ -218,7 +216,7 @@ test.describe("team_delegate — model inheritance", () => {
 	test("a spawned child inherits the parent's CURRENT model/thinking tuple (not the system default)", async ({ gateway }) => {
 		const parent = await createSession();
 		try {
-			await setSessionModel(parent, OPUS.provider, OPUS.modelId, OPUS.thinkingLevel);
+			await setSessionModel(gateway, parent, OPUS.provider, OPUS.modelId, OPUS.thinkingLevel);
 			const { status, json } = await orchestrate(parent, "spawn", { instructions: "inherit-model child" });
 			expect(status).toBe(201);
 			const childId = json.childSessionId as string;
@@ -245,7 +243,7 @@ test.describe("team_delegate — model inheritance", () => {
 	test("per-call model/thinking override wins over inheritance", async ({ gateway }) => {
 		const parent = await createSession();
 		try {
-			await setSessionModel(parent, OPUS.provider, OPUS.modelId, OPUS.thinkingLevel);
+			await setSessionModel(gateway, parent, OPUS.provider, OPUS.modelId, OPUS.thinkingLevel);
 			const override = { model: "anthropic/claude-sonnet-5", thinkingLevel: "medium" } as const;
 			const { status, json } = await orchestrate(parent, "spawn", {
 				instructions: "override-model child",
