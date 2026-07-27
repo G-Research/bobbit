@@ -925,6 +925,25 @@ function clampRoleThinking(value: unknown, modelStr: string | undefined): string
 	return clampThinkingLevelForModel(known, provider, modelId);
 }
 
+/** Resolve the durable provider/model/effective-thinking tuple for server-owned child paths. */
+export function resolveServerInitialModelTuple(
+	persisted: { modelProvider?: unknown; modelId?: unknown; effectiveThinkingLevel?: unknown } | undefined,
+	live?: { spawnPinnedThinkingLevel?: unknown },
+): { initialModel?: string; initialThinkingLevel?: string } {
+	const provider = typeof persisted?.modelProvider === "string" ? persisted.modelProvider.trim() : "";
+	const modelId = typeof persisted?.modelId === "string" ? persisted.modelId.trim() : "";
+	if (!provider || !modelId) return {};
+
+	const effectiveThinking = isKnownThinkingLevel(persisted?.effectiveThinkingLevel)
+		?? isKnownThinkingLevel(live?.spawnPinnedThinkingLevel);
+	return {
+		initialModel: `${provider}/${modelId}`,
+		...(effectiveThinking
+			? { initialThinkingLevel: clampThinkingLevelForModel(effectiveThinking, provider, modelId) }
+			: {}),
+	};
+}
+
 export function isMissingRemoteRefDeleteError(err: unknown): boolean {
 	const texts: string[] = [];
 	const addText = (value: unknown) => {
@@ -2586,11 +2605,14 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		// Inherit the owner's CURRENT model (same shape as the pr-walkthrough
 		// resolveParentInitialModel resolver) so a child no longer drops to the
 		// system default.
-		resolveSessionModel: (sessionId: string) => {
-			const persisted = sessionManager.getPersistedSession(sessionId);
-			return persisted?.modelProvider && persisted.modelId ? `${persisted.modelProvider}/${persisted.modelId}` : undefined;
-		},
-		resolveSessionThinking: (sessionId: string) => sessionManager.getSession(sessionId)?.spawnPinnedThinkingLevel,
+		resolveSessionModel: (sessionId: string) => resolveServerInitialModelTuple(
+			sessionManager.getPersistedSession(sessionId),
+			sessionManager.getSession(sessionId),
+		).initialModel,
+		resolveSessionThinking: (sessionId: string) => resolveServerInitialModelTuple(
+			sessionManager.getPersistedSession(sessionId),
+			sessionManager.getSession(sessionId),
+		).initialThinkingLevel,
 		// Resolve the owner's FULL effective tool catalogue so the core can
 		// synthesize an explicit "all-except-spawn-verbs" allow-list when the owner
 		// is unrestricted (orchestration-core §7 — a child must never have a spawn
@@ -12681,7 +12703,6 @@ async function handleApiRoute(
 						staffId: ps.staffId,
 						allowedTools: ps.allowedTools,
 					};
-					if (ps.modelProvider && ps.modelId) createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
 					if (ps.sandboxed && !worktreeOpts && !ps.goalId && !ps.assistantType) {
 						createOpts.sandboxBranch = `session/${forkId.slice(0, 8)}`;
 					}
@@ -12705,6 +12726,11 @@ async function handleApiRoute(
 						} else if (ps.accessory) {
 							createOpts.accessory = ps.accessory;
 						}
+					}
+					const sourceTuple = resolveServerInitialModelTuple(ps, source);
+					if (sourceTuple.initialModel) {
+						delete createOpts.initialThinkingLevel;
+						Object.assign(createOpts, sourceTuple);
 					}
 					return createOpts;
 				},
@@ -13254,11 +13280,6 @@ async function handleApiRoute(
 			awaitWorktreeSetup: !!worktreeOpts,
 			bypassWorktreePool: !!worktreeOpts && !!ps.sandboxed,
 		};
-		// Pin the persisted model at spawn time so pi-coding-agent doesn't emit a
-		// redundant initial `model_change` event with its hardcoded default.
-		if (ps.modelProvider && ps.modelId) {
-			createOpts.initialModel = `${ps.modelProvider}/${ps.modelId}`;
-		}
 		if (role) {
 			const opts = roleCreateOptions(role);
 			if (createOpts.initialModel) delete opts.initialModel;
@@ -13272,6 +13293,12 @@ async function handleApiRoute(
 			if (ps.accessory) createOpts.accessory = ps.accessory;
 		} else if (ps.accessory) {
 			createOpts.accessory = ps.accessory;
+		}
+		// Persisted verified selection wins over a role/default selected after archive.
+		const sourceTuple = resolveServerInitialModelTuple(ps);
+		if (sourceTuple.initialModel) {
+			delete createOpts.initialThinkingLevel;
+			Object.assign(createOpts, sourceTuple);
 		}
 
 		let newSession;

@@ -34,11 +34,11 @@ test.describe("server deferred-provider model boundaries", () => {
 			label: "Supported provider Kimi-named model",
 			promptTemplate: "preserve provider identity",
 			model: "aigw/kimi-coding/claude-opus-5",
-			thinkingLevel: "xhigh",
+			thinkingLevel: "high",
 		});
 		expect(supported.response.status, JSON.stringify(supported.data)).toBe(201);
 		expect(supported.data.model).toBe("aigw/kimi-coding/claude-opus-5");
-		expect(supported.data.thinkingLevel).toBe("xhigh");
+		expect(supported.data.thinkingLevel).toBe("high");
 
 		const rejectedUpdate = await roleRequest(`/api/roles/${encodeURIComponent(SUPPORTED_ROLE)}`, "PUT", {
 			model: "kimi-coding/k2p5",

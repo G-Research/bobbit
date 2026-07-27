@@ -31,10 +31,10 @@ describe("server Pi 0.82 exact tuple inheritance", () => {
 			modelProvider: "aigw",
 			modelId: "kimi-coding/claude-opus-5",
 		}, {
-			spawnPinnedThinkingLevel: "xhigh",
+			spawnPinnedThinkingLevel: "high",
 		})).toEqual({
 			initialModel: "aigw/kimi-coding/claude-opus-5",
-			initialThinkingLevel: "xhigh",
+			initialThinkingLevel: "high",
 		});
 	});
 
