@@ -1,6 +1,6 @@
 sandbox: docker
 sandbox_image: bobbit-agent
-base_ref: origin/master
+base_ref: origin/main
 components:
   - name: bobbit
     repo: .
@@ -282,7 +282,7 @@ workflows:
             type: command
             run: git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads
               origin {{branch}} | grep -q .
-          - name: Master merged into branch
+          - name: Base ref merged into branch
             type: command
             run: git fetch origin {{baseBranch}} && git merge-base --is-ancestor
               origin/{{baseBranch}} {{branch}}
@@ -553,7 +553,7 @@ workflows:
             type: command
             run: git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads
               origin {{branch}} | grep -q .
-          - name: Master merged into branch
+          - name: Base ref merged into branch
             type: command
             run: git fetch origin {{baseBranch}} && git merge-base --is-ancestor
               origin/{{baseBranch}} {{branch}}
@@ -715,7 +715,7 @@ workflows:
             type: command
             run: git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads
               origin {{branch}} | grep -q .
-          - name: Master merged into branch
+          - name: Base ref merged into branch
             type: command
             run: git fetch origin {{baseBranch}} && git merge-base --is-ancestor
               origin/{{baseBranch}} {{branch}}
@@ -799,7 +799,7 @@ workflows:
             type: command
             run: git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads
               origin {{branch}} | grep -q .
-          - name: Master merged into branch
+          - name: Base ref merged into branch
             type: command
             run: git fetch origin {{baseBranch}} && git merge-base --is-ancestor
               origin/{{baseBranch}} {{branch}}
