@@ -1,5 +1,5 @@
 import { test, expect, type TestInfo } from "@playwright/test";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -13,6 +13,8 @@ import {
 } from "./test-utils/pi-packed-consumer-command.js";
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const PACKAGE_NAME = (JSON.parse(readFileSync(join(PROJECT_ROOT, "package.json"), "utf8")) as { name: string }).name;
+const PACKAGE_INSTALL_SEGMENTS = PACKAGE_NAME.split("/");
 const PI_PACKAGES = [
 	"@earendil-works/pi-agent-core",
 	"@earendil-works/pi-ai",
@@ -164,7 +166,7 @@ test.describe("published Bobbit package dependency security", () => {
 			expect(Array.isArray(packJson), "npm pack must report one-element JSON array").toBe(true);
 			expect(packJson).toHaveLength(1);
 			const packEntry = asRecord((packJson as unknown[])[0], "npm pack entry");
-			expect(packEntry.name).toBe("bobbit");
+			expect(packEntry.name).toBe(PACKAGE_NAME);
 			expect(typeof packEntry.filename).toBe("string");
 			const tarballPath = resolve(packDir, packEntry.filename as string);
 			expect(existsSync(tarballPath), `npm pack did not create ${tarballPath}`).toBe(true);
@@ -189,7 +191,7 @@ test.describe("published Bobbit package dependency security", () => {
 			).toBe(true);
 
 			const installedManifest = JSON.parse(await readFile(
-				join(consumerDir, "node_modules", "bobbit", "package.json"),
+				join(consumerDir, "node_modules", ...PACKAGE_INSTALL_SEGMENTS, "package.json"),
 				"utf8",
 			)) as { dependencies?: Record<string, string> };
 			const piPins = PI_PACKAGES.map(name => installedManifest.dependencies?.[name]);
@@ -220,7 +222,7 @@ test.describe("published Bobbit package dependency security", () => {
 					`${piPackage} must not have mixed or stale versions`,
 				).toEqual([selectedPiVersion]);
 				expect(
-					piOccurrences.every(entry => entry.path.includes("bobbit")),
+					piOccurrences.every(entry => entry.path.includes(PACKAGE_NAME)),
 					`${piPackage} must resolve through the installed Bobbit package`,
 				).toBe(true);
 			}
@@ -250,7 +252,14 @@ test.describe("published Bobbit package dependency security", () => {
 				).toBe(true);
 			}
 
-			const binariesModulePath = join(consumerDir, "node_modules", "bobbit", "dist", "server", "binaries.js");
+			const binariesModulePath = join(
+				consumerDir,
+				"node_modules",
+				...PACKAGE_INSTALL_SEGMENTS,
+				"dist",
+				"server",
+				"binaries.js",
+			);
 			const binaries = await import(pathToFileURL(binariesModulePath).href) as {
 				expectedBinaryPackage(): string | null;
 				getFdResolution(): { source: string; path: string | null; expectedPackage: string };
