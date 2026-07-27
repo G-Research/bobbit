@@ -88,7 +88,7 @@ export default function(pi) {
   }
 
   function contextHeavyReadError(input) {
-    const flags = ["verbose", "include_tool_results"].filter((flag) => input[flag] === true);
+    const flags = ["verbose", "include_tool_results", "includeToolResults"].filter((flag) => input[flag] === true);
     if (flags.length === 0) return undefined;
     const limit = input.limit;
     if (typeof limit === "number" && Number.isFinite(limit) && Number.isInteger(limit) && limit >= 1 && limit <= 10) {

@@ -116,6 +116,52 @@ describe("tool result error bridge extension", () => {
 		assert.equal(projected.messages[0].toolResults[0].name, "read");
 	});
 
+	it("continues a fitted negative regex tail from its exact filtered position", async () => {
+		const activate = await loadGeneratedExtension();
+		const { pi, handlers } = makePi();
+		activate(pi);
+		const filteredExpandedIndexes = Array.from({ length: 10 }, (_, index) => index);
+		const expandedTailIndexes = filteredExpandedIndexes.slice(-4);
+		const escapedText = "\\\"\n".repeat(2_048);
+		const messages = expandedTailIndexes.map((index) => ({
+			index,
+			role: "assistant",
+			text: escapedText,
+		}));
+		const envelope = {
+			total: 10,
+			matchCount: 10,
+			returned: messages.length,
+			offsetStart: messages[0].index,
+			offsetEnd: messages[messages.length - 1].index,
+			messages,
+		};
+		pi.tool({ name: "read_session" }, async () => envelope);
+
+		const result = await handlers.get("read_session")!({
+			session_id: "target",
+			pattern: "needle",
+			context: 1,
+			offset: -4,
+			limit: 4,
+			verbose: true,
+		});
+		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= 50 * 1024);
+		const projected = JSON.parse(result.content[0].text);
+		assert.equal(projected.partial, true, "double encoding must force a page partial");
+		assert.equal(projected.truncatedBy, "transport_budget");
+		assert.equal(projected.returned, 3,
+			"the final fitter must retain the exact fitting prefix of the selected tail");
+		assert.deepEqual(projected.messages.map((message: any) => message.index), [6, 7, 8]);
+		const selectedStart = envelope.matchCount - 4;
+		const firstOmittedPosition = selectedStart + projected.returned;
+		assert.equal(firstOmittedPosition, 9);
+		assert.equal(filteredExpandedIndexes[firstOmittedPosition], 9,
+			"the continued position must be the first omitted context-expanded row");
+		assert.equal(projected.nextOffset, 9);
+		assert.deepEqual(projected.continuationRequest, { kind: "page", offset: 9 });
+	});
+
 	it("uses a sub-1KiB structured fallback for unknown successful wrappers", async () => {
 		const activate = await loadGeneratedExtension();
 		const { pi, handlers } = makePi();

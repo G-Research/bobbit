@@ -248,6 +248,10 @@ describe("generateToolGuardExtension", () => {
 		for (const input of [
 			{ verbose: true },
 			{ include_tool_results: true, limit: 11 },
+			{ includeToolResults: true },
+			{ includeToolResults: true, limit: 11 },
+			{ includeToolResults: true, limit: "10" },
+			{ includeToolResults: true, limit: 1.5 },
 			{ verbose: true, limit: "10" },
 			{ verbose: true, limit: 1.5 },
 		]) {
@@ -257,6 +261,8 @@ describe("generateToolGuardExtension", () => {
 		}
 		assert.equal(await onToolCall!({ toolName: "read_session", input: {} }), undefined);
 		assert.equal(await onToolCall!({ toolName: "READ_SESSION", arguments: { include_tool_results: true, limit: 10 } }), undefined);
+		assert.equal(await onToolCall!({ toolName: "read_session", input: { includeToolResults: true, limit: 1 } }), undefined);
+		assert.equal(await onToolCall!({ toolName: "read_session", input: { includeToolResults: true, limit: 10 } }), undefined);
 	});
 
 	it("does not cache one-time grant responses in the active guard", async () => {
