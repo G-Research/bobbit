@@ -95,13 +95,15 @@ export function aggregateGitStatusProbes(
 
 		const results = successfulComponents.map(({ probe }) => probe.result);
 		const base = results[0];
+		const partial = components.some(({ probe }) => probe.kind !== "success")
+			|| results.some((result) => result.partial === true);
 		const aggregate: GitStatusResult = {
 			branch: base.branch,
 			primaryBranch: base.primaryBranch,
 			primaryRef: base.primaryRef,
 			isOnPrimary: base.isOnPrimary,
 			hasUpstream: base.hasUpstream,
-			mergedIntoPrimary: base.mergedIntoPrimary,
+			mergedIntoPrimary: !partial && results.every((result) => result.mergedIntoPrimary),
 			status: [],
 			ahead: sum(results, (result) => result.ahead),
 			behind: sum(results, (result) => result.behind),
@@ -112,7 +114,7 @@ export function aggregateGitStatusProbes(
 			clean: results.every((result) => result.clean),
 			unpushed: results.some((result) => result.unpushed),
 			summary: `${results.length} ${results.length === 1 ? "repo" : "repos"}`,
-			partial: components.some(({ probe }) => probe.kind !== "success") || results.some((result) => result.partial === true),
+			partial,
 			untrackedIncluded: components.every(({ probe }) => probe.kind === "success")
 				&& results.every((result) => result.untrackedIncluded === true),
 		};
