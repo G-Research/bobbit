@@ -227,7 +227,29 @@ interface ProjectedToolCall {
 
 Inputs are read in compatibility order from `arguments`, then `input`. A tool-only assistant row is valid and useful even when `text` is empty because it contains `toolCalls`.
 
-Full provider call IDs may appear once in an optional envelope dictionary when correlation truly requires them. Per-message call/result rows use the short ref. A result whose call lies outside the page still gets a deterministic page-local entry populated from the full-transcript name map.
+Full provider call IDs are used only inside the server-side correlation index and never appear in an agent projection or dictionary. Correlated call/result rows share a page-local `t1`, `t2`, … ref allocated by first selected source-block order. The optional `correlations` dictionary maps that ref only to bounded semantic data (`name`, call `messageIndex`, and `blockIndex`), never the raw provider ID. A result whose call lies outside the page still gets a page-local `tN` entry populated from the full-transcript correlation map. An uncorrelated result gets `r1`, `r2`, … by selected result order and a dictionary entry containing only its own message/block locator and canonical name; this applies equally to a missing ID and a present ID with no matching call.
+
+#### 6.1.1 Full tool-call search corpus
+
+`argumentsPreview` is presentation only. Pattern matching never searches that bounded preview. Before pagination or projection, every Anthropic `tool_use` and Pi `toolCall` block contributes two independent, unbounded server-side search segments in source-block order:
+
+1. its canonical tool name; and
+2. `canonicalToolCallArguments(call)`, including content beyond the preview cap.
+
+The canonical call name is the first own, non-empty, Unicode-well-formed string in exact priority `name`, then `toolName`, or the literal `unknown`; invalid candidates are rejected without coercion. The argument source is the first own, non-`undefined` field in exact priority `arguments`, then `input`; `null` is selected. A selected string is used unchanged after the same Unicode well-formedness check as direct result text. Any other selected JSON value is encoded with the exact recursive stable JSON encoder and invalid-value rejection from §6.2.2; selected `null` encodes as the literal `null`, while a missing source contributes no argument segment. Strings that happen to contain JSON are not parsed and rewritten. The same canonical argument string feeds the bounded preview (a Unicode-scalar-safe prefix, maximum 512 UTF-16 units, with `argumentsTruncated`) and full search, so Pi and Anthropic shapes cannot disagree about what was searched.
+
+The normative per-message search corpus is a sequence of semantic segments, not one lossy concatenation: visible text segments in source order; each call's name then canonical arguments; and each result's full `canonicalToolResultBody`. The compiled regex is reset to `lastIndex = 0` and tested independently against every segment, avoiding matches synthesized across field/block boundaries. A hit in any segment selects that source message index exactly once. Context expansion then uses the existing transcript-index neighborhood, de-duplicates indexes, and sorts them ascending. `matchCount` counts matching source messages before context expansion. Offset resolution—including negative offsets—then applies to this filtered/expanded index list exactly as it does today.
+
+Projection occurs only after selection. A name or argument hit maps to the ordinary projected row for that source message: canonical name, bounded `argumentsPreview`, and `argumentsTruncated`; an argument match beyond the cap does not promote, splice, or excerpt the hidden suffix. Result-body hits likewise return canonical result metadata only unless a separate handle slice was requested. Transport-budget continuation records the next non-negative position in the same filtered/expanded list; the caller repeats the original pattern/case/context and uses that `nextOffset`, so continuation neither overlaps nor changes the search corpus.
+
+Pin this with an authenticated agent-bound fixture containing both providers, 700-unit arguments whose unique sentinels occur after unit 512, and repeated hits at source indexes 2, 5, and 8:
+
+- a tool-name regex with `context: 1` returns the matching Pi/Anthropic call row plus the exact adjacent transcript indexes, with the call name visible but no hidden argument suffix;
+- provider-specific regexes find the Pi `arguments` sentinel and Anthropic `input` sentinel beyond the preview, while neither sentinel appears in any returned C/CR/V/VR row;
+- a shared beyond-preview argument regex with `context: 0, offset: -2, limit: 1` resolves against the three-row filtered list, returns source index 5, reports `nextOffset: 2`, and a follow-up with the same filter plus `offset: 2` returns source index 8 without overlap;
+- the same negative-offset/continuation assertions run for a tool-name regex, and result-body matching remains metadata-only.
+
+These tests run through the agent-facing extension return, not only `flattenText()` or direct REST, and assert each actual return stays within 50 KiB.
 
 ### 6.2 Results
 
@@ -259,7 +281,39 @@ interface ProjectedToolResult {
 
 There is no `toolName`, `toolUseId`, `isError`, `contentOmitted`, `resultSize`, or prose placeholder alias in the agent projection. Compatibility aliases remain only in the direct REST legacy shape.
 
-#### 6.2.1 One canonical tool-result body
+#### 6.2.1 Canonical result identity and status
+
+Result metadata is normalized once, before C/CR/V/VR projection. For a block-level result, the **direct result object** is the result block and the enclosing message is a lower-priority fallback. For a message-level Pi result, `fullMessage` is the direct result object and is not synthesized into a second alias-bearing block.
+
+A correlation ID is the first own, non-empty, well-formed string in this priority: direct `tool_use_id`, `toolUseId`, `toolCallId`, `tool_call_id`, then the same four keys on the enclosing message. Direct `id` is accepted last only on an object whose exact type is `tool_result` or `toolResult`; a generic message `id` is never treated as a call correlation. Invalid candidates are rejected and the next candidate is considered; values are never trimmed, stringified, or truthiness-coerced. A call-side correlation ID is the first own, non-empty, well-formed string in exact priority `id`, `toolCallId`, `tool_call_id`, `toolUseId`, `tool_use_id` on that `tool_use`/`toolCall`; invalid candidates are rejected without coercion and an earlier conflicting alias wins. The correlation map uses the nearest preceding call with that exact canonical ID from the full transcript, even when the call is outside the returned page. If historical duplicate call IDs exist, nearest-preceding order is deterministic; a later/unrelated call never rewrites an earlier result.
+
+Canonical `name` uses the first valid candidate in this exact priority:
+
+1. direct result own `name`;
+2. direct result own `toolName`;
+3. enclosing message own `name`;
+4. enclosing message own `toolName`;
+5. correlated call name; or
+6. the literal `unknown` when correlation is missing and no direct candidate is valid.
+
+A valid name is a non-empty, Unicode-well-formed string; there is no numeric/object coercion and no whitespace trimming. Thus conflicting `name`/`toolName` values choose `name`, and any direct valid name wins a conflicting correlation-map name. Lower-priority conflicts are not copied into output. Projection applies the 128-unit scalar-safe cap only after this choice.
+
+Canonical `status` uses the first valid candidate in this exact priority: direct `status`, direct `isError`, direct `is_error`, enclosing-message `status`, enclosing-message `isError`, enclosing-message `is_error`; the enclosing object is skipped for message-level Pi results because it is already the direct object. `status` accepts only the exact strings `ok`, `error`, and `unknown`. `isError`/`is_error` accept only booleans and map `true` to `error` and `false` to `ok`. All other spellings/types—including `"true"`, `1`, `success`, and mixed-case strings—are rejected as candidates without coercion. If no valid candidate remains, status is `unknown`. A valid higher-priority value wins even when a lower-priority alias conflicts; only the normalized value is projected.
+
+Pin the precedence with exact fixtures in every mode:
+
+| Direct result metadata | Enclosing / correlation metadata | Canonical result |
+|---|---|---|
+| `name:"read", toolName:"grep", status:"ok", isError:true, is_error:true` | correlation name `find` | `name:"read", status:"ok"` |
+| `toolName:"grep", isError:false, is_error:true` | correlation name `find` | `name:"grep", status:"ok"` |
+| no direct name, `status:7, isError:"true", is_error:true` | correlation name `find` | `name:"find", status:"error"` |
+| block `name:"read", status:"error"` | enclosing `name:"grep", status:"ok"`; correlation name `find` | `name:"read", status:"error"` |
+| no direct/enclosing name or status and an unmatched correlation ID | missing correlation | `name:"unknown", status:"unknown", ref:"rN"` |
+| no correlation ID, name, or status fields | no correlation candidate | `name:"unknown", status:"unknown", ref:"rN"` |
+
+The fixture assertions also prove that the losing names, all status/error aliases, and raw correlation IDs are absent from the projected result record and envelope dictionaries. A matched result shares its call's `tN`; both an unmatched ID and a wholly missing ID receive deterministic page-local `rN` refs with only source locators in `correlations`. Missing correlation never borrows the most recent unrelated call and never fails body sizing, handle generation, search, or slicing.
+
+#### 6.2.2 One canonical tool-result body
 
 Every operation that needs result text calls one `canonicalToolResultBody(result)` implementation. There is no separate text flattener for metrics, regex, digests, or slices.
 
@@ -304,6 +358,14 @@ Pin these boundary fixtures exactly:
 | `[null,{"type":"text","text":""}]` | empty string | 0 | 0 | 0 |
 
 In-memory-only fixtures pin boundaries JSON cannot express: an inherited `content` property is ignored while an own `output` wins; cyclic/`BigInt` plain objects return `INVALID_RESULT_BODY`; and raw text leaves `"\uD800"` and `"\uD801"` each return `INVALID_RESULT_BODY` rather than collapsing to the same UTF-8 replacement bytes. A source-selection fixture with outer `{ content: null, output: "ignored", result: "ignored" }` separately proves the same own-key/null priority before traversal. Parameterized `attachment` and `binary` blocks carry unique multi-kilobyte payload sentinels: neither sentinel may appear in any C/CR/V/VR projection, their stable summaries must match the exact rule above, and a one-byte payload change must change the result handle and stale the old one.
+
+#### 6.2.3 Path-scoped provider metadata policy
+
+Provider scrubbing is structural and path-sensitive, never a recursive key-name deletion over arbitrary values. The projector classifies a result and selects its `content`/`output`/`result` body before applying the message/block allowlist. It then forbids provider-only own fields such as `thinkingSignature`, `textSignature`, `signature`, `encrypted_content`, `encryptedContent`, replay/encrypted payloads, raw response objects, and provider metadata when they occur on the raw message envelope, `fullMessage` bookkeeping, non-result thinking/reasoning/text blocks, or transport wrapper/details objects. Those structural source paths have no corresponding field in C/CR/V/VR.
+
+The deny policy does **not** descend into the selected canonical result body. Plain result objects use the stable JSON rule unchanged, and text result leaves remain unchanged. Therefore keys named `signature`, `thinkingSignature`, `textSignature`, or `encrypted_content` and their values are legal domain data inside `canonicalToolResultBody`, can participate in server-side pattern matching, and can appear literally within `toolResults[*].excerpt.text` in CR/VR. The same principle applies to tool-call arguments. Only typed opaque/binary result blocks use the separate metadata-only rule in §6.2.2.
+
+Tests must parse the projected envelope and assert paths, not ban substrings from `JSON.stringify(projection)`: provider-field paths and their unique provider-only sentinels are absent from all structural message/block/wrapper locations, while the exact canonical result `{"signature":"customer-visible-signature","thinkingSignature":"domain-value"}` remains byte-for-byte searchable and present in a requested CR/VR excerpt. C/V omit that body because result bodies are redacted, not because either key was scrubbed. A path walker explicitly exempts canonical result body/excerpt text from provider-metadata assertions; a complementary assertion parses the excerpt text and requires both otherwise-forbidden key names and values there.
 
 ### 6.3 Lazy bounded slices
 
@@ -353,7 +415,40 @@ For every successful agent-facing call, `serializedBytes(actualPiValue) <= READ_
 
 Budget authority lives in a gateway-generated, content-addressed `read-session-result-boundary` Pi extension, implemented by extending the existing `tool-result-error-bridge-extension.ts` registration wrapper rather than by trusting a tool-group extension. Its source is regenerated/verified like the existing error bridge, mounted read-only into sandboxes, and injected before every resolved builtin/server/project/market tool extension whenever `read_session` is granted. Session activation fails closed for `read_session` if this boundary cannot be written, translated, or loaded.
 
-A recoverable envelope has an exact schema. Required fields are `total` (non-negative safe integer), `returned` (non-negative safe integer equal to `messages.length`), `offsetStart` and `offsetEnd` (safe integers), and `messages` (array). Optional fields are `matchCount` (non-negative safe integer), `partial` (boolean), `truncatedBy` (`"transport_budget"` only on a recognized route envelope), `nextOffset` (safe integer or `null`), and `authors`/`correlations` (object dictionaries only). Each message must be an object with a non-negative safe-integer `index` and string `role`; it is then reprojected through the same semantic field allowlist/caps as route messages, so unknown nested fields are discarded. Incoming dictionaries are never copied wholesale: the boundary rebuilds only entries referenced by retained messages and lets the fitter limit their count. No coercion of numeric strings or aliases occurs. Before candidate search, if returned `details.session_id` exists it must be a string exactly equal to invocation `params.session_id`, otherwise recovery fails.
+A canonical successful envelope has an exact discriminated union. All variants require `total` (non-negative safe integer), `returned` (non-negative safe integer equal to `messages.length`), `offsetStart` and `offsetEnd` (safe integers), and `messages` (array). Optional common fields are `matchCount` (non-negative safe integer), `nextOffset` (safe integer or `null`), and `authors`/`correlations` (object dictionaries only). `truncatedBy` is the exact union `"transport_budget" | "extension_return_unrecognized"`; it is legal only when `partial` is exactly `true`.
+
+The variants are normative:
+
+```ts
+type SuccessfulEnvelope =
+  | (EnvelopeBase & {
+      partial?: false;
+      truncatedBy?: never;
+      continuationRequest?: never;
+      wrapperDiagnostics?: never;
+    })
+  | (EnvelopeBase & {
+      partial: true;
+      truncatedBy: "transport_budget";
+      continuationRequest:
+        | { kind: "page"; offset: number }
+        | { kind: "result_slice"; result_handle: string;
+            result_cursor: number; result_limit: number };
+      wrapperDiagnostics?: never;
+    })
+  | (EnvelopeBase & {
+      partial: true;
+      truncatedBy: "extension_return_unrecognized";
+      continuationRequest: RetrySameRequest;
+      wrapperDiagnostics: { omitted: true; actualBytes: number };
+    });
+```
+
+For a `transport_budget` page partial, `nextOffset` is required, non-negative, equals `continuationRequest.offset`, and identifies the first unreturned position in the raw or filtered/expanded sequence. For a `transport_budget` result-slice partial, `nextOffset` is absent, exactly one returned result has a non-null `excerpt.nextCursor`, and the continuation repeats that result's handle, uses that `nextCursor`, and carries an integer `result_limit` in `[1,8192]`. A transport partial must use one of these two forms and must not contain wrapper diagnostics.
+
+The `extension_return_unrecognized` variant has exact base values `total: 0`, `returned: 0`, `offsetStart: -1`, `offsetEnd: -1`, and `messages: []`; `matchCount`, `nextOffset`, `authors`, and `correlations` are absent because they cannot be recovered. Its `continuationRequest` is the bounded retry allowlist defined below, and `wrapperDiagnostics.actualBytes` is a non-negative safe integer measuring the discarded actual wrapper. No other variant may carry `wrapperDiagnostics` or retry fields.
+
+Each message must be an object with a non-negative safe-integer `index` and string `role`; it is then reprojected through the same semantic field allowlist/caps as route messages, so unknown nested fields are discarded. The only summary-row additions are `projectionOmitted: true` with non-negative safe-integer `toolCallCount` and `toolResultCount`; those fields are legal only in a `transport_budget` page partial. Incoming dictionaries are never copied wholesale: the boundary rebuilds only entries referenced by retained messages and lets the fitter limit their count. No coercion of numeric strings or aliases occurs. Before candidate search, if returned `details.session_id` exists it must be a string exactly equal to invocation `params.session_id`, otherwise recovery fails.
 
 Candidate search is deterministic and stops at the first valid source: (1) the returned object itself; (2) `content` array entries in ascending order whose exact `type` is `text` and whose `text` parses as a direct envelope; (3) `details.envelope`; (4) a legacy envelope assembled from exact `details.total`, `matchCount`, `returned`, `offsetStart`, `offsetEnd`, `nextOffset`, and `messages` keys. A lower-priority duplicate/conflict is never merged into a higher-priority candidate. The invocation's already-validated `session_id` binds a direct/text candidate when it has no envelope identity of its own. Unknown top-level envelope/wrapper fields are ignored only after a valid candidate is found; if no source validates, the fixed compatibility partial is used.
 
@@ -385,7 +480,7 @@ The execution order is exact:
 5. The boundary always reprojects a recognized successful envelope through `fitReadSessionActualPiValue`; it does this even when the stale return happened to be small. Only the reprojected value resolves to Pi. Pi therefore emits, broadcasts, and persists the bounded canonical value, never the stale intermediate object.
 6. Only after final `JSON.stringify`/UTF-8 measurement passes does the wrapped promise resolve. The existing error bridge then preserves structured error semantics. Because wrapping occurs at registration and after the real handler, server/project precedence, respawn, and sandbox path translation cannot bypass it.
 
-An unrecognized **successful** legacy shape is also fail-bounded, not passed through and not converted to a transport error. The boundary emits a successful envelope with `partial: true`, `truncatedBy: "extension_return_unrecognized"`, `returned: 0`, `messages: []`, a fixed-schema `continuationRequest`, and `{ omitted: true, actualBytes }` wrapper diagnostics. The continuation allowlist is exact: `retrySameRequest: true`; a well-formed `session_id` truncated at a scalar boundary to 64 UTF-16 units with `sessionIdTruncated` (ill-formed IDs are omitted); safe-integer `offset`/`limit`; booleans `case_sensitive`, `verbose`, and `include_tool_results`; integer `context` clamped to 0–5; and `patternOmitted: true` when a pattern was present. It never echoes pattern text, result handles, unknown parameters, or arbitrary strings. Invalid/out-of-range scalars are omitted rather than stringified. Consequently even a multi-megabyte input pattern cannot grow this prebuilt fallback beyond its separately asserted 1-KiB ceiling. It does not invent `nextOffset` when the unknown wrapper did not expose one and never includes an excerpt of the unknown return. This compatibility partial tells the caller to retry the already-known request after the override is updated while maintaining the hard ceiling. Recognized upstream success that merely exhausts the byte budget retains the exact `nextOffset`/result cursor described below.
+An unrecognized **successful** legacy shape is also fail-bounded, not passed through and not converted to a transport error. The boundary emits the legal `extension_return_unrecognized` variant above with exact empty/unknown base values, a fixed-schema `continuationRequest`, and `wrapperDiagnostics: { omitted: true, actualBytes }`. `RetrySameRequest` has the exact required fields `kind: "retry"` and `retrySameRequest: true`; its optional allowlist is a well-formed `session_id` truncated at a scalar boundary to 64 UTF-16 units with `sessionIdTruncated` (ill-formed IDs are omitted); safe-integer `offset`/`limit`; booleans `case_sensitive`, `verbose`, and `include_tool_results`; integer `context` clamped to 0–5; and `patternOmitted: true` when a pattern was present. It never echoes pattern text, result handles, unknown parameters, or arbitrary strings. Invalid/out-of-range scalars are omitted rather than stringified. Consequently even a multi-megabyte input pattern cannot grow this prebuilt fallback beyond its separately asserted 1-KiB ceiling. It does not invent `nextOffset` when the unknown wrapper did not expose one and never includes an excerpt of the unknown return. This compatibility partial tells the caller to retry the already-known request after the override is updated while maintaining the hard ceiling. Recognized upstream success that merely exhausts the byte budget uses the legal `transport_budget` variant and retains the exact `nextOffset`/result cursor described below.
 
 The authenticated route still canonicalizes, scrubs, and pre-fits its agent envelope to avoid needless IPC, but it does **not** predict wrapper overhead and is not the final budget authority. Direct REST remains outside this Pi boundary.
 
@@ -411,16 +506,19 @@ The boundary emits one canonical successful shape:
 
 `details` never contains `messages`; the renderer parses canonical text or uses only these scalars. Measuring this complete value counts JSON quotes/backslashes/control escapes added around the already-serialized envelope, all UTF-8 bytes for emoji, every wrapper key, and `details`. There is no separately fillable 50 KiB inner budget.
 
-The fitter is deterministic. Before fitting, variable semantic metadata uses explicit UTF-16 caps: role 32, tool name 128, author label 128, argument preview 512, thinking/error summary 512, and session ID/handle/ref 64. Provider correlation IDs are represented by bounded refs/digests rather than copied raw. Every string cap uses a Unicode-scalar-safe boundary and carries a truncation indicator where loss is diagnostically meaningful.
+The fitter is deterministic. Before fitting, variable semantic fields use explicit UTF-16 caps: role 32, tool name 128, author label 128, compact visible text 800, verbose visible text 4096, argument preview 512, thinking/error summary 512, and session ID/handle/ref 64. Provider correlation IDs are represented by bounded refs/digests rather than copied raw. Every string cap uses a Unicode-scalar-safe boundary and carries a truncation indicator where loss is diagnostically meaningful. Hitting one of these declared projection caps sets the row-level truncation flag; it does not by itself set envelope `partial` or claim transport exhaustion.
 
 1. Construct canonical messages using those field caps, accurate metadata, and requested ordering.
 2. Add one message at a time and build/serialize the canonical **actual Pi value**.
-3. If it does not fit, binary-search UTF-16-safe prefixes of result excerpts, visible text, argument previews, and thinking summaries in that order, rebuilding and serializing the complete value at each probe. Never estimate from source characters.
-4. If the selected message is still too large, remove optional previews but retain its index, role, canonical call/result name, status, size, omission state, handle, and author reference. Bounded canonical metadata makes this row fit.
-5. If another message would overflow, omit that and later messages and set `partial: true`, `truncatedBy: "transport_budget"`, and `nextOffset` to the first unreturned position in the requested/filtered sequence. `returned`, `offsetStart`, and `offsetEnd` describe only rows actually returned. A targeted result excerpt similarly reports the exact `nextCursor`.
-6. Serialize the actual value once more at the post-handler boundary and assert the invariant before returning it. A violated internal field-cap invariant uses a prebuilt, separately budget-pinned successful metadata-only compatibility partial with the original continuation; it never leaks the oversized intermediate result.
+3. For an explicit targeted result-slice request only, if the requested excerpt would overflow, binary-search a Unicode-safe excerpt prefix while rebuilding and serializing the complete value at each probe. Emit the `transport_budget` result-slice variant whose continuation repeats the handle and exact non-null `nextCursor`. Never estimate from source characters.
+4. For a transcript page row that is still too large, remove optional call/result previews and excerpts but retain its index, role, canonical call/result name, status, size, omission state, result handles, and author reference. The retained result handles permit separate targeted slices. Preview removal is normal bounded projection, not an unretrievable transport continuation; a pathological count of otherwise bounded records falls through to the summary fallback in step 6.
+5. If another message would overflow, omit that and later messages and emit the `transport_budget` page variant: set `nextOffset` to the first unreturned position in the requested/filtered sequence and require `continuationRequest: { kind: "page", offset: nextOffset }`. `returned`, `offsetStart`, and `offsetEnd` describe only rows actually returned. Page fitting never emits a result-slice continuation, and targeted result-slice fitting never emits a page continuation.
+6. A violated internal field/count-cap invariant uses separately budget-pinned canonical outputs, never an untyped “compatibility” shape. A page request returns one fixed-schema summary row for the current source message (`index`, `role`, `projectionOmitted: true`, and non-negative `toolCallCount`/`toolResultCount`), then sets `nextOffset`/page continuation to the following filtered-list position so retry cannot loop. A targeted slice with `cursor < size.chars` returns canonical result metadata plus at least the next complete Unicode scalar (two UTF-16 units for an astral scalar); if content remains, it is the result-slice partial with strictly greater `nextCursor`, otherwise it is the complete variant with `nextCursor: null`. A target at `cursor === size.chars` returns the complete empty `[cursor,cursor)` excerpt. These fixed one-scalar/empty values are separately proven to fit, never carry `wrapperDiagnostics`, never repeat a continuation cursor, and never leak any other part of the oversized intermediate result.
+7. Serialize the actual value once more at the post-handler boundary and assert the invariant before returning it.
 
-An upstream-successful read is never converted to an error merely because its content is large. A single oversized message/result returns a successful metadata-bearing partial row plus an exact continuation. This makes exhaustion explicit and recoverable rather than relying on transport truncation.
+An upstream-successful read is never converted to an error merely because its content is large. A single oversized visible message returns a complete bounded row with `textTruncated`; a page result returns bounded metadata/excerpt plus a handle; and only actual page omission or a targeted slice shortened below the requested range sets envelope `partial` with the corresponding schema-valid continuation. This makes exhaustion explicit and recoverable rather than relying on transport truncation.
+
+A table-driven schema suite validates the complete variant plus both `transport_budget` continuation forms and `extension_return_unrecognized` before the boundary serializes them. It also rejects: either `truncatedBy` value without `partial: true`; an unknown truncation reason; a page partial without matching `nextOffset`/page continuation; a slice partial without a matching returned excerpt cursor; a summary row outside a transport-page partial or without both counts; an unrecognized partial without `kind: "retry"`, `retrySameRequest: true`, or `wrapperDiagnostics`; wrapper diagnostics on any other variant; and the previously contradictory fallback shape under a transport-only schema. The suite also pins fallback progress: an interior targeted cursor advances by one Unicode scalar and is partial only when content remains; a final-scalar cursor returns a complete excerpt; and `cursor === size.chars` returns a complete empty excerpt. The real stale-wrapper tests validate the parsed `content[0].text` against this same schema, preventing unit-only type assertions from masking an illegal emitted partial.
 
 ## 7. Response-projection field audit
 
@@ -443,10 +541,10 @@ Modes are **C** compact, **CR** compact with result excerpts, **V** verbose with
 | Author identity (`kind`, `id`, `label`) | R | R | R | R | Live object 103 B/message; repeats across most rows | High for attribution | Medium aggregate | Canonicalize into envelope dictionary + short refs | Direct REST/UI author objects unchanged; renderer resolves refs |
 | Human/assistant visible text | S | S | bounded K | bounded K | Compact currently up to 800 chars/message; verbose unbounded | High | Medium/high | Summarize, then whole-response budget | Preserve visible text and regex behavior; indicate truncation |
 | Thinking summary text | — | — | S | S | Usually tens of chars; currently coupled to large signatures | Medium | Low after scrub | Summarize | Do not expose private replay metadata |
-| `thinkingSignature`, `textSignature`, encrypted/replay/provider metadata | — | — | — | — | **2.81 MB observed**; often hundreds–thousands of bytes/block | None for diagnostics | Critical | Omit with an explicit provider-field denylist/allowlist | Scope scrub to provider metadata, not arbitrary tool-output text named “signature” |
-| Tool call name + arguments | S | S | S | S | Normally 20–250 B/call after cap; Pi calls currently disappear | High | Low | Canonicalize Anthropic `tool_use` + Pi `toolCall` | Accept `arguments` and `input`; tool-only rows cannot be blank |
-| Full provider call IDs and alias IDs | R | R | R | R | Live composite ID 83 chars, repeated in call/result/aliases | Medium | Medium aggregate | Store once only if needed; otherwise short page-local ref/message+block index | Preserve correlation meaning, not raw repetition |
-| Result name, normalized status, measured size | M | M | M | M | Typically 80–180 B/result | High | Low | Canonicalize | One `name`, one `status`, one `size`; retain `ok/error/unknown` |
+| `thinkingSignature`, `textSignature`, encrypted/replay/provider metadata | — | — | — | — | **2.81 MB observed**; often hundreds–thousands of bytes/block | None for diagnostics | Critical | Omit with an explicit path-scoped provider-field denylist/allowlist | Scope scrub to provider message/block/wrapper metadata paths; preserve same keys in canonical tool-output text |
+| Tool call name + arguments | S | S | S | S | Normally 20–250 B/call after cap; Pi calls currently disappear | High | Low | Canonicalize Anthropic `tool_use` + Pi `toolCall` | Accept `arguments` then `input`; full canonical name/arguments remain searchable beyond the bounded preview; tool-only rows cannot be blank |
+| Full provider call IDs and alias IDs | R | R | R | R | Live composite ID 83 chars, repeated in call/result/aliases | Medium | Medium aggregate | Use server-side only; project short page-local ref + message/block locator, never raw ID | Preserve correlation meaning without returning provider identifiers |
+| Result name, normalized status, measured size | M | M | M | M | Typically 80–180 B/result | High | Low | Canonicalize | One `name`, one `status`, one `size`; exact direct/alias/correlation precedence; retain `ok/error/unknown` |
 | Nested result text metrics | M | M | M | M | Current live result says only `array, blocks:1`; actual body may be hundreds of KB | High | Low | Summarize accurately | Keep outer `type`/`blocks` while adding chars/lines/bytes |
 | Duplicate `toolName`/`name`, `isError`/`is_error`/`status`, body aliases | — | — | — | — | Tens–hundreds B/result plus ambiguity | None once normalized | Medium aggregate | Canonicalize/omit aliases | Direct REST legacy projection may retain aliases |
 | Repeated prose omission marker | — | — | — | — | 83 chars/result in live sample | None | Medium aggregate | Replace with boolean `omitted`/`excerpt.complete` | Renderer supplies human prose locally |
@@ -487,11 +585,11 @@ A direct `get_session` projection fixture pins every row and every named field i
 
 Owner files: `src/server/agent/transcript-reader.ts`, preferably with small extracted `transcript-agent-projection.ts` and `canonical-tool-result-body.ts` modules.
 
-- Normalize `tool_use` and `toolCall`.
-- Normalize message-level and block-level results.
-- Implement the one exact body-selection/traversal/stringification contract from §6.2.1.
-- Derive nested text metrics and regex input only from that canonical string.
-- Use explicit semantic allowlists and provider metadata scrubbers.
+- Normalize `tool_use` and `toolCall`; derive bounded previews and full server-side search from one canonical argument string.
+- Normalize message-level and block-level results with the exact name/correlation/status precedence in §6.2.1.
+- Implement the one exact body-selection/traversal/stringification contract from §6.2.2.
+- Derive nested text metrics and result-search input only from that canonical body; build the complete per-message search corpus from discrete visible/call/result segments.
+- Use explicit semantic allowlists and path-scoped provider metadata scrubbers.
 
 ### Slice B — Result index and lazy slices
 
@@ -548,25 +646,26 @@ New tests belong in `tests2/` and must be registered in `tests2/tests-map.json`.
 
 Create one mixed JSONL fixture containing:
 
-1. Anthropic `tool_use` with `input`.
-2. Pi `toolCall` with `arguments` and a tool-only assistant message.
+1. Anthropic `tool_use` with `input`, including a 700-unit argument with a unique sentinel after the 512-unit preview cap.
+2. Pi `toolCall` with `arguments`, a tool-only assistant message, and the corresponding beyond-preview sentinel; repeated call-name/argument hits occur at known source indexes for filtered paging.
 3. Anthropic block-level `tool_result`.
 4. Pi message-level `toolResult` whose `content` is a nested text-block array.
-5. Duplicate `name`/`toolName`, error aliases, and long composite IDs.
-6. Provider blocks containing `thinkingSignature`, `textSignature`, generic provider `signature`, `encrypted_content`, and replay metadata with unique secret sentinels.
-7. An opaque tool-result body containing the exact legitimate payload `{"signature":"customer-visible-signature","thinkingSignature":"domain-value"}`. This is the required counterexample: field names are scrubbed only from provider/message metadata, never recursively from tool output.
+5. Every conflicting metadata row from §6.2.1: different `name`/`toolName`/correlation-map names, contradictory valid and invalid `status`/`isError`/`is_error` aliases, block-versus-enclosing-message conflicts, conflicting call/result ID aliases, long composite IDs, one result with an unmatched correlation ID, and one with no correlation ID at all.
+6. Provider blocks containing `thinkingSignature`, `textSignature`, generic provider `signature`, `encrypted_content`, and replay metadata at distinct message/non-result-block/wrapper paths, each with a unique provider-only sentinel.
+7. A plain structured (non-opaque) tool-result body containing the exact legitimate payload `{"signature":"customer-visible-signature","thinkingSignature":"domain-value"}`. This is the required counterexample: field names are scrubbed only from provider/message metadata, never recursively from tool output.
 8. The exact slice string `A😀e\u0301\r\nZ`, quote/backslash/newline-heavy text, and one multi-byte, multi-line nested result larger than 1 MiB.
-9. Every exact canonical-body row and in-memory counterexample from §6.2.1: outer and nested `content`/`output`/`result` priority (including own `content: null`), inherited-key rejection, typed versus untyped text, adjacent leaves, split CR/LF, primitive leaves, recursive and integer-like plain-object key order, empty/null leaves, image/attachment/binary summaries with raw sentinels, unpaired surrogates, and cyclic/`BigInt` `INVALID_RESULT_BODY`.
+9. Every exact canonical-body row and in-memory counterexample from §6.2.2: outer and nested `content`/`output`/`result` priority (including own `content: null`), inherited-key rejection, typed versus untyped text, adjacent leaves, split CR/LF, primitive leaves, recursive and integer-like plain-object key order, empty/null leaves, image/attachment/binary summaries with raw sentinels, unpaired surrogates, and cyclic/`BigInt` `INVALID_RESULT_BODY`.
 10. Two records at the same session/message/block identity whose canonical bodies differ by one code unit, for stale-handle rejection.
+11. One valid complete envelope, both valid `transport_budget` continuation variants, one valid `extension_return_unrecognized` variant, and each invalid cross-variant/missing-required-field case listed in §6.4.2.
 
 Assertions across C/CR/V/VR:
 
-- Pi call rows contain name + bounded arguments and are never blank.
-- Canonical extraction produces the exact §6.2.1 strings before projection; chars/lines/bytes, regex matching, digest input, and every reassembled slice all use those same strings. In particular adjacent leaves have no inserted separator and split CR/LF counts as one CRLF line break.
+- Pi and Anthropic call rows contain canonical names + bounded arguments and are never blank. Name regexes and provider-specific argument regexes beyond the preview select the correct ordinary projected rows without returning the hidden suffix. With repeated hits, `context`, negative offsets, `matchCount`, `nextOffset`, and filtered continuation produce the exact no-overlap indexes from §6.1.1 through the actual agent extension.
+- Canonical extraction produces the exact §6.2.2 strings before projection; chars/lines/bytes, regex matching, digest input, and every reassembled slice all use those same strings. In particular adjacent leaves have no inserted separator and split CR/LF counts as one CRLF line break.
 - Nested result chars/lines/bytes match the fixture exactly.
-- No provider signature/blob key or provider sentinel appears in any serialized agent projection. No image/attachment/binary payload sentinel appears in C/CR/V/VR; only the exact opaque summary is present where applicable, and changing one payload byte stales the prior handle.
-- In CR and VR, the bounded tool-result excerpt retains the exact `customer-visible-signature` and `domain-value` payload. In C and V the body is absent only because it is omitted, while sizing and server-side regex matching still inspect the unchanged payload. A direct unit assertion on canonical result extraction proves the scrubber did not delete or rename either tool-output field.
-- Only canonical result fields appear; duplicate aliases and omission prose do not.
+- Path-aware assertions reject provider metadata keys and provider-only sentinels at message, non-result block, and wrapper/details metadata paths in C/CR/V/VR; they do not perform a blanket serialized-substring ban. No image/attachment/binary payload sentinel appears in C/CR/V/VR; only the exact opaque summary is present where applicable, and changing one payload byte stales the prior handle.
+- In CR and VR, the bounded tool-result excerpt retains the exact `customer-visible-signature` and `domain-value` payload and, when parsed, contains the legitimate `signature` and `thinkingSignature` keys. In C and V the body is absent only because it is omitted, while sizing and server-side regex matching still inspect the unchanged payload. A direct unit assertion on canonical result extraction proves the path-scoped scrubber did not delete or rename either tool-output field.
+- Every conflicting/missing result fixture yields the exact canonical `name`/`status` in §6.2.1. Correlated rows share `tN`; unmatched-ID and absent-ID rows receive `rN` refs/source locators. Only canonical result fields appear; losing names, raw correlation IDs (including in dictionaries), status/error aliases, and omission prose do not.
 - The normative Unicode ranges, validation codes, continuation, and exact reassembly from §6.3 hold. Raw unpaired-high-surrogate leaves `\uD800` and `\uD801` both reject with `INVALID_RESULT_BODY`, while well-formed astral scalars remain distinct through UTF-8 measurement/digest/slices.
 - The digest known vector produces full SHA-256 `354040cc2ee2720318c043f2b91f0e150cb1dbd58f982a47454820e0cb9b6554` and exact handle `rs1:m6h:b0:NUBAzC7icgMYwEPyuR8OFQyx29U`; all handles are at most 64 characters. Reusing the old handle after a one-code-unit body rewrite returns `STALE_RESULT_HANDLE`, while missing message/block identity returns `RESULT_NOT_FOUND`.
 - Result excerpts retain name/status/size/handle and continue with the returned cursor.
@@ -578,7 +677,7 @@ Core budget tests register the current real `read_session` extension behind the 
 Buffer.byteLength(JSON.stringify(actualPiValue), "utf8") <= 50 * 1024
 ```
 
-They do **not** assert only the projected server `success`, route envelope, stale handler's intermediate return, or inner text. Run this separately for: (a) repeated quotes, backslashes, and control/newline escapes; (b) repeated emoji/non-ASCII text; (c) a single oversized visible message; and (d) a single oversized nested Pi result in each result-including mode. Every recognized-envelope case is a successful `partial: true` response with accurate metadata and `nextOffset`/result cursor as applicable; reparsing `content[0].text` produces the same partial envelope the renderer sees. A deliberately unknown oversized return shape plus a multi-megabyte input `pattern` exercises the fixed-schema `extension_return_unrecognized` success partial, asserts it is under 1 KiB, and proves no pattern/sentinel substring is echoed. These unit tests complement, but do not replace, the real stale-winner lifecycle proof below.
+They do **not** assert only the projected server `success`, route envelope, stale handler's intermediate return, or inner text. Run this separately for: (a) repeated quotes, backslashes, and control/newline escapes; (b) repeated emoji/non-ASCII text; (c) a single oversized visible message; and (d) a single oversized nested Pi result in each result-including mode. The single visible-message case is a complete bounded row with `textTruncated`; the page-result cases retain accurate metadata/handle and only their normal bounded excerpts; separate multi-row page and oversized targeted-slice cases force the two legal `transport_budget` partial variants and exact continuations. Reparsing `content[0].text` produces the same complete/partial envelope the renderer sees and validates against the `SuccessfulEnvelope` discriminated union. A deliberately unknown oversized return shape plus a multi-megabyte input `pattern` exercises the legal `extension_return_unrecognized` success partial, requires its exact retry continuation and wrapper diagnostics, asserts it is under 1 KiB, and proves no pattern/sentinel substring is echoed. Negative schema fixtures remove each required variant field and mix diagnostics/continuation kinds to prove validation fails. These unit tests complement, but do not replace, the real stale-winner lifecycle proof below.
 
 ### 9.2 Heavy guard matrix and real spawned lifecycle path
 
@@ -605,10 +704,10 @@ The decisive stale-override tests must not stop at constructing a `ToolManager`,
 1. **Direct/server winner:** install a stale server-scope `agent` override that lacks the local heavy guard and returns the historic duplicated `details.messages` shape plus configurable oversized `details.extra`. Create/start a direct session through `SessionManager`; let its real `RpcBridge` spawn the lightweight test Pi child/extension host with the production argv/env. Assert provider provenance points at that stale server directory, while the immutable invocation guard and post-result boundary precede it in the child. Repeat after the normal stop/restore/respawn path.
 2. **Project/sandbox winner:** install a distinct stale project override that reformats the envelope under a legacy text/details wrapper and adds a different oversized extra field. Create a project-scoped sandbox session through the public lifecycle. The real sandbox-aware `SessionManager`/`RpcBridge` must choose that project override, translate and load both immutable boundary paths in the child, then repeat after sandbox respawn/restore. No test may manually load a host extension path.
 3. In both winners, first send the rejected heavy matrix and observe `CONTEXT_HEAVY_LIMIT_REQUIRED`, zero stale-handler fetch sentinels, and zero transcript-route reads. Then send valid heavy calls with limits `1` and `10` plus an ordinary compact call; each makes exactly one stale-handler gateway fetch and proves the resolved tool remains usable.
-4. In **each** server and project/sandbox winner, parameterize four successful endpoint payloads: quote/backslash/control/newline-heavy text, repeated emoji/non-ASCII text, a single oversized visible message, and a single oversized nested Pi result (CR and VR). Configure the stale override so its intermediate returned object exceeds 50 KiB and visibly duplicates/reformats the body. Invoke `read_session` over real RPC. Capture the actual `tool_execution_end.result`, wait for Pi's persisted `toolResult` JSONL row, and extract the stored result value. For every case assert both
+4. In **each** server and project/sandbox winner, parameterize successful endpoint payloads for quote/backslash/control/newline-heavy text, repeated emoji/non-ASCII text, a single oversized visible message, a single oversized nested Pi result (CR and VR), a multi-row page forced over budget, and an oversized targeted slice forced below its requested range. Configure the stale override so its intermediate returned object exceeds 50 KiB and visibly duplicates/reformats the body. Invoke `read_session` over real RPC. Capture the actual `tool_execution_end.result`, wait for Pi's persisted `toolResult` JSONL row, and extract the stored result value. For every case assert both
    `Buffer.byteLength(JSON.stringify(event.result), "utf8") <= 50 * 1024` and
-   `Buffer.byteLength(JSON.stringify(persistedResultValue), "utf8") <= 50 * 1024`, and assert the two canonical values are equal. Also assert `partial: true`, accurate canonical name/status/size, no stale extra/duplicate fields, and exact `nextOffset`/`nextCursor`. These assertions run before and after the lifecycle respawn.
-5. In each winner, configure the resolved stale execute path to return an unknown oversized wrapper for a valid call carrying a multi-megabyte `pattern`. Assert the actual emitted and persisted values use `extension_return_unrecognized`, are each under 1 KiB (therefore also under 50 KiB), contain `patternOmitted: true`, and contain neither the pattern nor unknown-wrapper sentinels.
+   `Buffer.byteLength(JSON.stringify(persistedResultValue), "utf8") <= 50 * 1024`, and assert the two canonical values are equal and validate against `SuccessfulEnvelope`. Also assert accurate canonical name/status/size and no stale extra/duplicate fields. The single-message/result projections may be complete under declared caps; the forced page and targeted-slice cases must be `partial: true` with the exact matching continuation. These assertions run before and after the lifecycle respawn.
+5. In each winner, configure the resolved stale execute path to return an unknown oversized wrapper for a valid call carrying a multi-megabyte `pattern`. Assert the actual emitted and persisted values validate as `extension_return_unrecognized`, are each under 1 KiB (therefore also under 50 KiB), contain the exact retry continuation, `wrapperDiagnostics: { omitted: true, actualBytes }`, and `patternOmitted: true`, and contain neither the pattern nor unknown-wrapper sentinels.
 
 Only endpoint payloads and fetch/read counters are test doubles. Activation, winning-provider selection, session creation, spawn/respawn, RPC dispatch, extension loading/translation, stale handler execution, post-handler reprojection, Pi emission, and JSONL persistence are production classes/paths. The deliberately oversized stale intermediate confirms the ceiling is enforced on the actual value after arbitrary winner formatting, not on a route simulation. Direct builtin-import and pure builder tests remain useful but are not acceptance evidence.
 
@@ -619,7 +718,9 @@ Extend `tests2/integration/transcript-api.test.ts` with two callers over the sam
 - ordinary authenticated REST, no agent caller header: legacy include defaults and UI-compatible verbose content remain unchanged;
 - authenticated agent-bound request: canonical scrubbed/budgeted projection and the complete heavy-input table from §9.2, with every rejected case occurring before the injected `readContent`/`sessionFileRead` spy runs.
 
-The valid agent-bound cases `limit=1` and `limit=10` each read once. Retain existing tests for negative offsets, pattern/context, cross-project access, and structured error mapping.
+The agent-bound caller also runs the §6.1.1 matrix against both Pi `toolCall.arguments` and Anthropic `tool_use.input`: tool-name and beyond-preview argument patterns, context expansion, `offset: -2`, and the returned filtered continuation. It asserts exact source indexes/match counts, no overlapping continuation windows, no matched hidden suffix in the body, and a <=50 KiB actual extension return. Pattern evaluation may inspect full call arguments and omitted result bodies server-side; projection never returns either implicitly.
+
+The valid agent-bound cases `limit=1` and `limit=10` each read once. Retain existing direct-REST tests for negative offsets, pattern/context, cross-project access, and structured error mapping.
 
 ### 9.4 Bobbit metadata
 
@@ -676,14 +777,15 @@ Acceptance bounds are: **exactly 6 metadata calls, at most 7 `read_session` call
 | Unpaired UTF-16 surrogates collide under UTF-8 replacement or break cursors | Reject ill-formed direct string/text/binary leaves as `INVALID_RESULT_BODY`; pin distinct unpaired-surrogate rejects and valid astral continuation |
 | Binary/image payloads re-enter excerpts through plain-object serialization | Recognize the exact opaque type/payload keys before carriers, expose only stable metadata/digest, and assert unique raw sentinels are absent in C/CR/V/VR |
 | Slices repeat/skip Unicode, combining, or newline units | Use normative UTF-16 `[start,end)` cursors and exact `nextCursor=end`; pin the surrogate error plus combining/CRLF reassembly fixture |
-| Regex search leaks the matching omitted body | Match server-side against the full canonical body, project only canonical metadata unless a slice is explicitly requested |
-| Provider scrub removes legitimate tool output fields named `signature` | Apply field policy only to provider/message metadata; explicitly retain `{"signature":"customer-visible-signature"}` in result-including projections and canonical body extraction |
+| Regex search misses full calls or leaks hidden arguments/results | Match discrete server-side segments for visible text, canonical tool name, full canonical arguments, and full canonical result body; project only the normal bounded row unless a result slice is explicitly requested; pin context, negative-offset, and filtered continuation |
+| Provider scrub removes legitimate tool output fields named `signature` | Apply field policy only to provider/message/wrapper metadata paths; use path-aware assertions and explicitly retain `{"signature":"customer-visible-signature"}` in result excerpts and canonical body extraction |
 | Result handles point at different content after rewrite/compaction or collide | Bind session/message/block and canonical-body bytes with domain-separated SHA-256, retain 160 bits in a ≤64-character handle, and pin known-vector plus stale-body rejection |
 | Author dictionaries break attribution or renderer labels | Keep `kind/id/label` once in the envelope; direct REST unchanged; DOM/browser tests resolve refs |
 | Stale overrides bypass builtin-only input or output fixes again | Put the heavy rule in the immutable pre-call guard and the byte ceiling in the immutable post-handler registration wrapper; test real server and project/sandbox winners before/after respawn |
 | Server route accidentally changes UI/direct REST | Agent policy derives from authenticated caller identity, never default query behavior; paired integration assertions |
 | Wrapper `details` silently reintroduce duplication | Post-handler reprojection discards stale wrapper extras/duplicates and canonical details contain scalars only; assert actual emitted and persisted Pi values, not simulated profiles |
-| Whole-transcript canonicalization increases CPU/memory | Stream accepted leaves into one indexed canonical-body representation/digest per result, stable-serialize only plain structured payload objects, and reuse it for metrics/regex/slices |
+| A successful fallback violates its own envelope type or cannot be continued | Use the discriminated `truncatedBy` union; require variant-specific continuation and wrapper diagnostics; validate complete, transport-page, transport-slice, and unrecognized outputs with one runtime schema |
+| Whole-transcript canonicalization increases CPU/memory | Stream accepted leaves into indexed canonical call/result representations, stable-serialize only structured JSON payloads, and reuse them for previews, metrics, regex, digests, and slices |
 | New optional slice params complicate structured errors | Add explicit invalid/stale/not-found codes while retaining existing error envelope shape |
 
 ## 11. Progressive diagnostic workflow to document
