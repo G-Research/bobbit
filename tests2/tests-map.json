@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/session-manager-spawn-tuple-boundary-repro.test.ts",
+      "reason": "Focused failing-first actual-SessionManager regressions proving a normal no-role/default spawn resolves an authenticated-first/shared-rank Bobbit catalog model before constructing Pi, and an explicit skip-auto reviewer spawn read-backs then durably commits provider/model/effective-thinking in one atomic update.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/integration/team-spawn-multi-repo-real-git.test.ts",
       "reason": "Focused real-Git regression for a non-Git two-component project: drives direct TeamManager.spawnRole and one REST team/spawn request from unpublished divergent local goal-component HEADs; verifies exact-start branch-collision rejection before worktree attachment/upstream or remote mutation, rollback of an earlier component while preserving the divergent colliding branch, actual createSession agent-spawn then post-spawn setup failure without Git probes against either non-Git container, TeamManager-owned component/container cleanup, common branch-container layout, injected partial rollback, and cleanup coordinates in createSession's first durable write.",
       "execution": {
