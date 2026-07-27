@@ -69,6 +69,7 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 	let body = extractMethodBody(src, "private async tryAutoSelectModel(session: SessionInfo)");
 	body = body
 		.replace(/\s+as\s+string\s*\|\s*undefined/g, "")
+		.replace(/async \(modelString: string\): Promise<void> =>/g, "async (modelString) =>")
 		.replace(/SessionManager\.AIGW_CACHE_TTL_MS/g, "60_000");
 
 	// The extracted production method now normalizes legacy provider-prefixed AIGW
@@ -98,6 +99,14 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 	const discoverAigwModels = async () => ([{ id: "us.anthropic.claude-opus-4-5" }]);
 	const modelRecencyRank = () => 1;
 	const inferMeta = () => ({ reasoning: false });
+	const isKnownThinkingLevel = (value: unknown) => (
+		typeof value === "string" && ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(value)
+			? value
+			: undefined
+	);
+	const clampThinkingLevelForModel = (value: string, _provider: string, modelId: string) => (
+		modelId.includes("opus-5") || !["xhigh", "max"].includes(value) ? value : "high"
+	);
 	const sanitizeModelErrorText = (err: unknown) => err instanceof Error ? err.message : String(err);
 	const sanitizeModelErrorForLog = sanitizeModelErrorText;
 	const broadcast = (clients: Set<any>, message: any) => {
@@ -120,6 +129,8 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 		"discoverAigwModels",
 		"modelRecencyRank",
 		"inferMeta",
+		"isKnownThinkingLevel",
+		"clampThinkingLevelForModel",
 		"sanitizeModelErrorText",
 		"sanitizeModelErrorForLog",
 		"broadcast",
@@ -133,6 +144,8 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 		discoverAigwModels,
 		modelRecencyRank,
 		inferMeta,
+		isKnownThinkingLevel,
+		clampThinkingLevelForModel,
 		sanitizeModelErrorText,
 		sanitizeModelErrorForLog,
 		broadcast,
@@ -145,28 +158,60 @@ const tryAutoSelectModel = loadTryAutoSelectModel();
 async function exerciseAutoSelect(options: {
 	prefs: Prefs;
 	roleModel?: string;
+	roleThinking?: string;
 	failModels?: string[];
+	failThinkingLevels?: string[];
 	spawnPinnedModel?: string;
-	initialBound?: { provider: string; id: string };
+	spawnPinnedThinkingLevel?: string;
+	initialBound?: { provider: string; id: string; thinkingLevel?: string };
+	initialDurable?: { provider: string; id: string; thinkingLevel: string };
 }): Promise<{
 	error: unknown;
 	setModelCalls: ModelPair[];
+	setThinkingCalls: string[];
 	persisted: Array<Record<string, unknown>>;
+	durable: { provider: string; id: string; thinkingLevel: string };
 	modelFiles: string[];
 	broadcastModels: Array<{ provider: string; id: string }>;
+	broadcastTuples: Array<{ provider: string; id: string; thinkingLevel: string | undefined }>;
 }> {
 	const setModelCalls: ModelPair[] = [];
+	const setThinkingCalls: string[] = [];
 	const persisted: Array<Record<string, unknown>> = [];
 	const modelFiles: string[] = [];
-	let bound: { provider: string; id: string } | undefined = options.initialBound;
+	const initialDurable = options.initialDurable ?? { provider: "anthropic", id: "durable-model", thinkingLevel: "high" };
+	let durable = { ...initialDurable };
+	let bound = {
+		provider: options.initialBound?.provider ?? initialDurable.provider,
+		id: options.initialBound?.id ?? initialDurable.id,
+		thinkingLevel: options.initialBound?.thinkingLevel ?? initialDurable.thinkingLevel,
+	};
 	const failModels = new Set(options.failModels ?? []);
+	const failThinkingLevels = new Set(options.failThinkingLevels ?? []);
 	const client = { messages: [] as any[] };
+	const store = {
+		get: () => ({
+			modelProvider: durable.provider,
+			modelId: durable.id,
+			effectiveThinkingLevel: durable.thinkingLevel,
+		}),
+		update: (_sessionId: string, update: Record<string, unknown>) => {
+			persisted.push(update);
+			durable = {
+				provider: typeof update.modelProvider === "string" ? update.modelProvider : durable.provider,
+				id: typeof update.modelId === "string" ? update.modelId : durable.id,
+				thinkingLevel: typeof update.effectiveThinkingLevel === "string" ? update.effectiveThinkingLevel : durable.thinkingLevel,
+			};
+		},
+	};
 	const manager = {
 		preferencesStore: { get: (key: string) => options.prefs[key] },
 		resolveRoleModel: () => options.roleModel,
-		resolveStoreForSession: () => ({
-			update: (_sessionId: string, update: Record<string, unknown>) => persisted.push(update),
-		}),
+		resolveRoleThinkingLevel: () => options.roleThinking,
+		resolveStoreForSession: () => store,
+		persistSessionModel: (sessionId: string, provider: string, modelId: string, effectiveThinkingLevel: string) => {
+			store.update(sessionId, { modelProvider: provider, modelId, effectiveThinkingLevel });
+		},
 		_writeModelNameFile: (_sessionId: string, model: string) => modelFiles.push(model),
 		_aigwModelCache: undefined,
 	};
@@ -174,6 +219,7 @@ async function exerciseAutoSelect(options: {
 		id: "session-under-test",
 		role: "coder",
 		spawnPinnedModel: options.spawnPinnedModel,
+		spawnPinnedThinkingLevel: options.spawnPinnedThinkingLevel,
 		clients: new Set([client]),
 		rpcClient: {
 			async setModel(provider: string, modelId: string) {
@@ -182,10 +228,15 @@ async function exerciseAutoSelect(options: {
 				if (failModels.has(key)) {
 					throw new Error(`controlled model fallback policy fixture: unavailable ${key}`);
 				}
-				bound = { provider, id: modelId };
+				bound = { provider, id: modelId, thinkingLevel: bound.thinkingLevel };
+			},
+			async setThinkingLevel(level: string) {
+				setThinkingCalls.push(level);
+				if (failThinkingLevels.has(level)) throw new Error(`controlled model fallback policy fixture: thinking unavailable ${level}`);
+				bound.thinkingLevel = level;
 			},
 			async getState() {
-				return { model: bound ?? { provider: "unset", id: "unset" } };
+				return { model: { provider: bound.provider, id: bound.id }, thinkingLevel: bound.thinkingLevel };
 			},
 		},
 	};
@@ -200,12 +251,21 @@ async function exerciseAutoSelect(options: {
 	return {
 		error,
 		setModelCalls,
+		setThinkingCalls,
 		persisted,
+		durable,
 		modelFiles,
 		broadcastModels: client.messages
 			.map((msg) => msg?.data?.model)
 			.filter(Boolean)
 			.map((model) => ({ provider: model.provider, id: model.id })),
+		broadcastTuples: client.messages
+			.filter((msg) => msg?.data?.model)
+			.map((msg) => ({
+				provider: msg.data.model.provider,
+				id: msg.data.model.id,
+				thinkingLevel: msg.data.thinkingLevel,
+			})),
 	};
 }
 
@@ -329,6 +389,48 @@ function tempPrefs(): { prefs: PreferencesStore; cleanup: () => void } {
 }
 
 describe("controlled model fallback policy — session auto-selection", () => {
+	it("model success followed by thinking rejection leaves the previous durable tuple intact", async () => {
+		const previous = { provider: "anthropic", id: "claude-sonnet-4-20250514", thinkingLevel: "high" };
+		const result = await exerciseAutoSelect({
+			prefs: { "default.sessionThinkingLevel": "xhigh" },
+			roleModel: "anthropic/claude-opus-5",
+			roleThinking: "xhigh",
+			initialDurable: previous,
+			failThinkingLevels: ["xhigh"],
+		});
+
+		assert.match(String((result.error as Error | undefined)?.message), /thinking unavailable|rejected/i);
+		assert.deepEqual(result.setModelCalls, [["anthropic", "claude-opus-5"]]);
+		assert.deepEqual(result.setThinkingCalls, ["xhigh"]);
+		assert.deepEqual(result.persisted, [], "a rejected effective thinking level must not persist a model-only tuple");
+		assert.deepEqual(result.durable, previous, "the previous verified tuple must remain durable");
+		assert.deepEqual(result.modelFiles, [], "a partial model mutation must not update the model-name mirror");
+		assert.deepEqual(result.broadcastTuples, [], "a partial model mutation must not broadcast success");
+	});
+
+	it("an exact controlled selection commits one complete model/thinking tuple", async () => {
+		const result = await exerciseAutoSelect({
+			prefs: { "default.sessionThinkingLevel": "xhigh" },
+			roleModel: "anthropic/claude-opus-5",
+			roleThinking: "xhigh",
+		});
+
+		assert.equal(result.error, undefined);
+		assert.deepEqual(result.setModelCalls, [["anthropic", "claude-opus-5"]]);
+		assert.deepEqual(result.setThinkingCalls, ["xhigh"]);
+		assert.deepEqual(result.persisted, [{
+			modelProvider: "anthropic",
+			modelId: "claude-opus-5",
+			effectiveThinkingLevel: "xhigh",
+		}]);
+		assert.deepEqual(result.modelFiles, ["anthropic/claude-opus-5"]);
+		assert.deepEqual(result.broadcastTuples, [{
+			provider: "anthropic",
+			id: "claude-opus-5",
+			thinkingLevel: "xhigh",
+		}]);
+	});
+
 	it("off/absent setting: failing explicit default.sessionModel rejects and never falls through to AIGW", async () => {
 		const result = await exerciseAutoSelect({
 			prefs: {
@@ -371,8 +473,8 @@ describe("controlled model fallback policy — session auto-selection", () => {
 		);
 		assert.deepEqual(
 			result.persisted,
-			[{ modelProvider: "openai", modelId: "fallback-session" }],
-			"controlled model fallback policy: persisted model must be the actual default.sessionModel fallback",
+			[{ modelProvider: "openai", modelId: "fallback-session", effectiveThinkingLevel: "high" }],
+			"controlled model fallback policy: persisted tuple must be the actual default.sessionModel fallback with verified thinking",
 		);
 		assert.deepEqual(result.broadcastModels, [{ provider: "openai", id: "fallback-session" }]);
 		assert.deepEqual(result.modelFiles, ["openai/fallback-session"]);
@@ -385,7 +487,7 @@ describe("controlled model fallback policy — session auto-selection", () => {
 
 		assert.equal(result.error, undefined);
 		assert.deepEqual(result.setModelCalls, [["aigw", "legacy-model"]]);
-		assert.deepEqual(result.persisted, [{ modelProvider: "aigw", modelId: "legacy-model" }]);
+		assert.deepEqual(result.persisted, [{ modelProvider: "aigw", modelId: "legacy-model", effectiveThinkingLevel: "high" }]);
 		assert.deepEqual(result.modelFiles, ["aigw/legacy-model"]);
 		assert.deepEqual(result.broadcastModels, [{ provider: "aigw", id: "legacy-model" }]);
 	});
@@ -471,7 +573,7 @@ describe("controlled model fallback policy — session auto-selection", () => {
 
 		assert.equal(result.error, undefined);
 		assert.deepEqual(result.setModelCalls, [["openai", "fallback-session"]]);
-		assert.deepEqual(result.persisted, [{ modelProvider: "openai", modelId: "fallback-session" }]);
+		assert.deepEqual(result.persisted, [{ modelProvider: "openai", modelId: "fallback-session", effectiveThinkingLevel: "high" }]);
 		assert.deepEqual(result.broadcastModels, [{ provider: "openai", id: "fallback-session" }]);
 	});
 });
@@ -806,7 +908,14 @@ describe("controlled model fallback policy — review model overrides", () => {
 		assert.deepEqual(
 			persisted,
 			[{ sessionId: "review-session", provider: "openai", modelId: "fallback-session" }],
-			"controlled model fallback policy: review fallback must persist/display the actual default.sessionModel fallback",
+			"the legacy helper still reports its model-only persistence request to this isolated seam",
+		);
+		const managerSrc = readFileSync(SESSION_MANAGER_SOURCE, "utf-8");
+		const persisterBody = extractMethodBody(managerSrc, "persistSessionModel(sessionId: string");
+		assert.match(
+			persisterBody,
+			/if \(effectiveThinkingLevel === undefined\) return/,
+			"SessionManager must ignore legacy model-only persistence requests until thinking is verified",
 		);
 	});
 });

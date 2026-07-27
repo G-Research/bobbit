@@ -276,6 +276,17 @@ describe("TeamManager seam decisions", () => {
 		assert.equal(sessions.getSession(thinkingOverride.sessionId)!.createOpts.initialThinkingLevel, "medium");
 	});
 
+	it("rejects an exact deferred-provider team lead before creating any session", async () => {
+		const { goals } = addGoal({ sandboxed: false, repoPath: undefined });
+		const { manager, sessions } = makeTeam(goals);
+		const leadRole = (manager as any).config.roleStore.get("team-lead");
+		leadRole.model = "kimi-coding/k2p5";
+
+		await assert.rejects(() => manager.startTeam("goal-1"), /not session-selectable/i);
+		assert.equal(sessions.createSession.mock.calls.length, 0, "team-lead rejection must happen before createSession");
+		assert.equal(manager.getTeamState("goal-1"), undefined);
+	});
+
 	it("preserves Kimi-named AIGW model IDs but rejects the exact deferred provider", async () => {
 		const { goals } = addGoal({ sandboxed: false, repoPath: undefined });
 		const { manager, sessions } = makeTeam(goals);

@@ -1,5 +1,5 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch } from "./_e2e/e2e-setup.js";
+import { apiFetch, nonGitCwd } from "./_e2e/e2e-setup.js";
 
 const BLOCKED_ROLE = `pi082-kimi-blocked-${Date.now()}`;
 const SUPPORTED_ROLE = `pi082-kimi-id-supported-${Date.now()}`;
@@ -39,7 +39,21 @@ test.describe("server deferred-provider model boundaries", () => {
 		}
 	});
 
-	test("role create/update rejects exact kimi-coding but preserves Kimi-named IDs under supported providers", async () => {
+	test("role/createSession rejects exact kimi-coding but preserves Kimi-named IDs under supported providers", async ({ gateway }) => {
+		const sessionsBefore = new Set(gateway.sessionManager.listSessions().map((session: any) => session.id));
+		await expect(gateway.sessionManager.createSession(
+			nonGitCwd(),
+			undefined,
+			undefined,
+			undefined,
+			{
+				projectId: gateway.defaultProjectId,
+				initialModel: "kimi-coding/k2p5",
+				initialThinkingLevel: "high",
+			},
+		)).rejects.toThrow(/not currently available|not session-selectable|unavailable/i);
+		expect(new Set(gateway.sessionManager.listSessions().map((session: any) => session.id))).toEqual(sessionsBefore);
+
 		const blocked = await roleRequest("/api/roles", "POST", {
 			name: BLOCKED_ROLE,
 			label: "Deferred provider role",
@@ -83,5 +97,24 @@ test.describe("server deferred-provider model boundaries", () => {
 		const retained = await apiFetch(`/api/roles/${encodeURIComponent(SUPPORTED_ROLE)}`);
 		expect(retained.status).toBe(200);
 		expect((await retained.json()).model).toBe(supportedModel);
+
+		let supportedSession: any;
+		try {
+			supportedSession = await gateway.sessionManager.createSession(
+				nonGitCwd(),
+				undefined,
+				undefined,
+				undefined,
+				{
+					projectId: gateway.defaultProjectId,
+					initialModel: supportedModel,
+					initialThinkingLevel: "high",
+				},
+			);
+			expect(supportedSession.spawnPinnedModel).toBe(supportedModel);
+			expect(supportedSession.spawnPinnedThinkingLevel).toBe("high");
+		} finally {
+			if (supportedSession?.id) await gateway.sessionManager.terminateSession(supportedSession.id).catch(() => {});
+		}
 	});
 });
