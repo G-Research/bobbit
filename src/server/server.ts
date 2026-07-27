@@ -492,7 +492,14 @@ function viewerSubscribedToGoal(ws: any, goalId: string): boolean {
 	return goalIds instanceof Set && goalIds.has(goalId);
 }
 
-import { runBatchGitStatusNative } from "./skills/git-status-native.js";
+import { probeBatchGitStatusNative } from "./skills/git-status-native.js";
+import {
+	collectGitStatusEnvelope,
+	type GitStatusProbe,
+	type GitStatusResult,
+	type GitStatusTarget,
+} from "./skills/git-status-envelope.js";
+export type { GitStatusResult } from "./skills/git-status-envelope.js";
 import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
@@ -1323,28 +1330,6 @@ async function publishCurrentBranchToOrigin(
 	return output;
 }
 
-/** Git status result shape (+ optional partial/untrackedIncluded flags). */
-export interface GitStatusResult {
-	branch: string; primaryBranch: string; isOnPrimary: boolean;
-	/**
-	 * Actual ref used for `aheadOfPrimary`/`behindPrimary` calculations.
-	 * Equals `origin/<primaryBranch>` when the remote ref exists, else the
-	 * bare local branch name `<primaryBranch>`. Surfaced separately from
-	 * `primaryBranch` so the UI can render the truthful target (a configured
-	 * `base_ref` of `MyUpstream` is a LOCAL branch — "Merged into
-	 * origin/MyUpstream" is misleading when origin has no such ref).
-	 */
-	primaryRef: string;
-	status: { file: string; status: string }[];
-	hasUpstream: boolean; ahead: number; behind: number;
-	aheadOfPrimary: number; behindPrimary: number; mergedIntoPrimary: boolean;
-	insertionsVsPrimary: number; deletionsVsPrimary: number;
-	clean: boolean; summary: string; unpushed: boolean;
-	/** true if porcelain (Phase B) was skipped or timed-out */
-	partial?: boolean;
-	/** true only when ?untracked=1 was passed (-uall); false on default -uno */
-	untrackedIncluded?: boolean;
-}
 
 // ── Git status cache + single-flight ──
 // Short TTL (2000ms) to coalesce the storm of event-driven refreshes (reconnect,
@@ -1357,9 +1342,9 @@ export interface GitStatusResult {
 // responses never cross-contaminate each other.
 const GIT_STATUS_TTL_MS = 2000;
 interface GitStatusCacheEntry {
-	promise: Promise<GitStatusResult | null>;
+	promise: Promise<GitStatusProbe>;
 	resolvedAt: number; // 0 while in flight
-	result: GitStatusResult | null | undefined; // undefined while in flight
+	result: GitStatusProbe | undefined; // undefined while in flight
 }
 const gitStatusCache = new Map<string, GitStatusCacheEntry>();
 
@@ -1373,7 +1358,8 @@ export function __resetGitStatusInvocationCount(): void { _runBatchGitStatusCoun
  *  exercise the TTL/single-flight/coalesce logic deterministically without
  *  spawning Git Bash under CI load (which fails unpredictably). Production
  *  code never sets this. */
-let _gitStatusFake: ((cwd: string, containerId?: string, opts?: { untracked?: boolean; configuredBaseRef?: string }) => Promise<GitStatusResult | null>) | undefined;
+type GitStatusFakeValue = GitStatusResult | GitStatusProbe | null;
+let _gitStatusFake: ((cwd: string, containerId?: string, opts?: { untracked?: boolean; configuredBaseRef?: string }) => Promise<GitStatusFakeValue>) | undefined;
 export function __setGitStatusFake(fn: typeof _gitStatusFake): void { _gitStatusFake = fn; }
 export function __clearGitStatusFake(): void { _gitStatusFake = undefined; }
 
@@ -1421,7 +1407,7 @@ async function batchGitStatus(
 	cwd: string,
 	containerId?: string,
 	opts?: { untracked?: boolean; configuredBaseRef?: string },
-): Promise<GitStatusResult | null> {
+): Promise<GitStatusProbe> {
 	const key = gitStatusCacheKey(cwd, containerId, opts?.untracked);
 	const now = Date.now();
 	evictExpired(now);
@@ -1436,13 +1422,17 @@ async function batchGitStatus(
 		(result) => {
 			const entry = gitStatusCache.get(key);
 			if (entry && entry.promise === promise) {
-				entry.result = result;
-				entry.resolvedAt = Date.now();
+				if (result.kind === "error") {
+					// Transient failures must never poison the cache.
+					gitStatusCache.delete(key);
+				} else {
+					entry.result = result;
+					entry.resolvedAt = Date.now();
+				}
 			}
 			return result;
 		},
 		(err) => {
-			// Do NOT cache errors — next caller will retry fresh.
 			const entry = gitStatusCache.get(key);
 			if (entry && entry.promise === promise) gitStatusCache.delete(key);
 			throw err;
@@ -1452,19 +1442,20 @@ async function batchGitStatus(
 	return promise;
 }
 
-/** Batched git status — host path uses native parallel execFile (no shell);
- *  container path keeps the legacy `docker exec sh -c <batch>` round-trip.
- *  Implementation lives in `./skills/git-status-native.ts`. Returns null if
- *  not a git repository. `partial` is reserved for a future degraded-mode
- *  flag and is currently always `false` on success. */
+/** Classified native status producer behind the cache/single-flight layer. */
 async function runBatchGitStatus(
 	cwd: string,
 	containerId?: string,
 	opts?: { untracked?: boolean; configuredBaseRef?: string },
-): Promise<GitStatusResult | null> {
+): Promise<GitStatusProbe> {
 	_runBatchGitStatusCount++;
-	if (_gitStatusFake) return _gitStatusFake(cwd, containerId, opts);
-	return runBatchGitStatusNative(cwd, { ...opts, containerId });
+	if (_gitStatusFake) {
+		const result = await _gitStatusFake(cwd, containerId, opts);
+		if (result === null) return { kind: "not-repository" };
+		if ("kind" in result) return result;
+		return { kind: "success", result };
+	}
+	return probeBatchGitStatusNative(cwd, { ...opts, containerId });
 }
 
 // ── Git diff / commit helpers (shared between session and goal endpoints) ──
@@ -11987,35 +11978,30 @@ async function handleApiRoute(
 			}
 		} catch { /* container/config unavailable — fall through */ }
 
-		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		const repoWorktrees = (goal as { repoWorktrees?: Record<string, string> }).repoWorktrees;
+		const components: GitStatusTarget[] = Object.entries(repoWorktrees ?? {}).map(([repo, worktreePath]) => ({ repo, worktreePath }));
+		if (!cid && components.length === 0 && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const goalUntracked = url.searchParams.get('untracked') === '1';
-		if (url.searchParams.get('fetch') === 'true') {
-			try { await execGit('git fetch --quiet', cwd, 15000, cid); } catch { /* best-effort */ }
-			invalidateGitStatusCache(cwd, cid);
-		}
+		const shouldFetch = url.searchParams.get('fetch') === 'true';
 		try {
-			const result = await batchGitStatus(cwd, cid, { untracked: goalUntracked, configuredBaseRef: goalBaseRef });
-			if (!result) { json({ error: "Not a git repository" }, 400); return; }
-
-			// Multi-repo aware envelope: include `repos` map + `aggregate` for back-compat.
-			const repoWorktrees = (goal as { repoWorktrees?: Record<string, string> }).repoWorktrees;
-			if (repoWorktrees && Object.keys(repoWorktrees).length > 0) {
-				const repos: Record<string, typeof result> = {};
-				for (const [repoName, repoPath] of Object.entries(repoWorktrees)) {
-					try {
-						if (cid || fs.existsSync(repoPath)) {
-							const r = await batchGitStatus(repoPath, cid, { untracked: goalUntracked, configuredBaseRef: goalBaseRef });
-							if (r) repos[repoName] = r;
-						}
-					} catch { /* per-repo failure non-fatal */ }
-				}
-				json({ ...result, aggregate: result, repos });
+			const collected = await collectGitStatusEnvelope({
+				rootPath: cwd,
+				components,
+				probe: worktreePath => batchGitStatus(worktreePath, cid, { untracked: goalUntracked, configuredBaseRef: goalBaseRef }),
+				pathExists: cid ? undefined : fs.existsSync,
+				fetchTarget: shouldFetch ? worktreePath => execGit('git fetch --quiet', worktreePath, 15000, cid) : undefined,
+				invalidateTarget: shouldFetch ? worktreePath => invalidateGitStatusCache(worktreePath, cid) : undefined,
+			});
+			if (collected.kind === "success") {
+				json(collected.envelope);
+			} else if (collected.kind === "not-repository") {
+				json({ error: "Not a git repository" }, 400);
 			} else {
-				// Single-repo: include `repos: { ".": result }, aggregate: result` for back-compat.
-				json({ ...result, aggregate: result, repos: { ".": result } });
+				console.error("[git-status handler] error for goal", goalId, "cwd=", cwd, "message=", collected.diagnostic);
+				json({ error: collected.diagnostic || "git status failed" }, 500);
 			}
 		} catch (err: any) {
-			jsonError(500, err, { error: err.stderr?.trim() || err.message || "git status failed" });
+			jsonError(500, err, { error: err?.stderr?.trim() || err?.message || "git status failed" });
 		}
 		return;
 	}
@@ -14038,8 +14024,6 @@ async function handleApiRoute(
 		const cwd = session.cwd;
 		const cid = session.sandboxed ? session.containerId : undefined;
 
-		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
-
 		// Resolve project `base_ref` config for the `aheadOfPrimary`/`behindPrimary`
 		// counter — see `docs/design/base-ref.md` §5.
 		let sessionBaseRef: string | undefined;
@@ -14048,98 +14032,32 @@ async function handleApiRoute(
 			if (sessCtx) sessionBaseRef = sessCtx.projectConfigStore.get("base_ref") || undefined;
 		} catch { /* config unavailable — fall through */ }
 
-		// Optional: run git fetch first when ?fetch=true is passed
+		// Session metadata uses an array while goal metadata uses a record. Both
+		// normalize into the same collector policy, including a sole named repo.
+		const components: GitStatusTarget[] = (session.repoWorktrees ?? []).map(({ repo, worktreePath }) => ({ repo, worktreePath }));
+		if (!cid && components.length === 0 && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const sessUntracked = url.searchParams.get('untracked') === '1';
-		if (url.searchParams.get('fetch') === 'true') {
-			try { await execGit('git fetch --quiet', cwd, 15000, cid); } catch { /* best-effort */ }
-			invalidateGitStatusCache(cwd, cid);
-		}
-
-		// Single attempt — native parallel execFile is fast (50–150 ms p50 on
-		// Windows) and errors are not cached, so the client retry loop in
-		// `git-status-refresh.ts` (4 attempts × 0/500/2000/5000 ms backoff) is
-		// the resilience layer for transient failures.
-		// `session.repoWorktrees` is an ARRAY `Array<{repo, repoPath, worktreePath}>`
-		// (session-manager.ts), unlike the goal's `Record<string,string>`.
-		const sessRepoWorktrees = session.repoWorktrees;
-		const isMultiRepo = !!(sessRepoWorktrees && sessRepoWorktrees.length > 1);
-
-		// Root container status. In a TRUE polyrepo (no `repo: "."` git-root
-		// component) the container `cwd` is NOT itself a git repo, so this is
-		// null/throws — that is non-fatal in multi-repo mode (the per-repo
-		// worktrees below are the source of truth). For single-repo it must
-		// keep the existing 400/500 behavior.
-		let result: Awaited<ReturnType<typeof batchGitStatus>> | undefined;
+		const shouldFetch = url.searchParams.get('fetch') === 'true';
 		try {
-			result = await batchGitStatus(cwd, cid, { untracked: sessUntracked, configuredBaseRef: sessionBaseRef });
-		} catch (err: any) {
-			if (!isMultiRepo) {
-				console.error("[git-status handler] error for session", id, "cwd=", cwd, "code=", err?.code, "signal=", err?.signal, "killed=", err?.killed, "stderr=", err?.stderr, "message=", err?.message);
-				jsonError(500, err, { error: err?.stderr?.trim() || err?.message || "git status failed" });
-				return;
+			const collected = await collectGitStatusEnvelope({
+				rootPath: cwd,
+				components,
+				probe: worktreePath => batchGitStatus(worktreePath, cid, { untracked: sessUntracked, configuredBaseRef: sessionBaseRef }),
+				pathExists: cid ? undefined : fs.existsSync,
+				fetchTarget: shouldFetch ? worktreePath => execGit('git fetch --quiet', worktreePath, 15000, cid) : undefined,
+				invalidateTarget: shouldFetch ? worktreePath => invalidateGitStatusCache(worktreePath, cid) : undefined,
+			});
+			if (collected.kind === "success") {
+				json(collected.envelope);
+			} else if (collected.kind === "not-repository") {
+				json({ error: "Not a git repository" }, 400);
+			} else {
+				console.error("[git-status handler] error for session", id, "cwd=", cwd, "message=", collected.diagnostic);
+				json({ error: collected.diagnostic || "git status failed" }, 500);
 			}
-			// Multi-repo: container-cwd failure is expected/non-fatal.
-			result = undefined;
+		} catch (err: any) {
+			jsonError(500, err, { error: err?.stderr?.trim() || err?.message || "git status failed" });
 		}
-
-		if (!isMultiRepo) {
-			// Single-repo / no repoWorktrees: keep back-compat flat shape plus
-			// `repos: { ".": result }, aggregate: result`.
-			if (!result) { json({ error: "Not a git repository" }, 400); return; }
-			json({ ...result, aggregate: result, repos: { ".": result } });
-			return;
-		}
-
-		// Multi-repo aware envelope (parity with the goal git-status handler):
-		// emit a `repos` map keyed by repo name + an `aggregate`.
-		const repos: Record<string, GitStatusResult> = {};
-		for (const { repo, worktreePath } of sessRepoWorktrees!) {
-			try {
-				if (cid || fs.existsSync(worktreePath)) {
-					const r = await batchGitStatus(worktreePath, cid, { untracked: sessUntracked, configuredBaseRef: sessionBaseRef });
-					if (r) repos[repo] = r;
-				}
-			} catch { /* per-repo failure non-fatal */ }
-		}
-
-		const repoResults = Object.values(repos);
-		// Aggregate: prefer the root container status when it IS a git repo
-		// (e.g. a `repo: "."` component) for back-compat; otherwise synthesize
-		// one from the per-repo results. All sub-repos share the same session
-		// branch, so branch/primary fields come from the first repo while the
-		// numeric counters are summed and `clean` is the AND across repos.
-		let aggregate: GitStatusResult | undefined = result ?? undefined;
-		if (!aggregate) {
-			if (repoResults.length === 0) { json({ error: "Not a git repository" }, 400); return; }
-			const base = repoResults[0];
-			const sum = (pick: (r: GitStatusResult) => number) =>
-				repoResults.reduce((acc, r) => acc + (typeof pick(r) === "number" ? pick(r) : 0), 0);
-			const ahead = sum(r => r.ahead);
-			const behind = sum(r => r.behind);
-			const insertionsVsPrimary = sum(r => r.insertionsVsPrimary);
-			const deletionsVsPrimary = sum(r => r.deletionsVsPrimary);
-			aggregate = {
-				branch: base.branch,
-				primaryBranch: base.primaryBranch,
-				primaryRef: base.primaryRef,
-				isOnPrimary: base.isOnPrimary,
-				hasUpstream: base.hasUpstream,
-				mergedIntoPrimary: base.mergedIntoPrimary,
-				status: [], // multi-repo mode suppresses the flat list; per-repo sections are authoritative
-				ahead,
-				behind,
-				aheadOfPrimary: sum(r => r.aheadOfPrimary),
-				behindPrimary: sum(r => r.behindPrimary),
-				insertionsVsPrimary,
-				deletionsVsPrimary,
-				clean: repoResults.every(r => r.clean),
-				unpushed: repoResults.some(r => r.unpushed),
-				summary: `${repoResults.length} repos`,
-				untrackedIncluded: sessUntracked,
-			};
-		}
-
-		json({ ...aggregate, aggregate, repos });
 		return;
 	}
 	// GET /api/sessions/:id/tool-content/:messageIndex/:blockIndex — lazy-load full tool input content

@@ -188,7 +188,7 @@ test.describe("session git-status read-only contract", () => {
 		expect(response.status).toBe(200);
 		const body = await response.json();
 		expect(Object.keys(body.repos).sort()).toEqual(["api", "web"]);
-		expect(body.aggregate).toMatchObject({ branch: "session/multi-abcdef", ahead: 1 });
+		expect(body.aggregate).toMatchObject({ branch: "session/multi-abcdef", ahead: 2 });
 		expect(publishCalls).toHaveLength(0);
 	});
 
