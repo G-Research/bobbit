@@ -46,6 +46,13 @@ export interface VerifyStep {
 	name: string;
 	type: "command" | "llm-review" | "agent-qa" | "subgoal" | "human-signoff";
 	run?: string;
+	/** Authored workflow reference; resolved once when a goal snapshot is frozen. */
+	promptRef?: string;
+	/** Immutable prompt contract fields carried by frozen goal snapshots. */
+	promptId?: string;
+	promptSha256?: string;
+	resolvedPrompt?: string;
+	/** Inline prompt for ordinary review/QA/sign-off steps. */
 	prompt?: string;
 	expect?: "success" | "failure";
 	timeout?: number;
@@ -64,6 +71,8 @@ export interface VerifyStep {
 	 */
 	optionalLabel?: string;
 	role?: string;
+	/** Concurrency/ordering class for implementation-gate specialist reviews. */
+	reviewGroup?: string;
 	description?: string;
 	/** Structural reference: which component to run from. */
 	component?: string;
@@ -125,6 +134,10 @@ function normalizeStep(raw: unknown): VerifyStep {
 	};
 	if (typeof r.run === "string") step.run = r.run;
 	if (typeof r.prompt === "string") step.prompt = r.prompt;
+	if (typeof r.promptRef === "string") step.promptRef = r.promptRef;
+	if (typeof r.promptId === "string") step.promptId = r.promptId;
+	if (typeof r.promptSha256 === "string") step.promptSha256 = r.promptSha256;
+	if (typeof r.resolvedPrompt === "string") step.resolvedPrompt = r.resolvedPrompt;
 	if (r.expect === "success" || r.expect === "failure") step.expect = r.expect;
 	if (typeof r.timeout === "number") step.timeout = r.timeout;
 	if (typeof r.phase === "number") step.phase = r.phase;
@@ -153,6 +166,7 @@ function normalizeStep(raw: unknown): VerifyStep {
 	}
 
 	if (typeof r.role === "string") step.role = r.role;
+	if (typeof r.reviewGroup === "string") step.reviewGroup = r.reviewGroup;
 	if (typeof r.description === "string") step.description = r.description;
 	if (typeof r.component === "string") step.component = r.component;
 	if (typeof r.command === "string") step.command = r.command;
@@ -362,7 +376,11 @@ function serializeStep(s: VerifyStep): Record<string, unknown> {
 	if (s.component !== undefined) out.component = s.component;
 	if (s.command !== undefined) out.command = s.command;
 	if (s.run !== undefined) out.run = s.run;
-	if (s.prompt !== undefined) out.prompt = s.prompt;
+	// Project workflow definitions persist only the stable reference. Resolved
+	// prompt bytes/hash fields belong exclusively to frozen goal snapshots.
+	const promptRef = s.promptRef ?? s.promptId;
+	if (promptRef !== undefined) out.promptRef = promptRef;
+	else if (s.prompt !== undefined) out.prompt = s.prompt;
 	if (s.expect !== undefined) out.expect = s.expect;
 	if (s.timeout !== undefined) out.timeout = s.timeout;
 	if (s.phase !== undefined) out.phase = s.phase;
@@ -370,6 +388,7 @@ function serializeStep(s: VerifyStep): Record<string, unknown> {
 	if (s.type === "human-signoff" && s.label !== undefined) out.label = s.label;
 	if (s.optionalLabel !== undefined) out.optionalLabel = s.optionalLabel;
 	if (s.role !== undefined) out.role = s.role;
+	if (s.reviewGroup !== undefined) out.reviewGroup = s.reviewGroup;
 	if (s.description !== undefined) out.description = s.description;
 	if (s.subgoal) {
 		const sg: Record<string, unknown> = {

@@ -136,8 +136,12 @@ export type CommandStepFreeform = {
 export type CommandStep = CommandStepStructural | CommandStepComponentRun | CommandStepFreeform;
 
 export type LlmReviewStep = {
-	name: string; type: "llm-review"; prompt: string;
-	role?: string; phase?: number; expect?: "success" | "failure";
+	name: string; type: "llm-review";
+	/** Ordinary reviews author prompt inline; contract-backed reviews use promptRef. */
+	prompt?: string; promptRef?: string;
+	/** Present only on frozen workflow snapshots, never serialized to project.yaml. */
+	promptId?: string; promptSha256?: string; resolvedPrompt?: string;
+	role?: string; reviewGroup?: string; phase?: number; expect?: "success" | "failure";
 	timeout?: number; optional?: boolean; label?: string; optionalLabel?: string; description?: string;
 };
 
