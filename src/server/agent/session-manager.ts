@@ -7817,8 +7817,28 @@ export class SessionManager {
 			? this.scopedGatewayEnvForDirectAgent(id, projectId, goalId ?? opts?.teamGoalId ?? opts?.env?.BOBBIT_GOAL_ID)
 			: undefined;
 		const initialRole = opts?.role ?? opts?.roleName;
-		const rawSelectedSpawnModel = opts?.initialModel
+		let rawSelectedSpawnModel = opts?.initialModel
 			?? (!opts?.skipAutoModel ? this.resolveInitialModel(initialRole, projectId) : undefined);
+		let currentModels: Awaited<ReturnType<typeof getAvailableModels>> | undefined;
+		// A normal Bobbit spawn must bind one of Bobbit's current catalog rows
+		// explicitly rather than letting Pi choose a newly published hidden provider.
+		// Non-empty generic agent args retain their legacy/raw CLI semantics.
+		if (!rawSelectedSpawnModel && !opts?.skipAutoModel && !agentArgs?.length && this.preferencesStore) {
+			currentModels = await getAvailableModels(this.preferencesStore);
+			const catalogDefault = currentModels
+				.filter((model) => model.sessionSelectable !== false)
+				.sort((a, b) => {
+					const authDelta = Number(Boolean(b.authenticated)) - Number(Boolean(a.authenticated));
+					if (authDelta !== 0) return authDelta;
+					const rankDelta = modelRecencyRank(b.id) - modelRecencyRank(a.id);
+					if (rankDelta !== 0) return rankDelta;
+					return a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id);
+				})[0];
+			if (!catalogDefault) {
+				throw new Error("No model is currently available for session selection");
+			}
+			rawSelectedSpawnModel = `${catalogDefault.provider}/${catalogDefault.id}`;
+		}
 		const selectedSpawnModel = rawSelectedSpawnModel
 			? normalizeAigwModelString(rawSelectedSpawnModel)
 			: undefined;
@@ -7829,7 +7849,7 @@ export class SessionManager {
 			if (!provider || !modelId || !this.preferencesStore) {
 				throw new Error(`Initial model "${sanitizeModelErrorText(selectedSpawnModel)}" is not currently available for session selection`);
 			}
-			const currentModels = await getAvailableModels(this.preferencesStore);
+			currentModels ??= await getAvailableModels(this.preferencesStore);
 			if (!findSessionSelectableModel(currentModels, provider, modelId)) {
 				throw new Error(`Initial model "${sanitizeModelErrorText(selectedSpawnModel)}" is not currently available for session selection`);
 			}
@@ -8058,6 +8078,12 @@ export class SessionManager {
 
 		const session = await executePlan(plan, ctx);
 		if (projectId) session.projectId = projectId;
+		// Verification/reviewer sessions deliberately skip the ordinary post-spawn
+		// selectors because their tuple was pinned in argv. They still need the same
+		// exact read-back and one atomic durable tuple commit before create returns.
+		if (opts?.skipAutoModel && opts.skipAutoThinking && selectedSpawnModel) {
+			await this.tryAutoSelectModel(session);
+		}
 		this.notifySessionCreated(session);
 
 		// Persist session metadata (fire-and-forget, but tracked for terminate).
