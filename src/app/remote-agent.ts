@@ -1357,10 +1357,18 @@ export class RemoteAgent {
 
 	// ── Setters (Agent interface) ────────────────────────────────────
 
-	setModel(model: any): void {
+	setModel(model: any, thinkingLevel?: string): void {
 		this._state.model = model;
+		if (thinkingLevel !== undefined) {
+			this._state.thinkingLevel = thinkingLevel as any;
+		}
 		this._clearProviderAuthRequired();
-		this.send({ type: "set_model", provider: model.provider, modelId: model.id });
+		this.send({
+			type: "set_model",
+			provider: model.provider,
+			modelId: model.id,
+			...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
+		});
 		state.chatPanel?.agentInterface?.requestUpdate();
 		this.emit({ type: "render" });
 	}

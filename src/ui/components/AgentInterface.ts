@@ -1672,6 +1672,17 @@ export class AgentInterface extends LitElement {
 		return known[provider] || provider.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 	}
 
+	/** Apply one picker choice as an exact model/effective-thinking tuple. */
+	private _applyModelSelection(session: any, model: any): void {
+		const effectiveThinking = clampThinkingLevel(session.state?.thinkingLevel, model as any) ?? "off";
+		if (typeof session.setModel === "function") {
+			session.setModel(model, effectiveThinking);
+		} else {
+			session.state.model = model;
+			session.state.thinkingLevel = effectiveThinking;
+		}
+	}
+
 	private _handleProviderAuthAction(type: "open_settings" | "retry" | "switch_provider" | "abort_respawn"): void {
 		const session = this.session as any;
 		if (type === "open_settings") {
@@ -1687,7 +1698,7 @@ export class AgentInterface extends LitElement {
 			const model = this.session?.state?.model;
 			if (model) {
 				void openModelSelector(model, (nextModel) => {
-					session?.setModel?.(nextModel);
+					this._applyModelSelection(session, nextModel);
 					this.requestUpdate();
 				});
 			}
@@ -2116,20 +2127,8 @@ export class AgentInterface extends LitElement {
 				variant: "ghost",
 				size: "sm",
 				onClick: () => {
-					void openModelSelector(state.model, (m) => {
-						if (typeof (session as any).setModel === 'function') (session as any).setModel(m);
-						else session.state.model = m;
-						// After model change, clamp the current thinking level to one
-						// supported by the new model. The server boundary re-clamps
-						// defensively, but doing it here keeps the UI in sync.
-						const current = session.state?.thinkingLevel as string | undefined;
-						if (current) {
-							const clamped = clampThinkingLevel(current, m as any);
-							if (clamped && clamped !== current) {
-								if (typeof (session as any).setThinkingLevel === 'function') (session as any).setThinkingLevel(clamped);
-								else session.state.thinkingLevel = clamped as any;
-							}
-						}
+					void openModelSelector(state.model, (model) => {
+						this._applyModelSelection(session, model);
 					});
 				},
 				children: html`
@@ -2490,18 +2489,8 @@ export class AgentInterface extends LitElement {
 							}}
 							.onModelSelect=${() => {
 								void openModelSelector(state.model, (model) => {
-								if (typeof (session as any).setModel === 'function') (session as any).setModel(model);
-								else session.state.model = model;
-								// Clamp thinking-level against the newly selected model.
-								const current = session.state?.thinkingLevel as string | undefined;
-								if (current) {
-									const clamped = clampThinkingLevel(current, model as any);
-									if (clamped && clamped !== current) {
-										if (typeof (session as any).setThinkingLevel === 'function') (session as any).setThinkingLevel(clamped);
-										else session.state.thinkingLevel = clamped as any;
-									}
-								}
-							});
+									this._applyModelSelection(session, model);
+								});
 							}}
 							.onThinkingChange=${
 								this.enableThinkingSelector
