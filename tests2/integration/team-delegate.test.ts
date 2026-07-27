@@ -94,10 +94,9 @@ async function setSessionModel(gateway: any, sessionId: string, provider: string
 }
 
 test.describe("team_delegate — blocking one-shot (delegate parity)", () => {
-	test("single blocking delegate spawns, waits, returns output, and auto-dismisses", async ({ gateway }) => {
+	test("single blocking delegate spawns, waits, returns output, and auto-dismisses", async () => {
 		const parent = await createSession();
 		try {
-			await setSessionModel(gateway, parent, OPUS.provider, OPUS.modelId, OPUS.thinkingLevel);
 			const { status, json } = await orchestrate(parent, "delegate", { instructions: "do a small task" });
 			expect(status).toBe(200);
 			expect(Array.isArray(json.delegates)).toBe(true);
@@ -112,10 +111,9 @@ test.describe("team_delegate — blocking one-shot (delegate parity)", () => {
 		}
 	});
 
-	test("parallel blocking delegate waits for ALL children", async ({ gateway }) => {
+	test("parallel blocking delegate waits for ALL children", async () => {
 		const parent = await createSession();
 		try {
-			await setSessionModel(gateway, parent, OPUS.provider, OPUS.modelId, OPUS.thinkingLevel);
 			const { status, json } = await orchestrate(parent, "delegate", {
 				parallel: [{ instructions: "task one" }, { instructions: "task two" }, { instructions: "task three" }],
 			});
@@ -155,7 +153,6 @@ test.describe("team_delegate — accountable kickoff author", () => {
 			});
 			expect(renamed.status, await renamed.clone().text()).toBe(200);
 			expect(gateway.sessionManager.getSession(parent)?.title).toBe(oldName);
-			await setSessionModel(gateway, parent, OPUS.provider, OPUS.modelId, OPUS.thinkingLevel);
 
 			const { status, json } = await orchestrate(parent, "spawn", {
 				instructions: "delegate author lifecycle",
