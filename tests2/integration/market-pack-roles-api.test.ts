@@ -173,10 +173,16 @@ test.describe("market-pack roles API regression", () => {
 		await expectLiveSessionRolePins(created.id, "POST /api/sessions");
 	});
 
-	test("PATCH /api/sessions/:id accepts a role that is visible through the market-pack cascade", async () => {
+	test("PATCH /api/sessions/:id applies the market-pack role's exact tuple and preserves it for a role without a model", async ({ gateway }) => {
 		const project = await defaultProject();
 		await fixtureRole(project.id);
 		const sessionId = await createPlainSession();
+		const before = gateway.sessionManager.getPersistedSession(sessionId);
+		expect(before, `${REPRO}: plain session must have a durable tuple before role replacement`).toMatchObject({
+			modelProvider: "mock",
+			modelId: "mock-model",
+			effectiveThinkingLevel: "off",
+		});
 
 		const resp = await apiFetch(`/api/sessions/${sessionId}`, {
 			method: "PATCH",
@@ -190,6 +196,23 @@ test.describe("market-pack roles API regression", () => {
 		expect(session.role, `${REPRO}: patched session should persist the market-pack role name`).toBe(ROLE_ID);
 		expect(session.accessory, `${REPRO}: patched session should use the market-pack role accessory`).toBe("stethoscope");
 		await expectLiveSessionRolePins(sessionId, "PATCH /api/sessions/:id");
+		expect(gateway.sessionManager.getPersistedSession(sessionId), `${REPRO}: verified role tuple must replace the prior durable tuple atomically`).toMatchObject({
+			modelProvider: "openai",
+			modelId: "gpt-4.1-mini",
+			effectiveThinkingLevel: "off",
+		});
+
+		const generalResp = await apiFetch(`/api/sessions/${sessionId}`, {
+			method: "PATCH",
+			body: JSON.stringify({ roleId: "general" }),
+		});
+		expect(generalResp.status, `${REPRO}: assigning a role without a model should succeed; body=${await generalResp.clone().text()}`).toBe(200);
+		await expectLiveSessionRolePins(sessionId, "role without a model");
+		expect(gateway.sessionManager.getPersistedSession(sessionId), `${REPRO}: role without a model must preserve the durable verified tuple`).toMatchObject({
+			modelProvider: "openai",
+			modelId: "gpt-4.1-mini",
+			effectiveThinkingLevel: "off",
+		});
 	});
 
 	test("POST /api/staff validates roleId through the market-pack cascade", async () => {

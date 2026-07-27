@@ -95,7 +95,8 @@ function seedLiveStorySession(gateway: any): { sessionId: string; cleanup: () =>
 	const sessionId = `session-story-${randomUUID()}`;
 	const cwd = harnessDefaultProjectRoot();
 	const now = Date.now();
-	let model = { provider: "anthropic", id: "claude-sonnet-4-20250514" };
+	let model = { provider: "mock", id: "mock-model" };
+	let thinkingLevel = "off";
 	const session = {
 		id: sessionId,
 		title: "Session story fixture",
@@ -112,7 +113,8 @@ function seedLiveStorySession(gateway: any): { sessionId: string; cleanup: () =>
 		promptQueue: { toArray: () => [] },
 		rpcClient: {
 			async setModel(provider: string, id: string) { model = { provider, id }; },
-			async getState() { return { success: true, data: { model } }; },
+			async setThinkingLevel(level: string) { thinkingLevel = level; },
+			async getState() { return { success: true, data: { model, thinkingLevel } }; },
 		},
 	};
 	const store = sessionManager.getSessionStore(projectId);
@@ -182,27 +184,37 @@ test.describe("Session story API invariants", () => {
 				const cursor = connection.messageCount();
 				connection.send({
 					type: "set_model",
-					provider: "anthropic",
-					modelId: "claude-sonnet-4-20250514",
+					provider: "mock",
+					modelId: "mock-model",
+					thinkingLevel: "off",
 				});
 				connection.send({ type: "get_state" });
 				const state = await connection.waitForFrom(
 					cursor,
 					(message) =>
 						message.type === "state" &&
-						message.data?.model?.id === "claude-sonnet-4-20250514",
+						message.data?.model?.provider === "mock" &&
+						message.data?.model?.id === "mock-model" &&
+						message.data?.thinkingLevel === "off" &&
+						message.data?.model?.contextWindow === 8_192,
 					1_000,
 				);
-				expect(state.data.model.provider).toBe("anthropic");
-				expect(state.data.model.contextWindow).toBe(1_000_000);
+				expect(state.data.model).toMatchObject({
+					provider: "mock",
+					id: "mock-model",
+					contextWindow: 8_192,
+					maxTokens: 4_096,
+					reasoning: false,
+				});
+				expect(state.data.thinkingLevel).toBe("off");
 
 				const resp = await apiFetch(`/api/sessions/${fixture.sessionId}`);
 				expect(resp.ok).toBe(true);
 				expect(await resp.json()).toMatchObject({
 					title: "My Custom Title",
 					colorIndex: 5,
-					modelProvider: "anthropic",
-					modelId: "claude-sonnet-4-20250514",
+					modelProvider: "mock",
+					modelId: "mock-model",
 				});
 			} finally {
 				connection.close();

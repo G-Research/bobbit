@@ -9520,7 +9520,20 @@ export class SessionManager {
 		// Get the agent session file so we can restore conversation. A structured
 		// getState rejection is just as much a fallback case as a thrown RPC error;
 		// start from the durable value and replace it only with a non-empty live one.
-		const persistedBeforeRole = this.resolveStoreForSession(id).get(id);
+		const roleStore = this.resolveStoreForSession(id);
+		const persistedBeforeRole = roleStore.get(id);
+		const durableTupleBeforeRole = {
+			modelProvider: persistedBeforeRole?.modelProvider,
+			modelId: persistedBeforeRole?.modelId,
+			effectiveThinkingLevel: persistedBeforeRole?.effectiveThinkingLevel,
+		};
+		const durableModelBeforeRole = durableTupleBeforeRole.modelProvider && durableTupleBeforeRole.modelId
+			? `${durableTupleBeforeRole.modelProvider}/${durableTupleBeforeRole.modelId}`
+			: undefined;
+		const restoreDurableTupleBeforeRole = (): void => {
+			roleStore.update(id, durableTupleBeforeRole);
+			if (durableModelBeforeRole) this._writeModelNameFile(id, durableModelBeforeRole);
+		};
 		let agentSessionFile = persistedBeforeRole?.agentSessionFile;
 		try {
 			const stateResp = await session.rpcClient.getState();
@@ -9613,15 +9626,24 @@ export class SessionManager {
 		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
 
-		// Pin model/thinking-level at spawn for the respawn (after role assignment).
+		// Pin one exact model/thinking tuple for the replacement. An explicit model
+		// on the newly assigned role owns both resolution paths; otherwise preserve
+		// the session's last verified durable tuple across the role-only respawn.
 		const respawnPersisted = this.resolveStoreForSession(id).get(id);
 		const respawnPersistedModel =
 			respawnPersisted?.modelProvider && respawnPersisted?.modelId
 				? normalizeAigwModelString(`${respawnPersisted.modelProvider}/${respawnPersisted.modelId}`)
 				: undefined;
-		// See spawn path: skip a persisted pin that is no longer spawn-pinnable
-		// (e.g. unauthenticated Code Assist) so the respawn falls back cleanly.
-		if (respawnPersistedModel && isSpawnPinnableModelString(respawnPersistedModel)) {
+		const rawRoleModel = this.resolveRoleModelValue(role.name, session.projectId);
+		const roleModel = rawRoleModel && /^[^/]+\/.+$/.test(rawRoleModel)
+			? normalizeAigwModelString(rawRoleModel)
+			: undefined;
+		const roleModelPinned = !!roleModel && isSpawnPinnableModelString(roleModel);
+		if (roleModel && roleModelPinned) {
+			bridgeOptions.initialModel = roleModel;
+		} else if (respawnPersistedModel && isSpawnPinnableModelString(respawnPersistedModel)) {
+			// See spawn path: skip a persisted pin that is no longer spawn-pinnable
+			// (e.g. unauthenticated Code Assist) so the respawn falls back cleanly.
 			bridgeOptions.initialModel = respawnPersistedModel;
 		} else {
 			const initModel = this.resolveInitialModel(role.name, session.projectId);
@@ -9631,7 +9653,7 @@ export class SessionManager {
 			bridgeOptions.initialModel,
 			role.name,
 			session.projectId,
-			respawnPersisted?.effectiveThinkingLevel,
+			roleModelPinned ? undefined : respawnPersisted?.effectiveThinkingLevel,
 		);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 
@@ -9653,7 +9675,8 @@ export class SessionManager {
 		} else {
 			this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
 		}
-		this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, respawnPersisted?.modelProvider);
+		const spawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
+		this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, spawnProvider || respawnPersisted?.modelProvider);
 
 		// Build and fully validate the replacement while the original bridge stays
 		// subscribed and usable. Role assignment is a two-phase swap: start,
@@ -9665,7 +9688,7 @@ export class SessionManager {
 		const rpcClient = new RpcBridge(bridgeOptions);
 		let replacementCommitted = false;
 		let oldBridgeStopped = false;
-		const roleStore = this.resolveStoreForSession(id);
+		let verifiedReplacementTuple: { provider: string; modelId: string; thinkingLevel: ThinkingLevel } | undefined;
 		const unsub = rpcClient.onEvent((event: any) => {
 			// switch_session replays historical events and the replacement may emit
 			// readiness frames before commit. Ignore all of them while staged so a
@@ -9706,12 +9729,30 @@ export class SessionManager {
 				await this.switchSessionForRehydration(rpcClient, rolePs, agentSessionFile);
 			}
 			await this.tryAutoSelectModel(stagedSession);
+			let replacementTupleVerified = true;
 			try {
 				await this.tryApplyDefaultThinkingLevel(stagedSession);
 			} catch (err) {
 				if (respawnPersisted?.effectiveThinkingLevel !== undefined) throw err;
+				replacementTupleVerified = false;
 				console.warn(`[session-manager] Legacy session ${id} could not verify effective thinking during role replacement:`, err);
 			}
+			if (replacementTupleVerified) {
+				const verifiedPersisted = roleStore.get(id);
+				const verifiedThinking = isKnownThinkingLevel(verifiedPersisted?.effectiveThinkingLevel);
+				if (!verifiedPersisted?.modelProvider || !verifiedPersisted.modelId || !verifiedThinking) {
+					throw new Error(`Cannot assign role for session ${id}: replacement model tuple was not durably verified`);
+				}
+				verifiedReplacementTuple = {
+					provider: verifiedPersisted.modelProvider,
+					modelId: verifiedPersisted.modelId,
+					thinkingLevel: verifiedThinking,
+				};
+			}
+			// Model/thinking setup reuses the ordinary verification helpers, which
+			// persist as they complete. Keep the old tuple authoritative until this
+			// staged bridge wins the lifecycle commit below.
+			restoreDurableTupleBeforeRole();
 
 			// Another lifecycle replacement may have won while this bridge was being
 			// prepared. Never stop or overwrite that newer canonical session; the catch
@@ -9738,6 +9779,7 @@ export class SessionManager {
 				throw new Error(`Session ${id} role replacement was superseded after old bridge stop`);
 			}
 		} catch (err) {
+			restoreDurableTupleBeforeRole();
 			unsub();
 			await rpcClient.stop().catch(() => {});
 			// If terminal cancellation landed during the irreversible old stop, both
@@ -9757,6 +9799,15 @@ export class SessionManager {
 		session.role = role.name;
 		session.accessory = role.accessory;
 		session.allowedTools = effectiveAllowedNames;
+		if (verifiedReplacementTuple) {
+			this.persistSessionModel(
+				id,
+				verifiedReplacementTuple.provider,
+				verifiedReplacementTuple.modelId,
+				verifiedReplacementTuple.thinkingLevel,
+			);
+			this._writeModelNameFile(id, `${verifiedReplacementTuple.provider}/${verifiedReplacementTuple.modelId}`);
+		}
 		replacementCommitted = true;
 
 		// assignRole owns the status fence until every concurrently queued role
