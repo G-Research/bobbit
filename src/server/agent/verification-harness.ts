@@ -134,6 +134,7 @@ import type { ToolManager } from "./tool-manager.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import type { GrantPolicy } from "./role-store.js";
 import { computeEffectiveAllowedTools, computeToolActivationArgs, tagAllowedTool, writeMcpProxyExtensions, writeToolGuardExtension, type GroupPolicyProvider } from "./tool-activation.js";
+import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
 import { WorkflowResolveError } from "./workflow-validator.js";
 import { getVerificationShell, GIT_BASH } from "./shell-util.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
@@ -255,7 +256,7 @@ export function buildVerificationToolActivation(
 		? writeMcpProxyExtensions(deps.mcpManager, allowedToolNames, roleForPolicies, deps.toolManager, deps.groupPolicyStore)
 		: undefined;
 	const activation = computeToolActivationArgs(effectiveAllowedTools, deps.toolManager, cwd, mcpExtensionPaths);
-	const args = [...activation.args];
+	const args = prependToolResultErrorBridge([...activation.args], activation.readSessionAvailable);
 
 	const guardPath = deps.toolManager
 		? writeToolGuardExtension(subSessionId, deps.toolManager, deps.mcpManager ?? undefined, roleForPolicies, deps.groupPolicyStore)

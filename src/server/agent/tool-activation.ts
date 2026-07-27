@@ -577,6 +577,8 @@ export function computeEffectiveAllowedTools(
 export interface ToolActivationResult {
 	/** CLI args to add (e.g. ["--no-builtin-tools", "--no-extensions", "--extension", "/path/to/ext"]) */
 	args: string[];
+	/** True when the resolved runtime surface grants read_session. */
+	readSessionAvailable: boolean;
 	/**
 	 * Env vars to set on the spawned agent process. Currently used only for
 	 * `BOBBIT_BUILTIN_TOOLS`, which the `_builtins` extension reads to decide
@@ -972,17 +974,20 @@ export function writeToolGuardExtension(
 		}
 	}
 
-	// Generate the guard if any tool needs interception — 'ask' (long-poll for
-	// user grant) or 'never' (hard-block). 'allow' tools don't need the guard.
+	// Generate the guard if any tool needs ordinary policy interception OR if
+	// read_session is available. The latter is an immutable heavy-read safety
+	// boundary and must exist even when the resolved policy is plain `allow`.
 	const hasGuardedTools = Object.values(policies).some(p => p.policy === 'ask' || p.policy === 'never');
-	if (!hasGuardedTools) return undefined;
+	const hasReadSessionSafety = Object.entries(policies).some(([name, policy]) =>
+		name.toLowerCase() === "read_session" && policy.policy !== "never");
+	if (!hasGuardedTools && !hasReadSessionSafety) return undefined;
 
 	// Fingerprint of all inputs that affect the generated code. Used to cache
 	// both the generated source (skip template gen) and the written file path
 	// (skip fs read-compare-write). The disabled-tools set is folded in only
 	// when non-empty so the empty case keeps today's key.
 	const genKey = hashKey({
-		kind: 'guardCode',
+		kind: 'guardCode_v2',
 		policies,
 		grantedTools: (grantedTools ?? []).slice().sort(),
 		...(hasDisabled ? { disabledTools: [...disabledTools!].map(t => t.toLowerCase()).sort() } : {}),
@@ -1252,6 +1257,7 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 
 	const builtinsToRegister = new Set<string>();
 	const extensionPaths = new Set<string>();
+	let readSessionAvailable = false;
 
 	if (!toolManager) {
 		// Fallback: no tool manager available, can't resolve providers.
@@ -1275,7 +1281,7 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 		if (mcpExtensionPaths) {
 			for (const extPath of mcpExtensionPaths) args.push("--extension", extPath);
 		}
-		return { args, env };
+		return { args, env, readSessionAvailable };
 	}
 
 	// Always load the _builtins extension; it reads BOBBIT_BUILTIN_TOOLS to
@@ -1310,6 +1316,9 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 			if (provider.type === "pi-extension") {
 				continue;
 			}
+			if (entry.name.toLowerCase() === "read_session") {
+				readSessionAvailable = true;
+			}
 			if (provider.type === "builtin" && provider.tool) {
 				if (provider.tool === "bash") {
 					// bash comes from shell/extension.ts, not from the file-builtins set.
@@ -1343,5 +1352,5 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 	if (mcpExtensionPaths) {
 		for (const extPath of mcpExtensionPaths) args.push("--extension", extPath);
 	}
-	return { args, env };
+	return { args, env, readSessionAvailable };
 }

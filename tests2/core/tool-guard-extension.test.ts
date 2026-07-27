@@ -234,6 +234,31 @@ describe("generateToolGuardExtension", () => {
 		assert.ok(source.includes("missing BOBBIT_SESSION_ID"));
 	});
 
+	it("guards allow-policy read_session heavy calls before the resolved handler", async () => {
+		const guard = evaluateCommonJs(
+			generateToolGuardExtension("read-session-safety", {
+				read_session: { policy: "allow", group: "Agent" },
+			}, []),
+			async () => assert.fail("allow-policy safety guard must not request a grant"),
+		);
+		let onToolCall: ((event: any) => Promise<any>) | undefined;
+		guard({ on: (_event, callback) => { onToolCall = callback; } });
+		assert.ok(onToolCall);
+
+		for (const input of [
+			{ verbose: true },
+			{ include_tool_results: true, limit: 11 },
+			{ verbose: true, limit: "10" },
+			{ verbose: true, limit: 1.5 },
+		]) {
+			const decision = await onToolCall!({ toolName: "read_session", input });
+			assert.equal(decision?.block, true);
+			assert.equal(JSON.parse(decision.reason).code, "CONTEXT_HEAVY_LIMIT_REQUIRED");
+		}
+		assert.equal(await onToolCall!({ toolName: "read_session", input: {} }), undefined);
+		assert.equal(await onToolCall!({ toolName: "READ_SESSION", arguments: { include_tool_results: true, limit: 10 } }), undefined);
+	});
+
 	it("does not cache one-time grant responses in the active guard", async () => {
 		const guard = await importGeneratedGuard(
 			generateToolGuardExtension("sess-one-time", { bash: { policy: "ask", group: "shell" } }, []),

@@ -3634,7 +3634,10 @@ export class SessionManager {
 		const activation = computeToolActivationArgs(filteredAllowed, this.toolManager, cwd, mcpExtPaths, disabledTools, toolScope);
 		const piExtensionActivation = this.resolveMarketplacePiExtensionArgs(projectId, cwd);
 
-		const args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args]);
+		const args = prependToolResultErrorBridge(
+			[...activation.args, ...piExtensionActivation.args],
+			activation.readSessionAvailable,
+		);
 
 		// Compute session-specific grants (tools in allowedTools but not in the role's base allowedTools)
 		// and layer explicit grant records on top. Ask-gated tools are part of the

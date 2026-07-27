@@ -70,6 +70,81 @@ describe("tool result error bridge extension", () => {
 		assert.deepEqual(await handlers.get("x")!({}), { content: [{ type: "text", text: "ok" }] });
 	});
 
+	it("reprojects and bounds the actual resolved read_session return", async () => {
+		const activate = await loadGeneratedExtension();
+		const { pi, handlers } = makePi();
+		activate(pi);
+		const largeText = "\\\"\n😀".repeat(30_000);
+		const envelope = {
+			total: 1,
+			returned: 1,
+			offsetStart: 4,
+			offsetEnd: 4,
+			messages: [{
+				index: 4,
+				role: "toolResult",
+				thinkingSignature: "provider-only",
+				toolResults: [{
+					ref: "r1",
+					name: "read",
+					toolName: "duplicate",
+					status: "ok",
+					isError: true,
+					size: { type: "string", chars: largeText.length, lines: 30_001, bytes: Buffer.byteLength(largeText) },
+					omitted: false,
+					handle: "rs1:m4:b0:AAAAAAAAAAAAAAAAAAAAAAAAAAA",
+					excerpt: { start: 0, end: largeText.length, text: largeText, nextCursor: null, complete: true },
+				}],
+			}],
+		};
+		pi.tool({ name: "read_session" }, async () => ({
+			content: [{ type: "text", text: JSON.stringify(envelope) }, { type: "text", text: largeText }],
+			details: { session_id: "target", envelope, messages: envelope.messages, extra: largeText },
+		}));
+
+		const result = await handlers.get("read_session")!({
+			session_id: "target",
+			include_tool_results: true,
+			limit: 1,
+		});
+		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= 50 * 1024);
+		assert.equal(Object.hasOwn(result.details, "messages"), false);
+		const projected = JSON.parse(result.content[0].text);
+		assert.equal(projected.messages[0].thinkingSignature, undefined);
+		assert.deepEqual(Object.keys(projected.messages[0].toolResults[0]).sort(),
+			["excerpt", "handle", "name", "omitted", "ref", "size", "status"].sort());
+		assert.equal(projected.messages[0].toolResults[0].name, "read");
+	});
+
+	it("uses a sub-1KiB structured fallback for unknown successful wrappers", async () => {
+		const activate = await loadGeneratedExtension();
+		const { pi, handlers } = makePi();
+		activate(pi);
+		const large = "never-echo-this".repeat(100_000);
+		pi.tool({ name: "read_session" }, async () => ({ unknown: large }));
+
+		const result = await handlers.get("read_session")!({
+			session_id: "target",
+			pattern: large,
+			offset: 2,
+			limit: 10,
+		});
+		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") < 1024);
+		assert.equal(JSON.stringify(result).includes("never-echo-this"), false);
+		const projected = JSON.parse(result.content[0].text);
+		assert.equal(projected.truncatedBy, "extension_return_unrecognized");
+		assert.deepEqual(projected.continuationRequest, {
+			kind: "retry",
+			retrySameRequest: true,
+			session_id: "target",
+			sessionIdTruncated: false,
+			offset: 2,
+			limit: 10,
+			patternOmitted: true,
+		});
+		assert.equal(projected.wrapperDiagnostics.actualBytes > 1_000_000, true);
+	});
+
 	it("repairs tampered cached bridge source before reuse", () => {
 		const previousBobbitDir = process.env.BOBBIT_DIR;
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-tool-result-bridge-"));
