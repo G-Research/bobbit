@@ -2684,16 +2684,26 @@ export class MockAgentCore {
 
 			case "get_state": {
 				const sf = this.ensureSessionFile();
+				// Real Pi retains top-level runtime cwd headers when serializing state.
+				// Keep their exact raw JSONL lines instead of dropping them while the
+				// mock rewrites its message view.
+				const runtimeCwdHeaders = fs.readFileSync(sf, "utf8").split("\n").filter(line => {
+					try {
+						const parsed = JSON.parse(line);
+						return (parsed?.type === "system" || parsed?.type === "session") && typeof parsed.cwd === "string";
+					} catch {
+						return false;
+					}
+				});
 				// After an AUTO_COMPACT turn, preserve the full on-disk transcript
 				// (orphans + compaction marker + kept tail) WITH top-level ids so a
 				// post-compaction get_state (e.g. refreshAfterCompaction) does not
 				// clobber the ids the orphan-history endpoint splits on.
-				if (Array.isArray(this._postCompactionEntries)) {
-					fs.writeFileSync(sf, this._postCompactionEntries.map(e => JSON.stringify(e)).join("\n") + "\n");
-				} else {
-					const lines = this.conversationMessages.map(m => JSON.stringify({ type: "message", message: m }));
-					fs.writeFileSync(sf, lines.join("\n") + (lines.length ? "\n" : ""));
-				}
+				const lines = Array.isArray(this._postCompactionEntries)
+					? this._postCompactionEntries.map(e => JSON.stringify(e))
+					: this.conversationMessages.map(m => JSON.stringify({ type: "message", message: m }));
+				lines.push(...runtimeCwdHeaders);
+				fs.writeFileSync(sf, lines.join("\n") + (lines.length ? "\n" : ""));
 				return {
 					success: true,
 					data: {

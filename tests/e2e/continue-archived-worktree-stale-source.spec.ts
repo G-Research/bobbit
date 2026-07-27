@@ -87,52 +87,22 @@ function findClonedJsonl(slugDir: string, sessionId: string): string | null {
 }
 
 type RuntimeCwdRecord = { type: "system" | "session"; cwd: string };
-type RuntimeCwdLine = RuntimeCwdRecord & { raw: string };
 
-function readRuntimeCwdLines(jsonlPath: string): RuntimeCwdLine[] {
-	const records: RuntimeCwdLine[] = [];
+function readRuntimeCwdRecords(jsonlPath: string): RuntimeCwdRecord[] {
+	const records: RuntimeCwdRecord[] = [];
 	for (const line of readFileSync(jsonlPath, "utf8").split("\n")) {
 		const trimmed = line.trim();
 		if (!trimmed) continue;
 		try {
 			const parsed = JSON.parse(trimmed);
 			if ((parsed?.type === "system" || parsed?.type === "session") && typeof parsed.cwd === "string") {
-				records.push({ type: parsed.type, cwd: parsed.cwd, raw: trimmed });
+				records.push({ type: parsed.type, cwd: parsed.cwd });
 			}
 		} catch {
 			// Ignore malformed transcript lines; the mock agent does the same.
 		}
 	}
 	return records;
-}
-
-function readRuntimeCwdRecords(jsonlPath: string): RuntimeCwdRecord[] {
-	return readRuntimeCwdLines(jsonlPath).map(({ type, cwd }) => ({ type, cwd }));
-}
-
-function preserveRuntimeCwdMetadataAcrossMockStateReads(rpcClient: any): () => void {
-	if (!rpcClient?._agent) return () => {};
-	const prototype = Object.getPrototypeOf(rpcClient);
-	const originalSendCommand = prototype?.sendCommand;
-	if (typeof originalSendCommand !== "function") return () => {};
-
-	async function preservingSendCommand(this: any, command: any, ...args: any[]): Promise<any> {
-		if (command?.type !== "get_state") return originalSendCommand.call(this, command, ...args);
-		const sessionFile = this?._agent?.sessionFilePath;
-		const before = sessionFile && existsSync(sessionFile) ? readRuntimeCwdLines(sessionFile) : [];
-		const response = await originalSendCommand.call(this, command, ...args);
-		if (before.length > 0 && sessionFile && existsSync(sessionFile)) {
-			const after = readRuntimeCwdRecords(sessionFile);
-			const missing = before.filter((record) => !after.some((current) => current.type === record.type && current.cwd === record.cwd));
-			if (missing.length > 0) appendFileSync(sessionFile, `${missing.map((record) => record.raw).join("\n")}\n`);
-		}
-		return response;
-	}
-
-	prototype.sendCommand = preservingSendCommand;
-	return () => {
-		if (prototype.sendCommand === preservingSendCommand) prototype.sendCommand = originalSendCommand;
-	};
 }
 
 function readRuntimeCwds(jsonlPath: string): string[] {
@@ -165,7 +135,6 @@ test.describe("Continue-Archived stale worktree source", () => {
 		let projectId: string | undefined;
 		let srcId: string | undefined;
 		let newId: string | undefined;
-		let restoreMockStateReads = () => {};
 
 		try {
 			await initRepo(repoPath);
@@ -207,12 +176,6 @@ test.describe("Continue-Archived stale worktree source", () => {
 			ensureStaleRuntimeCwdMetadata(sourceJsonl, srcRec.worktreePath, srcId);
 			expect(readRuntimeCwdRecords(sourceJsonl), "source transcript should contain stale system cwd metadata before archive").toContainEqual({ type: "system", cwd: srcRec.worktreePath });
 			expect(readRuntimeCwdRecords(sourceJsonl), "source transcript should contain stale Pi-style session cwd metadata before archive").toContainEqual({ type: "session", cwd: srcRec.worktreePath });
-			// Pi 0.82 exact tuple verification reads state after switch_session. The
-			// in-process mock serializes only loaded messages on get_state, unlike Pi,
-			// so retain the runtime headers that production rebases for this canary.
-			restoreMockStateReads = preserveRuntimeCwdMetadataAcrossMockStateReads(
-				gateway.sessionManager.getSession(srcId)?.rpcClient,
-			);
 
 			const seedProposal = await apiFetch(`/api/sessions/${srcId}/proposal/role/seed`, {
 				method: "POST",
@@ -295,7 +258,6 @@ test.describe("Continue-Archived stale worktree source", () => {
 			expect(proposalResp.status, proposalBody).toBe(200);
 			expect(proposalBody).toContain(proposalMarker);
 		} finally {
-			restoreMockStateReads();
 			if (newId) {
 				await apiFetch(`/api/sessions/${newId}`, { method: "DELETE" }).catch(() => {});
 			}
