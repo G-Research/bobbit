@@ -26,6 +26,7 @@ import { InlineWorkflowStore } from "../../src/server/agent/workflow-store.ts";
 import { computePlanFreezeUpdate } from "../../src/server/agent/parent-workflow-freeze.ts";
 import type { PersistedGoal } from "../../src/server/agent/goal-store.ts";
 import { createMemFs, type MemFs } from "../harness/mem-fs.js";
+import { testSystemsInteractionReviewStep } from "../harness/systems-review-workflow.js";
 
 let memfs: MemFs;
 const tmpRoot = path.resolve("/memfs/freeze-signal/work");
@@ -46,7 +47,7 @@ function makeManager(): { gm: GoalManager; store: GoalStore } {
 		{
 			id: "feature", name: "Feature", description: "",
 			gates: [
-				{ id: "implementation", name: "Implementation", dependsOn: [] },
+				{ id: "implementation", name: "Implementation", dependsOn: [], verify: [testSystemsInteractionReviewStep()] },
 				{ id: "ready-to-merge", name: "Ready", dependsOn: ["implementation"] },
 			],
 			createdAt: 0, updatedAt: 0,

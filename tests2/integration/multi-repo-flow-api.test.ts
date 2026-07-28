@@ -5,6 +5,7 @@ import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch } from "./_e2e/e2e-setup.js";
 import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
+import { testSystemsInteractionReviewStep } from "../harness/systems-review-workflow.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -83,6 +84,7 @@ async function registerMultiRepoProject(): Promise<{ id: string; rootPath: strin
 								{ name: "Build api", type: "command", component: "api", command: "build" },
 								{ name: "Test api", type: "command", component: "api", command: "test" },
 								{ name: "Build web", type: "command", component: "web", command: "build" },
+								testSystemsInteractionReviewStep(),
 							],
 						},
 					],

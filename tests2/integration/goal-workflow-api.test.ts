@@ -7,6 +7,7 @@
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch } from "./_e2e/e2e-setup.js";
+import { testSystemsInteractionReviewStep } from "../harness/systems-review-workflow.js";
 
 function uniqueWorkflowId(): string {
 	return `goal-workflow-api-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -32,10 +33,11 @@ test.describe("Goal/workflow API", () => {
 						dependsOn: [],
 						verify: [
 							{ name: "Build", type: "command", run: "echo build", phase: 0 },
+							testSystemsInteractionReviewStep(),
 							{
 								name: "QA testing",
 								type: "agent-qa",
-								phase: 1,
+								phase: 2,
 								optional: true,
 								// Old `label:` on a non-human-signoff optional step is migrated
 								// forward to `optionalLabel:` on workflow load — see
@@ -55,12 +57,13 @@ test.describe("Goal/workflow API", () => {
 			expect(getResp.status).toBe(200);
 			const workflow = await getResp.json();
 			const steps = workflow.gates[0].verify;
-			expect(steps).toHaveLength(2);
+			expect(steps).toHaveLength(3);
 			expect(steps[0]).toMatchObject({ name: "Build", type: "command", phase: 0 });
-			expect(steps[1]).toMatchObject({
+			expect(steps[1]).toMatchObject(testSystemsInteractionReviewStep());
+			expect(steps[2]).toMatchObject({
 				name: "QA testing",
 				type: "agent-qa",
-				phase: 1,
+				phase: 2,
 				optional: true,
 				// After the schema split, optional non-human-signoff steps emit
 				// `optionalLabel` (not `label`). The POST above intentionally still
@@ -69,7 +72,7 @@ test.describe("Goal/workflow API", () => {
 				description: "Run a real browser QA pass.",
 				prompt: "Validate the goal end-to-end.",
 			});
-			expect(steps[1].label).toBeUndefined();
+			expect(steps[2].label).toBeUndefined();
 		} finally {
 			await deleteWorkflow(id);
 		}

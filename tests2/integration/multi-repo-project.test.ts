@@ -9,6 +9,7 @@ import { apiFetch, readE2EToken, base, registerProject } from "./_e2e/e2e-setup.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { testSystemsInteractionReviewStep } from "../harness/systems-review-workflow.js";
 
 let token: string;
 let fixtureRoot: string;
@@ -55,7 +56,9 @@ test.beforeAll(async () => {
 		],
 		workflows: {
 			simple: {
-				id: "simple", name: "Simple", gates: [{ id: "implementation", name: "Build" }],
+				id: "simple",
+				name: "Simple",
+				gates: [{ id: "implementation", name: "Build", verify: [testSystemsInteractionReviewStep()] }],
 			},
 		},
 	});

@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { prepareGitTemplate, copyGitTemplate } from "../../../tests2/harness/git-template.js";
 import { runFixtureCommand } from "../../../tests2/harness/spawn-with-retry.js";
+import { testSystemsInteractionReviewStep } from "../../../tests2/harness/systems-review-workflow.js";
 
 // Base repo comes from the immutable committed template (master + README.md +
 // .gitattributes + one commit); the bare-clone origin wiring stays real git.
@@ -55,6 +56,7 @@ async function registerMultiRepoProject(): Promise<{ id: string; rootPath: strin
 								{ name: "Build api", type: "command", component: "api", command: "build" },
 								{ name: "Test api", type: "command", component: "api", command: "test" },
 								{ name: "Build web", type: "command", component: "web", command: "build" },
+								testSystemsInteractionReviewStep(),
 							],
 						},
 					],
