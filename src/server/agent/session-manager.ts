@@ -8939,14 +8939,15 @@ export class SessionManager {
 				}
 				if (!controlledFallbackError && fallbackSessionModel) {
 					try {
+						const currentFallbackSessionModel = await this.requireCurrentCatalogSpawnModel(fallbackSessionModel);
 						const pinnedMsg = sanitizeModelErrorText(pinnedModelError);
-						const safeFallbackSessionModel = sanitizeModelErrorText(fallbackSessionModel);
+						const safeFallbackSessionModel = sanitizeModelErrorText(currentFallbackSessionModel);
 						console.warn(`[session-manager] Spawn-pinned model "${safePinnedModel}" failed for ${session.id}; controlled fallback enabled, trying default.sessionModel="${safeFallbackSessionModel}": ${pinnedMsg}`);
-						await applyModelString(session.rpcClient, fallbackSessionModel, {
+						await applyModelString(session.rpcClient, currentFallbackSessionModel, {
 							contextLabel: "default.sessionModel fallback",
 						});
-						await commitExactSpawnTuple(fallbackSessionModel);
-						console.log(`[session-manager] Controlled fallback selected default.sessionModel "${fallbackSessionModel}" for session ${session.id} after spawn-pinned model "${pinnedModel}" failed`);
+						await commitExactSpawnTuple(currentFallbackSessionModel);
+						console.log(`[session-manager] Controlled fallback selected default.sessionModel "${currentFallbackSessionModel}" for session ${session.id} after spawn-pinned model "${pinnedModel}" failed`);
 						return;
 					} catch (fallbackErr) {
 						controlledFallbackError = fallbackErr;
@@ -8996,15 +8997,16 @@ export class SessionManager {
 				}
 				if (!controlledFallbackError && fallbackSessionModel) {
 					try {
+						const currentFallbackSessionModel = await this.requireCurrentCatalogSpawnModel(fallbackSessionModel);
 						const roleMsg = sanitizeModelErrorText(roleModelError);
-						const safeFallbackSessionModel = sanitizeModelErrorText(fallbackSessionModel);
+						const safeFallbackSessionModel = sanitizeModelErrorText(currentFallbackSessionModel);
 						console.warn(`[session-manager] Role model "${safeRoleModel}" failed for ${session.id}; controlled fallback enabled, trying default.sessionModel="${safeFallbackSessionModel}": ${roleMsg}`);
-						await applyModelString(session.rpcClient, fallbackSessionModel, {
+						await applyModelString(session.rpcClient, currentFallbackSessionModel, {
 							contextLabel: "default.sessionModel fallback",
-							skipSetModel: spawnPinned && normalizeAigwModelString(session.spawnPinnedModel || "") === fallbackSessionModel,
+							skipSetModel: spawnPinned && normalizeAigwModelString(session.spawnPinnedModel || "") === currentFallbackSessionModel,
 						});
-						await commitExactSpawnTuple(fallbackSessionModel);
-						console.log(`[session-manager] Controlled fallback selected default.sessionModel "${fallbackSessionModel}" for session ${session.id} after role model "${roleModel}" failed`);
+						await commitExactSpawnTuple(currentFallbackSessionModel);
+						console.log(`[session-manager] Controlled fallback selected default.sessionModel "${currentFallbackSessionModel}" for session ${session.id} after role model "${roleModel}" failed`);
 						return;
 					} catch (fallbackErr) {
 						controlledFallbackError = fallbackErr;

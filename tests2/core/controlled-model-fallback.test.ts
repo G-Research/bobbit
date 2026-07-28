@@ -205,11 +205,21 @@ async function exerciseAutoSelect(options: {
 			};
 		},
 	};
+	const currentCatalogModels = new Set([
+		"openai/fallback-session",
+		"openai/dead-fallback",
+	]);
 	const manager = {
 		preferencesStore: { get: (key: string) => options.prefs[key] },
 		resolveRoleModel: () => options.roleModel,
 		resolveRoleThinkingLevel: () => options.roleThinking,
 		resolveStoreForSession: () => store,
+		async requireCurrentCatalogSpawnModel(model: string) {
+			if (!currentCatalogModels.has(model)) {
+				throw new Error(`Model ${model} is not currently available for session selection`);
+			}
+			return model;
+		},
 		persistSessionModel: (sessionId: string, provider: string, modelId: string, effectiveThinkingLevel: string) => {
 			store.update(sessionId, { modelProvider: provider, modelId, effectiveThinkingLevel });
 		},
@@ -484,6 +494,42 @@ describe("controlled model fallback policy — session auto-selection", () => {
 		);
 		assert.deepEqual(result.broadcastModels, [{ provider: "openai", id: "fallback-session" }]);
 		assert.deepEqual(result.modelFiles, ["openai/fallback-session"]);
+	});
+
+	it("rejects a hidden-provider role fallback before mutating any observable state", async () => {
+		const result = await exerciseAutoSelect({
+			prefs: {
+				allowSessionModelFallback: true,
+				"default.sessionModel": "kimi-coding/k2p5",
+			},
+			roleModel: "anthropic/dead-role",
+			failModels: ["anthropic/dead-role"],
+		});
+
+		assert.match(String((result.error as Error | undefined)?.message), /not currently available for session selection/i);
+		assert.deepEqual(result.setModelCalls, [["anthropic", "dead-role"]], "the hidden fallback must be rejected before setModel");
+		assert.deepEqual(result.setThinkingCalls, []);
+		assert.deepEqual(result.persisted, []);
+		assert.deepEqual(result.modelFiles, []);
+		assert.deepEqual(result.broadcastTuples, []);
+	});
+
+	it("rejects a hidden-provider spawn-pinned fallback before mutating any observable state", async () => {
+		const result = await exerciseAutoSelect({
+			prefs: {
+				allowSessionModelFallback: true,
+				"default.sessionModel": "kimi-coding/k2p5",
+			},
+			spawnPinnedModel: "anthropic/stale-persisted",
+			initialBound: { provider: "unset", id: "unset" },
+		});
+
+		assert.match(String((result.error as Error | undefined)?.message), /not currently available for session selection/i);
+		assert.deepEqual(result.setModelCalls, [], "the hidden fallback must be rejected before setModel");
+		assert.deepEqual(result.setThinkingCalls, []);
+		assert.deepEqual(result.persisted, []);
+		assert.deepEqual(result.modelFiles, []);
+		assert.deepEqual(result.broadcastTuples, []);
 	});
 
 	it("normalizes a legacy provider-prefixed AIGW default before selecting and persisting it", async () => {
