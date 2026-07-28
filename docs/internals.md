@@ -1569,7 +1569,7 @@ Two optional fields on the `Role` interface in `role-store.ts`:
 | Field | Type | Meaning |
 |---|---|---|
 | `model` | `"<provider>/<modelId>"` | Same shape as `default.sessionModel` (e.g. `anthropic/claude-opus-4-1`). Empty/missing = inherit. |
-| `thinkingLevel` | `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` | Same value space as the global thinking selector. `xhigh` is only honoured on models that support it (Opus 4.6+, gpt-5.1-codex-max, gpt-5.2*) — unsupported levels are clamped down at use-time. Empty/missing = inherit. See [Per-model thinking-level capabilities](thinking-levels.md). |
+| `thinkingLevel` | `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` | Same value space as the global thinking selector. The value is clamped against the exact role-selected model at use time; extended levels such as `xhigh` and `max` are retained only when that model's Pi metadata advertises them, and `max` has no heuristic fallback. Empty/missing = inherit. See [Per-model thinking-level capabilities](thinking-levels.md). |
 
 `parseRole` and `serializeRole` round-trip both fields and omit them from YAML when unset ("absent" and "empty string" are equivalent on the wire). Malformed values (e.g. `model: "no-slash"`, `thinkingLevel: "weird"`) are silently dropped at parse time so a typo never breaks role loading; the API layer rejects them with 400 so the UI surfaces the error.
 
@@ -1605,32 +1605,43 @@ The role-manager page (`src/app/role-manager-page.ts`) has a third tab next to *
 
 ## Spawn-time model pinning
 
-Without spawn-time pinning, every session emitted two `model_change` events at startup - pi-coding-agent booted with its CLI default and Bobbit then called `setModel` shortly afterward - which transiently flashed the wrong model in the footer and was easy to mistake for a model-binding bug.
+Pi's published catalog is broader than Bobbit's session-selection surface. Leaving startup selection to Pi could therefore move a session onto a newly published but unadopted provider, while binding after startup also produced a transient `model_change` for Pi's default. Bobbit avoids both outcomes by resolving the model and effective thinking level before launching a normal Bobbit-owned agent.
 
-Agent processes are now spawned with the desired model and reasoning level passed as CLI flags, so the pi-coding-agent boot binds directly to the right model and emits a single matching `model_change` event. For the Pi 0.77 / Opus 4.8 upgrade, that means a persisted or selected `anthropic/claude-opus-4-8` session starts on Opus 4.8 rather than flashing an older Pi default. The legacy path - boot with the CLI default, then call `setModel` post-spawn - still runs as a fallback for cases where the model is not yet resolvable at spawn time (chiefly the aigw cold-cache discovery path).
+A normal spawn selects an exact current catalog tuple in this order:
 
-Spawn-pinned models are still read-back verified before a session becomes idle/live. If the agent reports a different model or the selected model cannot bind, the controlled policy in [Controlled session model fallback](session-model-fallback.md) decides whether to fail immediately or try `default.sessionModel` exactly once.
+1. Explicit or persisted per-session model.
+2. Role override (`role.model`).
+3. `default.sessionModel`.
+4. A deterministic current catalog default: session-selectable and spawn-pinnable rows first by authentication, then the shared model rank, then provider and model id as stable tie-breakers.
+
+An explicit candidate must still be present on Bobbit's current session-selectable catalog; stale, malformed, deferred-provider, or otherwise unavailable selections fail with the existing unavailable-model error instead of falling through to another provider. If no eligible catalog row exists, creation fails rather than delegating provider choice to Pi. `skipAutoModel` skips role/default preference selection, not this deterministic final binding.
+
+The compatibility exception is a caller that supplies non-empty generic raw Pi arguments without selecting a model. That path remains caller-owned and does not synthesize Bobbit's catalog default. Bobbit-generated goal/team argument lists containing only `--extension` pairs are not generic raw arguments and still receive the deterministic tuple.
+
+Spawn-pinned models are read-back verified before a session becomes idle/live. If the agent reports a different model or the selected model cannot bind, the controlled policy in [Controlled session model fallback](session-model-fallback.md) decides whether to fail immediately or try `default.sessionModel` exactly once.
 
 ### Bridge options and CLI flags
 
 `RpcBridgeOptions` in `src/server/agent/rpc-bridge.ts` carries two optional fields:
 
 - `initialModel?: string` - literal `<provider>/<modelId>`.
-- `initialThinkingLevel?: string` - one of `off|minimal|low|medium|high|xhigh`. The level is clamped against the resolved model before injection — see [Per-model thinking-level capabilities](thinking-levels.md) for the rules.
+- `initialThinkingLevel?: string` - one of `off|minimal|low|medium|high|xhigh|max`. The level is clamped against the resolved model before injection — see [Per-model thinking-level capabilities](thinking-levels.md) for the rules.
 
-`buildAgentArgs(options)` in the same file translates them to `--model <provider>/<modelId>` and `--thinking <level>` and prepends them to the agent argv. Malformed values (no `/`, unknown level) are silently dropped - the post-spawn helpers will still bind correctly.
+`buildAgentArgs(options)` translates the tuple to separate Pi arguments:
 
-### Resolution helpers
+```text
+--provider <provider> --model <modelId> --thinking <level>
+```
 
-`SessionManager.resolveInitialModel(role, projectId)` and `resolveInitialThinkingLevel(role, projectId)` mirror the precedence used at session start:
+It splits `initialModel` only at the first slash. For example, `aigw/aws/us.anthropic.claude-opus-5` becomes provider `aigw` and model id `aws/us.anthropic.claude-opus-5`; slashes inside the model id remain part of its identity. Malformed model strings and unknown thinking tokens are silently omitted at this low-level bridge boundary.
 
-1. Role override (`role.model` / `role.thinkingLevel` from the resolved cascade).
-2. `default.sessionModel` / `default.sessionThinkingLevel` preference (or `default.reviewModel` for verification sub-sessions).
-3. `undefined` - the aigw best-ranked fallback runs post-spawn via `tryAutoSelectModel` and emits a second `model_change` only on a cold cache.
+Generated provider/model/thinking arguments precede caller-supplied `options.args`, so Pi's normal last-value-wins parsing preserves explicit overrides in generic raw-argument flows. The existing project-trust and context-file flags are the narrow exception: the bridge strips their caller-supplied forms and emits Bobbit's non-overridable values.
 
-`resolveBridgeOptions` in `src/server/agent/session-setup.ts` is the single call site for the normal-create pipeline; `session-manager.ts` re-runs the helpers at the role-respawn and force-abort respawn sites; `verification-harness.ts` does it at all three reviewer/QA sub-session sites; `server.ts` does it at the continue-archived endpoint. The pinned values are stored on `session.spawnPinnedModel` and `session.spawnPinnedThinkingLevel`.
+### Resolution and catalog validation
 
-`SessionSetupPlan` exposes two parallel fields naming the same role — `role` and `roleName` — because callers were added at different times and never converged. `team-manager.spawnRole`, `startTeam` for the team lead, and `staff-manager` pass only `roleName`; the verification harness and respawn paths pass `role`. `_resolveBridgeOptions` therefore resolves overrides from `plan.role ?? plan.roleName` (and `spawnAgent` / `persistOnce` mirror the same fallback when populating `session.role`, so the post-spawn `tryAutoSelectModel` safety net keys off the right id). Collapsing the duality into a single field is a separate refactor; until then, new spawn sites should set `roleName` and rely on the fallback rather than re-introducing it elsewhere.
+`SessionManager.resolveInitialModel(role, projectId)` supplies the role/default candidate used across setup paths. `requireCurrentCatalogSpawnModel` validates an exact requested tuple, while `resolveCurrentCatalogSpawnModel` supplies the deterministic catalog choice only when no exact selection exists. Effective thinking resolves from an explicit value, then the role override, then `default.sessionThinkingLevel`, then `medium`, and is clamped against that exact provider/model before spawn.
+
+The resolved tuple flows through the existing session setup, restore, respawn, delegate/team, host, and sandbox mechanisms as `initialModel` and `initialThinkingLevel`. The live session retains the spawn values as `spawnPinnedModel` and `spawnPinnedThinkingLevel` for read-back verification and later inheritance.
 
 ### Skip-setModel branch preserves hard-fail-on-mismatch
 
@@ -1638,12 +1649,12 @@ Spawn-pinned models are still read-back verified before a session becomes idle/l
 
 ### Pool-claimed sessions
 
-The worktree pool (`src/server/agent/worktree-pool.ts`) pre-creates **git worktrees only** - it does not pre-spawn agent processes. When a session claims a pool worktree, `executeWorktreeAsync` in `session-setup.ts` runs the same `resolveBridgeOptions` → `new RpcBridge(plan.bridgeOptions)` sequence as a non-pool spawn, so `initialModel` is injected and `session.spawnPinnedModel` is populated identically. Spawn-time pinning therefore applies to pool-claimed sessions too - there is no special pool path that emits two `model_change` events. The remaining two-event case is the aigw cold-cache discovery fallback, where the model is not resolvable at spawn time.
+The worktree pool (`src/server/agent/worktree-pool.ts`) pre-creates **git worktrees only** - it does not pre-spawn agent processes. When a session claims a pool worktree, `executeWorktreeAsync` in `session-setup.ts` runs the same `resolveBridgeOptions` → `new RpcBridge(plan.bridgeOptions)` sequence as a non-pool spawn, so `initialModel` is injected and `session.spawnPinnedModel` is populated identically. Spawn-time pinning therefore applies to pool-claimed sessions too; only the explicit generic raw-argument compatibility path may intentionally omit Bobbit's generated model tuple.
 
 ### Out of scope
 
 - The client-side placeholder default (`anthropic/claude-opus-4-6`) seeded in `src/app/remote-agent.ts` until the first server `state` frame arrives. Replacing it with `null` would require auditing every `state.model` consumer.
-- Patching pi-coding-agent to suppress its own initial `model_change` when spawned with `--model`. The current behaviour is benign - the event simply matches the bound model.
+- Patching pi-coding-agent to suppress its own initial `model_change` when spawned with explicit `--provider` and `--model` values. The current behaviour is benign - the event simply matches the bound model.
 
 ### Key files
 
@@ -1655,7 +1666,7 @@ The worktree pool (`src/server/agent/worktree-pool.ts`) pre-creates **git worktr
 | `src/server/agent/review-model-override.ts` | `applyModelString` / `applyReviewModelOverrides` `skipSetModel` flag with read-back retained |
 | `src/server/agent/verification-harness.ts` | Pre-resolves model at all 3 sub-session spawn sites; passes `skipSetModel: true` post-spawn when matched |
 | `src/server/server.ts` | Continue-archived endpoint pre-resolves model before `createSession` |
-| `tests/rpc-bridge-spawn-args.test.ts` | Asserts `--model` / `--thinking` flag injection, including Opus 4.8 + `xhigh` |
+| `tests2/core/rpc-bridge-spawn-args.test.ts` | Asserts separate `--provider` / `--model` / `--thinking` injection, first-slash parsing, and extended thinking levels |
 | `tests/review-model-override.test.ts` | Covers the `skipSetModel` read-back contract |
 
 For current Pi runtime compatibility boundaries, see [Pi runtime compatibility](pi-runtime-compatibility.md). For the historical Pi 0.77 / Opus 4.8 model-specific contract, see [Pi 0.77 / Claude Opus 4.8 compatibility](pi-0.77-opus-4.8.md).
@@ -2073,7 +2084,7 @@ Indexes are a rebuildable cache; the source-of-truth stores repopulate automatic
 
 ## Thinking level configuration
 
-Configurable via `default_thinking_level` in `project.yaml`. Values: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `""` (empty = agent default `"medium"`). `xhigh` is only honoured on models that advertise it (Anthropic Opus 4.6+, OpenAI `gpt-5.1-codex-max`, `gpt-5.2*`); on other models it clamps down at session-start. See [docs/thinking-levels.md](thinking-levels.md) for the capability matrix and clamping semantics.
+Configurable through the `default.sessionThinkingLevel` preference. Values: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`, `""` (empty = agent default `"medium"`). The requested value is clamped against the exact selected model at session start. Pi's per-model `thinkingLevelMap` is authoritative when present; in particular, `max` is available only when explicitly advertised and never through family heuristics. See [docs/thinking-levels.md](thinking-levels.md) for the capability matrix and clamping semantics.
 
 Token budgets (hardcoded in `remote-agent.ts`): minimal=1024, low=4096, medium=10240, high=32768.
 
