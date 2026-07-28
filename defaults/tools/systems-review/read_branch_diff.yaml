@@ -1,7 +1,8 @@
 name: read_branch_diff
 description: "Read a bounded page from the immutable Systems review branch snapshot."
-summary: "Read immutable branch-diff evidence"
+summary: "Read evidence"
 params: [operation, repo_id?, change_id?, side?, path?, paths?, query?, cursor?, limit?]
+promptParams: []
 provider:
   type: bobbit-extension
   extension: extension.ts
