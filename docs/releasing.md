@@ -1,6 +1,19 @@
 # Releasing Bobbit
 
-This doc covers the Bobbit release checks that cannot be inferred from a normal development checkout: the installed consumer's security report and the bundled `fd`/`rg` binaries. The root `@gresearch/bobbit` package itself is published automatically by [`.github/workflows/release-publish.yml`](../.github/workflows/release-publish.yml) (npm trusted publishing / OIDC, with provenance) when a `v*` tag is pushed; only the binary sub-packages below are published manually.
+This doc covers the Bobbit release checks that cannot be inferred from a normal development checkout: the installed consumer's security report and the bundled `fd`/`rg` binaries. The root `@gresearch/bobbit` package itself is tagged and published automatically by [`.github/workflows/release-publish.yml`](../.github/workflows/release-publish.yml) when a validated release PR is merged; only the binary sub-packages below are published manually.
+
+## Automated root release
+
+A root release is authorized by squash-merging a same-repository PR from `release/v<version>` into `main`. The PR title must be `chore(release): v<version>`, `package.json` and both root versions in `package-lock.json` must agree, and `RELEASE_NOTES_v<version>.md` must be present and non-empty. Merging is the irreversible publication approval.
+
+The workflow checks out the PR's exact squash-merge SHA, creates a lightweight `v<version>` tag at that commit, and publishes the package from the same workflow run using npm trusted publishing/OIDC. The tag and publish intentionally share one run because events created with `GITHUB_TOKEN` do not start another workflow. A global concurrency group prevents two publishes from running together; never merge another release PR until the current release workflow completes because GitHub retains at most one pending run per concurrency group. A rerun accepts an existing tag only when it still points to the expected merge commit. It never silently accepts an existing npm version; if the registry may have accepted a publish despite a failed command, verify the published package and provenance before deciding how to recover.
+
+The automated tag is not GPG/SSH-signed. Its trust comes from the reviewed and protected `main` merge, the workflow's exact-SHA and version checks, job-scoped least-privilege `GITHUB_TOKEN` permissions, npm's short-lived OIDC credential, and provenance attestation. Before creating a tag, the workflow requires these two active repository tag rulesets targeting `refs/tags/v*` with no exclusions:
+
+- **Release tag creation** — a `creation` rule with exactly one bypass actor: the GitHub Actions integration (app ID `15368`, bypass mode `always`).
+- **Immutable release tags** — `update` and `deletion` rules with no bypass actors and no `creation` rule.
+
+Splitting creation from immutability lets the workflow create a release tag without giving it—or anyone else—permission to move or delete one later. GitHub does not expose complete bypass-actor lists to the workflow token, so a repository administrator must verify those lists in Settings. The workflow fails closed unless both rule shapes are active, its token can bypass the creation rule, and its token cannot bypass immutability.
 
 ## Required packed-consumer audit
 
@@ -83,7 +96,7 @@ changes.
    pin in the root `package.json` `optionalDependencies` block to the
    new version.
 7. Publish each sub-package (the root is not published here — it ships via
-   CI on the tag push):
+   CI when the release PR is merged):
    ```bash
    npm publish ./binaries/binaries-darwin-arm64
    npm publish ./binaries/binaries-darwin-x64
@@ -91,9 +104,9 @@ changes.
    npm publish ./binaries/binaries-linux-arm64
    npm publish ./binaries/binaries-win32-x64
    ```
-   Do this **before** pushing the release tag, so the sub-packages are on npm
-   before the root that pins them. `publishConfig.access: "public"` is baked
-   into each sub-package, so `--access public` is not needed on the CLI.
+   Do this **before** merging the release PR, so the sub-packages are on npm
+   before the automated root publish that pins them. `publishConfig.access: "public"`
+   is baked into each sub-package, so `--access public` is not needed on the CLI.
 
 ### Decoupled versioning
 

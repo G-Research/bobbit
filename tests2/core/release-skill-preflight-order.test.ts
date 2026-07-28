@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { describe, it } from "vitest";
+import { parse as parseYaml } from "yaml";
 import {
 	buildRestrictedNpmEnv,
 	evaluatePackedConsumerAudit,
@@ -12,11 +13,42 @@ import {
 } from "../../scripts/release-packed-consumer-audit.mjs";
 
 const skill = readFileSync(resolve(process.cwd(), ".claude/skills/release/SKILL.md"), "utf8");
+const releaseWorkflowSource = readFileSync(
+	resolve(process.cwd(), ".github/workflows/release-publish.yml"),
+	"utf8",
+);
+type WorkflowStep = {
+	name?: string;
+	uses?: string;
+	with?: Record<string, unknown>;
+	run?: string;
+};
+type WorkflowJob = {
+	if?: string;
+	needs?: string;
+	permissions?: Record<string, string>;
+	steps?: WorkflowStep[];
+};
+const releaseWorkflow = parseYaml(releaseWorkflowSource) as {
+	on?: {
+		pull_request?: { branches?: string[]; types?: string[] };
+		push?: unknown;
+		pull_request_target?: unknown;
+	};
+	concurrency?: { group?: string; "cancel-in-progress"?: boolean };
+	jobs?: { tag?: WorkflowJob; publish?: WorkflowJob };
+};
 const packageJson = JSON.parse(readFileSync(resolve(process.cwd(), "package.json"), "utf8")) as {
 	name?: string;
 	scripts?: Record<string, string>;
 };
 const preflight = skill.match(/## 2\. Pre-flight quality gates[\s\S]*?```bash\n([\s\S]*?)\n```/)?.[1];
+
+function workflowStep(job: WorkflowJob | undefined, name: string): WorkflowStep {
+	const step = job?.steps?.find(candidate => candidate.name === name);
+	assert.ok(step, `release workflow is missing step: ${name}`);
+	return step;
+}
 
 const zeroCounts = {
 	info: 0,
@@ -60,6 +92,92 @@ describe("release skill primary branch", () => {
 	});
 });
 
+describe("merge-triggered release workflow", () => {
+	it("runs only for merged same-repository release PRs targeting main", () => {
+		assert.deepEqual(releaseWorkflow.on?.pull_request, {
+			branches: ["main"],
+			types: ["closed"],
+		});
+		assert.equal(releaseWorkflow.on?.push, undefined);
+		assert.equal(releaseWorkflow.on?.pull_request_target, undefined);
+		assert.equal(releaseWorkflow.concurrency?.group, "release-publish");
+		assert.equal(releaseWorkflow.concurrency?.["cancel-in-progress"], false);
+
+		const condition = releaseWorkflow.jobs?.tag?.if ?? "";
+		assert.match(condition, /pull_request\.merged == true/);
+		assert.match(condition, /pull_request\.base\.ref == 'main'/);
+		assert.match(condition, /pull_request\.head\.repo\.full_name == github\.repository/);
+		assert.match(condition, /startsWith\(github\.event\.pull_request\.head\.ref, 'release\/v'\)/);
+	});
+
+	it("validates and tags the exact squash commit with an idempotent collision guard", () => {
+		const tagJob = releaseWorkflow.jobs?.tag;
+		assert.deepEqual(tagJob?.permissions, { contents: "write" });
+
+		const checkout = workflowStep(tagJob, "Checkout exact merge commit");
+		assert.equal(checkout.with?.ref, "${{ github.event.pull_request.merge_commit_sha }}");
+		assert.equal(checkout.with?.["persist-credentials"], false);
+
+		const validation = workflowStep(tagJob, "Validate merged release PR").run ?? "";
+		assert.match(validation, /ACTUAL_SHA.*MERGE_SHA/);
+		assert.match(validation, /0\|\[1-9\]\\d\*/);
+		assert.match(validation, /prereleasePart/);
+		assert.match(validation, /release\/\$TAG/);
+		assert.match(validation, /chore\(release\): \$TAG/);
+		assert.match(validation, /lock\.packages\?\.\[""\]\?\.version/);
+		assert.match(validation, /RELEASE_NOTES_\$TAG\.md/);
+
+		const protection = workflowStep(tagJob, "Verify release tag protection").run ?? "";
+		assert.match(protection, /Release tag creation/);
+		assert.match(protection, /Immutable release tags/);
+		assert.match(protection, /\.type == "creation"/);
+		assert.match(protection, /\.type == "update"/);
+		assert.match(protection, /\.type == "deletion"/);
+		assert.match(protection, /current_user_can_bypass == "always"/);
+		assert.match(protection, /current_user_can_bypass == "never"/);
+		assert.doesNotMatch(protection, /bypass_actors/);
+
+		const createTag = workflowStep(tagJob, "Create or verify release tag").run ?? "";
+		assert.match(createTag, /git\/ref\/tags\/\$TAG/);
+		assert.match(createTag, /object_type.*commit/);
+		assert.match(createTag, /object_sha.*MERGE_SHA/);
+		assert.match(createTag, /refs\/tags\/\$TAG/);
+
+		const names = tagJob?.steps?.map(step => step.name) ?? [];
+		assert.ok(names.indexOf("Verify release tag protection") < names.indexOf("Create or verify release tag"));
+	});
+
+	it("publishes in the same run with read-only contents and short-lived npm OIDC", () => {
+		const publishJob = releaseWorkflow.jobs?.publish;
+		assert.equal(publishJob?.needs, "tag");
+		assert.deepEqual(publishJob?.permissions, {
+			contents: "read",
+			"id-token": "write",
+		});
+
+		const checkout = workflowStep(publishJob, "Checkout tagged merge commit");
+		assert.equal(checkout.with?.ref, "${{ needs.tag.outputs.merge-sha }}");
+		assert.equal(checkout.with?.["persist-credentials"], false);
+		workflowStep(publishJob, "Verify release tag");
+		workflowStep(publishJob, "Install");
+		const publish = workflowStep(publishJob, "Publish (OIDC trusted publishing)").run ?? "";
+		assert.match(publish, /npm publish --provenance --tag "\$DIST_TAG"/);
+		assert.doesNotMatch(publish, /npm view|already published/);
+
+		const names = publishJob?.steps?.map(step => step.name) ?? [];
+		assert.ok(names.indexOf("Verify release tag") < names.indexOf("Install"));
+		assert.ok(names.indexOf("Install") < names.indexOf("Publish (OIDC trusted publishing)"));
+	});
+
+	it("keeps the runbook aligned with action-owned tags and merge-as-publish", () => {
+		assert.match(skill, /Merging publishes/);
+		assert.match(skill, /release workflow owns the tag/i);
+		assert.match(skill, /Release tag creation.*Immutable release tags/s);
+		assert.match(skill, /before.*release\nPR merge in §8/s);
+		assert.doesNotMatch(skill, /git tag -[sa]|git push origin v<new-version>|user\.signingkey/);
+	});
+});
+
 describe("release skill pre-flight order", () => {
 	it("audits the built tarball consumer before type-checking and tests", () => {
 		assert.equal(
@@ -71,7 +189,8 @@ describe("release skill pre-flight order", () => {
 		assert.ok(position("npm run build") < position("npm run audit:packed-consumer"));
 		assert.ok(position("npm run audit:packed-consumer") < position("npm run check"));
 		assert.ok(position("npm run check") < position("npm run test:unit"));
-		assert.ok(position("npm run test:unit") < position("npm run test:e2e"));
+		assert.ok(position("npm run test:unit") < position("npm run test:browser"));
+		assert.ok(position("npm run test:browser") < position("npm run test:e2e"));
 	});
 
 	it("keeps mutable advisory availability release-only and blocks every finding", () => {

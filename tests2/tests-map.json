@@ -976,7 +976,7 @@
     },
     {
       "path": "tests2/core/release-skill-preflight-order.test.ts",
-      "reason": "Pins the scoped npm identity used by release verification/reporting and the clean-release pre-flight order required by emitted test declarations.",
+      "reason": "Pins the merge-authorized, exact-SHA, least-privilege OIDC tag-and-publish workflow, its aligned release runbook, the scoped npm identity, and the clean-release pre-flight order required by emitted test declarations.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

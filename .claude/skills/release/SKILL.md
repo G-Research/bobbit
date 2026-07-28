@@ -1,15 +1,16 @@
 ---
 name: release
-description: Cut a Bobbit release — preflight checks, version bump, signed tag (CI publishes the root to npm via OIDC on tag push), optional binary sub-packages, GitHub release with generated notes.
+description: Cut a Bobbit release — preflight checks, version bump, release PR (CI tags and publishes the root via npm OIDC), optional binary sub-packages, GitHub release, and smoke test.
 argument-hint: [major|minor|patch|<explicit-version>]
 ---
 
-Drive an end-to-end release of Bobbit. The maintainer (human) must be at the
-keyboard to sign the tag, and for `npm login` / OTP prompts **only when
-republishing binary sub-packages** — pause and ask when the flow needs them.
-The root `@gresearch/bobbit` package publishes automatically via CI (npm
-trusted publishing / OIDC) when the signed tag is pushed; **never** run a
-manual root `npm publish`.
+Drive an end-to-end release of Bobbit. The maintainer (human) must approve the
+release notes and the final release PR merge, and must be at the keyboard for
+`npm login` / OTP prompts **only when republishing binary sub-packages**. Merging
+the validated release PR makes the release public: GitHub Actions creates the
+tag at the exact squash-merge commit and publishes the root
+`@gresearch/bobbit` package through npm trusted publishing/OIDC. **Never**
+create the root tag or run a manual root `npm publish`.
 
 Single source of truth for release mechanics: [`docs/releasing.md`](../../../docs/releasing.md).
 This skill orchestrates that doc + version bump + notes + GitHub release.
@@ -23,8 +24,8 @@ second worktree while the primary already has it. Instead, §1.5 creates a
 dedicated **detached-HEAD worktree off `origin/main`** (a sibling of the
 primary, *not* under `*-wt/`), and every mutating step runs there. The release
 commit is pushed to a `release/v<version>` branch and squash-merged through the
-repository's required PR flow (§6–§8); the resulting merge commit is what gets
-tagged. The E2E harness binds port 0 and uses ephemeral `BOBBIT_DIR`s, so
+repository's required PR flow (§6–§8); the merge triggers the automated tag and
+root publish. The E2E harness binds port 0 and uses ephemeral `BOBBIT_DIR`s, so
 `test:e2e` won't collide with the running dev server.
 
 ## 0. Sanity check the environment
@@ -41,8 +42,8 @@ git log --oneline <prev-tag>..origin/main | head    # must be non-empty (somethi
 node -v                                  # must satisfy engines.node (>=22.19.0)
 npm whoami                               # only needed if republishing binary sub-packages (§3); root ships via CI
 gh auth status                           # must be authed for G-Research/bobbit
-git config --get user.signingkey || echo "NO_SIGNING_KEY"
-git config --get commit.gpgsign || echo "commit.gpgsign=unset"
+gh api repos/G-Research/bobbit/rulesets \
+  --jq '.[] | select(.target == "tag") | [.name, .enforcement] | @tsv'
 ```
 
 Note: do **not** gate on the current worktree's branch or cleanliness — the
@@ -54,7 +55,7 @@ so the session/primary worktree state is irrelevant. What matters is that
 - `origin/main` has nothing new since the previous tag (nothing to release), or it isn't the commit they expect to ship.
 - `npm whoami` fails **and** step 3 will republish binary sub-packages — ask them to run `npm login` (and enable 2FA if not already; npm requires OTP for those sub-package publishes). The root `@gresearch/bobbit` publish needs no npm login — it goes through CI/OIDC.
 - `gh auth status` not logged in — ask them to run `gh auth login`.
-- No GPG/SSH signing key configured — confirm whether to proceed with **unsigned** tag or wait until they set one up. Default to waiting.
+- The active **Release tag creation** and **Immutable release tags** rulesets required by [`docs/releasing.md`](../../../docs/releasing.md#automated-root-release) are absent or misconfigured — stop until a repository administrator fixes them.
 
 ## 1. Decide the new version
 
@@ -138,7 +139,7 @@ git diff v<prev>..HEAD -- binaries.versions.json
 npm version <new-version> --no-git-tag-version
 ```
 
-`--no-git-tag-version` because we want a signed tag, not the unsigned one `npm version` would otherwise create. **Don't commit yet** — the release notes (§5) are a tracked file and ship in the *same* `chore(release)` commit as the version bump (that's how prior releases do it, e.g. v0.11.0 bundled `RELEASE_NOTES_v0.11.0.md` with `package.json`). Leave the bumped `package.json` / `package-lock.json` (and any `binaries/*` edits from §3) staged-but-uncommitted until §5.
+`--no-git-tag-version` because the merge-triggered release workflow owns tag creation. **Don't commit yet** — the release notes (§5) are a tracked file and ship in the *same* `chore(release)` commit as the version bump (that's how prior releases do it, e.g. v0.11.0 bundled `RELEASE_NOTES_v0.11.0.md` with `package.json`). Leave the bumped `package.json` / `package-lock.json` (and any `binaries/*` edits from §3) staged-but-uncommitted until §5.
 
 ## 5. Generate release notes — then commit
 
@@ -162,16 +163,13 @@ Once the user approves the notes, commit the version bump and the notes together
 git add package.json package-lock.json RELEASE_NOTES_v<new-version>.md
 # include binaries/* package.json edits if §3 changed them
 git commit -m "chore(release): v<new-version>" \
-  --trailer "Co-authored-by: bobbit-ai <bobbit@bobbit.ai>" \
-  -S    # GPG/SSH-sign the commit if a signing key is configured
+  --trailer "Co-authored-by: bobbit-ai <bobbit@bobbit.ai>"
 ```
 
-If no signing key is set, drop `-S` (you already confirmed with the user in step 0).
-
 The commit lands on this worktree's detached HEAD — that's expected. The
-required squash merge in §8 creates the final `main` commit; that commit,
-not the detached release commit, is what gets tagged so npm, Git, and the
-GitHub release all agree.
+required squash merge in §8 creates the final `main` commit, and the release
+workflow tags that exact merge commit so npm, Git, and the GitHub release all
+agree.
 
 ## 6. Open the release PR and clear its gates
 
@@ -199,24 +197,24 @@ gh pr checks "$PR" --watch
 gh pr view "$PR" --json mergeStateStatus,reviewDecision,statusCheckRollup
 ```
 
-The PR must be ready to merge, but **do not merge it yet**. Publishing remains
-the last irreversible step before the source and tag become public. Do not
-create the tag before the squash merge because the pre-merge commit will not
-be the commit that lands on `main`.
+The PR must be ready to merge, but **do not merge it yet**. Merging is the
+irreversible publication approval because it immediately starts the automated
+tag and root publish. Publish any changed binary sub-packages first (§7), then
+pause for the maintainer's final merge confirmation (§8).
 
 ## 7. Publish binary sub-packages (only if step 3 bumped binaries)
 
-**The root `@gresearch/bobbit` package is NOT published here.** It publishes automatically
-via the `.github/workflows/release-publish.yml` workflow (npm trusted publishing
-/ OIDC, with provenance) when the signed tag is pushed in §8 — there is no manual
-root `npm publish`. Skip straight to §8 unless step 3 bumped the binary
-sub-packages.
+**The root `@gresearch/bobbit` package is NOT published here.** It publishes
+automatically through `.github/workflows/release-publish.yml` (npm trusted
+publishing/OIDC with provenance) when the release PR is merged in §8. There is
+no manual root `npm publish`. Skip straight to §8 unless step 3 bumped the
+binary sub-packages.
 
-If step 3 bumped binaries, publish the sub-packages now — **before** the tag push
-in §8, so they are on npm before the root that pins them. **Pause and confirm with
-the user** first; npm publishes are irreversible (you can `unpublish` for 72h but
-the version number is burned either way). Use `ask_user_choices` with the exact
-commands:
+If step 3 bumped binaries, publish the sub-packages now — **before** the release
+PR merge in §8, so they are on npm before the root that pins them. **Pause and
+confirm with the user** first; npm publishes are irreversible (you can
+`unpublish` for 72h but the version number is burned either way). Use
+`ask_user_choices` with the exact commands:
 
 ```bash
 npm publish ./binaries/binaries-darwin-arm64
@@ -231,10 +229,15 @@ Notes:
 - npm will prompt for OTP — that's the maintainer's job; just wait.
 - If publish fails after some sub-packages went through, **do not** try to bump+republish under a new version. Re-run `npm publish` on the remaining packages with the same version once the issue is fixed.
 
-## 8. Squash-merge the release PR, then tag it (this triggers the npm publish)
+## 8. Confirm, squash-merge, and watch the automated release
 
-Once the release PR is fully green and mergeable, squash-merge it.
-Pin the subject and co-author trailer explicitly:
+Once the release PR is fully green and mergeable, **pause and confirm with the
+maintainer** that merging should publish v<new-version>. The merge is the final
+irreversible action: `.github/workflows/release-publish.yml` validates the
+merged PR, creates `v<new-version>` at its exact squash commit, and publishes
+the root package through npm OIDC.
+
+After confirmation, pin the squash subject and co-author trailer explicitly:
 
 ```bash
 gh pr merge "$PR" \
@@ -250,33 +253,35 @@ git diff --exit-code HEAD "$MERGE_SHA" -- \
   package.json package-lock.json RELEASE_NOTES_v<new-version>.md
 ```
 
-Tag the PR's exact squash commit, not the current `origin/main` tip (another
-PR may have merged immediately afterward). **Pushing the tag triggers the root
-npm publish** (`.github/workflows/release-publish.yml`) and is irreversible —
-pause and confirm with the user before the `git push`:
+Wait for the merge-triggered workflow to appear, then watch it through tag
+creation and publication:
 
 ```bash
-git tag -s v<new-version> "$MERGE_SHA" -m "Bobbit v<new-version>"
-git tag -v v<new-version>
-git push origin v<new-version>       # -> release-publish.yml publishes @gresearch/bobbit to npm (OIDC + provenance)
+RUN_ID=""
+for _ in $(seq 1 30); do
+  RUN_ID=$(gh run list --workflow release-publish.yml --commit "$MERGE_SHA" \
+    --limit 1 --json databaseId -q '.[0].databaseId')
+  [ -n "$RUN_ID" ] && break
+  sleep 2
+done
+[ -n "$RUN_ID" ]
+gh run watch "$RUN_ID" --exit-status
+
+git fetch origin --tags
+test "$(git rev-list -n1 v<new-version>)" = "$MERGE_SHA"
+npm view @gresearch/bobbit@<new-version> version
 ```
 
-If the user explicitly opted out of signing in step 0, use `git tag -a`
-instead and inspect it with `git show --no-patch v<new-version>`.
+If the workflow fails before `npm publish`, repair the cause and re-run **the
+same workflow run**; tag creation is idempotent only when the existing tag
+points to the expected merge SHA. If the publish command fails after the
+registry may have accepted the package, inspect the published package and its
+provenance before taking any further action. The workflow deliberately does not
+silently accept an existing npm version. Do not bump the version, create or move
+the tag manually, or create a second release PR for the same version.
 
-Then watch the publish workflow and confirm it succeeds before moving on:
-
-```bash
-gh run watch "$(gh run list --workflow release-publish.yml --branch v<new-version> --limit 1 --json databaseId -q '.[0].databaseId')" --exit-status
-```
-
-If the publish job fails (e.g. transient registry error), **re-run the same
-workflow run** for the same version — do not bump the version or re-tag; the
-tag is already public and the version number is immutable.
-
-If merging fails, stop and repair the same release PR. Do not change the
-version, create a second release commit, force-push `main`, or tag the
-detached pre-merge commit.
+If merging itself fails, stop and repair the same release PR. Do not change the
+version, force-push `main`, or tag the detached pre-merge commit.
 
 **Refresh the running dev server** so it picks up the release commit (its
 local `main` is now behind remote):
@@ -297,7 +302,7 @@ gh release create v<new-version> \
 
 `--verify-tag` ensures gh refuses to create the release if the tag doesn't already exist on the remote (catches push-skipped-by-mistake).
 
-If this is a pre-release (version contains `-beta`, `-rc`, `-alpha`), add `--prerelease`.
+If the version contains any prerelease suffix after `-` (for example `-beta`, `-rc.1`, or `-next.2`), add `--prerelease`.
 
 ## 10. Post-release smoke
 
@@ -336,12 +341,12 @@ Report to the user:
 
 ## Rules / best practices
 
-- **Signed tag, always.** Use `git tag -s`. Only fall back to `-a` if the maintainer explicitly opted out in step 0.
-- **Signed commit if a signing key is configured.** Add `-S` to `git commit`. Never override `user.name` / `user.email`; never silently disable signing.
-- **The root publish is CI-only.** It runs via `release-publish.yml` (OIDC trusted publishing) on the tag push, with provenance automatic. Never run a manual root `npm publish`.
+- **The release workflow owns the tag.** Never create, move, or delete a root release tag manually. The automated lightweight tag must point to the release PR's exact squash-merge commit.
+- **Merging publishes.** Treat the final release PR merge confirmation as the irreversible release approval.
+- **The root publish is CI-only.** `release-publish.yml` creates the tag and publishes through npm OIDC with automatic provenance. Never run a manual root `npm publish`.
 - **OTP is the human's job** — but only for the binary sub-package publishes. Pause and let them type it; don't try to read it from anywhere. The root publish uses no OTP.
 - **Never `npm publish --force`.** If a sub-package republish is genuinely needed, bump the patch version and republish cleanly. If the CI root publish fails, re-run the same workflow run for the same version.
-- **Never delete a tag that's been pushed.** If you tagged wrong, bump the version and tag again — published version numbers are immutable.
-- **Use the required squash-merge PR flow.** Never tag the detached release commit; tag the PR's exact `mergeCommit` SHA after verifying its package version and release files.
+- **Never delete or move a published tag.** If a release is wrong, fix it in a new version — published version numbers are immutable.
+- **Use the required squash-merge PR flow.** Never tag the detached release commit; the workflow validates and tags the PR's exact `mergeCommit` SHA.
 - **One release at a time.** Don't start a second version bump while the previous tag/publish is in flight.
 - **Stop on any test, audit, or check failure.** Releases amplify bugs — the cost of waiting a day is tiny; the cost of a bad publish is days of cleanup.
