@@ -30,7 +30,15 @@ function fixtureRoot(label: string): string {
 	return root;
 }
 
-function contribution(listName: string, entryPath: string | undefined, status: ResolvedPiExtensionContribution["diagnostic"]["status"] = "ok"): ResolvedPiExtensionContribution {
+function contribution(
+	listName: string,
+	entryPath: string | undefined,
+	status: ResolvedPiExtensionContribution["diagnostic"]["status"] = "ok",
+	discovery: ResolvedPiExtensionContribution["discovery"] = {
+		status: "ok",
+		tools: [{ name: `${listName}_tool`, description: `${listName} tool` }],
+	},
+): ResolvedPiExtensionContribution {
 	return {
 		listName,
 		entryPath,
@@ -38,7 +46,7 @@ function contribution(listName: string, entryPath: string | undefined, status: R
 		packRoot: entryPath ? path.dirname(entryPath) : process.cwd(),
 		origin: { scope: "project", packName: "pi-pack", packId: "market:project:pi-pack" },
 		diagnostic: { status, code: status, message: `${listName} ${status}`, updatedAt: "2026-01-01T00:00:00.000Z" },
-		discovery: { status: "ok", tools: [{ name: `${listName}_tool`, description: `${listName} tool` }] },
+		discovery,
 	};
 }
 
@@ -85,6 +93,38 @@ describe("marketplace pi extension activation args", () => {
 		assert.deepEqual(extensionPaths(result.args), [a, b]);
 		assert.deepEqual(result.tools.map((t) => t.name), ["enabled_tool", "discovery_failed_tool"]);
 		assert.equal(result.diagnostics.length, 4);
+	});
+
+	it("reports when appended runtime registrations require the immutable read_session boundary", () => {
+		const root = path.resolve("/virtual/pi-boundary");
+		const discoveredRead = resolveMarketplacePiExtensionActivation(
+			() => [contribution("read", path.join(root, "read.ts"), "ok", { status: "ok", tools: [{ name: "read_session" }] })],
+			"project-1",
+			root,
+		);
+		assert.equal(discoveredRead.readSessionBoundaryRequired, true);
+
+		const discoveredNonRead = resolveMarketplacePiExtensionActivation(
+			() => [contribution("demo", path.join(root, "demo.ts"), "ok", { status: "ok", tools: [{ name: "pi_demo" }] })],
+			"project-1",
+			root,
+		);
+		assert.equal(discoveredNonRead.readSessionBoundaryRequired, false);
+
+		const failedUnknown = resolveMarketplacePiExtensionActivation(
+			() => [contribution("unknown", path.join(root, "unknown.ts"), "discovery-failed", { status: "failed", tools: [] })],
+			"project-1",
+			root,
+		);
+		assert.equal(failedUnknown.readSessionBoundaryRequired, true);
+
+		const disabledUnknown = resolveMarketplacePiExtensionActivation(
+			() => [contribution("disabled", path.join(root, "disabled.ts"), "disabled", { status: "failed", tools: [] })],
+			"project-1",
+			root,
+		);
+		assert.equal(disabledUnknown.readSessionBoundaryRequired, false);
+		assert.deepEqual(disabledUnknown.args, []);
 	});
 
 	it("threads marketplace pi extension args through SessionManager restore/respawn helper after Bobbit activation args", () => {

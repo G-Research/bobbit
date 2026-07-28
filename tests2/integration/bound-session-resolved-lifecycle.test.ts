@@ -6,6 +6,11 @@ import path from "node:path";
 import { expect } from "vitest";
 
 import { ToolManager, __resetToolScanCache } from "../../src/server/agent/tool-manager.ts";
+import {
+	scopedToolContext,
+	type ResolvedPiExtensionContribution,
+} from "../../src/server/agent/session-setup.ts";
+import { resetToolResultErrorBridgeExtensionCache } from "../../src/server/agent/tool-result-error-bridge-extension.ts";
 import { test as gatewayTest } from "./_e2e/in-process-harness.js";
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
 import { InProcessMockBridge } from "../../tests/e2e/in-process-mock-bridge.mjs";
@@ -627,6 +632,259 @@ gatewayTest("resolved stale server and remapped project/sandbox winners stay gua
 		if (projectId) await gateway.api(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
 		if (oldFetchLog === undefined) delete process.env.BOBBIT_LIFECYCLE_FETCH_LOG;
 		else process.env.BOBBIT_LIFECYCLE_FETCH_LOG = oldFetchLog;
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+// Marketplace Pi discovery is intentionally lazy and mutates the scoped
+// ToolManager only when SessionManager resolves runtime contributions. These
+// lifecycle cases begin with an empty scoped catalogue and make only the
+// tool-result boundary directory unwritable, leaving the rest of gateway state
+// available so a stale pre-discovery decision cannot be mistaken for setup I/O.
+type MarketplaceBoundaryKind = "read" | "unknown" | "non-read";
+
+type MarketplaceBoundaryScenario = {
+	kind: MarketplaceBoundaryKind;
+	cwd: string;
+	entryPath: string;
+	calls: Array<{ catalogueEmptyBeforeResolution: boolean }>;
+};
+
+function marketplaceRuntimeToolName(kind: MarketplaceBoundaryKind): string {
+	return kind === "non-read" ? "pi_demo" : "read_session";
+}
+
+function writeMarketplaceBoundaryExtension(root: string, kind: MarketplaceBoundaryKind): string {
+	const extensionRoot = path.join(root, "pi-extensions", kind);
+	const entryPath = path.join(extensionRoot, "extension.mjs");
+	const toolName = marketplaceRuntimeToolName(kind);
+	fs.mkdirSync(extensionRoot, { recursive: true });
+	fs.writeFileSync(entryPath, [
+		"export default function activate(pi) {",
+		"  pi.registerTool({",
+		`    name: ${JSON.stringify(toolName)},`,
+		"    description: 'Marketplace boundary lifecycle fixture',",
+		"    inputSchema: { type: 'object', properties: {} },",
+		"    async execute() { return { content: [{ type: 'text', text: 'ok' }] }; },",
+		"  });",
+		"}",
+		"",
+	].join("\n"));
+	return entryPath;
+}
+
+function marketplaceBoundaryContribution(scenario: MarketplaceBoundaryScenario): ResolvedPiExtensionContribution {
+	const discoveryFailed = scenario.kind === "unknown";
+	return {
+		listName: `boundary-${scenario.kind}`,
+		entryPath: scenario.entryPath,
+		entryRelativePath: path.relative(path.dirname(path.dirname(scenario.entryPath)), scenario.entryPath),
+		packRoot: path.dirname(path.dirname(scenario.entryPath)),
+		origin: {
+			scope: "project",
+			packName: `boundary-${scenario.kind}`,
+			packId: `market:project:boundary-${scenario.kind}`,
+		},
+		diagnostic: {
+			status: discoveryFailed ? "discovery-failed" : "ok",
+			code: discoveryFailed ? "probe_failed" : "ok",
+			message: discoveryFailed ? "fixture discovery failed" : "fixture discovered",
+			updatedAt: "2026-01-01T00:00:00.000Z",
+		},
+		discovery: discoveryFailed
+			? {
+				status: "failed",
+				tools: [],
+				diagnostic: {
+					status: "discovery-failed",
+					code: "probe_failed",
+					message: "fixture discovery failed",
+					updatedAt: "2026-01-01T00:00:00.000Z",
+				},
+			}
+			: { status: "ok", tools: [{ name: marketplaceRuntimeToolName(scenario.kind) }] },
+	};
+}
+
+function snapshotPath(source: string, backup: string): { existed: boolean; directory: boolean } {
+	if (!fs.existsSync(source)) return { existed: false, directory: false };
+	const directory = fs.statSync(source).isDirectory();
+	if (directory) fs.cpSync(source, backup, { recursive: true });
+	else fs.copyFileSync(source, backup);
+	return { existed: true, directory };
+}
+
+function restorePath(target: string, backup: string, snapshot: { existed: boolean; directory: boolean }): void {
+	fs.rmSync(target, { recursive: true, force: true });
+	if (!snapshot.existed) return;
+	fs.mkdirSync(path.dirname(target), { recursive: true });
+	if (snapshot.directory) fs.cpSync(backup, target, { recursive: true });
+	else fs.copyFileSync(backup, target);
+}
+
+gatewayTest("marketplace Pi discovery requires the result boundary on initial setup and restore", async ({ gateway }) => {
+	const runtime = await loadServerTestRuntime();
+	const rpcRuntime = runtime.rpcBridge;
+	const sessionManager: any = gateway.sessionManager;
+	const originalFactory = rpcRuntime.getRegisteredRpcBridgeFactory();
+	const originalToolManager = sessionManager.toolManager;
+	const originalResolver = sessionManager.marketplacePiExtensionResolver;
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "marketplace-pi-boundary-lifecycle-"));
+	const configDir = path.join(root, "config");
+	const builtinDir = path.join(root, "builtin-tools");
+	fs.mkdirSync(configDir, { recursive: true });
+	fs.mkdirSync(builtinDir, { recursive: true });
+	const toolManager = new ToolManager(configDir, builtinDir);
+	const boundaryBase = path.join(gateway.bobbitDir, "state", "tool-result-error-bridge");
+	const boundaryBackup = path.join(root, "boundary-backup");
+	const boundarySnapshot = snapshotPath(boundaryBase, boundaryBackup);
+	const scenarios = new Map<string, MarketplaceBoundaryScenario>();
+	const sessionIds = new Set<string>();
+	const spawnArgs = new Map<string, string[][]>();
+
+	for (const kind of ["read", "unknown", "non-read"] as const) {
+		const cwd = path.join(root, kind);
+		fs.mkdirSync(cwd, { recursive: true });
+		scenarios.set(path.resolve(cwd), {
+			kind,
+			cwd,
+			entryPath: writeMarketplaceBoundaryExtension(cwd, kind),
+			calls: [],
+		});
+	}
+
+	const restoreBoundary = () => {
+		resetToolResultErrorBridgeExtensionCache();
+		restorePath(boundaryBase, boundaryBackup, boundarySnapshot);
+	};
+	const blockBoundary = () => {
+		resetToolResultErrorBridgeExtensionCache();
+		fs.rmSync(boundaryBase, { recursive: true, force: true });
+		fs.mkdirSync(path.dirname(boundaryBase), { recursive: true });
+		fs.writeFileSync(boundaryBase, "block only result-boundary materialization", "utf8");
+	};
+	const clearScenarioCatalogue = (scenario: MarketplaceBoundaryScenario) => {
+		toolManager.clearScopedPiExtensionTools(scopedToolContext(gateway.defaultProjectId, scenario.cwd));
+	};
+	const create = (scenario: MarketplaceBoundaryScenario, phase: string) => {
+		const sessionId = `market-boundary-${scenario.kind}-${phase}-${randomUUID()}`;
+		sessionIds.add(sessionId);
+		return sessionManager.createSession(scenario.cwd, undefined, undefined, undefined, {
+			projectId: gateway.defaultProjectId,
+			sessionId,
+			title: `Marketplace boundary ${scenario.kind} ${phase}`,
+			skipAutoModel: true,
+			skipAutoThinking: true,
+			env: { BOBBIT_MARKETPLACE_BOUNDARY_SESSION: sessionId },
+		});
+	};
+	const expectBoundaryFailure = async (promise: Promise<unknown>) => {
+		await expect(promise).rejects.toThrow(/read_session safety boundary could not be written or verified/);
+	};
+	const assertLastResolutionStartedEmpty = (scenario: MarketplaceBoundaryScenario) => {
+		expect(scenario.calls.at(-1)?.catalogueEmptyBeforeResolution).toBe(true);
+	};
+
+	sessionManager.toolManager = toolManager;
+	sessionManager.setMarketplacePiExtensionResolver((scope: { projectId?: string; cwd?: string }) => {
+		const scenario = scope.cwd ? scenarios.get(path.resolve(scope.cwd)) : undefined;
+		if (!scenario) return [];
+		const context = scopedToolContext(scope.projectId, scope.cwd);
+		const runtimeName = marketplaceRuntimeToolName(scenario.kind);
+		const catalogueEmptyBeforeResolution = !toolManager.getToolProviders(context).has(runtimeName);
+		scenario.calls.push({ catalogueEmptyBeforeResolution });
+		const contribution = marketplaceBoundaryContribution(scenario);
+		toolManager.setScopedPiExtensionTools(context, contribution.discovery.tools.map((tool) => ({
+			name: tool.name,
+			runtimeName: tool.name,
+			description: tool.description ?? "Marketplace boundary lifecycle fixture",
+			group: "Pi Extensions",
+			providerKey: `pi-ext:project:${contribution.origin.packId}:${contribution.listName}:${tool.name}`,
+			packName: contribution.origin.packName,
+			packId: contribution.origin.packId,
+			listName: contribution.listName,
+			scope: contribution.origin.scope,
+			sourcePath: contribution.entryPath,
+		})));
+		return [contribution];
+	});
+
+	rpcRuntime.registerRpcBridgeFactory((options: any) => {
+		const sessionId = options.env?.BOBBIT_MARKETPLACE_BOUNDARY_SESSION ?? options.env?.BOBBIT_SESSION_ID;
+		if (!sessionId || !sessionIds.has(sessionId)) return originalFactory?.(options) ?? null;
+		const rows = spawnArgs.get(sessionId) ?? [];
+		rows.push([...(options.args ?? [])]);
+		spawnArgs.set(sessionId, rows);
+		return new InProcessMockBridge(options) as any;
+	});
+
+	try {
+		// Initial setup: both known read_session and unknowable discovery-failed
+		// runtime registrations fail before RpcBridge construction. A successfully
+		// discovered non-read extension keeps the historical best-effort behavior.
+		for (const kind of ["read", "unknown"] as const) {
+			const scenario = scenarios.get(path.resolve(path.join(root, kind)))!;
+			clearScenarioCatalogue(scenario);
+			blockBoundary();
+			await expectBoundaryFailure(create(scenario, "initial"));
+			assertLastResolutionStartedEmpty(scenario);
+		}
+
+		const initialNonRead = scenarios.get(path.resolve(path.join(root, "non-read")))!;
+		clearScenarioCatalogue(initialNonRead);
+		blockBoundary();
+		const nonReadSession = await create(initialNonRead, "initial");
+		assertLastResolutionStartedEmpty(initialNonRead);
+		const nonReadInitialArgs = spawnArgs.get(nonReadSession.id)?.at(-1) ?? [];
+		expect(extensionPaths(nonReadInitialArgs)).toContain(initialNonRead.entryPath);
+		expect(extensionPaths(nonReadInitialArgs).some((value) => value.includes("tool-result-error-bridge"))).toBe(false);
+		await removeSession(gateway, nonReadSession.id, gateway.defaultProjectId);
+		sessionIds.delete(nonReadSession.id);
+
+		// Restore/respawn: seed each session while the boundary is writable, clear
+		// its scoped catalogue to reproduce a cold gateway scope, then corrupt only
+		// the boundary output path before the public restart lifecycle rebuilds argv.
+		for (const kind of ["read", "unknown", "non-read"] as const) {
+			const scenario = scenarios.get(path.resolve(path.join(root, kind)))!;
+			restoreBoundary();
+			clearScenarioCatalogue(scenario);
+			let session = await create(scenario, "restore");
+			await session.pendingMetadataPersist;
+			assertLastResolutionStartedEmpty(scenario);
+			const firstArgs = spawnArgs.get(session.id)?.at(-1) ?? [];
+			expect(extensionPaths(firstArgs)).toContain(scenario.entryPath);
+			if (kind !== "non-read") {
+				const boundaryIndex = extensionPaths(firstArgs).findIndex((value) => value.includes("tool-result-error-bridge"));
+				const marketplaceIndex = extensionPaths(firstArgs).indexOf(scenario.entryPath);
+				expect(boundaryIndex).toBeGreaterThanOrEqual(0);
+				expect(marketplaceIndex).toBeGreaterThan(boundaryIndex);
+			}
+
+			clearScenarioCatalogue(scenario);
+			blockBoundary();
+			if (kind === "non-read") {
+				await sessionManager.restartAgent(session.id);
+				session = sessionManager.getSession(session.id);
+				const restartedArgs = spawnArgs.get(session.id)?.at(-1) ?? [];
+				expect(extensionPaths(restartedArgs)).toContain(scenario.entryPath);
+				expect(extensionPaths(restartedArgs).some((value) => value.includes("tool-result-error-bridge"))).toBe(false);
+			} else {
+				await expectBoundaryFailure(sessionManager.restartAgent(session.id));
+				expect(spawnArgs.get(session.id)?.length).toBe(1);
+			}
+			assertLastResolutionStartedEmpty(scenario);
+			await removeSession(gateway, session.id, gateway.defaultProjectId);
+			sessionIds.delete(session.id);
+		}
+	} finally {
+		for (const sessionId of sessionIds) {
+			await removeSession(gateway, sessionId, gateway.defaultProjectId).catch(() => {});
+		}
+		sessionManager.toolManager = originalToolManager;
+		sessionManager.setMarketplacePiExtensionResolver(originalResolver);
+		rpcRuntime.registerRpcBridgeFactory(originalFactory);
+		resetToolResultErrorBridgeExtensionCache();
+		restorePath(boundaryBase, boundaryBackup, boundarySnapshot);
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 });

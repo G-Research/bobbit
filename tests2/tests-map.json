@@ -31,7 +31,7 @@
     },
     {
       "path": "tests2/integration/bound-session-resolved-lifecycle.test.ts",
-      "reason": "Production-resolved lifecycle proof for Bound Session Diagnostics: real SessionManager session creation and restart through the RpcBridge factory boundary spawn fresh Pi-compatible child agents that load stale server and project/sandbox winners, enforce snake/camel heavy-read guards before gateway fetch, remap immutable sandbox extensions, and keep quote/emoji/nested-result tool_execution_end plus persisted JSONL values identical and within 50 KiB.",
+      "reason": "Production-resolved lifecycle proof for Bound Session Diagnostics: real SessionManager session creation and restart through the RpcBridge factory boundary spawn fresh Pi-compatible child agents that load stale server and project/sandbox winners, enforce snake/camel heavy-read guards before gateway fetch, remap immutable sandbox extensions, and keep quote/emoji/nested-result tool_execution_end plus persisted JSONL values identical and within 50 KiB. Also starts Marketplace Pi scopes from an empty ToolManager catalogue and forces result-boundary materialization failure across initial setup and restore, pinning known read_session and discovery-failed fail-closed behavior without changing successfully discovered non-read activation.",
       "execution": {
         "runner": "vitest",
         "tier": "e2e",
