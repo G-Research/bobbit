@@ -264,6 +264,101 @@ describe("actual SessionManager spawn tuple boundaries", () => {
 		assert.notEqual(store.get(sessionId)?.modelProvider, "kimi-coding");
 	});
 
+	it("binds an unset reviewer selection to the current catalog before createSession returns", async () => {
+		const prefs = makePreferences("skip-auto-reviewer-without-model");
+		invalidateModelCache();
+		const expectedModel = expectedDefaultModel(await getAvailableModels(prefs));
+		const expected = splitModel(expectedModel)!;
+		const store = new RecordingStore();
+		const sessionId = "skip-auto-reviewer-without-model";
+		const goalId = "goal-reviewer-without-model";
+		const projectId = "project-reviewer-without-model";
+		const bridgeOptions: Record<string, any>[] = [];
+		let bridge: any;
+		registerRpcBridgeFactory((options: Record<string, any>) => {
+			bridgeOptions.push({ ...options });
+			bridge = makeBridge(options, sessionId);
+			return bridge;
+		});
+
+		const manager: any = new SessionManager({ preferencesStore: prefs, stateDir });
+		manager._testStore = store;
+		managers.push(manager);
+
+		assert.equal(prefs.get("default.reviewModel"), undefined, "fixture must leave default.reviewModel unset");
+		assert.equal(
+			manager.resolveInitialReviewModel("reviewer", projectId),
+			undefined,
+			"fixture must leave the reviewer role model unset",
+		);
+
+		const session = await manager.createSession(tmpRoot, undefined, goalId, undefined, {
+			sessionId,
+			projectId,
+			roleName: "reviewer",
+			rolePrompt: "Review the Bobbit-owned goal without a role/default review model",
+			skipAutoModel: true,
+			skipAutoThinking: true,
+			initialThinkingLevel: "off",
+		});
+
+		// Capture durability and manager-owned read-back before issuing our own
+		// observation below. Verification spawns may skip role/preference mutation,
+		// but createSession must still bind and verify a Bobbit catalog tuple before
+		// its promise resolves.
+		const durableAtReturn = store.get(sessionId);
+		const tupleWritesAtReturn = store.updates
+			.filter(({ id }) => id === sessionId)
+			.map(({ fields }) => fields)
+			.filter((fields) => ["modelProvider", "modelId", "effectiveThinkingLevel"]
+				.some((key) => Object.prototype.hasOwnProperty.call(fields, key)));
+		const stateReadsBeforeObservation = bridge.getState.mock.calls.length;
+		const liveStateResponse = await session.rpcClient.getState();
+		const liveState = liveStateResponse.data;
+
+		assert.deepEqual(
+			{
+				bridgeInitialModel: bridgeOptions[0]?.initialModel,
+				bridgeInitialThinking: bridgeOptions[0]?.initialThinkingLevel,
+				goalExtensionContext: bridgeOptions[0]?.env?.BOBBIT_GOAL_ID,
+				managerVerifiedReadBack: stateReadsBeforeObservation >= 2,
+				liveProvider: liveState?.model?.provider,
+				liveModelId: liveState?.model?.id,
+				liveThinking: liveState?.thinkingLevel,
+				durableProjectId: durableAtReturn?.projectId,
+				durableGoalId: durableAtReturn?.goalId,
+				durableProvider: durableAtReturn?.modelProvider,
+				durableModelId: durableAtReturn?.modelId,
+				durableThinking: durableAtReturn?.effectiveThinkingLevel,
+				tupleWritesAtReturn,
+				hiddenKimiSelected: bridgeOptions[0]?.initialModel?.startsWith("kimi-coding/") === true
+					|| liveState?.model?.provider === "kimi-coding"
+					|| durableAtReturn?.modelProvider === "kimi-coding",
+			},
+			{
+				bridgeInitialModel: expectedModel,
+				bridgeInitialThinking: "off",
+				goalExtensionContext: goalId,
+				managerVerifiedReadBack: true,
+				liveProvider: expected.provider,
+				liveModelId: expected.id,
+				liveThinking: "off",
+				durableProjectId: projectId,
+				durableGoalId: goalId,
+				durableProvider: expected.provider,
+				durableModelId: expected.id,
+				durableThinking: "off",
+				tupleWritesAtReturn: [{
+					modelProvider: expected.provider,
+					modelId: expected.id,
+					effectiveThinkingLevel: "off",
+				}],
+				hiddenKimiSelected: false,
+			},
+			"REVIEWER_UNSET_TUPLE_BOUNDARY: skipAuto flags must skip reviewer role/preference mutation, not explicit binding, read-back, and atomic durability of the current Bobbit catalog tuple",
+		);
+	});
+
 	it("verifies and durably commits an explicit skip-auto reviewer tuple in one update", async () => {
 		const prefs = makePreferences("skip-auto-reviewer");
 		invalidateModelCache();
