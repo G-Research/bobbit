@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/session-manager-bare-delegate-model-boundary.test.ts",
+      "reason": "Focused failing-first actual-SessionManager regression proving bare createDelegateSession rejects the exact deferred kimi-coding provider before RpcBridge construction, process start, or child persistence, while a selectable custom/local provider preserves a slash-containing Kimi-named model ID.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/session-manager-spawn-tuple-boundary-repro.test.ts",
       "reason": "Focused failing-first actual-SessionManager regressions proving a normal no-role/default spawn resolves an authenticated-first/shared-rank Bobbit catalog model before constructing Pi, and an explicit skip-auto reviewer spawn read-backs then durably commits provider/model/effective-thinking in one atomic update.",
       "execution": {
