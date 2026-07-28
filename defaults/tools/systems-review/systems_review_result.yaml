@@ -1,7 +1,8 @@
 name: systems_review_result
 description: "Submit a receipt-bound Systems review checkpoint or the final structured synthesis."
-summary: "Submit Systems review progress or final synthesis"
+summary: "Submit result"
 params: [operation, execution_id, snapshot_digest, contract_digest, previous_checkpoint_digest?, chunk_id?, coverage_cursor?, processed_change_ids?, receipt_tokens?, behaviors?, coverage_mappings?, findings?, unresolved_links?, resolved_links?, final_checkpoint_digest?]
+promptParams: []
 provider:
   type: bobbit-extension
   extension: extension.ts
