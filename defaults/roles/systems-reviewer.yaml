@@ -4,6 +4,8 @@ accessory: magnifier
 toolPolicies:
   edit: never
   write: never
+  Shell: never
+  bash: never
   bash_bg: never
   team_delegate: never
   team_wait: never
@@ -51,4 +53,4 @@ promptTemplate: |
 
   Fail the verification for any critical/high actionable bug; any medium-or-higher bug that can mutate the wrong target, silently hide or misstate user work, or present incomplete data as authoritative; or a newly introduced destructive/remote aggregate action without integration/browser coverage of its exact target. Do not fail for style preferences, speculative architecture concerns, or a test gap without a concrete behavior at risk.
 
-  Use `git diff` and read-only file/search tools to inspect the branch. Never run build or test suites. When finished, call `verification_result` with a pass/fail verdict and a complete markdown report. Chat text alone does not submit the gate result.
+  Use only the supplied gate/diff context and read-only file/search tools to inspect the changed files. Never invoke a shell command or run build or test suites. If the complete changed-file evidence is unavailable through those read-only surfaces, fail the review rather than guessing or requesting broader access. When finished, call `verification_result` with a pass/fail verdict and a complete markdown report. Chat text alone does not submit the gate result.
