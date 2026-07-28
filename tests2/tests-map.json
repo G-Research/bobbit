@@ -57,6 +57,15 @@
       }
     },
     {
+      "path": "tests2/core/systems-review-reader-bounds.test.ts",
+      "reason": "Adversarial bounded-reader coverage proving signed exact-position cursors exhaustively traverse large trees and literal matches while a 10 MiB common-query search early-stops without unbounded result allocation or false completeness.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/systems-review-continuation-store.test.ts",
       "reason": "Durable logical execution coverage pinning fresh reviewer-session bindings across restart/resume and process-wide writer lease exclusion/release semantics.",
       "execution": {
