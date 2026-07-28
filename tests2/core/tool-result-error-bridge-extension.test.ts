@@ -116,6 +116,65 @@ describe("tool result error bridge extension", () => {
 		assert.equal(projected.messages[0].toolResults[0].name, "read");
 	});
 
+	it("continues a sanitized upstream result slice from the emitted excerpt", async () => {
+		const activate = await loadGeneratedExtension();
+		const { pi, handlers } = makePi();
+		activate(pi);
+		const handle = "rs1:m4:b0:AAAAAAAAAAAAAAAAAAAAAAAAAAA";
+		const upstreamText = "x".repeat(8_192);
+		const envelope = {
+			total: 1,
+			returned: 1,
+			offsetStart: 4,
+			offsetEnd: 4,
+			messages: [{
+				index: 4,
+				role: "toolResult",
+				toolResults: [{
+					ref: "r1",
+					name: "read",
+					status: "ok",
+					size: { type: "string", chars: 12_000, lines: 1, bytes: 12_000 },
+					omitted: false,
+					handle,
+					excerpt: {
+						start: 0,
+						end: upstreamText.length,
+						text: upstreamText,
+						nextCursor: upstreamText.length,
+						complete: false,
+					},
+				}],
+			}],
+			partial: true,
+			truncatedBy: "transport_budget",
+			continuationRequest: {
+				kind: "result_slice",
+				result_handle: handle,
+				result_cursor: upstreamText.length,
+				result_limit: 4_096,
+			},
+		};
+		pi.tool({ name: "read_session" }, async () => envelope);
+
+		const result = await handlers.get("read_session")!({
+			session_id: "target",
+			result_handle: handle,
+		});
+		const projected = JSON.parse(result.content[0].text);
+		const emittedResult = projected.messages[0].toolResults[0];
+		assert.equal(emittedResult.handle, handle);
+		assert.equal(emittedResult.excerpt.text.length, 4_096);
+		assert.equal(emittedResult.excerpt.end, 4_096);
+		assert.equal(emittedResult.excerpt.nextCursor, 4_096);
+		assert.deepEqual(projected.continuationRequest, {
+			kind: "result_slice",
+			result_handle: handle,
+			result_cursor: 4_096,
+			result_limit: 4_096,
+		});
+	});
+
 	it("continues a fitted negative regex tail from its exact filtered position", async () => {
 		const activate = await loadGeneratedExtension();
 		const { pi, handlers } = makePi();
