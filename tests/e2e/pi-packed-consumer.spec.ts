@@ -21,7 +21,7 @@ const PI_PACKAGES = [
 	"@earendil-works/pi-coding-agent",
 ] as const;
 const INSPECTED_PACKAGES = [...PI_PACKAGES, "brace-expansion", "protobufjs"];
-const COMPATIBILITY_BASELINE = "0.81.1";
+const REQUIRED_PI_VERSION = "0.82.1";
 
 interface JsonRecord {
 	[key: string]: unknown;
@@ -200,7 +200,7 @@ test.describe("published Bobbit package dependency security", () => {
 			expect(new Set(piPins).size, "packed Bobbit must pin all three Pi packages to one version").toBe(1);
 			const selectedPiVersion = piPins[0]!;
 			parseVersion(selectedPiVersion, "selected Pi pin");
-			expect(compareVersions(selectedPiVersion, COMPATIBILITY_BASELINE)).toBeGreaterThanOrEqual(0);
+			expect(selectedPiVersion, "packed Bobbit must pin Pi exactly to the supported version").toBe(REQUIRED_PI_VERSION);
 			report.selectedPiVersion = selectedPiVersion;
 
 			const lsResult = await runNpm(
@@ -237,21 +237,10 @@ test.describe("published Bobbit package dependency security", () => {
 
 			const protobufOccurrences = occurrences.filter(entry => entry.name === "protobufjs");
 			expect(protobufOccurrences.length, "protobufjs must appear in the packed consumer tree").toBeGreaterThan(0);
-			const isKnown0811 = selectedPiVersion === COMPATIBILITY_BASELINE;
-			if (isKnown0811) {
-				const vulnerableEdges = protobufOccurrences.filter(entry => entry.version === "7.6.4");
-				expect(vulnerableEdges, "0.81.1 must retain exactly its one known shrinkwrap-owned protobuf edge").toHaveLength(1);
-				expect(vulnerableEdges[0].path).toContain("@earendil-works/pi-coding-agent");
-				expect(
-					protobufOccurrences.every(entry => entry.version === "7.6.4" || compareVersions(entry.version, "7.6.5") >= 0),
-					`unexpected protobufjs edge: ${JSON.stringify(protobufOccurrences)}`,
-				).toBe(true);
-			} else {
-				expect(
-					protobufOccurrences.every(entry => compareVersions(entry.version, "7.6.5") >= 0),
-					`Pi ${selectedPiVersion} must resolve every protobufjs edge to 7.6.5+: ${JSON.stringify(protobufOccurrences)}`,
-				).toBe(true);
-			}
+			expect(
+				protobufOccurrences.every(entry => compareVersions(entry.version, "7.6.5") >= 0),
+				`Pi ${selectedPiVersion} must resolve every protobufjs edge to 7.6.5+: ${JSON.stringify(protobufOccurrences)}`,
+			).toBe(true);
 
 			const binariesModulePath = join(installedRoot, "dist", "server", "binaries.js");
 			const binaries = await import(pathToFileURL(binariesModulePath).href) as {
