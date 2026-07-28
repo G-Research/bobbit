@@ -19,13 +19,8 @@
 import { performance } from "node:perf_hooks";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
-import type { GitStatusResult } from "../server.js";
+import type { GitStatusProbe, GitStatusResult } from "./git-status-envelope.js";
 import { parseBaseRef } from "./git.js";
-
-function childErrorCode(err: unknown): string {
-	const code = (err as { code?: unknown } | null)?.code;
-	return typeof code === "string" || typeof code === "number" ? String(code) : "error";
-}
 
 function statusGitOperation(args: readonly string[]): string {
 	const [cmd, sub] = args;
@@ -57,14 +52,65 @@ export interface BatchGitStatusOpts {
 
 const PER_CALL_TIMEOUT_MS = 3000;
 const CONTAINER_BATCH_TIMEOUT_MS = 15000;
+const NOT_REPOSITORY_RE = /not a git repository(?:\s|\(|$)/i;
+const CONTAINER_NOT_REPOSITORY = "__BOBBIT_GIT_STATUS__:NOT_REPOSITORY";
+const CONTAINER_PROBE_ERROR = "__BOBBIT_GIT_STATUS__:PROBE_ERROR:";
+const CONTAINER_OPTIONAL_ERROR = "__BOBBIT_GIT_STATUS__:OPTIONAL_ERROR";
 
-/** Spawn `git` (or `docker exec ... git`) and capture stdout. Never throws —
- * returns `{ ok: false, stdout: "" }` on any failure (non-zero exit, timeout,
- * spawn error). Argv array — never goes through a shell.
- *
- * `trim` defaults to true (strip surrounding whitespace, mirroring the legacy
- * bash script's behavior for single-line metadata). Pass `trim: false` for
- * porcelain output where leading spaces in status codes are significant. */
+interface GitCommandFailure {
+	error: Error;
+	diagnostic: string;
+	code?: string;
+	signal?: string;
+	killed?: boolean;
+	timedOut: boolean;
+}
+
+interface GitCommandResult {
+	stdout: string;
+	stderr: string;
+	ok: boolean;
+	failure?: GitCommandFailure;
+}
+
+function errorText(value: unknown): string {
+	return typeof value === "string" || Buffer.isBuffer(value) ? value.toString().trim() : "";
+}
+
+function commandFailure(err: unknown): GitCommandFailure {
+	const candidate = err as { stderr?: unknown; stdout?: unknown; message?: unknown; code?: unknown; signal?: unknown; killed?: unknown } | null;
+	const error = err instanceof Error ? err : new Error(typeof candidate?.message === "string" ? candidate.message : String(err));
+	const code = typeof candidate?.code === "string" || typeof candidate?.code === "number" ? String(candidate.code) : undefined;
+	const signal = typeof candidate?.signal === "string" ? candidate.signal : undefined;
+	const killed = candidate?.killed === true;
+	const diagnostic = errorText(candidate?.stderr) || errorText(candidate?.stdout) || error.message || "git command failed";
+	return {
+		error,
+		diagnostic,
+		code,
+		signal,
+		killed,
+		timedOut: killed || code === "ETIMEDOUT" || /timed?\s*out/i.test(error.message),
+	};
+}
+
+/** Only Git's explicit outside-repository diagnostic is terminal. */
+export function classifyMandatoryGitFailure(failure: GitCommandFailure): Exclude<GitStatusProbe, { kind: "success" }> {
+	// A numeric exit code means Git itself ran. Spawn-layer string codes,
+	// signals, and timeouts are always transient even if their text happens to
+	// contain Git's outside-repository diagnostic.
+	const processFailed = failure.timedOut
+		|| !!failure.signal
+		|| !failure.code
+		|| !/^\d+$/.test(failure.code);
+	if (!processFailed && NOT_REPOSITORY_RE.test(failure.diagnostic)) {
+		return { kind: "not-repository", diagnostic: failure.diagnostic };
+	}
+	return { kind: "error", error: failure.error, diagnostic: failure.diagnostic };
+}
+
+/** Spawn `git` and retain enough failure metadata to distinguish a definitive
+ * outside-repository result from spawn, timeout, permission, and unknown errors. */
 async function runGit(
 	args: string[],
 	cwd: string,
@@ -72,13 +118,14 @@ async function runGit(
 	timeoutMs = PER_CALL_TIMEOUT_MS,
 	trim = true,
 	commandRunner: CommandRunner = realCommandRunner,
-): Promise<{ stdout: string; ok: boolean }> {
+): Promise<GitCommandResult> {
 	const diagEnabled = cpuDiagnosticsEnabled();
 	const diagStart = diagEnabled ? performance.now() : 0;
 	let success = 0;
 	let errorCode = "none";
 	try {
 		let stdout: string;
+		let stderr: string;
 		if (containerId) {
 			const r = await commandRunner.execFile(
 				"docker",
@@ -86,6 +133,7 @@ async function runGit(
 				{ encoding: "utf-8", timeout: timeoutMs, windowsHide: true },
 			);
 			stdout = r.stdout.toString();
+			stderr = r.stderr.toString();
 		} else {
 			const r = await commandRunner.execFile("git", args, {
 				cwd,
@@ -94,12 +142,14 @@ async function runGit(
 				windowsHide: true,
 			});
 			stdout = r.stdout.toString();
+			stderr = r.stderr.toString();
 		}
 		success = 1;
-		return { stdout: trim ? stdout.trim() : stdout.replace(/\r?\n$/, ""), ok: true };
+		return { stdout: trim ? stdout.trim() : stdout.replace(/\r?\n$/, ""), stderr, ok: true };
 	} catch (err) {
-		errorCode = childErrorCode(err);
-		return { stdout: "", ok: false };
+		const failure = commandFailure(err);
+		errorCode = failure.code ?? "error";
+		return { stdout: "", stderr: "", ok: false, failure };
 	} finally {
 		if (diagEnabled) {
 			getCpuDiagnostics().recordChildProcess(containerId ? "docker exec git status" : "git status", performance.now() - diagStart, {
@@ -160,7 +210,7 @@ function parsePorcelain(raw: string): { status: { file: string; status: string }
 }
 
 /** Host path: parallel native execFile per design §2 (Phase A then Phase B). */
-async function runHost(cwd: string, untracked: boolean, configuredBaseRef: string | undefined, commandRunner: CommandRunner): Promise<GitStatusResult | null> {
+async function runHost(cwd: string, untracked: boolean, configuredBaseRef: string | undefined, commandRunner: CommandRunner): Promise<GitStatusProbe> {
 	const runGitStatus = (args: string[], timeoutMs = PER_CALL_TIMEOUT_MS, trim = true) => runGit(args, cwd, undefined, timeoutMs, trim, commandRunner);
 
 	const porcelainArgs = [
@@ -181,8 +231,13 @@ async function runHost(cwd: string, untracked: boolean, configuredBaseRef: strin
 		runGitStatus(["rev-parse", "--abbrev-ref", "@{u}"]),
 	]);
 
-	// A1 mandatory.
-	if (!a1.ok || !a1.stdout) return null;
+	// A1 is the mandatory repository probe. Only Git's known outside-repo
+	// diagnostic is terminal; every other failure remains retryable.
+	if (!a1.ok) return classifyMandatoryGitFailure(a1.failure ?? commandFailure(new Error("git repository probe failed")));
+	if (!a1.stdout) {
+		const error = new Error("git repository probe returned an empty branch");
+		return { kind: "error", error, diagnostic: error.message };
+	}
 	const branch = a1.stdout;
 
 	// primaryBranch resolution — honour configured `base_ref` when set, else
@@ -247,34 +302,40 @@ async function runHost(cwd: string, untracked: boolean, configuredBaseRef: strin
 	}
 
 	return {
-		branch,
-		primaryBranch,
-		primaryRef: pref,
-		isOnPrimary,
-		status,
-		hasUpstream,
-		ahead,
-		behind,
-		aheadOfPrimary,
-		behindPrimary,
-		mergedIntoPrimary,
-		insertionsVsPrimary,
-		deletionsVsPrimary,
-		clean,
-		summary,
-		unpushed: hasUpstream ? ahead > 0 : !mergedIntoPrimary,
-		partial: false,
-		untrackedIncluded: untracked,
+		kind: "success",
+		result: {
+			branch,
+			primaryBranch,
+			primaryRef: pref,
+			isOnPrimary,
+			status,
+			hasUpstream,
+			ahead,
+			behind,
+			aheadOfPrimary,
+			behindPrimary,
+			mergedIntoPrimary,
+			insertionsVsPrimary,
+			deletionsVsPrimary,
+			clean,
+			summary,
+			unpushed: hasUpstream ? ahead > 0 : !mergedIntoPrimary,
+			partial: !a5.ok
+				|| (hasUpstream && (!b1.ok || !b2.ok))
+				|| (!isOnPrimary && (!b3.ok || !b4.ok || !b5.ok || !b6.ok)),
+			untrackedIncluded: untracked && a5.ok,
+		},
 	};
 }
 
 /** Container path: preserve the legacy single-spawn batched script. The
  * Windows tax is host-side only; inside Linux containers `git` is fast and
  * one `docker exec sh -c` round-trip beats 11 parallel `docker exec` calls. */
-async function runContainer(cwd: string, containerId: string, untracked: boolean, configuredBaseRef: string | undefined, commandRunner: CommandRunner): Promise<GitStatusResult | null> {
-	const porcelainLine = untracked
-		? "git -c core.filemode=false status --porcelain=v1 -uall 2>/dev/null"
-		: "git -c core.filemode=false status --porcelain=v1 -uno 2>/dev/null";
+async function runContainer(cwd: string, containerId: string, untracked: boolean, configuredBaseRef: string | undefined, commandRunner: CommandRunner): Promise<GitStatusProbe> {
+	const porcelainCommand = untracked
+		? "git -c core.filemode=false status --porcelain=v1 -uall"
+		: "git -c core.filemode=false status --porcelain=v1 -uno";
+	const porcelainLine = `PORCELAIN=$(${porcelainCommand} 2>/dev/null); PORCELAIN_CODE=$?; if [ "$PORCELAIN_CODE" -eq 0 ]; then printf "%s" "$PORCELAIN"; else printf "${CONTAINER_OPTIONAL_ERROR}"; fi`;
 
 	// When `base_ref` is configured, substitute the resolved branch name
 	// directly into the script (saves a `symbolic-ref` round-trip and honours
@@ -289,7 +350,9 @@ async function runContainer(cwd: string, containerId: string, untracked: boolean
 			].join("\n");
 
 	const batchScript = [
-		"git rev-parse --abbrev-ref HEAD 2>/dev/null || echo __FAIL__",
+		'PROBE_OUTPUT=$(git rev-parse --abbrev-ref HEAD 2>&1)',
+		'PROBE_CODE=$?',
+		'if [ "$PROBE_CODE" -eq 0 ]; then printf "%s" "$PROBE_OUTPUT"; else case "$PROBE_OUTPUT" in *"not a git repository"*) printf "__BOBBIT_GIT_STATUS__:NOT_REPOSITORY" ;; *) PROBE_DIAG=$(printf "%s" "$PROBE_OUTPUT" | tr "\\r\\n" "  " | cut -c 1-400); printf "__BOBBIT_GIT_STATUS__:PROBE_ERROR:%s:%s" "$PROBE_CODE" "$PROBE_DIAG" ;; esac; fi',
 		'printf "\\0"',
 		"git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null || echo __FAIL__",
 		'printf "\\0"',
@@ -302,19 +365,19 @@ async function runContainer(cwd: string, containerId: string, untracked: boolean
 		"BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)",
 		'git rev-parse --abbrev-ref "$BRANCH@{u}" 2>/dev/null || echo __FAIL__',
 		'printf "\\0"',
-		"git rev-list --count @{u}..HEAD 2>/dev/null || echo 0",
+		`git rev-list --count @{u}..HEAD 2>/dev/null || echo ${CONTAINER_OPTIONAL_ERROR}`,
 		'printf "\\0"',
-		"git rev-list --count HEAD..@{u} 2>/dev/null || echo 0",
+		`git rev-list --count HEAD..@{u} 2>/dev/null || echo ${CONTAINER_OPTIONAL_ERROR}`,
 		'printf "\\0"',
 		primaryResolutionScript,
 		'if git rev-parse --verify "origin/$PRIMARY" >/dev/null 2>&1; then PREF="origin/$PRIMARY"; else PREF="$PRIMARY"; fi',
-		'git rev-list --count "$PREF..HEAD" 2>/dev/null || echo 0',
+		`git rev-list --count "$PREF..HEAD" 2>/dev/null || echo ${CONTAINER_OPTIONAL_ERROR}`,
 		'printf "\\0"',
-		'git rev-list --count "HEAD..$PREF" 2>/dev/null || echo 0',
+		`git rev-list --count "HEAD..$PREF" 2>/dev/null || echo ${CONTAINER_OPTIONAL_ERROR}`,
 		'printf "\\0"',
-		'git diff --shortstat "$PREF...HEAD" 2>/dev/null || true',
+		`git diff --shortstat "$PREF...HEAD" 2>/dev/null || printf "${CONTAINER_OPTIONAL_ERROR}"`,
 		'printf "\\0"',
-		'git diff --shortstat HEAD 2>/dev/null || true',
+		`git diff --shortstat HEAD 2>/dev/null || printf "${CONTAINER_OPTIONAL_ERROR}"`,
 		'printf "\\0"',
 		// Echo the resolved PREF so the host can report which ref was actually
 		// used (`origin/<primary>` if it exists, else the bare local branch).
@@ -340,8 +403,9 @@ async function runContainer(cwd: string, containerId: string, untracked: boolean
 		success = 1;
 		stdout = result.stdout.toString();
 	} catch (err) {
-		errorCode = childErrorCode(err);
-		throw err;
+		const failure = commandFailure(err);
+		errorCode = failure.code ?? "error";
+		return { kind: "error", error: failure.error, diagnostic: failure.diagnostic };
 	} finally {
 		if (diagEnabled) {
 			getCpuDiagnostics().recordChildProcess("docker exec git status", performance.now() - diagStart, {
@@ -356,7 +420,17 @@ async function runContainer(cwd: string, containerId: string, untracked: boolean
 
 	const sections = stdout.split("\0").map((s) => s.replace(/\s+$/, ""));
 	const branchRaw = sections[0] || "";
-	if (branchRaw === "__FAIL__" || !branchRaw) return null;
+	if (branchRaw === CONTAINER_NOT_REPOSITORY) {
+		return { kind: "not-repository", diagnostic: "Not a git repository" };
+	}
+	if (branchRaw.startsWith(CONTAINER_PROBE_ERROR)) {
+		const diagnostic = branchRaw.slice(CONTAINER_PROBE_ERROR.length).replace(/^\d+:/, "") || "container git repository probe failed";
+		return { kind: "error", error: new Error(diagnostic), diagnostic };
+	}
+	if (!branchRaw) {
+		const diagnostic = "container git repository probe returned an empty branch";
+		return { kind: "error", error: new Error(diagnostic), diagnostic };
+	}
 	const branch = branchRaw;
 
 	let primaryBranch = "master";
@@ -397,7 +471,8 @@ async function runContainer(cwd: string, containerId: string, untracked: boolean
 		deletionsVsPrimary = c.deletions + w.deletions;
 	}
 
-	const { status, clean, summary } = parsePorcelain(sections[4] || "");
+	const porcelainFailed = sections[4] === CONTAINER_OPTIONAL_ERROR;
+	const { status, clean, summary } = parsePorcelain(porcelainFailed ? "" : (sections[4] || ""));
 
 	// Section 12: the resolved PREF echoed by the batch script (see above).
 	// Fall back to the host-side mirror of the same `origin/<primary>` vs bare
@@ -405,40 +480,59 @@ async function runContainer(cwd: string, containerId: string, untracked: boolean
 	const primaryRef = sections[12] && sections[12] !== "" ? sections[12] : primaryBranch;
 
 	return {
-		branch,
-		primaryBranch,
-		primaryRef,
-		isOnPrimary,
-		status,
-		hasUpstream,
-		ahead,
-		behind,
-		aheadOfPrimary,
-		behindPrimary,
-		mergedIntoPrimary,
-		insertionsVsPrimary,
-		deletionsVsPrimary,
-		clean,
-		summary,
-		unpushed: hasUpstream ? ahead > 0 : !mergedIntoPrimary,
-		partial: false,
-		untrackedIncluded: untracked,
+		kind: "success",
+		result: {
+			branch,
+			primaryBranch,
+			primaryRef,
+			isOnPrimary,
+			status,
+			hasUpstream,
+			ahead,
+			behind,
+			aheadOfPrimary,
+			behindPrimary,
+			mergedIntoPrimary,
+			insertionsVsPrimary,
+			deletionsVsPrimary,
+			clean,
+			summary,
+			unpushed: hasUpstream ? ahead > 0 : !mergedIntoPrimary,
+			partial: porcelainFailed
+				|| (hasUpstream && (sections[6] === CONTAINER_OPTIONAL_ERROR || sections[7] === CONTAINER_OPTIONAL_ERROR))
+				|| (!isOnPrimary && sections.slice(8, 12).some((section) => section === CONTAINER_OPTIONAL_ERROR)),
+			untrackedIncluded: untracked && !porcelainFailed,
+		},
 	};
 }
 
-/** Top-level entry — dispatches to host (parallel native) or container
- * (batched docker exec). Never retries internally; caller (single-flight
- * cache + client) handles transient failure. */
-export async function runBatchGitStatusNative(
+/** Classified top-level probe used by the HTTP collector. Never retries. */
+export async function probeBatchGitStatusNative(
 	cwd: string,
 	opts?: BatchGitStatusOpts,
-): Promise<GitStatusResult | null> {
+): Promise<GitStatusProbe> {
 	const untracked = opts?.untracked === true;
 	const commandRunner = opts?.commandRunner ?? realCommandRunner;
 	if (opts?.containerId) {
 		return runContainer(cwd, opts.containerId, untracked, opts?.configuredBaseRef, commandRunner);
 	}
 	return runHost(cwd, untracked, opts?.configuredBaseRef, commandRunner);
+}
+
+/**
+ * Compatibility wrapper for callers that predate classified probes. Host
+ * failures retain the old nullable result; container execution errors retain
+ * the old rejection behaviour. New route code must use
+ * `probeBatchGitStatusNative` so transient failures cannot become terminal.
+ */
+export async function runBatchGitStatusNative(
+	cwd: string,
+	opts?: BatchGitStatusOpts,
+): Promise<GitStatusResult | null> {
+	const probe = await probeBatchGitStatusNative(cwd, opts);
+	if (probe.kind === "success") return probe.result;
+	if (probe.kind === "error" && opts?.containerId) throw probe.error;
+	return null;
 }
 
 /** Single-quote a string for safe inclusion in an `sh -c` shell script.

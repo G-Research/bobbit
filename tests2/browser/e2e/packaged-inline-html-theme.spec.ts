@@ -1,5 +1,5 @@
 import { test, expect, type Page, type TestInfo } from "@playwright/test";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
@@ -20,8 +20,8 @@ import {
 } from "./packaged-runtime-helpers.js";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
-const BOBBIT_PACKAGE_NAME = "@gresearch/bobbit";
-const BOBBIT_PACKAGE_PATH = BOBBIT_PACKAGE_NAME.split("/");
+const PACKAGE_NAME = (JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { name: string }).name;
+const PACKAGE_INSTALL_SEGMENTS = PACKAGE_NAME.split("/");
 const CANONICAL_BRIDGE_SIGNATURE = "data-bobbit-inline-theme-bridge";
 const SOURCE_BRIDGE_PATH = "src/shared/preview-bridge-scripts.ts";
 const THEME_TOKENS = ["--background", "--foreground", "--card", "--positive", "--chart-1"] as const;
@@ -215,7 +215,7 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			report.commands.push(packed);
 			expect(packed.code, commandFailure(packed)).toBe(0);
 			const pack = parsePackResult(packed.stdout);
-			expect(pack.name).toBe(BOBBIT_PACKAGE_NAME);
+			expect(pack.name).toBe(PACKAGE_NAME);
 			expect(typeof pack.filename).toBe("string");
 			report.packFiles = normalizedPackagePaths(pack);
 			expect(report.packFiles).toContain("dist/server/cli.js");
@@ -239,7 +239,7 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			report.commands.push(install);
 			expect(install.code, commandFailure(install)).toBe(0);
 
-			const installedRoot = join(consumerDir, "node_modules", ...BOBBIT_PACKAGE_PATH);
+			const installedRoot = join(consumerDir, "node_modules", ...PACKAGE_INSTALL_SEGMENTS);
 			const installedManifest = JSON.parse(await readFile(join(installedRoot, "package.json"), "utf8")) as {
 				bin?: Record<string, string>;
 			};

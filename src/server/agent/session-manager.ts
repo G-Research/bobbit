@@ -371,6 +371,15 @@ interface ArchivedWorktreeGuardRef {
 	repoWorktrees?: Record<string, string>;
 }
 
+/** Non-sandboxed polyrepo team leads borrow, but never own, the goal worktree set. */
+function hasGoalOwnedTeamLeadWorktrees(ps: Pick<PersistedSession, "role" | "goalId" | "teamGoalId" | "sandboxed" | "repoWorktrees">): boolean {
+	return ps.role === "team-lead"
+		&& !!(ps.teamGoalId ?? ps.goalId)
+		&& !ps.sandboxed
+		&& !!ps.repoWorktrees
+		&& Object.keys(ps.repoWorktrees).length > 0;
+}
+
 interface ArchivedWorktreeScanContext {
 	candidateContexts: ProjectContext[];
 	sessionPathRecords: WorktreeReferenceRecord[];
@@ -11132,6 +11141,9 @@ export class SessionManager {
 	}
 
 	private async archivedSessionWorktreeItems(ps: PersistedSession, ctx: ArchivedWorktreeScanContext, projectName?: string): Promise<ArchivedSessionWorktreeItem[]> {
+		// Borrowed goal worktrees remain goal-owned after the lead is archived;
+		// do not expose them as archived-session cleanup candidates.
+		if (hasGoalOwnedTeamLeadWorktrees(ps)) return [];
 		const specs: Array<{ repo: string; repoPath?: string; worktreePath?: string; branch?: string; source: "repoWorktrees" | "sessionWorktree" }> = [];
 		if (ps.repoWorktrees && Object.keys(ps.repoWorktrees).length > 0) {
 			for (const [repo, wt] of Object.entries(ps.repoWorktrees)) {
@@ -11519,8 +11531,9 @@ export class SessionManager {
 		// Clean up host worktree.  Sandboxed session worktrees also create a host-side
 		// worktree for server bookkeeping, so we clean those up too.  Skip paths that
 		// are container-internal (start with /workspace) — those have no host counterpart.
-		// Skip delegates — they share the parent's worktree and must never remove it.
-		if (ps.worktreePath && ps.repoPath && !ps.worktreePath.startsWith("/workspace") && !ps.delegateOf) {
+		// Skip delegates and non-sandboxed polyrepo leads — both borrow worktrees owned elsewhere.
+		const goalOwnsTeamLeadWorktrees = hasGoalOwnedTeamLeadWorktrees(ps);
+		if (ps.worktreePath && ps.repoPath && !ps.worktreePath.startsWith("/workspace") && !ps.delegateOf && !goalOwnsTeamLeadWorktrees) {
 			try {
 				const { cleanupWorktree, removeEmptyWorktreeSetContainer } = await import("../skills/git.js");
 				const allPersisted = this.getAllPersistedSessionsForWorktreeGuard();
@@ -11556,6 +11569,8 @@ export class SessionManager {
 			} catch (err) {
 				console.error(`[session-manager] Failed to cleanup worktree for ${ps.id}:`, err);
 			}
+		} else if (goalOwnsTeamLeadWorktrees) {
+			console.log(`[session-manager] Skipping goal-owned component worktree cleanup for purged team lead ${ps.id}.`);
 		}
 
 		// Remove color

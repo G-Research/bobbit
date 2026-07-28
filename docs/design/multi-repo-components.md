@@ -501,6 +501,20 @@ A `.` entry whose source *is* a git repo root (a genuine single-repo / container
 
 **Net effect.** Staff creation in a poly-repo now produces one worktree per git sub-repo under the branch container — byte-for-byte the same shape a regular session produces for the same project. Projects with no worktree-able git repo fall back to no-worktree instead of throwing.
 
+### 4.6 Team leads borrow the goal-owned set
+
+A non-sandboxed polyrepo team lead runs in the goal's existing branch container. Team startup passes the goal's `worktreePath`, `repoPath`, `branch`, and `repoWorktrees` into session creation and the subsequent metadata update. It does **not** claim a pool entry, call `createWorktreeSet`, or provision a parallel lead worktree. This keeps the lead and goal on the same component HEADs and avoids duplicate branches for what is conceptually one goal workspace.
+
+The coordinate shapes differ by lifecycle layer:
+
+- `PersistedGoal.repoWorktrees` and `PersistedSession.repoWorktrees` are `Record<string, string>` maps from repository key to worktree path. This compact form is the durable source across gateway restarts.
+- A live session expands the map to `Array<{ repo, repoPath, worktreePath }>` so callers have both the component worktree and its primary checkout. `repoPath` is derived from the persisted container `repoPath` and repository key.
+- `worktreePath`, `repoPath`, `branch`, and `repoWorktrees` are recovery-critical session fields, so metadata updates flush synchronously. Session restoration rebuilds the live array from the persisted record before Git-status and diff routes use it.
+
+Borrowing coordinates does not transfer cleanup ownership. The goal remains the owner of the directories, Git worktree registrations, and shared branch. Archiving a non-sandboxed polyrepo lead keeps its coordinates for restoration and history but excludes the borrowed set from archived-session cleanup. Purging the lead removes its record without deleting those worktrees. The normal reference guards still protect worktrees used by live goals, sessions, teams, or staff.
+
+If a team-store entry survives but its lead session record is missing, orphan recovery reconstructs the lead from the goal and copies the same component map for a non-sandboxed goal. That makes the recovered session status-capable without inventing new worktrees. Sandboxed leads retain sandbox-owned restoration instead, and Headquarters retains its no-worktree contract. These ownership boundaries matter because recovery metadata must make a workspace discoverable, not make it deletable by a second owner.
+
 ---
 
 ## 5. Worktree pool fixes
@@ -661,13 +675,17 @@ export function readHandoff(task: PersistedTask, repo: string):
 
 ### 6.2 Aggregated git status / diff
 
-`server.ts`:
+Goal and session Git-status routes normalize their different metadata shapes into the same ordered `{ repo, worktreePath }` targets, then use one collector and aggregation policy. Root and component probes run independently, so a non-Git branch container cannot prevent component status from being collected.
 
-- `GET /api/goals/:id/git-status` → returns `{ aggregate: GitStatus, repos: Record<string, GitStatus> }` for multi-repo; single-repo returns `{ aggregate, repos: { ".": aggregate } }` (back-compat — existing UI handles flat shape).
-- `GET /api/goals/:id/git-diff?repo=<name>` → diff scoped to a repo. Without `?repo=`, returns concatenated diff with per-repo headers.
-- `batchGitStatus()` (existing) is reused per-repo and aggregated.
+Both routes return a flat-compatible envelope:
 
-The matching **session-context** endpoints (`GET /api/sessions/:id/git-status` and `git-diff`) reached parity in a follow-up — see §13 for the session envelope, the synthesized aggregate for non-git branch containers, per-repo diff routing, and the container-diff security hardening.
+```typescript
+{ ...aggregate, aggregate: GitStatusResult, repos: Record<string, GitStatusResult> }
+```
+
+Configured component results are authoritative whenever at least one succeeds; the root is only a fallback when no component succeeds. This prevents a Git root or an offset `cwd` from duplicating or overriding component counts. A sole `"."` repository retains the flat single-repo shape, while a sole named component remains a component envelope. See §13 for synthesis, failure classification, fetch/cache behaviour, and UI semantics.
+
+Diff routing remains explicit and unchanged: `?repo=<name>` selects that component worktree for both goal and session routes. A missing or unknown repository parameter retains the route's root/container fallback. Widget file links from named sections always include the repository key, so a component file is diffed in the repository that reported it.
 
 ### 6.3 PR-per-repo
 
@@ -799,7 +817,7 @@ Plus:
 
 ### 8.4 Git status widget
 
-`src/ui/components/GitStatusWidget.ts`: when `repos` map has more than one entry, render a collapsible per-repo section with aggregated counts in the header:
+`GitStatusWidget` treats an envelope as component-oriented when `repos` has multiple entries **or any sole key other than `"."`**. Only `{ ".": result }` uses the flat single-repo rendering. This distinction matters for a polyrepo with one available named component: the repository section must remain visible rather than collapsing into an anonymous flat list.
 
 ```
 [Git status]  3 changed across 2 repos    ▾
@@ -808,7 +826,7 @@ Plus:
   shared   clean
 ```
 
-API contract change: existing flat shape continues for single-repo. Multi-repo returns the new envelope; widget detects and renders accordingly.
+The pill derives dirty counts and primary-comparison segments from `repos`; the dropdown renders one named collapsible section per returned component. Dirty sections open by default and clean sections remain collapsed. Both the session surface and goal dashboard accept the same successful envelope and reconstruct the sections after reload. The client treats only an exact 400 `Not a git repository` response as terminal; retryable failures do not hide the widget permanently, and a later successful envelope restores it.
 
 ### 8.5 `propose_project` tool
 
@@ -844,7 +862,9 @@ Acceptance side (`session-manager.ts::acceptProjectProposal`): writes `component
 
 ---
 
-## 9. Testing plan (mapped to acceptance criteria)
+## 9. Testing plan and regression ownership
+
+Sections 9.1–9.4 preserve the original feature acceptance plan. The current Test Suite v2 regression owners for the corrected Git-status lifecycle are listed in §9.5; those entries supersede older path and coverage claims for this follow-up.
 
 ### 9.1 Unit / file-fixture tests (`tests/*.spec.ts`)
 
@@ -879,6 +899,17 @@ Acceptance side (`session-manager.ts::acceptProjectProposal`): writes `component
 | AC | Test |
 |----|------|
 | 23 | `multi-repo-docker.test.ts` — real Docker, real git, two real repos in container; create goal; per-component setup runs inside container; one llm-review and one agent-qa gate execute end-to-end; teardown succeeds. |
+
+### 9.5 Current Git-status regression owners
+
+These tests are registered in `tests2/tests-map.json`:
+
+- `tests2/integration/team-spawn-multi-repo-real-git.test.ts` creates real component repositories beneath a non-Git root. It pins goal-owned coordinates, live and persisted lead metadata, session restoration, goal/session envelopes with real summed line counts, and archive/purge safety for the borrowed set.
+- `tests2/core/git-status-envelope.test.ts` pins component-authoritative synthesis, all required aggregate fields, root fallback, partial sibling survival, sole-named and sole-root shapes, missing-path classification, and deduplicated target side effects.
+- `tests2/core/git-status-native-classification.test.ts` pins host and container probe classification, including definitive outside-repository diagnostics, spawn/timeout/permission failures, and partial results from optional probe failures.
+- `tests2/integration/git-status-polyrepo-fetch-policy.test.ts` warms separate root and component cache variants, then proves both endpoint families fetch and invalidate every target even when the non-Git root fetch fails.
+- `tests2/core/git-status-local-only-policy.test.ts` and `tests2/integration/git-status-local-only-policy.test.ts` pin the read-only status policy and keep publication behind explicit Git-action routes.
+- `tests2/dom/git-status-widget-multi-repo.test.ts` pins aggregate pill and section behaviour, including a sole named component. `tests2/browser/journeys/polyrepo-git-status.journey.spec.ts` exercises the session and goal-dashboard surfaces, explicit refresh, multiple named components, the sole-named case, and reload.
 
 ---
 
@@ -947,59 +978,103 @@ Acceptance side (`session-manager.ts::acceptProjectProposal`): writes `component
 
 ---
 
-## 13. Session git-status / git-diff parity (addendum, 2026-06)
+## 13. Shared Git-status lifecycle and aggregation contract
 
-§6.2 described the **goal** dashboard's aggregated git status/diff. This section documents the matching **session-context** work: the per-session pill + popover above the composer now show the same multi-repo aggregate that the goal dashboard does. Goal and single-repo behaviour are byte-for-byte unchanged; only the session code path gained multi-repo awareness.
+Goal dashboards and session widgets now use the same Git-status collector. This is necessary because a true polyrepo's branch container is intentionally not a Git repository: treating the container probe as a prerequisite hides valid component worktrees and can poison the client's negative-repository cache.
 
-**Why this was needed.** A polyrepo session's worktrees live one level under a non-git *branch container* (see §4.2). The session widget previously statused only the container `cwd` and rendered a flat single-repo result — so a true polyrepo session showed just a branch name with no per-repo breakdown and no aggregated dirty/ahead/behind/diff counts. The goal path already solved this; sessions were the remaining gap.
+### 13.1 Target collection
 
-### 13.1 Envelope shape (`GET /api/sessions/:id/git-status`)
+The two routes normalize durable metadata before collection:
 
-The handler in `src/server/server.ts` (the `/api/sessions/:id/git-status` branch) mirrors the goal handler's envelope:
+- A goal supplies its persisted `Record<string, string>` directly as ordered `{ repo, worktreePath }` component targets.
+- A live session supplies the same target shape from its `Array<{ repo, repoPath, worktreePath }>` representation. Restored team leads have this array because §4.6 rebuilds it from the persisted record.
 
-- **Single-repo / no `repoWorktrees`** → unchanged flat shape plus back-compat keys: `{ ...result, aggregate: result, repos: { ".": result } }`. The existing 400 `{ error: "Not a git repository" }` and 500 paths are preserved. Status is read-only for every session; legacy publication metadata does not change that contract.
-- **Multi-repo** (`session.repoWorktrees.length > 1`) → `{ ...aggregate, aggregate, repos }`, where `repos` is keyed by **repo name** and each entry is a full `GitStatusResult`.
+The collector builds a root-plus-components target set, deduplicated by worktree path. It probes the root and every configured component independently; root failure never short-circuits component work. The same policy therefore covers a normal Git root, a non-Git polyrepo container, an offset `cwd`, and a sole named component without separate goal/session implementations.
 
-**Shape note.** In-memory `session.repoWorktrees` is an **array** `Array<{ repo, repoPath, worktreePath }>` (see `session-manager.ts`), unlike the goal's `Record<string, string>` (`goal.repoWorktrees`). The session handler iterates the array and statuses each entry's `worktreePath` (sandboxed sessions route through the container via the `containerId` argument, exactly as the flat path does). Per-repo failures are swallowed (`try/catch`, skip the entry) so one broken sub-repo cannot 500 the whole status. Each per-repo `batchGitStatus` call honours the project `base_ref` config (`configuredBaseRef`), matching the goal handler and `docs/design/base-ref.md` §5.
+Host targets are existence-checked before Git runs. Container targets are classified by the container probe because their paths are not meaningful to the host. Missing configured host paths are failures rather than silently skipped components, so an incomplete worktree set is observable.
 
-### 13.2 Synthesized aggregate for non-git containers
+### 13.2 Flat-compatible envelope and synthesis
 
-The root container status comes from `batchGitStatus(cwd, …)`. In a **true polyrepo** the container `cwd` is *not* itself a git repo (§4.2), so this returns `null` / throws. That is **non-fatal in multi-repo mode** — the per-repo worktrees are the source of truth. The aggregate is resolved as:
+Every successful response has the same shape:
 
-1. **Root `result` exists** (the container is itself a git repo — e.g. a `repo: "."` component, or a single-repo collapse) → use it as the aggregate, for back-compat with the flat shape.
-2. **Root `result` is null** (genuine non-git container) → **synthesize** an aggregate from the per-repo results. All sub-repos share the same session branch, so `branch` / `primaryBranch` / `primaryRef` / `isOnPrimary` / `hasUpstream` / `mergedIntoPrimary` are taken from the **first** repo, while the numeric counters (`ahead`, `behind`, `aheadOfPrimary`, `behindPrimary`, `insertionsVsPrimary`, `deletionsVsPrimary`) are **summed** across repos. `clean` is the **AND** across repos (clean only if every repo is clean), `unpushed` is the **OR**, `status` is `[]` (the flat file list is suppressed — the per-repo popover sections are authoritative), and `summary` is `"<N> repos"`.
+```typescript
+interface GitStatusEnvelope extends GitStatusResult {
+  aggregate: GitStatusResult;
+  repos: Record<string, GitStatusResult>;
+}
+```
 
-If neither a root `result` nor any per-repo result is available, the handler returns the same 400 `{ error: "Not a git repository" }` as the flat path.
+The top level spreads `aggregate` for callers that still read flat fields. Each `GitStatusResult` includes the required identity, file, remote, primary-comparison, line-count, and state fields:
 
-**Why synthesize rather than 400.** Without the synthesized aggregate, a polyrepo session whose container is non-git would have no top-level status object at all, so the pill would fall back to rendering only the branch name — the exact gap this work closes. Synthesizing lets the pill show real aggregated stats even though the directory the agent's `cwd` points at is not a git repo.
+```typescript
+{
+  branch, primaryBranch, primaryRef, isOnPrimary,
+  status, hasUpstream, ahead, behind,
+  aheadOfPrimary, behindPrimary, mergedIntoPrimary,
+  insertionsVsPrimary, deletionsVsPrimary,
+  clean, summary, unpushed,
+  partial?, untrackedIncluded?
+}
+```
 
-**Status is read-only.** A non-git-container polyrepo has no root repository, so the handler synthesizes its aggregate from per-repo results. Neither the root nor per-repo status path publishes branches. Persistent per-repo worktrees are the collaboration and durability mechanism; explicit user/agent push and workflow commands remain separate.
+Aggregation follows these rules:
 
-### 13.3 Per-repo diff routing (`GET /api/sessions/:id/git-diff`)
+1. **Successful configured components are authoritative.** If any configured component succeeds, `repos` contains the successful components and the root result is not counted. This avoids duplicate or contradictory data when the root is Git or `cwd` is inside a component.
+2. **Identity is deterministic.** The first successful component in configured order supplies `branch`, `primaryBranch`, `primaryRef`, `isOnPrimary`, and `hasUpstream`.
+3. **Counters are additive.** `ahead`, `behind`, `aheadOfPrimary`, `behindPrimary`, `insertionsVsPrimary`, and `deletionsVsPrimary` are summed across successful components.
+4. **State is collective.** `clean` is true only when every successful component is clean; `unpushed` is true when any is unpushed. `mergedIntoPrimary` is true only when the aggregate is complete and every successful component reports merged; a partial aggregate always reports false so missing or incomplete comparisons cannot imply that the whole polyrepo is merged. The synthesized `status` is empty because per-repository file lists are authoritative, and `summary` is `"<N> repo(s)"`.
+5. **Incomplete data stays visible.** A failed component is omitted from `repos`, successful siblings remain, and `partial` becomes true. A component's own partial result also propagates. `untrackedIncluded` is true only when every configured component succeeded with complete untracked data.
+6. **Root is fallback, not winner.** The root result is used only when no configured component succeeds. If configured components were attempted, the root fallback is marked partial and untracked-incomplete. With no component targets, the root result remains byte-compatible with the flat single-repo response.
 
-Clicking a file inside a per-repo popover section opens that repo's diff. The widget's `_openDiffModal(file, repo?)` (`src/ui/components/GitStatusWidget.ts`) appends `?repo=<name>` to the diff URL when the file came from a multi-repo section. The session `git-diff` handler resolves `?repo=` against `session.repoWorktrees` (find the array entry whose `repo` matches) and diffs that entry's `worktreePath`; an absent or `.` repo param (or an unknown name) falls back to the container `cwd`. This mirrors the goal `git-diff` handler's `?repo=` resolution.
+A sole `"."` component keeps `{ ...result, aggregate: result, repos: { ".": result } }`. A sole named component uses the component-authoritative synthesis, including `status: []`, and retains its name in `repos`. This distinction lets the widget show the repository section even when only one named component is available.
 
-### 13.4 Container-path security: argument-vector exec
+### 13.3 Definitive non-repository versus retryable failure
 
-`getGitDiff`'s container branch previously built a `/bin/sh -c "git diff … -- <file>"` string with the user-supplied `file` interpolated in, a command-injection vector. It now uses **argument-vector execution** via `execGitArgsSafe` → `execGitArgs`, which runs `docker exec -w <cwd> <containerId> git <args…>` with `file` passed as a distinct argv element — never parsed by a shell. (Path-traversal / absolute / drive-letter `file` values are still rejected up front with `INVALID_PATH`.)
+The shared status path uses classified probes rather than collapsing every non-zero command to `null`. Native host/container probes produce these outcomes, and the collector adds path-validation failures:
 
-**Why argv instead of a shell string.** Passing `file` through `/bin/sh -c` meant any shell metacharacters in the filename were interpreted by the container's shell. Argv execution removes the shell entirely, so the diff target is always treated as literal data regardless of its contents — closing the injection vector without changing behaviour for legitimate paths.
+- `success` carries a `GitStatusResult`.
+- `not-repository` is reserved for the mandatory branch probe when Git itself exits with its known outside-repository diagnostic.
+- `error` covers timeouts, killed processes, spawn failures such as `ENOENT` or `EACCES`, missing Git or Docker, Docker execution failure, permission or dubious-ownership diagnostics, unknown non-zero exits, missing configured paths, and unexpected exceptions.
 
-### 13.5 Widget rendering
+On the host, process code, signal, killed/timeout state, stderr, and stdout are retained so terminal-looking text from a failed spawn cannot be mistaken for a definitive Git answer. In a container, the batch script emits separate machine-readable sentinels for the known non-repository case and other mandatory-probe failures; a Docker rejection occurs outside the script and is always an error. Optional porcelain, upstream, count, or shortstat failures may still return success, but mark the result `partial` and clear untracked completeness where applicable.
 
-`src/ui/components/GitStatusWidget.ts` already rendered per-repo sections and a multi-repo pill label; this work completed the aggregation:
+HTTP classification is based on all attempted targets:
 
-- **Pill** — in multi-repo mode (`repos` has >1 entry) the pill shows `"<N> changed across <M> repos"` (dirty-file count summed across repos, `M` = count of dirty repos) **plus** full aggregated primary-comparison segments. `_aggregatePrimaryStats()` sums `aheadOfPrimary` / `behindPrimary` / `insertionsVsPrimary` / `deletionsVsPrimary` across the `repos` envelope entries, and `_segmentSpans()` renders the shared coloured `↓behind ↑ahead +ins -del` markup (the same helper the flat `_pillSegments()` uses, so styling never diverges).
-- **Clean collapse** — multi-repo clean state (every repo clean *and* all summed primary stats zero, with no PR) collapses to the single green "clean" indicator. This is derived from the **aggregate**, **independent of `isOnPrimary`** — a clean `session/…` branch must still collapse to "clean" even though it is not on the primary branch. Flat/single-repo collapse logic is unchanged (it still considers `isOnPrimary` / `mergedIntoPrimary`).
-- **Popover** — `_renderMultiRepoSections()` renders one collapsible section per repo with per-repo counts; dirty repos auto-expand, clean ones stay collapsed.
+- Return 200 when the root or any component succeeds.
+- Return 400 `{ error: "Not a git repository" }` only when every attempted target is definitively `not-repository`.
+- Return a retryable 500 when nothing succeeds and any target is `error`. In particular, an all-missing component set is not a terminal non-repository result.
 
-The per-repo envelope entries already carried `aheadOfPrimary` / `behindPrimary` / `insertionsVsPrimary` / `deletionsVsPrimary` (added by the line-counts work in `docs/design/git-status-widget-reliability.md` §13), so the pill aggregation reuses those fields directly rather than recomputing anything server-side.
+The existing missing-sole-root precondition may still return 404 before collection when there are no component targets. Headquarters and goal no-worktree checks retain their existing unavailable responses; an ordinary session still statuses its configured `cwd`. On the client, only the exact 400 payload becomes `not-a-repo`; other failures remain retry-eligible, and a later successful envelope restores the widget.
 
-### 13.6 Tests
+### 13.4 Per-target fetch and cache policy
 
-- **Widget unit / file-fixture** — the `git-status-widget-multi-repo` bundle (`tests/fixtures/build-bundle.ts`) covers the full-aggregate pill (summed dirty + ahead/behind/+/−) and the clean-collapse case.
-- **API E2E** — `GET /api/sessions/:id/git-status` returns `{ repos, aggregate }` for a multi-repo session and the unchanged flat + `repos: { ".": result }` shape for single-repo.
-- **Browser E2E** (`tests/e2e/ui/`) — a polyrepo session shows aggregated pill stats; the popover shows one section per repo with correct counts; a clean repo renders collapsed; clicking a file opens that repo's diff; state persists across reload.
+`?fetch=true` operates on the same deduplicated root-plus-components set used for status:
+
+1. Best-effort fetch every applicable target independently. A non-Git root or one failed component does not stop sibling fetches.
+2. In a `finally` path, invalidate every requested target even when fetch fails or a host path is absent.
+3. Invalidation clears both the summary and untracked cache variants for that path and container scope before status is collected.
+
+Status caching is also per target and separates summary from untracked requests. In-flight calls are coalesced, successful and definitive non-repository probes use the short cache window, and retryable errors are evicted immediately. This prevents stale component entries from surviving an explicit refresh merely because the container root failed first.
+
+Fetch and status remain read-only. They do not push, pull, merge, rename branches, set upstreams, or publish a session branch. Explicit Git-action routes and workflow commands retain ownership of those mutations.
+
+### 13.5 Widget and reload behaviour
+
+Both the session header and goal dashboard consume the top-level aggregate while forwarding `repos` to `GitStatusWidget`. A component-only response still has a top-level branch, so the normal reveal logic keeps the widget visible when the root container is non-Git.
+
+The widget uses per-repository mode for multiple entries or a sole named key; only a sole `"."` key stays flat. It shows summed dirty and primary-comparison segments in the pill, renders one collapsible section per successful repository, opens dirty sections by default, and leaves clean sections collapsed. A partially failed sibling therefore does not hide valid sections. Opening the widget requests explicit fetch and full untracked status, and navigation reload refetches the envelope, so both multiple-component and sole-named sections reappear after reload.
+
+A named-component envelope is aggregate status, not an action target. Pull, Push, rebase on primary, squash-push, and commit-history controls are therefore hidden until their APIs accept an explicit repository identity; otherwise they would ambiguously target the non-Git container or an arbitrary component. A sole `"."` repository retains these single-repo controls. PR display and merge remain available because their existing PR identity is independent of the aggregate Git-action target.
+
+### 13.6 Per-repository diff routing
+
+Clicking a file in a named section appends `?repo=<name>` to the goal or session diff URL. Each route resolves the key against its own `repoWorktrees` shape and runs the diff in that component worktree. An absent or unknown key retains the historical root/container fallback; component links always carry the key, which is essential when that fallback is a non-Git directory.
+
+Container diff execution passes the file as an argument-vector element rather than interpolating it into a shell command. Existing path validation still rejects traversal, absolute, and drive-letter paths. This preserves diff behaviour while ensuring a repository filename cannot become shell syntax.
+
+### 13.7 Regression boundaries
+
+The canonical regression owners are listed in §9.5. Together they pin the real-Git team-lead lifecycle and cleanup boundary, shared aggregation and native failure policy, per-target fetch/cache invalidation, read-only status behaviour, DOM rendering, and browser reload journeys. Single-repo envelopes, Headquarters/no-worktree handling, sandbox probing, diff routing, and explicit Git actions remain separate compatibility boundaries rather than special cases inside the polyrepo collector.
 
 ---
 
