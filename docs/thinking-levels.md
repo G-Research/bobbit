@@ -1,11 +1,12 @@
 # Per-model thinking-level capabilities
 
 The "thinking level" picker controls how much reasoning effort the underlying
-model spends before answering. Not every model supports every level — Opus 4.8
-exposes an extra `xhigh` step, GPT 5.6 models expose `max`, plain `gpt-4`
-exposes none — and the set of levels has to stay consistent across UI
-selectors, REST endpoints, the WebSocket boundary, and the verification
-harness.
+model spends before answering. Not every model supports every level. In Pi
+`0.82.1`, direct Anthropic and supported Amazon Bedrock Claude Opus 5 entries
+publish both `xhigh` and `max`; Opus 4.8 publishes `xhigh` but not `max`; plain
+`gpt-4` exposes no reasoning levels. The supported set has to stay consistent
+across UI selectors, REST endpoints, the WebSocket boundary, and the
+verification harness.
 
 Rather than scattering hardcoded `["off","minimal","low","medium","high"]`
 arrays around the codebase, all capability questions go through one shared
@@ -50,9 +51,12 @@ export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 ```
 
 Ranked low→high. `off` is available unless upstream explicitly disables it
-with `off: null` (forced adaptive thinking). `xhigh` is supported by Opus
-4.6+ and some GPT 5.x families. `max` is exposed by the Pi `0.81.1` catalog
-for models whose upstream `thinkingLevelMap` explicitly includes it.
+with `off: null` (forced adaptive thinking). `xhigh` is supported by catalog
+metadata or the narrow fallback families below. `max` is never inferred: it
+is exposed only when the exact model's upstream `thinkingLevelMap` explicitly
+includes it. Pi `0.82.1` publishes both extended entries for direct Anthropic
+and supported Amazon Bedrock Claude Opus 5, so those rows expose the full
+`off` through `max` ladder.
 
 The canonical `ThinkingLevel` type, the `ModelLike` shape consumed by
 capability detection, and the helpers below all live in
@@ -101,7 +105,8 @@ wrong the moment a model started dropping `off` (Fable) or a middle level
 | Model | `thinkingLevelMap` | Supported levels |
 |---|---|---|
 | Claude Fable 5 | `{ off: null, xhigh: "xhigh", max: "max" }` | `minimal, low, medium, high, xhigh, max` — **no `off`** |
-| Claude Opus 4.8 | `{ xhigh: "xhigh" }` | `off, minimal, low, medium, high, xhigh` |
+| Claude Opus 5 (direct Anthropic and supported Bedrock profiles, Pi `0.82.1`) | `{ xhigh: "xhigh", max: "max" }` | `off, minimal, low, medium, high, xhigh, max` |
+| Claude Opus 4.8 | `{ xhigh: "xhigh" }` | `off, minimal, low, medium, high, xhigh` — **no `max`** |
 | gpt-5.2 | `{ off: "none", xhigh: "xhigh" }` | `off, minimal, low, medium, high, xhigh` |
 | gpt-5.5 | `{ off: "none", xhigh: "xhigh", minimal: null }` | `off, low, medium, high, xhigh` — **no `minimal`** |
 | gpt-5.6 Luna/Sol/Terra | non-null `xhigh` and `max` entries | `off, minimal, low, medium, high, xhigh, max` |
@@ -125,14 +130,16 @@ directly stay correct, then falls back to family matching. There is no
 
 The fallback families currently qualify:
 
-- **Anthropic Claude Opus 4.6 and later** — matched by
+- **Anthropic Claude Opus 4.6+ within the 4.x ID family** — matched by
   `/claude-opus-4(?:-|\.)(?:[6-9]|\d{2,})\b/i`, so `claude-opus-4-6`,
   `claude-opus-4-8`, dotted `claude-opus-4.8`, and any future `-4-10`+
-  light up without a code change.
-- **OpenAI gpt-5.1-codex-max and any gpt-5.2\* / gpt-5.4\* / gpt-5.5\*** —
-  matched by `/^gpt-5\.1-codex-max\b/i` and
-  `/^gpt-5\.(?:2|4|5)(?:\b|[-.])/i`. `gpt-5.2-codex`, `gpt-5.4-mini`, and
-  `gpt-5.5-pro` are covered by the second regex.
+  light up without a code change. This heuristic does not infer extended
+  levels for a map-less Opus 5 payload; authoritative Pi `0.82.1` Opus 5
+  rows carry the explicit `xhigh`/`max` map.
+- **OpenAI gpt-5.1-codex-max and any gpt-5.2\* / gpt-5.4\* / gpt-5.5\* /
+  gpt-5.6\*** — matched by `/^gpt-5\.1-codex-max\b/i` and
+  `/^gpt-5\.(?:2|4|5|6)(?:\b|[-.])/i`. `gpt-5.2-codex`, `gpt-5.4-mini`,
+  `gpt-5.5-pro`, and `gpt-5.6-luna` are covered by the second regex.
 
 ### Why the regex tolerates 4-10+ but not 4-5
 
@@ -193,6 +200,8 @@ old down-only walk did — the fix is strictly additive for the
 `off`-unsupported case. Concretely:
 
 - `xhigh` on Sonnet 4.6 (no xhigh) clamps to `high`.
+- `max` on Opus 4.8 clamps to `xhigh`; `max` on a Pi `0.82.1` Opus 5 catalog
+  row stays `max` because that exact row advertises it.
 - `xhigh` on a non-reasoning model (e.g. Haiku) clamps to `off`.
 - `off` on Fable (`off` unsupported) clamps **up** to `minimal`; `high` and
   `max` stay unchanged when the Fable map includes them.
@@ -283,6 +292,7 @@ bypass the UI. The server clamps at every entry point:
 
 | Boundary | Site | What it clamps |
 |---|---|---|
+| WS `set_model` | `src/server/ws/runtime-model-selection.ts` | The optional requested thinking level, or the previous effective level for an older frame, against the exact selected catalog model before either value becomes durable. |
 | WS `set_thinking_level` | `src/server/ws/handler.ts` | The level the client sent, against the session's currently-bound model. |
 | REST role create/update | `clampRoleThinking` in `src/server/server.ts` | The role's `thinkingLevel` field, against the role's `model` if set (or returned as-is if the role inherits, since the per-session clamp will run at spawn). |
 | REST project/system prefs PUT | `/api/preferences` | Stored as-is (no write-time clamp): the defaults apply to many models and the resolved model may not be known yet. Clamping happens at use-time — see `resolveInitialThinkingLevel` / `tryApplyDefaultThinkingLevel` for sessions and `clampReviewThinking` for verification reviewers. |
@@ -321,16 +331,54 @@ The UI never invents its own rules — every selector imports
 `getSupportedThinkingLevels` and `clampThinkingLevel` from
 `src/shared/thinking-levels.ts`.
 
-### Per-session footer (`src/ui/components/AgentInterface.ts`)
+### Per-session picker and footer (`src/ui/components/AgentInterface.ts`)
 
-The footer dropdown computes its options from `state.model` every render,
-so switching the session's model immediately reshapes the menu. The
-ModelSelector callback also clamps `state.thinkingLevel` against the new
-model and pushes the clamped value through `session.setThinkingLevel(...)`
-— which round-trips through the WS `set_thinking_level` handler so the
-server agrees with the client. The full-name label map in this file is the
-single place to extend if a new level is added; `xhigh` is labelled "Extra
-high" and `max` is labelled "Max".
+The footer dropdown computes its options from `state.model` every render, so
+switching the session's model immediately reshapes the menu. Both model-picker
+entry points use the same selection helper: it clamps the current thinking
+value against the newly chosen model's authoritative metadata, optimistically
+stages both fields, and calls `session.setModel(model, effectiveLevel)` once.
+`RemoteAgent` then sends one combined frame:
+
+```json
+{
+  "type": "set_model",
+  "provider": "anthropic",
+  "modelId": "claude-opus-4-8",
+  "thinkingLevel": "xhigh"
+}
+```
+
+This example starts from a stored `max`: Opus 4.8 does not advertise `max`, so
+the picker clamps it to `xhigh` before sending. The same `max` remains `max`
+when selecting a Pi `0.82.1` Opus 5 row because that exact row advertises both
+`xhigh` and `max`. The picker does **not** send a follow-up
+`set_thinking_level` for the same model choice; keeping the two values in one
+request prevents an intervening command from observing a model-only picker
+state.
+
+The server validates the model, re-clamps the requested level, applies and
+reads back the complete tuple, and broadcasts a `state` frame containing both
+`model` and `thinkingLevel`. That frame is authoritative and replaces both
+optimistic fields. On `SET_MODEL_FAILED`, the server first broadcasts the
+observed or previous durable tuple, attempts a verified rollback, and uses the
+existing restart path if a partial mutation cannot be verified. The client
+also requests `get_state`, so a rejected model or thinking write cannot leave
+either optimistic field displayed.
+
+### Standalone thinking changes
+
+Changing only the footer or message-editor thinking control remains a separate
+operation. It calls `session.setThinkingLevel(level)` and sends
+`{ "type": "set_thinking_level", "level": "..." }`; it does not resend the
+model picker request. The server clamps that level against the currently bound
+exact model, verifies the resulting complete model/thinking tuple, persists it,
+and broadcasts authoritative state. `SET_THINKING_LEVEL_FAILED` follows the
+same correction, bounded rollback/restart, and `get_state` refresh behavior.
+
+The full-name label map in `AgentInterface.ts` is the single place to extend if
+a new level is added; `xhigh` is labelled "Extra high" and `max` is labelled
+"Max".
 
 ### Settings page and role manager (`src/app/settings-page.ts`)
 
@@ -358,6 +406,9 @@ the wire:
 | Test | What it pins |
 |---|---|
 | `tests2/core/thinking-levels.test.ts` | Capability matrix for Opus 4.5/4.6/4.7/4.8, dotted Opus ids, AIGW-routed Opus ids, Sonnet 4.6, GPT 5.x, non-reasoning models, clamping behaviour, and the cross-provider-collision pin. It also covers map-present cases including Fable's `{off:null, xhigh:"xhigh", max:"max"}` and GPT 5.6 `max` exposure. |
+| `tests2/core/model-utils.test.ts` and `tests2/core/models-api.test.ts` | Pi `0.82.1` direct Anthropic and supported Bedrock Opus 5 rows advertise exact `{xhigh, max}` metadata and the complete supported ladder. |
+| `tests2/dom/client-combined-model-thinking-selection.test.ts` | The picker sends one clamped `set_model` tuple, authoritative state replaces both optimistic fields, and selection errors request `get_state`. |
+| `tests2/core/controlled-model-fallback.test.ts` | Combined and standalone selections persist only verified complete tuples; failed or partial writes correct both fields and use bounded rollback/restart recovery. |
 | `tests2/core/fable-thinking-levels-repro.test.ts` | Regression repro for the Fable-specific outcome — forced adaptive thinking (`off` dropped) with the selector present. |
 | `tests2/core/model-state-meta-resolver.test.ts` | `resolveModelStateMeta` returns pi-ai values for `claude-fable-5` (1M ctx, `reasoning:true`, full `thinkingLevelMap`) and falls back to `inferMeta` for a genuinely-unknown id. |
 | `tests2/dom/thinking-levels-per-model.test.ts` | Fixture-based browser tests that exercise selector logic, including the map-present cases. |
@@ -374,9 +425,10 @@ in the wiring between the shared module and the UI / server boundary.
   call (pi-mono / pi-coding-agent). Bobbit will accept new levels once they
   appear in the upstream enum.
 - **How thinking levels are passed to the agent process** — `--thinking
-  <level>` CLI flag at spawn (`src/server/agent/rpc-bridge.ts`) and the
-  `set_thinking_level` WS message thereafter. The shared module changes the
-  set of accepted values, not the transport.
+  <level>` remains the spawn-time CLI flag. A live model pick carries the
+  effective level in Bobbit's combined `set_model` frame and then uses Pi's
+  existing model/thinking setters with exact read-back; an independent level
+  change still uses the standalone `set_thinking_level` frame.
 - **Per-provider thinking-budget tuning** (`thinkingBudgets` in
   pi-agent-core) — a separate concern.
 
@@ -388,6 +440,7 @@ in the wiring between the shared module and the UI / server boundary.
 - [Spawn-time model pinning](internals.md#spawn-time-model-pinning) — how
   `resolveInitialThinkingLevel` injects the level into the agent CLI args at
   spawn so there's no boot-time race.
-- [Pi 0.77 / Claude Opus 4.8 compatibility](pi-0.77-opus-4.8.md) — package,
-  ranking, xhigh, spawn, transcript, and regression-test notes for the Pi
-  upgrade.
+- [Pi runtime compatibility](pi-runtime-compatibility.md) — current Pi `0.82.1`
+  package, Opus 5 catalog, exact tuple, spawn, audit, and verification status.
+- [Pi 0.77 / Claude Opus 4.8 compatibility](pi-0.77-opus-4.8.md) — historical
+  package, ranking, xhigh, spawn, transcript, and regression-test notes.

@@ -140,7 +140,8 @@ lifecycle, validation, size, or replay rules.
 | `restart_agent` | — | Restart the agent process for this socket's session. This is the active-session path; the sidebar `Refresh agent` action uses `POST /api/sessions/:id/restart` to target any live row by id. Both paths call the same session-manager restart implementation. |
 | `grant_tool_permission` | `toolName`, `scope`, `group?`, `mode?` | Grant the active `ask`-gated tool request for one tool or a tool group. `mode` is `persistent`, `session-only`, or `one-time`; see [Permission Card UX](permission-card-ux.md). |
 | `deny_tool_permission` | `toolName` | Deny the active `ask`-gated tool request so the guard long-poll returns immediately. |
-| `set_model` | `provider`, `modelId` | Switch the AI model |
+| `set_model` | `provider`, `modelId`, `thinkingLevel?` | Switch the exact AI provider/model and, when supplied, its effective thinking level as one request. The session picker always supplies the clamped level; the field remains optional for older clients. See [Model and thinking selection](#model-and-thinking-selection). |
+| `set_thinking_level` | `level` | Change only the current model's thinking level. The server clamps and verifies the resulting complete tuple; this remains separate from a model-picker request. |
 | `set_image_model` | `provider`, `modelId` | Switch the per-session image generation model. Server validates `(provider, modelId)` against `getAvailableImageModels()`; on unknown the server replies with `{ type: "error", message: "unknown image model", code: "UNKNOWN_IMAGE_MODEL" }` and does **not** mutate session state. On valid, persists `imageModelProvider`/`imageModelId` to the session row and broadcasts the updated state to all attached clients. |
 | `compact` | — | Trigger context compaction |
 | `get_state` | — | Request current agent state |
@@ -153,6 +154,81 @@ lifecycle, validation, size, or replay rules.
 | `task_update` | `taskId`, `updates` | Update a task (title, spec, state, assignment, deps) |
 | `task_delete` | `taskId` | Delete a task |
 | `summarize_goal_title` | `goalTitle` | Auto-generate a shorter goal title |
+
+### Model and thinking selection
+
+A model-picker choice is one exact provider/model/effective-thinking request:
+
+```ts
+{ type: "set_model"; provider: string; modelId: string; thinkingLevel?: string }
+```
+
+The picker always includes `thinkingLevel`. Before sending, it clamps the
+session's current level against the chosen catalog row, optimistically updates
+both fields, and emits no follow-up `set_thinking_level`. For example, if the
+current level is `max` and the user selects Opus 4.8, whose metadata advertises
+`xhigh` but not `max`, the only picker frame is:
+
+```json
+{
+  "type": "set_model",
+  "provider": "anthropic",
+  "modelId": "claude-opus-4-8",
+  "thinkingLevel": "xhigh"
+}
+```
+
+The optional field preserves compatibility with older clients. When it is
+absent, the gateway reuses the previous durable effective level when available,
+otherwise the current authoritative level, and clamps it against the exact new
+model. It does not infer `max`: that level is selectable only when the model's
+`thinkingLevelMap` explicitly contains a non-null `max` entry. Pi `0.82.1`'s
+direct Anthropic and supported Amazon Bedrock Opus 5 rows publish
+`{ xhigh: "xhigh", max: "max" }`, so both levels—and the ordinary
+`off` through `high` levels retained by the map rules—are available for those
+exact rows. Opus 4.8 publishes `xhigh` only. `max` is unavailable without an
+explicit map entry; `xhigh` may additionally come from the narrow map-less
+family fallbacks documented in the thinking-level guide.
+
+On success, the gateway:
+
+1. Requires the exact `provider`/`modelId` to be session-selectable.
+2. Clamps thinking against that selected catalog model.
+3. Applies the model and verifies exact provider/model read-back before applying
+   thinking.
+4. Applies thinking and verifies the complete provider/model/effective-thinking
+   tuple.
+5. Persists and broadcasts only that verified tuple in one authoritative
+   `state` frame containing both `model` and `thinkingLevel`.
+
+`set_model` and `set_thinking_level` use the existing per-session command FIFO,
+so a prompt or later selection cannot overtake an in-flight tuple mutation.
+
+The client treats `state` as authoritative over its optimistic model and
+thinking values. If either write fails, the gateway broadcasts the complete
+observed tuple when available, otherwise the previous durable verified tuple,
+to correct both fields. It keeps durable state unchanged, makes one bounded and
+verified rollback attempt after a partial mutation, and uses the existing agent
+restart path when the live tuple or rollback cannot be verified. It then returns
+`SET_MODEL_FAILED`; the client requests `get_state` as an additional
+reconciliation. A partially mutated bridge never becomes a successful
+selection.
+
+A thinking-only UI change remains supported with:
+
+```json
+{ "type": "set_thinking_level", "level": "high" }
+```
+
+This standalone path leaves provider/model unchanged, clamps `level`—including
+`xhigh` or `max` only when supported—against the currently bound exact model,
+verifies and persists the resulting complete tuple, and broadcasts both tuple
+fields as authoritative state. Failure returns
+`SET_THINKING_LEVEL_FAILED` and uses the same correction, bounded rollback or
+restart, and client `get_state` refresh behavior.
+
+See [Per-model thinking-level capabilities](thinking-levels.md) for map
+semantics and the shared clamp order.
 
 ## Server → Client
 
