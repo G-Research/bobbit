@@ -85,7 +85,7 @@
     },
     {
       "path": "tests2/integration/systems-review-command-evidence-lifecycle.test.ts",
-      "reason": "Normal implementation-gate lifecycle coverage proving registered command evidence is collected before reviewer launch through the real GoalManager.mergeChild and final Git adapter, persists across restart for bounded reader/finalization use, bypasses stale cache, and rejects wrong execution/head/coverage/action/adapter bindings.",
+      "reason": "Implementation-gate lifecycle coverage proving registered command evidence is collected before reviewer launch through the real GoalManager.mergeChild and final Git adapter, persists across restart for bounded reader/finalization use, bypasses stale cache, rejects wrong execution/head/coverage/action/adapter bindings, and the explicit LLM-review skip avoids Systems snapshot, Git, execution, and lease side effects.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

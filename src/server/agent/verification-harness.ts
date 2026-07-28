@@ -3841,7 +3841,11 @@ export class VerificationHarness {
 			const systemsStepIndex = signal.gateId === "implementation"
 				? steps.findIndex(step => step.type === "llm-review" && step.role === "systems-reviewer")
 				: -1;
-			if (systemsStepIndex >= 0) {
+			// The explicit test-mode LLM bypass skips the Systems reviewer itself, so
+			// it must also skip that review's snapshot, durable execution, and writer
+			// lease. Normal verification still precreates all three before commands so
+			// exact-target evidence remains bound to the immutable execution.
+			if (systemsStepIndex >= 0 && !this.skipLlmReview) {
 				const systemsStep = steps[systemsStepIndex];
 				const existingExecutionId = active.steps[systemsStepIndex]?.systemsReviewExecutionId;
 				const bootstrapSessionId = existingExecutionId
