@@ -318,6 +318,15 @@
       }
     },
     {
+      "path": "tests2/core/aigw-retained-catalog-on-discovery-failure.test.ts",
+      "reason": "Focused AIGW catalog regression proving transient discovery failures retain only matching persisted routing metadata while successful discovery omissions remain authoritative.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/aigw-wellknown-config-atomic.test.ts",
       "reason": "Unit coverage for atomic AIGW models/configuration failure behavior.",
       "execution": {
