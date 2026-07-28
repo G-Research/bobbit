@@ -16,11 +16,24 @@ export const READ_SESSION_FINAL_RESULT_MAX_BYTES = 50 * 1024;
  * complete tool_result listener chain, independent of extension ordering.
  */
 export function generateToolResultErrorBridgeExtension(): string {
-	return `const READ_SESSION_FINAL_RESULT_MAX_BYTES = ${READ_SESSION_FINAL_RESULT_MAX_BYTES};
+	return `import { createHash } from "node:crypto";
+
+const READ_SESSION_FINAL_RESULT_MAX_BYTES = ${READ_SESSION_FINAL_RESULT_MAX_BYTES};
 const RESULT_EXCERPT_DEFAULT = 4096;
 const RESULT_EXCERPT_MAX = 8192;
-const SHARED_RUNNER_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-runner-boundary.v4");
+const SNAPSHOT_MAX_DEPTH = 64;
+const SNAPSHOT_MAX_NODES = 16384;
+const SNAPSHOT_MAX_IDENTITIES = 4096;
+const SNAPSHOT_MAX_ARRAY_LENGTH = 4096;
+const SNAPSHOT_MAX_OBJECT_KEYS = 4096;
+const SNAPSHOT_MAX_STRING_UNITS = 2 * 1024 * 1024;
+const SNAPSHOT_MAX_WORK_UNITS = 4 * 1024 * 1024;
+const TOOL_CALL_ID_MAX_UNITS = 128;
+const SHARED_RUNNER_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-runner-boundary.v5");
+const SHARED_AGENT_SESSION_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-agent-session-boundary.v1");
 const SNAPSHOT_OMITTED = Symbol("snapshot-omitted");
+const SNAPSHOT_REJECTED = Symbol("snapshot-rejected");
+const runnerReadSessionCalls = new WeakMap();
 
 function isObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -78,52 +91,115 @@ function boundedString(value, maxUnits) {
 
 /**
  * Consume untrusted extension values exactly once into ordinary JSON data.
- * Accessors cannot change the later measurement/return, and toJSON is ignored
- * rather than being given a second chance to rewrite the persisted value.
+ * Traversal is iterative and admits only arrays and ordinary objects. Accessors
+ * and toJSON are never invoked. Global identity/work caps prevent cycles,
+ * shared-DAG expansion, sparse-array walks, and deep inputs from monopolizing
+ * the event loop or overflowing the stack.
  */
-function consumeSnapshot(value, ancestors = new Set()) {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (!value || (typeof value !== "object" && typeof value !== "function")) return SNAPSHOT_OMITTED;
-  if (ancestors.has(value)) return SNAPSHOT_OMITTED;
-  ancestors.add(value);
-  try {
-    if (Array.isArray(value)) {
-      const out = [];
-      for (let index = 0; index < value.length; index += 1) {
-        let item;
-        try { item = value[index]; } catch { item = SNAPSHOT_OMITTED; }
-        const consumed = item === SNAPSHOT_OMITTED ? SNAPSHOT_OMITTED : consumeSnapshot(item, ancestors);
-        out.push(consumed === SNAPSHOT_OMITTED ? null : consumed);
+function consumeSnapshot(value) {
+  const root = { value: undefined };
+  const seen = new WeakSet();
+  const stack = [{ source: value, parent: root, key: "value", arraySlot: false, depth: 0 }];
+  let nodes = 0;
+  let identities = 0;
+  let workUnits = 0;
+
+  while (stack.length > 0) {
+    const job = stack.pop();
+    nodes += 1;
+    if (nodes > SNAPSHOT_MAX_NODES || job.depth > SNAPSHOT_MAX_DEPTH) return SNAPSHOT_REJECTED;
+    const source = job.source;
+    if (source === null || typeof source === "boolean") {
+      job.parent[job.key] = source;
+      continue;
+    }
+    if (typeof source === "number") {
+      job.parent[job.key] = Number.isFinite(source) ? source : null;
+      continue;
+    }
+    if (typeof source === "string") {
+      if (source.length > SNAPSHOT_MAX_STRING_UNITS) return SNAPSHOT_REJECTED;
+      workUnits += source.length;
+      if (workUnits > SNAPSHOT_MAX_WORK_UNITS) return SNAPSHOT_REJECTED;
+      job.parent[job.key] = source;
+      continue;
+    }
+    if (!source || typeof source !== "object") {
+      if (job.arraySlot) job.parent[job.key] = null;
+      continue;
+    }
+    if (seen.has(source)) {
+      if (job.arraySlot) job.parent[job.key] = null;
+      continue;
+    }
+    identities += 1;
+    if (identities > SNAPSHOT_MAX_IDENTITIES) return SNAPSHOT_REJECTED;
+    seen.add(source);
+
+    if (Array.isArray(source)) {
+      let length;
+      try { length = source.length; } catch { return SNAPSHOT_REJECTED; }
+      if (!isSafeInteger(length) || length < 0 || length > SNAPSHOT_MAX_ARRAY_LENGTH) return SNAPSHOT_REJECTED;
+      workUnits += length;
+      if (workUnits > SNAPSHOT_MAX_WORK_UNITS) return SNAPSHOT_REJECTED;
+      const out = new Array(length).fill(null);
+      job.parent[job.key] = out;
+      for (let index = length - 1; index >= 0; index -= 1) {
+        let descriptor;
+        try { descriptor = Object.getOwnPropertyDescriptor(source, String(index)); } catch { return SNAPSHOT_REJECTED; }
+        if (!descriptor || !("value" in descriptor)) continue;
+        stack.push({ source: descriptor.value, parent: out, key: index, arraySlot: true, depth: job.depth + 1 });
       }
-      return out;
+      continue;
     }
-    const out = {};
+
+    let prototype;
+    try { prototype = Object.getPrototypeOf(source); } catch { return SNAPSHOT_REJECTED; }
+    if (prototype !== Object.prototype && prototype !== null) {
+      if (job.arraySlot) job.parent[job.key] = null;
+      continue;
+    }
     let keys;
-    try { keys = Object.keys(value); } catch { return SNAPSHOT_OMITTED; }
-    for (const key of keys) {
-      // JSON.stringify calls this hook instead of serializing the measured data.
+    try { keys = Object.keys(source); } catch { return SNAPSHOT_REJECTED; }
+    if (keys.length > SNAPSHOT_MAX_OBJECT_KEYS) return SNAPSHOT_REJECTED;
+    workUnits += keys.length;
+    if (workUnits > SNAPSHOT_MAX_WORK_UNITS) return SNAPSHOT_REJECTED;
+    const out = {};
+    job.parent[job.key] = out;
+    for (let index = keys.length - 1; index >= 0; index -= 1) {
+      const key = keys[index];
+      // JSON.stringify calls this hook instead of serializing measured data.
       if (key === "toJSON") continue;
-      let item;
-      try { item = value[key]; } catch { continue; }
-      const consumed = consumeSnapshot(item, ancestors);
-      if (consumed !== SNAPSHOT_OMITTED) out[key] = consumed;
+      workUnits += key.length;
+      if (workUnits > SNAPSHOT_MAX_WORK_UNITS) return SNAPSHOT_REJECTED;
+      let descriptor;
+      try { descriptor = Object.getOwnPropertyDescriptor(source, key); } catch { return SNAPSHOT_REJECTED; }
+      if (!descriptor || !("value" in descriptor)) continue;
+      stack.push({ source: descriptor.value, parent: out, key, arraySlot: false, depth: job.depth + 1 });
     }
-    return out;
-  } finally {
-    ancestors.delete(value);
   }
+  return root.value === undefined ? SNAPSHOT_OMITTED : root.value;
+}
+
+function freezeSnapshot(root) {
+  const stack = [root];
+  const seen = new WeakSet();
+  while (stack.length > 0) {
+    const candidate = stack.pop();
+    if (!candidate || typeof candidate !== "object" || seen.has(candidate)) continue;
+    seen.add(candidate);
+    for (const child of Object.values(candidate)) {
+      if (child && typeof child === "object") stack.push(child);
+    }
+    Object.freeze(candidate);
+  }
+  return root;
 }
 
 function immutableSnapshot(value) {
   const consumed = consumeSnapshot(value);
-  const root = consumed === SNAPSHOT_OMITTED ? {} : consumed;
-  const freeze = (candidate) => {
-    if (!candidate || typeof candidate !== "object" || Object.isFrozen(candidate)) return candidate;
-    for (const child of Object.values(candidate)) freeze(child);
-    return Object.freeze(candidate);
-  };
-  return freeze(root);
+  const root = consumed === SNAPSHOT_OMITTED || consumed === SNAPSHOT_REJECTED ? {} : consumed;
+  return freezeSnapshot(root);
 }
 
 function serializedByteLength(value) {
@@ -135,11 +211,74 @@ function serializedByteLength(value) {
   }
 }
 
+function hashedCorrelationId(value) {
+  const encoded = JSON.stringify(typeof value === "string" ? value : String(value ?? ""));
+  const digest = createHash("sha256")
+    .update("bobbit-read-session-tool-call-id-v1\\0", "utf8")
+    .update(encoded, "utf8")
+    .digest("hex")
+    .slice(0, 40);
+  return "brs1:" + digest;
+}
+
+function normalizedProviderCorrelationId(value) {
+  if (typeof value === "string" && isWellFormed(value) && value.length > 0
+    && value.length <= TOOL_CALL_ID_MAX_UNITS && !value.startsWith("brs1:")) return value;
+  return hashedCorrelationId(value);
+}
+
+function callMap(runner) {
+  if (!runner || (typeof runner !== "object" && typeof runner !== "function")) return undefined;
+  let calls = runnerReadSessionCalls.get(runner);
+  if (!calls) {
+    calls = new Map();
+    runnerReadSessionCalls.set(runner, calls);
+  }
+  return calls;
+}
+
+function rememberReadSessionCall(runner, toolCallId, input) {
+  const calls = callMap(runner);
+  if (!calls) return normalizedProviderCorrelationId(toolCallId);
+  const existing = calls.get(toolCallId);
+  if (existing) {
+    const params = consumeParams(input);
+    if (Object.keys(params).length > 0) existing.params = params;
+    return existing.toolCallId;
+  }
+  const normalized = normalizedProviderCorrelationId(toolCallId);
+  const params = consumeParams(input);
+  const record = { toolCallId: normalized, params };
+  calls.set(normalized, record);
+  if (typeof toolCallId === "string" && toolCallId !== normalized) calls.set(toolCallId, record);
+  // One model turn cannot legitimately need an unbounded correlation table.
+  while (calls.size > 256) calls.delete(calls.keys().next().value);
+  return normalized;
+}
+
+function knownReadSessionCall(runner, toolCallId) {
+  const calls = callMap(runner);
+  if (!calls) return undefined;
+  return calls.get(toolCallId);
+}
+
+function readSessionContext(runner, toolCallId, toolName, input) {
+  const known = knownReadSessionCall(runner, toolCallId);
+  if (known) {
+    if (input !== undefined && String(toolName || "").toLowerCase() === "read_session") {
+      rememberReadSessionCall(runner, toolCallId, input);
+    }
+    return known;
+  }
+  if (String(toolName || "").toLowerCase() !== "read_session") return undefined;
+  const normalized = rememberReadSessionCall(runner, toolCallId, input);
+  return knownReadSessionCall(runner, normalized) || { toolCallId: normalized, params: consumeParams(input) };
+}
+
 function transportProfile(toolCallId, isError) {
   return {
-    // This field is not returned by the boundary, but Pi persists it verbatim.
-    // Measure even ill-formed provider strings using JSON.stringify's behavior.
-    toolCallId: typeof toolCallId === "string" ? toolCallId : "",
+    // Final message/state seams persist this same normalized correlation ID.
+    toolCallId: normalizedProviderCorrelationId(toolCallId),
     isError: isError === true,
   };
 }
@@ -180,7 +319,13 @@ function fits(value, profile) {
 }
 
 function isErroredToolResult(value) {
-  return isObject(value) && (value.isError === true || value.is_error === true);
+  if (!isObject(value)) return false;
+  for (const key of ["isError", "is_error"]) {
+    let descriptor;
+    try { descriptor = Object.getOwnPropertyDescriptor(value, key); } catch { return false; }
+    if (descriptor && "value" in descriptor && descriptor.value === true) return true;
+  }
+  return false;
 }
 
 function stringifyBlock(block) {
@@ -670,7 +815,9 @@ function retryRequest(params) {
   return retry;
 }
 
-function unrecognizedResult(result, params) {
+function unrecognizedResult(result, params, actualBytesOverride) {
+  const measuredBytes = isNonNegativeInteger(actualBytesOverride)
+    ? actualBytesOverride : serializedByteLength(result);
   const envelope = {
     total: 0,
     returned: 0,
@@ -680,7 +827,7 @@ function unrecognizedResult(result, params) {
     partial: true,
     truncatedBy: "extension_return_unrecognized",
     continuationRequest: retryRequest(params),
-    wrapperDiagnostics: { omitted: true, actualBytes: serializedByteLength(result) },
+    wrapperDiagnostics: { omitted: true, actualBytes: measuredBytes },
   };
   return actualValue(envelope, params);
 }
@@ -820,6 +967,9 @@ function fitPage(candidate, projection, params, profile) {
 
 function boundReadSessionResult(result, params, profile = transportProfile("", false)) {
   const snapshot = consumeSnapshot(result);
+  if (snapshot === SNAPSHOT_REJECTED) {
+    return unrecognizedResult({}, params, Number.MAX_SAFE_INTEGER);
+  }
   const safeResult = snapshot === SNAPSHOT_OMITTED ? {} : snapshot;
   const envelope = recoverEnvelope(safeResult, params);
   if (!envelope) return unrecognizedResult(safeResult, params);
@@ -856,7 +1006,7 @@ function consumeParams(value) {
     let item;
     try { item = value[key]; } catch { continue; }
     const consumed = consumeSnapshot(item);
-    if (consumed !== SNAPSHOT_OMITTED) out[key] = consumed;
+    if (consumed !== SNAPSHOT_OMITTED && consumed !== SNAPSHOT_REJECTED) out[key] = consumed;
   }
   // Only presence/type affects continuations and filtered-tail positioning. Never
   // copy a potentially multi-megabyte regex into the boundary snapshot.
@@ -956,7 +1106,7 @@ function boundReadSessionError(result, profile = transportProfile("", true)) {
 function eventResultSnapshot(event, transformed) {
   if (isObject(transformed)) {
     const consumed = consumeSnapshot(transformed);
-    return isObject(consumed) ? consumed : {};
+    return consumed === SNAPSHOT_REJECTED ? SNAPSHOT_REJECTED : (isObject(consumed) ? consumed : {});
   }
   const source = {};
   for (const key of ["content", "details", "usage", "isError", "is_error", "error", "message", "code", "status", "statusCode", "httpStatus"]) {
@@ -964,20 +1114,26 @@ function eventResultSnapshot(event, transformed) {
     let item;
     try { item = event[key]; } catch { continue; }
     const consumed = consumeSnapshot(item);
+    if (consumed === SNAPSHOT_REJECTED) return SNAPSHOT_REJECTED;
     if (consumed !== SNAPSHOT_OMITTED) source[key] = consumed;
   }
   return source;
 }
 
-function boundFinalReadSessionEvent(event, transformed) {
-  if (!isObject(event) || String(event.toolName || "").toLowerCase() !== "read_session") return transformed;
+function boundFinalReadSessionEvent(event, transformed, context) {
+  if (!isObject(event) || (!context && String(event.toolName || "").toLowerCase() !== "read_session")) return transformed;
   const source = eventResultSnapshot(event, transformed);
-  const params = consumeParams(event.input);
-  const isError = source.isError === true || source.is_error === true;
-  const profile = transportProfile(event.toolCallId, isError);
+  const params = context?.params || consumeParams(event.input);
+  const rejected = source === SNAPSHOT_REJECTED;
+  const safeSource = rejected ? {} : source;
+  const isError = safeSource.isError === true || safeSource.is_error === true || event.isError === true;
+  const toolCallId = context?.toolCallId || normalizedProviderCorrelationId(event.toolCallId);
+  const profile = transportProfile(toolCallId, isError);
   const bounded = isError
-    ? boundReadSessionError(source, profile)
-    : boundReadSessionResult(source, params, profile);
+    ? boundReadSessionError(safeSource, profile)
+    : (rejected
+      ? unrecognizedResult({}, params, Number.MAX_SAFE_INTEGER)
+      : boundReadSessionResult(safeSource, params, profile));
   // Measure and return this exact accessor-free immutable snapshot. No digest,
   // marker, accessor or toJSON hook from an extension remains authoritative.
   const finalSnapshot = immutableSnapshot({
@@ -989,7 +1145,7 @@ function boundFinalReadSessionEvent(event, transformed) {
   if (fits(finalSnapshot, profile)) return finalSnapshot;
   const fallback = isError
     ? boundReadSessionError({}, profile)
-    : unrecognizedResult(source, params);
+    : unrecognizedResult(safeSource, params, rejected ? Number.MAX_SAFE_INTEGER : undefined);
   return immutableSnapshot({
     content: fallback.content,
     details: fallback.details,
@@ -1008,10 +1164,14 @@ function wrapHandler(handler, toolName) {
       const params = consumeParams(invocationParams(args));
       const callId = typeof args[0] === "string" ? args[0] : "";
       const snapshot = consumeSnapshot(rawResult);
-      const safeResult = snapshot === SNAPSHOT_OMITTED ? {} : snapshot;
-      result = isErroredToolResult(safeResult)
+      const rejected = snapshot === SNAPSHOT_REJECTED;
+      const safeResult = snapshot === SNAPSHOT_OMITTED || rejected ? {} : snapshot;
+      const errored = isErroredToolResult(safeResult) || (rejected && isErroredToolResult(rawResult));
+      result = errored
         ? boundReadSessionError(safeResult, transportProfile(callId, true))
-        : boundReadSessionResult(safeResult, params, transportProfile(callId, false));
+        : (rejected
+          ? unrecognizedResult({}, params, Number.MAX_SAFE_INTEGER)
+          : boundReadSessionResult(safeResult, params, transportProfile(callId, false)));
     } else {
       result = rawResult;
     }
@@ -1059,15 +1219,137 @@ function wrapRegistrationArgs(args) {
   return next;
 }
 
+function replaceObjectInPlace(target, replacement, freeze) {
+  if (!isObject(target) || !isObject(replacement)) return false;
+  if (target !== replacement) {
+    if (Object.isFrozen(target)) {
+      try { return JSON.stringify(target) === JSON.stringify(replacement); } catch { return false; }
+    }
+    try {
+      for (const key of Object.keys(target)) delete target[key];
+      Object.assign(target, replacement);
+    } catch {
+      return false;
+    }
+  }
+  if (freeze) freezeSnapshot(target);
+  return true;
+}
+
+function canonicalReadSessionMessage(message, runner, forcedContext) {
+  const context = forcedContext || readSessionContext(runner, message?.toolCallId, message?.toolName);
+  if (!context || !isObject(message)) return undefined;
+  const bounded = boundFinalReadSessionEvent({
+    type: "tool_result",
+    toolCallId: context.toolCallId,
+    toolName: "read_session",
+    input: context.params,
+    content: message.content,
+    details: message.details,
+    usage: message.usage,
+    isError: message.isError === true,
+  }, undefined, context);
+  const timestamp = typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
+    ? message.timestamp : 0;
+  return immutableSnapshot({
+    role: "toolResult",
+    toolCallId: context.toolCallId,
+    toolName: "read_session",
+    content: bounded.content,
+    details: bounded.details,
+    usage: bounded.usage,
+    isError: bounded.isError === true,
+    timestamp,
+  });
+}
+
+function assistantHasReadSessionCall(message) {
+  return isObject(message) && message.role === "assistant" && Array.isArray(message.content)
+    && message.content.some((block) => isObject(block) && block.type === "toolCall"
+      && String(block.name || "").toLowerCase() === "read_session");
+}
+
+function normalizeAssistantReadSessionCalls(message, runner) {
+  if (!assistantHasReadSessionCall(message)) return undefined;
+  const snapshot = consumeSnapshot(message);
+  if (!isObject(snapshot)) return undefined;
+  let found = false;
+  for (const block of snapshot.content) {
+    if (!isObject(block) || block.type !== "toolCall" || String(block.name || "").toLowerCase() !== "read_session") continue;
+    const input = isObject(block.arguments) ? block.arguments : (isObject(block.input) ? block.input : {});
+    block.id = rememberReadSessionCall(runner, block.id, input);
+    found = true;
+  }
+  return found ? freezeSnapshot(snapshot) : undefined;
+}
+
+function toolResultMessageContext(runner, message) {
+  if (!isObject(message) || message.role !== "toolResult") return undefined;
+  return readSessionContext(runner, message.toolCallId, message.toolName);
+}
+
+function enforceResultTarget(event, context) {
+  const bounded = boundFinalReadSessionEvent({
+    ...event,
+    toolCallId: context.toolCallId,
+    toolName: "read_session",
+    input: context.params,
+    isError: event.isError === true,
+    content: event.result?.content,
+    details: event.result?.details,
+    usage: event.result?.usage,
+  }, event.result, context);
+  if (!replaceObjectInPlace(event.result, bounded, true)) {
+    throw new Error("read_session result could not be secured after extension handlers");
+  }
+  event.isError = bounded.isError === true;
+  return bounded;
+}
+
+function installAgentSessionBoundary(imported) {
+  const prototype = imported && imported.AgentSession && imported.AgentSession.prototype;
+  if (!prototype || prototype[SHARED_AGENT_SESSION_BOUNDARY_MARKER] === true
+    || typeof prototype._emitExtensionEvent !== "function") return;
+  const originalEmitExtensionEvent = prototype._emitExtensionEvent;
+  prototype._emitExtensionEvent = async function bobbitBoundAgentSessionEvent(event, ...args) {
+    const runner = this._extensionRunner;
+    const toolEndContext = event?.type === "tool_execution_end"
+      ? readSessionContext(runner, event.toolCallId, event.toolName) : undefined;
+    const messageContext = event?.type === "message_end"
+      ? toolResultMessageContext(runner, event.message) : undefined;
+    await originalEmitExtensionEvent.call(this, event, ...args);
+
+    if (toolEndContext && isObject(event.result)) {
+      enforceResultTarget(event, toolEndContext);
+    }
+    if (event?.type === "message_end" && isObject(event.message)) {
+      const canonical = messageContext
+        ? canonicalReadSessionMessage(event.message, runner, messageContext)
+        : normalizeAssistantReadSessionCalls(event.message, runner);
+      if (canonical && !replaceObjectInPlace(event.message, canonical, true)) {
+        throw new Error("read_session message could not be secured before state persistence");
+      }
+    }
+    if (event?.type === "agent_end") callMap(runner)?.clear();
+  };
+  Object.defineProperty(prototype, SHARED_AGENT_SESSION_BOUNDARY_MARKER, { value: true });
+}
+
 async function installSharedRunnerBoundary() {
   try {
     const imported = await import("@earendil-works/pi-coding-agent");
     const prototype = imported && imported.ExtensionRunner && imported.ExtensionRunner.prototype;
-    if (!prototype || prototype[SHARED_RUNNER_BOUNDARY_MARKER] === true
+    if (!prototype) return;
+    installAgentSessionBoundary(imported);
+    if (prototype[SHARED_RUNNER_BOUNDARY_MARKER] === true
       || typeof prototype.getAllRegisteredTools !== "function"
-      || typeof prototype.emitToolResult !== "function") return;
+      || typeof prototype.emitToolResult !== "function"
+      || typeof prototype.emitMessageEnd !== "function"
+      || typeof prototype.emit !== "function") return;
     const originalGetAllRegisteredTools = prototype.getAllRegisteredTools;
     const originalEmitToolResult = prototype.emitToolResult;
+    const originalEmitMessageEnd = prototype.emitMessageEnd;
+    const originalEmit = prototype.emit;
     prototype.getAllRegisteredTools = function bobbitBoundRegisteredTools(...args) {
       const registered = originalGetAllRegisteredTools.apply(this, args);
       if (!Array.isArray(registered)) return registered;
@@ -1080,8 +1362,32 @@ async function installSharedRunnerBoundary() {
       });
     };
     prototype.emitToolResult = async function bobbitBoundFinalToolResult(event, ...args) {
+      const context = readSessionContext(this, event?.toolCallId, event?.toolName, event?.input);
       const transformed = await originalEmitToolResult.call(this, event, ...args);
-      return boundFinalReadSessionEvent(event, transformed);
+      return context ? boundFinalReadSessionEvent(event, transformed, context) : transformed;
+    };
+    prototype.emit = async function bobbitBoundLaterExtensionEvent(event, ...args) {
+      const context = event?.type === "tool_execution_end"
+        ? readSessionContext(this, event.toolCallId, event.toolName) : undefined;
+      if (context && isObject(event.result)) enforceResultTarget(event, context);
+      const result = await originalEmit.call(this, event, ...args);
+      if (context && isObject(event.result)) enforceResultTarget(event, context);
+      return result;
+    };
+    prototype.emitMessageEnd = async function bobbitBoundFinalMessageEnd(event, ...args) {
+      const resultContext = toolResultMessageContext(this, event?.message);
+      const hasAssistantCall = assistantHasReadSessionCall(event?.message);
+      if (!resultContext && !hasAssistantCall) return originalEmitMessageEnd.call(this, event, ...args);
+      const working = consumeSnapshot(event.message);
+      if (!isObject(working)) {
+        if (resultContext) return canonicalReadSessionMessage(event.message, this, resultContext);
+        throw new Error("read_session assistant call could not be safely snapshotted");
+      }
+      const transformed = await originalEmitMessageEnd.call(this, { ...event, message: working }, ...args);
+      const candidate = isObject(transformed) ? transformed : working;
+      return resultContext
+        ? canonicalReadSessionMessage(candidate, this, resultContext)
+        : normalizeAssistantReadSessionCalls(candidate, this);
     };
     Object.defineProperty(prototype, SHARED_RUNNER_BOUNDARY_MARKER, { value: true });
   } catch {

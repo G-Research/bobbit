@@ -6,9 +6,11 @@ import path from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import {
+	AgentSession,
 	ExtensionRunner,
 	SessionManager,
-	type RegisteredTool,
+	SettingsManager,
+	type LoadExtensionsResult,
 } from "@earendil-works/pi-coding-agent";
 // Pi 0.81's runtime root accidentally omits this export although its declaration
 // file includes it. Import the installed loader directly so this remains a real
@@ -47,14 +49,14 @@ function model() {
 	} as any;
 }
 
-function makeStream(toolName: string, args: Record<string, unknown>) {
+function makeStream(toolName: string, args: Record<string, unknown>, toolCallId?: string) {
 	let call = 0;
 	return () => {
 		const stream = createAssistantMessageEventStream();
 		const message = call++ === 0
 			? {
 				role: "assistant" as const,
-				content: [{ type: "toolCall" as const, id: `call-${call}`, name: toolName, arguments: args }],
+				content: [{ type: "toolCall" as const, id: toolCallId ?? `call-${call}`, name: toolName, arguments: args }],
 				api: "test",
 				provider: "test",
 				model: "test-model",
@@ -78,34 +80,63 @@ function makeStream(toolName: string, args: Record<string, unknown>) {
 	};
 }
 
-function asAgentTool(registered: RegisteredTool): any {
-	const definition = registered.definition;
+function resourceLoader(loaded: LoadExtensionsResult): any {
 	return {
-		...definition,
-		execute: (toolCallId: string, args: unknown, signal: AbortSignal | undefined, onUpdate: unknown) =>
-			definition.execute(toolCallId, args as never, signal, onUpdate as never, {} as never),
+		getExtensions: () => loaded,
+		getSkills: () => ({ skills: [], diagnostics: [] }),
+		getPrompts: () => ({ prompts: [], diagnostics: [] }),
+		getThemes: () => ({ themes: [], diagnostics: [] }),
+		getAgentsFiles: () => ({ agentsFiles: [] }),
+		getSystemPrompt: () => undefined,
+		getAppendSystemPrompt: () => [],
+		extendResources: () => undefined,
+		reload: async () => undefined,
 	};
 }
 
-function createAgent(runner: ExtensionRunner, registered: RegisteredTool, args: Record<string, unknown>) {
-	return new Agent({
+let lifecycleCounter = 0;
+
+function createLifecycleSession(
+	loaded: LoadExtensionsResult,
+	root: string,
+	args: Record<string, unknown>,
+	toolName = "read_session",
+	toolCallId?: string,
+): AgentSession {
+	const sessionManager = SessionManager.create(root, path.join(root, `lifecycle-${++lifecycleCounter}`));
+	const settingsManager = SettingsManager.inMemory({
+		compaction: { enabled: false },
+		retry: { enabled: false, maxRetries: 0 },
+	});
+	const agent = new Agent({
 		initialState: {
 			systemPrompt: "test",
 			model: model(),
-			tools: [asAgentTool(registered)],
+			tools: [],
 		},
-		streamFn: makeStream(registered.definition.name, args),
-		afterToolCall: async ({ toolCall, args: input, result, isError }) => runner.emitToolResult({
-			type: "tool_result",
-			toolCallId: toolCall.id,
-			toolName: toolCall.name,
-			input: input as Record<string, unknown>,
-			content: result.content,
-			details: result.details,
-			isError,
-			usage: result.usage,
-		}),
+		streamFn: makeStream(toolName, args, toolCallId),
 	});
+	return new AgentSession({
+		agent,
+		sessionManager,
+		settingsManager,
+		cwd: root,
+		resourceLoader: resourceLoader(loaded),
+		modelRuntime: {} as never,
+		baseToolsOverride: {},
+		initialActiveToolNames: [],
+	});
+}
+
+async function runLifecycle(session: AgentSession, label: string): Promise<any[]> {
+	const events: any[] = [];
+	session.subscribe((event) => { events.push(event); });
+	await (session as any)._runAgentPrompt({
+		role: "user",
+		content: [{ type: "text", text: label }],
+		timestamp: Date.now(),
+	});
+	return events;
 }
 
 function bytes(value: unknown): number {
@@ -120,15 +151,8 @@ function toolOutcome(events: any[]) {
 	return { emitted, persisted };
 }
 
-function persistOutcome(root: string, label: string, events: any[]) {
-	const invokingAssistant = events.find((event) =>
-		event.type === "message_end" && event.message.role === "assistant" && event.message.stopReason === "toolUse")?.message;
-	const { persisted } = toolOutcome(events);
-	assert.ok(invokingAssistant);
-	const manager = SessionManager.create(root, path.join(root, `${label}-sessions`));
-	manager.appendMessage(invokingAssistant);
-	manager.appendMessage(persisted);
-	const sessionFile = manager.getSessionFile();
+function persistOutcome(session: AgentSession) {
+	const sessionFile = session.sessionManager.getSessionFile();
 	assert.ok(sessionFile);
 	const roundTrip = (SessionManager.open(sessionFile).getEntries()
 		.find((entry) => entry.type === "message" && entry.message.role === "toolResult") as any)?.message;
@@ -196,8 +220,39 @@ export default function (pi) {
       hostile_to_json: Type.Optional(Type.Boolean()),
       near_ceiling: Type.Optional(Type.Boolean()),
       throw_after_mutation: Type.Optional(Type.Boolean()),
+      late_phase_attack: Type.Optional(Type.String()),
+      snapshot_attack: Type.Optional(Type.String()),
     }),
     async execute(_toolCallId, params) {
+      if (params.snapshot_attack === "deep" || params.snapshot_attack === "error_deep") {
+        let value = { leaf: "bounded" };
+        for (let index = 0; index < 50_000; index++) value = { child: value };
+        if (params.snapshot_attack === "error_deep") value.isError = true;
+        return value;
+      }
+      if (params.snapshot_attack === "sparse") {
+        const sparse = [];
+        sparse.length = 0xffffffff;
+        return { content: sparse, details: { session_id: params.session_id } };
+      }
+      if (params.snapshot_attack === "cycle") {
+        const cycle = { label: "cycle" };
+        cycle.self = cycle;
+        return { cycle };
+      }
+      if (params.snapshot_attack === "dag") {
+        let value = { leaf: "bounded" };
+        for (let index = 0; index < 40; index++) value = { left: value, right: value };
+        return { value };
+      }
+      if (params.snapshot_attack === "nonplain") {
+        const value = { when: new Date(0) };
+        Object.defineProperty(value, "providerBlob", {
+          enumerable: true,
+          get() { return "ACCESSOR_PROVIDER_DATA".repeat(100_000); },
+        });
+        return { value };
+      }
       if (params.fail) return {
         content: [{ type: "text", text: JSON.stringify({
           error: "transcript_unavailable",
@@ -258,10 +313,53 @@ export default function (pi) {
 `, "utf8");
 		fs.writeFileSync(inPlaceMutatorPath, `
 const payload = "\\\"\\n😀".repeat(30_000);
+const invocations = new Map();
 
 export default function (pi) {
+  pi.on("tool_execution_end", (event) => {
+    if (String(event.toolName || "").toLowerCase() !== "read_session") return;
+    const params = invocations.get(event.toolCallId) || {};
+    const malicious = {
+      content: [{ type: "text", text: "TOOL_END_PROVIDER_DATA".repeat(100_000) }],
+      details: { thinkingSignature: "TOOL_END_PROVIDER_SIGNATURE" },
+      usage: { providerMetadata: "TOOL_END_USAGE".repeat(100_000) },
+    };
+    if (params.late_phase_attack === "return") return { result: malicious };
+    if (params.late_phase_attack === "mutate") {
+      event.result.content = malicious.content;
+      event.result.details = malicious.details;
+    }
+    if (params.late_phase_attack === "mutate_throw") {
+      event.result = malicious;
+      throw new Error("tool_execution_end mutation regression");
+    }
+  });
+
+  pi.on("message_end", (event) => {
+    if (event.message?.role !== "toolResult") return;
+    const params = invocations.get(event.message.toolCallId) || {};
+    const malicious = {
+      ...event.message,
+      content: [{ type: "text", text: "MESSAGE_END_PROVIDER_DATA".repeat(100_000) }],
+      details: { textSignature: "MESSAGE_END_PROVIDER_SIGNATURE" },
+      usage: { providerMetadata: "MESSAGE_END_USAGE".repeat(100_000) },
+    };
+    if (params.late_phase_attack === "return") return { message: malicious };
+    if (params.late_phase_attack === "mutate") {
+      event.message.content = malicious.content;
+      event.message.details = malicious.details;
+      event.message.usage = malicious.usage;
+    }
+    if (params.late_phase_attack === "mutate_throw") {
+      event.message.content = malicious.content;
+      event.message.details = malicious.details;
+      throw new Error("message_end mutation regression");
+    }
+  });
+
   pi.on("tool_result", (event) => {
     if (String(event.toolName || "").toLowerCase() !== "read_session") return;
+    invocations.set(event.toolCallId, event.input || {});
     if (event.isError) {
       return {
         details: {
@@ -338,18 +436,13 @@ export default function (pi) {
 		assert.equal(loaded.extensions[1].tools.has("read_session"), true);
 		assert.equal(loaded.extensions[2].handlers.get("tool_result")?.length, 1);
 
-		const runner = new ExtensionRunner(loaded.extensions, loaded.runtime, root, {} as never, {} as never);
-		const registered = runner.getAllRegisteredTools().find((tool) => tool.definition.name === "read_session");
-		assert.ok(registered);
-
-		const success = createAgent(runner, registered, {
+		const success = createLifecycleSession(loaded, root, {
 			session_id: "target",
 			include_tool_results: true,
 			limit: 1,
 		});
-		const successEvents: any[] = [];
-		success.subscribe((event) => { successEvents.push(event); });
-		await success.prompt("read it");
+		const successEvents = await runLifecycle(success, "read it");
+		assert.equal(success.getActiveToolNames().includes("read_session"), true);
 
 		const emitted = successEvents.find((event) => event.type === "tool_execution_end");
 		const persisted = successEvents.find((event) => event.type === "message_end" && event.message.role === "toolResult")?.message;
@@ -365,17 +458,8 @@ export default function (pi) {
 		assert.equal(Object.isFrozen(emitted.result.content), true,
 			"the final listener-controlled value must be an immutable plain snapshot");
 
-		const sessionManager = SessionManager.create(root, path.join(root, "sessions"));
-		const invokingAssistant = successEvents.find((event) =>
-			event.type === "message_end" && event.message.role === "assistant" && event.message.stopReason === "toolUse")?.message;
-		assert.ok(invokingAssistant);
-		sessionManager.appendMessage(invokingAssistant);
-		sessionManager.appendMessage(persisted);
-		const sessionFile = sessionManager.getSessionFile();
-		assert.ok(sessionFile);
-		const persistedRoundTrip = (SessionManager.open(sessionFile).getEntries()
-			.find((entry) => entry.type === "message" && entry.message.role === "toolResult") as any)?.message;
-		assert.ok(persistedRoundTrip);
+		const successStored = persistOutcome(success);
+		const { roundTrip: persistedRoundTrip, sessionFile } = successStored;
 		assert.ok(bytes(persistedRoundTrip) <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
 		assert.deepEqual(persistedRoundTrip.content, persisted.content);
 		assert.deepEqual(persistedRoundTrip.details, JSON.parse(JSON.stringify(persisted.details)));
@@ -408,15 +492,13 @@ export default function (pi) {
 		assert.equal(projected.messages[0].toolResults[0].name, "read");
 		assert.equal(projected.messages[0].toolResults[0].status, "ok");
 
-		const mutationThenThrow = createAgent(runner, registered, {
+		const mutationThenThrow = createLifecycleSession(loaded, root, {
 			session_id: "target",
 			include_tool_results: true,
 			limit: 1,
 			throw_after_mutation: true,
 		});
-		const mutationThenThrowEvents: any[] = [];
-		mutationThenThrow.subscribe((event) => { mutationThenThrowEvents.push(event); });
-		await mutationThenThrow.prompt("read it after a throwing mutator");
+		const mutationThenThrowEvents = await runLifecycle(mutationThenThrow, "read it after a throwing mutator");
 		const throwEmitted = mutationThenThrowEvents.find((event) => event.type === "tool_execution_end");
 		const throwPersisted = mutationThenThrowEvents.find((event) =>
 			event.type === "message_end" && event.message.role === "toolResult")?.message;
@@ -433,17 +515,9 @@ export default function (pi) {
 			assert.equal(JSON.stringify(throwPersisted).includes(sentinel), false);
 		}
 
-		const throwSessionManager = SessionManager.create(root, path.join(root, "throw-sessions"));
-		const throwInvokingAssistant = mutationThenThrowEvents.find((event) =>
-			event.type === "message_end" && event.message.role === "assistant" && event.message.stopReason === "toolUse")?.message;
-		assert.ok(throwInvokingAssistant);
-		throwSessionManager.appendMessage(throwInvokingAssistant);
-		throwSessionManager.appendMessage(throwPersisted);
-		const throwSessionFile = throwSessionManager.getSessionFile();
-		assert.ok(throwSessionFile);
-		const throwPersistedRoundTrip = (SessionManager.open(throwSessionFile).getEntries()
-			.find((entry) => entry.type === "message" && entry.message.role === "toolResult") as any)?.message;
-		assert.ok(throwPersistedRoundTrip);
+		const throwStored = persistOutcome(mutationThenThrow);
+		const throwSessionFile = throwStored.sessionFile;
+		const throwPersistedRoundTrip = throwStored.roundTrip;
 		assert.ok(bytes(throwPersistedRoundTrip) <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
 		assert.deepEqual(throwPersistedRoundTrip.content, throwPersisted.content);
 		assert.deepEqual(throwPersistedRoundTrip.details, JSON.parse(JSON.stringify(throwPersisted.details)));
@@ -456,6 +530,56 @@ export default function (pi) {
 		for (const sentinel of downstreamProviderData) {
 			assert.equal(JSON.stringify(throwPersistedRoundTrip).includes(sentinel), false);
 			assert.equal(throwPersistedJsonlLine.includes(sentinel), false);
+		}
+
+		for (const latePhaseAttack of ["return", "mutate", "mutate_throw"] as const) {
+			const lateSession = createLifecycleSession(loaded, root, {
+				session_id: "target",
+				include_tool_results: true,
+				limit: 1,
+				late_phase_attack: latePhaseAttack,
+			});
+			const lateEvents = await runLifecycle(lateSession, `late ${latePhaseAttack}`);
+			const { emitted: lateEnd, persisted: lateMessage } = toolOutcome(lateEvents);
+			const lateStored = persistOutcome(lateSession);
+			const stateMessage = lateSession.state.messages.find((message) => message.role === "toolResult") as any;
+			assert.ok(stateMessage);
+			assert.ok(bytes(lateEnd.result) <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
+			assert.ok(bytes(lateMessage) <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
+			assert.ok(Buffer.byteLength(lateStored.line, "utf8") <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
+			assert.deepEqual(stateMessage.content, lateStored.roundTrip.content);
+			for (const sentinel of [
+				"TOOL_END_PROVIDER_DATA",
+				"TOOL_END_PROVIDER_SIGNATURE",
+				"TOOL_END_USAGE",
+				"MESSAGE_END_PROVIDER_DATA",
+				"MESSAGE_END_PROVIDER_SIGNATURE",
+				"MESSAGE_END_USAGE",
+			]) {
+				assert.equal(JSON.stringify(lateEnd.result).includes(sentinel), false);
+				assert.equal(JSON.stringify(stateMessage).includes(sentinel), false);
+				assert.equal(lateStored.line.includes(sentinel), false);
+			}
+		}
+
+		for (const snapshotAttack of ["deep", "error_deep", "sparse", "cycle", "dag", "nonplain"] as const) {
+			const hostileSession = createLifecycleSession(loaded, root, {
+				session_id: "target",
+				snapshot_attack: snapshotAttack,
+			});
+			const hostileEvents = await runLifecycle(hostileSession, `snapshot ${snapshotAttack}`);
+			const { emitted: hostileEnd } = toolOutcome(hostileEvents);
+			const hostileStored = persistOutcome(hostileSession);
+			assert.ok(bytes(hostileEnd.result) <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
+			assert.ok(Buffer.byteLength(hostileStored.line, "utf8") <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
+			const fallback = JSON.parse(hostileStored.roundTrip.content[0].text);
+			if (snapshotAttack === "error_deep") {
+				assert.equal(hostileStored.roundTrip.isError, true);
+				assert.equal(fallback.error, "read_session_failed");
+			} else {
+				assert.equal(fallback.truncatedBy, "extension_return_unrecognized");
+			}
+			assert.equal(hostileStored.line.includes("ACCESSOR_PROVIDER_DATA"), false);
 		}
 
 		const adversarialCases = [
@@ -475,10 +599,8 @@ export default function (pi) {
 			},
 		] as const;
 		for (const scenario of adversarialCases) {
-			const agent = createAgent(runner, registered, scenario.params);
-			const events: any[] = [];
-			agent.subscribe((event) => { events.push(event); });
-			await agent.prompt(scenario.label);
+			const agent = createLifecycleSession(loaded, root, scenario.params);
+			const events = await runLifecycle(agent, scenario.label);
 			const { emitted: failedEnd, persisted: failedMessage } = toolOutcome(events);
 			assert.equal(failedEnd.isError, true);
 			assert.equal(failedMessage.isError, true);
@@ -488,7 +610,7 @@ export default function (pi) {
 			const errorPayload = JSON.parse(failedMessage.content[0].text);
 			assert.equal(errorPayload.code, scenario.code);
 			assert.equal(errorPayload.status, scenario.status);
-			const stored = persistOutcome(root, scenario.label, events);
+			const stored = persistOutcome(agent);
 			assert.ok(Buffer.byteLength(stored.line, "utf8") <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
 			assert.equal(stored.roundTrip.isError, true);
 			for (const sentinel of scenario.forbidden) {
@@ -497,12 +619,10 @@ export default function (pi) {
 			}
 		}
 
-		const providerOnlyError = createAgent(runner, registered, { session_id: "target", provider_only_fail: true });
-		const providerOnlyEvents: any[] = [];
-		providerOnlyError.subscribe((event) => { providerOnlyEvents.push(event); });
-		await providerOnlyError.prompt("provider-only error");
+		const providerOnlyError = createLifecycleSession(loaded, root, { session_id: "target", provider_only_fail: true });
+		const providerOnlyEvents = await runLifecycle(providerOnlyError, "provider-only error");
 		const { emitted: providerOnlyEnd } = toolOutcome(providerOnlyEvents);
-		const providerOnlyStored = persistOutcome(root, "provider-only-error", providerOnlyEvents);
+		const providerOnlyStored = persistOutcome(providerOnlyError);
 		assert.equal(providerOnlyEnd.isError, true);
 		assert.deepEqual(JSON.parse(providerOnlyEnd.result.content[0].text), { error: "read_session_failed" });
 		for (const sentinel of [
@@ -518,37 +638,68 @@ export default function (pi) {
 			{ label: "accessor", params: { session_id: "target", accessor_attack: true }, forbidden: "ACCESSOR_HUGE_PROVIDER_DATA" },
 			{ label: "to-json", params: { session_id: "target", hostile_to_json: true }, forbidden: "HOSTILE_TO_JSON_DATA" },
 		] as const) {
-			const agent = createAgent(runner, registered, scenario.params);
-			const events: any[] = [];
-			agent.subscribe((event) => { events.push(event); });
-			await agent.prompt(scenario.label);
+			const agent = createLifecycleSession(loaded, root, scenario.params);
+			const events = await runLifecycle(agent, scenario.label);
 			const { emitted: safeEnd, persisted: safeMessage } = toolOutcome(events);
 			assert.equal(safeEnd.isError, false);
 			assert.equal(safeMessage.isError, false);
 			assert.ok(bytes(safeEnd.result) <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
 			assert.equal(JSON.stringify(safeEnd.result).includes(scenario.forbidden), false);
 			assert.equal(Object.prototype.hasOwnProperty.call(safeEnd.result.details, "toJSON"), false);
-			const stored = persistOutcome(root, scenario.label, events);
+			const stored = persistOutcome(agent);
 			assert.ok(Buffer.byteLength(stored.line, "utf8") <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
 			assert.equal(stored.line.includes(scenario.forbidden), false);
 		}
 
-		const nearCeiling = createAgent(runner, registered, {
+		const nearCeiling = createLifecycleSession(loaded, root, {
 			session_id: "target",
 			verbose: true,
 			near_ceiling: true,
 		});
-		const nearCeilingEvents: any[] = [];
-		nearCeiling.subscribe((event) => { nearCeilingEvents.push(event); });
-		await nearCeiling.prompt("near ceiling");
+		const nearCeilingEvents = await runLifecycle(nearCeiling, "near ceiling");
 		const { emitted: ceilingEnd, persisted: ceilingMessage } = toolOutcome(nearCeilingEvents);
-		const ceilingStored = persistOutcome(root, "near-ceiling", nearCeilingEvents);
+		const ceilingStored = persistOutcome(nearCeiling);
 		assert.ok(bytes(ceilingEnd.result) > 40 * 1024, "the fitter should preserve useful near-ceiling capacity");
 		assert.ok(bytes(ceilingEnd.result) <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
 		assert.ok(bytes(ceilingMessage) <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
 		assert.ok(Buffer.byteLength(ceilingStored.line, "utf8") <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
 		assert.deepEqual(ceilingStored.roundTrip.content, ceilingEnd.result.content);
 		assert.deepEqual(ceilingStored.roundTrip.details, ceilingEnd.result.details);
+
+		for (const correlation of [
+			{ label: "boundary", source: "b".repeat(128), hashed: false },
+			{ label: "over-boundary", source: "o".repeat(129), hashed: true },
+			{ label: "oversized", source: "z".repeat(100_000), hashed: true },
+		] as const) {
+			const correlationSession = createLifecycleSession(loaded, root, {
+				session_id: "target",
+				limit: 1,
+			}, "read_session", correlation.source);
+			const correlationEvents = await runLifecycle(correlationSession, correlation.label);
+			const assistant = correlationSession.state.messages.find((message) =>
+				message.role === "assistant" && message.stopReason === "toolUse") as any;
+			const result = correlationSession.state.messages.find((message) => message.role === "toolResult") as any;
+			assert.ok(assistant);
+			assert.ok(result);
+			const normalizedId = assistant.content.find((block: any) => block.type === "toolCall")?.id;
+			assert.equal(typeof normalizedId, "string");
+			assert.equal(result.toolCallId, normalizedId);
+			assert.equal(correlationEvents.find((event) => event.type === "tool_execution_start")?.toolCallId, normalizedId);
+			assert.equal(correlationEvents.find((event) => event.type === "tool_execution_end")?.toolCallId, normalizedId);
+			if (correlation.hashed) {
+				assert.match(normalizedId, /^brs1:[0-9a-f]{40}$/);
+				assert.notEqual(normalizedId, correlation.source);
+			} else {
+				assert.equal(normalizedId, correlation.source);
+			}
+			const stored = persistOutcome(correlationSession);
+			for (const line of fs.readFileSync(stored.sessionFile, "utf8").split(/\r?\n/).filter(Boolean)) {
+				if (line.includes('"role":"assistant"') || line.includes('"role":"toolResult"')) {
+					assert.ok(Buffer.byteLength(line, "utf8") <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
+				}
+			}
+			assert.equal(stored.roundTrip.toolCallId, normalizedId);
+		}
 	});
 
 	it("always snapshots an unchanged result after the complete listener chain", async () => {
