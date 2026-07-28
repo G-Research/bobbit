@@ -266,10 +266,25 @@ async function main() {
 
 	const only = args.group;
 	const results = [];
-	if (!only || only === "A") results.push(await runGroupA(A));
-	if (!only || only === "B") results.push(await runGroupB(B));
-	if (!only || only === "C") results.push(await runGroupC(C));
-	if (!only || only === "D") results.push(await runGroupD(D));
+	if (only) {
+		// Focused group runs retain their existing single-group behavior.
+		if (only === "A") results.push(await runGroupA(A));
+		if (only === "B") results.push(await runGroupB(B));
+		if (only === "C") results.push(await runGroupC(C));
+		if (only === "D") results.push(await runGroupD(D));
+	} else {
+		// Keep the gateway/worktree/browser-heavy A → B → C lane serialized. Group D
+		// is independent: it owns a separate Vitest coordinator and PID-scoped cache,
+		// uses isolated temp fixture roots, and is already capped at one worker. Start
+		// only that bounded lane concurrently, then await it so cleanup, reporting,
+		// failure aggregation, and result ordering remain unchanged.
+		console.log("[e2e-v2] schedule: A → B → C; isolated single-worker D runs concurrently");
+		const groupDRun = runGroupD(D);
+		results.push(await runGroupA(A));
+		results.push(await runGroupB(B));
+		results.push(await runGroupC(C));
+		results.push(await groupDRun);
+	}
 
 	const sample = sampler.stop();
 	const wallMs = Math.round(performance.now() - startWall);
