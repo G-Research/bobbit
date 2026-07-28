@@ -123,6 +123,7 @@ describe("tool result boundary through Pi's real extension runner", () => {
 		roots.push(root);
 		const boundaryPath = path.join(root, "boundary.ts");
 		const overridePath = path.join(root, "override.ts");
+		const laterMutatorPath = path.join(root, "later-mutator.ts");
 		fs.writeFileSync(boundaryPath, generateToolResultErrorBridgeExtension(), "utf8");
 		fs.writeFileSync(overridePath, `
 import { Type } from "typebox";
@@ -180,13 +181,48 @@ export default function (pi) {
   });
 }
 `, "utf8");
+		fs.writeFileSync(laterMutatorPath, `
+const payload = "\\\"\\n😀".repeat(30_000);
 
-		const loaded = await loadExtensions([boundaryPath, overridePath], root);
+export default function (pi) {
+  pi.on("tool_result", (event) => {
+    if (String(event.toolName || "").toLowerCase() !== "read_session") return;
+    if (event.isError) {
+      return {
+        details: { ...event.details, downstreamErrorObserved: true },
+        isError: true,
+      };
+    }
+    const envelope = JSON.parse(event.content[0].text);
+    envelope.messages[0].text = payload;
+    envelope.messages[0].thinkingSignature = "LATER_MESSAGE_THINKING_SIGNATURE";
+    envelope.messages[0].textSignature = "LATER_MESSAGE_TEXT_SIGNATURE";
+    return {
+      content: [
+        { type: "text", text: JSON.stringify(envelope) },
+        { type: "text", text: payload },
+      ],
+      details: {
+        ...event.details,
+        envelope,
+        thinkingSignature: "LATER_DETAILS_THINKING_SIGNATURE",
+        textSignature: "LATER_DETAILS_TEXT_SIGNATURE",
+        encryptedContent: "LATER_ENCRYPTED_PROVIDER_BLOB",
+        extra: payload,
+      },
+      isError: false,
+    };
+  });
+}
+`, "utf8");
+
+		const loaded = await loadExtensions([boundaryPath, overridePath, laterMutatorPath], root);
 		assert.deepEqual(loaded.errors, []);
-		assert.equal(loaded.extensions.length, 2);
+		assert.equal(loaded.extensions.length, 3);
 		assert.notEqual(loaded.extensions[0], loaded.extensions[1], "Pi must load extensions into separate private maps");
 		assert.equal(loaded.extensions[0].tools.size, 0);
 		assert.equal(loaded.extensions[1].tools.has("read_session"), true);
+		assert.equal(loaded.extensions[2].handlers.get("tool_result")?.length, 1);
 
 		const runner = new ExtensionRunner(loaded.extensions, loaded.runtime, root, {} as never, {} as never);
 		const registered = runner.getAllRegisteredTools().find((tool) => tool.definition.name === "read_session");
@@ -235,6 +271,18 @@ export default function (pi) {
 		assert.equal(JSON.stringify(projected).includes("PROVIDER_SIGNATURE_MUST_NOT_SURVIVE"), false);
 		assert.equal(JSON.stringify(persisted).includes("WRAPPER_PROVIDER_SIGNATURE"), false);
 		assert.equal(JSON.stringify(persisted).includes("WRAPPER_ONLY_PROVIDER_DATA"), false);
+		for (const downstreamProviderData of [
+			"LATER_MESSAGE_THINKING_SIGNATURE",
+			"LATER_MESSAGE_TEXT_SIGNATURE",
+			"LATER_DETAILS_THINKING_SIGNATURE",
+			"LATER_DETAILS_TEXT_SIGNATURE",
+			"LATER_ENCRYPTED_PROVIDER_BLOB",
+		]) {
+			assert.equal(JSON.stringify(emitted.result).includes(downstreamProviderData), false);
+			assert.equal(JSON.stringify(persistedRoundTrip).includes(downstreamProviderData), false);
+		}
+		assert.equal(persistedRoundTrip.content.length, 1,
+			"the final runner seam must discard downstream wrapper content");
 		assert.deepEqual(Object.keys(projected.messages[0].toolResults[0]).sort(),
 			["excerpt", "handle", "name", "omitted", "ref", "size", "status"].sort());
 		assert.equal(projected.messages[0].toolResults[0].name, "read");
@@ -249,6 +297,9 @@ export default function (pi) {
 		assert.equal(failedEnd?.isError, true);
 		assert.equal(failedMessage?.isError, true);
 		assert.match(failedMessage.content[0].text, /override returned failure/);
+		assert.equal(failedEnd?.result.details.downstreamErrorObserved, true,
+			"the final success boundary must not replace an errored post-chain result");
+		assert.equal(failedMessage?.details.downstreamErrorObserved, true);
 	});
 
 	it("marks a result so duplicate boundary handlers do not process it twice", async () => {

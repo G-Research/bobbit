@@ -11,16 +11,16 @@ export const READ_SESSION_FINAL_RESULT_MAX_BYTES = 50 * 1024;
  *
  * Pi gives every loaded extension its own registration API and private tool
  * map, so registration wrapping alone cannot see a read_session contributed by
- * another extension. The supported cross-extension tool_result hook therefore
- * canonicalizes whichever resolved read_session wins, while the shared runner
- * registry seam retains the legacy returned-error bridge across private maps.
+ * another extension. A shared runner seam therefore retains the legacy error
+ * bridge across private maps and canonicalizes the final result only after the
+ * complete tool_result listener chain, independent of extension ordering.
  */
 export function generateToolResultErrorBridgeExtension(): string {
 	return `const READ_SESSION_FINAL_RESULT_MAX_BYTES = ${READ_SESSION_FINAL_RESULT_MAX_BYTES};
 const RESULT_EXCERPT_DEFAULT = 4096;
 const RESULT_EXCERPT_MAX = 8192;
 const READ_SESSION_RESULT_BOUNDARY_MARKER = Symbol.for("bobbit.read_session.result-boundary.v1");
-const SHARED_RUNNER_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-runner-boundary.v1");
+const SHARED_RUNNER_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-runner-boundary.v2");
 
 function isObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -760,14 +760,31 @@ function isReadSessionBoundaryResult(value) {
     && value.details[READ_SESSION_RESULT_BOUNDARY_MARKER] === true;
 }
 
-function boundReadSessionEvent(event) {
-  if (!isObject(event) || String(event.toolName || "").toLowerCase() !== "read_session"
-    || event.isError === true || isReadSessionBoundaryResult(event)) return undefined;
+function boundFinalReadSessionEvent(event, transformed) {
+  if (!isObject(event) || String(event.toolName || "").toLowerCase() !== "read_session") return transformed;
+  const current = isObject(transformed) ? transformed : event;
+  const isError = typeof current.isError === "boolean" ? current.isError : event.isError;
+  if (isError === true) return transformed;
+
+  // Registration wrapping already bounds tools visible through the shared
+  // registry. If no listener declared a change, keep that exact result rather
+  // than projecting it twice. Any declared downstream transformation is always
+  // reprocessed, even when it retained the non-serialized marker.
+  if (transformed === undefined && isReadSessionBoundaryResult(event)) return undefined;
+
   const source = {
-    content: Array.isArray(event.content) ? event.content : [],
-    ...(hasOwn(event, "details") ? { details: event.details } : {}),
+    content: Array.isArray(current.content) ? current.content : [],
+    ...(hasOwn(current, "details") ? { details: current.details } : {}),
   };
-  return markReadSessionBoundaryResult(boundReadSessionResult(source, isObject(event.input) ? event.input : {}));
+  const bounded = markReadSessionBoundaryResult(boundReadSessionResult(
+    source,
+    isObject(event.input) ? event.input : {},
+  ));
+  return {
+    content: bounded.content,
+    details: bounded.details,
+    ...(typeof isError === "boolean" ? { isError } : {}),
+  };
 }
 
 function wrapHandler(handler, toolName) {
@@ -826,10 +843,12 @@ async function installSharedRunnerBoundary() {
     const imported = await import("@earendil-works/pi-coding-agent");
     const prototype = imported && imported.ExtensionRunner && imported.ExtensionRunner.prototype;
     if (!prototype || prototype[SHARED_RUNNER_BOUNDARY_MARKER] === true
-      || typeof prototype.getAllRegisteredTools !== "function") return;
-    const original = prototype.getAllRegisteredTools;
+      || typeof prototype.getAllRegisteredTools !== "function"
+      || typeof prototype.emitToolResult !== "function") return;
+    const originalGetAllRegisteredTools = prototype.getAllRegisteredTools;
+    const originalEmitToolResult = prototype.emitToolResult;
     prototype.getAllRegisteredTools = function bobbitBoundRegisteredTools(...args) {
-      const registered = original.apply(this, args);
+      const registered = originalGetAllRegisteredTools.apply(this, args);
       if (!Array.isArray(registered)) return registered;
       return registered.map((tool) => {
         if (!isObject(tool) || !isObject(tool.definition)) return tool;
@@ -839,9 +858,13 @@ async function installSharedRunnerBoundary() {
         return { ...tool, definition: { ...definition, execute } };
       });
     };
+    prototype.emitToolResult = async function bobbitBoundFinalToolResult(event, ...args) {
+      const transformed = await originalEmitToolResult.call(this, event, ...args);
+      return boundFinalReadSessionEvent(event, transformed);
+    };
     Object.defineProperty(prototype, SHARED_RUNNER_BOUNDARY_MARKER, { value: true });
   } catch {
-    // The supported tool_result hook still enforces the read_session boundary.
+    // Registration wrapping still preserves returned-error semantics.
   }
 }
 
@@ -850,7 +873,9 @@ export default function(pi) {
   Object.defineProperty(pi, "__bobbitToolResultErrorBridgeInstalled", { value: true });
 
   if (typeof pi.on === "function") {
-    pi.on("tool_result", (event) => boundReadSessionEvent(event));
+    // Keep Pi's afterToolCall path active even when no other extension listens;
+    // final enforcement belongs to the runner-owned post-chain seam above.
+    pi.on("tool_result", () => undefined);
   }
 
   if (typeof pi.tool === "function") {

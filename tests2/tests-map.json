@@ -49,7 +49,7 @@
     },
     {
       "path": "tests2/core/tool-result-error-bridge-real-pi.test.ts",
-      "reason": "Real Pi 0.81 loadExtensions and ExtensionRunner regression proving the immutable tool_result hook bounds and scrubs a read_session registered in a separate extension before execution-end emission and agent-state persistence, preserves success/error status, and idempotently handles duplicate boundaries.",
+      "reason": "Real Pi 0.81 loadExtensions and ExtensionRunner regression proving the immutable runner-owned post-listener seam bounds and scrubs a read_session registered in a separate extension before execution-end emission and agent-state persistence, resists a later inflating hook, preserves success/error status, and idempotently handles duplicate boundaries.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
