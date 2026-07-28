@@ -17,8 +17,10 @@
  *
  * Verification command bodies are stubbed to `echo ok` so steps complete
  * instantly. llm-review steps run through the harness skip path
- * (BOBBIT_LLM_REVIEW_SKIP=1) so their `prompt:` text is never invoked.
+ * (BOBBIT_LLM_REVIEW_SKIP=1) so their prompt contracts are never invoked.
  */
+
+import { SYSTEMS_INTERACTION_REVIEW_PROMPT_ID } from "../../src/server/agent/systems-interaction-review-contract.js";
 
 export interface TestComponent {
 	name: string;
@@ -68,12 +70,27 @@ export function testWorkflows(): TestWorkflowsBlock {
 		id: "documentation", name: "Documentation", depends_on: deps,
 		verify: [reviewStep("Documentation coverage")],
 	});
+	const systemsReviewStep = (phase: number): Record<string, unknown> => ({
+		name: "Systems interaction review",
+		type: "llm-review",
+		role: "systems-reviewer",
+		reviewGroup: "specialist",
+		phase,
+		promptRef: SYSTEMS_INTERACTION_REVIEW_PROMPT_ID,
+		optional: false,
+	});
 	const implementationVerify = (): Record<string, unknown>[] => [
 		{ name: "Build", type: "command", component: "test", command: "build", timeout: 600 },
 		{ name: "Type check", type: "command", phase: 1, component: "test", command: "check" },
 		{ name: "Unit tests", type: "command", phase: 1, component: "test", command: "unit" },
 		{ name: "E2E tests", type: "command", phase: 1, component: "test", command: "e2e", timeout: 900 },
-		reviewStep("Code quality review"),
+		{
+			...reviewStep("Code quality review"),
+			role: "code-reviewer",
+			reviewGroup: "specialist",
+			phase: 2,
+		},
+		systemsReviewStep(2),
 		{
 			name: "QA testing", type: "agent-qa", role: "qa-tester", phase: 3,
 			optional: true, label: "Enable QA Testing",
@@ -138,8 +155,8 @@ export function testWorkflows(): TestWorkflowsBlock {
 				readyToMergeGate(["implementation"]),
 			],
 		},
-		// `test-fast` is the canonical command-only fixture used by
-		// gate-verification.test.ts and other contract tests.
+		// `test-fast` is the canonical fast fixture used by gate-verification.test.ts
+		// and other contract tests; its mandatory LLM review follows the skip path.
 		"test-fast": {
 			id: "test-fast",
 			name: "Test Fast",
@@ -149,7 +166,10 @@ export function testWorkflows(): TestWorkflowsBlock {
 				{ id: "design-doc", name: "Design Doc",
 					verify: [{ name: "Content present", type: "command", run: "echo ok" }] },
 				{ id: "implementation", name: "Implementation", depends_on: ["design-doc"],
-					verify: [{ name: "Quick check", type: "command", run: "echo ok" }] },
+					verify: [
+						{ name: "Quick check", type: "command", run: "echo ok" },
+						systemsReviewStep(1),
+					] },
 				{ id: "ready-to-merge", name: "Ready to Merge", depends_on: ["implementation"],
 					verify: [
 						{ name: "Branch pushed", type: "command", run: "echo ok" },
