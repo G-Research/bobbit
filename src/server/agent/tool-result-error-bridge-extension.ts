@@ -29,11 +29,16 @@ const SNAPSHOT_MAX_OBJECT_KEYS = 4096;
 const SNAPSHOT_MAX_STRING_UNITS = 2 * 1024 * 1024;
 const SNAPSHOT_MAX_WORK_UNITS = 4 * 1024 * 1024;
 const TOOL_CALL_ID_MAX_UNITS = 128;
-const SHARED_RUNNER_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-runner-boundary.v5");
-const SHARED_AGENT_SESSION_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-agent-session-boundary.v1");
+const CALL_MAP_MAX_ENTRIES = 256;
+const CORRELATION_DIGEST_HEX_UNITS = 40;
+const CORRELATION_KEY_UNITS = 5 + CORRELATION_DIGEST_HEX_UNITS;
+const SHARED_RUNNER_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-runner-boundary.v6");
+const SHARED_AGENT_SESSION_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-agent-session-boundary.v2");
+const CALL_MAP_DIAGNOSTICS = Symbol.for("bobbit.tool-result.read-session-call-map-diagnostics.v1");
 const SNAPSHOT_OMITTED = Symbol("snapshot-omitted");
 const SNAPSHOT_REJECTED = Symbol("snapshot-rejected");
 const runnerReadSessionCalls = new WeakMap();
+const boundaryOwnedSnapshots = new WeakSet();
 
 function isObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -196,10 +201,16 @@ function freezeSnapshot(root) {
   return root;
 }
 
+function ownImmutableSnapshot(value) {
+  const root = freezeSnapshot(value);
+  if (root && typeof root === "object") boundaryOwnedSnapshots.add(root);
+  return root;
+}
+
 function immutableSnapshot(value) {
   const consumed = consumeSnapshot(value);
   const root = consumed === SNAPSHOT_OMITTED || consumed === SNAPSHOT_REJECTED ? {} : consumed;
-  return freezeSnapshot(root);
+  return ownImmutableSnapshot(root);
 }
 
 function serializedByteLength(value) {
@@ -211,20 +222,76 @@ function serializedByteLength(value) {
   }
 }
 
-function hashedCorrelationId(value) {
-  const encoded = JSON.stringify(typeof value === "string" ? value : String(value ?? ""));
-  const digest = createHash("sha256")
-    .update("bobbit-read-session-tool-call-id-v1\\0", "utf8")
-    .update(encoded, "utf8")
-    .digest("hex")
-    .slice(0, 40);
-  return "brs1:" + digest;
+function correlationDigest(value) {
+  const hash = createHash("sha256").update("bobbit-read-session-tool-call-id-v2\\0", "utf8");
+  if (typeof value === "string") hash.update("string\\0", "utf8").update(value, "utf8");
+  else if (typeof value === "number" && Number.isFinite(value)) hash.update("number\\0" + value, "utf8");
+  else if (typeof value === "boolean") hash.update("boolean\\0", "utf8").update(value ? "1" : "0", "utf8");
+  else if (value === null) hash.update("null", "utf8");
+  else if (value === undefined) hash.update("undefined", "utf8");
+  else hash.update("invalid:" + typeof value, "utf8");
+  return hash.digest("hex").slice(0, CORRELATION_DIGEST_HEX_UNITS);
+}
+
+function correlationIdentity(value) {
+  const digest = correlationDigest(value);
+  const alreadyNormalized = typeof value === "string" && /^brs1:[0-9a-f]{40}$/.test(value);
+  const retainProviderId = typeof value === "string" && value.length > 0
+    && value.length <= TOOL_CALL_ID_MAX_UNITS && isWellFormed(value)
+    && (!value.startsWith("brs1:") || alreadyNormalized);
+  const toolCallId = retainProviderId ? value : "brs1:" + digest;
+  const key = "brk1:" + digest;
+  // Oversized inputs are normalized before later Pi phases. Retain a second
+  // fixed digest key for that bounded output, never the raw provider ID.
+  const outputKey = toolCallId === value ? key : "brk1:" + correlationDigest(toolCallId);
+  return { key, outputKey, toolCallId };
 }
 
 function normalizedProviderCorrelationId(value) {
-  if (typeof value === "string" && isWellFormed(value) && value.length > 0
-    && value.length <= TOOL_CALL_ID_MAX_UNITS && !value.startsWith("brs1:")) return value;
-  return hashedCorrelationId(value);
+  return correlationIdentity(value).toolCallId;
+}
+
+function boundedCallParams(input) {
+  const params = consumeParams(input);
+  const out = {};
+  for (const key of ["session_id", "result_handle"]) {
+    const bounded = boundedString(params[key], 64);
+    if (bounded) out[key] = bounded.text;
+  }
+  for (const key of ["offset", "limit", "context", "result_cursor", "result_limit"]) {
+    if (isSafeInteger(params[key])) out[key] = params[key];
+  }
+  for (const key of ["case_sensitive", "verbose", "include_tool_results"]) {
+    if (typeof params[key] === "boolean") out[key] = params[key];
+  }
+  if (hasOwn(params, "pattern")) out.pattern = typeof params.pattern === "string" ? "" : null;
+  return out;
+}
+
+function inspectCallMap(runner) {
+  const calls = runnerReadSessionCalls.get(runner);
+  let maxKeyUnits = 0;
+  let maxValueStringUnits = 0;
+  let totalRetainedStringUnits = 0;
+  if (calls) {
+    for (const [key, record] of calls) {
+      maxKeyUnits = Math.max(maxKeyUnits, key.length);
+      totalRetainedStringUnits += key.length;
+      const retained = [record.toolCallId, ...Object.values(record.params).filter((value) => typeof value === "string")];
+      for (const value of retained) {
+        maxValueStringUnits = Math.max(maxValueStringUnits, value.length);
+        totalRetainedStringUnits += value.length;
+      }
+    }
+  }
+  return Object.freeze({
+    entries: calls?.size || 0,
+    maxEntries: CALL_MAP_MAX_ENTRIES,
+    correlationKeyUnits: CORRELATION_KEY_UNITS,
+    maxKeyUnits,
+    maxValueStringUnits,
+    totalRetainedStringUnits,
+  });
 }
 
 function callMap(runner) {
@@ -233,46 +300,64 @@ function callMap(runner) {
   if (!calls) {
     calls = new Map();
     runnerReadSessionCalls.set(runner, calls);
+    try {
+      if (typeof runner[CALL_MAP_DIAGNOSTICS] !== "function") {
+        Object.defineProperty(runner, CALL_MAP_DIAGNOSTICS, {
+          value: function bobbitReadSessionCallMapDiagnostics() { return inspectCallMap(this); },
+        });
+      }
+    } catch { /* diagnostics are best-effort and never weaken enforcement */ }
   }
   return calls;
 }
 
-function rememberReadSessionCall(runner, toolCallId, input) {
-  const calls = callMap(runner);
-  if (!calls) return normalizedProviderCorrelationId(toolCallId);
-  const existing = calls.get(toolCallId);
-  if (existing) {
-    const params = consumeParams(input);
-    if (Object.keys(params).length > 0) existing.params = params;
-    return existing.toolCallId;
-  }
-  const normalized = normalizedProviderCorrelationId(toolCallId);
-  const params = consumeParams(input);
-  const record = { toolCallId: normalized, params };
-  calls.set(normalized, record);
-  if (typeof toolCallId === "string" && toolCallId !== normalized) calls.set(toolCallId, record);
-  // One model turn cannot legitimately need an unbounded correlation table.
-  while (calls.size > 256) calls.delete(calls.keys().next().value);
-  return normalized;
-}
-
-function knownReadSessionCall(runner, toolCallId) {
+function knownReadSessionCall(runner, identity) {
   const calls = callMap(runner);
   if (!calls) return undefined;
-  return calls.get(toolCallId);
+  return calls.get(identity.key) || calls.get(identity.outputKey);
+}
+
+function rememberReadSessionCall(runner, toolCallId, input, resolvedIdentity) {
+  const identity = resolvedIdentity || correlationIdentity(toolCallId);
+  const calls = callMap(runner);
+  if (!calls) return identity.toolCallId;
+  const existing = calls.get(identity.key) || calls.get(identity.outputKey);
+  if (existing) {
+    const params = boundedCallParams(input);
+    if (Object.keys(params).length > 0) existing.params = params;
+    calls.set(identity.key, existing);
+    calls.set(identity.outputKey, existing);
+    while (calls.size > CALL_MAP_MAX_ENTRIES) calls.delete(calls.keys().next().value);
+    return existing.toolCallId;
+  }
+  const record = { toolCallId: identity.toolCallId, params: boundedCallParams(input) };
+  calls.set(identity.key, record);
+  calls.set(identity.outputKey, record);
+  // One model turn cannot legitimately need an unbounded correlation table.
+  while (calls.size > CALL_MAP_MAX_ENTRIES) calls.delete(calls.keys().next().value);
+  return identity.toolCallId;
+}
+
+function normalizedExplicitToolName(value) {
+  return typeof value === "string" && value.length > 0 ? value.toLowerCase() : undefined;
 }
 
 function readSessionContext(runner, toolCallId, toolName, input) {
-  const known = knownReadSessionCall(runner, toolCallId);
+  const explicitToolName = normalizedExplicitToolName(toolName);
+  // An explicit non-read name is authoritative. ID-only correlation is reserved
+  // for provider phases that genuinely omit the tool name.
+  if (explicitToolName !== undefined && explicitToolName !== "read_session") return undefined;
+  const identity = correlationIdentity(toolCallId);
+  const known = knownReadSessionCall(runner, identity);
   if (known) {
-    if (input !== undefined && String(toolName || "").toLowerCase() === "read_session") {
-      rememberReadSessionCall(runner, toolCallId, input);
+    if (input !== undefined && explicitToolName === "read_session") {
+      rememberReadSessionCall(runner, toolCallId, input, identity);
     }
     return known;
   }
-  if (String(toolName || "").toLowerCase() !== "read_session") return undefined;
-  const normalized = rememberReadSessionCall(runner, toolCallId, input);
-  return knownReadSessionCall(runner, normalized) || { toolCallId: normalized, params: consumeParams(input) };
+  if (explicitToolName !== "read_session") return undefined;
+  const normalized = rememberReadSessionCall(runner, toolCallId, input, identity);
+  return knownReadSessionCall(runner, identity) || { toolCallId: normalized, params: boundedCallParams(input) };
 }
 
 function transportProfile(toolCallId, isError) {
@@ -1220,19 +1305,26 @@ function wrapRegistrationArgs(args) {
 }
 
 function replaceObjectInPlace(target, replacement, freeze) {
-  if (!isObject(target) || !isObject(replacement)) return false;
-  if (target !== replacement) {
-    if (Object.isFrozen(target)) {
-      try { return JSON.stringify(target) === JSON.stringify(replacement); } catch { return false; }
-    }
-    try {
-      for (const key of Object.keys(target)) delete target[key];
-      Object.assign(target, replacement);
-    } catch {
-      return false;
-    }
+  if (!isObject(target) || !isObject(replacement) || !boundaryOwnedSnapshots.has(replacement)) return false;
+  if (target === replacement) return true;
+  let frozen;
+  try { frozen = Object.isFrozen(target); } catch { return false; }
+  if (frozen) {
+    // Never serialize a frozen listener-owned target: accessors and toJSON are
+    // still executable. Only a snapshot frozen by this boundary is trusted.
+    return boundaryOwnedSnapshots.has(target);
   }
-  if (freeze) freezeSnapshot(target);
+  try {
+    const prototype = Object.getPrototypeOf(target);
+    if (prototype !== Object.prototype && prototype !== null) return false;
+    for (const key of Reflect.ownKeys(target)) {
+      if (!Reflect.deleteProperty(target, key)) return false;
+    }
+    Object.defineProperties(target, Object.getOwnPropertyDescriptors(replacement));
+  } catch {
+    return false;
+  }
+  if (freeze) ownImmutableSnapshot(target);
   return true;
 }
 
@@ -1280,7 +1372,7 @@ function normalizeAssistantReadSessionCalls(message, runner) {
     block.id = rememberReadSessionCall(runner, block.id, input);
     found = true;
   }
-  return found ? freezeSnapshot(snapshot) : undefined;
+  return found ? ownImmutableSnapshot(snapshot) : undefined;
 }
 
 function toolResultMessageContext(runner, message) {
@@ -1295,12 +1387,14 @@ function enforceResultTarget(event, context) {
     toolName: "read_session",
     input: context.params,
     isError: event.isError === true,
-    content: event.result?.content,
-    details: event.result?.details,
-    usage: event.result?.usage,
   }, event.result, context);
   if (!replaceObjectInPlace(event.result, bounded, true)) {
-    throw new Error("read_session result could not be secured after extension handlers");
+    // A listener may replace the result with a hostile frozen object. Replace
+    // the boundary-owned event slot rather than inspecting or serializing it.
+    try { event.result = bounded; } catch { /* fail closed below */ }
+    if (event.result !== bounded) {
+      throw new Error("read_session result could not be secured after extension handlers");
+    }
   }
   event.isError = bounded.isError === true;
   return bounded;
@@ -1327,7 +1421,10 @@ function installAgentSessionBoundary(imported) {
         ? canonicalReadSessionMessage(event.message, runner, messageContext)
         : normalizeAssistantReadSessionCalls(event.message, runner);
       if (canonical && !replaceObjectInPlace(event.message, canonical, true)) {
-        throw new Error("read_session message could not be secured before state persistence");
+        try { event.message = canonical; } catch { /* fail closed below */ }
+        if (event.message !== canonical) {
+          throw new Error("read_session message could not be secured before state persistence");
+        }
       }
     }
     if (event?.type === "agent_end") callMap(runner)?.clear();

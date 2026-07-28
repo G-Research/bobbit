@@ -49,14 +49,21 @@ function model() {
 	} as any;
 }
 
-function makeStream(toolName: string, args: Record<string, unknown>, toolCallId?: string) {
-	let call = 0;
+interface StreamToolCall {
+	name: string;
+	arguments: Record<string, unknown>;
+	id: string;
+}
+
+function makeSequenceStream(calls: StreamToolCall[]) {
+	let index = 0;
 	return () => {
 		const stream = createAssistantMessageEventStream();
-		const message = call++ === 0
+		const next = calls[index++];
+		const message = next
 			? {
 				role: "assistant" as const,
-				content: [{ type: "toolCall" as const, id: toolCallId ?? `call-${call}`, name: toolName, arguments: args }],
+				content: [{ type: "toolCall" as const, id: next.id, name: next.name, arguments: next.arguments }],
 				api: "test",
 				provider: "test",
 				model: "test-model",
@@ -78,6 +85,10 @@ function makeStream(toolName: string, args: Record<string, unknown>, toolCallId?
 		stream.push({ type: "done", reason: message.stopReason, message });
 		return stream;
 	};
+}
+
+function makeStream(toolName: string, args: Record<string, unknown>, toolCallId?: string) {
+	return makeSequenceStream([{ name: toolName, arguments: args, id: toolCallId ?? "call-1" }]);
 }
 
 function resourceLoader(loaded: LoadExtensionsResult): any {
@@ -102,6 +113,7 @@ function createLifecycleSession(
 	args: Record<string, unknown>,
 	toolName = "read_session",
 	toolCallId?: string,
+	streamFn = makeStream(toolName, args, toolCallId),
 ): AgentSession {
 	const sessionManager = SessionManager.create(root, path.join(root, `lifecycle-${++lifecycleCounter}`));
 	const settingsManager = SettingsManager.inMemory({
@@ -114,7 +126,7 @@ function createLifecycleSession(
 			model: model(),
 			tools: [],
 		},
-		streamFn: makeStream(toolName, args, toolCallId),
+		streamFn,
 	});
 	return new AgentSession({
 		agent,
@@ -222,6 +234,7 @@ export default function (pi) {
       throw_after_mutation: Type.Optional(Type.Boolean()),
       late_phase_attack: Type.Optional(Type.String()),
       snapshot_attack: Type.Optional(Type.String()),
+      frozen_target_attack: Type.Optional(Type.String()),
     }),
     async execute(_toolCallId, params) {
       if (params.snapshot_attack === "deep" || params.snapshot_attack === "error_deep") {
@@ -314,11 +327,38 @@ export default function (pi) {
 		fs.writeFileSync(inPlaceMutatorPath, `
 const payload = "\\\"\\n😀".repeat(30_000);
 const invocations = new Map();
+const frozenTargetCounterSymbol = Symbol.for("bobbit.test.frozen-target-counter");
+const frozenTargetCounters = globalThis[frozenTargetCounterSymbol]
+  || (globalThis[frozenTargetCounterSymbol] = { getter: 0, toJSON: 0 });
 
 export default function (pi) {
   pi.on("tool_execution_end", (event) => {
     if (String(event.toolName || "").toLowerCase() !== "read_session") return;
     const params = invocations.get(event.toolCallId) || {};
+    if (params.frozen_target_attack === "getter") {
+      const hostile = {};
+      Object.defineProperty(hostile, "content", {
+        enumerable: true,
+        get() {
+          frozenTargetCounters.getter += 1;
+          throw new Error("frozen result getter must never run");
+        },
+      });
+      event.result = Object.freeze(hostile);
+      return undefined;
+    }
+    if (params.frozen_target_attack === "toJSON") {
+      const hostile = {};
+      Object.defineProperty(hostile, "toJSON", {
+        enumerable: true,
+        value() {
+          frozenTargetCounters.toJSON += 1;
+          throw new Error("frozen result toJSON must never run");
+        },
+      });
+      event.result = Object.freeze(hostile);
+      return undefined;
+    }
     const malicious = {
       content: [{ type: "text", text: "TOOL_END_PROVIDER_DATA".repeat(100_000) }],
       details: { thinkingSignature: "TOOL_END_PROVIDER_SIGNATURE" },
@@ -428,6 +468,9 @@ export default function (pi) {
 }
 `, "utf8");
 
+		const frozenTargetCounterSymbol = Symbol.for("bobbit.test.frozen-target-counter");
+		const frozenTargetCounters = { getter: 0, toJSON: 0 };
+		(globalThis as any)[frozenTargetCounterSymbol] = frozenTargetCounters;
 		const loaded = await loadExtensions([boundaryPath, overridePath, inPlaceMutatorPath], root);
 		assert.deepEqual(loaded.errors, []);
 		assert.equal(loaded.extensions.length, 3);
@@ -582,6 +625,23 @@ export default function (pi) {
 			assert.equal(hostileStored.line.includes("ACCESSOR_PROVIDER_DATA"), false);
 		}
 
+		for (const frozenTargetAttack of ["getter", "toJSON"] as const) {
+			const frozenSession = createLifecycleSession(loaded, root, {
+				session_id: "target",
+				frozen_target_attack: frozenTargetAttack,
+			});
+			const frozenEvents = await runLifecycle(frozenSession, `frozen target ${frozenTargetAttack}`);
+			const { emitted: frozenEnd, persisted: frozenMessage } = toolOutcome(frozenEvents);
+			const frozenStored = persistOutcome(frozenSession);
+			assert.ok(bytes(frozenEnd.result) <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
+			assert.ok(bytes(frozenMessage) <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
+			assert.ok(Buffer.byteLength(frozenStored.line, "utf8") <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
+			assert.equal(JSON.parse(frozenStored.roundTrip.content[0].text).messages[0].index, 7,
+				"the safe pre-listener snapshot must remain authoritative");
+		}
+		assert.deepEqual(frozenTargetCounters, { getter: 0, toJSON: 0 },
+			"frozen listener-controlled accessors and serializers must never execute");
+
 		const adversarialCases = [
 			{
 				label: "initial-error",
@@ -700,6 +760,167 @@ export default function (pi) {
 			}
 			assert.equal(stored.roundTrip.toolCallId, normalizedId);
 		}
+	});
+
+	it("does not let cached IDs capture an explicitly named non-read tool", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-real-pi-result-collision-"));
+		roots.push(root);
+		const boundaryPath = path.join(root, "boundary.ts");
+		const toolsPath = path.join(root, "tools.ts");
+		fs.writeFileSync(boundaryPath, generateToolResultErrorBridgeExtension(), "utf8");
+		fs.writeFileSync(toolsPath, `
+import { Type } from "typebox";
+
+export default function (pi) {
+  pi.registerTool({
+    name: "read_session",
+    label: "Read session",
+    description: "Collision setup",
+    parameters: Type.Object({ session_id: Type.String() }),
+    async execute() {
+      const envelope = {
+        total: 1,
+        returned: 1,
+        offsetStart: 0,
+        offsetEnd: 0,
+        messages: [{ index: 0, role: "assistant", text: "bounded read" }],
+      };
+      return { content: [{ type: "text", text: JSON.stringify(envelope) }] };
+    },
+  });
+  pi.registerTool({
+    name: "collision_probe",
+    label: "Collision probe",
+    description: "Must remain ordinary tool output",
+    parameters: Type.Object({}),
+    async execute() {
+      return {
+        content: [{ type: "text", text: "NON_READ_COLLISION_PASSTHROUGH" }],
+        details: { providerMetadata: "NON_READ_COLLISION_DETAILS" },
+        usage: { providerMetadata: "NON_READ_COLLISION_USAGE" },
+      };
+    },
+  });
+}
+`, "utf8");
+
+		const loaded = await loadExtensions([boundaryPath, toolsPath], root);
+		assert.deepEqual(loaded.errors, []);
+		const collisionId = "shared-provider-call-id";
+		const streamFn = makeSequenceStream([
+			{ name: "read_session", arguments: { session_id: "target" }, id: collisionId },
+			{ name: "collision_probe", arguments: {}, id: collisionId },
+		]);
+		const session = createLifecycleSession(
+			loaded,
+			root,
+			{ session_id: "target" },
+			"read_session",
+			collisionId,
+			streamFn,
+		);
+		const events = await runLifecycle(session, "run colliding tools");
+		const emitted = events.find((event) =>
+			event.type === "tool_execution_end" && event.toolName === "collision_probe");
+		assert.ok(emitted);
+		assert.equal(emitted.result.content[0].text, "NON_READ_COLLISION_PASSTHROUGH");
+		assert.deepEqual(emitted.result.details, { providerMetadata: "NON_READ_COLLISION_DETAILS" });
+		assert.deepEqual(emitted.result.usage, { providerMetadata: "NON_READ_COLLISION_USAGE" });
+
+		const stateResult = session.state.messages.find((message) =>
+			message.role === "toolResult" && (message as any).toolName === "collision_probe") as any;
+		assert.ok(stateResult, "the non-read result must reach AgentSession state");
+		assert.equal(stateResult.toolCallId, collisionId);
+		assert.equal(stateResult.content[0].text, "NON_READ_COLLISION_PASSTHROUGH");
+		assert.deepEqual(stateResult.details, { providerMetadata: "NON_READ_COLLISION_DETAILS" });
+
+		const sessionFile = session.sessionManager.getSessionFile();
+		assert.ok(sessionFile);
+		const persistedLine = fs.readFileSync(sessionFile, "utf8")
+			.split(/\r?\n/)
+			.find((line) => line.includes('"toolName":"collision_probe"'));
+		assert.ok(persistedLine, "the non-read result must be persisted");
+		assert.equal(persistedLine.includes("NON_READ_COLLISION_PASSTHROUGH"), true);
+		assert.equal(persistedLine.includes("NON_READ_COLLISION_DETAILS"), true);
+	});
+
+	it("retains only fixed-bounded digests for many oversized provider call IDs", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-real-pi-result-call-map-"));
+		roots.push(root);
+		const boundaryPath = path.join(root, "boundary.ts");
+		fs.writeFileSync(boundaryPath, generateToolResultErrorBridgeExtension(), "utf8");
+		const loaded = await loadExtensions([boundaryPath], root);
+		assert.deepEqual(loaded.errors, []);
+		const runner = new ExtensionRunner(loaded.extensions, loaded.runtime, root, {} as never, {} as never);
+		const diagnosticsSymbol = Symbol.for("bobbit.tool-result.read-session-call-map-diagnostics.v1");
+		let lastNormalizedId = "";
+
+		for (let index = 0; index < 16; index++) {
+			const prefix = `${index}:`;
+			const providerId = prefix + "x".repeat(2 * 1024 * 1024 - prefix.length);
+			const normalized = await runner.emitMessageEnd({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{
+						type: "toolCall",
+						id: providerId,
+						name: "read_session",
+						arguments: { session_id: `target-${index}` },
+					}],
+				},
+			} as never) as any;
+			lastNormalizedId = normalized.content[0].id;
+			assert.match(lastNormalizedId, /^brs1:[0-9a-f]{40}$/);
+			assert.notEqual(lastNormalizedId, providerId);
+		}
+
+		const envelope = {
+			total: 1,
+			returned: 1,
+			offsetStart: 0,
+			offsetEnd: 0,
+			messages: [{ index: 0, role: "assistant", text: "correlated" }],
+		};
+		const correlated = await runner.emitToolResult({
+			type: "tool_result",
+			toolCallId: lastNormalizedId,
+			content: [{ type: "text", text: JSON.stringify(envelope) }],
+			isError: false,
+		} as never) as any;
+		assert.equal(JSON.parse(correlated.content[0].text).messages[0].text, "correlated",
+			"the normalized ID must still resolve the correct read_session parameters");
+
+		for (let index = 0; index < 300; index++) {
+			await runner.emitMessageEnd({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{
+						type: "toolCall",
+						id: `small-${index}`,
+						name: "read_session",
+						arguments: { session_id: `target-${index}` },
+					}],
+				},
+			} as never);
+		}
+
+		const inspect = (runner as any)[diagnosticsSymbol];
+		assert.equal(typeof inspect, "function");
+		const diagnostics = inspect.call(runner);
+		assert.deepEqual(
+			{
+				entries: diagnostics.entries,
+				maxEntries: diagnostics.maxEntries,
+				correlationKeyUnits: diagnostics.correlationKeyUnits,
+				maxKeyUnits: diagnostics.maxKeyUnits,
+			},
+			{ entries: 256, maxEntries: 256, correlationKeyUnits: 45, maxKeyUnits: 45 },
+		);
+		assert.ok(diagnostics.maxValueStringUnits <= 128);
+		assert.ok(diagnostics.totalRetainedStringUnits <= 256 * (45 + 128 + 64 + 64),
+			"all retained map keys and string values must have a fixed aggregate bound");
 	});
 
 	it("always snapshots an unchanged result after the complete listener chain", async () => {
