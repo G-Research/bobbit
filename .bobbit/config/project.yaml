@@ -252,6 +252,15 @@ workflows:
 
               Check injection risks, auth/authz, data validation, secrets
               handling, and dependency risks.
+          - name: Systems interaction review
+            type: llm-review
+            role: systems-reviewer
+            phase: 4
+            prompt: >-
+              Perform the complete Systems Interaction Review defined by the
+              systems-reviewer role for branch {{branch}} versus {{baseBranch}}.
+              Inspect every changed cross-layer state and action path, continue
+              after the first finding, and submit the verification result.
       - id: documentation
         name: Documentation
         depends_on:
@@ -518,6 +527,15 @@ workflows:
             prompt: Security review of changes on branch {{branch}} vs
               origin/{{baseBranch}}. Check injection, auth/authz, validation,
               secrets, and dependency risks.
+          - name: Systems interaction review
+            type: llm-review
+            role: systems-reviewer
+            phase: 4
+            prompt: >-
+              Perform the complete Systems Interaction Review defined by the
+              systems-reviewer role for branch {{branch}} versus {{baseBranch}}.
+              Inspect every changed cross-layer state and action path, continue
+              after the first finding, and submit the verification result.
           - name: QA testing
             type: agent-qa
             role: qa-tester
@@ -680,6 +698,15 @@ workflows:
             phase: 4
             prompt: Security review of changes on branch {{branch}} vs {{baseBranch}}. Check
               injection, auth/authz, validation, secrets, and dependency risks.
+          - name: Systems interaction review
+            type: llm-review
+            role: systems-reviewer
+            phase: 4
+            prompt: >-
+              Perform the complete Systems Interaction Review defined by the
+              systems-reviewer role for branch {{branch}} versus {{baseBranch}}.
+              Inspect every changed cross-layer state and action path, continue
+              after the first finding, and submit the verification result.
           - name: QA testing
             type: agent-qa
             role: qa-tester
@@ -790,6 +817,15 @@ workflows:
               behavior. Fail only for critical/high actionable bugs; include
               file:line, reproduction conditions, consequence, and why it is a
               bug.
+          - name: Systems interaction review
+            type: llm-review
+            role: systems-reviewer
+            phase: 4
+            prompt: >-
+              Perform the complete Systems Interaction Review defined by the
+              systems-reviewer role for branch {{branch}} versus {{baseBranch}}.
+              Inspect every changed cross-layer state and action path, continue
+              after the first finding, and submit the verification result.
       - id: ready-to-merge
         name: Ready to Merge
         depends_on:
@@ -855,6 +891,15 @@ workflows:
               behavior. Fail only for critical/high actionable bugs; include
               file:line, reproduction conditions, consequence, and why it is a
               bug.
+          - name: Systems interaction review
+            type: llm-review
+            role: systems-reviewer
+            phase: 1
+            prompt: >-
+              Perform the complete Systems Interaction Review defined by the
+              systems-reviewer role for branch {{branch}} versus {{baseBranch}}.
+              Inspect every changed cross-layer state and action path, continue
+              after the first finding, and submit the verification result.
       - id: ready-to-merge
         name: Ready to Merge
         depends_on:
