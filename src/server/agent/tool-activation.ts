@@ -47,6 +47,29 @@ export interface GroupPolicyProvider {
 	getSubgoalsEnabled?(): boolean;
 }
 
+/** Minimal role shape consumed by the tool-policy pipeline. */
+export interface ToolPolicyRole {
+	name?: string;
+	toolPolicies?: Record<string, GrantPolicy>;
+}
+
+/**
+ * Security boundary for the Systems reviewer. Unlike ordinary roles, its
+ * capability set is closed in server code: configuration and newly discovered
+ * providers may neither add a tool nor change either dedicated tool to `ask`.
+ */
+export const SYSTEMS_REVIEWER_ROLE_NAME = "systems-reviewer" as const;
+export const SYSTEMS_REVIEWER_HARD_ALLOWED_TOOLS = Object.freeze([
+	"read_branch_diff",
+	"systems_review_result",
+] as const);
+const SYSTEMS_REVIEWER_HARD_ALLOWED_TOOL_SET: ReadonlySet<string> = new Set(SYSTEMS_REVIEWER_HARD_ALLOWED_TOOLS);
+
+function resolveHardRolePolicy(toolName: string, role: ToolPolicyRole | undefined): GrantPolicy | undefined {
+	if (role?.name !== SYSTEMS_REVIEWER_ROLE_NAME) return undefined;
+	return SYSTEMS_REVIEWER_HARD_ALLOWED_TOOL_SET.has(toolName) ? "allow" : "never";
+}
+
 // ── Process-level caches ────────────────────────────────────────────────────
 // These caches memoize the expensive tool-activation pipeline steps. Inputs
 // rarely change during a server lifetime (role policies, tool YAML, MCP tool
@@ -148,7 +171,7 @@ const warnedLegacyToolKeys = new Set<string>();
  * resolved role's policy keys pass through against the known-tool set.
  */
 function warnLegacyToolPolicyKeys(
-	role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
+	role: ToolPolicyRole | undefined,
 	knownToolNames: Set<string>,
 ): void {
 	const policies = role?.toolPolicies;
@@ -216,7 +239,7 @@ function isNeverPolicy(policy: GrantPolicy): boolean {
 
 /**
  * Resolve the effective grant policy for a tool.
- * Priority: role tool-specific > role group-level > tool YAML default > group default > system fallback.
+ * Priority: server hard role boundary > role tool-specific > role group-level > tool YAML default > group default > system fallback.
  * Always returns a concrete policy (never null).
  *
  * Normalizes old policy values internally: `always-allow`→allow, `ask-once`/`always-ask`→ask, `never-ask`→never.
@@ -224,12 +247,19 @@ function isNeverPolicy(policy: GrantPolicy): boolean {
 export function resolveGrantPolicy(
 	toolName: string,
 	toolGroup: string | undefined,
-	role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
+	role: ToolPolicyRole | undefined,
 	toolManager: ToolManager | undefined,
 	groupPolicyStore?: GroupPolicyProvider,
 	scopedContext?: ScopedToolContext,
 	knownTool?: { grantPolicy?: string },
 ): GrantPolicy {
+	// Step -1: the Systems reviewer is a server-enforced closed capability.
+	// This must precede every configurable role/tool/group/pack source so an
+	// unknown YAML, scoped Pi extension, MCP server, or marketplace contribution
+	// can never widen the verifier beyond its two receipt-bound tools.
+	const hardRolePolicy = resolveHardRolePolicy(toolName, role);
+	if (hardRolePolicy) return hardRolePolicy;
+
 	// Step 0: system-scope Subgoals feature gate. When the flag is OFF, every
 	// tool in the `Children` group resolves to `never` regardless of role /
 	// group overrides. See docs/design/subgoals-experimental-toggle.md.
@@ -492,7 +522,7 @@ export function tagAllowedTools(names: readonly string[], toolManager?: ToolMana
  */
 export function computeEffectiveAllowedTools(
 	toolManager: ToolManager,
-	role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
+	role: ToolPolicyRole | undefined,
 	groupPolicyStore?: GroupPolicyProvider,
 	mcpManager?: { getToolInfos(): Array<{ name: string; group: string; serverName: string }> },
 	scopedContext?: ScopedToolContext,
@@ -506,8 +536,9 @@ export function computeEffectiveAllowedTools(
 
 	// Content-based fingerprint: same inputs → same cache key → same output.
 	const cacheKey = hashKey({
-		kind: 'effectiveAllowedTools_v4',
+		kind: 'effectiveAllowedTools_v5',
 		scopeKey: scopedContext?.scopeKey ?? "default",
+		roleName: role?.name ?? null,
 		toolPolicies: role?.toolPolicies ?? null,
 		groupPolicies: readGroupPolicies(groupPolicyStore),
 		subgoalsEnabled: groupPolicyStore?.getSubgoalsEnabled?.() ?? null,
@@ -846,7 +877,7 @@ export default function(pi) {
 export function computeToolPolicies(
 	toolManager: ToolManager,
 	mcpManager: McpManager | undefined,
-	role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
+	role: ToolPolicyRole | undefined,
 	groupPolicyStore?: GroupPolicyProvider,
 	scopedContext?: ScopedToolContext,
 ): Record<string, ToolPolicyEntry> {
@@ -854,8 +885,9 @@ export function computeToolPolicies(
 	const mcpInfos = mcpManager?.getToolInfos() ?? [];
 
 	const cacheKey = hashKey({
-		kind: 'toolPolicies_v3',
+		kind: 'toolPolicies_v4',
 		scopeKey: scopedContext?.scopeKey ?? "default",
+		roleName: role?.name ?? null,
 		toolPolicies: role?.toolPolicies ?? null,
 		groupPolicies: readGroupPolicies(groupPolicyStore),
 		subgoalsEnabled: groupPolicyStore?.getSubgoalsEnabled?.() ?? null,
@@ -951,7 +983,7 @@ export function writeToolGuardExtension(
 	sessionId: string,
 	toolManager: ToolManager,
 	mcpManager: McpManager | undefined,
-	role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
+	role: ToolPolicyRole | undefined,
 	groupPolicyStore?: GroupPolicyProvider,
 	grantedTools?: string[],
 	disabledTools?: ReadonlySet<string>,
@@ -1031,7 +1063,7 @@ export function writeToolGuardExtension(
 export function writeMcpProxyExtensions(
 	mcpManager: McpManager,
 	allowedTools?: string[],
-	role?: { toolPolicies?: Record<string, GrantPolicy> },
+	role?: ToolPolicyRole,
 	toolManager?: ToolManager,
 	groupPolicyStore?: GroupPolicyProvider,
 	disabledTools?: ReadonlySet<string>,
@@ -1048,7 +1080,7 @@ export function writeMcpProxyExtensions(
 	const managerScopeKey = typeof (mcpManager as any).getScopeKey === "function" ? (mcpManager as any).getScopeKey() : "default";
 	const scopeSegment = managerScopeKey === "default" ? "" : createHash("sha256").update(managerScopeKey).digest("hex").slice(0, 12);
 	const cacheKey = hashKey({
-		kind: 'mcpProxy_v2',
+		kind: 'mcpProxy_v3',
 		managerScopeKey,
 		infos: infos.map(i => ({
 			name: i.name,
@@ -1059,6 +1091,7 @@ export function writeMcpProxyExtensions(
 			group: i.group,
 		})).sort((a, b) => a.name.localeCompare(b.name)),
 		allowedTools: allowedTools ? allowedTools.slice().sort() : null,
+		roleName: role?.name ?? null,
 		toolPolicies: role?.toolPolicies ?? null,
 		groupPolicies: readGroupPolicies(groupPolicyStore),
 		toolScopeKey: scopedContext?.scopeKey ?? "default",
@@ -1179,7 +1212,14 @@ export function writeMcpProxyExtensions(
 	// failed before listing tools), so always land at `<server>.ts`.
 	for (const status of statuses) {
 		if (status.status !== "error") continue;
-		const metaLower = makeMetaToolName(status.name).toLowerCase();
+		const metaName = makeMetaToolName(status.name);
+		const metaLower = metaName.toLowerCase();
+		// Error-state servers have no operation definitions to run through the
+		// normal policy loop above. Apply the role boundary to the stub itself so
+		// even a stale or externally widened allowedTools list cannot surface MCP
+		// to a closed-capability role such as systems-reviewer.
+		const stubPolicy = resolveGrantPolicy(metaName, `MCP: ${status.name}`, role, toolManager, groupPolicyStore, scopedContext, {});
+		if (isNeverPolicy(stubPolicy)) continue;
 		// Respect goal-metadata disable for the flat meta-tool of an error server.
 		if (hasDisabled && disabledTools!.has(metaLower)) continue;
 		// Honour the allowlist for error stubs too: when an allowlist is in effect
