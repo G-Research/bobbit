@@ -16,13 +16,11 @@ export const READ_SESSION_FINAL_RESULT_MAX_BYTES = 50 * 1024;
  * complete tool_result listener chain, independent of extension ordering.
  */
 export function generateToolResultErrorBridgeExtension(): string {
-	return `import { createHash } from "node:crypto";
-
-const READ_SESSION_FINAL_RESULT_MAX_BYTES = ${READ_SESSION_FINAL_RESULT_MAX_BYTES};
+	return `const READ_SESSION_FINAL_RESULT_MAX_BYTES = ${READ_SESSION_FINAL_RESULT_MAX_BYTES};
 const RESULT_EXCERPT_DEFAULT = 4096;
 const RESULT_EXCERPT_MAX = 8192;
-const READ_SESSION_RESULT_BOUNDARY_MARKER = Symbol.for("bobbit.read_session.result-boundary.v1");
-const SHARED_RUNNER_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-runner-boundary.v3");
+const SHARED_RUNNER_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-runner-boundary.v4");
+const SNAPSHOT_OMITTED = Symbol("snapshot-omitted");
 
 function isObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -78,6 +76,56 @@ function boundedString(value, maxUnits) {
   return { text, truncated: text.length !== value.length };
 }
 
+/**
+ * Consume untrusted extension values exactly once into ordinary JSON data.
+ * Accessors cannot change the later measurement/return, and toJSON is ignored
+ * rather than being given a second chance to rewrite the persisted value.
+ */
+function consumeSnapshot(value, ancestors = new Set()) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (!value || (typeof value !== "object" && typeof value !== "function")) return SNAPSHOT_OMITTED;
+  if (ancestors.has(value)) return SNAPSHOT_OMITTED;
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const out = [];
+      for (let index = 0; index < value.length; index += 1) {
+        let item;
+        try { item = value[index]; } catch { item = SNAPSHOT_OMITTED; }
+        const consumed = item === SNAPSHOT_OMITTED ? SNAPSHOT_OMITTED : consumeSnapshot(item, ancestors);
+        out.push(consumed === SNAPSHOT_OMITTED ? null : consumed);
+      }
+      return out;
+    }
+    const out = {};
+    let keys;
+    try { keys = Object.keys(value); } catch { return SNAPSHOT_OMITTED; }
+    for (const key of keys) {
+      // JSON.stringify calls this hook instead of serializing the measured data.
+      if (key === "toJSON") continue;
+      let item;
+      try { item = value[key]; } catch { continue; }
+      const consumed = consumeSnapshot(item, ancestors);
+      if (consumed !== SNAPSHOT_OMITTED) out[key] = consumed;
+    }
+    return out;
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function immutableSnapshot(value) {
+  const consumed = consumeSnapshot(value);
+  const root = consumed === SNAPSHOT_OMITTED ? {} : consumed;
+  const freeze = (candidate) => {
+    if (!candidate || typeof candidate !== "object" || Object.isFrozen(candidate)) return candidate;
+    for (const child of Object.values(candidate)) freeze(child);
+    return Object.freeze(candidate);
+  };
+  return freeze(root);
+}
+
 function serializedByteLength(value) {
   try {
     const json = JSON.stringify(value);
@@ -87,8 +135,48 @@ function serializedByteLength(value) {
   }
 }
 
-function fits(value) {
-  return serializedByteLength(value) <= READ_SESSION_FINAL_RESULT_MAX_BYTES;
+function transportProfile(toolCallId, isError) {
+  return {
+    // This field is not returned by the boundary, but Pi persists it verbatim.
+    // Measure even ill-formed provider strings using JSON.stringify's behavior.
+    toolCallId: typeof toolCallId === "string" ? toolCallId : "",
+    isError: isError === true,
+  };
+}
+
+/** Measure the exact current-Pi message/JSONL wrappers, not only inner details. */
+function finalSerializedByteLengths(value, profile = transportProfile("", false)) {
+  const message = {
+    role: "toolResult",
+    toolCallId: profile.toolCallId,
+    toolName: "read_session",
+    content: value.content,
+    details: value.details,
+    usage: value.usage,
+    isError: profile.isError,
+    timestamp: Number.MAX_SAFE_INTEGER,
+  };
+  // SessionManager IDs are 8 hex characters with a 36-character UUID fallback.
+  // Use the fallback length for both IDs and include the trailing JSONL newline.
+  const line = {
+    type: "message",
+    id: "0".repeat(36),
+    parentId: "0".repeat(36),
+    timestamp: "+999999-12-31T23:59:59.999Z",
+    message,
+  };
+  return {
+    value: serializedByteLength(value),
+    message: serializedByteLength(message),
+    line: serializedByteLength(line) + 1,
+  };
+}
+
+function fits(value, profile) {
+  const sizes = finalSerializedByteLengths(value, profile);
+  return sizes.value <= READ_SESSION_FINAL_RESULT_MAX_BYTES
+    && sizes.message <= READ_SESSION_FINAL_RESULT_MAX_BYTES
+    && sizes.line <= READ_SESSION_FINAL_RESULT_MAX_BYTES;
 }
 
 function isErroredToolResult(value) {
@@ -558,7 +646,12 @@ function actualDetails(envelope, params) {
 }
 
 function actualValue(envelope, params) {
-  return { content: [{ type: "text", text: JSON.stringify(envelope) }], details: actualDetails(envelope, params) };
+  return {
+    content: [{ type: "text", text: JSON.stringify(envelope) }],
+    details: actualDetails(envelope, params),
+    // Clear any listener/provider usage object before Agent merges the hook result.
+    usage: {},
+  };
 }
 
 function retryRequest(params) {
@@ -662,7 +755,7 @@ function withTargetExcerpt(envelope, prefixUnits, requestedLimit) {
   return next;
 }
 
-function fitTargetedEnvelope(envelope, params, requestedLimit) {
+function fitTargetedEnvelope(envelope, params, requestedLimit, profile) {
   const target = firstExcerpt(envelope);
   if (!target || typeof target.result.handle !== "string") return undefined;
   const sourceLength = target.excerpt.text.length;
@@ -673,7 +766,7 @@ function fitTargetedEnvelope(envelope, params, requestedLimit) {
     const mid = Math.floor((low + high) / 2);
     const candidate = withTargetExcerpt(envelope, mid, requestedLimit);
     const value = actualValue(candidate, params);
-    if (fits(value)) {
+    if (fits(value, profile)) {
       best = value;
       low = mid + 1;
     } else {
@@ -683,10 +776,10 @@ function fitTargetedEnvelope(envelope, params, requestedLimit) {
   if (best) return best;
   const progress = withTargetExcerpt(envelope, 1, requestedLimit);
   const progressValue = actualValue(progress, params);
-  return fits(progressValue) ? progressValue : undefined;
+  return fits(progressValue, profile) ? progressValue : undefined;
 }
 
-function fitPage(candidate, projection, params) {
+function fitPage(candidate, projection, params, profile) {
   const retained = [];
   let returnedPositions = 0;
   for (let index = 0; index < projection.messages.length; index += 1) {
@@ -701,8 +794,8 @@ function fitPage(candidate, projection, params) {
     };
 
     let attempt = tryEnvelope(source);
-    if (!fits(attempt.value)) attempt = tryEnvelope(minimizedMessage(source));
-    if (fits(attempt.value)) {
+    if (!fits(attempt.value, profile)) attempt = tryEnvelope(minimizedMessage(source));
+    if (fits(attempt.value, profile)) {
       retained.splice(0, retained.length, ...attempt.rows);
       returnedPositions += 1;
       if (isLast) return attempt.value;
@@ -717,31 +810,33 @@ function fitPage(candidate, projection, params) {
     returnedPositions = 1;
     const summaryEnvelope = pagePartial(candidate, [summary], projection, params, returnedPositions);
     const summaryValue = actualValue(summaryEnvelope, params);
-    if (fits(summaryValue)) return summaryValue;
+    if (fits(summaryValue, profile)) return summaryValue;
     return undefined;
   }
   const empty = preserveUpstreamCompletion(candidate, [], projection);
   const value = actualValue(empty, params);
-  return fits(value) ? value : undefined;
+  return fits(value, profile) ? value : undefined;
 }
 
-function boundReadSessionResult(result, params) {
-  const envelope = recoverEnvelope(result, params);
-  if (!envelope) return unrecognizedResult(result, params);
+function boundReadSessionResult(result, params, profile = transportProfile("", false)) {
+  const snapshot = consumeSnapshot(result);
+  const safeResult = snapshot === SNAPSHOT_OMITTED ? {} : snapshot;
+  const envelope = recoverEnvelope(safeResult, params);
+  if (!envelope) return unrecognizedResult(safeResult, params);
 
   const projection = sanitizeProjection(envelope, params);
   const canonical = preserveUpstreamCompletion(envelope, projection.messages, projection);
   const direct = actualValue(canonical, params);
-  if (fits(direct)) return direct;
+  if (fits(direct, profile)) return direct;
 
   if (projection.targeted) {
-    const targeted = fitTargetedEnvelope(canonical, params, projection.excerptLimit);
-    if (targeted && fits(targeted)) return targeted;
+    const targeted = fitTargetedEnvelope(canonical, params, projection.excerptLimit, profile);
+    if (targeted && fits(targeted, profile)) return targeted;
   }
 
-  const paged = fitPage(envelope, projection, params);
-  if (paged && fits(paged)) return paged;
-  return unrecognizedResult(result, params);
+  const paged = fitPage(envelope, projection, params, profile);
+  if (paged && fits(paged, profile)) return paged;
+  return unrecognizedResult(safeResult, params);
 }
 
 function invocationParams(args) {
@@ -750,76 +845,182 @@ function invocationParams(args) {
   return {};
 }
 
-function readSessionBoundaryDigest(value) {
-  if (!isObject(value)) return undefined;
-  try {
-    const snapshot = JSON.stringify({
-      content: Array.isArray(value.content) ? value.content : [],
-      ...(hasOwn(value, "details") ? { details: value.details } : {}),
-    });
-    return typeof snapshot === "string"
-      ? createHash("sha256").update(snapshot).digest("hex")
-      : undefined;
-  } catch {
-    return undefined;
+function consumeParams(value) {
+  if (!isObject(value)) return {};
+  const out = {};
+  for (const key of [
+    "session_id", "offset", "limit", "case_sensitive", "verbose", "include_tool_results",
+    "context", "result_handle", "result_cursor", "result_limit",
+  ]) {
+    if (!hasOwn(value, key)) continue;
+    let item;
+    try { item = value[key]; } catch { continue; }
+    const consumed = consumeSnapshot(item);
+    if (consumed !== SNAPSHOT_OMITTED) out[key] = consumed;
   }
+  // Only presence/type affects continuations and filtered-tail positioning. Never
+  // copy a potentially multi-megabyte regex into the boundary snapshot.
+  if (hasOwn(value, "pattern")) {
+    let pattern;
+    try { pattern = value.pattern; } catch { pattern = undefined; }
+    out.pattern = typeof pattern === "string" ? "" : null;
+  }
+  return out;
 }
 
-function markReadSessionBoundaryResult(result) {
-  if (isObject(result) && isObject(result.details)) {
-    const digest = readSessionBoundaryDigest(result);
-    if (digest !== undefined) {
-      Object.defineProperty(result.details, READ_SESSION_RESULT_BOUNDARY_MARKER, { value: digest });
+function diagnosticString(value, maxUnits) {
+  const bounded = boundedString(value, maxUnits);
+  return bounded && bounded.text.length > 0 ? bounded.text : undefined;
+}
+
+function diagnosticStatus(value) {
+  if (isSafeInteger(value)) return value;
+  return diagnosticString(value, 64);
+}
+
+function parsedErrorContent(result) {
+  if (!isObject(result) || !Array.isArray(result.content)) return { parsed: undefined, fallback: undefined };
+  for (const block of result.content) {
+    const text = typeof block === "string" ? block : (isObject(block) && typeof block.text === "string" ? block.text : undefined);
+    if (typeof text !== "string" || text.length === 0) continue;
+    try {
+      const parsed = JSON.parse(text);
+      if (isObject(parsed)) return { parsed, fallback: undefined };
+    } catch { /* ordinary text is retained as a bounded message below */ }
+    return { parsed: undefined, fallback: text };
+  }
+  return { parsed: undefined, fallback: undefined };
+}
+
+function firstDiagnosticString(sources, keys, maxUnits) {
+  for (const source of sources) {
+    if (!isObject(source)) continue;
+    for (const key of keys) {
+      const value = diagnosticString(source[key], maxUnits);
+      if (value !== undefined) return value;
     }
   }
-  return result;
+  return undefined;
 }
 
-function isUnchangedReadSessionBoundaryResult(value) {
-  if (!isObject(value) || !isObject(value.details)) return false;
-  const digest = value.details[READ_SESSION_RESULT_BOUNDARY_MARKER];
-  return typeof digest === "string" && digest === readSessionBoundaryDigest(value);
+function firstDiagnosticStatus(sources) {
+  for (const source of sources) {
+    if (!isObject(source)) continue;
+    for (const key of ["status", "statusCode", "httpStatus"]) {
+      const value = diagnosticStatus(source[key]);
+      if (value !== undefined) return value;
+    }
+  }
+  return undefined;
+}
+
+function boundReadSessionError(result, profile = transportProfile("", true)) {
+  const consumed = consumeSnapshot(result);
+  const safeResult = isObject(consumed) ? consumed : {};
+  const details = isObject(safeResult.details) ? safeResult.details : undefined;
+  const { parsed, fallback } = parsedErrorContent(safeResult);
+  const sources = [parsed, safeResult, details];
+  const error = firstDiagnosticString(sources, ["error"], 128);
+  const code = firstDiagnosticString(sources, ["code"], 128);
+  const status = firstDiagnosticStatus(sources);
+  const detail = firstDiagnosticString(sources, ["detail"], 1024);
+  const message = firstDiagnosticString(sources, ["message"], 1024)
+    || diagnosticString(fallback, 1024);
+  const payload = {};
+  if (error !== undefined) payload.error = error;
+  if (code !== undefined) payload.code = code;
+  if (status !== undefined) payload.status = status;
+  if (detail !== undefined) payload.detail = detail;
+  if (message !== undefined) payload.message = message;
+  if (Object.keys(payload).length === 0) payload.error = "read_session_failed";
+  const canonicalDetails = {};
+  if (code !== undefined) canonicalDetails.code = code;
+  if (status !== undefined) canonicalDetails.status = status;
+  const bounded = {
+    content: [{ type: "text", text: JSON.stringify(payload) }],
+    details: canonicalDetails,
+    usage: {},
+    isError: true,
+  };
+  // Fixed field caps make this path comfortably fit, but retain a fail-closed
+  // last resort if a future key changes its serialized cost.
+  if (fits(bounded, profile)) return bounded;
+  return {
+    content: [{ type: "text", text: '{"error":"read_session_failed"}' }],
+    details: {},
+    usage: {},
+    isError: true,
+  };
+}
+
+function eventResultSnapshot(event, transformed) {
+  if (isObject(transformed)) {
+    const consumed = consumeSnapshot(transformed);
+    return isObject(consumed) ? consumed : {};
+  }
+  const source = {};
+  for (const key of ["content", "details", "usage", "isError", "is_error", "error", "message", "code", "status", "statusCode", "httpStatus"]) {
+    if (!hasOwn(event, key)) continue;
+    let item;
+    try { item = event[key]; } catch { continue; }
+    const consumed = consumeSnapshot(item);
+    if (consumed !== SNAPSHOT_OMITTED) source[key] = consumed;
+  }
+  return source;
 }
 
 function boundFinalReadSessionEvent(event, transformed) {
   if (!isObject(event) || String(event.toolName || "").toLowerCase() !== "read_session") return transformed;
-  const current = isObject(transformed) ? transformed : event;
-  const isError = typeof current.isError === "boolean" ? current.isError : event.isError;
-  if (isError === true) return transformed;
-
-  // Pi shallow-copies the event for listeners, so a listener can mutate nested
-  // content/details and still return undefined. Only skip the second projection
-  // when the complete serializable result still matches its immutable snapshot.
-  if (transformed === undefined && isUnchangedReadSessionBoundaryResult(event)) return undefined;
-
-  const source = {
-    content: Array.isArray(current.content) ? current.content : [],
-    ...(hasOwn(current, "details") ? { details: current.details } : {}),
-  };
-  const bounded = markReadSessionBoundaryResult(boundReadSessionResult(
-    source,
-    isObject(event.input) ? event.input : {},
-  ));
-  return {
+  const source = eventResultSnapshot(event, transformed);
+  const params = consumeParams(event.input);
+  const isError = source.isError === true || source.is_error === true;
+  const profile = transportProfile(event.toolCallId, isError);
+  const bounded = isError
+    ? boundReadSessionError(source, profile)
+    : boundReadSessionResult(source, params, profile);
+  // Measure and return this exact accessor-free immutable snapshot. No digest,
+  // marker, accessor or toJSON hook from an extension remains authoritative.
+  const finalSnapshot = immutableSnapshot({
     content: bounded.content,
     details: bounded.details,
-    ...(typeof isError === "boolean" ? { isError } : {}),
-  };
+    usage: bounded.usage,
+    isError,
+  });
+  if (fits(finalSnapshot, profile)) return finalSnapshot;
+  const fallback = isError
+    ? boundReadSessionError({}, profile)
+    : unrecognizedResult(source, params);
+  return immutableSnapshot({
+    content: fallback.content,
+    details: fallback.details,
+    usage: fallback.usage,
+    isError,
+  });
 }
 
 function wrapHandler(handler, toolName) {
   if (typeof handler !== "function" || handler.__bobbitErrorBridgeWrapped) return handler;
   async function bobbitToolResultErrorBridgeHandler(...args) {
-    let result = await handler.apply(this, args);
-    if (String(toolName || "").toLowerCase() === "read_session" && !isErroredToolResult(result)) {
-      result = markReadSessionBoundaryResult(boundReadSessionResult(result, invocationParams(args)));
+    const readSession = String(toolName || "").toLowerCase() === "read_session";
+    const rawResult = await handler.apply(this, args);
+    let result;
+    if (readSession) {
+      const params = consumeParams(invocationParams(args));
+      const callId = typeof args[0] === "string" ? args[0] : "";
+      const snapshot = consumeSnapshot(rawResult);
+      const safeResult = snapshot === SNAPSHOT_OMITTED ? {} : snapshot;
+      result = isErroredToolResult(safeResult)
+        ? boundReadSessionError(safeResult, transportProfile(callId, true))
+        : boundReadSessionResult(safeResult, params, transportProfile(callId, false));
+    } else {
+      result = rawResult;
     }
     if (isErroredToolResult(result)) {
       const err = new Error(messageFromToolResult(result));
       err.name = "BobbitToolResultError";
       err.isError = true;
       err.is_error = true;
-      err.bobbitToolResult = result;
+      err.bobbitToolResult = immutableSnapshot(result);
       throw err;
     }
     return result;
