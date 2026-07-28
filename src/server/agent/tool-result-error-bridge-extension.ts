@@ -155,7 +155,16 @@ function validEnvelope(value, expectedSessionId) {
   if (!Array.isArray(value.messages) || value.returned !== value.messages.length) return false;
   if (value.messages.some((message) => !isObject(message) || !isNonNegativeInteger(message.index) || !isWellFormed(message.role))) return false;
   if (hasOwn(value, "matchCount") && !isNonNegativeInteger(value.matchCount)) return false;
+  const hasPageStart = hasOwn(value, "pageStart");
+  const hasPageCount = hasOwn(value, "pageCount");
+  if (hasPageStart !== hasPageCount) return false;
+  if (hasPageStart && (!isNonNegativeInteger(value.pageStart)
+    || !isNonNegativeInteger(value.pageCount)
+    || value.pageStart > value.pageCount
+    || value.returned > value.pageCount - value.pageStart)) return false;
   if (hasOwn(value, "nextOffset") && value.nextOffset !== null && !isSafeInteger(value.nextOffset)) return false;
+  if (hasPageStart && isSafeInteger(value.nextOffset)
+    && value.nextOffset !== value.pageStart + value.returned) return false;
   if (hasOwn(value, "authors") && !isObject(value.authors)) return false;
   if (hasOwn(value, "correlations") && !isObject(value.correlations)) return false;
 
@@ -191,6 +200,7 @@ function validEnvelope(value, expectedSessionId) {
   if (value.truncatedBy === "extension_return_unrecognized") {
     return value.total === 0 && value.returned === 0 && value.offsetStart === -1 && value.offsetEnd === -1
       && value.messages.length === 0 && !hasOwn(value, "matchCount") && !hasOwn(value, "nextOffset")
+      && !hasOwn(value, "pageStart") && !hasOwn(value, "pageCount")
       && !hasOwn(value, "authors") && !hasOwn(value, "correlations")
       && validRetryRequest(value.continuationRequest)
       && isObject(value.wrapperDiagnostics)
@@ -465,6 +475,10 @@ function commonEnvelope(candidate, messages, projection) {
     messages,
   };
   if (isNonNegativeInteger(candidate.matchCount)) envelope.matchCount = candidate.matchCount;
+  if (isNonNegativeInteger(candidate.pageStart) && isNonNegativeInteger(candidate.pageCount)) {
+    envelope.pageStart = candidate.pageStart;
+    envelope.pageCount = candidate.pageCount;
+  }
   return rebuildDictionaries(envelope, projection);
 }
 
@@ -502,13 +516,11 @@ function preserveUpstreamCompletion(candidate, messages, projection) {
 }
 
 function resolvedPageStart(candidate, params) {
+  if (isNonNegativeInteger(candidate.pageStart)) return candidate.pageStart;
   if (isSafeInteger(candidate.nextOffset)) return Math.max(0, candidate.nextOffset - candidate.returned);
   if (isSafeInteger(params.offset)) {
     if (params.offset >= 0) return params.offset;
     if (typeof params.pattern !== "string" || params.pattern.length === 0) return Math.max(0, candidate.total + params.offset);
-    // A completed filtered tail has no upstream nextOffset. Re-resolve its
-    // negative offset against the filtered count instead of restarting at 0.
-    if (isNonNegativeInteger(candidate.matchCount)) return Math.max(0, candidate.matchCount + params.offset);
   }
   return 0;
 }

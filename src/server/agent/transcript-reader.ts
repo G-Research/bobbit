@@ -160,6 +160,10 @@ export type TranscriptMessage = CompactMessage | VerboseMessage | AgentTranscrip
 export interface ReadTranscriptEnvelope {
 	total: number;
 	matchCount?: number;
+	/** Resolved position of this window in the raw or context-expanded sequence. */
+	pageStart?: number;
+	/** Total pageable rows in that raw or context-expanded sequence. */
+	pageCount?: number;
 	returned: number;
 	offsetStart: number;
 	offsetEnd: number;
@@ -1471,6 +1475,8 @@ function referencedDictionary<T>(
 function envelopeForAgentRows(
 	total: number,
 	matchCount: number | undefined,
+	pageStart: number | undefined,
+	pageCount: number | undefined,
 	rows: AgentTranscriptMessage[],
 	state: AgentProjectionState,
 	nextOffset: number | undefined,
@@ -1489,6 +1495,7 @@ function envelopeForAgentRows(
 	return {
 		total,
 		...(matchCount !== undefined ? { matchCount } : {}),
+		...(pageStart !== undefined && pageCount !== undefined ? { pageStart, pageCount } : {}),
 		returned: rows.length,
 		offsetStart: rows.length > 0 ? rows[0].index : -1,
 		offsetEnd: rows.length > 0 ? rows[rows.length - 1].index : -1,
@@ -1543,6 +1550,8 @@ function fitAgentPage(
 		let trial = envelopeForAgentRows(
 			all.length,
 			matchCount,
+			start,
+			workingIndices.length,
 			[...rows, row],
 			state,
 			reserveOffset,
@@ -1554,6 +1563,8 @@ function fitAgentPage(
 			trial = envelopeForAgentRows(
 				all.length,
 				matchCount,
+				start,
+				workingIndices.length,
 				[...rows, row],
 				state,
 				reserveOffset,
@@ -1567,6 +1578,8 @@ function fitAgentPage(
 				trial = envelopeForAgentRows(
 					all.length,
 					matchCount,
+					start,
+					workingIndices.length,
 					[row],
 					state,
 					reserveOffset,
@@ -1586,6 +1599,8 @@ function fitAgentPage(
 		return envelopeForAgentRows(
 			all.length,
 			matchCount,
+			start,
+			workingIndices.length,
 			rows,
 			state,
 			nextOffset,
@@ -1597,6 +1612,8 @@ function fitAgentPage(
 	return envelopeForAgentRows(
 		all.length,
 		matchCount,
+		start,
+		workingIndices.length,
 		rows,
 		state,
 		endPosition < workingIndices.length ? endPosition : undefined,
@@ -1658,7 +1675,7 @@ function readTargetedResultSlice(
 	};
 	const state = newAgentProjectionState();
 	const base = makeTargetRow(state, requestedLimit);
-	let envelope = envelopeForAgentRows(all.length, undefined, [base], state, undefined);
+	let envelope = envelopeForAgentRows(all.length, undefined, undefined, undefined, [base], state, undefined);
 	if (serializedBytes(envelope) <= budget) return envelope;
 
 	let low = 1;
@@ -1672,6 +1689,8 @@ function readTargetedResultSlice(
 		const partial = actualEnd < requestedEnd;
 		const projected = envelopeForAgentRows(
 			all.length,
+			undefined,
+			undefined,
 			undefined,
 			[candidate],
 			candidateState,
@@ -1729,6 +1748,8 @@ function readAgentTranscript(
 			return {
 				total: all.length,
 				...(matchCount !== undefined ? { matchCount } : {}),
+				pageStart: Math.min(start, workingIndices.length),
+				pageCount: workingIndices.length,
 				returned: 0,
 				offsetStart: -1,
 				offsetEnd: -1,
