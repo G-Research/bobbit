@@ -64,6 +64,22 @@ class FakeRegexWorker extends EventEmitter implements SafeRegexWorkerLike {
 	}
 }
 
+class DeferredTerminationRegexWorker extends FakeRegexWorker {
+	private resolveTermination!: (code: number) => void;
+	private readonly termination = new Promise<number>((resolve) => {
+		this.resolveTermination = resolve;
+	});
+
+	override terminate(): Promise<number> {
+		this.terminateCount++;
+		return this.termination;
+	}
+
+	completeTermination(code = 1): void {
+		this.resolveTermination(code);
+	}
+}
+
 function protocolRegexWorker(
 	matcher: (pattern: string, text: string, caseSensitive: boolean) => boolean = (pattern, text, caseSensitive) =>
 		caseSensitive ? text.includes(pattern) : text.toLocaleLowerCase().includes(pattern.toLocaleLowerCase()),
@@ -637,6 +653,29 @@ describe("transcript-reader / readTranscript", () => {
 });
 
 describe("transcript-reader / bounded regex worker pool", () => {
+	it("pins the production default active worker cap at exactly two", async () => {
+		const workers: FakeRegexWorker[] = [];
+		const pool = createTranscriptRegexPoolForTests({
+			workerFactory: () => {
+				const worker = new FakeRegexWorker(() => undefined);
+				workers.push(worker);
+				return worker;
+			},
+		});
+
+		const first = pool.search([["first"]], "never").catch((error) => error);
+		const second = pool.search([["second"]], "never").catch((error) => error);
+		const queued = pool.search([["queued"]], "never").catch((error) => error);
+
+		assert.equal(workers.length, 2, "the third concurrent search must queue behind exactly two workers");
+		assert.deepEqual(pool.stats(), { activeWorkers: 2, queuedJobs: 1, queuedCorpusUnits: 6 });
+		pool.stop();
+		for (const outcome of await Promise.all([first, second, queued])) {
+			assert.equal(outcome instanceof TranscriptRegexSearchError && outcome.code, "REGEX_SEARCH_STOPPED");
+		}
+		assert.deepEqual(workers.map((worker) => worker.terminateCount), [1, 1]);
+	});
+
 	it("caps active workers and rejects queued count or corpus overload without spawning", async () => {
 		const clock = new ManualRegexClock();
 		const workers: FakeRegexWorker[] = [];
@@ -671,24 +710,36 @@ describe("transcript-reader / bounded regex worker pool", () => {
 		assert.equal(workers[0].terminateCount, 1);
 	});
 
-	it("times out, terminates unconditionally, and recovers for the next queued scan", async () => {
+	it("keeps a lifecycle error sink through timeout termination and drains already-queued recovery work", async () => {
 		const clock = new ManualRegexClock();
 		const workers: FakeRegexWorker[] = [];
 		const constructorOptions: WorkerOptions[] = [];
+		let settlements = 0;
 		const pool = createTranscriptRegexPoolForTests({
 			maxActiveWorkers: 1,
 			wallTimeoutMs: 25,
 			clock,
 			workerFactory: (_source, options) => {
 				constructorOptions.push(options);
-				const worker = workers.length === 0 ? new FakeRegexWorker(() => undefined) : protocolRegexWorker();
+				const worker = workers.length === 0
+					? new DeferredTerminationRegexWorker(() => undefined)
+					: protocolRegexWorker();
 				workers.push(worker);
 				return worker;
 			},
 			yieldToEventLoop: async () => undefined,
 		});
 
-		const timedOut = pool.search([["first"]], "first").catch((error) => error);
+		const timedOut = pool.search([["first"]], "first").then(
+			(matches) => {
+				settlements++;
+				return matches;
+			},
+			(error: unknown) => {
+				settlements++;
+				return error;
+			},
+		);
 		assert.deepEqual(constructorOptions[0].workerData, { modulePath: constructorOptions[0].workerData!.modulePath });
 		assert.equal(Object.prototype.hasOwnProperty.call(constructorOptions[0].workerData!, "pattern"), false);
 		assert.equal(Object.prototype.hasOwnProperty.call(constructorOptions[0].workerData!, "segmentsByMessage"), false);
@@ -698,13 +749,27 @@ describe("transcript-reader / bounded regex worker pool", () => {
 			stackSizeMb: 4,
 		});
 
-		clock.advance(25);
+		clock.advance(10);
+		const recovered = pool.search([["second has needle"]], "needle");
+		assert.deepEqual(pool.stats(), { activeWorkers: 1, queuedJobs: 1, queuedCorpusUnits: 17 });
+		clock.advance(15);
+
+		const firstWorker = workers[0] as DeferredTerminationRegexWorker;
+		assert.equal(firstWorker.terminateCount, 1);
+		assert.equal(firstWorker.listenerCount("error"), 1, "late worker failures need a sink until termination settles");
+		assert.doesNotThrow(() => firstWorker.emit("error", new Error("late OOM during termination")));
+		assert.equal(settlements, 0, "the search must wait for termination and settle exactly once");
+		assert.equal(workers.length, 1, "queued work must not start before active worker termination settles");
+
+		firstWorker.completeTermination();
 		const timeoutError = await timedOut;
 		assert.equal(timeoutError instanceof TranscriptRegexSearchError && timeoutError.code, "REGEX_SEARCH_TIMEOUT");
-		assert.equal(workers[0].terminateCount, 1);
+		assert.equal(settlements, 1);
+		assert.equal(firstWorker.listenerCount("error"), 0, "termination completion must remove the lifecycle sink");
+		assert.deepEqual(firstWorker.eventNames(), [], "termination completion must not leak worker listeners");
 
-		const recovered = await pool.search([["second has needle"]], "needle");
-		assert.deepEqual(recovered, [0]);
+		assert.deepEqual(await recovered, [0]);
+		assert.equal(workers.length, 2, "the queued recovery scan must drain without starvation");
 		assert.equal(workers[1].terminateCount, 1);
 		assert.deepEqual(pool.stats(), { activeWorkers: 0, queuedJobs: 0, queuedCorpusUnits: 0 });
 		pool.stop();
@@ -731,12 +796,17 @@ describe("transcript-reader / bounded regex worker pool", () => {
 				yieldToEventLoop: async () => undefined,
 			});
 
-			const failed = await pool.search([["first"]], "first").catch((error) => error);
+			const failedPromise = pool.search([["first"]], "first").catch((error) => error);
+			const recovered = pool.search([["recovered"]], "recovered");
+			assert.deepEqual(pool.stats(), { activeWorkers: 1, queuedJobs: 1, queuedCorpusUnits: 9 });
+
+			const failed = await failedPromise;
 			assert.equal(failed instanceof TranscriptRegexSearchError && failed.code, "REGEX_WORKER_FAILED");
 			assert.match(failed.message, failure === "error" ? /injected worker fault/ : /exited before completing \(code 0\)/);
 			assert.equal(workers[0].terminateCount, 1);
-			assert.deepEqual(await pool.search([["recovered"]], "recovered"), [0]);
+			assert.deepEqual(await recovered, [0]);
 			assert.equal(workers[1].terminateCount, 1);
+			assert.deepEqual(pool.stats(), { activeWorkers: 0, queuedJobs: 0, queuedCorpusUnits: 0 });
 			pool.stop();
 		});
 	}
