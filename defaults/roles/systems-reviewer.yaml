@@ -9,6 +9,9 @@ toolPolicies:
   team_wait: never
   team_spawn: never
   team_prompt: never
+  team_abort: never
+  team_dismiss: never
+  team_steer: never
   session_prompt: never
   gate_signal: never
   task_create: never

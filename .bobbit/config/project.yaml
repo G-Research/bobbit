@@ -126,7 +126,6 @@ workflows:
             command: e2e
           - name: Gap analysis
             type: llm-review
-            reviewGroup: specialist
             role: spec-auditor
             phase: 4
             prompt: >-
@@ -168,7 +167,6 @@ workflows:
               relative to the spec and design.
           - name: Code quality review
             type: llm-review
-            reviewGroup: specialist
             role: code-reviewer
             phase: 4
             prompt: >-
@@ -209,7 +207,6 @@ workflows:
               5. Test coverage — are new behaviors tested?
           - name: E2E user journey coverage
             type: llm-review
-            reviewGroup: specialist
             phase: 4
             prompt: >-
               Verify that the implementation includes browser-based E2E tests
@@ -232,7 +229,6 @@ workflows:
               user-facing behavior, or if persistence/cleanup are skipped.
           - name: Bug hunt
             type: llm-review
-            reviewGroup: specialist
             role: bug-hunter
             phase: 4
             prompt: Review the implementation on branch {{branch}} vs origin/{{baseBranch}}
@@ -243,7 +239,6 @@ workflows:
               it is a bug.
           - name: Security review
             type: llm-review
-            reviewGroup: specialist
             role: security-reviewer
             phase: 4
             prompt: >-
@@ -261,7 +256,6 @@ workflows:
             type: llm-review
             role: systems-reviewer
             phase: 4
-            reviewGroup: specialist
             prompt: >-
               Perform the complete Systems Interaction Review defined by the
               systems-reviewer role for branch {{branch}} versus {{baseBranch}}.
@@ -497,7 +491,6 @@ workflows:
             command: e2e
           - name: Gap analysis
             type: llm-review
-            reviewGroup: specialist
             role: spec-auditor
             phase: 4
             prompt: >-
@@ -512,7 +505,6 @@ workflows:
               {{goal_spec}}
           - name: Code quality review
             type: llm-review
-            reviewGroup: specialist
             role: code-reviewer
             phase: 4
             prompt: Review the code changes on branch {{branch}} vs origin/{{baseBranch}}
@@ -520,7 +512,6 @@ workflows:
               style, and test coverage.
           - name: Bug hunt
             type: llm-review
-            reviewGroup: specialist
             role: bug-hunter
             phase: 4
             prompt: Review the implementation on branch {{branch}} vs origin/{{baseBranch}}
@@ -531,7 +522,6 @@ workflows:
               it is a bug.
           - name: Security review
             type: llm-review
-            reviewGroup: specialist
             role: security-reviewer
             phase: 4
             prompt: Security review of changes on branch {{branch}} vs
@@ -541,7 +531,6 @@ workflows:
             type: llm-review
             role: systems-reviewer
             phase: 4
-            reviewGroup: specialist
             prompt: >-
               Perform the complete Systems Interaction Review defined by the
               systems-reviewer role for branch {{branch}} versus {{baseBranch}}.
@@ -669,7 +658,6 @@ workflows:
             command: e2e
           - name: Gap analysis
             type: llm-review
-            reviewGroup: specialist
             role: spec-auditor
             phase: 4
             prompt: >-
@@ -683,7 +671,6 @@ workflows:
               {{goal_spec}}
           - name: Code quality review
             type: llm-review
-            reviewGroup: specialist
             role: code-reviewer
             phase: 4
             prompt: Review the code changes on branch {{branch}} vs {{baseBranch}} for
@@ -691,14 +678,12 @@ workflows:
               regression risk, and test coverage.
           - name: Regression test coverage
             type: llm-review
-            reviewGroup: specialist
             phase: 4
             prompt: Verify that the bug fix includes a regression test that would catch
               reintroduction. PASS if at least one unit, fixture, or E2E test
               covers the fixed behavior; FAIL if no regression test was added.
           - name: Bug hunt
             type: llm-review
-            reviewGroup: specialist
             role: bug-hunter
             phase: 4
             prompt: Review the implementation on branch {{branch}} vs {{baseBranch}} for
@@ -709,7 +694,6 @@ workflows:
               bug.
           - name: Security review
             type: llm-review
-            reviewGroup: specialist
             role: security-reviewer
             phase: 4
             prompt: Security review of changes on branch {{branch}} vs {{baseBranch}}. Check
@@ -718,7 +702,6 @@ workflows:
             type: llm-review
             role: systems-reviewer
             phase: 4
-            reviewGroup: specialist
             prompt: >-
               Perform the complete Systems Interaction Review defined by the
               systems-reviewer role for branch {{branch}} versus {{baseBranch}}.
@@ -805,7 +788,6 @@ workflows:
             command: e2e
           - name: Gap analysis
             type: llm-review
-            reviewGroup: specialist
             role: spec-auditor
             phase: 4
             prompt: >-
@@ -820,7 +802,6 @@ workflows:
               {{goal_spec}}
           - name: Code quality review
             type: llm-review
-            reviewGroup: specialist
             role: code-reviewer
             phase: 4
             prompt: Review the code changes on branch {{branch}} vs {{baseBranch}} for
@@ -828,7 +809,6 @@ workflows:
               minimality, and test coverage.
           - name: Bug hunt
             type: llm-review
-            reviewGroup: specialist
             role: bug-hunter
             phase: 4
             prompt: Review the implementation on branch {{branch}} vs {{baseBranch}} for
@@ -841,7 +821,6 @@ workflows:
             type: llm-review
             role: systems-reviewer
             phase: 4
-            reviewGroup: specialist
             prompt: >-
               Perform the complete Systems Interaction Review defined by the
               systems-reviewer role for branch {{branch}} versus {{baseBranch}}.
@@ -904,7 +883,6 @@ workflows:
             phase: 0
           - name: Bug hunt
             type: llm-review
-            reviewGroup: specialist
             role: bug-hunter
             phase: 1
             prompt: Review the implementation on branch {{branch}} vs {{baseBranch}} for
@@ -917,7 +895,6 @@ workflows:
             type: llm-review
             role: systems-reviewer
             phase: 1
-            reviewGroup: specialist
             prompt: >-
               Perform the complete Systems Interaction Review defined by the
               systems-reviewer role for branch {{branch}} versus {{baseBranch}}.
