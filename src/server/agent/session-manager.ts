@@ -7842,13 +7842,15 @@ export class SessionManager {
 		let currentModels: Awaited<ReturnType<typeof getAvailableModels>> | undefined;
 		// A normal Bobbit spawn must bind one of Bobbit's current catalog rows
 		// explicitly rather than letting Pi choose a newly published hidden provider.
-		// Goal/team extension-only args are Bobbit-owned setup, not generic raw Pi
-		// arguments; every other non-empty agentArgs input keeps the legacy exemption.
+		// skipAutoModel bypasses role/preferences selection, not this deterministic
+		// catalog binding. Goal/team extension-only args are Bobbit-owned setup, not
+		// generic raw Pi arguments; every other non-empty agentArgs input keeps the
+		// legacy exemption.
 		const bobbitOwnedExtensionSpawn = !!(goalId || opts?.teamGoalId || opts?.teamLeadSessionId)
 			&& !!agentArgs?.length
 			&& agentArgs.length % 2 === 0
 			&& agentArgs.every((arg, index) => index % 2 === 0 ? arg === "--extension" : arg.length > 0);
-		if (!rawSelectedSpawnModel && !opts?.skipAutoModel && (!agentArgs?.length || bobbitOwnedExtensionSpawn) && this.preferencesStore) {
+		if (!rawSelectedSpawnModel && (!agentArgs?.length || bobbitOwnedExtensionSpawn) && this.preferencesStore) {
 			currentModels = await getAvailableModels(this.preferencesStore);
 			rawSelectedSpawnModel = await this.resolveCurrentCatalogSpawnModel([], currentModels);
 		}
