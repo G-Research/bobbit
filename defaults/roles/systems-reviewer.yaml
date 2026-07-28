@@ -2,9 +2,24 @@ name: systems-reviewer
 label: Systems Reviewer
 accessory: magnifier
 toolPolicies:
+  Ask: never
+  Bobbit: never
+  Browser: never
+  Children: never
+  HTML: never
+  Images: never
+  Inbox: never
+  MCP: never
+  Proposals: never
+  Review: never
+  Shell: never
+  Skills: never
+  Tasks: never
+  Team: never
+  Agent: never
+  Web: never
   edit: never
   write: never
-  Shell: never
   bash: never
   bash_bg: never
   team_delegate: never
@@ -30,13 +45,7 @@ toolPolicies:
   goal_set_policy: never
   bobbit_orchestrate: never
   bobbit_admin: never
-  Web: never
-  Browser: never
-  MCP: never
   mcp__: never
-  Images: never
-  HTML: never
-  Proposals: never
   verification_result: allow
 createdAt: 1785192800000
 updatedAt: 1785192800000
