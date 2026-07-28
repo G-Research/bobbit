@@ -108,6 +108,10 @@ describe("model setup error redaction", () => {
 				},
 				resolveRoleModel: () => "anthropic/dead-role",
 				resolveStoreForSession: () => ({ update: () => {} }),
+				async requireCurrentCatalogSpawnModel(model: string) {
+					assert.equal(model, "openai/dead-fallback");
+					return model;
+				},
 				_writeModelNameFile: () => {},
 			}, {
 				id: "session-manager-redaction",
