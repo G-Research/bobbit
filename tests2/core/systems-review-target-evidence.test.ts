@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
 	FINAL_MUTATION_TARGET_CORRELATION_HEADER,
 	FINAL_MUTATION_TARGET_QUEUE_ENVELOPE_KEY,
+	FinalMutationTargetAssertionRegistry,
 	FinalMutationTargetEvidenceBroker,
 	assertCapturedFinalMutationTarget,
 	attachFinalMutationTargetQueueEnvelope,
@@ -42,13 +43,11 @@ function binding(
 }
 
 function isRegisteredTestRuntimeAdapterSource(source: string): boolean {
-	// The v2 server prebundle owns this production module at runtime, so the
-	// captured non-source-mapped frame is its immutable hashed entry rather than
-	// this test helper's TypeScript frame. Keep the test allowlist just as narrow
-	// as a harness adapter allowlist: exact function plus exact production entry.
-	return source.startsWith("captureAdapterSource (")
-		&& source.includes("/.profiles/testing-v2/server-prebundle/")
-		&& source.includes("/entries/src/server/agent/systems-review-target-evidence-");
+	// The stack walker must skip the evidence substrate itself and attribute the
+	// record to the actual adapter. This test-only predicate intentionally accepts
+	// only this helper; production harness validation uses its own closed allowlist.
+	return source.startsWith("registeredFinalMutationAdapter (")
+		&& source.replace(/\\/g, "/").includes("/tests2/core/systems-review-target-evidence.test.ts:");
 }
 
 function expectation(
@@ -145,7 +144,10 @@ describe("trusted final-mutator target evidence", () => {
 		expect(assertion.evidence.attempts).toHaveLength(2);
 		expect(assertion.evidence.attempts.map(attempt => attempt.attempt)).toEqual([1, 2]);
 		expect(assertion.evidence.attempts.every(attempt => attempt.effectKind === "git-delete-branch")).toBe(true);
-		expect(assertion.evidence.attempts.every(attempt => isRegisteredTestRuntimeAdapterSource(attempt.adapterSource))).toBe(true);
+		expect(
+			assertion.evidence.attempts.every(attempt => isRegisteredTestRuntimeAdapterSource(attempt.adapterSource)),
+			JSON.stringify(assertion.evidence.attempts.map(attempt => attempt.adapterSource)),
+		).toBe(true);
 		expect(assertion.evidence.effectOutcome).toBe("succeeded");
 		expect(Object.isFrozen(assertion.evidence)).toBe(true);
 
@@ -289,6 +291,34 @@ describe("trusted final-mutator target evidence", () => {
 			assertion.assertionToken,
 			expectation(context.binding),
 		)).toEqual(assertion.evidence);
+	});
+
+	it("registers opaque assertion ids and permits only identical replay-safe finalization", async () => {
+		const context = harness();
+		const assertion = await withCapability(context.broker, context.capability, () => assertCapturedFinalMutationTarget({
+			actionId: "aggregate-delete",
+			expectedTarget: "C:/repo/api",
+			expectedScope: "component:api",
+			invoke: () => captureThroughSerializedQueue(context.broker),
+		}));
+		const registry = new FinalMutationTargetAssertionRegistry(
+			context.broker,
+			isRegisteredTestRuntimeAdapterSource,
+			() => 123,
+			() => "server-generated-id",
+		);
+		const registered = registry.register(assertion);
+		expect(registered.assertionId).toBe("target-assertion:server-generated-id");
+		const expected = {
+			executionId: context.binding.executionId,
+			baseOid: context.binding.baseOid,
+			headOid: context.binding.headOid,
+			actionId: context.binding.actionId,
+			coverageItemId: context.binding.coverageItemId,
+		};
+		expect(registry.validateAndConsume(registered.assertionId, expected)).toBe(true);
+		expect(registry.validateAndConsume(registered.assertionId, expected)).toBe(true);
+		expect(registry.validateAndConsume(registered.assertionId, { ...expected, actionId: "different-action" })).toBe(false);
 	});
 
 	it("preserves signed correlation through serialized queue workers and fails closed for lost or forged envelopes", async () => {

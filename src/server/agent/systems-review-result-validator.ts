@@ -434,16 +434,19 @@ export function finalizeSystemsReviewResult(context: FinalizeSystemsReviewContex
 		if (mappedBehaviors.some(behavior => !behavior)) throw new SystemsReviewResultError("UNKNOWN_BEHAVIOR", `Coverage item "${item.id}" maps to an unknown behavior.`);
 		if (item.requiresStateTrace && !mappedBehaviors.some(behavior => behavior?.kind === "state")) throw new SystemsReviewResultError("MISSING_STATE_TRACE", `Coverage item "${item.id}" requires a state trace.`);
 		if (item.requiresActionTrace && !mappedBehaviors.some(behavior => behavior?.kind === "action")) throw new SystemsReviewResultError("MISSING_ACTION_TRACE", `Coverage item "${item.id}" requires an action trace.`);
-		if (item.requiresExactTargetEvidence) {
-			for (const behavior of mappedBehaviors) {
-				if (behavior?.kind !== "action") continue;
-				// Coverage risk is server-derived and cannot be downgraded by the
-				// reviewer's change/mutation/aggregate declarations. Every mapped
-				// action for a conservatively flagged item needs trusted evidence.
-				const assertionIds = behavior.tests.map(test => test.exactTargetAssertionId).filter((value): value is string => !!value);
-				const trusted = assertionIds.some(assertionId => context.validateExactTargetAssertion?.({ assertionId, behavior, coverageItem: item }) === true);
-				if (!trusted) findings.push(derivedUntestedTargetFinding(behavior, item));
-			}
+		for (const behavior of mappedBehaviors) {
+			if (behavior?.kind !== "action") continue;
+			const reviewerConfirmedQualifyingAction = behavior.change !== "unchanged"
+				&& (behavior.mutation === "destructive" || behavior.mutation === "remote")
+				&& behavior.aggregate;
+			if (!item.requiresExactTargetEvidence && !reviewerConfirmedQualifyingAction) continue;
+			// Server-derived coverage risk cannot be downgraded by reviewer fields;
+			// conversely, a reviewer-confirmed introduced/modified destructive or
+			// remote aggregate action cannot evade proof because a keyword heuristic
+			// missed it. Either source independently forces trusted final evidence.
+			const assertionIds = behavior.tests.map(test => test.exactTargetAssertionId).filter((value): value is string => !!value);
+			const trusted = assertionIds.some(assertionId => context.validateExactTargetAssertion?.({ assertionId, behavior, coverageItem: item }) === true);
+			if (!trusted) findings.push(derivedUntestedTargetFinding(behavior, item));
 		}
 	}
 	for (const change of context.snapshot.changes) {

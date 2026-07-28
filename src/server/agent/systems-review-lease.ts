@@ -81,3 +81,11 @@ export class SystemsReviewWriterLeaseCoordinator {
 		return found ? { ...found } : undefined;
 	}
 }
+
+/** Single process-wide writer boundary shared by the harness and GoalManager. */
+export const systemsReviewWriterLeaseCoordinator = new SystemsReviewWriterLeaseCoordinator();
+
+/** Central server-owned goal/worktree mutation guard. */
+export function assertSystemsReviewGoalWriteAllowed(goalId: string, ownerToken?: string): void {
+	systemsReviewWriterLeaseCoordinator.assertWriteAllowed(goalId, ownerToken);
+}

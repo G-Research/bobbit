@@ -57,12 +57,30 @@
       }
     },
     {
+      "path": "tests2/core/systems-review-continuation-store.test.ts",
+      "reason": "Durable logical execution coverage pinning fresh reviewer-session bindings across restart/resume and process-wide writer lease exclusion/release semantics.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/systems-review-target-evidence.test.ts",
       "reason": "Trusted final-mutator evidence regressions covering exact target/scope capture for every retry, zero/mismatch/failure rejection, integration/browser admission, signed assertion replay resistance, tautological-helper misuse, queue and cross-process correlation, binding/tamper failures, and production-safe no-op behavior.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
         "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/systems-review-target-finalization.test.ts",
+      "reason": "Real-Git integration proof that neutral aggregate mutations are conservatively classified, the registered test runner captures target/scope at mergeChildBranchLocal immediately before Git, and Systems finalization consumes the opaque assertion replay-safely.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
       }
     },
     {

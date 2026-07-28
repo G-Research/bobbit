@@ -39,7 +39,10 @@ export interface PersistedSystemsReviewExecution {
 	goalId: string;
 	gateId: string;
 	signalId: string;
+	/** Initial reviewer session retained for snapshot/receipt compatibility. */
 	sessionId: string;
+	/** Every fresh continuation session authorized for this logical execution. */
+	reviewerSessionIds: string[];
 	snapshot: SystemsReviewSnapshot;
 	contractId: string;
 	contractDigest: string;
@@ -158,6 +161,11 @@ export class SystemsReviewExecutionStore {
 				if (!candidate || typeof candidate !== "object") continue;
 				const execution = candidate as PersistedSystemsReviewExecution;
 				if (execution.version !== STORE_VERSION || !execution.id || !execution.snapshot?.digest || !Array.isArray(execution.checkpoints)) continue;
+				// v1 executions created before resumable fresh-session support carry
+				// only sessionId. Upgrade in memory without changing their snapshot.
+				execution.reviewerSessionIds = Array.isArray(execution.reviewerSessionIds)
+					? [...new Set([execution.sessionId, ...execution.reviewerSessionIds].filter(Boolean))]
+					: [execution.sessionId];
 				this.executions.set(execution.id, execution);
 			}
 		} catch (error) {
@@ -200,6 +208,7 @@ export class SystemsReviewExecutionStore {
 			gateId: input.gateId,
 			signalId: input.signalId,
 			sessionId: input.sessionId,
+			reviewerSessionIds: [input.sessionId],
 			snapshot: clone(input.snapshot),
 			contractId: input.contractId,
 			contractDigest: input.contractDigest,
@@ -217,6 +226,25 @@ export class SystemsReviewExecutionStore {
 	get(id: string): PersistedSystemsReviewExecution | undefined {
 		const found = this.executions.get(id);
 		return found ? clone(found) : undefined;
+	}
+
+	isReviewerSessionBound(id: string, sessionId: string): boolean {
+		const execution = this.require(id);
+		return execution.sessionId === sessionId || execution.reviewerSessionIds.includes(sessionId);
+	}
+
+	bindContinuationSession(id: string, sessionId: string): PersistedSystemsReviewExecution {
+		const execution = this.require(id);
+		if (execution.final || execution.status !== "running") {
+			throw new SystemsReviewExecutionStoreError("EXECUTION_CLOSED", `Systems review execution is ${execution.status}; continuation session rejected.`, 410);
+		}
+		if (!sessionId) throw new SystemsReviewExecutionStoreError("INVALID_SESSION", "Continuation session id is required.", 400);
+		if (!execution.reviewerSessionIds.includes(sessionId)) {
+			execution.reviewerSessionIds.push(sessionId);
+			execution.updatedAt = this.now();
+			this.save();
+		}
+		return clone(execution);
 	}
 
 	private require(id: string): PersistedSystemsReviewExecution {

@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createHmac, randomBytes as cryptoRandomBytes, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes as cryptoRandomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { getCallSites } from "node:util";
 
 /**
@@ -29,7 +29,18 @@ const MAX_CAPTURE_EVIDENCE_BYTES = 320 * 1_024;
 const MAX_ID_BYTES = 1_024;
 const MAX_VALUE_BYTES = 16 * 1_024;
 const FUTURE_SKEW_MS = 30_000;
-const MODULE_STACK_MARKER = "systems-review-target-evidence.";
+const MODULE_STACK_PATH = /(?:^|[\\/])src[\\/]server[\\/]agent[\\/]systems-review-target-evidence\.(?:[cm]?js|ts)$/u;
+const INTERNAL_CAPTURE_FUNCTIONS = new Set([
+	"captureAdapterSource",
+	"captureFinalMutationTarget",
+	"FinalMutationTargetEvidenceBroker.capture",
+	"capture",
+]);
+const REGISTERED_FINAL_ADAPTERS = Object.freeze([
+	Object.freeze({ functionName: "mergeChildBranchLocal", source: /(?:^|[\\/])src[\\/]server[\\/]skills[\\/]git\.ts(?::\d+:\d+)?$/u }),
+	Object.freeze({ functionName: "mergeChildBranchLocal", source: /[\\/]\.profiles[\\/]testing-v2[\\/]server-prebundle[\\/][a-zA-Z0-9_-]+[\\/]chunks[\\/]chunk-[a-zA-Z0-9_-]+\.mjs(?::\d+:\d+)?$/u }),
+	Object.freeze({ functionName: "mergeChildBranchLocal", source: /[\\/]dist[\\/]server[\\/]skills[\\/]git\.js(?::\d+:\d+)?$/u }),
+]);
 // Capture the Node intrinsic while the trusted server loads this module. Unlike
 // Error.stack, util.getCallSites does not consult caller-controlled
 // Error.prepareStackTrace. Keeping the original reference also resists later
@@ -57,8 +68,9 @@ export interface FinalMutationTargetEvidenceBinding {
 }
 
 export interface CaptureFinalMutationTargetInput {
-	readonly actionId: string;
-	readonly coverageItemId: string;
+	/** Optional only for a registered production adapter; the capability supplies the immutable binding. */
+	readonly actionId?: string;
+	readonly coverageItemId?: string;
 	readonly resolvedTarget: string;
 	readonly resolvedScope: string;
 	/** Adapter-owned effect classification, for example `git-command` or `remote-request`. */
@@ -266,16 +278,41 @@ function safeEqual(left: string, right: string): boolean {
 
 function captureAdapterSource(): string {
 	// Use generated/runtime identity. Source-map metadata can be supplied by the
-	// caller and therefore cannot establish a trusted production adapter.
-	for (const callSite of trustedGetCallSites(20, { sourceMap: false })) {
-		if (!callSite.scriptName || callSite.scriptName.includes(MODULE_STACK_MARKER)) continue;
+	// caller and therefore cannot establish a trusted production adapter. Bundled
+	// builds may put this module and its caller in hashed entry files, so skip the
+	// substrate by function identity as well as by its development source path.
+	for (const callSite of trustedGetCallSites(30, { sourceMap: false })) {
+		const functionName = callSite.functionName ?? "";
+		if (
+			!callSite.scriptName
+			|| MODULE_STACK_PATH.test(callSite.scriptName.replace(/:\d+:\d+$/u, ""))
+			|| INTERNAL_CAPTURE_FUNCTIONS.has(functionName)
+			|| functionName.endsWith(".capture")
+		) continue;
 		const location = `${callSite.scriptName}:${callSite.lineNumber}:${callSite.columnNumber}`;
-		return callSite.functionName ? `${callSite.functionName} (${location})` : location;
+		return functionName ? `${functionName} (${location})` : location;
 	}
 	throw new FinalMutationTargetEvidenceError(
 		"unregistered-adapter",
 		"Could not determine the final mutation adapter source",
 	);
+}
+
+/**
+ * Server-owned allowlist for final production adapters. Tests and routes cannot
+ * become trusted merely by choosing a source label: both the runtime function
+ * identity and its generated/development production module path must match.
+ */
+export function isRegisteredFinalMutationTargetAdapterSource(source: string): boolean {
+	if (typeof source !== "string") return false;
+	const match = /^([^ (]+) \((.+)\)$/u.exec(source);
+	if (!match) return false;
+	const [, functionName, rawLocation] = match;
+	const normalizedLocation = rawLocation.replace(/\\/g, "/");
+	return REGISTERED_FINAL_ADAPTERS.some(adapter => (
+		adapter.functionName === functionName
+		&& adapter.source.test(normalizedLocation)
+	));
 }
 
 function immutableRecord(record: FinalMutationTargetCaptureRecord): FinalMutationTargetCaptureRecord {
@@ -666,8 +703,8 @@ export class FinalMutationTargetEvidenceBroker {
 			session.status = "failed";
 			throw new FinalMutationTargetEvidenceError("expired-context", "Final mutation target evidence capability expired");
 		}
-		const actionId = requireText(input.actionId, "actionId");
-		const coverageItemId = requireText(input.coverageItemId, "coverageItemId");
+		const actionId = input.actionId === undefined ? session.binding.actionId : requireText(input.actionId, "actionId");
+		const coverageItemId = input.coverageItemId === undefined ? session.binding.coverageItemId : requireText(input.coverageItemId, "coverageItemId");
 		if (actionId !== session.binding.actionId || coverageItemId !== session.binding.coverageItemId) {
 			session.status = "failed";
 			throw new FinalMutationTargetEvidenceError(
@@ -927,6 +964,110 @@ export class FinalMutationTargetEvidenceBroker {
 				session.status = "failed";
 				this.sessionsByNonce.delete(nonce);
 			}
+		}
+	}
+}
+
+export interface RegisteredFinalMutationTargetAssertion {
+	readonly assertionId: string;
+	readonly evidence: FinalMutationTargetAssertionEvidence;
+	readonly registeredAt: number;
+}
+
+export interface FinalMutationTargetAssertionRegistryExpectation {
+	readonly executionId: string;
+	readonly baseOid: string;
+	readonly headOid: string;
+	readonly actionId: string;
+	readonly coverageItemId: string;
+}
+
+interface RegisteredAssertionRecord extends RegisteredFinalMutationTargetAssertion {
+	readonly token: string;
+	consumedExpectation?: string;
+}
+
+function registryExpectationKey(expected: FinalMutationTargetAssertionRegistryExpectation): string {
+	return [
+		requireText(expected.executionId, "executionId"),
+		requireOid(expected.baseOid, "baseOid"),
+		requireOid(expected.headOid, "headOid"),
+		requireText(expected.actionId, "actionId"),
+		requireText(expected.coverageItemId, "coverageItemId"),
+	].join("\0");
+}
+
+/**
+ * Harness-owned assertion registry. Reviewers receive only the random assertion
+ * id; the signed token and registered command/test bindings never cross into the
+ * review submission. Consumption is idempotent only for the identical immutable
+ * expectation, so a correctable final-synthesis retry cannot burn valid proof
+ * while cross-action, cross-coverage, and cross-execution replay still fails.
+ */
+export class FinalMutationTargetAssertionRegistry {
+	private readonly assertions = new Map<string, RegisteredAssertionRecord>();
+
+	constructor(
+		private readonly broker: FinalMutationTargetEvidenceBroker,
+		private readonly isRegisteredFinalAdapterSource: (source: string) => boolean = isRegisteredFinalMutationTargetAdapterSource,
+		private readonly now: () => number = Date.now,
+		private readonly createId: () => string = randomUUID,
+	) {}
+
+	register<T>(assertion: CapturedFinalMutationTargetAssertion<T>): RegisteredFinalMutationTargetAssertion {
+		if (!assertion || typeof assertion.assertionToken !== "string" || !assertion.evidence) {
+			throw new FinalMutationTargetEvidenceError("invalid-token", "A broker-issued final mutation assertion is required");
+		}
+		const assertionId = `target-assertion:${this.createId()}`;
+		if (this.assertions.has(assertionId)) {
+			throw new FinalMutationTargetEvidenceError("invalid-binding", "Assertion id source produced a duplicate identifier");
+		}
+		const record: RegisteredAssertionRecord = {
+			assertionId,
+			token: assertion.assertionToken,
+			evidence: assertion.evidence,
+			registeredAt: this.now(),
+		};
+		this.assertions.set(assertionId, record);
+		return Object.freeze({ assertionId, evidence: record.evidence, registeredAt: record.registeredAt });
+	}
+
+	validateAndConsume(
+		assertionId: string,
+		expected: FinalMutationTargetAssertionRegistryExpectation,
+	): boolean {
+		const record = this.assertions.get(assertionId);
+		if (!record) return false;
+		let expectationKey: string;
+		try {
+			expectationKey = registryExpectationKey(expected);
+		} catch {
+			return false;
+		}
+		if (record.consumedExpectation !== undefined) return safeEqual(record.consumedExpectation, expectationKey);
+		const evidence = record.evidence;
+		try {
+			consumeFinalMutationTargetAssertion(this.broker, record.token, {
+				executionId: expected.executionId,
+				commandId: evidence.commandId,
+				testId: evidence.testId,
+				testKind: evidence.testKind,
+				baseOid: expected.baseOid,
+				headOid: expected.headOid,
+				actionId: expected.actionId,
+				coverageItemId: expected.coverageItemId,
+				isRegisteredFinalAdapterSource: this.isRegisteredFinalAdapterSource,
+			});
+			record.consumedExpectation = expectationKey;
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	discardExecution(executionId: string): void {
+		for (const [assertionId, record] of this.assertions) {
+			if (record.evidence.executionId === executionId) this.assertions.delete(assertionId);
 		}
 	}
 }
