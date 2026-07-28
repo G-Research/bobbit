@@ -66,6 +66,15 @@
       }
     },
     {
+      "path": "tests2/core/pi-extension-read-session-boundary.test.ts",
+      "reason": "Focused activation-boundary regression proving explicit Pi read_session contributions require the immutable result bridge with and without ToolManager resolution, disabled and ordinary Pi tools remain unavailable without activation drift, and bridge materialization failures fail closed only when read_session is exposed.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/dom/read-session-renderer.test.ts",
       "reason": "Focused DOM coverage proving ReadSessionRenderer parses canonical content JSON instead of duplicated details messages, resolves author dictionaries, renders bounded calls plus canonical result status/metrics/omission/excerpts/continuations, keeps legacy compact rows compatible, escapes output, and advances the direct REST modal using returned/nextOffset.",
       "execution": {
