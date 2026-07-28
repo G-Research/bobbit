@@ -145,6 +145,76 @@ function legacySessionRecord(id: string): StoredRecord {
 	};
 }
 
+const RETIRED_MODEL = "retired-custom/retired-opus";
+const SELECTABLE_DEFAULT = "anthropic/claude-opus-5";
+const RETIRED_TUPLE = {
+	modelProvider: "retired-custom",
+	modelId: "retired-opus",
+	effectiveThinkingLevel: "high",
+} as const;
+
+function durableSessionRecord(id: string): StoredRecord {
+	return {
+		...legacySessionRecord(id),
+		title: "Session with a previously verified durable tuple",
+		...RETIRED_TUPLE,
+	};
+}
+
+function durableTupleBytes(record: StoredRecord | undefined): string {
+	return JSON.stringify({
+		modelProvider: record?.modelProvider,
+		modelId: record?.modelId,
+		effectiveThinkingLevel: record?.effectiveThinkingLevel,
+	});
+}
+
+async function makeCatalogDriftPreferences(label: string): Promise<InstanceType<typeof PreferencesStore>> {
+	const prefs = makePreferences(label);
+	prefs.set("default.sessionModel", SELECTABLE_DEFAULT);
+	invalidateModelCache();
+	const models = await getAvailableModels(prefs);
+	assert.ok(
+		models.some((model) => `${model.provider}/${model.id}` === SELECTABLE_DEFAULT && model.sessionSelectable !== false),
+		"catalog-drift fixture requires a different selectable default",
+	);
+	assert.ok(
+		!models.some((model) => `${model.provider}/${model.id}` === RETIRED_MODEL),
+		"catalog-drift fixture requires the previously verified durable model to be absent",
+	);
+	return prefs;
+}
+
+function trackConstructedBridges(): {
+	options: Record<string, any>[];
+	getStartCount: () => number;
+	reset: () => void;
+} {
+	const options: Record<string, any>[] = [];
+	let startCount = 0;
+	registerRpcBridgeFactory((bridgeOptions: Record<string, any>) => {
+		options.push({ ...bridgeOptions });
+		const sessionId = bridgeOptions.env?.BOBBIT_SESSION_ID ?? `tracked-${options.length}`;
+		const bridge = makeBridge(bridgeOptions, sessionId);
+		bridge.start = vi.fn(async () => { startCount += 1; });
+		return bridge;
+	});
+	return {
+		options,
+		getStartCount: () => startCount,
+		reset: () => {
+			options.length = 0;
+			startCount = 0;
+		},
+	};
+}
+
+function isActionableUnavailableFailure(message: string | undefined): boolean {
+	return !!message
+		&& message.includes(RETIRED_MODEL)
+		&& /not currently available for session selection/i.test(message);
+}
+
 async function flushMicrotasks(times = 12): Promise<void> {
 	for (let i = 0; i < times; i++) await Promise.resolve();
 }
@@ -397,6 +467,161 @@ describe("actual SessionManager spawn tuple boundaries", () => {
 				forceAbortReplacement: expectedModel,
 			},
 			"LEGACY_REPLACEMENTS_EXPLICIT_PIN: role and force-abort replacement bridges must resolve the current Bobbit catalog default when a legacy row has no durable tuple",
+		);
+	});
+
+	it("fails cold restore before spawn when its complete durable tuple left the current catalog", async () => {
+		const prefs = await makeCatalogDriftPreferences("durable-cold-restore-catalog-drift");
+		const sessionId = "durable-cold-restore-catalog-drift";
+		const ps = durableSessionRecord(sessionId);
+		fs.writeFileSync(ps.agentSessionFile, "");
+		const store = new RecordingStore();
+		store.put(ps);
+		const durableBefore = durableTupleBytes(store.get(sessionId));
+		const tracker = trackConstructedBridges();
+
+		const manager: any = new SessionManager({ preferencesStore: prefs, stateDir });
+		manager._testStore = store;
+		managers.push(manager);
+
+		let failure: unknown;
+		try {
+			await manager.restoreSession(ps);
+		} catch (error) {
+			failure = error;
+		}
+		const failureMessage = failure instanceof Error ? failure.message : failure === undefined ? undefined : String(failure);
+
+		assert.deepEqual(
+			{
+				actionableUnavailableFailure: isActionableUnavailableFailure(failureMessage),
+				replacementConstructions: tracker.options.length,
+				replacementStarts: tracker.getStartCount(),
+				liveReplacementInstalled: manager.sessions.has(sessionId),
+				durableTupleBytes: durableTupleBytes(store.get(sessionId)),
+			},
+			{
+				actionableUnavailableFailure: true,
+				replacementConstructions: 0,
+				replacementStarts: 0,
+				liveReplacementInstalled: false,
+				durableTupleBytes: durableBefore,
+			},
+			"DURABLE_TUPLE_UNAVAILABLE_COLD_RESTORE: a complete previously verified tuple must fail closed when catalog drift removes it; a different selectable default is not a restore substitute",
+		);
+	});
+
+	it("fails a model-less role replacement before spawn when its complete durable tuple left the current catalog", async () => {
+		const prefs = await makeCatalogDriftPreferences("durable-role-replacement-catalog-drift");
+		const sessionId = "durable-role-replacement-catalog-drift";
+		const transcript = path.join(agentDir, "sessions", `${sessionId}.jsonl`);
+		fs.writeFileSync(transcript, "");
+		const store = new RecordingStore();
+		const tracker = trackConstructedBridges();
+		const manager: any = new SessionManager({ preferencesStore: prefs, stateDir });
+		manager._testStore = store;
+		managers.push(manager);
+
+		const session = await manager.createSession(tmpRoot, [], undefined, undefined, {
+			sessionId,
+			initialModel: SELECTABLE_DEFAULT,
+			initialThinkingLevel: "high",
+		});
+		if (session.pendingMetadataPersist) await session.pendingMetadataPersist;
+		await flushMicrotasks();
+		store.records.set(sessionId, {
+			...store.get(sessionId),
+			id: sessionId,
+			agentSessionFile: transcript,
+			...RETIRED_TUPLE,
+		});
+		const durableBefore = durableTupleBytes(store.get(sessionId));
+		const originalBridge = session.rpcClient;
+		const originalStop = vi.spyOn(originalBridge, "stop");
+		tracker.reset();
+
+		let failure: unknown;
+		try {
+			await manager.assignRole(sessionId, {
+				name: "model-less-replacement-role",
+				promptTemplate: "Role replacement without a model override",
+				accessory: "none",
+			});
+		} catch (error) {
+			failure = error;
+		}
+		const failureMessage = failure instanceof Error ? failure.message : failure === undefined ? undefined : String(failure);
+
+		assert.deepEqual(
+			{
+				actionableUnavailableFailure: isActionableUnavailableFailure(failureMessage),
+				replacementConstructions: tracker.options.length,
+				replacementStarts: tracker.getStartCount(),
+				originalBridgeStopped: originalStop.mock.calls.length > 0,
+				originalBridgeRetained: manager.sessions.get(sessionId)?.rpcClient === originalBridge,
+				durableTupleBytes: durableTupleBytes(store.get(sessionId)),
+			},
+			{
+				actionableUnavailableFailure: true,
+				replacementConstructions: 0,
+				replacementStarts: 0,
+				originalBridgeStopped: false,
+				originalBridgeRetained: true,
+				durableTupleBytes: durableBefore,
+			},
+			"DURABLE_TUPLE_UNAVAILABLE_ROLE_REPLACEMENT: a model-less role replacement must retain and validate its complete durable tuple instead of substituting a different selectable default",
+		);
+	});
+
+	it("fails force-abort replacement before spawn when its complete durable tuple left the current catalog", async () => {
+		const prefs = await makeCatalogDriftPreferences("durable-force-abort-catalog-drift");
+		const sessionId = "durable-force-abort-catalog-drift";
+		const transcript = path.join(agentDir, "sessions", `${sessionId}.jsonl`);
+		fs.writeFileSync(transcript, "");
+		const store = new RecordingStore();
+		const tracker = trackConstructedBridges();
+		const manager: any = new SessionManager({ preferencesStore: prefs, stateDir });
+		manager._testStore = store;
+		managers.push(manager);
+
+		const session = await manager.createSession(tmpRoot, [], undefined, undefined, {
+			sessionId,
+			initialModel: SELECTABLE_DEFAULT,
+			initialThinkingLevel: "high",
+		});
+		if (session.pendingMetadataPersist) await session.pendingMetadataPersist;
+		await flushMicrotasks();
+		store.records.set(sessionId, {
+			...store.get(sessionId),
+			id: sessionId,
+			agentSessionFile: transcript,
+			...RETIRED_TUPLE,
+		});
+		const durableBefore = durableTupleBytes(store.get(sessionId));
+		tracker.reset();
+		session.status = "streaming";
+		const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await manager.forceAbort(sessionId, 1);
+		const loggedFailure = errorLog.mock.calls
+			.flatMap((args) => args)
+			.map((value) => value instanceof Error ? value.message : String(value))
+			.join(" ");
+
+		assert.deepEqual(
+			{
+				actionableUnavailableFailure: isActionableUnavailableFailure(loggedFailure),
+				replacementConstructions: tracker.options.length,
+				replacementStarts: tracker.getStartCount(),
+				durableTupleBytes: durableTupleBytes(store.get(sessionId)),
+			},
+			{
+				actionableUnavailableFailure: true,
+				replacementConstructions: 0,
+				replacementStarts: 0,
+				durableTupleBytes: durableBefore,
+			},
+			"DURABLE_TUPLE_UNAVAILABLE_FORCE_ABORT: force-abort recovery must surface the unavailable durable model and terminate before constructing a replacement with a different selectable default",
 		);
 	});
 
