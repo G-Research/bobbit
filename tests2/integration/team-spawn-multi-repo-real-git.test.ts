@@ -8,6 +8,7 @@ import { awaitableRm, pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 import { copyGitTemplate, prepareGitTemplate } from "../harness/git-template.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, deleteGoal, registerProject, teardownTeam } from "./_e2e/e2e-setup.js";
+import { testSystemsInteractionReviewStep } from "../harness/systems-review-workflow.js";
 
 // The E2E Vitest lane defaults to 30s. Give this real-Git lifecycle file the
 // same budget as the integration lane so Windows process and filesystem
@@ -148,7 +149,12 @@ test("direct and REST team spawn preserve exact local component HEADs across col
 				general: {
 					name: "General",
 					description: "Focused multi-repo team-spawn regression",
-					gates: [{ id: "implementation", name: "Implementation", depends_on: [] }],
+					gates: [{
+						id: "implementation",
+						name: "Implementation",
+						depends_on: [],
+						verify: [testSystemsInteractionReviewStep()],
+					}],
 				},
 			},
 			seedWorkflows: false,
@@ -695,7 +701,12 @@ test("team lead borrows goal-owned polyrepo coordinates and both git-status rout
 				general: {
 					name: "General",
 					description: "Focused polyrepo team-lead git-status reproduction",
-					gates: [{ id: "implementation", name: "Implementation", depends_on: [] }],
+					gates: [{
+						id: "implementation",
+						name: "Implementation",
+						depends_on: [],
+						verify: [testSystemsInteractionReviewStep()],
+					}],
 				},
 			},
 			seedWorkflows: false,

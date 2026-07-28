@@ -33,6 +33,7 @@ import {
 	SYSTEM_MAX_NESTING_DEPTH_MIN,
 } from "../../src/server/agent/subgoal-nesting-limit.ts";
 import { createMemFs, type MemFs } from "../harness/mem-fs.js";
+import { testSystemsInteractionReviewStep } from "../harness/systems-review-workflow.js";
 
 let memfs: MemFs;
 const tmpRoot = path.resolve("/memfs/subgoal-nesting/work");
@@ -53,7 +54,7 @@ function makeManager(): { gm: GoalManager; store: GoalStore } {
 		{
 			id: "feature", name: "Feature", description: "",
 			gates: [
-				{ id: "implementation", name: "Implementation", dependsOn: [] },
+				{ id: "implementation", name: "Implementation", dependsOn: [], verify: [testSystemsInteractionReviewStep()] },
 				{ id: "ready-to-merge", name: "Ready", dependsOn: ["implementation"] },
 			],
 			createdAt: 0, updatedAt: 0,
