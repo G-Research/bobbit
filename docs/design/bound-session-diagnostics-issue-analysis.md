@@ -2,6 +2,8 @@
 
 Status: issue-analysis artifact for goal **Bound Session Diagnostics**. This document describes the pre-fix behavior and the implementation boundary; it is not the shipped user guide.
 
+The incident evidence and root-cause sections remain historical. The response contract and audited matrices are the rationale for the shipped projection. The shipped envelope adds explicit `pageStart`/`pageCount` coordinates so a resolved negative or filtered/context window can be refit and continued without confusing page positions with source message indexes.
+
 ## 1. Incident and impact
 
 Session `3e541ac7-83f4-48e6-a408-d5ea41b902f5` compared a bug-discovery session with workflow-review sessions. The comparison was answerable, but transcript exploration consumed most of the agent's context before it reached the answer.
@@ -415,7 +417,7 @@ For every successful agent-facing call, `serializedBytes(actualPiValue) <= READ_
 
 Budget authority lives in a gateway-generated, content-addressed `read-session-result-boundary` Pi extension, implemented by extending the existing `tool-result-error-bridge-extension.ts` registration wrapper rather than by trusting a tool-group extension. Its source is regenerated/verified like the existing error bridge, mounted read-only into sandboxes, and injected before every resolved builtin/server/project/market tool extension whenever `read_session` is granted. Session activation fails closed for `read_session` if this boundary cannot be written, translated, or loaded.
 
-A canonical successful envelope has an exact discriminated union. All variants require `total` (non-negative safe integer), `returned` (non-negative safe integer equal to `messages.length`), `offsetStart` and `offsetEnd` (safe integers), and `messages` (array). Optional common fields are `matchCount` (non-negative safe integer), `nextOffset` (safe integer or `null`), and `authors`/`correlations` (object dictionaries only). `truncatedBy` is the exact union `"transport_budget" | "extension_return_unrecognized"`; it is legal only when `partial` is exactly `true`.
+A canonical successful envelope has an exact discriminated union. All variants require `total` (non-negative safe integer), `returned` (non-negative safe integer equal to `messages.length`), `offsetStart` and `offsetEnd` (safe source-message indexes), and `messages` (array). Optional common fields are `matchCount` (non-negative safe integer), paired `pageStart`/`pageCount` (non-negative safe integers), `nextOffset` (safe integer or `null`), and `authors`/`correlations` (object dictionaries only). `pageStart` is the resolved zero-based position in the raw or filtered/context-expanded pageable sequence; `pageCount` is that sequence's total length. They are absent from targeted result-slice and unrecognized-wrapper envelopes. When present, `pageStart <= pageCount`, `returned <= pageCount - pageStart`, and a numeric `nextOffset` equals `pageStart + returned`. `truncatedBy` is the exact union `"transport_budget" | "extension_return_unrecognized"`; it is legal only when `partial` is exactly `true`.
 
 The variants are normative:
 
@@ -444,9 +446,9 @@ type SuccessfulEnvelope =
     });
 ```
 
-For a `transport_budget` page partial, `nextOffset` is required, non-negative, equals `continuationRequest.offset`, and identifies the first unreturned position in the raw or filtered/expanded sequence. For a `transport_budget` result-slice partial, `nextOffset` is absent, exactly one returned result has a non-null `excerpt.nextCursor`, and the continuation repeats that result's handle, uses that `nextCursor`, and carries an integer `result_limit` in `[1,8192]`. A transport partial must use one of these two forms and must not contain wrapper diagnostics.
+For a `transport_budget` page partial, `nextOffset` is required, non-negative, equals both `continuationRequest.offset` and `pageStart + returned`, and identifies the first unreturned position in the raw or filtered/context-expanded sequence. This normalized coordinate is essential after a negative filtered/context offset: the continuation repeats the same filter parameters and passes the non-negative `nextOffset`, never `offsetEnd + 1`. For a `transport_budget` result-slice partial, `pageStart`, `pageCount`, and `nextOffset` are absent; exactly one returned result has a non-null `excerpt.nextCursor`, and the continuation repeats that result's handle, uses that `nextCursor`, and carries an integer `result_limit` in `[1,8192]`. A transport partial must use one of these two forms and must not contain wrapper diagnostics.
 
-The `extension_return_unrecognized` variant has exact base values `total: 0`, `returned: 0`, `offsetStart: -1`, `offsetEnd: -1`, and `messages: []`; `matchCount`, `nextOffset`, `authors`, and `correlations` are absent because they cannot be recovered. Its `continuationRequest` is the bounded retry allowlist defined below, and `wrapperDiagnostics.actualBytes` is a non-negative safe integer measuring the discarded actual wrapper. No other variant may carry `wrapperDiagnostics` or retry fields.
+The `extension_return_unrecognized` variant has exact base values `total: 0`, `returned: 0`, `offsetStart: -1`, `offsetEnd: -1`, and `messages: []`; `matchCount`, `pageStart`, `pageCount`, `nextOffset`, `authors`, and `correlations` are absent because they cannot be recovered. Its `continuationRequest` is the bounded retry allowlist defined below, and `wrapperDiagnostics.actualBytes` is a non-negative safe integer measuring the discarded actual wrapper. No other variant may carry `wrapperDiagnostics` or retry fields.
 
 Each message must be an object with a non-negative safe-integer `index` and string `role`; it is then reprojected through the same semantic field allowlist/caps as route messages, so unknown nested fields are discarded. The only summary-row additions are `projectionOmitted: true` with non-negative safe-integer `toolCallCount` and `toolResultCount`; those fields are legal only in a `transport_budget` page partial. Incoming dictionaries are never copied wholesale: the boundary rebuilds only entries referenced by retained messages and lets the fitter limit their count. No coercion of numeric strings or aliases occurs. Before candidate search, if returned `details.session_id` exists it must be a string exactly equal to invocation `params.session_id`, otherwise recovery fails.
 
@@ -506,7 +508,7 @@ The boundary emits one canonical successful shape:
 
 `details` never contains `messages`; the renderer parses canonical text or uses only these scalars. Measuring this complete value counts JSON quotes/backslashes/control escapes added around the already-serialized envelope, all UTF-8 bytes for emoji, every wrapper key, and `details`. There is no separately fillable 50 KiB inner budget.
 
-The fitter is deterministic. Before fitting, variable semantic fields use explicit UTF-16 caps: role 32, tool name 128, author label 128, compact visible text 800, verbose visible text 4096, argument preview 512, thinking/error summary 512, and session ID/handle/ref 64. Provider correlation IDs are represented by bounded refs/digests rather than copied raw. Every string cap uses a Unicode-scalar-safe boundary and carries a truncation indicator where loss is diagnostically meaningful. Hitting one of these declared projection caps sets the row-level truncation flag; it does not by itself set envelope `partial` or claim transport exhaustion.
+The fitter is deterministic. Before fitting, variable semantic fields use explicit UTF-16 caps: role 32, timestamp 64, tool name 128, author label 128, compact visible text 800, verbose visible text 4096, argument preview 512, thinking/error summary 512, and session ID/handle/ref 64. Provider correlation IDs are represented by bounded refs/digests rather than copied raw. Every string cap uses a Unicode-scalar-safe boundary and carries a truncation or invalid-value indicator where loss is diagnostically meaningful. Hitting one of these declared projection caps sets the row-level truncation flag; it does not by itself set envelope `partial` or claim transport exhaustion.
 
 1. Construct canonical messages using those field caps, accurate metadata, and requested ordering.
 2. Add one message at a time and build/serialize the canonical **actual Pi value**.
@@ -534,10 +536,13 @@ Legend:
 
 Modes are **C** compact, **CR** compact with result excerpts, **V** verbose with results redacted, and **VR** verbose with result excerpts. “Verbose” means more semantic content, never provider replay blobs or unbounded result bodies.
 
+The shipped agent projection records both normalized page coordinates (`pageStart`, `pageCount`, `nextOffset`) and returned source coordinates (`offsetStart`, `offsetEnd`). This is an additive agent-bound field group: direct REST/UI keeps its legacy envelope and derives its own pagination as before.
+
 | Field or normalized group | C | CR | V | VR | Observed / typical size | Diagnostic usefulness | Size rating | Decision | Compatibility constraints |
 |---|---:|---:|---:|---:|---|---|---|---|---|
-| Envelope totals, match count, returned range, page continuation | K | K | K | K | Typically <200 B/call | High | Low | Keep | Preserve offset, negative-offset, regex/context semantics |
-| Message `index`, `role`, `ts` | K | K | K | K | Roughly 50–100 B/message | High | Low | Keep | Existing indexes and timestamps retain meaning |
+| Envelope totals, match count, normalized `pageStart`/`pageCount`, returned source range, page continuation | K | K | K | K | Typically <250 B/call | High | Low | Keep | Preserve negative-offset and regex/context semantics; `nextOffset` is a page position, while `offsetStart`/`offsetEnd` are source indexes; direct REST/UI shape remains unchanged |
+| Message `index` | K | K | K | K | Roughly 10–25 B/message | High | Low | Keep | Existing source indexes retain meaning |
+| Message `role`, `ts` | S | S | S | S | Roughly 40–80 B/message after caps | High | Low | Bound and retain | Role is capped at 32 UTF-16 units; timestamp at 64 with explicit truncation/invalid indicators; direct REST values remain unchanged |
 | Author identity (`kind`, `id`, `label`) | R | R | R | R | Live object 103 B/message; repeats across most rows | High for attribution | Medium aggregate | Canonicalize into envelope dictionary + short refs | Direct REST/UI author objects unchanged; renderer resolves refs |
 | Human/assistant visible text | S | S | bounded K | bounded K | Compact currently up to 800 chars/message; verbose unbounded | High | Medium/high | Summarize, then whole-response budget | Preserve visible text and regex behavior; indicate truncation |
 | Thinking summary text | — | — | S | S | Usually tens of chars; currently coupled to large signatures | Medium | Low after scrub | Summarize | Do not expose private replay metadata |
@@ -549,7 +554,8 @@ Modes are **C** compact, **CR** compact with result excerpts, **V** verbose with
 | Duplicate `toolName`/`name`, `isError`/`is_error`/`status`, body aliases | — | — | — | — | Tens–hundreds B/result plus ambiguity | None once normalized | Medium aggregate | Canonicalize/omit aliases | Direct REST legacy projection may retain aliases |
 | Repeated prose omission marker | — | — | — | — | 83 chars/result in live sample | None | Medium aggregate | Replace with boolean `omitted`/`excerpt.complete` | Renderer supplies human prose locally |
 | Result body | — | E | — | E | **6.80 MB observed**; raw-mode calls returned **7.86 MB**; one response **950.8 KB** | High only when narrowly targeted | Critical | Lazy-slice | Never anonymous; include metadata and continuation on every excerpt |
-| Result retrieval handle/range/cursor | M | M | M | M | Target <60 B/result | High | Low | Keep | Handle must detect stale/rebound transcript content |
+| Result retrieval handle | M | M | M | M | Target <60 B/result | High | Low | Keep | Handle must detect stale/rebound transcript content |
+| Result excerpt range/cursor | — | E | — | E | Typically <100 B/excerpt | High only during targeted retrieval | Low | Include with excerpt only | UTF-16 half-open range and exact `nextCursor`; absent when the result body is omitted |
 | Attachments/images/binary provider blocks | S | S | S | S | Potentially very large | Medium | High | Metadata summary + lazy retrieval; no inline binary | Preserve user-visible meaning without base64/provider blobs |
 | Stop/error diagnostics and semantic execution status | M | M | M | M | Usually <200 B/message | High | Low | Keep/canonicalize | Preserve structured error contracts |
 | Arbitrary provider/full-message bookkeeping | — | — | — | — | Variable; can include usage/replay/raw-response objects | Low | High | Omit unless explicitly allowlisted as semantic diagnostics | Direct REST verbose remains compatible |
