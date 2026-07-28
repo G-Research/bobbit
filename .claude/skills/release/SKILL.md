@@ -18,9 +18,9 @@ This skill orchestrates that doc + version bump + notes + GitHub release.
 worktree**: the dev server runs there, and `npm ci` / `npm run build` would wipe
 its `node_modules` / overwrite its `dist/` and break the running server
 mid-release. Never cut it from a **session worktree** either — that's on a
-session branch, not `master`, and git won't let you check out `master` in a
+session branch, not `main`, and git won't let you check out `main` in a
 second worktree while the primary already has it. Instead, §1.5 creates a
-dedicated **detached-HEAD worktree off `origin/master`** (a sibling of the
+dedicated **detached-HEAD worktree off `origin/main`** (a sibling of the
 primary, *not* under `*-wt/`), and every mutating step runs there. The release
 commit is pushed to a `release/v<version>` branch and squash-merged through the
 repository's required PR flow (§6–§8); the resulting merge commit is what gets
@@ -35,9 +35,9 @@ anything mutating:
 
 ```bash
 git fetch origin --tags
-git rev-parse origin/master              # sha we'll release from
+git rev-parse origin/main                # sha we'll release from
 git tag --sort=-v:refname | head -5      # find previous tag
-git log --oneline <prev-tag>..origin/master | head    # must be non-empty (something to release)
+git log --oneline <prev-tag>..origin/main | head    # must be non-empty (something to release)
 node -v                                  # must satisfy engines.node (>=22.19.0)
 npm whoami                               # only needed if republishing binary sub-packages (§3); root ships via CI
 gh auth status                           # must be authed for G-Research/bobbit
@@ -46,12 +46,12 @@ git config --get commit.gpgsign || echo "commit.gpgsign=unset"
 ```
 
 Note: do **not** gate on the current worktree's branch or cleanliness — the
-release is cut from a fresh detached worktree at `origin/master`'s tip (§1.5),
+release is cut from a fresh detached worktree at `origin/main`'s tip (§1.5),
 so the session/primary worktree state is irrelevant. What matters is that
-`origin/master` is the intended release point.
+`origin/main` is the intended release point.
 
 **Stop and ask the user** if any of:
-- `origin/master` has nothing new since the previous tag (nothing to release), or it isn't the commit they expect to ship.
+- `origin/main` has nothing new since the previous tag (nothing to release), or it isn't the commit they expect to ship.
 - `npm whoami` fails **and** step 3 will republish binary sub-packages — ask them to run `npm login` (and enable 2FA if not already; npm requires OTP for those sub-package publishes). The root `@gresearch/bobbit` publish needs no npm login — it goes through CI/OIDC.
 - `gh auth status` not logged in — ask them to run `gh auth login`.
 - No GPG/SSH signing key configured — confirm whether to proceed with **unsigned** tag or wait until they set one up. Default to waiting.
@@ -79,16 +79,16 @@ the gateway never mistakes it for a session worktree):
 PRIMARY=$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')
 RELDIR="$(dirname "$PRIMARY")/bobbit-release-<new-version>"
 git fetch origin --tags
-git worktree add --detach "$RELDIR" origin/master
+git worktree add --detach "$RELDIR" origin/main
 cd "$RELDIR"
-git rev-parse --short HEAD            # confirm == origin/master tip
+git rev-parse --short HEAD            # confirm == origin/main tip
 git status --porcelain               # must be empty (fresh checkout)
 ```
 
-Detached HEAD is deliberate: `master` is already checked out in the primary
+Detached HEAD is deliberate: `main` is already checked out in the primary
 worktree and git forbids the same branch in two worktrees. The release commit
 lands on this detached HEAD, is pushed to a release branch in §6, and reaches
-`master` through the required squash-merge PR in §8.
+`main` through the required squash-merge PR in §8.
 
 **Run every remaining step from inside `$RELDIR`.** Its `node_modules` and
 `dist/` are independent of the dev server's.
@@ -169,13 +169,13 @@ git commit -m "chore(release): v<new-version>" \
 If no signing key is set, drop `-S` (you already confirmed with the user in step 0).
 
 The commit lands on this worktree's detached HEAD — that's expected. The
-required squash merge in §8 creates the final `master` commit; that commit,
+required squash merge in §8 creates the final `main` commit; that commit,
 not the detached release commit, is what gets tagged so npm, Git, and the
 GitHub release all agree.
 
 ## 6. Open the release PR and clear its gates
 
-Direct pushes to `master` are blocked by repository rules, and squash is the
+Direct pushes to `main` are blocked by repository rules, and squash is the
 only enabled merge strategy. Push the detached HEAD to a release branch and
 open a PR:
 
@@ -183,7 +183,7 @@ open a PR:
 RELBRANCH="release/v<new-version>"
 git push origin HEAD:refs/heads/$RELBRANCH
 PR_URL=$(gh pr create \
-  --base master \
+  --base main \
   --head "$RELBRANCH" \
   --title "chore(release): v<new-version>" \
   --body-file <release-pr-body-file>)
@@ -202,7 +202,7 @@ gh pr view "$PR" --json mergeStateStatus,reviewDecision,statusCheckRollup
 The PR must be ready to merge, but **do not merge it yet**. Publishing remains
 the last irreversible step before the source and tag become public. Do not
 create the tag before the squash merge because the pre-merge commit will not
-be the commit that lands on `master`.
+be the commit that lands on `main`.
 
 ## 7. Publish binary sub-packages (only if step 3 bumped binaries)
 
@@ -243,14 +243,14 @@ gh pr merge "$PR" \
   --subject "chore(release): v<new-version>" \
   --body "Co-authored-by: bobbit-ai <bobbit@bobbit.ai>"
 MERGE_SHA=$(gh pr view "$PR" --json mergeCommit -q .mergeCommit.oid)
-git fetch origin master --tags
-git merge-base --is-ancestor "$MERGE_SHA" origin/master
+git fetch origin main --tags
+git merge-base --is-ancestor "$MERGE_SHA" origin/main
 git show "$MERGE_SHA":package.json | grep '"version": "<new-version>"'
 git diff --exit-code HEAD "$MERGE_SHA" -- \
   package.json package-lock.json RELEASE_NOTES_v<new-version>.md
 ```
 
-Tag the PR's exact squash commit, not the current `origin/master` tip (another
+Tag the PR's exact squash commit, not the current `origin/main` tip (another
 PR may have merged immediately afterward). **Pushing the tag triggers the root
 npm publish** (`.github/workflows/release-publish.yml`) and is irreversible —
 pause and confirm with the user before the `git push`:
@@ -275,14 +275,14 @@ workflow run** for the same version — do not bump the version or re-tag; the
 tag is already public and the version number is immutable.
 
 If merging fails, stop and repair the same release PR. Do not change the
-version, create a second release commit, force-push `master`, or tag the
+version, create a second release commit, force-push `main`, or tag the
 detached pre-merge commit.
 
 **Refresh the running dev server** so it picks up the release commit (its
-local `master` is now behind remote):
+local `main` is now behind remote):
 
 ```bash
-cd "$PRIMARY" && git pull origin master    # fast-forward the primary worktree on master
+cd "$PRIMARY" && git pull origin main    # fast-forward the primary worktree on main
 # then restart the dev server if needed (npm run restart-server)
 ```
 

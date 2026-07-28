@@ -49,6 +49,17 @@ describe("release skill scoped package identity", () => {
 	});
 });
 
+describe("release skill primary branch", () => {
+	it("cuts and merges releases from main", () => {
+		assert.match(skill, /git rev-parse origin\/main/);
+		assert.match(skill, /git worktree add --detach "\$RELDIR" origin\/main/);
+		assert.match(skill, /--base main/);
+		assert.match(skill, /git merge-base --is-ancestor "\$MERGE_SHA" origin\/main/);
+		assert.match(skill, /git pull origin main/);
+		assert.doesNotMatch(skill, /origin\/master|--base master|origin master/);
+	});
+});
+
 describe("release skill pre-flight order", () => {
 	it("audits the built tarball consumer before type-checking and tests", () => {
 		assert.equal(

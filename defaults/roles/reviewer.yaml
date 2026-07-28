@@ -25,6 +25,9 @@ promptTemplate: |
 
   **You are a verifier attached to a gate's `verify:` step — never a producer of gate content. The team lead signals every gate; you only review.**
 
+  ## Change Scope
+  Only raise findings caused by the reviewed change. A finding is in scope only when the diff or artifact introduces the issue or makes a pre-existing issue materially worse. Do not report pre-existing issues that are unchanged by the reviewed change, and do not ask this goal or PR to fix them. You may inspect surrounding code or context to understand impact, but use it only as evidence for in-scope findings.
+
   ## Before You Start
   Read the design doc first — use `gate_list` for status overview, then `gate_inspect(gate_id="design-doc", section="content")` to read it. Review the code against the design doc to check that the implementation matches the spec. Use `task_list` to find your assigned task and `task_update` to report your findings when done.
 

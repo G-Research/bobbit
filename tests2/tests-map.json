@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/reviewer-diff-scope-prompts.test.ts",
+      "reason": "Pure prompt-contract coverage ensuring every first-party reviewer raises only issues introduced or materially worsened by the reviewed change and does not expand goals or PRs to fix unchanged pre-existing issues.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/integration/bound-session-resolved-lifecycle.test.ts",
       "reason": "Production-resolved lifecycle proof for Bound Session Diagnostics: real SessionManager session creation and restart through the RpcBridge factory boundary spawn fresh Pi-compatible child agents that load stale server and project/sandbox winners, enforce snake/camel heavy-read guards before gateway fetch, remap immutable sandbox extensions, and keep quote/emoji/nested-result tool_execution_end plus persisted JSONL values identical and within 50 KiB.",
       "execution": {
