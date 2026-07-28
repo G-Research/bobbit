@@ -532,6 +532,101 @@ describe("transcript-reader / readTranscript", () => {
 	});
 });
 
+describe("transcript-reader / safe regex search", () => {
+	const audiences = [
+		{
+			name: "legacy/direct",
+			options: (content: string) => memoryTranscript(content),
+		},
+		{
+			name: "agent",
+			options: (content: string) => ({
+				...memoryTranscript(content),
+				projection: "agent" as const,
+				sessionId: "safe-regex-test",
+			}),
+		},
+	] as const;
+
+	for (const audience of audiences) {
+		describe(audience.name, () => {
+			it("retains supported regex and case-sensitivity semantics", async () => {
+				const insensitive = await readTranscript(
+					{ pattern: "\\berr(or)?\\b" },
+					audience.options(sample),
+				);
+				assert.equal(insensitive.matchCount, 2);
+				assert.deepEqual(insensitive.messages.map((message) => message.index), [2, 5]);
+
+				const sensitive = await readTranscript(
+					{ pattern: "\\bERROR\\b", caseSensitive: true },
+					audience.options(sample),
+				);
+				assert.equal(sensitive.matchCount, 1);
+				assert.equal(sensitive.messages[0].index, 2);
+			});
+
+			it("deterministically rejects syntax errors and unsupported constructs", async () => {
+				for (const pattern of ["(", "ERROR(?= here)", "(ERROR)\\1"]) {
+					await assert.rejects(
+						() => readTranscript({ pattern }, audience.options(sample)),
+						(error: unknown) => error instanceof TranscriptReaderError && error.code === "invalid_regex",
+					);
+				}
+			});
+
+			it("searches large omitted result bodies without exposing them", async () => {
+				const sentinel = "SAFE_REGEX_RESULT_SENTINEL";
+				const resultBody = `prefix-${"x".repeat(256 * 1024)}-${sentinel}`;
+				const transcript = makeJsonl([
+					{ role: "assistant", content: [{ type: "tool_use", id: "safe-regex-call", name: "bash", input: { cmd: "run" } }] },
+					{ role: "user", content: [{ type: "tool_result", tool_use_id: "safe-regex-call", content: resultBody }] },
+				]);
+
+				const envelope = await readTranscript(
+					{ pattern: sentinel, includeToolResults: false },
+					audience.options(transcript),
+				);
+				assert.equal(envelope.matchCount, 1);
+				assert.equal(envelope.messages[0].index, 1);
+				assert.equal(JSON.stringify(envelope).includes(sentinel), false);
+			});
+
+			it("retains context expansion and filtered pagination", async () => {
+				const envelope = await readTranscript(
+					{ pattern: "error", context: 1, offset: -2, limit: 2 },
+					audience.options(sample),
+				);
+				assert.equal(envelope.matchCount, 2);
+				assert.deepEqual(envelope.messages.map((message) => message.index), [5, 6]);
+			});
+
+			it("handles a catastrophic backtracking pattern off the gateway event loop", async () => {
+				const transcript = makeJsonl([
+					{ role: "user", content: `${"a".repeat(256 * 1024)}!` },
+					{ role: "assistant", content: "a".repeat(64) },
+				]);
+				let eventLoopAdvanced = false;
+				const eventLoopTurn = new Promise<void>((resolve) => {
+					setImmediate(() => {
+						eventLoopAdvanced = true;
+						resolve();
+					});
+				});
+
+				const envelope = await readTranscript(
+					{ pattern: "^(a+)+$" },
+					audience.options(transcript),
+				);
+				assert.equal(eventLoopAdvanced, true);
+				assert.equal(envelope.matchCount, 1);
+				assert.equal(envelope.messages[0].index, 1);
+				await eventLoopTurn;
+			});
+		});
+	}
+});
+
 describe("transcript-reader / agent filtered pagination metadata", () => {
 	it("records the resolved position and count of a completed negative context tail", async () => {
 		const text = Array.from({ length: 10 }, (_, index) => ({

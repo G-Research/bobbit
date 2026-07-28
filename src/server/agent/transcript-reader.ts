@@ -11,6 +11,8 @@
  */
 
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
+import { Worker } from "node:worker_threads";
 import type { MessageAuthor } from "../../shared/message-author.js";
 import {
 	isToolResultOnlyMessage,
@@ -565,33 +567,135 @@ export function resolveOffset(offset: number, length: number): number {
 	return resolved < 0 ? 0 : resolved;
 }
 
-function buildMatchList(
+const RE2_WASM_MODULE_PATH = createRequire(import.meta.url).resolve("re2-wasm");
+
+const SAFE_REGEX_WORKER_SOURCE = String.raw`
+const { parentPort, workerData } = require("node:worker_threads");
+const { RE2 } = require(workerData.modulePath);
+
+let matcher;
+try {
+	// RE2-WASM requires Unicode mode. It rejects unsupported constructs such
+	// as lookarounds and backreferences rather than falling back to RegExp.
+	matcher = new RE2(workerData.pattern, workerData.caseSensitive ? "u" : "iu");
+} catch (error) {
+	parentPort.postMessage({
+		kind: "invalid_regex",
+		message: error instanceof Error ? error.message : String(error),
+	});
+}
+
+if (matcher) {
+	try {
+		const matches = [];
+		for (let messageIndex = 0; messageIndex < workerData.segmentsByMessage.length; messageIndex++) {
+			const segments = workerData.segmentsByMessage[messageIndex];
+			for (const segment of segments) {
+				matcher.lastIndex = 0;
+				if (matcher.test(segment)) {
+					matches.push(messageIndex);
+					break;
+				}
+			}
+		}
+		parentPort.postMessage({ kind: "matches", matches });
+	} catch (error) {
+		parentPort.postMessage({
+			kind: "worker_error",
+			message: error instanceof Error ? error.message : String(error),
+		});
+	}
+}
+`;
+
+interface SafeRegexWorkerResult {
+	kind: "matches" | "invalid_regex" | "worker_error";
+	matches?: number[];
+	message?: string;
+}
+
+/**
+ * Compile and execute caller-provided regexes outside the gateway event loop.
+ * RE2-WASM guarantees linear-time matching; the worker isolates compilation
+ * and scans of very large result bodies without a native RegExp fallback.
+ */
+async function safeRegexMatchPositions(
+	pattern: string,
+	caseSensitive: boolean,
+	segmentsByMessage: string[][],
+): Promise<number[]> {
+	const worker = new Worker(SAFE_REGEX_WORKER_SOURCE, {
+		eval: true,
+		workerData: {
+			modulePath: RE2_WASM_MODULE_PATH,
+			pattern,
+			caseSensitive,
+			segmentsByMessage,
+		},
+	});
+	return await new Promise<number[]>((resolve, reject) => {
+		let settled = false;
+		const settle = (callback: () => void): void => {
+			if (settled) return;
+			settled = true;
+			callback();
+		};
+		worker.once("message", (result: SafeRegexWorkerResult) => {
+			settle(() => {
+				void worker.terminate();
+				if (result.kind === "invalid_regex") {
+					reject(new TranscriptReaderError("invalid_regex", result.message));
+					return;
+				}
+				if (result.kind === "worker_error" || !Array.isArray(result.matches)) {
+					reject(new Error(result.message ?? "safe regex worker returned an invalid result"));
+					return;
+				}
+				resolve(result.matches);
+			});
+		});
+		worker.once("error", (error) => settle(() => reject(error)));
+		worker.once("exit", (code) => {
+			if (code !== 0) settle(() => reject(new Error(`safe regex worker exited with code ${code}`)));
+		});
+	});
+}
+
+function expandMatchContext(matches: number[], messageCount: number, context: number): number[] {
+	if (context <= 0) return matches.slice();
+	const expanded = new Set<number>();
+	for (const messageIndex of matches) {
+		for (let candidate = Math.max(0, messageIndex - context);
+			candidate <= Math.min(messageCount - 1, messageIndex + context);
+			candidate++) expanded.add(candidate);
+	}
+	return [...expanded].sort((a, b) => a - b);
+}
+
+async function matchMessageSegments(
+	segmentsByMessage: string[][],
+	pattern: string,
+	caseSensitive: boolean,
+	context: number,
+): Promise<{ matchCount: number; expanded: number[] }> {
+	const matches = await safeRegexMatchPositions(pattern, caseSensitive, segmentsByMessage);
+	return {
+		matchCount: matches.length,
+		expanded: expandMatchContext(matches, segmentsByMessage.length, context),
+	};
+}
+
+async function buildMatchList(
 	messages: RawMessage[],
 	pattern: string,
 	caseSensitive: boolean,
 	context: number,
-): { matchCount: number; expanded: number[] } {
-	let regex: RegExp;
-	try {
-		regex = new RegExp(pattern, caseSensitive ? "" : "i");
-	} catch (err) {
-		throw new TranscriptReaderError("invalid_regex", err instanceof Error ? err.message : String(err));
-	}
-	const matches: number[] = [];
-	for (const m of messages) {
-		const flat = isMessageLevelToolResult(m) ? flattenText([messageLevelToolResultBlock(m)]) : flattenText(m.content);
-		if (regex.test(flat)) matches.push(m.index);
-	}
-	if (context <= 0) return { matchCount: matches.length, expanded: matches.slice() };
-
-	const set = new Set<number>();
-	for (const i of matches) {
-		const lo = Math.max(0, i - context);
-		const hi = Math.min(messages.length - 1, i + context);
-		for (let k = lo; k <= hi; k++) set.add(k);
-	}
-	const expanded = Array.from(set).sort((a, b) => a - b);
-	return { matchCount: matches.length, expanded };
+): Promise<{ matchCount: number; expanded: number[] }> {
+	return await matchMessageSegments(messages.map((message) => [
+		isMessageLevelToolResult(message)
+			? flattenText([messageLevelToolResultBlock(message)])
+			: flattenText(message.content),
+	]), pattern, caseSensitive, context);
 }
 
 // ── Author normalization ──
@@ -1220,39 +1324,19 @@ function buildCanonicalTranscriptIndex(
 	return { callsByMessage, resultsByMessage, resultByLocation, searchSegmentsByMessage };
 }
 
-function regexMatchesAny(regex: RegExp, segments: string[]): boolean {
-	for (const segment of segments) {
-		regex.lastIndex = 0;
-		if (regex.test(segment)) return true;
-	}
-	return false;
-}
-
-function buildAgentMatchList(
+async function buildAgentMatchList(
 	messages: RawMessage[],
 	index: CanonicalTranscriptIndex,
 	pattern: string,
 	caseSensitive: boolean,
 	context: number,
-): { matchCount: number; expanded: number[] } {
-	let regex: RegExp;
-	try {
-		regex = new RegExp(pattern, caseSensitive ? "" : "i");
-	} catch (error) {
-		throw new TranscriptReaderError("invalid_regex", error instanceof Error ? error.message : String(error));
-	}
-	const matches: number[] = [];
-	for (const message of messages) {
-		if (regexMatchesAny(regex, index.searchSegmentsByMessage.get(message.index) ?? [])) matches.push(message.index);
-	}
-	if (context <= 0) return { matchCount: matches.length, expanded: matches };
-	const expanded = new Set<number>();
-	for (const messageIndex of matches) {
-		for (let candidate = Math.max(0, messageIndex - context);
-			candidate <= Math.min(messages.length - 1, messageIndex + context);
-			candidate++) expanded.add(candidate);
-	}
-	return { matchCount: matches.length, expanded: [...expanded].sort((a, b) => a - b) };
+): Promise<{ matchCount: number; expanded: number[] }> {
+	return await matchMessageSegments(
+		messages.map((message) => index.searchSegmentsByMessage.get(message.index) ?? []),
+		pattern,
+		caseSensitive,
+		context,
+	);
 }
 
 function authorDictionaryKey(author: MessageAuthor): string {
@@ -1714,12 +1798,12 @@ function readTargetedResultSlice(
 	throw new TranscriptReaderError("invalid_params", "serialized transcript budget is too small for result metadata");
 }
 
-function readAgentTranscript(
+async function readAgentTranscript(
 	params: ReadTranscriptParams,
 	all: RawMessage[],
 	opts: ReadTranscriptOptions,
 	validated: { offset: number; limit: number; context: number },
-): ReadTranscriptEnvelope {
+): Promise<ReadTranscriptEnvelope> {
 	const sessionId = opts.sessionId ?? opts.authorContext?.session?.id ?? "unknown";
 	const budget = opts.serializedBudgetBytes ?? READ_SESSION_AGENT_ENVELOPE_MAX_BYTES;
 	if (!Number.isSafeInteger(budget) || budget < 512 || budget > READ_SESSION_AGENT_ENVELOPE_MAX_BYTES) {
@@ -1737,7 +1821,7 @@ function readAgentTranscript(
 		let workingIndices: number[];
 		let matchCount: number | undefined;
 		if (params.pattern && params.pattern.length > 0) {
-			const matched = buildAgentMatchList(all, index, params.pattern, !!params.caseSensitive, validated.context);
+			const matched = await buildAgentMatchList(all, index, params.pattern, !!params.caseSensitive, validated.context);
 			workingIndices = matched.expanded;
 			matchCount = matched.matchCount;
 		} else {
@@ -1814,7 +1898,7 @@ export async function readTranscript(
 
 	const all = resolveRawMessageAuthors(parseJsonl(content), opts.authorContext);
 	if (opts.projection === "agent") {
-		return readAgentTranscript(params, all, opts, { offset, limit, context });
+		return await readAgentTranscript(params, all, opts, { offset, limit, context });
 	}
 	const total = all.length;
 	const renderOptions: RenderOptions = { includeToolResults, toolNameById: buildToolNameMap(all) };
@@ -1823,7 +1907,7 @@ export async function readTranscript(
 	let workingIndices: number[];
 	let matchCount: number | undefined;
 	if (pattern && pattern.length > 0) {
-		const { matchCount: mc, expanded } = buildMatchList(all, pattern, caseSensitive, context);
+		const { matchCount: mc, expanded } = await buildMatchList(all, pattern, caseSensitive, context);
 		matchCount = mc;
 		workingIndices = expanded;
 	} else {
