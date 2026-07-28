@@ -10,6 +10,8 @@ import {
 import {
 	SYSTEMS_REVIEW_READER_VERSION,
 	type SystemsReviewChange,
+	type SystemsReviewCoverageReadRecord,
+	type SystemsReviewEligibleTargetAssertion,
 	type SystemsReviewReadOperation,
 	type SystemsReviewReadPage,
 	type SystemsReviewReadRequest,
@@ -142,18 +144,21 @@ export interface SystemsReviewReaderOptions {
 	snapshot: SystemsReviewSnapshot;
 	secret: Buffer | string;
 	commandRunner?: CommandRunner;
+	targetAssertions?: readonly (SystemsReviewEligibleTargetAssertion & { coverageItemId: string; executionId: string })[];
 }
 
 export class SystemsReviewDiffReader {
 	readonly snapshot: SystemsReviewSnapshot;
 	private readonly secret: Buffer;
 	private readonly commandRunner?: CommandRunner;
+	private readonly targetAssertions: readonly (SystemsReviewEligibleTargetAssertion & { coverageItemId: string; executionId: string })[];
 
 	constructor(options: SystemsReviewReaderOptions) {
 		this.snapshot = options.snapshot;
 		this.secret = Buffer.isBuffer(options.secret) ? Buffer.from(options.secret) : Buffer.from(options.secret, "utf8");
 		if (this.secret.byteLength < 32) throw new SystemsReviewReaderError("WEAK_SECRET", "Systems review cursor/receipt secret must contain at least 32 bytes.");
 		this.commandRunner = options.commandRunner;
+		this.targetAssertions = Object.freeze((options.targetAssertions ?? []).map(assertion => Object.freeze(structuredClone(assertion))));
 	}
 
 	verifyReceipt(token: string): SystemsReviewReceiptClaims {
@@ -249,7 +254,7 @@ export class SystemsReviewDiffReader {
 			switch (request.operation) {
 				case "repos": return this.readRepos(request.cursor, request.limit);
 				case "manifest": return this.recordsPage("manifest", `manifest:${this.snapshot.digest}`, this.snapshot.changes, request.cursor, request.limit);
-				case "coverage": return this.recordsPage("coverage", `coverage:${this.snapshot.digest}`, this.snapshot.coverage, request.cursor, request.limit);
+				case "coverage": return this.readCoverage(request.cursor, request.limit);
 				case "patch": return await this.readPatch(request.changeId, request.cursor, request.limit);
 				case "file": return await this.readFile(request.repoId, request.side, request.path, request.cursor, request.limit, started);
 				case "list": return await this.readList(request.repoId, request.side, request.path, request.cursor, request.limit, started);
@@ -265,6 +270,38 @@ export class SystemsReviewDiffReader {
 	private readRepos(cursor?: string, limit?: number): SystemsReviewReadPage {
 		const records = this.snapshot.repos.map(({ root: _root, ...repo }) => repo);
 		return this.recordsPage("repos", `repos:${this.snapshot.digest}`, records, cursor, limit);
+	}
+
+	private readCoverage(cursor?: string, limit?: number): SystemsReviewReadPage<SystemsReviewCoverageReadRecord[]> {
+		const records: SystemsReviewCoverageReadRecord[] = this.snapshot.coverage.map(item => {
+			const requiredAdapters = new Set(item.requiredTargetAdapterIds ?? []);
+			const eligibleTargetAssertions = this.targetAssertions
+				.filter(assertion => (
+					assertion.coverageItemId === item.id
+					&& assertion.adapterIds.length > 0
+					&& assertion.adapterIds.every(adapterId => requiredAdapters.has(adapterId))
+				))
+				.map(assertion => ({
+					assertionId: assertion.assertionId,
+					actionId: assertion.actionId,
+					commandId: assertion.commandId,
+					testId: assertion.testId,
+					testKind: assertion.testKind,
+					baseOid: assertion.baseOid,
+					headOid: assertion.headOid,
+					expectedTarget: assertion.expectedTarget,
+					expectedScope: assertion.expectedScope,
+					effectOutcome: assertion.effectOutcome,
+					adapterIds: [...assertion.adapterIds],
+					effectKinds: [...assertion.effectKinds],
+				}));
+			return { ...structuredClone(item), eligibleTargetAssertions };
+		});
+		// Assertions are append-only, so bind cursors/receipts to this exact immutable
+		// projection. If evidence appears between pages, the old cursor fails closed
+		// and the reviewer restarts the bounded coverage read.
+		const evidenceDigest = sha256(stableJson(records));
+		return this.recordsPage("coverage", `coverage:${this.snapshot.digest}:${evidenceDigest}`, records, cursor, limit);
 	}
 
 	private async readPatch(changeId: string, cursor?: string, limit?: number): Promise<SystemsReviewReadPage> {

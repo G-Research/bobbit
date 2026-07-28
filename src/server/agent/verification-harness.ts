@@ -178,6 +178,7 @@ import {
 } from "./systems-review-store.js";
 import type { SystemsReviewReadRequest, SystemsReviewResultSubmission } from "./systems-review-types.js";
 import {
+	FINAL_MUTATION_TARGET_CORRELATION_ENV,
 	FinalMutationTargetAssertionRegistry,
 	FinalMutationTargetEvidenceBroker,
 	assertCapturedFinalMutationTarget,
@@ -436,21 +437,20 @@ type SystemsReviewRuntimeContext = {
 	executionId?: string;
 };
 
-export interface RegisteredSystemsReviewTargetTestInput<T> {
+export interface RegisteredSystemsReviewTargetTestInput {
 	executionId: string;
 	componentName: string;
 	commandName: string;
-	testId: string;
 	actionId: string;
 	coverageItemId: string;
 	expectedTarget: string;
 	expectedScope: string;
-	invoke: () => T | Promise<T>;
 }
 
-export interface RegisteredSystemsReviewTargetTestResult<T> {
+export interface RegisteredSystemsReviewTargetTestResult {
 	assertionId: string;
-	value: T;
+	stdout: string;
+	stderr: string;
 	evidence: FinalMutationTargetAssertionEvidence;
 }
 
@@ -1512,14 +1512,14 @@ export class VerificationHarness {
 	}
 
 	/**
-	 * Registered integration/browser runner seam. All identity and commit bindings
-	 * are derived from the durable execution and project command registry; callers
-	 * provide only the invariant and invocation, never actual captured values or
-	 * an assertion id.
+	 * Execute an actual project-registered integration/browser command under a
+	 * one-shot signed target-evidence correlation. The caller cannot substitute an
+	 * arbitrary callback or claim a test path: command/test identity, cwd, commits,
+	 * coverage, adapter class, and process outcome are server-derived.
 	 */
-	async runRegisteredSystemsReviewTargetTest<T>(
-		input: RegisteredSystemsReviewTargetTestInput<T>,
-	): Promise<RegisteredSystemsReviewTargetTestResult<T>> {
+	async runRegisteredSystemsReviewTargetTest(
+		input: RegisteredSystemsReviewTargetTestInput,
+	): Promise<RegisteredSystemsReviewTargetTestResult> {
 		const execution = this.systemsReviewStore.get(input.executionId);
 		if (!execution || execution.status !== "running" || execution.final) {
 			throw new SystemsReviewExecutionStoreError("EXECUTION_CLOSED", "Target evidence requires a running Systems review execution.", 410);
@@ -1528,26 +1528,41 @@ export class VerificationHarness {
 		const coverageItem = execution.snapshot.coverage.find(item => item.id === input.coverageItemId);
 		const repo = coverageItem && execution.snapshot.repos.find(candidate => candidate.id === coverageItem.repoId);
 		if (!coverageItem || !repo) throw new SystemsReviewExecutionStoreError("UNKNOWN_COVERAGE_ITEM", "Target evidence names an unknown snapshot coverage item.", 400);
+		if (!coverageItem.requiresExactTargetEvidence) {
+			throw new SystemsReviewExecutionStoreError("TARGET_EVIDENCE_NOT_REQUIRED", "Coverage item is not eligible for exact-target evidence.", 400);
+		}
+		if (execution.targetAssertions.some(assertion => assertion.coverageItemId === coverageItem.id)) {
+			throw new SystemsReviewExecutionStoreError("TARGET_ASSERTION_COVERAGE_CONFLICT", "Coverage item already has immutable exact-target evidence.", 409);
+		}
+		const requiredAdapterIds = coverageItem.requiredTargetAdapterIds ?? [];
+		if (requiredAdapterIds.length === 0) {
+			throw new SystemsReviewExecutionStoreError("FINAL_ADAPTER_UNAVAILABLE", "The changed action has no registered final adapter and therefore fails closed.", 400);
+		}
 		const components = this.resolveProjectConfigStore(execution.goalId)?.getComponents() ?? [];
 		const component = components.find(candidate => candidate.name === input.componentName);
 		const registeredCommand = component?.commands?.[input.commandName];
-		if (!registeredCommand) throw new SystemsReviewExecutionStoreError("UNREGISTERED_TEST_COMMAND", "Target evidence must run through a configured component command.", 400);
-		const browserCommand = /(?:browser|playwright)/iu.test(input.commandName);
-		const integrationCommand = /(?:integration|e2e)/iu.test(input.commandName);
+		if (!component || !registeredCommand) throw new SystemsReviewExecutionStoreError("UNREGISTERED_TEST_COMMAND", "Target evidence must run through a configured component command.", 400);
+		if (!repo.components.includes(component.name)) {
+			throw new SystemsReviewExecutionStoreError("COMMAND_COVERAGE_MISMATCH", "Registered command component does not own the covered repository.", 400);
+		}
+		const browserCommand = /^(?:browser|playwright|test[-_:]?(?:browser|playwright))$/iu.test(input.commandName);
+		const integrationCommand = /^(?:integration|e2e|test[-_:]?(?:integration|e2e))$/iu.test(input.commandName);
 		if (!browserCommand && !integrationCommand) {
 			throw new SystemsReviewExecutionStoreError("UNIT_TARGET_EVIDENCE_FORBIDDEN", "Only registered integration or browser commands can prove final mutation targets.", 400);
 		}
-		const browserTestId = /(?:^|[\\/])tests2[\\/]browser[\\/]/iu.test(input.testId) || /\.spec\.[cm]?[jt]sx?(?:\s|$)/iu.test(input.testId);
-		const integrationTestId = /(?:^|[\\/])tests2[\\/]integration[\\/]/iu.test(input.testId);
-		if ((browserCommand && !browserTestId) || (!browserCommand && !integrationTestId)) {
-			throw new SystemsReviewExecutionStoreError("UNREGISTERED_TEST_IDENTITY", "Test identity does not belong to the registered integration/browser command kind.", 400);
-		}
 		const testKind = browserCommand ? "browser" as const : "integration" as const;
-		const commandId = `${component!.name}:${input.commandName}:${createHash("sha256").update(registeredCommand).digest("hex").slice(0, 16)}`;
+		const commandHash = createHash("sha256").update(registeredCommand).digest("hex");
+		const commandId = `${component.name}:${input.commandName}:${commandHash.slice(0, 16)}`;
+		const testId = `registered-command:${component.name}:${input.commandName}:${commandHash}`;
+		const componentCwd = fs.realpathSync.native(path.resolve(repo.root, component.relativePath ?? "."));
+		const relativeCwd = path.relative(repo.root, componentCwd);
+		if (relativeCwd.startsWith("..") || path.isAbsolute(relativeCwd)) {
+			throw new SystemsReviewExecutionStoreError("COMMAND_CWD_ESCAPE", "Registered command cwd escapes the immutable repository binding.", 400);
+		}
 		const capability = createFinalMutationTargetEvidenceCapability(this.systemsReviewEvidenceBroker, {
 			executionId: execution.id,
 			commandId,
-			testId: input.testId,
+			testId,
 			testKind,
 			baseOid: repo.mergeBaseOid,
 			headOid: repo.headOid,
@@ -1562,12 +1577,45 @@ export class VerificationHarness {
 				invoke: async () => {
 					const token = mintFinalMutationTargetCrossProcessToken();
 					if (!token) throw new Error("Target evidence correlation token was not created.");
-					return await runWithFinalMutationTargetCrossProcessToken(this.systemsReviewEvidenceBroker, token, input.invoke);
+					const shell = getVerificationShell(registeredCommand);
+					return this.commandRunner.execFile(shell.shell, [...shell.args, registeredCommand], {
+						cwd: componentCwd,
+						env: { ...process.env, [FINAL_MUTATION_TARGET_CORRELATION_ENV]: token },
+						timeout: 15 * 60 * 1_000,
+						maxBuffer: 2 * 1024 * 1024,
+					});
 				},
 			})
 		));
-		const registered = this.systemsReviewAssertionRegistry.register(assertion);
-		return { assertionId: registered.assertionId, value: assertion.value, evidence: registered.evidence };
+		const registered = this.systemsReviewAssertionRegistry.register(assertion, {
+			executionId: execution.id,
+			baseOid: repo.mergeBaseOid,
+			headOid: repo.headOid,
+			actionId: input.actionId,
+			coverageItemId: coverageItem.id,
+			requiredAdapterIds,
+		});
+		this.systemsReviewStore.registerTargetAssertion(execution.id, registered);
+		return {
+			assertionId: registered.assertionId,
+			stdout: execOutputToString(assertion.value.stdout),
+			stderr: execOutputToString(assertion.value.stderr),
+			evidence: registered.evidence,
+		};
+	}
+
+	/** Authenticated internal-route entrypoint; execution identity is session-bound. */
+	async runRegisteredSystemsReviewTargetTestForSession(
+		sessionId: string,
+		input: Omit<RegisteredSystemsReviewTargetTestInput, "executionId">,
+	): Promise<RegisteredSystemsReviewTargetTestResult> {
+		const execution = this.systemsExecutionForSession(sessionId);
+		return this.runRegisteredSystemsReviewTargetTest({ ...input, executionId: execution.id });
+	}
+
+	/** Run one inbound request under its signed cross-process correlation. */
+	runWithSystemsReviewTargetCorrelation<T>(token: unknown, callback: () => T): T {
+		return runWithFinalMutationTargetCrossProcessToken(this.systemsReviewEvidenceBroker, token, callback);
 	}
 
 	private systemsExecutionForSession(sessionId: string): PersistedSystemsReviewExecution {
@@ -1657,12 +1705,13 @@ export class VerificationHarness {
 			validateExactTargetAssertion: ({ assertionId, behavior, coverageItem }) => {
 				const repo = before.snapshot.repos.find(candidate => candidate.id === coverageItem.repoId);
 				if (!repo) return false;
-				return this.systemsReviewAssertionRegistry.validateAndConsume(assertionId, {
+				return this.systemsReviewStore.validateTargetAssertion(before.id, assertionId, {
 					executionId: before.id,
 					baseOid: repo.mergeBaseOid,
 					headOid: repo.headOid,
 					actionId: behavior.id,
 					coverageItemId: coverageItem.id,
+					requiredAdapterIds: coverageItem.requiredTargetAdapterIds ?? [],
 				});
 			},
 		});

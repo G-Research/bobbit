@@ -43,11 +43,12 @@ function binding(
 }
 
 function isRegisteredTestRuntimeAdapterSource(source: string): boolean {
-	// The stack walker must skip the evidence substrate itself and attribute the
-	// record to the actual adapter. This test-only predicate intentionally accepts
-	// only this helper; production harness validation uses its own closed allowlist.
 	return source.startsWith("registeredFinalMutationAdapter (")
 		&& source.replace(/\\/g, "/").includes("/tests2/core/systems-review-target-evidence.test.ts:");
+}
+
+function resolveRegisteredTestRuntimeAdapter(source: string, effectKind: string): string | undefined {
+	return effectKind === "git-merge" && isRegisteredTestRuntimeAdapterSource(source) ? "test.git-merge" : undefined;
 }
 
 function expectation(
@@ -63,7 +64,8 @@ function expectation(
 		headOid: value.headOid,
 		actionId: value.actionId,
 		coverageItemId: value.coverageItemId,
-		isRegisteredFinalAdapterSource: isRegisteredTestRuntimeAdapterSource,
+		resolveRegisteredFinalAdapter: resolveRegisteredTestRuntimeAdapter,
+		requiredAdapterIds: ["test.git-merge"],
 		...overrides,
 	};
 }
@@ -96,7 +98,7 @@ function registeredFinalMutationAdapter(
 		coverageItemId,
 		resolvedTarget: target,
 		resolvedScope: scope,
-		effectKind: "git-delete-branch",
+		effectKind: "git-merge",
 	});
 }
 
@@ -143,7 +145,7 @@ describe("trusted final-mutator target evidence", () => {
 		expect(assertion.evidence.headOid).toBe(HEAD_OID);
 		expect(assertion.evidence.attempts).toHaveLength(2);
 		expect(assertion.evidence.attempts.map(attempt => attempt.attempt)).toEqual([1, 2]);
-		expect(assertion.evidence.attempts.every(attempt => attempt.effectKind === "git-delete-branch")).toBe(true);
+		expect(assertion.evidence.attempts.every(attempt => attempt.effectKind === "git-merge")).toBe(true);
 		expect(
 			assertion.evidence.attempts.every(attempt => isRegisteredTestRuntimeAdapterSource(attempt.adapterSource)),
 			JSON.stringify(assertion.evidence.attempts.map(attempt => attempt.adapterSource)),
@@ -265,7 +267,7 @@ describe("trusted final-mutator target evidence", () => {
 		expect(() => consumeFinalMutationTargetAssertion(
 			context.broker,
 			assertion.assertionToken,
-			expectation(context.binding, { isRegisteredFinalAdapterSource: () => false }),
+			expectation(context.binding, { resolveRegisteredFinalAdapter: () => undefined }),
 		)).toThrow(/registered final production adapter/i);
 
 		const mismatches: Array<Partial<FinalMutationTargetAssertionExpectation>> = [
@@ -303,19 +305,20 @@ describe("trusted final-mutator target evidence", () => {
 		}));
 		const registry = new FinalMutationTargetAssertionRegistry(
 			context.broker,
-			isRegisteredTestRuntimeAdapterSource,
+			resolveRegisteredTestRuntimeAdapter,
 			() => 123,
 			() => "server-generated-id",
 		);
-		const registered = registry.register(assertion);
-		expect(registered.assertionId).toBe("target-assertion:server-generated-id");
 		const expected = {
 			executionId: context.binding.executionId,
 			baseOid: context.binding.baseOid,
 			headOid: context.binding.headOid,
 			actionId: context.binding.actionId,
 			coverageItemId: context.binding.coverageItemId,
+			requiredAdapterIds: ["test.git-merge"],
 		};
+		const registered = registry.register(assertion, expected);
+		expect(registered.assertionId).toBe("target-assertion:server-generated-id");
 		expect(registry.validateAndConsume(registered.assertionId, expected)).toBe(true);
 		expect(registry.validateAndConsume(registered.assertionId, expected)).toBe(true);
 		expect(registry.validateAndConsume(registered.assertionId, { ...expected, actionId: "different-action" })).toBe(false);

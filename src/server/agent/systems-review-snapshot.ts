@@ -15,6 +15,7 @@ import {
 	type SystemsReviewRepoBinding,
 	type SystemsReviewRiskSignal,
 	type SystemsReviewSnapshot,
+	type SystemsReviewTargetEffectKind,
 } from "./systems-review-types.js";
 
 const ZERO_OID_RE = /^0+$/;
@@ -52,6 +53,15 @@ const RISK_PATTERNS: ReadonlyArray<readonly [SystemsReviewRiskSignal, RegExp]> =
 	["transport", /\b(api|http|websocket|transport|payload|request|response|json|rpc|event)\b/i],
 	["persistence", /\b(database|persist|store|cache|file|queue|serialize|sessionstorage|localstorage)\b/i],
 	["state", /\b(state|status|stale|partial|failed|success|boolean|flag|loading|error)\b/i],
+];
+
+const TARGET_ADAPTER_PATTERNS: ReadonlyArray<readonly [string, SystemsReviewTargetEffectKind, RegExp]> = [
+	["bobbit.git.merge-child", "git-merge", /\bmergeChildBranchLocal\b/u],
+	["bobbit.git.push", "git-push", /(?:\bgit\b[^\n]{0,80}\bpush\b|\bpush\b[^\n]{0,80}\bgit\b)/iu],
+	["bobbit.filesystem.delete", "filesystem-delete", /(?:\b(?:fs|fileSystem)(?:\.promises)?\.(?:rm|unlink|rmdir)(?:Sync)?\b|\b(?:rm|unlink|rmdir)(?:Sync)?\s*\()/u],
+	["bobbit.persistence.write", "persistence-write", /(?:\b(?:database|persistence|store)\b[^\n]{0,80}\b(?:delete|insert|put|save|update|write)\w*\b|\b(?:persist|saveToStore|writeRecord)\w*\s*\()/iu],
+	["bobbit.queue.worker-effect", "queue-effect", /(?:\b(?:queue|job|worker)\b[^\n]{0,80}\b(?:dispatch|effect|execute|process|remove|update|write)\w*\b)/iu],
+	["bobbit.remote.request", "remote-request", /(?:\b(?:fetch|axios\.(?:delete|patch|post|put)|https?\.request|remoteClient\.\w+)\s*\()/u],
 ];
 
 export class SystemsReviewSnapshotError extends Error {
@@ -93,6 +103,8 @@ interface PatchInspection {
 	bytes: number;
 	binary: boolean;
 	riskSignals: SystemsReviewRiskSignal[];
+	targetAdapterIds: string[];
+	targetEffectKinds: SystemsReviewTargetEffectKind[];
 }
 
 function sha256(value: string | Buffer): string {
@@ -340,6 +352,8 @@ async function inspectPatch(repo: SystemsReviewRepoBinding, raw: RawChange, comm
 	let scanTail = "";
 	let binary = false;
 	const signals = new Set<SystemsReviewRiskSignal>();
+	const targetAdapterIds = new Set<string>();
+	const targetEffectKinds = new Set<SystemsReviewTargetEffectKind>();
 	const change = { oldPath: raw.oldPath, newPath: raw.newPath };
 	await runSystemsReviewGit(repo.root, patchArgs(repo, change), commandRunner, chunk => {
 		hash.update(chunk);
@@ -347,9 +361,21 @@ async function inspectPatch(repo: SystemsReviewRepoBinding, raw: RawChange, comm
 		const scan = scanTail + chunk.toString("utf8");
 		if (/Binary files .* differ|GIT binary patch/i.test(scan)) binary = true;
 		for (const [signal, pattern] of RISK_PATTERNS) if (pattern.test(scan)) signals.add(signal);
+		for (const [adapterId, effectKind, pattern] of TARGET_ADAPTER_PATTERNS) {
+			if (!pattern.test(scan)) continue;
+			targetAdapterIds.add(adapterId);
+			targetEffectKinds.add(effectKind);
+		}
 		scanTail = scan.slice(-1024);
 	});
-	return { sha256: hash.digest("hex"), bytes, binary, riskSignals: [...signals].sort() };
+	return {
+		sha256: hash.digest("hex"),
+		bytes,
+		binary,
+		riskSignals: [...signals].sort(),
+		targetAdapterIds: [...targetAdapterIds].sort(),
+		targetEffectKinds: [...targetEffectKinds].sort(),
+	};
 }
 
 function classifyPath(candidate: string, binary: boolean): SystemsReviewPathClass {
@@ -393,6 +419,8 @@ function coverageFor(change: SystemsReviewChange): SystemsReviewCoverageItem {
 	const requiresActionTrace = aggregateMutation || (risks.has("mutation") && (risks.has("control") || risks.has("route") || risks.has("target") || risks.has("aggregation")));
 	const requiresStateTrace = risks.has("aggregation") || risks.has("state") || risks.has("transport") || risks.has("persistence") || (change.pathClass === "config-schema" && (risks.has("transport") || risks.has("state")));
 	const requiresExactTargetEvidence = aggregateMutation;
+	const inferredAdapterIds = [...(change.targetAdapterIds ?? [])];
+	const unambiguousAdapter = inferredAdapterIds.length === 1;
 	const candidate = change.newPath ?? change.oldPath ?? "unknown";
 	return {
 		id: `coverage:${sha256(`${SYSTEMS_REVIEW_COVERAGE_VERSION}\0${change.id}`).slice(0, 32)}`,
@@ -405,6 +433,11 @@ function coverageFor(change: SystemsReviewChange): SystemsReviewCoverageItem {
 		requiresStateTrace,
 		requiresActionTrace,
 		requiresExactTargetEvidence,
+		// One semantic change that reaches multiple final-effect categories cannot
+		// safely bind a single reviewer behavior/assertion. Leave it ineligible so
+		// finalization derives the blocking untested-target finding.
+		requiredTargetAdapterIds: requiresExactTargetEvidence && unambiguousAdapter ? inferredAdapterIds : [],
+		requiredTargetEffectKinds: requiresExactTargetEvidence && unambiguousAdapter ? [...(change.targetEffectKinds ?? [])] : [],
 	};
 }
 
@@ -567,6 +600,8 @@ export async function createSystemsReviewSnapshot(options: CreateSystemsReviewSn
 				components: repo.components,
 				pathClass,
 				riskSignals: patch.riskSignals,
+				targetAdapterIds: patch.targetAdapterIds,
+				targetEffectKinds: patch.targetEffectKinds,
 			});
 		}
 	}
@@ -591,8 +626,19 @@ export async function createSystemsReviewSnapshot(options: CreateSystemsReviewSn
 		digest,
 		derivationSha256,
 		repos: repos.map(repo => Object.freeze({ ...repo, components: Object.freeze([...repo.components]) }) as SystemsReviewRepoBinding),
-		changes: changes.map(change => Object.freeze({ ...change, components: Object.freeze([...change.components]), riskSignals: Object.freeze([...change.riskSignals]) }) as SystemsReviewChange),
-		coverage: coverage.map(item => Object.freeze({ ...item, riskSignals: Object.freeze([...item.riskSignals]) }) as SystemsReviewCoverageItem),
+		changes: changes.map(change => Object.freeze({
+			...change,
+			components: Object.freeze([...change.components]),
+			riskSignals: Object.freeze([...change.riskSignals]),
+			targetAdapterIds: Object.freeze([...(change.targetAdapterIds ?? [])]),
+			targetEffectKinds: Object.freeze([...(change.targetEffectKinds ?? [])]),
+		}) as SystemsReviewChange),
+		coverage: coverage.map(item => Object.freeze({
+			...item,
+			riskSignals: Object.freeze([...item.riskSignals]),
+			requiredTargetAdapterIds: Object.freeze([...(item.requiredTargetAdapterIds ?? [])]),
+			requiredTargetEffectKinds: Object.freeze([...(item.requiredTargetEffectKinds ?? [])]),
+		}) as SystemsReviewCoverageItem),
 		chunks: chunks.map(chunk => Object.freeze({ ...chunk, parts: Object.freeze(chunk.parts.map(part => Object.freeze({ ...part }))), changeIds: Object.freeze([...chunk.changeIds]) }) as SystemsReviewEvidenceChunk),
 	});
 }

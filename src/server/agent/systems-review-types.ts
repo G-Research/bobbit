@@ -22,6 +22,35 @@ export type SystemsReviewRiskSignal =
 export type SystemsReviewChangeKind = "add" | "modify" | "delete" | "rename" | "copy" | "type-change";
 export type SystemsReviewTreeSide = "base" | "head";
 
+/**
+ * Closed final-effect vocabulary used to bind target proof to the changed
+ * action. A registered Git merge adapter cannot satisfy a filesystem, queue,
+ * persistence, or remote-request coverage item.
+ */
+export type SystemsReviewTargetEffectKind =
+	| "git-merge"
+	| "git-push"
+	| "filesystem-delete"
+	| "persistence-write"
+	| "queue-effect"
+	| "remote-request"
+	| "unknown";
+
+export interface SystemsReviewEligibleTargetAssertion {
+	assertionId: string;
+	actionId: string;
+	commandId: string;
+	testId: string;
+	testKind: "integration" | "browser";
+	baseOid: string;
+	headOid: string;
+	expectedTarget: string;
+	expectedScope: string;
+	effectOutcome: "succeeded";
+	adapterIds: readonly string[];
+	effectKinds: readonly SystemsReviewTargetEffectKind[];
+}
+
 export interface SystemsReviewRepoBinding {
 	id: string;
 	root: string;
@@ -52,6 +81,10 @@ export interface SystemsReviewChange {
 	components: string[];
 	pathClass: SystemsReviewPathClass;
 	riskSignals: SystemsReviewRiskSignal[];
+	/** Adapter identities inferred from the immutable semantic patch. */
+	targetAdapterIds?: string[];
+	/** Final-effect kinds inferred from the immutable semantic patch. */
+	targetEffectKinds?: SystemsReviewTargetEffectKind[];
 }
 
 export interface SystemsReviewCoverageItem {
@@ -65,6 +98,14 @@ export interface SystemsReviewCoverageItem {
 	requiresStateTrace: boolean;
 	requiresActionTrace: boolean;
 	requiresExactTargetEvidence: boolean;
+	/** Empty means no registered final adapter can prove this item (fail closed). */
+	requiredTargetAdapterIds?: string[];
+	requiredTargetEffectKinds?: SystemsReviewTargetEffectKind[];
+}
+
+/** Reader-only projection. Assertions are server-attested and append-only. */
+export interface SystemsReviewCoverageReadRecord extends SystemsReviewCoverageItem {
+	eligibleTargetAssertions: SystemsReviewEligibleTargetAssertion[];
 }
 
 export interface SystemsReviewChunkPart {

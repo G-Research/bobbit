@@ -76,7 +76,7 @@
     },
     {
       "path": "tests2/integration/systems-review-target-finalization.test.ts",
-      "reason": "Real-Git integration proof that neutral aggregate mutations are conservatively classified, the registered test runner captures target/scope at mergeChildBranchLocal immediately before Git, and Systems finalization consumes the opaque assertion replay-safely.",
+      "reason": "Actual registered-command integration proof binding immutable coverage, command outcome, head, action, target/scope, and the mergeChildBranchLocal final adapter; pins reader-visible attested IDs, persisted finalization, unit non-execution, and rejection of unrelated Git proof for filesystem deletion.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
