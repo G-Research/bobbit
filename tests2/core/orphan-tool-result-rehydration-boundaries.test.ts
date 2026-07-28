@@ -7,6 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { createMemFs } from "../harness/mem-fs.js";
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "orphan-rehydration-boundaries-"));
 const stateDir = path.join(tmpRoot, "state");
@@ -15,6 +16,7 @@ process.env.BOBBIT_AGENT_DIR = path.join(tmpRoot, "agent");
 fs.mkdirSync(stateDir, { recursive: true });
 
 const { activeAgentSessionsDir } = await import("../../src/server/agent/agent-session-path.ts");
+const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
 const {
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,
@@ -25,10 +27,37 @@ const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { containerPathToHost, registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
 const { sessionFsContextForAgentFile } = await import("../../src/server/agent/session-fs.ts");
-const { SessionManager, switchSessionPathForAgent } = await import("../../src/server/agent/session-manager.ts");
+const { SessionManager: BaseSessionManager, switchSessionPathForAgent } = await import("../../src/server/agent/session-manager.ts");
 const { executePlan } = await import("../../src/server/agent/session-setup.ts");
 const { initPromptDirs } = await import("../../src/server/agent/system-prompt.ts");
 const { loadOrCreateToken } = await import("../../src/server/auth/token.ts");
+
+const FIXTURE_MODEL_PROVIDER = "orphan-boundary-mock";
+const FIXTURE_MODEL_ID = "orphan-boundary-model";
+const FIXTURE_THINKING_LEVEL = "off";
+const preferencesStore = new PreferencesStore(
+	path.resolve("/memfs/orphan-rehydration-boundaries"),
+	createMemFs(),
+);
+preferencesStore.set("customProviders", [{
+	id: FIXTURE_MODEL_PROVIDER,
+	name: FIXTURE_MODEL_PROVIDER,
+	type: "manual",
+	baseUrl: "http://127.0.0.1:9",
+	apiKey: "test-key",
+	models: [{ id: FIXTURE_MODEL_ID, name: "Orphan Boundary Model" }],
+}]);
+preferencesStore.set("default.sessionModel", `${FIXTURE_MODEL_PROVIDER}/${FIXTURE_MODEL_ID}`);
+preferencesStore.set("default.sessionThinkingLevel", FIXTURE_THINKING_LEVEL);
+// The poison-recovery cases intentionally retain their explicit Anthropic tuple.
+preferencesStore.set("providerKey.anthropic", "test-anthropic-key");
+
+/** Ensure every SessionManager fixture sees the same deterministic selectable catalog. */
+class SessionManager extends BaseSessionManager {
+	constructor(options: any = {}) {
+		super({ ...options, preferencesStore });
+	}
+}
 
 initPromptDirs(stateDir);
 initAuthorSidecarDir(stateDir, {
@@ -144,6 +173,9 @@ function realSandboxFixture(containerFile: string, containerId = "container-boun
 }
 
 function recordingBridge(onSwitch: (sessionPath: string) => void): any {
+	let modelProvider = FIXTURE_MODEL_PROVIDER;
+	let modelId = FIXTURE_MODEL_ID;
+	let thinkingLevel = FIXTURE_THINKING_LEVEL;
 	return {
 		running: true,
 		async start() {},
@@ -153,10 +185,22 @@ function recordingBridge(onSwitch: (sessionPath: string) => void): any {
 		async prompt() { return { success: true }; },
 		async steer() { return { success: true }; },
 		async abort() { return { success: true }; },
-		async getState() { return { success: true, data: {} }; },
+		async getState() {
+			return {
+				success: true,
+				data: { model: { provider: modelProvider, id: modelId }, thinkingLevel },
+			};
+		},
 		async getMessages() { return { success: true, data: { messages: [] } }; },
-		async setModel() { return { success: true }; },
-		async setThinkingLevel() { return { success: true }; },
+		async setModel(provider: string, nextModelId: string) {
+			modelProvider = provider;
+			modelId = nextModelId;
+			return { success: true };
+		},
+		async setThinkingLevel(nextThinkingLevel: string) {
+			thinkingLevel = nextThinkingLevel;
+			return { success: true };
+		},
 		async compact() { return { success: true }; },
 		async sendCommand(command: any) {
 			if (command?.type === "switch_session") onSwitch(command.sessionPath);
@@ -211,6 +255,9 @@ function persisted(id: string, agentSessionFile: string, overrides: Record<strin
 		createdAt: Date.now(),
 		lastActivity: Date.now(),
 		sandboxed: false,
+		modelProvider: FIXTURE_MODEL_PROVIDER,
+		modelId: FIXTURE_MODEL_ID,
+		effectiveThinkingLevel: FIXTURE_THINKING_LEVEL,
 		...overrides,
 	};
 }
