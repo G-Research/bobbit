@@ -1650,101 +1650,104 @@ function resultLocationKey(messageIndex: number, blockIndex: number): string {
 	return `${messageIndex}:${blockIndex}`;
 }
 
-function callPrecedes(call: CanonicalCall, messageIndex: number, blockIndex: number): boolean {
-	return call.messageIndex < messageIndex
-		|| (call.messageIndex === messageIndex && call.blockIndex < blockIndex);
-}
-
-function findNearestPrecedingCall(calls: CanonicalCall[], messageIndex: number, blockIndex: number): CanonicalCall | undefined {
-	for (let index = calls.length - 1; index >= 0; index--) {
-		if (callPrecedes(calls[index], messageIndex, blockIndex)) return calls[index];
-	}
-	return undefined;
+export interface TranscriptCorrelationOperations {
+	callUpdates: number;
+	resultLookups: number;
 }
 
 function buildCanonicalTranscriptIndex(
 	messages: RawMessage[],
 	sessionId: string,
+	operations?: TranscriptCorrelationOperations,
 ): CanonicalTranscriptIndex {
 	const callsByMessage = new Map<number, CanonicalCall[]>();
-	const allCallsById = new Map<string, CanonicalCall[]>();
+	const resultsByMessage = new Map<number, CanonicalResult[]>();
+	const resultByLocation = new Map<string, CanonicalResult>();
+	const latestCallById = new Map<string, CanonicalCall>();
+
+	const indexCall = (message: RawMessage, block: Record<string, unknown>, blockIndex: number): void => {
+		const args = canonicalToolCallArgumentDetails(block);
+		const id = canonicalCallId(block);
+		const call: CanonicalCall = {
+			messageIndex: message.index,
+			blockIndex,
+			block,
+			...(id ? { id } : {}),
+			name: canonicalToolCallName(block),
+			argumentsText: args.text,
+			argumentsPresent: args.present,
+		};
+		const messageCalls = callsByMessage.get(message.index) ?? [];
+		messageCalls.push(call);
+		callsByMessage.set(message.index, messageCalls);
+		if (call.id) {
+			latestCallById.set(call.id, call);
+			if (operations) operations.callUpdates++;
+		}
+	};
+
+	const indexResult = (
+		message: RawMessage,
+		direct: Record<string, unknown>,
+		blockIndex: number,
+		messageLevel: boolean,
+	): void => {
+		const correlationId = canonicalResultCorrelationId(direct, message.fullMessage, messageLevel);
+		const correlatedCall = correlationId ? latestCallById.get(correlationId) : undefined;
+		if (correlationId && operations) operations.resultLookups++;
+		const canonical = canonicalToolResultBodyDetails(direct);
+		const size: ToolResultSize = {
+			type: canonical.type,
+			...(canonical.blocks !== undefined ? { blocks: canonical.blocks } : {}),
+			chars: canonical.text.length,
+			lines: stringLineCount(canonical.text),
+			bytes: Buffer.byteLength(canonical.text, "utf8"),
+		};
+		const result: CanonicalResult = {
+			messageIndex: message.index,
+			blockIndex,
+			direct,
+			message: message.fullMessage,
+			...(correlationId ? { correlationId } : {}),
+			...(correlatedCall ? { correlatedCall } : {}),
+			name: canonicalResultName(direct, message.fullMessage, messageLevel, correlatedCall),
+			status: canonicalResultStatus(direct, message.fullMessage, messageLevel),
+			body: canonical.text,
+			size,
+			handle: createTranscriptResultHandle(sessionId, message.index, blockIndex, canonical.text),
+		};
+		const messageResults = resultsByMessage.get(message.index) ?? [];
+		messageResults.push(result);
+		resultsByMessage.set(message.index, messageResults);
+		resultByLocation.set(resultLocationKey(message.index, blockIndex), result);
+	};
 
 	for (const message of messages) {
+		const messageLevelResult = isMessageLevelToolResult(message);
+		// A message-level result has the synthetic location (messageIndex, 0),
+		// so no content block in the same message can precede it. Index it before
+		// walking content, while retaining any unusual call blocks for later rows.
+		if (messageLevelResult) indexResult(message, message.fullMessage, 0, true);
 		if (!Array.isArray(message.content)) continue;
 		for (let blockIndex = 0; blockIndex < message.content.length; blockIndex++) {
 			const candidate = message.content[blockIndex];
 			if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
 			const block = candidate as Record<string, unknown>;
-			if (block.type !== "tool_use" && block.type !== "toolCall") continue;
-			const args = canonicalToolCallArgumentDetails(block);
-			const call: CanonicalCall = {
-				messageIndex: message.index,
-				blockIndex,
-				block,
-				...(canonicalCallId(block) ? { id: canonicalCallId(block) } : {}),
-				name: canonicalToolCallName(block),
-				argumentsText: args.text,
-				argumentsPresent: args.present,
-			};
-			const messageCalls = callsByMessage.get(message.index) ?? [];
-			messageCalls.push(call);
-			callsByMessage.set(message.index, messageCalls);
-			if (call.id) {
-				const byId = allCallsById.get(call.id) ?? [];
-				byId.push(call);
-				allCallsById.set(call.id, byId);
-			}
-		}
-	}
-
-	const resultsByMessage = new Map<number, CanonicalResult[]>();
-	const resultByLocation = new Map<string, CanonicalResult>();
-	for (const message of messages) {
-		const sources: Array<{ direct: Record<string, unknown>; blockIndex: number; messageLevel: boolean }> = [];
-		if (isMessageLevelToolResult(message)) {
-			sources.push({ direct: message.fullMessage, blockIndex: 0, messageLevel: true });
-		} else if (Array.isArray(message.content)) {
-			for (let blockIndex = 0; blockIndex < message.content.length; blockIndex++) {
-				const candidate = message.content[blockIndex];
-				if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
-				const direct = candidate as Record<string, unknown>;
-				if (isToolResultBlock(direct)) sources.push({ direct, blockIndex, messageLevel: false });
-			}
-		}
-		for (const source of sources) {
-			const correlationId = canonicalResultCorrelationId(source.direct, message.fullMessage, source.messageLevel);
-			const correlatedCall = correlationId
-				? findNearestPrecedingCall(allCallsById.get(correlationId) ?? [], message.index, source.blockIndex)
-				: undefined;
-			const canonical = canonicalToolResultBodyDetails(source.direct);
-			const size: ToolResultSize = {
-				type: canonical.type,
-				...(canonical.blocks !== undefined ? { blocks: canonical.blocks } : {}),
-				chars: canonical.text.length,
-				lines: stringLineCount(canonical.text),
-				bytes: Buffer.byteLength(canonical.text, "utf8"),
-			};
-			const result: CanonicalResult = {
-				messageIndex: message.index,
-				blockIndex: source.blockIndex,
-				direct: source.direct,
-				message: message.fullMessage,
-				...(correlationId ? { correlationId } : {}),
-				...(correlatedCall ? { correlatedCall } : {}),
-				name: canonicalResultName(source.direct, message.fullMessage, source.messageLevel, correlatedCall),
-				status: canonicalResultStatus(source.direct, message.fullMessage, source.messageLevel),
-				body: canonical.text,
-				size,
-				handle: createTranscriptResultHandle(sessionId, message.index, source.blockIndex, canonical.text),
-			};
-			const messageResults = resultsByMessage.get(message.index) ?? [];
-			messageResults.push(result);
-			resultsByMessage.set(message.index, messageResults);
-			resultByLocation.set(resultLocationKey(message.index, source.blockIndex), result);
+			// A malformed hybrid call/result block cannot correlate to itself: a
+			// same-message call precedes a result only when its block index is lower.
+			if (!messageLevelResult && isToolResultBlock(block)) indexResult(message, block, blockIndex, false);
+			if (block.type === "tool_use" || block.type === "toolCall") indexCall(message, block, blockIndex);
 		}
 	}
 
 	return { callsByMessage, resultsByMessage, resultByLocation };
+}
+
+/** Deterministic test-only instrumentation for correlation-index growth. */
+export function measureTranscriptCorrelationOperationsForTests(jsonl: string): TranscriptCorrelationOperations {
+	const operations: TranscriptCorrelationOperations = { callUpdates: 0, resultLookups: 0 };
+	buildCanonicalTranscriptIndex(parseJsonl(jsonl), "correlation-operations-test", operations);
+	return operations;
 }
 
 function* agentSearchSegments(message: RawMessage, index: CanonicalTranscriptIndex): Iterable<string> {

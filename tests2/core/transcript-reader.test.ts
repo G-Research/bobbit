@@ -8,6 +8,8 @@ import { EventEmitter } from "node:events";
 import type { WorkerOptions } from "node:worker_threads";
 import {
 	createTranscriptRegexPoolForTests,
+	createTranscriptResultHandle,
+	measureTranscriptCorrelationOperationsForTests,
 	readTranscript,
 	readOrphanedBeforeCompaction,
 	parseJsonl,
@@ -649,6 +651,112 @@ describe("transcript-reader / readTranscript", () => {
 		assert.deepEqual((env.messages[0] as any).author, {
 			kind: "system", id: "system:bobbit", label: "Bobbit",
 		});
+	});
+});
+
+describe("transcript-reader / agent call correlation", () => {
+	it("correlates repeated IDs with one forward update and lookup per pair", async () => {
+		const pairCount = 4_096;
+		const lines: string[] = [];
+		for (let index = 0; index < pairCount; index++) {
+			lines.push(JSON.stringify({
+				type: "message",
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "reused-id", name: `tool-${index}`, arguments: { index } }],
+				},
+			}));
+			lines.push(JSON.stringify({
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolCallId: "reused-id",
+					status: index % 2 === 0 ? "ok" : "error",
+					content: `result-${index}`,
+				},
+			}));
+		}
+		const text = lines.join("\n") + "\n";
+
+		assert.deepEqual(measureTranscriptCorrelationOperationsForTests(text), {
+			callUpdates: pairCount,
+			resultLookups: pairCount,
+		});
+
+		const sessionId = "repeated-correlation";
+		const envelope = await readTranscript({ offset: -1, limit: 1 }, {
+			...memoryTranscript(text),
+			projection: "agent",
+			sessionId,
+		});
+		const result = (envelope.messages[0] as any).toolResults[0];
+		assert.equal(result.name, `tool-${pairCount - 1}`);
+		assert.equal(result.status, "error");
+		assert.equal(result.handle, createTranscriptResultHandle(
+			sessionId,
+			pairCount * 2 - 1,
+			0,
+			`result-${pairCount - 1}`,
+		));
+		assert.deepEqual((envelope.correlations as any)[result.ref], {
+			name: `tool-${pairCount - 1}`,
+			messageIndex: pairCount * 2 - 2,
+			blockIndex: 0,
+		});
+	});
+
+	it("uses only lower block indexes when correlating within one message", async () => {
+		const text = [
+			{
+				type: "message",
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "same-id", name: "prior-call", arguments: {} }],
+				},
+			},
+			{
+				type: "message",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "tool_result", tool_use_id: "same-id", content: "before-call", is_error: true },
+						{ type: "toolCall", id: "same-id", name: "same-message-call", arguments: {} },
+						{ type: "tool_result", tool_use_id: "same-id", content: "after-call", status: "ok" },
+					],
+				},
+			},
+		].map((entry) => JSON.stringify(entry)).join("\n") + "\n";
+		const sessionId = "same-message-correlation";
+
+		const envelope = await readTranscript({ offset: 1, limit: 1 }, {
+			...memoryTranscript(text),
+			projection: "agent",
+			sessionId,
+		});
+		const message = envelope.messages[0] as any;
+		assert.equal(message.toolCalls[0].name, "same-message-call");
+		assert.deepEqual(message.toolResults.map((result: any) => ({
+			name: result.name,
+			status: result.status,
+			handle: result.handle,
+		})), [
+			{
+				name: "prior-call",
+				status: "error",
+				handle: createTranscriptResultHandle(sessionId, 1, 0, "before-call"),
+			},
+			{
+				name: "same-message-call",
+				status: "ok",
+				handle: createTranscriptResultHandle(sessionId, 1, 2, "after-call"),
+			},
+		]);
+		assert.deepEqual((envelope.correlations as any)[message.toolResults[0].ref], {
+			name: "prior-call",
+			messageIndex: 0,
+			blockIndex: 0,
+		});
+		assert.equal(message.toolResults[1].ref, message.toolCalls[0].ref);
 	});
 });
 
