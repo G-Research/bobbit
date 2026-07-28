@@ -233,6 +233,7 @@ export default function (pi) {
       near_ceiling: Type.Optional(Type.Boolean()),
       throw_after_mutation: Type.Optional(Type.Boolean()),
       late_phase_attack: Type.Optional(Type.String()),
+      post_chain_accessor_attack: Type.Optional(Type.String()),
       snapshot_attack: Type.Optional(Type.String()),
       frozen_target_attack: Type.Optional(Type.String()),
     }),
@@ -330,6 +331,46 @@ const invocations = new Map();
 const frozenTargetCounterSymbol = Symbol.for("bobbit.test.frozen-target-counter");
 const frozenTargetCounters = globalThis[frozenTargetCounterSymbol]
   || (globalThis[frozenTargetCounterSymbol] = { getter: 0, toJSON: 0 });
+const postChainAccessorCounterSymbol = Symbol.for("bobbit.test.post-chain-accessor-counter");
+const postChainAccessorCounter = globalThis[postChainAccessorCounterSymbol]
+  || (globalThis[postChainAccessorCounterSymbol] = { installed: 0, reads: 0 });
+
+function installThrowingAccessors(target, fields, label) {
+  for (const field of fields) {
+    postChainAccessorCounter.installed += 1;
+    Object.defineProperty(target, field, {
+      configurable: true,
+      enumerable: true,
+      get() {
+        postChainAccessorCounter.reads += 1;
+        throw new Error(label + " " + field + " getter must never run");
+      },
+    });
+  }
+  return target;
+}
+
+function hostileResult(label) {
+  return installThrowingAccessors({}, ["content", "details", "usage", "isError"], label);
+}
+
+function mutableMessage(message) {
+  return {
+    role: "toolResult",
+    toolCallId: message.toolCallId,
+    toolName: "read_session",
+    content: [],
+    details: {},
+    usage: {},
+    isError: false,
+    timestamp: 0,
+  };
+}
+
+function hostileMessage(message, label) {
+  return installThrowingAccessors(mutableMessage(message),
+    ["content", "details", "usage", "isError", "timestamp"], label);
+}
 
 export default function (pi) {
   pi.on("tool_execution_end", (event) => {
@@ -364,6 +405,13 @@ export default function (pi) {
       details: { thinkingSignature: "TOOL_END_PROVIDER_SIGNATURE" },
       usage: { providerMetadata: "TOOL_END_USAGE".repeat(100_000) },
     };
+    if (params.post_chain_accessor_attack === "tool_return") {
+      return { result: hostileResult("returned tool result") };
+    }
+    if (params.post_chain_accessor_attack === "tool_in_place") {
+      event.result = { content: [], details: {}, usage: {}, isError: false };
+      return undefined;
+    }
     if (params.late_phase_attack === "return") return { result: malicious };
     if (params.late_phase_attack === "mutate") {
       event.result.content = malicious.content;
@@ -375,6 +423,20 @@ export default function (pi) {
     }
   });
 
+  pi.on("tool_execution_end", (event) => {
+    const params = invocations.get(event.toolCallId) || {};
+    if (params.post_chain_accessor_attack !== "tool_in_place") return;
+    installThrowingAccessors(event.result, ["content", "details", "usage", "isError"], "in-place tool result");
+    Object.defineProperty(event, "isError", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        postChainAccessorCounter.reads += 1;
+        throw new Error("in-place tool event isError getter must never run");
+      },
+    });
+  });
+
   pi.on("message_end", (event) => {
     if (event.message?.role !== "toolResult") return;
     const params = invocations.get(event.message.toolCallId) || {};
@@ -384,6 +446,12 @@ export default function (pi) {
       details: { textSignature: "MESSAGE_END_PROVIDER_SIGNATURE" },
       usage: { providerMetadata: "MESSAGE_END_USAGE".repeat(100_000) },
     };
+    if (params.post_chain_accessor_attack === "message_return") {
+      return { message: hostileMessage(event.message, "returned message") };
+    }
+    if (params.post_chain_accessor_attack === "message_in_place") {
+      return { message: mutableMessage(event.message) };
+    }
     if (params.late_phase_attack === "return") return { message: malicious };
     if (params.late_phase_attack === "mutate") {
       event.message.content = malicious.content;
@@ -395,6 +463,13 @@ export default function (pi) {
       event.message.details = malicious.details;
       throw new Error("message_end mutation regression");
     }
+  });
+
+  pi.on("message_end", (event) => {
+    const params = invocations.get(event.message.toolCallId) || {};
+    if (params.post_chain_accessor_attack !== "message_in_place") return;
+    installThrowingAccessors(event.message,
+      ["content", "details", "usage", "isError", "timestamp"], "in-place message");
   });
 
   pi.on("tool_result", (event) => {
@@ -471,6 +546,9 @@ export default function (pi) {
 		const frozenTargetCounterSymbol = Symbol.for("bobbit.test.frozen-target-counter");
 		const frozenTargetCounters = { getter: 0, toJSON: 0 };
 		(globalThis as any)[frozenTargetCounterSymbol] = frozenTargetCounters;
+		const postChainAccessorCounterSymbol = Symbol.for("bobbit.test.post-chain-accessor-counter");
+		const postChainAccessorCounter = { installed: 0, reads: 0 };
+		(globalThis as any)[postChainAccessorCounterSymbol] = postChainAccessorCounter;
 		const loaded = await loadExtensions([boundaryPath, overridePath, inPlaceMutatorPath], root);
 		assert.deepEqual(loaded.errors, []);
 		assert.equal(loaded.extensions.length, 3);
@@ -605,6 +683,32 @@ export default function (pi) {
 			}
 		}
 
+		for (const accessorAttack of ["tool_return", "tool_in_place", "message_return", "message_in_place"] as const) {
+			const accessorSession = createLifecycleSession(loaded, root, {
+				session_id: "target",
+				include_tool_results: true,
+				limit: 1,
+				post_chain_accessor_attack: accessorAttack,
+			});
+			const accessorEvents = await runLifecycle(accessorSession, `post-chain accessor ${accessorAttack}`);
+			const { emitted: accessorEnd, persisted: accessorMessage } = toolOutcome(accessorEvents);
+			const accessorStored = persistOutcome(accessorSession);
+			const stateMessage = accessorSession.state.messages.find((message) => message.role === "toolResult") as any;
+			assert.ok(stateMessage, "the bounded result must remain in Agent state");
+			assert.ok(accessorSession.state.messages.some((message) =>
+				message.role === "assistant" && (message as any).stopReason === "stop"), "the turn must complete");
+			assert.ok(bytes(accessorEnd.result) <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
+			assert.ok(bytes(accessorMessage) <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
+			assert.ok(bytes(stateMessage) <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
+			assert.ok(Buffer.byteLength(accessorStored.line, "utf8") <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
+			assert.deepEqual(stateMessage.content, accessorStored.roundTrip.content);
+			assert.equal(accessorStored.roundTrip.toolName, "read_session");
+		}
+		assert.equal(postChainAccessorCounter.installed, 18,
+			"each returned and in-place accessor scenario must reach its real Pi listener");
+		assert.equal(postChainAccessorCounter.reads, 0,
+			"post-chain returned and in-place accessors must never execute outside Pi's listener try/catch");
+
 		for (const snapshotAttack of ["deep", "error_deep", "sparse", "cycle", "dag", "nonplain"] as const) {
 			const hostileSession = createLifecycleSession(loaded, root, {
 				session_id: "target",
@@ -730,6 +834,8 @@ export default function (pi) {
 			{ label: "boundary", source: "b".repeat(128), hashed: false },
 			{ label: "over-boundary", source: "o".repeat(129), hashed: true },
 			{ label: "oversized", source: "z".repeat(100_000), hashed: true },
+			{ label: "snapshot-limit-plus-one", source: "j".repeat(2 * 1024 * 1024 + 1), hashed: true },
+			{ label: "far-over-snapshot-limit", source: "f".repeat(8 * 1024 * 1024 + 17), hashed: true },
 		] as const) {
 			const correlationSession = createLifecycleSession(loaded, root, {
 				session_id: "target",
