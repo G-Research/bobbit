@@ -792,17 +792,19 @@ function startSafeRegexExecution(
 			));
 		};
 
-		const removeListeners = (): void => {
+		const removeProtocolListeners = (): void => {
 			worker.off("message", onMessage);
-			worker.off("error", onError);
 			worker.off("exit", onExit);
+		};
+		const removeLifecycleErrorSink = (): void => {
+			worker.off("error", onError);
 		};
 
 		function finish(error?: Error): void {
 			if (settled) return;
 			settled = true;
 			options.clock.clearTimer(timer);
-			removeListeners();
+			removeProtocolListeners();
 			if (awaiting) {
 				const waiter = awaiting;
 				awaiting = undefined;
@@ -814,12 +816,21 @@ function startSafeRegexExecution(
 			} catch (terminationError) {
 				termination = Promise.reject(terminationError);
 			}
+			// terminate() can race a late OOM/uncaught worker failure. Keep the
+			// now-no-op onError listener as a sink until termination fully settles;
+			// otherwise EventEmitter would treat that late error as unhandled.
 			void termination.then(
-				() => error ? reject(error) : resolve(matches),
-				(terminationError) => reject(error ?? new TranscriptRegexSearchError(
-					"REGEX_WORKER_FAILED",
-					`safe regex worker termination failed: ${terminationError instanceof Error ? terminationError.message : String(terminationError)}`,
-				)),
+				() => {
+					removeLifecycleErrorSink();
+					error ? reject(error) : resolve(matches);
+				},
+				(terminationError) => {
+					removeLifecycleErrorSink();
+					reject(error ?? new TranscriptRegexSearchError(
+						"REGEX_WORKER_FAILED",
+						`safe regex worker termination failed: ${terminationError instanceof Error ? terminationError.message : String(terminationError)}`,
+					));
+				},
 			);
 		}
 
