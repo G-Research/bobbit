@@ -17,6 +17,7 @@ fs.mkdirSync(stateDir, { recursive: true });
 
 const { activeAgentSessionsDir } = await import("../../src/server/agent/agent-session-path.ts");
 const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
+const { invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
 const {
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,
@@ -35,6 +36,8 @@ const { loadOrCreateToken } = await import("../../src/server/auth/token.ts");
 const FIXTURE_MODEL_PROVIDER = "orphan-boundary-mock";
 const FIXTURE_MODEL_ID = "orphan-boundary-model";
 const FIXTURE_THINKING_LEVEL = "off";
+const agentDir = process.env.BOBBIT_AGENT_DIR!;
+const modelsJsonPath = path.join(agentDir, "models.json");
 const preferencesStore = new PreferencesStore(
 	path.resolve("/memfs/orphan-rehydration-boundaries"),
 	createMemFs(),
@@ -73,6 +76,8 @@ const ORPHAN_ERROR =
 
 afterEach(() => {
 	registerRpcBridgeFactory(null);
+	invalidateModelCache();
+	fs.rmSync(modelsJsonPath, { force: true });
 	vi.restoreAllMocks();
 	while (managers.length > 0) {
 		const manager = managers.pop();
@@ -172,10 +177,13 @@ function realSandboxFixture(containerFile: string, containerId = "container-boun
 	};
 }
 
-function recordingBridge(onSwitch: (sessionPath: string) => void): any {
-	let modelProvider = FIXTURE_MODEL_PROVIDER;
-	let modelId = FIXTURE_MODEL_ID;
-	let thinkingLevel = FIXTURE_THINKING_LEVEL;
+function recordingBridge(
+	onSwitch: (sessionPath: string) => void,
+	initial?: { modelProvider: string; modelId: string; thinkingLevel: string },
+): any {
+	let modelProvider = initial?.modelProvider ?? FIXTURE_MODEL_PROVIDER;
+	let modelId = initial?.modelId ?? FIXTURE_MODEL_ID;
+	let thinkingLevel = initial?.thinkingLevel ?? FIXTURE_THINKING_LEVEL;
 	return {
 		running: true,
 		async start() {},
@@ -245,6 +253,38 @@ function failingSwitchBridge(
 	};
 }
 
+function bridgeTuple(options: Record<string, any>): { modelProvider: string; modelId: string; thinkingLevel: string } {
+	const model = String(options.initialModel ?? "");
+	const slash = model.indexOf("/");
+	if (slash <= 0 || slash === model.length - 1) throw new Error(`fixture requires an explicit model, got ${model}`);
+	return {
+		modelProvider: model.slice(0, slash),
+		modelId: model.slice(slash + 1),
+		thinkingLevel: options.initialThinkingLevel ?? "medium",
+	};
+}
+
+function mutableStore(record: Record<string, any>): any {
+	const updates: Array<Record<string, any>> = [];
+	return {
+		updates,
+		get: vi.fn(() => record),
+		getLive: vi.fn(() => [record]),
+		update: vi.fn((_id: string, patch: Record<string, any>) => {
+			updates.push({ ...patch });
+			Object.assign(record, patch);
+		}),
+		put: vi.fn(() => {}),
+		archive: vi.fn(() => {}),
+	};
+}
+
+function tupleUpdates(store: { updates: Array<Record<string, any>> }): Array<Record<string, any>> {
+	return store.updates.filter((patch) =>
+		["modelProvider", "modelId", "effectiveThinkingLevel"]
+			.some((key) => Object.prototype.hasOwnProperty.call(patch, key)));
+}
+
 function persisted(id: string, agentSessionFile: string, overrides: Record<string, any> = {}): any {
 	return {
 		id,
@@ -312,7 +352,215 @@ function deferred<T = void>(): {
 	return { promise, resolve, reject };
 }
 
+function writeLegacyAigwCatalog(url: string): void {
+	fs.mkdirSync(agentDir, { recursive: true });
+	fs.writeFileSync(modelsJsonPath, JSON.stringify({
+		providers: {
+			aigw: {
+				baseUrl: url,
+				api: "openai-completions",
+				models: [{
+					id: "legacy-id",
+					name: "Legacy model",
+					contextWindow: 128_000,
+					maxTokens: 16_384,
+					reasoning: false,
+					input: ["text"],
+				}],
+			},
+		},
+	}), "utf8");
+}
+
+function makeLegacyAigwPreferences(label: string, url: string): InstanceType<typeof PreferencesStore> {
+	const prefs = new PreferencesStore(path.resolve(`/memfs/${label}`), createMemFs());
+	prefs.set("aigw.url", url);
+	return prefs;
+}
+
+function makeRoleThinkingManager(
+	label: string,
+	roleThinkingLevel: string | undefined,
+): { manager: any; role: any } {
+	const prefs = new PreferencesStore(path.resolve(`/memfs/${label}`), createMemFs());
+	prefs.set("providerKey.anthropic", "test-anthropic-key");
+	const role = {
+		name: "thinking-role",
+		label: "Thinking role",
+		promptTemplate: "Exercise exact thinking precedence",
+		accessory: "none",
+		...(roleThinkingLevel ? { thinkingLevel: roleThinkingLevel } : {}),
+		createdAt: 1,
+		updatedAt: 1,
+	};
+	const roleManager = {
+		getRole: vi.fn((name: string) => name === role.name ? role : undefined),
+		listRoles: vi.fn(() => [role]),
+	};
+	const manager: any = new BaseSessionManager({ preferencesStore: prefs, roleManager: roleManager as any });
+	managers.push(manager);
+	return { manager, role };
+}
+
 describe("executable SessionManager rehydration boundaries", () => {
+	it.each(["start", "switch", "read-back"] as const)(
+		"keeps the complete legacy AIGW tuple durable when normalized cold restore fails at %s",
+		async (failure) => {
+			const file = hostTranscript(`normalized-restore-${failure}`);
+			const url = "http://127.0.0.1:1/v1";
+			writeLegacyAigwCatalog(url);
+			invalidateModelCache();
+			const prefs = makeLegacyAigwPreferences(`normalized-restore-${failure}`, url);
+			const ps = persisted(`normalized-restore-${failure}`, file, {
+				modelProvider: "aigw",
+				modelId: "openai/legacy-id",
+				effectiveThinkingLevel: "high",
+			});
+			const durableBefore = {
+				modelProvider: ps.modelProvider,
+				modelId: ps.modelId,
+				effectiveThinkingLevel: ps.effectiveThinkingLevel,
+			};
+			const store = mutableStore(ps);
+			registerRpcBridgeFactory((options: Record<string, any>) => {
+				const bridge = recordingBridge(() => {}, bridgeTuple(options));
+				if (failure === "start") bridge.start = vi.fn(async () => { throw new Error("fixture start failed"); });
+				if (failure === "switch") bridge.sendCommand = vi.fn(async () => ({ success: false, error: "fixture switch failed" }));
+				if (failure === "read-back") bridge.getState = vi.fn(async () => ({ success: false, error: "fixture read-back failed" }));
+				return bridge;
+			});
+			const manager: any = new BaseSessionManager({ preferencesStore: prefs });
+			manager._testStore = store;
+			managers.push(manager);
+			vi.spyOn(console, "error").mockImplementation(() => {});
+
+			await expect(manager.restoreSession(ps)).rejects.toThrow();
+
+			expect({
+				modelProvider: ps.modelProvider,
+				modelId: ps.modelId,
+				effectiveThinkingLevel: ps.effectiveThinkingLevel,
+			}).toEqual(durableBefore);
+			expect(tupleUpdates(store)).toEqual([]);
+		},
+	);
+
+	it("atomically commits the normalized legacy AIGW tuple only after cold-restore verification", async () => {
+		const file = hostTranscript("normalized-restore-success");
+		const url = "http://127.0.0.1:1/v1";
+		writeLegacyAigwCatalog(url);
+		invalidateModelCache();
+		const prefs = makeLegacyAigwPreferences("normalized-restore-success", url);
+		const ps = persisted("normalized-restore-success", file, {
+			modelProvider: "aigw",
+			modelId: "openai/legacy-id",
+			effectiveThinkingLevel: "high",
+		});
+		const store = mutableStore(ps);
+		const optionsSeen: Record<string, any>[] = [];
+		registerRpcBridgeFactory((options: Record<string, any>) => {
+			optionsSeen.push({ ...options });
+			return recordingBridge(() => {}, bridgeTuple(options));
+		});
+		const manager: any = new BaseSessionManager({ preferencesStore: prefs });
+		manager._testStore = store;
+		managers.push(manager);
+		vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await manager.restoreSession(ps);
+
+		expect(optionsSeen[0]?.initialModel).toBe("aigw/legacy-id");
+		expect(tupleUpdates(store)).toEqual([{
+			modelProvider: "aigw",
+			modelId: "legacy-id",
+			effectiveThinkingLevel: "off",
+		}]);
+		expect({
+			modelProvider: ps.modelProvider,
+			modelId: ps.modelId,
+			effectiveThinkingLevel: ps.effectiveThinkingLevel,
+		}).toEqual({
+			modelProvider: "aigw",
+			modelId: "legacy-id",
+			effectiveThinkingLevel: "off",
+		});
+	});
+
+	it.each([
+		{ roleThinkingLevel: "xhigh", expected: "xhigh" },
+		{ roleThinkingLevel: undefined, expected: "high" },
+	])("assignRole gives explicit role thinking $roleThinkingLevel precedence and otherwise retains durable thinking", async ({ roleThinkingLevel, expected }) => {
+		invalidateModelCache();
+		const file = hostTranscript(`assign-role-thinking-${roleThinkingLevel ?? "durable"}`);
+		const ps = persisted(`assign-role-thinking-${roleThinkingLevel ?? "durable"}`, file, {
+			modelProvider: "anthropic",
+			modelId: "claude-opus-5",
+			effectiveThinkingLevel: "high",
+		});
+		const store = mutableStore(ps);
+		const { manager, role } = makeRoleThinkingManager(`assign-role-thinking-${roleThinkingLevel ?? "durable"}`, roleThinkingLevel);
+		manager._testStore = store;
+		const optionsSeen: Record<string, any>[] = [];
+		registerRpcBridgeFactory((options: Record<string, any>) => {
+			optionsSeen.push({ ...options });
+			return recordingBridge(() => {}, bridgeTuple(options));
+		});
+		const oldBridge = recordingBridge(() => {}, {
+			modelProvider: "anthropic",
+			modelId: "claude-opus-5",
+			thinkingLevel: "high",
+		});
+		oldBridge.stop = vi.fn(async () => {});
+		manager.sessions.set(ps.id, liveSession(ps.id, oldBridge, { unsubscribe: vi.fn() }));
+
+		await expect(manager.assignRole(ps.id, role)).resolves.toBe(true);
+
+		expect(optionsSeen[0]?.initialModel).toBe("anthropic/claude-opus-5");
+		expect(optionsSeen[0]?.initialThinkingLevel).toBe(expected);
+		expect(ps.effectiveThinkingLevel).toBe(expected);
+	});
+
+	it.each([
+		{ roleThinkingLevel: "xhigh", expected: "xhigh" },
+		{ roleThinkingLevel: undefined, expected: "high" },
+	])("forceAbort gives explicit role thinking $roleThinkingLevel precedence and otherwise retains durable thinking", async ({ roleThinkingLevel, expected }) => {
+		invalidateModelCache();
+		const file = hostTranscript(`force-abort-thinking-${roleThinkingLevel ?? "durable"}`);
+		const ps = persisted(`force-abort-thinking-${roleThinkingLevel ?? "durable"}`, file, {
+			role: "thinking-role",
+			modelProvider: "anthropic",
+			modelId: "claude-opus-5",
+			effectiveThinkingLevel: "high",
+		});
+		const store = mutableStore(ps);
+		const { manager } = makeRoleThinkingManager(`force-abort-thinking-${roleThinkingLevel ?? "durable"}`, roleThinkingLevel);
+		manager._testStore = store;
+		const optionsSeen: Record<string, any>[] = [];
+		registerRpcBridgeFactory((options: Record<string, any>) => {
+			optionsSeen.push({ ...options });
+			return recordingBridge(() => {}, bridgeTuple(options));
+		});
+		const oldBridge = recordingBridge(() => {}, {
+			modelProvider: "anthropic",
+			modelId: "claude-opus-5",
+			thinkingLevel: "high",
+		});
+		oldBridge.abort = vi.fn(() => new Promise(() => {}));
+		oldBridge.stop = vi.fn(async () => {});
+		oldBridge.getState = vi.fn(async () => ({ success: true, data: { sessionFile: file } }));
+		manager.sessions.set(ps.id, liveSession(ps.id, oldBridge, {
+			role: "thinking-role",
+			status: "streaming",
+			streamingStartedAt: Date.now(),
+			unsubscribe: vi.fn(),
+		}));
+
+		await manager.forceAbort(ps.id, 1);
+
+		expect(optionsSeen[0]?.initialModel).toBe("anthropic/claude-opus-5");
+		expect(optionsSeen[0]?.initialThinkingLevel).toBe(expected);
+		expect(ps.effectiveThinkingLevel).toBe(expected);
+	});
 	it("repairs a cold-restored host transcript before switch_session observes it", async () => {
 		const file = hostTranscript("cold-restore");
 		const switches: string[] = [];

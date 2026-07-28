@@ -7512,14 +7512,10 @@ export class SessionManager {
 				restoreInitialModel,
 				restoreDefaultModel,
 			]);
-		if (bridgeOptions.initialModel === psPersistedModel && psPersistedModel) {
-			const slash = psPersistedModel.indexOf("/");
-			const normalizedProvider = psPersistedModel.slice(0, slash);
-			const normalizedModelId = psPersistedModel.slice(slash + 1);
-			if (normalizedProvider !== ps.modelProvider || normalizedModelId !== ps.modelId) {
-				this.resolveStoreForSession(ps.id).update(ps.id, { modelProvider: normalizedProvider, modelId: normalizedModelId });
-			}
-		}
+		// Normalization is a spawn candidate only until Pi verifies the complete
+		// model/thinking tuple below. tryAutoSelectModel owns the single atomic
+		// durable commit, so any failed start, switch, or read-back retains the
+		// original verified tuple byte-for-byte.
 		const initThinking = this.resolveThinkingLevelForModel(
 			bridgeOptions.initialModel,
 			ps.role,
@@ -9798,9 +9794,9 @@ export class SessionManager {
 		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
 
-		// Pin one exact model/thinking tuple for the replacement. An explicit model
-		// on the newly assigned role owns both resolution paths; otherwise preserve
-		// the session's last verified durable tuple across the role-only respawn.
+		// Pin one exact model/thinking tuple for the replacement. Model selection
+		// prefers the assigned role, while thinking independently prefers an explicit
+		// role override and otherwise preserves the last verified durable level.
 		const respawnPersisted = this.resolveStoreForSession(id).get(id);
 		const respawnPersistedModel =
 			respawnPersisted?.modelProvider && respawnPersisted?.modelId
@@ -9820,12 +9816,14 @@ export class SessionManager {
 				roleInitialModel,
 				roleDefaultModel,
 			]);
-		const roleModelPinned = !!roleModel && bridgeOptions.initialModel === roleModel;
+		const roleThinkingOverride = isKnownThinkingLevel(
+			this.resolveRoleThinkingLevelValue(role.name, session.projectId),
+		);
 		const initThinking = this.resolveThinkingLevelForModel(
 			bridgeOptions.initialModel,
 			role.name,
 			session.projectId,
-			roleModelPinned ? undefined : respawnPersisted?.effectiveThinkingLevel,
+			roleThinkingOverride ?? respawnPersisted?.effectiveThinkingLevel,
 		);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 
@@ -12258,11 +12256,14 @@ export class SessionManager {
 					forceInitialModel,
 					forceDefaultModel,
 				]);
+			const forceRoleThinkingOverride = isKnownThinkingLevel(
+				this.resolveRoleThinkingLevelValue(session.role, session.projectId),
+			);
 			const initThinking = this.resolveThinkingLevelForModel(
 				bridgeOptions.initialModel,
 				session.role,
 				session.projectId,
-				forceRespawnPersisted?.effectiveThinkingLevel,
+				forceRoleThinkingOverride ?? forceRespawnPersisted?.effectiveThinkingLevel,
 			);
 			if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 			const forceSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
