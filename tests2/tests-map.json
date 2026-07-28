@@ -48,6 +48,15 @@
       }
     },
     {
+      "path": "tests2/core/tool-result-error-bridge-real-pi.test.ts",
+      "reason": "Real Pi 0.81 loadExtensions and ExtensionRunner regression proving the immutable tool_result hook bounds and scrubs a read_session registered in a separate extension before execution-end emission and agent-state persistence, preserves success/error status, and idempotently handles duplicate boundaries.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/dom/read-session-renderer.test.ts",
       "reason": "Focused DOM coverage proving ReadSessionRenderer parses canonical content JSON instead of duplicated details messages, resolves author dictionaries, renders bounded calls plus canonical result status/metrics/omission/excerpts/continuations, keeps legacy compact rows compatible, escapes output, and advances the direct REST modal using returned/nextOffset.",
       "execution": {

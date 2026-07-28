@@ -7,17 +7,20 @@ import { bobbitStateDir } from "../bobbit-dir.js";
 export const READ_SESSION_FINAL_RESULT_MAX_BYTES = 50 * 1024;
 
 /**
- * Generate the immutable Pi registration boundary used by Bobbit tools.
+ * Generate the immutable Pi result boundary used by Bobbit tools.
  *
- * Besides preserving returned error flags, the boundary wraps the actual
- * resolved read_session handler (including project/server overrides), recovers
- * its successful envelope, applies a strict semantic allowlist, and fits the
- * complete value Pi will emit and persist to 50 KiB.
+ * Pi gives every loaded extension its own registration API and private tool
+ * map, so registration wrapping alone cannot see a read_session contributed by
+ * another extension. The supported cross-extension tool_result hook therefore
+ * canonicalizes whichever resolved read_session wins, while the shared runner
+ * registry seam retains the legacy returned-error bridge across private maps.
  */
 export function generateToolResultErrorBridgeExtension(): string {
 	return `const READ_SESSION_FINAL_RESULT_MAX_BYTES = ${READ_SESSION_FINAL_RESULT_MAX_BYTES};
 const RESULT_EXCERPT_DEFAULT = 4096;
 const RESULT_EXCERPT_MAX = 8192;
+const READ_SESSION_RESULT_BOUNDARY_MARKER = Symbol.for("bobbit.read_session.result-boundary.v1");
+const SHARED_RUNNER_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-runner-boundary.v1");
 
 function isObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -745,12 +748,34 @@ function invocationParams(args) {
   return {};
 }
 
+function markReadSessionBoundaryResult(result) {
+  if (isObject(result) && isObject(result.details)) {
+    Object.defineProperty(result.details, READ_SESSION_RESULT_BOUNDARY_MARKER, { value: true });
+  }
+  return result;
+}
+
+function isReadSessionBoundaryResult(value) {
+  return isObject(value) && isObject(value.details)
+    && value.details[READ_SESSION_RESULT_BOUNDARY_MARKER] === true;
+}
+
+function boundReadSessionEvent(event) {
+  if (!isObject(event) || String(event.toolName || "").toLowerCase() !== "read_session"
+    || event.isError === true || isReadSessionBoundaryResult(event)) return undefined;
+  const source = {
+    content: Array.isArray(event.content) ? event.content : [],
+    ...(hasOwn(event, "details") ? { details: event.details } : {}),
+  };
+  return markReadSessionBoundaryResult(boundReadSessionResult(source, isObject(event.input) ? event.input : {}));
+}
+
 function wrapHandler(handler, toolName) {
   if (typeof handler !== "function" || handler.__bobbitErrorBridgeWrapped) return handler;
   async function bobbitToolResultErrorBridgeHandler(...args) {
     let result = await handler.apply(this, args);
     if (String(toolName || "").toLowerCase() === "read_session" && !isErroredToolResult(result)) {
-      result = boundReadSessionResult(result, invocationParams(args));
+      result = markReadSessionBoundaryResult(boundReadSessionResult(result, invocationParams(args)));
     }
     if (isErroredToolResult(result)) {
       const err = new Error(messageFromToolResult(result));
@@ -796,9 +821,37 @@ function wrapRegistrationArgs(args) {
   return next;
 }
 
+async function installSharedRunnerBoundary() {
+  try {
+    const imported = await import("@earendil-works/pi-coding-agent");
+    const prototype = imported && imported.ExtensionRunner && imported.ExtensionRunner.prototype;
+    if (!prototype || prototype[SHARED_RUNNER_BOUNDARY_MARKER] === true
+      || typeof prototype.getAllRegisteredTools !== "function") return;
+    const original = prototype.getAllRegisteredTools;
+    prototype.getAllRegisteredTools = function bobbitBoundRegisteredTools(...args) {
+      const registered = original.apply(this, args);
+      if (!Array.isArray(registered)) return registered;
+      return registered.map((tool) => {
+        if (!isObject(tool) || !isObject(tool.definition)) return tool;
+        const definition = tool.definition;
+        const execute = wrapHandler(definition.execute, definition.name);
+        if (execute === definition.execute) return tool;
+        return { ...tool, definition: { ...definition, execute } };
+      });
+    };
+    Object.defineProperty(prototype, SHARED_RUNNER_BOUNDARY_MARKER, { value: true });
+  } catch {
+    // The supported tool_result hook still enforces the read_session boundary.
+  }
+}
+
 export default function(pi) {
   if (!pi || pi.__bobbitToolResultErrorBridgeInstalled) return;
   Object.defineProperty(pi, "__bobbitToolResultErrorBridgeInstalled", { value: true });
+
+  if (typeof pi.on === "function") {
+    pi.on("tool_result", (event) => boundReadSessionEvent(event));
+  }
 
   if (typeof pi.tool === "function") {
     const originalTool = pi.tool.bind(pi);
@@ -814,6 +867,8 @@ export default function(pi) {
     const originalToolsRegister = pi.tools.register.bind(pi.tools);
     pi.tools.register = (...args) => originalToolsRegister(...wrapRegistrationArgs(args));
   }
+
+  return installSharedRunnerBoundary();
 }
 `;
 }
@@ -863,7 +918,7 @@ export function resetToolResultErrorBridgeExtensionCache(): void {
 }
 
 /**
- * Prepend the immutable registration boundary before resolved tool extensions.
+ * Prepend the immutable result boundary before resolved tool extensions.
  * When read_session is part of the runtime surface, failure to materialize the
  * boundary is fatal rather than silently starting an unsafe agent process.
  */
