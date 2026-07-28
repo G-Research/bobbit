@@ -248,6 +248,51 @@ describe("read_session extension context-heavy guard", () => {
 		assert.equal(JSON.stringify(result.details).includes("toolResults"), false);
 	});
 
+	it("refits a completed negative context tail from its resolved expanded position", async () => {
+		const escapedText = "\\\"\n".repeat(4_096).slice(0, 4_096);
+		const argumentPreview = escapedText.slice(0, 512);
+		responseBody = {
+			total: 10,
+			matchCount: 2,
+			pageStart: 4,
+			pageCount: 6,
+			returned: 2,
+			offsetStart: 8,
+			offsetEnd: 9,
+			messages: [8, 9].map((index) => ({
+				index,
+				role: "assistant",
+				text: escapedText,
+				toolCalls: Array.from({ length: 12 }, (_, callIndex) => ({
+					ref: `t${index}-${callIndex}`,
+					name: "bash",
+					argumentsPreview: argumentPreview,
+					argumentsTruncated: true,
+				})),
+			})),
+		};
+
+		const result = await execute("toolu_READ", {
+			session_id: "target-session",
+			pattern: "needle",
+			context: 1,
+			offset: -2,
+			limit: 2,
+			verbose: true,
+		});
+
+		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= 50 * 1024);
+		const projected = JSON.parse(result.content[0].text);
+		assert.equal(projected.partial, true);
+		assert.equal(projected.truncatedBy, "transport_budget");
+		assert.equal(projected.pageStart, 4);
+		assert.equal(projected.pageCount, 6);
+		assert.equal(projected.returned, 1);
+		assert.deepEqual(projected.messages.map((message: any) => message.index), [8]);
+		assert.equal(projected.nextOffset, 5);
+		assert.deepEqual(projected.continuationRequest, { kind: "page", offset: 5 });
+	});
+
 	it("preserves structured gateway errors for result slices", async () => {
 		responseOk = false;
 		responseStatus = 400;

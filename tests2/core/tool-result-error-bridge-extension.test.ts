@@ -175,21 +175,30 @@ describe("tool result error bridge extension", () => {
 		});
 	});
 
-	it("continues a fitted negative regex tail from its exact filtered position", async () => {
+	it("continues a fitted negative regex tail from its exact expanded position", async () => {
 		const activate = await loadGeneratedExtension();
 		const { pi, handlers } = makePi();
 		activate(pi);
-		const filteredExpandedIndexes = Array.from({ length: 10 }, (_, index) => index);
-		const expandedTailIndexes = filteredExpandedIndexes.slice(-4);
-		const escapedText = "\\\"\n".repeat(2_048);
+		const filteredExpandedIndexes = [1, 2, 3, 7, 8, 9];
+		const expandedTailIndexes = filteredExpandedIndexes.slice(-2);
+		const escapedText = "\\\"\n".repeat(4_096).slice(0, 4_096);
+		const argumentPreview = escapedText.slice(0, 512);
 		const messages = expandedTailIndexes.map((index) => ({
 			index,
 			role: "assistant",
 			text: escapedText,
+			toolCalls: Array.from({ length: 12 }, (_, callIndex) => ({
+				ref: `t${index}-${callIndex}`,
+				name: "bash",
+				argumentsPreview: argumentPreview,
+				argumentsTruncated: true,
+			})),
 		}));
 		const envelope = {
 			total: 10,
-			matchCount: 10,
+			matchCount: 2,
+			pageStart: 4,
+			pageCount: filteredExpandedIndexes.length,
 			returned: messages.length,
 			offsetStart: messages[0].index,
 			offsetEnd: messages[messages.length - 1].index,
@@ -201,24 +210,65 @@ describe("tool result error bridge extension", () => {
 			session_id: "target",
 			pattern: "needle",
 			context: 1,
-			offset: -4,
-			limit: 4,
+			offset: -2,
+			limit: 2,
 			verbose: true,
 		});
 		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= 50 * 1024);
 		const projected = JSON.parse(result.content[0].text);
 		assert.equal(projected.partial, true, "double encoding must force a page partial");
 		assert.equal(projected.truncatedBy, "transport_budget");
-		assert.equal(projected.returned, 3,
+		assert.equal(projected.pageStart, 4);
+		assert.equal(projected.pageCount, 6);
+		assert.equal(projected.returned, 1,
 			"the final fitter must retain the exact fitting prefix of the selected tail");
-		assert.deepEqual(projected.messages.map((message: any) => message.index), [6, 7, 8]);
-		const selectedStart = envelope.matchCount - 4;
-		const firstOmittedPosition = selectedStart + projected.returned;
-		assert.equal(firstOmittedPosition, 9);
+		assert.deepEqual(projected.messages.map((message: any) => message.index), [8]);
+		const firstOmittedPosition = envelope.pageStart + projected.returned;
+		assert.equal(firstOmittedPosition, 5);
 		assert.equal(filteredExpandedIndexes[firstOmittedPosition], 9,
 			"the continued position must be the first omitted context-expanded row");
-		assert.equal(projected.nextOffset, 9);
-		assert.deepEqual(projected.continuationRequest, { kind: "page", offset: 9 });
+		assert.equal(projected.nextOffset, 5);
+		assert.deepEqual(projected.continuationRequest, { kind: "page", offset: 5 });
+	});
+
+	it("preserves an already-fitted expanded continuation while stripping wrapper excess", async () => {
+		const activate = await loadGeneratedExtension();
+		const { pi, handlers } = makePi();
+		activate(pi);
+		const envelope = {
+			total: 10,
+			matchCount: 2,
+			pageStart: 4,
+			pageCount: 6,
+			returned: 1,
+			offsetStart: 8,
+			offsetEnd: 8,
+			nextOffset: 5,
+			messages: [{ index: 8, role: "assistant", text: "retained" }],
+			partial: true,
+			truncatedBy: "transport_budget",
+			continuationRequest: { kind: "page", offset: 5 },
+		};
+		const excess = "wrapper-only".repeat(10_000);
+		pi.tool({ name: "read_session" }, async () => ({
+			content: [{ type: "text", text: JSON.stringify(envelope) }, { type: "text", text: excess }],
+			details: { session_id: "target", extra: excess },
+		}));
+
+		const result = await handlers.get("read_session")!({
+			session_id: "target",
+			pattern: "needle",
+			context: 1,
+			offset: -2,
+			limit: 2,
+		});
+		assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= 50 * 1024);
+		assert.equal(JSON.stringify(result).includes("wrapper-only"), false);
+		const projected = JSON.parse(result.content[0].text);
+		assert.equal(projected.pageStart, 4);
+		assert.equal(projected.pageCount, 6);
+		assert.equal(projected.nextOffset, 5);
+		assert.deepEqual(projected.continuationRequest, { kind: "page", offset: 5 });
 	});
 
 	it("uses a sub-1KiB structured fallback for unknown successful wrappers", async () => {

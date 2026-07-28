@@ -341,7 +341,16 @@ function isCanonicalReadSessionEnvelope(value: unknown): value is ReadSessionRec
 	if (value.messages.some((message: unknown) => !isReadSessionRecord(message)
 		|| !isNonNegativeInteger(message.index) || !isWellFormedString(message.role))) return false;
 	if (hasReadSessionKey(value, "matchCount") && !isNonNegativeInteger(value.matchCount)) return false;
+	const hasPageStart = hasReadSessionKey(value, "pageStart");
+	const hasPageCount = hasReadSessionKey(value, "pageCount");
+	if (hasPageStart !== hasPageCount) return false;
+	if (hasPageStart && (!isNonNegativeInteger(value.pageStart)
+		|| !isNonNegativeInteger(value.pageCount)
+		|| value.pageStart > value.pageCount
+		|| value.returned > value.pageCount - value.pageStart)) return false;
 	if (hasReadSessionKey(value, "nextOffset") && value.nextOffset !== null && !isSafeInteger(value.nextOffset)) return false;
+	if (hasPageStart && isSafeInteger(value.nextOffset)
+		&& value.nextOffset !== value.pageStart + value.returned) return false;
 
 	if (value.partial === undefined || value.partial === false) {
 		return !hasReadSessionKey(value, "truncatedBy")
@@ -372,6 +381,7 @@ function isCanonicalReadSessionEnvelope(value: unknown): value is ReadSessionRec
 		&& value.total === 0 && value.returned === 0
 		&& value.offsetStart === -1 && value.offsetEnd === -1
 		&& value.messages.length === 0
+		&& !hasReadSessionKey(value, "pageStart") && !hasReadSessionKey(value, "pageCount")
 		&& validRetryContinuation(value.continuationRequest)
 		&& isReadSessionRecord(value.wrapperDiagnostics)
 		&& value.wrapperDiagnostics.omitted === true
@@ -573,6 +583,10 @@ function commonReadSessionEnvelope(
 		messages,
 	};
 	if (isNonNegativeInteger(source.matchCount)) envelope.matchCount = source.matchCount;
+	if (isNonNegativeInteger(source.pageStart) && isNonNegativeInteger(source.pageCount)) {
+		envelope.pageStart = source.pageStart;
+		envelope.pageCount = source.pageCount;
+	}
 	rebuildReadSessionDictionaries(envelope, projection);
 	return envelope;
 }
@@ -636,11 +650,11 @@ function preserveReadSessionCompletion(
 }
 
 function resolvedReadSessionPageStart(source: ReadSessionRecord, params: ReadSessionParams): number {
+	if (isNonNegativeInteger(source.pageStart)) return source.pageStart;
 	if (isSafeInteger(source.nextOffset)) return Math.max(0, source.nextOffset - source.returned);
 	if (isSafeInteger(params.offset)) {
 		if (params.offset >= 0) return params.offset;
 		if (typeof params.pattern !== "string" || params.pattern.length === 0) return Math.max(0, source.total + params.offset);
-		if (source.returned < -params.offset) return 0;
 	}
 	return 0;
 }

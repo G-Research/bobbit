@@ -532,6 +532,35 @@ describe("transcript-reader / readTranscript", () => {
 	});
 });
 
+describe("transcript-reader / agent filtered pagination metadata", () => {
+	it("records the resolved position and count of a completed negative context tail", async () => {
+		const text = Array.from({ length: 10 }, (_, index) => ({
+			type: "message",
+			message: {
+				role: index % 2 === 0 ? "assistant" : "user",
+				content: index === 2 || index === 8 ? `needle at ${index}` : `row ${index}`,
+			},
+		})).map((entry) => JSON.stringify(entry)).join("\n") + "\n";
+
+		const envelope = await readTranscript({
+			pattern: "needle",
+			context: 1,
+			offset: -2,
+			limit: 2,
+		}, {
+			...memoryTranscript(text),
+			projection: "agent",
+			sessionId: "filtered-tail",
+		});
+
+		assert.equal(envelope.matchCount, 2);
+		assert.equal(envelope.pageStart, 4);
+		assert.equal(envelope.pageCount, 6);
+		assert.deepEqual(envelope.messages.map((message) => message.index), [8, 9]);
+		assert.equal(envelope.nextOffset, undefined);
+	});
+});
+
 describe("transcript-reader / agent timestamp budgets", () => {
 	const safeTimestampPrefix = "x".repeat(63);
 	const oversizedTimestamp = safeTimestampPrefix + "😀" + "y".repeat(100 * 1024);
