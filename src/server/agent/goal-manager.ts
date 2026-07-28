@@ -16,6 +16,10 @@ import { cleanupGateDiagnosticsForGoal } from "./gate-diagnostics-cleanup.js";
 import { resolveSetupTimeoutMs } from "../skills/worktree-setup.js";
 import { resolveGoalMetadata, type GoalMetadata } from "./goal-metadata.js";
 import { assertSystemsReviewGoalWriteAllowed } from "./systems-review-lease.js";
+import {
+	FINAL_MUTATION_TARGET_ACTIONS,
+	runWithFinalMutationTargetAction,
+} from "./systems-review-target-evidence.js";
 import { realClock, realCommandRunner, type Clock, type CommandRunner } from "../gateway-deps.js";
 import { isHeadquartersProject } from "./project-registry.js";
 
@@ -864,12 +868,21 @@ export class GoalManager {
 
 			const repos: Record<string, MergeChildResult> = {};
 			for (const repo of matchingRepos) {
-				repos[repo] = await mergeChildBranchLocal(
-					parent.branch,
-					child.branch,
-					parentRepoWorktrees[repo],
-					this.commandRunner,
-					this.remotePolicy,
+				const parentRepoWorktree = parentRepoWorktrees[repo];
+				repos[repo] = await runWithFinalMutationTargetAction(
+					FINAL_MUTATION_TARGET_ACTIONS.mergeChildGoal,
+					{
+						resolvedTarget: fs.realpathSync.native(parentRepoWorktree),
+						resolvedScope: `branch:${parent.branch}`,
+					},
+					() => mergeChildBranchLocal(
+						parent.branch!,
+						child.branch!,
+						parentRepoWorktree,
+						this.commandRunner,
+						this.remotePolicy,
+					),
+					result => result.merged || result.alreadyMerged,
 				);
 			}
 			const results = Object.values(repos);
@@ -892,7 +905,15 @@ export class GoalManager {
 			throw err;
 		}
 
-		return mergeChildBranchLocal(parent.branch, child.branch, parent.worktreePath, this.commandRunner, this.remotePolicy);
+		return runWithFinalMutationTargetAction(
+			FINAL_MUTATION_TARGET_ACTIONS.mergeChildGoal,
+			{
+				resolvedTarget: fs.realpathSync.native(parent.worktreePath),
+				resolvedScope: `branch:${parent.branch}`,
+			},
+			() => mergeChildBranchLocal(parent.branch!, child.branch!, parent.worktreePath!, this.commandRunner, this.remotePolicy),
+			result => result.merged || result.alreadyMerged,
+		);
 	}
 
 	/**

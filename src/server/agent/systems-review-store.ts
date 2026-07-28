@@ -287,6 +287,7 @@ export class SystemsReviewExecutionStore {
 			|| assertion.baseOid !== repo.mergeBaseOid
 			|| assertion.headOid !== repo.headOid
 			|| assertion.effectOutcome !== "succeeded"
+			|| !(coverage.requiredTargetActionIds ?? []).includes(assertion.actionId)
 			|| assertion.adapterIds.length === 0
 			|| assertion.adapterIds.some(adapterId => !(coverage.requiredTargetAdapterIds ?? []).includes(adapterId))
 		) {
@@ -321,7 +322,7 @@ export class SystemsReviewExecutionStore {
 		if (
 			assertion.baseOid !== expected.baseOid
 			|| assertion.headOid !== expected.headOid
-			|| assertion.actionId !== expected.actionId
+			|| (expected.actionId !== undefined && assertion.actionId !== expected.actionId)
 			|| assertion.coverageItemId !== expected.coverageItemId
 			|| assertion.effectOutcome !== "succeeded"
 		) return false;

@@ -179,14 +179,8 @@ import {
 import type { SystemsReviewReadRequest, SystemsReviewResultSubmission } from "./systems-review-types.js";
 import {
 	FINAL_MUTATION_TARGET_CORRELATION_ENV,
-	FinalMutationTargetAssertionRegistry,
-	FinalMutationTargetEvidenceBroker,
-	assertCapturedFinalMutationTarget,
-	createFinalMutationTargetEvidenceCapability,
-	mintFinalMutationTargetCrossProcessToken,
-	runWithFinalMutationTargetCrossProcessToken,
-	runWithFinalMutationTargetEvidenceCapability,
-	type FinalMutationTargetAssertionEvidence,
+	FinalMutationTargetCommandEvidenceBroker,
+	type FinalMutationTargetCommandCapability,
 } from "./systems-review-target-evidence.js";
 import {
 	SystemsReviewWriterLeaseCoordinator,
@@ -437,23 +431,6 @@ type SystemsReviewRuntimeContext = {
 	executionId?: string;
 };
 
-export interface RegisteredSystemsReviewTargetTestInput {
-	executionId: string;
-	componentName: string;
-	commandName: string;
-	actionId: string;
-	coverageItemId: string;
-	expectedTarget: string;
-	expectedScope: string;
-}
-
-export interface RegisteredSystemsReviewTargetTestResult {
-	assertionId: string;
-	stdout: string;
-	stderr: string;
-	evidence: FinalMutationTargetAssertionEvidence;
-}
-
 function execOutputToString(value: unknown): string {
 	if (Buffer.isBuffer(value)) return value.toString("utf8");
 	return typeof value === "string" ? value : "";
@@ -477,6 +454,13 @@ function lsRemoteOutputHasHead(stdout: unknown, branch: string): boolean {
 	return execOutputToString(stdout)
 		.split(/\r?\n/)
 		.some(line => line.trimEnd().endsWith(`\t${headRef}`));
+}
+
+function registeredTargetTestKind(commandName: string | undefined): "integration" | "browser" | undefined {
+	if (!commandName) return undefined;
+	if (/^(?:browser|playwright|test[-_:]?(?:browser|playwright))$/iu.test(commandName)) return "browser";
+	if (/^(?:integration|e2e|test[-_:]?(?:integration|e2e))$/iu.test(commandName)) return "integration";
+	return undefined;
 }
 
 /**
@@ -1444,8 +1428,7 @@ export class VerificationHarness {
 	private readonly systemsReviewStore: SystemsReviewExecutionStore;
 	private readonly systemsReviewExecutionBySession = new Map<string, string>();
 	private readonly systemsReviewCurrentSessionByExecution = new Map<string, string>();
-	private readonly systemsReviewEvidenceBroker: FinalMutationTargetEvidenceBroker;
-	private readonly systemsReviewAssertionRegistry: FinalMutationTargetAssertionRegistry;
+	private readonly systemsReviewCommandEvidenceBroker: FinalMutationTargetCommandEvidenceBroker;
 	private readonly systemsReviewWriterLeases: SystemsReviewWriterLeaseCoordinator;
 	private readonly systemsReviewLeaseByExecution = new Map<string, SystemsReviewWriterLease>();
 
@@ -1511,111 +1494,9 @@ export class VerificationHarness {
 		this.systemsReviewWriterLeases.assertWriteAllowed(goalId, ownerToken);
 	}
 
-	/**
-	 * Execute an actual project-registered integration/browser command under a
-	 * one-shot signed target-evidence correlation. The caller cannot substitute an
-	 * arbitrary callback or claim a test path: command/test identity, cwd, commits,
-	 * coverage, adapter class, and process outcome are server-derived.
-	 */
-	async runRegisteredSystemsReviewTargetTest(
-		input: RegisteredSystemsReviewTargetTestInput,
-	): Promise<RegisteredSystemsReviewTargetTestResult> {
-		const execution = this.systemsReviewStore.get(input.executionId);
-		if (!execution || execution.status !== "running" || execution.final) {
-			throw new SystemsReviewExecutionStoreError("EXECUTION_CLOSED", "Target evidence requires a running Systems review execution.", 410);
-		}
-		this.ensureSystemsReviewLease(execution).assertCurrent();
-		const coverageItem = execution.snapshot.coverage.find(item => item.id === input.coverageItemId);
-		const repo = coverageItem && execution.snapshot.repos.find(candidate => candidate.id === coverageItem.repoId);
-		if (!coverageItem || !repo) throw new SystemsReviewExecutionStoreError("UNKNOWN_COVERAGE_ITEM", "Target evidence names an unknown snapshot coverage item.", 400);
-		if (!coverageItem.requiresExactTargetEvidence) {
-			throw new SystemsReviewExecutionStoreError("TARGET_EVIDENCE_NOT_REQUIRED", "Coverage item is not eligible for exact-target evidence.", 400);
-		}
-		if (execution.targetAssertions.some(assertion => assertion.coverageItemId === coverageItem.id)) {
-			throw new SystemsReviewExecutionStoreError("TARGET_ASSERTION_COVERAGE_CONFLICT", "Coverage item already has immutable exact-target evidence.", 409);
-		}
-		const requiredAdapterIds = coverageItem.requiredTargetAdapterIds ?? [];
-		if (requiredAdapterIds.length === 0) {
-			throw new SystemsReviewExecutionStoreError("FINAL_ADAPTER_UNAVAILABLE", "The changed action has no registered final adapter and therefore fails closed.", 400);
-		}
-		const components = this.resolveProjectConfigStore(execution.goalId)?.getComponents() ?? [];
-		const component = components.find(candidate => candidate.name === input.componentName);
-		const registeredCommand = component?.commands?.[input.commandName];
-		if (!component || !registeredCommand) throw new SystemsReviewExecutionStoreError("UNREGISTERED_TEST_COMMAND", "Target evidence must run through a configured component command.", 400);
-		if (!repo.components.includes(component.name)) {
-			throw new SystemsReviewExecutionStoreError("COMMAND_COVERAGE_MISMATCH", "Registered command component does not own the covered repository.", 400);
-		}
-		const browserCommand = /^(?:browser|playwright|test[-_:]?(?:browser|playwright))$/iu.test(input.commandName);
-		const integrationCommand = /^(?:integration|e2e|test[-_:]?(?:integration|e2e))$/iu.test(input.commandName);
-		if (!browserCommand && !integrationCommand) {
-			throw new SystemsReviewExecutionStoreError("UNIT_TARGET_EVIDENCE_FORBIDDEN", "Only registered integration or browser commands can prove final mutation targets.", 400);
-		}
-		const testKind = browserCommand ? "browser" as const : "integration" as const;
-		const commandHash = createHash("sha256").update(registeredCommand).digest("hex");
-		const commandId = `${component.name}:${input.commandName}:${commandHash.slice(0, 16)}`;
-		const testId = `registered-command:${component.name}:${input.commandName}:${commandHash}`;
-		const componentCwd = fs.realpathSync.native(path.resolve(repo.root, component.relativePath ?? "."));
-		const relativeCwd = path.relative(repo.root, componentCwd);
-		if (relativeCwd.startsWith("..") || path.isAbsolute(relativeCwd)) {
-			throw new SystemsReviewExecutionStoreError("COMMAND_CWD_ESCAPE", "Registered command cwd escapes the immutable repository binding.", 400);
-		}
-		const capability = createFinalMutationTargetEvidenceCapability(this.systemsReviewEvidenceBroker, {
-			executionId: execution.id,
-			commandId,
-			testId,
-			testKind,
-			baseOid: repo.mergeBaseOid,
-			headOid: repo.headOid,
-			actionId: input.actionId,
-			coverageItemId: coverageItem.id,
-		});
-		const assertion = await runWithFinalMutationTargetEvidenceCapability(this.systemsReviewEvidenceBroker, capability, () => (
-			assertCapturedFinalMutationTarget({
-				actionId: input.actionId,
-				expectedTarget: input.expectedTarget,
-				expectedScope: input.expectedScope,
-				invoke: async () => {
-					const token = mintFinalMutationTargetCrossProcessToken();
-					if (!token) throw new Error("Target evidence correlation token was not created.");
-					const shell = getVerificationShell(registeredCommand);
-					return this.commandRunner.execFile(shell.shell, [...shell.args, registeredCommand], {
-						cwd: componentCwd,
-						env: { ...process.env, [FINAL_MUTATION_TARGET_CORRELATION_ENV]: token },
-						timeout: 15 * 60 * 1_000,
-						maxBuffer: 2 * 1024 * 1024,
-					});
-				},
-			})
-		));
-		const registered = this.systemsReviewAssertionRegistry.register(assertion, {
-			executionId: execution.id,
-			baseOid: repo.mergeBaseOid,
-			headOid: repo.headOid,
-			actionId: input.actionId,
-			coverageItemId: coverageItem.id,
-			requiredAdapterIds,
-		});
-		this.systemsReviewStore.registerTargetAssertion(execution.id, registered);
-		return {
-			assertionId: registered.assertionId,
-			stdout: execOutputToString(assertion.value.stdout),
-			stderr: execOutputToString(assertion.value.stderr),
-			evidence: registered.evidence,
-		};
-	}
-
-	/** Authenticated internal-route entrypoint; execution identity is session-bound. */
-	async runRegisteredSystemsReviewTargetTestForSession(
-		sessionId: string,
-		input: Omit<RegisteredSystemsReviewTargetTestInput, "executionId">,
-	): Promise<RegisteredSystemsReviewTargetTestResult> {
-		const execution = this.systemsExecutionForSession(sessionId);
-		return this.runRegisteredSystemsReviewTargetTest({ ...input, executionId: execution.id });
-	}
-
-	/** Run one inbound request under its signed cross-process correlation. */
+	/** Restore correlation issued only to a currently-running verification command. */
 	runWithSystemsReviewTargetCorrelation<T>(token: unknown, callback: () => T): T {
-		return runWithFinalMutationTargetCrossProcessToken(this.systemsReviewEvidenceBroker, token, callback);
+		return this.systemsReviewCommandEvidenceBroker.runWithCorrelation(token, callback);
 	}
 
 	private systemsExecutionForSession(sessionId: string): PersistedSystemsReviewExecution {
@@ -1702,21 +1583,19 @@ export class VerificationHarness {
 			}
 		}
 		const final = this.systemsReviewStore.finalize(submission, {
-			validateExactTargetAssertion: ({ assertionId, behavior, coverageItem }) => {
+			validateExactTargetAssertion: ({ assertionId, coverageItem }) => {
 				const repo = before.snapshot.repos.find(candidate => candidate.id === coverageItem.repoId);
 				if (!repo) return false;
 				return this.systemsReviewStore.validateTargetAssertion(before.id, assertionId, {
 					executionId: before.id,
 					baseOid: repo.mergeBaseOid,
 					headOid: repo.headOid,
-					actionId: behavior.id,
 					coverageItemId: coverageItem.id,
 					requiredAdapterIds: coverageItem.requiredTargetAdapterIds ?? [],
 				});
 			},
 		});
 		this.releaseSystemsReviewLease(before.id);
-		this.systemsReviewAssertionRegistry.discardExecution(before.id);
 		const resolver = this.pendingSystemsResults.get(sessionId);
 		resolver?.({ verdict: final.verdict === "pass", summary: final.report });
 		return {
@@ -2948,7 +2827,7 @@ export class VerificationHarness {
 			commandStepRunner?: VerificationCommandRunner;
 			clock?: Clock;
 			skipLlmReview?: boolean;
-			systemsReviewEvidenceBroker?: FinalMutationTargetEvidenceBroker;
+			systemsReviewCommandEvidenceBroker?: FinalMutationTargetCommandEvidenceBroker;
 			systemsReviewWriterLeases?: SystemsReviewWriterLeaseCoordinator;
 		} = {},
 	) {
@@ -2975,8 +2854,7 @@ export class VerificationHarness {
 		this._stateDir = stateDir;
 		this._persistPath = path.join(stateDir, "active-verifications.json");
 		this.systemsReviewStore = new SystemsReviewExecutionStore(stateDir, { now: () => this.clock.now() });
-		this.systemsReviewEvidenceBroker = deps.systemsReviewEvidenceBroker ?? new FinalMutationTargetEvidenceBroker({ now: () => this.clock.now() });
-		this.systemsReviewAssertionRegistry = new FinalMutationTargetAssertionRegistry(this.systemsReviewEvidenceBroker, undefined, () => this.clock.now());
+		this.systemsReviewCommandEvidenceBroker = deps.systemsReviewCommandEvidenceBroker ?? new FinalMutationTargetCommandEvidenceBroker({ now: () => this.clock.now() });
 		this.systemsReviewWriterLeases = deps.systemsReviewWriterLeases ?? systemsReviewWriterLeaseCoordinator;
 		this.projectContextManager = projectContextManager ?? null;
 		// Unified child-team scheduler — closures read `this.*` lazily at call
@@ -2995,14 +2873,16 @@ export class VerificationHarness {
 		for (const v of persisted) {
 			this.activeVerifications.set(v.signalId, v);
 			for (const step of v.steps) {
-				if (step.sessionId && step.systemsReviewExecutionId) {
-					this.systemsReviewExecutionBySession.set(step.sessionId, step.systemsReviewExecutionId);
-					this.systemsReviewCurrentSessionByExecution.set(step.systemsReviewExecutionId, step.sessionId);
-					const execution = this.systemsReviewStore.get(step.systemsReviewExecutionId);
-					if (execution && !execution.final && ["running", "timed-out", "interrupted"].includes(execution.status)) {
-						try { this.ensureSystemsReviewLease(execution); } catch (error) {
-							console.warn(`[verification] Could not restore Systems review writer lease ${execution.id}:`, error);
-						}
+				if (!step.systemsReviewExecutionId) continue;
+				const execution = this.systemsReviewStore.get(step.systemsReviewExecutionId);
+				const boundSessionId = step.sessionId ?? execution?.sessionId;
+				if (boundSessionId) {
+					this.systemsReviewExecutionBySession.set(boundSessionId, step.systemsReviewExecutionId);
+					this.systemsReviewCurrentSessionByExecution.set(step.systemsReviewExecutionId, boundSessionId);
+				}
+				if (execution && !execution.final && ["running", "timed-out", "interrupted"].includes(execution.status)) {
+					try { this.ensureSystemsReviewLease(execution); } catch (error) {
+						console.warn(`[verification] Could not restore Systems review writer lease ${execution.id}:`, error);
 					}
 				}
 			}
@@ -3759,11 +3639,15 @@ export class VerificationHarness {
 				signal.commitSha,
 				gateState?.verificationCacheInvalidatedAt,
 			);
-			// Systems output is bound to an immutable snapshot and frozen contract,
-			// not merely a step name + commit. Never reuse a historical specialist
-			// result through the generic verification cache.
+			// Systems output and its signed command evidence are bound to one immutable
+			// execution, not merely a commit. Never cache the reviewer or an applicable
+			// integration/browser command into a fresh execution: the latter must run
+			// so its production adapter captures are available before reviewer launch.
+			const hasSystemsReview = signal.gateId === "implementation"
+				&& steps.some(step => step.type === "llm-review" && step.role === "systems-reviewer");
 			for (const step of steps) {
 				if (step.type === "llm-review" && step.role === "systems-reviewer") cachedSteps.delete(step.name);
+				if (hasSystemsReview && step.type === "command" && registeredTargetTestKind(step.command)) cachedSteps.delete(step.name);
 			}
 			if (cachedSteps.size > 0) {
 				console.log(`[verification] Reusing ${cachedSteps.size} previously-passed step(s) for commit ${signal.commitSha.slice(0, 8)}: ${[...cachedSteps.keys()].join(", ")}`);
@@ -3948,6 +3832,45 @@ export class VerificationHarness {
 						}
 					}
 				}
+			}
+
+			// Bind the immutable execution before any integration/browser command can
+			// run. Command-phase evidence is therefore durable and reader-visible
+			// before the read-only reviewer session is launched.
+			let preparedSystemsExecutionId: string | undefined;
+			const systemsStepIndex = signal.gateId === "implementation"
+				? steps.findIndex(step => step.type === "llm-review" && step.role === "systems-reviewer")
+				: -1;
+			if (systemsStepIndex >= 0) {
+				const systemsStep = steps[systemsStepIndex];
+				const existingExecutionId = active.steps[systemsStepIndex]?.systemsReviewExecutionId;
+				const bootstrapSessionId = existingExecutionId
+					? (this.systemsReviewStore.get(existingExecutionId)?.sessionId ?? `systems-review-bootstrap-${signal.id}`)
+					: `systems-review-bootstrap-${signal.id}`;
+				const prepared = await this.prepareSystemsReviewExecution({
+					step: {
+						name: systemsStep.name,
+						prompt: systemsStep.prompt,
+						timeout: systemsStep.timeout,
+						role: systemsStep.role,
+						promptRef: systemsStep.promptRef,
+						promptId: systemsStep.promptId,
+						promptSha256: systemsStep.promptSha256,
+						resolvedPrompt: systemsStep.resolvedPrompt,
+					},
+					cwd,
+					goalId: signal.goalId,
+					sessionId: bootstrapSessionId,
+					context: {
+						signalId: signal.id,
+						gateId: signal.gateId,
+						stepIndex: systemsStepIndex,
+						baseBranch,
+						executionId: existingExecutionId,
+					},
+					publishReviewerSession: false,
+				});
+				preparedSystemsExecutionId = prepared.execution.id;
 			}
 
 			const MAX_ARTIFACT_SIZE = 10 * 1024 * 1024; // 10 MB
@@ -4180,8 +4103,35 @@ export class VerificationHarness {
 										console.log(`[verification] Step "${step.name}" waiting for semaphore slot...`);
 									}
 									await this.commandSemaphore.acquire();
+									const commandTimeoutSec = resolveCommandStepTimeoutSec(step);
+									const targetEvidence = preparedSystemsExecutionId && !expectFailure
+										? this.beginSystemsReviewCommandEvidence({
+											executionId: preparedSystemsExecutionId,
+											step,
+											command: cmd,
+											cwd: resolvedCwd,
+											timeoutSec: commandTimeoutSec,
+											signalId: signal.id,
+											stepIndex: index,
+										})
+										: undefined;
 									try {
-										result = await this.runCommandStep(cmd, commandCwd, resolveCommandStepTimeoutSec(step), expectFailure, streamCtx, errorPattern, commandContainerId);
+										result = await this.runCommandStep(
+											cmd,
+											commandCwd,
+											commandTimeoutSec,
+											expectFailure,
+											streamCtx,
+											errorPattern,
+											commandContainerId,
+											targetEvidence?.env,
+										);
+										if (targetEvidence) this.completeSystemsReviewCommandEvidence(preparedSystemsExecutionId!, targetEvidence.capability, result.passed);
+									} catch (error) {
+										if (targetEvidence) {
+											try { this.completeSystemsReviewCommandEvidence(preparedSystemsExecutionId!, targetEvidence.capability, false); } catch { /* already closed */ }
+										}
+										throw error;
 									} finally {
 										this.commandSemaphore.release();
 									}
@@ -4381,7 +4331,13 @@ export class VerificationHarness {
 										signal.content, signal.metadata,
 										goalSpec, allGateStates, signal.goalId, attemptSessionId,
 										gate,
-										{ signalId: signal.id, gateId: signal.gateId, stepIndex: index, baseBranch },
+										{
+											signalId: signal.id,
+											gateId: signal.gateId,
+											stepIndex: index,
+											baseBranch,
+											executionId: step.role === "systems-reviewer" ? preparedSystemsExecutionId : undefined,
+										},
 									);
 									if (step.role === "systems-reviewer") this.closeUnfinalizedSystemsReview(attemptSessionId, result);
 									if (result.status === "timeout") break;
@@ -4497,6 +4453,22 @@ export class VerificationHarness {
 				return;
 			}
 
+			if (preparedSystemsExecutionId && systemsStepIndex >= 0 && allResults[systemsStepIndex]?.skipped) {
+				const execution = this.systemsReviewStore.get(preparedSystemsExecutionId);
+				if (execution?.status === "running" && !execution.final) {
+					try {
+						this.systemsReviewStore.markFailed(
+							preparedSystemsExecutionId,
+							"failed",
+							"SYSTEMS_REVIEW_NOT_RUN",
+							"Systems review was not launched because an earlier verification phase failed.",
+						);
+					} finally {
+						this.releaseSystemsReviewLease(preparedSystemsExecutionId);
+					}
+				}
+			}
+
 			// Collect final results in YAML order
 			const results = allResults.map((r, i) => r ?? {
 				name: steps[i].name,
@@ -4532,6 +4504,14 @@ export class VerificationHarness {
 				this._persistActive();
 				return;
 			}
+			for (const step of active.steps) {
+				if (!step.systemsReviewExecutionId) continue;
+				const execution = this.systemsReviewStore.get(step.systemsReviewExecutionId);
+				if (execution?.status === "running" && !execution.final) {
+					try { this.systemsReviewStore.markFailed(execution.id, "failed", "SYSTEMS_REVIEW_GATE_ERROR", err?.message || String(err)); }
+					finally { this.releaseSystemsReviewLease(execution.id); }
+				}
+			}
 			const errorStep = { name: "Error", type: "command" as const, passed: false, status: "failed" as const, phase: 0, output: err.message, duration_ms: 0 };
 			this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, {
 				status: "failed",
@@ -4551,6 +4531,70 @@ export class VerificationHarness {
 			broadcastGateStatusChanged(this.broadcastFn, signal.goalId, signal.gateId, "failed");
 			this.notifyTeamLead(signal.goalId, signal.gateId, "failed", { steps: [errorStep], goalBranch });
 		}
+	}
+
+	private beginSystemsReviewCommandEvidence(args: {
+		executionId: string;
+		step: VerifyStep;
+		command: string;
+		cwd: string;
+		timeoutSec: number;
+		signalId: string;
+		stepIndex: number;
+	}): { capability: FinalMutationTargetCommandCapability; env: Record<string, string> } | undefined {
+		if (args.step.type !== "command" || !args.step.component || !args.step.command) return undefined;
+		const testKind = registeredTargetTestKind(args.step.command);
+		if (!testKind) return undefined;
+		const execution = this.systemsReviewStore.get(args.executionId);
+		if (!execution || execution.status !== "running" || execution.final) return undefined;
+		this.ensureSystemsReviewLease(execution).assertCurrent();
+		const component = this.resolveProjectConfigStore(execution.goalId)?.getComponents()
+			.find(candidate => candidate.name === args.step.component);
+		const registeredCommand = component?.commands?.[args.step.command];
+		if (!component || !registeredCommand) return undefined;
+		const coverage = execution.snapshot.coverage.flatMap(item => {
+			if (!item.requiresExactTargetEvidence || execution.targetAssertions.some(assertion => assertion.coverageItemId === item.id)) return [];
+			const repo = execution.snapshot.repos.find(candidate => candidate.id === item.repoId);
+			if (!repo || !repo.components.includes(component.name)) return [];
+			const relativeCwd = path.relative(repo.root, fs.realpathSync.native(args.cwd));
+			if (relativeCwd.startsWith("..") || path.isAbsolute(relativeCwd)) return [];
+			const requiredActionIds = item.requiredTargetActionIds ?? [];
+			const requiredAdapterIds = item.requiredTargetAdapterIds ?? [];
+			if (requiredActionIds.length === 0 || requiredAdapterIds.length === 0) return [];
+			return [{
+				coverageItemId: item.id,
+				baseOid: repo.mergeBaseOid,
+				headOid: repo.headOid,
+				requiredActionIds,
+				requiredAdapterIds,
+			}];
+		});
+		if (coverage.length === 0) return undefined;
+		const commandHash = createHash("sha256").update(args.command).digest("hex");
+		const commandId = `${args.signalId}:${args.stepIndex}:${component.name}:${args.step.command}:${commandHash.slice(0, 16)}`;
+		const testId = `registered-command:${component.name}:${args.step.command}:${commandHash}`;
+		const run = this.systemsReviewCommandEvidenceBroker.begin({
+			executionId: execution.id,
+			commandId,
+			testId,
+			testKind,
+			coverage,
+			ttlMs: Math.max(60_000, (args.timeoutSec + 30) * 1_000),
+		});
+		return {
+			capability: run.capability,
+			env: { [FINAL_MUTATION_TARGET_CORRELATION_ENV]: run.correlationToken },
+		};
+	}
+
+	private completeSystemsReviewCommandEvidence(
+		executionId: string,
+		capability: FinalMutationTargetCommandCapability,
+		commandPassed: boolean,
+	): void {
+		const assertions = this.systemsReviewCommandEvidenceBroker.complete(capability, commandPassed);
+		if (!commandPassed) return;
+		for (const assertion of assertions) this.systemsReviewStore.registerTargetAssertion(executionId, assertion);
 	}
 
 	private ensureSystemsReviewLease(execution: PersistedSystemsReviewExecution): SystemsReviewWriterLease {
@@ -4576,13 +4620,14 @@ export class VerificationHarness {
 		execution: PersistedSystemsReviewExecution,
 		sessionId: string,
 		context: SystemsReviewRuntimeContext,
+		publishReviewerSession = true,
 	): void {
 		this.systemsReviewExecutionBySession.set(sessionId, execution.id);
 		this.systemsReviewCurrentSessionByExecution.set(execution.id, sessionId);
 		const active = this.activeVerifications.get(context.signalId);
 		const activeStep = active?.steps[context.stepIndex];
 		if (!activeStep) return;
-		activeStep.sessionId = sessionId;
+		if (publishReviewerSession) activeStep.sessionId = sessionId;
 		activeStep.systemsReviewExecutionId = execution.id;
 		activeStep.systemsReviewSnapshotDigest = execution.snapshot.digest;
 		activeStep.systemsReviewContractId = execution.contractId;
@@ -4596,6 +4641,7 @@ export class VerificationHarness {
 		goalId: string;
 		sessionId: string;
 		context: SystemsReviewRuntimeContext;
+		publishReviewerSession?: boolean;
 	}): Promise<{ execution: PersistedSystemsReviewExecution; continuation: ReturnType<SystemsReviewExecutionStore["continuationIndex"]> }> {
 		if (args.context.gateId !== "implementation") {
 			throw new Error("The systems-reviewer role may only execute on the implementation gate.");
@@ -4627,7 +4673,7 @@ export class VerificationHarness {
 			if (execution.status !== "running" || execution.final) throw new Error(`Systems review execution cannot continue from state ${execution.status}.`);
 			this.ensureSystemsReviewLease(execution).assertCurrent();
 			execution = this.systemsReviewStore.bindContinuationSession(execution.id, args.sessionId);
-			this.persistSystemsReviewSessionBinding(execution, args.sessionId, args.context);
+			this.persistSystemsReviewSessionBinding(execution, args.sessionId, args.context, args.publishReviewerSession !== false);
 			return { execution, continuation: this.systemsReviewStore.continuationIndex(execution.id) };
 		}
 
@@ -4657,7 +4703,7 @@ export class VerificationHarness {
 				contractId,
 				contractDigest,
 			});
-			this.persistSystemsReviewSessionBinding(execution, args.sessionId, args.context);
+			this.persistSystemsReviewSessionBinding(execution, args.sessionId, args.context, args.publishReviewerSession !== false);
 			return { execution, continuation: this.systemsReviewStore.continuationIndex(execution.id) };
 		} catch (error) {
 			this.releaseSystemsReviewLease(executionId);
@@ -5919,6 +5965,7 @@ export class VerificationHarness {
 		streamCtx?: { goalId: string; gateId: string; signalId: string; stepIndex: number },
 		errorPattern?: string,
 		containerId?: string,
+		additionalEnv?: Record<string, string>,
 	): Promise<{ passed: boolean; output: string; diagnostics?: GateStepDiagnostics }> {
 		return new Promise((resolve) => {
 			const normalizedCwd = cwd.replace(/\\/g, "/");
@@ -6158,7 +6205,8 @@ export class VerificationHarness {
 						wrappedCmd = `echo $$ > ${killPidFile}; ${command}`;
 					}
 					const pidFileForKill = killPidFile;
-					tracked = spawnTracked("docker", ["exec", "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
+					const dockerEnvironment = Object.entries(additionalEnv ?? {}).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
+					tracked = spawnTracked("docker", ["exec", ...dockerEnvironment, "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
 						stdio: ["ignore", "pipe", "pipe"],
 						timeoutMs: timeoutSec * 1000,
 						env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
@@ -6187,6 +6235,7 @@ export class VerificationHarness {
 						shellBin, shellArgs, cmdToRun, command,
 						cwd: normalizedCwd,
 						stdio: ["ignore", "ignore", "ignore"],
+						env: additionalEnv ? { ...process.env, ...additionalEnv } : undefined,
 						timeoutMs: timeoutSec * 1000,
 						windowsHide: process.platform === "win32",
 						useDetached: true,
@@ -6197,6 +6246,7 @@ export class VerificationHarness {
 						shellBin, shellArgs, cmdToRun, command,
 						cwd: normalizedCwd,
 						stdio: ["ignore", "pipe", "pipe"],
+						env: additionalEnv ? { ...process.env, ...additionalEnv } : undefined,
 						timeoutMs: timeoutSec * 1000,
 						windowsHide: process.platform === "win32",
 						useDetached: false,

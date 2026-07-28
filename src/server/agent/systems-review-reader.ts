@@ -307,9 +307,11 @@ export class SystemsReviewDiffReader {
 	private readCoverage(cursor?: string, limit?: number): SystemsReviewReadPage<SystemsReviewCoverageReadRecord[]> {
 		const records: SystemsReviewCoverageReadRecord[] = this.snapshot.coverage.map(item => {
 			const requiredAdapters = new Set(item.requiredTargetAdapterIds ?? []);
+			const requiredActions = new Set(item.requiredTargetActionIds ?? []);
 			const eligibleTargetAssertions = this.targetAssertions
 				.filter(assertion => (
 					assertion.coverageItemId === item.id
+					&& requiredActions.has(assertion.actionId)
 					&& assertion.adapterIds.length > 0
 					&& assertion.adapterIds.every(adapterId => requiredAdapters.has(adapterId))
 				))

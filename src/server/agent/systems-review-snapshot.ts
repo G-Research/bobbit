@@ -64,6 +64,14 @@ const TARGET_ADAPTER_PATTERNS: ReadonlyArray<readonly [string, SystemsReviewTarg
 	["bobbit.remote.request", "remote-request", /(?:\b(?:fetch|axios\.(?:delete|patch|post|put)|https?\.request|remoteClient\.\w+)\s*\()/u],
 ];
 
+/**
+ * Closed production action markers. A final adapter alone is insufficient:
+ * the immutable patch must also name the high-level action which owns it.
+ */
+const TARGET_ACTION_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
+	["bobbit.goal.merge-child", /\bFINAL_MUTATION_TARGET_ACTIONS\.mergeChildGoal\b/u],
+];
+
 export class SystemsReviewSnapshotError extends Error {
 	readonly code: string;
 	readonly details?: Record<string, unknown>;
@@ -104,6 +112,7 @@ interface PatchInspection {
 	binary: boolean;
 	riskSignals: SystemsReviewRiskSignal[];
 	targetAdapterIds: string[];
+	targetActionIds: string[];
 	targetEffectKinds: SystemsReviewTargetEffectKind[];
 }
 
@@ -353,6 +362,7 @@ async function inspectPatch(repo: SystemsReviewRepoBinding, raw: RawChange, comm
 	let binary = false;
 	const signals = new Set<SystemsReviewRiskSignal>();
 	const targetAdapterIds = new Set<string>();
+	const targetActionIds = new Set<string>();
 	const targetEffectKinds = new Set<SystemsReviewTargetEffectKind>();
 	const change = { oldPath: raw.oldPath, newPath: raw.newPath };
 	await runSystemsReviewGit(repo.root, patchArgs(repo, change), commandRunner, chunk => {
@@ -366,6 +376,9 @@ async function inspectPatch(repo: SystemsReviewRepoBinding, raw: RawChange, comm
 			targetAdapterIds.add(adapterId);
 			targetEffectKinds.add(effectKind);
 		}
+		for (const [actionId, pattern] of TARGET_ACTION_PATTERNS) {
+			if (pattern.test(scan)) targetActionIds.add(actionId);
+		}
 		scanTail = scan.slice(-1024);
 	});
 	return {
@@ -374,6 +387,7 @@ async function inspectPatch(repo: SystemsReviewRepoBinding, raw: RawChange, comm
 		binary,
 		riskSignals: [...signals].sort(),
 		targetAdapterIds: [...targetAdapterIds].sort(),
+		targetActionIds: [...targetActionIds].sort(),
 		targetEffectKinds: [...targetEffectKinds].sort(),
 	};
 }
@@ -420,7 +434,9 @@ function coverageFor(change: SystemsReviewChange): SystemsReviewCoverageItem {
 	const requiresStateTrace = risks.has("aggregation") || risks.has("state") || risks.has("transport") || risks.has("persistence") || (change.pathClass === "config-schema" && (risks.has("transport") || risks.has("state")));
 	const requiresExactTargetEvidence = aggregateMutation;
 	const inferredAdapterIds = [...(change.targetAdapterIds ?? [])];
+	const inferredActionIds = [...(change.targetActionIds ?? [])];
 	const unambiguousAdapter = inferredAdapterIds.length === 1;
+	const unambiguousAction = inferredActionIds.length === 1;
 	const candidate = change.newPath ?? change.oldPath ?? "unknown";
 	return {
 		id: `coverage:${sha256(`${SYSTEMS_REVIEW_COVERAGE_VERSION}\0${change.id}`).slice(0, 32)}`,
@@ -437,6 +453,7 @@ function coverageFor(change: SystemsReviewChange): SystemsReviewCoverageItem {
 		// safely bind a single reviewer behavior/assertion. Leave it ineligible so
 		// finalization derives the blocking untested-target finding.
 		requiredTargetAdapterIds: requiresExactTargetEvidence && unambiguousAdapter ? inferredAdapterIds : [],
+		requiredTargetActionIds: requiresExactTargetEvidence && unambiguousAction ? inferredActionIds : [],
 		requiredTargetEffectKinds: requiresExactTargetEvidence && unambiguousAdapter ? [...(change.targetEffectKinds ?? [])] : [],
 	};
 }
@@ -601,6 +618,7 @@ export async function createSystemsReviewSnapshot(options: CreateSystemsReviewSn
 				pathClass,
 				riskSignals: patch.riskSignals,
 				targetAdapterIds: patch.targetAdapterIds,
+				targetActionIds: patch.targetActionIds,
 				targetEffectKinds: patch.targetEffectKinds,
 			});
 		}
@@ -631,12 +649,14 @@ export async function createSystemsReviewSnapshot(options: CreateSystemsReviewSn
 			components: Object.freeze([...change.components]),
 			riskSignals: Object.freeze([...change.riskSignals]),
 			targetAdapterIds: Object.freeze([...(change.targetAdapterIds ?? [])]),
+			targetActionIds: Object.freeze([...(change.targetActionIds ?? [])]),
 			targetEffectKinds: Object.freeze([...(change.targetEffectKinds ?? [])]),
 		}) as SystemsReviewChange),
 		coverage: coverage.map(item => Object.freeze({
 			...item,
 			riskSignals: Object.freeze([...item.riskSignals]),
 			requiredTargetAdapterIds: Object.freeze([...(item.requiredTargetAdapterIds ?? [])]),
+			requiredTargetActionIds: Object.freeze([...(item.requiredTargetActionIds ?? [])]),
 			requiredTargetEffectKinds: Object.freeze([...(item.requiredTargetEffectKinds ?? [])]),
 		}) as SystemsReviewCoverageItem),
 		chunks: chunks.map(chunk => Object.freeze({ ...chunk, parts: Object.freeze(chunk.parts.map(part => Object.freeze({ ...part }))), changeIds: Object.freeze([...chunk.changeIds]) }) as SystemsReviewEvidenceChunk),

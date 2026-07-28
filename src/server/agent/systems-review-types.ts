@@ -38,12 +38,14 @@ export type SystemsReviewTargetEffectKind =
 
 export interface SystemsReviewEligibleTargetAssertion {
 	assertionId: string;
+	/** Production-owned action identity; never supplied by a reviewer or test. */
 	actionId: string;
 	commandId: string;
 	testId: string;
 	testKind: "integration" | "browser";
 	baseOid: string;
 	headOid: string;
+	/** A literal target/scope for one effect, or an immutable set digest for aggregate effects. */
 	expectedTarget: string;
 	expectedScope: string;
 	effectOutcome: "succeeded";
@@ -83,6 +85,8 @@ export interface SystemsReviewChange {
 	riskSignals: SystemsReviewRiskSignal[];
 	/** Adapter identities inferred from the immutable semantic patch. */
 	targetAdapterIds?: string[];
+	/** Production action identities inferred from the immutable semantic patch. */
+	targetActionIds?: string[];
 	/** Final-effect kinds inferred from the immutable semantic patch. */
 	targetEffectKinds?: SystemsReviewTargetEffectKind[];
 }
@@ -100,6 +104,8 @@ export interface SystemsReviewCoverageItem {
 	requiresExactTargetEvidence: boolean;
 	/** Empty means no registered final adapter can prove this item (fail closed). */
 	requiredTargetAdapterIds?: string[];
+	/** Empty means the patch has no unambiguous production action provenance (fail closed). */
+	requiredTargetActionIds?: string[];
 	requiredTargetEffectKinds?: SystemsReviewTargetEffectKind[];
 }
 

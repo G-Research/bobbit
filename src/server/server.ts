@@ -16406,48 +16406,6 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/internal/systems-review/run-target-test
-	if (url.pathname === "/api/internal/systems-review/run-target-test" && req.method === "POST") {
-		const body = await readBody(req);
-		const secretHeader = Array.isArray(req.headers["x-bobbit-session-secret"])
-			? req.headers["x-bobbit-session-secret"][0]
-			: req.headers["x-bobbit-session-secret"];
-		const sessionId = sessionManager.sessionSecretStore.resolveSessionIdBySecret(secretHeader);
-		if (!sessionId) {
-			json({ error: "A valid X-Bobbit-Session-Secret is required", code: "SYSTEMS_REVIEW_SESSION_SECRET_REQUIRED" }, 403);
-			return;
-		}
-		if (typeof body?.sessionId === "string" && body.sessionId !== sessionId) {
-			json({ error: "Submission session does not match the authentic caller", code: "SYSTEMS_REVIEW_SESSION_MISMATCH" }, 403);
-			return;
-		}
-		const required = ["componentName", "commandName", "actionId", "coverageItemId", "expectedTarget", "expectedScope"] as const;
-		if (required.some(field => typeof body?.[field] !== "string" || body[field].length === 0)) {
-			json({ error: `Missing required string field: ${required.find(field => typeof body?.[field] !== "string" || body[field].length === 0)}` }, 400);
-			return;
-		}
-		try {
-			const result = await verificationHarness.runRegisteredSystemsReviewTargetTestForSession(sessionId, {
-				componentName: body.componentName,
-				commandName: body.commandName,
-				actionId: body.actionId,
-				coverageItemId: body.coverageItemId,
-				expectedTarget: body.expectedTarget,
-				expectedScope: body.expectedScope,
-			});
-			json({
-				assertionId: result.assertionId,
-				commandId: result.evidence.commandId,
-				testId: result.evidence.testId,
-				testKind: result.evidence.testKind,
-				effectOutcome: result.evidence.effectOutcome,
-			});
-		} catch (err: any) {
-			json({ error: err?.message || String(err), code: err?.code, details: err?.details }, Number.isInteger(err?.status) ? err.status : 400);
-		}
-		return;
-	}
-
 	// POST /api/internal/systems-review/result
 	if (url.pathname === "/api/internal/systems-review/result" && req.method === "POST") {
 		const body = await readBody(req);
