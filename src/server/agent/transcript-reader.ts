@@ -12,7 +12,7 @@
 
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { Worker } from "node:worker_threads";
+import { Worker, type WorkerOptions } from "node:worker_threads";
 import type { MessageAuthor } from "../../shared/message-author.js";
 import {
 	isToolResultOnlyMessage,
@@ -568,97 +568,510 @@ export function resolveOffset(offset: number, length: number): number {
 }
 
 const RE2_WASM_MODULE_PATH = createRequire(import.meta.url).resolve("re2-wasm");
+const SAFE_REGEX_PATTERN_MAX_UNITS = 4096;
+const SAFE_REGEX_CHUNK_UNITS = 32 * 1024;
+const SAFE_REGEX_MAX_ACTIVE_WORKERS = 2;
+const SAFE_REGEX_MAX_QUEUED_JOBS = 4;
+const SAFE_REGEX_MAX_QUEUED_CORPUS_UNITS = 32 * 1024 * 1024;
+const SAFE_REGEX_WALL_TIMEOUT_MS = 10_000;
+const SAFE_REGEX_RESOURCE_LIMITS = {
+	maxOldGenerationSizeMb: 64,
+	maxYoungGenerationSizeMb: 16,
+	stackSizeMb: 4,
+} as const;
 
 const SAFE_REGEX_WORKER_SOURCE = String.raw`
 const { parentPort, workerData } = require("node:worker_threads");
 const { RE2 } = require(workerData.modulePath);
 
 let matcher;
-try {
-	// RE2-WASM requires Unicode mode. It rejects unsupported constructs such
-	// as lookarounds and backreferences rather than falling back to RegExp.
-	matcher = new RE2(workerData.pattern, workerData.caseSensitive ? "u" : "iu");
-} catch (error) {
-	parentPort.postMessage({
-		kind: "invalid_regex",
-		message: error instanceof Error ? error.message : String(error),
-	});
+let segmentChunks;
+let segmentMessageIndex;
+
+function post(kind, extra = {}) {
+	parentPort.postMessage({ kind, ...extra });
 }
 
-if (matcher) {
+parentPort.on("message", (message) => {
 	try {
-		const matches = [];
-		for (let messageIndex = 0; messageIndex < workerData.segmentsByMessage.length; messageIndex++) {
-			const segments = workerData.segmentsByMessage[messageIndex];
-			for (const segment of segments) {
-				matcher.lastIndex = 0;
-				if (matcher.test(segment)) {
-					matches.push(messageIndex);
-					break;
+		switch (message && message.kind) {
+			case "init":
+				try {
+					// RE2-WASM requires Unicode mode and rejects lookarounds and
+					// backreferences rather than falling back to native RegExp.
+					matcher = new RE2(message.pattern, message.caseSensitive ? "u" : "iu");
+					post("ready");
+				} catch (error) {
+					post("invalid_regex", { message: error instanceof Error ? error.message : String(error) });
 				}
+				break;
+			case "segment_start":
+				if (!matcher || segmentChunks) throw new Error("invalid segment start");
+				segmentMessageIndex = message.messageIndex;
+				segmentChunks = [];
+				post("segment_started");
+				break;
+			case "segment_chunk":
+				if (!segmentChunks || typeof message.text !== "string") throw new Error("invalid segment chunk");
+				segmentChunks.push(message.text);
+				post("chunk_accepted");
+				break;
+			case "segment_end": {
+				if (!matcher || !segmentChunks) throw new Error("invalid segment end");
+				// Chunking is transport-only: reassemble the exact semantic segment
+				// before matching so anchors and repetitions cross chunk boundaries.
+				const segment = segmentChunks.join("");
+				segmentChunks = undefined;
+				matcher.lastIndex = 0;
+				const matched = matcher.test(segment);
+				post("segment_result", { messageIndex: segmentMessageIndex, matched });
+				segmentMessageIndex = undefined;
+				break;
 			}
+			case "finish":
+				if (segmentChunks) throw new Error("cannot finish an incomplete segment");
+				post("done");
+				break;
+			default:
+				throw new Error("unknown safe regex command");
 		}
-		parentPort.postMessage({ kind: "matches", matches });
 	} catch (error) {
-		parentPort.postMessage({
-			kind: "worker_error",
-			message: error instanceof Error ? error.message : String(error),
-		});
+		segmentChunks = undefined;
+		post("worker_error", { message: error instanceof Error ? error.message : String(error) });
 	}
-}
+});
 `;
 
-interface SafeRegexWorkerResult {
-	kind: "matches" | "invalid_regex" | "worker_error";
-	matches?: number[];
+interface SafeRegexWorkerMessage {
+	kind: "ready" | "segment_started" | "chunk_accepted" | "segment_result" | "done" | "invalid_regex" | "worker_error";
 	message?: string;
+	messageIndex?: number;
+	matched?: boolean;
+}
+
+export interface SafeRegexWorkerLike {
+	postMessage(value: unknown): void;
+	on(event: "message", listener: (value: unknown) => void): this;
+	on(event: "error", listener: (error: Error) => void): this;
+	on(event: "exit", listener: (code: number) => void): this;
+	off(event: "message", listener: (value: unknown) => void): this;
+	off(event: "error", listener: (error: Error) => void): this;
+	off(event: "exit", listener: (code: number) => void): this;
+	terminate(): Promise<number>;
+}
+
+export type SafeRegexWorkerFactory = (source: string, options: WorkerOptions) => SafeRegexWorkerLike;
+
+export interface SafeRegexClock {
+	now(): number;
+	setTimer(callback: () => void, delayMs: number): unknown;
+	clearTimer(handle: unknown): void;
+}
+
+interface SafeRegexSegmentSource {
+	messageCount: number;
+	/** Conservative UTF-16 corpus retention charged while this job is queued. */
+	retainedUnits: number;
+	segmentsForMessage(messageIndex: number): Iterable<string>;
+}
+
+interface SafeRegexPoolOptions {
+	maxActiveWorkers: number;
+	maxQueuedJobs: number;
+	maxQueuedCorpusUnits: number;
+	wallTimeoutMs: number;
+	chunkUnits: number;
+	resourceLimits: WorkerOptions["resourceLimits"];
+	workerFactory: SafeRegexWorkerFactory;
+	yieldToEventLoop: () => Promise<void>;
+	clock: SafeRegexClock;
+}
+
+export type TranscriptRegexSearchFailureCode =
+	| "REGEX_SEARCH_OVERLOADED"
+	| "REGEX_SEARCH_TIMEOUT"
+	| "REGEX_WORKER_FAILED"
+	| "REGEX_SEARCH_STOPPED";
+
+/** Stable internal failure codes keep worker isolation faults deterministic. */
+export class TranscriptRegexSearchError extends Error {
+	readonly code: TranscriptRegexSearchFailureCode;
+	constructor(code: TranscriptRegexSearchFailureCode, message: string) {
+		super(message);
+		this.code = code;
+	}
+}
+
+function defaultSafeRegexWorkerFactory(source: string, options: WorkerOptions): SafeRegexWorkerLike {
+	return new Worker(source, options) as SafeRegexWorkerLike;
+}
+
+function defaultYieldToEventLoop(): Promise<void> {
+	return new Promise((resolve) => setImmediate(resolve));
+}
+
+const DEFAULT_SAFE_REGEX_CLOCK: SafeRegexClock = {
+	now: () => Date.now(),
+	setTimer: (callback, delayMs) => {
+		const timer = setTimeout(callback, delayMs);
+		timer.unref?.();
+		return timer;
+	},
+	clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+
+function isSafeRegexWorkerMessage(value: unknown): value is SafeRegexWorkerMessage {
+	if (!value || typeof value !== "object") return false;
+	const kind = (value as Record<string, unknown>).kind;
+	return kind === "ready" || kind === "segment_started" || kind === "chunk_accepted"
+		|| kind === "segment_result" || kind === "done" || kind === "invalid_regex" || kind === "worker_error";
+}
+
+interface SafeRegexExecution {
+	promise: Promise<number[]>;
+	cancel(error: Error): void;
 }
 
 /**
- * Compile and execute caller-provided regexes outside the gateway event loop.
- * RE2-WASM guarantees linear-time matching; the worker isolates compilation
- * and scans of very large result bodies without a native RegExp fallback.
+ * Start one isolated scan. Only the module path is cloned by the Worker
+ * constructor. The parent sends one bounded chunk and waits for its ack before
+ * sending another; the worker releases each assembled segment after testing.
  */
-async function safeRegexMatchPositions(
+function startSafeRegexExecution(
+	source: SafeRegexSegmentSource,
 	pattern: string,
 	caseSensitive: boolean,
-	segmentsByMessage: string[][],
-): Promise<number[]> {
-	const worker = new Worker(SAFE_REGEX_WORKER_SOURCE, {
-		eval: true,
-		workerData: {
-			modulePath: RE2_WASM_MODULE_PATH,
-			pattern,
-			caseSensitive,
-			segmentsByMessage,
-		},
-	});
-	return await new Promise<number[]>((resolve, reject) => {
+	options: SafeRegexPoolOptions,
+	wallTimeoutMs: number,
+): SafeRegexExecution {
+	let cancel = (_error: Error): void => undefined;
+	const promise = new Promise<number[]>((resolve, reject) => {
+		let worker: SafeRegexWorkerLike;
+		try {
+			worker = options.workerFactory(SAFE_REGEX_WORKER_SOURCE, {
+				eval: true,
+				workerData: { modulePath: RE2_WASM_MODULE_PATH },
+				resourceLimits: options.resourceLimits,
+			});
+		} catch (error) {
+			reject(new TranscriptRegexSearchError(
+				"REGEX_WORKER_FAILED",
+				`safe regex worker could not start: ${error instanceof Error ? error.message : String(error)}`,
+			));
+			return;
+		}
+
 		let settled = false;
-		const settle = (callback: () => void): void => {
+		let awaiting: { resolve: (message: SafeRegexWorkerMessage) => void; reject: (error: Error) => void } | undefined;
+		const matches: number[] = [];
+		const timer = options.clock.setTimer(() => {
+			finish(new TranscriptRegexSearchError("REGEX_SEARCH_TIMEOUT", "safe regex search exceeded its wall timeout"));
+		}, Math.max(1, wallTimeoutMs));
+
+		const onMessage = (value: unknown): void => {
+			if (settled) return;
+			if (!isSafeRegexWorkerMessage(value)) {
+				finish(new TranscriptRegexSearchError("REGEX_WORKER_FAILED", "safe regex worker returned an invalid message"));
+				return;
+			}
+			const waiter = awaiting;
+			awaiting = undefined;
+			if (!waiter) {
+				finish(new TranscriptRegexSearchError("REGEX_WORKER_FAILED", "safe regex worker sent an unexpected message"));
+				return;
+			}
+			waiter.resolve(value);
+		};
+		const onError = (error: Error): void => {
+			finish(new TranscriptRegexSearchError("REGEX_WORKER_FAILED", `safe regex worker failed: ${error.message}`));
+		};
+		const onExit = (code: number): void => {
+			finish(new TranscriptRegexSearchError(
+				"REGEX_WORKER_FAILED",
+				`safe regex worker exited before completing (code ${code})`,
+			));
+		};
+
+		const removeListeners = (): void => {
+			worker.off("message", onMessage);
+			worker.off("error", onError);
+			worker.off("exit", onExit);
+		};
+
+		function finish(error?: Error): void {
 			if (settled) return;
 			settled = true;
-			callback();
-		};
-		worker.once("message", (result: SafeRegexWorkerResult) => {
-			settle(() => {
-				void worker.terminate();
-				if (result.kind === "invalid_regex") {
-					reject(new TranscriptReaderError("invalid_regex", result.message));
-					return;
+			options.clock.clearTimer(timer);
+			removeListeners();
+			if (awaiting) {
+				const waiter = awaiting;
+				awaiting = undefined;
+				waiter.reject(error ?? new TranscriptRegexSearchError("REGEX_SEARCH_STOPPED", "safe regex search stopped"));
+			}
+			let termination: Promise<number>;
+			try {
+				termination = Promise.resolve(worker.terminate());
+			} catch (terminationError) {
+				termination = Promise.reject(terminationError);
+			}
+			void termination.then(
+				() => error ? reject(error) : resolve(matches),
+				(terminationError) => reject(error ?? new TranscriptRegexSearchError(
+					"REGEX_WORKER_FAILED",
+					`safe regex worker termination failed: ${terminationError instanceof Error ? terminationError.message : String(terminationError)}`,
+				)),
+			);
+		}
+
+		cancel = (error: Error): void => finish(error);
+		worker.on("message", onMessage);
+		worker.on("error", onError);
+		worker.on("exit", onExit);
+
+		const exchange = (message: unknown): Promise<SafeRegexWorkerMessage> => {
+			if (settled) return Promise.reject(new TranscriptRegexSearchError("REGEX_SEARCH_STOPPED", "safe regex search stopped"));
+			if (awaiting) return Promise.reject(new TranscriptRegexSearchError("REGEX_WORKER_FAILED", "safe regex protocol overlapped requests"));
+			return new Promise<SafeRegexWorkerMessage>((exchangeResolve, exchangeReject) => {
+				awaiting = { resolve: exchangeResolve, reject: exchangeReject };
+				try {
+					worker.postMessage(message);
+				} catch (error) {
+					awaiting = undefined;
+					exchangeReject(new TranscriptRegexSearchError(
+						"REGEX_WORKER_FAILED",
+						`safe regex worker transfer failed: ${error instanceof Error ? error.message : String(error)}`,
+					));
 				}
-				if (result.kind === "worker_error" || !Array.isArray(result.matches)) {
-					reject(new Error(result.message ?? "safe regex worker returned an invalid result"));
-					return;
-				}
-				resolve(result.matches);
 			});
-		});
-		worker.once("error", (error) => settle(() => reject(error)));
-		worker.once("exit", (code) => {
-			if (code !== 0) settle(() => reject(new Error(`safe regex worker exited with code ${code}`)));
-		});
+		};
+		const expect = async (message: unknown, expectedKind: SafeRegexWorkerMessage["kind"]): Promise<SafeRegexWorkerMessage> => {
+			const response = await exchange(message);
+			if (response.kind === "invalid_regex") {
+				throw new TranscriptReaderError("invalid_regex", response.message);
+			}
+			if (response.kind === "worker_error") {
+				throw new TranscriptRegexSearchError("REGEX_WORKER_FAILED", response.message ?? "safe regex worker failed");
+			}
+			if (response.kind !== expectedKind) {
+				throw new TranscriptRegexSearchError(
+					"REGEX_WORKER_FAILED",
+					`safe regex worker protocol expected ${expectedKind}, received ${response.kind}`,
+				);
+			}
+			return response;
+		};
+
+		void (async () => {
+			try {
+				await expect({ kind: "init", pattern, caseSensitive }, "ready");
+				for (let messageIndex = 0; messageIndex < source.messageCount; messageIndex++) {
+					const segments = source.segmentsForMessage(messageIndex);
+					let messageMatched = false;
+					for (const segment of segments) {
+						await expect({ kind: "segment_start", messageIndex }, "segment_started");
+						for (let start = 0; start < segment.length; start += options.chunkUnits) {
+							const text = segment.slice(start, start + options.chunkUnits);
+							await expect({ kind: "segment_chunk", text }, "chunk_accepted");
+							// Yield after every bounded transfer. At most one chunk can be
+							// queued in the worker channel at any time.
+							await options.yieldToEventLoop();
+						}
+						const response = await expect({ kind: "segment_end" }, "segment_result");
+						if (response.messageIndex !== messageIndex || typeof response.matched !== "boolean") {
+							throw new TranscriptRegexSearchError("REGEX_WORKER_FAILED", "safe regex worker returned an invalid segment result");
+						}
+						if (response.matched) {
+							matches.push(messageIndex);
+							messageMatched = true;
+							break;
+						}
+					}
+					// Empty messages and many tiny segments must also cooperate.
+					if (!messageMatched) await options.yieldToEventLoop();
+				}
+				await expect({ kind: "finish" }, "done");
+				finish();
+			} catch (error) {
+				finish(error instanceof Error ? error : new Error(String(error)));
+			}
+		})();
 	});
+	return { promise, cancel: (error) => cancel(error) };
+}
+
+interface QueuedSafeRegexJob {
+	source: SafeRegexSegmentSource;
+	pattern: string;
+	caseSensitive: boolean;
+	deadline: number;
+	queueTimer?: unknown;
+	resolve(matches: number[]): void;
+	reject(error: Error): void;
+}
+
+class SafeRegexWorkerPool {
+	private activeWorkers = 0;
+	private queuedCorpusUnits = 0;
+	private readonly queue: QueuedSafeRegexJob[] = [];
+	private readonly active = new Set<{ cancel(error: Error): void }>();
+	private stopped = false;
+
+	constructor(private readonly options: SafeRegexPoolOptions) {}
+
+	match(source: SafeRegexSegmentSource, pattern: string, caseSensitive: boolean): Promise<number[]> {
+		if (this.stopped) {
+			return Promise.reject(new TranscriptRegexSearchError("REGEX_SEARCH_STOPPED", "safe regex worker pool is stopped"));
+		}
+		if (pattern.length > SAFE_REGEX_PATTERN_MAX_UNITS) {
+			return Promise.reject(new TranscriptReaderError(
+				"invalid_params",
+				`pattern must contain at most ${SAFE_REGEX_PATTERN_MAX_UNITS} UTF-16 units`,
+			));
+		}
+		if (this.activeWorkers >= this.options.maxActiveWorkers
+			&& (this.queue.length >= this.options.maxQueuedJobs
+				|| source.retainedUnits > this.options.maxQueuedCorpusUnits - this.queuedCorpusUnits)) {
+			return Promise.reject(new TranscriptRegexSearchError(
+				"REGEX_SEARCH_OVERLOADED",
+				"safe regex search capacity is exhausted",
+			));
+		}
+		return new Promise<number[]>((resolve, reject) => {
+			const job: QueuedSafeRegexJob = {
+				source,
+				pattern,
+				caseSensitive,
+				deadline: this.options.clock.now() + this.options.wallTimeoutMs,
+				resolve,
+				reject,
+			};
+			if (this.activeWorkers < this.options.maxActiveWorkers) {
+				this.start(job);
+				return;
+			}
+			this.queuedCorpusUnits += source.retainedUnits;
+			job.queueTimer = this.options.clock.setTimer(() => this.expireQueued(job), this.options.wallTimeoutMs);
+			this.queue.push(job);
+		});
+	}
+
+	stats(): { activeWorkers: number; queuedJobs: number; queuedCorpusUnits: number } {
+		return {
+			activeWorkers: this.activeWorkers,
+			queuedJobs: this.queue.length,
+			queuedCorpusUnits: this.queuedCorpusUnits,
+		};
+	}
+
+	stop(): void {
+		if (this.stopped) return;
+		this.stopped = true;
+		const error = new TranscriptRegexSearchError("REGEX_SEARCH_STOPPED", "safe regex worker pool stopped");
+		for (const job of this.queue.splice(0)) {
+			if (job.queueTimer !== undefined) this.options.clock.clearTimer(job.queueTimer);
+			job.reject(error);
+		}
+		this.queuedCorpusUnits = 0;
+		for (const execution of this.active) execution.cancel(error);
+	}
+
+	private expireQueued(job: QueuedSafeRegexJob): void {
+		const position = this.queue.indexOf(job);
+		if (position < 0) return;
+		this.queue.splice(position, 1);
+		this.queuedCorpusUnits -= job.source.retainedUnits;
+		job.reject(new TranscriptRegexSearchError("REGEX_SEARCH_TIMEOUT", "safe regex search timed out while queued"));
+	}
+
+	private start(job: QueuedSafeRegexJob): void {
+		if (job.queueTimer !== undefined) this.options.clock.clearTimer(job.queueTimer);
+		this.activeWorkers++;
+		const remaining = job.deadline - this.options.clock.now();
+		if (remaining <= 0) {
+			this.activeWorkers--;
+			job.reject(new TranscriptRegexSearchError("REGEX_SEARCH_TIMEOUT", "safe regex search exceeded its wall timeout"));
+			this.drain();
+			return;
+		}
+		const execution = startSafeRegexExecution(job.source, job.pattern, job.caseSensitive, this.options, remaining);
+		this.active.add(execution);
+		void (async () => {
+			try {
+				job.resolve(await execution.promise);
+			} catch (error) {
+				job.reject(error instanceof Error ? error : new Error(String(error)));
+			} finally {
+				this.active.delete(execution);
+				this.activeWorkers--;
+				this.drain();
+			}
+		})();
+	}
+
+	private drain(): void {
+		while (!this.stopped && this.activeWorkers < this.options.maxActiveWorkers && this.queue.length > 0) {
+			const job = this.queue.shift()!;
+			this.queuedCorpusUnits -= job.source.retainedUnits;
+			this.start(job);
+		}
+	}
+}
+
+function safeRegexPoolOptions(overrides: Partial<SafeRegexPoolOptions> = {}): SafeRegexPoolOptions {
+	return {
+		maxActiveWorkers: SAFE_REGEX_MAX_ACTIVE_WORKERS,
+		maxQueuedJobs: SAFE_REGEX_MAX_QUEUED_JOBS,
+		maxQueuedCorpusUnits: SAFE_REGEX_MAX_QUEUED_CORPUS_UNITS,
+		wallTimeoutMs: SAFE_REGEX_WALL_TIMEOUT_MS,
+		chunkUnits: SAFE_REGEX_CHUNK_UNITS,
+		resourceLimits: SAFE_REGEX_RESOURCE_LIMITS,
+		workerFactory: defaultSafeRegexWorkerFactory,
+		yieldToEventLoop: defaultYieldToEventLoop,
+		clock: DEFAULT_SAFE_REGEX_CLOCK,
+		...overrides,
+	};
+}
+
+/**
+ * readTranscript has no AbortSignal today. If its caller abandons a promise,
+ * the global concurrency/queue/resource caps and wall deadline still terminate
+ * the work and release its retained corpus without spawning replacement work.
+ */
+const SAFE_REGEX_POOL = new SafeRegexWorkerPool(safeRegexPoolOptions());
+
+/** Narrow deterministic seam for worker lifecycle and backpressure tests. */
+export interface TranscriptRegexPoolTestHarness {
+	search(segmentsByMessage: readonly (readonly string[])[], pattern: string, caseSensitive?: boolean, retainedUnits?: number): Promise<number[]>;
+	stats(): { activeWorkers: number; queuedJobs: number; queuedCorpusUnits: number };
+	stop(): void;
+}
+
+export interface TranscriptRegexPoolTestOptions {
+	maxActiveWorkers?: number;
+	maxQueuedJobs?: number;
+	maxQueuedCorpusUnits?: number;
+	wallTimeoutMs?: number;
+	chunkUnits?: number;
+	resourceLimits?: WorkerOptions["resourceLimits"];
+	workerFactory?: SafeRegexWorkerFactory;
+	yieldToEventLoop?: () => Promise<void>;
+	clock?: SafeRegexClock;
+}
+
+export function createTranscriptRegexPoolForTests(options: TranscriptRegexPoolTestOptions = {}): TranscriptRegexPoolTestHarness {
+	const pool = new SafeRegexWorkerPool(safeRegexPoolOptions(options));
+	return {
+		search: (segmentsByMessage, pattern, caseSensitive = false, retainedUnits) => pool.match({
+			messageCount: segmentsByMessage.length,
+			retainedUnits: retainedUnits ?? segmentsByMessage.reduce(
+				(total, segments) => total + segments.reduce((messageTotal, segment) => messageTotal + segment.length, 0),
+				0,
+			),
+			segmentsForMessage: (messageIndex) => segmentsByMessage[messageIndex] ?? [],
+		}, pattern, caseSensitive),
+		stats: () => pool.stats(),
+		stop: () => pool.stop(),
+	};
 }
 
 function expandMatchContext(matches: number[], messageCount: number, context: number): number[] {
@@ -673,16 +1086,20 @@ function expandMatchContext(matches: number[], messageCount: number, context: nu
 }
 
 async function matchMessageSegments(
-	segmentsByMessage: string[][],
+	source: SafeRegexSegmentSource,
 	pattern: string,
 	caseSensitive: boolean,
 	context: number,
 ): Promise<{ matchCount: number; expanded: number[] }> {
-	const matches = await safeRegexMatchPositions(pattern, caseSensitive, segmentsByMessage);
+	const matches = await SAFE_REGEX_POOL.match(source, pattern, caseSensitive);
 	return {
 		matchCount: matches.length,
-		expanded: expandMatchContext(matches, segmentsByMessage.length, context),
+		expanded: expandMatchContext(matches, source.messageCount, context),
 	};
+}
+
+function estimatedQueuedCorpusUnits(transcriptUnits: number, projectionCopies: number): number {
+	return Math.min(Number.MAX_SAFE_INTEGER, transcriptUnits * projectionCopies);
 }
 
 async function buildMatchList(
@@ -690,12 +1107,18 @@ async function buildMatchList(
 	pattern: string,
 	caseSensitive: boolean,
 	context: number,
+	transcriptUnits: number,
 ): Promise<{ matchCount: number; expanded: number[] }> {
-	return await matchMessageSegments(messages.map((message) => [
-		isMessageLevelToolResult(message)
-			? flattenText([messageLevelToolResultBlock(message)])
-			: flattenText(message.content),
-	]), pattern, caseSensitive, context);
+	return await matchMessageSegments({
+		messageCount: messages.length,
+		retainedUnits: estimatedQueuedCorpusUnits(transcriptUnits, 2),
+		segmentsForMessage: (messageIndex) => {
+			const message = messages[messageIndex];
+			return [isMessageLevelToolResult(message)
+				? flattenText([messageLevelToolResultBlock(message)])
+				: flattenText(message.content)];
+		},
+	}, pattern, caseSensitive, context);
 }
 
 // ── Author normalization ──
@@ -1067,7 +1490,6 @@ interface CanonicalTranscriptIndex {
 	callsByMessage: Map<number, CanonicalCall[]>;
 	resultsByMessage: Map<number, CanonicalResult[]>;
 	resultByLocation: Map<string, CanonicalResult>;
-	searchSegmentsByMessage: Map<number, string[]>;
 }
 
 function ownValidString(source: Record<string, unknown>, key: string): string | undefined {
@@ -1311,17 +1733,29 @@ function buildCanonicalTranscriptIndex(
 		}
 	}
 
-	const searchSegmentsByMessage = new Map<number, string[]>();
-	for (const message of messages) {
-		const segments = visibleTextSegments(message);
-		for (const call of callsByMessage.get(message.index) ?? []) {
-			segments.push(call.name);
-			if (call.argumentsPresent) segments.push(call.argumentsText);
+	return { callsByMessage, resultsByMessage, resultByLocation };
+}
+
+function* agentSearchSegments(message: RawMessage, index: CanonicalTranscriptIndex): Iterable<string> {
+	if (!isMessageLevelToolResult(message)) {
+		if (typeof message.content === "string") {
+			if (isWellFormedUnicode(message.content)) yield message.content;
+		} else if (Array.isArray(message.content)) {
+			for (const candidate of message.content) {
+				if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+				const block = candidate as Record<string, unknown>;
+				if (!isToolResultBlock(block) && block.type === "text"
+					&& typeof block.text === "string" && isWellFormedUnicode(block.text)) {
+					yield block.text;
+				}
+			}
 		}
-		for (const result of resultsByMessage.get(message.index) ?? []) segments.push(result.body);
-		searchSegmentsByMessage.set(message.index, segments);
 	}
-	return { callsByMessage, resultsByMessage, resultByLocation, searchSegmentsByMessage };
+	for (const call of index.callsByMessage.get(message.index) ?? []) {
+		yield call.name;
+		if (call.argumentsPresent) yield call.argumentsText;
+	}
+	for (const result of index.resultsByMessage.get(message.index) ?? []) yield result.body;
 }
 
 async function buildAgentMatchList(
@@ -1330,13 +1764,13 @@ async function buildAgentMatchList(
 	pattern: string,
 	caseSensitive: boolean,
 	context: number,
+	transcriptUnits: number,
 ): Promise<{ matchCount: number; expanded: number[] }> {
-	return await matchMessageSegments(
-		messages.map((message) => index.searchSegmentsByMessage.get(message.index) ?? []),
-		pattern,
-		caseSensitive,
-		context,
-	);
+	return await matchMessageSegments({
+		messageCount: messages.length,
+		retainedUnits: estimatedQueuedCorpusUnits(transcriptUnits, 3),
+		segmentsForMessage: (messageIndex) => agentSearchSegments(messages[messageIndex], index),
+	}, pattern, caseSensitive, context);
 }
 
 function authorDictionaryKey(author: MessageAuthor): string {
@@ -1803,6 +2237,7 @@ async function readAgentTranscript(
 	all: RawMessage[],
 	opts: ReadTranscriptOptions,
 	validated: { offset: number; limit: number; context: number },
+	transcriptUnits: number,
 ): Promise<ReadTranscriptEnvelope> {
 	const sessionId = opts.sessionId ?? opts.authorContext?.session?.id ?? "unknown";
 	const budget = opts.serializedBudgetBytes ?? READ_SESSION_AGENT_ENVELOPE_MAX_BYTES;
@@ -1821,7 +2256,14 @@ async function readAgentTranscript(
 		let workingIndices: number[];
 		let matchCount: number | undefined;
 		if (params.pattern && params.pattern.length > 0) {
-			const matched = await buildAgentMatchList(all, index, params.pattern, !!params.caseSensitive, validated.context);
+			const matched = await buildAgentMatchList(
+				all,
+				index,
+				params.pattern,
+				!!params.caseSensitive,
+				validated.context,
+				transcriptUnits,
+			);
 			workingIndices = matched.expanded;
 			matchCount = matched.matchCount;
 		} else {
@@ -1889,6 +2331,15 @@ export async function readTranscript(
 	const verbose = !!params.verbose;
 	const includeToolResults = params.includeToolResults ?? true;
 	const pattern = params.pattern;
+	if (pattern !== undefined && typeof pattern !== "string") {
+		throw new TranscriptReaderError("invalid_params", "pattern must be a string");
+	}
+	if (pattern !== undefined && pattern.length > SAFE_REGEX_PATTERN_MAX_UNITS) {
+		throw new TranscriptReaderError(
+			"invalid_params",
+			`pattern must contain at most ${SAFE_REGEX_PATTERN_MAX_UNITS} UTF-16 units`,
+		);
+	}
 	const caseSensitive = !!params.caseSensitive;
 
 	const content = await opts.readContent();
@@ -1898,7 +2349,7 @@ export async function readTranscript(
 
 	const all = resolveRawMessageAuthors(parseJsonl(content), opts.authorContext);
 	if (opts.projection === "agent") {
-		return await readAgentTranscript(params, all, opts, { offset, limit, context });
+		return await readAgentTranscript(params, all, opts, { offset, limit, context }, content.length);
 	}
 	const total = all.length;
 	const renderOptions: RenderOptions = { includeToolResults, toolNameById: buildToolNameMap(all) };
@@ -1907,7 +2358,7 @@ export async function readTranscript(
 	let workingIndices: number[];
 	let matchCount: number | undefined;
 	if (pattern && pattern.length > 0) {
-		const { matchCount: mc, expanded } = await buildMatchList(all, pattern, caseSensitive, context);
+		const { matchCount: mc, expanded } = await buildMatchList(all, pattern, caseSensitive, context, content.length);
 		matchCount = mc;
 		workingIndices = expanded;
 	} else {
