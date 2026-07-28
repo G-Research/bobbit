@@ -102,6 +102,13 @@ export interface MarketplacePiExtensionActivation {
 	tools: PiExtensionToolInfo[];
 	diagnostics: PiExtensionDiagnostic[];
 	runtimeExtensions: RuntimePiExtensionInfo[];
+	/**
+	 * True when an appended runtime extension is known to register read_session,
+	 * or when failed/skipped discovery leaves its runtime registrations unknown.
+	 * Consumers must combine this with the ordinary resolved-tool decision before
+	 * materializing the immutable read_session result boundary.
+	 */
+	readSessionBoundaryRequired: boolean;
 }
 
 const RUNTIME_OMIT_PI_EXTENSION_STATUSES = new Set<PiExtensionDiagnostic["status"]>(["disabled", "unresolved"]);
@@ -116,12 +123,13 @@ export function resolveMarketplacePiExtensionActivation(
 	projectId: string | undefined,
 	cwd: string | undefined,
 ): MarketplacePiExtensionActivation {
-	if (!resolver) return { args: [], tools: [], diagnostics: [], runtimeExtensions: [] };
+	if (!resolver) return { args: [], tools: [], diagnostics: [], runtimeExtensions: [], readSessionBoundaryRequired: false };
 	const contributions = resolver({ projectId, cwd });
 	const args: string[] = [];
 	const tools: PiExtensionToolInfo[] = [];
 	const diagnostics: PiExtensionDiagnostic[] = [];
 	const runtimeExtensions: RuntimePiExtensionInfo[] = [];
+	let readSessionBoundaryRequired = false;
 	for (const contribution of contributions) {
 		diagnostics.push(contribution.diagnostic);
 		if (contribution.discovery?.diagnostic) diagnostics.push(contribution.discovery.diagnostic);
@@ -130,6 +138,12 @@ export function resolveMarketplacePiExtensionActivation(
 			for (const tool of contribution.discovery?.tools ?? []) tools.push(tool);
 		}
 		if (contribution.entryPath && runtimeEnabled) {
+			// Marketplace discovery and runtime loading are deliberately separate:
+			// discovery-failed entries still reach Pi argv. A successful discovery
+			// gives us the exact registration names; any other discovery state leaves
+			// them unknowable, so activation must conservatively require the boundary.
+			readSessionBoundaryRequired ||= contribution.discovery?.status !== "ok"
+				|| (contribution.discovery.tools ?? []).some(tool => tool.name.toLowerCase() === "read_session");
 			args.push("--extension", contribution.entryPath);
 			runtimeExtensions.push({
 				listName: contribution.listName,
@@ -140,7 +154,7 @@ export function resolveMarketplacePiExtensionActivation(
 			});
 		}
 	}
-	return { args, tools, diagnostics, runtimeExtensions };
+	return { args, tools, diagnostics, runtimeExtensions, readSessionBoundaryRequired };
 }
 
 // ── Extension path helpers ─────────────────────────────────────────────────
@@ -954,16 +968,19 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 
 	const flatNames = plan.effectiveAllowedTools?.map(e => e.name);
 	const toolScope = scopedToolContext(plan.projectId, plan.cwd);
+	// Resolve Marketplace contributions before ordinary activation. The production
+	// resolver populates ToolManager as a side effect; fresh scoped sessions must
+	// see that catalogue during activation rather than relying on a stale pre-scan.
+	const piExtensionActivation = resolveMarketplacePiExtensionActivation(ctx.marketplacePiExtensionResolver, plan.projectId, plan.cwd);
 	const mcpExtPaths = ctx.mcpManager
 		? writeMcpProxyExtensions(ctx.mcpManager, flatNames, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined, disabledTools, toolScope)
 		: undefined;
 
 	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools, toolScope);
-	const piExtensionActivation = resolveMarketplacePiExtensionActivation(ctx.marketplacePiExtensionResolver, plan.projectId, plan.cwd);
 
 	plan.bridgeOptions.args = prependToolResultErrorBridge(
 		[...activation.args, ...piExtensionActivation.args, ...(plan.bridgeOptions.args || [])],
-		activation.readSessionAvailable,
+		activation.readSessionAvailable || piExtensionActivation.readSessionBoundaryRequired,
 	);
 	plan.bridgeOptions.piExtensions = [...(plan.bridgeOptions.piExtensions ?? []), ...piExtensionActivation.runtimeExtensions];
 	plan.bridgeOptions.env = { ...(plan.bridgeOptions.env || {}), ...activation.env };

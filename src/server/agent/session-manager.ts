@@ -3624,6 +3624,10 @@ export class SessionManager {
 		const toolScope = scopedToolContext(projectId, cwd);
 
 		const mcpManager = this.getMcpManagerForContext(projectId, cwd);
+		// Resolve Marketplace contributions before ordinary activation. The
+		// production resolver populates the scoped ToolManager catalogue, including
+		// sessions restored before that scope has ever been discovered.
+		const piExtensionActivation = this.resolveMarketplacePiExtensionArgs(projectId, cwd);
 
 		// MCP proxy extensions
 		const mcpExtPaths = mcpManager
@@ -3632,11 +3636,10 @@ export class SessionManager {
 
 		// Builtin + bobbit-extension activation
 		const activation = computeToolActivationArgs(filteredAllowed, this.toolManager, cwd, mcpExtPaths, disabledTools, toolScope);
-		const piExtensionActivation = this.resolveMarketplacePiExtensionArgs(projectId, cwd);
 
 		const args = prependToolResultErrorBridge(
 			[...activation.args, ...piExtensionActivation.args],
-			activation.readSessionAvailable,
+			activation.readSessionAvailable || piExtensionActivation.readSessionBoundaryRequired,
 		);
 
 		// Compute session-specific grants (tools in allowedTools but not in the role's base allowedTools)
