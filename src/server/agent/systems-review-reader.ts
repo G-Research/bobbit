@@ -1,4 +1,6 @@
+import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { StringDecoder } from "node:string_decoder";
 import type { CommandRunner } from "../gateway-deps.js";
 import {
 	assertSystemsReviewReadablePath,
@@ -23,9 +25,14 @@ export const SYSTEMS_REVIEW_MAX_PAGE_BYTES = 48 * 1024;
 export const SYSTEMS_REVIEW_MAX_PAGE_RECORDS = 200;
 export const SYSTEMS_REVIEW_MAX_CONTENT_BYTES = 40 * 1024;
 export const SYSTEMS_REVIEW_READ_TIMEOUT_MS = 10_000;
+export const SYSTEMS_REVIEW_SEARCH_TIMEOUT_MS = 2_000;
 export const SYSTEMS_REVIEW_SEARCH_MAX_QUERY_BYTES = 256;
 export const SYSTEMS_REVIEW_SEARCH_MAX_PATHS = 50;
 export const SYSTEMS_REVIEW_SEARCH_MAX_FILE_BYTES = 10 * 1024 * 1024;
+
+type CursorPosition =
+	| { kind: "list"; afterPath: string }
+	| { kind: "search"; pathIndex: number; byteOffset: number; line: number; column: number; linePrefix: string };
 
 interface CursorClaims {
 	version: typeof SYSTEMS_REVIEW_READER_VERSION;
@@ -36,6 +43,7 @@ interface CursorClaims {
 	operation: SystemsReviewReadOperation;
 	objectId: string;
 	offset: number;
+	position?: CursorPosition;
 }
 
 interface SignedReceiptEnvelope {
@@ -56,6 +64,14 @@ interface SearchRecord {
 	column: number;
 	text: string;
 	blobOid: string;
+}
+
+interface PendingSearchRecord extends Omit<SearchRecord, "text"> {
+	position: Extract<CursorPosition, { kind: "search" }>;
+}
+
+function compareGitPaths(left: string, right: string): number {
+	return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
 }
 
 function sha256(value: string | Buffer): string {
@@ -169,16 +185,31 @@ export class SystemsReviewDiffReader {
 		return claims;
 	}
 
-	private offset(cursor: string | undefined, operation: SystemsReviewReadOperation, objectId: string): number {
-		if (!cursor) return 0;
+	private cursorClaims(cursor: string | undefined, operation: SystemsReviewReadOperation, objectId: string): CursorClaims {
+		if (!cursor) {
+			return {
+				version: SYSTEMS_REVIEW_READER_VERSION,
+				kind: "cursor",
+				sessionId: this.snapshot.sessionId,
+				signalId: this.snapshot.signalId,
+				snapshotDigest: this.snapshot.digest,
+				operation,
+				objectId,
+				offset: 0,
+			};
+		}
 		const claims = decodeSigned<CursorClaims>(cursor, "sr-c1", this.secret);
 		if (claims?.version !== SYSTEMS_REVIEW_READER_VERSION || claims.kind !== "cursor" || claims.sessionId !== this.snapshot.sessionId || claims.signalId !== this.snapshot.signalId || claims.snapshotDigest !== this.snapshot.digest || claims.operation !== operation || claims.objectId !== objectId || !Number.isSafeInteger(claims.offset) || claims.offset < 0) {
 			throw new SystemsReviewReaderError("CURSOR_SCOPE_MISMATCH", "Systems review cursor does not match this session, signal, snapshot, operation, or object.");
 		}
-		return claims.offset;
+		return claims;
 	}
 
-	private cursor(operation: SystemsReviewReadOperation, objectId: string, offset: number): string {
+	private offset(cursor: string | undefined, operation: SystemsReviewReadOperation, objectId: string): number {
+		return this.cursorClaims(cursor, operation, objectId).offset;
+	}
+
+	private cursor(operation: SystemsReviewReadOperation, objectId: string, offset: number, position?: CursorPosition): string {
 		return encodeSigned("sr-c1", {
 			version: SYSTEMS_REVIEW_READER_VERSION,
 			kind: "cursor",
@@ -188,10 +219,11 @@ export class SystemsReviewDiffReader {
 			operation,
 			objectId,
 			offset,
+			...(position ? { position } : {}),
 		} satisfies CursorClaims, this.secret);
 	}
 
-	private page<T>(operation: SystemsReviewReadOperation, objectId: string, start: number, end: number, complete: boolean, data: T, binding: Partial<Pick<SystemsReviewReceiptClaims, "repoId" | "path" | "side">> = {}): SystemsReviewReadPage<T> {
+	private page<T>(operation: SystemsReviewReadOperation, objectId: string, start: number, end: number, complete: boolean, data: T, binding: Partial<Pick<SystemsReviewReceiptClaims, "repoId" | "path" | "side">> = {}, nextPosition?: CursorPosition): SystemsReviewReadPage<T> {
 		const claims: SystemsReviewReceiptClaims = {
 			version: SYSTEMS_REVIEW_READER_VERSION,
 			sessionId: this.snapshot.sessionId,
@@ -216,7 +248,7 @@ export class SystemsReviewDiffReader {
 			data,
 			receipt: encodeSigned("sr-r1", { kind: "receipt", claims } satisfies SignedReceiptEnvelope, this.secret),
 			receiptClaims: claims,
-			...(complete ? {} : { nextCursor: this.cursor(operation, objectId, end) }),
+			...(complete ? {} : { nextCursor: this.cursor(operation, objectId, end, nextPosition) }),
 		};
 		if (Buffer.byteLength(JSON.stringify(page), "utf8") > SYSTEMS_REVIEW_MAX_PAGE_BYTES) {
 			throw new SystemsReviewReaderError("PAGE_LIMIT_EXCEEDED", "Systems review response exceeded the 48 KiB page limit.");
@@ -281,20 +313,87 @@ export class SystemsReviewDiffReader {
 		return this.page("patch", objectId, start, range.end, range.complete, { encoding: "utf8", content: range.content.toString("utf8"), patchSha256: range.digest, totalBytes: range.totalBytes }, { repoId: change.repoId, path: change.newPath ?? change.oldPath });
 	}
 
-	private remainingTimeout(started: number): number {
-		const remaining = SYSTEMS_REVIEW_READ_TIMEOUT_MS - (Date.now() - started);
-		if (remaining <= 0) throw new SystemsReviewReaderError("READ_TIMEOUT", "Systems review read exceeded 10 seconds.");
+	private remainingTimeout(started: number, budget = SYSTEMS_REVIEW_READ_TIMEOUT_MS): number {
+		const remaining = budget - (Date.now() - started);
+		if (remaining <= 0) throw new SystemsReviewReaderError("READ_TIMEOUT", `Systems review read exceeded ${budget}ms.`);
 		return remaining;
 	}
 
-	private async git(repo: SystemsReviewRepoBinding, args: readonly string[], started: number, onStdout?: (chunk: Buffer) => void): Promise<Buffer> {
-		return runSystemsReviewGit(repo.root, args, this.commandRunner, onStdout, this.remainingTimeout(started));
+	private async git(repo: SystemsReviewRepoBinding, args: readonly string[], started: number, onStdout?: (chunk: Buffer) => void, budget = SYSTEMS_REVIEW_READ_TIMEOUT_MS): Promise<Buffer> {
+		return runSystemsReviewGit(repo.root, args, this.commandRunner, onStdout, this.remainingTimeout(started, budget));
 	}
 
-	private async exactTreeEntry(repo: SystemsReviewRepoBinding, side: SystemsReviewTreeSide, candidatePath: string, started: number): Promise<TreeEntry> {
+	private async streamGit(repo: SystemsReviewRepoBinding, args: readonly string[], started: number, onStdout: (chunk: Buffer) => boolean, budget = SYSTEMS_REVIEW_READ_TIMEOUT_MS): Promise<boolean> {
+		if (this.commandRunner && !this.commandRunner.spawn) {
+			throw new SystemsReviewReaderError("STREAMING_UNAVAILABLE", "Bounded Systems review list/search requires a streaming command runner.");
+		}
+		const timeout = this.remainingTimeout(started, budget);
+		return new Promise<boolean>((resolve, reject) => {
+			let child: ChildProcess;
+			try {
+				child = this.commandRunner?.spawn
+					? this.commandRunner.spawn("git", args, { cwd: repo.root, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] })
+					: nodeSpawn("git", [...args], { cwd: repo.root, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+			} catch (error) {
+				reject(error);
+				return;
+			}
+			let stopped = false;
+			let timedOut = false;
+			let callbackError: unknown;
+			let stderr = Buffer.alloc(0);
+			const timer = setTimeout(() => {
+				timedOut = true;
+				child.kill("SIGKILL");
+			}, timeout);
+			child.stdout?.on("data", (value: Buffer | string) => {
+				if (stopped || callbackError) return;
+				try {
+					if (onStdout(Buffer.isBuffer(value) ? value : Buffer.from(value))) {
+						stopped = true;
+						child.kill("SIGKILL");
+					}
+				} catch (error) {
+					callbackError = error;
+					child.kill("SIGKILL");
+				}
+			});
+			child.stderr?.on("data", (value: Buffer | string) => {
+				if (stderr.byteLength >= SYSTEMS_REVIEW_MAX_CONTENT_BYTES) return;
+				const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+				stderr = Buffer.concat([stderr, chunk.subarray(0, SYSTEMS_REVIEW_MAX_CONTENT_BYTES - stderr.byteLength)]);
+			});
+			child.once("error", error => {
+				clearTimeout(timer);
+				reject(error);
+			});
+			child.once("close", code => {
+				clearTimeout(timer);
+				if (callbackError) {
+					reject(callbackError);
+					return;
+				}
+				if (stopped) {
+					resolve(true);
+					return;
+				}
+				if (timedOut || Date.now() - started >= budget) {
+					reject(new SystemsReviewReaderError("READ_TIMEOUT", `Systems review read exceeded ${budget}ms.`));
+					return;
+				}
+				if (code !== 0) {
+					reject(new SystemsReviewReaderError("GIT_FAILED", `git ${args.join(" ")} failed: ${stderr.toString("utf8").trim()}`));
+					return;
+				}
+				resolve(false);
+			});
+		});
+	}
+
+	private async exactTreeEntry(repo: SystemsReviewRepoBinding, side: SystemsReviewTreeSide, candidatePath: string, started: number, budget = SYSTEMS_REVIEW_READ_TIMEOUT_MS): Promise<TreeEntry> {
 		const safePath = assertSystemsReviewReadablePath(candidatePath);
 		if (isSystemsReviewBodyExemptPath(safePath)) throw new SystemsReviewReaderError("BODY_EXEMPT_PATH", `Body-exempt asset or dependency lockfile "${safePath}" cannot be read or searched.`);
-		const raw = await this.git(repo, ["-c", "core.quotepath=false", "ls-tree", "-z", treeFor(repo, side), "--", literalPathspec(safePath)], started);
+		const raw = await this.git(repo, ["-c", "core.quotepath=false", "ls-tree", "-z", treeFor(repo, side), "--", literalPathspec(safePath)], started, undefined, budget);
 		const tokens = raw.subarray(0, raw.at(-1) === 0 ? raw.length - 1 : raw.length).toString("binary");
 		if (!tokens) throw new SystemsReviewReaderError("PATH_NOT_FOUND", `Path "${safePath}" does not exist in the bound ${side} tree.`);
 		const entries = raw.toString("binary").split("\0").filter(Boolean).map(token => parseTreeEntry(Buffer.from(token, "binary")));
@@ -304,8 +403,8 @@ export class SystemsReviewDiffReader {
 		return entry;
 	}
 
-	private async blobSize(repo: SystemsReviewRepoBinding, oid: string, started: number): Promise<number> {
-		const raw = (await this.git(repo, ["cat-file", "-s", oid], started)).toString("utf8").trim();
+	private async blobSize(repo: SystemsReviewRepoBinding, oid: string, started: number, budget = SYSTEMS_REVIEW_READ_TIMEOUT_MS): Promise<number> {
+		const raw = (await this.git(repo, ["cat-file", "-s", oid], started, undefined, budget)).toString("utf8").trim();
 		const size = Number(raw);
 		if (!Number.isSafeInteger(size) || size < 0) throw new SystemsReviewReaderError("INVALID_BLOB", `Git returned an invalid blob size for ${oid}.`);
 		return size;
@@ -345,73 +444,212 @@ export class SystemsReviewDiffReader {
 		return this.page("file", objectId, start, end, end >= size, { encoding: "utf8", content: content.toString("utf8"), blobOid: entry.oid, totalBytes: size }, { repoId, path: safePath, side });
 	}
 
-	private async treeEntries(repo: SystemsReviewRepoBinding, side: SystemsReviewTreeSide, prefix: string | undefined, started: number): Promise<TreeEntry[]> {
-		const safePrefix = prefix ? assertSystemsReviewReadablePath(prefix) : undefined;
-		const args = ["-c", "core.quotepath=false", "ls-tree", "-r", "-z", treeFor(repo, side), ...(safePrefix ? ["--", literalPathspec(safePrefix)] : [])];
-		const entries: TreeEntry[] = [];
+	private async readList(repoId: string, side: SystemsReviewTreeSide, prefix: string | undefined, cursor: string | undefined, limit: number | undefined, started: number): Promise<SystemsReviewReadPage> {
+		const repo = repoFor(this.snapshot, repoId);
+		const safePrefix = prefix ? assertSystemsReviewReadablePath(prefix) : "";
+		const objectId = `list:${repo.id}:${side}:${treeFor(repo, side)}:${sha256(safePrefix)}`;
+		const claims = this.cursorClaims(cursor, "list", objectId);
+		const position = claims.position;
+		if (cursor && (position?.kind !== "list" || !position.afterPath)) throw new SystemsReviewReaderError("INVALID_CURSOR", "List cursor omitted its exact tree position.");
+		const afterPath = position?.kind === "list" ? position.afterPath : undefined;
+		const requested = checkedLimit(limit, SYSTEMS_REVIEW_MAX_PAGE_RECORDS, SYSTEMS_REVIEW_MAX_PAGE_RECORDS);
+		const records: Array<{ mode: string; type: TreeEntry["type"]; blobOid: string; path: string }> = [];
+		let recordsBytes = 2;
 		let pending = Buffer.alloc(0);
-		await this.git(repo, args, started, chunk => {
+		let previousPath: string | undefined;
+		let resumeSeen = afterPath === undefined;
+		let overflow = false;
+		let lastReturnedPath: string | undefined;
+		const args = ["-c", "core.quotepath=false", "ls-tree", "-r", "-z", treeFor(repo, side), ...(safePrefix ? ["--", literalPathspec(safePrefix)] : [])];
+		const stopped = await this.streamGit(repo, args, started, chunk => {
 			pending = Buffer.concat([pending, chunk]);
 			let delimiter = pending.indexOf(0);
 			while (delimiter >= 0) {
 				const token = pending.subarray(0, delimiter);
 				pending = pending.subarray(delimiter + 1);
-				if (token.byteLength > 0) entries.push(parseTreeEntry(token));
 				delimiter = pending.indexOf(0);
+				if (token.byteLength === 0) continue;
+				const entry = parseTreeEntry(token);
+				assertReadableTreeEntry(entry);
+				if (previousPath !== undefined && compareGitPaths(previousPath, entry.path) >= 0) throw new SystemsReviewReaderError("MALFORMED_TREE", "Git tree traversal was not strictly ordered.");
+				previousPath = entry.path;
+				if (!resumeSeen) {
+					const comparison = compareGitPaths(entry.path, afterPath!);
+					if (comparison < 0) continue;
+					if (comparison > 0) throw new SystemsReviewReaderError("INVALID_CURSOR", "List cursor tree position no longer exists.");
+					resumeSeen = true;
+					continue;
+				}
+				const record = { mode: entry.mode, type: entry.type, blobOid: entry.oid, path: entry.path };
+				const nextRecordBytes = Buffer.byteLength(stableJson(record), "utf8") + (records.length === 0 ? 0 : 1);
+				if (records.length >= requested || recordsBytes + nextRecordBytes > SYSTEMS_REVIEW_MAX_CONTENT_BYTES) {
+					if (records.length === 0) throw new SystemsReviewReaderError("OVERSIZED_RECORD", "A Systems review tree record exceeds the bounded page size.");
+					overflow = true;
+					return true;
+				}
+				records.push(record);
+				recordsBytes += nextRecordBytes;
+				lastReturnedPath = entry.path;
 			}
+			if (pending.byteLength > SYSTEMS_REVIEW_MAX_CONTENT_BYTES) throw new SystemsReviewReaderError("OVERSIZED_RECORD", "A Systems review tree record exceeds the bounded page size.");
+			return false;
 		});
-		if (pending.byteLength > 0) throw new SystemsReviewReaderError("MALFORMED_TREE", "Git tree stream ended inside an entry.");
-		for (const entry of entries) {
-			assertSystemsReviewReadablePath(entry.path);
-			if (entry.mode === "120000" || entry.mode === "160000" || entry.type === "commit") throw new SystemsReviewReaderError("UNREADABLE_TREE_ENTRY", `Tree contains an unreadable symlink or submodule path: ${entry.path}`);
-		}
-		return entries;
-	}
-
-	private async readList(repoId: string, side: SystemsReviewTreeSide, prefix: string | undefined, cursor: string | undefined, limit: number | undefined, started: number): Promise<SystemsReviewReadPage> {
-		const repo = repoFor(this.snapshot, repoId);
-		const safePrefix = prefix ? assertSystemsReviewReadablePath(prefix) : "";
-		const objectId = `list:${repo.id}:${side}:${treeFor(repo, side)}:${sha256(safePrefix)}`;
-		const entries = await this.treeEntries(repo, side, safePrefix || undefined, started);
-		const requested = checkedLimit(limit, SYSTEMS_REVIEW_MAX_PAGE_RECORDS, SYSTEMS_REVIEW_MAX_PAGE_RECORDS);
-		const records = entries.map(entry => ({ mode: entry.mode, type: entry.type, blobOid: entry.oid, path: entry.path }));
-		const page = this.recordsPage("list", objectId, records, cursor, requested);
-		return this.page("list", objectId, page.range.start, page.range.end, page.range.complete, page.data, { repoId, path: safePrefix, side });
-	}
-
-	private async readWholeTextBlob(repo: SystemsReviewRepoBinding, entry: TreeEntry, size: number, started: number): Promise<string> {
-		const buffer = await this.blobRange(repo, entry.oid, 0, size, size, started);
-		if (buffer.includes(0)) throw new SystemsReviewReaderError("BINARY_FILE", `Binary blob "${entry.path}" cannot be searched.`);
-		return buffer.toString("utf8");
+		if (!stopped && pending.byteLength > 0) throw new SystemsReviewReaderError("MALFORMED_TREE", "Git tree stream ended inside an entry.");
+		if (!resumeSeen) throw new SystemsReviewReaderError("INVALID_CURSOR", "List cursor tree position no longer exists.");
+		const complete = !stopped && !overflow;
+		const end = claims.offset + records.length;
+		if (!complete && !lastReturnedPath) throw new SystemsReviewReaderError("INVALID_CURSOR", "List traversal made no resumable progress.");
+		return this.page("list", objectId, claims.offset, end, complete, records, { repoId, path: safePrefix, side }, complete ? undefined : { kind: "list", afterPath: lastReturnedPath! });
 	}
 
 	private async readSearch(repoId: string, side: SystemsReviewTreeSide, paths: string[], query: string, cursor: string | undefined, limit: number | undefined, started: number): Promise<SystemsReviewReadPage> {
 		const repo = repoFor(this.snapshot, repoId);
-		if (Buffer.byteLength(query, "utf8") < 1 || Buffer.byteLength(query, "utf8") > SYSTEMS_REVIEW_SEARCH_MAX_QUERY_BYTES) throw new SystemsReviewReaderError("INVALID_QUERY", `Literal search query must contain 1 to ${SYSTEMS_REVIEW_SEARCH_MAX_QUERY_BYTES} UTF-8 bytes.`);
+		const queryBytes = Buffer.from(query, "utf8");
+		if (queryBytes.byteLength < 1 || queryBytes.byteLength > SYSTEMS_REVIEW_SEARCH_MAX_QUERY_BYTES) throw new SystemsReviewReaderError("INVALID_QUERY", `Literal search query must contain 1 to ${SYSTEMS_REVIEW_SEARCH_MAX_QUERY_BYTES} UTF-8 bytes.`);
 		if (!Array.isArray(paths) || paths.length < 1 || paths.length > SYSTEMS_REVIEW_SEARCH_MAX_PATHS) throw new SystemsReviewReaderError("INVALID_SEARCH_PATHS", `Literal search requires 1 to ${SYSTEMS_REVIEW_SEARCH_MAX_PATHS} paths.`);
 		const safePaths = [...new Set(paths.map(candidate => assertSystemsReviewReadablePath(candidate)))];
 		const objectId = `search:${repo.id}:${side}:${treeFor(repo, side)}:${sha256(stableJson({ paths: safePaths, query }))}`;
-		const records: SearchRecord[] = [];
+		const claims = this.cursorClaims(cursor, "search", objectId);
+		const requested = checkedLimit(limit, SYSTEMS_REVIEW_MAX_PAGE_RECORDS, SYSTEMS_REVIEW_MAX_PAGE_RECORDS);
+		const entries: Array<{ entry: TreeEntry; size: number }> = [];
 		let aggregateBytes = 0;
 		for (const safePath of safePaths) {
-			const entry = await this.exactTreeEntry(repo, side, safePath, started);
-			const size = await this.blobSize(repo, entry.oid, started);
+			const entry = await this.exactTreeEntry(repo, side, safePath, started, SYSTEMS_REVIEW_SEARCH_TIMEOUT_MS);
+			const size = await this.blobSize(repo, entry.oid, started, SYSTEMS_REVIEW_SEARCH_TIMEOUT_MS);
 			aggregateBytes += size;
 			if (aggregateBytes > SYSTEMS_REVIEW_SEARCH_MAX_FILE_BYTES) throw new SystemsReviewReaderError("SEARCH_BUDGET_EXCEEDED", "Literal search file inputs exceed the 10 MiB bound.");
-			const content = await this.readWholeTextBlob(repo, entry, size, started);
-			const lines = content.split("\n");
-			for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
-				let from = 0;
-				while (from <= lines[lineIndex].length) {
-					const column = lines[lineIndex].indexOf(query, from);
-					if (column < 0) break;
-					records.push({ path: safePath, line: lineIndex + 1, column: column + 1, text: lines[lineIndex].slice(0, 2_000), blobOid: entry.oid });
-					from = column + Math.max(1, query.length);
-				}
-			}
+			entries.push({ entry, size });
 		}
-		const page = this.recordsPage("search", objectId, records, cursor, limit);
-		return this.page("search", objectId, page.range.start, page.range.end, page.range.complete, page.data, { repoId, side });
+
+		const initialPosition: Extract<CursorPosition, { kind: "search" }> = { kind: "search", pathIndex: 0, byteOffset: 0, line: 1, column: 1, linePrefix: "" };
+		const resume = claims.position ?? initialPosition;
+		if (cursor && resume.kind !== "search") throw new SystemsReviewReaderError("INVALID_CURSOR", "Search cursor omitted its exact match position.");
+		if (resume.kind !== "search" || !Number.isSafeInteger(resume.pathIndex) || resume.pathIndex < 0 || resume.pathIndex >= entries.length || !Number.isSafeInteger(resume.byteOffset) || resume.byteOffset < 0 || resume.byteOffset > entries[resume.pathIndex].size || !Number.isSafeInteger(resume.line) || resume.line < 1 || !Number.isSafeInteger(resume.column) || resume.column < 1 || typeof resume.linePrefix !== "string" || resume.linePrefix.length > 2_000) {
+			throw new SystemsReviewReaderError("INVALID_CURSOR", "Search cursor position is malformed or beyond the bound blob.");
+		}
+
+		const records: SearchRecord[] = [];
+		let recordsBytes = 2;
+		let lastPosition: Extract<CursorPosition, { kind: "search" }> | undefined;
+		let overflow = false;
+		const queryHasNewline = queryBytes.includes(0x0a);
+
+		for (let pathIndex = resume.pathIndex; pathIndex < entries.length && !overflow; pathIndex++) {
+			const { entry, size } = entries[pathIndex];
+			const pathResume = pathIndex === resume.pathIndex ? resume : { ...initialPosition, pathIndex };
+			let absoluteOffset = pathResume.byteOffset;
+			let physicalOffset = 0;
+			let line = pathResume.line;
+			let column = pathResume.column;
+			let linePrefix = pathResume.linePrefix;
+			let prefixComplete = linePrefix.length >= 2_000;
+			let decoder = new StringDecoder("utf8");
+			let buffered = Buffer.alloc(0);
+			let pendingLine: PendingSearchRecord[] = [];
+
+			const flushLine = (): boolean => {
+				for (const pendingRecord of pendingLine) {
+					const record: SearchRecord = { path: pendingRecord.path, line: pendingRecord.line, column: pendingRecord.column, text: linePrefix, blobOid: pendingRecord.blobOid };
+					const nextRecordBytes = Buffer.byteLength(stableJson(record), "utf8") + (records.length === 0 ? 0 : 1);
+					if (records.length >= requested || recordsBytes + nextRecordBytes > SYSTEMS_REVIEW_MAX_CONTENT_BYTES) {
+						if (records.length === 0) throw new SystemsReviewReaderError("OVERSIZED_RECORD", "A Systems review search record exceeds the bounded page size.");
+						overflow = true;
+						break;
+					}
+					records.push(record);
+					recordsBytes += nextRecordBytes;
+					lastPosition = pendingRecord.position;
+				}
+				pendingLine = [];
+				return overflow;
+			};
+
+			const appendDecoded = (text: string): boolean => {
+				column += text.length;
+				if (!prefixComplete) {
+					linePrefix = (linePrefix + text).slice(0, 2_000);
+					prefixComplete = linePrefix.length >= 2_000;
+					if (prefixComplete && flushLine()) return true;
+				}
+				return false;
+			};
+
+			const consumeText = (value: Buffer): boolean => {
+				absoluteOffset += value.byteLength;
+				return appendDecoded(decoder.write(value));
+			};
+
+			const consumeBuffer = (final: boolean): boolean => {
+				while (buffered.byteLength > 0) {
+					const newline = buffered.indexOf(0x0a);
+					const match = queryHasNewline ? -1 : buffered.indexOf(queryBytes);
+					const event = newline < 0 ? match : match < 0 ? newline : Math.min(newline, match);
+					const safeBytes = final ? buffered.byteLength : Math.max(0, buffered.byteLength - Math.max(0, queryBytes.byteLength - 1));
+					if (event < 0 || event >= safeBytes) {
+						if (safeBytes === 0) return false;
+						const value = buffered.subarray(0, safeBytes);
+						buffered = buffered.subarray(safeBytes);
+						if (consumeText(value)) return true;
+						continue;
+					}
+					if (event > 0) {
+						const value = buffered.subarray(0, event);
+						buffered = buffered.subarray(event);
+						if (consumeText(value)) return true;
+					}
+					if (buffered[0] === 0x0a) {
+						buffered = buffered.subarray(1);
+						absoluteOffset++;
+						const decodedNewline = decoder.write(Buffer.from([0x0a]));
+						if (decodedNewline.length > 1 && appendDecoded(decodedNewline.slice(0, -1))) return true;
+						if (flushLine()) return true;
+						line++;
+						column = 1;
+						linePrefix = "";
+						prefixComplete = false;
+						decoder = new StringDecoder("utf8");
+						continue;
+					}
+					const recordLine = line;
+					const recordColumn = column;
+					buffered = buffered.subarray(queryBytes.byteLength);
+					if (consumeText(queryBytes)) return true;
+					if (pendingLine.length <= requested - records.length) {
+						pendingLine.push({
+							path: entry.path,
+							line: recordLine,
+							column: recordColumn,
+							blobOid: entry.oid,
+							position: { kind: "search", pathIndex, byteOffset: absoluteOffset, line, column, linePrefix },
+						});
+					}
+					if (prefixComplete && flushLine()) return true;
+				}
+				return false;
+			};
+
+			const stopped = await this.streamGit(repo, ["cat-file", "blob", entry.oid], started, chunk => {
+				const chunkEnd = physicalOffset + chunk.byteLength;
+				const skip = Math.max(0, pathResume.byteOffset - physicalOffset);
+				physicalOffset = chunkEnd;
+				if (skip >= chunk.byteLength) return false;
+				const readable = chunk.subarray(skip);
+				if (readable.includes(0)) throw new SystemsReviewReaderError("BINARY_FILE", `Binary blob "${entry.path}" cannot be searched.`);
+				buffered = Buffer.concat([buffered, readable]);
+				return consumeBuffer(false);
+			}, SYSTEMS_REVIEW_SEARCH_TIMEOUT_MS);
+			if (stopped) break;
+			if (physicalOffset !== size) throw new SystemsReviewReaderError("STALE_BLOB", `Bound blob ${entry.oid} changed size while being searched.`);
+			if (consumeBuffer(true)) break;
+			const tail = decoder.end();
+			if (tail && appendDecoded(tail)) break;
+			if (flushLine()) break;
+		}
+
+		const end = claims.offset + records.length;
+		const complete = !overflow;
+		if (!complete && !lastPosition) throw new SystemsReviewReaderError("INVALID_CURSOR", "Search traversal made no resumable progress.");
+		return this.page("search", objectId, claims.offset, end, complete, records, { repoId, side }, complete ? undefined : lastPosition);
 	}
 }
 
