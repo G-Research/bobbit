@@ -1257,7 +1257,13 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 
 	const builtinsToRegister = new Set<string>();
 	const extensionPaths = new Set<string>();
-	let readSessionAvailable = false;
+	// Pi extensions are appended to the runtime argv outside this function, so
+	// explicit resolved contributions must still require the safety boundary
+	// even when provider lookup is unavailable.
+	let readSessionAvailable = allowedTools?.some(entry =>
+		entry.kind === "pi-extension"
+		&& entry.name.toLowerCase() === "read_session"
+		&& !disabledTools?.has(entry.name.toLowerCase())) ?? false;
 
 	if (!toolManager) {
 		// Fallback: no tool manager available, can't resolve providers.
@@ -1298,11 +1304,15 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 	// genuinely unknown YAML tool names (typos in role allowedTools, etc.).
 	const collect = (entries: Iterable<{ kind?: "yaml" | "mcp" | "pi-extension"; name: string }>) => {
 		for (const entry of entries) {
-			if (entry.kind === "mcp" || entry.kind === "pi-extension") continue;
+			const normalizedName = entry.name.toLowerCase();
 			// Goal-metadata disabled tool: drop in BOTH the allowlist branch and the
 			// unrestricted/all-tools branch (both flow through here), so a disabled
 			// tool is never registered even for a role-less / all-tools session.
-			if (disabledTools && disabledTools.has(entry.name.toLowerCase())) continue;
+			if (disabledTools && disabledTools.has(normalizedName)) continue;
+			if (entry.kind === "mcp") continue;
+			// Marketplace Pi extensions are appended to the runtime argv separately;
+			// their explicit read_session contribution was accounted for above.
+			if (entry.kind === "pi-extension") continue;
 			const provider = providers.get(entry.name);
 			if (!provider) {
 				const inactive = inactiveToolContribution(toolManager, entry.name, scopedContext);
@@ -1313,11 +1323,11 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 				warnMissingProviderOnce(entry.name, scopedContext);
 				continue;
 			}
+			if (normalizedName === "read_session") {
+				readSessionAvailable = true;
+			}
 			if (provider.type === "pi-extension") {
 				continue;
-			}
-			if (entry.name.toLowerCase() === "read_session") {
-				readSessionAvailable = true;
 			}
 			if (provider.type === "builtin" && provider.tool) {
 				if (provider.tool === "bash") {
