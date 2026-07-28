@@ -14,6 +14,7 @@ import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } f
 import { cleanupGateDiagnosticsForGoal } from "./gate-diagnostics-cleanup.js";
 import { resolveSetupTimeoutMs } from "../skills/worktree-setup.js";
 import { resolveGoalMetadata, type GoalMetadata } from "./goal-metadata.js";
+import { assertSystemsReviewGoalWriteAllowed } from "./systems-review-lease.js";
 import { realClock, realCommandRunner, type Clock, type CommandRunner } from "../gateway-deps.js";
 import { isHeadquartersProject } from "./project-registry.js";
 
@@ -507,6 +508,7 @@ export class GoalManager {
 		if (!goal) {
 			throw new Error(`Goal ${goalId} not found or missing repo/branch info`);
 		}
+		assertSystemsReviewGoalWriteAllowed(goalId);
 		if (isHeadquartersProject(goal.projectId)) {
 			this.forceHeadquartersNoWorktree(goal);
 			return;
@@ -786,6 +788,7 @@ export class GoalManager {
 		if (!goal || goal.setupStatus !== "error") {
 			return false;
 		}
+		assertSystemsReviewGoalWriteAllowed(goalId);
 		this.store.update(goalId, {
 			setupStatus: "preparing",
 			setupError: undefined,
@@ -815,6 +818,7 @@ export class GoalManager {
 		if (!child) {
 			throw new Error(`mergeChild: child goal not found: ${childGoalId}`);
 		}
+		assertSystemsReviewGoalWriteAllowed(parentGoalId);
 		if (child.parentGoalId !== parentGoalId) {
 			// Structured error so REST handlers can return 400 instead of 500.
 			const err = new Error(
@@ -902,6 +906,7 @@ export class GoalManager {
 		if (goal.archived && goal.state === "complete") {
 			return;
 		}
+		assertSystemsReviewGoalWriteAllowed(childId);
 
 		// 1. State first.
 		if (goal.state !== "complete") {
@@ -976,6 +981,7 @@ export class GoalManager {
 	async archiveGoal(id: string): Promise<boolean> {
 		const goal = this.store.get(id);
 		if (!goal) return false;
+		assertSystemsReviewGoalWriteAllowed(id);
 		const archived = this.store.archive(id);
 		if (archived) {
 			try {
@@ -1078,6 +1084,7 @@ export class GoalManager {
 	}): Promise<boolean> {
 		const existing = this.store.get(id);
 		if (!existing) return false;
+		assertSystemsReviewGoalWriteAllowed(id);
 
 		// If toggling team mode ON for a non-team goal, auto-create worktree
 		if (updates.team === true && !existing.team && !existing.worktreePath && !isHeadquartersProject(existing.projectId)) {
@@ -1105,6 +1112,7 @@ export class GoalManager {
 	async deleteGoal(id: string): Promise<boolean> {
 		const goal = this.store.get(id);
 		if (!goal) return false;
+		assertSystemsReviewGoalWriteAllowed(id);
 
 		// Worktrees preserved for 7-day archive (cleaned by periodic purge).
 		if (goal?.team) {

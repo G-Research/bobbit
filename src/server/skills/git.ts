@@ -10,6 +10,7 @@ import {
 } from "../agent/bounded-async-work.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 import type { Component } from "../agent/project-config-store.js";
+import { captureFinalMutationTarget } from "../agent/systems-review-target-evidence.js";
 import { branchToSlug, worktreeRoot as wtRootHelper } from "./worktree-paths.js";
 
 const primaryBranchFallbackWarningCwds = new Set<string>();
@@ -1193,6 +1194,15 @@ export async function mergeChildBranchLocal(
 	} catch {
 		// non-fatal
 	}
+
+	// Final production-owned adapter: capture only under a harness-issued,
+	// signed integration/browser correlation. The target and scope are resolved
+	// here, after branch normalization/verification and immediately before Git.
+	captureFinalMutationTarget({
+		resolvedTarget: fs.realpathSync.native(parentCwd),
+		resolvedScope: `branch:${currentBranch}`,
+		effectKind: "git-merge",
+	});
 
 	// Attempt the merge.
 	let mergeStdout = "";

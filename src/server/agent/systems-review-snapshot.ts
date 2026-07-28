@@ -384,9 +384,15 @@ export function isSystemsReviewBodyExemptPath(candidate: string): boolean {
 
 function coverageFor(change: SystemsReviewChange): SystemsReviewCoverageItem {
 	const risks = new Set(change.riskSignals);
-	const requiresActionTrace = risks.has("mutation") && (risks.has("control") || risks.has("route") || risks.has("target") || risks.has("aggregation"));
+	const productionOrUnknown = change.pathClass === "production-executable" || change.pathClass === "unknown";
+	// Mutation + aggregation is itself enough to force action treatment. A queue,
+	// worker, callback, or neutral wrapper must not evade exact-target proof merely
+	// because its patch omits incidental UI/route/target vocabulary. Unknown paths
+	// fail conservatively as possible production code.
+	const aggregateMutation = productionOrUnknown && risks.has("mutation") && risks.has("aggregation");
+	const requiresActionTrace = aggregateMutation || (risks.has("mutation") && (risks.has("control") || risks.has("route") || risks.has("target") || risks.has("aggregation")));
 	const requiresStateTrace = risks.has("aggregation") || risks.has("state") || risks.has("transport") || risks.has("persistence") || (change.pathClass === "config-schema" && (risks.has("transport") || risks.has("state")));
-	const requiresExactTargetEvidence = requiresActionTrace && risks.has("aggregation") && (risks.has("target") || risks.has("control") || risks.has("route"));
+	const requiresExactTargetEvidence = aggregateMutation;
 	const candidate = change.newPath ?? change.oldPath ?? "unknown";
 	return {
 		id: `coverage:${sha256(`${SYSTEMS_REVIEW_COVERAGE_VERSION}\0${change.id}`).slice(0, 32)}`,
