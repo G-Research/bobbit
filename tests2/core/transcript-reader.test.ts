@@ -4,14 +4,20 @@
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import type { WorkerOptions } from "node:worker_threads";
 import {
+	createTranscriptRegexPoolForTests,
 	readTranscript,
 	readOrphanedBeforeCompaction,
 	parseJsonl,
 	READ_SESSION_AGENT_ENVELOPE_MAX_BYTES,
 	resolveOffset,
 	TranscriptReaderError,
+	TranscriptRegexSearchError,
 	type ReadTranscriptEnvelope,
+	type SafeRegexClock,
+	type SafeRegexWorkerLike,
 } from "../../src/server/agent/transcript-reader.js";
 
 function makeJsonl(messages: Array<{ role: string; content: any; ts?: string }>): string {
@@ -31,6 +37,104 @@ const sample = makeJsonl([
 ]);
 
 const memoryTranscript = (content: string) => ({ readContent: async () => content });
+
+type FakeRegexCommand = { kind?: string; pattern?: string; caseSensitive?: boolean; messageIndex?: number; text?: string };
+
+class FakeRegexWorker extends EventEmitter implements SafeRegexWorkerLike {
+	readonly commands: FakeRegexCommand[] = [];
+	terminateCount = 0;
+
+	constructor(private readonly receive: (worker: FakeRegexWorker, command: FakeRegexCommand) => void) {
+		super();
+	}
+
+	postMessage(value: unknown): void {
+		const command = value as FakeRegexCommand;
+		this.commands.push(command);
+		this.receive(this, command);
+	}
+
+	respond(value: Record<string, unknown>): void {
+		this.emit("message", value);
+	}
+
+	async terminate(): Promise<number> {
+		this.terminateCount++;
+		return 1;
+	}
+}
+
+function protocolRegexWorker(
+	matcher: (pattern: string, text: string, caseSensitive: boolean) => boolean = (pattern, text, caseSensitive) =>
+		caseSensitive ? text.includes(pattern) : text.toLocaleLowerCase().includes(pattern.toLocaleLowerCase()),
+): FakeRegexWorker {
+	let pattern = "";
+	let caseSensitive = false;
+	let messageIndex = -1;
+	let chunks: string[] | undefined;
+	return new FakeRegexWorker((worker, command) => {
+		queueMicrotask(() => {
+			switch (command.kind) {
+				case "init":
+					pattern = command.pattern ?? "";
+					caseSensitive = !!command.caseSensitive;
+					worker.respond({ kind: "ready" });
+					break;
+				case "segment_start":
+					messageIndex = command.messageIndex ?? -1;
+					chunks = [];
+					worker.respond({ kind: "segment_started" });
+					break;
+				case "segment_chunk":
+					chunks!.push(command.text ?? "");
+					worker.respond({ kind: "chunk_accepted" });
+					break;
+				case "segment_end": {
+					const text = chunks!.join("");
+					chunks = undefined;
+					worker.respond({ kind: "segment_result", messageIndex, matched: matcher(pattern, text, caseSensitive) });
+					break;
+				}
+				case "finish":
+					worker.respond({ kind: "done" });
+					break;
+			}
+		});
+	});
+}
+
+class ManualRegexClock implements SafeRegexClock {
+	private current = 0;
+	private nextId = 1;
+	private readonly timers = new Map<number, { at: number; callback: () => void }>();
+
+	now(): number {
+		return this.current;
+	}
+
+	setTimer(callback: () => void, delayMs: number): unknown {
+		const id = this.nextId++;
+		this.timers.set(id, { at: this.current + delayMs, callback });
+		return id;
+	}
+
+	clearTimer(handle: unknown): void {
+		this.timers.delete(handle as number);
+	}
+
+	advance(ms: number): void {
+		this.current += ms;
+		for (;;) {
+			const due = [...this.timers.entries()]
+				.filter(([, timer]) => timer.at <= this.current)
+				.sort((left, right) => left[1].at - right[1].at || left[0] - right[0]);
+			if (due.length === 0) return;
+			const [id, timer] = due[0];
+			this.timers.delete(id);
+			timer.callback();
+		}
+	}
+}
 
 describe("transcript-reader / parseJsonl", () => {
 	it("skips blank and malformed lines", () => {
@@ -529,6 +633,187 @@ describe("transcript-reader / readTranscript", () => {
 		assert.deepEqual((env.messages[0] as any).author, {
 			kind: "system", id: "system:bobbit", label: "Bobbit",
 		});
+	});
+});
+
+describe("transcript-reader / bounded regex worker pool", () => {
+	it("caps active workers and rejects queued count or corpus overload without spawning", async () => {
+		const clock = new ManualRegexClock();
+		const workers: FakeRegexWorker[] = [];
+		const pool = createTranscriptRegexPoolForTests({
+			maxActiveWorkers: 1,
+			maxQueuedJobs: 2,
+			maxQueuedCorpusUnits: 5,
+			wallTimeoutMs: 1_000,
+			clock,
+			workerFactory: () => {
+				const worker = new FakeRegexWorker(() => undefined);
+				workers.push(worker);
+				return worker;
+			},
+		});
+
+		const active = pool.search([["active"]], "never", false, 1).catch((error) => error);
+		const queuedAtCorpusCap = pool.search([["queued"]], "never", false, 5).catch((error) => error);
+		const corpusOverload = await pool.search([["too large"]], "never", false, 1).catch((error) => error);
+		const queuedAtCountCap = pool.search([[]], "never", false, 0).catch((error) => error);
+		const countOverload = await pool.search([[]], "never", false, 0).catch((error) => error);
+
+		assert.equal(workers.length, 1, "queued and rejected jobs must not construct more workers");
+		assert.deepEqual(pool.stats(), { activeWorkers: 1, queuedJobs: 2, queuedCorpusUnits: 5 });
+		assert.equal(corpusOverload instanceof TranscriptRegexSearchError && corpusOverload.code, "REGEX_SEARCH_OVERLOADED");
+		assert.equal(countOverload instanceof TranscriptRegexSearchError && countOverload.code, "REGEX_SEARCH_OVERLOADED");
+
+		pool.stop();
+		for (const outcome of await Promise.all([active, queuedAtCorpusCap, queuedAtCountCap])) {
+			assert.equal(outcome instanceof TranscriptRegexSearchError && outcome.code, "REGEX_SEARCH_STOPPED");
+		}
+		assert.equal(workers[0].terminateCount, 1);
+	});
+
+	it("times out, terminates unconditionally, and recovers for the next queued scan", async () => {
+		const clock = new ManualRegexClock();
+		const workers: FakeRegexWorker[] = [];
+		const constructorOptions: WorkerOptions[] = [];
+		const pool = createTranscriptRegexPoolForTests({
+			maxActiveWorkers: 1,
+			wallTimeoutMs: 25,
+			clock,
+			workerFactory: (_source, options) => {
+				constructorOptions.push(options);
+				const worker = workers.length === 0 ? new FakeRegexWorker(() => undefined) : protocolRegexWorker();
+				workers.push(worker);
+				return worker;
+			},
+			yieldToEventLoop: async () => undefined,
+		});
+
+		const timedOut = pool.search([["first"]], "first").catch((error) => error);
+		assert.deepEqual(constructorOptions[0].workerData, { modulePath: constructorOptions[0].workerData!.modulePath });
+		assert.equal(Object.prototype.hasOwnProperty.call(constructorOptions[0].workerData!, "pattern"), false);
+		assert.equal(Object.prototype.hasOwnProperty.call(constructorOptions[0].workerData!, "segmentsByMessage"), false);
+		assert.deepEqual(constructorOptions[0].resourceLimits, {
+			maxOldGenerationSizeMb: 64,
+			maxYoungGenerationSizeMb: 16,
+			stackSizeMb: 4,
+		});
+
+		clock.advance(25);
+		const timeoutError = await timedOut;
+		assert.equal(timeoutError instanceof TranscriptRegexSearchError && timeoutError.code, "REGEX_SEARCH_TIMEOUT");
+		assert.equal(workers[0].terminateCount, 1);
+
+		const recovered = await pool.search([["second has needle"]], "needle");
+		assert.deepEqual(recovered, [0]);
+		assert.equal(workers[1].terminateCount, 1);
+		assert.deepEqual(pool.stats(), { activeWorkers: 0, queuedJobs: 0, queuedCorpusUnits: 0 });
+		pool.stop();
+	});
+
+	for (const failure of ["error", "exit"] as const) {
+		it(`settles ${failure === "error" ? "worker errors" : "premature zero exits"}, terminates, and recovers`, async () => {
+			const workers: FakeRegexWorker[] = [];
+			const pool = createTranscriptRegexPoolForTests({
+				maxActiveWorkers: 1,
+				workerFactory: () => {
+					const worker = workers.length === 0
+						? new FakeRegexWorker((current, command) => {
+							if (command.kind === "init") {
+								queueMicrotask(() => failure === "error"
+									? current.emit("error", new Error("injected worker fault"))
+									: current.emit("exit", 0));
+							}
+						})
+						: protocolRegexWorker();
+					workers.push(worker);
+					return worker;
+				},
+				yieldToEventLoop: async () => undefined,
+			});
+
+			const failed = await pool.search([["first"]], "first").catch((error) => error);
+			assert.equal(failed instanceof TranscriptRegexSearchError && failed.code, "REGEX_WORKER_FAILED");
+			assert.match(failed.message, failure === "error" ? /injected worker fault/ : /exited before completing \(code 0\)/);
+			assert.equal(workers[0].terminateCount, 1);
+			assert.deepEqual(await pool.search([["recovered"]], "recovered"), [0]);
+			assert.equal(workers[1].terminateCount, 1);
+			pool.stop();
+		});
+	}
+
+	it("streams one bounded chunk at a time and yields while preserving whole-segment semantics", async () => {
+		const chunks: string[] = [];
+		let chunksInFlight = 0;
+		let maxChunksInFlight = 0;
+		let yields = 0;
+		let eventLoopTurns = 0;
+		let worker: FakeRegexWorker;
+		const pool = createTranscriptRegexPoolForTests({
+			maxActiveWorkers: 1,
+			chunkUnits: 7,
+			workerFactory: () => {
+				const protocol = protocolRegexWorker((pattern, text) => text === pattern);
+				const originalPost = protocol.postMessage.bind(protocol);
+				protocol.postMessage = (value: unknown): void => {
+					const command = value as FakeRegexCommand;
+					if (command.kind === "segment_chunk") {
+						chunksInFlight++;
+						maxChunksInFlight = Math.max(maxChunksInFlight, chunksInFlight);
+						chunks.push(command.text ?? "");
+						queueMicrotask(() => { chunksInFlight--; });
+					}
+					originalPost(value);
+				};
+				worker = protocol;
+				return protocol;
+			},
+			yieldToEventLoop: () => new Promise((resolve) => {
+				yields++;
+				setImmediate(() => {
+					eventLoopTurns++;
+					resolve();
+				});
+			}),
+		});
+		const wholeSegment = "prefix-BOUNDARY-crosses-chunks-suffix";
+		const manySegments = Array.from({ length: 24 }, (_, index) => `non-match-${index}`);
+		const matches = await pool.search([[...manySegments, wholeSegment], ["other"]], wholeSegment);
+
+		assert.deepEqual(matches, [0]);
+		assert.equal(chunks.join("").includes(wholeSegment), true);
+		assert.equal(chunks.every((chunk) => chunk.length <= 7), true);
+		assert.equal(maxChunksInFlight, 1, "the parent must wait for each worker ack");
+		assert.equal(eventLoopTurns, yields, "each cooperative transfer yield must advance the event loop");
+		assert.ok(yields > manySegments.length, "large and numerous segments must yield repeatedly");
+		assert.equal(worker!.terminateCount, 1);
+		pool.stop();
+	});
+
+	it("rejects oversized patterns before constructing a worker", async () => {
+		let workerConstructions = 0;
+		const pool = createTranscriptRegexPoolForTests({
+			workerFactory: () => {
+				workerConstructions++;
+				return protocolRegexWorker();
+			},
+		});
+		await assert.rejects(
+			() => pool.search([["text"]], "x".repeat(4097)),
+			(error: unknown) => error instanceof TranscriptReaderError && error.code === "invalid_params",
+		);
+		assert.equal(workerConstructions, 0);
+		let transcriptReads = 0;
+		await assert.rejects(
+			() => readTranscript({ pattern: "x".repeat(4097) }, {
+				readContent: async () => {
+					transcriptReads++;
+					return sample;
+				},
+			}),
+			(error: unknown) => error instanceof TranscriptReaderError && error.code === "invalid_params",
+		);
+		assert.equal(transcriptReads, 0, "oversized patterns must reject before transcript fetch or worker construction");
+		pool.stop();
 	});
 });
 
