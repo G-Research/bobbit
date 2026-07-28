@@ -5,6 +5,7 @@
  * so the footer/context bar never renders the hardcoded remote-agent placeholder
  * (or an older Claude Opus default) as authoritative state.
  */
+import { vi } from "vitest";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import {
 	apiFetch,
@@ -47,6 +48,22 @@ function expectNoStaleModelBeforeOpus5(messages: WsMsg[], context: string) {
 	expect(staleBeforeTarget, `${context}: stale/placeholder Opus state must not appear before ${OPUS_5.id}`).toEqual([]);
 }
 
+function expectOnlyCompleteOpus5Tuples(messages: WsMsg[], context: string) {
+	const modelFrames = messages.filter((message) => stateModelId(message) !== undefined);
+	expect(modelFrames.length, `${context}: expected at least one model state frame`).toBeGreaterThan(0);
+	expect(
+		modelFrames.map((message) => {
+			const state = message.data as any;
+			return {
+				provider: state.model.provider,
+				id: state.model.id,
+				thinkingLevel: state.thinkingLevel,
+			};
+		}),
+		`${context}: every model state frame must contain one complete authoritative tuple`,
+	).toEqual(modelFrames.map(() => OPUS_5));
+}
+
 async function waitForPersistedOpus5Xhigh(gateway: any, sessionId: string) {
 	await pollUntil(async () => {
 		const persisted = gateway.sessionManager.getPersistedSession(sessionId);
@@ -60,6 +77,27 @@ async function closeWs(ws: WsConnection) {
 	const closed = new Promise<void>(r => ws.ws.once("close", () => r()));
 	ws.close();
 	await closed;
+}
+
+async function prepareDurableOpus5Xhigh(gateway: any, sessionId: string): Promise<void> {
+	const ws = await connectWs(sessionId);
+	try {
+		const selectionCursor = ws.messageCount();
+		ws.send({
+			type: "set_model",
+			provider: OPUS_5.provider,
+			modelId: OPUS_5.id,
+			thinkingLevel: OPUS_5.thinkingLevel,
+		});
+		await ws.waitForFrom(selectionCursor, isOpus5XhighState, 10_000);
+		await waitForPersistedOpus5Xhigh(gateway, sessionId);
+
+		// Guarantee attach takes the proactive live getState path.
+		ws.send({ type: "prompt", text: "seed reconnect state hydration" });
+		await ws.waitFor(agentEndPredicate(), 10_000);
+	} finally {
+		await closeWs(ws);
+	}
 }
 
 test.describe("model state after reconnect", () => {
@@ -113,6 +151,56 @@ test.describe("model state after reconnect", () => {
 		).toBe(true);
 
 		ws2.close();
+	});
+
+	test("matching live model without thinking hydrates one complete durable tuple on reconnect and get_state", async ({ gateway }) => {
+		await prepareDurableOpus5Xhigh(gateway, sessionId);
+		const session = gateway.sessionManager.getSession(sessionId);
+		expect(session?.eventBuffer.size).toBeGreaterThan(0);
+		const getState = vi.spyOn(session!.rpcClient, "getState").mockResolvedValue({
+			success: true,
+			data: { model: { provider: OPUS_5.provider, id: OPUS_5.id } },
+		});
+		let ws: WsConnection | undefined;
+		try {
+			ws = await connectWs(sessionId);
+			await ws.waitFor((message) => stateModelId(message) !== undefined, 5_000);
+			expectOnlyCompleteOpus5Tuples(ws.messages, "proactive attach with matching model");
+
+			const cursor = ws.messageCount();
+			ws.send({ type: "get_state" });
+			await ws.waitForFrom(cursor, (message) => stateModelId(message) !== undefined, 5_000);
+			expectOnlyCompleteOpus5Tuples(ws.messages.slice(cursor), "explicit get_state with matching model");
+			expect(getState).toHaveBeenCalledTimes(2);
+		} finally {
+			getState.mockRestore();
+			ws?.close();
+		}
+	});
+
+	test("mismatched live model without thinking falls back before emitting any model tuple", async ({ gateway }) => {
+		await prepareDurableOpus5Xhigh(gateway, sessionId);
+		const session = gateway.sessionManager.getSession(sessionId);
+		expect(session?.eventBuffer.size).toBeGreaterThan(0);
+		const getState = vi.spyOn(session!.rpcClient, "getState").mockResolvedValue({
+			success: true,
+			data: { model: { provider: "anthropic", id: "claude-sonnet-5" } },
+		});
+		let ws: WsConnection | undefined;
+		try {
+			ws = await connectWs(sessionId);
+			await ws.waitFor((message) => stateModelId(message) !== undefined, 5_000);
+			expectOnlyCompleteOpus5Tuples(ws.messages, "proactive attach with mismatched model");
+
+			const cursor = ws.messageCount();
+			ws.send({ type: "get_state" });
+			await ws.waitForFrom(cursor, (message) => stateModelId(message) !== undefined, 5_000);
+			expectOnlyCompleteOpus5Tuples(ws.messages.slice(cursor), "explicit get_state with mismatched model");
+			expect(getState).toHaveBeenCalledTimes(2);
+		} finally {
+			getState.mockRestore();
+			ws?.close();
+		}
 	});
 
 	test("combined Opus 5/xhigh selection persists and reconnects without a stale model flash", async ({ gateway }) => {
