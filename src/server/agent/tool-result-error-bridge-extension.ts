@@ -399,7 +399,6 @@ function finalSerializedByteLengths(value, profile = transportProfile("", false)
     toolName: "read_session",
     content: value.content,
     details: value.details,
-    usage: value.usage,
     isError: profile.isError,
     timestamp: Number.MAX_SAFE_INTEGER,
   };
@@ -902,8 +901,6 @@ function actualValue(envelope, params) {
   return {
     content: [{ type: "text", text: JSON.stringify(envelope) }],
     details: actualDetails(envelope, params),
-    // Clear any listener/provider usage object before Agent merges the hook result.
-    usage: {},
   };
 }
 
@@ -1197,7 +1194,6 @@ function boundReadSessionError(result, profile = transportProfile("", true)) {
   const bounded = {
     content: [{ type: "text", text: JSON.stringify(payload) }],
     details: canonicalDetails,
-    usage: {},
     isError: true,
   };
   // Fixed field caps make this path comfortably fit, but retain a fail-closed
@@ -1206,7 +1202,6 @@ function boundReadSessionError(result, profile = transportProfile("", true)) {
   return {
     content: [{ type: "text", text: '{"error":"read_session_failed"}' }],
     details: {},
-    usage: {},
     isError: true,
   };
 }
@@ -1247,7 +1242,6 @@ function boundFinalReadSessionEvent(event, transformed, context) {
   const finalSnapshot = immutableSnapshot({
     content: bounded.content,
     details: bounded.details,
-    usage: bounded.usage,
     isError,
   });
   if (fits(finalSnapshot, profile)) return finalSnapshot;
@@ -1257,7 +1251,6 @@ function boundFinalReadSessionEvent(event, transformed, context) {
   return immutableSnapshot({
     content: fallback.content,
     details: fallback.details,
-    usage: fallback.usage,
     isError,
   });
 }
@@ -1461,7 +1454,6 @@ function fallbackReadSessionResult(context) {
   return immutableSnapshot({
     content: fallback.content,
     details: fallback.details,
-    usage: fallback.usage,
     isError: false,
   });
 }
@@ -1478,7 +1470,6 @@ function canonicalReadSessionMessage(message, runner, forcedContext) {
     input: context.params,
     content: safeMessage.content,
     details: safeMessage.details,
-    usage: safeMessage.usage,
     isError: safeMessage.isError === true,
   }, undefined, context) : fallbackReadSessionResult(context);
   const timestamp = typeof safeMessage.timestamp === "number" && Number.isFinite(safeMessage.timestamp)
@@ -1489,7 +1480,6 @@ function canonicalReadSessionMessage(message, runner, forcedContext) {
     toolName: "read_session",
     content: bounded.content,
     details: bounded.details,
-    usage: bounded.usage,
     isError: bounded.isError === true,
     timestamp,
   });

@@ -176,6 +176,14 @@ function persistOutcome(session: AgentSession) {
 	return { roundTrip, line, sessionFile };
 }
 
+function resultValueFromMessage(message: any): Record<string, unknown> {
+	const value: Record<string, unknown> = {};
+	for (const key of ["content", "details", "isError"] as const) {
+		if (Object.prototype.hasOwnProperty.call(message, key)) value[key] = message[key];
+	}
+	return value;
+}
+
 afterEach(() => {
 	for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
@@ -573,17 +581,34 @@ export default function (pi) {
 		assert.equal(persisted.isError, false);
 		assert.ok(bytes(emitted.result) <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
 		assert.ok(bytes(persisted) <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
-		assert.deepEqual(persisted.content, emitted.result.content);
-		assert.deepEqual(persisted.details, emitted.result.details);
-		assert.deepEqual(emitted.result.usage, {}, "provider usage metadata must be cleared at the final seam");
 		assert.equal(Object.isFrozen(emitted.result.content), true,
 			"the final listener-controlled value must be an immutable plain snapshot");
 
+		const stateMessage = success.state.messages.find((message) => message.role === "toolResult") as any;
+		assert.ok(stateMessage, "the canonical result must reach Agent state");
 		const successStored = persistOutcome(success);
-		const { roundTrip: persistedRoundTrip, sessionFile } = successStored;
+		const { roundTrip: persistedRoundTrip, line: persistedJsonlLine } = successStored;
+		const jsonlMessage = JSON.parse(persistedJsonlLine).message;
+		for (const [label, value] of [
+			["tool_execution_end", emitted.result],
+			["message_end", persisted],
+			["Agent state", stateMessage],
+			["SessionManager round trip", persistedRoundTrip],
+			["JSONL", jsonlMessage],
+		] as const) {
+			assert.deepEqual(resultValueFromMessage(value), emitted.result,
+				`${label} must retain the exact emitted canonical result`);
+			for (const key of [
+				"usage", "api", "provider", "model", "providerMetadata",
+				"thinkingSignature", "textSignature", "encryptedContent",
+			]) {
+				assert.equal(Object.prototype.hasOwnProperty.call(value, key), false,
+					`${label} must omit provider-only ${key} metadata`);
+				assert.equal(Object.prototype.hasOwnProperty.call((value as any).details, key), false,
+					`${label} details must omit provider-only ${key} metadata`);
+			}
+		}
 		assert.ok(bytes(persistedRoundTrip) <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
-		assert.deepEqual(persistedRoundTrip.content, persisted.content);
-		assert.deepEqual(persistedRoundTrip.details, JSON.parse(JSON.stringify(persisted.details)));
 
 		const projected = JSON.parse(persistedRoundTrip.content[0].text);
 		assert.equal(JSON.stringify(projected).includes("PROVIDER_SIGNATURE_MUST_NOT_SURVIVE"), false);
@@ -596,13 +621,11 @@ export default function (pi) {
 			"LATER_DETAILS_TEXT_SIGNATURE",
 			"LATER_ENCRYPTED_PROVIDER_BLOB",
 		];
-		const persistedJsonlLine = fs.readFileSync(sessionFile, "utf8")
-			.split(/\r?\n/)
-			.find((line) => line.includes('"role":"toolResult"'));
-		assert.ok(persistedJsonlLine);
 		assert.ok(Buffer.byteLength(persistedJsonlLine, "utf8") <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
 		for (const sentinel of downstreamProviderData) {
 			assert.equal(JSON.stringify(emitted.result).includes(sentinel), false);
+			assert.equal(JSON.stringify(persisted).includes(sentinel), false);
+			assert.equal(JSON.stringify(stateMessage).includes(sentinel), false);
 			assert.equal(JSON.stringify(persistedRoundTrip).includes(sentinel), false);
 			assert.equal(persistedJsonlLine.includes(sentinel), false);
 		}
