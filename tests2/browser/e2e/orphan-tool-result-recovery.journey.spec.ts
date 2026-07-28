@@ -21,7 +21,7 @@ const POISONED_HISTORY_ERROR =
 const RETRY_INTENT = "ORPHAN_BROWSER_RETRY_INTENT";
 const FOLLOW_UP_INTENT = "ORPHAN_BROWSER_FOLLOW_UP_INTENT";
 const PRESERVED_HISTORY = "Inspect the current test performance.";
-const MODEL = { provider: "anthropic", id: "claude-sonnet-4-20250514", thinkingLevel: "high" } as const;
+const MODEL = { provider: "anthropic", id: "claude-sonnet-4-5", thinkingLevel: "high" } as const;
 
 function affectedPiSequence(parentId: string | null = null, suffix = "initial"): Array<Record<string, unknown>> {
 	const userId = `msg-user-before-affected-turn-${suffix}`;
