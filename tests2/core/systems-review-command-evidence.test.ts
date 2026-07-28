@@ -175,5 +175,9 @@ describe("Systems review command evidence authority", () => {
 		expect(harnessSource).not.toContain("RegisteredSystemsReviewTargetTestInput");
 		expect(harnessSource).not.toContain("assertCapturedFinalMutationTarget");
 		expect(harnessSource).toContain("preparedSystemsExecutionId && !expectFailure");
+		const skippedCommandBranch = harnessSource.indexOf("else if (skipReason)");
+		const evidenceBegin = harnessSource.indexOf("const targetEvidence = preparedSystemsExecutionId");
+		expect(skippedCommandBranch).toBeGreaterThan(-1);
+		expect(evidenceBegin).toBeGreaterThan(skippedCommandBranch);
 	});
 });

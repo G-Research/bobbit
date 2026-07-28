@@ -76,7 +76,7 @@
     },
     {
       "path": "tests2/core/systems-review-command-evidence.test.ts",
-      "reason": "Command-phase evidence authority regressions pinning integration/browser-only immutable bindings, signed correlation rejection, production action/final-adapter provenance, zero/failed action and command denial, expect-failure exclusion, caller-label rejection, production-safe no-op behavior, and removal of the private caller-driven target-test runner.",
+      "reason": "Command-phase evidence authority regressions pinning integration/browser-only immutable bindings, signed correlation rejection, production action/final-adapter provenance, zero/failed action and command denial, skipped/expect-failure exclusion, caller-label rejection, production-safe no-op behavior, and removal of the private caller-driven target-test runner.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -85,7 +85,34 @@
     },
     {
       "path": "tests2/integration/systems-review-command-evidence-lifecycle.test.ts",
-      "reason": "Normal implementation-gate lifecycle coverage proving registered command evidence is collected before reviewer launch through the real GoalManager.mergeChild and final Git adapter, persists for bounded reader/finalization use, bypasses stale cache, and fails closed for unit, zero-action, and failed-command runs.",
+      "reason": "Normal implementation-gate lifecycle coverage proving registered command evidence is collected before reviewer launch through the real GoalManager.mergeChild and final Git adapter, persists across restart for bounded reader/finalization use, bypasses stale cache, and rejects wrong execution/head/coverage/action/adapter bindings.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/systems-review-command-evidence-negative-lifecycle.test.ts",
+      "reason": "Normal implementation-gate lifecycle negative coverage proving a unit command can execute the real GoalManager.mergeChild effect but cannot create or persist reviewer-visible exact-target assertions.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/systems-review-command-evidence-mismatch-lifecycle.test.ts",
+      "reason": "Normal implementation-gate lifecycle negative coverage proving the registered final Git adapter rejects wrong production target and scope invariants without performing or persisting the effect.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/systems-review-command-evidence-failed-lifecycle.test.ts",
+      "reason": "Normal implementation-gate lifecycle negative coverage proving a failed registered integration command discards genuine GoalManager.mergeChild captures and leaves the reviewer assertion set empty after restart.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
