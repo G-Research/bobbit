@@ -29,11 +29,12 @@ const SNAPSHOT_MAX_OBJECT_KEYS = 4096;
 const SNAPSHOT_MAX_STRING_UNITS = 2 * 1024 * 1024;
 const SNAPSHOT_MAX_WORK_UNITS = 4 * 1024 * 1024;
 const TOOL_CALL_ID_MAX_UNITS = 128;
+const CORRELATION_HASH_CHUNK_UNITS = 64 * 1024;
 const CALL_MAP_MAX_ENTRIES = 256;
 const CORRELATION_DIGEST_HEX_UNITS = 40;
 const CORRELATION_KEY_UNITS = 5 + CORRELATION_DIGEST_HEX_UNITS;
-const SHARED_RUNNER_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-runner-boundary.v6");
-const SHARED_AGENT_SESSION_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-agent-session-boundary.v2");
+const SHARED_RUNNER_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-runner-boundary.v7");
+const SHARED_AGENT_SESSION_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-agent-session-boundary.v3");
 const CALL_MAP_DIAGNOSTICS = Symbol.for("bobbit.tool-result.read-session-call-map-diagnostics.v1");
 const SNAPSHOT_OMITTED = Symbol("snapshot-omitted");
 const SNAPSHOT_REJECTED = Symbol("snapshot-rejected");
@@ -101,7 +102,7 @@ function boundedString(value, maxUnits) {
  * shared-DAG expansion, sparse-array walks, and deep inputs from monopolizing
  * the event loop or overflowing the stack.
  */
-function consumeSnapshot(value) {
+function consumeSnapshot(value, options) {
   const root = { value: undefined };
   const seen = new WeakSet();
   const stack = [{ source: value, parent: root, key: "value", arraySlot: false, depth: 0 }];
@@ -142,8 +143,10 @@ function consumeSnapshot(value) {
     seen.add(source);
 
     if (Array.isArray(source)) {
-      let length;
-      try { length = source.length; } catch { return SNAPSHOT_REJECTED; }
+      let lengthDescriptor;
+      try { lengthDescriptor = Object.getOwnPropertyDescriptor(source, "length"); } catch { return SNAPSHOT_REJECTED; }
+      if (!lengthDescriptor || !("value" in lengthDescriptor)) return SNAPSHOT_REJECTED;
+      const length = lengthDescriptor.value;
       if (!isSafeInteger(length) || length < 0 || length > SNAPSHOT_MAX_ARRAY_LENGTH) return SNAPSHOT_REJECTED;
       workUnits += length;
       if (workUnits > SNAPSHOT_MAX_WORK_UNITS) return SNAPSHOT_REJECTED;
@@ -152,7 +155,11 @@ function consumeSnapshot(value) {
       for (let index = length - 1; index >= 0; index -= 1) {
         let descriptor;
         try { descriptor = Object.getOwnPropertyDescriptor(source, String(index)); } catch { return SNAPSHOT_REJECTED; }
-        if (!descriptor || !("value" in descriptor)) continue;
+        if (!descriptor) continue;
+        if (!("value" in descriptor)) {
+          if (options?.rejectAccessors) return SNAPSHOT_REJECTED;
+          continue;
+        }
         stack.push({ source: descriptor.value, parent: out, key: index, arraySlot: true, depth: job.depth + 1 });
       }
       continue;
@@ -173,14 +180,19 @@ function consumeSnapshot(value) {
     job.parent[job.key] = out;
     for (let index = keys.length - 1; index >= 0; index -= 1) {
       const key = keys[index];
-      // JSON.stringify calls this hook instead of serializing measured data.
-      if (key === "toJSON") continue;
       workUnits += key.length;
       if (workUnits > SNAPSHOT_MAX_WORK_UNITS) return SNAPSHOT_REJECTED;
       let descriptor;
       try { descriptor = Object.getOwnPropertyDescriptor(source, key); } catch { return SNAPSHOT_REJECTED; }
-      if (!descriptor || !("value" in descriptor)) continue;
-      stack.push({ source: descriptor.value, parent: out, key, arraySlot: false, depth: job.depth + 1 });
+      if (!descriptor || !("value" in descriptor)) {
+        if (options?.rejectAccessors) return SNAPSHOT_REJECTED;
+        continue;
+      }
+      // JSON.stringify calls this hook instead of serializing measured data.
+      if (key === "toJSON") continue;
+      const replacements = options?.dataReplacements?.get(source);
+      const child = replacements?.has(key) ? replacements.get(key) : descriptor.value;
+      stack.push({ source: child, parent: out, key, arraySlot: false, depth: job.depth + 1 });
     }
   }
   return root.value === undefined ? SNAPSHOT_OMITTED : root.value;
@@ -224,8 +236,19 @@ function serializedByteLength(value) {
 
 function correlationDigest(value) {
   const hash = createHash("sha256").update("bobbit-read-session-tool-call-id-v2\\0", "utf8");
-  if (typeof value === "string") hash.update("string\\0", "utf8").update(value, "utf8");
-  else if (typeof value === "number" && Number.isFinite(value)) hash.update("number\\0" + value, "utf8");
+  if (typeof value === "string") {
+    hash.update("string\\0", "utf8");
+    for (let start = 0; start < value.length;) {
+      let end = Math.min(value.length, start + CORRELATION_HASH_CHUNK_UNITS);
+      if (end < value.length) {
+        const high = value.charCodeAt(end - 1);
+        const low = value.charCodeAt(end);
+        if (high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff) end -= 1;
+      }
+      hash.update(value.slice(start, end), "utf8");
+      start = end;
+    }
+  } else if (typeof value === "number" && Number.isFinite(value)) hash.update("number\\0" + value, "utf8");
   else if (typeof value === "boolean") hash.update("boolean\\0", "utf8").update(value ? "1" : "0", "utf8");
   else if (value === null) hash.update("null", "utf8");
   else if (value === undefined) hash.update("undefined", "utf8");
@@ -1310,9 +1333,10 @@ function replaceObjectInPlace(target, replacement, freeze) {
   let frozen;
   try { frozen = Object.isFrozen(target); } catch { return false; }
   if (frozen) {
-    // Never serialize a frozen listener-owned target: accessors and toJSON are
-    // still executable. Only a snapshot frozen by this boundary is trusted.
-    return boundaryOwnedSnapshots.has(target);
+    // Never serialize or compare a frozen listener-owned target: accessors and
+    // toJSON are still executable. A different boundary snapshot must replace
+    // the owning slot even when the current frozen target is boundary-owned.
+    return false;
   }
   try {
     const prototype = Object.getPrototypeOf(target);
@@ -1328,21 +1352,137 @@ function replaceObjectInPlace(target, replacement, freeze) {
   return true;
 }
 
+function ownDataField(source, key) {
+  if (!isObject(source)) return { valid: false, present: false, value: undefined };
+  let descriptor;
+  try { descriptor = Object.getOwnPropertyDescriptor(source, key); } catch {
+    return { valid: false, present: false, value: undefined };
+  }
+  if (!descriptor) return { valid: true, present: false, value: undefined };
+  if (!("value" in descriptor)) return { valid: false, present: true, value: undefined };
+  return { valid: true, present: true, value: descriptor.value };
+}
+
+function inspectAssistantReadSessionCalls(message) {
+  const role = ownDataField(message, "role");
+  if (!role.valid) return SNAPSHOT_REJECTED;
+  if (role.value !== "assistant") return [];
+  const content = ownDataField(message, "content");
+  if (!content.valid || !Array.isArray(content.value)) return SNAPSHOT_REJECTED;
+  let lengthDescriptor;
+  try { lengthDescriptor = Object.getOwnPropertyDescriptor(content.value, "length"); } catch {
+    return SNAPSHOT_REJECTED;
+  }
+  const length = lengthDescriptor && "value" in lengthDescriptor ? lengthDescriptor.value : undefined;
+  if (!isSafeInteger(length) || length < 0 || length > SNAPSHOT_MAX_ARRAY_LENGTH) return SNAPSHOT_REJECTED;
+  const calls = [];
+  for (let index = 0; index < length; index += 1) {
+    let blockDescriptor;
+    try { blockDescriptor = Object.getOwnPropertyDescriptor(content.value, String(index)); } catch {
+      return SNAPSHOT_REJECTED;
+    }
+    if (!blockDescriptor) continue;
+    if (!("value" in blockDescriptor) || !isObject(blockDescriptor.value)) return SNAPSHOT_REJECTED;
+    const block = blockDescriptor.value;
+    const type = ownDataField(block, "type");
+    if (!type.valid) return SNAPSHOT_REJECTED;
+    if (type.value !== "toolCall") continue;
+    const name = ownDataField(block, "name");
+    if (!name.valid) return SNAPSHOT_REJECTED;
+    if (typeof name.value !== "string" || name.value.length > 64 || name.value.toLowerCase() !== "read_session") continue;
+    const id = ownDataField(block, "id");
+    if (!id.valid) return SNAPSHOT_REJECTED;
+    calls.push({ block, index, identity: correlationIdentity(id.value) });
+  }
+  return calls;
+}
+
+function assistantFallbackMessage(message, calls) {
+  const content = calls.map((call) => {
+    const argumentsField = ownDataField(call.block, "arguments");
+    const inputField = ownDataField(call.block, "input");
+    const input = argumentsField.valid && isObject(argumentsField.value)
+      ? argumentsField.value : (inputField.valid && isObject(inputField.value) ? inputField.value : {});
+    return {
+      type: "toolCall",
+      id: call.identity.toolCallId,
+      name: "read_session",
+      arguments: boundedCallParams(input),
+    };
+  });
+  const out = {
+    role: "assistant",
+    content,
+    usage: {},
+    stopReason: "toolUse",
+    timestamp: 0,
+  };
+  for (const key of ["api", "provider", "model"]) {
+    const field = ownDataField(message, key);
+    const bounded = field.valid ? boundedString(field.value, 128) : undefined;
+    if (bounded) out[key] = bounded.text;
+  }
+  const timestamp = ownDataField(message, "timestamp");
+  if (timestamp.valid && typeof timestamp.value === "number" && Number.isFinite(timestamp.value)) {
+    out.timestamp = timestamp.value;
+  }
+  return out;
+}
+
+function normalizeAssistantReadSessionCalls(message, runner, inspectedCalls) {
+  const calls = inspectedCalls || inspectAssistantReadSessionCalls(message);
+  if (calls === SNAPSHOT_REJECTED || calls.length === 0) return undefined;
+  const dataReplacements = new WeakMap();
+  for (const call of calls) dataReplacements.set(call.block, new Map([["id", call.identity.toolCallId]]));
+  let snapshot = consumeSnapshot(message, { rejectAccessors: true, dataReplacements });
+  const usedFallback = !isObject(snapshot);
+  if (usedFallback) snapshot = assistantFallbackMessage(message, calls);
+  for (let index = 0; index < calls.length; index += 1) {
+    const call = calls[index];
+    const blockIndex = usedFallback ? index : call.index;
+    const block = Array.isArray(snapshot.content) ? snapshot.content[blockIndex] : undefined;
+    if (!isObject(block)) continue;
+    const input = isObject(block.arguments) ? block.arguments : (isObject(block.input) ? block.input : {});
+    block.id = rememberReadSessionCall(runner, call.identity.toolCallId, input, call.identity);
+  }
+  return ownImmutableSnapshot(snapshot);
+}
+
+function toolResultMessageContext(runner, message) {
+  const role = ownDataField(message, "role");
+  const toolCallId = ownDataField(message, "toolCallId");
+  const toolName = ownDataField(message, "toolName");
+  if (!role.valid || !toolCallId.valid || !toolName.valid || role.value !== "toolResult") return undefined;
+  return readSessionContext(runner, toolCallId.value, toolName.value);
+}
+
+function fallbackReadSessionResult(context) {
+  const fallback = unrecognizedResult({}, context.params, Number.MAX_SAFE_INTEGER);
+  return immutableSnapshot({
+    content: fallback.content,
+    details: fallback.details,
+    usage: fallback.usage,
+    isError: false,
+  });
+}
+
 function canonicalReadSessionMessage(message, runner, forcedContext) {
-  const context = forcedContext || readSessionContext(runner, message?.toolCallId, message?.toolName);
-  if (!context || !isObject(message)) return undefined;
-  const bounded = boundFinalReadSessionEvent({
+  const snapshot = consumeSnapshot(message, { rejectAccessors: true });
+  const context = forcedContext || (isObject(snapshot) ? toolResultMessageContext(runner, snapshot) : undefined);
+  if (!context) return undefined;
+  const safeMessage = isObject(snapshot) ? snapshot : {};
+  const bounded = isObject(snapshot) ? boundFinalReadSessionEvent({
     type: "tool_result",
     toolCallId: context.toolCallId,
     toolName: "read_session",
     input: context.params,
-    content: message.content,
-    details: message.details,
-    usage: message.usage,
-    isError: message.isError === true,
-  }, undefined, context);
-  const timestamp = typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
-    ? message.timestamp : 0;
+    content: safeMessage.content,
+    details: safeMessage.details,
+    usage: safeMessage.usage,
+    isError: safeMessage.isError === true,
+  }, undefined, context) : fallbackReadSessionResult(context);
+  const timestamp = typeof safeMessage.timestamp === "number" && Number.isFinite(safeMessage.timestamp)
+    ? safeMessage.timestamp : 0;
   return immutableSnapshot({
     role: "toolResult",
     toolCallId: context.toolCallId,
@@ -1355,48 +1495,45 @@ function canonicalReadSessionMessage(message, runner, forcedContext) {
   });
 }
 
-function assistantHasReadSessionCall(message) {
-  return isObject(message) && message.role === "assistant" && Array.isArray(message.content)
-    && message.content.some((block) => isObject(block) && block.type === "toolCall"
-      && String(block.name || "").toLowerCase() === "read_session");
+function replaceBoundarySlot(target, key, replacement, freeze) {
+  if (!isObject(target)) return false;
+  let descriptor;
+  try { descriptor = Object.getOwnPropertyDescriptor(target, key); } catch { return false; }
+  if (descriptor && "value" in descriptor && isObject(descriptor.value)
+    && replaceObjectInPlace(descriptor.value, replacement, freeze)) return true;
+  const next = descriptor
+    ? { ...descriptor, value: replacement }
+    : { value: replacement, writable: true, enumerable: true, configurable: true };
+  delete next.get;
+  delete next.set;
+  try { return Reflect.defineProperty(target, key, next); } catch { return false; }
 }
 
-function normalizeAssistantReadSessionCalls(message, runner) {
-  if (!assistantHasReadSessionCall(message)) return undefined;
-  const snapshot = consumeSnapshot(message);
-  if (!isObject(snapshot)) return undefined;
-  let found = false;
-  for (const block of snapshot.content) {
-    if (!isObject(block) || block.type !== "toolCall" || String(block.name || "").toLowerCase() !== "read_session") continue;
-    const input = isObject(block.arguments) ? block.arguments : (isObject(block.input) ? block.input : {});
-    block.id = rememberReadSessionCall(runner, block.id, input);
-    found = true;
-  }
-  return found ? ownImmutableSnapshot(snapshot) : undefined;
+function replaceBoundaryScalar(target, key, replacement) {
+  if (!isObject(target)) return false;
+  let descriptor;
+  try { descriptor = Object.getOwnPropertyDescriptor(target, key); } catch { return false; }
+  const next = descriptor
+    ? { ...descriptor, value: replacement }
+    : { value: replacement, writable: true, enumerable: true, configurable: true };
+  delete next.get;
+  delete next.set;
+  try { return Reflect.defineProperty(target, key, next); } catch { return false; }
 }
 
-function toolResultMessageContext(runner, message) {
-  if (!isObject(message) || message.role !== "toolResult") return undefined;
-  return readSessionContext(runner, message.toolCallId, message.toolName);
-}
-
-function enforceResultTarget(event, context) {
-  const bounded = boundFinalReadSessionEvent({
-    ...event,
-    toolCallId: context.toolCallId,
-    toolName: "read_session",
-    input: context.params,
-    isError: event.isError === true,
-  }, event.result, context);
-  if (!replaceObjectInPlace(event.result, bounded, true)) {
-    // A listener may replace the result with a hostile frozen object. Replace
-    // the boundary-owned event slot rather than inspecting or serializing it.
-    try { event.result = bounded; } catch { /* fail closed below */ }
-    if (event.result !== bounded) {
-      throw new Error("read_session result could not be secured after extension handlers");
-    }
-  }
-  event.isError = bounded.isError === true;
+function enforceResultTarget(event, context, safeFallback) {
+  const snapshot = consumeSnapshot(event, { rejectAccessors: true });
+  const bounded = isObject(snapshot) && isObject(snapshot.result)
+    ? boundFinalReadSessionEvent({
+      type: "tool_result",
+      toolCallId: context.toolCallId,
+      toolName: "read_session",
+      input: context.params,
+      isError: snapshot.isError === true,
+    }, snapshot.result, context)
+    : (safeFallback || fallbackReadSessionResult(context));
+  replaceBoundarySlot(event, "result", bounded, true);
+  replaceBoundaryScalar(event, "isError", bounded.isError === true);
   return bounded;
 }
 
@@ -1407,27 +1544,34 @@ function installAgentSessionBoundary(imported) {
   const originalEmitExtensionEvent = prototype._emitExtensionEvent;
   prototype._emitExtensionEvent = async function bobbitBoundAgentSessionEvent(event, ...args) {
     const runner = this._extensionRunner;
-    const toolEndContext = event?.type === "tool_execution_end"
-      ? readSessionContext(runner, event.toolCallId, event.toolName) : undefined;
-    const messageContext = event?.type === "message_end"
-      ? toolResultMessageContext(runner, event.message) : undefined;
+    const typeField = ownDataField(event, "type");
+    const eventType = typeField.valid ? typeField.value : undefined;
+    const toolCallId = ownDataField(event, "toolCallId");
+    const toolName = ownDataField(event, "toolName");
+    const messageField = ownDataField(event, "message");
+    const toolEndContext = eventType === "tool_execution_end" && toolCallId.valid && toolName.valid
+      ? readSessionContext(runner, toolCallId.value, toolName.value) : undefined;
+    const messageContext = eventType === "message_end" && messageField.valid
+      ? toolResultMessageContext(runner, messageField.value) : undefined;
+    const assistantCalls = eventType === "message_end" && messageField.valid
+      ? inspectAssistantReadSessionCalls(messageField.value) : [];
+    const safeToolFallback = toolEndContext ? enforceResultTarget(event, toolEndContext) : undefined;
+    const safeMessageFallback = messageContext
+      ? canonicalReadSessionMessage(messageField.value, runner, messageContext)
+      : (assistantCalls !== SNAPSHOT_REJECTED && assistantCalls.length > 0
+        ? normalizeAssistantReadSessionCalls(messageField.value, runner, assistantCalls) : undefined);
     await originalEmitExtensionEvent.call(this, event, ...args);
 
-    if (toolEndContext && isObject(event.result)) {
-      enforceResultTarget(event, toolEndContext);
-    }
-    if (event?.type === "message_end" && isObject(event.message)) {
+    if (toolEndContext) enforceResultTarget(event, toolEndContext, safeToolFallback);
+    if (eventType === "message_end" && safeMessageFallback) {
+      const postEvent = consumeSnapshot(event, { rejectAccessors: true });
+      const postMessage = isObject(postEvent) ? postEvent.message : undefined;
       const canonical = messageContext
-        ? canonicalReadSessionMessage(event.message, runner, messageContext)
-        : normalizeAssistantReadSessionCalls(event.message, runner);
-      if (canonical && !replaceObjectInPlace(event.message, canonical, true)) {
-        try { event.message = canonical; } catch { /* fail closed below */ }
-        if (event.message !== canonical) {
-          throw new Error("read_session message could not be secured before state persistence");
-        }
-      }
+        ? canonicalReadSessionMessage(postMessage, runner, messageContext)
+        : normalizeAssistantReadSessionCalls(postMessage, runner);
+      replaceBoundarySlot(event, "message", canonical || safeMessageFallback, true);
     }
-    if (event?.type === "agent_end") callMap(runner)?.clear();
+    if (eventType === "agent_end") callMap(runner)?.clear();
   };
   Object.defineProperty(prototype, SHARED_AGENT_SESSION_BOUNDARY_MARKER, { value: true });
 }
@@ -1464,27 +1608,43 @@ async function installSharedRunnerBoundary() {
       return context ? boundFinalReadSessionEvent(event, transformed, context) : transformed;
     };
     prototype.emit = async function bobbitBoundLaterExtensionEvent(event, ...args) {
-      const context = event?.type === "tool_execution_end"
-        ? readSessionContext(this, event.toolCallId, event.toolName) : undefined;
-      if (context && isObject(event.result)) enforceResultTarget(event, context);
+      const type = ownDataField(event, "type");
+      const toolCallId = ownDataField(event, "toolCallId");
+      const toolName = ownDataField(event, "toolName");
+      const context = type.valid && type.value === "tool_execution_end" && toolCallId.valid && toolName.valid
+        ? readSessionContext(this, toolCallId.value, toolName.value) : undefined;
+      const safeFallback = context ? enforceResultTarget(event, context) : undefined;
       const result = await originalEmit.call(this, event, ...args);
-      if (context && isObject(event.result)) enforceResultTarget(event, context);
+      if (context) {
+        enforceResultTarget(event, context, safeFallback);
+        const resultSnapshot = consumeSnapshot(result, { rejectAccessors: true });
+        return resultSnapshot === SNAPSHOT_OMITTED || resultSnapshot === SNAPSHOT_REJECTED
+          ? undefined : ownImmutableSnapshot(resultSnapshot);
+      }
       return result;
     };
     prototype.emitMessageEnd = async function bobbitBoundFinalMessageEnd(event, ...args) {
-      const resultContext = toolResultMessageContext(this, event?.message);
-      const hasAssistantCall = assistantHasReadSessionCall(event?.message);
+      const message = ownDataField(event, "message");
+      const resultContext = message.valid ? toolResultMessageContext(this, message.value) : undefined;
+      const assistantCalls = message.valid ? inspectAssistantReadSessionCalls(message.value) : SNAPSHOT_REJECTED;
+      const hasAssistantCall = assistantCalls !== SNAPSHOT_REJECTED && assistantCalls.length > 0;
       if (!resultContext && !hasAssistantCall) return originalEmitMessageEnd.call(this, event, ...args);
-      const working = consumeSnapshot(event.message);
-      if (!isObject(working)) {
-        if (resultContext) return canonicalReadSessionMessage(event.message, this, resultContext);
-        throw new Error("read_session assistant call could not be safely snapshotted");
+      const working = resultContext
+        ? canonicalReadSessionMessage(message.value, this, resultContext)
+        : normalizeAssistantReadSessionCalls(message.value, this, assistantCalls);
+      if (!working) {
+        return resultContext ? canonicalReadSessionMessage({}, this, resultContext) : undefined;
       }
-      const transformed = await originalEmitMessageEnd.call(this, { ...event, message: working }, ...args);
-      const candidate = isObject(transformed) ? transformed : working;
-      return resultContext
-        ? canonicalReadSessionMessage(candidate, this, resultContext)
-        : normalizeAssistantReadSessionCalls(candidate, this);
+      const transformed = await originalEmitMessageEnd.call(this, { type: "message_end", message: working }, ...args);
+      if (resultContext) {
+        const transformedSnapshot = consumeSnapshot(transformed, { rejectAccessors: true });
+        return canonicalReadSessionMessage(isObject(transformedSnapshot) ? transformedSnapshot : working, this, resultContext);
+      }
+      const transformedCalls = inspectAssistantReadSessionCalls(transformed);
+      if (transformedCalls !== SNAPSHOT_REJECTED && transformedCalls.length > 0) {
+        return normalizeAssistantReadSessionCalls(transformed, this, transformedCalls);
+      }
+      return normalizeAssistantReadSessionCalls(working, this);
     };
     Object.defineProperty(prototype, SHARED_RUNNER_BOUNDARY_MARKER, { value: true });
   } catch {
