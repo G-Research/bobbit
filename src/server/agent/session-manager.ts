@@ -7481,21 +7481,28 @@ export class SessionManager {
 
 		// Pin model + thinking level at spawn so pi-coding-agent doesn't emit a
 		// redundant initial `model_change` event with its hardcoded default. A durable
-		// or role/default candidate must still exist in Bobbit's current selectable
-		// catalog; otherwise initial setup uses the deterministic catalog default.
+		// tuple is an exact verified selection: catalog drift must fail before bridge
+		// construction rather than silently substituting a different current default.
 		const psPersistedModel = ps.modelProvider && ps.modelId ? normalizeAigwModelString(`${ps.modelProvider}/${ps.modelId}`) : undefined;
 		// Preserve the pre-validation candidate ordering pinned by the legacy restore
-		// canary; resolveCurrentCatalogSpawnModel below is the final spawn authority.
+		// canary; the exact validator below is the final spawn authority.
 		if (psPersistedModel && isSpawnPinnableModelString(psPersistedModel)) {
 			bridgeOptions.initialModel = psPersistedModel;
 		}
 		const restoreInitialModel = this.resolveInitialModel(ps.role, ps.projectId);
 		const restoreDefaultModel = this.resolveInitialModel(undefined, ps.projectId);
-		bridgeOptions.initialModel = await this.resolveCurrentCatalogSpawnModel([
-			bridgeOptions.initialModel,
-			restoreInitialModel,
-			restoreDefaultModel,
-		]);
+		const rawRestoreRoleModel = ps.role
+			? this.resolveRoleModelValue(ps.role, ps.projectId)
+			: undefined;
+		const rawRestoreDefaultModel = this.preferencesStore?.get("default.sessionModel") as string | undefined;
+		const exactRestoreModel = psPersistedModel ?? rawRestoreRoleModel ?? rawRestoreDefaultModel;
+		bridgeOptions.initialModel = exactRestoreModel
+			? await this.requireCurrentCatalogSpawnModel(exactRestoreModel)
+			: await this.resolveCurrentCatalogSpawnModel([
+				bridgeOptions.initialModel,
+				restoreInitialModel,
+				restoreDefaultModel,
+			]);
 		if (bridgeOptions.initialModel === psPersistedModel && psPersistedModel) {
 			const slash = psPersistedModel.indexOf("/");
 			const normalizedProvider = psPersistedModel.slice(0, slash);
@@ -7822,7 +7829,15 @@ export class SessionManager {
 			? this.scopedGatewayEnvForDirectAgent(id, projectId, goalId ?? opts?.teamGoalId ?? opts?.env?.BOBBIT_GOAL_ID)
 			: undefined;
 		const initialRole = opts?.role ?? opts?.roleName;
+		const rawInitialRoleModel = !opts?.skipAutoModel && initialRole
+			? this.resolveRoleModelValue(initialRole, projectId)
+			: undefined;
+		const rawInitialDefaultModel = !opts?.skipAutoModel
+			? this.preferencesStore?.get("default.sessionModel") as string | undefined
+			: undefined;
 		let rawSelectedSpawnModel = opts?.initialModel
+			?? rawInitialRoleModel
+			?? rawInitialDefaultModel
 			?? (!opts?.skipAutoModel ? this.resolveInitialModel(initialRole, projectId) : undefined);
 		let currentModels: Awaited<ReturnType<typeof getAvailableModels>> | undefined;
 		// A normal Bobbit spawn must bind one of Bobbit's current catalog rows
@@ -7841,16 +7856,10 @@ export class SessionManager {
 			? normalizeAigwModelString(rawSelectedSpawnModel)
 			: undefined;
 		if (selectedSpawnModel) {
-			const slash = selectedSpawnModel.indexOf("/");
-			const provider = slash > 0 ? selectedSpawnModel.slice(0, slash) : "";
-			const modelId = slash > 0 ? selectedSpawnModel.slice(slash + 1) : "";
-			if (!provider || !modelId || !this.preferencesStore) {
-				throw new Error(`Initial model "${sanitizeModelErrorText(selectedSpawnModel)}" is not currently available for session selection`);
-			}
-			currentModels ??= await getAvailableModels(this.preferencesStore);
-			if (!findSessionSelectableModel(currentModels, provider, modelId)) {
-				throw new Error(`Initial model "${sanitizeModelErrorText(selectedSpawnModel)}" is not currently available for session selection`);
-			}
+			currentModels ??= this.preferencesStore
+				? await getAvailableModels(this.preferencesStore)
+				: undefined;
+			await this.requireCurrentCatalogSpawnModel(selectedSpawnModel, currentModels);
 		}
 		const exactInitialThinkingLevel = opts?.skipAutoThinking && !opts?.initialThinkingLevel
 			? undefined
@@ -8116,7 +8125,8 @@ export class SessionManager {
 		/**
 		 * Model / thinking-level inheritance (fixes the delegate model-default
 		 * drop, §2.2). The core resolves the owner's CURRENT model and forwards
-		 * it here. When omitted, the agent CLI falls back to its own default.
+		 * it here. A tuple-less legacy parent uses Bobbit's deterministic catalog
+		 * selection; Pi never chooses an implicit provider.
 		 */
 		initialModel?: string;
 		initialThinkingLevel?: string;
@@ -8218,9 +8228,20 @@ export class SessionManager {
 		const parentDurableModel = parentMeta?.modelProvider && parentMeta.modelId
 			? normalizeAigwModelString(`${parentMeta.modelProvider}/${parentMeta.modelId}`)
 			: undefined;
-		const delegateInitialModel = opts.initialModel
+		const rawDelegateRoleModel = opts.role
+			? this.resolveRoleModelValue(opts.role, parentProjectId)
+			: undefined;
+		const rawDelegateDefaultModel = this.preferencesStore?.get("default.sessionModel") as string | undefined;
+		const exactDelegateModel = opts.initialModel
 			?? parentDurableModel
-			?? this.resolveInitialModel(opts.role, parentProjectId);
+			?? rawDelegateRoleModel
+			?? rawDelegateDefaultModel;
+		// Explicit delegate/role selections and parent durability are mandatory.
+		// Only a genuinely tuple-less legacy parent may use deterministic catalog
+		// selection, and validation happens before executePlan can persist or spawn.
+		const delegateInitialModel = exactDelegateModel
+			? await this.requireCurrentCatalogSpawnModel(exactDelegateModel)
+			: await this.resolveCurrentCatalogSpawnModel([]);
 		const delegateThinkingCandidate = opts.initialThinkingLevel
 			?? (opts.role ? undefined : parentMeta?.effectiveThinkingLevel);
 		const delegateInitialThinking = this.resolveThinkingLevelForModel(
@@ -8687,6 +8708,31 @@ export class SessionManager {
 			if (isSpawnPinnableModelString(normalized)) return normalized;
 		}
 		return undefined;
+	}
+
+	/** Require one exact provider/model tuple to remain in Bobbit's current catalog. */
+	private async requireCurrentCatalogSpawnModel(
+		model: string,
+		models?: Awaited<ReturnType<typeof getAvailableModels>>,
+	): Promise<string> {
+		const normalized = normalizeAigwModelString(model);
+		const slash = normalized.indexOf("/");
+		const unavailable = (): Error => new Error(
+			`Model ${sanitizeModelErrorText(normalized)} is not currently available for session selection`,
+		);
+		if (
+			slash <= 0
+			|| slash === normalized.length - 1
+			|| !isSpawnPinnableModelString(normalized)
+			|| !this.preferencesStore
+		) {
+			throw unavailable();
+		}
+		const currentModels = models ?? await getAvailableModels(this.preferencesStore);
+		if (!findSessionSelectableModel(currentModels, normalized.slice(0, slash), normalized.slice(slash + 1))) {
+			throw unavailable();
+		}
+		return normalized;
 	}
 
 	/**
@@ -9748,17 +9794,19 @@ export class SessionManager {
 				? normalizeAigwModelString(`${respawnPersisted.modelProvider}/${respawnPersisted.modelId}`)
 				: undefined;
 		const rawRoleModel = this.resolveRoleModelValue(role.name, session.projectId);
-		const roleModel = rawRoleModel && /^[^/]+\/.+$/.test(rawRoleModel)
+		const roleModel = rawRoleModel
 			? normalizeAigwModelString(rawRoleModel)
 			: undefined;
 		const roleInitialModel = this.resolveInitialModel(role.name, session.projectId);
 		const roleDefaultModel = this.resolveInitialModel(undefined, session.projectId);
-		bridgeOptions.initialModel = await this.resolveCurrentCatalogSpawnModel([
-			roleModel,
-			respawnPersistedModel,
-			roleInitialModel,
-			roleDefaultModel,
-		]);
+		const rawRoleDefaultModel = this.preferencesStore?.get("default.sessionModel") as string | undefined;
+		const exactRoleReplacementModel = roleModel ?? respawnPersistedModel ?? rawRoleDefaultModel;
+		bridgeOptions.initialModel = exactRoleReplacementModel
+			? await this.requireCurrentCatalogSpawnModel(exactRoleReplacementModel)
+			: await this.resolveCurrentCatalogSpawnModel([
+				roleInitialModel,
+				roleDefaultModel,
+			]);
 		const roleModelPinned = !!roleModel && bridgeOptions.initialModel === roleModel;
 		const initThinking = this.resolveThinkingLevelForModel(
 			bridgeOptions.initialModel,
@@ -12178,11 +12226,19 @@ export class SessionManager {
 					: undefined;
 			const forceInitialModel = this.resolveInitialModel(session.role, session.projectId);
 			const forceDefaultModel = this.resolveInitialModel(undefined, session.projectId);
-			bridgeOptions.initialModel = await this.resolveCurrentCatalogSpawnModel([
-				forceRespawnPersistedModel,
-				forceInitialModel,
-				forceDefaultModel,
-			]);
+			const rawForceRoleModel = session.role
+				? this.resolveRoleModelValue(session.role, session.projectId)
+				: undefined;
+			const rawForceDefaultModel = this.preferencesStore?.get("default.sessionModel") as string | undefined;
+			const exactForceReplacementModel = forceRespawnPersistedModel
+				?? rawForceRoleModel
+				?? rawForceDefaultModel;
+			bridgeOptions.initialModel = exactForceReplacementModel
+				? await this.requireCurrentCatalogSpawnModel(exactForceReplacementModel)
+				: await this.resolveCurrentCatalogSpawnModel([
+					forceInitialModel,
+					forceDefaultModel,
+				]);
 			const initThinking = this.resolveThinkingLevelForModel(
 				bridgeOptions.initialModel,
 				session.role,
