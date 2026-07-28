@@ -11,7 +11,6 @@ import {
 	GoalProposalRouteFixture,
 	VALIDATION_PROJECT_WORKFLOWS,
 } from "./_proposal-goal-route-fixture.js";
-import { testSystemsInteractionReviewStep } from "../harness/systems-review-workflow.js";
 
 const INLINE_WORKFLOW = {
 	id: "bespoke-seed-inline-e2e",
@@ -31,7 +30,6 @@ const INLINE_WORKFLOW = {
 			verify: [
 				{ name: "implementation-check", type: "command", run: "echo implementation" },
 				{ name: "Inline QA", type: "command", run: "echo inline qa", optional: true, optionalLabel: "Enable Inline QA" },
-				testSystemsInteractionReviewStep(),
 			],
 		},
 		{

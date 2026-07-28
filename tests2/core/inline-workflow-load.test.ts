@@ -23,7 +23,6 @@ import { WorkflowManager } from "../../src/server/agent/workflow-manager.ts";
 import { GoalManager } from "../../src/server/agent/goal-manager.ts";
 import { GoalStore } from "../../src/server/agent/goal-store.ts";
 import { createMemFs, type MemFs } from "../harness/mem-fs.js";
-import { testSystemsInteractionReviewStep } from "../harness/systems-review-workflow.js";
 
 let memfs: MemFs;
 const tmpRoot = path.resolve("/memfs/inline-workflow-test/work");
@@ -57,7 +56,6 @@ describe("InlineWorkflowStore — reads from project.yaml::workflows", () => {
 					gates: [
 						{ id: "implementation", name: "Implementation", verify: [
 							{ name: "Build", type: "command", component: "myapp", command: "build" },
-							testSystemsInteractionReviewStep(),
 						] },
 					],
 				},

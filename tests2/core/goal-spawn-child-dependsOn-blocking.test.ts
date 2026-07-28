@@ -35,7 +35,6 @@ import { InlineWorkflowStore } from "../../src/server/agent/workflow-store.ts";
 import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../../src/server/agent/nested-goal-routes.ts";
 import { ChildTeamScheduler } from "../../src/server/agent/child-team-scheduler.ts";
 import { CookieStore } from "../../src/server/auth/cookie.ts";
-import { testSystemsInteractionReviewStep } from "../harness/systems-review-workflow.js";
 
 interface Harness {
 	tmpRoot: string;
@@ -74,7 +73,7 @@ async function makeHarness(): Promise<Harness> {
 		{
 			id: "feature", name: "Feature", description: "",
 			gates: [
-				{ id: "implementation", name: "Implementation", dependsOn: [], verify: [testSystemsInteractionReviewStep()] },
+				{ id: "implementation", name: "Implementation", dependsOn: [] },
 				{ id: "ready-to-merge", name: "Ready", dependsOn: ["implementation"] },
 			],
 			createdAt: 0, updatedAt: 0,

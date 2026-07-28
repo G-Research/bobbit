@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { spawnTracked, killAllTracked, killTreeByPid, type TrackedChild } from "./spawn-tree.js";
 import { realClock, realCommandRunner, type Clock, type CommandRunner, type TimerHandle } from "../gateway-deps.js";
@@ -170,23 +170,6 @@ import { Semaphore } from "./semaphore.js";
 import { ChildTeamScheduler } from "./child-team-scheduler.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
 import { buildVerificationFailureMessage } from "./notify-team-lead-failure.js";
-import { createSystemsReviewSnapshot, assertSystemsReviewSnapshotCurrent } from "./systems-review-snapshot.js";
-import {
-	SystemsReviewExecutionStore,
-	SystemsReviewExecutionStoreError,
-	type PersistedSystemsReviewExecution,
-} from "./systems-review-store.js";
-import type { SystemsReviewReadRequest, SystemsReviewResultSubmission } from "./systems-review-types.js";
-import {
-	FINAL_MUTATION_TARGET_CORRELATION_ENV,
-	FinalMutationTargetCommandEvidenceBroker,
-	type FinalMutationTargetCommandCapability,
-} from "./systems-review-target-evidence.js";
-import {
-	SystemsReviewWriterLeaseCoordinator,
-	systemsReviewWriterLeaseCoordinator,
-	type SystemsReviewWriterLease,
-} from "./systems-review-lease.js";
 
 import { buildVerificationReviewerMeta } from "./verification-reviewer-meta.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
@@ -411,26 +394,6 @@ type ReviewStepExecutionResult = {
 	timeout?: VerificationTimeoutInfo;
 };
 
-type LlmReviewStepInput = {
-	name: string;
-	prompt?: string;
-	timeout?: number;
-	role?: string;
-	promptRef?: string;
-	promptId?: string;
-	promptSha256?: string;
-	resolvedPrompt?: string;
-};
-
-type SystemsReviewRuntimeContext = {
-	signalId: string;
-	gateId: string;
-	stepIndex: number;
-	baseBranch: string;
-	/** Existing logical execution reused by a restart/budget continuation. */
-	executionId?: string;
-};
-
 function execOutputToString(value: unknown): string {
 	if (Buffer.isBuffer(value)) return value.toString("utf8");
 	return typeof value === "string" ? value : "";
@@ -456,13 +419,6 @@ function lsRemoteOutputHasHead(stdout: unknown, branch: string): boolean {
 		.some(line => line.trimEnd().endsWith(`\t${headRef}`));
 }
 
-function registeredTargetTestKind(commandName: string | undefined): "integration" | "browser" | undefined {
-	if (!commandName) return undefined;
-	if (/^(?:browser|playwright|test[-_:]?(?:browser|playwright))$/iu.test(commandName)) return "browser";
-	if (/^(?:integration|e2e|test[-_:]?(?:integration|e2e))$/iu.test(commandName)) return "integration";
-	return undefined;
-}
-
 /**
  * Frozen workflows may omit `timeout:` for component command steps. The full
  * unit suite is resource-sensitive on developer machines/CI and can exceed the
@@ -483,17 +439,7 @@ export async function runVerificationPhaseSteps<T, R>(
 	phaseSteps: readonly T[],
 	runStep: (phaseStep: T) => Promise<R>,
 ): Promise<R[]> {
-	// Dispatch every peer before awaiting any one outcome. Promise.all() also
-	// starts peers eagerly, but rejects as soon as the first peer rejects; that
-	// let the gate finalize while slower reviewers in the same phase were still
-	// running. The barrier must settle the full phase before propagating an
-	// unexpected runner error.
-	const settled = await Promise.allSettled(phaseSteps.map(phaseStep => runStep(phaseStep)));
-	const rejected = settled.filter((result): result is PromiseRejectedResult => result.status === "rejected");
-	if (rejected.length > 0) {
-		throw new AggregateError(rejected.map(result => result.reason), `${rejected.length} verification phase step(s) rejected`);
-	}
-	return settled.map(result => (result as PromiseFulfilledResult<R>).value);
+	return Promise.all(phaseSteps.map(phaseStep => runStep(phaseStep)));
 }
 
 export interface VerificationPushSafetyVars {
@@ -781,29 +727,6 @@ export interface VerificationResult {
 	reportHtml?: string;
 }
 
-export interface SystemsReviewSubmissionResponse {
-	operation: "checkpoint" | "final";
-	accepted: true;
-	idempotent?: boolean;
-	checkpointDigest?: string;
-	checkpointIndex?: number;
-	nextChunkId?: string;
-	verdict?: "pass" | "fail";
-	blockingFindingIds?: string[];
-}
-
-export const SYSTEMS_REVIEW_RESULT_REMINDER =
-	"You went idle without submitting the required Systems review result. " +
-	"Continue the immutable review from its persisted checkpoint chain, then call `systems_review_result`. " +
-	"Use operation=\"checkpoint\" for progress and operation=\"final\" only after exhaustive coverage. " +
-	"Do not call `verification_result` and do not provide a caller-selected verdict.";
-
-export const SYSTEMS_REVIEW_RESTART_RESUME_PROMPT =
-	"The Bobbit server/infrastructure restarted while your Systems Interaction Review was in progress. " +
-	"The immutable snapshot and accepted checkpoint chain were preserved. Continue from the server-provided execution binding, " +
-	"inspect every remaining chunk with `read_branch_diff`, and call `systems_review_result` when checkpointing or completing final synthesis. " +
-	"Do not call `verification_result`.";
-
 /**
  * Outcome of a `human-signoff` step. The verification harness parks an
  * awaiter in `pendingSignoffs` until either the REST handler resolves it
@@ -971,11 +894,6 @@ export interface ActiveVerification {
 		bootEpoch?: string;
 		/** Resolved command deadline or fresh review-agent active-turn allowance, in seconds. */
 		timeoutSec?: number;
-		/** Durable logical execution binding for the dedicated Systems reviewer. */
-		systemsReviewExecutionId?: string;
-		systemsReviewSnapshotDigest?: string;
-		systemsReviewContractId?: string;
-		systemsReviewContractDigest?: string;
 		/** Terminal review-agent timeout marker and timing for the turn that expired. */
 		timeout?: VerificationTimeoutInfo;
 		/** Whether the step expects a non-zero exit. */
@@ -1423,15 +1341,6 @@ export class VerificationHarness {
 	/** Pending verification_result resolvers keyed by sessionId. */
 	public pendingResults = new Map<string, (result: VerificationResult) => void>();
 
-	/** Dedicated final-result resolvers. Checkpoints never resolve this channel. */
-	public pendingSystemsResults = new Map<string, (result: VerificationResult) => void>();
-	private readonly systemsReviewStore: SystemsReviewExecutionStore;
-	private readonly systemsReviewExecutionBySession = new Map<string, string>();
-	private readonly systemsReviewCurrentSessionByExecution = new Map<string, string>();
-	private readonly systemsReviewCommandEvidenceBroker: FinalMutationTargetCommandEvidenceBroker;
-	private readonly systemsReviewWriterLeases: SystemsReviewWriterLeaseCoordinator;
-	private readonly systemsReviewLeaseByExecution = new Map<string, SystemsReviewWriterLease>();
-
 	/**
 	 * Pending human-signoff resolvers keyed by `${signalId}::${stepName}`.
 	 * Populated when a `human-signoff` step parks and `await`s the user;
@@ -1487,125 +1396,6 @@ export class VerificationHarness {
 	getActiveVerification(signalId: string): ActiveVerification | undefined {
 		const active = this.activeVerifications.get(signalId);
 		return active && !active.cancelled && active.overallStatus !== "cancelled" ? active : undefined;
-	}
-
-	/** Reject central server-owned goal/worktree mutations while a frozen review is live. */
-	assertGoalWorktreeWriteAllowed(goalId: string, ownerToken?: string): void {
-		this.systemsReviewWriterLeases.assertWriteAllowed(goalId, ownerToken);
-	}
-
-	/** Restore correlation issued only to a currently-running verification command. */
-	runWithSystemsReviewTargetCorrelation<T>(token: unknown, callback: () => T): T {
-		return this.systemsReviewCommandEvidenceBroker.runWithCorrelation(token, callback);
-	}
-
-	private systemsExecutionForSession(sessionId: string): PersistedSystemsReviewExecution {
-		const executionId = this.systemsReviewExecutionBySession.get(sessionId);
-		if (!executionId) {
-			throw new SystemsReviewExecutionStoreError(
-				"SYSTEMS_REVIEW_SESSION_NOT_FOUND",
-				`Session "${sessionId}" is not bound to an active Systems review execution.`,
-				404,
-			);
-		}
-		const execution = this.systemsReviewStore.get(executionId);
-		const currentSessionId = this.systemsReviewCurrentSessionByExecution.get(executionId);
-		if (!execution || !this.systemsReviewStore.isReviewerSessionBound(executionId, sessionId) || (currentSessionId && currentSessionId !== sessionId)) {
-			throw new SystemsReviewExecutionStoreError(
-				"SYSTEMS_REVIEW_SESSION_MISMATCH",
-				"Systems review execution does not belong to this verifier session.",
-				404,
-			);
-		}
-		if (execution.status === "running") this.ensureSystemsReviewLease(execution).assertCurrent();
-		return execution;
-	}
-
-	/** Receipt-bound read access used exclusively by read_branch_diff. */
-	async readSystemsReviewBranchDiff(sessionId: string, request: SystemsReviewReadRequest): Promise<unknown> {
-		const execution = this.systemsExecutionForSession(sessionId);
-		if (execution.status !== "running") {
-			throw new SystemsReviewExecutionStoreError(
-				"EXECUTION_CLOSED",
-				`Systems review execution is ${execution.status}; late reads are rejected.`,
-				410,
-			);
-		}
-		return this.systemsReviewStore.reader(execution.id, this.commandRunner).read(request);
-	}
-
-	/**
-	 * Validate and durably append one Systems checkpoint/final submission.
-	 * The method remains atomic across each store mutation: validation and the
-	 * fs-backed write are synchronous once an optional final staleness check has
-	 * completed, so concurrent requests cannot interleave checkpoint heads.
-	 */
-	async submitSystemsReviewResult(
-		sessionId: string,
-		submission: SystemsReviewResultSubmission,
-	): Promise<SystemsReviewSubmissionResponse> {
-		const before = this.systemsExecutionForSession(sessionId);
-		if (submission.executionId !== before.id) {
-			throw new SystemsReviewExecutionStoreError(
-				"SUBMISSION_SCOPE_MISMATCH",
-				"Systems review submission names an execution not bound to this session.",
-				400,
-			);
-		}
-
-		if (submission.operation === "checkpoint") {
-			const existing = before.checkpoints.find(checkpoint => checkpoint.chunkId === submission.chunkId);
-			const checkpoint = this.systemsReviewStore.submitCheckpoint(submission);
-			const continuation = this.systemsReviewStore.continuationIndex(before.id);
-			return {
-				operation: "checkpoint",
-				accepted: true,
-				idempotent: !!existing,
-				checkpointDigest: checkpoint.digest,
-				checkpointIndex: checkpoint.index,
-				nextChunkId: continuation.nextChunkId,
-			};
-		}
-
-		// Repeated identical finals are idempotent and use the frozen report. A
-		// first final must prove the bound worktrees have not moved since capture.
-		if (!before.final) {
-			try {
-				this.ensureSystemsReviewLease(before).assertCurrent();
-				await assertSystemsReviewSnapshotCurrent(before.snapshot, this.commandRunner);
-			} catch (error) {
-				try {
-					this.systemsReviewStore.markFailed(before.id, "failed", "SYSTEMS_REVIEW_STALE_SNAPSHOT", error instanceof Error ? error.message : String(error));
-				} finally {
-					this.releaseSystemsReviewLease(before.id);
-				}
-				throw error;
-			}
-		}
-		const final = this.systemsReviewStore.finalize(submission, {
-			validateExactTargetAssertion: ({ assertionId, coverageItem }) => {
-				const repo = before.snapshot.repos.find(candidate => candidate.id === coverageItem.repoId);
-				if (!repo) return false;
-				return this.systemsReviewStore.validateTargetAssertion(before.id, assertionId, {
-					executionId: before.id,
-					baseOid: repo.mergeBaseOid,
-					headOid: repo.headOid,
-					coverageItemId: coverageItem.id,
-					requiredAdapterIds: coverageItem.requiredTargetAdapterIds ?? [],
-				});
-			},
-		});
-		this.releaseSystemsReviewLease(before.id);
-		const resolver = this.pendingSystemsResults.get(sessionId);
-		resolver?.({ verdict: final.verdict === "pass", summary: final.report });
-		return {
-			operation: "final",
-			accepted: true,
-			idempotent: !!before.final,
-			checkpointDigest: final.checkpointDigest,
-			verdict: final.verdict,
-			blockingFindingIds: final.blockingFindingIds,
-		};
 	}
 
 	/**
@@ -2137,15 +1927,6 @@ export class VerificationHarness {
 			let resumeResult = step.type === "command"
 				? await this._resumeCommandStep(v, step)
 				: await this._tryResumeFromSession(v, step);
-			const checkpointedSystemsExecution = step.systemsReviewExecutionId
-				? this.systemsReviewStore.get(step.systemsReviewExecutionId)
-				: undefined;
-			const hasResumableSystemsCheckpoints = !!checkpointedSystemsExecution
-				&& !checkpointedSystemsExecution.final
-				&& checkpointedSystemsExecution.checkpoints.length > 0;
-			if (step.systemsReviewExecutionId && resumeResult && !hasResumableSystemsCheckpoints) {
-				this.closeUnfinalizedSystemsReview(step.sessionId, resumeResult);
-			}
 			if (!this._isResumeStillActive(v)) return;
 
 			// If resume failed with a transient error and this is an llm-review or agent-qa step,
@@ -2157,9 +1938,8 @@ export class VerificationHarness {
 			const isTransient = step.type === "agent-qa"
 					? isTransientQaError(resumeResult?.output || "")
 					: isRetryableLlmReviewRecovery(resumeResult?.output || "");
-			const rerunnable = hasResumableSystemsCheckpoints
-				|| (resumeResult?.status !== "timeout"
-					&& (isTransient || shouldRerunSessionStepOnResume(resumeResult?.output || "")));
+			const rerunnable = resumeResult?.status !== "timeout"
+				&& (isTransient || shouldRerunSessionStepOnResume(resumeResult?.output || ""));
 			if (resumeResult && !resumeResult.passed && (step.type === "llm-review" || step.type === "agent-qa") && rerunnable) {
 				console.log(`[verification] Resume failed transiently for "${step.name}", re-running from scratch...`);
 				let rerunResult: typeof resumeResult | null = null;
@@ -2173,11 +1953,6 @@ export class VerificationHarness {
 					resumeResult = rerunResult;
 				}
 				// If rerun context unavailable, fall through with the original transient failure
-			}
-
-			if (step.systemsReviewExecutionId && resumeResult) {
-				const remaining = this.systemsReviewStore.get(step.systemsReviewExecutionId);
-				if (remaining?.status === "running" && !remaining.final) this.closeUnfinalizedSystemsReview(step.sessionId, resumeResult);
 			}
 
 			if (resumeResult) {
@@ -2315,21 +2090,17 @@ export class VerificationHarness {
 	): Promise<ResumedVerificationStep | null> {
 		if (!step.sessionId) return null;
 
-		const frozenStep = this._findStepDefinition(v.goalId, v.gateId, step.name);
-		const isSystemsReview = frozenStep?.role === "systems-reviewer";
 		const session = this.sessionManager?.getSession(step.sessionId);
 		if (!session) {
-			// A checkpointed Systems execution is deliberately re-run into a fresh
-			// continuation session by the caller; its immutable chain is not closed.
-			const execution = step.systemsReviewExecutionId ? this.systemsReviewStore.get(step.systemsReviewExecutionId) : undefined;
+			// Session lost — return transient failure so caller can re-run
 			return {
 				name: step.name, type: step.type, passed: false,
-				output: isSystemsReview && execution?.checkpoints.length
-					? "Systems reviewer session lost after durable checkpoint; fresh continuation required."
-					: "Session lost during server restart.",
+				output: "Session lost during server restart.",
 				duration_ms: Date.now() - step.startedAt,
 			};
 		}
+
+		const frozenStep = this._findStepDefinition(v.goalId, v.gateId, step.name);
 		const timeoutSec = typeof step.timeoutSec === "number" && Number.isFinite(step.timeoutSec) && step.timeoutSec > 0
 			? Math.max(MIN_LLM_REVIEW_TIMEOUT_S, Math.floor(step.timeoutSec))
 			: frozenStep && (frozenStep.type === "llm-review" || frozenStep.type === "agent-qa")
@@ -2348,47 +2119,14 @@ export class VerificationHarness {
 			duration_ms: Date.now() - step.startedAt,
 		});
 
-		// Restore the dedicated submission channel before prompting the session.
-		// A final that landed during boot before this resolver existed is replayed
-		// from the durable execution store immediately.
-		const { promise: resultPromise, resolve: resultResolver } = deferred<VerificationResult>();
-		const pendingResultMap = isSystemsReview ? this.pendingSystemsResults : this.pendingResults;
-		const terminateInvalidSystemsResume = async (output: string): Promise<ResumedVerificationStep> => {
-			try { await this.sessionManager?.terminateSession(step.sessionId!); } catch { /* best-effort */ }
-			return {
-				name: step.name, type: step.type, passed: false,
-				output,
-				duration_ms: Date.now() - step.startedAt,
-			};
-		};
-		if (isSystemsReview) {
-			const executionId = step.systemsReviewExecutionId;
-			if (!executionId) {
-				return terminateInvalidSystemsResume("Systems review execution binding was not persisted before server restart.");
-			}
-			this.systemsReviewExecutionBySession.set(step.sessionId, executionId);
-			this.systemsReviewCurrentSessionByExecution.set(executionId, step.sessionId);
-			const execution = this.systemsReviewStore.get(executionId);
-			if (!execution) {
-				return terminateInvalidSystemsResume("Systems review durable execution state is unavailable after server restart.");
-			}
-			if (execution.status === "timed-out" || execution.status === "interrupted") {
-				const resumed = this.systemsReviewStore.resume(executionId);
-				this.ensureSystemsReviewLease(resumed).assertCurrent();
-			} else if (execution.final) {
-				resultResolver({ verdict: execution.final.verdict === "pass", summary: execution.final.report });
-			} else if (execution.status !== "running") {
-				return terminateInvalidSystemsResume(`Systems review execution cannot resume from state ${execution.status}.`);
-			} else {
-				this.ensureSystemsReviewLease(execution).assertCurrent();
-			}
-		}
-		pendingResultMap.set(step.sessionId, resultResolver);
-
-		// Re-register reviewer session only after its durable binding validates.
+		// Re-register reviewer session in team store so team_list shows it
 		if (this.teamManager) {
 			try { this.teamManager.registerReviewerSession(v.goalId, step.sessionId, step.name); } catch { /* ignore */ }
 		}
+
+		// Set up verification_result promise for this resumed session
+		const { promise: resultPromise, resolve: resultResolver } = deferred<VerificationResult>();
+		this.pendingResults.set(step.sessionId, resultResolver);
 
 		// Watch for errored tool_results so we can send a targeted JSON-retry
 		// prompt if the agent gives up after a streaming/arg-validation glitch.
@@ -2450,13 +2188,11 @@ export class VerificationHarness {
 			// instead of the generic idle-without-result reminder.
 			const jsonErr = lastErroredToolOutput ? detectJsonValidationError(lastErroredToolOutput) : null;
 			const useRestartContinuationPrompt = restartInterruptedTurn && !jsonErr;
-			const reminderPrompt = isSystemsReview
-				? (useRestartContinuationPrompt ? SYSTEMS_REVIEW_RESTART_RESUME_PROMPT : SYSTEMS_REVIEW_RESULT_REMINDER)
-				: jsonErr
-					? buildJsonRetryPrompt(jsonErr)
-					: useRestartContinuationPrompt
-						? VERIFICATION_RESTART_RESUME_PROMPT
-						: VERIFICATION_RESULT_REMINDER;
+			const reminderPrompt = jsonErr
+				? buildJsonRetryPrompt(jsonErr)
+				: useRestartContinuationPrompt
+					? VERIFICATION_RESTART_RESUME_PROMPT
+					: VERIFICATION_RESULT_REMINDER;
 			const reminderKind = jsonErr ? "JSON-retry" : useRestartContinuationPrompt ? "restart-resume" : "generic";
 			console.log(`[verification] No verification_result from resumed session ${step.sessionId}, sending ${reminderKind} reminder...`);
 			// A freshly-revived reviewer is COLD (model init + MCP extension load),
@@ -2532,9 +2268,7 @@ export class VerificationHarness {
 			// that reminder the same fair start/idle window before hard failure.
 			if (useRestartContinuationPrompt) {
 				const fallbackJsonErr = lastErroredToolOutput ? detectJsonValidationError(lastErroredToolOutput) : null;
-				const fallbackPrompt = isSystemsReview
-					? SYSTEMS_REVIEW_RESULT_REMINDER
-					: fallbackJsonErr ? buildJsonRetryPrompt(fallbackJsonErr) : VERIFICATION_RESULT_REMINDER;
+				const fallbackPrompt = fallbackJsonErr ? buildJsonRetryPrompt(fallbackJsonErr) : VERIFICATION_RESULT_REMINDER;
 				const fallbackKind = fallbackJsonErr ? "JSON-retry" : "generic";
 				console.log(`[verification] Restart continuation for resumed session ${step.sessionId} ended without verification_result, sending ${fallbackKind} fallback reminder...`);
 				let fallbackStarted = false;
@@ -2592,9 +2326,7 @@ export class VerificationHarness {
 			return {
 				name: step.name, type: step.type,
 				passed: false,
-				output: isSystemsReview
-					? "Systems reviewer did not submit an accepted final synthesis after server restart and reminder."
-					: "Agent did not call verification_result after server restart and reminder.",
+				output: "Agent did not call verification_result after server restart and reminder.",
 				duration_ms: Date.now() - step.startedAt,
 			};
 		} finally {
@@ -2603,7 +2335,7 @@ export class VerificationHarness {
 			// racing teardown is still captured, not 404-dropped (see the
 			// delete-vs-late-POST fix in runLlmReviewViaSession).
 			try { await this.sessionManager!.terminateSession(step.sessionId); } catch { /* ignore */ }
-			pendingResultMap.delete(step.sessionId);
+			this.pendingResults.delete(step.sessionId);
 			if (this.teamManager) {
 				try { await this.teamManager.unregisterReviewerSession(v.goalId, step.sessionId); } catch { /* ignore */ }
 			}
@@ -2657,37 +2389,13 @@ export class VerificationHarness {
 				console.log(`[verification] Aborting re-run of "${stepName}" — goal ${goalId} is ${goalCheck.state}`);
 				return { name: stepName, type: "llm-review", passed: false, output: `Aborted: goal is ${goalCheck.state}`, duration_ms: Date.now() - startedAt };
 			}
-			const rerunSessionId = stepDef.role === "systems-reviewer"
-				? `systems-review-${randomUUID().slice(0, 12)}`
-				: undefined;
 			result = await this.runLlmReviewStep(
-				{
-					name: stepDef.name,
-					prompt,
-					timeout: stepDef.timeout,
-					role: stepDef.role,
-					promptRef: (stepDef as any).promptRef,
-					promptId: (stepDef as any).promptId,
-					promptSha256: (stepDef as any).promptSha256,
-					resolvedPrompt: (stepDef as any).resolvedPrompt,
-				},
+				{ name: stepDef.name, prompt, timeout: stepDef.timeout, role: stepDef.role },
 				ctx.cwd, ctx.builtinVars,
 				ctx.signal.content, ctx.signal.metadata,
 				ctx.goalSpec, ctx.allGateStates, goalId,
-				rerunSessionId, ctx.gate,
-				{
-					signalId,
-					gateId,
-					stepIndex: ctx.gate?.verify?.findIndex(candidate => candidate.name === stepName) ?? -1,
-					baseBranch: ctx.builtinVars.baseBranch,
-					executionId: (() => {
-						const id = this.activeVerifications.get(signalId)?.steps.find(candidate => candidate.name === stepName)?.systemsReviewExecutionId;
-						const execution = id ? this.systemsReviewStore.get(id) : undefined;
-						return execution && !execution.final && ["running", "timed-out", "interrupted"].includes(execution.status) ? id : undefined;
-					})(),
-				},
+				undefined, ctx.gate,
 			);
-			if (stepDef.role === "systems-reviewer") this.closeUnfinalizedSystemsReview(result.sessionId, result);
 			if (result.status === "timeout") break;
 			const decision = shouldRetryVerificationStep({
 				passed: result.passed, output: result.output,
@@ -2822,14 +2530,7 @@ export class VerificationHarness {
 		private projectConfigStore?: ProjectConfigStore,
 		projectContextManager?: ProjectContextManager,
 		configCascade?: import("./config-cascade.js").ConfigCascade,
-		deps: {
-			commandRunner?: CommandRunner;
-			commandStepRunner?: VerificationCommandRunner;
-			clock?: Clock;
-			skipLlmReview?: boolean;
-			systemsReviewCommandEvidenceBroker?: FinalMutationTargetCommandEvidenceBroker;
-			systemsReviewWriterLeases?: SystemsReviewWriterLeaseCoordinator;
-		} = {},
+		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; skipLlmReview?: boolean } = {},
 	) {
 		this.commandRunner = deps.commandRunner ?? realCommandRunner;
 		this.commandStepRunner = deps.commandStepRunner ?? realVerificationCommandRunner;
@@ -2853,9 +2554,6 @@ export class VerificationHarness {
 		};
 		this._stateDir = stateDir;
 		this._persistPath = path.join(stateDir, "active-verifications.json");
-		this.systemsReviewStore = new SystemsReviewExecutionStore(stateDir, { now: () => this.clock.now() });
-		this.systemsReviewCommandEvidenceBroker = deps.systemsReviewCommandEvidenceBroker ?? new FinalMutationTargetCommandEvidenceBroker({ now: () => this.clock.now() });
-		this.systemsReviewWriterLeases = deps.systemsReviewWriterLeases ?? systemsReviewWriterLeaseCoordinator;
 		this.projectContextManager = projectContextManager ?? null;
 		// Unified child-team scheduler — closures read `this.*` lazily at call
 		// time so they pick up the projectContextManager/teamManager wired above.
@@ -2872,20 +2570,6 @@ export class VerificationHarness {
 		const persisted = this._loadActive();
 		for (const v of persisted) {
 			this.activeVerifications.set(v.signalId, v);
-			for (const step of v.steps) {
-				if (!step.systemsReviewExecutionId) continue;
-				const execution = this.systemsReviewStore.get(step.systemsReviewExecutionId);
-				const boundSessionId = step.sessionId ?? execution?.sessionId;
-				if (boundSessionId) {
-					this.systemsReviewExecutionBySession.set(boundSessionId, step.systemsReviewExecutionId);
-					this.systemsReviewCurrentSessionByExecution.set(step.systemsReviewExecutionId, boundSessionId);
-				}
-				if (execution && !execution.final && ["running", "timed-out", "interrupted"].includes(execution.status)) {
-					try { this.ensureSystemsReviewLease(execution); } catch (error) {
-						console.warn(`[verification] Could not restore Systems review writer lease ${execution.id}:`, error);
-					}
-				}
-			}
 		}
 	}
 
@@ -3334,24 +3018,6 @@ export class VerificationHarness {
 	 * resolves with `{ cancelled: true }` and the outer `active.cancelled`
 	 * short-circuit handles the rest of the cleanup.
 	 */
-	private _closeSystemsReviewExecutions(
-		active: ActiveVerification,
-		status: "cancelled" | "interrupted",
-		code: string,
-		message: string,
-	): void {
-		for (const step of active.steps) {
-			if (!step.systemsReviewExecutionId) continue;
-			try {
-				this.systemsReviewStore.markFailed(step.systemsReviewExecutionId, status, code, message);
-			} catch (err) {
-				console.warn(`[verification] Failed to close Systems review execution ${step.systemsReviewExecutionId}:`, err);
-			} finally {
-				this.releaseSystemsReviewLease(step.systemsReviewExecutionId);
-			}
-		}
-	}
-
 	private _drainPendingSignoffsForSignal(signalId: string): void {
 		const prefix = `${signalId}::`;
 		for (const key of Array.from(this.pendingSignoffs.keys())) {
@@ -3369,14 +3035,6 @@ export class VerificationHarness {
 	 * orphan chromium / playwright descendants don't survive the gateway exit.
 	 */
 	shutdown(): void {
-		for (const active of this.activeVerifications.values()) {
-			this._closeSystemsReviewExecutions(
-				active,
-				"interrupted",
-				"SYSTEMS_REVIEW_SERVER_RESTART",
-				"The server stopped before final synthesis; immutable checkpoints remain resumable.",
-			);
-		}
 		try { killAllTracked("SIGKILL"); } catch { /* best-effort */ }
 	}
 
@@ -3397,7 +3055,6 @@ export class VerificationHarness {
 			this._killTrackedForSignal(signalId);
 			const commandKillsSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
 			this._drainPendingSignoffsForSignal(signalId);
-			this._closeSystemsReviewExecutions(active, "cancelled", "SYSTEMS_REVIEW_CANCELLED", "Verification was cancelled before final synthesis.");
 
 			for (const step of active.steps) {
 				if (step.sessionId && step.status === "running") {
@@ -3456,7 +3113,6 @@ export class VerificationHarness {
 			this._killTrackedForSignal(signalId);
 			const commandKillsSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
 			this._drainPendingSignoffsForSignal(signalId);
-			this._closeSystemsReviewExecutions(active, "cancelled", "SYSTEMS_REVIEW_SUPERSEDED", "A newer gate signal superseded this Systems review execution.");
 			if (commandKillsSettled) {
 				this.activeVerifications.delete(signalId);
 			} else {
@@ -3639,16 +3295,6 @@ export class VerificationHarness {
 				signal.commitSha,
 				gateState?.verificationCacheInvalidatedAt,
 			);
-			// Systems output and its signed command evidence are bound to one immutable
-			// execution, not merely a commit. Never cache the reviewer or an applicable
-			// integration/browser command into a fresh execution: the latter must run
-			// so its production adapter captures are available before reviewer launch.
-			const hasSystemsReview = signal.gateId === "implementation"
-				&& steps.some(step => step.type === "llm-review" && step.role === "systems-reviewer");
-			for (const step of steps) {
-				if (step.type === "llm-review" && step.role === "systems-reviewer") cachedSteps.delete(step.name);
-				if (hasSystemsReview && step.type === "command" && registeredTargetTestKind(step.command)) cachedSteps.delete(step.name);
-			}
 			if (cachedSteps.size > 0) {
 				console.log(`[verification] Reusing ${cachedSteps.size} previously-passed step(s) for commit ${signal.commitSha.slice(0, 8)}: ${[...cachedSteps.keys()].join(", ")}`);
 			}
@@ -3834,49 +3480,6 @@ export class VerificationHarness {
 				}
 			}
 
-			// Bind the immutable execution before any integration/browser command can
-			// run. Command-phase evidence is therefore durable and reader-visible
-			// before the read-only reviewer session is launched.
-			let preparedSystemsExecutionId: string | undefined;
-			const systemsStepIndex = signal.gateId === "implementation"
-				? steps.findIndex(step => step.type === "llm-review" && step.role === "systems-reviewer")
-				: -1;
-			// The explicit test-mode LLM bypass skips the Systems reviewer itself, so
-			// it must also skip that review's snapshot, durable execution, and writer
-			// lease. Normal verification still precreates all three before commands so
-			// exact-target evidence remains bound to the immutable execution.
-			if (systemsStepIndex >= 0 && !this.skipLlmReview) {
-				const systemsStep = steps[systemsStepIndex];
-				const existingExecutionId = active.steps[systemsStepIndex]?.systemsReviewExecutionId;
-				const bootstrapSessionId = existingExecutionId
-					? (this.systemsReviewStore.get(existingExecutionId)?.sessionId ?? `systems-review-bootstrap-${signal.id}`)
-					: `systems-review-bootstrap-${signal.id}`;
-				const prepared = await this.prepareSystemsReviewExecution({
-					step: {
-						name: systemsStep.name,
-						prompt: systemsStep.prompt,
-						timeout: systemsStep.timeout,
-						role: systemsStep.role,
-						promptRef: systemsStep.promptRef,
-						promptId: systemsStep.promptId,
-						promptSha256: systemsStep.promptSha256,
-						resolvedPrompt: systemsStep.resolvedPrompt,
-					},
-					cwd,
-					goalId: signal.goalId,
-					sessionId: bootstrapSessionId,
-					context: {
-						signalId: signal.id,
-						gateId: signal.gateId,
-						stepIndex: systemsStepIndex,
-						baseBranch,
-						executionId: existingExecutionId,
-					},
-					publishReviewerSession: false,
-				});
-				preparedSystemsExecutionId = prepared.execution.id;
-			}
-
 			const MAX_ARTIFACT_SIZE = 10 * 1024 * 1024; // 10 MB
 			const earliestPreResolvedFailedPhase = allResults.reduce<number | undefined>((earliest, result) => {
 				if (!result || result.passed || result.skipped) return earliest;
@@ -3944,7 +3547,6 @@ export class VerificationHarness {
 				const phaseResults = await runVerificationPhaseSteps(
 					phaseSteps,
 					async ({ step, index }) => {
-						try {
 						const cached = cachedSteps.get(step.name);
 						if (cached) {
 							const cachedStatus = terminalStatusForStep(cached);
@@ -4107,35 +3709,8 @@ export class VerificationHarness {
 										console.log(`[verification] Step "${step.name}" waiting for semaphore slot...`);
 									}
 									await this.commandSemaphore.acquire();
-									const commandTimeoutSec = resolveCommandStepTimeoutSec(step);
-									const targetEvidence = preparedSystemsExecutionId && !expectFailure
-										? this.beginSystemsReviewCommandEvidence({
-											executionId: preparedSystemsExecutionId,
-											step,
-											command: cmd,
-											cwd: resolvedCwd,
-											timeoutSec: commandTimeoutSec,
-											signalId: signal.id,
-											stepIndex: index,
-										})
-										: undefined;
 									try {
-										result = await this.runCommandStep(
-											cmd,
-											commandCwd,
-											commandTimeoutSec,
-											expectFailure,
-											streamCtx,
-											errorPattern,
-											commandContainerId,
-											targetEvidence?.env,
-										);
-										if (targetEvidence) this.completeSystemsReviewCommandEvidence(preparedSystemsExecutionId!, targetEvidence.capability, result.passed);
-									} catch (error) {
-										if (targetEvidence) {
-											try { this.completeSystemsReviewCommandEvidence(preparedSystemsExecutionId!, targetEvidence.capability, false); } catch { /* already closed */ }
-										}
-										throw error;
+										result = await this.runCommandStep(cmd, commandCwd, resolveCommandStepTimeoutSec(step), expectFailure, streamCtx, errorPattern, commandContainerId);
 									} finally {
 										this.commandSemaphore.release();
 									}
@@ -4321,29 +3896,12 @@ export class VerificationHarness {
 										console.log(`[verification][reviewer-lifecycle] llm-review "${step.name}" attempt 1/${maxBoundedAttempts}: session ${attemptSessionId ?? "<none>"} (goal=${signal.goalId}, timeout=${reviewTimeoutSec}s).`);
 									}
 									result = await this.runLlmReviewStep(
-										{
-											name: step.name,
-											prompt,
-											timeout: step.timeout,
-											role: step.role,
-											promptRef: (step as any).promptRef,
-											promptId: (step as any).promptId,
-											promptSha256: (step as any).promptSha256,
-											resolvedPrompt: (step as any).resolvedPrompt,
-										},
+										{ name: step.name, prompt, timeout: step.timeout, role: step.role },
 										cwd, builtinVars,
 										signal.content, signal.metadata,
 										goalSpec, allGateStates, signal.goalId, attemptSessionId,
 										gate,
-										{
-											signalId: signal.id,
-											gateId: signal.gateId,
-											stepIndex: index,
-											baseBranch,
-											executionId: step.role === "systems-reviewer" ? preparedSystemsExecutionId : undefined,
-										},
 									);
-									if (step.role === "systems-reviewer") this.closeUnfinalizedSystemsReview(attemptSessionId, result);
 									if (result.status === "timeout") break;
 									const decision = shouldRetryVerificationStep({
 										passed: result.passed, output: result.output,
@@ -4404,38 +3962,6 @@ export class VerificationHarness {
 						if (artifact) stepResult.artifact = artifact;
 						if (result.diagnostics) stepResult.diagnostics = result.diagnostics;
 						return { index, stepResult };
-						} catch (err) {
-							// Convert an unexpected peer exception into that peer's failed
-							// result. Other same-phase reviewers continue to completion and
-							// persist their own outputs before phase aggregation.
-							const output = `Verification step failed unexpectedly: ${(err as Error)?.message || String(err)}`;
-							if (step.role === "systems-reviewer") {
-								this.closeUnfinalizedSystemsReview(active.steps[index]?.sessionId, { output });
-							}
-							const duration_ms = Date.now() - (active.steps[index]?.startedAt || Date.now());
-							const stepResult: GateSignalStep = {
-								name: step.name,
-								type: step.type,
-								passed: false,
-								status: "failed",
-								phase,
-								output,
-								duration_ms,
-								expect: step.expect,
-							};
-							const av = this.activeVerifications.get(signal.id);
-							if (av?.steps[index]) {
-								av.steps[index] = { ...av.steps[index], status: "failed", phase, durationMs: duration_ms, output };
-								this._persistActive();
-							}
-							if (!active.cancelled) this.broadcastFn(signal.goalId, {
-								type: "gate_verification_step_complete",
-								goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
-								stepIndex: index, stepName: step.name,
-								status: "failed", durationMs: duration_ms, output, phase,
-							});
-							return { index, stepResult };
-						}
 					},
 				);
 
@@ -4455,22 +3981,6 @@ export class VerificationHarness {
 				this.activeVerifications.delete(signal.id);
 				this._persistActive();
 				return;
-			}
-
-			if (preparedSystemsExecutionId && systemsStepIndex >= 0 && allResults[systemsStepIndex]?.skipped) {
-				const execution = this.systemsReviewStore.get(preparedSystemsExecutionId);
-				if (execution?.status === "running" && !execution.final) {
-					try {
-						this.systemsReviewStore.markFailed(
-							preparedSystemsExecutionId,
-							"failed",
-							"SYSTEMS_REVIEW_NOT_RUN",
-							"Systems review was not launched because an earlier verification phase failed.",
-						);
-					} finally {
-						this.releaseSystemsReviewLease(preparedSystemsExecutionId);
-					}
-				}
 			}
 
 			// Collect final results in YAML order
@@ -4508,14 +4018,6 @@ export class VerificationHarness {
 				this._persistActive();
 				return;
 			}
-			for (const step of active.steps) {
-				if (!step.systemsReviewExecutionId) continue;
-				const execution = this.systemsReviewStore.get(step.systemsReviewExecutionId);
-				if (execution?.status === "running" && !execution.final) {
-					try { this.systemsReviewStore.markFailed(execution.id, "failed", "SYSTEMS_REVIEW_GATE_ERROR", err?.message || String(err)); }
-					finally { this.releaseSystemsReviewLease(execution.id); }
-				}
-			}
 			const errorStep = { name: "Error", type: "command" as const, passed: false, status: "failed" as const, phase: 0, output: err.message, duration_ms: 0 };
 			this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, {
 				status: "failed",
@@ -4537,260 +4039,12 @@ export class VerificationHarness {
 		}
 	}
 
-	private beginSystemsReviewCommandEvidence(args: {
-		executionId: string;
-		step: VerifyStep;
-		command: string;
-		cwd: string;
-		timeoutSec: number;
-		signalId: string;
-		stepIndex: number;
-	}): { capability: FinalMutationTargetCommandCapability; env: Record<string, string> } | undefined {
-		if (args.step.type !== "command" || !args.step.component || !args.step.command) return undefined;
-		const testKind = registeredTargetTestKind(args.step.command);
-		if (!testKind) return undefined;
-		const execution = this.systemsReviewStore.get(args.executionId);
-		if (!execution || execution.status !== "running" || execution.final) return undefined;
-		this.ensureSystemsReviewLease(execution).assertCurrent();
-		const component = this.resolveProjectConfigStore(execution.goalId)?.getComponents()
-			.find(candidate => candidate.name === args.step.component);
-		const registeredCommand = component?.commands?.[args.step.command];
-		if (!component || !registeredCommand) return undefined;
-		const coverage = execution.snapshot.coverage.flatMap(item => {
-			if (!item.requiresExactTargetEvidence || execution.targetAssertions.some(assertion => assertion.coverageItemId === item.id)) return [];
-			const repo = execution.snapshot.repos.find(candidate => candidate.id === item.repoId);
-			if (!repo || !repo.components.includes(component.name)) return [];
-			const relativeCwd = path.relative(repo.root, fs.realpathSync.native(args.cwd));
-			if (relativeCwd.startsWith("..") || path.isAbsolute(relativeCwd)) return [];
-			const requiredActionIds = item.requiredTargetActionIds ?? [];
-			const requiredAdapterIds = item.requiredTargetAdapterIds ?? [];
-			if (requiredActionIds.length === 0 || requiredAdapterIds.length === 0) return [];
-			return [{
-				coverageItemId: item.id,
-				baseOid: repo.mergeBaseOid,
-				headOid: repo.headOid,
-				requiredActionIds,
-				requiredAdapterIds,
-			}];
-		});
-		if (coverage.length === 0) return undefined;
-		const commandHash = createHash("sha256").update(args.command).digest("hex");
-		const commandId = `${args.signalId}:${args.stepIndex}:${component.name}:${args.step.command}:${commandHash.slice(0, 16)}`;
-		const testId = `registered-command:${component.name}:${args.step.command}:${commandHash}`;
-		const run = this.systemsReviewCommandEvidenceBroker.begin({
-			executionId: execution.id,
-			commandId,
-			testId,
-			testKind,
-			coverage,
-			ttlMs: Math.max(60_000, (args.timeoutSec + 30) * 1_000),
-		});
-		return {
-			capability: run.capability,
-			env: { [FINAL_MUTATION_TARGET_CORRELATION_ENV]: run.correlationToken },
-		};
-	}
-
-	private completeSystemsReviewCommandEvidence(
-		executionId: string,
-		capability: FinalMutationTargetCommandCapability,
-		commandPassed: boolean,
-	): void {
-		const assertions = this.systemsReviewCommandEvidenceBroker.complete(capability, commandPassed);
-		if (!commandPassed) return;
-		for (const assertion of assertions) this.systemsReviewStore.registerTargetAssertion(executionId, assertion);
-	}
-
-	private ensureSystemsReviewLease(execution: PersistedSystemsReviewExecution): SystemsReviewWriterLease {
-		const existing = this.systemsReviewLeaseByExecution.get(execution.id);
-		if (existing) {
-			existing.assertCurrent();
-			return existing;
-		}
-		const lease = this.systemsReviewWriterLeases.acquire(execution.goalId, execution.id);
-		this.systemsReviewLeaseByExecution.set(execution.id, lease);
-		return lease;
-	}
-
-	private releaseSystemsReviewLease(executionId: string): void {
-		this.systemsReviewCurrentSessionByExecution.delete(executionId);
-		const lease = this.systemsReviewLeaseByExecution.get(executionId);
-		if (!lease) return;
-		this.systemsReviewLeaseByExecution.delete(executionId);
-		lease.release();
-	}
-
-	private persistSystemsReviewSessionBinding(
-		execution: PersistedSystemsReviewExecution,
-		sessionId: string,
-		context: SystemsReviewRuntimeContext,
-		publishReviewerSession = true,
-	): void {
-		this.systemsReviewExecutionBySession.set(sessionId, execution.id);
-		this.systemsReviewCurrentSessionByExecution.set(execution.id, sessionId);
-		const active = this.activeVerifications.get(context.signalId);
-		const activeStep = active?.steps[context.stepIndex];
-		if (!activeStep) return;
-		if (publishReviewerSession) activeStep.sessionId = sessionId;
-		activeStep.systemsReviewExecutionId = execution.id;
-		activeStep.systemsReviewSnapshotDigest = execution.snapshot.digest;
-		activeStep.systemsReviewContractId = execution.contractId;
-		activeStep.systemsReviewContractDigest = execution.contractDigest;
-		this._persistActive();
-	}
-
-	private async prepareSystemsReviewExecution(args: {
-		step: LlmReviewStepInput;
-		cwd: string;
-		goalId: string;
-		sessionId: string;
-		context: SystemsReviewRuntimeContext;
-		publishReviewerSession?: boolean;
-	}): Promise<{ execution: PersistedSystemsReviewExecution; continuation: ReturnType<SystemsReviewExecutionStore["continuationIndex"]> }> {
-		if (args.context.gateId !== "implementation") {
-			throw new Error("The systems-reviewer role may only execute on the implementation gate.");
-		}
-		if (args.context.stepIndex < 0) throw new Error("Systems review step index is unavailable.");
-
-		const contractId = args.step.promptId || args.step.promptRef;
-		const contractDigest = args.step.promptSha256;
-		const resolvedPrompt = args.step.resolvedPrompt;
-		if (!contractId || !contractDigest || !resolvedPrompt) {
-			throw new Error("Systems review step is missing its frozen promptId, promptSha256, or resolvedPrompt snapshot fields.");
-		}
-		const actualDigest = createHash("sha256").update(resolvedPrompt, "utf8").digest("hex");
-		if (actualDigest !== contractDigest) {
-			throw new Error(`Systems review frozen prompt digest mismatch: expected ${contractDigest}, got ${actualDigest}.`);
-		}
-
-		if (args.context.executionId) {
-			let execution = this.systemsReviewStore.get(args.context.executionId);
-			if (!execution) throw new Error(`Systems review execution "${args.context.executionId}" is unavailable for continuation.`);
-			if (
-				execution.goalId !== args.goalId
-				|| execution.gateId !== args.context.gateId
-				|| execution.signalId !== args.context.signalId
-				|| execution.contractId !== contractId
-				|| execution.contractDigest !== contractDigest
-			) throw new Error("Systems review continuation does not match the frozen execution binding.");
-			if (execution.status === "timed-out" || execution.status === "interrupted") execution = this.systemsReviewStore.resume(execution.id);
-			if (execution.status !== "running" || execution.final) throw new Error(`Systems review execution cannot continue from state ${execution.status}.`);
-			this.ensureSystemsReviewLease(execution).assertCurrent();
-			execution = this.systemsReviewStore.bindContinuationSession(execution.id, args.sessionId);
-			this.persistSystemsReviewSessionBinding(execution, args.sessionId, args.context, args.publishReviewerSession !== false);
-			return { execution, continuation: this.systemsReviewStore.continuationIndex(execution.id) };
-		}
-
-		const projectContext = this.projectContextManager?.getContextForGoal(args.goalId);
-		if (!projectContext) throw new Error(`Cannot bind Systems review: goal "${args.goalId}" has no project context.`);
-		const executionId = randomUUID();
-		const lease = this.systemsReviewWriterLeases.acquire(args.goalId, executionId);
-		this.systemsReviewLeaseByExecution.set(executionId, lease);
-		try {
-			const snapshot = await createSystemsReviewSnapshot({
-				sessionId: args.sessionId,
-				signalId: args.context.signalId,
-				projectRoot: projectContext.project.rootPath,
-				branchContainer: args.cwd,
-				components: this.resolveProjectConfigStore(args.goalId)?.getComponents() ?? [],
-				baseBranch: args.context.baseBranch,
-				commandRunner: this.commandRunner,
-				now: () => this.clock.now(),
-			});
-			const execution = this.systemsReviewStore.create({
-				id: executionId,
-				goalId: args.goalId,
-				gateId: args.context.gateId,
-				signalId: args.context.signalId,
-				sessionId: args.sessionId,
-				snapshot,
-				contractId,
-				contractDigest,
-			});
-			this.persistSystemsReviewSessionBinding(execution, args.sessionId, args.context, args.publishReviewerSession !== false);
-			return { execution, continuation: this.systemsReviewStore.continuationIndex(execution.id) };
-		} catch (error) {
-			this.releaseSystemsReviewLease(executionId);
-			throw error;
-		}
-	}
-
-	private closeUnfinalizedSystemsReview(
-		sessionId: string | undefined,
-		result: { output: string; status?: string },
-	): void {
-		if (!sessionId) return;
-		const executionId = this.systemsReviewExecutionBySession.get(sessionId);
-		if (!executionId) return;
-		const execution = this.systemsReviewStore.get(executionId);
-		if (!execution || execution.status !== "running") return;
-		const timedOut = result.status === "timeout";
-		try {
-			this.systemsReviewStore.markFailed(
-				executionId,
-				timedOut ? "timed-out" : "failed",
-				timedOut ? "SYSTEMS_REVIEW_TIMEOUT" : "SYSTEMS_REVIEW_NO_FINAL",
-				result.output || "Systems reviewer ended without an accepted final synthesis.",
-			);
-		} finally {
-			this.releaseSystemsReviewLease(executionId);
-		}
-	}
-
-	private buildSystemsReviewPrompts(args: {
-		role: { promptTemplate: string; name?: string };
-		stepName: string;
-		resolvedPrompt: string;
-		execution: PersistedSystemsReviewExecution;
-		continuation: ReturnType<SystemsReviewExecutionStore["continuationIndex"]>;
-	}): { combinedPrompt: string; kickoff: string } {
-		const reviewContext = [
-			"## Immutable Systems Review Context",
-			"Use only `read_branch_diff` and `systems_review_result`.",
-			"The branch snapshot, contract, receipts, and coverage manifest are frozen by the server.",
-			"Do not use generic filesystem, shell, Git, browser, network, orchestration, task, gate, or posting tools.",
-		].join("\n");
-		const rolePrompt = args.role.promptTemplate
-			.replace(/\{\{REVIEW_CONTEXT\}\}/g, reviewContext)
-			.replace(/\{\{GOAL_BRANCH\}\}/g, "immutable-snapshot")
-			.replace(/\{\{AGENT_ID\}\}/g, args.role.name || "systems-reviewer");
-		const binding = {
-			executionId: args.execution.id,
-			snapshotDigest: args.execution.snapshot.digest,
-			contractId: args.execution.contractId,
-			contractDigest: args.execution.contractDigest,
-			repositoryCount: args.execution.snapshot.repos.length,
-			changeCount: args.execution.snapshot.changes.length,
-			coverageItemCount: args.execution.snapshot.coverage.length,
-			chunkCount: args.execution.snapshot.chunks.length,
-			continuation: args.continuation,
-		};
-		const combinedPrompt = [
-			rolePrompt,
-			"",
-			"## Frozen Systems Interaction Review Contract",
-			args.resolvedPrompt,
-			"",
-			"## Server-Bound Execution",
-			"```json",
-			JSON.stringify(binding, null, 2),
-			"```",
-		].join("\n");
-		const kickoff = [
-			`Perform the immutable Systems Interaction Review step: "${args.stepName}".`,
-			"",
-			"Use the server-bound execution above. Read all evidence chunks in order, submit checkpoints as required, and submit final only after exhaustive gap-free coverage.",
-			"The server derives the only verdict and final report. Do not call `verification_result`, do not emit prose verdict tags, and do not access evidence outside `read_branch_diff`.",
-		].join("\n");
-		return { combinedPrompt, kickoff };
-	}
-
 	/**
 	 * Spawn a one-shot reviewer sub-agent to perform an LLM-powered code review.
 	 * Follows the pattern from src/server/skills/sub-agent.ts.
 	 */
 	private async runLlmReviewStep(
-		step: LlmReviewStepInput,
+		step: { name: string; prompt?: string; timeout?: number; role?: string },
 		cwd: string,
 		builtinVars: Record<string, string>,
 		signalContent?: string,
@@ -4800,7 +4054,6 @@ export class VerificationHarness {
 		goalId?: string,
 		sessionId?: string,
 		gate?: WorkflowGate,
-		systemsContext?: SystemsReviewRuntimeContext,
 	): Promise<ReviewStepExecutionResult> {
 		const roleName = step.role || "reviewer";
 		// Goal-scoped inline roles win over the role store. The default
@@ -4818,72 +4071,6 @@ export class VerificationHarness {
 		}
 
 		const timeoutMs = resolveReviewStepTimeoutSec({ type: "llm-review", timeout: step.timeout }) * 1000;
-		const isSystemsReview = roleName === "systems-reviewer";
-		if (isSystemsReview) {
-			if (!this.sessionManager || !goalId || !sessionId || !systemsContext) {
-				throw new Error("Systems review requires SessionManager, goal, pre-generated session, and signal bindings.");
-			}
-			let currentSessionId = sessionId;
-			let prepared = await this.prepareSystemsReviewExecution({ step, cwd, goalId, sessionId: currentSessionId, context: systemsContext });
-			let checkpointCountAtSessionStart = prepared.execution.checkpoints.length;
-			const maxFreshSessions = prepared.execution.snapshot.chunks.length + 1;
-			for (let logicalSession = 0; logicalSession < maxFreshSessions; logicalSession++) {
-				const prompts = this.buildSystemsReviewPrompts({
-					role,
-					stepName: step.name,
-					resolvedPrompt: step.resolvedPrompt!,
-					execution: prepared.execution,
-					continuation: prepared.continuation,
-				});
-				const result = await this.runLlmReviewViaSession(step, cwd, goalId, role, prompts.combinedPrompt, prompts.kickoff, timeoutMs, currentSessionId, "systems-review");
-				const latest = this.systemsReviewStore.get(prepared.execution.id);
-				if (!latest || latest.final || latest.status !== "running") return result;
-				const madeCheckpointProgress = latest.checkpoints.length > checkpointCountAtSessionStart;
-				if (!madeCheckpointProgress) return result;
-
-				// The bounded turn consumed immutable evidence and checkpointed it, but
-				// did not finalize. Retire that transcript and continue the SAME logical
-				// execution in a fresh context containing only the frozen contract and
-				// server-rendered checkpoint index. One fresh session requires progress;
-				// this prevents an infinite no-op continuation loop.
-				const retiredSessionId = currentSessionId;
-				currentSessionId = `systems-review-${randomUUID().slice(0, 12)}`;
-				prepared = await this.prepareSystemsReviewExecution({
-					step,
-					cwd,
-					goalId,
-					sessionId: currentSessionId,
-					context: { ...systemsContext, executionId: latest.id },
-				});
-				const active = this.activeVerifications.get(systemsContext.signalId);
-				const activeStep = active?.steps[systemsContext.stepIndex];
-				if (activeStep) {
-					activeStep.startedAt = Date.now();
-					this._persistActive();
-					this.broadcastFn(goalId, {
-						type: "gate_verification_step_started",
-						goalId,
-						gateId: systemsContext.gateId,
-						signalId: systemsContext.signalId,
-						stepIndex: systemsContext.stepIndex,
-						stepName: step.name,
-						startedAt: activeStep.startedAt,
-						sessionId: currentSessionId,
-						retiredSessionId,
-						timeoutSec: timeoutMs / 1_000,
-						phase: activeStep.phase ?? 0,
-					});
-				}
-				console.log(`[verification][systems-continuation] execution ${latest.id}: ${retiredSessionId} → ${currentSessionId} after ${latest.checkpoints.length}/${latest.snapshot.chunks.length} checkpoint(s).`);
-				checkpointCountAtSessionStart = prepared.execution.checkpoints.length;
-			}
-			return {
-				passed: false,
-				status: "timeout",
-				output: "Systems review exhausted its progress-bounded continuation sessions before final synthesis.",
-				sessionId: currentSessionId,
-			};
-		}
 
 		const combinedPrompt = await buildReviewPrompt(role, step, cwd, builtinVars, signalContent, signalMetadata, goalSpec, allGateStates, gate, this.commandRunner);
 
@@ -5131,7 +4318,7 @@ export class VerificationHarness {
 	 * Run an LLM review step via SessionManager (visible in UI as a proper session).
 	 */
 	private async runLlmReviewViaSession(
-		step: LlmReviewStepInput,
+		step: { name: string; prompt?: string; timeout?: number; role?: string },
 		cwd: string,
 		goalId: string,
 		role: { promptTemplate: string; accessory?: string; name?: string },
@@ -5139,7 +4326,6 @@ export class VerificationHarness {
 		kickoff: string,
 		timeoutMs: number,
 		preGeneratedSessionId?: string,
-		submissionKind: "verification" | "systems-review" = "verification",
 	): Promise<ReviewStepExecutionResult> {
 		// Pause-cascade backstop: race-window guard. The mainline path is
 		// blocked at `/gates/:id/signal` (server.ts), but a deep descendant
@@ -5167,10 +4353,7 @@ export class VerificationHarness {
 			if (!capturedVerdict) capturedVerdict = r;
 			resultResolver(r);
 		};
-		const pendingResultMap = submissionKind === "systems-review"
-			? this.pendingSystemsResults
-			: this.pendingResults;
-		pendingResultMap.set(sessionId, capturingResolver);
+		this.pendingResults.set(sessionId, capturingResolver);
 
 		let lastErroredToolOutput: string | null = null;
 		let errListenerUnsub: (() => void) | undefined;
@@ -5370,9 +4553,7 @@ export class VerificationHarness {
 				| { type: "idle" } = { type: "idle" };
 			for (let reminderNum = 1; reminderNum <= MAX_REVIEWER_REMINDERS; reminderNum++) {
 				const jsonErr = lastErroredToolOutput ? detectJsonValidationError(lastErroredToolOutput) : null;
-				const reminderPrompt = submissionKind === "systems-review"
-					? SYSTEMS_REVIEW_RESULT_REMINDER
-					: jsonErr ? buildJsonRetryPrompt(jsonErr) : buildContextRichReminder(kickoff);
+				const reminderPrompt = jsonErr ? buildJsonRetryPrompt(jsonErr) : buildContextRichReminder(kickoff);
 				console.log(`[verification][reviewer-lifecycle] reminder ${reminderNum}/${MAX_REVIEWER_REMINDERS} to ${sessionId} for "${step.name}" (${jsonErr ? "JSON-retry" : "context-rich"}) — re-nudging same session (context preserved).`);
 				await dispatchTrackedSystemPrompt(session, reminderPrompt, {
 					source: "verification",
@@ -5430,14 +4611,8 @@ export class VerificationHarness {
 			// Flag it so the `finally` can still honor a verdict that lands during
 			// teardown (the delete-vs-late-POST race) instead of dropping it.
 			hardFailureNoResult = true;
-			console.log(`[verification][reviewer-lifecycle] termination reason=reminder-exhausted for ${sessionId} ("${step.name}") after ${MAX_REVIEWER_REMINDERS} fair reminder(s) — no accepted ${submissionKind === "systems-review" ? "systems_review_result final" : "verification_result"}.`);
-			return {
-				passed: false,
-				output: submissionKind === "systems-review"
-					? "Systems reviewer did not submit an accepted final synthesis after reminder."
-					: "Agent did not call verification_result after reminder.",
-				sessionId,
-			};
+			console.log(`[verification][reviewer-lifecycle] termination reason=reminder-exhausted for ${sessionId} ("${step.name}") after ${MAX_REVIEWER_REMINDERS} fair reminder(s) — no verification_result.`);
+			return { passed: false, output: "Agent did not call verification_result after reminder.", sessionId };
 		} catch (err: any) {
 			const msg = err?.message || String(err);
 			const isTimeout = msg.includes("timed out") || msg.includes("Timeout");
@@ -5455,7 +4630,7 @@ export class VerificationHarness {
 					sessionId,
 					stepName: step.name,
 					label: "LLM review",
-					prompt: submissionKind === "systems-review" ? SYSTEMS_REVIEW_RESTART_RESUME_PROMPT : VERIFICATION_RESTART_RESUME_PROMPT,
+					prompt: VERIFICATION_RESTART_RESUME_PROMPT,
 					resultPromise,
 					timeoutMs,
 				});
@@ -5490,7 +4665,7 @@ export class VerificationHarness {
 				try {
 					await this.sessionManager!.terminateSession(sessionId);
 				} catch { /* ignore — session may already be terminated */ }
-				pendingResultMap.delete(sessionId);
+				this.pendingResults.delete(sessionId);
 				if (this.teamManager) {
 					try {
 						await this.teamManager.unregisterReviewerSession(goalId, sessionId);
@@ -5969,7 +5144,6 @@ export class VerificationHarness {
 		streamCtx?: { goalId: string; gateId: string; signalId: string; stepIndex: number },
 		errorPattern?: string,
 		containerId?: string,
-		additionalEnv?: Record<string, string>,
 	): Promise<{ passed: boolean; output: string; diagnostics?: GateStepDiagnostics }> {
 		return new Promise((resolve) => {
 			const normalizedCwd = cwd.replace(/\\/g, "/");
@@ -6209,8 +5383,7 @@ export class VerificationHarness {
 						wrappedCmd = `echo $$ > ${killPidFile}; ${command}`;
 					}
 					const pidFileForKill = killPidFile;
-					const dockerEnvironment = Object.entries(additionalEnv ?? {}).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
-					tracked = spawnTracked("docker", ["exec", ...dockerEnvironment, "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
+					tracked = spawnTracked("docker", ["exec", "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
 						stdio: ["ignore", "pipe", "pipe"],
 						timeoutMs: timeoutSec * 1000,
 						env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
@@ -6239,7 +5412,6 @@ export class VerificationHarness {
 						shellBin, shellArgs, cmdToRun, command,
 						cwd: normalizedCwd,
 						stdio: ["ignore", "ignore", "ignore"],
-						env: additionalEnv ? { ...process.env, ...additionalEnv } : undefined,
 						timeoutMs: timeoutSec * 1000,
 						windowsHide: process.platform === "win32",
 						useDetached: true,
@@ -6250,7 +5422,6 @@ export class VerificationHarness {
 						shellBin, shellArgs, cmdToRun, command,
 						cwd: normalizedCwd,
 						stdio: ["ignore", "pipe", "pipe"],
-						env: additionalEnv ? { ...process.env, ...additionalEnv } : undefined,
 						timeoutMs: timeoutSec * 1000,
 						windowsHide: process.platform === "win32",
 						useDetached: false,

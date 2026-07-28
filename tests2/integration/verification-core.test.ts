@@ -439,17 +439,9 @@ test.describe("Multi-step verification", () => {
 				gateEvent(goalId, "implementation", signalId, "gate_verification_started"),
 				VERIFICATION_WS_TIMEOUT_MS,
 			);
-			expect(started.steps).toEqual([
-				{ name: "Quick check", type: "command", phase: 0 },
-				{ name: "Systems interaction review", type: "llm-review", phase: 1 },
-			]);
-
-			const commandPhase = await ws.waitForFrom(
-				cursor,
-				(m) => gateEvent(goalId, "implementation", signalId, "gate_verification_phase_started")(m) && m.phase === 0,
-				VERIFICATION_WS_TIMEOUT_MS,
-			);
-			expect(commandPhase.stepIndices).toEqual([0]);
+			expect(started.steps).toBeDefined();
+			expect(started.steps.length).toBe(1);
+			expect(started.steps[0].name).toBe("Quick check");
 
 			// Check step_output event fields
 			const output = await ws.waitForFrom(
@@ -468,30 +460,11 @@ test.describe("Multi-step verification", () => {
 
 			const stepComplete = await ws.waitForFrom(
 				cursor,
-				(m) => gateEvent(goalId, "implementation", signalId, "gate_verification_step_complete")(m) && m.stepIndex === 0,
+				gateEvent(goalId, "implementation", signalId, "gate_verification_step_complete"),
 				VERIFICATION_WS_TIMEOUT_MS,
 			);
 			expect(stepComplete.stepName).toBe("Quick check");
 			expect(stepComplete.status).toBe("passed");
-			expect(stepComplete.phase).toBe(0);
-
-			const reviewPhase = await ws.waitForFrom(
-				cursor,
-				(m) => gateEvent(goalId, "implementation", signalId, "gate_verification_phase_started")(m) && m.phase === 1,
-				VERIFICATION_WS_TIMEOUT_MS,
-			);
-			expect(reviewPhase.stepIndices).toEqual([1]);
-
-			const reviewComplete = await ws.waitForFrom(
-				cursor,
-				(m) => gateEvent(goalId, "implementation", signalId, "gate_verification_step_complete")(m) && m.stepIndex === 1,
-				VERIFICATION_WS_TIMEOUT_MS,
-			);
-			expect(reviewComplete.stepName).toBe("Systems interaction review");
-			expect(reviewComplete.status).toBe("passed");
-			expect(reviewComplete.phase).toBe(1);
-			expect(reviewComplete.output).toContain("LLM review skipped");
-			expect(reviewComplete.output).toContain("BOBBIT_LLM_REVIEW_SKIP");
 
 			const complete = await ws.waitForFrom(
 				cursor,

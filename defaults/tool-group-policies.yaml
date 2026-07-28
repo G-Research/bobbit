@@ -30,10 +30,6 @@ Skills: allow
 # agents from a worker session — where the tool wouldn't work anyway because
 # the team extension is only loaded for the team-lead session.
 Team: never
-# Systems Review group: immutable branch evidence and structured result tools.
-# Default `never` so every non-reviewer role fails closed. The systems-reviewer
-# role's explicit per-tool `allow` entries override this group default.
-Systems Review: never
 # PR Walkthrough group: host.agents reviewer tools (readonly_bash,
 # read_pr_walkthrough_bundle, submit_pr_walkthrough_chunk,
 # read_pr_walkthrough_submission_status, finalize_pr_walkthrough_submission,

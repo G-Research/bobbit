@@ -4,13 +4,12 @@
  *
  * See docs/design/multi-repo-components.md §1.3.
  *
- * Idempotent: component synthesis runs only when `components:` is absent.
- * Already-migrated projects still receive safe, versioned workflow and legacy
- * QA forward migrations. The migration runs at server boot before pool fill.
+ * Idempotent: if `components:` is already present, this is a no-op. The
+ * migration runs once per project at server boot, before any pool fill.
  *
  * Behavior:
  *   1. Read `<configDir>/project.yaml`.
- *   2. If `components:` already present → run workflow/QA forward migrations only.
+ *   2. If `components:` already present → log nothing and return.
  *   3. Build a one-element `components[]`:
  *        - name: project's name from the registry (NOT "default")
  *        - repo: "."
@@ -24,24 +23,18 @@
 import fs from "node:fs";
 import path from "node:path";
 import yaml from "yaml";
-import {
-	migrateSystemsInteractionWorkflows,
-	type SystemsInteractionWorkflowMigrationDiagnostic,
-} from "./migrate-systems-interaction-workflows.js";
 
 interface MigrateOpts {
 	configDir: string;
 	projectName: string;
 }
 
-export interface MigrateResult {
+interface MigrateResult {
 	migrated: boolean;
 	componentName?: string;
 	commandKeys?: string[];
 	workflowsMigrated?: number;
 	workflowsDirRemoved?: boolean;
-	systemsReviewWorkflowsUpgraded?: number;
-	systemsReviewUpgradeDiagnostics?: SystemsInteractionWorkflowMigrationDiagnostic[];
 }
 
 /** Legacy top-level QA keys that move into `components[*].config[]`. */
@@ -177,12 +170,6 @@ function isNonEmpty(v: unknown): v is string {
 	return typeof v === "string" && v.trim().length > 0;
 }
 
-function logSystemsReviewUpgradeDiagnostics(diagnostics: SystemsInteractionWorkflowMigrationDiagnostic[]): void {
-	for (const item of diagnostics) {
-		console.warn(`[migrate] workflow "${item.workflowId}", gate "${item.gateId}": ${item.message} (code=${item.code})`);
-	}
-}
-
 export function migrateProjectYaml(opts: MigrateOpts): MigrateResult {
 	const yamlFile = path.join(opts.configDir, "project.yaml");
 	const workflowsDir = path.join(opts.configDir, "workflows");
@@ -298,13 +285,9 @@ export function migrateProjectYaml(opts: MigrateOpts): MigrateResult {
 	}
 
 	// No default-workflow seeding. Workflows are the project assistant's
-	// responsibility; a project may legitimately have zero workflows. Existing
-	// project definitions are upgraded in place only when their specialist phase
-	// is unambiguous; goal snapshots are stored elsewhere and never enter this pass.
-	const systemsReviewUpgrade = migrateSystemsInteractionWorkflows(inlineWorkflows);
-	logSystemsReviewUpgradeDiagnostics(systemsReviewUpgrade.diagnostics);
-	if (Object.keys(systemsReviewUpgrade.workflows).length > 0) {
-		next.workflows = systemsReviewUpgrade.workflows;
+	// responsibility; a project may legitimately have zero workflows.
+	if (Object.keys(inlineWorkflows).length > 0) {
+		next.workflows = inlineWorkflows;
 	}
 
 	// Migrate legacy top-level qa_* keys onto the chosen component's config map.
@@ -335,8 +318,6 @@ export function migrateProjectYaml(opts: MigrateOpts): MigrateResult {
 		commandKeys: Object.keys(commands),
 		workflowsMigrated,
 		workflowsDirRemoved,
-		systemsReviewWorkflowsUpgraded: systemsReviewUpgrade.upgradedWorkflowIds.length,
-		systemsReviewUpgradeDiagnostics: systemsReviewUpgrade.diagnostics,
 	};
 }
 
@@ -368,8 +349,10 @@ function maybeSeedWorkflowsOnly(args: {
 	// config (any presence of a legacy qa_* top-level key triggers a write — even
 	// empty values get deleted to satisfy the "no top-level qa_* after boot"
 	// acceptance criterion).
-	// Do not return early for populated inline workflows: they may still need the
-	// versioned Systems interaction review migration below.
+	const hasLegacyQaTopLevel = LEGACY_QA_KEYS.some(k => k in raw);
+	if (hasInlineWorkflows && !hasWorkflowsDir && !hasLegacyQaTopLevel) {
+		return { migrated: false };
+	}
 
 	const components = raw.components as Array<Record<string, unknown>> | undefined;
 	const componentName = components && components[0] && typeof components[0].name === "string"
@@ -404,27 +387,15 @@ function maybeSeedWorkflowsOnly(args: {
 		}
 	}
 
-	// Upgrade only workflow definitions whose existing specialist phase is safe to
-	// infer. Ambiguous custom workflows remain byte-for-byte intact and emit a
-	// structured manual-upgrade diagnostic; selecting one for a new goal is then
-	// blocked by workflow validation.
-	const systemsReviewUpgrade = migrateSystemsInteractionWorkflows(inlineWorkflows);
-	logSystemsReviewUpgradeDiagnostics(systemsReviewUpgrade.diagnostics);
-
 	// Migrate any legacy top-level qa_* keys onto the appropriate component's config.
 	// The components array is mutated in place; the same reference is then re-emitted in `next`.
 	const nextComponents = (components ?? []).map(c => ({ ...c }));
-	const nextRaw: Record<string, unknown> = { ...raw, components: nextComponents, workflows: systemsReviewUpgrade.workflows };
+	const nextRaw: Record<string, unknown> = { ...raw, components: nextComponents, workflows: inlineWorkflows };
 	const qaResult = migrateLegacyQaToComponent(nextRaw, nextComponents, projectName);
 
-	if (workflowsMigrated === 0 && !qaResult.changed && !systemsReviewUpgrade.changed) {
-		// Nothing changed (no inline dir to migrate, no workflow upgrade, no QA migration).
-		return {
-			migrated: false,
-			...(systemsReviewUpgrade.diagnostics.length > 0
-				? { systemsReviewUpgradeDiagnostics: systemsReviewUpgrade.diagnostics }
-				: {}),
-		};
+	if (workflowsMigrated === 0 && !qaResult.changed) {
+		// Nothing changed (no inline dir to migrate, no default seeding, no QA migration).
+		return { migrated: false };
 	}
 
 	const next = nextRaw;
@@ -447,8 +418,6 @@ function maybeSeedWorkflowsOnly(args: {
 		componentName,
 		workflowsMigrated,
 		workflowsDirRemoved,
-		systemsReviewWorkflowsUpgraded: systemsReviewUpgrade.upgradedWorkflowIds.length,
-		systemsReviewUpgradeDiagnostics: systemsReviewUpgrade.diagnostics,
 	};
 }
 

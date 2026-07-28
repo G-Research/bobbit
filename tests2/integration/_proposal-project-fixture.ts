@@ -7,7 +7,6 @@ import {
 	type ProposalType,
 } from "../../src/server/proposals/proposal-files.js";
 import type { TestComponent, TestWorkflowsBlock } from "../../tests/e2e/seed-workflows.js";
-import { testSystemsInteractionReviewStep } from "../harness/systems-review-workflow.js";
 
 interface ProposalProjectFixture {
 	id: string;
@@ -28,11 +27,7 @@ export const MINIMAL_PROPOSAL_WORKFLOWS: TestWorkflowsBlock = Object.freeze({
 		id: "general",
 		name: "General",
 		gates: Object.freeze([
-			Object.freeze({
-				id: "implementation",
-				name: "Implementation",
-				verify: Object.freeze([Object.freeze(testSystemsInteractionReviewStep())]),
-			}),
+			Object.freeze({ id: "implementation", name: "Implementation", verify: Object.freeze([]) }),
 		]),
 	}),
 	feature: Object.freeze({
@@ -43,12 +38,10 @@ export const MINIMAL_PROPOSAL_WORKFLOWS: TestWorkflowsBlock = Object.freeze({
 				id: "implementation",
 				name: "Implementation",
 				verify: Object.freeze([
-					Object.freeze(testSystemsInteractionReviewStep()),
 					Object.freeze({
 						name: "QA testing",
 						type: "agent-qa",
 						role: "qa-tester",
-						phase: 2,
 						optional: true,
 						label: "Enable QA Testing",
 						prompt: "QA test (skipped in tests).",
@@ -65,11 +58,7 @@ export const TARGET_ONLY_WORKFLOWS: TestWorkflowsBlock = Object.freeze({
 		name: "Target Only",
 		description: "Workflow present only in the cross-project target.",
 		gates: Object.freeze([
-			Object.freeze({
-				id: "implementation",
-				name: "Implementation",
-				verify: Object.freeze([Object.freeze(testSystemsInteractionReviewStep())]),
-			}),
+			Object.freeze({ id: "implementation", name: "Implementation", verify: Object.freeze([]) }),
 		]),
 	}),
 }) as TestWorkflowsBlock;

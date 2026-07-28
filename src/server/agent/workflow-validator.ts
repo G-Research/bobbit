@@ -1,8 +1,4 @@
 import { normalizeWorkflow, type Workflow } from "./workflow-store.js";
-import {
-	SYSTEMS_INTERACTION_REVIEW_PROMPT_ID,
-	resolveSystemsInteractionReviewContract,
-} from "./systems-interaction-review-contract.js";
 
 /**
  * Workflow validation shared by project workflow mutations, goal creation, and
@@ -21,13 +17,6 @@ export interface WorkflowValidationOptions {
 	 * but their already-resolved component references must remain intact.
 	 */
 	validateComponentReferences?: boolean;
-	/**
-	 * Historical persisted goal snapshots are read directly and never enter this
-	 * validator. This escape hatch is reserved for explicit legacy inspection
-	 * tools; all authored definitions and newly frozen snapshots enforce the
-	 * implementation-gate Systems review invariant by default.
-	 */
-	enforceSystemsInteractionReview?: boolean;
 }
 
 export interface ValidatorVerifyStep {
@@ -37,12 +26,7 @@ export interface ValidatorVerifyStep {
 	command?: string;
 	run?: string;
 	prompt?: string;
-	promptRef?: string;
-	promptId?: string;
-	promptSha256?: string;
-	resolvedPrompt?: string;
 	role?: string;
-	reviewGroup?: string;
 	optional?: boolean;
 	label?: string;
 	optionalLabel?: string;
@@ -76,39 +60,6 @@ export interface ValidatorWorkflow {
 export const WORKFLOW_ID_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
 
 const STEP_TYPES = ["command", "llm-review", "agent-qa", "subgoal", "human-signoff"] as const;
-
-export type WorkflowSystemsReviewInvariantCode =
-	| "systems-review-missing"
-	| "systems-review-duplicate"
-	| "systems-review-invalid-step"
-	| "systems-review-invalid-contract"
-	| "specialist-phase-mismatch"
-	| "command-phase-order"
-	| "qa-phase-order";
-
-/** Structured diagnostic used to block only new snapshots of incompatible workflows. */
-export class WorkflowSystemsReviewInvariantError extends Error {
-	readonly code: WorkflowSystemsReviewInvariantCode;
-	readonly workflow: string;
-	readonly gate = "implementation" as const;
-	readonly stepIndex?: number;
-	readonly stepName?: string;
-
-	constructor(opts: {
-		code: WorkflowSystemsReviewInvariantCode;
-		workflow: string;
-		message: string;
-		stepIndex?: number;
-		stepName?: string;
-	}) {
-		super(`Workflow "${opts.workflow}", gate "implementation": ${opts.message}`);
-		this.name = "WorkflowSystemsReviewInvariantError";
-		this.code = opts.code;
-		this.workflow = opts.workflow;
-		this.stepIndex = opts.stepIndex;
-		this.stepName = opts.stepName;
-	}
-}
 
 export class WorkflowResolveError extends Error {
 	readonly workflow: string;
@@ -191,153 +142,6 @@ function gateDependencies(gate: Record<string, unknown>): unknown {
 	return Array.isArray(gate.depends_on) ? gate.depends_on : gate.dependsOn;
 }
 
-const SYSTEMS_REVIEW_STEP_NAME = "Systems interaction review";
-const SYSTEMS_REVIEW_ROLE = "systems-reviewer";
-const SPECIALIST_REVIEW_GROUP = "specialist";
-const KNOWN_SPECIALIST_ROLES = new Set(["spec-auditor", "code-reviewer", "bug-hunter", "security-reviewer"]);
-const KNOWN_SPECIALIST_NAMES = new Set([
-	"gap analysis",
-	"code quality review",
-	"bug hunt",
-	"security review",
-	"regression test coverage",
-	"e2e user journey coverage",
-]);
-
-function effectiveStepPhase(step: ValidatorVerifyStep): number {
-	return typeof step.phase === "number" && Number.isInteger(step.phase) && step.phase >= 0 ? step.phase : 0;
-}
-
-function isKnownSpecialistStep(step: ValidatorVerifyStep): boolean {
-	if ((step.type ?? "command") !== "llm-review") return false;
-	if (step.reviewGroup === SPECIALIST_REVIEW_GROUP) return true;
-	if (typeof step.role === "string" && KNOWN_SPECIALIST_ROLES.has(step.role)) return true;
-	return typeof step.name === "string" && KNOWN_SPECIALIST_NAMES.has(step.name.trim().toLowerCase());
-}
-
-function looksLikeSystemsReviewStep(step: ValidatorVerifyStep): boolean {
-	return step.name === SYSTEMS_REVIEW_STEP_NAME
-		|| step.role === SYSTEMS_REVIEW_ROLE
-		|| step.promptRef === SYSTEMS_INTERACTION_REVIEW_PROMPT_ID
-		|| step.promptId === SYSTEMS_INTERACTION_REVIEW_PROMPT_ID;
-}
-
-function validateSystemsInteractionReviewGate(wfId: string, steps: ValidatorVerifyStep[]): Error[] {
-	const errors: Error[] = [];
-	const add = (
-		code: WorkflowSystemsReviewInvariantCode,
-		message: string,
-		stepIndex?: number,
-		stepName?: string,
-	): void => {
-		errors.push(new WorkflowSystemsReviewInvariantError({ code, workflow: wfId, message, stepIndex, stepName }));
-	};
-	const systemsCandidates = steps
-		.map((step, index) => ({ step, index }))
-		.filter(({ step }) => isPlainObject(step) && looksLikeSystemsReviewStep(step));
-
-	if (systemsCandidates.length === 0) {
-		add(
-			"systems-review-missing",
-			`missing mandatory "${SYSTEMS_REVIEW_STEP_NAME}" llm-review step. This workflow requires manual upgrade before it can be selected for a new goal.`,
-		);
-		return errors;
-	}
-	if (systemsCandidates.length > 1) {
-		add(
-			"systems-review-duplicate",
-			`has ${systemsCandidates.length} Systems interaction review candidates; keep exactly one canonical mandatory step.`,
-		);
-		return errors;
-	}
-
-	const { step: systems, index: systemsIndex } = systemsCandidates[0];
-	const systemsName = typeof systems.name === "string" ? systems.name : "";
-	if (systems.name !== SYSTEMS_REVIEW_STEP_NAME
-		|| systems.type !== "llm-review"
-		|| systems.role !== SYSTEMS_REVIEW_ROLE
-		|| systems.reviewGroup !== SPECIALIST_REVIEW_GROUP
-		|| systems.optional === true
-		|| systems.phase === undefined
-		|| systems.prompt !== undefined) {
-		add(
-			"systems-review-invalid-step",
-			`step ${systemsIndex + 1} ("${systemsName || "<unnamed>"}") must be a mandatory llm-review using role "${SYSTEMS_REVIEW_ROLE}", reviewGroup "${SPECIALIST_REVIEW_GROUP}", an explicit phase, and no inline prompt.`,
-			systemsIndex,
-			systemsName,
-		);
-	}
-
-	let contract: { prompt: string; sha256: string };
-	try {
-		contract = resolveSystemsInteractionReviewContract(SYSTEMS_INTERACTION_REVIEW_PROMPT_ID);
-	} catch (error) {
-		add("systems-review-invalid-contract", `cannot resolve prompt contract "${SYSTEMS_INTERACTION_REVIEW_PROMPT_ID}": ${error instanceof Error ? error.message : String(error)}`);
-		return errors;
-	}
-	const hasReference = systems.promptRef === SYSTEMS_INTERACTION_REVIEW_PROMPT_ID;
-	const hasInvalidReference = systems.promptRef !== undefined && !hasReference;
-	const snapshotFields = [systems.promptId, systems.promptSha256, systems.resolvedPrompt];
-	const hasAnySnapshotField = snapshotFields.some(value => value !== undefined);
-	const hasExactSnapshot = systems.promptId === SYSTEMS_INTERACTION_REVIEW_PROMPT_ID
-		&& systems.promptSha256 === contract.sha256
-		&& systems.resolvedPrompt === contract.prompt;
-	if (hasInvalidReference || (!hasReference && !hasExactSnapshot) || (hasAnySnapshotField && !hasExactSnapshot)) {
-		add(
-			"systems-review-invalid-contract",
-			`step ${systemsIndex + 1} must reference "${SYSTEMS_INTERACTION_REVIEW_PROMPT_ID}" or carry its exact immutable {promptId, promptSha256, resolvedPrompt} snapshot.`,
-			systemsIndex,
-			systemsName,
-		);
-	}
-
-	const systemsPhase = effectiveStepPhase(systems);
-	// Known shipped specialist roles/names remain recognizable while the boot
-	// migration adds reviewGroup to legacy project definitions. Explicitly
-	// grouped custom specialists are included too; unrelated LLM groups are not.
-	const specialists = steps.filter(step => step === systems || (isPlainObject(step) && isKnownSpecialistStep(step)));
-	const phaseMismatches = specialists.filter(step => effectiveStepPhase(step) !== systemsPhase);
-	if (phaseMismatches.length > 0) {
-		add(
-			"specialist-phase-mismatch",
-			`all specialist llm-review steps must share phase ${systemsPhase}; mismatched: ${phaseMismatches.map(step => `"${step.name ?? "<unnamed>"}"`).join(", ")}.`,
-		);
-	}
-
-	const lateCommands = steps.filter(step => isPlainObject(step) && (step.type ?? "command") === "command" && effectiveStepPhase(step) >= systemsPhase);
-	if (lateCommands.length > 0) {
-		add(
-			"command-phase-order",
-			`all command steps must run before specialist phase ${systemsPhase}; not earlier: ${lateCommands.map(step => `"${step.name ?? "<unnamed>"}"`).join(", ")}.`,
-		);
-	}
-	const earlyQa = steps.filter(step => isPlainObject(step) && step.type === "agent-qa" && effectiveStepPhase(step) <= systemsPhase);
-	if (earlyQa.length > 0) {
-		add(
-			"qa-phase-order",
-			`all agent-qa steps must remain after specialist phase ${systemsPhase}; not later: ${earlyQa.map(step => `"${step.name ?? "<unnamed>"}"`).join(", ")}.`,
-		);
-	}
-	return errors;
-}
-
-/** Resolve authored prompt references exactly once into a newly frozen snapshot. */
-function resolveSystemsInteractionReviewSnapshots(workflow: Workflow): Workflow {
-	const clone = structuredClone(workflow);
-	for (const gate of clone.gates) {
-		if (gate.id !== "implementation") continue;
-		for (const step of gate.verify ?? []) {
-			if (step.name !== SYSTEMS_REVIEW_STEP_NAME || step.role !== SYSTEMS_REVIEW_ROLE) continue;
-			if (step.promptRef !== SYSTEMS_INTERACTION_REVIEW_PROMPT_ID) continue;
-			const contract = resolveSystemsInteractionReviewContract(step.promptRef);
-			step.promptId = step.promptRef;
-			step.promptSha256 = contract.sha256;
-			step.resolvedPrompt = contract.prompt;
-		}
-	}
-	return clone;
-}
-
 /**
  * Validate verification execution semantics and component/command references.
  * This entry point remains intentionally non-throwing for config diagnostics.
@@ -346,9 +150,8 @@ function validateWorkflowSteps(
 	wf: ValidatorWorkflow,
 	components: WorkflowComponentRef[],
 	validateComponentReferences: boolean,
-	enforceSystemsInteractionReview: boolean,
-): Error[] {
-	const errors: Error[] = [];
+): WorkflowResolveError[] {
+	const errors: WorkflowResolveError[] = [];
 	const wfId = typeof wf?.id === "string" && wf.id ? wf.id : "(anonymous)";
 	const componentNames = components.map(c => c.name);
 	const componentByName = new Map(components.map(c => [c.name, c]));
@@ -422,25 +225,13 @@ function validateWorkflowSteps(
 					}
 				}
 			} else if (stepType === "llm-review" || stepType === "agent-qa") {
-				const contractBackedSystemsStep = gateId === "implementation"
-					&& stepType === "llm-review"
-					&& looksLikeSystemsReviewStep(step);
-				if (!contractBackedSystemsStep && !isNonEmptyString(step.prompt)) {
-					fail(`type: ${stepType} step requires a non-empty "prompt".`);
-				}
-				if (step.reviewGroup !== undefined && stepType !== "llm-review") {
-					fail("reviewGroup is supported only on llm-review steps.");
-				}
+				if (!isNonEmptyString(step.prompt)) fail(`type: ${stepType} step requires a non-empty "prompt".`);
 			} else if (stepType === "human-signoff") {
 				if (!isNonEmptyString(step.prompt)) fail('type: human-signoff step requires a non-empty "prompt".');
 				if (!isNonEmptyString(step.label)) fail('type: human-signoff step requires a non-empty "label".');
 			} else if (stepType !== "subgoal") {
 				fail(`unknown step type "${String(stepType)}"; expected one of: ${STEP_TYPES.join(", ")}.`);
 			}
-		}
-
-		if (enforceSystemsInteractionReview && gateId === "implementation") {
-			errors.push(...validateSystemsInteractionReviewGate(wfId, steps));
 		}
 	}
 	return errors;
@@ -520,19 +311,8 @@ export function validateWorkflowDefinition(
 			const prefix = `Workflow "${wfId}", gate "${gateId}", step ${stepIndex + 1}`;
 			if (!isNonEmptyString(stepValue.name)) fail(`${prefix}: step must have a non-empty name`);
 			const type = stepValue.type === undefined ? "command" : stepValue.type;
-			for (const stringField of [
-				"run", "prompt", "promptRef", "promptId", "promptSha256", "resolvedPrompt",
-				"role", "reviewGroup", "label", "optionalLabel", "description", "component", "command",
-			] as const) {
+			for (const stringField of ["run", "prompt", "role", "label", "optionalLabel", "description", "component", "command"] as const) {
 				if (stepValue[stringField] !== undefined && typeof stepValue[stringField] !== "string") fail(`${prefix}: ${stringField} must be a string`);
-			}
-			if (stepValue.reviewGroup !== undefined && type !== "llm-review") fail(`${prefix}: reviewGroup is supported only on llm-review steps`);
-			const hasPromptContractField = stepValue.promptRef !== undefined
-				|| stepValue.promptId !== undefined
-				|| stepValue.promptSha256 !== undefined
-				|| stepValue.resolvedPrompt !== undefined;
-			if (hasPromptContractField && !(gateId === "implementation" && type === "llm-review" && looksLikeSystemsReviewStep(stepValue))) {
-				fail(`${prefix}: prompt contract fields are reserved for the implementation gate's Systems interaction review`);
 			}
 			if (stepValue.optional !== undefined && typeof stepValue.optional !== "boolean") fail(`${prefix}: optional must be a boolean`);
 			if (stepValue.expect !== undefined && stepValue.expect !== "success" && stepValue.expect !== "failure") fail(`${prefix}: expect must be "success" or "failure"`);
@@ -616,7 +396,6 @@ export function validateWorkflowDefinition(
 		raw as unknown as ValidatorWorkflow,
 		components,
 		options.validateComponentReferences !== false,
-		options.enforceSystemsInteractionReview !== false,
 	));
 	return errors;
 }
@@ -648,9 +427,7 @@ export function freezeWorkflowDefinition(
 	assertValidWorkflowDefinition(raw, components, options);
 	const normalized = normalizeWorkflow(raw, idHint);
 	if (!normalized) throw new Error("Invalid workflow definition");
-	return options.enforceSystemsInteractionReview === false
-		? structuredClone(normalized)
-		: resolveSystemsInteractionReviewSnapshots(normalized);
+	return structuredClone(normalized);
 }
 
 /** Validate every workflow in an inline workflows map. */

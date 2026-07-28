@@ -85,10 +85,8 @@ interface BaseToolInfo {
 	provider?: ToolProvider;
 	/** Grant policy loaded from YAML; undefined means "not configured" */
 	grantPolicy?: GrantPolicy;
-	/** Authoritative positional parameter names (trailing `?` marks optional). */
+	/** Optional positional parameter names (trailing `?` marks optional). Drives compact `(args)` rendering. */
 	params?: string[];
-	/** Optional display-only override for compact prompt docs. An explicit empty list omits `(args)`. */
-	promptParams?: string[];
 	/** Subdirectory name within tools/ (e.g. "shell", "filesystem"). Empty string for flat files. */
 	groupDir: string;
 	/** Absolute path to the YAML file on disk. */
@@ -153,14 +151,6 @@ function parseParamsField(value: unknown): string[] | undefined {
 	return out.length > 0 ? out : undefined;
 }
 
-/** Parse the display-only prompt parameter override, preserving an explicit empty list. */
-function parsePromptParamsField(value: unknown): string[] | undefined {
-	if (!Array.isArray(value)) return undefined;
-	return value
-		.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
-		.map((entry) => entry.trim());
-}
-
 import { bobbitConfigDir } from "../bobbit-dir.js";
 
 
@@ -219,7 +209,6 @@ function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 								provider: data.provider,
 								grantPolicy: data.grantPolicy,
 								params: parseParamsField(data.params),
-								promptParams: parsePromptParamsField(data.promptParams),
 								groupDir,
 								filePath,
 								baseDir,
@@ -254,7 +243,6 @@ function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 						provider: data.provider,
 						grantPolicy: data.grantPolicy,
 						params: parseParamsField(data.params),
-						promptParams: parsePromptParamsField(data.promptParams),
 						groupDir: "",
 						filePath,
 						baseDir,
@@ -975,7 +963,7 @@ export class ToolManager {
 			const group = tool.group;
 			const summary = tool.summary ?? tool.description;
 			if (!grouped.has(group)) grouped.set(group, { groupDir: tool.groupDir, entries: [] });
-			grouped.get(group)!.entries.push({ name: tool.name, summary, params: tool.promptParams ?? tool.params });
+			grouped.get(group)!.entries.push({ name: tool.name, summary, params: tool.params });
 			included.add(tool.name.toLowerCase());
 		}
 

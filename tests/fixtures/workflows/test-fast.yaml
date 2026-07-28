@@ -17,12 +17,6 @@ gates:
       - name: "Quick check"
         type: command
         run: "echo ok"
-      - name: Systems interaction review
-        type: llm-review
-        role: systems-reviewer
-        phase: 1
-        reviewGroup: specialist
-        promptRef: bobbit:systems-interaction-review/v1
 
   - id: ready-to-merge
     name: Ready to Merge

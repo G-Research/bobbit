@@ -1,7 +1,6 @@
 import type { PersistedGoal } from "../../src/server/agent/goal-store.js";
 import type { Workflow } from "../../src/server/agent/workflow-store.js";
 import { prepareGoalProposalSeed } from "../../src/server/proposals/goal-proposal-seed.js";
-import { testSystemsInteractionReviewStep } from "../harness/systems-review-workflow.js";
 
 export const VALIDATION_PROJECT_WORKFLOWS: readonly Workflow[] = [
 	{
@@ -14,7 +13,7 @@ export const VALIDATION_PROJECT_WORKFLOWS: readonly Workflow[] = [
 			id: "implementation",
 			name: "Implementation",
 			dependsOn: [],
-			verify: [testSystemsInteractionReviewStep()],
+			verify: [],
 		}],
 	},
 	{
@@ -27,18 +26,14 @@ export const VALIDATION_PROJECT_WORKFLOWS: readonly Workflow[] = [
 			id: "implementation",
 			name: "Implementation",
 			dependsOn: [],
-			verify: [
-				testSystemsInteractionReviewStep(),
-				{
-					name: "QA testing",
-					type: "agent-qa",
-					role: "qa-tester",
-					phase: 2,
-					optional: true,
-					optionalLabel: "Enable QA Testing",
-					prompt: "QA test (skipped in tests).",
-				},
-			],
+			verify: [{
+				name: "QA testing",
+				type: "agent-qa",
+				role: "qa-tester",
+				optional: true,
+				optionalLabel: "Enable QA Testing",
+				prompt: "QA test (skipped in tests).",
+			}],
 		}],
 	},
 ];

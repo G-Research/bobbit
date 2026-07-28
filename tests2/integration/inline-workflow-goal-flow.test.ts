@@ -13,7 +13,6 @@ import os from "node:os";
 import path from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, registerProject } from "./_e2e/e2e-setup.js";
-import { testSystemsInteractionReviewStep } from "../harness/systems-review-workflow.js";
 
 const COMPONENTS = [
 	{ name: "default", repo: ".", commands: { build: "echo built", check: "echo checked" } },
@@ -38,7 +37,6 @@ const INLINE_WORKFLOWS = {
 			{ id: "implementation", name: "Implementation", verify: [
 				{ name: "Check", type: "command", component: "default", command: "check" },
 				{ name: "Echo", type: "command", run: "echo {{branch}}" },
-				testSystemsInteractionReviewStep(),
 			] },
 		],
 	},
@@ -113,7 +111,7 @@ test("inline workflows from project.yaml drive goal creation @smoke", async () =
 		expect(goalRespB.status).toBe(201);
 		const goalB = await goalRespB.json();
 		createdGoalIds.push(goalB.id);
-		expect(goalB.workflow.gates[0].verify).toHaveLength(3);
+		expect(goalB.workflow.gates[0].verify).toHaveLength(2);
 		expect(goalB.workflow.gates[0].verify[1]).toMatchObject({
 			name: "Echo", type: "command", run: "echo {{branch}}",
 		});

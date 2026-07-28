@@ -262,7 +262,11 @@ workflows:
             role: systems-reviewer
             phase: 4
             reviewGroup: specialist
-            promptRef: bobbit:systems-interaction-review/v1
+            prompt: >-
+              Perform the complete Systems Interaction Review defined by the
+              systems-reviewer role for branch {{branch}} versus {{baseBranch}}.
+              Inspect every changed cross-layer state and action path, continue
+              after the first finding, and submit the verification result.
       - id: documentation
         name: Documentation
         depends_on:
@@ -538,7 +542,11 @@ workflows:
             role: systems-reviewer
             phase: 4
             reviewGroup: specialist
-            promptRef: bobbit:systems-interaction-review/v1
+            prompt: >-
+              Perform the complete Systems Interaction Review defined by the
+              systems-reviewer role for branch {{branch}} versus {{baseBranch}}.
+              Inspect every changed cross-layer state and action path, continue
+              after the first finding, and submit the verification result.
           - name: QA testing
             type: agent-qa
             role: qa-tester
@@ -711,7 +719,11 @@ workflows:
             role: systems-reviewer
             phase: 4
             reviewGroup: specialist
-            promptRef: bobbit:systems-interaction-review/v1
+            prompt: >-
+              Perform the complete Systems Interaction Review defined by the
+              systems-reviewer role for branch {{branch}} versus {{baseBranch}}.
+              Inspect every changed cross-layer state and action path, continue
+              after the first finding, and submit the verification result.
           - name: QA testing
             type: agent-qa
             role: qa-tester
@@ -830,7 +842,11 @@ workflows:
             role: systems-reviewer
             phase: 4
             reviewGroup: specialist
-            promptRef: bobbit:systems-interaction-review/v1
+            prompt: >-
+              Perform the complete Systems Interaction Review defined by the
+              systems-reviewer role for branch {{branch}} versus {{baseBranch}}.
+              Inspect every changed cross-layer state and action path, continue
+              after the first finding, and submit the verification result.
       - id: ready-to-merge
         name: Ready to Merge
         depends_on:
@@ -902,7 +918,11 @@ workflows:
             role: systems-reviewer
             phase: 1
             reviewGroup: specialist
-            promptRef: bobbit:systems-interaction-review/v1
+            prompt: >-
+              Perform the complete Systems Interaction Review defined by the
+              systems-reviewer role for branch {{branch}} versus {{baseBranch}}.
+              Inspect every changed cross-layer state and action path, continue
+              after the first finding, and submit the verification result.
       - id: ready-to-merge
         name: Ready to Merge
         depends_on:

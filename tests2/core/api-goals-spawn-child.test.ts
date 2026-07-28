@@ -30,7 +30,6 @@ import { GoalManager } from "../../src/server/agent/goal-manager.ts";
 import { ProjectConfigStore } from "../../src/server/agent/project-config-store.ts";
 import { InlineWorkflowStore } from "../../src/server/agent/workflow-store.ts";
 import { createMemFs, type MemFs } from "../harness/mem-fs.js";
-import { testSystemsInteractionReviewStep } from "../harness/systems-review-workflow.js";
 
 let memfs: MemFs;
 const tmpRoot = path.resolve("/memfs/spawn-child/work");
@@ -51,7 +50,7 @@ function makeManager(): { gm: GoalManager; store: GoalStore } {
 		{
 			id: "feature", name: "Feature", description: "",
 			gates: [
-				{ id: "implementation", name: "Implementation", dependsOn: [], verify: [testSystemsInteractionReviewStep()] },
+				{ id: "implementation", name: "Implementation", dependsOn: [] },
 				{ id: "ready-to-merge", name: "Ready", dependsOn: ["implementation"] },
 			],
 			createdAt: 0, updatedAt: 0,

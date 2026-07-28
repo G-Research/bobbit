@@ -233,51 +233,6 @@ describe("generateDetailDocs", () => {
 	});
 });
 
-describe("getToolDocsForPrompt — display-only parameter overrides", () => {
-	it("keeps Systems review tools discoverable without inlining their specialized params", () => {
-		const repoRoot = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), "..", "..");
-		const isolatedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "tool-docs-systems-review-"));
-		const builtinsDir = path.join(isolatedRoot, "builtins");
-		const configDir = path.join(isolatedRoot, "config");
-		const stateDir = path.join(isolatedRoot, "state");
-		fs.cpSync(
-			path.join(repoRoot, "defaults", "tools", "systems-review"),
-			path.join(builtinsDir, "systems-review"),
-			{ recursive: true },
-		);
-		fs.mkdirSync(path.join(configDir, "tools"), { recursive: true });
-
-		try {
-			const tm = new ToolManager(configDir, builtinsDir);
-			const output = tm.getToolDocsForPrompt(undefined, stateDir);
-			assert.ok(output.includes(`## Systems Review — see ${path.join(stateDir, "tool-docs", "systems-review.md")}`));
-			assert.ok(output.includes("- read_branch_diff — Read evidence"));
-			assert.ok(output.includes("- systems_review_result — Submit result"));
-			assert.ok(!output.includes("read_branch_diff("), "compact docs must omit the specialized reader params");
-			assert.ok(!output.includes("systems_review_result("), "compact docs must omit the structured result params");
-
-			const tools = tm.getAvailableTools();
-			assert.deepEqual(
-				tools.find((tool) => tool.name === "read_branch_diff")?.params,
-				["operation", "repo_id?", "change_id?", "side?", "path?", "paths?", "query?", "cursor?", "limit?"],
-				"display-only promptParams must not alter authoritative params",
-			);
-			assert.deepEqual(
-				tools.find((tool) => tool.name === "systems_review_result")?.params,
-				["operation", "execution_id", "snapshot_digest", "contract_digest", "previous_checkpoint_digest?", "chunk_id?", "coverage_cursor?", "processed_change_ids?", "receipt_tokens?", "behaviors?", "coverage_mappings?", "findings?", "unresolved_links?", "resolved_links?", "final_checkpoint_digest?"],
-				"display-only promptParams must not alter authoritative params",
-			);
-
-			tm.generateDetailDocs(stateDir);
-			const detail = fs.readFileSync(path.join(stateDir, "tool-docs", "systems-review.md"), "utf-8");
-			assert.ok(detail.includes("## read_branch_diff"));
-			assert.ok(detail.includes("## systems_review_result"));
-		} finally {
-			fs.rmSync(isolatedRoot, { recursive: true, force: true });
-		}
-	});
-});
-
 describe("getToolDocsForPrompt — byte budget (real builtins)", () => {
 	it("renders the full default builtin set under 8 KB", () => {
 		// Point ToolManager at the real defaults/tools directory, not tmpConfigDir.

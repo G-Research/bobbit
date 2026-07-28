@@ -19,22 +19,6 @@ import { describe, it, afterAll } from "vitest";
 import assert from "node:assert/strict";
 
 import { buildFixture, buildActive, buildSubgoalStep } from "../../tests/helpers/run-subgoal-step-fixture.ts";
-import type { Workflow } from "../../src/server/agent/workflow-store.ts";
-import {
-	SYSTEMS_INTERACTION_REVIEW_PROMPT,
-	SYSTEMS_INTERACTION_REVIEW_PROMPT_ID,
-	SYSTEMS_INTERACTION_REVIEW_PROMPT_SHA256,
-} from "../../src/server/agent/systems-interaction-review-contract.ts";
-import { testSystemsInteractionReviewStep } from "../harness/systems-review-workflow.ts";
-
-function assertFrozenSystemsStep(workflow: Workflow | undefined): void {
-	const step = workflow?.gates
-		.find(gate => gate.id === "implementation")
-		?.verify?.find(candidate => candidate.name === "Systems interaction review");
-	assert.equal(step?.promptId, SYSTEMS_INTERACTION_REVIEW_PROMPT_ID);
-	assert.equal(step?.promptSha256, SYSTEMS_INTERACTION_REVIEW_PROMPT_SHA256);
-	assert.equal(step?.resolvedPrompt, SYSTEMS_INTERACTION_REVIEW_PROMPT);
-}
 
 describe("runSubgoalStep — stamp spawnedFromPlanId immediately after createGoal", () => {
 	it("the very next call after createGoal is updateGoal({ spawnedFromPlanId })", async () => {
@@ -89,54 +73,6 @@ describe("runSubgoalStep — stamp spawnedFromPlanId immediately after createGoa
 		const create = fx.calls.find(c => c.kind === "createGoal");
 		assert.ok(create && create.kind === "createGoal");
 		assert.equal(create.opts.workflowId, "general");
-	});
-
-	it("freezes a registered workflow selected by the harness spawn path", async () => {
-		const fx = await buildFixture();
-		afterAll(() => fx.cleanup());
-
-		const step = buildSubgoalStep({ planId: "p-frozen-registered", workflowId: "feature" });
-		const { signal, active, stepIndex } = buildActive(fx.parent.id);
-		const result = await fx.harness.runSubgoalStep(step, signal, active, stepIndex);
-		assert.equal(result.passed, true, result.output);
-
-		const child = fx.goalStore.getAll().find(goal => goal.spawnedFromPlanId === "p-frozen-registered");
-		assert.ok(child);
-		assertFrozenSystemsStep(child.workflow);
-	});
-
-	it("freezes an inherited raw inline workflow without rewriting the historical parent snapshot", async () => {
-		const inlineWorkflow: Workflow = {
-			id: "inline-child-harness",
-			name: "Inline child harness",
-			description: "",
-			gates: [{
-				id: "implementation",
-				name: "Implementation",
-				dependsOn: [],
-				verify: [testSystemsInteractionReviewStep()],
-			}],
-			createdAt: 0,
-			updatedAt: 0,
-		};
-		const fx = await buildFixture({
-			parentOver: { workflowId: inlineWorkflow.id, workflow: inlineWorkflow },
-		});
-		afterAll(() => fx.cleanup());
-		assert.equal(inlineWorkflow.gates[0].verify?.[0].promptId, undefined);
-
-		const step = buildSubgoalStep({ planId: "p-frozen-inline" });
-		const { signal, active, stepIndex } = buildActive(fx.parent.id);
-		const result = await fx.harness.runSubgoalStep(step, signal, active, stepIndex);
-		assert.equal(result.passed, true, result.output);
-
-		const child = fx.goalStore.getAll().find(goal => goal.spawnedFromPlanId === "p-frozen-inline");
-		assert.ok(child);
-		assert.equal(child.workflowId, inlineWorkflow.id);
-		assertFrozenSystemsStep(child.workflow);
-		const persistedParentStep = fx.goalStore.get(fx.parent.id)?.workflow?.gates[0].verify?.[0];
-		assert.equal(persistedParentStep?.promptId, undefined,
-			"creating the child must not retrofit the parent's historical workflow snapshot");
 	});
 
 	it("R-001: child gate state is initialised after spawn (mirrors POST /spawn-child)", async () => {

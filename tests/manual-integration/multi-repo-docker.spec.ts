@@ -43,7 +43,6 @@ import { manualTmpRoot } from "./manual-test-paths.ts";
 import { seedManualTestModelPreferences } from "./manual-test-model-seeding.ts";
 import { fileURLToPath } from "node:url";
 import { setupMultiRepoFixture } from "../fixtures/multi-repo/setup-fixture.mjs";
-import { testSystemsInteractionReviewStep } from "../../tests2/harness/systems-review-workflow.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(HERE, "..", "..");
@@ -239,17 +238,14 @@ test.describe("Multi-repo & components — integration", () => {
 					id: "implementation",
 					name: "Implementation",
 					verify: [
-						{ name: "Build api", type: "command", phase: 0, component: "api", command: "build" },
-						{ name: "Build web", type: "command", phase: 0, component: "web", command: "build" },
+						{ name: "Build api", type: "command", component: "api", command: "build" },
+						{ name: "Build web", type: "command", component: "web", command: "build" },
 						{
 							name: "Code review", type: "llm-review", role: "code-reviewer",
-							reviewGroup: "specialist", phase: 1,
 							prompt: "Review changes on {{branch}} vs origin/{{master}}.",
 						},
-						testSystemsInteractionReviewStep(),
 						{
-							name: "QA testing", type: "agent-qa", role: "qa-tester", phase: 2,
-							optional: true,
+							name: "QA testing", type: "agent-qa", role: "qa-tester",
 							prompt: "Drive scenarios against the project-level qa_* config.",
 						},
 					],

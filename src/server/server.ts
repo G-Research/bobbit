@@ -501,7 +501,6 @@ import {
 } from "./skills/git-status-envelope.js";
 export type { GitStatusResult } from "./skills/git-status-envelope.js";
 import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
-import { FINAL_MUTATION_TARGET_CORRELATION_HEADER } from "./agent/systems-review-target-evidence.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
 import { isKnownThinkingLevel } from "../shared/thinking-levels.js";
@@ -2660,7 +2659,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// Sandbox manager — assigned in start() when sandbox=docker
 	let sandboxManager: SandboxManager | null = null;
 
-	const requestHandlerCore = async (req: http.IncomingMessage, res: http.ServerResponse) => {
+	const requestHandler = async (req: http.IncomingMessage, res: http.ServerResponse) => {
 		const url = new URL(req.url || "/", `http://${req.headers.host}`);
 		const isLocalhostMode = !config.forceAuth && (config.host === "localhost" || config.host === "127.0.0.1" || config.host === "::1");
 
@@ -2693,7 +2692,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			res.setHeader("Access-Control-Allow-Origin", corsOrigin);
 			if (corsOrigin !== "*") res.setHeader("Vary", "Origin");
 			res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-			res.setHeader("Access-Control-Allow-Headers", `Authorization, Content-Type, X-Bobbit-Session-Id, X-Bobbit-Spawning-Session, ${FINAL_MUTATION_TARGET_CORRELATION_HEADER}`);
+			res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Bobbit-Session-Id, X-Bobbit-Spawning-Session");
 
 			if (req.method === "OPTIONS") {
 				res.writeHead(204);
@@ -2855,23 +2854,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 
 		res.writeHead(404);
 		res.end("Not found");
-	};
-
-	const requestHandler = async (req: http.IncomingMessage, res: http.ServerResponse) => {
-		const targetEvidenceHeader = req.headers[FINAL_MUTATION_TARGET_CORRELATION_HEADER];
-		if (targetEvidenceHeader === undefined) return requestHandlerCore(req, res);
-		try {
-			if (Array.isArray(targetEvidenceHeader) || typeof targetEvidenceHeader !== "string") throw new Error("ambiguous correlation header");
-			return verificationHarness.runWithSystemsReviewTargetCorrelation(
-				targetEvidenceHeader,
-				() => requestHandlerCore(req, res),
-			);
-		} catch {
-			if (!res.headersSent) {
-				res.writeHead(403, { "Content-Type": "application/json" });
-				res.end(JSON.stringify({ error: "Invalid final mutation target evidence correlation", code: "INVALID_TARGET_EVIDENCE_CORRELATION" }));
-			}
-		}
 	};
 
 	const server: http.Server | https.Server = config.tls
@@ -16369,76 +16351,6 @@ async function handleApiRoute(
 			const e = err as Error;
 			console.error(`[mcp] Describe failed:`, e.stack || e);
 			json({ error: e.message, stack: e.stack }, 500);
-		}
-		return;
-	}
-
-	// POST /api/internal/systems-review/read-branch-diff
-	if (url.pathname === "/api/internal/systems-review/read-branch-diff" && req.method === "POST") {
-		const body = await readBody(req);
-		const secretHeader = Array.isArray(req.headers["x-bobbit-session-secret"])
-			? req.headers["x-bobbit-session-secret"][0]
-			: req.headers["x-bobbit-session-secret"];
-		const sessionId = sessionManager.sessionSecretStore.resolveSessionIdBySecret(secretHeader);
-		if (!sessionId) {
-			json({ error: "A valid X-Bobbit-Session-Secret is required", code: "SYSTEMS_REVIEW_SESSION_SECRET_REQUIRED" }, 403);
-			return;
-		}
-		if (typeof body?.sessionId === "string" && body.sessionId !== sessionId) {
-			json({ error: "Submission session does not match the authentic caller", code: "SYSTEMS_REVIEW_SESSION_MISMATCH" }, 403);
-			return;
-		}
-		if (typeof body?.operation !== "string") {
-			json({ error: "Missing required field: operation" }, 400);
-			return;
-		}
-		try {
-			const request = { ...body };
-			delete request.sessionId;
-			const page = await verificationHarness.readSystemsReviewBranchDiff(sessionId, request as any);
-			json(page);
-		} catch (err: any) {
-			const status = Number.isInteger(err?.status)
-				? err.status
-				: /^(STALE_|REPO_MOVED)/.test(String(err?.code || "")) ? 409 : 400;
-			json({ error: err?.message || String(err), code: err?.code, details: err?.details }, status);
-		}
-		return;
-	}
-
-	// POST /api/internal/systems-review/result
-	if (url.pathname === "/api/internal/systems-review/result" && req.method === "POST") {
-		const body = await readBody(req);
-		const secretHeader = Array.isArray(req.headers["x-bobbit-session-secret"])
-			? req.headers["x-bobbit-session-secret"][0]
-			: req.headers["x-bobbit-session-secret"];
-		const sessionId = sessionManager.sessionSecretStore.resolveSessionIdBySecret(secretHeader);
-		if (!sessionId) {
-			json({ error: "A valid X-Bobbit-Session-Secret is required", code: "SYSTEMS_REVIEW_SESSION_SECRET_REQUIRED" }, 403);
-			return;
-		}
-		if (typeof body?.sessionId === "string" && body.sessionId !== sessionId) {
-			json({ error: "Submission session does not match the authentic caller", code: "SYSTEMS_REVIEW_SESSION_MISMATCH" }, 403);
-			return;
-		}
-		if (body?.operation !== "checkpoint" && body?.operation !== "final") {
-			json({ error: "Missing or invalid required field: operation" }, 400);
-			return;
-		}
-		if ("verdict" in body || "summary" in body) {
-			json({ error: "systems_review_result accepts no caller-selected verdict or generic summary" }, 400);
-			return;
-		}
-		try {
-			const submission = { ...body };
-			delete submission.sessionId;
-			const accepted = await verificationHarness.submitSystemsReviewResult(sessionId, submission as any);
-			json(accepted);
-		} catch (err: any) {
-			const status = Number.isInteger(err?.status)
-				? err.status
-				: /^(STALE_|REPO_MOVED)/.test(String(err?.code || "")) ? 409 : 400;
-			json({ error: err?.message || String(err), code: err?.code, details: err?.details }, status);
 		}
 		return;
 	}

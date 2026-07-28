@@ -18,8 +18,6 @@ import type { Locator } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, deleteGoal } from "../e2e-setup.js";
 import { openApp, sendMessage, createSessionViaUI, activeSessionId, createGoalAssistantViaUI } from "./ui-helpers.js";
-import { SYSTEMS_INTERACTION_REVIEW_PROMPT_ID } from "../../../src/server/agent/systems-interaction-review-contract.js";
-import { testSystemsInteractionReviewStep } from "../../../tests2/harness/systems-review-workflow.js";
 
 const INLINE_WORKFLOW_ID = "bespoke-inline-e2e";
 const INLINE_WORKFLOW_GATE_COUNT = 3;
@@ -45,12 +43,6 @@ const INLINE_WORKFLOW_FRONTMATTER = `inlineWorkflow:
         - name: implementation-check
           type: command
           run: echo implementation
-        - name: Systems interaction review
-          type: llm-review
-          role: systems-reviewer
-          reviewGroup: specialist
-          phase: 1
-          promptRef: ${SYSTEMS_INTERACTION_REVIEW_PROMPT_ID}
     - id: ready-to-merge
       name: Ready to Merge
       dependsOn:
@@ -75,10 +67,7 @@ const INLINE_WORKFLOW = {
 			id: "implementation",
 			name: "Implementation",
 			dependsOn: ["issue-analysis"],
-			verify: [
-				{ name: "implementation-check", type: "command", run: "echo implementation" },
-				testSystemsInteractionReviewStep(),
-			],
+			verify: [{ name: "implementation-check", type: "command", run: "echo implementation" }],
 		},
 		{
 			id: "ready-to-merge",

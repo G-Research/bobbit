@@ -11,7 +11,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { CommandRunner } from "../../src/server/gateway-deps.js";
-import { testSystemsInteractionReviewStep } from "../harness/systems-review-workflow.js";
 
 let token: string;
 let restoreCommandRunner: (() => void) | undefined;
@@ -61,10 +60,7 @@ test("multi-repo goal creates per-repo worktrees", async () => {
 						id: "implementation",
 						name: "Implementation",
 						depends_on: [],
-						verify: [
-							{ name: "Build", type: "command", run: "echo ok" },
-							testSystemsInteractionReviewStep(),
-						],
+						verify: [{ name: "Build", type: "command", run: "echo ok" }],
 					},
 				],
 			},

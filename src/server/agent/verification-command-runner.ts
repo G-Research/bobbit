@@ -50,8 +50,6 @@ export interface VerificationCommandSpawnSpec {
 	readonly command: string;
 	readonly cwd: string;
 	readonly timeoutMs: number;
-	/** Additional harness-issued environment (for example opaque evidence correlation). */
-	readonly env?: NodeJS.ProcessEnv;
 	readonly stdio: StdioOptions;
 	readonly windowsHide: boolean;
 	/** True when the harness selected the durable detached wrapper for cmdToRun. */
@@ -82,7 +80,6 @@ export const realVerificationCommandRunner: VerificationCommandRunner = {
 	spawn(spec) {
 		return spawnTracked(spec.shellBin, [...spec.shellArgs, spec.cmdToRun], {
 			cwd: spec.cwd,
-			env: spec.env,
 			stdio: spec.stdio,
 			timeoutMs: spec.timeoutMs,
 			windowsHide: spec.windowsHide,

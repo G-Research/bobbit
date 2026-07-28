@@ -4,8 +4,7 @@ import path from "node:path";
 import { GoalStore, type GoalState, type PersistedGoal } from "./goal-store.js";
 import { createWorktree, createWorktreeSet, isGitRepo, getRepoRoot, mergeChildBranchLocal, type MergeChildResult, type RemoteGitPolicy } from "../skills/git.js";
 import { resolveWorktreeSupport } from "./worktree-support.js";
-import type { WorkflowStore, Workflow } from "./workflow-store.js";
-import { freezeWorkflowDefinition } from "./workflow-validator.js";
+import { normalizeWorkflow, type WorkflowStore, type Workflow } from "./workflow-store.js";
 import type { WorktreePool } from "./worktree-pool.js";
 import type { Component } from "./project-config-store.js";
 import type { GateStore } from "./gate-store.js";
@@ -15,11 +14,6 @@ import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } f
 import { cleanupGateDiagnosticsForGoal } from "./gate-diagnostics-cleanup.js";
 import { resolveSetupTimeoutMs } from "../skills/worktree-setup.js";
 import { resolveGoalMetadata, type GoalMetadata } from "./goal-metadata.js";
-import { assertSystemsReviewGoalWriteAllowed } from "./systems-review-lease.js";
-import {
-	FINAL_MUTATION_TARGET_ACTIONS,
-	runWithFinalMutationTargetAction,
-} from "./systems-review-target-evidence.js";
 import { realClock, realCommandRunner, type Clock, type CommandRunner } from "../gateway-deps.js";
 import { isHeadquartersProject } from "./project-registry.js";
 
@@ -355,11 +349,6 @@ export class GoalManager {
 		let repoPath: string | undefined;
 		let goalCwd = cwd;
 		let setupStatus: "ready" | "preparing" = "ready";
-		// Resolve once so worktree provisioning and workflow freezing observe the
-		// same project-component snapshot throughout this creation operation.
-		const projectComponents = projectId && this.componentsResolver
-			? this.componentsResolver(projectId)
-			: [];
 
 		// Detect git repo root — needed for team operations even without a worktree.
 		// Single source of truth shared with the session path (server.ts) and the
@@ -369,9 +358,10 @@ export class GoalManager {
 		// root; otherwise it falls back to the single-repo `isGitRepo(cwd)` probe,
 		// and to no-worktree when that also fails (never throws).
 		if (!headquartersGoal) {
+			const components = projectId && this.componentsResolver ? this.componentsResolver(projectId) : undefined;
 			const projectRoot = projectId && this.projectRootResolver ? this.projectRootResolver(projectId) : undefined;
 			const configuredBaseRef = projectId && this.baseRefResolver ? this.baseRefResolver(projectId) : undefined;
-			const support = await resolveWorktreeSupport(projectComponents, projectRoot, cwd, undefined, { configuredBaseRef, commandRunner: this.commandRunner });
+			const support = await resolveWorktreeSupport(components ?? [], projectRoot, cwd, undefined, { configuredBaseRef, commandRunner: this.commandRunner });
 			if (support.supported) repoPath = support.repoPath;
 		}
 
@@ -458,28 +448,18 @@ export class GoalManager {
 		//   2. Caller passed `workflowId` only — read from the inline workflow store.
 		//   3. Neither — fall back to the first workflow in the store
 		//      (insertion order preserves config-cascade priority).
-		// `freezeWorkflowDefinition` is the shared new-goal snapshot boundary:
-		// it validates/normalizes authored definitions and resolves immutable
-		// prompt contracts for roots and both child-spawn paths alike. Existing
-		// persisted goals never enter createGoal, so historical snapshots remain
-		// untouched. Component references are intentionally not re-resolved here:
-		// selected cascade workflows can legitimately originate from another
-		// layer, matching the public root-goal route's established semantics.
-		const freezeSelectedWorkflow = (workflow: Workflow, selectedId: string): Workflow =>
-			freezeWorkflowDefinition(
-				workflow,
-				projectComponents,
-				selectedId,
-				{ validateComponentReferences: false },
-			);
+		// `normalizeWorkflow` converts snake_case inline workflows to
+		// runtime camelCase — critical for gate_signal (see AGENTS.md
+		// "gateDef.dependsOn is not iterable").
 		// If we can't resolve a workflow at all, throw a clear error so
 		// `POST /api/goals` surfaces a 400 instead of silently creating a
 		// gateless goal. See docs/design/multi-repo-components.md §3.4.
 		const NO_WORKFLOWS_MSG =
 			"This project has no workflows configured. Run project setup or generate workflows from Settings → project tab.";
 		if (workflowId && resolvedWorkflow) {
+			const normalized = normalizeWorkflow(resolvedWorkflow, workflowId) ?? resolvedWorkflow;
 			goal.workflowId = workflowId;
-			goal.workflow = freezeSelectedWorkflow(resolvedWorkflow, workflowId);
+			goal.workflow = structuredClone(normalized);
 		} else if (workflowId && workflowStore) {
 			const wf = workflowStore.get(workflowId);
 			if (!wf) {
@@ -490,7 +470,7 @@ export class GoalManager {
 				throw new Error(`Workflow not found: ${workflowId}`);
 			}
 			goal.workflowId = workflowId;
-			goal.workflow = freezeSelectedWorkflow(wf, workflowId);
+			goal.workflow = structuredClone(wf);
 		} else if (workflowId) {
 			// workflowId given but no resolvedWorkflow or workflowStore: fail
 			// loudly instead of producing a gateless goal. The "no workflowId,
@@ -511,7 +491,7 @@ export class GoalManager {
 			}
 			const first = all[0];
 			goal.workflowId = first.id;
-			goal.workflow = freezeSelectedWorkflow(first, first.id);
+			goal.workflow = JSON.parse(JSON.stringify(first));
 		}
 
 		this.store.put(goal);
@@ -527,7 +507,6 @@ export class GoalManager {
 		if (!goal) {
 			throw new Error(`Goal ${goalId} not found or missing repo/branch info`);
 		}
-		assertSystemsReviewGoalWriteAllowed(goalId);
 		if (isHeadquartersProject(goal.projectId)) {
 			this.forceHeadquartersNoWorktree(goal);
 			return;
@@ -807,7 +786,6 @@ export class GoalManager {
 		if (!goal || goal.setupStatus !== "error") {
 			return false;
 		}
-		assertSystemsReviewGoalWriteAllowed(goalId);
 		this.store.update(goalId, {
 			setupStatus: "preparing",
 			setupError: undefined,
@@ -837,7 +815,6 @@ export class GoalManager {
 		if (!child) {
 			throw new Error(`mergeChild: child goal not found: ${childGoalId}`);
 		}
-		assertSystemsReviewGoalWriteAllowed(parentGoalId);
 		if (child.parentGoalId !== parentGoalId) {
 			// Structured error so REST handlers can return 400 instead of 500.
 			const err = new Error(
@@ -868,21 +845,12 @@ export class GoalManager {
 
 			const repos: Record<string, MergeChildResult> = {};
 			for (const repo of matchingRepos) {
-				const parentRepoWorktree = parentRepoWorktrees[repo];
-				repos[repo] = await runWithFinalMutationTargetAction(
-					FINAL_MUTATION_TARGET_ACTIONS.mergeChildGoal,
-					{
-						resolvedTarget: fs.realpathSync.native(parentRepoWorktree),
-						resolvedScope: `branch:${parent.branch}`,
-					},
-					() => mergeChildBranchLocal(
-						parent.branch!,
-						child.branch!,
-						parentRepoWorktree,
-						this.commandRunner,
-						this.remotePolicy,
-					),
-					result => result.merged || result.alreadyMerged,
+				repos[repo] = await mergeChildBranchLocal(
+					parent.branch,
+					child.branch,
+					parentRepoWorktrees[repo],
+					this.commandRunner,
+					this.remotePolicy,
 				);
 			}
 			const results = Object.values(repos);
@@ -905,15 +873,7 @@ export class GoalManager {
 			throw err;
 		}
 
-		return runWithFinalMutationTargetAction(
-			FINAL_MUTATION_TARGET_ACTIONS.mergeChildGoal,
-			{
-				resolvedTarget: fs.realpathSync.native(parent.worktreePath),
-				resolvedScope: `branch:${parent.branch}`,
-			},
-			() => mergeChildBranchLocal(parent.branch!, child.branch!, parent.worktreePath!, this.commandRunner, this.remotePolicy),
-			result => result.merged || result.alreadyMerged,
-		);
+		return mergeChildBranchLocal(parent.branch, child.branch, parent.worktreePath, this.commandRunner, this.remotePolicy);
 	}
 
 	/**
@@ -942,7 +902,6 @@ export class GoalManager {
 		if (goal.archived && goal.state === "complete") {
 			return;
 		}
-		assertSystemsReviewGoalWriteAllowed(childId);
 
 		// 1. State first.
 		if (goal.state !== "complete") {
@@ -1017,7 +976,6 @@ export class GoalManager {
 	async archiveGoal(id: string): Promise<boolean> {
 		const goal = this.store.get(id);
 		if (!goal) return false;
-		assertSystemsReviewGoalWriteAllowed(id);
 		const archived = this.store.archive(id);
 		if (archived) {
 			try {
@@ -1120,7 +1078,6 @@ export class GoalManager {
 	}): Promise<boolean> {
 		const existing = this.store.get(id);
 		if (!existing) return false;
-		assertSystemsReviewGoalWriteAllowed(id);
 
 		// If toggling team mode ON for a non-team goal, auto-create worktree
 		if (updates.team === true && !existing.team && !existing.worktreePath && !isHeadquartersProject(existing.projectId)) {
@@ -1148,7 +1105,6 @@ export class GoalManager {
 	async deleteGoal(id: string): Promise<boolean> {
 		const goal = this.store.get(id);
 		if (!goal) return false;
-		assertSystemsReviewGoalWriteAllowed(id);
 
 		// Worktrees preserved for 7-day archive (cleaned by periodic purge).
 		if (goal?.team) {

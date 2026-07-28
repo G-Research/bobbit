@@ -13,29 +13,15 @@ import {
 	validateWorkflow,
 	validateAllWorkflows,
 	WorkflowResolveError,
-	type ValidatorVerifyStep,
 	type ValidatorWorkflow,
 	type WorkflowComponentRef,
 } from "../../src/server/agent/workflow-validator.ts";
-import { SYSTEMS_INTERACTION_REVIEW_PROMPT_ID } from "../../src/server/agent/systems-interaction-review-contract.ts";
 
 const components: WorkflowComponentRef[] = [
 	{ name: "api", commands: { build: "npm run build", test: "npm test", check: "npm run check" } },
 	{ name: "web", commands: { build: "npm run build", test: "npm test" } },
 	{ name: "shared" }, // data-only
 ];
-
-function systemsInteractionReviewStep(): ValidatorVerifyStep {
-	return {
-		name: "Systems interaction review",
-		type: "llm-review",
-		role: "systems-reviewer",
-		reviewGroup: "specialist",
-		phase: 2,
-		promptRef: SYSTEMS_INTERACTION_REVIEW_PROMPT_ID,
-		optional: false,
-	};
-}
 
 describe("workflow-validator — positive cases", () => {
 	it("accepts all three command step shapes", () => {
@@ -49,7 +35,6 @@ describe("workflow-validator — positive cases", () => {
 					{ name: "Build api", type: "command", component: "api", command: "build" },
 					{ name: "Custom api", type: "command", component: "api", run: "./scripts/x.sh" },
 					{ name: "Push", type: "command", run: "git push origin {{branch}}" },
-					systemsInteractionReviewStep(),
 				],
 			}],
 		};
@@ -291,10 +276,7 @@ describe("workflow-validator — negative cases", () => {
 			gates: [{
 				id: "implementation",
 				name: "Implementation",
-				verify: [
-					{ name: "Build", type: "command", component: "apii", command: "build" },
-					systemsInteractionReviewStep(),
-				],
+				verify: [{ name: "Build", type: "command", component: "apii", command: "build" }],
 			}],
 		};
 		const errs = validateWorkflow(wf, components);
@@ -313,10 +295,7 @@ describe("workflow-validator — negative cases", () => {
 			gates: [{
 				id: "implementation",
 				name: "Implementation",
-				verify: [
-					{ name: "Lint", type: "command", component: "api", command: "lintt" },
-					systemsInteractionReviewStep(),
-				],
+				verify: [{ name: "Lint", type: "command", component: "api", command: "lintt" }],
 			}],
 		};
 		const errs = validateWorkflow(wf, components);

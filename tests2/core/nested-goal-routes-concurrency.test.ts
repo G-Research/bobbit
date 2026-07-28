@@ -33,7 +33,6 @@ import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../../src/se
 import { ChildTeamScheduler } from "../../src/server/agent/child-team-scheduler.ts";
 import type { CookieStore } from "../../src/server/auth/cookie.ts";
 import { createMemFs } from "../harness/mem-fs.js";
-import { testSystemsInteractionReviewStep } from "../harness/systems-review-workflow.js";
 import { SessionSecretStore } from "../../src/server/auth/session-secret.ts";
 
 const TL = "tl-session";
@@ -69,7 +68,7 @@ async function makeHarness(cap: number, opts: { stampChildPreparing?: boolean } 
 		{
 			id: "feature", name: "Feature", description: "",
 			gates: [
-				{ id: "implementation", name: "Implementation", dependsOn: [], verify: [testSystemsInteractionReviewStep()] },
+				{ id: "implementation", name: "Implementation", dependsOn: [] },
 				{ id: "ready-to-merge", name: "Ready", dependsOn: ["implementation"] },
 			],
 			createdAt: 0, updatedAt: 0,
