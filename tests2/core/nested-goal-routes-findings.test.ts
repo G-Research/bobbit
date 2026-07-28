@@ -28,11 +28,16 @@ import { GoalManager } from "../../src/server/agent/goal-manager.ts";
 import { GateStore } from "../../src/server/agent/gate-store.ts";
 import { PlanMutationStore } from "../../src/server/agent/plan-mutation-store.ts";
 import { ProjectConfigStore } from "../../src/server/agent/project-config-store.ts";
-import { InlineWorkflowStore } from "../../src/server/agent/workflow-store.ts";
+import { InlineWorkflowStore, type Workflow } from "../../src/server/agent/workflow-store.ts";
 import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../../src/server/agent/nested-goal-routes.ts";
 import type { CookieStore } from "../../src/server/auth/cookie.ts";
 import { createMemFs } from "../harness/mem-fs.js";
 import { testSystemsInteractionReviewStep } from "../harness/systems-review-workflow.js";
+import {
+	SYSTEMS_INTERACTION_REVIEW_PROMPT,
+	SYSTEMS_INTERACTION_REVIEW_PROMPT_ID,
+	SYSTEMS_INTERACTION_REVIEW_PROMPT_SHA256,
+} from "../../src/server/agent/systems-interaction-review-contract.ts";
 import { SessionSecretStore } from "../../src/server/auth/session-secret.ts";
 
 interface Harness {
@@ -206,6 +211,15 @@ beforeEach(async () => { h = await makeHarness(); });
 // pause/resume/decision/archive — keep the cookie; covered separately below.)
 const TL = "tl-session";
 
+function assertFrozenSystemsStep(workflow: Workflow | undefined): void {
+	const step = workflow?.gates
+		.find(gate => gate.id === "implementation")
+		?.verify?.find(candidate => candidate.name === "Systems interaction review");
+	assert.equal(step?.promptId, SYSTEMS_INTERACTION_REVIEW_PROMPT_ID);
+	assert.equal(step?.promptSha256, SYSTEMS_INTERACTION_REVIEW_PROMPT_SHA256);
+	assert.equal(step?.resolvedPrompt, SYSTEMS_INTERACTION_REVIEW_PROMPT);
+}
+
 describe("G2/C1 — spawn-child workflow override", () => {
 	it("an explicit workflowId overrides the inherited parent workflow snapshot", async () => {
 		h.teamLeadByGoal[h.parent.id] = TL;
@@ -222,6 +236,37 @@ describe("G2/C1 — spawn-child workflow override", () => {
 		assert.equal(child.workflow?.id, "feature");
 		assert.equal(child.workflow?.gates.some(g => g.id === "execution"), false,
 			"child must not carry the parent's execution gate when overriding");
+		assertFrozenSystemsStep(child.workflow);
+	});
+
+	it("freezes a raw inline workflow on the direct spawn path without mutating the request", async () => {
+		h.teamLeadByGoal[h.parent.id] = TL;
+		const inlineWorkflow: Workflow = {
+			id: "inline-child",
+			name: "Inline child",
+			description: "",
+			gates: [{
+				id: "implementation",
+				name: "Implementation",
+				dependsOn: [],
+				verify: [testSystemsInteractionReviewStep()],
+			}],
+			createdAt: 0,
+			updatedAt: 0,
+		};
+		const r = await h.call("POST", `/api/goals/${h.parent.id}/spawn-child`, {
+			planId: "p-inline-wf",
+			title: "Child with inline workflow",
+			spec: "Child spec: use the caller-provided inline workflow and freeze its shared Systems contract on the new child snapshot.",
+			workflow: inlineWorkflow,
+		}, h.authAs(TL));
+
+		assert.equal(r.status, 201, JSON.stringify(r.payload));
+		const child = h.goalStore.get(r.payload.id)!;
+		assert.equal(child.workflowId, "inline-child");
+		assertFrozenSystemsStep(child.workflow);
+		assert.equal(inlineWorkflow.gates[0].verify?.[0].promptId, undefined,
+			"freezing the child snapshot must not mutate the caller's inline definition");
 	});
 
 	it("inherits the parent workflow (stripped) when no workflowId is given", async () => {

@@ -4,7 +4,8 @@ import path from "node:path";
 import { GoalStore, type GoalState, type PersistedGoal } from "./goal-store.js";
 import { createWorktree, createWorktreeSet, isGitRepo, getRepoRoot, mergeChildBranchLocal, type MergeChildResult, type RemoteGitPolicy } from "../skills/git.js";
 import { resolveWorktreeSupport } from "./worktree-support.js";
-import { normalizeWorkflow, type WorkflowStore, type Workflow } from "./workflow-store.js";
+import type { WorkflowStore, Workflow } from "./workflow-store.js";
+import { freezeWorkflowDefinition } from "./workflow-validator.js";
 import type { WorktreePool } from "./worktree-pool.js";
 import type { Component } from "./project-config-store.js";
 import type { GateStore } from "./gate-store.js";
@@ -350,6 +351,11 @@ export class GoalManager {
 		let repoPath: string | undefined;
 		let goalCwd = cwd;
 		let setupStatus: "ready" | "preparing" = "ready";
+		// Resolve once so worktree provisioning and workflow freezing observe the
+		// same project-component snapshot throughout this creation operation.
+		const projectComponents = projectId && this.componentsResolver
+			? this.componentsResolver(projectId)
+			: [];
 
 		// Detect git repo root — needed for team operations even without a worktree.
 		// Single source of truth shared with the session path (server.ts) and the
@@ -359,10 +365,9 @@ export class GoalManager {
 		// root; otherwise it falls back to the single-repo `isGitRepo(cwd)` probe,
 		// and to no-worktree when that also fails (never throws).
 		if (!headquartersGoal) {
-			const components = projectId && this.componentsResolver ? this.componentsResolver(projectId) : undefined;
 			const projectRoot = projectId && this.projectRootResolver ? this.projectRootResolver(projectId) : undefined;
 			const configuredBaseRef = projectId && this.baseRefResolver ? this.baseRefResolver(projectId) : undefined;
-			const support = await resolveWorktreeSupport(components ?? [], projectRoot, cwd, undefined, { configuredBaseRef, commandRunner: this.commandRunner });
+			const support = await resolveWorktreeSupport(projectComponents, projectRoot, cwd, undefined, { configuredBaseRef, commandRunner: this.commandRunner });
 			if (support.supported) repoPath = support.repoPath;
 		}
 
@@ -449,18 +454,28 @@ export class GoalManager {
 		//   2. Caller passed `workflowId` only — read from the inline workflow store.
 		//   3. Neither — fall back to the first workflow in the store
 		//      (insertion order preserves config-cascade priority).
-		// `normalizeWorkflow` converts snake_case inline workflows to
-		// runtime camelCase — critical for gate_signal (see AGENTS.md
-		// "gateDef.dependsOn is not iterable").
+		// `freezeWorkflowDefinition` is the shared new-goal snapshot boundary:
+		// it validates/normalizes authored definitions and resolves immutable
+		// prompt contracts for roots and both child-spawn paths alike. Existing
+		// persisted goals never enter createGoal, so historical snapshots remain
+		// untouched. Component references are intentionally not re-resolved here:
+		// selected cascade workflows can legitimately originate from another
+		// layer, matching the public root-goal route's established semantics.
+		const freezeSelectedWorkflow = (workflow: Workflow, selectedId: string): Workflow =>
+			freezeWorkflowDefinition(
+				workflow,
+				projectComponents,
+				selectedId,
+				{ validateComponentReferences: false },
+			);
 		// If we can't resolve a workflow at all, throw a clear error so
 		// `POST /api/goals` surfaces a 400 instead of silently creating a
 		// gateless goal. See docs/design/multi-repo-components.md §3.4.
 		const NO_WORKFLOWS_MSG =
 			"This project has no workflows configured. Run project setup or generate workflows from Settings → project tab.";
 		if (workflowId && resolvedWorkflow) {
-			const normalized = normalizeWorkflow(resolvedWorkflow, workflowId) ?? resolvedWorkflow;
 			goal.workflowId = workflowId;
-			goal.workflow = structuredClone(normalized);
+			goal.workflow = freezeSelectedWorkflow(resolvedWorkflow, workflowId);
 		} else if (workflowId && workflowStore) {
 			const wf = workflowStore.get(workflowId);
 			if (!wf) {
@@ -471,7 +486,7 @@ export class GoalManager {
 				throw new Error(`Workflow not found: ${workflowId}`);
 			}
 			goal.workflowId = workflowId;
-			goal.workflow = structuredClone(wf);
+			goal.workflow = freezeSelectedWorkflow(wf, workflowId);
 		} else if (workflowId) {
 			// workflowId given but no resolvedWorkflow or workflowStore: fail
 			// loudly instead of producing a gateless goal. The "no workflowId,
@@ -492,7 +507,7 @@ export class GoalManager {
 			}
 			const first = all[0];
 			goal.workflowId = first.id;
-			goal.workflow = JSON.parse(JSON.stringify(first));
+			goal.workflow = freezeSelectedWorkflow(first, first.id);
 		}
 
 		this.store.put(goal);

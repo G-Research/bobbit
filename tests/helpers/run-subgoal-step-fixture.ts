@@ -29,6 +29,7 @@ import { GateStore } from "../../src/server/agent/gate-store.ts";
 import { ProjectConfigStore } from "../../src/server/agent/project-config-store.ts";
 import { InlineWorkflowStore } from "../../src/server/agent/workflow-store.ts";
 import { VerificationHarness } from "../../src/server/agent/verification-harness.ts";
+import { testSystemsInteractionReviewStep } from "../../tests2/harness/systems-review-workflow.ts";
 
 export type CallRecord =
 	| { kind: "createGoal"; title: string; opts: any }
@@ -83,7 +84,7 @@ export async function buildFixture(opts: FixtureOptions = {}): Promise<Fixture> 
 			id: "feature", name: "Feature", description: "",
 			gates: [
 				{ id: "design-doc", name: "Design", dependsOn: [], content: true, injectDownstream: true },
-				{ id: "implementation", name: "Implementation", dependsOn: ["design-doc"] },
+				{ id: "implementation", name: "Implementation", dependsOn: ["design-doc"], verify: [testSystemsInteractionReviewStep()] },
 				{ id: "ready-to-merge", name: "Ready to Merge", dependsOn: ["implementation"] },
 			],
 			createdAt: 0, updatedAt: 0,

@@ -22,7 +22,14 @@ import { join } from "node:path";
 import { GoalManager } from "../../src/server/agent/goal-manager.js";
 import { GoalStore } from "../../src/server/agent/goal-store.js";
 import type { Workflow, WorkflowStore } from "../../src/server/agent/workflow-store.js";
+import { freezeWorkflowDefinition } from "../../src/server/agent/workflow-validator.js";
+import {
+	SYSTEMS_INTERACTION_REVIEW_PROMPT,
+	SYSTEMS_INTERACTION_REVIEW_PROMPT_ID,
+	SYSTEMS_INTERACTION_REVIEW_PROMPT_SHA256,
+} from "../../src/server/agent/systems-interaction-review-contract.js";
 import { createMemFs } from "../harness/mem-fs.js";
+import { testSystemsInteractionReviewStep } from "../harness/systems-review-workflow.js";
 
 const NO_WORKFLOWS_MSG =
 	"This project has no workflows configured. Run project setup or generate workflows from Settings → project tab.";
@@ -32,7 +39,7 @@ function makeWorkflow(id: string): Workflow {
 		id,
 		name: `${id} workflow`,
 		description: `${id} description`,
-		gates: [],
+		gates: [{ id: "g", name: "Gate", dependsOn: [] }],
 		createdAt: 1,
 		updatedAt: 1,
 	} as unknown as Workflow;
@@ -44,6 +51,28 @@ function makeStore(items: Workflow[]): WorkflowStore {
 		get: (id: string) => map.get(id),
 		getAll: () => items.slice(),
 	} as unknown as WorkflowStore;
+}
+
+function makeSystemsWorkflow(id: string): Workflow {
+	return {
+		id,
+		name: `${id} workflow`,
+		description: `${id} description`,
+		gates: [{
+			id: "implementation",
+			name: "Implementation",
+			dependsOn: [],
+			verify: [testSystemsInteractionReviewStep()],
+		}],
+		createdAt: 1,
+		updatedAt: 1,
+	};
+}
+
+function systemsStep(workflow: Workflow) {
+	return workflow.gates
+		.find(gate => gate.id === "implementation")
+		?.verify?.find(step => step.name === "Systems interaction review");
 }
 
 function makeManager() {
@@ -92,5 +121,33 @@ describe("GoalManager workflow defaulting", () => {
 			}),
 			(err: Error) => /Workflow not found: missing/.test(err.message),
 		);
+	});
+
+	it("freezes a registered workflow selected by id at the shared creation boundary", async () => {
+		const { mgr, dir } = makeManager();
+		const authored = makeSystemsWorkflow("feature");
+		const goal = await mgr.createGoal("registered workflow goal", dir, {
+			workflowId: "feature",
+			workflowStore: makeStore([authored]),
+		});
+
+		const step = systemsStep(goal.workflow!);
+		assert.equal(step?.promptId, SYSTEMS_INTERACTION_REVIEW_PROMPT_ID);
+		assert.equal(step?.promptSha256, SYSTEMS_INTERACTION_REVIEW_PROMPT_SHA256);
+		assert.equal(step?.resolvedPrompt, SYSTEMS_INTERACTION_REVIEW_PROMPT);
+		assert.equal(systemsStep(authored)?.promptId, undefined, "the authored store definition must remain unresolved");
+	});
+
+	it("preserves an already-frozen root workflow snapshot byte-for-byte", async () => {
+		const { mgr, dir } = makeManager();
+		const frozen = freezeWorkflowDefinition(makeSystemsWorkflow("inline-root"));
+		const before = structuredClone(frozen);
+		const goal = await mgr.createGoal("pre-frozen root", dir, {
+			workflowId: frozen.id,
+			resolvedWorkflow: frozen,
+		});
+
+		assert.deepEqual(goal.workflow, before);
+		assert.deepEqual(frozen, before, "createGoal must not mutate its caller's frozen snapshot");
 	});
 });
