@@ -16,11 +16,13 @@ export const READ_SESSION_FINAL_RESULT_MAX_BYTES = 50 * 1024;
  * complete tool_result listener chain, independent of extension ordering.
  */
 export function generateToolResultErrorBridgeExtension(): string {
-	return `const READ_SESSION_FINAL_RESULT_MAX_BYTES = ${READ_SESSION_FINAL_RESULT_MAX_BYTES};
+	return `import { createHash } from "node:crypto";
+
+const READ_SESSION_FINAL_RESULT_MAX_BYTES = ${READ_SESSION_FINAL_RESULT_MAX_BYTES};
 const RESULT_EXCERPT_DEFAULT = 4096;
 const RESULT_EXCERPT_MAX = 8192;
 const READ_SESSION_RESULT_BOUNDARY_MARKER = Symbol.for("bobbit.read_session.result-boundary.v1");
-const SHARED_RUNNER_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-runner-boundary.v2");
+const SHARED_RUNNER_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-runner-boundary.v3");
 
 function isObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -748,16 +750,35 @@ function invocationParams(args) {
   return {};
 }
 
+function readSessionBoundaryDigest(value) {
+  if (!isObject(value)) return undefined;
+  try {
+    const snapshot = JSON.stringify({
+      content: Array.isArray(value.content) ? value.content : [],
+      ...(hasOwn(value, "details") ? { details: value.details } : {}),
+    });
+    return typeof snapshot === "string"
+      ? createHash("sha256").update(snapshot).digest("hex")
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function markReadSessionBoundaryResult(result) {
   if (isObject(result) && isObject(result.details)) {
-    Object.defineProperty(result.details, READ_SESSION_RESULT_BOUNDARY_MARKER, { value: true });
+    const digest = readSessionBoundaryDigest(result);
+    if (digest !== undefined) {
+      Object.defineProperty(result.details, READ_SESSION_RESULT_BOUNDARY_MARKER, { value: digest });
+    }
   }
   return result;
 }
 
-function isReadSessionBoundaryResult(value) {
-  return isObject(value) && isObject(value.details)
-    && value.details[READ_SESSION_RESULT_BOUNDARY_MARKER] === true;
+function isUnchangedReadSessionBoundaryResult(value) {
+  if (!isObject(value) || !isObject(value.details)) return false;
+  const digest = value.details[READ_SESSION_RESULT_BOUNDARY_MARKER];
+  return typeof digest === "string" && digest === readSessionBoundaryDigest(value);
 }
 
 function boundFinalReadSessionEvent(event, transformed) {
@@ -766,11 +787,10 @@ function boundFinalReadSessionEvent(event, transformed) {
   const isError = typeof current.isError === "boolean" ? current.isError : event.isError;
   if (isError === true) return transformed;
 
-  // Registration wrapping already bounds tools visible through the shared
-  // registry. If no listener declared a change, keep that exact result rather
-  // than projecting it twice. Any declared downstream transformation is always
-  // reprocessed, even when it retained the non-serialized marker.
-  if (transformed === undefined && isReadSessionBoundaryResult(event)) return undefined;
+  // Pi shallow-copies the event for listeners, so a listener can mutate nested
+  // content/details and still return undefined. Only skip the second projection
+  // when the complete serializable result still matches its immutable snapshot.
+  if (transformed === undefined && isUnchangedReadSessionBoundaryResult(event)) return undefined;
 
   const source = {
     content: Array.isArray(current.content) ? current.content : [],
