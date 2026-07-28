@@ -3,6 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 import type { CommandRunner } from "../gateway-deps.js";
 import { SystemsReviewDiffReader } from "./systems-review-reader.js";
+import type {
+	FinalMutationTargetAssertionRegistryExpectation,
+	RegisteredFinalMutationTargetAssertion,
+} from "./systems-review-target-evidence.js";
 import {
 	accumulateSystemsReviewResults,
 	finalizeSystemsReviewResult,
@@ -49,6 +53,8 @@ export interface PersistedSystemsReviewExecution {
 	receiptSecretBase64: string;
 	status: SystemsReviewExecutionStatus;
 	checkpoints: SystemsReviewStoredCheckpoint[];
+	/** Server-attested, append-only exact-target assertions available to the reviewer. */
+	targetAssertions: RegisteredFinalMutationTargetAssertion[];
 	createdAt: number;
 	updatedAt: number;
 	final?: SystemsReviewFinalReport;
@@ -166,6 +172,7 @@ export class SystemsReviewExecutionStore {
 				execution.reviewerSessionIds = Array.isArray(execution.reviewerSessionIds)
 					? [...new Set([execution.sessionId, ...execution.reviewerSessionIds].filter(Boolean))]
 					: [execution.sessionId];
+				execution.targetAssertions = Array.isArray(execution.targetAssertions) ? execution.targetAssertions : [];
 				this.executions.set(execution.id, execution);
 			}
 		} catch (error) {
@@ -215,6 +222,7 @@ export class SystemsReviewExecutionStore {
 			receiptSecretBase64: secret.toString("base64"),
 			status: "running",
 			checkpoints: [],
+			targetAssertions: [],
 			createdAt: timestamp,
 			updatedAt: timestamp,
 		};
@@ -255,7 +263,70 @@ export class SystemsReviewExecutionStore {
 
 	reader(id: string, commandRunner?: CommandRunner): SystemsReviewDiffReader {
 		const execution = this.require(id);
-		return new SystemsReviewDiffReader({ snapshot: execution.snapshot, secret: Buffer.from(execution.receiptSecretBase64, "base64"), commandRunner });
+		return new SystemsReviewDiffReader({
+			snapshot: execution.snapshot,
+			secret: Buffer.from(execution.receiptSecretBase64, "base64"),
+			commandRunner,
+			targetAssertions: execution.targetAssertions,
+		});
+	}
+
+	registerTargetAssertion(id: string, assertion: RegisteredFinalMutationTargetAssertion): RegisteredFinalMutationTargetAssertion {
+		const execution = this.require(id);
+		if (execution.status !== "running" || execution.final) {
+			throw new SystemsReviewExecutionStoreError("EXECUTION_CLOSED", "Target evidence requires a running Systems review execution.", 410);
+		}
+		if (assertion.executionId !== execution.id) {
+			throw new SystemsReviewExecutionStoreError("TARGET_ASSERTION_SCOPE_MISMATCH", "Target assertion belongs to another Systems review execution.", 400);
+		}
+		const coverage = execution.snapshot.coverage.find(item => item.id === assertion.coverageItemId);
+		const repo = coverage && execution.snapshot.repos.find(candidate => candidate.id === coverage.repoId);
+		if (
+			!coverage
+			|| !repo
+			|| assertion.baseOid !== repo.mergeBaseOid
+			|| assertion.headOid !== repo.headOid
+			|| assertion.effectOutcome !== "succeeded"
+			|| assertion.adapterIds.length === 0
+			|| assertion.adapterIds.some(adapterId => !(coverage.requiredTargetAdapterIds ?? []).includes(adapterId))
+		) {
+			throw new SystemsReviewExecutionStoreError("TARGET_ASSERTION_SCOPE_MISMATCH", "Target assertion does not match its immutable coverage, commit, adapter, or outcome binding.", 400);
+		}
+		const duplicate = execution.targetAssertions.find(candidate => candidate.assertionId === assertion.assertionId);
+		if (duplicate) {
+			if (stableJson(duplicate) === stableJson(assertion)) return clone(duplicate);
+			throw new SystemsReviewExecutionStoreError("TARGET_ASSERTION_CONFLICT", "Target assertion id is already bound to different evidence.", 409);
+		}
+		if (execution.targetAssertions.some(candidate => candidate.coverageItemId === assertion.coverageItemId)) {
+			throw new SystemsReviewExecutionStoreError(
+				"TARGET_ASSERTION_COVERAGE_CONFLICT",
+				"A coverage item can expose only one immutable exact-target assertion; ambiguous multi-action changes fail closed.",
+				409,
+			);
+		}
+		execution.targetAssertions.push(clone(assertion));
+		execution.updatedAt = this.now();
+		this.save();
+		return clone(assertion);
+	}
+
+	validateTargetAssertion(
+		id: string,
+		assertionId: string,
+		expected: FinalMutationTargetAssertionRegistryExpectation,
+	): boolean {
+		const execution = this.require(id);
+		const assertion = execution.targetAssertions.find(candidate => candidate.assertionId === assertionId);
+		if (!assertion || assertion.executionId !== expected.executionId || assertion.executionId !== execution.id) return false;
+		if (
+			assertion.baseOid !== expected.baseOid
+			|| assertion.headOid !== expected.headOid
+			|| assertion.actionId !== expected.actionId
+			|| assertion.coverageItemId !== expected.coverageItemId
+			|| assertion.effectOutcome !== "succeeded"
+		) return false;
+		const required = new Set(expected.requiredAdapterIds);
+		return required.size > 0 && assertion.adapterIds.length > 0 && assertion.adapterIds.every(adapterId => required.has(adapterId));
 	}
 
 	submitCheckpoint(submission: SystemsReviewCheckpointSubmission): SystemsReviewStoredCheckpoint {
