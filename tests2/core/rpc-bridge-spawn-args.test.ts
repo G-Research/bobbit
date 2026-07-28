@@ -182,6 +182,39 @@ describe("buildAgentArgs", () => {
 		assert.deepEqual(args.slice(-6), ["--provider", "custom", "--model", "nested/override", "--thinking", "low"]);
 	});
 
+	it("does not retain the initial provider for Pi's qualified model-only raw override", () => {
+		// Pi 0.82.1 parses the supported spelling `--model <provider>/<id>` and
+		// infers the provider only when no explicit --provider remains. Retaining
+		// the injected Anthropic provider would instead select the synthetic model
+		// anthropic/openai/gpt-4.1.
+		const args = buildAgentArgs({
+			initialModel: "anthropic/claude-opus-5",
+			args: ["--model", "openai/gpt-4.1"],
+		});
+		const providerIndex = args.lastIndexOf("--provider");
+		const modelIndex = args.lastIndexOf("--model");
+		const provider = providerIndex >= 0 ? args[providerIndex + 1] : undefined;
+		const model = args[modelIndex + 1];
+		const effectiveModel = provider
+			? `${provider}/${model.startsWith(`${provider}/`) ? model.slice(provider.length + 1) : model}`
+			: model;
+
+		assert.equal(effectiveModel, "openai/gpt-4.1", `wrong effective Pi tuple from: ${args.join(" ")}`);
+	});
+
+	it("retains the initial provider for a bare model-only raw override", () => {
+		const args = buildAgentArgs({
+			initialModel: "anthropic/claude-opus-5",
+			args: ["--model", "claude-sonnet-4-6"],
+		});
+
+		assert.deepEqual(args.slice(-6), [
+			"--provider", "anthropic",
+			"--model", "claude-opus-5",
+			"--model", "claude-sonnet-4-6",
+		]);
+	});
+
 	it("places --system-prompt before the explicit provider/model tuple", () => {
 		const args = buildAgentArgs({
 			systemPromptPath: "/tmp/p.md",
