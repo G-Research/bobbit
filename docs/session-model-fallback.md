@@ -2,7 +2,7 @@
 
 Bobbit normally treats model selection as a user contract: if a user, role, workflow, or stored session state names a session model, Bobbit must either bind that exact model or fail visibly. This prevents a stale provider ID, missing API key, or provider outage from silently moving a session to a more expensive, less capable, or unexpected model.
 
-The global `allowSessionModelFallback` preference is the only exception to that rule. It is off by default and is exposed in **Settings → Models**, near the default model rows, as **Allow controlled session-model fallback**.
+The global `allowSessionModelFallback` preference provides one narrow exception during session setup. It is off by default and is exposed in **Settings → Models**, near the default model rows, as **Allow controlled session-model fallback**. It does not authorize fallback for an explicit live model-picker request.
 
 ## Preference
 
@@ -10,7 +10,7 @@ The global `allowSessionModelFallback` preference is the only exception to that 
 |---|---|---|---|
 | `allowSessionModelFallback` | `boolean` | `false` when absent | Settings → Models, near model defaults |
 
-The setting is intentionally global because fallback changes the safety contract for every text-session model binding path. It is not a per-session or per-role toggle.
+The setting is intentionally global so eligible startup, restore, role, and review setup paths use one policy. It is not a per-session or per-role toggle, and it does not change the exact-selection contract of a running session.
 
 ## Behavior when disabled
 
@@ -23,15 +23,15 @@ When `allowSessionModelFallback` is absent or `false`, every explicit session-mo
 
 This applies to missing auth, provider outages, stale model IDs, provider rejection, malformed preferences, non-session-selectable models, and read-back mismatches where the agent reports a different model than the one Bobbit requested.
 
-## Behavior when enabled
+## Controlled fallback during setup
 
-When `allowSessionModelFallback` is `true`, Bobbit may try exactly one fallback for an explicit non-default session-model failure:
+When `allowSessionModelFallback` is `true`, an eligible setup path may try exactly one fallback after an explicit non-default session model fails:
 
 ```text
 default.sessionModel
 ```
 
-No other fallback target is permitted. After the selected model fails, Bobbit either binds and verifies `default.sessionModel`, or it fails. It must not continue to AI Gateway best-ranked discovery, provider defaults, SDK defaults, pi-coding-agent defaults, or hardcoded model IDs.
+No other fallback target is permitted. Bobbit must bind and read back the fallback model, apply its normalized effective thinking level, and verify the complete tuple before the setup succeeds. It must not continue to AI Gateway best-ranked discovery, provider defaults, SDK defaults, pi-coding-agent defaults, or hardcoded model IDs.
 
 `default.sessionModel` is not fallback-eligible when it is the selected model that failed. In that case Bobbit fails visibly, because falling back from the default to itself or to a discovered/default provider model would violate the controlled policy.
 
@@ -45,45 +45,50 @@ Even with fallback enabled, Bobbit rejects the fallback and surfaces both the or
 - the same model as the failed selected model;
 - unavailable because credentials are missing or invalid;
 - rejected by the provider;
-- bound unsuccessfully, including read-back mismatch after `setModel` or spawn-time verification.
+- bound unsuccessfully, including a model or effective-thinking read-back mismatch after `setModel` or spawn-time verification.
 
 A failing fallback target is tried at most once. After that Bobbit stops and reports the failure.
 
-## Covered model paths
+## Eligible setup paths
 
-The controlled policy covers explicit text-session model bindings across the session lifecycle:
+Controlled fallback applies while Bobbit prepares or restores a session, before the selected tuple is accepted as live:
 
 - `default.sessionModel` during normal session auto-selection. This is explicit and fails hard; it does not fall back to another model.
 - Role model overrides (`role.model`) for ordinary sessions, team agents, staff agents, and verification sub-sessions.
 - Review/QA defaults such as `default.reviewModel` when no role model override applies.
-- Runtime model switching from the session model picker (`set_model`).
 - Spawn-pinned models passed to the agent process at startup through the bridge's initial model option.
-- Restored or respawned sessions whose persisted model is re-applied at startup.
-- Forked or continued sessions that inherit a model from the source session.
+- Restored or respawned sessions whose persisted tuple is re-applied at startup.
+- Forked or continued sessions that inherit a tuple from the source session.
 
-Spawn-pinned and inherited models are treated as explicit because they represent a previous user or caller selection. Bobbit verifies the model reported by the agent before the session becomes idle/live. If verification fails, the same controlled fallback rules apply.
+Spawn-pinned and inherited models are explicit because they represent a previous user or caller selection. Bobbit verifies the complete model/thinking tuple before the session becomes idle/live. If verification fails, the setup-time controlled fallback rules apply.
 
-## Runtime model picker reconciliation
+Runtime model switching from the picker is deliberately excluded. Once a session is live, `allowSessionModelFallback` does not permit replacing the user's picker request with `default.sessionModel` or any provider-selected alternative.
 
-The session model picker uses the same explicit-binding contract as startup and role/review overrides. The picker path requests `setModel`, then verifies the agent-reported model with a short bounded read-back retry. This covers agents that apply `setModel` slightly asynchronously while preserving the hard failure for a real read-back mismatch.
+## Exact live model-picker selection
 
-After any picker attempt, the displayed model must converge to server-confirmed state:
+The picker sends one combined `set_model` request containing `provider`, `modelId`, and the effective `thinkingLevel`. Bobbit clamps thinking against the exact selected model, asks the agent to bind that model, reads back the exact provider/model identity, applies thinking, and then reads back the complete tuple.
 
-- On success, the server persists the verified model and broadcasts a `state` frame with the bound model metadata.
-- If controlled fallback succeeds, that `state` frame names the verified `default.sessionModel` target, not the originally selected model.
-- On failure, the server first broadcasts the actual bound model from `getState()`; if the agent state is unavailable, it falls back to the persisted session model. It then sends `SET_MODEL_FAILED` so the UI can show the error without leaving the optimistic selection stranded.
+The live request succeeds only when the final state exactly matches the requested provider/model and normalized effective thinking level. Only then does the server atomically persist the tuple, update the session's spawn pins and model-name mirror, and broadcast a complete `state` frame. A Pi or provider fallback to an unrequested model is a read-back mismatch, not success—even when `allowSessionModelFallback` is enabled or the bound model equals `default.sessionModel`.
 
-The browser may render the selected row optimistically while the request is in flight, but durable per-session model storage is updated only from server `state` frames. A `SET_MODEL_FAILED` error also triggers a fresh `get_state` request as a reconciliation fallback. The picker/footer therefore reflect the last server-confirmed model, never a failed optimistic choice.
+### Failure correction and recovery
+
+Before mutation, the server snapshots the previous durable verified tuple. A failed request never overwrites it.
+
+- If validation fails before mutation, Bobbit broadcasts the complete live tuple, or the complete durable tuple when live read-back is unavailable.
+- If mutation began, Bobbit broadcasts a complete correction and makes one bounded rollback attempt to the previous durable model and thinking level. The original bridge remains live only when a final read-back verifies that exact rollback tuple.
+- If there is no complete durable tuple, or rollback cannot be verified, Bobbit uses the existing `restartAgent` replacement path. The replacement starts from unchanged durable state and its complete tuple is read back before it is accepted.
+
+Every correction frame carries both model metadata and thinking level so both optimistic picker fields converge together. The server then reports `SET_MODEL_FAILED`; the client requests `get_state` as an additional authoritative refresh. Standalone `set_thinking_level` failures use the same complete-tuple correction and recovery contract.
 
 ## Persistence and visibility
 
-Bobbit persists and displays only the model that was actually verified in the running agent:
+Bobbit persists and displays only complete verified tuples:
 
-- If the selected model succeeds, persisted state remains the selected model.
-- If controlled fallback succeeds, persisted state and the UI model state are updated to the verified `default.sessionModel` target.
-- If fallback is rejected or fails, Bobbit does not persist a replacement model, and the UI is reconciled back to the actual bound model.
+- During setup, exact selection persists the selected tuple; a successful controlled fallback persists the verified `default.sessionModel` tuple and its effective thinking level.
+- During live picker selection, only the exact requested tuple may replace durable state. There is no successful live fallback outcome.
+- On live selection failure, the prior durable tuple remains unchanged while complete correction frames reconcile every attached client to verified state.
 
-Fallback attempts are logged with the failed selected model, the fact that controlled fallback was enabled, and the `default.sessionModel` target. Successful fallback also logs that the session is running on `default.sessionModel` because the selected model failed.
+Setup-time fallback attempts are logged with the failed selected model, the fact that controlled fallback was enabled, and the `default.sessionModel` target. Successful setup fallback also logs that the session is running on `default.sessionModel` because the selected setup model failed.
 
 Error text is sanitized before it reaches clients, transcripts, or logs, so provider tokens and API keys are redacted.
 
@@ -91,7 +96,7 @@ Error text is sanitized before it reaches clients, transcripts, or logs, so prov
 
 AI Gateway best-ranked discovery is still allowed only when there is no explicit session model to honor. For example, a new session with no role model and no `default.sessionModel` may still use AI Gateway discovery as the initial model resolution path.
 
-Once an explicit model has been selected or inherited, failure never falls through to discovery or defaults except for the controlled `default.sessionModel` fallback described above.
+Once an explicit model has been selected or inherited, setup failure never falls through to discovery or defaults except for the controlled setup-time `default.sessionModel` fallback described above. An explicit live picker failure never falls back.
 
 ## Image generation is separate
 
@@ -103,9 +108,9 @@ Image generation uses the session image-model selector and `default.imageModel`.
 
 - Session startup, restore, respawn, fork, continue, and spawn-pinned verification: `src/server/agent/session-manager.ts` and `src/server/agent/session-setup.ts`.
 - Shared hard-fail/read-back/fallback binding helper for role and review models: `src/server/agent/review-model-override.ts`.
-- Runtime picker binding and failure reconciliation: `src/server/ws/runtime-model-selection.ts` and the `set_model` branch in `src/server/ws/handler.ts`.
-- Client reconciliation and confirmed-state persistence: `src/app/remote-agent.ts` and `src/app/session-manager.ts`.
+- Exact live picker binding, rollback, and restart handoff: `src/server/ws/runtime-model-selection.ts` and the `set_model` branch in `src/server/ws/handler.ts`.
+- Client optimistic-state correction: `src/app/remote-agent.ts` and `src/app/session-manager.ts`.
 - Settings UI: `src/app/settings-page.ts`.
-- Regression coverage: `tests/controlled-model-fallback.test.ts`, `tests/model-error-redaction.test.ts`, and `tests/e2e/ui/settings-model-fallback.spec.ts`.
+- Regression coverage: `tests2/core/controlled-model-fallback.test.ts`, `tests2/core/model-error-redaction.test.ts`, `tests2/dom/client-combined-model-thinking-selection.test.ts`, and `tests/e2e/ui/settings-model-fallback.spec.ts`.
 
 See also [Per-role model & thinking-level overrides](internals.md#per-role-model--thinking-level-overrides), [Spawn-time model pinning](internals.md#spawn-time-model-pinning), and [Image generation routing](internals.md#image-generation-routing).
