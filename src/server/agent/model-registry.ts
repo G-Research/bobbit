@@ -12,13 +12,14 @@
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
+import path from "node:path";
 // Pi also exposes provider-scoped `Models` with async catalog refresh/auth.
 // Bobbit intentionally stays on these synchronous static-catalog reads: its own
 // registry composes that snapshot with AI Gateway and local-provider discovery,
 // while credential refresh remains owned by the spawned coding-agent runtime.
 import { getBuiltinProviders, getBuiltinModels, getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import type { PreferencesStore } from "./preferences-store.js";
-import { globalAuthPath } from "../bobbit-dir.js";
+import { globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
 import { inferMeta, discoverAigwModels, getAigwUrl } from "./aigw-manager.js";
 import { getOpenAIModelAdditions } from "./openai-model-additions.js";
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
@@ -283,6 +284,59 @@ function builtInNumber(modelId: string, explicitValue: unknown, inferredValue: n
 	return explicit ?? inferredValue;
 }
 
+function comparableAigwUrl(value: unknown): string | undefined {
+	if (typeof value !== "string" || !value.trim()) return undefined;
+	try {
+		const url = new URL(value.trim());
+		if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+		return url.href.replace(/\/+$/, "");
+	} catch {
+		return undefined;
+	}
+}
+
+function readRetainedAigwModels(configuredUrl: string): ApiModel[] {
+	try {
+		const data = JSON.parse(fs.readFileSync(path.join(globalAgentDir(), "models.json"), "utf-8"));
+		const provider = data?.providers?.aigw;
+		const activeUrl = comparableAigwUrl(configuredUrl);
+		const retainedUrl = comparableAigwUrl(provider?.baseUrl);
+		if (!activeUrl || !retainedUrl || retainedUrl !== activeUrl || !Array.isArray(provider.models)) return [];
+
+		return provider.models.flatMap((model: any): ApiModel[] => {
+			if (!model || typeof model.id !== "string" || !model.id) return [];
+			const api = typeof model.api === "string" ? model.api : provider.api;
+			const baseUrl = typeof model.baseUrl === "string" ? model.baseUrl : provider.baseUrl;
+			if (typeof api !== "string" || typeof baseUrl !== "string") return [];
+			const input = Array.isArray(model.input)
+				? model.input.filter((item: unknown): item is "text" | "image" => item === "text" || item === "image")
+				: [];
+
+			return [{
+				id: model.id,
+				name: typeof model.name === "string" && model.name ? model.name : model.id,
+				provider: "aigw",
+				...(typeof model.upstreamProvider === "string" ? { upstreamProvider: model.upstreamProvider } : {}),
+				api,
+				baseUrl,
+				contextWindow: typeof model.contextWindow === "number" ? model.contextWindow : 0,
+				maxTokens: typeof model.maxTokens === "number" ? model.maxTokens : 0,
+				reasoning: model.reasoning === true,
+				...(model.thinkingLevelMap && typeof model.thinkingLevelMap === "object" ? { thinkingLevelMap: model.thinkingLevelMap } : {}),
+				input: input.length > 0 ? input : ["text"],
+				cost: model.cost && typeof model.cost === "object"
+					? model.cost
+					: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				...(model.headers && typeof model.headers === "object" ? { headers: model.headers } : {}),
+				...(model.compat && typeof model.compat === "object" ? { compat: model.compat } : {}),
+				authenticated: true,
+			}];
+		});
+	} catch {
+		return [];
+	}
+}
+
 async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 	const results: ApiModel[] = [];
 	const aigwUrl = getAigwUrl(prefs);
@@ -414,6 +468,12 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 			}
 		} catch (err) {
 			console.error("[model-registry] Failed to discover AI Gateway models:", err);
+			// Startup deliberately keeps the last atomically written models.json when
+			// discovery is unavailable. Keep that exact catalog selectable for restore
+			// and spawn validation too, but only when it belongs to this configured URL.
+			// A successful discovery never enters this branch, so omissions remain
+			// authoritative catalog drift and fail closed.
+			results.push(...readRetainedAigwModels(aigwUrl));
 		}
 	}
 
