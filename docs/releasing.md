@@ -18,7 +18,7 @@ The command runs npm with fresh home, config, cache, and temporary directories; 
 
 Normal unit, browser, and E2E suites intentionally do not query or assert registry advisory output because that feed can change without a source change. The packed-consumer E2E remains deterministic: it verifies consumer lock creation, dependency-owned shrinkwrap presence, installed graph validity, coordinated Pi versions, known dependency version/path floors, and bundled binary resolution/smoke behavior. Live advisory enforcement belongs only to this required release preflight.
 
-A clean root audit is still useful, but it is not consumer evidence. npm may honor a dependency's published `npm-shrinkwrap.json` only after Bobbit is installed as a package, so the consumer can resolve a different tree from the repository checkout. See [Pi runtime compatibility](pi-runtime-compatibility.md#compatibility-and-release-eligibility) for the current dependency constraints.
+A clean root audit is still useful, but it is not consumer evidence. npm may honor a dependency's published `npm-shrinkwrap.json` only after Bobbit is installed as a package, so the consumer can resolve a different tree from the repository checkout. See the [Pi `0.82.1` compatibility outcome](pi-runtime-compatibility.md#pi-0821-compatibility-outcome) for the current dependency constraints.
 
 ## Bundled fd/rg binaries
 
