@@ -1,141 +1,206 @@
-# Transcript reads and tool-result redaction
+# Bounded session diagnostics
 
-`read_session` is the agent-facing transcript reader for inspecting another Bobbit session without loading the whole chat into context. It calls `GET /api/sessions/:id/transcript`, which parses the target session's agent JSONL transcript server-side and returns a paginated envelope.
+`read_session` is the agent-facing transcript reader. It projects provider transcripts into a compact, canonical shape so an agent can diagnose another session without loading large tool output or provider replay data into context.
 
-The feature exists to make diagnostic reads safe: tool outputs can be much larger than the conversation around them, so agents should first see the flow and metadata, then opt in to raw output only for the small window they need.
+The direct transcript REST endpoint and the browser keep their legacy projection. Agent calls use a trusted caller-session boundary that adds canonicalization, bounded excerpts, strict heavy-read guards, and a complete serialized response budget.
 
-## Agent tool default
+## Progressive diagnostic workflow
 
-`read_session` omits tool result bodies by default.
+1. Fetch compact session metadata once with `bobbit_read(operation="get_session", sessionId="...")`.
+2. Read a small compact tail or regex page, normally with `limit <= 10`.
+3. Narrow using source message indexes, tool names, normalized statuses, and result `chars`/`lines`/`bytes`.
+4. Continue only from the returned page offset; do not reread overlapping windows.
+5. If the metadata is insufficient, retrieve at most one bounded result slice by handle. Continue from its returned cursor only when necessary.
+6. Stop as soon as the question is answered. `verbose` is not the discovery default.
 
-A default compact response still includes:
+This order matters because a single nested result can be large even when its outer shape contains only one block.
 
-- message `index`, `role`, and timestamp (`ts`);
-- compact message text;
-- tool-call summaries in `toolUses`;
-- redacted tool-result placeholders in `toolResults`.
+## Compact projection
 
-A placeholder includes metadata when it can be derived cheaply:
+Compact mode is the default. Each message retains its source `index`, canonical `role`, bounded visible `text`, timestamp, semantic stop/error fields, attribution reference, and any canonical tool calls or results. Truncation flags distinguish a bounded field from a complete one.
+
+### Tool calls
+
+Anthropic `tool_use` and Pi `toolCall` blocks share one shape:
 
 ```json
 {
-  "name": "bash",
-  "toolUseId": "toolu_...",
-  "omitted": true,
+  "ref": "t1",
+  "name": "read",
+  "argumentsPreview": "{\"path\":\"docs/read-session.md\"}",
+  "argumentsTruncated": false
+}
+```
+
+The argument source is normalized from `arguments`, then `input`. The preview is deterministic and bounded to 512 UTF-16 code units. A tool-only assistant message remains useful through `toolCalls` even when its visible `text` is empty.
+
+Regex matching uses the full canonical tool name and arguments server-side, not only `argumentsPreview`. A match beyond the preview selects the ordinary bounded message row; it does not expose the hidden suffix.
+
+### Tool results
+
+Pi message-level results and Anthropic block-level results also share one shape:
+
+```json
+{
+  "ref": "t1",
+  "name": "read",
   "status": "ok",
-  "size": { "type": "string", "chars": 1200, "lines": 42, "bytes": 1200 }
+  "size": {
+    "type": "array",
+    "blocks": 1,
+    "chars": 1200,
+    "lines": 42,
+    "bytes": 1238
+  },
+  "omitted": true,
+  "handle": "rs1:m6h:b0:NUBAzC7icgMYwEPyuR8OFQyx29U"
 }
 ```
 
-`name` can come from the result block itself, the message-level tool metadata, or the preceding tool call associated by id. `status` is `ok`, `error`, or `unknown`. `size` reports string character, line, and byte counts when the body is a string; arrays report block count; other values report their broad type.
+- `name` is the one canonical direct, message, or correlated call name.
+- `status` is exactly `ok`, `error`, or `unknown`.
+- `size.chars` counts JavaScript UTF-16 code units, `lines` measures the canonical nested text, and `bytes` is its UTF-8 size. `type` describes the selected outer body and `blocks` is retained for root arrays.
+- `omitted` says whether this response contains an excerpt.
+- `handle` identifies this session/message/block and canonical body. A changed body makes an old handle stale rather than silently rebinding it.
 
-## Context-heavy reads are explicitly bounded
+Duplicate aliases such as `toolName`, `toolUseId`, `isError`, `is_error`, `contentOmitted`, and `resultSize` are not returned. Omission is a boolean, not repeated prose.
 
-Both `verbose: true` and `include_tool_results: true` are context-heavy flags.
-Either one requires an explicit integer `limit` from 1 through 10, even though
-ordinary compact reads default to 20. Search and compact reads first, then fetch
-only the narrow raw window you need. Use successive batches when necessary and
-watch token consumption.
+### Provider metadata
 
-A missing, invalid, or larger limit is rejected by the agent tool before it
-calls the gateway. The returned tool error contains parseable JSON:
+Agent projection is semantic rather than a provider-object passthrough. Structural provider fields such as `thinkingSignature`, `textSignature`, encrypted/replay payloads, raw response objects, and provider bookkeeping are omitted in every agent-facing mode. Verbose mode may add bounded thinking text, but never those replay fields.
+
+Scrubbing is path-sensitive. A tool's legitimate result text or structured result may itself contain keys such as `signature` or `thinkingSignature`; that payload remains searchable and may appear in an explicitly requested excerpt.
+
+### Attribution and correlation dictionaries
+
+Messages use `authorRef` values such as `a1`; the envelope's `authors` dictionary stores the corresponding `{ kind, id, label }` once. Calls and correlated results share short refs such as `t1`; uncorrelated results use refs such as `r1`. The `correlations` dictionary maps referenced call/result refs to bounded semantic data:
 
 ```json
 {
-  "error": "You should not typically pull this much data from the API. Context-heavy flag(s) `include_tool_results` require an explicit limit at or below 10. Call again with limit <= 10 and fetch in smaller batches only if you REALLY need full verbosity. Keep an eye on token consumption.",
-  "code": "CONTEXT_HEAVY_LIMIT_REQUIRED"
+  "authors": {
+    "a1": { "kind": "agent", "id": "session:...", "label": "Reviewer" }
+  },
+  "correlations": {
+    "t1": { "name": "read", "messageIndex": 12, "blockIndex": 0 }
+  }
 }
 ```
 
-If both flags are enabled, the message names both. Filtering with `pattern` or
-`context` does not remove the explicit-limit requirement because only `limit`
-bounds the returned window.
+Only dictionary entries referenced by returned messages are included. Full provider correlation IDs are never returned.
 
-## Opting in to result bodies
+## Search and page coordinates
 
-Pass `include_tool_results: true` with a small explicit `limit` when you
-deliberately need the output body.
+`pattern` is a regular expression over discrete server-side segments: visible text, canonical tool names, full canonical call arguments, and full canonical result bodies. Matching can therefore find omitted result text without returning that body. `context` expands each matched source message by up to five neighbouring transcript messages, then de-duplicates and sorts that sequence before paging.
 
-```text
-read_session(session_id="abc-123", offset=42, limit=1, include_tool_results=true)
+Agent envelopes distinguish page positions from source transcript indexes:
+
+| Field | Meaning |
+|---|---|
+| `total` | Number of source transcript messages. |
+| `matchCount` | Source messages matching `pattern`, before context expansion. Present only for a regex read. |
+| `pageCount` | Rows in the pageable sequence: `total` without a filter, or the de-duplicated context-expanded sequence with a filter. |
+| `pageStart` | Zero-based resolved position in that pageable sequence. A negative requested offset is normalized here. |
+| `returned` | Number of rows actually returned. |
+| `offsetStart` / `offsetEnd` | Source transcript indexes of the first and last returned messages, or `-1` for an empty page. |
+| `nextOffset` | Next position in the same pageable sequence, when more rows remain. |
+
+For a filtered/context read, repeat the same `pattern`, `case_sensitive`, and `context`, then pass `offset=nextOffset`. A negative initial offset therefore produces a non-negative continuation over the already-defined filtered sequence. Do not substitute `offsetEnd + 1`: source indexes and filtered page positions are different coordinate systems.
+
+A normal page can have `nextOffset` without being transport-partial. When the byte budget itself stops a page, the envelope additionally has:
+
+```json
+{
+  "partial": true,
+  "truncatedBy": "transport_budget",
+  "nextOffset": 5,
+  "continuationRequest": { "kind": "page", "offset": 5 }
+}
 ```
 
-Compact reads with `include_tool_results: true` include tool-result previews instead of omission placeholders. Use `verbose: true` together with `include_tool_results: true` when you need the full content blocks, including raw `tool_result` bodies:
+Follow the exact continuation and retain the original filter parameters.
+
+## Bounded result excerpts
+
+`include_tool_results: true` adds bounded, self-describing excerpts to results in a small page; it never restores raw provider result blocks or returns an unbounded body. Prefer a targeted slice after locating the result:
 
 ```text
 read_session(
   session_id="abc-123",
-  offset=42,
-  limit=1,
-  verbose=true,
-  include_tool_results=true
+  result_handle="<handle-from-prior-result>",
+  result_cursor=0,
+  result_limit=2048
 )
 ```
 
-`verbose: true` by itself is not an opt-in. For the `read_session` tool, verbose mode still redacts tool result bodies unless `include_tool_results: true` is also set. Redacted verbose `tool_result` blocks keep identifying fields and replace the body with an omission marker plus `contentOmitted: true`, `resultSize`, and `status`.
-
-## Search first, opt in second
-
-Use the filtering parameters to locate a large result before requesting its body:
-
-1. Search by a stable string from the output:
-
-   ```text
-   read_session(session_id="abc-123", pattern="TypeError", context=2, limit=10)
-   ```
-
-2. Note the returned message `index`, tool name/id, status, and size metadata.
-3. Read only that message or a small surrounding window with
-   `include_tool_results: true` and an explicit `limit <= 10`.
-
-`pattern` matches the flattened raw transcript text, including tool result text, even when returned messages are redacted. `context` expands each regex hit by neighbouring messages before pagination. `offset` and `limit` then page over either the raw transcript window (no pattern) or the deduplicated match-with-context list (with pattern).
-
-## REST endpoint compatibility
-
-`GET /api/sessions/:id/transcript` keeps its legacy default for direct REST callers: when no include flag is supplied, tool results are not redacted. Compact reads keep the legacy previews; verbose reads include raw `tool_result` bodies. The 10-message context-heavy guard is an agent-tool policy, not a REST limit; direct REST and other programmatic consumers retain the endpoint's existing paging behavior.
-
-To request redacted REST output, pass either spelling with a false value:
-
-```http
-GET /api/sessions/abc-123/transcript?include_tool_results=false
-GET /api/sessions/abc-123/transcript?includeToolResults=0
-```
-
-To explicitly include result bodies, pass `include_tool_results=true`, `includeToolResults=true`, or `1`.
-
-`verbose` only selects compact summaries versus full content blocks. It does not override result-body inclusion:
-
-- direct REST with no include flag remains backward-compatible and does not redact tool results; with `verbose=true`, raw `tool_result` bodies are included;
-- direct REST with `include_tool_results=false` redacts tool results, even with `verbose=true`;
-- `read_session` always sends the include flag, defaulting it to false unless the caller passes `include_tool_results: true`.
-
-## Response shape
-
-The envelope is the same for compact and verbose reads:
+A targeted slice does not require `include_tool_results`. `result_cursor` and `result_limit` require `result_handle`.
 
 ```json
 {
-  "total": 142,
-  "matchCount": 3,
-  "returned": 1,
-  "offsetStart": 42,
-  "offsetEnd": 42,
-  "messages": []
+  "name": "read",
+  "status": "ok",
+  "size": { "type": "array", "blocks": 1, "chars": 1200, "lines": 42, "bytes": 1238 },
+  "omitted": false,
+  "handle": "rs1:m6h:b0:NUBAzC7icgMYwEPyuR8OFQyx29U",
+  "excerpt": {
+    "start": 0,
+    "end": 1200,
+    "text": "...",
+    "nextCursor": null,
+    "complete": true
+  }
 }
 ```
 
-`matchCount` appears only when `pattern` is supplied. Empty windows return `messages: []` and `offsetStart` / `offsetEnd` as `-1`.
+Slice coordinates are half-open UTF-16 ranges `[start,end)`, matching `size.chars`. `result_cursor` defaults to `0`. `result_limit` defaults to `4096` and must be an integer from `1` through `8192`. Slices never split a Unicode scalar; the only over-limit case is the two-unit progress needed for one astral scalar when `result_limit=1`.
+
+When `complete` is false, continue with the same `handle` and `result_cursor=excerpt.nextCursor`. If the complete-response budget shortens a targeted slice, `continuationRequest.kind` is `result_slice` and repeats the exact handle, next cursor, and requested result limit.
+
+## Context-heavy guard
+
+An agent call is context-heavy when any of these is exactly `true`:
+
+- `verbose`
+- `include_tool_results`
+- the compatibility alias `includeToolResults`
+
+Each spelling is guarded in actual spawned sessions, including stale server/project tool overrides. A heavy call requires an explicitly supplied numeric integer `limit` from `1` through `10`. Missing limits, numeric strings, fractions, zero, negative values, and values above 10 return `CONTEXT_HEAVY_LIMIT_REQUIRED` before the tool handler can fetch the transcript.
+
+The current `read_session` schema exposes `include_tool_results`; the camel-case alias remains protected for compatibility with older or custom wrappers. Ordinary compact calls retain the default `limit` of 20.
+
+`verbose` expands bounded semantic text and thinking summaries. It does not expose provider blocks or make result bodies unbounded. Result excerpts still require `include_tool_results` or a targeted `result_handle` read.
+
+## Complete 50 KiB agent-return budget
+
+Every successful agent-facing call is limited to 50 KiB after serializing the complete Pi tool value—not only the REST envelope or its inner text. This includes JSON escaping and the renderer details wrapper. The wrapper keeps only bounded scalar summary fields and never duplicates `messages`.
+
+The fitter first bounds semantic fields and excerpts, then removes optional previews or later page rows if necessary. A budget-shortened page or targeted slice returns a typed continuation rather than silent transport truncation. If an old resolved extension returns an unrecognized successful wrapper, the boundary returns a small `extension_return_unrecognized` partial with retry metadata instead of forwarding the unknown body.
 
 ## Errors
 
-Transcript reads return structured error codes:
-
 | Code | Meaning |
 |---|---|
-| `session_not_found` | The target session id is unknown. |
-| `transcript_unavailable` | The session exists, but its agent transcript file is missing or empty. |
+| `session_not_found` | The target session ID is unknown. |
+| `transcript_unavailable` | The session exists, but its agent transcript is missing or empty. |
 | `invalid_regex` | `pattern` is not a valid regular expression. |
-| `invalid_params` | REST pagination, context, or boolean query parameters are invalid. |
-| `CONTEXT_HEAVY_LIMIT_REQUIRED` | Agent-tool-only guard: `verbose` or `include_tool_results` needs an explicit integer `limit` from 1 through 10. No REST request is sent. |
+| `invalid_params` | Pagination, context, boolean, or projection parameters are invalid. |
+| `INVALID_RESULT_BODY` | A result cannot be canonicalized safely. |
+| `INVALID_RESULT_HANDLE` | The handle is missing, malformed, or required by another slice parameter. |
+| `RESULT_NOT_FOUND` | The handle points to a message/block that no longer exists. |
+| `STALE_RESULT_HANDLE` | The located result body no longer matches the handle. |
+| `INVALID_RESULT_CURSOR` | The cursor is out of range or splits a Unicode scalar. |
+| `INVALID_RESULT_LIMIT` | The result limit is not an integer from 1 through 8192. |
+| `CONTEXT_HEAVY_LIMIT_REQUIRED` | An agent heavy read lacks an explicit integer `limit` from 1 through 10. No transcript request is made. |
 
-See [REST API](rest-api.md#sessions) for the route table and [Orchestration](orchestration.md) for child-agent usage.
+## Direct REST and UI compatibility
+
+`GET /api/sessions/:id/transcript` keeps its legacy direct-caller behavior when the request is not bound to a real caller session:
+
+- omitting both result-inclusion query aliases keeps results included;
+- compact mode keeps legacy previews and verbose mode keeps legacy content blocks;
+- `include_tool_results=false`, `includeToolResults=false`, or `0` requests legacy redaction;
+- direct pagination, negative offsets, regex/context matching, author objects, and error contracts are unchanged;
+- the agent-only heavy limit and complete Pi-result budget do not apply.
+
+The browser transcript UI uses this direct boundary. `read_session` sends an authenticated caller-session identity and explicitly defaults `include_tool_results` to false, selecting the bounded agent projection. The caller header is a policy selector only after it resolves to a real session; an absent or unknown header does not change the legacy REST response.
+
+See [REST API](rest-api.md#transcript-reader-and-read_session) for query parameters and boundary selection. The audited rationale and field decisions are in [Bound Session Diagnostics — Issue Analysis](design/bound-session-diagnostics-issue-analysis.md#7-response-projection-field-audit).
