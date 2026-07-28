@@ -479,10 +479,13 @@ function preserveUpstreamCompletion(candidate, messages, projection) {
     if (continuation.kind === "page") {
       envelope.continuationRequest = { kind: "page", offset: continuation.offset };
     } else if (continuation.kind === "result_slice") {
+      const target = firstExcerpt(envelope);
+      const cursor = isNonNegativeInteger(target?.excerpt.nextCursor)
+        ? target.excerpt.nextCursor : continuation.result_cursor;
       envelope.continuationRequest = {
         kind: "result_slice",
-        result_handle: continuation.result_handle,
-        result_cursor: continuation.result_cursor,
+        result_handle: target?.result.handle || continuation.result_handle,
+        result_cursor: cursor,
         result_limit: continuation.result_limit,
       };
     } else {
