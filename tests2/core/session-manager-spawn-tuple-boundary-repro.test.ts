@@ -24,6 +24,7 @@ const { SessionManager } = await import("../../src/server/agent/session-manager.
 const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
 const { getAvailableModels, invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
 const { modelRecencyRank } = await import("../../src/shared/model-ranks.ts");
+const { clampThinkingLevelForModel } = await import("../../src/server/agent/thinking-level-clamp.ts");
 const { registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
 const { applyRuntimeSessionThinkingSelection } = await import("../../src/server/ws/runtime-model-selection.ts");
 const { initAuthorSidecarDir } = await import("../../src/server/agent/author-sidecar.ts");
@@ -269,6 +270,8 @@ describe("actual SessionManager spawn tuple boundaries", () => {
 		invalidateModelCache();
 		const expectedModel = expectedDefaultModel(await getAvailableModels(prefs));
 		const expected = splitModel(expectedModel)!;
+		const expectedThinking = clampThinkingLevelForModel("off", expected.provider, expected.id);
+		assert.ok(expectedThinking, "fixture requires explicit off to clamp against the selected model");
 		const store = new RecordingStore();
 		const sessionId = "skip-auto-reviewer-without-model";
 		const goalId = "goal-reviewer-without-model";
@@ -337,21 +340,21 @@ describe("actual SessionManager spawn tuple boundaries", () => {
 			},
 			{
 				bridgeInitialModel: expectedModel,
-				bridgeInitialThinking: "off",
+				bridgeInitialThinking: expectedThinking,
 				goalExtensionContext: goalId,
 				managerVerifiedReadBack: true,
 				liveProvider: expected.provider,
 				liveModelId: expected.id,
-				liveThinking: "off",
+				liveThinking: expectedThinking,
 				durableProjectId: projectId,
 				durableGoalId: goalId,
 				durableProvider: expected.provider,
 				durableModelId: expected.id,
-				durableThinking: "off",
+				durableThinking: expectedThinking,
 				tupleWritesAtReturn: [{
 					modelProvider: expected.provider,
 					modelId: expected.id,
-					effectiveThinkingLevel: "off",
+					effectiveThinkingLevel: expectedThinking,
 				}],
 				hiddenKimiSelected: false,
 			},
