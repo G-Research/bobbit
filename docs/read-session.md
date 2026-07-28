@@ -88,9 +88,19 @@ Messages use `authorRef` values such as `a1`; the envelope's `authors` dictionar
 
 Only dictionary entries referenced by returned messages are included. Full provider correlation IDs are never returned.
 
+**Operator note:** the immutable Pi boundary also keeps raw lifecycle correlation bounded. It preserves a well-formed, non-empty `read_session` call ID through 128 UTF-16 units; an oversized or otherwise unsafe ID becomes a stable `brs1:<40-lowercase-hex>` value across assistant calls, execution events, AgentSession state, and JSONL persistence. This internal, non-reversible ID can therefore appear when inspecting raw session files, but it never replaces the page-local `tN`/`rN` projection above.
+
 ## Search and page coordinates
 
 `pattern` is a regular expression over discrete server-side segments: visible text, canonical tool names, full canonical call arguments, and full canonical result bodies. Matching can therefore find omitted result text without returning that body. `context` expands each matched source message by up to five neighbouring transcript messages, then de-duplicates and sorts that sequence before paging.
+
+### Safe regex syntax and errors
+
+Patterns use RE2-WASM in Unicode mode, not JavaScript's backtracking `RegExp`. The default is Unicode case-insensitive matching; `case_sensitive: true` selects Unicode case-sensitive matching. Common literals, character classes, alternation, capturing groups, quantifiers, anchors, and boundaries work. RE2 does not support lookahead, lookbehind, or backreferences, so patterns such as `ERROR(?= here)` and `(ERROR)\1` are rejected rather than passed to a JavaScript fallback.
+
+Agent-bound reads test each canonical semantic segment separately, so a pattern cannot create a match across a text, call-name, argument, or result-body boundary. Direct REST retains its legacy flattened segment per message but uses the same safe engine. Large segments are transferred to an isolated worker in chunks and reassembled before matching, so anchors and repetitions retain their normal meaning within one segment.
+
+A syntax error or unsupported RE2 construct deterministically returns `400` with `error: "invalid_regex"` for both direct REST and agent-bound reads. The agent tool preserves that discriminator in its errored result. Treat `detail` as explanatory compiler text, not a stable value. A pattern longer than 4096 UTF-16 units is instead `invalid_params` and is rejected before transcript I/O; an omitted or empty pattern performs an unfiltered read.
 
 Agent envelopes distinguish page positions from source transcript indexes:
 
@@ -171,9 +181,19 @@ The current `read_session` schema exposes `include_tool_results`; the camel-case
 
 ## Complete 50 KiB agent-return budget
 
-Every successful agent-facing call is limited to 50 KiB after serializing the complete Pi tool value—not only the REST envelope or its inner text. This includes JSON escaping and the renderer details wrapper. The wrapper keeps only bounded scalar summary fields and never duplicates `messages`.
+The 50 KiB invariant is enforced at the final Pi lifecycle boundary, not only on the REST envelope or its inner text. For both successful and errored `read_session` calls, each of these serialized UTF-8 values is at most 51,200 bytes:
 
-The fitter first bounds semantic fields and excerpts, then removes optional previews or later page rows if necessary. A budget-shortened page or targeted slice returns a typed continuation rather than silent transport truncation. If an old resolved extension returns an unrecognized successful wrapper, the boundary returns a small `extension_return_unrecognized` partial with retry metadata instead of forwarding the unknown body.
+- the final Pi tool return;
+- the emitted and AgentSession-state `toolResult` message; and
+- the persisted JSONL message row, including its outer row metadata and newline.
+
+The measurement therefore includes JSON escaping, the renderer details wrapper, and persistence overhead. Details retain bounded scalar summaries and never duplicate `messages`.
+
+When `read_session` is available, Bobbit prepends a content-addressed immutable boundary before the resolved builtin, server, project, or market extension. Activation fails closed if that boundary cannot be written and verified. The boundary runs through `tool_result`, `tool_execution_end`, and `message_end`, then canonicalizes the value placed in AgentSession state and SessionManager persistence. This remains true after restart/restore and in sandboxes, where the verified generated extension is mounted read-only. A stale or downstream extension therefore cannot restore an oversized wrapper after the resolved handler returns.
+
+Successful values are reprojected into the canonical envelope described above. The fitter bounds semantic fields and excerpts, then removes optional previews or later page rows if necessary. A budget-shortened page or targeted slice returns a typed continuation rather than silent transport truncation. If an old resolved extension returns an unrecognized successful wrapper, the boundary returns a small `extension_return_unrecognized` partial with retry metadata instead of forwarding the unknown body.
+
+Errored values retain only bounded `error`, `code`, `status`, `detail`, and `message` diagnostics; renderer details retain only `code` and `status`. Missing semantic diagnostics become `{"error":"read_session_failed"}`. Both success and error paths remove wrapper-level `usage`, provider/model metadata, signatures, encrypted/replay fields, arbitrary extra content, accessors, and custom serializers before emission and persistence. This wrapper scrub is separate from the path-sensitive result-body rule: legitimate provider-like keys inside an explicitly requested canonical tool-result excerpt remain payload data.
 
 ## Errors
 
@@ -181,8 +201,8 @@ The fitter first bounds semantic fields and excerpts, then removes optional prev
 |---|---|
 | `session_not_found` | The target session ID is unknown. |
 | `transcript_unavailable` | The session exists, but its agent transcript is missing or empty. |
-| `invalid_regex` | `pattern` is not a valid regular expression. |
-| `invalid_params` | Pagination, context, boolean, or projection parameters are invalid. |
+| `invalid_regex` | `pattern` has invalid RE2 syntax or uses an unsupported construct such as lookaround or a backreference. |
+| `invalid_params` | Pagination, context, boolean, projection parameters, or the 4096-unit pattern limit are invalid. |
 | `INVALID_RESULT_BODY` | A result cannot be canonicalized safely. |
 | `INVALID_RESULT_HANDLE` | The handle is missing, malformed, or required by another slice parameter. |
 | `RESULT_NOT_FOUND` | The handle points to a message/block that no longer exists. |
@@ -198,7 +218,7 @@ The fitter first bounds semantic fields and excerpts, then removes optional prev
 - omitting both result-inclusion query aliases keeps results included;
 - compact mode keeps legacy previews and verbose mode keeps legacy content blocks;
 - `include_tool_results=false`, `includeToolResults=false`, or `0` requests legacy redaction;
-- direct pagination, negative offsets, regex/context matching, author objects, and error contracts are unchanged;
+- direct pagination, negative offsets, supported RE2 pattern/context matching, author objects, and error response shape are unchanged;
 - the agent-only heavy limit and complete Pi-result budget do not apply.
 
 The browser transcript UI uses this direct boundary. `read_session` sends an authenticated caller-session identity and explicitly defaults `include_tool_results` to false, selecting the bounded agent projection. The caller header is a policy selector only after it resolves to a real session; an absent or unknown header does not change the legacy REST response.

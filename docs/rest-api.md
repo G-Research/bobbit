@@ -182,7 +182,7 @@ Query parameters:
 |---|---|---|
 | `offset` | Integer position; negative values resolve from the end of the raw or filtered sequence. Default `0`. | Same input semantics. The response also reports normalized `pageStart`; continuations use a non-negative page position. |
 | `limit` | Integer `1..200`; default `20`. | Same ordinary range/default. If a heavy flag is true, an explicit integer `1..10` is required before transcript I/O. |
-| `pattern` | Optional regular expression over legacy flattened transcript text. | Searches discrete full canonical visible-text, tool-name, call-argument, and result-body segments. A hit in omitted content does not expose it. |
+| `pattern` | Optional RE2-WASM Unicode regular expression over legacy flattened transcript text. | Uses the same safe regex engine over discrete full canonical visible-text, tool-name, call-argument, and result-body segments. A hit in omitted content does not expose it. |
 | `case_sensitive` | `true`/`1` enables case-sensitive matching. | Same. |
 | `context` | Integer `0..5`; expands each regex hit before de-duplication and paging. | Same, with normalized page coordinates over the expanded sequence. |
 | `verbose` | Selects legacy verbose content. | Adds only bounded semantic text/thinking. Provider replay metadata remains omitted. A true value is heavy. |
@@ -191,11 +191,13 @@ Query parameters:
 | `result_cursor` | No direct legacy projection contract. | Optional UTF-16 cursor for `result_handle`; default `0`. |
 | `result_limit` | No direct legacy projection contract. | Optional UTF-16-unit request size, integer `1..8192`; default `4096`. |
 
+Patterns are limited to 4096 UTF-16 units. RE2-WASM supports common regular-expression syntax but deliberately rejects JavaScript-only backtracking features, including lookahead, lookbehind, and backreferences. Invalid syntax and unsupported constructs return `400 { error: "invalid_regex", detail }` in both compatibility modes; callers should branch on `error`, because `detail` is explanatory compiler text. An oversized pattern is `invalid_params` and rejects before transcript I/O. See [Safe regex syntax and errors](read-session.md#safe-regex-syntax-and-errors).
+
 Agent page-read envelopes include `total`, optional `matchCount`, `pageStart`, `pageCount`, `returned`, source-index `offsetStart`/`offsetEnd`, optional `nextOffset`, and `messages`. Targeted result-slice envelopes omit `pageStart`/`pageCount`. For page reads, `pageStart` and `nextOffset` are positions in the raw or context-expanded pageable sequence; `offsetStart` and `offsetEnd` remain source transcript indexes. This distinction makes a negative filtered/context tail safely continuable: repeat the same filter and use `offset=nextOffset`, rather than deriving an offset from the returned source index.
 
 At the agent boundary, `verbose: true`, `include_tool_results: true`, or the compatibility alias `includeToolResults: true` requires an explicitly supplied numeric integer `limit` from 1 through 10. The immutable spawned-agent guard rejects invalid calls before an overridden handler can fetch; the authenticated route repeats the check before reading the transcript. Rejections return `400` with `code: "CONTEXT_HEAVY_LIMIT_REQUIRED"`. Direct REST is deliberately outside this policy.
 
-Every successful agent tool return—not only this route's inner JSON—is serialized within 50 KiB. Budget-shortened pages and result slices return typed continuations. Direct REST responses retain their legacy transport and rendering contract.
+The immutable agent boundary canonicalizes both success and error results after the resolved extension and downstream Pi result listeners. The final Pi return, AgentSession `toolResult` state/event value, and persisted JSONL row each serialize within 50 KiB; provider-only wrapper fields and duplicate result data cannot reappear later in the lifecycle. Budget-shortened successful pages and result slices return typed continuations. Direct REST responses remain outside this Pi lifecycle policy and retain their legacy transport and rendering contract.
 
 See [Bounded session diagnostics](read-session.md) for canonical Pi/Anthropic records, result metrics/handles, continuation examples, dictionaries, and the compact-first workflow.
 
