@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/runtime-model-zombie-recovery-repro.test.ts",
+      "reason": "Focused failing-first real SessionManager/runtime-selection recovery regression proving an unverifiable partial tuple mutation in a role-less pre-transcript session cannot be left live after zombie recovery archives its unchanged durable tuple.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/session-manager-bare-delegate-model-boundary.test.ts",
       "reason": "Focused failing-first actual-SessionManager regression proving bare createDelegateSession rejects the exact deferred kimi-coding provider before RpcBridge construction, process start, or child persistence, while a selectable custom/local provider preserves a slash-containing Kimi-named model ID.",
       "execution": {
