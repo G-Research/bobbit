@@ -39,6 +39,15 @@
       }
     },
     {
+      "path": "tests2/core/runtime-model-recovery-ownership.test.ts",
+      "reason": "Deterministic failing-first runtime recovery ownership races proving a superseded restart bridge cannot quarantine a newer canonical replacement or publish a stale candidate after ownership and durability move again during verification.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/session-manager-bare-delegate-model-boundary.test.ts",
       "reason": "Focused failing-first actual-SessionManager regression proving bare createDelegateSession rejects the exact deferred kimi-coding provider before RpcBridge construction, process start, or child persistence, while a selectable custom/local provider preserves a slash-containing Kimi-named model ID.",
       "execution": {
