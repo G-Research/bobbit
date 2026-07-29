@@ -1,6 +1,6 @@
 import type { ThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
-import type { SessionInfo, SessionManager } from "../agent/session-manager.js";
+import type { SessionBridgeOwner, SessionInfo, SessionManager } from "../agent/session-manager.js";
 import type { PreferencesStore } from "../agent/preferences-store.js";
 import { sanitizeModelErrorText } from "../agent/model-error-sanitizer.js";
 import { applyModelString } from "../agent/review-model-override.js";
@@ -18,9 +18,10 @@ type RuntimeModelSessionManager = Omit<
 		SessionManager,
 		"getPersistedSession" | "updateModelNameFile" | "restartAgent" | "getSession" | "terminateSession" | "storeArchive"
 	>,
-	"getPersistedSession"
+	"getPersistedSession" | "restartAgent"
 > & {
 	getPersistedSession(sessionId: string): RuntimePersistedSession | undefined;
+	restartAgent(sessionId: string, expectedOwner?: SessionBridgeOwner): Promise<void>;
 	/** Atomic durable tuple seam; SessionManager owns the store implementation. */
 	persistSessionModel(sessionId: string, provider: string, modelId: string, effectiveThinkingLevel?: ThinkingLevel): void;
 };
@@ -294,7 +295,7 @@ async function recoverRuntimeTupleMutation(
 		broadcastModelState,
 	)) return;
 
-	await sessionManager.restartAgent(session.id);
+	await sessionManager.restartAgent(session.id, { session, rpcClient: mutationRpcClient });
 	const replacement = sessionManager.getSession(session.id);
 	if (!replacement) throw new Error("runtime selection recovery restart returned no live session");
 	const recoveryOwner: RuntimeRecoveryOwner = { session: replacement, rpcClient: replacement.rpcClient };
