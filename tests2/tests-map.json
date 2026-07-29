@@ -58,7 +58,34 @@
     },
     {
       "path": "tests2/core/tool-result-error-bridge-real-pi.test.ts",
-      "reason": "Real Pi 0.81 AgentSession and SessionManager lifecycle regression proving every post-result extension phase is re-bounded before agent state and JSONL persistence, hostile snapshot graphs are work-capped, oversized call IDs retain bounded correlation, and duplicate boundaries remain idempotent.",
+      "reason": "Real Pi 0.81 AgentSession and SessionManager lifecycle regression proving every post-result extension phase is re-bounded before agent state and JSONL persistence, including hostile listener mutations, snapshots, provider-only errors, near-ceiling results, and oversized call IDs. Split from the runner-focused cases so the real lifecycle coverage remains safely within the tier-1 per-file wall budget under contention.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/tool-result-error-bridge-real-pi-collision.test.ts",
+      "reason": "Real Pi 0.81 loadExtensions, AgentSession, and SessionManager regression proving reused provider call IDs cannot make an explicitly named ordinary tool cross the read_session result boundary. Split into a focused file to preserve lifecycle fidelity within the tier-1 per-file wall budget under contention.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/tool-result-error-bridge-real-pi-correlation.test.ts",
+      "reason": "Real Pi 0.81 loadExtensions and ExtensionRunner regression proving many oversized provider call IDs are replaced by fixed-bounded digests while correlation and the bounded call map remain correct. Split into a focused file to remain within the tier-1 per-file wall budget under contention.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/tool-result-error-bridge-real-pi-idempotency.test.ts",
+      "reason": "Real Pi 0.81 loadExtensions and ExtensionRunner regression proving duplicate result boundaries always produce an independent immutable canonical snapshot after the complete listener chain. Split into a focused file to remain within the tier-1 per-file wall budget under contention.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
