@@ -75,6 +75,15 @@
       }
     },
     {
+      "path": "tests2/core/tool-result-error-bridge-real-pi-flags.test.ts",
+      "reason": "Real Pi 0.81 AgentSession and SessionManager lifecycle regression proving role and timestamp truncation/invalidity flags survive the final immutable result boundary across emitted events, Agent state, SessionManager round trips, and exact persisted JSONL values.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/tool-result-error-bridge-real-pi-snapshots.test.ts",
       "reason": "Real Pi 0.81 AgentSession and SessionManager lifecycle regression proving deeply nested, sparse, cyclic, DAG, non-plain, and frozen hostile result targets become bounded safe snapshots without invoking provider accessors or serializers. Sharded from the lifecycle matrix for comfortable tier-1 per-file wall-budget headroom.",
       "execution": {
