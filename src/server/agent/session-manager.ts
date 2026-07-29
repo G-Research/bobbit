@@ -6579,7 +6579,10 @@ export class SessionManager {
 	): Promise<SessionInfo | undefined> {
 		return this._coordinateSessionReplacement(session.id, "respawn", (token) =>
 			this._respawnAgentInPlaceOwned(session.id, session, ps, opts, token), {
-				coalesceKey: "rehydrate",
+				// Owner-sensitive recovery must reach its own serialized admission
+				// check; joining a generic rehydrate would inherit another operation's
+				// replacement without ever proving ownership of its stopped bridge.
+				coalesceKey: opts?.expectedOwner ? undefined : "rehydrate",
 				drainOnRelease: opts?.deferQueueDrain !== true,
 				cancelOnTerminal: () => undefined,
 			});
@@ -8982,12 +8985,16 @@ export class SessionManager {
 		// mutation must also apply and read back the effective thinking level before
 		// any store, model-name mirror, or client success frame is updated.
 		let verifiedSpawnTuple;
-		const commitExactSpawnTuple = async (modelString: string): Promise<void> => {
+		const commitExactSpawnTuple = async (
+			modelString: string,
+			explicitPreferredThinking?: ThinkingLevel,
+		): Promise<void> => {
 			const slash = modelString.indexOf("/");
 			const provider = modelString.slice(0, slash);
 			const modelId = modelString.slice(slash + 1);
 			const persisted = this.resolveStoreForSession(session.id).get(session.id);
-			const requestedThinking = isKnownThinkingLevel(session.spawnPinnedThinkingLevel)
+			const requestedThinking = explicitPreferredThinking
+				?? isKnownThinkingLevel(session.spawnPinnedThinkingLevel)
 				?? isKnownThinkingLevel(this.resolveRoleThinkingLevel(session))
 				?? isKnownThinkingLevel(persisted?.effectiveThinkingLevel)
 				?? isKnownThinkingLevel(this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined)
@@ -9082,7 +9089,13 @@ export class SessionManager {
 						await applyModelString(session.rpcClient, currentFallbackSessionModel, {
 							contextLabel: "default.sessionModel fallback",
 						});
-						await commitExactSpawnTuple(currentFallbackSessionModel);
+						// A staged assignRole pin already carries thinking clamped for the
+						// failed role model. Re-clamp the raw explicit role request against
+						// the fallback that actually won; restore/respawn pins remain durable-first.
+						const explicitRoleFallbackThinking = Reflect.get(session, "_deferVerifiedTupleCommit") === true
+							? isKnownThinkingLevel(this.resolveRoleThinkingLevel(session))
+							: undefined;
+						await commitExactSpawnTuple(currentFallbackSessionModel, explicitRoleFallbackThinking);
 						console.log(`[session-manager] Controlled fallback selected default.sessionModel "${currentFallbackSessionModel}" for session ${session.id} after spawn-pinned model "${pinnedModel}" failed`);
 						return verifiedSpawnTuple;
 					} catch (fallbackErr) {

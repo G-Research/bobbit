@@ -101,6 +101,10 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 	body = body
 		.replace(/\s+as\s+string\s*\|\s*undefined/g, "")
 		.replace(/async \(modelString: string\): Promise<void> =>/g, "async (modelString) =>")
+		.replace(
+			/async \(\s*modelString: string,\s*explicitPreferredThinking\?: ThinkingLevel,\s*\): Promise<void> =>/g,
+			"async (modelString, explicitPreferredThinking) =>",
+		)
 		.replace(/SessionManager\.AIGW_CACHE_TTL_MS/g, "60_000");
 
 	// The extracted production method now normalizes legacy provider-prefixed AIGW
@@ -194,6 +198,7 @@ async function exerciseAutoSelect(options: {
 	failThinkingLevels?: string[];
 	spawnPinnedModel?: string;
 	spawnPinnedThinkingLevel?: string;
+	explicitRoleAssignment?: boolean;
 	initialBound?: { provider: string; id: string; thinkingLevel?: string };
 	initialDurable?: { provider: string; id: string; thinkingLevel: string };
 }): Promise<{
@@ -205,6 +210,7 @@ async function exerciseAutoSelect(options: {
 	modelFiles: string[];
 	broadcastModels: Array<{ provider: string; id: string }>;
 	broadcastTuples: Array<{ provider: string; id: string; thinkingLevel: string | undefined }>;
+	spawnPinnedThinkingLevel: string | undefined;
 }> {
 	const setModelCalls: ModelPair[] = [];
 	const setThinkingCalls: string[] = [];
@@ -236,6 +242,7 @@ async function exerciseAutoSelect(options: {
 		},
 	};
 	const currentCatalogModels = new Set([
+		"anthropic/claude-opus-5",
 		"openai/fallback-session",
 		"openai/dead-fallback",
 	]);
@@ -272,6 +279,7 @@ async function exerciseAutoSelect(options: {
 		role: "coder",
 		spawnPinnedModel: options.spawnPinnedModel,
 		spawnPinnedThinkingLevel: options.spawnPinnedThinkingLevel,
+		...(options.explicitRoleAssignment ? { _deferVerifiedTupleCommit: true } : {}),
 		clients: new Set([client]),
 		rpcClient: {
 			async setModel(provider: string, modelId: string) {
@@ -318,6 +326,7 @@ async function exerciseAutoSelect(options: {
 				id: msg.data.model.id,
 				thinkingLevel: msg.data.thinkingLevel,
 			})),
+		spawnPinnedThinkingLevel: session.spawnPinnedThinkingLevel,
 	};
 }
 
@@ -759,6 +768,32 @@ describe("controlled model fallback policy — session auto-selection", () => {
 		);
 		assert.deepEqual(result.broadcastModels, [{ provider: "openai", id: "fallback-session" }]);
 		assert.deepEqual(result.modelFiles, ["openai/fallback-session"]);
+	});
+
+	it("re-clamps raw explicit-role thinking against the model that actually wins controlled fallback", async () => {
+		const result = await exerciseAutoSelect({
+			prefs: {
+				allowSessionModelFallback: true,
+				"default.sessionModel": "anthropic/claude-opus-5",
+			},
+			roleModel: "openai/dead-fallback",
+			roleThinking: "xhigh",
+			spawnPinnedModel: "openai/dead-fallback",
+			// The role's xhigh request was clamped for the failed pinned model.
+			spawnPinnedThinkingLevel: "high",
+			explicitRoleAssignment: true,
+			initialBound: { provider: "unset", id: "unset", thinkingLevel: "high" },
+		});
+
+		assert.equal(result.error, undefined);
+		assert.deepEqual(result.setModelCalls, [["anthropic", "claude-opus-5"]]);
+		assert.deepEqual(
+			result.setThinkingCalls,
+			["xhigh"],
+			"EXPLICIT_ROLE_FALLBACK_REUSED_THINKING_CLAMPED_FOR_FAILED_MODEL",
+		);
+		assert.equal(result.spawnPinnedThinkingLevel, "xhigh");
+		assert.deepEqual(result.persisted, [], "a staged explicit role must remain side-effect-free before lifecycle commit");
 	});
 
 	it("rejects a hidden-provider role fallback before mutating any observable state", async () => {
