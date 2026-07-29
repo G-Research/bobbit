@@ -16,11 +16,33 @@ import {
 	type WsMsg,
 } from "./_e2e/e2e-setup.js";
 import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
-import { getAvailableModels, invalidateModelCache, type ApiModel } from "../../src/server/agent/model-registry.js";
+import {
+	getAvailableModels,
+	invalidateModelCache,
+	resolveModelStateMeta,
+	type ApiModel,
+} from "../../src/server/agent/model-registry.js";
 
 const OPUS_5 = { provider: "anthropic", id: "claude-opus-5", thinkingLevel: "xhigh" } as const;
 const STALE_MODEL_IDS = new Set(["claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4"]);
 const SNAPSHOT_PROVIDER = "tuple-snapshot-custom";
+const INFERRED_DYNAMIC_TUPLE = { provider: "custom", id: "cache-empty-dynamic-a", thinkingLevel: "high" } as const;
+const INFERRED_DYNAMIC_MODEL = {
+	provider: INFERRED_DYNAMIC_TUPLE.provider,
+	id: INFERRED_DYNAMIC_TUPLE.id,
+	contextWindow: 654_319,
+	maxTokens: 23_417,
+	reasoning: true,
+	thinkingLevelMap: { off: null, high: "high", max: "max" },
+} as const;
+const FOREIGN_DYNAMIC_MODEL = {
+	provider: INFERRED_DYNAMIC_TUPLE.provider,
+	id: "cache-empty-dynamic-foreign",
+	contextWindow: 777_731,
+	maxTokens: 31_337,
+	reasoning: true,
+	thinkingLevelMap: { off: "foreign-off", max: "foreign-max" },
+} as const;
 const DURABLE_SNAPSHOT_TUPLE = { provider: SNAPSHOT_PROVIDER, id: "durable-a", thinkingLevel: "high" } as const;
 const TARGET_SNAPSHOT_TUPLE = { provider: SNAPSHOT_PROVIDER, id: "target-b", thinkingLevel: "xhigh" } as const;
 const DURABLE_SNAPSHOT_MODEL = {
@@ -364,6 +386,85 @@ test.describe("model state after reconnect", () => {
 
 	test("a second connection retains the durable custom tuple while thinking mutation is pending", async ({ gateway }) => {
 		await exercisePartialMutationSnapshot(gateway, sessionId, "second-connection");
+	});
+
+	test("cache-empty inferred matching live identity preserves metadata while durable thinking repairs the tuple", async ({ gateway }) => {
+		const session = gateway.sessionManager.getSession(sessionId);
+		expect(session?.status).toBe("idle");
+		gateway.sessionManager.persistSessionModel(
+			sessionId,
+			INFERRED_DYNAMIC_TUPLE.provider,
+			INFERRED_DYNAMIC_TUPLE.id,
+			INFERRED_DYNAMIC_TUPLE.thinkingLevel,
+		);
+		expect(gateway.sessionManager.getPersistedSession(sessionId)).toMatchObject({
+			modelProvider: INFERRED_DYNAMIC_TUPLE.provider,
+			modelId: INFERRED_DYNAMIC_TUPLE.id,
+			effectiveThinkingLevel: INFERRED_DYNAMIC_TUPLE.thinkingLevel,
+		});
+
+		// Force the dynamic custom model through inferMeta: only the matching live
+		// bridge knows its exact limits and thinking map.
+		invalidateModelCache();
+		expect(resolveModelStateMeta(INFERRED_DYNAMIC_TUPLE.provider, INFERRED_DYNAMIC_TUPLE.id).source).toBe("inferred");
+		session.eventBuffer.push({ type: "inferred_dynamic_snapshot_test_seed" });
+
+		const getState = vi.spyOn(session.rpcClient, "getState")
+			.mockResolvedValueOnce({
+				success: true,
+				data: { model: { ...INFERRED_DYNAMIC_MODEL } },
+			})
+			.mockResolvedValueOnce({
+				success: true,
+				data: { model: { ...INFERRED_DYNAMIC_MODEL }, thinkingLevel: "low" },
+			})
+			.mockResolvedValueOnce({
+				success: true,
+				data: { model: { ...FOREIGN_DYNAMIC_MODEL }, thinkingLevel: "low" },
+			});
+		let ws: WsConnection | undefined;
+		try {
+			ws = await connectWs(sessionId);
+			const missingThinking = await ws.waitFor(
+				(message) => stateModelId(message) === INFERRED_DYNAMIC_TUPLE.id,
+				5_000,
+			);
+			expect((missingThinking.data as any).model).toEqual(INFERRED_DYNAMIC_MODEL);
+			expect((missingThinking.data as any).thinkingLevel).toBe(INFERRED_DYNAMIC_TUPLE.thinkingLevel);
+
+			let cursor = ws.messageCount();
+			ws.send({ type: "get_state" });
+			const mismatchedThinking = await ws.waitForFrom(
+				cursor,
+				(message) => stateModelId(message) === INFERRED_DYNAMIC_TUPLE.id,
+				5_000,
+			);
+			expect((mismatchedThinking.data as any).model).toEqual(INFERRED_DYNAMIC_MODEL);
+			expect((mismatchedThinking.data as any).thinkingLevel).toBe(INFERRED_DYNAMIC_TUPLE.thinkingLevel);
+
+			cursor = ws.messageCount();
+			ws.send({ type: "get_state" });
+			const differentIdentity = await ws.waitForFrom(
+				cursor,
+				(message) => stateModelId(message) === INFERRED_DYNAMIC_TUPLE.id,
+				5_000,
+			);
+			const differentIdentityState = differentIdentity.data as any;
+			expect(differentIdentityState.thinkingLevel).toBe(INFERRED_DYNAMIC_TUPLE.thinkingLevel);
+			expect(differentIdentityState.model).toMatchObject({
+				provider: INFERRED_DYNAMIC_TUPLE.provider,
+				id: INFERRED_DYNAMIC_TUPLE.id,
+			});
+			expect(differentIdentityState.model.contextWindow).not.toBe(FOREIGN_DYNAMIC_MODEL.contextWindow);
+			expect(differentIdentityState.model.maxTokens).not.toBe(FOREIGN_DYNAMIC_MODEL.maxTokens);
+			expect(differentIdentityState.model.reasoning).not.toBe(FOREIGN_DYNAMIC_MODEL.reasoning);
+			expect(differentIdentityState.model.thinkingLevelMap).not.toEqual(FOREIGN_DYNAMIC_MODEL.thinkingLevelMap);
+			expect(getState).toHaveBeenCalledTimes(3);
+		} finally {
+			getState.mockRestore();
+			if (ws) await closeWs(ws);
+			invalidateModelCache();
+		}
 	});
 
 	test("matching live model without thinking hydrates one complete durable tuple on reconnect and get_state", async ({ gateway }) => {
