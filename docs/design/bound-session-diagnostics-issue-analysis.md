@@ -4,7 +4,7 @@ Status: issue-analysis artifact for goal **Bound Session Diagnostics**. This doc
 
 The incident evidence and root-cause sections remain historical. The response contract and audited matrices are the rationale for the shipped projection. The shipped envelope adds explicit `pageStart`/`pageCount` coordinates so a resolved negative or filtered/context window can be refit and continued without confusing page positions with source message indexes.
 
-Post-analysis security hardening also moved all transcript pattern matching to isolated RE2-WASM workers and extended the immutable result boundary through final Pi emission, AgentSession state, and SessionManager persistence. The current operator contract is authoritative in [Bounded session diagnostics](../read-session.md); the additions below record why those server-level safeguards are compatible with the projection rationale.
+Post-analysis security hardening also moved all transcript pattern matching to isolated RE2-WASM workers and extended the immutable result boundary through final Pi emission, AgentSession state, and SessionManager persistence. Post-review work added pre-I/O admission, pre-parse raw-transcript accounting, lazy result materialization, incremental hidden-body search, truthful minimum-budget slices, and conservative Marketplace Pi-extension activation. The current operator contract is authoritative in [Bounded session diagnostics](../read-session.md); the additions below record why those server-level safeguards are compatible with the projection rationale.
 
 ## 1. Incident and impact
 
@@ -242,7 +242,7 @@ Full provider call IDs are used only inside the server-side correlation index an
 
 The canonical call name is the first own, non-empty, Unicode-well-formed string in exact priority `name`, then `toolName`, or the literal `unknown`; invalid candidates are rejected without coercion. The argument source is the first own, non-`undefined` field in exact priority `arguments`, then `input`; `null` is selected. A selected string is used unchanged after the same Unicode well-formedness check as direct result text. Any other selected JSON value is encoded with the exact recursive stable JSON encoder and invalid-value rejection from §6.2.2; selected `null` encodes as the literal `null`, while a missing source contributes no argument segment. Strings that happen to contain JSON are not parsed and rewritten. The same canonical argument string feeds the bounded preview (a Unicode-scalar-safe prefix, maximum 512 UTF-16 units, with `argumentsTruncated`) and full search, so Pi and Anthropic shapes cannot disagree about what was searched.
 
-The normative per-message search corpus is a sequence of semantic segments, not one lossy concatenation: visible text segments in source order; each call's name then canonical arguments; and each result's full `canonicalToolResultBody`. The compiled regex is reset to `lastIndex = 0` and tested independently against every segment, avoiding matches synthesized across field/block boundaries. A hit in any segment selects that source message index exactly once. Context expansion then uses the existing transcript-index neighborhood, de-duplicates indexes, and sorts them ascending. `matchCount` counts matching source messages before context expansion. Offset resolution—including negative offsets—then applies to this filtered/expanded index list exactly as it does today.
+The normative per-message search corpus is a sequence of semantic segments, not one lossy concatenation: visible text segments in source order; each call's name then canonical arguments; and each result's full `canonicalToolResultBody`. A lightweight structural index retains bounded names and raw locators, not canonical bodies. During regex matching, each hidden argument/result segment is canonicalized and sent to the isolated matcher incrementally, then released; only rows selected after matching are materialized again for projection. The regex is tested independently against every segment, avoiding matches synthesized across field/block boundaries. A hit in any segment selects that source message index exactly once. Context expansion then uses the existing transcript-index neighborhood, de-duplicates indexes, and sorts them ascending. `matchCount` counts matching source messages before context expansion. Offset resolution—including negative offsets—then applies to this filtered/expanded index list exactly as it does today.
 
 Projection occurs only after selection. A name or argument hit maps to the ordinary projected row for that source message: canonical name, bounded `argumentsPreview`, and `argumentsTruncated`; an argument match beyond the cap does not promote, splice, or excerpt the hidden suffix. Result-body hits likewise return canonical result metadata only unless a separate handle slice was requested. Transport-budget continuation records the next non-negative position in the same filtered/expanded list; the caller repeats the original pattern/case/context and uses that `nextOffset`, so continuation neither overlaps nor changes the search corpus.
 
@@ -387,6 +387,8 @@ result_cursor=0
 result_limit=4096
 ```
 
+The structural index deliberately stores result locators rather than canonical bodies. An ordinary unfiltered page materializes only selected rows, one at a time; a targeted handle materializes only its located result. Regex search necessarily inspects hidden bodies, but releases each canonical segment immediately and then re-materializes only selected rows. Excerpt strings are detached from the complete body before that body is released. This preserves accurate `size`, digest, and cursor semantics without retaining every large result merely to display a small page.
+
 The slice contract is normative:
 
 - Cursors and `excerpt.start`/`excerpt.end` are **JavaScript UTF-16 code-unit offsets** into the canonical result text. This deliberately matches `size.chars` and JavaScript `String.length`/`slice`.
@@ -421,9 +423,13 @@ const serializedBytes = (value: unknown) =>
 
 For every agent-facing success or error, the final Pi tool return, the emitted/AgentSession-state `toolResult` message, and the persisted JSONL row each serialize to at most `READ_SESSION_FINAL_RESULT_MAX_BYTES` (50 KiB), including JSONL outer metadata and its newline. The invariant is not a route-envelope estimate or a limit on `content[0].text` alone.
 
+The route-side fitter accepts an internal serialized-envelope budget from **1,536 bytes through 50 KiB**. The lower bound exists only to prove a canonical targeted slice can always preserve result identity, normalized status, accurate size, handle, and truthful excerpt/continuation metadata under worst-case JSON escaping. Production agent requests still select 50 KiB; 1,536 bytes is neither a public query option nor a reduced transport ceiling.
+
 #### 6.4.1 Override-independent output boundary
 
 Budget authority lives in a gateway-generated, content-addressed `read-session-result-boundary` Pi extension, implemented in `tool-result-error-bridge-extension.ts` rather than in a tool-group extension. Its source is regenerated and byte-verified, mounted read-only into sandboxes, and injected before every resolved builtin/server/project/market tool extension whenever `read_session` is granted. Session activation fails closed for `read_session` if this boundary cannot be materialized.
+
+Marketplace Pi contributions resolve before ordinary tool activation because discovery can populate the scoped ToolManager catalogue. Runtime Marketplace arguments still follow the ordinary Bobbit tool arguments, but the result boundary is prepended ahead of the combined list. A successfully discovered `read_session` registration requires the boundary. A runtime-enabled contribution whose discovery failed or was skipped has unknown registrations: Bobbit does not invent a visible `read_session` catalogue entry, but conservatively requires both the result boundary and the immutable pre-handler heavy guard. If boundary materialization fails, activation aborts before RpcBridge construction; if the unknown extension registers `read_session`, the guard still rejects heavy input before its handler can fetch. Successfully discovered non-read extensions retain their best-effort activation behavior.
 
 Registration wrapping canonicalizes the actual resolved handler return. Shared ExtensionRunner and AgentSession seams then reapply the boundary after the complete `tool_result`, `tool_execution_end`, and `message_end` listener chains and before AgentSession state or SessionManager JSONL persistence. This second layer is required because Pi extensions use private tool maps and downstream listeners may return or mutate values after the registered handler has already been wrapped.
 
@@ -526,12 +532,28 @@ The fitter is deterministic. Before fitting, variable semantic fields use explic
 3. For an explicit targeted result-slice request only, if the requested excerpt would overflow, binary-search a Unicode-safe excerpt prefix while rebuilding and serializing the complete value at each probe. Emit the `transport_budget` result-slice variant whose continuation repeats the handle and exact non-null `nextCursor`. Never estimate from source characters.
 4. For a transcript page row that is still too large, remove optional call/result previews and excerpts but retain its index, role, canonical call/result name, status, size, omission state, result handles, and author reference. The retained result handles permit separate targeted slices. Preview removal is normal bounded projection, not an unretrievable transport continuation; a pathological count of otherwise bounded records falls through to the summary fallback in step 6.
 5. If another message would overflow, omit that and later messages and emit the `transport_budget` page variant: set `nextOffset` to the first unreturned position in the requested/filtered sequence and require `continuationRequest: { kind: "page", offset: nextOffset }`. `returned`, `offsetStart`, and `offsetEnd` describe only rows actually returned. Page fitting never emits a result-slice continuation, and targeted result-slice fitting never emits a page continuation.
-6. A violated internal field/count-cap invariant uses separately budget-pinned canonical outputs, never an untyped “compatibility” shape. A page request returns one fixed-schema summary row for the current source message (`index`, `role`, `projectionOmitted: true`, and non-negative `toolCallCount`/`toolResultCount`), then sets `nextOffset`/page continuation to the following filtered-list position so retry cannot loop. A targeted slice with `cursor < size.chars` returns canonical result metadata plus at least the next complete Unicode scalar (two UTF-16 units for an astral scalar); if content remains, it is the result-slice partial with strictly greater `nextCursor`, otherwise it is the complete variant with `nextCursor: null`. A target at `cursor === size.chars` returns the complete empty `[cursor,cursor)` excerpt. These fixed one-scalar/empty values are separately proven to fit, never carry `wrapperDiagnostics`, never repeat a continuation cursor, and never leak any other part of the oversized intermediate result.
+6. A violated internal field/count-cap invariant uses separately budget-pinned canonical outputs, never an untyped “compatibility” shape. A page request returns one fixed-schema summary row for the current source message (`index`, `role`, `projectionOmitted: true`, and non-negative `toolCallCount`/`toolResultCount`), then sets `nextOffset`/page continuation to the following filtered-list position so retry cannot loop. A targeted slice first refits to a compact canonical row by dropping repeatable role/timestamp/text, author, and correlation-dictionary data while retaining exactly one result's `ref`, `name`, `status`, accurate `size`, `omitted`, `handle`, and excerpt. If even the requested excerpt is too large, it is shortened with the exact result-slice continuation. A targeted slice with `cursor < size.chars` always returns at least the next complete Unicode scalar (two UTF-16 units for an astral scalar); if content remains, it is partial with a strictly greater `nextCursor`, otherwise it is complete with `nextCursor: null`. A target at `cursor === size.chars` returns the complete empty `[cursor,cursor)` excerpt. These compact one-scalar/empty values are separately proven at the 1,536-byte floor, never claim `complete` or `omitted` incorrectly, never repeat a continuation cursor, and never leak any other part of the oversized intermediate result.
 7. Serialize the actual value once more at the post-handler boundary and assert the invariant before returning it.
 
 An upstream-successful read is never converted to an error merely because its content is large. A single oversized visible message returns a complete bounded row with `textTruncated`; a page result returns bounded metadata/excerpt plus a handle; and only actual page omission or a targeted slice shortened below the requested range sets envelope `partial` with the corresponding schema-valid continuation. This makes exhaustion explicit and recoverable rather than relying on transport truncation.
 
 A table-driven schema suite validates the complete variant plus both `transport_budget` continuation forms and `extension_return_unrecognized` before the boundary serializes them. It also rejects: either `truncatedBy` value without `partial: true`; an unknown truncation reason; a page partial without matching `nextOffset`/page continuation; a slice partial without a matching returned excerpt cursor; a summary row outside a transport-page partial or without both counts; an unrecognized partial without `kind: "retry"`, `retrySameRequest: true`, or `wrapperDiagnostics`; wrapper diagnostics on any other variant; and the previously contradictory fallback shape under a transport-only schema. The suite also pins fallback progress: an interior targeted cursor advances by one Unicode scalar and is partial only when content remains; a final-scalar cursor returns a complete excerpt; and `cursor === size.chars` returns a complete empty excerpt. The real stale-wrapper tests validate the parsed `content[0].text` against this same schema, preventing unit-only type assertions from masking an illegal emitted partial.
+
+### 6.5 Agent projection work admission
+
+The response ceiling bounds returned context but not the CPU and memory required to produce it. Agent projection therefore has a separate reservation model for concurrent requests, cumulative operations, indexed result count, raw/canonical/projected text work, and retained strings.
+
+Admission and accounting order are part of the safety contract:
+
+1. Validate pagination, regex shape/length, result-handle syntax, cursor/limit, and the internal serialized budget before transcript I/O.
+2. Acquire a shared request reservation before `readContent()` so concurrent calls cannot all load and parse large transcripts outside the pool.
+3. After I/O, reserve the entire raw JSONL before splitting, parsing, cloning messages, or resolving authors. Provider-only fields still consume resources even though projection later omits them.
+4. Build only the lightweight structure index. Charge every operation/result and every full provider string before search or projection; preflight structured arguments/results before materializing them.
+5. Release canonical calls/results and detached excerpts as soon as the current search segment or projected row is complete, and release all request/global reservations on both success and failure.
+
+Any request or shared ceiling returns `400 { error: "TRANSCRIPT_WORK_LIMIT_EXCEEDED", detail }` at the authenticated agent route. The builtin wrapper preserves the discriminator and bounded detail in an errored Pi result, and the immutable result boundary prevents oversized error metadata. `detail` is explanatory, not a stable subcode. Operators should not spin-retry: wait for concurrent work to drain and attempt one small compact page; a persistent error means the transcript cannot be safely projected through this boundary.
+
+These reservations belong to the trusted agent projection. Direct REST/UI stays on the legacy projection and is not moved behind these agent work limits; the separately documented safe-regex worker remains common to both matching modes.
 
 ## 7. Response-projection field audit
 
@@ -555,7 +577,7 @@ The shipped agent projection records both normalized page coordinates (`pageStar
 | Message `index` | K | K | K | K | Roughly 10–25 B/message | High | Low | Keep | Existing source indexes retain meaning |
 | Message `role`, `ts` | S | S | S | S | Roughly 40–80 B/message after caps | High | Low | Bound and retain | Role is capped at 32 UTF-16 units; timestamp at 64 with explicit truncation/invalid indicators; direct REST values remain unchanged |
 | Author identity (`kind`, `id`, `label`) | R | R | R | R | Live object 103 B/message; repeats across most rows | High for attribution | Medium aggregate | Canonicalize into envelope dictionary + short refs | Direct REST/UI author objects unchanged; renderer resolves refs |
-| Human/assistant visible text | S | S | bounded K | bounded K | Compact currently up to 800 chars/message; verbose unbounded | High | Medium/high | Summarize, then whole-response budget | Preserve visible text and regex behavior; indicate truncation |
+| Human/assistant visible text | S | S | bounded K | bounded K | Shipped caps are 800 UTF-16 units in compact and 4096 in verbose | High | Medium/high | Summarize, then whole-response budget | Preserve visible text and regex behavior; indicate truncation |
 | Thinking summary text | — | — | S | S | Usually tens of chars; currently coupled to large signatures | Medium | Low after scrub | Summarize | Do not expose private replay metadata |
 | `thinkingSignature`, `textSignature`, encrypted/replay/provider metadata | — | — | — | — | **2.81 MB observed**; often hundreds–thousands of bytes/block | None for diagnostics | Critical | Omit with an explicit path-scoped provider-field denylist/allowlist | Scope scrub to provider message/block/wrapper metadata paths; preserve same keys in canonical tool-output text |
 | Tool call name + arguments | S | S | S | S | Normally 20–250 B/call after cap; Pi calls currently disappear | High | Low | Canonicalize Anthropic `tool_use` + Pi `toolCall` | Accept `arguments` then `input`; full canonical name/arguments remain searchable beyond the bounded preview; tool-only rows cannot be blank |
@@ -606,6 +628,8 @@ Owner files: `src/server/agent/transcript-reader.ts`, preferably with small extr
 - Normalize message-level and block-level results with the exact name/correlation/status precedence in §6.2.1.
 - Implement the one exact body-selection/traversal/stringification contract from §6.2.2.
 - Derive nested text metrics and result-search input only from that canonical body; build the complete per-message search corpus from discrete visible/call/result segments.
+- Keep the full-transcript structure index body-free; materialize only selected results, or one hidden segment at a time during regex search.
+- Reserve request admission before I/O; charge raw/canonical/projected work before the corresponding parse, scan, hash, or copy can proceed.
 - Use explicit semantic allowlists and path-scoped provider metadata scrubbers.
 
 ### Slice B — Result index and lazy slices
@@ -615,6 +639,7 @@ Owner files: reader module and transcript REST route.
 - Build handles with the exact domain-separated SHA-256/160-bit contract.
 - Add bounded slice params and structured stale/not-found errors.
 - Derive digest and slices from `canonicalToolResultBody`; repeat canonical identity/status/size on every slice.
+- Under the internal minimum budget, drop repeatable row/dictionary fields before result identity or truthful excerpt state.
 - Keep direct REST additions optional and backward compatible.
 
 ### Slice C — Final-result budgeting and attribution dictionaries
@@ -632,9 +657,10 @@ Owner files: agent projection plus the gateway-owned post-result registration wr
 Owner files: `src/server/server.ts`, `src/server/agent/tool-activation.ts`, `src/server/agent/tool-guard-extension.ts`, `src/server/agent/rpc-bridge.ts`.
 
 - Resolve agent-bound transcript requests from authenticated caller identity.
+- Resolve Marketplace Pi contributions before ordinary activation, while keeping their runtime arguments after ordinary Bobbit extensions.
 - Apply agent policy and the strict heavy-input matrix before `sessionFileRead()`.
-- Generate the `tool_call` heavy-read guard even for all-allow roles.
-- Prepend and require the immutable post-result boundary for every session granted `read_session`, including sandbox path translation; fail activation closed if it cannot load.
+- Generate the `tool_call` heavy-read guard for discovered `read_session` and discovery-failed/skipped unknown runtime registrations, without inventing catalogue tools.
+- Prepend and require the immutable post-result boundary for every known or conservatively possible `read_session`, including sandbox path translation; fail activation closed if it cannot load.
 - Prove guard and output boundary through real `SessionManager` spawn/respawn and `RpcBridge` execution for direct server-scope and project/sandbox stale winners; a manual `computeToolActivationArgs()` load is not acceptance coverage.
 
 ### Slice E — Agent wrapper, renderer, and session metadata
@@ -802,7 +828,9 @@ Acceptance bounds are: **exactly 6 metadata calls, at most 7 `read_session` call
 | Server route accidentally changes UI/direct REST | Agent policy derives from authenticated caller identity, never default query behavior; paired integration assertions |
 | Wrapper `details` silently reintroduce duplication | Post-handler reprojection discards stale wrapper extras/duplicates and canonical details contain scalars only; assert actual emitted and persisted Pi values, not simulated profiles |
 | A successful fallback violates its own envelope type or cannot be continued | Use the discriminated `truncatedBy` union; require variant-specific continuation and wrapper diagnostics; validate complete, transport-page, transport-slice, and unrecognized outputs with one runtime schema |
-| Whole-transcript canonicalization increases CPU/memory | Stream accepted leaves into indexed canonical call/result representations, stable-serialize only structured JSON payloads, and reuse them for previews, metrics, regex, digests, and slices |
+| Full-transcript result materialization increases CPU/memory even for a one-row page | Keep only raw locators/bounded names in the structure index; materialize selected rows lazily, stream hidden regex segments incrementally, detach excerpts, and release full bodies immediately |
+| Concurrent or adversarial transcripts exhaust work before the 50 KiB response is produced | Reserve request capacity before I/O, charge raw JSONL before parse, bound cumulative operations/results/text globally and per request, and return structured `TRANSCRIPT_WORK_LIMIT_EXCEEDED` without partial unsafe work |
+| Marketplace discovery failure hides a runtime `read_session` registration from the catalogue | Resolve Marketplace first; for unknown enabled registrations require both immutable boundaries without inventing a visible tool, and abort activation if the result boundary cannot be materialized |
 | New optional slice params complicate structured errors | Add explicit invalid/stale/not-found codes while retaining existing error envelope shape |
 
 ## 11. Progressive diagnostic workflow to document
@@ -813,7 +841,8 @@ The safe operator/agent workflow is:
 2. **Small compact view.** Tail a few messages or search a stable regex. Compact rows must show Pi/Anthropic tool names and bounded arguments.
 3. **Narrow with metadata.** Use message indexes, normalized statuses, and accurate chars/lines/bytes. Do not infer “small” from `blocks: 1`.
 4. **Avoid overlap.** Continue only from the returned page cursor/offset; never reread broad overlapping windows.
-5. **Slice once if necessary.** Request one result handle with a bounded cursor/range. Continue that slice only when the first excerpt is insufficient.
-6. **Stop when answered.** Verbose mode is not a discovery default, and `include_tool_results` is never permission for an unbounded body.
+5. **Slice once if necessary.** Request one result handle with a bounded cursor/range. Continue that slice only from its exact `nextCursor` and only when the first excerpt is insufficient.
+6. **Treat resource rejection as a stop signal.** After `TRANSCRIPT_WORK_LIMIT_EXCEEDED`, wait for concurrent work to drain and retry at most one small compact page; do not fan out retries or switch to broad raw reads.
+7. **Stop when answered.** Verbose mode is not a discovery default, and `include_tool_results` is never permission for an unbounded body.
 
-This workflow is viable only after compact projection is complete and accurate; guidance alone cannot compensate for blank tool calls, false size metadata, or a bypassable guard.
+This workflow is viable only after compact projection is complete and accurate; guidance alone cannot compensate for blank tool calls, false size metadata, retained whole-result corpora, or a bypassable guard.
