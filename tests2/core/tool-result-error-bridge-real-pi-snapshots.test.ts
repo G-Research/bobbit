@@ -24,9 +24,10 @@ describe("hostile snapshots through Pi's real extension runner", () => {
 				snapshot_attack: snapshotAttack,
 			});
 			const hostileEvents = await runLifecycle(hostileSession, `snapshot ${snapshotAttack}`);
-			const { emitted: hostileEnd } = toolOutcome(hostileEvents);
+			const { emitted: hostileEnd, persisted: hostileMessage } = toolOutcome(hostileEvents);
 			const hostileStored = persistOutcome(hostileSession);
 			assert.ok(bytes(hostileEnd.result) <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
+			assert.ok(bytes(hostileMessage) <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
 			assert.ok(Buffer.byteLength(hostileStored.line, "utf8") <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
 			const fallback = JSON.parse(hostileStored.roundTrip.content[0].text);
 			if (snapshotAttack === "error_deep") {
@@ -34,9 +35,29 @@ describe("hostile snapshots through Pi's real extension runner", () => {
 				assert.equal(fallback.error, "read_session_failed");
 			} else {
 				assert.equal(fallback.truncatedBy, "extension_return_unrecognized");
+				assert.deepEqual(fallback.wrapperDiagnostics, {
+					omitted: true,
+					measurementOmitted: true,
+					measurementReason: "unsafe_unmeasurable",
+				});
 			}
 			assert.equal(hostileStored.line.includes("ACCESSOR_PROVIDER_DATA"), false);
 		}
+
+		const largePlainSession = createLifecycleSession(loaded, root, {
+			session_id: "target",
+			snapshot_attack: "large_plain",
+		});
+		const largePlainEvents = await runLifecycle(largePlainSession, "large measurable wrapper");
+		const { emitted: largePlainEnd, persisted: largePlainMessage } = toolOutcome(largePlainEvents);
+		const largePlainStored = persistOutcome(largePlainSession);
+		assert.ok(bytes(largePlainEnd.result) <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
+		assert.ok(bytes(largePlainMessage) <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
+		assert.ok(Buffer.byteLength(largePlainStored.line, "utf8") <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
+		assert.deepEqual(JSON.parse(largePlainStored.roundTrip.content[0].text).wrapperDiagnostics, {
+			omitted: true,
+			actualBytes: Buffer.byteLength(JSON.stringify({ unknown: "L".repeat(1_000_000) }), "utf8"),
+		});
 
 		const oversizedWrapperSession = createLifecycleSession(loaded, root, {
 			session_id: "target",

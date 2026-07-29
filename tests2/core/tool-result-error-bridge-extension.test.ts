@@ -274,8 +274,13 @@ describe("tool result error bridge extension", () => {
 		assert.equal(parseEnvelope(textResult).messages[0].text, "text-loses");
 	});
 
-	it("fails hostile accessors and proxies closed without fabricating wrapper bytes", async () => {
+	it("fails hostile accessors and proxies closed with explicit unmeasurable diagnostics", async () => {
 		const activate = await loadGeneratedExtension();
+		const unsafeDiagnostics = {
+			omitted: true,
+			measurementOmitted: true,
+			measurementReason: "unsafe_unmeasurable",
+		};
 		for (const attack of ["accessor", "proxy"] as const) {
 			const { pi, handlers } = makePi();
 			activate(pi);
@@ -306,7 +311,7 @@ describe("tool result error bridge extension", () => {
 			const projected = parseEnvelope(result);
 			assert.equal(reads, 0, attack);
 			assert.equal(projected.truncatedBy, "extension_return_unrecognized", attack);
-			assert.deepEqual(projected.wrapperDiagnostics, { omitted: true }, attack);
+			assert.deepEqual(projected.wrapperDiagnostics, unsafeDiagnostics, attack);
 			assert.ok(finalJsonlBytes(result) <= FINAL_RESULT_MAX_BYTES, attack);
 		}
 
@@ -317,7 +322,47 @@ describe("tool result error bridge extension", () => {
 			session_id: "target",
 			limit: 1,
 		});
-		assert.deepEqual(parseEnvelope(oversized).wrapperDiagnostics, { omitted: true });
+		assert.deepEqual(parseEnvelope(oversized).wrapperDiagnostics, unsafeDiagnostics);
+	});
+
+	it("rejects malformed wrapper diagnostic unions and rebuilds one exact branch", async () => {
+		const activate = await loadGeneratedExtension();
+		const malformedDiagnostics = [
+			undefined,
+			{ omitted: true },
+			{ omitted: true, actualBytes: 7, measurementOmitted: true, measurementReason: "unsafe_unmeasurable" },
+			{ omitted: true, measurementOmitted: true },
+			{ omitted: true, measurementReason: "unsafe_unmeasurable" },
+			{ omitted: true, measurementOmitted: true, measurementReason: "unknown" },
+			{ omitted: true, actualBytes: -1 },
+		];
+		for (const wrapperDiagnostics of malformedDiagnostics) {
+			const { pi, handlers } = makePi();
+			activate(pi);
+			const envelope: any = {
+				total: 0,
+				returned: 0,
+				offsetStart: -1,
+				offsetEnd: -1,
+				messages: [],
+				partial: true,
+				truncatedBy: "extension_return_unrecognized",
+				continuationRequest: { kind: "retry", retrySameRequest: true },
+			};
+			if (wrapperDiagnostics !== undefined) envelope.wrapperDiagnostics = wrapperDiagnostics;
+			const expectedBytes = Buffer.byteLength(JSON.stringify(envelope), "utf8");
+			pi.tool({ name: "read_session" }, async () => envelope);
+
+			const result = await handlers.get("read_session")!(TARGET_CALL_ID, {
+				session_id: "target",
+				limit: 1,
+			});
+			assert.deepEqual(parseEnvelope(result).wrapperDiagnostics, {
+				omitted: true,
+				actualBytes: expectedBytes,
+			});
+			assert.ok(finalJsonlBytes(result) <= FINAL_RESULT_MAX_BYTES);
+		}
 	});
 
 	it("never emits a zero-length targeted range when one complete BMP scalar is available", async () => {
@@ -633,7 +678,10 @@ describe("tool result error bridge extension", () => {
 			limit: 10,
 			patternOmitted: true,
 		});
-		assert.equal(projected.wrapperDiagnostics.actualBytes > 1_000_000, true);
+		assert.deepEqual(projected.wrapperDiagnostics, {
+			omitted: true,
+			actualBytes: Buffer.byteLength(JSON.stringify({ unknown: large }), "utf8"),
+		});
 	});
 
 	it("repairs tampered cached bridge source before reuse", () => {

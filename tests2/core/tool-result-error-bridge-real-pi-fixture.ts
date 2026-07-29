@@ -280,6 +280,9 @@ export default function (pi) {
         });
         return { value };
       }
+      if (params.snapshot_attack === "large_plain") {
+        return { unknown: "L".repeat(1_000_000) };
+      }
       if (params.fail) return {
         content: [{ type: "text", text: JSON.stringify({
           error: "transcript_unavailable",

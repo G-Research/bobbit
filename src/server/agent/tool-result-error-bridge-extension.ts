@@ -89,7 +89,10 @@ const CONTINUATION_SCHEMA = schemaObject({
   patternOmitted: SCALAR_SCHEMA, result_handle: SCALAR_SCHEMA,
   result_cursor: SCALAR_SCHEMA, result_limit: SCALAR_SCHEMA,
 });
-const WRAPPER_DIAGNOSTICS_SCHEMA = schemaObject({ omitted: SCALAR_SCHEMA, actualBytes: SCALAR_SCHEMA });
+const WRAPPER_DIAGNOSTICS_SCHEMA = schemaObject({
+  omitted: SCALAR_SCHEMA, actualBytes: SCALAR_SCHEMA,
+  measurementOmitted: SCALAR_SCHEMA, measurementReason: SCALAR_SCHEMA,
+});
 const ENVELOPE_SCHEMA = schemaObject({
   session_id: SCALAR_SCHEMA, total: SCALAR_SCHEMA, returned: SCALAR_SCHEMA,
   offsetStart: SCALAR_SCHEMA, offsetEnd: SCALAR_SCHEMA, messages: schemaArray(MESSAGE_SCHEMA),
@@ -676,6 +679,21 @@ function validSummaryRows(messages, allowed) {
   return true;
 }
 
+function validWrapperDiagnostics(value) {
+  if (!isObject(value) || value.omitted !== true) return false;
+  const keys = Object.keys(value);
+  const hasActualBytes = hasOwn(value, "actualBytes");
+  const hasMeasurementOmitted = hasOwn(value, "measurementOmitted");
+  const hasMeasurementReason = hasOwn(value, "measurementReason");
+  if (hasActualBytes) {
+    return keys.length === 2 && isNonNegativeInteger(value.actualBytes)
+      && !hasMeasurementOmitted && !hasMeasurementReason;
+  }
+  return keys.length === 3 && hasMeasurementOmitted && hasMeasurementReason
+    && value.measurementOmitted === true
+    && value.measurementReason === "unsafe_unmeasurable";
+}
+
 function validEnvelope(value, expectedSessionId) {
   if (!isObject(value)) return false;
   if (hasOwn(value, "session_id") && (typeof value.session_id !== "string" || value.session_id !== expectedSessionId)) return false;
@@ -732,11 +750,7 @@ function validEnvelope(value, expectedSessionId) {
       && !hasOwn(value, "pageStart") && !hasOwn(value, "pageCount")
       && !hasOwn(value, "authors") && !hasOwn(value, "correlations")
       && validRetryRequest(value.continuationRequest)
-      && isObject(value.wrapperDiagnostics)
-      && Object.keys(value.wrapperDiagnostics).every((key) => key === "omitted" || key === "actualBytes")
-      && value.wrapperDiagnostics.omitted === true
-      && (!hasOwn(value.wrapperDiagnostics, "actualBytes")
-        || isNonNegativeInteger(value.wrapperDiagnostics.actualBytes));
+      && validWrapperDiagnostics(value.wrapperDiagnostics);
   }
   return false;
 }
@@ -1131,10 +1145,13 @@ function preserveUpstreamCompletion(candidate, messages, projection) {
       }
     }
     if (candidate.truncatedBy === "extension_return_unrecognized") {
-      envelope.wrapperDiagnostics = { omitted: true };
-      if (isNonNegativeInteger(candidate.wrapperDiagnostics.actualBytes)) {
-        envelope.wrapperDiagnostics.actualBytes = candidate.wrapperDiagnostics.actualBytes;
-      }
+      envelope.wrapperDiagnostics = isNonNegativeInteger(candidate.wrapperDiagnostics.actualBytes)
+        ? { omitted: true, actualBytes: candidate.wrapperDiagnostics.actualBytes }
+        : {
+          omitted: true,
+          measurementOmitted: true,
+          measurementReason: "unsafe_unmeasurable",
+        };
     }
   }
   return envelope;
@@ -1212,8 +1229,13 @@ function retryRequest(params) {
 function unrecognizedResult(result, params, actualBytesOverride) {
   const measuredBytes = actualBytesOverride === null ? undefined
     : (isNonNegativeInteger(actualBytesOverride) ? actualBytesOverride : exactSerializedByteLength(result));
-  const wrapperDiagnostics = { omitted: true };
-  if (isNonNegativeInteger(measuredBytes)) wrapperDiagnostics.actualBytes = measuredBytes;
+  const wrapperDiagnostics = isNonNegativeInteger(measuredBytes)
+    ? { omitted: true, actualBytes: measuredBytes }
+    : {
+      omitted: true,
+      measurementOmitted: true,
+      measurementReason: "unsafe_unmeasurable",
+    };
   const envelope = {
     total: 0,
     returned: 0,
