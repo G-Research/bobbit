@@ -32,6 +32,7 @@ const { SessionManager: BaseSessionManager, switchSessionPathForAgent } = await 
 const { executePlan } = await import("../../src/server/agent/session-setup.ts");
 const { initPromptDirs } = await import("../../src/server/agent/system-prompt.ts");
 const { loadOrCreateToken } = await import("../../src/server/auth/token.ts");
+const { applyRuntimeSessionModelSelection } = await import("../../src/server/ws/runtime-model-selection.ts");
 
 const FIXTURE_MODEL_PROVIDER = "orphan-boundary-mock";
 const FIXTURE_MODEL_ID = "orphan-boundary-model";
@@ -1036,6 +1037,78 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(oldBridge.prompt).toHaveBeenCalledTimes(1);
 		expect(oldBridge.prompt).toHaveBeenCalledWith("intent survives rollback", undefined);
 		expect(original.promptQueue.isEmpty).toBe(true);
+	});
+
+	it("does not let a failed role replacement roll durable tuple A over a concurrent runtime selection of tuple B", async () => {
+		invalidateModelCache();
+		const file = hostTranscript("assign-role-runtime-selection-race");
+		const replacementStart = deferred<void>();
+		const replacement = recordingBridge(() => {}, {
+			modelProvider: FIXTURE_MODEL_PROVIDER,
+			modelId: FIXTURE_MODEL_ID,
+			thinkingLevel: FIXTURE_THINKING_LEVEL,
+		});
+		replacement.start = vi.fn(() => replacementStart.promise);
+		replacement.stop = vi.fn(async () => {});
+		const ps = persisted("assign-role-runtime-selection-race", file);
+		const store = mutableStore(ps);
+		registerRpcBridgeFactory(() => replacement);
+		const manager: any = new SessionManager();
+		manager._testStore = store;
+		managers.push(manager);
+		const oldBridge = recordingBridge(() => {}, {
+			modelProvider: FIXTURE_MODEL_PROVIDER,
+			modelId: FIXTURE_MODEL_ID,
+			thinkingLevel: FIXTURE_THINKING_LEVEL,
+		});
+		oldBridge.stop = vi.fn(async () => {});
+		const original = liveSession(ps.id, oldBridge, {
+			unsubscribe: vi.fn(),
+			spawnPinnedModel: `${FIXTURE_MODEL_PROVIDER}/${FIXTURE_MODEL_ID}`,
+			spawnPinnedThinkingLevel: FIXTURE_THINKING_LEVEL,
+		});
+		manager.sessions.set(ps.id, original);
+
+		// assignRole has captured durable tuple A and is preparing its replacement,
+		// but the original bridge remains live until the two-phase swap commits.
+		const assignment = manager.assignRole(ps.id, {
+			name: "replacement-role",
+			promptTemplate: "Replacement role",
+			accessory: "replacement-accessory",
+		});
+		await vi.waitFor(() => expect(replacement.start).toHaveBeenCalledTimes(1));
+
+		const tupleB = {
+			provider: "anthropic",
+			id: "claude-opus-5",
+			thinkingLevel: "xhigh" as const,
+		};
+		await expect(applyRuntimeSessionModelSelection(
+			manager,
+			original,
+			tupleB.provider,
+			tupleB.id,
+			tupleB.thinkingLevel,
+			preferencesStore,
+		)).resolves.toEqual(tupleB);
+		expect({
+			provider: ps.modelProvider,
+			id: ps.modelId,
+			thinkingLevel: ps.effectiveThinkingLevel,
+		}).toEqual(tupleB);
+
+		// Fail after tuple B has committed. The role rollback must not replay its
+		// stale snapshot of tuple A over that newer verified durable selection.
+		replacementStart.reject(new Error("fixture staged role start failed after tuple B commit"));
+		await expect(assignment).rejects.toThrow("fixture staged role start failed after tuple B commit");
+
+		expect(manager.sessions.get(ps.id)).toBe(original);
+		expect({
+			provider: ps.modelProvider,
+			id: ps.modelId,
+			thinkingLevel: ps.effectiveThinkingLevel,
+		}, "SELECTION_REPLACEMENT_RACE: failed role replacement restored stale tuple A over committed tuple B")
+			.toEqual(tupleB);
 	});
 
 	it("serializes concurrent assignRole replacements and leaves only the final bridge live", async () => {
