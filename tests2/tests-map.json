@@ -84,6 +84,15 @@
       }
     },
     {
+      "path": "tests2/core/tool-result-error-bridge-pagination-leaks.test.ts",
+      "reason": "Focused generated immutable-boundary regressions for filtered negative-tail continuation coordinates, four-mode thinking/error alias canonicalization, and truthful ordinary versus transport-shortened targeted result-slice diagnostics.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/tool-result-error-bridge-real-pi-snapshots.test.ts",
       "reason": "Real Pi 0.81 AgentSession and SessionManager lifecycle regression proving deeply nested, sparse, cyclic, DAG, non-plain, and frozen hostile result targets become bounded safe snapshots without invoking provider accessors or serializers. Sharded from the lifecycle matrix for comfortable tier-1 per-file wall-budget headroom.",
       "execution": {
