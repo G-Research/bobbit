@@ -2963,8 +2963,8 @@ function summaryRow(
 ): AgentTranscriptMessage {
 	// Provider metadata is deliberately excluded. With all numeric values bounded
 	// by the charged raw transcript, this row plus its page continuation fits the
-	// minimum accepted 512-byte envelope even when the source strings require
-	// worst-case JSON escaping.
+	// minimum accepted `READ_SESSION_AGENT_ENVELOPE_MIN_BYTES` envelope even when
+	// the source strings require worst-case JSON escaping.
 	return {
 		index: message.index,
 		role: "unknown",

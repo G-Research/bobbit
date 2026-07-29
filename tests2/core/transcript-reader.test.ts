@@ -1992,6 +1992,107 @@ describe("transcript-reader / agent timestamp budgets", () => {
 		);
 	});
 
+	it("refits worst-escaping targeted slices into a compact transport continuation", async () => {
+		const resultName = "\0".repeat(128);
+		const body = "0123456789abcdef".repeat(2048);
+		const text = JSON.stringify({
+			type: "message",
+			message: {
+				role: "toolResult",
+				toolCallId: "call-compact-refit",
+				name: resultName,
+				status: "error",
+				content: body,
+			},
+		}) + "\n";
+		const metadataOptions = {
+			...memoryTranscript(text),
+			projection: "agent" as const,
+			sessionId: "compact-result-slice-refit",
+		};
+		const page = await readTranscript({ limit: 1, includeToolResults: false }, metadataOptions);
+		const metadata = (page.messages[0] as any).toolResults[0];
+		assert.equal(metadata.name, resultName);
+		assert.equal(metadata.status, "error");
+		assert.deepEqual(metadata.size, { type: "string", chars: body.length, lines: 1, bytes: body.length });
+
+		const sliceOptions = {
+			...metadataOptions,
+			serializedBudgetBytes: READ_SESSION_AGENT_ENVELOPE_MIN_BYTES,
+		};
+		const first = await readTranscript({
+			resultHandle: metadata.handle,
+			resultCursor: 0,
+			resultLimit: 8192,
+		}, sliceOptions);
+		assert.ok(Buffer.byteLength(JSON.stringify(first), "utf8") <= READ_SESSION_AGENT_ENVELOPE_MIN_BYTES);
+		assert.equal(first.returned, 1);
+		assert.equal(first.offsetStart, 0);
+		assert.equal(first.offsetEnd, 0);
+		const firstRow = first.messages[0] as any;
+		const firstResult = firstRow.toolResults[0];
+		assert.equal(firstRow.role, "unknown", "the minimum budget must force the compact row refit");
+		assert.equal(Object.prototype.hasOwnProperty.call(firstRow, "ts"), false);
+		assert.equal(Object.prototype.hasOwnProperty.call(firstRow, "text"), false);
+		assert.equal(first.authors, undefined);
+		assert.equal(first.correlations, undefined);
+		assert.deepEqual(Object.keys(firstResult).sort(), [
+			"excerpt", "handle", "name", "omitted", "ref", "size", "status",
+		]);
+		assert.equal(firstResult.ref, metadata.ref);
+		assert.equal(firstResult.name, resultName);
+		assert.equal(firstResult.status, "error");
+		assert.deepEqual(firstResult.size, metadata.size);
+		assert.equal(firstResult.omitted, false);
+		assert.equal(firstResult.handle, metadata.handle);
+		assert.equal(firstResult.excerpt.start, 0);
+		assert.ok(firstResult.excerpt.end > 0);
+		assert.ok(firstResult.excerpt.end < 8192, "the long requested slice must be transport-partial");
+		assert.equal(firstResult.excerpt.text, body.slice(0, firstResult.excerpt.end));
+		assert.equal(firstResult.excerpt.complete, false);
+		assert.equal(firstResult.excerpt.nextCursor, firstResult.excerpt.end);
+		assert.equal(first.partial, true);
+		assert.equal(first.truncatedBy, "transport_budget");
+		const firstContinuation = {
+			kind: "result_slice",
+			result_handle: metadata.handle,
+			result_cursor: firstResult.excerpt.end,
+			result_limit: 8192,
+		} satisfies Extract<
+			NonNullable<ReadTranscriptEnvelope["continuationRequest"]>,
+			{ kind: "result_slice" }
+		>;
+		assert.deepEqual(first.continuationRequest, firstContinuation);
+
+		const second = await readTranscript({
+			resultHandle: firstContinuation.result_handle,
+			resultCursor: firstContinuation.result_cursor,
+			resultLimit: firstContinuation.result_limit,
+		}, sliceOptions);
+		assert.ok(Buffer.byteLength(JSON.stringify(second), "utf8") <= READ_SESSION_AGENT_ENVELOPE_MIN_BYTES);
+		const secondRow = second.messages[0] as any;
+		const secondResult = secondRow.toolResults[0];
+		assert.equal(secondRow.role, "unknown");
+		assert.equal(secondResult.ref, firstResult.ref);
+		assert.equal(secondResult.name, firstResult.name);
+		assert.equal(secondResult.status, firstResult.status);
+		assert.deepEqual(secondResult.size, firstResult.size);
+		assert.equal(secondResult.omitted, false);
+		assert.equal(secondResult.handle, firstResult.handle);
+		assert.equal(secondResult.excerpt.start, firstContinuation.result_cursor);
+		assert.ok(secondResult.excerpt.end > secondResult.excerpt.start);
+		assert.equal(
+			secondResult.excerpt.text,
+			body.slice(secondResult.excerpt.start, secondResult.excerpt.end),
+			"typed continuation must return the exact next UTF-16 slice",
+		);
+		assert.equal(
+			firstResult.excerpt.text + secondResult.excerpt.text,
+			body.slice(0, secondResult.excerpt.end),
+			"continued transport slices must neither overlap nor skip content",
+		);
+	});
+
 	it("keeps minimum-budget targeted slices canonical across every Unicode continuation boundary", async () => {
 		const controls = Array.from({ length: 32 }, (_, index) => String.fromCharCode(index)).join("");
 		const body = "A😀e\u0301\r\nZ";
@@ -2071,17 +2172,16 @@ describe("transcript-reader / agent timestamp budgets", () => {
 			return projected;
 		};
 
-		const expectedRanges = [[0, 1], [1, 3], [3, 5], [5, 6], [6, 7], [7, 8]] as const;
-		const requestedLimits = [1, 1, 2, 1, 1, 1] as const;
+		const continuationLengths = [1, 2, 2, 1, 1, 1] as const;
 		let cursor = 0;
 		let reconstructed = "";
-		for (let index = 0; index < expectedRanges.length; index++) {
-			const [start, end] = expectedRanges[index];
-			assert.equal(cursor, start, "continuations must neither overlap nor skip UTF-16 units");
+		for (const continuationLength of continuationLengths) {
+			const start = cursor;
+			const end = start + continuationLength;
 			const envelope = await readTranscript({
 				resultHandle: metadata.handle,
-				resultCursor: cursor,
-				resultLimit: requestedLimits[index],
+				resultCursor: start,
+				resultLimit: continuationLength,
 			}, sliceOptions);
 			const projected = assertCanonicalSlice(envelope, {
 				start,
@@ -2089,15 +2189,28 @@ describe("transcript-reader / agent timestamp budgets", () => {
 				text: body.slice(start, end),
 				complete: end === body.length,
 			});
-			if (start === 1) {
-				assert.equal(requestedLimits[index], 1);
-				assert.equal(end - start, 2, "result_limit:1 must return one complete astral scalar");
-			}
+			assert.equal(
+				projected.excerpt.end - projected.excerpt.start,
+				continuationLength,
+				"each requested UTF-16 continuation length must be exact",
+			);
 			reconstructed += projected.excerpt.text;
 			cursor = projected.excerpt.nextCursor ?? projected.excerpt.end;
 		}
 		assert.equal(reconstructed, body);
 		assert.equal(cursor, body.length);
+
+		const splitSurrogateLimit = await readTranscript({
+			resultHandle: metadata.handle,
+			resultCursor: 1,
+			resultLimit: 1,
+		}, sliceOptions);
+		assertCanonicalSlice(splitSurrogateLimit, {
+			start: 1,
+			end: 3,
+			text: "😀",
+			complete: false,
+		});
 
 		await assert.rejects(
 			readTranscript({
