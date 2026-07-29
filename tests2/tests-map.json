@@ -58,7 +58,43 @@
     },
     {
       "path": "tests2/core/tool-result-error-bridge-real-pi.test.ts",
-      "reason": "Real Pi 0.81 AgentSession and SessionManager lifecycle regression proving every post-result extension phase is re-bounded before agent state and JSONL persistence, including hostile listener mutations, snapshots, provider-only errors, near-ceiling results, and oversized call IDs. Split from the runner-focused cases so the real lifecycle coverage remains safely within the tier-1 per-file wall budget under contention.",
+      "reason": "Real Pi 0.81 AgentSession and SessionManager lifecycle regression proving canonical success and a throwing tool_result mutator are re-bounded identically across emitted events, agent state, SessionManager round trips, and JSONL persistence. The remaining lifecycle scenario families use the same shared fixture in focused files for comfortable tier-1 per-file wall-budget headroom.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/tool-result-error-bridge-real-pi-listeners.test.ts",
+      "reason": "Real Pi 0.81 AgentSession and SessionManager lifecycle regression proving late tool_execution_end/message_end mutations and hostile post-chain accessors are re-bounded without evaluating attacker-controlled getters. Sharded from the lifecycle matrix for comfortable tier-1 per-file wall-budget headroom.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/tool-result-error-bridge-real-pi-snapshots.test.ts",
+      "reason": "Real Pi 0.81 AgentSession and SessionManager lifecycle regression proving deeply nested, sparse, cyclic, DAG, non-plain, and frozen hostile result targets become bounded safe snapshots without invoking provider accessors or serializers. Sharded from the lifecycle matrix for comfortable tier-1 per-file wall-budget headroom.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/tool-result-error-bridge-real-pi-errors.test.ts",
+      "reason": "Real Pi 0.81 AgentSession and SessionManager lifecycle regression proving initial, downstream, provider-only, accessor-mutated, and hostile-toJSON result errors retain canonical status while provider metadata is scrubbed before state and JSONL persistence. Sharded from the lifecycle matrix for comfortable tier-1 per-file wall-budget headroom.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/tool-result-error-bridge-real-pi-bounds.test.ts",
+      "reason": "Real Pi 0.81 AgentSession and SessionManager lifecycle regression proving near-ceiling output keeps useful capacity and provider call IDs at, above, and far beyond correlation snapshot limits remain bounded and consistent across events, state, and JSONL persistence. Sharded from the lifecycle matrix for comfortable tier-1 per-file wall-budget headroom.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
