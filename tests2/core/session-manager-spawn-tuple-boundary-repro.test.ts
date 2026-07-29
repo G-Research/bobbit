@@ -698,23 +698,27 @@ describe("actual SessionManager spawn tuple boundaries", () => {
 		const durableBefore = durableTupleBytes(store.get(sessionId));
 		tracker.reset();
 		session.status = "streaming";
-		const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
 
-		await manager.forceAbort(sessionId, 1);
-		const loggedFailure = errorLog.mock.calls
-			.flatMap((args) => args)
-			.map((value) => value instanceof Error ? value.message : String(value))
-			.join(" ");
+		let failure: unknown;
+		try {
+			await manager.forceAbort(sessionId, 1);
+		} catch (error) {
+			failure = error;
+		}
+		const failureMessage = failure instanceof Error ? failure.message : failure === undefined ? undefined : String(failure);
 
 		assert.deepEqual(
 			{
-				actionableUnavailableFailure: isActionableUnavailableFailure(loggedFailure),
+				actionableUnavailableFailure: isActionableUnavailableFailure(failureMessage),
+				status: manager.getSession(sessionId)?.status,
 				replacementConstructions: tracker.options.length,
 				replacementStarts: tracker.getStartCount(),
 				durableTupleBytes: durableTupleBytes(store.get(sessionId)),
 			},
 			{
 				actionableUnavailableFailure: true,
+				status: "terminated",
 				replacementConstructions: 0,
 				replacementStarts: 0,
 				durableTupleBytes: durableBefore,

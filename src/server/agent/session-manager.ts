@@ -12383,6 +12383,10 @@ export class SessionManager {
 			session.lastKeylessPromptAuthorEnd = undefined;
 			console.error(`[session-manager] Failed to restart agent after force abort:`, err);
 			broadcastStatus(session, "terminated");
+			// The old bridge is dead and no verified replacement exists. Keep the
+			// terminated capsule authoritative, but let API/WS/orchestration callers
+			// report the actionable recovery failure instead of claiming Stop recovered.
+			throw err;
 		}
 	}
 

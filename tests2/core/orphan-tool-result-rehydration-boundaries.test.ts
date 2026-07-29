@@ -1990,7 +1990,9 @@ describe("executable SessionManager rehydration boundaries", () => {
 		manager.sessions.set(ps.id, original);
 		vi.spyOn(console, "error").mockImplementation(() => {});
 
-		await manager.forceAbort(ps.id, 5);
+		await expect(manager.forceAbort(ps.id, 5)).rejects.toThrow(
+			"persisted conversation history is unavailable",
+		);
 
 		expect(switches).toEqual([]);
 		expect(replacement.stop).toHaveBeenCalledTimes(1);
@@ -2477,7 +2479,9 @@ describe("executable SessionManager rehydration boundaries", () => {
 		original.promptQueue.enqueue("queued user intent");
 		manager.sessions.set(ps.id, original);
 
-		await manager.forceAbort(ps.id, 5);
+		await expect(manager.forceAbort(ps.id, 5)).rejects.toThrow(
+			"sandbox realm is unavailable",
+		);
 
 		expect(manager.applySandboxWiring).toHaveBeenCalledTimes(1);
 		expect(replacement.start).not.toHaveBeenCalled();
@@ -2515,7 +2519,9 @@ describe("executable SessionManager rehydration boundaries", () => {
 		original.promptQueue.enqueue("queued user intent");
 		manager.sessions.set(ps.id, original);
 
-		await manager.forceAbort(ps.id, 5);
+		await expect(manager.forceAbort(ps.id, 5)).rejects.toThrow(
+			failure === "exception" ? "fixture switch timeout" : "fixture switch rejected",
+		);
 
 		expect(timeouts).toEqual([timeout]);
 		expect(stop).toHaveBeenCalledTimes(1);

@@ -15595,8 +15595,15 @@ async function handleApiRoute(
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		if (session.status !== "streaming") { json({ ok: true, status: session.status }); return; }
-		await sessionManager.forceAbort(id);
-		json({ ok: true, status: "idle" });
+		try {
+			await sessionManager.forceAbort(id);
+			json({ ok: true, status: sessionManager.getSession(id)?.status ?? "terminated" });
+		} catch (err) {
+			jsonError(500, err, {
+				ok: false,
+				status: sessionManager.getSession(id)?.status ?? "terminated",
+			});
+		}
 		return;
 	}
 
