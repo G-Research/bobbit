@@ -94,7 +94,7 @@
     },
     {
       "path": "tests2/core/tool-result-error-bridge-real-pi-snapshots.test.ts",
-      "reason": "Real Pi 0.81 AgentSession and SessionManager lifecycle regression proving deeply nested, sparse, cyclic, DAG, non-plain, and frozen hostile result targets become bounded safe snapshots without invoking provider accessors or serializers. Sharded from the lifecycle matrix for comfortable tier-1 per-file wall-budget headroom.",
+      "reason": "Real Pi 0.81 AgentSession and SessionManager lifecycle regression proving valid text envelopes are recovered before multi-megabyte wrapper-only siblings, while deeply nested, sparse, cyclic, DAG, non-plain, and frozen hostile result targets become bounded safe snapshots without invoking provider accessors or serializers. Sharded from the lifecycle matrix for comfortable tier-1 per-file wall-budget headroom.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -139,7 +139,7 @@
     },
     {
       "path": "tests2/core/tool-result-error-bridge-real-pi-idempotency.test.ts",
-      "reason": "Real Pi 0.81 loadExtensions and ExtensionRunner regression proving duplicate result boundaries always produce an independent immutable canonical snapshot after the complete listener chain. Split into a focused file to remain within the tier-1 per-file wall budget under contention.",
+      "reason": "Real Pi 0.81 loadExtensions and ExtensionRunner regression proving duplicate result boundaries always produce an independent immutable canonical snapshot after the complete listener chain without invoking invocation-parameter accessors. Split into a focused file to remain within the tier-1 per-file wall budget under contention.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
