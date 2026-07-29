@@ -200,13 +200,13 @@ async function exerciseAutoSelect(options: {
 	spawnPinnedThinkingLevel?: string;
 	explicitRoleAssignment?: boolean;
 	initialBound?: { provider: string; id: string; thinkingLevel?: string };
-	initialDurable?: { provider: string; id: string; thinkingLevel: string };
+	initialDurable?: { provider: string; id: string; thinkingLevel: string } | null;
 }): Promise<{
 	error: unknown;
 	setModelCalls: ModelPair[];
 	setThinkingCalls: string[];
 	persisted: Array<Record<string, unknown>>;
-	durable: { provider: string; id: string; thinkingLevel: string };
+	durable: { provider: string; id: string; thinkingLevel: string } | undefined;
 	modelFiles: string[];
 	broadcastModels: Array<{ provider: string; id: string }>;
 	broadcastTuples: Array<{ provider: string; id: string; thinkingLevel: string | undefined }>;
@@ -216,28 +216,30 @@ async function exerciseAutoSelect(options: {
 	const setThinkingCalls: string[] = [];
 	const persisted: Array<Record<string, unknown>> = [];
 	const modelFiles: string[] = [];
-	const initialDurable = options.initialDurable ?? { provider: "anthropic", id: "durable-model", thinkingLevel: "high" };
-	let durable = { ...initialDurable };
+	const defaultDurable = { provider: "anthropic", id: "durable-model", thinkingLevel: "high" };
+	let durable = options.initialDurable === null
+		? undefined
+		: { ...(options.initialDurable ?? defaultDurable) };
 	let bound = {
-		provider: options.initialBound?.provider ?? initialDurable.provider,
-		id: options.initialBound?.id ?? initialDurable.id,
-		thinkingLevel: options.initialBound?.thinkingLevel ?? initialDurable.thinkingLevel,
+		provider: options.initialBound?.provider ?? durable?.provider ?? "unset",
+		id: options.initialBound?.id ?? durable?.id ?? "unset",
+		thinkingLevel: options.initialBound?.thinkingLevel ?? durable?.thinkingLevel ?? "medium",
 	};
 	const failModels = new Set(options.failModels ?? []);
 	const failThinkingLevels = new Set(options.failThinkingLevels ?? []);
 	const client = { messages: [] as any[] };
 	const store = {
-		get: () => ({
+		get: () => durable ? {
 			modelProvider: durable.provider,
 			modelId: durable.id,
 			effectiveThinkingLevel: durable.thinkingLevel,
-		}),
+		} : undefined,
 		update: (_sessionId: string, update: Record<string, unknown>) => {
 			persisted.push(update);
 			durable = {
-				provider: typeof update.modelProvider === "string" ? update.modelProvider : durable.provider,
-				id: typeof update.modelId === "string" ? update.modelId : durable.id,
-				thinkingLevel: typeof update.effectiveThinkingLevel === "string" ? update.effectiveThinkingLevel : durable.thinkingLevel,
+				provider: typeof update.modelProvider === "string" ? update.modelProvider : durable?.provider ?? "",
+				id: typeof update.modelId === "string" ? update.modelId : durable?.id ?? "",
+				thinkingLevel: typeof update.effectiveThinkingLevel === "string" ? update.effectiveThinkingLevel : durable?.thinkingLevel ?? "medium",
 			};
 		},
 	};
@@ -770,7 +772,7 @@ describe("controlled model fallback policy — session auto-selection", () => {
 		assert.deepEqual(result.modelFiles, ["openai/fallback-session"]);
 	});
 
-	it("re-clamps raw explicit-role thinking against the model that actually wins controlled fallback", async () => {
+	it("re-clamps a fresh explicit role's raw thinking override against the model that wins controlled fallback", async () => {
 		const result = await exerciseAutoSelect({
 			prefs: {
 				allowSessionModelFallback: true,
@@ -779,7 +781,36 @@ describe("controlled model fallback policy — session auto-selection", () => {
 			roleModel: "openai/dead-fallback",
 			roleThinking: "xhigh",
 			spawnPinnedModel: "openai/dead-fallback",
-			// The role's xhigh request was clamped for the failed pinned model.
+			// The role's xhigh request was provisionally clamped for the failed model.
+			spawnPinnedThinkingLevel: "high",
+			initialDurable: null,
+			initialBound: { provider: "unset", id: "unset", thinkingLevel: "high" },
+		});
+
+		assert.equal(result.error, undefined);
+		assert.deepEqual(result.setModelCalls, [["anthropic", "claude-opus-5"]]);
+		assert.deepEqual(
+			result.setThinkingCalls,
+			["xhigh"],
+			"FRESH_ROLE_FALLBACK_REUSED_THINKING_CLAMPED_FOR_FAILED_MODEL",
+		);
+		assert.deepEqual(result.durable, {
+			provider: "anthropic",
+			id: "claude-opus-5",
+			thinkingLevel: "xhigh",
+		});
+	});
+
+	it("re-clamps a staged explicit role's raw thinking override against the model that wins controlled fallback", async () => {
+		const result = await exerciseAutoSelect({
+			prefs: {
+				allowSessionModelFallback: true,
+				"default.sessionModel": "anthropic/claude-opus-5",
+			},
+			roleModel: "openai/dead-fallback",
+			roleThinking: "xhigh",
+			spawnPinnedModel: "openai/dead-fallback",
+			// The role's xhigh request was provisionally clamped for the failed model.
 			spawnPinnedThinkingLevel: "high",
 			explicitRoleAssignment: true,
 			initialBound: { provider: "unset", id: "unset", thinkingLevel: "high" },
@@ -790,10 +821,41 @@ describe("controlled model fallback policy — session auto-selection", () => {
 		assert.deepEqual(
 			result.setThinkingCalls,
 			["xhigh"],
-			"EXPLICIT_ROLE_FALLBACK_REUSED_THINKING_CLAMPED_FOR_FAILED_MODEL",
+			"STAGED_ROLE_FALLBACK_REUSED_THINKING_CLAMPED_FOR_FAILED_MODEL",
 		);
 		assert.equal(result.spawnPinnedThinkingLevel, "xhigh");
 		assert.deepEqual(result.persisted, [], "a staged explicit role must remain side-effect-free before lifecycle commit");
+	});
+
+	it("re-clamps raw durable thinking when a staged role without a thinking override falls back", async () => {
+		const result = await exerciseAutoSelect({
+			prefs: {
+				allowSessionModelFallback: true,
+				"default.sessionModel": "anthropic/claude-opus-5",
+			},
+			roleModel: "openai/dead-fallback",
+			spawnPinnedModel: "openai/dead-fallback",
+			// Durable xhigh was provisionally clamped for the failed role model.
+			spawnPinnedThinkingLevel: "high",
+			explicitRoleAssignment: true,
+			initialDurable: { provider: "anthropic", id: "durable-model", thinkingLevel: "xhigh" },
+			initialBound: { provider: "unset", id: "unset", thinkingLevel: "high" },
+		});
+
+		assert.equal(result.error, undefined);
+		assert.deepEqual(result.setModelCalls, [["anthropic", "claude-opus-5"]]);
+		assert.deepEqual(
+			result.setThinkingCalls,
+			["xhigh"],
+			"STAGED_ROLE_FALLBACK_DISCARDED_RAW_DURABLE_THINKING",
+		);
+		assert.equal(result.spawnPinnedThinkingLevel, "xhigh");
+		assert.deepEqual(result.persisted, [], "a staged fallback must not advance durability before lifecycle commit");
+		assert.deepEqual(result.durable, {
+			provider: "anthropic",
+			id: "durable-model",
+			thinkingLevel: "xhigh",
+		});
 	});
 
 	it("rejects a hidden-provider role fallback before mutating any observable state", async () => {

@@ -9044,6 +9044,25 @@ export class SessionManager {
 			session.spawnPinnedThinkingLevel = effectiveThinking;
 			verifiedSpawnTuple = tuple;
 		};
+		// A controlled fallback changes the model against which thinking must be
+		// clamped. Choose the raw authority for this setup context before looking at
+		// the provisional spawn pin, which was clamped for the model that just failed.
+		const resolveControlledFallbackThinking = () => {
+			const persisted = this.resolveStoreForSession(session.id).get(session.id);
+			const roleThinking = isKnownThinkingLevel(this.resolveRoleThinkingLevel(session));
+			const durableThinking = persisted?.modelProvider && persisted?.modelId
+				? isKnownThinkingLevel(persisted.effectiveThinkingLevel)
+				: undefined;
+			const defaultThinking = isKnownThinkingLevel(
+				this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined,
+			);
+			const provisionalThinking = isKnownThinkingLevel(session.spawnPinnedThinkingLevel);
+			if (Reflect.get(session, "_deferVerifiedTupleCommit") === true) {
+				return roleThinking ?? durableThinking ?? defaultThinking ?? provisionalThinking ?? "medium";
+			}
+			if (durableThinking) return durableThinking;
+			return roleThinking ?? defaultThinking ?? provisionalThinking ?? "medium";
+		};
 
 		// Spawn-pinned models are explicit selections too (restore/respawn persisted
 		// model, role/default pin from initial setup, or caller-supplied initialModel).
@@ -9089,13 +9108,10 @@ export class SessionManager {
 						await applyModelString(session.rpcClient, currentFallbackSessionModel, {
 							contextLabel: "default.sessionModel fallback",
 						});
-						// A staged assignRole pin already carries thinking clamped for the
-						// failed role model. Re-clamp the raw explicit role request against
-						// the fallback that actually won; restore/respawn pins remain durable-first.
-						const explicitRoleFallbackThinking = Reflect.get(session, "_deferVerifiedTupleCommit") === true
-							? isKnownThinkingLevel(this.resolveRoleThinkingLevel(session))
-							: undefined;
-						await commitExactSpawnTuple(currentFallbackSessionModel, explicitRoleFallbackThinking);
+						await commitExactSpawnTuple(
+							currentFallbackSessionModel,
+							resolveControlledFallbackThinking(),
+						);
 						console.log(`[session-manager] Controlled fallback selected default.sessionModel "${currentFallbackSessionModel}" for session ${session.id} after spawn-pinned model "${pinnedModel}" failed`);
 						return verifiedSpawnTuple;
 					} catch (fallbackErr) {
@@ -9154,7 +9170,10 @@ export class SessionManager {
 							contextLabel: "default.sessionModel fallback",
 							skipSetModel: spawnPinned && normalizeAigwModelString(session.spawnPinnedModel || "") === currentFallbackSessionModel,
 						});
-						await commitExactSpawnTuple(currentFallbackSessionModel);
+						await commitExactSpawnTuple(
+							currentFallbackSessionModel,
+							resolveControlledFallbackThinking(),
+						);
 						console.log(`[session-manager] Controlled fallback selected default.sessionModel "${currentFallbackSessionModel}" for session ${session.id} after role model "${roleModel}" failed`);
 						return verifiedSpawnTuple;
 					} catch (fallbackErr) {
@@ -10059,12 +10078,16 @@ export class SessionManager {
 				await this.switchSessionForRehydration(rpcClient, rolePs, agentSessionFile);
 			}
 			verifiedReplacementTuple = await this.tryAutoSelectModel(stagedSession);
-			try {
-				verifiedReplacementTuple = await this.tryApplyDefaultThinkingLevel(stagedSession);
-			} catch (err) {
-				if (respawnPersisted?.effectiveThinkingLevel !== undefined) throw err;
-				verifiedReplacementTuple = undefined;
-				console.warn(`[session-manager] Legacy session ${id} could not verify effective thinking during role replacement:`, err);
+			// tryAutoSelectModel verifies a complete tuple. Only use the standalone
+			// thinking helper when model selection produced no tuple; re-reading an
+			// already-complete legacy candidate can fail and must not discard it.
+			if (!verifiedReplacementTuple) {
+				try {
+					verifiedReplacementTuple = await this.tryApplyDefaultThinkingLevel(stagedSession);
+				} catch (err) {
+					if (respawnPersisted?.effectiveThinkingLevel !== undefined) throw err;
+					console.warn(`[session-manager] Legacy session ${id} could not verify effective thinking during role replacement:`, err);
+				}
 			}
 			if (respawnPersisted?.effectiveThinkingLevel !== undefined && !verifiedReplacementTuple) {
 				throw new Error(`Cannot assign role for session ${id}: replacement model tuple was not verified`);
