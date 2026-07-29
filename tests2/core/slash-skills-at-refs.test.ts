@@ -15,10 +15,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-let cwd: string;
+const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "slash-skills-at-refs-test-"));
 
 beforeAll(() => {
-	cwd = fs.mkdtempSync(path.join(os.tmpdir(), "slash-skills-at-refs-test-"));
 	const skillRoot = path.join(cwd, ".claude", "skills", "withref");
 	fs.mkdirSync(skillRoot, { recursive: true });
 	fs.mkdirSync(path.join(skillRoot, "references"), { recursive: true });

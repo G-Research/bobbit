@@ -463,7 +463,7 @@ describe("finding #3 — server-scope skill pack resolves for a non-default proj
 		// WITHOUT the market context, serverBase defaults to the project cwd, which
 		// holds no market packs — so the server-scope skill must NOT leak in. This
 		// is exactly why the bug existed before the serverBase wiring landed.
-		const unwired = discoverSlashSkills(projectBase, undefined, { globalUserBase, projectBase });
+		const unwired = discoverSlashSkills(projectBase, undefined, { serverBase: projectBase, globalUserBase, projectBase });
 		assert.equal(unwired.find((s) => s.name === "srv-scope-skill"), undefined,
 			"without serverBase wiring the server-scope skill must not resolve (proves the wiring is load-bearing)");
 	});
