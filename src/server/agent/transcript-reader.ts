@@ -190,7 +190,8 @@ export type ReadTranscriptError =
 	| "RESULT_NOT_FOUND"
 	| "STALE_RESULT_HANDLE"
 	| "INVALID_RESULT_CURSOR"
-	| "INVALID_RESULT_LIMIT";
+	| "INVALID_RESULT_LIMIT"
+	| "TRANSCRIPT_WORK_LIMIT_EXCEEDED";
 
 export class TranscriptReaderError extends Error {
 	code: ReadTranscriptError;
@@ -1215,6 +1216,25 @@ export interface TranscriptAuthorResolutionContext extends NormalizeVisibleMessa
 	sidecarEntries?: PromptAuthorBinding[];
 }
 
+export interface TranscriptProjectionWorkMetricsForTests {
+	callArgumentsCanonicalized: number;
+	resultBodiesCanonicalized: number;
+	resultBodiesHashed: number;
+	canonicalResultUnits: number;
+	peakRetainedCanonicalResultUnits: number;
+}
+
+/** Deterministic instrumentation seam; production callers do not need this. */
+export function createTranscriptProjectionWorkMetricsForTests(): TranscriptProjectionWorkMetricsForTests {
+	return {
+		callArgumentsCanonicalized: 0,
+		resultBodiesCanonicalized: 0,
+		resultBodiesHashed: 0,
+		canonicalResultUnits: 0,
+		peakRetainedCanonicalResultUnits: 0,
+	};
+}
+
 export interface ReadTranscriptOptions {
 	/** Async loader returning the raw JSONL contents. */
 	readContent: () => Promise<string | null>;
@@ -1226,6 +1246,8 @@ export interface ReadTranscriptOptions {
 	sessionId?: string;
 	/** Agent envelope ceiling. The default is the 50 KiB tool transport ceiling. */
 	serializedBudgetBytes?: number;
+	/** Test-only counters for proving lazy agent projection work. */
+	workMetricsForTests?: TranscriptProjectionWorkMetricsForTests;
 }
 
 /**
@@ -1473,34 +1495,42 @@ const AGENT_TIMESTAMP_LIMIT = 64;
 const AGENT_TOOL_NAME_LIMIT = 128;
 const RESULT_HANDLE_DOMAIN = "bobbit.read-session.result-handle.v1\0";
 
-interface CanonicalCall {
+// Keep synchronous canonical projection within the safe matcher's 32 Mi
+// UTF-16-unit corpus ceiling; row bodies are released before advancing the page.
+const AGENT_CANONICAL_IN_FLIGHT_MAX_UNITS = 32 * 1024 * 1024;
+
+/** Lightweight call locator. Potentially large arguments remain in the raw block. */
+interface IndexedCall {
 	messageIndex: number;
 	blockIndex: number;
 	block: Record<string, unknown>;
 	id?: string;
 	name: string;
-	argumentsText: string;
-	argumentsPresent: boolean;
 }
 
-interface CanonicalResult {
+/** Lightweight result locator. The canonical body is deliberately not retained here. */
+interface IndexedResult {
 	messageIndex: number;
 	blockIndex: number;
 	direct: Record<string, unknown>;
 	message: Record<string, unknown>;
 	correlationId?: string;
-	correlatedCall?: CanonicalCall;
+	correlatedCall?: IndexedCall;
 	name: string;
 	status: ToolResultStatus;
+}
+
+interface MaterializedResult {
+	indexed: IndexedResult;
 	body: string;
 	size: ToolResultSize;
 	handle: string;
 }
 
-interface CanonicalTranscriptIndex {
-	callsByMessage: Map<number, CanonicalCall[]>;
-	resultsByMessage: Map<number, CanonicalResult[]>;
-	resultByLocation: Map<string, CanonicalResult>;
+interface TranscriptStructureIndex {
+	callsByMessage: Map<number, IndexedCall[]>;
+	resultsByMessage: Map<number, IndexedResult[]>;
+	resultByLocation: Map<string, IndexedResult>;
 }
 
 function ownValidString(source: Record<string, unknown>, key: string): string | undefined {
@@ -1541,7 +1571,7 @@ function canonicalResultName(
 	direct: Record<string, unknown>,
 	message: Record<string, unknown>,
 	messageLevel: boolean,
-	call?: CanonicalCall,
+	call?: IndexedCall,
 ): string {
 	return ownValidString(direct, "name")
 		?? ownValidString(direct, "toolName")
@@ -1655,27 +1685,23 @@ export interface TranscriptCorrelationOperations {
 	resultLookups: number;
 }
 
-function buildCanonicalTranscriptIndex(
+function buildTranscriptStructureIndex(
 	messages: RawMessage[],
-	sessionId: string,
 	operations?: TranscriptCorrelationOperations,
-): CanonicalTranscriptIndex {
-	const callsByMessage = new Map<number, CanonicalCall[]>();
-	const resultsByMessage = new Map<number, CanonicalResult[]>();
-	const resultByLocation = new Map<string, CanonicalResult>();
-	const latestCallById = new Map<string, CanonicalCall>();
+): TranscriptStructureIndex {
+	const callsByMessage = new Map<number, IndexedCall[]>();
+	const resultsByMessage = new Map<number, IndexedResult[]>();
+	const resultByLocation = new Map<string, IndexedResult>();
+	const latestCallById = new Map<string, IndexedCall>();
 
 	const indexCall = (message: RawMessage, block: Record<string, unknown>, blockIndex: number): void => {
-		const args = canonicalToolCallArgumentDetails(block);
 		const id = canonicalCallId(block);
-		const call: CanonicalCall = {
+		const call: IndexedCall = {
 			messageIndex: message.index,
 			blockIndex,
 			block,
 			...(id ? { id } : {}),
 			name: canonicalToolCallName(block),
-			argumentsText: args.text,
-			argumentsPresent: args.present,
 		};
 		const messageCalls = callsByMessage.get(message.index) ?? [];
 		messageCalls.push(call);
@@ -1695,15 +1721,7 @@ function buildCanonicalTranscriptIndex(
 		const correlationId = canonicalResultCorrelationId(direct, message.fullMessage, messageLevel);
 		const correlatedCall = correlationId ? latestCallById.get(correlationId) : undefined;
 		if (correlationId && operations) operations.resultLookups++;
-		const canonical = canonicalToolResultBodyDetails(direct);
-		const size: ToolResultSize = {
-			type: canonical.type,
-			...(canonical.blocks !== undefined ? { blocks: canonical.blocks } : {}),
-			chars: canonical.text.length,
-			lines: stringLineCount(canonical.text),
-			bytes: Buffer.byteLength(canonical.text, "utf8"),
-		};
-		const result: CanonicalResult = {
+		const result: IndexedResult = {
 			messageIndex: message.index,
 			blockIndex,
 			direct,
@@ -1712,9 +1730,6 @@ function buildCanonicalTranscriptIndex(
 			...(correlatedCall ? { correlatedCall } : {}),
 			name: canonicalResultName(direct, message.fullMessage, messageLevel, correlatedCall),
 			status: canonicalResultStatus(direct, message.fullMessage, messageLevel),
-			body: canonical.text,
-			size,
-			handle: createTranscriptResultHandle(sessionId, message.index, blockIndex, canonical.text),
 		};
 		const messageResults = resultsByMessage.get(message.index) ?? [];
 		messageResults.push(result);
@@ -1746,11 +1761,210 @@ function buildCanonicalTranscriptIndex(
 /** Deterministic test-only instrumentation for correlation-index growth. */
 export function measureTranscriptCorrelationOperationsForTests(jsonl: string): TranscriptCorrelationOperations {
 	const operations: TranscriptCorrelationOperations = { callUpdates: 0, resultLookups: 0 };
-	buildCanonicalTranscriptIndex(parseJsonl(jsonl), "correlation-operations-test", operations);
+	buildTranscriptStructureIndex(parseJsonl(jsonl), operations);
 	return operations;
 }
 
-function* agentSearchSegments(message: RawMessage, index: CanonicalTranscriptIndex): Iterable<string> {
+const CANONICAL_BODY_KEYS = ["content", "output", "result"] as const;
+const CANONICAL_OPAQUE_BLOCK_TYPES = new Set(["image", "audio", "video", "file", "attachment", "binary"]);
+const CANONICAL_INPUT_MAX_DEPTH = 512;
+
+function firstOwnDefinedValue(source: Record<string, unknown>, keys: readonly string[]): { found: boolean; value: unknown } {
+	for (const key of keys) {
+		if (Object.prototype.hasOwnProperty.call(source, key) && source[key] !== undefined) {
+			return { found: true, value: source[key] };
+		}
+	}
+	return { found: false, value: undefined };
+}
+
+class CanonicalInputWorkBudget {
+	private used = 0;
+	private readonly ancestors = new Set<object>();
+
+	constructor(private readonly limit: number) {}
+
+	private add(units: number): void {
+		if (!Number.isSafeInteger(units) || units < 0 || units > this.limit - this.used) {
+			throw new TranscriptReaderError(
+				"TRANSCRIPT_WORK_LIMIT_EXCEEDED",
+				"canonical transcript input exceeds the in-flight work limit",
+			);
+		}
+		this.used += units;
+	}
+
+	private enter(value: object, depth: number): void {
+		if (depth > CANONICAL_INPUT_MAX_DEPTH) {
+			throw new TranscriptReaderError("TRANSCRIPT_WORK_LIMIT_EXCEEDED", "canonical transcript input is nested too deeply");
+		}
+		if (this.ancestors.has(value)) throw new CanonicalTranscriptValueError("cyclic transcript JSON value");
+		this.ancestors.add(value);
+	}
+
+	private leave(value: object): void {
+		this.ancestors.delete(value);
+	}
+
+	stableJson(value: unknown, depth = 0): void {
+		if (typeof value === "string") {
+			// JSON escaping can expand one UTF-16 unit to a six-unit \\u00XX form.
+			this.add(value.length * 6 + 2);
+			return;
+		}
+		if (value === null || typeof value !== "object") {
+			this.add(1);
+			return;
+		}
+		this.enter(value, depth);
+		try {
+			if (Array.isArray(value)) {
+				this.add(value.length + 2);
+				for (const item of value) this.stableJson(item, depth + 1);
+				return;
+			}
+			const record = value as Record<string, unknown>;
+			const keys = Object.keys(record);
+			this.add(keys.length + 2);
+			for (const key of keys) {
+				this.add(key.length * 6 + 2);
+				this.stableJson(record[key], depth + 1);
+			}
+		} finally {
+			this.leave(value);
+		}
+	}
+
+	canonicalResultValue(value: unknown, depth = 0): void {
+		if (typeof value === "string") {
+			this.add(value.length);
+			return;
+		}
+		if (value === null || typeof value !== "object") {
+			this.add(1);
+			return;
+		}
+		this.enter(value, depth);
+		try {
+			if (Array.isArray(value)) {
+				this.add(value.length);
+				for (const item of value) this.canonicalResultValue(item, depth + 1);
+				return;
+			}
+			const block = value as Record<string, unknown>;
+			if (block.type === "text" && typeof block.text === "string") {
+				this.add(block.text.length);
+				return;
+			}
+			if (typeof block.type === "string" && CANONICAL_OPAQUE_BLOCK_TYPES.has(block.type)) {
+				const payload = firstOwnDefinedValue(block, ["data", "base64", "bytes", "content"]);
+				if (payload.found) {
+					if (typeof payload.value === "string") this.add(payload.value.length);
+					else this.stableJson(payload.value, depth + 1);
+				}
+				this.add(512);
+				return;
+			}
+			const carrier = firstOwnDefinedValue(block, CANONICAL_BODY_KEYS);
+			if (carrier.found) {
+				this.canonicalResultValue(carrier.value, depth + 1);
+				return;
+			}
+			// stableJson owns its own ancestor scope. Leave the canonical carrier
+			// scope first so an ordinary object is not mistaken for a self-cycle.
+			this.leave(value);
+			this.stableJson(block, depth + 1);
+		} finally {
+			this.leave(value);
+		}
+	}
+}
+
+function assertCallCanonicalizationWithinLimit(call: IndexedCall, limit: number): void {
+	const selected = firstOwnDefinedValue(call.block, ["arguments", "input"]);
+	if (!selected.found) return;
+	const budget = new CanonicalInputWorkBudget(limit);
+	if (typeof selected.value === "string") budget.canonicalResultValue(selected.value);
+	else budget.stableJson(selected.value);
+}
+
+function assertResultCanonicalizationWithinLimit(result: IndexedResult, limit: number): void {
+	const selected = firstOwnDefinedValue(result.direct, CANONICAL_BODY_KEYS);
+	if (!selected.found) return;
+	new CanonicalInputWorkBudget(limit).canonicalResultValue(selected.value);
+}
+
+class AgentProjectionWorkTracker {
+	private retainedResultUnits = 0;
+	private retainedCallUnits = 0;
+
+	constructor(readonly metrics?: TranscriptProjectionWorkMetricsForTests) {}
+
+	private remainingUnits(): number {
+		return AGENT_CANONICAL_IN_FLIGHT_MAX_UNITS - this.retainedResultUnits - this.retainedCallUnits;
+	}
+
+	canonicalizeCall(call: IndexedCall): ReturnType<typeof canonicalToolCallArgumentDetails> {
+		assertCallCanonicalizationWithinLimit(call, this.remainingUnits());
+		const details = canonicalToolCallArgumentDetails(call.block);
+		if (details.text.length > this.remainingUnits()) {
+			throw new TranscriptReaderError("TRANSCRIPT_WORK_LIMIT_EXCEEDED", "canonical tool arguments exceed the in-flight work limit");
+		}
+		if (this.metrics) this.metrics.callArgumentsCanonicalized++;
+		return details;
+	}
+
+	canonicalizeResult(result: IndexedResult): ReturnType<typeof canonicalToolResultBodyDetails> {
+		assertResultCanonicalizationWithinLimit(result, this.remainingUnits());
+		const details = canonicalToolResultBodyDetails(result.direct);
+		if (details.text.length > this.remainingUnits()) {
+			throw new TranscriptReaderError("TRANSCRIPT_WORK_LIMIT_EXCEEDED", "canonical tool result exceeds the in-flight work limit");
+		}
+		if (this.metrics) {
+			this.metrics.resultBodiesCanonicalized++;
+			this.metrics.canonicalResultUnits += details.text.length;
+		}
+		return details;
+	}
+
+	recordHash(): void {
+		if (this.metrics) this.metrics.resultBodiesHashed++;
+	}
+
+	retainCall(units: number): void {
+		if (units > this.remainingUnits()) {
+			throw new TranscriptReaderError("TRANSCRIPT_WORK_LIMIT_EXCEEDED", "canonical tool arguments exceed the in-flight work limit");
+		}
+		this.retainedCallUnits += units;
+	}
+
+	releaseCall(units: number): void {
+		this.retainedCallUnits -= units;
+	}
+
+	retainResult(units: number): void {
+		if (units > this.remainingUnits()) {
+			throw new TranscriptReaderError("TRANSCRIPT_WORK_LIMIT_EXCEEDED", "canonical tool results exceed the in-flight work limit");
+		}
+		this.retainedResultUnits += units;
+		if (this.metrics) {
+			this.metrics.peakRetainedCanonicalResultUnits = Math.max(
+				this.metrics.peakRetainedCanonicalResultUnits,
+				this.retainedResultUnits,
+			);
+		}
+	}
+
+	releaseResult(units: number): void {
+		this.retainedResultUnits -= units;
+	}
+}
+
+function* agentSearchSegments(
+	message: RawMessage,
+	index: TranscriptStructureIndex,
+	work: AgentProjectionWorkTracker,
+): Iterable<string> {
 	if (!isMessageLevelToolResult(message)) {
 		if (typeof message.content === "string") {
 			if (isWellFormedUnicode(message.content)) yield message.content;
@@ -1767,23 +1981,47 @@ function* agentSearchSegments(message: RawMessage, index: CanonicalTranscriptInd
 	}
 	for (const call of index.callsByMessage.get(message.index) ?? []) {
 		yield call.name;
-		if (call.argumentsPresent) yield call.argumentsText;
+		const args = work.canonicalizeCall(call);
+		if (args.present) {
+			work.retainCall(args.text.length);
+			try {
+				yield args.text;
+			} finally {
+				work.releaseCall(args.text.length);
+			}
+		}
 	}
-	for (const result of index.resultsByMessage.get(message.index) ?? []) yield result.body;
+	for (const result of index.resultsByMessage.get(message.index) ?? []) {
+		const canonical = work.canonicalizeResult(result);
+		work.retainResult(canonical.text.length);
+		try {
+			yield canonical.text;
+		} finally {
+			work.releaseResult(canonical.text.length);
+		}
+	}
 }
 
 async function buildAgentMatchList(
 	messages: RawMessage[],
-	index: CanonicalTranscriptIndex,
+	index: TranscriptStructureIndex,
 	pattern: string,
 	caseSensitive: boolean,
 	context: number,
 	transcriptUnits: number,
+	work: AgentProjectionWorkTracker,
 ): Promise<{ matchCount: number; expanded: number[] }> {
+	const retainedUnits = estimatedQueuedCorpusUnits(transcriptUnits, 3);
+	// Unlike direct REST matching, agent search additionally creates canonical
+	// call/result segments. Reject before that work if the request would exceed
+	// the existing safe-worker corpus ceiling, even when a worker is immediately free.
+	if (retainedUnits > SAFE_REGEX_MAX_QUEUED_CORPUS_UNITS) {
+		throw new TranscriptReaderError("TRANSCRIPT_WORK_LIMIT_EXCEEDED", "agent transcript search corpus exceeds the safe work limit");
+	}
 	return await matchMessageSegments({
 		messageCount: messages.length,
-		retainedUnits: estimatedQueuedCorpusUnits(transcriptUnits, 3),
-		segmentsForMessage: (messageIndex) => agentSearchSegments(messages[messageIndex], index),
+		retainedUnits,
+		segmentsForMessage: (messageIndex) => agentSearchSegments(messages[messageIndex], index, work),
 	}, pattern, caseSensitive, context);
 }
 
@@ -1792,8 +2030,8 @@ function authorDictionaryKey(author: MessageAuthor): string {
 }
 
 interface AgentProjectionState {
-	callRefs: Map<CanonicalCall, string>;
-	resultRefs: Map<CanonicalResult, string>;
+	callRefs: Map<IndexedCall, string>;
+	resultRefs: Map<IndexedResult, string>;
 	authorRefs: Map<string, string>;
 	authors: Record<string, MessageAuthor>;
 	correlations: Record<string, Record<string, unknown>>;
@@ -1815,7 +2053,7 @@ function newAgentProjectionState(): AgentProjectionState {
 	};
 }
 
-function refForCall(call: CanonicalCall, state: AgentProjectionState): string {
+function refForCall(call: IndexedCall, state: AgentProjectionState): string {
 	const existing = state.callRefs.get(call);
 	if (existing) return existing;
 	const ref = `t${state.nextToolRef++}`;
@@ -1828,7 +2066,7 @@ function refForCall(call: CanonicalCall, state: AgentProjectionState): string {
 	return ref;
 }
 
-function refForResult(result: CanonicalResult, state: AgentProjectionState): string {
+function refForResult(result: IndexedResult, state: AgentProjectionState): string {
 	if (result.correlatedCall) return refForCall(result.correlatedCall, state);
 	const existing = state.resultRefs.get(result);
 	if (existing) return existing;
@@ -1894,17 +2132,77 @@ function validateResultLimit(value: unknown): number {
 	return value as number;
 }
 
+class AgentRowMaterializer {
+	private readonly calls = new Map<IndexedCall, ReturnType<typeof canonicalToolCallArgumentDetails>>();
+	private readonly results = new Map<IndexedResult, MaterializedResult>();
+
+	constructor(
+		private readonly sessionId: string,
+		private readonly work: AgentProjectionWorkTracker,
+	) {}
+
+	callArguments(call: IndexedCall): ReturnType<typeof canonicalToolCallArgumentDetails> {
+		const existing = this.calls.get(call);
+		if (existing) return existing;
+		const details = this.work.canonicalizeCall(call);
+		this.work.retainCall(details.text.length);
+		this.calls.set(call, details);
+		return details;
+	}
+
+	result(indexed: IndexedResult): MaterializedResult {
+		const existing = this.results.get(indexed);
+		if (existing) return existing;
+		const canonical = this.work.canonicalizeResult(indexed);
+		this.work.retainResult(canonical.text.length);
+		try {
+			const size: ToolResultSize = {
+				type: canonical.type,
+				...(canonical.blocks !== undefined ? { blocks: canonical.blocks } : {}),
+				chars: canonical.text.length,
+				lines: stringLineCount(canonical.text),
+				bytes: Buffer.byteLength(canonical.text, "utf8"),
+			};
+			const handle = createTranscriptResultHandle(
+				this.sessionId,
+				indexed.messageIndex,
+				indexed.blockIndex,
+				canonical.text,
+			);
+			this.work.recordHash();
+			const result: MaterializedResult = {
+				indexed,
+				body: canonical.text,
+				size,
+				handle,
+			};
+			this.results.set(indexed, result);
+			return result;
+		} catch (error) {
+			this.work.releaseResult(canonical.text.length);
+			throw error;
+		}
+	}
+
+	release(): void {
+		for (const result of this.results.values()) this.work.releaseResult(result.body.length);
+		for (const call of this.calls.values()) this.work.releaseCall(call.text.length);
+		this.results.clear();
+		this.calls.clear();
+	}
+}
+
 function projectedResult(
-	result: CanonicalResult,
+	result: MaterializedResult,
 	state: AgentProjectionState,
 	includeExcerpt: boolean,
 	cursor = 0,
 	limit = AGENT_RESULT_EXCERPT_DEFAULT,
 ): ProjectedToolResult {
 	const projected: ProjectedToolResult = {
-		ref: refForResult(result, state),
-		name: scalarSafePrefix(result.name, AGENT_TOOL_NAME_LIMIT),
-		status: result.status,
+		ref: refForResult(result.indexed, state),
+		name: scalarSafePrefix(result.indexed.name, AGENT_TOOL_NAME_LIMIT),
+		status: result.indexed.status,
 		size: result.size,
 		omitted: !includeExcerpt,
 		handle: result.handle,
@@ -1934,8 +2232,9 @@ function projectAgentTimestamp(timestamp: string | null): Pick<AgentTranscriptMe
 
 function projectAgentMessage(
 	message: RawMessage,
-	index: CanonicalTranscriptIndex,
+	index: TranscriptStructureIndex,
 	state: AgentProjectionState,
+	materializer: AgentRowMaterializer,
 	options: { verbose: boolean; includeToolResults: boolean; omitOptional?: boolean },
 ): AgentTranscriptMessage {
 	const role = scalarSafePrefix(isWellFormedUnicode(message.role) ? message.role : "unknown", AGENT_ROLE_LIMIT);
@@ -1974,21 +2273,22 @@ function projectAgentMessage(
 	const calls = index.callsByMessage.get(message.index) ?? [];
 	if (calls.length > 0) {
 		out.toolCalls = calls.map((call) => {
-			const preview = options.omitOptional ? "" : scalarSafePrefix(call.argumentsText, AGENT_ARGUMENT_PREVIEW_LIMIT);
+			const args = materializer.callArguments(call);
+			const preview = options.omitOptional ? "" : scalarSafePrefix(args.text, AGENT_ARGUMENT_PREVIEW_LIMIT);
 			return {
 				ref: refForCall(call, state),
 				name: scalarSafePrefix(call.name, AGENT_TOOL_NAME_LIMIT),
 				argumentsPreview: preview,
 				argumentsTruncated: options.omitOptional
-					? call.argumentsText.length > 0
-					: preview.length < call.argumentsText.length,
+					? args.text.length > 0
+					: preview.length < args.text.length,
 			};
 		});
 	}
 	const results = index.resultsByMessage.get(message.index) ?? [];
 	if (results.length > 0) {
 		out.toolResults = results.map((result) => projectedResult(
-			result,
+			materializer.result(result),
 			state,
 			options.includeToolResults && !options.omitOptional,
 		));
@@ -2047,7 +2347,7 @@ function serializedBytes(value: unknown): number {
 	return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
-function summaryRow(message: RawMessage, index: CanonicalTranscriptIndex): AgentTranscriptMessage {
+function summaryRow(message: RawMessage, index: TranscriptStructureIndex): AgentTranscriptMessage {
 	return {
 		index: message.index,
 		role: scalarSafePrefix(isWellFormedUnicode(message.role) ? message.role : "unknown", AGENT_ROLE_LIMIT),
@@ -2061,7 +2361,7 @@ function summaryRow(message: RawMessage, index: CanonicalTranscriptIndex): Agent
 
 function fitAgentPage(
 	all: RawMessage[],
-	index: CanonicalTranscriptIndex,
+	index: TranscriptStructureIndex,
 	workingIndices: number[],
 	start: number,
 	limit: number,
@@ -2069,6 +2369,8 @@ function fitAgentPage(
 	includeToolResults: boolean,
 	matchCount: number | undefined,
 	budget: number,
+	sessionId: string,
+	work: AgentProjectionWorkTracker,
 ): ReadTranscriptEnvelope {
 	const requestedIndices = workingIndices.slice(start, Math.min(workingIndices.length, start + limit));
 	const state = newAgentProjectionState();
@@ -2077,22 +2379,11 @@ function fitAgentPage(
 
 	for (let relative = 0; relative < requestedIndices.length; relative++) {
 		const raw = all[requestedIndices[relative]];
-		let row = projectAgentMessage(raw, index, state, { verbose, includeToolResults });
-		const reserveOffset = start + relative + 1;
-		let trial = envelopeForAgentRows(
-			all.length,
-			matchCount,
-			start,
-			workingIndices.length,
-			[...rows, row],
-			state,
-			reserveOffset,
-			true,
-			{ kind: "page", offset: reserveOffset },
-		);
-		if (serializedBytes(trial) > budget) {
-			row = projectAgentMessage(raw, index, state, { verbose, includeToolResults, omitOptional: true });
-			trial = envelopeForAgentRows(
+		const materializer = new AgentRowMaterializer(sessionId, work);
+		try {
+			let row = projectAgentMessage(raw, index, state, materializer, { verbose, includeToolResults });
+			const reserveOffset = start + relative + 1;
+			let trial = envelopeForAgentRows(
 				all.length,
 				matchCount,
 				start,
@@ -2103,27 +2394,45 @@ function fitAgentPage(
 				true,
 				{ kind: "page", offset: reserveOffset },
 			);
-		}
-		if (serializedBytes(trial) > budget) {
-			if (rows.length === 0) {
-				row = summaryRow(raw, index);
+			if (serializedBytes(trial) > budget) {
+				row = projectAgentMessage(raw, index, state, materializer, { verbose, includeToolResults, omitOptional: true });
 				trial = envelopeForAgentRows(
 					all.length,
 					matchCount,
 					start,
 					workingIndices.length,
-					[row],
+					[...rows, row],
 					state,
 					reserveOffset,
 					true,
 					{ kind: "page", offset: reserveOffset },
 				);
-				if (serializedBytes(trial) <= budget) rows.push(row);
 			}
-			transportStopped = true;
-			break;
+			if (serializedBytes(trial) > budget) {
+				if (rows.length === 0) {
+					row = summaryRow(raw, index);
+					trial = envelopeForAgentRows(
+						all.length,
+						matchCount,
+						start,
+						workingIndices.length,
+						[row],
+						state,
+						reserveOffset,
+						true,
+						{ kind: "page", offset: reserveOffset },
+					);
+					if (serializedBytes(trial) <= budget) rows.push(row);
+				}
+				transportStopped = true;
+				break;
+			}
+			rows.push(row);
+		} finally {
+			// The response contains only bounded excerpts and metadata. Release the
+			// full canonical row bodies before considering the next page row.
+			materializer.release();
 		}
-		rows.push(row);
 	}
 
 	if (transportStopped || rows.length < requestedIndices.length) {
@@ -2175,75 +2484,83 @@ function parseResultHandle(handle: unknown): ParsedResultHandle {
 
 function readTargetedResultSlice(
 	all: RawMessage[],
-	index: CanonicalTranscriptIndex,
+	index: TranscriptStructureIndex,
 	params: ReadTranscriptParams,
 	budget: number,
+	sessionId: string,
+	work: AgentProjectionWorkTracker,
 ): ReadTranscriptEnvelope {
 	const location = parseResultHandle(params.resultHandle);
 	const raw = all[location.messageIndex];
 	if (!raw || raw.index !== location.messageIndex) {
 		throw new TranscriptReaderError("RESULT_NOT_FOUND", "result handle message does not exist");
 	}
-	const result = index.resultByLocation.get(resultLocationKey(location.messageIndex, location.blockIndex));
-	if (!result) throw new TranscriptReaderError("RESULT_NOT_FOUND", "result handle block does not exist");
-	if (result.handle !== params.resultHandle) {
-		throw new TranscriptReaderError("STALE_RESULT_HANDLE", "result body changed after this handle was issued");
-	}
-	const cursor = validateResultCursor(result.body, params.resultCursor ?? 0);
-	const requestedLimit = validateResultLimit(params.resultLimit ?? AGENT_RESULT_EXCERPT_DEFAULT);
-	const requestedEnd = canonicalSliceEnd(result.body, cursor, requestedLimit);
-	const makeTargetRow = (state: AgentProjectionState, limit: number): AgentTranscriptMessage => {
-		const role = scalarSafePrefix(isWellFormedUnicode(raw.role) ? raw.role : "unknown", AGENT_ROLE_LIMIT);
-		const row: AgentTranscriptMessage = {
-			index: raw.index,
-			role,
-			...(role.length < raw.role.length ? { roleTruncated: true } : {}),
-			...projectAgentTimestamp(raw.ts),
-			text: "",
-			toolResults: [projectedResult(result, state, true, cursor, limit)],
-		};
-		if (raw.author) row.authorRef = refForAuthor(raw.author, state);
-		return row;
-	};
-	const state = newAgentProjectionState();
-	const base = makeTargetRow(state, requestedLimit);
-	let envelope = envelopeForAgentRows(all.length, undefined, undefined, undefined, [base], state, undefined);
-	if (serializedBytes(envelope) <= budget) return envelope;
-
-	let low = 1;
-	let high = Math.max(1, requestedEnd - cursor);
-	let best: ReadTranscriptEnvelope | undefined;
-	while (low <= high) {
-		const units = Math.floor((low + high) / 2);
-		const candidateState = newAgentProjectionState();
-		const candidate = makeTargetRow(candidateState, units);
-		const actualEnd = candidate.toolResults![0].excerpt!.end;
-		const partial = actualEnd < requestedEnd;
-		const projected = envelopeForAgentRows(
-			all.length,
-			undefined,
-			undefined,
-			undefined,
-			[candidate],
-			candidateState,
-			undefined,
-			partial,
-			partial ? {
-				kind: "result_slice",
-				result_handle: result.handle,
-				result_cursor: actualEnd,
-				result_limit: requestedLimit,
-			} : undefined,
-		);
-		if (serializedBytes(projected) <= budget) {
-			best = projected;
-			low = units + 1;
-		} else {
-			high = units - 1;
+	const indexed = index.resultByLocation.get(resultLocationKey(location.messageIndex, location.blockIndex));
+	if (!indexed) throw new TranscriptReaderError("RESULT_NOT_FOUND", "result handle block does not exist");
+	const materializer = new AgentRowMaterializer(sessionId, work);
+	try {
+		const result = materializer.result(indexed);
+		if (result.handle !== params.resultHandle) {
+			throw new TranscriptReaderError("STALE_RESULT_HANDLE", "result body changed after this handle was issued");
 		}
+		const cursor = validateResultCursor(result.body, params.resultCursor ?? 0);
+		const requestedLimit = validateResultLimit(params.resultLimit ?? AGENT_RESULT_EXCERPT_DEFAULT);
+		const requestedEnd = canonicalSliceEnd(result.body, cursor, requestedLimit);
+		const makeTargetRow = (state: AgentProjectionState, limit: number): AgentTranscriptMessage => {
+			const role = scalarSafePrefix(isWellFormedUnicode(raw.role) ? raw.role : "unknown", AGENT_ROLE_LIMIT);
+			const row: AgentTranscriptMessage = {
+				index: raw.index,
+				role,
+				...(role.length < raw.role.length ? { roleTruncated: true } : {}),
+				...projectAgentTimestamp(raw.ts),
+				text: "",
+				toolResults: [projectedResult(result, state, true, cursor, limit)],
+			};
+			if (raw.author) row.authorRef = refForAuthor(raw.author, state);
+			return row;
+		};
+		const state = newAgentProjectionState();
+		const base = makeTargetRow(state, requestedLimit);
+		let envelope = envelopeForAgentRows(all.length, undefined, undefined, undefined, [base], state, undefined);
+		if (serializedBytes(envelope) <= budget) return envelope;
+
+		let low = 1;
+		let high = Math.max(1, requestedEnd - cursor);
+		let best: ReadTranscriptEnvelope | undefined;
+		while (low <= high) {
+			const units = Math.floor((low + high) / 2);
+			const candidateState = newAgentProjectionState();
+			const candidate = makeTargetRow(candidateState, units);
+			const actualEnd = candidate.toolResults![0].excerpt!.end;
+			const partial = actualEnd < requestedEnd;
+			const projected = envelopeForAgentRows(
+				all.length,
+				undefined,
+				undefined,
+				undefined,
+				[candidate],
+				candidateState,
+				undefined,
+				partial,
+				partial ? {
+					kind: "result_slice",
+					result_handle: result.handle,
+					result_cursor: actualEnd,
+					result_limit: requestedLimit,
+				} : undefined,
+			);
+			if (serializedBytes(projected) <= budget) {
+				best = projected;
+				low = units + 1;
+			} else {
+				high = units - 1;
+			}
+		}
+		if (best) return best;
+		throw new TranscriptReaderError("invalid_params", "serialized transcript budget is too small for result metadata");
+	} finally {
+		materializer.release();
 	}
-	if (best) return best;
-	throw new TranscriptReaderError("invalid_params", "serialized transcript budget is too small for result metadata");
 }
 
 async function readAgentTranscript(
@@ -2259,8 +2576,11 @@ async function readAgentTranscript(
 		throw new TranscriptReaderError("invalid_params", `serializedBudgetBytes must be an integer in [512, ${READ_SESSION_AGENT_ENVELOPE_MAX_BYTES}]`);
 	}
 	try {
-		const index = buildCanonicalTranscriptIndex(all, sessionId);
-		if (params.resultHandle !== undefined) return readTargetedResultSlice(all, index, params, budget);
+		const work = new AgentProjectionWorkTracker(opts.workMetricsForTests);
+		const index = buildTranscriptStructureIndex(all);
+		if (params.resultHandle !== undefined) {
+			return readTargetedResultSlice(all, index, params, budget, sessionId, work);
+		}
 		if (params.resultCursor !== undefined) {
 			throw new TranscriptReaderError("INVALID_RESULT_HANDLE", "result_handle is required with result_cursor");
 		}
@@ -2277,6 +2597,7 @@ async function readAgentTranscript(
 				!!params.caseSensitive,
 				validated.context,
 				transcriptUnits,
+				work,
 			);
 			workingIndices = matched.expanded;
 			matchCount = matched.matchCount;
@@ -2306,6 +2627,8 @@ async function readAgentTranscript(
 			params.includeToolResults === true,
 			matchCount,
 			budget,
+			sessionId,
+			work,
 		);
 	} catch (error) {
 		if (error instanceof TranscriptReaderError) throw error;
