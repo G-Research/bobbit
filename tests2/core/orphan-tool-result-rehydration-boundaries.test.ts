@@ -1111,6 +1111,123 @@ describe("executable SessionManager rehydration boundaries", () => {
 			.toEqual(tupleB);
 	});
 
+	it("does not let stale runtime recovery quarantine a newer canonical role replacement", async () => {
+		invalidateModelCache();
+		const file = hostTranscript("runtime-selection-role-replacement-race");
+		const raceProvider = "runtime-selection-role-race";
+		const tupleA = { provider: raceProvider, id: "tuple-a", thinkingLevel: "off" as const };
+		const tupleB = { provider: raceProvider, id: "tuple-b", thinkingLevel: "off" as const };
+		const requested = { provider: raceProvider, id: "tuple-c", thinkingLevel: "off" as const };
+		const racePreferences = new PreferencesStore(
+			path.resolve("/memfs/runtime-selection-role-race"),
+			createMemFs(),
+		);
+		racePreferences.set("customProviders", [{
+			id: raceProvider,
+			name: raceProvider,
+			type: "manual",
+			baseUrl: "http://127.0.0.1:9",
+			apiKey: "test-key",
+			models: [tupleA.id, tupleB.id, requested.id].map((id) => ({ id, name: id })),
+		}]);
+		const role = {
+			name: "replacement-role",
+			label: "Replacement role",
+			promptTemplate: "Replacement role",
+			accessory: "replacement-accessory",
+			model: `${tupleB.provider}/${tupleB.id}`,
+			thinkingLevel: tupleB.thinkingLevel,
+		};
+		const roleManager = {
+			getRole: vi.fn((name: string) => name === role.name ? role : undefined),
+			listRoles: vi.fn(() => [role]),
+		};
+		const ps = persisted("runtime-selection-role-replacement-race", file, {
+			modelProvider: tupleA.provider,
+			modelId: tupleA.id,
+			effectiveThinkingLevel: tupleA.thinkingLevel,
+		});
+		const store = mutableStore(ps);
+		store.archiveAsync = vi.fn(async () => {
+			ps.archived = true;
+			return true;
+		});
+
+		const replacement = recordingBridge(() => {}, {
+			modelProvider: tupleB.provider,
+			modelId: tupleB.id,
+			thinkingLevel: tupleB.thinkingLevel,
+		});
+		const replacementSetModel = replacement.setModel.bind(replacement);
+		replacement.setModel = vi.fn(async (provider: string, modelId: string) => {
+			if (provider === tupleA.provider && modelId === tupleA.id) return { success: true };
+			return replacementSetModel(provider, modelId);
+		});
+		replacement.stop = vi.fn(async () => {});
+		registerRpcBridgeFactory(() => replacement);
+
+		const manager: any = new BaseSessionManager({ preferencesStore: racePreferences, roleManager: roleManager as any });
+		manager._testStore = store;
+		manager.restartAgent = vi.fn(async () => {});
+		managers.push(manager);
+
+		const selectionSetModelStarted = deferred<void>();
+		const releaseSelectionSetModel = deferred<void>();
+		const original = recordingBridge(() => {}, {
+			modelProvider: tupleA.provider,
+			modelId: tupleA.id,
+			thinkingLevel: tupleA.thinkingLevel,
+		});
+		const originalSetModel = original.setModel.bind(original);
+		original.setModel = vi.fn(async (provider: string, modelId: string) => {
+			const result = await originalSetModel(provider, modelId);
+			if (provider === requested.provider && modelId === requested.id) {
+				selectionSetModelStarted.resolve();
+				await releaseSelectionSetModel.promise;
+			}
+			return result;
+		});
+		original.stop = vi.fn(async () => {});
+		const session = liveSession(ps.id, original, {
+			spawnPinnedModel: `${tupleA.provider}/${tupleA.id}`,
+			spawnPinnedThinkingLevel: tupleA.thinkingLevel,
+		});
+		manager.sessions.set(ps.id, session);
+
+		const selection = applyRuntimeSessionModelSelection(
+			manager,
+			session,
+			requested.provider,
+			requested.id,
+			requested.thinkingLevel,
+			racePreferences,
+		);
+		await selectionSetModelStarted.promise;
+		await expect(manager.assignRole(ps.id, role)).resolves.toBe(true);
+		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(replacement);
+		expect({
+			provider: ps.modelProvider,
+			id: ps.modelId,
+			thinkingLevel: ps.effectiveThinkingLevel,
+		}).toEqual(tupleB);
+
+		releaseSelectionSetModel.resolve();
+		await expect(selection).rejects.toThrow(/read-back mismatch/i);
+
+		expect(manager.restartAgent).not.toHaveBeenCalled();
+		expect(replacement.setModel).not.toHaveBeenCalledWith(tupleA.provider, tupleA.id);
+		expect(replacement.stop).not.toHaveBeenCalled();
+		expect(store.archiveAsync).not.toHaveBeenCalled();
+		expect(ps.archived).not.toBe(true);
+		expect(manager.sessions.get(ps.id)).toBe(session);
+		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(replacement);
+		expect({
+			provider: ps.modelProvider,
+			id: ps.modelId,
+			thinkingLevel: ps.effectiveThinkingLevel,
+		}, "STALE_RUNTIME_RECOVERY_QUARANTINED_CANONICAL_REPLACEMENT").toEqual(tupleB);
+	});
+
 	it("serializes concurrent assignRole replacements and leaves only the final bridge live", async () => {
 		const file = hostTranscript("assign-role-concurrent");
 		const firstStart = deferred<void>();
