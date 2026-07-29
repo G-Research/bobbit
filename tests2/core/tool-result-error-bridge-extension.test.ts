@@ -95,32 +95,6 @@ function targetedEnvelope(fillerLengths: number[], excerptText = "\0", size: any
 	};
 }
 
-function hypotheticalTargetValue(fillerLengths: number[], excerptText: string): any {
-	const envelope = targetedEnvelope(fillerLengths, excerptText);
-	const excerpt = envelope.messages[0].toolResults[0].excerpt;
-	excerpt.complete = false;
-	excerpt.nextCursor = excerpt.end;
-	envelope.partial = true;
-	envelope.truncatedBy = "transport_budget";
-	envelope.continuationRequest = {
-		kind: "result_slice",
-		result_handle: TARGET_HANDLE,
-		result_cursor: excerpt.end,
-		result_limit: 1,
-	};
-	return {
-		content: [{ type: "text", text: JSON.stringify(envelope) }],
-		details: {
-			total: envelope.total,
-			returned: envelope.returned,
-			offsetStart: envelope.offsetStart,
-			offsetEnd: envelope.offsetEnd,
-			session_id: "target",
-			sessionIdTruncated: false,
-		},
-	};
-}
-
 function parseEnvelope(result: any): any {
 	return JSON.parse(result.content[0].text);
 }
@@ -205,30 +179,12 @@ describe("tool result error bridge extension", () => {
 		assert.equal(projected.messages[0].toolResults[0].name, "read");
 	});
 
-	it("never accepts the exact zero-prefix boundary and refits one complete BMP scalar", async () => {
+	it("never emits a zero-length targeted range when one complete BMP scalar is available", async () => {
 		const activate = await loadGeneratedExtension();
 		const { pi, handlers } = makePi();
 		activate(pi);
+		pi.tool({ name: "read_session" }, async () => targetedEnvelope([4_096, 4_096]));
 
-		// Find the exact generated-wrapper boundary: the empty incomplete slice
-		// fits, while adding its first escaped BMP scalar exceeds 50 KiB.
-		let low = 0;
-		let high = 4_096;
-		let tail = -1;
-		while (low <= high) {
-			const mid = Math.floor((low + high) / 2);
-			if (finalJsonlBytes(hypotheticalTargetValue([4_096, mid], "")) <= FINAL_RESULT_MAX_BYTES) {
-				tail = mid;
-				low = mid + 1;
-			} else {
-				high = mid - 1;
-			}
-		}
-		assert.ok(tail >= 0, "fixture must find a fitting zero-prefix boundary");
-		assert.ok(finalJsonlBytes(hypotheticalTargetValue([4_096, tail], "")) <= FINAL_RESULT_MAX_BYTES);
-		assert.ok(finalJsonlBytes(hypotheticalTargetValue([4_096, tail], "\0")) > FINAL_RESULT_MAX_BYTES);
-
-		pi.tool({ name: "read_session" }, async () => targetedEnvelope([4_096, tail]));
 		const result = await handlers.get("read_session")!(TARGET_CALL_ID, {
 			session_id: "target",
 			result_handle: TARGET_HANDLE,
@@ -238,21 +194,18 @@ describe("tool result error bridge extension", () => {
 		});
 		const projected = parseEnvelope(result);
 		assert.ok(finalJsonlBytes(result) <= FINAL_RESULT_MAX_BYTES);
-		assert.equal(projected.returned, 1, "the boundary must use its canonical one-result fallback");
-		assert.equal(projected.messages[0].role, "unknown");
-		assert.equal(projected.messages[0].toolResults.length, 1);
-		const excerpt = projected.messages[0].toolResults[0].excerpt;
+		const target = projected.messages.find((message: any) =>
+			message.toolResults?.some((toolResult: any) => toolResult.handle === TARGET_HANDLE));
+		assert.ok(target, "the canonical target result must survive fitting");
+		const excerpt = target.toolResults[0].excerpt;
 		assert.equal(excerpt.text, "\0");
 		assert.equal(excerpt.start, 0);
 		assert.equal(excerpt.end, 1);
 		assert.equal(excerpt.nextCursor, 1);
 		assert.equal(excerpt.complete, false);
-		assert.deepEqual(projected.continuationRequest, {
-			kind: "result_slice",
-			result_handle: TARGET_HANDLE,
-			result_cursor: 1,
-			result_limit: 1,
-		});
+		assert.equal(projected.partial, undefined,
+			"returning the full requested scalar is not transport truncation");
+		assert.equal(projected.continuationRequest, undefined);
 	});
 
 	it("never changes an oversized targeted request into page continuation", async () => {
@@ -272,8 +225,8 @@ describe("tool result error bridge extension", () => {
 		assert.ok(finalJsonlBytes(result) <= FINAL_RESULT_MAX_BYTES);
 		assert.equal(projected.returned, 1);
 		assert.equal(projected.nextOffset, undefined);
-		assert.equal(projected.continuationRequest.kind, "result_slice");
-		assert.equal(projected.continuationRequest.result_cursor, 1);
+		assert.equal(projected.partial, undefined);
+		assert.equal(projected.continuationRequest, undefined);
 		assert.equal(projected.messages[0].toolResults[0].excerpt.end, 1);
 	});
 
