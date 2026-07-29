@@ -242,6 +242,7 @@ export default function (pi) {
       accessor_attack: Type.Optional(Type.Boolean()),
       hostile_to_json: Type.Optional(Type.Boolean()),
       near_ceiling: Type.Optional(Type.Boolean()),
+      projection_flags: Type.Optional(Type.Boolean()),
       throw_after_mutation: Type.Optional(Type.Boolean()),
       late_phase_attack: Type.Optional(Type.String()),
       post_chain_accessor_attack: Type.Optional(Type.String()),
@@ -302,7 +303,24 @@ export default function (pi) {
         details: { encryptedContent: "PROVIDER_ONLY_ENCRYPTED_DETAILS" },
         isError: true,
       };
-      const selectedEnvelope = params.near_ceiling ? {
+      const selectedEnvelope = params.projection_flags ? {
+        total: 2,
+        returned: 2,
+        offsetStart: 0,
+        offsetEnd: 1,
+        messages: [{
+          index: 0,
+          role: "r".repeat(40),
+          roleTruncated: true,
+          ts: "t".repeat(80),
+          tsTruncated: true,
+        }, {
+          index: 1,
+          role: "assistant",
+          ts: null,
+          tsInvalid: true,
+        }],
+      } : params.near_ceiling ? {
         total: 10,
         returned: 10,
         offsetStart: 0,

@@ -36,6 +36,95 @@ function makePi() {
 	return { pi, handlers };
 }
 
+const FINAL_RESULT_MAX_BYTES = 50 * 1024;
+const TARGET_HANDLE = "rs1:m0:b0:AAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const TARGET_CALL_ID = "call-final-boundary";
+
+function finalJsonlBytes(value: any, toolCallId = TARGET_CALL_ID): number {
+	const message = {
+		role: "toolResult",
+		toolCallId,
+		toolName: "read_session",
+		content: value.content,
+		details: value.details,
+		isError: false,
+		timestamp: Number.MAX_SAFE_INTEGER,
+	};
+	const line = {
+		type: "message",
+		id: "0".repeat(36),
+		parentId: "0".repeat(36),
+		timestamp: "+999999-12-31T23:59:59.999Z",
+		message,
+	};
+	return Buffer.byteLength(`${JSON.stringify(line)}\n`, "utf8");
+}
+
+function targetedEnvelope(fillerLengths: number[], excerptText = "\0", size: any = {
+	type: "string", chars: 10_000, lines: 1, bytes: 10_000,
+}): any {
+	const messages = [{
+		index: 0,
+		role: "toolResult",
+		toolResults: [{
+			ref: "r1",
+			name: "diagnostic_probe",
+			status: "ok",
+			size,
+			omitted: false,
+			handle: TARGET_HANDLE,
+			excerpt: {
+				start: 0,
+				end: excerptText.length,
+				text: excerptText,
+				nextCursor: excerptText.length,
+				complete: false,
+			},
+		}],
+	}, ...fillerLengths.map((length, index) => ({
+		index: index + 1,
+		role: "assistant",
+		text: "\0".repeat(length),
+	}))];
+	return {
+		total: messages.length,
+		returned: messages.length,
+		offsetStart: 0,
+		offsetEnd: messages.length - 1,
+		messages,
+	};
+}
+
+function hypotheticalTargetValue(fillerLengths: number[], excerptText: string): any {
+	const envelope = targetedEnvelope(fillerLengths, excerptText);
+	const excerpt = envelope.messages[0].toolResults[0].excerpt;
+	excerpt.complete = false;
+	excerpt.nextCursor = excerpt.end;
+	envelope.partial = true;
+	envelope.truncatedBy = "transport_budget";
+	envelope.continuationRequest = {
+		kind: "result_slice",
+		result_handle: TARGET_HANDLE,
+		result_cursor: excerpt.end,
+		result_limit: 1,
+	};
+	return {
+		content: [{ type: "text", text: JSON.stringify(envelope) }],
+		details: {
+			total: envelope.total,
+			returned: envelope.returned,
+			offsetStart: envelope.offsetStart,
+			offsetEnd: envelope.offsetEnd,
+			session_id: "target",
+			sessionIdTruncated: false,
+		},
+	};
+}
+
+function parseEnvelope(result: any): any {
+	return JSON.parse(result.content[0].text);
+}
+
 describe("tool result error bridge extension", () => {
 	it("throws returned isError:true results so pi marks the tool result errored", async () => {
 		const activate = await loadGeneratedExtension();
@@ -114,6 +203,159 @@ describe("tool result error bridge extension", () => {
 		assert.deepEqual(Object.keys(projected.messages[0].toolResults[0]).sort(),
 			["excerpt", "handle", "name", "omitted", "ref", "size", "status"].sort());
 		assert.equal(projected.messages[0].toolResults[0].name, "read");
+	});
+
+	it("never accepts the exact zero-prefix boundary and refits one complete BMP scalar", async () => {
+		const activate = await loadGeneratedExtension();
+		const { pi, handlers } = makePi();
+		activate(pi);
+
+		// Find the exact generated-wrapper boundary: the empty incomplete slice
+		// fits, while adding its first escaped BMP scalar exceeds 50 KiB.
+		let low = 0;
+		let high = 4_096;
+		let tail = -1;
+		while (low <= high) {
+			const mid = Math.floor((low + high) / 2);
+			if (finalJsonlBytes(hypotheticalTargetValue([4_096, mid], "")) <= FINAL_RESULT_MAX_BYTES) {
+				tail = mid;
+				low = mid + 1;
+			} else {
+				high = mid - 1;
+			}
+		}
+		assert.ok(tail >= 0, "fixture must find a fitting zero-prefix boundary");
+		assert.ok(finalJsonlBytes(hypotheticalTargetValue([4_096, tail], "")) <= FINAL_RESULT_MAX_BYTES);
+		assert.ok(finalJsonlBytes(hypotheticalTargetValue([4_096, tail], "\0")) > FINAL_RESULT_MAX_BYTES);
+
+		pi.tool({ name: "read_session" }, async () => targetedEnvelope([4_096, tail]));
+		const result = await handlers.get("read_session")!(TARGET_CALL_ID, {
+			session_id: "target",
+			result_handle: TARGET_HANDLE,
+			result_cursor: 0,
+			result_limit: 1,
+			verbose: true,
+		});
+		const projected = parseEnvelope(result);
+		assert.ok(finalJsonlBytes(result) <= FINAL_RESULT_MAX_BYTES);
+		assert.equal(projected.returned, 1, "the boundary must use its canonical one-result fallback");
+		assert.equal(projected.messages[0].role, "unknown");
+		assert.equal(projected.messages[0].toolResults.length, 1);
+		const excerpt = projected.messages[0].toolResults[0].excerpt;
+		assert.equal(excerpt.text, "\0");
+		assert.equal(excerpt.start, 0);
+		assert.equal(excerpt.end, 1);
+		assert.equal(excerpt.nextCursor, 1);
+		assert.equal(excerpt.complete, false);
+		assert.deepEqual(projected.continuationRequest, {
+			kind: "result_slice",
+			result_handle: TARGET_HANDLE,
+			result_cursor: 1,
+			result_limit: 1,
+		});
+	});
+
+	it("never changes an oversized targeted request into page continuation", async () => {
+		const activate = await loadGeneratedExtension();
+		const { pi, handlers } = makePi();
+		activate(pi);
+		pi.tool({ name: "read_session" }, async () => targetedEnvelope([4_096, 4_096, 4_096]));
+
+		const result = await handlers.get("read_session")!(TARGET_CALL_ID, {
+			session_id: "target",
+			result_handle: TARGET_HANDLE,
+			result_cursor: 0,
+			result_limit: 1,
+			verbose: true,
+		});
+		const projected = parseEnvelope(result);
+		assert.ok(finalJsonlBytes(result) <= FINAL_RESULT_MAX_BYTES);
+		assert.equal(projected.returned, 1);
+		assert.equal(projected.nextOffset, undefined);
+		assert.equal(projected.continuationRequest.kind, "result_slice");
+		assert.equal(projected.continuationRequest.result_cursor, 1);
+		assert.equal(projected.messages[0].toolResults[0].excerpt.end, 1);
+	});
+
+	it("preserves missing-size continuation truth and advances by one full scalar", async () => {
+		const activate = await loadGeneratedExtension();
+		for (const [label, text, expectedUnits] of [
+			["BMP", "A", 1],
+			["astral", "😀", 2],
+		] as const) {
+			const { pi, handlers } = makePi();
+			activate(pi);
+			const envelope = targetedEnvelope([], text, { type: "missing" });
+			envelope.partial = true;
+			envelope.truncatedBy = "transport_budget";
+			envelope.continuationRequest = {
+				kind: "result_slice",
+				result_handle: TARGET_HANDLE,
+				result_cursor: text.length,
+				result_limit: 1,
+			};
+			pi.tool({ name: "read_session" }, async () => envelope);
+
+			const result = await handlers.get("read_session")!(TARGET_CALL_ID, {
+				session_id: "target",
+				result_handle: TARGET_HANDLE,
+				result_cursor: 0,
+				result_limit: 1,
+			});
+			const projected = parseEnvelope(result);
+			const excerpt = projected.messages[0].toolResults[0].excerpt;
+			assert.equal(excerpt.text, text, label);
+			assert.equal(excerpt.end, expectedUnits, label);
+			assert.equal(excerpt.nextCursor, expectedUnits, label);
+			assert.equal(excerpt.complete, false, `${label} missing size cannot imply completion`);
+			assert.equal(projected.partial, true, label);
+			assert.equal(projected.continuationRequest.kind, "result_slice", label);
+			assert.equal(projected.continuationRequest.result_cursor, expectedUnits, label);
+		}
+	});
+
+	it("preserves role and timestamp projection-state flags", async () => {
+		const activate = await loadGeneratedExtension();
+		const { pi, handlers } = makePi();
+		activate(pi);
+		const envelope = {
+			total: 2,
+			returned: 2,
+			offsetStart: 0,
+			offsetEnd: 1,
+			messages: [{
+				index: 0,
+				role: "r".repeat(40),
+				roleTruncated: true,
+				ts: "t".repeat(80),
+				tsTruncated: true,
+			}, {
+				index: 1,
+				role: "assistant",
+				ts: null,
+				tsInvalid: true,
+			}],
+		};
+		pi.tool({ name: "read_session" }, async () => envelope);
+
+		const result = await handlers.get("read_session")!(TARGET_CALL_ID, {
+			session_id: "target",
+			limit: 2,
+		});
+		const projected = parseEnvelope(result);
+		assert.deepEqual(projected.messages[0], {
+			index: 0,
+			role: "r".repeat(32),
+			roleTruncated: true,
+			ts: "t".repeat(64),
+			tsTruncated: true,
+		});
+		assert.deepEqual(projected.messages[1], {
+			index: 1,
+			role: "assistant",
+			ts: null,
+			tsInvalid: true,
+		});
 	});
 
 	it("continues a sanitized upstream result slice from the emitted excerpt", async () => {

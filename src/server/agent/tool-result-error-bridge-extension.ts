@@ -33,8 +33,8 @@ const CORRELATION_HASH_CHUNK_UNITS = 64 * 1024;
 const CALL_MAP_MAX_ENTRIES = 256;
 const CORRELATION_DIGEST_HEX_UNITS = 40;
 const CORRELATION_KEY_UNITS = 5 + CORRELATION_DIGEST_HEX_UNITS;
-const SHARED_RUNNER_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-runner-boundary.v7");
-const SHARED_AGENT_SESSION_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-agent-session-boundary.v3");
+const SHARED_RUNNER_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-runner-boundary.v8");
+const SHARED_AGENT_SESSION_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-agent-session-boundary.v4");
 const CALL_MAP_DIAGNOSTICS = Symbol.for("bobbit.tool-result.read-session-call-map-diagnostics.v1");
 const SNAPSHOT_OMITTED = Symbol("snapshot-omitted");
 const SNAPSHOT_REJECTED = Symbol("snapshot-rejected");
@@ -720,16 +720,26 @@ function sanitizeProjection(candidate, params) {
   const messages = candidate.messages.map((message) => {
     const role = boundedString(message.role, 32);
     const out = { index: message.index, role: role && role.text.length > 0 ? role.text : "unknown" };
+    if (role?.truncated || message.roleTruncated === true) out.roleTruncated = true;
     if (message.projectionOmitted === true) {
       out.projectionOmitted = true;
       out.toolCallCount = message.toolCallCount;
       out.toolResultCount = message.toolResultCount;
       return out;
     }
-    if (message.ts === null) out.ts = null;
-    else {
+    if (message.ts === null) {
+      out.ts = null;
+      if (message.tsInvalid === true) out.tsInvalid = true;
+      if (message.tsTruncated === true) out.tsTruncated = true;
+    } else {
       const ts = boundedString(message.ts, 64);
-      if (ts) out.ts = ts.text;
+      if (ts) {
+        out.ts = ts.text;
+        if (ts.truncated || message.tsTruncated === true) out.tsTruncated = true;
+      } else if (message.tsInvalid === true) {
+        out.ts = null;
+        out.tsInvalid = true;
+      }
     }
     const text = boundedString(message.text, verbose ? 4096 : 800);
     if (text) {
@@ -962,11 +972,14 @@ function summaryMessage(message) {
   };
 }
 
-function firstExcerpt(envelope) {
+function firstExcerpt(envelope, resultHandle) {
   for (const message of envelope.messages) {
     if (!Array.isArray(message.toolResults)) continue;
     for (const result of message.toolResults) {
-      if (isObject(result.excerpt)) return { result, excerpt: result.excerpt };
+      if (!isObject(result.excerpt)) continue;
+      if (resultHandle === undefined || result.handle === resultHandle) {
+        return { message, result, excerpt: result.excerpt };
+      }
     }
   }
   return undefined;
@@ -976,22 +989,38 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function withTargetExcerpt(envelope, prefixUnits, requestedLimit) {
+function withTargetExcerpt(envelope, prefixUnits, requestedLimit, resultHandle) {
   const next = clone(envelope);
   delete next.nextOffset;
   delete next.wrapperDiagnostics;
   delete next.partial;
   delete next.truncatedBy;
   delete next.continuationRequest;
-  const target = firstExcerpt(next);
-  if (!target) return next;
+  const target = firstExcerpt(next, resultHandle);
+  if (!target || typeof target.result.handle !== "string") return undefined;
+
+  // A legal targeted partial has exactly one excerpt continuation. Other result
+  // metadata may remain on an ordinary fitted row, but its bodies are omitted.
+  for (const message of next.messages) {
+    if (!Array.isArray(message.toolResults)) continue;
+    for (const result of message.toolResults) {
+      if (result === target.result || !isObject(result.excerpt)) continue;
+      delete result.excerpt;
+      result.omitted = true;
+    }
+  }
+
   const sourceText = target.excerpt.text;
+  const sourceEnd = target.excerpt.end;
+  const sourceComplete = target.excerpt.complete === true;
   const text = scalarPrefix(sourceText, prefixUnits, true);
   const end = target.excerpt.start + text.length;
   target.excerpt.text = text;
   target.excerpt.end = end;
   const chars = target.result.size && target.result.size.chars;
-  const complete = isNonNegativeInteger(chars) ? end >= chars : end >= target.excerpt.end && target.excerpt.complete === true;
+  const complete = isNonNegativeInteger(chars)
+    ? end >= chars
+    : text.length === sourceText.length && end >= sourceEnd && sourceComplete;
   target.excerpt.complete = complete;
   target.excerpt.nextCursor = complete ? null : end;
   if (!complete) {
@@ -1007,16 +1036,68 @@ function withTargetExcerpt(envelope, prefixUnits, requestedLimit) {
   return next;
 }
 
-function fitTargetedEnvelope(envelope, params, requestedLimit, profile) {
-  const target = firstExcerpt(envelope);
+function compactTargetedEnvelope(envelope, resultHandle) {
+  const next = clone(envelope);
+  const target = firstExcerpt(next, resultHandle);
+  if (!target || typeof target.result.handle !== "string") return undefined;
+  const message = {
+    index: target.message.index,
+    role: "unknown",
+    toolResults: [target.result],
+  };
+  const compact = {
+    total: next.total,
+    returned: 1,
+    offsetStart: message.index,
+    offsetEnd: message.index,
+    messages: [message],
+  };
+  if (isNonNegativeInteger(next.matchCount)) compact.matchCount = next.matchCount;
+  return compact;
+}
+
+function firstScalarUnits(value) {
+  if (value.length === 0) return 0;
+  const first = value.charCodeAt(0);
+  return first >= 0xd800 && first <= 0xdbff ? 2 : 1;
+}
+
+function hasTargetProgress(envelope, resultHandle) {
+  const target = firstExcerpt(envelope, resultHandle);
+  if (!target) return false;
+  if (target.excerpt.complete === true) return target.excerpt.nextCursor === null;
+  return target.excerpt.end > target.excerpt.start
+    && target.excerpt.nextCursor === target.excerpt.end;
+}
+
+function fitTargetedCandidate(envelope, params, requestedLimit, profile, resultHandle) {
+  const target = firstExcerpt(envelope, resultHandle);
   if (!target || typeof target.result.handle !== "string") return undefined;
   const sourceLength = target.excerpt.text.length;
-  let low = 0;
-  let high = sourceLength;
+  const chars = target.result.size && target.result.size.chars;
+  const requiresProgress = isNonNegativeInteger(chars)
+    ? target.excerpt.start < chars
+    : target.excerpt.complete !== true;
+  if (requiresProgress && sourceLength === 0) return undefined;
+
+  // Completion removes continuation metadata and is not strictly monotonic with
+  // excerpt length, so test the complete available prefix before binary search.
+  const fullEnvelope = withTargetExcerpt(envelope, sourceLength, requestedLimit, resultHandle);
+  if (fullEnvelope && hasTargetProgress(fullEnvelope, resultHandle)) {
+    const fullValue = actualValue(fullEnvelope, params);
+    if (fits(fullValue, profile)) return fullValue;
+  }
+
+  let low = requiresProgress ? firstScalarUnits(target.excerpt.text) : 0;
+  let high = sourceLength - 1;
   let best;
   while (low <= high) {
     const mid = Math.floor((low + high) / 2);
-    const candidate = withTargetExcerpt(envelope, mid, requestedLimit);
+    const candidate = withTargetExcerpt(envelope, mid, requestedLimit, resultHandle);
+    if (!candidate || !hasTargetProgress(candidate, resultHandle)) {
+      low = mid + 1;
+      continue;
+    }
     const value = actualValue(candidate, params);
     if (fits(value, profile)) {
       best = value;
@@ -1025,10 +1106,18 @@ function fitTargetedEnvelope(envelope, params, requestedLimit, profile) {
       high = mid - 1;
     }
   }
-  if (best) return best;
-  const progress = withTargetExcerpt(envelope, 1, requestedLimit);
-  const progressValue = actualValue(progress, params);
-  return fits(progressValue, profile) ? progressValue : undefined;
+  return best;
+}
+
+function fitTargetedEnvelope(envelope, params, requestedLimit, profile) {
+  const resultHandle = params.result_handle;
+  if (typeof resultHandle !== "string") return undefined;
+  const ordinary = fitTargetedCandidate(envelope, params, requestedLimit, profile, resultHandle);
+  if (ordinary) return ordinary;
+  const compact = compactTargetedEnvelope(envelope, resultHandle);
+  return compact
+    ? fitTargetedCandidate(compact, params, requestedLimit, profile, resultHandle)
+    : undefined;
 }
 
 function fitPage(candidate, projection, params, profile) {
@@ -1082,13 +1171,17 @@ function boundReadSessionResult(result, params, profile = transportProfile("", f
   const projection = sanitizeProjection(envelope, params);
   const canonical = preserveUpstreamCompletion(envelope, projection.messages, projection);
   const direct = actualValue(canonical, params);
-  if (fits(direct, profile)) return direct;
 
+  // Targeted reads have only result-slice semantics. Always rebuild their
+  // completion/continuation from the selected excerpt, even when an upstream
+  // page-shaped response would otherwise fit, and never fall through to paging.
   if (projection.targeted) {
     const targeted = fitTargetedEnvelope(canonical, params, projection.excerptLimit, profile);
     if (targeted && fits(targeted, profile)) return targeted;
+    return unrecognizedResult(safeResult, params);
   }
 
+  if (fits(direct, profile)) return direct;
   const paged = fitPage(envelope, projection, params, profile);
   if (paged && fits(paged, profile)) return paged;
   return unrecognizedResult(safeResult, params);
