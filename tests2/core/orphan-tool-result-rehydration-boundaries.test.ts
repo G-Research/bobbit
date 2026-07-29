@@ -978,6 +978,70 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(manager.sessions.get(ps.id)?.promptQueue.isEmpty).toBe(true);
 	});
 
+	it("retains a complete staged auto-selection tuple for a legacy role replacement without a redundant thinking read", async () => {
+		invalidateModelCache();
+		const file = hostTranscript("assign-role-legacy-complete-tuple");
+		const role = {
+			name: "legacy-complete-tuple-role",
+			label: "Legacy complete tuple role",
+			promptTemplate: "Preserve the complete verified tuple",
+			accessory: "replacement-accessory",
+			model: `${FIXTURE_MODEL_PROVIDER}/${FIXTURE_MODEL_ID}`,
+		};
+		const roleManager = {
+			getRole: vi.fn((name: string) => name === role.name ? role : undefined),
+			listRoles: vi.fn(() => [role]),
+		};
+		const ps = persisted("assign-role-legacy-complete-tuple", file, {
+			effectiveThinkingLevel: undefined,
+		});
+		const store = mutableStore(ps);
+		let replacementStateReads = 0;
+		let replacement: any;
+		registerRpcBridgeFactory((options: Record<string, any>) => {
+			replacement = recordingBridge(() => {}, bridgeTuple(options));
+			const readState = replacement.getState.bind(replacement);
+			replacement.getState = vi.fn(async () => {
+				replacementStateReads += 1;
+				if (replacementStateReads === 4) {
+					return { success: false, error: "fixture redundant thinking read failed" };
+				}
+				return readState();
+			});
+			return replacement;
+		});
+		const manager: any = new BaseSessionManager({
+			preferencesStore,
+			roleManager: roleManager as any,
+		});
+		manager._testStore = store;
+		managers.push(manager);
+		const applyThinking = vi.spyOn(manager, "tryApplyDefaultThinkingLevel");
+		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
+		oldBridge.stop = vi.fn(async () => {});
+		const original = liveSession(ps.id, oldBridge, { unsubscribe: vi.fn() });
+		manager.sessions.set(ps.id, original);
+
+		await expect(manager.assignRole(ps.id, role)).resolves.toBe(true);
+
+		expect(applyThinking, "LEGACY_STAGED_COMPLETE_TUPLE_RAN_REDUNDANT_THINKING_READ").not.toHaveBeenCalled();
+		expect(tupleUpdates(store), "LEGACY_STAGED_COMPLETE_TUPLE_WAS_DISCARDED").toEqual([{
+			modelProvider: FIXTURE_MODEL_PROVIDER,
+			modelId: FIXTURE_MODEL_ID,
+			effectiveThinkingLevel: FIXTURE_THINKING_LEVEL,
+		}]);
+		expect({
+			provider: ps.modelProvider,
+			modelId: ps.modelId,
+			thinkingLevel: ps.effectiveThinkingLevel,
+		}).toEqual({
+			provider: FIXTURE_MODEL_PROVIDER,
+			modelId: FIXTURE_MODEL_ID,
+			thinkingLevel: FIXTURE_THINKING_LEVEL,
+		});
+		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(replacement);
+	});
+
 	it.each([
 		{ label: "generic errored", error: "fixture provider failure" },
 		{ label: "poisoned-history", error: ORPHAN_ERROR },
@@ -1461,9 +1525,9 @@ describe("executable SessionManager rehydration boundaries", () => {
 		const modelNameSpy = vi.spyOn(manager, "_writeModelNameFile");
 		const roleTupleVerified = deferred<void>();
 		const releaseRoleVerification = deferred<void>();
-		const realTryApplyThinking = manager.tryApplyDefaultThinkingLevel.bind(manager);
-		manager.tryApplyDefaultThinkingLevel = vi.fn(async (target: any) => {
-			const result = await realTryApplyThinking(target);
+		const realTryAutoSelect = manager.tryAutoSelectModel.bind(manager);
+		manager.tryAutoSelectModel = vi.fn(async (target: any) => {
+			const result = await realTryAutoSelect(target);
 			if (target.rpcClient === roleBridge) {
 				roleTupleVerified.resolve();
 				await releaseRoleVerification.promise;
