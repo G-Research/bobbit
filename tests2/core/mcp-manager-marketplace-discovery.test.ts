@@ -6,7 +6,7 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { describe, it } from "vitest";
+import { afterAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -26,6 +26,21 @@ import type {
   ResolvedMcpContribution,
 } from "../../src/server/mcp/mcp-manager.ts";
 import type { McpServerConfig, McpToolDef, McpToolResult } from "../../src/server/mcp/mcp-types.ts";
+
+// McpManager intentionally discovers user-level Claude and Bobbit config. Point
+// those roots at this file's temporary fixture before any manager is created so
+// reload tests cannot connect a developer's real MCP servers.
+const discoveryFixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-marketplace-discovery-"));
+const discoveryFixtureHome = path.join(discoveryFixtureRoot, "home");
+const discoveryFixtureHeadquarters = path.join(discoveryFixtureRoot, "headquarters");
+fs.mkdirSync(discoveryFixtureHome, { recursive: true });
+fs.mkdirSync(discoveryFixtureHeadquarters, { recursive: true });
+process.env.HOME = discoveryFixtureHome;
+process.env.USERPROFILE = discoveryFixtureHome;
+process.env.BOBBIT_DIR = discoveryFixtureHeadquarters;
+afterAll(() => {
+  fs.rmSync(discoveryFixtureRoot, { recursive: true, force: true });
+});
 
 class StubMcpClient {
   public connected = false;
