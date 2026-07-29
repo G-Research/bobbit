@@ -7,6 +7,7 @@ import { extensionSystemAuthor } from "../agent/message-author.js";
 import { LOCAL_USER_AUTHOR } from "../../shared/message-author.js";
 import type { ThinkingLevel } from "../../shared/thinking-levels.js";
 import type { RateLimiter } from "../auth/rate-limit.js";
+import { redactSensitive } from "../auth/redact.js";
 import { validateToken } from "../auth/token.js";
 import type { SandboxTokenStore } from "../auth/sandbox-token.js";
 import type { ProjectContextManager } from "../agent/project-context-manager.js";
@@ -1175,8 +1176,9 @@ export function handleWebSocketConnection(
 					} catch (err: any) {
 						// The runtime helper has already corrected both optimistic tuple fields
 						// and either verified rollback or replaced an unverifiable bridge.
-						console.error(`[ws-handler] set_model failed for session ${session.id} (${msg.provider}/${msg.modelId}):`, err?.message || err);
-						send(ws, { type: "error", message: `Failed to switch model: ${err?.message || err}`, code: "SET_MODEL_FAILED" });
+						const safeError = redactSensitive(String(err?.message || err));
+						console.error(`[ws-handler] set_model failed for session ${session.id} (${msg.provider}/${msg.modelId}):`, safeError);
+						send(ws, { type: "error", message: `Failed to switch model: ${safeError}`, code: "SET_MODEL_FAILED" });
 					}
 					break;
 				case "set_image_model": {
@@ -1200,10 +1202,11 @@ export function handleWebSocketConnection(
 					try {
 						await applyRuntimeSessionThinkingSelection(sessionManager, session, msg.level, broadcast);
 					} catch (err: any) {
-						console.error(`[ws-handler] set_thinking_level failed for session ${session.id} (${msg.level}):`, err?.message || err);
+						const safeError = redactSensitive(String(err?.message || err));
+						console.error(`[ws-handler] set_thinking_level failed for session ${session.id} (${msg.level}):`, safeError);
 						send(ws, {
 							type: "error",
-							message: `Failed to switch thinking level: ${err?.message || err}`,
+							message: `Failed to switch thinking level: ${safeError}`,
 							code: "SET_THINKING_LEVEL_FAILED",
 						});
 					}

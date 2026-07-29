@@ -3,6 +3,7 @@
 // Bucket: v2-core | Method: direct in-memory mocks | Classification: clean
 
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { afterEach, describe, it, vi } from "vitest";
 
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
@@ -10,6 +11,7 @@ import { handleSetupFailure } from "../../src/server/agent/session-setup.ts";
 import { redactSensitive } from "../../src/server/auth/redact.js";
 import { BOBBIT_SYSTEM_AUTHOR } from "../../src/server/agent/message-author.js";
 import { applyModelString, type ReviewModelRpc } from "../../src/server/agent/review-model-override.js";
+import { handleWebSocketConnection } from "../../src/server/ws/handler.ts";
 
 afterEach(() => vi.useRealTimers());
 
@@ -33,6 +35,147 @@ function assertRedacted(text: string) {
 	assert.equal(text.includes(BEARER), false, "bearer token must be redacted");
 	assert.match(text, /<redacted-(?:api-key|token)>/, "redaction marker should remain visible");
 }
+
+class FakeWebSocket extends EventEmitter {
+	readyState = 1;
+	readonly sent: any[] = [];
+
+	send(data: string, cb?: (err?: Error) => void): void {
+		this.sent.push(JSON.parse(data));
+		cb?.();
+	}
+
+	close(code?: number, reason?: string): void {
+		this.readyState = 3;
+		this.emit("close", code, reason);
+	}
+}
+
+let runtimeHarnessCounter = 0;
+
+async function makeRuntimeThinkingHarness(failRecovery = false): Promise<{
+	ws: FakeWebSocket;
+	restartCalls: () => number;
+}> {
+	const sessionId = `runtime-thinking-redaction-${++runtimeHarnessCounter}`;
+	const ws = new FakeWebSocket();
+	const clients = new Set<any>();
+	let thinkingLevel = "high";
+	let thinkingCalls = 0;
+	let restarts = 0;
+	const session: any = {
+		id: sessionId,
+		status: "idle",
+		statusVersion: 1,
+		title: "Runtime thinking redaction",
+		clients,
+		eventBuffer: { size: 0 },
+		promptQueue: { toArray: () => [] },
+		cwd: process.cwd(),
+		rpcClient: {
+			async getState() {
+				return {
+					success: true,
+					data: {
+						model: { provider: "anthropic", id: "claude-opus-5" },
+						thinkingLevel,
+					},
+				};
+			},
+			async setModel() {
+				if (failRecovery) throw new Error("rollback model unavailable");
+			},
+			async setThinkingLevel(level: string) {
+				thinkingCalls++;
+				if (thinkingCalls === 1) {
+					throw new Error(`thinking provider unavailable: api_key=${API_KEY}; Authorization: Bearer ${BEARER}`);
+				}
+				thinkingLevel = level;
+			},
+		},
+	};
+	const persisted = {
+		modelProvider: "anthropic",
+		modelId: "claude-opus-5",
+		effectiveThinkingLevel: "high",
+	};
+	const sessionManager: any = {
+		getSession: (id: string) => id === sessionId ? session : undefined,
+		getArchivedSession: () => undefined,
+		addClient: (_id: string, client: any) => clients.add(client),
+		removeClient: (_id: string, client: any) => clients.delete(client),
+		getPersistedSession: () => persisted,
+		getImageModelForSession: () => undefined,
+		withSessionCostInState: (_id: string, data: unknown) => data,
+		getSessionCostUpdate: () => undefined,
+		getPendingToolPermission: () => undefined,
+		getProjectContextManager: () => undefined,
+		persistSessionModel: () => assert.fail("failed thinking selection must not persist"),
+		updateModelNameFile: () => assert.fail("failed thinking selection must not update model file"),
+		async restartAgent() {
+			restarts++;
+			throw new Error(`recovery provider unavailable: api_key=${API_KEY}; Authorization: Bearer ${BEARER}`);
+		},
+	};
+
+	handleWebSocketConnection(
+		ws as any,
+		sessionId,
+		{ socket: { remoteAddress: "127.0.0.1" } } as any,
+		sessionManager,
+		"unused-token",
+		{ isRateLimited: () => false, recordFailure: () => {} } as any,
+		undefined,
+		true,
+	);
+	ws.emit("message", JSON.stringify({ type: "auth", token: "ignored" }));
+	await Promise.resolve();
+	return { ws, restartCalls: () => restarts };
+}
+
+async function waitForErrorFrame(ws: FakeWebSocket, code: string): Promise<any> {
+	for (let attempt = 0; attempt < 50; attempt++) {
+		const frame = ws.sent.find((message) => message.type === "error" && message.code === code);
+		if (frame) return frame;
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+	assert.fail(`timed out waiting for ${code}`);
+}
+
+describe("runtime model error redaction", () => {
+	it("redacts raw setThinkingLevel provider errors in WebSocket responses and logs", async () => {
+		const { ws, restartCalls } = await makeRuntimeThinkingHarness();
+		const captured = captureConsole("error");
+		try {
+			ws.emit("message", JSON.stringify({ type: "set_thinking_level", level: "medium" }));
+			const frame = await waitForErrorFrame(ws, "SET_THINKING_LEVEL_FAILED");
+			assert.match(frame.message, /thinking provider unavailable/);
+			assertRedacted(frame.message);
+			assertRedacted(captured.lines.join("\n"));
+			assert.equal(restartCalls(), 0, "a verified rollback should keep the bridge live");
+		} finally {
+			captured.restore();
+			ws.close();
+		}
+	});
+
+	it("redacts runtime recovery errors in WebSocket responses and logs", async () => {
+		const { ws, restartCalls } = await makeRuntimeThinkingHarness(true);
+		const captured = captureConsole("error");
+		try {
+			ws.emit("message", JSON.stringify({ type: "set_thinking_level", level: "medium" }));
+			const frame = await waitForErrorFrame(ws, "SET_THINKING_LEVEL_FAILED");
+			assert.match(frame.message, /thinking provider unavailable/);
+			assert.match(frame.message, /runtime selection recovery failed: recovery provider unavailable/);
+			assertRedacted(frame.message);
+			assertRedacted(captured.lines.join("\n"));
+			assert.equal(restartCalls(), 1);
+		} finally {
+			captured.restore();
+			ws.close();
+		}
+	});
+});
 
 describe("model setup error redaction", () => {
 	it("redactSensitive masks API-key assignments, bearer headers, and prefixed keys", () => {
