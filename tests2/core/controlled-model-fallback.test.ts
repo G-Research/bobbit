@@ -250,6 +250,7 @@ async function exerciseAutoSelect(options: {
 	]);
 	const manager = {
 		preferencesStore: { get: (key: string) => options.prefs[key] },
+		_setupInitialThinkingAuthorities: new Map(),
 		resolveRoleModel: () => options.roleModel,
 		resolveRoleThinkingLevel: () => options.roleThinking,
 		async resolveCurrentCatalogThinkingLevel(model: string, _role: string | undefined, _projectId: string | undefined, preferred: string) {
@@ -713,6 +714,20 @@ async function createInheritedThinkingSession(
 		const projectId = `project-${sessionId}`;
 		const worktreePath = path.join(BOUNDARY_TMP_ROOT, `prebuilt-${sessionId}`);
 		fs.mkdirSync(worktreePath, { recursive: true });
+		// The setup-failure canary deliberately rejects after claiming this fake
+		// prebuilt worktree. Seed a second live owner so failure cleanup exercises
+		// the shared-worktree guard instead of launching an unrelated real Git cleanup.
+		fixture.store.put({
+			id: `shared-owner-${sessionId}`,
+			title: "Shared fixture owner",
+			cwd: worktreePath,
+			worktreePath,
+			repoPath: BOUNDARY_TMP_ROOT,
+			branch: `fixture/${sessionId}`,
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			agentSessionFile: "",
+		});
 		fixture.manager.worktreePools.set(projectId, {
 			claim: vi.fn(async () => ({ worktreePath })),
 		});
