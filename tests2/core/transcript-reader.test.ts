@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import type { WorkerOptions } from "node:worker_threads";
 import {
+	createTranscriptProjectionWorkMetricsForTests,
 	createTranscriptRegexPoolForTests,
 	createTranscriptResultHandle,
 	measureTranscriptCorrelationOperationsForTests,
@@ -757,6 +758,133 @@ describe("transcript-reader / agent call correlation", () => {
 			blockIndex: 0,
 		});
 		assert.equal(message.toolResults[1].ref, message.toolCalls[0].ref);
+	});
+});
+
+describe("transcript-reader / lazy agent result canonicalization", () => {
+	function largePiTranscript(resultCount: number, bodyUnits: number): {
+		text: string;
+		bodies: string[];
+	} {
+		const lines: string[] = [];
+		const bodies: string[] = [];
+		for (let index = 0; index < resultCount; index++) {
+			const body = `result-${index}\n${String.fromCharCode(97 + index % 26).repeat(bodyUnits)}`;
+			bodies.push(body);
+			lines.push(JSON.stringify({
+				type: "message",
+				message: {
+					role: "assistant",
+					content: [{
+						type: "toolCall",
+						id: `large-call-${index}`,
+						name: `large-tool-${index}`,
+						arguments: { index },
+					}],
+				},
+			}));
+			lines.push(JSON.stringify({
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolCallId: `large-call-${index}`,
+					status: index % 2 === 0 ? "ok" : "error",
+					content: [
+						{ type: "text", text: body.slice(0, 9) },
+						{ content: [{ type: "text", text: body.slice(9) }] },
+					],
+				},
+			}));
+		}
+		return { text: lines.join("\n") + "\n", bodies };
+	}
+
+	it("canonicalizes and hashes only a limit-one tail result, then targets only that handle", async () => {
+		const { text, bodies } = largePiTranscript(48, 64 * 1024);
+		const selectedBody = bodies.at(-1)!;
+		const sessionId = "lazy-large-pi-results";
+		const pageWork = createTranscriptProjectionWorkMetricsForTests();
+		const options = {
+			...memoryTranscript(text),
+			projection: "agent" as const,
+			sessionId,
+			workMetricsForTests: pageWork,
+		};
+
+		const page = await readTranscript({ offset: -1, limit: 1, includeToolResults: false }, options);
+		assert.ok(Buffer.byteLength(JSON.stringify(page), "utf8") <= READ_SESSION_AGENT_ENVELOPE_MAX_BYTES);
+		assert.equal(page.returned, 1);
+		assert.equal(page.messages[0].index, 95);
+		const result = (page.messages[0] as any).toolResults[0];
+		assert.equal(result.name, "large-tool-47");
+		assert.equal(result.status, "error");
+		assert.deepEqual(result.size, {
+			type: "array",
+			blocks: 2,
+			chars: selectedBody.length,
+			lines: 2,
+			bytes: Buffer.byteLength(selectedBody, "utf8"),
+		});
+		assert.equal(result.handle, createTranscriptResultHandle(sessionId, 95, 0, selectedBody));
+		assert.deepEqual((page.correlations as any)[result.ref], {
+			name: "large-tool-47",
+			messageIndex: 94,
+			blockIndex: 0,
+		});
+		assert.deepEqual(pageWork, {
+			callArgumentsCanonicalized: 0,
+			resultBodiesCanonicalized: 1,
+			resultBodiesHashed: 1,
+			canonicalResultUnits: selectedBody.length,
+			peakRetainedCanonicalResultUnits: selectedBody.length,
+		});
+
+		const sliceWork = createTranscriptProjectionWorkMetricsForTests();
+		const slice = await readTranscript({
+			resultHandle: result.handle,
+			resultCursor: 9,
+			resultLimit: 37,
+		}, {
+			...options,
+			workMetricsForTests: sliceWork,
+		});
+		const excerpt = (slice.messages[0] as any).toolResults[0].excerpt;
+		assert.equal(excerpt.start, 9);
+		assert.equal(excerpt.end, 46);
+		assert.equal(excerpt.text, selectedBody.slice(9, 46));
+		assert.deepEqual(sliceWork, {
+			callArgumentsCanonicalized: 0,
+			resultBodiesCanonicalized: 1,
+			resultBodiesHashed: 1,
+			canonicalResultUnits: selectedBody.length,
+			peakRetainedCanonicalResultUnits: selectedBody.length,
+		});
+	});
+
+	it("streams regex result bodies without retaining them and re-materializes only the selected row", async () => {
+		const { text, bodies } = largePiTranscript(6, 16 * 1024);
+		const sentinel = bodies[3].slice(0, 8);
+		const work = createTranscriptProjectionWorkMetricsForTests();
+		const envelope = await readTranscript({
+			pattern: `^${sentinel}`,
+			limit: 1,
+			includeToolResults: false,
+		}, {
+			...memoryTranscript(text),
+			projection: "agent",
+			sessionId: "lazy-regex-results",
+			workMetricsForTests: work,
+		});
+
+		assert.equal(envelope.matchCount, 1);
+		assert.equal(envelope.messages[0].index, 7);
+		assert.equal(JSON.stringify(envelope).includes(bodies[3]), false);
+		const result = (envelope.messages[0] as any).toolResults[0];
+		assert.equal(result.size.chars, bodies[3].length);
+		assert.equal(result.omitted, true);
+		assert.equal(work.resultBodiesCanonicalized, bodies.length + 1);
+		assert.equal(work.resultBodiesHashed, 1);
+		assert.equal(work.peakRetainedCanonicalResultUnits, Math.max(...bodies.map((body) => body.length)));
 	});
 });
 
