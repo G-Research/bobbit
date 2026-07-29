@@ -54,7 +54,7 @@ Add a portable regression fixture that creates a symlinked temp-root alias when 
 
 ### Extension-host confinement
 
-The extension-host source already has the correct canonical comparison pattern in `src/server/extension-host/path-guard.ts`: `realpathSync` is applied to both root and candidate before `path.relative`. The reported `extension-host-channel-registry` filename is not in the current `tests2/tests-map.json` v2-core inventory, so it could not be rerun at this checkout. When restoring/adding it, ensure its worker bootstrap passes a canonical pack root to the confinement loader or uses `isPackPathWithinRoot()` rather than independently comparing a real candidate against lexical `packRoot`.
+The extension-host source already has the correct canonical comparison pattern in `src/server/extension-host/path-guard.ts`: `realpathSync` is applied to both root and candidate before `path.relative`. The reported `extension-host-channel-registry` filename is not in the current `tests2/tests-map.json` v2-core inventory, so it could not be rerun at this checkout. **Unconditional deliverable:** add (or restore) an inventoried v2-core regression test, registered in `tests2/tests-map.json`, that exercises extension-host confinement with a lexical pack root and a canonical (symlink-resolved) module candidate — using a symlinked temp-root fixture where the platform permits and the injected `realpathSync` seam otherwise — asserting the confinement loader accepts in-root modules and rejects out-of-root ones regardless of spelling. Its worker bootstrap must pass a canonical pack root to the confinement loader or use `isPackPathWithinRoot()` rather than independently comparing a real candidate against lexical `packRoot`.
 
 Audit targets with lexical containment calls include:
 
@@ -131,7 +131,7 @@ Global rule for all implementation work under this design: do not weaken asserti
 
 ## Coordination with `goal/fix-anthropic-c76d3af7`
 
-Commit `3505711e` (transcript-sanitizer canonicalization + MCP discovery fixture isolation) is applied here by cherry-pick so the identical patch deduplicates on merge. After the OAuth branch lands on the primary branch, merge the updated primary into this goal branch and verify no duplicate/conflicting hunks remain in `src/server/agent/transcript-sanitizer.ts` and `tests2/core/mcp-manager-marketplace-discovery.test.ts` before final verification runs.
+Commit `3505711e` (transcript-sanitizer canonicalization + MCP discovery fixture isolation) is applied here by cherry-pick so the identical patch deduplicates on integration. After the OAuth branch lands on the primary branch, **rebase this goal branch onto the detected primary branch** (per the goal spec) and verify no duplicate/conflicting hunks remain in `src/server/agent/transcript-sanitizer.ts` and `tests2/core/mcp-manager-marketplace-discovery.test.ts` before final verification runs.
 
 ## Durable test-authoring rules
 
@@ -149,6 +149,6 @@ Add `docs/testing-v2/cross-os-test-authoring.md` and a one-line AGENTS.md pointe
 1. Run the three representative DOM files above under v2-dom with retry disabled for diagnosis, then the complete DOM project.
 2. Run transcript trust/recovery and MCP discovery files with a symlink alias fixture and isolated HOME.
 3. Run base-ref, project UI, and tools cascade integration files alone and together.
-4. Run `npm run check`, then five consecutive `npm run test:unit` executions on each available OS. Record Node versions and whether symlink privileges were native or seam-simulated.
+4. Run `npm run check`, then five consecutive full unit-gate executions on each available OS **with retries disabled** (e.g. `npx vitest run --retry=0` over the same project set as `test:unit`, or `test:unit` with a retry-override env/flag added for this purpose). A run counts as green only if zero tests failed on first attempt; if the runner reports any retried test, the verification fails — the configured `retry: 3` must never be load-bearing. Record Node versions and whether symlink privileges were native or seam-simulated.
 5. Run the full `npm run test:browser` gate once after all changes to prove the browser suite is unaffected (in addition to the concurrent smoke subsets in §6).
 6. **Unavailable-OS coverage:** only macOS is guaranteed locally. Windows and Linux constraints are covered by (a) the seam-simulated regression matrix above (separators, CRLF, case, symlink-denied environments all exercised on every OS), and (b) CI: `.github/workflows/build-unit-gate.yml` currently runs only `ubuntu-latest` on Node 22.19.0 — extend it with an OS matrix (`ubuntu-latest`, `windows-latest`, `macos-latest`) so the unit gate is continuously exercised on all three; additionally include a Node 26 job on at least one OS so the unavailable-`localStorage` runtime class (§1) stays pinned across Node versions. The PR description must record exactly which platforms were verified natively, which via CI, and which via simulation seams.
