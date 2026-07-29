@@ -123,10 +123,27 @@ export function detectSymlinkRoot(
 }
 
 function canonicalProjectPath(rootPath: string): string {
-  let resolved = path.resolve(rootPath);
-  try { resolved = path.resolve(fs.realpathSync(resolved)); } catch { /* textual fallback */ }
-  const normalized = resolved.replace(/\\/g, "/").replace(/\/+$/, "");
-  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+  const resolved = path.resolve(rootPath);
+  // Keep a nonexistent suffix lexical, but canonicalize the longest existing
+  // prefix so temp-root aliases (/var vs /private/var) have one identity.
+  let existing = resolved;
+  const suffix: string[] = [];
+  while (true) {
+    try {
+      const canonical = path.resolve(fs.realpathSync(existing));
+      const combined = path.join(canonical, ...suffix.reverse());
+      const normalized = combined.replace(/\\/g, "/").replace(/\/+$/, "");
+      return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+    } catch {
+      const parent = path.dirname(existing);
+      if (parent === existing) {
+        const normalized = resolved.replace(/\\/g, "/").replace(/\/+$/, "");
+        return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+      }
+      suffix.push(path.basename(existing));
+      existing = parent;
+    }
+  }
 }
 
 function sameProjectPath(a: string, b: string): boolean {
@@ -507,16 +524,14 @@ export class ProjectRegistry {
    * duplicate-path guard for `register()` and must match exactly what the
    * caller passed. */
   findByCwd(cwd: string): RegisteredProject | undefined {
-    const resolveReal = (p: string) => {
-      try { return fs.realpathSync(p); } catch { return p; }
-    };
-    const normalized = path.resolve(resolveReal(cwd)).replace(/\\/g, "/").toLowerCase();
+    const normalized = canonicalProjectPath(cwd);
     let best: RegisteredProject | undefined;
     let bestLen = 0;
     for (const p of this.projects.values()) {
       if (p.hidden) continue;
-      const root = path.resolve(resolveReal(p.rootPath)).replace(/\\/g, "/").toLowerCase();
-      if ((normalized === root || normalized.startsWith(root + "/")) && root.length > bestLen) {
+      const root = canonicalProjectPath(p.rootPath);
+      const relative = path.relative(root, normalized);
+      if ((relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))) && root.length > bestLen) {
         best = p;
         bestLen = root.length;
       }

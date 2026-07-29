@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { promises as nodeFs, type Dirent } from "node:fs";
+import fs, { promises as nodeFs, type Dirent } from "node:fs";
 import path from "node:path";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import type { SessionManager, ArchivedSessionWorktreeGroup, ArchivedSessionWorktreeItem, ArchivedSessionWorktreeScanResponse, ArchivedSessionWorktreeSelectionPreset, ArchivedSessionWorktreeSession, ArchivedWorktreeReason, ArchivedWorktreeReasonCategory, ArchivedWorktreeSelectionCategory, CleanupArchivedSessionWorktreesRequest, CleanupArchivedSessionWorktreesResponse, ArchivedSessionWorktreeCleanupResult } from "./session-manager.js";
@@ -243,7 +243,27 @@ function isBobbitOwnedBranch(branch: string | undefined): boolean {
 	return !!branch && (branch.startsWith("session/") || branch.startsWith("goal/") || branch.startsWith("staff-") || isBobbitPoolBranch(branch));
 }
 
-function norm(p?: string): string | undefined { return normalizeWorktreeHostPath(p); }
+function canonicalExistingPrefix(input: string): string {
+	const resolved = path.resolve(input);
+	let existing = resolved;
+	const suffix: string[] = [];
+	while (true) {
+		try { return path.join(fs.realpathSync(existing), ...suffix.reverse()); }
+		catch {
+			const parent = path.dirname(existing);
+			if (parent === existing) return resolved;
+			suffix.push(path.basename(existing));
+			existing = parent;
+		}
+	}
+}
+
+// Inventory records may preserve a lexical TMPDIR spelling while Git and the
+// filesystem report its canonical spelling. Canonicalize only the existing
+// prefix; persisted/nonexistent suffixes remain lexical and never gain access.
+function norm(p?: string): string | undefined {
+	return p ? normalizeWorktreeHostPath(canonicalExistingPrefix(p)) : undefined;
+}
 function repoKey(repoPath: string | undefined): string { return norm(repoPath) ?? ""; }
 function stableId(prefix: string, ...parts: Array<string | undefined>): string {
 	return `${prefix}:${createHash("sha1").update(parts.map(p => p ?? "").join("\0")).digest("hex").slice(0, 16)}`;

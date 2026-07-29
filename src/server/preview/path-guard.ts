@@ -61,9 +61,9 @@ export function resolveAssetPath(baseDir: string, rel: string | null | undefined
 	try {
 		resolvedReal = fs.realpathSync(resolved);
 	} catch {
-		// File doesn't exist; check that the *unresolved* path is contained
-		// before reporting 404 (prevents leaking which paths exist outside).
-		if (!isContained(resolved, baseReal)) {
+		// Do not canonicalize a user-supplied missing path. Compare the lexical
+		// pair instead: baseReal may spell /private/var while baseDir spells /var.
+		if (!isContained(resolved, path.resolve(baseDir))) {
 			return { ok: false, status: 400, error: "Path traversal rejected" };
 		}
 		return { ok: false, status: 404, error: "File not found" };
@@ -88,8 +88,6 @@ export function resolveAssetPath(baseDir: string, rel: string | null | undefined
 }
 
 function isContained(child: string, parent: string): boolean {
-	if (child === parent) return true;
-	const sep = path.sep;
-	const parentWithSep = parent.endsWith(sep) ? parent : parent + sep;
-	return child.startsWith(parentWithSep);
+	const relative = path.relative(parent, child);
+	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }

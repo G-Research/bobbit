@@ -29,9 +29,10 @@ import path from "node:path";
  * @returns true when `fileAbs` is safe to read/import, false when it escapes.
  */
 export function isPackPathWithinRoot(rootAbs: string, fileAbs: string): boolean {
-	// 1. Lexical check (defense in depth): fileAbs must be inside rootAbs.
+	// 1. Keep the lexical result for missing targets, but do not reject yet:
+	// rootAbs may be /var/... while fileAbs is its /private/var/... realpath.
 	const rel = path.relative(rootAbs, fileAbs);
-	if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return false;
+	const lexicalContained = rel !== "" && !rel.startsWith(`..${path.sep}`) && rel !== ".." && !path.isAbsolute(rel);
 
 	// 2. Realpath check: resolve symlinks on BOTH paths and require the target's
 	//    realpath to stay under the pack root's realpath (rejects symlink escape).
@@ -46,11 +47,12 @@ export function isPackPathWithinRoot(rootAbs: string, fileAbs: string): boolean 
 	try {
 		fileReal = fs.realpathSync(fileAbs);
 	} catch (err: any) {
-		// Missing target: tolerate — the caller's read/stat surfaces not-found.
-		if (err && err.code === "ENOENT") return true;
+		// Missing target: tolerate only when its lexical spelling is in-root.
+		// A nonexistent path cannot be canonically proven safe.
+		if (err && err.code === "ENOENT") return lexicalContained;
 		return false;
 	}
 	const realRel = path.relative(rootReal, fileReal);
-	if (realRel === "" || realRel.startsWith("..") || path.isAbsolute(realRel)) return false;
+	if (realRel === "" || realRel.startsWith(`..${path.sep}`) || realRel === ".." || path.isAbsolute(realRel)) return false;
 	return true;
 }

@@ -49,6 +49,24 @@ function trySymlink(target: string, linkPath: string): boolean {
 }
 
 describe("isPackPathWithinRoot", () => {
+	it("accepts lexical pack roots and canonical module paths through a symlinked temp root", () => {
+		const canonicalRoot = path.join(tmp, "canonical-pack-root");
+		const lexicalRoot = path.join(tmp, "lexical-pack-root");
+		fs.mkdirSync(path.join(canonicalRoot, "tools"), { recursive: true });
+		const inside = path.join(canonicalRoot, "tools", "inside.js");
+		const outside = path.join(tmp, "outside-pack-root.js");
+		fs.writeFileSync(inside, "export default 1;");
+		fs.writeFileSync(outside, "export default 2;");
+		try {
+			fs.symlinkSync(canonicalRoot, lexicalRoot, process.platform === "win32" ? "junction" : "dir");
+		} catch (error) {
+			throw new Error(`Unable to create extension-host temp-root alias: ${String(error)}`);
+		}
+
+		assert.equal(isPackPathWithinRoot(lexicalRoot, fs.realpathSync(inside)), true);
+		assert.equal(isPackPathWithinRoot(lexicalRoot, outside), false);
+	});
+
 	it("allows a normal in-pack file", () => {
 		const group = path.join(tmp, "case-ok", "group");
 		fs.mkdirSync(group, { recursive: true });
