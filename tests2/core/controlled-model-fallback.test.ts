@@ -246,6 +246,14 @@ async function exerciseAutoSelect(options: {
 		async resolveCurrentCatalogThinkingLevel(model: string, _role: string | undefined, _projectId: string | undefined, preferred: string) {
 			return model.includes("opus-5") || !["xhigh", "max"].includes(preferred) ? preferred : "high";
 		},
+		async resolveCurrentCatalogPreferredThinkingLevel(
+			model: string,
+			role: string | undefined,
+			projectId: string | undefined,
+			preferred: string,
+		) {
+			return this.resolveCurrentCatalogThinkingLevel(model, role, projectId, preferred);
+		},
 		resolveStoreForSession: () => store,
 		async requireCurrentCatalogSpawnModel(model: string) {
 			if (!currentCatalogModels.has(model)) {
