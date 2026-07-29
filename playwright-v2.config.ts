@@ -16,6 +16,12 @@ import { existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { seedTransformCacheForRunDir } from "./scripts/testing-v2/pwtest-cache.js";
+import { capturePlaywrightBrowserRegistry } from "./tests2/harness/run-isolation.js";
+
+// This config is evaluated before browser workers import the isolated gateway
+// harness. Pin the host Playwright cache now; workers can then isolate HOME for
+// Bobbit config discovery without making Chromium resolve into their empty home.
+capturePlaywrightBrowserRegistry();
 
 function e2eTempRoot(): string {
 	if (existsSync("/.dockerenv")) return "/tmp";

@@ -1,16 +1,20 @@
 import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+	capturePlaywrightBrowserRegistry,
 	CREDENTIAL_ENV_PATTERN,
 	createRunChild,
 	getRunRoot,
 	installRunIsolation,
 	isOwnedRunPath,
+	PLAYWRIGHT_BROWSERS_PATH_ENV,
+	resolvePlaywrightBrowserRegistry,
 	isolateCredentialEnv,
 } from "../harness/run-isolation.js";
 
 const savedEnv = new Map<string, string | undefined>();
-for (const key of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN", "HOME", "USERPROFILE", "BOBBIT_DIR"]) savedEnv.set(key, process.env[key]);
+for (const key of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN", "HOME", "USERPROFILE", "BOBBIT_DIR", "XDG_CACHE_HOME", "LOCALAPPDATA", PLAYWRIGHT_BROWSERS_PATH_ENV]) savedEnv.set(key, process.env[key]);
 afterEach(() => {
 	for (const [key, value] of savedEnv) {
 		if (value === undefined) delete process.env[key];
@@ -45,6 +49,19 @@ describe("workflow run isolation", () => {
 		restore();
 		expect(process.env.ANTHROPIC_API_KEY).toBe("fake");
 		expect(CREDENTIAL_ENV_PATTERN.test("GOOGLE_API_KEY")).toBe(true);
+	});
+
+	it("keeps Playwright's browser registry outside the isolated home", () => {
+		delete process.env[PLAYWRIGHT_BROWSERS_PATH_ENV];
+		const hostHome = join(getRunRoot(), "playwright-host-home");
+		process.env.HOME = hostHome;
+		process.env.USERPROFILE = hostHome;
+		const expected = resolvePlaywrightBrowserRegistry();
+		expect(capturePlaywrightBrowserRegistry()).toBe(expected);
+		installRunIsolation();
+		expect(process.env[PLAYWRIGHT_BROWSERS_PATH_ENV]).toBe(expected);
+		expect(process.env.HOME).not.toBe(hostHome);
+		expect(expected).not.toContain(process.env.HOME!);
 	});
 
 	it("keeps workflow harnesses free of fixed ports, timestamp-only roots, and unowned cleanup", () => {
