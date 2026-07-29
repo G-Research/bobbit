@@ -116,7 +116,7 @@ export default defineConfig({
 					environment: "happy-dom",
 					pool: "threads" as const,
 					isolate: true,
-					setupFiles: tier1SetupFiles,
+					setupFiles: [...tier1SetupFiles, "tests2/harness/v2-dom-environment.ts"],
 					include: execution.dom,
 				},
 			},

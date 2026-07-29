@@ -26,13 +26,18 @@ function setFetchResponder(fn: (url: string, init: any) => { status: number; bod
 	responder = fn;
 }
 
-async function waitFor(fn: () => boolean, timeout = 5000): Promise<void> {
-	const deadline = Date.now() + timeout;
-	while (Date.now() < deadline) {
-		if (fn()) return;
-		await new Promise((r) => setTimeout(r, 10));
-	}
-	throw new Error("waitFor timed out");
+async function settleErrorDetails(): Promise<void> {
+	const existing = document.querySelector("error-details") as { updateComplete: Promise<unknown> } | null;
+	const details = existing ?? await new Promise<{ updateComplete: Promise<unknown> }>((resolve) => {
+		const observer = new MutationObserver(() => {
+			const element = document.querySelector("error-details") as { updateComplete: Promise<unknown> } | null;
+			if (!element) return;
+			observer.disconnect();
+			resolve(element);
+		});
+		observer.observe(document.body, { childList: true, subtree: true });
+	});
+	await details.updateComplete;
 }
 
 beforeEach(() => {
@@ -55,8 +60,7 @@ describe("createGoal — descriptive error forwarding", () => {
 		const result = await createGoal("", "/tmp", { projectId: "p1" });
 		expect(result).toBeNull();
 
-		// Dialog renders asynchronously (dynamic import of dialogs.js).
-		await waitFor(() => !!document.querySelector('[data-testid="error-details-message"]'));
+		await settleErrorDetails();
 
 		const message = document.querySelector('[data-testid="error-details-message"]');
 		expect(message?.textContent).toBe("Missing title");
@@ -86,7 +90,7 @@ describe("createGoal — descriptive error forwarding", () => {
 		const result = await createGoal("x", "/tmp", { projectId: "p1" });
 		expect(result).toBeNull();
 
-		await waitFor(() => !!document.querySelector('[data-testid="error-details-message"]'));
+		await settleErrorDetails();
 		expect(document.querySelector('[data-testid="error-details-message"]')?.textContent)
 			.toBe("Failed to create goal: 400");
 	});
