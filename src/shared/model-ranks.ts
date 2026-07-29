@@ -22,10 +22,10 @@ function claudeOpus4Rank(id: string): number | undefined {
 }
 
 function claude5Family(id: string): "fable" | "opus" | "sonnet" | undefined {
-	// Match a complete bare/provider-prefixed Claude ID or a published regional
+	// Match a complete bare/provider-prefixed Claude ID or a regional/non-regional
 	// Bedrock profile. Do not rank arbitrary names that merely contain `opus-5`.
 	const match = id.toLowerCase().match(
-		/(?:^|\/)(?:claude-(fable|opus|sonnet)-5|(?:au|eu|global|jp|us)\.anthropic\.claude-(fable|opus|sonnet)-5)(?:$|[-.:])/,
+		/(?:^|\/)(?:claude-(fable|opus|sonnet)-5|(?:(?:au|eu|global|jp|us)\.)?anthropic\.claude-(fable|opus|sonnet)-5)(?:$|[-.:])/,
 	);
 	return (match?.[1] ?? match?.[2]) as "fable" | "opus" | "sonnet" | undefined;
 }

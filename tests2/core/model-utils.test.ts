@@ -249,6 +249,8 @@ describe("modelRecencyRank()", () => {
 		assert.equal(modelRecencyRank("claude-fable-5"), 113);
 		assert.equal(modelRecencyRank("claude-opus-5"), 112);
 		assert.equal(modelRecencyRank("claude-sonnet-5"), 111);
+		assert.equal(modelRecencyRank("anthropic.claude-fable-5"), 113);
+		assert.equal(modelRecencyRank("anthropic.claude-sonnet-5"), 111);
 		assert.equal(modelRecencyRank("eu.anthropic.claude-opus-5"), 112);
 		assert.equal(modelRecencyRank("amazon-bedrock/us.anthropic.claude-opus-5"), 112);
 		assert.equal(modelRecencyRank("anthropic/claude-opus-5"), 112);
