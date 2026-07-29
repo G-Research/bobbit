@@ -78,12 +78,16 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 
 		const GRACE = 80;
 		const t0 = Date.now();
-		await manager.forceAbort(session.id, GRACE);
+		const failure = await manager.forceAbort(session.id, GRACE).then(
+			() => undefined,
+			(error: unknown) => error,
+		);
 		const elapsed = Date.now() - t0;
 
+		assert.ok(failure instanceof Error, "failed replacement is propagated after the hard kill");
 		assert.equal(abortStarted.mock.calls.length, 1, "graceful abort() was attempted");
 		assert.equal(stop.mock.calls.length, 1, "force-kill stop() was called (didn't hang on abort)");
-		assert.ok(elapsed < 5000, `forceAbort resolved promptly (${elapsed}ms), not at the ~30s ack timeout`);
+		assert.ok(elapsed < 5000, `forceAbort settled promptly (${elapsed}ms), not at the ~30s ack timeout`);
 		assert.ok(elapsed >= GRACE - 20, `did not force-kill before the grace period (${elapsed}ms)`);
 	});
 
@@ -141,7 +145,9 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 		};
 		manager.sessions.set(session.id, session);
 
-		await manager.forceAbort(session.id, 30);
+		await manager.forceAbort(session.id, 30).catch(() => {
+			// This fixture intentionally stops replacement setup after capturing args.
+		});
 		assert.ok(captured, "buildToolActivationArgs was called during force-abort respawn");
 		return { kind: "args", allowed: captured!.allowed };
 	}
@@ -297,7 +303,9 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 		manager.sessions.set(session.id, session);
 		vi.spyOn(console, "error").mockImplementation(() => {});
 
-		await manager.forceAbort(session.id, 20);
+		await manager.forceAbort(session.id, 20).catch(() => {
+			// This fixture intentionally has no selectable replacement model.
+		});
 		await vi.waitFor(() => assert.equal(manager.lifecycleHub.dispatch.mock.calls.length, 1));
 
 		assert.equal(session.completedTurnCount, 3);

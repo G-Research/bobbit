@@ -1357,10 +1357,17 @@ export class RemoteAgent {
 
 	// ── Setters (Agent interface) ────────────────────────────────────
 
-	setModel(model: any): void {
+	setModel(model: any, thinkingLevel?: string): void {
+		const effectiveThinking = thinkingLevel ?? this._state.thinkingLevel;
 		this._state.model = model;
+		this._state.thinkingLevel = effectiveThinking as any;
 		this._clearProviderAuthRequired();
-		this.send({ type: "set_model", provider: model.provider, modelId: model.id });
+		this.send({
+			type: "set_model",
+			provider: model.provider,
+			modelId: model.id,
+			thinkingLevel: effectiveThinking,
+		});
 		state.chatPanel?.agentInterface?.requestUpdate();
 		this.emit({ type: "render" });
 	}
@@ -2243,7 +2250,7 @@ export class RemoteAgent {
 
 			case "error":
 				console.error(`[RemoteAgent] Server error: ${msg.message} (${msg.code})`);
-				if ((msg as any).code === "SET_MODEL_FAILED") {
+				if ((msg as any).code === "SET_MODEL_FAILED" || (msg as any).code === "SET_THINKING_LEVEL_FAILED") {
 					this.send({ type: "get_state" });
 				}
 				if ((msg as any).code === "GRANT_ERROR") {

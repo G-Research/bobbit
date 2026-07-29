@@ -34,6 +34,7 @@ fs.mkdirSync(stateDir, { recursive: true });
 process.env.BOBBIT_DIR = tmpRoot;
 
 const { SessionStore } = await import("../../src/server/agent/session-store.ts");
+const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
 type PersistedSession = import("../../src/server/agent/session-store.ts").PersistedSession;
 
 const STORE_FILE = path.join(stateDir, "sessions.json");
@@ -151,6 +152,75 @@ describe("restoreSession lastActivity gating", () => {
 // Source-level regression guard: the restoreSession event handler must keep
 // its `if (!restoring)` gate around the `session.lastActivity = Date.now()`
 // write. If a future refactor drops it, this test fails loudly.
+describe("verified model/thinking tuple persistence", () => {
+	it("persists provider, model id, and effective thinking in one recovery-critical update", () => {
+		const store = freshStore();
+		store.put(makeSession());
+		const updates: Array<Partial<PersistedSession>> = [];
+		const originalUpdate = store.update.bind(store);
+		store.update = ((id: string, fields: Partial<PersistedSession>) => {
+			updates.push(fields);
+			originalUpdate(id, fields as any);
+		}) as typeof store.update;
+		const manager = new SessionManager();
+		(manager as any)._testStore = store;
+
+		manager.persistSessionModel("sess-1", "anthropic", "claude-opus-5", "xhigh" as any);
+
+		assert.deepEqual(updates, [{
+			modelProvider: "anthropic",
+			modelId: "claude-opus-5",
+			effectiveThinkingLevel: "xhigh",
+		}]);
+		const persisted = new SessionStore(stateDir).get("sess-1");
+		assert.deepEqual(
+			{
+				provider: persisted?.modelProvider,
+				modelId: persisted?.modelId,
+				thinking: persisted?.effectiveThinkingLevel,
+			},
+			{ provider: "anthropic", modelId: "claude-opus-5", thinking: "xhigh" },
+		);
+	});
+
+	it("clamps against the exact live model, verifies read-back, then persists the tuple", async () => {
+		const store = freshStore();
+		store.put(makeSession());
+		const manager = new SessionManager();
+		(manager as any)._testStore = store;
+		let thinkingLevel = "medium";
+		const applied: string[] = [];
+		const session = {
+			id: "sess-1",
+			spawnPinnedThinkingLevel: "xhigh",
+			rpcClient: {
+				getState: async () => ({
+					success: true,
+					data: {
+						model: { provider: "anthropic", id: "claude-opus-4-5" },
+						thinkingLevel,
+					},
+				}),
+				setThinkingLevel: async (level: string) => {
+					applied.push(level);
+					thinkingLevel = level;
+					return { success: true };
+				},
+			},
+		};
+
+		await (manager as any).tryApplyDefaultThinkingLevel(session);
+
+		assert.deepEqual(applied, ["high"], "xhigh must clamp against the exact older Opus model");
+		assert.deepEqual(store.get("sess-1"), {
+			...makeSession(),
+			modelProvider: "anthropic",
+			modelId: "claude-opus-4-5",
+			effectiveThinkingLevel: "high",
+		});
+	});
+});
+
 describe("restoreSession source guard", () => {
 	it("session-manager.ts contains the restoring gate", async () => {
 		const src = fs.readFileSync(
@@ -179,7 +249,7 @@ describe("restoreSession source guard", () => {
 		);
 		const idx = src.indexOf("private async restoreSession(ps: PersistedSession)");
 		assert.ok(idx > 0, "restoreSession declaration not found");
-		const window = src.slice(idx, idx + 15_000);
+		const window = src.slice(idx, idx + 45_000);
 		// 1. derive and conservatively normalize a persisted AIGW model before pinning
 		const derivedIdx = window.indexOf("const psPersistedModel = ps.modelProvider && ps.modelId ? normalizeAigwModelString(`${ps.modelProvider}/${ps.modelId}`) : undefined");
 		// 2. guard the pin with isSpawnPinnableModelString(psPersistedModel)
@@ -192,5 +262,33 @@ describe("restoreSession source guard", () => {
 		assert.ok(guardIdx > derivedIdx, "restoreSession must guard the persisted pin with isSpawnPinnableModelString(psPersistedModel) after deriving it");
 		assert.ok(initialModelIdx > guardIdx, "restoreSession must assign bridgeOptions.initialModel = psPersistedModel inside the spawn-pinnable guard");
 		assert.ok(fallbackIdx > initialModelIdx, "restoreSession must fall back to role/default model resolution only after the persisted model branch");
+		assert.match(
+			window,
+			/resolveCurrentCatalogThinkingLevel\(\s*bridgeOptions\.initialModel,[\s\S]*?ps\.effectiveThinkingLevel[\s\S]*?bridgeOptions\.initialThinkingLevel/,
+			"restore must clamp durable effective thinking against the exact current catalog row",
+		);
+		const verifyModelIdx = window.indexOf("await this.tryAutoSelectModel(session)");
+		const verifyThinkingIdx = window.indexOf("await this.tryApplyDefaultThinkingLevel(session)", verifyModelIdx);
+		const idleIdx = window.indexOf('broadcastStatus(session, "idle")', verifyThinkingIdx);
+		assert.ok(verifyThinkingIdx > verifyModelIdx, "restore must verify effective thinking after exact model verification");
+		assert.ok(idleIdx > verifyThinkingIdx, "restore must verify and persist the tuple before broadcasting idle");
+	});
+
+	it("respawn, force-abort, and delegate paths carry durable effective thinking", () => {
+		const src = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-manager.ts"), "utf-8");
+		const roleStart = src.indexOf("const respawnPersisted = this.resolveStoreForSession(id).get(id);");
+		const roleWindow = src.slice(roleStart, roleStart + 8_000);
+		assert.match(roleWindow, /respawnPersisted\?\.effectiveThinkingLevel/);
+		assert.match(roleWindow, /await this\.tryApplyDefaultThinkingLevel\(stagedSession\)/);
+
+		const forceStart = src.indexOf("const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);");
+		const forceWindow = src.slice(forceStart, forceStart + 8_000);
+		assert.match(forceWindow, /forceRespawnPersisted\?\.effectiveThinkingLevel/);
+		assert.match(forceWindow, /await this\.tryApplyDefaultThinkingLevel\(session\)/);
+
+		const delegateStart = src.indexOf("async createDelegateSession(parentSessionId: string");
+		const delegateWindow = src.slice(delegateStart, delegateStart + 12_000);
+		assert.match(delegateWindow, /parentMeta\?\.effectiveThinkingLevel/);
+		assert.match(delegateWindow, /resolveCurrentCatalogThinkingLevel\(/);
 	});
 });

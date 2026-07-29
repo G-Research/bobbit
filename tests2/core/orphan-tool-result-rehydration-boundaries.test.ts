@@ -7,6 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { createMemFs } from "../harness/mem-fs.js";
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "orphan-rehydration-boundaries-"));
 const stateDir = path.join(tmpRoot, "state");
@@ -15,6 +16,8 @@ process.env.BOBBIT_AGENT_DIR = path.join(tmpRoot, "agent");
 fs.mkdirSync(stateDir, { recursive: true });
 
 const { activeAgentSessionsDir } = await import("../../src/server/agent/agent-session-path.ts");
+const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
+const { invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
 const {
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,
@@ -25,10 +28,40 @@ const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { containerPathToHost, registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
 const { sessionFsContextForAgentFile } = await import("../../src/server/agent/session-fs.ts");
-const { SessionManager, switchSessionPathForAgent } = await import("../../src/server/agent/session-manager.ts");
+const { SessionManager: BaseSessionManager, switchSessionPathForAgent } = await import("../../src/server/agent/session-manager.ts");
 const { executePlan } = await import("../../src/server/agent/session-setup.ts");
 const { initPromptDirs } = await import("../../src/server/agent/system-prompt.ts");
 const { loadOrCreateToken } = await import("../../src/server/auth/token.ts");
+const { applyRuntimeSessionModelSelection } = await import("../../src/server/ws/runtime-model-selection.ts");
+
+const FIXTURE_MODEL_PROVIDER = "orphan-boundary-mock";
+const FIXTURE_MODEL_ID = "orphan-boundary-model";
+const FIXTURE_THINKING_LEVEL = "off";
+const agentDir = process.env.BOBBIT_AGENT_DIR!;
+const modelsJsonPath = path.join(agentDir, "models.json");
+const preferencesStore = new PreferencesStore(
+	path.resolve("/memfs/orphan-rehydration-boundaries"),
+	createMemFs(),
+);
+preferencesStore.set("customProviders", [{
+	id: FIXTURE_MODEL_PROVIDER,
+	name: FIXTURE_MODEL_PROVIDER,
+	type: "manual",
+	baseUrl: "http://127.0.0.1:9",
+	apiKey: "test-key",
+	models: [{ id: FIXTURE_MODEL_ID, name: "Orphan Boundary Model" }],
+}]);
+preferencesStore.set("default.sessionModel", `${FIXTURE_MODEL_PROVIDER}/${FIXTURE_MODEL_ID}`);
+preferencesStore.set("default.sessionThinkingLevel", FIXTURE_THINKING_LEVEL);
+// The poison-recovery cases intentionally retain their explicit Anthropic tuple.
+preferencesStore.set("providerKey.anthropic", "test-anthropic-key");
+
+/** Ensure every SessionManager fixture sees the same deterministic selectable catalog. */
+class SessionManager extends BaseSessionManager {
+	constructor(options: any = {}) {
+		super({ ...options, preferencesStore });
+	}
+}
 
 initPromptDirs(stateDir);
 initAuthorSidecarDir(stateDir, {
@@ -44,6 +77,8 @@ const ORPHAN_ERROR =
 
 afterEach(() => {
 	registerRpcBridgeFactory(null);
+	invalidateModelCache();
+	fs.rmSync(modelsJsonPath, { force: true });
 	vi.restoreAllMocks();
 	while (managers.length > 0) {
 		const manager = managers.pop();
@@ -143,7 +178,13 @@ function realSandboxFixture(containerFile: string, containerId = "container-boun
 	};
 }
 
-function recordingBridge(onSwitch: (sessionPath: string) => void): any {
+function recordingBridge(
+	onSwitch: (sessionPath: string) => void,
+	initial?: { modelProvider: string; modelId: string; thinkingLevel: string },
+): any {
+	let modelProvider = initial?.modelProvider ?? FIXTURE_MODEL_PROVIDER;
+	let modelId = initial?.modelId ?? FIXTURE_MODEL_ID;
+	let thinkingLevel = initial?.thinkingLevel ?? FIXTURE_THINKING_LEVEL;
 	return {
 		running: true,
 		async start() {},
@@ -153,10 +194,22 @@ function recordingBridge(onSwitch: (sessionPath: string) => void): any {
 		async prompt() { return { success: true }; },
 		async steer() { return { success: true }; },
 		async abort() { return { success: true }; },
-		async getState() { return { success: true, data: {} }; },
+		async getState() {
+			return {
+				success: true,
+				data: { model: { provider: modelProvider, id: modelId }, thinkingLevel },
+			};
+		},
 		async getMessages() { return { success: true, data: { messages: [] } }; },
-		async setModel() { return { success: true }; },
-		async setThinkingLevel() { return { success: true }; },
+		async setModel(provider: string, nextModelId: string) {
+			modelProvider = provider;
+			modelId = nextModelId;
+			return { success: true };
+		},
+		async setThinkingLevel(nextThinkingLevel: string) {
+			thinkingLevel = nextThinkingLevel;
+			return { success: true };
+		},
 		async compact() { return { success: true }; },
 		async sendCommand(command: any) {
 			if (command?.type === "switch_session") onSwitch(command.sessionPath);
@@ -201,6 +254,38 @@ function failingSwitchBridge(
 	};
 }
 
+function bridgeTuple(options: Record<string, any>): { modelProvider: string; modelId: string; thinkingLevel: string } {
+	const model = String(options.initialModel ?? "");
+	const slash = model.indexOf("/");
+	if (slash <= 0 || slash === model.length - 1) throw new Error(`fixture requires an explicit model, got ${model}`);
+	return {
+		modelProvider: model.slice(0, slash),
+		modelId: model.slice(slash + 1),
+		thinkingLevel: options.initialThinkingLevel ?? "medium",
+	};
+}
+
+function mutableStore(record: Record<string, any>): any {
+	const updates: Array<Record<string, any>> = [];
+	return {
+		updates,
+		get: vi.fn(() => record),
+		getLive: vi.fn(() => [record]),
+		update: vi.fn((_id: string, patch: Record<string, any>) => {
+			updates.push({ ...patch });
+			Object.assign(record, patch);
+		}),
+		put: vi.fn(() => {}),
+		archive: vi.fn(() => {}),
+	};
+}
+
+function tupleUpdates(store: { updates: Array<Record<string, any>> }): Array<Record<string, any>> {
+	return store.updates.filter((patch) =>
+		["modelProvider", "modelId", "effectiveThinkingLevel"]
+			.some((key) => Object.prototype.hasOwnProperty.call(patch, key)));
+}
+
 function persisted(id: string, agentSessionFile: string, overrides: Record<string, any> = {}): any {
 	return {
 		id,
@@ -211,6 +296,9 @@ function persisted(id: string, agentSessionFile: string, overrides: Record<strin
 		createdAt: Date.now(),
 		lastActivity: Date.now(),
 		sandboxed: false,
+		modelProvider: FIXTURE_MODEL_PROVIDER,
+		modelId: FIXTURE_MODEL_ID,
+		effectiveThinkingLevel: FIXTURE_THINKING_LEVEL,
 		...overrides,
 	};
 }
@@ -265,7 +353,215 @@ function deferred<T = void>(): {
 	return { promise, resolve, reject };
 }
 
+function writeLegacyAigwCatalog(url: string): void {
+	fs.mkdirSync(agentDir, { recursive: true });
+	fs.writeFileSync(modelsJsonPath, JSON.stringify({
+		providers: {
+			aigw: {
+				baseUrl: url,
+				api: "openai-completions",
+				models: [{
+					id: "legacy-id",
+					name: "Legacy model",
+					contextWindow: 128_000,
+					maxTokens: 16_384,
+					reasoning: false,
+					input: ["text"],
+				}],
+			},
+		},
+	}), "utf8");
+}
+
+function makeLegacyAigwPreferences(label: string, url: string): InstanceType<typeof PreferencesStore> {
+	const prefs = new PreferencesStore(path.resolve(`/memfs/${label}`), createMemFs());
+	prefs.set("aigw.url", url);
+	return prefs;
+}
+
+function makeRoleThinkingManager(
+	label: string,
+	roleThinkingLevel: string | undefined,
+): { manager: any; role: any } {
+	const prefs = new PreferencesStore(path.resolve(`/memfs/${label}`), createMemFs());
+	prefs.set("providerKey.anthropic", "test-anthropic-key");
+	const role = {
+		name: "thinking-role",
+		label: "Thinking role",
+		promptTemplate: "Exercise exact thinking precedence",
+		accessory: "none",
+		...(roleThinkingLevel ? { thinkingLevel: roleThinkingLevel } : {}),
+		createdAt: 1,
+		updatedAt: 1,
+	};
+	const roleManager = {
+		getRole: vi.fn((name: string) => name === role.name ? role : undefined),
+		listRoles: vi.fn(() => [role]),
+	};
+	const manager: any = new BaseSessionManager({ preferencesStore: prefs, roleManager: roleManager as any });
+	managers.push(manager);
+	return { manager, role };
+}
+
 describe("executable SessionManager rehydration boundaries", () => {
+	it.each(["start", "switch", "read-back"] as const)(
+		"keeps the complete legacy AIGW tuple durable when normalized cold restore fails at %s",
+		async (failure) => {
+			const file = hostTranscript(`normalized-restore-${failure}`);
+			const url = "http://127.0.0.1:1/v1";
+			writeLegacyAigwCatalog(url);
+			invalidateModelCache();
+			const prefs = makeLegacyAigwPreferences(`normalized-restore-${failure}`, url);
+			const ps = persisted(`normalized-restore-${failure}`, file, {
+				modelProvider: "aigw",
+				modelId: "openai/legacy-id",
+				effectiveThinkingLevel: "high",
+			});
+			const durableBefore = {
+				modelProvider: ps.modelProvider,
+				modelId: ps.modelId,
+				effectiveThinkingLevel: ps.effectiveThinkingLevel,
+			};
+			const store = mutableStore(ps);
+			registerRpcBridgeFactory((options: Record<string, any>) => {
+				const bridge = recordingBridge(() => {}, bridgeTuple(options));
+				if (failure === "start") bridge.start = vi.fn(async () => { throw new Error("fixture start failed"); });
+				if (failure === "switch") bridge.sendCommand = vi.fn(async () => ({ success: false, error: "fixture switch failed" }));
+				if (failure === "read-back") bridge.getState = vi.fn(async () => ({ success: false, error: "fixture read-back failed" }));
+				return bridge;
+			});
+			const manager: any = new BaseSessionManager({ preferencesStore: prefs });
+			manager._testStore = store;
+			managers.push(manager);
+			vi.spyOn(console, "error").mockImplementation(() => {});
+
+			await expect(manager.restoreSession(ps)).rejects.toThrow();
+
+			expect({
+				modelProvider: ps.modelProvider,
+				modelId: ps.modelId,
+				effectiveThinkingLevel: ps.effectiveThinkingLevel,
+			}).toEqual(durableBefore);
+			expect(tupleUpdates(store)).toEqual([]);
+		},
+	);
+
+	it("atomically commits the normalized legacy AIGW tuple only after cold-restore verification", async () => {
+		const file = hostTranscript("normalized-restore-success");
+		const url = "http://127.0.0.1:1/v1";
+		writeLegacyAigwCatalog(url);
+		invalidateModelCache();
+		const prefs = makeLegacyAigwPreferences("normalized-restore-success", url);
+		const ps = persisted("normalized-restore-success", file, {
+			modelProvider: "aigw",
+			modelId: "openai/legacy-id",
+			effectiveThinkingLevel: "high",
+		});
+		const store = mutableStore(ps);
+		const optionsSeen: Record<string, any>[] = [];
+		registerRpcBridgeFactory((options: Record<string, any>) => {
+			optionsSeen.push({ ...options });
+			return recordingBridge(() => {}, bridgeTuple(options));
+		});
+		const manager: any = new BaseSessionManager({ preferencesStore: prefs });
+		manager._testStore = store;
+		managers.push(manager);
+		vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await manager.restoreSession(ps);
+
+		expect(optionsSeen[0]?.initialModel).toBe("aigw/legacy-id");
+		expect(tupleUpdates(store)).toEqual([{
+			modelProvider: "aigw",
+			modelId: "legacy-id",
+			effectiveThinkingLevel: "off",
+		}]);
+		expect({
+			modelProvider: ps.modelProvider,
+			modelId: ps.modelId,
+			effectiveThinkingLevel: ps.effectiveThinkingLevel,
+		}).toEqual({
+			modelProvider: "aigw",
+			modelId: "legacy-id",
+			effectiveThinkingLevel: "off",
+		});
+	});
+
+	it.each([
+		{ roleThinkingLevel: "xhigh", expected: "xhigh" },
+		{ roleThinkingLevel: undefined, expected: "high" },
+	])("assignRole gives explicit role thinking $roleThinkingLevel precedence and otherwise retains durable thinking", async ({ roleThinkingLevel, expected }) => {
+		invalidateModelCache();
+		const file = hostTranscript(`assign-role-thinking-${roleThinkingLevel ?? "durable"}`);
+		const ps = persisted(`assign-role-thinking-${roleThinkingLevel ?? "durable"}`, file, {
+			modelProvider: "anthropic",
+			modelId: "claude-opus-5",
+			effectiveThinkingLevel: "high",
+		});
+		const store = mutableStore(ps);
+		const { manager, role } = makeRoleThinkingManager(`assign-role-thinking-${roleThinkingLevel ?? "durable"}`, roleThinkingLevel);
+		manager._testStore = store;
+		const optionsSeen: Record<string, any>[] = [];
+		registerRpcBridgeFactory((options: Record<string, any>) => {
+			optionsSeen.push({ ...options });
+			return recordingBridge(() => {}, bridgeTuple(options));
+		});
+		const oldBridge = recordingBridge(() => {}, {
+			modelProvider: "anthropic",
+			modelId: "claude-opus-5",
+			thinkingLevel: "high",
+		});
+		oldBridge.stop = vi.fn(async () => {});
+		manager.sessions.set(ps.id, liveSession(ps.id, oldBridge, { unsubscribe: vi.fn() }));
+
+		await expect(manager.assignRole(ps.id, role)).resolves.toBe(true);
+
+		expect(optionsSeen[0]?.initialModel).toBe("anthropic/claude-opus-5");
+		expect(optionsSeen[0]?.initialThinkingLevel).toBe(expected);
+		expect(ps.effectiveThinkingLevel).toBe(expected);
+	});
+
+	it.each([
+		{ roleThinkingLevel: "xhigh", expected: "xhigh" },
+		{ roleThinkingLevel: undefined, expected: "high" },
+	])("forceAbort gives explicit role thinking $roleThinkingLevel precedence and otherwise retains durable thinking", async ({ roleThinkingLevel, expected }) => {
+		invalidateModelCache();
+		const file = hostTranscript(`force-abort-thinking-${roleThinkingLevel ?? "durable"}`);
+		const ps = persisted(`force-abort-thinking-${roleThinkingLevel ?? "durable"}`, file, {
+			role: "thinking-role",
+			modelProvider: "anthropic",
+			modelId: "claude-opus-5",
+			effectiveThinkingLevel: "high",
+		});
+		const store = mutableStore(ps);
+		const { manager } = makeRoleThinkingManager(`force-abort-thinking-${roleThinkingLevel ?? "durable"}`, roleThinkingLevel);
+		manager._testStore = store;
+		const optionsSeen: Record<string, any>[] = [];
+		registerRpcBridgeFactory((options: Record<string, any>) => {
+			optionsSeen.push({ ...options });
+			return recordingBridge(() => {}, bridgeTuple(options));
+		});
+		const oldBridge = recordingBridge(() => {}, {
+			modelProvider: "anthropic",
+			modelId: "claude-opus-5",
+			thinkingLevel: "high",
+		});
+		oldBridge.abort = vi.fn(() => new Promise(() => {}));
+		oldBridge.stop = vi.fn(async () => {});
+		oldBridge.getState = vi.fn(async () => ({ success: true, data: { sessionFile: file } }));
+		manager.sessions.set(ps.id, liveSession(ps.id, oldBridge, {
+			role: "thinking-role",
+			status: "streaming",
+			streamingStartedAt: Date.now(),
+			unsubscribe: vi.fn(),
+		}));
+
+		await manager.forceAbort(ps.id, 1);
+
+		expect(optionsSeen[0]?.initialModel).toBe("anthropic/claude-opus-5");
+		expect(optionsSeen[0]?.initialThinkingLevel).toBe(expected);
+		expect(ps.effectiveThinkingLevel).toBe(expected);
+	});
 	it("repairs a cold-restored host transcript before switch_session observes it", async () => {
 		const file = hostTranscript("cold-restore");
 		const switches: string[] = [];
@@ -741,6 +1037,202 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(oldBridge.prompt).toHaveBeenCalledTimes(1);
 		expect(oldBridge.prompt).toHaveBeenCalledWith("intent survives rollback", undefined);
 		expect(original.promptQueue.isEmpty).toBe(true);
+	});
+
+	it("does not let a failed role replacement roll durable tuple A over a concurrent runtime selection of tuple B", async () => {
+		invalidateModelCache();
+		const file = hostTranscript("assign-role-runtime-selection-race");
+		const replacementStart = deferred<void>();
+		const replacement = recordingBridge(() => {}, {
+			modelProvider: FIXTURE_MODEL_PROVIDER,
+			modelId: FIXTURE_MODEL_ID,
+			thinkingLevel: FIXTURE_THINKING_LEVEL,
+		});
+		replacement.start = vi.fn(() => replacementStart.promise);
+		replacement.stop = vi.fn(async () => {});
+		const ps = persisted("assign-role-runtime-selection-race", file);
+		const store = mutableStore(ps);
+		registerRpcBridgeFactory(() => replacement);
+		const manager: any = new SessionManager();
+		manager._testStore = store;
+		managers.push(manager);
+		const oldBridge = recordingBridge(() => {}, {
+			modelProvider: FIXTURE_MODEL_PROVIDER,
+			modelId: FIXTURE_MODEL_ID,
+			thinkingLevel: FIXTURE_THINKING_LEVEL,
+		});
+		oldBridge.stop = vi.fn(async () => {});
+		const original = liveSession(ps.id, oldBridge, {
+			unsubscribe: vi.fn(),
+			spawnPinnedModel: `${FIXTURE_MODEL_PROVIDER}/${FIXTURE_MODEL_ID}`,
+			spawnPinnedThinkingLevel: FIXTURE_THINKING_LEVEL,
+		});
+		manager.sessions.set(ps.id, original);
+
+		// assignRole has captured durable tuple A and is preparing its replacement,
+		// but the original bridge remains live until the two-phase swap commits.
+		const assignment = manager.assignRole(ps.id, {
+			name: "replacement-role",
+			promptTemplate: "Replacement role",
+			accessory: "replacement-accessory",
+		});
+		await vi.waitFor(() => expect(replacement.start).toHaveBeenCalledTimes(1));
+
+		const tupleB = {
+			provider: "anthropic",
+			id: "claude-opus-5",
+			thinkingLevel: "xhigh" as const,
+		};
+		await expect(applyRuntimeSessionModelSelection(
+			manager,
+			original,
+			tupleB.provider,
+			tupleB.id,
+			tupleB.thinkingLevel,
+			preferencesStore,
+		)).resolves.toEqual(tupleB);
+		expect({
+			provider: ps.modelProvider,
+			id: ps.modelId,
+			thinkingLevel: ps.effectiveThinkingLevel,
+		}).toEqual(tupleB);
+
+		// Fail after tuple B has committed. The role rollback must not replay its
+		// stale snapshot of tuple A over that newer verified durable selection.
+		replacementStart.reject(new Error("fixture staged role start failed after tuple B commit"));
+		await expect(assignment).rejects.toThrow("fixture staged role start failed after tuple B commit");
+
+		expect(manager.sessions.get(ps.id)).toBe(original);
+		expect({
+			provider: ps.modelProvider,
+			id: ps.modelId,
+			thinkingLevel: ps.effectiveThinkingLevel,
+		}, "SELECTION_REPLACEMENT_RACE: failed role replacement restored stale tuple A over committed tuple B")
+			.toEqual(tupleB);
+	});
+
+	it("does not let stale runtime recovery quarantine a newer canonical role replacement", async () => {
+		invalidateModelCache();
+		const file = hostTranscript("runtime-selection-role-replacement-race");
+		const raceProvider = "runtime-selection-role-race";
+		const tupleA = { provider: raceProvider, id: "tuple-a", thinkingLevel: "off" as const };
+		const tupleB = { provider: raceProvider, id: "tuple-b", thinkingLevel: "off" as const };
+		const requested = { provider: raceProvider, id: "tuple-c", thinkingLevel: "off" as const };
+		const racePreferences = new PreferencesStore(
+			path.resolve("/memfs/runtime-selection-role-race"),
+			createMemFs(),
+		);
+		racePreferences.set("customProviders", [{
+			id: raceProvider,
+			name: raceProvider,
+			type: "manual",
+			baseUrl: "http://127.0.0.1:9",
+			apiKey: "test-key",
+			models: [tupleA.id, tupleB.id, requested.id].map((id) => ({ id, name: id })),
+		}]);
+		const role = {
+			name: "replacement-role",
+			label: "Replacement role",
+			promptTemplate: "Replacement role",
+			accessory: "replacement-accessory",
+			model: `${tupleB.provider}/${tupleB.id}`,
+			thinkingLevel: tupleB.thinkingLevel,
+		};
+		const roleManager = {
+			getRole: vi.fn((name: string) => name === role.name ? role : undefined),
+			listRoles: vi.fn(() => [role]),
+		};
+		const ps = persisted("runtime-selection-role-replacement-race", file, {
+			modelProvider: tupleA.provider,
+			modelId: tupleA.id,
+			effectiveThinkingLevel: tupleA.thinkingLevel,
+		});
+		const store = mutableStore(ps);
+		store.archiveAsync = vi.fn(async () => {
+			ps.archived = true;
+			return true;
+		});
+
+		const replacement = recordingBridge(() => {}, {
+			modelProvider: tupleB.provider,
+			modelId: tupleB.id,
+			thinkingLevel: tupleB.thinkingLevel,
+		});
+		const replacementSetModel = replacement.setModel.bind(replacement);
+		replacement.setModel = vi.fn(async (provider: string, modelId: string) => {
+			if (provider === tupleA.provider && modelId === tupleA.id) return { success: true };
+			return replacementSetModel(provider, modelId);
+		});
+		replacement.stop = vi.fn(async () => {});
+		registerRpcBridgeFactory(() => replacement);
+
+		const manager: any = new BaseSessionManager({ preferencesStore: racePreferences, roleManager: roleManager as any });
+		manager._testStore = store;
+		manager.restartAgent = vi.fn(async () => {});
+		managers.push(manager);
+
+		const selectionSetModelStarted = deferred<void>();
+		const releaseSelectionSetModel = deferred<void>();
+		const original = recordingBridge(() => {}, {
+			modelProvider: tupleA.provider,
+			modelId: tupleA.id,
+			thinkingLevel: tupleA.thinkingLevel,
+		});
+		const originalSetModel = original.setModel.bind(original);
+		original.setModel = vi.fn(async (provider: string, modelId: string) => {
+			const result = await originalSetModel(provider, modelId);
+			if (provider === requested.provider && modelId === requested.id) {
+				selectionSetModelStarted.resolve();
+				await releaseSelectionSetModel.promise;
+			}
+			return result;
+		});
+		original.stop = vi.fn(async () => { original.running = false; });
+		const session = liveSession(ps.id, original, {
+			spawnPinnedModel: `${tupleA.provider}/${tupleA.id}`,
+			spawnPinnedThinkingLevel: tupleA.thinkingLevel,
+		});
+		manager.sessions.set(ps.id, session);
+
+		const selection = applyRuntimeSessionModelSelection(
+			manager,
+			session,
+			requested.provider,
+			requested.id,
+			requested.thinkingLevel,
+			racePreferences,
+		);
+		await selectionSetModelStarted.promise;
+		await expect(manager.assignRole(ps.id, role)).resolves.toBe(true);
+		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(replacement);
+		expect({
+			provider: ps.modelProvider,
+			id: ps.modelId,
+			thinkingLevel: ps.effectiveThinkingLevel,
+		}).toEqual(tupleB);
+
+		releaseSelectionSetModel.resolve();
+		await expect(selection).rejects.toThrow(/read-back mismatch/i);
+
+		expect(
+			manager.restartAgent,
+			"STALE_RUNTIME_RECOVERY_TARGETED_CANONICAL_REPLACEMENT",
+		).not.toHaveBeenCalled();
+		expect(replacement.setModel).not.toHaveBeenCalledWith(tupleA.provider, tupleA.id);
+		expect(original.stop).toHaveBeenCalledTimes(2);
+		expect(original.running).toBe(false);
+		expect(replacement.stop).not.toHaveBeenCalled();
+		expect(store.archiveAsync).not.toHaveBeenCalled();
+		expect(ps.archived).not.toBe(true);
+		expect(manager.sessions.get(ps.id)).toBe(session);
+		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(replacement);
+		expect(manager.isSessionLive(ps.id)).toBe(true);
+		expect(replacement.running).toBe(true);
+		expect({
+			provider: ps.modelProvider,
+			id: ps.modelId,
+			thinkingLevel: ps.effectiveThinkingLevel,
+		}, "STALE_RUNTIME_RECOVERY_QUARANTINED_CANONICAL_REPLACEMENT").toEqual(tupleB);
 	});
 
 	it("serializes concurrent assignRole replacements and leaves only the final bridge live", async () => {
@@ -1695,7 +2187,9 @@ describe("executable SessionManager rehydration boundaries", () => {
 		manager.sessions.set(ps.id, original);
 		vi.spyOn(console, "error").mockImplementation(() => {});
 
-		await manager.forceAbort(ps.id, 5);
+		await expect(manager.forceAbort(ps.id, 5)).rejects.toThrow(
+			"persisted conversation history is unavailable",
+		);
 
 		expect(switches).toEqual([]);
 		expect(replacement.stop).toHaveBeenCalledTimes(1);
@@ -1724,7 +2218,10 @@ describe("executable SessionManager rehydration boundaries", () => {
 		const successfulReplacement = recordingBridge((sessionPath) => successfulSwitches.push(sessionPath));
 		successfulReplacement.getState = vi.fn(async () => ({
 			success: true,
-			data: { model: { provider: "anthropic", id: "claude-sonnet-4-5" } },
+			data: {
+				model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+				thinkingLevel: "high",
+			},
 		}));
 		successfulReplacement.prompt = vi.fn(async (text: string) => {
 			successfulPrompts.push(text);
@@ -1743,6 +2240,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			cwd: sandboxed ? "/workspace" : tmpRoot,
 			modelProvider: "anthropic",
 			modelId: "claude-sonnet-4-5",
+			effectiveThinkingLevel: "high",
 			allowedTools: ["read"],
 		});
 		const manager: any = new SessionManager();
@@ -1875,7 +2373,10 @@ describe("executable SessionManager rehydration boundaries", () => {
 		const replacement = recordingBridge(() => {});
 		replacement.getState = vi.fn(async () => ({
 			success: true,
-			data: { model: { provider: "anthropic", id: "claude-sonnet-4-5" } },
+			data: {
+				model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+				thinkingLevel: "high",
+			},
 		}));
 		replacement.prompt = vi.fn(async (text: string) => {
 			successfulPrompts.push(text);
@@ -1890,6 +2391,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			cwd: "/workspace",
 			modelProvider: "anthropic",
 			modelId: "claude-sonnet-4-5",
+			effectiveThinkingLevel: "high",
 			allowedTools: ["read"],
 		});
 		const manager: any = new SessionManager();
@@ -2174,7 +2676,9 @@ describe("executable SessionManager rehydration boundaries", () => {
 		original.promptQueue.enqueue("queued user intent");
 		manager.sessions.set(ps.id, original);
 
-		await manager.forceAbort(ps.id, 5);
+		await expect(manager.forceAbort(ps.id, 5)).rejects.toThrow(
+			"sandbox realm is unavailable",
+		);
 
 		expect(manager.applySandboxWiring).toHaveBeenCalledTimes(1);
 		expect(replacement.start).not.toHaveBeenCalled();
@@ -2212,7 +2716,9 @@ describe("executable SessionManager rehydration boundaries", () => {
 		original.promptQueue.enqueue("queued user intent");
 		manager.sessions.set(ps.id, original);
 
-		await manager.forceAbort(ps.id, 5);
+		await expect(manager.forceAbort(ps.id, 5)).rejects.toThrow(
+			failure === "exception" ? "fixture switch timeout" : "fixture switch rejected",
+		);
 
 		expect(timeouts).toEqual([timeout]);
 		expect(stop).toHaveBeenCalledTimes(1);

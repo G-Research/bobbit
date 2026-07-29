@@ -12,13 +12,14 @@
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
-// Pi 0.81 also exposes provider-scoped `Models` with async catalog refresh/auth.
+import path from "node:path";
+// Pi also exposes provider-scoped `Models` with async catalog refresh/auth.
 // Bobbit intentionally stays on these synchronous static-catalog reads: its own
 // registry composes that snapshot with AI Gateway and local-provider discovery,
 // while credential refresh remains owned by the spawned coding-agent runtime.
 import { getBuiltinProviders, getBuiltinModels, getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import type { PreferencesStore } from "./preferences-store.js";
-import { globalAuthPath } from "../bobbit-dir.js";
+import { globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
 import { inferMeta, discoverAigwModels, getAigwUrl } from "./aigw-manager.js";
 import { getOpenAIModelAdditions } from "./openai-model-additions.js";
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
@@ -27,9 +28,12 @@ import { GOOGLE_GEMINI_CLI_PROVIDER, hasGoogleCodeAssistSpawnCredential } from "
 // These Pi providers require credential/runtime integration Bobbit does not yet
 // forward to host or sandbox agents. Keep the denylist provider-scoped so future
 // catalog additions cannot accidentally make their models selectable.
+const DEFERRED_SESSION_PROVIDER = "kimi-coding";
+
 const UPSTREAM_ONLY_BUILTIN_PROVIDERS = new Set([
 	"qwen-token-plan",
 	"qwen-token-plan-cn",
+	DEFERRED_SESSION_PROVIDER,
 ]);
 
 function getBobbitBuiltInProviders(): ReturnType<typeof getBuiltinProviders> {
@@ -65,6 +69,24 @@ export interface ApiModel {
 	sessionSelectable?: boolean;
 	/** Human-readable reason shown in the selector when `sessionSelectable === false`. */
 	sessionUnavailableReason?: string;
+}
+
+/**
+ * Resolve an exact provider/model tuple from Bobbit's current session catalog.
+ * The provider comparison is deliberately exact: Kimi-named IDs remain valid
+ * under supported AIGW, custom, local, Moonshot, and legacy gateway providers.
+ */
+export function findSessionSelectableModel(
+	models: readonly ApiModel[],
+	provider: string,
+	modelId: string,
+): ApiModel | undefined {
+	if (provider === DEFERRED_SESSION_PROVIDER) return undefined;
+	return models.find((model) =>
+		model.provider === provider
+		&& model.id === modelId
+		&& model.sessionSelectable !== false,
+	);
 }
 
 export interface CustomProviderConfig {
@@ -262,6 +284,59 @@ function builtInNumber(modelId: string, explicitValue: unknown, inferredValue: n
 	return explicit ?? inferredValue;
 }
 
+function comparableAigwUrl(value: unknown): string | undefined {
+	if (typeof value !== "string" || !value.trim()) return undefined;
+	try {
+		const url = new URL(value.trim());
+		if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+		return url.href.replace(/\/+$/, "");
+	} catch {
+		return undefined;
+	}
+}
+
+function readRetainedAigwModels(configuredUrl: string): ApiModel[] {
+	try {
+		const data = JSON.parse(fs.readFileSync(path.join(globalAgentDir(), "models.json"), "utf-8"));
+		const provider = data?.providers?.aigw;
+		const activeUrl = comparableAigwUrl(configuredUrl);
+		const retainedUrl = comparableAigwUrl(provider?.baseUrl);
+		if (!activeUrl || !retainedUrl || retainedUrl !== activeUrl || !Array.isArray(provider.models)) return [];
+
+		return provider.models.flatMap((model: any): ApiModel[] => {
+			if (!model || typeof model.id !== "string" || !model.id) return [];
+			const api = typeof model.api === "string" ? model.api : provider.api;
+			const baseUrl = typeof model.baseUrl === "string" ? model.baseUrl : provider.baseUrl;
+			if (typeof api !== "string" || typeof baseUrl !== "string") return [];
+			const input = Array.isArray(model.input)
+				? model.input.filter((item: unknown): item is "text" | "image" => item === "text" || item === "image")
+				: [];
+
+			return [{
+				id: model.id,
+				name: typeof model.name === "string" && model.name ? model.name : model.id,
+				provider: "aigw",
+				...(typeof model.upstreamProvider === "string" ? { upstreamProvider: model.upstreamProvider } : {}),
+				api,
+				baseUrl,
+				contextWindow: typeof model.contextWindow === "number" ? model.contextWindow : 0,
+				maxTokens: typeof model.maxTokens === "number" ? model.maxTokens : 0,
+				reasoning: model.reasoning === true,
+				...(model.thinkingLevelMap && typeof model.thinkingLevelMap === "object" ? { thinkingLevelMap: model.thinkingLevelMap } : {}),
+				input: input.length > 0 ? input : ["text"],
+				cost: model.cost && typeof model.cost === "object"
+					? model.cost
+					: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				...(model.headers && typeof model.headers === "object" ? { headers: model.headers } : {}),
+				...(model.compat && typeof model.compat === "object" ? { compat: model.compat } : {}),
+				authenticated: true,
+			}];
+		});
+	} catch {
+		return [];
+	}
+}
+
 async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 	const results: ApiModel[] = [];
 	const aigwUrl = getAigwUrl(prefs);
@@ -393,6 +468,12 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 			}
 		} catch (err) {
 			console.error("[model-registry] Failed to discover AI Gateway models:", err);
+			// Startup deliberately keeps the last atomically written models.json when
+			// discovery is unavailable. Keep that exact catalog selectable for restore
+			// and spawn validation too, but only when it belongs to this configured URL.
+			// A successful discovery never enters this branch, so omissions remain
+			// authoritative catalog drift and fail closed.
+			results.push(...readRetainedAigwModels(aigwUrl));
 		}
 	}
 
@@ -404,7 +485,9 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 		console.error("[model-registry] Failed to discover custom providers:", err);
 	}
 
-	return results;
+	// Enforce the exact deferred-provider boundary across every catalog source,
+	// including a custom provider alias. Never inspect model IDs here.
+	return results.filter((model) => model.provider !== DEFERRED_SESSION_PROVIDER);
 }
 
 // ── Authentication Detection ───────────────────────────────────────
@@ -697,114 +780,5 @@ function httpGetJson(url: string, apiKey?: string, timeoutMs = 10_000): Promise<
 
 // ── Model Recency Ranking ──────────────────────────────────────────
 
-// Re-export GPT_55_RECENCY_RANK from the shared module so server callers
-// who already pull from model-registry keep a stable import path. The
-// canonical declaration lives in `src/shared/model-ranks.ts` so the UI can
-// import it without crossing the server/web tsconfig boundary.
-import { GPT_55_RECENCY_RANK } from "../../shared/model-ranks.js";
-export { GPT_55_RECENCY_RANK };
-
-function claudeOpus4Minor(id: string): number | undefined {
-	// Keep in lockstep with src/ui/dialogs/ModelSelector.ts. Limit the minor
-	// capture to version-looking values so date-only IDs like
-	// claude-opus-4-20250514 remain the generic Opus 4 tier.
-	const match = id.toLowerCase().match(/claude-opus-4(?:-|\.)(\d{1,3})\b/);
-	return match ? Number(match[1]) : undefined;
-}
-
-function claudeOpus4Rank(id: string): number | undefined {
-	const minor = claudeOpus4Minor(id);
-	if (minor === undefined) return undefined;
-	if (minor === 1) return 96;
-	return 88 + minor * 2;
-}
-
-/**
- * Rank a model ID by recency/quality tier. Higher = newer/better.
- * Used to auto-select the best model when no preference is set.
- * Canonical server-side copy — also used by session-manager for auto-selection.
- */
-export function modelRecencyRank(id: string): number {
-	const s = id.toLowerCase();
-
-	// ── Anthropic Claude ──
-	const opus4Rank = claudeOpus4Rank(s);
-	if (opus4Rank !== undefined) return opus4Rank;
-	if (s.includes("claude-sonnet-4-6") || s.includes("claude-sonnet-4.6")) return 99;
-	if (s.includes("claude-sonnet-4-5") || s.includes("claude-sonnet-4.5")) return 97;
-	if (s.includes("claude-opus-4")) return 95;
-	if (s.includes("claude-sonnet-4") && !s.includes("4-5") && !s.includes("4.5") && !s.includes("4-6") && !s.includes("4.6")) return 94;
-	if (s.includes("claude-haiku-4-5") || s.includes("claude-haiku-4.5")) return 90;
-	if (s.includes("claude-3-7-sonnet") || s.includes("claude-3.7-sonnet")) return 80;
-	if (s.includes("claude-3-5-sonnet") || s.includes("claude-3.5-sonnet")) return 70;
-	if (s.includes("claude-3-5-haiku") || s.includes("claude-3.5-haiku")) return 65;
-	if (s.includes("claude-3-opus")) return 60;
-	if (s.includes("claude")) return 50;
-
-	// ── OpenAI ──
-	if (s.includes("gpt-5.5")) return GPT_55_RECENCY_RANK;
-	if (s.includes("gpt-5.4")) return 100;
-	if (s.includes("gpt-5.3")) return 98;
-	if (s.includes("gpt-5.2")) return 96;
-	if (s.includes("gpt-5.1")) return 94;
-	if (s.includes("gpt-5") && !s.includes("5.")) return 92;
-	if (s.includes("o4-mini")) return 91;
-	if (s.includes("o3-pro")) return 89;
-	if (s.includes("o3") && !s.includes("o3-mini")) return 88;
-	if (s.includes("o3-mini")) return 85;
-	if (s.includes("o1-pro")) return 80;
-	if (s.includes("o1") && !s.includes("o1-mini")) return 78;
-	if (s.includes("gpt-4o") && !s.includes("mini")) return 70;
-	if (s.includes("gpt-4.1")) return 68;
-	if (s.includes("gpt-4o-mini") || s.includes("gpt-4.1-mini")) return 65;
-	if (s.includes("gpt-4")) return 50;
-
-	// ── Google Gemini ──
-	if (s.includes("gemini-3.1-pro")) return 100;
-	if (s.includes("gemini-3-pro")) return 98;
-	if (s.includes("gemini-3.1-flash") || s.includes("gemini-3-flash")) return 95;
-	if (s.includes("gemini-2.5-pro")) return 90;
-	if (s.includes("gemini-2.5-flash") && !s.includes("lite")) return 85;
-	if (s.includes("gemini-2.5-flash-lite")) return 80;
-	if (s.includes("gemini-2.0")) return 60;
-	if (s.includes("gemini-1.5")) return 40;
-	if (s.includes("gemini")) return 30;
-
-	// ── xAI Grok ──
-	if (s.includes("grok-4")) return 100;
-	if (s.includes("grok-3") && !s.includes("mini")) return 90;
-	if (s.includes("grok-3-mini")) return 85;
-	if (s.includes("grok-2")) return 70;
-	if (s.includes("grok")) return 50;
-
-	// ── DeepSeek ──
-	if (s.includes("deepseek-v3.2")) return 95;
-	if (s.includes("deepseek-v3.1")) return 90;
-	if (s.includes("deepseek-r1")) return 88;
-	if (s.includes("deepseek-v3")) return 85;
-	if (s.includes("deepseek")) return 50;
-
-	// ── Qwen ──
-	if (s.includes("qwen3.5") || s.includes("qwen-3.5")) return 95;
-	if (s.includes("qwen3-coder") || s.includes("qwen-3-coder")) return 90;
-	if (s.includes("qwen3-next") || s.includes("qwen-3-next")) return 88;
-	if (s.includes("qwen3") || s.includes("qwen-3")) return 85;
-	if (s.includes("qwen")) return 50;
-
-	// ── Mistral ──
-	if (s.includes("devstral-medium")) return 90;
-	if (s.includes("magistral")) return 88;
-	if (s.includes("devstral")) return 85;
-	if (s.includes("codestral")) return 80;
-	if (s.includes("mistral-large")) return 75;
-	if (s.includes("mistral-medium")) return 70;
-	if (s.includes("mistral")) return 50;
-
-	// ── Llama ──
-	if (s.includes("llama-4") || s.includes("llama4")) return 90;
-	if (s.includes("llama-3.3") || s.includes("llama3-3")) return 80;
-	if (s.includes("llama-3.2") || s.includes("llama3-2")) return 70;
-	if (s.includes("llama")) return 50;
-
-	return 0;
-}
+// Preserve the server import path while using the browser-safe shared source.
+export { GPT_55_RECENCY_RANK, modelRecencyRank } from "../../shared/model-ranks.js";

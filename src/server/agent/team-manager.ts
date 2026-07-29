@@ -48,6 +48,7 @@ import {
 	type RecoveryFs,
 } from "./bounded-async-work.js";
 import { isHeadquartersProject } from "./project-registry.js";
+import { isSessionSelectableModelString } from "./google-code-assist.js";
 
 const execFile = promisify(execFileCb);
 
@@ -1891,6 +1892,14 @@ export class TeamManager {
 		if (!storedRole) {
 			throw new Error('Role "team-lead" not found. Ensure roles/team-lead.yaml exists.');
 		}
+		const teamLeadModel = storedRole.model || undefined;
+		const teamLeadModelSlash = teamLeadModel?.indexOf("/") ?? -1;
+		const teamLeadModelProvider = teamLeadModel && teamLeadModelSlash > 0
+			? teamLeadModel.slice(0, teamLeadModelSlash)
+			: undefined;
+		if (teamLeadModel && (teamLeadModelProvider === "kimi-coding" || !isSessionSelectableModelString(teamLeadModel))) {
+			throw new Error(`Team lead model "${teamLeadModel}" is not session-selectable`);
+		}
 		const teamLeadPromptTemplate = storedRole.promptTemplate;
 		const teamLeadPrompt = applyPromptConditionals(
 			teamLeadPromptTemplate
@@ -1939,7 +1948,7 @@ export class TeamManager {
 				sandboxBranch: sandboxed && !headquartersGoal && goal.branch ? goal.branch : undefined,
 				// Honour role-level model / thinking-level override (cascade-resolved above).
 				// Empty string falls through to undefined → system default.
-				initialModel: storedRole.model || undefined,
+				initialModel: teamLeadModel,
 				initialThinkingLevel: storedRole.thinkingLevel || undefined,
 				// A non-sandboxed polyrepo lead borrows the goal-owned component set;
 				// passing coordinates here persists them without provisioning another worktree.
@@ -2119,6 +2128,39 @@ export class TeamManager {
 		// Pause-cascade guard — in-process callers (team-lead extension
 		// invoking the team_spawn MCP tool) bypass REST. Defense-in-depth.
 		if (goal.paused) throw new GoalPausedError(goalId);
+
+		// A worker role overrides each field independently; otherwise inherit the
+		// lead's verified durable tuple. Narrow SessionManager test doubles may not
+		// expose persistence, so fall back to the existing live spawn mirror while
+		// production continues to prefer verified durable state.
+		const liveTeamLead = entry.teamLeadSessionId
+			? this.sessionManager.getSession(entry.teamLeadSessionId)
+			: undefined;
+		const getPersistedSession = (this.sessionManager as Partial<SessionManager>).getPersistedSession;
+		const persistedTeamLead = entry.teamLeadSessionId && typeof getPersistedSession === "function"
+			? getPersistedSession.call(this.sessionManager, entry.teamLeadSessionId) as {
+				modelProvider?: string;
+				modelId?: string;
+				effectiveThinkingLevel?: string;
+			} | undefined
+			: undefined;
+		const durableModel = persistedTeamLead?.modelProvider && persistedTeamLead.modelId
+			? `${persistedTeamLead.modelProvider}/${persistedTeamLead.modelId}`
+			: undefined;
+		const inheritedModel = durableModel || liveTeamLead?.spawnPinnedModel;
+		const initialModel = storedRoleDef.model || inheritedModel;
+		const modelSlash = initialModel?.indexOf("/") ?? -1;
+		const modelProvider = initialModel && modelSlash > 0 ? initialModel.slice(0, modelSlash) : undefined;
+		if (initialModel && (modelProvider === "kimi-coding" || !isSessionSelectableModelString(initialModel))) {
+			throw new Error(`Team worker model "${initialModel}" is not session-selectable`);
+		}
+		// Preserve role-over-durable-over-live precedence without clamping from model
+		// strings. SessionManager owns the final clamp against the exact catalog row.
+		const initialThinkingLevel = initialModel
+			? storedRoleDef.thinkingLevel
+				|| persistedTeamLead?.effectiveThinkingLevel
+				|| liveTeamLead?.spawnPinnedThinkingLevel
+			: undefined;
 
 		// repoPath is only set when the goal's cwd is inside a git repo.
 		// If absent, skip worktree creation and use the goal's cwd directly.
@@ -2309,10 +2351,10 @@ export class TeamManager {
 					// The base branch is local-ref-first because sandbox goal branches may be unpublished.
 					sandboxBranch: memberSandboxed && branchName ? branchName : undefined,
 					sandboxBaseBranch: memberSandboxed && branchName ? memberStartPoint : undefined,
-					// Honour role-level model / thinking-level override (cascade-resolved above).
-					// Empty string falls through to undefined → system default.
-					initialModel: storedRoleDef.model || undefined,
-					initialThinkingLevel: storedRoleDef.thinkingLevel || undefined,
+					// Role overrides win field-by-field; otherwise forward the lead's
+					// verified durable tuple for the final SessionManager clamp.
+					initialModel,
+					initialThinkingLevel,
 				},
 			);
 

@@ -2,15 +2,162 @@
 
 Bobbit depends on Pi for provider metadata, browser-side first-message streaming helpers, and the `pi-coding-agent` process that runs agent turns. Pi upgrades are runtime compatibility changes, not simple package bumps: they can affect browser bundle safety, model catalog reads, authentication, RPC lifecycle events, tool-result shapes, transcript metadata, compaction, sandbox credentials, and provider default selection.
 
-This page records the durable Bobbit-side contracts added or reaffirmed for the selected Pi `0.81.1` line:
+This page records the durable Bobbit-side contracts added or reaffirmed across Pi runtime upgrades. The selected runtime line pins these packages exactly and together:
 
-- `@earendil-works/pi-agent-core@0.81.1`
-- `@earendil-works/pi-ai@0.81.1`
-- `@earendil-works/pi-coding-agent@0.81.1`
+- `@earendil-works/pi-agent-core@0.82.1`
+- `@earendil-works/pi-ai@0.82.1`
+- `@earendil-works/pi-coding-agent@0.82.1`
 
-Keep all three packages pinned exactly to the same Pi patch. A mixed Pi line can compile while still breaking the spawned-agent runtime contract.
+A mixed Pi line can compile while still breaking the spawned-agent runtime contract.
 
-## Compatibility and release eligibility
+## Pi `0.82.1` compatibility outcome
+
+| Decision | Status |
+|---|---|
+| Compatibility | **Accepted with deferred findings.** Dependency alignment, Opus 5 catalog/ranking, exact live selection, and the covered persistence, spawn, and inheritance paths passed. The conflicting role/default restore case described below remains deferred. |
+| Tests | **Passed.** The final verification run passed `npm run build`, `npm run check`, `npm run test:unit`, `npm run test:browser`, and `npm run test:e2e`. Security review passed; optional agent QA was not enabled. |
+| Immutable upstream audit | **Non-zero.** The isolated packed-consumer audit reports one high finding: Pi coding-agent's published shrinkwrap pins `brace-expansion@5.0.7`, affected by [`GHSA-mh99-v99m-4gvg`](https://github.com/advisories/GHSA-mh99-v99m-4gvg). This is immutable class C upstream packaging, not an audit-clean result. |
+| Accepted-risk status | **Accepted.** The exact `brace-expansion@5.0.7` finding remains visible and was explicitly accepted without an audit fix, override, vendor, fork, repack, or weakened check. It is not a merge or release-eligibility blocker for this delivery. |
+| Implementation verification | **Human-bypassed.** The latest implementation review failed on the deferred findings below. A human overseer advanced the gate for urgency; bypass is not a passing review result. |
+| Release eligibility | **True under the amended acceptance and explicit human decision.** This delivery is release-eligible, but it is neither audit-clean nor free of deferred findings. Any additional audit finding or unaccepted release failure remains blocking. |
+
+### Verification disposition and deferred findings
+
+At final implementation commit `68dc74a4`, the build, type-check, unit, browser, and E2E command gates passed. The security review also passed. Optional agent QA was skipped because it was not enabled.
+
+The latest static review then raised the following unresolved items:
+
+- **Deferred restore finding:** a role-backed session may prefer its role's configured thinking level over a later verified durable `effectiveThinkingLevel` during cold restore or force-abort replacement. Multiple reviewers traced this path, but no executable failing regression was run before the human decision to proceed. The proposed **Harden Tuple Transitions** follow-up, dependent on PR #1057, owns this restore/force-abort precedence concern and is intended to reproduce and fix it without broadening recovery architecture.
+- **Unexecuted review hypotheses:** the systems review proposed races involving wrong-target quarantine after restart, rollback of a concurrently committed tuple during staged role replacement, and reconnect publishing an in-flight mixed tuple. These were not demonstrated by executable reproductions on this branch and are not reported here as confirmed defects. The same follow-up will reproduce each hypothesis and fix only defects confirmed by deterministic tests.
+
+A human overseer bypassed the failed Implementation gate for **Urgency** after reviewing the aggregate. The bypass allows the documentation and merge workflow to continue, but it does not erase the findings, convert failed reviews into passes, or make the optional QA step executed. Release eligibility above reflects that explicit decision and the amended accepted-risk policy.
+
+### Authoritative Claude Opus 5 catalog
+
+Bobbit exposes the direct Anthropic model and every Opus 5 Amazon Bedrock profile published by Pi `0.82.1`. The exact provider and model ID are part of the model identity; regional Bedrock prefixes are not normalized away.
+
+| Provider / exact model ID | Published name | API | Base URL | Cost `{input, output, cacheRead, cacheWrite}` |
+|---|---|---|---|---|
+| `anthropic/claude-opus-5` | Claude Opus 5 | `anthropic-messages` | `https://api.anthropic.com` | `{5, 25, 0.5, 6.25}` |
+| `amazon-bedrock/au.anthropic.claude-opus-5` | Claude Opus 5 (AU) | `bedrock-converse-stream` | `https://bedrock-runtime.us-east-1.amazonaws.com` | `{5, 25, 0.5, 6.25}` |
+| `amazon-bedrock/eu.anthropic.claude-opus-5` | Claude Opus 5 (EU) | `bedrock-converse-stream` | `https://bedrock-runtime.eu-central-1.amazonaws.com` | `{5.5, 27.5, 0.55, 6.875}` |
+| `amazon-bedrock/global.anthropic.claude-opus-5` | Claude Opus 5 (Global) | `bedrock-converse-stream` | `https://bedrock-runtime.us-east-1.amazonaws.com` | `{5, 25, 0.5, 6.25}` |
+| `amazon-bedrock/jp.anthropic.claude-opus-5` | Claude Opus 5 (JP) | `bedrock-converse-stream` | `https://bedrock-runtime.us-east-1.amazonaws.com` | `{5, 25, 0.5, 6.25}` |
+| `amazon-bedrock/us.anthropic.claude-opus-5` | Claude Opus 5 (US) | `bedrock-converse-stream` | `https://bedrock-runtime.us-east-1.amazonaws.com` | `{5, 25, 0.5, 6.25}` |
+
+All six entries are reasoning models with text and image input, a 1,000,000-token context window, a 128,000-token output limit, and `thinkingLevelMap: { xhigh: "xhigh", max: "max" }`. The direct Anthropic row also publishes this `compat` metadata:
+
+```ts
+{
+  forceAdaptiveThinking: true,
+  supportsTemperature: false,
+  supportsStrictTools: true,
+}
+```
+
+The Bedrock rows publish no model-level `compat` object, so Bobbit does not invent one; Pi's Bedrock adapter owns its adaptive-thinking behavior. Pi's catalog remains authoritative for API, endpoint, limits, input modes, pricing/cache rates, reasoning, thinking, and compatibility metadata.
+
+Ordinary absent thinking-map entries retain the existing provider defaults, while `xhigh` and `max` require explicit non-null entries. Opus 5 therefore exposes the full supported ladder: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Selection uses the existing upward-first clamp against the exact selected model.
+
+Server auto-selection and the UI picker share one browser-safe ranking function. Its Claude order is Fable 5 (`113`) > Opus 5 (`112`) > Sonnet 5 (`111`) > every older Opus (`110` or lower); existing non-Claude ranks are unchanged.
+
+### Exact runtime tuple
+
+The durable selection contract is:
+
+```text
+provider + modelId + normalized effectiveThinkingLevel
+```
+
+The picker sends one combined additive WebSocket frame:
+
+```ts
+{ type: "set_model", provider, modelId, thinkingLevel }
+```
+
+The client clamps the current thinking level against the selected catalog row, optimistically updates both fields, and sends no follow-up thinking frame for the same pick. Standalone `set_thinking_level` remains supported. The gateway serializes both mutation messages with existing per-session command ordering.
+
+For a live model selection, the gateway validates the exact provider/model against the current session-selectable catalog, applies the model, verifies exact provider/model read-back before applying thinking, then verifies the complete effective tuple. Only that verified tuple is atomically persisted, mirrored for later spawns, and broadcast as authoritative state. An unrequested Pi or configured fallback is never a successful live selection.
+
+Failure keeps the previous durable tuple unchanged. Bobbit broadcasts a complete observed or durable tuple to correct both optimistic model and thinking state, makes one bounded rollback to the previous tuple, and verifies it. If live state or rollback is incomplete, unreachable, or unverifiable, the existing agent restart path replaces the bridge from unchanged durability; a partially mutated bridge does not continue live. The client also requests authoritative state after either model or thinking selection errors.
+
+Persistence adds only `effectiveThinkingLevel` beside the existing exact provider/model fields. Settled reconnect, reload, archived-state, and covered rehydration paths use the verified tuple rather than a placeholder. The conflicting role-default cold-restore/force-abort case is the deferred review finding recorded above and is not claimed as verified by this report. Legacy rows remain readable, but a new complete tuple becomes durable only after runtime verification.
+
+Host and sandbox processes use the same argument builder and receive separate arguments:
+
+```text
+--provider anthropic --model claude-opus-5 --thinking xhigh
+--provider amazon-bedrock --model eu.anthropic.claude-opus-5 --thinking max
+```
+
+The provider/model split occurs at the first slash only, preserving slashes inside model IDs. Spawn planning clamps thinking against the exact chosen or role-overridden model before launch. Delegates and host children prefer the owner's durable tuple; team workers apply role model/thinking overrides first and otherwise inherit the lead's durable tuple, with the resulting pair clamped together. Bobbit-owned spawns without an explicit tuple resolve and pin a current selectable catalog model rather than allowing a hidden Pi default.
+
+### Deferred provider and login surfaces
+
+Pi `0.82.1` adds provider and login capabilities that Bobbit does not adopt in this upgrade. Exact provider `kimi-coding` is a canary for an unadopted provider, not a special credential or security class. It is absent or rejected across Bobbit-owned catalog, defaults, roles, runtime selection, initial-model, delegate, and team surfaces. No Kimi login, new Pi-native provider/login UI, credential store, OAuth path, sandbox token policy, or environment-forwarding policy is added.
+
+This boundary compares the provider exactly; it does not scan model IDs for `kimi`. Kimi-named IDs remain valid under an existing selectable AIGW, custom, local, Moonshot, or legacy gateway provider. Existing custom/local providers, legacy gateway models, OpenRouter API-key models, and supported login paths therefore retain their previous behavior.
+
+### Focused coverage
+
+The focused canaries cover:
+
+- exact aligned Pi `0.82.1` root, nested, and packed-consumer structure;
+- the Anthropic and five Bedrock catalog rows, full metadata, shared rank, and `xhigh`/`max` clamping;
+- one combined request through the real gateway/mock-agent boundary, atomic durability, settled reconnect, archived state, covered non-conflicting cold restore, host/sandbox argv, and child/team inheritance;
+- exact-provider `kimi-coding` rejection while preserving Kimi-named custom/local and AIGW models;
+- correction of both optimistic fields, verified rollback, and restart after an unverifiable partial mutation; and
+- the established browser-import, OAuth, RPC correlation/retry/thinking, tool lifecycle, compaction, transcript, extension, binary-resolution, and sandbox-status compatibility boundaries.
+
+The registered browser journey selects `anthropic/claude-opus-5`, verifies its authoritative limits, image/reasoning flags and complete thinking ladder, sends the combined `xhigh` tuple through a mock-backed session, reloads and re-verifies authoritative state, then deletes the session and restores preferences.
+
+## Pi `0.82.1` dependency-only Phase 0 baseline
+
+The dependency-only baseline was measured on 2026-07-27 before any feature production or test change.
+
+- Current `origin/master`: `60aa0d4099f58070217e9ef0c8fe7a683d955d30`.
+- Design-only parent: `94f71d2f7db96f0da319692fdd9ea683a4599d0c` (the current master plus the approved design commits).
+- Dependency-only commit: `df799ab7cc1075b6f884c960c4e38c04b88c45fe`.
+- Exact direct pins: `@earendil-works/pi-agent-core@0.82.1`, `@earendil-works/pi-ai@0.82.1`, and `@earendil-works/pi-coding-agent@0.82.1`.
+
+### Controlled lock regeneration and graph
+
+The lock was regenerated using [the `0.82.1` design procedure](design/minimal-pi-0.82.md#fresh-base-and-exact-lock-regeneration): `.npmrc` was backed up outside the worktree and removed, the installed old coding-agent shrinkwrap was deleted, and `npm install --package-lock=true` freshly extracted `node_modules/@earendil-works/pi-coding-agent/npm-shrinkwrap.json` at `0.82.1`. `.npmrc` was restored byte-for-byte before testing. A following plain `npm install` with `shrinkwrap=false` left `package.json`, `package-lock.json`, and `.npmrc` byte-identical.
+
+The parsed command
+
+```bash
+npm ls @earendil-works/pi-agent-core @earendil-works/pi-ai @earendil-works/pi-coding-agent @earendil-works/pi-tui brace-expansion protobufjs --all --json
+```
+
+exited zero with no invalid, missing, stale, or extraneous edge. Every reported direct and nested Pi occurrence is exactly `0.82.1`. The development graph reports `protobufjs@7.6.5` on both paths, `brace-expansion@5.0.7` below coding-agent, and the unrelated development-only `brace-expansion@5.0.8` path below c8. The published coding-agent shrinkwrap itself contains aligned Pi `0.82.1`, `protobufjs@7.6.5`, and `brace-expansion@5.0.7`.
+
+### Dependency-only compatibility results
+
+| Boundary | Result |
+|---|---|
+| `npm run check` | Passed after generating the ignored `dist/server` type-import prerequisite with `npm run build:server`; a subsequent direct `npm run check` passed. |
+| Design's nine-file core Pi canary command | 9 files passed; 92 tests passed and 1 platform-specific transcript test skipped. |
+| Extended OAuth, RPC lifecycle, tool normalization, transcript reader, Pi extension, binary, shrinkwrap-fixture, and sandbox-status canaries | 13 files passed; 167 tests passed and 1 platform-specific extension test skipped. |
+| Compaction DOM canary | 1 file passed; 2 tests passed. |
+| Sandbox missing/stale-image coverage | The existing two-test `sandbox-status` Docker-context canary passed. No focused image-version canary exists in `tests2/` or `tests/`; no dependency-only edit to `sandbox-status.ts` is justified. |
+| Packed-consumer graph/binary canary | Reached the unchanged assertion expecting package name `bobbit`, but `npm pack` returns the current manifest name `@gresearch/bobbit`. Both the manifest name and canary are byte-identical to `origin/master`, so this pre-existing failure occurs before any Pi graph or binary assertion and is not a dependency-bump delta. |
+
+### Deterministic failure ledger
+
+**No deterministic dependency-only failures.** There are no `D*` entries and therefore no compatibility production change is justified by the `0.82.1` bump.
+
+The fresh-worktree `npm run check` prerequisite and stale packed-consumer package-name assertion above reproduce independently of the Pi pins and are explicitly excluded from this ledger. Timeouts, network behavior, and mutable advisory-feed results are likewise not compatibility deltas.
+
+### Dependency audit evidence
+
+At `2026-07-27T15:15:55Z`, root `npm audit --omit=dev --json` exited zero and reported zero vulnerabilities. That root result does not inspect the dependency-owned coding-agent shrinkwrap and is not packed-consumer evidence.
+
+`npm run audit:packed-consumer` successfully packed and installed Bobbit in its isolated clean consumer, then exited 1 with exactly one high finding: coding-agent's immutable `brace-expansion@5.0.7` edge is affected by [`GHSA-mh99-v99m-4gvg`](https://github.com/advisories/GHSA-mh99-v99m-4gvg). This is class C upstream Pi packaging. Compatibility Phase 0 passes. Under the current user-approved accepted-risk amendment, this exact finding does not block merge or release eligibility, although the result remains non-zero and not audit-clean. No audit fix, override, vendoring, fork, upstream Pi repack, or reporting exception was used.
+
+The remaining sections document the preceding `0.81.1` compatibility line and its durable Bobbit-side contracts.
+
+## Historical Pi `0.81.1` compatibility and release eligibility
 
 Pi `0.81.1` is the compatibility baseline selected on 2026-07-21. It removes the targeted high-severity `brace-expansion` edge from Pi's published dependency tree, but **the next Bobbit release is not audit-clean or release-eligible**.
 
@@ -317,7 +464,7 @@ npm ls @earendil-works/pi-agent-core @earendil-works/pi-ai @earendil-works/pi-co
 
 `tests/e2e/pi-packed-consumer.spec.ts` builds and packs Bobbit, installs the tarball into an empty project under normal consumer lock settings, inspects the dependency graph and shrinkwrap-owned paths, and smokes the installed `fd`/`rg` binaries. It intentionally does not call `npm audit`; normal unit, browser, and E2E gates must remain independent of mutable registry advisory output.
 
-For release evaluation, first build Bobbit, then run `npm run audit:packed-consumer`. The command packs the built package and installs it into a clean temporary consumer, then runs `npm audit --omit=dev --json` against the public registry. Its child npm processes use fresh home/config/cache/temp directories, do not inherit registry credentials or auth tokens, and disable lifecycle scripts. Publication is blocked unless the audit exits successfully and every severity and total count is zero; an unavailable advisory service also blocks rather than bypasses the check. See [Releasing Bobbit](releasing.md#required-packed-consumer-audit).
+For release evaluation, first build Bobbit, then run `npm run audit:packed-consumer`. The command packs the built package and installs it into a clean temporary consumer, then runs `npm audit --omit=dev --json` against the public registry. Its child npm processes use fresh home/config/cache/temp directories, do not inherit registry credentials or auth tokens, and disable lifecycle scripts. The normal release policy requires a successful zero-finding result and treats an unavailable advisory service as blocking; see [Releasing Bobbit](releasing.md#required-packed-consumer-audit). This `0.82.1` delivery has one explicit, human-approved exception for the exact Pi-owned `brace-expansion@5.0.7` finding. The command remains non-zero and its report remains required evidence. The exception does not cover a changed advisory result, an additional finding, or an unavailable audit service.
 
 `tests2/core/pi-published-shrinkwrap-security.test.ts` uses local fixtures to pin why a clean root audit cannot replace consumer evidence without querying the registry.
 

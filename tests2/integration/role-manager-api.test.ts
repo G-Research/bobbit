@@ -20,20 +20,20 @@ test.describe("Role API — model & thinkingLevel fields", () => {
 				name: "model-test-role",
 				label: "Model Test Role",
 				promptTemplate: "p",
-				model: "anthropic/claude-opus-4",
-				thinkingLevel: "high",
+				model: "anthropic/claude-opus-5",
+				thinkingLevel: "xhigh",
 			}),
 		});
 		expect(createResp.status).toBe(201);
 		const created = await createResp.json();
-		expect(created.model).toBe("anthropic/claude-opus-4");
-		expect(created.thinkingLevel).toBe("high");
+		expect(created.model).toBe("anthropic/claude-opus-5");
+		expect(created.thinkingLevel).toBe("xhigh");
 
 		const getResp = await apiFetch("/api/roles/model-test-role");
 		expect(getResp.status).toBe(200);
 		const got = await getResp.json();
-		expect(got.model).toBe("anthropic/claude-opus-4");
-		expect(got.thinkingLevel).toBe("high");
+		expect(got.model).toBe("anthropic/claude-opus-5");
+		expect(got.thinkingLevel).toBe("xhigh");
 	});
 
 	test("creates a role without model/thinkingLevel — fields are absent", async () => {
@@ -66,7 +66,7 @@ test.describe("Role API — model & thinkingLevel fields", () => {
 		const putResp = await apiFetch("/api/roles/model-test-role", {
 			method: "PUT",
 			body: JSON.stringify({
-				model: "anthropic/claude-sonnet",
+				model: "anthropic/claude-sonnet-5",
 				thinkingLevel: "medium",
 			}),
 		});
@@ -74,7 +74,7 @@ test.describe("Role API — model & thinkingLevel fields", () => {
 
 		const getResp = await apiFetch("/api/roles/model-test-role");
 		const got = await getResp.json();
-		expect(got.model).toBe("anthropic/claude-sonnet");
+		expect(got.model).toBe("anthropic/claude-sonnet-5");
 		expect(got.thinkingLevel).toBe("medium");
 	});
 
@@ -85,8 +85,8 @@ test.describe("Role API — model & thinkingLevel fields", () => {
 				name: "model-test-role",
 				label: "Test",
 				promptTemplate: "p",
-				model: "anthropic/claude-opus-4",
-				thinkingLevel: "high",
+				model: "anthropic/claude-opus-5",
+				thinkingLevel: "xhigh",
 			}),
 		});
 

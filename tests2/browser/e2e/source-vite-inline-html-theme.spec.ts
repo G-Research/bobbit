@@ -171,12 +171,45 @@ test.describe("source Vite inline HTML theme runtime", () => {
 			});
 			await waitForSourceGateway(gatewayBaseUrl, gateway);
 			const token = await readToken(join(tempRoot, "secrets"));
+			const preferenceHeaders = {
+				Authorization: `Bearer ${token}`,
+				"Content-Type": "application/json",
+			};
+			const providerSeed = await fetch(`${gatewayBaseUrl}/api/preferences`, {
+				method: "PUT",
+				headers: preferenceHeaders,
+				body: JSON.stringify({
+					customProviders: [{
+						id: "mock",
+						name: "mock",
+						type: "manual",
+						baseUrl: "http://127.0.0.1",
+						models: [{ id: "source-vite-write-agent", name: "source-vite-write-agent" }],
+					}],
+				}),
+			});
+			expect(
+				providerSeed.ok,
+				`failed to register source Vite mock provider: ${providerSeed.status} ${await providerSeed.clone().text()}`,
+			).toBe(true);
 			const preferenceResponse = await fetch(`${gatewayBaseUrl}/api/preferences`, {
 				method: "PUT",
-				headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-				body: JSON.stringify({ palette: "ocean" }),
+				headers: preferenceHeaders,
+				body: JSON.stringify({
+					palette: "ocean",
+					"default.sessionModel": "mock/source-vite-write-agent",
+					"default.sessionThinkingLevel": "off",
+				}),
 			});
-			expect(preferenceResponse.ok, `failed to seed ocean palette: ${preferenceResponse.status} ${await preferenceResponse.text()}`).toBe(true);
+			expect(
+				preferenceResponse.ok,
+				`failed to select source Vite mock tuple and ocean palette: ${preferenceResponse.status} ${await preferenceResponse.clone().text()}`,
+			).toBe(true);
+			expect(await preferenceResponse.json()).toMatchObject({
+				palette: "ocean",
+				"default.sessionModel": "mock/source-vite-write-agent",
+				"default.sessionThinkingLevel": "off",
+			});
 			const sessionId = await createProjectAndSession(gatewayBaseUrl, token, workspaceDir);
 
 			vite = startSourceVite({

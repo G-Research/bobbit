@@ -56,6 +56,8 @@ const matrix: MatrixRow[] = [
 	// Bobbit doesn't know by regex, and should override the heuristic when present.
 	{ label: "metadata-driven xhigh", model: { id: "future-reasoner", provider: "openai", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } }, expected: ALL_PLUS_XHIGH },
 	{ label: "metadata-driven max", model: { id: "future-reasoner", provider: "openai", reasoning: true, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, expected: ALL_PLUS_MAX },
+	{ label: "Anthropic Opus 5 authoritative xhigh/max map", model: { id: "claude-opus-5", provider: "anthropic", reasoning: true, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, expected: ALL_PLUS_MAX },
+	{ label: "Bedrock Opus 5 authoritative xhigh/max map", model: { id: "eu.anthropic.claude-opus-5", provider: "amazon-bedrock", reasoning: true, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }, expected: ALL_PLUS_MAX },
 	{ label: "metadata disables xhigh despite heuristic match", model: { id: "gpt-5.5", provider: "openai", reasoning: true, thinkingLevelMap: { xhigh: null } }, expected: ALL_BASE },
 	// thinkingLevelMap semantics mirror pi-ai's getSupportedThinkingLevels: a
 	// level mapped to null is DROPPED (unsupported), an absent level is KEPT,
@@ -159,6 +161,33 @@ test("clampThinkingLevel: returns input unchanged when supported", () => {
 	for (const lvl of THINKING_LEVELS) {
 		assert.equal(clampThinkingLevel(lvl, maxCapable), lvl);
 	}
+});
+
+test("Opus 5 authoritative maps preserve all seven levels and exact xhigh/max", () => {
+	for (const model of [
+		{ id: "claude-opus-5", provider: "anthropic", reasoning: true, thinkingLevelMap: { xhigh: "xhigh", max: "max" } },
+		{ id: "us.anthropic.claude-opus-5", provider: "amazon-bedrock", reasoning: true, thinkingLevelMap: { xhigh: "xhigh", max: "max" } },
+	] satisfies ModelLike[]) {
+		assert.deepEqual(getSupportedThinkingLevels(model), ALL_PLUS_MAX);
+		assert.equal(clampThinkingLevel("xhigh", model), "xhigh");
+		assert.equal(clampThinkingLevel("max", model), "max");
+	}
+});
+
+test("Opus 5 clamping obeys explicit null exclusions", () => {
+	const withoutXHigh: ModelLike = {
+		id: "claude-opus-5", provider: "anthropic", reasoning: true,
+		thinkingLevelMap: { xhigh: null, max: "max" },
+	};
+	assert.deepEqual(getSupportedThinkingLevels(withoutXHigh), [...ALL_BASE, "max"]);
+	assert.equal(clampThinkingLevel("xhigh", withoutXHigh), "max");
+
+	const withoutMax: ModelLike = {
+		id: "claude-opus-5", provider: "anthropic", reasoning: true,
+		thinkingLevelMap: { xhigh: "xhigh", max: null },
+	};
+	assert.deepEqual(getSupportedThinkingLevels(withoutMax), ALL_PLUS_XHIGH);
+	assert.equal(clampThinkingLevel("max", withoutMax), "xhigh");
 });
 
 test("clampThinkingLevel: xhigh/max on unsupported reasoning models clamp downward", () => {

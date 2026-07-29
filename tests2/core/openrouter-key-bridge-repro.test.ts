@@ -51,7 +51,9 @@ initAuthorSidecarDir(stateDir, {
 loadOrCreateToken(); // seed admin token so direct-agent spawns find it (mirrors server boot)
 
 const FAKE_OPENROUTER_KEY = "sk-or-repro-openrouter-key-never-persist";
-const PINNED_OPENROUTER_MODEL = { provider: "openrouter", id: "anthropic/claude-3.5-sonnet" };
+const OPENROUTER_MODEL_ID = "anthropic/claude-sonnet-4.5";
+const EFFECTIVE_THINKING_LEVEL = "medium";
+const PINNED_OPENROUTER_MODEL = { provider: "openrouter", id: OPENROUTER_MODEL_ID };
 const AUTH_ERROR_SECRET = "sk-or-secret-never-log";
 const AUTH_ERROR = `No API key found for openrouter: ${AUTH_ERROR_SECRET}`;
 
@@ -130,7 +132,8 @@ function persistedOpenRouterSession(id = "s-openrouter-direct"): any {
 		createdAt: Date.now(),
 		lastActivity: Date.now(),
 		modelProvider: "openrouter",
-		modelId: "anthropic/claude-3.5-sonnet",
+		modelId: OPENROUTER_MODEL_ID,
+		effectiveThinkingLevel: EFFECTIVE_THINKING_LEVEL,
 		sandboxed: false,
 	};
 }
@@ -150,6 +153,7 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 					success: true,
 					data: {
 						model: PINNED_OPENROUTER_MODEL,
+						thinkingLevel: EFFECTIVE_THINKING_LEVEL,
 						sessionFile: path.join(agentDir, "sessions", "initial-direct-openrouter.jsonl"),
 					},
 				})),
@@ -168,7 +172,8 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 		const session = await manager.createSession(tmpRoot, [], undefined, undefined, {
 			sessionId: "s-openrouter-initial-direct",
 			sandboxed: false,
-			initialModel: "openrouter/anthropic/claude-3.5-sonnet",
+			initialModel: `openrouter/${OPENROUTER_MODEL_ID}`,
+			initialThinkingLevel: EFFECTIVE_THINKING_LEVEL,
 			skipAutoThinking: true,
 		});
 		if (session.pendingMetadataPersist) await session.pendingMetadataPersist;
@@ -204,7 +209,10 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 			return makeBridge({
 				getState: vi.fn(async () => ({
 					success: true,
-					data: { model: PINNED_OPENROUTER_MODEL },
+					data: {
+						model: PINNED_OPENROUTER_MODEL,
+						thinkingLevel: EFFECTIVE_THINKING_LEVEL,
+					},
 				})),
 			});
 		});
@@ -259,7 +267,7 @@ describe("OpenRouter provider key bridge (reproducing)", () => {
 			promptQueue: new PromptQueue(),
 			eventBuffer: new EventBuffer(),
 			modelProvider: "openrouter",
-			modelId: "anthropic/claude-3.5-sonnet",
+			modelId: OPENROUTER_MODEL_ID,
 			inFlightSteerTexts: [],
 			unsubscribe: () => {},
 			rpcClient: makeBridge({ prompt }),
