@@ -30,6 +30,10 @@ type RuntimeModelSession = Pick<
 	"id" | "rpcClient" | "clients" | "spawnPinnedModel" | "spawnPinnedThinkingLevel"
 >;
 type RuntimeModelRpcClient = RuntimeModelSession["rpcClient"];
+type RuntimeRecoveryOwner = {
+	session: RuntimeModelSession;
+	rpcClient: RuntimeModelRpcClient;
+};
 type BroadcastFn = (clients: RuntimeModelSession["clients"], msg: ServerMessage) => void;
 
 export type RuntimeModelTuple = {
@@ -170,6 +174,26 @@ async function rollbackRuntimeTuple(
 
 class StaleRuntimeBridgeRecoveryError extends Error {}
 
+class OwnedRuntimeRecoveryError extends Error {
+	readonly owner: RuntimeRecoveryOwner;
+	readonly recoveryError: unknown;
+
+	constructor(recoveryError: unknown, owner: RuntimeRecoveryOwner) {
+		super(errorText(recoveryError));
+		this.name = "OwnedRuntimeRecoveryError";
+		this.owner = owner;
+		this.recoveryError = recoveryError;
+	}
+}
+
+function recoveryOwnerIsCanonical(
+	sessionManager: RuntimeModelSessionManager,
+	owner: RuntimeRecoveryOwner,
+): boolean {
+	const canonical = sessionManager.getSession(owner.session.id);
+	return canonical === owner.session && canonical.rpcClient === owner.rpcClient;
+}
+
 /**
  * A role/respawn may replace a SessionInfo's bridge in place while an older RPC
  * is still settling. Once that happens, only the detached bridge may be fenced;
@@ -177,28 +201,45 @@ class StaleRuntimeBridgeRecoveryError extends Error {}
  */
 async function retainVerifiedCanonicalReplacement(
 	sessionManager: RuntimeModelSessionManager,
-	session: RuntimeModelSession,
-	mutationRpcClient: RuntimeModelRpcClient,
+	owner: RuntimeRecoveryOwner,
 	broadcastModelState: BroadcastFn | undefined,
 ): Promise<boolean> {
-	const canonical = sessionManager.getSession(session.id);
-	if (!canonical || (canonical === session && canonical.rpcClient === mutationRpcClient)) return false;
+	const initialCanonical = sessionManager.getSession(owner.session.id);
+	if (!initialCanonical || (initialCanonical === owner.session && initialCanonical.rpcClient === owner.rpcClient)) return false;
 
-	const latestDurable = persistedTuple(sessionManager, session.id);
-	const canonicalState = await readRuntimeModelSnapshot(canonical);
 	try {
-		await mutationRpcClient.stop();
+		await owner.rpcClient.stop();
 	} catch (stopError) {
 		throw new StaleRuntimeBridgeRecoveryError(
 			`the superseded runtime bridge could not be stopped: ${errorText(stopError)}`,
 		);
 	}
-	if (!latestDurable || !tuplesEqual(canonicalState, latestDurable)) {
+
+	// Stopping the detached owner awaited an RPC. Capture the candidate and its
+	// complete durable authority only afterwards, then fence both again once its
+	// asynchronous read-back settles.
+	const candidate = sessionManager.getSession(owner.session.id);
+	const candidateDurable = persistedTuple(sessionManager, owner.session.id);
+	if (!candidate || !candidateDurable || (candidate === owner.session && candidate.rpcClient === owner.rpcClient)) {
 		throw new StaleRuntimeBridgeRecoveryError(
-			"a newer canonical session exists, but its latest durable model tuple could not be verified",
+			"the superseded bridge was stopped, but no complete newer canonical tuple was available to verify",
 		);
 	}
-	if (broadcastModelState) broadcastTuple(canonical, latestDurable, broadcastModelState);
+	const candidateRpcClient = candidate.rpcClient;
+	const candidateState = await readRuntimeModelBridgeSnapshot(candidateRpcClient);
+	const current = sessionManager.getSession(owner.session.id);
+	const currentDurable = persistedTuple(sessionManager, owner.session.id);
+	if (
+		current !== candidate
+		|| current.rpcClient !== candidateRpcClient
+		|| !currentDurable
+		|| !tuplesEqual(candidateState, currentDurable)
+	) {
+		throw new StaleRuntimeBridgeRecoveryError(
+			"a newer canonical session exists, but its latest durable model tuple could not be verified without another ownership change",
+		);
+	}
+	if (broadcastModelState) broadcastTuple(candidate, currentDurable, broadcastModelState);
 	return true;
 }
 
@@ -224,8 +265,7 @@ async function recoverRuntimeTupleMutation(
 	// SessionInfo object, so bridge identity—not only session identity—is required.
 	if (await retainVerifiedCanonicalReplacement(
 		sessionManager,
-		session,
-		mutationRpcClient,
+		{ session, rpcClient: mutationRpcClient },
 		broadcastModelState,
 	)) return;
 
@@ -250,38 +290,61 @@ async function recoverRuntimeTupleMutation(
 	// Recheck ownership immediately before the session-id restart boundary.
 	if (await retainVerifiedCanonicalReplacement(
 		sessionManager,
-		session,
-		mutationRpcClient,
+		{ session, rpcClient: mutationRpcClient },
 		broadcastModelState,
 	)) return;
 
 	await sessionManager.restartAgent(session.id);
 	const replacement = sessionManager.getSession(session.id);
 	if (!replacement) throw new Error("runtime selection recovery restart returned no live session");
-	const replacementState = await readRuntimeModelSnapshot(replacement);
-	const replacementTuple = completeTuple(replacementState);
-	if (!replacementTuple) throw new Error("runtime selection recovery restart state is incomplete or unreachable");
-	if (durable && !tuplesEqual(replacementTuple, durable)) {
-		throw new Error(
-			`runtime selection recovery restart mismatch: expected ${durable.provider}/${durable.id}/${durable.thinkingLevel}, ` +
-			`agent reports ${replacementTuple.provider}/${replacementTuple.id}/${replacementTuple.thinkingLevel}`,
-		);
+	const recoveryOwner: RuntimeRecoveryOwner = { session: replacement, rpcClient: replacement.rpcClient };
+	try {
+		const replacementState = await readRuntimeModelBridgeSnapshot(recoveryOwner.rpcClient);
+		const replacementTuple = completeTuple(replacementState);
+		if (!replacementTuple) throw new Error("runtime selection recovery restart state is incomplete or unreachable");
+		if (durable && !tuplesEqual(replacementTuple, durable)) {
+			throw new Error(
+				`runtime selection recovery restart mismatch: expected ${durable.provider}/${durable.id}/${durable.thinkingLevel}, ` +
+				`agent reports ${replacementTuple.provider}/${replacementTuple.id}/${replacementTuple.thinkingLevel}`,
+			);
+		}
+		const currentDurable = persistedTuple(sessionManager, session.id, replacementState);
+		if (!recoveryOwnerIsCanonical(sessionManager, recoveryOwner) || !currentDurable || !tuplesEqual(replacementTuple, currentDurable)) {
+			throw new Error("runtime selection recovery restart was superseded before its complete durable tuple could be accepted");
+		}
+		if (broadcastModelState) broadcastTuple(replacement, replacementTuple, broadcastModelState);
+	} catch (recoveryError) {
+		throw new OwnedRuntimeRecoveryError(recoveryError, recoveryOwner);
 	}
-	if (broadcastModelState) broadcastTuple(replacement, replacementTuple, broadcastModelState);
 }
 
 function errorText(error: unknown): string {
 	return sanitizeModelErrorText(error);
 }
 
-async function quarantineUnverifiableRuntimeSession(
+async function quarantineOwnedRuntimeSession(
 	sessionManager: RuntimeModelSessionManager,
-	sessionId: string,
-): Promise<void> {
-	const terminated = await sessionManager.terminateSession(sessionId);
-	if (terminated) return;
-	if (await sessionManager.storeArchive(sessionId)) return;
+	owner: RuntimeRecoveryOwner,
+): Promise<boolean> {
+	// The comparison and coordinated termination admission are intentionally
+	// synchronous. Once terminateSession is invoked, its existing replacement
+	// coordinator owns terminal intent for this exact canonical bridge.
+	if (!recoveryOwnerIsCanonical(sessionManager, owner)) return false;
+	const terminated = await sessionManager.terminateSession(owner.session.id);
+	if (terminated) return true;
+
+	// terminateSession awaited. Never archive by id if a replacement acquired the
+	// canonical slot while termination was settling.
+	if (!recoveryOwnerIsCanonical(sessionManager, owner)) return false;
+	if (await sessionManager.storeArchive(owner.session.id)) return true;
 	throw new Error("the unsafe session could not be terminated or archived");
+}
+
+function staleRuntimeRecoveryFailure(error: unknown, recoveryError: unknown): Error {
+	return new Error(
+		`${errorText(error)}; stale runtime bridge recovery failed: ${errorText(recoveryError)}. ` +
+		"The newer canonical session was retained; retry the selection after reconnecting.",
+	);
 }
 
 async function throwAfterRuntimeRecovery(
@@ -302,25 +365,49 @@ async function throwAfterRuntimeRecovery(
 			broadcastModelState,
 			mutationStarted,
 		);
-	} catch (recoveryError) {
-		if (recoveryError instanceof StaleRuntimeBridgeRecoveryError) {
-			throw new Error(
-				`${errorText(error)}; stale runtime bridge recovery failed: ${errorText(recoveryError)}. ` +
-				"The newer canonical session was retained; retry the selection after reconnecting.",
-			);
+	} catch (caughtRecoveryError) {
+		if (caughtRecoveryError instanceof StaleRuntimeBridgeRecoveryError) {
+			throw staleRuntimeRecoveryFailure(error, caughtRecoveryError);
 		}
+
+		const recoveryOwner = caughtRecoveryError instanceof OwnedRuntimeRecoveryError
+			? caughtRecoveryError.owner
+			: { session, rpcClient: mutationRpcClient };
+		const recoveryError = caughtRecoveryError instanceof OwnedRuntimeRecoveryError
+			? caughtRecoveryError.recoveryError
+			: caughtRecoveryError;
+
+		let quarantined: boolean;
 		try {
-			await quarantineUnverifiableRuntimeSession(sessionManager, session.id);
+			quarantined = await quarantineOwnedRuntimeSession(sessionManager, recoveryOwner);
 		} catch (quarantineError) {
 			throw new Error(
 				`${errorText(error)}; runtime selection recovery failed: ${errorText(recoveryError)}; ` +
 				`unsafe session quarantine failed: ${errorText(quarantineError)}`,
 			);
 		}
-		throw new Error(
-			`${errorText(error)}; runtime selection recovery failed: ${errorText(recoveryError)}. ` +
-			"The session was terminated and archived because its runtime model state could not be verified; create a fresh session to continue.",
-		);
+		if (quarantined) {
+			throw new Error(
+				`${errorText(error)}; runtime selection recovery failed: ${errorText(recoveryError)}. ` +
+				"The session was terminated and archived because its runtime model state could not be verified; create a fresh session to continue.",
+			);
+		}
+
+		try {
+			const retained = await retainVerifiedCanonicalReplacement(
+				sessionManager,
+				recoveryOwner,
+				broadcastModelState,
+			);
+			if (!retained) {
+				throw new StaleRuntimeBridgeRecoveryError(
+					"the recovery owner lost its canonical slot, but no newer canonical session was available to verify",
+				);
+			}
+		} catch (staleError) {
+			throw staleRuntimeRecoveryFailure(error, staleError);
+		}
+		throw staleRuntimeRecoveryFailure(error, recoveryError);
 	}
 	throw error;
 }
