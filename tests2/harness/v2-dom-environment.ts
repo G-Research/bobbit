@@ -1,13 +1,13 @@
 // v2-dom only: Node may expose an unusable `localStorage` global which
 // happy-dom leaves in place instead of replacing with the window's storage.
 // Install the current file's real window stores after happy-dom has created it.
-import { Storage } from "happy-dom";
 import { afterAll, afterEach, beforeEach } from "vitest";
 
 type StorageProperty = "localStorage" | "sessionStorage";
 type DescriptorPair = Record<StorageProperty, PropertyDescriptor | undefined>;
+type StorageDescriptors = { global: DescriptorPair; window: DescriptorPair };
 
-let previousDescriptors: DescriptorPair | undefined;
+let previousDescriptors: StorageDescriptors | undefined;
 
 function windowStorage(name: StorageProperty): Storage {
 	// `window` is one of happy-dom's copied globals and can retain Node's
@@ -17,33 +17,45 @@ function windowStorage(name: StorageProperty): Storage {
 	if (!currentWindow) throw new Error(`v2-dom setup requires a document window for ${name}`);
 	const store = currentWindow[name];
 	// Node's unavailable localStorage can overwrite happy-dom's populated
-	// window property too. Use happy-dom's real Storage implementation, not a
-	// hand-rolled map, when that happens.
-	return store ?? new Storage();
+	// window property too. Construct through this file's Window so the fallback
+	// remains the environment's real Storage implementation rather than a fake.
+	return store ?? new currentWindow.Storage();
 }
 
 /** Install storage from the current happy-dom window (never a module-scoped window). */
-export function installDomStorage(): DescriptorPair {
-	const previous: DescriptorPair = {
-		localStorage: Object.getOwnPropertyDescriptor(globalThis, "localStorage"),
-		sessionStorage: Object.getOwnPropertyDescriptor(globalThis, "sessionStorage"),
+export function installDomStorage(): StorageDescriptors {
+	const currentWindow = globalThis.document?.defaultView;
+	if (!currentWindow) throw new Error("v2-dom setup requires a document window");
+	const previous: StorageDescriptors = {
+		global: {
+			localStorage: Object.getOwnPropertyDescriptor(globalThis, "localStorage"),
+			sessionStorage: Object.getOwnPropertyDescriptor(globalThis, "sessionStorage"),
+		},
+		window: {
+			localStorage: Object.getOwnPropertyDescriptor(currentWindow, "localStorage"),
+			sessionStorage: Object.getOwnPropertyDescriptor(currentWindow, "sessionStorage"),
+		},
 	};
 	for (const name of ["localStorage", "sessionStorage"] as const) {
-		Object.defineProperty(globalThis, name, {
-			value: windowStorage(name),
-			writable: true,
-			configurable: true,
-		});
+		const store = windowStorage(name);
+		const descriptor = { value: store, writable: true, configurable: true };
+		// Vitest's global and happy-dom's Window are distinct aliases. Patch both
+		// so application code and fixtures always operate on the same live store.
+		Object.defineProperty(currentWindow, name, descriptor);
+		Object.defineProperty(globalThis, name, descriptor);
 	}
 	return previous;
 }
 
-export function restoreDomStorage(previous: DescriptorPair): void {
+export function restoreDomStorage(previous: StorageDescriptors): void {
+	const currentWindow = globalThis.document?.defaultView;
 	for (const name of ["localStorage", "sessionStorage"] as const) {
-		const store = (globalThis as typeof globalThis)[name];
-		store?.clear();
-		if (previous[name]) Object.defineProperty(globalThis, name, previous[name]);
-		else delete (globalThis as Record<string, unknown>)[name];
+		(globalThis as typeof globalThis)[name]?.clear();
+		if (previous.global[name]) Object.defineProperty(globalThis, name, previous.global[name]);
+		else Reflect.deleteProperty(globalThis, name);
+		if (!currentWindow) continue;
+		if (previous.window[name]) Object.defineProperty(currentWindow, name, previous.window[name]);
+		else Reflect.deleteProperty(currentWindow, name);
 	}
 }
 
