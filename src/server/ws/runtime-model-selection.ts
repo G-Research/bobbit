@@ -2,6 +2,7 @@ import type { ThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import type { SessionInfo, SessionManager } from "../agent/session-manager.js";
 import type { PreferencesStore } from "../agent/preferences-store.js";
+import { sanitizeModelErrorText } from "../agent/model-error-sanitizer.js";
 import { applyModelString } from "../agent/review-model-override.js";
 import { getAvailableModels, resolveModelStateMeta } from "../agent/model-registry.js";
 import type { ServerMessage } from "./protocol.js";
@@ -13,7 +14,10 @@ type RuntimePersistedSession = {
 };
 
 type RuntimeModelSessionManager = Omit<
-	Pick<SessionManager, "getPersistedSession" | "updateModelNameFile" | "restartAgent" | "getSession">,
+	Pick<
+		SessionManager,
+		"getPersistedSession" | "updateModelNameFile" | "restartAgent" | "getSession" | "terminateSession" | "storeArchive"
+	>,
 	"getPersistedSession"
 > & {
 	getPersistedSession(sessionId: string): RuntimePersistedSession | undefined;
@@ -201,7 +205,17 @@ async function recoverRuntimeTupleMutation(
 }
 
 function errorText(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
+	return sanitizeModelErrorText(error);
+}
+
+async function quarantineUnverifiableRuntimeSession(
+	sessionManager: RuntimeModelSessionManager,
+	sessionId: string,
+): Promise<void> {
+	const terminated = await sessionManager.terminateSession(sessionId);
+	if (terminated) return;
+	if (await sessionManager.storeArchive(sessionId)) return;
+	throw new Error("the unsafe session could not be terminated or archived");
 }
 
 async function throwAfterRuntimeRecovery(
@@ -215,7 +229,18 @@ async function throwAfterRuntimeRecovery(
 	try {
 		await recoverRuntimeTupleMutation(sessionManager, session, durable, broadcastModelState, mutationStarted);
 	} catch (recoveryError) {
-		throw new Error(`${errorText(error)}; runtime selection recovery failed: ${errorText(recoveryError)}`);
+		try {
+			await quarantineUnverifiableRuntimeSession(sessionManager, session.id);
+		} catch (quarantineError) {
+			throw new Error(
+				`${errorText(error)}; runtime selection recovery failed: ${errorText(recoveryError)}; ` +
+				`unsafe session quarantine failed: ${errorText(quarantineError)}`,
+			);
+		}
+		throw new Error(
+			`${errorText(error)}; runtime selection recovery failed: ${errorText(recoveryError)}. ` +
+			"The session was terminated and archived because its runtime model state could not be verified; create a fresh session to continue.",
+		);
 	}
 	throw error;
 }
