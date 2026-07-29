@@ -31,76 +31,48 @@ function clearAll() {
 	try { window.localStorage.clear(); } catch { /* ignore */ }
 }
 
-// Install / restore throwing Storage methods to simulate disabled/quota storage.
-// Record every patched target and its effective descriptor. Deleting overrides is
-// not sufficient: happy-dom's Storage proxy rejects deletion, and another test shim
-// may already have supplied an own method. Retaining the original target also avoids
-// missing an object whose global alias changes while the fault is installed.
-type StorageMethod = "setItem" | "getItem";
-type StorageOverride = {
-	target: Storage;
-	method: StorageMethod;
-	original: PropertyDescriptor;
+// Install / restore throwing Storage aliases to simulate disabled/quota storage.
+// The app resolves storage from globalThis while fixture helpers use window. Patch
+// both aliases to one proxy; patching Storage methods directly is unreliable in
+// happy-dom because its Storage proxy can ignore own method overrides.
+type StorageProperty = "localStorage" | "sessionStorage";
+type StorageAliasOverride = {
+	target: object;
+	property: StorageProperty;
+	original: PropertyDescriptor | undefined;
 };
-let storageOverrides: StorageOverride[] = [];
-function effectiveDescriptor(target: Storage, method: StorageMethod): PropertyDescriptor {
-	let current: object | null = target;
-	while (current) {
-		const descriptor = Object.getOwnPropertyDescriptor(current, method);
-		if (descriptor) return descriptor;
-		current = Object.getPrototypeOf(current);
-	}
-	throw new Error(`Storage.${method} has no descriptor`);
+let storageOverrides: StorageAliasOverride[] = [];
+
+function throwingStorage(storage: Storage): Storage {
+	return new Proxy(storage, {
+		get(target, property, receiver) {
+			if (property === "setItem") return () => { throw new Error("QuotaExceededError (simulated)"); };
+			if (property === "getItem") return () => { throw new Error("SecurityError (simulated)"); };
+			const value = Reflect.get(target, property, receiver);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
 }
-function targets(): Storage[] {
-	// The store resolves storage via `globalThis.{session,local}Storage`; patch
-	// those exact instances (and the window aliases, which may or may not be the
-	// same object under vitest's populateGlobal).
-	return Array.from(new Set<Storage>([
-		(globalThis as any).sessionStorage, (globalThis as any).localStorage,
-		window.sessionStorage, window.localStorage,
-	].filter(Boolean)));
-}
+
 function breakStorage() {
 	if (storageOverrides.length > 0) return;
-	const throwingMethods: Record<StorageMethod, () => never> = {
-		setItem: () => { throw new Error("QuotaExceededError (simulated)"); },
-		getItem: () => { throw new Error("SecurityError (simulated)"); },
-	};
-	try {
-		for (const target of targets()) {
-			for (const method of Object.keys(throwingMethods) as StorageMethod[]) {
-				storageOverrides.push({
-					target,
-					method,
-					original: effectiveDescriptor(target, method),
-				});
-				Object.defineProperty(target, method, {
-					configurable: true,
-					writable: true,
-					value: throwingMethods[method],
-				});
-			}
+	const currentWindow = document.defaultView;
+	if (!currentWindow) throw new Error("test requires a window");
+	for (const property of ["localStorage", "sessionStorage"] as const) {
+		const store = (globalThis as typeof globalThis)[property];
+		const broken = throwingStorage(store);
+		for (const target of new Set<object>([globalThis, currentWindow])) {
+			storageOverrides.push({ target, property, original: Object.getOwnPropertyDescriptor(target, property) });
+			Object.defineProperty(target, property, { value: broken, configurable: true, writable: true });
 		}
-	} catch (error) {
-		restoreStorage();
-		throw error;
 	}
 }
+
 function restoreStorage() {
-	const overrides = storageOverrides.splice(0).reverse();
-	let cleanupError: unknown;
-	for (const { target, method, original } of overrides) {
-		try {
-			// Define the effective method as an own property. happy-dom's Storage proxy
-			// returns false from deleteProperty, so delete-based cleanup leaves the
-			// throwing fault installed for the rest of the worker.
-			Object.defineProperty(target, method, original);
-		} catch (error) {
-			cleanupError ??= error;
-		}
+	for (const { target, property, original } of storageOverrides.splice(0).reverse()) {
+		if (original) Object.defineProperty(target, property, original);
+		else delete (target as Record<string, unknown>)[property];
 	}
-	if (cleanupError) throw cleanupError;
 }
 
 const makeStore = (options: TransientDraftStoreOptions) => createTransientDraftStore<any>(options);
