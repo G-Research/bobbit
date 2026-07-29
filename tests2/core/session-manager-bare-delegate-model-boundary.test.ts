@@ -214,6 +214,28 @@ describe("actual SessionManager bare-delegate model boundary", () => {
 		expect.soft(manager.sessions.size, "rejected bare delegate must not remain live").toBe(0);
 	});
 
+	it("preserves durable thinking for an arbitrary dynamic local reasoning row", async () => {
+		const { manager, store, bridgeOptions, counters } = makeFixture("dynamic-reasoning");
+		const row = findSessionSelectableModel(
+			await getAvailableModels((manager as any).preferencesStore),
+			MOCK_PROVIDER,
+			DEFAULT_MODEL_ID,
+		);
+		assert.ok(row, "dynamic reasoning fixture must be selectable");
+		row.reasoning = true;
+
+		const child = await manager.createDelegateSession(PARENT_ID, {
+			instructions: "Preserve the owner's dynamic reasoning level",
+			cwd: tmpRoot,
+		});
+		if (child.pendingMetadataPersist) await child.pendingMetadataPersist;
+
+		assert.equal(bridgeOptions[0]?.initialModel, `${MOCK_PROVIDER}/${DEFAULT_MODEL_ID}`);
+		assert.equal(bridgeOptions[0]?.initialThinkingLevel, "high");
+		assert.equal(store.get(child.id)?.effectiveThinkingLevel, "high");
+		assert.equal(counters.starts, 1);
+	});
+
 	it("accepts a selectable custom provider when only the model ID contains kimi", async () => {
 		const { manager, store, bridgeOptions, counters } = makeFixture("supported-kimi-id");
 		const selectable = findSessionSelectableModel(
@@ -233,7 +255,7 @@ describe("actual SessionManager bare-delegate model boundary", () => {
 
 		assert.equal(bridgeOptions.length, 1);
 		assert.equal(bridgeOptions[0].initialModel, SUPPORTED_KIMI_NAMED_MODEL);
-		assert.equal(bridgeOptions[0].initialThinkingLevel, "high");
+		assert.equal(bridgeOptions[0].initialThinkingLevel, "off", "the exact non-reasoning catalog row must beat model-ID heuristics");
 		assert.equal(counters.starts, 1);
 		assert.deepEqual(
 			{
@@ -245,7 +267,7 @@ describe("actual SessionManager bare-delegate model boundary", () => {
 			{
 				provider: MOCK_PROVIDER,
 				modelId: KIMI_NAMED_MODEL_ID,
-				thinking: "high",
+				thinking: "off",
 				delegateOf: PARENT_ID,
 			},
 			"provider filtering must use exact provider identity and preserve slash-containing Kimi-named IDs",

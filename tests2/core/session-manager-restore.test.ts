@@ -264,8 +264,8 @@ describe("restoreSession source guard", () => {
 		assert.ok(fallbackIdx > initialModelIdx, "restoreSession must fall back to role/default model resolution only after the persisted model branch");
 		assert.match(
 			window,
-			/resolveThinkingLevelForModel\(\s*bridgeOptions\.initialModel,[\s\S]*?ps\.effectiveThinkingLevel[\s\S]*?bridgeOptions\.initialThinkingLevel/,
-			"restore must clamp durable effective thinking against the exact restored model",
+			/resolveCurrentCatalogThinkingLevel\(\s*bridgeOptions\.initialModel,[\s\S]*?ps\.effectiveThinkingLevel[\s\S]*?bridgeOptions\.initialThinkingLevel/,
+			"restore must clamp durable effective thinking against the exact current catalog row",
 		);
 		const verifyModelIdx = window.indexOf("await this.tryAutoSelectModel(session)");
 		const verifyThinkingIdx = window.indexOf("await this.tryApplyDefaultThinkingLevel(session)", verifyModelIdx);
@@ -289,6 +289,6 @@ describe("restoreSession source guard", () => {
 		const delegateStart = src.indexOf("async createDelegateSession(parentSessionId: string");
 		const delegateWindow = src.slice(delegateStart, delegateStart + 12_000);
 		assert.match(delegateWindow, /parentMeta\?\.effectiveThinkingLevel/);
-		assert.match(delegateWindow, /resolveThinkingLevelForModel\(/);
+		assert.match(delegateWindow, /resolveCurrentCatalogThinkingLevel\(/);
 	});
 });

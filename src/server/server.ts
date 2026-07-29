@@ -504,7 +504,6 @@ import { VerificationHarness, goalBranchContainer } from "./agent/verification-h
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
 import { isKnownThinkingLevel } from "../shared/thinking-levels.js";
-import { clampThinkingLevelForModel } from "./agent/thinking-level-clamp.js";
 import { isSessionSelectableModelString } from "./agent/google-code-assist.js";
 
 // In-memory dedup guard for ask_user_choices /submit. Keyed by
@@ -913,23 +912,9 @@ function piExtensionExternalTools(contributions: readonly ResolvedPiExtensionCon
 
 const piExtensionDiscoveryCache = new Map<string, { rows?: ResolvedPiExtensionContribution[]; pending?: Promise<ResolvedPiExtensionContribution[]> }>();
 
-/**
- * Clamp a thinking-level token against a role's pinned model (if any).
- * - Validates that the token is in the canonical set; returns undefined otherwise.
- * - When `modelStr` is set in canonical `provider/modelId` form, clamps the
- *   level against that model's inferred reasoning/family.
- * - When `modelStr` is empty (role inherits), returns the validated token as-is
- *   — the per-session clamp at spawn time will handle model resolution.
- */
-function clampRoleThinking(value: unknown, modelStr: string | undefined): string | undefined {
-	const known = isKnownThinkingLevel(value);
-	if (!known) return undefined;
-	if (!modelStr) return known;
-	const slash = modelStr.indexOf("/");
-	if (slash <= 0) return known;
-	const provider = modelStr.slice(0, slash);
-	const modelId = modelStr.slice(slash + 1);
-	return clampThinkingLevelForModel(known, provider, modelId);
+/** Validate a role thinking token without discarding dynamic model metadata. */
+function normalizeRoleThinking(value: unknown): string | undefined {
+	return isKnownThinkingLevel(value);
 }
 
 /** Resolve the durable provider/model/effective-thinking tuple for server-owned child paths. */
@@ -945,9 +930,7 @@ export function resolveServerInitialModelTuple(
 		?? isKnownThinkingLevel(live?.spawnPinnedThinkingLevel);
 	return {
 		initialModel: `${provider}/${modelId}`,
-		...(effectiveThinking
-			? { initialThinkingLevel: clampThinkingLevelForModel(effectiveThinking, provider, modelId) }
-			: {}),
+		...(effectiveThinking ? { initialThinkingLevel: effectiveThinking } : {}),
 	};
 }
 
@@ -4076,7 +4059,7 @@ async function handleApiRoute(
 		const initialModel = typeof role.model === "string" && /^[^/]+\/.+$/.test(role.model) && isSessionSelectableModelString(role.model)
 			? role.model
 			: undefined;
-		const initialThinkingLevel = clampRoleThinking(role.thinkingLevel, initialModel);
+		const initialThinkingLevel = normalizeRoleThinking(role.thinkingLevel);
 		return {
 			roleName: role.name,
 			role: role.name,
@@ -4086,13 +4069,14 @@ async function handleApiRoute(
 		};
 	};
 	const requireCurrentSessionModel = async (modelString: string, contextLabel: string): Promise<boolean> => {
-		const slash = modelString.indexOf("/");
-		if (slash <= 0 || slash === modelString.length - 1) {
+		const normalizedModel = normalizeAigwModelString(modelString);
+		const slash = normalizedModel.indexOf("/");
+		if (slash <= 0 || slash === normalizedModel.length - 1) {
 			json({ error: `${contextLabel} must use provider/modelId format`, code: "MODEL_UNAVAILABLE" }, 400);
 			return false;
 		}
-		const provider = modelString.slice(0, slash);
-		const modelId = modelString.slice(slash + 1);
+		const provider = normalizedModel.slice(0, slash);
+		const modelId = normalizedModel.slice(slash + 1);
 		try {
 			const models = await getAvailableModels(preferencesStore);
 			if (findSessionSelectableModel(models, provider, modelId)) return true;
@@ -10310,7 +10294,7 @@ async function handleApiRoute(
 					accessory: body?.accessory,
 					toolPolicies: body?.toolPolicies,
 					model: modelStr,
-					thinkingLevel: clampRoleThinking(body?.thinkingLevel, modelStr),
+					thinkingLevel: normalizeRoleThinking(body?.thinkingLevel),
 				});
 				json(role, 201);
 			} else {
@@ -10322,7 +10306,7 @@ async function handleApiRoute(
 					accessory: body?.accessory ?? "none",
 					toolPolicies: body?.toolPolicies,
 					model: modelStr,
-					thinkingLevel: clampRoleThinking(body?.thinkingLevel, modelStr),
+					thinkingLevel: normalizeRoleThinking(body?.thinkingLevel),
 					createdAt: now,
 					updatedAt: now,
 				};
@@ -10442,7 +10426,7 @@ async function handleApiRoute(
 				}
 				let thinkingLevel = existing.thinkingLevel;
 				if (body.thinkingLevel !== undefined) {
-					thinkingLevel = clampRoleThinking(body.thinkingLevel, model);
+					thinkingLevel = normalizeRoleThinking(body.thinkingLevel);
 				}
 				const updated = {
 					...existing,
@@ -10463,7 +10447,7 @@ async function handleApiRoute(
 					? (typeof body.model === "string" && body.model.trim() ? body.model.trim() : "")
 					: undefined;
 				const thinkingUpdate = body.thinkingLevel !== undefined
-					? (clampRoleThinking(body.thinkingLevel, typeof modelUpdate === "string" ? modelUpdate : undefined) ?? "")
+					? (normalizeRoleThinking(body.thinkingLevel) ?? "")
 					: undefined;
 				// Apply model/thinking via direct store update to support clearing (yaml-store update treats undefined as "don't change").
 				if (modelUpdate !== undefined || thinkingUpdate !== undefined) {

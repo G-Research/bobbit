@@ -249,7 +249,7 @@ describe("TeamManager seam decisions", () => {
 		});
 	}
 
-	it("applies field-level role precedence and clamps the resulting exact pair", async () => {
+	it("applies field-level role precedence and carries the raw token to the final SessionManager clamp", async () => {
 		const { goals } = addGoal({ sandboxed: false, repoPath: undefined });
 		const { manager, sessions } = makeTeam(goals);
 		const lead = await manager.startTeam("goal-1");
@@ -265,8 +265,8 @@ describe("TeamManager seam decisions", () => {
 		assert.equal(sessions.getSession(modelOverride.sessionId)!.createOpts.initialModel, "anthropic/claude-sonnet-4-5");
 		assert.equal(
 			sessions.getSession(modelOverride.sessionId)!.createOpts.initialThinkingLevel,
-			"high",
-			"the lead's xhigh level must clamp against the role-overridden Sonnet model",
+			"xhigh",
+			"TeamManager must not discard a dynamic model's metadata by clamping from strings before SessionManager resolves the exact catalog row",
 		);
 
 		const reviewerRole = (manager as any).config.roleStore.get("reviewer");
@@ -274,6 +274,22 @@ describe("TeamManager seam decisions", () => {
 		const thinkingOverride = await manager.spawnRole("goal-1", "reviewer", "override thinking only");
 		assert.equal(sessions.getSession(thinkingOverride.sessionId)!.createOpts.initialModel, "anthropic/claude-opus-5");
 		assert.equal(sessions.getSession(thinkingOverride.sessionId)!.createOpts.initialThinkingLevel, "medium");
+	});
+
+	it("does not downgrade a dynamically discovered local reasoning tuple during team inheritance", async () => {
+		const { goals } = addGoal({ sandboxed: false, repoPath: undefined });
+		const { manager, sessions } = makeTeam(goals);
+		const lead = await manager.startTeam("goal-1");
+		sessions._persistedSessions.set(lead.id, {
+			modelProvider: "local-reasoner",
+			modelId: "reasoner-v1",
+			effectiveThinkingLevel: "high",
+		});
+
+		const worker = await manager.spawnRole("goal-1", "coder", "inherit dynamic reasoning tuple");
+		const createOpts = sessions.getSession(worker.sessionId)!.createOpts;
+		assert.equal(createOpts.initialModel, "local-reasoner/reasoner-v1");
+		assert.equal(createOpts.initialThinkingLevel, "high");
 	});
 
 	it("rejects an exact deferred-provider team lead before creating any session", async () => {
@@ -299,7 +315,7 @@ describe("TeamManager seam decisions", () => {
 
 		const inherited = await manager.spawnRole("goal-1", "coder", "preserve gateway identity");
 		assert.equal(sessions.getSession(inherited.sessionId)!.createOpts.initialModel, "aigw/vendor/kimi/claude-opus-5");
-		assert.equal(sessions.getSession(inherited.sessionId)!.createOpts.initialThinkingLevel, "high");
+		assert.equal(sessions.getSession(inherited.sessionId)!.createOpts.initialThinkingLevel, "xhigh");
 
 		const reviewerRole = (manager as any).config.roleStore.get("reviewer");
 		reviewerRole.model = "kimi-coding/k2p5";

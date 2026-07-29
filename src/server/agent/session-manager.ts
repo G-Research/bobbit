@@ -107,7 +107,7 @@ import { getAigwUrl, discoverAigwModels, deriveName, normalizeAigwModelString, w
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { findSessionSelectableModel, getAvailableModels, modelRecencyRank, resolveModelStateMeta } from "./model-registry.js";
 import { isSessionSelectableModelString, isSpawnPinnableModelString } from "./google-code-assist.js";
-import { isKnownThinkingLevel, type ThinkingLevel } from "../../shared/thinking-levels.js";
+import { clampThinkingLevel, isKnownThinkingLevel, type ThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
 import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
@@ -7516,7 +7516,7 @@ export class SessionManager {
 		// model/thinking tuple below. tryAutoSelectModel owns the single atomic
 		// durable commit, so any failed start, switch, or read-back retains the
 		// original verified tuple byte-for-byte.
-		const initThinking = this.resolveThinkingLevelForModel(
+		const initThinking = await this.resolveCurrentCatalogThinkingLevel(
 			bridgeOptions.initialModel,
 			ps.role,
 			ps.projectId,
@@ -7870,11 +7870,12 @@ export class SessionManager {
 		}
 		const exactInitialThinkingLevel = opts?.skipAutoThinking && !opts?.initialThinkingLevel
 			? undefined
-			: this.resolveThinkingLevelForModel(
+			: await this.resolveCurrentCatalogThinkingLevel(
 				selectedSpawnModel,
 				initialRole,
 				projectId,
 				opts?.initialThinkingLevel,
+				currentModels,
 			);
 
 		// ── Worktree: return a "preparing" session immediately, launch agent async ──
@@ -8250,8 +8251,8 @@ export class SessionManager {
 			? await this.requireCurrentCatalogSpawnModel(exactDelegateModel)
 			: await this.resolveCurrentCatalogSpawnModel([]);
 		const delegateThinkingCandidate = opts.initialThinkingLevel
-			?? (opts.role ? undefined : parentMeta?.effectiveThinkingLevel);
-		const delegateInitialThinking = this.resolveThinkingLevelForModel(
+			?? parentMeta?.effectiveThinkingLevel;
+		const delegateInitialThinking = await this.resolveCurrentCatalogThinkingLevel(
 			delegateInitialModel,
 			opts.role,
 			parentProjectId,
@@ -8786,11 +8787,12 @@ export class SessionManager {
 		role: string | undefined,
 		projectId: string | undefined,
 		preferred?: string,
+		catalogModel?: Awaited<ReturnType<typeof getAvailableModels>>[number],
 	): ThinkingLevel | undefined {
-		let candidate = isKnownThinkingLevel(preferred);
-		if (!candidate && role) {
-			candidate = isKnownThinkingLevel(this.resolveRoleThinkingLevelValue(role, projectId));
-		}
+		let candidate = role
+			? isKnownThinkingLevel(this.resolveRoleThinkingLevelValue(role, projectId))
+			: undefined;
+		if (!candidate) candidate = isKnownThinkingLevel(preferred);
 		if (!candidate) {
 			candidate = isKnownThinkingLevel(
 				this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined,
@@ -8798,6 +8800,7 @@ export class SessionManager {
 		}
 		if (!candidate) candidate = "medium";
 		if (!model) return candidate;
+		if (catalogModel) return clampThinkingLevel(candidate, catalogModel);
 		const slash = model.indexOf("/");
 		if (slash <= 0 || slash === model.length - 1) return candidate;
 		return clampThinkingLevelForModel(
@@ -8805,6 +8808,38 @@ export class SessionManager {
 			model.slice(0, slash),
 			model.slice(slash + 1),
 		);
+	}
+
+	/** Final spawn/restore clamp using the exact current session-selectable row. */
+	private async resolveCurrentCatalogThinkingLevel(
+		model: string | undefined,
+		role: string | undefined,
+		projectId: string | undefined,
+		preferred?: string,
+		models?: Awaited<ReturnType<typeof getAvailableModels>>,
+		allowUnlistedRawModel = false,
+	): Promise<ThinkingLevel | undefined> {
+		if (!model || !this.preferencesStore) {
+			return this.resolveThinkingLevelForModel(model, role, projectId, preferred);
+		}
+		const normalized = normalizeAigwModelString(model);
+		const slash = normalized.indexOf("/");
+		if (slash <= 0 || slash === normalized.length - 1) {
+			return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred);
+		}
+		const currentModels = models ?? await getAvailableModels(this.preferencesStore);
+		const catalogModel = findSessionSelectableModel(
+			currentModels,
+			normalized.slice(0, slash),
+			normalized.slice(slash + 1),
+		);
+		if (!catalogModel) {
+			if (allowUnlistedRawModel) {
+				return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred);
+			}
+			throw new Error(`Model "${normalized}" is not currently available for session selection`);
+		}
+		return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred, catalogModel);
 	}
 
 	/**
@@ -8863,7 +8898,12 @@ export class SessionManager {
 				?? isKnownThinkingLevel(persisted?.effectiveThinkingLevel)
 				?? isKnownThinkingLevel(this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined)
 				?? "medium";
-			const effectiveThinking = clampThinkingLevelForModel(requestedThinking, provider, modelId);
+			const effectiveThinking = await this.resolveCurrentCatalogThinkingLevel(
+				modelString,
+				session.role,
+				session.projectId,
+				requestedThinking,
+			);
 			if (!effectiveThinking) throw new Error(`thinking level "${requestedThinking}" could not be normalized`);
 
 			const beforeResp = await session.rpcClient.getState();
@@ -9116,7 +9156,14 @@ export class SessionManager {
 			const provider = typeof before?.model?.provider === "string" ? before.model.provider : undefined;
 			const modelId = typeof before?.model?.id === "string" ? before.model.id : undefined;
 			if (!provider || !modelId) throw new Error("get_state returned no exact model before thinking selection");
-			const effective = clampThinkingLevelForModel(candidate, provider, modelId);
+			const effective = await this.resolveCurrentCatalogThinkingLevel(
+				`${provider}/${modelId}`,
+				session.role,
+				session.projectId,
+				candidate,
+				undefined,
+				!session.spawnPinnedModel,
+			);
 			if (!effective) throw new Error(`thinking level "${candidate}" could not be normalized`);
 			if (
 				persisted?.modelProvider === provider
@@ -9819,7 +9866,7 @@ export class SessionManager {
 		const roleThinkingOverride = isKnownThinkingLevel(
 			this.resolveRoleThinkingLevelValue(role.name, session.projectId),
 		);
-		const initThinking = this.resolveThinkingLevelForModel(
+		const initThinking = await this.resolveCurrentCatalogThinkingLevel(
 			bridgeOptions.initialModel,
 			role.name,
 			session.projectId,
@@ -12259,7 +12306,7 @@ export class SessionManager {
 			const forceRoleThinkingOverride = isKnownThinkingLevel(
 				this.resolveRoleThinkingLevelValue(session.role, session.projectId),
 			);
-			const initThinking = this.resolveThinkingLevelForModel(
+			const initThinking = await this.resolveCurrentCatalogThinkingLevel(
 				bridgeOptions.initialModel,
 				session.role,
 				session.projectId,
