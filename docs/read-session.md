@@ -11,7 +11,8 @@ The direct transcript REST endpoint and the browser keep their legacy projection
 3. Narrow using source message indexes, tool names, normalized statuses, and result `chars`/`lines`/`bytes`.
 4. Continue only from the returned page offset; do not reread overlapping windows.
 5. If the metadata is insufficient, retrieve at most one bounded result slice by handle. Continue from its returned cursor only when necessary.
-6. Stop as soon as the question is answered. `verbose` is not the discovery default.
+6. If projection returns `TRANSCRIPT_WORK_LIMIT_EXCEEDED`, wait for concurrent reads to drain and retry at most one small compact page; do not fan out or switch to broad raw reads.
+7. Stop as soon as the question is answered. `verbose` is not the discovery default.
 
 This order matters because a single nested result can be large even when its outer shape contains only one block.
 
@@ -102,6 +103,14 @@ Agent-bound reads test each canonical semantic segment separately, so a pattern 
 
 A syntax error or unsupported RE2 construct deterministically returns `400` with `error: "invalid_regex"` for both direct REST and agent-bound reads. The agent tool preserves that discriminator in its errored result. Treat `detail` as explanatory compiler text, not a stable value. A pattern longer than 4096 UTF-16 units is instead `invalid_params` and is rejected before transcript I/O; an omitted or empty pattern performs an unfiltered read.
 
+### Lazy indexing and bounded work
+
+Agent reads build a lightweight call/result index without retaining canonical result bodies. An unfiltered page materializes only the selected rows, one at a time; a targeted handle materializes only that result. Regex search must inspect hidden call arguments and result bodies, but it canonicalizes each segment incrementally, releases it after matching, and materializes the selected rows again for truthful metadata and handles. Bounded excerpts are detached from their full parent strings before the parent is released.
+
+Resource admission starts before expensive work. An agent request acquires its concurrency reservation before transcript I/O. After the read returns, the complete raw JSONL is charged before splitting, parsing, cloning, or author correlation, so ignored provider metadata still counts toward the safety limit. Cumulative operation, result-count, canonicalization, hashing, copy, and retained-text work is also bounded per request and across concurrent requests.
+
+Exhaustion returns `400 { "error": "TRANSCRIPT_WORK_LIMIT_EXCEEDED", "detail": "..." }`; `read_session` preserves that object as a bounded errored tool result. The discriminator is stable, but `detail` is explanatory. Do not loop on this error: wait for concurrent reads to drain and retry one small compact page at most; if it persists, stop or use an operator-managed diagnostic path.
+
 Agent envelopes distinguish page positions from source transcript indexes:
 
 | Field | Meaning |
@@ -165,6 +174,8 @@ Slice coordinates are half-open UTF-16 ranges `[start,end)`, matching `size.char
 
 When `complete` is false, continue with the same `handle` and `result_cursor=excerpt.nextCursor`. If the complete-response budget shortens a targeted slice, `continuationRequest.kind` is `result_slice` and repeats the exact handle, next cursor, and requested result limit.
 
+The internal fitter accepts budgets no smaller than 1,536 serialized bytes so even an adversarial tool name can retain one canonical result's `ref`, `name`, `status`, accurate `size`, `omitted`, `handle`, and self-describing excerpt. At that floor it may omit repeatable row metadata and author/correlation dictionaries and use `role: "unknown"`; it never claims that a shortened excerpt is complete or that an included excerpt is omitted. This floor is an internal fitting invariant, not a public transport setting: production agent reads continue to use the 50 KiB ceiling.
+
 ## Context-heavy guard
 
 An agent call is context-heavy when any of these is exactly `true`:
@@ -179,9 +190,15 @@ The current `read_session` schema exposes `include_tool_results`; the camel-case
 
 `verbose` expands bounded semantic text and thinking summaries. It does not expose provider blocks or make result bodies unbounded. Result excerpts still require `include_tool_results` or a targeted `result_handle` read.
 
-## Complete 50 KiB agent-return budget
+### Marketplace Pi extensions
 
-The 50 KiB invariant is enforced at the final Pi lifecycle boundary, not only on the REST envelope or its inner text. For both successful and errored `read_session` calls, each of these serialized UTF-8 values is at most 51,200 bytes:
+Marketplace Pi contributions resolve before ordinary tool activation on initial spawn and restore/respawn, because discovery can populate the scoped tool catalogue used by policy resolution. Their runtime extension arguments remain after ordinary Bobbit tool arguments, while the immutable result boundary is prepended ahead of both.
+
+A successfully discovered `read_session` registration requires both immutable boundaries. If discovery failed or was skipped for a runtime-enabled extension, its registrations are unknown: Bobbit does not invent a visible catalogue entry, but conservatively requires the result boundary and the pre-call heavy guard. Failure to materialize the result boundary aborts activation; an unknown extension that registers `read_session` still has heavy inputs rejected by the guard before its handler can fetch. A successfully discovered non-`read_session` extension keeps the normal best-effort activation behavior.
+
+## Production 50 KiB agent-return ceiling
+
+The production 50 KiB invariant is enforced at the final Pi lifecycle boundary, not only on the REST envelope or its inner text. For both successful and errored `read_session` calls, each of these serialized UTF-8 values is at most 51,200 bytes:
 
 - the final Pi tool return;
 - the emitted and AgentSession-state `toolResult` message; and
@@ -209,6 +226,7 @@ Errored values retain only bounded `error`, `code`, `status`, `detail`, and `mes
 | `STALE_RESULT_HANDLE` | The located result body no longer matches the handle. |
 | `INVALID_RESULT_CURSOR` | The cursor is out of range or splits a Unicode scalar. |
 | `INVALID_RESULT_LIMIT` | The result limit is not an integer from 1 through 8192. |
+| `TRANSCRIPT_WORK_LIMIT_EXCEEDED` | Agent projection admission or cumulative parsing/indexing/canonicalization work exhausted a request or shared safety limit. The response is structured and bounded. |
 | `CONTEXT_HEAVY_LIMIT_REQUIRED` | An agent heavy read lacks an explicit integer `limit` from 1 through 10. No transcript request is made. |
 
 ## Direct REST and UI compatibility
@@ -219,7 +237,7 @@ Errored values retain only bounded `error`, `code`, `status`, `detail`, and `mes
 - compact mode keeps legacy previews and verbose mode keeps legacy content blocks;
 - `include_tool_results=false`, `includeToolResults=false`, or `0` requests legacy redaction;
 - direct pagination, negative offsets, supported RE2 pattern/context matching, author objects, and error response shape are unchanged;
-- the agent-only heavy limit and complete Pi-result budget do not apply.
+- the agent-only heavy limit, projection work reservations, and complete Pi-result budget do not apply.
 
 The browser transcript UI uses this direct boundary. `read_session` sends an authenticated caller-session identity and explicitly defaults `include_tool_results` to false, selecting the bounded agent projection. The caller header is a policy selector only after it resolves to a real session; an absent or unknown header does not change the legacy REST response.
 
