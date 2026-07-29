@@ -30,6 +30,24 @@
       }
     },
     {
+      "path": "tests2/core/extension-host-path-guard.test.ts",
+      "reason": "Cross-platform symlinked-temp-root regression proving extension-host confinement compares paired canonical paths: a lexical pack root accepts its canonical in-root module and rejects a canonical out-of-root module.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/transcript-sanitizer.test.ts",
+      "reason": "Cross-platform symlinked-temp-root regression proving persisted transcript trust records both lexical and canonical path spellings without expanding write eligibility.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/runtime-model-zombie-recovery-repro.test.ts",
       "reason": "Focused failing-first real SessionManager/runtime-selection recovery regression proving an unverifiable partial tuple mutation in a role-less pre-transcript session cannot be left live after zombie recovery archives its unchanged durable tuple.",
       "execution": {

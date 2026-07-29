@@ -558,6 +558,28 @@ describe("transcript write path validation", () => {
 		assert.equal(resolveSafeSessionsPath("", rootPolicy), null);
 	});
 
+	it("trusts persisted transcript aliases through both lexical and canonical temp-root spellings", () => {
+		const canonicalRoot = path.join(agentDir, "canonical-trust-root");
+		const lexicalRoot = path.join(agentDir, "lexical-trust-root");
+		fs.mkdirSync(canonicalRoot, { recursive: true });
+		try {
+			fs.symlinkSync(canonicalRoot, lexicalRoot, process.platform === "win32" ? "junction" : "dir");
+		} catch (error) {
+			// Directory links are available on the supported test hosts. Surface a
+			// permission/configuration regression instead of silently skipping this
+			// cross-platform trust invariant.
+			throw new Error(`Unable to create transcript temp-root alias: ${String(error)}`);
+		}
+		const lexicalFile = path.join(lexicalRoot, "persisted.jsonl");
+		fs.writeFileSync(lexicalFile, POISONED, "utf-8");
+		const canonicalFile = fs.realpathSync(lexicalFile);
+
+		trustPersistedAgentSessionFile(lexicalFile, rootPolicy);
+
+		assert.equal(resolveReadablePersistedAgentSessionFile(lexicalFile, rootPolicy), canonicalFile);
+		assert.equal(resolveReadablePersistedAgentSessionFile(canonicalFile, rootPolicy), canonicalFile);
+	});
+
 	it("scopes trusted exact persisted files to one policy and keeps them read-only", async () => {
 		const outside = path.join(agentDir, "trusted-historical-exact.jsonl");
 		fs.writeFileSync(outside, POISONED, "utf-8");

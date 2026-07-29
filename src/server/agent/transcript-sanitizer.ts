@@ -573,7 +573,12 @@ export function trustPersistedAgentSessionFile(
 	}
 	const readable = validateReadableOutsideTranscriptFile(filePath);
 	if (!readable) return;
-	trustedExactSessionFiles(rootPolicy).add(normalizeComparablePath(readable));
+	const trusted = trustedExactSessionFiles(rootPolicy);
+	// Keep the persisted lexical spelling as well as its real path. On macOS,
+	// /var is commonly a symlink to /private/var, so callers may later supply
+	// the same trusted file through a spelling that differs from realpathSync.
+	trusted.add(normalizeComparablePath(filePath));
+	trusted.add(normalizeComparablePath(readable));
 }
 
 function isTrustedExactSessionFile(filePath: string, rootPolicy: TranscriptRootPolicy): boolean {
