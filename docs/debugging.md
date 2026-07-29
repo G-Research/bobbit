@@ -226,14 +226,16 @@ After a server restart, the context bar may show wrong info (e.g. 200k instead o
 
 ## Duplicate `model_change` event at session startup
 
-Non-pool sessions should emit a single `model_change` matching the configured model. Two events at startup means the spawn-time pin didn't apply.
+A normal Bobbit-owned spawn binds one exact provider/model/effective-thinking tuple before the first prompt. A duplicate startup `model_change`, or a first state frame with a different tuple, means that spawn-time pin did not apply.
 
-- Confirm the spawn site routes through `resolveBridgeOptions` in `src/server/agent/session-setup.ts` (normal create) or the equivalent inline pre-resolve in `session-manager.ts` (role-respawn, force-abort respawn) / `verification-harness.ts` (3 sub-session sites) / `server.ts` (continue-archived). Each call ends with `bridgeOptions.initialModel` set when a model is resolvable.
-- Confirm `buildAgentArgs` in `src/server/agent/rpc-bridge.ts` is producing `--model <provider>/<modelId>` — a stray `/` in the value or a missing slash drops the flag silently.
-- Confirm post-spawn helpers pass `skipSetModel: true` when `session.spawnPinnedModel` matches: `tryAutoSelectModel`, `tryApplyDefaultThinkingLevel` in `session-manager.ts`, and the three sites in `verification-harness.ts`. The flag still runs the `getState()` read-back, so the hard-fail-on-mismatch contract is preserved — the only thing it elides is the `setModel` RPC and its `model_change` echo.
-- **Documented limitation**: the aigw cold-cache fallback emits two events — best-ranked model discovery is async and runs post-spawn, so the agent boots before a model id is known. Pool-claimed sessions are NOT in this bucket: the worktree pool (`src/server/agent/worktree-pool.ts`) pre-creates git worktrees only, not agent processes, so they go through the same `resolveBridgeOptions` → `new RpcBridge` path as a non-pool spawn.
+- Confirm the spawn site routes through `resolveBridgeOptions` in `src/server/agent/session-setup.ts` (normal create) or the equivalent pre-resolve in session restore/replacement, verification setup, and continue-archived paths. The resulting bridge options must carry both `initialModel` and the clamped `initialThinkingLevel`.
+- Confirm `buildAgentArgs` in `src/server/agent/rpc-bridge.ts` splits `initialModel` at only the first slash and emits separate `--provider <provider> --model <modelId> --thinking <effectiveLevel>` arguments. Dotted Bedrock profiles and model IDs containing further slashes remain entirely in `<modelId>`.
+- If the requested provider/model is absent from the current session-selectable catalog—including the deferred exact provider `kimi-coding`—the Bobbit-owned setup path must fail with the actionable unavailable-model error before spawning. It must not omit the tuple, delegate selection to Pi's default, or fall through to a hidden provider.
+- Generic caller-supplied `options.args` are the narrow exception to Bobbit-owned selection: they remain after the injected tuple so Pi's existing last-value-wins CLI behavior is preserved. For a qualified raw `--model <provider>/<modelId>` without a raw `--provider`, the builder keeps the initial pin in qualified model-only form so the later raw argument can change provider without a stale injected provider. Do not use this compatibility behavior for picker, default, role, team, delegate, or restore selection.
+- Confirm post-spawn helpers pass `skipSetModel: true` when `session.spawnPinnedModel` matches. The flag still performs the `getState()` read-back and exact tuple verification; it elides only the redundant `setModel` RPC and its `model_change` echo.
+- During a transient AIGW discovery failure, a matching last-published `models.json` catalog can still supply the exact selectable tuple. A missing, malformed, or different-URL retained catalog fails closed instead of producing an unpinned spawn, while a successful discovery that omits the old model is authoritative.
 
-Unit coverage in `tests/rpc-bridge-spawn-args.test.ts` and `tests/review-model-override.test.ts`. See [docs/internals.md — Spawn-time model pinning](internals.md#spawn-time-model-pinning).
+Coverage lives in `tests2/core/rpc-bridge-spawn-args.test.ts` and the focused model-selection, restore, and spawn-boundary canaries. See [docs/internals.md — Spawn-time model pinning](internals.md#spawn-time-model-pinning).
 
 ## Archived session footer shows placeholder model
 
@@ -1010,9 +1012,11 @@ See [Configurable agent directory](configurable-agent-directory.md).
 
 Symptom: a new aigw-side model isn't selectable, gateway operators don't see `User-Agent: Bobbit/<version>`, or per-session header partitioning isn't happening for users whose active agent-directory `models.json` predates the generated header block.
 
-Resolution: restart the gateway. `startupAigwCheck` in `src/server/agent/aigw-manager.ts` now re-discovers models and rewrites the active agent directory's `models.json` on every startup when aigw is configured, preserving non-aigw providers and user `modelOverrides` while refreshing `providers.aigw.headers`. Look for `[aigw] re-discovered <N> models on startup, refreshed models.json` in the gateway log to confirm. If you instead see `[aigw] gateway unreachable on startup (<msg>), keeping existing models.json`, the gateway HTTP probe failed and the file was deliberately left as-is — fix gateway connectivity and restart again.
+Resolution: restart the gateway. `startupAigwCheck` in `src/server/agent/aigw-manager.ts` re-discovers models and rewrites the active agent directory's `models.json` on every startup when aigw is configured, preserving non-aigw providers and user `modelOverrides` while refreshing `providers.aigw.headers`. Look for `[aigw] re-discovered <N> models on startup, refreshed models.json` in the gateway log to confirm.
 
-`BOBBIT_SKIP_AIGW_DISCOVERY=1` semantics shifted with this change: it now skips only the network call. When aigw is already configured, Bedrock env vars are still applied and the existing `models.json` is kept untouched. Previously this flag short-circuited everything pre-config; the post-config refresh path is the new behaviour.
+If you instead see `[aigw] gateway unreachable on startup (<msg>), keeping existing models.json`, the discovery probe failed and the file was deliberately left as-is. `/api/aigw/status` reports that live-discovery outage as `models: []`, but `/api/models` retains the last published AIGW rows only when `providers.aigw.baseUrl` exactly matches the configured URL after normalization. This keeps exact restore/spawn validation available during an outage without accepting routing from a previous gateway. A successful discovery response remains authoritative: a model it omits is unavailable and is not restored from disk. Fix gateway connectivity and restart again when the published catalog itself needs refreshing.
+
+`BOBBIT_SKIP_AIGW_DISCOVERY=1` skips only the startup network call. When aigw is already configured, Bedrock env vars are still applied and the existing `models.json` remains active.
 
 See [docs/internals.md — Startup refresh behavior](internals.md#startup-refresh-behavior).
 
