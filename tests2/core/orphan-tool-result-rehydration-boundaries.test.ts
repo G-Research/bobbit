@@ -1214,7 +1214,10 @@ describe("executable SessionManager rehydration boundaries", () => {
 		releaseSelectionSetModel.resolve();
 		await expect(selection).rejects.toThrow(/read-back mismatch/i);
 
-		expect(manager.restartAgent).not.toHaveBeenCalled();
+		expect(
+			manager.restartAgent,
+			"STALE_RUNTIME_RECOVERY_TARGETED_CANONICAL_REPLACEMENT",
+		).not.toHaveBeenCalled();
 		expect(replacement.setModel).not.toHaveBeenCalledWith(tupleA.provider, tupleA.id);
 		expect(original.stop).toHaveBeenCalledTimes(2);
 		expect(original.running).toBe(false);
