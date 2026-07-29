@@ -3655,9 +3655,19 @@ export class SessionManager {
 		const derivedSessionGrants = (flatNames ?? []).filter(t => !roleAllowed.has(t.toLowerCase()));
 		const sessionGrants = this.mergeToolNames(derivedSessionGrants, grantedTools) ?? [];
 
-		// Tool guard extension for 'ask' policy tools
-		const guardPath = this.toolManager
-			? writeToolGuardExtension(sessionId, this.toolManager, mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants, disabledTools, toolScope)
+		// Policy interception and immutable read_session heavy-read guard.
+		const guardPath = (this.toolManager || piExtensionActivation.readSessionGuardRequired)
+			? writeToolGuardExtension(
+				sessionId,
+				this.toolManager,
+				mcpManager ?? undefined,
+				role,
+				this.groupPolicyStore,
+				sessionGrants,
+				disabledTools,
+				toolScope,
+				piExtensionActivation.readSessionGuardRequired,
+			)
 			: undefined;
 		if (guardPath) {
 			args.push("--extension", guardPath);

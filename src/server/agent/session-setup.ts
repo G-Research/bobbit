@@ -109,6 +109,12 @@ export interface MarketplacePiExtensionActivation {
 	 * materializing the immutable read_session result boundary.
 	 */
 	readSessionBoundaryRequired: boolean;
+	/**
+	 * Fail-closed signal for the immutable pre-handler heavy-read guard. This is
+	 * separate from the discovered tool catalogue so an unknown runtime
+	 * registration stays protected without inventing a visible tool or policy.
+	 */
+	readSessionGuardRequired: boolean;
 }
 
 const RUNTIME_OMIT_PI_EXTENSION_STATUSES = new Set<PiExtensionDiagnostic["status"]>(["disabled", "unresolved"]);
@@ -123,13 +129,23 @@ export function resolveMarketplacePiExtensionActivation(
 	projectId: string | undefined,
 	cwd: string | undefined,
 ): MarketplacePiExtensionActivation {
-	if (!resolver) return { args: [], tools: [], diagnostics: [], runtimeExtensions: [], readSessionBoundaryRequired: false };
+	if (!resolver) {
+		return {
+			args: [],
+			tools: [],
+			diagnostics: [],
+			runtimeExtensions: [],
+			readSessionBoundaryRequired: false,
+			readSessionGuardRequired: false,
+		};
+	}
 	const contributions = resolver({ projectId, cwd });
 	const args: string[] = [];
 	const tools: PiExtensionToolInfo[] = [];
 	const diagnostics: PiExtensionDiagnostic[] = [];
 	const runtimeExtensions: RuntimePiExtensionInfo[] = [];
 	let readSessionBoundaryRequired = false;
+	let readSessionGuardRequired = false;
 	for (const contribution of contributions) {
 		diagnostics.push(contribution.diagnostic);
 		if (contribution.discovery?.diagnostic) diagnostics.push(contribution.discovery.diagnostic);
@@ -141,9 +157,12 @@ export function resolveMarketplacePiExtensionActivation(
 			// Marketplace discovery and runtime loading are deliberately separate:
 			// discovery-failed entries still reach Pi argv. A successful discovery
 			// gives us the exact registration names; any other discovery state leaves
-			// them unknowable, so activation must conservatively require the boundary.
-			readSessionBoundaryRequired ||= contribution.discovery?.status !== "ok"
+			// them unknowable, so activation must conservatively require both immutable
+			// read_session boundaries without adding a speculative catalogue entry.
+			const mayRegisterReadSession = contribution.discovery?.status !== "ok"
 				|| (contribution.discovery.tools ?? []).some(tool => tool.name.toLowerCase() === "read_session");
+			readSessionBoundaryRequired ||= mayRegisterReadSession;
+			readSessionGuardRequired ||= mayRegisterReadSession;
 			args.push("--extension", contribution.entryPath);
 			runtimeExtensions.push({
 				listName: contribution.listName,
@@ -154,7 +173,14 @@ export function resolveMarketplacePiExtensionActivation(
 			});
 		}
 	}
-	return { args, tools, diagnostics, runtimeExtensions, readSessionBoundaryRequired };
+	return {
+		args,
+		tools,
+		diagnostics,
+		runtimeExtensions,
+		readSessionBoundaryRequired,
+		readSessionGuardRequired,
+	};
 }
 
 // ── Extension path helpers ─────────────────────────────────────────────────
@@ -985,16 +1011,17 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	plan.bridgeOptions.piExtensions = [...(plan.bridgeOptions.piExtensions ?? []), ...piExtensionActivation.runtimeExtensions];
 	plan.bridgeOptions.env = { ...(plan.bridgeOptions.env || {}), ...activation.env };
 
-	// Generate and add the tool_call guard extension if any tools have 'ask' or 'never' policy.
-	const guardPath = ctx.toolManager ? writeToolGuardExtension(
+	// Generate policy interception and immutable read_session heavy-read guards.
+	const guardPath = (ctx.toolManager || piExtensionActivation.readSessionGuardRequired) ? writeToolGuardExtension(
 		plan.id,
-		ctx.toolManager,
+		ctx.toolManager ?? undefined,
 		ctx.mcpManager ?? undefined,
 		effectiveRole ?? undefined,
 		ctx.groupPolicyStore ?? undefined,
 		[],
 		disabledTools,
 		toolScope,
+		piExtensionActivation.readSessionGuardRequired,
 	) : undefined;
 	if (guardPath) {
 		plan.bridgeOptions.args.push("--extension", guardPath);
