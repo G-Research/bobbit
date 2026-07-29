@@ -70,15 +70,32 @@ The picker sends one combined `set_model` request containing `provider`, `modelI
 
 The live request succeeds only when the final state exactly matches the requested provider/model and normalized effective thinking level. Only then does the server atomically persist the tuple, update the session's spawn pins and model-name mirror, and broadcast a complete `state` frame. A Pi or provider fallback to an unrequested model is a read-back mismatch, not success—even when `allowSessionModelFallback` is enabled or the bound model equals `default.sessionModel`.
 
-### Failure correction and recovery
+### Failure correction and bounded recovery
 
-Before mutation, the server snapshots the previous durable verified tuple. A failed request never overwrites it.
+Before mutation, the server snapshots the previous durable verified tuple and the exact RPC bridge that will receive the request. A failed request never overwrites the durable tuple.
 
 - If validation fails before mutation, Bobbit broadcasts the complete live tuple, or the complete durable tuple when live read-back is unavailable.
-- If mutation began, Bobbit broadcasts a complete correction and makes one bounded rollback attempt to the previous durable model and thinking level. The original bridge remains live only when a final read-back verifies that exact rollback tuple.
-- If there is no complete durable tuple, or rollback cannot be verified, Bobbit uses the existing `restartAgent` replacement path. The replacement starts from unchanged durable state and its complete tuple is read back before it is accepted.
+- If mutation began, Bobbit broadcasts a complete correction and makes one bounded rollback attempt on that same bridge. The bridge remains live only when a final read-back verifies the previous durable model and thinking level exactly.
+- If there is no complete durable tuple, or rollback cannot be verified, Bobbit uses the existing `restartAgent` replacement path. The replacement starts from unchanged durability and is accepted only after a complete read-back; when a durable tuple exists, the replacement must match it exactly.
 
-Every correction frame carries both model metadata and thinking level so both optimistic picker fields converge together. The server then reports `SET_MODEL_FAILED`; the client requests `get_state` as an additional authoritative refresh. Standalone `set_thinking_level` failures use the same complete-tuple correction and recovery contract.
+Every correction frame carries both model metadata and thinking level so both optimistic picker fields converge together. For a non-terminal failure, the server then reports `SET_MODEL_FAILED`; the client requests `get_state` as an additional authoritative refresh. Standalone `set_thinking_level` failures use the same complete-tuple correction and recovery contract, with `SET_THINKING_LEVEL_FAILED` as their error code.
+
+#### Fail-closed quarantine
+
+If restart or replacement fails, is unreachable, returns incomplete state, or cannot verify the unchanged durable tuple, Bobbit cannot safely leave the partially mutated runtime available. It synchronously uses existing `SessionManager` lifecycle behavior rather than adding a recovery subsystem:
+
+1. If the session is live, `terminateSession` stops its bridge, detaches it from the live-session map, archives the existing record, and closes attached clients through the normal archived-session path.
+2. If no live session can be terminated, `storeArchive` archives the dormant durable record.
+
+This terminal path is called *quarantine* because it makes an unverifiable runtime unavailable; it is not a new session status or lifecycle mode. The previous durable tuple remains unchanged, and neither the requested partial tuple nor an unrequested fallback becomes durable. The archived session cannot accept more prompts. The sanitized failure directs the user to create a fresh session; if termination and archival both fail, the reported error includes that quarantine failure and still never reports the selection as successful.
+
+#### Stale-target protection
+
+A role assignment, respawn, or another replacement can install a new canonical bridge while an older model RPC is still settling. Recovery therefore binds every mutation and rollback RPC to the bridge captured at request start and checks canonical ownership before mutation, after model binding, before commit, before rollback, and again before any session-ID restart.
+
+If ownership moved to a newer bridge, the stale request must not roll back, restart, terminate, or archive by session ID: those operations would target the replacement rather than the bridge that was partially mutated. Bobbit instead stops only the superseded captured bridge, reloads the latest durable tuple, and verifies the newer canonical bridge against it. A verified replacement is retained and broadcast as authoritative state; the stale request still fails.
+
+If the superseded bridge cannot be stopped or the newer bridge cannot be verified, Bobbit reports a sanitized stale-recovery failure and retains the newer canonical session rather than quarantining it by stale session ID. The client reconciles after reconnecting and may retry the selection. This protects a concurrently committed tuple from being overwritten by an older durable snapshot.
 
 ## Persistence and visibility
 
@@ -86,7 +103,7 @@ Bobbit persists and displays only complete verified tuples:
 
 - During setup, exact selection persists the selected tuple; a successful controlled fallback persists the verified `default.sessionModel` tuple and its effective thinking level.
 - During live picker selection, only the exact requested tuple may replace durable state. There is no successful live fallback outcome.
-- On live selection failure, the prior durable tuple remains unchanged while complete correction frames reconcile every attached client to verified state.
+- On live selection failure, the prior durable tuple remains unchanged while complete correction frames reconcile attached clients to verified state. If recovery cannot establish a safe live runtime, normal termination/archive events replace further state reconciliation.
 
 Setup-time fallback attempts are logged with the failed selected model, the fact that controlled fallback was enabled, and the `default.sessionModel` target. Successful setup fallback also logs that the session is running on `default.sessionModel` because the selected setup model failed.
 
@@ -108,9 +125,9 @@ Image generation uses the session image-model selector and `default.imageModel`.
 
 - Session startup, restore, respawn, fork, continue, and spawn-pinned verification: `src/server/agent/session-manager.ts` and `src/server/agent/session-setup.ts`.
 - Shared hard-fail/read-back/fallback binding helper for role and review models: `src/server/agent/review-model-override.ts`.
-- Exact live picker binding, rollback, and restart handoff: `src/server/ws/runtime-model-selection.ts` and the `set_model` branch in `src/server/ws/handler.ts`.
+- Exact live picker binding, bridge-identity fencing, rollback, restart handoff, and fail-closed quarantine: `src/server/ws/runtime-model-selection.ts` and the model-selection branches in `src/server/ws/handler.ts`.
 - Client optimistic-state correction: `src/app/remote-agent.ts` and `src/app/session-manager.ts`.
 - Settings UI: `src/app/settings-page.ts`.
-- Regression coverage: `tests2/core/controlled-model-fallback.test.ts`, `tests2/core/model-error-redaction.test.ts`, `tests2/dom/client-combined-model-thinking-selection.test.ts`, and `tests/e2e/ui/settings-model-fallback.spec.ts`.
+- Regression coverage: controlled fallback and redaction tests in `tests2/core/`, the focused runtime-zombie recovery and replacement-race cases there, the combined-selection DOM test, and the settings fallback E2E journey.
 
 See also [Per-role model & thinking-level overrides](internals.md#per-role-model--thinking-level-overrides), [Spawn-time model pinning](internals.md#spawn-time-model-pinning), and [Image generation routing](internals.md#image-generation-routing).

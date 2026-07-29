@@ -204,15 +204,54 @@ On success, the gateway:
 `set_model` and `set_thinking_level` use the existing per-session command FIFO,
 so a prompt or later selection cannot overtake an in-flight tuple mutation.
 
+#### Failed selection and correction
+
 The client treats `state` as authoritative over its optimistic model and
-thinking values. If either write fails, the gateway broadcasts the complete
-observed tuple when available, otherwise the previous durable verified tuple,
-to correct both fields. It keeps durable state unchanged, makes one bounded and
-verified rollback attempt after a partial mutation, and uses the existing agent
-restart path when the live tuple or rollback cannot be verified. It then returns
-`SET_MODEL_FAILED`; the client requests `get_state` as an additional
-reconciliation. A partially mutated bridge never becomes a successful
+thinking values. If either write fails, the gateway keeps the previous durable
+tuple unchanged and broadcasts a complete correction—both `model` and
+`thinkingLevel`—from live read-back when available, otherwise from complete
+durable state.
+
+After a partial mutation, the gateway makes one bounded rollback attempt on the
+same RPC bridge that received the request. If exact rollback cannot be verified,
+it restarts the session from unchanged durability and verifies the replacement's
+complete tuple. A recoverable failure therefore produces authoritative `state`
+correction followed by `SET_MODEL_FAILED`; the browser responds with `get_state`
+as a final reconciliation. No partial or unrequested tuple is a successful
 selection.
+
+If restart or replacement cannot establish a complete verified tuple, recovery
+fails closed through normal session termination/archive behavior. A live unsafe
+bridge is stopped and detached, its existing record is archived without changing
+the durable tuple, and its clients receive the normal `session_archived` event
+before their sockets close. If no live row remains, the gateway archives the
+dormant record directly. There is no separate quarantine frame or session
+status. Because socket closure can precede command-error delivery, clients must
+treat `session_archived`/disconnect and session-list invalidation as terminal;
+the actionable recovery is to create a fresh session, not to continue sending
+commands to the old socket. All recovery errors are sanitized before logging or
+WebSocket delivery.
+
+#### Stale selection targets
+
+The gateway captures the request's RPC bridge identity and rechecks it around
+mutation, commit, rollback, and the session-ID restart boundary. This is needed
+because role assignment or respawn can replace the canonical bridge while an
+older `set_model` or `set_thinking_level` RPC is awaiting read-back.
+
+When a newer canonical bridge has taken ownership, the stale request never
+rolls back, restarts, terminates, or archives by session ID. It stops only the
+superseded captured bridge, reloads the latest durable tuple, verifies the newer
+bridge against that tuple, and broadcasts the canonical state when verification
+succeeds. The stale command still returns its normal failure code, and the
+client's `get_state` refresh converges on the replacement.
+
+If stopping the superseded bridge or verifying the replacement fails, the
+gateway reports a sanitized stale-recovery error and retains the newer canonical
+session. It deliberately does not invoke session-ID quarantine, because that
+would destroy the replacement rather than fence the stale target. The client
+should reconnect before retrying. This also prevents an older durable snapshot
+from overwriting a tuple committed by the replacement.
 
 A thinking-only UI change remains supported with:
 
@@ -224,8 +263,8 @@ This standalone path leaves provider/model unchanged, clamps `level`—including
 `xhigh` or `max` only when supported—against the currently bound exact model,
 verifies and persists the resulting complete tuple, and broadcasts both tuple
 fields as authoritative state. Failure returns
-`SET_THINKING_LEVEL_FAILED` and uses the same correction, bounded rollback or
-restart, and client `get_state` refresh behavior.
+`SET_THINKING_LEVEL_FAILED` and uses the same correction, bounded rollback,
+restart, fail-closed quarantine, stale-target fencing, and client refresh rules.
 
 See [Per-model thinking-level capabilities](thinking-levels.md) for map
 semantics and the shared clamp order.
