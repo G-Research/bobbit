@@ -1,12 +1,17 @@
 import { render } from "lit";
 import { ReadSessionRenderer } from "../../../src/ui/tools/renderers/ReadSessionRenderer.js";
 
-const SESSION_ID = "87654321-1234-4123-8123-canonicalcard";
+const SESSION_ID_PREFIX = "read-session-control-prefix-".padEnd(64, "x");
+const SESSION_ID = `${SESSION_ID_PREFIX}-exact-target`;
+const COLLIDING_SESSION_ID = `${SESSION_ID_PREFIX}-different-target`;
 const RAW_SENTINEL = "UNBOUNDED_RAW_PROVIDER_RESULT_MUST_STAY_HIDDEN";
 
 function boot(): void {
 	const app = document.getElementById("app");
 	if (!app) throw new Error("#app missing");
+	if (SESSION_ID.length <= 64 || SESSION_ID.slice(0, 64) !== COLLIDING_SESSION_ID.slice(0, 64)) {
+		throw new Error("long session fixture must retain a colliding 64-unit prefix");
+	}
 	document.documentElement.style.setProperty("--background", "#fafafa");
 	document.documentElement.style.setProperty("--foreground", "#171717");
 	document.documentElement.style.setProperty("--muted-foreground", "#606060");
@@ -56,7 +61,8 @@ function boot(): void {
 		isError: false,
 		content: [{ type: "text", text: JSON.stringify(envelope) }],
 		details: {
-			session_id: SESSION_ID,
+			session_id: SESSION_ID_PREFIX,
+			sessionIdTruncated: true,
 			total: 5,
 			returned: 1,
 			messages: [{ text: RAW_SENTINEL }],
@@ -67,9 +73,17 @@ function boot(): void {
 	render(output.content, app);
 
 	const fetchOffsets: string[] = [];
+	const fetchSessionIds: string[] = [];
 	window.fetch = (async (input: RequestInfo | URL) => {
 		const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, window.location.href);
 		fetchOffsets.push(url.searchParams.get("offset") || "");
+		const sessionPathMarker = "/api/sessions/";
+		const sessionPathStart = url.pathname.indexOf(sessionPathMarker);
+		const transcriptSuffix = "/transcript";
+		const encodedSessionId = sessionPathStart >= 0 && url.pathname.endsWith(transcriptSuffix)
+			? url.pathname.slice(sessionPathStart + sessionPathMarker.length, -transcriptSuffix.length)
+			: "";
+		fetchSessionIds.push(decodeURIComponent(encodedSessionId));
 		return new Response(JSON.stringify({
 			total: 1,
 			returned: 1,
@@ -89,6 +103,7 @@ function boot(): void {
 		__readSessionFixtureReady: true,
 		__readSessionRawSentinel: RAW_SENTINEL,
 		__readSessionFetchOffsets: fetchOffsets,
+		__readSessionFetchSessionIds: fetchSessionIds,
 	});
 }
 

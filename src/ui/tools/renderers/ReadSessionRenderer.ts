@@ -150,6 +150,25 @@ function parseEnvelope(result: ToolResultMessage<ReadSessionDetails> | undefined
 	return undefined;
 }
 
+/** Resolve the exact session used by navigation and direct transcript reads. */
+function sessionControlTarget(
+	params: ReadSessionParams | undefined,
+	details: ReadSessionDetails | undefined,
+	envelope: TranscriptEnvelope | undefined,
+): string {
+	const envelopeId = typeof envelope?.session_id === "string" && envelope.session_id ? envelope.session_id : "";
+	const detailsId = typeof details?.session_id === "string" && details.session_id ? details.session_id : "";
+	const paramsId = typeof params?.session_id === "string" && params.session_id ? params.session_id : "";
+
+	// Canonical boundary details cap session IDs at 64 UTF-16 units. The original
+	// call parameters remain exact, so a marked prefix must never become a link or
+	// REST target. Legacy/unmarked complete details retain their prior precedence.
+	return envelopeId
+		|| (detailsId && details?.sessionIdTruncated !== true ? detailsId : "")
+		|| paramsId
+		|| detailsId;
+}
+
 function fmtTs(ts: string | null | undefined): string {
 	if (!ts) return "";
 	try {
@@ -436,10 +455,7 @@ export class ReadSessionRenderer implements ToolRenderer<ReadSessionParams, Read
 		const chevronRef = createRef<HTMLSpanElement>();
 		const details = result?.details;
 		const envelope = parseEnvelope(result);
-		const sid = (typeof envelope?.session_id === "string" && envelope.session_id)
-			|| (typeof details?.session_id === "string" && details.session_id)
-			|| params?.session_id
-			|| "";
+		const sid = sessionControlTarget(params, details, envelope);
 		const sidShort = sid ? sid.slice(0, 12) : "?";
 
 		if (!result) {
