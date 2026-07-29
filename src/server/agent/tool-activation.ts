@@ -946,20 +946,23 @@ export function computeToolPolicies(
 }
 
 /**
- * Write the tool_call guard extension if any tools have 'ask' policy.
+ * Write the tool_call policy/heavy-read guard extension when required.
  * Returns the file path of the written extension, or undefined if no guard is needed.
  */
 export function writeToolGuardExtension(
 	sessionId: string,
-	toolManager: ToolManager,
+	toolManager: ToolManager | undefined,
 	mcpManager: McpManager | undefined,
 	role: { toolPolicies?: Record<string, GrantPolicy> } | undefined,
 	groupPolicyStore?: GroupPolicyProvider,
 	grantedTools?: string[],
 	disabledTools?: ReadonlySet<string>,
 	scopedContext?: ScopedToolContext,
+	readSessionGuardRequired = false,
 ): string | undefined {
-	const computed = computeToolPolicies(toolManager, mcpManager, role, groupPolicyStore, scopedContext);
+	const computed = toolManager
+		? computeToolPolicies(toolManager, mcpManager, role, groupPolicyStore, scopedContext)
+		: {};
 	const hasDisabled = !!disabledTools && disabledTools.size > 0;
 
 	// Defense in depth: treat any goal-metadata disabled tool as effective
@@ -975,10 +978,11 @@ export function writeToolGuardExtension(
 	}
 
 	// Generate the guard if any tool needs ordinary policy interception OR if
-	// read_session is available. The latter is an immutable heavy-read safety
-	// boundary and must exist even when the resolved policy is plain `allow`.
+	// read_session is known or conservatively may be registered at runtime. The
+	// latter is an immutable heavy-read boundary even when discovery produced no
+	// visible catalogue/policy entry.
 	const hasGuardedTools = Object.values(policies).some(p => p.policy === 'ask' || p.policy === 'never');
-	const hasReadSessionSafety = Object.entries(policies).some(([name, policy]) =>
+	const hasReadSessionSafety = readSessionGuardRequired || Object.entries(policies).some(([name, policy]) =>
 		name.toLowerCase() === "read_session" && policy.policy !== "never");
 	if (!hasGuardedTools && !hasReadSessionSafety) return undefined;
 
@@ -991,6 +995,7 @@ export function writeToolGuardExtension(
 		policies,
 		grantedTools: (grantedTools ?? []).slice().sort(),
 		...(hasDisabled ? { disabledTools: [...disabledTools!].map(t => t.toLowerCase()).sort() } : {}),
+		...(readSessionGuardRequired ? { readSessionGuardRequired: true } : {}),
 	});
 
 	// Fast path: same code was already written to disk — reuse path if it still exists.
@@ -1000,7 +1005,7 @@ export function writeToolGuardExtension(
 	// Generate (or fetch cached) source code
 	let code = guardCodeCache.get(genKey);
 	if (!code) {
-		code = generateToolGuardExtension(sessionId, policies, grantedTools ?? []);
+		code = generateToolGuardExtension(sessionId, policies, grantedTools ?? [], readSessionGuardRequired);
 		guardCodeCache.set(genKey, code);
 	}
 

@@ -24,20 +24,22 @@ export interface ToolPolicyEntry {
  * Generate the TypeScript source for a tool_call guard extension.
  *
  * @param _sessionId - Retained for API compatibility; runtime identity comes from the gateway-owned BOBBIT_SESSION_ID env so identical policies can share one immutable extension.
- * @param policies - Map of tool name → { policy, group } for all tools with 'ask' policy
+ * @param policies - Map of tool name → { policy, group } for all resolved tools
  * @param grantedTools - Tools already granted (pre-populated grant set)
+ * @param readSessionGuardRequired - Protect an unknown runtime read_session registration without synthesizing a policy entry
  * @returns TypeScript source string for the extension
  */
 export function generateToolGuardExtension(
 	_sessionId: string,
 	policies: Record<string, ToolPolicyEntry>,
 	grantedTools: string[],
+	readSessionGuardRequired = false,
 ): string {
 	// Only include 'ask' and 'never' policies in the generated code —
 	// 'allow' tools don't need the guard.
 	const askPolicies: Record<string, ToolPolicyEntry> = {};
 	const neverPolicies: Record<string, ToolPolicyEntry> = {};
-	let readSessionProtected = false;
+	let readSessionProtected = readSessionGuardRequired;
 	for (const [name, entry] of Object.entries(policies)) {
 		if (entry.policy === 'ask') {
 			askPolicies[name] = entry;
