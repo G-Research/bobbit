@@ -213,6 +213,9 @@ async function exerciseAutoSelect(options: {
 		preferencesStore: { get: (key: string) => options.prefs[key] },
 		resolveRoleModel: () => options.roleModel,
 		resolveRoleThinkingLevel: () => options.roleThinking,
+		async resolveCurrentCatalogThinkingLevel(model: string, _role: string | undefined, _projectId: string | undefined, preferred: string) {
+			return model.includes("opus-5") || !["xhigh", "max"].includes(preferred) ? preferred : "high";
+		},
 		resolveStoreForSession: () => store,
 		async requireCurrentCatalogSpawnModel(model: string) {
 			if (!currentCatalogModels.has(model)) {

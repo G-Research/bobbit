@@ -49,7 +49,6 @@ import {
 } from "./bounded-async-work.js";
 import { isHeadquartersProject } from "./project-registry.js";
 import { isSessionSelectableModelString } from "./google-code-assist.js";
-import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
 
 const execFile = promisify(execFileCb);
 
@@ -2155,18 +2154,13 @@ export class TeamManager {
 		if (initialModel && (modelProvider === "kimi-coding" || !isSessionSelectableModelString(initialModel))) {
 			throw new Error(`Team worker model "${initialModel}" is not session-selectable`);
 		}
-		let initialThinkingLevel = initialModel
+		// Preserve role-over-durable-over-live precedence without clamping from model
+		// strings. SessionManager owns the final clamp against the exact catalog row.
+		const initialThinkingLevel = initialModel
 			? storedRoleDef.thinkingLevel
 				|| persistedTeamLead?.effectiveThinkingLevel
 				|| liveTeamLead?.spawnPinnedThinkingLevel
 			: undefined;
-		if (initialModel && modelProvider && initialThinkingLevel) {
-			initialThinkingLevel = clampThinkingLevelForModel(
-				initialThinkingLevel,
-				modelProvider,
-				initialModel.slice(modelSlash + 1),
-			);
-		}
 
 		// repoPath is only set when the goal's cwd is inside a git repo.
 		// If absent, skip worktree creation and use the goal's cwd directly.
@@ -2358,7 +2352,7 @@ export class TeamManager {
 					sandboxBranch: memberSandboxed && branchName ? branchName : undefined,
 					sandboxBaseBranch: memberSandboxed && branchName ? memberStartPoint : undefined,
 					// Role overrides win field-by-field; otherwise forward the lead's
-					// verified durable tuple, clamped together above.
+					// verified durable tuple for the final SessionManager clamp.
 					initialModel,
 					initialThinkingLevel,
 				},

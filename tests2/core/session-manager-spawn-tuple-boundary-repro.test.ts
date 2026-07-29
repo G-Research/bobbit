@@ -3,6 +3,7 @@ guardProcessEnv();
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import path from "node:path";
 import { afterAll, afterEach, describe, it, vi } from "vitest";
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
@@ -117,6 +118,66 @@ function makePreferences(label: string): InstanceType<typeof PreferencesStore> {
 	// environment. No role/default model is set in the no-explicit-selection case.
 	prefs.set("providerKey.anthropic", "test-anthropic-key");
 	return prefs;
+}
+
+const DYNAMIC_PROVIDER = "local-reasoner";
+const DYNAMIC_MODEL_ID = "reasoner-v1";
+const DYNAMIC_MODEL = `${DYNAMIC_PROVIDER}/${DYNAMIC_MODEL_ID}`;
+
+async function makeDynamicReasoningPreferences(label: string): Promise<InstanceType<typeof PreferencesStore>> {
+	const prefs = makePreferences(label);
+	prefs.set("customProviders", [{
+		id: DYNAMIC_PROVIDER,
+		name: DYNAMIC_PROVIDER,
+		type: "manual",
+		baseUrl: "http://127.0.0.1:9",
+		apiKey: "test-key",
+		models: [{ id: DYNAMIC_MODEL_ID, name: "Dynamic local reasoner" }],
+	}]);
+	invalidateModelCache();
+	const models = await getAvailableModels(prefs);
+	const row = models.find((model) => model.provider === DYNAMIC_PROVIDER && model.id === DYNAMIC_MODEL_ID);
+	assert.ok(row, "fixture requires a current custom/local catalog row");
+	// Manual discovery supplies the same mutable ApiModel shape as Ollama/LM Studio.
+	// Mark this arbitrary, non-heuristic ID as the reasoning metadata those dynamic
+	// providers report; the registry cache is the production metadata authority.
+	row.reasoning = true;
+	return prefs;
+}
+
+function startDynamicAigw(): Promise<{ url: string; close: () => Promise<void> }> {
+	const server = http.createServer((req, res) => {
+		if (req.url === "/.well-known/opencode") {
+			const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+			res.writeHead(200, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({
+				model: "local:reasoner-v1",
+				provider: {
+					local: {
+						npm: "@ai-sdk/openai",
+						options: { baseURL: `${origin}/v1` },
+						models: {
+							"reasoner-v1": {
+								name: "Discovered gateway reasoner",
+								reasoning: true,
+								tool_call: true,
+								variants: { off: {}, low: {}, high: {}, xhigh: {}, max: {} },
+								limit: { context: 64_000, output: 8_192 },
+								modalities: { input: ["text"] },
+							},
+						},
+					},
+				},
+			}));
+			return;
+		}
+		res.writeHead(404);
+		res.end();
+	});
+	return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve({
+		url: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+		close: () => new Promise<void>((done) => server.close(() => done())),
+	})));
 }
 
 function expectedDefaultModel(models: any[]): string {
@@ -238,6 +299,96 @@ afterAll(() => {
 });
 
 describe("actual SessionManager spawn tuple boundaries", () => {
+	it("uses the exact dynamic catalog row for create and cold-restore thinking clamps", async () => {
+		const prefs = await makeDynamicReasoningPreferences("dynamic-reasoning-create-restore");
+		const store = new RecordingStore();
+		const bridgeOptions: Record<string, any>[] = [];
+		registerRpcBridgeFactory((options: Record<string, any>) => {
+			bridgeOptions.push({ ...options });
+			return makeBridge(options, options.env?.BOBBIT_SESSION_ID ?? `dynamic-${bridgeOptions.length}`);
+		});
+
+		const manager: any = new SessionManager({ preferencesStore: prefs, stateDir });
+		manager._testStore = store;
+		managers.push(manager);
+
+		const createdId = "dynamic-reasoning-create";
+		const created = await manager.createSession(tmpRoot, [], undefined, undefined, {
+			sessionId: createdId,
+			initialModel: DYNAMIC_MODEL,
+			initialThinkingLevel: "high",
+		});
+		if (created.pendingMetadataPersist) await created.pendingMetadataPersist;
+
+		const restoredId = "dynamic-reasoning-restore";
+		const restoredRecord: StoredRecord = {
+			...legacySessionRecord(restoredId),
+			modelProvider: DYNAMIC_PROVIDER,
+			modelId: DYNAMIC_MODEL_ID,
+			effectiveThinkingLevel: "high",
+		};
+		fs.writeFileSync(restoredRecord.agentSessionFile, "");
+		store.put(restoredRecord);
+		await manager.restoreSession(restoredRecord);
+
+		assert.deepEqual(
+			{
+				createSpawnThinking: bridgeOptions[0]?.initialThinkingLevel,
+				createDurableThinking: store.get(createdId)?.effectiveThinkingLevel,
+				restoreSpawnThinking: bridgeOptions[1]?.initialThinkingLevel,
+				restoreDurableThinking: store.get(restoredId)?.effectiveThinkingLevel,
+			},
+			{
+				createSpawnThinking: "high",
+				createDurableThinking: "high",
+				restoreSpawnThinking: "high",
+				restoreDurableThinking: "high",
+			},
+			"DYNAMIC_MODEL_METADATA: an arbitrary custom/local reasoning row must not be downgraded by string heuristics at create or cold restore",
+		);
+	});
+
+	it("uses discovered AIGW reasoning metadata for a non-heuristic model ID", async () => {
+		const gateway = await startDynamicAigw();
+		try {
+			const prefs = makePreferences("dynamic-aigw-reasoning");
+			prefs.set("aigw.url", gateway.url);
+			invalidateModelCache();
+			const row = (await getAvailableModels(prefs)).find((model) => model.provider === "aigw" && model.id === "reasoner-v1");
+			assert.ok(row, "well-known discovery must expose the arbitrary AIGW row");
+			assert.equal(row.reasoning, true);
+			assert.deepEqual(row.thinkingLevelMap, {
+				off: "none",
+				low: "low",
+				high: "high",
+				xhigh: "xhigh",
+				max: "max",
+			});
+
+			const store = new RecordingStore();
+			const bridgeOptions: Record<string, any>[] = [];
+			registerRpcBridgeFactory((options: Record<string, any>) => {
+				bridgeOptions.push({ ...options });
+				return makeBridge(options, "dynamic-aigw-create");
+			});
+			const manager: any = new SessionManager({ preferencesStore: prefs, stateDir });
+			manager._testStore = store;
+			managers.push(manager);
+
+			const session = await manager.createSession(tmpRoot, [], undefined, undefined, {
+				sessionId: "dynamic-aigw-create",
+				initialModel: "aigw/reasoner-v1",
+				initialThinkingLevel: "xhigh",
+			});
+			if (session.pendingMetadataPersist) await session.pendingMetadataPersist;
+
+			assert.equal(bridgeOptions[0]?.initialThinkingLevel, "xhigh");
+			assert.equal(store.get(session.id)?.effectiveThinkingLevel, "xhigh");
+		} finally {
+			await gateway.close();
+		}
+	});
+
 	it("resolves a Bobbit-exposed model before a normal spawn with no explicit role/default model", async () => {
 		const prefs = makePreferences("no-explicit-model");
 		invalidateModelCache();
