@@ -1187,7 +1187,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			}
 			return result;
 		});
-		original.stop = vi.fn(async () => {});
+		original.stop = vi.fn(async () => { original.running = false; });
 		const session = liveSession(ps.id, original, {
 			spawnPinnedModel: `${tupleA.provider}/${tupleA.id}`,
 			spawnPinnedThinkingLevel: tupleA.thinkingLevel,
@@ -1216,11 +1216,15 @@ describe("executable SessionManager rehydration boundaries", () => {
 
 		expect(manager.restartAgent).not.toHaveBeenCalled();
 		expect(replacement.setModel).not.toHaveBeenCalledWith(tupleA.provider, tupleA.id);
+		expect(original.stop).toHaveBeenCalledTimes(2);
+		expect(original.running).toBe(false);
 		expect(replacement.stop).not.toHaveBeenCalled();
 		expect(store.archiveAsync).not.toHaveBeenCalled();
 		expect(ps.archived).not.toBe(true);
 		expect(manager.sessions.get(ps.id)).toBe(session);
 		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(replacement);
+		expect(manager.isSessionLive(ps.id)).toBe(true);
+		expect(replacement.running).toBe(true);
 		expect({
 			provider: ps.modelProvider,
 			id: ps.modelId,

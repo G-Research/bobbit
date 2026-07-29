@@ -29,6 +29,7 @@ type RuntimeModelSession = Pick<
 	SessionInfo,
 	"id" | "rpcClient" | "clients" | "spawnPinnedModel" | "spawnPinnedThinkingLevel"
 >;
+type RuntimeModelRpcClient = RuntimeModelSession["rpcClient"];
 type BroadcastFn = (clients: RuntimeModelSession["clients"], msg: ServerMessage) => void;
 
 export type RuntimeModelTuple = {
@@ -83,12 +84,16 @@ function completeTuple(snapshot: RuntimeModelSnapshot | null | undefined): Runti
 		: null;
 }
 
-async function readRuntimeModelSnapshot(session: RuntimeModelSession): Promise<RuntimeModelSnapshot | null> {
+async function readRuntimeModelBridgeSnapshot(rpcClient: RuntimeModelRpcClient): Promise<RuntimeModelSnapshot | null> {
 	try {
-		return extractRuntimeModelSnapshot(await session.rpcClient.getState());
+		return extractRuntimeModelSnapshot(await rpcClient.getState());
 	} catch {
 		return null;
 	}
+}
+
+async function readRuntimeModelSnapshot(session: RuntimeModelSession): Promise<RuntimeModelSnapshot | null> {
+	return readRuntimeModelBridgeSnapshot(session.rpcClient);
 }
 
 function persistedTuple(
@@ -143,17 +148,17 @@ export async function broadcastRuntimeSessionActualModelState(
 }
 
 async function rollbackRuntimeTuple(
-	session: RuntimeModelSession,
+	rpcClient: RuntimeModelRpcClient,
 	target: RuntimeModelTuple,
 ): Promise<RuntimeModelTuple> {
-	await applyModelString(session.rpcClient, `${target.provider}/${target.id}`, {
+	await applyModelString(rpcClient, `${target.provider}/${target.id}`, {
 		contextLabel: "runtime selection rollback",
 		maxAttempts: 1,
 		retryDelayMs: 0,
 		readBackAttempts: 1,
 	});
-	await session.rpcClient.setThinkingLevel(target.thinkingLevel);
-	const rolledBack = await readRuntimeModelSnapshot(session);
+	await rpcClient.setThinkingLevel(target.thinkingLevel);
+	const rolledBack = await readRuntimeModelBridgeSnapshot(rpcClient);
 	if (!tuplesEqual(rolledBack, target)) {
 		throw new Error(
 			`runtime selection rollback read-back mismatch: expected ${target.provider}/${target.id}/${target.thinkingLevel}, ` +
@@ -163,24 +168,76 @@ async function rollbackRuntimeTuple(
 	return target;
 }
 
+class StaleRuntimeBridgeRecoveryError extends Error {}
+
+/**
+ * A role/respawn may replace a SessionInfo's bridge in place while an older RPC
+ * is still settling. Once that happens, only the detached bridge may be fenced;
+ * recovery by session id would target the newer canonical process instead.
+ */
+async function retainVerifiedCanonicalReplacement(
+	sessionManager: RuntimeModelSessionManager,
+	session: RuntimeModelSession,
+	mutationRpcClient: RuntimeModelRpcClient,
+	broadcastModelState: BroadcastFn | undefined,
+): Promise<boolean> {
+	const canonical = sessionManager.getSession(session.id);
+	if (!canonical || (canonical === session && canonical.rpcClient === mutationRpcClient)) return false;
+
+	const latestDurable = persistedTuple(sessionManager, session.id);
+	const canonicalState = await readRuntimeModelSnapshot(canonical);
+	try {
+		await mutationRpcClient.stop();
+	} catch (stopError) {
+		throw new StaleRuntimeBridgeRecoveryError(
+			`the superseded runtime bridge could not be stopped: ${errorText(stopError)}`,
+		);
+	}
+	if (!latestDurable || !tuplesEqual(canonicalState, latestDurable)) {
+		throw new StaleRuntimeBridgeRecoveryError(
+			"a newer canonical session exists, but its latest durable model tuple could not be verified",
+		);
+	}
+	if (broadcastModelState) broadcastTuple(canonical, latestDurable, broadcastModelState);
+	return true;
+}
+
 async function recoverRuntimeTupleMutation(
 	sessionManager: RuntimeModelSessionManager,
 	session: RuntimeModelSession,
+	mutationRpcClient: RuntimeModelRpcClient,
 	durable: RuntimeModelTuple | null,
 	broadcastModelState: BroadcastFn | undefined,
 	mutationStarted: boolean,
 ): Promise<void> {
-	const liveAfterFailure = await readRuntimeModelSnapshot(session);
+	if (!mutationStarted) {
+		const liveAfterFailure = await readRuntimeModelSnapshot(session);
+		const correctionAfterFailure = completeTuple(liveAfterFailure) ?? durable;
+		if (correctionAfterFailure && broadcastModelState) {
+			broadcastTuple(session, correctionAfterFailure, broadcastModelState);
+		}
+		return;
+	}
+
+	// Re-read both canonical bridge ownership and the latest durable tuple at the
+	// last safe point before rollback. An in-place role replacement keeps the same
+	// SessionInfo object, so bridge identity—not only session identity—is required.
+	if (await retainVerifiedCanonicalReplacement(
+		sessionManager,
+		session,
+		mutationRpcClient,
+		broadcastModelState,
+	)) return;
+
+	const liveAfterFailure = await readRuntimeModelBridgeSnapshot(mutationRpcClient);
 	const correctionAfterFailure = completeTuple(liveAfterFailure) ?? durable;
 	if (correctionAfterFailure && broadcastModelState) {
 		broadcastTuple(session, correctionAfterFailure, broadcastModelState);
 	}
 
-	if (!mutationStarted) return;
-
 	if (durable) {
 		try {
-			const rolledBack = await rollbackRuntimeTuple(session, durable);
+			const rolledBack = await rollbackRuntimeTuple(mutationRpcClient, durable);
 			if (broadcastModelState) broadcastTuple(session, rolledBack, broadcastModelState);
 			return;
 		} catch {
@@ -188,6 +245,15 @@ async function recoverRuntimeTupleMutation(
 			// bridge from unchanged durable state below; never continue it partially bound.
 		}
 	}
+
+	// Rollback awaited RPCs, so a replacement could have committed meanwhile.
+	// Recheck ownership immediately before the session-id restart boundary.
+	if (await retainVerifiedCanonicalReplacement(
+		sessionManager,
+		session,
+		mutationRpcClient,
+		broadcastModelState,
+	)) return;
 
 	await sessionManager.restartAgent(session.id);
 	const replacement = sessionManager.getSession(session.id);
@@ -222,13 +288,27 @@ async function throwAfterRuntimeRecovery(
 	error: unknown,
 	sessionManager: RuntimeModelSessionManager,
 	session: RuntimeModelSession,
+	mutationRpcClient: RuntimeModelRpcClient,
 	durable: RuntimeModelTuple | null,
 	broadcastModelState: BroadcastFn | undefined,
 	mutationStarted: boolean,
 ): Promise<never> {
 	try {
-		await recoverRuntimeTupleMutation(sessionManager, session, durable, broadcastModelState, mutationStarted);
+		await recoverRuntimeTupleMutation(
+			sessionManager,
+			session,
+			mutationRpcClient,
+			durable,
+			broadcastModelState,
+			mutationStarted,
+		);
 	} catch (recoveryError) {
+		if (recoveryError instanceof StaleRuntimeBridgeRecoveryError) {
+			throw new Error(
+				`${errorText(error)}; stale runtime bridge recovery failed: ${errorText(recoveryError)}. ` +
+				"The newer canonical session was retained; retry the selection after reconnecting.",
+			);
+		}
 		try {
 			await quarantineUnverifiableRuntimeSession(sessionManager, session.id);
 		} catch (quarantineError) {
@@ -278,6 +358,15 @@ function effectiveThinkingForSelection(
 	return effective;
 }
 
+function runtimeBridgeIsCanonical(
+	sessionManager: RuntimeModelSessionManager,
+	session: RuntimeModelSession,
+	rpcClient: RuntimeModelRpcClient,
+): boolean {
+	const canonical = sessionManager.getSession(session.id);
+	return canonical === session && canonical.rpcClient === rpcClient;
+}
+
 export async function applyRuntimeSessionModelSelection(
 	sessionManager: RuntimeModelSessionManager,
 	session: RuntimeModelSession,
@@ -287,7 +376,8 @@ export async function applyRuntimeSessionModelSelection(
 	preferencesStore?: PreferencesStore,
 	broadcastModelState?: BroadcastFn,
 ): Promise<RuntimeModelTuple> {
-	const liveBefore = await readRuntimeModelSnapshot(session);
+	const mutationRpcClient = session.rpcClient;
+	const liveBefore = await readRuntimeModelBridgeSnapshot(mutationRpcClient);
 	const durable = persistedTuple(sessionManager, session.id, liveBefore);
 	let mutationStarted = false;
 
@@ -299,28 +389,37 @@ export async function applyRuntimeSessionModelSelection(
 			selectedModel,
 		);
 		const requested: RuntimeModelTuple = { provider, id: modelId, thinkingLevel: effectiveThinkingLevel };
+		if (!runtimeBridgeIsCanonical(sessionManager, session, mutationRpcClient)) {
+			throw new Error("runtime model read-back mismatch: the session bridge was replaced before selection");
+		}
 
 		mutationStarted = true;
-		await applyModelString(session.rpcClient, `${provider}/${modelId}`, {
+		await applyModelString(mutationRpcClient, `${provider}/${modelId}`, {
 			contextLabel: "runtime session model",
 			maxAttempts: 1,
 			retryDelayMs: 0,
 			readBackAttempts: 1,
 		});
-		const modelReadBack = await readRuntimeModelSnapshot(session);
+		if (!runtimeBridgeIsCanonical(sessionManager, session, mutationRpcClient)) {
+			throw new Error("runtime model read-back mismatch: the session bridge was replaced during selection");
+		}
+		const modelReadBack = await readRuntimeModelBridgeSnapshot(mutationRpcClient);
 		if (modelReadBack?.provider !== provider || modelReadBack.id !== modelId) {
 			throw new Error(
 				`runtime model read-back mismatch before thinking: expected ${provider}/${modelId}, ` +
 				`agent reports ${modelReadBack?.provider ?? "?"}/${modelReadBack?.id ?? "?"}`,
 			);
 		}
-		await session.rpcClient.setThinkingLevel(effectiveThinkingLevel);
-		const finalState = await readRuntimeModelSnapshot(session);
+		await mutationRpcClient.setThinkingLevel(effectiveThinkingLevel);
+		const finalState = await readRuntimeModelBridgeSnapshot(mutationRpcClient);
 		if (!tuplesEqual(finalState, requested)) {
 			throw new Error(
 				`runtime tuple read-back mismatch: expected ${provider}/${modelId}/${effectiveThinkingLevel}, ` +
 				`agent reports ${finalState?.provider ?? "?"}/${finalState?.id ?? "?"}/${finalState?.thinkingLevel ?? "?"}`,
 			);
+		}
+		if (!runtimeBridgeIsCanonical(sessionManager, session, mutationRpcClient)) {
+			throw new Error("runtime tuple read-back mismatch: the session bridge was replaced before commit");
 		}
 
 		commitRuntimeTuple(sessionManager, session, requested);
@@ -328,7 +427,15 @@ export async function applyRuntimeSessionModelSelection(
 		if (broadcastModelState) broadcastTuple(session, requested, broadcastModelState);
 		return requested;
 	} catch (error) {
-		return throwAfterRuntimeRecovery(error, sessionManager, session, durable, broadcastModelState, mutationStarted);
+		return throwAfterRuntimeRecovery(
+			error,
+			sessionManager,
+			session,
+			mutationRpcClient,
+			durable,
+			broadcastModelState,
+			mutationStarted,
+		);
 	}
 }
 
@@ -338,7 +445,8 @@ export async function applyRuntimeSessionThinkingSelection(
 	thinkingLevel: string,
 	broadcastModelState?: BroadcastFn,
 ): Promise<RuntimeModelTuple> {
-	const liveBefore = await readRuntimeModelSnapshot(session);
+	const mutationRpcClient = session.rpcClient;
+	const liveBefore = await readRuntimeModelBridgeSnapshot(mutationRpcClient);
 	const durable = persistedTuple(sessionManager, session.id, liveBefore);
 	let mutationStarted = false;
 
@@ -368,15 +476,21 @@ export async function applyRuntimeSessionThinkingSelection(
 			throw new Error(`Thinking level "${requested}" is unavailable for ${current.provider}/${current.id}`);
 		}
 		const expected: RuntimeModelTuple = { ...current, thinkingLevel: effectiveThinkingLevel };
+		if (!runtimeBridgeIsCanonical(sessionManager, session, mutationRpcClient)) {
+			throw new Error("runtime thinking read-back mismatch: the session bridge was replaced before selection");
+		}
 
 		mutationStarted = true;
-		await session.rpcClient.setThinkingLevel(effectiveThinkingLevel);
-		const finalState = await readRuntimeModelSnapshot(session);
+		await mutationRpcClient.setThinkingLevel(effectiveThinkingLevel);
+		const finalState = await readRuntimeModelBridgeSnapshot(mutationRpcClient);
 		if (!tuplesEqual(finalState, expected)) {
 			throw new Error(
 				`runtime thinking read-back mismatch: expected ${expected.provider}/${expected.id}/${effectiveThinkingLevel}, ` +
 				`agent reports ${finalState?.provider ?? "?"}/${finalState?.id ?? "?"}/${finalState?.thinkingLevel ?? "?"}`,
 			);
+		}
+		if (!runtimeBridgeIsCanonical(sessionManager, session, mutationRpcClient)) {
+			throw new Error("runtime thinking read-back mismatch: the session bridge was replaced before commit");
 		}
 
 		commitRuntimeTuple(sessionManager, session, expected);
@@ -384,6 +498,14 @@ export async function applyRuntimeSessionThinkingSelection(
 		if (broadcastModelState) broadcastTuple(session, expected, broadcastModelState);
 		return expected;
 	} catch (error) {
-		return throwAfterRuntimeRecovery(error, sessionManager, session, durable, broadcastModelState, mutationStarted);
+		return throwAfterRuntimeRecovery(
+			error,
+			sessionManager,
+			session,
+			mutationRpcClient,
+			durable,
+			broadcastModelState,
+			mutationStarted,
+		);
 	}
 }
