@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import type { WorkerOptions } from "node:worker_threads";
 import {
+	createTranscriptProjectionReservationPoolForTests,
 	createTranscriptProjectionWorkMetricsForTests,
 	createTranscriptRegexPoolForTests,
 	createTranscriptResultHandle,
@@ -831,13 +832,15 @@ describe("transcript-reader / lazy agent result canonicalization", () => {
 			messageIndex: 94,
 			blockIndex: 0,
 		});
-		assert.deepEqual(pageWork, {
-			callArgumentsCanonicalized: 0,
-			resultBodiesCanonicalized: 1,
-			resultBodiesHashed: 1,
-			canonicalResultUnits: selectedBody.length,
-			peakRetainedCanonicalResultUnits: selectedBody.length,
-		});
+		assert.equal(pageWork.callArgumentsCanonicalized, 0);
+		assert.equal(pageWork.resultBodiesCanonicalized, 1);
+		assert.equal(pageWork.resultBodiesHashed, 1);
+		assert.equal(pageWork.canonicalResultUnits, selectedBody.length);
+		assert.equal(pageWork.canonicalTextWorkUnits, selectedBody.length);
+		assert.equal(pageWork.peakRetainedCanonicalResultUnits, selectedBody.length);
+		assert.equal(pageWork.currentRetainedCanonicalCallUnits, 0);
+		assert.equal(pageWork.currentRetainedCanonicalResultUnits, 0);
+		assert.equal(pageWork.currentRetainedDetachedUnits, 0);
 
 		const sliceWork = createTranscriptProjectionWorkMetricsForTests();
 		const slice = await readTranscript({
@@ -852,13 +855,16 @@ describe("transcript-reader / lazy agent result canonicalization", () => {
 		assert.equal(excerpt.start, 9);
 		assert.equal(excerpt.end, 46);
 		assert.equal(excerpt.text, selectedBody.slice(9, 46));
-		assert.deepEqual(sliceWork, {
-			callArgumentsCanonicalized: 0,
-			resultBodiesCanonicalized: 1,
-			resultBodiesHashed: 1,
-			canonicalResultUnits: selectedBody.length,
-			peakRetainedCanonicalResultUnits: selectedBody.length,
-		});
+		assert.equal(sliceWork.callArgumentsCanonicalized, 0);
+		assert.equal(sliceWork.resultBodiesCanonicalized, 1);
+		assert.equal(sliceWork.resultBodiesHashed, 1);
+		assert.equal(sliceWork.canonicalResultUnits, selectedBody.length);
+		assert.equal(sliceWork.canonicalTextWorkUnits, selectedBody.length + 37);
+		assert.equal(sliceWork.peakRetainedCanonicalResultUnits, selectedBody.length);
+		assert.equal(sliceWork.detachedResultExcerptUnits, 37);
+		assert.equal(sliceWork.currentRetainedCanonicalCallUnits, 0);
+		assert.equal(sliceWork.currentRetainedCanonicalResultUnits, 0);
+		assert.equal(sliceWork.currentRetainedDetachedUnits, 0);
 	});
 
 	it("streams regex result bodies without retaining them and re-materializes only the selected row", async () => {
@@ -886,6 +892,166 @@ describe("transcript-reader / lazy agent result canonicalization", () => {
 		assert.equal(work.resultBodiesHashed, 1);
 		assert.equal(work.peakRetainedCanonicalResultUnits, Math.max(...bodies.map((body) => body.length)));
 	});
+});
+
+describe("transcript-reader / cumulative projection work budgets", () => {
+	const workLimitError = (error: unknown): boolean =>
+		error instanceof TranscriptReaderError && error.code === "TRANSCRIPT_WORK_LIMIT_EXCEEDED";
+
+	it("rejects high-count empty results by count before hashing or projecting them", async () => {
+		const resultLimit = 32;
+		const content = [{
+			type: "message",
+			message: {
+				role: "assistant",
+				content: Array.from({ length: resultLimit + 1 }, (_, index) => ({
+					type: "tool_result",
+					tool_use_id: `empty-${index}`,
+					content: "",
+				})),
+			},
+		}].map((entry) => JSON.stringify(entry)).join("\n");
+		const metrics = createTranscriptProjectionWorkMetricsForTests();
+
+		await assert.rejects(
+			() => readTranscript({ limit: 1 }, {
+				...memoryTranscript(content),
+				projection: "agent",
+				sessionId: "empty-result-count",
+				projectionWorkLimitsForTests: { maxResults: resultLimit },
+				workMetricsForTests: metrics,
+			}),
+			workLimitError,
+		);
+		assert.equal(metrics.indexedResults, resultLimit);
+		assert.equal(metrics.resultBodiesCanonicalized, 0);
+		assert.equal(metrics.resultBodiesHashed, 0);
+		assert.equal(metrics.currentRetainedCanonicalResultUnits, 0);
+	});
+
+	it("applies one cumulative text budget across a limit-200 page", async () => {
+		const content = Array.from({ length: 200 }, (_, index) => JSON.stringify({
+			type: "message",
+			message: {
+				role: "toolResult",
+				toolCallId: `aggregate-${index}`,
+				content: `body-${index}-${"x".repeat(64)}`,
+			},
+		})).join("\n");
+		const metrics = createTranscriptProjectionWorkMetricsForTests();
+
+		await assert.rejects(
+			() => readTranscript({ limit: 200 }, {
+				...memoryTranscript(content),
+				projection: "agent",
+				sessionId: "aggregate-page-work",
+				projectionWorkLimitsForTests: { maxTextUnits: 1_024 },
+				workMetricsForTests: metrics,
+			}),
+			workLimitError,
+		);
+		assert.ok(metrics.resultBodiesCanonicalized > 1);
+		assert.ok(metrics.resultBodiesCanonicalized < 200);
+		assert.ok(metrics.canonicalTextWorkUnits <= 1_024);
+		assert.equal(metrics.currentRetainedCanonicalResultUnits, 0);
+	});
+
+	it("bounds simultaneous request, operation, result, and text reservations globally", () => {
+		const pool = createTranscriptProjectionReservationPoolForTests({
+			maxRequests: 2,
+			maxOperations: 5,
+			maxResults: 3,
+			maxTextUnits: 10,
+		});
+		const first = pool.acquire();
+		const second = pool.acquire();
+		assert.throws(() => pool.acquire(), workLimitError);
+		first.reserve({ operations: 3, results: 2, textUnits: 6 });
+		assert.throws(() => second.reserve({ operations: 3 }), workLimitError);
+		assert.throws(() => second.reserve({ results: 2 }), workLimitError);
+		assert.throws(() => second.reserve({ textUnits: 5 }), workLimitError);
+		second.reserve({ operations: 2, results: 1, textUnits: 4 });
+		assert.deepEqual(pool.stats(), {
+			activeRequests: 2,
+			reservedOperations: 5,
+			reservedResults: 3,
+			reservedTextUnits: 10,
+		});
+		first.close();
+		second.close();
+		assert.deepEqual(pool.stats(), {
+			activeRequests: 0,
+			reservedOperations: 0,
+			reservedResults: 0,
+			reservedTextUnits: 0,
+		});
+	});
+
+	it("returns detached bounded previews while releasing both canonical parents", async () => {
+		const argumentsText = `arg-${"a".repeat(128 * 1024)}`;
+		const resultText = `result-${"r".repeat(128 * 1024)}`;
+		const content = JSON.stringify({
+			type: "message",
+			message: {
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: "detached", name: "detach", arguments: argumentsText },
+					{ type: "tool_result", tool_use_id: "detached", content: resultText },
+				],
+			},
+		});
+		const metrics = createTranscriptProjectionWorkMetricsForTests();
+		const envelope = await readTranscript({ limit: 1, includeToolResults: true }, {
+			...memoryTranscript(content),
+			projection: "agent",
+			sessionId: "detached-previews",
+			workMetricsForTests: metrics,
+		});
+		const row = envelope.messages[0] as any;
+		assert.equal(row.toolCalls[0].argumentsPreview, argumentsText.slice(0, 512));
+		assert.equal(row.toolResults[0].excerpt.text, resultText.slice(0, 4096));
+		assert.equal(metrics.detachedArgumentPreviewUnits, 512);
+		assert.equal(metrics.detachedResultExcerptUnits, 4096);
+		assert.ok(metrics.peakRetainedTotalUnits >= argumentsText.length + resultText.length + 512 + 4096);
+		assert.equal(metrics.currentRetainedCanonicalCallUnits, 0);
+		assert.equal(metrics.currentRetainedCanonicalResultUnits, 0);
+		assert.equal(metrics.currentRetainedDetachedUnits, 0);
+	});
+
+	for (const [label, primitive] of [
+		["boolean", false],
+		["number", 9_007_199_254_740_991],
+		["null", null],
+	] as const) {
+		it(`preflights ${label} array stable JSON before materialization`, async () => {
+			const content = JSON.stringify({
+				type: "message",
+				message: {
+					role: "assistant",
+					content: [{
+						type: "toolCall",
+						id: `primitive-${label}`,
+						name: "primitive-array",
+						arguments: Array.from({ length: 400 }, () => primitive),
+					}],
+				},
+			});
+			const metrics = createTranscriptProjectionWorkMetricsForTests();
+			await assert.rejects(
+				() => readTranscript({ limit: 1 }, {
+					...memoryTranscript(content),
+					projection: "agent",
+					sessionId: `primitive-${label}`,
+					projectionWorkLimitsForTests: { maxOperations: 2_000, maxTextUnits: 1_024 },
+					workMetricsForTests: metrics,
+				}),
+				workLimitError,
+			);
+			assert.equal(metrics.callArgumentsCanonicalized, 0);
+			assert.equal(metrics.canonicalTextWorkUnits, 0);
+			assert.equal(metrics.currentRetainedCanonicalCallUnits, 0);
+		});
+	}
 });
 
 describe("transcript-reader / bounded regex worker pool", () => {
