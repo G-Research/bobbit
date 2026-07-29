@@ -13,9 +13,10 @@ guardProcessEnv();
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import fs, { readFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { describe, it } from "vitest";
+import { afterAll, afterEach, describe, it, vi } from "vitest";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -30,6 +31,35 @@ import { generateImage } from "../../src/server/agent/image-generation.js";
 import { fallbackProviderAllowlistFromPrefs, resolveHostAgentProviderEnv } from "../../src/server/agent/host-tokens.js";
 import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
 import { createMemFs } from "../harness/mem-fs.js";
+
+// The selector-only harnesses below intentionally isolate tryAutoSelectModel.
+// These two boundary tests instead run through the real SessionManager spawn
+// preflight so catalog rejection cannot accidentally bypass controlled fallback.
+const BOUNDARY_TMP_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "controlled-model-fallback-boundary-"));
+const BOUNDARY_STATE_DIR = path.join(BOUNDARY_TMP_ROOT, "state");
+const BOUNDARY_AGENT_DIR = path.join(BOUNDARY_TMP_ROOT, "agent");
+fs.mkdirSync(BOUNDARY_STATE_DIR, { recursive: true });
+fs.mkdirSync(path.join(BOUNDARY_AGENT_DIR, "sessions"), { recursive: true });
+process.env.BOBBIT_DIR = BOUNDARY_TMP_ROOT;
+process.env.BOBBIT_AGENT_DIR = BOUNDARY_AGENT_DIR;
+process.env.BOBBIT_TEST_NO_REMOTE = "1";
+process.env.BOBBIT_TEST_NO_EXTERNAL = "1";
+
+const { resetAgentDirStateForTests } = await import("../../src/server/bobbit-dir.ts");
+resetAgentDirStateForTests?.();
+const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
+const { invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
+const { registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
+const { initAuthorSidecarDir } = await import("../../src/server/agent/author-sidecar.ts");
+const { initPromptDirs } = await import("../../src/server/agent/system-prompt.ts");
+const { loadOrCreateToken } = await import("../../src/server/auth/token.ts");
+
+initPromptDirs(BOUNDARY_STATE_DIR);
+initAuthorSidecarDir(BOUNDARY_STATE_DIR, {
+	secretsDir: path.join(BOUNDARY_TMP_ROOT, "private-secrets"),
+	hmacKey: Buffer.alloc(32, 0x43),
+});
+loadOrCreateToken();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
@@ -406,6 +436,228 @@ function tempPrefs(): { prefs: PreferencesStore; cleanup: () => void } {
 		cleanup: () => memfs.rmSync(dir, { recursive: true, force: true }),
 	};
 }
+
+const BOUNDARY_ROLE = "retired-fallback-role";
+const BOUNDARY_RETIRED_MODEL = "retired-provider/claude-opus-4-5-retired";
+const BOUNDARY_FALLBACK_PROVIDER = "controlled-fallback-local";
+const BOUNDARY_FALLBACK_MODEL_ID = "claude-opus-5";
+const BOUNDARY_FALLBACK_MODEL = `${BOUNDARY_FALLBACK_PROVIDER}/${BOUNDARY_FALLBACK_MODEL_ID}`;
+
+type BoundaryRecord = Record<string, any> & { id: string };
+
+class BoundaryStore {
+	readonly records = new Map<string, BoundaryRecord>();
+	readonly updates: Array<{ id: string; fields: Record<string, any> }> = [];
+
+	put(record: BoundaryRecord): void {
+		this.records.set(record.id, { ...record });
+	}
+
+	update(id: string, fields: Record<string, any>): void {
+		this.updates.push({ id, fields: { ...fields } });
+		this.records.set(id, { ...(this.records.get(id) ?? { id }), ...fields });
+	}
+
+	get(id: string): BoundaryRecord | undefined { return this.records.get(id); }
+	getAll(): BoundaryRecord[] { return [...this.records.values()]; }
+	getLive(): BoundaryRecord[] { return this.getAll().filter((row) => !row.archived); }
+	getArchived(): BoundaryRecord[] { return this.getAll().filter((row) => row.archived); }
+	archive(id: string): void { this.update(id, { archived: true, archivedAt: Date.now() }); }
+	flush(): void {}
+}
+
+function splitBoundaryModel(model: string | undefined): { provider: string; id: string } {
+	assert.ok(model, "controlled fallback must bind an explicit model before bridge construction");
+	const slash = model.indexOf("/");
+	assert.ok(slash > 0 && slash < model.length - 1, `invalid boundary model: ${model}`);
+	return { provider: model.slice(0, slash), id: model.slice(slash + 1) };
+}
+
+function makeBoundaryBridge(options: Record<string, any>, sessionId: string): any {
+	let model = splitBoundaryModel(options.initialModel);
+	let thinkingLevel = options.initialThinkingLevel ?? "medium";
+	return {
+		running: true,
+		start: vi.fn(async () => {}),
+		stop: vi.fn(async () => {}),
+		waitForReady: vi.fn(async () => {}),
+		promptWhenReady: vi.fn(async () => ({ success: true })),
+		prompt: vi.fn(async () => ({ success: true })),
+		steer: vi.fn(async () => ({ success: true })),
+		abort: vi.fn(async () => ({ success: true })),
+		getState: vi.fn(async () => ({
+			success: true,
+			data: {
+				model,
+				thinkingLevel,
+				sessionFile: path.join(BOUNDARY_AGENT_DIR, "sessions", `${sessionId}.jsonl`),
+			},
+		})),
+		getMessages: vi.fn(async () => ({ success: true, data: { messages: [] } })),
+		setModel: vi.fn(async (provider: string, id: string) => {
+			model = { provider, id };
+			return { success: true };
+		}),
+		setThinkingLevel: vi.fn(async (level: string) => {
+			thinkingLevel = level;
+			return { success: true };
+		}),
+		compact: vi.fn(async () => ({ success: true })),
+		sendCommand: vi.fn(async () => ({ success: true })),
+		onEvent: vi.fn(() => () => {}),
+	};
+}
+
+function makeBoundaryFixture(label: string): {
+	manager: any;
+	store: BoundaryStore;
+	bridgeOptions: Record<string, any>[];
+} {
+	const preferences = new PreferencesStore(
+		path.resolve(`/memfs/controlled-fallback-boundary-${label}`),
+		createMemFs(),
+	);
+	preferences.set("customProviders", [{
+		id: BOUNDARY_FALLBACK_PROVIDER,
+		name: "Controlled fallback fixture",
+		type: "manual",
+		baseUrl: "http://127.0.0.1:9",
+		apiKey: "test-key",
+		models: [{ id: BOUNDARY_FALLBACK_MODEL_ID, name: "Controlled fallback Opus" }],
+	}]);
+	preferences.set("default.sessionModel", BOUNDARY_FALLBACK_MODEL);
+	preferences.set("default.sessionThinkingLevel", "high");
+	preferences.set("allowSessionModelFallback", true as any);
+	invalidateModelCache();
+
+	const store = new BoundaryStore();
+	const bridgeOptions: Record<string, any>[] = [];
+	registerRpcBridgeFactory((options: Record<string, any>) => {
+		bridgeOptions.push({ ...options });
+		return makeBoundaryBridge(options, options.env?.BOBBIT_SESSION_ID ?? `boundary-${bridgeOptions.length}`);
+	});
+	const roleManager = {
+		getRole(name: string) {
+			if (name !== BOUNDARY_ROLE) return undefined;
+			return {
+				name,
+				label: "Retired fallback role",
+				promptTemplate: "Exercise controlled model fallback preflight.",
+				model: BOUNDARY_RETIRED_MODEL,
+				thinkingLevel: "high",
+			};
+		},
+		listRoles: () => [],
+	};
+	const manager: any = new SessionManager({
+		preferencesStore: preferences,
+		roleManager: roleManager as any,
+		stateDir: BOUNDARY_STATE_DIR,
+	});
+	manager._testStore = store;
+	boundaryManagers.push(manager);
+	return { manager, store, bridgeOptions };
+}
+
+function boundaryTuple(record: BoundaryRecord | undefined): Record<string, unknown> {
+	return {
+		provider: record?.modelProvider,
+		modelId: record?.modelId,
+		thinkingLevel: record?.effectiveThinkingLevel,
+	};
+}
+
+const boundaryManagers: any[] = [];
+
+afterEach(() => {
+	registerRpcBridgeFactory(null);
+	invalidateModelCache();
+	while (boundaryManagers.length > 0) {
+		const manager = boundaryManagers.pop();
+		if (manager?._statusHeartbeatTimer) clearInterval(manager._statusHeartbeatTimer);
+		manager?.sessions?.clear?.();
+	}
+});
+
+afterAll(() => {
+	fs.rmSync(BOUNDARY_TMP_ROOT, { recursive: true, force: true });
+});
+
+describe("controlled model fallback policy — real SessionManager preflight", () => {
+	it("fails closed before bridge construction when a complete durable restore tuple left the catalog", async () => {
+		const { manager, store, bridgeOptions } = makeBoundaryFixture("durable-restore");
+		const sessionId = "durable-restore-fail-closed";
+		const transcript = path.join(BOUNDARY_AGENT_DIR, "sessions", `${sessionId}.jsonl`);
+		fs.writeFileSync(transcript, "");
+		const durable = {
+			id: sessionId,
+			title: "Durable restore must fail closed",
+			cwd: BOUNDARY_TMP_ROOT,
+			agentSessionFile: transcript,
+			createdAt: Date.now() - 1_000,
+			lastActivity: Date.now() - 500,
+			messageQueue: [],
+			wasStreaming: false,
+			modelProvider: "retired-provider",
+			modelId: "claude-opus-4-5-retired",
+			effectiveThinkingLevel: "high",
+		};
+		store.put(durable);
+		const before = boundaryTuple(store.get(sessionId));
+
+		let failure: unknown;
+		try {
+			await manager.restoreSession(durable);
+		} catch (error) {
+			failure = error;
+		}
+
+		assert.match(String((failure as Error | undefined)?.message), /not currently available for session selection/i);
+		assert.deepEqual(bridgeOptions, [], "a complete unavailable durable tuple must fail before constructing a fallback bridge");
+		assert.deepEqual(boundaryTuple(store.get(sessionId)), before, "controlled fallback must not replace the previous durable tuple");
+		assert.equal(manager.sessions.has(sessionId), false);
+	});
+
+	it("lets an unavailable role candidate use the selectable configured fallback before a new-session bridge is built", async () => {
+		const { manager, store, bridgeOptions } = makeBoundaryFixture("role-new-session");
+		const sessionId = "eligible-role-fallback-preflight";
+
+		let session: any;
+		let failure: unknown;
+		try {
+			session = await manager.createSession(
+				BOUNDARY_TMP_ROOT,
+				[],
+				undefined,
+				undefined,
+				{ sessionId, role: BOUNDARY_ROLE },
+			);
+			if (session.pendingMetadataPersist) await session.pendingMetadataPersist;
+		} catch (error) {
+			failure = error;
+		}
+
+		assert.deepEqual(
+			{
+				failure: failure instanceof Error ? failure.message : failure,
+				bridgeModels: bridgeOptions.map((options) => options.initialModel),
+				live: manager.sessions.has(sessionId),
+				durable: boundaryTuple(store.get(sessionId)),
+			},
+			{
+				failure: undefined,
+				bridgeModels: [BOUNDARY_FALLBACK_MODEL],
+				live: true,
+				durable: {
+					provider: BOUNDARY_FALLBACK_PROVIDER,
+					modelId: BOUNDARY_FALLBACK_MODEL_ID,
+					thinkingLevel: "high",
+				},
+			},
+			"ROLE_FALLBACK_PREFLIGHT: an unavailable role on an eligible new session must use the current default.sessionModel instead of being rejected before controlled fallback can run",
+		);
+	});
+});
 
 describe("controlled model fallback policy — session auto-selection", () => {
 	it("model success followed by thinking rejection leaves the previous durable tuple intact", async () => {
