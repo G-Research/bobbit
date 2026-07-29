@@ -210,6 +210,24 @@ When `read_session` is available, Bobbit prepends a content-addressed immutable 
 
 Successful values are reprojected into the canonical envelope described above. The fitter bounds semantic fields and excerpts, then removes optional previews or later page rows if necessary. A budget-shortened page or targeted slice returns a typed continuation rather than silent transport truncation. If an old resolved extension returns an unrecognized successful wrapper, the boundary returns a small `extension_return_unrecognized` partial with retry metadata instead of forwarding the unknown body.
 
+That compatibility partial always includes exactly one `wrapperDiagnostics` form:
+
+```json
+{ "omitted": true, "actualBytes": 12345 }
+```
+
+`actualBytes` is present only when the boundary can prove the discarded wrapper's exact UTF-8 JSON byte length from ordinary own-data properties. Otherwise it returns:
+
+```json
+{
+  "omitted": true,
+  "measurementOmitted": true,
+  "measurementReason": "unsafe_unmeasurable"
+}
+```
+
+The second form is expected for hostile accessors or proxies, custom serializers, and values that exceed bounded snapshot work. The boundary does not invoke getters, proxy traps, or `toJSON` to calculate diagnostics. It also does not fabricate `0`, a ceiling, or another sentinel as `actualBytes`; consumers that display wrapper size must branch on `actualBytes` versus `measurementReason`. Consumers that only follow the retry metadata can continue to use `omitted` and `continuationRequest`. This agent-only compatibility detail does not change direct REST or browser payloads.
+
 Errored values retain only bounded `error`, `code`, `status`, `detail`, and `message` diagnostics; renderer details retain only `code` and `status`. Missing semantic diagnostics become `{"error":"read_session_failed"}`. Both success and error paths remove wrapper-level `usage`, provider/model metadata, signatures, encrypted/replay fields, arbitrary extra content, accessors, and custom serializers before emission and persistence. This wrapper scrub is separate from the path-sensitive result-body rule: legitimate provider-like keys inside an explicitly requested canonical tool-result excerpt remain payload data.
 
 ## Errors
