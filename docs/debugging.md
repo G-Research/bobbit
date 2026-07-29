@@ -1235,7 +1235,16 @@ The session-header toast (e.g. "Link copied" from the Copy-link button) uses `sh
 
 ## Transcript access errors
 
-Cross-project reads are allowed for `read_session`, `GET /api/sessions/:id/transcript`, and `GET /api/sessions/:id/transcript/before-compaction` when the authenticated caller can reach the target session on the same gateway; the `x-bobbit-session-id` header no longer gates transcript access by matching `projectId`. Structured transcript-reader errors are `session_not_found`, `transcript_unavailable`, `invalid_regex`, and `invalid_params`; before-compaction history also has `compaction_not_found` and may surface `internal_error`. Files: `src/server/agent/transcript-reader.ts`, `defaults/tools/agent/read_session.yaml` + `extension.ts`.
+Cross-project reads are allowed for `read_session`, `GET /api/sessions/:id/transcript`, and `GET /api/sessions/:id/transcript/before-compaction` when the authenticated caller can reach the target session on the same gateway; `x-bobbit-session-id` does not require a matching `projectId`.
+
+First identify the response boundary:
+
+- **Common reader errors** use `{ error: "<discriminator>", detail? }`: `session_not_found`, `transcript_unavailable`, `invalid_regex`, and `invalid_params`. Before-compaction history additionally has `compaction_not_found` and may surface `internal_error`.
+- **Agent-bound result handling** additionally returns `INVALID_RESULT_BODY` when a result cannot be canonicalized safely; `INVALID_RESULT_HANDLE` for a missing/malformed handle or cursor/limit without a handle; `RESULT_NOT_FOUND` when its message/block disappeared; `STALE_RESULT_HANDLE` when the body changed; `INVALID_RESULT_CURSOR` for an out-of-range cursor or one that splits a Unicode scalar; and `INVALID_RESULT_LIMIT` unless the slice limit is an integer from 1 through 8192. Reuse the exact handle, continue only from `excerpt.nextCursor`, and correct the request instead of broadening it.
+- **Agent-bound work admission** returns `{ error: "TRANSCRIPT_WORK_LIMIT_EXCEEDED", detail }` when pre-I/O capacity or cumulative parsing, indexing, result, canonicalization, hashing, copy, or retained-text work is exhausted. Wait for concurrent reads to drain and retry at most one small compact page; do not fan out or switch to broad result reads.
+- **Pre-read heavy guard** returns `{ error: "<guidance>", code: "CONTEXT_HEAVY_LIMIT_REQUIRED" }` before transcript I/O when `verbose`, `include_tool_results`, or `includeToolResults` is true without an explicitly supplied numeric integer `limit` from 1 through 10. Add a valid small limit or return to compact discovery.
+
+The result-slice, work-admission, and heavy-limit errors belong to a request bound to a real caller session. Ordinary direct REST/UI transcript reads retain the legacy projection and do not acquire those agent-only policies; both boundaries share the common reader errors and safe RE2 syntax. See [Bounded session diagnostics — Errors](read-session.md#errors) for the canonical table and [Direct REST and UI compatibility](read-session.md#direct-rest-and-ui-compatibility) for boundary selection. Files: `src/server/agent/transcript-reader.ts`, `defaults/tools/agent/read_session.yaml` + `extension.ts`.
 
 ## Mobile annotation popover doesn't open after tapping "Add comment"
 

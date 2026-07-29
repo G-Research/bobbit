@@ -144,7 +144,7 @@ For non-blocking children you spawned, these verbs work over the child's session
 - **`team_steer`** — backward-compatible mid-turn redirect; requires the child to be `streaming` (else `409`). Prefer `team_prompt(mode="steer")` for routine nudges because it also handles idle targets.
 - **`team_abort`** — force-abort a stuck child.
 - **`team_dismiss`** — terminate and archive the child.
-- **`read_session`** — read the child's transcript; tool result bodies are omitted by default unless `include_tool_results: true` is passed. See [Transcript reads and tool-result redaction](read-session.md).
+- **`read_session`** — diagnose the child compact-first. Results expose identity, status, accurate size, and a handle by default. `include_tool_results: true` requires an explicit `limit <= 10` and adds only bounded, self-describing excerpts—never broad or raw result bodies. Prefer locating one result, then requesting a targeted `result_handle` slice and continuing only from its returned cursor. See [Bounded session diagnostics](read-session.md).
 
 ### `team_dismiss` outcomes
 

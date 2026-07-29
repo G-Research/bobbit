@@ -1,7 +1,15 @@
 # Design: Bobbit tool verbosity guards
 
-Status: **implemented**
+Status: **implemented for `bobbit_*`; superseded for agent-bound `read_session`**
 Goal: **Bobbit Tool Verbosity Guards**
+
+> **Supersession boundary:** This document remains the design record for compact
+> `bobbit_read`, `bobbit_orchestrate`, and `bobbit_admin` projection. The later
+> [Bound Session Diagnostics issue analysis](bound-session-diagnostics-issue-analysis.md)
+> supersedes its `read_session` architecture. Use
+> [Bounded session diagnostics](../read-session.md) for the shipped agent-facing
+> contract. Ordinary direct transcript REST/UI calls retain the compatibility
+> behavior described in that guide.
 
 ## 1. Problem and scope
 
@@ -11,14 +19,25 @@ Agent-facing gateway tools previously placed much more data in model context tha
 - `read_session` allowing `verbose: true` and `include_tool_results: true` over its normal 20-message default or larger windows; and
 - all three `bobbit_*` tools returning successful REST payloads verbatim, with no compact default.
 
-The implemented change is an **agent-tool output policy**, not a REST API policy. Gateway REST responses and non-agent callers remain unchanged. The four affected tools are:
+The initial implementation added an **agent-tool output policy** to four tools:
 
 - `bobbit_read`, `bobbit_orchestrate`, and `bobbit_admin` in `defaults/tools/bobbit/extension.ts`;
 - `read_session` in `defaults/tools/agent/extension.ts`.
 
-The design adds compact-by-default projection to the three `bobbit_*` tools and a shared, fail-closed limit guard for context-heavy flags. It does not change transcript storage, transcript parsing, gateway endpoint schemas, or UI REST consumers.
+Compact-by-default projection for the three `bobbit_*` tools remains at the
+post-REST agent boundary and does not change their gateway REST responses. The
+initial `read_session` extension guard is still one layer, but it is no longer
+its complete architecture: authenticated agent-bound transcript requests also
+use route-level pre-read enforcement, canonical reader projection and work
+admission, and a final Pi lifecycle budget. Those controls do not apply to an
+ordinary direct REST/UI transcript request.
 
 ## 2. Resolved values and shared vocabulary
+
+For `bobbit_*`, the shared module below remains the source of truth. Its
+`read_session` entry records the original builtin-extension layer; the immutable
+alias guard and agent-bound route/reader enforcement are defined by the
+superseding architecture in [section 6](#6-read_session-superseding-agent-boundary-and-rest-compatibility).
 
 Add `defaults/tools/_shared/context-heavy-guard.ts` as the single source of truth used by both extension families. Export these exact values:
 
@@ -267,39 +286,62 @@ For a paged `bobbit_read` operation, `verbose: true` therefore requires an expli
 
 The `verbose` parameter is tool-layer only. Never forward it as a gateway query/body field.
 
-## 6. `read_session` guard and REST compatibility
+## 6. `read_session`: superseding agent boundary and REST compatibility
 
-### 6.1 Agent extension
+### 6.1 Agent-bound enforcement
 
-In `defaults/tools/agent/extension.ts`, call:
+The original builtin extension still calls
+`contextHeavyLimitError("read_session", params, true)` before its gateway
+request. Bound Session Diagnostics added defense in depth because a server,
+project, or Marketplace override can replace that handler:
 
-```ts
-contextHeavyLimitError("read_session", params, true)
-```
+1. A gateway-owned immutable pre-handler guard rejects `verbose`,
+   `include_tool_results`, or the compatibility alias `includeToolResults` when
+   true unless `limit` is an explicitly supplied numeric integer from 1 through
+   10.
+2. Once `x-bobbit-session-id` resolves to a real caller session, the transcript
+   route repeats that check before transcript I/O.
+3. The reader selects its agent projection: canonical Pi/Anthropic calls and
+   results, bounded result handles/excerpts, provider-field scrubbing, work
+   admission, and whole-response fitting.
+4. A final immutable Pi result boundary keeps the tool return, lifecycle event,
+   AgentSession state, and persisted JSONL row within the production 50 KiB
+   ceiling.
 
-at the beginning of `read_session.execute`, before credential resolution and `callReadSessionEndpoint`. If it returns an error, serialize the structured error and return `isError: true` without issuing a request.
+A heavy request that passes the small-page guard therefore does **not** proceed
+unchanged. `include_tool_results: true` adds only bounded, self-describing
+excerpts; it never restores raw provider blocks or an unbounded result body.
+`verbose` adds bounded semantic detail but cannot restore opaque provider replay
+metadata. Prefer a compact page, then one targeted `result_handle` slice if its
+metadata is insufficient.
 
-Both `verbose: true` and `include_tool_results: true` independently activate the guard; when both are true the message names both. `limit` must be explicitly supplied even though the transcript reader normally defaults to 20. At `limit: 10` or less, the request proceeds unchanged. Existing defaults remain:
+Omitted/false `include_tool_results` remains the agent default, ordinary compact
+reads retain the default `limit` of 20, and filtering does not waive the
+explicit heavy-read limit. See [Bounded session diagnostics](../read-session.md)
+for result slice parameters, continuations, work limits, and structured errors.
 
-- omitted/false `verbose` produces compact messages;
-- omitted/false `include_tool_results` is sent to REST as `include_tool_results=0`;
-- ordinary non-heavy reads retain default limit 20 and maximum 200.
+### 6.2 Ordinary direct REST remains compatible
 
-Filtering (`pattern`, `context`, negative `offset`) does not waive the explicit small-limit requirement. These controls narrow which messages match, but do not prove the returned payload is bounded unless `limit` is present.
+The route name alone does not select agent policy. The
+`GET /api/sessions/:id/transcript` route uses the bounded branch only when the
+caller header resolves to a real session. An absent or unknown caller header
+stays on the ordinary direct REST/UI branch; omitting result-inclusion flags
+there retains legacy result inclusion, projection, author objects, and the
+existing 200-message validation cap.
 
-### 6.2 Do not gate the REST route or pure reader
+The server route and transcript reader must enforce safety for the authenticated
+**agent-bound branch** while preserving the ordinary direct branch. In
+particular:
 
-Do **not** add this policy to `src/server/server.ts` or `src/server/agent/transcript-reader.ts`.
-
-The route `GET /api/sessions/:id/transcript` is also a programmatic/UI-compatible REST surface. It currently parses `include_tool_results` as optional; when omitted, `readTranscript` deliberately defaults `includeToolResults` to `true` for backward compatibility. The agent extension explicitly sends `0` by default. Moving the new guard into the route or reader would break callers that are not model-context consumers and would change established REST behavior.
-
-Accordingly:
-
-- the REST API continues accepting verbose/raw reads up to its existing 200-message validation cap;
-- `ReadTranscriptParams`, `DEFAULT_LIMIT = 20`, `MAX_LIMIT = 200`, rendering, and error codes remain unchanged;
-- only the agent tool enforces the 10-message context budget;
+- only agent-bound requests get the 10-message heavy guard, canonical result
+  handles/slices, work admission, and complete Pi lifecycle response budget;
+- direct REST/UI keeps its legacy response projection and result defaults;
+- both branches use the common safe RE2 matching engine, so invalid or
+  unsupported patterns return `invalid_regex` rather than entering a
+  backtracking engine;
 - the before-compaction transcript route is unaffected; and
-- this is a context-safety guard, not an authorization boundary against a caller deliberately using raw HTTP.
+- the agent guard is context safety, not an authorization boundary intended to
+  prevent an authorized operator from using ordinary direct REST.
 
 ## 7. Tool schemas and documentation
 
@@ -325,12 +367,16 @@ Their `docs`/`detail_docs` must state compact is the default, `verbose: true` re
 
 ### `read_session` YAML and prompt guidance
 
-Update `defaults/tools/agent/read_session.yaml` and the registered TypeBox descriptions/prompt guidelines to say:
+The original tool-description work was later superseded. Current
+`read_session` YAML and prompt guidance must say:
 
-- either heavy flag requires an explicit `limit <= 10`;
-- omission of `limit` is rejected even though ordinary reads default to 20;
-- fetch additional raw/verbose content in smaller batches; and
-- compact/default behavior remains unchanged.
+- every heavy spelling requires an explicit numeric integer `limit` from 1
+  through 10, even though ordinary compact reads default to 20;
+- begin with a compact tail or regex page and avoid overlapping windows;
+- `include_tool_results` returns bounded, self-describing excerpts rather than
+  raw result bodies; and
+- retrieve additional content only through a targeted result handle and its
+  returned cursor.
 
 Keep descriptions concise. Run `tests2/core/tool-description-budget.test.ts`; do not expand the short registered tool descriptions or operation-union descriptions unnecessarily. Put detailed explanation in `detail_docs`, not the hot tool description.
 
@@ -418,7 +464,12 @@ Both extensions import the same flags, cap, code, template, and formatter from `
 
 ### REST/UI compatibility regression
 
-The heavy guard lives only in extension `execute` functions. `server.ts` and `transcript-reader.ts` are deliberately untouched, preserving the reader's direct/API default of including tool results when the REST query omits the flag. A direct-REST compatibility test can pin this boundary.
+The initial extension guard remains, but authenticated agent-bound requests now
+repeat enforcement in the route and use the reader's bounded projection. Tests
+must pin both sides of the policy selector: a real caller-session identity gets
+agent guards before transcript I/O, while ordinary direct REST retains its
+legacy result-inclusion default and projection. See
+[Bounded session diagnostics — Direct REST and UI compatibility](../read-session.md#direct-rest-and-ui-compatibility).
 
 ### Tool-description budget growth
 
@@ -428,11 +479,16 @@ Keep registered descriptions short and move details to YAML `detail_docs`. Run t
 
 The 200-unit slice is deterministic and JSON-safe, though it can split a surrogate pair. If implementation prefers code-point safety, use `Array.from(text).slice(0, 200).join("")`; tests should define the chosen behavior. Code-point slicing is recommended so previews never contain an unmatched surrogate.
 
-## 10. Non-goals
+## 10. Non-goals and superseded scope
 
-- No change to gateway REST response shapes or paging defaults.
-- No change to transcript JSONL parsing, tool-result redaction, or the 32 KB transcript result cap.
-- No attempt to prevent raw HTTP access; this protects normal agent tool use.
-- No addition of paging to currently non-paged mutation/admin operations.
-- No UI renderer changes.
-- No hardcoding for particular goals, sessions, projects, or response fixtures.
+For the still-current `bobbit_*` projection, gateway REST response shapes and
+paging defaults remain unchanged, and no paging is added to non-paged
+mutation/admin operations.
+
+The old `read_session` non-goals are superseded: its agent-bound branch now
+intentionally changes transcript parsing/projection, result retrieval, reader
+work admission, rendering data, and lifecycle response fitting. It still does
+not change transcript storage or the ordinary direct REST/UI projection, and it
+does not try to prevent an authorized caller from using that direct surface.
+Neither design hardcodes particular goals, sessions, projects, or response
+fixtures.
