@@ -7859,14 +7859,47 @@ export class SessionManager {
 			currentModels = await getAvailableModels(this.preferencesStore);
 			rawSelectedSpawnModel = await this.resolveCurrentCatalogSpawnModel([], currentModels);
 		}
-		const selectedSpawnModel = rawSelectedSpawnModel
+		let selectedSpawnModel = rawSelectedSpawnModel
 			? normalizeAigwModelString(rawSelectedSpawnModel)
 			: undefined;
 		if (selectedSpawnModel) {
 			currentModels ??= this.preferencesStore
 				? await getAvailableModels(this.preferencesStore)
 				: undefined;
-			await this.requireCurrentCatalogSpawnModel(selectedSpawnModel, currentModels);
+			try {
+				await this.requireCurrentCatalogSpawnModel(selectedSpawnModel, currentModels);
+			} catch (selectedError) {
+				// A fresh role-owned setup is one of the existing controlled-fallback
+				// call sites. Resolve its one configured fallback before constructing the
+				// bridge so an unavailable role provider cannot prevent verified setup.
+				// Explicit initial models, defaults, restores, and inherited tuples remain
+				// fail-closed at their own boundaries.
+				const roleFallbackEligible = opts?.initialModel === undefined
+					&& !opts?.allowSessionReuse
+					&& !!rawInitialRoleModel
+					&& this.preferencesStore?.get("allowSessionModelFallback") === true;
+				if (!roleFallbackEligible) throw selectedError;
+
+				const fallbackModel = rawInitialDefaultModel
+					? normalizeAigwModelString(rawInitialDefaultModel)
+					: undefined;
+				let fallbackError: unknown;
+				if (!fallbackModel) {
+					fallbackError = new Error("controlled model fallback is enabled but default.sessionModel is unset");
+				} else if (fallbackModel === selectedSpawnModel) {
+					fallbackError = new Error("controlled model fallback target default.sessionModel is the same as the unavailable role model");
+				} else {
+					try {
+						selectedSpawnModel = await this.requireCurrentCatalogSpawnModel(fallbackModel, currentModels);
+						console.warn(`[session-manager] Role model "${sanitizeModelErrorText(rawInitialRoleModel)}" is unavailable for new session ${id}; controlled fallback enabled, binding default.sessionModel="${sanitizeModelErrorText(selectedSpawnModel)}" before spawn`);
+					} catch (error) {
+						fallbackError = error;
+					}
+				}
+				if (fallbackError) {
+					throw new Error(`role model "${sanitizeModelErrorText(rawInitialRoleModel)}" failed preflight and controlled fallback did not bind; original error: ${sanitizeModelErrorText(selectedError)}; fallback error: ${sanitizeModelErrorText(fallbackError)}`);
+				}
+			}
 		}
 		const exactInitialThinkingLevel = opts?.skipAutoThinking && !opts?.initialThinkingLevel
 			? undefined

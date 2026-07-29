@@ -519,7 +519,8 @@ function makeBoundaryFixture(label: string): {
 	);
 	preferences.set("customProviders", [{
 		id: BOUNDARY_FALLBACK_PROVIDER,
-		name: "Controlled fallback fixture",
+		// Manual providers use their configured name as the runtime provider key.
+		name: BOUNDARY_FALLBACK_PROVIDER,
 		type: "manual",
 		baseUrl: "http://127.0.0.1:9",
 		apiKey: "test-key",
@@ -651,7 +652,8 @@ describe("controlled model fallback policy — real SessionManager preflight", (
 				durable: {
 					provider: BOUNDARY_FALLBACK_PROVIDER,
 					modelId: BOUNDARY_FALLBACK_MODEL_ID,
-					thinkingLevel: "high",
+					// The manual row is authoritatively non-reasoning, so high clamps to off.
+					thinkingLevel: "off",
 				},
 			},
 			"ROLE_FALLBACK_PREFLIGHT: an unavailable role on an eligible new session must use the current default.sessionModel instead of being rejected before controlled fallback can run",
