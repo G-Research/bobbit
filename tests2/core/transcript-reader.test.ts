@@ -931,7 +931,7 @@ describe("transcript-reader / cumulative projection work budgets", () => {
 		assert.equal(metrics.currentRetainedCanonicalResultUnits, 0);
 	});
 
-	it("applies one cumulative text budget across a limit-200 page", async () => {
+	it("rejects a limit-200 transcript before semantic work when raw JSONL exceeds the cumulative text budget", async () => {
 		const content = Array.from({ length: 200 }, (_, index) => JSON.stringify({
 			type: "message",
 			message: {
@@ -939,6 +939,7 @@ describe("transcript-reader / cumulative projection work budgets", () => {
 				content: `body-${index}-${"x".repeat(64)}`,
 			},
 		})).join("\n");
+		assert.ok(content.length > 1_024);
 		const metrics = createTranscriptProjectionWorkMetricsForTests();
 
 		await assert.rejects(
@@ -951,9 +952,12 @@ describe("transcript-reader / cumulative projection work budgets", () => {
 			}),
 			workLimitError,
 		);
-		assert.ok(metrics.resultBodiesCanonicalized > 1);
-		assert.ok(metrics.resultBodiesCanonicalized < 200);
-		assert.ok(metrics.canonicalTextWorkUnits <= 1_024);
+		assert.equal(metrics.rawTranscriptWorkUnits, 0, "an unreservable raw transcript must not be partially charged");
+		assert.equal(metrics.canonicalTextWorkUnits, 0);
+		assert.equal(metrics.operationWorkUnits, 0);
+		assert.equal(metrics.indexedResults, 0);
+		assert.equal(metrics.resultBodiesCanonicalized, 0);
+		assert.equal(metrics.resultBodiesHashed, 0);
 		assert.equal(metrics.currentRetainedCanonicalResultUnits, 0);
 	});
 
@@ -1008,11 +1012,12 @@ describe("transcript-reader / cumulative projection work budgets", () => {
 				...memoryTranscript(content),
 				projection: "agent",
 				sessionId: "opaque-cumulative-work",
-				projectionWorkLimitsForTests: { maxTextUnits: 2_500 },
+				projectionWorkLimitsForTests: { maxTextUnits: content.length + 2_500 },
 				workMetricsForTests: metrics,
 			}),
 			workLimitError,
 		);
+		assert.equal(metrics.rawTranscriptWorkUnits, content.length);
 		assert.ok(metrics.canonicalInputWorkUnits >= opaquePayload.length + opaqueMimeType.length + 512);
 		assert.ok(metrics.resultBodiesCanonicalized < 2, "tiny summaries must not replace charged opaque scans");
 		assert.equal(metrics.currentRetainedCanonicalResultUnits, 0);
@@ -1106,6 +1111,7 @@ describe("transcript-reader / cumulative projection work budgets", () => {
 		assert.equal(nameMatch.messages[0].index, 2, "search must inspect the full name, not its index prefix");
 
 		const rejectedMetrics = createTranscriptProjectionWorkMetricsForTests();
+		assert.ok(content.length > 128 * 1024);
 		await assert.rejects(
 			() => readTranscript({ limit: 1 }, {
 				...memoryTranscript(content),
@@ -1116,6 +1122,9 @@ describe("transcript-reader / cumulative projection work budgets", () => {
 			}),
 			workLimitError,
 		);
+		assert.equal(rejectedMetrics.rawTranscriptWorkUnits, 0);
+		assert.equal(rejectedMetrics.indexStringWorkUnits, 0);
+		assert.equal(rejectedMetrics.operationWorkUnits, 0);
 		assert.equal(rejectedMetrics.resultBodiesCanonicalized, 0);
 	});
 
@@ -1153,7 +1162,7 @@ describe("transcript-reader / cumulative projection work budgets", () => {
 		assert.equal(reads, 0);
 	});
 
-	it("cleans tracker reservations after success, failure, and concurrent rejection", async () => {
+	it("cleans tracker reservations after success and failure", async () => {
 		const limits = {
 			maxRequests: 1,
 			maxOperations: 128 * 1024,
@@ -1194,27 +1203,190 @@ describe("transcript-reader / cumulative projection work budgets", () => {
 			reservedResults: 0,
 			reservedTextUnits: 0,
 		});
+	});
 
-		const concurrentPool = createTranscriptProjectionReservationPoolForTests(limits);
-		const searchable = makeJsonl(Array.from({ length: 4_096 }, (_, index) => ({
-			role: index % 2 === 0 ? "assistant" : "user",
-			content: `searchable row ${index} ${"z".repeat(64)}`,
-		})));
-		const concurrentOptions = {
-			...memoryTranscript(searchable),
-			projection: "agent" as const,
-			sessionId: "tracker-concurrent",
-			workReservationPoolForTests: concurrentPool,
-		};
-		const active = readTranscript({ pattern: "never-match", limit: 1 }, concurrentOptions);
-		for (let attempt = 0; attempt < 100 && concurrentPool.stats().activeRequests === 0; attempt++) {
-			await new Promise((resolve) => setTimeout(resolve, 1));
+	it("acquires the sole request reservation before deferred transcript I/O", async () => {
+		const content = makeJsonl([{ role: "assistant", content: "deferred read" }]);
+		const pool = createTranscriptProjectionReservationPoolForTests({
+			maxRequests: 1,
+			maxOperations: 1_000,
+			maxResults: 100,
+			maxTextUnits: 1_000_000,
+		});
+		let firstReads = 0;
+		let secondReads = 0;
+		let signalReadStarted!: () => void;
+		let releaseRead!: () => void;
+		const readStarted = new Promise<void>((resolve) => { signalReadStarted = resolve; });
+		const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+		const first = readTranscript({ limit: 1 }, {
+			readContent: async () => {
+				firstReads++;
+				signalReadStarted();
+				await readGate;
+				return content;
+			},
+			projection: "agent",
+			sessionId: "reservation-before-io-first",
+			workReservationPoolForTests: pool,
+		});
+		await readStarted;
+		try {
+			assert.deepEqual(pool.stats(), {
+				activeRequests: 1,
+				reservedOperations: 0,
+				reservedResults: 0,
+				reservedTextUnits: 0,
+			});
+			await assert.rejects(
+				() => readTranscript({ limit: 1 }, {
+					readContent: async () => {
+						secondReads++;
+						return content;
+					},
+					projection: "agent",
+					sessionId: "reservation-before-io-second",
+					workReservationPoolForTests: pool,
+				}),
+				workLimitError,
+			);
+			assert.equal(firstReads, 1);
+			assert.equal(secondReads, 0, "request-cap rejection must happen before the second readContent call");
+		} finally {
+			releaseRead();
 		}
-		assert.equal(concurrentPool.stats().activeRequests, 1);
-		await assert.rejects(() => readTranscript({ limit: 1 }, concurrentOptions), workLimitError);
-		assert.equal(concurrentPool.stats().activeRequests, 1);
-		await active;
-		assert.deepEqual(concurrentPool.stats(), {
+		await first;
+		assert.deepEqual(pool.stats(), {
+			activeRequests: 0,
+			reservedOperations: 0,
+			reservedResults: 0,
+			reservedTextUnits: 0,
+		});
+	});
+
+	it("rejects a second raw transcript after I/O but before its parse hook when global text is full", async () => {
+		const content = makeJsonl([{ role: "assistant", content: "fills raw reservation" }]);
+		const pool = createTranscriptProjectionReservationPoolForTests({
+			maxRequests: 2,
+			maxOperations: 1_000,
+			maxResults: 100,
+			maxTextUnits: content.length,
+		});
+		const firstMetrics = createTranscriptProjectionWorkMetricsForTests();
+		const secondMetrics = createTranscriptProjectionWorkMetricsForTests();
+		let signalFirstParse!: () => void;
+		let releaseFirstParse!: () => void;
+		const firstAtParse = new Promise<void>((resolve) => { signalFirstParse = resolve; });
+		const firstParseGate = new Promise<void>((resolve) => { releaseFirstParse = resolve; });
+		let firstParseHooks = 0;
+		let secondReads = 0;
+		let secondParseHooks = 0;
+		const first = readTranscript({ limit: 1 }, {
+			...memoryTranscript(content),
+			projection: "agent",
+			sessionId: "global-raw-first",
+			workMetricsForTests: firstMetrics,
+			workReservationPoolForTests: pool,
+			beforeAgentParseForTests: async () => {
+				firstParseHooks++;
+				signalFirstParse();
+				await firstParseGate;
+			},
+		});
+		await firstAtParse;
+		try {
+			assert.equal(firstMetrics.rawTranscriptWorkUnits, content.length);
+			assert.deepEqual(pool.stats(), {
+				activeRequests: 1,
+				reservedOperations: 0,
+				reservedResults: 0,
+				reservedTextUnits: content.length,
+			});
+			await assert.rejects(
+				() => readTranscript({ limit: 1 }, {
+					readContent: async () => {
+						secondReads++;
+						return content;
+					},
+					projection: "agent",
+					sessionId: "global-raw-second",
+					workMetricsForTests: secondMetrics,
+					workReservationPoolForTests: pool,
+					beforeAgentParseForTests: () => { secondParseHooks++; },
+				}),
+				workLimitError,
+			);
+			assert.equal(secondReads, 1, "the global text rejection must happen after transcript I/O");
+			assert.equal(secondParseHooks, 0, "the rejected raw transcript must not reach the parse seam");
+			assert.equal(secondMetrics.rawTranscriptWorkUnits, 0);
+			assert.equal(secondMetrics.operationWorkUnits, 0);
+			assert.deepEqual(pool.stats(), {
+				activeRequests: 1,
+				reservedOperations: 0,
+				reservedResults: 0,
+				reservedTextUnits: content.length,
+			});
+		} finally {
+			releaseFirstParse();
+		}
+		await assert.rejects(() => first, workLimitError);
+		assert.equal(firstParseHooks, 1);
+		assert.deepEqual(pool.stats(), {
+			activeRequests: 0,
+			reservedOperations: 0,
+			reservedResults: 0,
+			reservedTextUnits: 0,
+		});
+	});
+
+	it("rejects oversized ignored provider metadata before parsing or semantic work", async () => {
+		const content = JSON.stringify({
+			type: "message",
+			message: {
+				role: "assistant",
+				content: [{
+					type: "thinking",
+					thinking: "bounded visible thought",
+					thinkingSignature: "provider-only-" + "s".repeat(16 * 1024),
+				}],
+			},
+		}) + "\n";
+		const metrics = createTranscriptProjectionWorkMetricsForTests();
+		const pool = createTranscriptProjectionReservationPoolForTests({
+			maxRequests: 1,
+			maxOperations: 1_000,
+			maxResults: 100,
+			maxTextUnits: content.length * 2,
+		});
+		let reads = 0;
+		let parseHooks = 0;
+		await assert.rejects(
+			() => readTranscript({ limit: 1 }, {
+				readContent: async () => {
+					reads++;
+					return content;
+				},
+				projection: "agent",
+				sessionId: "ignored-provider-raw-limit",
+				projectionWorkLimitsForTests: { maxTextUnits: content.length - 1 },
+				workMetricsForTests: metrics,
+				workReservationPoolForTests: pool,
+				beforeAgentParseForTests: () => { parseHooks++; },
+			}),
+			workLimitError,
+		);
+		assert.equal(reads, 1);
+		assert.equal(parseHooks, 0);
+		assert.equal(metrics.rawTranscriptWorkUnits, 0);
+		assert.equal(metrics.canonicalTextWorkUnits, 0);
+		assert.equal(metrics.operationWorkUnits, 0);
+		assert.equal(metrics.indexedResults, 0);
+		assert.equal(metrics.indexStringWorkUnits, 0);
+		assert.equal(metrics.canonicalInputWorkUnits, 0);
+		assert.equal(metrics.projectedStringWorkUnits, 0);
+		assert.equal(metrics.callArgumentsCanonicalized, 0);
+		assert.equal(metrics.resultBodiesCanonicalized, 0);
+		assert.deepEqual(pool.stats(), {
 			activeRequests: 0,
 			reservedOperations: 0,
 			reservedResults: 0,
@@ -1277,11 +1449,12 @@ describe("transcript-reader / cumulative projection work budgets", () => {
 					...memoryTranscript(content),
 					projection: "agent",
 					sessionId: `primitive-${label}`,
-					projectionWorkLimitsForTests: { maxOperations: 2_000, maxTextUnits: 1_024 },
+					projectionWorkLimitsForTests: { maxOperations: 2_000, maxTextUnits: content.length + 1_024 },
 					workMetricsForTests: metrics,
 				}),
 				workLimitError,
 			);
+			assert.equal(metrics.rawTranscriptWorkUnits, content.length);
 			assert.equal(metrics.callArgumentsCanonicalized, 0);
 			assert.equal(metrics.canonicalInputWorkUnits, 0);
 			assert.ok(metrics.indexStringWorkUnits > 0);
@@ -1653,18 +1826,28 @@ describe("transcript-reader / agent timestamp budgets", () => {
 	const safeTimestampPrefix = "x".repeat(63);
 	const oversizedTimestamp = safeTimestampPrefix + "😀" + "y".repeat(100 * 1024);
 
-	it("caps ts/timestamp in normal and summary rows while pagination makes exact progress", async () => {
-		const oversizedCalls = Array.from({ length: 64 }, (_, index) => ({
+	it("uses a deterministic minimum-budget summary for control-heavy metadata and advances one row", async () => {
+		const controls = Array.from({ length: 32 }, (_, index) => String.fromCharCode(index)).join("");
+		const oversizedCalls = Array.from({ length: 12 }, (_, index) => ({
 			type: "toolCall",
-			id: `call-${index}`,
-			name: "read",
-			arguments: { path: `fixture-${index}` },
+			id: `call-${index}-${controls.repeat(2)}`,
+			name: `read-${controls.repeat(2)}`,
+			arguments: { path: `fixture-${index}-${controls.repeat(4)}` },
+		}));
+		const oversizedResults = Array.from({ length: 7 }, (_, index) => ({
+			type: "tool_result",
+			tool_use_id: `result-${index}-${controls.repeat(2)}`,
+			name: `result-${controls.repeat(2)}`,
+			content: "ok",
 		}));
 		const text = [
 			{
 				type: "message",
-				timestamp: oversizedTimestamp,
-				message: { role: "assistant", content: oversizedCalls },
+				timestamp: `timestamp-${controls.repeat(8)}`,
+				message: {
+					role: `role-${controls.repeat(8)}`,
+					content: [...oversizedCalls, ...oversizedResults],
+				},
 			},
 			{
 				type: "message",
@@ -1675,7 +1858,7 @@ describe("transcript-reader / agent timestamp budgets", () => {
 		const options = {
 			...memoryTranscript(text),
 			projection: "agent" as const,
-			sessionId: "timestamp-page",
+			sessionId: "minimum-summary-page",
 			serializedBudgetBytes: 512,
 		};
 
@@ -1685,11 +1868,18 @@ describe("transcript-reader / agent timestamp budgets", () => {
 		assert.equal(first.offsetStart, 0);
 		assert.equal(first.offsetEnd, 0);
 		const summary = first.messages[0] as any;
-		assert.equal(summary.projectionOmitted, true);
-		assert.equal(summary.toolCallCount, oversizedCalls.length);
-		assert.equal(summary.ts, safeTimestampPrefix);
-		assert.equal(summary.tsTruncated, true);
+		assert.deepEqual(summary, {
+			index: 0,
+			role: "unknown",
+			ts: null,
+			text: "",
+			projectionOmitted: true,
+			toolCallCount: oversizedCalls.length,
+			toolResultCount: oversizedResults.length,
+		});
+		assert.equal(Object.prototype.hasOwnProperty.call(summary, "tsTruncated"), false);
 		assert.equal(first.nextOffset, 1);
+		assert.equal(first.nextOffset, first.pageStart! + 1);
 		assert.ok(first.nextOffset! > first.offsetEnd, "page continuation must advance past the summarized row");
 		assert.deepEqual(first.continuationRequest, { kind: "page", offset: 1 });
 
@@ -1795,6 +1985,102 @@ describe("transcript-reader / agent timestamp budgets", () => {
 			firstResult.excerpt.text + secondResult.excerpt.text,
 			body.slice(0, secondResult.excerpt.end),
 			"continued slices must be exact and non-overlapping",
+		);
+	});
+
+	it("returns one exact scalar in the reduced 512-byte targeted-slice envelope", async () => {
+		const controls = Array.from({ length: 32 }, (_, index) => String.fromCharCode(index)).join("");
+		const body = "\u0000" + "slice-body-".repeat(1024);
+		const resultName = `result-${controls.repeat(6)}`;
+		const text = JSON.stringify({
+			type: "message",
+			ts: `timestamp-${controls.repeat(6)}`,
+			message: {
+				role: `role-${controls.repeat(6)}`,
+				content: [{
+					type: "tool_result",
+					tool_use_id: `call-${controls.repeat(6)}`,
+					name: resultName,
+					content: body,
+				}],
+			},
+		}) + "\n";
+		const metadataOptions = {
+			...memoryTranscript(text),
+			projection: "agent" as const,
+			sessionId: "minimum-result-slice",
+			authorContext: {
+				systemAuthor: {
+					kind: "system" as const,
+					id: `system:${controls.repeat(7)}`,
+					label: `author-${controls.repeat(7)}`,
+				},
+			},
+		};
+		const page = await readTranscript({ limit: 1, includeToolResults: false }, metadataOptions);
+		const metadata = (page.messages[0] as any).toolResults[0];
+		assert.equal(typeof metadata.handle, "string");
+		const sliceOptions = { ...metadataOptions, serializedBudgetBytes: 512 };
+
+		const first = await readTranscript({
+			resultHandle: metadata.handle,
+			resultCursor: 0,
+			resultLimit: 8192,
+		}, sliceOptions);
+		assert.ok(Buffer.byteLength(JSON.stringify(first), "utf8") <= 512);
+		const firstRow = first.messages[0] as any;
+		const firstResult = firstRow.toolResults[0];
+		assert.equal(firstRow.role, "unknown");
+		assert.equal(Object.prototype.hasOwnProperty.call(firstRow, "ts"), false);
+		assert.equal(Object.prototype.hasOwnProperty.call(firstRow, "text"), false);
+		assert.equal(Object.prototype.hasOwnProperty.call(firstRow, "author"), false);
+		assert.equal(Object.prototype.hasOwnProperty.call(firstRow, "authorRef"), false);
+		assert.equal(Object.prototype.hasOwnProperty.call(firstRow, "correlations"), false);
+		assert.equal(first.authors, undefined);
+		assert.equal(first.correlations, undefined);
+		assert.deepEqual(Object.keys(firstResult).sort(), ["excerpt", "handle"]);
+		assert.equal(firstResult.handle, metadata.handle);
+		assert.equal(firstResult.excerpt.start, 0);
+		assert.equal(firstResult.excerpt.end, 1);
+		assert.equal(firstResult.excerpt.text, "\u0000");
+		assert.equal(Array.from(firstResult.excerpt.text).length, 1);
+		assert.equal(firstResult.excerpt.nextCursor, 1);
+		assert.equal(firstResult.excerpt.complete, false);
+		assert.equal(first.partial, true);
+		assert.equal(first.truncatedBy, "transport_budget");
+		assert.deepEqual(first.continuationRequest, {
+			kind: "result_slice",
+			result_handle: metadata.handle,
+			result_cursor: 1,
+			result_limit: 8192,
+		});
+
+		const second = await readTranscript({
+			resultHandle: metadata.handle,
+			resultCursor: firstResult.excerpt.nextCursor,
+			resultLimit: 8192,
+		}, sliceOptions);
+		assert.ok(Buffer.byteLength(JSON.stringify(second), "utf8") <= 512);
+		const secondRow = second.messages[0] as any;
+		const secondResult = secondRow.toolResults[0];
+		assert.equal(secondRow.role, "unknown");
+		assert.deepEqual(Object.keys(secondResult).sort(), ["excerpt", "handle"]);
+		assert.equal(secondResult.handle, firstResult.handle);
+		assert.equal(secondResult.excerpt.start, firstResult.excerpt.nextCursor);
+		assert.equal(Array.from(secondResult.excerpt.text).length, 1);
+		assert.equal(secondResult.excerpt.end, secondResult.excerpt.start + 1);
+		assert.equal(secondResult.excerpt.nextCursor, secondResult.excerpt.end);
+		assert.equal(second.partial, true);
+		assert.deepEqual(second.continuationRequest, {
+			kind: "result_slice",
+			result_handle: metadata.handle,
+			result_cursor: secondResult.excerpt.end,
+			result_limit: 8192,
+		});
+		assert.equal(
+			firstResult.excerpt.text + secondResult.excerpt.text,
+			body.slice(0, secondResult.excerpt.end),
+			"minimum-budget continuations must be exact and non-overlapping",
 		);
 	});
 });
