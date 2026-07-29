@@ -22,7 +22,7 @@
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { waitForHealth, apiFetch, registerProject } from "./_e2e/e2e-setup.js";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -56,9 +56,9 @@ async function fetchNames(path: string): Promise<string[]> {
 test.beforeAll(async () => {
 	await waitForHealth();
 
-	const stamp = `${process.pid}-${Date.now()}`;
-	pRoot = join(tmpdir(), `bobbit-skill-surface-p-${stamp}`);
-	qRoot = join(tmpdir(), `bobbit-skill-surface-q-${stamp}`);
+	const stamp = `${process.pid}`;
+	pRoot = mkdtempSync(join(tmpdir(), `bobbit-skill-surface-p-${stamp}-`));
+	qRoot = mkdtempSync(join(tmpdir(), `bobbit-skill-surface-q-${stamp}-`));
 
 	// Project-only skill lives under P's rootPath. Q gets no custom skill.
 	writeSkill(pRoot, P_SKILL, "A skill that exists only under project P");
@@ -66,8 +66,8 @@ test.beforeAll(async () => {
 
 	// Project R exercises a PROJECT-SCOPE custom skill directory (Facet 1b): the
 	// skill lives in a directory OUTSIDE R's rootPath, wired via config_directories.
-	rRoot = join(tmpdir(), `bobbit-skill-surface-r-${stamp}`);
-	rCustomDir = join(tmpdir(), `bobbit-skill-custom-dir-${stamp}`);
+	rRoot = mkdtempSync(join(tmpdir(), `bobbit-skill-surface-r-${stamp}-`));
+	rCustomDir = mkdtempSync(join(tmpdir(), `bobbit-skill-custom-dir-${stamp}-`));
 	mkdirSync(join(rRoot, ".claude", "skills"), { recursive: true });
 	writeSkill(rCustomDir, R_SKILL, "A skill wired via a project-scope custom directory");
 

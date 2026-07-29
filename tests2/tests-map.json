@@ -1711,6 +1711,15 @@
         "tier": "unit",
         "project": "integration"
       }
+    },
+    {
+      "path": "tests2/core/run-isolation.test.ts",
+      "reason": "Pins canonical per-run roots, credential neutralization, and workflow-harness concurrency hygiene.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [
