@@ -194,6 +194,59 @@ describe("ReadSessionRenderer canonical envelopes", () => {
 });
 
 describe("ReadSessionRenderer direct REST modal", () => {
+	it("uses exact call params for controls when bounded details contain a colliding session prefix", async () => {
+		const sharedPrefix = "p".repeat(64);
+		const exactSessionId = `${sharedPrefix}-exact-target`;
+		const collidingSessionId = `${sharedPrefix}-different-target`;
+		expect(exactSessionId.length).toBeGreaterThan(64);
+		expect(exactSessionId.slice(0, 64)).toBe(collidingSessionId.slice(0, 64));
+
+		const fetchMock = vi.fn(async (_input: RequestInfo | URL) => ({ ok: true, json: async () => directEnvelope() }));
+		vi.stubGlobal("fetch", fetchMock);
+		const card = renderCard(toolResult({
+			total: 0,
+			returned: 0,
+			offsetStart: -1,
+			offsetEnd: -1,
+			messages: [],
+		}, {
+			session_id: sharedPrefix,
+			sessionIdTruncated: true,
+		}), { session_id: exactSessionId });
+
+		const link = card.querySelector('a[title="View delegate session"]');
+		expect(link?.getAttribute("href")).toBe(`#/session/${exactSessionId}`);
+		expect(link?.getAttribute("href")).not.toBe(`#/session/${sharedPrefix}`);
+		expect(link?.getAttribute("href")).not.toBe(`#/session/${collidingSessionId}`);
+
+		(card.querySelector('[data-testid="read-session-open-full"]') as HTMLButtonElement).click();
+		await waitForFetchCalls(fetchMock, 1);
+		const requestedUrl = new URL(String(fetchMock.mock.calls[0][0]), "http://localhost");
+		expect(decodeURIComponent(requestedUrl.pathname)).toBe(`/api/sessions/${exactSessionId}/transcript`);
+	});
+
+	it("retains complete details and falls back to exact params when details are absent", () => {
+		const emptyEnvelope = {
+			total: 0,
+			returned: 0,
+			offsetStart: -1,
+			offsetEnd: -1,
+			messages: [],
+		};
+		const completeDetailsId = "complete-details-session";
+		const completeCard = renderCard(toolResult(emptyEnvelope, {
+			session_id: completeDetailsId,
+			sessionIdTruncated: false,
+		}), { session_id: "original-call-session" });
+		const completeLink = completeCard.querySelector('a[title="View delegate session"]');
+		expect(completeLink?.getAttribute("href")).toBe(`#/session/${completeDetailsId}`);
+
+		const paramsOnlyId = "params-only-session";
+		const paramsOnlyCard = renderCard(toolResult(emptyEnvelope), { session_id: paramsOnlyId });
+		const paramsOnlyLink = paramsOnlyCard.querySelector('a[title="View delegate session"]');
+		expect(paramsOnlyLink?.getAttribute("href")).toBe(`#/session/${paramsOnlyId}`);
+	});
+
 	it("paginates by returned and nextOffset, preserves attribution, and escapes direct rows", async () => {
 		const pages = [
 			directEnvelope({

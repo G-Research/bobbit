@@ -8,7 +8,9 @@ const ENTRY = path.resolve("tests2/browser/fixtures/read-session-renderer-entry.
 const RENDERER = path.resolve("src/ui/tools/renderers/ReadSessionRenderer.ts");
 const BUNDLE_DIR = path.resolve(".bobbit/tmp/ui-fixtures");
 const BUNDLE = path.join(BUNDLE_DIR, "read-session-renderer-bundle.js");
-const SESSION_ID = "87654321-1234-4123-8123-canonicalcard";
+const SESSION_ID_PREFIX = "read-session-control-prefix-".padEnd(64, "x");
+const SESSION_ID = `${SESSION_ID_PREFIX}-exact-target`;
+const COLLIDING_SESSION_ID = `${SESSION_ID_PREFIX}-different-target`;
 const RAW_SENTINEL = "UNBOUNDED_RAW_PROVIDER_RESULT_MUST_STAY_HIDDEN";
 
 test.beforeAll(() => {
@@ -17,6 +19,8 @@ test.beforeAll(() => {
 });
 
 test("canonical read_session card, direct modal, and reload stay bounded", async ({ page }) => {
+	expect(SESSION_ID.length).toBeGreaterThan(64);
+	expect(SESSION_ID.slice(0, 64)).toBe(COLLIDING_SESSION_ID.slice(0, 64));
 	await page.goto(`file://${SHELL.replace(/\\/g, "/")}`);
 	await page.waitForFunction(() => (window as any).__readSessionFixtureReady === true);
 
@@ -24,6 +28,8 @@ test("canonical read_session card, direct modal, and reload stay bounded", async
 	await expect(card).toContainText("1 of 5");
 	await expect(card).toContainText("partial");
 	await expect(card.locator(`a[href="#/session/${SESSION_ID}"]`)).toHaveCount(1);
+	await expect(card.locator(`a[href="#/session/${SESSION_ID_PREFIX}"]`)).toHaveCount(0);
+	await expect(card.locator(`a[href="#/session/${COLLIDING_SESSION_ID}"]`)).toHaveCount(0);
 	await expect(page.locator("body")).not.toContainText(RAW_SENTINEL);
 
 	await card.locator(":scope > button").click();
@@ -40,6 +46,7 @@ test("canonical read_session card, direct modal, and reload stay bounded", async
 	await expect(modal).toContainText("<direct-rest-row>escaped</direct-rest-row>");
 	await expect(modal.locator("direct-rest-row")).toHaveCount(0);
 	await expect.poll(() => page.evaluate(() => (window as any).__readSessionFetchOffsets)).toEqual(["0"]);
+	await expect.poll(() => page.evaluate(() => (window as any).__readSessionFetchSessionIds)).toEqual([SESSION_ID]);
 	await expect(page.locator("body")).not.toContainText(RAW_SENTINEL);
 
 	await page.reload();
