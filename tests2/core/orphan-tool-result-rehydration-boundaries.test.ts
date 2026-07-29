@@ -487,6 +487,32 @@ describe("executable SessionManager rehydration boundaries", () => {
 		});
 	});
 
+	it("cold restore retains durable thinking over an attached role default", async () => {
+		invalidateModelCache();
+		const file = hostTranscript("cold-restore-durable-thinking");
+		const ps = persisted("cold-restore-durable-thinking", file, {
+			role: "thinking-role",
+			modelProvider: "anthropic",
+			modelId: "claude-opus-5",
+			effectiveThinkingLevel: "xhigh",
+		});
+		const store = mutableStore(ps);
+		const { manager } = makeRoleThinkingManager("cold-restore-durable-thinking", "high");
+		manager._testStore = store;
+		const optionsSeen: Record<string, any>[] = [];
+		registerRpcBridgeFactory((options: Record<string, any>) => {
+			optionsSeen.push({ ...options });
+			return recordingBridge(() => {}, bridgeTuple(options));
+		});
+
+		await manager.restoreSession(ps);
+
+		expect(optionsSeen[0]?.initialModel).toBe("anthropic/claude-opus-5");
+		expect(optionsSeen[0]?.initialThinkingLevel).toBe("xhigh");
+		expect(ps.effectiveThinkingLevel).toBe("xhigh");
+		expect(manager.sessions.get(ps.id)?.spawnPinnedThinkingLevel).toBe("xhigh");
+	});
+
 	it.each([
 		{ roleThinkingLevel: "xhigh", expected: "xhigh" },
 		{ roleThinkingLevel: undefined, expected: "high" },
@@ -522,19 +548,19 @@ describe("executable SessionManager rehydration boundaries", () => {
 	});
 
 	it.each([
-		{ roleThinkingLevel: "xhigh", expected: "xhigh" },
-		{ roleThinkingLevel: undefined, expected: "high" },
-	])("forceAbort gives explicit role thinking $roleThinkingLevel precedence and otherwise retains durable thinking", async ({ roleThinkingLevel, expected }) => {
+		{ roleThinkingLevel: "high", durableThinkingLevel: "xhigh" },
+		{ roleThinkingLevel: "xhigh", durableThinkingLevel: "high" },
+	])("forceAbort retains durable thinking $durableThinkingLevel over attached role default $roleThinkingLevel", async ({ roleThinkingLevel, durableThinkingLevel }) => {
 		invalidateModelCache();
-		const file = hostTranscript(`force-abort-thinking-${roleThinkingLevel ?? "durable"}`);
-		const ps = persisted(`force-abort-thinking-${roleThinkingLevel ?? "durable"}`, file, {
+		const file = hostTranscript(`force-abort-thinking-${durableThinkingLevel}-over-${roleThinkingLevel}`);
+		const ps = persisted(`force-abort-thinking-${durableThinkingLevel}-over-${roleThinkingLevel}`, file, {
 			role: "thinking-role",
 			modelProvider: "anthropic",
 			modelId: "claude-opus-5",
-			effectiveThinkingLevel: "high",
+			effectiveThinkingLevel: durableThinkingLevel,
 		});
 		const store = mutableStore(ps);
-		const { manager } = makeRoleThinkingManager(`force-abort-thinking-${roleThinkingLevel ?? "durable"}`, roleThinkingLevel);
+		const { manager } = makeRoleThinkingManager(`force-abort-thinking-${durableThinkingLevel}-over-${roleThinkingLevel}`, roleThinkingLevel);
 		manager._testStore = store;
 		const optionsSeen: Record<string, any>[] = [];
 		registerRpcBridgeFactory((options: Record<string, any>) => {
@@ -544,7 +570,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 		const oldBridge = recordingBridge(() => {}, {
 			modelProvider: "anthropic",
 			modelId: "claude-opus-5",
-			thinkingLevel: "high",
+			thinkingLevel: durableThinkingLevel,
 		});
 		oldBridge.abort = vi.fn(() => new Promise(() => {}));
 		oldBridge.stop = vi.fn(async () => {});
@@ -559,8 +585,9 @@ describe("executable SessionManager rehydration boundaries", () => {
 		await manager.forceAbort(ps.id, 1);
 
 		expect(optionsSeen[0]?.initialModel).toBe("anthropic/claude-opus-5");
-		expect(optionsSeen[0]?.initialThinkingLevel).toBe(expected);
-		expect(ps.effectiveThinkingLevel).toBe(expected);
+		expect(optionsSeen[0]?.initialThinkingLevel).toBe(durableThinkingLevel);
+		expect(ps.effectiveThinkingLevel).toBe(durableThinkingLevel);
+		expect(manager.sessions.get(ps.id)?.spawnPinnedThinkingLevel).toBe(durableThinkingLevel);
 	});
 	it("repairs a cold-restored host transcript before switch_session observes it", async () => {
 		const file = hostTranscript("cold-restore");

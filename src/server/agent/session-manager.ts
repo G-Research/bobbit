@@ -7516,12 +7516,23 @@ export class SessionManager {
 		// model/thinking tuple below. tryAutoSelectModel owns the single atomic
 		// durable commit, so any failed start, switch, or read-back retains the
 		// original verified tuple byte-for-byte.
-		const initThinking = await this.resolveCurrentCatalogThinkingLevel(
-			bridgeOptions.initialModel,
-			ps.role,
-			ps.projectId,
-			ps.effectiveThinkingLevel,
+		const restoreHasDurableTuple = !!(
+			psPersistedModel
+			&& isKnownThinkingLevel(ps.effectiveThinkingLevel)
 		);
+		const initThinking = restoreHasDurableTuple
+			? await this.resolveCurrentCatalogPreferredThinkingLevel(
+				bridgeOptions.initialModel,
+				ps.role,
+				ps.projectId,
+				ps.effectiveThinkingLevel,
+			)
+			: await this.resolveCurrentCatalogThinkingLevel(
+				bridgeOptions.initialModel,
+				ps.role,
+				ps.projectId,
+				ps.effectiveThinkingLevel,
+			);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 		const restoreSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
 		this.applyDirectProviderEnv(bridgeOptions, !!ps.sandboxed, restoreSpawnProvider);
@@ -8821,11 +8832,14 @@ export class SessionManager {
 		projectId: string | undefined,
 		preferred?: string,
 		catalogModel?: Awaited<ReturnType<typeof getAvailableModels>>[number],
+		preferPreferred = false,
 	): ThinkingLevel | undefined {
-		let candidate = role
+		const preferredCandidate = isKnownThinkingLevel(preferred);
+		const roleCandidate = role
 			? isKnownThinkingLevel(this.resolveRoleThinkingLevelValue(role, projectId))
 			: undefined;
-		if (!candidate) candidate = isKnownThinkingLevel(preferred);
+		let candidate = preferPreferred ? preferredCandidate : roleCandidate;
+		if (!candidate) candidate = preferPreferred ? roleCandidate : preferredCandidate;
 		if (!candidate) {
 			candidate = isKnownThinkingLevel(
 				this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined,
@@ -8851,14 +8865,15 @@ export class SessionManager {
 		preferred?: string,
 		models?: Awaited<ReturnType<typeof getAvailableModels>>,
 		allowUnlistedRawModel = false,
+		preferPreferred = false,
 	): Promise<ThinkingLevel | undefined> {
 		if (!model || !this.preferencesStore) {
-			return this.resolveThinkingLevelForModel(model, role, projectId, preferred);
+			return this.resolveThinkingLevelForModel(model, role, projectId, preferred, undefined, preferPreferred);
 		}
 		const normalized = normalizeAigwModelString(model);
 		const slash = normalized.indexOf("/");
 		if (slash <= 0 || slash === normalized.length - 1) {
-			return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred);
+			return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred, undefined, preferPreferred);
 		}
 		const currentModels = models ?? await getAvailableModels(this.preferencesStore);
 		const catalogModel = findSessionSelectableModel(
@@ -8868,11 +8883,29 @@ export class SessionManager {
 		);
 		if (!catalogModel) {
 			if (allowUnlistedRawModel) {
-				return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred);
+				return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred, undefined, preferPreferred);
 			}
 			throw new Error(`Model "${normalized}" is not currently available for session selection`);
 		}
-		return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred, catalogModel);
+		return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred, catalogModel, preferPreferred);
+	}
+
+	/** Preserve an already-chosen explicit/durable candidate ahead of role defaults. */
+	private resolveCurrentCatalogPreferredThinkingLevel(
+		model: string | undefined,
+		role: string | undefined,
+		projectId: string | undefined,
+		preferred: string | undefined,
+	): Promise<ThinkingLevel | undefined> {
+		return this.resolveCurrentCatalogThinkingLevel(
+			model,
+			role,
+			projectId,
+			preferred,
+			undefined,
+			false,
+			true,
+		);
 	}
 
 	/**
@@ -8931,7 +8964,7 @@ export class SessionManager {
 				?? isKnownThinkingLevel(persisted?.effectiveThinkingLevel)
 				?? isKnownThinkingLevel(this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined)
 				?? "medium";
-			const effectiveThinking = await this.resolveCurrentCatalogThinkingLevel(
+			const effectiveThinking = await this.resolveCurrentCatalogPreferredThinkingLevel(
 				modelString,
 				session.role,
 				session.projectId,
@@ -12361,15 +12394,23 @@ export class SessionManager {
 					forceInitialModel,
 					forceDefaultModel,
 				]);
-			const forceRoleThinkingOverride = isKnownThinkingLevel(
-				this.resolveRoleThinkingLevelValue(session.role, session.projectId),
+			const forceRespawnHasDurableTuple = !!(
+				forceRespawnPersistedModel
+				&& isKnownThinkingLevel(forceRespawnPersisted?.effectiveThinkingLevel)
 			);
-			const initThinking = await this.resolveCurrentCatalogThinkingLevel(
-				bridgeOptions.initialModel,
-				session.role,
-				session.projectId,
-				forceRoleThinkingOverride ?? forceRespawnPersisted?.effectiveThinkingLevel,
-			);
+			const initThinking = forceRespawnHasDurableTuple
+				? await this.resolveCurrentCatalogPreferredThinkingLevel(
+					bridgeOptions.initialModel,
+					session.role,
+					session.projectId,
+					forceRespawnPersisted?.effectiveThinkingLevel,
+				)
+				: await this.resolveCurrentCatalogThinkingLevel(
+					bridgeOptions.initialModel,
+					session.role,
+					session.projectId,
+					forceRespawnPersisted?.effectiveThinkingLevel,
+				);
 			if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 			const forceSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
 			this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, forceSpawnProvider);
