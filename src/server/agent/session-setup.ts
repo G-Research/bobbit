@@ -1021,7 +1021,7 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 		[],
 		disabledTools,
 		toolScope,
-		piExtensionActivation.readSessionGuardRequired,
+		activation.readSessionAvailable || piExtensionActivation.readSessionGuardRequired,
 	) : undefined;
 	if (guardPath) {
 		plan.bridgeOptions.args.push("--extension", guardPath);

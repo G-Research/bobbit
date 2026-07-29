@@ -577,7 +577,7 @@ export function computeEffectiveAllowedTools(
 export interface ToolActivationResult {
 	/** CLI args to add (e.g. ["--no-builtin-tools", "--no-extensions", "--extension", "/path/to/ext"]) */
 	args: string[];
-	/** True when the resolved runtime surface grants read_session. */
+	/** True when the resolved runtime surface is known to register read_session. */
 	readSessionAvailable: boolean;
 	/**
 	 * Env vars to set on the spawned agent process. Currently used only for
@@ -599,6 +599,16 @@ const FILE_TOOL_BUILTIN_NAMES = new Set(["read", "edit", "write", "grep", "find"
  */
 function resolveExtensionPath(provider: ToolProvider & { groupDir: string; baseDir: string }): string {
 	return path.join(provider.baseDir, provider.groupDir, provider.extension!);
+}
+
+/**
+ * Canonical identity for one resolved Bobbit extension registration unit.
+ * A single extension file can register several tools, so activation safety must
+ * follow the loaded file rather than only the selected catalogue row.
+ */
+function extensionRegistrationKey(extensionPath: string): string {
+	const resolved = path.resolve(extensionPath);
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
 /** Convert a JSON Schema object to a TypeBox code string. */
@@ -1301,6 +1311,12 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 	args.push("--extension", builtinsExtPath);
 
 	const providers = toolManager.getToolProviders(scopedContext);
+	const readSessionExtensionKeys = new Set<string>();
+	for (const [name, provider] of providers) {
+		if (name.toLowerCase() !== "read_session") continue;
+		if (provider.type !== "bobbit-extension" || !provider.extension) continue;
+		readSessionExtensionKeys.add(extensionRegistrationKey(resolveExtensionPath(provider)));
+	}
 
 	// `kind:"mcp"` entries are satisfied externally via `mcpExtensionPaths` and
 	// MUST NOT be looked up in the YAML provider registry — doing so would
@@ -1346,7 +1362,15 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 					console.warn(`[tool-activation] Tool "${entry.name}" has provider.type: builtin with tool: "${provider.tool}" but no handler — extension not loaded; this is likely a misconfigured YAML`);
 				}
 			} else if (provider.type === "bobbit-extension" && provider.extension) {
-				extensionPaths.add(resolveExtensionPath(provider));
+				const extensionPath = resolveExtensionPath(provider);
+				extensionPaths.add(extensionPath);
+				// Loading one row from a multi-tool extension registers every tool in
+				// that file. If a sibling catalogue row identifies read_session, both
+				// immutable safety extensions are required even when the selected row
+				// itself has another name (for example agent/team_wait).
+				if (readSessionExtensionKeys.has(extensionRegistrationKey(extensionPath))) {
+					readSessionAvailable = true;
+				}
 			}
 		}
 	};
