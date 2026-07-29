@@ -1,0 +1,3 @@
+id: experiment-runner.panel
+title: Experiments
+entry: ../lib/panel.js
