@@ -48,7 +48,7 @@ process.env.BOBBIT_TEST_NO_EXTERNAL = "1";
 const { resetAgentDirStateForTests } = await import("../../src/server/bobbit-dir.ts");
 resetAgentDirStateForTests?.();
 const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
-const { invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
+const { getAvailableModels, invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
 const { registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
 const { initAuthorSidecarDir } = await import("../../src/server/agent/author-sidecar.ts");
 const { initPromptDirs } = await import("../../src/server/agent/system-prompt.ts");
@@ -250,6 +250,7 @@ async function exerciseAutoSelect(options: {
 	]);
 	const manager = {
 		preferencesStore: { get: (key: string) => options.prefs[key] },
+		_setupInitialThinkingAuthorities: new Map(),
 		resolveRoleModel: () => options.roleModel,
 		resolveRoleThinkingLevel: () => options.roleThinking,
 		async resolveCurrentCatalogThinkingLevel(model: string, _role: string | undefined, _projectId: string | undefined, preferred: string) {
@@ -587,6 +588,164 @@ function boundaryTuple(record: BoundaryRecord | undefined): Record<string, unkno
 	};
 }
 
+const INHERITED_SELECTED_PROVIDER = "inherited-selected";
+const INHERITED_SELECTED_MODEL_ID = "limited-reasoner";
+const INHERITED_SELECTED_MODEL = `${INHERITED_SELECTED_PROVIDER}/${INHERITED_SELECTED_MODEL_ID}`;
+const INHERITED_FALLBACK_PROVIDER = "inherited-fallback";
+const INHERITED_FALLBACK_MODEL_ID = "extended-reasoner";
+const INHERITED_FALLBACK_MODEL = `${INHERITED_FALLBACK_PROVIDER}/${INHERITED_FALLBACK_MODEL_ID}`;
+
+type InheritedSetupMode = "normal" | "worktree";
+
+async function makeInheritedThinkingFixture(
+	label: string,
+	opts: { failFallback?: boolean } = {},
+): Promise<{
+	manager: any;
+	store: BoundaryStore;
+	startedOptions: Record<string, any>[];
+	setModelCalls: ModelPair[];
+	setThinkingCalls: string[];
+}> {
+	const preferences = new PreferencesStore(
+		path.resolve(`/memfs/controlled-fallback-inherited-${label}`),
+		createMemFs(),
+	);
+	preferences.set("customProviders", [
+		{
+			id: INHERITED_SELECTED_PROVIDER,
+			name: INHERITED_SELECTED_PROVIDER,
+			type: "manual",
+			baseUrl: "http://127.0.0.1:9",
+			apiKey: "test-key",
+			models: [{ id: INHERITED_SELECTED_MODEL_ID, name: "Limited reasoner" }],
+		},
+		{
+			id: INHERITED_FALLBACK_PROVIDER,
+			name: INHERITED_FALLBACK_PROVIDER,
+			type: "manual",
+			baseUrl: "http://127.0.0.1:9",
+			apiKey: "test-key",
+			models: [{ id: INHERITED_FALLBACK_MODEL_ID, name: "Extended reasoner" }],
+		},
+	]);
+	preferences.set("default.sessionModel", INHERITED_FALLBACK_MODEL);
+	preferences.set("default.sessionThinkingLevel", "low");
+	preferences.set("allowSessionModelFallback", true as any);
+	invalidateModelCache();
+	const models = await getAvailableModels(preferences);
+	const selected = models.find((model: any) => (
+		model.provider === INHERITED_SELECTED_PROVIDER && model.id === INHERITED_SELECTED_MODEL_ID
+	));
+	const fallback = models.find((model: any) => (
+		model.provider === INHERITED_FALLBACK_PROVIDER && model.id === INHERITED_FALLBACK_MODEL_ID
+	));
+	assert.ok(selected && fallback, "fixture requires both current custom catalog rows");
+	// The selected model clamps xhigh down to high. The fallback supports xhigh,
+	// so the selector must re-clamp the raw inherited request rather than reuse
+	// either that provisional high or the unrelated global low default.
+	selected.reasoning = true;
+	fallback.reasoning = true;
+	fallback.thinkingLevelMap = { xhigh: "xhigh" };
+
+	const store = new BoundaryStore();
+	const startedOptions: Record<string, any>[] = [];
+	const setModelCalls: ModelPair[] = [];
+	const setThinkingCalls: string[] = [];
+	registerRpcBridgeFactory((options: Record<string, any>) => {
+		let model = { provider: "fixture-runtime", id: "spawn-readback-mismatch" };
+		let thinkingLevel = options.initialThinkingLevel ?? "medium";
+		return {
+			running: true,
+			start: vi.fn(async () => { startedOptions.push({ ...options }); }),
+			stop: vi.fn(async () => {}),
+			waitForReady: vi.fn(async () => {}),
+			promptWhenReady: vi.fn(async () => ({ success: true })),
+			prompt: vi.fn(async () => ({ success: true })),
+			steer: vi.fn(async () => ({ success: true })),
+			abort: vi.fn(async () => ({ success: true })),
+			getState: vi.fn(async () => ({
+				success: true,
+				data: {
+					model,
+					thinkingLevel,
+					sessionFile: path.join(BOUNDARY_AGENT_DIR, "sessions", `${label}.jsonl`),
+				},
+			})),
+			getMessages: vi.fn(async () => ({ success: true, data: { messages: [] } })),
+			setModel: vi.fn(async (provider: string, id: string) => {
+				setModelCalls.push([provider, id]);
+				if (opts.failFallback && `${provider}/${id}` === INHERITED_FALLBACK_MODEL) {
+					throw new Error("fixture fallback bind failed");
+				}
+				model = { provider, id };
+				return { success: true };
+			}),
+			setThinkingLevel: vi.fn(async (level: string) => {
+				setThinkingCalls.push(level);
+				thinkingLevel = level;
+				return { success: true };
+			}),
+			compact: vi.fn(async () => ({ success: true })),
+			sendCommand: vi.fn(async () => ({ success: true })),
+			onEvent: vi.fn(() => () => {}),
+		};
+	});
+	const manager: any = new SessionManager({
+		preferencesStore: preferences,
+		stateDir: BOUNDARY_STATE_DIR,
+	});
+	manager._testStore = store;
+	boundaryManagers.push(manager);
+	return { manager, store, startedOptions, setModelCalls, setThinkingCalls };
+}
+
+async function createInheritedThinkingSession(
+	fixture: Awaited<ReturnType<typeof makeInheritedThinkingFixture>>,
+	mode: InheritedSetupMode,
+	sessionId: string,
+): Promise<any> {
+	const createOpts: Record<string, any> = {
+		sessionId,
+		initialModel: INHERITED_SELECTED_MODEL,
+		initialThinkingLevel: "xhigh",
+	};
+	if (mode === "worktree") {
+		const projectId = `project-${sessionId}`;
+		const worktreePath = path.join(BOUNDARY_TMP_ROOT, `prebuilt-${sessionId}`);
+		fs.mkdirSync(worktreePath, { recursive: true });
+		// The setup-failure canary deliberately rejects after claiming this fake
+		// prebuilt worktree. Seed a second live owner so failure cleanup exercises
+		// the shared-worktree guard instead of launching an unrelated real Git cleanup.
+		fixture.store.put({
+			id: `shared-owner-${sessionId}`,
+			title: "Shared fixture owner",
+			cwd: worktreePath,
+			worktreePath,
+			repoPath: BOUNDARY_TMP_ROOT,
+			branch: `fixture/${sessionId}`,
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			agentSessionFile: "",
+		});
+		fixture.manager.worktreePools.set(projectId, {
+			claim: vi.fn(async () => ({ worktreePath })),
+		});
+		Object.assign(createOpts, {
+			projectId,
+			worktreeOpts: { repoPath: BOUNDARY_TMP_ROOT },
+			awaitWorktreeSetup: true,
+		});
+	}
+	return fixture.manager.createSession(
+		BOUNDARY_TMP_ROOT,
+		[],
+		undefined,
+		undefined,
+		createOpts,
+	);
+}
+
 const boundaryManagers: any[] = [];
 
 afterEach(() => {
@@ -678,6 +837,57 @@ describe("controlled model fallback policy — real SessionManager preflight", (
 			"ROLE_FALLBACK_PREFLIGHT: an unavailable role on an eligible new session must use the current default.sessionModel instead of being rejected before controlled fallback can run",
 		);
 	});
+
+	it.each(["normal", "worktree"] as const)(
+		"preserves an explicit inherited thinking request through %s post-spawn controlled fallback",
+		async (mode) => {
+			const fixture = await makeInheritedThinkingFixture(`success-${mode}`);
+			const sessionId = `inherited-thinking-${mode}`;
+			const session = await createInheritedThinkingSession(fixture, mode, sessionId);
+			if (session.pendingMetadataPersist) await session.pendingMetadataPersist;
+
+			assert.equal(fixture.startedOptions.at(-1)?.initialModel, INHERITED_SELECTED_MODEL);
+			assert.equal(
+				fixture.startedOptions.at(-1)?.initialThinkingLevel,
+				"high",
+				"the spawn pin is only the provisional clamp for the selected model",
+			);
+			assert.deepEqual(fixture.setModelCalls, [[INHERITED_FALLBACK_PROVIDER, INHERITED_FALLBACK_MODEL_ID]]);
+			assert.deepEqual(
+				fixture.setThinkingCalls,
+				["xhigh"],
+				"EXPLICIT_INHERITED_FALLBACK_THINKING_LOST_TO_GLOBAL_DEFAULT",
+			);
+			assert.deepEqual(boundaryTuple(fixture.store.get(sessionId)), {
+				provider: INHERITED_FALLBACK_PROVIDER,
+				modelId: INHERITED_FALLBACK_MODEL_ID,
+				thinkingLevel: "xhigh",
+			});
+			assert.equal(
+				fixture.manager._setupInitialThinkingAuthorities?.size ?? 0,
+				0,
+				"temporary raw setup authority must clear after successful setup",
+			);
+		},
+	);
+
+	it.each(["normal", "worktree"] as const)(
+		"clears explicit inherited thinking authority when %s post-spawn fallback fails",
+		async (mode) => {
+			const fixture = await makeInheritedThinkingFixture(`failure-${mode}`, { failFallback: true });
+			const sessionId = `inherited-thinking-failure-${mode}`;
+
+			await assert.rejects(
+				createInheritedThinkingSession(fixture, mode, sessionId),
+				/controlled fallback did not bind|fixture fallback bind failed/i,
+			);
+			assert.equal(
+				fixture.manager._setupInitialThinkingAuthorities?.size ?? 0,
+				0,
+				"temporary raw setup authority must clear after failed setup",
+			);
+		},
+	);
 });
 
 describe("controlled model fallback policy — session auto-selection", () => {
