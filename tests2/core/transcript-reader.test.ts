@@ -16,6 +16,7 @@ import {
 	readOrphanedBeforeCompaction,
 	parseJsonl,
 	READ_SESSION_AGENT_ENVELOPE_MAX_BYTES,
+	READ_SESSION_AGENT_ENVELOPE_MIN_BYTES,
 	resolveOffset,
 	TranscriptReaderError,
 	TranscriptRegexSearchError,
@@ -1859,11 +1860,11 @@ describe("transcript-reader / agent timestamp budgets", () => {
 			...memoryTranscript(text),
 			projection: "agent" as const,
 			sessionId: "minimum-summary-page",
-			serializedBudgetBytes: 512,
+			serializedBudgetBytes: READ_SESSION_AGENT_ENVELOPE_MIN_BYTES,
 		};
 
 		const first = await readTranscript({ limit: 2, includeToolResults: false }, options);
-		assert.ok(Buffer.byteLength(JSON.stringify(first), "utf8") <= 512);
+		assert.ok(Buffer.byteLength(JSON.stringify(first), "utf8") <= READ_SESSION_AGENT_ENVELOPE_MIN_BYTES);
 		assert.equal(first.returned, 1);
 		assert.equal(first.offsetStart, 0);
 		assert.equal(first.offsetEnd, 0);
@@ -1884,7 +1885,7 @@ describe("transcript-reader / agent timestamp budgets", () => {
 		assert.deepEqual(first.continuationRequest, { kind: "page", offset: 1 });
 
 		const second = await readTranscript({ offset: first.nextOffset, limit: 1, includeToolResults: false }, options);
-		assert.ok(Buffer.byteLength(JSON.stringify(second), "utf8") <= 512);
+		assert.ok(Buffer.byteLength(JSON.stringify(second), "utf8") <= READ_SESSION_AGENT_ENVELOPE_MIN_BYTES);
 		assert.equal(second.returned, 1);
 		assert.equal(second.offsetStart, 1);
 		assert.equal(second.offsetEnd, 1);
@@ -1934,7 +1935,7 @@ describe("transcript-reader / agent timestamp budgets", () => {
 			...memoryTranscript(text),
 			projection: "agent" as const,
 			sessionId: "timestamp-result-slice",
-			serializedBudgetBytes: 1200,
+			serializedBudgetBytes: READ_SESSION_AGENT_ENVELOPE_MIN_BYTES,
 		};
 		const page = await readTranscript({ limit: 1, includeToolResults: false }, options);
 		const metadata = (page.messages[0] as any).toolResults[0];
@@ -1944,12 +1945,13 @@ describe("transcript-reader / agent timestamp budgets", () => {
 			resultCursor: 0,
 			resultLimit: 8192,
 		}, options);
-		assert.ok(Buffer.byteLength(JSON.stringify(first), "utf8") <= 1200);
+		assert.ok(Buffer.byteLength(JSON.stringify(first), "utf8") <= READ_SESSION_AGENT_ENVELOPE_MIN_BYTES);
 		assert.ok(Buffer.byteLength(JSON.stringify(first), "utf8") <= READ_SESSION_AGENT_ENVELOPE_MAX_BYTES);
 		const firstRow = first.messages[0] as any;
 		const firstResult = firstRow.toolResults[0];
 		assert.equal(firstRow.ts, safeTimestampPrefix);
 		assert.equal(firstRow.tsTruncated, true);
+		assert.equal(firstResult.ref, metadata.ref);
 		assert.equal(firstResult.name, "read");
 		assert.equal(firstResult.status, "ok");
 		assert.deepEqual(firstResult.size, metadata.size);
@@ -1973,11 +1975,13 @@ describe("transcript-reader / agent timestamp budgets", () => {
 			resultCursor: firstResult.excerpt.nextCursor,
 			resultLimit: 8192,
 		}, options);
-		assert.ok(Buffer.byteLength(JSON.stringify(second), "utf8") <= 1200);
+		assert.ok(Buffer.byteLength(JSON.stringify(second), "utf8") <= READ_SESSION_AGENT_ENVELOPE_MIN_BYTES);
 		const secondResult = (second.messages[0] as any).toolResults[0];
+		assert.equal(secondResult.ref, firstResult.ref);
 		assert.equal(secondResult.name, firstResult.name);
 		assert.equal(secondResult.status, firstResult.status);
 		assert.deepEqual(secondResult.size, firstResult.size);
+		assert.equal(secondResult.omitted, false);
 		assert.equal(secondResult.handle, firstResult.handle);
 		assert.equal(secondResult.excerpt.start, firstResult.excerpt.nextCursor);
 		assert.ok(secondResult.excerpt.end > secondResult.excerpt.start, "slice continuation must advance");
@@ -1988,9 +1992,9 @@ describe("transcript-reader / agent timestamp budgets", () => {
 		);
 	});
 
-	it("returns one exact scalar in the reduced 512-byte targeted-slice envelope", async () => {
+	it("keeps minimum-budget targeted slices canonical across every Unicode continuation boundary", async () => {
 		const controls = Array.from({ length: 32 }, (_, index) => String.fromCharCode(index)).join("");
-		const body = "\u0000" + "slice-body-".repeat(1024);
+		const body = "A😀e\u0301\r\nZ";
 		const resultName = `result-${controls.repeat(6)}`;
 		const text = JSON.stringify({
 			type: "message",
@@ -2001,6 +2005,7 @@ describe("transcript-reader / agent timestamp budgets", () => {
 					type: "tool_result",
 					tool_use_id: `call-${controls.repeat(6)}`,
 					name: resultName,
+					status: "error",
 					content: body,
 				}],
 			},
@@ -2019,69 +2024,101 @@ describe("transcript-reader / agent timestamp budgets", () => {
 		};
 		const page = await readTranscript({ limit: 1, includeToolResults: false }, metadataOptions);
 		const metadata = (page.messages[0] as any).toolResults[0];
+		assert.equal(metadata.name, resultName.slice(0, 128));
+		assert.equal(metadata.status, "error");
+		assert.deepEqual(metadata.size, { type: "string", chars: 8, lines: 2, bytes: 11 });
 		assert.equal(typeof metadata.handle, "string");
-		const sliceOptions = { ...metadataOptions, serializedBudgetBytes: 512 };
+		const sliceOptions = {
+			...metadataOptions,
+			serializedBudgetBytes: READ_SESSION_AGENT_ENVELOPE_MIN_BYTES,
+		};
 
-		const first = await readTranscript({
-			resultHandle: metadata.handle,
-			resultCursor: 0,
-			resultLimit: 8192,
-		}, sliceOptions);
-		assert.ok(Buffer.byteLength(JSON.stringify(first), "utf8") <= 512);
-		const firstRow = first.messages[0] as any;
-		const firstResult = firstRow.toolResults[0];
-		assert.equal(firstRow.role, "unknown");
-		assert.equal(Object.prototype.hasOwnProperty.call(firstRow, "ts"), false);
-		assert.equal(Object.prototype.hasOwnProperty.call(firstRow, "text"), false);
-		assert.equal(Object.prototype.hasOwnProperty.call(firstRow, "author"), false);
-		assert.equal(Object.prototype.hasOwnProperty.call(firstRow, "authorRef"), false);
-		assert.equal(Object.prototype.hasOwnProperty.call(firstRow, "correlations"), false);
-		assert.equal(first.authors, undefined);
-		assert.equal(first.correlations, undefined);
-		assert.deepEqual(Object.keys(firstResult).sort(), ["excerpt", "handle"]);
-		assert.equal(firstResult.handle, metadata.handle);
-		assert.equal(firstResult.excerpt.start, 0);
-		assert.equal(firstResult.excerpt.end, 1);
-		assert.equal(firstResult.excerpt.text, "\u0000");
-		assert.equal(Array.from(firstResult.excerpt.text).length, 1);
-		assert.equal(firstResult.excerpt.nextCursor, 1);
-		assert.equal(firstResult.excerpt.complete, false);
-		assert.equal(first.partial, true);
-		assert.equal(first.truncatedBy, "transport_budget");
-		assert.deepEqual(first.continuationRequest, {
-			kind: "result_slice",
-			result_handle: metadata.handle,
-			result_cursor: 1,
-			result_limit: 8192,
-		});
+		const assertCanonicalSlice = (
+			envelope: ReadTranscriptEnvelope,
+			expected: { start: number; end: number; text: string; complete: boolean },
+		): any => {
+			assert.ok(
+				Buffer.byteLength(JSON.stringify(envelope), "utf8") <= READ_SESSION_AGENT_ENVELOPE_MIN_BYTES,
+				"selected serialized budget must bound every successful slice",
+			);
+			assert.equal(envelope.returned, 1);
+			assert.equal(envelope.offsetStart, 0);
+			assert.equal(envelope.offsetEnd, 0);
+			const row = envelope.messages[0] as any;
+			const projected = row.toolResults[0];
+			assert.equal(row.role, "unknown");
+			assert.equal(Object.prototype.hasOwnProperty.call(row, "ts"), false);
+			assert.equal(Object.prototype.hasOwnProperty.call(row, "text"), false);
+			assert.equal(row.authorRef, undefined);
+			assert.equal(envelope.authors, undefined);
+			assert.equal(envelope.correlations, undefined);
+			assert.deepEqual(Object.keys(projected).sort(), [
+				"excerpt", "handle", "name", "omitted", "ref", "size", "status",
+			]);
+			assert.equal(projected.ref, metadata.ref);
+			assert.equal(projected.name, metadata.name);
+			assert.equal(projected.status, metadata.status);
+			assert.deepEqual(projected.size, metadata.size);
+			assert.equal(projected.omitted, false);
+			assert.equal(projected.handle, metadata.handle);
+			assert.deepEqual(projected.excerpt, {
+				...expected,
+				nextCursor: expected.complete ? null : expected.end,
+			});
+			assert.equal(envelope.partial, undefined);
+			assert.equal(envelope.truncatedBy, undefined);
+			assert.equal(envelope.continuationRequest, undefined);
+			return projected;
+		};
 
-		const second = await readTranscript({
-			resultHandle: metadata.handle,
-			resultCursor: firstResult.excerpt.nextCursor,
-			resultLimit: 8192,
-		}, sliceOptions);
-		assert.ok(Buffer.byteLength(JSON.stringify(second), "utf8") <= 512);
-		const secondRow = second.messages[0] as any;
-		const secondResult = secondRow.toolResults[0];
-		assert.equal(secondRow.role, "unknown");
-		assert.deepEqual(Object.keys(secondResult).sort(), ["excerpt", "handle"]);
-		assert.equal(secondResult.handle, firstResult.handle);
-		assert.equal(secondResult.excerpt.start, firstResult.excerpt.nextCursor);
-		assert.equal(Array.from(secondResult.excerpt.text).length, 1);
-		assert.equal(secondResult.excerpt.end, secondResult.excerpt.start + 1);
-		assert.equal(secondResult.excerpt.nextCursor, secondResult.excerpt.end);
-		assert.equal(second.partial, true);
-		assert.deepEqual(second.continuationRequest, {
-			kind: "result_slice",
-			result_handle: metadata.handle,
-			result_cursor: secondResult.excerpt.end,
-			result_limit: 8192,
-		});
-		assert.equal(
-			firstResult.excerpt.text + secondResult.excerpt.text,
-			body.slice(0, secondResult.excerpt.end),
-			"minimum-budget continuations must be exact and non-overlapping",
+		const expectedRanges = [[0, 1], [1, 3], [3, 5], [5, 6], [6, 7], [7, 8]] as const;
+		const requestedLimits = [1, 1, 2, 1, 1, 1] as const;
+		let cursor = 0;
+		let reconstructed = "";
+		for (let index = 0; index < expectedRanges.length; index++) {
+			const [start, end] = expectedRanges[index];
+			assert.equal(cursor, start, "continuations must neither overlap nor skip UTF-16 units");
+			const envelope = await readTranscript({
+				resultHandle: metadata.handle,
+				resultCursor: cursor,
+				resultLimit: requestedLimits[index],
+			}, sliceOptions);
+			const projected = assertCanonicalSlice(envelope, {
+				start,
+				end,
+				text: body.slice(start, end),
+				complete: end === body.length,
+			});
+			if (start === 1) {
+				assert.equal(requestedLimits[index], 1);
+				assert.equal(end - start, 2, "result_limit:1 must return one complete astral scalar");
+			}
+			reconstructed += projected.excerpt.text;
+			cursor = projected.excerpt.nextCursor ?? projected.excerpt.end;
+		}
+		assert.equal(reconstructed, body);
+		assert.equal(cursor, body.length);
+
+		await assert.rejects(
+			readTranscript({
+				resultHandle: metadata.handle,
+				resultCursor: 2,
+				resultLimit: 1,
+			}, sliceOptions),
+			(error: unknown) => error instanceof TranscriptReaderError && error.code === "INVALID_RESULT_CURSOR",
 		);
+
+		const empty = await readTranscript({
+			resultHandle: metadata.handle,
+			resultCursor: body.length,
+			resultLimit: 1,
+		}, sliceOptions);
+		assertCanonicalSlice(empty, {
+			start: body.length,
+			end: body.length,
+			text: "",
+			complete: true,
+		});
 	});
 });
 

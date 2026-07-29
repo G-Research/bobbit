@@ -130,11 +130,8 @@ export interface ProjectedToolResultExcerpt {
 	complete: boolean;
 }
 
-/** Minimum-budget targeted slices retain only the continuation-bearing fields. */
-export interface ReducedProjectedToolResult {
-	handle: string;
-	excerpt: ProjectedToolResultExcerpt;
-}
+/** @deprecated Targeted slices now retain the complete canonical result metadata. */
+export type ReducedProjectedToolResult = ProjectedToolResult;
 
 export interface AgentTranscriptMessage {
 	index: number;
@@ -159,7 +156,7 @@ export interface AgentTranscriptMessage {
 	author?: MessageAuthor;
 	authorRef?: string;
 	toolCalls?: ProjectedToolCall[];
-	toolResults?: Array<ProjectedToolResult | ReducedProjectedToolResult>;
+	toolResults?: ProjectedToolResult[];
 	projectionOmitted?: true;
 	toolCallCount?: number;
 	toolResultCount?: number;
@@ -1532,6 +1529,13 @@ export async function readOrphanedBeforeCompaction(
 // ── Canonical agent projection ──
 
 export const READ_SESSION_AGENT_ENVELOPE_MAX_BYTES = 50 * 1024;
+/**
+ * A canonical targeted-slice envelope has roughly 700 bytes of fixed schema,
+ * while a 128-unit tool name can require another 768 bytes after JSON escaping.
+ * 1536 bytes therefore preserves the full result identity and metrics even for
+ * the adversarial all-control-character name pinned by the minimum-budget test.
+ */
+export const READ_SESSION_AGENT_ENVELOPE_MIN_BYTES = 1536;
 const AGENT_ARGUMENT_PREVIEW_LIMIT = 512;
 const AGENT_RESULT_EXCERPT_DEFAULT = 4096;
 const AGENT_RESULT_EXCERPT_MAX = 8192;
@@ -3241,47 +3245,80 @@ function readTargetedResultSlice(
 			materializer.discardDetached();
 		}
 
-		// The normal canonical metadata cannot always fit in the 512-byte test
-		// budget after JSON escaping. Return one scalar (or the already-complete
-		// empty range) with only the fields needed to identify and continue the
-		// slice. Raw-transcript charging bounds every numeric locator to at most
-		// the request work ceiling, making this shape deterministically fit.
-		const fallbackEnd = cursor < requestedEnd
-			? canonicalSliceEnd(result.body, cursor, 1)
-			: cursor;
-		const fallbackComplete = fallbackEnd === result.body.length;
-		const fallbackPartial = fallbackEnd < requestedEnd;
-		const fallbackResult: ReducedProjectedToolResult = {
-			handle: result.handle,
-			excerpt: {
-				start: cursor,
-				end: fallbackEnd,
-				text: materializer.resultExcerpt(result.body, cursor, fallbackEnd),
-				nextCursor: fallbackComplete ? null : fallbackEnd,
-				complete: fallbackComplete,
-			},
+		// Optional row metadata and the correlation/author dictionaries can exceed
+		// the minimum budget after JSON escaping. Refit a compact canonical row:
+		// omit those repeatable fields, but never the result's ref, name, status,
+		// accurate size, omission state, handle, or self-describing excerpt.
+		const makeCompactTargetRow = (limit: number): { row: AgentTranscriptMessage; end: number } => {
+			const compactState = newAgentProjectionState();
+			const compactResult = projectedResult(
+				result,
+				compactState,
+				true,
+				cursor,
+				limit,
+				(text, start, end) => materializer.resultExcerpt(text, start, end),
+			);
+			return {
+				row: {
+					index: raw.index,
+					role: "unknown",
+					toolResults: [compactResult],
+				},
+				end: compactResult.excerpt!.end,
+			};
 		};
-		const fallbackRow: AgentTranscriptMessage = {
-			index: raw.index,
-			role: "unknown",
-			toolResults: [fallbackResult],
+		const compactEnvelope = (row: AgentTranscriptMessage, end: number): ReadTranscriptEnvelope => {
+			const partial = end < requestedEnd;
+			return envelopeForAgentRows(
+				all.length,
+				undefined,
+				undefined,
+				undefined,
+				[row],
+				// The result is self-describing, so do not repeat its name/location in
+				// a correlation dictionary solely to explain the already-present ref.
+				newAgentProjectionState(),
+				undefined,
+				partial,
+				partial ? {
+					kind: "result_slice",
+					result_handle: result.handle,
+					result_cursor: end,
+					result_limit: requestedLimit,
+				} : undefined,
+			);
 		};
-		envelope = envelopeForAgentRows(
-			all.length,
-			undefined,
-			undefined,
-			undefined,
-			[fallbackRow],
-			newAgentProjectionState(),
-			undefined,
-			fallbackPartial,
-			fallbackPartial ? {
-				kind: "result_slice",
-				result_handle: result.handle,
-				result_cursor: fallbackEnd,
-				result_limit: requestedLimit,
-			} : undefined,
-		);
+
+		const requestedCompact = makeCompactTargetRow(requestedLimit);
+		envelope = compactEnvelope(requestedCompact.row, requestedCompact.end);
+		if (serializedBytes(envelope) <= budget) {
+			materializer.commitDetached();
+			return envelope;
+		}
+		materializer.discardDetached();
+
+		let compactLow = 1;
+		let compactHigh = Math.max(1, requestedEnd - cursor);
+		let compactBestUnits: number | undefined;
+		while (compactLow <= compactHigh) {
+			const units = Math.floor((compactLow + compactHigh) / 2);
+			const candidate = makeCompactTargetRow(units);
+			const projected = compactEnvelope(candidate.row, candidate.end);
+			const fits = serializedBytes(projected) <= budget;
+			materializer.discardDetached();
+			if (fits) {
+				compactBestUnits = units;
+				compactLow = units + 1;
+			} else {
+				compactHigh = units - 1;
+			}
+		}
+		if (compactBestUnits === undefined) {
+			throw new Error("minimum transcript result-slice envelope cannot preserve canonical metadata");
+		}
+		const compactBest = makeCompactTargetRow(compactBestUnits);
+		envelope = compactEnvelope(compactBest.row, compactBest.end);
 		if (serializedBytes(envelope) > budget) {
 			throw new Error("minimum transcript result-slice fallback exceeded its proven serialized budget");
 		}
@@ -3297,8 +3334,11 @@ function validatedAgentProjectionConfig(opts: ReadTranscriptOptions): {
 	requestLimits: TranscriptProjectionRequestWorkLimits;
 } {
 	const budget = opts.serializedBudgetBytes ?? READ_SESSION_AGENT_ENVELOPE_MAX_BYTES;
-	if (!Number.isSafeInteger(budget) || budget < 512 || budget > READ_SESSION_AGENT_ENVELOPE_MAX_BYTES) {
-		throw new TranscriptReaderError("invalid_params", `serializedBudgetBytes must be an integer in [512, ${READ_SESSION_AGENT_ENVELOPE_MAX_BYTES}]`);
+	if (!Number.isSafeInteger(budget) || budget < READ_SESSION_AGENT_ENVELOPE_MIN_BYTES || budget > READ_SESSION_AGENT_ENVELOPE_MAX_BYTES) {
+		throw new TranscriptReaderError(
+			"invalid_params",
+			`serializedBudgetBytes must be an integer in [${READ_SESSION_AGENT_ENVELOPE_MIN_BYTES}, ${READ_SESSION_AGENT_ENVELOPE_MAX_BYTES}]`,
+		);
 	}
 	const requestLimits: TranscriptProjectionRequestWorkLimits = {
 		...READ_SESSION_AGENT_WORK_LIMITS.request,
