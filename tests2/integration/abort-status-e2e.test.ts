@@ -170,57 +170,63 @@ test.describe("Abort status E2E", () => {
 			conn.send({ type: "steer", text: "S_DIRECT" });
 			conn.send({ type: "abort" });
 
-			// Wait for session to settle after abort. The abort-induced agent_end
-			// drops us back to idle; with the fix, drainQueue then delivers the
-			// steered text as a fresh user turn (which transitions us back to
-			// streaming and then idle again).
-			await conn.waitForFrom(cursor, statusPredicate("idle"), 10_000);
-
-			// Give drain a brief window to dispatch the re-armed steer and for
-			// the mock agent to emit the resulting user message_end.
-			const userMsgIdx = await conn.waitForFrom(
+			// Establish the abort terminal boundary before looking for delivery. A
+			// live steer can legitimately echo while Stop is in flight; only a
+			// subsequent user event proves that intent was redelivered after the
+			// cancelled turn.
+			await conn.waitForFrom(
 				cursor,
+				(m) => m.type === "event" && m.data?.type === "agent_end",
+				10_000,
+			);
+			const postAbortEnd = conn.messages.slice(cursor);
+			const firstAgentEndIdx = postAbortEnd.findIndex(
+				(m) => m.type === "event" && m.data?.type === "agent_end",
+			);
+			expect(firstAgentEndIdx, "PI-25b: expected an agent_end event from the abort before the redelivered user turn").toBeGreaterThanOrEqual(0);
+
+			await conn.waitForFrom(
+				cursor + firstAgentEndIdx + 1,
 				(m) =>
 					m.type === "event" &&
 					m.data?.type === "message_end" &&
 					m.data?.message?.role === "user" &&
 					m.data?.message?.content?.[0]?.text === "S_DIRECT",
 				8_000,
-			).then(() => conn.messageCount()).catch(() => -1);
+			).catch(() => { /* handled by the assertion below */ });
 
-			// Wait for the agent to complete its turn in response to the redelivered
-			// steer (the assertion below keys on this follow-up agent_end).
-			if (userMsgIdx > 0) {
-				await conn.waitForFrom(
-					userMsgIdx,
-					(m) => m.type === "event" && m.data?.type === "agent_end",
-					8_000,
-				).catch(() => { /* handled below */ });
-			}
-
-			// Collect the event stream post-cursor and find the abort-induced
-			// agent_end + any subsequent user message_end carrying "S_DIRECT".
-			const post = conn.messages.slice(cursor);
-			const firstAgentEndIdx = post.findIndex(
-				(m) => m.type === "event" && m.data?.type === "agent_end",
-			);
-			const userDirectIdx = post.findIndex(
-				(m) =>
+			// Find the redelivered user turn, then wait from that exact event
+			// boundary for the turn it starts to finish.
+			let post = conn.messages.slice(cursor);
+			let userDirectIdx = post.findIndex(
+				(m, index) =>
+					index > firstAgentEndIdx &&
 					m.type === "event" &&
 					m.data?.type === "message_end" &&
 					m.data?.message?.role === "user" &&
 					m.data?.message?.content?.[0]?.text === "S_DIRECT",
 			);
+			if (userDirectIdx >= 0) {
+				await conn.waitForFrom(
+					cursor + userDirectIdx + 1,
+					(m) => m.type === "event" && m.data?.type === "agent_end",
+					8_000,
+				).catch(() => { /* handled by the assertion below */ });
+				post = conn.messages.slice(cursor);
+				userDirectIdx = post.findIndex(
+					(m, index) =>
+						index > firstAgentEndIdx &&
+						m.type === "event" &&
+						m.data?.type === "message_end" &&
+						m.data?.message?.role === "user" &&
+						m.data?.message?.content?.[0]?.text === "S_DIRECT",
+				);
+			}
 
 			// Specific, identifiable error message for the harness to key on.
 			expect(
 				userDirectIdx,
 				"PI-25b: live-steer text 'S_DIRECT' was never delivered as a user turn after abort — deliverLiveSteer did not persist the steer and drainQueue had nothing to re-dispatch",
-			).toBeGreaterThanOrEqual(0);
-
-			expect(
-				firstAgentEndIdx,
-				"PI-25b: expected an agent_end event from the abort before the redelivered user turn",
 			).toBeGreaterThanOrEqual(0);
 
 			// The redelivered user message_end must come AFTER the abort's agent_end.

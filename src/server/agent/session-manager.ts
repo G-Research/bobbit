@@ -4734,23 +4734,21 @@ export class SessionManager {
 	}
 
 	/**
-	 * Splice an entry from the shadow ledger when its echo arrives.
-	 * Matches the SDK's text-match removal at agent-session.js:265-280:
-	 * find the first index whose text equals the user-message body, splice it.
-	 * Silent no-op for non-matching messages (regular prompts, follow-ups,
-	 * skill-expansion echoes whose body has been rewritten).
+	 * Observe a steer echo without settling its shadow-ledger record. An echo only
+	 * proves that Pi accepted the interrupt; if Stop aborts the same turn before
+	 * its terminal agent_end, the user's intent still needs to be redelivered on
+	 * the replacement turn. Successful agent_end settles the record instead.
 	 */
-	private _consumeSteerEcho(session: SessionInfo, event: any): void {
+	private _consumeSteerEcho(session: SessionInfo, event: any, opts?: { replay?: boolean }): void {
 		const ledger = session.inFlightSteerTexts;
 		if (!ledger || ledger.length === 0) return;
 		if (event.type !== "message_end") return;
 		if (event.message?.role !== "user" && event.message?.role !== "user-with-attachments") return;
 		const authorBinding = event[PROMPT_AUTHOR_EVENT_BINDING] as PromptAuthorEventBinding | undefined;
-		// A replayed/duplicate end frame for an already-settled Pi message must not
-		// consume the next same-text steer. The first end consumes by prompt id.
 		if (authorBinding?.alreadySettled) return;
 		const text = extractUserMessageText(event.message);
 		if (!text) return;
+		if (!opts?.replay) return;
 		const idx = authorBinding
 			? ledger.findIndex((record) => record.promptId === authorBinding.promptId)
 			: ledger.findIndex((record) => record.text === text);
@@ -4758,6 +4756,12 @@ export class SessionManager {
 			ledger.splice(idx, 1);
 			this.persistInFlightSteerLedger(session);
 		}
+	}
+
+	private _settleInFlightSteers(session: SessionInfo): void {
+		if (!session.inFlightSteerTexts || session.inFlightSteerTexts.length === 0) return;
+		session.inFlightSteerTexts.length = 0;
+		this.persistInFlightSteerLedger(session);
 	}
 
 	/**
@@ -5245,10 +5249,9 @@ export class SessionManager {
 			}
 		}
 
-		// Splice this echoed user message off the shadow ledger if it was a
-		// dispatched steer. Mirrors the SDK's _steeringMessages text-match
-		// removal (agent-session.js:265–280); harmless no-op for non-steer
-		// user messages (regular prompts, follow-ups, ask responses).
+		// A live echo does not settle a steer: Stop may still abort this turn.
+		// Replay echoes do settle records because their turn completed before the
+		// replacement bridge was created.
 		this._consumeSteerEcho(session, event);
 
 		// Tool boundary: defensively flush any steered rows that remain queued
@@ -5339,20 +5342,11 @@ export class SessionManager {
 				session.oneTimeGrantedTools = [];
 			}
 
-			// Safety net: if steers arrived after the last tool call or during a
-			// non-tool turn (no tool_execution_end fired), dispatch them now.
-			if (session.status !== "aborting") {
-				const steered = session.promptQueue.dequeueAllSteered();
-				if (steered.length > 0) void this._dispatchSteer(session, steered).catch(() => {});
-			}
-
 			const wasAborting = session.status === "aborting";
 			if (wasAborting) {
-				// Reconcile in-flight steers that the SDK accepted but never
-				// echoed because the turn was aborted. Re-enqueueing at front
-				// as steered means drainQueue → _dispatchSteer redispatches
-				// the batch on the next turn. Plus a defensive rebroadcast in
-				// case the queue was mutated mid-abort.
+				// Reconcile every steer accepted by the aborted turn, including one
+				// whose user echo raced ahead of Stop. An echo acknowledges delivery
+				// to the cancelled turn, not completion of the user's request.
 				this._reconcileAfterAbort(session);
 				this.broadcastQueue(session);
 
@@ -5369,6 +5363,16 @@ export class SessionManager {
 				session.lastTurnErrored = false;
 				session.lastTurnErrorMessage = undefined;
 				session.consecutiveErrorTurns = 0;
+			} else {
+				// A completed, non-aborted turn is the settlement boundary for its
+				// live steers. Do this before dispatching any safety-net steers below
+				// so those new records belong to their next turn.
+				this._settleInFlightSteers(session);
+
+				// Safety net: if steers arrived after the last tool call or during a
+				// non-tool turn (no tool_execution_end fired), dispatch them now.
+				const steered = session.promptQueue.dequeueAllSteered();
+				if (steered.length > 0) void this._dispatchSteer(session, steered).catch(() => {});
 			}
 
 			session.streamingStartedAt = undefined;
@@ -7626,7 +7630,7 @@ export class SessionManager {
 			} else {
 				// Preserve the narrow replay reconciliation that proves an accepted
 				// steer was already echoed, without running lifecycle dispatch hooks.
-				this._consumeSteerEcho(session, preparedEvent);
+				this._consumeSteerEcho(session, preparedEvent, { replay: true });
 			}
 
 			this.emitAgentEvent(session, preparedEvent);
@@ -12387,7 +12391,7 @@ export class SessionManager {
 				if (switchingSession) {
 					if (replayingSession) {
 						const preparedEvent = this.prepareVisibleAgentEvent(session, event);
-						this._consumeSteerEcho(session, preparedEvent);
+						this._consumeSteerEcho(session, preparedEvent, { replay: true });
 					}
 					return;
 				}
