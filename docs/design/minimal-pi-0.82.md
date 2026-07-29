@@ -22,7 +22,7 @@ The implementation must not merge, cherry-pick, or replay a prior Pi branch. Ear
 
 This upgrade does not redesign credentials, login, sandbox token forwarding, generic environment inheritance, raw agent arguments, review/QA lifecycle, transcript recovery, provider policy, or session replacement. Pi `0.82.1` login/provider additions, including Kimi Code, remain unavailable through Bobbit-owned selection surfaces.
 
-A production change is permitted only when it maps to an acceptance item in this document or to a deterministic dependency-only failure recorded during Phase 0. If a focused partial-mutation reproduction cannot be recovered by the existing `SessionManager.restartAgent()` / `_respawnAgentInPlace()` path, stop and request a goal amendment. Do not introduce a new coordinator, generation system, restore planner, or provider-policy module.
+A production change is permitted only when it maps to an acceptance item in this document or to a deterministic dependency-only failure recorded during Phase 0. A focused deterministic reproduction showed that the existing restart path can archive a role-less, no-transcript record while retaining its partially mutated live bridge. The approved narrow amendment is fail-closed: after bounded rollback and restart/replacement fail to verify the unchanged durable tuple, synchronously terminate and detach the unsafe live bridge/session through existing `SessionManager` termination/archive behavior, retain the previous durable tuple, and surface an actionable redacted failure. Do not generalize this amendment into a coordinator, generation system, restore planner, recovery framework, or provider-policy module.
 
 `src/server/agent/session-setup.ts`, `src/server/agent/google-code-assist.ts`, `src/server/agent/orchestration-core.ts`, OAuth code, transcript code, generic environment code, and generic raw-argument handling remain unchanged.
 
@@ -197,7 +197,7 @@ Do not add Kimi or OpenRouter login UI, OAuth handlers, credential scrubbing, pe
 | Durable state | `SessionStore` and `SessionManager.persistSessionModel` | Add normalized effective thinking and write the verified triple together. |
 | Spawn planning | Existing `createSession()` inputs and unchanged `session-setup.ts` | Resolve/validate/clamp before passing existing `initialModel` and `initialThinkingLevel`. |
 | Host and sandbox argv | `rpc-bridge.ts::buildAgentArgs` | Emit explicit provider, model ID, and thinking. Docker uses the same built list. |
-| Restore/restart | `restoreSession()`, `restartAgent()`, `_respawnAgentInPlace()` | Prefer the durable triple and verify it; no new lifecycle owner. |
+| Restore/restart/fail-closed detach | `restoreSession()`, `restartAgent()`, `_respawnAgentInPlace()`, and existing `SessionManager` termination/archive behavior | Prefer and verify the durable triple; if replacement cannot verify it, synchronously terminate/detach and archive the unsafe session without adding a lifecycle owner. |
 | Delegate/host child | Existing `OrchestrationCore` dependencies in `server.ts` | Make thinking resolution durable-first; clamp in existing session creation. |
 | Team workers | `TeamManager.spawnRole()` | Role override first, otherwise lead's durable triple. |
 
@@ -242,12 +242,13 @@ The failure contract is intentionally local to this request. A provider/model re
 1. Retain the previous durable verified triple. Never persist the requested model, requested thinking, or an unrequested returned fallback after only one mutation succeeds.
 2. Read `getState()` and, when complete, broadcast its actual provider/model/thinking as a failure correction so both optimistic client fields are replaced together. This is not a success commit for the returned model.
 3. If the request may have mutated Pi, make one bounded attempt to restore the previous durable provider/model and thinking using existing setters, then require exact `getState()` verification. On success broadcast the restored triple; durable state was never changed.
-4. If state is incomplete, the bridge is unreachable, either rollback write fails, or rollback cannot be verified exactly, call existing `SessionManager.restartAgent(session.id)`. That path rehydrates from the unchanged durable triple. Do not continue using the partially mutated live bridge.
-5. After successful existing-path restart, broadcast the replacement's authoritative state, then send the request error. If restart fails, surface the existing terminated/recovery error; do not fabricate state.
+4. If state is incomplete, the bridge is unreachable, either rollback write fails, or rollback cannot be verified exactly, call existing `SessionManager.restartAgent(session.id)`. Do not continue using the partially mutated live bridge while restart/replacement is pending.
+5. Read the replacement's authoritative state and require the unchanged durable tuple. On exact verification, broadcast that tuple and then send the request error.
+6. If restart/replacement fails, returns no live session, or cannot verify the unchanged durable tuple—including the proved role-less/no-transcript archive case—await existing `SessionManager` termination/archive behavior to terminate and detach the unsafe live bridge/session. Keep the previous durable tuple in the archived record and surface an actionable redacted failure that tells the user to create a fresh session. Never fabricate a recovery state or return while the partially mutated bridge remains live.
 
-The same bounded behavior applies when standalone thinking selection fails. The existing session command FIFO orders later model/thinking/prompt frames behind recovery, and existing session replacement code owns restart races. No selection generation, fingerprint, transition lock, rollback framework, or duplicated restore plan is introduced.
+The same bounded behavior applies when standalone thinking selection fails. The existing session command FIFO orders later model/thinking/prompt frames behind recovery, and existing session replacement and termination/archive code owns the lifecycle. No selection generation, fingerprint, transition lock, rollback framework, duplicated restore plan, or generalized quarantine subsystem is introduced.
 
-A focused partial-write test must prove an unverifiable mutation invokes `restartAgent()` and cannot continue live. If that test demonstrates the existing restart path cannot safely rehydrate the previous triple, implementation stops for an amendment.
+The focused partial-write test must prove an unverifiable mutation invokes `restartAgent()` and cannot continue live. A focused fail-closed case must also reproduce restart/replacement failing to verify the old tuple, then prove that termination/archive is awaited, the unsafe bridge is detached, the previous durable tuple is retained, and the returned failure is actionable and redacted.
 
 ## Persistence, reconnect, restore, and spawn
 
@@ -333,9 +334,9 @@ Every planned production hunk is within the goal guardrail.
 | `src/app/remote-agent.ts` | A4 optimistic combined request and A10 authoritative correction of both fields. |
 | `src/server/ws/protocol.ts` | A4 additive combined request field. |
 | `src/server/ws/handler.ts` | A4 current-catalog dispatch, existing FIFO reuse, A10 error correction/recovery, reconnect fallback thinking. |
-| `src/server/ws/runtime-model-selection.ts` | A4 exact apply/read-back/commit, A10 bounded rollback and existing restart handoff. This is the one existing focused WS helper; add no second module. |
+| `src/server/ws/runtime-model-selection.ts` | A4 exact apply/read-back/commit; A10 bounded rollback, existing restart handoff, and the approved fail-closed handoff to existing termination/archive behavior. This is the one existing focused WS helper; add no second module. |
 | `src/server/agent/session-store.ts` | A6 durable normalized effective thinking and recovery-critical flush. |
-| `src/server/agent/session-manager.ts` | A4 atomic triple persistence; A5 explicit/clamped spawn; A6 initial, restore, replacement, and delegate continuity; A7 no hidden default. |
+| `src/server/agent/session-manager.ts` | A4 atomic triple persistence and reuse of existing termination/archive behavior for the approved fail-closed case; A5 explicit/clamped spawn; A6 initial, restore, replacement, and delegate continuity; A7 no hidden default. |
 | `src/server/agent/rpc-bridge.ts` | A5 exact `--provider`, `--model`, and `--thinking` for host and Docker. |
 | `src/server/agent/team-manager.ts` | A6 team-lead tuple inheritance with role precedence. |
 | `src/server/server.ts` | A6 durable child-thinking resolver; A7 preference/role/initial-model selection validation. |
@@ -358,7 +359,7 @@ The implementation/test plan is deliberately non-duplicative.
 | **A7** | Custom/local and legacy AIGW Kimi-named IDs still work; exact provider `kimi-coding` is absent/rejected from catalog, preferences, roles, runtime, team, and initial spawn. | Catalog test plus one focused runtime-selection test. No provider substring denylist. |
 | **A8** | One registered browser journey performs the complete Opus 5 flow. | Rewrite only the Opus-specific journey in `tests2/browser/journeys/pi-runtime-upgrade.journey.spec.ts`; retain unrelated canaries. |
 | **A9** | Existing Pi compatibility canaries remain green, changing only proven version-specific assertions. | Existing browser-import, OAuth, RPC, tool, retry/compaction, transcript, extension, packed-consumer, and binary tests. |
-| **A10** | One failure corrects optimistic model and thinking; one unverifiable partial write enters existing recovery. | One focused `RemoteAgent` failure test plus focused runtime-helper partial-write injection; do not add a lifecycle/race matrix. |
+| **A10** | One failure corrects optimistic model and thinking; one unverifiable partial write enters existing recovery, then fail-closes through existing termination/archive behavior if replacement cannot verify durability. | One focused `RemoteAgent` failure test plus focused runtime-helper partial-write and fail-closed injections; do not add a lifecycle/race matrix. |
 
 ### Required browser journey
 
@@ -377,7 +378,7 @@ Do not add a second Opus lifecycle browser test.
 
 The optimistic correction test must start with a verified old triple, optimistically select a different model/thinking pair, inject a server failure, deliver the authoritative corrective `state`, and assert both client fields equal the server result.
 
-Add this deterministic A10 fallback case: begin with durable verified model `C` at `high`; issue a combined explicit request for model `B` at `xhigh`; configure `applyModelString()` to report/select configured fallback model `A` instead of `B`. Assert that the provider/model mismatch enters failure before `xhigh` is applied, `A` is never accepted or persisted as the live request's success, neither `B/xhigh` nor any `A/<level>` tuple changes durability, and the old durable `C/high` remains. The failure path must publish complete authoritative model-and-thinking correction, attempt the single bounded rollback to `C/high`, and end at verified `C/high`; if that rollback cannot be verified, it must invoke `restartAgent()` exactly once and rehydrate `C/high` from unchanged durability. In both branches the client receives an error, never a successful `A` selection.
+Add this deterministic A10 fallback case: begin with durable verified model `C` at `high`; issue a combined explicit request for model `B` at `xhigh`; configure `applyModelString()` to report/select configured fallback model `A` instead of `B`. Assert that the provider/model mismatch enters failure before `xhigh` is applied, `A` is never accepted or persisted as the live request's success, neither `B/xhigh` nor any `A/<level>` tuple changes durability, and the old durable `C/high` remains. The failure path must publish complete authoritative model-and-thinking correction, attempt the single bounded rollback to `C/high`, and end at verified `C/high`; if rollback cannot be verified, it must invoke `restartAgent()` exactly once and require rehydrated `C/high` from unchanged durability. If restart/replacement cannot verify `C/high`, it must enter the approved fail-closed termination/archive path below. In every branch the client receives an error, never a successful `A` selection.
 
 The partial-write test must make model application succeed, make thinking/final read-back unverifiable, and assert:
 
@@ -385,6 +386,8 @@ The partial-write test must make model application succeed, make thinking/final 
 - no requested partial triple is persisted or broadcast as success;
 - the existing `restartAgent()` path is invoked exactly once; and
 - the partially mutated bridge is not allowed to continue live.
+
+The approved fail-closed reproduction must then make restart/replacement archive or otherwise fail to return an exactly verified old tuple. It must assert that existing termination/archive behavior is awaited, the unsafe bridge/session is detached, the old durable tuple remains in the archived record, and the client receives an actionable redacted error rather than a recovery state.
 
 ## Compatibility canaries
 
@@ -410,7 +413,7 @@ Change only assertions proven version-specific by the Phase 0 delta. New `0.82.1
 - Explicit `null` thinking-map entries remain exclusions; missing ordinary entries remain provider defaults; missing `xhigh`/`max` remain unsupported.
 - A legacy persisted row without effective thinking is normalized once and remains backward compatible.
 - An unavailable live model selection fails actionably without fallback. Only an existing initial-setup call site may use its current opt-in configured fallback; neither path delegates to Pi's hidden default.
-- A model succeeds but thinking fails: durability remains old, actual state is read back, bounded rollback is attempted, and unverifiable state restarts through the existing path.
+- A model succeeds but thinking fails: durability remains old, actual state is read back, bounded rollback is attempted, and unverifiable state restarts through the existing path; if replacement cannot verify the old tuple, the unsafe session is synchronously terminated/detached and archived with the old durable tuple.
 - A reconnect during failure consumes authoritative server state; it never trusts the optimistic client snapshot.
 - Archived/fallback state without a live bridge uses the durable verified triple.
 - Role model and thinking overrides are resolved together and clamped together; a thinking value is never clamped against the model it is about to replace.
@@ -422,7 +425,7 @@ Classify findings explicitly:
 
 - **A — branch-introduced and in scope:** a changed Bobbit hunk creates a vulnerability or makes the new selectable Opus 5 path unsafe. Fix before merge.
 - **B — pre-existing architecture/policy:** the same issue exists on `origin/master` for existing providers, raw args, shared auth, sandbox tokens, or generic environment inheritance. Record separately; do not broaden this goal.
-- **C — immutable upstream Pi packaging:** the exact published Pi `0.82.1` shrinkwrap carries the finding. Report it as an upstream release blocker; do not override, vendor, fork, hide, or weaken audit checks.
+- **C — immutable upstream Pi packaging:** the exact published Pi `0.82.1` shrinkwrap carries the finding. Report it transparently; do not override, vendor, fork, hide, or weaken audit checks. It remains blocking unless it is the exact accepted-risk exception below.
 
 Run both root and packed-consumer checks:
 
@@ -434,9 +437,9 @@ npm run audit:packed-consumer
 
 Normal compatibility tests remain deterministic and do not assert mutable advisory-feed output. Attach the root and packed audit JSON/exit codes to the final report.
 
-At design time, coding-agent `0.82.1` publishes `brace-expansion@5.0.7` under `minimatch@10.2.5`. If the known `GHSA-mh99-v99m-4gvg` finding remains present, classify it C and keep it separately release-blocking. `protobufjs@7.6.5` resolves the prior `0.81.1` protobuf blocker, but it does not make the package audit-clean. A root audit that deduplicates differently does not override packed-consumer evidence.
+Coding-agent `0.82.1` publishes `brace-expansion@5.0.7` under `minimatch@10.2.5`. The user explicitly accepted the risk of the exact Pi-owned `GHSA-mh99-v99m-4gvg` finding on that exact version and path. Keep it visible as class C in the full non-zero packed-consumer audit and final report, but do not treat it by itself as a merge blocker or release-eligibility blocker. This exception does not make the package audit-clean and does not permit an audit fix, override, vendoring, forking, repacking, suppression, or weakened check. `protobufjs@7.6.5` resolves the prior `0.81.1` protobuf blocker; a root audit that deduplicates differently still does not override packed-consumer evidence.
 
-Compatibility may pass while release eligibility fails. Publication requires a compatible common Pi patch, coordinated exact advancement of all three direct pins, and a packed-consumer audit with successful exit and zero findings.
+Compatibility and release eligibility remain separate decisions. This delivery may be release-eligible with only the exact accepted finding above, even though the packed-consumer command exits non-zero. Any additional vulnerability, different version/path/advisory, audit execution failure, or other unaccepted finding remains release-blocking.
 
 ## Final verification and scope audit
 
@@ -461,16 +464,17 @@ Also retain:
 Before completion:
 
 ```bash
-git diff --check origin/master...HEAD
-git diff --name-only origin/master...HEAD
-git diff --stat origin/master...HEAD
+git diff --check origin/main...HEAD
+git diff --name-only origin/main...HEAD
+git diff --stat origin/main...HEAD
 ```
 
 Review every production hunk against the file map and `A1`–`A10`/`D*`. Remove any unmapped hunk. A production file outside the guardrail requires a dependency-only deterministic reproduction, a written reason the allowed boundaries cannot fix it, and an approved paused-goal amendment before editing.
 
-The final report must state four independent outcomes:
+The final report must state five independent outcomes:
 
 1. **Compatibility status** — exact Pi/catalog/protocol/persistence/spawn/inheritance behavior.
 2. **Test status** — focused and full command results, including any environment skip.
-3. **Immutable upstream audit blocker status** — exact class C package/path/advisory and packed-consumer evidence.
-4. **Release eligibility** — explicitly ineligible while any packed-consumer vulnerability remains, even if compatibility and tests pass.
+3. **Immutable upstream audit status** — exact class C package/path/advisory, packed-consumer evidence, counts, and exit code.
+4. **Accepted-risk status** — whether the only non-zero finding is the exact accepted Pi-owned `brace-expansion@5.0.7` path above; never call that result audit-clean.
+5. **Release eligibility** — the accepted finding alone does not make eligibility false; any additional or unaccepted vulnerability or audit execution failure does.
