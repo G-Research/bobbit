@@ -30,6 +30,7 @@ toolPolicies:
   "PR Walkthrough": allow
   "mcp__": never
   "Agent": never
+  read_session: never
   "Ask": never
   "Bobbit": never
   "Browser": never

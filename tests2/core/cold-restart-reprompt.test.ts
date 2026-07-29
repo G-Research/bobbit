@@ -41,13 +41,25 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
 import { TeamManager } from "../../src/server/agent/team-manager.ts";
+import { PreferencesStore } from "../../src/server/agent/preferences-store.ts";
 import { registerRpcBridgeFactory } from "../../src/server/agent/rpc-bridge.ts";
+import { createMemFs } from "../harness/mem-fs.js";
 
 // This suite exercises restore orchestration, not persistence or prompt assembly.
 // Keep its fixture paths synthetic and process-owned so v2-core workers perform no
 // Defender-scanned NTFS writes and cannot contend with another Vitest process.
 const tmpRoot = path.resolve(".profiles", "testing-v2", "fixtures", `cold-restart-${process.pid}`);
 const stateDir = path.join(tmpRoot, "state");
+const preferencesStore = new PreferencesStore(path.resolve("/memfs/cold-restart-reprompt"), createMemFs());
+preferencesStore.set("customProviders", [{
+	id: "cold-restart-mock",
+	name: "cold-restart-mock",
+	type: "manual",
+	baseUrl: "http://127.0.0.1:9",
+	apiKey: "test-key",
+	models: [{ id: "cold-restart-model", name: "Cold Restart Model" }],
+}]);
+preferencesStore.set("default.sessionModel", "cold-restart-mock/cold-restart-model");
 
 const GENEROUS_TIMEOUT_FLOOR_MS = 90_000;
 const COLD_TIMEOUT_MSG = "Command timed out: prompt";
@@ -93,7 +105,11 @@ function makeManager(bridge: any): any {
 	// Supplying a PCM prevents SessionManager's non-PCM constructor from opening
 	// six unrelated durable stores. The records below remain the suite's explicit
 	// in-memory persistence seam, as they were before this fixture optimization.
-	const m: any = new SessionManager({ projectContextManager: {} as any, stateDir });
+	const m: any = new SessionManager({
+		projectContextManager: {} as any,
+		preferencesStore,
+		stateDir,
+	});
 	m._testStore = {
 		update: () => {},
 		get: () => undefined,

@@ -21,7 +21,7 @@ const POISONED_HISTORY_ERROR =
 const RETRY_INTENT = "ORPHAN_BROWSER_RETRY_INTENT";
 const FOLLOW_UP_INTENT = "ORPHAN_BROWSER_FOLLOW_UP_INTENT";
 const PRESERVED_HISTORY = "Inspect the current test performance.";
-const MODEL = { provider: "anthropic", id: "claude-sonnet-4-20250514" } as const;
+const MODEL = { provider: "anthropic", id: "claude-sonnet-4-5", thinkingLevel: "high" } as const;
 
 function affectedPiSequence(parentId: string | null = null, suffix = "initial"): Array<Record<string, unknown>> {
 	const userId = `msg-user-before-affected-turn-${suffix}`;
@@ -134,9 +134,13 @@ function surfacePoisonedHistoryError(session: any, consecutiveErrorTurns: number
 	emitAgentEvent(session.rpcClient, { type: "agent_end", willRetry: false });
 }
 
-async function modelOf(session: any): Promise<{ provider?: string; id?: string }> {
+async function modelTupleOf(session: any): Promise<{ provider?: string; id?: string; thinkingLevel?: string }> {
 	const state = await session.rpcClient.getState();
-	return state.data?.model ?? {};
+	return {
+		provider: state.data?.model?.provider,
+		id: state.data?.model?.id,
+		thinkingLevel: state.data?.thinkingLevel,
+	};
 }
 
 async function messageTextCount(session: any, marker: string): Promise<number> {
@@ -176,7 +180,12 @@ test.describe("Journey: orphan tool-result recovery", () => {
 			let session = requireSession(sessionManager, sessionId);
 
 			await session.rpcClient.setModel(MODEL.provider, MODEL.id);
-			sessionManager.persistSessionModel(sessionId, MODEL.provider, MODEL.id);
+			await session.rpcClient.setThinkingLevel(MODEL.thinkingLevel);
+			await expect.poll(
+				() => modelTupleOf(session),
+				{ timeout: 15_000, message: "ORPHAN_TOOL_RESULT_BROWSER_RECOVERY: initial live tuple must be exact before persistence" },
+			).toEqual(MODEL);
+			sessionManager.persistSessionModel(sessionId, MODEL.provider, MODEL.id, MODEL.thinkingLevel);
 			let persisted: any;
 			await expect.poll(
 				() => {
@@ -185,6 +194,11 @@ test.describe("Journey: orphan tool-result recovery", () => {
 				},
 				{ timeout: 15_000, message: "ORPHAN_TOOL_RESULT_BROWSER_RECOVERY: persisted transcript path missing" },
 			).toEqual(expect.any(String));
+			expect(persisted).toMatchObject({
+				modelProvider: MODEL.provider,
+				modelId: MODEL.id,
+				effectiveThinkingLevel: MODEL.thinkingLevel,
+			});
 			// Use the canonical SessionStore path: every real repair boundary reads
 			// this path, while a test-only switch_session alone does not update it.
 			const transcriptFile = persisted.agentSessionFile as string;
@@ -220,7 +234,7 @@ test.describe("Journey: orphan tool-result recovery", () => {
 			await expect.poll(() => orphanIdsIn(transcriptFile), { timeout: 20_000 }).toEqual([]);
 			session = requireSession(sessionManager, sessionId);
 			await expect.poll(() => messageTextCount(session, RETRY_INTENT), { timeout: 20_000 }).toBe(1);
-			await expect.poll(() => modelOf(session), { timeout: 20_000 }).toEqual(expect.objectContaining(MODEL));
+			await expect.poll(() => modelTupleOf(session), { timeout: 20_000 }).toEqual(MODEL);
 			await page.reload();
 			await expect(editor).toBeVisible({ timeout: 20_000 });
 			await expect(page.getByText("OK", { exact: true }).last()).toBeVisible({ timeout: 20_000 });
@@ -245,7 +259,7 @@ test.describe("Journey: orphan tool-result recovery", () => {
 			session = requireSession(sessionManager, sessionId);
 			await expect.poll(() => messageTextCount(session, FOLLOW_UP_INTENT), { timeout: 20_000 }).toBe(1);
 			await expect.poll(() => session.promptQueue.toArray().filter((row: any) => row.text.includes(FOLLOW_UP_INTENT)).length, { timeout: 20_000 }).toBe(0);
-			await expect.poll(() => modelOf(session), { timeout: 20_000 }).toEqual(expect.objectContaining(MODEL));
+			await expect.poll(() => modelTupleOf(session), { timeout: 20_000 }).toEqual(MODEL);
 			await page.reload();
 			await expect(editor).toBeVisible({ timeout: 20_000 });
 			await expect(page.getByText(FOLLOW_UP_INTENT, { exact: true }).last()).toBeVisible({ timeout: 20_000 });

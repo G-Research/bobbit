@@ -6,10 +6,12 @@
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import {
+	apiFetch,
 	createSession,
 	deleteSession,
 	connectWs,
 	statusPredicate,
+	waitForSessionStatus,
 	queueLenPredicate,
 	toolStartPredicate,
 	type WsConnection,
@@ -386,5 +388,54 @@ test.describe("Abort status E2E", () => {
 		} finally {
 			conn.close();
 		}
+	});
+
+	test("REST abort reports an unavailable durable-model recovery failure", async ({ gateway }) => {
+		sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+
+		const manager = gateway.sessionManager;
+		const live = manager.getSession(sessionId);
+		expect(live).toBeTruthy();
+		if (live.pendingMetadataPersist) await live.pendingMetadataPersist;
+		const persisted = manager.getPersistedSession(sessionId);
+		expect(persisted?.projectId).toBeTruthy();
+
+		const retiredTuple = {
+			modelProvider: "retired-custom",
+			modelId: "retired-force-abort-model",
+			effectiveThinkingLevel: "high",
+		};
+		const durableStore = manager.getSessionStore(persisted.projectId);
+		durableStore.update(sessionId, retiredTuple);
+
+		const oldBridge = live.rpcClient;
+		const originalStop = oldBridge.stop.bind(oldBridge);
+		let stopCalls = 0;
+		oldBridge.abort = () => new Promise<void>(() => {});
+		oldBridge.stop = async () => {
+			stopCalls += 1;
+			await originalStop();
+		};
+		live.status = "streaming";
+
+		const responsePending = apiFetch(`/api/sessions/${sessionId}/abort`, { method: "POST" });
+		for (let i = 0; i < 20 && live.status !== "aborting"; i++) {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+		}
+		expect(live.status).toBe("aborting");
+		gateway.clock.advance(3_000);
+
+		const response = await responsePending;
+		const body = await response.json();
+		const exactModel = `${retiredTuple.modelProvider}/${retiredTuple.modelId}`;
+		expect(response.status, JSON.stringify(body)).toBe(500);
+		expect(body).toMatchObject({ ok: false, status: "terminated" });
+		expect(body.error).toContain(exactModel);
+		expect(body.error).toMatch(/not currently available for session selection/i);
+		expect(manager.getSession(sessionId)?.status).toBe("terminated");
+		expect(oldBridge.running).toBe(false);
+		expect(stopCalls).toBe(1);
+		expect(manager.getPersistedSession(sessionId)).toMatchObject(retiredTuple);
 	});
 });

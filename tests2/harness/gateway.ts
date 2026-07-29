@@ -247,7 +247,22 @@ async function boot(): Promise<BootedGateway> {
 	// marker, subgoals-experimental ON (so nested-goal tests work unchanged).
 	writeFileSync(join(stateDir, "projects.json"), "[]");
 	writeFileSync(join(stateDir, "setup-complete"), "tests2\n");
-	writeFileSync(join(stateDir, "preferences.json"), JSON.stringify({ subgoalsEnabled: true }, null, 2));
+	// Register the in-process agent's exact tuple through the same manual-provider
+	// preferences production model validation reads. Seed before gateway boot so
+	// every ordinary test session starts from an explicit selectable model rather
+	// than falling through to a hidden Pi default.
+	writeFileSync(join(stateDir, "preferences.json"), JSON.stringify({
+		subgoalsEnabled: true,
+		customProviders: [{
+			id: "mock",
+			name: "mock",
+			type: "manual",
+			baseUrl: "http://127.0.0.1",
+			models: [{ id: "mock-model", name: "mock-model" }],
+		}],
+		"default.sessionModel": "mock/mock-model",
+		"default.sessionThinkingLevel": "off",
+	}, null, 2));
 
 	// BOBBIT_DIR / BOBBIT_AGENT_DIR are the real runtime dir vars (also set in
 	// production by cli.ts) — NOT test-only flags. Everything else is config.

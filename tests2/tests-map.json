@@ -21,6 +21,42 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/reviewer-read-session-policy.test.ts",
+      "reason": "Resolved tool-policy coverage proving every first-party reviewer role and project override explicitly denies cross-session transcript reads through read_session.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/runtime-model-zombie-recovery-repro.test.ts",
+      "reason": "Focused failing-first real SessionManager/runtime-selection recovery regression proving an unverifiable partial tuple mutation in a role-less pre-transcript session cannot be left live after zombie recovery archives its unchanged durable tuple.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/session-manager-bare-delegate-model-boundary.test.ts",
+      "reason": "Focused failing-first actual-SessionManager regression proving bare createDelegateSession rejects the exact deferred kimi-coding provider before RpcBridge construction, process start, or child persistence, while a selectable custom/local provider preserves a slash-containing Kimi-named model ID.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/session-manager-spawn-tuple-boundary-repro.test.ts",
+      "reason": "Focused failing-first actual-SessionManager regressions proving a normal no-role/default spawn resolves an authenticated-first/shared-rank Bobbit catalog model before constructing Pi, and an explicit skip-auto reviewer spawn read-backs then durably commits provider/model/effective-thinking in one atomic update.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/reviewer-diff-scope-prompts.test.ts",
       "reason": "Pure prompt-contract coverage ensuring every first-party reviewer raises only issues introduced or materially worsened by the reviewed change and does not expand goals or PRs to fix unchanged pre-existing issues.",
       "execution": {
@@ -211,7 +247,7 @@
     },
     {
       "path": "tests2/integration/team-spawn-multi-repo-real-git.test.ts",
-      "reason": "Focused real-Git regression for a non-Git two-component project: covers direct and REST worker spawn from unpublished divergent component HEADs, collision rejection, partial and post-spawn rollback, component-owned cleanup, and first-write cleanup coordinates; also proves the team lead borrows the goal's live and persisted worktree metadata, retains it across session restoration, returns summed per-component goal/session Git-status envelopes, and can be archived and purged without removing goal-owned component worktrees.",
+      "reason": "Focused real-Git regression for a non-Git two-component project: drives direct TeamManager.spawnRole and REST worker spawn from unpublished divergent component HEADs; verifies exact-start collision rejection, partial and post-spawn rollback, actual createSession agent-spawn failure handling, component-owned cleanup, and first-write cleanup coordinates; also proves the team lead borrows the goal's live and persisted worktree metadata, retains it across session restoration, returns summed per-component goal/session Git-status envelopes, and can be archived and purged without removing goal-owned component worktrees.",
       "execution": {
         "runner": "vitest",
         "tier": "e2e",
@@ -437,6 +473,15 @@
     {
       "path": "tests2/core/bounded-tree-quarantine-errors.test.ts",
       "reason": "Deterministic quarantine lifecycle failures prove root and child opendir/read/unlink/rmdir errors restore the exact remaining identity for visible retry, partial cleanup remains visible, collisions never overwrite, impossible restoration reports and logs its quarantine path, missing parents retain force semantics, and mismatched external identities are never deleted.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/aigw-retained-catalog-on-discovery-failure.test.ts",
+      "reason": "Focused AIGW catalog regression proving transient discovery failures retain only matching persisted routing metadata while successful discovery omissions remain authoritative.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -1057,7 +1102,7 @@
     },
     {
       "path": "tests2/browser/journeys/pi-runtime-upgrade.journey.spec.ts",
-      "reason": "Pi 0.80.6 and AIGW browser journey coverage: pins GPT 5.6 catalog selection, upstream-provider badge/search, stable non-AIGW labels, bare AIGW preference persistence across reload, browser-safe pi-ai provider/key-test routes, and session reload/restore after transcript parsing.",
+      "reason": "Pi 0.82.1 and AIGW browser journey coverage: selects authoritative Anthropic Opus 5 metadata and all thinking levels, sends the combined xhigh tuple through a real gateway/mock session, verifies persistence/reload/cleanup, preserves AIGW provenance preferences, exercises browser-safe pi-ai key routes, and restores a mock transcript.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
@@ -1782,6 +1827,33 @@
         "runner": "vitest",
         "tier": "unit",
         "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/client-combined-model-thinking-selection.test.ts",
+      "reason": "Focused DOM contract for one clamped combined model/thinking request, optimistic tuple correction from authoritative state, and legacy standalone-thinking compatibility.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/core/server-model-tuple-inheritance.test.ts",
+      "reason": "Focused server boundary coverage for durable-first Opus 5 thinking inheritance, exact-model clamping, supported Kimi-named IDs, and shared tuple resolution at orchestration/fork/continue call sites.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/deferred-provider-selection-boundary.test.ts",
+      "reason": "Real-gateway coverage that Bobbit-owned defaults and roles reject exact deferred provider kimi-coding while preserving Kimi-named IDs under supported custom/local providers.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
       }
     }
   ],

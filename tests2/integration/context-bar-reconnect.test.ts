@@ -5,6 +5,7 @@
  * so the footer/context bar never renders the hardcoded remote-agent placeholder
  * (or an older Claude Opus default) as authoritative state.
  */
+import { vi } from "vitest";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import {
 	apiFetch,
@@ -16,42 +17,87 @@ import {
 } from "./_e2e/e2e-setup.js";
 import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 
-const OPUS_48 = "claude-opus-4-8";
-const FALLBACK_MODEL_IDS = new Set(["claude-opus-4-7", "claude-opus-4-6", "claude-opus-4"]);
+const OPUS_5 = { provider: "anthropic", id: "claude-opus-5", thinkingLevel: "xhigh" } as const;
+const STALE_MODEL_IDS = new Set(["claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4"]);
 
 function stateModelId(message: WsMsg): string | undefined {
 	return message.type === "state" ? (message.data as any)?.model?.id : undefined;
 }
 
-function expectNoFallbackBeforeOpus48(messages: WsMsg[], context: string) {
-	const badBeforeTarget: string[] = [];
+function isOpus5XhighState(message: WsMsg): boolean {
+	if (message.type !== "state") return false;
+	const state = message.data as any;
+	return state?.model?.provider === OPUS_5.provider
+		&& state?.model?.id === OPUS_5.id
+		&& state?.thinkingLevel === OPUS_5.thinkingLevel;
+}
+
+function expectNoStaleModelBeforeOpus5(messages: WsMsg[], context: string) {
+	const staleBeforeTarget: string[] = [];
 	let sawTarget = false;
 	for (const message of messages) {
 		const id = stateModelId(message);
 		if (!id) continue;
-		if (id === OPUS_48) {
+		if (isOpus5XhighState(message)) {
 			sawTarget = true;
 			break;
 		}
-		if (FALLBACK_MODEL_IDS.has(id)) badBeforeTarget.push(id);
+		if (STALE_MODEL_IDS.has(id)) staleBeforeTarget.push(id);
 	}
-	expect(sawTarget, `${context}: expected Opus 4.8 state; got ${JSON.stringify(messages.filter(m => m.type === "state").map(m => m.data))}`).toBe(true);
-	expect(badBeforeTarget, `${context}: older Opus fallback state must not appear before ${OPUS_48}`).toEqual([]);
+	expect(sawTarget, `${context}: expected Opus 5/xhigh state; got ${JSON.stringify(messages.filter(m => m.type === "state").map(m => m.data))}`).toBe(true);
+	expect(staleBeforeTarget, `${context}: stale/placeholder Opus state must not appear before ${OPUS_5.id}`).toEqual([]);
 }
 
-async function waitForPersistedOpus48(sessionId: string) {
+function expectOnlyCompleteOpus5Tuples(messages: WsMsg[], context: string) {
+	const modelFrames = messages.filter((message) => stateModelId(message) !== undefined);
+	expect(modelFrames.length, `${context}: expected at least one model state frame`).toBeGreaterThan(0);
+	expect(
+		modelFrames.map((message) => {
+			const state = message.data as any;
+			return {
+				provider: state.model.provider,
+				id: state.model.id,
+				thinkingLevel: state.thinkingLevel,
+			};
+		}),
+		`${context}: every model state frame must contain one complete authoritative tuple`,
+	).toEqual(modelFrames.map(() => OPUS_5));
+}
+
+async function waitForPersistedOpus5Xhigh(gateway: any, sessionId: string) {
 	await pollUntil(async () => {
-		const resp = await apiFetch(`/api/sessions/${sessionId}`);
-		if (!resp.ok) return false;
-		const data = await resp.json();
-		return data.modelProvider === "anthropic" && data.modelId === OPUS_48;
-	}, { timeoutMs: 5_000, intervalMs: 50, label: "Opus 4.8 model persisted" });
+		const persisted = gateway.sessionManager.getPersistedSession(sessionId);
+		return persisted?.modelProvider === OPUS_5.provider
+			&& persisted.modelId === OPUS_5.id
+			&& persisted.effectiveThinkingLevel === OPUS_5.thinkingLevel;
+	}, { timeoutMs: 5_000, intervalMs: 50, label: "Opus 5/xhigh tuple persisted" });
 }
 
 async function closeWs(ws: WsConnection) {
 	const closed = new Promise<void>(r => ws.ws.once("close", () => r()));
 	ws.close();
 	await closed;
+}
+
+async function prepareDurableOpus5Xhigh(gateway: any, sessionId: string): Promise<void> {
+	const ws = await connectWs(sessionId);
+	try {
+		const selectionCursor = ws.messageCount();
+		ws.send({
+			type: "set_model",
+			provider: OPUS_5.provider,
+			modelId: OPUS_5.id,
+			thinkingLevel: OPUS_5.thinkingLevel,
+		});
+		await ws.waitForFrom(selectionCursor, isOpus5XhighState, 10_000);
+		await waitForPersistedOpus5Xhigh(gateway, sessionId);
+
+		// Guarantee attach takes the proactive live getState path.
+		ws.send({ type: "prompt", text: "seed reconnect state hydration" });
+		await ws.waitFor(agentEndPredicate(), 10_000);
+	} finally {
+		await closeWs(ws);
+	}
 }
 
 test.describe("model state after reconnect", () => {
@@ -63,7 +109,7 @@ test.describe("model state after reconnect", () => {
 
 	test("reconnect sends state with correct contextWindow for persisted model", async () => {
 		const ws1 = await connectWs(sessionId);
-		ws1.send({ type: "set_model", provider: "anthropic", modelId: "claude-sonnet-4-20250514" });
+		ws1.send({ type: "set_model", provider: "anthropic", modelId: "claude-sonnet-5" });
 
 		// Send a prompt so eventBuffer has content and reconnect exercises the
 		// proactive getState path, not only the persisted fallback path.
@@ -74,7 +120,7 @@ test.describe("model state after reconnect", () => {
 			const resp = await apiFetch(`/api/sessions/${sessionId}`);
 			if (!resp.ok) return false;
 			const data = await resp.json();
-			return data.modelProvider === "anthropic" && data.modelId === "claude-sonnet-4-20250514";
+			return data.modelProvider === "anthropic" && data.modelId === "claude-sonnet-5";
 		}, { timeoutMs: 5_000, intervalMs: 50, label: "model persisted" });
 
 		await closeWs(ws1);
@@ -107,29 +153,90 @@ test.describe("model state after reconnect", () => {
 		ws2.close();
 	});
 
-	test("Opus 4.8 displays after selection and survives reconnect without older Opus flash", async () => {
+	test("matching live model without thinking hydrates one complete durable tuple on reconnect and get_state", async ({ gateway }) => {
+		await prepareDurableOpus5Xhigh(gateway, sessionId);
+		const session = gateway.sessionManager.getSession(sessionId);
+		expect(session?.eventBuffer.size).toBeGreaterThan(0);
+		const getState = vi.spyOn(session!.rpcClient, "getState").mockResolvedValue({
+			success: true,
+			data: { model: { provider: OPUS_5.provider, id: OPUS_5.id } },
+		});
+		let ws: WsConnection | undefined;
+		try {
+			ws = await connectWs(sessionId);
+			await ws.waitFor((message) => stateModelId(message) !== undefined, 5_000);
+			expectOnlyCompleteOpus5Tuples(ws.messages, "proactive attach with matching model");
+
+			const cursor = ws.messageCount();
+			ws.send({ type: "get_state" });
+			await ws.waitForFrom(cursor, (message) => stateModelId(message) !== undefined, 5_000);
+			expectOnlyCompleteOpus5Tuples(ws.messages.slice(cursor), "explicit get_state with matching model");
+			expect(getState).toHaveBeenCalledTimes(2);
+		} finally {
+			getState.mockRestore();
+			ws?.close();
+		}
+	});
+
+	test("mismatched live model without thinking falls back before emitting any model tuple", async ({ gateway }) => {
+		await prepareDurableOpus5Xhigh(gateway, sessionId);
+		const session = gateway.sessionManager.getSession(sessionId);
+		expect(session?.eventBuffer.size).toBeGreaterThan(0);
+		const getState = vi.spyOn(session!.rpcClient, "getState").mockResolvedValue({
+			success: true,
+			data: { model: { provider: "anthropic", id: "claude-sonnet-5" } },
+		});
+		let ws: WsConnection | undefined;
+		try {
+			ws = await connectWs(sessionId);
+			await ws.waitFor((message) => stateModelId(message) !== undefined, 5_000);
+			expectOnlyCompleteOpus5Tuples(ws.messages, "proactive attach with mismatched model");
+
+			const cursor = ws.messageCount();
+			ws.send({ type: "get_state" });
+			await ws.waitForFrom(cursor, (message) => stateModelId(message) !== undefined, 5_000);
+			expectOnlyCompleteOpus5Tuples(ws.messages.slice(cursor), "explicit get_state with mismatched model");
+			expect(getState).toHaveBeenCalledTimes(2);
+		} finally {
+			getState.mockRestore();
+			ws?.close();
+		}
+	});
+
+	test("combined Opus 5/xhigh selection persists and reconnects without a stale model flash", async ({ gateway }) => {
 		const ws1 = await connectWs(sessionId);
 
-		// Selection path: the client sends set_model, then displays the selected
-		// model from the next state hydration without substituting an older Opus.
+		// One combined request crosses the real gateway/mock-agent path. The exact
+		// verified tuple must be returned and durably committed together.
 		const selectionCursor = ws1.messageCount();
-		ws1.send({ type: "set_model", provider: "anthropic", modelId: OPUS_48 });
-		ws1.send({ type: "get_state" });
-		await ws1.waitForFrom(
-			selectionCursor,
-			(m: WsMsg) => stateModelId(m) === OPUS_48,
-			5_000,
-		).catch(() => {});
-		expectNoFallbackBeforeOpus48(ws1.messages.slice(selectionCursor), "after selection");
-		await waitForPersistedOpus48(sessionId);
+		ws1.send({
+			type: "set_model",
+			provider: OPUS_5.provider,
+			modelId: OPUS_5.id,
+			thinkingLevel: OPUS_5.thinkingLevel,
+		});
+		const selected = await ws1.waitForFrom(selectionCursor, isOpus5XhighState, 10_000);
+		expect((selected.data as any).model).toMatchObject({
+			provider: OPUS_5.provider,
+			id: OPUS_5.id,
+			contextWindow: 1_000_000,
+			maxTokens: 128_000,
+			reasoning: true,
+			thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+		});
+		expectNoStaleModelBeforeOpus5(ws1.messages.slice(selectionCursor), "after combined selection");
+		await waitForPersistedOpus5Xhigh(gateway, sessionId);
 
+		// Populate the event buffer so reconnect exercises authoritative live-state
+		// hydration rather than only the persisted fallback response.
+		ws1.send({ type: "prompt", text: "Opus 5 reconnect tuple" });
+		await ws1.waitFor(agentEndPredicate(), 10_000);
 		await closeWs(ws1);
 
-		// Reconnect/reload path: a fresh socket must receive the persisted Opus 4.8
-		// state immediately, before any placeholder/older Opus state can be shown.
 		const ws2 = await connectWs(sessionId);
-		await ws2.waitFor((m: WsMsg) => stateModelId(m) === OPUS_48, 5_000).catch(() => {});
-		expectNoFallbackBeforeOpus48(ws2.messages, "reconnect initial state");
+		await ws2.waitFor(isOpus5XhighState, 10_000);
+		expectNoStaleModelBeforeOpus5(ws2.messages, "reconnect initial state");
+		await waitForPersistedOpus5Xhigh(gateway, sessionId);
 		ws2.close();
 	});
 });

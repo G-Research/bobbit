@@ -17,7 +17,7 @@
  *
  * Each Playwright worker gets its own isolated gateway with:
  *   - A unique OS-assigned port (port 0)
- *   - A unique BOBBIT_DIR (ephemeral, cleaned up after)
+ *   - A unique BOBBIT_DIR and BOBBIT_AGENT_DIR (ephemeral, cleaned up after)
  *   - The mock agent (no API key needed)
  *
  * The fixture sets process.env.E2E_PORT before any test files import
@@ -86,12 +86,30 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		// Clean slate (usually a no-op since the dir name is fresh)
 		rmSync(bobbitDir, { recursive: true, force: true });
 		mkdirSync(join(bobbitDir, "state"), { recursive: true });
+		const agentDir = join(bobbitDir, "agent");
+		mkdirSync(agentDir, { recursive: true });
 		bobbitDir = realpathSync(bobbitDir);
 		// Seed projects.json. The server no longer auto-registers a default project,
 		// so we register one explicitly via the API after startup (see below) to
 		// preserve the pre-existing test harness contract ("projects[0] == server CWD").
 		writeFileSync(join(bobbitDir, "state", "projects.json"), "[]");
 		writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
+		// Register the mock agent's exact tuple through the same manual-provider
+		// preferences that production model validation reads, before gateway boot.
+		writeFileSync(
+			join(bobbitDir, "state", "preferences.json"),
+			JSON.stringify({
+				customProviders: [{
+					id: "mock",
+					name: "mock",
+					type: "manual",
+					baseUrl: "http://127.0.0.1",
+					models: [{ id: "mock-model", name: "mock-model" }],
+				}],
+				"default.sessionModel": "mock/mock-model",
+				"default.sessionThinkingLevel": "off",
+			}, null, 2),
+		);
 
 		// Set BOBBIT_DIR env BEFORE importing server modules.
 		// Playwright workers are separate Node processes, so module singletons
@@ -100,6 +118,9 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		// Isolate live server secrets (token/TLS/sandbox-agent auth) so they never
 		// land in the developer's real OS home dir (serverSecretsDir() default).
 		process.env.BOBBIT_SECRETS_DIR = join(bobbitDir, ".secrets");
+		// Isolate the agent CLI directory as well as .bobbit/. Without this, API
+		// workers race through ~/.bobbit/agent/models.json during startup/aigw tests.
+		process.env.BOBBIT_AGENT_DIR = agentDir;
 		process.env.NODE_ENV = "test";
 		process.env.BOBBIT_SKIP_MCP = "1";
 		process.env.BOBBIT_SKIP_NPM_CI = "1";

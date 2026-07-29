@@ -746,9 +746,9 @@ See [docs/cache-hit-rate.md](cache-hit-rate.md) for full formula and null semant
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/roles` | List all roles |
-| `POST` | `/api/roles` | Create a role (`{ name, label, promptTemplate, toolPolicies?, allowedTools?, accessory?, model?, thinkingLevel? }`). `toolPolicies` is the source of truth for tool access; `allowedTools` is accepted for backward compatibility and merged as `always-allow` entries. `model` is `"<provider>/<modelId>"` format and overrides `default.sessionModel` / `default.reviewModel` for sessions of this role. `thinkingLevel` is one of `"off" | "minimal" | "low" | "medium" | "high" | "xhigh"` (clamped to the role's model capability at write time when `model` is set; see [docs/thinking-levels.md](thinking-levels.md)). |
+| `POST` | `/api/roles` | Create a role (`{ name, label, promptTemplate, toolPolicies?, allowedTools?, accessory?, model?, thinkingLevel? }`). `toolPolicies` is the source of truth for tool access; `allowedTools` is accepted for backward compatibility and merged as `always-allow` entries. `model` is `"<provider>/<modelId>"` format and overrides `default.sessionModel` / `default.reviewModel` for sessions of this role. `thinkingLevel` is one of `"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"` (clamped to the role's exact model capability at write time when `model` is set; `max` requires explicit per-model support; see [docs/thinking-levels.md](thinking-levels.md)). |
 | `GET` | `/api/roles/:name` | Get a role (includes `toolPolicies` and derived `allowedTools`) |
-| `PUT` | `/api/roles/:name` | Update a role. Accepts `toolPolicies` (Record of tool/group name → policy), `model` (`"<provider>/<modelId>"`), and `thinkingLevel` (`"off" | "minimal" | "low" | "medium" | "high" | "xhigh"`, clamped to the role's model capability when `model` is set). Policy values are validated against: `always-allow`, `ask-once`, `always-ask`, `never-ask`, `never`. Malformed `model` strings are rejected with 400. |
+| `PUT` | `/api/roles/:name` | Update a role. Accepts `toolPolicies` (Record of tool/group name → policy), `model` (`"<provider>/<modelId>"`), and `thinkingLevel` (`"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`, clamped to the role's exact model capability when `model` is set; `max` requires explicit per-model support). Policy values are validated against: `always-allow`, `ask-once`, `always-ask`, `never-ask`, `never`. Malformed `model` strings are rejected with 400. |
 | `DELETE` | `/api/roles/:name` | Delete a role |
 
 Role list/mutation routes that accept `projectId` treat `projectId=headquarters` as server/Headquarters scope for non-workflow config. Created or customized roles are stored in server config and appear with origin `server` (labelled Headquarters in the UI), not as a duplicate project override.
@@ -1084,7 +1084,26 @@ interface AgentDirApiState {
 | `GET` | `/api/image-models` | List currently available image-generation models |
 | `POST` | `/api/image-generation/generate` | Generate images through the configured image model; used by the `generate_image` tool |
 
-`GET /api/models` includes each model's `cost` in pi-ai's per-million-token shape: `{ input, output, cacheRead, cacheWrite }`, plus optional `cost.tiers[]` when Pi exposes tiered pricing metadata. Reasoning-capable models may also include `thinkingLevelMap`; Pi `0.81.1` uses that map to expose `max` thinking support for GPT 5.6 and Fable-class models. AI Gateway models may also include `upstreamProvider`, which the UI uses for badges and search while preferences remain `aigw/<bare-id>`. Bobbit takes AIGW cost from well-known per-million-token `cost` metadata or converts legacy `/v1/models` per-token `pricing`; it does not call aggregate endpoints such as `/v1/usage`, `/v1/cost`, or `/v1/credits`.
+`GET /api/models` returns the current Bobbit session catalog. Each `ApiModel` includes provider, ID, API, limits, input modes, reasoning capability, authentication state, and `cost` in Pi's per-million-token shape: `{ input, output, cacheRead, cacheWrite }`; optional fields include `baseUrl`, `thinkingLevelMap`, `compat`, `sessionSelectable`, `upstreamProvider`, and tiered `cost.tiers[]`.
+
+#### Pi 0.82.1 Claude Opus 5 catalog
+
+Pi's published `0.82.1` catalog is authoritative for the direct Anthropic row and all five supported Amazon Bedrock profiles:
+
+| Exact provider/model | Published name | API | Base URL | Cost `{input, output, cacheRead, cacheWrite}` |
+|---|---|---|---|---|
+| `anthropic/claude-opus-5` | Claude Opus 5 | `anthropic-messages` | `https://api.anthropic.com` | `{5, 25, 0.5, 6.25}` |
+| `amazon-bedrock/au.anthropic.claude-opus-5` | Claude Opus 5 (AU) | `bedrock-converse-stream` | `https://bedrock-runtime.us-east-1.amazonaws.com` | `{5, 25, 0.5, 6.25}` |
+| `amazon-bedrock/eu.anthropic.claude-opus-5` | Claude Opus 5 (EU) | `bedrock-converse-stream` | `https://bedrock-runtime.eu-central-1.amazonaws.com` | `{5.5, 27.5, 0.55, 6.875}` |
+| `amazon-bedrock/global.anthropic.claude-opus-5` | Claude Opus 5 (Global) | `bedrock-converse-stream` | `https://bedrock-runtime.us-east-1.amazonaws.com` | `{5, 25, 0.5, 6.25}` |
+| `amazon-bedrock/jp.anthropic.claude-opus-5` | Claude Opus 5 (JP) | `bedrock-converse-stream` | `https://bedrock-runtime.us-east-1.amazonaws.com` | `{5, 25, 0.5, 6.25}` |
+| `amazon-bedrock/us.anthropic.claude-opus-5` | Claude Opus 5 (US) | `bedrock-converse-stream` | `https://bedrock-runtime.us-east-1.amazonaws.com` | `{5, 25, 0.5, 6.25}` |
+
+All six rows have a 1,000,000-token context window, 128,000-token output limit, `reasoning: true`, `input: ["text", "image"]`, and `thinkingLevelMap: { xhigh: "xhigh", max: "max" }`. Combined with the ordinary provider defaults, this exposes `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; the effective level is clamped against the exact selected row. Only the direct Anthropic row publishes `compat: { forceAdaptiveThinking: true, supportsTemperature: false, supportsStrictTools: true }`. The Bedrock rows have no model-level `compat`, so Bobbit does not invent one; Pi's Bedrock adapter owns their adaptive-thinking behavior. See [Pi runtime compatibility — Authoritative Claude Opus 5 catalog](pi-runtime-compatibility.md#authoritative-claude-opus-5-catalog).
+
+Bobbit omits the exact deferred provider `kimi-coding` from `/api/models` and `/api/pi-ai/providers`, and Bobbit-owned default, role, and session-selection paths reject that provider without changing durable state. This is an exact provider-identity boundary, not a model-ID filter: Kimi-named IDs remain valid under a session-selectable AIGW, custom/local, Moonshot, or legacy gateway provider.
+
+AI Gateway models may include `upstreamProvider`, which the UI uses for badges and search while preferences remain `aigw/<bare-id>`. Bobbit takes AIGW cost from well-known per-million-token `cost` metadata or converts legacy `/v1/models` per-token `pricing`; it does not call aggregate endpoints such as `/v1/usage`, `/v1/cost`, or `/v1/credits`.
 
 Google has two independent, session-selectable model paths: `google-gemini-cli/*` uses a
 Google account and Bobbit's native PKCE/Code Assist runtime, while `google/*` uses a Google
@@ -1131,7 +1150,7 @@ Used by the Settings → Models tab per-row Test button. See [AI Gateway routing
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/aigw/status` | Return `{ configured, url?, models? }`; configured gateways are discovered fresh, with failures represented by `models: []` |
+| `GET` | `/api/aigw/status` | Return `{ configured, url?, models? }`; configured gateways are discovered fresh. A discovery failure returns `models: []` as live status even when `/api/models` can use the matching last-published catalog. |
 | `POST` | `/api/aigw/configure` | Discover and persist a gateway (`{ url }`), publish `models.json`, and refresh sandbox mounts |
 | `DELETE` | `/api/aigw/configure` | Remove gateway configuration and its generated provider |
 | `POST` | `/api/aigw/test` | Run well-known-first discovery for `{ url }` without saving or changing active routing |
@@ -1140,7 +1159,7 @@ Used by the Settings → Models tab per-row Test button. See [AI Gateway routing
 
 Configure, refresh, and delete return `remountPending: true` when the durable configuration succeeded but one or more tracked sandbox containers could not yet remount the atomically replaced `models.json`. Callers must not interpret that flag as a rollback; normal container health recovery continues.
 
-Discovery first requests `/.well-known/opencode` at the gateway origin and falls back to `/v1/models` only when no authoritative config resolves. Outbound requests carry Bobbit's canonical AI Gateway user agent. See [AI Gateway routing](ai-gateway-routing.md) for precedence, remote-config security, provider-specific routes, model-ID migration, and cache/container behavior; see [AI Gateway request headers](internals.md#ai-gateway-request-headers-user-agent-x-opencode-session) for implementation details.
+Discovery first requests `/.well-known/opencode` at the gateway origin and falls back to `/v1/models` only when no authoritative config resolves. On a discovery error, `/api/models` may read the last atomically published `providers.aigw.models` only when its normalized `baseUrl` exactly matches the currently configured URL. A successful discovery is authoritative, including model omissions; retained rows are never merged back into a successful result. Outbound requests carry Bobbit's canonical AI Gateway user agent. See [AI Gateway routing](ai-gateway-routing.md) for precedence, outage retention, remote-config security, provider-specific routes, model-ID migration, and cache/container behavior; see [AI Gateway request headers](internals.md#ai-gateway-request-headers-user-agent-x-opencode-session) for implementation details.
 
 ### OAuth
 

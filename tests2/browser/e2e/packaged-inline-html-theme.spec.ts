@@ -271,6 +271,43 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			expect(await rootResponse.text()).toMatch(/assets\//);
 
 			const token = await readToken(secretsDir);
+			const preferenceHeaders = {
+				Authorization: `Bearer ${token}`,
+				"Content-Type": "application/json",
+			};
+			const providerSeed = await fetch(`${baseUrl}/api/preferences`, {
+				method: "PUT",
+				headers: preferenceHeaders,
+				body: JSON.stringify({
+					customProviders: [{
+						id: "mock",
+						name: "mock",
+						type: "manual",
+						baseUrl: "http://127.0.0.1",
+						models: [{ id: "mock-model", name: "mock-model" }],
+					}],
+				}),
+			});
+			expect(
+				providerSeed.ok,
+				`failed to register packaged mock provider: ${providerSeed.status} ${await providerSeed.clone().text()}`,
+			).toBe(true);
+			const defaultSeed = await fetch(`${baseUrl}/api/preferences`, {
+				method: "PUT",
+				headers: preferenceHeaders,
+				body: JSON.stringify({
+					"default.sessionModel": "mock/mock-model",
+					"default.sessionThinkingLevel": "off",
+				}),
+			});
+			expect(
+				defaultSeed.ok,
+				`failed to select packaged mock default: ${defaultSeed.status} ${await defaultSeed.clone().text()}`,
+			).toBe(true);
+			expect(await defaultSeed.json()).toMatchObject({
+				"default.sessionModel": "mock/mock-model",
+				"default.sessionThinkingLevel": "off",
+			});
 			const sessionId = await createProjectAndSession(baseUrl, token, workspaceDir);
 			await promptSession(wsBaseUrl, sessionId, token);
 

@@ -157,11 +157,21 @@ describe("session-manager.ts has the isUserVisibleActivity filter wired in", () 
 	});
 
 	it("role-restart's onEvent handler uses isUserVisibleActivity to gate lastActivity", () => {
-		const idx = SOURCE.indexOf("const roleStore = this.resolveStoreForSession(id);");
-		assert.ok(idx > 0, "roleStore declaration not found — role-restart scope changed");
-		const window = SOURCE.slice(idx, idx + 800);
+		const roleRestartStart = SOURCE.indexOf("private async _assignRoleStaged(");
+		const roleRestartEnd = SOURCE.indexOf("\n\ttryGenerateTitleFromPrompt(", roleRestartStart);
+		assert.ok(roleRestartStart > 0, "_assignRoleStaged declaration not found — role-restart scope changed");
+		assert.ok(roleRestartEnd > roleRestartStart, "role-restart end boundary not found — _assignRoleStaged scope changed");
+		const roleRestart = SOURCE.slice(roleRestartStart, roleRestartEnd);
+		const handlerStart = roleRestart.indexOf("const unsub = rpcClient.onEvent(");
+		const handlerEnd = roleRestart.indexOf("\n\t\t});", handlerStart);
+		assert.ok(handlerStart >= 0, "role-restart onEvent handler not found");
+		assert.ok(handlerEnd > handlerStart, "role-restart onEvent handler end not found");
+		const handler = roleRestart.slice(handlerStart, handlerEnd);
+		const filterIndex = handler.search(/isUserVisibleActivity\s*\(/);
+		const lastActivityIndex = handler.indexOf("session.lastActivity =");
+		assert.ok(filterIndex >= 0, "role-restart handler must call isUserVisibleActivity");
 		assert.ok(
-			/isUserVisibleActivity\s*\(/.test(window),
+			lastActivityIndex > filterIndex,
 			"role-restart handler must call isUserVisibleActivity before bumping lastActivity",
 		);
 	});

@@ -1,7 +1,7 @@
 /**
  * Journey: Pi runtime upgrade — browser-facing compatibility coverage.
- * Covers server-backed model metadata, provider key testing through the
- * browser-safe pi-ai routes, and session restore after transcript parsing.
+ * Covers the Pi-authoritative Opus 5 picker/runtime tuple, provider key testing
+ * through browser-safe pi-ai routes, and session restore after transcript parsing.
  */
 import type { Page } from "@playwright/test";
 import { test, expect, openApp, navigateToHash, apiFetch, createSession, deleteSession, waitForSessionStatus } from "../_helpers/journey-fixture.js";
@@ -10,12 +10,16 @@ interface ApiModel {
 	id: string;
 	name: string;
 	provider: string;
+	api: string;
+	baseUrl: string;
 	contextWindow: number;
 	maxTokens: number;
 	reasoning: boolean;
 	input: string[];
 	authenticated: boolean;
-	cost: { input: number; output: number };
+	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+	thinkingLevelMap?: Record<string, string | null>;
+	compat?: Record<string, unknown>;
 }
 
 function assertModelMetadata(model: unknown): asserts model is ApiModel {
@@ -42,22 +46,13 @@ async function loadModelsFromApi(): Promise<ApiModel[]> {
 	return models;
 }
 
-/**
- * Pi 0.80.6's central user-facing contract: the GPT 5.6 catalog entries must be
- * exposed through /api/models under the openai provider. Pinning these exact IDs
- * (instead of accepting any generic model) is the point of this journey — it
- * fails loudly if the Pi upgrade or the Bobbit model registry stops surfacing them.
- */
-const GPT_5_6_IDS = ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"] as const;
+const OPUS_5 = { provider: "anthropic", id: "claude-opus-5", thinkingLevel: "xhigh" } as const;
+const OPUS_5_LEVEL_LABELS = ["Off", "Minimal", "Low", "Medium", "High", "Extra high", "Max"] as const;
 
-function requireGpt56Models(models: ApiModel[]): ApiModel[] {
-	const selected: ApiModel[] = [];
-	for (const id of GPT_5_6_IDS) {
-		const model = models.find((m) => m.provider === "openai" && m.id === id);
-		expect(model, `expected openai/${id} GPT 5.6 model in /api/models`).toBeTruthy();
-		selected.push(model as ApiModel);
-	}
-	return selected;
+function requireOpus5Model(models: ApiModel[]): ApiModel {
+	const model = models.find((candidate) => candidate.provider === OPUS_5.provider && candidate.id === OPUS_5.id);
+	expect(model, "expected anthropic/claude-opus-5 in /api/models").toBeTruthy();
+	return model as ApiModel;
 }
 
 async function openModelsSettings(page: Page): Promise<void> {
@@ -67,54 +62,131 @@ async function openModelsSettings(page: Page): Promise<void> {
 }
 
 test.describe("Journey: Pi Runtime Upgrade", () => {
-	test("settings selector exposes Pi 0.80.6 GPT 5.6 models from /api/models and selects one", async ({ page }) => {
+	test("selects Pi 0.82.1 Opus 5 with xhigh, uses it, and restores the authoritative tuple after reload", async ({ page }) => {
+		test.setTimeout(90_000);
 		const models = await loadModelsFromApi();
-		// Hard pin: all three GPT 5.6 catalog entries must be present, not just any model.
-		const gpt56 = requireGpt56Models(models);
-		for (const model of gpt56) {
-			expect(model.contextWindow, `${model.id} contextWindow`).toBeGreaterThan(0);
-			expect(model.maxTokens, `${model.id} maxTokens`).toBeGreaterThan(0);
-			expect(model.reasoning, `${model.id} should be reasoning-capable`).toBe(true);
-		}
-		// Select the first GPT 5.6 entry through the settings picker.
-		const model = gpt56[0];
-
-		const modelResponses: string[] = [];
-		page.on("response", (response) => {
-			if (response.url().includes("/api/models") && response.request().method() === "GET" && response.ok()) {
-				modelResponses.push(response.url());
-			}
+		const model = requireOpus5Model(models);
+		expect(model).toMatchObject({
+			name: "Claude Opus 5",
+			api: "anthropic-messages",
+			baseUrl: "https://api.anthropic.com",
+			contextWindow: 1_000_000,
+			maxTokens: 128_000,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+			thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+			compat: { forceAdaptiveThinking: true, supportsTemperature: false, supportsStrictTools: true },
 		});
 
-		try {
-			await apiFetch("/api/preferences", {
-				method: "PUT",
-				body: JSON.stringify({ "default.sessionModel": null }),
+		const beforePreferences = await (await apiFetch("/api/preferences")).json();
+		const sentFrames: Array<Record<string, unknown>> = [];
+		page.on("websocket", (socket) => {
+			socket.on("framesent", (event) => {
+				try {
+					const payload = typeof event.payload === "string" ? event.payload : event.payload.toString("utf8");
+					sentFrames.push(JSON.parse(payload));
+				} catch { /* non-JSON frame */ }
 			});
+		});
 
-			await openModelsSettings(page);
-			const sessionRow = page.locator('[data-testid="model-row"][data-row-label="Session"]').first();
-			await sessionRow.locator('button[title="Choose model"]').click();
+		let sessionId: string | undefined;
+		try {
+			const seeded = await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({
+					"default.sessionModel": "anthropic/claude-fable-5",
+					"default.sessionThinkingLevel": "xhigh",
+				}),
+			});
+			expect(seeded.status).toBe(200);
 
-			await expect(page.getByText("Select Model").first()).toBeVisible({ timeout: 15_000 });
-			await page.getByPlaceholder("Search models...").fill(model.id);
-			const item = page.locator("[data-model-item]").filter({ hasText: model.id }).filter({ hasText: model.provider }).first();
-			await expect(item, `expected ${model.provider}/${model.id} in the model selector`).toBeVisible({ timeout: 15_000 });
+			sessionId = await createSession();
+			await waitForSessionStatus(sessionId, "idle");
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+
+			const footerModel = page.getByTestId("footer-model-id");
+			await expect(footerModel).toHaveText("claude-fable-5", { timeout: 20_000 });
+			await expect(page.locator(".thinking-select-compact")).toHaveAttribute("title", "Extra high", { timeout: 20_000 });
+			await footerModel.click();
+
+			const selector = page.locator("agent-model-selector");
+			await expect(selector.getByText("Select Model").first()).toBeVisible({ timeout: 15_000 });
+			await selector.getByPlaceholder("Search models...").fill(OPUS_5.id);
+			const item = selector.locator(`[data-model-item][data-model-id="${OPUS_5.id}"]`).filter({ hasText: OPUS_5.provider }).first();
+			await expect(item, `expected ${OPUS_5.provider}/${OPUS_5.id} in the session picker`).toBeVisible({ timeout: 15_000 });
+			await expect(item).toContainText("1MK/128K");
+
+			// These filters consume the same reasoning/image metadata as the row icons.
+			await selector.getByText("Thinking", { exact: true }).click();
+			await expect(item).toBeVisible();
+			await selector.getByText("Vision", { exact: true }).click();
+			await expect(item).toBeVisible();
 			await item.click();
 
-			await expect(page.getByText("Select Model")).toHaveCount(0, { timeout: 15_000 });
-			await expect(sessionRow.locator('button[title="Choose model"]')).toContainText(model.id, { timeout: 15_000 });
-			expect(modelResponses.length, "settings/model selector should fetch server model metadata").toBeGreaterThan(0);
+			await expect(footerModel).toHaveText(OPUS_5.id, { timeout: 20_000 });
+			await expect(page.locator(".thinking-select-compact")).toHaveAttribute("title", "Extra high", { timeout: 20_000 });
+			await expect.poll(
+				() => sentFrames.find((frame) => frame.type === "set_model" && frame.modelId === OPUS_5.id),
+				{ timeout: 15_000, message: "picker should send one combined Opus 5/xhigh request" },
+			).toEqual({ type: "set_model", provider: OPUS_5.provider, modelId: OPUS_5.id, thinkingLevel: OPUS_5.thinkingLevel });
+
+			const readRemoteTuple = () => page.evaluate(() => {
+				const appState = (window as any).bobbitState ?? (window as any).__bobbitState;
+				const state = appState?.remoteAgent?.state;
+				return {
+					provider: state?.model?.provider,
+					id: state?.model?.id,
+					thinkingLevel: state?.thinkingLevel,
+					contextWindow: state?.model?.contextWindow,
+					maxTokens: state?.model?.maxTokens,
+				};
+			});
+			await expect.poll(readRemoteTuple, { timeout: 20_000 }).toEqual({
+				...OPUS_5,
+				contextWindow: 1_000_000,
+				maxTokens: 128_000,
+			});
+
+			const thinking = page.locator(".thinking-select-compact");
+			await thinking.locator("button").click();
+			const listbox = page.locator('[role="listbox"]').last();
+			await expect(listbox).toBeVisible();
+			const labels = (await listbox.locator('[role="option"]').allTextContents()).map((text) => text.replace(/\s+/g, " ").trim());
+			expect(labels).toEqual(OPUS_5_LEVEL_LABELS);
+			await thinking.locator("button").click();
+
+			const editor = page.locator("message-editor textarea").first();
+			await expect(editor).toBeVisible({ timeout: 15_000 });
+			await editor.fill("Opus 5 xhigh browser journey");
+			await editor.press("Enter");
+			await expect(page.getByText("OK", { exact: true }).first()).toBeVisible({ timeout: 20_000 });
+
+			await page.reload({ waitUntil: "domcontentloaded" });
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(footerModel).toHaveText(OPUS_5.id, { timeout: 20_000 });
+			await expect(page.locator(".thinking-select-compact")).toHaveAttribute("title", "Extra high", { timeout: 20_000 });
+			await expect.poll(readRemoteTuple, { timeout: 20_000 }).toEqual({
+				...OPUS_5,
+				contextWindow: 1_000_000,
+				maxTokens: 128_000,
+			});
 		} finally {
+			if (sessionId) await deleteSession(sessionId).catch(() => undefined);
 			await apiFetch("/api/preferences", {
 				method: "PUT",
-				body: JSON.stringify({ "default.sessionModel": null }),
+				body: JSON.stringify({
+					"default.sessionModel": beforePreferences["default.sessionModel"] ?? null,
+					"default.sessionThinkingLevel": beforePreferences["default.sessionThinkingLevel"] ?? null,
+				}),
 			});
 		}
 	});
 
 	test("AIGW provenance is searchable, badges stay stable, and bare preference survives reload", async ({ page }) => {
 		const aigwId = "gpt-5.6-sol";
+		const registryProviderId = `pi-runtime-aigw-${Date.now()}`;
 		const models = [
 			{
 				id: aigwId,
@@ -149,6 +221,18 @@ test.describe("Journey: Pi Runtime Upgrade", () => {
 		});
 
 		try {
+			const registered = await apiFetch("/api/custom-providers", {
+				method: "POST",
+				body: JSON.stringify({
+					id: registryProviderId,
+					name: "aigw",
+					type: "manual",
+					baseUrl: "http://127.0.0.1:9",
+					models: [{ id: aigwId, name: "GPT 5.6 Sol" }],
+				}),
+			});
+			expect(registered.status, await registered.clone().text()).toBe(200);
+
 			await apiFetch("/api/preferences", {
 				method: "PUT",
 				body: JSON.stringify({ "default.sessionModel": null }),
@@ -185,6 +269,7 @@ test.describe("Journey: Pi Runtime Upgrade", () => {
 				method: "PUT",
 				body: JSON.stringify({ "default.sessionModel": null }),
 			});
+			await apiFetch(`/api/custom-providers/${encodeURIComponent(registryProviderId)}`, { method: "DELETE" });
 			await page.unroute("**/api/models");
 		}
 	});

@@ -172,6 +172,9 @@ export class MockAgentCore {
 		this._onEvent = options.onEvent || (() => {});
 		this.conversationMessages = [];
 		this.currentModel = mockModelFromString(options.initialModel) || { ...DEFAULT_MODEL };
+		// Pi initializes sessions at its default thinking level and reports the
+		// effective value through get_state after every runtime mutation.
+		this.currentThinkingLevel = "medium";
 		this.sessionFilePath = null;
 		// When an AUTO_COMPACT turn has run, this holds the FULL on-disk
 		// transcript (orphaned pre-compaction entries + a compaction marker +
@@ -2681,22 +2684,33 @@ export class MockAgentCore {
 
 			case "get_state": {
 				const sf = this.ensureSessionFile();
+				// Real Pi retains top-level runtime cwd headers when serializing state.
+				// Keep their exact raw JSONL lines instead of dropping them while the
+				// mock rewrites its message view.
+				const runtimeCwdHeaders = fs.readFileSync(sf, "utf8").split("\n").filter(line => {
+					try {
+						const parsed = JSON.parse(line);
+						return (parsed?.type === "system" || parsed?.type === "session") && typeof parsed.cwd === "string";
+					} catch {
+						return false;
+					}
+				});
 				// After an AUTO_COMPACT turn, preserve the full on-disk transcript
 				// (orphans + compaction marker + kept tail) WITH top-level ids so a
 				// post-compaction get_state (e.g. refreshAfterCompaction) does not
 				// clobber the ids the orphan-history endpoint splits on.
-				if (Array.isArray(this._postCompactionEntries)) {
-					fs.writeFileSync(sf, this._postCompactionEntries.map(e => JSON.stringify(e)).join("\n") + "\n");
-				} else {
-					const lines = this.conversationMessages.map(m => JSON.stringify({ type: "message", message: m }));
-					fs.writeFileSync(sf, lines.join("\n") + (lines.length ? "\n" : ""));
-				}
+				const lines = Array.isArray(this._postCompactionEntries)
+					? this._postCompactionEntries.map(e => JSON.stringify(e))
+					: this.conversationMessages.map(m => JSON.stringify({ type: "message", message: m }));
+				lines.push(...runtimeCwdHeaders);
+				fs.writeFileSync(sf, lines.join("\n") + (lines.length ? "\n" : ""));
 				return {
 					success: true,
 					data: {
 						status: "idle",
 						sessionFile: sf,
 						model: this.currentModel,
+						thinkingLevel: this.currentThinkingLevel,
 					},
 				};
 			}
@@ -2710,6 +2724,10 @@ export class MockAgentCore {
 				this.currentModel = mockModelFromString(`${provider}/${modelId}`) || { ...DEFAULT_MODEL };
 				return { success: true };
 			}
+
+			case "set_thinking_level":
+				this.currentThinkingLevel = msg.level;
+				return { success: true };
 
 			case "compact":
 				// Manual /compact: mirror pi 0.74+ by emitting compaction_start/end

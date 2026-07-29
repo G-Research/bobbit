@@ -42,6 +42,16 @@ A remote config may not point to another unresolved `remote_config`. The initial
 
 Authoritative filtering applies `disabled_providers`, each provider's `whitelist`, and URL validation. Bobbit does not repopulate filtered or invalid providers from `/v1/models`; doing so would silently override the gateway operator's policy.
 
+## Transient discovery outages
+
+The last atomically published AIGW catalog is an outage-only availability fallback. When live discovery throws, `/api/models` may read `providers.aigw.models` from the active agent directory's `models.json` only if the persisted provider `baseUrl` and the saved `aigw.url` are the same normalized HTTP(S) URL. This exact-URL check prevents routing metadata from a previously configured gateway from becoming selectable.
+
+Retained rows preserve their published provider/model identity, API, endpoint, limits, input modes, thinking map, costs, headers, and compatibility metadata. Keeping that exact catalog available lets existing session pins, cold restore, and new spawn validation continue through a transient discovery outage; Bobbit does not choose a different provider or a hidden Pi default.
+
+Retention never masks a successful discovery result. If discovery succeeds and omits a previously published model, that omission is authoritative and the old row becomes unavailable. A missing, malformed, or URL-mismatched persisted provider also yields no retained AIGW rows.
+
+`GET /api/aigw/status` is deliberately a live-discovery view and therefore returns `models: []` on an outage. `/api/models` is the session-selection view and may still include the matching retained rows. The empty status response does not erase `models.json` or by itself mean that durable routing was disconnected.
+
 ## Remote config security
 
 Discovery URLs are untrusted configuration and are constrained to prevent credential leakage, SSRF, and DNS rebinding:
