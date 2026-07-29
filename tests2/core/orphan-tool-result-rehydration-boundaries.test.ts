@@ -1259,6 +1259,126 @@ describe("executable SessionManager rehydration boundaries", () => {
 		}).toEqual(tupleB);
 	});
 
+	it("does not let owner-sensitive recovery join a generic rehydrate queued behind role replacement", async () => {
+		invalidateModelCache();
+		const file = hostTranscript("owner-sensitive-recovery-coalesce");
+		const raceProvider = "owner-sensitive-recovery-coalesce";
+		const tupleA = { provider: raceProvider, id: "tuple-a", thinkingLevel: "off" as const };
+		const tupleB = { provider: raceProvider, id: "tuple-b", thinkingLevel: "off" as const };
+		const racePreferences = new PreferencesStore(
+			path.resolve("/memfs/owner-sensitive-recovery-coalesce"),
+			createMemFs(),
+		);
+		racePreferences.set("customProviders", [{
+			id: raceProvider,
+			name: raceProvider,
+			type: "manual",
+			baseUrl: "http://127.0.0.1:9",
+			apiKey: "test-key",
+			models: [tupleA.id, tupleB.id].map((id) => ({ id, name: id })),
+		}]);
+		const role = {
+			name: "coalesce-replacement-role",
+			label: "Coalesce replacement role",
+			promptTemplate: "Coalesce replacement role",
+			accessory: "replacement-accessory",
+			model: `${tupleB.provider}/${tupleB.id}`,
+			thinkingLevel: tupleB.thinkingLevel,
+		};
+		const roleManager = {
+			getRole: vi.fn((name: string) => name === role.name ? role : undefined),
+			listRoles: vi.fn(() => [role]),
+		};
+		const ps = persisted("owner-sensitive-recovery-coalesce", file, {
+			modelProvider: tupleA.provider,
+			modelId: tupleA.id,
+			effectiveThinkingLevel: tupleA.thinkingLevel,
+		});
+		const store = mutableStore(ps);
+		store.archiveAsync = vi.fn(async () => {
+			ps.archived = true;
+			return true;
+		});
+
+		const roleStartSeen = deferred<void>();
+		const releaseRoleStart = deferred<void>();
+		const roleBridge = recordingBridge(() => {}, {
+			modelProvider: tupleB.provider,
+			modelId: tupleB.id,
+			thinkingLevel: tupleB.thinkingLevel,
+		});
+		roleBridge.start = vi.fn(async () => {
+			roleStartSeen.resolve();
+			await releaseRoleStart.promise;
+		});
+		roleBridge.stop = vi.fn(async () => { roleBridge.running = false; });
+		let genericRehydrateBridge: any;
+		let factoryCalls = 0;
+		registerRpcBridgeFactory((options: Record<string, any>) => {
+			factoryCalls += 1;
+			if (factoryCalls === 1) return roleBridge;
+			genericRehydrateBridge = recordingBridge(() => {}, bridgeTuple(options));
+			genericRehydrateBridge.stop = vi.fn(async () => { genericRehydrateBridge.running = false; });
+			return genericRehydrateBridge;
+		});
+
+		const manager: any = new BaseSessionManager({ preferencesStore: racePreferences, roleManager: roleManager as any });
+		manager._testStore = store;
+		managers.push(manager);
+		const restartSpy = vi.spyOn(manager, "restartAgent");
+		const terminateSpy = vi.spyOn(manager, "terminateSession");
+		let originalReads = 0;
+		const original = recordingBridge(() => {}, {
+			modelProvider: tupleA.provider,
+			modelId: tupleA.id,
+			thinkingLevel: tupleA.thinkingLevel,
+		});
+		original.getState = vi.fn(async () => {
+			originalReads += 1;
+			const tuple = originalReads <= 2
+				? tupleA
+				: { provider: tupleA.provider, id: "unverified-partial", thinkingLevel: tupleA.thinkingLevel };
+			return { success: true, data: { model: { provider: tuple.provider, id: tuple.id }, thinkingLevel: tuple.thinkingLevel } };
+		});
+		original.setModel = vi.fn(async () => ({ success: false, error: "fixture rollback failed" }));
+		original.stop = vi.fn(async () => { original.running = false; });
+		const session = liveSession(ps.id, original, {
+			spawnPinnedModel: `${tupleA.provider}/${tupleA.id}`,
+			spawnPinnedThinkingLevel: tupleA.thinkingLevel,
+		});
+		manager.sessions.set(ps.id, session);
+
+		const assignment = manager.assignRole(ps.id, role);
+		await roleStartSeen.promise;
+		const genericRestart = manager.restartAgent(ps.id);
+		const selection = applyRuntimeSessionThinkingSelection(manager, session, "medium");
+		await vi.waitFor(() => expect(restartSpy).toHaveBeenCalledTimes(2));
+		const recoveryRestartArgs = restartSpy.mock.calls[1] as any[];
+		releaseRoleStart.resolve();
+
+		await expect(assignment).resolves.toBe(true);
+		await expect(genericRestart).resolves.toBeUndefined();
+		const genericRehydrateSession = manager.sessions.get(ps.id);
+		await expect(selection).rejects.toThrow();
+
+		expect(recoveryRestartArgs[1]?.session, "OWNER_SENSITIVE_RESPAWN_MISSING_EXPECTED_SESSION").toBe(session);
+		expect(recoveryRestartArgs[1]?.rpcClient, "OWNER_SENSITIVE_RESPAWN_MISSING_EXPECTED_RPC").toBe(original);
+		expect(factoryCalls).toBe(2);
+		expect(roleBridge.stop).toHaveBeenCalledTimes(1);
+		expect(genericRehydrateBridge.stop, "OWNER_SENSITIVE_RESPAWN_QUARANTINED_UNOWNED_REHYDRATE").not.toHaveBeenCalled();
+		expect(terminateSpy, "OWNER_SENSITIVE_RESPAWN_TERMINATED_UNOWNED_REHYDRATE").not.toHaveBeenCalled();
+		expect(store.archiveAsync, "OWNER_SENSITIVE_RESPAWN_ARCHIVED_UNOWNED_REHYDRATE").not.toHaveBeenCalled();
+		expect(ps.archived).not.toBe(true);
+		expect(manager.sessions.get(ps.id)).toBe(genericRehydrateSession);
+		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(genericRehydrateBridge);
+		expect(genericRehydrateBridge.running).toBe(true);
+		expect({
+			provider: ps.modelProvider,
+			id: ps.modelId,
+			thinkingLevel: ps.effectiveThinkingLevel,
+		}).toEqual(tupleB);
+	});
+
 	it("keeps staged role verification side-effect-free while recovered A remains canonical", async () => {
 		invalidateModelCache();
 		const file = hostTranscript("staged-role-verification-durability");
@@ -1417,6 +1537,143 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(recoveredBridge.stop).toHaveBeenCalledTimes(1);
 		expect(roleBridge.stop).not.toHaveBeenCalled();
 		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(roleBridge);
+		expect({
+			provider: ps.modelProvider,
+			id: ps.modelId,
+			thinkingLevel: ps.effectiveThinkingLevel,
+		}).toEqual(tupleB);
+	});
+
+	it("retains actual assigned role B when it commits while recovery R read-back is held", async () => {
+		invalidateModelCache();
+		const file = hostTranscript("recovery-read-held-role-commit");
+		const raceProvider = "recovery-read-held-role-commit";
+		const tupleA = { provider: raceProvider, id: "tuple-a", thinkingLevel: "off" as const };
+		const tupleB = { provider: raceProvider, id: "tuple-b", thinkingLevel: "off" as const };
+		const racePreferences = new PreferencesStore(
+			path.resolve("/memfs/recovery-read-held-role-commit"),
+			createMemFs(),
+		);
+		racePreferences.set("customProviders", [{
+			id: raceProvider,
+			name: raceProvider,
+			type: "manual",
+			baseUrl: "http://127.0.0.1:9",
+			apiKey: "test-key",
+			models: [tupleA.id, tupleB.id].map((id) => ({ id, name: id })),
+		}]);
+		const role = {
+			name: "read-held-replacement-role",
+			label: "Read-held replacement role",
+			promptTemplate: "Read-held replacement role",
+			accessory: "replacement-accessory",
+			model: `${tupleB.provider}/${tupleB.id}`,
+			thinkingLevel: tupleB.thinkingLevel,
+		};
+		const roleManager = {
+			getRole: vi.fn((name: string) => name === role.name ? role : undefined),
+			listRoles: vi.fn(() => [role]),
+		};
+		const ps = persisted("recovery-read-held-role-commit", file, {
+			modelProvider: tupleA.provider,
+			modelId: tupleA.id,
+			effectiveThinkingLevel: tupleA.thinkingLevel,
+		});
+		const store = mutableStore(ps);
+		store.archiveAsync = vi.fn(async () => {
+			ps.archived = true;
+			return true;
+		});
+
+		let restartCompleted = false;
+		let recoveryReadHeld = false;
+		const recoveryReadStarted = deferred<void>();
+		const releaseRecoveryRead = deferred<unknown>();
+		let recoveredBridge: any;
+		let roleBridge: any;
+		let factoryCalls = 0;
+		registerRpcBridgeFactory((options: Record<string, any>) => {
+			factoryCalls += 1;
+			const tuple = bridgeTuple(options);
+			if (factoryCalls === 1) {
+				recoveredBridge = recordingBridge(() => {}, tuple);
+				const normalGetState = recoveredBridge.getState.bind(recoveredBridge);
+				recoveredBridge.getState = vi.fn(async () => {
+					if (restartCompleted && !recoveryReadHeld) {
+						recoveryReadHeld = true;
+						recoveryReadStarted.resolve();
+						return releaseRecoveryRead.promise;
+					}
+					return normalGetState();
+				});
+				recoveredBridge.stop = vi.fn(async () => { recoveredBridge.running = false; });
+				return recoveredBridge;
+			}
+			roleBridge = recordingBridge(() => {}, tuple);
+			roleBridge.stop = vi.fn(async () => { roleBridge.running = false; });
+			return roleBridge;
+		});
+
+		const manager: any = new BaseSessionManager({ preferencesStore: racePreferences, roleManager: roleManager as any });
+		manager._testStore = store;
+		managers.push(manager);
+		const realRestartAgent = manager.restartAgent.bind(manager);
+		manager.restartAgent = vi.fn(async (...args: any[]) => {
+			await realRestartAgent(...args);
+			restartCompleted = true;
+		});
+		const terminateSpy = vi.spyOn(manager, "terminateSession");
+
+		let originalReads = 0;
+		const original = recordingBridge(() => {}, {
+			modelProvider: tupleA.provider,
+			modelId: tupleA.id,
+			thinkingLevel: tupleA.thinkingLevel,
+		});
+		original.getState = vi.fn(async () => {
+			originalReads += 1;
+			const tuple = originalReads === 1
+				? tupleA
+				: { provider: tupleA.provider, id: "unverified-partial", thinkingLevel: tupleA.thinkingLevel };
+			return { success: true, data: { model: { provider: tuple.provider, id: tuple.id }, thinkingLevel: tuple.thinkingLevel } };
+		});
+		original.setModel = vi.fn(async () => ({ success: false, error: "fixture rollback failed" }));
+		original.stop = vi.fn(async () => { original.running = false; });
+		const session = liveSession(ps.id, original, {
+			spawnPinnedModel: `${tupleA.provider}/${tupleA.id}`,
+			spawnPinnedThinkingLevel: tupleA.thinkingLevel,
+		});
+		manager.sessions.set(ps.id, session);
+
+		const selection = applyRuntimeSessionThinkingSelection(manager, session, "medium");
+		const selectionOutcome = selection.then(
+			(value) => ({ value, error: undefined as unknown }),
+			(error) => ({ value: undefined, error }),
+		);
+		await recoveryReadStarted.promise;
+		const recoveredSession = manager.sessions.get(ps.id);
+		await expect(manager.assignRole(ps.id, role)).resolves.toBe(true);
+		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(roleBridge);
+		expect({
+			provider: ps.modelProvider,
+			id: ps.modelId,
+			thinkingLevel: ps.effectiveThinkingLevel,
+		}).toEqual(tupleB);
+
+		releaseRecoveryRead.resolve({ success: false, error: "fixture stale recovery read failed" });
+		const settledSelection = await selectionOutcome;
+
+		expect(settledSelection.error).toBeInstanceOf(Error);
+		expect(factoryCalls).toBe(2);
+		expect(manager.restartAgent).toHaveBeenCalledTimes(1);
+		expect(recoveredBridge.stop).toHaveBeenCalled();
+		expect(roleBridge.stop, "RECOVERY_READ_HELD_STOPPED_COMMITTED_ROLE_BRIDGE").not.toHaveBeenCalled();
+		expect(terminateSpy, "RECOVERY_READ_HELD_TERMINATED_COMMITTED_ROLE_BRIDGE").not.toHaveBeenCalled();
+		expect(store.archiveAsync, "RECOVERY_READ_HELD_ARCHIVED_COMMITTED_ROLE_BRIDGE").not.toHaveBeenCalled();
+		expect(ps.archived).not.toBe(true);
+		expect(manager.sessions.get(ps.id)).toBe(recoveredSession);
+		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(roleBridge);
+		expect(roleBridge.running).toBe(true);
 		expect({
 			provider: ps.modelProvider,
 			id: ps.modelId,
