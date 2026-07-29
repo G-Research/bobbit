@@ -9779,8 +9779,33 @@ export class SessionManager {
 			? `${durableTupleBeforeRole.modelProvider}/${durableTupleBeforeRole.modelId}`
 			: undefined;
 		const restoreDurableTupleBeforeRole = (): void => {
-			roleStore.update(id, durableTupleBeforeRole);
-			if (durableModelBeforeRole) this._writeModelNameFile(id, durableModelBeforeRole);
+			// Runtime selection may verify and commit a newer tuple on the still-live
+			// original bridge while this replacement is staged. Its canonical spawn
+			// mirrors and the authoritative store advance together. Preserve that tuple
+			// instead of replaying this operation's stale snapshot; staged verification
+			// writes do not advance the original mirrors and still roll back normally.
+			const currentDurable = roleStore.get(id);
+			const currentModel = session.spawnPinnedModel;
+			const slash = currentModel?.indexOf("/") ?? -1;
+			const currentThinking = isKnownThinkingLevel(session.spawnPinnedThinkingLevel);
+			const canonicalTupleIsDurable = slash > 0
+				&& slash < (currentModel?.length ?? 0) - 1
+				&& !!currentThinking
+				&& currentDurable?.modelProvider === currentModel?.slice(0, slash)
+				&& currentDurable?.modelId === currentModel?.slice(slash + 1)
+				&& currentDurable?.effectiveThinkingLevel === currentThinking;
+			const durableTupleToRestore = canonicalTupleIsDurable
+				? {
+					modelProvider: currentDurable?.modelProvider,
+					modelId: currentDurable?.modelId,
+					effectiveThinkingLevel: currentThinking,
+				}
+				: durableTupleBeforeRole;
+			roleStore.update(id, durableTupleToRestore);
+			const durableModelToRestore = durableTupleToRestore.modelProvider && durableTupleToRestore.modelId
+				? `${durableTupleToRestore.modelProvider}/${durableTupleToRestore.modelId}`
+				: durableModelBeforeRole;
+			if (durableModelToRestore) this._writeModelNameFile(id, durableModelToRestore);
 		};
 		let agentSessionFile = persistedBeforeRole?.agentSessionFile;
 		try {
