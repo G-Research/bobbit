@@ -11754,7 +11754,10 @@ export class SessionManager {
 				const safePath = safePersistedHostAgentSessionFile(ps.agentSessionFile);
 				if (safePath) {
 					trustPersistedAgentSessionFile(safePath);
-					return safePath.replace(/\\/g, "/");
+					// Recovery returns the spelling persisted with the session. The
+					// sanitizer's canonical result is validation evidence, not a
+					// migration of durable lexical paths (/var vs /private/var).
+					return ps.agentSessionFile.replace(/\\/g, "/");
 				}
 			}
 
