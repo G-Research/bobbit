@@ -27,15 +27,6 @@ async function flush(): Promise<void> {
 	await new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
 
-async function waitFor(predicate: () => boolean, label: string, timeout = 2000): Promise<void> {
-	const deadline = Date.now() + timeout;
-	while (Date.now() < deadline) {
-		if (predicate()) return;
-		await new Promise<void>((resolve) => setTimeout(resolve, 5));
-	}
-	throw new Error(`Timed out waiting for ${label}`);
-}
-
 function session(id: string, projectId: string, status = "idle"): GatewaySession {
 	return {
 		id,
@@ -185,13 +176,13 @@ describe("foreground agent_end notification source", () => {
 			const agent = new RemoteAgent();
 			(agent as any)._sessionId = sourceId;
 			(agent as any).handleAgentEvent({ type: "agent_end" });
-			await waitFor(() => configPaths.length === 1, "cold source-project config request");
-			await waitFor(() => badgeCalls.mock.calls.length === 1, "immediate favicon/app badge");
+			await flush();
+			expect(configPaths).toHaveLength(1);
+			expect(badgeCalls).toHaveBeenCalledTimes(1);
 			expect(FakeAudioContext.instances).toHaveLength(0);
 			expect(configPaths).toEqual([`/api/projects/${sourceProject}/config`]);
 
 			config.resolve(json({ [PROJECT_PLAY_FINISH_SOUND_KEY]: testCase.raw }));
-			await waitFor(() => FakeAudioContext.instances.length === testCase.audio || testCase.audio === 0, "source audio decision");
 			await flush();
 			expect(FakeAudioContext.instances).toHaveLength(testCase.audio);
 			expect(badgeCalls).toHaveBeenCalledTimes(1);
@@ -219,7 +210,8 @@ describe("foreground agent_end notification source", () => {
 		const agent = new RemoteAgent();
 		(agent as any)._sessionId = "finishing";
 		(agent as any).handleAgentEvent({ type: "agent_end" });
-		await waitFor(() => FakeAudioContext.instances.length === 1, "forced-on source beep");
+		await flush();
+		expect(FakeAudioContext.instances).toHaveLength(1);
 		expect(requests).toEqual(["/api/projects/project-force-on/config"]);
 		expect(badgeCalls).toHaveBeenCalledTimes(1);
 	});
@@ -269,8 +261,9 @@ describe("background polling notification source", () => {
 
 		let firstResolved = false;
 		const firstRefresh = refreshSessions().then(() => { firstResolved = true; });
-		await waitFor(() => configRequests.size === 2, "opportunistic project preloads");
 		await expect(firstRefresh).resolves.toBeUndefined();
+		await flush();
+		expect(configRequests.size).toBe(2);
 		expect(firstResolved).toBe(true);
 		expect(state.gatewaySessions.find((item) => item.id === "background")?.status).toBe("streaming");
 		expect(FakeAudioContext.instances).toHaveLength(0);
@@ -278,16 +271,18 @@ describe("background polling notification source", () => {
 		let secondResolved = false;
 		const secondRefresh = refreshSessions().then(() => { secondResolved = true; });
 		await expect(secondRefresh).resolves.toBeUndefined();
+		await flush();
 		expect(secondResolved).toBe(true);
 		expect(state.gatewaySessions.find((item) => item.id === "background")?.status).toBe("idle");
-		await waitFor(() => badgeCalls.mock.calls.length === 1, "background badge while config is pending");
+		expect(badgeCalls).toHaveBeenCalledTimes(1);
 		expect(FakeAudioContext.instances).toHaveLength(0);
 		expect(configRequests.get("/api/projects/project-source-on/config")).toBe(1);
 		expect(configRequests.get("/api/projects/project-active-off/config")).toBe(1);
 
 		// Only the notification source settles. The unrelated active-project preload remains pending.
 		sourceConfig.resolve(json({ [PROJECT_PLAY_FINISH_SOUND_KEY]: "true" }));
-		await waitFor(() => FakeAudioContext.instances.length === 1, "source-project audio while unrelated GET remains pending");
+		await flush();
+		expect(FakeAudioContext.instances).toHaveLength(1);
 		expect(badgeCalls).toHaveBeenCalledTimes(1);
 		expect(configRequests.get("/api/projects/project-source-on/config")).toBe(1);
 		activeConfig.resolve(json({ [PROJECT_PLAY_FINISH_SOUND_KEY]: "false" }));
@@ -312,8 +307,8 @@ describe("background polling notification source", () => {
 
 		await refreshSessions();
 		await refreshSessions();
-		await waitFor(() => badgeCalls.mock.calls.length === 1, "badge for muted source");
 		await flush();
+		expect(badgeCalls).toHaveBeenCalledTimes(1);
 		expect(FakeAudioContext.instances).toHaveLength(0);
 		expect(badgeCalls).toHaveBeenCalledTimes(1);
 	});

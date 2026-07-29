@@ -17,8 +17,15 @@ import { state } from "../../src/app/state.js";
 
 const SLASH_PATH = 'svg path[d="m2 2 20 20"]';
 let putCalls: Array<{ url: string; method: string; body: string }>;
+let preferencePut: { promise: Promise<void>; resolve: () => void };
 let originalActiveProjectId: typeof state.activeProjectId;
 let projectSequence = 0;
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+	let resolve!: () => void;
+	const promise = new Promise<void>((done) => { resolve = done; });
+	return { promise, resolve };
+}
 
 function setActiveProjectOverride(rawValue: "true" | "false") {
 	const projectId = `bell-project-${++projectSequence}`;
@@ -33,8 +40,11 @@ beforeEach(() => {
 	originalActiveProjectId = state.activeProjectId;
 	delete document.documentElement.dataset.playAgentFinishSound; // unset ⇒ default ON
 	putCalls = [];
+	preferencePut = deferred();
 	vi.stubGlobal("fetch", async (url: any, init: any = {}) => {
-		putCalls.push({ url: String(url), method: init?.method ?? "GET", body: init?.body });
+		const call = { url: String(url), method: init?.method ?? "GET", body: init?.body };
+		putCalls.push(call);
+		if (/\/api\/preferences$/.test(call.url) && call.method === "PUT") preferencePut.resolve();
 		return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
 	});
 });
@@ -65,7 +75,7 @@ describe("<bell-toggle>", () => {
 	it("click mutes: swaps to BellOff, flips the dataset, and persists the preference", async () => {
 		const el = await mount();
 		(el.querySelector("button") as HTMLButtonElement).click();
-		await (el as any).updateComplete;
+		await Promise.all([(el as any).updateComplete, preferencePut.promise]);
 
 		expect(el.querySelector("button")!.getAttribute("title")).toMatch(/Unmute agent finish beeps/);
 		expect(el.querySelectorAll(SLASH_PATH).length).toBe(1);
@@ -116,7 +126,7 @@ describe("<bell-toggle>", () => {
 		const el = await mount();
 
 		(el.querySelector("button") as HTMLButtonElement).click();
-		await (el as any).updateComplete;
+		await Promise.all([(el as any).updateComplete, preferencePut.promise]);
 
 		expect(getProjectPlayFinishSoundOverride(projectId)).toBe("off");
 		expect(document.documentElement.dataset.playAgentFinishSound).toBe("false");

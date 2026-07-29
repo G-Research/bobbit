@@ -1720,6 +1720,15 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/dom/v2-dom-storage-environment.test.ts",
+      "reason": "Regression coverage proving the v2-dom setup replaces an absent runtime storage global with the current happy-dom window storage so gatewayFetch reaches its deterministic fetch stub.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
     }
   ],
   "journeys": [
