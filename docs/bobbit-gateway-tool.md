@@ -105,10 +105,13 @@ receive their established response bodies.
 Compact mode keeps fields needed to identify an entity, judge its state, take
 the next action, page, and diagnose failures. In particular, identity and label
 fields, state/status/type, project identity, `{ error, code }`, pagination, and
-recency timestamps are retained when present. Long freeform text is shortened
-to a 200-character preview followed by
-`…(truncated; pass verbose:true)`. UI/model bookkeeping, redundant id aliases,
-and embedded goal/session workflow snapshots are omitted. A snapshot's
+recency timestamps are retained when present. Long freeform text normally uses
+a 200-Unicode-character preview followed by
+`…(truncated; pass verbose:true)`. The session projection deliberately allows
+`restoreError` and `lastTurnErrorMessage` up to 512 UTF-16 code units before the
+same marker so compact `get_session` retains an actionable failure; it avoids
+splitting a surrogate pair. UI/model bookkeeping, redundant id aliases, and
+embedded goal/session workflow snapshots are omitted. A snapshot's
 `workflowId` is retained or derived so the caller can fetch the workflow
 explicitly.
 
@@ -120,7 +123,7 @@ by operation:
 | Operations | Compact behavior |
 |---|---|
 | Goal list/get/create/update | Keeps goal state, branch/merge/setup/team fields and a spec preview; omits filesystem paths and the embedded workflow. Archived session enrichments use the session projection. |
-| Session list/get/create/restart | Keeps role/assistant identity, goal/task relationships, recency, archive state, and error-turn diagnostics; omits cwd/path and UI/model bookkeeping. Archived delegate enrichments use the same projection. |
+| Session list/get/create/restart | Keeps role/assistant identity, goal/task relationships, recency, archive state, and error-turn diagnostics; `restoreError` and `lastTurnErrorMessage` use the 512-UTF-16-unit compact exception described above. Omits cwd/path and UI/model bookkeeping. Archived delegate enrichments use the same projection. |
 | Search | Keeps hit id/type/title/score/state and a snippet preview; omits indexed bodies. |
 | Task and gate operations | Keeps ids, dependencies, assignment/workflow links, state, git handoff fields, counts, and short content/spec/result previews; omits verifier prompts and large verification bodies. |
 | Workflow list/get | Lists omit gates. A direct `get_workflow` keeps a compact gate DAG but omits each gate's verifier blocks and prompts. |
