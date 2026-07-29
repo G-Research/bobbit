@@ -3,6 +3,9 @@ import { defineConfig } from "vitest/config";
 import { loadVitestExecutionMap } from "./scripts/testing-v2/test-map-execution.mjs";
 import * as serverPrebundle from "./scripts/testing-v2/server-prebundle.mjs";
 import UnitFileBudgetReporter from "./tests2/harness/unit-file-budget-reporter.js";
+import { installRunIsolation } from "./tests2/harness/run-isolation.js";
+
+installRunIsolation();
 
 /** Fixed suite-wide cap. The environment may lower it, never raise it. */
 export const FIXED_UNIT_WORKERS = 3;
@@ -56,7 +59,7 @@ const fileBoundaryRunner = "tests2/harness/file-boundary-runner.ts";
 const coverage = {
 	provider: "v8" as const,
 	reporter: ["json-summary" as const],
-	reportsDirectory: ".profiles/testing-v2/coverage",
+	reportsDirectory: join(".profiles", "testing-v2", "coverage", `run-${process.env.BOBBIT_V2_RUN_ID ?? process.pid}`),
 	include: ["src/**/*.ts", "src/**/*.js"],
 	exclude: [
 		"src/**/*.d.ts",

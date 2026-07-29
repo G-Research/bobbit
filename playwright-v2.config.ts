@@ -10,6 +10,7 @@
  *   - Separate output dir (test-results-v2)
  *   - Global setup: build dist if missing
  */
+import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -40,7 +41,7 @@ function prepareV2RuntimeCaches(): void {
 	if (!process.env.PWTEST_CACHE_DIR) {
 		const runId = sanitizeCacheSegment(
 			process.env.BOBBIT_V2_BROWSER_RUN_ID?.trim()
-				|| `v2-direct-${new Date().toISOString().replace(/[:.]/g, "-")}-${process.pid}`,
+				|| `v2-direct-${process.pid}-${randomUUID()}`,
 		);
 		const runCacheRoot = join(resolve(e2ePwtestCacheBaseRoot()), "pwtest-transform-cache-v2", runId);
 		process.env.BOBBIT_V2_PWTEST_RUN_CACHE_ROOT = runCacheRoot;
@@ -102,6 +103,7 @@ function resolvePlaywrightWorkers(): number {
 }
 
 const playwrightWorkers = resolvePlaywrightWorkers();
+const playwrightRunId = sanitizeCacheSegment(process.env.BOBBIT_V2_BROWSER_RUN_ID?.trim() || process.env.BOBBIT_V2_RUN_ROOT?.split(/[\\/]/).pop() || `${process.pid}-${randomUUID()}`);
 
 export default {
 	timeout: 60_000,
@@ -120,7 +122,7 @@ export default {
 	workers: playwrightWorkers,
 	reporter: [
 		[process.stdout.isTTY ? "list" : "line"],
-		["json", { outputFile: ".profiles/testing-v2/budgets/playwright-report.json" }],
+		["json", { outputFile: `.profiles/testing-v2/budgets/playwright-report-${playwrightRunId}.json` }],
 	] as Array<[string, unknown?]>,
 	globalSetup: "./tests2/browser-global-setup.ts",
 	globalTeardown: "./tests2/browser-global-teardown.ts",
@@ -162,5 +164,5 @@ export default {
 			},
 		},
 	],
-	outputDir: "test-results-v2",
+	outputDir: `test-results-v2-${playwrightRunId}`,
 };

@@ -18,20 +18,20 @@
  * Per-test isolation is the caller's responsibility via `createScope()`
  * (see scope.ts) + `assertNoLeaks()` (see leak-detector.ts).
  */
-import { cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpSync, existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import type WebSocket from "ws";
 
-import type { GatewayDeps } from "../../src/server/gateway-deps.js";
+import type { CommandRunner, GatewayDeps } from "../../src/server/gateway-deps.js";
 import { testWorkflows, TEST_DEFAULT_COMPONENT } from "../../tests/e2e/seed-workflows.js";
 import { createManualClock, type ManualClock } from "./clock.js";
 import { createFencedCommandRunner } from "./fenced-command-runner.js";
 import { createFencedFetch } from "./fenced-fetch.js";
 import { createFakeVerificationCommandRunner } from "./fake-verification-command-runner.js";
 import { loadServerTestRuntime, serverRuntimeMode } from "./server-runtime.js";
+import { createRunChild, getRunRoot } from "./run-isolation.js";
 
 const HARNESS_DIR = fileURLToPath(new URL(".", import.meta.url));
 const REPO_ROOT = resolve(HARNESS_DIR, "..", "..");
@@ -91,9 +91,7 @@ const MOCK_BRIDGE_SPECIFIER = new URL("../../tests/e2e/in-process-mock-bridge.mj
 // Keep write-heavy temp dirs off the repo tree so isGitRepo() never fires and
 // sessions do not auto-create worktrees. Windows Defender-heavy project paths
 // are avoided by anchoring under the OS temp root.
-const TMP_ROOT = process.platform === "win32"
-	? (process.env.BOBBIT_V2_TMP_ROOT || "C:\\bobbit-v2")
-	: join(tmpdir(), "bobbit-v2");
+const TMP_ROOT = join(getRunRoot(), "gateway");
 
 export interface EntityCounts {
 	sessions: number;
@@ -229,7 +227,7 @@ function prepareBuiltinPacksDir(bobbitDir: string): string {
 
 async function boot(): Promise<BootedGateway> {
 	mkdirSync(TMP_ROOT, { recursive: true });
-	let bobbitDir = mkdtempSync(join(TMP_ROOT, `fork-${process.pid}-`));
+	let bobbitDir = createRunChild(`gateway-fork-${process.pid}`);
 	try { bobbitDir = realpathSync(bobbitDir); } catch { /* platform edge */ }
 
 	const stateDir = join(bobbitDir, "state");
@@ -267,6 +265,9 @@ async function boot(): Promise<BootedGateway> {
 	// BOBBIT_DIR / BOBBIT_AGENT_DIR are the real runtime dir vars (also set in
 	// production by cli.ts) — NOT test-only flags. Everything else is config.
 	process.env.BOBBIT_DIR = bobbitDir;
+	process.env.HOME = join(bobbitDir, "home");
+	process.env.USERPROFILE = process.env.HOME;
+	mkdirSync(process.env.HOME, { recursive: true });
 	process.env.BOBBIT_AGENT_DIR = agentDir;
 	process.env.BOBBIT_SECRETS_DIR = secretsDir;
 
@@ -310,7 +311,13 @@ async function boot(): Promise<BootedGateway> {
 	const useFakeCommandStep = (globalThis as { __BOBBIT_V2_FAKE_CMD_STEP__?: boolean }).__BOBBIT_V2_FAKE_CMD_STEP__ === true;
 	const deps: GatewayDeps = {
 		clock,
-		commandRunner: createFencedCommandRunner(runtime.gatewayDeps.realCommandRunner),
+		// Resolve the runtime delegate per invocation: integration tests may replace
+		// it after boot to model a Git response without rebuilding the gateway.
+		commandRunner: createFencedCommandRunner({
+			execFile: (...args) => runtime.gatewayDeps.realCommandRunner.execFile(...args),
+			execFileSync: (...args) => runtime.gatewayDeps.realCommandRunner.execFileSync?.(...args),
+			spawn: (...args) => runtime.gatewayDeps.realCommandRunner.spawn?.(...args),
+		} as CommandRunner),
 		fetchImpl: createFencedFetch(),
 		agentBridgeFactory,
 		...(useFakeCommandStep ? { commandStepRunner: createFakeVerificationCommandRunner() } : {}),
@@ -362,6 +369,8 @@ async function boot(): Promise<BootedGateway> {
 	};
 	const restoreAgentDirRuntime = (): void => {
 		process.env.BOBBIT_DIR = bobbitDir;
+		process.env.HOME = join(bobbitDir, "home");
+		process.env.USERPROFILE = process.env.HOME;
 		process.env.BOBBIT_AGENT_DIR = agentDir;
 		process.env.BOBBIT_SECRETS_DIR = secretsDir;
 		setProjectRoot(bobbitDir);
