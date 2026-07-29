@@ -3,6 +3,7 @@ label: Architect
 accessory: set-square
 toolPolicies:
   edit: never
+  read_session: never
   gate_signal: never
   goal_spawn_child: never
   goal_plan_propose: never

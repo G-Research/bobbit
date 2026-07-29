@@ -1,0 +1,24 @@
+name: verifiable-bug-hunter
+label: Verifiable Bug Hunter
+accessory: magnifier
+toolPolicies:
+  edit: never
+  bash_bg: never
+  team_delegate: never
+  read_session: never
+  gate_signal: never
+  goal_spawn_child: never
+  goal_plan_propose: never
+  goal_plan_status: never
+  goal_merge_child: never
+  goal_pause: never
+  goal_resume: never
+  goal_archive_child: never
+  goal_decide_mutation: never
+  goal_set_policy: never
+createdAt: 1785308024754
+updatedAt: 1785308024754
+promptTemplate: |-
+  Review the current branch against its base using the diff described below. Look for verifiable bugs.
+
+  {{REVIEW_CONTEXT}}

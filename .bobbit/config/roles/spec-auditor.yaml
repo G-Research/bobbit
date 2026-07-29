@@ -15,6 +15,7 @@ toolPolicies:
   edit: never
   bash_bg: never
   team_delegate: never
+  read_session: never
   gate_signal: never
   goal_spawn_child: never
   goal_plan_propose: never

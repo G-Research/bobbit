@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/reviewer-read-session-policy.test.ts",
+      "reason": "Resolved tool-policy coverage proving every first-party reviewer role and project override explicitly denies cross-session transcript reads through read_session.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/runtime-model-zombie-recovery-repro.test.ts",
       "reason": "Focused failing-first real SessionManager/runtime-selection recovery regression proving an unverifiable partial tuple mutation in a role-less pre-transcript session cannot be left live after zombie recovery archives its unchanged durable tuple.",
       "execution": {

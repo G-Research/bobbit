@@ -237,6 +237,11 @@ workflows:
               dangerous behavior. Fail only for critical/high actionable bugs;
               include file:line, reproduction conditions, consequence, and why
               it is a bug.
+          - name: Verifiable bug hunt
+            type: llm-review
+            role: verifiable-bug-hunter
+            phase: 4
+            prompt: Look for verifiable bugs in the implementation diff.
           - name: Security review
             type: llm-review
             role: security-reviewer
@@ -520,6 +525,11 @@ workflows:
               dangerous behavior. Fail only for critical/high actionable bugs;
               include file:line, reproduction conditions, consequence, and why
               it is a bug.
+          - name: Verifiable bug hunt
+            type: llm-review
+            role: verifiable-bug-hunter
+            phase: 4
+            prompt: Look for verifiable bugs in the implementation diff.
           - name: Security review
             type: llm-review
             role: security-reviewer
@@ -692,6 +702,11 @@ workflows:
               behavior. Fail only for critical/high actionable bugs; include
               file:line, reproduction conditions, consequence, and why it is a
               bug.
+          - name: Verifiable bug hunt
+            type: llm-review
+            role: verifiable-bug-hunter
+            phase: 4
+            prompt: Look for verifiable bugs in the implementation diff.
           - name: Security review
             type: llm-review
             role: security-reviewer
@@ -817,6 +832,11 @@ workflows:
               behavior. Fail only for critical/high actionable bugs; include
               file:line, reproduction conditions, consequence, and why it is a
               bug.
+          - name: Verifiable bug hunt
+            type: llm-review
+            role: verifiable-bug-hunter
+            phase: 4
+            prompt: Look for verifiable bugs in the implementation diff.
           - name: Systems interaction review
             type: llm-review
             role: systems-reviewer
@@ -891,6 +911,11 @@ workflows:
               behavior. Fail only for critical/high actionable bugs; include
               file:line, reproduction conditions, consequence, and why it is a
               bug.
+          - name: Verifiable bug hunt
+            type: llm-review
+            role: verifiable-bug-hunter
+            phase: 1
+            prompt: Look for verifiable bugs in the implementation diff.
           - name: Systems interaction review
             type: llm-review
             role: systems-reviewer
