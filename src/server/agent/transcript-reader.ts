@@ -1221,7 +1221,16 @@ export interface TranscriptProjectionWorkMetricsForTests {
 	resultBodiesCanonicalized: number;
 	resultBodiesHashed: number;
 	canonicalResultUnits: number;
+	canonicalTextWorkUnits: number;
+	operationWorkUnits: number;
+	indexedResults: number;
+	currentRetainedCanonicalCallUnits: number;
+	currentRetainedCanonicalResultUnits: number;
+	currentRetainedDetachedUnits: number;
 	peakRetainedCanonicalResultUnits: number;
+	peakRetainedTotalUnits: number;
+	detachedArgumentPreviewUnits: number;
+	detachedResultExcerptUnits: number;
 }
 
 /** Deterministic instrumentation seam; production callers do not need this. */
@@ -1231,7 +1240,16 @@ export function createTranscriptProjectionWorkMetricsForTests(): TranscriptProje
 		resultBodiesCanonicalized: 0,
 		resultBodiesHashed: 0,
 		canonicalResultUnits: 0,
+		canonicalTextWorkUnits: 0,
+		operationWorkUnits: 0,
+		indexedResults: 0,
+		currentRetainedCanonicalCallUnits: 0,
+		currentRetainedCanonicalResultUnits: 0,
+		currentRetainedDetachedUnits: 0,
 		peakRetainedCanonicalResultUnits: 0,
+		peakRetainedTotalUnits: 0,
+		detachedArgumentPreviewUnits: 0,
+		detachedResultExcerptUnits: 0,
 	};
 }
 
@@ -1248,6 +1266,10 @@ export interface ReadTranscriptOptions {
 	serializedBudgetBytes?: number;
 	/** Test-only counters for proving lazy agent projection work. */
 	workMetricsForTests?: TranscriptProjectionWorkMetricsForTests;
+	/** Test-only request bounds; production always uses the exported defaults. */
+	projectionWorkLimitsForTests?: Partial<TranscriptProjectionRequestWorkLimits>;
+	/** Test-only reservation pool for deterministic concurrency coverage. */
+	workReservationPoolForTests?: TranscriptProjectionReservationPool;
 }
 
 /**
@@ -1495,9 +1517,151 @@ const AGENT_TIMESTAMP_LIMIT = 64;
 const AGENT_TOOL_NAME_LIMIT = 128;
 const RESULT_HANDLE_DOMAIN = "bobbit.read-session.result-handle.v1\0";
 
-// Keep synchronous canonical projection within the safe matcher's 32 Mi
-// UTF-16-unit corpus ceiling; row bodies are released before advancing the page.
-const AGENT_CANONICAL_IN_FLIGHT_MAX_UNITS = 32 * 1024 * 1024;
+export interface TranscriptProjectionRequestWorkLimits {
+	maxOperations: number;
+	maxResults: number;
+	maxTextUnits: number;
+}
+
+export interface TranscriptProjectionReservationPoolLimits extends TranscriptProjectionRequestWorkLimits {
+	maxRequests: number;
+}
+
+export interface TranscriptProjectionReservationPoolStats {
+	activeRequests: number;
+	reservedOperations: number;
+	reservedResults: number;
+	reservedTextUnits: number;
+}
+
+interface TranscriptProjectionReservationDelta {
+	operations?: number;
+	results?: number;
+	textUnits?: number;
+}
+
+interface TranscriptProjectionReservation {
+	reserve(delta: TranscriptProjectionReservationDelta): void;
+	release(delta: TranscriptProjectionReservationDelta): void;
+	close(): void;
+}
+
+export interface TranscriptProjectionReservationPool {
+	acquire(): TranscriptProjectionReservation;
+	stats(): TranscriptProjectionReservationPoolStats;
+}
+
+export const READ_SESSION_AGENT_WORK_LIMITS = Object.freeze({
+	request: Object.freeze({
+		maxOperations: 128 * 1024,
+		maxResults: 16 * 1024,
+		maxTextUnits: 32 * 1024 * 1024,
+	}),
+	global: Object.freeze({
+		maxRequests: 8,
+		maxOperations: 256 * 1024,
+		maxResults: 32 * 1024,
+		maxTextUnits: 64 * 1024 * 1024,
+	}),
+});
+
+function checkedReservationUnits(value: number): number {
+	if (!Number.isSafeInteger(value) || value < 0) {
+		throw new TranscriptReaderError("TRANSCRIPT_WORK_LIMIT_EXCEEDED", "transcript work reservation is invalid");
+	}
+	return value;
+}
+
+class BoundedTranscriptProjectionReservationPool implements TranscriptProjectionReservationPool {
+	private activeRequests = 0;
+	private reservedOperations = 0;
+	private reservedResults = 0;
+	private reservedTextUnits = 0;
+
+	constructor(private readonly limits: TranscriptProjectionReservationPoolLimits) {}
+
+	acquire(): TranscriptProjectionReservation {
+		if (this.activeRequests >= this.limits.maxRequests) {
+			throw new TranscriptReaderError(
+				"TRANSCRIPT_WORK_LIMIT_EXCEEDED",
+				"concurrent transcript projection capacity is exhausted",
+			);
+		}
+		this.activeRequests++;
+		let operations = 0;
+		let results = 0;
+		let textUnits = 0;
+		let closed = false;
+		const adjust = (delta: TranscriptProjectionReservationDelta, direction: 1 | -1): void => {
+			if (closed) throw new Error("transcript projection reservation is closed");
+			const operationDelta = checkedReservationUnits(delta.operations ?? 0) * direction;
+			const resultDelta = checkedReservationUnits(delta.results ?? 0) * direction;
+			const textDelta = checkedReservationUnits(delta.textUnits ?? 0) * direction;
+			if (direction === 1 && (
+				operationDelta > this.limits.maxOperations - this.reservedOperations
+				|| resultDelta > this.limits.maxResults - this.reservedResults
+				|| textDelta > this.limits.maxTextUnits - this.reservedTextUnits
+			)) {
+				throw new TranscriptReaderError(
+					"TRANSCRIPT_WORK_LIMIT_EXCEEDED",
+					"concurrent transcript projection work exceeds the global reservation limit",
+				);
+			}
+			if (direction === -1 && (-operationDelta > operations || -resultDelta > results || -textDelta > textUnits)) {
+				throw new Error("transcript projection reservation underflow");
+			}
+			operations += operationDelta;
+			results += resultDelta;
+			textUnits += textDelta;
+			this.reservedOperations += operationDelta;
+			this.reservedResults += resultDelta;
+			this.reservedTextUnits += textDelta;
+		};
+		return {
+			reserve: (delta) => adjust(delta, 1),
+			release: (delta) => adjust(delta, -1),
+			close: () => {
+				if (closed) return;
+				this.reservedOperations -= operations;
+				this.reservedResults -= results;
+				this.reservedTextUnits -= textUnits;
+				this.activeRequests--;
+				closed = true;
+			},
+		};
+	}
+
+	stats(): TranscriptProjectionReservationPoolStats {
+		return {
+			activeRequests: this.activeRequests,
+			reservedOperations: this.reservedOperations,
+			reservedResults: this.reservedResults,
+			reservedTextUnits: this.reservedTextUnits,
+		};
+	}
+}
+
+function validatedProjectionReservationPoolLimits(
+	limits: TranscriptProjectionReservationPoolLimits,
+): TranscriptProjectionReservationPoolLimits {
+	for (const [name, value] of Object.entries(limits)) {
+		if (!Number.isSafeInteger(value) || value < 1) {
+			throw new Error(`${name} must be a positive safe integer`);
+		}
+	}
+	return limits;
+}
+
+/** Deterministic seam for simultaneous in-flight reservation tests. */
+export function createTranscriptProjectionReservationPoolForTests(
+	limits: TranscriptProjectionReservationPoolLimits,
+): TranscriptProjectionReservationPool {
+	return new BoundedTranscriptProjectionReservationPool(validatedProjectionReservationPoolLimits(limits));
+}
+
+const AGENT_PROJECTION_RESERVATION_POOL = new BoundedTranscriptProjectionReservationPool(
+	READ_SESSION_AGENT_WORK_LIMITS.global,
+);
 
 /** Lightweight call locator. Potentially large arguments remain in the raw block. */
 interface IndexedCall {
@@ -1688,6 +1852,7 @@ export interface TranscriptCorrelationOperations {
 function buildTranscriptStructureIndex(
 	messages: RawMessage[],
 	operations?: TranscriptCorrelationOperations,
+	work?: AgentProjectionWorkTracker,
 ): TranscriptStructureIndex {
 	const callsByMessage = new Map<number, IndexedCall[]>();
 	const resultsByMessage = new Map<number, IndexedResult[]>();
@@ -1718,6 +1883,7 @@ function buildTranscriptStructureIndex(
 		blockIndex: number,
 		messageLevel: boolean,
 	): void => {
+		work?.indexResult();
 		const correlationId = canonicalResultCorrelationId(direct, message.fullMessage, messageLevel);
 		const correlatedCall = correlationId ? latestCallById.get(correlationId) : undefined;
 		if (correlationId && operations) operations.resultLookups++;
@@ -1738,6 +1904,7 @@ function buildTranscriptStructureIndex(
 	};
 
 	for (const message of messages) {
+		work?.recordOperations();
 		const messageLevelResult = isMessageLevelToolResult(message);
 		// A message-level result has the synthetic location (messageIndex, 0),
 		// so no content block in the same message can precede it. Index it before
@@ -1745,6 +1912,7 @@ function buildTranscriptStructureIndex(
 		if (messageLevelResult) indexResult(message, message.fullMessage, 0, true);
 		if (!Array.isArray(message.content)) continue;
 		for (let blockIndex = 0; blockIndex < message.content.length; blockIndex++) {
+			work?.recordOperations();
 			const candidate = message.content[blockIndex];
 			if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
 			const block = candidate as Record<string, unknown>;
@@ -1782,13 +1950,20 @@ class CanonicalInputWorkBudget {
 	private used = 0;
 	private readonly ancestors = new Set<object>();
 
-	constructor(private readonly limit: number) {}
+	constructor(
+		private readonly limit: number,
+		private readonly recordOperation: () => void,
+	) {}
+
+	get estimatedUnits(): number {
+		return this.used;
+	}
 
 	private add(units: number): void {
 		if (!Number.isSafeInteger(units) || units < 0 || units > this.limit - this.used) {
 			throw new TranscriptReaderError(
 				"TRANSCRIPT_WORK_LIMIT_EXCEEDED",
-				"canonical transcript input exceeds the in-flight work limit",
+				"canonical transcript input exceeds the cumulative text work limit",
 			);
 		}
 		this.used += units;
@@ -1806,26 +1981,54 @@ class CanonicalInputWorkBudget {
 		this.ancestors.delete(value);
 	}
 
+	private primitiveStableJson(value: unknown): boolean {
+		if (value === null) {
+			this.add(4);
+			return true;
+		}
+		switch (typeof value) {
+			case "string":
+				// JSON escaping can expand one UTF-16 unit to a six-unit \\u00XX form.
+				this.add(value.length * 6 + 2);
+				return true;
+			case "boolean":
+				this.add(value ? 4 : 5);
+				return true;
+			case "number": {
+				if (!Number.isFinite(value)) throw new CanonicalTranscriptValueError("non-finite number is not valid transcript JSON");
+				const encoded = JSON.stringify(value);
+				this.add(encoded.length);
+				return true;
+			}
+			case "undefined":
+			case "function":
+			case "symbol":
+			case "bigint":
+				throw new CanonicalTranscriptValueError(`unsupported transcript JSON value: ${typeof value}`);
+			default:
+				return false;
+		}
+	}
+
 	stableJson(value: unknown, depth = 0): void {
-		if (typeof value === "string") {
-			// JSON escaping can expand one UTF-16 unit to a six-unit \\u00XX form.
-			this.add(value.length * 6 + 2);
-			return;
-		}
-		if (value === null || typeof value !== "object") {
-			this.add(1);
-			return;
-		}
+		this.recordOperation();
+		if (this.primitiveStableJson(value)) return;
+		if (value === null || typeof value !== "object") throw new CanonicalTranscriptValueError("unsupported transcript JSON value");
 		this.enter(value, depth);
 		try {
 			if (Array.isArray(value)) {
-				this.add(value.length + 2);
-				for (const item of value) this.stableJson(item, depth + 1);
+				this.add(value.length === 0 ? 2 : value.length + 1);
+				for (let index = 0; index < value.length; index++) {
+					if (!Object.prototype.hasOwnProperty.call(value, index)) {
+						throw new CanonicalTranscriptValueError("sparse transcript JSON array");
+					}
+					this.stableJson(value[index], depth + 1);
+				}
 				return;
 			}
 			const record = value as Record<string, unknown>;
 			const keys = Object.keys(record);
-			this.add(keys.length + 2);
+			this.add(keys.length === 0 ? 2 : keys.length * 2 + 1);
 			for (const key of keys) {
 				this.add(key.length * 6 + 2);
 				this.stableJson(record[key], depth + 1);
@@ -1836,19 +2039,25 @@ class CanonicalInputWorkBudget {
 	}
 
 	canonicalResultValue(value: unknown, depth = 0): void {
+		this.recordOperation();
 		if (typeof value === "string") {
 			this.add(value.length);
 			return;
 		}
-		if (value === null || typeof value !== "object") {
-			this.add(1);
+		if (value === null) return;
+		if (typeof value !== "object") {
+			this.primitiveStableJson(value);
 			return;
 		}
-		this.enter(value, depth);
+		this.enter(value as object, depth);
 		try {
 			if (Array.isArray(value)) {
-				this.add(value.length);
-				for (const item of value) this.canonicalResultValue(item, depth + 1);
+				for (let index = 0; index < value.length; index++) {
+					if (!Object.prototype.hasOwnProperty.call(value, index)) {
+						throw new CanonicalTranscriptValueError("sparse tool result array");
+					}
+					this.canonicalResultValue(value[index], depth + 1);
+				}
 				return;
 			}
 			const block = value as Record<string, unknown>;
@@ -1880,83 +2089,214 @@ class CanonicalInputWorkBudget {
 	}
 }
 
-function assertCallCanonicalizationWithinLimit(call: IndexedCall, limit: number): void {
+function assertCallCanonicalizationWithinLimit(
+	call: IndexedCall,
+	limit: number,
+	recordOperation: () => void,
+): number {
 	const selected = firstOwnDefinedValue(call.block, ["arguments", "input"]);
-	if (!selected.found) return;
-	const budget = new CanonicalInputWorkBudget(limit);
+	if (!selected.found) return 0;
+	const budget = new CanonicalInputWorkBudget(limit, recordOperation);
 	if (typeof selected.value === "string") budget.canonicalResultValue(selected.value);
 	else budget.stableJson(selected.value);
+	return budget.estimatedUnits;
 }
 
-function assertResultCanonicalizationWithinLimit(result: IndexedResult, limit: number): void {
+function assertResultCanonicalizationWithinLimit(
+	result: IndexedResult,
+	limit: number,
+	recordOperation: () => void,
+): number {
 	const selected = firstOwnDefinedValue(result.direct, CANONICAL_BODY_KEYS);
-	if (!selected.found) return;
-	new CanonicalInputWorkBudget(limit).canonicalResultValue(selected.value);
+	if (!selected.found) return 0;
+	const budget = new CanonicalInputWorkBudget(limit, recordOperation);
+	budget.canonicalResultValue(selected.value);
+	return budget.estimatedUnits;
 }
 
 class AgentProjectionWorkTracker {
+	private operationWorkUnits = 0;
+	private indexedResults = 0;
+	private textWorkUnits = 0;
 	private retainedResultUnits = 0;
 	private retainedCallUnits = 0;
+	private retainedDetachedUnits = 0;
+	private closed = false;
+	private readonly reservation: TranscriptProjectionReservation;
 
-	constructor(readonly metrics?: TranscriptProjectionWorkMetricsForTests) {}
+	constructor(
+		readonly metrics?: TranscriptProjectionWorkMetricsForTests,
+		private readonly limits: TranscriptProjectionRequestWorkLimits = READ_SESSION_AGENT_WORK_LIMITS.request,
+		pool: TranscriptProjectionReservationPool = AGENT_PROJECTION_RESERVATION_POOL,
+	) {
+		this.reservation = pool.acquire();
+	}
 
-	private remainingUnits(): number {
-		return AGENT_CANONICAL_IN_FLIGHT_MAX_UNITS - this.retainedResultUnits - this.retainedCallUnits;
+	private assertOpen(): void {
+		if (this.closed) throw new Error("transcript projection work tracker is closed");
+	}
+
+	private updateRetainedMetrics(): void {
+		if (!this.metrics) return;
+		this.metrics.currentRetainedCanonicalCallUnits = this.retainedCallUnits;
+		this.metrics.currentRetainedCanonicalResultUnits = this.retainedResultUnits;
+		this.metrics.currentRetainedDetachedUnits = this.retainedDetachedUnits;
+		this.metrics.peakRetainedCanonicalResultUnits = Math.max(
+			this.metrics.peakRetainedCanonicalResultUnits,
+			this.retainedResultUnits,
+		);
+		this.metrics.peakRetainedTotalUnits = Math.max(
+			this.metrics.peakRetainedTotalUnits,
+			this.retainedCallUnits + this.retainedResultUnits + this.retainedDetachedUnits,
+		);
+	}
+
+	recordOperations(units = 1): void {
+		this.assertOpen();
+		if (!Number.isSafeInteger(units) || units < 0 || units > this.limits.maxOperations - this.operationWorkUnits) {
+			throw new TranscriptReaderError(
+				"TRANSCRIPT_WORK_LIMIT_EXCEEDED",
+				"transcript projection exceeds the cumulative operation work limit",
+			);
+		}
+		this.reservation.reserve({ operations: units });
+		this.operationWorkUnits += units;
+		if (this.metrics) this.metrics.operationWorkUnits = this.operationWorkUnits;
+	}
+
+	indexResult(): void {
+		this.recordOperations();
+		if (this.indexedResults >= this.limits.maxResults) {
+			throw new TranscriptReaderError(
+				"TRANSCRIPT_WORK_LIMIT_EXCEEDED",
+				"transcript projection exceeds the cumulative result count limit",
+			);
+		}
+		this.reservation.reserve({ results: 1 });
+		this.indexedResults++;
+		if (this.metrics) this.metrics.indexedResults = this.indexedResults;
+	}
+
+	private remainingTextWorkUnits(): number {
+		return this.limits.maxTextUnits - this.textWorkUnits;
+	}
+
+	private canonicalize<T>(estimate: number, materialize: () => T, text: (value: T) => string): T {
+		this.assertOpen();
+		if (!Number.isSafeInteger(estimate) || estimate < 0 || estimate > this.remainingTextWorkUnits()) {
+			throw new TranscriptReaderError(
+				"TRANSCRIPT_WORK_LIMIT_EXCEEDED",
+				"canonical transcript text exceeds the cumulative text work limit",
+			);
+		}
+		this.reservation.reserve({ textUnits: estimate });
+		let committed = false;
+		try {
+			const value = materialize();
+			const actual = text(value).length;
+			if (actual > estimate) {
+				throw new TranscriptReaderError(
+					"TRANSCRIPT_WORK_LIMIT_EXCEEDED",
+					"canonical transcript preflight underestimated materialized text",
+				);
+			}
+			if (estimate > actual) this.reservation.release({ textUnits: estimate - actual });
+			this.textWorkUnits += actual;
+			if (this.metrics) this.metrics.canonicalTextWorkUnits = this.textWorkUnits;
+			committed = true;
+			return value;
+		} finally {
+			if (!committed) this.reservation.release({ textUnits: estimate });
+		}
 	}
 
 	canonicalizeCall(call: IndexedCall): ReturnType<typeof canonicalToolCallArgumentDetails> {
-		assertCallCanonicalizationWithinLimit(call, this.remainingUnits());
-		const details = canonicalToolCallArgumentDetails(call.block);
-		if (details.text.length > this.remainingUnits()) {
-			throw new TranscriptReaderError("TRANSCRIPT_WORK_LIMIT_EXCEEDED", "canonical tool arguments exceed the in-flight work limit");
-		}
+		this.recordOperations();
+		const estimate = assertCallCanonicalizationWithinLimit(
+			call,
+			this.remainingTextWorkUnits(),
+			() => this.recordOperations(),
+		);
+		const details = this.canonicalize(estimate, () => canonicalToolCallArgumentDetails(call.block), (value) => value.text);
+		this.retainedCallUnits += details.text.length;
 		if (this.metrics) this.metrics.callArgumentsCanonicalized++;
+		this.updateRetainedMetrics();
 		return details;
 	}
 
 	canonicalizeResult(result: IndexedResult): ReturnType<typeof canonicalToolResultBodyDetails> {
-		assertResultCanonicalizationWithinLimit(result, this.remainingUnits());
-		const details = canonicalToolResultBodyDetails(result.direct);
-		if (details.text.length > this.remainingUnits()) {
-			throw new TranscriptReaderError("TRANSCRIPT_WORK_LIMIT_EXCEEDED", "canonical tool result exceeds the in-flight work limit");
-		}
+		this.recordOperations();
+		const estimate = assertResultCanonicalizationWithinLimit(
+			result,
+			this.remainingTextWorkUnits(),
+			() => this.recordOperations(),
+		);
+		const details = this.canonicalize(estimate, () => canonicalToolResultBodyDetails(result.direct), (value) => value.text);
+		this.retainedResultUnits += details.text.length;
 		if (this.metrics) {
 			this.metrics.resultBodiesCanonicalized++;
 			this.metrics.canonicalResultUnits += details.text.length;
 		}
+		this.updateRetainedMetrics();
 		return details;
 	}
 
 	recordHash(): void {
+		this.recordOperations();
 		if (this.metrics) this.metrics.resultBodiesHashed++;
 	}
 
-	retainCall(units: number): void {
-		if (units > this.remainingUnits()) {
-			throw new TranscriptReaderError("TRANSCRIPT_WORK_LIMIT_EXCEEDED", "canonical tool arguments exceed the in-flight work limit");
+	recordDetached(units: number, kind: "argument" | "result"): void {
+		this.recordOperations();
+		if (!Number.isSafeInteger(units) || units < 0 || units > this.remainingTextWorkUnits()) {
+			throw new TranscriptReaderError(
+				"TRANSCRIPT_WORK_LIMIT_EXCEEDED",
+				"detached transcript preview exceeds the cumulative text work limit",
+			);
 		}
-		this.retainedCallUnits += units;
+		this.reservation.reserve({ textUnits: units });
+		this.textWorkUnits += units;
+		this.retainedDetachedUnits += units;
+		if (this.metrics) {
+			this.metrics.canonicalTextWorkUnits = this.textWorkUnits;
+			if (kind === "argument") this.metrics.detachedArgumentPreviewUnits += units;
+			else this.metrics.detachedResultExcerptUnits += units;
+		}
+		this.updateRetainedMetrics();
+	}
+
+	releaseDetached(units: number): void {
+		if (!Number.isSafeInteger(units) || units < 0 || units > this.retainedDetachedUnits) {
+			throw new Error("detached transcript retention underflow");
+		}
+		this.retainedDetachedUnits -= units;
+		this.updateRetainedMetrics();
 	}
 
 	releaseCall(units: number): void {
+		if (!Number.isSafeInteger(units) || units < 0 || units > this.retainedCallUnits) {
+			throw new Error("canonical call retention underflow");
+		}
 		this.retainedCallUnits -= units;
-	}
-
-	retainResult(units: number): void {
-		if (units > this.remainingUnits()) {
-			throw new TranscriptReaderError("TRANSCRIPT_WORK_LIMIT_EXCEEDED", "canonical tool results exceed the in-flight work limit");
-		}
-		this.retainedResultUnits += units;
-		if (this.metrics) {
-			this.metrics.peakRetainedCanonicalResultUnits = Math.max(
-				this.metrics.peakRetainedCanonicalResultUnits,
-				this.retainedResultUnits,
-			);
-		}
+		this.updateRetainedMetrics();
 	}
 
 	releaseResult(units: number): void {
+		if (!Number.isSafeInteger(units) || units < 0 || units > this.retainedResultUnits) {
+			throw new Error("canonical result retention underflow");
+		}
 		this.retainedResultUnits -= units;
+		this.updateRetainedMetrics();
+	}
+
+	close(): void {
+		if (this.closed) return;
+		this.retainedCallUnits = 0;
+		this.retainedResultUnits = 0;
+		this.retainedDetachedUnits = 0;
+		this.updateRetainedMetrics();
+		this.reservation.close();
+		this.closed = true;
 	}
 }
 
@@ -1982,18 +2322,14 @@ function* agentSearchSegments(
 	for (const call of index.callsByMessage.get(message.index) ?? []) {
 		yield call.name;
 		const args = work.canonicalizeCall(call);
-		if (args.present) {
-			work.retainCall(args.text.length);
-			try {
-				yield args.text;
-			} finally {
-				work.releaseCall(args.text.length);
-			}
+		try {
+			if (args.present) yield args.text;
+		} finally {
+			work.releaseCall(args.text.length);
 		}
 	}
 	for (const result of index.resultsByMessage.get(message.index) ?? []) {
 		const canonical = work.canonicalizeResult(result);
-		work.retainResult(canonical.text.length);
 		try {
 			yield canonical.text;
 		} finally {
@@ -2094,6 +2430,13 @@ function refForAuthor(author: MessageAuthor, state: AgentProjectionState): strin
 	return ref;
 }
 
+function detachedStringSlice(text: string, start: number, end: number): string {
+	if (start === end) return "";
+	// Buffer round-tripping forces an independent backing store. A plain slice
+	// can remain a V8 SlicedString that pins the full canonical parent.
+	return Buffer.from(text.slice(start, end), "utf8").toString("utf8");
+}
+
 function canonicalSliceEnd(text: string, start: number, limit: number): number {
 	let end = Math.min(text.length, start + limit);
 	if (end > start && end < text.length) {
@@ -2135,6 +2478,7 @@ function validateResultLimit(value: unknown): number {
 class AgentRowMaterializer {
 	private readonly calls = new Map<IndexedCall, ReturnType<typeof canonicalToolCallArgumentDetails>>();
 	private readonly results = new Map<IndexedResult, MaterializedResult>();
+	private pendingDetachedUnits = 0;
 
 	constructor(
 		private readonly sessionId: string,
@@ -2145,16 +2489,29 @@ class AgentRowMaterializer {
 		const existing = this.calls.get(call);
 		if (existing) return existing;
 		const details = this.work.canonicalizeCall(call);
-		this.work.retainCall(details.text.length);
 		this.calls.set(call, details);
 		return details;
+	}
+
+	argumentPreview(text: string, limit: number): string {
+		const end = canonicalSliceEnd(text, 0, limit);
+		const preview = detachedStringSlice(text, 0, end);
+		this.work.recordDetached(preview.length, "argument");
+		this.pendingDetachedUnits += preview.length;
+		return preview;
+	}
+
+	resultExcerpt(text: string, start: number, end: number): string {
+		const excerpt = detachedStringSlice(text, start, end);
+		this.work.recordDetached(excerpt.length, "result");
+		this.pendingDetachedUnits += excerpt.length;
+		return excerpt;
 	}
 
 	result(indexed: IndexedResult): MaterializedResult {
 		const existing = this.results.get(indexed);
 		if (existing) return existing;
 		const canonical = this.work.canonicalizeResult(indexed);
-		this.work.retainResult(canonical.text.length);
 		try {
 			const size: ToolResultSize = {
 				type: canonical.type,
@@ -2184,7 +2541,17 @@ class AgentRowMaterializer {
 		}
 	}
 
+	discardDetached(): void {
+		this.work.releaseDetached(this.pendingDetachedUnits);
+		this.pendingDetachedUnits = 0;
+	}
+
+	commitDetached(): void {
+		this.pendingDetachedUnits = 0;
+	}
+
 	release(): void {
+		this.discardDetached();
 		for (const result of this.results.values()) this.work.releaseResult(result.body.length);
 		for (const call of this.calls.values()) this.work.releaseCall(call.text.length);
 		this.results.clear();
@@ -2198,6 +2565,7 @@ function projectedResult(
 	includeExcerpt: boolean,
 	cursor = 0,
 	limit = AGENT_RESULT_EXCERPT_DEFAULT,
+	detachExcerpt?: (text: string, start: number, end: number) => string,
 ): ProjectedToolResult {
 	const projected: ProjectedToolResult = {
 		ref: refForResult(result.indexed, state),
@@ -2208,11 +2576,12 @@ function projectedResult(
 		handle: result.handle,
 	};
 	if (includeExcerpt) {
+		if (!detachExcerpt) throw new Error("result excerpts must be detached from their canonical parent");
 		const end = canonicalSliceEnd(result.body, cursor, limit);
 		projected.excerpt = {
 			start: cursor,
 			end,
-			text: result.body.slice(cursor, end),
+			text: detachExcerpt(result.body, cursor, end),
 			nextCursor: end < result.body.length ? end : null,
 			complete: end === result.body.length,
 		};
@@ -2274,7 +2643,7 @@ function projectAgentMessage(
 	if (calls.length > 0) {
 		out.toolCalls = calls.map((call) => {
 			const args = materializer.callArguments(call);
-			const preview = options.omitOptional ? "" : scalarSafePrefix(args.text, AGENT_ARGUMENT_PREVIEW_LIMIT);
+			const preview = options.omitOptional ? "" : materializer.argumentPreview(args.text, AGENT_ARGUMENT_PREVIEW_LIMIT);
 			return {
 				ref: refForCall(call, state),
 				name: scalarSafePrefix(call.name, AGENT_TOOL_NAME_LIMIT),
@@ -2291,6 +2660,9 @@ function projectAgentMessage(
 			materializer.result(result),
 			state,
 			options.includeToolResults && !options.omitOptional,
+			0,
+			AGENT_RESULT_EXCERPT_DEFAULT,
+			(text, start, end) => materializer.resultExcerpt(text, start, end),
 		));
 	}
 	return out;
@@ -2395,6 +2767,7 @@ function fitAgentPage(
 				{ kind: "page", offset: reserveOffset },
 			);
 			if (serializedBytes(trial) > budget) {
+				materializer.discardDetached();
 				row = projectAgentMessage(raw, index, state, materializer, { verbose, includeToolResults, omitOptional: true });
 				trial = envelopeForAgentRows(
 					all.length,
@@ -2409,6 +2782,7 @@ function fitAgentPage(
 				);
 			}
 			if (serializedBytes(trial) > budget) {
+				materializer.discardDetached();
 				if (rows.length === 0) {
 					row = summaryRow(raw, index);
 					trial = envelopeForAgentRows(
@@ -2428,6 +2802,7 @@ function fitAgentPage(
 				break;
 			}
 			rows.push(row);
+			materializer.commitDetached();
 		} finally {
 			// The response contains only bounded excerpts and metadata. Release the
 			// full canonical row bodies before considering the next page row.
@@ -2514,7 +2889,14 @@ function readTargetedResultSlice(
 				...(role.length < raw.role.length ? { roleTruncated: true } : {}),
 				...projectAgentTimestamp(raw.ts),
 				text: "",
-				toolResults: [projectedResult(result, state, true, cursor, limit)],
+				toolResults: [projectedResult(
+					result,
+					state,
+					true,
+					cursor,
+					limit,
+					(text, start, end) => materializer.resultExcerpt(text, start, end),
+				)],
 			};
 			if (raw.author) row.authorRef = refForAuthor(raw.author, state);
 			return row;
@@ -2522,11 +2904,15 @@ function readTargetedResultSlice(
 		const state = newAgentProjectionState();
 		const base = makeTargetRow(state, requestedLimit);
 		let envelope = envelopeForAgentRows(all.length, undefined, undefined, undefined, [base], state, undefined);
-		if (serializedBytes(envelope) <= budget) return envelope;
+		if (serializedBytes(envelope) <= budget) {
+			materializer.commitDetached();
+			return envelope;
+		}
+		materializer.discardDetached();
 
 		let low = 1;
 		let high = Math.max(1, requestedEnd - cursor);
-		let best: ReadTranscriptEnvelope | undefined;
+		let bestUnits: number | undefined;
 		while (low <= high) {
 			const units = Math.floor((low + high) / 2);
 			const candidateState = newAgentProjectionState();
@@ -2549,14 +2935,42 @@ function readTargetedResultSlice(
 					result_limit: requestedLimit,
 				} : undefined,
 			);
-			if (serializedBytes(projected) <= budget) {
-				best = projected;
+			const fits = serializedBytes(projected) <= budget;
+			materializer.discardDetached();
+			if (fits) {
+				bestUnits = units;
 				low = units + 1;
 			} else {
 				high = units - 1;
 			}
 		}
-		if (best) return best;
+		if (bestUnits !== undefined) {
+			const bestState = newAgentProjectionState();
+			const best = makeTargetRow(bestState, bestUnits);
+			const actualEnd = best.toolResults![0].excerpt!.end;
+			const partial = actualEnd < requestedEnd;
+			envelope = envelopeForAgentRows(
+				all.length,
+				undefined,
+				undefined,
+				undefined,
+				[best],
+				bestState,
+				undefined,
+				partial,
+				partial ? {
+					kind: "result_slice",
+					result_handle: result.handle,
+					result_cursor: actualEnd,
+					result_limit: requestedLimit,
+				} : undefined,
+			);
+			if (serializedBytes(envelope) <= budget) {
+				materializer.commitDetached();
+				return envelope;
+			}
+			materializer.discardDetached();
+		}
 		throw new TranscriptReaderError("invalid_params", "serialized transcript budget is too small for result metadata");
 	} finally {
 		materializer.release();
@@ -2575,9 +2989,24 @@ async function readAgentTranscript(
 	if (!Number.isSafeInteger(budget) || budget < 512 || budget > READ_SESSION_AGENT_ENVELOPE_MAX_BYTES) {
 		throw new TranscriptReaderError("invalid_params", `serializedBudgetBytes must be an integer in [512, ${READ_SESSION_AGENT_ENVELOPE_MAX_BYTES}]`);
 	}
+	let work: AgentProjectionWorkTracker | undefined;
 	try {
-		const work = new AgentProjectionWorkTracker(opts.workMetricsForTests);
-		const index = buildTranscriptStructureIndex(all);
+		const requestLimits: TranscriptProjectionRequestWorkLimits = {
+			...READ_SESSION_AGENT_WORK_LIMITS.request,
+			...opts.projectionWorkLimitsForTests,
+		};
+		for (const [name, value] of Object.entries(requestLimits)) {
+			const productionMaximum = READ_SESSION_AGENT_WORK_LIMITS.request[name as keyof TranscriptProjectionRequestWorkLimits];
+			if (!Number.isSafeInteger(value) || value < 1 || value > productionMaximum) {
+				throw new Error(`${name} test override must be a positive safe integer no larger than production`);
+			}
+		}
+		work = new AgentProjectionWorkTracker(
+			opts.workMetricsForTests,
+			requestLimits,
+			opts.workReservationPoolForTests ?? AGENT_PROJECTION_RESERVATION_POOL,
+		);
+		const index = buildTranscriptStructureIndex(all, undefined, work);
 		if (params.resultHandle !== undefined) {
 			return readTargetedResultSlice(all, index, params, budget, sessionId, work);
 		}
@@ -2636,6 +3065,8 @@ async function readAgentTranscript(
 			throw new TranscriptReaderError("INVALID_RESULT_BODY", error.message);
 		}
 		throw error;
+	} finally {
+		work?.close();
 	}
 }
 
