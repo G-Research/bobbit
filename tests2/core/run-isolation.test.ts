@@ -64,6 +64,19 @@ describe("workflow run isolation", () => {
 		expect(expected).not.toContain(process.env.HOME!);
 	});
 
+	it("captures the Playwright registry before the E2E harness isolates HOME", () => {
+		const source = readFileSync("playwright-e2e.config.ts", "utf8");
+		expect(source).toContain('import { capturePlaywrightBrowserRegistry } from "./tests2/harness/run-isolation.js"');
+		expect(source.indexOf("capturePlaywrightBrowserRegistry();")).toBeLessThan(source.indexOf("prepareE2ERuntimeCaches();"));
+	});
+
+	it("preserves PATH for Git discovery while isolating config and credentials", () => {
+		const path = process.env.PATH ?? process.env.Path;
+		expect(path).toBeTruthy();
+		installRunIsolation();
+		expect(process.env.PATH ?? process.env.Path).toBe(path);
+	});
+
 	it("keeps workflow harnesses free of fixed ports, timestamp-only roots, and unowned cleanup", () => {
 		for (const file of ["tests2/harness/gateway.ts", "tests/e2e/in-process-harness.ts", "tests/e2e/gateway-harness.ts"]) {
 			const source = readFileSync(file, "utf8");

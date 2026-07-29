@@ -1,6 +1,11 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { capturePlaywrightBrowserRegistry } from "./tests2/harness/run-isolation.js";
+
+// Config evaluation precedes isolated E2E worker imports. Preserve the host
+// browser registry before their harness redirects HOME for Bobbit discovery.
+capturePlaywrightBrowserRegistry();
 
 /**
  * E2E test config: split into API (in-process) and browser (process-spawned) projects.

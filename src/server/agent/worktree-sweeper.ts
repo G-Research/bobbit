@@ -22,6 +22,7 @@
  */
 
 import { performance } from "node:perf_hooks";
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import { cleanupWorktree, type RemoteGitPolicy } from "../skills/git.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
@@ -99,7 +100,17 @@ export interface SweepResult {
 
 type ParsedWorktree = ReturnType<typeof parseGitWorktreeList>[number];
 
-const normalize = normalizeWorktreeHostPath;
+// Git emits canonical paths while persisted records may retain the lexical
+// TMPDIR spelling. Compare real paths whenever the entry exists so a macOS
+// /var → /private/var alias never makes the primary worktree look orphaned.
+function normalize(value?: string): string | undefined {
+	if (!value) return undefined;
+	try {
+		return normalizeWorktreeHostPath(realpathSync(value));
+	} catch {
+		return normalizeWorktreeHostPath(path.resolve(value));
+	}
+}
 
 type SweepFs = Pick<RecoveryFs, "access">;
 type WorktreeCleanup = typeof cleanupWorktree;
