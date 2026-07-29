@@ -50,8 +50,10 @@ test.describe("atomic models.json bind mount", () => {
 
 			writeFileSync(replacement, '{"generation":1}\n');
 			renameSync(replacement, modelsJson);
-			// Docker still exposes the old bound inode until recreation.
-			expect(readMounted(activeId)).toBe('{"generation":0}');
+			// A file bind mount's result between rename and recreation is a host-
+			// filesystem detail: Linux retains the old inode, while Docker Desktop
+			// VirtioFS may report ENOENT (and newer implementations may expose the
+			// replacement). The cross-platform contract begins with recreation below.
 
 			const sandbox = new ProjectSandbox({
 				projectId: `${prefix}-project`,
