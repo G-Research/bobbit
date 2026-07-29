@@ -21,11 +21,9 @@ import {
 } from "./message-author.js";
 import {
 	canonicalToolCallArgumentDetails,
-	canonicalToolCallName,
 	canonicalToolResultBodyDetails,
 	CanonicalTranscriptValueError,
 	isWellFormedUnicode,
-	scalarSafePrefix,
 } from "./canonical-tool-result-body.js";
 import {
 	mergeAuthorSidecarIntoMessages,
@@ -1221,7 +1219,11 @@ export interface TranscriptProjectionWorkMetricsForTests {
 	resultBodiesCanonicalized: number;
 	resultBodiesHashed: number;
 	canonicalResultUnits: number;
+	/** Cumulative charged input scans plus bounded output-copy work. */
 	canonicalTextWorkUnits: number;
+	canonicalInputWorkUnits: number;
+	indexStringWorkUnits: number;
+	projectedStringWorkUnits: number;
 	operationWorkUnits: number;
 	indexedResults: number;
 	currentRetainedCanonicalCallUnits: number;
@@ -1231,6 +1233,9 @@ export interface TranscriptProjectionWorkMetricsForTests {
 	peakRetainedTotalUnits: number;
 	detachedArgumentPreviewUnits: number;
 	detachedResultExcerptUnits: number;
+	detachedVisibleTextUnits: number;
+	detachedThinkingUnits: number;
+	detachedMetadataUnits: number;
 }
 
 /** Deterministic instrumentation seam; production callers do not need this. */
@@ -1241,6 +1246,9 @@ export function createTranscriptProjectionWorkMetricsForTests(): TranscriptProje
 		resultBodiesHashed: 0,
 		canonicalResultUnits: 0,
 		canonicalTextWorkUnits: 0,
+		canonicalInputWorkUnits: 0,
+		indexStringWorkUnits: 0,
+		projectedStringWorkUnits: 0,
 		operationWorkUnits: 0,
 		indexedResults: 0,
 		currentRetainedCanonicalCallUnits: 0,
@@ -1250,6 +1258,9 @@ export function createTranscriptProjectionWorkMetricsForTests(): TranscriptProje
 		peakRetainedTotalUnits: 0,
 		detachedArgumentPreviewUnits: 0,
 		detachedResultExcerptUnits: 0,
+		detachedVisibleTextUnits: 0,
+		detachedThinkingUnits: 0,
+		detachedMetadataUnits: 0,
 	};
 }
 
@@ -1668,7 +1679,7 @@ interface IndexedCall {
 	messageIndex: number;
 	blockIndex: number;
 	block: Record<string, unknown>;
-	id?: string;
+	/** Detached, bounded display name. */
 	name: string;
 }
 
@@ -1678,8 +1689,8 @@ interface IndexedResult {
 	blockIndex: number;
 	direct: Record<string, unknown>;
 	message: Record<string, unknown>;
-	correlationId?: string;
 	correlatedCall?: IndexedCall;
+	/** Detached, bounded display name. */
 	name: string;
 	status: ToolResultStatus;
 }
@@ -1697,37 +1708,95 @@ interface TranscriptStructureIndex {
 	resultByLocation: Map<string, IndexedResult>;
 }
 
-function ownValidString(source: Record<string, unknown>, key: string): string | undefined {
+const INDEX_CORRELATION_INLINE_LIMIT = 256;
+const INDEX_CORRELATION_DOMAIN = "bobbit.read-session.correlation-key.v1\0";
+
+function ownNonEmptyString(source: Record<string, unknown>, key: string): string | undefined {
 	if (!Object.prototype.hasOwnProperty.call(source, key)) return undefined;
 	const value = source[key];
-	return typeof value === "string" && value.length > 0 && isWellFormedUnicode(value) ? value : undefined;
+	return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-function firstOwnValidString(source: Record<string, unknown>, keys: readonly string[]): string | undefined {
+function detachedIndexString(value: string, limit: number): string {
+	const end = scalarPrefixEnd(value, 0, limit);
+	return detachedStringSlice(value, 0, end);
+}
+
+function normalizedCorrelationKey(value: string, work?: AgentProjectionWorkTracker): string | undefined {
+	if (work) return work.correlationKey(value);
+	if (!isWellFormedUnicode(value)) return undefined;
+	if (value.length <= INDEX_CORRELATION_INLINE_LIMIT) {
+		return `i:${detachedIndexString(value, INDEX_CORRELATION_INLINE_LIMIT)}`;
+	}
+	return `h:${createHash("sha256").update(INDEX_CORRELATION_DOMAIN).update(value, "utf8").digest("hex")}`;
+}
+
+function boundedIndexName(value: string, work?: AgentProjectionWorkTracker): string | undefined {
+	if (work) return work.indexDisplayString(value, AGENT_TOOL_NAME_LIMIT);
+	if (!isWellFormedUnicode(value)) return undefined;
+	return detachedIndexString(value, AGENT_TOOL_NAME_LIMIT);
+}
+
+function firstCorrelationKey(
+	source: Record<string, unknown>,
+	keys: readonly string[],
+	work?: AgentProjectionWorkTracker,
+): string | undefined {
 	for (const key of keys) {
-		const value = ownValidString(source, key);
-		if (value !== undefined) return value;
+		const value = ownNonEmptyString(source, key);
+		if (value === undefined) continue;
+		const normalized = normalizedCorrelationKey(value, work);
+		if (normalized !== undefined) return normalized;
 	}
 	return undefined;
 }
 
-function canonicalCallId(call: Record<string, unknown>): string | undefined {
-	return firstOwnValidString(call, ["id", "toolCallId", "tool_call_id", "toolUseId", "tool_use_id"]);
+function firstIndexName(
+	source: Record<string, unknown>,
+	keys: readonly string[],
+	work?: AgentProjectionWorkTracker,
+): string | undefined {
+	for (const key of keys) {
+		const value = ownNonEmptyString(source, key);
+		if (value === undefined) continue;
+		const bounded = boundedIndexName(value, work);
+		if (bounded !== undefined) return bounded;
+	}
+	return undefined;
+}
+
+function canonicalCallId(call: Record<string, unknown>, work?: AgentProjectionWorkTracker): string | undefined {
+	return firstCorrelationKey(call, ["id", "toolCallId", "tool_call_id", "toolUseId", "tool_use_id"], work);
+}
+
+function canonicalCallName(call: Record<string, unknown>, work?: AgentProjectionWorkTracker): string {
+	return firstIndexName(call, ["name", "toolName"], work) ?? "unknown";
+}
+
+function canonicalCallSearchName(call: IndexedCall, work: AgentProjectionWorkTracker): string {
+	for (const key of ["name", "toolName"] as const) {
+		const value = ownNonEmptyString(call.block, key);
+		if (value !== undefined && work.inspectProjectedString(value)) return value;
+	}
+	return "unknown";
 }
 
 function canonicalResultCorrelationId(
 	direct: Record<string, unknown>,
 	message: Record<string, unknown>,
 	messageLevel: boolean,
+	work?: AgentProjectionWorkTracker,
 ): string | undefined {
 	const aliases = ["tool_use_id", "toolUseId", "toolCallId", "tool_call_id"] as const;
-	const directAlias = firstOwnValidString(direct, aliases);
+	const directAlias = firstCorrelationKey(direct, aliases, work);
 	if (directAlias) return directAlias;
 	if (!messageLevel) {
-		const messageAlias = firstOwnValidString(message, aliases);
+		const messageAlias = firstCorrelationKey(message, aliases, work);
 		if (messageAlias) return messageAlias;
 	}
-	if ((direct.type === "tool_result" || direct.type === "toolResult")) return ownValidString(direct, "id");
+	if ((direct.type === "tool_result" || direct.type === "toolResult")) {
+		return firstCorrelationKey(direct, ["id"], work);
+	}
 	return undefined;
 }
 
@@ -1736,11 +1805,10 @@ function canonicalResultName(
 	message: Record<string, unknown>,
 	messageLevel: boolean,
 	call?: IndexedCall,
+	work?: AgentProjectionWorkTracker,
 ): string {
-	return ownValidString(direct, "name")
-		?? ownValidString(direct, "toolName")
-		?? (!messageLevel ? ownValidString(message, "name") : undefined)
-		?? (!messageLevel ? ownValidString(message, "toolName") : undefined)
+	return firstIndexName(direct, ["name", "toolName"], work)
+		?? (!messageLevel ? firstIndexName(message, ["name", "toolName"], work) : undefined)
 		?? call?.name
 		?? "unknown";
 }
@@ -1767,27 +1835,23 @@ function canonicalResultStatus(
 		?? "unknown";
 }
 
-function visibleTextSegments(message: RawMessage): string[] {
-	if (isMessageLevelToolResult(message)) return [];
+function* visibleTextSegments(message: RawMessage): Iterable<string> {
+	if (isMessageLevelToolResult(message)) return;
 	if (typeof message.content === "string") {
-		return isWellFormedUnicode(message.content) ? [message.content] : [];
+		yield message.content;
+		return;
 	}
-	if (!Array.isArray(message.content)) return [];
-	const segments: string[] = [];
+	if (!Array.isArray(message.content)) return;
 	for (const candidate of message.content) {
 		if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
 		const block = candidate as Record<string, unknown>;
 		if (isToolResultBlock(block)) continue;
-		if (block.type === "text" && typeof block.text === "string" && isWellFormedUnicode(block.text)) {
-			segments.push(block.text);
-		}
+		if (block.type === "text" && typeof block.text === "string") yield block.text;
 	}
-	return segments;
 }
 
-function thinkingSegments(message: RawMessage): string[] {
-	if (!Array.isArray(message.content)) return [];
-	const segments: string[] = [];
+function* thinkingSegments(message: RawMessage): Iterable<string> {
+	if (!Array.isArray(message.content)) return;
 	for (const candidate of message.content) {
 		if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
 		const block = candidate as Record<string, unknown>;
@@ -1795,9 +1859,8 @@ function thinkingSegments(message: RawMessage): string[] {
 		const value = typeof block.thinking === "string" ? block.thinking
 			: typeof block.text === "string" ? block.text
 			: undefined;
-		if (value !== undefined && isWellFormedUnicode(value)) segments.push(value);
+		if (value !== undefined) yield value;
 	}
-	return segments;
 }
 
 function u32(value: number): Buffer {
@@ -1860,19 +1923,20 @@ function buildTranscriptStructureIndex(
 	const latestCallById = new Map<string, IndexedCall>();
 
 	const indexCall = (message: RawMessage, block: Record<string, unknown>, blockIndex: number): void => {
-		const id = canonicalCallId(block);
+		const id = canonicalCallId(block, work);
 		const call: IndexedCall = {
 			messageIndex: message.index,
 			blockIndex,
 			block,
-			...(id ? { id } : {}),
-			name: canonicalToolCallName(block),
+			name: canonicalCallName(block, work),
 		};
 		const messageCalls = callsByMessage.get(message.index) ?? [];
 		messageCalls.push(call);
 		callsByMessage.set(message.index, messageCalls);
-		if (call.id) {
-			latestCallById.set(call.id, call);
+		if (id) {
+			// Hash/bound the provider ID, but retain the same forward overwrite
+			// semantics so duplicate IDs still resolve to the nearest call.
+			latestCallById.set(id, call);
 			if (operations) operations.callUpdates++;
 		}
 	};
@@ -1884,7 +1948,7 @@ function buildTranscriptStructureIndex(
 		messageLevel: boolean,
 	): void => {
 		work?.indexResult();
-		const correlationId = canonicalResultCorrelationId(direct, message.fullMessage, messageLevel);
+		const correlationId = canonicalResultCorrelationId(direct, message.fullMessage, messageLevel, work);
 		const correlatedCall = correlationId ? latestCallById.get(correlationId) : undefined;
 		if (correlationId && operations) operations.resultLookups++;
 		const result: IndexedResult = {
@@ -1892,9 +1956,8 @@ function buildTranscriptStructureIndex(
 			blockIndex,
 			direct,
 			message: message.fullMessage,
-			...(correlationId ? { correlationId } : {}),
 			...(correlatedCall ? { correlatedCall } : {}),
-			name: canonicalResultName(direct, message.fullMessage, messageLevel, correlatedCall),
+			name: canonicalResultName(direct, message.fullMessage, messageLevel, correlatedCall, work),
 			status: canonicalResultStatus(direct, message.fullMessage, messageLevel),
 		};
 		const messageResults = resultsByMessage.get(message.index) ?? [];
@@ -2071,6 +2134,11 @@ class CanonicalInputWorkBudget {
 					if (typeof payload.value === "string") this.add(payload.value.length);
 					else this.stableJson(payload.value, depth + 1);
 				}
+				// opaqueSummary validates and bounds mimeType independently from the
+				// payload. Charge that provider metadata scan as input work too.
+				if (Object.prototype.hasOwnProperty.call(block, "mimeType") && typeof block.mimeType === "string") {
+					this.add(block.mimeType.length);
+				}
 				this.add(512);
 				return;
 			}
@@ -2114,9 +2182,13 @@ function assertResultCanonicalizationWithinLimit(
 	return budget.estimatedUnits;
 }
 
+type DetachedStringKind = "argument" | "result" | "visible" | "thinking" | "metadata";
+type TextWorkKind = "canonical" | "index" | "projected";
+
 class AgentProjectionWorkTracker {
 	private operationWorkUnits = 0;
 	private indexedResults = 0;
+	/** Cumulative input scans and bounded copy work. Never released before close. */
 	private textWorkUnits = 0;
 	private retainedResultUnits = 0;
 	private retainedCallUnits = 0;
@@ -2136,6 +2208,10 @@ class AgentProjectionWorkTracker {
 		if (this.closed) throw new Error("transcript projection work tracker is closed");
 	}
 
+	private retainedTextUnits(): number {
+		return this.retainedCallUnits + this.retainedResultUnits + this.retainedDetachedUnits;
+	}
+
 	private updateRetainedMetrics(): void {
 		if (!this.metrics) return;
 		this.metrics.currentRetainedCanonicalCallUnits = this.retainedCallUnits;
@@ -2147,7 +2223,7 @@ class AgentProjectionWorkTracker {
 		);
 		this.metrics.peakRetainedTotalUnits = Math.max(
 			this.metrics.peakRetainedTotalUnits,
-			this.retainedCallUnits + this.retainedResultUnits + this.retainedDetachedUnits,
+			this.retainedTextUnits(),
 		);
 	}
 
@@ -2178,36 +2254,86 @@ class AgentProjectionWorkTracker {
 	}
 
 	private remainingTextWorkUnits(): number {
-		return this.limits.maxTextUnits - this.textWorkUnits;
+		return this.limits.maxTextUnits - this.textWorkUnits - this.retainedTextUnits();
+	}
+
+	private chargeTextWork(units: number, kind: TextWorkKind): void {
+		this.assertOpen();
+		if (!Number.isSafeInteger(units) || units < 0 || units > this.remainingTextWorkUnits()) {
+			throw new TranscriptReaderError(
+				"TRANSCRIPT_WORK_LIMIT_EXCEEDED",
+				"transcript projection exceeds the cumulative text work limit",
+			);
+		}
+		this.reservation.reserve({ textUnits: units });
+		this.textWorkUnits += units;
+		if (this.metrics) {
+			this.metrics.canonicalTextWorkUnits = this.textWorkUnits;
+			if (kind === "canonical") this.metrics.canonicalInputWorkUnits += units;
+			else if (kind === "index") this.metrics.indexStringWorkUnits += units;
+			else this.metrics.projectedStringWorkUnits += units;
+		}
+	}
+
+	private retainText(units: number, kind: "call" | "result" | "detached"): void {
+		if (!Number.isSafeInteger(units) || units < 0 || units > this.remainingTextWorkUnits()) {
+			throw new TranscriptReaderError(
+				"TRANSCRIPT_WORK_LIMIT_EXCEEDED",
+				"transcript projection retained text exceeds the request limit",
+			);
+		}
+		this.reservation.reserve({ textUnits: units });
+		if (kind === "call") this.retainedCallUnits += units;
+		else if (kind === "result") this.retainedResultUnits += units;
+		else this.retainedDetachedUnits += units;
+		this.updateRetainedMetrics();
+	}
+
+	/** Validate and charge a provider string before it is searched or projected. */
+	inspectProjectedString(value: string): boolean {
+		this.chargeTextWork(value.length, "projected");
+		return isWellFormedUnicode(value);
+	}
+
+	/** Bounded, content-preserving key for full-transcript call correlation. */
+	correlationKey(value: string): string | undefined {
+		this.chargeTextWork(value.length, "index");
+		if (!isWellFormedUnicode(value)) return undefined;
+		let key: string;
+		if (value.length <= INDEX_CORRELATION_INLINE_LIMIT) {
+			key = `i:${detachedIndexString(value, INDEX_CORRELATION_INLINE_LIMIT)}`;
+		} else {
+			// Unicode validation and hashing are separate linear passes.
+			this.chargeTextWork(value.length, "index");
+			key = `h:${createHash("sha256").update(INDEX_CORRELATION_DOMAIN).update(value, "utf8").digest("hex")}`;
+		}
+		this.chargeTextWork(key.length, "index");
+		return key;
+	}
+
+	/** Detached bounded display metadata retained by the lightweight index. */
+	indexDisplayString(value: string, limit: number): string | undefined {
+		this.chargeTextWork(value.length, "index");
+		if (!isWellFormedUnicode(value)) return undefined;
+		const bounded = detachedIndexString(value, limit);
+		this.chargeTextWork(bounded.length, "index");
+		return bounded;
 	}
 
 	private canonicalize<T>(estimate: number, materialize: () => T, text: (value: T) => string): T {
-		this.assertOpen();
-		if (!Number.isSafeInteger(estimate) || estimate < 0 || estimate > this.remainingTextWorkUnits()) {
+		// Charge the conservative input traversal permanently for this request.
+		// Opaque bodies may collapse to tiny summaries, but their scan/hash work
+		// must never be replaced by the summary's retained size.
+		this.chargeTextWork(estimate, "canonical");
+		const value = materialize();
+		const actual = text(value).length;
+		if (actual > estimate) {
 			throw new TranscriptReaderError(
 				"TRANSCRIPT_WORK_LIMIT_EXCEEDED",
-				"canonical transcript text exceeds the cumulative text work limit",
+				"canonical transcript preflight underestimated materialized text",
 			);
 		}
-		this.reservation.reserve({ textUnits: estimate });
-		let committed = false;
-		try {
-			const value = materialize();
-			const actual = text(value).length;
-			if (actual > estimate) {
-				throw new TranscriptReaderError(
-					"TRANSCRIPT_WORK_LIMIT_EXCEEDED",
-					"canonical transcript preflight underestimated materialized text",
-				);
-			}
-			if (estimate > actual) this.reservation.release({ textUnits: estimate - actual });
-			this.textWorkUnits += actual;
-			if (this.metrics) this.metrics.canonicalTextWorkUnits = this.textWorkUnits;
-			committed = true;
-			return value;
-		} finally {
-			if (!committed) this.reservation.release({ textUnits: estimate });
-		}
+		return value;
 	}
 
 	canonicalizeCall(call: IndexedCall): ReturnType<typeof canonicalToolCallArgumentDetails> {
@@ -2218,9 +2344,8 @@ class AgentProjectionWorkTracker {
 			() => this.recordOperations(),
 		);
 		const details = this.canonicalize(estimate, () => canonicalToolCallArgumentDetails(call.block), (value) => value.text);
-		this.retainedCallUnits += details.text.length;
+		this.retainText(details.text.length, "call");
 		if (this.metrics) this.metrics.callArgumentsCanonicalized++;
-		this.updateRetainedMetrics();
 		return details;
 	}
 
@@ -2232,12 +2357,11 @@ class AgentProjectionWorkTracker {
 			() => this.recordOperations(),
 		);
 		const details = this.canonicalize(estimate, () => canonicalToolResultBodyDetails(result.direct), (value) => value.text);
-		this.retainedResultUnits += details.text.length;
+		this.retainText(details.text.length, "result");
 		if (this.metrics) {
 			this.metrics.resultBodiesCanonicalized++;
 			this.metrics.canonicalResultUnits += details.text.length;
 		}
-		this.updateRetainedMetrics();
 		return details;
 	}
 
@@ -2246,23 +2370,17 @@ class AgentProjectionWorkTracker {
 		if (this.metrics) this.metrics.resultBodiesHashed++;
 	}
 
-	recordDetached(units: number, kind: "argument" | "result"): void {
+	recordDetached(units: number, kind: DetachedStringKind): void {
 		this.recordOperations();
-		if (!Number.isSafeInteger(units) || units < 0 || units > this.remainingTextWorkUnits()) {
-			throw new TranscriptReaderError(
-				"TRANSCRIPT_WORK_LIMIT_EXCEEDED",
-				"detached transcript preview exceeds the cumulative text work limit",
-			);
-		}
-		this.reservation.reserve({ textUnits: units });
-		this.textWorkUnits += units;
-		this.retainedDetachedUnits += units;
+		this.chargeTextWork(units, "projected");
+		this.retainText(units, "detached");
 		if (this.metrics) {
-			this.metrics.canonicalTextWorkUnits = this.textWorkUnits;
 			if (kind === "argument") this.metrics.detachedArgumentPreviewUnits += units;
-			else this.metrics.detachedResultExcerptUnits += units;
+			else if (kind === "result") this.metrics.detachedResultExcerptUnits += units;
+			else if (kind === "visible") this.metrics.detachedVisibleTextUnits += units;
+			else if (kind === "thinking") this.metrics.detachedThinkingUnits += units;
+			else this.metrics.detachedMetadataUnits += units;
 		}
-		this.updateRetainedMetrics();
 	}
 
 	releaseDetached(units: number): void {
@@ -2270,6 +2388,7 @@ class AgentProjectionWorkTracker {
 			throw new Error("detached transcript retention underflow");
 		}
 		this.retainedDetachedUnits -= units;
+		this.reservation.release({ textUnits: units });
 		this.updateRetainedMetrics();
 	}
 
@@ -2278,6 +2397,7 @@ class AgentProjectionWorkTracker {
 			throw new Error("canonical call retention underflow");
 		}
 		this.retainedCallUnits -= units;
+		this.reservation.release({ textUnits: units });
 		this.updateRetainedMetrics();
 	}
 
@@ -2286,6 +2406,7 @@ class AgentProjectionWorkTracker {
 			throw new Error("canonical result retention underflow");
 		}
 		this.retainedResultUnits -= units;
+		this.reservation.release({ textUnits: units });
 		this.updateRetainedMetrics();
 	}
 
@@ -2305,22 +2426,13 @@ function* agentSearchSegments(
 	index: TranscriptStructureIndex,
 	work: AgentProjectionWorkTracker,
 ): Iterable<string> {
-	if (!isMessageLevelToolResult(message)) {
-		if (typeof message.content === "string") {
-			if (isWellFormedUnicode(message.content)) yield message.content;
-		} else if (Array.isArray(message.content)) {
-			for (const candidate of message.content) {
-				if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
-				const block = candidate as Record<string, unknown>;
-				if (!isToolResultBlock(block) && block.type === "text"
-					&& typeof block.text === "string" && isWellFormedUnicode(block.text)) {
-					yield block.text;
-				}
-			}
-		}
+	for (const segment of visibleTextSegments(message)) {
+		if (work.inspectProjectedString(segment)) yield segment;
 	}
 	for (const call of index.callsByMessage.get(message.index) ?? []) {
-		yield call.name;
+		// Display metadata is bounded in the structure index, but regex matching
+		// still sees the complete canonical provider name on demand.
+		yield canonicalCallSearchName(call, work);
 		const args = work.canonicalizeCall(call);
 		try {
 			if (args.present) yield args.text;
@@ -2361,10 +2473,6 @@ async function buildAgentMatchList(
 	}, pattern, caseSensitive, context);
 }
 
-function authorDictionaryKey(author: MessageAuthor): string {
-	return `${author.kind}\0${author.id}\0${author.label}`;
-}
-
 interface AgentProjectionState {
 	callRefs: Map<IndexedCall, string>;
 	resultRefs: Map<IndexedResult, string>;
@@ -2395,7 +2503,7 @@ function refForCall(call: IndexedCall, state: AgentProjectionState): string {
 	const ref = `t${state.nextToolRef++}`;
 	state.callRefs.set(call, ref);
 	state.correlations[ref] = {
-		name: scalarSafePrefix(call.name, AGENT_TOOL_NAME_LIMIT),
+		name: call.name,
 		messageIndex: call.messageIndex,
 		blockIndex: call.blockIndex,
 	};
@@ -2409,24 +2517,27 @@ function refForResult(result: IndexedResult, state: AgentProjectionState): strin
 	const ref = `r${state.nextResultRef++}`;
 	state.resultRefs.set(result, ref);
 	state.correlations[ref] = {
-		name: scalarSafePrefix(result.name, AGENT_TOOL_NAME_LIMIT),
+		name: result.name,
 		messageIndex: result.messageIndex,
 		blockIndex: result.blockIndex,
 	};
 	return ref;
 }
 
-function refForAuthor(author: MessageAuthor, state: AgentProjectionState): string {
-	const key = authorDictionaryKey(author);
+function refForAuthor(
+	author: MessageAuthor,
+	state: AgentProjectionState,
+	materializer: AgentRowMaterializer,
+): string {
+	const kind = materializer.projectedString(author.kind, 32, "metadata", "system").text as MessageAuthor["kind"];
+	const id = materializer.projectedString(author.id, 256, "metadata", "").text;
+	const label = materializer.projectedString(author.label, 128, "metadata", "").text;
+	const key = `${kind}\0${id}\0${label}`;
 	const existing = state.authorRefs.get(key);
 	if (existing) return existing;
 	const ref = `a${state.nextAuthorRef++}`;
 	state.authorRefs.set(key, ref);
-	state.authors[ref] = {
-		kind: author.kind,
-		id: scalarSafePrefix(author.id, 256),
-		label: scalarSafePrefix(author.label, 128),
-	};
+	state.authors[ref] = { kind, id, label };
 	return ref;
 }
 
@@ -2437,13 +2548,18 @@ function detachedStringSlice(text: string, start: number, end: number): string {
 	return Buffer.from(text.slice(start, end), "utf8").toString("utf8");
 }
 
-function canonicalSliceEnd(text: string, start: number, limit: number): number {
+function scalarPrefixEnd(text: string, start: number, limit: number): number {
 	let end = Math.min(text.length, start + limit);
 	if (end > start && end < text.length) {
 		const previous = text.charCodeAt(end - 1);
 		const next = text.charCodeAt(end);
 		if (previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end--;
 	}
+	return end;
+}
+
+function canonicalSliceEnd(text: string, start: number, limit: number): number {
+	const end = scalarPrefixEnd(text, start, limit);
 	if (end === start && start < text.length) {
 		const current = text.charCodeAt(start);
 		const next = text.charCodeAt(start + 1);
@@ -2454,10 +2570,10 @@ function canonicalSliceEnd(text: string, start: number, limit: number): number {
 }
 
 function validateResultCursor(text: string, cursor: unknown): number {
-	if (!Number.isInteger(cursor) || (cursor as number) < 0 || (cursor as number) > text.length) {
+	const value = validateResultCursorShape(cursor);
+	if (value > text.length) {
 		throw new TranscriptReaderError("INVALID_RESULT_CURSOR", "result_cursor must be an integer within the result body");
 	}
-	const value = cursor as number;
 	if (value > 0 && value < text.length) {
 		const previous = text.charCodeAt(value - 1);
 		const current = text.charCodeAt(value);
@@ -2475,6 +2591,12 @@ function validateResultLimit(value: unknown): number {
 	return value as number;
 }
 
+interface BoundedProjectedString {
+	text: string;
+	truncated: boolean;
+	valid: boolean;
+}
+
 class AgentRowMaterializer {
 	private readonly calls = new Map<IndexedCall, ReturnType<typeof canonicalToolCallArgumentDetails>>();
 	private readonly results = new Map<IndexedResult, MaterializedResult>();
@@ -2485,6 +2607,75 @@ class AgentRowMaterializer {
 		private readonly work: AgentProjectionWorkTracker,
 	) {}
 
+	private detachedCopy(text: string, start: number, end: number, kind: DetachedStringKind): string {
+		if (start === end) return "";
+		const copy = detachedStringSlice(text, start, end);
+		this.work.recordDetached(copy.length, kind);
+		this.pendingDetachedUnits += copy.length;
+		return copy;
+	}
+
+	projectedString(
+		value: string,
+		limit: number,
+		kind: DetachedStringKind,
+		invalidFallback?: string,
+	): BoundedProjectedString {
+		let source = value;
+		const valid = this.work.inspectProjectedString(source);
+		if (!valid) {
+			if (invalidFallback === undefined) return { text: "", truncated: false, valid: false };
+			source = invalidFallback;
+			if (!this.work.inspectProjectedString(source)) throw new Error("invalid projected-string fallback");
+		}
+		const end = scalarPrefixEnd(source, 0, limit);
+		return {
+			text: this.detachedCopy(source, 0, end, kind),
+			truncated: end < source.length,
+			valid,
+		};
+	}
+
+	joinedPrefix(segments: Iterable<string>, limit: number, kind: "visible" | "thinking"): BoundedProjectedString {
+		const parts: string[] = [];
+		let accepted = 0;
+		let used = 0;
+		let truncated = false;
+		for (const segment of segments) {
+			if (!this.work.inspectProjectedString(segment)) continue;
+			const separator = accepted > 0 ? "\n" : "";
+			const available = limit - used;
+			const contributionLength = separator.length + segment.length;
+			if (contributionLength <= available) {
+				if (separator) parts.push(separator);
+				if (segment) parts.push(segment);
+				used += contributionLength;
+				accepted++;
+				continue;
+			}
+			if (separator && available > 0) {
+				parts.push(separator);
+				used++;
+			}
+			const segmentLimit = Math.max(0, limit - used);
+			const end = segmentLimit > 0 ? scalarPrefixEnd(segment, 0, segmentLimit) : 0;
+			if (end > 0) {
+				// This temporary slice is bounded; the final returned string is
+				// copied again below so it cannot retain this segment's parent.
+				parts.push(segment.slice(0, end));
+				used += end;
+			}
+			truncated = true;
+			break;
+		}
+		const bounded = parts.join("");
+		return {
+			text: this.detachedCopy(bounded, 0, bounded.length, kind),
+			truncated,
+			valid: true,
+		};
+	}
+
 	callArguments(call: IndexedCall): ReturnType<typeof canonicalToolCallArgumentDetails> {
 		const existing = this.calls.get(call);
 		if (existing) return existing;
@@ -2494,18 +2685,12 @@ class AgentRowMaterializer {
 	}
 
 	argumentPreview(text: string, limit: number): string {
-		const end = canonicalSliceEnd(text, 0, limit);
-		const preview = detachedStringSlice(text, 0, end);
-		this.work.recordDetached(preview.length, "argument");
-		this.pendingDetachedUnits += preview.length;
-		return preview;
+		const end = scalarPrefixEnd(text, 0, limit);
+		return this.detachedCopy(text, 0, end, "argument");
 	}
 
 	resultExcerpt(text: string, start: number, end: number): string {
-		const excerpt = detachedStringSlice(text, start, end);
-		this.work.recordDetached(excerpt.length, "result");
-		this.pendingDetachedUnits += excerpt.length;
-		return excerpt;
+		return this.detachedCopy(text, start, end, "result");
 	}
 
 	result(indexed: IndexedResult): MaterializedResult {
@@ -2569,7 +2754,7 @@ function projectedResult(
 ): ProjectedToolResult {
 	const projected: ProjectedToolResult = {
 		ref: refForResult(result.indexed, state),
-		name: scalarSafePrefix(result.indexed.name, AGENT_TOOL_NAME_LIMIT),
+		name: result.indexed.name,
 		status: result.indexed.status,
 		size: result.size,
 		omitted: !includeExcerpt,
@@ -2589,14 +2774,32 @@ function projectedResult(
 	return projected;
 }
 
-function projectAgentTimestamp(timestamp: string | null): Pick<AgentTranscriptMessage, "ts" | "tsTruncated" | "tsInvalid"> {
+function projectAgentTimestamp(
+	timestamp: string | null,
+	materializer: AgentRowMaterializer,
+): Pick<AgentTranscriptMessage, "ts" | "tsTruncated" | "tsInvalid"> {
 	if (timestamp === null) return { ts: null };
-	if (!isWellFormedUnicode(timestamp)) return { ts: null, tsInvalid: true };
-	const ts = scalarSafePrefix(timestamp, AGENT_TIMESTAMP_LIMIT);
+	const projected = materializer.projectedString(timestamp, AGENT_TIMESTAMP_LIMIT, "metadata");
+	if (!projected.valid) return { ts: null, tsInvalid: true };
 	return {
-		ts,
-		...(ts.length < timestamp.length ? { tsTruncated: true } : {}),
+		ts: projected.text,
+		...(projected.truncated ? { tsTruncated: true } : {}),
 	};
+}
+
+function firstProjectedMetadataString(
+	source: Record<string, unknown>,
+	keys: readonly string[],
+	limit: number,
+	materializer: AgentRowMaterializer,
+): BoundedProjectedString | undefined {
+	for (const key of keys) {
+		const value = ownNonEmptyString(source, key);
+		if (value === undefined) continue;
+		const projected = materializer.projectedString(value, limit, "metadata");
+		if (projected.valid) return projected;
+	}
+	return undefined;
 }
 
 function projectAgentMessage(
@@ -2606,37 +2809,45 @@ function projectAgentMessage(
 	materializer: AgentRowMaterializer,
 	options: { verbose: boolean; includeToolResults: boolean; omitOptional?: boolean },
 ): AgentTranscriptMessage {
-	const role = scalarSafePrefix(isWellFormedUnicode(message.role) ? message.role : "unknown", AGENT_ROLE_LIMIT);
-	const fullText = visibleTextSegments(message).join("\n");
+	const projectedRole = materializer.projectedString(message.role, AGENT_ROLE_LIMIT, "metadata", "unknown");
 	const textLimit = options.verbose ? AGENT_VERBOSE_TEXT_LIMIT : AGENT_COMPACT_TEXT_LIMIT;
-	const text = scalarSafePrefix(fullText, textLimit);
+	const projectedText = materializer.joinedPrefix(visibleTextSegments(message), textLimit, "visible");
 	const out: AgentTranscriptMessage = {
 		index: message.index,
-		role,
-		...(role.length < message.role.length ? { roleTruncated: true } : {}),
-		...projectAgentTimestamp(message.ts),
-		text,
-		...(text.length < fullText.length ? { textTruncated: true } : {}),
+		role: projectedRole.text,
+		...(projectedRole.truncated || (!projectedRole.valid && projectedRole.text.length < message.role.length)
+			? { roleTruncated: true }
+			: {}),
+		...projectAgentTimestamp(message.ts, materializer),
+		text: projectedText.text,
+		...(projectedText.truncated ? { textTruncated: true } : {}),
 	};
-	if (message.author) out.authorRef = refForAuthor(message.author, state);
-	const stopReason = ownValidString(message.fullMessage, "stopReason")
-		?? ownValidString(message.fullMessage, "stop_reason");
+	if (message.author) out.authorRef = refForAuthor(message.author, state, materializer);
+	const stopReason = firstProjectedMetadataString(
+		message.fullMessage,
+		["stopReason", "stop_reason"],
+		AGENT_ROLE_LIMIT,
+		materializer,
+	);
 	if (stopReason) {
-		out.stopReason = scalarSafePrefix(stopReason, AGENT_ROLE_LIMIT);
-		if (out.stopReason.length < stopReason.length) out.stopReasonTruncated = true;
+		out.stopReason = stopReason.text;
+		if (stopReason.truncated) out.stopReasonTruncated = true;
 	}
-	const fullError = ownValidString(message.fullMessage, "errorMessage")
-		?? ownValidString(message.fullMessage, "error_message");
-	if (fullError) {
-		out.errorSummary = scalarSafePrefix(fullError, AGENT_THINKING_LIMIT);
-		if (out.errorSummary.length < fullError.length) out.errorSummaryTruncated = true;
+	const errorSummary = firstProjectedMetadataString(
+		message.fullMessage,
+		["errorMessage", "error_message"],
+		AGENT_THINKING_LIMIT,
+		materializer,
+	);
+	if (errorSummary) {
+		out.errorSummary = errorSummary.text;
+		if (errorSummary.truncated) out.errorSummaryTruncated = true;
 	}
 	if (options.verbose) {
-		const fullThinking = thinkingSegments(message).join("\n");
-		if (fullThinking) {
-			const thinking = scalarSafePrefix(fullThinking, AGENT_THINKING_LIMIT);
-			out.thinking = thinking;
-			if (thinking.length < fullThinking.length) out.thinkingTruncated = true;
+		const thinking = materializer.joinedPrefix(thinkingSegments(message), AGENT_THINKING_LIMIT, "thinking");
+		if (thinking.text) {
+			out.thinking = thinking.text;
+			if (thinking.truncated) out.thinkingTruncated = true;
 		}
 	}
 	const calls = index.callsByMessage.get(message.index) ?? [];
@@ -2646,7 +2857,7 @@ function projectAgentMessage(
 			const preview = options.omitOptional ? "" : materializer.argumentPreview(args.text, AGENT_ARGUMENT_PREVIEW_LIMIT);
 			return {
 				ref: refForCall(call, state),
-				name: scalarSafePrefix(call.name, AGENT_TOOL_NAME_LIMIT),
+				name: call.name,
 				argumentsPreview: preview,
 				argumentsTruncated: options.omitOptional
 					? args.text.length > 0
@@ -2719,11 +2930,19 @@ function serializedBytes(value: unknown): number {
 	return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
-function summaryRow(message: RawMessage, index: TranscriptStructureIndex): AgentTranscriptMessage {
+function summaryRow(
+	message: RawMessage,
+	index: TranscriptStructureIndex,
+	materializer: AgentRowMaterializer,
+): AgentTranscriptMessage {
+	const role = materializer.projectedString(message.role, AGENT_ROLE_LIMIT, "metadata", "unknown");
 	return {
 		index: message.index,
-		role: scalarSafePrefix(isWellFormedUnicode(message.role) ? message.role : "unknown", AGENT_ROLE_LIMIT),
-		...projectAgentTimestamp(message.ts),
+		role: role.text,
+		...(role.truncated || (!role.valid && role.text.length < message.role.length)
+			? { roleTruncated: true }
+			: {}),
+		...projectAgentTimestamp(message.ts, materializer),
 		text: "",
 		projectionOmitted: true,
 		toolCallCount: (index.callsByMessage.get(message.index) ?? []).length,
@@ -2784,7 +3003,7 @@ function fitAgentPage(
 			if (serializedBytes(trial) > budget) {
 				materializer.discardDetached();
 				if (rows.length === 0) {
-					row = summaryRow(raw, index);
+					row = summaryRow(raw, index, materializer);
 					trial = envelopeForAgentRows(
 						all.length,
 						matchCount,
@@ -2796,7 +3015,10 @@ function fitAgentPage(
 						true,
 						{ kind: "page", offset: reserveOffset },
 					);
-					if (serializedBytes(trial) <= budget) rows.push(row);
+					if (serializedBytes(trial) <= budget) {
+						rows.push(row);
+						materializer.commitDetached();
+					}
 				}
 				transportStopped = true;
 				break;
@@ -2842,7 +3064,7 @@ interface ParsedResultHandle {
 }
 
 function parseResultHandle(handle: unknown): ParsedResultHandle {
-	if (typeof handle !== "string" || !isWellFormedUnicode(handle)) {
+	if (typeof handle !== "string" || handle.length > 128 || !isWellFormedUnicode(handle)) {
 		throw new TranscriptReaderError("INVALID_RESULT_HANDLE", "result_handle must be a canonical result handle");
 	}
 	const match = /^rs1:m([0-9a-z]+):b([0-9a-z]+):([A-Za-z0-9_-]{27})$/.exec(handle);
@@ -2855,6 +3077,29 @@ function parseResultHandle(handle: unknown): ParsedResultHandle {
 		throw new TranscriptReaderError("INVALID_RESULT_HANDLE", "result_handle location is malformed");
 	}
 	return { messageIndex, blockIndex };
+}
+
+function validateResultCursorShape(cursor: unknown): number {
+	if (!Number.isSafeInteger(cursor) || (cursor as number) < 0) {
+		throw new TranscriptReaderError("INVALID_RESULT_CURSOR", "result_cursor must be a non-negative safe integer");
+	}
+	return cursor as number;
+}
+
+function prevalidateAgentResultRequest(params: ReadTranscriptParams): void {
+	if (params.resultHandle === undefined) {
+		if (params.resultCursor !== undefined) {
+			throw new TranscriptReaderError("INVALID_RESULT_HANDLE", "result_handle is required with result_cursor");
+		}
+		if (params.resultLimit !== undefined) {
+			throw new TranscriptReaderError("INVALID_RESULT_HANDLE", "result_handle is required with result_limit");
+		}
+		return;
+	}
+	// Handle syntax has stable precedence over dependent cursor/limit errors.
+	parseResultHandle(params.resultHandle);
+	if (params.resultCursor !== undefined) validateResultCursorShape(params.resultCursor);
+	if (params.resultLimit !== undefined) validateResultLimit(params.resultLimit);
 }
 
 function readTargetedResultSlice(
@@ -2882,12 +3127,14 @@ function readTargetedResultSlice(
 		const requestedLimit = validateResultLimit(params.resultLimit ?? AGENT_RESULT_EXCERPT_DEFAULT);
 		const requestedEnd = canonicalSliceEnd(result.body, cursor, requestedLimit);
 		const makeTargetRow = (state: AgentProjectionState, limit: number): AgentTranscriptMessage => {
-			const role = scalarSafePrefix(isWellFormedUnicode(raw.role) ? raw.role : "unknown", AGENT_ROLE_LIMIT);
+			const role = materializer.projectedString(raw.role, AGENT_ROLE_LIMIT, "metadata", "unknown");
 			const row: AgentTranscriptMessage = {
 				index: raw.index,
-				role,
-				...(role.length < raw.role.length ? { roleTruncated: true } : {}),
-				...projectAgentTimestamp(raw.ts),
+				role: role.text,
+				...(role.truncated || (!role.valid && role.text.length < raw.role.length)
+					? { roleTruncated: true }
+					: {}),
+				...projectAgentTimestamp(raw.ts, materializer),
 				text: "",
 				toolResults: [projectedResult(
 					result,
@@ -2898,7 +3145,7 @@ function readTargetedResultSlice(
 					(text, start, end) => materializer.resultExcerpt(text, start, end),
 				)],
 			};
-			if (raw.author) row.authorRef = refForAuthor(raw.author, state);
+			if (raw.author) row.authorRef = refForAuthor(raw.author, state, materializer);
 			return row;
 		};
 		const state = newAgentProjectionState();
@@ -3010,12 +3257,6 @@ async function readAgentTranscript(
 		if (params.resultHandle !== undefined) {
 			return readTargetedResultSlice(all, index, params, budget, sessionId, work);
 		}
-		if (params.resultCursor !== undefined) {
-			throw new TranscriptReaderError("INVALID_RESULT_HANDLE", "result_handle is required with result_cursor");
-		}
-		if (params.resultLimit !== undefined) {
-			throw new TranscriptReaderError("INVALID_RESULT_HANDLE", "result_handle is required with result_limit");
-		}
 		let workingIndices: number[];
 		let matchCount: number | undefined;
 		if (params.pattern && params.pattern.length > 0) {
@@ -3109,6 +3350,7 @@ export async function readTranscript(
 		);
 	}
 	const caseSensitive = !!params.caseSensitive;
+	if (opts.projection === "agent") prevalidateAgentResultRequest(params);
 
 	const content = await opts.readContent();
 	if (content === null || content === undefined || content === "") {
