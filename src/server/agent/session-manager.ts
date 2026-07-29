@@ -3666,7 +3666,7 @@ export class SessionManager {
 				sessionGrants,
 				disabledTools,
 				toolScope,
-				piExtensionActivation.readSessionGuardRequired,
+				activation.readSessionAvailable || piExtensionActivation.readSessionGuardRequired,
 			)
 			: undefined;
 		if (guardPath) {
