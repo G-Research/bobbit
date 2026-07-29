@@ -65,7 +65,7 @@ export default function (pi) {
 			undefined as never,
 			{} as never,
 		);
-		assert.equal(verboseReads, 1);
+		assert.equal(verboseReads, 0, "invocation accessors must not execute during handler projection");
 		assert.equal(Object.getOwnPropertySymbols(executed.details as object).length, 0,
 			"no digest or marker supplied by a mutable result may be trusted");
 
@@ -80,7 +80,7 @@ export default function (pi) {
 		});
 
 		assert.ok(replacement, "the final seam must always return its own canonical snapshot");
-		assert.equal(verboseReads, 2, "the final seam independently snapshots invocation policy inputs");
+		assert.equal(verboseReads, 0, "the final seam must remain descriptor-only for invocation policy inputs");
 		assert.notEqual(replacement, executed);
 		assert.equal(Object.isFrozen(replacement), true);
 		assert.equal(Object.isFrozen(replacement.content), true);

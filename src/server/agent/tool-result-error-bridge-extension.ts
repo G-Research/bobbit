@@ -17,6 +17,7 @@ export const READ_SESSION_FINAL_RESULT_MAX_BYTES = 50 * 1024;
  */
 export function generateToolResultErrorBridgeExtension(): string {
 	return `import { createHash } from "node:crypto";
+import { types as utilTypes } from "node:util";
 
 const READ_SESSION_FINAL_RESULT_MAX_BYTES = ${READ_SESSION_FINAL_RESULT_MAX_BYTES};
 const RESULT_EXCERPT_DEFAULT = 4096;
@@ -33,11 +34,71 @@ const CORRELATION_HASH_CHUNK_UNITS = 64 * 1024;
 const CALL_MAP_MAX_ENTRIES = 256;
 const CORRELATION_DIGEST_HEX_UNITS = 40;
 const CORRELATION_KEY_UNITS = 5 + CORRELATION_DIGEST_HEX_UNITS;
-const SHARED_RUNNER_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-runner-boundary.v9");
-const SHARED_AGENT_SESSION_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-agent-session-boundary.v5");
+const SHARED_RUNNER_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-runner-boundary.v10");
+const SHARED_AGENT_SESSION_BOUNDARY_MARKER = Symbol.for("bobbit.tool-result.shared-agent-session-boundary.v6");
 const CALL_MAP_DIAGNOSTICS = Symbol.for("bobbit.tool-result.read-session-call-map-diagnostics.v1");
 const SNAPSHOT_OMITTED = Symbol("snapshot-omitted");
 const SNAPSHOT_REJECTED = Symbol("snapshot-rejected");
+const SNAPSHOT_INVALID = Symbol("snapshot-invalid");
+const SCALAR_SCHEMA = "scalar";
+const schemaArray = (item) => ({ kind: "array", item });
+const schemaObject = (fields) => ({ kind: "object", fields });
+const schemaRecord = (item) => ({ kind: "record", item });
+const SIZE_SCHEMA = schemaObject({
+  type: SCALAR_SCHEMA, chars: SCALAR_SCHEMA, lines: SCALAR_SCHEMA,
+  bytes: SCALAR_SCHEMA, blocks: SCALAR_SCHEMA,
+});
+const EXCERPT_SCHEMA = schemaObject({
+  start: SCALAR_SCHEMA, end: SCALAR_SCHEMA, text: SCALAR_SCHEMA,
+  nextCursor: SCALAR_SCHEMA, complete: SCALAR_SCHEMA,
+});
+const TOOL_CALL_SCHEMA = schemaObject({
+  ref: SCALAR_SCHEMA, name: SCALAR_SCHEMA, toolName: SCALAR_SCHEMA,
+  argumentsPreview: SCALAR_SCHEMA, inputPreview: SCALAR_SCHEMA,
+  argumentsTruncated: SCALAR_SCHEMA,
+});
+const TOOL_RESULT_SCHEMA = schemaObject({
+  ref: SCALAR_SCHEMA, name: SCALAR_SCHEMA, toolName: SCALAR_SCHEMA,
+  status: SCALAR_SCHEMA, isError: SCALAR_SCHEMA, is_error: SCALAR_SCHEMA,
+  size: SIZE_SCHEMA, resultSize: SIZE_SCHEMA, omitted: SCALAR_SCHEMA,
+  handle: SCALAR_SCHEMA, excerpt: EXCERPT_SCHEMA,
+});
+const AUTHOR_SCHEMA = schemaObject({ kind: SCALAR_SCHEMA, id: SCALAR_SCHEMA, label: SCALAR_SCHEMA });
+const CORRELATION_SCHEMA = schemaObject({
+  name: SCALAR_SCHEMA, messageIndex: SCALAR_SCHEMA, blockIndex: SCALAR_SCHEMA,
+});
+const MESSAGE_SCHEMA = schemaObject({
+  index: SCALAR_SCHEMA, role: SCALAR_SCHEMA, roleTruncated: SCALAR_SCHEMA,
+  projectionOmitted: SCALAR_SCHEMA, toolCallCount: SCALAR_SCHEMA, toolResultCount: SCALAR_SCHEMA,
+  ts: SCALAR_SCHEMA, tsInvalid: SCALAR_SCHEMA, tsTruncated: SCALAR_SCHEMA,
+  text: SCALAR_SCHEMA, textTruncated: SCALAR_SCHEMA,
+  thinking: SCALAR_SCHEMA, thinkingSummary: SCALAR_SCHEMA,
+  thinkingTruncated: SCALAR_SCHEMA, thinkingSummaryTruncated: SCALAR_SCHEMA,
+  errorSummary: SCALAR_SCHEMA, error: SCALAR_SCHEMA,
+  errorSummaryTruncated: SCALAR_SCHEMA, errorTruncated: SCALAR_SCHEMA,
+  stopReason: SCALAR_SCHEMA, stopReasonTruncated: SCALAR_SCHEMA, status: SCALAR_SCHEMA,
+  authorRef: SCALAR_SCHEMA, author: AUTHOR_SCHEMA,
+  toolCalls: schemaArray(TOOL_CALL_SCHEMA), toolUses: schemaArray(TOOL_CALL_SCHEMA),
+  toolResults: schemaArray(TOOL_RESULT_SCHEMA),
+});
+const CONTINUATION_SCHEMA = schemaObject({
+  kind: SCALAR_SCHEMA, retrySameRequest: SCALAR_SCHEMA,
+  session_id: SCALAR_SCHEMA, sessionIdTruncated: SCALAR_SCHEMA,
+  offset: SCALAR_SCHEMA, limit: SCALAR_SCHEMA, case_sensitive: SCALAR_SCHEMA,
+  verbose: SCALAR_SCHEMA, include_tool_results: SCALAR_SCHEMA, context: SCALAR_SCHEMA,
+  patternOmitted: SCALAR_SCHEMA, result_handle: SCALAR_SCHEMA,
+  result_cursor: SCALAR_SCHEMA, result_limit: SCALAR_SCHEMA,
+});
+const WRAPPER_DIAGNOSTICS_SCHEMA = schemaObject({ omitted: SCALAR_SCHEMA, actualBytes: SCALAR_SCHEMA });
+const ENVELOPE_SCHEMA = schemaObject({
+  session_id: SCALAR_SCHEMA, total: SCALAR_SCHEMA, returned: SCALAR_SCHEMA,
+  offsetStart: SCALAR_SCHEMA, offsetEnd: SCALAR_SCHEMA, messages: schemaArray(MESSAGE_SCHEMA),
+  matchCount: SCALAR_SCHEMA, pageStart: SCALAR_SCHEMA, pageCount: SCALAR_SCHEMA,
+  nextOffset: SCALAR_SCHEMA, authors: schemaRecord(AUTHOR_SCHEMA),
+  correlations: schemaRecord(CORRELATION_SCHEMA), partial: SCALAR_SCHEMA,
+  truncatedBy: SCALAR_SCHEMA, continuationRequest: CONTINUATION_SCHEMA,
+  wrapperDiagnostics: WRAPPER_DIAGNOSTICS_SCHEMA,
+});
 const runnerReadSessionCalls = new WeakMap();
 const boundaryOwnedSnapshots = new WeakSet();
 
@@ -131,16 +192,24 @@ function consumeSnapshot(value, options) {
       continue;
     }
     if (!source || typeof source !== "object") {
+      if (options?.requireJsonExact && typeof source === "bigint") return SNAPSHOT_REJECTED;
       if (job.arraySlot) job.parent[job.key] = null;
       continue;
     }
+    if (utilTypes.isProxy(source)) return SNAPSHOT_REJECTED;
     if (seen.has(source)) {
+      if (options?.requireJsonExact) return SNAPSHOT_REJECTED;
       if (job.arraySlot) job.parent[job.key] = null;
       continue;
     }
     identities += 1;
     if (identities > SNAPSHOT_MAX_IDENTITIES) return SNAPSHOT_REJECTED;
     seen.add(source);
+    if (options?.requireJsonExact) {
+      let toJSONDescriptor;
+      try { toJSONDescriptor = Object.getOwnPropertyDescriptor(source, "toJSON"); } catch { return SNAPSHOT_REJECTED; }
+      if (toJSONDescriptor) return SNAPSHOT_REJECTED;
+    }
 
     if (Array.isArray(source)) {
       let lengthDescriptor;
@@ -168,6 +237,7 @@ function consumeSnapshot(value, options) {
     let prototype;
     try { prototype = Object.getPrototypeOf(source); } catch { return SNAPSHOT_REJECTED; }
     if (prototype !== Object.prototype && prototype !== null) {
+      if (options?.requireJsonExact) return SNAPSHOT_REJECTED;
       if (job.arraySlot) job.parent[job.key] = null;
       continue;
     }
@@ -189,13 +259,120 @@ function consumeSnapshot(value, options) {
         continue;
       }
       // JSON.stringify calls this hook instead of serializing measured data.
-      if (key === "toJSON") continue;
+      if (key === "toJSON") {
+        if (options?.requireJsonExact) return SNAPSHOT_REJECTED;
+        continue;
+      }
       const replacements = options?.dataReplacements?.get(source);
       const child = replacements?.has(key) ? replacements.get(key) : descriptor.value;
       stack.push({ source: child, parent: out, key, arraySlot: false, depth: job.depth + 1 });
     }
   }
   return root.value === undefined ? SNAPSHOT_OMITTED : root.value;
+}
+
+/**
+ * Snapshot only schema-selected fields from an untrusted candidate. Unknown
+ * wrapper keys are never enumerated, read, or charged. Every selected value is
+ * reached through an own data descriptor; proxies and accessors fail closed.
+ */
+function consumeSelectedSnapshot(value, schema, budget) {
+  const work = budget || { nodes: 0, identities: 0, stringUnits: 0, workUnits: 0 };
+  const root = { value: undefined };
+  const seen = new WeakSet();
+  const stack = [{ source: value, schema, parent: root, key: "value", depth: 0 }];
+
+  while (stack.length > 0) {
+    const job = stack.pop();
+    work.nodes += 1;
+    if (work.nodes > SNAPSHOT_MAX_NODES || job.depth > SNAPSHOT_MAX_DEPTH) return SNAPSHOT_REJECTED;
+    const source = job.source;
+    if (job.schema === SCALAR_SCHEMA) {
+      if (source === null || typeof source === "boolean" || typeof source === "number") {
+        job.parent[job.key] = source;
+        continue;
+      }
+      if (typeof source === "string") {
+        if (source.length > SNAPSHOT_MAX_STRING_UNITS) return SNAPSHOT_INVALID;
+        work.stringUnits += source.length;
+        work.workUnits += source.length;
+        if (work.stringUnits > SNAPSHOT_MAX_WORK_UNITS || work.workUnits > SNAPSHOT_MAX_WORK_UNITS) {
+          return SNAPSHOT_REJECTED;
+        }
+        job.parent[job.key] = source;
+        continue;
+      }
+      if (source === undefined) {
+        job.parent[job.key] = undefined;
+        continue;
+      }
+      return SNAPSHOT_INVALID;
+    }
+    if (!source || typeof source !== "object") return SNAPSHOT_INVALID;
+    if (utilTypes.isProxy(source)) return SNAPSHOT_REJECTED;
+    if (seen.has(source)) return SNAPSHOT_INVALID;
+    work.identities += 1;
+    if (work.identities > SNAPSHOT_MAX_IDENTITIES) return SNAPSHOT_REJECTED;
+    seen.add(source);
+
+    if (job.schema.kind === "array") {
+      if (!Array.isArray(source)) return SNAPSHOT_INVALID;
+      let lengthDescriptor;
+      try { lengthDescriptor = Object.getOwnPropertyDescriptor(source, "length"); } catch { return SNAPSHOT_REJECTED; }
+      if (!lengthDescriptor || !("value" in lengthDescriptor)) return SNAPSHOT_REJECTED;
+      const length = lengthDescriptor.value;
+      if (!isSafeInteger(length) || length < 0 || length > SNAPSHOT_MAX_ARRAY_LENGTH) return SNAPSHOT_REJECTED;
+      work.workUnits += length;
+      if (work.workUnits > SNAPSHOT_MAX_WORK_UNITS) return SNAPSHOT_REJECTED;
+      const out = new Array(length).fill(null);
+      job.parent[job.key] = out;
+      for (let index = length - 1; index >= 0; index -= 1) {
+        let descriptor;
+        try { descriptor = Object.getOwnPropertyDescriptor(source, String(index)); } catch { return SNAPSHOT_REJECTED; }
+        if (!descriptor) continue;
+        if (!("value" in descriptor)) return SNAPSHOT_REJECTED;
+        stack.push({ source: descriptor.value, schema: job.schema.item, parent: out, key: index, depth: job.depth + 1 });
+      }
+      continue;
+    }
+
+    if (Array.isArray(source)) return SNAPSHOT_INVALID;
+    let prototype;
+    try { prototype = Object.getPrototypeOf(source); } catch { return SNAPSHOT_REJECTED; }
+    if (prototype !== Object.prototype && prototype !== null) return SNAPSHOT_INVALID;
+    const out = {};
+    job.parent[job.key] = out;
+    if (job.schema.kind === "record") {
+      let keys;
+      try { keys = Object.keys(source); } catch { return SNAPSHOT_REJECTED; }
+      if (keys.length > SNAPSHOT_MAX_OBJECT_KEYS) return SNAPSHOT_REJECTED;
+      work.workUnits += keys.length;
+      if (work.workUnits > SNAPSHOT_MAX_WORK_UNITS) return SNAPSHOT_REJECTED;
+      for (let index = keys.length - 1; index >= 0; index -= 1) {
+        const key = keys[index];
+        work.workUnits += key.length;
+        if (work.workUnits > SNAPSHOT_MAX_WORK_UNITS) return SNAPSHOT_REJECTED;
+        let descriptor;
+        try { descriptor = Object.getOwnPropertyDescriptor(source, key); } catch { return SNAPSHOT_REJECTED; }
+        if (!descriptor || !("value" in descriptor)) return SNAPSHOT_REJECTED;
+        stack.push({ source: descriptor.value, schema: job.schema.item, parent: out, key, depth: job.depth + 1 });
+      }
+      continue;
+    }
+    if (job.schema.kind !== "object") return SNAPSHOT_INVALID;
+    const entries = Object.entries(job.schema.fields);
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const [key, childSchema] = entries[index];
+      let descriptor;
+      try { descriptor = Object.getOwnPropertyDescriptor(source, key); } catch { return SNAPSHOT_REJECTED; }
+      if (!descriptor) continue;
+      if (!("value" in descriptor)) return SNAPSHOT_REJECTED;
+      work.workUnits += key.length;
+      if (work.workUnits > SNAPSHOT_MAX_WORK_UNITS) return SNAPSHOT_REJECTED;
+      stack.push({ source: descriptor.value, schema: childSchema, parent: out, key, depth: job.depth + 1 });
+    }
+  }
+  return root.value === undefined ? SNAPSHOT_INVALID : root.value;
 }
 
 function freezeSnapshot(root) {
@@ -232,6 +409,13 @@ function serializedByteLength(value) {
   } catch {
     return Number.MAX_SAFE_INTEGER;
   }
+}
+
+function exactSerializedByteLength(value) {
+  const snapshot = consumeSnapshot(value, { rejectAccessors: true, requireJsonExact: true });
+  if (snapshot === SNAPSHOT_OMITTED || snapshot === SNAPSHOT_REJECTED) return undefined;
+  const bytes = serializedByteLength(snapshot);
+  return isNonNegativeInteger(bytes) && bytes !== Number.MAX_SAFE_INTEGER ? bytes : undefined;
 }
 
 function correlationDigest(value) {
@@ -426,7 +610,7 @@ function fits(value, profile) {
 }
 
 function isErroredToolResult(value) {
-  if (!isObject(value)) return false;
+  if (!isObject(value) || utilTypes.isProxy(value)) return false;
   for (const key of ["isError", "is_error"]) {
     let descriptor;
     try { descriptor = Object.getOwnPropertyDescriptor(value, key); } catch { return false; }
@@ -551,51 +735,112 @@ function validEnvelope(value, expectedSessionId) {
       && isObject(value.wrapperDiagnostics)
       && Object.keys(value.wrapperDiagnostics).every((key) => key === "omitted" || key === "actualBytes")
       && value.wrapperDiagnostics.omitted === true
-      && isNonNegativeInteger(value.wrapperDiagnostics.actualBytes);
+      && (!hasOwn(value.wrapperDiagnostics, "actualBytes")
+        || isNonNegativeInteger(value.wrapperDiagnostics.actualBytes));
   }
   return false;
 }
 
-function parseEnvelopeText(text, expectedSessionId) {
-  if (typeof text !== "string") return undefined;
+function parseEnvelopeText(text, expectedSessionId, budget) {
+  if (typeof text !== "string" || text.length > SNAPSHOT_MAX_STRING_UNITS || !isWellFormed(text)) {
+    return SNAPSHOT_INVALID;
+  }
+  budget.stringUnits += text.length;
+  budget.workUnits += text.length;
+  if (budget.stringUnits > SNAPSHOT_MAX_WORK_UNITS || budget.workUnits > SNAPSHOT_MAX_WORK_UNITS) {
+    return SNAPSHOT_REJECTED;
+  }
   try {
-    const candidate = JSON.parse(text);
-    return validEnvelope(candidate, expectedSessionId) ? candidate : undefined;
+    const parsed = JSON.parse(text);
+    const candidate = consumeSelectedSnapshot(parsed, ENVELOPE_SCHEMA, budget);
+    if (candidate === SNAPSHOT_REJECTED) return SNAPSHOT_REJECTED;
+    return candidate !== SNAPSHOT_INVALID && validEnvelope(candidate, expectedSessionId)
+      ? candidate : SNAPSHOT_INVALID;
   } catch {
-    return undefined;
+    return SNAPSHOT_INVALID;
   }
 }
 
 function recoverEnvelope(result, params) {
   if (!isObject(result)) return undefined;
+  if (utilTypes.isProxy(result)) return SNAPSHOT_REJECTED;
   const expectedSessionId = typeof params.session_id === "string" ? params.session_id : undefined;
   if (typeof expectedSessionId !== "string") return undefined;
-  if (isObject(result.details) && hasOwn(result.details, "session_id")
-    && (typeof result.details.session_id !== "string" || result.details.session_id !== expectedSessionId)) return undefined;
+  const budget = { nodes: 0, identities: 0, stringUnits: 0, workUnits: 0 };
 
-  if (validEnvelope(result, expectedSessionId)) return result;
-  if (Array.isArray(result.content)) {
-    for (const block of result.content) {
-      if (!isObject(block) || block.type !== "text") continue;
-      const parsed = parseEnvelopeText(block.text, expectedSessionId);
-      if (parsed) return parsed;
+  // Bind every candidate to the invocation before touching optional wrapper
+  // bodies. Only the exact own data field is inspected; details.extra and other
+  // extension bookkeeping remain completely unexplored.
+  const detailsField = ownDataField(result, "details");
+  if (!detailsField.valid) return SNAPSHOT_REJECTED;
+  const details = detailsField.present ? detailsField.value : undefined;
+  if (isObject(details)) {
+    const sessionId = ownDataField(details, "session_id");
+    if (!sessionId.valid) return SNAPSHOT_REJECTED;
+    if (sessionId.present
+      && (typeof sessionId.value !== "string" || sessionId.value !== expectedSessionId)) return undefined;
+  }
+
+  // Candidate 1: the returned object itself. The selector ignores wrapper-only
+  // keys rather than materializing them before discovering that this is an
+  // envelope.
+  const direct = consumeSelectedSnapshot(result, ENVELOPE_SCHEMA, budget);
+  if (direct === SNAPSHOT_REJECTED) return SNAPSHOT_REJECTED;
+  if (direct !== SNAPSHOT_INVALID && validEnvelope(direct, expectedSessionId)) return direct;
+
+  // Candidate 2: exact text blocks, in ascending array order. Stop immediately
+  // at the first valid candidate so later oversized siblings are never read.
+  const contentField = ownDataField(result, "content");
+  if (!contentField.valid) return SNAPSHOT_REJECTED;
+  if (contentField.present && Array.isArray(contentField.value)) {
+    const content = contentField.value;
+    if (utilTypes.isProxy(content)) return SNAPSHOT_REJECTED;
+    let lengthDescriptor;
+    try { lengthDescriptor = Object.getOwnPropertyDescriptor(content, "length"); } catch { return SNAPSHOT_REJECTED; }
+    const length = lengthDescriptor && "value" in lengthDescriptor ? lengthDescriptor.value : undefined;
+    if (!isSafeInteger(length) || length < 0 || length > SNAPSHOT_MAX_ARRAY_LENGTH) return SNAPSHOT_REJECTED;
+    budget.workUnits += length;
+    if (budget.workUnits > SNAPSHOT_MAX_WORK_UNITS) return SNAPSHOT_REJECTED;
+    for (let index = 0; index < length; index += 1) {
+      let blockDescriptor;
+      try { blockDescriptor = Object.getOwnPropertyDescriptor(content, String(index)); } catch { return SNAPSHOT_REJECTED; }
+      if (!blockDescriptor) continue;
+      if (!("value" in blockDescriptor)) return SNAPSHOT_REJECTED;
+      const block = blockDescriptor.value;
+      if (!isObject(block)) continue;
+      const type = ownDataField(block, "type");
+      if (!type.valid) return SNAPSHOT_REJECTED;
+      if (type.value !== "text") continue;
+      const text = ownDataField(block, "text");
+      if (!text.valid) return SNAPSHOT_REJECTED;
+      const parsed = parseEnvelopeText(text.value, expectedSessionId, budget);
+      if (parsed === SNAPSHOT_REJECTED) return SNAPSHOT_REJECTED;
+      if (parsed !== SNAPSHOT_INVALID) return parsed;
     }
   }
-  if (isObject(result.details) && validEnvelope(result.details.envelope, expectedSessionId)) return result.details.envelope;
-  if (isObject(result.details)) {
-    const details = result.details;
-    const legacy = {
-      total: details.total,
-      returned: details.returned,
-      offsetStart: details.offsetStart,
-      offsetEnd: details.offsetEnd,
-      messages: details.messages,
-      ...(hasOwn(details, "matchCount") ? { matchCount: details.matchCount } : {}),
-      ...(hasOwn(details, "nextOffset") ? { nextOffset: details.nextOffset } : {}),
-    };
-    if (validEnvelope(legacy, expectedSessionId)) return legacy;
+
+  if (!isObject(details)) return undefined;
+
+  // Candidate 3: canonical details.envelope.
+  const envelopeField = ownDataField(details, "envelope");
+  if (!envelopeField.valid) return SNAPSHOT_REJECTED;
+  if (envelopeField.present) {
+    const nested = consumeSelectedSnapshot(envelopeField.value, ENVELOPE_SCHEMA, budget);
+    if (nested === SNAPSHOT_REJECTED) return SNAPSHOT_REJECTED;
+    if (nested !== SNAPSHOT_INVALID && validEnvelope(nested, expectedSessionId)) return nested;
   }
-  return undefined;
+
+  // Candidate 4: the exact legacy details scalar/message allowlist.
+  const legacy = {};
+  for (const key of ["total", "matchCount", "returned", "offsetStart", "offsetEnd", "nextOffset", "messages"]) {
+    const field = ownDataField(details, key);
+    if (!field.valid) return SNAPSHOT_REJECTED;
+    if (field.present) legacy[key] = field.value;
+  }
+  const selectedLegacy = consumeSelectedSnapshot(legacy, ENVELOPE_SCHEMA, budget);
+  if (selectedLegacy === SNAPSHOT_REJECTED) return SNAPSHOT_REJECTED;
+  return selectedLegacy !== SNAPSHOT_INVALID && validEnvelope(selectedLegacy, expectedSessionId)
+    ? selectedLegacy : undefined;
 }
 
 function sanitizeSize(value) {
@@ -886,7 +1131,10 @@ function preserveUpstreamCompletion(candidate, messages, projection) {
       }
     }
     if (candidate.truncatedBy === "extension_return_unrecognized") {
-      envelope.wrapperDiagnostics = { omitted: true, actualBytes: candidate.wrapperDiagnostics.actualBytes };
+      envelope.wrapperDiagnostics = { omitted: true };
+      if (isNonNegativeInteger(candidate.wrapperDiagnostics.actualBytes)) {
+        envelope.wrapperDiagnostics.actualBytes = candidate.wrapperDiagnostics.actualBytes;
+      }
     }
   }
   return envelope;
@@ -962,8 +1210,10 @@ function retryRequest(params) {
 }
 
 function unrecognizedResult(result, params, actualBytesOverride) {
-  const measuredBytes = isNonNegativeInteger(actualBytesOverride)
-    ? actualBytesOverride : serializedByteLength(result);
+  const measuredBytes = actualBytesOverride === null ? undefined
+    : (isNonNegativeInteger(actualBytesOverride) ? actualBytesOverride : exactSerializedByteLength(result));
+  const wrapperDiagnostics = { omitted: true };
+  if (isNonNegativeInteger(measuredBytes)) wrapperDiagnostics.actualBytes = measuredBytes;
   const envelope = {
     total: 0,
     returned: 0,
@@ -973,7 +1223,7 @@ function unrecognizedResult(result, params, actualBytesOverride) {
     partial: true,
     truncatedBy: "extension_return_unrecognized",
     continuationRequest: retryRequest(params),
-    wrapperDiagnostics: { omitted: true, actualBytes: measuredBytes },
+    wrapperDiagnostics,
   };
   return actualValue(envelope, params);
 }
@@ -1208,14 +1458,12 @@ function fitPage(candidate, projection, params, profile) {
   return fits(value, profile) ? value : undefined;
 }
 
-function boundReadSessionResult(result, params, profile = transportProfile("", false)) {
-  const snapshot = consumeSnapshot(result);
-  if (snapshot === SNAPSHOT_REJECTED) {
-    return unrecognizedResult({}, params, Number.MAX_SAFE_INTEGER);
+function boundReadSessionResult(result, params, profile = transportProfile("", false), rejectionFallback) {
+  const envelope = recoverEnvelope(result, params);
+  if (envelope === SNAPSHOT_REJECTED) {
+    return rejectionFallback || unrecognizedResult(result, params, null);
   }
-  const safeResult = snapshot === SNAPSHOT_OMITTED ? {} : snapshot;
-  const envelope = recoverEnvelope(safeResult, params);
-  if (!envelope) return unrecognizedResult(safeResult, params);
+  if (!envelope) return unrecognizedResult(result, params);
 
   const projection = sanitizeProjection(envelope, params);
   const canonical = preserveUpstreamCompletion(envelope, projection.messages, projection);
@@ -1229,13 +1477,13 @@ function boundReadSessionResult(result, params, profile = transportProfile("", f
       canonical, params, projection.excerptLimit, profile, projection.targetRangeShortened,
     );
     if (targeted && fits(targeted, profile)) return targeted;
-    return unrecognizedResult(safeResult, params);
+    return unrecognizedResult(result, params);
   }
 
   if (fits(direct, profile)) return direct;
   const paged = fitPage(envelope, projection, params, profile);
   if (paged && fits(paged, profile)) return paged;
-  return unrecognizedResult(safeResult, params);
+  return unrecognizedResult(result, params);
 }
 
 function invocationParams(args) {
@@ -1251,19 +1499,15 @@ function consumeParams(value) {
     "session_id", "offset", "limit", "case_sensitive", "verbose", "include_tool_results",
     "context", "result_handle", "result_cursor", "result_limit",
   ]) {
-    if (!hasOwn(value, key)) continue;
-    let item;
-    try { item = value[key]; } catch { continue; }
-    const consumed = consumeSnapshot(item);
+    const field = ownDataField(value, key);
+    if (!field.valid || !field.present) continue;
+    const consumed = consumeSnapshot(field.value);
     if (consumed !== SNAPSHOT_OMITTED && consumed !== SNAPSHOT_REJECTED) out[key] = consumed;
   }
   // Only presence/type affects continuations and filtered-tail positioning. Never
   // copy a potentially multi-megabyte regex into the boundary snapshot.
-  if (hasOwn(value, "pattern")) {
-    let pattern;
-    try { pattern = value.pattern; } catch { pattern = undefined; }
-    out.pattern = typeof pattern === "string" ? "" : null;
-  }
+  const pattern = ownDataField(value, "pattern");
+  if (pattern.valid && pattern.present) out.pattern = typeof pattern.value === "string" ? "" : null;
   return out;
 }
 
@@ -1350,37 +1594,44 @@ function boundReadSessionError(result, profile = transportProfile("", true)) {
   };
 }
 
-function eventResultSnapshot(event, transformed) {
-  if (isObject(transformed)) {
-    const consumed = consumeSnapshot(transformed);
-    return consumed === SNAPSHOT_REJECTED ? SNAPSHOT_REJECTED : (isObject(consumed) ? consumed : {});
-  }
+function eventResultSource(event, transformed) {
+  if (isObject(transformed)) return utilTypes.isProxy(transformed) ? SNAPSHOT_REJECTED : transformed;
+  if (!isObject(event) || utilTypes.isProxy(event)) return SNAPSHOT_REJECTED;
   const source = {};
-  for (const key of ["content", "details", "usage", "isError", "is_error", "error", "message", "code", "status", "statusCode", "httpStatus"]) {
-    if (!hasOwn(event, key)) continue;
-    let item;
-    try { item = event[key]; } catch { continue; }
-    const consumed = consumeSnapshot(item);
-    if (consumed === SNAPSHOT_REJECTED) return SNAPSHOT_REJECTED;
-    if (consumed !== SNAPSHOT_OMITTED) source[key] = consumed;
+  for (const key of ["content", "details", "isError", "is_error", "error", "message", "code", "status", "statusCode", "httpStatus"]) {
+    const field = ownDataField(event, key);
+    if (!field.valid) return SNAPSHOT_REJECTED;
+    if (field.present) source[key] = field.value;
   }
   return source;
 }
 
-function boundFinalReadSessionEvent(event, transformed, context) {
-  if (!isObject(event) || (!context && String(event.toolName || "").toLowerCase() !== "read_session")) return transformed;
-  const source = eventResultSnapshot(event, transformed);
-  const params = context?.params || consumeParams(event.input);
+function trueDataFlag(source, key) {
+  const field = ownDataField(source, key);
+  return field.valid && field.present && field.value === true;
+}
+
+function boundFinalReadSessionEvent(event, transformed, context, rejectionFallback) {
+  if (!isObject(event)) return transformed;
+  const eventToolName = ownDataField(event, "toolName");
+  if (!context && (!eventToolName.valid || typeof eventToolName.value !== "string"
+    || eventToolName.value.toLowerCase() !== "read_session")) return transformed;
+  const source = eventResultSource(event, transformed);
+  const input = ownDataField(event, "input");
+  const params = context?.params || consumeParams(input.valid ? input.value : undefined);
   const rejected = source === SNAPSHOT_REJECTED;
   const safeSource = rejected ? {} : source;
-  const isError = safeSource.isError === true || safeSource.is_error === true || event.isError === true;
-  const toolCallId = context?.toolCallId || normalizedProviderCorrelationId(event.toolCallId);
+  const isError = trueDataFlag(safeSource, "isError") || trueDataFlag(safeSource, "is_error")
+    || trueDataFlag(event, "isError") || trueDataFlag(rejectionFallback, "isError");
+  const eventCallId = ownDataField(event, "toolCallId");
+  const toolCallId = context?.toolCallId
+    || normalizedProviderCorrelationId(eventCallId.valid ? eventCallId.value : undefined);
   const profile = transportProfile(toolCallId, isError);
   const bounded = isError
     ? boundReadSessionError(safeSource, profile)
     : (rejected
-      ? unrecognizedResult({}, params, Number.MAX_SAFE_INTEGER)
-      : boundReadSessionResult(safeSource, params, profile));
+      ? (rejectionFallback || unrecognizedResult(undefined, params, null))
+      : boundReadSessionResult(safeSource, params, profile, rejectionFallback));
   // Measure and return this exact accessor-free immutable snapshot. No digest,
   // marker, accessor or toJSON hook from an extension remains authoritative.
   const finalSnapshot = immutableSnapshot({
@@ -1391,7 +1642,7 @@ function boundFinalReadSessionEvent(event, transformed, context) {
   if (fits(finalSnapshot, profile)) return finalSnapshot;
   const fallback = isError
     ? boundReadSessionError({}, profile)
-    : unrecognizedResult(safeSource, params, rejected ? Number.MAX_SAFE_INTEGER : undefined);
+    : (rejectionFallback || unrecognizedResult(safeSource, params, rejected ? null : undefined));
   return immutableSnapshot({
     content: fallback.content,
     details: fallback.details,
@@ -1408,15 +1659,10 @@ function wrapHandler(handler, toolName) {
     if (readSession) {
       const params = consumeParams(invocationParams(args));
       const callId = typeof args[0] === "string" ? args[0] : "";
-      const snapshot = consumeSnapshot(rawResult);
-      const rejected = snapshot === SNAPSHOT_REJECTED;
-      const safeResult = snapshot === SNAPSHOT_OMITTED || rejected ? {} : snapshot;
-      const errored = isErroredToolResult(safeResult) || (rejected && isErroredToolResult(rawResult));
+      const errored = isErroredToolResult(rawResult);
       result = errored
-        ? boundReadSessionError(safeResult, transportProfile(callId, true))
-        : (rejected
-          ? unrecognizedResult({}, params, Number.MAX_SAFE_INTEGER)
-          : boundReadSessionResult(safeResult, params, transportProfile(callId, false)));
+        ? boundReadSessionError(rawResult, transportProfile(callId, true))
+        : boundReadSessionResult(rawResult, params, transportProfile(callId, false));
     } else {
       result = rawResult;
     }
@@ -1490,7 +1736,7 @@ function replaceObjectInPlace(target, replacement, freeze) {
 }
 
 function ownDataField(source, key) {
-  if (!isObject(source)) return { valid: false, present: false, value: undefined };
+  if (!isObject(source) || utilTypes.isProxy(source)) return { valid: false, present: false, value: undefined };
   let descriptor;
   try { descriptor = Object.getOwnPropertyDescriptor(source, key); } catch {
     return { valid: false, present: false, value: undefined };
@@ -1594,7 +1840,7 @@ function toolResultMessageContext(runner, message) {
 }
 
 function fallbackReadSessionResult(context) {
-  const fallback = unrecognizedResult({}, context.params, Number.MAX_SAFE_INTEGER);
+  const fallback = unrecognizedResult(undefined, context.params, null);
   return immutableSnapshot({
     content: fallback.content,
     details: fallback.details,
@@ -1602,22 +1848,18 @@ function fallbackReadSessionResult(context) {
   });
 }
 
-function canonicalReadSessionMessage(message, runner, forcedContext) {
-  const snapshot = consumeSnapshot(message, { rejectAccessors: true });
-  const context = forcedContext || (isObject(snapshot) ? toolResultMessageContext(runner, snapshot) : undefined);
+function canonicalReadSessionMessage(message, runner, forcedContext, safeFallback) {
+  const context = forcedContext || toolResultMessageContext(runner, message);
   if (!context) return undefined;
-  const safeMessage = isObject(snapshot) ? snapshot : {};
-  const bounded = isObject(snapshot) ? boundFinalReadSessionEvent({
+  const bounded = boundFinalReadSessionEvent({
     type: "tool_result",
     toolCallId: context.toolCallId,
     toolName: "read_session",
     input: context.params,
-    content: safeMessage.content,
-    details: safeMessage.details,
-    isError: safeMessage.isError === true,
-  }, undefined, context) : fallbackReadSessionResult(context);
-  const timestamp = typeof safeMessage.timestamp === "number" && Number.isFinite(safeMessage.timestamp)
-    ? safeMessage.timestamp : 0;
+  }, message, context, safeFallback && resultValueFromCanonicalMessage(safeFallback));
+  const timestampField = ownDataField(message, "timestamp");
+  const timestamp = timestampField.valid && typeof timestampField.value === "number"
+    && Number.isFinite(timestampField.value) ? timestampField.value : 0;
   return immutableSnapshot({
     role: "toolResult",
     toolCallId: context.toolCallId,
@@ -1626,6 +1868,19 @@ function canonicalReadSessionMessage(message, runner, forcedContext) {
     details: bounded.details,
     isError: bounded.isError === true,
     timestamp,
+  });
+}
+
+function resultValueFromCanonicalMessage(message) {
+  if (!isObject(message)) return undefined;
+  const content = ownDataField(message, "content");
+  const details = ownDataField(message, "details");
+  const isError = ownDataField(message, "isError");
+  if (!content.valid || !details.valid || !isError.valid) return undefined;
+  return ownImmutableSnapshot({
+    content: content.present ? content.value : [],
+    details: details.present ? details.value : {},
+    isError: isError.present && isError.value === true,
   });
 }
 
@@ -1656,15 +1911,16 @@ function replaceBoundaryScalar(target, key, replacement) {
 }
 
 function enforceResultTarget(event, context, safeFallback) {
-  const snapshot = consumeSnapshot(event, { rejectAccessors: true });
-  const bounded = isObject(snapshot) && isObject(snapshot.result)
+  const result = ownDataField(event, "result");
+  const error = ownDataField(event, "isError");
+  const bounded = result.valid && result.present && isObject(result.value)
     ? boundFinalReadSessionEvent({
       type: "tool_result",
       toolCallId: context.toolCallId,
       toolName: "read_session",
       input: context.params,
-      isError: snapshot.isError === true,
-    }, snapshot.result, context)
+      isError: error.valid && error.present && error.value === true,
+    }, result.value, context, safeFallback)
     : (safeFallback || fallbackReadSessionResult(context));
   replaceBoundarySlot(event, "result", bounded, true);
   replaceBoundaryScalar(event, "isError", bounded.isError === true);
@@ -1698,11 +1954,11 @@ function installAgentSessionBoundary(imported) {
 
     if (toolEndContext) enforceResultTarget(event, toolEndContext, safeToolFallback);
     if (eventType === "message_end" && safeMessageFallback) {
-      const postEvent = consumeSnapshot(event, { rejectAccessors: true });
-      const postMessage = isObject(postEvent) ? postEvent.message : undefined;
+      const postMessage = ownDataField(event, "message");
       const canonical = messageContext
-        ? canonicalReadSessionMessage(postMessage, runner, messageContext)
-        : normalizeAssistantReadSessionCalls(postMessage, runner);
+        ? canonicalReadSessionMessage(postMessage.valid ? postMessage.value : undefined,
+          runner, messageContext, safeMessageFallback)
+        : normalizeAssistantReadSessionCalls(postMessage.valid ? postMessage.value : undefined, runner);
       replaceBoundarySlot(event, "message", canonical || safeMessageFallback, true);
     }
     if (eventType === "agent_end") callMap(runner)?.clear();
@@ -1737,7 +1993,11 @@ async function installSharedRunnerBoundary() {
       });
     };
     prototype.emitToolResult = async function bobbitBoundFinalToolResult(event, ...args) {
-      const context = readSessionContext(this, event?.toolCallId, event?.toolName, event?.input);
+      const toolCallId = ownDataField(event, "toolCallId");
+      const toolName = ownDataField(event, "toolName");
+      const input = ownDataField(event, "input");
+      const context = toolCallId.valid && toolName.valid && input.valid
+        ? readSessionContext(this, toolCallId.value, toolName.value, input.value) : undefined;
       const transformed = await originalEmitToolResult.call(this, event, ...args);
       return context ? boundFinalReadSessionEvent(event, transformed, context) : transformed;
     };
@@ -1771,8 +2031,8 @@ async function installSharedRunnerBoundary() {
       }
       const transformed = await originalEmitMessageEnd.call(this, { type: "message_end", message: working }, ...args);
       if (resultContext) {
-        const transformedSnapshot = consumeSnapshot(transformed, { rejectAccessors: true });
-        return canonicalReadSessionMessage(isObject(transformedSnapshot) ? transformedSnapshot : working, this, resultContext);
+        return canonicalReadSessionMessage(isObject(transformed) ? transformed : working,
+          this, resultContext, working);
       }
       const transformedCalls = inspectAssistantReadSessionCalls(transformed);
       if (transformedCalls !== SNAPSHOT_REJECTED && transformedCalls.length > 0) {

@@ -179,6 +179,147 @@ describe("tool result error bridge extension", () => {
 		assert.equal(projected.messages[0].toolResults[0].name, "read");
 	});
 
+	it("recovers the first valid candidate before oversized wrapper siblings", async () => {
+		const activate = await loadGeneratedExtension();
+		const { pi, handlers } = makePi();
+		activate(pi);
+		const envelope = {
+			total: 1,
+			returned: 1,
+			offsetStart: 23,
+			offsetEnd: 23,
+			messages: [{ index: 23, role: "assistant", text: "candidate-first" }],
+		};
+		const oversizedExtra = "IRRELEVANT_WRAPPER_EXTRA".repeat(100_000);
+		let irrelevantProxyReads = 0;
+		const irrelevantSibling = new Proxy({ type: "text", text: oversizedExtra }, {
+			getOwnPropertyDescriptor() {
+				irrelevantProxyReads += 1;
+				throw new Error("lower-priority sibling must not be inspected");
+			},
+		});
+		pi.tool({ name: "read_session" }, async () => ({
+			content: [
+				{ type: "text", text: JSON.stringify(envelope) },
+				irrelevantSibling,
+			],
+			details: {
+				session_id: "target",
+				envelope,
+				messages: envelope.messages,
+				extra: oversizedExtra,
+			},
+		}));
+
+		const result = await handlers.get("read_session")!(TARGET_CALL_ID, {
+			session_id: "target",
+			limit: 1,
+		});
+		assert.ok(finalJsonlBytes(result) <= FINAL_RESULT_MAX_BYTES);
+		assert.equal(irrelevantProxyReads, 0);
+		assert.equal(JSON.stringify(result).includes("IRRELEVANT_WRAPPER_EXTRA"), false);
+		assert.deepEqual(parseEnvelope(result).messages, [
+			{ index: 23, role: "assistant", text: "candidate-first" },
+		]);
+	});
+
+	it("honors direct and first-text candidate priority without merging lower conflicts", async () => {
+		const activate = await loadGeneratedExtension();
+		const direct = {
+			total: 1,
+			returned: 1,
+			offsetStart: 3,
+			offsetEnd: 3,
+			messages: [{ index: 3, role: "assistant", text: "direct-wins" }],
+		};
+		const text = {
+			...direct,
+			offsetStart: 4,
+			offsetEnd: 4,
+			messages: [{ index: 4, role: "assistant", text: "text-loses" }],
+		};
+		const nested = {
+			...direct,
+			offsetStart: 5,
+			offsetEnd: 5,
+			messages: [{ index: 5, role: "assistant", text: "details-loses" }],
+		};
+		const { pi, handlers } = makePi();
+		activate(pi);
+		pi.tool({ name: "read_session" }, async () => ({
+			...direct,
+			content: [{ type: "text", text: JSON.stringify(text) }],
+			details: { session_id: "target", envelope: nested },
+		}));
+
+		const result = await handlers.get("read_session")!(TARGET_CALL_ID, {
+			session_id: "target",
+			limit: 1,
+		});
+		assert.equal(parseEnvelope(result).messages[0].text, "direct-wins");
+
+		const { pi: textPi, handlers: textHandlers } = makePi();
+		activate(textPi);
+		textPi.tool({ name: "read_session" }, async () => ({
+			content: [
+				{ type: "text", text: JSON.stringify(text) },
+				{ type: "text", text: JSON.stringify(nested) },
+			],
+			details: { session_id: "target", envelope: nested },
+		}));
+		const textResult = await textHandlers.get("read_session")!(TARGET_CALL_ID, {
+			session_id: "target",
+			limit: 1,
+		});
+		assert.equal(parseEnvelope(textResult).messages[0].text, "text-loses");
+	});
+
+	it("fails hostile accessors and proxies closed without fabricating wrapper bytes", async () => {
+		const activate = await loadGeneratedExtension();
+		for (const attack of ["accessor", "proxy"] as const) {
+			const { pi, handlers } = makePi();
+			activate(pi);
+			let reads = 0;
+			const wrapper: any = {};
+			if (attack === "accessor") {
+				Object.defineProperty(wrapper, "content", {
+					enumerable: true,
+					get() {
+						reads += 1;
+						throw new Error("candidate getter must not run");
+					},
+				});
+			} else {
+				wrapper.details = new Proxy({}, {
+					getOwnPropertyDescriptor() {
+						reads += 1;
+						throw new Error("candidate proxy trap must not run");
+					},
+				});
+			}
+			pi.tool({ name: "read_session" }, async () => wrapper);
+
+			const result = await handlers.get("read_session")!(TARGET_CALL_ID, {
+				session_id: "target",
+				limit: 1,
+			});
+			const projected = parseEnvelope(result);
+			assert.equal(reads, 0, attack);
+			assert.equal(projected.truncatedBy, "extension_return_unrecognized", attack);
+			assert.deepEqual(projected.wrapperDiagnostics, { omitted: true }, attack);
+			assert.ok(finalJsonlBytes(result) <= FINAL_RESULT_MAX_BYTES, attack);
+		}
+
+		const { pi, handlers } = makePi();
+		activate(pi);
+		pi.tool({ name: "read_session" }, async () => ({ unknown: "x".repeat(2 * 1024 * 1024 + 1) }));
+		const oversized = await handlers.get("read_session")!(TARGET_CALL_ID, {
+			session_id: "target",
+			limit: 1,
+		});
+		assert.deepEqual(parseEnvelope(oversized).wrapperDiagnostics, { omitted: true });
+	});
+
 	it("never emits a zero-length targeted range when one complete BMP scalar is available", async () => {
 		const activate = await loadGeneratedExtension();
 		const { pi, handlers } = makePi();

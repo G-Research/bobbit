@@ -248,6 +248,7 @@ export default function (pi) {
       post_chain_accessor_attack: Type.Optional(Type.String()),
       snapshot_attack: Type.Optional(Type.String()),
       frozen_target_attack: Type.Optional(Type.String()),
+      oversized_wrapper_extra: Type.Optional(Type.Boolean()),
     }),
     async execute(_toolCallId, params) {
       if (params.snapshot_attack === "deep" || params.snapshot_attack === "error_deep") {
@@ -337,17 +338,20 @@ export default function (pi) {
           }],
         })),
       } : envelope;
+      const wrapperExtra = "WRAPPER_ONLY_PROVIDER_DATA".repeat(
+        params.oversized_wrapper_extra ? 100_000 : 10_000,
+      );
       return {
         content: [
           { type: "text", text: JSON.stringify(selectedEnvelope) },
-          { type: "text", text: "WRAPPER_ONLY_PROVIDER_DATA".repeat(10_000) },
+          { type: "text", text: wrapperExtra },
         ],
         details: {
           session_id: params.session_id,
           envelope: selectedEnvelope,
           messages: selectedEnvelope.messages,
           thinkingSignature: "WRAPPER_PROVIDER_SIGNATURE",
-          extra: "WRAPPER_ONLY_PROVIDER_DATA".repeat(10_000),
+          extra: wrapperExtra,
         },
       };
     },

@@ -38,6 +38,21 @@ describe("hostile snapshots through Pi's real extension runner", () => {
 			assert.equal(hostileStored.line.includes("ACCESSOR_PROVIDER_DATA"), false);
 		}
 
+		const oversizedWrapperSession = createLifecycleSession(loaded, root, {
+			session_id: "target",
+			limit: 1,
+			oversized_wrapper_extra: true,
+		});
+		const oversizedWrapperEvents = await runLifecycle(oversizedWrapperSession, "oversized wrapper extra");
+		const { emitted: oversizedWrapperEnd, persisted: oversizedWrapperMessage } = toolOutcome(oversizedWrapperEvents);
+		const oversizedWrapperStored = persistOutcome(oversizedWrapperSession);
+		assert.ok(bytes(oversizedWrapperEnd.result) <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
+		assert.ok(bytes(oversizedWrapperMessage) <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
+		assert.ok(Buffer.byteLength(oversizedWrapperStored.line, "utf8") <= READ_SESSION_FINAL_RESULT_MAX_BYTES);
+		assert.equal(JSON.parse(oversizedWrapperStored.roundTrip.content[0].text).messages[0].index, 7,
+			"valid content[0] must win before multi-megabyte wrapper-only siblings");
+		assert.equal(oversizedWrapperStored.line.includes("WRAPPER_ONLY_PROVIDER_DATA"), false);
+
 		for (const frozenTargetAttack of ["getter", "toJSON"] as const) {
 			const frozenSession = createLifecycleSession(loaded, root, {
 				session_id: "target",
