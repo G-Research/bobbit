@@ -112,6 +112,27 @@ All workflow suites must be safe when separate worktrees run simultaneously. Thi
 3. Add an audit test that rejects fixed listener ports, timestamp-only mutable roots, and non-owned recursive cleanup in unit-owned tests/harnesses. Allow explicit fixture URLs only when they are not listened on.
 4. Run two then three `npm run test:unit` processes from separate worktrees at the same commit, with independent `BOBBIT_V2_RUN_ID` values. Assert all pass with retries disabled for diagnosis, all created paths have distinct owner roots, no process binds a fixed port, and ledger reservations never exceed capacity. Repeat equivalent concurrent `test:browser` and `test:e2e` smoke subsets after their harness migration.
 
+## Portable regression matrix (all four named invariants)
+
+Each platform-specific failure class gets a concrete regression test that runs on every OS, simulating the constraint where the host cannot exhibit it natively:
+
+1. **TMPDIR symlinks** — fixture creates a symlinked alias of a per-test temp root (`fs.symlinkSync` dir link); where the platform denies directory symlink creation (Windows without Developer Mode), exercise the canonicalization helper through an injected `realpathSync` seam that returns a divergent canonical path. Applied to transcript trust, session recovery, and the containment helpers audited in §3.
+2. **Path separators** — containment/normalization helpers are tested with both `/` and `\\` inputs via `path.win32`/`path.posix` seams so Windows semantics are exercised on POSIX hosts and vice versa.
+3. **CRLF** — add regression coverage for line-ending-sensitive code paths: any parser/comparator of text fixtures (transcript JSONL reading, config/YAML loading, tool-description budget fixtures) is exercised with both `\n` and `\r\n` fixture variants; test fixtures that generate multi-line files write an explicit CRLF variant assertion. Git-level policy stays pinned by `.gitattributes`; the tests must not rely on checkout-time normalization.
+4. **Case-insensitivity** — path-identity/containment comparisons are tested through a case-folding seam: on case-insensitive hosts (macOS default, Windows) a native fixture writes `Foo/` and resolves `foo/`; on case-sensitive hosts the same invariant is exercised via an injected comparator/realpath seam returning case-divergent spellings. Any dedup/registry keyed by path must have an explicit case-collision regression test.
+
+## Host credential isolation
+
+Beyond filesystem roots (HOME/USERPROFILE/BOBBIT_DIR), the run-isolation owner must audit and neutralize inherited credential environment variables before any server/discovery import: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`/`GOOGLE_API_KEY`, `GITHUB_TOKEN`/`GH_TOKEN`, `CLAUDE_CODE_*`, `BOBBIT_*` (except test-owned), and any provider keys consumed by `src/server` config cascade or secrets store (grep `process.env` in `src/server/**` for the authoritative list). The v2 harness setup snapshots, deletes, and restores them (extending the existing `guardProcessEnv()` pattern), so unit results are identical whether or not the developer shell exports credentials. Add a regression test that seeds fake credential env vars and asserts discovery/initialization output is unchanged.
+
+## Test-retention policy
+
+Global rule for all implementation work under this design: do not weaken assertions, raise timeouts as a primary fix, `test.skip`, or delete tests to get green. Any test believed genuinely obsolete must be listed with justification in the PR description and removed only after that review. Fix ordering is: production bug → fix production; platform assumption in the test → fix the fixture/harness; never dilute the asserted behavior.
+
+## Coordination with `goal/fix-anthropic-c76d3af7`
+
+Commit `3505711e` (transcript-sanitizer canonicalization + MCP discovery fixture isolation) is applied here by cherry-pick so the identical patch deduplicates on merge. After the OAuth branch lands on the primary branch, merge the updated primary into this goal branch and verify no duplicate/conflicting hunks remain in `src/server/agent/transcript-sanitizer.ts` and `tests2/core/mcp-manager-marketplace-discovery.test.ts` before final verification runs.
+
 ## Durable test-authoring rules
 
 Add `docs/testing-v2/cross-os-test-authoring.md` and a one-line AGENTS.md pointer. The guide must require:
@@ -129,3 +150,5 @@ Add `docs/testing-v2/cross-os-test-authoring.md` and a one-line AGENTS.md pointe
 2. Run transcript trust/recovery and MCP discovery files with a symlink alias fixture and isolated HOME.
 3. Run base-ref, project UI, and tools cascade integration files alone and together.
 4. Run `npm run check`, then five consecutive `npm run test:unit` executions on each available OS. Record Node versions and whether symlink privileges were native or seam-simulated.
+5. Run the full `npm run test:browser` gate once after all changes to prove the browser suite is unaffected (in addition to the concurrent smoke subsets in §6).
+6. **Unavailable-OS coverage:** only macOS is guaranteed locally. Windows and Linux constraints are covered by (a) the seam-simulated regression matrix above (separators, CRLF, case, symlink-denied environments all exercised on every OS), and (b) CI: `.github/workflows/build-unit-gate.yml` currently runs only `ubuntu-latest` on Node 22.19.0 — extend it with an OS matrix (`ubuntu-latest`, `windows-latest`, `macos-latest`) so the unit gate is continuously exercised on all three; additionally include a Node 26 job on at least one OS so the unavailable-`localStorage` runtime class (§1) stays pinned across Node versions. The PR description must record exactly which platforms were verified natively, which via CI, and which via simulation seams.
