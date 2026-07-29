@@ -177,8 +177,8 @@ function sendStateWithCost(ws: WebSocket, sessionManager: SessionManager, sessio
 /**
  * Dispatch a successful live getState snapshot without splitting the durable
  * model/thinking tuple. A complete durable tuple remains authoritative while a
- * runtime mutation is in flight: live model metadata is reusable only when the
- * raw live provider, model, and thinking level all match durability exactly.
+ * runtime mutation is in flight. Live model metadata is reusable when its raw
+ * provider/model identity matches durability; thinking is repaired separately.
  */
 function sendLiveStateSnapshot(
 	ws: WebSocket,
@@ -199,13 +199,18 @@ function sendLiveStateSnapshot(
 	let rebuiltFromDurableTuple = false;
 
 	if (durableProvider && durableModelId && durableThinkingLevel !== undefined) {
-		const liveMatchesDurableTuple = liveModel?.provider === durableProvider
-			&& liveModel?.id === durableModelId
+		const liveMatchesDurableIdentity = liveModel?.provider === durableProvider
+			&& liveModel?.id === durableModelId;
+		const liveMatchesDurableTuple = liveMatchesDurableIdentity
 			&& data.thinkingLevel === durableThinkingLevel;
 		if (!liveMatchesDurableTuple) {
 			normalized = {
 				...normalized,
-				model: buildResolvedModelStateModel(durableProvider, durableModelId),
+				model: buildResolvedModelStateModel(
+					durableProvider,
+					durableModelId,
+					liveMatchesDurableIdentity ? liveModel : undefined,
+				),
 				thinkingLevel: durableThinkingLevel,
 			};
 			rebuiltFromDurableTuple = true;
