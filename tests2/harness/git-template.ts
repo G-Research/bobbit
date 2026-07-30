@@ -73,6 +73,28 @@ function removeContainer(container: string): void {
 	}
 }
 
+async function populatePrivateRepository(container: string, repository: string, env: NodeJS.ProcessEnv): Promise<void> {
+	mkdirSync(repository);
+	await runFixtureCommand("git", ["-c", "init.defaultBranch=master", "init", "--quiet", repository], { cwd: container, env });
+	await runFixtureCommand("git", ["config", "user.name", "Bobbit Test"], { cwd: repository, env });
+	await runFixtureCommand("git", ["config", "user.email", "bobbit-test@example.invalid"], { cwd: repository, env });
+	await runFixtureCommand("git", ["config", "core.autocrlf", "false"], { cwd: repository, env });
+	await runFixtureCommand("git", ["config", "commit.gpgsign", "false"], { cwd: repository, env });
+	const hooks = join(repository, ".git", "hooks-disabled");
+	mkdirSync(hooks);
+	await runFixtureCommand("git", ["config", "core.hooksPath", hooks], { cwd: repository, env });
+	writeFileSync(join(repository, "README.md"), README, "utf8");
+	writeFileSync(join(repository, ".gitattributes"), GITATTRIBUTES, "utf8");
+	await runFixtureCommand("git", ["add", "--", "README.md", ".gitattributes"], { cwd: repository, env });
+}
+
+async function recreatePrivateRepository(container: string, repository: string, env: NodeJS.ProcessEnv): Promise<void> {
+	// The template is not published until its commit succeeds, so deleting the
+	// whole private attempt is safer than guessing whether a timed-out commit took effect.
+	rmSync(repository, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 });
+	await populatePrivateRepository(container, repository, env);
+}
+
 /**
  * Prepare one committed `master` repository for this Vitest fork. The promise is
  * stored on `process`, so isolated module contexts in the same fork share the
@@ -89,21 +111,14 @@ export async function prepareGitTemplate(): Promise<string> {
 	shared.promise = (async () => {
 		const container = mkdtempSync(join(tmpdir(), "bb-git-template-"));
 		const repository = join(container, "repo");
-		mkdirSync(repository);
 		const env = templateEnvironment();
 		try {
-			await runFixtureCommand("git", ["-c", "init.defaultBranch=master", "init", "--quiet", repository], { cwd: container, env });
-			await runFixtureCommand("git", ["config", "user.name", "Bobbit Test"], { cwd: repository, env });
-			await runFixtureCommand("git", ["config", "user.email", "bobbit-test@example.invalid"], { cwd: repository, env });
-			await runFixtureCommand("git", ["config", "core.autocrlf", "false"], { cwd: repository, env });
-			await runFixtureCommand("git", ["config", "commit.gpgsign", "false"], { cwd: repository, env });
-			const hooks = join(repository, ".git", "hooks-disabled");
-			mkdirSync(hooks);
-			await runFixtureCommand("git", ["config", "core.hooksPath", hooks], { cwd: repository, env });
-			writeFileSync(join(repository, "README.md"), README, "utf8");
-			writeFileSync(join(repository, ".gitattributes"), GITATTRIBUTES, "utf8");
-			await runFixtureCommand("git", ["add", "--", "README.md", ".gitattributes"], { cwd: repository, env });
-			await runFixtureCommand("git", ["commit", "--quiet", "-m", "Initial fixture"], { cwd: repository, env });
+			await populatePrivateRepository(container, repository, env);
+			await runFixtureCommand("git", ["commit", "--quiet", "-m", "Initial fixture"], {
+				cwd: repository,
+				env,
+				onTimedOutAttemptClosed: () => recreatePrivateRepository(container, repository, env),
+			});
 
 			const canonical = realpathSync(repository);
 			shared.path = canonical;

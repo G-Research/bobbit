@@ -15,6 +15,11 @@ export interface FixtureCommandOptions {
 	maxOutputBytes?: number;
 	/** Literal values removed from diagnostics. Environment secrets are detected too. */
 	redact?: readonly string[];
+	/**
+	 * Restore private transactional state after a timed-out process has closed and
+	 * before retrying. A thrown cleanup error is sanitized as FixtureCommandError.
+	 */
+	onTimedOutAttemptClosed?: (attempt: number) => void | Promise<void>;
 }
 
 export interface FixtureCommandResult {
@@ -152,14 +157,15 @@ async function runAttempt(
 		let timedOut = false;
 		let outputExceeded = false;
 		let settled = false;
+		let spawnCause: unknown;
+		let killCause: unknown;
+		let terminationRequested = false;
 		let timeout: FixtureCommandTimer | undefined;
-		let forcedFinish: FixtureCommandTimer | undefined;
 
 		const finish = (result: { stdout: string; stderr: string } | AttemptFailure): void => {
 			if (settled) return;
 			settled = true;
 			timeout?.cancel();
-			forcedFinish?.cancel();
 			resolve(result);
 		};
 
@@ -178,39 +184,50 @@ async function runAttempt(
 			return;
 		}
 
+		const requestTermination = (): void => {
+			if (terminationRequested) return;
+			terminationRequested = true;
+			try {
+				child.kill("SIGKILL");
+			} catch (cause) {
+				// A kill error is diagnostic only. The attempt still cannot settle until
+				// Node confirms `close`; retrying while the child may live is unsafe.
+				killCause = cause;
+			}
+		};
+
 		const append = (current: Buffer<ArrayBufferLike>, chunk: Buffer<ArrayBufferLike> | string): Buffer<ArrayBufferLike> => {
 			const next = Buffer.concat([current, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
 			if (next.length <= maxOutputBytes) return next;
 			outputExceeded = true;
-			child.kill("SIGKILL");
+			requestTermination();
 			return next.subarray(0, maxOutputBytes);
 		};
 		child.onStdout(chunk => { stdout = append(stdout, chunk); });
 		child.onStderr(chunk => { stderr = append(stderr, chunk); });
-		child.onError(cause => {
-			finish({ exitCode: null, signal: null, stderr: stderr.toString("utf8"), timedOut, cause });
-		});
+		// Node emits `close` after `error`. Retain the spawn failure for the final
+		// diagnostic, but never let a retry overlap a child whose close is unknown.
+		child.onError(cause => { spawnCause ??= cause; });
 		child.onClose((exitCode, signal) => {
 			const stderrText = stderr.toString("utf8");
-			if (exitCode === 0 && !timedOut && !outputExceeded) {
+			// A timeout can race delivery of an already-successful close. Exit zero is
+			// authoritative and must not turn a completed non-idempotent command into a retry.
+			if (exitCode === 0 && spawnCause === undefined && !outputExceeded) {
 				finish({ stdout: stdout.toString("utf8"), stderr: stderrText });
 				return;
 			}
 			const suffix = outputExceeded ? `\nfixture command output exceeded ${maxOutputBytes} bytes` : "";
-			finish({ exitCode, signal, stderr: `${stderrText}${suffix}`.trim(), timedOut });
+			finish({
+				exitCode,
+				signal,
+				stderr: `${stderrText}${suffix}`.trim(),
+				timedOut,
+				cause: spawnCause ?? killCause,
+			});
 		});
 		timeout = backend.schedule(() => {
 			timedOut = true;
-			child.kill("SIGKILL");
-			// A platform adapter can fail to deliver even SIGKILL. Bound the caller's
-			// wait regardless; commands are direct children because shell is false.
-			forcedFinish = backend.schedule(() => finish({
-				exitCode: null,
-				signal: "SIGKILL",
-				stderr: stderr.toString("utf8"),
-				timedOut: true,
-			}), 1_000);
-			forcedFinish.unref();
+			requestTermination();
 		}, timeoutMs);
 		timeout.unref();
 	});
@@ -247,28 +264,47 @@ export async function runFixtureCommandWithBackend(
 	const secrets = secretValues(options);
 	const command = renderCommand(file, args, secrets);
 	let lastFailure: AttemptFailure | undefined;
+	let attemptsMade = 0;
+
+	const commandError = (failure: AttemptFailure, cleanupCause?: unknown): FixtureCommandError => {
+		const stderr = redact(failure.stderr, secrets);
+		const cleanupMessage = cleanupCause instanceof Error
+			? `: ${redact(cleanupCause.message, secrets)}`
+			: typeof cleanupCause === "string"
+				? `: ${redact(cleanupCause, secrets)}`
+				: "";
+		const reason = cleanupCause !== undefined
+			? `timed-out attempt cleanup failed${cleanupMessage}`
+			: failure.timedOut
+				? `timed out after ${timeoutMs}ms`
+				: failure.exitCode === null
+					? `failed to start${failure.cause instanceof Error ? `: ${redact(failure.cause.message, secrets)}` : ""}`
+					: `exited with code ${failure.exitCode}${failure.signal ? ` (${failure.signal})` : ""}`;
+		const detail = stderr ? `\nstderr:\n${stderr}` : "";
+		return new FixtureCommandError(
+			`[tests2/fixture-command] ${command} ${reason} after ${attemptsMade} attempt${attemptsMade === 1 ? "" : "s"}${detail}`,
+			attemptsMade,
+			{ ...failure, stderr },
+		);
+	};
 
 	for (let attempt = 1; attempt <= attempts; attempt++) {
+		attemptsMade = attempt;
 		const result = await runAttempt(file, args, options, timeoutMs, maxOutputBytes, backend);
 		if ("stdout" in result) return { ...result, attempts: attempt, exitCode: 0 };
 		lastFailure = result;
 		if (attempt < attempts) {
+			if (result.timedOut && options.onTimedOutAttemptClosed) {
+				try {
+					await options.onTimedOutAttemptClosed(attempt);
+				} catch (cause) {
+					throw commandError(result, cause);
+				}
+			}
 			const delay = Math.min(maxRetryDelayMs, retryDelayMs * (2 ** (attempt - 1)));
 			await backend.sleep(delay);
 		}
 	}
 
-	const failure = lastFailure!;
-	const stderr = redact(failure.stderr, secrets);
-	const reason = failure.timedOut
-		? `timed out after ${timeoutMs}ms`
-		: failure.exitCode === null
-			? `failed to start${failure.cause instanceof Error ? `: ${redact(failure.cause.message, secrets)}` : ""}`
-			: `exited with code ${failure.exitCode}${failure.signal ? ` (${failure.signal})` : ""}`;
-	const detail = stderr ? `\nstderr:\n${stderr}` : "";
-	throw new FixtureCommandError(
-		`[tests2/fixture-command] ${command} ${reason} after ${attempts} attempt${attempts === 1 ? "" : "s"}${detail}`,
-		attempts,
-		{ ...failure, stderr },
-	);
+	throw commandError(lastFailure!);
 }

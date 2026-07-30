@@ -1560,6 +1560,15 @@
       }
     },
     {
+      "path": "tests2/integration/fixture-command-timeout-real-git.test.ts",
+      "reason": "Focused Group D real-Git/platform regression for the timeout-versus-successful-commit race: reproduces the blind retry's code-1 result, proves private transactional recreation, confirms exit-zero close wins the timeout race, and pins close-before-cleanup plus FixtureCommandError redaction.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
       "path": "tests2/core/tier1-spawn-guard-policy.test.ts",
       "reason": "Subprocess-free policy coverage for every guarded child-process API, migration diagnostics, ESM synchronization, restoration, and idempotent ownership through an injectable target.",
       "execution": {
