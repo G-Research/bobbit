@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { afterEach, describe, it, vi } from "vitest";
+import { describe, it, vi } from "vitest";
 
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
 import { handleSetupFailure } from "../../src/server/agent/session-setup.ts";
@@ -12,8 +12,6 @@ import { redactSensitive } from "../../src/server/auth/redact.js";
 import { BOBBIT_SYSTEM_AUTHOR } from "../../src/server/agent/message-author.js";
 import { applyModelString, type ReviewModelRpc } from "../../src/server/agent/review-model-override.js";
 import { handleWebSocketConnection } from "../../src/server/ws/handler.ts";
-
-afterEach(() => vi.useRealTimers());
 
 const API_KEY = "sk-or-" + "a".repeat(28);
 const BEARER = "bearer_secret_" + "b".repeat(40);
@@ -232,18 +230,27 @@ describe("model setup error redaction", () => {
 
 	it("session-manager controlled fallback errors and logs redact provider secrets", async () => {
 		const captured = captureConsole("warn");
+		// Keep both production retry paths, but make only their delay immediate. A
+		// process-wide fake clock can return before a later promise continuation
+		// schedules the next retry, leaving this test hung until Vitest retries it.
+		const retryDelay = vi.spyOn(globalThis, "setTimeout").mockImplementation((callback, _delay, ...args) => {
+			callback(...args);
+			return 0 as unknown as ReturnType<typeof setTimeout>;
+		});
+		let setModelCalls = 0;
+		let retryDelayCalls = 0;
 		let thrown: unknown;
 		try {
-			vi.useFakeTimers();
 			const rpc = {
 				async setModel(_provider: string, _modelId: string) {
+					setModelCalls++;
 					throw new Error(`provider rejected: api_key=${API_KEY}; Authorization: Bearer ${BEARER}; cause=provider unavailable`);
 				},
 				async getState() {
 					return { model: { provider: "unset", id: "unset" } };
 				},
 			};
-			const pending = (SessionManager.prototype as any).tryAutoSelectModel.call({
+			await (SessionManager.prototype as any).tryAutoSelectModel.call({
 				preferencesStore: {
 					get(key: string) {
 						return ({ allowSessionModelFallback: true, "default.sessionModel": "openai/dead-fallback" } as Record<string, unknown>)[key];
@@ -262,14 +269,16 @@ describe("model setup error redaction", () => {
 				clients: new Set(),
 				rpcClient: rpc,
 			});
-			const settled = pending.then(() => undefined, (error: unknown) => error);
-			await vi.runAllTimersAsync();
-			thrown = await settled;
+		} catch (error) {
+			thrown = error;
 		} finally {
-			vi.useRealTimers();
+			retryDelayCalls = retryDelay.mock.calls.length;
+			retryDelay.mockRestore();
 			captured.restore();
 		}
 
+		assert.equal(setModelCalls, 4, "role and controlled-fallback provider retries must both run");
+		assert.equal(retryDelayCalls, 2, "both retry delays should use the immediate test seam");
 		assert.ok(thrown instanceof Error);
 		assert.match(thrown.message, /role model "anthropic\/dead-role" failed/);
 		assert.match(thrown.message, /provider unavailable/);
