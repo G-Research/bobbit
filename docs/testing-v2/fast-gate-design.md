@@ -13,7 +13,7 @@ npm run test:unit
   -> vitest run --config vitest.config.ts --silent=passed-only
 ```
 
-The hard outcome is two consecutive green solo runs at or below 300 seconds, followed by three simultaneous green runs on the Windows 12-core acceptance machine. The stretch target is 180 seconds. `retry: 3` remains configured; passing by deleting coverage, weakening assertions, or relocating any file other than the two named below is not allowed.
+The hard outcome is two consecutive green solo runs at or below 300 seconds, followed by three simultaneous green runs on the Windows 12-core acceptance machine. The stretch target is 180 seconds. This historical design originally retained `retry: 3`; the current cross-OS policy supersedes it with `retry: 0`. Passing by deleting coverage, weakening assertions, or relocating any file other than the two named below is not allowed.
 
 ## Pre-implementation baseline
 
@@ -55,7 +55,7 @@ function resolveMaxWorkers(env = process.env): number {
 }
 ```
 
-The resolved value is applied at top-level `test.maxWorkers`; project configuration must never raise it. `VITEST_MAX_WORKERS=1` and `=2` are supported diagnostic reductions; zero, fractions below one, non-numbers, and values above three resolve to the fixed default/cap as shown. A replacement for `tests2/core/unit-lanes-scheduling.test.ts` pins this function, the absence of ledger imports, and a three-worker default. `retry: 3`, `passWithNoTests`, console behavior, timeouts, and V8 coverage settings remain in the shared configuration.
+The resolved value is applied at top-level `test.maxWorkers`; project configuration must never raise it. `VITEST_MAX_WORKERS=1` and `=2` are supported diagnostic reductions; zero, fractions below one, non-numbers, and values above three resolve to the fixed default/cap as shown. A replacement for `tests2/core/unit-lanes-scheduling.test.ts` pins this function, the absence of ledger imports, and a three-worker default. `retry: 0`, `passWithNoTests`, console behavior, timeouts, and V8 coverage settings remain in the shared configuration.
 
 ### Four unit projects
 
@@ -204,7 +204,7 @@ The standard reporter remains enabled. A retry that makes a file exceed budget s
 - `npm run test:e2e` remains `test:e2e:v2`. `run-e2e-v2.mjs::classifyDaily` mechanically discovers exactly the two Group D files, and `runGroupD` still uses one worker plus `BOBBIT_V2_E2E_VITEST=1`.
 - `npm run test:v2`, bundle checks, browser chaos, and full-suite scripts may retain their own orchestration. The prohibition is specifically the `test:unit` path.
 - External-service fencing remains active. Neither unit nor E2E relocation may contact GitHub, a non-loopback HTTP endpoint, or a real LLM.
-- `retry: 3` remains in `vitest.config.ts`; no project overrides it downward.
+- `retry: 0` remains in `vitest.config.ts`; no project may override it upward.
 
 ## Windows behavior
 

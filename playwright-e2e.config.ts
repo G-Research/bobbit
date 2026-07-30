@@ -74,11 +74,10 @@ const recordScreenReporters: Array<[string]> = process.env.RECORDSCREEN === "1"
 	? [["./tests/e2e/report/tier-2-5-reporter.ts"]]
 	: [];
 
-// Keep three retries as the project-level flake absorber for broad E2E runs.
-// Deterministic failures still fail after the retry budget is exhausted.
+// Workflow E2E runs must expose every first-attempt failure for root-cause fixes.
 export default {
 	timeout: 30_000,
-	retries: 3,
+	retries: 0,
 	fullyParallel: true,
 	// Top-level cap. Playwright treats this as the max parallelism across
 	// all projects. Per-project `workers` fields below further constrain

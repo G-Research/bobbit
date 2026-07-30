@@ -36,7 +36,8 @@ const shared = {
 	pool: "forks" as const,
 	isolate: false,
 	maxWorkers: MAX_WORKERS,
-	retry: 3,
+	// Test retries hide first-attempt flakes; fix the root cause instead.
+	retry: 0,
 	passWithNoTests: true,
 	disableConsoleIntercept: true,
 	testTimeout: 30_000,
