@@ -833,7 +833,12 @@ export class RemoteAgent {
 	 * (`initial` false) failures schedule the next retry silently.
 	 */
 	private _connectWs(initial: boolean): Promise<void> {
-		const wsUrl = gatewayWsUrl(gatewayRoute(`/ws/${encodeURIComponent(this._sessionId)}`), this._gatewayUrl);
+		// An unset per-agent base means "use the active gateway", not an explicit
+		// empty operator URL. Non-empty bases remain authoritative on reconnect.
+		const wsUrl = gatewayWsUrl(
+			gatewayRoute(`/ws/${encodeURIComponent(this._sessionId)}`),
+			this._gatewayUrl || undefined,
+		);
 
 		return new Promise<void>((resolve, reject) => {
 			const ws = new WebSocket(wsUrl);

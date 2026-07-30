@@ -6,6 +6,10 @@ import vm from "node:vm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "lit";
 import { PREVIEW_SWIPE_SCRIPT, PREVIEW_THEME_BRIDGE } from "../../src/shared/preview-bridge-scripts.js";
+import {
+	__resetGatewayConnectionForTests,
+	commitGatewayConnection,
+} from "../../src/app/gateway-fetch.js";
 import { EditRenderer } from "../../src/ui/tools/renderers/EditRenderer.js";
 import { HtmlRenderer } from "../../src/ui/tools/renderers/HtmlRenderer.js";
 import {
@@ -146,6 +150,7 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 	document.body.innerHTML = "";
 	localStorage.clear();
+	__resetGatewayConnectionForTests();
 	window.location.hash = "";
 });
 
@@ -457,8 +462,7 @@ describe("HTML renderer delegation", () => {
 
 	it("EditRenderer fetches completed HTML and delegates the cached bytes through the same preparation", async () => {
 		window.location.hash = "#/session/11111111-1111-4111-8111-111111111111";
-		localStorage.setItem("gateway.url", "https://gateway.test");
-		localStorage.setItem("gateway.token", "test-token");
+		commitGatewayConnection("https://gateway.test", "test-token");
 		const fetchMock = vi.fn().mockResolvedValue({
 			ok: true,
 			json: async () => ({ content: AUTHORED_HTML }),
@@ -474,9 +478,13 @@ describe("HTML renderer delegation", () => {
 		renderer.render(params, result, false);
 		await ready;
 		expect(fetchMock).toHaveBeenCalledTimes(1);
-		expect(fetchMock.mock.calls[0][0]).toContain("/api/sessions/11111111-1111-4111-8111-111111111111/file-content");
+		expect(fetchMock.mock.calls[0][0]).toContain("https://gateway.test/api/sessions/11111111-1111-4111-8111-111111111111/file-content");
 		expect(fetchMock.mock.calls[0][0]).toContain("snapshotId=edit-call-theme");
-		expect(fetchMock.mock.calls[0][1]).toEqual({ headers: { Authorization: "Bearer test-token" } });
+		const requestInit = fetchMock.mock.calls[0][1] as RequestInit;
+		expect(requestInit.credentials).toBe("include");
+		const requestHeaders = new Headers(requestInit.headers);
+		expect(requestHeaders.get("Authorization")).toBe("Bearer test-token");
+		expect(requestHeaders.get("Content-Type")).toBe("application/json");
 
 		const container = document.createElement("div");
 		document.body.appendChild(container);

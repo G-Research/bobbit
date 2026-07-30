@@ -109,7 +109,9 @@ describe("CostPopover production component cache-hit display", () => {
 		const popover = container.querySelector("cost-popover")!;
 		expect(popover.textContent).toContain("Delegates");
 		expect(popover.textContent).toContain("Child agent");
-		expect(calls).toEqual(["/api/sessions/session-cost/cost/breakdown"]);
+		expect(calls).toEqual([
+			new URL("/api/sessions/session-cost/cost/breakdown", window.location.origin).href,
+		]);
 	});
 });
 
