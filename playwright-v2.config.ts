@@ -15,9 +15,9 @@ import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { seedTransformCacheForRunDir } from "./scripts/testing-v2/pwtest-cache.js";
-import { capturePlaywrightBrowserRegistry, createRunArtifactDirectory, getRunRoot } from "./tests2/harness/run-isolation.js";
+import { capturePlaywrightBrowserRegistry, createRunArtifactDirectory, getRunRoot, isOwnedRunPath } from "./tests2/harness/run-isolation.js";
 
 // This config is evaluated before browser workers import the isolated gateway
 // harness. Pin the host Playwright cache now; workers can then isolate HOME for
@@ -30,10 +30,16 @@ capturePlaywrightBrowserRegistry();
 getRunRoot();
 const playwrightArtifactsDir = createRunArtifactDirectory("playwright-v2");
 const playwrightResultsDir = join(playwrightArtifactsDir, "test-results");
-// The budget checker executes after Playwright exits, so retain one stable,
-// ignored summary instead of accumulating UUID-named reports in the worktree.
-const playwrightBudgetReport = ".profiles/testing-v2/budgets/playwright-report.json";
-mkdirSync(resolve(".profiles/testing-v2/budgets"), { recursive: true });
+// The browser coordinator supplies a unique report path inside its owned run
+// root. Direct config use gets the same isolated default; never fall back to a
+// shared checkout-local "latest" report that concurrent coordinators could race.
+function resolvePlaywrightBudgetReport(): string {
+	const report = resolve(process.env.BOBBIT_V2_PLAYWRIGHT_REPORT_PATH?.trim() || join(playwrightArtifactsDir, "playwright-report.json"));
+	if (!isOwnedRunPath(report)) throw new Error(`Playwright report must be inside the owned run root: ${report}`);
+	mkdirSync(dirname(report), { recursive: true });
+	return report;
+}
+const playwrightBudgetReport = resolvePlaywrightBudgetReport();
 
 function e2eTempRoot(): string {
 	if (existsSync("/.dockerenv")) return "/tmp";

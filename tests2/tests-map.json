@@ -1740,6 +1740,15 @@
       }
     },
     {
+      "path": "tests2/core/browser-run-wrapper.test.ts",
+      "reason": "Pins the browser coordinator's unique temp-root report handoff and exact forwarding of retry-free Playwright flags.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/dom/v2-dom-storage-environment.test.ts",
       "reason": "Regression coverage proving the v2-dom setup replaces an absent runtime storage global with the current happy-dom window storage so gatewayFetch reaches its deterministic fetch stub.",
       "execution": {

@@ -158,13 +158,15 @@ describe("workflow run isolation", () => {
 		expect(source.indexOf("capturePlaywrightBrowserRegistry();")).toBeLessThan(source.indexOf("prepareE2ERuntimeCaches();"));
 	});
 
-	it("keeps v2 Playwright results in the owned run root and overwrites one budget report", () => {
+	it("keeps v2 Playwright results and reports in the owned run root", () => {
 		const source = readFileSync("playwright-v2.config.ts", "utf8");
 		expect(source).toContain("createRunArtifactDirectory");
 		expect(source.indexOf("getRunRoot();")).toBeLessThan(source.indexOf("createRunArtifactDirectory(\"playwright-v2\")"));
 		expect(source).toContain('outputDir: playwrightResultsDir');
 		expect(source).toContain('outputFile: playwrightBudgetReport');
-		expect(source).toContain('const playwrightBudgetReport = ".profiles/testing-v2/budgets/playwright-report.json"');
+		expect(source).toContain("BOBBIT_V2_PLAYWRIGHT_REPORT_PATH");
+		expect(source).toContain("isOwnedRunPath(report)");
+		expect(source).not.toContain(".profiles/testing-v2/budgets/playwright-report.json");
 		expect(source).not.toContain("test-results-v2-${playwrightRunId}");
 		expect(source).not.toContain("playwright-report-${playwrightRunId}.json");
 	});
