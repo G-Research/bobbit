@@ -30,27 +30,18 @@
  * Making this test-scoped would cause silent cross-test contamination.
  */
 import { test as base } from "@playwright/test";
-import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { awaitableRm } from "./test-utils/cleanup.js";
 import { withDistServerImportLock } from "./test-utils/dist-import-lock.js";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { createRunChild, installRunIsolation } from "../../tests2/harness/run-isolation.js";
+
+installRunIsolation();
 import { fileURLToPath } from "node:url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..", "..");
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
-
-// Inside Docker containers, /workspace is a bind-mount with ~10-20x slower I/O
-// (9P/gRPC layer on Docker Desktop). Put write-heavy temp dirs on the container's
-// local overlay FS instead.  On the host, use os.tmpdir() to guarantee the CWD
-// is outside the git repo — otherwise isGitRepo() returns true for the project
-// rootPath and sessions auto-create worktrees (slow, conflicts with git state).
-const E2E_TEMP_ROOT = existsSync("/.dockerenv")
-	? "/tmp"
-	: process.platform === "win32"
-		? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
-		: join(realpathSync(tmpdir()), "bobbit-e2e");
 
 export interface GatewayInfo {
 	port: number;
@@ -75,16 +66,9 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 	enableWorktreePool: [false, { scope: "worker", option: true }],
 
 	gateway: [async ({ enableWorktreePool }, use, workerInfo) => {
-		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
-		// Include pid + a per-worker counter so retries don't collide with a
-		// previous worker's teardown that still holds file handles on Windows.
-		let bobbitDir = join(
-			E2E_TEMP_ROOT,
-			`.e2e-inproc-${process.pid}-${workerInfo.workerIndex}-${Date.now()}`,
-		);
-
-		// Clean slate (usually a no-op since the dir name is fresh)
-		rmSync(bobbitDir, { recursive: true, force: true });
+		// Each retry gets a distinct child owned by this coordinator. Do not use a
+		// shared temp parent: a concurrent legacy E2E run may still own siblings.
+		let bobbitDir = createRunChild(`e2e-realpush-${process.pid}-${workerInfo.workerIndex}`);
 		mkdirSync(join(bobbitDir, "state"), { recursive: true });
 		const agentDir = join(bobbitDir, "agent");
 		mkdirSync(agentDir, { recursive: true });
