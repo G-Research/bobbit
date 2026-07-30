@@ -40,6 +40,9 @@ export function createE2ERunPaths(tempDirectory = tmpdir()) {
     appDataDir: join(root, "appdata"),
     xdgDir: join(root, "xdg"),
     tempDir: join(root, "tmp"),
+    // dist-import-lock creates its lock non-recursively below this legacy
+    // os.tmpdir() child, so the coordinator must own and create it up front.
+    legacyTempParent: join(root, "tmp", "bobbit-e2e"),
   };
 }
 
@@ -155,7 +158,7 @@ export function createIsolatedE2EEnvironment(paths, inheritedEnv = process.env, 
     XDG_CONFIG_HOME: join(paths.xdgDir, "config"),
     XDG_CACHE_HOME: join(paths.xdgDir, "cache"),
   };
-  for (const directory of Object.values(owned)) mkdirSync(directory, { recursive: true });
+  for (const directory of [...Object.values(owned), paths.legacyTempParent]) mkdirSync(directory, { recursive: true });
   Object.assign(env, owned, { PLAYWRIGHT_BROWSERS_PATH: browserRegistry });
   if (resolveChildTmpdir(env, platform) !== paths.tempDir) {
     throw new Error("isolated E2E environment did not confine the child temp directory");

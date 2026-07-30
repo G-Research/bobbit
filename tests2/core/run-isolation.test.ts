@@ -215,6 +215,11 @@ describe("workflow run isolation", () => {
 			expect(env.TMPDIR).toBe(paths.tempDir);
 			expect(env.TEMP).toBe(paths.tempDir);
 			expect(env.TMP).toBe(paths.tempDir);
+			// dist-import-lock creates its lock with recursive:false under this
+			// legacy os.tmpdir() child, which must remain coordinator-owned.
+			expect(paths.legacyTempParent).toBe(join(paths.tempDir, "bobbit-e2e"));
+			expect(existsSync(paths.legacyTempParent)).toBe(true);
+			expect(isOwnedRunChild(paths.root, paths.legacyTempParent)).toBe(true);
 			expect(env.tmpdir).toBeUndefined();
 			expect(env.temp).toBeUndefined();
 			expect(env.tmp).toBeUndefined();
