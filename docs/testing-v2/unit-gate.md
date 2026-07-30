@@ -12,7 +12,7 @@ The historical design and qualification evidence remain in [`fast-gate-design.md
 vitest run --config vitest.config.ts --silent=passed-only
 ```
 
-`vitest.config.ts` applies a fixed suite-wide cap of three workers and `retry: 3`. `VITEST_MAX_WORKERS=1` or `2` may lower the cap for diagnosis; it cannot raise the cap above three.
+`vitest.config.ts` applies a fixed suite-wide cap of three workers and `retry: 0`. A first-attempt failure fails the gate and must be root-caused; retry budgets are never used to absorb flakes. `VITEST_MAX_WORKERS=1` or `2` may lower the cap for diagnosis; it cannot raise the cap above three.
 
 Nothing on the unit command path reserves a test ledger slot or gateway-boot lease, launches a lane runner, writes lane logs, or cost-shards the inventory. Browser, E2E, and compatibility tooling may still use their own orchestration; that does not make it part of `test:unit`.
 
