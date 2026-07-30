@@ -224,13 +224,32 @@ describe("browser cookie eligibility", () => {
 		});
 	});
 
-	it("does not enable the Vite port exception while serving the production UI", () => {
-		assertDenied("origin-mismatch", {
+	it("allows direct cross-port binding only with real bearer or an exact centrally verified cookie", () => {
+		const crossPort = {
 			headers: {
 				host: "bobbit.example:3001",
 				origin: "https://bobbit.example:5173",
 			},
+		};
+		assert.equal(classify(crossPort).mayBootstrap, true);
+		assert.deepEqual(classify(crossPort, {
+			authentication: { source: "signed-cookie", needsRenewal: true },
+		}), {
+			mayBootstrap: false,
+			mayRenew: true,
+			reason: "eligible-renewal",
 		});
+		assertDenied("origin-mismatch", crossPort, { authentication: { source: "localhost-trusted" } });
+		assertDenied("origin-mismatch", crossPort, { authentication: { source: "other" } });
+	});
+
+	it("uses normalized hostname equivalence for direct cross-port binding", () => {
+		assert.equal(classify({
+			headers: {
+				host: "bobbit.example:3001",
+				origin: "https://BOBBIT.EXAMPLE.:5173",
+			},
+		}).mayBootstrap, true);
 	});
 
 	it("requires the exact Fetch Metadata contract", () => {
@@ -271,12 +290,12 @@ describe("browser cookie eligibility", () => {
 		}
 	});
 
-	it("rejects mismatched production origins including port mismatches", () => {
+	it("rejects mismatched production hosts and schemes", () => {
 		assertDenied("origin-mismatch", { headers: { origin: "https://other.example" } });
 		assertDenied("origin-mismatch", {
 			headers: {
 				host: "bobbit.example:3001",
-				origin: "https://bobbit.example:5173",
+				origin: "https://subdomain.bobbit.example:5173",
 			},
 		});
 	});

@@ -621,6 +621,59 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("in-process gateway mounted a
 	});
 });
 
+describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("direct cross-port browser cookie binding", () => {
+	let running: RunningGateway;
+
+	beforeAll(async () => {
+		running = await bootGateway(MOUNT, "localhost", true);
+	}, 60_000);
+
+	afterAll(async () => {
+		await running?.shutdown();
+	}, 60_000);
+
+	it("binds a real-bearer bootstrap to an equivalent trailing-dot UI host", async () => {
+		const uiOrigin = "http://localhost.:5173";
+		const bootstrap = await fetch(`${running.baseUrl}/api/health`, {
+			headers: {
+				...authHeaders(),
+				Origin: uiOrigin,
+				"Sec-Fetch-Site": "same-site",
+				"Sec-Fetch-Mode": "cors",
+			},
+		});
+		expect(bootstrap.status).toBe(200);
+		expect(bootstrap.headers.get("access-control-allow-origin")).toBe(uiOrigin);
+		const setCookie = bootstrap.headers.get("set-cookie") ?? "";
+		expect(setCookie).toContain("bobbit_session=v1.2.");
+		expect(setCookie).toContain(`Path=${MOUNT}/`);
+		const cookie = cookiePair(setCookie);
+
+		const reload = await fetch(`${running.baseUrl}/api/health`, {
+			headers: { Cookie: cookie, Origin: uiOrigin },
+		});
+		expect(reload.status).toBe(200);
+		expect(reload.headers.get("access-control-allow-origin")).toBe(uiOrigin);
+
+		const wrongPortOrigin = "http://localhost.:5174";
+		const mismatch = await fetch(`${running.baseUrl}/api/health`, {
+			headers: { Cookie: cookie, Origin: wrongPortOrigin },
+		});
+		expect(mismatch.status).toBe(401);
+		expect(mismatch.headers.get("access-control-allow-origin")).toBeNull();
+
+		const viewer = await authenticateSocket(`${running.wsOrigin}${MOUNT}/ws/viewer`, {
+			origin: uiOrigin,
+			headers: { Cookie: cookie },
+		}, "localhost");
+		viewer.close();
+		await expectRejectedUpgrade(`${running.wsOrigin}${MOUNT}/ws/viewer`, {
+			origin: wrongPortOrigin,
+			headers: { Cookie: cookie },
+		});
+	});
+});
+
 describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("root-mounted gateway compatibility", () => {
 	let running: RunningGateway;
 	let originalShell: string;

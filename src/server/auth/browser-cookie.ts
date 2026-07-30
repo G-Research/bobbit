@@ -149,15 +149,11 @@ export function classifyBrowserCookieEligibility(
 		if (browserOrigin.protocol === "http:" && !isLoopbackHostname(browserOrigin.hostname)) {
 			return deny("insecure-non-loopback-origin");
 		}
-		if (normalizedFetchSite === "same-site") {
-			// The base-path compatibility extension is specifically for a bundled UI
-			// and gateway on the same scheme/hostname but different ports. An exact
-			// origin is serialized by browsers as `same-origin`, not `same-site`.
-			if (browserOrigin.origin === requestOrigin.origin) return deny("invalid-fetch-site");
-			if (!isSameSchemeHost(browserOrigin, requestOrigin)) return deny("origin-mismatch");
-		} else if (!isAcceptedOrigin(browserOrigin, requestOrigin, context)) {
-			return deny("origin-mismatch");
+		if (normalizedFetchSite === "same-site" && browserOrigin.origin === requestOrigin.origin) {
+			// An exact origin is serialized by browsers as `same-origin`, not `same-site`.
+			return deny("invalid-fetch-site");
 		}
+		if (!isAcceptedOrigin(browserOrigin, requestOrigin, context)) return deny("origin-mismatch");
 	}
 
 	switch (context.authentication.source) {
@@ -290,7 +286,15 @@ function isAcceptedOrigin(
 	context: BrowserCookieEligibilityContext,
 ): boolean {
 	if (browserOrigin.origin === requestOrigin.origin) return true;
-	if (context.deployment !== "vite") return false;
+	if (context.deployment === "direct") {
+		// A production UI may intentionally select a gateway on another port of
+		// the same scheme/normalized host. Only a real admin bearer may establish
+		// that binding; subsequent renewal is safe only because the caller first
+		// completed centralized verification of the cookie's exact origin claim.
+		const hasBindingAuthority = context.authentication.source === "admin-bearer"
+			|| context.authentication.source === "signed-cookie";
+		return hasBindingAuthority && isSameSchemeHost(browserOrigin, requestOrigin);
+	}
 
 	const configuredHostname = normalizeConfiguredHostname(context.configuredHost);
 	const bothUseConfiguredHost = configuredHostname !== undefined
