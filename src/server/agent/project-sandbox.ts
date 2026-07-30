@@ -18,7 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
-import { buildDockerRunArgs, projectSandboxVolumeNames, SANDBOX_STATE_MOUNTS, validatedE2ERunId } from "./docker-args.js";
+import { buildDockerRunArgs, e2eSandboxVolumeCreateArgs, projectSandboxVolumeNames, SANDBOX_STATE_MOUNTS, validatedE2ERunId } from "./docker-args.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { globalAgentDir } from "../bobbit-dir.js";
 import { toDockerPath } from "./rpc-bridge.js";
@@ -1006,6 +1006,12 @@ export class ProjectSandbox {
 		for (const src of Object.values(this.options.cloneSourceByName ?? {})) addMount(src);
 
 		const e2eRunId = validatedE2ERunId();
+		// Docker only labels volumes when explicitly creating them. The labels let
+		// E2E teardown find its resources even after a spec has removed the
+		// container that would otherwise reveal the project ID.
+		for (const volumeArgs of e2eSandboxVolumeCreateArgs(projectId, e2eRunId)) {
+			await this.execDocker(volumeArgs, { timeout: 15_000, env: DOCKER_ENV });
+		}
 		const dockerArgs = buildDockerRunArgs({
 			image,
 			workspaceDir: "", // unused for /workspace — named volume instead

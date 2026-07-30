@@ -11,7 +11,7 @@ import assert from "node:assert";
 import fs from "node:fs";
 import path from "node:path";
 import type { CommandRunner } from "../../src/server/gateway-deps.ts";
-import { buildDockerRunArgs, projectSandboxVolumeNames } from "../../src/server/agent/docker-args.js";
+import { buildDockerRunArgs, e2eSandboxVolumeCreateArgs, projectSandboxVolumeNames } from "../../src/server/agent/docker-args.js";
 import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource } from "../../src/server/agent/sandbox-clone-source.js";
 import { toDockerPath } from "../../src/server/agent/rpc-bridge.js";
 import {
@@ -128,7 +128,7 @@ describe("buildDockerRunArgs", () => {
 		);
 	});
 
-	it("names sandbox volumes by validated legacy E2E run ID without changing production names", () => {
+	it("names and labels sandbox volumes by validated legacy E2E run ID without changing production names", () => {
 		const projectId = "test-project-abc";
 		const prior = process.env.BOBBIT_E2E_RUN_ID;
 		try {
@@ -137,17 +137,23 @@ describe("buildDockerRunArgs", () => {
 				workspace: `bobbit-workspace-${projectId}`,
 				worktrees: `bobbit-worktrees-${projectId}`,
 			});
+			assert.deepEqual(e2eSandboxVolumeCreateArgs(projectId), []);
 
 			process.env.BOBBIT_E2E_RUN_ID = "legacy-run_123";
 			let args = buildDockerRunArgs({ image: "test", workspaceDir: "/tmp/test", projectId }, NOOP_COMMAND_RUNNER);
 			assert.ok(args.includes(`bobbit-workspace-${projectId}-e2e-legacy-run_123:/workspace`));
 			assert.ok(args.includes(`bobbit-worktrees-${projectId}-e2e-legacy-run_123:/workspace-wt`));
+			assert.deepEqual(e2eSandboxVolumeCreateArgs(projectId), [
+				["volume", "create", "--label", `bobbit-project=${projectId}`, "--label", "bobbit-e2e-run=legacy-run_123", `bobbit-workspace-${projectId}-e2e-legacy-run_123`],
+				["volume", "create", "--label", `bobbit-project=${projectId}`, "--label", "bobbit-e2e-run=legacy-run_123", `bobbit-worktrees-${projectId}-e2e-legacy-run_123`],
+			]);
 
 			process.env.BOBBIT_E2E_RUN_ID = "bad/run-id";
 			args = buildDockerRunArgs({ image: "test", workspaceDir: "/tmp/test", projectId }, NOOP_COMMAND_RUNNER);
 			assert.ok(args.includes(`bobbit-workspace-${projectId}:/workspace`));
 			assert.ok(args.includes(`bobbit-worktrees-${projectId}:/workspace-wt`));
 			assert.ok(!args.some(arg => arg.includes("bad/run-id")));
+			assert.deepEqual(e2eSandboxVolumeCreateArgs(projectId), []);
 		} finally {
 			if (prior === undefined) delete process.env.BOBBIT_E2E_RUN_ID;
 			else process.env.BOBBIT_E2E_RUN_ID = prior;

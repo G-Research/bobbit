@@ -64,6 +64,21 @@ export function projectSandboxVolumeNames(projectId: string, runId = validatedE2
 	};
 }
 
+/**
+ * Explicitly create E2E volumes before the container so they carry ownership
+ * labels. Docker's implicit named-volume creation cannot attach labels, which
+ * would make teardown depend on a surviving container to discover a project.
+ */
+export function e2eSandboxVolumeCreateArgs(projectId: string, runId = validatedE2ERunId()): string[][] {
+	if (!runId) return [];
+	return Object.values(projectSandboxVolumeNames(projectId, runId)).map((name) => [
+		"volume", "create",
+		"--label", `bobbit-project=${projectId}`,
+		"--label", `bobbit-e2e-run=${runId}`,
+		name,
+	]);
+}
+
 export interface DockerRunConfig {
 	image: string;
 	/** Host path to mount as /workspace (used for bind-mount mode when projectId is not set). */

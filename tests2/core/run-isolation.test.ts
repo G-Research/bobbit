@@ -37,7 +37,13 @@ import {
 	createNestedE2EEnvironment,
 	defaultPerformanceReportPath,
 } from "../../scripts/testing-v2/run-e2e-v2.mjs";
-import { currentRunId, ownedE2EVolumeNames } from "../../tests/e2e/e2e-teardown.js";
+import {
+	cleanOwnedDockerResources,
+	currentRunId,
+	isOwnedE2EVolumeName,
+	ownedE2EVolumeNames,
+	ownedE2EVolumeNamesFromLabelOutput,
+} from "../../tests/e2e/e2e-teardown.js";
 import { packedConsumerTempPrefix } from "../../scripts/release-packed-consumer-audit.mjs";
 
 const baselineEnv = { ...process.env };
@@ -361,6 +367,30 @@ describe("workflow run isolation", () => {
 			`bobbit-workspace-${projectId}-e2e-${runId}`,
 			`bobbit-worktrees-${projectId}-e2e-${runId}`,
 		]);
+	});
+
+	it("discovers and removes owned E2E volumes after their containers are gone", () => {
+		const runId = "legacy-run_123";
+		const ownedWorkspace = "bobbit-workspace-project-123-e2e-legacy-run_123";
+		const ownedWorktrees = "bobbit-worktrees-project-123-e2e-legacy-run_123";
+		const foreign = "unrelated-e2e-legacy-run_123";
+		expect(isOwnedE2EVolumeName(ownedWorkspace, runId)).toBe(true);
+		expect(isOwnedE2EVolumeName(foreign, runId)).toBe(false);
+		expect(ownedE2EVolumeNamesFromLabelOutput(`${ownedWorkspace}\n${foreign}\n${ownedWorktrees}`, runId))
+			.toEqual([ownedWorkspace, ownedWorktrees]);
+
+		const calls: string[][] = [];
+		cleanOwnedDockerResources(runId, (args) => {
+			calls.push(args);
+			if (args[0] === "volume" && args[1] === "ls") return `${ownedWorkspace}\n${foreign}\n${ownedWorktrees}\n`;
+			if (args[0] === "ps") return ""; // The container has already been removed by a spec.
+			return "";
+		});
+
+		expect(calls).toContainEqual(["volume", "ls", "-q", "--filter", `label=bobbit-e2e-run=${runId}`]);
+		expect(calls).toContainEqual(["volume", "rm", "-f", ownedWorkspace]);
+		expect(calls).toContainEqual(["volume", "rm", "-f", ownedWorktrees]);
+		expect(calls).not.toContainEqual(["volume", "rm", "-f", foreign]);
 	});
 
 	it("keeps Playwright's browser registry outside the isolated home", () => {

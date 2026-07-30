@@ -3,6 +3,7 @@
  * plus the narrow live-Docker models.json inode-remount contract.
  */
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -31,7 +32,7 @@ test.describe("atomic models.json bind mount", () => {
 		const root = mkdtempSync(path.join(tmpdir(), "bobbit-model-remount-"));
 		const modelsJson = path.join(root, "models.json");
 		const replacement = path.join(root, "models.next.json");
-		const prefix = `bobbit-remount-${process.pid}-${Date.now()}`;
+		const prefix = `bobbit-remount-${randomUUID()}`;
 		let activeName = `${prefix}-0`;
 		let activeId = "";
 		const createContainer = (name: string): string => execFileSync("docker", [
@@ -55,6 +56,7 @@ test.describe("atomic models.json bind mount", () => {
 			// VirtioFS may report ENOENT (and newer implementations may expose the
 			// replacement). The cross-platform contract begins with recreation below.
 
+			const initialId = activeId;
 			const sandbox = new ProjectSandbox({
 				projectId: `${prefix}-project`,
 				projectDir: root,
@@ -70,7 +72,9 @@ test.describe("atomic models.json bind mount", () => {
 			};
 
 			await sandbox.refreshAgentModelMount();
-			expect(readMounted(await sandbox.getContainerId())).toBe('{"generation":1}');
+			const recreatedId = await sandbox.getContainerId();
+			expect(recreatedId).not.toBe(initialId, "refresh must publish a replacement container identity");
+			expect(readMounted(recreatedId)).toBe('{"generation":1}');
 		} finally {
 			for (const suffix of ["0", "1"]) {
 				try { execFileSync("docker", ["rm", "-f", `${prefix}-${suffix}`], { stdio: "ignore", timeout: 10_000 }); } catch { /* best effort */ }
