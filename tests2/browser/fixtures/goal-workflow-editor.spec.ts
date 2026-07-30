@@ -234,6 +234,17 @@ test.describe("Goal/workflow editor fixture", () => {
 		await expect(saveButton(page)).toHaveText("Save");
 		await expect(saveButton(page)).toBeEnabled();
 		await expect(nameInput).toHaveValue("Newer unsaved draft");
-		await expect(page.locator("input[placeholder='e.g. bug-fix']")).toBeDisabled();
+
+		// The create result must bind this preserved draft to the newly created
+		// workflow so the following save updates that workflow instead of POSTing
+		// another one. The new-workflow id field no longer renders after creation.
+		await saveButton(page).click();
+		await expect.poll(() => page.evaluate(() =>
+			(window as any).__goalWorkflowFetchLog().filter((entry: any) => entry.method === "PUT").at(-1) ?? null,
+		), { timeout: 5_000 }).toMatchObject({
+			url: "/api/workflows/created-workflow?projectId=fixture-project",
+			method: "PUT",
+			body: { name: "Newer unsaved draft" },
+		});
 	});
 });
