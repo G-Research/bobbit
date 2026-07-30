@@ -244,7 +244,7 @@ test.describe("Sidebar tree indentation (full-stack UI)", () => {
 
 		await page.locator(INDENT_RESET).click();
 		await waitForRuntimeIndent(page, DEFAULT_PX);
-		expect(await inputValueAsNumber(page)).toBe(DEFAULT_PX);
+		await expect(indentInput(page)).toHaveValue(String(DEFAULT_PX), { timeout: 5_000 });
 		expect(await persistedIndentPx(page)).toBe(DEFAULT_PX);
 		expect(await childOffset(page, fixture)).toBeCloseTo(defaultOffset, 0);
 	});
