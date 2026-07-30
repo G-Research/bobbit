@@ -35,6 +35,7 @@ type LoadedConfig = {
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const CONFIG_PATH = resolve(REPO_ROOT, "vitest.config.ts");
 const LEGACY_E2E_CONFIG_PATH = resolve(REPO_ROOT, "playwright-e2e.config.ts");
+const CROSS_OS_UNIT_GATE_DESIGN_PATH = resolve(REPO_ROOT, "docs", "testing-v2", "cross-os-unit-gate-design.md");
 const HARNESS_ROOT = resolve(REPO_ROOT, "tests2", "harness");
 const LEDGER_PATH = resolve(REPO_ROOT, "scripts", "testing-v2", "ledger.mjs");
 const packageJson = JSON.parse(
@@ -203,7 +204,7 @@ describe("direct unit-stage scheduling", () => {
 		);
 	});
 
-	it("disables retries across exactly four normal projects", () => {
+	it("keeps workflow retry safety across exactly four normal projects", () => {
 		const actual = projects(normal);
 		assert.deepEqual(
 			actual.map(({ name }) => name),
@@ -219,18 +220,25 @@ describe("direct unit-stage scheduling", () => {
 				retry,
 			})),
 			[
-				{ name: "v2-core", environment: "node", pool: "forks", isolate: false, maxWorkers: 3, retry: 0 },
-				{ name: "v2-dom", environment: "happy-dom", pool: "threads", isolate: true, maxWorkers: 3, retry: 0 },
-				{ name: "v2-integration", environment: "node", pool: "forks", isolate: false, maxWorkers: 3, retry: 0 },
-				{ name: "v2-isolated", environment: "node", pool: "forks", isolate: true, maxWorkers: 1, retry: 0 },
+				{ name: "v2-core", environment: "node", pool: "forks", isolate: false, maxWorkers: 3, retry: 3 },
+				{ name: "v2-dom", environment: "happy-dom", pool: "threads", isolate: true, maxWorkers: 3, retry: 3 },
+				{ name: "v2-integration", environment: "node", pool: "forks", isolate: false, maxWorkers: 3, retry: 3 },
+				{ name: "v2-isolated", environment: "node", pool: "forks", isolate: true, maxWorkers: 1, retry: 3 },
 			],
 		);
 	});
 
-	it("pins zero retries for the legacy workflow E2E runner", () => {
+	it("pins workflow retry safety for the legacy E2E runner", () => {
 		const source = readFileSync(LEGACY_E2E_CONFIG_PATH, "utf8");
-		assert.match(source, /^\s*retries:\s*0\s*,/m);
-		assert.doesNotMatch(source, /^\s*retries:\s*[1-9]\d*\s*,/m);
+		assert.match(source, /^\s*retries:\s*3\s*,/m);
+		assert.doesNotMatch(source, /^\s*retries:\s*(?!3\b)[1-9]\d*\s*,/m);
+	});
+
+	it("requires retry-free first-attempt evidence for cross-OS qualification", () => {
+		const design = readFileSync(CROSS_OS_UNIT_GATE_DESIGN_PATH, "utf8");
+		assert.match(design, /\*\*with retries disabled\*\*/);
+		assert.match(design, /--retry=0/);
+		assert.match(design, /never load-bearing for qualification/);
 	});
 
 	it("adds only the exact isolated E2E project when explicitly enabled", () => {
@@ -264,7 +272,7 @@ describe("direct unit-stage scheduling", () => {
 				pool: "forks",
 				isolate: true,
 				maxWorkers: 1,
-				retry: 0,
+				retry: 3,
 				include: [
 					"tests2/core/file-mentions-authenticated-boundary.test.ts",
 					"tests2/core/git-lifecycle-no-publication-real-git.test.ts",

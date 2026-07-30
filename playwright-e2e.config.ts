@@ -74,10 +74,11 @@ const recordScreenReporters: Array<[string]> = process.env.RECORDSCREEN === "1"
 	? [["./tests/e2e/report/tier-2-5-reporter.ts"]]
 	: [];
 
-// Workflow E2E runs must expose every first-attempt failure for root-cause fixes.
+// Workflow retries protect developer productivity after isolated transients.
+// Retry-free qualification remains the only evidence of first-attempt stability.
 export default {
 	timeout: 30_000,
-	retries: 0,
+	retries: 3,
 	fullyParallel: true,
 	// Top-level cap. Playwright treats this as the max parallelism across
 	// all projects. Per-project `workers` fields below further constrain

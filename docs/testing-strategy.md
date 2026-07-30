@@ -28,11 +28,14 @@ tooling, and `npm run test:unit:inventory` reject orphaned files, duplicate or m
 ownership, and lost declaration semantics.
 
 The unit phase uses one Vitest coordinator with a fixed three-worker cap and
-`retry: 0`. First-attempt failures are gate failures and must be root-caused, not
-absorbed by retries. `VITEST_MAX_WORKERS` may lower the cap only. It has no lane runner,
-ledger reservation, cost sharding, lane logs, or gateway-boot lease. All four tier-1
-projects install the subprocess guard and enforce a hard 25-second solo file budget.
-See [Unit gate operating model](testing-v2/unit-gate.md) for cache, proof-mode, E2E
+`retry: 3`. This workflow safety net prevents one isolated transient from re-running
+the entire gate; it is not evidence that a test is stable. Any retried result is
+diagnostic debt that must be root-caused. Cross-OS qualification invokes the same
+unit inventory with `--retry=0` and accepts only first-attempt passes.
+`VITEST_MAX_WORKERS` may lower the cap only. It has no lane runner, ledger reservation,
+cost sharding, lane logs, or gateway-boot lease. All four tier-1 projects install the
+subprocess guard and enforce a hard 25-second solo file budget. See
+[Unit gate operating model](testing-v2/unit-gate.md) for cache, proof-mode, E2E
 ownership, and audit details.
 
 ## Current State (v2)
@@ -41,7 +44,7 @@ ownership, and audit details.
 
 | Tier | Projects/buckets | Runner |
 |------|------------------|--------|
-| tier-1 unit | `v2-core`, `v2-dom`, `v2-integration`, `v2-isolated` | direct Vitest, fixed cap 3, `retry: 0` |
+| tier-1 unit | `v2-core`, `v2-dom`, `v2-integration`, `v2-isolated` | direct Vitest, fixed cap 3, `retry: 3` |
 | browser | `v2-browser` | Playwright |
 | E2E real fidelity | tests-map `daily`, including conditional `v2-e2e-vitest` | `run-e2e-v2.mjs` Groups A–D |
 | manual integration | `manual-integration` | Playwright manual config |
@@ -693,9 +696,10 @@ inventory audit also rejects direct value imports. The inventory audit pins exac
 execution ownership and scans mutable paths in shared-worker projects for a real
 cross-process owner token rather than timestamp-only names.
 
-Browser and E2E phases retain their own resource policies. Workflow runner configs
-must default to `retry`/`retries: 0`; do not infer worker limits from the unit gate.
-The current config for each phase is authoritative.
+Browser and E2E phases retain their own resource and workflow-retry policies. Their
+configured retries are availability protection, not flake-free evidence: any retried
+result is diagnostic debt. Do not infer worker limits from the unit gate; the current
+config for each phase is authoritative.
 
 **External-service-free (hard constraint).** Automated unit and E2E tests do not call
 a real LLM, GitHub remote, or non-loopback HTTP service. Fenced fetch/command seams

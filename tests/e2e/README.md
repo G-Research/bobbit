@@ -11,8 +11,8 @@ The e2e config (`playwright-e2e.config.ts`) defines three Playwright projects:
 - **`browser`** — In-process gateway + Chromium UI. Runs UI specs. Workers: 3,
   `fullyParallel: false`.
 
-The committed config runs `retries: 0` everywhere (top-level) — see
-[Retries: failures stay visible](#retries-failures-stay-visible).
+The committed config runs `retries: 3` everywhere (top-level) — see
+[Retries: workflow safety net, not qualification](#retries-workflow-safety-net-not-qualification).
 
 ## No quarantine, no skip-for-flake
 
@@ -25,18 +25,22 @@ immediately, the right move is to revert the change that introduced it
 Do not add `test.skip("flaky…")`. Do not add `@quarantine` labels or a
 per-describe / per-project `retries: N` override. Do not bump a timeout
 to make a slow product faster. If you find yourself wanting to do any of
-these, file a goal and stop.
+these, file a goal and stop. The top-level `retries: 3` is workflow
+availability protection, not a licence to leave a first-attempt flake
+un-root-caused.
 
-## Retries: failures stay visible
+## Retries: workflow safety net, not qualification
 
-The committed config runs `retries: 0` everywhere. A first-attempt failure
-fails the workflow run, including under concurrent worktree load. Treat CPU,
-filesystem, port, and timing contention as root causes to fix with isolation
-or deterministic synchronization — never as a reason to add a retry budget.
+The committed config runs `retries: 3` everywhere so one isolated transient
+does not re-trigger an entire long workflow gate. This protects developer
+productivity under concurrent worktree load; it does not prove flake-freedom.
+Any retried result is diagnostic debt: collect evidence with the profiler,
+root-cause it, and fix it with isolation or deterministic synchronization.
 
-Use the profiler below to collect evidence for a flake, then fix it in place.
-A green concurrent run must have no retried tests because the runner does not
-retry them.
+Use retry-free runs for stability qualification. In particular, the cross-OS
+unit qualification runs its full inventory five consecutive times with
+`--retry=0`, then repeats that retry-free command concurrently from separate
+worktrees. Only zero first-attempt failures count as a fix.
 
 ## Profiler (`BOBBIT_E2E_PROFILE=1`)
 

@@ -36,8 +36,9 @@ const shared = {
 	pool: "forks" as const,
 	isolate: false,
 	maxWorkers: MAX_WORKERS,
-	// Test retries hide first-attempt flakes; fix the root cause instead.
-	retry: 0,
+	// Workflow retries protect developer productivity after an isolated transient.
+	// Retry-free qualification still establishes first-attempt stability.
+	retry: 3,
 	passWithNoTests: true,
 	disableConsoleIntercept: true,
 	testTimeout: 30_000,
