@@ -94,7 +94,7 @@
     },
     {
       "path": "tests2/integration/base-path-cli-startup.test.ts",
-      "reason": "Actual CLI subprocess coverage for mounted ephemeral-port startup, flag-over-environment precedence, persisted and advertised URLs, auth banner modes, and failure-before-side-effects behavior.",
+      "reason": "Production runCli coverage with injected gateway effects for bound-port startup, flag-over-environment and root precedence, GatewayConfig wiring, persisted and advertised URLs, auth banners, and failure-before-side-effects behavior.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
