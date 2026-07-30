@@ -54,10 +54,21 @@ function assertSafeDestination(source: string, destination: string): void {
 	}
 }
 
-function templateEnvironment(): NodeJS.ProcessEnv {
+function templateEnvironment(home: string): NodeJS.ProcessEnv {
+	const env = { ...process.env };
+	// Git's command-scoped configuration can be inherited through several
+	// GIT_CONFIG_* variables. Strip those host-owned values before explicitly
+	// selecting the fixture's empty global config below.
+	for (const name of Object.keys(env)) {
+		if (name.startsWith("GIT_CONFIG_")) delete env[name];
+	}
 	return {
-		...process.env,
+		...env,
+		HOME: home,
+		USERPROFILE: home,
+		XDG_CONFIG_HOME: join(home, ".config"),
 		GIT_CONFIG_NOSYSTEM: "1",
+		GIT_CONFIG_GLOBAL: join(home, "gitconfig"),
 		GIT_TERMINAL_PROMPT: "0",
 		GIT_ASKPASS: "",
 		GIT_EDITOR: "true",
@@ -89,21 +100,35 @@ export async function prepareGitTemplate(): Promise<string> {
 	shared.promise = (async () => {
 		const container = mkdtempSync(join(tmpdir(), "bb-git-template-"));
 		const repository = join(container, "repo");
+		const home = join(container, "home");
 		mkdirSync(repository);
-		const env = templateEnvironment();
+		mkdirSync(home);
+		writeFileSync(join(home, "gitconfig"), "", "utf8");
+		const env = templateEnvironment(home);
+		const fixtureGit = (args: string[], cwd: string) => runFixtureCommand(
+			"git",
+			// Both settings are written locally below so every copied fixture remains
+			// stable. Supplying them during bootstrap also prevents the committing
+			// process itself from launching background maintenance before the local
+			// config is available (macOS can otherwise leave maintenance.lock briefly).
+			["-c", "maintenance.auto=false", "-c", "gc.auto=0", ...args],
+			{ cwd, env },
+		);
 		try {
-			await runFixtureCommand("git", ["-c", "init.defaultBranch=master", "init", "--quiet", repository], { cwd: container, env });
-			await runFixtureCommand("git", ["config", "user.name", "Bobbit Test"], { cwd: repository, env });
-			await runFixtureCommand("git", ["config", "user.email", "bobbit-test@example.invalid"], { cwd: repository, env });
-			await runFixtureCommand("git", ["config", "core.autocrlf", "false"], { cwd: repository, env });
-			await runFixtureCommand("git", ["config", "commit.gpgsign", "false"], { cwd: repository, env });
+			await fixtureGit(["-c", "init.defaultBranch=master", "init", "--quiet", repository], container);
+			await fixtureGit(["config", "user.name", "Bobbit Test"], repository);
+			await fixtureGit(["config", "user.email", "bobbit-test@example.invalid"], repository);
+			await fixtureGit(["config", "core.autocrlf", "false"], repository);
+			await fixtureGit(["config", "commit.gpgsign", "false"], repository);
+			await fixtureGit(["config", "maintenance.auto", "false"], repository);
+			await fixtureGit(["config", "gc.auto", "0"], repository);
 			const hooks = join(repository, ".git", "hooks-disabled");
 			mkdirSync(hooks);
-			await runFixtureCommand("git", ["config", "core.hooksPath", hooks], { cwd: repository, env });
+			await fixtureGit(["config", "core.hooksPath", hooks], repository);
 			writeFileSync(join(repository, "README.md"), README, "utf8");
 			writeFileSync(join(repository, ".gitattributes"), GITATTRIBUTES, "utf8");
-			await runFixtureCommand("git", ["add", "--", "README.md", ".gitattributes"], { cwd: repository, env });
-			await runFixtureCommand("git", ["commit", "--quiet", "-m", "Initial fixture"], { cwd: repository, env });
+			await fixtureGit(["add", "--", "README.md", ".gitattributes"], repository);
+			await fixtureGit(["commit", "--quiet", "-m", "Initial fixture"], repository);
 
 			const canonical = realpathSync(repository);
 			shared.path = canonical;
