@@ -31,7 +31,6 @@ import { ProjectConfigStore } from "../../src/server/agent/project-config-store.
 import { InlineWorkflowStore } from "../../src/server/agent/workflow-store.ts";
 import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../../src/server/agent/nested-goal-routes.ts";
 import { ChildTeamScheduler } from "../../src/server/agent/child-team-scheduler.ts";
-import type { CookieStore } from "../../src/server/auth/cookie.ts";
 import { createMemFs } from "../harness/mem-fs.js";
 import { SessionSecretStore } from "../../src/server/auth/session-secret.ts";
 
@@ -61,7 +60,6 @@ async function makeHarness(cap: number, opts: { stampChildPreparing?: boolean } 
 	memfs.mkdirSync(configDir);
 
 	const goalStore = new GoalStore(stateDir, memfs);
-	const cookieStore = { verify: () => false } as unknown as CookieStore;
 	const cfg = new ProjectConfigStore(configDir, memfs);
 	const wf = new InlineWorkflowStore(cfg);
 	wf.setBuiltins([
@@ -154,7 +152,7 @@ async function makeHarness(cap: number, opts: { stampChildPreparing?: boolean } 
 	};
 
 	const deps: NestedGoalRouteDeps = {
-		projectContextManager, verificationHarness, teamManager, sessionManager, cookieStore,
+		projectContextManager, verificationHarness, teamManager, sessionManager, cookieAuthenticated: false,
 		requireSubgoalsEnabled: () => true,
 		getGoalAcrossProjects: (gid) => goalStore.get(gid),
 		getGoalManagerForGoal: () => goalManager,

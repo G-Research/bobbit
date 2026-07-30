@@ -7,7 +7,9 @@ import { describe, it } from "vitest";
 import {
 	COOKIE_NAME,
 	CookieStore,
+	expireCookie,
 	extractCookieValue,
+	hasRootScopedCookie,
 	issueCookie,
 	issueIfMissing,
 	tryAuth,
@@ -45,7 +47,11 @@ describe("mount-scoped signed browser cookies", () => {
 		assert.match(serializedCookie(rootResponse), /(?:^|; )Path=\/(?:;|$)/);
 
 		const mountedResponse = fakeResponse();
-		issueCookie(mountedResponse as any, store, { localhost: true, basePath: "/team/bobbit" });
+		issueCookie(mountedResponse as any, store, {
+			localhost: true,
+			basePath: "/team/bobbit",
+			origin: "http://localhost:3001",
+		});
 		assert.match(serializedCookie(mountedResponse), /(?:^|; )Path=\/team\/bobbit\/(?:;|$)/);
 		assert.doesNotMatch(serializedCookie(mountedResponse), /; Path=\/(?:;|$)/);
 	});
@@ -53,22 +59,55 @@ describe("mount-scoped signed browser cookies", () => {
 	it.each(["invalid-first", "valid-first"])("authenticates the valid duplicate cookie when it is %s", (order) => {
 		const currentStore = new CookieStore(Buffer.alloc(32, 0x41));
 		const otherStore = new CookieStore(Buffer.alloc(32, 0x42));
-		const valid = currentStore.mint();
-		const invalidForCurrentMount = otherStore.mint();
+		const binding = { basePath: "/bobbit", origin: "http://localhost:3001" };
+		const valid = currentStore.mint(binding);
+		const invalidForCurrentMount = otherStore.mint(binding);
 		const parts = order === "invalid-first"
 			? [`${COOKIE_NAME}=${invalidForCurrentMount}`, `${COOKIE_NAME}=${valid}`]
 			: [`${COOKIE_NAME}=${valid}`, `${COOKIE_NAME}=${invalidForCurrentMount}`];
 		const request = fakeRequest(parts.join("; "));
 
-		assert.equal(tryAuth(request, currentStore), true);
-		assert.equal(extractCookieValue(request, currentStore), valid);
+		assert.equal(tryAuth(request, currentStore, binding), true);
+		assert.equal(extractCookieValue(request, currentStore, binding), valid);
 		const response = fakeResponse();
 		assert.equal(
-			issueIfMissing(request, response as any, currentStore, { localhost: true, basePath: "/bobbit" }),
+			issueIfMissing(request, response as any, currentStore, { localhost: true, ...binding }),
 			undefined,
 			"a valid duplicate must not be shadowed into needless replacement",
 		);
 		assert.equal(response.headers["Set-Cookie"], undefined);
+	});
+
+	it("rejects a legacy root claim at a mount and emits explicit root expiry before replacement", () => {
+		const store = new CookieStore(Buffer.alloc(32, 0x49));
+		const legacy = store.mint();
+		const request = fakeRequest(`${COOKIE_NAME}=${legacy}`);
+		assert.ok(store.verify(legacy, { basePath: "" }));
+		assert.equal(store.verify(legacy, { basePath: "/bobbit" }), undefined);
+		assert.equal(hasRootScopedCookie(request, store), true);
+
+		const response = fakeResponse();
+		expireCookie(response as any, { localhost: true, basePath: "" });
+		issueCookie(response as any, store, {
+			localhost: true,
+			basePath: "/bobbit",
+			origin: "http://localhost:3001",
+		});
+		const setCookies = response.headers["Set-Cookie"];
+		assert.ok(Array.isArray(setCookies));
+		assert.match(setCookies[0]!, /^bobbit_session=; .*Path=\/; Max-Age=0;/);
+		assert.match(setCookies[1]!, /^bobbit_session=v1\.2\..*Path=\/bobbit\//);
+	});
+
+	it("recognizes a bound root cookie as stale mount state", () => {
+		const store = new CookieStore(Buffer.alloc(32, 0x4a));
+		const rootBound = store.mint({ basePath: "", origin: "https://bobbit.example" });
+		const request = fakeRequest(`${COOKIE_NAME}=${rootBound}`);
+		assert.equal(hasRootScopedCookie(request, store), true);
+		assert.equal(store.verify(rootBound, {
+			basePath: "/bobbit",
+			origin: "https://bobbit.example",
+		}), undefined);
 	});
 
 	it("rejects and replaces a duplicate set when none verifies in the current store", () => {
@@ -79,7 +118,11 @@ describe("mount-scoped signed browser cookies", () => {
 		assert.equal(extractCookieValue(request, currentStore), undefined);
 
 		const response = fakeResponse();
-		const replacement = issueIfMissing(request, response as any, currentStore, { localhost: true, basePath: "/bobbit" });
+		const replacement = issueIfMissing(request, response as any, currentStore, {
+			localhost: true,
+			basePath: "/bobbit",
+			origin: "http://localhost:3001",
+		});
 		assert.ok(replacement);
 		assert.ok(currentStore.verify(replacement));
 		assert.match(serializedCookie(response), /Path=\/bobbit\//);

@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import WebSocket from "ws";
+import WebSocket, { type ClientOptions } from "ws";
 
 import {
 	bobbitStateDir,
@@ -27,6 +27,7 @@ import {
 import { initAuthorSidecarDir } from "../../src/server/agent/author-sidecar.js";
 import { realClock, realCommandRunner, realFs, type GatewayDeps } from "../../src/server/gateway-deps.js";
 import { scaffoldBobbitDir } from "../../src/server/scaffold.js";
+import { CookieStore } from "../../src/server/auth/cookie.js";
 import { createGateway } from "../../src/server/server.js";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../..", import.meta.url)));
@@ -141,7 +142,7 @@ function writeStaticFixture(staticDir: string): string {
 	return shell;
 }
 
-async function bootGateway(basePath: string): Promise<RunningGateway> {
+async function bootGateway(basePath: string, host = "127.0.0.1", forceAuth = true): Promise<RunningGateway> {
 	const processState = captureProcessState();
 	let root = mkdtempSync(join(tmpdir(), "bobbit-base-path-gateway-"));
 	try { root = realpathSync(root); } catch { /* platform edge */ }
@@ -166,13 +167,13 @@ async function bootGateway(basePath: string): Promise<RunningGateway> {
 	scaffoldBobbitDir(root);
 
 	const gateway = createGateway({
-		host: "127.0.0.1",
+		host,
 		port: 0,
 		portExplicit: true,
 		authToken: TOKEN,
 		defaultCwd: root,
 		staticDir,
-		forceAuth: true,
+		forceAuth,
 		skipMcp: true,
 		skipWorktreePool: true,
 		skipTitleGeneration: true,
@@ -183,13 +184,14 @@ async function bootGateway(basePath: string): Promise<RunningGateway> {
 		basePath,
 	} as Parameters<typeof createGateway>[0] & { basePath: string }, gatewayDeps);
 	const port = await gateway.start();
-	const origin = `http://127.0.0.1:${port}`;
+	const connectHost = host.toLowerCase() === "localhost" ? "localhost" : "127.0.0.1";
+	const origin = `http://${connectHost}:${port}`;
 	return {
 		root,
 		staticDir,
 		origin,
 		baseUrl: `${origin}${basePath}`,
-		wsOrigin: `ws://127.0.0.1:${port}`,
+		wsOrigin: `ws://${connectHost}:${port}`,
 		gateway,
 		async shutdown() {
 			try { await gateway.shutdown(); }
@@ -218,9 +220,9 @@ function cookiePair(setCookie: string): string {
 	return setCookie.split(";", 1)[0]!;
 }
 
-function authenticateSocket(url: string): Promise<WebSocket> {
+function authenticateSocket(url: string, options: ClientOptions = {}, token = TOKEN): Promise<WebSocket> {
 	return new Promise((resolveSocket, reject) => {
-		const socket = new WebSocket(url);
+		const socket = new WebSocket(url, options);
 		const timer = setTimeout(() => {
 			socket.terminate();
 			reject(new Error(`Timed out authenticating WebSocket ${url}`));
@@ -230,7 +232,7 @@ function authenticateSocket(url: string): Promise<WebSocket> {
 			reject(error);
 		};
 		socket.once("error", fail);
-		socket.once("open", () => socket.send(JSON.stringify({ type: "auth", token: TOKEN })));
+		socket.once("open", () => socket.send(JSON.stringify({ type: "auth", token })));
 		socket.on("message", (raw) => {
 			const message = JSON.parse(raw.toString()) as { type?: string };
 			if (message.type !== "auth_ok") return;
@@ -241,9 +243,9 @@ function authenticateSocket(url: string): Promise<WebSocket> {
 	});
 }
 
-function expectRejectedUpgrade(url: string): Promise<void> {
+function expectRejectedUpgrade(url: string, options: ClientOptions = {}): Promise<void> {
 	return new Promise((resolveRejected, reject) => {
-		const socket = new WebSocket(url);
+		const socket = new WebSocket(url, options);
 		let opened = false;
 		const timer = setTimeout(() => {
 			socket.terminate();
@@ -428,6 +430,94 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("in-process gateway mounted a
 		expect(setCookie).not.toContain("; Secure");
 	});
 
+	it("migrates legacy root cookies and binds HTTP, CORS preflight, and WebSocket use to the bootstrapping UI origin", async () => {
+		const signingKey = readFileSync(join(running.root, "secrets", "cookie-signing-key"));
+		const cookieStore = new CookieStore(signingKey);
+		const legacy = cookieStore.mint();
+		const uiOrigin = "http://127.0.0.1:5173";
+		const otherOrigin = "http://127.0.0.1:5174";
+		const rootBound = cookieStore.mint({ basePath: "", origin: uiOrigin });
+		const staleRootCookies = `bobbit_session=${legacy}; bobbit_session=${rootBound}`;
+		const migration = await fetch(`${running.baseUrl}/api/health`, {
+			headers: {
+				...authHeaders(),
+				Cookie: staleRootCookies,
+				Origin: uiOrigin,
+				"Sec-Fetch-Site": "same-site",
+				"Sec-Fetch-Mode": "cors",
+			},
+		});
+		expect(migration.status).toBe(200);
+		const setCookies = (migration.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie?.()
+			?? [migration.headers.get("set-cookie") ?? ""];
+		expect(setCookies.some((value) => /bobbit_session=;.*Path=\/;.*Max-Age=0/.test(value))).toBe(true);
+		const mountedSetCookie = setCookies.find((value) => value.includes(`Path=${MOUNT}/`) && value.includes("bobbit_session=v1.2."));
+		expect(mountedSetCookie).toBeDefined();
+		const mountedCookie = cookiePair(mountedSetCookie!);
+
+		const staleOnly = await fetch(`${running.baseUrl}/api/health`, {
+			headers: { Cookie: staleRootCookies, Origin: uiOrigin },
+		});
+		expect(staleOnly.status).toBe(401);
+		expect(staleOnly.headers.get("access-control-allow-origin")).toBeNull();
+
+		const exact = await fetch(`${running.baseUrl}/api/health`, {
+			headers: { Cookie: mountedCookie, Origin: uiOrigin },
+		});
+		expect(exact.status).toBe(200);
+		expect(exact.headers.get("access-control-allow-origin")).toBe(uiOrigin);
+		expect(exact.headers.get("access-control-allow-credentials")).toBe("true");
+
+		const mismatch = await fetch(`${running.baseUrl}/api/health`, {
+			headers: { Cookie: mountedCookie, Origin: otherOrigin },
+		});
+		expect(mismatch.status).toBe(401);
+		expect(mismatch.headers.get("access-control-allow-origin")).toBeNull();
+		expect(mismatch.headers.get("access-control-allow-credentials")).toBeNull();
+
+		const mismatchSse = await fetch(`${running.baseUrl}/api/sessions/00000000-0000-4000-8000-000000000001/preview-events`, {
+			headers: { Cookie: mountedCookie, Origin: otherOrigin },
+		});
+		expect(mismatchSse.status).toBe(401);
+		const mismatchPreview = await fetch(`${running.baseUrl}/preview/00000000-0000-4000-8000-000000000001/index.html`, {
+			headers: { Cookie: mountedCookie, Origin: otherOrigin },
+		});
+		expect(mismatchPreview.status).toBe(401);
+
+		const exactPreflight = await fetch(`${running.baseUrl}/api/config`, {
+			method: "OPTIONS",
+			headers: {
+				Origin: uiOrigin,
+				"Access-Control-Request-Method": "POST",
+				"Access-Control-Request-Headers": "content-type",
+			},
+		});
+		expect(exactPreflight.status).toBe(204);
+		expect(exactPreflight.headers.get("access-control-allow-origin")).toBe(uiOrigin);
+
+		const mismatchPreflight = await fetch(`${running.baseUrl}/api/config`, {
+			method: "OPTIONS",
+			headers: {
+				Origin: otherOrigin,
+				"Access-Control-Request-Method": "POST",
+				"Access-Control-Request-Headers": "content-type",
+			},
+		});
+		expect(mismatchPreflight.status).toBe(204);
+		expect(mismatchPreflight.headers.get("access-control-allow-origin")).toBeNull();
+		expect(mismatchPreflight.headers.get("access-control-allow-credentials")).toBeNull();
+
+		const exactViewer = await authenticateSocket(`${running.wsOrigin}${MOUNT}/ws/viewer`, {
+			origin: uiOrigin,
+			headers: { Cookie: mountedCookie },
+		}, "cookie-only-no-bearer");
+		exactViewer.close();
+		await expectRejectedUpgrade(`${running.wsOrigin}${MOUNT}/ws/viewer`, {
+			origin: otherOrigin,
+			headers: { Cookie: mountedCookie },
+		});
+	});
+
 	it("keeps preview API, restore, bootstrap, and live SSE payloads mount-relative while browser outputs are prefixed once", async () => {
 		const sessionId = randomUUID();
 		const mountRoute = `/api/preview/mount?sessionId=${sessionId}`;
@@ -556,6 +646,26 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("root-mounted gateway compati
 		expect((await mount.json() as { url: string }).url).toMatch(new RegExp(`^/preview/${previewSession}/`));
 
 		const viewer = await authenticateSocket(`${running.wsOrigin}/ws/viewer`);
+		viewer.close();
+	});
+});
+
+describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("mixed-case loopback gateway auth state", () => {
+	let running: RunningGateway;
+
+	beforeAll(async () => {
+		running = await bootGateway("", "LOCALHOST", false);
+	}, 60_000);
+
+	afterAll(async () => {
+		await running?.shutdown();
+	}, 60_000);
+
+	it("uses the same disabled-auth decision for HTTP health and viewer WebSockets", async () => {
+		const health = await fetch(`${running.baseUrl}/api/health`);
+		expect(health.status).toBe(200);
+		expect(await health.json()).toMatchObject({ status: "ok", localhost: true });
+		const viewer = await authenticateSocket(`${running.wsOrigin}/ws/viewer`, {}, "localhost");
 		viewer.close();
 	});
 });

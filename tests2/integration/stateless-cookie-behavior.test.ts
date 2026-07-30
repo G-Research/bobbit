@@ -113,7 +113,7 @@ function expectSignedCookie(response: RawResponse): string {
 	const cookies = bobbitSetCookies(response);
 	expect(cookies, `expected one signed ${COOKIE_NAME} cookie; body=${response.body}`).toHaveLength(1);
 	const value = cookieValue(cookies[0]);
-	expect(value).toMatch(/^v1\.\d+\.\d+\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/);
+	expect(value).toMatch(/^v1\.2\.\d+\.\d+\.[A-Za-z0-9_-]{22}(?:\.[A-Za-z0-9_-]{43}){3}$/);
 	return cookies[0];
 }
 

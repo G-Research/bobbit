@@ -40,7 +40,6 @@ import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 import { walkGoalSubtree, cascadeSubtree } from "./goal-subtree.js";
 import { resolveChildWorkflow } from "./spawn-child-workflow.js";
 import { authorizeChildrenMutation, type ChildrenMutationClass } from "../auth/children-mutation-authz.js";
-import { tryAuth as cookieTryAuth, type CookieStore } from "../auth/cookie.js";
 import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
 
 export interface NestedGoalRouteDeps {
@@ -48,13 +47,8 @@ export interface NestedGoalRouteDeps {
 	verificationHarness: VerificationHarness;
 	teamManager: TeamManager;
 	sessionManager: SessionManager;
-	/**
-	 * In-memory signed-cookie verifier used to compute the weak human-operator
-	 * signal for S1 authz on the mutating Children endpoints. A verified
-	 * `bobbit_session` is accepted as a human/UI signal for operator verbs, but
-	 * it is not proof of a human caller (see `children-mutation-authz.ts`).
-	 */
-	cookieStore: CookieStore;
+	/** Result of the gateway's centralized mount/origin-bound cookie check. */
+	cookieAuthenticated: boolean;
 	requireSubgoalsEnabled(): boolean;
 	getGoalAcrossProjects(goalId: string): PersistedGoal | undefined;
 	getGoalManagerForGoal(goalId: string): GoalManager;
@@ -228,7 +222,7 @@ export async function tryHandleNestedGoalRoute(
 		jsonError,
 		broadcastToAll,
 		getSubgoalNestingPrefs,
-		cookieStore,
+		cookieAuthenticated,
 	} = deps;
 
 	function readReqHeader(name: string): string | undefined {
@@ -286,7 +280,7 @@ export async function tryHandleNestedGoalRoute(
 	function authorizeTeamLeadOrReject(goalIdForTeam: string, mutationClass: ChildrenMutationClass): boolean {
 		const result = authorizeChildrenMutation({
 			mutationClass,
-			isHumanOperator: cookieTryAuth(req, cookieStore),
+			isHumanOperator: cookieAuthenticated,
 			authenticCallerSessionId: readAuthenticCallerSessionId(),
 			teamLeadSessionId: teamManager.getTeamState(goalIdForTeam)?.teamLeadSessionId,
 		});

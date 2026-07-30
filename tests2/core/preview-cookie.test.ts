@@ -337,6 +337,42 @@ describe("stateless signed cookies", () => {
 		});
 	});
 
+	it("cryptographically binds v1.2 cookies to the canonical mount and exact UI origin", () => {
+		const { clock } = mutableClock();
+		const store = new CookieStore(KEY, {
+			clock,
+			randomBytes: (size) => Buffer.alloc(size, 0x45),
+		});
+		const binding = { basePath: "/team/bobbit", origin: "https://bobbit.example:5173" };
+		const value = store.mint(binding);
+		const parts = value.split(".");
+		assert.equal(parts.length, 8);
+		assert.deepEqual(parts.slice(0, 2), ["v1", "2"]);
+		assert.match(parts[5]!, /^[A-Za-z0-9_-]{43}$/);
+		assert.match(parts[6]!, /^[A-Za-z0-9_-]{43}$/);
+		assert.deepEqual(store.verify(value, binding), {
+			issuedAt: BASE_NOW,
+			expiresAt: BASE_NOW + COOKIE_MAX_AGE_SECONDS,
+			needsRenewal: false,
+			binding: { basePath: true, origin: true },
+		});
+		assert.equal(store.verify(value, { ...binding, basePath: "/other" }), undefined);
+		assert.equal(store.verify(value, { ...binding, origin: "https://bobbit.example:5174" }), undefined);
+		for (const basePath of ["/team/bobbit/", "/team/../bobbit", "/a//b", "/a%2fb"]) {
+			assert.throws(() => store.mint({ ...binding, basePath }), /canonical/i);
+		}
+		assert.throws(() => store.mint({ ...binding, origin: "https://BOBBIT.example:5173" }), /canonical/i);
+	});
+
+	it("keeps legacy v1 cookies root-compatible but rejects them at a mounted scope", () => {
+		const { clock } = mutableClock();
+		const store = new CookieStore(KEY, { clock });
+		const legacy = store.mint();
+		assert.ok(store.verify(legacy));
+		assert.ok(store.verify(legacy, { basePath: "", origin: "https://bobbit.example" }));
+		assert.equal(store.verify(legacy, { basePath: "/bobbit", origin: "https://bobbit.example" }), undefined);
+	});
+
 	it("keeps cookies valid across stores with the same key and rejects a changed key", () => {
 		const { clock } = mutableClock();
 		const value = new CookieStore(KEY, { clock }).mint();

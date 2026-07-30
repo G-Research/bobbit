@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 
 import {
+	browserCookieRequestOrigin,
 	browserCookieRequiresSecure,
+	canonicalRequestOrigin,
 	classifyBrowserCookieEligibility,
+	isBrowserCookieAuthenticationCompatible,
 	type BrowserCookieEligibilityContext,
 	type BrowserCookieHeaders,
 	type BrowserCookieRequestMetadata,
@@ -84,6 +87,40 @@ describe("browser cookie transport security", () => {
 	it("fails secure for a missing or malformed Host", () => {
 		assert.equal(browserCookieRequiresSecure({ headers: {}, isTls: false }), true);
 		assert.equal(browserCookieRequiresSecure({ headers: { host: "localhost, bobbit.example" }, isTls: false }), true);
+	});
+});
+
+describe("browser cookie origin authority", () => {
+	it("canonicalizes an exact browser Origin and uses actual Host/TLS only as the originless fallback", () => {
+		assert.equal(browserCookieRequestOrigin({
+			headers: { host: "bobbit.example:3001", origin: "HTTPS://BOBBIT.EXAMPLE:5173" },
+			isTls: true,
+		}), "https://bobbit.example:5173");
+		assert.equal(browserCookieRequestOrigin({
+			headers: {
+				host: "LOCALHOST:3001",
+				"x-forwarded-host": "attacker.example",
+				"x-forwarded-proto": "https",
+			},
+			isTls: false,
+		}), "http://localhost:3001");
+		assert.equal(canonicalRequestOrigin({ headers: { host: "[::1]:3001" }, isTls: false }), "http://[::1]:3001");
+		assert.equal(browserCookieRequestOrigin({
+			headers: { host: "bobbit.example, attacker.example", origin: "https://bobbit.example" },
+			isTls: true,
+		}), undefined);
+	});
+
+	it("keeps legacy cookie authority exact-origin instead of accepting an arbitrary same-host port", () => {
+		const context = { deployment: "direct" as const, configuredHost: "bobbit.example" };
+		assert.equal(isBrowserCookieAuthenticationCompatible({
+			headers: { host: "bobbit.example:3001", origin: "https://bobbit.example:3001" },
+			isTls: true,
+		}, context), true);
+		assert.equal(isBrowserCookieAuthenticationCompatible({
+			headers: { host: "bobbit.example:3001", origin: "https://bobbit.example:5173" },
+			isTls: true,
+		}, context), false);
 	});
 });
 
