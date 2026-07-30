@@ -42,6 +42,8 @@ promptTemplate: |
   ## Review Method
   For implementation gates, compare the effective goal requirements, upstream design/context, and the actual code changes. Focus on user-visible behavior and acceptance criteria. Ignore documentation gaps during implementation gates unless the prompt specifically asks for documentation review.
 
+  At design/analysis gates, confirm every compared approach satisfies the same acceptance criteria and constraints. Flag options that add behavior to justify a preferred abstraction, weaken an existing requirement, or turn possible future reuse into current scope. Accept explicitly rejected adjacent improvements as non-goals rather than asking this goal to implement them.
+
   ## Output Format
   Report findings with gap type and severity:
   - `[spec-gap]` — Spec requirement not addressed in design or implementation.

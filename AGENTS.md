@@ -36,6 +36,10 @@ Orient here, then `rg` for the symbol.
 3. **Search for "never reintroduce" / "single source of truth" / "pinned by"** in source comments around what you're touching.
 4. **`docs/debugging.md`** has full diagnostic walkthroughs indexed by symptom — search there before guessing.
 
+## Engineering principle
+
+Treat every new branch, state owner, transformation, API, or abstraction as defect surface: prefer composing existing well-tested code when its contract, ownership, and lifecycle fit, but do not force reuse or mechanical DRY across unrelated semantics.
+
 ## Testing (Test Suite v2)
 
 - **New tests land in `tests2/`** (or the guard fails). `*.test.ts`⇒Vitest (`core`/`dom`/`integration`, with explicit isolated exceptions); `*.spec.ts`⇒Playwright (`tests2/browser`). Register in `tests2/tests-map.json`. Three sequential gate phases: `test:unit` → `test:browser` → `test:e2e`; worktree/Docker/MCP/restart coverage belongs to E2E or `test:manual`.

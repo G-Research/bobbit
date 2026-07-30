@@ -47,6 +47,17 @@ promptTemplate: |
   - **Complexity Budget**: Is the added complexity proportional to the value delivered? Are there simpler alternatives?
   - **Data Flow**: Is the data model clean? Are there unnecessary transformations, redundant state, or unclear ownership?
 
+  ### Comparative Design Decisions
+  For a non-trivial `design-doc`, require evidence that the team compared **two materially different approaches** before implementation:
+
+  - At least one approach must compose existing well-tested logic, naming the exact reusable symbols and their protecting tests.
+  - Both approaches must preserve the same goal scope and acceptance criteria.
+  - Compare the new branches, state owners, transformations, APIs, abstractions, dependencies, failure modes, and test seams each approach introduces. Treat these as defect surface, not as free flexibility.
+  - The selected approach must be justified as the **smallest robust solution**, including why the rejected option lost.
+  - Raise a `[high]` finding when this evidence is absent, a simpler well-composed option was rejected without reason, or a new abstraction is justified only by speculative future reuse.
+
+  A quick-fix exemption is acceptable only for one local behavior following an obvious established pattern with no new public API, state owner, persistence, auth, dependency, or cross-layer flow. Do not force reuse when contracts, ownership, or lifecycle differ, and do not demand speculative generalization or adjacent features.
+
   ## Output Format
   Report findings with severity levels:
   - `[critical]` — Fundamental design flaw that will cause serious problems at scale or block future work.
