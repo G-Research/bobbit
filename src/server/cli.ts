@@ -11,14 +11,14 @@ import { resolveSystemPromptPath } from "./agent/system-prompt.js";
 import { loadOrCreateToken, readToken } from "./auth/token.js";
 import { ensureTlsCert } from "./auth/tls.js";
 import { loadDesecConfig, updateDesecIp } from "./auth/desec.js";
-import { createGateway } from "./server.js";
 import { bootLog, bootMark } from "./boot-profile.js";
 import { loopbackForBind } from "./cli-loopback.js";
 import { resolveCliGatewayDeps } from "./cli-gateway-deps.js";
+import { normalizeBasePath } from "../shared/base-path.js";
 
 export { loopbackForBind };
 
-interface CliArgs {
+export interface CliArgs {
 	host: string;
 	port: number;
 	portExplicit: boolean;
@@ -31,6 +31,89 @@ interface CliArgs {
 	forceAuth: boolean;
 	staticDir?: string;
 	agentCliPath?: string;
+	basePath: string;
+}
+
+export interface CliRunEffects {
+	createGateway?: typeof import("./server.js").createGateway;
+	writeGatewayUrl?: (filePath: string, peerUrl: string) => void;
+	openUrl?: (url: string) => void;
+	registerSignalHandlers?: boolean;
+	stageBundledBinaries?: typeof stageBundledBinaries;
+}
+
+export interface StartupUrls {
+	protocol: "http" | "https";
+	authEnforced: boolean;
+	listenUrl: string;
+	peerUrl: string;
+	uiUrl: string;
+	openUrl: string;
+}
+
+export function isLoopbackHost(host: string): boolean {
+	const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+	return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+}
+
+function urlHost(host: string): string {
+	const normalized = host.trim();
+	return normalized.includes(":") && !normalized.startsWith("[") ? `[${normalized}]` : normalized;
+}
+
+export function buildStartupUrls(input: {
+	protocol: "http" | "https";
+	host: string;
+	port: number;
+	basePath?: string;
+	token: string;
+	forceAuth?: boolean;
+}): StartupUrls {
+	const basePath = normalizeBasePath(input.basePath);
+	const authEnforced = Boolean(input.forceAuth) || !isLoopbackHost(input.host);
+	const listenUrl = `${input.protocol}://${urlHost(input.host)}:${input.port}${basePath}`;
+	const peerHost = loopbackForBind(input.host);
+	const peerUrl = `${input.protocol}://${urlHost(peerHost)}:${input.port}${basePath}`;
+	const uiUrl = authEnforced
+		? `${listenUrl}/?token=${encodeURIComponent(input.token)}`
+		: `${listenUrl}/`;
+	return { protocol: input.protocol, authEnforced, listenUrl, peerUrl, uiUrl, openUrl: uiUrl };
+}
+
+export function formatStartupBanner(input: {
+	version: string;
+	urls: StartupUrls;
+	token: string;
+	cwd: string;
+	staticDir?: string;
+	addresses?: readonly string[];
+}): string {
+	const lines = ["", `Bobbit Gateway v${input.version}`, `  Listening:  ${input.urls.listenUrl}`];
+	if (input.urls.authEnforced) lines.push(`  Auth token: ${input.token}`);
+	lines.push(`  Agent CWD:  ${input.cwd}`);
+	if (input.staticDir) lines.push(`  UI:         ${input.urls.uiUrl}`);
+	if (input.addresses?.length) lines.push(`  Accessible from: ${input.addresses.join(", ")}`);
+	lines.push("");
+	if (input.urls.authEnforced) {
+		lines.push("  ⚠ This token grants full shell access to this machine.");
+		lines.push("  Keep it secret. Regenerate with --new-token.");
+	} else {
+		lines.push("  Token authentication is disabled on this loopback bind.");
+		lines.push("  Any local process can access the gateway. Use --auth to require the token.");
+	}
+	lines.push("");
+	return lines.join("\n");
+}
+
+function writeFileAtomic(filePath: string, content: string): void {
+	const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+	fs.writeFileSync(tempPath, content, "utf-8");
+	try {
+		fs.renameSync(tempPath, filePath);
+	} catch (error) {
+		try { fs.unlinkSync(tempPath); } catch { /* best-effort temp cleanup */ }
+		throw error;
+	}
 }
 
 /** Find the NordLynx (NordVPN mesh) interface IPv4 address, or null if not found. */
@@ -48,8 +131,8 @@ function findNordLynxIp(): string | null {
 	return null;
 }
 
-function parseArgs(argv: string[]): CliArgs {
-	const envPort = process.env.PORT ? parseInt(process.env.PORT, 10) : NaN;
+export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env): CliArgs {
+	const envPort = env.PORT ? parseInt(env.PORT, 10) : NaN;
 	const result: CliArgs = {
 		host: "",  // resolved after parsing
 		port: !isNaN(envPort) ? envPort : 3001,
@@ -61,7 +144,10 @@ function parseArgs(argv: string[]): CliArgs {
 		tls: true,  // on by default
 		tlsExplicit: false,
 		forceAuth: false,
+		basePath: "",
 	};
+	let basePathFlagPresent = false;
+	let basePathFlagValue: string | undefined;
 
 	for (let i = 0; i < argv.length; i++) {
 		switch (argv[i]) {
@@ -87,6 +173,14 @@ function parseArgs(argv: string[]): CliArgs {
 			case "--agent-cli":
 				result.agentCliPath = path.resolve(argv[++i]);
 				break;
+			case "--base-path": {
+				basePathFlagPresent = true;
+				if (i + 1 >= argv.length || argv[i + 1]!.startsWith("--")) {
+					throw new Error("--base-path requires a value (use / for a root mount)");
+				}
+				basePathFlagValue = argv[++i]!;
+				break;
+			}
 			case "--no-ui":
 				result.noUi = true;
 				break;
@@ -114,6 +208,11 @@ function parseArgs(argv: string[]): CliArgs {
 		}
 	}
 
+	const selectedBasePath = basePathFlagPresent
+		? basePathFlagValue
+		: Object.prototype.hasOwnProperty.call(env, "BOBBIT_BASE_PATH") ? env.BOBBIT_BASE_PATH : undefined;
+	result.basePath = normalizeBasePath(selectedBasePath);
+
 	// Auto-detect embedded UI (dist/ui/) unless --no-ui or explicit --static
 	if (!result.noUi && !result.staticDir) {
 		const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -126,10 +225,14 @@ function parseArgs(argv: string[]): CliArgs {
 	return result;
 }
 
-async function main() {
+export async function runCli(
+	argv: string[] = process.argv.slice(2),
+	env: NodeJS.ProcessEnv = process.env,
+	effects: CliRunEffects = {},
+): Promise<void> {
 	// Wall-clock anchor for boot instrumentation — process-start (approx) to listen.
 	const bootWallT0 = Date.now();
-	const args = parseArgs(process.argv.slice(2));
+	const args = parseArgs(argv, env);
 
 	// --show-token: print token and exit
 	if (args.showToken) {
@@ -162,7 +265,7 @@ async function main() {
 	// finds them via its existing getToolPath() lookup. Idempotent; failures
 	// log a single warning but never crash startup. See src/server/binaries.ts.
 	try {
-		await stageBundledBinaries(globalAgentDir());
+		await (effects.stageBundledBinaries ?? stageBundledBinaries)(globalAgentDir());
 	} catch (e) {
 		console.warn(`[binaries] Staging failed: ${(e as Error).message}`);
 	}
@@ -176,7 +279,7 @@ async function main() {
 	}
 
 	// Auto-disable TLS for loopback to avoid self-signed cert warnings on localhost
-	const isLoopback = args.host === "127.0.0.1" || args.host === "::1" || args.host === "localhost";
+	const isLoopback = isLoopbackHost(args.host);
 	if (isLoopback && !args.tlsExplicit) {
 		args.tls = false;
 		console.log("  Binding to localhost — TLS disabled (use --tls to override).");
@@ -198,19 +301,36 @@ async function main() {
 
 	bootMark(`BOOT ${new Date().toISOString()}`);
 	bootLog(`[boot] prologue (binaries/token/tls) in ${Date.now() - bootWallT0}ms`);
+	const protocol = args.tls ? "https" as const : "http" as const;
+	let startupUrls: StartupUrls | undefined;
+	const gatewayUrlPath = path.join(bobbitStateDir(), "gateway-url");
 	const ctorT0 = Date.now();
-	const gateway = createGateway({
+	const createGatewayImpl = effects.createGateway ?? (await import("./server.js")).createGateway;
+	const gateway = createGatewayImpl({
 		host: args.host,
 		port: args.port,
 		portExplicit: args.portExplicit,
 		authToken,
 		defaultCwd: args.cwd,
 		staticDir: args.staticDir,
+		basePath: args.basePath,
+		onBound: (actualPort) => {
+			startupUrls = buildStartupUrls({
+				protocol,
+				host: args.host,
+				port: actualPort,
+				basePath: args.basePath,
+				token: authToken,
+				forceAuth: args.forceAuth,
+			});
+			(effects.writeGatewayUrl ?? writeFileAtomic)(gatewayUrlPath, startupUrls.peerUrl);
+			return startupUrls.peerUrl;
+		},
 		agentCliPath: args.agentCliPath,
 		systemPromptPath,
 		tls,
 		forceAuth: args.forceAuth,
-	}, resolveCliGatewayDeps());
+	}, resolveCliGatewayDeps(env));
 	bootLog(`[boot] createGateway construction in ${Date.now() - ctorT0}ms`);
 
 	const startT0 = Date.now();
@@ -230,47 +350,44 @@ async function main() {
 		}
 	}
 
-	const proto = args.tls ? "https" : "http";
-	const baseUrl = `${proto}://${args.host}:${actualPort}`;
-	// peerUrl is what same-host agents use to call back into the gateway. For a
-	// wildcard bind (`0.0.0.0` / `::`), normalise to loopback so the connect side
-	// has a real peer address (the wildcard is a listen-only address).
-	const peerUrl = `${proto}://${loopbackForBind(args.host)}:${actualPort}`;
-	const fullUrl = `${baseUrl}/?token=${encodeURIComponent(authToken)}`;
-
-	// Write gateway URL to a discoverable file so Vite proxy and extensions can find it.
-	const gatewayUrlPath = path.join(bobbitStateDir(), "gateway-url");
-	fs.writeFileSync(gatewayUrlPath, peerUrl, "utf-8");
+	// `onBound` publishes this before restore. Keep a defensive construction for
+	// custom/programmatic gateway implementations which do not invoke the hook.
+	startupUrls ??= buildStartupUrls({
+		protocol,
+		host: args.host,
+		port: actualPort,
+		basePath: args.basePath,
+		token: authToken,
+		forceAuth: args.forceAuth,
+	});
 
 	const __cliDir = path.dirname(fileURLToPath(import.meta.url));
 	const pkgVersion = JSON.parse(fs.readFileSync(path.resolve(__cliDir, "../../package.json"), "utf-8")).version;
 	// Set terminal tab title
 	process.stdout.write(`\x1b]0;Bobbit Server\x07`);
-	console.log(`\nBobbit Gateway v${pkgVersion}`);
-	console.log(`  Listening:  ${baseUrl}`);
-	console.log(`  Auth token: ${authToken}`);
-	console.log(`  Agent CWD:  ${args.cwd}`);
-	if (args.staticDir) {
-		console.log(`  UI:         ${fullUrl}`);
-	}
-	if (addresses.length > 0) {
-		console.log(`  Accessible from: ${addresses.join(", ")}`);
-	}
-	console.log();
-	console.log(`  \u26A0 This token grants full shell access to this machine.`);
-	console.log(`  Keep it secret. Regenerate with --new-token.`);
-	console.log();
+	console.log(formatStartupBanner({
+		version: pkgVersion,
+		urls: startupUrls,
+		token: authToken,
+		cwd: args.cwd,
+		staticDir: args.staticDir,
+		addresses,
+	}));
 
 	// Auto-open browser when serving the UI, passing token so the UI auto-connects.
 	// Skipped when:
 	//   - BOBBIT_NO_OPEN is set (explicit opt-out)
 	//   - NODE_ENV === "test" (manual integration tests + any test harness; prevents
 	//     browser tab spam from per-test gateway spawns)
-	const suppressOpen = process.env.BOBBIT_NO_OPEN || process.env.NODE_ENV === "test";
+	const suppressOpen = env.BOBBIT_NO_OPEN || env.NODE_ENV === "test";
 	if (args.staticDir && !suppressOpen) {
-		const cmd =
-			process.platform === "win32" ? "start" : process.platform === "darwin" ? "open" : "xdg-open";
-		import("node:child_process").then(({ exec }) => exec(`${cmd} ${fullUrl}`));
+		if (effects.openUrl) {
+			effects.openUrl(startupUrls.openUrl);
+		} else {
+			const cmd =
+				process.platform === "win32" ? "start" : process.platform === "darwin" ? "open" : "xdg-open";
+			import("node:child_process").then(({ exec }) => exec(`${cmd} ${startupUrls!.openUrl}`));
+		}
 	}
 
 	// Graceful shutdown
@@ -280,8 +397,10 @@ async function main() {
 		process.exit(0);
 	};
 
-	process.on("SIGINT", shutdown);
-	process.on("SIGTERM", shutdown);
+	if (effects.registerSignalHandlers !== false) {
+		process.on("SIGINT", shutdown);
+		process.on("SIGTERM", shutdown);
+	}
 }
 
 // Global error handlers — prevent silent zombification from stray rejections
@@ -308,7 +427,10 @@ process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
 	process.exit(1);
 });
 
-main().catch((err) => {
-	console.error("Fatal:", err);
-	process.exit(1);
-});
+const invokedPath = process.argv[1];
+if (invokedPath && path.resolve(invokedPath) === path.resolve(fileURLToPath(import.meta.url))) {
+	runCli().catch((err) => {
+		console.error("Fatal:", err instanceof Error ? err.message : err);
+		process.exit(1);
+	});
+}
