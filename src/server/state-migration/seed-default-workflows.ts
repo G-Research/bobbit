@@ -115,12 +115,18 @@ If the diff fixes any of the above (e.g. it shortens long entries, dedupes recip
 
 Summarize with PASS/FAIL for each check and specific items to address.`;
 
-export const DESIGN_REVIEW_PROMPT = `Review this design document for structure, clarity, and completeness. Verify:
-1. Approach is clearly described with rationale
-2. File changes are listed with specific descriptions
-3. Acceptance criteria are specific and testable
-4. Edge cases and error handling are considered
-5. **E2E test plan** — the design MUST include a section describing browser-based E2E tests that validate the user journey end-to-end. If no E2E test plan section is present, FAIL this review.`;
+export const DESIGN_REVIEW_PROMPT = `Review this design document for structure, clarity, comparative reasoning, and completeness.
+
+For every non-trivial change, FAIL unless the design:
+1. Compares two materially different approaches that preserve the same scope and acceptance criteria
+2. Includes a minimal-composition option that names exact well-tested existing code and its protecting tests
+3. Inventories and justifies every new branch, state owner, transformation, API, abstraction, and dependency as added defect surface
+4. Compares data/control flow, expected files, failure modes, and test seams
+5. Selects the smallest robust solution and explains why the rejected option lost
+
+A quick-fix exemption is acceptable only for one local behavior following an obvious established pattern with no new public API, state owner, persistence, auth, dependency, or cross-layer flow; the design must state why comparison is unnecessary. Do not force reuse where contracts, ownership, or lifecycle differ, and do not demand speculative generalization or adjacent features.
+
+Regardless of comparative-design exemption, every design must list file changes with specific descriptions, define specific and testable acceptance criteria, cover edge/error handling, and include an E2E test plan that validates the user journey end-to-end.`;
 
 export const GAP_ANALYSIS_DESIGN_PROMPT = `Compare the goal specification to this design document.
 
@@ -132,6 +138,8 @@ Identify:
 2. Acceptance criteria not covered by the proposed changes
 3. Edge cases mentioned in the goal but missing from the design
 4. Any contradictions between the goal and the design
+5. Compared approaches that do not target the same acceptance criteria and constraints
+6. Scope expansion added to justify an abstraction or possible future reuse
 
 Use your tools to read the design document content from the signal.`;
 

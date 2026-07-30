@@ -33,35 +33,51 @@ workflows:
         content: true
         inject_downstream: true
         verify:
-          - name: Design review
+          - name: Comparative design review
             type: llm-review
             role: architect
             prompt: >-
-              Review this design document for structure, clarity, and
-              completeness. Verify:
+              Review this design document for structure, clarity, comparative
+              reasoning, and completeness.
 
 
-              1. Approach is clearly described with rationale
+              For every non-trivial change, FAIL unless the design:
 
 
-              2. File changes are listed with specific descriptions
+              1. Compares two materially different approaches that preserve the
+              same scope and acceptance criteria
 
 
-              3. Acceptance criteria are specific and testable
+              2. Includes a minimal-composition option that names exact
+              well-tested existing code and its protecting tests
 
 
-              4. Edge cases and error handling are considered
+              3. Inventories and justifies every new branch, state owner,
+              transformation, API, abstraction, and dependency as added defect
+              surface
 
 
-              5. **E2E test plan** — the design MUST include a section
-              describing the browser-based E2E tests that will validate the user
-              journey end-to-end. For UI features, this means fullstack tests
-              (in tests/e2e/ui/) that exercise the complete workflow through
-              real browser interactions: navigate to the feature, interact with
-              it, verify state persists across reload, verify cleanup/removal
-              works. For API-only features, E2E tests (in tests/e2e/) covering
-              the request/response lifecycle are sufficient. If no E2E test plan
-              section is present, FAIL this review.
+              4. Compares data/control flow, expected files, failure modes, and
+              test seams
+
+
+              5. Selects the smallest robust solution and explains why the
+              rejected option lost
+
+
+              A quick-fix exemption is acceptable only for one local behavior
+              following an obvious established pattern with no new public API,
+              state owner, persistence, auth, dependency, or cross-layer flow;
+              the design must state why comparison is unnecessary. Do not force
+              reuse where contracts, ownership, or lifecycle differ, and do not
+              demand speculative generalization or adjacent features.
+
+
+              Regardless of comparative-design exemption, every design must list
+              file changes with specific descriptions, define specific and
+              testable acceptance criteria, cover edge/error handling, and
+              include an E2E test plan that validates the user journey
+              end-to-end.
           - name: Gap analysis
             type: llm-review
             role: spec-auditor
@@ -88,6 +104,14 @@ workflows:
 
 
               4. Any contradictions between the goal and the design
+
+
+              5. Compared approaches that do not target the same acceptance
+              criteria and constraints
+
+
+              6. Scope expansion added to justify an abstraction or possible
+              future reuse
 
 
               Use your tools to read the design document content from the
@@ -440,12 +464,51 @@ workflows:
         content: true
         inject_downstream: true
         verify:
-          - name: Design review
+          - name: Comparative design review
             type: llm-review
             role: architect
-            prompt: Review this design document for structure, clarity, and completeness.
-              Verify architecture/API surface, file-change rationale, testable
-              acceptance criteria, and edge/error handling.
+            prompt: >-
+              Review this design document for structure, clarity, comparative
+              reasoning, and completeness.
+
+
+              For every non-trivial change, FAIL unless the design:
+
+
+              1. Compares two materially different approaches that preserve the
+              same scope and acceptance criteria
+
+
+              2. Includes a minimal-composition option that names exact
+              well-tested existing code and its protecting tests
+
+
+              3. Inventories and justifies every new branch, state owner,
+              transformation, API, abstraction, and dependency as added defect
+              surface
+
+
+              4. Compares data/control flow, expected files, failure modes, and
+              test seams
+
+
+              5. Selects the smallest robust solution and explains why the
+              rejected option lost
+
+
+              A quick-fix exemption is acceptable only for one local behavior
+              following an obvious established pattern with no new public API,
+              state owner, persistence, auth, dependency, or cross-layer flow;
+              the design must state why comparison is unnecessary. Do not force
+              reuse where contracts, ownership, or lifecycle differ, and do not
+              demand speculative generalization or adjacent features.
+
+
+              Regardless of comparative-design exemption, every design must list
+              file changes with specific descriptions, define specific and
+              testable acceptance criteria, cover edge/error handling, and
+              include an E2E test plan that validates the user journey
+              end-to-end.
           - name: Gap analysis
             type: llm-review
             role: spec-auditor
@@ -460,8 +523,10 @@ workflows:
 
 
               Identify unaddressed requirements, uncovered acceptance criteria,
-              missing edge cases, and contradictions. Use your tools to read the
-              design document content from the signal.
+              missing edge cases, contradictions, compared approaches that do
+              not target the same acceptance criteria, and scope expansion added
+              to justify an abstraction or possible future reuse. Use your tools
+              to read the design document content from the signal.
       - id: implementation
         name: Implementation
         depends_on:
