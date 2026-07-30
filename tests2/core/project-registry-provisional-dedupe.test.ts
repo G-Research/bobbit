@@ -43,24 +43,29 @@ function readStoredProjects(stateDir: string): Array<{ id: string; rootPath: str
 }
 
 test("canonicalProjectPath folds nonexistent suffixes only after a read-only insensitive-ancestor probe", () => {
-  const ancestor = "/identity/Ancestor";
+  // This is a POSIX-volume simulation, not a claim about the runner's native
+  // filesystem. Declare the dialect explicitly so a Windows runner exercises
+  // the probe instead of treating the POSIX fixture as foreign.
+  const pathApi = path.posix;
+  const ancestor = pathApi.join(pathApi.sep, "identity", "Ancestor");
   const insensitiveRealpath = (candidate: string): string => {
-    if (candidate === ancestor || candidate === "/identity/ancestor") return ancestor;
+    if (candidate === ancestor || candidate === pathApi.join(pathApi.dirname(ancestor), "ancestor")) return ancestor;
     throw new Error(`not found: ${candidate}`);
   };
   const sensitiveRealpath = (candidate: string): string => {
     if (candidate === ancestor) return ancestor;
     throw new Error(`not found: ${candidate}`);
   };
+  const nativePosixVolume = { isNativePathApi: (dialect: "posix" | "win32") => dialect === "posix" };
 
   assert.equal(
-    canonicalProjectPath(`${ancestor}/FutureProject`, { realpathSync: insensitiveRealpath }),
-    `${ancestor}/futureproject`,
+    canonicalProjectPath(pathApi.join(ancestor, "FutureProject"), { ...nativePosixVolume, realpathSync: insensitiveRealpath }),
+    pathApi.join(ancestor, "futureproject"),
     "a case-variant spelling of the existing ancestor proves suffix folding is safe",
   );
   assert.equal(
-    canonicalProjectPath(`${ancestor}/FutureProject`, { realpathSync: sensitiveRealpath }),
-    `${ancestor}/FutureProject`,
+    canonicalProjectPath(pathApi.join(ancestor, "FutureProject"), { ...nativePosixVolume, realpathSync: sensitiveRealpath }),
+    pathApi.join(ancestor, "FutureProject"),
     "without that proof, a sensitive filesystem retains the requested suffix spelling",
   );
 });
