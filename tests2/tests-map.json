@@ -1552,7 +1552,7 @@
     },
     {
       "path": "tests2/core/spawn-with-retry-policy.test.ts",
-      "reason": "Subprocess-free policy coverage for bounded fixture command retry, timeout, redaction, literal argv, and safe process options through an injectable backend.",
+      "reason": "Subprocess-free policy coverage for bounded fixture command retry, timeout/close ordering, authoritative close-zero handling, transactional cleanup redaction, literal argv, and safe process options through an injectable backend.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -1561,7 +1561,7 @@
     },
     {
       "path": "tests2/integration/fixture-command-timeout-real-git.test.ts",
-      "reason": "Focused Group D real-Git/platform regression for the timeout-versus-successful-commit race: reproduces the blind retry's code-1 result, proves private transactional recreation, confirms exit-zero close wins the timeout race, and pins close-before-cleanup plus FixtureCommandError redaction.",
+      "reason": "Focused Group D real-Git/platform regression for the timeout-versus-successful-commit race: reproduces blind retry exit code 1 and proves that a timed-out attempt later closing unsuccessfully with one retry remaining recreates private transactional state before retry.",
       "execution": {
         "runner": "vitest",
         "tier": "e2e",

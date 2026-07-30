@@ -3,13 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import {
-	FixtureCommandError,
-	runFixtureCommand,
-	runFixtureCommandWithBackend,
-	type FixtureCommandBackend,
-	type FixtureCommandProcess,
-} from "../harness/spawn-with-retry.js";
+import { FixtureCommandError, runFixtureCommand } from "../harness/spawn-with-retry.js";
 
 const roots: string[] = [];
 const gitEnv: NodeJS.ProcessEnv = {
@@ -101,91 +95,5 @@ describe("fixture command timeout races on real Git", () => {
 		expect(blindRetryExitCode).toBe(1);
 		expect(result).toMatchObject({ attempts: 2, exitCode: 0 });
 		expect(readFileSync(attemptLog, "utf8").trim().split(/\s+/)).toEqual(["0", "0"]);
-	});
-
-	it("accepts an exit-zero close that races the timeout without cleanup or retry", async () => {
-		let fireTimeout: (() => void) | undefined;
-		let close: ((exitCode: number | null, signal: NodeJS.Signals | null) => void) | undefined;
-		let cleanupCalls = 0;
-		let spawnCalls = 0;
-		const backend: FixtureCommandBackend = {
-			spawn() {
-				spawnCalls += 1;
-				return {
-					onStdout() {},
-					onStderr() {},
-					onError() {},
-					onClose(listener) { close = listener; },
-					kill() {},
-				};
-			},
-			schedule(callback) {
-				fireTimeout = callback;
-				return { cancel() {}, unref() {} };
-			},
-			async sleep() {},
-		};
-
-		const command = runFixtureCommandWithBackend("git", ["commit"], {
-			attempts: 2,
-			timeoutMs: 100,
-			onTimedOutAttemptClosed: () => { cleanupCalls += 1; },
-		}, backend);
-		await Promise.resolve();
-		fireTimeout!();
-		close!(0, null);
-
-		await expect(command).resolves.toMatchObject({ attempts: 1, exitCode: 0 });
-		expect(spawnCalls).toBe(1);
-		expect(cleanupCalls).toBe(0);
-	});
-
-	it("waits for close and wraps cleanup-hook errors with secret redaction", async () => {
-		const secret = "cleanup-hook-secret";
-		let fireTimeout: (() => void) | undefined;
-		let close: ((exitCode: number | null, signal: NodeJS.Signals | null) => void) | undefined;
-		let cleanupCalls = 0;
-		let settled = false;
-		const process: FixtureCommandProcess = {
-			onStdout() {},
-			onStderr(listener) { listener(secret); },
-			onError() {},
-			onClose(listener) { close = listener; },
-			kill() {},
-		};
-		const backend: FixtureCommandBackend = {
-			spawn: () => process,
-			schedule(callback) {
-				fireTimeout = callback;
-				return { cancel() {}, unref() {} };
-			},
-			async sleep() { throw new Error("cleanup failure must suppress retry sleep"); },
-		};
-
-		const command = runFixtureCommandWithBackend("git", ["commit", secret], {
-			attempts: 2,
-			timeoutMs: 100,
-			redact: [secret],
-			onTimedOutAttemptClosed: () => {
-				cleanupCalls += 1;
-				throw new Error(`cleanup rejected ${secret}`);
-			},
-		}, backend);
-		void command.then(() => { settled = true; }, () => { settled = true; });
-		await Promise.resolve();
-		fireTimeout!();
-		await Promise.resolve();
-		expect(settled).toBe(false);
-		expect(cleanupCalls).toBe(0);
-
-		close!(null, "SIGKILL");
-		const error = await fixtureError(command);
-		expect(error.attempts).toBe(1);
-		expect(error.timedOut).toBe(true);
-		expect(error.message).toContain("timed-out attempt cleanup failed");
-		expect(error.message).toContain("[REDACTED]");
-		expect(error.message).not.toContain(secret);
-		expect(error.stderr).toBe("[REDACTED]");
-		expect(cleanupCalls).toBe(1);
 	});
 });

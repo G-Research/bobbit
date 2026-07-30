@@ -16,8 +16,9 @@ export interface FixtureCommandOptions {
 	/** Literal values removed from diagnostics. Environment secrets are detected too. */
 	redact?: readonly string[];
 	/**
-	 * Restore private transactional state after a timed-out process has closed and
-	 * before retrying. A thrown cleanup error is sanitized as FixtureCommandError.
+	 * Restore private transactional state after a timed-out process closes
+	 * unsuccessfully and before a remaining retry. A thrown cleanup error is
+	 * sanitized as FixtureCommandError.
 	 */
 	onTimedOutAttemptClosed?: (attempt: number) => void | Promise<void>;
 }
@@ -157,7 +158,7 @@ async function runAttempt(
 		let timedOut = false;
 		let outputExceeded = false;
 		let settled = false;
-		let spawnCause: unknown;
+		let processCause: unknown;
 		let killCause: unknown;
 		let terminationRequested = false;
 		let timeout: FixtureCommandTimer | undefined;
@@ -205,14 +206,14 @@ async function runAttempt(
 		};
 		child.onStdout(chunk => { stdout = append(stdout, chunk); });
 		child.onStderr(chunk => { stderr = append(stderr, chunk); });
-		// Node emits `close` after `error`. Retain the spawn failure for the final
+		// Node emits `close` after `error`. Retain process errors for the final
 		// diagnostic, but never let a retry overlap a child whose close is unknown.
-		child.onError(cause => { spawnCause ??= cause; });
+		child.onError(cause => { processCause ??= cause; });
 		child.onClose((exitCode, signal) => {
 			const stderrText = stderr.toString("utf8");
-			// A timeout can race delivery of an already-successful close. Exit zero is
-			// authoritative and must not turn a completed non-idempotent command into a retry.
-			if (exitCode === 0 && spawnCause === undefined && !outputExceeded) {
+			// Timeout and post-spawn errors can race delivery of an already-successful
+			// close. Exit zero is authoritative unless captured output exceeded its bound.
+			if (exitCode === 0 && !outputExceeded) {
 				finish({ stdout: stdout.toString("utf8"), stderr: stderrText });
 				return;
 			}
@@ -222,7 +223,7 @@ async function runAttempt(
 				signal,
 				stderr: `${stderrText}${suffix}`.trim(),
 				timedOut,
-				cause: spawnCause ?? killCause,
+				cause: processCause ?? killCause,
 			});
 		});
 		timeout = backend.schedule(() => {
