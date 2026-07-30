@@ -20,7 +20,7 @@ import {
 	promptAuthorBindingMatchesText,
 	readAuthorSidecar,
 } from "../../src/server/agent/author-sidecar.js";
-import { attachLocalMockAgentClock } from "./helpers/local-mock-agent-clock.js";
+import { restoreWithLocalMockAgentClock } from "./helpers/local-mock-agent-clock.js";
 
 const STEER_TEXT = "RESTART_M1\nRESTART_M2";
 const AGENT_STEER_TEXT = "RESTART_AGENT_ACCOUNTABLE_STEER";
@@ -103,9 +103,7 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 			live.unsubscribe();
 			await live.rpcClient.stop();
 			sm.sessions.delete(sessionId);
-			await sm.restoreSessions();
-
-			const restoredClock = attachLocalMockAgentClock(gateway, sessionId);
+			const restoredClock = await restoreWithLocalMockAgentClock(gateway, sessionId);
 			await restoredClock.settleCurrentPrompt();
 
 			conn = await connectWs(sessionId);
@@ -179,9 +177,7 @@ test.describe("Steer + gateway restart (AC §3)", () => {
 			live.unsubscribe();
 			await live.rpcClient.stop();
 			sm.sessions.delete(sessionId);
-			await sm.restoreSessions();
-
-			const restoredClock = attachLocalMockAgentClock(gateway, sessionId);
+			const restoredClock = await restoreWithLocalMockAgentClock(gateway, sessionId);
 			await restoredClock.settleCurrentPrompt();
 			expect(rawUserMessages(gateway, sessionId).filter(message => messageText(message) === piText),
 				"only the healthy post-restart bridge observes the decorated steer").toHaveLength(1);
