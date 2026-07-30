@@ -17,6 +17,8 @@ export interface RunningCli {
 	child: ChildProcess;
 	stdout: string[];
 	stderr: string[];
+	/** Set only after ChildProcess emits `close`, never when its stdio closes. */
+	closed: boolean;
 }
 
 const PACKED_THEME_HTML = `<!doctype html>
@@ -304,9 +306,21 @@ export function startPackagedCli(options: {
 		detached: process.platform !== "win32",
 		stdio: ["ignore", "pipe", "pipe"],
 	});
-	child.stdout?.on("data", chunk => stdout.push(String(chunk)));
-	child.stderr?.on("data", chunk => stderr.push(String(chunk)));
-	return { child, stdout, stderr };
+	return capturePackagedCli(child, stdout, stderr);
+}
+
+export function capturePackagedCli(
+	child: ChildProcess,
+	stdout: string[] = [],
+	stderr: string[] = [],
+): RunningCli {
+	const runtime: RunningCli = { child, stdout, stderr, closed: false };
+	child.stdout?.on("data", chunk => runtime.stdout.push(String(chunk)));
+	child.stderr?.on("data", chunk => runtime.stderr.push(String(chunk)));
+	// Stream `close` is only the pipe lifecycle. The child may deliberately
+	// release all stdio and keep running, so teardown follows process `close`.
+	child.once("close", () => { runtime.closed = true; });
+	return runtime;
 }
 
 export async function waitForHealth(baseUrl: string, runtime: RunningCli, timeoutMs = 60_000): Promise<void> {
@@ -331,50 +345,48 @@ export async function waitForHealth(baseUrl: string, runtime: RunningCli, timeou
 const PACKAGED_CLI_TERM_GRACE_MS = 1_000;
 const PACKAGED_CLI_FORCED_CLOSE_WAIT_MS = 8_000;
 
-function streamsAreClosed(child: ChildProcess): boolean {
-	return [child.stdin, child.stdout, child.stderr].every(stream => stream == null || stream.destroyed);
+function waitForChildClose(runtime: RunningCli, timeoutMs: number): Promise<boolean> {
+	if (runtime.closed) return Promise.resolve(true);
+	return new Promise(resolve => {
+		let timer: NodeJS.Timeout | undefined;
+		const finish = (closed: boolean) => {
+			if (timer) clearTimeout(timer);
+			runtime.child.removeListener("close", onClose);
+			resolve(closed);
+		};
+		const onClose = () => finish(true);
+		timer = setTimeout(() => finish(false), timeoutMs);
+		runtime.child.once("close", onClose);
+		// The listener above is synchronous, but retain the second check so this
+		// stays correct if a future runtime is constructed asynchronously.
+		if (runtime.closed) finish(true);
+	});
 }
 
-function awaitChildClose(child: ChildProcess): Promise<void> {
-	if (streamsAreClosed(child)) return Promise.resolve();
-	return new Promise(resolve => child.once("close", resolve));
-}
-
-async function closesWithin(closed: Promise<void>, timeoutMs: number): Promise<boolean> {
-	let timer: NodeJS.Timeout | undefined;
-	try {
-		return await Promise.race([
-			closed.then(() => true),
-			new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); }),
-		]);
-	} finally {
-		if (timer) clearTimeout(timer);
-	}
-}
-
-function destroyChildStdio(child: ChildProcess): void {
+function releaseChildStdio(child: ChildProcess): void {
 	for (const stream of [child.stdin, child.stdout, child.stderr]) {
-		try { stream?.destroy(); } catch { /* best-effort final containment */ }
+		try { stream?.destroy(); } catch { /* best-effort cleanup after failed OS close */ }
 	}
+	// If the OS did not acknowledge the forced kill, detached children must not
+	// retain this Playwright worker through inherited stdio handles.
+	try { child.unref(); } catch { /* child may have exited between checks */ }
 }
 
 export async function stopPackagedCli(runtime: RunningCli): Promise<void> {
+	if (runtime.closed) return;
 	const child = runtime.child;
-	const closed = awaitChildClose(child);
-	if (await closesWithin(closed, 0)) return;
 
 	// POSIX children are detached process-group leaders. Give the whole group a
 	// short graceful shutdown window, then kill the same group unconditionally.
 	// On Windows taskkill /T /F remains the forceful tree-kill mechanism.
 	killTree(child, "SIGTERM");
-	if (await closesWithin(closed, PACKAGED_CLI_TERM_GRACE_MS)) return;
+	if (await waitForChildClose(runtime, PACKAGED_CLI_TERM_GRACE_MS)) return;
 	if (process.platform !== "win32") killTree(child, "SIGKILL");
-	if (await closesWithin(closed, PACKAGED_CLI_FORCED_CLOSE_WAIT_MS)) return;
+	if (await waitForChildClose(runtime, PACKAGED_CLI_FORCED_CLOSE_WAIT_MS)) return;
 
-	// A descendant can retain an inherited pipe after its parent has exited.
-	// Destroying our pipe handles is the final bounded containment step so they
-	// cannot keep the Playwright worker's event loop alive.
-	destroyChildStdio(child);
+	// Pipe release is containment only, not proof of process termination. A
+	// child that closes stdio while alive must still receive the kill sequence.
+	releaseChildStdio(child);
 }
 
 export async function readToken(secretsDir: string): Promise<string> {

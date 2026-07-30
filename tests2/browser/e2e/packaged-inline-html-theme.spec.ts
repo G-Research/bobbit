@@ -6,6 +6,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import {
+	capturePackagedCli,
 	cleanConsumerNpmEnv,
 	commandFailure,
 	createProjectAndSession,
@@ -189,17 +190,63 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			stdio: ["ignore", "pipe", "pipe"],
 			windowsHide: true,
 		});
+		const runtime = capturePackagedCli(child);
 		await once(child.stdout!, "data");
 
 		const startedAt = Date.now();
-		await stopPackagedCli({ child, stdout: [], stderr: [] });
+		await stopPackagedCli(runtime);
 		const elapsedMs = Date.now() - startedAt;
 
 		if (process.platform !== "win32") expect(child.signalCode).toBe("SIGKILL");
+		expect(runtime.closed, "teardown must wait for ChildProcess close").toBe(true);
 		expect(child.exitCode ?? child.signalCode).not.toBeNull();
 		expect(child.stdout?.destroyed, "teardown must release inherited stdout").toBe(true);
 		expect(child.stderr?.destroyed, "teardown must release inherited stderr").toBe(true);
 		expect(elapsedMs, "teardown must remain bounded after escalation").toBeLessThan(10_000);
+	});
+
+	test("teardown does not mistake released stdio for packaged process close", async () => {
+		const child = spawn(process.execPath, ["-e", `
+			const fs = require("node:fs");
+			const keepAlive = setInterval(() => {}, 1_000);
+			process.on("message", message => {
+				if (message !== "release-stdio") return;
+				process.stdout.destroy();
+				process.stderr.destroy();
+				fs.closeSync(1);
+				fs.closeSync(2);
+				process.send?.("stdio-released");
+			});
+			process.stdout.write("ready\\n");
+		`], {
+			detached: process.platform !== "win32",
+			stdio: ["ignore", "pipe", "pipe", "ipc"],
+			windowsHide: true,
+		});
+		const runtime = capturePackagedCli(child);
+		const actualClose = once(child, "close");
+		await once(child.stdout!, "data");
+		const stdoutReleased = once(child.stdout!, "close");
+		child.send("release-stdio");
+		await stdoutReleased;
+
+		try {
+			expect(runtime.closed, "stdio closure must not be recorded as process closure").toBe(false);
+			expect(child.exitCode).toBeNull();
+			expect(child.signalCode).toBeNull();
+
+			await stopPackagedCli(runtime);
+			expect(runtime.closed, "teardown must await actual ChildProcess close").toBe(true);
+			await actualClose;
+			expect(child.exitCode ?? child.signalCode).not.toBeNull();
+		} finally {
+			// Keep this regression self-cleaning against a broken teardown: the
+			// fixture intentionally has no natural exit path after closing stdio.
+			if (!runtime.closed) {
+				child.kill("SIGKILL");
+				await actualClose;
+			}
+		}
 	});
 
 	test("clean consumer serves dist UI and executes the bundled canonical theme bridge", async ({ page }, testInfo) => {
