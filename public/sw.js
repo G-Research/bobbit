@@ -8,11 +8,8 @@
 //     refresh (Ctrl+Shift+R) will always reach the gateway.
 //   * `BUILD_ID` is replaced at build time by the `bobbit-sw-version`
 //     Vite plugin (and stamped to a fresh value on every dev request).
-//     A new BUILD_ID -> new CACHE_NAME -> activate handler purges every
-//     cache that isn't the current one. Combined with `skipWaiting()` +
-//     `clients.claim()` this means: deploy a new build, the next page
-//     load activates the new SW, and the old caches are wiped before
-//     the user notices.
+//     Cache names include both the worker's runtime mount and the build,
+//     so separate Bobbit mounts on one origin cannot evict each other.
 //
 // Why we no longer cache `/assets/*` aggressively: the cache-first asset
 // path was the proximate cause of the "stuck UI after server restart"
@@ -23,7 +20,17 @@
 // for assets too removes that failure mode entirely while still
 // allowing offline use of the last-seen build.
 const BUILD_ID = "__BOBBIT_BUILD_ID__";
-const CACHE_NAME = `bobbit-${BUILD_ID}`;
+
+// The worker is registered at `<mount>/sw.js`, so its own location is the
+// deployment-independent source of truth for the active mount. Root mode is
+// represented as the empty string, matching the browser runtime boundary.
+const SW_PATH = self.location.pathname;
+const BASE_PATH = SW_PATH.endsWith("/sw.js")
+	? SW_PATH.slice(0, -"/sw.js".length)
+	: "";
+const CACHE_PREFIX = `bobbit:${encodeURIComponent(BASE_PATH || "/")}:`;
+const CACHE_NAME = `${CACHE_PREFIX}${BUILD_ID}`;
+
 // The marker `/*__BOBBIT_PRECACHE_CHUNKS__*/` is replaced at build time
 // by the `bobbit-sw-version` Vite plugin with the comma-separated hashed
 // paths of the most-likely next route chunks (goal-dashboard,
@@ -33,6 +40,26 @@ const CACHE_NAME = `bobbit-${BUILD_ID}`;
 // after a deploy. In dev / unstamped sources the marker is a no-op
 // comment so the file stays valid JS.
 const PRECACHE_ROUTE_CHUNKS = [/*__BOBBIT_PRECACHE_CHUNKS__*/];
+const MOUNTED_PRECACHE_ROUTE_CHUNKS = PRECACHE_ROUTE_CHUNKS.map((pathname) =>
+	`${BASE_PATH}${pathname.startsWith("/") ? pathname : `/${pathname}`}`,
+);
+const OFFLINE_NAVIGATION_URL = `${BASE_PATH}/`;
+
+/** Return the mount-relative pathname, or null outside this worker's mount. */
+function mountRelativePath(url) {
+	if (url.origin !== self.location.origin) return null;
+	if (!BASE_PATH) return url.pathname;
+	if (url.pathname === BASE_PATH) return "/";
+	if (!url.pathname.startsWith(`${BASE_PATH}/`)) return null;
+	return url.pathname.slice(BASE_PATH.length);
+}
+
+function isGatewayTransport(pathname) {
+	return pathname === "/api"
+		|| pathname.startsWith("/api/")
+		|| pathname === "/ws"
+		|| pathname.startsWith("/ws/");
+}
 
 self.addEventListener("install", (event) => {
 	// Activate immediately so a new build replaces the old SW on the next
@@ -42,11 +69,11 @@ self.addEventListener("install", (event) => {
 	// navigation to e.g. /goal-dashboard hits the cache instead of the
 	// network. Failures must not block install (e.g. unstamped dev SW
 	// has an empty list).
-	if (PRECACHE_ROUTE_CHUNKS.length > 0) {
+	if (MOUNTED_PRECACHE_ROUTE_CHUNKS.length > 0) {
 		event.waitUntil((async () => {
 			try {
 				const cache = await caches.open(CACHE_NAME);
-				await cache.addAll(PRECACHE_ROUTE_CHUNKS);
+				await cache.addAll(MOUNTED_PRECACHE_ROUTE_CHUNKS);
 			} catch {
 				// Pre-cache is best-effort; ignore failures.
 			}
@@ -55,13 +82,19 @@ self.addEventListener("install", (event) => {
 });
 
 self.addEventListener("activate", (event) => {
-	// Purge every cache that isn't the current build. This is what
-	// guarantees a fresh-deploy client never serves stale assets.
+	// Delete only superseded builds for this exact mount. Root mode also
+	// cleans up the legacy `bobbit-<build>` namespace used before caches were
+	// mount-scoped; a mounted worker must never touch those or sibling mounts.
 	event.waitUntil(
 		(async () => {
 			const keys = await caches.keys();
 			await Promise.all(
-				keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)),
+				keys
+					.filter((key) =>
+						(key.startsWith(CACHE_PREFIX) && key !== CACHE_NAME)
+						|| (!BASE_PATH && key.startsWith("bobbit-")),
+					)
+					.map((key) => caches.delete(key)),
 			);
 			await self.clients.claim();
 		})(),
@@ -75,31 +108,39 @@ self.addEventListener("fetch", (event) => {
 	if (req.method !== "GET") return;
 
 	const url = new URL(req.url);
+	const relativePathname = mountRelativePath(url);
 
-	// Never touch API or WebSocket traffic — must always hit the gateway.
-	if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/ws")) return;
+	// Do not claim external or same-origin sibling-app requests, and never
+	// touch gateway API/WebSocket traffic. Comparisons are mount-relative so
+	// mounted transports cannot accidentally enter the offline cache.
+	if (relativePathname === null || isGatewayTransport(relativePathname)) return;
 
-	// Network-first with offline cache fallback for every other GET.
+	// Network-first with offline cache fallback for every other in-mount GET.
 	event.respondWith(
 		fetch(req)
 			.then((response) => {
-				// Only cache successful, basic/cors responses. Opaque/error
-				// responses can poison the cache and serve garbage offline.
-				if (response.ok && (response.type === "basic" || response.type === "cors")) {
+				const finalUrl = new URL(response.url || req.url);
+				// Redirects can leave the mount. Cache only successful final responses
+				// that remain on this origin and within this exact mount.
+				if (
+					response.ok
+					&& mountRelativePath(finalUrl) !== null
+					&& (response.type === "basic" || response.type === "cors")
+				) {
 					const clone = response.clone();
 					caches.open(CACHE_NAME).then((cache) => cache.put(req, clone)).catch(() => {});
 				}
 				return response;
 			})
 			.catch(async () => {
-				// Network failed — try the per-build cache.
-				const cached = await caches.match(req);
+				// Network failed — consult only this mount/build's cache.
+				const cache = await caches.open(CACHE_NAME);
+				const cached = await cache.match(req);
 				if (cached) return cached;
-				// Navigation requests should at least get *some* HTML rather
-				// than the browser's default failure page. Fall back to the
-				// cached root if we have one.
+				// Navigation requests should at least get the mounted SPA shell rather
+				// than the browser's default failure page.
 				if (req.mode === "navigate") {
-					const root = await caches.match("/");
+					const root = await cache.match(OFFLINE_NAVIGATION_URL);
 					if (root) return root;
 				}
 				// Re-throw — browser shows offline error.
