@@ -60,8 +60,8 @@ test("canonicalProjectPath folds nonexistent suffixes only after a read-only ins
 
   assert.equal(
     canonicalProjectPath(pathApi.join(ancestor, "FutureProject"), { ...nativePosixVolume, realpathSync: insensitiveRealpath }),
-    pathApi.join(ancestor, "futureproject"),
-    "a case-variant spelling of the existing ancestor proves suffix folding is safe",
+    pathApi.join("/identity", "ancestor", "futureproject"),
+    "a case-variant spelling of the existing ancestor proves folding of both existing and future segments is safe",
   );
   assert.equal(
     canonicalProjectPath(pathApi.join(ancestor, "FutureProject"), { ...nativePosixVolume, realpathSync: sensitiveRealpath }),
