@@ -9,6 +9,7 @@ import { GoalPauseRenderer, GoalResumeRenderer } from "../../src/ui/tools/render
 import { GoalArchiveChildRenderer } from "../../src/ui/tools/renderers/GoalArchiveChildRenderer.js";
 import { GoalDecideMutationRenderer } from "../../src/ui/tools/renderers/GoalDecideMutationRenderer.js";
 import { GoalSetPolicyRenderer } from "../../src/ui/tools/renderers/GoalSetPolicyRenderer.js";
+import { commitGatewayConnection } from "../../src/app/gateway-fetch.js";
 import { _setSubgoalsEnabledForTesting } from "../../src/app/subgoals-flag.js";
 import "../../src/ui/lazy/children-mutation-approval.js";
 import "../../src/ui/lazy/children-goal-state-pill.js";
@@ -52,10 +53,21 @@ _setSubgoalsEnabledForTesting(true);
 (window as any).__getFetchCalls = () => (window as any).__fetchCalls || [];
 (window as any).__resetFetchCalls = () => { (window as any).__fetchCalls = []; };
 window.fetch = async (url: any, init: any = {}) => {
-	(window as any).__fetchCalls.push({ url: String(url), method: init?.method || "GET", body: init?.body });
+	(window as any).__fetchCalls.push({
+		url: String(url),
+		method: init?.method || "GET",
+		body: init?.body,
+		credentials: init?.credentials,
+		headers: Object.fromEntries(new Headers(init?.headers).entries()),
+	});
 	const responder = (window as any).__fetchResponder as undefined | ((u: string, i: any) => { status: number; body: any });
 	const resp = responder ? responder(String(url), init) : { status: 200, body: { ok: true } };
 	return new Response(JSON.stringify(resp.body), { status: resp.status, headers: { "Content-Type": "application/json" } });
 };
+
+// A file:// fixture has no HTTP origin for gatewayFetch's same-origin fallback.
+// Seed the real connection boundary with a mounted gateway and bearer so this
+// fixture still exercises prefix resolution and credential handling.
+commitGatewayConnection("https://gateway.test/team/bobbit", "fixture-token");
 
 (window as any).__ready = true;

@@ -189,7 +189,12 @@ test.describe("goal_plan_propose", () => {
 		await expect(page.locator('[data-testid="children-mutation-decided"]')).toHaveText(/Approved/, { timeout: 3000 });
 		const calls = await page.evaluate(() => (window as any).__getFetchCalls());
 		const post = calls.find((c: any) => c.method === "POST" && /mutation\/req-bbb\/decision/.test(c.url));
-		expect(post).toBeTruthy();
+		expect(post).toMatchObject({
+			url: "https://gateway.test/team/bobbit/api/goals/goal-zzz/mutation/req-bbb/decision",
+			method: "POST",
+			credentials: "include",
+		});
+		expect(post.headers.authorization).toBe("Bearer fixture-token");
 		expect(JSON.parse(post.body)).toEqual({ decision: "approve" });
 	});
 });
