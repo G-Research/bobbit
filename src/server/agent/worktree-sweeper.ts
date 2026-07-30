@@ -360,12 +360,20 @@ export async function sweepOrphanedWorktrees(opts: {
 			const ownershipForAliases = opts.getCurrentOwnership ? opts.getCurrentOwnership() : initialOwnership;
 			await canonicalizePaths(ownershipPaths(ownershipForAliases), sweepFs.realpath, aliases);
 		};
-		const finalOwnershipGuards = (): OwnershipGuards => {
+		const finalOwnershipGuards = (): { guards: OwnershipGuards; hasUnresolvedPaths: boolean } => {
 			// Call this directly after refreshCurrentOwnershipAliases(). It performs
 			// the final synchronous ownership read and has no await before repair or
 			// cleanup begins, leaving no event-loop turn for a new claim to race in.
 			const finalOwnership = opts.getCurrentOwnership ? opts.getCurrentOwnership() : initialOwnership;
-			return buildOwnershipGuards(finalOwnership, aliases);
+			// A path that first appears in this final snapshot could be a lexical
+			// alias (for example /var while Git reported /private/var). Resolving it
+			// would yield and reopen the ownership race, so do not mutate until a
+			// later sweep can canonicalize it from a stable snapshot.
+			const hasUnresolvedPaths = ownershipPaths(finalOwnership).some(value => {
+				const normalized = normalize(value);
+				return !!normalized && !aliases.has(normalized);
+			});
+			return { guards: buildOwnershipGuards(finalOwnership, aliases), hasUnresolvedPaths };
 		};
 
 		type SweepOutcome =
@@ -423,9 +431,9 @@ export async function sweepOrphanedWorktrees(opts: {
 								// can appear while the async repo scan is pending. Resolve unseen
 								// aliases, then synchronously re-read ownership before repair.
 								await refreshCurrentOwnershipAliases();
-								const currentGuards = finalOwnershipGuards();
+								const { guards: currentGuards, hasUnresolvedPaths } = finalOwnershipGuards();
 								const current = ownershipForWorktree(wt.path, branch, currentGuards);
-								if (current.ownedByPath || !current.ownedByBranch || !current.expectedPath || normalize(current.expectedPath) === wtPathNorm) {
+								if (hasUnresolvedPaths || current.ownedByPath || !current.ownedByBranch || !current.expectedPath || normalize(current.expectedPath) === wtPathNorm) {
 									outcomes.push({ kind: "none" });
 									continue;
 								}
@@ -456,9 +464,9 @@ export async function sweepOrphanedWorktrees(opts: {
 					// authorization must be live: session creation remains available while
 					// this post-listen sweep yields on filesystem and Git work.
 					await refreshCurrentOwnershipAliases();
-					const currentGuards = finalOwnershipGuards();
+					const { guards: currentGuards, hasUnresolvedPaths } = finalOwnershipGuards();
 					const current = ownershipForWorktree(wt.path, branch, currentGuards);
-					if (current.ownedByBranch || current.ownedByPath) {
+					if (hasUnresolvedPaths || current.ownedByBranch || current.ownedByPath) {
 						outcomes.push({ kind: "none" });
 						continue;
 					}
