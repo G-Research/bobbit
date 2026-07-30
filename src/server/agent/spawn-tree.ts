@@ -52,6 +52,13 @@ export interface TrackedChild {
 	 * window for this kill specifically (e.g. cancellation uses 1000ms).
 	 */
 	killTree(signal?: "SIGTERM" | "SIGKILL", graceMsOverride?: number): void;
+	/**
+	 * Wait a bounded interval for a previously-requested tree kill to finish.
+	 * On POSIX this observes the owned process group, not merely the shell
+	 * leader (which can exit while a descendant ignores SIGTERM). On Windows it
+	 * waits for the scoped `taskkill /T /F` invocation to complete.
+	 */
+	waitForTreeExit(timeoutMs?: number): Promise<boolean>;
 	killed(): boolean;
 	timedOut(): boolean;
 	/**
@@ -73,6 +80,38 @@ interface InternalTracked extends TrackedChild {
 	_survivesShutdown: boolean;
 	_escalationTimer?: NodeJS.Timeout;
 	_timeoutTimer?: NodeJS.Timeout;
+	/** Completes after the currently-running Windows taskkill invocation. */
+	_windowsTreeKill?: Promise<void>;
+}
+
+const TREE_EXIT_POLL_MS = 25;
+const TREE_EXIT_SETTLE_MS = 1_500;
+
+function isPidAlive(pid: number): boolean {
+	if (!Number.isFinite(pid) || pid <= 0) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (err: any) {
+		return err?.code === "EPERM";
+	}
+}
+
+function isProcessGroupAlive(pgid: number): boolean {
+	if (!Number.isFinite(pgid) || pgid <= 0) return false;
+	try {
+		// Negative PID is intentionally limited to the process group created by
+		// this module's detached spawn. A live group with this ID cannot have
+		// been reused: the original group would first need to become empty.
+		process.kill(-pgid, 0);
+		return true;
+	} catch (err: any) {
+		return err?.code === "EPERM";
+	}
+}
+
+function delay(ms: number): Promise<void> {
+	return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 /** Spawn a process whose entire tree we can later kill. */
@@ -106,40 +145,87 @@ export function spawnTracked(
 		killed: () => tracked._killed,
 		timedOut: () => tracked._timedOut,
 		markSurvival: () => { tracked._survivesShutdown = true; },
+		async waitForTreeExit(timeoutMs?: number): Promise<boolean> {
+			const pid = tracked._pid;
+			if (pid == null) return true;
+			const timeout = Math.max(0, timeoutMs ?? killGraceMs + TREE_EXIT_SETTLE_MS);
+			const deadline = Date.now() + timeout;
+
+			if (isWin) {
+				// taskkill /T /F is synchronous with respect to its tree walk. Await
+				// that owned helper rather than treating the root cmd.exe exit as proof
+				// that descendants are gone.
+				if (tracked._windowsTreeKill) {
+					await Promise.race([tracked._windowsTreeKill, delay(timeout)]);
+				}
+				return !isPidAlive(pid);
+			}
+
+			// The child process can close as soon as its shell leader receives
+			// SIGTERM. Continue checking the *owned* process group until it is
+			// empty, so grandchildren that ignored SIGTERM cannot escape the later
+			// SIGKILL escalation.
+			while (isProcessGroupAlive(pid)) {
+				if (Date.now() >= deadline) return false;
+				await delay(Math.min(TREE_EXIT_POLL_MS, Math.max(1, deadline - Date.now())));
+			}
+			return true;
+		},
 		killTree(signal: "SIGTERM" | "SIGKILL" = "SIGTERM", graceMsOverride?: number) {
-			if (tracked._closed) return;
+			if (tracked._closed && !isWin && !isProcessGroupAlive(tracked._pid ?? 0)) return;
 			tracked._killed = true;
+			// Restart survival is only for a still-running durable command. Once
+			// cancellation/timeout requested cleanup, shutdown must retain ownership
+			// and never skip this process tree.
+			tracked._survivesShutdown = false;
 			const pid = tracked._pid;
 			if (pid == null) return;
 
 			if (isWin) {
-				// Windows: taskkill /T walks the whole tree; /F is forceful.
-				// Fire-and-forget — we don't await its exit.
+				// Windows has no POSIX process groups. taskkill /T /F is scoped to the
+				// original root PID and walks only its descendants; retain its promise
+				// so timeout/cancel callers can wait boundedly for that tree cleanup.
 				try {
 					const tk = spawn("taskkill", ["/T", "/F", "/PID", String(pid)], {
 						stdio: "ignore",
 						windowsHide: true,
 					});
-					tk.on("error", () => { /* taskkill not on PATH? best-effort */ });
-				} catch { /* ignore */ }
+					tracked._windowsTreeKill = new Promise<void>((resolve) => {
+						const done = () => resolve();
+						tk.once("close", done);
+						tk.once("error", done);
+					});
+				} catch {
+					tracked._windowsTreeKill = Promise.resolve();
+				}
 				return;
 			}
 
-			// POSIX: kill the process group (pgid === pid because detached:true).
+			// POSIX: kill only the process group created by this detached spawn
+			// (pgid === pid). Never fall back to a broad process scan or -1.
 			try { process.kill(-pid, signal); } catch { /* already dead */ }
 
-			// Escalate to SIGKILL after the grace window if the child is still
-			// open. We only schedule one escalation; subsequent killTree calls
-			// reset the timer if needed.
+			// A shell leader can exit immediately after SIGTERM while descendants
+			// remain in its process group. Do NOT gate escalation on `_closed`:
+			// doing so orphaned npm/playwright workers. A live group proves this
+			// group is still ours, so SIGKILL remains scoped to this command tree.
 			if (signal === "SIGTERM") {
 				if (tracked._escalationTimer) clock.clearTimeout(tracked._escalationTimer);
 				const grace = graceMsOverride ?? killGraceMs;
 				tracked._escalationTimer = clock.setTimeout(() => {
-					if (tracked._closed) return;
-					try { process.kill(-pid, "SIGKILL"); } catch { /* already dead */ }
+					if (isProcessGroupAlive(pid)) {
+						try { process.kill(-pid, "SIGKILL"); } catch { /* already dead */ }
+					}
+					// SIGKILL has been issued (or the group was already empty), so this
+					// entry no longer needs shutdown ownership.
+					registry.delete(tracked);
 				}, grace);
 				tracked._escalationTimer.unref();
+			} else if (tracked._escalationTimer) {
+				clock.clearTimeout(tracked._escalationTimer);
+				tracked._escalationTimer = undefined;
 			}
+			if (signal === "SIGKILL" && tracked._closed) registry.delete(tracked);
 		},
 	};
 
@@ -159,8 +245,17 @@ export function spawnTracked(
 	const onClose = () => {
 		tracked._closed = true;
 		if (tracked._timeoutTimer) clock.clearTimeout(tracked._timeoutTimer);
-		if (tracked._escalationTimer) clock.clearTimeout(tracked._escalationTimer);
-		registry.delete(tracked);
+		// Preserve a pending POSIX SIGTERM → SIGKILL escalation after the shell
+		// leader closes. Its descendants may still be alive in the owned group.
+		const descendantsStillAlive = !isWin && tracked._killed && isProcessGroupAlive(tracked._pid ?? 0);
+		if (tracked._escalationTimer && !descendantsStillAlive) {
+			clock.clearTimeout(tracked._escalationTimer);
+			tracked._escalationTimer = undefined;
+		}
+		// Keep a pending tree in the registry until escalation fires. If the
+		// gateway shuts down in this window, killAllTracked() must still find it
+		// and send SIGKILL rather than letting unref'd timers abandon descendants.
+		if (!descendantsStillAlive) registry.delete(tracked);
 	};
 	child.once("close", onClose);
 	child.once("exit", onClose);

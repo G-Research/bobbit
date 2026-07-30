@@ -106,6 +106,7 @@ function createManualVerificationRunner(clock: ManualClock): ResettableVerificat
 				killed: () => killed,
 				timedOut: () => timedOut || !!tracked._timedOut,
 				markSurvival: () => {},
+				waitForTreeExit: async () => true,
 				killTree: () => {
 					if (closed) return;
 					killed = true;

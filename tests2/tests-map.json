@@ -912,6 +912,15 @@
       }
     },
     {
+      "path": "tests2/core/spawn-tree-process-cleanup.test.ts",
+      "reason": "Real subprocess regression: timeout cleanup reaps the owned process group/job when a grandchild ignores SIGTERM after its shell leader exits.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/store-fsimpl-contract.test.ts",
       "reason": "DI contract: store fsImpl defaults to node:fs; memfs override works.",
       "execution": {
