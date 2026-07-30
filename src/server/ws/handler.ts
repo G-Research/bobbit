@@ -176,10 +176,9 @@ function sendStateWithCost(ws: WebSocket, sessionManager: SessionManager, sessio
 
 /**
  * Dispatch a successful live getState snapshot without splitting the durable
- * model/thinking tuple. Older/incomplete bridges can omit thinkingLevel even
- * when the verified durable tuple has one. Reuse it only when the live model
- * exactly matches; otherwise prefer the complete persisted fallback rather
- * than grafting durable thinking onto a different live model.
+ * model/thinking tuple. A complete durable tuple remains authoritative while a
+ * runtime mutation is in flight. Live model metadata is reusable when its raw
+ * provider/model identity matches durability; thinking is repaired separately.
  */
 function sendLiveStateSnapshot(
 	ws: WebSocket,
@@ -187,11 +186,36 @@ function sendLiveStateSnapshot(
 	sessionId: string,
 	data: Record<string, unknown>,
 ): void {
-	const hadLiveModel = !!data.model && typeof data.model === "object";
+	const liveModel = data.model && typeof data.model === "object"
+		? data.model as Record<string, unknown>
+		: undefined;
+	const hadLiveModel = liveModel !== undefined;
 	let normalized = normalizeStateModelSnapshot(data, sessionManager, sessionId);
 	const model = normalized.model as Record<string, unknown> | undefined;
 	const persisted = sessionManager.getPersistedSession(sessionId);
-	if (model && normalized.thinkingLevel === undefined && persisted?.effectiveThinkingLevel !== undefined) {
+	const durableProvider = persisted?.modelProvider;
+	const durableModelId = persisted?.modelId;
+	const durableThinkingLevel = persisted?.effectiveThinkingLevel;
+	let rebuiltFromDurableTuple = false;
+
+	if (durableProvider && durableModelId && durableThinkingLevel !== undefined) {
+		const liveMatchesDurableIdentity = liveModel?.provider === durableProvider
+			&& liveModel?.id === durableModelId;
+		const liveMatchesDurableTuple = liveMatchesDurableIdentity
+			&& data.thinkingLevel === durableThinkingLevel;
+		if (!liveMatchesDurableTuple) {
+			normalized = {
+				...normalized,
+				model: buildResolvedModelStateModel(
+					durableProvider,
+					durableModelId,
+					liveMatchesDurableIdentity ? liveModel : undefined,
+				),
+				thinkingLevel: durableThinkingLevel,
+			};
+			rebuiltFromDurableTuple = true;
+		}
+	} else if (model && normalized.thinkingLevel === undefined && persisted?.effectiveThinkingLevel !== undefined) {
 		const matchesDurableModel = model.provider === persisted.modelProvider && model.id === persisted.modelId;
 		if (!matchesDurableModel) {
 			sendFallbackModelState(ws, sessionManager, sessionId);
@@ -202,7 +226,7 @@ function sendLiveStateSnapshot(
 
 	sendStateWithCost(ws, sessionManager, sessionId, normalized);
 	sendImageModelState(ws, sessionManager, sessionId);
-	if (!hadLiveModel) sendFallbackModelState(ws, sessionManager, sessionId);
+	if (!hadLiveModel && !rebuiltFromDurableTuple) sendFallbackModelState(ws, sessionManager, sessionId);
 }
 
 function sendSessionCostUpdate(ws: WebSocket, sessionManager: SessionManager, sessionId: string): void {
