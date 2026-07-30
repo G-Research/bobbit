@@ -12,25 +12,48 @@ A mixed Pi line can compile while still breaking the spawned-agent runtime contr
 
 ## Pi `0.82.1` compatibility outcome
 
+### PR #1057 disposition (historical)
+
+This table records the decision when PR #1057 was accepted. It remains the audit history for that delivery; the tuple-transition findings have since been resolved or closed as described in the current-status section below.
+
 | Decision | Status |
 |---|---|
-| Compatibility | **Accepted with deferred findings.** Dependency alignment, Opus 5 catalog/ranking, exact live selection, and the covered persistence, spawn, and inheritance paths passed. The conflicting role/default restore case described below remains deferred. |
+| Compatibility | **Accepted with deferred findings at merge.** Dependency alignment, Opus 5 catalog/ranking, exact live selection, and the then-covered persistence, spawn, and inheritance paths passed. The conflicting role/default restore case remained deferred for follow-up. |
 | Tests | **Passed.** The final verification run passed `npm run build`, `npm run check`, `npm run test:unit`, `npm run test:browser`, and `npm run test:e2e`. Security review passed; optional agent QA was not enabled. |
 | Immutable upstream audit | **Non-zero.** The isolated packed-consumer audit reports one high finding: Pi coding-agent's published shrinkwrap pins `brace-expansion@5.0.7`, affected by [`GHSA-mh99-v99m-4gvg`](https://github.com/advisories/GHSA-mh99-v99m-4gvg). This is immutable class C upstream packaging, not an audit-clean result. |
 | Accepted-risk status | **Accepted.** The exact `brace-expansion@5.0.7` finding remains visible and was explicitly accepted without an audit fix, override, vendor, fork, repack, or weakened check. It is not a merge or release-eligibility blocker for this delivery. |
-| Implementation verification | **Human-bypassed.** The latest implementation review failed on the deferred findings below. A human overseer advanced the gate for urgency; bypass is not a passing review result. |
-| Release eligibility | **True under the amended acceptance and explicit human decision.** This delivery is release-eligible, but it is neither audit-clean nor free of deferred findings. Any additional audit finding or unaccepted release failure remains blocking. |
+| Implementation verification | **Human-bypassed for PR #1057.** The final implementation review failed on the findings below. A human overseer advanced the gate for urgency; bypass is not a passing review result. |
+| Release eligibility | **True for PR #1057 under the amended acceptance and explicit human decision.** At that decision, the delivery was release-eligible but neither audit-clean nor free of deferred findings. Any additional audit finding or unaccepted release failure remained blocking. |
 
-### Verification disposition and deferred findings
+### PR #1057 verification disposition and deferred findings (historical)
 
 At final implementation commit `68dc74a4`, the build, type-check, unit, browser, and E2E command gates passed. The security review also passed. Optional agent QA was skipped because it was not enabled.
 
-The latest static review then raised the following unresolved items:
+The final static review then raised these unresolved items at the time:
 
-- **Deferred restore finding:** a role-backed session may prefer its role's configured thinking level over a later verified durable `effectiveThinkingLevel` during cold restore or force-abort replacement. Multiple reviewers traced this path, but no executable failing regression was run before the human decision to proceed. The proposed **Harden Tuple Transitions** follow-up, dependent on PR #1057, owns this restore/force-abort precedence concern and is intended to reproduce and fix it without broadening recovery architecture.
-- **Unexecuted review hypotheses:** the systems review proposed races involving wrong-target quarantine after restart, rollback of a concurrently committed tuple during staged role replacement, and reconnect publishing an in-flight mixed tuple. These were not demonstrated by executable reproductions on this branch and are not reported here as confirmed defects. The same follow-up will reproduce each hypothesis and fix only defects confirmed by deterministic tests.
+- **Deferred restore finding:** a role-backed session could prefer its role's configured thinking level over a later verified durable `effectiveThinkingLevel` during cold restore or force-abort replacement. Multiple reviewers traced this path, but no executable failing regression was run before the human decision to proceed. The later **Harden Tuple Transitions** follow-up owned deterministic reproduction and a focused fix.
+- **Unexecuted review hypotheses:** the systems review proposed races involving wrong-target quarantine after restart, rollback of a concurrently committed tuple during staged role replacement, and reconnect publishing an in-flight mixed tuple. These were not demonstrated by executable reproductions in PR #1057 and were not reported there as confirmed defects. The follow-up exercised each hypothesis deterministically and changed production behavior only for confirmed defects.
 
-A human overseer bypassed the failed Implementation gate for **Urgency** after reviewing the aggregate. The bypass allows the documentation and merge workflow to continue, but it does not erase the findings, convert failed reviews into passes, or make the optional QA step executed. Release eligibility above reflects that explicit decision and the amended accepted-risk policy.
+For PR #1057, a human overseer bypassed the failed Implementation gate for **Urgency** after reviewing the aggregate. The bypass allowed the documentation and merge workflow to continue, but it did not erase the findings, convert failed reviews into passes, or make the optional QA step executed. The historical release eligibility above reflects that explicit decision and the amended accepted-risk policy.
+
+### Harden Tuple Transitions follow-up (current status)
+
+The follow-up ran deterministic reproductions after PR #1057. The historical implementation bypass remains recorded above, but these tuple-transition items are no longer deferred:
+
+- **Restore and force-abort precedence is fixed.** When a complete durable `{provider, modelId, effectiveThinkingLevel}` exists, its thinking level wins during cold restore and force-abort. An already attached role is not new user intent. A new explicit `assignRole` remains role-first, with its requested thinking clamped against the exact selected model before read-back and persistence.
+- **Runtime recovery is fenced to exact bridge ownership.** A stale mutation or restart bridge cannot stop, terminate, archive, or publish state for a newer role/restart replacement. Recovery rechecks canonical session and RPC bridge identity around asynchronous read-back, and publishes a newer bridge only when its complete read-back still matches current durability. The empty-transcript zombie decision uses the same coordinated ownership admission: an owned direct restart still fails closed and archives a genuine zombie, while queued stale recovery cannot archive a verified replacement.
+- **The staged rollback hypothesis is closed without an extra production fix.** The existing deterministic A/B ordering test already proves that a failed staged role replacement cannot restore captured tuple A over a concurrently verified runtime tuple B. This narrow hypothesis required no duplicate test or behavior change.
+- **Reconnect and `get_state` retain complete durability during mutation.** If the model step has moved to B while thinking is still from A, proactive attach and explicit state requests publish the previous complete durable tuple A, not mixed `{B, A-thinking}` state. The snapshot retains unrelated status, cost, and preparation fields. Matching live identity may preserve dynamic metadata; mismatched live identity cannot lend B's metadata to durable A. The complete B tuple becomes authoritative only after final verification and atomic persistence.
+- **Fallback and inherited thinking remain tuple-correct.** When controlled fallback changes the selected model, Bobbit re-clamps the original explicit role, durable, or inherited thinking request against the exact current fallback `ApiModel`. It does not reuse a clamp from the failed model or replace inherited thinking with the global default. Normal and worktree setup persist a fallback tuple only after verification, and clear temporary setup authority on both success and failure.
+
+Focused evidence:
+
+- `tests2/core/orphan-tool-result-rehydration-boundaries.test.ts` covers durable-first cold restore and force-abort in both directions, explicit `assignRole` precedence, the existing A/B rollback ordering, stale recovery queued behind role replacement, and empty-transcript zombie admission.
+- `tests2/core/runtime-model-recovery-ownership.test.ts` covers role bridge B replacing recovery bridge R during read-back, B committing before quarantine admission, and replacement C winning while B verification is held.
+- `tests2/integration/context-bar-reconnect.test.ts` covers explicit `get_state`, second-connection hydration during partial mutation, complete durable metadata, and matching dynamic live metadata.
+- `tests2/core/controlled-model-fallback.test.ts` covers exact fallback tuple verification, fresh and staged role reclamping, durable-thinking reclamping, and inherited thinking through normal and worktree setup.
+- `tests2/core/runtime-model-zombie-recovery-repro.test.ts` retains the fail-closed canary for a genuinely owned, unverifiable recovery bridge.
+- `tests2/core/rpc-bridge-spawn-args.test.ts` and `tests2/integration/host-agents-sandbox-inheritance.test.ts` retain exact tuple propagation across the shared host/sandbox argument boundary and inherited child sessions.
 
 ### Authoritative Claude Opus 5 catalog
 
@@ -81,7 +104,7 @@ For a live model selection, the gateway validates the exact provider/model again
 
 Failure keeps the previous durable tuple unchanged. Bobbit broadcasts a complete observed or durable tuple to correct both optimistic model and thinking state, makes one bounded rollback to the previous tuple, and verifies it. If live state or rollback is incomplete, unreachable, or unverifiable, the existing agent restart path replaces the bridge from unchanged durability; a partially mutated bridge does not continue live. The client also requests authoritative state after either model or thinking selection errors.
 
-Persistence adds only `effectiveThinkingLevel` beside the existing exact provider/model fields. Settled reconnect, reload, archived-state, and covered rehydration paths use the verified tuple rather than a placeholder. The conflicting role-default cold-restore/force-abort case is the deferred review finding recorded above and is not claimed as verified by this report. Legacy rows remain readable, but a new complete tuple becomes durable only after runtime verification.
+Persistence adds only `effectiveThinkingLevel` beside the existing exact provider/model fields. Settled reconnect, reload, archived-state, and rehydration paths use the verified tuple rather than a placeholder. A complete durable tuple now also takes precedence over an attached role default during cold restore and force-abort; only a new explicit role assignment applies new role thinking. Legacy rows remain readable, but a new complete tuple becomes durable only after runtime verification.
 
 Host and sandbox processes use the same argument builder and receive separate arguments:
 
@@ -98,9 +121,9 @@ Pi `0.82.1` adds provider and login capabilities that Bobbit does not adopt in t
 
 This boundary compares the provider exactly; it does not scan model IDs for `kimi`. Kimi-named IDs remain valid under an existing selectable AIGW, custom, local, Moonshot, or legacy gateway provider. Existing custom/local providers, legacy gateway models, OpenRouter API-key models, and supported login paths therefore retain their previous behavior.
 
-### Focused coverage
+### PR #1057 focused coverage (historical)
 
-The focused canaries cover:
+The PR #1057 focused canaries covered:
 
 - exact aligned Pi `0.82.1` root, nested, and packed-consumer structure;
 - the Anthropic and five Bedrock catalog rows, full metadata, shared rank, and `xhigh`/`max` clamping;
@@ -109,7 +132,7 @@ The focused canaries cover:
 - correction of both optimistic fields, verified rollback, and restart after an unverifiable partial mutation; and
 - the established browser-import, OAuth, RPC correlation/retry/thinking, tool lifecycle, compaction, transcript, extension, binary-resolution, and sandbox-status compatibility boundaries.
 
-The registered browser journey selects `anthropic/claude-opus-5`, verifies its authoritative limits, image/reasoning flags and complete thinking ladder, sends the combined `xhigh` tuple through a mock-backed session, reloads and re-verifies authoritative state, then deletes the session and restores preferences.
+The PR #1057 browser journey selected `anthropic/claude-opus-5`, verified its authoritative limits, image/reasoning flags and complete thinking ladder, sent the combined `xhigh` tuple through a mock-backed session, reloaded and re-verified authoritative state, then deleted the session and restored preferences.
 
 ## Pi `0.82.1` dependency-only Phase 0 baseline
 
