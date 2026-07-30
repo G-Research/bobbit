@@ -128,10 +128,12 @@ test.describe("terminal pack panel", () => {
 		const run = `bobbit_scroll_${Date.now()}`;
 		const burstDone = `${run}_BURST_DONE`;
 		const followUp = `${run}_FOLLOWUP_VISIBLE`;
-		const burstCommand = [
-			...Array.from({ length: 90 }, (_, i) => `echo ${run}_LINE_${String(i).padStart(3, "0")}_abc123xyz`),
-			`echo ${burstDone}`,
-		].join(" && ");
+		// Keep the input itself below a PTY canonical-buffer line while preserving
+		// the 90-line large-output condition. A giant `echo && echo …` paste can
+		// fill a just-started shell's line discipline before it accepts Enter.
+		const burstCommand = process.platform === "win32"
+			? `(for /L %i in (1,1,90) do @echo ${run}_LINE_%i_abc123xyz) & echo ${burstDone}`
+			: `i=0; while [ "$i" -lt 90 ]; do printf '${run}_LINE_%03d_abc123xyz\\n' "$i"; i=$((i + 1)); done; printf '${burstDone}\\n'`;
 		await typeCommand(page, burstCommand);
 		await expect.poll(
 			() => receivedTerminalTextIncludes(page, burstDone),
