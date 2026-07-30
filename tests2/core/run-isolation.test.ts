@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, win32 } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+	captureMachineLedgerDirectory,
 	capturePlaywrightBrowserRegistry,
 	cleanupOwnedRunRoot,
 	CREDENTIAL_ENV_EXACT_NAMES,
@@ -25,6 +26,7 @@ import {
 } from "../harness/run-isolation.js";
 import {
 	coordinatorTempDirectory,
+	captureMachineGlobalLedgerDirectory,
 	createE2ERunPaths,
 	createIsolatedE2EEnvironment,
 	isE2ECredentialEnvKey,
@@ -36,6 +38,7 @@ import {
 	createE2EV2CoordinatorEnvironment,
 	createNestedE2EEnvironment,
 	defaultPerformanceReportPath,
+	resolveE2ERetryCount,
 } from "../../scripts/testing-v2/run-e2e-v2.mjs";
 import {
 	cleanOwnedDockerResources,
@@ -102,6 +105,14 @@ describe("workflow run isolation", () => {
 		expect(CREDENTIAL_ENV_PREFIXES).toContain("CLAUDE_CODE_");
 		expect(CREDENTIAL_ENV_PATTERN.test("GOOGLE_CLOUD_ACCESS_TOKEN")).toBe(true);
 		expect(isCredentialEnvKey("PATH")).toBe(false);
+	});
+
+	it("keeps the captured machine-global ledger outside the isolated run root", () => {
+		const ledger = captureMachineLedgerDirectory();
+		const root = installRunIsolation();
+		expect(process.env.BOBBIT_V2_LEDGER_DIR).toBe(ledger);
+		expect(isOwnedRunChild(root, ledger)).toBe(false);
+		expect(existsSync(ledger)).toBe(true);
 	});
 
 	it("redirects every host configuration root to the run root", () => {
@@ -290,6 +301,30 @@ describe("workflow run isolation", () => {
 		}
 	});
 
+	it("preserves the canonical machine ledger while redirecting every mutable E2E root", () => {
+		const temp = mkdtempSync(join(tmpdir(), "legacy-e2e-ledger-"));
+		try {
+			const hostTemp = join(temp, "host-temp");
+			const paths = createE2ERunPaths(join(temp, "run-parent"));
+			const inherited = { HOME: join(temp, "host-home"), TMPDIR: hostTemp };
+			const expected = captureMachineGlobalLedgerDirectory(inherited);
+			const env = createIsolatedE2EEnvironment(paths, inherited);
+			expect(env.BOBBIT_V2_LEDGER_DIR).toBe(expected);
+			expect(isOwnedRunChild(paths.root, env.BOBBIT_V2_LEDGER_DIR!)).toBe(false);
+			expect(env.TMPDIR).toBe(paths.tempDir);
+
+			const fixtureLedger = join(temp, "fixture-ledger");
+			const fixtureEnv = createIsolatedE2EEnvironment(paths, {
+				...inherited,
+				BOBBIT_V2_LEDGER_DIR: fixtureLedger,
+			});
+			expect(fixtureEnv.BOBBIT_V2_LEDGER_DIR).toBe(realpathSync(fixtureLedger));
+			expect(isOwnedRunChild(paths.root, fixtureEnv.BOBBIT_V2_LEDGER_DIR!)).toBe(false);
+		} finally {
+			rmSync(temp, { recursive: true, force: true });
+		}
+	});
+
 	it("isolates legacy E2E host roots and credentials while preserving its browser registry", () => {
 		const temp = mkdtempSync(join(tmpdir(), "legacy-e2e-environment-"));
 		try {
@@ -327,6 +362,8 @@ describe("workflow run isolation", () => {
 				expect(existsSync(env[key]!)).toBe(true);
 			}
 			expect(env.PLAYWRIGHT_BROWSERS_PATH).toBe(browserRegistry);
+			expect(env.BOBBIT_V2_LEDGER_DIR).toBe(realpathSync(join(temp, "host-tmpdir", "bobbit-test-v2-ledger")));
+			expect(isOwnedRunChild(paths.root, env.BOBBIT_V2_LEDGER_DIR!)).toBe(false);
 			expect(env.HOME).not.toBe(join(temp, "host-home"));
 			expect(env.TMPDIR).toBe(paths.tempDir);
 			expect(env.TEMP).toBe(paths.tempDir);
@@ -356,6 +393,12 @@ describe("workflow run isolation", () => {
 		} finally {
 			rmSync(temp, { recursive: true, force: true });
 		}
+	});
+
+	it("keeps normal retries while exposing an explicit retry-free E2E qualification", () => {
+		expect(resolveE2ERetryCount({})).toBe(3);
+		expect(resolveE2ERetryCount({ BOBBIT_V2_RETRY_FREE: "0" })).toBe(3);
+		expect(resolveE2ERetryCount({ BOBBIT_V2_RETRY_FREE: "1" })).toBe(0);
 	});
 
 	it("limits legacy E2E teardown to validated run-namespaced volume names", () => {
@@ -406,10 +449,13 @@ describe("workflow run isolation", () => {
 		expect(expected).not.toContain(process.env.HOME!);
 	});
 
-	it("captures the Playwright registry before the E2E harness isolates HOME", () => {
+	it("captures the Playwright registry and global ledger before the E2E harness isolates host roots", () => {
 		const source = readFileSync("playwright-e2e.config.ts", "utf8");
 		expect(source).toContain('import { capturePlaywrightBrowserRegistry } from "./tests2/harness/run-isolation.js"');
+		expect(source).toContain("captureMachineGlobalLedgerDirectory");
+		expect(source.indexOf("captureMachineGlobalLedgerDirectory();")).toBeLessThan(source.indexOf("prepareE2ERuntimeCaches();"));
 		expect(source.indexOf("capturePlaywrightBrowserRegistry();")).toBeLessThan(source.indexOf("prepareE2ERuntimeCaches();"));
+		expect(source).toContain('retries: process.env.BOBBIT_V2_RETRY_FREE === "1" ? 0 : 3');
 	});
 
 	it("keeps v2 Playwright results and reports in the owned run root", () => {

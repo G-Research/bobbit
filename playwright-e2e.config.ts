@@ -1,10 +1,12 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { basename, join } from "node:path";
+import { captureMachineGlobalLedgerDirectory } from "./scripts/run-playwright-e2e.mjs";
 import { capturePlaywrightBrowserRegistry } from "./tests2/harness/run-isolation.js";
 import { getRunRoot } from "./tests2/harness/run-isolation.js";
 
-// Config evaluation precedes isolated E2E worker imports. Preserve the host
-// browser registry before their harness redirects HOME for Bobbit discovery.
+// Config evaluation precedes isolated E2E worker imports. Preserve host-only
+// runtime inputs before the harness redirects HOME and TMPDIR for Bobbit discovery.
+process.env.BOBBIT_V2_LEDGER_DIR = captureMachineGlobalLedgerDirectory();
 capturePlaywrightBrowserRegistry();
 
 /**
@@ -57,10 +59,11 @@ const recordScreenReporters: Array<[string]> = process.env.RECORDSCREEN === "1"
 	: [];
 
 // Workflow retries protect developer productivity after isolated transients.
-// Retry-free qualification remains the only evidence of first-attempt stability.
+// Retry-free qualification sets BOBBIT_V2_RETRY_FREE=1 and remains the only
+// evidence of first-attempt stability.
 export default {
 	timeout: 30_000,
-	retries: 3,
+	retries: process.env.BOBBIT_V2_RETRY_FREE === "1" ? 0 : 3,
 	fullyParallel: true,
 	// Top-level cap. Playwright treats this as the max parallelism across
 	// all projects. Per-project `workers` fields below further constrain

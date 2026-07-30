@@ -28,12 +28,21 @@ describe("v2 browser coordinator", () => {
 	});
 
 	it("forwards retry and other npm-supplied Playwright arguments unchanged", () => {
-		const args = playwrightCommandArgs(["--retry=0", "--grep", "sidebar"]);
-		expect(args.slice(-3)).toEqual(["--retry=0", "--grep", "sidebar"]);
+		const args = playwrightCommandArgs(["--retries=0", "--grep", "sidebar"]);
+		expect(args.slice(-3)).toEqual(["--retries=0", "--grep", "sidebar"]);
 		expect(args).toContain("--project");
 		expect(args).toContain("browser-v2");
 		const scripts = JSON.parse(readFileSync("package.json", "utf8")).scripts;
 		expect(scripts["test:v2:browser"]).toBe("node scripts/testing-v2/run-browser-v2.mjs");
 		expect(scripts["test:browser"]).toBe("npm run test:v2:browser --");
+	});
+
+	it("captures the global ledger before config-level temp isolation and supports retry-free qualification", () => {
+		const config = readFileSync("playwright-v2.config.ts", "utf8");
+		const capture = config.indexOf("captureMachineGlobalLedgerDirectory");
+		const isolate = config.indexOf("getRunRoot();");
+		expect(capture).toBeGreaterThanOrEqual(0);
+		expect(capture).toBeLessThan(isolate);
+		expect(config).toContain('retries: process.env.BOBBIT_V2_RETRY_FREE === "1" ? 0 : 3');
 	});
 });

@@ -9,21 +9,20 @@
  *   - manual-integration specs (real-agent / real-LLM / real-Docker — that
  *     is the tier-3 `test:manual` lane, never here).
  *
- * Everything else in that bucket runs here at retries:3 (a TEMPORARY
- * concurrency bridge — see docs/testing-strategy.md "Concurrency & budgets" and
- * the Group B/C notes below; Group A uses node:test's --test-force-exit and has
- * no retry knob wired here), in four groups
- * derived mechanically from tests-map.json (so this is reusable, not
+ * Everything else in that bucket normally runs at retries:3 for developer
+ * workflow resilience. Set BOBBIT_V2_RETRY_FREE=1 to qualify Groups B/C with
+ * retries disabled; Group A uses node:test's --test-force-exit and has no retry
+ * knob wired here. The groups are derived mechanically from tests-map.json (so this is reusable, not
  * hand-assembled — it tracks the map, not a frozen list):
  *
  *   Group A — node relocate specs (tests node .test.ts): real git worktree /
  *             sweeper / sandbox-mount / spawn-tree fidelity. Run via `tsx --test`.
  *   Group B — playwright e2e relocate specs (tests/e2e .spec.ts): real
  *             worktree pool / MCP subprocess / port / restart. Run via the legacy
- *             playwright-e2e config at --retries=2 (concurrency bridge).
+ *             playwright-e2e config at retries:3 (or 0 when qualifying).
  *   Group C — adapter browser specs: the geometry/journey specs migrated into
  *             tests2/browser/e2e/. Run via playwright-v2 config, project
- *             `browser-v2-e2e` (retries:3 inherited from the v2 config).
+ *             `browser-v2-e2e` (retries:3 normally, 0 when qualifying).
  *   Group D — Vitest real-fidelity suites explicitly classified `vitest-e2e`;
  *             run in the isolated `v2-e2e-vitest` project.
  *
@@ -309,18 +308,25 @@ async function runGroupA(specs, coordinatorEnv) {
 	});
 }
 
+export function resolveE2ERetryCount(env = process.env) {
+	return env.BOBBIT_V2_RETRY_FREE === "1" ? 0 : 3;
+}
+
+function isRetryFreeQualification(env = process.env) {
+	return resolveE2ERetryCount(env) === 0;
+}
+
 async function runGroupB(specs, coordinatorEnv) {
 	if (specs.length === 0) return { label: "B/e2e", code: 0, wallMs: 0, skipped: true };
 	// The legacy wrapper must allocate its own nested Playwright cache rather
 	// than inheriting this coordinator's cache settings. It still inherits the
 	// owned temp directory, so its `createE2ERunPaths()` child is contained here.
 	const nestedEnv = createNestedE2EEnvironment(coordinatorEnv);
-	// Reuse the project's playwright-e2e runner (cache isolation + external-free
-	// env baked in) at retries:3 — TEMPORARY concurrency bridge (see file header +
-	// docs/testing-strategy.md "Concurrency & budgets"; restore 0 when the higher-N
-	// server-throughput fix lands).
+	const retries = resolveE2ERetryCount(coordinatorEnv);
+	// Preserve retries:3 for ordinary workflow use. Retry-free qualification
+	// explicitly passes 0 so no first-attempt failure can be hidden.
 	const pwWorkers = resolveE2ePlaywrightWorkers();
-	return run(npmCmd(), ["run", "test:e2e:run", "--", ...specs, `--workers=${pwWorkers}`, "--retries=3"], {
+	return run(npmCmd(), ["run", "test:e2e:run", "--", ...specs, `--workers=${pwWorkers}`, `--retries=${retries}`], {
 		env: composeE2EChildEnvironment(nestedEnv, EXTERNAL_FREE_ENV),
 		label: "B/e2e-relocate",
 	});
@@ -328,9 +334,8 @@ async function runGroupB(specs, coordinatorEnv) {
 
 async function runGroupC(specs, coordinatorEnv) {
 	if (specs.length === 0) return { label: "C/browser", code: 0, wallMs: 0, skipped: true };
-	// playwright-v2 config, browser-v2-e2e project (retries:3 from config —
-	// the concurrency bridge; we intentionally do NOT pass --retries here so the
-	// config's value governs).
+	// playwright-v2 config, browser-v2-e2e project. The config's retry-free
+	// override is inherited through coordinatorEnv when qualifying.
 	// We run the WHOLE project (its testDir IS tests2/browser/e2e — the physical
 	// real-fidelity browser bucket) rather than passing individual spec paths:
 	// Playwright's `--project` is variadic and would swallow trailing positional
@@ -342,7 +347,8 @@ async function runGroupC(specs, coordinatorEnv) {
 	const cmd = usesLocal ? process.execPath : (process.platform === "win32" ? "npx.cmd" : "npx");
 	const pre = usesLocal ? [localCli] : ["playwright"];
 	const pwWorkersC = resolveE2ePlaywrightWorkers();
-	return run(cmd, [...pre, "test", "--config", "playwright-v2.config.ts", "--project", "browser-v2-e2e", `--workers=${pwWorkersC}`], {
+	const retryArgs = isRetryFreeQualification(coordinatorEnv) ? ["--retries=0"] : [];
+	return run(cmd, [...pre, "test", "--config", "playwright-v2.config.ts", "--project", "browser-v2-e2e", `--workers=${pwWorkersC}`, ...retryArgs], {
 		env: composeE2EChildEnvironment(coordinatorEnv, EXTERNAL_FREE_ENV),
 		label: "C/adapter-browser",
 		// node.exe path may contain spaces (C:\Program Files\nodejs); spawn it

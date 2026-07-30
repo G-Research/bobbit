@@ -3,8 +3,8 @@
  *
  * Key differences from playwright-e2e.config.ts:
  *   - Chromium only (no Firefox/WebKit)
- *   - retries: 3 (TEMPORARY concurrency bridge — see the `retries` note below
- *     and docs/testing-strategy.md "Concurrency & budgets"; NOT flake-masking)
+ *   - retries: 3 for normal developer workflow; retry-free qualification uses
+ *     BOBBIT_V2_RETRY_FREE=1 without changing the default safety net
  *   - Worker count from the shared ledger (cap 4)
  *   - testDir: tests2/browser
  *   - Per-coordinator result artifacts under the owned run root
@@ -17,7 +17,12 @@ import { existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { seedTransformCacheForRunDir } from "./scripts/testing-v2/pwtest-cache.js";
+import { captureMachineGlobalLedgerDirectory } from "./scripts/run-playwright-e2e.mjs";
 import { capturePlaywrightBrowserRegistry, createRunArtifactDirectory, getRunRoot, isOwnedRunPath } from "./tests2/harness/run-isolation.js";
+
+// The browser harness redirects TMPDIR below. Preserve the intentional
+// machine-global concurrency ledger before that isolation takes effect.
+process.env.BOBBIT_V2_LEDGER_DIR = captureMachineGlobalLedgerDirectory();
 
 // This config is evaluated before browser workers import the isolated gateway
 // harness. Pin the host Playwright cache now; workers can then isolate HOME for
@@ -131,17 +136,9 @@ const playwrightWorkers = resolvePlaywrightWorkers();
 
 export default {
 	timeout: 60_000,
-	// TEMPORARY CONCURRENCY BRIDGE (not a flake budget).
-	// Bobbit runs goals CONCURRENTLY in prod. The concurrency proof
-	// (docs/testing-v2/concurrency-proof.md, the N=2 → 3/6 finding) shows a PROVEN
-	// structural server-throughput ceiling: at N≥2 concurrent full runs a rotating
-	// cast of tests hits wall-timeouts / load-induced races under CPU starvation on
-	// one box — NOT assertion/logic bugs (browser render-timeouts + one load-induced
-	// 403 goal-creation were the tier-2 casualties). With retries:0 those spurious
-	// starvation failures would fail concurrent goal gate-loops. The flakes are KNOWN
-	// and DOCUMENTED (not blind-masked). REMOVAL CONDITION: restore `retries: 0` once
-	// the higher-N server-throughput fix (spin-off goal) lands.
-	retries: 3,
+	// Normal workflow retains the developer safety net. Qualification sets
+	// BOBBIT_V2_RETRY_FREE=1 and accepts only first-attempt results.
+	retries: process.env.BOBBIT_V2_RETRY_FREE === "1" ? 0 : 3,
 	fullyParallel: false,
 	workers: playwrightWorkers,
 	reporter: [
@@ -178,8 +175,8 @@ export default {
 		{
 			// Real-fidelity browser lane (adapter specs + crash/restart journey).
 			// Run only via `test:e2e:v2` — NOT part of tier-2 `test:v2`.
-			// retries:3 is inherited from the top-level config (temporary concurrency
-			// bridge — see the top-level `retries` note; NOT a flake budget).
+			// Inherits normal retries:3; BOBBIT_V2_RETRY_FREE=1 makes this lane
+			// retry-free for concurrent first-attempt qualification.
 			name: "browser-v2-e2e",
 			testDir: "./tests2/browser/e2e",
 			testMatch: ["**/*.spec.ts"],

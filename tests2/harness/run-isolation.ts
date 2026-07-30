@@ -7,6 +7,7 @@ export const RUN_ROOT_ENV = "BOBBIT_V2_RUN_ROOT";
 /** Set only by the coordinator that made RUN_ROOT_ENV; workers must never clean it. */
 export const RUN_ROOT_OWNER_ENV = "BOBBIT_V2_RUN_ROOT_OWNER_PID";
 export const PLAYWRIGHT_BROWSERS_PATH_ENV = "PLAYWRIGHT_BROWSERS_PATH";
+export const MACHINE_LEDGER_DIRNAME = "bobbit-test-v2-ledger";
 
 /**
  * Exact credential inputs read by the gateway's host-token and model-auth paths.
@@ -206,11 +207,24 @@ export function capturePlaywrightBrowserRegistry(): string {
 	return registry;
 }
 
+/**
+ * Preserve the intentionally machine-global concurrency ledger before test
+ * isolation redirects TMPDIR. An explicit directory is retained for ledger
+ * protocol self-tests, which deliberately avoid the production pool.
+ */
+export function captureMachineLedgerDirectory(): string {
+	const explicit = process.env.BOBBIT_V2_LEDGER_DIR?.trim();
+	const directory = explicit ? path.resolve(explicit) : path.join(canonicalDirectory(tmpdir()), MACHINE_LEDGER_DIRNAME);
+	return canonicalDirectory(directory);
+}
+
 /** Redirect all user-discovery roots before a server/discovery module is imported. */
 export function installRunIsolation(): string {
+	const ledgerDirectory = captureMachineLedgerDirectory();
 	const root = getRunRoot();
 	const home = canonicalDirectory(path.join(root, "home"));
 	const temp = canonicalDirectory(path.join(root, "tmp"));
+	process.env.BOBBIT_V2_LEDGER_DIR = ledgerDirectory;
 	process.env.TMPDIR = temp;
 	process.env.TEMP = temp;
 	process.env.TMP = temp;
