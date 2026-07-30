@@ -10,7 +10,8 @@ import {
 // `./api.js`. The implementation now lives in `./gateway-fetch.js` (tiny,
 // dependency-free) so utility modules like `fetch-tool-content.ts` can
 // import it without pulling the entire app-shell graph.
-import { gatewayFetch, GW_TOKEN_KEY, GW_URL_KEY } from "./gateway-fetch.js";
+import { activeGatewayConnection, appUrl, gatewayFetch, gatewayWsUrl } from "./gateway-fetch.js";
+import { gatewayRoute } from "../shared/base-path.js";
 export { gatewayFetch };
 import { sessionHueRotation, sessionColorMap } from "./session-colors.js";
 import { RemoteAgent } from "./remote-agent.js";
@@ -76,7 +77,7 @@ export function sessionDeepLink(sessionId: string): string {
 export function sessionPathDeepLink(sessionId: string): string {
 	const path = `/session/${encodeURIComponent(sessionId)}`;
 	if (typeof location === "undefined") return path;
-	return `${location.origin}${path}`;
+	return `${location.origin}${appUrl(path)}`;
 }
 
 export function goalDeepLink(goalId: string): string {
@@ -301,7 +302,7 @@ function canRefreshSessionListFromPush(): boolean {
 function canConnectSessionListPush(): boolean {
 	if (state.appView !== "authenticated") return false;
 	if (typeof document !== "undefined" && document.visibilityState !== "visible") return false;
-	return !!localStorage.getItem(GW_TOKEN_KEY);
+	return !!activeGatewayConnection().token;
 }
 
 async function refreshClientListsFromPush(includeStaff: boolean): Promise<void> {
@@ -347,8 +348,7 @@ export function scheduleStaffListRefreshFromPush(): void {
 }
 
 function sessionListPushWsUrl(): string {
-	const configured = localStorage.getItem(GW_URL_KEY) || window.location.origin;
-	return `${configured.replace(/\/$/, "").replace(/^http/i, "ws")}/ws/viewer`;
+	return gatewayWsUrl(gatewayRoute("/ws/viewer"));
 }
 
 function clearSessionListPushReconnect(): void {
@@ -370,7 +370,7 @@ function scheduleSessionListPushReconnect(): void {
 
 export function startSessionListPushSync(): void {
 	if (!canConnectSessionListPush()) return;
-	const token = localStorage.getItem(GW_TOKEN_KEY)!;
+	const token = activeGatewayConnection().token;
 	if (sessionListPushWs && (sessionListPushWs.readyState === WebSocket.OPEN || sessionListPushWs.readyState === WebSocket.CONNECTING)) return;
 
 	sessionListPushIntentionalClose = false;

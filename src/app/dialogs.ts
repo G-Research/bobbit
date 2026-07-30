@@ -10,8 +10,6 @@ import {
 	renderApp,
 	setProjects,
 	activeSessionId,
-	GW_URL_KEY,
-	GW_TOKEN_KEY,
 	GOAL_STATE_LABELS,
 	type Goal,
 	type GoalState,
@@ -52,6 +50,8 @@ import { authenticateGateway, connectToSession } from "./session-manager.js";
 import { BOBBIT_HUE_ROTATIONS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";
 import { accountOAuthProviderLabel, dismissAccountOAuthExpiryReminders, type ExpiredAccountOAuthCredential } from "./account-oauth-providers.js";
 import { defaultCwdForProjectSession, HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
+import { activeGatewayConnection, gatewayBaseUrl, gatewayUrl, InvalidGatewayBaseUrlError, LOCALHOST_TOKEN } from "./gateway-fetch.js";
+import { gatewayRoute } from "../shared/base-path.js";
 // NOTE: session-manager imports from dialogs, so we use dynamic imports to break the cycle
 
 // ============================================================================
@@ -752,8 +752,9 @@ export function openGatewayDialog(): void {
 	const container = document.createElement("div");
 	document.body.appendChild(container);
 
-	let urlValue = localStorage.getItem(GW_URL_KEY) || window.location.origin;
-	let tokenValue = localStorage.getItem(GW_TOKEN_KEY) || "";
+	const activeConnection = activeGatewayConnection();
+	let urlValue = activeConnection.baseUrl;
+	let tokenValue = activeConnection.token;
 	let connecting = false;
 	let error = "";
 
@@ -776,8 +777,8 @@ export function openGatewayDialog(): void {
 			cleanup();
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
-			// Auth failures are permanent
-			if (msg.includes("Invalid auth token")) {
+			// Validation and auth failures are permanent.
+			if (err instanceof InvalidGatewayBaseUrlError || msg.includes("Invalid auth token")) {
 				error = msg;
 				connecting = false;
 				renderDialog();
@@ -796,7 +797,7 @@ export function openGatewayDialog(): void {
 					cleanup();
 					return;
 				} catch (retryErr: any) {
-					if (retryErr?.message?.includes("Invalid auth token")) {
+					if (retryErr instanceof InvalidGatewayBaseUrlError || retryErr?.message?.includes("Invalid auth token")) {
 						error = retryErr.message;
 						connecting = false;
 						renderDialog();
@@ -896,9 +897,10 @@ export async function showQrCodeDialog(): Promise<void> {
 		container.remove();
 	};
 
-	const token = localStorage.getItem(GW_TOKEN_KEY) || "";
-	const mobileUrl = `${window.location.origin}?token=${encodeURIComponent(token)}`;
-	const caCertUrl = `${window.location.origin}/api/ca-cert`;
+	const token = activeGatewayConnection().token;
+	const tokenQuery = token && token !== LOCALHOST_TOKEN ? `?token=${encodeURIComponent(token)}` : "";
+	const mobileUrl = `${gatewayBaseUrl()}/${tokenQuery}`;
+	const caCertUrl = gatewayUrl(gatewayRoute("/api/ca-cert"));
 
 	let sessionQr = "";
 	let certQr = "";
