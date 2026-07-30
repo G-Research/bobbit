@@ -51,16 +51,22 @@ await run("timeout");
 await run("cancel");
 `;
 
-function fakeChild(pid: number): ChildProcess & { killCalls: NodeJS.Signals[]; readyPipe: EventEmitter } {
+type FakeReadyPipe = EventEmitter & { unrefCalls: number; unref(): void };
+type FakeChild = ChildProcess & { killCalls: NodeJS.Signals[]; readyPipe: FakeReadyPipe };
+
+function fakeChild(pid: number): FakeChild {
 	const killCalls: NodeJS.Signals[] = [];
-	const readyPipe = new EventEmitter();
+	const readyPipe = Object.assign(new EventEmitter(), {
+		unrefCalls: 0,
+		unref() { this.unrefCalls++; },
+	}) as FakeReadyPipe;
 	return Object.assign(new EventEmitter(), {
 		pid,
 		killCalls,
 		readyPipe,
 		stdio: [null, null, null, readyPipe],
 		kill: (signal: NodeJS.Signals) => { killCalls.push(signal); return true; },
-	}) as unknown as ChildProcess & { killCalls: NodeJS.Signals[]; readyPipe: EventEmitter };
+	}) as unknown as FakeChild;
 }
 
 function runProbe(): Promise<{ stdout: string; stderr: string; code: number | null }> {
@@ -163,6 +169,35 @@ describe("spawnTracked timeout cleanup", () => {
 		root.emit("exit", 0, null);
 		expect(await tracked.waitForTreeExit(0)).toBe(false);
 		expect(root.killCalls).toEqual([]);
+	});
+
+	it("unrefs the parent FD-3 handle after survival is durably acknowledged", () => {
+		const root = fakeChild(123_454);
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "linux",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+		});
+
+		tracked.markSurvival();
+		expect(root.readyPipe.unrefCalls).toBe(0);
+		root.readyPipe.emit("data", Buffer.from("."));
+		expect(root.readyPipe.unrefCalls).toBe(1);
+	});
+
+	it("dispatches immediate POSIX SIGKILL without waiting for the FD-3 acknowledgement", () => {
+		const root = fakeChild(123_454);
+		const signals: Array<{ pgid: number; signal: NodeJS.Signals }> = [];
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "linux",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			signalProcessGroup: (pgid, signal) => { signals.push({ pgid, signal }); },
+		});
+
+		tracked.killTree("SIGKILL");
+		expect(signals).toEqual([{ pgid: 123_454, signal: "SIGKILL" }]);
 	});
 
 	it("queues an immediate POSIX kill until the sentinel confirms group ownership", () => {

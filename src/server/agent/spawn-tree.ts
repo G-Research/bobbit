@@ -283,7 +283,14 @@ export function spawnTracked(
 		_resolveWindowsSupervisorClosed: resolveWindowsSupervisorClosed,
 		killed: () => tracked._killed,
 		timedOut: () => tracked._timedOut,
-		markSurvival: () => { tracked._survivesShutdown = true; },
+		markSurvival: () => {
+			tracked._survivesShutdown = true;
+			// FD 3 remains open for the payload's lifetime, so its parent Socket
+			// must not keep a gateway alive after this deliberately detached child
+			// has acknowledged the sentinel handshake. Unref preserves the stream and
+			// normal `close` settlement for explicit later cleanup.
+			if (tracked._posixSentinelReady) readyPipe?.unref?.();
+		},
 		async waitForTreeExit(timeoutMs?: number): Promise<boolean> {
 			// Once the root's exit event fired without completion already observed,
 			// neither a POSIX PGID nor a Windows PID remains an owned identity. Do not
@@ -346,15 +353,16 @@ export function spawnTracked(
 
 			const pid = tracked._pid;
 			if (pid == null || tracked._processGroupOwnershipLost || tracked._posixFinalSignalSent) return;
-			if (tracked._posixSentinelOwned && !tracked._posixSentinelReady) {
-				// Do not race the sentinel's trap installation. Holding this intent
-				// until its FD-3 acknowledgement means our own SIGTERM cannot kill the
-				// sentinel before it has made the PGID ownership durable.
+			if (tracked._posixSentinelOwned && !tracked._posixSentinelReady && signal !== "SIGKILL") {
+				// Do not race the sentinel's trap installation with SIGTERM. Holding
+				// that graceful intent until its FD-3 acknowledgement means our own
+				// SIGTERM cannot kill the sentinel before it has made PGID ownership
+				// durable. SIGKILL needs no trap and must not wait on an acknowledgement:
+				// force cleanup must still settle `close` if the pre-exec shell never
+				// reaches its FD-3 write.
 				tracked._killed = true;
 				tracked._survivesShutdown = false;
-				if (signal === "SIGKILL" || !tracked._pendingPosixKill) {
-					tracked._pendingPosixKill = { signal, graceMsOverride };
-				}
+				tracked._pendingPosixKill = { signal, graceMsOverride };
 				return;
 			}
 			if (!groupIsAlive(pid)) {
@@ -463,6 +471,10 @@ export function spawnTracked(
 		const pending = tracked._pendingPosixKill;
 		tracked._pendingPosixKill = undefined;
 		if (pending) tracked.killTree(pending.signal, pending.graceMsOverride);
+		// markSurvival() may happen before the asynchronous FD-3 handshake.
+		// Once durable ownership is established, FD 3 must not retain the
+		// gateway event loop for the lifetime of the surviving payload.
+		if (tracked._survivesShutdown) readyPipe.unref?.();
 	});
 	const onExit = () => {
 		tracked._exited = true;
