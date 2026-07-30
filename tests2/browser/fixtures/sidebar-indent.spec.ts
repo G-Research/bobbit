@@ -211,7 +211,7 @@ test.describe("Sidebar tree indentation (full-stack UI)", () => {
 
 		await setIndentPx(page, "24");
 		await waitForRuntimeIndent(page, 24);
-		expect(await inputValueAsNumber(page)).toBe(24);
+		await expect(indentInput(page)).toHaveValue("24", { timeout: 5_000 });
 		expect(await persistedIndentPx(page)).toBe(24);
 		const customOffset = await childOffset(page, fixture);
 		expect(customOffset - defaultOffset, "raising indentation should move child goals right").toBeGreaterThan(5);
@@ -224,7 +224,7 @@ test.describe("Sidebar tree indentation (full-stack UI)", () => {
 
 		await setIndentPx(page, "100");
 		await waitForRuntimeIndent(page, MAX_PX);
-		expect(await inputValueAsNumber(page)).toBe(MAX_PX);
+		await expect(indentInput(page)).toHaveValue(String(MAX_PX), { timeout: 5_000 });
 		expect(await persistedIndentPx(page)).toBe(MAX_PX);
 		const maxOffset = await childOffset(page, fixture);
 		expect(maxOffset - customOffset, "clamping to max should still apply the max visual offset").toBeGreaterThan(2);
@@ -237,7 +237,7 @@ test.describe("Sidebar tree indentation (full-stack UI)", () => {
 
 		await setIndentPx(page, "1");
 		await waitForRuntimeIndent(page, MIN_PX);
-		expect(await inputValueAsNumber(page)).toBe(MIN_PX);
+		await expect(indentInput(page)).toHaveValue(String(MIN_PX), { timeout: 5_000 });
 		expect(await persistedIndentPx(page)).toBe(MIN_PX);
 		const minOffset = await childOffset(page, fixture);
 		expect(maxOffset - minOffset, "lowering indentation should move child goals left").toBeGreaterThan(15);
