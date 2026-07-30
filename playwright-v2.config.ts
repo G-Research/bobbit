@@ -7,7 +7,8 @@
  *     and docs/testing-strategy.md "Concurrency & budgets"; NOT flake-masking)
  *   - Worker count from the shared ledger (cap 4)
  *   - testDir: tests2/browser
- *   - Separate output dir (test-results-v2)
+ *   - Per-coordinator result artifacts under the owned run root
+ *   - One stable ignored JSON summary for the budget gate
  *   - Global setup: build dist if missing
  */
 import { randomUUID } from "node:crypto";
@@ -16,12 +17,23 @@ import { existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { seedTransformCacheForRunDir } from "./scripts/testing-v2/pwtest-cache.js";
-import { capturePlaywrightBrowserRegistry } from "./tests2/harness/run-isolation.js";
+import { capturePlaywrightBrowserRegistry, createRunArtifactDirectory, getRunRoot } from "./tests2/harness/run-isolation.js";
 
 // This config is evaluated before browser workers import the isolated gateway
 // harness. Pin the host Playwright cache now; workers can then isolate HOME for
 // Bobbit config discovery without making Chromium resolve into their empty home.
 capturePlaywrightBrowserRegistry();
+
+// Allocate this before Playwright spawns workers so every worker inherits the
+// same coordinator-owned root. It is removed only by that coordinator after
+// reporters finish; workers can never clean a sibling's diagnostics.
+getRunRoot();
+const playwrightArtifactsDir = createRunArtifactDirectory("playwright-v2");
+const playwrightResultsDir = join(playwrightArtifactsDir, "test-results");
+// The budget checker executes after Playwright exits, so retain one stable,
+// ignored summary instead of accumulating UUID-named reports in the worktree.
+const playwrightBudgetReport = ".profiles/testing-v2/budgets/playwright-report.json";
+mkdirSync(resolve(".profiles/testing-v2/budgets"), { recursive: true });
 
 function e2eTempRoot(): string {
 	if (existsSync("/.dockerenv")) return "/tmp";
@@ -109,7 +121,6 @@ function resolvePlaywrightWorkers(): number {
 }
 
 const playwrightWorkers = resolvePlaywrightWorkers();
-const playwrightRunId = sanitizeCacheSegment(process.env.BOBBIT_V2_BROWSER_RUN_ID?.trim() || process.env.BOBBIT_V2_RUN_ROOT?.split(/[\\/]/).pop() || `${process.pid}-${randomUUID()}`);
 
 export default {
 	timeout: 60_000,
@@ -128,7 +139,7 @@ export default {
 	workers: playwrightWorkers,
 	reporter: [
 		[process.stdout.isTTY ? "list" : "line"],
-		["json", { outputFile: `.profiles/testing-v2/budgets/playwright-report-${playwrightRunId}.json` }],
+		["json", { outputFile: playwrightBudgetReport }],
 	] as Array<[string, unknown?]>,
 	globalSetup: "./tests2/browser-global-setup.ts",
 	globalTeardown: "./tests2/browser-global-teardown.ts",
@@ -170,5 +181,5 @@ export default {
 			},
 		},
 	],
-	outputDir: `test-results-v2-${playwrightRunId}`,
+	outputDir: playwrightResultsDir,
 };

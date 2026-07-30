@@ -6,6 +6,12 @@
  * ~566 files), THEN delegates to the legacy e2e teardown, which — unchanged —
  * deletes the per-run cache dir and cleans up ephemeral state/Docker.
  *
+ * Result artifacts are intentionally not removed here: Playwright's JSON
+ * reporter writes after global teardown. The config coordinator owns the run
+ * root and its exit hook removes those per-run artifacts after reporters have
+ * finished; the stable ignored budget JSON remains available to the following
+ * gate command.
+ *
  * The publish is fail-open and env-gated (BOBBIT_E2E_PWTEST_CACHE_OWNED=1,
  * v2 namespace only); BOBBIT_KEEP_PWTEST_CACHE=1 keeps its existing
  * "don't delete the per-run dir" semantics in the delegated teardown.

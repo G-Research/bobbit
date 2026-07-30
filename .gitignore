@@ -12,7 +12,9 @@ Thumbs.db
 *.log
 bobbit2/
 test-results/
-test-results-v2/
+# Legacy Playwright v2 result directories used UUID suffixes. Current runs use
+# the owned system-temp run root, but ignore any stale checkout-local output.
+test-results-v2*/
 tests/results/tier-2-5/
 bobbit-screenshot.png
 tests/fullstack/screenshots/

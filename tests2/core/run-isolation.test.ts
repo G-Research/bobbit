@@ -7,6 +7,7 @@ import {
 	CREDENTIAL_ENV_EXACT_NAMES,
 	CREDENTIAL_ENV_PATTERN,
 	CREDENTIAL_ENV_PREFIXES,
+	createRunArtifactDirectory,
 	createRunChild,
 	getRunRoot,
 	installRunIsolation,
@@ -41,6 +42,17 @@ describe("workflow run isolation", () => {
 
 		removeOwnedRunChild(child);
 		expect(existsSync(child)).toBe(false);
+	});
+
+	it("contains deterministic Playwright artifact directories in the coordinator run root", () => {
+		const root = getRunRoot();
+		const artifacts = createRunArtifactDirectory("playwright-v2");
+		expect(artifacts).toBe(join(root, "playwright-v2"));
+		expect(existsSync(artifacts)).toBe(true);
+		expect(isOwnedRunPath(artifacts)).toBe(true);
+		for (const invalid of ["", ".", "..", "nested/child", "nested\\child"]) {
+			expect(() => createRunArtifactDirectory(invalid)).toThrow(/invalid|non-owned/);
+		}
 	});
 
 	it("neutralizes every credential family consumed by host discovery", () => {
@@ -144,6 +156,17 @@ describe("workflow run isolation", () => {
 		const source = readFileSync("playwright-e2e.config.ts", "utf8");
 		expect(source).toContain('import { capturePlaywrightBrowserRegistry } from "./tests2/harness/run-isolation.js"');
 		expect(source.indexOf("capturePlaywrightBrowserRegistry();")).toBeLessThan(source.indexOf("prepareE2ERuntimeCaches();"));
+	});
+
+	it("keeps v2 Playwright results in the owned run root and overwrites one budget report", () => {
+		const source = readFileSync("playwright-v2.config.ts", "utf8");
+		expect(source).toContain("createRunArtifactDirectory");
+		expect(source.indexOf("getRunRoot();")).toBeLessThan(source.indexOf("createRunArtifactDirectory(\"playwright-v2\")"));
+		expect(source).toContain('outputDir: playwrightResultsDir');
+		expect(source).toContain('outputFile: playwrightBudgetReport');
+		expect(source).toContain('const playwrightBudgetReport = ".profiles/testing-v2/budgets/playwright-report.json"');
+		expect(source).not.toContain("test-results-v2-${playwrightRunId}");
+		expect(source).not.toContain("playwright-report-${playwrightRunId}.json");
 	});
 
 	it("preserves PATH for Git discovery while isolating config and credentials", () => {

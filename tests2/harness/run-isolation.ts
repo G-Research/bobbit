@@ -132,6 +132,8 @@ export function isRunRootOwner(): boolean {
 /**
  * Delete a run root only when this process allocated it. Workers inherit the
  * root but have no ownership flag, so their exit can never race sibling tests.
+ * Reporters finish before the coordinator exits; durable summaries belong in
+ * their explicitly managed report paths, not in disposable worker artifacts.
  */
 export function cleanupOwnedRunRoot(): boolean {
 	if (!runRootOwnedByThisProcess || !runRoot || runRootCleaned) return false;
@@ -148,6 +150,24 @@ export function cleanupOwnedRunRoot(): boolean {
 /** Allocate a unique directory owned by this run; only such children may be removed. */
 export function createRunChild(prefix: string): string {
 	return canonicalDirectory(mkdtempSync(path.join(getRunRoot(), `${prefix}-`)));
+}
+
+/**
+ * Create a deterministic artifact directory inside this run's unique root.
+ *
+ * Unlike createRunChild(), artifact names are deliberately stable: Playwright
+ * receives one output directory per coordinator, while the unique run root
+ * prevents concurrent coordinators from ever sharing it. Reject separators so
+ * a config value can neither escape nor overlap another owned child.
+ */
+export function createRunArtifactDirectory(name: string): string {
+	if (!name || name === "." || name === ".." || name.includes("/") || name.includes("\\") || name !== path.basename(name)) {
+		throw new Error(`invalid run artifact directory name: ${name}`);
+	}
+	const root = getRunRoot();
+	const artifactDir = path.resolve(root, name);
+	if (!isOwnedRunChild(root, artifactDir)) throw new Error(`refusing to create non-owned test artifact path: ${artifactDir}`);
+	return canonicalDirectory(artifactDir);
 }
 
 export function removeOwnedRunChild(candidate: string): void {
