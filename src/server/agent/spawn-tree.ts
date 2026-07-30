@@ -153,6 +153,12 @@ function unrefTimer(timer: NodeJS.Timeout | undefined): void {
 	timer?.unref?.();
 }
 
+/** Child stdio is typed as a generic readable/writable stream, but FD 3 is a Socket. */
+function unrefReadyPipe(pipe: unknown): void {
+	const unref = (pipe as { unref?: unknown } | undefined)?.unref;
+	if (typeof unref === "function") unref.call(pipe);
+}
+
 /** A bounded wait that never leaves its losing timeout referenced. */
 function waitWithTimeout(promise: Promise<boolean>, timeoutMs: number): Promise<boolean> {
 	return new Promise(resolve => {
@@ -289,7 +295,7 @@ export function spawnTracked(
 			// must not keep a gateway alive after this deliberately detached child
 			// has acknowledged the sentinel handshake. Unref preserves the stream and
 			// normal `close` settlement for explicit later cleanup.
-			if (tracked._posixSentinelReady) readyPipe?.unref?.();
+			if (tracked._posixSentinelReady) unrefReadyPipe(readyPipe);
 		},
 		async waitForTreeExit(timeoutMs?: number): Promise<boolean> {
 			// Once the root's exit event fired without completion already observed,
@@ -474,7 +480,7 @@ export function spawnTracked(
 		// markSurvival() may happen before the asynchronous FD-3 handshake.
 		// Once durable ownership is established, FD 3 must not retain the
 		// gateway event loop for the lifetime of the surviving payload.
-		if (tracked._survivesShutdown) readyPipe.unref?.();
+		if (tracked._survivesShutdown) unrefReadyPipe(readyPipe);
 	});
 	const onExit = () => {
 		tracked._exited = true;
