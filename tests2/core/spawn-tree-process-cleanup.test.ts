@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { spawnTracked } from "../../src/server/agent/spawn-tree.js";
+import { createManualClock } from "../harness/clock.js";
 
 type NativeSpawn = typeof import("node:child_process").spawn;
 
@@ -90,6 +91,43 @@ describe("spawnTracked timeout cleanup", () => {
 		expect(result.stdout).toContain("process-tree-cleanup-ok");
 	});
 
+	it("Windows retains tree-kill ownership from root exit until inherited stdio closes", async () => {
+		const clock = createManualClock(0);
+		const root = fakeChild(2_147_483_647);
+		const taskkill = fakeChild(2_147_483_646);
+		const calls: Array<{ cmd: string; args: string[] }> = [];
+		const spawnImpl = ((cmd: string, args: string[]) => {
+			calls.push({ cmd, args });
+			return calls.length === 1 ? root : taskkill;
+		}) as unknown as NativeSpawn;
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "win32",
+			spawnImpl,
+			clock,
+			timeoutMs: 50,
+		});
+
+		// Windows can emit `exit` while a descendant owns inherited stdio. That is
+		// not a PID-reuse boundary: the timeout must still start exactly one scoped
+		// taskkill before the later full `close`.
+		root.emit("exit", 0, null);
+		expect(await tracked.waitForTreeExit(0)).toBe(false);
+		clock.advance(50);
+		expect(tracked.timedOut()).toBe(true);
+		expect(calls).toEqual([
+			{ cmd: "node", args: ["worker"] },
+			{ cmd: "taskkill", args: ["/T", "/F", "/PID", "2147483647"] },
+		]);
+
+		const completion = tracked.waitForTreeExit(1_000);
+		taskkill.emit("close", 0, null);
+		expect(await completion).toBe(true);
+
+		root.emit("close", 0, null);
+		tracked.killTree();
+		expect(calls).toHaveLength(2);
+	});
+
 	it("Windows cleanup joins one taskkill and never retargets a closed or completed root", async () => {
 		const root = fakeChild(2_147_483_647);
 		const taskkill = fakeChild(2_147_483_646);
@@ -124,6 +162,34 @@ describe("spawnTracked timeout cleanup", () => {
 		root.emit("close", 0, null);
 		tracked.killTree();
 		expect(calls).toHaveLength(2);
+	});
+
+	it("POSIX drops delayed escalation after the original process group becomes empty", () => {
+		const clock = createManualClock(0);
+		const root = fakeChild(123_456);
+		const signals: Array<{ pgid: number; signal: NodeJS.Signals }> = [];
+		let groupAlive = true;
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "linux",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			clock,
+			killGraceMs: 50,
+			isProcessGroupAlive: () => groupAlive,
+			signalProcessGroup: (pgid, signal) => { signals.push({ pgid, signal }); },
+		});
+
+		tracked.killTree("SIGTERM");
+		expect(signals).toEqual([{ pgid: 123_456, signal: "SIGTERM" }]);
+
+		// The group's original descendants all exit before grace elapses. A later
+		// `true` models the kernel reusing that numeric PGID for an unrelated tree.
+		groupAlive = false;
+		root.emit("exit", 0, null);
+		groupAlive = true;
+		clock.advance(50);
+		tracked.killTree("SIGKILL");
+
+		expect(signals).toEqual([{ pgid: 123_456, signal: "SIGTERM" }]);
 	});
 
 	it("Windows never starts taskkill once the tracked root has closed", () => {
