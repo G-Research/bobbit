@@ -95,6 +95,8 @@ interface InternalTracked extends TrackedChild {
 	_closed: boolean;
 	/** Once a POSIX group is observed empty, its numeric PGID is no longer owned. */
 	_processGroupOwnershipLost: boolean;
+	/** A terminal POSIX group signal was sent; never signal that numeric PGID again. */
+	_posixFinalSignalSent: boolean;
 	_survivesShutdown: boolean;
 	_escalationTimer?: NodeJS.Timeout;
 	_timeoutTimer?: NodeJS.Timeout;
@@ -158,6 +160,7 @@ export function spawnTracked(
 		_exited: false,
 		_closed: false,
 		_processGroupOwnershipLost: false,
+		_posixFinalSignalSent: false,
 		_survivesShutdown: false,
 		killed: () => tracked._killed,
 		timedOut: () => tracked._timedOut,
@@ -179,14 +182,19 @@ export function spawnTracked(
 				]);
 			}
 
-			// A negative-PID action is safe only while its original process group
-			// has continuously remained live. Once an empty group is observed, its
-			// numeric PGID can be reused and must never be signalled again.
-			while (!tracked._processGroupOwnershipLost && groupIsAlive(pid)) {
+			// A terminal group signal is asynchronous. Do not report the tree gone
+			// merely because SIGKILL was accepted: macOS can still report a just-killed
+			// descendant as live for a turn. This loop observes only; it never sends
+			// another negative-PID signal after finalization, so a recycled PGID cannot
+			// be retargeted.
+			while (!tracked._processGroupOwnershipLost) {
+				if (!groupIsAlive(pid)) {
+					tracked._processGroupOwnershipLost = true;
+					return true;
+				}
 				if (Date.now() >= deadline) return false;
 				await delay(Math.min(TREE_EXIT_POLL_MS, Math.max(1, deadline - Date.now())));
 			}
-			if (!tracked._processGroupOwnershipLost) tracked._processGroupOwnershipLost = true;
 			return true;
 		},
 		killTree(signal: "SIGTERM" | "SIGKILL" = "SIGTERM", graceMsOverride?: number) {
@@ -224,7 +232,7 @@ export function spawnTracked(
 			}
 
 			const pid = tracked._pid;
-			if (pid == null || tracked._processGroupOwnershipLost) return;
+			if (pid == null || tracked._processGroupOwnershipLost || tracked._posixFinalSignalSent) return;
 			if (!groupIsAlive(pid)) {
 				tracked._processGroupOwnershipLost = true;
 				registry.delete(tracked);
@@ -250,18 +258,27 @@ export function spawnTracked(
 					// numeric-PGID signal into a possible reuse window.
 					if (!tracked._exited && !tracked._processGroupOwnershipLost && groupIsAlive(pid)) {
 						try { signalProcessGroup(pid, "SIGKILL"); } catch { /* already dead */ }
+						tracked._posixFinalSignalSent = true;
+					} else if (!tracked._exited) {
+						tracked._processGroupOwnershipLost = true;
 					}
-					// No later action may rely on this numeric group ID, regardless of
-					// whether it was empty or received SIGKILL above.
-					tracked._processGroupOwnershipLost = true;
+					// SIGKILL delivery is asynchronous. Drop shutdown ownership, but let
+					// waitForTreeExit observe the group becoming empty before claiming it
+					// has been reaped.
 					registry.delete(tracked);
 				}, grace);
 				unrefTimer(tracked._escalationTimer);
-			} else if (tracked._escalationTimer) {
-				clock.clearTimeout(tracked._escalationTimer);
-				tracked._escalationTimer = undefined;
+			} else {
+				if (tracked._escalationTimer) {
+					clock.clearTimeout(tracked._escalationTimer);
+					tracked._escalationTimer = undefined;
+				}
+				tracked._posixFinalSignalSent = true;
+				// A final signal may take a turn to become visible to process.kill(0).
+				// Keep that observation available to waiters but never retain a registry
+				// entry that could cause a second negative-PID action after reuse.
+				registry.delete(tracked);
 			}
-			if (signal === "SIGKILL" && tracked._closed) registry.delete(tracked);
 		},
 	};
 
@@ -284,7 +301,7 @@ export function spawnTracked(
 	};
 	const finishPosixAfterRootExit = () => {
 		const pid = tracked._pid;
-		if (pid == null || tracked._processGroupOwnershipLost) return;
+		if (pid == null || tracked._processGroupOwnershipLost || tracked._posixFinalSignalSent) return;
 		if (!groupIsAlive(pid)) {
 			tracked._processGroupOwnershipLost = true;
 			clearEscalation();
@@ -295,8 +312,9 @@ export function spawnTracked(
 		// it now rather than retaining a delayed numeric-PGID callback that could
 		// be retargeted after every original descendant leaves the group.
 		try { signalProcessGroup(pid, "SIGKILL"); } catch { /* already dead */ }
-		// SIGKILL is terminal; retaining the numeric ID would create a reuse risk.
-		tracked._processGroupOwnershipLost = true;
+		// Never signal this numeric group again. waitForTreeExit still observes
+		// its disappearance so callers cannot mistake SIGKILL dispatch for reaping.
+		tracked._posixFinalSignalSent = true;
 		clearEscalation();
 		registry.delete(tracked);
 	};
