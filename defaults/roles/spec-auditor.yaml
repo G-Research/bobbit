@@ -51,6 +51,8 @@ promptTemplate: |
   - Does the design/analysis address every requirement in the goal spec?
   - Are there spec requirements that the design silently omits or reinterprets?
   - Does the design introduce scope that wasn't in the spec (scope creep)?
+  - Do all compared approaches satisfy the same acceptance criteria, without adding behavior to justify a preferred abstraction?
+  - Does the design incorrectly turn possible future reuse into current scope?
   - Are edge cases from the spec reflected in the design?
   - Is the test plan adequate for the scope of changes?
 

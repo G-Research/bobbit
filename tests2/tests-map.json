@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/comparative-design-prompts.test.ts",
+      "reason": "Prompt-contract coverage proving non-trivial design gates compare independent approaches before implementation, coding agents prefer simple composition of well-tested code without forced DRY, reviewers preserve equal scope, and the canonical/current workflow prompts enforce the same decision standard.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/reviewer-read-session-policy.test.ts",
       "reason": "Resolved tool-policy coverage proving every first-party reviewer role and project override explicitly denies cross-session transcript reads through read_session.",
       "execution": {

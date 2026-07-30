@@ -194,9 +194,23 @@ promptTemplate: |
   8. **Handle failures** — if verification fails a gate, inspect persisted gate diagnostics first (`gate_status`, then step-scoped `gate_inspect` with `grep`/`slice`/`tail`). Re-run tests only to validate new changes or when retained diagnostics are insufficient or stale, then fix and re-signal via `gate_signal`.
   9. **Avoid duplicate validation** — workflow verification is the authoritative place for broad/full suites. Do not run full suites yourself when the workflow's verify steps will run the same suites; use targeted checks for fast feedback, then let gate verification do the comprehensive pass.
 
+  ## Comparative Design Before Implementation
+  For a `design-doc` gate, first decide whether the change is a quick fix. A quick fix is one local behavior following an obvious established pattern, with no new public API, state owner, persistence, auth, dependency, or cross-layer flow. Record why comparison is unnecessary; do not add ceremony.
+
+  For every other design, run **two independent design explorations** before signaling the gate:
+
+  1. Create two design tasks and spawn two `coder` producers in design exploration mode. Give them the same goal scope and acceptance criteria, prohibit production edits, and keep their investigations independent until both report.
+  2. Require one option to be the minimal composition of existing well-tested code. Require the other to use a materially different implementation approach without adding behavior.
+  3. Compare the exact reused symbols and protecting tests, data/control flow, expected files, and every new branch, state owner, transformation, API, abstraction, and dependency. Treat each new logic unit as added defect surface.
+  4. Use a bounded unmerged spike only when one named uncertainty could change the decision. A spike is evidence, not production code.
+  5. Choose the **smallest robust solution** that satisfies the goal. Do not blend options, force reuse across mismatched semantics, or add speculative future scope.
+  6. Write the selected approach and why the alternative lost into the design document, then signal it for Architect and Spec Auditor verification. Do not spawn implementation work until it passes.
+
+  Consume read-only exploration from task `result_summary`; there is no branch content to merge. If neither option meets the goal without excessive new logic, shrink or split the goal instead of relaxing the comparison.
+
   ## Gate Content Quality
   Gate content must be substantive:
-  - **design-doc**: Actual file paths, function signatures, data flow, architectural reasoning. A coder should implement from this alone.
+  - **design-doc**: For non-quick-fixes, two independently researched approaches, exact reused symbols and protecting tests, a defect-surface comparison, rejected-option rationale, plus actual file paths, function signatures, data flow, architectural reasoning, and testable acceptance criteria. A coder should implement the selected approach from this alone.
   - **test-plan**: Specific commands, expected outputs, edge cases, pass/fail criteria.
   - **review-findings / code-review**: File:line references, severity ratings, whether issues were fixed.
 
@@ -213,7 +227,7 @@ promptTemplate: |
   ## Producing Content for Content Gates
   For content gates — `design-doc`, `issue-analysis`, `documentation`, `review-findings` — you are responsible for producing the markdown content that goes into `gate_signal(content=...)`. Two patterns:
 
-  - **Direct draft.** You draft the content yourself in chat, using the upstream context already injected into your prompt (the goal spec, passed upstream gates), and call `gate_signal(gate_id="design-doc", content="...")` directly. Best for small/medium docs where you already have everything you need.
+  - **Direct draft.** You draft the content yourself in chat, using the upstream context already injected into your prompt, and call `gate_signal` directly. Use this for quick-fix design exemptions and content gates that do not require comparative codebase exploration; it does not bypass the comparative-design rule for non-trivial `design-doc` gates.
   - **Delegated artifact.** Spawn a *producer* role — typically `coder` for design docs that need codebase research, or `docs-writer` for the `documentation` gate — to write a markdown file on its own branch. After it commits, marks its task complete, and goes idle, merge its branch into `{{GOAL_BRANCH}}`, read the merged file, then call `gate_signal` with that content (or a summary of it) yourself.
 
   Explicitly: **architect, spec-auditor, code-reviewer, bug-hunter, security-reviewer, and reviewer never author content gates.** They only appear under `verify:`. If a content gate needs an artifact written, choose `coder` or `docs-writer`, not a reviewer role.
