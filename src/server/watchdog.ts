@@ -20,12 +20,14 @@
  */
 
 import { spawn, execSync, type ChildProcess } from "node:child_process";
+import http from "node:http";
 import https from "node:https";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { bobbitStateDir } from "./bobbit-dir.js";
 import { validateDependencies, type DependencyValidationResult } from "./harness-deps.js";
+import { gatewayRoute, normalizeBasePath, withBasePath } from "../shared/base-path.js";
 
 export type WatchdogRecoveryDecision =
 	| { action: "none"; previousFailures?: number }
@@ -171,55 +173,116 @@ const forwardedArgs = (() => {
 	return sep >= 0 ? argv.slice(sep + 1) : argv;
 })();
 
-/** Detect a CLI flag value from forwarded args */
-function detectFlag(flag: string): string | undefined {
-	const idx = forwardedArgs.indexOf(flag);
-	if (idx >= 0 && forwardedArgs[idx + 1]) {
-		return forwardedArgs[idx + 1];
+export interface WatchdogProbeTarget {
+	protocol: "http:" | "https:";
+	hostname: string;
+	port: number;
+	basePath: string;
+}
+
+export interface ResolveWatchdogProbeTargetOptions {
+	forwardedArgs?: readonly string[];
+	env?: Readonly<Record<string, string | undefined>>;
+	/** A fresh CLI-persisted URL, when available, replaces the entire target atomically. */
+	persistedGatewayUrl?: string;
+}
+
+interface FlagValue {
+	present: boolean;
+	value?: string;
+}
+
+function lastFlagValue(args: readonly string[], flag: string): FlagValue {
+	let found: FlagValue = { present: false };
+	for (let i = 0; i < args.length; i++) {
+		if (args[i] !== flag) continue;
+		if (i + 1 >= args.length || args[i + 1]!.startsWith("--")) {
+			found = { present: true };
+		} else {
+			found = { present: true, value: args[i + 1] };
+			i++;
+		}
 	}
-	return undefined;
+	return found;
 }
 
-/** Detect the port from forwarded args, defaulting to 3001 */
-function detectPort(): number {
-	const v = detectFlag("--port");
-	return v ? parseInt(v, 10) : 3001;
+function parsePort(raw: string | undefined, fallback: number): number {
+	if (raw === undefined) return fallback;
+	if (!/^(?:0|[1-9][0-9]*)$/.test(raw)) throw new Error(`Invalid watchdog port: ${JSON.stringify(raw)}`);
+	const port = Number(raw);
+	if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error(`Invalid watchdog port: ${JSON.stringify(raw)}`);
+	return port;
 }
 
-/**
- * Detect the host to probe.
- *
- * The server binds to the address given via --host (or auto-detected NordLynx IP).
- * The watchdog must probe that same address — probing 127.0.0.1 fails when the
- * server is bound to a non-loopback interface.
- *
- * Strategy:
- *  1. Use --host from forwarded args if present
- *  2. Read .bobbit/state/gateway-url written by the CLI on startup
- *  3. Fall back to 127.0.0.1
- */
-function detectHost(): string {
-	// 1. Explicit --host in forwarded args
-	const explicit = detectFlag("--host");
-	if (explicit) return explicit;
+function probeHostname(host: string): string {
+	const normalized = host.trim().replace(/^\[|\]$/g, "");
+	if (normalized === "0.0.0.0") return "127.0.0.1";
+	if (normalized === "::") return "::1";
+	return normalized;
+}
 
-	// 2. Read persisted gateway URL
-	try {
-		const gwUrlFile = path.join(bobbitStateDir(), "gateway-url");
-		const raw = fs.readFileSync(gwUrlFile, "utf-8").trim();
-		const parsed = new URL(raw);
-		return parsed.hostname;
-	} catch {
-		// File doesn't exist yet or is unparseable — expected on first launch
+function isLoopback(host: string): boolean {
+	const normalized = probeHostname(host).toLowerCase();
+	return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+}
+
+function parsePersistedTarget(raw: string): WatchdogProbeTarget {
+	if (raw !== raw.trim() || /[\u0000-\u0020\u007f\\]/.test(raw)) {
+		throw new Error("Persisted gateway URL contains unsafe characters");
 	}
-
-	// 3. Fallback
-	return "127.0.0.1";
+	const lexical = raw.match(/^(https?):\/\/([^/?#]+)(\/[^?#]*)?$/i);
+	if (!lexical) throw new Error("Persisted gateway URL must be absolute HTTP(S) without query or fragment");
+	// Validate the lexical pathname before WHATWG URL processing can erase dot
+	// segments or normalize encoded separators.
+	const basePath = normalizeBasePath(lexical[3] ?? "");
+	const parsed = new URL(raw);
+	if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname) {
+		throw new Error("Persisted gateway URL must be absolute HTTP(S)");
+	}
+	if (parsed.username || parsed.password) throw new Error("Persisted gateway URL must not contain credentials");
+	return {
+		protocol: parsed.protocol,
+		hostname: probeHostname(parsed.hostname),
+		port: parsed.port ? parsePort(parsed.port, 0) : parsed.protocol === "https:" ? 443 : 80,
+		basePath,
+	};
 }
 
-const PORT = detectPort();
-/** Cached probe host — re-resolved from gateway-url after each harness launch */
-let probeHost = detectHost();
+/** Resolve one complete health-probe target using CLI-presence-over-env semantics. */
+export function resolveWatchdogProbeTarget(options: ResolveWatchdogProbeTargetOptions = {}): WatchdogProbeTarget {
+	if (options.persistedGatewayUrl !== undefined) return parsePersistedTarget(options.persistedGatewayUrl);
+	const args = options.forwardedArgs ?? [];
+	const env = options.env ?? {};
+
+	const baseFlag = lastFlagValue(args, "--base-path");
+	if (baseFlag.present && baseFlag.value === undefined) throw new Error("--base-path requires a value (use / for a root mount)");
+	const selectedBase = baseFlag.present
+		? baseFlag.value
+		: Object.prototype.hasOwnProperty.call(env, "BOBBIT_BASE_PATH") ? env.BOBBIT_BASE_PATH : undefined;
+	const basePath = normalizeBasePath(selectedBase);
+
+	const hostFlag = lastFlagValue(args, "--host");
+	if (hostFlag.present && hostFlag.value === undefined) throw new Error("--host requires a value");
+	const configuredHost = hostFlag.value || "localhost";
+	const portFlag = lastFlagValue(args, "--port");
+	if (portFlag.present && portFlag.value === undefined) throw new Error("--port requires a value");
+	const port = parsePort(portFlag.present ? portFlag.value : env.PORT, 3001);
+
+	const hasNoTls = args.includes("--no-tls");
+	const hasTls = args.includes("--tls");
+	const protocol: "http:" | "https:" = hasNoTls || (!hasTls && isLoopback(configuredHost)) ? "http:" : "https:";
+	return { protocol, hostname: probeHostname(configuredHost), port, basePath };
+}
+
+export function watchdogHealthPath(target: Pick<WatchdogProbeTarget, "basePath">): string {
+	return withBasePath(gatewayRoute("/api/health"), normalizeBasePath(target.basePath));
+}
+
+function sameTarget(a: WatchdogProbeTarget, b: WatchdogProbeTarget): boolean {
+	return a.protocol === b.protocol && a.hostname === b.hostname && a.port === b.port && a.basePath === b.basePath;
+}
+
+let probeTarget: WatchdogProbeTarget = { protocol: "http:", hostname: "localhost", port: 3001, basePath: "" };
 
 /** How often to probe the server (ms) */
 const PROBE_INTERVAL_MS = 10_000;
@@ -248,6 +311,50 @@ let isRestarting = false;
 let lastLaunchTime = 0;
 let shuttingDown = false;
 let dependencyRecheckTimer: ReturnType<typeof setTimeout> | null = null;
+let gatewayTargetPollTimer: ReturnType<typeof setInterval> | null = null;
+let targetWarningLogged = false;
+
+interface GatewayUrlSnapshot {
+	raw?: string;
+	mtimeMs?: number;
+}
+
+let launchGatewayUrlSnapshot: GatewayUrlSnapshot = {};
+
+function readGatewayUrlSnapshot(): GatewayUrlSnapshot {
+	try {
+		const file = path.join(bobbitStateDir(), "gateway-url");
+		return { raw: fs.readFileSync(file, "utf-8").trim(), mtimeMs: fs.statSync(file).mtimeMs };
+	} catch {
+		return {};
+	}
+}
+
+function refreshProbeTargetFromState(): boolean {
+	const current = readGatewayUrlSnapshot();
+	const changed = current.raw !== launchGatewayUrlSnapshot.raw || current.mtimeMs !== launchGatewayUrlSnapshot.mtimeMs;
+	if (!changed || !current.raw) return false;
+	try {
+		const next = resolveWatchdogProbeTarget({ persistedGatewayUrl: current.raw });
+		if (!sameTarget(next, probeTarget)) {
+			console.log(`[watchdog] Probe target updated: ${probeTarget.protocol}//${probeTarget.hostname}:${probeTarget.port}${probeTarget.basePath} → ${next.protocol}//${next.hostname}:${next.port}${next.basePath}`);
+			probeTarget = next;
+		}
+		launchGatewayUrlSnapshot = current;
+		targetWarningLogged = false;
+		if (gatewayTargetPollTimer) {
+			clearInterval(gatewayTargetPollTimer);
+			gatewayTargetPollTimer = null;
+		}
+		return true;
+	} catch (error) {
+		if (!targetWarningLogged) {
+			targetWarningLogged = true;
+			console.warn(`[watchdog] Ignoring invalid fresh state/gateway-url; retaining configured probe target: ${errorMessage(error)}`);
+		}
+		return false;
+	}
+}
 
 const recoveryPolicy = new WatchdogRecoveryPolicy({
 	failureThreshold: FAILURE_THRESHOLD,
@@ -264,11 +371,12 @@ function probeHealth(): Promise<boolean> {
 			resolve(false);
 		}, PROBE_TIMEOUT_MS);
 
-		const req = https.request(
+		const transport = probeTarget.protocol === "https:" ? https : http;
+		const req = transport.request(
 			{
-				hostname: probeHost,
-				port: PORT,
-				path: "/api/health",
+				hostname: probeTarget.hostname,
+				port: probeTarget.port,
+				path: watchdogHealthPath(probeTarget),
 				method: "GET",
 				rejectUnauthorized: false, // self-signed cert
 				timeout: PROBE_TIMEOUT_MS,
@@ -301,12 +409,17 @@ function probeHealth(): Promise<boolean> {
 // ---------------------------------------------------------------------------
 
 function launchHarness(): void {
-	console.log(`\n[watchdog] Launching harness (port ${PORT})...`);
+	console.log(`\n[watchdog] Launching harness (port ${probeTarget.port}, mount ${probeTarget.basePath || "/"})...`);
 
 	if (dependencyRecheckTimer) {
 		clearTimeout(dependencyRecheckTimer);
 		dependencyRecheckTimer = null;
 	}
+
+	launchGatewayUrlSnapshot = readGatewayUrlSnapshot();
+	targetWarningLogged = false;
+	if (gatewayTargetPollTimer) clearInterval(gatewayTargetPollTimer);
+	gatewayTargetPollTimer = setInterval(() => { refreshProbeTargetFromState(); }, 500);
 
 	const child = spawn(process.execPath, [HARNESS_PATH, ...forwardedArgs], {
 		cwd: PROJECT_ROOT,
@@ -317,15 +430,6 @@ function launchHarness(): void {
 	recoveryPolicy.markHarnessLaunched();
 	lastLaunchTime = Date.now();
 
-	// Re-resolve probe host after the server has time to write gateway-url
-	setTimeout(() => {
-		const newHost = detectHost();
-		if (newHost !== probeHost) {
-			console.log(`[watchdog] Probe host updated: ${probeHost} → ${newHost}`);
-			probeHost = newHost;
-		}
-	}, STARTUP_GRACE_MS + 2000);
-
 	child.on("exit", (code, signal) => {
 		const reason = signal ? `signal ${signal}` : `code ${code}`;
 		console.log(`[watchdog] Harness exited (${reason})`);
@@ -334,6 +438,10 @@ function launchHarness(): void {
 		// that stale exit clear or schedule recovery for the current child.
 		if (harnessChild !== child) return;
 		harnessChild = null;
+		if (gatewayTargetPollTimer) {
+			clearInterval(gatewayTargetPollTimer);
+			gatewayTargetPollTimer = null;
+		}
 
 		if (!shuttingDown && !isRestarting) {
 			recoveryPolicy.markHarnessExited();
@@ -453,7 +561,10 @@ function writeState(): void {
 		const state = {
 			watchdogPid: process.pid,
 			harnessPid: harnessChild?.pid ?? null,
-			port: PORT,
+			protocol: probeTarget.protocol,
+			hostname: probeTarget.hostname,
+			port: probeTarget.port,
+			basePath: probeTarget.basePath,
 			lastLaunch: new Date(lastLaunchTime).toISOString(),
 			consecutiveFailures: recoveryPolicy.consecutiveFailures,
 			waitingForDependencies: recoveryPolicy.isWaitingForDependencies,
@@ -470,6 +581,7 @@ function writeState(): void {
 
 async function probeLoop(): Promise<void> {
 	if (shuttingDown) return;
+	refreshProbeTargetFromState();
 
 	// Skip probing during startup grace period
 	const elapsed = Date.now() - lastLaunchTime;
@@ -481,6 +593,18 @@ async function probeLoop(): Promise<void> {
 		}
 		scheduleNextProbe();
 		return;
+	}
+
+	if (!targetWarningLogged) {
+		let snapshotMatches = false;
+		try {
+			snapshotMatches = Boolean(launchGatewayUrlSnapshot.raw)
+				&& sameTarget(resolveWatchdogProbeTarget({ persistedGatewayUrl: launchGatewayUrlSnapshot.raw! }), probeTarget);
+		} catch { /* stale/invalid snapshot */ }
+		if (!snapshotMatches) {
+			targetWarningLogged = true;
+			console.warn("[watchdog] No fresh valid state/gateway-url was published for this launch; retaining the complete configured probe target.");
+		}
 	}
 
 	if (!harnessChild) {
@@ -540,6 +664,10 @@ async function shutdown(): Promise<void> {
 		clearTimeout(dependencyRecheckTimer);
 		dependencyRecheckTimer = null;
 	}
+	if (gatewayTargetPollTimer) {
+		clearInterval(gatewayTargetPollTimer);
+		gatewayTargetPollTimer = null;
+	}
 
 	console.log("\n[watchdog] Shutting down...");
 	await killHarness();
@@ -557,12 +685,19 @@ async function shutdown(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function main(): void {
+	try {
+		probeTarget = resolveWatchdogProbeTarget({ forwardedArgs, env: process.env });
+	} catch (error) {
+		console.error(`[watchdog] Invalid configuration: ${errorMessage(error)}`);
+		process.exitCode = 1;
+		return;
+	}
 	process.on("SIGINT", shutdown);
 	process.on("SIGTERM", shutdown);
 
 	console.log("[watchdog] Dev harness watchdog starting");
-	console.log(`[watchdog] Probe host:        ${probeHost}`);
-	console.log(`[watchdog] Port:              ${PORT}`);
+	console.log(`[watchdog] Probe target:      ${probeTarget.protocol}//${probeTarget.hostname}:${probeTarget.port}${probeTarget.basePath}`);
+	console.log(`[watchdog] Health path:       ${watchdogHealthPath(probeTarget)}`);
 	console.log(`[watchdog] Probe interval:    ${PROBE_INTERVAL_MS / 1000}s`);
 	console.log(`[watchdog] Failure threshold: ${FAILURE_THRESHOLD} consecutive failures`);
 	console.log(`[watchdog] Startup grace:     ${STARTUP_GRACE_MS / 1000}s`);

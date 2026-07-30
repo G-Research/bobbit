@@ -3,7 +3,7 @@
  *
  * Mounts the per-session preview directory at `/preview/<sessionId>/<rel-path>`.
  *
- * - `text/html` responses get a `<base href="/preview/<sid>/">` injected and
+ * - `text/html` responses get a marked, mount-aware `<base>` injected and
  *   the theme/swipe bridge scripts appended.
  * - All other MIME types stream as-is (no body rewrite).
  * - Path-traversal defence delegates to `path-guard.ts::resolveAssetPath`.
@@ -23,6 +23,7 @@ import { resolveAssetPath } from "./path-guard.js";
 import { mimeTypeFor } from "./mime.js";
 import { tryAuth as cookieTryAuth, type CookieStore } from "../auth/cookie.js";
 import { injectBaseAndScripts, PREVIEW_BRIDGE_SCRIPTS } from "../../shared/preview-bridge-scripts.js";
+import { gatewayRoute, normalizeBasePath, withBasePath } from "../../shared/base-path.js";
 import { getPreviewThemeSnapshot } from "./theme-snapshot.js";
 
 const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -32,6 +33,8 @@ export interface ContentRouteOptions {
 	isLocalhost: boolean;
 	/** Optional admin token check for fallback bearer-auth (used by SSE callers and tests). */
 	adminBearerToken?: string;
+	/** Canonical deployment mount. `pathname` itself has already been stripped. */
+	basePath?: string;
 }
 
 function send(res: http.ServerResponse, status: number, body: string, contentType = "application/json") {
@@ -117,8 +120,9 @@ export async function handlePreviewRequest(
 	// This lets the client switch between preview tabs (each backed by its own
 	// artifact) by just changing the iframe src — no POST/restore round-trip
 	// needed, since each artifact's bytes live at their own URL forever.
+	const basePath = normalizeBasePath(opts.basePath);
 	let baseDir = mountPath(sid);
-	let baseHrefPrefix = `/preview/${sid}/`;
+	let internalBaseRoute = gatewayRoute(`/preview/${sid}/`);
 	if (rel.startsWith("_artifact/")) {
 		const afterPrefix = rel.slice("_artifact/".length);
 		const nextSlash = afterPrefix.indexOf("/");
@@ -138,7 +142,7 @@ export async function handlePreviewRequest(
 			send(res, 404, JSON.stringify({ error: "Preview artifact not found" }));
 			return true;
 		}
-		baseHrefPrefix = `/preview/${sid}/_artifact/${artifactId}/`;
+		internalBaseRoute = gatewayRoute(`/preview/${sid}/_artifact/${artifactId}/`);
 		rel = artRel;
 	}
 
@@ -151,7 +155,7 @@ export async function handlePreviewRequest(
 
 	// `/preview/<sid>` → 301 redirect to add trailing slash so relative URLs resolve.
 	if (slashIdx < 0) {
-		res.writeHead(301, { Location: `/preview/${sid}/`, "Cache-Control": "no-store" });
+		res.writeHead(301, { Location: withBasePath(gatewayRoute(`/preview/${sid}/`), basePath), "Cache-Control": "no-store" });
 		res.end();
 		return true;
 	}
@@ -177,7 +181,10 @@ export async function handlePreviewRequest(
 			send(res, 404, JSON.stringify({ error: "Preview mount is empty" }));
 			return true;
 		}
-		res.writeHead(302, { Location: `${baseHrefPrefix}${encodeURIComponent(entry)}`, "Cache-Control": "no-store" });
+		res.writeHead(302, {
+			Location: withBasePath(gatewayRoute(`${internalBaseRoute}${encodeURIComponent(entry)}`), basePath),
+			"Cache-Control": "no-store",
+		});
 		res.end();
 		return true;
 	}
@@ -216,7 +223,8 @@ export async function handlePreviewRequest(
 		// standalone-tab opens (where the runtime parent-pull bridge no-ops) still
 		// resolve `var(--background)` etc. The runtime bridge continues to flow
 		// live theme toggles into embedded iframes where `parent !== window`.
-		const baseTag = `<base href="${baseHrefPrefix}">` + getPreviewThemeSnapshot();
+		const publicBaseHref = withBasePath(internalBaseRoute, basePath);
+		const baseTag = `<base data-bobbit-preview-base href="${publicBaseHref}">` + getPreviewThemeSnapshot();
 		const rewritten = injectBaseAndScripts(body, baseTag, PREVIEW_BRIDGE_SCRIPTS);
 		res.writeHead(200, {
 			"Content-Type": contentType,
