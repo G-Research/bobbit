@@ -314,20 +314,21 @@ describe("worktree-sweeper — bounded asynchronous sweep", () => {
 		assert.deepEqual(cleanupCalls, [], "a worktree claimed after the initial snapshot must never be deleted");
 	});
 
-	it("reads final ownership after alias I/O when a claim arrives during realpath", async () => {
-		const repo = path.resolve("virtual-realpath-owner", "repo");
-		const worktreePath = path.resolve("virtual-realpath-owner-wt", "new-session");
-		const aliasProbePath = path.resolve("virtual-realpath-owner-wt", "alias-probe");
+	it("fails closed for a path-only /var claim first seen while realpath resolves aliases", async () => {
+		// macOS Git reports /private/var while durable records can retain /var.
+		// The new claim is path-only, so branch ownership cannot mask an alias bug.
+		const repo = "/private/var/folders/worktree-sweeper/repo";
+		const worktreePath = "/private/var/folders/worktree-sweeper-wt/new-session";
+		const aliasProbePath = "/var/folders/worktree-sweeper-wt/alias-probe";
+		const claimedAliasPath = "/var/folders/worktree-sweeper-wt/new-session";
 		const branch = "session/new-realpath-owner";
 		const realpathStarted = new Deferred();
 		const releaseRealpath = new Deferred();
 		const cleanupCalls: string[] = [];
 		let ownershipReads = 0;
-		const currentSessions: Array<{
-			id: string;
-			branch?: string;
-			worktreePath?: string;
-		}> = [{ id: "alias-probe", worktreePath: aliasProbePath }];
+		const currentSessions: Array<{ id: string; worktreePath?: string }> = [
+			{ id: "alias-probe", worktreePath: aliasProbePath },
+		];
 		const runner: CommandRunner = {
 			async execFile(file, args) {
 				assert.equal(file, "git");
@@ -349,31 +350,28 @@ describe("worktree-sweeper — bounded asynchronous sweep", () => {
 			fs: {
 				access: async () => {},
 				realpath: async value => {
-					// The sweeper normalizes host paths before calling its async seam.
-					if (value.endsWith("/alias-probe")) {
+					if (value === aliasProbePath) {
 						realpathStarted.resolve();
 						await releaseRealpath.promise;
 					}
-					return value;
+					return value.replace(/^\/var\//, "/private/var/");
 				},
 			},
 			commandRunner: runner,
 			getCurrentOwnership: () => {
 				ownershipReads++;
-				// Durable stores return snapshots, so the first read must stay stale
-				// after the claim instead of sharing this mutable fixture array.
 				return { goals: [], sessions: [...currentSessions], teams: [], staff: [] };
 			},
 			cleanupWorktreeImpl: async (_repoPath, candidatePath) => { cleanupCalls.push(candidatePath); },
 		});
 
 		await realpathStarted.promise;
-		currentSessions.push({ id: "new-session", branch, worktreePath });
+		currentSessions.push({ id: "new-session", worktreePath: claimedAliasPath });
 		releaseRealpath.resolve();
 
 		assert.deepEqual(await sweep, { reclaimed: 0, cleaned: 0, repaired: 0 });
 		assert.equal(ownershipReads, 2, "the final ownership read must follow alias I/O");
-		assert.deepEqual(cleanupCalls, [], "a claim made while realpath yields must prevent cleanup");
+		assert.deepEqual(cleanupCalls, [], "an unresolved final /var alias must fail closed instead of deleting the /private/var worktree");
 	});
 
 	it("bounds cleanup across repos while keeping each repo sequential", async () => {
