@@ -1,4 +1,5 @@
 import { render } from "lit";
+import { commitGatewayConnection } from "../../src/app/gateway-fetch.js";
 import { renderSidebar, isProjectExpanded, toggleProjectExpanded } from "../../src/app/sidebar.js";
 import { navigateSidebar, expandActiveSidebarItem, installKeyboardNavOverrideClearListener } from "../../src/app/sidebar-nav.js";
 import {
@@ -20,6 +21,9 @@ const LIVE_GOAL_ID = "11111111-1111-4111-8111-111111111111";
 const ARCHIVED_GOAL_ID = "22222222-2222-4222-8222-222222222222";
 const GOAL_SESSION_ID = "sidebar-nav-fixture-goal-session";
 const LIVE_SESSION_ID = "sidebar-nav-fixture-live-session";
+const FIXTURE_GATEWAY_BASE_URL = "https://fixture.test/team/bobbit";
+const FIXTURE_GATEWAY_BASE_PATH = "/team/bobbit";
+const FIXTURE_GATEWAY_TOKEN = "fixture-token";
 
 const PROJECT: Project = {
 	id: PROJECT_ID,
@@ -114,14 +118,26 @@ function response(body: unknown, status = 200): Response {
 	});
 }
 
-function requestPath(input: RequestInfo | URL): string {
+function requestUrl(input: RequestInfo | URL): string {
 	const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
 	try {
-		const url = new URL(raw, window.location.href);
-		return `${url.pathname}${url.search}`;
+		return new URL(raw, window.location.href).href;
 	} catch {
 		return raw;
 	}
+}
+
+function requestPath(input: RequestInfo | URL): string {
+	const url = new URL(requestUrl(input));
+	const gatewayOrigin = new URL(FIXTURE_GATEWAY_BASE_URL).origin;
+	if (url.origin !== gatewayOrigin) {
+		throw new Error(`Sidebar keyboard fixture rejected foreign origin: ${url.origin}`);
+	}
+	if (url.pathname !== FIXTURE_GATEWAY_BASE_PATH && !url.pathname.startsWith(`${FIXTURE_GATEWAY_BASE_PATH}/`)) {
+		throw new Error(`Sidebar keyboard fixture rejected off-mount path: ${url.pathname}`);
+	}
+	const pathname = url.pathname.slice(FIXTURE_GATEWAY_BASE_PATH.length) || "/";
+	return `${pathname}${url.search}`;
 }
 
 const SESSION_BY_ID = new Map<string, GatewaySession>([
@@ -129,7 +145,15 @@ const SESSION_BY_ID = new Map<string, GatewaySession>([
 	[LIVE_SESSION_ID, LIVE_SESSION],
 ]);
 
-window.fetch = (async (input: RequestInfo | URL) => {
+window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+	const request = input instanceof Request ? input : null;
+	const headers = new Headers(init?.headers ?? request?.headers);
+	(window as any).__sidebarKeyboardNavRequests.push({
+		url: requestUrl(input),
+		method: init?.method ?? request?.method ?? "GET",
+		credentials: init?.credentials ?? request?.credentials ?? null,
+		authorization: headers.get("Authorization"),
+	});
 	const url = requestPath(input);
 	if (url.startsWith("/api/goals?") && url.includes("archived=true")) {
 		return response({ goals: [{ ...ARCHIVED_GOAL }], total: 1, hasMore: false, nextCursor: null, archivedSessions: [] });
@@ -210,8 +234,12 @@ async function setShowArchived(showArchived: boolean): Promise<void> {
 }
 
 async function resetFixture(options?: { showArchived?: boolean }): Promise<void> {
+	// Publish a valid mounted active connection before renderSidebar assigns
+	// missing session colours through the gateway URL boundary.
+	commitGatewayConnection(FIXTURE_GATEWAY_BASE_URL, FIXTURE_GATEWAY_TOKEN);
 	installFixtureStyle();
 	installKeyboardDriver();
+	(window as any).__sidebarKeyboardNavRequests = [];
 	const showArchived = options?.showArchived === true;
 	localStorage.setItem("bobbit-show-archived", showArchived ? "true" : "false");
 	localStorage.setItem("bobbit-show-busy", "true");
