@@ -264,7 +264,15 @@ describe("service worker mount isolation", () => {
 
 	it("retains root-mounted API bypass and offline fallback", async () => {
 		const worker = loadWorker("");
-		assert.equal(dispatchFetch(worker, "https://host.example/api/health"), undefined);
+		for (const pathname of [
+			"/api/health",
+			"/ws/viewer",
+			"/bobbit/api/health",
+			"/team/bobbit/ws/session",
+		]) {
+			assert.equal(dispatchFetch(worker, `https://host.example${pathname}`), undefined, pathname);
+		}
+		assert.ok(dispatchFetch(worker, "https://host.example/team/bobbit/assets/app.js"), "nested UI assets remain network-first/offline-cacheable");
 		worker.setNetworkFetch(async () => { throw new Error("offline"); });
 		const response = dispatchFetch(worker, "https://host.example/session/abc", { mode: "navigate" });
 		assert.ok(response);
@@ -307,6 +315,21 @@ function sourcePatternViolations(
 
 describe("client gateway sink regression guard", () => {
 	const files = [...sourceFiles(path.resolve("src/app")), ...sourceFiles(path.resolve("src/ui"))];
+
+	it("retires stale service-worker mount state before gateway connection hydration", () => {
+		const source = fs.readFileSync(path.resolve("src/app/main.ts"), "utf8");
+		const initStart = source.indexOf("async function initApp()");
+		const initEnd = source.indexOf("\ninitApp();", initStart);
+		assert.ok(initStart >= 0 && initEnd > initStart, "initApp source must be discoverable");
+		const init = source.slice(initStart, initEnd);
+		const cleanup = init.indexOf("await prepareRuntimeServiceWorkerMount()");
+		const hydrate = init.indexOf("activeGatewayConnection()");
+		const firstFetch = init.indexOf("await fetch(");
+		assert.ok(cleanup >= 0, "initApp must await stale mount retirement");
+		assert.ok(cleanup < hydrate, "service-worker cleanup must precede credential hydration");
+		assert.ok(cleanup < firstFetch, "service-worker cleanup must precede the first gateway request");
+		assert.equal((source.match(/serviceWorker\.register/g) ?? []).length, 0, "main must not race a separate late worker registration");
+	});
 
 	it("centralizes direct browser bearer construction", () => {
 		const directBearer = /(?:["']?Authorization["']?|headers\s*\[\s*["']Authorization["']\s*\])\s*(?::|=)[\s\S]{0,120}?(?:`Bearer\s+\$\{|["']Bearer\s+["']\s*\+)/g;

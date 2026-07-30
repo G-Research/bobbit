@@ -64,12 +64,11 @@ import { restoreActiveProjectFromLastSession } from "./skills-active-project.js"
 import { bootMark } from "./boot-timing.js";
 import {
 	activeGatewayConnection,
-	appUrl,
 	commitGatewayConnection,
 	gatewayUrl,
 	InvalidGatewayBaseUrlError,
 	LOCALHOST_TOKEN,
-	runtimeBasePath,
+	prepareRuntimeServiceWorkerMount,
 	sameOriginGatewayBaseUrl,
 	takeGatewayRecoveryWarning,
 } from "./gateway-fetch.js";
@@ -631,6 +630,13 @@ async function handleHashChange(): Promise<void> {
 
 async function initApp() {
 	bootMark("initApp-start");
+	// A root-scoped Bobbit worker from an earlier deployment can otherwise own
+	// this mounted page and cache its first authenticated API response. Retire
+	// wrong-mount registrations/caches before hydrating credentials or issuing
+	// any gateway request; a controlled page stops boot after the one safe reload.
+	const serviceWorkerPreparation = await prepareRuntimeServiceWorkerMount();
+	if (serviceWorkerPreparation.reloadRequested) return;
+
 	const app = document.getElementById("app");
 	if (!app) throw new Error("App container not found");
 
@@ -1096,11 +1102,6 @@ async function initApp() {
 }
 
 initApp();
-
-// Register the worker below the runtime mount so it cannot claim sibling apps.
-if ('serviceWorker' in navigator) {
-	navigator.serviceWorker.register(appUrl('/sw.js'), { scope: `${runtimeBasePath()}/` }).catch(() => {});
-}
 
 // iOS PWA grey-screen recovery (frozen/killed standalone snapshot on relaunch).
 // All paths are gated on standalone display mode, so a normal browser tab and

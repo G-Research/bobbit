@@ -55,30 +55,32 @@ function mountRelativePath(url) {
 }
 
 function isGatewayTransport(pathname) {
-	return pathname === "/api"
-		|| pathname.startsWith("/api/")
-		|| pathname === "/ws"
-		|| pathname.startsWith("/ws/");
+	// Match transport names as complete path segments at any depth. The nested
+	// form is defensive migration behavior: a still-controlling root worker must
+	// bypass `/bobbit/api/...` and `/bobbit/ws/...` while the mounted app retires it.
+	return /(?:^|\/)(?:api|ws)(?:\/|$)/.test(pathname);
 }
 
 self.addEventListener("install", (event) => {
 	// Activate immediately so a new build replaces the old SW on the next
 	// navigation rather than waiting for every tab to close first.
 	self.skipWaiting();
-	// Best-effort pre-warm of likely-next route chunks so the first
-	// navigation to e.g. /goal-dashboard hits the cache instead of the
-	// network. Failures must not block install (e.g. unstamped dev SW
-	// has an empty list).
-	if (MOUNTED_PRECACHE_ROUTE_CHUNKS.length > 0) {
-		event.waitUntil((async () => {
-			try {
-				const cache = await caches.open(CACHE_NAME);
+	// Always create the mount-scoped namespace. Besides offline ownership, this
+	// is the durable identity marker used by a later mount to distinguish stale
+	// Bobbit registrations from unrelated service workers on the shared origin.
+	event.waitUntil((async () => {
+		try {
+			const cache = await caches.open(CACHE_NAME);
+			// Best-effort pre-warm of likely-next route chunks so the first
+			// navigation to e.g. /goal-dashboard hits the cache instead of the
+			// network. Unstamped dev workers simply have an empty list.
+			if (MOUNTED_PRECACHE_ROUTE_CHUNKS.length > 0) {
 				await cache.addAll(MOUNTED_PRECACHE_ROUTE_CHUNKS);
-			} catch {
-				// Pre-cache is best-effort; ignore failures.
 			}
-		})());
-	}
+		} catch {
+			// Cache creation/pre-warming is best-effort; ignore failures.
+		}
+	})());
 });
 
 self.addEventListener("activate", (event) => {

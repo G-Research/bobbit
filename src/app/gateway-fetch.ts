@@ -17,6 +17,9 @@ export const LOCALHOST_TOKEN = "localhost";
 const INVALID_SAVED_GATEWAY_WARNING = "Invalid saved gateway URL; using this Bobbit deployment instead.";
 const STORAGE_WARNING = "Connected, but the gateway connection could not be saved for the next reload.";
 const NATIVE_TRANSPORT_WARNING = "Preview live updates and embedded previews require the Bobbit UI and gateway to use the same scheme and hostname. Serve the UI from the gateway origin or through a same-host reverse proxy.";
+const SERVICE_WORKER_RELOAD_GUARD_KEY = "bobbit-sw-mount-reload";
+const BOBBIT_CACHE_PREFIX = "bobbit:";
+const LEGACY_BOBBIT_CACHE_PREFIX = "bobbit-";
 
 export type InvalidGatewayBaseUrlCode =
 	| "EMPTY"
@@ -56,11 +59,71 @@ export interface GatewayNativeTransportSupport {
 	message?: string;
 }
 
+interface BobbitServiceWorkerLike {
+	scriptURL: string;
+}
+
+interface BobbitServiceWorkerRegistrationLike {
+	scope: string;
+	active?: BobbitServiceWorkerLike | null;
+	waiting?: BobbitServiceWorkerLike | null;
+	installing?: BobbitServiceWorkerLike | null;
+	unregister(): Promise<boolean>;
+}
+
+interface BobbitServiceWorkerContainerLike {
+	controller?: BobbitServiceWorkerLike | null;
+	getRegistrations(): Promise<BobbitServiceWorkerRegistrationLike[]>;
+	register(scriptURL: string, options: { scope: string }): Promise<unknown>;
+}
+
+interface BobbitCacheStorageLike {
+	keys(): Promise<string[]>;
+	delete(name: string): Promise<boolean>;
+}
+
+export interface BobbitServiceWorkerMountEnvironment {
+	serviceWorker?: BobbitServiceWorkerContainerLike;
+	cacheStorage?: BobbitCacheStorageLike;
+	sessionStorage?: Pick<Storage, "getItem" | "setItem" | "removeItem">;
+	origin?: string;
+	reload?: () => void;
+}
+
+export interface ServiceWorkerMountPreparationResult {
+	deletedCaches: number;
+	registered: boolean;
+	reloadRequested: boolean;
+	retiredRegistrations: number;
+}
+
 let activeConnection: ActiveGatewayConnection | null = null;
 let recoveryWarning: string | null = null;
+let serviceWorkerReloadRequested = false;
 
 function browserWindow(): (Window & typeof globalThis) | undefined {
 	return typeof window === "undefined" ? undefined : window;
+}
+
+/** DNS names are case-insensitive and one terminal root-label dot is optional. */
+function normalizeHostname(hostname: string): string {
+	let normalized = hostname.toLowerCase();
+	if (normalized.startsWith("[") && normalized.endsWith("]")) normalized = normalized.slice(1, -1);
+	if (normalized.endsWith(".")) normalized = normalized.slice(0, -1);
+	return normalized;
+}
+
+function cookieCompatibleGatewayBase(baseUrl: string): boolean {
+	const current = browserWindow();
+	if (!current) return false;
+	try {
+		const page = new URL(current.location.origin);
+		const gateway = new URL(baseUrl);
+		return gateway.protocol === page.protocol
+			&& normalizeHostname(gateway.hostname) === normalizeHostname(page.hostname);
+	} catch {
+		return false;
+	}
 }
 
 function storageValue(key: string): string | null {
@@ -207,13 +270,20 @@ function restoreStorageValue(storage: Storage, key: string, value: string | null
 }
 
 /**
- * Publish an authenticated connection in memory, then persist the URL/token pair.
- * A storage failure rolls persisted values back while retaining the working pair
- * for every transport in the current tab.
+ * Publish an authenticated connection in memory, then persist its reload-safe
+ * representation. A real bearer remains in memory for the current tab, but a
+ * same-scheme/same-host gateway is persisted with the non-credential sentinel:
+ * the successful authenticated probe has already installed its bound HttpOnly
+ * cookie. Different-host gateways retain the bearer because native cookie
+ * transports are deliberately unavailable there.
  */
 export function commitGatewayConnection(baseUrl: string, token: string): GatewayConnectionCommitResult {
 	const normalized = normalizeGatewayBaseUrl(baseUrl);
 	activeConnection = { baseUrl: normalized, token };
+	const persistCookieSentinel = Boolean(token)
+		&& token !== LOCALHOST_TOKEN
+		&& cookieCompatibleGatewayBase(normalized);
+	const persistedToken = persistCookieSentinel ? LOCALHOST_TOKEN : token;
 
 	let storage: Storage;
 	let previousUrl: string | null;
@@ -226,13 +296,28 @@ export function commitGatewayConnection(baseUrl: string, token: string): Gateway
 	} catch {
 		return { persisted: false, warning: STORAGE_WARNING };
 	}
-	try {
-		storage.setItem(GW_URL_KEY, normalized);
-		storage.setItem(GW_TOKEN_KEY, token);
-	} catch {
-		try { restoreStorageValue(storage, GW_URL_KEY, previousUrl); } catch { /* best effort */ }
-		try { restoreStorageValue(storage, GW_TOKEN_KEY, previousToken); } catch { /* best effort */ }
-		return { persisted: false, warning: STORAGE_WARNING };
+
+	if (persistCookieSentinel) {
+		// Scrub an older persisted bearer before updating the URL. If either write
+		// fails, never roll the secret back into origin-wide Web Storage.
+		try {
+			storage.setItem(GW_TOKEN_KEY, LOCALHOST_TOKEN);
+			storage.setItem(GW_URL_KEY, normalized);
+		} catch {
+			try { storage.removeItem(GW_URL_KEY); } catch { /* best effort */ }
+			try { storage.setItem(GW_TOKEN_KEY, LOCALHOST_TOKEN); }
+			catch { try { storage.removeItem(GW_TOKEN_KEY); } catch { /* best effort */ } }
+			return { persisted: false, warning: STORAGE_WARNING };
+		}
+	} else {
+		try {
+			storage.setItem(GW_URL_KEY, normalized);
+			storage.setItem(GW_TOKEN_KEY, persistedToken);
+		} catch {
+			try { restoreStorageValue(storage, GW_URL_KEY, previousUrl); } catch { /* best effort */ }
+			try { restoreStorageValue(storage, GW_TOKEN_KEY, previousToken); } catch { /* best effort */ }
+			return { persisted: false, warning: STORAGE_WARNING };
+		}
 	}
 
 	try {
@@ -264,17 +349,15 @@ export function gatewayAuthorizationHeaders(token?: string | null): Record<strin
 
 /** Compatibility boundary for cookie-only EventSource/iframe/popout transports. */
 export function gatewayNativeTransportSupport(explicitBase?: string): GatewayNativeTransportSupport {
-	const current = browserWindow();
-	if (!current) return { supported: false, message: NATIVE_TRANSPORT_WARNING };
-	let gateway: URL;
+	let baseUrl: string;
 	try {
-		gateway = new URL(explicitBase === undefined ? gatewayBaseUrl() : normalizeGatewayBaseUrl(explicitBase));
+		baseUrl = explicitBase === undefined ? gatewayBaseUrl() : normalizeGatewayBaseUrl(explicitBase);
 	} catch {
 		return { supported: false, message: NATIVE_TRANSPORT_WARNING };
 	}
-	const supported = gateway.protocol === current.location.protocol
-		&& gateway.hostname.toLowerCase() === current.location.hostname.toLowerCase();
-	return supported ? { supported: true } : { supported: false, message: NATIVE_TRANSPORT_WARNING };
+	return cookieCompatibleGatewayBase(baseUrl)
+		? { supported: true }
+		: { supported: false, message: NATIVE_TRANSPORT_WARNING };
 }
 
 /** Central credentialed HTTP transport. Route strings are validated at entry. */
@@ -291,6 +374,142 @@ export function gatewayFetch(route: GatewayRoute | string, init: RequestInit = {
 		credentials: init.credentials ?? "include",
 		headers,
 	});
+}
+
+function cacheMount(cacheName: string): string | null {
+	if (cacheName.startsWith(LEGACY_BOBBIT_CACHE_PREFIX)) return "";
+	if (!cacheName.startsWith(BOBBIT_CACHE_PREFIX)) return null;
+	const encodedEnd = cacheName.indexOf(":", BOBBIT_CACHE_PREFIX.length);
+	if (encodedEnd < 0) return null;
+	try {
+		const decoded = decodeURIComponent(cacheName.slice(BOBBIT_CACHE_PREFIX.length, encodedEnd));
+		if (decoded === "/") return "";
+		const normalized = normalizeBasePath(decoded);
+		return normalized === decoded ? normalized : null;
+	} catch {
+		return null;
+	}
+}
+
+function workerMount(scriptURL: string, origin: string): string | null {
+	try {
+		const script = new URL(scriptURL, origin);
+		if (script.origin !== origin || !script.pathname.endsWith("/sw.js")) return null;
+		const rawMount = script.pathname.slice(0, -"/sw.js".length);
+		const normalized = normalizeBasePath(rawMount);
+		return normalized === rawMount ? normalized : null;
+	} catch {
+		return null;
+	}
+}
+
+function registrationMount(registration: BobbitServiceWorkerRegistrationLike, origin: string): string | null {
+	const worker = registration.active ?? registration.waiting ?? registration.installing;
+	if (!worker) return null;
+	const mount = workerMount(worker.scriptURL, origin);
+	if (mount === null) return null;
+	try {
+		const scope = new URL(registration.scope, origin);
+		if (scope.origin !== origin || scope.pathname !== `${mount}/`) return null;
+		return mount;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Retire Bobbit service-worker state belonging to another mount before any
+ * gateway request can cross a stale root controller. Cache namespaces provide
+ * the identity proof: an unrelated `sw.js` registration is never removed merely
+ * because its script has a conventional name.
+ */
+export async function prepareRuntimeServiceWorkerMount(
+	environment: BobbitServiceWorkerMountEnvironment = {},
+): Promise<ServiceWorkerMountPreparationResult> {
+	const result: ServiceWorkerMountPreparationResult = {
+		deletedCaches: 0,
+		registered: false,
+		reloadRequested: false,
+		retiredRegistrations: 0,
+	};
+	const current = browserWindow();
+	const origin = environment.origin ?? current?.location.origin;
+	if (!origin) return result;
+
+	const serviceWorker = environment.serviceWorker
+		?? (typeof navigator !== "undefined" && "serviceWorker" in navigator
+			? navigator.serviceWorker as unknown as BobbitServiceWorkerContainerLike
+			: undefined);
+	const cacheStorage = environment.cacheStorage
+		?? (typeof caches !== "undefined" ? caches as unknown as BobbitCacheStorageLike : undefined);
+	const reloadStorage = environment.sessionStorage
+		?? (typeof sessionStorage !== "undefined" ? sessionStorage : undefined);
+	const basePath = runtimeBasePath();
+	const currentCachePrefix = `${BOBBIT_CACHE_PREFIX}${encodeURIComponent(basePath || "/")}:`;
+
+	let cacheNames: string[] = [];
+	let registrations: BobbitServiceWorkerRegistrationLike[] = [];
+	try { cacheNames = cacheStorage ? await cacheStorage.keys() : []; } catch { /* unavailable */ }
+	try { registrations = serviceWorker ? await serviceWorker.getRegistrations() : []; } catch { /* unavailable */ }
+
+	const knownBobbitMounts = new Set<string>();
+	for (const name of cacheNames) {
+		const mount = cacheMount(name);
+		if (mount !== null) knownBobbitMounts.add(mount);
+	}
+
+	for (const registration of registrations) {
+		const mount = registrationMount(registration, origin);
+		if (mount === null || mount === basePath || !knownBobbitMounts.has(mount)) continue;
+		try {
+			if (await registration.unregister()) result.retiredRegistrations += 1;
+		} catch { /* cleanup is best effort */ }
+	}
+
+	if (cacheStorage) {
+		for (const name of cacheNames) {
+			const mount = cacheMount(name);
+			const staleScopedCache = name.startsWith(BOBBIT_CACHE_PREFIX)
+				&& !name.startsWith(currentCachePrefix)
+				&& mount !== null;
+			const staleLegacyRootCache = Boolean(basePath) && name.startsWith(LEGACY_BOBBIT_CACHE_PREFIX);
+			if (!staleScopedCache && !staleLegacyRootCache) continue;
+			try {
+				if (await cacheStorage.delete(name)) result.deletedCaches += 1;
+			} catch { /* cleanup is best effort */ }
+		}
+	}
+
+	const controllerMount = serviceWorker?.controller
+		? workerMount(serviceWorker.controller.scriptURL, origin)
+		: null;
+	const staleBobbitController = controllerMount !== null
+		&& controllerMount !== basePath
+		&& knownBobbitMounts.has(controllerMount);
+	if (staleBobbitController) {
+		const guardValue = `${basePath || "/"}|${serviceWorker!.controller!.scriptURL}`;
+		let alreadyReloaded = false;
+		try { alreadyReloaded = reloadStorage?.getItem(SERVICE_WORKER_RELOAD_GUARD_KEY) === guardValue; }
+		catch { /* use the in-memory guard */ }
+		if (!alreadyReloaded && !serviceWorkerReloadRequested) {
+			serviceWorkerReloadRequested = true;
+			try { reloadStorage?.setItem(SERVICE_WORKER_RELOAD_GUARD_KEY, guardValue); } catch { /* best effort */ }
+			result.reloadRequested = true;
+			try { (environment.reload ?? (() => current?.location.reload()))(); } catch { /* best effort */ }
+			return result;
+		}
+	} else {
+		serviceWorkerReloadRequested = false;
+		try { reloadStorage?.removeItem(SERVICE_WORKER_RELOAD_GUARD_KEY); } catch { /* best effort */ }
+	}
+
+	if (serviceWorker) {
+		try {
+			await serviceWorker.register(appUrl("/sw.js"), { scope: `${basePath}/` });
+			result.registered = true;
+		} catch { /* installability is best effort */ }
+	}
+	return result;
 }
 
 function previewRouteCandidate(raw: string): GatewayRoute | null {
@@ -349,4 +568,5 @@ export function previewRouteFromStoredValue(value: unknown): GatewayRoute | null
 export function __resetGatewayConnectionForTests(): void {
 	activeConnection = null;
 	recoveryWarning = null;
+	serviceWorkerReloadRequested = false;
 }
