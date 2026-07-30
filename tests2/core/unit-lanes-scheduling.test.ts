@@ -6,6 +6,7 @@ import { dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { afterAll, beforeAll, describe, it, vi } from "vitest";
+import { resolveE2ePlaywrightWorkers } from "../../scripts/testing-v2/run-e2e-v2.mjs";
 
 type ProjectConfig = {
 	test: {
@@ -239,6 +240,16 @@ describe("direct unit-stage scheduling", () => {
 		assert.match(design, /\*\*with retries disabled\*\*/);
 		assert.match(design, /--retry=0/);
 		assert.match(design, /never load-bearing for qualification/);
+	});
+
+	it("keeps E2E Playwright at two workers unless an explicit bounded override requests more", () => {
+		assert.equal(resolveE2ePlaywrightWorkers({}), 2);
+		assert.equal(resolveE2ePlaywrightWorkers({ E2E_V2_PW_WORKERS: "1" }), 1);
+		assert.equal(resolveE2ePlaywrightWorkers({ E2E_V2_PW_WORKERS: "4" }), 4);
+		assert.equal(resolveE2ePlaywrightWorkers({ E2E_V2_PW_WORKERS: "99" }), 4);
+		for (const invalid of ["", "0", "-1", "2.5", "workers"]) {
+			assert.equal(resolveE2ePlaywrightWorkers({ E2E_V2_PW_WORKERS: invalid }), 2);
+		}
 	});
 
 	it("adds only the exact isolated E2E project when explicitly enabled", () => {

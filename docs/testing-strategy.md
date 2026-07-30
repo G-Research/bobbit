@@ -780,7 +780,7 @@ E2E command before merge.
 ### Playwright transform-cache isolation
 
 `e2e:v2` Group B drives the relocate specs through the same npm wrapper
-(`run-e2e-v2.mjs` calls `npm run test:e2e:run -- <specs> --workers=2 --retries=2` — the concurrency bridge):
+(`run-e2e-v2.mjs` calls `npm run test:e2e:run -- <specs> --workers=2 --retries=3`):
 
 ```bash
 npm run test:e2e:run -- <specs>   # the wrapper e2e:v2 Group B reuses
@@ -798,6 +798,18 @@ overlapping worktrees. Playwright's default transform cache is shared by temp
 root, so concurrent cold imports can reuse partial or stale transforms and show
 false startup errors such as missing ESM exports. Setting the cache before
 Playwright imports its cache code avoids that cross-worktree sharing.
+
+Group B and Group C both default to two Playwright workers. For an intentional
+workflow or local throughput experiment, override the E2E runner on every OS with
+Git Bash-compatible syntax; the runner accepts whole workers from 1 through 4:
+
+```bash
+E2E_V2_PW_WORKERS=4 npm run test:e2e
+```
+
+The default remains two because the browser-render lease limits total Chromium
+workers across concurrent runs. This worker knob does not alter the configured
+retry policy.
 
 Supported knobs:
 

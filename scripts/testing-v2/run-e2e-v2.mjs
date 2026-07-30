@@ -127,6 +127,16 @@ function npmCmd() {
 	return process.platform === "win32" ? "npm.cmd" : "npm";
 }
 
+// The E2E runner intentionally defaults Groups B/C to two workers. It is a
+// conservative cross-platform baseline; workflow callers can opt into more
+// parallelism with E2E_V2_PW_WORKERS=1..4 (Git Bash supports the same prefix on
+// Windows). Keep the bound aligned with the global browser-render lease cap.
+export function resolveE2ePlaywrightWorkers(env = process.env) {
+	const requested = Number(env.E2E_V2_PW_WORKERS);
+	if (!Number.isInteger(requested) || requested < 1) return 2;
+	return Math.min(4, requested);
+}
+
 function run(command, args, { env = {}, label, shell, captureOutputDir } = {}) {
 	const startWall = performance.now();
 	return new Promise((resolveRun) => {
@@ -243,9 +253,7 @@ async function runGroupB(specs) {
 	// env baked in) at retries:3 — TEMPORARY concurrency bridge (see file header +
 	// docs/testing-strategy.md "Concurrency & budgets"; restore 0 when the higher-N
 	// server-throughput fix lands).
-	// RESOURCE CAP: bound Playwright workers so the e2e browser swarm can't
-	// oversubscribe the box (override with E2E_V2_PW_WORKERS).
-	const pwWorkers = process.env.E2E_V2_PW_WORKERS || "2";
+	const pwWorkers = resolveE2ePlaywrightWorkers();
 	return run(npmCmd(), ["run", "test:e2e:run", "--", ...specs, `--workers=${pwWorkers}`, "--retries=3"], {
 		env: { ...EXTERNAL_FREE_ENV },
 		label: "B/e2e-relocate",
@@ -267,8 +275,7 @@ async function runGroupC(specs) {
 	const usesLocal = existsSync(localCli);
 	const cmd = usesLocal ? process.execPath : (process.platform === "win32" ? "npx.cmd" : "npx");
 	const pre = usesLocal ? [localCli] : ["playwright"];
-	// RESOURCE CAP: bound Playwright workers (override with E2E_V2_PW_WORKERS).
-	const pwWorkersC = process.env.E2E_V2_PW_WORKERS || "2";
+	const pwWorkersC = resolveE2ePlaywrightWorkers();
 	return run(cmd, [...pre, "test", "--config", "playwright-v2.config.ts", "--project", "browser-v2-e2e", `--workers=${pwWorkersC}`], {
 		env: { ...EXTERNAL_FREE_ENV },
 		label: "C/adapter-browser",
