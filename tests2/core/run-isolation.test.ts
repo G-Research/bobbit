@@ -362,7 +362,11 @@ describe("workflow run isolation", () => {
 				expect(existsSync(env[key]!)).toBe(true);
 			}
 			expect(env.PLAYWRIGHT_BROWSERS_PATH).toBe(browserRegistry);
-			expect(env.BOBBIT_V2_LEDGER_DIR).toBe(realpathSync(join(temp, "host-tmpdir", "bobbit-test-v2-ledger")));
+			expect(env.BOBBIT_V2_LEDGER_DIR).toBe(captureMachineGlobalLedgerDirectory({
+				TMPDIR: join(temp, "host-tmpdir"),
+				TEMP: join(temp, "host-temp"),
+				TMP: join(temp, "host-tmp"),
+			}, "win32"));
 			expect(isOwnedRunChild(paths.root, env.BOBBIT_V2_LEDGER_DIR!)).toBe(false);
 			expect(env.HOME).not.toBe(join(temp, "host-home"));
 			expect(env.TMPDIR).toBe(paths.tempDir);
