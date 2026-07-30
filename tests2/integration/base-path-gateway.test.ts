@@ -348,7 +348,9 @@ async function registerArchivedSession(running: RunningGateway): Promise<string>
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ name: "base-path-project", rootPath: projectRoot, upsert: true, acceptCanonical: true }),
 	});
-	if (response.status !== 201) throw new Error(`Project registration returned ${response.status}: ${await response.text()}`);
+	if (response.status !== 200 && response.status !== 201) {
+		throw new Error(`Project registration returned ${response.status}: ${await response.text()}`);
+	}
 	const project = await response.json() as { id: string };
 	const sessionId = randomUUID();
 	const store = running.gateway.sessionManager.getSessionStore(project.id);
@@ -507,11 +509,23 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("in-process gateway mounted a
 		expect(mismatchPreflight.headers.get("access-control-allow-origin")).toBeNull();
 		expect(mismatchPreflight.headers.get("access-control-allow-credentials")).toBeNull();
 
-		const exactViewer = await authenticateSocket(`${running.wsOrigin}${MOUNT}/ws/viewer`, {
-			origin: uiOrigin,
-			headers: { Cookie: mountedCookie },
-		}, "cookie-only-no-bearer");
+		// Reloaded cookie-compatible clients persist only the non-secret
+		// `localhost` sentinel. The exact bound HttpOnly cookie must therefore
+		// authorize both socket types before that first auth frame is evaluated.
+		const sessionId = await registerArchivedSession(running);
+		const socketOptions = { origin: uiOrigin, headers: { Cookie: mountedCookie } };
+		const exactViewer = await authenticateSocket(
+			`${running.wsOrigin}${MOUNT}/ws/viewer`,
+			socketOptions,
+			"localhost",
+		);
+		const exactSession = await authenticateSocket(
+			`${running.wsOrigin}${MOUNT}/ws/${sessionId}`,
+			socketOptions,
+			"localhost",
+		);
 		exactViewer.close();
+		exactSession.close();
 		await expectRejectedUpgrade(`${running.wsOrigin}${MOUNT}/ws/viewer`, {
 			origin: otherOrigin,
 			headers: { Cookie: mountedCookie },
