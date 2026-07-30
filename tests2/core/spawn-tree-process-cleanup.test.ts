@@ -8,12 +8,10 @@ type NativeSpawn = typeof import("node:child_process").spawn;
 
 /**
  * The tier-1 spawn guard intentionally fences ordinary test subprocesses. This
- * test is the narrow process-tree exception: retrieve its preserved native
- * spawn and execute the probe in a separate Node process, where spawn-tree is
- * unguarded. The probe's grandchild has a finite safety lifetime. After a root
- * identity boundary both POSIX and Windows deliberately fail closed rather than
- * retargeting a recycled numeric identity, so the finite lifetime prevents this
- * regression probe leaking.
+ * narrow process-tree exception retrieves its preserved native spawn and
+ * executes the probe in a separate Node process, where spawn-tree is unguarded.
+ * Its grandchild ignores SIGTERM but has a finite final safety lifetime: every
+ * lifecycle path must prove it was reaped before that fallback can matter.
  */
 type GuardState = { originals?: { spawn?: NativeSpawn } };
 const SPAWN_GUARD_STATE = Symbol.for("bobbit.tests2.tier1-spawn-guard-state");
@@ -26,51 +24,43 @@ import os from "node:os";
 import path from "node:path";
 import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
 
-const marker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-spawn-tree-")), "grandchild.pid");
-const isWindows = process.platform === "win32";
 const grandchildScript = "process.on('SIGTERM', () => {}); setTimeout(() => process.exit(0), 600); setInterval(() => {}, 1000);";
 const parentScript = "const fs=require('fs'); const {spawn}=require('child_process'); const child=spawn(process.execPath,['-e',process.argv[1]],{stdio:'ignore'}); fs.writeFileSync(process.argv[2],String(child.pid)); if(process.argv[3] === 'exit-root') process.exit(0); setInterval(()=>{},1000);";
-const tracked = spawnTracked(process.execPath, ["-e", parentScript, grandchildScript, marker, isWindows ? "exit-root" : "stay-root"], {
-  stdio: "ignore",
-  ...(isWindows ? {} : { timeoutMs: 100, killGraceMs: 100 }),
-});
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (err) { return err?.code === "EPERM"; } };
 
-const deadline = Date.now() + 1000;
-while (!fs.existsSync(marker) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
-assert.ok(fs.existsSync(marker), "parent should publish its grandchild PID before cleanup");
-
-if (isWindows) {
-  // Windows has no restart-stable process-group handle. Once the root exits,
-  // the numeric PID can be reused, so fail closed rather than trying to reap a
-  // descendant through its old parent PID. The host-independent seam below
-  // separately pins the exact no-retarget rule.
-  if (tracked.child.exitCode === null && tracked.child.signalCode === null) {
-    await new Promise(resolve => tracked.child.once("exit", resolve));
-  }
-  tracked.killTree();
-  assert.equal(await tracked.waitForTreeExit(0), false, "post-exit Windows cleanup must remain unverified rather than retargeting a PID");
-  console.log("windows-root-exit-boundary-ok");
-} else {
+async function run(mode) {
+  const marker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-spawn-tree-")), "grandchild.pid");
+  const tracked = spawnTracked(process.execPath, ["-e", parentScript, grandchildScript, marker, mode === "natural" ? "exit-root" : "stay-root"], {
+    stdio: "ignore",
+    ...(mode === "timeout" ? { timeoutMs: 100, killGraceMs: 100 } : {}),
+  });
+  const deadline = Date.now() + 1000;
+  while (!fs.existsSync(marker) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(fs.existsSync(marker), mode + ": parent should publish its grandchild PID");
   const grandchildPid = Number(fs.readFileSync(marker, "utf8"));
-  assert.ok(Number.isSafeInteger(grandchildPid) && grandchildPid > 0, "grandchild PID should be valid");
-  if (tracked.child.exitCode === null && tracked.child.signalCode === null) {
-    await new Promise(resolve => tracked.child.once("exit", resolve));
-  }
-  const exited = await tracked.waitForTreeExit(1500);
-  const alive = (() => { try { process.kill(grandchildPid, 0); return true; } catch (err) { return err?.code === "EPERM"; } })();
-  if (alive) {
-    // The probe owns this fresh PID directly and its finite lifetime is an
-    // additional fallback. The production helper must not infer that a later
-    // process-group number is still ours after the root exit boundary.
-    try { process.kill(grandchildPid, "SIGKILL"); } catch {}
-  }
-  assert.equal(exited, false, "root exit before descendant stdio closure must fail closed rather than retargeting a PGID");
-  console.log("posix-root-exit-boundary-ok");
+  assert.ok(Number.isSafeInteger(grandchildPid) && grandchildPid > 0, mode + ": grandchild PID should be valid");
+  if (mode === "cancel") tracked.killTree("SIGTERM", 0);
+  if (tracked.child.exitCode === null && tracked.child.signalCode === null) await new Promise(resolve => tracked.child.once("exit", resolve));
+  assert.equal(await tracked.waitForTreeExit(1500), true, mode + ": tracked tree should be exhausted");
+  assert.equal(alive(grandchildPid), false, mode + ": SIGTERM-ignoring grandchild must be reaped");
+  console.log(mode + "-tree-reaped");
 }
+
+await run("natural");
+await run("timeout");
+await run("cancel");
 `;
 
-function fakeChild(pid: number): ChildProcess {
-	return Object.assign(new EventEmitter(), { pid }) as unknown as ChildProcess;
+function fakeChild(pid: number): ChildProcess & { killCalls: NodeJS.Signals[]; readyPipe: EventEmitter } {
+	const killCalls: NodeJS.Signals[] = [];
+	const readyPipe = new EventEmitter();
+	return Object.assign(new EventEmitter(), {
+		pid,
+		killCalls,
+		readyPipe,
+		stdio: [null, null, null, readyPipe],
+		kill: (signal: NodeJS.Signals) => { killCalls.push(signal); return true; },
+	}) as unknown as ChildProcess & { killCalls: NodeJS.Signals[]; readyPipe: EventEmitter };
 }
 
 function runProbe(): Promise<{ stdout: string; stderr: string; code: number | null }> {
@@ -102,10 +92,10 @@ function runProbe(): Promise<{ stdout: string; stderr: string; code: number | nu
 }
 
 describe("spawnTracked timeout cleanup", () => {
-	it("enforces the native process-tree lifecycle contract after its shell leader exits", async () => {
+	it("reaps SIGTERM-ignoring descendants after natural success, timeout, and cancellation", async () => {
 		const result = await runProbe();
 		expect(result.code, result.stderr).toBe(0);
-		expect(result.stdout).toContain(process.platform === "win32" ? "windows-root-exit-boundary-ok" : "posix-root-exit-boundary-ok");
+		for (const mode of ["natural", "timeout", "cancel"]) expect(result.stdout).toContain(`${mode}-tree-reaped`);
 	});
 
 	it("Windows treats root exit as a PID-reuse boundary, even before inherited stdio closes", async () => {
@@ -136,68 +126,68 @@ describe("spawnTracked timeout cleanup", () => {
 		expect(calls).toHaveLength(1);
 	});
 
-	it("Windows cleanup joins one successful pre-exit taskkill and never retargets a closed root", async () => {
+	it("Windows supervises the payload from spawn and joins its Job close without PID retargeting", async () => {
 		const root = fakeChild(2_147_483_647);
-		const taskkill = fakeChild(2_147_483_646);
 		const calls: Array<{ cmd: string; args: string[] }> = [];
 		const spawnImpl = ((cmd: string, args: string[]) => {
 			calls.push({ cmd, args });
-			return calls.length === 1 ? root : taskkill;
+			return root;
 		}) as unknown as NativeSpawn;
-		const tracked = spawnTracked("node", ["worker"], { platform: "win32", spawnImpl });
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "win32",
+			spawnImpl,
+			windowsJobSupervisor: true,
+		});
 
-		tracked.killTree();
-		tracked.killTree("SIGKILL");
+		expect(calls).toHaveLength(1);
+		expect(calls[0].cmd).toBe("powershell.exe");
+		expect(calls[0].args).toContain("-EncodedCommand");
+		tracked.killTree("SIGTERM");
+		expect(root.killCalls).toEqual(["SIGTERM"]);
+
 		const completion = tracked.waitForTreeExit(1_000);
-		let settled = false;
-		void completion.then(() => { settled = true; });
-		await Promise.resolve();
-		expect(settled).toBe(false);
-		expect(calls).toEqual([
-			{ cmd: "node", args: ["worker"] },
-			{ cmd: "taskkill", args: ["/T", "/F", "/PID", "2147483647"] },
-		]);
-
-		taskkill.emit("close", 0, null);
+		root.emit("exit", null, "SIGTERM");
+		root.emit("close", null, "SIGTERM");
 		expect(await completion).toBe(true);
-
-		// Retain the resolved cleanup promise even while the root close event has
-		// not arrived: completed cleanup must not restart taskkill.
-		tracked.killTree();
-		expect(calls).toHaveLength(2);
-
-		// A late root close likewise cannot make a reused PID targetable.
-		root.emit("close", 0, null);
-		tracked.killTree();
-		expect(calls).toHaveLength(2);
+		tracked.killTree("SIGKILL");
+		expect(root.killCalls).toEqual(["SIGTERM"]);
+		expect(calls).toHaveLength(1);
 	});
 
-	it("Windows reports taskkill nonzero, error, and spawn failure as unverified cleanup", async () => {
-		for (const completion of ["nonzero", "error", "throw"] as const) {
-			const root = fakeChild(2_147_483_647);
-			const taskkill = fakeChild(2_147_483_646);
-			const calls: Array<{ cmd: string; args: string[] }> = [];
-			const spawnImpl = ((cmd: string, args: string[]) => {
-				calls.push({ cmd, args });
-				if (calls.length === 1) return root;
-				if (completion === "throw") throw new Error("taskkill unavailable");
-				return taskkill;
-			}) as unknown as NativeSpawn;
-			const tracked = spawnTracked("node", ["worker"], { platform: "win32", spawnImpl });
-
-			tracked.killTree();
-			if (completion === "nonzero") taskkill.emit("close", 1, null);
-			else if (completion === "error") taskkill.emit("error", new Error("taskkill unavailable"));
-
-			expect(await tracked.waitForTreeExit(1_000)).toBe(false);
-			expect(calls).toEqual([
-				{ cmd: "node", args: ["worker"] },
-				{ cmd: "taskkill", args: ["/T", "/F", "/PID", "2147483647"] },
-			]);
-		}
+	it("Windows refuses a platform seam without spawn-time Job ownership", async () => {
+		const root = fakeChild(2_147_483_647);
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "win32",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+		});
+		root.emit("exit", 0, null);
+		expect(await tracked.waitForTreeExit(0)).toBe(false);
+		expect(root.killCalls).toEqual([]);
 	});
 
-	it("POSIX fails closed after root exit instead of rearming a recycled process-group id", async () => {
+	it("queues an immediate POSIX kill until the sentinel confirms group ownership", () => {
+		const root = fakeChild(123_455);
+		const signals: Array<{ pgid: number; signal: NodeJS.Signals }> = [];
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "linux",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			signalProcessGroup: (pgid, signal) => { signals.push({ pgid, signal }); },
+		});
+
+		tracked.killTree("SIGTERM", 0);
+		expect(signals).toEqual([]);
+		root.readyPipe.emit("data", Buffer.from("."));
+		expect(signals).toEqual([{ pgid: 123_455, signal: "SIGTERM" }]);
+		root.emit("exit", null, "SIGTERM");
+		expect(signals).toEqual([
+			{ pgid: 123_455, signal: "SIGTERM" },
+			{ pgid: 123_455, signal: "SIGKILL" },
+		]);
+	});
+
+	it("POSIX synchronously finalizes a live group at root exit and never rearms its PGID", async () => {
 		const clock = createManualClock(0);
 		const root = fakeChild(123_456);
 		const signals: Array<{ pgid: number; signal: NodeJS.Signals }> = [];
@@ -207,22 +197,28 @@ describe("spawnTracked timeout cleanup", () => {
 			spawnImpl: (() => root) as unknown as NativeSpawn,
 			clock,
 			killGraceMs: 50,
+			posixTreeSentinel: true,
 			isProcessGroupAlive: () => groupAlive,
 			signalProcessGroup: (pgid, signal) => { signals.push({ pgid, signal }); },
 		});
 
+		root.readyPipe.emit("data", Buffer.from("."));
 		tracked.killTree("SIGTERM");
 		expect(signals).toEqual([{ pgid: 123_456, signal: "SIGTERM" }]);
 
-		// The root exits while a descendant still retains stdio. `true` after the
-		// boundary intentionally models a recycled numeric PGID: no later SIGKILL
-		// or liveness probe may treat it as this tracked tree.
+		// The root exits while a descendant still retains stdio. The final kill is
+		// dispatched synchronously in that exit callback, before a later empty
+		// group could make the numeric PGID reusable.
 		root.emit("exit", 0, null);
+		expect(signals).toEqual([
+			{ pgid: 123_456, signal: "SIGTERM" },
+			{ pgid: 123_456, signal: "SIGKILL" },
+		]);
+		groupAlive = false;
+		expect(await tracked.waitForTreeExit()).toBe(true);
 		clock.advance(50);
 		tracked.killTree("SIGKILL");
-
-		expect(signals).toEqual([{ pgid: 123_456, signal: "SIGTERM" }]);
-		expect(await tracked.waitForTreeExit()).toBe(false);
+		expect(signals).toHaveLength(2);
 	});
 
 	it("POSIX timeout firing after root exit never signals an unrelated recycled group", async () => {
@@ -234,19 +230,24 @@ describe("spawnTracked timeout cleanup", () => {
 			spawnImpl: (() => root) as unknown as NativeSpawn,
 			clock,
 			timeoutMs: 50,
+			posixTreeSentinel: true,
 			isProcessGroupAlive: () => true,
 			signalProcessGroup: (pgid, signal) => { signals.push({ pgid, signal }); },
 		});
 
+		root.readyPipe.emit("data", Buffer.from("."));
 		root.emit("exit", 0, null);
 		clock.advance(50);
 
 		expect(tracked.timedOut()).toBe(true);
-		expect(signals).toEqual([]);
-		expect(await tracked.waitForTreeExit()).toBe(false);
+		// The timeout sees a root that has already exited, but the exit callback
+		// already synchronously finalized the still-owned group. It never emits a
+		// later SIGTERM against a possibly recycled numeric PGID.
+		expect(signals).toEqual([{ pgid: 123_457, signal: "SIGKILL" }]);
+		expect(await tracked.waitForTreeExit(0)).toBe(false);
 	});
 
-	it("Windows never starts taskkill once the tracked root has closed", () => {
+	it("Windows never signals a supervisor after it has closed", () => {
 		const root = fakeChild(2_147_483_647);
 		const calls: Array<{ cmd: string; args: string[] }> = [];
 		const spawnImpl = ((cmd: string, args: string[]) => {

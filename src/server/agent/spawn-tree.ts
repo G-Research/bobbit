@@ -9,15 +9,17 @@
  *   child, never its descendants.
  *
  * Approach:
- *   POSIX — spawn with `detached: true` so the child becomes its own process
- *           group leader (pgid === child.pid). Kill the whole tree via
- *           `process.kill(-pgid, sig)`. SIGTERM → SIGKILL escalation after a
- *           grace period (default 5s, 1s when called from cancellation). Root
- *           exit is an ownership boundary: never signal a numeric PGID after
- *           it; report cleanup as unverified rather than risk PGID reuse.
- *   Windows — `taskkill /T /F /PID <pid>` (the `/T` flag walks the tree), but
- *           only while the root process has not emitted `exit`. Root exit is
- *           the PID-reuse boundary: no later numeric-PID action is safe.
+ *   POSIX — spawn with `detached: true` and a same-group sentinel that ignores
+ *           SIGTERM, so the child becomes a process-group leader (pgid ===
+ *           child.pid) whose PGID remains owned through root exit. Kill the
+ *           whole tree via `process.kill(-pgid, sig)`. SIGTERM → SIGKILL
+ *           escalation after a grace period (default 5s, 1s when called from
+ *           cancellation). At root exit, the sentinel keeps ownership live for
+ *           the final group kill; it is never signalled after that final kill.
+ *   Windows — spawn a PowerShell/.NET job-object supervisor. It creates the
+ *           payload suspended, assigns it to a KILL_ON_JOB_CLOSE job, then
+ *           resumes it. Closing or terminating the supervisor closes the job
+ *           and atomically reaps every descendant without PID retargeting.
  *
  * The helper owns the timeout timer (`setTimeout`, `.unref()`'d) so a
  * long-running tracked child never holds the event loop open against a
@@ -46,6 +48,14 @@ export interface SpawnTrackedOptions {
 	isProcessGroupAlive?: (pgid: number) => boolean;
 	/** Test seam for sending a signal to the detached POSIX process group. */
 	signalProcessGroup?: (pgid: number, signal: NodeJS.Signals) => void;
+	/** Enable the POSIX same-group sentinel (production default). */
+	posixTreeSentinel?: boolean;
+	/**
+	 * Enable the Windows job-object supervisor. Production Windows spawns enable
+	 * it by default; lifecycle seams opt in explicitly to avoid requiring
+	 * PowerShell in platform-neutral tests.
+	 */
+	windowsJobSupervisor?: boolean;
 	/** Optional — helper owns the timer; cleared on full process closure. */
 	timeoutMs?: number;
 	/** SIGTERM → SIGKILL escalation delay (POSIX only). Default 5000ms. */
@@ -60,16 +70,16 @@ export interface TrackedChild {
 	/**
 	 * Kill the entire process tree. Idempotent.
 	 * On POSIX, SIGTERM is sent first; SIGKILL escalates after grace while the
-	 * root process still witnesses the owned group. Root exit fails closed.
+	 * root process exits, it synchronously sends the final group signal while
+	 * that owned process group is still live.
 	 * `graceMsOverride` shortens (or lengthens) the SIGKILL escalation
 	 * window for this kill specifically (e.g. cancellation uses 1000ms).
 	 */
 	killTree(signal?: "SIGTERM" | "SIGKILL", graceMsOverride?: number): void;
 	/**
 	 * Wait a bounded interval for a previously-requested tree kill to finish.
-	 * On POSIX this observes the owned process group while the root remains a
-	 * valid ownership witness; otherwise it fails closed. On Windows it waits
-	 * for the scoped `taskkill /T /F` invocation to complete.
+	 * On POSIX this observes the owned process group after its final signal. On
+	 * Windows it joins the spawn-time Job supervisor's close barrier.
 	 */
 	waitForTreeExit(timeoutMs?: number): Promise<boolean>;
 	killed(): boolean;
@@ -97,6 +107,14 @@ interface InternalTracked extends TrackedChild {
 	_processGroupOwnershipLost: boolean;
 	/** A terminal POSIX group signal was sent; never signal that numeric PGID again. */
 	_posixFinalSignalSent: boolean;
+	/** Spawn-time sentinel keeps the original POSIX process group identity live. */
+	_posixSentinelOwned: boolean;
+	/** The sentinel installed its signal dispositions and acknowledged FD 3. */
+	_posixSentinelReady: boolean;
+	/** A kill requested before the sentinel handshake, replayed once ready. */
+	_pendingPosixKill?: { signal: "SIGTERM" | "SIGKILL"; graceMsOverride?: number };
+	/** Root exited before the sentinel handshake; finalize as soon as it arrives. */
+	_pendingPosixFinalization: boolean;
 	/**
 	 * The root identity boundary passed before we could establish tree completion.
 	 * The numeric POSIX PGID / Windows PID is no longer safe to probe or target.
@@ -105,8 +123,11 @@ interface InternalTracked extends TrackedChild {
 	_survivesShutdown: boolean;
 	_escalationTimer?: NodeJS.Timeout;
 	_timeoutTimer?: NodeJS.Timeout;
-	/** Resolves to the outcome of the one scoped Windows taskkill invocation. */
-	_windowsTreeKill?: Promise<boolean>;
+	/** Windows job-object ownership was established before the payload resumed. */
+	_windowsJobOwned: boolean;
+	/** Resolves when the tracked supervisor's stdio and job handle have closed. */
+	_windowsSupervisorClosed: Promise<void>;
+	_resolveWindowsSupervisorClosed: () => void;
 }
 
 const TREE_EXIT_POLL_MS = 25;
@@ -132,6 +153,75 @@ function unrefTimer(timer: NodeJS.Timeout | undefined): void {
 	timer?.unref?.();
 }
 
+/** A bounded wait that never leaves its losing timeout referenced. */
+function waitWithTimeout(promise: Promise<boolean>, timeoutMs: number): Promise<boolean> {
+	return new Promise(resolve => {
+		let settled = false;
+		const finish = (value: boolean) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve(value);
+		};
+		const timer = setTimeout(() => finish(false), Math.max(0, timeoutMs));
+		timer.unref?.();
+		void promise.then(finish, () => finish(false));
+	});
+}
+
+/*
+ * This fixed, dependency-free supervisor is the Windows ownership primitive.
+ * It must assign the payload before it resumes it: assigning a running root
+ * leaves a window where a fast payload can spawn an unowned child. The job's
+ * KILL_ON_JOB_CLOSE flag makes both normal completion and cancellation close
+ * the entire tree without ever acting on a PID after its exit event.
+ */
+const WINDOWS_JOB_SUPERVISOR = String.raw`
+$payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:BOBBIT_WINDOWS_JOB_PAYLOAD)) | ConvertFrom-Json
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class BobbitJobSupervisor {
+  const uint CREATE_SUSPENDED = 4, STARTF_USESTDHANDLES = 0x100, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000, HANDLE_FLAG_INHERIT = 1, INFINITE = 0xffffffff;
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct STARTUPINFO { public int cb; public string lpReserved, lpDesktop, lpTitle; public int dwX,dwY,dwXSize,dwYSize,dwXCountChars,dwYCountChars,dwFillAttribute,dwFlags; public short wShowWindow,cbReserved2; public IntPtr lpReserved2,hStdInput,hStdOutput,hStdError; }
+  [StructLayout(LayoutKind.Sequential)] public struct PROCESS_INFORMATION { public IntPtr hProcess,hThread; public int dwProcessId,dwThreadId; }
+  [StructLayout(LayoutKind.Sequential)] public struct JOBOBJECT_BASIC_LIMIT_INFORMATION { public long PerProcessUserTimeLimit,PerJobUserTimeLimit; public uint LimitFlags; public UIntPtr MinimumWorkingSetSize,MaximumWorkingSetSize; public uint ActiveProcessLimit; public UIntPtr Affinity; public uint PriorityClass,SchedulingClass; }
+  [StructLayout(LayoutKind.Sequential)] public struct IO_COUNTERS { public ulong ReadOperationCount,WriteOperationCount,OtherOperationCount,ReadTransferCount,WriteTransferCount,OtherTransferCount; }
+  [StructLayout(LayoutKind.Sequential)] public struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION { public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation; public IO_COUNTERS IoInfo; public UIntPtr ProcessMemoryLimit,JobMemoryLimit,PeakProcessMemoryUsed,PeakJobMemoryUsed; }
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateJobObject(IntPtr a, string n);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetInformationJobObject(IntPtr job, int cls, ref JOBOBJECT_EXTENDED_LIMIT_INFORMATION info, uint len);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool CreateProcess(string app, StringBuilder line, IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string cwd, ref STARTUPINFO si, out PROCESS_INFORMATION pi);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern uint ResumeThread(IntPtr thread);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle, uint ms);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr process, out uint code);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateProcess(IntPtr process, uint code);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr h);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr GetStdHandle(int n);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetHandleInformation(IntPtr h, uint mask, uint flags);
+  static void Check(bool ok) { if (!ok) throw new Win32Exception(Marshal.GetLastWin32Error()); }
+  static string Quote(string s) { if (s.Length == 0) return "\"\""; if (s.IndexOfAny(new [] {' ', '\t', '"'}) < 0) return s; var b = new StringBuilder("\""); int slashes = 0; foreach (char c in s) { if (c == '\\') { slashes++; continue; } if (c == '"') { b.Append('\\', slashes * 2 + 1); b.Append(c); slashes = 0; continue; } b.Append('\\', slashes); slashes = 0; b.Append(c); } b.Append('\\', slashes * 2); b.Append('"'); return b.ToString(); }
+  public static int Run(string file, string[] args, string cwd) { IntPtr job = IntPtr.Zero; PROCESS_INFORMATION pi = new PROCESS_INFORMATION(); bool assigned = false; try { job = CreateJobObject(IntPtr.Zero, null); if (job == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error()); var limits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION(); limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE; Check(SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf(limits))); var si = new STARTUPINFO(); si.cb = Marshal.SizeOf(si); si.dwFlags = STARTF_USESTDHANDLES; si.hStdInput = GetStdHandle(-10); si.hStdOutput = GetStdHandle(-11); si.hStdError = GetStdHandle(-12); Check(SetHandleInformation(si.hStdInput, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)); Check(SetHandleInformation(si.hStdOutput, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)); Check(SetHandleInformation(si.hStdError, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)); var line = new StringBuilder(Quote(file)); foreach (var arg in args) line.Append(' ').Append(Quote(arg)); Check(CreateProcess(null, line, IntPtr.Zero, IntPtr.Zero, true, CREATE_SUSPENDED, IntPtr.Zero, cwd, ref si, out pi)); Check(AssignProcessToJobObject(job, pi.hProcess)); assigned = true; if (ResumeThread(pi.hThread) == 0xffffffff) throw new Win32Exception(Marshal.GetLastWin32Error()); WaitForSingleObject(pi.hProcess, INFINITE); uint code; Check(GetExitCodeProcess(pi.hProcess, out code)); return unchecked((int)code); } finally { if (pi.hThread != IntPtr.Zero) CloseHandle(pi.hThread); if (pi.hProcess != IntPtr.Zero && !assigned) TerminateProcess(pi.hProcess, 1); if (pi.hProcess != IntPtr.Zero) CloseHandle(pi.hProcess); if (job != IntPtr.Zero) CloseHandle(job); } }
+}
+'@
+exit [BobbitJobSupervisor]::Run([string]$payload.file, [string[]]$payload.args, [string]$payload.cwd)
+`;
+
+const WINDOWS_JOB_SUPERVISOR_COMMAND = Buffer.from(WINDOWS_JOB_SUPERVISOR, "utf16le").toString("base64");
+
+// The background shell remains in the detached process group but ignores the
+// graceful signal. It makes root exit an ownership-safe place to send SIGKILL:
+// no empty-group/PGID-reuse window exists until that final signal kills it.
+const POSIX_TREE_SENTINEL_SCRIPT = "(trap '' HUP INT TERM; printf . >&3; while :; do sleep 2147483647 & wait $!; done) & exec \"$@\"";
+
+function withPosixSentinelReadyPipe(stdio: StdioOptions | undefined): StdioOptions {
+	if (Array.isArray(stdio)) return [...stdio.slice(0, 3), "pipe"] as StdioOptions;
+	const standard = stdio ?? "pipe";
+	return [standard, standard, standard, "pipe"] as StdioOptions;
+}
+
 /** Spawn a process whose entire tree we can later kill. */
 export function spawnTracked(
 	cmd: string,
@@ -146,17 +236,34 @@ export function spawnTracked(
 	const signalProcessGroup = opts.signalProcessGroup ?? ((pgid, signal) => {
 		process.kill(-pgid, signal);
 	});
-	const child = spawnImpl(cmd, args as string[], {
-		cwd: opts.cwd,
-		env: opts.env,
-		stdio: opts.stdio,
-		// POSIX: detached:true puts the child in its own process group so we
-		// can kill the whole tree via process.kill(-pgid, sig).
-		detached: !isWin,
-		// Windows: spawn options handle tree kill via taskkill /T below.
-		windowsHide: opts.windowsHide ?? isWin,
-	});
+	// Only a real Windows spawn enables the supervisor by default. Platform
+	// seams must opt in so their fake root remains inspectable and does not
+	// require PowerShell merely to exercise state transitions.
+	const posixTreeSentinel = opts.posixTreeSentinel ?? (!isWin && opts.spawnImpl == null);
+	const windowsJobSupervisor = opts.windowsJobSupervisor ?? (isWin && opts.spawnImpl == null);
+	const windowsPayload = windowsJobSupervisor
+		? Buffer.from(JSON.stringify({ file: cmd, args, cwd: opts.cwd ?? process.cwd() }), "utf8").toString("base64")
+		: undefined;
+	const child = spawnImpl(
+		windowsJobSupervisor ? "powershell.exe" : (posixTreeSentinel ? "/bin/sh" : cmd),
+		(windowsJobSupervisor
+			? ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", WINDOWS_JOB_SUPERVISOR_COMMAND]
+			: posixTreeSentinel ? ["-c", POSIX_TREE_SENTINEL_SCRIPT, "bobbit-tree-sentinel", cmd, ...args] : args) as string[],
+		{
+			cwd: opts.cwd,
+			env: windowsJobSupervisor
+				? { ...(opts.env ?? process.env), BOBBIT_WINDOWS_JOB_PAYLOAD: windowsPayload }
+				: opts.env,
+			stdio: posixTreeSentinel ? withPosixSentinelReadyPipe(opts.stdio) : opts.stdio,
+			// POSIX: detached:true puts the child in its own process group so we
+			// can kill the whole tree via process.kill(-pgid, sig).
+			detached: !isWin,
+			windowsHide: opts.windowsHide ?? isWin,
+		},
+	);
 
+	let resolveWindowsSupervisorClosed!: () => void;
+	const windowsSupervisorClosed = new Promise<void>(resolve => { resolveWindowsSupervisorClosed = resolve; });
 	const tracked: InternalTracked = {
 		child,
 		_pid: child.pid,
@@ -166,8 +273,14 @@ export function spawnTracked(
 		_closed: false,
 		_processGroupOwnershipLost: false,
 		_posixFinalSignalSent: false,
+		_posixSentinelOwned: posixTreeSentinel,
+		_posixSentinelReady: !posixTreeSentinel,
+		_pendingPosixFinalization: false,
 		_treeCompletionUnverified: false,
 		_survivesShutdown: false,
+		_windowsJobOwned: windowsJobSupervisor,
+		_windowsSupervisorClosed: windowsSupervisorClosed,
+		_resolveWindowsSupervisorClosed: resolveWindowsSupervisorClosed,
 		killed: () => tracked._killed,
 		timedOut: () => tracked._timedOut,
 		markSurvival: () => { tracked._survivesShutdown = true; },
@@ -182,20 +295,26 @@ export function spawnTracked(
 			const deadline = Date.now() + timeout;
 
 			if (isWin) {
-				// `exit` is a PID-reuse boundary. Do not probe or target that numeric
-				// PID after it: the only trustworthy cleanup result is taskkill that
-				// was started before the root exited.
-				if (!tracked._windowsTreeKill) return false;
-				return Promise.race([
-					tracked._windowsTreeKill,
-					delay(timeout).then(() => false),
-				]);
+				// The supervisor owns a Job handle from before the payload first runs.
+				// Its close is therefore an ownership-safe tree-completion barrier;
+				// unlike taskkill it never names a PID after root exit.
+				if (!tracked._windowsJobOwned) return false;
+				if (tracked._closed) return true;
+				return waitWithTimeout(tracked._windowsSupervisorClosed.then(() => true), timeout);
 			}
 
-			// A final group signal may take a turn to become visible. Probe once only:
-			// an empty group proves completion; a still-live number is deliberately
-			// unverified rather than repeatedly polling into a later PGID reuse window.
+			// SIGKILL delivery is asynchronous. Once it has been dispatched, later
+			// checks are observation only: they never signal this numeric PGID again,
+			// so a future reuse can at worst produce an unverified result, never
+			// retarget an unrelated tree.
 			if (tracked._posixFinalSignalSent) {
+				while (Date.now() < deadline) {
+					if (!groupIsAlive(pid)) {
+						tracked._processGroupOwnershipLost = true;
+						return true;
+					}
+					await delay(Math.min(TREE_EXIT_POLL_MS, Math.max(1, deadline - Date.now())));
+				}
 				if (!groupIsAlive(pid)) {
 					tracked._processGroupOwnershipLost = true;
 					return true;
@@ -215,52 +334,27 @@ export function spawnTracked(
 		},
 		killTree(signal: "SIGTERM" | "SIGKILL" = "SIGTERM", graceMsOverride?: number) {
 			if (isWin) {
-				// Unlike `close`, root `exit` is the identity boundary: Windows can
-				// reuse this PID while descendants still retain inherited stdio. Never
-				// begin a new taskkill after it, even as a best-effort fallback.
-				if (tracked._exited || tracked._closed || tracked._windowsTreeKill) return;
-				const pid = tracked._pid;
-				if (pid == null) return;
-
+				// We only ever signal the still-live supervisor. Windows closes its Job
+				// handle on supervisor termination, which kills the payload tree without
+				// a taskkill/PID lookup. Never fall back after its exit boundary.
+				if (!tracked._windowsJobOwned || tracked._exited || tracked._closed) return;
 				tracked._killed = true;
 				tracked._survivesShutdown = false;
-				let completeTreeKill!: (succeeded: boolean) => void;
-				tracked._windowsTreeKill = new Promise<boolean>((resolve) => {
-					completeTreeKill = resolve;
-				});
-				try {
-					const tk = spawnImpl("taskkill", ["/T", "/F", "/PID", String(pid)], {
-						stdio: "ignore",
-						windowsHide: true,
-					});
-					let completed = false;
-					const done = (succeeded: boolean) => {
-						if (completed) return;
-						completed = true;
-						completeTreeKill(succeeded);
-					};
-					tk.once("close", (code: number | null) => done(code === 0));
-					tk.once("error", () => done(false));
-				} catch {
-					completeTreeKill(false);
-				}
+				try { child.kill(signal); } catch { /* supervisor may have just exited */ }
 				return;
 			}
 
 			const pid = tracked._pid;
 			if (pid == null || tracked._processGroupOwnershipLost || tracked._posixFinalSignalSent) return;
-			// Root exit is the POSIX ownership boundary just as it is for a Windows
-			// PID. Descendants may retain stdio after it, but their old numeric PGID
-			// can be released and recycled before an asynchronous timeout callback.
-			// Failing closed is safer than signalling an unrelated process group.
-			if (tracked._exited) {
+			if (tracked._posixSentinelOwned && !tracked._posixSentinelReady) {
+				// Do not race the sentinel's trap installation. Holding this intent
+				// until its FD-3 acknowledgement means our own SIGTERM cannot kill the
+				// sentinel before it has made the PGID ownership durable.
 				tracked._killed = true;
-				tracked._treeCompletionUnverified = true;
-				tracked._processGroupOwnershipLost = true;
-				tracked._posixFinalSignalSent = true;
-				if (tracked._escalationTimer) clock.clearTimeout(tracked._escalationTimer);
-				tracked._escalationTimer = undefined;
-				registry.delete(tracked);
+				tracked._survivesShutdown = false;
+				if (signal === "SIGKILL" || !tracked._pendingPosixKill) {
+					tracked._pendingPosixKill = { signal, graceMsOverride };
+				}
 				return;
 			}
 			if (!groupIsAlive(pid)) {
@@ -329,28 +423,67 @@ export function spawnTracked(
 		if (tracked._escalationTimer) clock.clearTimeout(tracked._escalationTimer);
 		tracked._escalationTimer = undefined;
 	};
-	const onExit = () => {
-		tracked._exited = true;
-		if (!isWin && tracked._killed) {
-			// An exit event can arrive before descendants close inherited stdio. If
-			// SIGKILL was not already dispatched while the root was alive, the leader
-			// no longer witnesses the numeric process-group identity: never re-arm a
-			// negative-PID action and fail cleanup closed. A final signal that was sent
-			// before this boundary gets exactly one non-destructive completion probe.
-			if (!tracked._posixFinalSignalSent) {
-				tracked._treeCompletionUnverified = true;
-				tracked._processGroupOwnershipLost = true;
-			}
+	const finishPosixAtRootExit = () => {
+		const pid = tracked._pid;
+		if (pid == null || tracked._processGroupOwnershipLost || tracked._posixFinalSignalSent) return;
+		if (!tracked._posixSentinelOwned) {
+			// A platform seam without the spawn-time sentinel has no durable PGID
+			// ownership after root exit. Fail closed rather than retarget a number.
+			tracked._treeCompletionUnverified = true;
+			tracked._processGroupOwnershipLost = true;
 			clearEscalation();
 			registry.delete(tracked);
+			return;
+		}
+		if (!tracked._posixSentinelReady) {
+			tracked._pendingPosixFinalization = true;
+			return;
+		}
+		// The sentinel ignores graceful terminal signals and is still a member of
+		// this group until this final SIGKILL. That spawn-time ownership removes
+		// the empty-group/PGID-reuse gap at root exit.
+		try { signalProcessGroup(pid, "SIGKILL"); } catch { /* already gone */ }
+		tracked._posixFinalSignalSent = true;
+		clearEscalation();
+		registry.delete(tracked);
+	};
+	const readyPipe = posixTreeSentinel ? child.stdio[3] : undefined;
+	if (posixTreeSentinel && !readyPipe) {
+		// This should be unreachable because we add FD 3 above. Do not silently
+		// assume ownership if a future caller changes the stdio construction.
+		tracked._treeCompletionUnverified = true;
+	}
+	readyPipe?.once("data", () => {
+		tracked._posixSentinelReady = true;
+		if (tracked._pendingPosixFinalization) {
+			tracked._pendingPosixFinalization = false;
+			finishPosixAtRootExit();
+			return;
+		}
+		const pending = tracked._pendingPosixKill;
+		tracked._pendingPosixKill = undefined;
+		if (pending) tracked.killTree(pending.signal, pending.graceMsOverride);
+	});
+	const onExit = () => {
+		tracked._exited = true;
+		if (!isWin) {
+			// This also covers an apparently successful shell exit. A descendant
+			// retaining inherited stdio must neither survive nor turn that root code
+			// into a false successful command result.
+			finishPosixAtRootExit();
 		}
 	};
 	const onClose = () => {
 		tracked._closed = true;
+		if (!isWin && tracked._posixSentinelOwned && !tracked._posixSentinelReady) {
+			// A broken sentinel handshake means we never established the ownership
+			// barrier. Never turn the leader's close into a successful tree result.
+			tracked._treeCompletionUnverified = true;
+			tracked._processGroupOwnershipLost = true;
+		}
+		tracked._resolveWindowsSupervisorClosed();
 		if (tracked._timeoutTimer) clock.clearTimeout(tracked._timeoutTimer);
 		if (!isWin) clearEscalation();
-		// A taskkill already started remains joinable, but root `exit` (and,
-		// independently, full stream closure) forbids every new PID action.
 		registry.delete(tracked);
 	};
 	child.once("exit", onExit);

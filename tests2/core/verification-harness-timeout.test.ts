@@ -103,6 +103,30 @@ function createUnverifiedTimedOutRunner() {
 }
 
 /** Windows root exits successfully while an untracked descendant retains stdio. */
+function createNaturalExitWithUnverifiedTreeRunner() {
+	return {
+		nonDurable: true,
+		spawn: () => {
+			const stdout = Object.assign(new EventEmitter(), { destroy() {} });
+			const stderr = Object.assign(new EventEmitter(), { destroy() {} });
+			const child = Object.assign(new EventEmitter(), { pid: 910_005, stdout, stderr });
+			const tracked = {
+				child,
+				killed: () => false,
+				timedOut: () => false,
+				markSurvival: () => {},
+				killTree: () => {},
+				waitForTreeExit: async () => false,
+			};
+			queueMicrotask(() => {
+				child.emit("exit", 0, null);
+				child.emit("close", 0, null);
+			});
+			return tracked as any;
+		},
+	};
+}
+
 function createWindowsRootExitWithOpenDescendantRunner() {
 	return {
 		nonDurable: true,
@@ -216,6 +240,15 @@ describe("runCommandStep tree-kill", () => {
 		expect(result.passed).toBe(false);
 		expect(result.output).toContain("subprocess tree cleanup could not be verified");
 		expect(result.output).not.toContain("killed subprocess tree");
+	});
+
+	it("fails a natural POSIX-style zero exit when tree completion is unverified", async () => {
+		const harness = makeHarness({ commandStepRunner: createNaturalExitWithUnverifiedTreeRunner(), platform: "linux" });
+		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-natural-unverified-"));
+
+		const result = await (harness as any).runCommandStep("true", tmp, 60, false) as { passed: boolean; output: string };
+		expect(result.passed).toBe(false);
+		expect(result.output).toContain("subprocess tree completion could not be verified");
 	});
 
 	it("fails closed when a Windows command exits zero while a descendant keeps stdio open", async () => {
