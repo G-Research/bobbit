@@ -228,6 +228,13 @@ test.describe("Stateless browser cookie upgrade", () => {
 			await expectCookieAuthenticatedNavigation(iframeResponse);
 			const iframe = page.locator(".goal-preview-panel iframe").first();
 			await expect(iframe).toBeVisible({ timeout: 20_000 });
+			await expect(iframe, "preview iframe should expose an absolute cookie-authenticated gateway URL").toHaveAttribute("src", /^https?:\/\//);
+			const iframeUrl = new URL((await iframe.getAttribute("src"))!);
+			expect(iframeUrl.origin, "preview iframe must stay on the cookie-bearing browser origin").toBe(browserOrigin);
+			expect(iframeUrl.pathname).toBe(`/preview/${sessionId}/${ENTRY}`);
+			expect([...iframeUrl.searchParams.keys()], "preview iframe should carry only the cache buster").toEqual(["mtime"]);
+			expect(iframeUrl.searchParams.get("mtime")).toMatch(/^\d+$/);
+			expect(iframeUrl.hash).toBe("");
 			await expect(page.frameLocator(".goal-preview-panel iframe").locator("body")).toContainText(PREVIEW_TEXT, { timeout: 15_000 });
 
 			const apiResponse = await cookieOnlySessionFetch(page, sessionId);
@@ -262,7 +269,12 @@ test.describe("Stateless browser cookie upgrade", () => {
 			await expect(page.frameLocator(".goal-preview-panel iframe").locator("body")).toContainText(SSE_PREVIEW_TEXT, { timeout: 15_000 });
 
 			const newTabLink = page.locator('a[title="Open preview in new tab"]').first();
-			await expect(newTabLink).toHaveAttribute("href", `/preview/${sessionId}/${ENTRY}`, { timeout: 15_000 });
+			await expect(newTabLink, "preview popout should expose an absolute cookie-authenticated gateway URL").toHaveAttribute("href", /^https?:\/\//, { timeout: 15_000 });
+			const newTabUrl = new URL((await newTabLink.getAttribute("href"))!);
+			expect(newTabUrl.origin, "preview popout must stay on the cookie-bearing browser origin").toBe(browserOrigin);
+			expect(newTabUrl.pathname).toBe(`/preview/${sessionId}/${ENTRY}`);
+			expect(newTabUrl.search, "preview popout must not carry the iframe cache buster").toBe("");
+			expect(newTabUrl.hash).toBe("");
 			const popupPromise = page.waitForEvent("popup", { timeout: 15_000 });
 			await newTabLink.click();
 			popup = await popupPromise;

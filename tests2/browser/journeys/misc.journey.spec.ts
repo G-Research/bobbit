@@ -243,15 +243,26 @@ test.describe("Journey: Preview Artifacts", () => {
 			).toBe("journey.html");
 			const iframe = page.locator(".goal-preview-panel iframe").first();
 			await expect(iframe).toBeVisible({ timeout: 20_000 });
+			await expect(iframe, "preview iframe should expose an absolute gateway URL").toHaveAttribute("src", /^https?:\/\//);
 			const src = await iframe.getAttribute("src");
-			expect(src).toMatch(/^\/preview\/[a-f0-9-]+\/journey\.html\?mtime=\d+$/);
+			const srcUrl = new URL(src!);
+			const gatewayOrigin = new URL(page.url()).origin;
+			expect(srcUrl.origin, "preview iframe should stay on the active gateway origin").toBe(gatewayOrigin);
+			expect(srcUrl.pathname).toBe(`/preview/${encodeURIComponent(sessionId)}/journey.html`);
+			expect([...srcUrl.searchParams.keys()], "preview iframe should carry only the cache buster").toEqual(["mtime"]);
+			expect(srcUrl.searchParams.get("mtime")).toMatch(/^\d+$/);
+			expect(srcUrl.hash).toBe("");
 			// Ported from preview-happy-path.spec.ts (BR52): the open-in-new-tab
 			// anchor href must NOT carry a cache-buster; Refresh must bump the mtime.
 			const link = page.locator('a[title="Open preview in new tab"]').first();
 			await expect(link).toBeVisible({ timeout: 10_000 });
+			await expect(link, "preview popout should expose an absolute gateway URL").toHaveAttribute("href", /^https?:\/\//);
 			const href = await link.getAttribute("href");
-			expect(href).toMatch(/^\/preview\/[a-f0-9-]+\/journey\.html$/);
-			expect(href).not.toMatch(/[?#]mtime=/);
+			const hrefUrl = new URL(href!);
+			expect(hrefUrl.origin, "preview popout should stay on the active gateway origin").toBe(gatewayOrigin);
+			expect(hrefUrl.pathname).toBe(`/preview/${encodeURIComponent(sessionId)}/journey.html`);
+			expect(hrefUrl.search, "preview popout must not carry the iframe cache buster").toBe("");
+			expect(hrefUrl.hash).toBe("");
 			const refresh = page.locator('button[title="Refresh preview"]').first();
 			await expect(refresh).toBeVisible({ timeout: 10_000 });
 			await refresh.click();
