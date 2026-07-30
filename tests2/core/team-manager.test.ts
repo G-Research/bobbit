@@ -7,6 +7,7 @@ import { describe, it, beforeAll, afterEach, afterAll, vi } from "vitest";
 afterEach(() => { vi.useRealTimers(); });
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -1691,16 +1692,31 @@ describe("TeamManager", () => {
 			return execFileSync("git", args, { cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });
 		}
 
+		/**
+		 * Git canonicalizes registered worktree paths on some platforms (macOS
+		 * `/var` -> `/private/var`), while creation returns the caller's lexical
+		 * spelling. Missing paths are retained lexically because `worktree list`
+		 * can intentionally report stale registrations during lifecycle cleanup.
+		 */
+		function canonicalWorktreePath(worktreePath: string): string {
+			const lexicalPath = path.resolve(worktreePath);
+			try {
+				return fs.realpathSync(lexicalPath);
+			} catch {
+				return lexicalPath;
+			}
+		}
+
 		function listedWorktreePaths(repoPath: string): string[] {
 			return runGit(["worktree", "list", "--porcelain"], repoPath)
 				.split(/\r?\n/)
 				.filter((line) => line.startsWith("worktree "))
-				.map((line) => path.resolve(line.slice("worktree ".length)));
+				.map((line) => canonicalWorktreePath(line.slice("worktree ".length)));
 		}
 
 		function assertRegisteredWorktree(repoPath: string, worktreePath: string): void {
 			assert.ok(
-				listedWorktreePaths(repoPath).includes(path.resolve(worktreePath)),
+				listedWorktreePaths(repoPath).includes(canonicalWorktreePath(worktreePath)),
 				`${worktreePath} should remain registered in git worktree list`,
 			);
 		}
@@ -1796,6 +1812,40 @@ describe("TeamManager", () => {
 		// - complete: all-worker cleanup while team state and registered worktree survive
 		// - persistence: real HEAD SHA survives the TeamStore reload boundary
 		// - multi-member: three independently registered branches and worktree paths
+		it("recognizes registered worktrees through supported symlink aliases", async () => {
+			const fixture = createGitFixture();
+			const { team } = createRepoTeam(fixture);
+			await team.startTeam("goal-1");
+			const result = await team.spawnRole("goal-1", "coder", "Verify canonical worktree registration");
+			assert.ok(result.worktreePath, "spawn must create a worktree");
+
+			const lexicalPath = path.resolve(result.worktreePath);
+			const aliasRoot = `${path.dirname(lexicalPath)}-alias-${randomUUID()}`;
+			try {
+				try {
+					fs.symlinkSync(
+						path.dirname(lexicalPath),
+						aliasRoot,
+						process.platform === "win32" ? "junction" : "dir",
+					);
+				} catch {
+					// Symlink creation can be unavailable in restricted Windows environments.
+					// The helper must still compare paths lexically when realpath cannot resolve.
+					const missingPath = path.join(lexicalPath, "removed-worktree");
+					assert.equal(canonicalWorktreePath(missingPath), path.resolve(missingPath));
+					assertRegisteredWorktree(fixture.repoPath, lexicalPath);
+					return;
+				}
+
+				const aliasedWorktreePath = path.join(aliasRoot, path.basename(lexicalPath));
+				assert.notEqual(aliasedWorktreePath, lexicalPath, "fixture must use a distinct lexical spelling");
+				assert.equal(canonicalWorktreePath(aliasedWorktreePath), canonicalWorktreePath(lexicalPath));
+				assertRegisteredWorktree(fixture.repoPath, aliasedWorktreePath);
+			} finally {
+				fs.rmSync(aliasRoot, { recursive: true, force: true });
+			}
+		});
+
 		it("should create a worktree and session for a coder role", async () => {
 			const fixture = createGitFixture();
 			const { sm, team } = createRepoTeam(fixture);
@@ -2031,9 +2081,8 @@ describe("TeamManager", () => {
 			it("should create distinct worktrees for coder, reviewer, and tester", () => {
 				assert.equal(team.listAgents("goal-1").length, roles.length);
 				assert.equal(new Set(results.map((result) => result.worktreePath)).size, roles.length);
-				const registeredPaths = new Set(listedWorktreePaths(fixture.repoPath));
 				for (const result of results) {
-					assert.ok(registeredPaths.has(path.resolve(result.worktreePath!)), `${result.worktreePath} should be registered`);
+					assertRegisteredWorktree(fixture.repoPath, result.worktreePath!);
 				}
 			});
 		});
