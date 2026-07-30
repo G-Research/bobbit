@@ -1,12 +1,24 @@
 import { render } from "lit";
+import { commitGatewayConnection } from "../../src/app/gateway-fetch.js";
 import { clearToolPageState, loadToolPageData, renderToolManagerPage } from "../../src/app/tool-manager-page.js";
 import { setRenderApp } from "../../src/app/state.js";
 
-type FetchLogEntry = { url: string; method: string; body: any };
+const FIXTURE_GATEWAY_BASE_URL = "https://fixture.test/team/bobbit";
+const FIXTURE_GATEWAY_TOKEN = "fixture-token";
+
+type FetchLogEntry = {
+	url: string;
+	method: string;
+	body: any;
+	credentials: RequestCredentials | null;
+	authorization: string | null;
+};
 
 let mcpServers: any[] = [];
 let policies: Record<string, string> = {};
 let fetchLog: FetchLogEntry[] = [];
+
+commitGatewayConnection(FIXTURE_GATEWAY_BASE_URL, FIXTURE_GATEWAY_TOKEN);
 
 function response(body: any, status = 200): Response {
 	return new Response(JSON.stringify(body), {
@@ -15,14 +27,16 @@ function response(body: any, status = 200): Response {
 	});
 }
 
-function requestPath(input: RequestInfo | URL): string {
+function requestUrl(input: RequestInfo | URL): URL {
 	const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-	try {
-		const url = new URL(raw, window.location.href);
-		return `${url.pathname}${url.search}`;
-	} catch {
-		return raw;
-	}
+	return new URL(raw, window.location.href);
+}
+
+function mountedRoute(url: URL): string {
+	const gateway = new URL(FIXTURE_GATEWAY_BASE_URL);
+	const mount = gateway.pathname.replace(/\/$/, "");
+	if (url.origin !== gateway.origin || (url.pathname !== mount && !url.pathname.startsWith(`${mount}/`))) return "";
+	return `${url.pathname.slice(mount.length) || "/"}${url.search}`;
 }
 
 function parseBody(init?: RequestInit): any {
@@ -31,23 +45,32 @@ function parseBody(init?: RequestInit): any {
 }
 
 window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-	const url = requestPath(input);
-	const method = (init?.method || "GET").toUpperCase();
+	const request = input instanceof Request ? input : null;
+	const requestUrlValue = requestUrl(input);
+	const route = mountedRoute(requestUrlValue);
+	const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
 	const body = parseBody(init);
-	fetchLog.push({ url, method, body });
+	const headers = new Headers(init?.headers ?? request?.headers);
+	fetchLog.push({
+		url: requestUrlValue.href,
+		method,
+		body,
+		credentials: init?.credentials ?? request?.credentials ?? null,
+		authorization: headers.get("Authorization"),
+	});
 
-	if (url.startsWith("/api/tools")) return response({
+	if (route.startsWith("/api/tools")) return response({
 		tools: [{ name: "bash", description: "Run a shell command.", group: "Shell" }],
 	});
-	if (url.startsWith("/api/roles")) return response([]);
-	if (url.startsWith("/api/mcp-servers")) return response(mcpServers);
-	if (url.startsWith("/api/tool-group-policies") && method === "GET") {
+	if (route.startsWith("/api/roles")) return response([]);
+	if (route.startsWith("/api/mcp-servers")) return response(mcpServers);
+	if (route.startsWith("/api/tool-group-policies") && method === "GET") {
 		const cascade: Record<string, { policy: string; origin: string }> = {};
 		for (const [key, policy] of Object.entries(policies)) cascade[key] = { policy, origin: "fixture" };
 		return response(cascade);
 	}
-	if (url.startsWith("/api/tool-group-policies/") && method === "PUT") {
-		const key = decodeURIComponent(url.split("/").pop() || "");
+	if (route.startsWith("/api/tool-group-policies/") && method === "PUT") {
+		const key = decodeURIComponent(route.split("/").pop() || "");
 		const policy = body?.policy ?? null;
 		if (policy) policies[key] = policy;
 		else delete policies[key];
