@@ -8,6 +8,8 @@ import path from "node:path";
 import { createFsFromVolume, Volume } from "memfs";
 
 import {
+  canonicalProjectPath,
+  createProjectPathIdentity,
   HEADQUARTERS_PROJECT_ID,
   ProjectRegistry,
   SpecialProjectMutationError,
@@ -39,6 +41,29 @@ function makeTmpDir(label: string): string {
 function readStoredProjects(stateDir: string): Array<{ id: string; rootPath: string; provisional?: boolean; hidden?: boolean }> {
   return JSON.parse(fs.readFileSync(path.join(stateDir, "projects.json"), "utf-8"));
 }
+
+test("canonicalProjectPath folds nonexistent suffixes only after a read-only insensitive-ancestor probe", () => {
+  const ancestor = "/identity/Ancestor";
+  const insensitiveRealpath = (candidate: string): string => {
+    if (candidate === ancestor || candidate === "/identity/ancestor") return ancestor;
+    throw new Error(`not found: ${candidate}`);
+  };
+  const sensitiveRealpath = (candidate: string): string => {
+    if (candidate === ancestor) return ancestor;
+    throw new Error(`not found: ${candidate}`);
+  };
+
+  assert.equal(
+    canonicalProjectPath(`${ancestor}/FutureProject`, { realpathSync: insensitiveRealpath }),
+    `${ancestor}/futureproject`,
+    "a case-variant spelling of the existing ancestor proves suffix folding is safe",
+  );
+  assert.equal(
+    canonicalProjectPath(`${ancestor}/FutureProject`, { realpathSync: sensitiveRealpath }),
+    `${ancestor}/FutureProject`,
+    "without that proof, a sensitive filesystem retains the requested suffix spelling",
+  );
+});
 
 test("ProjectRegistry.registerProvisional reuses an existing normal project at the same canonical root", () => {
   const stateDir = makeTmpDir("bobbit-provisional-dedupe-state-");
@@ -100,6 +125,55 @@ test("ProjectRegistry.registerProvisional reuses the normal server-run-dir proje
     assert.equal(readStoredProjects(stateDir).filter(project => path.resolve(project.rootPath) === path.resolve(serverRoot)).length, 1);
   } finally {
     fs.rmSync(serverRoot, { recursive: true, force: true });
+  }
+});
+
+test("ProjectRegistry path identity folds provisional and Headquarters aliases only on an injected insensitive filesystem", () => {
+  const serverRoot = makeTmpDir("bobbit-provisional-case-insensitive-server-");
+  const stateDir = makeTmpDir("bobbit-provisional-case-insensitive-state-");
+  const headquartersRoot = path.join(serverRoot, ".bobbit", "headquarters");
+  const insensitiveIdentity = createProjectPathIdentity({ isCaseInsensitiveAt: () => true });
+  try {
+    fs.mkdirSync(headquartersRoot, { recursive: true });
+    const registry = new ProjectRegistry(stateDir, { pathIdentity: insensitiveIdentity });
+    registry.ensureHeadquartersProject(headquartersRoot, { stateDir });
+
+    assert.throws(
+      () => registry.registerProvisional("case alias", path.join(serverRoot, ".bobbit", "HEADQUARTERS")),
+      (err: unknown) => err instanceof SpecialProjectMutationError && err.code === "HEADQUARTERS_IMMUTABLE",
+    );
+
+    const first = registry.registerProvisional("first", path.join(serverRoot, "PlannedProject"));
+    const duplicate = registry.registerProvisional("duplicate", path.join(serverRoot, "plannedproject"));
+    assert.equal(duplicate.id, first.id, "case-only nonexistent suffix aliases share one provisional project");
+  } finally {
+    fs.rmSync(serverRoot, { recursive: true, force: true });
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("ProjectRegistry preserves distinct nonexistent suffixes on an injected sensitive filesystem", () => {
+  const serverRoot = makeTmpDir("bobbit-provisional-case-sensitive-server-");
+  const stateDir = makeTmpDir("bobbit-provisional-case-sensitive-state-");
+  const headquartersRoot = path.join(serverRoot, ".bobbit", "headquarters");
+  const sensitiveIdentity = createProjectPathIdentity({ isCaseInsensitiveAt: () => false });
+  try {
+    fs.mkdirSync(headquartersRoot, { recursive: true });
+    const registry = new ProjectRegistry(stateDir, { pathIdentity: sensitiveIdentity });
+    registry.ensureHeadquartersProject(headquartersRoot, { stateDir });
+
+    const caseDistinctHeadquarters = registry.registerProvisional(
+      "case-distinct path",
+      path.join(serverRoot, ".bobbit", "HEADQUARTERS"),
+    );
+    assert.equal(caseDistinctHeadquarters.provisional, true);
+
+    const upper = registry.registerProvisional("upper", path.join(serverRoot, "PlannedProject"));
+    const lower = registry.registerProvisional("lower", path.join(serverRoot, "plannedproject"));
+    assert.notEqual(lower.id, upper.id, "case-sensitive suffixes must not be folded together");
+  } finally {
+    fs.rmSync(serverRoot, { recursive: true, force: true });
+    fs.rmSync(stateDir, { recursive: true, force: true });
   }
 });
 

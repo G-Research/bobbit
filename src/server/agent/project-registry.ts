@@ -151,7 +151,82 @@ function normalizeProjectPath(value: string, pathApi: ProjectPathApi): string {
   return pathApi === path.win32 ? normalized.toLowerCase() : normalized;
 }
 
-function canonicalProjectPath(rootPath: string): string {
+export interface ProjectPathIdentityOptions {
+  /**
+   * A read-only seam for path-identity tests and unusual filesystems. The
+   * production default is `fs.realpathSync`.
+   */
+  realpathSync?: (candidate: string) => string;
+  /** A read-only fallback probe when the ancestor itself is a filesystem root. */
+  readdirSync?: (candidate: string) => string[];
+  /**
+   * Overrides the read-only case probe. This is deliberately an opt-in seam:
+   * absent proof that a volume is case-insensitive, suffix spelling is kept.
+   */
+  isCaseInsensitiveAt?: (existingAncestor: string) => boolean;
+}
+
+function toggledCase(value: string): string | undefined {
+  const match = /[a-zA-Z]/.exec(value);
+  if (!match || match.index === undefined) return undefined;
+  const index = match.index;
+  const char = value[index];
+  const toggled = char === char.toLowerCase() ? char.toUpperCase() : char.toLowerCase();
+  return `${value.slice(0, index)}${toggled}${value.slice(index + 1)}`;
+}
+
+/**
+ * Establish case behaviour without creating, renaming, or deleting anything.
+ * A differently cased spelling of an existing entry proves case-insensitivity
+ * only when it resolves to the same canonical target. If no such proof is
+ * available (including an empty filesystem root), preserve suffix spelling.
+ */
+function hasCaseInsensitiveAncestor(
+  existingAncestor: string,
+  pathApi: ProjectPathApi,
+  realpathSync: (candidate: string) => string,
+  readdirSync: (candidate: string) => string[],
+): boolean {
+  const parent = pathApi.dirname(existingAncestor);
+  const probes: Array<{ candidate: string; expected: string }> = [];
+  const variant = parent === existingAncestor ? undefined : toggledCase(pathApi.basename(existingAncestor));
+  if (variant) probes.push({ candidate: pathApi.join(parent, variant), expected: existingAncestor });
+
+  // A root has no case-changeable basename. Probe one of its existing children
+  // instead; this remains a read-only capability check.
+  if (probes.length === 0) {
+    try {
+      const child = readdirSync(existingAncestor).find(entry => toggledCase(entry));
+      if (child) {
+        probes.push({
+          candidate: pathApi.join(existingAncestor, toggledCase(child)!),
+          expected: pathApi.join(existingAncestor, child),
+        });
+      }
+    } catch {
+      // No readable probe means no demonstrable case behaviour.
+    }
+  }
+
+  return probes.some(({ candidate, expected }) => {
+    try {
+      return pathApi.resolve(realpathSync(candidate)) === pathApi.resolve(realpathSync(expected));
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
+ * Canonical project identity. Existing prefixes are resolved through realpath;
+ * nonexistent suffixes retain their spelling unless the nearest existing
+ * ancestor demonstrably accepts a case-variant spelling. This prevents a
+ * case-sensitive macOS/Linux volume from silently collapsing distinct paths.
+ */
+export function canonicalProjectPath(
+  rootPath: string,
+  options: ProjectPathIdentityOptions = {},
+): string {
   const pathApi = projectPathApi(rootPath);
   const resolved = pathApi.resolve(rootPath);
   // Do not ask the host filesystem to resolve a foreign path dialect. Its
@@ -159,14 +234,18 @@ function canonicalProjectPath(rootPath: string): string {
   // keeps drive and UNC roots from becoming host-relative paths on POSIX.
   if (!isNativeProjectPathApi(pathApi)) return normalizeProjectPath(resolved, pathApi);
 
-  // Keep a nonexistent suffix lexical, but canonicalize the longest existing
-  // prefix so temp-root aliases (/var vs /private/var) have one identity.
+  const realpathSync = options.realpathSync ?? (candidate => fs.realpathSync(candidate));
+  const readdirSync = options.readdirSync ?? (candidate => fs.readdirSync(candidate));
   let existing = resolved;
   const suffix: string[] = [];
   while (true) {
     try {
-      const canonical = pathApi.resolve(fs.realpathSync(existing));
-      return normalizeProjectPath(pathApi.join(canonical, ...suffix.reverse()), pathApi);
+      const canonical = pathApi.resolve(realpathSync(existing));
+      const normalizedSuffix = (options.isCaseInsensitiveAt?.(canonical)
+        ?? hasCaseInsensitiveAncestor(canonical, pathApi, realpathSync, readdirSync))
+        ? suffix.reverse().map(segment => segment.toLowerCase())
+        : suffix.reverse();
+      return normalizeProjectPath(pathApi.join(canonical, ...normalizedSuffix), pathApi);
     } catch {
       const parent = pathApi.dirname(existing);
       if (parent === existing) return normalizeProjectPath(resolved, pathApi);
@@ -176,8 +255,10 @@ function canonicalProjectPath(rootPath: string): string {
   }
 }
 
-function sameProjectPath(a: string, b: string): boolean {
-  return canonicalProjectPath(a) === canonicalProjectPath(b);
+export type ProjectPathIdentity = (rootPath: string) => string;
+
+export function createProjectPathIdentity(options: ProjectPathIdentityOptions = {}): ProjectPathIdentity {
+  return rootPath => canonicalProjectPath(rootPath, options);
 }
 
 /**
@@ -215,10 +296,16 @@ export class SymlinkProjectRootError extends Error {
 export class ProjectRegistry {
   private projects = new Map<string, RegisteredProject>();
   private readonly storePath: string;
+  private readonly pathIdentity: ProjectPathIdentity;
 
-  constructor(stateDir: string) {
+  constructor(stateDir: string, options: { pathIdentity?: ProjectPathIdentity } = {}) {
     this.storePath = path.join(stateDir, "projects.json");
+    this.pathIdentity = options.pathIdentity ?? canonicalProjectPath;
     this.load();
+  }
+
+  private sameProjectPath(a: string, b: string): boolean {
+    return this.pathIdentity(a) === this.pathIdentity(b);
   }
 
   private isVisibleListProject(project: RegisteredProject): boolean {
@@ -306,7 +393,7 @@ export class ProjectRegistry {
   ): void {
     for (const existing of this.projects.values()) {
       if (opts.excludeId !== undefined && existing.id === opts.excludeId) continue;
-      if (!sameProjectPath(existing.rootPath, rootPath)) continue;
+      if (!this.sameProjectPath(existing.rootPath, rootPath)) continue;
       if (isHeadquartersProject(existing)) {
         throw new SpecialProjectMutationError(
           "HEADQUARTERS_IMMUTABLE",
@@ -538,7 +625,7 @@ export class ProjectRegistry {
   getByPath(rootPath: string): RegisteredProject | undefined {
     for (const p of this.projects.values()) {
       if (p.hidden) continue;
-      if (sameProjectPath(p.rootPath, rootPath)) return p;
+      if (this.sameProjectPath(p.rootPath, rootPath)) return p;
     }
     return undefined;
   }
@@ -550,10 +637,11 @@ export class ProjectRegistry {
    * fallback on EPERM/ENOENT) so a cwd reached through a symlink resolves to
    * a project registered at the canonical path (or vice versa).
    * `getByPath()` uses this same canonical identity for upserts, so symlink,
-   * separator, and case aliases cannot create a second project. */
+   * separator, and case aliases on a demonstrably insensitive filesystem
+   * cannot create a second project. */
   findByCwd(cwd: string): RegisteredProject | undefined {
     const cwdPathApi = projectPathApi(cwd);
-    const normalized = canonicalProjectPath(cwd);
+    const normalized = this.pathIdentity(cwd);
     let best: RegisteredProject | undefined;
     let bestLen = 0;
     for (const p of this.projects.values()) {
@@ -563,7 +651,7 @@ export class ProjectRegistry {
       // relative comparison uses win32 semantics for drive and UNC projects on
       // every host.
       if (rootPathApi !== cwdPathApi) continue;
-      const root = canonicalProjectPath(p.rootPath);
+      const root = this.pathIdentity(p.rootPath);
       const relative = rootPathApi.relative(root, normalized);
       if ((relative === "" || (!relative.startsWith(`..${rootPathApi.sep}`) && relative !== ".." && !rootPathApi.isAbsolute(relative))) && root.length > bestLen) {
         best = p;
@@ -824,7 +912,7 @@ export class ProjectRegistry {
     // Compatibility: older startup code passed the server run directory here.
     // Treat that as a request for the physical Headquarters directory; callers
     // updated for the split pass headquartersDir() directly.
-    const requestedRoot = sameProjectPath(rootPath, getProjectRoot()) ? headquartersDir(rootPath) : rootPath;
+    const requestedRoot = this.sameProjectPath(rootPath, getProjectRoot()) ? headquartersDir(rootPath) : rootPath;
     const canonicalRoot = (() => {
       try { return path.resolve(fs.realpathSync(requestedRoot)); }
       catch { return path.resolve(requestedRoot); }
@@ -974,7 +1062,7 @@ export class ProjectRegistry {
     // not block provisioning; Headquarters' physical directory stays immutable.
     const normalized = path.resolve(rootPath);
     for (const p of this.projects.values()) {
-      if (!sameProjectPath(p.rootPath, normalized)) continue;
+      if (!this.sameProjectPath(p.rootPath, normalized)) continue;
       if (isHeadquartersProject(p)) {
         assertNormalMutableProject(p, "used as a provisional project");
       }
