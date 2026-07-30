@@ -5379,8 +5379,8 @@ export class VerificationHarness {
 			// The same is true for any direct `process.kill(child.pid, sig)`.
 			// We use `spawnTracked` which spawns the child in its own process
 			// group (POSIX `detached:true`) so the helper can kill the whole
-			// tree via `process.kill(-pgid, sig)` (or `taskkill /T /F` on
-			// Windows). The helper owns the timeout timer. See spawn-tree.ts.
+			// tree via `process.kill(-pgid, sig)` (or a spawn-time Windows Job
+			// supervisor). The helper owns the timeout timer. See spawn-tree.ts.
 			// This primitive is reusable; any caller that spawns a shell which
 			// may itself spawn descendants should prefer it over raw spawn.
 			let tracked: TrackedChild | undefined;
@@ -5588,7 +5588,6 @@ export class VerificationHarness {
 			const settleFromProcess = async (
 				code: number | null,
 				signal: NodeJS.Signals | null,
-				verifyWindowsTreeCompletion = false,
 			) => {
 				if (settled || settleStarted) return;
 				settleStarted = true;
@@ -5601,12 +5600,13 @@ export class VerificationHarness {
 				const didCancel = !didTimeOut && this._cancelledTrackedKeys.delete(trackedKey);
 				// Do not report a timeout/cancel cleanup as successful merely because
 				// its shell leader closed. The tracked runner verifies the owned
-				// process group/job; on Windows it returns false when root exit made a
-				// new taskkill unsafe, or when taskkill itself failed.
-				const treeCompletionMustBeVerified = didTimeOut || didCancel
-					|| (verifyWindowsTreeCompletion && this.platform === "win32");
-				const treeCleanupVerified = !treeCompletionMustBeVerified
-					|| await tracked!.waitForTreeExit();
+				// process group or the Windows Job supervisor close barrier.
+				// A zero exit code belongs to the tracked process tree, not merely its
+				// shell leader. POSIX synchronously finalizes a live group at root exit;
+				// Windows joins its spawn-time Job supervisor. Every result therefore
+				// waits for that ownership barrier, including natural success.
+				const treeCompletionMustBeVerified = true;
+				const treeCleanupVerified = await tracked!.waitForTreeExit();
 				settled = true;
 
 				let outText = stdout;
@@ -5687,10 +5687,11 @@ export class VerificationHarness {
 					stderr += `${stderr ? "\n" : ""}${warning}`;
 					appendRetainedLogChunk(errFile, `${warning}\n`);
 					// Root `exit` is a PID-reuse boundary on Windows. Closing streams
-					// unblocks settlement without risking a late numeric-PID kill.
+					// unblocks settlement; the spawn-time Job supervisor owns all payload
+					// descendants without a late numeric-PID kill.
 					try { child.stdout?.destroy(); } catch { /* ignore */ }
 					try { child.stderr?.destroy(); } catch { /* ignore */ }
-					void settleFromProcess(exitCode, exitSignal, true);
+					void settleFromProcess(exitCode, exitSignal);
 				}, COMMAND_EXIT_CLOSE_GRACE_MS);
 				closeGraceTimer.unref?.();
 			});
