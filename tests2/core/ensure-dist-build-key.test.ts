@@ -7,7 +7,7 @@
  * temp fixture and real child processes with a synthetic build — never npm.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, it } from "vitest";
@@ -80,6 +80,14 @@ try {
 		lockWaitMs: 5_000,
 		lockPollMs: 5,
 		beforeAcquireLock: () => writeFileSync(marker("caller-" + callerId + ".missed"), "missed"),
+		afterAcquireIntent: () => {
+			if (mode === "crash-intent") {
+				writeFileSync(marker("crash-intent-created"), "created");
+				// process.exit bypasses the lock acquirer's finally cleanup, modeling a
+				// coordinator that dies after publishing intent but before acquisition.
+				process.exit(86);
+			}
+		},
 		afterRecoveryClaim: () => {
 			if (mode === "recovery") {
 				writeFileSync(marker("recovery-claimed"), "claimed");
@@ -150,6 +158,18 @@ function runDistWorker(
 				reject(error);
 			}
 		});
+	});
+}
+
+/** A real child exits after intent publication, intentionally bypassing cleanup. */
+function runCrashedDistWorker(workerFile: string, root: string, callerId: string): Promise<number | null> {
+	return new Promise((resolve, reject) => {
+		const child = nativeSpawn()(process.execPath, [workerFile, root, "crash-intent", join(root, `report-${callerId}.json`), callerId], {
+			cwd: root,
+			stdio: "ignore",
+		});
+		child.once("error", reject);
+		child.once("close", resolve);
 	});
 }
 
@@ -267,11 +287,11 @@ function resetLockFixture(root = repoRoot): void {
 	rmSync(join(root, "dist"), { recursive: true, force: true });
 	rmSync(join(root, ".profiles"), { recursive: true, force: true });
 	for (const name of [
-		"allow-build-finish", "build-started", "build-count", "recovery-claimed",
+		"allow-build-finish", "build-started", "build-count", "recovery-claimed", "crash-intent-created",
 		"caller-leader.started", "caller-leader.missed", "caller-waiter.started", "caller-waiter.missed",
 		"caller-reclaimer.started", "caller-reclaimer.missed", "caller-successor.started", "caller-successor.missed",
 		"report-leader.json", "report-waiter.json", "report-failed.json", "report-repaired.json", "report-stale.json",
-		"report-reclaimer.json", "report-successor.json",
+		"report-reclaimer.json", "report-successor.json", "report-crashed.json", "report-recovered-intent.json",
 	]) {
 		rmSync(join(root, name), { force: true });
 	}
@@ -335,6 +355,30 @@ describe.sequential("dist build worktree lock", () => {
 		assert.equal(recovered.report.ok, true, "a dead stale owner must be reclaimed without manual cleanup");
 		assert.deepEqual(buildCount(), ["normal"]);
 		assert.equal(existsSync(staleLock), false, "the replacement owner must release the recovered lock");
+	});
+
+	it("reclaims a dead stale acquisition intent from a real crashed child", async () => {
+		resetLockFixture();
+		const staleLock = distBuildLockPath(repoRoot);
+		mkdirSync(dirname(staleLock), { recursive: true });
+		writeFileSync(staleLock, `${JSON.stringify({ pid: 0, token: "dead-lock-owner" })}\n`);
+		const old = new Date(Date.now() - 100);
+		utimesSync(staleLock, old, old);
+
+		const crashed = runCrashedDistWorker(workerFile, repoRoot, "crashed");
+		await waitForFile(join(repoRoot, "crash-intent-created"));
+		assert.equal(await crashed, 86, "the child must die without its intent cleanup finally block");
+
+		const intentName = readdirSync(dirname(staleLock)).find(name => name.startsWith(`${staleLock.split(/[\\/]/).pop()}.acquire-`));
+		assert.ok(intentName, "crashed acquirer must leave a published intent");
+		const staleIntent = join(dirname(staleLock), intentName);
+		utimesSync(staleIntent, old, old);
+
+		const recovered = await runDistWorker(workerFile, repoRoot, "normal", "recovered-intent");
+		assert.equal(recovered.report.ok, true, "a dead stale intent must not wedge lock recovery");
+		assert.deepEqual(buildCount(), ["normal"]);
+		assert.equal(existsSync(staleIntent), false, "only the dead intent is reclaimed");
+		assert.equal(existsSync(staleLock), false, "the replacement owner must release its lock");
 	});
 
 	it("does not remove a successor while recovery has claimed a stale owner", async () => {

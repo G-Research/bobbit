@@ -215,9 +215,34 @@ function discardDeadRecoveryClaim(recoveryPath, staleMs) {
 function acquisitionIntents(lockPath) {
 	const prefix = `${LOCK_FILENAME}${ACQUIRE_INTENT_PREFIX}`;
 	try {
-		return readdirSync(dirname(lockPath)).filter(name => name.startsWith(prefix));
+		return readdirSync(dirname(lockPath))
+			.filter(name => name.startsWith(prefix))
+			.map(name => ({ path: join(dirname(lockPath), name), token: name.slice(prefix.length) }))
+			.filter(({ token }) => token.length > 0);
 	} catch (error) {
 		if (error?.code === "ENOENT") return [];
+		throw error;
+	}
+}
+
+/**
+ * An acquirer can die after publishing its intent but before its `finally`
+ * removes it. Delete only an old intent owned by a dead PID, and bind the
+ * filename's capability token to the recorded owner before re-reading it just
+ * before unlinking. Intent filenames are token-namespaced, so this cannot
+ * remove a later acquirer's distinct intent.
+ */
+function discardDeadAcquisitionIntent(intent, staleMs) {
+	try {
+		const ageMs = Date.now() - statSync(intent.path).mtimeMs;
+		const owner = readLockOwner(intent.path);
+		if (ageMs < staleMs || owner.token !== intent.token || pidAlive(owner.pid)) return false;
+		const current = readLockOwner(intent.path);
+		if (current.pid !== owner.pid || current.token !== intent.token) return false;
+		unlinkSync(intent.path);
+		return true;
+	} catch (error) {
+		if (error?.code === "ENOENT") return true;
 		throw error;
 	}
 }
@@ -239,7 +264,10 @@ function recoverStaleLock(lockPath, staleMs, pollMs, deadline, afterRecoveryClai
 	}
 	try {
 		afterRecoveryClaim?.();
-		while (acquisitionIntents(lockPath).length > 0) {
+		for (;;) {
+			const intents = acquisitionIntents(lockPath);
+			for (const intent of intents) discardDeadAcquisitionIntent(intent, staleMs);
+			if (acquisitionIntents(lockPath).length === 0) break;
 			if (Date.now() >= deadline) return false;
 			sleepSync(pollMs);
 		}
@@ -265,6 +293,7 @@ function acquireDistBuildLock(repoRoot, {
 	staleMs = LOCK_STALE_MS,
 	waitMs = LOCK_WAIT_MS,
 	pollMs = LOCK_POLL_MS,
+	afterAcquireIntent,
 	afterRecoveryClaim,
 } = {}) {
 	if (!Number.isFinite(staleMs) || staleMs < 0) throw new Error("[ensure-dist] lock staleMs must be a non-negative number");
@@ -279,6 +308,7 @@ function acquireDistBuildLock(repoRoot, {
 		let acquired = false;
 		try {
 			createOwnedFile(intentPath, { pid: process.pid, token, createdAt: new Date().toISOString() });
+			afterAcquireIntent?.();
 			if (!hasRecoveryClaim(lockPath)) {
 				try {
 					createOwnedFile(lockPath, { pid: process.pid, token, createdAt: new Date().toISOString() });
@@ -345,6 +375,7 @@ export function ensureDistBuild({
 	lockWaitMs,
 	lockPollMs,
 	beforeAcquireLock,
+	afterAcquireIntent,
 	afterRecoveryClaim,
 } = {}) {
 	let key = computeDistBuildKey(repoRoot);
@@ -358,6 +389,7 @@ export function ensureDistBuild({
 		...(lockStaleMs === undefined ? {} : { staleMs: lockStaleMs }),
 		...(lockWaitMs === undefined ? {} : { waitMs: lockWaitMs }),
 		...(lockPollMs === undefined ? {} : { pollMs: lockPollMs }),
+		...(afterAcquireIntent === undefined ? {} : { afterAcquireIntent }),
 		...(afterRecoveryClaim === undefined ? {} : { afterRecoveryClaim }),
 	});
 	try {
