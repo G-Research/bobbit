@@ -74,11 +74,44 @@ async function putBodies(page: Page): Promise<any[]> {
 	});
 }
 
+function saveButton(page: Page) {
+	return page.locator(".wf-nav-right button").last();
+}
+
+async function waitForSaveComplete(page: Page): Promise<void> {
+	await expect(saveButton(page)).toHaveText("Save");
+	await expect(saveButton(page)).toBeEnabled();
+}
+
 async function save(page: Page): Promise<any> {
 	const before = (await putBodies(page)).length;
-	await page.locator("button").filter({ hasText: "Save" }).first().click();
+	await saveButton(page).click();
 	await expect.poll(async () => (await putBodies(page)).length, { timeout: 5_000 }).toBe(before + 1);
+	await waitForSaveComplete(page);
 	return (await putBodies(page)).at(-1);
+}
+
+async function delayNextPut(page: Page): Promise<void> {
+	await page.evaluate(() => {
+		const originalFetch = window.fetch;
+		let release!: () => void;
+		const pending = new Promise<void>((resolve) => { release = resolve; });
+		let delayed = false;
+		(window as any).__releaseWorkflowPut = release;
+		window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+			const response = await originalFetch(input, init);
+			if (!delayed && (init?.method || "GET").toUpperCase() === "PUT") {
+				delayed = true;
+				await pending;
+			}
+			return response;
+		}) as typeof window.fetch;
+	});
+}
+
+async function releasePut(page: Page): Promise<void> {
+	await page.evaluate(() => (window as any).__releaseWorkflowPut());
+	await waitForSaveComplete(page);
 }
 
 test("workflow editor explains and preserves review-agent per-turn timeout rules", async ({ page }) => {
@@ -129,13 +162,24 @@ test("workflow editor explains and preserves review-agent per-turn timeout rules
 	await openAdvanced(page);
 	await expect(page.getByTestId("wf-step-timeout")).toHaveValue("45");
 
-	// Invalid zero is normalized to omitted; a positive fraction is normalized
-	// to its integer editor representation.
+	// Invalid zero is normalized to omitted. Keep its PUT response pending, then
+	// edit the same field again: a completed save must not replace the newer
+	// draft or close Advanced while the browser is filling the replacement.
+	await delayNextPut(page);
 	await page.getByTestId("wf-step-timeout").fill("0");
-	const zeroBody = await save(page);
+	const beforeZero = (await putBodies(page)).length;
+	await saveButton(page).click();
+	await expect.poll(async () => (await putBodies(page)).length, { timeout: 5_000 }).toBe(beforeZero + 1);
+	await expect(saveButton(page)).toHaveText("Saving…");
+	const zeroBody = (await putBodies(page)).at(-1);
 	expect(zeroBody.gates[0].verify[0].timeout).toBeUndefined();
+
 	await openAdvanced(page);
 	await page.getByTestId("wf-step-timeout").fill("3.8");
+	await releasePut(page);
+	await expect(page.getByTestId("wf-step-timeout")).toBeVisible();
+	await expect(page.getByTestId("wf-step-timeout")).toHaveValue("3");
+
 	const fractionBody = await save(page);
 	expect(fractionBody.gates[0].verify[0].timeout).toBe(3);
 

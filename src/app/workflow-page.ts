@@ -55,6 +55,9 @@ interface EditorInstance {
 	selectedWorkflow: Workflow | null;
 	isNew: boolean;
 	saving: boolean;
+	// Monotonic draft version used to avoid replacing edits made while a save
+	// request is in flight with the response snapshot.
+	editRevision: number;
 	// Expansion / drag state
 	expandedGateIndices: Set<number>;
 	expandedVStepKeys: Set<string>;
@@ -83,6 +86,7 @@ function makeInstance(id: string): EditorInstance {
 		selectedWorkflow: null,
 		isNew: false,
 		saving: false,
+		editRevision: 0,
 		expandedGateIndices: new Set(),
 		expandedVStepKeys: new Set(),
 		dragIndex: null,
@@ -237,6 +241,7 @@ function resetPageInstance(): void {
 	pageInstance.selectedWorkflow = null;
 	pageInstance.isNew = false;
 	pageInstance.saving = false;
+	pageInstance.editRevision = 0;
 	pageInstance.expandedGateIndices = new Set();
 	pageInstance.expandedVStepKeys = new Set();
 	pageInstance.dragIndex = null;
@@ -290,6 +295,7 @@ function showEdit(workflow: Workflow): void {
 	pageInstance.editDescription = workflow.description;
 	pageInstance.editGates = workflow.gates.map((g) => ({ ...g, dependsOn: [...g.dependsOn], verify: g.verify ? g.verify.map(v => ({ ...v })) : undefined, metadata: g.metadata ? { ...g.metadata } : undefined }));
 	pageInstance.saving = false;
+	pageInstance.editRevision = 0;
 	pageInstance.expandedGateIndices = new Set();
 	pageInstance.expandedVStepKeys = new Set();
 	saveAttempted = false;
@@ -309,6 +315,7 @@ function showNewEdit(): void {
 	pageInstance.editDescription = "";
 	pageInstance.editGates = [];
 	pageInstance.saving = false;
+	pageInstance.editRevision = 0;
 	pageInstance.expandedGateIndices = new Set();
 	pageInstance.expandedVStepKeys = new Set();
 	saveAttempted = false;
@@ -548,6 +555,7 @@ async function handleSave(): Promise<void> {
 		return;
 	}
 
+	const submittedRevision = pageInstance.editRevision;
 	pageInstance.saving = true;
 	renderApp();
 
@@ -580,8 +588,20 @@ async function handleSave(): Promise<void> {
 		if (ok) {
 			workflows = await fetchWorkflowsScoped();
 			const updated = workflows.find((w) => w.id === pageInstance.selectedWorkflow!.id);
-			if (updated) showEdit(updated);
-			else showList();
+			if (updated && pageInstance.editRevision === submittedRevision) {
+				showEdit(updated);
+			} else if (updated) {
+				// The request persisted its submission snapshot, but the user kept
+				// editing while it was in flight. Keep that newer draft instead of
+				// replacing it with the response and silently losing those edits.
+				pageInstance.selectedWorkflow = updated;
+				pageInstance.saving = false;
+				saveAttempted = false;
+				saveBlockedReason = null;
+				renderApp();
+			} else {
+				showList();
+			}
 			return;
 		}
 	}
@@ -651,6 +671,7 @@ function updateGateField(inst: EditorInstance, index: number, field: string, val
 
 // Build the current draft and notify the controller (if any).
 function notifyControlledChange(inst: EditorInstance): void {
+	inst.editRevision++;
 	if (!inst.controller) return;
 	const draft: Workflow = {
 		id: inst.editId,
@@ -921,7 +942,11 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 		nextGates[gateIdx] = nextGate;
 		inst.editGates = nextGates;
 		notifyControlledChange(inst);
-		if (rerender || saveAttempted) renderApp();
+		// Never replace an active form control merely because validation has
+		// already run. Browsers emit transient empty input values while replacing
+		// a number, and a rerender here can close Advanced before the final value
+		// arrives. Structural edits explicitly request their own rerender.
+		if (rerender) renderApp();
 	};
 
 	const stepType = step.type || "command";
@@ -1376,6 +1401,7 @@ function seedEmbedInstance(
 		verify: g.verify ? g.verify.map((v) => ({ ...v })) : undefined,
 		metadata: g.metadata ? { ...g.metadata } : undefined,
 	}));
+	inst.editRevision = 0;
 	inst.expandedGateIndices = expandAll
 		? new Set<number>(inst.editGates.map((_, i) => i))
 		: new Set();
