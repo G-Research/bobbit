@@ -3,15 +3,24 @@
  * used by test:e2e:v2 and tests2/browser-global-setup.ts: changed build inputs
  * must change the key, and validation must fail closed on a missing/stale
  * manifest or missing build artifacts so a stale dist can never be silently
- * tested. Modeled on tests2/core/server-prebundle-cache.test.ts; uses a temp-dir
- * fixture and the pure functions only — never runs a real build.
+ * tested. Modeled on tests2/core/server-prebundle-cache.test.ts; uses an owned
+ * temp fixture and real child processes with a synthetic build — never npm.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, it } from "vitest";
-import { computeDistBuildKey, validateDistBuild } from "../../scripts/testing-v2/ensure-dist.mjs";
+import type { ChildProcess, SpawnOptions } from "node:child_process";
+import {
+	computeDistBuildKey,
+	distBuildLockPath,
+	validateDistBuild,
+} from "../../scripts/testing-v2/ensure-dist.mjs";
+
+type NativeSpawn = typeof import("node:child_process").spawn;
+type SpawnGuardState = { originals?: { spawn?: NativeSpawn } };
+const SPAWN_GUARD_STATE = Symbol.for("bobbit.tests2.tier1-spawn-guard-state");
 
 const BASE_FILES: Record<string, string> = {
 	"src/server/cli.ts": "export const cli = 1;\n",
@@ -48,6 +57,101 @@ function resetFakeRepo(root: string): void {
 	writeFakeRepo(root);
 }
 
+const DIST_WORKER_SOURCE = String.raw`
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { ensureDistBuild } from ${JSON.stringify(new URL("../../scripts/testing-v2/ensure-dist.mjs", import.meta.url).href)};
+
+const [repoRoot, mode, reportPath, callerId] = process.argv.slice(2);
+const marker = (name) => join(repoRoot, name);
+const report = (value) => writeFileSync(reportPath, JSON.stringify(value));
+const waitForRelease = () => {
+	const deadline = Date.now() + 5_000;
+	while (!existsSync(marker("allow-build-finish"))) {
+		if (Date.now() >= deadline) throw new Error("test release signal was not published");
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+	}
+};
+try {
+	writeFileSync(marker("caller-" + callerId + ".started"), "started");
+	const result = ensureDistBuild({
+		repoRoot,
+		lockStaleMs: 1,
+		lockWaitMs: 5_000,
+		lockPollMs: 5,
+		beforeAcquireLock: () => writeFileSync(marker("caller-" + callerId + ".missed"), "missed"),
+		runBuild: () => {
+			if (mode === "fail") {
+				appendFileSync(marker("build-count"), "failed\n");
+				throw new Error("intentional build failure");
+			}
+			appendFileSync(marker("build-count"), mode + "\n");
+			if (mode === "slow") {
+				writeFileSync(marker("build-started"), "started");
+				waitForRelease();
+			}
+			mkdirSync(join(repoRoot, "dist", "server"), { recursive: true });
+			mkdirSync(join(repoRoot, "dist", "ui"), { recursive: true });
+			writeFileSync(join(repoRoot, "dist", "server", "cli.js"), "// cli\n");
+			writeFileSync(join(repoRoot, "dist", "ui", "index.html"), "<html></html>\n");
+		},
+	});
+	report({ ok: true, result });
+} catch (error) {
+	report({ ok: false, message: error instanceof Error ? error.message : String(error) });
+}
+`;
+
+function nativeSpawn(): NativeSpawn {
+	const state = (process as NodeJS.Process & { [SPAWN_GUARD_STATE]?: SpawnGuardState })[SPAWN_GUARD_STATE];
+	const spawn = state?.originals?.spawn;
+	if (!spawn) throw new Error("ensure-dist multi-process probe requires the tier-1 spawn guard's preserved native spawn");
+	return spawn;
+}
+
+function waitForFile(file: string, timeoutMs = 5_000): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const deadline = Date.now() + timeoutMs;
+		const check = () => {
+			if (existsSync(file)) return resolve();
+			if (Date.now() >= deadline) return reject(new Error(`timed out waiting for ${file}`));
+			setTimeout(check, 5);
+		};
+		check();
+	});
+}
+
+function runDistWorker(
+	workerFile: string,
+	root: string,
+	mode: string,
+	callerId: string,
+): Promise<{ stdout: string; stderr: string; report: Record<string, unknown> }> {
+	const reportPath = join(root, `report-${callerId}.json`);
+	return new Promise((resolve, reject) => {
+		let stdout = "";
+		let stderr = "";
+		const options: SpawnOptions = { cwd: root, stdio: ["ignore", "pipe", "pipe"] };
+		const child: ChildProcess = nativeSpawn()(process.execPath, [workerFile, root, mode, reportPath, callerId], options);
+		child.stdout?.on("data", chunk => { stdout += chunk.toString(); });
+		child.stderr?.on("data", chunk => { stderr += chunk.toString(); });
+		child.once("error", reject);
+		child.once("close", code => {
+			if (code !== 0) return reject(new Error(`dist worker ${callerId} exited ${code}: ${stderr}`));
+			try {
+				resolve({ stdout, stderr, report: JSON.parse(requireFile(reportPath)) as Record<string, unknown> });
+			} catch (error) {
+				reject(error);
+			}
+		});
+	});
+}
+
+function requireFile(file: string): string {
+	if (!existsSync(file)) throw new Error(`worker did not publish report: ${file}`);
+	return readFileSync(file, "utf8");
+}
+
 /** Well-formed dist fixture: artifacts + manifest matching `key`. */
 function writeDistFixture(root: string, key: string): void {
 	writeRepoFile(root, "dist/server/cli.js", "#!/usr/bin/env node\n// cli\n");
@@ -57,11 +161,14 @@ function writeDistFixture(root: string, key: string): void {
 
 let workspace: string;
 let repoRoot: string;
+let workerFile: string;
 let key: string;
 
 beforeAll(() => {
 	workspace = mkdtempSync(join(tmpdir(), "bobbit-ensure-dist-"));
 	repoRoot = join(workspace, "repo");
+	workerFile = join(workspace, "ensure-dist-worker.mjs");
+	writeFileSync(workerFile, DIST_WORKER_SOURCE);
 	writeFakeRepo(repoRoot);
 	key = computeDistBuildKey(repoRoot);
 });
@@ -147,5 +254,78 @@ describe.sequential("dist build validation (fail-closed)", () => {
 		assert.equal(validateDistBuild(repoRoot, key), false, "missing dist/ui/index.html must not validate");
 
 		rmSync(join(repoRoot, "dist"), { recursive: true, force: true });
+	});
+});
+
+function resetLockFixture(root = repoRoot): void {
+	rmSync(join(root, "dist"), { recursive: true, force: true });
+	rmSync(join(root, ".profiles"), { recursive: true, force: true });
+	for (const name of [
+		"allow-build-finish", "build-started", "build-count",
+		"caller-leader.started", "caller-leader.missed", "caller-waiter.started", "caller-waiter.missed",
+		"report-leader.json", "report-waiter.json", "report-failed.json", "report-repaired.json", "report-stale.json",
+	]) {
+		rmSync(join(root, name), { force: true });
+	}
+	writeFakeRepo(root);
+}
+
+function buildCount(root = repoRoot): string[] {
+	return readFileSync(join(root, "build-count"), "utf8").trim().split("\n").filter(Boolean);
+}
+
+describe.sequential("dist build worktree lock", () => {
+	it("is scoped to one worktree rather than a machine-wide lock", () => {
+		const otherWorktree = join(workspace, "other-worktree");
+		writeFakeRepo(otherWorktree);
+		assert.notEqual(distBuildLockPath(repoRoot), distBuildLockPath(otherWorktree));
+	});
+
+	it("runs exactly one real multi-process build and makes the waiter consume its manifest", async () => {
+		resetLockFixture();
+		const leader = runDistWorker(workerFile, repoRoot, "slow", "leader");
+		await waitForFile(join(repoRoot, "build-started"));
+
+		const waiter = runDistWorker(workerFile, repoRoot, "normal", "waiter");
+		// The waiter has already observed the cache miss before the owner publishes
+		// the manifest. Releasing now pins the required revalidation-inside-lock path.
+		await waitForFile(join(repoRoot, "caller-waiter.missed"));
+		writeFileSync(join(repoRoot, "allow-build-finish"), "release");
+
+		const [leaderResult, waiterResult] = await Promise.all([leader, waiter]);
+		assert.deepEqual(buildCount(), ["slow"], "only the lock owner may execute the build");
+		assert.equal(leaderResult.report.ok, true);
+		assert.equal(waiterResult.report.ok, true);
+		assert.deepEqual(
+			[leaderResult.report.result, waiterResult.report.result]
+				.map(result => (result as { cacheHit: boolean }).cacheHit)
+				.sort(),
+			[false, true],
+			"one caller builds and the contending caller uses the published manifest",
+		);
+		assert.match(waiterResult.stdout, /cache hit after lock/, "waiter must revalidate only after acquiring the mutex");
+	});
+
+	it("releases a failed build owner and recovers a bounded stale owner", async () => {
+		resetLockFixture();
+		const failed = await runDistWorker(workerFile, repoRoot, "fail", "failed");
+		assert.equal(failed.report.ok, false);
+		assert.match(String(failed.report.message), /intentional build failure/);
+
+		const repaired = await runDistWorker(workerFile, repoRoot, "normal", "repaired");
+		assert.equal(repaired.report.ok, true, "a failed builder must release its lock for the next coordinator");
+		assert.deepEqual(buildCount(), ["failed", "normal"]);
+
+		resetLockFixture();
+		const staleLock = distBuildLockPath(repoRoot);
+		mkdirSync(dirname(staleLock), { recursive: true });
+		writeFileSync(staleLock, `${JSON.stringify({ pid: 0, token: "dead-owner" })}\n`);
+		const old = new Date(Date.now() - 100);
+		utimesSync(staleLock, old, old);
+
+		const recovered = await runDistWorker(workerFile, repoRoot, "normal", "stale");
+		assert.equal(recovered.report.ok, true, "a dead stale owner must be reclaimed without manual cleanup");
+		assert.deepEqual(buildCount(), ["normal"]);
+		assert.equal(existsSync(staleLock), false, "the replacement owner must release the recovered lock");
 	});
 });
