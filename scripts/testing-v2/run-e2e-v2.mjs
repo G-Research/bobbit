@@ -51,6 +51,7 @@ import { coordinatorTempDirectory, createE2ERunPaths, createIsolatedE2EEnvironme
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
+const PERFORMANCE_REPORT_DIR = join(REPO_ROOT, ".profiles", "testing-v2", "samples");
 
 /**
  * Give the top-level E2E coordinator its own environment before it starts any
@@ -77,11 +78,38 @@ export function createE2EV2CoordinatorEnvironment(paths, inheritedEnv = process.
 
 function cleanup(root) {
 	try {
-		rmSync(root, { recursive: true, force: true });
+		// Windows can briefly retain Playwright output handles after its child
+		// exits. Keep retries bounded while tolerating transient EPERM/ENOTEMPTY.
+		rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
 		return true;
 	} catch {
 		return false;
 	}
+}
+
+/** Copy a fully prepared environment without resurrecting ambient host values. */
+export function composeE2EChildEnvironment(environment, additions = {}) {
+	return { ...environment, ...additions };
+}
+
+/** Remove coordinator cache settings before invoking the nested legacy runner. */
+export function createNestedE2EEnvironment(coordinatorEnv) {
+	const nestedEnv = { ...coordinatorEnv };
+	for (const key of [
+		"PWTEST_CACHE_DIR",
+		"BOBBIT_E2E_PWTEST_CACHE_ROOT",
+		"BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT",
+		"BOBBIT_E2E_PWTEST_CACHE_DIR",
+		"BOBBIT_E2E_PWTEST_CACHE_OWNED",
+		"BOBBIT_PWTEST_CACHE_ROOT",
+		"BOBBIT_E2E_V8CACHE_ROOT",
+	]) delete nestedEnv[key];
+	return nestedEnv;
+}
+
+/** Persist the default report outside the disposable run root, uniquely per run. */
+export function defaultPerformanceReportPath(paths) {
+	return join(PERFORMANCE_REPORT_DIR, `${paths.runId}-e2e-v2.json`);
 }
 
 function parseArgs(argv) {
@@ -181,7 +209,9 @@ function run(command, args, { env = {}, label, shell, captureOutputDir } = {}) {
 
 		const child = spawn(command, args, {
 			cwd: REPO_ROOT,
-			env: { ...process.env, ...env },
+			// `env` is already built from the coordinator's sanitized environment.
+			// Re-merging process.env here would restore deleted credentials/cache roots.
+			env: composeE2EChildEnvironment(env),
 			stdio: capturedOutput ? ["inherit", "pipe", "pipe"] : "inherit",
 			// Default: shell on Windows (needed for npm.cmd/npx.cmd). Callers that
 			// spawn an absolute exe with spaces (e.g. process.execPath under
@@ -274,7 +304,7 @@ async function runGroupA(specs, coordinatorEnv) {
 	const nodeConc = process.env.E2E_V2_NODE_CONCURRENCY || "2";
 	const args = ["--test", "--test-force-exit", `--test-concurrency=${nodeConc}`, ...specs];
 	return run(process.platform === "win32" ? "npx.cmd" : "npx", ["tsx", ...args], {
-		env: { ...coordinatorEnv, ...EXTERNAL_FREE_ENV, NODE_ENV: "test" },
+		env: composeE2EChildEnvironment(coordinatorEnv, { ...EXTERNAL_FREE_ENV, NODE_ENV: "test" }),
 		label: "A/node-relocate",
 	});
 }
@@ -284,22 +314,14 @@ async function runGroupB(specs, coordinatorEnv) {
 	// The legacy wrapper must allocate its own nested Playwright cache rather
 	// than inheriting this coordinator's cache settings. It still inherits the
 	// owned temp directory, so its `createE2ERunPaths()` child is contained here.
-	const nestedEnv = { ...coordinatorEnv };
-	for (const key of [
-		"PWTEST_CACHE_DIR",
-		"BOBBIT_E2E_PWTEST_CACHE_ROOT",
-		"BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT",
-		"BOBBIT_E2E_PWTEST_CACHE_DIR",
-		"BOBBIT_E2E_PWTEST_CACHE_OWNED",
-		"BOBBIT_E2E_V8CACHE_ROOT",
-	]) delete nestedEnv[key];
+	const nestedEnv = createNestedE2EEnvironment(coordinatorEnv);
 	// Reuse the project's playwright-e2e runner (cache isolation + external-free
 	// env baked in) at retries:3 — TEMPORARY concurrency bridge (see file header +
 	// docs/testing-strategy.md "Concurrency & budgets"; restore 0 when the higher-N
 	// server-throughput fix lands).
 	const pwWorkers = resolveE2ePlaywrightWorkers();
 	return run(npmCmd(), ["run", "test:e2e:run", "--", ...specs, `--workers=${pwWorkers}`, "--retries=3"], {
-		env: { ...nestedEnv, ...EXTERNAL_FREE_ENV },
+		env: composeE2EChildEnvironment(nestedEnv, EXTERNAL_FREE_ENV),
 		label: "B/e2e-relocate",
 	});
 }
@@ -321,7 +343,7 @@ async function runGroupC(specs, coordinatorEnv) {
 	const pre = usesLocal ? [localCli] : ["playwright"];
 	const pwWorkersC = resolveE2ePlaywrightWorkers();
 	return run(cmd, [...pre, "test", "--config", "playwright-v2.config.ts", "--project", "browser-v2-e2e", `--workers=${pwWorkersC}`], {
-		env: { ...coordinatorEnv, ...EXTERNAL_FREE_ENV },
+		env: composeE2EChildEnvironment(coordinatorEnv, EXTERNAL_FREE_ENV),
 		label: "C/adapter-browser",
 		// node.exe path may contain spaces (C:\Program Files\nodejs); spawn it
 		// directly without a shell so the path isn't word-split.
@@ -339,12 +361,11 @@ async function runGroupD(specs, { captureOutputDir, coordinatorEnv } = {}) {
 		"--project", "v2-e2e-vitest",
 		"--silent=passed-only",
 	], {
-		env: {
-			...coordinatorEnv,
+		env: composeE2EChildEnvironment(coordinatorEnv, {
 			...EXTERNAL_FREE_ENV,
 			BOBBIT_V2_E2E_VITEST: "1",
 			VITEST_MAX_WORKERS: "1",
-		},
+		}),
 		label: "D/vitest-real-fidelity",
 		shell: false,
 		captureOutputDir,
@@ -415,9 +436,8 @@ async function main() {
 		}
 	}
 
-	const reportDir = join(paths.root, "reports");
-	mkdirSync(reportDir, { recursive: true });
-	const samplePath = join(reportDir, "e2e-v2.json");
+	const samplePath = defaultPerformanceReportPath(paths);
+	mkdirSync(dirname(samplePath), { recursive: true });
 	const report = {
 		scope: "e2e-v2",
 		cpuMin: +(sample.cpuMs / 60000).toFixed(3),

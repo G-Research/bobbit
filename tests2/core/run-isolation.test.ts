@@ -31,7 +31,12 @@ import {
 	resolveChildTmpdir,
 } from "../../scripts/run-playwright-e2e.mjs";
 import { createBrowserRunEnvironment, createBrowserRunPaths } from "../../scripts/testing-v2/run-browser-v2.mjs";
-import { createE2EV2CoordinatorEnvironment } from "../../scripts/testing-v2/run-e2e-v2.mjs";
+import {
+	composeE2EChildEnvironment,
+	createE2EV2CoordinatorEnvironment,
+	createNestedE2EEnvironment,
+	defaultPerformanceReportPath,
+} from "../../scripts/testing-v2/run-e2e-v2.mjs";
 import { currentRunId, ownedE2EVolumeNames } from "../../tests/e2e/e2e-teardown.js";
 import { packedConsumerTempPrefix } from "../../scripts/release-packed-consumer-audit.mjs";
 
@@ -218,9 +223,14 @@ describe("workflow run isolation", () => {
 				"tests/e2e/aigw-startup-refresh.spec.ts",
 			]) {
 				const source = readFileSync(file, "utf8");
-				expect(source.indexOf("process.env.BOBBIT_E2E_TMP_ROOT"), file)
-					.toBeLessThan(source.indexOf('existsSync("/.dockerenv")'));
+				const ownedRootLookup = source.indexOf("process.env.BOBBIT_E2E_TMP_ROOT");
+				const dockerLookup = source.indexOf('existsSync("/.dockerenv")');
+				expect(ownedRootLookup, `${file} must check its owned root`).toBeGreaterThanOrEqual(0);
+				expect(dockerLookup, `${file} must retain its Docker fallback`).toBeGreaterThanOrEqual(0);
+				expect(ownedRootLookup, file).toBeLessThan(dockerLookup);
 			}
+			expect(defaultPerformanceReportPath(e2e)).toContain(`${e2e.runId}-e2e-v2.json`);
+			expect(defaultPerformanceReportPath(e2e)).not.toContain(e2e.root);
 
 			// Each coordinator removes only its root. A browser completion cannot
 			// remove the still-running E2E command's dist-import-lock parent.
@@ -230,6 +240,47 @@ describe("workflow run isolation", () => {
 			if (browserRoot) rmSync(browserRoot, { recursive: true, force: true });
 			if (e2eRoot) rmSync(e2eRoot, { recursive: true, force: true });
 			rmSync(gateRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("passes only sanitized coordinator environments to every E2E child group", () => {
+		const temp = mkdtempSync(join(tmpdir(), "e2e-child-environment-"));
+		try {
+			const paths = createE2ERunPaths(temp);
+			const coordinator = createE2EV2CoordinatorEnvironment(paths, {
+				...process.env,
+				ANTHROPIC_API_KEY: "host-anthropic-secret",
+				OPENAI_API_KEY: "host-openai-secret",
+				BOBBIT_HOST_TOKEN: "host-bobbit-secret",
+				PWTEST_CACHE_DIR: join(temp, "shared-playwright-cache"),
+				BOBBIT_E2E_PWTEST_CACHE_ROOT: join(temp, "shared-cache-root"),
+				BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT: join(temp, "shared-run-cache-root"),
+				BOBBIT_E2E_PWTEST_CACHE_DIR: join(temp, "shared-cache-dir"),
+				BOBBIT_E2E_PWTEST_CACHE_OWNED: "1",
+				BOBBIT_PWTEST_CACHE_ROOT: join(temp, "shared-legacy-cache-root"),
+				BOBBIT_E2E_V8CACHE_ROOT: join(temp, "shared-v8-cache"),
+			});
+			const groupA = composeE2EChildEnvironment(coordinator, { BOBBIT_TEST_NO_EXTERNAL: "1" });
+			const groupC = composeE2EChildEnvironment(coordinator, { BOBBIT_TEST_NO_EXTERNAL: "1" });
+			const groupD = composeE2EChildEnvironment(coordinator, { BOBBIT_V2_E2E_VITEST: "1" });
+			const groupB = composeE2EChildEnvironment(createNestedE2EEnvironment(coordinator), { BOBBIT_TEST_NO_EXTERNAL: "1" });
+
+			for (const child of [groupA, groupB, groupC, groupD]) {
+				expect(child.ANTHROPIC_API_KEY).toBeUndefined();
+				expect(child.OPENAI_API_KEY).toBeUndefined();
+				expect(child.BOBBIT_HOST_TOKEN).toBeUndefined();
+			}
+			for (const cacheKey of [
+				"PWTEST_CACHE_DIR",
+				"BOBBIT_E2E_PWTEST_CACHE_ROOT",
+				"BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT",
+				"BOBBIT_E2E_PWTEST_CACHE_DIR",
+				"BOBBIT_E2E_PWTEST_CACHE_OWNED",
+				"BOBBIT_PWTEST_CACHE_ROOT",
+				"BOBBIT_E2E_V8CACHE_ROOT",
+			]) expect(groupB[cacheKey], cacheKey).toBeUndefined();
+		} finally {
+			rmSync(temp, { recursive: true, force: true });
 		}
 	});
 

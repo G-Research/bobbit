@@ -79,7 +79,9 @@ function run(command, args, env) {
 
 function cleanup(root) {
 	try {
-		rmSync(root, { recursive: true, force: true });
+		// Windows can briefly retain Playwright output handles after its child
+		// exits. Keep retries bounded while tolerating transient EPERM/ENOTEMPTY.
+		rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
 		return true;
 	} catch {
 		return false;
