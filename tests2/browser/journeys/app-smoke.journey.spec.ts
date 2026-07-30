@@ -357,8 +357,12 @@ test.describe("Journey: Open in New Window", () => {
 			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 			const row = page.locator(`[data-session-id="${sessionId}"]`).first();
 			await expect(row).toBeVisible({ timeout: 10_000 });
-			// Session deep links use the hash form (absoluteHashUrl): origin+pathname+search+#/session/<id>.
-			const deepLink = await page.evaluate((id) => `${location.origin}${location.pathname}${location.search}#/session/${id}`, sessionId);
+			// New windows use the reload-safe path form below the runtime mount;
+			// the SPA canonicalizes it to the hash route after loading.
+			const deepLink = await page.evaluate((id) => {
+				const mount = String((window as any).__BOBBIT_BASE_PATH__ ?? "");
+				return `${location.origin}${mount}/session/${id}`;
+			}, sessionId);
 			// Capture window.open (stub applied right before the action so a render
 			// pass cannot restore the native impl between hover and click).
 			await page.evaluate(() => {
