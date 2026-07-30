@@ -19,6 +19,7 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createManualClock } from "../harness/clock.js";
 
 const TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "verif-treekill-test-"));
 fs.mkdirSync(path.join(TEST_DIR, "state"), { recursive: true });
@@ -96,6 +97,30 @@ function createUnverifiedTimedOutRunner() {
 				child.emit("exit", null, "SIGTERM");
 				child.emit("close", null, "SIGTERM");
 			});
+			return tracked as any;
+		},
+	};
+}
+
+/** Windows root exits successfully while an untracked descendant retains stdio. */
+function createWindowsRootExitWithOpenDescendantRunner() {
+	return {
+		nonDurable: true,
+		spawn: () => {
+			const stdout = Object.assign(new EventEmitter(), { destroy() {} });
+			const stderr = Object.assign(new EventEmitter(), { destroy() {} });
+			const child = Object.assign(new EventEmitter(), { pid: 910_004, stdout, stderr });
+			const tracked = {
+				child,
+				killed: () => false,
+				timedOut: () => false,
+				markSurvival: () => {},
+				killTree: () => {},
+				// The root has crossed the PID-reuse boundary, so no job/tree
+				// completion is provable and a later taskkill would be unsafe.
+				waitForTreeExit: async () => false,
+			};
+			queueMicrotask(() => child.emit("exit", 0, null));
 			return tracked as any;
 		},
 	};
@@ -191,6 +216,25 @@ describe("runCommandStep tree-kill", () => {
 		expect(result.passed).toBe(false);
 		expect(result.output).toContain("subprocess tree cleanup could not be verified");
 		expect(result.output).not.toContain("killed subprocess tree");
+	});
+
+	it("fails closed when a Windows command exits zero while a descendant keeps stdio open", async () => {
+		const commandLifecycleClock = createManualClock(0);
+		const harness = makeHarness({
+			commandStepRunner: createWindowsRootExitWithOpenDescendantRunner(),
+			commandLifecycleClock,
+			platform: "win32",
+		});
+		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-windows-root-exit-"));
+		const step = (harness as any).runCommandStep("true", tmp, 60, false) as Promise<{ passed: boolean; output: string }>;
+
+		// Drive the bounded exit-without-close grace without a wall-clock sleep.
+		await Promise.resolve();
+		commandLifecycleClock.advance(60_000);
+		const result = await step;
+
+		expect(result.passed).toBe(false);
+		expect(result.output).toContain("subprocess tree completion could not be verified");
 	});
 
 	it("cancellation kills the tracked command and emits output plus cancelled marker", async () => {

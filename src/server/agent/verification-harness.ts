@@ -2517,6 +2517,8 @@ export class VerificationHarness {
 	/** Executor for verification command STEPS (default = real durable spawn). */
 	private readonly commandStepRunner: VerificationCommandRunner;
 	private readonly clock: Clock;
+	/** Real by default; injectable only to drive exit-without-close regressions deterministically. */
+	private readonly commandLifecycleClock: Clock;
 	/** Injectable only for deterministic lifecycle tests; production uses the host platform. */
 	private readonly platform: NodeJS.Platform;
 	private readonly skipLlmReview: boolean;
@@ -2533,11 +2535,12 @@ export class VerificationHarness {
 		private projectConfigStore?: ProjectConfigStore,
 		projectContextManager?: ProjectContextManager,
 		configCascade?: import("./config-cascade.js").ConfigCascade,
-		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; platform?: NodeJS.Platform; skipLlmReview?: boolean } = {},
+		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; commandLifecycleClock?: Clock; platform?: NodeJS.Platform; skipLlmReview?: boolean } = {},
 	) {
 		this.commandRunner = deps.commandRunner ?? realCommandRunner;
 		this.commandStepRunner = deps.commandStepRunner ?? realVerificationCommandRunner;
 		this.clock = deps.clock ?? realClock;
+		this.commandLifecycleClock = deps.commandLifecycleClock ?? realClock;
 		this.platform = deps.platform ?? process.platform;
 		this.skipLlmReview = !!deps.skipLlmReview;
 		this.configCascade = configCascade;
@@ -5577,13 +5580,16 @@ export class VerificationHarness {
 			let exitSignal: NodeJS.Signals | null = null;
 			let closeGraceTimer: TimerHandle | undefined;
 			let exitFilePollTimer: TimerHandle | undefined;
-			// These timers are coupled to a real OS child process. Do not schedule them
-			// on the injected/manual gateway clock used by tests; if the child emits
-			// "exit" without a matching "close", virtual time would never advance and
-			// verification would remain running until the outer test times out.
-			const processClock = realClock;
+			// Production always uses real time for OS child lifecycle events. A focused
+			// lifecycle test may inject a manual clock and advance this bounded grace
+			// explicitly, avoiding a wall-clock sleep for exit-without-close coverage.
+			const processClock = this.commandLifecycleClock;
 
-			const settleFromProcess = async (code: number | null, signal: NodeJS.Signals | null) => {
+			const settleFromProcess = async (
+				code: number | null,
+				signal: NodeJS.Signals | null,
+				verifyWindowsTreeCompletion = false,
+			) => {
 				if (settled || settleStarted) return;
 				settleStarted = true;
 				if (closeGraceTimer) processClock.clearTimeout(closeGraceTimer);
@@ -5597,7 +5603,9 @@ export class VerificationHarness {
 				// its shell leader closed. The tracked runner verifies the owned
 				// process group/job; on Windows it returns false when root exit made a
 				// new taskkill unsafe, or when taskkill itself failed.
-				const treeCleanupVerified = !(didTimeOut || didCancel)
+				const treeCompletionMustBeVerified = didTimeOut || didCancel
+					|| (verifyWindowsTreeCompletion && this.platform === "win32");
+				const treeCleanupVerified = !treeCompletionMustBeVerified
 					|| await tracked!.waitForTreeExit();
 				settled = true;
 
@@ -5632,6 +5640,11 @@ export class VerificationHarness {
 					resolve(withDiagnostics({ passed: false, output: combined }));
 					return;
 				}
+				if (treeCompletionMustBeVerified && !treeCleanupVerified) {
+					const marker = "[step command exited but subprocess tree completion could not be verified]";
+					resolve(withDiagnostics({ passed: false, output: tail ? `${tail}\n${marker}` : marker }));
+					return;
+				}
 				if (expectFailure) {
 					resolve(withDiagnostics(matchExpectFailure(code, tail, errorPattern)));
 					return;
@@ -5657,9 +5670,9 @@ export class VerificationHarness {
 					} catch {
 						return;
 					}
-					// The child may have emitted `exit` before this poll runs. Delegate to
-					// the tracked owner so Windows refuses any post-exit PID action.
-					try { tracked!.killTree("SIGKILL"); } catch { /* best-effort */ }
+					// The exit file is the wrapper's normal completion record. Do not send
+					// a post-completion numeric-PID/PGID signal here: the root may already
+					// have exited, making that identity unsafe to target.
 					void settleFromProcess(code, null);
 				}, 100);
 				exitFilePollTimer.unref?.();
@@ -5677,7 +5690,7 @@ export class VerificationHarness {
 					// unblocks settlement without risking a late numeric-PID kill.
 					try { child.stdout?.destroy(); } catch { /* ignore */ }
 					try { child.stderr?.destroy(); } catch { /* ignore */ }
-					void settleFromProcess(exitCode, exitSignal);
+					void settleFromProcess(exitCode, exitSignal, true);
 				}, COMMAND_EXIT_CLOSE_GRACE_MS);
 				closeGraceTimer.unref?.();
 			});

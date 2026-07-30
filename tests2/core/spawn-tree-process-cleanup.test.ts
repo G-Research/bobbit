@@ -10,9 +10,10 @@ type NativeSpawn = typeof import("node:child_process").spawn;
  * The tier-1 spawn guard intentionally fences ordinary test subprocesses. This
  * test is the narrow process-tree exception: retrieve its preserved native
  * spawn and execute the probe in a separate Node process, where spawn-tree is
- * unguarded. The probe's grandchild has a finite safety lifetime. POSIX reaps
- * it on assertion failure; Windows deliberately does not retarget it after the
- * root exits, so its finite lifetime prevents this regression probe leaking.
+ * unguarded. The probe's grandchild has a finite safety lifetime. After a root
+ * identity boundary both POSIX and Windows deliberately fail closed rather than
+ * retargeting a recycled numeric identity, so the finite lifetime prevents this
+ * regression probe leaking.
  */
 type GuardState = { originals?: { spawn?: NativeSpawn } };
 const SPAWN_GUARD_STATE = Symbol.for("bobbit.tests2.tier1-spawn-guard-state");
@@ -52,16 +53,19 @@ if (isWindows) {
 } else {
   const grandchildPid = Number(fs.readFileSync(marker, "utf8"));
   assert.ok(Number.isSafeInteger(grandchildPid) && grandchildPid > 0, "grandchild PID should be valid");
+  if (tracked.child.exitCode === null && tracked.child.signalCode === null) {
+    await new Promise(resolve => tracked.child.once("exit", resolve));
+  }
   const exited = await tracked.waitForTreeExit(1500);
   const alive = (() => { try { process.kill(grandchildPid, 0); return true; } catch (err) { return err?.code === "EPERM"; } })();
   if (alive) {
-    // This PID came from the still-owned POSIX probe group, so emergency
-    // cleanup remains targeted even if the assertion below catches a regression.
+    // The probe owns this fresh PID directly and its finite lifetime is an
+    // additional fallback. The production helper must not infer that a later
+    // process-group number is still ours after the root exit boundary.
     try { process.kill(grandchildPid, "SIGKILL"); } catch {}
   }
-  assert.equal(exited, true, "owned POSIX process group should exit within the bounded cleanup window");
-  assert.equal(alive, false, "SIGTERM-ignoring grandchild must be reaped by the owned-tree kill");
-  console.log("posix-process-tree-cleanup-ok");
+  assert.equal(exited, false, "root exit before descendant stdio closure must fail closed rather than retargeting a PGID");
+  console.log("posix-root-exit-boundary-ok");
 }
 `;
 
@@ -101,7 +105,7 @@ describe("spawnTracked timeout cleanup", () => {
 	it("enforces the native process-tree lifecycle contract after its shell leader exits", async () => {
 		const result = await runProbe();
 		expect(result.code, result.stderr).toBe(0);
-		expect(result.stdout).toContain(process.platform === "win32" ? "windows-root-exit-boundary-ok" : "posix-process-tree-cleanup-ok");
+		expect(result.stdout).toContain(process.platform === "win32" ? "windows-root-exit-boundary-ok" : "posix-root-exit-boundary-ok");
 	});
 
 	it("Windows treats root exit as a PID-reuse boundary, even before inherited stdio closes", async () => {
@@ -193,7 +197,7 @@ describe("spawnTracked timeout cleanup", () => {
 		}
 	});
 
-	it("POSIX drops delayed escalation after the original process group becomes empty", () => {
+	it("POSIX fails closed after root exit instead of rearming a recycled process-group id", async () => {
 		const clock = createManualClock(0);
 		const root = fakeChild(123_456);
 		const signals: Array<{ pgid: number; signal: NodeJS.Signals }> = [];
@@ -210,15 +214,36 @@ describe("spawnTracked timeout cleanup", () => {
 		tracked.killTree("SIGTERM");
 		expect(signals).toEqual([{ pgid: 123_456, signal: "SIGTERM" }]);
 
-		// The group's original descendants all exit before grace elapses. A later
-		// `true` models the kernel reusing that numeric PGID for an unrelated tree.
-		groupAlive = false;
+		// The root exits while a descendant still retains stdio. `true` after the
+		// boundary intentionally models a recycled numeric PGID: no later SIGKILL
+		// or liveness probe may treat it as this tracked tree.
 		root.emit("exit", 0, null);
-		groupAlive = true;
 		clock.advance(50);
 		tracked.killTree("SIGKILL");
 
 		expect(signals).toEqual([{ pgid: 123_456, signal: "SIGTERM" }]);
+		expect(await tracked.waitForTreeExit()).toBe(false);
+	});
+
+	it("POSIX timeout firing after root exit never signals an unrelated recycled group", async () => {
+		const clock = createManualClock(0);
+		const root = fakeChild(123_457);
+		const signals: Array<{ pgid: number; signal: NodeJS.Signals }> = [];
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "linux",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			clock,
+			timeoutMs: 50,
+			isProcessGroupAlive: () => true,
+			signalProcessGroup: (pgid, signal) => { signals.push({ pgid, signal }); },
+		});
+
+		root.emit("exit", 0, null);
+		clock.advance(50);
+
+		expect(tracked.timedOut()).toBe(true);
+		expect(signals).toEqual([]);
+		expect(await tracked.waitForTreeExit()).toBe(false);
 	});
 
 	it("Windows never starts taskkill once the tracked root has closed", () => {

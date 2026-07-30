@@ -12,9 +12,9 @@
  *   POSIX — spawn with `detached: true` so the child becomes its own process
  *           group leader (pgid === child.pid). Kill the whole tree via
  *           `process.kill(-pgid, sig)`. SIGTERM → SIGKILL escalation after a
- *           grace period (default 5s, 1s when called from cancellation). If
- *           the leader exits first while descendants remain, reap the still-
- *           owned group immediately rather than later risking PGID reuse.
+ *           grace period (default 5s, 1s when called from cancellation). Root
+ *           exit is an ownership boundary: never signal a numeric PGID after
+ *           it; report cleanup as unverified rather than risk PGID reuse.
  *   Windows — `taskkill /T /F /PID <pid>` (the `/T` flag walks the tree), but
  *           only while the root process has not emitted `exit`. Root exit is
  *           the PID-reuse boundary: no later numeric-PID action is safe.
@@ -59,17 +59,17 @@ export interface TrackedChild {
 	readonly child: ChildProcess;
 	/**
 	 * Kill the entire process tree. Idempotent.
-	 * On POSIX, SIGTERM is sent first; SIGKILL escalates after grace (or when
-	 * the leader exits while descendants still retain the owned group).
+	 * On POSIX, SIGTERM is sent first; SIGKILL escalates after grace while the
+	 * root process still witnesses the owned group. Root exit fails closed.
 	 * `graceMsOverride` shortens (or lengthens) the SIGKILL escalation
 	 * window for this kill specifically (e.g. cancellation uses 1000ms).
 	 */
 	killTree(signal?: "SIGTERM" | "SIGKILL", graceMsOverride?: number): void;
 	/**
 	 * Wait a bounded interval for a previously-requested tree kill to finish.
-	 * On POSIX this observes the owned process group, not merely the shell
-	 * leader (which can exit while a descendant ignores SIGTERM). On Windows it
-	 * waits for the scoped `taskkill /T /F` invocation to complete.
+	 * On POSIX this observes the owned process group while the root remains a
+	 * valid ownership witness; otherwise it fails closed. On Windows it waits
+	 * for the scoped `taskkill /T /F` invocation to complete.
 	 */
 	waitForTreeExit(timeoutMs?: number): Promise<boolean>;
 	killed(): boolean;
@@ -97,6 +97,11 @@ interface InternalTracked extends TrackedChild {
 	_processGroupOwnershipLost: boolean;
 	/** A terminal POSIX group signal was sent; never signal that numeric PGID again. */
 	_posixFinalSignalSent: boolean;
+	/**
+	 * The root identity boundary passed before we could establish tree completion.
+	 * The numeric POSIX PGID / Windows PID is no longer safe to probe or target.
+	 */
+	_treeCompletionUnverified: boolean;
 	_survivesShutdown: boolean;
 	_escalationTimer?: NodeJS.Timeout;
 	_timeoutTimer?: NodeJS.Timeout;
@@ -161,11 +166,16 @@ export function spawnTracked(
 		_closed: false,
 		_processGroupOwnershipLost: false,
 		_posixFinalSignalSent: false,
+		_treeCompletionUnverified: false,
 		_survivesShutdown: false,
 		killed: () => tracked._killed,
 		timedOut: () => tracked._timedOut,
 		markSurvival: () => { tracked._survivesShutdown = true; },
 		async waitForTreeExit(timeoutMs?: number): Promise<boolean> {
+			// Once the root's exit event fired without completion already observed,
+			// neither a POSIX PGID nor a Windows PID remains an owned identity. Do not
+			// turn a later numeric lookup into evidence for a recycled process tree.
+			if (tracked._treeCompletionUnverified) return false;
 			const pid = tracked._pid;
 			if (pid == null) return true;
 			const timeout = Math.max(0, timeoutMs ?? killGraceMs + TREE_EXIT_SETTLE_MS);
@@ -182,11 +192,17 @@ export function spawnTracked(
 				]);
 			}
 
-			// A terminal group signal is asynchronous. Do not report the tree gone
-			// merely because SIGKILL was accepted: macOS can still report a just-killed
-			// descendant as live for a turn. This loop observes only; it never sends
-			// another negative-PID signal after finalization, so a recycled PGID cannot
-			// be retargeted.
+			// A final group signal may take a turn to become visible. Probe once only:
+			// an empty group proves completion; a still-live number is deliberately
+			// unverified rather than repeatedly polling into a later PGID reuse window.
+			if (tracked._posixFinalSignalSent) {
+				if (!groupIsAlive(pid)) {
+					tracked._processGroupOwnershipLost = true;
+					return true;
+				}
+				return false;
+			}
+
 			while (!tracked._processGroupOwnershipLost) {
 				if (!groupIsAlive(pid)) {
 					tracked._processGroupOwnershipLost = true;
@@ -233,6 +249,20 @@ export function spawnTracked(
 
 			const pid = tracked._pid;
 			if (pid == null || tracked._processGroupOwnershipLost || tracked._posixFinalSignalSent) return;
+			// Root exit is the POSIX ownership boundary just as it is for a Windows
+			// PID. Descendants may retain stdio after it, but their old numeric PGID
+			// can be released and recycled before an asynchronous timeout callback.
+			// Failing closed is safer than signalling an unrelated process group.
+			if (tracked._exited) {
+				tracked._killed = true;
+				tracked._treeCompletionUnverified = true;
+				tracked._processGroupOwnershipLost = true;
+				tracked._posixFinalSignalSent = true;
+				if (tracked._escalationTimer) clock.clearTimeout(tracked._escalationTimer);
+				tracked._escalationTimer = undefined;
+				registry.delete(tracked);
+				return;
+			}
 			if (!groupIsAlive(pid)) {
 				tracked._processGroupOwnershipLost = true;
 				registry.delete(tracked);
@@ -299,34 +329,26 @@ export function spawnTracked(
 		if (tracked._escalationTimer) clock.clearTimeout(tracked._escalationTimer);
 		tracked._escalationTimer = undefined;
 	};
-	const finishPosixAfterRootExit = () => {
-		const pid = tracked._pid;
-		if (pid == null || tracked._processGroupOwnershipLost || tracked._posixFinalSignalSent) return;
-		if (!groupIsAlive(pid)) {
-			tracked._processGroupOwnershipLost = true;
-			clearEscalation();
-			registry.delete(tracked);
-			return;
-		}
-		// The group is still continuously owned at the root exit boundary. Reap
-		// it now rather than retaining a delayed numeric-PGID callback that could
-		// be retargeted after every original descendant leaves the group.
-		try { signalProcessGroup(pid, "SIGKILL"); } catch { /* already dead */ }
-		// Never signal this numeric group again. waitForTreeExit still observes
-		// its disappearance so callers cannot mistake SIGKILL dispatch for reaping.
-		tracked._posixFinalSignalSent = true;
-		clearEscalation();
-		registry.delete(tracked);
-	};
 	const onExit = () => {
 		tracked._exited = true;
-		if (!isWin && tracked._killed) finishPosixAfterRootExit();
+		if (!isWin && tracked._killed) {
+			// An exit event can arrive before descendants close inherited stdio. If
+			// SIGKILL was not already dispatched while the root was alive, the leader
+			// no longer witnesses the numeric process-group identity: never re-arm a
+			// negative-PID action and fail cleanup closed. A final signal that was sent
+			// before this boundary gets exactly one non-destructive completion probe.
+			if (!tracked._posixFinalSignalSent) {
+				tracked._treeCompletionUnverified = true;
+				tracked._processGroupOwnershipLost = true;
+			}
+			clearEscalation();
+			registry.delete(tracked);
+		}
 	};
 	const onClose = () => {
 		tracked._closed = true;
 		if (tracked._timeoutTimer) clock.clearTimeout(tracked._timeoutTimer);
-		if (!isWin && tracked._killed) finishPosixAfterRootExit();
-		else if (!isWin) clearEscalation();
+		if (!isWin) clearEscalation();
 		// A taskkill already started remains joinable, but root `exit` (and,
 		// independently, full stream closure) forbids every new PID action.
 		registry.delete(tracked);
