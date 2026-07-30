@@ -2,11 +2,11 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1138,
+  "censusTotal": 1137,
   "buckets": {
     "daily": 62,
     "v2-browser": 216,
-    "v2-core": 513,
+    "v2-core": 512,
     "v2-dom": 144,
     "v2-integration": 203
   },
@@ -20,6 +20,123 @@
     "vitest-e2e": 2
   },
   "v2Native": [
+    {
+      "path": "tests2/core/base-path.test.ts",
+      "reason": "Pure base-path normalization, validation, exact segment-boundary stripping, and branded route joining coverage for root and nested gateway mounts.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/base-path-browser-boundary.test.ts",
+      "reason": "Browser URL-boundary coverage for runtime app mounts, explicit gateway bases, WebSocket resolution, authorization headers, malformed-storage recovery, and active connection ownership.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/base-path-cli.test.ts",
+      "reason": "Focused CLI coverage for flag-over-environment base-path selection, unsafe input rejection, mounted startup URLs, persisted peers, and truthful authentication banners.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/base-path-http.test.ts",
+      "reason": "Pure HTTP rewriting coverage for runtime-stamped SPA shells, prefix-aware manifests, direct preview redirects and marked base tags, plus root-mount compatibility.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/base-path-preview-contract.test.ts",
+      "reason": "Preview transport contract coverage proving persisted results remain mount-relative, browser sinks resolve once, and historical mounted URLs recover only validated internal routes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/base-path-pwa-cookie-guards.test.ts",
+      "reason": "PWA, cookie, CORS, and source-guard coverage for mount-scoped service-worker caching, duplicate signed cookies, credentialed native transports, and centralized client URL/auth ownership.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/base-path-vite-proxy.test.ts",
+      "reason": "Vite proxy and production-build coverage proving mounted gateway HTTP/WS forwarding, response rebasing, root-mounted development, and runtime-based emitted chunk URLs.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/base-path-watchdog.test.ts",
+      "reason": "Pure watchdog target coverage for flag and environment precedence, root and nested mounted health paths, unsafe input rejection, and persisted-target adoption.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/base-path-cli-startup.test.ts",
+      "reason": "Actual CLI subprocess coverage for mounted ephemeral-port startup, flag-over-environment precedence, persisted and advertised URLs, auth banner modes, and failure-before-side-effects behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/base-path-gateway.test.ts",
+      "reason": "In-process gateway coverage for nested and root HTTP routes, off-mount boundaries, SPA and manifest responses, preview redirects and bases, cookies, and accepted or rejected WebSocket upgrades.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/base-path-watchdog.test.ts",
+      "reason": "In-process watchdog integration proving mounted health probes reach the gateway, root behavior remains compatible, and persisted generations atomically replace complete targets.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/base-path-mounting.journey.spec.ts",
+      "reason": "Production Chromium journey for a nested mount covering shell assets, REST, viewer and session sockets, lazy navigation, deep-link reload, previews and popouts, and off-mount isolation.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/explicit-gateway-base-path.journey.spec.ts",
+      "reason": "Two-origin Chromium journey covering authoritative prefixed gateway URLs, same-host REST/WS/SSE/iframe/popout credentials, duplicate cookies, no double prefix, and distinct-host native-preview blocking.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
     {
       "path": "tests2/core/reviewer-read-session-policy.test.ts",
       "reason": "Resolved tool-policy coverage proving every first-party reviewer role and project override explicitly denies cross-session transcript reads through read_session.",
