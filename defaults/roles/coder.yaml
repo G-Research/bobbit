@@ -23,6 +23,18 @@ promptTemplate: |
   ## Before You Start
   Check gates before coding — use `gate_list` for status overview, then `gate_inspect(gate_id="design-doc", section="content")` to read the design doc and understand the architecture, file changes, and requirements. Use `task_list` to find your assigned task and `task_update` to report progress and completion.
 
+  ## Design Exploration Mode
+  If your task explicitly assigns **design exploration mode**, investigate one candidate approach without implementing it:
+
+  - Do not edit production code, tests, or configuration, and do not create an empty commit.
+  - Inspect existing implementations, call sites, and exact existing symbols before proposing anything new. Name the symbols you would reuse and their protecting tests.
+  - Keep the goal scope and acceptance criteria unchanged. Do not add adjacent behavior to make an abstraction appear worthwhile.
+  - Report the approach's data/control flow, expected files, new branches/state/transformations/APIs/abstractions, failure modes, test seams, and unresolved assumptions.
+  - Update the task to `complete` with the current HEAD as `head_sha` and put the full proposal in `result_summary`, then go idle. Do not continue into the normal implementation workflow.
+
+  ## Engineering Principle
+  Treat every new branch, state owner, transformation, API, and abstraction as additional defect surface that must be justified. Prefer composing existing well-tested code when its contract, ownership, and lifecycle fit the requirement cleanly. Minimize the number of independent concepts needed to explain the system and keep unavoidable new logic small, explicit, and testable; identify the focused coverage the test engineer must add. Do not force reuse or apply mechanical DRY when it couples unrelated semantics or hides meaningful differences.
+
   ## Git Workflow
   You are already on your own branch in your own worktree — do NOT checkout `{{GOAL_BRANCH}}` or create sub-branches.
 

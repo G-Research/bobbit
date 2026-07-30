@@ -172,7 +172,15 @@ Roles listed under a gate's `verify:` block (e.g. `role: architect`, `role: code
 
 The team lead is the producer for content gates: it either drafts the markdown directly and signals, or delegates artifact-writing to a `coder` / `docs-writer`, merges the resulting branch, and signals from the merged content. Every contributor role carries `gate_signal: never` in its tool-policy; only the `team-lead` role's policy permits the call. Workflow authors should therefore not staff content-producing tasks with reviewer roles, and should expect the team lead — never the reviewer named under `verify:` — to be the one calling `gate_signal`.
 
-### 3.1 The implementation gate is a Ralph loop
+### 3.1 Comparative design gates
+
+Non-trivial `design-doc` gates should compare **two independent approaches** before implementation. Give both explorations the same acceptance criteria and constraints; require one to minimize new logic by composing existing well-tested code, and require the other to use a materially different implementation approach without adding behavior. The signaled design should name exact reusable symbols and protecting tests, inventory new branches/state owners/transformations/APIs/abstractions/dependencies as defect surface, compare failure modes and test seams, and justify the smallest robust solution.
+
+Do not turn this into mechanical DRY: reuse only when contracts, ownership, and lifecycle align. A quick-fix may state that comparison is unnecessary when it changes one local behavior through an obvious established pattern and adds no public API, state owner, persistence, auth, dependency, or cross-layer flow. A bounded unmerged spike is appropriate only when one named uncertainty could change the decision; spike code is evidence, not production.
+
+The Architect verifies the comparison and rejects unexplained new logic or speculative generalization. The Spec Auditor confirms both approaches preserve the same scope so possible future reuse does not become current work.
+
+### 3.2 The implementation gate is a Ralph loop
 
 The `implementation` gate's `verify` list is the agent's loop body. When verification
 fails, the gate runner reports the failed steps to the implementing agent, which
@@ -341,12 +349,12 @@ These are the typical gate sets per workflow style. Generators MAY extend, prune
 
 > All non-quick-fix flows below include **both** a design-time gap-analysis step
 > (in `design-doc` / `issue-analysis`) and a post-implementation gap-analysis step
-> (in `implementation`, phase 2). See §3.1 — these two checks bracket the Ralph loop.
+> (in `implementation`, phase 2). See §3.2 — these two checks bracket the Ralph loop.
 
 ### 6.1 `general` — lightweight
 
 ```yaml
-- design-doc       (content; design-review + gap-analysis llm-review)
+- design-doc       (content; comparative design-review + gap-analysis llm-review)
 - implementation   (build/check/unit/e2e in phase 1; gap-analysis + code-review + bug-hunt llm-review in phase 2)  # Ralph loop
 - documentation    (llm-review)
 - ready-to-merge   (push, fast-forward, PR exists)
@@ -355,7 +363,7 @@ These are the typical gate sets per workflow style. Generators MAY extend, prune
 ### 6.2 `feature` — full design + impl + multi-review + optional QA
 
 ```yaml
-- design-doc       (content; design-review + gap-analysis llm-review)
+- design-doc       (content; comparative design-review + gap-analysis llm-review)
 - implementation   (build/check/unit/e2e, gap+code+bug-hunt+security llm-review, optional agent-qa)    # Ralph loop
 - documentation    (llm-review)
 - ready-to-merge   (push/fast-forward/PR)
@@ -432,7 +440,7 @@ workflows:
         content: true
         inject_downstream: true
         verify:
-          - { name: "Design review", type: llm-review, role: architect, prompt: "Review this design document for structure, clarity, and completeness." }
+          - { name: "Comparative design review", type: llm-review, role: architect, prompt: "For non-trivial changes, require two materially different approaches, exact well-tested reuse evidence, a defect-surface comparison, and selection of the smallest robust solution. Do not force reuse across mismatched contracts." }
 
       - id: implementation
         name: Implementation
