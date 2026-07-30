@@ -13,8 +13,9 @@ guardProcessEnv();
  * runner. Real process-tree reaping fidelity belongs to the e2e tier.
  */
 
-import { describe, it, afterAll } from "vitest";
+import { describe, expect, it, afterAll } from "vitest";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -73,6 +74,31 @@ function makeHarness(deps: Record<string, unknown> = {}, broadcasts: any[] = [])
 
 function fakeTreeCommand(): string {
 	return `node -e "console.log('PARENT_PID=910001'); console.log('CHILD_PID=910002'); setTimeout(()=>process.exit(0),300000)"`;
+}
+
+/** Deterministic cleanup-failure seam: no OS process or wall-clock race. */
+function createUnverifiedTimedOutRunner() {
+	return {
+		nonDurable: true,
+		spawn: () => {
+			const stdout = Object.assign(new EventEmitter(), { destroy() {} });
+			const stderr = Object.assign(new EventEmitter(), { destroy() {} });
+			const child = Object.assign(new EventEmitter(), { pid: 910_003, stdout, stderr });
+			const tracked = {
+				child,
+				killed: () => true,
+				timedOut: () => true,
+				markSurvival: () => {},
+				killTree: () => {},
+				waitForTreeExit: async () => false,
+			};
+			queueMicrotask(() => {
+				child.emit("exit", null, "SIGTERM");
+				child.emit("close", null, "SIGTERM");
+			});
+			return tracked as any;
+		},
+	};
 }
 
 describe("deterministic tracked child", () => {
@@ -155,6 +181,16 @@ describe("runCommandStep tree-kill", () => {
 		assert.ok(/PARENT_PID=\d+/.test(result.output), `output missing PARENT_PID: ${result.output}`);
 		assert.ok(/CHILD_PID=\d+/.test(result.output), `output missing CHILD_PID: ${result.output}`);
 		assert.strictEqual((harness as any)._trackedCommandChildren.has(`${signalId}:0`), false, "tracked child should be unregistered after timeout settles");
+	});
+
+	it("fails rather than claiming a timeout tree cleanup succeeded when verification is unavailable", async () => {
+		const harness = makeHarness({ commandStepRunner: createUnverifiedTimedOutRunner() });
+		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-unverified-cleanup-"));
+
+		const result = await (harness as any).runCommandStep("true", tmp, 60, true, undefined, "timed out") as { passed: boolean; output: string };
+		expect(result.passed).toBe(false);
+		expect(result.output).toContain("subprocess tree cleanup could not be verified");
+		expect(result.output).not.toContain("killed subprocess tree");
 	});
 
 	it("cancellation kills the tracked command and emits output plus cancelled marker", async () => {

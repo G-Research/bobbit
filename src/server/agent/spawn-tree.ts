@@ -15,8 +15,9 @@
  *           grace period (default 5s, 1s when called from cancellation). If
  *           the leader exits first while descendants remain, reap the still-
  *           owned group immediately rather than later risking PGID reuse.
- *   Windows — `taskkill /T /F /PID <pid>` (the `/T` flag walks the tree); an
- *           `exit` event retains ownership until inherited stdio fully closes.
+ *   Windows — `taskkill /T /F /PID <pid>` (the `/T` flag walks the tree), but
+ *           only while the root process has not emitted `exit`. Root exit is
+ *           the PID-reuse boundary: no later numeric-PID action is safe.
  *
  * The helper owns the timeout timer (`setTimeout`, `.unref()`'d) so a
  * long-running tracked child never holds the event loop open against a
@@ -45,8 +46,6 @@ export interface SpawnTrackedOptions {
 	isProcessGroupAlive?: (pgid: number) => boolean;
 	/** Test seam for sending a signal to the detached POSIX process group. */
 	signalProcessGroup?: (pgid: number, signal: NodeJS.Signals) => void;
-	/** Test seam for checking a Windows root PID after taskkill completes. */
-	isPidAlive?: (pid: number) => boolean;
 	/** Optional — helper owns the timer; cleared on full process closure. */
 	timeoutMs?: number;
 	/** SIGTERM → SIGKILL escalation delay (POSIX only). Default 5000ms. */
@@ -99,22 +98,12 @@ interface InternalTracked extends TrackedChild {
 	_survivesShutdown: boolean;
 	_escalationTimer?: NodeJS.Timeout;
 	_timeoutTimer?: NodeJS.Timeout;
-	/** Completes after the currently-running Windows taskkill invocation. */
-	_windowsTreeKill?: Promise<void>;
+	/** Resolves to the outcome of the one scoped Windows taskkill invocation. */
+	_windowsTreeKill?: Promise<boolean>;
 }
 
 const TREE_EXIT_POLL_MS = 25;
 const TREE_EXIT_SETTLE_MS = 1_500;
-
-function isPidAlive(pid: number): boolean {
-	if (!Number.isFinite(pid) || pid <= 0) return false;
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (err: any) {
-		return err?.code === "EPERM";
-	}
-}
 
 function isProcessGroupAlive(pgid: number): boolean {
 	if (!Number.isFinite(pgid) || pgid <= 0) return false;
@@ -150,8 +139,6 @@ export function spawnTracked(
 	const signalProcessGroup = opts.signalProcessGroup ?? ((pgid, signal) => {
 		process.kill(-pgid, signal);
 	});
-	const pidIsAlive = opts.isPidAlive ?? isPidAlive;
-
 	const child = spawnImpl(cmd, args as string[], {
 		cwd: opts.cwd,
 		env: opts.env,
@@ -182,17 +169,14 @@ export function spawnTracked(
 			const deadline = Date.now() + timeout;
 
 			if (isWin) {
-				// `exit` only means the root ended; descendants may retain stdio until
-				// `close`. Tree completion is therefore the one taskkill invocation we
-				// started while that root identity was still owned, not `pid` liveness.
-				if (tracked._windowsTreeKill) {
-					const completed = await Promise.race([
-						tracked._windowsTreeKill.then(() => true),
-						delay(timeout).then(() => false),
-					]);
-					return completed;
-				}
-				return tracked._closed && !pidIsAlive(pid);
+				// `exit` is a PID-reuse boundary. Do not probe or target that numeric
+				// PID after it: the only trustworthy cleanup result is taskkill that
+				// was started before the root exited.
+				if (!tracked._windowsTreeKill) return false;
+				return Promise.race([
+					tracked._windowsTreeKill,
+					delay(timeout).then(() => false),
+				]);
 			}
 
 			// A negative-PID action is safe only while its original process group
@@ -207,17 +191,17 @@ export function spawnTracked(
 		},
 		killTree(signal: "SIGTERM" | "SIGKILL" = "SIGTERM", graceMsOverride?: number) {
 			if (isWin) {
-				// `exit` precedes `close` when descendants retain inherited stdio. It
-				// does not surrender ownership: taskkill must still receive its one
-				// scoped tree walk before the full-close/PID-reuse boundary.
-				if (tracked._closed || tracked._windowsTreeKill) return;
+				// Unlike `close`, root `exit` is the identity boundary: Windows can
+				// reuse this PID while descendants still retain inherited stdio. Never
+				// begin a new taskkill after it, even as a best-effort fallback.
+				if (tracked._exited || tracked._closed || tracked._windowsTreeKill) return;
 				const pid = tracked._pid;
 				if (pid == null) return;
 
 				tracked._killed = true;
 				tracked._survivesShutdown = false;
-				let completeTreeKill!: () => void;
-				tracked._windowsTreeKill = new Promise<void>((resolve) => {
+				let completeTreeKill!: (succeeded: boolean) => void;
+				tracked._windowsTreeKill = new Promise<boolean>((resolve) => {
 					completeTreeKill = resolve;
 				});
 				try {
@@ -225,11 +209,16 @@ export function spawnTracked(
 						stdio: "ignore",
 						windowsHide: true,
 					});
-					const done = () => completeTreeKill();
-					tk.once("close", done);
-					tk.once("error", done);
+					let completed = false;
+					const done = (succeeded: boolean) => {
+						if (completed) return;
+						completed = true;
+						completeTreeKill(succeeded);
+					};
+					tk.once("close", (code: number | null) => done(code === 0));
+					tk.once("error", () => done(false));
 				} catch {
-					completeTreeKill();
+					completeTreeKill(false);
 				}
 				return;
 			}
@@ -320,9 +309,8 @@ export function spawnTracked(
 		if (tracked._timeoutTimer) clock.clearTimeout(tracked._timeoutTimer);
 		if (!isWin && tracked._killed) finishPosixAfterRootExit();
 		else if (!isWin) clearEscalation();
-		// Windows ownership lasts through full stream closure, not root exit.
-		// A taskkill already started remains joinable, but no new PID action is
-		// allowed after this boundary because PID reuse can retarget it.
+		// A taskkill already started remains joinable, but root `exit` (and,
+		// independently, full stream closure) forbids every new PID action.
 		registry.delete(tracked);
 	};
 	child.once("exit", onExit);
@@ -367,33 +355,9 @@ export function killTreeByPid(pid: number, signal: NodeJS.Signals = "SIGKILL"): 
 			tk.on("error", () => { /* best-effort */ });
 			tk.unref?.();
 		} catch { /* ignore */ }
-		// If the shell/root process has already exited but a descendant kept an
-		// inherited stdio handle open, taskkill by the root pid can miss it. Walk
-		// ParentProcessId as a second best-effort pass so exit-close fallback paths
-		// can reap those descendants instead of leaving them as orphaned test/verify
-		// processes. The pid is numeric and passed as an argv element (no shell).
-		try {
-			const root = Math.trunc(pid);
-			const script = `
-$ErrorActionPreference = 'SilentlyContinue'
-$seen = @{}
-function Stop-BobbitTree([int]$Id) {
-  if ($seen.ContainsKey($Id)) { return }
-  $seen[$Id] = $true
-  $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$Id")
-  if (-not $children -and (Get-Command Get-WmiObject -ErrorAction SilentlyContinue)) { $children = @(Get-WmiObject Win32_Process -Filter "ParentProcessId=$Id") }
-  foreach ($child in $children) { Stop-BobbitTree ([int]$child.ProcessId) }
-  Stop-Process -Id $Id -Force -ErrorAction SilentlyContinue
-}
-Stop-BobbitTree ${root}
-`;
-			const ps = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], {
-				stdio: "ignore",
-				windowsHide: true,
-			});
-			ps.on("error", () => { /* best-effort */ });
-			ps.unref?.();
-		} catch { /* ignore */ }
+		// Do not enumerate descendants by numeric parent PID as a fallback.
+		// Parent PIDs can be reused after a root exit, making that PowerShell/WMI
+		// walk capable of killing an unrelated process tree.
 		return;
 	}
 	// Try pgid first (matches detached spawn). If the negative-pid call

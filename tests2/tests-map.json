@@ -922,7 +922,7 @@
     },
     {
       "path": "tests2/core/spawn-tree-process-cleanup.test.ts",
-      "reason": "Real subprocess regression: timeout cleanup reaps the owned process group/job when a grandchild ignores SIGTERM after its shell leader exits.",
+      "reason": "Real subprocess regression: timeout cleanup reaps the owned process group/job when a grandchild ignores SIGTERM after its shell leader exits; deterministic Windows seams pin exit/PID-reuse and taskkill-outcome safety.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

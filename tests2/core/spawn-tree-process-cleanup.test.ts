@@ -91,14 +91,13 @@ describe("spawnTracked timeout cleanup", () => {
 		expect(result.stdout).toContain("process-tree-cleanup-ok");
 	});
 
-	it("Windows retains tree-kill ownership from root exit until inherited stdio closes", async () => {
+	it("Windows treats root exit as a PID-reuse boundary, even before inherited stdio closes", async () => {
 		const clock = createManualClock(0);
 		const root = fakeChild(2_147_483_647);
-		const taskkill = fakeChild(2_147_483_646);
 		const calls: Array<{ cmd: string; args: string[] }> = [];
 		const spawnImpl = ((cmd: string, args: string[]) => {
 			calls.push({ cmd, args });
-			return calls.length === 1 ? root : taskkill;
+			return root;
 		}) as unknown as NativeSpawn;
 		const tracked = spawnTracked("node", ["worker"], {
 			platform: "win32",
@@ -107,28 +106,20 @@ describe("spawnTracked timeout cleanup", () => {
 			timeoutMs: 50,
 		});
 
-		// Windows can emit `exit` while a descendant owns inherited stdio. That is
-		// not a PID-reuse boundary: the timeout must still start exactly one scoped
-		// taskkill before the later full `close`.
+		// `close` can lag because descendants retain inherited stdio, but after
+		// `exit` this numeric PID is no longer safe to target: Windows may reuse it.
 		root.emit("exit", 0, null);
-		expect(await tracked.waitForTreeExit(0)).toBe(false);
 		clock.advance(50);
 		expect(tracked.timedOut()).toBe(true);
-		expect(calls).toEqual([
-			{ cmd: "node", args: ["worker"] },
-			{ cmd: "taskkill", args: ["/T", "/F", "/PID", "2147483647"] },
-		]);
-
-		const completion = tracked.waitForTreeExit(1_000);
-		taskkill.emit("close", 0, null);
-		expect(await completion).toBe(true);
+		expect(await tracked.waitForTreeExit(0)).toBe(false);
+		expect(calls).toEqual([{ cmd: "node", args: ["worker"] }]);
 
 		root.emit("close", 0, null);
 		tracked.killTree();
-		expect(calls).toHaveLength(2);
+		expect(calls).toHaveLength(1);
 	});
 
-	it("Windows cleanup joins one taskkill and never retargets a closed or completed root", async () => {
+	it("Windows cleanup joins one successful pre-exit taskkill and never retargets a closed root", async () => {
 		const root = fakeChild(2_147_483_647);
 		const taskkill = fakeChild(2_147_483_646);
 		const calls: Array<{ cmd: string; args: string[] }> = [];
@@ -162,6 +153,31 @@ describe("spawnTracked timeout cleanup", () => {
 		root.emit("close", 0, null);
 		tracked.killTree();
 		expect(calls).toHaveLength(2);
+	});
+
+	it("Windows reports taskkill nonzero, error, and spawn failure as unverified cleanup", async () => {
+		for (const completion of ["nonzero", "error", "throw"] as const) {
+			const root = fakeChild(2_147_483_647);
+			const taskkill = fakeChild(2_147_483_646);
+			const calls: Array<{ cmd: string; args: string[] }> = [];
+			const spawnImpl = ((cmd: string, args: string[]) => {
+				calls.push({ cmd, args });
+				if (calls.length === 1) return root;
+				if (completion === "throw") throw new Error("taskkill unavailable");
+				return taskkill;
+			}) as unknown as NativeSpawn;
+			const tracked = spawnTracked("node", ["worker"], { platform: "win32", spawnImpl });
+
+			tracked.killTree();
+			if (completion === "nonzero") taskkill.emit("close", 1, null);
+			else if (completion === "error") taskkill.emit("error", new Error("taskkill unavailable"));
+
+			expect(await tracked.waitForTreeExit(1_000)).toBe(false);
+			expect(calls).toEqual([
+				{ cmd: "node", args: ["worker"] },
+				{ cmd: "taskkill", args: ["/T", "/F", "/PID", "2147483647"] },
+			]);
+		}
 	});
 
 	it("POSIX drops delayed escalation after the original process group becomes empty", () => {
