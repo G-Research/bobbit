@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "..");
 const cacheBootstrap = resolve(__dirname, "playwright-e2e-cache-bootstrap.cjs");
+const LEDGER_DIRNAME = "bobbit-test-v2-ledger";
 
 function canonicalDirectory(directory) {
   mkdirSync(directory, { recursive: true });
@@ -124,6 +125,23 @@ export function resolveChildTmpdir(env, platform = process.platform) {
   return directory.length > 1 && directory.endsWith("/") ? directory.slice(0, -1) : directory;
 }
 
+/**
+ * Capture the machine-global test-concurrency ledger before a coordinator
+ * redirects TMPDIR into its disposable run root. An explicit override remains
+ * available for ledger self-tests, which must never join the production pool.
+ */
+export function captureMachineGlobalLedgerDirectory(inheritedEnv = process.env, platform = process.platform) {
+  const explicit = environmentValue(inheritedEnv, "BOBBIT_V2_LEDGER_DIR", platform);
+  if (explicit) return canonicalDirectory(resolve(explicit));
+  const hasExplicitTemp = platform === "win32"
+    ? Boolean(environmentValue(inheritedEnv, "TEMP", platform) || environmentValue(inheritedEnv, "TMP", platform))
+    : Boolean(environmentValue(inheritedEnv, "TMPDIR", platform) || environmentValue(inheritedEnv, "TMP", platform) || environmentValue(inheritedEnv, "TEMP", platform));
+  // If the caller supplied no temp variables, use Node's platform-aware OS
+  // temp root rather than guessing /tmp (notably important on macOS).
+  const hostTemp = hasExplicitTemp ? resolveChildTmpdir(inheritedEnv, platform) : tmpdir();
+  return canonicalDirectory(join(hostTemp, LEDGER_DIRNAME));
+}
+
 /** Resolve the installed browser registry before HOME/APPDATA are redirected. */
 export function resolvePlaywrightBrowserRegistry(env = process.env, platform = process.platform) {
   const configuredRegistry = environmentValue(env, "PLAYWRIGHT_BROWSERS_PATH", platform);
@@ -141,6 +159,9 @@ export function resolvePlaywrightBrowserRegistry(env = process.env, platform = p
  * ensures every Playwright worker inherits one owned set of discovery roots.
  */
 export function createIsolatedE2EEnvironment(paths, inheritedEnv = process.env, platform = process.platform) {
+  // The concurrency ledger is intentionally machine-global. Capture it before
+  // replacing TMPDIR below; all other mutable test artifacts remain run-local.
+  const ledgerDirectory = captureMachineGlobalLedgerDirectory(inheritedEnv, platform);
   const env = { ...inheritedEnv };
   // Browser binaries are a Playwright runtime dependency, not Bobbit config.
   // Preserve their host registry before replacing all user discovery roots.
@@ -180,7 +201,10 @@ export function createIsolatedE2EEnvironment(paths, inheritedEnv = process.env, 
     XDG_CACHE_HOME: join(paths.xdgDir, "cache"),
   };
   for (const directory of [...Object.values(owned), paths.cacheRoot, paths.legacyTempParent]) mkdirSync(directory, { recursive: true });
-  Object.assign(env, owned, { PLAYWRIGHT_BROWSERS_PATH: browserRegistry });
+  Object.assign(env, owned, {
+    PLAYWRIGHT_BROWSERS_PATH: browserRegistry,
+    BOBBIT_V2_LEDGER_DIR: ledgerDirectory,
+  });
   if (resolveChildTmpdir(env, platform) !== paths.tempDir) {
     throw new Error("isolated E2E environment did not confine the child temp directory");
   }
