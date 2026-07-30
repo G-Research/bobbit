@@ -42,9 +42,30 @@ describe("build-unit-gate CI qualification", () => {
 		assert.deepEqual(matrix.include, [{ os: "ubuntu-latest", node: "26.x" }]);
 	});
 
-	it("rejects retry-masked qualification evidence", () => {
-		const unitGate = readWorkflow().jobs.verify.steps.find((step) => step.name === "Unit gate (first attempt)");
-		assert.ok(unitGate, "workflow must include the retry-free unit qualification step");
-		assert.equal(unitGate.run, "npm run test:unit -- --retry=0");
+	it("runs five retry-free unit-gate attempts after build and type-check", () => {
+		const steps = readWorkflow().jobs.verify.steps;
+		const buildIndex = steps.findIndex((step) => step.name === "Build");
+		const typeCheckIndex = steps.findIndex((step) => step.name === "Type-check");
+		const unitGates = steps.filter((step) => step.name?.startsWith("Unit gate (attempt "));
+		const expectedUnitGateNames = [
+			"Unit gate (attempt 1 of 5)",
+			"Unit gate (attempt 2 of 5)",
+			"Unit gate (attempt 3 of 5)",
+			"Unit gate (attempt 4 of 5)",
+			"Unit gate (attempt 5 of 5)",
+		];
+
+		assert.ok(buildIndex >= 0, "workflow must build before qualification");
+		assert.ok(typeCheckIndex > buildIndex, "workflow must type-check after building");
+		assert.equal(unitGates.length, 5, "workflow must qualify five consecutive unit-gate attempts");
+		assert.deepEqual(unitGates.map((step) => step.name), expectedUnitGateNames);
+		assert.deepEqual(
+			steps.slice(typeCheckIndex + 1, typeCheckIndex + 1 + expectedUnitGateNames.length).map((step) => step.name),
+			expectedUnitGateNames,
+			"unit qualification must start immediately after type-checking and remain consecutive",
+		);
+		for (const unitGate of unitGates) {
+			assert.equal(unitGate.run, "npm run test:unit -- --retry=0");
+		}
 	});
 });

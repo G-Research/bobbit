@@ -47,5 +47,17 @@ jobs:
       - name: Type-check
         run: npm run check
 
-      - name: Unit gate (first attempt)
+      - name: Unit gate (attempt 1 of 5)
+        run: npm run test:unit -- --retry=0
+
+      - name: Unit gate (attempt 2 of 5)
+        run: npm run test:unit -- --retry=0
+
+      - name: Unit gate (attempt 3 of 5)
+        run: npm run test:unit -- --retry=0
+
+      - name: Unit gate (attempt 4 of 5)
+        run: npm run test:unit -- --retry=0
+
+      - name: Unit gate (attempt 5 of 5)
         run: npm run test:unit -- --retry=0
