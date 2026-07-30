@@ -1323,6 +1323,159 @@ describe("executable SessionManager rehydration boundaries", () => {
 		}).toEqual(tupleB);
 	});
 
+	it("admits an empty-transcript zombie decision only after an earlier verified role replacement", async () => {
+		invalidateModelCache();
+		const raceProvider = "empty-transcript-recovery-admission";
+		const tupleA = { provider: raceProvider, id: "tuple-a", thinkingLevel: "off" as const };
+		const tupleB = { provider: raceProvider, id: "tuple-b", thinkingLevel: "off" as const };
+		const racePreferences = new PreferencesStore(
+			path.resolve("/memfs/empty-transcript-recovery-admission"),
+			createMemFs(),
+		);
+		racePreferences.set("customProviders", [{
+			id: raceProvider,
+			name: raceProvider,
+			type: "manual",
+			baseUrl: "http://127.0.0.1:9",
+			apiKey: "test-key",
+			models: [tupleA.id, tupleB.id].map((id) => ({ id, name: id })),
+		}]);
+		const role = {
+			name: "empty-transcript-replacement-role",
+			label: "Empty transcript replacement role",
+			promptTemplate: "Empty transcript replacement role",
+			accessory: "replacement-accessory",
+			model: `${tupleB.provider}/${tupleB.id}`,
+			thinkingLevel: tupleB.thinkingLevel,
+		};
+		const roleManager = {
+			getRole: vi.fn((name: string) => name === role.name ? role : undefined),
+			listRoles: vi.fn(() => [role]),
+		};
+		const ps = persisted("empty-transcript-recovery-admission", "", {
+			modelProvider: tupleA.provider,
+			modelId: tupleA.id,
+			effectiveThinkingLevel: tupleA.thinkingLevel,
+		});
+		const store = mutableStore(ps);
+		store.archiveAsync = vi.fn(async () => {
+			ps.archived = true;
+			ps.archivedAt = Date.now();
+			return true;
+		});
+
+		const roleBridge = recordingBridge(() => {}, {
+			modelProvider: tupleB.provider,
+			modelId: tupleB.id,
+			thinkingLevel: tupleB.thinkingLevel,
+		});
+		roleBridge.stop = vi.fn(async () => { roleBridge.running = false; });
+		let factoryCalls = 0;
+		registerRpcBridgeFactory(() => {
+			factoryCalls += 1;
+			return roleBridge;
+		});
+
+		const manager: any = new BaseSessionManager({ preferencesStore: racePreferences, roleManager: roleManager as any });
+		manager._testStore = store;
+		managers.push(manager);
+		const restartSpy = vi.spyOn(manager, "restartAgent");
+		const terminateSpy = vi.spyOn(manager, "terminateSession");
+		const roleTupleVerified = deferred<void>();
+		const releaseRoleCommit = deferred<void>();
+		const realTryAutoSelect = manager.tryAutoSelectModel.bind(manager);
+		manager.tryAutoSelectModel = vi.fn(async (target: any) => {
+			const result = await realTryAutoSelect(target);
+			if (target.rpcClient === roleBridge) {
+				roleTupleVerified.resolve();
+				await releaseRoleCommit.promise;
+			}
+			return result;
+		});
+
+		let originalReads = 0;
+		const original = recordingBridge(() => {}, {
+			modelProvider: tupleA.provider,
+			modelId: tupleA.id,
+			thinkingLevel: tupleA.thinkingLevel,
+		});
+		original.getState = vi.fn(async () => {
+			originalReads += 1;
+			const tuple = originalReads <= 2
+				? tupleA
+				: { provider: tupleA.provider, id: "unverified-partial", thinkingLevel: tupleA.thinkingLevel };
+			return { success: true, data: { model: { provider: tuple.provider, id: tuple.id }, thinkingLevel: tuple.thinkingLevel } };
+		});
+		original.setModel = vi.fn(async () => ({ success: false, error: "fixture rollback failed" }));
+		original.stop = vi.fn(async () => { original.running = false; });
+		const session = liveSession(ps.id, original, {
+			spawnPinnedModel: `${tupleA.provider}/${tupleA.id}`,
+			spawnPinnedThinkingLevel: tupleA.thinkingLevel,
+		});
+		manager.sessions.set(ps.id, session);
+
+		const assignmentOutcome = manager.assignRole(ps.id, role).then(
+			(value: boolean) => ({ value, error: undefined as unknown }),
+			(error: unknown) => ({ value: undefined, error }),
+		);
+		await roleTupleVerified.promise;
+		const selectionOutcome = applyRuntimeSessionThinkingSelection(manager, session, "medium").then(
+			(value) => ({ value, error: undefined as unknown }),
+			(error) => ({ value: undefined, error }),
+		);
+		await vi.waitFor(() => {
+			expect(restartSpy).toHaveBeenCalledTimes(1);
+			expect(manager._sessionReplacementCoordinators.get(ps.id)?.pending).toBe(2);
+		});
+		const restartArgs = restartSpy.mock.calls[0] as any[];
+		releaseRoleCommit.resolve();
+		const [settledAssignment, settledSelection] = await Promise.all([assignmentOutcome, selectionOutcome]);
+
+		expect(restartArgs[1]?.session, "EMPTY_ZOMBIE_RECOVERY_MISSING_EXPECTED_SESSION_OWNER").toBe(session);
+		expect(restartArgs[1]?.rpcClient, "EMPTY_ZOMBIE_RECOVERY_MISSING_EXPECTED_RPC_OWNER").toBe(original);
+		expect(settledAssignment.error, "EMPTY_ZOMBIE_RECOVERY_CANCELLED_EARLIER_ROLE_ASSIGNMENT").toBeUndefined();
+		expect(settledAssignment.value).toBe(true);
+		expect(settledSelection.error).toBeInstanceOf(Error);
+		expect(terminateSpy, "EMPTY_ZOMBIE_RECOVERY_TERMINATED_ROLE_REPLACEMENT").not.toHaveBeenCalled();
+		expect(store.archiveAsync, "EMPTY_ZOMBIE_RECOVERY_ARCHIVED_ROLE_REPLACEMENT").not.toHaveBeenCalled();
+		expect(store.updates.some((patch: Record<string, any>) => patch.archived === true),
+			"EMPTY_ZOMBIE_RECOVERY_ARCHIVED_BEFORE_OWNER_ADMISSION").toBe(false);
+		expect(ps.archived).not.toBe(true);
+		expect(ps.archivedAt).toBeUndefined();
+		expect(factoryCalls).toBe(1);
+		expect(roleBridge.stop, "EMPTY_ZOMBIE_RECOVERY_STOPPED_ROLE_REPLACEMENT").not.toHaveBeenCalled();
+		expect(manager.sessions.get(ps.id)).toBe(session);
+		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(roleBridge);
+		expect({
+			role: ps.role,
+			provider: ps.modelProvider,
+			id: ps.modelId,
+			thinkingLevel: ps.effectiveThinkingLevel,
+		}).toEqual({ role: role.name, ...tupleB });
+	});
+
+	it("preserves direct restart zombie archival after serialized admission", async () => {
+		const ps = persisted("direct-empty-transcript-restart", "");
+		const store = mutableStore(ps);
+		const manager: any = new SessionManager();
+		manager._testStore = store;
+		managers.push(manager);
+		const bridge = recordingBridge(() => {});
+		bridge.stop = vi.fn(async () => { bridge.running = false; });
+		const session = liveSession(ps.id, bridge);
+		manager.sessions.set(ps.id, session);
+
+		await expect(manager.restartAgent(ps.id)).rejects.toMatchObject({
+			code: "SESSION_UNRECOVERABLE_ARCHIVED",
+		});
+
+		expect(store.updates.some((patch: Record<string, any>) => patch.archived === true)).toBe(true);
+		expect(ps.archived).toBe(true);
+		expect(ps.archivedAt).toEqual(expect.any(Number));
+		expect(bridge.stop, "DIRECT_ZOMBIE_RESTART_STOPPED_UNRECOVERABLE_BRIDGE").not.toHaveBeenCalled();
+		expect(manager.sessions.get(ps.id)).toBe(session);
+	});
+
 	it("does not let owner-sensitive recovery join a generic rehydrate queued behind role replacement", async () => {
 		invalidateModelCache();
 		const file = hostTranscript("owner-sensitive-recovery-coalesce");
