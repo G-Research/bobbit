@@ -2517,6 +2517,8 @@ export class VerificationHarness {
 	/** Executor for verification command STEPS (default = real durable spawn). */
 	private readonly commandStepRunner: VerificationCommandRunner;
 	private readonly clock: Clock;
+	/** Injectable only for deterministic lifecycle tests; production uses the host platform. */
+	private readonly platform: NodeJS.Platform;
 	private readonly skipLlmReview: boolean;
 
 	constructor(
@@ -2531,11 +2533,12 @@ export class VerificationHarness {
 		private projectConfigStore?: ProjectConfigStore,
 		projectContextManager?: ProjectContextManager,
 		configCascade?: import("./config-cascade.js").ConfigCascade,
-		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; skipLlmReview?: boolean } = {},
+		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; platform?: NodeJS.Platform; skipLlmReview?: boolean } = {},
 	) {
 		this.commandRunner = deps.commandRunner ?? realCommandRunner;
 		this.commandStepRunner = deps.commandStepRunner ?? realVerificationCommandRunner;
 		this.clock = deps.clock ?? realClock;
+		this.platform = deps.platform ?? process.platform;
 		this.skipLlmReview = !!deps.skipLlmReview;
 		this.configCascade = configCascade;
 		// Wrap the broadcast fn so every gate_verification_* event carries a
@@ -2715,13 +2718,13 @@ export class VerificationHarness {
 		}
 		const filePid = Number(parsed?.pid);
 		const validFilePid = Number.isFinite(filePid) && filePid > 0 ? filePid : undefined;
-		const pid = process.platform === "win32" && typeof step.pid === "number"
+		const pid = this.platform === "win32" && typeof step.pid === "number"
 			? step.pid
 			: (validFilePid ?? step.pid);
 		if (!pid || !Number.isFinite(pid) || pid <= 0) {
 			return { ok: false, reason: "command identity file did not contain a valid process id", retryable: true, mtimeMs };
 		}
-		if (process.platform !== "win32" && typeof step.pid === "number" && validFilePid !== undefined && step.pid !== validFilePid) {
+		if (this.platform !== "win32" && typeof step.pid === "number" && validFilePid !== undefined && step.pid !== validFilePid) {
 			return { pid, ok: false, reason: "command identity process id did not match persisted metadata", retryable: false, mtimeMs };
 		}
 		return { pid, ok: true, reason: "verified", retryable: false, mtimeMs };
@@ -2746,7 +2749,7 @@ export class VerificationHarness {
 			const stat = fs.statSync(step.heartbeatFile);
 			if (Date.now() - stat.mtimeMs > COMMAND_IDENTITY_HEARTBEAT_STALE_MS) return false;
 			const parsed = JSON.parse(fs.readFileSync(step.heartbeatFile, "utf8"));
-			return parsed?.nonce === expectedNonce && (process.platform === "win32" || Number(parsed?.pid) === pid);
+			return parsed?.nonce === expectedNonce && (this.platform === "win32" || Number(parsed?.pid) === pid);
 		} catch {
 			return false;
 		}
@@ -2758,7 +2761,7 @@ export class VerificationHarness {
 	): { verified: boolean; pid?: number; reason: string } {
 		const identity = preReadIdentity ?? this._readCommandIdentityFile(step);
 		if (!identity.ok || !identity.pid) return { verified: false, pid: identity.pid, reason: identity.reason };
-		if (!step.containerId && !supportsHostDetachedCommandRecovery(process.platform)) {
+		if (!step.containerId && !supportsHostDetachedCommandRecovery(this.platform)) {
 			return {
 				verified: false,
 				pid: identity.pid,

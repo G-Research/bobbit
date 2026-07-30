@@ -10,9 +10,9 @@ type NativeSpawn = typeof import("node:child_process").spawn;
  * The tier-1 spawn guard intentionally fences ordinary test subprocesses. This
  * test is the narrow process-tree exception: retrieve its preserved native
  * spawn and execute the probe in a separate Node process, where spawn-tree is
- * unguarded. The probe's grandchild has a finite safety lifetime and the probe
- * explicitly reaps it on assertion failure, so this regression test cannot
- * itself leave an orphan behind.
+ * unguarded. The probe's grandchild has a finite safety lifetime. POSIX reaps
+ * it on assertion failure; Windows deliberately does not retarget it after the
+ * root exits, so its finite lifetime prevents this regression probe leaking.
  */
 type GuardState = { originals?: { spawn?: NativeSpawn } };
 const SPAWN_GUARD_STATE = Symbol.for("bobbit.tests2.tier1-spawn-guard-state");
@@ -26,30 +26,43 @@ import path from "node:path";
 import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
 
 const marker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-spawn-tree-")), "grandchild.pid");
-const grandchildScript = "process.on('SIGTERM', () => {}); setTimeout(() => process.exit(0), 2500); setInterval(() => {}, 1000);";
-const parentScript = "const fs=require('fs'); const {spawn}=require('child_process'); const child=spawn(process.execPath,['-e',process.argv[1]],{stdio:'ignore'}); fs.writeFileSync(process.argv[2],String(child.pid)); setInterval(()=>{},1000);";
-const tracked = spawnTracked(process.execPath, ["-e", parentScript, grandchildScript, marker], {
+const isWindows = process.platform === "win32";
+const grandchildScript = "process.on('SIGTERM', () => {}); setTimeout(() => process.exit(0), 600); setInterval(() => {}, 1000);";
+const parentScript = "const fs=require('fs'); const {spawn}=require('child_process'); const child=spawn(process.execPath,['-e',process.argv[1]],{stdio:'ignore'}); fs.writeFileSync(process.argv[2],String(child.pid)); if(process.argv[3] === 'exit-root') process.exit(0); setInterval(()=>{},1000);";
+const tracked = spawnTracked(process.execPath, ["-e", parentScript, grandchildScript, marker, isWindows ? "exit-root" : "stay-root"], {
   stdio: "ignore",
-  timeoutMs: 100,
-  killGraceMs: 100,
+  ...(isWindows ? {} : { timeoutMs: 100, killGraceMs: 100 }),
 });
 
 const deadline = Date.now() + 1000;
 while (!fs.existsSync(marker) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
-assert.ok(fs.existsSync(marker), "parent should publish its grandchild PID before timeout");
-const grandchildPid = Number(fs.readFileSync(marker, "utf8"));
-assert.ok(Number.isSafeInteger(grandchildPid) && grandchildPid > 0, "grandchild PID should be valid");
+assert.ok(fs.existsSync(marker), "parent should publish its grandchild PID before cleanup");
 
-const exited = await tracked.waitForTreeExit(1500);
-const alive = (() => { try { process.kill(grandchildPid, 0); return true; } catch (err) { return err?.code === "EPERM"; } })();
-if (alive) {
-  // This PID came from the just-spawned probe, so emergency cleanup remains
-  // targeted even if the assertion below catches a regression.
-  try { process.kill(grandchildPid, "SIGKILL"); } catch {}
+if (isWindows) {
+  // Windows has no restart-stable process-group handle. Once the root exits,
+  // the numeric PID can be reused, so fail closed rather than trying to reap a
+  // descendant through its old parent PID. The host-independent seam below
+  // separately pins the exact no-retarget rule.
+  if (tracked.child.exitCode === null && tracked.child.signalCode === null) {
+    await new Promise(resolve => tracked.child.once("exit", resolve));
+  }
+  tracked.killTree();
+  assert.equal(await tracked.waitForTreeExit(0), false, "post-exit Windows cleanup must remain unverified rather than retargeting a PID");
+  console.log("windows-root-exit-boundary-ok");
+} else {
+  const grandchildPid = Number(fs.readFileSync(marker, "utf8"));
+  assert.ok(Number.isSafeInteger(grandchildPid) && grandchildPid > 0, "grandchild PID should be valid");
+  const exited = await tracked.waitForTreeExit(1500);
+  const alive = (() => { try { process.kill(grandchildPid, 0); return true; } catch (err) { return err?.code === "EPERM"; } })();
+  if (alive) {
+    // This PID came from the still-owned POSIX probe group, so emergency
+    // cleanup remains targeted even if the assertion below catches a regression.
+    try { process.kill(grandchildPid, "SIGKILL"); } catch {}
+  }
+  assert.equal(exited, true, "owned POSIX process group should exit within the bounded cleanup window");
+  assert.equal(alive, false, "SIGTERM-ignoring grandchild must be reaped by the owned-tree kill");
+  console.log("posix-process-tree-cleanup-ok");
 }
-assert.equal(exited, true, "owned process group/job should exit within the bounded cleanup window");
-assert.equal(alive, false, "SIGTERM-ignoring grandchild must be reaped by the owned-tree kill");
-console.log("process-tree-cleanup-ok");
 `;
 
 function fakeChild(pid: number): ChildProcess {
@@ -85,10 +98,10 @@ function runProbe(): Promise<{ stdout: string; stderr: string; code: number | nu
 }
 
 describe("spawnTracked timeout cleanup", () => {
-	it("reaps an SIGTERM-ignoring grandchild after its shell leader exits", async () => {
+	it("enforces the native process-tree lifecycle contract after its shell leader exits", async () => {
 		const result = await runProbe();
 		expect(result.code, result.stderr).toBe(0);
-		expect(result.stdout).toContain("process-tree-cleanup-ok");
+		expect(result.stdout).toContain(process.platform === "win32" ? "windows-root-exit-boundary-ok" : "posix-process-tree-cleanup-ok");
 	});
 
 	it("Windows treats root exit as a PID-reuse boundary, even before inherited stdio closes", async () => {

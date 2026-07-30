@@ -34,7 +34,7 @@ function makeLifecycleStateDir(): string {
 	return stateDir;
 }
 
-function makeHarnessForStateDir(stateDir = makeLifecycleStateDir()) {
+function makeHarnessForStateDir(stateDir = makeLifecycleStateDir(), platform?: NodeJS.Platform) {
 	const gateStoreCalls: GateStoreCall[] = [];
 	const broadcasts: Array<{ goalId: string; event: any }> = [];
 	const notifications: Array<{ goalId: string; message: string }> = [];
@@ -58,6 +58,7 @@ function makeHarnessForStateDir(stateDir = makeLifecycleStateDir()) {
 		{
 			commandRunner: { execFile: async () => ({ stdout: "", stderr: "" }) },
 			commandStepRunner: createFakeVerificationCommandRunner(),
+			platform,
 		},
 	);
 	harness.setTeamLeadNotifier((goalId, message) => notifications.push({ goalId, message }));
@@ -138,8 +139,9 @@ function activeVerification(signalId: string, steps: any[], startedAt = Date.now
 	return { ...ACTIVE_VERIFICATION_TEMPLATE, signalId, startedAt, steps };
 }
 
-test("persisted identity accepts a matching nonce with a fresh heartbeat", () => {
-	const { stateDir, harness } = makeHarnessForStateDir();
+test("persisted identity accepts a matching nonce with a fresh heartbeat on a supported host", () => {
+	// Exercise the durable-host contract independent of the CI runner's OS.
+	const { stateDir, harness } = makeHarnessForStateDir(undefined, "linux");
 	const pid = 424_242;
 	const nonce = "matching-nonce";
 	const identity = writeIdentityEvidence(path.join(stateDir, "identity-match"), pid, nonce);
@@ -149,8 +151,22 @@ test("persisted identity accepts a matching nonce with a fresh heartbeat", () =>
 	assert.equal(result.pid, pid);
 });
 
+test("persisted Windows host command identity fails closed even with a matching fresh heartbeat", () => {
+	// A nonce and heartbeat do not atomically bind a persisted Windows PID to
+	// its original tree after restart. This must remain true on every CI host.
+	const { stateDir, harness } = makeHarnessForStateDir(undefined, "win32");
+	const pid = 424_242;
+	const nonce = "windows-unsupported-nonce";
+	const identity = writeIdentityEvidence(path.join(stateDir, "identity-windows-unsupported"), pid, nonce);
+	const step = commandStepFixture({ name: "Windows host identity", startedAt: Date.now(), pid, nonce, ...identity });
+	const result = withPidReportedAlive(pid, () => (harness as any)._verifyPersistedCommandIdentity(step));
+	assert.equal(result.verified, false);
+	assert.equal(result.pid, pid);
+	assert.match(result.reason, /Windows host-detached.*unsupported|refusing PID cleanup/i);
+});
+
 test("persisted identity rejects a mismatched nonce without authorizing a kill", () => {
-	const { stateDir, harness } = makeHarnessForStateDir();
+	const { stateDir, harness } = makeHarnessForStateDir(undefined, "linux");
 	const pid = 424_243;
 	const identity = writeIdentityEvidence(path.join(stateDir, "identity-mismatch"), pid, "foreign-nonce");
 	const step = commandStepFixture({ name: "Foreign identity", startedAt: Date.now(), pid, nonce: "expected-nonce", ...identity });
@@ -160,7 +176,7 @@ test("persisted identity rejects a mismatched nonce without authorizing a kill",
 });
 
 test("persisted identity rejects stale heartbeat evidence", () => {
-	const { stateDir, harness } = makeHarnessForStateDir();
+	const { stateDir, harness } = makeHarnessForStateDir(undefined, "linux");
 	const pid = 424_244;
 	const nonce = "stale-nonce";
 	const identity = writeIdentityEvidence(path.join(stateDir, "identity-stale"), pid, nonce);
