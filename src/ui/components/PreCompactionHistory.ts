@@ -1,6 +1,7 @@
 import { LitElement, html, nothing, type PropertyValues } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { gatewayFetch } from "../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../shared/base-path.js";
 import type { PromptAuthorAppearance } from "../../app/message-author-appearance.js";
 import {
 	NO_PROMPT_AUTHOR_LABELS,
@@ -244,9 +245,9 @@ export class PreCompactionHistory extends LitElement {
 		if (this._countLoaded || this._inFlight || !this.sessionId || !this.compactionId) return;
 		this._inFlight = true;
 		try {
-			const res = await gatewayFetch(
+			const res = await gatewayFetch(gatewayRoute(
 				`/api/sessions/${encodeURIComponent(this.sessionId)}/transcript/before-compaction?compactionId=${encodeURIComponent(this.compactionId)}&limit=1`,
-			);
+			));
 			if (!res.ok) {
 				// 404 compaction_not_found / transcript_unavailable is transient
 				// right after a live (esp. manual) compaction: the widget mounts on
@@ -289,9 +290,9 @@ export class PreCompactionHistory extends LitElement {
 		const start = Math.max(0, total - PAGE);
 		const limit = total - start;
 		try {
-			const res = await gatewayFetch(
+			const res = await gatewayFetch(gatewayRoute(
 				`/api/sessions/${encodeURIComponent(this.sessionId)}/transcript/before-compaction?compactionId=${encodeURIComponent(this.compactionId)}&cursor=${start}&limit=${limit}&verbose=1`,
-			);
+			));
 			if (!res.ok) {
 				this._error = `Failed to load (HTTP ${res.status})`;
 				return;
@@ -316,9 +317,9 @@ export class PreCompactionHistory extends LitElement {
 		const newStart = Math.max(0, this._firstLoadedIndex - PAGE);
 		const limit = this._firstLoadedIndex - newStart;
 		try {
-			const res = await gatewayFetch(
+			const res = await gatewayFetch(gatewayRoute(
 				`/api/sessions/${encodeURIComponent(this.sessionId)}/transcript/before-compaction?compactionId=${encodeURIComponent(this.compactionId)}&cursor=${newStart}&limit=${limit}&verbose=1`,
-			);
+			));
 			if (!res.ok) {
 				this._error = `Failed to load (HTTP ${res.status})`;
 				return;

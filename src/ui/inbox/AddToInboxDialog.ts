@@ -1,5 +1,7 @@
 import { html, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { gatewayFetch } from "../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../shared/base-path.js";
 
 /**
  * <add-to-inbox-dialog> — modal composer for manually enqueuing an
@@ -52,7 +54,7 @@ export class AddToInboxDialog extends LitElement {
 		this._submitting = true;
 		this._error = null;
 		try {
-			const res = await fetch(`/api/staff/${encodeURIComponent(this.staffId)}/inbox`, {
+			const res = await gatewayFetch(gatewayRoute(`/api/staff/${encodeURIComponent(this.staffId)}/inbox`), {
 				method: "POST",
 				credentials: "include",
 				headers: { "Content-Type": "application/json" },

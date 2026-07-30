@@ -8,7 +8,8 @@ import { html, type PropertyValues, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { createRef, ref } from "lit/directives/ref.js";
 import { Brain, Image as ImageIcon, KeyRound } from "lucide";
-import { gatewayFetch } from "../../app/api.js";
+import { gatewayFetch } from "../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../shared/base-path.js";
 import { modelRecencyRank } from "../../shared/model-ranks.js";
 import { Input } from "../components/Input.js";
 import { formatModelCost } from "../utils/format.js";
@@ -47,7 +48,7 @@ export class ModelSelector extends DialogBase {
 	private async loadModels() {
 		this.loading = true;
 		try {
-			const res = await gatewayFetch("/api/models");
+			const res = await gatewayFetch(gatewayRoute("/api/models"));
 			if (res.ok) {
 				this.serverModels = await res.json();
 			}

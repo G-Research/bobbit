@@ -6,7 +6,8 @@ import { html, type PropertyValues, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { createRef, ref } from "lit/directives/ref.js";
 import { Image as ImageIcon, KeyRound } from "lucide";
-import { gatewayFetch } from "../../app/api.js";
+import { gatewayFetch } from "../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../shared/base-path.js";
 import { Input } from "../components/Input.js";
 import { i18n } from "../utils/i18n.js";
 
@@ -64,7 +65,7 @@ export class ImageModelSelector extends DialogBase {
 	private async loadModels() {
 		this.loading = true;
 		try {
-			const res = await gatewayFetch("/api/image-models");
+			const res = await gatewayFetch(gatewayRoute("/api/image-models"));
 			if (res.ok) this.serverModels = await res.json();
 		} catch (err) {
 			console.error("Failed to load image models:", err);

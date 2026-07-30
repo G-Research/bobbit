@@ -62,7 +62,7 @@ export function createExtractDocumentTool(): AgentTool<typeof extractDocumentSch
 			// Size limit: 50MB
 			const MAX_SIZE = 50 * 1024 * 1024;
 
-			// Helper function to fetch and process document
+			// The input is a user-supplied external/content URL, not a gateway route.
 			const fetchAndProcess = async (fetchUrl: string) => {
 				const response = await fetch(fetchUrl, { signal });
 
