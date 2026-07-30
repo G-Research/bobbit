@@ -2855,10 +2855,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					hasSandboxCredential,
 				});
 				if (cookieEligibility.mayBootstrap || cookieEligibility.mayRenew) {
-					// Eligibility already rejects insecure non-loopback origins. Omit Secure
-					// for authenticated HTTP loopback deployments even when --auth is set,
-					// otherwise browsers discard the native-transport cookie.
-					issueCookie(res, cookieStore, { localhost: !isTls, basePath });
+					issueCookie(res, cookieStore, { localhost: isLocalhostMode && !isTls, basePath });
 				}
 			}
 
