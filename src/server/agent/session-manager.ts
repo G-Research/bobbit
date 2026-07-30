@@ -730,6 +730,8 @@ export interface SessionInfo {
 	spawnPinnedModel?: string;
 	/** Thinking level passed via `--thinking` at spawn time, if any. */
 	spawnPinnedThinkingLevel?: string;
+	/** Staged role candidates verify without advancing shared durable/client authority. */
+	_deferVerifiedTupleCommit?: boolean;
 	/** True if the last agent turn ended due to a model/API error */
 	lastTurnErrored?: boolean;
 	/** Error message from the last errored turn (e.g. streaming JSON parse failure) */
@@ -877,6 +879,22 @@ export interface SessionInfo {
 		promise: Promise<{ success: boolean; data?: unknown; error?: string }>;
 	};
 }
+
+/** Exact canonical bridge identity required by ownership-sensitive respawns. */
+export type SessionBridgeOwner = {
+	session: Pick<SessionInfo, "id" | "rpcClient">;
+	rpcClient: SessionInfo["rpcClient"];
+};
+
+type VerifiedSessionModelTuple = {
+	provider: string;
+	modelId: string;
+	thinkingLevel: ThinkingLevel;
+};
+
+type SetupInitialThinkingAuthority = Readonly<{
+	initialThinkingLevel: ThinkingLevel;
+}>;
 
 // `spliceInFlightMessage` lives in its own module so unit tests can import
 // it without dragging in the full session-manager module graph (which
@@ -1887,6 +1905,12 @@ export class SessionManager {
 	 * `promptOwner` until the final replacement commits or rolls back.
 	 */
 	private _sessionReplacementCoordinators = new Map<string, SessionReplacementCoordinator>();
+	/**
+	 * Raw explicit/inherited thinking requests retained only while initial setup is
+	 * verifying its spawn tuple. The provisional spawn pin may already have been
+	 * clamped for a model that controlled fallback later replaces.
+	 */
+	private _setupInitialThinkingAuthorities = new Map<string, SetupInitialThinkingAuthority>();
 	/** User-driven orphan-history recoveries include their redrive so duplicate Retry clicks join instead of dispatching twice. */
 	private _poisonedHistoryRecoveries = new Map<string, Promise<void>>();
 	/** Latest lifecycle generation for each session; stale SessionInfo writers must no-op when behind this value. */
@@ -1904,6 +1928,18 @@ export class SessionManager {
 	/** Clear auto-selection discovery state after configure, refresh, or removal. */
 	invalidateAigwModelCache(): void {
 		this._aigwModelCache = null;
+	}
+
+	private retainSetupInitialThinkingAuthority(sessionId: string, rawInitialThinkingLevel: string | undefined): () => void {
+		const initialThinkingLevel = isKnownThinkingLevel(rawInitialThinkingLevel);
+		if (!initialThinkingLevel) return () => {};
+		const authority: SetupInitialThinkingAuthority = { initialThinkingLevel };
+		this._setupInitialThinkingAuthorities.set(sessionId, authority);
+		return () => {
+			if (this._setupInitialThinkingAuthorities.get(sessionId) === authority) {
+				this._setupInitialThinkingAuthorities.delete(sessionId);
+			}
+		};
 	}
 
 	private _idleWaiters = new Map<string, Set<IdleWaiter>>();
@@ -2654,8 +2690,8 @@ export class SessionManager {
 			trackCostFromEvent: (session, event) => this.trackCostFromEvent(session, event),
 			recordPiExtensionDiagnostic: (session, diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension),
 			broadcast: (clients, msg) => broadcast(clients, msg),
-			tryAutoSelectModel: (session) => this.tryAutoSelectModel(session),
-			tryApplyDefaultThinkingLevel: (session) => this.tryApplyDefaultThinkingLevel(session),
+			tryAutoSelectModel: async (session) => { await this.tryAutoSelectModel(session); },
+			tryApplyDefaultThinkingLevel: async (session) => { await this.tryApplyDefaultThinkingLevel(session); },
 			buildWorkflowList: (projectId?: string) => this._buildWorkflowList(projectId),
 			resolveInitialModel: (role, projectId) => this.resolveInitialModel(role, projectId),
 			resolveInitialThinkingLevel: (role, projectId) => this.resolveInitialThinkingLevel(role, projectId),
@@ -6561,11 +6597,18 @@ export class SessionManager {
 			preserveSandboxRealm?: boolean;
 			/** Poison redrive must dispatch its superseding intent before parked rows. */
 			deferQueueDrain?: boolean;
+			/** Reject at coordinated admission unless this exact bridge still owns the slot. */
+			expectedOwner?: SessionBridgeOwner;
+			/** Apply restartAgent's persisted zombie guard only after serialized ownership admission. */
+			restartZombieGuard?: boolean;
 		},
 	): Promise<SessionInfo | undefined> {
 		return this._coordinateSessionReplacement(session.id, "respawn", (token) =>
 			this._respawnAgentInPlaceOwned(session.id, session, ps, opts, token), {
-				coalesceKey: "rehydrate",
+				// Owner-sensitive recovery must reach its own serialized admission
+				// check; joining a generic rehydrate would inherit another operation's
+				// replacement without ever proving ownership of its stopped bridge.
+				coalesceKey: opts?.expectedOwner ? undefined : "rehydrate",
 				drainOnRelease: opts?.deferQueueDrain !== true,
 				cancelOnTerminal: () => undefined,
 			});
@@ -6580,13 +6623,28 @@ export class SessionManager {
 			finalStatus?: SessionStatus;
 			preserveSandboxRealm?: boolean;
 			deferQueueDrain?: boolean;
+			expectedOwner?: SessionBridgeOwner;
+			restartZombieGuard?: boolean;
 		} | undefined,
 		token: SessionReplacementToken,
 	): Promise<SessionInfo | undefined> {
 		// A role/restart queued ahead of us may already have replaced the object.
-		// Resolve canonical ownership only when this serialized operation starts.
-		const session = this.sessions.get(id) ?? requestedSession;
-		const ps = this.resolveStoreForId(id)?.get(id) ?? requestedPs;
+		// Ownership-sensitive recovery must reject at serialized admission instead
+		// of re-resolving and stopping that newer canonical bridge.
+		const canonical = this.sessions.get(id);
+		if (
+			opts?.expectedOwner
+			&& (
+				canonical !== opts.expectedOwner.session
+				|| canonical?.rpcClient !== opts.expectedOwner.rpcClient
+			)
+		) {
+			throw new Error(`Session ${id} respawn expected bridge ownership changed before coordinated admission`);
+		}
+		const session = canonical ?? requestedSession;
+		const ps = opts?.restartZombieGuard
+			? this._admitRestartPersistedSession(id)
+			: this.resolveStoreForId(id)?.get(id) ?? requestedPs;
 		const savedClients = new Set(session.clients);
 		session.unsubscribe();
 		const frameOfRef = this._snapshotStreamingFrameOfReference(session);
@@ -6646,37 +6704,46 @@ export class SessionManager {
 	}
 
 	/**
+	 * Read and admit restartAgent's canonical durable row while the replacement
+	 * coordinator owns the session. Owner-sensitive callers reach this only after
+	 * their exact bridge has passed admission, so a stale recovery cannot archive
+	 * a row that an earlier replacement has already advanced.
+	 */
+	private _admitRestartPersistedSession(id: string): PersistedSession {
+		const store = this.resolveStoreForId(id);
+		if (!store) throw new Error("No persisted session data");
+		const ps = store.get(id);
+		if (!ps) throw new Error("No persisted session data");
+		if (ps.agentSessionFile || ps.role) return ps;
+
+		console.warn(
+			`[session-manager] Session ${id} is an unrecoverable zombie ` +
+			`(no agentSessionFile, no role) — archiving instead of restarting.`,
+		);
+		try {
+			store.update(id, { archived: true, archivedAt: this.clock.now() });
+		} catch (err) {
+			console.error(`[session-manager] Failed to archive zombie session ${id}:`, err);
+		}
+		const zombieErr: Error & { code?: string } = new Error(
+			`Session ${id} could not be restarted — neither an agent session file nor ` +
+			`a role was persisted. The session has been archived; create a fresh session to continue.`,
+		);
+		zombieErr.code = "SESSION_UNRECOVERABLE_ARCHIVED";
+		throw zombieErr;
+	}
+
+	/**
 	 * Restart the agent process for a session whose process has died.
 	 * Stops any remnant process, then restores from persisted state.
 	 * Re-attaches existing WS clients so the user can keep working.
 	 */
-	async restartAgent(sessionId: string): Promise<void> {
+	async restartAgent(sessionId: string, expectedOwner?: SessionBridgeOwner): Promise<void> {
 		const session = this.sessions.get(sessionId);
 		if (!session) throw new Error("Session not found");
 
 		const ps = this.resolveStoreForSession(session.id).get(session.id);
 		if (!ps) throw new Error("No persisted session data");
-
-		// Zombie-archive guard: a record with neither an agent session file nor a role
-		// can't be bootstrapped by `_respawnAgentInPlace`. Archive it surface-side
-		// instead of throwing opaquely on every Restart click.
-		if (!ps.agentSessionFile && !ps.role) {
-			console.warn(
-				`[session-manager] Session ${sessionId} is an unrecoverable zombie ` +
-				`(no agentSessionFile, no role) — archiving instead of restarting.`,
-			);
-			try {
-				this.resolveStoreForSession(sessionId).update(sessionId, { archived: true, archivedAt: this.clock.now() });
-			} catch (err) {
-				console.error(`[session-manager] Failed to archive zombie session ${sessionId}:`, err);
-			}
-			const zombieErr: Error & { code?: string } = new Error(
-				`Session ${sessionId} could not be restarted — neither an agent session file nor ` +
-				`a role was persisted. The session has been archived; create a fresh session to continue.`,
-			);
-			zombieErr.code = "SESSION_UNRECOVERABLE_ARCHIVED";
-			throw zombieErr;
-		}
 
 		const savedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools ? [...session.sessionOnlyGrantedTools] : undefined;
 		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
@@ -6690,6 +6757,8 @@ export class SessionManager {
 				if (overrideAllowedTools) (p as any)._overrideAllowedTools = overrideAllowedTools;
 				if (overrideGrantedTools) (p as any)._overrideGrantedTools = overrideGrantedTools;
 			},
+			expectedOwner,
+			restartZombieGuard: true,
 		});
 
 		if (restored) {
@@ -7516,12 +7585,23 @@ export class SessionManager {
 		// model/thinking tuple below. tryAutoSelectModel owns the single atomic
 		// durable commit, so any failed start, switch, or read-back retains the
 		// original verified tuple byte-for-byte.
-		const initThinking = await this.resolveCurrentCatalogThinkingLevel(
-			bridgeOptions.initialModel,
-			ps.role,
-			ps.projectId,
-			ps.effectiveThinkingLevel,
+		const restoreHasDurableTuple = !!(
+			psPersistedModel
+			&& isKnownThinkingLevel(ps.effectiveThinkingLevel)
 		);
+		const initThinking = restoreHasDurableTuple
+			? await this.resolveCurrentCatalogPreferredThinkingLevel(
+				bridgeOptions.initialModel,
+				ps.role,
+				ps.projectId,
+				ps.effectiveThinkingLevel,
+			)
+			: await this.resolveCurrentCatalogThinkingLevel(
+				bridgeOptions.initialModel,
+				ps.role,
+				ps.projectId,
+				ps.effectiveThinkingLevel,
+			);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 		const restoreSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
 		this.applyDirectProviderEnv(bridgeOptions, !!ps.sandboxed, restoreSpawnProvider);
@@ -8044,6 +8124,10 @@ export class SessionManager {
 			// and let setup complete in the background. Continue-Archived opts in to
 			// awaiting setup so fresh worktree/base-ref failures are returned by the POST
 			// instead of surfacing later as an asynchronously archived session.
+			const releaseSetupThinkingAuthority = this.retainSetupInitialThinkingAuthority(
+				id,
+				opts?.initialThinkingLevel,
+			);
 			const setupPromise = executeWorktreeAsync(plan, session, ctx, claimed?.worktreePath).then(() => {
 				// agentSessionFile is now persisted synchronously by spawnAgent before
 				// status flips to idle (see session-setup.ts). The post-resolve persist
@@ -8055,7 +8139,7 @@ export class SessionManager {
 				session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
 					console.warn(`[session-manager] Early persist failed for worktree session ${session.id}:`, err);
 				}).finally(() => { session.pendingMetadataPersist = undefined; });
-			});
+			}).finally(releaseSetupThinkingAuthority);
 
 			if (opts?.awaitWorktreeSetup) {
 				try {
@@ -8124,26 +8208,34 @@ export class SessionManager {
 			bridgeOptions: { cwd },
 		};
 
-		const session = await executePlan(plan, ctx);
-		if (projectId) session.projectId = projectId;
-		// Verification/reviewer sessions deliberately skip the ordinary post-spawn
-		// selectors because their tuple was pinned in argv. They still need the same
-		// exact read-back and one atomic durable tuple commit before create returns.
-		if (opts?.skipAutoModel && opts.skipAutoThinking && selectedSpawnModel) {
-			await this.tryAutoSelectModel(session);
-		}
-		this.notifySessionCreated(session);
+		const releaseSetupThinkingAuthority = this.retainSetupInitialThinkingAuthority(
+			id,
+			opts?.initialThinkingLevel,
+		);
+		try {
+			const session = await executePlan(plan, ctx);
+			if (projectId) session.projectId = projectId;
+			// Verification/reviewer sessions deliberately skip the ordinary post-spawn
+			// selectors because their tuple was pinned in argv. They still need the same
+			// exact read-back and one atomic durable tuple commit before create returns.
+			if (opts?.skipAutoModel && opts.skipAutoThinking && selectedSpawnModel) {
+				await this.tryAutoSelectModel(session);
+			}
+			this.notifySessionCreated(session);
 
-		// Persist session metadata (fire-and-forget, but tracked for terminate).
-		// Rehydrated sessions already have a cloned/adopted transcript path recorded;
-		// avoid a redundant get_state that can rewrite runtime-only metadata.
-		if (!plan.preExistingAgentSessionFile) {
-			session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
-				console.warn(`[session-manager] Early persist failed for ${session.id}:`, err);
-			}).finally(() => { session.pendingMetadataPersist = undefined; });
-		}
+			// Persist session metadata (fire-and-forget, but tracked for terminate).
+			// Rehydrated sessions already have a cloned/adopted transcript path recorded;
+			// avoid a redundant get_state that can rewrite runtime-only metadata.
+			if (!plan.preExistingAgentSessionFile) {
+				session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
+					console.warn(`[session-manager] Early persist failed for ${session.id}:`, err);
+				}).finally(() => { session.pendingMetadataPersist = undefined; });
+			}
 
-		return session;
+			return session;
+		} finally {
+			releaseSetupThinkingAuthority();
+		}
 	}
 
 	/**
@@ -8348,7 +8440,16 @@ export class SessionManager {
 			bridgeOptions: { cwd: opts.cwd },
 		};
 
-		const session = await executePlan(plan, ctx);
+		const releaseSetupThinkingAuthority = this.retainSetupInitialThinkingAuthority(
+			plan.id,
+			delegateThinkingCandidate,
+		);
+		let session: SessionInfo;
+		try {
+			session = await executePlan(plan, ctx);
+		} finally {
+			releaseSetupThinkingAuthority();
+		}
 		if (parentProjectId) session.projectId = parentProjectId;
 		// Persist the effective-goal stamp on BOTH the live session and the store
 		// record so it survives restart/respawn (the initial structural put happens
@@ -8821,11 +8922,14 @@ export class SessionManager {
 		projectId: string | undefined,
 		preferred?: string,
 		catalogModel?: Awaited<ReturnType<typeof getAvailableModels>>[number],
+		preferPreferred = false,
 	): ThinkingLevel | undefined {
-		let candidate = role
+		const preferredCandidate = isKnownThinkingLevel(preferred);
+		const roleCandidate = role
 			? isKnownThinkingLevel(this.resolveRoleThinkingLevelValue(role, projectId))
 			: undefined;
-		if (!candidate) candidate = isKnownThinkingLevel(preferred);
+		let candidate = preferPreferred ? preferredCandidate : roleCandidate;
+		if (!candidate) candidate = preferPreferred ? roleCandidate : preferredCandidate;
 		if (!candidate) {
 			candidate = isKnownThinkingLevel(
 				this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined,
@@ -8851,14 +8955,15 @@ export class SessionManager {
 		preferred?: string,
 		models?: Awaited<ReturnType<typeof getAvailableModels>>,
 		allowUnlistedRawModel = false,
+		preferPreferred = false,
 	): Promise<ThinkingLevel | undefined> {
 		if (!model || !this.preferencesStore) {
-			return this.resolveThinkingLevelForModel(model, role, projectId, preferred);
+			return this.resolveThinkingLevelForModel(model, role, projectId, preferred, undefined, preferPreferred);
 		}
 		const normalized = normalizeAigwModelString(model);
 		const slash = normalized.indexOf("/");
 		if (slash <= 0 || slash === normalized.length - 1) {
-			return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred);
+			return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred, undefined, preferPreferred);
 		}
 		const currentModels = models ?? await getAvailableModels(this.preferencesStore);
 		const catalogModel = findSessionSelectableModel(
@@ -8868,11 +8973,29 @@ export class SessionManager {
 		);
 		if (!catalogModel) {
 			if (allowUnlistedRawModel) {
-				return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred);
+				return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred, undefined, preferPreferred);
 			}
 			throw new Error(`Model "${normalized}" is not currently available for session selection`);
 		}
-		return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred, catalogModel);
+		return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred, catalogModel, preferPreferred);
+	}
+
+	/** Preserve an already-chosen explicit/durable candidate ahead of role defaults. */
+	private resolveCurrentCatalogPreferredThinkingLevel(
+		model: string | undefined,
+		role: string | undefined,
+		projectId: string | undefined,
+		preferred: string | undefined,
+	): Promise<ThinkingLevel | undefined> {
+		return this.resolveCurrentCatalogThinkingLevel(
+			model,
+			role,
+			projectId,
+			preferred,
+			undefined,
+			false,
+			true,
+		);
 	}
 
 	/**
@@ -8909,7 +9032,7 @@ export class SessionManager {
 		return undefined;
 	}
 
-	private async tryAutoSelectModel(session: SessionInfo): Promise<void> {
+	private async tryAutoSelectModel(session: SessionInfo): Promise<VerifiedSessionModelTuple | undefined> {
 		// If the agent was spawned with `--model <provider>/<modelId>` already,
 		// skip the redundant `setModel` RPC — read-back verification still runs
 		// and hard-fails on mismatch.
@@ -8921,17 +9044,22 @@ export class SessionManager {
 		// Model verification alone is not a durable commit. A successful model
 		// mutation must also apply and read back the effective thinking level before
 		// any store, model-name mirror, or client success frame is updated.
-		const commitExactSpawnTuple = async (modelString: string): Promise<void> => {
+		let verifiedSpawnTuple;
+		const commitExactSpawnTuple = async (
+			modelString: string,
+			explicitPreferredThinking?: ThinkingLevel,
+		): Promise<void> => {
 			const slash = modelString.indexOf("/");
 			const provider = modelString.slice(0, slash);
 			const modelId = modelString.slice(slash + 1);
 			const persisted = this.resolveStoreForSession(session.id).get(session.id);
-			const requestedThinking = isKnownThinkingLevel(session.spawnPinnedThinkingLevel)
+			const requestedThinking = explicitPreferredThinking
+				?? isKnownThinkingLevel(session.spawnPinnedThinkingLevel)
 				?? isKnownThinkingLevel(this.resolveRoleThinkingLevel(session))
 				?? isKnownThinkingLevel(persisted?.effectiveThinkingLevel)
 				?? isKnownThinkingLevel(this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined)
 				?? "medium";
-			const effectiveThinking = await this.resolveCurrentCatalogThinkingLevel(
+			const effectiveThinking = await this.resolveCurrentCatalogPreferredThinkingLevel(
 				modelString,
 				session.role,
 				session.projectId,
@@ -8961,14 +9089,51 @@ export class SessionManager {
 				throw new Error(`spawn tuple read-back mismatch for ${modelString}`);
 			}
 
-			this.persistSessionModel(session.id, provider, modelId, effectiveThinking);
-			this._writeModelNameFile(session.id, modelString);
+			const tuple = { provider, modelId, thinkingLevel: effectiveThinking };
+			// Staged role candidates verify against Pi through the ordinary helper but
+			// cannot advance shared authority until their lifecycle commit wins.
+			if (session._deferVerifiedTupleCommit !== true) {
+				this.persistSessionModel(session.id, provider, modelId, effectiveThinking);
+				this._writeModelNameFile(session.id, modelString);
+				broadcast(session.clients, {
+					type: "state",
+					data: { ...buildModelStateData(provider, modelId), thinkingLevel: effectiveThinking },
+				});
+			}
 			session.spawnPinnedModel = modelString;
 			session.spawnPinnedThinkingLevel = effectiveThinking;
-			broadcast(session.clients, {
-				type: "state",
-				data: { ...buildModelStateData(provider, modelId), thinkingLevel: effectiveThinking },
-			});
+			verifiedSpawnTuple = tuple;
+		};
+		// A controlled fallback changes the model against which thinking must be
+		// clamped. Choose the raw authority for this setup context before looking at
+		// the provisional spawn pin, which was clamped for the model that just failed.
+		const resolveControlledFallbackThinking = () => {
+			const persisted = this.resolveStoreForSession(session.id).get(session.id);
+			const roleThinking = isKnownThinkingLevel(this.resolveRoleThinkingLevel(session));
+			const durableThinking = persisted?.modelProvider && persisted?.modelId
+				? isKnownThinkingLevel(persisted.effectiveThinkingLevel)
+				: undefined;
+			const explicitInitialThinking = this._setupInitialThinkingAuthorities.get(
+				session.id,
+			)?.initialThinkingLevel;
+			const defaultThinking = isKnownThinkingLevel(
+				this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined,
+			);
+			const provisionalThinking = isKnownThinkingLevel(session.spawnPinnedThinkingLevel);
+			if (session._deferVerifiedTupleCommit === true) {
+				return roleThinking
+					?? durableThinking
+					?? explicitInitialThinking
+					?? defaultThinking
+					?? provisionalThinking
+					?? "medium";
+			}
+			return durableThinking
+				?? roleThinking
+				?? explicitInitialThinking
+				?? defaultThinking
+				?? provisionalThinking
+				?? "medium";
 		};
 
 		// Spawn-pinned models are explicit selections too (restore/respawn persisted
@@ -8991,7 +9156,7 @@ export class SessionManager {
 					});
 					await commitExactSpawnTuple(pinnedModel);
 					if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Verified spawn-pinned model "${pinnedModel}" for session ${session.id}`);
-					return;
+					return verifiedSpawnTuple;
 				} catch (err) {
 					pinnedModelError = err;
 				}
@@ -9015,9 +9180,12 @@ export class SessionManager {
 						await applyModelString(session.rpcClient, currentFallbackSessionModel, {
 							contextLabel: "default.sessionModel fallback",
 						});
-						await commitExactSpawnTuple(currentFallbackSessionModel);
+						await commitExactSpawnTuple(
+							currentFallbackSessionModel,
+							resolveControlledFallbackThinking(),
+						);
 						console.log(`[session-manager] Controlled fallback selected default.sessionModel "${currentFallbackSessionModel}" for session ${session.id} after spawn-pinned model "${pinnedModel}" failed`);
-						return;
+						return verifiedSpawnTuple;
 					} catch (fallbackErr) {
 						controlledFallbackError = fallbackErr;
 					}
@@ -9049,7 +9217,7 @@ export class SessionManager {
 					});
 					await commitExactSpawnTuple(roleModel);
 					console.log(`[session-manager] Set role-override model "${roleModel}" for session ${session.id} (role=${session.role})`);
-					return;
+					return verifiedSpawnTuple;
 				} catch (err) {
 					roleModelError = err;
 				}
@@ -9074,9 +9242,12 @@ export class SessionManager {
 							contextLabel: "default.sessionModel fallback",
 							skipSetModel: spawnPinned && normalizeAigwModelString(session.spawnPinnedModel || "") === currentFallbackSessionModel,
 						});
-						await commitExactSpawnTuple(currentFallbackSessionModel);
+						await commitExactSpawnTuple(
+							currentFallbackSessionModel,
+							resolveControlledFallbackThinking(),
+						);
 						console.log(`[session-manager] Controlled fallback selected default.sessionModel "${currentFallbackSessionModel}" for session ${session.id} after role model "${roleModel}" failed`);
-						return;
+						return verifiedSpawnTuple;
 					} catch (fallbackErr) {
 						controlledFallbackError = fallbackErr;
 					}
@@ -9114,7 +9285,7 @@ export class SessionManager {
 				});
 				await commitExactSpawnTuple(sessionModelPref);
 				if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Set preferred model "${sessionModelPref}" for session ${session.id}${preSpawnPinned ? " (spawn-pinned)" : ""}`);
-				return;
+				return verifiedSpawnTuple;
 			} catch (err) {
 				console.error(`[session-manager] default.sessionModel "${safeSessionModelPref}" failed for ${session.id}; controlled fallback is not eligible for the default session model: ${sanitizeModelErrorForLog(err)}`);
 				throw (err instanceof Error && err.message === sanitizeModelErrorText(err)) ? err : new Error(sanitizeModelErrorText(err));
@@ -9152,10 +9323,11 @@ export class SessionManager {
 		}
 		await commitExactSpawnTuple(aigwModel);
 		console.log(`[session-manager] Auto-selected aigw model "${modelToUse.id}" for session ${session.id}`);
+		return verifiedSpawnTuple;
 	}
 
 	/** Apply, read back, and atomically persist thinking with the exact live model. */
-	private async tryApplyDefaultThinkingLevel(session: SessionInfo): Promise<void> {
+	private async tryApplyDefaultThinkingLevel(session: SessionInfo): Promise<VerifiedSessionModelTuple> {
 		const persisted = this.resolveStoreForSession(session.id).get(session.id);
 		const spawnPinnedThinking = isKnownThinkingLevel(session.spawnPinnedThinkingLevel);
 		const spawnPinnedModel = session.spawnPinnedModel
@@ -9173,7 +9345,11 @@ export class SessionManager {
 			&& persisted?.modelId === spawnPinnedModel.slice(spawnModelSlash + 1)
 			&& persisted?.effectiveThinkingLevel === spawnPinnedThinking
 		) {
-			return;
+			return {
+				provider: spawnPinnedModel.slice(0, spawnModelSlash),
+				modelId: spawnPinnedModel.slice(spawnModelSlash + 1),
+				thinkingLevel: spawnPinnedThinking,
+			};
 		}
 		const roleThinking = isKnownThinkingLevel(this.resolveRoleThinkingLevel(session));
 		const durableThinking = isKnownThinkingLevel(persisted?.effectiveThinkingLevel);
@@ -9182,7 +9358,7 @@ export class SessionManager {
 		);
 		const requested = spawnPinnedThinking ?? roleThinking ?? durableThinking ?? preferenceThinking ?? "medium";
 
-		const applyAndVerify = async (candidate: ThinkingLevel): Promise<ThinkingLevel> => {
+		const applyAndVerify = async (candidate: ThinkingLevel): Promise<VerifiedSessionModelTuple> => {
 			const beforeResp = await session.rpcClient.getState();
 			if (beforeResp?.success === false) throw new Error("get_state failed before thinking selection");
 			const before = beforeResp?.data ?? beforeResp;
@@ -9204,7 +9380,7 @@ export class SessionManager {
 				&& persisted?.effectiveThinkingLevel === effective
 				&& isKnownThinkingLevel(before?.thinkingLevel) === effective
 			) {
-				return effective;
+				return { provider, modelId, thinkingLevel: effective };
 			}
 			if (before?.thinkingLevel !== effective) {
 				const setResp = await session.rpcClient.setThinkingLevel(effective);
@@ -9220,14 +9396,19 @@ export class SessionManager {
 			if (verifiedProvider !== provider || verifiedModelId !== modelId || verifiedThinking !== effective) {
 				throw new Error(`thinking selection read-back mismatch for ${provider}/${modelId}`);
 			}
-			this.persistSessionModel(session.id, provider, modelId, effective);
-			return effective;
+			if (session._deferVerifiedTupleCommit !== true) {
+				this.persistSessionModel(session.id, provider, modelId, effective);
+			}
+			session.spawnPinnedModel = `${provider}/${modelId}`;
+			session.spawnPinnedThinkingLevel = effective;
+			return { provider, modelId, thinkingLevel: effective };
 		};
 
-		const effective = await applyAndVerify(requested);
+		const verifiedTuple = await applyAndVerify(requested);
 		if (process.env.BOBBIT_DEBUG) {
-			console.log(`[session-manager] Verified effective thinking level "${effective}" for session ${session.id}`);
+			console.log(`[session-manager] Verified effective thinking level "${verifiedTuple.thinkingLevel}" for session ${session.id}`);
 		}
+		return verifiedTuple;
 	}
 
 	async persistSessionMetadata(session: SessionInfo): Promise<void> {
@@ -9770,43 +9951,6 @@ export class SessionManager {
 		// start from the durable value and replace it only with a non-empty live one.
 		const roleStore = this.resolveStoreForSession(id);
 		const persistedBeforeRole = roleStore.get(id);
-		const durableTupleBeforeRole = {
-			modelProvider: persistedBeforeRole?.modelProvider,
-			modelId: persistedBeforeRole?.modelId,
-			effectiveThinkingLevel: persistedBeforeRole?.effectiveThinkingLevel,
-		};
-		const durableModelBeforeRole = durableTupleBeforeRole.modelProvider && durableTupleBeforeRole.modelId
-			? `${durableTupleBeforeRole.modelProvider}/${durableTupleBeforeRole.modelId}`
-			: undefined;
-		const restoreDurableTupleBeforeRole = (): void => {
-			// Runtime selection may verify and commit a newer tuple on the still-live
-			// original bridge while this replacement is staged. Its canonical spawn
-			// mirrors and the authoritative store advance together. Preserve that tuple
-			// instead of replaying this operation's stale snapshot; staged verification
-			// writes do not advance the original mirrors and still roll back normally.
-			const currentDurable = roleStore.get(id);
-			const currentModel = session.spawnPinnedModel;
-			const slash = currentModel?.indexOf("/") ?? -1;
-			const currentThinking = isKnownThinkingLevel(session.spawnPinnedThinkingLevel);
-			const canonicalTupleIsDurable = slash > 0
-				&& slash < (currentModel?.length ?? 0) - 1
-				&& !!currentThinking
-				&& currentDurable?.modelProvider === currentModel?.slice(0, slash)
-				&& currentDurable?.modelId === currentModel?.slice(slash + 1)
-				&& currentDurable?.effectiveThinkingLevel === currentThinking;
-			const durableTupleToRestore = canonicalTupleIsDurable
-				? {
-					modelProvider: currentDurable?.modelProvider,
-					modelId: currentDurable?.modelId,
-					effectiveThinkingLevel: currentThinking,
-				}
-				: durableTupleBeforeRole;
-			roleStore.update(id, durableTupleToRestore);
-			const durableModelToRestore = durableTupleToRestore.modelProvider && durableTupleToRestore.modelId
-				? `${durableTupleToRestore.modelProvider}/${durableTupleToRestore.modelId}`
-				: durableModelBeforeRole;
-			if (durableModelToRestore) this._writeModelNameFile(id, durableModelToRestore);
-		};
 		let agentSessionFile = persistedBeforeRole?.agentSessionFile;
 		try {
 			const stateResp = await session.rpcClient.getState();
@@ -9991,7 +10135,9 @@ export class SessionManager {
 			role: role.name,
 			accessory: role.accessory,
 			allowedTools: effectiveAllowedNames,
-			// Model verification must not broadcast replacement state before commit.
+			// Model verification must not mutate durable/model-name/client authority
+			// before this candidate wins the lifecycle commit.
+			_deferVerifiedTupleCommit: true,
 			clients: new Set<WebSocket>(),
 		} as SessionInfo;
 
@@ -10003,31 +10149,21 @@ export class SessionManager {
 				}
 				await this.switchSessionForRehydration(rpcClient, rolePs, agentSessionFile);
 			}
-			await this.tryAutoSelectModel(stagedSession);
-			let replacementTupleVerified = true;
-			try {
-				await this.tryApplyDefaultThinkingLevel(stagedSession);
-			} catch (err) {
-				if (respawnPersisted?.effectiveThinkingLevel !== undefined) throw err;
-				replacementTupleVerified = false;
-				console.warn(`[session-manager] Legacy session ${id} could not verify effective thinking during role replacement:`, err);
-			}
-			if (replacementTupleVerified) {
-				const verifiedPersisted = roleStore.get(id);
-				const verifiedThinking = isKnownThinkingLevel(verifiedPersisted?.effectiveThinkingLevel);
-				if (!verifiedPersisted?.modelProvider || !verifiedPersisted.modelId || !verifiedThinking) {
-					throw new Error(`Cannot assign role for session ${id}: replacement model tuple was not durably verified`);
+			verifiedReplacementTuple = await this.tryAutoSelectModel(stagedSession);
+			// tryAutoSelectModel verifies a complete tuple. Only use the standalone
+			// thinking helper when model selection produced no tuple; re-reading an
+			// already-complete legacy candidate can fail and must not discard it.
+			if (!verifiedReplacementTuple) {
+				try {
+					verifiedReplacementTuple = await this.tryApplyDefaultThinkingLevel(stagedSession);
+				} catch (err) {
+					if (respawnPersisted?.effectiveThinkingLevel !== undefined) throw err;
+					console.warn(`[session-manager] Legacy session ${id} could not verify effective thinking during role replacement:`, err);
 				}
-				verifiedReplacementTuple = {
-					provider: verifiedPersisted.modelProvider,
-					modelId: verifiedPersisted.modelId,
-					thinkingLevel: verifiedThinking,
-				};
 			}
-			// Model/thinking setup reuses the ordinary verification helpers, which
-			// persist as they complete. Keep the old tuple authoritative until this
-			// staged bridge wins the lifecycle commit below.
-			restoreDurableTupleBeforeRole();
+			if (respawnPersisted?.effectiveThinkingLevel !== undefined && !verifiedReplacementTuple) {
+				throw new Error(`Cannot assign role for session ${id}: replacement model tuple was not verified`);
+			}
 
 			// Another lifecycle replacement may have won while this bridge was being
 			// prepared. Never stop or overwrite that newer canonical session; the catch
@@ -10054,7 +10190,6 @@ export class SessionManager {
 				throw new Error(`Session ${id} role replacement was superseded after old bridge stop`);
 			}
 		} catch (err) {
-			restoreDurableTupleBeforeRole();
 			unsub();
 			await rpcClient.stop().catch(() => {});
 			// If terminal cancellation landed during the irreversible old stop, both
@@ -10071,6 +10206,10 @@ export class SessionManager {
 		session.unsubscribe = unsub;
 		session.spawnPinnedModel = bridgeOptions.initialModel;
 		session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
+		if (verifiedReplacementTuple) {
+			session.spawnPinnedModel = `${verifiedReplacementTuple.provider}/${verifiedReplacementTuple.modelId}`;
+			session.spawnPinnedThinkingLevel = verifiedReplacementTuple.thinkingLevel;
+		}
 		session.role = role.name;
 		session.accessory = role.accessory;
 		session.allowedTools = effectiveAllowedNames;
@@ -12361,15 +12500,23 @@ export class SessionManager {
 					forceInitialModel,
 					forceDefaultModel,
 				]);
-			const forceRoleThinkingOverride = isKnownThinkingLevel(
-				this.resolveRoleThinkingLevelValue(session.role, session.projectId),
+			const forceRespawnHasDurableTuple = !!(
+				forceRespawnPersistedModel
+				&& isKnownThinkingLevel(forceRespawnPersisted?.effectiveThinkingLevel)
 			);
-			const initThinking = await this.resolveCurrentCatalogThinkingLevel(
-				bridgeOptions.initialModel,
-				session.role,
-				session.projectId,
-				forceRoleThinkingOverride ?? forceRespawnPersisted?.effectiveThinkingLevel,
-			);
+			const initThinking = forceRespawnHasDurableTuple
+				? await this.resolveCurrentCatalogPreferredThinkingLevel(
+					bridgeOptions.initialModel,
+					session.role,
+					session.projectId,
+					forceRespawnPersisted?.effectiveThinkingLevel,
+				)
+				: await this.resolveCurrentCatalogThinkingLevel(
+					bridgeOptions.initialModel,
+					session.role,
+					session.projectId,
+					forceRespawnPersisted?.effectiveThinkingLevel,
+				);
 			if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 			const forceSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
 			this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, forceSpawnProvider);
