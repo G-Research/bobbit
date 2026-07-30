@@ -2057,7 +2057,7 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 
 	return html`
 		<div class="w-14 shrink-0 h-full flex flex-col items-center sidebar-edge sidebar-root" data-testid="sidebar-collapsed" style="background: var(--sidebar);">
-			<div class="flex-1 overflow-y-auto flex flex-col items-center gap-0.5 py-2 px-0.5">
+			<div class="sidebar-collapsed-scroll flex-1 overflow-y-auto flex flex-col items-center gap-0.5 py-2 px-0.5">
 				${sidebarTree.projects.map((projectTree, pi) => {
 					const project = projectTree.project as Project;
 					const staffRows = projectTree.staffRows

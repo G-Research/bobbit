@@ -238,6 +238,17 @@ bell-toggle button {
 	width: max(3.5rem, 3.75em);
 }
 
+/* The collapsed rail centers its children. Without an explicit cross-axis
+ * constraint, its vertical scroller uses its max-content width, which can
+ * exceed the narrow rail when large fonts have OS-specific glyph metrics. */
+.sidebar-root[data-testid="sidebar-collapsed"] > .sidebar-collapsed-scroll {
+	align-self: stretch;
+	width: 100%;
+	min-width: 0;
+	max-width: 100%;
+	overflow-x: hidden;
+}
+
 .sidebar-root .sidebar-collapsed-label {
 	min-width: 0;
 	overflow: hidden;
