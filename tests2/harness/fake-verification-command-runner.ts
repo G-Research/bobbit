@@ -208,6 +208,7 @@ function makeFakeTracked(spec: VerificationCommandSpawnSpec): TrackedChild {
 		killed: () => killed,
 		timedOut: () => timedOut || !!tracked._timedOut,
 		markSurvival: () => { /* fake children never survive shutdown */ },
+		waitForTreeExit: async () => true,
 		killTree: (_signal, _graceMsOverride) => {
 			if (closed) return;
 			killed = true;

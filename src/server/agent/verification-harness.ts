@@ -5547,6 +5547,7 @@ export class VerificationHarness {
 			}
 
 			let settled = false;
+			let settleStarted = false;
 			let exitCode: number | null = null;
 			let exitSignal: NodeJS.Signals | null = null;
 			let closeGraceTimer: TimerHandle | undefined;
@@ -5557,13 +5558,24 @@ export class VerificationHarness {
 			// verification would remain running until the outer test times out.
 			const processClock = realClock;
 
-			const settleFromProcess = (code: number | null, signal: NodeJS.Signals | null) => {
-				if (settled) return;
-				settled = true;
+			const settleFromProcess = async (code: number | null, signal: NodeJS.Signals | null) => {
+				if (settled || settleStarted) return;
+				settleStarted = true;
 				if (closeGraceTimer) processClock.clearTimeout(closeGraceTimer);
 				if (exitFilePollTimer) processClock.clearInterval(exitFilePollTimer);
 				this._trackedCommandChildren.delete(trackedKey);
 				try { stopTail?.(); } catch { /* ignore */ }
+
+				const didTimeOut = tracked!.timedOut();
+				const didCancel = !didTimeOut && this._cancelledTrackedKeys.delete(trackedKey);
+				// Do not finalize a timeout/cancel when only the shell leader has
+				// exited. The tracked runner owns this process group/job and waits a
+				// bounded interval for SIGTERM → SIGKILL (or taskkill /T /F) to reap
+				// every descendant before this step reports completion.
+				if (didTimeOut || didCancel) {
+					await tracked!.waitForTreeExit();
+				}
+				settled = true;
 
 				let outText = stdout;
 				let errText = stderr;
@@ -5573,8 +5585,6 @@ export class VerificationHarness {
 					errText = readCommandLogTail(errFile);
 				}
 				const tail = (outText + "\n" + errText).trim().slice(-5000);
-				const didTimeOut = tracked!.timedOut();
-				const didCancel = !didTimeOut && this._cancelledTrackedKeys.delete(trackedKey);
 
 				if (didTimeOut) {
 					const marker = `[step timed out after ${timeoutSec}s \u2014 killed subprocess tree]`;
@@ -5619,7 +5629,7 @@ export class VerificationHarness {
 						return;
 					}
 					try { if (child.pid) killTreeByPid(child.pid, "SIGKILL"); } catch { /* best-effort */ }
-					settleFromProcess(code, null);
+					void settleFromProcess(code, null);
 				}, 100);
 				exitFilePollTimer.unref?.();
 			}
@@ -5628,22 +5638,23 @@ export class VerificationHarness {
 				exitCode = code;
 				exitSignal = signal;
 				closeGraceTimer = processClock.setTimeout(() => {
-					if (settled) return;
+					if (settled || settleStarted) return;
 					const warning = `[verification] command process exited but stdio did not close within ${COMMAND_EXIT_CLOSE_GRACE_MS}ms; treating the process exit as authoritative and attempting to kill any remaining subprocess group.`;
 					stderr += `${stderr ? "\n" : ""}${warning}`;
 					appendRetainedLogChunk(errFile, `${warning}\n`);
 					try { if (child.pid) killTreeByPid(child.pid, "SIGKILL"); } catch { /* best-effort */ }
 					try { child.stdout?.destroy(); } catch { /* ignore */ }
 					try { child.stderr?.destroy(); } catch { /* ignore */ }
-					settleFromProcess(exitCode, exitSignal);
+					void settleFromProcess(exitCode, exitSignal);
 				}, COMMAND_EXIT_CLOSE_GRACE_MS);
 				closeGraceTimer.unref?.();
 			});
 			child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
-				settleFromProcess(code ?? exitCode, signal ?? exitSignal);
+				void settleFromProcess(code ?? exitCode, signal ?? exitSignal);
 			});
 			child.on("error", (err: Error) => {
-				if (settled) return;
+				if (settled || settleStarted) return;
+				settleStarted = true;
 				settled = true;
 				if (closeGraceTimer) processClock.clearTimeout(closeGraceTimer);
 				if (exitFilePollTimer) processClock.clearInterval(exitFilePollTimer);
