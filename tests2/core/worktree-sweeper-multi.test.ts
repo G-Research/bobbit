@@ -23,6 +23,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { RECOVERY_IO_CONCURRENCY } from "../../src/server/agent/bounded-async-work.ts";
 import { classifyWorktrees, sweepOrphanedWorktrees } from "../../src/server/agent/worktree-sweeper.ts";
+import { normalizeWorktreeHostPath } from "../../src/server/agent/worktree-reference-guard.ts";
 import type { CommandRunner } from "../../src/server/gateway-deps.ts";
 import type { RemoteGitPolicy } from "../../src/server/skills/git.ts";
 
@@ -314,13 +315,20 @@ describe("worktree-sweeper — bounded asynchronous sweep", () => {
 		assert.deepEqual(cleanupCalls, [], "a worktree claimed after the initial snapshot must never be deleted");
 	});
 
-	it("fails closed for a path-only /var claim first seen while realpath resolves aliases", async () => {
-		// macOS Git reports /private/var while durable records can retain /var.
-		// The new claim is path-only, so branch ownership cannot mask an alias bug.
-		const repo = "/private/var/folders/worktree-sweeper/repo";
-		const worktreePath = "/private/var/folders/worktree-sweeper-wt/new-session";
-		const aliasProbePath = "/var/folders/worktree-sweeper-wt/alias-probe";
-		const claimedAliasPath = "/var/folders/worktree-sweeper-wt/new-session";
+	it("fails closed for a path-only alias claim first seen while realpath resolves aliases", async () => {
+		// Model the /var → /private/var spelling distinction in the host dialect.
+		// The sweeper normalizes host paths before invoking its realpath seam, so
+		// raw POSIX fixture strings would never observe that call on Windows.
+		const hostRoot = path.parse(path.resolve(path.sep)).root;
+		// Match the sweeper's injected-realpath contract: values have already
+		// passed through its host normalizer when this seam receives them.
+		const hostPath = (...segments: string[]) => normalizeWorktreeHostPath(path.resolve(hostRoot, ...segments))!;
+		const lexicalRoot = hostPath("var", "folders", "worktree-sweeper-wt");
+		const canonicalRoot = hostPath("private", "var", "folders", "worktree-sweeper-wt");
+		const repo = hostPath("private", "var", "folders", "worktree-sweeper", "repo");
+		const worktreePath = hostPath("private", "var", "folders", "worktree-sweeper-wt", "new-session");
+		const aliasProbePath = hostPath("var", "folders", "worktree-sweeper-wt", "alias-probe");
+		const claimedAliasPath = hostPath("var", "folders", "worktree-sweeper-wt", "new-session");
 		const branch = "session/new-realpath-owner";
 		const realpathStarted = new Deferred();
 		const releaseRealpath = new Deferred();
@@ -354,7 +362,9 @@ describe("worktree-sweeper — bounded asynchronous sweep", () => {
 						realpathStarted.resolve();
 						await releaseRealpath.promise;
 					}
-					return value.replace(/^\/var\//, "/private/var/");
+					return value === lexicalRoot || value.startsWith(`${lexicalRoot}/`)
+						? `${canonicalRoot}${value.slice(lexicalRoot.length)}`
+						: value;
 				},
 			},
 			commandRunner: runner,
@@ -371,7 +381,7 @@ describe("worktree-sweeper — bounded asynchronous sweep", () => {
 
 		assert.deepEqual(await sweep, { reclaimed: 0, cleaned: 0, repaired: 0 });
 		assert.equal(ownershipReads, 2, "the final ownership read must follow alias I/O");
-		assert.deepEqual(cleanupCalls, [], "an unresolved final /var alias must fail closed instead of deleting the /private/var worktree");
+		assert.deepEqual(cleanupCalls, [], "an unresolved final alias must fail closed instead of deleting the canonical worktree");
 	});
 
 	it("bounds cleanup across repos while keeping each repo sequential", async () => {
