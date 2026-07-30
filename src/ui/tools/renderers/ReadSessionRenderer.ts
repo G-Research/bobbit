@@ -10,6 +10,8 @@ import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html, type TemplateResult } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { History, ExternalLink } from "lucide";
+import { gatewayFetch } from "../../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../../shared/base-path.js";
 import { renderCollapsibleHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 import { renderSessionLink } from "./delegate-cards.js";
@@ -110,7 +112,7 @@ function renderCompactMessage(m: CompactMessage): TemplateResult {
 async function fetchPage(sessionId: string, offset: number, limit: number, verbose: boolean): Promise<any> {
 	const qs = new URLSearchParams({ offset: String(offset), limit: String(limit) });
 	if (verbose) qs.set("verbose", "1");
-	const resp = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/transcript?${qs.toString()}`, {
+	const resp = await gatewayFetch(gatewayRoute(`/api/sessions/${encodeURIComponent(sessionId)}/transcript?${qs.toString()}`), {
 		credentials: "include",
 	});
 	if (!resp.ok) {

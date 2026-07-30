@@ -4,6 +4,7 @@
 // `Messages.ts` lean and avoids `__ready` flakes under parallel-worker
 // contention.
 import { gatewayFetch } from "../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../shared/base-path.js";
 
 /**
  * Fetch full tool input content from the server on demand.
@@ -19,9 +20,9 @@ export async function fetchToolContent(
 	messageIndex: number,
 	blockIndex: number,
 ): Promise<string> {
-	const res = await gatewayFetch(
+	const res = await gatewayFetch(gatewayRoute(
 		`/api/sessions/${sessionId}/tool-content/${messageIndex}/${blockIndex}`,
-	);
+	));
 	if (!res.ok) {
 		throw new Error(`Failed to fetch tool content: ${res.status} ${res.statusText}`);
 	}

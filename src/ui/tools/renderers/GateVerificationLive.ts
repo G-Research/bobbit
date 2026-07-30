@@ -13,6 +13,8 @@ import "../../components/LiveTimer.js";
 import "../../components/VerificationOutputModal.js";
 import { ansiToHtml, hasAnsi } from "../../utils/ansi.js";
 import { GATE_STATUS_CLIENT_EVENT, HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE } from "../../../app/gate-status-events.js";
+import { gatewayFetch } from "../../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../../shared/base-path.js";
 import { getVerificationEventKey } from "../../../app/verification-event-bus.js";
 import "../../components/SignoffReviewLauncher.js";
 import {
@@ -317,11 +319,8 @@ export class GateVerificationLive extends LitElement {
 	private async _fetchAndReconcile(): Promise<void> {
 		if (!this.goalId || !this.gateId || !this.signalId) return;
 
-		const token = localStorage.getItem("gateway.token") || "";
-		const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-
 		try {
-			const res = await fetch(`/api/goals/${this.goalId}/gates/${this.gateId}`, { headers });
+			const res = await gatewayFetch(gatewayRoute(`/api/goals/${this.goalId}/gates/${this.gateId}`));
 			if (!res.ok) return;
 			const gate = await res.json();
 
@@ -349,7 +348,7 @@ export class GateVerificationLive extends LitElement {
 				let activeFetchOk = false;
 				let hasLiveActive = false;
 				try {
-					const activeRes = await fetch(`/api/goals/${this.goalId}/verifications/active`, { headers });
+					const activeRes = await gatewayFetch(gatewayRoute(`/api/goals/${this.goalId}/verifications/active`));
 					if (activeRes.ok) {
 						activeFetchOk = true;
 						const activeData = await activeRes.json();

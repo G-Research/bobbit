@@ -1,5 +1,7 @@
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { gatewayFetch } from "../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../shared/base-path.js";
 import { formatCost, formatTokenCount } from "../utils/format.js";
 
 interface SessionCostEntry {
@@ -67,18 +69,15 @@ export class CostPopover extends LitElement {
 		this._loading = true;
 		this._error = "";
 		try {
-			const token = localStorage.getItem("gateway.token") || "";
-			const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
-
 			if (this.goalId) {
-				const res = await fetch(`/api/goals/${this.goalId}/cost/breakdown`, { headers });
+				const res = await gatewayFetch(gatewayRoute(`/api/goals/${this.goalId}/cost/breakdown`));
 				if (!res.ok) throw new Error(`${res.status}`);
 				const data = await res.json();
 				this._aggregate = data.aggregate;
 				this._sessions = data.sessions || [];
 				this._delegates = [];
 			} else if (this.sessionId) {
-				const res = await fetch(`/api/sessions/${this.sessionId}/cost/breakdown`, { headers });
+				const res = await gatewayFetch(gatewayRoute(`/api/sessions/${this.sessionId}/cost/breakdown`));
 				if (!res.ok) throw new Error(`${res.status}`);
 				const data = await res.json();
 				this._aggregate = data.session;

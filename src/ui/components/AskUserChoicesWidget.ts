@@ -35,18 +35,9 @@
 import { LitElement, html, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { repeat } from "lit/directives/repeat.js";
+import { gatewayFetch } from "../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../shared/base-path.js";
 import { createTransientDraftStore } from "../storage/transient-draft-store.js";
-
-/**
- * Resolve the gateway auth token. Tries both storage keys used by the app
- * ("gateway.token" set by main.ts on connect, and "auth-token" used by the
- * legacy auth-token util).
- */
-function resolveAuthToken(): string {
-	return localStorage.getItem("gateway.token")
-		?? localStorage.getItem("auth-token")
-		?? "";
-}
 
 /** Sentinel value for the "Other" option — distinct from any real option text. */
 export const OTHER_SENTINEL = "__OTHER__";
@@ -441,12 +432,8 @@ export class AskUserChoicesWidget extends LitElement {
 			};
 		});
 		try {
-			const token = resolveAuthToken();
-			const headers: Record<string, string> = { "Content-Type": "application/json" };
-			if (token) headers["Authorization"] = `Bearer ${token}`;
-			const resp = await fetch("/api/internal/user-question/submit", {
+			const resp = await gatewayFetch(gatewayRoute("/api/internal/user-question/submit"), {
 				method: "POST",
-				headers,
 				body: JSON.stringify({ sessionId: this.sessionId, toolUseId: this.toolUseId, answers }),
 			});
 			if (!resp.ok) {

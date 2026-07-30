@@ -2,6 +2,8 @@ import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { FileCode2 } from "lucide";
+import { gatewayFetch } from "../../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../../shared/base-path.js";
 import { i18n } from "../../utils/i18n.js";
 import { renderCollapsibleHeader, renderHeader, getToolState, isSkippedToolResult } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
@@ -36,13 +38,9 @@ function getSessionIdFromHash(): string | undefined {
  *  When snapshotId is provided, the server saves a copy so it survives page refresh. */
 async function fetchFileContent(sessionId: string, filePath: string, snapshotId?: string): Promise<string | null> {
 	try {
-		const gwUrl = localStorage.getItem("gateway.url") || window.location.origin;
-		const token = localStorage.getItem("gateway.token") || "";
-		let url = `${gwUrl}/api/sessions/${sessionId}/file-content?path=${encodeURIComponent(filePath)}`;
-		if (snapshotId) url += `&snapshotId=${encodeURIComponent(snapshotId)}`;
-		const res = await fetch(url, {
-			headers: { Authorization: `Bearer ${token}` },
-		});
+		let route = `/api/sessions/${sessionId}/file-content?path=${encodeURIComponent(filePath)}`;
+		if (snapshotId) route += `&snapshotId=${encodeURIComponent(snapshotId)}`;
+		const res = await gatewayFetch(gatewayRoute(route));
 		if (!res.ok) return null;
 		const data = await res.json();
 		return data.content ?? null;

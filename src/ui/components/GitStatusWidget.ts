@@ -1,5 +1,7 @@
 import { html, LitElement, nothing, render } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { gatewayFetch } from '../../app/gateway-fetch.js';
+import { gatewayRoute } from '../../shared/base-path.js';
 import './RichGitDiffViewer.js';
 
 type CommitChangedFile = {
@@ -52,7 +54,6 @@ export class GitStatusWidget extends LitElement {
 
     @property() sessionId = '';
     @property() goalId = '';
-    @property() token = '';
 
     // PR status properties
     @property() prState?: string; // "OPEN" | "MERGED" | "CLOSED"
@@ -741,9 +742,7 @@ export class GitStatusWidget extends LitElement {
         if (options.commit) url += `&commit=${encodeURIComponent(options.commit)}`;
         if (repo && repo !== '.') url += `&repo=${encodeURIComponent(repo)}`;
         try {
-            const headers: Record<string, string> = {};
-            if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
-            const resp = await fetch(url, { headers });
+            const resp = await gatewayFetch(gatewayRoute(url));
             if (this._diffRequestKey !== requestKey) return;
             if (!resp.ok) {
                 const body = await resp.json().catch(() => ({}));
@@ -856,9 +855,7 @@ export class GitStatusWidget extends LitElement {
         if (vs) params.set('vs', vs);
         const base = params.toString() ? `${basePath}?${params}` : basePath;
         try {
-            const headers: Record<string, string> = {};
-            if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
-            const resp = await fetch(base, { headers });
+            const resp = await gatewayFetch(gatewayRoute(base));
             if (!resp.ok) {
                 const body = await resp.json().catch(() => ({}));
                 this._commitsError = (body as Record<string, string>).error || `HTTP ${resp.status}`;

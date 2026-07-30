@@ -36,6 +36,8 @@ import { GATE_STATUS_CACHE_UPDATED_EVENT_TYPE, GATE_STATUS_CLIENT_EVENT, HUMAN_S
 import { renderGateProgressBadge, renderGateStatusIcon } from "../../app/render-helpers.js";
 import { setHashRoute } from "../../app/routing.js";
 import { state as appState } from "../../app/state.js";
+import { activeGatewayConnection, gatewayFetch, gatewayWsUrl } from "../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../shared/base-path.js";
 
 type GateStatus = "pending" | "passed" | "failed" | "running" | "bypassed";
 
@@ -66,7 +68,6 @@ function signoffKey(s: { signalId: string; stepName: string }): string {
 @customElement("goal-status-widget")
 export class GoalStatusWidget extends LitElement {
 	@property() goalId = "";
-	@property() token = "";
 	@property() branch = "";
 
 	@state() private _gates: GateSummary[] = [];
@@ -279,10 +280,8 @@ export class GoalStatusWidget extends LitElement {
 	}
 
 	private async _fetch(path: string, init?: RequestInit): Promise<Response | null> {
-		const headers: Record<string, string> = { "Content-Type": "application/json" };
-		if (this.token) headers["Authorization"] = `Bearer ${this.token}`;
 		try {
-			return await fetch(path, { ...init, headers: { ...headers, ...(init?.headers as Record<string, string> | undefined) } });
+			return await gatewayFetch(gatewayRoute(path), init);
 		} catch {
 			return null;
 		}
@@ -403,8 +402,8 @@ export class GoalStatusWidget extends LitElement {
 		if (!this.goalId) return;
 		if (this._ws && (this._ws.readyState === WebSocket.OPEN || this._ws.readyState === WebSocket.CONNECTING)) return;
 		this._wsIntentionalClose = false;
-		const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-		const ws = new WebSocket(`${protocol}//${location.host}/ws/viewer`);
+		const connection = activeGatewayConnection();
+		const ws = new WebSocket(gatewayWsUrl(gatewayRoute("/ws/viewer"), connection.baseUrl));
 		this._ws = ws;
 
 		const subscribe = () => {
@@ -413,8 +412,11 @@ export class GoalStatusWidget extends LitElement {
 			}
 		};
 		ws.addEventListener("open", () => {
-			if (this.token) {
-				ws.send(JSON.stringify({ type: "auth", token: this.token, goalId: this.goalId }));
+			// WebSocket first-frame authentication is protocol data, not an HTTP
+			// Authorization header. Keep sending the localhost sentinel here while
+			// gatewayAuthorizationHeaders deliberately omits it from fetches.
+			if (connection.token) {
+				ws.send(JSON.stringify({ type: "auth", token: connection.token, goalId: this.goalId }));
 			} else {
 				subscribe();
 			}

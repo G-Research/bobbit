@@ -50,7 +50,9 @@ import {
 	type PromptAuthorAppearance,
 } from "../../app/message-author-appearance.js";
 import { sessionColorMap } from "../../app/session-colors.js";
-import { copyTextToClipboard, gatewayFetch } from "../../app/api.js";
+import { copyTextToClipboard } from "../../app/api.js";
+import { gatewayFetch } from "../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../shared/base-path.js";
 import { selectProposalWorkspaceTab } from "../../app/preview-panel.js";
 import { setHashRoute } from "../../app/routing.js";
 import { canContinueArchivedSession, continueArchivedSession } from "../../app/session-actions.js";
@@ -193,7 +195,7 @@ export class AgentInterface extends LitElement {
 		if (this._archivedProposalsFetchedFor === sessionId) return;
 		this._archivedProposalsFetchedFor = sessionId;
 		try {
-			const resp = await gatewayFetch(`/api/sessions/${sessionId}/proposals`);
+			const resp = await gatewayFetch(gatewayRoute(`/api/sessions/${sessionId}/proposals`));
 			if (!resp.ok) {
 				this._archivedProposalTypes = [];
 				return;
@@ -2367,12 +2369,10 @@ export class AgentInterface extends LitElement {
 							${this._renderPillStrip()}
 							${(this.goalId || this.teamGoalId) ? html`<goal-status-widget
 								.goalId=${this.teamGoalId || this.goalId || ''}
-								.token=${localStorage.getItem("gateway.token") || ""}
 								.branch=${this.gitStatus?.branch ?? ''}
 							></goal-status-widget>` : nothing}
 							${this._showGitStatusWidget ? html`<git-status-widget
 								.sessionId=${this.session?.sessionId ?? ''}
-								.token=${localStorage.getItem("gateway.token") || ""}
 								.branch=${this.gitStatus?.branch ?? ''}
 								.primaryBranch=${this.gitStatus?.primaryBranch ?? 'master'}
 								.primaryRef=${this.gitStatus?.primaryRef ?? `origin/${this.gitStatus?.primaryBranch ?? 'master'}`}

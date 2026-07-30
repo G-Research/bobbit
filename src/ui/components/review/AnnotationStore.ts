@@ -1,3 +1,5 @@
+import { gatewayFetch, gatewayUrl } from "../../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../../shared/base-path.js";
 import type {
   ReviewDecision,
   ReviewDecisionPayload,
@@ -72,15 +74,6 @@ export async function flushPendingWrites(): Promise<void> {
 
 // ── Internal helpers ─────────────────────────────────────────────────
 
-/** Build auth headers from localStorage (same token used by gatewayFetch in api.ts). */
-function _authHeaders(): Record<string, string> {
-  const token = (typeof localStorage !== "undefined" && localStorage.getItem("gateway.token")) || "";
-  return {
-    Authorization: `Bearer ${token}`,
-    "Content-Type": "application/json",
-  };
-}
-
 function _isKeepaliveSafe(options?: RequestInit): boolean {
   const body = options?.body;
   if (body == null) return true;
@@ -88,11 +81,10 @@ function _isKeepaliveSafe(options?: RequestInit): boolean {
   return new TextEncoder().encode(body).byteLength <= 60 * 1024;
 }
 
-function _serverFetch(url: string, options?: RequestInit): Promise<void> {
-  const p = fetch(url, {
+function _serverFetch(route: string, options?: RequestInit): Promise<void> {
+  const p = gatewayFetch(gatewayRoute(route), {
     ...options,
     keepalive: options?.keepalive ?? _isKeepaliveSafe(options),
-    headers: { ..._authHeaders(), ...options?.headers },
   }).then(() => {}).catch(() => {
     // Persistence is best-effort when the server is unavailable. Callers that
     // await this promise still wait for the request to settle when it can run.
@@ -122,9 +114,7 @@ function _ensureSessionCache(sessionId: string): Map<string, ReviewAnnotation[]>
  */
 export async function initAnnotationStore(sessionId: string): Promise<void> {
   try {
-    const res = await fetch(`/api/sessions/${sessionId}/review/annotations`, {
-      headers: _authHeaders(),
-    });
+    const res = await gatewayFetch(gatewayRoute(`/api/sessions/${sessionId}/review/annotations`));
     if (!res.ok) {
       // Server doesn't have data yet or session not found — start empty
       _annotationCache.set(sessionId, new Map());
@@ -562,7 +552,7 @@ if (typeof window !== "undefined") {
         ? { annotations, submitted: true }
         : { annotations };
       navigator.sendBeacon(
-        `/api/sessions/${sessionId}/review/annotations/bulk`,
+        gatewayUrl(gatewayRoute(`/api/sessions/${sessionId}/review/annotations/bulk`)),
         new Blob([JSON.stringify(payload)], { type: "application/json" }),
       );
     }
