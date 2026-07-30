@@ -504,6 +504,8 @@ import { VerificationHarness, goalBranchContainer } from "./agent/verification-h
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
 import { isKnownThinkingLevel } from "../shared/thinking-levels.js";
+import { normalizeBasePath, stripBasePath } from "../shared/base-path.js";
+import { rewriteManifestForBasePath, rewriteSpaShell } from "./base-path-http.js";
 import { isSessionSelectableModelString } from "./agent/google-code-assist.js";
 
 // In-memory dedup guard for ask_user_choices /submit. Keyed by
@@ -532,7 +534,12 @@ import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { CookieStore, extractCookieValue, issueCookie, tryAuth as cookieTryAuth } from "./auth/cookie.js";
 import { loadOrCreateCookieSigningKey } from "./auth/cookie-signing-key.js";
-import { classifyBrowserCookieEligibility, type BrowserCookieAuthentication } from "./auth/browser-cookie.js";
+import {
+	canonicalHttpOrigin,
+	classifyBrowserCookieEligibility,
+	isBrowserCookieAuthenticationCompatible,
+	type BrowserCookieAuthentication,
+} from "./auth/browser-cookie.js";
 import { authorizeChildrenMutation } from "./auth/children-mutation-authz.js";
 import { handlePreviewRequest, pickEntry } from "./preview/content-route.js";
 import { handlePrWalkthroughApiRoute } from "./pr-walkthrough/routes.js";
@@ -1813,6 +1820,14 @@ export interface GatewayConfig {
 	authToken: string;
 	defaultCwd: string;
 	staticDir?: string;
+	/** Canonical runtime mount; omitted/empty means root-mounted. */
+	basePath?: string;
+	/**
+	 * Runs immediately after the listener binds and before persisted sessions or
+	 * verification teams can resume. CLI callers use this to publish the actual
+	 * mounted callback URL (especially when `port` is zero).
+	 */
+	onBound?: (actualPort: number) => string | void | Promise<string | void>;
 	agentCliPath?: string;
 	systemPromptPath?: string;
 	tls?: TlsConfig;
@@ -1875,6 +1890,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		__ckLast = now;
 		if (delta >= SLOW_PHASE_MS) bootLog(`[boot] ctor ${label} +${delta}ms (@${now - __ckT0}ms)`);
 	};
+	const basePath = normalizeBasePath(config.basePath);
+	let publishedGatewayUrl: string | undefined;
 	const { gatewayDeps, restoreExplicitRpcBridgeFactory } = installGatewayBridgeDeps(deps);
 	serverCommandRunner = gatewayDeps.commandRunner;
 	const envRuntimeFlags = resolveLegacyTestRuntimeFlags();
@@ -1888,6 +1905,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	};
 	config = {
 		...config,
+		basePath,
 		skipRemotePush: gatewayRuntimeFlags.skipRemotePush,
 		skipNonLocalRemoteGit: gatewayRuntimeFlags.skipNonLocalRemoteGit,
 		skipMcp: gatewayRuntimeFlags.skipMcp,
@@ -2467,7 +2485,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}),
 		gatewayInfo: () => {
 			try {
-				const baseUrl = process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
+				const baseUrl = publishedGatewayUrl || process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
 				// Secrets moved to serverSecretsDir() after the S1 relocation; readToken()
 				// is relocation-aware (new location + legacy fallback), so a fresh install
 				// with no legacy token still resolves instead of ENOENT-ing.
@@ -2663,9 +2681,30 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 
 	// Sandbox manager — assigned in start() when sandbox=docker
 	let sandboxManager: SandboxManager | null = null;
+	// The listener binds before session restoration so the actual port can be
+	// published. Mounted routing remains active during that window, but in-mount
+	// traffic is held behind a 503 readiness gate.
+	let gatewayReady = false;
 
 	const requestHandler = async (req: http.IncomingMessage, res: http.ServerResponse) => {
-		const url = new URL(req.url || "/", `http://${req.headers.host}`);
+		const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+		if (basePath && url.pathname === basePath) {
+			res.writeHead(301, { Location: `${basePath}/${url.search}` });
+			res.end();
+			return;
+		}
+		const mountRelativePath = stripBasePath(url.pathname, basePath);
+		if (mountRelativePath === null) {
+			res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+			res.end("Not found");
+			return;
+		}
+		url.pathname = mountRelativePath;
+		if (!gatewayReady) {
+			res.writeHead(503, { "Content-Type": "text/plain; charset=utf-8", "Retry-After": "1" });
+			res.end("Gateway starting");
+			return;
+		}
 		const isLocalhostMode = !config.forceAuth && (config.host === "localhost" || config.host === "127.0.0.1" || config.host === "::1");
 
 		// Content-origin preview route — served before API auth so iframe loads
@@ -2676,6 +2715,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				cookieStore,
 				isLocalhost: isLocalhostMode,
 				adminBearerToken: config.authToken,
+				basePath,
 			});
 			return;
 		}
@@ -2692,10 +2732,17 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				});
 			}
 
-			// When serving the UI (same-origin), reflect the request origin; otherwise allow any
-			const corsOrigin = config.staticDir ? (req.headers.origin || "*") : "*";
-			res.setHeader("Access-Control-Allow-Origin", corsOrigin);
-			if (corsOrigin !== "*") res.setHeader("Vary", "Origin");
+			// Credentialed browser requests must reflect one syntactically valid
+			// serialized HTTP(S) origin. Non-browser requests have no Origin and keep
+			// the wildcard compatibility response (without credentials).
+			const corsOrigin = canonicalHttpOrigin(req.headers.origin);
+			if (corsOrigin) {
+				res.setHeader("Access-Control-Allow-Origin", corsOrigin);
+				res.setHeader("Access-Control-Allow-Credentials", "true");
+				res.setHeader("Vary", "Origin");
+			} else if (req.headers.origin === undefined) {
+				res.setHeader("Access-Control-Allow-Origin", "*");
+			}
 			res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
 			res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Bobbit-Session-Id, X-Bobbit-Spawning-Session");
 
@@ -2725,10 +2772,18 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 
 			// Extract and verify the signed cookie exactly once in the global auth
 			// flow. The verification result also carries the renewal decision.
-			const cookieValue = extractCookieValue(req);
+			const isTls = Boolean((req.socket as { encrypted?: boolean }).encrypted);
+			const cookieValue = extractCookieValue(req, cookieStore);
 			const cookieVerification = cookieValue === undefined ? undefined : cookieStore.verify(cookieValue);
-			const hasValidCookie = cookieVerification !== undefined;
-			let authentication: BrowserCookieAuthentication = cookieVerification
+			const cookieOriginCompatible = isBrowserCookieAuthenticationCompatible({
+				headers: req.headers,
+				isTls,
+			}, {
+				deployment: config.staticDir ? "direct" : "vite",
+				configuredHost: config.host,
+			});
+			const hasValidCookie = cookieVerification !== undefined && cookieOriginCompatible;
+			let authentication: BrowserCookieAuthentication = hasValidCookie && cookieVerification
 				? { source: "signed-cookie", needsRenewal: cookieVerification.needsRenewal }
 				: { source: "other" };
 
@@ -2788,7 +2843,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			}
 
 			if (!isPublicEndpoint) {
-				const isTls = Boolean((req.socket as { encrypted?: boolean }).encrypted);
 				const cookieEligibility = classifyBrowserCookieEligibility({
 					method: req.method,
 					pathname: url.pathname,
@@ -2801,7 +2855,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					hasSandboxCredential,
 				});
 				if (cookieEligibility.mayBootstrap || cookieEligibility.mayRenew) {
-					issueCookie(res, cookieStore, { localhost: isLocalhostMode && !isTls });
+					issueCookie(res, cookieStore, { localhost: isLocalhostMode && !isTls, basePath });
 				}
 			}
 
@@ -2834,9 +2888,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			try {
 				const manifest = loadManifest(config.staticDir);
 				const providedToken = url.searchParams.get("token");
-				if (providedToken && validateToken(providedToken, config.authToken)) {
-					manifest.start_url = `/?token=${encodeURIComponent(providedToken)}`;
-				}
+				const validToken = providedToken && validateToken(providedToken, config.authToken)
+					? providedToken
+					: undefined;
+				const publicManifest = rewriteManifestForBasePath(manifest, basePath, validToken);
 				res.writeHead(200, {
 					"Content-Type": "application/manifest+json",
 					// Don't let the manifest be cached — token-validity may change.
@@ -2844,7 +2899,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					// Prevent token leakage via Referer when the PWA makes cross-origin requests.
 					"Referrer-Policy": "no-referrer",
 				});
-				res.end(JSON.stringify(manifest));
+				res.end(JSON.stringify(publicManifest));
 				return;
 			} catch {
 				// Fall through to static serving on any error.
@@ -2853,7 +2908,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 
 		// Static file serving
 		if (config.staticDir) {
-			serveStatic(url.pathname, config.staticDir, res);
+			serveStatic(url.pathname, config.staticDir, res, basePath);
 			return;
 		}
 
@@ -3248,9 +3303,18 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const isLocalhostServer = !config.forceAuth && (config.host === "localhost" || config.host === "127.0.0.1" || config.host === "::1");
 
 	server.on("upgrade", (req, socket, head) => {
-		const url = new URL(req.url || "/", `http://${req.headers.host}`);
-		const viewerMatch = url.pathname === "/ws/viewer";
-		const match = viewerMatch ? null : url.pathname.match(/^\/ws\/([^/]+)$/);
+		const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+		const wsPathname = stripBasePath(url.pathname, basePath);
+		if (wsPathname === null) {
+			socket.destroy();
+			return;
+		}
+		if (!gatewayReady) {
+			socket.destroy();
+			return;
+		}
+		const viewerMatch = wsPathname === "/ws/viewer";
+		const match = viewerMatch ? null : wsPathname.match(/^\/ws\/([^/]+)$/);
 
 		if (!match && !viewerMatch) {
 			socket.destroy();
@@ -3274,6 +3338,43 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	ck("post-VerificationHarness-to-return");
 	bootLog(`[boot] ctor total (createGateway body) ${Date.now() - __ckT0}ms`);
 	let bootBackgroundTask: Promise<void> | null = null;
+
+	const closeBoundServer = async (): Promise<void> => {
+		gatewayReady = false;
+		if (!server.listening) return;
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+	};
+
+	const bindGatewayServer = async (): Promise<number> => {
+		const maxPort = config.port === 0 || config.portExplicit !== false ? config.port : config.port + 9;
+		let port = config.port;
+		while (port <= maxPort) {
+			try {
+				await new Promise<void>((resolve, reject) => {
+					const onError = (error: Error) => reject(error);
+					server.once("error", onError);
+					server.listen(port, config.host, () => {
+						server.removeListener("error", onError);
+						resolve();
+					});
+				});
+				const address = server.address() as import("node:net").AddressInfo;
+				if (port !== 0 && port !== config.port) {
+					console.log(`Port ${config.port} in use, using port ${address.port}`);
+				}
+				return address.port;
+			} catch (error: any) {
+				if (error?.code === "EADDRINUSE" && port < maxPort) {
+					console.log(`Port ${port} in use, trying ${port + 1}...`);
+					port++;
+					continue;
+				}
+				throw error;
+			}
+		}
+		throw new Error(`All ports ${config.port}-${maxPort} in use`);
+	};
+
 	return {
 		server,
 		deps: gatewayDeps,
@@ -3477,6 +3578,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			sandboxManager = new SandboxManager({ bootstrap: sandboxBootstrap, commandRunner: gatewayDeps.commandRunner, clock: gatewayDeps.clock, worktreeSetupRuntime });
 			sessionManager.setSandboxManager(sandboxManager);
 			sessionManager.subscribeSandboxRecovery();
+
+			// Bind before restoration so port-zero and auto-incremented callback URLs
+			// can be published atomically before any agent/extension process resumes.
+			const actualPort = await bindGatewayServer();
+			try {
+				const callbackUrl = await config.onBound?.(actualPort);
+				if (typeof callbackUrl === "string" && callbackUrl) publishedGatewayUrl = callbackUrl;
 
 			// Restore persisted teams before sessions so reconstructed records are available
 			// to session revival. Both complete before accepting connections.
@@ -3718,53 +3826,16 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					console.error("[verification] Error resuming interrupted verifications:", err);
 				});
 			});
-			bootLog(`[boot] start() reached listen() at ${Date.now() - bootStart}ms`);
-
-			// Port 0 = let OS assign a free port; skip the auto-increment loop
-			if (config.port === 0) {
-				await new Promise<void>((resolve, reject) => {
-					server.once("error", reject);
-					server.listen(0, config.host, () => {
-						server.removeListener("error", reject);
-						resolve();
-					});
-				});
-				const addr = server.address() as import("node:net").AddressInfo;
-				bootBackgroundTask = runBootBackgroundTasks().catch((err) => {
-					console.warn("[boot] background tasks failed (non-fatal):", err);
-				});
-				return addr.port;
+			gatewayReady = true;
+			bootLog(`[boot] start() ready on port ${actualPort} at ${Date.now() - bootStart}ms`);
+			bootBackgroundTask = runBootBackgroundTasks().catch((err) => {
+				console.warn("[boot] background tasks failed (non-fatal):", err);
+			});
+			return actualPort;
+			} catch (error) {
+				await closeBoundServer();
+				throw error;
 			}
-
-			const maxPort = config.portExplicit !== false ? config.port : config.port + 9;
-			let port = config.port;
-
-			while (port <= maxPort) {
-				try {
-					await new Promise<void>((resolve, reject) => {
-						server.once("error", reject);
-						server.listen(port, config.host, () => {
-							server.removeListener("error", reject);
-							resolve();
-						});
-					});
-					if (port !== config.port) {
-						console.log(`Port ${config.port} in use, using port ${port}`);
-					}
-					bootBackgroundTask = runBootBackgroundTasks().catch((err) => {
-						console.warn("[boot] background tasks failed (non-fatal):", err);
-					});
-					return port;
-				} catch (err: any) {
-					if (err.code === "EADDRINUSE" && port < maxPort) {
-						console.log(`Port ${port} in use, trying ${port + 1}...`);
-						port++;
-						continue;
-					}
-					throw err;
-				}
-			}
-			throw new Error(`All ports ${config.port}-${maxPort} in use`);
 		},
 		async shutdown() {
 			const shutdownStart = Date.now();
@@ -17024,7 +17095,7 @@ function loadManifest(staticDir: string | undefined): { start_url?: string;[k: s
 	throw new Error("manifest.json not found");
 }
 
-function serveStatic(pathname: string, staticDir: string, res: http.ServerResponse) {
+function serveStatic(pathname: string, staticDir: string, res: http.ServerResponse, basePath = "") {
 	const resolvedStaticDir = path.resolve(staticDir);
 	let filePath = path.resolve(staticDir, pathname === "/" ? "index.html" : pathname.slice(1));
 
@@ -17048,7 +17119,11 @@ function serveStatic(pathname: string, staticDir: string, res: http.ServerRespon
 
 		const ext = path.extname(filePath).toLowerCase();
 		const contentType = MIME_TYPES[ext] || "application/octet-stream";
-		const content = fs.readFileSync(filePath);
+		const basename = path.basename(filePath);
+		const rawContent = fs.readFileSync(filePath);
+		const content: Buffer | string = basename === "index.html"
+			? rewriteSpaShell(rawContent.toString("utf-8"), basePath)
+			: rawContent;
 
 		const headers: Record<string, string> = { "Content-Type": contentType };
 		// Service-worker file: never cache. Browsers byte-compare SWs for
@@ -17056,7 +17131,6 @@ function serveStatic(pathname: string, staticDir: string, res: http.ServerRespon
 		// silently keep users on the old build's CACHE_NAME. Same goes for
 		// the SPA shell (index.html) — it references hashed bundle names
 		// that change every build.
-		const basename = path.basename(filePath);
 		if (basename === "sw.js" || basename === "index.html") {
 			headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
 		}
