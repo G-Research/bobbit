@@ -31,6 +31,9 @@ beforeAll(() => {
 	fs.mkdirSync(path.join(cwdDir, "src"), { recursive: true });
 	fs.writeFileSync(path.join(cwdDir, "notes.txt"), NOTES_CONTENT, "utf-8");
 	fs.writeFileSync(path.join(cwdDir, "src", "a.ts"), SOURCE_CONTENT, "utf-8");
+	for (const fixture of ["compact-lf.txt", "compact-crlf.txt", "compact-cr.txt"]) {
+		fs.writeFileSync(path.join(cwdDir, fixture), NOTES_CONTENT, "utf-8");
+	}
 	fs.writeFileSync(path.join(cwdDir, "pixel.png"), PIXEL_BYTES);
 	fs.writeFileSync(path.join(cwdDir, "data.bin"), BINARY_BYTES);
 });
@@ -1396,6 +1399,67 @@ describe("resolveFileMentions", () => {
 		}
 	});
 
+	it("preserves exact compact LF, CRLF, and CR source-offset splices", async () => {
+		const cases = [
+			{ label: "LF", eol: "\n", validPath: "compact-lf.txt", missingPath: "compact-lf-missing.txt" },
+			{ label: "CRLF", eol: "\r\n", validPath: "compact-crlf.txt", missingPath: "compact-crlf-missing.txt" },
+			{ label: "CR", eol: "\r", validPath: "compact-cr.txt", missingPath: "compact-cr-missing.txt" },
+		] as const;
+		const fixtures = cases.map(({ eol, validPath, missingPath }) => {
+			const text = [
+				`matched \`keep @${validPath} literal\``,
+				`multiline \`\`first${eol}second @${validPath} literal\`\``,
+				"```text",
+				`@${validPath} and @${missingPath}`,
+				"```",
+				`😀 outside @${validPath}; missing @${missingPath}.`,
+			].join(eol);
+			return { text, start: text.lastIndexOf(`@${validPath}`) };
+		});
+		const lstatSpy = vi.spyOn(fs.promises, "lstat");
+
+		try {
+			const results = await Promise.all(fixtures.map(({ text }) => resolveFileMentions(text, cwdDir)));
+			const probedPaths = lstatSpy.mock.calls.map(([target]) => path.resolve(String(target)));
+
+			for (const [index, { label, validPath, missingPath }] of cases.entries()) {
+				const { text, start } = fixtures[index];
+				const result = results[index];
+				const token = `@${validPath}`;
+				assert.equal(result.originalText, text, `${label}: source text must remain exact`);
+				assert.equal(
+					[...text.slice(0, start)].length,
+					start - 1,
+					`${label}: the astral prefix must distinguish UTF-16 units from code points`,
+				);
+				assert.deepEqual(
+					result.mentions.map((mention) => ({ kind: mention.kind, path: mention.path, range: mention.range })),
+					[{ kind: "text", path: validPath, range: [start, start + token.length] }],
+					`${label}: only the final outside mention may resolve at its exact source range`,
+				);
+				assert.equal(
+					result.modelText,
+					text.slice(0, start)
+						+ buildFileReferenceBlock(validPath, NOTES_CONTENT)
+						+ text.slice(start + token.length),
+					`${label}: inline code and fenced code must remain exact around the outside splice`,
+				);
+				assert.deepEqual(result.warnings, [], `${label}: the missing prose target stays ordinary text`);
+
+				const expectedProbes = [
+					path.resolve(cwdDir, validPath),
+					path.resolve(cwdDir, missingPath),
+				].sort();
+				assert.deepEqual(
+					probedPaths.filter((target) => expectedProbes.includes(target)).sort(),
+					expectedProbes,
+					`${label}: only its distinct outside valid and missing targets may reach lstat`,
+				);
+			}
+		} finally {
+			lstatSpy.mockRestore();
+		}
+	});
 
 	it("maps nested CRLF code compactly while preserving an outside UTF-16 mention range", async () => {
 		const nestedCodeLine = "  > ` keep @notes.txt and @nested-code-missing.txt literal\r\n";
