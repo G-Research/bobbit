@@ -29,6 +29,19 @@ describe("component path traversal", () => {
 		assert.equal(isSafeRelPath("a\0b"), false);
 	});
 
+	it("uses POSIX and Windows separator semantics identically on every host", () => {
+		assert.equal(path.posix.relative("/packs/demo", "/packs/demo/tools/index.ts"), "tools/index.ts");
+		assert.equal(path.posix.relative("/packs/demo", "/packs/demo-escape/index.ts"), "../demo-escape/index.ts");
+		assert.equal(path.win32.relative("C:\\packs\\demo", "C:\\packs\\demo\\tools\\index.ts"), "tools\\index.ts");
+		assert.equal(path.win32.relative("C:\\packs\\demo", "C:\\packs\\demo-escape\\index.ts"), "..\\demo-escape\\index.ts");
+
+		// Project YAML may be authored on either OS, so the production validator
+		// must reject escapes in either spelling independent of this host's OS.
+		for (const unsafe of ["..\\escape", "tools\\..\\escape", "C:/Windows", "\\\\server\\share\\repo"]) {
+			assert.equal(isSafeRelPath(unsafe), false, `must reject ${unsafe}`);
+		}
+	});
+
 	it("ProjectConfigStore drops components with traversal repo or relativePath", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "comp-traverse-"));
 		try {

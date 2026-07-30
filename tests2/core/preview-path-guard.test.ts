@@ -6,9 +6,10 @@
  * Unit tests for the path-traversal defence used by the preview content route.
  * Covers the algorithm spec'd in design doc §3.
  */
-import { describe, it, beforeAll, afterAll } from "vitest";
+import { describe, it, beforeAll, afterAll, vi } from "vitest";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
+import * as fs from "node:fs";
 import path from "node:path";
 import { resolveAssetPath } from "../../src/server/preview/path-guard.ts";
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
@@ -37,6 +38,20 @@ beforeAll(() => {
 afterAll(() => {
 	rmSync(workspaceRoot, { recursive: true, force: true });
 });
+
+/** Preserve the real production function while simulating an unavailable link. */
+function withRealpathAlias(alias: string, canonical: string, run: () => void): void {
+	const realpathSync = fs.realpathSync.bind(fs);
+	const spy = vi.spyOn(fs, "realpathSync").mockImplementation(((input: unknown, options?: unknown) => {
+		if (path.resolve(String(input)) === path.resolve(alias)) return canonical;
+		return realpathSync(input as Parameters<typeof fs.realpathSync>[0], options as never);
+	}) as never);
+	try {
+		run();
+	} finally {
+		spy.mockRestore();
+	}
+}
 
 describe("resolveAssetPath", () => {
 	it("returns ok for a sibling file", () => {
@@ -98,11 +113,19 @@ describe("resolveAssetPath", () => {
 		if (!r.ok) assert.strictEqual(r.status, 400);
 	});
 
-	it("400 on symlink that escapes baseDir (skipped on Windows without privilege)", () => {
-		if (!supportsSymlink) return;
-		const r = resolveAssetPath(baseDir, "evil-symlink");
-		assert.strictEqual(r.ok, false);
-		if (!r.ok) assert.strictEqual(r.status, 400);
+	it("400 on a symlink that escapes baseDir", () => {
+		const assertRejected = () => {
+			const r = resolveAssetPath(baseDir, "evil-symlink");
+			assert.strictEqual(r.ok, false);
+			if (!r.ok) assert.strictEqual(r.status, 400);
+		};
+		if (supportsSymlink) {
+			assertRejected();
+		} else {
+			// Restricted Windows/container runners still exercise the realpath
+			// containment branch rather than silently omitting the security check.
+			withRealpathAlias(path.join(baseDir, "evil-symlink"), fs.realpathSync(outsideFile), assertRejected);
+		}
 	});
 
 	it("404 when the file doesn't exist (within baseDir)", () => {

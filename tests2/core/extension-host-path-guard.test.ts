@@ -17,10 +17,11 @@
  *   - A lexically-escaping path (../) is rejected (false).
  *   - A missing target (ENOENT) is tolerated (true) — caller handles not-found.
  *
- * Symlink creation can fail on platforms/accounts without the privilege
- * (Windows non-admin): those cases skip gracefully rather than fail.
+ * Symlink creation can fail on restricted Windows/container hosts. Native
+ * links are preferred, with a scoped `realpathSync` seam covering the same
+ * canonical containment behavior when links are unavailable.
  */
-import { describe, it, beforeAll, afterAll } from "vitest";
+import { describe, it, beforeAll, afterAll, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -36,20 +37,39 @@ afterAll(() => {
 	try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
 });
 
-/** Create a symlink, returning false (so the test can skip) when the platform
- *  forbids it (e.g. Windows without the create-symlink privilege). */
-function trySymlink(target: string, linkPath: string): boolean {
+const UNSUPPORTED_LINK_ERRORS = new Set(["EPERM", "EACCES", "EROFS", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "UNKNOWN"]);
+
+/** Prefer a native link, but let every host exercise the realpath invariant. */
+function trySymlink(target: string, linkPath: string, type?: "dir" | "file" | "junction"): boolean {
 	try {
-		fs.symlinkSync(target, linkPath);
+		fs.symlinkSync(target, linkPath, type);
 		return true;
 	} catch (err: any) {
-		if (err && (err.code === "EPERM" || err.code === "EACCES" || err.code === "ENOSYS")) return false;
+		if (UNSUPPORTED_LINK_ERRORS.has(err?.code)) return false;
 		throw err;
 	}
 }
 
+/**
+ * Narrow test-only realpath seam for hosts that cannot create symlinks. The
+ * guard imports the Node fs object and dereferences realpathSync at call time,
+ * so this exercises its actual lexical-root/canonical-candidate comparison.
+ */
+function withRealpathAliases(aliases: ReadonlyMap<string, string>, run: () => void): void {
+	const realpathSync = fs.realpathSync.bind(fs);
+	const spy = vi.spyOn(fs, "realpathSync").mockImplementation(((input: unknown, options?: unknown) => {
+		const alias = aliases.get(path.resolve(String(input)));
+		return alias ?? realpathSync(input as Parameters<typeof fs.realpathSync>[0], options as never);
+	}) as never);
+	try {
+		run();
+	} finally {
+		spy.mockRestore();
+	}
+}
+
 describe("isPackPathWithinRoot", () => {
-	it("accepts lexical pack roots and canonical module paths through a symlinked temp root", () => {
+	it("accepts a canonical in-pack module from a lexical pack root and still rejects an outside module", () => {
 		const canonicalRoot = path.join(tmp, "canonical-pack-root");
 		const lexicalRoot = path.join(tmp, "lexical-pack-root");
 		fs.mkdirSync(path.join(canonicalRoot, "tools"), { recursive: true });
@@ -57,14 +77,28 @@ describe("isPackPathWithinRoot", () => {
 		const outside = path.join(tmp, "outside-pack-root.js");
 		fs.writeFileSync(inside, "export default 1;");
 		fs.writeFileSync(outside, "export default 2;");
-		try {
-			fs.symlinkSync(canonicalRoot, lexicalRoot, process.platform === "win32" ? "junction" : "dir");
-		} catch (error) {
-			throw new Error(`Unable to create extension-host temp-root alias: ${String(error)}`);
-		}
 
-		assert.equal(isPackPathWithinRoot(lexicalRoot, fs.realpathSync(inside)), true);
-		assert.equal(isPackPathWithinRoot(lexicalRoot, outside), false);
+		const assertInvariant = () => {
+			assert.equal(isPackPathWithinRoot(lexicalRoot, fs.realpathSync(inside)), true);
+			assert.equal(isPackPathWithinRoot(lexicalRoot, outside), false);
+		};
+		if (trySymlink(canonicalRoot, lexicalRoot, process.platform === "win32" ? "junction" : "dir")) {
+			assertInvariant();
+		} else {
+			// Restricted Windows/container runners: model the exact native alias.
+			withRealpathAliases(new Map([[path.resolve(lexicalRoot), fs.realpathSync(canonicalRoot)]]), assertInvariant);
+		}
+	});
+
+	it("pins lexical containment boundaries for both POSIX and Windows path dialects", () => {
+		const dialects = [
+			{ pathApi: path.posix, root: "/packs/demo", inside: "/packs/demo/tools/index.js", outside: "/packs/demo-escape/index.js" },
+			{ pathApi: path.win32, root: "C:\\packs\\demo", inside: "C:\\packs\\demo\\tools\\index.js", outside: "C:\\packs\\demo-escape\\index.js" },
+		];
+		for (const { pathApi, root, inside, outside } of dialects) {
+			assert.equal(pathApi.relative(root, inside).startsWith(`..${pathApi.sep}`), false);
+			assert.equal(pathApi.relative(root, outside).startsWith(`..${pathApi.sep}`), true);
+		}
 	});
 
 	it("allows a normal in-pack file", () => {
@@ -99,12 +133,12 @@ describe("isPackPathWithinRoot", () => {
 		fs.writeFileSync(secret, "export const stolen = true;");
 		// A pack entry lexically inside the group that symlinks to the secret.
 		const link = path.join(group, "renderer.js");
-		if (!trySymlink(secret, link)) {
-			// Platform cannot create symlinks — nothing to assert.
-			return;
+		const assertRejected = () => assert.equal(isPackPathWithinRoot(group, link), false);
+		if (trySymlink(secret, link)) {
+			assertRejected();
+		} else {
+			withRealpathAliases(new Map([[path.resolve(link), fs.realpathSync(secret)]]), assertRejected);
 		}
-		// Lexical check passes (link is inside group), but realpath escapes → reject.
-		assert.equal(isPackPathWithinRoot(group, link), false);
 	});
 
 	it("allows a symlink that stays within the group dir", () => {
@@ -113,8 +147,12 @@ describe("isPackPathWithinRoot", () => {
 		const real = path.join(group, "real.js");
 		fs.writeFileSync(real, "export default 1;");
 		const link = path.join(group, "alias.js");
-		if (!trySymlink(real, link)) return;
-		assert.equal(isPackPathWithinRoot(group, link), true);
+		const assertAccepted = () => assert.equal(isPackPathWithinRoot(group, link), true);
+		if (trySymlink(real, link)) {
+			assertAccepted();
+		} else {
+			withRealpathAliases(new Map([[path.resolve(link), fs.realpathSync(real)]]), assertAccepted);
+		}
 	});
 
 	it("tolerates a missing target (ENOENT) so the caller's not-found path runs", () => {

@@ -20,7 +20,7 @@
  *   npx tsx --test --test-force-exit tests/transcript-sanitizer.test.ts
  */
 
-import { describe, it, beforeAll, afterAll } from "vitest";
+import { describe, it, beforeAll, afterAll, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -43,6 +43,48 @@ function msg(role: string, content: unknown, id = "x"): string {
 }
 
 const IMG = { type: "image", source: { data: "AAAA" } };
+const UNSUPPORTED_LINK_ERRORS = new Set(["EPERM", "EACCES", "EROFS", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "UNKNOWN"]);
+
+function trySymlink(target: string, linkPath: string, type?: "dir" | "file" | "junction"): boolean {
+	try {
+		fs.symlinkSync(target, linkPath, type);
+		return true;
+	} catch (err: any) {
+		if (UNSUPPORTED_LINK_ERRORS.has(err?.code)) return false;
+		throw err;
+	}
+}
+
+/** Scoped fs seam for environments where filesystem links are unavailable. */
+function withRealpathAliases(aliases: ReadonlyMap<string, string>, run: () => void): void {
+	const realpathSync = fs.realpathSync.bind(fs);
+	const spy = vi.spyOn(fs, "realpathSync").mockImplementation(((input: unknown, options?: unknown) => {
+		const alias = aliases.get(path.resolve(String(input)));
+		return alias ?? realpathSync(input as Parameters<typeof fs.realpathSync>[0], options as never);
+	}) as never);
+	try {
+		run();
+	} finally {
+		spy.mockRestore();
+	}
+}
+
+/** Model an lstat-visible symlink without granting the test process link rights. */
+async function withSymbolicLinkAt(linkPath: string, run: () => Promise<void>): Promise<void> {
+	const lstatSync = fs.lstatSync.bind(fs);
+	const canonicalLink = path.join(fs.realpathSync(path.dirname(linkPath)), path.basename(linkPath));
+	const spy = vi.spyOn(fs, "lstatSync").mockImplementation(((input: unknown, options?: unknown) => {
+		if (path.resolve(String(input)) === path.resolve(canonicalLink)) {
+			return { isSymbolicLink: () => true, isFile: () => false } as fs.Stats;
+		}
+		return lstatSync(input as Parameters<typeof fs.lstatSync>[0], options as never);
+	}) as never);
+	try {
+		await run();
+	} finally {
+		spy.mockRestore();
+	}
+}
 
 describe("sanitizeTranscriptContent", () => {
 	it("(a) rewrites image-adjacent blank-text user message", () => {
@@ -523,28 +565,26 @@ describe("transcript write path validation", () => {
 		assert.equal(fs.readFileSync(outside, "utf-8"), POISONED, "file must remain untouched");
 	});
 
-	it("sanitizeAgentTranscriptFile rejects a symlink inside the sessions root (no read, no write)", async (t) => {
+	it("sanitizeAgentTranscriptFile rejects a symlink inside the sessions root (no read, no write)", async () => {
 		// Real (poisoned) file living OUTSIDE the sessions root.
 		const realTarget = path.join(agentDir, "symlink-target.jsonl");
 		fs.writeFileSync(realTarget, POISONED, "utf-8");
-
-		// A symlink INSIDE the sessions root pointing at the external file. If the
-		// platform forbids symlink creation (Windows w/o privilege), skip.
 		const link = path.join(sessionsRoot, "evil-link.jsonl");
-		try {
-			fs.symlinkSync(realTarget, link);
-		} catch {
-			t.skip("symlink creation not permitted on this platform");
-			return;
-		}
 
-		const rewritten = await sanitizeAgentTranscriptFile({ sandboxed: false }, link, null, rootPolicy);
-		assert.equal(rewritten, 0, "symlinked transcript path must be rejected");
-		assert.equal(
-			fs.readFileSync(realTarget, "utf-8"),
-			POISONED,
-			"symlink target must remain byte-identical (not followed)",
-		);
+		const assertRejected = async () => {
+			const rewritten = await sanitizeAgentTranscriptFile({ sandboxed: false }, link, null, rootPolicy);
+			assert.equal(rewritten, 0, "symlinked transcript path must be rejected");
+			assert.equal(
+				fs.readFileSync(realTarget, "utf-8"),
+				POISONED,
+				"symlink target must remain byte-identical (not followed)",
+			);
+		};
+		if (trySymlink(realTarget, link)) {
+			await assertRejected();
+		} else {
+			await withSymbolicLinkAt(link, assertRejected);
+		}
 	});
 
 	it("resolveSafeSessionsPath rejects symlink/out-of-root and accepts a real in-root file", () => {
@@ -558,26 +598,46 @@ describe("transcript write path validation", () => {
 		assert.equal(resolveSafeSessionsPath("", rootPolicy), null);
 	});
 
-	it("trusts persisted transcript aliases through both lexical and canonical temp-root spellings", () => {
+	it("accepts canonical files through lexical sessions roots and trusts persisted aliases", () => {
 		const canonicalRoot = path.join(agentDir, "canonical-trust-root");
 		const lexicalRoot = path.join(agentDir, "lexical-trust-root");
+		const outside = path.join(agentDir, "outside-alias-root.jsonl");
 		fs.mkdirSync(canonicalRoot, { recursive: true });
-		try {
-			fs.symlinkSync(canonicalRoot, lexicalRoot, process.platform === "win32" ? "junction" : "dir");
-		} catch (error) {
-			// Directory links are available on the supported test hosts. Surface a
-			// permission/configuration regression instead of silently skipping this
-			// cross-platform trust invariant.
-			throw new Error(`Unable to create transcript temp-root alias: ${String(error)}`);
+		fs.writeFileSync(outside, POISONED, "utf-8");
+		const aliasPolicy = createTranscriptRootPolicy([lexicalRoot]);
+
+		const assertRootInvariant = (canonicalFile: string) => {
+			assert.equal(resolveSafeSessionsPath(canonicalFile, aliasPolicy), fs.realpathSync(canonicalFile));
+			assert.equal(resolveSafeSessionsPath(outside, aliasPolicy), null, "outside-root files remain rejected");
+		};
+		if (trySymlink(canonicalRoot, lexicalRoot, process.platform === "win32" ? "junction" : "dir")) {
+			const lexicalFile = path.join(lexicalRoot, "persisted.jsonl");
+			fs.writeFileSync(lexicalFile, POISONED, "utf-8");
+			const canonicalFile = fs.realpathSync(lexicalFile);
+			assertRootInvariant(canonicalFile);
+
+			trustPersistedAgentSessionFile(lexicalFile, rootPolicy);
+			assert.equal(resolveReadablePersistedAgentSessionFile(lexicalFile, rootPolicy), canonicalFile);
+			assert.equal(resolveReadablePersistedAgentSessionFile(canonicalFile, rootPolicy), canonicalFile);
+		} else {
+			const canonicalFile = path.join(canonicalRoot, "persisted.jsonl");
+			fs.writeFileSync(canonicalFile, POISONED, "utf-8");
+			withRealpathAliases(new Map([[path.resolve(lexicalRoot), fs.realpathSync(canonicalRoot)]]), () => {
+				assertRootInvariant(canonicalFile);
+			});
 		}
-		const lexicalFile = path.join(lexicalRoot, "persisted.jsonl");
-		fs.writeFileSync(lexicalFile, POISONED, "utf-8");
-		const canonicalFile = fs.realpathSync(lexicalFile);
+	});
 
-		trustPersistedAgentSessionFile(lexicalFile, rootPolicy);
+	it("recognizes CRLF-delimited persisted transcript records before granting read-only trust", () => {
+		const outside = path.join(agentDir, "crlf-persisted.jsonl");
+		const crlfTranscript = [
+			JSON.stringify({ type: "session", id: "crlf-session" }),
+			POISONED,
+		].join("\r\n") + "\r\n";
+		fs.writeFileSync(outside, crlfTranscript, "utf-8");
 
-		assert.equal(resolveReadablePersistedAgentSessionFile(lexicalFile, rootPolicy), canonicalFile);
-		assert.equal(resolveReadablePersistedAgentSessionFile(canonicalFile, rootPolicy), canonicalFile);
+		trustPersistedAgentSessionFile(outside, rootPolicy);
+		assert.equal(resolveReadablePersistedAgentSessionFile(outside, rootPolicy), fs.realpathSync(outside));
 	});
 
 	it("scopes trusted exact persisted files to one policy and keeps them read-only", async () => {

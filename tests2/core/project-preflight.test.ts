@@ -172,6 +172,21 @@ test("path.nested-in-project: exact-same path is NOT 'nested'", () => {
 	} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 });
 
+test("case-folded project identities collide without relying on host filesystem case rules", () => {
+	const tmp = mkTmp();
+	try {
+		const mixedCaseRoot = path.join(tmp, "ProjectRoot");
+		fs.mkdirSync(mixedCaseRoot);
+		const alternateSpelling = path.join(tmp, "projectroot");
+		const report = runPreflight(mixedCaseRoot, emptyCtx({ gatewayProjectRoot: alternateSpelling }));
+		assert.equal(
+			find(report, "bobbit.gateway-owned").level,
+			"warn",
+			"case-only spelling must identify the same gateway project even on a case-sensitive host",
+		);
+	} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
 test("path.nested-in-project fails when inside another project's worktree root", () => {
 	const tmp = mkTmp();
 	try {
