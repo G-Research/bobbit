@@ -39,6 +39,7 @@ export function createE2ERunPaths(tempDirectory = tmpdir()) {
     secretsDir: join(root, "e2e-server-secrets"),
     appDataDir: join(root, "appdata"),
     xdgDir: join(root, "xdg"),
+    tempDir: join(root, "tmp"),
   };
 }
 
@@ -59,19 +60,32 @@ const CREDENTIAL_PREFIXES = [
   "TOGETHER_", "DEEPSEEK_", "XAI_",
 ];
 
-export function isE2ECredentialEnvKey(key) {
-  return CREDENTIAL_EXACT_NAMES.has(key)
-    || CREDENTIAL_PREFIXES.some(prefix => key.startsWith(prefix))
-    || /^BOBBIT_.*(?:KEY|TOKEN|SECRET|CREDENTIALS?)$/.test(key);
+export function isE2ECredentialEnvKey(key, platform = process.platform) {
+  // Windows environment variable names are case-insensitive. The spread below
+  // intentionally creates a plain object, so normalize here rather than relying
+  // on process.env's Windows-specific property lookup.
+  const normalized = platform === "win32" ? key.toUpperCase() : key;
+  return CREDENTIAL_EXACT_NAMES.has(normalized)
+    || CREDENTIAL_PREFIXES.some(prefix => normalized.startsWith(prefix))
+    || /^BOBBIT_.*(?:KEY|TOKEN|SECRET|CREDENTIALS?)$/.test(normalized);
+}
+
+/** Read an environment key with Windows' case-insensitive name semantics. */
+function environmentValue(env, name, platform) {
+  if (env[name]) return env[name];
+  if (platform !== "win32") return undefined;
+  const matchingKey = Object.keys(env).find(key => key.toUpperCase() === name);
+  return matchingKey ? env[matchingKey] : undefined;
 }
 
 /** Resolve the installed browser registry before HOME/APPDATA are redirected. */
 export function resolvePlaywrightBrowserRegistry(env = process.env, platform = process.platform) {
-  if (env.PLAYWRIGHT_BROWSERS_PATH) return env.PLAYWRIGHT_BROWSERS_PATH;
-  const home = env.HOME || env.USERPROFILE || homedir();
-  if (platform === "linux") return join(env.XDG_CACHE_HOME || join(home, ".cache"), "ms-playwright");
+  const configuredRegistry = environmentValue(env, "PLAYWRIGHT_BROWSERS_PATH", platform);
+  if (configuredRegistry) return configuredRegistry;
+  const home = environmentValue(env, "HOME", platform) || environmentValue(env, "USERPROFILE", platform) || homedir();
+  if (platform === "linux") return join(environmentValue(env, "XDG_CACHE_HOME", platform) || join(home, ".cache"), "ms-playwright");
   if (platform === "darwin") return join(home, "Library", "Caches", "ms-playwright");
-  if (platform === "win32") return join(env.LOCALAPPDATA || join(home, "AppData", "Local"), "ms-playwright");
+  if (platform === "win32") return join(environmentValue(env, "LOCALAPPDATA", platform) || join(home, "AppData", "Local"), "ms-playwright");
   throw new Error(`unsupported platform for Playwright browser registry: ${platform}`);
 }
 
@@ -87,10 +101,24 @@ export function createIsolatedE2EEnvironment(paths, inheritedEnv = process.env, 
   const browserRegistry = resolvePlaywrightBrowserRegistry(env, platform);
 
   for (const key of Object.keys(env)) {
-    if (isE2ECredentialEnvKey(key)) delete env[key];
+    if (isE2ECredentialEnvKey(key, platform)) delete env[key];
+  }
+  // A copied Windows process environment is a plain object, so remove any
+  // inherited spelling before adding the canonical temp keys below. Otherwise
+  // `Temp` and `TEMP` can both reach a spawned worker with ambiguous results.
+  if (platform === "win32") {
+    for (const key of Object.keys(env)) {
+      if (["TMPDIR", "TEMP", "TMP"].includes(key.toUpperCase())) delete env[key];
+    }
   }
 
   const owned = {
+    // Set every temp-dir spelling. Node reads TMPDIR on POSIX and TEMP/TMP on
+    // Windows; keeping all three in the owned run root confines every legacy
+    // Group B os.tmpdir() fixture and every spawned child process.
+    TMPDIR: paths.tempDir,
+    TEMP: paths.tempDir,
+    TMP: paths.tempDir,
     HOME: paths.homeDir,
     USERPROFILE: paths.homeDir,
     BOBBIT_DIR: paths.bobbitDir,
