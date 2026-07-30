@@ -14,12 +14,13 @@
  * under the SAME ledger.lock, so the global caps hold across ALL runs and tiers.
  *
  * INVARIANT: this file MUST stay protocol-compatible with the lease-pool section
- * of scripts/testing-v2/ledger.mjs (ledger dir, lock file + steal rule, leases
- * file name + entry shape {id,pool,pid,at,forced}, per-pool max-hold, cap
- * resolution). tests2/ledger-lease-bridge-interop.test.ts pins that agreement.
+ * of scripts/testing-v2/ledger.mjs (ledger dir including BOBBIT_V2_LEDGER_DIR
+ * override, lock file + steal rule, leases file name + entry shape
+ * {id,pool,pid,at,forced}, per-pool max-hold, cap resolution).
+ * tests2/ledger-lease-bridge-interop.test.ts pins that agreement.
  */
 import { openSync, closeSync, writeSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, statSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { tmpdir, cpus } from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -38,8 +39,11 @@ const BUDGET_CAPS_PATH = join(HERE, "..", "..", "tests2", "budget-caps.json");
 
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 
+// Must match ledger.mjs: the override makes isolated self-tests independent
+// of the intentionally machine-global production ledger.
 function ledgerDir() {
-	return join(tmpdir(), LEDGER_DIRNAME);
+	const override = process.env.BOBBIT_V2_LEDGER_DIR;
+	return override ? resolve(override) : join(tmpdir(), LEDGER_DIRNAME);
 }
 function leasesPath() {
 	return join(ledgerDir(), LEASES_FILENAME);

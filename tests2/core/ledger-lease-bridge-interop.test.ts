@@ -10,13 +10,12 @@ import { join } from "node:path";
 import assert from "node:assert/strict";
 import { describe, it, beforeAll, afterAll } from "vitest";
 
-// Both modules resolve their state dir from os.tmpdir()/bobbit-test-v2-ledger and
-// read os.tmpdir() live on each call, so pointing TEMP/TMP/TMPDIR at a fresh dir
-// fully isolates this test from the real ledger (and concurrent runs).
+// The production ledger deliberately lives under the OS temp root so all
+// workflow runs on one machine share its caps. This fixture must never use
+// that real pool: an explicit, per-file root avoids inheriting a busy lease
+// from a browser/E2E process or another unit run.
 const origEnv = {
-	TEMP: process.env.TEMP,
-	TMP: process.env.TMP,
-	TMPDIR: process.env.TMPDIR,
+	BOBBIT_V2_LEDGER_DIR: process.env.BOBBIT_V2_LEDGER_DIR,
 	BOBBIT_V2_MAX_BROWSER: process.env.BOBBIT_V2_MAX_BROWSER,
 	BOBBIT_V2_TOTAL_CORES: process.env.BOBBIT_V2_TOTAL_CORES,
 	BOBBIT_V2_LEDGER_PARENT: process.env.BOBBIT_V2_LEDGER_PARENT,
@@ -33,9 +32,7 @@ async function loadBoth() {
 describe("ledger-lease-bridge ↔ ledger.mjs interop", () => {
 	beforeAll(() => {
 		isolatedTmp = mkdtempSync(join(tmpdir(), "lease-interop-"));
-		process.env.TEMP = isolatedTmp;
-		process.env.TMP = isolatedTmp;
-		process.env.TMPDIR = isolatedTmp;
+		process.env.BOBBIT_V2_LEDGER_DIR = join(isolatedTmp, "ledger");
 		process.env.BOBBIT_V2_TOTAL_CORES = "24";
 		delete process.env.BOBBIT_V2_LEDGER_PARENT;
 		delete process.env.BOBBIT_V2_SLOTS_VITEST;
@@ -93,8 +90,14 @@ describe("ledger-lease-bridge ↔ ledger.mjs interop", () => {
 		}
 	});
 
-	it("a lease taken by one impl is SEEN by the other (shared cross-process pool)", async () => {
+	it("a lease taken by one impl is seen by the other (shared pool)", async () => {
 		const { ledger, bridge } = await loadBoth();
+		assert.equal(
+			ledger.ledgerDir(),
+			join(isolatedTmp, "ledger"),
+			"the interop fixture must not inherit the machine-global browser lease pool",
+		);
+		assert.equal(ledger.readLeases().leases.length, 0, "the fixture ledger starts empty");
 		// Fill the browser pool to cap=2 via the BRIDGE.
 		const b1 = await bridge.acquireLease("browser", { cap: 2, timeoutMs: 5000 });
 		const b2 = await bridge.acquireLease("browser", { cap: 2, timeoutMs: 5000 });
