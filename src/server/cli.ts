@@ -75,8 +75,8 @@ export function buildStartupUrls(input: {
 	const peerHost = loopbackForBind(input.host);
 	const peerUrl = `${input.protocol}://${urlHost(peerHost)}:${input.port}${basePath}`;
 	const uiUrl = authEnforced
-		? `${listenUrl}/?token=${encodeURIComponent(input.token)}`
-		: `${listenUrl}/`;
+		? `${peerUrl}/?token=${encodeURIComponent(input.token)}`
+		: `${peerUrl}/`;
 	return { protocol: input.protocol, authEnforced, listenUrl, peerUrl, uiUrl, openUrl: uiUrl };
 }
 

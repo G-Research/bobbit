@@ -124,7 +124,7 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("actual base-path CLI startup
 			expect(port).toBeGreaterThan(0);
 
 			expect(cli.output()).toMatch(new RegExp(`Listening:\\s+http://127\\.0\\.0\\.1:${port}/team/cli`));
-			expect(cli.output()).toMatch(/token auth (?:is )?disabled/i);
+			expect(cli.output()).toMatch(/token auth(?:entication)? (?:is )?disabled/i);
 			expect(cli.output()).not.toMatch(/Auth token:/i);
 			expect(cli.output()).not.toMatch(/token grants full shell access/i);
 			expect(cli.output()).not.toContain("?token=");

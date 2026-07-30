@@ -161,16 +161,16 @@ function loadWorker(mount: string): WorkerHarness {
 			return {
 				async addAll(values: string[]) { precacheAdds.push([...values]); },
 				async put(request: any) { cachePuts.push(typeof request === "string" ? request : request.url); },
+				async match(request: any) {
+					cacheMatches.push(request);
+					const value = typeof request === "string" ? request : request.url;
+					if (value === `${mount}/` || (mount === "" && value === "/")) return { offline: true };
+					return undefined;
+				},
 			};
 		},
 		async keys() { return [...cacheKeys]; },
 		async delete(name: string) { deletedCaches.push(name); return true; },
-		async match(request: any) {
-			cacheMatches.push(request);
-			const value = typeof request === "string" ? request : request.url;
-			if (value === `${mount}/` || (mount === "" && value === "/")) return { offline: true };
-			return undefined;
-		},
 	};
 	const self = {
 		location: { origin: "https://host.example", pathname: `${mount}/sw.js` || "/sw.js" },

@@ -250,7 +250,6 @@ function parsePersistedTarget(raw: string): WatchdogProbeTarget {
 
 /** Resolve one complete health-probe target using CLI-presence-over-env semantics. */
 export function resolveWatchdogProbeTarget(options: ResolveWatchdogProbeTargetOptions = {}): WatchdogProbeTarget {
-	if (options.persistedGatewayUrl !== undefined) return parsePersistedTarget(options.persistedGatewayUrl);
 	const args = options.forwardedArgs ?? [];
 	const env = options.env ?? {};
 
@@ -271,7 +270,13 @@ export function resolveWatchdogProbeTarget(options: ResolveWatchdogProbeTargetOp
 	const hasNoTls = args.includes("--no-tls");
 	const hasTls = args.includes("--tls");
 	const protocol: "http:" | "https:" = hasNoTls || (!hasTls && isLoopback(configuredHost)) ? "http:" : "https:";
-	return { protocol, hostname: probeHostname(configuredHost), port, basePath };
+	const selectedTarget = { protocol, hostname: probeHostname(configuredHost), port, basePath };
+	if (options.persistedGatewayUrl === undefined) return selectedTarget;
+	try {
+		return parsePersistedTarget(options.persistedGatewayUrl);
+	} catch {
+		return selectedTarget;
+	}
 }
 
 export function watchdogHealthPath(target: Pick<WatchdogProbeTarget, "basePath">): string {
@@ -335,7 +340,7 @@ function refreshProbeTargetFromState(): boolean {
 	const changed = current.raw !== launchGatewayUrlSnapshot.raw || current.mtimeMs !== launchGatewayUrlSnapshot.mtimeMs;
 	if (!changed || !current.raw) return false;
 	try {
-		const next = resolveWatchdogProbeTarget({ persistedGatewayUrl: current.raw });
+		const next = parsePersistedTarget(current.raw);
 		if (!sameTarget(next, probeTarget)) {
 			console.log(`[watchdog] Probe target updated: ${probeTarget.protocol}//${probeTarget.hostname}:${probeTarget.port}${probeTarget.basePath} → ${next.protocol}//${next.hostname}:${next.port}${next.basePath}`);
 			probeTarget = next;
@@ -599,7 +604,7 @@ async function probeLoop(): Promise<void> {
 		let snapshotMatches = false;
 		try {
 			snapshotMatches = Boolean(launchGatewayUrlSnapshot.raw)
-				&& sameTarget(resolveWatchdogProbeTarget({ persistedGatewayUrl: launchGatewayUrlSnapshot.raw! }), probeTarget);
+				&& sameTarget(parsePersistedTarget(launchGatewayUrlSnapshot.raw!), probeTarget);
 		} catch { /* stale/invalid snapshot */ }
 		if (!snapshotMatches) {
 			targetWarningLogged = true;

@@ -242,7 +242,7 @@ describe("production runtime asset URL configuration", () => {
 		assert.ok(files.length > 0, "dist/ui/assets must contain production JavaScript");
 		const sources = files.map(file => fs.readFileSync(path.join(assetsDir, file), "utf8"));
 		assert.ok(sources.some(source => source.includes("__BOBBIT_BASE_PATH__")), "emitted JavaScript must reference the runtime base-path global");
-		const offenders = files.filter((file, index) => /(?:return\s*|=>)\s*["']\/["']\s*\+/.test(sources[index]));
+		const offenders = files.filter((_file, index) => /(?:return\s*|=>)\s*["']\/["']\s*\+/.test(sources[index]));
 		assert.deepEqual(offenders, [], `Vite emitted a root-anchoring asset helper in: ${offenders.join(", ")}`);
 	});
 });

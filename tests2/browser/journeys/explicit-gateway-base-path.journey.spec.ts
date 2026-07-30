@@ -243,7 +243,7 @@ test.describe("Journey: explicit prefixed gateway on a distinct browser origin",
 			expect(explicitRest.length, "app boot should call the explicit gateway directly").toBeGreaterThan(0);
 			expect(explicitRest.every(entry => entry.credentials === "include"), "remote REST must include credentials").toBe(true);
 
-			const cookies = await context.cookies(explicitBase);
+			const cookies = await context.cookies(`${explicitBase}/`);
 			const rootCookie = cookies.find(cookie => cookie.name === "bobbit_session" && cookie.path === "/");
 			const mountedCookie = cookies.find(cookie => cookie.name === "bobbit_session" && cookie.path === `${GATEWAY_PATH}/`);
 			expect(rootCookie?.value).toBe(INVALID_COOKIE);
@@ -333,7 +333,8 @@ test.describe("Journey: explicit prefixed gateway on a distinct browser origin",
 
 			expect(gatewayRouteRequestsAtUiOrigin(traffic.requests, uiOrigin), "gateway transports must never fall back to the static UI origin").toEqual([]);
 			for (const record of traffic.requests.filter(record => new URL(record.url).origin === gatewayOrigin && /^\/(?:team\/gw\/)?(?:api|preview)(?:\/|$)/.test(new URL(record.url).pathname))) {
-				expectGatewayPathOnce(record.url, explicitBase, new URL(record.url).pathname.includes("/preview/") ? "/preview" : "/api");
+				const pathname = new URL(record.url).pathname;
+				expectGatewayPathOnce(record.url, explicitBase, pathname.startsWith(`${GATEWAY_PATH}/preview/`) ? "/preview" : "/api");
 			}
 			for (const socket of traffic.sockets) expectGatewayPathOnce(socket.url, explicitBase, "/ws");
 		} finally {
@@ -396,7 +397,7 @@ test.describe("Journey: explicit prefixed gateway on a distinct browser origin",
 			expect(mounted.body?.url).toBe(`/preview/${sessionId}/${ENTRY}`);
 
 			await expect(page.locator("body")).toContainText(
-				/(?:preview[^.]{0,160}(?:same[- ]host|same hostname|reverse proxy|gateway origin))|(?:(?:same[- ]host|same hostname|reverse proxy|gateway origin)[^.]{0,160}preview)/i,
+				/Preview live updates and embedded previews require .* same scheme and hostname/i,
 				{ timeout: 20_000 },
 			);
 			const probe = await transportProbe(page);

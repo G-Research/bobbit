@@ -4,6 +4,7 @@
 import {
 	gatewayRoute,
 	normalizeBasePath,
+	previewGatewayRoute,
 	stripBasePath,
 	withBasePath,
 	type GatewayRoute,
@@ -292,27 +293,8 @@ export function gatewayFetch(route: GatewayRoute | string, init: RequestInit = {
 	});
 }
 
-const PREVIEW_UUID_RE = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
-const PREVIEW_ARTIFACT_RE = /^[A-Za-z0-9_-]{6,64}$/;
-
 function previewRouteCandidate(raw: string): GatewayRoute | null {
-	const match = /^\/preview\/([^/?#]+)\/(.+)$/u.exec(raw);
-	if (!match || !PREVIEW_UUID_RE.test(match[1])) return null;
-	const tail = match[2];
-	const pathEnd = tail.search(/[?#]/);
-	const rawPath = pathEnd < 0 ? tail : tail.slice(0, pathEnd);
-	if (!rawPath || rawPath.includes("\\") || rawPath.includes("//")) return null;
-	const segments = rawPath.split("/");
-	for (const segment of segments) {
-		if (!segment) return null;
-		let decoded: string;
-		try { decoded = decodeURIComponent(segment); } catch { return null; }
-		if (!decoded || decoded === "." || decoded === ".." || /[\\/\u0000-\u001f\u007f]/u.test(decoded)) return null;
-	}
-	if (segments[0] === "_artifact") {
-		if (segments.length < 3 || !PREVIEW_ARTIFACT_RE.test(segments[1])) return null;
-	}
-	try { return gatewayRoute(raw); } catch { return null; }
+	try { return previewGatewayRoute(raw); } catch { return null; }
 }
 
 function splitPathSuffix(raw: string): { pathname: string; suffix: string } {
@@ -339,12 +321,11 @@ export function previewRouteFromStoredValue(value: unknown): GatewayRoute | null
 	if (/^https?:\/\//i.test(value)) {
 		let absolute: URL;
 		try { absolute = new URL(value); } catch { return null; }
+		if (!selected || absolute.origin !== selected.origin) return null;
 		pathname = absolute.pathname;
 		suffix = `${absolute.search}${absolute.hash}`;
-		if (selected && absolute.origin === selected.origin) {
-			const known = stripKnownPreviewMount(pathname, suffix, selected.pathname === "/" ? "" : selected.pathname);
-			if (known) return known;
-		}
+		const known = stripKnownPreviewMount(pathname, suffix, selected.pathname === "/" ? "" : selected.pathname);
+		if (known) return known;
 	} else if (value.startsWith("/")) {
 		({ pathname, suffix } = splitPathSuffix(value));
 		const selectedBasePath = selected && selected.pathname !== "/" ? selected.pathname : "";
