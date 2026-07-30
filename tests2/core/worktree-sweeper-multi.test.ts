@@ -310,8 +310,70 @@ describe("worktree-sweeper — bounded asynchronous sweep", () => {
 		releaseListing.resolve();
 
 		assert.deepEqual(await sweep, { reclaimed: 0, cleaned: 0, repaired: 0 });
-		assert.equal(ownershipReads, 1, "the destructive candidate must read current visible-store ownership");
+		assert.equal(ownershipReads, 2, "the destructive candidate must refresh aliases then read final visible-store ownership");
 		assert.deepEqual(cleanupCalls, [], "a worktree claimed after the initial snapshot must never be deleted");
+	});
+
+	it("reads final ownership after alias I/O when a claim arrives during realpath", async () => {
+		const repo = path.resolve("virtual-realpath-owner", "repo");
+		const worktreePath = path.resolve("virtual-realpath-owner-wt", "new-session");
+		const aliasProbePath = path.resolve("virtual-realpath-owner-wt", "alias-probe");
+		const branch = "session/new-realpath-owner";
+		const realpathStarted = new Deferred();
+		const releaseRealpath = new Deferred();
+		const cleanupCalls: string[] = [];
+		let ownershipReads = 0;
+		const currentSessions: Array<{
+			id: string;
+			branch?: string;
+			worktreePath?: string;
+		}> = [{ id: "alias-probe", worktreePath: aliasProbePath }];
+		const runner: CommandRunner = {
+			async execFile(file, args) {
+				assert.equal(file, "git");
+				if (args[0] === "worktree" && args[1] === "list") {
+					return {
+						stdout: [porcelainWorktree(repo, "master"), porcelainWorktree(worktreePath, branch)].join("\n"),
+						stderr: "",
+					};
+				}
+				return { stdout: "", stderr: "" };
+			},
+		};
+
+		const sweep = sweepOrphanedWorktrees({
+			projects: [{ id: "project", rootPath: repo }],
+			goals: [],
+			sessions: [],
+			staff: [],
+			fs: {
+				access: async () => {},
+				realpath: async value => {
+					// The sweeper normalizes host paths before calling its async seam.
+					if (value.endsWith("/alias-probe")) {
+						realpathStarted.resolve();
+						await releaseRealpath.promise;
+					}
+					return value;
+				},
+			},
+			commandRunner: runner,
+			getCurrentOwnership: () => {
+				ownershipReads++;
+				// Durable stores return snapshots, so the first read must stay stale
+				// after the claim instead of sharing this mutable fixture array.
+				return { goals: [], sessions: [...currentSessions], teams: [], staff: [] };
+			},
+			cleanupWorktreeImpl: async (_repoPath, candidatePath) => { cleanupCalls.push(candidatePath); },
+		});
+
+		await realpathStarted.promise;
+		currentSessions.push({ id: "new-session", branch, worktreePath });
+		releaseRealpath.resolve();
+
+		assert.deepEqual(await sweep, { reclaimed: 0, cleaned: 0, repaired: 0 });
+		assert.equal(ownershipReads, 2, "the final ownership read must follow alias I/O");
+		assert.deepEqual(cleanupCalls, [], "a claim made while realpath yields must prevent cleanup");
 	});
 
 	it("bounds cleanup across repos while keeping each repo sequential", async () => {

@@ -354,10 +354,18 @@ export async function sweepOrphanedWorktrees(opts: {
 			...scans.flatMap(worktrees => worktrees.flatMap(worktree => [worktree.path, worktree.repoPath, worktree.resolvedWorktreeRoot])),
 		], sweepFs.realpath);
 		const initialGuards = buildOwnershipGuards(initialOwnership, aliases);
-		const currentOwnershipGuards = async (): Promise<OwnershipGuards> => {
-			const currentOwnership = opts.getCurrentOwnership ? opts.getCurrentOwnership() : initialOwnership;
-			const currentAliases = await canonicalizePaths(ownershipPaths(currentOwnership), sweepFs.realpath, aliases);
-			return buildOwnershipGuards(currentOwnership, currentAliases);
+		const refreshCurrentOwnershipAliases = async (): Promise<void> => {
+			// This snapshot only tells us which aliases need I/O. A session can claim
+			// a worktree while that I/O yields, so it must never authorize a mutation.
+			const ownershipForAliases = opts.getCurrentOwnership ? opts.getCurrentOwnership() : initialOwnership;
+			await canonicalizePaths(ownershipPaths(ownershipForAliases), sweepFs.realpath, aliases);
+		};
+		const finalOwnershipGuards = (): OwnershipGuards => {
+			// Call this directly after refreshCurrentOwnershipAliases(). It performs
+			// the final synchronous ownership read and has no await before repair or
+			// cleanup begins, leaving no event-loop turn for a new claim to race in.
+			const finalOwnership = opts.getCurrentOwnership ? opts.getCurrentOwnership() : initialOwnership;
+			return buildOwnershipGuards(finalOwnership, aliases);
 		};
 
 		type SweepOutcome =
@@ -412,9 +420,10 @@ export async function sweepOrphanedWorktrees(opts: {
 						if (expected && normalize(expected) !== wtPathNorm) {
 							try {
 								// A new path/repo/team owner, archive, or changed branch owner
-								// can appear while the async repo scan is pending. Collect any
-								// unseen aliases, then rebuild every guard before repair.
-								const currentGuards = await currentOwnershipGuards();
+								// can appear while the async repo scan is pending. Resolve unseen
+								// aliases, then synchronously re-read ownership before repair.
+								await refreshCurrentOwnershipAliases();
+								const currentGuards = finalOwnershipGuards();
 								const current = ownershipForWorktree(wt.path, branch, currentGuards);
 								if (current.ownedByPath || !current.ownedByBranch || !current.expectedPath || normalize(current.expectedPath) === wtPathNorm) {
 									outcomes.push({ kind: "none" });
@@ -446,7 +455,8 @@ export async function sweepOrphanedWorktrees(opts: {
 					// The scan intentionally starts from a stable snapshot, but cleanup
 					// authorization must be live: session creation remains available while
 					// this post-listen sweep yields on filesystem and Git work.
-					const currentGuards = await currentOwnershipGuards();
+					await refreshCurrentOwnershipAliases();
+					const currentGuards = finalOwnershipGuards();
 					const current = ownershipForWorktree(wt.path, branch, currentGuards);
 					if (current.ownedByBranch || current.ownedByPath) {
 						outcomes.push({ kind: "none" });
