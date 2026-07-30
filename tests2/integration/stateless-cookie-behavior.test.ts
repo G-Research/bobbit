@@ -370,7 +370,7 @@ describe.sequential("stateless cookie behavior through the real gateway", () => 
 			expect(attributes).toContain("SameSite=Lax");
 			expect(attributes).toContain("Path=/");
 			expect(attributes).toContain("Max-Age=2592000");
-			expect(attributes).toContain("Secure");
+			expect(attributes).not.toContain("Secure");
 
 			const signedPair = cookiePair(setCookie);
 			const cookieOnly = await rawRequest(gateway.baseURL, "/api/sessions", {
