@@ -1,6 +1,6 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createBrowserRunPaths, playwrightCommandArgs } from "../../scripts/testing-v2/run-browser-v2.mjs";
 
@@ -18,9 +18,10 @@ describe("v2 browser coordinator", () => {
 		const second = createBrowserRunPaths(temp);
 		roots.push(first.root, second.root);
 
+		const canonicalTemp = realpathSync(temp);
 		expect(first.root).not.toBe(second.root);
-		expect(first.root.startsWith(temp)).toBe(true);
-		expect(second.root.startsWith(temp)).toBe(true);
+		expect(relative(canonicalTemp, first.root)).toMatch(/^bobbit-v2-run-/);
+		expect(relative(canonicalTemp, second.root)).toMatch(/^bobbit-v2-run-/);
 		expect(first.report).toBe(join(first.root, "playwright-v2", "playwright-report.json"));
 		expect(second.report).toBe(join(second.root, "playwright-v2", "playwright-report.json"));
 		expect(existsSync(first.root)).toBe(true);
