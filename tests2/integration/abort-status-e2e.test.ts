@@ -139,7 +139,7 @@ test.describe("Abort status E2E", () => {
 		}
 	});
 
-	test("PI-25b: live-steer (direct) survives abort and is delivered as next user turn", async () => {
+	test("PI-25b: an unechoed direct live-steer survives abort and is delivered as next user turn", async ({ gateway }) => {
 		// Bug: `deliverLiveSteer()` in session-manager.ts calls rpcClient.steer()
 		// WITHOUT writing to promptQueue. The SDK parks the steer until the next
 		// tool boundary; forceAbort tears the turn down and the parked steer is
@@ -162,6 +162,14 @@ test.describe("Abort status E2E", () => {
 
 			await startAbortableBusyTurn(conn, "long running task");
 
+			// Pin the actual recovery seam: accept the steer RPC but suppress its
+			// user-role echo. An echoed steer is settled work and must not replay;
+			// only this explicitly unechoed state is recovered after Stop.
+			const live = gateway.sessionManager.getSession(sessionId);
+			const mockAgent = live?.rpcClient?._agent;
+			expect(mockAgent, "PI-25b requires the in-process mock bridge").toBeTruthy();
+			mockAgent.env.MOCK_STEER_QUEUE_DROP = "always";
+
 			// Snapshot cursor so we look only at events AFTER steer+abort.
 			const cursor = conn.messageCount();
 
@@ -170,10 +178,9 @@ test.describe("Abort status E2E", () => {
 			conn.send({ type: "steer", text: "S_DIRECT" });
 			conn.send({ type: "abort" });
 
-			// Establish the abort terminal boundary before looking for delivery. A
-			// live steer can legitimately echo while Stop is in flight; only a
-			// subsequent user event proves that intent was redelivered after the
-			// cancelled turn.
+			// Establish the abort terminal boundary before looking for delivery.
+			// This fixture suppresses the original echo, so the subsequent user
+			// event proves one recovered delivery after the cancelled turn.
 			await conn.waitForFrom(
 				cursor,
 				(m) => m.type === "event" && m.data?.type === "agent_end",
@@ -222,6 +229,15 @@ test.describe("Abort status E2E", () => {
 						m.data?.message?.content?.[0]?.text === "S_DIRECT",
 				);
 			}
+
+			const recoveredSteers = post.filter(
+				(m) =>
+					m.type === "event" &&
+					m.data?.type === "message_end" &&
+					m.data?.message?.role === "user" &&
+					m.data?.message?.content?.[0]?.text === "S_DIRECT",
+			);
+			expect(recoveredSteers, "PI-25b must recover an unechoed steer exactly once").toHaveLength(1);
 
 			// Specific, identifiable error message for the harness to key on.
 			expect(

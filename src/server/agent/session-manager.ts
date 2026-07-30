@@ -858,13 +858,6 @@ export interface SessionInfo {
 	 */
 	inFlightSteerTexts?: InFlightSteerRecord[];
 	/**
-	 * Live steers whose user echo has arrived in the current turn. This is
-	 * deliberately in-memory only: the durable ledger's echo boundary remains
-	 * the restart contract. It lets abort reconciliation redeliver an intent
-	 * whose echo raced Stop before the cancelled turn's `agent_end`.
-	 */
-	echoedSteersThisTurn?: InFlightSteerRecord[];
-	/**
 	 * Latest in-flight `message_update` payload. Set on every `message_update`
 	 * event with a non-empty `event.message`; cleared on `message_end`,
 	 * `agent_end`, and `process_exit`. Used to splice the in-flight row into
@@ -4741,12 +4734,11 @@ export class SessionManager {
 	}
 
 	/**
-	 * Splice an entry from the shadow ledger when its echo arrives. This preserves
-	 * the durable echo boundary used by restart and keyless-replay recovery. For a
-	 * live event, retain the settled record only in memory until `agent_end`: Stop
-	 * can still cancel that turn, in which case abort reconciliation redelivers it.
+	 * Splice an entry from the shadow ledger when its user-role echo arrives.
+	 * The echo is the durable settlement boundary: it proves Pi accepted and
+	 * executed the steer, so Stop must never redispatch it.
 	 */
-	private _consumeSteerEcho(session: SessionInfo, event: any, opts?: { trackAbort?: boolean }): void {
+	private _consumeSteerEcho(session: SessionInfo, event: any): void {
 		const ledger = session.inFlightSteerTexts;
 		if (!ledger || ledger.length === 0) return;
 		if (event.type !== "message_end") return;
@@ -4761,10 +4753,7 @@ export class SessionManager {
 			? ledger.findIndex((record) => record.promptId === authorBinding.promptId)
 			: ledger.findIndex((record) => record.text === text);
 		if (idx !== -1) {
-			const [record] = ledger.splice(idx, 1);
-			if (opts?.trackAbort && record) {
-				(session.echoedSteersThisTurn ??= []).push(record);
-			}
+			ledger.splice(idx, 1);
 			this.persistInFlightSteerLedger(session);
 		}
 	}
@@ -4792,23 +4781,10 @@ export class SessionManager {
 	}
 
 	private _reconcileAfterAbort(session: SessionInfo): void {
-		const ledger = session.inFlightSteerTexts ?? [];
-		const echoed = session.echoedSteersThisTurn ?? [];
-		if (ledger.length === 0 && echoed.length === 0) return;
-		// The durable ledger holds unechoed steers. The ephemeral list holds live
-		// echoes from the cancelled turn; combining both preserves the durable echo
-		// contract while making Stop race-safe.
-		for (const record of [...ledger, ...echoed].reverse()) {
-			this.cancelPromptAuthorDispatch(session, record.promptId);
-			session.promptQueue.enqueueAtFront(record.text, {
-				isSteered: true,
-				source: record.source,
-				author: record.author,
-			});
-		}
-		ledger.length = 0;
-		session.echoedSteersThisTurn = undefined;
-		this.broadcastQueue(session, { includeInFlightSteers: true });
+		// Only unresolved records survive Stop. A user-role echo settled and
+		// removed its record synchronously, so replaying it would duplicate an
+		// instruction that Pi already executed in the cancelled turn.
+		this._reconcileInFlightSteers(session);
 	}
 
 	/** Reorder queued messages to match the given ID list. */
@@ -5270,10 +5246,9 @@ export class SessionManager {
 			}
 		}
 
-		// Every echo settles the durable ledger. A live echo is also retained in
-		// memory until agent_end so an intervening Stop can redeliver it; replay
-		// reconciliation keeps only the durable settlement behavior.
-		this._consumeSteerEcho(session, event, { trackAbort: true });
+		// Every proven user echo settles the durable ledger. Stop only recovers
+		// entries still unresolved after this boundary.
+		this._consumeSteerEcho(session, event);
 
 		// Tool boundary: defensively flush any steered rows that remain queued
 		// (for example, recovered/pre-existing rows). Fresh live steers and
@@ -5385,10 +5360,6 @@ export class SessionManager {
 				session.lastTurnErrorMessage = undefined;
 				session.consecutiveErrorTurns = 0;
 			} else {
-				// The durable ledger settled at each user echo. A completed turn makes
-				// the live-only abort fallback unnecessary.
-				session.echoedSteersThisTurn = undefined;
-
 				// Safety net: if steers arrived after the last tool call or during a
 				// non-tool turn (no tool_execution_end fired), dispatch them now.
 				const steered = session.promptQueue.dequeueAllSteered();
