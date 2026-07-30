@@ -55,10 +55,11 @@ function mountRelativePath(url) {
 }
 
 function isGatewayTransport(pathname) {
-	// Match transport names as complete path segments at any depth. The nested
-	// form is defensive migration behavior: a still-controlling root worker must
-	// bypass `/bobbit/api/...` and `/bobbit/ws/...` while the mounted app retires it.
-	return /(?:^|\/)(?:api|ws)(?:\/|$)/.test(pathname);
+	// Match authenticated transport/content names as complete path segments at
+	// any depth. The nested form is defensive migration behavior: a still-
+	// controlling root worker must bypass `/bobbit/api/...`, `/bobbit/ws/...`,
+	// and authenticated `/bobbit/preview/...` documents while the mount retires it.
+	return /(?:^|\/)(?:api|ws|preview)(?:\/|$)/.test(pathname);
 }
 
 self.addEventListener("install", (event) => {
@@ -113,8 +114,8 @@ self.addEventListener("fetch", (event) => {
 	const relativePathname = mountRelativePath(url);
 
 	// Do not claim external or same-origin sibling-app requests, and never
-	// touch gateway API/WebSocket traffic. Comparisons are mount-relative so
-	// mounted transports cannot accidentally enter the offline cache.
+	// touch gateway API/WebSocket/preview traffic. Comparisons are mount-relative
+	// so mounted transports cannot accidentally enter the offline cache.
 	if (relativePathname === null || isGatewayTransport(relativePathname)) return;
 
 	// Network-first with offline cache fallback for every other in-mount GET.

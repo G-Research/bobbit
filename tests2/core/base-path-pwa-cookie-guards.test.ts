@@ -228,19 +228,21 @@ describe("service worker mount isolation", () => {
 		assert.deepEqual(worker.deletedCaches, [oldCurrentMountCache]);
 	});
 
-	it("bypasses mounted API/WS and every off-mount or sibling request", () => {
+	it("bypasses mounted API/WS/preview and every off-mount or sibling request", () => {
 		const worker = loadWorker("/team/bobbit");
 		for (const pathname of [
 			"/team/bobbit/api",
 			"/team/bobbit/api/health",
 			"/team/bobbit/ws",
 			"/team/bobbit/ws/viewer",
+			"/team/bobbit/preview/session/index.html",
 			"/api/health",
 			"/team/bobbit-other/app.js",
 			"/other/app.js",
 		]) {
 			assert.equal(dispatchFetch(worker, `https://host.example${pathname}`), undefined, pathname);
 		}
+		assert.ok(dispatchFetch(worker, "https://host.example/team/bobbit/preview-other/app.js"), "preview must match as a complete segment");
 		assert.equal(dispatchFetch(worker, "https://other.example/team/bobbit/assets/app.js"), undefined);
 	});
 
@@ -262,16 +264,20 @@ describe("service worker mount isolation", () => {
 		assert.ok(worker.cacheMatches.includes("/team/bobbit/"));
 	});
 
-	it("retains root-mounted API bypass and offline fallback", async () => {
+	it("retains root-mounted transport bypass and offline fallback", async () => {
 		const worker = loadWorker("");
 		for (const pathname of [
 			"/api/health",
 			"/ws/viewer",
+			"/preview/session/index.html",
 			"/bobbit/api/health",
 			"/team/bobbit/ws/session",
+			"/bobbit/preview/session/_artifact/id/index.html",
 		]) {
 			assert.equal(dispatchFetch(worker, `https://host.example${pathname}`), undefined, pathname);
 		}
+		assert.ok(dispatchFetch(worker, "https://host.example/preview-other/app.js"), "preview-other is not an authenticated preview route");
+		assert.ok(dispatchFetch(worker, "https://host.example/bobbit/preview-other/app.js"), "nested preview-other remains cacheable");
 		assert.ok(dispatchFetch(worker, "https://host.example/team/bobbit/assets/app.js"), "nested UI assets remain network-first/offline-cacheable");
 		worker.setNetworkFetch(async () => { throw new Error("offline"); });
 		const response = dispatchFetch(worker, "https://host.example/session/abc", { mode: "navigate" });
