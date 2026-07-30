@@ -15,16 +15,26 @@
  * undefined and producing the duplicate-spawn cascade documented on PR
  * #409.
  */
-import { describe, it, afterAll } from "vitest";
+import { describe, it, beforeAll, beforeEach, afterAll } from "vitest";
 import assert from "node:assert/strict";
 
 import { buildFixture, buildActive, buildSubgoalStep } from "../../tests/helpers/run-subgoal-step-fixture.ts";
 
 describe("runSubgoalStep — stamp spawnedFromPlanId immediately after createGoal", () => {
-	it("the very next call after createGoal is updateGoal({ spawnedFromPlanId })", async () => {
-		const fx = await buildFixture();
-		afterAll(() => fx.cleanup());
+	let fx: Awaited<ReturnType<typeof buildFixture>>;
 
+	beforeAll(async () => {
+		fx = await buildFixture();
+	});
+
+	beforeEach(() => {
+		fx.calls.length = 0;
+		delete (fx.mockTeamManager as any).getTeamState;
+	});
+
+	afterAll(() => fx.cleanup());
+
+	it("the very next call after createGoal is updateGoal({ spawnedFromPlanId })", async () => {
 		const step = buildSubgoalStep({ planId: "phase-1-leaf-a" });
 		const { signal, active, stepIndex } = buildActive(fx.parent.id);
 
@@ -47,9 +57,6 @@ describe("runSubgoalStep — stamp spawnedFromPlanId immediately after createGoa
 	});
 
 	it("createGoal is invoked with parentGoalId + workflowId='feature' + projectId from parent", async () => {
-		const fx = await buildFixture();
-		afterAll(() => fx.cleanup());
-
 		const step = buildSubgoalStep({ planId: "p2" });
 		const { signal, active, stepIndex } = buildActive(fx.parent.id);
 		await fx.harness.runSubgoalStep(step, signal, active, stepIndex);
@@ -63,9 +70,6 @@ describe("runSubgoalStep — stamp spawnedFromPlanId immediately after createGoa
 	});
 
 	it("respects subgoal.workflowId override (defaults to 'feature' only when unset)", async () => {
-		const fx = await buildFixture();
-		afterAll(() => fx.cleanup());
-
 		const step = buildSubgoalStep({ planId: "p3", workflowId: "general" });
 		const { signal, active, stepIndex } = buildActive(fx.parent.id);
 		await fx.harness.runSubgoalStep(step, signal, active, stepIndex);
@@ -76,14 +80,13 @@ describe("runSubgoalStep — stamp spawnedFromPlanId immediately after createGoa
 	});
 
 	it("R-001: child gate state is initialised after spawn (mirrors POST /spawn-child)", async () => {
-		const fx = await buildFixture();
-		afterAll(() => fx.cleanup());
-
 		const step = buildSubgoalStep({ planId: "phase-1-gates" });
 		const { signal, active, stepIndex } = buildActive(fx.parent.id);
 		await fx.harness.runSubgoalStep(step, signal, active, stepIndex);
 
-		const children = fx.goalStore.getAll().filter(g => g.parentGoalId === fx.parent.id);
+		const children = fx.goalStore.getAll().filter(
+			g => g.parentGoalId === fx.parent.id && g.spawnedFromPlanId === "phase-1-gates",
+		);
 		assert.equal(children.length, 1);
 		const gates = fx.gateStore.getGatesForGoal(children[0].id);
 		assert.ok(gates.length > 0,
@@ -92,9 +95,6 @@ describe("runSubgoalStep — stamp spawnedFromPlanId immediately after createGoa
 	});
 
 	it("R-002: harness-spawned child stamps spawnedBySessionId from parent's team-lead session", async () => {
-		const fx = await buildFixture();
-		afterAll(() => fx.cleanup());
-
 		// Stub teamManager.getTeamState to return a known team-lead session id.
 		const teamLeadId = "team-lead-session-xyz";
 		(fx.mockTeamManager as any).getTeamState = (_id: string) => ({
@@ -108,7 +108,9 @@ describe("runSubgoalStep — stamp spawnedFromPlanId immediately after createGoa
 		const { signal, active, stepIndex } = buildActive(fx.parent.id);
 		await fx.harness.runSubgoalStep(step, signal, active, stepIndex);
 
-		const children = fx.goalStore.getAll().filter(g => g.parentGoalId === fx.parent.id);
+		const children = fx.goalStore.getAll().filter(
+			g => g.parentGoalId === fx.parent.id && g.spawnedFromPlanId === "p-attribution",
+		);
 		assert.equal(children.length, 1);
 		assert.equal(children[0].spawnedBySessionId, teamLeadId,
 			"harness-spawned child must inherit parent's team-lead session id for sidebar nesting");
@@ -121,30 +123,28 @@ describe("runSubgoalStep — stamp spawnedFromPlanId immediately after createGoa
 	});
 
 	it("R-002: omits spawnedBySessionId when parent has no live team", async () => {
-		const fx = await buildFixture();
-		afterAll(() => fx.cleanup());
-
 		// Default mockTeamManager has no getTeamState — the harness sees
 		// `teamManager.getTeamState?.(...)` return undefined.
 		const step = buildSubgoalStep({ planId: "p-no-tl" });
 		const { signal, active, stepIndex } = buildActive(fx.parent.id);
 		await fx.harness.runSubgoalStep(step, signal, active, stepIndex);
 
-		const children = fx.goalStore.getAll().filter(g => g.parentGoalId === fx.parent.id);
+		const children = fx.goalStore.getAll().filter(
+			g => g.parentGoalId === fx.parent.id && g.spawnedFromPlanId === "p-no-tl",
+		);
 		assert.equal(children.length, 1);
 		assert.equal(children[0].spawnedBySessionId, undefined,
 			"must NOT stamp spawnedBySessionId when no team-lead session is available");
 	});
 
 	it("the persisted child goal record carries spawnedFromPlanId on disk", async () => {
-		const fx = await buildFixture();
-		afterAll(() => fx.cleanup());
-
 		const step = buildSubgoalStep({ planId: "phase-2-leaf-x" });
 		const { signal, active, stepIndex } = buildActive(fx.parent.id);
 		await fx.harness.runSubgoalStep(step, signal, active, stepIndex);
 
-		const children = fx.goalStore.getAll().filter(g => g.parentGoalId === fx.parent.id);
+		const children = fx.goalStore.getAll().filter(
+			g => g.parentGoalId === fx.parent.id && g.spawnedFromPlanId === "phase-2-leaf-x",
+		);
 		assert.equal(children.length, 1);
 		assert.equal(children[0].spawnedFromPlanId, "phase-2-leaf-x");
 	});
@@ -152,13 +152,12 @@ describe("runSubgoalStep — stamp spawnedFromPlanId immediately after createGoa
 	it("re-running the step after spawn is idempotent — does NOT re-create the child", async () => {
 		// stamp-immediately + tier-1 lookup: tier-1 lookup finds the live child by spawnedFromPlanId
 		// and reuses it; no duplicate spawn.
-		const fx = await buildFixture();
-		afterAll(() => fx.cleanup());
-
 		const step = buildSubgoalStep({ planId: "phase-3" });
 		const { signal, active, stepIndex } = buildActive(fx.parent.id);
 		await fx.harness.runSubgoalStep(step, signal, active, stepIndex);
-		const childrenAfter1 = fx.goalStore.getAll().filter(g => g.parentGoalId === fx.parent.id).length;
+		const childrenAfter1 = fx.goalStore.getAll().filter(
+			g => g.parentGoalId === fx.parent.id && g.spawnedFromPlanId === "phase-3",
+		).length;
 		assert.equal(childrenAfter1, 1);
 
 		// Reset the calls log and re-run with a fresh active state.
@@ -166,7 +165,9 @@ describe("runSubgoalStep — stamp spawnedFromPlanId immediately after createGoa
 		const next = buildActive(fx.parent.id);
 		await fx.harness.runSubgoalStep(step, next.signal, next.active, next.stepIndex);
 
-		const childrenAfter2 = fx.goalStore.getAll().filter(g => g.parentGoalId === fx.parent.id).length;
+		const childrenAfter2 = fx.goalStore.getAll().filter(
+			g => g.parentGoalId === fx.parent.id && g.spawnedFromPlanId === "phase-3",
+		).length;
 		assert.equal(childrenAfter2, 1, "must NOT spawn a duplicate child on re-entry");
 		// And no createGoal in the second invocation's call log.
 		assert.equal(fx.calls.find(c => c.kind === "createGoal"), undefined);
