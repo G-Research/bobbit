@@ -24,11 +24,14 @@ import {
 	RUN_ROOT_OWNER_ENV,
 } from "../harness/run-isolation.js";
 import {
+	coordinatorTempDirectory,
 	createE2ERunPaths,
 	createIsolatedE2EEnvironment,
 	isE2ECredentialEnvKey,
 	resolveChildTmpdir,
 } from "../../scripts/run-playwright-e2e.mjs";
+import { createBrowserRunEnvironment, createBrowserRunPaths } from "../../scripts/testing-v2/run-browser-v2.mjs";
+import { createE2EV2CoordinatorEnvironment } from "../../scripts/testing-v2/run-e2e-v2.mjs";
 import { currentRunId, ownedE2EVolumeNames } from "../../tests/e2e/e2e-teardown.js";
 import { packedConsumerTempPrefix } from "../../scripts/release-packed-consumer-audit.mjs";
 
@@ -174,6 +177,62 @@ describe("workflow run isolation", () => {
 		}
 	});
 
+	it("gives concurrent browser and E2E coordinators separate legacy parents", () => {
+		const gateRoot = mkdtempSync(join(tmpdir(), "inherited-gate-root-"));
+		let browserRoot: string | undefined;
+		let e2eRoot: string | undefined;
+		try {
+			const inheritedTemp = join(gateRoot, "tmp");
+			const inheritedEnv = {
+				...process.env,
+				TMPDIR: inheritedTemp,
+				TEMP: inheritedTemp,
+				TMP: inheritedTemp,
+				BOBBIT_V2_RUN_ROOT: gateRoot,
+			};
+			const coordinatorTemp = coordinatorTempDirectory(inheritedTemp, inheritedEnv);
+			const browser = createBrowserRunPaths(coordinatorTemp);
+			const e2e = createE2ERunPaths(coordinatorTemp);
+			browserRoot = browser.root;
+			e2eRoot = e2e.root;
+			const browserEnv = createBrowserRunEnvironment(browser, inheritedEnv);
+			const e2eEnv = createE2EV2CoordinatorEnvironment(e2e, inheritedEnv);
+
+			expect(isOwnedRunChild(gateRoot, browser.root)).toBe(false);
+			expect(isOwnedRunChild(gateRoot, e2e.root)).toBe(false);
+			expect(browser.legacyTempParent).not.toBe(e2e.legacyTempParent);
+			expect(browserEnv.TMPDIR).toBe(browser.tempDir);
+			expect(e2eEnv.TMPDIR).toBe(e2e.tempDir);
+			expect(browserEnv.BOBBIT_E2E_TMP_ROOT).toBe(browser.legacyTempParent);
+			expect(e2eEnv.BOBBIT_E2E_TMP_ROOT).toBe(e2e.legacyTempParent);
+			expect(browserEnv.BOBBIT_E2E_V8CACHE_ROOT).toBe(browser.v8CacheRoot);
+			expect(e2eEnv.BOBBIT_E2E_V8CACHE_ROOT).toBe(e2e.v8CacheRoot);
+			expect(existsSync(browser.legacyTempParent)).toBe(true);
+			expect(existsSync(e2e.legacyTempParent)).toBe(true);
+			// Explicit owned roots win over Docker's otherwise shared `/tmp`.
+			for (const file of [
+				"playwright-v2.config.ts",
+				"tests/e2e/test-utils/dist-import-lock.ts",
+				"tests/e2e/session-recovery.spec.ts",
+				"tests/e2e/cost-backfill-on-boot.spec.ts",
+				"tests/e2e/aigw-startup-refresh.spec.ts",
+			]) {
+				const source = readFileSync(file, "utf8");
+				expect(source.indexOf("process.env.BOBBIT_E2E_TMP_ROOT"), file)
+					.toBeLessThan(source.indexOf('existsSync("/.dockerenv")'));
+			}
+
+			// Each coordinator removes only its root. A browser completion cannot
+			// remove the still-running E2E command's dist-import-lock parent.
+			rmSync(browser.root, { recursive: true, force: true });
+			expect(existsSync(e2e.legacyTempParent)).toBe(true);
+		} finally {
+			if (browserRoot) rmSync(browserRoot, { recursive: true, force: true });
+			if (e2eRoot) rmSync(e2eRoot, { recursive: true, force: true });
+			rmSync(gateRoot, { recursive: true, force: true });
+		}
+	});
+
 	it("isolates legacy E2E host roots and credentials while preserving its browser registry", () => {
 		const temp = mkdtempSync(join(tmpdir(), "legacy-e2e-environment-"));
 		try {
@@ -204,7 +263,7 @@ describe("workflow run isolation", () => {
 
 			for (const key of [
 				"TMPDIR", "TEMP", "TMP", "HOME", "USERPROFILE", "BOBBIT_DIR", "BOBBIT_PI_DIR", "BOBBIT_AGENT_DIR", "PI_CODING_AGENT_DIR",
-				"BOBBIT_SECRETS_DIR", "APPDATA", "LOCALAPPDATA", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME",
+				"BOBBIT_SECRETS_DIR", "BOBBIT_E2E_V8CACHE_ROOT", "APPDATA", "LOCALAPPDATA", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME",
 			]) {
 				expect(env[key], key).toBeTruthy();
 				expect(isOwnedRunChild(paths.root, env[key]!)).toBe(true);

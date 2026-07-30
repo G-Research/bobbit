@@ -12,7 +12,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
@@ -25,6 +25,25 @@ function canonicalDirectory(directory) {
   try { return realpathSync(directory); } catch { return resolve(directory); }
 }
 
+/**
+ * Pick a coordinator base that cannot be removed by an inherited test-run
+ * owner. Nested legacy invocations intentionally keep using `tmpdir()`; only
+ * top-level browser/E2E coordinators call this escape hatch.
+ */
+export function coordinatorTempDirectory(tempDirectory = tmpdir(), inheritedEnv = process.env) {
+	const base = canonicalDirectory(tempDirectory);
+	const inheritedRoot = inheritedEnv.BOBBIT_V2_RUN_ROOT;
+	if (!inheritedRoot) return base;
+	try {
+		const root = canonicalDirectory(inheritedRoot);
+		const rel = relative(root, base);
+		const isWithinRoot = rel === "" || (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`));
+		return isWithinRoot ? dirname(root) : base;
+	} catch {
+		return base;
+	}
+}
+
 /** Allocate the one canonical root owned by this legacy E2E coordinator. */
 export function createE2ERunPaths(tempDirectory = tmpdir()) {
   const root = realpathSync(mkdtempSync(join(canonicalDirectory(tempDirectory), "bobbit-v2-run-")));
@@ -33,6 +52,7 @@ export function createE2ERunPaths(tempDirectory = tmpdir()) {
     root,
     runId,
     cacheRoot: join(root, "pwtest-transform-cache"),
+    v8CacheRoot: join(root, "v8-cache"),
     homeDir: join(root, "home"),
     bobbitDir: join(root, "bobbit"),
     agentDir: join(root, "agent"),
@@ -152,13 +172,14 @@ export function createIsolatedE2EEnvironment(paths, inheritedEnv = process.env, 
     BOBBIT_AGENT_DIR: paths.agentDir,
     PI_CODING_AGENT_DIR: paths.agentDir,
     BOBBIT_SECRETS_DIR: paths.secretsDir,
+    BOBBIT_E2E_V8CACHE_ROOT: paths.v8CacheRoot,
     APPDATA: join(paths.appDataDir, "roaming"),
     LOCALAPPDATA: join(paths.appDataDir, "local"),
     XDG_STATE_HOME: join(paths.xdgDir, "state"),
     XDG_CONFIG_HOME: join(paths.xdgDir, "config"),
     XDG_CACHE_HOME: join(paths.xdgDir, "cache"),
   };
-  for (const directory of [...Object.values(owned), paths.legacyTempParent]) mkdirSync(directory, { recursive: true });
+  for (const directory of [...Object.values(owned), paths.cacheRoot, paths.legacyTempParent]) mkdirSync(directory, { recursive: true });
   Object.assign(env, owned, { PLAYWRIGHT_BROWSERS_PATH: browserRegistry });
   if (resolveChildTmpdir(env, platform) !== paths.tempDir) {
     throw new Error("isolated E2E environment did not confine the child temp directory");

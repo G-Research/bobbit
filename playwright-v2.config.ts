@@ -42,10 +42,11 @@ function resolvePlaywrightBudgetReport(): string {
 const playwrightBudgetReport = resolvePlaywrightBudgetReport();
 
 function e2eTempRoot(): string {
+	// Coordinators always provide an owned compatibility parent. Prefer it even
+	// in Docker, where `/tmp/bobbit-e2e` would otherwise be shared by runs.
+	if (process.env.BOBBIT_E2E_TMP_ROOT) return process.env.BOBBIT_E2E_TMP_ROOT;
 	if (existsSync("/.dockerenv")) return "/tmp";
-	return process.platform === "win32"
-		? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
-		: join(tmpdir(), "bobbit-e2e");
+	return process.platform === "win32" ? "C:\\bobbit-e2e" : join(tmpdir(), "bobbit-e2e");
 }
 
 function sanitizeCacheSegment(value: string): string {
