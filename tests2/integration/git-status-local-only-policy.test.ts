@@ -6,10 +6,11 @@
  * invoke the publisher.
  */
 import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, defaultProjectId, deleteSession, gitCwd, nonGitCwd } from "./_e2e/e2e-setup.js";
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
+import { installCommandRunnerInterceptor } from "./helpers/command-runner-dispatcher.js";
 
 let serverModule: any;
 
@@ -193,17 +194,23 @@ test.describe("session git-status read-only contract", () => {
 	});
 
 	test("explicit POST git-push still invokes the branch publisher", async () => {
-		const { id } = await mkSession("explicit", gitCwd());
+		const { id, cwd } = await mkSession("explicit", gitCwd());
 		createdSessionIds.push(id);
 		const runtime = await loadServerTestRuntime();
 		const runner = runtime.gatewayDeps.realCommandRunner;
-		const originalExecFile = runner.execFile;
-		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
-			const command = args.join(" ");
-			if (command === "symbolic-ref --short HEAD") return { stdout: "feature/explicit", stderr: "" };
-			if (command === "rev-parse --abbrev-ref --symbolic-full-name @{u}") throw new Error("no upstream");
-			return originalExecFile(file, args, options);
-		};
+		const restoreCommandRunner = installCommandRunnerInterceptor(runner, {
+			label: "git-status-local-only-policy:explicit-push",
+			async execFile(file, args, options, next) {
+				const candidate = typeof options?.cwd === "string" ? resolve(options.cwd) : "";
+				const pathFromRoot = candidate ? relative(resolve(cwd), candidate) : "..";
+				if (basename(file).toLowerCase().replace(/\.exe$/, "") !== "git"
+					|| (pathFromRoot !== "" && (pathFromRoot.startsWith("..") || isAbsolute(pathFromRoot)))) return next();
+				const command = args.join(" ");
+				if (command === "symbolic-ref --short HEAD") return { stdout: "feature/explicit", stderr: "" };
+				if (command === "rev-parse --abbrev-ref --symbolic-full-name @{u}") throw new Error("no upstream");
+				return next();
+			},
+		});
 
 		try {
 			const response = await withRemotePushEnabled(() => apiFetch(`/api/sessions/${id}/git-push`, { method: "POST" }));
@@ -213,7 +220,7 @@ test.describe("session git-status read-only contract", () => {
 			expect(publishCalls).toHaveLength(1);
 			expect(publishCalls[0]).toMatchObject({ branch: "feature/explicit", opts: { setUpstream: true } });
 		} finally {
-			runner.execFile = originalExecFile;
+			restoreCommandRunner();
 		}
 	});
 });

@@ -41,6 +41,7 @@ import { apiFetch, createGoal, deleteGoal, nonGitCwd } from "./_e2e/e2e-setup.js
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { installCommandRunnerInterceptor } from "./helpers/command-runner-dispatcher.js";
 
 const WORKFLOW_ID = `test-restart-resignal-${Date.now()}`;
 const HEAD_SHA = "c".repeat(40);
@@ -70,17 +71,22 @@ async function deleteWorkflow(): Promise<void> {
 	await apiFetch(`/api/workflows/${WORKFLOW_ID}`, { method: "DELETE" }).catch(() => {});
 }
 
-async function withHeadSha<T>(gateway: any, run: () => Promise<T>): Promise<T> {
+async function withHeadSha<T>(gateway: any, ownedCwd: string, run: () => Promise<T>): Promise<T> {
 	const runner = gateway.sessionManager.commandRunner;
-	const originalExecFile = runner.execFile;
-	runner.execFile = async (command: string, args: readonly string[]) => {
-		if (command === "git" && args.join(" ") === "rev-parse HEAD") return { stdout: `${HEAD_SHA}\n`, stderr: "" };
-		throw new Error(`unexpected command: ${command} ${args.join(" ")}`);
-	};
+	const restoreCommandRunner = installCommandRunnerInterceptor(runner, {
+		label: "verification-restart-resignal:head-sha",
+		async execFile(command, args, options, next) {
+			const cwd = typeof options?.cwd === "string" ? path.resolve(options.cwd) : "";
+			const relative = cwd ? path.relative(path.resolve(ownedCwd), cwd) : "..";
+			if (relative !== "" && (relative.startsWith("..") || path.isAbsolute(relative))) return next();
+			if (command === "git" && args.join(" ") === "rev-parse HEAD") return { stdout: `${HEAD_SHA}\n`, stderr: "" };
+			throw new Error(`unexpected command: ${command} ${args.join(" ")}`);
+		},
+	});
 	try {
 		return await run();
 	} finally {
-		runner.execFile = originalExecFile;
+		restoreCommandRunner();
 	}
 }
 
@@ -102,11 +108,13 @@ test.describe("Verification lock after restart — re-signal is accepted", () =>
 	test("zombie command verification from previous boot is cleaned up; re-signal at same SHA returns 201", async ({ gateway }) => {
 		// The Git identity is supplied through the gateway CommandRunner seam; the
 		// duplicate-detection path still sees an authentic full commit SHA.
+		const goalCwd = path.join(nonGitCwd(), `restart-resignal-${randomUUID()}`);
+		fs.mkdirSync(goalCwd, { recursive: true });
 		const goal = await createGoal({
 			title: `Restart Resignal ${Date.now()}`,
 			workflowId: WORKFLOW_ID,
 			worktree: false,
-			cwd: nonGitCwd(),
+			cwd: goalCwd,
 		});
 		const goalId = goal.id;
 		const gateId = "slow-gate";
@@ -217,7 +225,7 @@ test.describe("Verification lock after restart — re-signal is accepted", () =>
 			// 6. Re-signal the same gate at the same SHA via the public HTTP API.
 			//    Pre-fix: HTTP 409 "Verification already in progress for this commit"
 			//    Post-fix: HTTP 201, a brand-new signalId, a fresh verification running.
-			const resignal = await withHeadSha(gateway, () => apiFetch(`/api/goals/${goalId}/gates/${gateId}/signal`, {
+			const resignal = await withHeadSha(gateway, goalCwd, () => apiFetch(`/api/goals/${goalId}/gates/${gateId}/signal`, {
 				method: "POST",
 				body: JSON.stringify({ content: "Re-signal after simulated restart" }),
 			}));
@@ -251,6 +259,7 @@ test.describe("Verification lock after restart — re-signal is accepted", () =>
 			}).catch(() => {});
 		} finally {
 			try { await deleteGoal(goalId); } catch { /* ignore */ }
+			fs.rmSync(goalCwd, { recursive: true, force: true });
 		}
 	});
 });

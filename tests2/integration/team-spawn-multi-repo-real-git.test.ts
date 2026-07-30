@@ -1,5 +1,5 @@
 import { appendFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { vi } from "vitest";
 
@@ -8,6 +8,7 @@ import { awaitableRm, pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 import { copyGitTemplate, prepareGitTemplate } from "../harness/git-template.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, deleteGoal, registerProject, teardownTeam } from "./_e2e/e2e-setup.js";
+import { installCommandRunnerInterceptor } from "./helpers/command-runner-dispatcher.js";
 
 // The E2E Vitest lane defaults to 30s. Give this real-Git lifecycle file the
 // same budget as the integration lane so Windows process and filesystem
@@ -58,6 +59,12 @@ async function waitForGoalReady(goalId: string): Promise<any> {
 function normalized(filePath: string): string {
 	const absolute = resolve(filePath);
 	return process.platform === "win32" ? absolute.toLowerCase() : absolute;
+}
+
+function isWithinFixture(root: string, cwd: unknown): cwd is string {
+	if (typeof cwd !== "string") return false;
+	const pathFromRoot = relative(resolve(root), resolve(cwd));
+	return pathFromRoot === "" || (!pathFromRoot.startsWith("..") && !isAbsolute(pathFromRoot));
 }
 
 function liveRepoWorktrees(session: any): Record<string, string> {
@@ -127,7 +134,7 @@ test("direct and REST team spawn preserve exact local component HEADs across col
 	let postSpawnFailedSessionId: string | undefined;
 	let directWorkerId: string | undefined;
 	let restWorkerId: string | undefined;
-	let originalExecFile: CommandRunner["execFile"] | undefined;
+	let restoreExecFileInterceptor: (() => void) | undefined;
 	let originalTryAutoSelectModel: any;
 	let originalUpdateSessionMeta: any;
 	let originalSessionStorePut: any;
@@ -203,37 +210,39 @@ test("direct and REST team spawn preserve exact local component HEADs across col
 		// completed. The rejected direct spawn must remove that worktree, its
 		// intermediate repo-key directory, branch, and container. It must never
 		// attempt cleanup against beta's failed, never-created target.
-		originalExecFile = runner.execFile;
 		let failedBranch: string | undefined;
 		let failedContainer: string | undefined;
 		let firstComponentWorktree: string | undefined;
 		let failedComponentWorktree: string | undefined;
 		const rollbackWorktreeRemoveTargets: string[] = [];
-		(runner as any).execFile = async (file: string, args: string[], options: any) => {
-			const gitCommand = file.toLowerCase().replace(/\.exe$/, "") === "git";
-			if (gitCommand && args[0] === "worktree" && args[1] === "remove") {
-				rollbackWorktreeRemoveTargets.push(String(args[2]));
-			}
-			const branchIndex = args.indexOf("-b");
-			const branch = branchIndex >= 0 ? args[branchIndex + 1] : undefined;
-			const target = branchIndex >= 0 ? args[branchIndex + 2] : args[2];
-			const workerAdd = gitCommand
-				&& args[0] === "worktree"
-				&& args[1] === "add"
-				&& branch?.startsWith(`goal/${goalId!.slice(0, 8)}/coder-`);
-			if (workerAdd && normalized(String(options?.cwd ?? "")) === normalized(join(projectRoot, NESTED_COMPONENT))) {
-				failedBranch = branch;
-				firstComponentWorktree = target;
-				failedContainer = dirname(dirname(target));
-			}
-			if (workerAdd && normalized(String(options?.cwd ?? "")) === normalized(join(projectRoot, FAILED_COMPONENT))) {
-				failedComponentWorktree = target;
-				const error = new Error("injected beta git worktree add failure");
-				(error as any).stderr = "injected beta git worktree add failure";
-				throw error;
-			}
-			return originalExecFile!.call(runner, file, args, options);
-		};
+		restoreExecFileInterceptor = installCommandRunnerInterceptor(runner, {
+			label: "team-spawn-multi-repo:partial-rollback",
+			async execFile(file, args, options, next) {
+				const gitCommand = file.toLowerCase().replace(/\.exe$/, "") === "git";
+				if (!gitCommand || !isWithinFixture(fixtureRoot, options?.cwd)) return next();
+				if (args[0] === "worktree" && args[1] === "remove") {
+					rollbackWorktreeRemoveTargets.push(String(args[2]));
+				}
+				const branchIndex = args.indexOf("-b");
+				const branch = branchIndex >= 0 ? args[branchIndex + 1] : undefined;
+				const target = branchIndex >= 0 ? args[branchIndex + 2] : args[2];
+				const workerAdd = args[0] === "worktree"
+					&& args[1] === "add"
+					&& branch?.startsWith(`goal/${goalId!.slice(0, 8)}/coder-`);
+				if (workerAdd && normalized(options.cwd) === normalized(join(projectRoot, NESTED_COMPONENT))) {
+					failedBranch = branch;
+					firstComponentWorktree = target;
+					failedContainer = dirname(dirname(target));
+				}
+				if (workerAdd && normalized(options.cwd) === normalized(join(projectRoot, FAILED_COMPONENT))) {
+					failedComponentWorktree = target;
+					const error = new Error("injected beta git worktree add failure");
+					(error as any).stderr = "injected beta git worktree add failure";
+					throw error;
+				}
+				return next();
+			},
+		});
 
 		let injectedFailure: unknown;
 		try {
@@ -241,8 +250,8 @@ test("direct and REST team spawn preserve exact local component HEADs across col
 		} catch (error) {
 			injectedFailure = error;
 		} finally {
-			(runner as any).execFile = originalExecFile;
-			originalExecFile = undefined;
+			restoreExecFileInterceptor();
+			restoreExecFileInterceptor = undefined;
 		}
 		const failureMessage = injectedFailure instanceof Error ? injectedFailure.message : String(injectedFailure ?? "spawn succeeded");
 		if (!/beta.*(?:git )?worktree add|(?:git )?worktree add.*beta/i.test(failureMessage)) {
@@ -279,66 +288,75 @@ test("direct and REST team spawn preserve exact local component HEADs across col
 		const projectContext = gateway.projectContextManager.getContextForGoal(goalId!);
 		expect(projectContext, "multi-repo goal must retain its project context").toBeTruthy();
 		projectContext!.projectConfigStore.set("base_ref", "master");
-		originalExecFile = runner.execFile;
 		let collidingBranch: string | undefined;
 		let collidingBranchHead: string | undefined;
 		let collisionContainer: string | undefined;
 		let firstCreatedWorktree: string | undefined;
 		let collidingWorktree: string | undefined;
+		let bypassCollisionInterceptor = false;
 		const collisionWorktreeAddTargets: string[] = [];
 		const rollbackWorktreeRemoveTargetsForCollision: string[] = [];
 		const upstreamMutationCalls: Array<{ cwd: string; args: string[] }> = [];
 		const localBranchDeleteCalls: Array<{ cwd: string; branch: string }> = [];
 		const remoteMutationCalls: Array<{ cwd: string; args: string[] }> = [];
-		(runner as any).execFile = async (file: string, args: string[], options: any) => {
-			const gitCommand = file.toLowerCase().replace(/\.exe$/, "") === "git";
-			const cwd = String(options?.cwd ?? "");
-			if (gitCommand && args[0] === "worktree" && args[1] === "remove") {
-				rollbackWorktreeRemoveTargetsForCollision.push(String(args[2]));
-			}
-			if (gitCommand && args[0] === "branch" && args.some(arg => arg.startsWith("--set-upstream-to="))) {
-				upstreamMutationCalls.push({ cwd, args: [...args] });
-			}
-			if (gitCommand && args[0] === "branch" && args[1] === "-D") {
-				localBranchDeleteCalls.push({ cwd, branch: String(args[2]) });
-			}
-			if (gitCommand && args[0] === "push") {
-				remoteMutationCalls.push({ cwd, args: [...args] });
-			}
+		restoreExecFileInterceptor = installCommandRunnerInterceptor(runner, {
+			label: "team-spawn-multi-repo:branch-collision",
+			async execFile(file, args, options, next) {
+				const gitCommand = file.toLowerCase().replace(/\.exe$/, "") === "git";
+				if (!gitCommand || !isWithinFixture(fixtureRoot, options?.cwd) || bypassCollisionInterceptor) return next();
+				const cwd = options.cwd;
+				if (args[0] === "worktree" && args[1] === "remove") {
+					rollbackWorktreeRemoveTargetsForCollision.push(String(args[2]));
+				}
+				if (args[0] === "branch" && args.some(arg => arg.startsWith("--set-upstream-to="))) {
+					upstreamMutationCalls.push({ cwd, args: [...args] });
+				}
+				if (args[0] === "branch" && args[1] === "-D") {
+					localBranchDeleteCalls.push({ cwd, branch: String(args[2]) });
+				}
+				if (args[0] === "push") {
+					remoteMutationCalls.push({ cwd, args: [...args] });
+				}
 
-			if (gitCommand && args[0] === "worktree" && args[1] === "add") {
-				const branchIndex = args.indexOf("-b");
-				const branch = String(branchIndex >= 0 ? args[branchIndex + 1] : args[3]);
-				const target = String(branchIndex >= 0 ? args[branchIndex + 2] : args[2]);
-				const workerAdd = branch.startsWith(`goal/${goalId!.slice(0, 8)}/coder-`);
-				if (workerAdd && normalized(cwd) === normalized(join(projectRoot, NESTED_COMPONENT))) {
-					firstCreatedWorktree = target;
-					collisionContainer = resolve(
-						target,
-						...NESTED_COMPONENT.split("/").map(() => ".."),
-					);
-					if (!collidingBranch) {
-						collidingBranch = branch;
-						const result = await originalExecFile!.call(runner, "git", ["rev-parse", "HEAD"], {
-							cwd: join(projectRoot, FAILED_COMPONENT),
-							encoding: "utf-8",
-							timeout: 10_000,
-						});
-						collidingBranchHead = String(result.stdout).trim();
-						await originalExecFile!.call(runner, "git", ["branch", collidingBranch, collidingBranchHead], {
-							cwd: join(projectRoot, FAILED_COMPONENT),
-							encoding: "utf-8",
-							timeout: 10_000,
-						});
+				if (args[0] === "worktree" && args[1] === "add") {
+					const branchIndex = args.indexOf("-b");
+					const branch = String(branchIndex >= 0 ? args[branchIndex + 1] : args[3]);
+					const target = String(branchIndex >= 0 ? args[branchIndex + 2] : args[2]);
+					const workerAdd = branch.startsWith(`goal/${goalId!.slice(0, 8)}/coder-`);
+					if (workerAdd && normalized(cwd) === normalized(join(projectRoot, NESTED_COMPONENT))) {
+						firstCreatedWorktree = target;
+						collisionContainer = resolve(
+							target,
+							...NESTED_COMPONENT.split("/").map(() => ".."),
+						);
+						if (!collidingBranch) {
+							collidingBranch = branch;
+							bypassCollisionInterceptor = true;
+							try {
+								const result = await runner.execFile("git", ["rev-parse", "HEAD"], {
+									cwd: join(projectRoot, FAILED_COMPONENT),
+									encoding: "utf-8",
+									timeout: 10_000,
+								});
+								collidingBranchHead = String(result.stdout).trim();
+								await runner.execFile("git", ["branch", collidingBranch, collidingBranchHead], {
+									cwd: join(projectRoot, FAILED_COMPONENT),
+									encoding: "utf-8",
+									timeout: 10_000,
+								});
+							} finally {
+								bypassCollisionInterceptor = false;
+							}
+						}
+					}
+					if (workerAdd && normalized(cwd) === normalized(join(projectRoot, FAILED_COMPONENT))) {
+						collidingWorktree = target;
+						collisionWorktreeAddTargets.push(target);
 					}
 				}
-				if (workerAdd && normalized(cwd) === normalized(join(projectRoot, FAILED_COMPONENT))) {
-					collidingWorktree = target;
-					collisionWorktreeAddTargets.push(target);
-				}
-			}
-			return originalExecFile!.call(runner, file, args, options);
-		};
+				return next();
+			},
+		});
 
 		let collisionFailure: unknown;
 		try {
@@ -347,8 +365,8 @@ test("direct and REST team spawn preserve exact local component HEADs across col
 		} catch (error) {
 			collisionFailure = error;
 		} finally {
-			(runner as any).execFile = originalExecFile;
-			originalExecFile = undefined;
+			restoreExecFileInterceptor();
+			restoreExecFileInterceptor = undefined;
 		}
 		const collisionFailureMessage = collisionFailure instanceof Error
 			? collisionFailure.message
@@ -409,7 +427,6 @@ test("direct and REST team spawn preserve exact local component HEADs across col
 		// awaited post-spawn model setup. SessionManager must not treat either
 		// non-Git container as a single-repo cleanup owner; TeamManager retains sole
 		// ownership of the already-provisioned component worktrees and container.
-		originalExecFile = runner.execFile;
 		originalTryAutoSelectModel = (gateway.sessionManager as any).tryAutoSelectModel;
 		const postSpawnGitCalls: Array<{ cwd: string; args: string[] }> = [];
 		const postSpawnWorktrees: Partial<Record<ComponentName, string>> = {};
@@ -419,32 +436,36 @@ test("direct and REST team spawn preserve exact local component HEADs across col
 		let postSpawnSessionShape: any;
 		let postSpawnSessionWasLive = false;
 		let componentsExistedDuringPostSpawn: Partial<Record<ComponentName, boolean>> = {};
-		(runner as any).execFile = async (file: string, args: string[], options: any) => {
-			const gitCommand = file.toLowerCase().replace(/\.exe$/, "") === "git";
-			const cwd = String(options?.cwd ?? "");
-			if (gitCommand) postSpawnGitCalls.push({ cwd, args: [...args] });
-			const result = await originalExecFile!.call(runner, file, args, options);
-			if (gitCommand && args[0] === "worktree" && args[1] === "add") {
-				const branchIndex = args.indexOf("-b");
-				const branch = String(branchIndex >= 0 ? args[branchIndex + 1] : args[3]);
-				const target = String(branchIndex >= 0 ? args[branchIndex + 2] : args[2]);
-				if (branch.startsWith(`goal/${goalId!.slice(0, 8)}/coder-`)) {
-					postSpawnBranch = branch;
-					for (const repo of COMPONENTS) {
-						if (normalized(cwd) === normalized(join(projectRoot, repo))) {
-							postSpawnWorktrees[repo] = target;
+		restoreExecFileInterceptor = installCommandRunnerInterceptor(runner, {
+			label: "team-spawn-multi-repo:post-spawn-cleanup",
+			async execFile(file, args, options, next) {
+				const gitCommand = file.toLowerCase().replace(/\.exe$/, "") === "git";
+				if (!gitCommand || !isWithinFixture(fixtureRoot, options?.cwd)) return next();
+				const cwd = options.cwd;
+				postSpawnGitCalls.push({ cwd, args: [...args] });
+				const result = await next();
+				if (args[0] === "worktree" && args[1] === "add") {
+					const branchIndex = args.indexOf("-b");
+					const branch = String(branchIndex >= 0 ? args[branchIndex + 1] : args[3]);
+					const target = String(branchIndex >= 0 ? args[branchIndex + 2] : args[2]);
+					if (branch.startsWith(`goal/${goalId!.slice(0, 8)}/coder-`)) {
+						postSpawnBranch = branch;
+						for (const repo of COMPONENTS) {
+							if (normalized(cwd) === normalized(join(projectRoot, repo))) {
+								postSpawnWorktrees[repo] = target;
+							}
+						}
+						if (normalized(cwd) === normalized(join(projectRoot, NESTED_COMPONENT))) {
+							postSpawnContainer = resolve(
+								target,
+								...NESTED_COMPONENT.split("/").map(() => ".."),
+							);
 						}
 					}
-					if (normalized(cwd) === normalized(join(projectRoot, NESTED_COMPONENT))) {
-						postSpawnContainer = resolve(
-							target,
-							...NESTED_COMPONENT.split("/").map(() => ".."),
-						);
-					}
 				}
-			}
-			return result;
-		};
+				return result;
+			},
+		});
 		(gateway.sessionManager as any).tryAutoSelectModel = async (session: any) => {
 			if (session.goalId === goalId && session.role === "coder") {
 				postSpawnFailedSessionId = session.id;
@@ -471,8 +492,8 @@ test("direct and REST team spawn preserve exact local component HEADs across col
 		} catch (error) {
 			postSpawnFailure = error;
 		} finally {
-			(runner as any).execFile = originalExecFile;
-			originalExecFile = undefined;
+			restoreExecFileInterceptor();
+			restoreExecFileInterceptor = undefined;
 			(gateway.sessionManager as any).tryAutoSelectModel = originalTryAutoSelectModel;
 			originalTryAutoSelectModel = undefined;
 		}
@@ -643,7 +664,8 @@ test("direct and REST team spawn preserve exact local component HEADs across col
 			worktreePath: spawnBody.worktreePath,
 		});
 	} finally {
-		if (originalExecFile) (runner as any).execFile = originalExecFile;
+		restoreExecFileInterceptor?.();
+		restoreExecFileInterceptor = undefined;
 		if (originalTryAutoSelectModel) (gateway.sessionManager as any).tryAutoSelectModel = originalTryAutoSelectModel;
 		if (originalUpdateSessionMeta) (gateway.sessionManager as any).updateSessionMeta = originalUpdateSessionMeta;
 		if (originalSessionStorePut && interceptedSessionStore) interceptedSessionStore.put = originalSessionStorePut;
