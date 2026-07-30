@@ -1,4 +1,5 @@
 import { render } from "lit";
+import { commitGatewayConnection } from "../../src/app/gateway-fetch.js";
 import { renderSidebar, isProjectExpanded, toggleProjectExpanded } from "../../src/app/sidebar.js";
 import {
 	expandedGoals,
@@ -28,6 +29,8 @@ const DELEGATE_CHILD_SESSION_ID = "sidebar-filter-delegate-child-session";
 const ARCHIVED_DELEGATE_CHILD_SESSION_ID = "sidebar-filter-archived-delegate-child-session";
 const NESTED_MATCH_GOAL_ID = "sidebar-filter-nested-match-goal";
 const ARCHIVED_SESSION_ID = "sidebar-filter-archived-session";
+const FIXTURE_GATEWAY_BASE_URL = "https://fixture.test/team/bobbit";
+const FIXTURE_GATEWAY_TOKEN = "fixture-token";
 
 const PROJECT: Project = {
 	id: PROJECT_ID,
@@ -114,24 +117,37 @@ function response(body: unknown, status = 200): Response {
 	});
 }
 
-function requestPath(input: RequestInfo | URL): string {
+function requestUrl(input: RequestInfo | URL): URL {
 	const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-	try {
-		const url = new URL(raw, window.location.href);
-		return `${url.pathname}${url.search}`;
-	} catch {
-		return raw;
-	}
+	return new URL(raw, window.location.href);
 }
 
-window.fetch = (async (input: RequestInfo | URL) => {
-	const url = requestPath(input);
-	if (url === "/api/projects") return response({ projects: [{ ...PROJECT }] });
-	if (url.startsWith("/api/sessions")) return response({ sessions: [], archivedDelegates: [], total: 0, hasMore: false, nextCursor: null });
-	if (url.startsWith("/api/goals")) return response({ goals: [], total: 0, hasMore: false, nextCursor: null, archivedSessions: [] });
-	if (url === "/api/staff" || url.startsWith("/api/staff?") || url === "/api/staff/orphaned") return response({ staff: [] });
-	if (url === "/api/preferences") return response({});
-	if (url.startsWith("/api/sandbox-status")) return response({ available: false, configured: false });
+function mountedRoute(url: URL): string {
+	const gateway = new URL(FIXTURE_GATEWAY_BASE_URL);
+	const mount = gateway.pathname.replace(/\/$/, "");
+	if (url.origin !== gateway.origin || (url.pathname !== mount && !url.pathname.startsWith(`${mount}/`))) {
+		throw new Error(`Fixture request escaped mounted gateway: ${url.href}`);
+	}
+	return `${url.pathname.slice(mount.length) || "/"}${url.search}`;
+}
+
+window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+	const request = input instanceof Request ? input : null;
+	const url = requestUrl(input);
+	const headers = new Headers(init?.headers ?? request?.headers);
+	(window as any).__sidebarFilterSearchRequests.push({
+		url: url.href,
+		method: init?.method ?? request?.method ?? "GET",
+		credentials: init?.credentials ?? request?.credentials ?? null,
+		authorization: headers.get("Authorization"),
+	});
+	const route = mountedRoute(url);
+	if (route === "/api/projects") return response({ projects: [{ ...PROJECT }] });
+	if (route.startsWith("/api/sessions")) return response({ sessions: [], archivedDelegates: [], total: 0, hasMore: false, nextCursor: null });
+	if (route.startsWith("/api/goals")) return response({ goals: [], total: 0, hasMore: false, nextCursor: null, archivedSessions: [] });
+	if (route === "/api/staff" || route.startsWith("/api/staff?") || route === "/api/staff/orphaned") return response({ staff: [] });
+	if (route === "/api/preferences") return response({});
+	if (route.startsWith("/api/sandbox-status")) return response({ available: false, configured: false });
 	return response({ ok: true });
 }) as typeof window.fetch;
 
@@ -312,6 +328,9 @@ function fixtureSessions(): GatewaySession[] {
 }
 
 async function resetFixture(opts: { preserveFilterStorage?: boolean } = {}): Promise<void> {
+	// Publish a valid mounted connection before renderSidebar persists missing session colours.
+	commitGatewayConnection(FIXTURE_GATEWAY_BASE_URL, FIXTURE_GATEWAY_TOKEN);
+	(window as any).__sidebarFilterSearchRequests = [];
 	installFixtureStyle();
 	if (!opts.preserveFilterStorage) {
 		localStorage.removeItem("bobbit-show-archived");
