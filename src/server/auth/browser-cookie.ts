@@ -104,7 +104,8 @@ export function classifyBrowserCookieEligibility(
 	}
 
 	const fetchSite = readSingleHeader(request.headers, "sec-fetch-site");
-	if (fetchSite.kind !== "value" || normalizeToken(fetchSite.value) !== "same-origin") {
+	const normalizedFetchSite = fetchSite.kind === "value" ? normalizeToken(fetchSite.value) : undefined;
+	if (normalizedFetchSite !== "same-origin" && normalizedFetchSite !== "same-site") {
 		return deny("invalid-fetch-site");
 	}
 
@@ -123,16 +124,25 @@ export function classifyBrowserCookieEligibility(
 	const originHeader = readSingleHeader(request.headers, "origin");
 	if (originHeader.kind === "invalid") return deny("invalid-origin");
 	if (originHeader.kind === "missing") {
-		// Same-origin navigational GETs may omit Origin. Other methods must provide
-		// it so the production or Vite origin tuple can be classified.
-		if (normalizeMethod(request.method) !== "GET") return deny("origin-required");
+		// Same-origin navigational GETs may omit Origin. A `same-site` request and
+		// every mutating request need the serialized browser origin so hostname and
+		// scheme compatibility can be proven rather than inferred.
+		if (normalizedFetchSite === "same-site" || normalizeMethod(request.method) !== "GET") {
+			return deny("origin-required");
+		}
 	} else {
 		const browserOrigin = parseOriginHeader(originHeader.value!);
 		if (!browserOrigin) return deny("invalid-origin");
 		if (browserOrigin.protocol === "http:" && !isLoopbackHostname(browserOrigin.hostname)) {
 			return deny("insecure-non-loopback-origin");
 		}
-		if (!isAcceptedOrigin(browserOrigin, requestOrigin, context)) {
+		if (normalizedFetchSite === "same-site") {
+			// The base-path compatibility extension is specifically for a bundled UI
+			// and gateway on the same scheme/hostname but different ports. An exact
+			// origin is serialized by browsers as `same-origin`, not `same-site`.
+			if (browserOrigin.origin === requestOrigin.origin) return deny("invalid-fetch-site");
+			if (!isSameSchemeHost(browserOrigin, requestOrigin)) return deny("origin-mismatch");
+		} else if (!isAcceptedOrigin(browserOrigin, requestOrigin, context)) {
 			return deny("origin-mismatch");
 		}
 	}
@@ -211,6 +221,12 @@ function parseOriginHeader(raw: string): ParsedOrigin | undefined {
 	return parseOrigin(raw);
 }
 
+/** Return the canonical value for one valid serialized HTTP(S) Origin header. */
+export function canonicalHttpOrigin(raw: string | readonly string[] | undefined): string | undefined {
+	if (typeof raw !== "string") return undefined;
+	return parseOriginHeader(raw)?.origin;
+}
+
 function parseOrigin(raw: string): ParsedOrigin | undefined {
 	try {
 		const parsed = new URL(raw);
@@ -228,6 +244,10 @@ function parseOrigin(raw: string): ParsedOrigin | undefined {
 	}
 }
 
+function isSameSchemeHost(a: ParsedOrigin, b: ParsedOrigin): boolean {
+	return a.protocol === b.protocol && a.hostname === b.hostname;
+}
+
 function isAcceptedOrigin(
 	browserOrigin: ParsedOrigin,
 	requestOrigin: ParsedOrigin,
@@ -242,7 +262,30 @@ function isAcceptedOrigin(
 		&& requestOrigin.hostname === configuredHostname;
 	const bothLoopback = isLoopbackHostname(browserOrigin.hostname)
 		&& isLoopbackHostname(requestOrigin.hostname);
-	return bothUseConfiguredHost || bothLoopback;
+	return browserOrigin.protocol === requestOrigin.protocol && (bothUseConfiguredHost || bothLoopback);
+}
+
+/**
+ * Cookie-only API authentication is valid for same-origin/same-scheme-host
+ * browser requests. Requests without an Origin retain non-browser compatibility;
+ * a presented malformed or incompatible browser Origin must use real Bearer auth.
+ */
+export function isBrowserCookieAuthenticationCompatible(
+	request: Pick<BrowserCookieRequestMetadata, "headers" | "isTls">,
+	context: Pick<BrowserCookieEligibilityContext, "deployment" | "configuredHost">,
+): boolean {
+	const originHeader = readSingleHeader(request.headers, "origin");
+	if (originHeader.kind === "missing") return true;
+	if (originHeader.kind === "invalid") return false;
+	const browserOrigin = parseOriginHeader(originHeader.value!);
+	const requestOrigin = parseRequestOrigin(request.headers, request.isTls);
+	return Boolean(browserOrigin && requestOrigin && (
+		isSameSchemeHost(browserOrigin, requestOrigin)
+		|| isAcceptedOrigin(browserOrigin, requestOrigin, {
+			...context,
+			authentication: { source: "other" },
+		})
+	));
 }
 
 function normalizeConfiguredHostname(host: string): string | undefined {

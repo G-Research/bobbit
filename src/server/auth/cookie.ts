@@ -153,7 +153,30 @@ export class CookieStore {
 	}
 }
 
-/** Parse the `Cookie` request header into a flat record. */
+function decodeCookieValue(value: string): string {
+	try {
+		return decodeURIComponent(value);
+	} catch {
+		return value;
+	}
+}
+
+/** Collect all values for one cookie name without comma folding or shadowing duplicates. */
+export function collectCookieValues(req: http.IncomingMessage, wantedName: string): string[] {
+	const header = req.headers.cookie;
+	if (!header || typeof header !== "string") return [];
+	const values: string[] = [];
+	for (const part of header.split(";")) {
+		const eq = part.indexOf("=");
+		if (eq < 0) continue;
+		const name = part.slice(0, eq).trim();
+		if (name !== wantedName) continue;
+		values.push(decodeCookieValue(part.slice(eq + 1).trim()));
+	}
+	return values;
+}
+
+/** Parse the `Cookie` request header into a flat compatibility record. */
 export function parseCookies(req: http.IncomingMessage): Record<string, string> {
 	const header = req.headers.cookie;
 	if (!header || typeof header !== "string") return {};
@@ -162,21 +185,15 @@ export function parseCookies(req: http.IncomingMessage): Record<string, string> 
 		const eq = part.indexOf("=");
 		if (eq < 0) continue;
 		const name = part.slice(0, eq).trim();
-		const value = part.slice(eq + 1).trim();
 		if (!name) continue;
-		try {
-			out[name] = decodeURIComponent(value);
-		} catch {
-			out[name] = value;
-		}
+		out[name] = decodeCookieValue(part.slice(eq + 1).trim());
 	}
 	return out;
 }
 
-/** Return true when the request carries a valid signed Bobbit session cookie. */
+/** Return true when any duplicate-name Bobbit cookie verifies in this store. */
 export function tryAuth(req: http.IncomingMessage, store: CookieStore): boolean {
-	const value = parseCookies(req)[COOKIE_NAME];
-	return value !== undefined && Boolean(store.verify(value));
+	return collectCookieValues(req, COOKIE_NAME).some((value) => Boolean(store.verify(value)));
 }
 
 /**
@@ -186,14 +203,18 @@ export function tryAuth(req: http.IncomingMessage, store: CookieStore): boolean 
 export function issueCookie(
 	res: http.ServerResponse,
 	store: CookieStore,
-	opts: { localhost?: boolean } = {},
+	opts: { localhost?: boolean; basePath?: string } = {},
 ): string {
 	const value = store.mint();
+	// The gateway normalizes this process-level deployment value before it can
+	// reach cookie issuance; keeping this crypto/auth module filesystem- and
+	// application-dependency-free is an existing security boundary.
+	const cookiePath = opts.basePath ? `${opts.basePath}/` : "/";
 	const attrs = [
 		`${COOKIE_NAME}=${value}`,
 		"HttpOnly",
 		"SameSite=Lax",
-		"Path=/",
+		`Path=${cookiePath}`,
 		`Max-Age=${COOKIE_MAX_AGE_SECONDS}`,
 	];
 	if (!opts.localhost) attrs.push("Secure");
@@ -213,15 +234,21 @@ export function issueIfMissing(
 	req: http.IncomingMessage,
 	res: http.ServerResponse,
 	store: CookieStore,
-	opts: { localhost?: boolean } = {},
+	opts: { localhost?: boolean; basePath?: string } = {},
 ): string | undefined {
-	const existing = parseCookies(req)[COOKIE_NAME];
-	const verification = existing === undefined ? undefined : store.verify(existing);
-	if (verification && !verification.needsRenewal) return undefined;
+	const verified = collectCookieValues(req, COOKIE_NAME)
+		.map((value) => ({ value, verification: store.verify(value) }))
+		.find((candidate) => candidate.verification !== undefined);
+	if (verified?.verification && !verified.verification.needsRenewal) return undefined;
 	return issueCookie(res, store, opts);
 }
 
-/** Extract the raw Bobbit session cookie, useful for SSE re-authentication. */
-export function extractCookieValue(req: http.IncomingMessage): string | undefined {
-	return parseCookies(req)[COOKIE_NAME];
+/**
+ * Extract a Bobbit session cookie. With a store, only a value verified by that
+ * store is returned, so a stale root cookie cannot shadow a valid mounted one.
+ */
+export function extractCookieValue(req: http.IncomingMessage, store?: CookieStore): string | undefined {
+	const values = collectCookieValues(req, COOKIE_NAME);
+	if (!store) return values[values.length - 1];
+	return values.find((value) => Boolean(store.verify(value)));
 }
