@@ -15,6 +15,7 @@ const SIDEBAR_POPOVER_SRC = path.resolve("src/ui/components/SidebarActionsPopove
 const SIDEBAR_FLIP_SRC = path.resolve("src/ui/components/sidebar-actions-flip.ts");
 const STATE_SRC = path.resolve("src/app/state.ts");
 const API_SRC = path.resolve("src/app/api.ts");
+const GATEWAY_FETCH_SRC = path.resolve("src/app/gateway-fetch.ts");
 const SESSION_MANAGER_SRC = path.resolve("src/app/session-manager.ts");
 
 const MARK = "SIDEBAR_ACTIONS_FIXTURE";
@@ -41,6 +42,7 @@ test.beforeAll(() => {
 			SIDEBAR_FLIP_SRC,
 			STATE_SRC,
 			API_SRC,
+			GATEWAY_FETCH_SRC,
 			SESSION_MANAGER_SRC,
 		],
 	});
@@ -142,6 +144,20 @@ async function menuTitleMap(page: Page): Promise<Record<string, string | null>> 
 		])),
 	);
 }
+
+test("render-time session updates use the mounted active gateway connection", async ({ page }) => {
+	const ids = await loadFixture(page);
+	await expect.poll(() => page.evaluate((sessionId) =>
+		(window as any).__sidebarActionsRequests.find((request: any) =>
+			request.method === "PATCH" && request.url.endsWith(`/api/sessions/${sessionId}`)), ids.session), {
+		message: `${MARK}: rendering should persist the assigned session colour through the gateway boundary`,
+	}).toMatchObject({
+		url: `https://fixture.test/team/bobbit/api/sessions/${ids.session}`,
+		method: "PATCH",
+		credentials: "include",
+		authorization: "Bearer fixture-token",
+	});
+});
 
 test("hover strip layout keeps action controls out of idle-time layout flow", async ({ page }) => {
 	const ids = await loadFixture(page);
