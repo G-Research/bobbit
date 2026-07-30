@@ -48,7 +48,7 @@ process.env.BOBBIT_TEST_NO_EXTERNAL = "1";
 const { resetAgentDirStateForTests } = await import("../../src/server/bobbit-dir.ts");
 resetAgentDirStateForTests?.();
 const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
-const { invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
+const { getAvailableModels, invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
 const { registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
 const { initAuthorSidecarDir } = await import("../../src/server/agent/author-sidecar.ts");
 const { initPromptDirs } = await import("../../src/server/agent/system-prompt.ts");
@@ -101,6 +101,10 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 	body = body
 		.replace(/\s+as\s+string\s*\|\s*undefined/g, "")
 		.replace(/async \(modelString: string\): Promise<void> =>/g, "async (modelString) =>")
+		.replace(
+			/async \(\s*modelString: string,\s*explicitPreferredThinking\?: ThinkingLevel,\s*\): Promise<void> =>/g,
+			"async (modelString, explicitPreferredThinking) =>",
+		)
 		.replace(/SessionManager\.AIGW_CACHE_TTL_MS/g, "60_000");
 
 	// The extracted production method now normalizes legacy provider-prefixed AIGW
@@ -194,57 +198,71 @@ async function exerciseAutoSelect(options: {
 	failThinkingLevels?: string[];
 	spawnPinnedModel?: string;
 	spawnPinnedThinkingLevel?: string;
+	explicitRoleAssignment?: boolean;
 	initialBound?: { provider: string; id: string; thinkingLevel?: string };
-	initialDurable?: { provider: string; id: string; thinkingLevel: string };
+	initialDurable?: { provider: string; id: string; thinkingLevel: string } | null;
 }): Promise<{
 	error: unknown;
 	setModelCalls: ModelPair[];
 	setThinkingCalls: string[];
 	persisted: Array<Record<string, unknown>>;
-	durable: { provider: string; id: string; thinkingLevel: string };
+	durable: { provider: string; id: string; thinkingLevel: string } | undefined;
 	modelFiles: string[];
 	broadcastModels: Array<{ provider: string; id: string }>;
 	broadcastTuples: Array<{ provider: string; id: string; thinkingLevel: string | undefined }>;
+	spawnPinnedThinkingLevel: string | undefined;
 }> {
 	const setModelCalls: ModelPair[] = [];
 	const setThinkingCalls: string[] = [];
 	const persisted: Array<Record<string, unknown>> = [];
 	const modelFiles: string[] = [];
-	const initialDurable = options.initialDurable ?? { provider: "anthropic", id: "durable-model", thinkingLevel: "high" };
-	let durable = { ...initialDurable };
+	const defaultDurable = { provider: "anthropic", id: "durable-model", thinkingLevel: "high" };
+	let durable = options.initialDurable === null
+		? undefined
+		: { ...(options.initialDurable ?? defaultDurable) };
 	let bound = {
-		provider: options.initialBound?.provider ?? initialDurable.provider,
-		id: options.initialBound?.id ?? initialDurable.id,
-		thinkingLevel: options.initialBound?.thinkingLevel ?? initialDurable.thinkingLevel,
+		provider: options.initialBound?.provider ?? durable?.provider ?? "unset",
+		id: options.initialBound?.id ?? durable?.id ?? "unset",
+		thinkingLevel: options.initialBound?.thinkingLevel ?? durable?.thinkingLevel ?? "medium",
 	};
 	const failModels = new Set(options.failModels ?? []);
 	const failThinkingLevels = new Set(options.failThinkingLevels ?? []);
 	const client = { messages: [] as any[] };
 	const store = {
-		get: () => ({
+		get: () => durable ? {
 			modelProvider: durable.provider,
 			modelId: durable.id,
 			effectiveThinkingLevel: durable.thinkingLevel,
-		}),
+		} : undefined,
 		update: (_sessionId: string, update: Record<string, unknown>) => {
 			persisted.push(update);
 			durable = {
-				provider: typeof update.modelProvider === "string" ? update.modelProvider : durable.provider,
-				id: typeof update.modelId === "string" ? update.modelId : durable.id,
-				thinkingLevel: typeof update.effectiveThinkingLevel === "string" ? update.effectiveThinkingLevel : durable.thinkingLevel,
+				provider: typeof update.modelProvider === "string" ? update.modelProvider : durable?.provider ?? "",
+				id: typeof update.modelId === "string" ? update.modelId : durable?.id ?? "",
+				thinkingLevel: typeof update.effectiveThinkingLevel === "string" ? update.effectiveThinkingLevel : durable?.thinkingLevel ?? "medium",
 			};
 		},
 	};
 	const currentCatalogModels = new Set([
+		"anthropic/claude-opus-5",
 		"openai/fallback-session",
 		"openai/dead-fallback",
 	]);
 	const manager = {
 		preferencesStore: { get: (key: string) => options.prefs[key] },
+		_setupInitialThinkingAuthorities: new Map(),
 		resolveRoleModel: () => options.roleModel,
 		resolveRoleThinkingLevel: () => options.roleThinking,
 		async resolveCurrentCatalogThinkingLevel(model: string, _role: string | undefined, _projectId: string | undefined, preferred: string) {
 			return model.includes("opus-5") || !["xhigh", "max"].includes(preferred) ? preferred : "high";
+		},
+		async resolveCurrentCatalogPreferredThinkingLevel(
+			model: string,
+			role: string | undefined,
+			projectId: string | undefined,
+			preferred: string,
+		) {
+			return this.resolveCurrentCatalogThinkingLevel(model, role, projectId, preferred);
 		},
 		resolveStoreForSession: () => store,
 		async requireCurrentCatalogSpawnModel(model: string) {
@@ -264,6 +282,7 @@ async function exerciseAutoSelect(options: {
 		role: "coder",
 		spawnPinnedModel: options.spawnPinnedModel,
 		spawnPinnedThinkingLevel: options.spawnPinnedThinkingLevel,
+		...(options.explicitRoleAssignment ? { _deferVerifiedTupleCommit: true } : {}),
 		clients: new Set([client]),
 		rpcClient: {
 			async setModel(provider: string, modelId: string) {
@@ -310,6 +329,7 @@ async function exerciseAutoSelect(options: {
 				id: msg.data.model.id,
 				thinkingLevel: msg.data.thinkingLevel,
 			})),
+		spawnPinnedThinkingLevel: session.spawnPinnedThinkingLevel,
 	};
 }
 
@@ -568,6 +588,164 @@ function boundaryTuple(record: BoundaryRecord | undefined): Record<string, unkno
 	};
 }
 
+const INHERITED_SELECTED_PROVIDER = "inherited-selected";
+const INHERITED_SELECTED_MODEL_ID = "limited-reasoner";
+const INHERITED_SELECTED_MODEL = `${INHERITED_SELECTED_PROVIDER}/${INHERITED_SELECTED_MODEL_ID}`;
+const INHERITED_FALLBACK_PROVIDER = "inherited-fallback";
+const INHERITED_FALLBACK_MODEL_ID = "extended-reasoner";
+const INHERITED_FALLBACK_MODEL = `${INHERITED_FALLBACK_PROVIDER}/${INHERITED_FALLBACK_MODEL_ID}`;
+
+type InheritedSetupMode = "normal" | "worktree";
+
+async function makeInheritedThinkingFixture(
+	label: string,
+	opts: { failFallback?: boolean } = {},
+): Promise<{
+	manager: any;
+	store: BoundaryStore;
+	startedOptions: Record<string, any>[];
+	setModelCalls: ModelPair[];
+	setThinkingCalls: string[];
+}> {
+	const preferences = new PreferencesStore(
+		path.resolve(`/memfs/controlled-fallback-inherited-${label}`),
+		createMemFs(),
+	);
+	preferences.set("customProviders", [
+		{
+			id: INHERITED_SELECTED_PROVIDER,
+			name: INHERITED_SELECTED_PROVIDER,
+			type: "manual",
+			baseUrl: "http://127.0.0.1:9",
+			apiKey: "test-key",
+			models: [{ id: INHERITED_SELECTED_MODEL_ID, name: "Limited reasoner" }],
+		},
+		{
+			id: INHERITED_FALLBACK_PROVIDER,
+			name: INHERITED_FALLBACK_PROVIDER,
+			type: "manual",
+			baseUrl: "http://127.0.0.1:9",
+			apiKey: "test-key",
+			models: [{ id: INHERITED_FALLBACK_MODEL_ID, name: "Extended reasoner" }],
+		},
+	]);
+	preferences.set("default.sessionModel", INHERITED_FALLBACK_MODEL);
+	preferences.set("default.sessionThinkingLevel", "low");
+	preferences.set("allowSessionModelFallback", true as any);
+	invalidateModelCache();
+	const models = await getAvailableModels(preferences);
+	const selected = models.find((model: any) => (
+		model.provider === INHERITED_SELECTED_PROVIDER && model.id === INHERITED_SELECTED_MODEL_ID
+	));
+	const fallback = models.find((model: any) => (
+		model.provider === INHERITED_FALLBACK_PROVIDER && model.id === INHERITED_FALLBACK_MODEL_ID
+	));
+	assert.ok(selected && fallback, "fixture requires both current custom catalog rows");
+	// The selected model clamps xhigh down to high. The fallback supports xhigh,
+	// so the selector must re-clamp the raw inherited request rather than reuse
+	// either that provisional high or the unrelated global low default.
+	selected.reasoning = true;
+	fallback.reasoning = true;
+	fallback.thinkingLevelMap = { xhigh: "xhigh" };
+
+	const store = new BoundaryStore();
+	const startedOptions: Record<string, any>[] = [];
+	const setModelCalls: ModelPair[] = [];
+	const setThinkingCalls: string[] = [];
+	registerRpcBridgeFactory((options: Record<string, any>) => {
+		let model = { provider: "fixture-runtime", id: "spawn-readback-mismatch" };
+		let thinkingLevel = options.initialThinkingLevel ?? "medium";
+		return {
+			running: true,
+			start: vi.fn(async () => { startedOptions.push({ ...options }); }),
+			stop: vi.fn(async () => {}),
+			waitForReady: vi.fn(async () => {}),
+			promptWhenReady: vi.fn(async () => ({ success: true })),
+			prompt: vi.fn(async () => ({ success: true })),
+			steer: vi.fn(async () => ({ success: true })),
+			abort: vi.fn(async () => ({ success: true })),
+			getState: vi.fn(async () => ({
+				success: true,
+				data: {
+					model,
+					thinkingLevel,
+					sessionFile: path.join(BOUNDARY_AGENT_DIR, "sessions", `${label}.jsonl`),
+				},
+			})),
+			getMessages: vi.fn(async () => ({ success: true, data: { messages: [] } })),
+			setModel: vi.fn(async (provider: string, id: string) => {
+				setModelCalls.push([provider, id]);
+				if (opts.failFallback && `${provider}/${id}` === INHERITED_FALLBACK_MODEL) {
+					throw new Error("fixture fallback bind failed");
+				}
+				model = { provider, id };
+				return { success: true };
+			}),
+			setThinkingLevel: vi.fn(async (level: string) => {
+				setThinkingCalls.push(level);
+				thinkingLevel = level;
+				return { success: true };
+			}),
+			compact: vi.fn(async () => ({ success: true })),
+			sendCommand: vi.fn(async () => ({ success: true })),
+			onEvent: vi.fn(() => () => {}),
+		};
+	});
+	const manager: any = new SessionManager({
+		preferencesStore: preferences,
+		stateDir: BOUNDARY_STATE_DIR,
+	});
+	manager._testStore = store;
+	boundaryManagers.push(manager);
+	return { manager, store, startedOptions, setModelCalls, setThinkingCalls };
+}
+
+async function createInheritedThinkingSession(
+	fixture: Awaited<ReturnType<typeof makeInheritedThinkingFixture>>,
+	mode: InheritedSetupMode,
+	sessionId: string,
+): Promise<any> {
+	const createOpts: Record<string, any> = {
+		sessionId,
+		initialModel: INHERITED_SELECTED_MODEL,
+		initialThinkingLevel: "xhigh",
+	};
+	if (mode === "worktree") {
+		const projectId = `project-${sessionId}`;
+		const worktreePath = path.join(BOUNDARY_TMP_ROOT, `prebuilt-${sessionId}`);
+		fs.mkdirSync(worktreePath, { recursive: true });
+		// The setup-failure canary deliberately rejects after claiming this fake
+		// prebuilt worktree. Seed a second live owner so failure cleanup exercises
+		// the shared-worktree guard instead of launching an unrelated real Git cleanup.
+		fixture.store.put({
+			id: `shared-owner-${sessionId}`,
+			title: "Shared fixture owner",
+			cwd: worktreePath,
+			worktreePath,
+			repoPath: BOUNDARY_TMP_ROOT,
+			branch: `fixture/${sessionId}`,
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			agentSessionFile: "",
+		});
+		fixture.manager.worktreePools.set(projectId, {
+			claim: vi.fn(async () => ({ worktreePath })),
+		});
+		Object.assign(createOpts, {
+			projectId,
+			worktreeOpts: { repoPath: BOUNDARY_TMP_ROOT },
+			awaitWorktreeSetup: true,
+		});
+	}
+	return fixture.manager.createSession(
+		BOUNDARY_TMP_ROOT,
+		[],
+		undefined,
+		undefined,
+		createOpts,
+	);
+}
+
 const boundaryManagers: any[] = [];
 
 afterEach(() => {
@@ -659,6 +837,57 @@ describe("controlled model fallback policy — real SessionManager preflight", (
 			"ROLE_FALLBACK_PREFLIGHT: an unavailable role on an eligible new session must use the current default.sessionModel instead of being rejected before controlled fallback can run",
 		);
 	});
+
+	it.each(["normal", "worktree"] as const)(
+		"preserves an explicit inherited thinking request through %s post-spawn controlled fallback",
+		async (mode) => {
+			const fixture = await makeInheritedThinkingFixture(`success-${mode}`);
+			const sessionId = `inherited-thinking-${mode}`;
+			const session = await createInheritedThinkingSession(fixture, mode, sessionId);
+			if (session.pendingMetadataPersist) await session.pendingMetadataPersist;
+
+			assert.equal(fixture.startedOptions.at(-1)?.initialModel, INHERITED_SELECTED_MODEL);
+			assert.equal(
+				fixture.startedOptions.at(-1)?.initialThinkingLevel,
+				"high",
+				"the spawn pin is only the provisional clamp for the selected model",
+			);
+			assert.deepEqual(fixture.setModelCalls, [[INHERITED_FALLBACK_PROVIDER, INHERITED_FALLBACK_MODEL_ID]]);
+			assert.deepEqual(
+				fixture.setThinkingCalls,
+				["xhigh"],
+				"EXPLICIT_INHERITED_FALLBACK_THINKING_LOST_TO_GLOBAL_DEFAULT",
+			);
+			assert.deepEqual(boundaryTuple(fixture.store.get(sessionId)), {
+				provider: INHERITED_FALLBACK_PROVIDER,
+				modelId: INHERITED_FALLBACK_MODEL_ID,
+				thinkingLevel: "xhigh",
+			});
+			assert.equal(
+				fixture.manager._setupInitialThinkingAuthorities?.size ?? 0,
+				0,
+				"temporary raw setup authority must clear after successful setup",
+			);
+		},
+	);
+
+	it.each(["normal", "worktree"] as const)(
+		"clears explicit inherited thinking authority when %s post-spawn fallback fails",
+		async (mode) => {
+			const fixture = await makeInheritedThinkingFixture(`failure-${mode}`, { failFallback: true });
+			const sessionId = `inherited-thinking-failure-${mode}`;
+
+			await assert.rejects(
+				createInheritedThinkingSession(fixture, mode, sessionId),
+				/controlled fallback did not bind|fixture fallback bind failed/i,
+			);
+			assert.equal(
+				fixture.manager._setupInitialThinkingAuthorities?.size ?? 0,
+				0,
+				"temporary raw setup authority must clear after failed setup",
+			);
+		},
+	);
 });
 
 describe("controlled model fallback policy — session auto-selection", () => {
@@ -751,6 +980,92 @@ describe("controlled model fallback policy — session auto-selection", () => {
 		);
 		assert.deepEqual(result.broadcastModels, [{ provider: "openai", id: "fallback-session" }]);
 		assert.deepEqual(result.modelFiles, ["openai/fallback-session"]);
+	});
+
+	it("re-clamps a fresh explicit role's raw thinking override against the model that wins controlled fallback", async () => {
+		const result = await exerciseAutoSelect({
+			prefs: {
+				allowSessionModelFallback: true,
+				"default.sessionModel": "anthropic/claude-opus-5",
+			},
+			roleModel: "openai/dead-fallback",
+			roleThinking: "xhigh",
+			spawnPinnedModel: "openai/dead-fallback",
+			// The role's xhigh request was provisionally clamped for the failed model.
+			spawnPinnedThinkingLevel: "high",
+			initialDurable: null,
+			initialBound: { provider: "unset", id: "unset", thinkingLevel: "high" },
+		});
+
+		assert.equal(result.error, undefined);
+		assert.deepEqual(result.setModelCalls, [["anthropic", "claude-opus-5"]]);
+		assert.deepEqual(
+			result.setThinkingCalls,
+			["xhigh"],
+			"FRESH_ROLE_FALLBACK_REUSED_THINKING_CLAMPED_FOR_FAILED_MODEL",
+		);
+		assert.deepEqual(result.durable, {
+			provider: "anthropic",
+			id: "claude-opus-5",
+			thinkingLevel: "xhigh",
+		});
+	});
+
+	it("re-clamps a staged explicit role's raw thinking override against the model that wins controlled fallback", async () => {
+		const result = await exerciseAutoSelect({
+			prefs: {
+				allowSessionModelFallback: true,
+				"default.sessionModel": "anthropic/claude-opus-5",
+			},
+			roleModel: "openai/dead-fallback",
+			roleThinking: "xhigh",
+			spawnPinnedModel: "openai/dead-fallback",
+			// The role's xhigh request was provisionally clamped for the failed model.
+			spawnPinnedThinkingLevel: "high",
+			explicitRoleAssignment: true,
+			initialBound: { provider: "unset", id: "unset", thinkingLevel: "high" },
+		});
+
+		assert.equal(result.error, undefined);
+		assert.deepEqual(result.setModelCalls, [["anthropic", "claude-opus-5"]]);
+		assert.deepEqual(
+			result.setThinkingCalls,
+			["xhigh"],
+			"STAGED_ROLE_FALLBACK_REUSED_THINKING_CLAMPED_FOR_FAILED_MODEL",
+		);
+		assert.equal(result.spawnPinnedThinkingLevel, "xhigh");
+		assert.deepEqual(result.persisted, [], "a staged explicit role must remain side-effect-free before lifecycle commit");
+	});
+
+	it("re-clamps raw durable thinking when a staged role without a thinking override falls back", async () => {
+		const result = await exerciseAutoSelect({
+			prefs: {
+				allowSessionModelFallback: true,
+				"default.sessionModel": "anthropic/claude-opus-5",
+			},
+			roleModel: "openai/dead-fallback",
+			spawnPinnedModel: "openai/dead-fallback",
+			// Durable xhigh was provisionally clamped for the failed role model.
+			spawnPinnedThinkingLevel: "high",
+			explicitRoleAssignment: true,
+			initialDurable: { provider: "anthropic", id: "durable-model", thinkingLevel: "xhigh" },
+			initialBound: { provider: "unset", id: "unset", thinkingLevel: "high" },
+		});
+
+		assert.equal(result.error, undefined);
+		assert.deepEqual(result.setModelCalls, [["anthropic", "claude-opus-5"]]);
+		assert.deepEqual(
+			result.setThinkingCalls,
+			["xhigh"],
+			"STAGED_ROLE_FALLBACK_DISCARDED_RAW_DURABLE_THINKING",
+		);
+		assert.equal(result.spawnPinnedThinkingLevel, "xhigh");
+		assert.deepEqual(result.persisted, [], "a staged fallback must not advance durability before lifecycle commit");
+		assert.deepEqual(result.durable, {
+			provider: "anthropic",
+			id: "durable-model",
+			thinkingLevel: "xhigh",
+		});
 	});
 
 	it("rejects a hidden-provider role fallback before mutating any observable state", async () => {

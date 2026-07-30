@@ -16,9 +16,71 @@ import {
 	type WsMsg,
 } from "./_e2e/e2e-setup.js";
 import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
+import {
+	getAvailableModels,
+	invalidateModelCache,
+	resolveModelStateMeta,
+	type ApiModel,
+} from "../../src/server/agent/model-registry.js";
 
 const OPUS_5 = { provider: "anthropic", id: "claude-opus-5", thinkingLevel: "xhigh" } as const;
 const STALE_MODEL_IDS = new Set(["claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4"]);
+const SNAPSHOT_PROVIDER = "tuple-snapshot-custom";
+const INFERRED_DYNAMIC_TUPLE = { provider: "custom", id: "cache-empty-dynamic-a", thinkingLevel: "high" } as const;
+const INFERRED_DYNAMIC_MODEL = {
+	provider: INFERRED_DYNAMIC_TUPLE.provider,
+	id: INFERRED_DYNAMIC_TUPLE.id,
+	contextWindow: 654_319,
+	maxTokens: 23_417,
+	reasoning: true,
+	thinkingLevelMap: { off: null, high: "high", max: "max" },
+} as const;
+const FOREIGN_DYNAMIC_MODEL = {
+	provider: INFERRED_DYNAMIC_TUPLE.provider,
+	id: "cache-empty-dynamic-foreign",
+	contextWindow: 777_731,
+	maxTokens: 31_337,
+	reasoning: true,
+	thinkingLevelMap: { off: "foreign-off", max: "foreign-max" },
+} as const;
+const DURABLE_SNAPSHOT_TUPLE = { provider: SNAPSHOT_PROVIDER, id: "durable-a", thinkingLevel: "high" } as const;
+const TARGET_SNAPSHOT_TUPLE = { provider: SNAPSHOT_PROVIDER, id: "target-b", thinkingLevel: "xhigh" } as const;
+const DURABLE_SNAPSHOT_MODEL = {
+	provider: SNAPSHOT_PROVIDER,
+	id: DURABLE_SNAPSHOT_TUPLE.id,
+	contextWindow: 131_071,
+	maxTokens: 8_191,
+	reasoning: true,
+	thinkingLevelMap: { off: "off", high: "high" },
+} as const;
+const TARGET_SNAPSHOT_MODEL = {
+	provider: SNAPSHOT_PROVIDER,
+	id: TARGET_SNAPSHOT_TUPLE.id,
+	contextWindow: 262_139,
+	maxTokens: 32_749,
+	reasoning: true,
+	thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max" },
+} as const;
+
+function snapshotCatalogRow(model: typeof DURABLE_SNAPSHOT_MODEL | typeof TARGET_SNAPSHOT_MODEL): ApiModel {
+	return {
+		...model,
+		name: model.id,
+		api: "openai-completions",
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		authenticated: true,
+	};
+}
+
+async function installSnapshotCatalog(gateway: any): Promise<void> {
+	invalidateModelCache();
+	const preferencesStore = gateway.sessionManager.preferencesStore;
+	expect(preferencesStore, "gateway fixture must expose the current model preferences").toBeTruthy();
+	const models = await getAvailableModels(preferencesStore);
+	expect(models.some((model) => model.provider === SNAPSHOT_PROVIDER)).toBe(false);
+	models.push(snapshotCatalogRow(DURABLE_SNAPSHOT_MODEL), snapshotCatalogRow(TARGET_SNAPSHOT_MODEL));
+}
 
 function stateModelId(message: WsMsg): string | undefined {
 	return message.type === "state" ? (message.data as any)?.model?.id : undefined;
@@ -77,6 +139,171 @@ async function closeWs(ws: WsConnection) {
 	const closed = new Promise<void>(r => ws.ws.once("close", () => r()));
 	ws.close();
 	await closed;
+}
+
+async function waitForPersistedTuple(gateway: any, sessionId: string, tuple: typeof DURABLE_SNAPSHOT_TUPLE | typeof TARGET_SNAPSHOT_TUPLE) {
+	await pollUntil(async () => {
+		const persisted = gateway.sessionManager.getPersistedSession(sessionId);
+		return persisted?.modelProvider === tuple.provider
+			&& persisted.modelId === tuple.id
+			&& persisted.effectiveThinkingLevel === tuple.thinkingLevel;
+	}, { timeoutMs: 5_000, intervalMs: 25, label: `${tuple.id}/${tuple.thinkingLevel} tuple persisted` });
+}
+
+function expectDurablePartialMutationSnapshot(
+	message: WsMsg,
+	expectedStatus: string,
+	expectedStatusVersion: number,
+	expectedCost: Record<string, unknown>,
+): void {
+	expect(message.type).toBe("state");
+	const state = message.data as any;
+	expect(state.model, "an in-flight model must not lend identity or metadata to the durable snapshot").toEqual(DURABLE_SNAPSHOT_MODEL);
+	expect(state.thinkingLevel).toBe(DURABLE_SNAPSHOT_TUPLE.thinkingLevel);
+	expect(state.status).toBe(expectedStatus);
+	expect(state.statusVersion).toBe(expectedStatusVersion);
+	expect(state.preparing).toBe(false);
+	expect(state.serverCost).toEqual(expectedCost);
+}
+
+async function exercisePartialMutationSnapshot(
+	gateway: any,
+	sessionId: string,
+	path: "explicit-get-state" | "second-connection",
+): Promise<void> {
+	await installSnapshotCatalog(gateway);
+	const session = gateway.sessionManager.getSession(sessionId);
+	expect(session?.status).toBe("idle");
+
+	let ws1: WsConnection | undefined;
+	let ws2: WsConnection | undefined;
+	let getStateSpy: ReturnType<typeof vi.spyOn> | undefined;
+	let setThinkingSpy: ReturnType<typeof vi.spyOn> | undefined;
+	let released = false;
+	let releaseThinking!: () => void;
+	const thinkingRelease = new Promise<void>((resolve) => {
+		releaseThinking = () => {
+			if (released) return;
+			released = true;
+			resolve();
+		};
+	});
+
+	try {
+		ws1 = await connectWs(sessionId);
+		const durableCursor = ws1.messageCount();
+		ws1.send({
+			type: "set_model",
+			provider: DURABLE_SNAPSHOT_TUPLE.provider,
+			modelId: DURABLE_SNAPSHOT_TUPLE.id,
+			thinkingLevel: DURABLE_SNAPSHOT_TUPLE.thinkingLevel,
+		});
+		const durableState = await ws1.waitForFrom(
+			durableCursor,
+			(message) => message.type === "state"
+				&& (message.data as any)?.model?.id === DURABLE_SNAPSHOT_TUPLE.id
+				&& (message.data as any)?.thinkingLevel === DURABLE_SNAPSHOT_TUPLE.thinkingLevel,
+			5_000,
+		);
+		expect((durableState.data as any).model).toEqual(DURABLE_SNAPSHOT_MODEL);
+		await waitForPersistedTuple(gateway, sessionId, DURABLE_SNAPSHOT_TUPLE);
+
+		// Proactive hydration is intentionally reserved for sessions with history.
+		// A synthetic buffered event exercises that real attach branch without an
+		// unrelated prompt turn or timing dependency.
+		session.eventBuffer.push({ type: "tuple_snapshot_test_seed" });
+		const expectedCost = gateway.sessionManager.getCostTracker(session.projectId).recordUsage(sessionId, {
+			inputTokens: 321,
+			outputTokens: 45,
+			cacheReadTokens: 67,
+			cacheWriteTokens: 8,
+			cost: 7.25,
+		});
+		const expectedStatus = session.status;
+		const expectedStatusVersion = session.statusVersion;
+
+		const realGetState = session.rpcClient.getState.bind(session.rpcClient);
+		const realSetThinkingLevel = session.rpcClient.setThinkingLevel.bind(session.rpcClient);
+		getStateSpy = vi.spyOn(session.rpcClient, "getState").mockImplementation(async () => {
+			const response = await realGetState();
+			if (!response.success) return response;
+			return {
+				...response,
+				data: {
+					...(response.data as Record<string, unknown> | undefined ?? {}),
+					preparing: false,
+				},
+			};
+		});
+		setThinkingSpy = vi.spyOn(session.rpcClient, "setThinkingLevel").mockImplementation(async (...args: unknown[]) => {
+			await thinkingRelease;
+			return realSetThinkingLevel(args[0] as string);
+		});
+
+		const selectionCursor = ws1.messageCount();
+		ws1.send({
+			type: "set_model",
+			provider: TARGET_SNAPSHOT_TUPLE.provider,
+			modelId: TARGET_SNAPSHOT_TUPLE.id,
+			thinkingLevel: TARGET_SNAPSHOT_TUPLE.thinkingLevel,
+		});
+		await pollUntil(
+			async () => (setThinkingSpy?.mock.calls.length ?? 0) === 1,
+			{ timeoutMs: 5_000, intervalMs: 10, label: "target model bound while thinking mutation is held" },
+		);
+		const partialLiveState = await realGetState();
+		expect(partialLiveState).toMatchObject({
+			success: true,
+			data: {
+				model: { provider: TARGET_SNAPSHOT_TUPLE.provider, id: TARGET_SNAPSHOT_TUPLE.id },
+				thinkingLevel: DURABLE_SNAPSHOT_TUPLE.thinkingLevel,
+			},
+		});
+		await waitForPersistedTuple(gateway, sessionId, DURABLE_SNAPSHOT_TUPLE);
+
+		let snapshot: WsMsg;
+		if (path === "explicit-get-state") {
+			const stateCursor = ws1.messageCount();
+			ws1.send({ type: "get_state" });
+			snapshot = await ws1.waitForFrom(
+				stateCursor,
+				(message) => message.type === "state"
+					&& (message.data as any)?.preparing === false
+					&& (message.data as any)?.model?.id !== undefined,
+				5_000,
+			);
+		} else {
+			ws2 = await connectWs(sessionId);
+			snapshot = await ws2.waitFor(
+				(message) => message.type === "state"
+					&& (message.data as any)?.preparing === false
+					&& (message.data as any)?.model?.id !== undefined,
+				5_000,
+			);
+		}
+		expectDurablePartialMutationSnapshot(snapshot, expectedStatus, expectedStatusVersion, expectedCost);
+
+		releaseThinking();
+		const committed = await ws1.waitForFrom(
+			selectionCursor,
+			(message) => message.type === "state"
+				&& (message.data as any)?.model?.id === TARGET_SNAPSHOT_TUPLE.id
+				&& (message.data as any)?.thinkingLevel === TARGET_SNAPSHOT_TUPLE.thinkingLevel,
+			5_000,
+		);
+		expect((committed.data as any).model).toEqual(TARGET_SNAPSHOT_MODEL);
+		await waitForPersistedTuple(gateway, sessionId, TARGET_SNAPSHOT_TUPLE);
+	} finally {
+		releaseThinking();
+		if ((setThinkingSpy?.mock.calls.length ?? 0) > 0) {
+			await waitForPersistedTuple(gateway, sessionId, TARGET_SNAPSHOT_TUPLE).catch(() => {});
+		}
+		setThinkingSpy?.mockRestore();
+		getStateSpy?.mockRestore();
+		if (ws2) await closeWs(ws2);
+		if (ws1) await closeWs(ws1);
+		invalidateModelCache();
+	}
 }
 
 async function prepareDurableOpus5Xhigh(gateway: any, sessionId: string): Promise<void> {
@@ -151,6 +378,93 @@ test.describe("model state after reconnect", () => {
 		).toBe(true);
 
 		ws2.close();
+	});
+
+	test("explicit get_state retains the durable custom tuple while thinking mutation is pending", async ({ gateway }) => {
+		await exercisePartialMutationSnapshot(gateway, sessionId, "explicit-get-state");
+	});
+
+	test("a second connection retains the durable custom tuple while thinking mutation is pending", async ({ gateway }) => {
+		await exercisePartialMutationSnapshot(gateway, sessionId, "second-connection");
+	});
+
+	test("cache-empty inferred matching live identity preserves metadata while durable thinking repairs the tuple", async ({ gateway }) => {
+		const session = gateway.sessionManager.getSession(sessionId);
+		expect(session?.status).toBe("idle");
+		gateway.sessionManager.persistSessionModel(
+			sessionId,
+			INFERRED_DYNAMIC_TUPLE.provider,
+			INFERRED_DYNAMIC_TUPLE.id,
+			INFERRED_DYNAMIC_TUPLE.thinkingLevel,
+		);
+		expect(gateway.sessionManager.getPersistedSession(sessionId)).toMatchObject({
+			modelProvider: INFERRED_DYNAMIC_TUPLE.provider,
+			modelId: INFERRED_DYNAMIC_TUPLE.id,
+			effectiveThinkingLevel: INFERRED_DYNAMIC_TUPLE.thinkingLevel,
+		});
+
+		// Force the dynamic custom model through inferMeta: only the matching live
+		// bridge knows its exact limits and thinking map.
+		invalidateModelCache();
+		expect(resolveModelStateMeta(INFERRED_DYNAMIC_TUPLE.provider, INFERRED_DYNAMIC_TUPLE.id).source).toBe("inferred");
+		session.eventBuffer.push({ type: "inferred_dynamic_snapshot_test_seed" });
+
+		const getState = vi.spyOn(session.rpcClient, "getState")
+			.mockResolvedValueOnce({
+				success: true,
+				data: { model: { ...INFERRED_DYNAMIC_MODEL } },
+			})
+			.mockResolvedValueOnce({
+				success: true,
+				data: { model: { ...INFERRED_DYNAMIC_MODEL }, thinkingLevel: "low" },
+			})
+			.mockResolvedValueOnce({
+				success: true,
+				data: { model: { ...FOREIGN_DYNAMIC_MODEL }, thinkingLevel: "low" },
+			});
+		let ws: WsConnection | undefined;
+		try {
+			ws = await connectWs(sessionId);
+			const missingThinking = await ws.waitFor(
+				(message) => stateModelId(message) === INFERRED_DYNAMIC_TUPLE.id,
+				5_000,
+			);
+			expect((missingThinking.data as any).model).toEqual(INFERRED_DYNAMIC_MODEL);
+			expect((missingThinking.data as any).thinkingLevel).toBe(INFERRED_DYNAMIC_TUPLE.thinkingLevel);
+
+			let cursor = ws.messageCount();
+			ws.send({ type: "get_state" });
+			const mismatchedThinking = await ws.waitForFrom(
+				cursor,
+				(message) => stateModelId(message) === INFERRED_DYNAMIC_TUPLE.id,
+				5_000,
+			);
+			expect((mismatchedThinking.data as any).model).toEqual(INFERRED_DYNAMIC_MODEL);
+			expect((mismatchedThinking.data as any).thinkingLevel).toBe(INFERRED_DYNAMIC_TUPLE.thinkingLevel);
+
+			cursor = ws.messageCount();
+			ws.send({ type: "get_state" });
+			const differentIdentity = await ws.waitForFrom(
+				cursor,
+				(message) => stateModelId(message) === INFERRED_DYNAMIC_TUPLE.id,
+				5_000,
+			);
+			const differentIdentityState = differentIdentity.data as any;
+			expect(differentIdentityState.thinkingLevel).toBe(INFERRED_DYNAMIC_TUPLE.thinkingLevel);
+			expect(differentIdentityState.model).toMatchObject({
+				provider: INFERRED_DYNAMIC_TUPLE.provider,
+				id: INFERRED_DYNAMIC_TUPLE.id,
+			});
+			expect(differentIdentityState.model.contextWindow).not.toBe(FOREIGN_DYNAMIC_MODEL.contextWindow);
+			expect(differentIdentityState.model.maxTokens).not.toBe(FOREIGN_DYNAMIC_MODEL.maxTokens);
+			expect(differentIdentityState.model.reasoning).not.toBe(FOREIGN_DYNAMIC_MODEL.reasoning);
+			expect(differentIdentityState.model.thinkingLevelMap).not.toEqual(FOREIGN_DYNAMIC_MODEL.thinkingLevelMap);
+			expect(getState).toHaveBeenCalledTimes(3);
+		} finally {
+			getState.mockRestore();
+			if (ws) await closeWs(ws);
+			invalidateModelCache();
+		}
 	});
 
 	test("matching live model without thinking hydrates one complete durable tuple on reconnect and get_state", async ({ gateway }) => {
