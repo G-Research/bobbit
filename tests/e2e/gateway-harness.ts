@@ -22,9 +22,11 @@
  * contamination.
  */
 import { test as base } from "@playwright/test";
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { awaitableRm } from "./test-utils/cleanup.js";
 import { withDistServerImportLock } from "./test-utils/dist-import-lock.js";
@@ -54,6 +56,85 @@ function loadLedger(): Promise<any> {
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 const STATIC_DIR = resolve(PROJECT_ROOT, "dist", "ui");
 
+const STATIC_MIME_TYPES: Record<string, string> = {
+	".css": "text/css; charset=utf-8",
+	".html": "text/html; charset=utf-8",
+	".ico": "image/x-icon",
+	".js": "text/javascript; charset=utf-8",
+	".json": "application/json; charset=utf-8",
+	".map": "application/json; charset=utf-8",
+	".png": "image/png",
+	".svg": "image/svg+xml",
+	".webmanifest": "application/manifest+json; charset=utf-8",
+	".woff": "font/woff",
+	".woff2": "font/woff2",
+};
+
+/**
+ * Root-mounted production UI origin used by explicit-gateway journeys. It is
+ * deliberately static-only: any accidental /api, /ws, or /preview fallback to
+ * this origin fails instead of being hidden by a second gateway.
+ */
+async function startRootStaticUiServer(): Promise<{ server: Server; originURL: string }> {
+	const server = createServer((req, res) => {
+		if (req.method !== "GET" && req.method !== "HEAD") {
+			res.writeHead(405, { "Content-Type": "text/plain; charset=utf-8" });
+			res.end("Method Not Allowed");
+			return;
+		}
+		let pathname: string;
+		try {
+			pathname = decodeURIComponent(new URL(req.url || "/", "http://127.0.0.1").pathname);
+		} catch {
+			res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
+			res.end("Bad Request");
+			return;
+		}
+		if (/^\/(?:api|preview|ws)(?:\/|$)/.test(pathname)) {
+			res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+			res.end("Static UI origin has no gateway routes");
+			return;
+		}
+		const candidate = resolve(STATIC_DIR, `.${pathname}`);
+		if (candidate !== STATIC_DIR && !candidate.startsWith(`${STATIC_DIR}${sep}`)) {
+			res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+			res.end("Not Found");
+			return;
+		}
+		let target = candidate;
+		try {
+			if (!existsSync(target) || !statSync(target).isFile()) target = join(STATIC_DIR, "index.html");
+			const bytes = readFileSync(target);
+			res.writeHead(200, {
+				"Cache-Control": "no-store",
+				"Content-Type": STATIC_MIME_TYPES[extname(target).toLowerCase()] || "application/octet-stream",
+			});
+			if (req.method === "HEAD") res.end();
+			else res.end(bytes);
+		} catch (err) {
+			res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+			res.end(err instanceof Error ? err.message : String(err));
+		}
+	});
+	await new Promise<void>((resolveListen, reject) => {
+		server.once("error", reject);
+		server.listen(0, "127.0.0.1", () => {
+			server.off("error", reject);
+			resolveListen();
+		});
+	});
+	const port = (server.address() as AddressInfo).port;
+	return { server, originURL: `http://localhost:${port}` };
+}
+
+async function closeServer(server: Server | undefined): Promise<void> {
+	if (!server?.listening) return;
+	await new Promise<void>((resolveClose, reject) => {
+		server.close(err => err ? reject(err) : resolveClose());
+		server.closeAllConnections?.();
+	});
+}
+
 // Inside Docker containers, /workspace is a bind-mount with ~10-20x slower I/O
 // (9P/gRPC layer on Docker Desktop). Put write-heavy temp dirs on the container's
 // local overlay FS instead. On the host, use os.tmpdir() to guarantee the CWD
@@ -67,8 +148,18 @@ const E2E_TEMP_ROOT = existsSync("/.dockerenv")
 
 export interface GatewayInfo {
 	port: number;
+	/** Canonical configured mount (empty string for a root gateway). */
+	basePath: string;
+	/** Mounted HTTP gateway base, with no trailing slash. */
 	baseURL: string;
+	/** Origin-only HTTP value for deliberate off-mount/non-collision probes. */
+	originURL: string;
+	/** Mounted WebSocket gateway base, with no trailing slash. */
 	wsBase: string;
+	/** Origin-only WebSocket value for deliberate rejected-upgrade probes. */
+	wsOrigin: string;
+	/** Browser UI base. Differs from baseURL only for explicit-gateway journeys. */
+	uiBaseURL: string;
 	/** Headquarters directory. In default browser harness mode this is also the server run directory. */
 	bobbitDir: string;
 	/** Server run directory passed to setProjectRoot(). Split-mode specs use this for same-root project coverage. */
@@ -199,6 +290,8 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	enableDevHarnessRestart: boolean;
 	splitHeadquartersServerRoot: boolean;
 	sameRootProjectAtStartup: boolean;
+	basePath: string;
+	separateUiOrigin: boolean;
 	browserRenderLease: void;
 	gateway: GatewayInfo;
 }>({
@@ -248,7 +341,17 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	// the server run directory before gateway boot.
 	sameRootProjectAtStartup: [false, { scope: "worker", option: true }],
 
-	gateway: [async ({ enableMcp, enableWorktreePool, enableDevHarnessRestart, splitHeadquartersServerRoot, sameRootProjectAtStartup, browserRenderLease }, use, workerInfo) => {
+	// Production gateway mount. Existing browser workers remain root-mounted.
+	// Values are intentionally passed through to createGateway without test-side
+	// normalization so the browser journey exercises the production contract.
+	basePath: ["", { scope: "worker", option: true }],
+
+	// Serve dist/ui from a static-only root origin while the mounted gateway runs
+	// on its own port. Explicit-gateway journeys use this to make any transport
+	// that falls back to the UI origin fail loudly.
+	separateUiOrigin: [false, { scope: "worker", option: true }],
+
+	gateway: [async ({ enableMcp, enableWorktreePool, enableDevHarnessRestart, splitHeadquartersServerRoot, sameRootProjectAtStartup, basePath, separateUiOrigin, browserRenderLease }, use, workerInfo) => {
 		// Depend on browserRenderLease purely for ordering: the global browser-render
 		// slot must be held BEFORE this worker boots a gateway, so a queued worker
 		// holds no gateway while it waits. The value itself is void.
@@ -460,6 +563,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			forceAuth: true,
 			agentCliPath: MOCK_AGENT,
 			staticDir: STATIC_DIR,
+			basePath,
 		};
 
 		// GLOBAL CONCURRENCY BUDGET (v2 browser runs only): serialise this worker's
@@ -493,7 +597,10 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			// next queued worker. Remaining setup is gateway-bound, not a CPU burst.
 			releaseBootLease();
 		}
-		const gatewayUrl = `http://127.0.0.1:${port}`;
+		const gatewayOrigin = `http://127.0.0.1:${port}`;
+		const gatewayWsOrigin = `ws://127.0.0.1:${port}`;
+		const gatewayUrl = `${gatewayOrigin}${basePath}`;
+		const gatewayWsUrl = `${gatewayWsOrigin}${basePath}`;
 
 		// Set env so e2e-setup.ts helpers and in-process mock agents target this worker's server.
 		process.env.E2E_PORT = String(port);
@@ -507,7 +614,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 
 		// Register a normal harness default project beside Headquarters. The server
 		// workspace itself is now the immutable Headquarters project.
-		const defaultProjectRegister = await fetch(`http://127.0.0.1:${port}/api/projects`, {
+		const defaultProjectRegister = await fetch(`${gatewayUrl}/api/projects`, {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
@@ -532,15 +639,27 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		if (!defaultProject?.id) {
 			throw new Error(`[gateway-harness] default project registration returned no id`);
 		}
-		await seedHarnessDefaultWorkflows({ baseURL: `http://127.0.0.1:${port}` }, {
+		await seedHarnessDefaultWorkflows({ baseURL: gatewayUrl }, {
 			"Content-Type": "application/json",
 			"Authorization": `Bearer ${token}`,
 		}, defaultProject.id);
 
+		let staticUiServer: Server | undefined;
+		let uiBaseURL = gatewayUrl;
+		if (separateUiOrigin) {
+			const staticUi = await startRootStaticUiServer();
+			staticUiServer = staticUi.server;
+			uiBaseURL = staticUi.originURL;
+		}
+
 		const info: GatewayInfo = {
 			port,
-			baseURL: `http://127.0.0.1:${port}`,
-			wsBase: `ws://127.0.0.1:${port}`,
+			basePath,
+			baseURL: gatewayUrl,
+			originURL: gatewayOrigin,
+			wsBase: gatewayWsUrl,
+			wsOrigin: gatewayWsOrigin,
+			uiBaseURL,
 			bobbitDir,
 			serverRoot,
 			sessionManager: gw.sessionManager,
@@ -585,7 +704,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 				}
 				writeFileSync(
 					join(bobbitDir, "state", "gateway-url"),
-					`http://127.0.0.1:${port}`,
+					gatewayUrl,
 				);
 				info.sessionManager = gw.sessionManager;
 				info.teamManager = gw.teamManager;
@@ -594,7 +713,10 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 
 		await use(info);
 
-		// Teardown — use existing shutdown() for proper cleanup
+		// Teardown — use existing shutdown() for proper cleanup. Close the optional
+		// static-only UI origin first so no late browser request races directory
+		// removal after the gateway has stopped.
+		await closeServer(staticUiServer);
 		await gw.shutdown();
 		// Bounded-retry cleanup. Replaces the previous fire-and-forget
 		// `void rmAsync(...)` strategy: that hid Windows Defender / FS-handle
