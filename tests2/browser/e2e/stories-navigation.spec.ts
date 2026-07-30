@@ -137,11 +137,11 @@ test.describe("CT-13: URL routing and navigation", () => {
 		s.assert();
 		await s.editor.is_visible();
 
-		// Deep link: goal. navigateToHash already waits for the hash to settle,
-		// so no extra waitForFunction is needed (removing it avoids compounding
-		// timeouts when the navigation is slow under load).
+		// Deep link: goal. The hash assignment is synchronous, but route handling
+		// is serialized; wait for the dashboard route to finish mounting.
 		s.act();
 		await navigateToHash(s.page, `#/goal/${goal.id}`);
+		await waitForGoalDashboardRoute(s.page, goal.id);
 		s.assert();
 		await expect(s.page.locator(".dashboard-container").first())
 			.toBeVisible({ timeout: 20_000 });
