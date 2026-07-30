@@ -63,17 +63,16 @@ async function waitForActiveSessionWithTextarea(page: Page, previousSessionId: s
 
 /**
  * Open the app authenticated via token query param.
- * Waits for the sidebar "New session" button to confirm the app has loaded.
+ *
+ * The authenticated app-shell header is present in every layout. Unlike a
+ * sidebar control, it remains a valid readiness signal when the sidebar is
+ * collapsed.
  */
 export async function openApp(page: Page): Promise<void> {
 	const token = await readE2ETokenAsync();
 	const baseUrl = base();
 	await page.goto(`${baseUrl}/?token=${encodeURIComponent(token)}`);
-	// Wait for sidebar to be fully loaded — Settings button is always present
-	// regardless of single-project or multi-project mode
-	await expect(
-		page.locator("button").filter({ hasText: "Settings" }).first(),
-	).toBeVisible({ timeout: 20_000 });
+	await expect(page.getByTestId("app-header-row")).toBeVisible({ timeout: 20_000 });
 }
 
 export async function activeSessionId(page: Page): Promise<string | null> {
