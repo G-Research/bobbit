@@ -7,7 +7,19 @@ export interface RunningSourceProcess {
 	label: string;
 	stdout: string[];
 	stderr: string[];
+	closed: boolean;
 }
+
+export interface StopSourceProcessOptions {
+	/** Test seam: production teardown keeps a ten-second graceful shutdown window. */
+	gracefulStopTimeoutMs?: number;
+	/** Test seam: bounds how long teardown waits for close after force-killing. */
+	forceStopTimeoutMs?: number;
+}
+
+const SOURCE_PROCESS_GRACEFUL_STOP_TIMEOUT_MS = 10_000;
+const SOURCE_PROCESS_FORCE_STOP_TIMEOUT_MS = 2_000;
+const WINDOWS_TASKKILL_TIMEOUT_MS = 2_000;
 
 export interface SourceGatewayOptions {
 	repoRoot: string;
@@ -161,9 +173,10 @@ function isolatedEnvironment(tempRoot: string): NodeJS.ProcessEnv {
 }
 
 function captureProcess(child: ChildProcess, label: string): RunningSourceProcess {
-	const runtime = { child, label, stdout: [] as string[], stderr: [] as string[] };
+	const runtime: RunningSourceProcess = { child, label, stdout: [], stderr: [], closed: false };
 	child.stdout?.on("data", chunk => runtime.stdout.push(String(chunk)));
 	child.stderr?.on("data", chunk => runtime.stderr.push(String(chunk)));
+	child.once("close", () => { runtime.closed = true; });
 	return runtime;
 }
 
@@ -243,21 +256,62 @@ export async function waitForSourceVite(baseUrl: string, runtime: RunningSourceP
 	throw processFailure(runtime, `readiness timed out: ${lastError}`);
 }
 
-function killTree(child: ChildProcess): void {
+function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
 	if (!child.pid) return;
 	if (process.platform === "win32") {
-		spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+		// taskkill is Windows' process-tree equivalent. Its own execution must not
+		// turn an already-failing test cleanup into an unbounded worker hang.
+		spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+			stdio: "ignore",
+			windowsHide: true,
+			timeout: WINDOWS_TASKKILL_TIMEOUT_MS,
+		});
 		return;
 	}
-	try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+	try { process.kill(-child.pid, signal); } catch { child.kill(signal); }
 }
 
-export async function stopSourceProcess(runtime: RunningSourceProcess): Promise<void> {
-	if (runtime.child.exitCode !== null) return;
-	const closed = new Promise<void>(resolveClosed => runtime.child.once("close", () => resolveClosed()));
-	killTree(runtime.child);
-	await Promise.race([closed, new Promise<void>(resolveDelay => setTimeout(resolveDelay, 10_000))]);
-	if (runtime.child.exitCode === null) killTree(runtime.child);
+function waitForProcessClose(runtime: RunningSourceProcess, timeoutMs: number): Promise<boolean> {
+	if (runtime.closed) return Promise.resolve(true);
+	return new Promise(resolveClosed => {
+		const onClose = () => finish(true);
+		const timeout = setTimeout(() => finish(false), timeoutMs);
+		const finish = (closed: boolean) => {
+			clearTimeout(timeout);
+			runtime.child.removeListener("close", onClose);
+			resolveClosed(closed);
+		};
+		runtime.child.once("close", onClose);
+	});
+}
+
+function releaseProcessStdio(child: ChildProcess): void {
+	for (const stream of [child.stdin, child.stdout, child.stderr]) {
+		try { stream?.destroy(); } catch { /* best-effort cleanup after a failed OS close */ }
+	}
+	// If the OS did not acknowledge the forced kill, detached children must not
+	// retain this Playwright worker through inherited stdio handles.
+	try { child.unref(); } catch { /* child may have exited between checks */ }
+}
+
+export async function stopSourceProcess(
+	runtime: RunningSourceProcess,
+	options: StopSourceProcessOptions = {},
+): Promise<void> {
+	if (runtime.closed) return;
+	const gracefulStopTimeoutMs = options.gracefulStopTimeoutMs ?? SOURCE_PROCESS_GRACEFUL_STOP_TIMEOUT_MS;
+	const forceStopTimeoutMs = options.forceStopTimeoutMs ?? SOURCE_PROCESS_FORCE_STOP_TIMEOUT_MS;
+
+	signalProcessTree(runtime.child, "SIGTERM");
+	if (await waitForProcessClose(runtime, gracefulStopTimeoutMs)) return;
+
+	// SIGTERM is deliberately not retried here: a stuck gateway may ignore it.
+	// Force-kill the detached POSIX process group, then still wait for `close` so
+	// its pipes cannot keep the Playwright worker alive.
+	signalProcessTree(runtime.child, "SIGKILL");
+	if (await waitForProcessClose(runtime, forceStopTimeoutMs)) return;
+
+	releaseProcessStdio(runtime.child);
 }
 
 export function processFailure(runtime: RunningSourceProcess, message: string): Error {
