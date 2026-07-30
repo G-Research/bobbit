@@ -126,8 +126,13 @@ type ProjectPathApi = typeof path.posix;
 
 function isWindowsProjectPath(rootPath: string): boolean {
   // Use the input dialect rather than the host OS so persisted projects can be
-  // compared deterministically in cross-platform tests and migrations.
-  return /^[a-z]:[\\/]/i.test(rootPath) || /^[\\/]{2}/.test(rootPath);
+  // compared deterministically in cross-platform tests and migrations. On
+  // POSIX, though, a double-forward-slash path is still a native absolute path
+  // (`//tmp/project` and `/tmp/project` identify the same directory), not a
+  // Windows UNC path. Explicit backslash UNC paths remain portable fixtures.
+  return /^[a-z]:[\\/]/i.test(rootPath)
+    || rootPath.startsWith("\\\\")
+    || (process.platform === "win32" && rootPath.startsWith("//"));
 }
 
 function projectPathApi(rootPath: string): ProjectPathApi {
@@ -527,14 +532,13 @@ export class ProjectRegistry {
     return this.projects.get(id);
   }
 
-  /** Find a project whose rootPath matches (normalized). Excludes hidden
-   * synthetic projects (e.g. "system") so that real-project lookups don't
+  /** Find a project whose rootPath matches its canonical identity. Excludes
+   * hidden synthetic projects (e.g. "system") so that real-project lookups don't
    * accidentally match the install-dir anchor of the hidden system project. */
   getByPath(rootPath: string): RegisteredProject | undefined {
-    const normalized = path.resolve(rootPath);
     for (const p of this.projects.values()) {
       if (p.hidden) continue;
-      if (path.resolve(p.rootPath) === normalized) return p;
+      if (sameProjectPath(p.rootPath, rootPath)) return p;
     }
     return undefined;
   }
@@ -545,9 +549,8 @@ export class ProjectRegistry {
    * Both sides are canonicalized via realpathSync (best-effort, with textual
    * fallback on EPERM/ENOENT) so a cwd reached through a symlink resolves to
    * a project registered at the canonical path (or vice versa).
-   * `getByPath()` is intentionally NOT canonicalized — it is used as a
-   * duplicate-path guard for `register()` and must match exactly what the
-   * caller passed. */
+   * `getByPath()` uses this same canonical identity for upserts, so symlink,
+   * separator, and case aliases cannot create a second project. */
   findByCwd(cwd: string): RegisteredProject | undefined {
     const cwdPathApi = projectPathApi(cwd);
     const normalized = canonicalProjectPath(cwd);
