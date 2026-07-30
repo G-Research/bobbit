@@ -249,6 +249,37 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 		}
 	});
 
+	test("reaps an inherited-stdio descendant at the owned root-exit boundary", async () => {
+		test.setTimeout(5_000);
+		const child = spawn(process.execPath, ["-e", [
+			'const { spawn } = require("node:child_process");',
+			'const descendant = spawn(process.execPath, ["-e", "process.on(\\\"SIGTERM\\\", () => {}); setInterval(() => {}, 1000);"], { stdio: "inherit" });',
+			'process.stdout.write("ready\\n");',
+			'process.on("SIGTERM", () => process.exit(0));',
+		].join("")], {
+			detached: process.platform !== "win32",
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		const runtime = capturePackagedCli(child);
+		const actualExit = once(child, "exit");
+		const actualClose = once(child, "close");
+		await once(child.stdout!, "data");
+
+		try {
+			await stopPackagedCli(runtime);
+			await actualExit;
+			await actualClose;
+			expect(runtime.exited, "root exit must be recorded before inherited stdio closes").toBe(true);
+			expect(runtime.closed, "the owned process tree must close after teardown").toBe(true);
+			if (process.platform !== "win32") {
+				expect(runtime.finalTreeSignalSent, "the original POSIX group must be finalized at root exit").toBe(true);
+			}
+		} finally {
+			if (!runtime.closed) await stopPackagedCli(runtime);
+		}
+	});
+
 	test("clean consumer serves dist UI and executes the bundled canonical theme bridge", async ({ page }, testInfo) => {
 		test.setTimeout(15 * 60_000);
 		const tempRoot = await mkdtemp(join(tmpdir(), "bobbit-packed-inline-theme-"));
