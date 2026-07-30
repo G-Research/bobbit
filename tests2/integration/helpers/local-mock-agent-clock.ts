@@ -8,6 +8,38 @@ export interface LocalMockAgentClock {
 }
 
 /**
+ * Restore a session with its per-bridge virtual clock installed at the exact
+ * queue-drain boundary. `restoreSessions()` re-enqueues durable steers, then
+ * releases its replacement coordinator which drains that queue synchronously.
+ * Attaching after restore returns races the mock's first sleep: that sleep can
+ * already have captured the real-time implementation, while the caller only
+ * advances the local clock. Installing immediately before the drain makes the
+ * entire recovered turn belong to one deterministic clock.
+ */
+export async function restoreWithLocalMockAgentClock(gateway: any, sessionId: string): Promise<LocalMockAgentClock> {
+	const manager = gateway.sessionManager;
+	const originalDrainQueue = manager.drainQueue;
+	let localClock: LocalMockAgentClock | undefined;
+
+	const patchedDrainQueue = (session: { id?: string }) => {
+		if (session?.id === sessionId && !localClock) {
+			localClock = attachLocalMockAgentClock(gateway, sessionId);
+		}
+		return originalDrainQueue.call(manager, session);
+	};
+	manager.drainQueue = patchedDrainQueue;
+	try {
+		await manager.restoreSessions();
+	} finally {
+		if (manager.drainQueue === patchedDrainQueue) manager.drainQueue = originalDrainQueue;
+	}
+	if (!localClock) {
+		throw new Error(`session ${sessionId} did not drain a recovered mock-agent prompt`);
+	}
+	return localClock;
+}
+
+/**
  * Give one in-process mock agent its own virtual clock.
  *
  * The gateway clock is fork-scoped, so advancing it from a test also fires
