@@ -12,11 +12,11 @@ import { loadOrCreateToken, readToken } from "./auth/token.js";
 import { ensureTlsCert } from "./auth/tls.js";
 import { loadDesecConfig, updateDesecIp } from "./auth/desec.js";
 import { bootLog, bootMark } from "./boot-profile.js";
-import { loopbackForBind } from "./cli-loopback.js";
+import { isLoopbackHost, loopbackForBind } from "./cli-loopback.js";
 import { resolveCliGatewayDeps } from "./cli-gateway-deps.js";
 import { normalizeBasePath } from "../shared/base-path.js";
 
-export { loopbackForBind };
+export { isLoopbackHost, loopbackForBind };
 
 export interface CliArgs {
 	host: string;
@@ -49,11 +49,6 @@ export interface StartupUrls {
 	peerUrl: string;
 	uiUrl: string;
 	openUrl: string;
-}
-
-export function isLoopbackHost(host: string): boolean {
-	const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
-	return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
 }
 
 function urlHost(host: string): string {
@@ -427,8 +422,28 @@ process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
 	process.exit(1);
 });
 
-const invokedPath = process.argv[1];
-if (invokedPath && path.resolve(invokedPath) === path.resolve(fileURLToPath(import.meta.url))) {
+/**
+ * Node resolves an imported module to its real path while npm exposes POSIX bin
+ * entries through a symlink. Compare filesystem identities when possible so an
+ * installed `bobbit`/`npx bobbit` entrypoint still executes; retain the lexical
+ * fallback for loaders whose synthetic module path does not exist on disk.
+ */
+export function isCliEntrypoint(invokedPath: string | undefined, moduleUrl = import.meta.url): boolean {
+	if (!invokedPath) return false;
+	const modulePath = fileURLToPath(moduleUrl);
+	const canonical = (candidate: string): string => {
+		try {
+			return fs.realpathSync(candidate);
+		} catch {
+			return path.resolve(candidate);
+		}
+	};
+	const left = canonical(invokedPath);
+	const right = canonical(modulePath);
+	return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
+if (isCliEntrypoint(process.argv[1])) {
 	runCli().catch((err) => {
 		console.error("Fatal:", err instanceof Error ? err.message : err);
 		process.exit(1);

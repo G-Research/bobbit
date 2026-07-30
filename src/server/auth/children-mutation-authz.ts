@@ -124,7 +124,7 @@ export interface ChildrenMutationAuthzInput {
 	mutationClass: ChildrenMutationClass;
 	/**
 	 * True when the request carries a server-verified signed `bobbit_session`
-	 * cookie (computed via `cookieTryAuth(req, cookieStore)` at the call site).
+	 * cookie (computed by the gateway's centralized mount/origin-bound check).
 	 * This is the weak human-operator/UI signal — normal agent traffic never
 	 * receives the cookie, but a shared-admin-token holder can deliberately make
 	 * an eligible browser-shaped request and obtain one. It is honoured ONLY for

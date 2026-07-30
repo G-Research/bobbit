@@ -149,15 +149,11 @@ export function classifyBrowserCookieEligibility(
 		if (browserOrigin.protocol === "http:" && !isLoopbackHostname(browserOrigin.hostname)) {
 			return deny("insecure-non-loopback-origin");
 		}
-		if (normalizedFetchSite === "same-site") {
-			// The base-path compatibility extension is specifically for a bundled UI
-			// and gateway on the same scheme/hostname but different ports. An exact
-			// origin is serialized by browsers as `same-origin`, not `same-site`.
-			if (browserOrigin.origin === requestOrigin.origin) return deny("invalid-fetch-site");
-			if (!isSameSchemeHost(browserOrigin, requestOrigin)) return deny("origin-mismatch");
-		} else if (!isAcceptedOrigin(browserOrigin, requestOrigin, context)) {
-			return deny("origin-mismatch");
+		if (normalizedFetchSite === "same-site" && browserOrigin.origin === requestOrigin.origin) {
+			// An exact origin is serialized by browsers as `same-origin`, not `same-site`.
+			return deny("invalid-fetch-site");
 		}
+		if (!isAcceptedOrigin(browserOrigin, requestOrigin, context)) return deny("origin-mismatch");
 	}
 
 	switch (context.authentication.source) {
@@ -240,6 +236,29 @@ export function canonicalHttpOrigin(raw: string | readonly string[] | undefined)
 	return parseOriginHeader(raw)?.origin;
 }
 
+/** Canonical actual gateway origin derived only from the socket TLS bit and Host. */
+export function canonicalRequestOrigin(
+	request: Pick<BrowserCookieRequestMetadata, "headers" | "isTls">,
+): string | undefined {
+	return parseRequestOrigin(request.headers, request.isTls)?.origin;
+}
+
+/**
+ * Canonical browser authority for a cookie-authenticated API/WS request. A
+ * serialized Origin wins; originless same-origin requests fall back to the
+ * actual gateway origin. Malformed Origin/Host values fail closed.
+ */
+export function browserCookieRequestOrigin(
+	request: Pick<BrowserCookieRequestMetadata, "headers" | "isTls">,
+): string | undefined {
+	const requestOrigin = canonicalRequestOrigin(request);
+	if (!requestOrigin) return undefined;
+	const originHeader = readSingleHeader(request.headers, "origin");
+	if (originHeader.kind === "invalid") return undefined;
+	if (originHeader.kind === "value") return parseOriginHeader(originHeader.value!)?.origin;
+	return requestOrigin;
+}
+
 function parseOrigin(raw: string): ParsedOrigin | undefined {
 	try {
 		const parsed = new URL(raw);
@@ -267,7 +286,15 @@ function isAcceptedOrigin(
 	context: BrowserCookieEligibilityContext,
 ): boolean {
 	if (browserOrigin.origin === requestOrigin.origin) return true;
-	if (context.deployment !== "vite") return false;
+	if (context.deployment === "direct") {
+		// A production UI may intentionally select a gateway on another port of
+		// the same scheme/normalized host. Only a real admin bearer may establish
+		// that binding; subsequent renewal is safe only because the caller first
+		// completed centralized verification of the cookie's exact origin claim.
+		const hasBindingAuthority = context.authentication.source === "admin-bearer"
+			|| context.authentication.source === "signed-cookie";
+		return hasBindingAuthority && isSameSchemeHost(browserOrigin, requestOrigin);
+	}
 
 	const configuredHostname = normalizeConfiguredHostname(context.configuredHost);
 	const bothUseConfiguredHost = configuredHostname !== undefined
@@ -279,26 +306,22 @@ function isAcceptedOrigin(
 }
 
 /**
- * Cookie-only API authentication is valid for same-origin/same-scheme-host
- * browser requests. Requests without an Origin retain non-browser compatibility;
- * a presented malformed or incompatible browser Origin must use real Bearer auth.
+ * Legacy unbound v1 cookies remain valid only for the gateway's exact origin.
+ * Cross-port compatibility is provided exclusively by v1.2's signed origin
+ * claim. Requests without Origin retain same-origin/non-browser compatibility.
  */
 export function isBrowserCookieAuthenticationCompatible(
 	request: Pick<BrowserCookieRequestMetadata, "headers" | "isTls">,
-	context: Pick<BrowserCookieEligibilityContext, "deployment" | "configuredHost">,
+	_context: Pick<BrowserCookieEligibilityContext, "deployment" | "configuredHost">,
 ): boolean {
 	const originHeader = readSingleHeader(request.headers, "origin");
-	if (originHeader.kind === "missing") return true;
+	if (originHeader.kind === "missing") return canonicalRequestOrigin(request) !== undefined;
 	if (originHeader.kind === "invalid") return false;
 	const browserOrigin = parseOriginHeader(originHeader.value!);
 	const requestOrigin = parseRequestOrigin(request.headers, request.isTls);
-	return Boolean(browserOrigin && requestOrigin && (
-		isSameSchemeHost(browserOrigin, requestOrigin)
-		|| isAcceptedOrigin(browserOrigin, requestOrigin, {
-			...context,
-			authentication: { source: "other" },
-		})
-	));
+	// This helper is now the legacy-v1 compatibility boundary. Bound v1.2
+	// cookies prove their exact cross-port UI origin cryptographically instead.
+	return Boolean(browserOrigin && requestOrigin && browserOrigin.origin === requestOrigin.origin);
 }
 
 function normalizeConfiguredHostname(host: string): string | undefined {

@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, it } from "vitest";
 
 interface CliArgs {
@@ -7,6 +11,7 @@ interface CliArgs {
 }
 
 interface StartupUrls {
+	authEnforced: boolean;
 	listenUrl: string;
 	peerUrl: string;
 	uiUrl: string;
@@ -14,6 +19,8 @@ interface StartupUrls {
 }
 
 interface CliModule {
+	isCliEntrypoint(invokedPath: string | undefined, moduleUrl?: string): boolean;
+	isLoopbackHost(host: string): boolean;
 	parseArgs(argv: string[], env?: NodeJS.ProcessEnv): CliArgs;
 	buildStartupUrls(options: {
 		protocol: "http" | "https";
@@ -35,6 +42,40 @@ interface CliModule {
 async function cliModule(): Promise<CliModule> {
 	return await import("../../src/server/cli.ts") as unknown as CliModule;
 }
+
+describe("CLI executable and loopback boundaries", () => {
+	it.skipIf(process.platform === "win32")("recognizes an npm-style POSIX bin symlink as direct execution", async () => {
+		const { isCliEntrypoint } = await cliModule();
+		const root = mkdtempSync(join(tmpdir(), "bobbit-cli-symlink-"));
+		try {
+			const target = join(root, "dist-cli.js");
+			const bin = join(root, "bobbit");
+			writeFileSync(target, "// fixture\n");
+			symlinkSync(target, bin, "file");
+			assert.equal(isCliEntrypoint(bin, pathToFileURL(target).href), true);
+			assert.equal(isCliEntrypoint(join(root, "other"), pathToFileURL(target).href), false);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("normalizes mixed-case and balanced IPv6 loopback hosts but rejects malformed brackets", async () => {
+		const { isLoopbackHost, buildStartupUrls } = await cliModule();
+		for (const host of ["LOCALHOST", " localhost ", "127.0.0.1", "::1", "[::1]"]) {
+			assert.equal(isLoopbackHost(host), true, host);
+			assert.equal(buildStartupUrls({
+				protocol: "http",
+				host,
+				port: 3001,
+				basePath: "",
+				token: "must-not-leak",
+			}).authEnforced, false, host);
+		}
+		for (const host of ["[::1", "::1]", "[localhost]", "[127.0.0.1]", "localhost.example", "127.0.0.2"]) {
+			assert.equal(isLoopbackHost(host), false, host);
+		}
+	});
+});
 
 describe("base-path CLI selection", () => {
 	it("defaults to root when neither flag nor environment is present", async () => {

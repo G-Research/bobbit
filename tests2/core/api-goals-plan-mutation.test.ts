@@ -46,7 +46,6 @@ const identitySecretStore = {
 
 let memfs: MemFs;
 const stateDir = path.resolve("/memfs/plan-mutation-api/state");
-const unauthenticatedCookieStore = { verify: () => false };
 
 function makePlanMutationStore(): PlanMutationStore {
 	return new PlanMutationStore(stateDir, { startSweep: false }, memfs);
@@ -283,7 +282,7 @@ describe("Gov-1: direct fix-up auto-pause via PATCH /plan handler", () => {
 			},
 			teamManager: { getTeamState: () => ({ teamLeadSessionId: TEAM_LEAD }) },
 			sessionManager: { getAllSessionsRaw: () => [], abortSessionTurn: async () => {}, sessionSecretStore: identitySecretStore },
-			cookieStore: unauthenticatedCookieStore,
+			cookieAuthenticated: false,
 			requireSubgoalsEnabled: () => true,
 			getGoalAcrossProjects: () => goal,
 			getGoalManagerForGoal: () => goalManager,
@@ -408,7 +407,7 @@ describe("Pre/post-freeze: PATCH /plan classifies only after goal-plan freeze", 
 			},
 			teamManager: { getTeamState: () => ({ teamLeadSessionId: TEAM_LEAD }) },
 			sessionManager: { getAllSessionsRaw: () => [], abortSessionTurn: async () => {}, sessionSecretStore: identitySecretStore },
-			cookieStore: unauthenticatedCookieStore,
+			cookieAuthenticated: false,
 			requireSubgoalsEnabled: () => true,
 			getGoalAcrossProjects: () => goal,
 			getGoalManagerForGoal: () => goalManager,
@@ -550,7 +549,7 @@ describe("mutation decision serialization", () => {
 				verificationHarness: {},
 				teamManager: { getTeamState: () => ({ teamLeadSessionId: TEAM_LEAD }) },
 				sessionManager: { sessionSecretStore: identitySecretStore },
-				cookieStore: unauthenticatedCookieStore,
+				cookieAuthenticated: false,
 				requireSubgoalsEnabled: () => true,
 				getGoalAcrossProjects: () => goal,
 				getGoalManagerForGoal: () => goalManager,

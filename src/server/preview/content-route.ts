@@ -22,6 +22,7 @@ import { artifactMountDir } from "./artifacts.js";
 import { resolveAssetPath } from "./path-guard.js";
 import { mimeTypeFor } from "./mime.js";
 import { tryAuth as cookieTryAuth, type CookieStore } from "../auth/cookie.js";
+import { canonicalHttpOrigin, canonicalRequestOrigin } from "../auth/browser-cookie.js";
 import { injectBaseAndScripts, PREVIEW_BRIDGE_SCRIPTS } from "../../shared/preview-bridge-scripts.js";
 import { gatewayRoute, normalizeBasePath, withBasePath } from "../../shared/base-path.js";
 import { getPreviewThemeSnapshot } from "./theme-snapshot.js";
@@ -44,7 +45,20 @@ function send(res: http.ServerResponse, status: number, body: string, contentTyp
 
 function isAuthorized(req: http.IncomingMessage, opts: ContentRouteOptions): boolean {
 	if (opts.isLocalhost) return true;
-	if (cookieTryAuth(req, opts.cookieStore)) return true;
+	const basePath = normalizeBasePath(opts.basePath);
+	const isTls = Boolean((req.socket as { encrypted?: boolean } | undefined)?.encrypted);
+	const requestOrigin = canonicalRequestOrigin({ headers: req.headers, isTls });
+	if (!requestOrigin) return false;
+	const rawOrigin = req.headers.origin;
+	const browserOrigin = canonicalHttpOrigin(rawOrigin);
+	if (rawOrigin !== undefined && !browserOrigin) return false;
+	// Originless GET/HEAD navigations are unreadable cross-origin and remain
+	// usable for iframe/popout loads. Same-origin preview subresources may use the
+	// gateway origin; an explicit external UI Origin must match the signed claim.
+	const binding = browserOrigin && browserOrigin !== requestOrigin
+		? { basePath, origin: browserOrigin }
+		: { basePath };
+	if (cookieTryAuth(req, opts.cookieStore, binding)) return true;
 	// Optional admin bearer (?token= or Authorization: Bearer) — useful for
 	// curl-driven testing; iframe loads always come via cookie.
 	if (opts.adminBearerToken) {
