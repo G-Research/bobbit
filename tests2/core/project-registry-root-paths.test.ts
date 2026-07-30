@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  canonicalProjectPath,
   createProjectPathIdentity,
   ProjectRegistry,
   type ProjectPathIdentity,
@@ -64,6 +65,84 @@ test("ProjectRegistry.findByCwd matches POSIX, drive, and UNC filesystem roots o
   assert.equal(unc.findByCwd("\\\\SERVER\\SHARE\\workspace")?.id, "unc-root");
   assert.equal(unc.findByCwd("\\\\server\\share\\workspace\\project")?.id, "unc-root");
   assert.equal(unc.getByPath("\\\\SERVER\\SHARE\\workspace")?.id, "unc-root");
+});
+
+test("ProjectRegistry identifies case aliases when realpath preserves caller casing", () => {
+  // Models APFS behaviour: every case spelling resolves, but realpath returns
+  // exactly the spelling it was given. The readdir seam exposes the single
+  // stored spelling, which is the read-only proof that the aliases share one
+  // entry rather than two case-distinct entries on a sensitive volume.
+  const prefix = "/case-preserving-apfs";
+  const root = `${prefix}/Projects/Bobbit`;
+  const alias = `${prefix.toUpperCase()}/projects/bObBiT`;
+  const identity = createProjectPathIdentity({
+    isNativePathApi: dialect => dialect === "posix",
+    realpathSync: candidate => {
+      const resolved = path.posix.resolve(candidate);
+      if (resolved.toLowerCase().startsWith(prefix)) return resolved;
+      throw new Error(`missing fixture path: ${candidate}`);
+    },
+    readdirSync: candidate => {
+      const normalized = path.posix.resolve(candidate).toLowerCase();
+      if (normalized.endsWith("/projects")) return ["Bobbit"];
+      if (normalized.endsWith("/bobbit")) return ["src"];
+      throw new Error(`missing fixture directory: ${candidate}`);
+    },
+  });
+  const registry = registryWithRoot("case-preserving", root, identity);
+
+  assert.equal(canonicalProjectPath(root, {
+    isNativePathApi: dialect => dialect === "posix",
+    realpathSync: candidate => path.posix.resolve(candidate),
+    readdirSync: candidate => {
+      const normalized = path.posix.resolve(candidate).toLowerCase();
+      if (normalized.endsWith("/projects")) return ["Bobbit"];
+      if (normalized.endsWith("/bobbit")) return ["src"];
+      throw new Error(`missing fixture directory: ${candidate}`);
+    },
+  }), "/case-preserving-apfs/projects/bobbit");
+  assert.equal(registry.getByPath(alias)?.id, "case-preserving");
+  assert.equal(registry.findByCwd(`${alias}/SRC`)?.id, "case-preserving");
+  assert.equal(registry.registerProvisional("case alias", alias).id, "case-preserving");
+});
+
+test("ProjectRegistry preserves case-distinct paths when the native volume is sensitive", () => {
+  const root = "/case-sensitive-volume/Projects/Bobbit";
+  const alias = "/case-sensitive-volume/Projects/bobbit";
+  const identity = createProjectPathIdentity({
+    isNativePathApi: dialect => dialect === "posix",
+    realpathSync: candidate => {
+      if (path.posix.resolve(candidate) === root) return root;
+      throw new Error(`missing fixture path: ${candidate}`);
+    },
+    isCaseInsensitiveAt: () => false,
+  });
+  const registry = registryWithRoot("case-sensitive", root, identity);
+
+  assert.equal(registry.getByPath(alias), undefined);
+  assert.equal(registry.registerProvisional("case-distinct", alias).provisional, true);
+});
+
+test("ProjectRegistry identifies native case aliases when the temp volume is insensitive", () => {
+  if (process.platform !== "darwin") return;
+
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "project-registry-native-case-"));
+  fixtureDirs.push(fixtureRoot);
+  const root = path.join(fixtureRoot, "ProjectIdentity");
+  const alias = path.join(fixtureRoot, "projectidentity");
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+
+  // Case-sensitive APFS volumes are valid macOS configurations. Only assert
+  // the alias contract when this particular native fixture proves insensitive.
+  try {
+    fs.realpathSync(alias);
+  } catch {
+    return;
+  }
+
+  const registry = registryWithRoot("native-case", root);
+  assert.equal(registry.getByPath(alias)?.id, "native-case");
+  assert.equal(registry.findByCwd(path.join(alias, "src"))?.id, "native-case");
 });
 
 test("ProjectRegistry rejects native POSIX double-slash aliases for Headquarters and existing projects", () => {

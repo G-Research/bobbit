@@ -150,13 +150,14 @@ function projectPathFlavor(pathApi: ProjectPathApi): "posix" | "win32" {
 function normalizeProjectPath(
   value: string,
   pathApi: ProjectPathApi,
-  options: { foldWindowsCase?: boolean } = {},
+  options: { foldCase?: boolean; foldWindowsCase?: boolean } = {},
 ): string {
   const resolved = pathApi.resolve(value);
   const root = pathApi.parse(resolved).root;
   const isRoot = pathApi.normalize(resolved) === pathApi.normalize(root);
   const normalized = (isRoot ? root : resolved.replace(/[\\/]+$/, "")).replace(/\\/g, "/");
-  return pathApi === path.win32 && (options.foldWindowsCase ?? true) ? normalized.toLowerCase() : normalized;
+  const foldCase = options.foldCase ?? (pathApi === path.win32 && (options.foldWindowsCase ?? true));
+  return foldCase ? normalized.toLowerCase() : normalized;
 }
 
 export interface ProjectPathIdentityOptions {
@@ -202,9 +203,16 @@ function hasCaseInsensitiveAncestor(
   readdirSync: (candidate: string) => string[],
 ): boolean {
   const parent = pathApi.dirname(existingAncestor);
-  const probes: Array<{ candidate: string; expected: string }> = [];
+  const probes: Array<{ candidate: string; expected: string; parent: string; name: string }> = [];
   const variant = parent === existingAncestor ? undefined : toggledCase(pathApi.basename(existingAncestor));
-  if (variant) probes.push({ candidate: pathApi.join(parent, variant), expected: existingAncestor });
+  if (variant) {
+    probes.push({
+      candidate: pathApi.join(parent, variant),
+      expected: existingAncestor,
+      parent,
+      name: pathApi.basename(existingAncestor),
+    });
+  }
 
   // A root has no case-changeable basename. Probe one of its existing children
   // instead; this remains a read-only capability check.
@@ -215,6 +223,8 @@ function hasCaseInsensitiveAncestor(
         probes.push({
           candidate: pathApi.join(existingAncestor, toggledCase(child)!),
           expected: pathApi.join(existingAncestor, child),
+          parent: existingAncestor,
+          name: child,
         });
       }
     } catch {
@@ -222,9 +232,20 @@ function hasCaseInsensitiveAncestor(
     }
   }
 
-  return probes.some(({ candidate, expected }) => {
+  return probes.some(({ candidate, expected, parent: probeParent, name }) => {
     try {
-      return pathApi.resolve(realpathSync(candidate)) === pathApi.resolve(realpathSync(expected));
+      const candidateRealpath = pathApi.resolve(realpathSync(candidate));
+      const expectedRealpath = pathApi.resolve(realpathSync(expected));
+      if (candidateRealpath === expectedRealpath) return true;
+
+      // APFS can preserve the caller's spelling in realpath output, so equal
+      // realpath strings alone cannot establish identity. A successful lookup
+      // of both spellings plus exactly one matching directory entry proves the
+      // filesystem resolves them to the same entry. Case-sensitive directories
+      // with distinct `Foo` and `foo` entries have two matching names instead.
+      const matchingEntries = readdirSync(probeParent)
+        .filter(entry => entry.toLowerCase() === name.toLowerCase());
+      return matchingEntries.length === 1;
     } catch {
       return false;
     }
@@ -233,9 +254,9 @@ function hasCaseInsensitiveAncestor(
 
 /**
  * Canonical project identity. Existing prefixes are resolved through realpath;
- * nonexistent suffixes retain their spelling unless the nearest existing
- * ancestor demonstrably accepts a case-variant spelling. This prevents a
- * case-sensitive macOS/Linux volume from silently collapsing distinct paths.
+ * spelling is folded only when the nearest existing ancestor demonstrably
+ * accepts a case-variant spelling. This prevents a case-sensitive macOS/Linux
+ * volume from silently collapsing distinct paths.
  */
 export function canonicalProjectPath(
   rootPath: string,
@@ -263,17 +284,19 @@ export function canonicalProjectPath(
         ? suffix.reverse().map(segment => segment.toLowerCase())
         : suffix.reverse();
       return normalizeProjectPath(pathApi.join(canonical, ...normalizedSuffix), pathApi, {
-        // Native Windows can host case-sensitive directories. Preserve their
-        // spelling unless the closest existing ancestor proves otherwise.
-        foldWindowsCase: pathApi !== path.win32 || isCaseInsensitive,
+        // APFS may preserve caller casing in realpath output, so fold the
+        // existing prefix too once the nearest ancestor proved insensitive.
+        // Native Windows can also host case-sensitive directories; without
+        // that proof, every spelling remains distinct.
+        foldCase: isCaseInsensitive,
       });
     } catch {
       const parent = pathApi.dirname(existing);
       if (parent === existing) {
         return normalizeProjectPath(resolved, pathApi, {
-          // There is no existing ancestor from which to establish native
-          // Windows case behaviour, so retaining spelling is the safe choice.
-          foldWindowsCase: pathApi !== path.win32,
+          // There is no existing ancestor from which to establish case
+          // behaviour, so retaining spelling is the safe choice.
+          foldCase: false,
         });
       }
       suffix.push(pathApi.basename(existing));
