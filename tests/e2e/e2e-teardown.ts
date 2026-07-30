@@ -8,9 +8,17 @@
  */
 import { execFileSync } from "node:child_process";
 
-function currentRunId(): string | undefined {
-	const runId = process.env.BOBBIT_E2E_RUN_ID?.trim();
-	return runId && /^[A-Za-z0-9._-]+$/.test(runId) ? runId : undefined;
+export function currentRunId(value = process.env.BOBBIT_E2E_RUN_ID): string | undefined {
+	const runId = value?.trim();
+	return runId && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(runId) ? runId : undefined;
+}
+
+/** Must match projectSandboxVolumeNames() in src/server/agent/docker-args.ts. */
+export function ownedE2EVolumeNames(projectId: string, runId: string): string[] {
+	return [
+		`bobbit-workspace-${projectId}-e2e-${runId}`,
+		`bobbit-worktrees-${projectId}-e2e-${runId}`,
+	];
 }
 
 export default function globalTeardown() {
@@ -33,9 +41,9 @@ function cleanOwnedDockerResources(runId: string | undefined): void {
 				], { encoding: "utf-8", timeout: 5_000 }).trim();
 				execFileSync("docker", ["rm", "-f", id], { timeout: 15_000, stdio: "ignore" });
 				if (projectId) {
-					for (const prefix of ["bobbit-workspace-", "bobbit-worktrees-"]) {
+					for (const volumeName of ownedE2EVolumeNames(projectId, runId)) {
 						try {
-							execFileSync("docker", ["volume", "rm", "-f", `${prefix}${projectId}`], {
+							execFileSync("docker", ["volume", "rm", "-f", volumeName], {
 								timeout: 10_000,
 								stdio: "ignore",
 							});

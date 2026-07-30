@@ -11,7 +11,7 @@ import assert from "node:assert";
 import fs from "node:fs";
 import path from "node:path";
 import type { CommandRunner } from "../../src/server/gateway-deps.ts";
-import { buildDockerRunArgs } from "../../src/server/agent/docker-args.js";
+import { buildDockerRunArgs, projectSandboxVolumeNames } from "../../src/server/agent/docker-args.js";
 import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource } from "../../src/server/agent/sandbox-clone-source.js";
 import { toDockerPath } from "../../src/server/agent/rpc-bridge.js";
 import {
@@ -126,6 +126,32 @@ describe("buildDockerRunArgs", () => {
 			args.includes(`bobbit-worktrees-${projectId}:/workspace-wt`),
 			"should mount worktrees named volume",
 		);
+	});
+
+	it("names sandbox volumes by validated legacy E2E run ID without changing production names", () => {
+		const projectId = "test-project-abc";
+		const prior = process.env.BOBBIT_E2E_RUN_ID;
+		try {
+			delete process.env.BOBBIT_E2E_RUN_ID;
+			assert.deepEqual(projectSandboxVolumeNames(projectId), {
+				workspace: `bobbit-workspace-${projectId}`,
+				worktrees: `bobbit-worktrees-${projectId}`,
+			});
+
+			process.env.BOBBIT_E2E_RUN_ID = "legacy-run_123";
+			let args = buildDockerRunArgs({ image: "test", workspaceDir: "/tmp/test", projectId }, NOOP_COMMAND_RUNNER);
+			assert.ok(args.includes(`bobbit-workspace-${projectId}-e2e-legacy-run_123:/workspace`));
+			assert.ok(args.includes(`bobbit-worktrees-${projectId}-e2e-legacy-run_123:/workspace-wt`));
+
+			process.env.BOBBIT_E2E_RUN_ID = "bad/run-id";
+			args = buildDockerRunArgs({ image: "test", workspaceDir: "/tmp/test", projectId }, NOOP_COMMAND_RUNNER);
+			assert.ok(args.includes(`bobbit-workspace-${projectId}:/workspace`));
+			assert.ok(args.includes(`bobbit-worktrees-${projectId}:/workspace-wt`));
+			assert.ok(!args.some(arg => arg.includes("bad/run-id")));
+		} finally {
+			if (prior === undefined) delete process.env.BOBBIT_E2E_RUN_ID;
+			else process.env.BOBBIT_E2E_RUN_ID = prior;
+		}
 	});
 
 	it("does not mount worktrees volume when projectId is not set", () => {
