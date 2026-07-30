@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { CommandRunner } from "../../../src/server/gateway-deps.js";
 import { copyGitTemplate } from "../../harness/git-template.js";
+import { loadServerTestRuntime } from "../../harness/server-runtime.js";
 import { test, expect } from "../_e2e/in-process-harness.js";
 import { readE2EToken, apiFetch as gatewayApiFetch, createSession, deleteSession, registerProject } from "../_e2e/e2e-setup.js";
 import { installMethodInterceptor } from "./command-runner-dispatcher.js";
@@ -42,24 +43,41 @@ export function registerMaintenanceHooks(model: MaintenanceGitModel = maintenanc
 	let restoreCommandRunner: (() => void) | undefined;
 	let restoreSessionStorePersistence: (() => void) | undefined;
 
-	test.beforeAll(({ gateway }) => {
+	test.beforeAll(async ({ gateway }) => {
 		model.reset();
 		readE2EToken();
 		maintenanceGateway = gateway;
 		maintenanceProjectId = gateway.defaultProjectId;
 		maintenanceProjectContext = gateway.projectContextManager.getOrCreate(maintenanceProjectId);
 		if (!maintenanceProjectId || !maintenanceProjectContext) throw new Error("maintenance fixture requires the stable default project context");
-		const commandRunner = (gateway.sessionManager as { commandRunner?: CommandRunner }).commandRunner;
-		if (!commandRunner) throw new Error("maintenance fixture requires the gateway command-runner seam");
-		restoreCommandRunner = model.install(commandRunner);
-		const sessionStore = maintenanceProjectContext.sessionStore as { saveNow?: () => void };
-		restoreSessionStorePersistence = suppressSessionStorePersistence(sessionStore, ownerLabel);
+		const gatewayRunner = (gateway.sessionManager as { commandRunner?: CommandRunner }).commandRunner;
+		if (!gatewayRunner) throw new Error("maintenance fixture requires the gateway command-runner seam");
+		const runtime = await loadServerTestRuntime();
+		// createGateway assigns the maintenance route's runner through a module-global.
+		// A preceding isolate:false file can therefore leave it on the real runner
+		// while this fork's SessionManager still owns its fenced runner. Lease both
+		// exact candidates; the model itself claims only its registered repository.
+		const routeRunner = runtime.gatewayDeps.realCommandRunner;
+		try {
+			restoreCommandRunner = model.install([gatewayRunner, routeRunner]);
+			const sessionStore = maintenanceProjectContext.sessionStore as { saveNow?: () => void };
+			restoreSessionStorePersistence = suppressSessionStorePersistence(sessionStore, ownerLabel);
+		} catch (error) {
+			try { restoreSessionStorePersistence?.(); }
+			finally {
+				try { restoreCommandRunner?.(); }
+				finally { model.reset(); }
+			}
+			throw error;
+		}
 	});
 
 	test.afterAll(() => {
-		restoreSessionStorePersistence?.();
-		restoreCommandRunner?.();
-		model.reset();
+		try { restoreSessionStorePersistence?.(); }
+		finally {
+			try { restoreCommandRunner?.(); }
+			finally { model.reset(); }
+		}
 	});
 }
 

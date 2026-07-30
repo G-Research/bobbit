@@ -145,7 +145,20 @@ export function installCommandRunnerInterceptor(runner: CommandRunner, intercept
 	}
 	const owner = Symbol(interceptor.label);
 	installation.registrations.push({ owner, interceptor });
-	refreshFacades(runner, installation);
+	try {
+		refreshFacades(runner, installation);
+	} catch (error) {
+		const index = installation.registrations.findIndex(registration => registration.owner === owner);
+		if (index >= 0) installation.registrations.splice(index, 1);
+		try {
+			refreshFacades(runner, installation);
+		} finally {
+			if (installation.registrations.length === 0 && state.installations.get(runner) === installation) {
+				state.installations.delete(runner);
+			}
+		}
+		throw error;
+	}
 	let restored = false;
 	return () => {
 		if (restored) return;
@@ -158,6 +171,46 @@ export function installCommandRunnerInterceptor(runner: CommandRunner, intercept
 		if (installation!.registrations.length === 0 && state.installations.get(runner) === installation) {
 			state.installations.delete(runner);
 		}
+	};
+}
+
+function releaseCommandRunnerInterceptors(restores: Array<() => void>): void {
+	let firstError: unknown;
+	for (let index = restores.length - 1; index >= 0; index--) {
+		try { restores[index](); }
+		catch (error) { firstError ??= error; }
+	}
+	if (firstError !== undefined) throw firstError;
+}
+
+/**
+ * Install the same owner-scoped interceptor on every distinct runner that may
+ * serve a fixture request. Installation and release are transactional: a
+ * partial failure unwinds every runner already acquired, and release always
+ * attempts every lease in reverse order.
+ */
+export function installCommandRunnerInterceptorForRunners(
+	runners: Iterable<CommandRunner>,
+	interceptor: CommandRunnerInterceptor,
+): () => void {
+	const distinctRunners = [...new Set(runners)];
+	if (distinctRunners.length === 0) throw new Error("[command-runner-dispatcher] at least one CommandRunner is required");
+	const restores: Array<() => void> = [];
+	try {
+		for (const runner of distinctRunners) restores.push(installCommandRunnerInterceptor(runner, interceptor));
+	} catch (error) {
+		try { releaseCommandRunnerInterceptors(restores); }
+		catch (cleanupError) {
+			throw new AggregateError([error, cleanupError], "CommandRunner interceptor installation and rollback both failed");
+		}
+		throw error;
+	}
+
+	let restored = false;
+	return () => {
+		if (restored) return;
+		restored = true;
+		releaseCommandRunnerInterceptors(restores);
 	};
 }
 

@@ -1,7 +1,11 @@
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import type { CommandRunner } from "../../src/server/gateway-deps.js";
 import { installCommandRunnerInterceptor } from "../integration/helpers/command-runner-dispatcher.js";
+import { MaintenanceGitModel } from "../integration/helpers/maintenance-git-model.js";
 
 describe("shared CommandRunner dispatcher leases", () => {
 	it("releases owners independently and leaves unintercepted methods untouched", async () => {
@@ -67,5 +71,51 @@ describe("shared CommandRunner dispatcher leases", () => {
 			"/unrelated:git status --short",
 			"/owned/alpha:git status --short",
 		]);
+	});
+
+	it("routes one maintenance owner across distinct gateway and route runners without claiming foreign paths", async () => {
+		const baseDir = mkdtempSync(join(tmpdir(), "bobbit-maintenance-runner-owners-"));
+		const alphaRepo = join(baseDir, "alpha-repo");
+		const alphaWorktree = join(baseDir, "alpha-worktree");
+		const betaRepo = join(baseDir, "beta-repo");
+		const betaWorktree = join(baseDir, "beta-worktree");
+		for (const repo of [alphaRepo, betaRepo]) mkdirSync(join(repo, ".git"), { recursive: true });
+
+		const gatewayBase: CommandRunner["execFile"] = async () => ({ stdout: "gateway-base", stderr: "" });
+		const routeBase: CommandRunner["execFile"] = async () => ({ stdout: "route-base", stderr: "" });
+		const gatewayRunner: CommandRunner = { execFile: gatewayBase };
+		const routeRunner: CommandRunner = { execFile: routeBase };
+		const alpha = new MaintenanceGitModel("dispatcher-regression-alpha");
+		const beta = new MaintenanceGitModel("dispatcher-regression-beta");
+		let releaseAlpha: (() => void) | undefined;
+		let releaseBeta: (() => void) | undefined;
+
+		try {
+			alpha.registerRepo(alphaRepo);
+			alpha.addWorktree(alphaRepo, alphaWorktree, "alpha-branch");
+			beta.registerRepo(betaRepo);
+			beta.addWorktree(betaRepo, betaWorktree, "beta-branch");
+			releaseAlpha = alpha.install([gatewayRunner, routeRunner, routeRunner]);
+			releaseBeta = beta.install([gatewayRunner, routeRunner]);
+
+			const routeAlpha = await routeRunner.execFile("git", ["worktree", "list", "--porcelain"], { cwd: alphaRepo });
+			const gatewayBeta = await gatewayRunner.execFile("git", ["worktree", "list", "--porcelain"], { cwd: betaRepo });
+			expect(routeAlpha.stdout).toContain(alphaWorktree);
+			expect(gatewayBeta.stdout).toContain(betaWorktree);
+			expect((await routeRunner.execFile("git", ["status"], { cwd: join(baseDir, "foreign") })).stdout).toBe("route-base");
+
+			releaseAlpha();
+			expect((await routeRunner.execFile("git", ["status"], { cwd: alphaRepo })).stdout).toBe("route-base");
+			expect((await routeRunner.execFile("git", ["worktree", "list", "--porcelain"], { cwd: betaRepo })).stdout).toContain(betaWorktree);
+		} finally {
+			releaseAlpha?.();
+			releaseBeta?.();
+			alpha.reset();
+			beta.reset();
+			rmSync(baseDir, { recursive: true, force: true });
+		}
+
+		expect(gatewayRunner.execFile).toBe(gatewayBase);
+		expect(routeRunner.execFile).toBe(routeBase);
 	});
 });
