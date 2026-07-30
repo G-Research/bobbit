@@ -69,12 +69,20 @@ test("ProjectRegistry.findByCwd matches POSIX, drive, and UNC filesystem roots o
 
 test("ProjectRegistry identifies case aliases when realpath preserves caller casing", () => {
   // Models APFS behaviour: every case spelling resolves, but realpath returns
-  // exactly the spelling it was given. The readdir seam exposes the single
-  // stored spelling, which is the read-only proof that the aliases share one
-  // entry rather than two case-distinct entries on a sensitive volume.
+  // exactly the spelling it was given. The readdir seam exposes each parent
+  // entry, proving which individual components are insensitive without
+  // treating a sensitive descendant as insensitive too.
   const prefix = "/case-preserving-apfs";
   const root = `${prefix}/Projects/Bobbit`;
   const alias = `${prefix.toUpperCase()}/projects/bObBiT`;
+  const readdirSync = (candidate: string): string[] => {
+    const normalized = path.posix.resolve(candidate).toLowerCase();
+    if (normalized === "/") return ["case-preserving-apfs"];
+    if (normalized.endsWith("/case-preserving-apfs")) return ["Projects"];
+    if (normalized.endsWith("/projects")) return ["Bobbit"];
+    if (normalized.endsWith("/bobbit")) return ["src"];
+    throw new Error(`missing fixture directory: ${candidate}`);
+  };
   const identity = createProjectPathIdentity({
     isNativePathApi: dialect => dialect === "posix",
     realpathSync: candidate => {
@@ -82,24 +90,14 @@ test("ProjectRegistry identifies case aliases when realpath preserves caller cas
       if (resolved.toLowerCase().startsWith(prefix)) return resolved;
       throw new Error(`missing fixture path: ${candidate}`);
     },
-    readdirSync: candidate => {
-      const normalized = path.posix.resolve(candidate).toLowerCase();
-      if (normalized.endsWith("/projects")) return ["Bobbit"];
-      if (normalized.endsWith("/bobbit")) return ["src"];
-      throw new Error(`missing fixture directory: ${candidate}`);
-    },
+    readdirSync,
   });
   const registry = registryWithRoot("case-preserving", root, identity);
 
   assert.equal(canonicalProjectPath(root, {
     isNativePathApi: dialect => dialect === "posix",
     realpathSync: candidate => path.posix.resolve(candidate),
-    readdirSync: candidate => {
-      const normalized = path.posix.resolve(candidate).toLowerCase();
-      if (normalized.endsWith("/projects")) return ["Bobbit"];
-      if (normalized.endsWith("/bobbit")) return ["src"];
-      throw new Error(`missing fixture directory: ${candidate}`);
-    },
+    readdirSync,
   }), "/case-preserving-apfs/projects/bobbit");
   assert.equal(registry.getByPath(alias)?.id, "case-preserving");
   assert.equal(registry.findByCwd(`${alias}/SRC`)?.id, "case-preserving");

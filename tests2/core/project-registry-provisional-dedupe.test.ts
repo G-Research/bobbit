@@ -50,7 +50,12 @@ test("canonicalProjectPath folds nonexistent suffixes only after a read-only ins
   const ancestor = pathApi.join(pathApi.sep, "identity", "Ancestor");
   const child = pathApi.join(ancestor, "KnownEntry");
   const insensitiveRealpath = (candidate: string): string => {
-    if (candidate === ancestor || candidate === child || candidate === pathApi.join(ancestor, "knownEntry")) return candidate;
+    if (
+      candidate === ancestor
+      || candidate === pathApi.join(pathApi.dirname(ancestor), "ancestor")
+      || candidate === child
+      || candidate === pathApi.join(ancestor, "knownEntry")
+    ) return candidate;
     throw new Error(`not found: ${candidate}`);
   };
   const sensitiveRealpath = (candidate: string): string => {
@@ -58,6 +63,7 @@ test("canonicalProjectPath folds nonexistent suffixes only after a read-only ins
     throw new Error(`not found: ${candidate}`);
   };
   const readdirSync = (candidate: string): string[] => {
+    if (candidate === pathApi.dirname(ancestor)) return ["Ancestor"];
     if (candidate === ancestor) return ["KnownEntry"];
     throw new Error(`not found: ${candidate}`);
   };
