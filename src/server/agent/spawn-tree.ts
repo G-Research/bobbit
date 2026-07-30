@@ -34,6 +34,10 @@ export interface SpawnTrackedOptions {
 	env?: NodeJS.ProcessEnv;
 	stdio?: StdioOptions;
 	windowsHide?: boolean;
+	/** Override process spawning (primarily for deterministic process-lifecycle tests). */
+	spawnImpl?: typeof spawn;
+	/** Override the platform branch (primarily for platform-neutral lifecycle tests). */
+	platform?: NodeJS.Platform;
 	/** Optional — helper owns the timer; cleared on close/exit. */
 	timeoutMs?: number;
 	/** SIGTERM → SIGKILL escalation delay (POSIX only). Default 5000ms. */
@@ -120,11 +124,12 @@ export function spawnTracked(
 	args: readonly string[],
 	opts: SpawnTrackedOptions = {},
 ): TrackedChild {
-	const isWin = process.platform === "win32";
+	const isWin = (opts.platform ?? process.platform) === "win32";
+	const spawnImpl = opts.spawnImpl ?? spawn;
 	const killGraceMs = opts.killGraceMs ?? 5000;
 	const clock = opts.clock ?? realClock;
 
-	const child = spawn(cmd, args as string[], {
+	const child = spawnImpl(cmd, args as string[], {
 		cwd: opts.cwd,
 		env: opts.env,
 		stdio: opts.stdio,
@@ -172,7 +177,37 @@ export function spawnTracked(
 			return true;
 		},
 		killTree(signal: "SIGTERM" | "SIGKILL" = "SIGTERM", graceMsOverride?: number) {
-			if (tracked._closed && !isWin && !isProcessGroupAlive(tracked._pid ?? 0)) return;
+			if (isWin) {
+				// A root-process close means this PID is no longer an identity we own.
+				// Never taskkill it again: Windows can reuse PIDs, making a late kill
+				// capable of targeting an unrelated process. Once cleanup begins, retain
+				// its promise forever so all timeout/cancellation callers join one tree
+				// walk rather than restarting taskkill after it finishes.
+				if (tracked._closed || tracked._windowsTreeKill) return;
+				const pid = tracked._pid;
+				if (pid == null) return;
+
+				tracked._killed = true;
+				tracked._survivesShutdown = false;
+				let completeTreeKill!: () => void;
+				tracked._windowsTreeKill = new Promise<void>((resolve) => {
+					completeTreeKill = resolve;
+				});
+				try {
+					const tk = spawnImpl("taskkill", ["/T", "/F", "/PID", String(pid)], {
+						stdio: "ignore",
+						windowsHide: true,
+					});
+					const done = () => completeTreeKill();
+					tk.once("close", done);
+					tk.once("error", done);
+				} catch {
+					completeTreeKill();
+				}
+				return;
+			}
+
+			if (tracked._closed && !isProcessGroupAlive(tracked._pid ?? 0)) return;
 			tracked._killed = true;
 			// Restart survival is only for a still-running durable command. Once
 			// cancellation/timeout requested cleanup, shutdown must retain ownership
@@ -180,26 +215,6 @@ export function spawnTracked(
 			tracked._survivesShutdown = false;
 			const pid = tracked._pid;
 			if (pid == null) return;
-
-			if (isWin) {
-				// Windows has no POSIX process groups. taskkill /T /F is scoped to the
-				// original root PID and walks only its descendants; retain its promise
-				// so timeout/cancel callers can wait boundedly for that tree cleanup.
-				try {
-					const tk = spawn("taskkill", ["/T", "/F", "/PID", String(pid)], {
-						stdio: "ignore",
-						windowsHide: true,
-					});
-					tracked._windowsTreeKill = new Promise<void>((resolve) => {
-						const done = () => resolve();
-						tk.once("close", done);
-						tk.once("error", done);
-					});
-				} catch {
-					tracked._windowsTreeKill = Promise.resolve();
-				}
-				return;
-			}
 
 			// POSIX: kill only the process group created by this detached spawn
 			// (pgid === pid). Never fall back to a broad process scan or -1.

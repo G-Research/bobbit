@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { spawnTracked } from "../../src/server/agent/spawn-tree.js";
 
 type NativeSpawn = typeof import("node:child_process").spawn;
 
@@ -49,6 +51,10 @@ assert.equal(alive, false, "SIGTERM-ignoring grandchild must be reaped by the ow
 console.log("process-tree-cleanup-ok");
 `;
 
+function fakeChild(pid: number): ChildProcess {
+	return Object.assign(new EventEmitter(), { pid }) as unknown as ChildProcess;
+}
+
 function runProbe(): Promise<{ stdout: string; stderr: string; code: number | null }> {
 	const state = (process as NodeJS.Process & { [SPAWN_GUARD_STATE]?: GuardState })[SPAWN_GUARD_STATE];
 	const nativeSpawn = state?.originals?.spawn;
@@ -82,5 +88,55 @@ describe("spawnTracked timeout cleanup", () => {
 		const result = await runProbe();
 		expect(result.code, result.stderr).toBe(0);
 		expect(result.stdout).toContain("process-tree-cleanup-ok");
+	});
+
+	it("Windows cleanup joins one taskkill and never retargets a closed or completed root", async () => {
+		const root = fakeChild(2_147_483_647);
+		const taskkill = fakeChild(2_147_483_646);
+		const calls: Array<{ cmd: string; args: string[] }> = [];
+		const spawnImpl = ((cmd: string, args: string[]) => {
+			calls.push({ cmd, args });
+			return calls.length === 1 ? root : taskkill;
+		}) as unknown as NativeSpawn;
+		const tracked = spawnTracked("node", ["worker"], { platform: "win32", spawnImpl });
+
+		tracked.killTree();
+		tracked.killTree("SIGKILL");
+		const completion = tracked.waitForTreeExit(1_000);
+		let settled = false;
+		void completion.then(() => { settled = true; });
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		expect(calls).toEqual([
+			{ cmd: "node", args: ["worker"] },
+			{ cmd: "taskkill", args: ["/T", "/F", "/PID", "2147483647"] },
+		]);
+
+		taskkill.emit("close", 0, null);
+		expect(await completion).toBe(true);
+
+		// Retain the resolved cleanup promise even while the root close event has
+		// not arrived: completed cleanup must not restart taskkill.
+		tracked.killTree();
+		expect(calls).toHaveLength(2);
+
+		// A late root close likewise cannot make a reused PID targetable.
+		root.emit("close", 0, null);
+		tracked.killTree();
+		expect(calls).toHaveLength(2);
+	});
+
+	it("Windows never starts taskkill once the tracked root has closed", () => {
+		const root = fakeChild(2_147_483_647);
+		const calls: Array<{ cmd: string; args: string[] }> = [];
+		const spawnImpl = ((cmd: string, args: string[]) => {
+			calls.push({ cmd, args });
+			return root;
+		}) as unknown as NativeSpawn;
+		const tracked = spawnTracked("node", ["worker"], { platform: "win32", spawnImpl });
+
+		root.emit("close", 0, null);
+		tracked.killTree();
+		expect(calls).toEqual([{ cmd: "node", args: ["worker"] }]);
 	});
 });
