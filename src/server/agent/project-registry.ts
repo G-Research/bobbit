@@ -122,25 +122,50 @@ export function detectSymlinkRoot(
   return { symlink: false };
 }
 
+type ProjectPathApi = typeof path.posix;
+
+function isWindowsProjectPath(rootPath: string): boolean {
+  // Use the input dialect rather than the host OS so persisted projects can be
+  // compared deterministically in cross-platform tests and migrations.
+  return /^[a-z]:[\\/]/i.test(rootPath) || /^[\\/]{2}/.test(rootPath);
+}
+
+function projectPathApi(rootPath: string): ProjectPathApi {
+  return isWindowsProjectPath(rootPath) ? path.win32 : path.posix;
+}
+
+function isNativeProjectPathApi(pathApi: ProjectPathApi): boolean {
+  return process.platform === "win32" ? pathApi === path.win32 : pathApi === path.posix;
+}
+
+function normalizeProjectPath(value: string, pathApi: ProjectPathApi): string {
+  const resolved = pathApi.resolve(value);
+  const root = pathApi.parse(resolved).root;
+  const isRoot = pathApi.normalize(resolved) === pathApi.normalize(root);
+  const normalized = (isRoot ? root : resolved.replace(/[\\/]+$/, "")).replace(/\\/g, "/");
+  return pathApi === path.win32 ? normalized.toLowerCase() : normalized;
+}
+
 function canonicalProjectPath(rootPath: string): string {
-  const resolved = path.resolve(rootPath);
+  const pathApi = projectPathApi(rootPath);
+  const resolved = pathApi.resolve(rootPath);
+  // Do not ask the host filesystem to resolve a foreign path dialect. Its
+  // lexical identity is still useful for comparing persisted paths, and this
+  // keeps drive and UNC roots from becoming host-relative paths on POSIX.
+  if (!isNativeProjectPathApi(pathApi)) return normalizeProjectPath(resolved, pathApi);
+
   // Keep a nonexistent suffix lexical, but canonicalize the longest existing
   // prefix so temp-root aliases (/var vs /private/var) have one identity.
   let existing = resolved;
   const suffix: string[] = [];
   while (true) {
     try {
-      const canonical = path.resolve(fs.realpathSync(existing));
-      const combined = path.join(canonical, ...suffix.reverse());
-      const normalized = combined.replace(/\\/g, "/").replace(/\/+$/, "");
-      return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+      const canonical = pathApi.resolve(fs.realpathSync(existing));
+      return normalizeProjectPath(pathApi.join(canonical, ...suffix.reverse()), pathApi);
     } catch {
-      const parent = path.dirname(existing);
-      if (parent === existing) {
-        const normalized = resolved.replace(/\\/g, "/").replace(/\/+$/, "");
-        return process.platform === "win32" ? normalized.toLowerCase() : normalized;
-      }
-      suffix.push(path.basename(existing));
+      const parent = pathApi.dirname(existing);
+      if (parent === existing) return normalizeProjectPath(resolved, pathApi);
+      suffix.push(pathApi.basename(existing));
       existing = parent;
     }
   }
@@ -524,14 +549,20 @@ export class ProjectRegistry {
    * duplicate-path guard for `register()` and must match exactly what the
    * caller passed. */
   findByCwd(cwd: string): RegisteredProject | undefined {
+    const cwdPathApi = projectPathApi(cwd);
     const normalized = canonicalProjectPath(cwd);
     let best: RegisteredProject | undefined;
     let bestLen = 0;
     for (const p of this.projects.values()) {
       if (p.hidden) continue;
+      const rootPathApi = projectPathApi(p.rootPath);
+      // Different dialects cannot contain one another. This also ensures the
+      // relative comparison uses win32 semantics for drive and UNC projects on
+      // every host.
+      if (rootPathApi !== cwdPathApi) continue;
       const root = canonicalProjectPath(p.rootPath);
-      const relative = path.relative(root, normalized);
-      if ((relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))) && root.length > bestLen) {
+      const relative = rootPathApi.relative(root, normalized);
+      if ((relative === "" || (!relative.startsWith(`..${rootPathApi.sep}`) && relative !== ".." && !rootPathApi.isAbsolute(relative))) && root.length > bestLen) {
         best = p;
         bestLen = root.length;
       }

@@ -1756,6 +1756,15 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/core/project-registry-root-paths.test.ts",
+      "reason": "Host-independent regression coverage for project-root matching that preserves POSIX, Windows drive, and UNC roots instead of collapsing them while canonicalizing paths.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [
