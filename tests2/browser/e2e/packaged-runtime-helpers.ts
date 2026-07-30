@@ -130,7 +130,7 @@ function displayCommand(command: string, args: readonly string[]): string {
 	return [command, ...args].map(value => /\s/.test(value) ? JSON.stringify(value) : value).join(" ");
 }
 
-function killTree(child: ChildProcess): void {
+function killTree(child: ChildProcess, signal: NodeJS.Signals = "SIGTERM"): void {
 	if (!child.pid) return;
 	if (process.platform === "win32") {
 		spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
@@ -139,7 +139,9 @@ function killTree(child: ChildProcess): void {
 		});
 		return;
 	}
-	try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+	try { process.kill(-child.pid, signal); } catch {
+		try { child.kill(signal); } catch { /* process already exited */ }
+	}
 }
 
 export function runCommand(
@@ -326,15 +328,53 @@ export async function waitForHealth(baseUrl: string, runtime: RunningCli, timeou
 	throw new Error(`packaged CLI health timed out: ${lastError}\nstdout:\n${runtime.stdout.join("")}\nstderr:\n${runtime.stderr.join("")}`);
 }
 
-export async function stopPackagedCli(runtime: RunningCli): Promise<void> {
-	if (runtime.child.exitCode !== null) return;
-	const closed = new Promise<void>(resolve => runtime.child.once("close", () => resolve()));
-	if (process.platform === "win32") killTree(runtime.child);
-	else {
-		try { process.kill(-runtime.child.pid!, "SIGTERM"); } catch { runtime.child.kill("SIGTERM"); }
+const PACKAGED_CLI_TERM_GRACE_MS = 1_000;
+const PACKAGED_CLI_FORCED_CLOSE_WAIT_MS = 8_000;
+
+function streamsAreClosed(child: ChildProcess): boolean {
+	return [child.stdin, child.stdout, child.stderr].every(stream => stream == null || stream.destroyed);
+}
+
+function awaitChildClose(child: ChildProcess): Promise<void> {
+	if (streamsAreClosed(child)) return Promise.resolve();
+	return new Promise(resolve => child.once("close", resolve));
+}
+
+async function closesWithin(closed: Promise<void>, timeoutMs: number): Promise<boolean> {
+	let timer: NodeJS.Timeout | undefined;
+	try {
+		return await Promise.race([
+			closed.then(() => true),
+			new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); }),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
 	}
-	await Promise.race([closed, new Promise<void>(resolve => setTimeout(resolve, 10_000))]);
-	if (runtime.child.exitCode === null) killTree(runtime.child);
+}
+
+function destroyChildStdio(child: ChildProcess): void {
+	for (const stream of [child.stdin, child.stdout, child.stderr]) {
+		try { stream?.destroy(); } catch { /* best-effort final containment */ }
+	}
+}
+
+export async function stopPackagedCli(runtime: RunningCli): Promise<void> {
+	const child = runtime.child;
+	const closed = awaitChildClose(child);
+	if (await closesWithin(closed, 0)) return;
+
+	// POSIX children are detached process-group leaders. Give the whole group a
+	// short graceful shutdown window, then kill the same group unconditionally.
+	// On Windows taskkill /T /F remains the forceful tree-kill mechanism.
+	killTree(child, "SIGTERM");
+	if (await closesWithin(closed, PACKAGED_CLI_TERM_GRACE_MS)) return;
+	if (process.platform !== "win32") killTree(child, "SIGKILL");
+	if (await closesWithin(closed, PACKAGED_CLI_FORCED_CLOSE_WAIT_MS)) return;
+
+	// A descendant can retain an inherited pipe after its parent has exited.
+	// Destroying our pipe handles is the final bounded containment step so they
+	// cannot keep the Playwright worker's event loop alive.
+	destroyChildStdio(child);
 }
 
 export async function readToken(secretsDir: string): Promise<string> {

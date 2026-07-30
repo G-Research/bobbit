@@ -1,4 +1,6 @@
 import { test, expect, type Page, type TestInfo } from "@playwright/test";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -178,6 +180,27 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 	// A retry repeats npm pack + a clean dependency install and can hide a real
 	// packaging regression behind a second independently-built consumer.
 	test.describe.configure({ retries: 0 });
+
+	test("teardown escalates an unresponsive packaged runtime without leaking its pipes", async () => {
+		const child = spawn(process.execPath, ["-e", process.platform === "win32"
+			? "console.log('ready'); setInterval(() => {}, 1_000);"
+			: "process.on('SIGTERM', () => {}); console.log('ready'); setInterval(() => {}, 1_000);"], {
+			detached: process.platform !== "win32",
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		await once(child.stdout!, "data");
+
+		const startedAt = Date.now();
+		await stopPackagedCli({ child, stdout: [], stderr: [] });
+		const elapsedMs = Date.now() - startedAt;
+
+		if (process.platform !== "win32") expect(child.signalCode).toBe("SIGKILL");
+		expect(child.exitCode ?? child.signalCode).not.toBeNull();
+		expect(child.stdout?.destroyed, "teardown must release inherited stdout").toBe(true);
+		expect(child.stderr?.destroyed, "teardown must release inherited stderr").toBe(true);
+		expect(elapsedMs, "teardown must remain bounded after escalation").toBeLessThan(10_000);
+	});
 
 	test("clean consumer serves dist UI and executes the bundled canonical theme bridge", async ({ page }, testInfo) => {
 		test.setTimeout(15 * 60_000);
