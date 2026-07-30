@@ -15,7 +15,16 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 
-import { getProjectRoot, resetAgentDirStateForTests, setProjectRoot } from "../../src/server/bobbit-dir.js";
+import {
+	bobbitStateDir,
+	getAgentDirState,
+	getProjectRoot,
+	initializeAgentDirRuntime,
+	resetAgentDirStateForTests,
+	setProjectRoot,
+	type AgentDirRuntimeState,
+} from "../../src/server/bobbit-dir.js";
+import { initAuthorSidecarDir } from "../../src/server/agent/author-sidecar.js";
 import { realClock, realCommandRunner, realFs, type GatewayDeps } from "../../src/server/gateway-deps.js";
 import { scaffoldBobbitDir } from "../../src/server/scaffold.js";
 import { createGateway } from "../../src/server/server.js";
@@ -35,17 +44,46 @@ const ENV_KEYS = [
 	"BOBBIT_LLM_REVIEW_SKIP",
 	"NODE_ENV",
 ] as const;
-const envSnapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]])) as Record<(typeof ENV_KEYS)[number], string | undefined>;
-const projectRootSnapshot = getProjectRoot();
+interface ProcessStateSnapshot {
+	env: Record<(typeof ENV_KEYS)[number], string | undefined>;
+	projectRoot: string;
+	agentDirState?: AgentDirRuntimeState;
+}
 
-function restoreProcessState(): void {
+function captureProcessState(): ProcessStateSnapshot {
+	let agentDirState: AgentDirRuntimeState | undefined;
+	try { agentDirState = getAgentDirState(); } catch { /* not initialized before the fork gateway boots */ }
+	return {
+		env: Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]])) as ProcessStateSnapshot["env"],
+		projectRoot: getProjectRoot(),
+		...(agentDirState ? { agentDirState } : {}),
+	};
+}
+
+function restoreProcessState(snapshot: ProcessStateSnapshot): void {
 	for (const key of ENV_KEYS) {
-		const previous = envSnapshot[key];
+		const previous = snapshot.env[key];
 		if (previous === undefined) delete process.env[key];
 		else process.env[key] = previous;
 	}
-	setProjectRoot(projectRootSnapshot);
+	setProjectRoot(snapshot.projectRoot);
 	resetAgentDirStateForTests();
+	if (snapshot.agentDirState) {
+		initializeAgentDirRuntime({
+			env: process.env,
+			projectRoot: snapshot.agentDirState.startup.projectRoot,
+			stateDir: bobbitStateDir(snapshot.agentDirState.startup.projectRoot),
+			persisted: snapshot.agentDirState.persisted,
+		});
+	}
+
+	// createGateway also repoints this fork-global cache. Restore the already
+	// running v2 harness before the temporary gateway root is removed.
+	const restoredRoot = snapshot.env.BOBBIT_DIR;
+	const restoredSecretsDir = snapshot.env.BOBBIT_SECRETS_DIR;
+	if (restoredRoot && restoredSecretsDir && existsSync(join(restoredRoot, "state"))) {
+		initAuthorSidecarDir(join(restoredRoot, "state"), { secretsDir: restoredSecretsDir });
+	}
 }
 
 interface RunningGateway {
@@ -104,6 +142,7 @@ function writeStaticFixture(staticDir: string): string {
 }
 
 async function bootGateway(basePath: string): Promise<RunningGateway> {
+	const processState = captureProcessState();
 	let root = mkdtempSync(join(tmpdir(), "bobbit-base-path-gateway-"));
 	try { root = realpathSync(root); } catch { /* platform edge */ }
 	const stateDir = join(root, "state");
@@ -157,7 +196,7 @@ async function bootGateway(basePath: string): Promise<RunningGateway> {
 			finally {
 				// createGateway resolves these process-wide values during startup. Restore
 				// every one before deleting the directories they previously referenced.
-				restoreProcessState();
+				restoreProcessState(processState);
 				rmSync(root, { recursive: true, force: true });
 			}
 		},
