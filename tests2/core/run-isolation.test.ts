@@ -1,5 +1,6 @@
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, win32 } from "node:path";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, relative, win32 } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	capturePlaywrightBrowserRegistry,
@@ -22,6 +23,8 @@ import {
 	RUN_ROOT_ENV,
 	RUN_ROOT_OWNER_ENV,
 } from "../harness/run-isolation.js";
+import { createE2ERunPaths } from "../../scripts/run-playwright-e2e.mjs";
+import { packedConsumerTempPrefix } from "../../scripts/release-packed-consumer-audit.mjs";
 
 const baselineEnv = { ...process.env };
 
@@ -139,6 +142,24 @@ describe("workflow run isolation", () => {
 		expect(existsSync(root)).toBe(true);
 	});
 
+	it("allocates a canonical legacy E2E coordinator root and confines its packed-consumer child", () => {
+		const temp = mkdtempSync(join(tmpdir(), "legacy-e2e-isolation-"));
+		try {
+			const first = createE2ERunPaths(temp);
+			const second = createE2ERunPaths(temp);
+			const canonicalTemp = realpathSync(temp);
+			expect(first.root).not.toBe(second.root);
+			expect(relative(canonicalTemp, first.root)).toMatch(/^bobbit-v2-run-/);
+			expect(first.runId).toBe(first.root.split(/[\\/]/).pop());
+			expect(first.cacheRoot).toBe(join(first.root, "pwtest-transform-cache"));
+			expect(packedConsumerTempPrefix({ BOBBIT_V2_RUN_ROOT: first.root })).toBe(
+				join(first.root, "bobbit-release-packed-audit-"),
+			);
+		} finally {
+			rmSync(temp, { recursive: true, force: true });
+		}
+	});
+
 	it("keeps Playwright's browser registry outside the isolated home", () => {
 		delete process.env[PLAYWRIGHT_BROWSERS_PATH_ENV];
 		const hostHome = join(getRunRoot(), "playwright-host-home");
@@ -179,14 +200,32 @@ describe("workflow run isolation", () => {
 	});
 
 	it("keeps workflow harnesses free of fixed ports, timestamp-only roots, and unowned cleanup", () => {
-		for (const file of ["tests2/harness/gateway.ts", "tests/e2e/in-process-harness.ts", "tests/e2e/gateway-harness.ts"]) {
+		for (const file of ["tests2/harness/gateway.ts", "tests/e2e/in-process-harness.ts", "tests/e2e/gateway-harness.ts", "tests/e2e/in-process-harness-realpush.ts"]) {
 			const source = readFileSync(file, "utf8");
 			expect(source, file).not.toMatch(/port:\s*(?!0\b)\d+/);
 			expect(source, file).not.toMatch(/join\([^\n]*Date\.now\(\)/);
 		}
-		for (const file of ["tests/e2e/in-process-harness.ts", "tests/e2e/gateway-harness.ts"]) {
+		for (const file of ["tests/e2e/in-process-harness.ts", "tests/e2e/gateway-harness.ts", "tests/e2e/in-process-harness-realpush.ts"]) {
 			const source = readFileSync(file, "utf8");
 			expect(source, file).not.toContain('join(tmpdir(), "bobbit-e2e")');
 		}
+	});
+
+	it("routes legacy E2E teardown and Docker cleanup by coordinator run identity", () => {
+		const runner = readFileSync("scripts/run-playwright-e2e.mjs", "utf8");
+		const realpush = readFileSync("tests/e2e/in-process-harness-realpush.ts", "utf8");
+		const teardown = readFileSync("tests/e2e/e2e-teardown.ts", "utf8");
+		const sandbox = readFileSync("src/server/agent/project-sandbox.ts", "utf8");
+		const audit = readFileSync("scripts/release-packed-consumer-audit.mjs", "utf8");
+		expect(runner).toContain("createE2ERunPaths");
+		expect(runner).toContain("BOBBIT_V2_RUN_ROOT");
+		expect(runner).toContain("BOBBIT_E2E_RUN_ID");
+		expect(realpush).toContain("installRunIsolation()");
+		expect(realpush).toContain("createRunChild(`e2e-realpush-");
+		expect(teardown).toContain("label=bobbit-e2e-run=${runId}");
+		expect(teardown).not.toContain("readdirSync");
+		expect(sandbox).toContain('"bobbit-e2e-run": e2eRunId');
+		expect(sandbox).toContain("_findContainerByLabel(label, e2eRunId)");
+		expect(audit).toContain("packedConsumerTempPrefix");
 	});
 });

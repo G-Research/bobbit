@@ -859,9 +859,11 @@ export class ProjectSandbox {
 	private async _initContainer(): Promise<void> {
 		const { projectId, image } = this.options;
 		const label = `bobbit-project=${projectId}`;
+		const e2eRunId = process.env.BOBBIT_E2E_RUN_ID?.trim();
 
-		// 1. Find existing container by label
-		const existingId = await this._findContainerByLabel(label);
+		// 1. Find an existing container only within this test coordinator. A
+		// matching project ID from a sibling E2E run must never be reattached.
+		const existingId = await this._findContainerByLabel(label, e2eRunId);
 
 		if (existingId) {
 			// Docker bind mounts are immutable. If Bobbit restarted with a new
@@ -997,12 +999,14 @@ export class ProjectSandbox {
 		addMount(this.options.cloneSource);
 		for (const src of Object.values(this.options.cloneSourceByName ?? {})) addMount(src);
 
+		const e2eRunId = process.env.BOBBIT_E2E_RUN_ID?.trim();
 		const dockerArgs = buildDockerRunArgs({
 			image,
 			workspaceDir: "", // unused for /workspace — named volume instead
 			projectMarketPacksRoot: path.join(this.options.projectDir, ".bobbit", "config", "market-packs"),
 			label: projectId,
 			labelPrefix: "bobbit-project",
+			additionalLabels: e2eRunId ? { "bobbit-e2e-run": e2eRunId } : undefined,
 			projectId,
 			stateDir,
 			memoryLimit: `${totalMemGB}g`,
@@ -1269,13 +1273,15 @@ export class ProjectSandbox {
 		}
 	}
 
-	private async _findContainerByLabel(label: string): Promise<string | null> {
+	private async _findContainerByLabel(label: string, e2eRunId?: string): Promise<string | null> {
 		try {
-			const { stdout } = await this.execDocker([
+			const args = [
 				"ps", "-a",
 				"--filter", `label=${label}`,
-				"--format", "{{.ID}}",
-			], {
+			];
+			if (e2eRunId) args.push("--filter", `label=bobbit-e2e-run=${e2eRunId}`);
+			args.push("--format", "{{.ID}}");
+			const { stdout } = await this.execDocker(args, {
 				timeout: 10_000,
 				env: DOCKER_ENV,
 			});

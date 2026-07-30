@@ -1,135 +1,48 @@
 /**
- * Global teardown: remove ephemeral state directories and Docker containers
- * created for this test run. Shared temp-root cleanup is best-effort only and
- * skips live worker-owned dirs from overlapping E2E runs.
- * Handles both legacy `.e2e-bobbit-*` dirs and per-worker `.e2e-worker-*` dirs.
+ * Legacy E2E global teardown.
+ *
+ * The wrapper owns and removes its canonical BOBBIT_V2_RUN_ROOT after
+ * Playwright exits. This process may only clean Docker resources carrying this
+ * coordinator's opaque run label; it must never sweep shared temp roots,
+ * checkout directories, or another coordinator's containers and volumes.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, rmSync, readdirSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
-function harnessOwnerPid(entry: string): number | undefined {
-	const match = /^\.e2e-(?:inproc|browser)-(\d+)-\d+-\d+$/.exec(entry);
-	if (!match) return undefined;
-	const pid = Number(match[1]);
-	return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
-}
-
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (err) {
-		return (err as { code?: string })?.code === "EPERM";
-	}
-}
-
-function removeIfOwnerExited(tmpRoot: string, entry: string): void {
-	const ownerPid = harnessOwnerPid(entry);
-	// Modern harness dirs include their worker PID. Unknown legacy shapes are not
-	// safe to sweep from a shared temp root because they may belong to another run.
-	if (!ownerPid || isProcessAlive(ownerPid)) return;
-	try { rmSync(join(tmpRoot, entry), { recursive: true, force: true }); } catch {}
+function currentRunId(): string | undefined {
+	const runId = process.env.BOBBIT_E2E_RUN_ID?.trim();
+	return runId && /^[A-Za-z0-9._-]+$/.test(runId) ? runId : undefined;
 }
 
 export default function globalTeardown() {
-	// Legacy: single shared dir from config env
-	const bobbitDir = process.env.BOBBIT_DIR;
-	if (bobbitDir && (bobbitDir.includes(".e2e-bobbit-") || bobbitDir.includes(".e2e-fullstack-"))) {
-		try { rmSync(bobbitDir, { recursive: true, force: true }); } catch {}
-	}
-
-	// Per-worker dirs created by gateway-harness.ts (legacy path: project root)
-	const projectRoot = join(import.meta.dirname, "..", "..");
-	try {
-		for (const entry of readdirSync(projectRoot)) {
-			if (entry.startsWith(".e2e-worker-")) {
-				try { rmSync(join(projectRoot, entry), { recursive: true, force: true }); } catch {}
-			}
-		}
-	} catch {}
-
-	// Current worker dirs live under E2E_TEMP_ROOT/.e2e-{inproc,browser}-*.
-	// This temp root is shared by overlapping worktrees/runs, so global teardown
-	// must never delete a directory whose owning worker process is still alive.
-	// Worker fixtures remove their own dirs first; this is only a best-effort
-	// stale/deferred cleanup for exited workers.
-	const tmpRoot = existsSync("/.dockerenv")
-		? "/tmp"
-		: process.platform === "win32"
-			? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
-			: join(tmpdir(), "bobbit-e2e");
-	if (existsSync(tmpRoot)) {
-		try {
-			for (const entry of readdirSync(tmpRoot)) {
-				if (entry.startsWith(".e2e-inproc-") || entry.startsWith(".e2e-browser-")) {
-					removeIfOwnerExited(tmpRoot, entry);
-				}
-			}
-		} catch {}
-	}
-
-	// Legacy cleanup for V8 compile-cache dirs from older harness versions.
-	const cacheRoot = process.env.BOBBIT_E2E_V8CACHE_ROOT;
-	if (cacheRoot && cacheRoot.includes("bobbit-e2e-v8cache")) {
-		try { rmSync(cacheRoot, { recursive: true, force: true }); } catch {}
-	}
-
-	// Per-run Playwright transform cache from scripts/run-playwright-e2e.mjs or
-	// the direct-npx fallback in playwright-e2e.config.ts. The default Windows
-	// location is shared across worktrees; these managed dirs are isolated and
-	// safe to remove once the run has ended.
-	const pwtestCacheDir = process.env.BOBBIT_E2E_PWTEST_CACHE_DIR;
-	if (
-		process.env.BOBBIT_KEEP_PWTEST_CACHE !== "1" &&
-		process.env.BOBBIT_E2E_PWTEST_CACHE_OWNED === "1" &&
-		pwtestCacheDir &&
-		pwtestCacheDir.includes("pwtest-transform-cache")
-	) {
-		try { rmSync(pwtestCacheDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch {}
-	}
-
-	// Clean up Docker containers created by E2E sandbox tests.
-	// These are labeled `bobbit-project=<uuid>` and bound to temp dirs.
-	cleanTestDockerContainers();
+	cleanOwnedDockerResources(currentRunId());
 }
 
-/**
- * Remove Docker containers and volumes whose bind-mounts reference E2E or
- * manual-test temp directories. Skips the live project sandbox.
- */
-function cleanTestDockerContainers() {
+/** Remove only Docker containers and volumes explicitly stamped by this run. */
+function cleanOwnedDockerResources(runId: string | undefined): void {
+	if (!runId) return;
 	try {
 		const ids = execFileSync("docker", [
-			"ps", "-aq", "--filter", "label=bobbit-project",
+			"ps", "-aq", "--filter", `label=bobbit-e2e-run=${runId}`,
 		], { encoding: "utf-8", timeout: 10_000, stdio: ["pipe", "pipe", "pipe"] }).trim();
 		if (!ids) return;
 
 		for (const id of ids.split(/\s+/).filter(Boolean)) {
 			try {
-				const binds = execFileSync("docker", [
-					"inspect", "--format", "{{json .HostConfig.Binds}}", id,
+				const projectId = execFileSync("docker", [
+					"inspect", "--format", '{{index .Config.Labels "bobbit-project"}}', id,
 				], { encoding: "utf-8", timeout: 5_000 }).trim();
-				// Only remove containers bound to test temp dirs
-				if (/\.e2e-worker-|\.e2e-bobbit-|\.e2e-fullstack-|\.e2e-inproc-|\.e2e-resilience-|\.bobbit-manual/.test(binds)) {
-					const projectId = execFileSync("docker", [
-						"inspect", "--format", '{{index .Config.Labels "bobbit-project"}}', id,
-					], { encoding: "utf-8", timeout: 5_000 }).trim();
-
-					execFileSync("docker", ["rm", "-f", id], { timeout: 15_000, stdio: "ignore" });
-
-					if (projectId) {
-						for (const prefix of ["bobbit-workspace-", "bobbit-worktrees-"]) {
-							try {
-								execFileSync("docker", ["volume", "rm", "-f", `${prefix}${projectId}`], {
-									timeout: 10_000, stdio: "ignore",
-								});
-							} catch {}
-						}
+				execFileSync("docker", ["rm", "-f", id], { timeout: 15_000, stdio: "ignore" });
+				if (projectId) {
+					for (const prefix of ["bobbit-workspace-", "bobbit-worktrees-"]) {
+						try {
+							execFileSync("docker", ["volume", "rm", "-f", `${prefix}${projectId}`], {
+								timeout: 10_000,
+								stdio: "ignore",
+							});
+						} catch { /* volume may already be gone */ }
 					}
 				}
-			} catch {}
+			} catch { /* continue with other owned containers */ }
 		}
-	} catch { /* docker not available — skip silently */ }
+	} catch { /* Docker unavailable — no cleanup required */ }
 }

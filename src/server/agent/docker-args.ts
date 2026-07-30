@@ -59,6 +59,8 @@ export interface DockerRunConfig {
 	labelPrefix?: string;
 	/** Worktree path label for sandbox-pool containers. */
 	worktreePath?: string;
+	/** Additional internally supplied ownership labels. */
+	additionalLabels?: Record<string, string>;
 
 	// ── Per-project container ────────────────────────────────────────────
 	/** Project ID — when set, uses a named Docker volume instead of bind mount for /workspace. */
@@ -126,7 +128,7 @@ export interface DockerRunConfig {
 export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: CommandRunner = realCommandRunner): string[] {
 	const {
 		image, workspaceDir,
-		label, labelVersion, labelPrefix, worktreePath,
+		label, labelVersion, labelPrefix, worktreePath, additionalLabels,
 		projectId, stateDir, sessionId,
 		sandboxMounts, sandboxCredentials,
 		sandboxNetwork,
@@ -167,6 +169,9 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 		if (worktreePath) {
 			args.push("--label", `${labelPrefix}-wt=${worktreePath}`);
 		}
+	}
+	for (const [key, value] of Object.entries(additionalLabels ?? {})) {
+		if (key && value) args.push("--label", `${key}=${value}`);
 	}
 
 	// ── Bind mounts / volumes ──────────────────────────────────────────

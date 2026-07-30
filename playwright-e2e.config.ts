@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join } from "node:path";
 import { capturePlaywrightBrowserRegistry } from "./tests2/harness/run-isolation.js";
+import { getRunRoot } from "./tests2/harness/run-isolation.js";
 
 // Config evaluation precedes isolated E2E worker imports. Preserve the host
 // browser registry before their harness redirects HOME for Bobbit discovery.
@@ -18,25 +18,6 @@ capturePlaywrightBrowserRegistry();
  *
  * Global setup ensures both server and UI are built (builds only what's missing).
  */
-function e2eTempRoot(): string {
-	if (existsSync("/.dockerenv")) return "/tmp";
-	return process.platform === "win32"
-		? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
-		: join(tmpdir(), "bobbit-e2e");
-}
-
-function sanitizeCacheSegment(value: string): string {
-	return value.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 80) || "run";
-}
-
-function e2ePwtestCacheBaseRoot(): string {
-	// Canonical external override. BOBBIT_PWTEST_CACHE_ROOT is a legacy alias
-	// accepted for older local wrappers.
-	return process.env.BOBBIT_E2E_PWTEST_CACHE_ROOT?.trim()
-		|| process.env.BOBBIT_PWTEST_CACHE_ROOT?.trim()
-		|| e2eTempRoot();
-}
-
 function prepareE2ERuntimeCaches(): void {
 	// Must run in the Playwright config process before test workers spawn.
 	// A host-level NODE_COMPILE_CACHE caused false ESM "missing export" errors
@@ -49,12 +30,11 @@ function prepareE2ERuntimeCaches(): void {
 	// fallback protects direct `npx playwright ... --config playwright-e2e.config.ts`
 	// runs before worker startup, even though the runner process may already have
 	// loaded Playwright's default transform-cache module while loading this config.
+	const runRoot = getRunRoot();
+	process.env.BOBBIT_E2E_RUN_ID ||= basename(runRoot);
+	process.env.BOBBIT_E2E_TMP_ROOT ||= runRoot;
 	if (!process.env.PWTEST_CACHE_DIR) {
-		const runId = sanitizeCacheSegment(
-			process.env.BOBBIT_E2E_RUN_ID?.trim()
-				|| `direct-${new Date().toISOString().replace(/[:.]/g, "-")}-${process.pid}`,
-		);
-		const runCacheRoot = join(resolve(e2ePwtestCacheBaseRoot()), "pwtest-transform-cache", runId);
+		const runCacheRoot = join(runRoot, "pwtest-transform-cache");
 		process.env.BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT = runCacheRoot;
 		process.env.PWTEST_CACHE_DIR = runCacheRoot;
 		process.env.BOBBIT_E2E_PWTEST_CACHE_OWNED = "1";
@@ -62,8 +42,10 @@ function prepareE2ERuntimeCaches(): void {
 	const transformCacheDir = process.env.PWTEST_CACHE_DIR!;
 	const runCacheRoot = process.env.BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT?.trim() || transformCacheDir;
 	process.env.BOBBIT_E2E_PWTEST_CACHE_DIR = runCacheRoot;
+	const secretsDir = process.env.BOBBIT_SECRETS_DIR ||= join(runRoot, "e2e-server-secrets");
 	mkdirSync(runCacheRoot, { recursive: true });
 	mkdirSync(transformCacheDir, { recursive: true });
+	mkdirSync(secretsDir, { recursive: true });
 }
 
 prepareE2ERuntimeCaches();
