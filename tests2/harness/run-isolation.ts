@@ -71,8 +71,12 @@ export const CREDENTIAL_ENV_PATTERN = new RegExp(
 );
 
 /** True for known host credentials and provider auth/config inputs. */
-export function isCredentialEnvKey(key: string): boolean {
-	return CREDENTIAL_ENV_EXACT_NAMES.has(key) || CREDENTIAL_ENV_PATTERN.test(key);
+export function isCredentialEnvKey(key: string, platform: NodeJS.Platform = process.platform): boolean {
+	// process.env is case-insensitive on Windows, but Object.keys() preserves
+	// inherited spelling. Normalize before matching so a lower-case credential
+	// cannot survive a host-environment scrub.
+	const normalized = platform === "win32" ? key.toUpperCase() : key;
+	return CREDENTIAL_ENV_EXACT_NAMES.has(normalized) || CREDENTIAL_ENV_PATTERN.test(normalized);
 }
 
 export interface PathContainmentApi {
@@ -206,6 +210,10 @@ export function capturePlaywrightBrowserRegistry(): string {
 export function installRunIsolation(): string {
 	const root = getRunRoot();
 	const home = canonicalDirectory(path.join(root, "home"));
+	const temp = canonicalDirectory(path.join(root, "tmp"));
+	process.env.TMPDIR = temp;
+	process.env.TEMP = temp;
+	process.env.TMP = temp;
 	process.env.HOME = home;
 	process.env.USERPROFILE = home;
 	process.env.BOBBIT_DIR = canonicalDirectory(path.join(root, "bobbit"));

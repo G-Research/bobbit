@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, win32 } from "node:path";
@@ -23,7 +24,7 @@ import {
 	RUN_ROOT_ENV,
 	RUN_ROOT_OWNER_ENV,
 } from "../harness/run-isolation.js";
-import { createE2ERunPaths, createIsolatedE2EEnvironment } from "../../scripts/run-playwright-e2e.mjs";
+import { createE2ERunPaths, createIsolatedE2EEnvironment, isE2ECredentialEnvKey } from "../../scripts/run-playwright-e2e.mjs";
 import { currentRunId, ownedE2EVolumeNames } from "../../tests/e2e/e2e-teardown.js";
 import { packedConsumerTempPrefix } from "../../scripts/release-packed-consumer-audit.mjs";
 
@@ -88,7 +89,7 @@ describe("workflow run isolation", () => {
 	it("redirects every host configuration root to the run root", () => {
 		const root = installRunIsolation();
 		for (const key of [
-			"HOME", "USERPROFILE", "BOBBIT_DIR", "BOBBIT_PI_DIR", "BOBBIT_AGENT_DIR", "PI_CODING_AGENT_DIR",
+			"TMPDIR", "TEMP", "TMP", "HOME", "USERPROFILE", "BOBBIT_DIR", "BOBBIT_PI_DIR", "BOBBIT_AGENT_DIR", "PI_CODING_AGENT_DIR",
 			"BOBBIT_SECRETS_DIR", "APPDATA", "LOCALAPPDATA", "XDG_STATE_HOME", "XDG_CONFIG_HOME",
 		]) {
 			const value = process.env[key];
@@ -143,6 +144,14 @@ describe("workflow run isolation", () => {
 		expect(existsSync(root)).toBe(true);
 	});
 
+	it("matches credential keys case-insensitively only under Windows semantics", () => {
+		for (const matchesCredential of [isCredentialEnvKey, isE2ECredentialEnvKey]) {
+			expect(matchesCredential("anthropic_api_key", "win32")).toBe(true);
+			expect(matchesCredential("bobbit_host_token", "win32")).toBe(true);
+			expect(matchesCredential("anthropic_api_key", "linux")).toBe(false);
+		}
+	});
+
 	it("allocates a canonical legacy E2E coordinator root and confines its packed-consumer child", () => {
 		const temp = mkdtempSync(join(tmpdir(), "legacy-e2e-isolation-"));
 		try {
@@ -169,20 +178,28 @@ describe("workflow run isolation", () => {
 			const env = createIsolatedE2EEnvironment(paths, {
 				HOME: join(temp, "host-home"),
 				USERPROFILE: join(temp, "host-profile"),
+				TMPDIR: join(temp, "host-tmpdir"),
+				TEMP: join(temp, "host-temp"),
+				TMP: join(temp, "host-tmp"),
+				tmpdir: join(temp, "host-tmpdir-lowercase"),
+				temp: join(temp, "host-temp-lowercase"),
+				tmp: join(temp, "host-tmp-lowercase"),
 				BOBBIT_DIR: join(temp, "host-bobbit"),
 				BOBBIT_SECRETS_DIR: join(temp, "host-secrets"),
 				APPDATA: join(temp, "host-appdata"),
 				XDG_CONFIG_HOME: join(temp, "host-xdg-config"),
-				PLAYWRIGHT_BROWSERS_PATH: browserRegistry,
+				playwright_browsers_path: browserRegistry,
+				anthropic_api_key: "fake-anthropic-lowercase",
+				openai_codex_auth: "fake-codex-lowercase",
 				ANTHROPIC_API_KEY: "fake-anthropic",
 				OPENAI_CODEX_AUTH: "fake-codex",
 				GOOGLE_APPLICATION_CREDENTIALS: "fake-google",
 				BOBBIT_TOKEN: "fake-bobbit-token",
 				PATH: "/safe/path",
-			});
+			}, "win32");
 
 			for (const key of [
-				"HOME", "USERPROFILE", "BOBBIT_DIR", "BOBBIT_PI_DIR", "BOBBIT_AGENT_DIR", "PI_CODING_AGENT_DIR",
+				"TMPDIR", "TEMP", "TMP", "HOME", "USERPROFILE", "BOBBIT_DIR", "BOBBIT_PI_DIR", "BOBBIT_AGENT_DIR", "PI_CODING_AGENT_DIR",
 				"BOBBIT_SECRETS_DIR", "APPDATA", "LOCALAPPDATA", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME",
 			]) {
 				expect(env[key], key).toBeTruthy();
@@ -191,8 +208,17 @@ describe("workflow run isolation", () => {
 			}
 			expect(env.PLAYWRIGHT_BROWSERS_PATH).toBe(browserRegistry);
 			expect(env.HOME).not.toBe(join(temp, "host-home"));
+			expect(env.TMPDIR).toBe(paths.tempDir);
+			expect(env.TEMP).toBe(paths.tempDir);
+			expect(env.TMP).toBe(paths.tempDir);
+			expect(env.tmpdir).toBeUndefined();
+			expect(env.temp).toBeUndefined();
+			expect(env.tmp).toBeUndefined();
+			expect(isOwnedRunChild(paths.root, execFileSync(process.execPath, ["-p", "require('node:os').tmpdir()"], { env, encoding: "utf8" }).trim())).toBe(true);
 			expect(env.ANTHROPIC_API_KEY).toBeUndefined();
 			expect(env.OPENAI_CODEX_AUTH).toBeUndefined();
+			expect(env.anthropic_api_key).toBeUndefined();
+			expect(env.openai_codex_auth).toBeUndefined();
 			expect(env.GOOGLE_APPLICATION_CREDENTIALS).toBeUndefined();
 			expect(env.BOBBIT_TOKEN).toBeUndefined();
 			expect(env.PATH).toBe("/safe/path");
