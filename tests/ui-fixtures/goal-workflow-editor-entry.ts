@@ -119,8 +119,8 @@ setRenderApp(doRender);
 localStorage.setItem("gateway.url", "http://fixture");
 localStorage.setItem("gateway.token", "fixture-token");
 
-(window as any).__loadGoalWorkflowFixture = async (workflow: FixtureWorkflow) => {
-	workflows = [clone(workflow)];
+(window as any).__loadGoalWorkflowFixture = async (workflow: FixtureWorkflow | null) => {
+	workflows = workflow ? [clone(workflow)] : [];
 	fetchLog = [];
 	state.projects = [{
 		id: PROJECT_ID,
@@ -134,7 +134,7 @@ localStorage.setItem("gateway.token", "fixture-token");
 	clearWorkflowPageState();
 	window.location.hash = "#/workflows";
 	await loadWorkflowPageData();
-	navigateToWorkflowEdit(workflow.id);
+	if (workflow) navigateToWorkflowEdit(workflow.id);
 	doRender();
 	await nextFrame();
 };

@@ -1,4 +1,4 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Locator, type Page } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
 import { buildBundle } from "../fixtures/build-bundle.js";
@@ -48,6 +48,37 @@ async function loadWorkflow(page: Page, workflow: FixtureWorkflow): Promise<void
 	await page.waitForFunction(() => (window as any).__goalWorkflowEditorReady === true, null, { timeout: 10_000 });
 	await page.evaluate((wf) => (window as any).__loadGoalWorkflowFixture(wf), workflow);
 	await expect(page.locator("input[placeholder='Workflow name']").first()).toHaveValue(workflow.name, { timeout: 10_000 });
+}
+
+async function loadNewWorkflowEditor(page: Page): Promise<void> {
+	await page.goto(`file://${SHELL.replace(/\\/g, "/")}`);
+	await page.addScriptTag({ path: BUNDLE });
+	await page.waitForFunction(() => (window as any).__goalWorkflowEditorReady === true, null, { timeout: 10_000 });
+	await page.evaluate(() => (window as any).__loadGoalWorkflowFixture(null));
+	await page.getByRole("button", { name: "create one by hand" }).click();
+	await expect(page.locator("input[placeholder='e.g. bug-fix']")).toBeVisible();
+}
+
+async function delayNextWorkflowCreate(page: Page): Promise<void> {
+	await page.evaluate(() => {
+		const originalFetch = window.fetch;
+		let release!: () => void;
+		const pending = new Promise<void>((resolve) => { release = resolve; });
+		let delayed = false;
+		(window as any).__releaseWorkflowCreate = release;
+		window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+			const response = await originalFetch(input, init);
+			if (!delayed && (init?.method || "GET").toUpperCase() === "POST") {
+				delayed = true;
+				await pending;
+			}
+			return response;
+		}) as typeof window.fetch;
+	});
+}
+
+function saveButton(page: Page): Locator {
+	return page.locator(".wf-nav-right button").last();
 }
 
 async function expandFirstGate(page: Page): Promise<void> {
@@ -182,5 +213,27 @@ test.describe("Goal/workflow editor fixture", () => {
 
 		const body = await lastPutBody(page);
 		expect(body.gates[0].verify.map((step: any) => step.phase ?? 0)).toEqual([0, 1]);
+	});
+
+	test("keeps a newer draft when a workflow create finishes", async ({ page }) => {
+		await loadNewWorkflowEditor(page);
+		await page.locator("input[placeholder='e.g. bug-fix']").fill("created-workflow");
+		const nameInput = page.locator("input[placeholder='Workflow name']");
+		await nameInput.fill("Submitted workflow");
+
+		await delayNextWorkflowCreate(page);
+		await saveButton(page).click();
+		await page.waitForFunction(() =>
+			(window as any).__goalWorkflowFetchLog().some((entry: any) => entry.method === "POST"),
+		);
+		await expect(saveButton(page)).toHaveText("Saving…");
+
+		await nameInput.fill("Newer unsaved draft");
+		await page.evaluate(() => (window as any).__releaseWorkflowCreate());
+
+		await expect(saveButton(page)).toHaveText("Save");
+		await expect(saveButton(page)).toBeEnabled();
+		await expect(nameInput).toHaveValue("Newer unsaved draft");
+		await expect(page.locator("input[placeholder='e.g. bug-fix']")).toBeDisabled();
 	});
 });

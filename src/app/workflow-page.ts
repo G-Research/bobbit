@@ -576,7 +576,19 @@ async function handleSave(): Promise<void> {
 		}, getConfigProjectId({ preserveHeadquarters: true }) || undefined);
 		if (result) {
 			workflows = await fetchWorkflowsScoped();
-			showEdit(result);
+			if (pageInstance.editRevision === submittedRevision) {
+				showEdit(result);
+			} else {
+				// Creation persisted the submitted snapshot, but the user kept
+				// editing while it was in flight. Bind the new workflow identity
+				// without replacing that newer draft.
+				pageInstance.selectedWorkflow = result;
+				pageInstance.isNew = false;
+				pageInstance.saving = false;
+				saveAttempted = false;
+				saveBlockedReason = null;
+				renderApp();
+			}
 			return;
 		}
 	} else if (pageInstance.selectedWorkflow) {
