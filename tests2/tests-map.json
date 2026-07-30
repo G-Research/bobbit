@@ -1738,6 +1738,15 @@
         "tier": "unit",
         "project": "dom"
       }
+    },
+    {
+      "path": "tests2/core/build-unit-gate-ci.test.ts",
+      "reason": "Structural CI qualification pin: validates YAML syntax plus main-only push/PR triggers, native Ubuntu/Windows/macOS coverage, the Ubuntu Node 26 qualifier, and an exact retry-free Vitest invocation so qualification cannot pass on retry-masked flakes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [

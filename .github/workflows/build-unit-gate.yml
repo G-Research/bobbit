@@ -2,9 +2,9 @@ name: Build & Unit Gate
 
 on:
   pull_request:
-    branches: [master]
+    branches: [main]
   push:
-    branches: [master]
+    branches: [main]
 
 permissions:
   contents: read
@@ -47,5 +47,5 @@ jobs:
       - name: Type-check
         run: npm run check
 
-      - name: Unit gate
-        run: npm run test:unit
+      - name: Unit gate (first attempt)
+        run: npm run test:unit -- --retry=0
