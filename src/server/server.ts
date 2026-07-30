@@ -3337,17 +3337,17 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				// shared across projects (Docker image tags) so the first project
 				// to request a sandbox pays the build cost.
 				const dockerContextRoot = resolveSandboxDockerContext(config.defaultCwd);
-				const imageStatus = await checkDockerAvailability(imageName, dockerContextRoot ?? undefined);
+				const imageStatus = await checkDockerAvailability(imageName, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
 				if (imageStatus.imageExists === false) {
 					if (!dockerContextRoot) {
 						throw new Error(`[sandbox] Docker image "${imageName}" is missing and docker/Dockerfile could not be found`);
 					}
-					const buildResult = await buildSandboxImage(imageName, dockerContextRoot);
+					const buildResult = await buildSandboxImage(imageName, dockerContextRoot, gatewayDeps.commandRunner);
 					if (!buildResult.success) {
 						throw new Error(`[sandbox] Auto-build failed for project ${projectId}: ${buildResult.error || "unknown error"}`);
 					}
 				} else if (imageStatus.imageExists === true) {
-					const imageReady = await ensureImageAgentVersion(imageName, dockerContextRoot ?? undefined);
+					const imageReady = await ensureImageAgentVersion(imageName, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
 					if (!imageReady) {
 						throw new Error(`[sandbox] Docker image "${imageName}" is stale and could not be rebuilt`);
 					}
@@ -4707,7 +4707,10 @@ async function handleApiRoute(
 		const imageName = scopedConfigStore.get("sandbox_image") || "bobbit-agent";
 		const configured = sandboxConfig === "docker";
 		const dockerContextRoot = resolveSandboxDockerContext(resolved.project.rootPath);
-		const status = await checkDockerAvailability(configured ? imageName : undefined, dockerContextRoot ?? undefined);
+		// Keep Docker probing behind the gateway command seam. Tier-1's fenced
+		// runner rejects it synchronously, so an unavailable Docker CLI cannot add
+		// platform-dependent process-startup latency to a status-only request.
+		const status = await checkDockerAvailability(configured ? imageName : undefined, dockerContextRoot ?? undefined, commandRunner ?? serverCommandRunner);
 		json({ ...status, configured });
 		return;
 	}
@@ -4731,7 +4734,7 @@ async function handleApiRoute(
 			json({ error: "Build already in progress" }, 409);
 			return;
 		}
-		const result = await buildSandboxImage(imageName, dockerContextRoot);
+		const result = await buildSandboxImage(imageName, dockerContextRoot, commandRunner ?? serverCommandRunner);
 		if (result.success) {
 			json({ success: true });
 		} else {
@@ -6706,7 +6709,7 @@ async function handleApiRoute(
 			const hasReadyContainer = sessionManager.getSandboxManager()?.getStats().containers.some(c => c.status === "ready") ?? false;
 			if (!hasReadyContainer) {
 				if (!_dockerAvailCache || Date.now() - _dockerAvailCache.ts > 60_000) {
-					const dockerStatus = await checkDockerAvailability();
+					const dockerStatus = await checkDockerAvailability(undefined, undefined, commandRunner ?? serverCommandRunner);
 					_dockerAvailCache = { available: dockerStatus.available, error: dockerStatus.error, ts: Date.now() };
 				}
 				if (!_dockerAvailCache.available) {
