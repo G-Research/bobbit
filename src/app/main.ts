@@ -28,8 +28,6 @@ import {
 	setRenderApp,
 	renderApp,
 	setProjects,
-	GW_URL_KEY,
-	GW_TOKEN_KEY,
 	activeSessionId,
 	expandedGoals,
 } from "./state.js";
@@ -64,6 +62,18 @@ import { loadPersistedPanelWorkspace } from "./panel-workspace.js";
 import { HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
 import { restoreActiveProjectFromLastSession } from "./skills-active-project.js";
 import { bootMark } from "./boot-timing.js";
+import {
+	activeGatewayConnection,
+	appUrl,
+	commitGatewayConnection,
+	gatewayUrl,
+	InvalidGatewayBaseUrlError,
+	LOCALHOST_TOKEN,
+	runtimeBasePath,
+	sameOriginGatewayBaseUrl,
+	takeGatewayRecoveryWarning,
+} from "./gateway-fetch.js";
+import { gatewayRoute } from "../shared/base-path.js";
 
 // Boot-timing: this fires only after the entire eager module graph has been
 // fetched + evaluated (the Vite dev module waterfall), so `t` here ≈ cost of
@@ -171,8 +181,8 @@ async function waitForGateway(url: string, token: string): Promise<void> {
 			await authenticateGateway(url, token);
 			return; // Success
 		} catch (err: any) {
-			// Auth failures are permanent — don't retry
-			if (err?.message?.includes("Invalid auth token")) throw err;
+			// Validation and auth failures are permanent — don't retry.
+			if (err instanceof InvalidGatewayBaseUrlError || err?.message?.includes("Invalid auth token")) throw err;
 
 			// If we've exceeded the max wait, give up
 			if (Date.now() - start >= MAX_WAIT) throw err;
@@ -302,8 +312,7 @@ async function handleHashChange(): Promise<void> {
 
 	try {
 		const route = getRouteFromHash();
-		const savedUrl = localStorage.getItem(GW_URL_KEY);
-		const savedToken = localStorage.getItem(GW_TOKEN_KEY);
+		const { baseUrl: savedUrl, token: savedToken } = activeGatewayConnection();
 
 		if (!savedUrl || !savedToken) {
 			state.appView = "disconnected";
@@ -629,35 +638,36 @@ async function initApp() {
 
 	state.chatPanel = new ChatPanel();
 
-	// Check for token in URL (passed by gateway auto-open)
+	// Hydrate one connection pair before any request. A malformed stored URL is
+	// cleared together with its token and falls back to this mounted deployment.
+	const initialConnection = activeGatewayConnection();
+	const recoveryWarning = takeGatewayRecoveryWarning();
+	const fallbackBase = sameOriginGatewayBaseUrl();
+
+	// A token in the gateway launch URL always belongs to this deployment, not
+	// to a previously selected explicit gateway. Probe first; authenticateGateway
+	// commits it only after success.
 	const params = new URLSearchParams(window.location.search);
 	const urlToken = params.get("token");
-	if (urlToken) {
-		localStorage.setItem(GW_URL_KEY, window.location.origin);
-		localStorage.setItem(GW_TOKEN_KEY, urlToken);
-		window.history.replaceState({}, "", window.location.pathname + window.location.hash);
-	}
+	let savedUrl = urlToken ? fallbackBase : initialConnection.baseUrl;
+	let savedToken = urlToken ?? initialConnection.token;
 
-	let savedUrl = localStorage.getItem(GW_URL_KEY);
-	let savedToken = localStorage.getItem(GW_TOKEN_KEY);
-
-	// Auto-connect in localhost mode: probe the server without credentials.
-	// If it reports localhost: true, store a dummy token and proceed — no
-	// gateway dialog needed.
-	if (!savedUrl || !savedToken) {
+	// Auto-connect in localhost mode. The successful probe is the commit point;
+	// the sentinel is never sent as an HTTP bearer credential.
+	if (!savedToken && savedUrl === fallbackBase) {
 		try {
-			const probe = await fetch(`${window.location.origin}/api/health`);
+			const probe = await fetch(gatewayUrl(gatewayRoute("/api/health"), fallbackBase), { credentials: "include" });
 			if (probe.ok) {
 				const health = await probe.json();
 				if (health.localhost) {
-					savedUrl = window.location.origin;
-					savedToken = "localhost";
-					localStorage.setItem(GW_URL_KEY, savedUrl);
-					localStorage.setItem(GW_TOKEN_KEY, savedToken);
+					savedUrl = fallbackBase;
+					savedToken = LOCALHOST_TOKEN;
+					const commit = commitGatewayConnection(savedUrl, savedToken);
+					if (commit.warning) showHeaderToast(commit.warning);
 				}
 			}
 		} catch {
-			// Server not reachable — fall through to disconnected state
+			// Server not reachable — fall through to disconnected state.
 		}
 	}
 
@@ -668,6 +678,7 @@ async function initApp() {
 	}
 	bootMark("first-render-call");
 	renderApp();
+	if (recoveryWarning) showHeaderToast(recoveryWarning);
 	// Signal boot intent. renderApp() defers the real Lit render to a rAF, so
 	// #app may still be empty right now — markAppBooted() does NOT clear the
 	// index.html boot watchdog until #app ACTUALLY paints (via MutationObserver).
@@ -681,6 +692,11 @@ async function initApp() {
 	if (savedUrl && savedToken) {
 		try {
 			await waitForGateway(savedUrl, savedToken);
+			if (urlToken) {
+				// Remove only the launch query after successful auth; preserve the
+				// mounted pathname and any deep-link hash.
+				window.history.replaceState({}, "", window.location.pathname + window.location.hash);
+			}
 
 			// Register pack-contributed tool renderers (extension-host §4a). Fire-and-
 			// forget so it never blocks boot; re-driven from /api/tools metadata so it
@@ -1081,9 +1097,9 @@ async function initApp() {
 
 initApp();
 
-// Register service worker for PWA installability
+// Register the worker below the runtime mount so it cannot claim sibling apps.
 if ('serviceWorker' in navigator) {
-	navigator.serviceWorker.register('/sw.js').catch(() => {});
+	navigator.serviceWorker.register(appUrl('/sw.js'), { scope: `${runtimeBasePath()}/` }).catch(() => {});
 }
 
 // iOS PWA grey-screen recovery (frozen/killed standalone snapshot on relaunch).

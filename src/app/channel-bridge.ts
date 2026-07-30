@@ -6,7 +6,8 @@
 // minting, and server frame dispatch. It deliberately exports no raw socket, URL,
 // bearer token, or caller-selectable pack identity.
 
-import { GW_TOKEN_KEY, GW_URL_KEY } from "./gateway-fetch.js";
+import { activeGatewayConnection, gatewayWsUrl } from "./gateway-fetch.js";
+import { gatewayRoute } from "../shared/base-path.js";
 
 export type HostChannelFrame =
 	| { kind: "text"; data: string }
@@ -222,11 +223,10 @@ class ChannelBridge {
 	private ensureConnected(): Promise<void> {
 		if (this.ws?.readyState === WebSocket.OPEN) return Promise.resolve();
 		if (this.connectPromise) return this.connectPromise;
-		const url = localStorage.getItem(GW_URL_KEY) || window.location.origin;
-		const token = localStorage.getItem(GW_TOKEN_KEY) || "";
-		const wsUrl = url.replace(/^http/, "ws");
+		const { token } = activeGatewayConnection();
+		const wsUrl = gatewayWsUrl(gatewayRoute(`/ws/${encodeURIComponent(this.sessionId)}`));
 		this.connectPromise = new Promise<void>((resolve, reject) => {
-			const ws = new WebSocket(`${wsUrl}/ws/${this.sessionId}`);
+			const ws = new WebSocket(wsUrl);
 			this.ws = ws;
 			const timer = setTimeout(() => {
 				reject(new Error("host.channels: timed out connecting WebSocket"));

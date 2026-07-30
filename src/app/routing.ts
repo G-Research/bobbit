@@ -2,6 +2,9 @@
 // URL ROUTING (hash-based: #/ = landing, #/session/{id} = connected, #/goal/{id} = dashboard)
 // ============================================================================
 
+import { appUrl, runtimeBasePath } from "./gateway-fetch.js";
+import { stripBasePath } from "../shared/base-path.js";
+
 export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "roles" | "role-edit" | "tools" | "tool-edit" | "workflows" | "workflow-edit" | "staff" | "staff-edit" | "skills" | "market" | "settings" | "search" | "ext";
 
 export type DashboardTabId = "spec" | "tasks" | "agents" | "commits" | "gates" | "plan" | "children";
@@ -33,7 +36,7 @@ const DASHBOARD_TABS = new Set<DashboardTabId>(["spec", "tasks", "agents", "comm
 const SETTINGS_TABS = new Set<SettingsTabId>(["shortcuts", "general", "project", "components", "workflows", "models", "palette", "directories", "account", "appearance", "maintenance"]);
 
 export function getRouteFromHash(): AppRoute {
-	const path = window.location.pathname || "";
+	const path = stripBasePath(window.location.pathname || "", runtimeBasePath()) ?? "";
 	const hash = window.location.hash || "";
 	if (hash === "#/search" || hash.startsWith("#/search?")) {
 		const qIdx = hash.indexOf("?");
@@ -186,11 +189,11 @@ export function setExtRoute(routeId: string, params?: Record<string, unknown>, r
 }
 
 export function canonicalizePathSessionRoute(sessionId: string): void {
-	const expectedPath = `/session/${sessionId}`;
+	const expectedPath = appUrl(`/session/${sessionId}`);
 	const expectedHash = `#/session/${sessionId}`;
 	if (window.location.pathname !== expectedPath || window.location.hash !== expectedHash) return;
 	// replaceState avoids a hashchange while cleaning up path-style deep links.
-	history.replaceState(history.state ?? {}, "", `/#/session/${sessionId}`);
+	history.replaceState(history.state ?? {}, "", appUrl(`/#/session/${sessionId}`));
 }
 
 export function setHashRoute(view: RouteView, id?: string, replace?: boolean): void {

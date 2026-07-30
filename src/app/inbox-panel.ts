@@ -25,6 +25,7 @@ import { state, renderApp } from "./state.js";
 import { getSidePanelWorkspace, openSidePanelTab } from "./side-panel-workspace.js";
 import { INBOX_PANEL_TAB_ID } from "./panel-workspace.js";
 import type { InboxEntry } from "../server/agent/inbox-store.js";
+import { gatewayFetch } from "./gateway-fetch.js";
 
 let currentSid: string | null = null;
 let currentStaffId: string | null = null;
@@ -45,30 +46,26 @@ export function startInboxSubscription(sessionId: string, staffId: string): void
 
 	void (async () => {
 		try {
-			const pendingResp = await fetch(
+			const pendingResp = await gatewayFetch(
 				`/api/staff/${encodeURIComponent(staffId)}/inbox?state=pending`,
-				{ credentials: "include" },
 			);
 			if (!pendingResp.ok) return;
 			if (token !== bootstrapToken) return;          // session switched mid-flight
 			const pendingData = await pendingResp.json();
 
-			const completedResp = await fetch(
+			const completedResp = await gatewayFetch(
 				`/api/staff/${encodeURIComponent(staffId)}/inbox?state=completed&limit=100`,
-				{ credentials: "include" },
 			);
 			if (token !== bootstrapToken) return;
 			const completedData = completedResp.ok ? await completedResp.json() : { entries: [] };
 
 			// Many terminal states are interesting in History — try to fetch
 			// failed/cancelled too if the API supports it. Best-effort.
-			const failedResp = await fetch(
+			const failedResp = await gatewayFetch(
 				`/api/staff/${encodeURIComponent(staffId)}/inbox?state=failed&limit=100`,
-				{ credentials: "include" },
 			).catch(() => null);
-			const cancelledResp = await fetch(
+			const cancelledResp = await gatewayFetch(
 				`/api/staff/${encodeURIComponent(staffId)}/inbox?state=cancelled&limit=100`,
-				{ credentials: "include" },
 			).catch(() => null);
 			if (token !== bootstrapToken) return;
 			const failedEntries = failedResp && failedResp.ok ? ((await failedResp.json()).entries || []) : [];
