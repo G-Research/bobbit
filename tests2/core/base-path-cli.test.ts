@@ -18,17 +18,16 @@ interface CliModule {
 	buildStartupUrls(options: {
 		protocol: "http" | "https";
 		host: string;
-		actualPort: number;
+		port: number;
 		basePath: string;
-		authEnforced: boolean;
-		authToken: string;
+		token: string;
+		forceAuth?: boolean;
 	}): StartupUrls;
 	formatStartupBanner(options: {
 		version: string;
 		cwd: string;
 		staticDir?: string;
-		authEnforced: boolean;
-		authToken: string;
+		token: string;
 		urls: StartupUrls;
 	}): string;
 }
@@ -83,10 +82,9 @@ describe("mounted startup URLs", () => {
 		const urls = buildStartupUrls({
 			protocol: "http",
 			host: "0.0.0.0",
-			actualPort: 43127,
+			port: 43127,
 			basePath: "/team/bobbit",
-			authEnforced: true,
-			authToken: "real token",
+			token: "real token",
 		});
 		assert.equal(urls.listenUrl, "http://0.0.0.0:43127/team/bobbit");
 		assert.equal(urls.peerUrl, "http://127.0.0.1:43127/team/bobbit");
@@ -99,10 +97,9 @@ describe("mounted startup URLs", () => {
 		const urls = buildStartupUrls({
 			protocol: "http",
 			host: "localhost",
-			actualPort: 3001,
+			port: 3001,
 			basePath: "/bobbit",
-			authEnforced: false,
-			authToken: "generated-but-unused",
+			token: "generated-but-unused",
 		});
 		assert.equal(urls.peerUrl, "http://localhost:3001/bobbit");
 		assert.equal(urls.uiUrl, "http://localhost:3001/bobbit/");
@@ -115,10 +112,9 @@ describe("mounted startup URLs", () => {
 		const urls = buildStartupUrls({
 			protocol: "https",
 			host: "gateway.example",
-			actualPort: 443,
+			port: 443,
 			basePath: "",
-			authEnforced: true,
-			authToken: "secret",
+			token: "secret",
 		});
 		assert.equal(urls.listenUrl, "https://gateway.example:443");
 		assert.equal(urls.peerUrl, "https://gateway.example:443");
@@ -132,17 +128,15 @@ describe("truthful authentication banner", () => {
 		const urls = buildStartupUrls({
 			protocol: "http",
 			host: "localhost",
-			actualPort: 3001,
+			port: 3001,
 			basePath: "/bobbit",
-			authEnforced: false,
-			authToken: "must-not-appear",
+			token: "must-not-appear",
 		});
 		const banner = formatStartupBanner({
 			version: "0.0.0-test",
 			cwd: "/workspace",
 			staticDir: "/dist/ui",
-			authEnforced: false,
-			authToken: "must-not-appear",
+			token: "must-not-appear",
 			urls,
 		});
 		assert.doesNotMatch(banner, /must-not-appear|grants full shell access|keep it secret/i);
@@ -156,17 +150,15 @@ describe("truthful authentication banner", () => {
 		const urls = buildStartupUrls({
 			protocol: "https",
 			host: "gateway.example",
-			actualPort: 3001,
+			port: 3001,
 			basePath: "/team/bobbit",
-			authEnforced: true,
-			authToken: "real-secret",
+			token: "real-secret",
 		});
 		const banner = formatStartupBanner({
 			version: "0.0.0-test",
 			cwd: "/workspace",
 			staticDir: "/dist/ui",
-			authEnforced: true,
-			authToken: "real-secret",
+			token: "real-secret",
 			urls,
 		});
 		assert.match(banner, /real-secret/);

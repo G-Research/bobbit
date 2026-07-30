@@ -183,12 +183,13 @@ function assertBuiltChunksAreRuntimeMounted(): void {
 	const assetsDir = join(process.cwd(), "dist", "ui", "assets");
 	const chunks = readdirSync(assetsDir).filter(file => file.endsWith(".js"));
 	expect(chunks.length, "production build should contain JavaScript chunks").toBeGreaterThan(0);
-	const offenders: string[] = [];
-	for (const chunk of chunks) {
-		const source = readFileSync(join(assetsDir, chunk), "utf8");
-		if (/["'`]\/assets\//.test(source)) offenders.push(chunk);
-	}
-	expect(offenders, "emitted JS must not contain Vite root-anchored /assets/ chunk or preload URLs").toEqual([]);
+	const sources = chunks.map(chunk => readFileSync(join(assetsDir, chunk), "utf8"));
+	expect(
+		sources.some(source => source.includes("__BOBBIT_BASE_PATH__")),
+		"emitted JavaScript must resolve assets through the runtime base-path global",
+	).toBe(true);
+	const offenders = chunks.filter((_chunk, index) => /(?:return\s*|=>)\s*["']\/["']\s*\+/.test(sources[index]));
+	expect(offenders, "emitted JS must not contain Vite's root-anchoring asset helper").toEqual([]);
 }
 
 test.describe("Journey: production gateway mounted below a nested base path", () => {
@@ -229,7 +230,7 @@ test.describe("Journey: production gateway mounted below a nested base path", ()
 			expect(shellAssets.some(record => record.resourceType === "stylesheet"), "mounted shell should load CSS").toBe(true);
 			for (const asset of shellAssets) expectExactlyOneMount(asset.url, gateway, "/");
 
-			const signedCookie = (await context.cookies(gateway.baseURL)).find(cookie => cookie.name === "bobbit_session");
+			const signedCookie = (await context.cookies(`${gateway.baseURL}/`)).find(cookie => cookie.name === "bobbit_session");
 			expect(signedCookie, "authenticated browser boot should mint the native-transport cookie").toBeTruthy();
 			expect(signedCookie?.path).toBe(`${BASE_PATH}/`);
 
@@ -343,13 +344,18 @@ test.describe("Journey: production gateway mounted below a nested base path", ()
 			}, { baseURL: gateway.baseURL });
 			const sentinelRequestStart = requests.length;
 			await page.reload({ waitUntil: "domcontentloaded" });
-			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
 			await expect.poll(() => requests.slice(sentinelRequestStart).filter(record => new URL(record.url).pathname.startsWith(`${BASE_PATH}/api/`)).length, {
 				timeout: 15_000,
 			}).toBeGreaterThan(0);
 			const sentinelApiRequests = requests.slice(sentinelRequestStart).filter(record => new URL(record.url).pathname.startsWith(`${BASE_PATH}/api/`));
 			expect(sentinelApiRequests.some(record => record.authorization === "Bearer localhost"), "localhost sentinel must never be sent as Bearer").toBe(false);
 			expect(sentinelApiRequests.every(record => !new URL(record.url).pathname.includes(`${BASE_PATH}${BASE_PATH}`))).toBe(true);
+			// This fixture enforces Bobbit token auth, so its WebSockets correctly reject
+			// the localhost first-frame sentinel. Restore the real token after proving the
+			// cookie-authenticated HTTP request omitted the meaningless Bearer header.
+			await page.evaluate((realToken) => localStorage.setItem("gateway.token", realToken), token);
+			await page.reload({ waitUntil: "domcontentloaded" });
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
 
 			await page.evaluate(() => {
 				(window as any).__copiedBasePathLinks = [];
@@ -376,7 +382,7 @@ test.describe("Journey: production gateway mounted below a nested base path", ()
 			const scriptsBeforeQr = requests.filter(record => record.resourceType === "script").length;
 			await page.locator('button[title="Show QR code"]').first().click();
 			await expect(page.locator('img[alt="Session QR"]')).toBeVisible({ timeout: 20_000 });
-			await expectQrImageEncodes(page, 'img[alt="Session QR"]', `${gateway.baseURL}/`);
+			await expectQrImageEncodes(page, 'img[alt="Session QR"]', `${gateway.baseURL}/?token=${encodeURIComponent(token)}`);
 			await page.getByRole("button", { name: /First time on this device.*iPhone/i }).click();
 			await expect(page.locator('img[alt="CA Certificate QR"]')).toBeVisible({ timeout: 10_000 });
 			await expectQrImageEncodes(page, 'img[alt="CA Certificate QR"]', `${gateway.baseURL}/api/ca-cert`);

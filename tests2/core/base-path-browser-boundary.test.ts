@@ -165,7 +165,7 @@ describe("runtime app and gateway URL boundaries", () => {
 
 	it("clears a malformed stored URL and its token before using mounted same-origin fallback", async () => {
 		const calls: string[] = [];
-		const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+		const fetchSpy = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
 			calls.push(String(input));
 			return new Response("ok");
 		});
@@ -197,7 +197,7 @@ describe("gateway authorization and fetch", () => {
 	});
 
 	it("defaults to credentialed requests while preserving caller headers and credential mode", async () => {
-		const fetchSpy = vi.fn(async () => new Response("ok"));
+		const fetchSpy = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("ok"));
 		const storage = installBrowser({ origin: "https://host.example", basePath: "/team/bobbit", fetch: fetchSpy as unknown as typeof fetch });
 		storage.setItem("gateway.url", "https://host.example/team/bobbit");
 		storage.setItem("gateway.token", "real-token");
@@ -217,7 +217,7 @@ describe("gateway authorization and fetch", () => {
 	});
 
 	it("never sends the localhost sentinel as an HTTP bearer", async () => {
-		const fetchSpy = vi.fn(async () => new Response("ok"));
+		const fetchSpy = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("ok"));
 		const storage = installBrowser({ origin: "http://localhost:3001", fetch: fetchSpy as unknown as typeof fetch });
 		storage.setItem("gateway.url", "http://localhost:3001");
 		storage.setItem("gateway.token", "localhost");
