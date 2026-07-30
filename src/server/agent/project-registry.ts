@@ -234,10 +234,42 @@ function hasCaseInsensitiveEntries(
 }
 
 /**
+ * Preserve the physical spelling of components below a sensitive directory,
+ * while folding every component whose *parent* proves it has insensitive
+ * entries. This separates identity of an existing directory from the case
+ * semantics of that directory's children (which can differ on NTFS).
+ */
+function normalizeExistingPathCase(
+  canonical: string,
+  pathApi: ProjectPathApi,
+  realpathSync: (candidate: string) => string,
+  readdirSync: (candidate: string) => string[],
+  isCaseInsensitiveAt?: (existingAncestor: string) => boolean,
+): string {
+  const root = pathApi.parse(canonical).root;
+  const normalizedRoot = isCaseInsensitiveAt?.(root) ? root.toLowerCase() : root;
+  const segments = pathApi.relative(root, canonical).split(/[\\/]+/).filter(Boolean);
+  let parent = root;
+  const normalized: string[] = [];
+
+  for (const segment of segments) {
+    const isCaseInsensitive = isCaseInsensitiveAt?.(parent)
+      ?? hasCaseInsensitiveEntries(parent, pathApi, realpathSync, readdirSync);
+    normalized.push(isCaseInsensitive ? segment.toLowerCase() : segment);
+    // Keep the canonical spelling for probes into the next directory. On an
+    // APFS volume it may be the caller's spelling, but it still resolves to
+    // the same directory when its parent was proven insensitive.
+    parent = pathApi.join(parent, segment);
+  }
+
+  return normalizeProjectPath(pathApi.join(normalizedRoot, ...normalized), pathApi, { foldCase: false });
+}
+
+/**
  * Canonical project identity. Existing prefixes are resolved through realpath;
- * spelling is folded only when the nearest existing ancestor demonstrably
- * accepts a case-variant spelling for its entries. This prevents a
- * case-sensitive macOS/Linux volume from silently collapsing distinct paths.
+ * spelling is folded only when the corresponding parent demonstrably accepts
+ * a case-variant spelling for its entries. This prevents a case-sensitive
+ * macOS/Linux volume from silently collapsing distinct paths.
  */
 export function canonicalProjectPath(
   rootPath: string,
@@ -264,12 +296,15 @@ export function canonicalProjectPath(
       const normalizedSuffix = isCaseInsensitive
         ? suffix.reverse().map(segment => segment.toLowerCase())
         : suffix.reverse();
-      return normalizeProjectPath(pathApi.join(canonical, ...normalizedSuffix), pathApi, {
-        // APFS may preserve caller casing in realpath output, so fold the
-        // existing prefix too once the nearest ancestor proved insensitive.
-        // Native Windows can also host case-sensitive directories; without
-        // that proof, every spelling remains distinct.
-        foldCase: isCaseInsensitive,
+      const normalizedCanonical = normalizeExistingPathCase(
+        canonical,
+        pathApi,
+        realpathSync,
+        readdirSync,
+        options.isCaseInsensitiveAt,
+      );
+      return normalizeProjectPath(pathApi.join(normalizedCanonical, ...normalizedSuffix), pathApi, {
+        foldCase: false,
       });
     } catch {
       const parent = pathApi.dirname(existing);
