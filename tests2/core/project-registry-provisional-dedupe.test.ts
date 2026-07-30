@@ -42,29 +42,34 @@ function readStoredProjects(stateDir: string): Array<{ id: string; rootPath: str
   return JSON.parse(fs.readFileSync(path.join(stateDir, "projects.json"), "utf-8"));
 }
 
-test("canonicalProjectPath folds nonexistent suffixes only after a read-only insensitive-ancestor probe", () => {
+test("canonicalProjectPath folds nonexistent suffixes only after a read-only insensitive-entry probe", () => {
   // This is a POSIX-volume simulation, not a claim about the runner's native
   // filesystem. Declare the dialect explicitly so a Windows runner exercises
   // the probe instead of treating the POSIX fixture as foreign.
   const pathApi = path.posix;
   const ancestor = pathApi.join(pathApi.sep, "identity", "Ancestor");
+  const child = pathApi.join(ancestor, "KnownEntry");
   const insensitiveRealpath = (candidate: string): string => {
-    if (candidate === ancestor || candidate === pathApi.join(pathApi.dirname(ancestor), "ancestor")) return ancestor;
+    if (candidate === ancestor || candidate === child || candidate === pathApi.join(ancestor, "knownEntry")) return candidate;
     throw new Error(`not found: ${candidate}`);
   };
   const sensitiveRealpath = (candidate: string): string => {
-    if (candidate === ancestor) return ancestor;
+    if (candidate === ancestor || candidate === child) return candidate;
+    throw new Error(`not found: ${candidate}`);
+  };
+  const readdirSync = (candidate: string): string[] => {
+    if (candidate === ancestor) return ["KnownEntry"];
     throw new Error(`not found: ${candidate}`);
   };
   const nativePosixVolume = { isNativePathApi: (dialect: "posix" | "win32") => dialect === "posix" };
 
   assert.equal(
-    canonicalProjectPath(pathApi.join(ancestor, "FutureProject"), { ...nativePosixVolume, realpathSync: insensitiveRealpath }),
+    canonicalProjectPath(pathApi.join(ancestor, "FutureProject"), { ...nativePosixVolume, realpathSync: insensitiveRealpath, readdirSync }),
     pathApi.join("/identity", "ancestor", "futureproject"),
-    "a case-variant spelling of the existing ancestor proves folding of both existing and future segments is safe",
+    "an existing entry that accepts a case variant proves folding of future segments is safe",
   );
   assert.equal(
-    canonicalProjectPath(pathApi.join(ancestor, "FutureProject"), { ...nativePosixVolume, realpathSync: sensitiveRealpath }),
+    canonicalProjectPath(pathApi.join(ancestor, "FutureProject"), { ...nativePosixVolume, realpathSync: sensitiveRealpath, readdirSync }),
     pathApi.join(ancestor, "FutureProject"),
     "without that proof, a sensitive filesystem retains the requested suffix spelling",
   );
@@ -107,6 +112,32 @@ test("canonicalProjectPath folds native Windows spelling on an injected insensit
   assert.equal(
     canonicalProjectPath(`${ancestor}\\futureproject`, nativeInsensitiveWindows),
     "c:/workspace/ancestor/futureproject",
+  );
+});
+
+test("canonicalProjectPath preserves a suffix below a case-sensitive NTFS child of an insensitive parent", () => {
+  const sensitiveChild = "C:\\Workspace\\SensitiveChild";
+  const knownEntry = `${sensitiveChild}\\KnownEntry`;
+  const nativeWindows = {
+    realpathSync: (candidate: string): string => {
+      // The parent directory is insensitive, so the child's name resolves in
+      // either case. Entries inside SensitiveChild remain case-sensitive.
+      if (candidate === sensitiveChild || candidate === "C:\\Workspace\\sensitiveChild" || candidate === knownEntry) {
+        return sensitiveChild;
+      }
+      throw new Error(`not found: ${candidate}`);
+    },
+    readdirSync: (candidate: string): string[] => {
+      if (candidate === sensitiveChild) return ["KnownEntry"];
+      throw new Error(`not found: ${candidate}`);
+    },
+    isNativePathApi: (pathApi: "posix" | "win32") => pathApi === "win32",
+  };
+
+  assert.equal(
+    canonicalProjectPath(`${sensitiveChild}\\FutureProject`, nativeWindows),
+    "C:/Workspace/SensitiveChild/FutureProject",
+    "the child directory's entry semantics, not its lookup from the parent, govern its nonexistent suffix",
   );
 });
 

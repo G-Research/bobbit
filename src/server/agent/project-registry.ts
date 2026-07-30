@@ -196,46 +196,29 @@ function toggledCase(value: string): string | undefined {
  * only when it resolves to the same canonical target. If no such proof is
  * available (including an empty filesystem root), preserve suffix spelling.
  */
-function hasCaseInsensitiveAncestor(
+function hasCaseInsensitiveEntries(
   existingAncestor: string,
   pathApi: ProjectPathApi,
   realpathSync: (candidate: string) => string,
   readdirSync: (candidate: string) => string[],
 ): boolean {
-  const parent = pathApi.dirname(existingAncestor);
-  const probes: Array<{ candidate: string; expected: string; parent: string; name: string }> = [];
-  const variant = parent === existingAncestor ? undefined : toggledCase(pathApi.basename(existingAncestor));
-  if (variant) {
-    probes.push({
-      candidate: pathApi.join(parent, variant),
-      expected: existingAncestor,
-      parent,
-      name: pathApi.basename(existingAncestor),
-    });
+  // Case sensitivity is a property of a directory's entries, not of the
+  // directory's name in its parent. This distinction matters for NTFS, where
+  // an insensitive parent can contain a case-sensitive child directory.
+  let entries: string[];
+  try {
+    entries = readdirSync(existingAncestor);
+  } catch {
+    // No readable child means no demonstrable case behaviour.
+    return false;
   }
 
-  // A root has no case-changeable basename. Probe one of its existing children
-  // instead; this remains a read-only capability check.
-  if (probes.length === 0) {
+  return entries.some(name => {
+    const variant = toggledCase(name);
+    if (!variant) return false;
     try {
-      const child = readdirSync(existingAncestor).find(entry => toggledCase(entry));
-      if (child) {
-        probes.push({
-          candidate: pathApi.join(existingAncestor, toggledCase(child)!),
-          expected: pathApi.join(existingAncestor, child),
-          parent: existingAncestor,
-          name: child,
-        });
-      }
-    } catch {
-      // No readable probe means no demonstrable case behaviour.
-    }
-  }
-
-  return probes.some(({ candidate, expected, parent: probeParent, name }) => {
-    try {
-      const candidateRealpath = pathApi.resolve(realpathSync(candidate));
-      const expectedRealpath = pathApi.resolve(realpathSync(expected));
+      const candidateRealpath = pathApi.resolve(realpathSync(pathApi.join(existingAncestor, variant)));
+      const expectedRealpath = pathApi.resolve(realpathSync(pathApi.join(existingAncestor, name)));
       if (candidateRealpath === expectedRealpath) return true;
 
       // APFS can preserve the caller's spelling in realpath output, so equal
@@ -243,9 +226,7 @@ function hasCaseInsensitiveAncestor(
       // of both spellings plus exactly one matching directory entry proves the
       // filesystem resolves them to the same entry. Case-sensitive directories
       // with distinct `Foo` and `foo` entries have two matching names instead.
-      const matchingEntries = readdirSync(probeParent)
-        .filter(entry => entry.toLowerCase() === name.toLowerCase());
-      return matchingEntries.length === 1;
+      return entries.filter(entry => entry.toLowerCase() === name.toLowerCase()).length === 1;
     } catch {
       return false;
     }
@@ -255,8 +236,8 @@ function hasCaseInsensitiveAncestor(
 /**
  * Canonical project identity. Existing prefixes are resolved through realpath;
  * spelling is folded only when the nearest existing ancestor demonstrably
- * accepts a case-variant spelling. This prevents a case-sensitive macOS/Linux
- * volume from silently collapsing distinct paths.
+ * accepts a case-variant spelling for its entries. This prevents a
+ * case-sensitive macOS/Linux volume from silently collapsing distinct paths.
  */
 export function canonicalProjectPath(
   rootPath: string,
@@ -279,7 +260,7 @@ export function canonicalProjectPath(
     try {
       const canonical = pathApi.resolve(realpathSync(existing));
       const isCaseInsensitive = options.isCaseInsensitiveAt?.(canonical)
-        ?? hasCaseInsensitiveAncestor(canonical, pathApi, realpathSync, readdirSync);
+        ?? hasCaseInsensitiveEntries(canonical, pathApi, realpathSync, readdirSync);
       const normalizedSuffix = isCaseInsensitive
         ? suffix.reverse().map(segment => segment.toLowerCase())
         : suffix.reverse();
