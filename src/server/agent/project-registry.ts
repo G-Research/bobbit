@@ -1110,7 +1110,10 @@ export class ProjectRegistry {
     // an existing visible normal/provisional scope instead of creating a second
     // project at the same path. Hidden/system anchors remain internal and do
     // not block provisioning; Headquarters' physical directory stays immutable.
-    const normalized = path.resolve(rootPath);
+    // Preserve the input dialect for the injected path-identity seam. Native
+    // path.resolve() turns an absolute POSIX fixture into a Windows path on
+    // Windows, preventing its identity from matching the persisted POSIX root.
+    const normalized = projectPathApi(rootPath).resolve(rootPath);
     for (const p of this.projects.values()) {
       if (!this.sameProjectPath(p.rootPath, normalized)) continue;
       if (isHeadquartersProject(p)) {
