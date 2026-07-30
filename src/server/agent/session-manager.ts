@@ -6599,6 +6599,8 @@ export class SessionManager {
 			deferQueueDrain?: boolean;
 			/** Reject at coordinated admission unless this exact bridge still owns the slot. */
 			expectedOwner?: SessionBridgeOwner;
+			/** Apply restartAgent's persisted zombie guard only after serialized ownership admission. */
+			restartZombieGuard?: boolean;
 		},
 	): Promise<SessionInfo | undefined> {
 		return this._coordinateSessionReplacement(session.id, "respawn", (token) =>
@@ -6622,6 +6624,7 @@ export class SessionManager {
 			preserveSandboxRealm?: boolean;
 			deferQueueDrain?: boolean;
 			expectedOwner?: SessionBridgeOwner;
+			restartZombieGuard?: boolean;
 		} | undefined,
 		token: SessionReplacementToken,
 	): Promise<SessionInfo | undefined> {
@@ -6639,7 +6642,9 @@ export class SessionManager {
 			throw new Error(`Session ${id} respawn expected bridge ownership changed before coordinated admission`);
 		}
 		const session = canonical ?? requestedSession;
-		const ps = this.resolveStoreForId(id)?.get(id) ?? requestedPs;
+		const ps = opts?.restartZombieGuard
+			? this._admitRestartPersistedSession(id)
+			: this.resolveStoreForId(id)?.get(id) ?? requestedPs;
 		const savedClients = new Set(session.clients);
 		session.unsubscribe();
 		const frameOfRef = this._snapshotStreamingFrameOfReference(session);
@@ -6699,6 +6704,36 @@ export class SessionManager {
 	}
 
 	/**
+	 * Read and admit restartAgent's canonical durable row while the replacement
+	 * coordinator owns the session. Owner-sensitive callers reach this only after
+	 * their exact bridge has passed admission, so a stale recovery cannot archive
+	 * a row that an earlier replacement has already advanced.
+	 */
+	private _admitRestartPersistedSession(id: string): PersistedSession {
+		const store = this.resolveStoreForId(id);
+		if (!store) throw new Error("No persisted session data");
+		const ps = store.get(id);
+		if (!ps) throw new Error("No persisted session data");
+		if (ps.agentSessionFile || ps.role) return ps;
+
+		console.warn(
+			`[session-manager] Session ${id} is an unrecoverable zombie ` +
+			`(no agentSessionFile, no role) — archiving instead of restarting.`,
+		);
+		try {
+			store.update(id, { archived: true, archivedAt: this.clock.now() });
+		} catch (err) {
+			console.error(`[session-manager] Failed to archive zombie session ${id}:`, err);
+		}
+		const zombieErr: Error & { code?: string } = new Error(
+			`Session ${id} could not be restarted — neither an agent session file nor ` +
+			`a role was persisted. The session has been archived; create a fresh session to continue.`,
+		);
+		zombieErr.code = "SESSION_UNRECOVERABLE_ARCHIVED";
+		throw zombieErr;
+	}
+
+	/**
 	 * Restart the agent process for a session whose process has died.
 	 * Stops any remnant process, then restores from persisted state.
 	 * Re-attaches existing WS clients so the user can keep working.
@@ -6709,27 +6744,6 @@ export class SessionManager {
 
 		const ps = this.resolveStoreForSession(session.id).get(session.id);
 		if (!ps) throw new Error("No persisted session data");
-
-		// Zombie-archive guard: a record with neither an agent session file nor a role
-		// can't be bootstrapped by `_respawnAgentInPlace`. Archive it surface-side
-		// instead of throwing opaquely on every Restart click.
-		if (!ps.agentSessionFile && !ps.role) {
-			console.warn(
-				`[session-manager] Session ${sessionId} is an unrecoverable zombie ` +
-				`(no agentSessionFile, no role) — archiving instead of restarting.`,
-			);
-			try {
-				this.resolveStoreForSession(sessionId).update(sessionId, { archived: true, archivedAt: this.clock.now() });
-			} catch (err) {
-				console.error(`[session-manager] Failed to archive zombie session ${sessionId}:`, err);
-			}
-			const zombieErr: Error & { code?: string } = new Error(
-				`Session ${sessionId} could not be restarted — neither an agent session file nor ` +
-				`a role was persisted. The session has been archived; create a fresh session to continue.`,
-			);
-			zombieErr.code = "SESSION_UNRECOVERABLE_ARCHIVED";
-			throw zombieErr;
-		}
 
 		const savedSessionOnlyGrantedTools = session.sessionOnlyGrantedTools ? [...session.sessionOnlyGrantedTools] : undefined;
 		const savedOneTimeGrantedTools = session.oneTimeGrantedTools ? [...session.oneTimeGrantedTools] : undefined;
@@ -6744,6 +6758,7 @@ export class SessionManager {
 				if (overrideGrantedTools) (p as any)._overrideGrantedTools = overrideGrantedTools;
 			},
 			expectedOwner,
+			restartZombieGuard: true,
 		});
 
 		if (restored) {
