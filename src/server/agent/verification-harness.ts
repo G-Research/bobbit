@@ -5568,13 +5568,12 @@ export class VerificationHarness {
 
 				const didTimeOut = tracked!.timedOut();
 				const didCancel = !didTimeOut && this._cancelledTrackedKeys.delete(trackedKey);
-				// Do not finalize a timeout/cancel when only the shell leader has
-				// exited. The tracked runner owns this process group/job and waits a
-				// bounded interval for SIGTERM → SIGKILL (or taskkill /T /F) to reap
-				// every descendant before this step reports completion.
-				if (didTimeOut || didCancel) {
-					await tracked!.waitForTreeExit();
-				}
+				// Do not report a timeout/cancel cleanup as successful merely because
+				// its shell leader closed. The tracked runner verifies the owned
+				// process group/job; on Windows it returns false when root exit made a
+				// new taskkill unsafe, or when taskkill itself failed.
+				const treeCleanupVerified = !(didTimeOut || didCancel)
+					|| await tracked!.waitForTreeExit();
 				settled = true;
 
 				let outText = stdout;
@@ -5587,10 +5586,13 @@ export class VerificationHarness {
 				const tail = (outText + "\n" + errText).trim().slice(-5000);
 
 				if (didTimeOut) {
-					const marker = `[step timed out after ${timeoutSec}s \u2014 killed subprocess tree]`;
+					const marker = treeCleanupVerified
+						? `[step timed out after ${timeoutSec}s \u2014 killed subprocess tree]`
+						: `[step timed out after ${timeoutSec}s \u2014 subprocess tree cleanup could not be verified]`;
 					const combined = tail ? `${tail}\n${marker}` : marker;
-					if (expectFailure) {
-						// Honour expectFailure + errorPattern against the accumulated output.
+					if (treeCleanupVerified && expectFailure) {
+						// Honour expectFailure + errorPattern only after cleanup has been
+						// verified. A failed cleanup must never become a passing result.
 						resolve(withDiagnostics(matchExpectFailure(null, combined, errorPattern)));
 						return;
 					}
@@ -5598,7 +5600,9 @@ export class VerificationHarness {
 					return;
 				}
 				if (didCancel) {
-					const marker = `[step cancelled \u2014 killed subprocess tree]`;
+					const marker = treeCleanupVerified
+						? `[step cancelled \u2014 killed subprocess tree]`
+						: `[step cancelled \u2014 subprocess tree cleanup could not be verified]`;
 					const combined = tail ? `${tail}\n${marker}` : marker;
 					resolve(withDiagnostics({ passed: false, output: combined }));
 					return;
@@ -5628,7 +5632,9 @@ export class VerificationHarness {
 					} catch {
 						return;
 					}
-					try { if (child.pid) killTreeByPid(child.pid, "SIGKILL"); } catch { /* best-effort */ }
+					// The child may have emitted `exit` before this poll runs. Delegate to
+					// the tracked owner so Windows refuses any post-exit PID action.
+					try { tracked!.killTree("SIGKILL"); } catch { /* best-effort */ }
 					void settleFromProcess(code, null);
 				}, 100);
 				exitFilePollTimer.unref?.();
@@ -5639,10 +5645,11 @@ export class VerificationHarness {
 				exitSignal = signal;
 				closeGraceTimer = processClock.setTimeout(() => {
 					if (settled || settleStarted) return;
-					const warning = `[verification] command process exited but stdio did not close within ${COMMAND_EXIT_CLOSE_GRACE_MS}ms; treating the process exit as authoritative and attempting to kill any remaining subprocess group.`;
+					const warning = `[verification] command process exited but stdio did not close within ${COMMAND_EXIT_CLOSE_GRACE_MS}ms; releasing inherited stream handles without another PID cleanup action.`;
 					stderr += `${stderr ? "\n" : ""}${warning}`;
 					appendRetainedLogChunk(errFile, `${warning}\n`);
-					try { if (child.pid) killTreeByPid(child.pid, "SIGKILL"); } catch { /* best-effort */ }
+					// Root `exit` is a PID-reuse boundary on Windows. Closing streams
+					// unblocks settlement without risking a late numeric-PID kill.
 					try { child.stdout?.destroy(); } catch { /* ignore */ }
 					try { child.stderr?.destroy(); } catch { /* ignore */ }
 					void settleFromProcess(exitCode, exitSignal);
