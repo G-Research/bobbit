@@ -129,6 +129,7 @@ test.describe("Stateless browser cookie upgrade", () => {
 		const context = page.context();
 		const browserURL = new URL(gateway.baseURL);
 		browserURL.hostname = "localhost";
+		expect(browserURL.protocol).toBe("http:");
 		const browserOrigin = browserURL.origin;
 		const recorder = createCookieWriteRecorder(context, browserOrigin);
 		let sessionId: string | undefined;
@@ -201,7 +202,7 @@ test.describe("Stateless browser cookie upgrade", () => {
 			expect(upgradeHeader).toMatch(/;\s*SameSite=Lax(?:;|$)/i);
 			expect(upgradeHeader).toMatch(/;\s*Path=\/(?:;|$)/i);
 			expect(upgradeHeader).toMatch(/;\s*Max-Age=2592000(?:;|$)/i);
-			expect(upgradeHeader).toMatch(/;\s*Secure(?:;|$)/i);
+			expect(upgradeHeader).not.toMatch(/;\s*Secure(?:;|$)/i);
 
 			await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
 			await expect.poll(
@@ -213,7 +214,7 @@ test.describe("Stateless browser cookie upgrade", () => {
 			expect(upgraded).toEqual(expect.objectContaining({
 				value: signedValue,
 				httpOnly: true,
-				secure: true,
+				secure: false,
 				sameSite: "Lax",
 				path: "/",
 			}));
