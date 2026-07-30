@@ -104,15 +104,31 @@ function createInstallation(runner: CommandRunner): DispatcherInstallation {
 	return installation;
 }
 
-function installFacade(runner: CommandRunner, installation: DispatcherInstallation): void {
+function refreshFacades(runner: CommandRunner, installation: DispatcherInstallation): void {
+	const needsExecFile = installation.registrations.some(({ interceptor }) => interceptor.execFile);
+	const needsExecFileSync = installation.registrations.some(({ interceptor }) => interceptor.execFileSync);
+	const needsSpawn = installation.registrations.some(({ interceptor }) => interceptor.spawn);
+
 	// A legacy suite may have installed a temporary facade before this owner. Keep
 	// that facade as the fallback rather than capturing an obsolete runner method.
-	if (runner.execFile !== installation.execFile) installation.baseExecFile = runner.execFile;
-	if (runner.execFileSync !== installation.execFileSync) installation.baseExecFileSync = runner.execFileSync;
-	if (runner.spawn !== installation.spawn) installation.baseSpawn = runner.spawn;
-	runner.execFile = installation.execFile;
-	runner.execFileSync = installation.execFileSync;
-	runner.spawn = installation.spawn;
+	if (needsExecFile) {
+		if (runner.execFile !== installation.execFile) installation.baseExecFile = runner.execFile;
+		runner.execFile = installation.execFile;
+	} else if (runner.execFile === installation.execFile) {
+		runner.execFile = installation.baseExecFile;
+	}
+	if (needsExecFileSync) {
+		if (runner.execFileSync !== installation.execFileSync) installation.baseExecFileSync = runner.execFileSync;
+		runner.execFileSync = installation.execFileSync;
+	} else if (runner.execFileSync === installation.execFileSync) {
+		runner.execFileSync = installation.baseExecFileSync;
+	}
+	if (needsSpawn) {
+		if (runner.spawn !== installation.spawn) installation.baseSpawn = runner.spawn;
+		runner.spawn = installation.spawn;
+	} else if (runner.spawn === installation.spawn) {
+		runner.spawn = installation.baseSpawn;
+	}
 }
 
 /**
@@ -127,24 +143,21 @@ export function installCommandRunnerInterceptor(runner: CommandRunner, intercept
 		installation = createInstallation(runner);
 		state.installations.set(runner, installation);
 	}
-	installFacade(runner, installation);
-
 	const owner = Symbol(interceptor.label);
 	installation.registrations.push({ owner, interceptor });
+	refreshFacades(runner, installation);
 	let restored = false;
 	return () => {
 		if (restored) return;
 		restored = true;
 		const index = installation!.registrations.findIndex(registration => registration.owner === owner);
 		if (index >= 0) installation!.registrations.splice(index, 1);
-		if (installation!.registrations.length > 0) return;
-
-		// Restore only methods still owned by this facade. A neighboring suite may
-		// have intentionally layered its own temporary implementation on top.
-		if (runner.execFile === installation!.execFile) runner.execFile = installation!.baseExecFile;
-		if (runner.execFileSync === installation!.execFileSync) runner.execFileSync = installation!.baseExecFileSync;
-		if (runner.spawn === installation!.spawn) runner.spawn = installation!.baseSpawn;
-		if (state.installations.get(runner) === installation) state.installations.delete(runner);
+		// Restore each method as soon as its final owner releases it. In particular,
+		// exec-only leases never replace spawn or execFileSync in the first place.
+		refreshFacades(runner, installation!);
+		if (installation!.registrations.length === 0 && state.installations.get(runner) === installation) {
+			state.installations.delete(runner);
+		}
 	};
 }
 

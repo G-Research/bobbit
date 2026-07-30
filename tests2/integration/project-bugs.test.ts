@@ -12,22 +12,39 @@ import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch } from "./_e2e/e2e-setup.js";
 import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import type { CommandRunner } from "../../src/server/gateway-deps.js";
+import { installCommandRunnerInterceptor } from "./helpers/command-runner-dispatcher.js";
 
 let restoreCommandRunner: (() => void) | undefined;
+const commandRunnerRoots = new Set<string>();
+
+function ownsCommandCwd(cwd: unknown): boolean {
+	if (typeof cwd !== "string") return false;
+	const candidate = resolve(cwd);
+	for (const root of commandRunnerRoots) {
+		const pathFromRoot = relative(root, candidate);
+		if (pathFromRoot === "" || (!pathFromRoot.startsWith("..") && !isAbsolute(pathFromRoot))) return true;
+	}
+	return false;
+}
 
 test.beforeAll(({ gateway }) => {
-	const runner = gateway.sessionManager.commandRunner as CommandRunner;
-	const original = { execFile: runner.execFile, execFileSync: runner.execFileSync, spawn: runner.spawn };
+	const runner = gateway.sessionManager.commandRunner;
 	const reject = (file: string): never => {
 		throw new Error(`non-git project fixture does not execute ${basename(file)}`);
 	};
-	runner.execFile = async file => reject(file);
-	runner.execFileSync = file => reject(file);
-	runner.spawn = undefined;
-	restoreCommandRunner = () => Object.assign(runner, original);
+	restoreCommandRunner = installCommandRunnerInterceptor(runner, {
+		label: "project-bugs",
+		async execFile(file, _args, options, next) {
+			if (!ownsCommandCwd(options?.cwd)) return next();
+			return reject(file);
+		},
+		execFileSync(file, _args, options, next) {
+			if (!ownsCommandCwd(options?.cwd)) return next();
+			return reject(file);
+		},
+	});
 });
 
 test.afterAll(() => restoreCommandRunner?.());
@@ -53,10 +70,12 @@ test.describe("Bug 3: Project registration upsert (idempotent)", () => {
 	test.beforeAll(() => {
 		// Create a real directory to use as project root.
 		projectRootPath = mkdtempSync(join(tmpdir(), "bobbit-e2e-project-"));
+		commandRunnerRoots.add(resolve(projectRootPath));
 	});
 
 	test.afterAll(() => {
 		try { rmSync(projectRootPath, { recursive: true, force: true }); } catch { /* ignore */ }
+		commandRunnerRoots.delete(resolve(projectRootPath));
 	});
 
 	test("registering the same rootPath twice with upsert returns existing project", async () => {
@@ -92,6 +111,7 @@ test.describe("Bug 3b: Config write atomicity", () => {
 
 	test.beforeEach(async () => {
 		projectRootPath = mkdtempSync(join(tmpdir(), "bobbit-e2e-config-"));
+		commandRunnerRoots.add(resolve(projectRootPath));
 
 		const resp = await apiFetch("/api/projects", {
 			method: "POST",
@@ -109,6 +129,7 @@ test.describe("Bug 3b: Config write atomicity", () => {
 	test.afterEach(async () => {
 		if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
 		try { rmSync(projectRootPath, { recursive: true, force: true }); } catch { /* ignore */ }
+		commandRunnerRoots.delete(resolve(projectRootPath));
 		projectId = "";
 	});
 
@@ -166,6 +187,7 @@ test.describe("Bug 2: Subdirectory project worktree CWD offset", () => {
 		// shape needed to register its project; constructing a Git repository here
 		// would add subprocess cost without executing or covering Git behavior.
 		repoDir = mkdtempSync(join(tmpdir(), "bobbit-e2e-subrepo-"));
+		commandRunnerRoots.add(resolve(repoDir));
 		subdirPath = join(repoDir, "packages", "my-app");
 		mkdirSync(subdirPath, { recursive: true });
 		writeFileSync(join(subdirPath, "package.json"), JSON.stringify({ name: "my-app" }));
@@ -184,6 +206,7 @@ test.describe("Bug 2: Subdirectory project worktree CWD offset", () => {
 	test.afterAll(async () => {
 		if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
 		if (repoDir) rmSync(repoDir, { recursive: true, force: true });
+		if (repoDir) commandRunnerRoots.delete(resolve(repoDir));
 	});
 
 	// TODO: subdirectory worktree CWD offset is not implemented.

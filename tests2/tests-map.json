@@ -1011,6 +1011,15 @@
       }
     },
     {
+      "path": "tests2/core/command-runner-dispatcher.test.ts",
+      "reason": "Pins owner-scoped shared CommandRunner leases: unrelated calls chain, strict owned-scope errors remain, overlapping releases cannot clobber another owner, and exec-only interception leaves sync/spawn identities untouched.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/fetch-fence.test.ts",
       "reason": "DI seam contract: fenced fetch rejects non-loopback hosts.",
       "execution": {

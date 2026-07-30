@@ -5,11 +5,27 @@ import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch } from "./_e2e/e2e-setup.js";
 import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
+import { installCommandRunnerInterceptor } from "./helpers/command-runner-dispatcher.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 let restoreCommandRunner: (() => void) | undefined;
+const commandRunnerRoots = new Set<string>();
+
+function ownsCommandCwd(cwd: unknown): cwd is string {
+	if (typeof cwd !== "string") return false;
+	const candidate = path.resolve(cwd);
+	for (const root of commandRunnerRoots) {
+		const relative = path.relative(root, candidate);
+		if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) return true;
+	}
+	return false;
+}
+
+function isGitExecutable(file: string): boolean {
+	return path.basename(file).toLowerCase().replace(/\.exe$/, "") === "git";
+}
 
 function fakeRepo(dir: string): void {
 	fs.mkdirSync(path.join(dir, ".git"), { recursive: true });
@@ -42,21 +58,24 @@ function cannedGit(cwd: string, args: readonly string[]): string {
 async function installCannedGitRunner(): Promise<void> {
 	const runtime = await loadServerTestRuntime();
 	const runner = runtime.gatewayDeps.realCommandRunner;
-	const original = { execFile: runner.execFile, execFileSync: runner.execFileSync, spawn: runner.spawn };
-	runner.execFile = async (file, args, options) => {
-		if (path.basename(file).toLowerCase().replace(/\.exe$/, "") !== "git") throw new Error(`unexpected command: ${file}`);
-		return { stdout: cannedGit(String(options?.cwd ?? ""), args), stderr: "" };
-	};
-	runner.execFileSync = (file, args, options) => {
-		if (path.basename(file).toLowerCase().replace(/\.exe$/, "") !== "git") throw new Error(`unexpected command: ${file}`);
-		return cannedGit(String(options?.cwd ?? ""), args);
-	};
-	runner.spawn = undefined;
-	restoreCommandRunner = () => Object.assign(runner, original);
+	restoreCommandRunner = installCommandRunnerInterceptor(runner, {
+		label: "multi-repo-flow-api",
+		async execFile(file, args, options, next) {
+			if (!ownsCommandCwd(options?.cwd)) return next();
+			if (!isGitExecutable(file)) throw new Error(`unexpected command: ${file}`);
+			return { stdout: cannedGit(options.cwd, args), stderr: "" };
+		},
+		execFileSync(file, args, options, next) {
+			if (!ownsCommandCwd(options?.cwd)) return next();
+			if (!isGitExecutable(file)) throw new Error(`unexpected command: ${file}`);
+			return cannedGit(options.cwd, args);
+		},
+	});
 }
 
 async function registerMultiRepoProject(): Promise<{ id: string; rootPath: string; cleanup: () => void }> {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mr-api-"));
+	commandRunnerRoots.add(path.resolve(root));
 	fakeRepo(path.join(root, "api"));
 	fakeRepo(path.join(root, "web"));
 	fs.mkdirSync(path.join(root, "shared"), { recursive: true });  // data-only repo
@@ -97,6 +116,7 @@ async function registerMultiRepoProject(): Promise<{ id: string; rootPath: strin
 		rootPath: root,
 		cleanup: () => {
 			try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
+			commandRunnerRoots.delete(path.resolve(root));
 		},
 	};
 }
@@ -108,6 +128,7 @@ test.describe("multi-repo flow API/data paths", () => {
 	test("multi-repo project exposes structured data and per-repo worktree lifecycle", async () => {
 		const project = await registerMultiRepoProject();
 		const worktreeOwnerRoot = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-mr-wt-${process.pid}-`));
+		commandRunnerRoots.add(path.resolve(worktreeOwnerRoot));
 		const customRoot = path.join(worktreeOwnerRoot, "worktrees");
 		let goalId: string | undefined;
 
@@ -193,6 +214,7 @@ test.describe("multi-repo flow API/data paths", () => {
 			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 			project.cleanup();
 			fs.rmSync(worktreeOwnerRoot, { recursive: true, force: true });
+			commandRunnerRoots.delete(path.resolve(worktreeOwnerRoot));
 		}
 	});
 });
