@@ -205,7 +205,7 @@ describe("Issue 2 — buildGateVerificationSnapshot honours liveness", () => {
 //   type CommandRecoveryMode = "detached" | "container-exec" | "pending-retry" | "unsupported"
 //   decideCommandRecoveryMode({ containerId?, hasStreamCtx, platform, hasGitBash })
 //     no streamCtx => "unsupported"; containerId truthy => "container-exec";
-//     win32 && !hasGitBash => "pending-retry"; else => "detached".
+//     win32 => "pending-retry" (with or without Git Bash); else => "detached".
 //   shouldRerunSessionStepOnResume(reason): true for cold-reviewer / readiness
 //     style reasons (re-runnable), false for genuinely unrecoverable reasons.
 // ─────────────────────────────────────────────────────────────────────────
@@ -220,11 +220,15 @@ describe("Issue 3 — decideCommandRecoveryMode classification", () => {
 		assert.equal(mode, "container-exec");
 	});
 
-	it("classifies windows-without-git-bash as pending-retry (not unsupported)", () => {
-		assert.equal(
-			verificationLogic.decideCommandRecoveryMode({ hasStreamCtx: true, platform: "win32", hasGitBash: false }),
-			"pending-retry",
-		);
+	it("classifies Windows host commands as pending-retry even with Git Bash", () => {
+		for (const hasGitBash of [false, true]) {
+			assert.equal(
+				verificationLogic.decideCommandRecoveryMode({ hasStreamCtx: true, platform: "win32", hasGitBash }),
+				"pending-retry",
+			);
+		}
+		assert.equal(verificationLogic.supportsHostDetachedCommandRecovery("win32"), false);
+		assert.equal(verificationLogic.supportsHostDetachedCommandRecovery("linux"), true);
 	});
 
 	it("uses the detached path on posix with a stream context", () => {

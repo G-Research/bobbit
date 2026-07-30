@@ -161,6 +161,7 @@ import {
 	isRestartInterruptError,
 	isRestartInterruptedStep,
 	decideCommandRecoveryMode,
+	supportsHostDetachedCommandRecovery,
 	shouldRerunSessionStepOnResume,
 	type CommandRecoveryMode,
 } from "./verification-logic.js";
@@ -2757,6 +2758,13 @@ export class VerificationHarness {
 	): { verified: boolean; pid?: number; reason: string } {
 		const identity = preReadIdentity ?? this._readCommandIdentityFile(step);
 		if (!identity.ok || !identity.pid) return { verified: false, pid: identity.pid, reason: identity.reason };
+		if (!step.containerId && !supportsHostDetachedCommandRecovery(process.platform)) {
+			return {
+				verified: false,
+				pid: identity.pid,
+				reason: "Windows host-detached command recovery is unsupported: a persisted PID cannot be atomically bound to its original process tree; refusing PID cleanup",
+			};
+		}
 		const pid = identity.pid;
 		if (!isPidAlive(pid)) return { verified: false, pid, reason: "command process is no longer alive" };
 
@@ -2920,7 +2928,14 @@ export class VerificationHarness {
 
 			step.killAttempts = (step.killAttempts ?? 0) + 1;
 			step.killLastAttemptAt = Date.now();
-			try { killTreeByPid(identity.pid, signal); } catch { /* best-effort */ }
+			const killResult = killTreeByPid(identity.pid, signal);
+			if (killResult !== "signalled") {
+				step.killUnsafeReason = killResult === "unsupported"
+					? "Persisted Windows PID cleanup is unsupported because ownership cannot be verified atomically"
+					: "Persisted command process group was unavailable before cleanup; refusing to retarget its numeric PID";
+				allSettled = false;
+				continue;
+			}
 			const exited = await this._waitForPidToExit(identity.pid);
 			if (exited) {
 				step.killCompletedAt = Date.now();
@@ -2970,7 +2985,14 @@ export class VerificationHarness {
 		this._markPersistedCommandKillIntent(active, "SIGKILL", "timeout");
 		step.killAttempts = (step.killAttempts ?? 0) + 1;
 		step.killLastAttemptAt = Date.now();
-		try { killTreeByPid(identity.pid, "SIGKILL"); } catch { /* best-effort */ }
+		const killResult = killTreeByPid(identity.pid, "SIGKILL");
+		if (killResult !== "signalled") {
+			step.killUnsafeReason = killResult === "unsupported"
+				? "Persisted Windows PID timeout cleanup is unsupported because ownership cannot be verified atomically"
+				: "Persisted command process group was unavailable before timeout cleanup; refusing to retarget its numeric PID";
+			this._persistActive();
+			return { status: "pending", reason: step.killUnsafeReason };
+		}
 		const exited = await this._waitForPidToExit(identity.pid);
 		if (exited) {
 			step.killCompletedAt = Date.now();
@@ -5186,12 +5208,12 @@ export class VerificationHarness {
 				recoveryMode === "pending-retry"
 					? (runnerNonDurable
 						? "Command step executed via an injected non-durable command-step runner (tier-1 fake); the attached path is not durable, so a gateway restart leaves the step pending/retryable (re-run on the next signal), never a fabricated verdict."
-						: "Windows command verification is using cmd.exe because Git Bash is unavailable; this attached path is not durable, so a gateway restart leaves the step pending/retryable (it is re-run on the next signal), never a fabricated verdict.")
+						: "Windows host-detached command recovery is disabled because a persisted PID cannot be atomically bound to its original process tree. A gateway restart mid-verification leaves the attached step pending/retryable (it is re-run on the next signal), never a fabricated verdict.")
 					: undefined;
 
-			if (recoveryMode === "pending-retry" && !runnerNonDurable && !VerificationHarness._warnedCmdExeDetached) {
+			if (recoveryMode === "pending-retry" && !runnerNonDurable && process.platform === "win32" && !VerificationHarness._warnedCmdExeDetached) {
 				VerificationHarness._warnedCmdExeDetached = true;
-				console.warn("[verification] Git Bash not found on Windows — durable detached command mode unavailable (cmd.exe cannot run the bash exit-file wrapper). A gateway restart mid-verification will leave command steps pending/retryable rather than recovered.");
+				console.warn("[verification] Windows host-detached command recovery is disabled: a persisted PID cannot be atomically bound to its original process tree. A gateway restart mid-verification leaves command steps pending/retryable rather than recovered.");
 			}
 			let outFile: string | undefined;
 			let errFile: string | undefined;

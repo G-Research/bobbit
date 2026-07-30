@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { spawnTracked } from "../../src/server/agent/spawn-tree.js";
+import { killTreeByPid, spawnTracked } from "../../src/server/agent/spawn-tree.js";
 import { createManualClock } from "../harness/clock.js";
 
 type NativeSpawn = typeof import("node:child_process").spawn;
@@ -220,5 +220,19 @@ describe("spawnTracked timeout cleanup", () => {
 		root.emit("close", 0, null);
 		tracked.killTree();
 		expect(calls).toEqual([{ cmd: "node", args: ["worker"] }]);
+	});
+
+	it("never retargets a persisted Windows PID or falls back after a lost POSIX group", () => {
+		const calls: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+		const killImpl = (pid: number, signal: NodeJS.Signals) => {
+			calls.push({ pid, signal });
+			throw new Error("original process group is gone");
+		};
+
+		expect(killTreeByPid(424_242, "SIGKILL", { platform: "win32", killImpl })).toBe("unsupported");
+		expect(calls).toEqual([]);
+
+		expect(killTreeByPid(424_242, "SIGKILL", { platform: "linux", killImpl })).toBe("invalid");
+		expect(calls).toEqual([{ pid: -424_242, signal: "SIGKILL" }]);
 	});
 });

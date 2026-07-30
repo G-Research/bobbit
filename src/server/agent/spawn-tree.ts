@@ -342,29 +342,32 @@ export function killAllTracked(signal: "SIGTERM" | "SIGKILL" = "SIGKILL", includ
  * recovery path (`_resumeCommandStep`) where the persisted pid is also
  * the pgid (because the original spawn used `detached: true`).
  *
- * On Windows, falls back to `taskkill /T /F /PID <pid>`.
+ *
+ * This is intentionally unsupported on Windows. A persisted PID has no stable
+ * Job-object handle after a gateway restart, so taskkill could target a reused
+ * PID. Callers must leave the command pending/retryable instead of issuing an
+ * asynchronous best-effort taskkill or inferring that descendants died because
+ * the persisted root disappeared.
  */
-export function killTreeByPid(pid: number, signal: NodeJS.Signals = "SIGKILL"): void {
-	if (!pid) return;
-	if (process.platform === "win32") {
-		try {
-			const tk = spawn("taskkill", ["/T", "/F", "/PID", String(pid)], {
-				stdio: "ignore",
-				windowsHide: true,
-			});
-			tk.on("error", () => { /* best-effort */ });
-			tk.unref?.();
-		} catch { /* ignore */ }
-		// Do not enumerate descendants by numeric parent PID as a fallback.
-		// Parent PIDs can be reused after a root exit, making that PowerShell/WMI
-		// walk capable of killing an unrelated process tree.
-		return;
+export type PersistedTreeKillResult = "signalled" | "unsupported" | "invalid";
+
+export function killTreeByPid(
+	pid: number,
+	signal: NodeJS.Signals = "SIGKILL",
+	opts: { platform?: NodeJS.Platform; killImpl?: (pid: number, signal: NodeJS.Signals) => void } = {},
+): PersistedTreeKillResult {
+	if (!Number.isFinite(pid) || pid <= 0) return "invalid";
+	if ((opts.platform ?? process.platform) === "win32") return "unsupported";
+	const kill = opts.killImpl ?? process.kill;
+	// The detached wrapper makes its PID the process-group ID. Do not fall back
+	// to the positive PID: a lost group is an ownership boundary, and a later
+	// numeric-PID action could be retargeted after reuse.
+	try {
+		kill(-pid, signal);
+		return "signalled";
+	} catch {
+		return "invalid";
 	}
-	// Try pgid first (matches detached spawn). If the negative-pid call
-	// fails (e.g. process wasn't detached, or pgid no longer exists), fall
-	// back to the immediate-child kill so we at least target *something*.
-	try { process.kill(-pid, signal); return; } catch { /* fall through */ }
-	try { process.kill(pid, signal); } catch { /* already dead */ }
 }
 
 /** Test-only: number of tracked children currently registered. */
