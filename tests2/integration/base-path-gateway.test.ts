@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 
-import { setProjectRoot } from "../../src/server/bobbit-dir.js";
+import { getProjectRoot, resetAgentDirStateForTests, setProjectRoot } from "../../src/server/bobbit-dir.js";
 import { realClock, realCommandRunner, realFs, type GatewayDeps } from "../../src/server/gateway-deps.js";
 import { scaffoldBobbitDir } from "../../src/server/scaffold.js";
 import { createGateway } from "../../src/server/server.js";
@@ -36,6 +36,17 @@ const ENV_KEYS = [
 	"NODE_ENV",
 ] as const;
 const envSnapshot = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]])) as Record<(typeof ENV_KEYS)[number], string | undefined>;
+const projectRootSnapshot = getProjectRoot();
+
+function restoreProcessState(): void {
+	for (const key of ENV_KEYS) {
+		const previous = envSnapshot[key];
+		if (previous === undefined) delete process.env[key];
+		else process.env[key] = previous;
+	}
+	setProjectRoot(projectRootSnapshot);
+	resetAgentDirStateForTests();
+}
 
 interface RunningGateway {
 	root: string;
@@ -112,6 +123,7 @@ async function bootGateway(basePath: string): Promise<RunningGateway> {
 	process.env.BOBBIT_LLM_REVIEW_SKIP = "1";
 	process.env.NODE_ENV = "test";
 	setProjectRoot(root);
+	resetAgentDirStateForTests();
 	scaffoldBobbitDir(root);
 
 	const gateway = createGateway({
@@ -142,7 +154,12 @@ async function bootGateway(basePath: string): Promise<RunningGateway> {
 		gateway,
 		async shutdown() {
 			try { await gateway.shutdown(); }
-			finally { rmSync(root, { recursive: true, force: true }); }
+			finally {
+				// createGateway resolves these process-wide values during startup. Restore
+				// every one before deleting the directories they previously referenced.
+				restoreProcessState();
+				rmSync(root, { recursive: true, force: true });
+			}
 		},
 	};
 }
@@ -471,11 +488,6 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("root-mounted gateway compati
 
 	afterAll(async () => {
 		await running?.shutdown();
-		for (const key of ENV_KEYS) {
-			const previous = envSnapshot[key];
-			if (previous === undefined) delete process.env[key];
-			else process.env[key] = previous;
-		}
 	}, 60_000);
 
 	it("retains root API, shell, manifest, cookie, preview wire shape, and viewer socket behavior", async () => {
