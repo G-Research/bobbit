@@ -5,8 +5,11 @@ import { applySidePanelWorkspaceFromServer } from "../../src/app/side-panel-work
 import type { SidePanelWorkspace } from "../../src/shared/side-panel-workspace.js";
 import { selectHtmlPreviewTab, selectReviewWorkspaceTab } from "../../src/app/preview-panel.js";
 import {
+	assistantProposalType,
+	buildPanelWorkspaceTabs,
 	CHAT_PANEL_TAB_ID,
 	LIVE_PREVIEW_PANEL_TAB_ID,
+	normalizeSidePanelTabs,
 	panelWorkspaceSessionKey,
 	previewTabDisplayTitle,
 	previewVersionedTabId,
@@ -35,6 +38,8 @@ const PROJECT_ROOT = "/tmp/dynamic-workspace";
 const SESSION_A = "dynamic-workspace-session-a";
 const SESSION_B = "dynamic-workspace-session-b";
 const STORE_KEY = "bobbit-dynamic-panel-workspace-fixture";
+const FIXTURE_GATEWAY_URL = "http://fixture.test";
+const FIXTURE_GATEWAY_TOKEN = "fixture-token";
 
 const PROJECT: Project = {
 	id: PROJECT_ID,
@@ -268,6 +273,10 @@ function resetState(options: { clearPersisted?: boolean; selectedSessionId?: str
 	if (options.clearPersisted ?? true) {
 		try { localStorage.removeItem(STORE_KEY); } catch { /* ignore */ }
 	}
+	// Install a valid gateway pair before annotation cleanup reaches the strict
+	// browser URL boundary; never use a file:// placeholder as a gateway URL.
+	localStorage.setItem("gateway.url", FIXTURE_GATEWAY_URL);
+	localStorage.setItem("gateway.token", FIXTURE_GATEWAY_TOKEN);
 	fetchLog = [];
 	promptLog = [];
 	knownPreviews = [];
@@ -306,8 +315,6 @@ function resetState(options: { clearPersisted?: boolean; selectedSessionId?: str
 	setRemoteAgent(selectedSessionId);
 	applyWorkspace(selectedSessionId);
 	window.location.hash = `#/session/${selectedSessionId}`;
-	localStorage.setItem("gateway.url", window.location.origin);
-	localStorage.setItem("gateway.token", "fixture-token");
 	addFixtureStyle();
 }
 
@@ -328,7 +335,41 @@ function rehydrateState(): void {
 	applyWorkspace(currentSessionId());
 }
 
+function syncHttpFixtureWorkspace(): void {
+	const sessionId = currentSessionId();
+	const sid = workspaceKey(sessionId);
+	const derivedTabs = buildPanelWorkspaceTabs({
+		sessionId,
+		isPreviewSession: state.isPreviewSession,
+		previewEntry: state.previewPanelEntry,
+		previewContentHash: (state as any).previewPanelContentHash,
+		activeProposalTypes: Object.keys(state.activeProposals || {}) as any,
+		assistantProposalType: assistantProposalType(state.assistantType),
+		reviewTitles: [...state.reviewDocuments.keys()],
+		reviewPanelOpen: state.reviewPanelOpen,
+		inboxPanelOpen: state.inboxPanelOpen,
+		inboxHasPending: state.inboxEntries.some((entry) => entry.state === "pending"),
+	});
+	const tabs = normalizeSidePanelTabs(state, sessionId, derivedTabs).map((tab) => ({
+		...tab,
+		source: { ...tab.source, type: tab.kind === "preview" ? "preview" : tab.source.type, sessionId },
+		updatedAt: Date.now(),
+	}));
+	const existing = state.sidePanelWorkspaceBySession[sid];
+	const requestedActive = state.panelWorkspaceActiveBySession[sid] || state.activePanelTabId;
+	applySidePanelWorkspaceFromServer({
+		version: 1,
+		sessionId,
+		revision: Math.max(existing?.revision || 0, state.lastWorkspaceRevisionBySession[sid] || 0) + 1,
+		tabs: tabs as any,
+		activeTabId: tabs.some((tab) => tab.id === requestedActive) ? requestedActive : tabs[0]?.id || "",
+		sizeMode: existing?.sizeMode || "split",
+		updatedAt: Date.now(),
+	}, { source: "rest", force: true, skipRender: true });
+}
+
 function renderNow(): void {
+	syncHttpFixtureWorkspace();
 	persistFixture();
 	renderApp();
 }
@@ -568,6 +609,15 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	if (url.startsWith("/api/sandbox-status")) return response({ available: false, configured: false });
 	if (url.includes("/review/annotations")) return response({ annotations: {}, submitted: false });
 	if (url.includes("/review/submitted")) return response({ submitted: false });
+	if (url.includes("/side-panel-workspace")) {
+		const match = /\/api\/sessions\/([^/]+)\/side-panel-workspace/.exec(url);
+		const sessionId = match ? decodeURIComponent(match[1]) : currentSessionId();
+		const sid = workspaceKey(sessionId);
+		const workspace = state.sidePanelWorkspaceBySession[sid];
+		return workspace
+			? response({ ...workspace, revision: workspace.revision + 1, updatedAt: Date.now() })
+			: response({ version: 1, sessionId, revision: 0, tabs: [], activeTabId: "", sizeMode: "split", updatedAt: Date.now() });
+	}
 	if (url.includes("/proposal/") || url.includes("/draft")) return response({ ok: true });
 	if (url.startsWith("/api/sessions/") && method === "PATCH") return response({ ok: true });
 	if (url.startsWith("/api/preview/mount")) {
@@ -595,8 +645,8 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 setRenderApp(doRenderApp);
 
 (window as any).__dynamicPanelWorkspaceSessions = { a: SESSION_A, b: SESSION_B };
-(window as any).__resetDynamicPanelWorkspaceFixture = () => { resetState(); doRenderApp(); };
-(window as any).__rehydrateDynamicPanelWorkspaceFixture = () => { rehydrateState(); doRenderApp(); };
+(window as any).__resetDynamicPanelWorkspaceFixture = () => { resetState(); renderNow(); };
+(window as any).__rehydrateDynamicPanelWorkspaceFixture = () => { rehydrateState(); renderNow(); };
 (window as any).__selectDynamicWorkspaceSession = selectSession;
 (window as any).__setDynamicGoalProposal = setGoalProposal;
 (window as any).__setDynamicLivePreview = setLivePreview;
