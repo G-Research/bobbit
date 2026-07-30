@@ -14,17 +14,36 @@ function json(body: unknown, status = 200): Response {
 	});
 }
 
-function deferred<T>() {
+interface Deferred<T> {
+	promise: Promise<T>;
+	resolve: (value: T | PromiseLike<T>) => void;
+	reject: (reason?: unknown) => void;
+}
+
+function deferred<T>(): Deferred<T> {
 	let resolve!: (value: T | PromiseLike<T>) => void;
 	let reject!: (reason?: unknown) => void;
 	const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
 	return { promise, resolve, reject };
 }
 
-async function flush(): Promise<void> {
-	await Promise.resolve();
-	await Promise.resolve();
-	await new Promise<void>((resolve) => setTimeout(resolve, 0));
+// `agent_end` and polling intentionally fire-and-forget this method. Observe
+// the real promise instead of guessing how many DOM/event-loop turns it needs.
+let pendingBeepCompletions: Promise<void>[] = [];
+let beepCompletionWaiters: Deferred<void>[] = [];
+
+function observeNextBeepCompletion(): Promise<void> {
+	const pending = pendingBeepCompletions.shift();
+	if (pending) return pending;
+	const waiter = deferred<void>();
+	beepCompletionWaiters.push(waiter);
+	return waiter.promise;
+}
+
+function recordBeepCompletion(completion: Promise<void>): void {
+	const waiter = beepCompletionWaiters.shift();
+	if (waiter) completion.then(waiter.resolve, waiter.reject);
+	else pendingBeepCompletions.push(completion);
 }
 
 function session(id: string, projectId: string, status = "idle"): GatewaySession {
@@ -42,9 +61,31 @@ function session(id: string, projectId: string, status = "idle"): GatewaySession
 
 class FakeAudioContext {
 	static instances: FakeAudioContext[] = [];
+	private static pendingInstances: FakeAudioContext[] = [];
+	private static instanceWaiters: Deferred<FakeAudioContext>[] = [];
+
+	static reset(): void {
+		FakeAudioContext.instances = [];
+		FakeAudioContext.pendingInstances = [];
+		FakeAudioContext.instanceWaiters = [];
+	}
+
+	static observeNextInstance(): Promise<FakeAudioContext> {
+		const pending = FakeAudioContext.pendingInstances.shift();
+		if (pending) return Promise.resolve(pending);
+		const waiter = deferred<FakeAudioContext>();
+		FakeAudioContext.instanceWaiters.push(waiter);
+		return waiter.promise;
+	}
+
 	currentTime = 0;
 	destination = {};
-	constructor() { FakeAudioContext.instances.push(this); }
+	constructor() {
+		FakeAudioContext.instances.push(this);
+		const waiter = FakeAudioContext.instanceWaiters.shift();
+		if (waiter) waiter.resolve(this);
+		else FakeAudioContext.pendingInstances.push(this);
+	}
 	createOscillator() {
 		return {
 			type: "",
@@ -111,7 +152,15 @@ beforeEach(() => {
 	setRenderApp(() => {});
 
 	delete document.documentElement.dataset.playAgentFinishSound;
-	FakeAudioContext.instances = [];
+	FakeAudioContext.reset();
+	pendingBeepCompletions = [];
+	beepCompletionWaiters = [];
+	const playNotificationBeep = RemoteAgent.playNotificationBeep;
+	vi.spyOn(RemoteAgent, "playNotificationBeep").mockImplementation((source) => {
+		const completion = playNotificationBeep(source);
+		recordBeepCompletion(completion);
+		return completion;
+	});
 	vi.stubGlobal("AudioContext", FakeAudioContext);
 	Object.defineProperty(window, "AudioContext", { value: FakeAudioContext, configurable: true, writable: true });
 	vi.stubGlobal("Image", ImmediatelyLoadedImage);
@@ -156,6 +205,7 @@ describe("foreground agent_end notification source", () => {
 			const sourceProject = `source-${testCase.raw}`;
 			const viewedProject = `viewed-${testCase.raw}`;
 			const config = deferred<Response>();
+			const configRequested = deferred<void>();
 			const configPaths: string[] = [];
 			document.documentElement.dataset.playAgentFinishSound = testCase.global;
 			state.selectedSessionId = "viewed-session";
@@ -168,22 +218,26 @@ describe("foreground agent_end notification source", () => {
 				const path = new URL(String(input), window.location.origin).pathname;
 				if (path === `/api/projects/${sourceProject}/config`) {
 					configPaths.push(path);
+					configRequested.resolve();
 					return config.promise;
 				}
 				throw new Error(`unexpected request ${path}`);
 			});
 
+			const beepCompleted = observeNextBeepCompletion();
+			const audioCreated = testCase.audio ? FakeAudioContext.observeNextInstance() : undefined;
 			const agent = new RemoteAgent();
 			(agent as any)._sessionId = sourceId;
 			(agent as any).handleAgentEvent({ type: "agent_end" });
-			await flush();
+			await configRequested.promise;
 			expect(configPaths).toHaveLength(1);
 			expect(badgeCalls).toHaveBeenCalledTimes(1);
 			expect(FakeAudioContext.instances).toHaveLength(0);
 			expect(configPaths).toEqual([`/api/projects/${sourceProject}/config`]);
 
 			config.resolve(json({ [PROJECT_PLAY_FINISH_SOUND_KEY]: testCase.raw }));
-			await flush();
+			await beepCompleted;
+			if (audioCreated) await audioCreated;
 			expect(FakeAudioContext.instances).toHaveLength(testCase.audio);
 			expect(badgeCalls).toHaveBeenCalledTimes(1);
 		});
@@ -207,10 +261,13 @@ describe("foreground agent_end notification source", () => {
 			return json({ [PROJECT_PLAY_FINISH_SOUND_KEY]: "false" });
 		});
 
+		const beepCompleted = observeNextBeepCompletion();
+		const audioCreated = FakeAudioContext.observeNextInstance();
 		const agent = new RemoteAgent();
 		(agent as any)._sessionId = "finishing";
 		(agent as any).handleAgentEvent({ type: "agent_end" });
-		await flush();
+		await beepCompleted;
+		await audioCreated;
 		expect(FakeAudioContext.instances).toHaveLength(1);
 		expect(requests).toEqual(["/api/projects/project-force-on/config"]);
 		expect(badgeCalls).toHaveBeenCalledTimes(1);
@@ -221,6 +278,8 @@ describe("background polling notification source", () => {
 	it("does not await unrelated preloads, badges immediately, deduplicates source loading, and resolves audio from the transitioning session", async () => {
 		const activeConfig = deferred<Response>();
 		const sourceConfig = deferred<Response>();
+		const activeConfigRequested = deferred<void>();
+		const sourceConfigRequested = deferred<void>();
 		const configRequests = new Map<string, number>();
 		let sessionPoll = 0;
 		document.documentElement.dataset.playAgentFinishSound = "false";
@@ -250,10 +309,12 @@ describe("background polling notification source", () => {
 			]);
 			if (path === "/api/projects/project-active-off/config") {
 				configRequests.set(path, (configRequests.get(path) ?? 0) + 1);
+				activeConfigRequested.resolve();
 				return activeConfig.promise;
 			}
 			if (path === "/api/projects/project-source-on/config") {
 				configRequests.set(path, (configRequests.get(path) ?? 0) + 1);
+				sourceConfigRequested.resolve();
 				return sourceConfig.promise;
 			}
 			throw new Error(`unexpected request ${url.href}`);
@@ -262,16 +323,17 @@ describe("background polling notification source", () => {
 		let firstResolved = false;
 		const firstRefresh = refreshSessions().then(() => { firstResolved = true; });
 		await expect(firstRefresh).resolves.toBeUndefined();
-		await flush();
+		await Promise.all([activeConfigRequested.promise, sourceConfigRequested.promise]);
 		expect(configRequests.size).toBe(2);
 		expect(firstResolved).toBe(true);
 		expect(state.gatewaySessions.find((item) => item.id === "background")?.status).toBe("streaming");
 		expect(FakeAudioContext.instances).toHaveLength(0);
 
 		let secondResolved = false;
+		const beepCompleted = observeNextBeepCompletion();
+		const audioCreated = FakeAudioContext.observeNextInstance();
 		const secondRefresh = refreshSessions().then(() => { secondResolved = true; });
 		await expect(secondRefresh).resolves.toBeUndefined();
-		await flush();
 		expect(secondResolved).toBe(true);
 		expect(state.gatewaySessions.find((item) => item.id === "background")?.status).toBe("idle");
 		expect(badgeCalls).toHaveBeenCalledTimes(1);
@@ -281,12 +343,13 @@ describe("background polling notification source", () => {
 
 		// Only the notification source settles. The unrelated active-project preload remains pending.
 		sourceConfig.resolve(json({ [PROJECT_PLAY_FINISH_SOUND_KEY]: "true" }));
-		await flush();
+		await beepCompleted;
+		await audioCreated;
 		expect(FakeAudioContext.instances).toHaveLength(1);
 		expect(badgeCalls).toHaveBeenCalledTimes(1);
 		expect(configRequests.get("/api/projects/project-source-on/config")).toBe(1);
-		activeConfig.resolve(json({ [PROJECT_PLAY_FINISH_SOUND_KEY]: "false" }));
-		await flush();
+		// The unrelated preload deliberately remains pending: it must not block
+		// either refresh or the source project's observable beep completion.
 	});
 
 	it("keeps the badge when the transitioning source project explicitly disables audio", async () => {
@@ -305,9 +368,10 @@ describe("background polling notification source", () => {
 			throw new Error(`unexpected request ${path}`);
 		});
 
+		const beepCompleted = observeNextBeepCompletion();
 		await refreshSessions();
 		await refreshSessions();
-		await flush();
+		await beepCompleted;
 		expect(badgeCalls).toHaveBeenCalledTimes(1);
 		expect(FakeAudioContext.instances).toHaveLength(0);
 		expect(badgeCalls).toHaveBeenCalledTimes(1);
