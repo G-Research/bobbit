@@ -80,6 +80,12 @@ try {
 		lockWaitMs: 5_000,
 		lockPollMs: 5,
 		beforeAcquireLock: () => writeFileSync(marker("caller-" + callerId + ".missed"), "missed"),
+		afterRecoveryClaim: () => {
+			if (mode === "recovery") {
+				writeFileSync(marker("recovery-claimed"), "claimed");
+				waitForRelease();
+			}
+		},
 		runBuild: () => {
 			if (mode === "fail") {
 				appendFileSync(marker("build-count"), "failed\n");
@@ -261,9 +267,11 @@ function resetLockFixture(root = repoRoot): void {
 	rmSync(join(root, "dist"), { recursive: true, force: true });
 	rmSync(join(root, ".profiles"), { recursive: true, force: true });
 	for (const name of [
-		"allow-build-finish", "build-started", "build-count",
+		"allow-build-finish", "build-started", "build-count", "recovery-claimed",
 		"caller-leader.started", "caller-leader.missed", "caller-waiter.started", "caller-waiter.missed",
+		"caller-reclaimer.started", "caller-reclaimer.missed", "caller-successor.started", "caller-successor.missed",
 		"report-leader.json", "report-waiter.json", "report-failed.json", "report-repaired.json", "report-stale.json",
+		"report-reclaimer.json", "report-successor.json",
 	]) {
 		rmSync(join(root, name), { force: true });
 	}
@@ -327,5 +335,31 @@ describe.sequential("dist build worktree lock", () => {
 		assert.equal(recovered.report.ok, true, "a dead stale owner must be reclaimed without manual cleanup");
 		assert.deepEqual(buildCount(), ["normal"]);
 		assert.equal(existsSync(staleLock), false, "the replacement owner must release the recovered lock");
+	});
+
+	it("does not remove a successor while recovery has claimed a stale owner", async () => {
+		resetLockFixture();
+		const staleLock = distBuildLockPath(repoRoot);
+		mkdirSync(dirname(staleLock), { recursive: true });
+		writeFileSync(staleLock, `${JSON.stringify({ pid: 0, token: "released-owner" })}\n`);
+		const old = new Date(Date.now() - 100);
+		utimesSync(staleLock, old, old);
+
+		const reclaimer = runDistWorker(workerFile, repoRoot, "recovery", "reclaimer");
+		await waitForFile(join(repoRoot, "recovery-claimed"));
+		const successor = runDistWorker(workerFile, repoRoot, "normal", "successor");
+		await waitForFile(join(repoRoot, "caller-successor.missed"));
+		assert.equal(
+			JSON.parse(readFileSync(staleLock, "utf8")).token,
+			"released-owner",
+			"a successor started during recovery must not replace the claimed stale lock",
+		);
+		writeFileSync(join(repoRoot, "allow-build-finish"), "release");
+
+		const [reclaimerResult, successorResult] = await Promise.all([reclaimer, successor]);
+		assert.equal(reclaimerResult.report.ok, true);
+		assert.equal(successorResult.report.ok, true);
+		assert.deepEqual(buildCount(), ["normal"], "the successor may build only after the recovery claim is released");
+		assert.match(reclaimerResult.stdout, /cache hit after lock/);
 	});
 });

@@ -51,6 +51,8 @@ const MANIFEST_SCHEMA = 1;
 // parallel while concurrent browser/E2E coordinators in one worktree serialize.
 const LOCK_DIR = [".profiles", "testing-v2"];
 const LOCK_FILENAME = "ensure-dist-build.lock";
+const RECOVERY_SUFFIX = ".recovery";
+const ACQUIRE_INTENT_PREFIX = ".acquire-";
 const LOCK_STALE_MS = 30_000;
 const LOCK_WAIT_MS = 10 * 60_000;
 const LOCK_POLL_MS = 40;
@@ -154,21 +156,55 @@ function readLockOwner(lockPath) {
 	}
 }
 
-/**
- * Recover only an old lock whose owner is demonstrably gone (or malformed).
- * The stale threshold protects a creator between O_EXCL creation and its owner
- * record write; PID liveness prevents a slow but live build being stolen.
- */
-function recoverStaleLock(lockPath, staleMs) {
+function recoveryPathFor(lockPath) {
+	return `${lockPath}${RECOVERY_SUFFIX}`;
+}
+
+function acquireIntentPathFor(lockPath, token) {
+	return `${lockPath}${ACQUIRE_INTENT_PREFIX}${token}`;
+}
+
+function isContended(error) {
+	// Windows can report delete-pending lock contention as EPERM/EACCES.
+	return error?.code === "EEXIST" || error?.code === "EPERM" || error?.code === "EACCES";
+}
+
+function releaseOwnedFile(path, token) {
+	if (readLockOwner(path).token !== token) return;
+	try { unlinkSync(path); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+}
+
+function createOwnedFile(path, owner) {
+	let fd;
+	let created = false;
 	try {
-		const ageMs = Date.now() - statSync(lockPath).mtimeMs;
-		const owner = readLockOwner(lockPath);
+		fd = openSync(path, "wx");
+		created = true;
+		writeSync(fd, `${JSON.stringify(owner)}\n`);
+		closeSync(fd);
+		fd = undefined;
+	} catch (error) {
+		if (fd !== undefined) closeSync(fd);
+		// O_EXCL made this process the sole creator. If owner publication fails,
+		// remove its empty/partial file before it can block every coordinator.
+		if (created) {
+			try { unlinkSync(path); } catch (unlinkError) { if (unlinkError?.code !== "ENOENT") throw unlinkError; }
+		}
+		throw error;
+	}
+}
+
+function hasRecoveryClaim(lockPath) {
+	return existsSync(recoveryPathFor(lockPath));
+}
+
+function discardDeadRecoveryClaim(recoveryPath, staleMs) {
+	try {
+		const ageMs = Date.now() - statSync(recoveryPath).mtimeMs;
+		const owner = readLockOwner(recoveryPath);
 		if (ageMs < staleMs || pidAlive(owner.pid)) return false;
-		// A competing reclaimer may have removed the stale file and published a
-		// fresh owner while we inspected it. Recheck the nonce before deleting.
-		const current = readLockOwner(lockPath);
-		if (current.pid !== owner.pid || current.token !== owner.token) return false;
-		unlinkSync(lockPath);
+		if (readLockOwner(recoveryPath).token !== owner.token) return false;
+		unlinkSync(recoveryPath);
 		return true;
 	} catch (error) {
 		if (error?.code === "ENOENT") return true;
@@ -176,41 +212,101 @@ function recoverStaleLock(lockPath, staleMs) {
 	}
 }
 
-function acquireDistBuildLock(repoRoot, { staleMs = LOCK_STALE_MS, waitMs = LOCK_WAIT_MS, pollMs = LOCK_POLL_MS } = {}) {
+function acquisitionIntents(lockPath) {
+	const prefix = `${LOCK_FILENAME}${ACQUIRE_INTENT_PREFIX}`;
+	try {
+		return readdirSync(dirname(lockPath)).filter(name => name.startsWith(prefix));
+	} catch (error) {
+		if (error?.code === "ENOENT") return [];
+		throw error;
+	}
+}
+
+/**
+ * Claim stale recovery before inspecting the lock. Acquirers register an intent
+ * before testing the claim; the claimant drains earlier intents, so no process
+ * can publish a successor between stale-owner validation and removal.
+ */
+function recoverStaleLock(lockPath, staleMs, pollMs, deadline, afterRecoveryClaim) {
+	const recoveryPath = recoveryPathFor(lockPath);
+	const token = randomUUID();
+	try {
+		createOwnedFile(recoveryPath, { pid: process.pid, token, createdAt: new Date().toISOString() });
+	} catch (error) {
+		if (!isContended(error)) throw error;
+		discardDeadRecoveryClaim(recoveryPath, staleMs);
+		return false;
+	}
+	try {
+		afterRecoveryClaim?.();
+		while (acquisitionIntents(lockPath).length > 0) {
+			if (Date.now() >= deadline) return false;
+			sleepSync(pollMs);
+		}
+		if (readLockOwner(recoveryPath).token !== token) return false;
+		try {
+			const ageMs = Date.now() - statSync(lockPath).mtimeMs;
+			const owner = readLockOwner(lockPath);
+			if (ageMs < staleMs || pidAlive(owner.pid)) return false;
+			// New acquisition intents are blocked by our recovery claim. Once the
+			// pre-claim intents have drained, this unlink cannot target a successor.
+			unlinkSync(lockPath);
+			return true;
+		} catch (error) {
+			if (error?.code === "ENOENT") return true;
+			throw error;
+		}
+	} finally {
+		releaseOwnedFile(recoveryPath, token);
+	}
+}
+
+function acquireDistBuildLock(repoRoot, {
+	staleMs = LOCK_STALE_MS,
+	waitMs = LOCK_WAIT_MS,
+	pollMs = LOCK_POLL_MS,
+	afterRecoveryClaim,
+} = {}) {
 	if (!Number.isFinite(staleMs) || staleMs < 0) throw new Error("[ensure-dist] lock staleMs must be a non-negative number");
 	if (!Number.isFinite(waitMs) || waitMs < 0) throw new Error("[ensure-dist] lock waitMs must be a non-negative number");
 	if (!Number.isFinite(pollMs) || pollMs < 1) throw new Error("[ensure-dist] lock pollMs must be a positive number");
 	const lockPath = distBuildLockPath(repoRoot);
 	mkdirSync(dirname(lockPath), { recursive: true });
 	const deadline = Date.now() + waitMs;
-	const token = randomUUID();
 	for (;;) {
-		let fd;
+		const token = randomUUID();
+		const intentPath = acquireIntentPathFor(lockPath, token);
+		let acquired = false;
 		try {
-			fd = openSync(lockPath, "wx");
-			writeSync(fd, `${JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() })}\n`);
-			closeSync(fd);
-			fd = undefined;
+			createOwnedFile(intentPath, { pid: process.pid, token, createdAt: new Date().toISOString() });
+			if (!hasRecoveryClaim(lockPath)) {
+				try {
+					createOwnedFile(lockPath, { pid: process.pid, token, createdAt: new Date().toISOString() });
+					if (!hasRecoveryClaim(lockPath) && readLockOwner(lockPath).token === token) {
+						acquired = true;
+					} else {
+						releaseOwnedFile(lockPath, token);
+					}
+				} catch (error) {
+					if (!isContended(error)) throw error;
+				}
+			}
+		} finally {
+			releaseOwnedFile(intentPath, token);
+		}
+		if (acquired) {
 			let released = false;
 			return () => {
 				if (released) return;
 				released = true;
-				// Never unlink a successor lock after our own lock has been recovered.
-				if (readLockOwner(lockPath).token === token) {
-					try { unlinkSync(lockPath); } catch (error) { if (error?.code !== "ENOENT") throw error; }
-				}
+				releaseOwnedFile(lockPath, token);
 			};
-		} catch (error) {
-			if (fd !== undefined) closeSync(fd);
-			// Windows can report delete-pending lock contention as EPERM/EACCES.
-			const contended = error?.code === "EEXIST" || error?.code === "EPERM" || error?.code === "EACCES";
-			if (!contended) throw error;
-			recoverStaleLock(lockPath, staleMs);
-			if (Date.now() >= deadline) {
-				throw new Error(`[ensure-dist] timed out waiting for worktree build lock: ${lockPath}`);
-			}
-			sleepSync(pollMs);
 		}
+		recoverStaleLock(lockPath, staleMs, pollMs, deadline, afterRecoveryClaim);
+		if (Date.now() >= deadline) {
+			throw new Error(`[ensure-dist] timed out waiting for worktree build lock: ${lockPath}`);
+		}
+		sleepSync(pollMs);
 	}
 }
 
@@ -238,7 +334,7 @@ export function validateDistBuild(repoRoot, key) {
  * manifest atomically. Revalidation after acquiring the mutex is essential:
  * waiters must consume the first builder's manifest, never rebuild it.
  *
- * `runBuild`, lock timings, and `beforeAcquireLock` are injectable solely for
+ * `runBuild`, lock timings, and test hooks are injectable solely for
  * deterministic fixtures; production uses the normal build command and
  * conservative dead-owner bounds.
  */
@@ -249,6 +345,7 @@ export function ensureDistBuild({
 	lockWaitMs,
 	lockPollMs,
 	beforeAcquireLock,
+	afterRecoveryClaim,
 } = {}) {
 	let key = computeDistBuildKey(repoRoot);
 	if (validateDistBuild(repoRoot, key)) {
@@ -261,6 +358,7 @@ export function ensureDistBuild({
 		...(lockStaleMs === undefined ? {} : { staleMs: lockStaleMs }),
 		...(lockWaitMs === undefined ? {} : { waitMs: lockWaitMs }),
 		...(lockPollMs === undefined ? {} : { pollMs: lockPollMs }),
+		...(afterRecoveryClaim === undefined ? {} : { afterRecoveryClaim }),
 	});
 	try {
 		// Another coordinator may have completed the build while we waited.
