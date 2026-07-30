@@ -229,10 +229,13 @@ describe("direct unit-stage scheduling", () => {
 		);
 	});
 
-	it("pins workflow retry safety for the legacy E2E runner", () => {
+	it("pins normal and retry-free workflow safety for the legacy E2E runner", () => {
 		const source = readFileSync(LEGACY_E2E_CONFIG_PATH, "utf8");
-		assert.match(source, /^\s*retries:\s*3\s*,/m);
-		assert.doesNotMatch(source, /^\s*retries:\s*(?!3\b)[1-9]\d*\s*,/m);
+		assert.match(source, /BOBBIT_V2_RETRY_FREE\s*===\s*["']1["']/);
+		assert.match(
+			source,
+			/retries:\s*(?:retryFree|process\.env\.BOBBIT_V2_RETRY_FREE\s*===\s*["']1["'])\s*\?\s*0\s*:\s*3\s*,/m,
+		);
 	});
 
 	it("requires retry-free first-attempt evidence for cross-OS qualification", () => {
