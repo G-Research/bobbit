@@ -73,6 +73,35 @@ describe("migrateProjectYaml", () => {
 			"top-level worktree_setup_command should move onto the component");
 	});
 
+	it("migrates CRLF project and workflow YAML fixtures", () => {
+		const yamlFile = path.join(configDir, "project.yaml");
+		fs.writeFileSync(yamlFile, [
+			"build_command: npm run build",
+			"qa_start_command: node server.js",
+		].join("\r\n") + "\r\n");
+
+		const wfDir = path.join(configDir, "workflows");
+		fs.mkdirSync(wfDir, { recursive: true });
+		fs.writeFileSync(path.join(wfDir, "feature.yaml"), [
+			"id: feature",
+			"name: Feature",
+			"gates:",
+			"  - id: implementation",
+			"    name: Implementation",
+		].join("\r\n") + "\r\n");
+
+		const result = migrateProjectYaml({ configDir, projectName: "crlf-app" });
+		assert.equal(result.migrated, true);
+		assert.equal(result.workflowsMigrated, 1);
+
+		const out = readYaml(yamlFile);
+		const component = (out.components as Array<Record<string, unknown>>)[0];
+		assert.equal(component.name, "crlf-app");
+		assert.equal((component.commands as Record<string, string>).build, "npm run build");
+		assert.equal((component.config as Record<string, string>).qa_start_command, "node server.js");
+		assert.equal((out.workflows as Record<string, Record<string, string>>).feature.name, "Feature");
+	});
+
 	it("drops empty/whitespace command values", () => {
 		const yamlFile = path.join(configDir, "project.yaml");
 		fs.writeFileSync(yamlFile, yaml.stringify({

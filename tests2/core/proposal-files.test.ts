@@ -106,6 +106,36 @@ describe("goal proposal round-trip", () => {
 		}
 	});
 
+	it("parses CRLF frontmatter and native YAML proposal fixtures", async () => {
+		const goalSid = "sess-crlf-goal";
+		memoryFs.writeFileSync(proposalFilePath(stateDir, goalSid, "goal"), [
+			"---",
+			"title: CRLF Goal",
+			"metadata:",
+			"  source: windows",
+			"---",
+			"A CRLF proposal body.",
+		].join("\r\n") + "\r\n");
+		const goal = await parseProposalFile(stateDir, goalSid, "goal");
+		assert.equal(goal.ok, true, JSON.stringify(goal));
+		if (goal.ok) {
+			assert.equal(goal.value.fields.title, "CRLF Goal");
+			assert.deepEqual(goal.value.fields.metadata, { source: "windows" });
+			assert.equal(goal.value.fields.spec, "A CRLF proposal body.\r\n");
+		}
+
+		const projectSid = "sess-crlf-project";
+		memoryFs.writeFileSync(proposalFilePath(stateDir, projectSid, "project"), [
+			"name: CRLF Project",
+			"root_path: /tmp/crlf-project",
+		].join("\r\n") + "\r\n");
+		const project = await parseProposalFile(stateDir, projectSid, "project");
+		assert.equal(project.ok, true, JSON.stringify(project));
+		if (project.ok) {
+			assert.deepEqual(project.value.fields, { name: "CRLF Project", root_path: "/tmp/crlf-project" });
+		}
+	});
+
 	it("round-trips the Sub-goals tab fields (subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren)", async () => {
 		const sgSid = "sess-subgoal-fields";
 		await writeProposalFile(stateDir, sgSid, "goal", {
