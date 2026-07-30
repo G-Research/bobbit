@@ -78,6 +78,29 @@ function environmentValue(env, name, platform) {
   return matchingKey ? env[matchingKey] : undefined;
 }
 
+/**
+ * Mirror Node's os.tmpdir() environment selection for an environment that will
+ * be passed to a child process. Keeping this pure lets tier-1 verify child
+ * confinement without opening a subprocess after its spawn guard is active.
+ */
+export function resolveChildTmpdir(env, platform = process.platform) {
+  const directory = platform === "win32"
+    ? environmentValue(env, "TEMP", platform)
+      || environmentValue(env, "TMP", platform)
+      || `${environmentValue(env, "SystemRoot", platform) || environmentValue(env, "windir", platform)}\\temp`
+    : environmentValue(env, "TMPDIR", platform)
+      || environmentValue(env, "TMP", platform)
+      || environmentValue(env, "TEMP", platform)
+      || "/tmp";
+
+  if (platform === "win32") {
+    return directory.length > 1 && directory.endsWith("\\") && !directory.endsWith(":\\")
+      ? directory.slice(0, -1)
+      : directory;
+  }
+  return directory.length > 1 && directory.endsWith("/") ? directory.slice(0, -1) : directory;
+}
+
 /** Resolve the installed browser registry before HOME/APPDATA are redirected. */
 export function resolvePlaywrightBrowserRegistry(env = process.env, platform = process.platform) {
   const configuredRegistry = environmentValue(env, "PLAYWRIGHT_BROWSERS_PATH", platform);
@@ -134,6 +157,9 @@ export function createIsolatedE2EEnvironment(paths, inheritedEnv = process.env, 
   };
   for (const directory of Object.values(owned)) mkdirSync(directory, { recursive: true });
   Object.assign(env, owned, { PLAYWRIGHT_BROWSERS_PATH: browserRegistry });
+  if (resolveChildTmpdir(env, platform) !== paths.tempDir) {
+    throw new Error("isolated E2E environment did not confine the child temp directory");
+  }
   return env;
 }
 

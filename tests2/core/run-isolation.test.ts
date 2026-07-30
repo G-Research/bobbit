@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, win32 } from "node:path";
@@ -24,7 +23,12 @@ import {
 	RUN_ROOT_ENV,
 	RUN_ROOT_OWNER_ENV,
 } from "../harness/run-isolation.js";
-import { createE2ERunPaths, createIsolatedE2EEnvironment, isE2ECredentialEnvKey } from "../../scripts/run-playwright-e2e.mjs";
+import {
+	createE2ERunPaths,
+	createIsolatedE2EEnvironment,
+	isE2ECredentialEnvKey,
+	resolveChildTmpdir,
+} from "../../scripts/run-playwright-e2e.mjs";
 import { currentRunId, ownedE2EVolumeNames } from "../../tests/e2e/e2e-teardown.js";
 import { packedConsumerTempPrefix } from "../../scripts/release-packed-consumer-audit.mjs";
 
@@ -214,7 +218,13 @@ describe("workflow run isolation", () => {
 			expect(env.tmpdir).toBeUndefined();
 			expect(env.temp).toBeUndefined();
 			expect(env.tmp).toBeUndefined();
-			expect(isOwnedRunChild(paths.root, execFileSync(process.execPath, ["-p", "require('node:os').tmpdir()"], { env, encoding: "utf8" }).trim())).toBe(true);
+			// This pure seam mirrors Node's os.tmpdir() selection for the child
+			// environment, avoiding a subprocess after tier-1's spawn guard closes.
+			for (const platform of ["linux", "darwin", "win32"] as const) {
+				const childTmpdir = resolveChildTmpdir(env, platform);
+				expect(childTmpdir).toBe(paths.tempDir);
+				expect(isOwnedRunChild(paths.root, childTmpdir)).toBe(true);
+			}
 			expect(env.ANTHROPIC_API_KEY).toBeUndefined();
 			expect(env.OPENAI_CODEX_AUTH).toBeUndefined();
 			expect(env.anthropic_api_key).toBeUndefined();
