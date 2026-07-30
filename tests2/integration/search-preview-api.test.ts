@@ -6,7 +6,7 @@ import { apiFetch, base, createSession, deleteSession, readE2EToken } from "./_e
 import * as previewArtifacts from "../../src/server/preview/artifacts.js";
 import * as previewMount from "../../src/server/preview/mount.js";
 
-const SIGNED_COOKIE_VALUE = String.raw`v1\.[1-9]\d*\.[1-9]\d*\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}`;
+const SIGNED_COOKIE_VALUE = String.raw`v1\.2\.[1-9]\d*\.[1-9]\d*\.[A-Za-z0-9_-]{22}(?:\.[A-Za-z0-9_-]{43}){3}`;
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
 	let resolve!: () => void;
