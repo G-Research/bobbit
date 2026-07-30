@@ -4,7 +4,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { ProjectRegistry, type RegisteredProject } from "../../src/server/agent/project-registry.js";
+import {
+  createProjectPathIdentity,
+  ProjectRegistry,
+  type ProjectPathIdentity,
+  type RegisteredProject,
+} from "../../src/server/agent/project-registry.js";
 
 const fixtureDirs: string[] = [];
 
@@ -15,7 +20,7 @@ afterEach(() => {
   }
 });
 
-function registryWithRoot(id: string, rootPath: string): ProjectRegistry {
+function registryWithRoot(id: string, rootPath: string, pathIdentity?: ProjectPathIdentity): ProjectRegistry {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "project-registry-root-paths-"));
   fixtureDirs.push(stateDir);
   const project: RegisteredProject = {
@@ -27,7 +32,7 @@ function registryWithRoot(id: string, rootPath: string): ProjectRegistry {
     colorDark: "#000",
   };
   fs.writeFileSync(path.join(stateDir, "projects.json"), JSON.stringify([project]));
-  return new ProjectRegistry(stateDir);
+  return new ProjectRegistry(stateDir, { pathIdentity });
 }
 
 test("ProjectRegistry.findByCwd matches POSIX, drive, and UNC filesystem roots on every host", () => {
@@ -45,14 +50,17 @@ test("ProjectRegistry.findByCwd matches POSIX, drive, and UNC filesystem roots o
     "POSIX double slashes are native aliases, while Windows treats them as UNC",
   );
 
-  const drive = registryWithRoot("drive-root", "C:\\Workspace\\Project");
+  // Force these synthetic Windows spellings to remain foreign even on a
+  // Windows runner. Their mocked roots do not provide filesystem case proof.
+  const foreignWindowsIdentity = createProjectPathIdentity({ isNativePathApi: () => false });
+  const drive = registryWithRoot("drive-root", "C:\\Workspace\\Project", foreignWindowsIdentity);
   assert.equal(drive.findByCwd("c:/workspace/project")?.id, "drive-root");
   assert.equal(drive.findByCwd("c:/workspace/project/src")?.id, "drive-root");
   assert.equal(drive.getByPath("c:/workspace/project")?.id, "drive-root");
 
   // Backslash UNC is an explicit, host-independent Windows path spelling.
   // On POSIX, //server/share is native POSIX syntax instead of a UNC alias.
-  const unc = registryWithRoot("unc-root", "\\\\server\\share\\Workspace");
+  const unc = registryWithRoot("unc-root", "\\\\server\\share\\Workspace", foreignWindowsIdentity);
   assert.equal(unc.findByCwd("\\\\SERVER\\SHARE\\workspace")?.id, "unc-root");
   assert.equal(unc.findByCwd("\\\\server\\share\\workspace\\project")?.id, "unc-root");
   assert.equal(unc.getByPath("\\\\SERVER\\SHARE\\workspace")?.id, "unc-root");

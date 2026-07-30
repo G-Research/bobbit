@@ -143,12 +143,20 @@ function isNativeProjectPathApi(pathApi: ProjectPathApi): boolean {
   return process.platform === "win32" ? pathApi === path.win32 : pathApi === path.posix;
 }
 
-function normalizeProjectPath(value: string, pathApi: ProjectPathApi): string {
+function projectPathFlavor(pathApi: ProjectPathApi): "posix" | "win32" {
+  return pathApi === path.win32 ? "win32" : "posix";
+}
+
+function normalizeProjectPath(
+  value: string,
+  pathApi: ProjectPathApi,
+  options: { foldWindowsCase?: boolean } = {},
+): string {
   const resolved = pathApi.resolve(value);
   const root = pathApi.parse(resolved).root;
   const isRoot = pathApi.normalize(resolved) === pathApi.normalize(root);
   const normalized = (isRoot ? root : resolved.replace(/[\\/]+$/, "")).replace(/\\/g, "/");
-  return pathApi === path.win32 ? normalized.toLowerCase() : normalized;
+  return pathApi === path.win32 && (options.foldWindowsCase ?? true) ? normalized.toLowerCase() : normalized;
 }
 
 export interface ProjectPathIdentityOptions {
@@ -164,6 +172,12 @@ export interface ProjectPathIdentityOptions {
    * absent proof that a volume is case-insensitive, suffix spelling is kept.
    */
   isCaseInsensitiveAt?: (existingAncestor: string) => boolean;
+  /**
+   * Determines whether a path dialect belongs to the host filesystem. This
+   * lets tests model native Windows case-sensitive and case-insensitive
+   * volumes independently of the machine running them.
+   */
+  isNativePathApi?: (pathApi: "posix" | "win32") => boolean;
 }
 
 function toggledCase(value: string): string | undefined {
@@ -229,10 +243,12 @@ export function canonicalProjectPath(
 ): string {
   const pathApi = projectPathApi(rootPath);
   const resolved = pathApi.resolve(rootPath);
+  const nativePathApi = options.isNativePathApi?.(projectPathFlavor(pathApi)) ?? isNativeProjectPathApi(pathApi);
   // Do not ask the host filesystem to resolve a foreign path dialect. Its
   // lexical identity is still useful for comparing persisted paths, and this
   // keeps drive and UNC roots from becoming host-relative paths on POSIX.
-  if (!isNativeProjectPathApi(pathApi)) return normalizeProjectPath(resolved, pathApi);
+  // Foreign Windows spellings retain their historical case-folded identity.
+  if (!nativePathApi) return normalizeProjectPath(resolved, pathApi);
 
   const realpathSync = options.realpathSync ?? (candidate => fs.realpathSync(candidate));
   const readdirSync = options.readdirSync ?? (candidate => fs.readdirSync(candidate));
@@ -241,14 +257,25 @@ export function canonicalProjectPath(
   while (true) {
     try {
       const canonical = pathApi.resolve(realpathSync(existing));
-      const normalizedSuffix = (options.isCaseInsensitiveAt?.(canonical)
-        ?? hasCaseInsensitiveAncestor(canonical, pathApi, realpathSync, readdirSync))
+      const isCaseInsensitive = options.isCaseInsensitiveAt?.(canonical)
+        ?? hasCaseInsensitiveAncestor(canonical, pathApi, realpathSync, readdirSync);
+      const normalizedSuffix = isCaseInsensitive
         ? suffix.reverse().map(segment => segment.toLowerCase())
         : suffix.reverse();
-      return normalizeProjectPath(pathApi.join(canonical, ...normalizedSuffix), pathApi);
+      return normalizeProjectPath(pathApi.join(canonical, ...normalizedSuffix), pathApi, {
+        // Native Windows can host case-sensitive directories. Preserve their
+        // spelling unless the closest existing ancestor proves otherwise.
+        foldWindowsCase: pathApi !== path.win32 || isCaseInsensitive,
+      });
     } catch {
       const parent = pathApi.dirname(existing);
-      if (parent === existing) return normalizeProjectPath(resolved, pathApi);
+      if (parent === existing) {
+        return normalizeProjectPath(resolved, pathApi, {
+          // There is no existing ancestor from which to establish native
+          // Windows case behaviour, so retaining spelling is the safe choice.
+          foldWindowsCase: pathApi !== path.win32,
+        });
+      }
       suffix.push(pathApi.basename(existing));
       existing = parent;
     }

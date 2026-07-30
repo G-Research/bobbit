@@ -65,6 +65,46 @@ test("canonicalProjectPath folds nonexistent suffixes only after a read-only ins
   );
 });
 
+test("canonicalProjectPath preserves native Windows spelling on an injected sensitive volume", () => {
+  const ancestor = "C:\\Workspace\\Ancestor";
+  const nativeSensitiveWindows = {
+    realpathSync: (candidate: string): string => {
+      if (candidate === ancestor) return ancestor;
+      throw new Error(`not found: ${candidate}`);
+    },
+    isCaseInsensitiveAt: () => false,
+    isNativePathApi: (pathApi: "posix" | "win32") => pathApi === "win32",
+  };
+
+  const upper = canonicalProjectPath(`${ancestor}\\FutureProject`, nativeSensitiveWindows);
+  const lower = canonicalProjectPath(`${ancestor}\\futureproject`, nativeSensitiveWindows);
+
+  assert.equal(upper, "C:/Workspace/Ancestor/FutureProject");
+  assert.equal(lower, "C:/Workspace/Ancestor/futureproject");
+  assert.notEqual(upper, lower, "case-distinct native Windows paths retain distinct identities");
+});
+
+test("canonicalProjectPath folds native Windows spelling on an injected insensitive volume", () => {
+  const ancestor = "C:\\Workspace\\Ancestor";
+  const nativeInsensitiveWindows = {
+    realpathSync: (candidate: string): string => {
+      if (candidate === ancestor) return ancestor;
+      throw new Error(`not found: ${candidate}`);
+    },
+    isCaseInsensitiveAt: () => true,
+    isNativePathApi: (pathApi: "posix" | "win32") => pathApi === "win32",
+  };
+
+  assert.equal(
+    canonicalProjectPath(`${ancestor}\\FutureProject`, nativeInsensitiveWindows),
+    "c:/workspace/ancestor/futureproject",
+  );
+  assert.equal(
+    canonicalProjectPath(`${ancestor}\\futureproject`, nativeInsensitiveWindows),
+    "c:/workspace/ancestor/futureproject",
+  );
+});
+
 test("ProjectRegistry.registerProvisional reuses an existing normal project at the same canonical root", () => {
   const stateDir = makeTmpDir("bobbit-provisional-dedupe-state-");
   const root = makeTmpDir("bobbit-provisional-dedupe-root-");
