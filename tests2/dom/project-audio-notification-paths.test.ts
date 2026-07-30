@@ -31,6 +31,8 @@ function deferred<T>(): Deferred<T> {
 // the real promise instead of guessing how many DOM/event-loop turns it needs.
 let pendingBeepCompletions: Promise<void>[] = [];
 let beepCompletionWaiters: Deferred<void>[] = [];
+let pendingBadgeInvocations = 0;
+let badgeInvocationWaiters: Deferred<void>[] = [];
 
 function observeNextBeepCompletion(): Promise<void> {
 	const pending = pendingBeepCompletions.shift();
@@ -44,6 +46,22 @@ function recordBeepCompletion(completion: Promise<void>): void {
 	const waiter = beepCompletionWaiters.shift();
 	if (waiter) completion.then(waiter.resolve, waiter.reject);
 	else pendingBeepCompletions.push(completion);
+}
+
+function observeNextBadgeInvocation(): Promise<void> {
+	if (pendingBadgeInvocations > 0) {
+		pendingBadgeInvocations--;
+		return Promise.resolve();
+	}
+	const waiter = deferred<void>();
+	badgeInvocationWaiters.push(waiter);
+	return waiter.promise;
+}
+
+function recordBadgeInvocation(): void {
+	const waiter = badgeInvocationWaiters.shift();
+	if (waiter) waiter.resolve(undefined);
+	else pendingBadgeInvocations++;
 }
 
 function session(id: string, projectId: string, status = "idle"): GatewaySession {
@@ -155,6 +173,8 @@ beforeEach(() => {
 	FakeAudioContext.reset();
 	pendingBeepCompletions = [];
 	beepCompletionWaiters = [];
+	pendingBadgeInvocations = 0;
+	badgeInvocationWaiters = [];
 	const playNotificationBeep = RemoteAgent.playNotificationBeep;
 	vi.spyOn(RemoteAgent, "playNotificationBeep").mockImplementation((source) => {
 		const completion = playNotificationBeep(source);
@@ -166,7 +186,10 @@ beforeEach(() => {
 	vi.stubGlobal("Image", ImmediatelyLoadedImage);
 	vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
 
-	badgeCalls = vi.fn(() => Promise.resolve());
+	badgeCalls = vi.fn(() => {
+		recordBadgeInvocation();
+		return Promise.resolve();
+	});
 	Object.defineProperty(navigator, "setAppBadge", { value: badgeCalls, configurable: true, writable: true });
 	let favicon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
 	if (!favicon) {
@@ -191,6 +214,9 @@ afterEach(() => {
 	setRenderApp(() => {});
 	delete document.documentElement.dataset.playAgentFinishSound;
 	finishSoundTest.resetProjectOverrides();
+	// showFaviconBadge holds module state until the tab becomes visible again.
+	// Exercise that real reset so the next case owns a fresh badge invocation.
+	document.dispatchEvent(new Event("visibilitychange"));
 	vi.restoreAllMocks();
 	vi.unstubAllGlobals();
 });
@@ -225,11 +251,13 @@ describe("foreground agent_end notification source", () => {
 			});
 
 			const beepCompleted = observeNextBeepCompletion();
+			const badgeInvoked = observeNextBadgeInvocation();
 			const audioCreated = testCase.audio ? FakeAudioContext.observeNextInstance() : undefined;
 			const agent = new RemoteAgent();
 			(agent as any)._sessionId = sourceId;
 			(agent as any).handleAgentEvent({ type: "agent_end" });
 			await configRequested.promise;
+			await badgeInvoked;
 			expect(configPaths).toHaveLength(1);
 			expect(badgeCalls).toHaveBeenCalledTimes(1);
 			expect(FakeAudioContext.instances).toHaveLength(0);
@@ -262,11 +290,13 @@ describe("foreground agent_end notification source", () => {
 		});
 
 		const beepCompleted = observeNextBeepCompletion();
+		const badgeInvoked = observeNextBadgeInvocation();
 		const audioCreated = FakeAudioContext.observeNextInstance();
 		const agent = new RemoteAgent();
 		(agent as any)._sessionId = "finishing";
 		(agent as any).handleAgentEvent({ type: "agent_end" });
 		await beepCompleted;
+		await badgeInvoked;
 		await audioCreated;
 		expect(FakeAudioContext.instances).toHaveLength(1);
 		expect(requests).toEqual(["/api/projects/project-force-on/config"]);
@@ -331,9 +361,11 @@ describe("background polling notification source", () => {
 
 		let secondResolved = false;
 		const beepCompleted = observeNextBeepCompletion();
+		const badgeInvoked = observeNextBadgeInvocation();
 		const audioCreated = FakeAudioContext.observeNextInstance();
 		const secondRefresh = refreshSessions().then(() => { secondResolved = true; });
 		await expect(secondRefresh).resolves.toBeUndefined();
+		await badgeInvoked;
 		expect(secondResolved).toBe(true);
 		expect(state.gatewaySessions.find((item) => item.id === "background")?.status).toBe("idle");
 		expect(badgeCalls).toHaveBeenCalledTimes(1);
@@ -369,9 +401,10 @@ describe("background polling notification source", () => {
 		});
 
 		const beepCompleted = observeNextBeepCompletion();
+		const badgeInvoked = observeNextBadgeInvocation();
 		await refreshSessions();
 		await refreshSessions();
-		await beepCompleted;
+		await Promise.all([beepCompleted, badgeInvoked]);
 		expect(badgeCalls).toHaveBeenCalledTimes(1);
 		expect(FakeAudioContext.instances).toHaveLength(0);
 		expect(badgeCalls).toHaveBeenCalledTimes(1);
