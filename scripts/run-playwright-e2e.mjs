@@ -11,7 +11,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -33,8 +33,80 @@ export function createE2ERunPaths(tempDirectory = tmpdir()) {
     root,
     runId,
     cacheRoot: join(root, "pwtest-transform-cache"),
+    homeDir: join(root, "home"),
+    bobbitDir: join(root, "bobbit"),
+    agentDir: join(root, "agent"),
     secretsDir: join(root, "e2e-server-secrets"),
+    appDataDir: join(root, "appdata"),
+    xdgDir: join(root, "xdg"),
   };
+}
+
+// Keep this in sync with tests2/harness/run-isolation.ts. The legacy E2E
+// wrapper must neutralize host credentials before Playwright loads any server
+// or discovery module, rather than relying on individual test fixtures.
+const CREDENTIAL_EXACT_NAMES = new Set([
+  "ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN", "OPENAI_API_KEY", "OPENAI_CODEX_AUTH",
+  "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_CLOUD_ACCESS_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS",
+  "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_PROJECT_ID", "GOOGLE_GENAI_USE_GCA",
+  "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE", "AWS_REGION",
+  "AWS_DEFAULT_REGION", "AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "AWS_BEDROCK_SKIP_AUTH", "NPM_TOKEN",
+  "GITHUB_TOKEN", "GH_TOKEN", "AIGW_OPENCODE_TOKEN",
+]);
+const CREDENTIAL_PREFIXES = [
+  "CLAUDE_CODE_", "ANTHROPIC_", "OPENAI_", "OPENROUTER_", "GEMINI_", "GOOGLE_", "AWS_",
+  "AIGW_", "OPENCODE_", "GITHUB_", "GH_", "AZURE_", "COHERE_", "MISTRAL_", "GROQ_",
+  "TOGETHER_", "DEEPSEEK_", "XAI_",
+];
+
+export function isE2ECredentialEnvKey(key) {
+  return CREDENTIAL_EXACT_NAMES.has(key)
+    || CREDENTIAL_PREFIXES.some(prefix => key.startsWith(prefix))
+    || /^BOBBIT_.*(?:KEY|TOKEN|SECRET|CREDENTIALS?)$/.test(key);
+}
+
+/** Resolve the installed browser registry before HOME/APPDATA are redirected. */
+export function resolvePlaywrightBrowserRegistry(env = process.env, platform = process.platform) {
+  if (env.PLAYWRIGHT_BROWSERS_PATH) return env.PLAYWRIGHT_BROWSERS_PATH;
+  const home = env.HOME || env.USERPROFILE || homedir();
+  if (platform === "linux") return join(env.XDG_CACHE_HOME || join(home, ".cache"), "ms-playwright");
+  if (platform === "darwin") return join(home, "Library", "Caches", "ms-playwright");
+  if (platform === "win32") return join(env.LOCALAPPDATA || join(home, "AppData", "Local"), "ms-playwright");
+  throw new Error(`unsupported platform for Playwright browser registry: ${platform}`);
+}
+
+/**
+ * Build the child environment for a legacy E2E coordinator. This deliberately
+ * does not mutate the wrapper process, which makes direct module use safe and
+ * ensures every Playwright worker inherits one owned set of discovery roots.
+ */
+export function createIsolatedE2EEnvironment(paths, inheritedEnv = process.env, platform = process.platform) {
+  const env = { ...inheritedEnv };
+  // Browser binaries are a Playwright runtime dependency, not Bobbit config.
+  // Preserve their host registry before replacing all user discovery roots.
+  const browserRegistry = resolvePlaywrightBrowserRegistry(env, platform);
+
+  for (const key of Object.keys(env)) {
+    if (isE2ECredentialEnvKey(key)) delete env[key];
+  }
+
+  const owned = {
+    HOME: paths.homeDir,
+    USERPROFILE: paths.homeDir,
+    BOBBIT_DIR: paths.bobbitDir,
+    BOBBIT_PI_DIR: paths.bobbitDir,
+    BOBBIT_AGENT_DIR: paths.agentDir,
+    PI_CODING_AGENT_DIR: paths.agentDir,
+    BOBBIT_SECRETS_DIR: paths.secretsDir,
+    APPDATA: join(paths.appDataDir, "roaming"),
+    LOCALAPPDATA: join(paths.appDataDir, "local"),
+    XDG_STATE_HOME: join(paths.xdgDir, "state"),
+    XDG_CONFIG_HOME: join(paths.xdgDir, "config"),
+    XDG_CACHE_HOME: join(paths.xdgDir, "cache"),
+  };
+  for (const directory of Object.values(owned)) mkdirSync(directory, { recursive: true });
+  Object.assign(env, owned, { PLAYWRIGHT_BROWSERS_PATH: browserRegistry });
+  return env;
 }
 
 function cacheRootOverride() {
@@ -52,7 +124,7 @@ const cacheRoot = explicitCache ? resolve(explicitCache) : join(resolve(cacheRoo
 const cacheDir = explicitCache || cacheRoot;
 mkdirSync(cacheDir, { recursive: true });
 
-const env = { ...process.env };
+const env = createIsolatedE2EEnvironment(paths);
 // The TypeScript fixtures consume this root through getRunRoot(). Workers only
 // inherit it; this wrapper is the sole cleanup owner after Playwright settles.
 env.BOBBIT_V2_RUN_ROOT = paths.root;
@@ -64,8 +136,6 @@ env.BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT = cacheRoot;
 env.PWTEST_CACHE_DIR = join(cacheDir, `runner-${process.pid}`);
 env.BOBBIT_E2E_PWTEST_CACHE_DIR = cacheRoot;
 env.BOBBIT_E2E_PWTEST_CACHE_OWNED = "1";
-env.BOBBIT_SECRETS_DIR = env.BOBBIT_SECRETS_DIR || paths.secretsDir;
-mkdirSync(env.BOBBIT_SECRETS_DIR, { recursive: true });
 env.NODE_ENV = "test";
 env.BOBBIT_TEST_NO_EXTERNAL = env.BOBBIT_TEST_NO_EXTERNAL || "1";
 env.BOBBIT_TEST_NO_REMOTE = env.BOBBIT_TEST_NO_REMOTE || "1";

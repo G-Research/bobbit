@@ -18,7 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
-import { buildDockerRunArgs, SANDBOX_STATE_MOUNTS } from "./docker-args.js";
+import { buildDockerRunArgs, projectSandboxVolumeNames, SANDBOX_STATE_MOUNTS, validatedE2ERunId } from "./docker-args.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { globalAgentDir } from "../bobbit-dir.js";
 import { toDockerPath } from "./rpc-bridge.js";
@@ -834,7 +834,11 @@ export class ProjectSandbox {
 	/** Full destroy: remove container AND volume. */
 	async destroy(): Promise<void> {
 		this.stopHealthMonitor();
-		const volumeName = this._volumeName();
+		const volumes = projectSandboxVolumeNames(this.options.projectId);
+		// Production retains its historic workspace-only destroy behavior. Legacy
+		// E2E owns both run-namespaced volumes and must remove both even when a
+		// spec destroys the container before global teardown can inspect it.
+		const volumeNames = validatedE2ERunId() ? Object.values(volumes) : [volumes.workspace];
 		if (this.containerId) {
 			try {
 				await this.execDocker(["rm", "-f", this.containerId], {
@@ -843,12 +847,14 @@ export class ProjectSandbox {
 				});
 			} catch { /* already gone */ }
 		}
-		try {
-			await this.execDocker(["volume", "rm", "-f", volumeName], {
-				timeout: 15_000,
-				env: DOCKER_ENV,
-			});
-		} catch { /* volume may not exist */ }
+		for (const volumeName of volumeNames) {
+			try {
+				await this.execDocker(["volume", "rm", "-f", volumeName], {
+					timeout: 15_000,
+					env: DOCKER_ENV,
+				});
+			} catch { /* volume may not exist */ }
+		}
 		this.containerId = null;
 		this._status = "starting";
 		console.log(`[project-sandbox] Destroyed container and volume for project ${this.options.projectId}`);
@@ -859,7 +865,7 @@ export class ProjectSandbox {
 	private async _initContainer(): Promise<void> {
 		const { projectId, image } = this.options;
 		const label = `bobbit-project=${projectId}`;
-		const e2eRunId = process.env.BOBBIT_E2E_RUN_ID?.trim();
+		const e2eRunId = validatedE2ERunId();
 
 		// 1. Find an existing container only within this test coordinator. A
 		// matching project ID from a sibling E2E run must never be reattached.
@@ -999,7 +1005,7 @@ export class ProjectSandbox {
 		addMount(this.options.cloneSource);
 		for (const src of Object.values(this.options.cloneSourceByName ?? {})) addMount(src);
 
-		const e2eRunId = process.env.BOBBIT_E2E_RUN_ID?.trim();
+		const e2eRunId = validatedE2ERunId();
 		const dockerArgs = buildDockerRunArgs({
 			image,
 			workspaceDir: "", // unused for /workspace — named volume instead
@@ -1363,7 +1369,4 @@ export class ProjectSandbox {
 		return stdout;
 	}
 
-	private _volumeName(): string {
-		return `bobbit-workspace-${this.options.projectId}`;
-	}
 }

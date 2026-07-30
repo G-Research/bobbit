@@ -23,7 +23,8 @@ import {
 	RUN_ROOT_ENV,
 	RUN_ROOT_OWNER_ENV,
 } from "../harness/run-isolation.js";
-import { createE2ERunPaths } from "../../scripts/run-playwright-e2e.mjs";
+import { createE2ERunPaths, createIsolatedE2EEnvironment } from "../../scripts/run-playwright-e2e.mjs";
+import { currentRunId, ownedE2EVolumeNames } from "../../tests/e2e/e2e-teardown.js";
 import { packedConsumerTempPrefix } from "../../scripts/release-packed-consumer-audit.mjs";
 
 const baselineEnv = { ...process.env };
@@ -160,6 +161,57 @@ describe("workflow run isolation", () => {
 		}
 	});
 
+	it("isolates legacy E2E host roots and credentials while preserving its browser registry", () => {
+		const temp = mkdtempSync(join(tmpdir(), "legacy-e2e-environment-"));
+		try {
+			const paths = createE2ERunPaths(temp);
+			const browserRegistry = join(temp, "host-browser-registry");
+			const env = createIsolatedE2EEnvironment(paths, {
+				HOME: join(temp, "host-home"),
+				USERPROFILE: join(temp, "host-profile"),
+				BOBBIT_DIR: join(temp, "host-bobbit"),
+				BOBBIT_SECRETS_DIR: join(temp, "host-secrets"),
+				APPDATA: join(temp, "host-appdata"),
+				XDG_CONFIG_HOME: join(temp, "host-xdg-config"),
+				PLAYWRIGHT_BROWSERS_PATH: browserRegistry,
+				ANTHROPIC_API_KEY: "fake-anthropic",
+				OPENAI_CODEX_AUTH: "fake-codex",
+				GOOGLE_APPLICATION_CREDENTIALS: "fake-google",
+				BOBBIT_TOKEN: "fake-bobbit-token",
+				PATH: "/safe/path",
+			});
+
+			for (const key of [
+				"HOME", "USERPROFILE", "BOBBIT_DIR", "BOBBIT_PI_DIR", "BOBBIT_AGENT_DIR", "PI_CODING_AGENT_DIR",
+				"BOBBIT_SECRETS_DIR", "APPDATA", "LOCALAPPDATA", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME",
+			]) {
+				expect(env[key], key).toBeTruthy();
+				expect(isOwnedRunChild(paths.root, env[key]!)).toBe(true);
+				expect(existsSync(env[key]!)).toBe(true);
+			}
+			expect(env.PLAYWRIGHT_BROWSERS_PATH).toBe(browserRegistry);
+			expect(env.HOME).not.toBe(join(temp, "host-home"));
+			expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+			expect(env.OPENAI_CODEX_AUTH).toBeUndefined();
+			expect(env.GOOGLE_APPLICATION_CREDENTIALS).toBeUndefined();
+			expect(env.BOBBIT_TOKEN).toBeUndefined();
+			expect(env.PATH).toBe("/safe/path");
+		} finally {
+			rmSync(temp, { recursive: true, force: true });
+		}
+	});
+
+	it("limits legacy E2E teardown to validated run-namespaced volume names", () => {
+		const projectId = "project-123";
+		const runId = "legacy-run_123";
+		expect(currentRunId(runId)).toBe(runId);
+		expect(currentRunId("invalid/run")).toBeUndefined();
+		expect(ownedE2EVolumeNames(projectId, runId)).toEqual([
+			`bobbit-workspace-${projectId}-e2e-${runId}`,
+			`bobbit-worktrees-${projectId}-e2e-${runId}`,
+		]);
+	});
+
 	it("keeps Playwright's browser registry outside the isolated home", () => {
 		delete process.env[PLAYWRIGHT_BROWSERS_PATH_ENV];
 		const hostHome = join(getRunRoot(), "playwright-host-home");
@@ -223,6 +275,8 @@ describe("workflow run isolation", () => {
 		expect(realpush).toContain("installRunIsolation()");
 		expect(realpush).toContain("createRunChild(`e2e-realpush-");
 		expect(teardown).toContain("label=bobbit-e2e-run=${runId}");
+		expect(teardown).toContain("ownedE2EVolumeNames(projectId, runId)");
+		expect(teardown).toContain("-e2e-${runId}");
 		expect(teardown).not.toContain("readdirSync");
 		expect(sandbox).toContain('"bobbit-e2e-run": e2eRunId');
 		expect(sandbox).toContain("_findContainerByLabel(label, e2eRunId)");

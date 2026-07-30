@@ -45,6 +45,25 @@ export const SANDBOX_STATE_MOUNTS: Array<{ sub: string; readOnly?: boolean }> = 
 	{ sub: "aigw-dns-guard", readOnly: true },
 ];
 
+/** Validated legacy E2E run ID. Invalid/unset values deliberately preserve production names. */
+export function validatedE2ERunId(value = process.env.BOBBIT_E2E_RUN_ID): string | undefined {
+	const runId = value?.trim();
+	return runId && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(runId) ? runId : undefined;
+}
+
+/**
+ * Docker volume names for a project sandbox. Legacy E2E runs get an opaque
+ * run suffix so concurrent coordinators cannot attach the same workspace.
+ * Normal production callers retain the longstanding names exactly.
+ */
+export function projectSandboxVolumeNames(projectId: string, runId = validatedE2ERunId()): { workspace: string; worktrees: string } {
+	const suffix = runId ? `-e2e-${runId}` : "";
+	return {
+		workspace: `bobbit-workspace-${projectId}${suffix}`,
+		worktrees: `bobbit-worktrees-${projectId}${suffix}`,
+	};
+}
+
 export interface DockerRunConfig {
 	image: string;
 	/** Host path to mount as /workspace (used for bind-mount mode when projectId is not set). */
@@ -176,9 +195,12 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 
 	// ── Bind mounts / volumes ──────────────────────────────────────────
 	if (projectId) {
-		// Per-project container: named Docker volumes (survive container recreation)
-		args.push("-v", `bobbit-workspace-${projectId}:/workspace`);
-		args.push("-v", `bobbit-worktrees-${projectId}:/workspace-wt`);
+		// Per-project container: named Docker volumes (survive container recreation).
+		// An E2E coordinator adds a validated run suffix; normal production names
+		// remain unchanged for backwards-compatible container reattachment.
+		const volumes = projectSandboxVolumeNames(projectId);
+		args.push("-v", `${volumes.workspace}:/workspace`);
+		args.push("-v", `${volumes.worktrees}:/workspace-wt`);
 	} else if (workspaceDir) {
 		// Legacy pool mode: bind-mount host directory as /workspace
 		args.push("-v", `${toDockerPath(workspaceDir)}:/workspace`);
