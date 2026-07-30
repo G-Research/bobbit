@@ -448,6 +448,7 @@ describe("workflow run isolation", () => {
 		const runner = readFileSync("scripts/run-playwright-e2e.mjs", "utf8");
 		const realpush = readFileSync("tests/e2e/in-process-harness-realpush.ts", "utf8");
 		const teardown = readFileSync("tests/e2e/e2e-teardown.ts", "utf8");
+		const dockerArgs = readFileSync("src/server/agent/docker-args.ts", "utf8");
 		const sandbox = readFileSync("src/server/agent/project-sandbox.ts", "utf8");
 		const audit = readFileSync("scripts/release-packed-consumer-audit.mjs", "utf8");
 		expect(runner).toContain("createE2ERunPaths");
@@ -455,10 +456,19 @@ describe("workflow run isolation", () => {
 		expect(runner).toContain("BOBBIT_E2E_RUN_ID");
 		expect(realpush).toContain("installRunIsolation()");
 		expect(realpush).toContain("createRunChild(`e2e-realpush-");
-		expect(teardown).toContain("label=bobbit-e2e-run=${runId}");
-		expect(teardown).toContain("ownedE2EVolumeNames(projectId, runId)");
+		// Volumes must be independently discoverable after their containers are gone:
+		// first select the coordinator label, then retain only its namespace.
+		expect(teardown).toContain('"volume", "ls", "-q", "--filter", `label=bobbit-e2e-run=${ownedRunId}`');
+		expect(teardown).toContain("ownedE2EVolumeNamesFromLabelOutput(listed.trim(), ownedRunId)");
+		expect(teardown).toContain("isOwnedE2EVolumeName(name, runId)");
 		expect(teardown).toContain("-e2e-${runId}");
+		expect(teardown).not.toContain("ownedE2EVolumeNames(projectId, runId)");
 		expect(teardown).not.toContain("readdirSync");
+		// Explicit creation is required because implicit Docker volume creation
+		// cannot stamp the run label needed by the independent teardown lookup.
+		expect(dockerArgs).toContain("e2eSandboxVolumeCreateArgs(projectId: string, runId = validatedE2ERunId())");
+		expect(dockerArgs).toContain("`bobbit-e2e-run=${runId}`");
+		expect(sandbox).toContain("e2eSandboxVolumeCreateArgs(projectId, e2eRunId)");
 		expect(sandbox).toContain('"bobbit-e2e-run": e2eRunId');
 		expect(sandbox).toContain("_findContainerByLabel(label, e2eRunId)");
 		expect(audit).toContain("packedConsumerTempPrefix");
