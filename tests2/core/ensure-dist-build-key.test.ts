@@ -357,9 +357,24 @@ describe.sequential("dist build worktree lock", () => {
 		writeFileSync(join(repoRoot, "allow-build-finish"), "release");
 
 		const [reclaimerResult, successorResult] = await Promise.all([reclaimer, successor]);
+		const results = [reclaimerResult, successorResult];
 		assert.equal(reclaimerResult.report.ok, true);
 		assert.equal(successorResult.report.ok, true);
-		assert.deepEqual(buildCount(), ["normal"], "the successor may build only after the recovery claim is released");
-		assert.match(reclaimerResult.stdout, /cache hit after lock/);
+		const builder = results.find(result => (result.report.result as { cacheHit: boolean }).cacheHit === false);
+		assert.ok(builder, "one caller must acquire the lock and build");
+		const builds = buildCount();
+		assert.equal(builds.length, 1, "exactly one contender must build after stale-lock recovery");
+		assert.equal(
+			builds[0],
+			builder === reclaimerResult ? "recovery" : "normal",
+			"the recorded build must belong to the caller that reported a cache miss",
+		);
+		const cacheHits = results
+			.map(result => (result.report.result as { cacheHit: boolean }).cacheHit)
+			.sort();
+		assert.deepEqual(cacheHits, [false, true], "one caller builds while the other consumes its manifest");
+		const loser = results.find(result => (result.report.result as { cacheHit: boolean }).cacheHit);
+		assert.ok(loser, "one caller must lose the lock race");
+		assert.match(loser.stdout, /cache hit after lock/, "the losing caller must revalidate after acquiring the lock");
 	});
 });
