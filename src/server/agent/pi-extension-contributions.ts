@@ -5,7 +5,13 @@ import type { PackManifest, PackScope } from "./pack-types.js";
 import { readMeta } from "./pack-manifest.js";
 import { PackContributionError, packIdFromRoot } from "./pack-contributions.js";
 import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
-import { discoverPiExtensionToolsSync, type PiExtensionDiscoveryBackend } from "./pi-extension-discovery.js";
+// Keep both discovery entry points in the initial module graph. A lazy import
+// would be resolved after callers install an isolated filesystem test fixture.
+import {
+	discoverPiExtensionTools,
+	discoverPiExtensionToolsSync,
+	type PiExtensionDiscoveryBackend,
+} from "./pi-extension-discovery.js";
 
 export interface ResolvedPiExtensionContribution {
 	/** Manifest contents.pi-extensions[] key and DisabledRefs key. */
@@ -342,7 +348,6 @@ export async function loadPiExtensionContributionsWithDiscovery(
 	opts: LoadPiExtensionContributionsWithDiscoveryOptions,
 ): Promise<ResolvedPiExtensionContribution[]> {
 	const rows = loadPiExtensionContributions(packRoot, manifest, opts);
-	const { discoverPiExtensionTools } = await import("./pi-extension-discovery.js");
 	for (const row of rows) {
 		if (!row.entryPath || row.diagnostic.status === "disabled" || row.discovery.status === "failed") continue;
 		row.discovery = await discoverPiExtensionTools(row.entryPath, {
