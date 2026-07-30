@@ -156,7 +156,15 @@ test.describe("published Bobbit package dependency security", () => {
 				private: true,
 			}, null, 2)}\n`);
 
-			const build = await runNpm(["run", "build"], PROJECT_ROOT, 10 * 60_000);
+			// `npm run build` rewrites dist destructively. Coordinate it with the
+			// repository cache/lock so concurrent E2E coordinators never pack while
+			// another consumer is rebuilding the same worktree.
+			const build = await runPiPackedConsumerCommand(
+				process.execPath,
+				[join(PROJECT_ROOT, "scripts", "testing-v2", "ensure-dist.mjs")],
+				{ cwd: PROJECT_ROOT, timeoutMs: 10 * 60_000 },
+			);
+			report.commands.push(build);
 			expectSuccess(build);
 
 			const packed = await runNpm(["pack", "--json", "--pack-destination", packDir], PROJECT_ROOT, 3 * 60_000);
