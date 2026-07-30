@@ -9,6 +9,27 @@ const BUNDLE_DIR = path.resolve(".bobbit/tmp/ui-fixtures");
 const BUNDLE = path.join(BUNDLE_DIR, "tool-manager-mcp-section-bundle.js");
 const TOOL_MANAGER_SRC = path.resolve("src/app/tool-manager-page.ts");
 const API_SRC = path.resolve("src/app/api.ts");
+const GATEWAY_FETCH_SRC = path.resolve("src/app/gateway-fetch.ts");
+const FIXTURE_GATEWAY_BASE_URL = "https://fixture.test/team/bobbit";
+const FIXTURE_GATEWAY_TOKEN = "fixture-token";
+
+type FetchLogEntry = {
+	url: string;
+	method: string;
+	body: any;
+	credentials: RequestCredentials | null;
+	authorization: string | null;
+};
+
+function expectedGatewayRequest(route: string, method = "GET", body: any = null): FetchLogEntry {
+	return {
+		url: `${FIXTURE_GATEWAY_BASE_URL}${route}`,
+		method,
+		body,
+		credentials: "include",
+		authorization: `Bearer ${FIXTURE_GATEWAY_TOKEN}`,
+	};
+}
 
 const FAKE_SERVERS = [
 	{
@@ -56,7 +77,7 @@ test.beforeAll(() => {
 	buildBundle({
 		entry: ENTRY,
 		outfile: BUNDLE,
-		deps: [ENTRY, TOOL_MANAGER_SRC, API_SRC],
+		deps: [ENTRY, TOOL_MANAGER_SRC, API_SRC, GATEWAY_FETCH_SRC],
 	});
 });
 
@@ -79,7 +100,7 @@ async function reloadWithMcp(page: Page, servers: unknown = FAKE_SERVERS, polici
 	await setupMcp(page, servers, policies);
 }
 
-async function fetchLog(page: Page): Promise<Array<{ url: string; method: string; body: any }>> {
+async function fetchLog(page: Page): Promise<FetchLogEntry[]> {
 	return await page.evaluate(() => (window as any).__getMcpFetchLog());
 }
 
@@ -90,6 +111,12 @@ test.describe("Tools page → MCP section fixture", () => {
 
 	test("renders flat servers, expands operations, and resets expansion on reload", async ({ page }) => {
 		await setupMcp(page);
+		await expect.poll(() => fetchLog(page)).toEqual([
+			expectedGatewayRequest("/api/tools?projectId=headquarters"),
+			expectedGatewayRequest("/api/roles?projectId=headquarters"),
+			expectedGatewayRequest("/api/tool-group-policies?projectId=headquarters"),
+			expectedGatewayRequest("/api/mcp-servers?projectId=headquarters"),
+		]);
 
 		const section = page.locator('[data-testid="mcp-section"]');
 		await expect(section.getByText("MCP", { exact: true })).toBeVisible();
@@ -151,20 +178,16 @@ test.describe("Tools page → MCP section fixture", () => {
 		const section = page.locator('[data-testid="mcp-section"]');
 		const gr = section.locator('[data-server-name="gr"]');
 		await gr.locator('[data-testid="mcp-server-policy"]').first().selectOption("never");
-		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual({
-			url: "/api/tool-group-policies/mcp__gr",
-			method: "PUT",
-			body: { policy: "never", projectId: "headquarters" },
-		});
+		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual(
+			expectedGatewayRequest("/api/tool-group-policies/mcp__gr", "PUT", { policy: "never", projectId: "headquarters" }),
+		);
 
 		await gr.locator('[data-testid="mcp-server-toggle"]').click();
 		const aiTool = gr.locator('[data-testid="mcp-tool-row"][data-tool-name="ai-adoption"]');
 		await aiTool.locator('[data-testid="mcp-tool-policy"]').selectOption("ask");
-		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual({
-			url: "/api/tool-group-policies/mcp__gr__ai-adoption",
-			method: "PUT",
-			body: { policy: "ask", projectId: "headquarters" },
-		});
+		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual(
+			expectedGatewayRequest("/api/tool-group-policies/mcp__gr__ai-adoption", "PUT", { policy: "ask", projectId: "headquarters" }),
+		);
 	});
 
 	test("uses supplied public MCP policy keys when gateway runtime names differ", async ({ page }) => {
@@ -192,18 +215,14 @@ test.describe("Tools page → MCP section fixture", () => {
 		await gateway.locator('[data-testid="mcp-server-toggle"]').click({ position: { x: 10, y: 10 } });
 		const jiraTool = gateway.locator('[data-testid="mcp-tool-row"][data-tool-name="jira"]');
 		await gateway.locator('[data-testid="mcp-server-policy"]').first().selectOption("never");
-		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual({
-			url: "/api/tool-group-policies/mcp__gr",
-			method: "PUT",
-			body: { policy: "never", projectId: "headquarters" },
-		});
+		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual(
+			expectedGatewayRequest("/api/tool-group-policies/mcp__gr", "PUT", { policy: "never", projectId: "headquarters" }),
+		);
 		await expect(jiraTool).toHaveAttribute("data-policy-key", "mcp__gr__jira");
 		await jiraTool.locator('[data-testid="mcp-tool-policy"]').selectOption("ask");
-		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual({
-			url: "/api/tool-group-policies/mcp__gr__jira",
-			method: "PUT",
-			body: { policy: "ask", projectId: "headquarters" },
-		});
+		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual(
+			expectedGatewayRequest("/api/tool-group-policies/mcp__gr__jira", "PUT", { policy: "ask", projectId: "headquarters" }),
+		);
 
 		await jiraTool.locator('[data-testid="mcp-tool-toggle"]').click();
 		const op = gateway.locator('[data-testid="mcp-operation-row"][data-tool-name="mcp__gr__jira__jira_search"]');
@@ -223,20 +242,16 @@ test.describe("Tools page → MCP section fixture", () => {
 		await expect(jiraPolicy.locator("option:checked")).toHaveText(/Never.*inherited/i);
 
 		await jiraPolicy.selectOption("ask");
-		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual({
-			url: "/api/tool-group-policies/mcp__gr__jira",
-			method: "PUT",
-			body: { policy: "ask", projectId: "headquarters" },
-		});
+		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual(
+			expectedGatewayRequest("/api/tool-group-policies/mcp__gr__jira", "PUT", { policy: "ask", projectId: "headquarters" }),
+		);
 		await expect(jiraPolicy).toHaveValue("ask");
 		await expect(jiraPolicy.locator("option:checked")).toHaveText("Ask");
 
 		await jiraPolicy.selectOption("");
-		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual({
-			url: "/api/tool-group-policies/mcp__gr__jira",
-			method: "PUT",
-			body: { policy: null, projectId: "headquarters" },
-		});
+		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual(
+			expectedGatewayRequest("/api/tool-group-policies/mcp__gr__jira", "PUT", { policy: null, projectId: "headquarters" }),
+		);
 		await expect(jiraPolicy).toHaveValue("");
 		await expect(jiraPolicy.locator("option:checked")).toHaveText(/Never.*inherited/i);
 
@@ -269,11 +284,9 @@ test.describe("Tools page → MCP section fixture", () => {
 
 		const serverSelect = gr.locator('[data-testid="mcp-server-policy"]').first();
 		await serverSelect.selectOption("");
-		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual({
-			url: "/api/tool-group-policies/mcp__gr",
-			method: "PUT",
-			body: { policy: null, projectId: "headquarters" },
-		});
+		await expect.poll(async () => (await fetchLog(page)).filter(e => e.method === "PUT").at(-1)).toEqual(
+			expectedGatewayRequest("/api/tool-group-policies/mcp__gr", "PUT", { policy: null, projectId: "headquarters" }),
+		);
 		await expect(serverSelect).toHaveValue("");
 
 		await reloadWithMcp(page, GATEWAY_SERVERS);
