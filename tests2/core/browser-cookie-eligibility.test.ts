@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 
 import {
+	browserCookieRequiresSecure,
 	classifyBrowserCookieEligibility,
 	type BrowserCookieEligibilityContext,
 	type BrowserCookieHeaders,
@@ -53,6 +54,38 @@ function assertDenied(
 		reason: expectedReason,
 	});
 }
+
+describe("browser cookie transport security", () => {
+	it.each([
+		"localhost:3001",
+		"app.localhost:3001",
+		"127.0.0.1:3001",
+		"[::1]:3001",
+	])("omits Secure for an actual HTTP loopback Host (%s)", (host) => {
+		assert.equal(browserCookieRequiresSecure({ headers: { host }, isTls: false }), false);
+	});
+
+	it("retains Secure for TLS even on loopback", () => {
+		assert.equal(browserCookieRequiresSecure({ headers: { host: "127.0.0.1:3001" }, isTls: true }), true);
+	});
+
+	it("retains Secure for an HTTP public Host and ignores proxy forwarding headers", () => {
+		assert.equal(browserCookieRequiresSecure({
+			headers: {
+				host: "bobbit.example",
+				forwarded: "host=localhost;proto=http",
+				"x-forwarded-host": "localhost",
+				"x-forwarded-proto": "https",
+			},
+			isTls: false,
+		}), true);
+	});
+
+	it("fails secure for a missing or malformed Host", () => {
+		assert.equal(browserCookieRequiresSecure({ headers: {}, isTls: false }), true);
+		assert.equal(browserCookieRequiresSecure({ headers: { host: "localhost, bobbit.example" }, isTls: false }), true);
+	});
+});
 
 describe("browser cookie eligibility", () => {
 	it("bootstraps only after already-resolved admin or localhost authentication", () => {

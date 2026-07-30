@@ -425,6 +425,7 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("in-process gateway mounted a
 		const setCookie = browserHealth.headers.get("set-cookie") ?? "";
 		expect(setCookie).toMatch(/^bobbit_session=/);
 		expect(setCookie).toContain(`Path=${MOUNT}/`);
+		expect(setCookie).not.toContain("; Secure");
 	});
 
 	it("keeps preview API, restore, bootstrap, and live SSE payloads mount-relative while browser outputs are prefixed once", async () => {

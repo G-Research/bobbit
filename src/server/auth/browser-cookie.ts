@@ -64,6 +64,19 @@ export interface BrowserCookieEligibility {
 	reason: BrowserCookieEligibilityReason;
 }
 
+/**
+ * Whether a browser session cookie needs the Secure attribute for this request.
+ * The direct socket transport and Host header are authoritative: forwarded
+ * headers are deliberately ignored. Invalid/missing Host values fail secure.
+ */
+export function browserCookieRequiresSecure(
+	request: Pick<BrowserCookieRequestMetadata, "headers" | "isTls">,
+): boolean {
+	if (request.isTls) return true;
+	const requestOrigin = parseRequestOrigin(request.headers, false);
+	return !requestOrigin || !isLoopbackHostname(requestOrigin.hostname);
+}
+
 const INELIGIBLE_SESSION_HEADERS = [
 	"x-bobbit-session-id",
 	"x-bobbit-spawning-session",

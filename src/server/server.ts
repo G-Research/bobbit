@@ -535,6 +535,7 @@ import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { CookieStore, extractCookieValue, issueCookie, tryAuth as cookieTryAuth } from "./auth/cookie.js";
 import { loadOrCreateCookieSigningKey } from "./auth/cookie-signing-key.js";
 import {
+	browserCookieRequiresSecure,
 	canonicalHttpOrigin,
 	classifyBrowserCookieEligibility,
 	isBrowserCookieAuthenticationCompatible,
@@ -2855,7 +2856,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					hasSandboxCredential,
 				});
 				if (cookieEligibility.mayBootstrap || cookieEligibility.mayRenew) {
-					issueCookie(res, cookieStore, { localhost: isLocalhostMode && !isTls, basePath });
+					// Cookie transport safety is independent of the localhost auth bypass.
+					// Authenticated loopback HTTP (including --auth) must omit Secure so
+					// browsers store it; TLS, public Hosts, and invalid Hosts fail secure.
+					const secure = browserCookieRequiresSecure({ headers: req.headers, isTls });
+					issueCookie(res, cookieStore, { localhost: !secure, basePath });
 				}
 			}
 
