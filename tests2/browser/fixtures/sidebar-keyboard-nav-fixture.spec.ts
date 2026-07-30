@@ -15,6 +15,7 @@ const RENDER_HELPERS_SRC = path.resolve("src/app/render-helpers.ts");
 const SIDEBAR_TREE_BUILDER_SRC = path.resolve("src/app/sidebar-tree-builder.ts");
 const STATE_SRC = path.resolve("src/app/state.ts");
 const API_SRC = path.resolve("src/app/api.ts");
+const GATEWAY_FETCH_SRC = path.resolve("src/app/gateway-fetch.ts");
 const SEARCH_BOX_SRC = path.resolve("src/ui/components/SearchBox.ts");
 const SEARCH_STATUS_DOT_SRC = path.resolve("src/app/components/search-status-dot.ts");
 
@@ -49,6 +50,7 @@ test.beforeAll(() => {
 			SIDEBAR_TREE_BUILDER_SRC,
 			STATE_SRC,
 			API_SRC,
+			GATEWAY_FETCH_SRC,
 			SEARCH_BOX_SRC,
 			SEARCH_STATUS_DOT_SRC,
 		],
@@ -237,6 +239,22 @@ function archivedOrder(ids: FixtureIds): string[] {
 test.describe("Sidebar keyboard navigation lightweight fixture", () => {
 	test.beforeEach(async ({ page }) => {
 		await loadFixture(page);
+	});
+
+	test("render-time session updates use the mounted active gateway connection", async ({ page }) => {
+		const ids = await fixtureIds(page);
+		const sessionId = ids.goalSession.replace(/^session:/, "");
+		expect(sessionId, `${MARK}: fixture goal-session nav id`).toBe("sidebar-nav-fixture-goal-session");
+		await expect.poll(() => page.evaluate((id) =>
+			(window as any).__sidebarKeyboardNavRequests.find((request: any) =>
+				request.method === "PATCH" && request.url.endsWith(`/api/sessions/${id}`)), sessionId), {
+			message: `${MARK}: rendering should persist the assigned session colour through the gateway boundary`,
+		}).toMatchObject({
+			url: `https://fixture.test/team/bobbit/api/sessions/${sessionId}`,
+			method: "PATCH",
+			credentials: "include",
+			authorization: "Bearer fixture-token",
+		});
 	});
 
 	test("Ctrl+Arrow walks visible rows in DOM order, wraps, and marks one active row", async ({ page }) => {
