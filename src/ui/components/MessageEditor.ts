@@ -446,44 +446,330 @@ export class MessageEditor extends LitElement {
 		}
 	}
 
+	/** CSS text-layout clone of the textarea, used for caret geometry. */
+	private _createMirror(textarea: HTMLTextAreaElement): HTMLDivElement {
+		const style = getComputedStyle(textarea);
+		const mirror = document.createElement("div");
+		// Every property that can move a line break or a line box must be copied
+		// explicitly — the `font` shorthand does not reliably carry line-height.
+		mirror.style.cssText = [
+			"position:absolute",
+			"top:-10000px",
+			"left:0",
+			"visibility:hidden",
+			"white-space:pre-wrap",
+			"word-wrap:break-word",
+			"overflow-wrap:break-word",
+			"margin:0",
+			`width:${textarea.clientWidth}px`,
+			`font-family:${style.fontFamily}`,
+			`font-size:${style.fontSize}`,
+			`font-weight:${style.fontWeight}`,
+			`font-style:${style.fontStyle}`,
+			`line-height:${style.lineHeight}`,
+			`letter-spacing:${style.letterSpacing}`,
+			`word-spacing:${style.wordSpacing}`,
+			`tab-size:${style.tabSize}`,
+			`text-indent:${style.textIndent}`,
+			`text-transform:${style.textTransform}`,
+			`padding:${style.padding}`,
+			`border:${style.border}`,
+			`box-sizing:${style.boxSizing}`,
+		].join(";");
+		return mirror;
+	}
+
+	/** Height of one visual row in the mirror. Uses the computed `line-height`
+	 *  when it resolves to a length; `normal` is resolved by probing two rows of a
+	 *  detached clone. Never derived by differencing integer `offsetHeight`s. */
+	private _mirrorRowHeight(mirror: HTMLDivElement): number | null {
+		const lineHeight = Number.parseFloat(getComputedStyle(mirror).lineHeight);
+		if (Number.isFinite(lineHeight) && lineHeight > 0) return lineHeight;
+
+		// `line-height: normal` — measure the gap between two consecutive rows with
+		// two single-character probes (same measurement basis as everything below).
+		const probe = mirror.cloneNode(false) as HTMLDivElement;
+		const text = document.createTextNode("X\nX");
+		probe.appendChild(text);
+		document.body.appendChild(probe);
+		try {
+			const first = this._charRectTop(text, 0);
+			const second = this._charRectTop(text, 2);
+			if (first === null || second === null) return null;
+			const delta = second - first;
+			return delta > 0 ? delta : null;
+		} finally {
+			probe.remove();
+		}
+	}
+
+	/** Lay `value` out in a throwaway mirror of `textarea` and hand the callback the
+	 *  single, UNSPLIT text node plus the resolved row height, so wrap points are
+	 *  exactly the browser's own. Returns `null` (unmeasurable) when the row height
+	 *  cannot be resolved — e.g. in a DOM implementation without a layout engine. */
+	private _withMirror<T>(
+		textarea: HTMLTextAreaElement,
+		value: string,
+		fn: (ctx: { text: Text; rowHeight: number; contentTop: number | null }) => T,
+	): T | null {
+		const mirror = this._createMirror(textarea);
+		const text = document.createTextNode(value);
+		mirror.appendChild(text);
+		document.body.appendChild(mirror);
+		try {
+			const rowHeight = this._mirrorRowHeight(mirror);
+			if (rowHeight === null || !(rowHeight > 0)) return null;
+			return fn({ text, rowHeight, contentTop: this._contentTop(mirror) });
+		} finally {
+			mirror.remove();
+		}
+	}
+
+	/** Index of the FIRST soft-wrap boundary inside the newline-free string `line`
+	 *  (the offset of the first character of its second visual row), `null` when the
+	 *  whole string fits on one visual row, or `"unknown"` when it cannot be
+	 *  measured.
+	 *
+	 *  ONLY A BOUNDED PREFIX IS LAID OUT. Greedy line breaking decides row 0's break
+	 *  from the characters up to the first overflow alone, so as soon as a prefix
+	 *  wraps, that prefix's first break IS the full string's first break (later text
+	 *  cannot move an earlier overflow); and a prefix can only fail to wrap where the
+	 *  full string also has no break before the window's end — hence the growth loop.
+	 *  This is what keeps a huge draft off the keydown critical path: the window stops
+	 *  at roughly one row's worth of characters instead of laying out the whole value
+	 *  (measured: ~1 ms vs ~135 ms for a 500 KB single-line draft, and Chromium
+	 *  needs ~800 ms just to lay out a 200 K-row one).
+	 *
+	 *  The boundary itself is found by BINARY SEARCH over single-character rect tops,
+	 *  which are monotonically non-decreasing in index — no per-row rect collection. */
+	private _firstWrapBoundary(textarea: HTMLTextAreaElement, line: string): number | null | "unknown" {
+		if (line.length < 2) return null;
+		const START_WINDOW = 512;
+		const GROWTH = 8;
+		let windowLen = Math.min(line.length, START_WINDOW);
+		for (;;) {
+			const result = this._withMirror(textarea, line.substring(0, windowLen), ({ text, rowHeight, contentTop }) => {
+				const tol = rowHeight / 2;
+				const firstTop = this._charRowTop(text, 0, rowHeight, contentTop);
+				const lastTop = this._charRowTop(text, windowLen - 1, rowHeight, contentTop);
+				if (firstTop === null || lastTop === null) return "unknown" as const;
+				if (lastTop - firstTop < tol) return "no-break" as const;
+				// Smallest index whose line box is below the first row.
+				let lo = 1;
+				let hi = windowLen - 1;
+				while (lo < hi) {
+					const mid = (lo + hi) >> 1;
+					const top = this._charRowTop(text, mid, rowHeight, contentTop);
+					if (top === null) return "unknown" as const;
+					if (top - firstTop >= tol) hi = mid;
+					else lo = mid + 1;
+				}
+				return lo;
+			});
+			if (result === null || result === "unknown") return "unknown";
+			if (typeof result === "number") return result;
+			if (windowLen >= line.length) return null;
+			windowLen = Math.min(line.length, windowLen * GROWTH);
+		}
+	}
+
+	/** `top` of the line box of the SINGLE character at `index`, or `null` when the
+	 *  character generates no rect.
+	 *
+	 *  This is the only rect primitive used by the caret geometry, and it is what
+	 *  makes the measurement O(1) in the number of visual rows: collecting rects for
+	 *  the whole value (and de-duplicating them) was O(rows^2) and froze the main
+	 *  thread inside the keydown handler on large drafts (≈6 s at 500 KB).
+	 *
+	 *  Read-only: a `Range` never mutates the node, so the browser's own wrap points
+	 *  are what gets measured. Verified in Chromium: every character kind —
+	 *  ordinary glyph, space, tab, NBSP, zero-width space, surrogate half, first
+	 *  char, last char AND `\n` — yields exactly one rect. A newline's rect sits on
+	 *  the row that newline TERMINATES (so a caret immediately before a `\n` shares
+	 *  that row, and a caret immediately after it is one row lower). */
+	private _charRectTop(text: Text, index: number): number | null {
+		if (index < 0 || index >= text.data.length) return null;
+		const range = document.createRange();
+		range.setStart(text, index);
+		range.setEnd(text, index + 1);
+		const rects = range.getClientRects();
+		if (rects.length === 0) return null;
+		const top = rects[0].top;
+		return Number.isFinite(top) ? top : null;
+	}
+
+	/** `top` of the line box the character at `index` sits on, with a fallback for
+	 *  engines where that character generates no rect: walk BACK to the nearest
+	 *  character that does have one and add one `rowHeight` per newline crossed
+	 *  (each crossed newline ends a row). Only string scanning is done here — no
+	 *  per-row rect work — so this stays O(1) in the number of rows. Never returns a
+	 *  different row than the character actually occupies; returns `null` rather
+	 *  than guess. */
+	private _charRowTop(text: Text, index: number, rowHeight: number, contentTop: number | null): number | null {
+		const direct = this._charRectTop(text, index);
+		if (direct !== null) return direct;
+		const data = text.data;
+		let rowsCrossed = 0;
+		for (let j = index - 1; j >= 0; j--) {
+			const top = this._charRectTop(text, j);
+			if (top !== null) return top + rowsCrossed * rowHeight;
+			if (data[j] === "\n") rowsCrossed++;
+		}
+		// Nothing before `index` renders at all — the first row starts at the mirror's
+		// content-box top, and every row is then derived arithmetically from it.
+		return contentTop === null ? null : contentTop + rowsCrossed * rowHeight;
+	}
+
+	/** Visual-row geometry of the caret, measured in ONE layout pass so every `top`
+	 *  is directly comparable. Shared by BOTH predicates so the newline arithmetic
+	 *  can never drift between them.
+	 *
+	 *  The mirror holds the value as a SINGLE, UNSPLIT text node and every quantity
+	 *  is a single-character rect probe, so wrap points are exactly the browser's own
+	 *  and the cost is independent of the number of rows. Inserting a marker at the
+	 *  caret instead is NOT viable: it splits the text node and can move a
+	 *  `break-word` soft-wrap point, which laid the marker out on the previous row
+	 *  and reintroduced the original user-visible bug for wrapped content.
+	 *
+	 *  TWO CARET-ROW CANDIDATES, AND WHY. A textarea caret at an exact soft-wrap
+	 *  boundary is genuinely ambiguous: offset `pos` is both the end of row N and
+	 *  column 0 of row N+1 (real `Home` at the boundary puts the caret there with
+	 *  downstream affinity), and that affinity is NOT observable from the DOM. So we
+	 *  do not guess it — we measure both readings:
+	 *    `beforeTop` — the row of the caret read as "just after the character at
+	 *                  pos - 1"; a newline there means the caret starts a new row, so
+	 *                  one `rowHeight` is added (CSS materialises no line box for the
+	 *                  row a TRAILING newline opens, yet a textarea shows it).
+	 *    `afterTop`  — the row of the caret read as "just before the character at
+	 *                  pos", i.e. that character's own line box.
+	 *  The predicates then require BOTH candidates to agree on being the first (or
+	 *  last) row. At every unambiguous position the two candidates are on the same
+	 *  row, so all established behaviour is preserved; at an ambiguous boundary they
+	 *  disagree and both predicates return false, so the key MOVES THE CARET instead
+	 *  of mutating history. That direction is deliberate: caret movement is
+	 *  non-destructive and self-correcting (the next press, from an unambiguous
+	 *  position, performs the history action), whereas a wrong history recall
+	 *  destroys the user's draft. It also makes boundaries deterministic and
+	 *  testable rather than affinity-dependent.
+	 *
+	 *  Returns `null` when the measurement is unusable (no layout engine, degenerate
+	 *  rects, unresolvable row height); callers then fall back to permissive `true`,
+	 *  preserving the pre-fix behaviour.
+	 *
+	 *  COST: O(1) rect probes, but Chromium must still lay the WHOLE value out, so the
+	 *  predicates only reach this path when no cheaper structural fact settles the
+	 *  answer — see `_isCursorOnVisualTopRow` / `_isCursorOnVisualBottomRow`. */
+	private _measureCaretRowGeometry(): {
+		beforeTop: number;
+		afterTop: number;
+		firstTop: number;
+		lastTop: number;
+		rowHeight: number;
+	} | null {
+		const textarea = this.textareaRef.value;
+		if (!textarea) return null;
+		const value = textarea.value;
+		const pos = Math.max(0, Math.min(textarea.selectionStart, value.length));
+
+		return this._withMirror(textarea, value, ({ text, rowHeight, contentTop }) => {
+			// First row: the line box of character 0. (A newline there still has a rect,
+			// on the row it terminates — i.e. row 0.)
+			const firstTop = value.length > 0 ? this._charRowTop(text, 0, rowHeight, contentTop) : contentTop;
+			if (firstTop === null || !Number.isFinite(firstTop)) return null;
+
+			// Row of the caret read as "just after the character at `end - 1`".
+			const rowAfterChar = (end: number): number | null => {
+				if (end <= 0) return firstTop;
+				const prev = this._charRowTop(text, end - 1, rowHeight, contentTop);
+				if (prev === null) return null;
+				// A newline ends its row, so the caret after it opens the next one.
+				return value[end - 1] === "\n" ? prev + rowHeight : prev;
+			};
+
+			const lastTop = rowAfterChar(value.length);
+			const beforeTop = rowAfterChar(pos);
+			// Row of the caret read as "just before the character at `pos`". A newline
+			// there needs no arithmetic: its rect already sits on the row it terminates,
+			// which is the row the caret occupies.
+			const afterTop = pos >= value.length ? lastTop : this._charRowTop(text, pos, rowHeight, contentTop);
+			if (lastTop === null || beforeTop === null || afterTop === null) return null;
+			if (!Number.isFinite(lastTop) || !Number.isFinite(beforeTop) || !Number.isFinite(afterTop)) return null;
+			return { beforeTop, afterTop, firstTop, lastTop, rowHeight };
+		});
+	}
+
+	/** Viewport `top` of an element's content box, or `null` if unmeasurable. */
+	private _contentTop(el: HTMLElement): number | null {
+		const rect = el.getBoundingClientRect();
+		const style = getComputedStyle(el);
+		const border = Number.parseFloat(style.borderTopWidth) || 0;
+		const padding = Number.parseFloat(style.paddingTop) || 0;
+		const top = rect.top + border + padding;
+		return Number.isFinite(top) ? top : null;
+	}
+
+	/** True when BOTH readings of the caret's row (see `_measureCaretRowGeometry`)
+	 *  are the FIRST visual row — i.e. ArrowUp may recall history instead of moving
+	 *  the caret. At an ambiguous soft-wrap boundary the two readings disagree, so
+	 *  this is false and the caret moves (the non-destructive direction).
+	 *
+	 *  Decided structurally, WITHOUT laying the value out, wherever that is exact:
+	 *  the caret is on the first visual row iff no hard newline precedes it and it is
+	 *  inside the first wrap segment of the first line. Only the first line's leading
+	 *  window is ever measured, which keeps a large draft off the keydown critical
+	 *  path (the previous whole-value measurement took ~1 s at 200 KB and ~6 s at
+	 *  500 KB, synchronously inside this handler). */
 	private _isCursorOnVisualTopRow(): boolean {
 		const textarea = this.textareaRef.value;
 		if (!textarea) return true;
-		const pos = textarea.selectionStart;
-		if (pos === 0) return true;
+		if (textarea.selectionStart === 0) return true;
+		const value = textarea.value;
+		const pos = Math.max(0, Math.min(textarea.selectionStart, value.length));
 
-		const style = getComputedStyle(textarea);
-		const mirror = document.createElement("div");
-		mirror.style.cssText = `position:absolute;visibility:hidden;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;width:${textarea.clientWidth}px;font:${style.font};padding:${style.padding};border:${style.border};box-sizing:${style.boxSizing};letter-spacing:${style.letterSpacing};`;
-		mirror.textContent = textarea.value.substring(0, pos);
-		document.body.appendChild(mirror);
-		const cursorHeight = mirror.offsetHeight;
-		mirror.textContent = "X";
-		const singleRowHeight = mirror.offsetHeight;
-		document.body.removeChild(mirror);
+		// A hard break before the caret puts it below the first visual row. Also covers
+		// the original bug: at column 0 of any later line, `pos - 1` IS that newline.
+		if (value.lastIndexOf("\n", pos - 1) !== -1) return false;
 
-		return cursorHeight <= singleRowHeight;
+		const firstLineEnd = value.indexOf("\n");
+		const firstLine = firstLineEnd === -1 ? value : value.substring(0, firstLineEnd);
+		const boundary = this._firstWrapBoundary(textarea, firstLine);
+		if (boundary === "unknown") return true; // unmeasurable — permissive, as before
+		if (boundary === null) return true; // the first line never wraps
+		// `pos === boundary` is the ambiguous case: the two readings straddle the wrap,
+		// so it is deliberately NOT the top row.
+		return pos < boundary;
 	}
 
+	/** True when BOTH readings of the caret's row are the LAST visual row. Mirror of
+	 *  `_isCursorOnVisualTopRow`: at an ambiguous boundary ArrowDown moves the caret
+	 *  instead of advancing/leaving history.
+	 *
+	 *  Cheap paths first, each of them EXACT:
+	 *   1. a hard newline at/after the caret ⇒ a later visual row exists ⇒ false;
+	 *   2. if the text after the caret wraps even when laid out from column 0 with the
+	 *      FULL width, then it certainly wraps on the caret's partially-filled row, so
+	 *      a later row exists ⇒ false. (One-directional: less room can only break
+	 *      earlier, never later.)
+	 *  Only when the whole tail fits on one row from column 0 — i.e. the caret is
+	 *  within about a row of the end — does the exact answer depend on how much room
+	 *  is left on the caret's own row, which needs the full-value geometry. */
 	private _isCursorOnVisualBottomRow(): boolean {
 		const textarea = this.textareaRef.value;
 		if (!textarea) return true;
-		const pos = textarea.selectionStart;
-		if (pos >= textarea.value.length) return true;
+		const value = textarea.value;
+		if (textarea.selectionStart >= value.length) return true;
+		const pos = Math.max(0, textarea.selectionStart);
 
-		const style = getComputedStyle(textarea);
-		const mirror = document.createElement("div");
-		mirror.style.cssText = `position:absolute;visibility:hidden;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;width:${textarea.clientWidth}px;font:${style.font};padding:${style.padding};border:${style.border};box-sizing:${style.boxSizing};letter-spacing:${style.letterSpacing};`;
-		mirror.textContent = textarea.value;
-		document.body.appendChild(mirror);
-		const fullHeight = mirror.offsetHeight;
-		mirror.textContent = textarea.value.substring(0, pos);
-		const cursorHeight = mirror.offsetHeight;
-		mirror.textContent = "X";
-		const singleRowHeight = mirror.offsetHeight;
-		document.body.removeChild(mirror);
+		if (value.indexOf("\n", pos) !== -1) return false;
 
-		return (fullHeight - cursorHeight) <= singleRowHeight;
+		const tailBreak = this._firstWrapBoundary(textarea, value.substring(pos));
+		if (tailBreak === "unknown") return true; // unmeasurable — permissive, as before
+		if (tailBreak !== null) return false;
+
+		const geo = this._measureCaretRowGeometry();
+		if (!geo) return true;
+		const tol = geo.rowHeight / 2;
+		return Math.abs(geo.beforeTop - geo.lastTop) < tol && Math.abs(geo.afterTop - geo.lastTop) < tol;
 	}
 
 	/** Horizontal pixel offset of the autocomplete menu for a token starting at
