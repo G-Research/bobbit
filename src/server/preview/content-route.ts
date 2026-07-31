@@ -7,11 +7,10 @@
  *   the theme/swipe bridge scripts appended.
  * - All other MIME types stream as-is (no body rewrite).
  * - Path-traversal defence delegates to `path-guard.ts::resolveAssetPath`.
- * - Auth is cookie-based (`bobbit_session`); localhost mode short-circuits.
- *
- * Bearer-token auth is intentionally *not* honoured here: iframe navigations
- * cannot carry an `Authorization` header. The cookie is minted by the API
- * router on the user's first authenticated request.
+ * - Initial navigation uses the signed browser cookie (or the existing admin
+ *   fallback); opaque-frame subresources use a signed, tree-scoped path
+ *   capability because SameSite cookies are intentionally unavailable there.
+ * - Localhost mode retains its existing auth short-circuit.
  */
 
 import fs from "node:fs";
@@ -28,6 +27,88 @@ import { gatewayRoute, normalizeBasePath, withBasePath } from "../../shared/base
 import { getPreviewThemeSnapshot } from "./theme-snapshot.js";
 
 const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+const VALID_ARTIFACT_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const VALID_CONTENT_CAPABILITY = /^[A-Za-z0-9._-]{1,256}$/;
+const CONTENT_CAPABILITY_SEGMENT = "_content";
+
+type PreviewContentCapability = Readonly<{ token: string; path: string; scope: string }>;
+
+function contentCapabilityScope(basePath: string, internalBaseRoute: string): string {
+	return normalizeBasePath(`${basePath}${internalBaseRoute}`);
+}
+
+function contentCapabilityFromRoute(
+	rel: string,
+	basePath: string,
+	internalBaseRoute: string,
+): PreviewContentCapability | null {
+	if (!rel.startsWith(`${CONTENT_CAPABILITY_SEGMENT}/`)) return null;
+	const remainder = rel.slice(CONTENT_CAPABILITY_SEGMENT.length + 1);
+	const slash = remainder.indexOf("/");
+	const token = slash < 0 ? remainder : remainder.slice(0, slash);
+	if (!VALID_CONTENT_CAPABILITY.test(token)) return null;
+	return {
+		token,
+		path: slash < 0 ? "" : remainder.slice(slash + 1),
+		scope: contentCapabilityScope(basePath, internalBaseRoute),
+	};
+}
+
+function contentCapabilityCandidate(rel: string, sid: string, basePath: string): PreviewContentCapability | null {
+	let internalBaseRoute = `/preview/${sid}/`;
+	let candidateRel = rel;
+	if (rel.startsWith("_artifact/")) {
+		const afterPrefix = rel.slice("_artifact/".length);
+		const slash = afterPrefix.indexOf("/");
+		const artifactId = slash < 0 ? afterPrefix : afterPrefix.slice(0, slash);
+		if (!VALID_ARTIFACT_ID.test(artifactId)) return null;
+		internalBaseRoute = `/preview/${sid}/_artifact/${artifactId}/`;
+		candidateRel = slash < 0 ? "" : afterPrefix.slice(slash + 1);
+	}
+	return contentCapabilityFromRoute(candidateRel, basePath, internalBaseRoute);
+}
+
+/**
+ * Preview HTML is agent-authored and may be served below Bobbit or another
+ * application on the same web origin. The response sandbox is therefore the
+ * security boundary for both embedded frames and top-level preview popouts.
+ */
+export const PREVIEW_HTML_CONTENT_SECURITY_POLICY = "sandbox allow-scripts";
+
+/**
+ * An iframe without `allow-same-origin` cannot inspect its parent to mirror
+ * live theme changes. Request the non-sensitive theme snapshot over a narrow
+ * postMessage channel instead; render.ts verifies the requesting Window is a
+ * currently mounted preview iframe before replying.
+ */
+const PREVIEW_OPAQUE_THEME_BRIDGE = `<script>
+(function() {
+	if (parent === window) return;
+	var MESSAGE_TYPE = 'bobbit-preview-theme';
+	window.addEventListener('message', function(event) {
+		if (event.source !== parent || !event.data || event.data.type !== MESSAGE_TYPE) return;
+		var theme = event.data.theme;
+		if (!theme || typeof theme !== 'object') return;
+		var root = document.documentElement;
+		root.classList.toggle('dark', theme.dark === true);
+		if (typeof theme.palette === 'string' && theme.palette) root.setAttribute('data-palette', theme.palette);
+		else root.removeAttribute('data-palette');
+		var properties = theme.customProperties;
+		if (properties && typeof properties === 'object') {
+			Object.keys(properties).forEach(function(name) {
+				var value = properties[name];
+				if (/^--[A-Za-z0-9_-]+$/.test(name) && typeof value === 'string') root.style.setProperty(name, value);
+			});
+		}
+		if (typeof theme.fontFamily === 'string') root.style.fontFamily = theme.fontFamily;
+	});
+	function requestTheme() {
+		parent.postMessage({ type: 'bobbit-preview-theme-request' }, '*');
+	}
+	requestTheme();
+	window.addEventListener('load', requestTheme, { once: true });
+})();
+<\/script>`;
 
 export interface ContentRouteOptions {
 	cookieStore: CookieStore;
@@ -43,7 +124,17 @@ function send(res: http.ServerResponse, status: number, body: string, contentTyp
 	res.end(body);
 }
 
-function isAuthorized(req: http.IncomingMessage, opts: ContentRouteOptions): boolean {
+function isAuthorized(
+	req: http.IncomingMessage,
+	opts: ContentRouteOptions,
+	contentCapability?: PreviewContentCapability | null,
+): boolean {
+	if (contentCapability) {
+		// Capability values live in the URL path, not a Cookie header. Verify the
+		// signed value against a session/artifact-specific synthetic base scope;
+		// it cannot authenticate APIs or a different preview tree.
+		if (opts.cookieStore.verify(contentCapability.token, { basePath: contentCapability.scope })) return true;
+	}
 	if (opts.isLocalhost) return true;
 	const basePath = normalizeBasePath(opts.basePath);
 	const isTls = Boolean((req.socket as { encrypted?: boolean } | undefined)?.encrypted);
@@ -112,17 +203,26 @@ export async function handlePreviewRequest(
 		return true;
 	}
 
-	// Auth (must come before any disclosure).
-	if (!isAuthorized(req, opts)) {
-		send(res, 401, JSON.stringify({ error: "Unauthorized" }));
-		return true;
-	}
-
-	// Parse `/preview/<sid>(/<rel>)?`.
+	// Parse enough route shape to authenticate an opaque-frame content
+	// capability, but retain the historical auth-before-disclosure response
+	// ordering for malformed session/artifact paths.
 	const remainder = pathname.slice("/preview/".length);
 	const slashIdx = remainder.indexOf("/");
 	const sid = slashIdx < 0 ? remainder : remainder.slice(0, slashIdx);
 	let rel = slashIdx < 0 ? "" : remainder.slice(slashIdx + 1);
+	const basePath = normalizeBasePath(opts.basePath);
+	const capability = VALID_SESSION_ID.test(sid)
+		? contentCapabilityCandidate(rel, sid, basePath)
+		: null;
+	const capabilityAuthorized = Boolean(
+		capability && opts.cookieStore.verify(capability.token, { basePath: capability.scope }),
+	);
+
+	// Auth (must come before any route/filesystem disclosure).
+	if (!isAuthorized(req, opts, capability)) {
+		send(res, 401, JSON.stringify({ error: "Unauthorized" }));
+		return true;
+	}
 
 	if (!sid || !VALID_SESSION_ID.test(sid)) {
 		send(res, 400, JSON.stringify({ error: "Invalid sessionId" }));
@@ -134,7 +234,6 @@ export async function handlePreviewRequest(
 	// This lets the client switch between preview tabs (each backed by its own
 	// artifact) by just changing the iframe src — no POST/restore round-trip
 	// needed, since each artifact's bytes live at their own URL forever.
-	const basePath = normalizeBasePath(opts.basePath);
 	let baseDir = mountPath(sid);
 	let internalBaseRoute = gatewayRoute(`/preview/${sid}/`);
 	if (rel.startsWith("_artifact/")) {
@@ -142,7 +241,7 @@ export async function handlePreviewRequest(
 		const nextSlash = afterPrefix.indexOf("/");
 		const artifactId = nextSlash < 0 ? afterPrefix : afterPrefix.slice(0, nextSlash);
 		const artRel = nextSlash < 0 ? "" : afterPrefix.slice(nextSlash + 1);
-		if (!artifactId || !/^[A-Za-z0-9_-]{1,64}$/.test(artifactId)) {
+		if (!VALID_ARTIFACT_ID.test(artifactId)) {
 			send(res, 400, JSON.stringify({ error: "Invalid artifactId" }));
 			return true;
 		}
@@ -158,6 +257,18 @@ export async function handlePreviewRequest(
 		}
 		internalBaseRoute = gatewayRoute(`/preview/${sid}/_artifact/${artifactId}/`);
 		rel = artRel;
+	}
+
+	// Opaque sandbox frames do not receive SameSite=Lax cookies on subresource
+	// requests. A signed path capability restores access only to this exact
+	// session/artifact tree; it cannot authenticate Bobbit APIs or siblings.
+	if (rel.startsWith(`${CONTENT_CAPABILITY_SEGMENT}/`)) {
+		const routedCapability = contentCapabilityFromRoute(rel, basePath, internalBaseRoute);
+		if (!routedCapability || !opts.cookieStore.verify(routedCapability.token, { basePath: routedCapability.scope })) {
+			send(res, 401, JSON.stringify({ error: "Unauthorized" }));
+			return true;
+		}
+		rel = routedCapability.path;
 	}
 
 	// Whole-root installs fence the exact destination through post-rename
@@ -195,9 +306,13 @@ export async function handlePreviewRequest(
 			send(res, 404, JSON.stringify({ error: "Preview mount is empty" }));
 			return true;
 		}
+		const redirectBaseRoute = capabilityAuthorized && capability
+			? gatewayRoute(`${internalBaseRoute}${CONTENT_CAPABILITY_SEGMENT}/${capability.token}/`)
+			: internalBaseRoute;
 		res.writeHead(302, {
-			Location: withBasePath(gatewayRoute(`${internalBaseRoute}${encodeURIComponent(entry)}`), basePath),
+			Location: withBasePath(gatewayRoute(`${redirectBaseRoute}${encodeURIComponent(entry)}`), basePath),
 			"Cache-Control": "no-store",
+			...(capabilityAuthorized ? { "Access-Control-Allow-Origin": "null" } : {}),
 		});
 		res.end();
 		return true;
@@ -234,16 +349,35 @@ export async function handlePreviewRequest(
 		}
 		// `<base>` + inline theme-token snapshot. Both land inside <head> via
 		// injectBaseAndScripts; the snapshot defines `:root`/`.dark` defaults so
-		// standalone-tab opens (where the runtime parent-pull bridge no-ops) still
-		// resolve `var(--background)` etc. The runtime bridge continues to flow
-		// live theme toggles into embedded iframes where `parent !== window`.
-		const publicBaseHref = withBasePath(internalBaseRoute, basePath);
+		// standalone-tab opens still resolve `var(--background)` etc. Opaque
+		// embedded frames receive live theme updates over the constrained
+		// postMessage bridge instead of reading parent.document.
+		const requestOrigin = canonicalRequestOrigin({
+			headers: req.headers,
+			isTls: Boolean((req.socket as { encrypted?: boolean } | undefined)?.encrypted),
+		});
+		const capabilityBaseRoute = requestOrigin
+			? gatewayRoute(`${internalBaseRoute}${CONTENT_CAPABILITY_SEGMENT}/${opts.cookieStore.mint({
+				basePath: contentCapabilityScope(basePath, internalBaseRoute),
+				origin: requestOrigin,
+			})}/`)
+			: internalBaseRoute;
+		const publicBaseHref = withBasePath(capabilityBaseRoute, basePath);
 		const baseTag = `<base data-bobbit-preview-base href="${publicBaseHref}">` + getPreviewThemeSnapshot();
-		const rewritten = injectBaseAndScripts(body, baseTag, PREVIEW_BRIDGE_SCRIPTS);
+		const rewritten = injectBaseAndScripts(
+			body,
+			baseTag,
+			PREVIEW_BRIDGE_SCRIPTS + PREVIEW_OPAQUE_THEME_BRIDGE,
+		);
 		res.writeHead(200, {
 			"Content-Type": contentType,
 			"Cache-Control": "no-store",
+			"Content-Security-Policy": PREVIEW_HTML_CONTENT_SECURITY_POLICY,
 			"X-Content-Type-Options": "nosniff",
+			// The scoped path capability is the authority. Reflect only the opaque
+			// sandbox origin so modules/fetch can read their own mounted assets;
+			// normal cookie-authenticated preview/API routes are not widened.
+			...(capabilityAuthorized ? { "Access-Control-Allow-Origin": "null" } : {}),
 		});
 		if (method === "HEAD") {
 			res.end();
@@ -259,6 +393,7 @@ export async function handlePreviewRequest(
 		"Content-Length": String(guard.size),
 		"Cache-Control": "no-store",
 		"X-Content-Type-Options": "nosniff",
+		...(capabilityAuthorized ? { "Access-Control-Allow-Origin": "null" } : {}),
 	});
 	if (method === "HEAD") {
 		res.end();

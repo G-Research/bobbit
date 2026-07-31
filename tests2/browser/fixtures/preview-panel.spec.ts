@@ -132,6 +132,8 @@ test.describe("Preview panel fixture", () => {
 
 		const iframe = page.locator(".goal-preview-panel iframe").first();
 		await expect(iframe).toBeVisible({ timeout: 5_000 });
+		await expect(iframe).toHaveAttribute("sandbox", "allow-scripts");
+		expect(await iframe.getAttribute("sandbox"), "agent-authored previews must retain an opaque origin").not.toContain("allow-same-origin");
 		await expect(iframe).toHaveAttribute("src", new RegExp(`^${FIXTURE_ORIGIN}/preview/${SESSION_A}/report\\.html\\?mtime=\\d+$`));
 		const initialSrc = await iframe.getAttribute("src");
 		expect(initialSrc).not.toContain("/api/preview/render");

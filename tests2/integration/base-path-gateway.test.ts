@@ -276,7 +276,7 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("in-process gateway mounted a
 		expect(content.status).toBe(200);
 		const previewHtml = await content.text();
 		expect(previewHtml).toContain(`data-bobbit-preview-base`);
-		expect(previewHtml).toContain(`href="${MOUNT}/preview/${sessionId}/"`);
+		expect(previewHtml).toMatch(new RegExp(`href="${MOUNT}/preview/${sessionId}/_content/[^/]+/"`));
 		expect(previewHtml).not.toContain(`${MOUNT}${MOUNT}`);
 	});
 

@@ -312,7 +312,8 @@ test.describe("Journey: explicit prefixed gateway on a distinct browser origin",
 			await expect(page.frameLocator(".goal-preview-panel iframe").locator("#asset")).toHaveCSS("font-weight", "700");
 			const assetRequest = traffic.requests.find(record => {
 				const url = new URL(record.url);
-				return url.origin === gatewayOrigin && url.pathname === `${GATEWAY_PATH}/preview/${sessionId}/asset.css`;
+				return url.origin === gatewayOrigin
+					&& new RegExp(`^${GATEWAY_PATH}/preview/${sessionId}/_content/[^/]+/asset\\.css$`).test(url.pathname);
 			});
 			expect(assetRequest, "explicit preview sibling asset should stay on the remote mount").toBeTruthy();
 

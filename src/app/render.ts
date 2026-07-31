@@ -1695,16 +1695,88 @@ function unifiedSlideX(index: number, count: number): number {
 	return -(index * 100) / count;
 }
 
-/** Listen for postMessage from the preview iframe and drive the slider track.
- *  Also handles touch swipes on the chat / content panes. */
+type PreviewThemePayload = {
+	type: "bobbit-preview-theme";
+	theme: {
+		dark: boolean;
+		palette: string | null;
+		fontFamily: string;
+		customProperties: Record<string, string>;
+	};
+};
+
+function previewIframeForMessageSource(source: MessageEventSource | null): HTMLIFrameElement | null {
+	if (!source) return null;
+	for (const iframe of document.querySelectorAll<HTMLIFrameElement>(".goal-preview-panel iframe")) {
+		if (iframe.contentWindow === source) return iframe;
+	}
+	return null;
+}
+
+let previewThemeCache: PreviewThemePayload | null = null;
+
+function currentPreviewTheme(): PreviewThemePayload {
+	if (previewThemeCache) return previewThemeCache;
+	const root = document.documentElement;
+	const computed = getComputedStyle(root);
+	const names = new Set<string>();
+	for (let index = 0; index < computed.length; index++) {
+		const name = computed.item(index);
+		if (name.startsWith("--")) names.add(name);
+	}
+	for (const sheet of Array.from(document.styleSheets)) {
+		try {
+			const visitRules = (rules: CSSRuleList): void => {
+				for (const rule of Array.from(rules)) {
+					const style = (rule as CSSStyleRule).style;
+					if (style) {
+						for (const name of Array.from(style)) if (name.startsWith("--")) names.add(name);
+					}
+					const nested = (rule as CSSRule & { cssRules?: CSSRuleList }).cssRules;
+					if (nested) visitRules(nested);
+				}
+			};
+			visitRules(sheet.cssRules);
+		} catch { /* ignore cross-origin stylesheets */ }
+	}
+	const customProperties: Record<string, string> = {};
+	for (const name of names) {
+		const value = computed.getPropertyValue(name);
+		if (value) customProperties[name] = value;
+	}
+	previewThemeCache = {
+		type: "bobbit-preview-theme",
+		theme: {
+			dark: root.classList.contains("dark"),
+			palette: root.getAttribute("data-palette"),
+			fontFamily: computed.fontFamily,
+			customProperties,
+		},
+	};
+	return previewThemeCache;
+}
+
+function postPreviewTheme(iframe: HTMLIFrameElement): void {
+	iframe.contentWindow?.postMessage(currentPreviewTheme(), "*");
+}
+
+/** Listen for postMessage from opaque preview iframes, provide a constrained
+ *  theme bridge, and drive the slider track. Also handles touch swipes on the
+ *  chat / content panes. */
 function setupPreviewSwipe(): void {
 	if ((window as any).__previewSwipeListening) return;
 	(window as any).__previewSwipeListening = true;
 
 	const getTrack = () => document.querySelector(".side-panel-slider__track, .preview-slider__track") as HTMLElement | null;
 
-	// === iframe -> parent: swipe on preview pane ===
+	// === iframe -> parent: theme request or swipe on preview pane ===
 	window.addEventListener("message", (e: MessageEvent) => {
+		const iframe = previewIframeForMessageSource(e.source);
+		if (!iframe) return;
+		if (e.data?.type === "bobbit-preview-theme-request") {
+			postPreviewTheme(iframe);
+			return;
+		}
 		if (!hasUnifiedPanel()) return;
 		const panes = unifiedMobilePanes();
 		const curIdx = unifiedMobilePaneIndex();
@@ -1734,6 +1806,17 @@ function setupPreviewSwipe(): void {
 			setUnifiedMobilePaneByIndex(newIdx);
 			track.style.transform = `translateX(${unifiedSlideX(newIdx, count)}%)`;
 		}
+	});
+
+	// Live theme changes are pushed only to mounted preview windows. The opaque
+	// child cannot inspect parent.document and receives no storage or credential
+	// authority through this data-only channel.
+	new MutationObserver(() => {
+		previewThemeCache = null;
+		for (const iframe of document.querySelectorAll<HTMLIFrameElement>(".goal-preview-panel iframe")) postPreviewTheme(iframe);
+	}).observe(document.documentElement, {
+		attributes: true,
+		attributeFilter: ["class", "data-palette", "style"],
 	});
 
 	// === touch swipe on non-iframe panes (chat, proposals, reviews, inbox) ===
@@ -2635,7 +2718,7 @@ export function doRenderApp(): void {
 				<iframe
 					class="w-full border-0"
 					style="position:absolute;inset:0;height:100%;"
-					sandbox="allow-scripts allow-same-origin"
+					sandbox="allow-scripts"
 					src=${src}
 				></iframe>
 			</div>
@@ -3202,7 +3285,6 @@ export function doRenderApp(): void {
 			</div>
 		`, app);
 		ensureMobileScrollTracking();
-		setupPreviewSwipe();
 		requestAnimationFrame(() => {
 			const headerEl = document.getElementById("app-header");
 			if (headerEl) {
@@ -3223,6 +3305,11 @@ export function doRenderApp(): void {
 			</div>
 		`, app);
 	}
+
+	// Preview messages are required on desktop and mobile. Historically the
+	// swipe listener was installed only by the mobile branch; the opaque-origin
+	// theme bridge also needs its constrained parent endpoint on desktop.
+	if (connected) setupPreviewSwipe();
 
 	// Attach SortableJS to the panel tab bar (if present). We look up the
 	// element after each render rather than relying on lit's ref directive

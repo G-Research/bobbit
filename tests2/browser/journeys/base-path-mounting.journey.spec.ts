@@ -287,17 +287,70 @@ test.describe("Journey: production gateway mounted below a nested base path", ()
 				return url.pathname === `${BASE_PATH}/api/sessions/${sessionId}/preview-events` && source.withCredentials;
 			}), { timeout: 20_000, message: "preview EventSource should connect with credentials below the mount" }).toBe(true);
 
+			const protectedProbePath = `${BASE_PATH}/api/projects?preview-isolation-probe=1`;
+			const offMountProbePath = "/other/preview-isolation-probe";
+			await context.addCookies([{
+				name: "shared_origin_secret",
+				value: "must-not-be-ambient",
+				url: `${gateway.originURL}/`,
+				sameSite: "Lax",
+			}]);
+			await page.evaluate(() => {
+				localStorage.setItem("preview-isolation-secret", "must-not-be-readable");
+				(window as any).__previewIsolationReports = [];
+				window.addEventListener("message", (event) => {
+					if (event.data?.type === "bobbit-preview-isolation-result") {
+						(window as any).__previewIsolationReports.push(event.data.result);
+					}
+				});
+			});
+
+			const iframeResponsePromise = page.waitForResponse(response => {
+				const url = new URL(response.url());
+				return url.pathname === `${BASE_PATH}/preview/${sessionId}/${ENTRY}`
+					&& response.request().resourceType() === "document";
+			}, { timeout: 20_000 });
+			const protectedProbePromise = page.waitForRequest(request => {
+				const url = new URL(request.url());
+				return url.pathname === `${BASE_PATH}/api/projects`
+					&& url.searchParams.get("preview-isolation-probe") === "1";
+			}, { timeout: 20_000 });
+			const offMountProbePromise = page.waitForRequest(request => new URL(request.url()).pathname === offMountProbePath, { timeout: 20_000 });
 			mkdirSync(previewFixtureDir, { recursive: true });
 			const htmlPath = join(previewFixtureDir, ENTRY);
+			const isolationScript = `<script>
+(async function() {
+	var result = { parentReadable: false, storageReadable: false, cookieReadable: false, ownAssetReadable: false, protectedReadable: false, offMountReadable: false };
+	try { result.parentReadable = !!parent.document.documentElement; } catch (error) { result.parentError = error && error.name; }
+	try { result.storageReadable = localStorage.getItem('preview-isolation-secret') === 'must-not-be-readable'; } catch (error) { result.storageError = error && error.name; }
+	try { result.cookieReadable = document.cookie.indexOf('shared_origin_secret=') >= 0; } catch (error) { result.cookieError = error && error.name; }
+	try {
+		var ownAssetResponse = await fetch('./probe.json');
+		result.ownAssetReadable = ownAssetResponse.ok && (await ownAssetResponse.json()).scope === 'preview-only';
+	} catch (error) { result.ownAssetError = error && error.name; }
+	try {
+		var protectedResponse = await fetch(${JSON.stringify(protectedProbePath)}, { credentials: 'include' });
+		await protectedResponse.text();
+		result.protectedReadable = true;
+	} catch (error) { result.protectedError = error && error.name; }
+	try {
+		var offMountResponse = await fetch(${JSON.stringify(offMountProbePath)}, { credentials: 'include' });
+		await offMountResponse.text();
+		result.offMountReadable = true;
+	} catch (error) { result.offMountError = error && error.name; }
+	parent.postMessage({ type: 'bobbit-preview-isolation-result', result: result }, '*');
+})();
+</script>`;
 			writeFileSync(htmlPath, [
 				"<!doctype html>",
 				"<html><head><link rel=\"stylesheet\" href=\"./sibling.css\"></head>",
-				`<body><h1>${PREVIEW_TEXT}</h1><div id=\"sibling\">${SIBLING_MARKER}</div></body></html>`,
+				`<body><h1>${PREVIEW_TEXT}</h1><div id=\"sibling\">${SIBLING_MARKER}</div>${isolationScript}</body></html>`,
 			].join(""));
 			writeFileSync(join(previewFixtureDir, "sibling.css"), "#sibling { color: rgb(12, 34, 56); }");
+			writeFileSync(join(previewFixtureDir, "probe.json"), JSON.stringify({ scope: "preview-only" }));
 			const mounted = await adminRequest(gateway, `/api/preview/mount?sessionId=${sessionId}`, {
 				method: "POST",
-				body: JSON.stringify({ file: htmlPath, assets: ["sibling.css"] }),
+				body: JSON.stringify({ file: htmlPath, assets: ["sibling.css", "probe.json"] }),
 			});
 			expect(mounted.response.status, mounted.text).toBe(200);
 			expect(mounted.body?.url).toBe(`/preview/${sessionId}/${ENTRY}`);
@@ -312,15 +365,46 @@ test.describe("Journey: production gateway mounted below a nested base path", ()
 
 			const iframe = page.locator(".goal-preview-panel iframe").first();
 			await expect(iframe).toBeVisible({ timeout: 25_000 });
+			await expect(iframe).toHaveAttribute("sandbox", "allow-scripts");
+			expect(await iframe.getAttribute("sandbox"), "embedded preview must not retain shared-origin authority").not.toContain("allow-same-origin");
 			const iframeSrc = await iframe.getAttribute("src");
 			expect(iframeSrc).toBeTruthy();
 			expectExactlyOneMount(iframeSrc!, gateway, "/preview");
+			const iframeResponse = await iframeResponsePromise;
+			expect(await iframeResponse.headerValue("content-security-policy")).toBe("sandbox allow-scripts");
 			await expect(page.frameLocator(".goal-preview-panel iframe").locator("body")).toContainText(PREVIEW_TEXT, { timeout: 20_000 });
 			await expect(page.frameLocator(".goal-preview-panel iframe").locator("#sibling")).toHaveCSS("color", "rgb(12, 34, 56)");
+			await page.evaluate(() => {
+				document.documentElement.classList.add("dark");
+				document.documentElement.setAttribute("data-palette", "security-probe");
+			});
+			await expect(page.frameLocator(".goal-preview-panel iframe").locator("html")).toHaveClass(/dark/, { timeout: 10_000 });
+			await expect(page.frameLocator(".goal-preview-panel iframe").locator("html")).toHaveAttribute("data-palette", "security-probe");
 			const injectedBase = await page.frameLocator(".goal-preview-panel iframe").locator("base[data-bobbit-preview-base]").getAttribute("href");
-			expect(injectedBase).toBe(`${BASE_PATH}/preview/${sessionId}/`);
-			const siblingRequest = requests.find(record => new URL(record.url).pathname === `${BASE_PATH}/preview/${sessionId}/sibling.css`);
+			expect(injectedBase).toMatch(new RegExp(`^${BASE_PATH}/preview/${sessionId}/_content/[^/]+/$`));
+			const siblingRequest = requests.find(record => new RegExp(`^${BASE_PATH}/preview/${sessionId}/_content/[^/]+/sibling\\.css$`).test(new URL(record.url).pathname));
 			expect(siblingRequest, "preview sibling asset should resolve through the injected mounted base").toBeTruthy();
+
+			await expect.poll(() => page.evaluate(() => (window as any).__previewIsolationReports?.at(-1) ?? null), {
+				timeout: 15_000,
+				message: "opaque preview should report denied parent, storage, cookie, and endpoint reads",
+			}).toMatchObject({
+				parentReadable: false,
+				storageReadable: false,
+				cookieReadable: false,
+				ownAssetReadable: true,
+				protectedReadable: false,
+				offMountReadable: false,
+			});
+			const protectedProbeRequest = await protectedProbePromise;
+			const offMountProbeRequest = await offMountProbePromise;
+			for (const probeRequest of [protectedProbeRequest, offMountProbeRequest]) {
+				const origin = await probeRequest.headerValue("origin");
+				expect(origin === null || origin === "null", "opaque preview requests must not claim the shared origin").toBe(true);
+				const cookies = await probeRequest.headerValue("cookie") ?? "";
+				expect(cookies, "opaque preview requests must not carry Bobbit authority").not.toContain("bobbit_session=");
+				expect(cookies, "opaque preview requests must not carry sibling-app authority").not.toContain("shared_origin_secret=");
+			}
 
 			const newTabLink = page.locator('a[title="Open preview in new tab"]').first();
 			await expect(newTabLink).toBeVisible({ timeout: 15_000 });
@@ -333,6 +417,13 @@ test.describe("Journey: production gateway mounted below a nested base path", ()
 			await popup.waitForLoadState("domcontentloaded");
 			expectExactlyOneMount(popup.url(), gateway, "/preview");
 			await expect(popup.locator("body")).toContainText(PREVIEW_TEXT, { timeout: 15_000 });
+			const popupReload = await popup.reload({ waitUntil: "domcontentloaded" });
+			expect(popupReload, "preview popout reload should return its sandboxed HTML response").not.toBeNull();
+			expect(await popupReload!.headerValue("content-security-policy")).toBe("sandbox allow-scripts");
+			expect(await popup.evaluate(() => {
+				try { localStorage.getItem("preview-isolation-secret"); return false; }
+				catch { return true; }
+			}), "response-level sandbox must keep a top-level preview popout out of origin storage").toBe(true);
 			await popup.close();
 			popup = undefined;
 
@@ -402,7 +493,9 @@ test.describe("Journey: production gateway mounted below a nested base path", ()
 			});
 			const escaped = gatewayRequests.filter(record => {
 				const pathname = new URL(record.url).pathname;
-				return pathname !== BASE_PATH && !pathname.startsWith(`${BASE_PATH}/`);
+				return pathname !== BASE_PATH
+					&& !pathname.startsWith(`${BASE_PATH}/`)
+					&& pathname !== offMountProbePath;
 			});
 			expect(escaped, "no production browser request may escape to the shared origin root").toEqual([]);
 			for (const socket of sockets) expectExactlyOneMount(socket.url, gateway, "/ws");

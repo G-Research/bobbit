@@ -18,7 +18,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import { handlePreviewRequest, pickEntry } from "../../src/server/preview/content-route.ts";
+import {
+	handlePreviewRequest,
+	pickEntry,
+	PREVIEW_HTML_CONTENT_SECURITY_POLICY,
+} from "../../src/server/preview/content-route.ts";
 import { setPreviewFsForTesting } from "../../src/server/preview/mount.ts";
 import { COOKIE_NAME, CookieStore } from "../../src/server/auth/cookie.ts";
 import { installScopedMemFs } from "./helpers/scoped-memfs.js";
@@ -27,6 +31,7 @@ import { installScopedMemFs } from "./helpers/scoped-memfs.js";
 // can serve every route assertion without creating or deleting NTFS fixtures.
 const workspaceRoot = path.resolve("/memfs/preview-content-route");
 const SID = "11111111-2222-3333-4444-555555555555";
+const OTHER_SID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const ENTRY_INLINE_DIR = path.join(workspaceRoot, "entries", "inline");
 const ENTRY_ALPHA_DIR = path.join(workspaceRoot, "entries", "alpha");
 const ENTRY_EMPTY_DIR = path.join(workspaceRoot, "entries", "empty");
@@ -248,8 +253,55 @@ describe("handlePreviewRequest — bridge injection", () => {
 		const res = fakeRes();
 		await handlePreviewRequest(fakeReq({ url: `/preview/${SID}/index.html` }), res as any, `/preview/${SID}/index.html`, o);
 		const txt = bodyText(res);
-		assert.match(txt, new RegExp(`<base data-bobbit-preview-base href="/preview/${SID}/"`));
+		assert.match(txt, new RegExp(`<base data-bobbit-preview-base href="/preview/${SID}/_content/[^/]+/"`));
 		assert.match(txt, /preview-swipe-start|MutationObserver|preview-swipe-move/);
+		assert.match(txt, /bobbit-preview-theme-request/);
+	});
+
+	it("sandboxes every HTML response without restoring same-origin authority", async () => {
+		const o = makeOpts(true);
+		for (const method of ["GET", "HEAD"]) {
+			const res = fakeRes();
+			await handlePreviewRequest(
+				fakeReq({ url: `/preview/${SID}/index.html`, method }),
+				res as any,
+				`/preview/${SID}/index.html`,
+				o,
+			);
+			assert.equal(res.statusCode, 200);
+			assert.equal(res.headers["content-security-policy"], PREVIEW_HTML_CONTENT_SECURITY_POLICY);
+			assert.doesNotMatch(String(res.headers["content-security-policy"]), /allow-same-origin/i);
+		}
+	});
+
+	it("uses an unforgeable tree-scoped path capability for opaque-frame assets", async () => {
+		const o = makeOpts(false);
+		const browserCookie = o.store.mint();
+		const htmlRes = fakeRes();
+		await handlePreviewRequest(
+			fakeReq({ url: `/preview/${SID}/index.html`, cookie: `${COOKIE_NAME}=${browserCookie}` }),
+			htmlRes as any,
+			`/preview/${SID}/index.html`,
+			o,
+		);
+		const capabilityPath = bodyText(htmlRes).match(new RegExp(`href="(/preview/${SID}/_content/[^/]+/)"`))?.[1];
+		assert.ok(capabilityPath, "HTML base must carry a signed content capability");
+
+		const assetRes = fakeRes();
+		await handlePreviewRequest(
+			fakeReq({ url: `${capabilityPath}styles.css` }),
+			assetRes as any,
+			`${capabilityPath}styles.css`,
+			o,
+		);
+		assert.equal(assetRes.statusCode, 200);
+		assert.equal(assetRes.headers["access-control-allow-origin"], "null");
+		assert.equal(bodyText(assetRes), "body{color:red}");
+
+		const crossSessionRes = fakeRes();
+		const stolenPath = capabilityPath.replace(`/preview/${SID}/`, `/preview/${OTHER_SID}/`);
+		await handlePreviewRequest(fakeReq({ url: `${stolenPath}styles.css` }), crossSessionRes as any, `${stolenPath}styles.css`, o);
+		assert.equal(crossSessionRes.statusCode, 401, "a capability must not authenticate another preview tree");
 	});
 
 	it("injects inline theme snapshot inside <head> on text/html", async () => {
@@ -266,7 +318,7 @@ describe("handlePreviewRequest — bridge injection", () => {
 		assert.match(headInner, /\.dark\s*\{/);
 	});
 
-	it("does NOT inject bridge into non-html (css)", async () => {
+	it("does NOT inject bridge or HTML sandbox policy into non-html (css)", async () => {
 		const o = makeOpts(true);
 		const res = fakeRes();
 		await handlePreviewRequest(fakeReq({ url: `/preview/${SID}/styles.css` }), res as any, `/preview/${SID}/styles.css`, o);
@@ -274,6 +326,7 @@ describe("handlePreviewRequest — bridge injection", () => {
 		assert.equal(txt, "body{color:red}");
 		assert.doesNotMatch(txt, /<base/);
 		assert.doesNotMatch(txt, /MutationObserver/);
+		assert.equal(res.headers["content-security-policy"], undefined);
 	});
 });
 
@@ -315,8 +368,9 @@ describe("handlePreviewRequest — per-artifact URL", () => {
 		const url = `/preview/${SID}/_artifact/${ARTIFACT_ID}/01.html`;
 		await handlePreviewRequest(fakeReq({ url }), res as any, url, o);
 		assert.equal(res.statusCode, 200);
+		assert.equal(res.headers["content-security-policy"], PREVIEW_HTML_CONTENT_SECURITY_POLICY);
 		const txt = bodyText(res);
-		assert.match(txt, new RegExp(`<base data-bobbit-preview-base href="/preview/${SID}/_artifact/${ARTIFACT_ID}/"`));
+		assert.match(txt, new RegExp(`<base data-bobbit-preview-base href="/preview/${SID}/_artifact/${ARTIFACT_ID}/_content/[^/]+/"`));
 		// Body content survives the rewrite. We can't assert `v1</body>` adjacency
 		// because injectBaseAndScripts adds the bridge scripts before </body>;
 		// instead assert v1 sits at the start of <body>, and that the bridge was
