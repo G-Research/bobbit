@@ -101,7 +101,12 @@ beforeAll(async () => {
 			return;
 		}
 		res.writeHead(200, { "Content-Type": "application/json" });
-		res.end(JSON.stringify({ requestUrl, url: `/preview/${SID}/index.html` }));
+		res.end(JSON.stringify({
+			requestUrl,
+			url: `/preview/${SID}/index.html`,
+			origin: req.headers.origin,
+			host: req.headers.host,
+		}));
 	});
 	targetServer.on("upgrade", (req, socket) => {
 		targetUpgrades.push(req.url ?? "");
@@ -137,6 +142,32 @@ describe.sequential("Vite mounted-gateway proxy", () => {
 		const body = await response.json() as { requestUrl: string; url: string };
 		assert.equal(body.requestUrl, `${MOUNT}/api/echo?value=1`);
 		assert.equal(body.url, `/preview/${SID}/index.html`, "route-shaped JSON must remain mount-relative");
+	});
+
+	it("preserves the Vite browser origin for originless same-origin GET cookie bootstrap", async () => {
+		const response = await fetch(`${devOrigin}/api/proxy-headers`, {
+			headers: {
+				"Sec-Fetch-Site": "same-origin",
+				"Sec-Fetch-Mode": "cors",
+			},
+		});
+		assert.equal(response.status, 200);
+		const body = await response.json() as { origin?: string; host?: string };
+		assert.equal(body.origin, devOrigin, "originless browser GET must bind the cookie to the Vite origin");
+		assert.equal(body.host, new URL(targetOrigin).host, "gateway Host must still identify the proxy target");
+	});
+
+	it("does not replace an explicit browser Origin", async () => {
+		const explicitOrigin = "http://localhost:5173";
+		const response = await fetch(`${devOrigin}/api/proxy-headers`, {
+			headers: {
+				Origin: explicitOrigin,
+				"Sec-Fetch-Site": "same-site",
+				"Sec-Fetch-Mode": "cors",
+			},
+		});
+		const body = await response.json() as { origin?: string };
+		assert.equal(body.origin, explicitOrigin);
 	});
 
 	it("uses the same join for WebSocket upgrades", async () => {
