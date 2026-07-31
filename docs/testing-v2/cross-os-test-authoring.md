@@ -26,13 +26,14 @@ Do not derive writable names from `Date.now()` alone. Use `mkdtemp`, a UUID, or 
 
 ## 2. Compare paths safely
 
-Never use string prefix checks for containment. Normalize lexical inputs with `path.resolve`, then use `path.relative` to test containment. Before accessing existing filesystem objects, resolve **both** the root and candidate with `realpath` and repeat the relative-path check; macOS `TMPDIR` aliases, symlinks, junctions, and case-normalizing filesystems otherwise produce false rejections or escapes.
+Never use string prefix checks for containment. Normalize inputs with `path.resolve`, then use `path.relative`. For existing filesystem objects, paired canonical paths are authoritative: resolve **both** the root and candidate with `realpath`, then compare those results. Do not independently reject an existing candidate because its lexical spelling differs from the root's; macOS `TMPDIR` aliases such as `/var` and `/private/var`, symlinks, junctions, and case-normalizing filesystems can name the same in-root object.
 
-A user path may not exist yet. In that case, canonicalize its longest existing prefix, retain the unresolved suffix, and compare the reconstructed candidate against the canonical root before creating or accessing it; do not call `realpath` on a nonexistent leaf and silently fall back to an unverified string comparison. Preserve a lexical alias only when it has passed the same validation as its canonical spelling.
+A user path may not exist yet. Canonicalize its longest existing prefix, retain the unresolved suffix, and validate that suffix relative to the canonical prefix before comparing the reconstructed candidate against the canonical root. This lexical validation protects creation paths without treating the original full root/candidate spellings as separate identities. Do not call `realpath` on a nonexistent leaf and silently fall back to an unverified string comparison. Preserve a lexical alias only when its canonical or prefix-reconstructed form passes containment.
 
 ```ts
-// Good: canonical paths decide containment. A missing candidate retains the
-// suffix after its longest canonical existing prefix.
+// Good: canonical paths decide existing-object containment. A missing
+// candidate validates only its suffix after the longest canonical prefix, so
+// an equivalent /var or /private/var root spelling is not rejected first.
 function isWithin(root: string, candidate: string): boolean {
   const canonicalRoot = realpathSync(resolve(root));
   const canonicalCandidate = canonicalizeCandidatePrefix(resolve(candidate));
@@ -72,7 +73,7 @@ function isRelativeWithin(root: string, candidate: string): boolean {
 candidate.startsWith(root)
 ```
 
-Test both a lexical and canonical spelling of an in-root path, plus an out-of-root path. Where a native directory symlink/junction cannot be created (for example, Windows without privilege), use an injected `realpath` seam—do not skip the invariant.
+Test canonical and alternate lexical spellings of both an existing in-root path and a missing in-root child, plus an out-of-root path. Where a native directory symlink/junction cannot be created (for example, Windows without privilege), use an injected `realpath` seam—do not skip the invariant.
 
 ## 3. Isolate host state and credentials
 
@@ -139,7 +140,7 @@ Run isolation is required for unit, browser, integration, and E2E harnesses. Ver
 Before submitting a test or harness change, confirm:
 
 - [ ] Every writable path is beneath a canonical `mkdtemp` owner root, and cleanup removes only that root.
-- [ ] Containment uses lexical and paired-canonical `path.relative` checks; symlink aliases and nonexistent paths are handled safely.
+- [ ] Existing-object containment uses paired-canonical `path.relative` checks; missing candidates validate only the suffix after their longest canonical prefix, and aliases are handled safely.
 - [ ] Home/config/credential discovery is injected or redirected before initialization, and environment changes are restored.
 - [ ] Network responses and async completion are deterministic and observable; no sleep or wall-clock assumption is load-bearing.
 - [ ] The regression covers separators, symlink fallback, CRLF, and case behavior natively or through a portable seam.
