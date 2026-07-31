@@ -221,6 +221,7 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-sentinel-write-fail-")
 const tracked = spawnTracked("/bin/sh", ["-c", "exec tail -f /dev/null"], {
   stdio: ["ignore", "ignore", "ignore", "pipe"],
   posixSentinelIdentity: { file: path.join(dir, "missing", "sentinel.json"), nonce: "write-fail" },
+  timeoutMs: 10_000,
 });
 const ready = tracked.child.stdio[3];
 let acknowledged = false;
@@ -230,7 +231,6 @@ await new Promise((resolve, reject) => {
   ready.once("close", resolve);
   ready.once("error", reject);
 });
-tracked.killTree("SIGKILL");
 const reaped = await tracked.waitForTreeExit(1_500);
 process.stdout.write(JSON.stringify({ acknowledged, reaped }) + "\n", () => {
   fs.rmSync(dir, { recursive: true, force: true });
@@ -360,7 +360,7 @@ function groupAlive(pid: number): boolean {
 function makeRecoveryHarness(
 	stateDir: string,
 	calls: Array<{ kind: string; status: string }>,
-	deps: { platform?: NodeJS.Platform; posixProcessIdentityInspector?: (pid: number) => { startToken: string; pgid: number } | undefined; persistedTreeKiller?: (pid: number, signal?: NodeJS.Signals) => "signalled" | "unsupported" | "invalid"; recoveredSentinelReaper?: (step: any) => Promise<void> } = {},
+	deps: { platform?: NodeJS.Platform; posixProcessIdentityInspector?: (pid: number) => { startToken: string; pgid: number } | undefined; persistedTreeKiller?: (pid: number, signal?: NodeJS.Signals) => "signalled" | "unsupported" | "invalid"; recoveredSentinelReaper?: (step: any) => Promise<void>; projectContextManager?: any } = {},
 ): VerificationHarness {
 	return new VerificationHarness(
 		stateDir,
@@ -375,7 +375,7 @@ function makeRecoveryHarness(
 		undefined,
 		undefined,
 		undefined,
-		undefined,
+		deps.projectContextManager,
 		undefined,
 		deps,
 	);
@@ -539,6 +539,29 @@ describe("spawnTracked timeout cleanup", () => {
 			expect(settled).toBe(true);
 			expect(calls).toBe(2);
 			expect((harness as any)._hasPendingCommandKillCleanup(active)).toBe(false);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps terminal-goal crash recovery active while sentinel cleanup is pending", async () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-terminal-sentinel-cleanup-"));
+		const exitFile = path.join(stateDir, "command.exit");
+		fs.writeFileSync(exitFile, "0\n");
+		const signalId = "terminal-signal";
+		fs.writeFileSync(path.join(stateDir, "active-verifications.json"), JSON.stringify({ verifications: [{
+			goalId: "terminal-goal", gateId: "implementation", signalId, overallStatus: "running", startedAt: Date.now(), currentPhase: 0,
+			steps: [{ name: "Recovered", type: "command", status: "running", startedAt: Date.now(), exitFile, sentinelCleanupPending: true }],
+		}] }));
+		try {
+			const harness = makeRecoveryHarness(stateDir, [], {
+				projectContextManager: { getContextForGoal: () => ({ goalStore: { get: () => ({ state: "complete" }) } }) },
+				recoveredSentinelReaper: async () => { throw Object.assign(new Error("pending"), { name: "PendingCommandCleanupError" }); },
+			});
+			await harness.resumeInterruptedVerifications();
+			expect(harness.getActiveVerifications().map(v => v.signalId)).toContain(signalId);
+			const persisted = JSON.parse(fs.readFileSync(path.join(stateDir, "active-verifications.json"), "utf8"));
+			expect(persisted.verifications.map((v: any) => v.signalId)).toContain(signalId);
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
 		}

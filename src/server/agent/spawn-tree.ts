@@ -510,6 +510,27 @@ export function spawnTracked(
 		// gateway event loop for the lifetime of the surviving payload.
 		if (tracked._survivesShutdown) unrefReadyPipe(readyPipe);
 	});
+	const failPosixSentinelHandshake = () => {
+		if (tracked._posixSentinelReady || isWin) return;
+		const pid = tracked._pid;
+		tracked._pendingPosixKill = undefined;
+		tracked._pendingPosixFinalization = false;
+		clearEscalation();
+		// Before root exit, this detached leader is still our ownership witness.
+		// Kill the group synchronously so a failed identity publication cannot
+		// leave its payload alive. After root exit, never name its old PGID again.
+		if (pid != null && !tracked._exited && !tracked._processGroupOwnershipLost && groupIsAlive(pid)) {
+			try { signalProcessGroup(pid, "SIGKILL"); } catch { /* already gone */ }
+			tracked._posixFinalSignalSent = true;
+		} else {
+			tracked._treeCompletionUnverified = true;
+			tracked._processGroupOwnershipLost = true;
+		}
+		tracked._survivesShutdown = false;
+		registry.delete(tracked);
+	};
+	readyPipe?.once("error", failPosixSentinelHandshake);
+	readyPipe?.once("close", failPosixSentinelHandshake);
 	const onExit = () => {
 		tracked._exited = true;
 		if (!isWin) {
@@ -551,7 +572,9 @@ export function spawnTracked(
  */
 export function killAllTracked(signal: "SIGTERM" | "SIGKILL" = "SIGKILL", includeSurvival = false): void {
 	for (const t of Array.from(registry)) {
-		if (!includeSurvival && t._survivesShutdown) continue;
+		// A child may outlive shutdown only after the sentinel has acknowledged
+		// durable ownership. Before that, failed publication must be reaped.
+		if (!includeSurvival && t._survivesShutdown && t._posixSentinelReady) continue;
 		try { t.killTree(signal, 0); } catch { /* best-effort */ }
 	}
 }
