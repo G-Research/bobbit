@@ -120,6 +120,15 @@
       }
     },
     {
+      "path": "tests2/integration/base-path-cli-entrypoint.test.ts",
+      "reason": "Real executable CLI entrypoint smoke in the E2E Vitest lane proving an isolated nested mount binds an ephemeral port, persists its mounted gateway URL, serves mounted health and static routes, prints the truthful loopback-auth banner, and terminates cleanly within a bound.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
       "path": "tests2/integration/base-path-gateway.test.ts",
       "reason": "In-process gateway coverage for nested and root HTTP routes, off-mount boundaries, SPA and manifest responses, preview redirects and bases, cookies, and accepted or rejected WebSocket upgrades.",
       "execution": {
