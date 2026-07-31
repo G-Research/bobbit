@@ -25,6 +25,8 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("root-mounted gateway compati
 	}, 60_000);
 
 	it("retains root API, shell, manifest, cookie, preview wire shape, and viewer socket behavior", async () => {
+		expect(running.lifecycleGatewayInfo().baseUrl).toBe(running.origin);
+		expect(running.lifecycleGatewayInfo().baseUrl).not.toMatch(/\/$/);
 		expect((await api(running.baseUrl, "/api/health")).status).toBe(200);
 		const shellResponse = await fetch(`${running.origin}/session/root-deep-link`);
 		expect(shellResponse.status).toBe(200);

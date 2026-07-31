@@ -25,7 +25,8 @@ import {
 import { initAuthorSidecarDir } from "../../../src/server/agent/author-sidecar.js";
 import { realClock, realCommandRunner, realFs, type GatewayDeps } from "../../../src/server/gateway-deps.js";
 import { scaffoldBobbitDir } from "../../../src/server/scaffold.js";
-import { createGateway } from "../../../src/server/server.js";
+import { loopbackForBind } from "../../../src/server/cli-loopback.js";
+import { createGateway, type GatewayConfig } from "../../../src/server/server.js";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 // This test branch is developed in parallel with the gateway foundation branch.
@@ -40,6 +41,7 @@ const ENV_KEYS = [
 	"BOBBIT_AGENT_DIR",
 	"BOBBIT_SKIP_AIGW_DISCOVERY",
 	"BOBBIT_LLM_REVIEW_SKIP",
+	"BOBBIT_GATEWAY_URL",
 	"NODE_ENV",
 ] as const;
 
@@ -94,6 +96,8 @@ export interface RunningGateway {
 	/** Test CA for an optional TLS fixture. */
 	tlsCaCert?: string;
 	gateway: ReturnType<typeof createGateway>;
+	/** Exact callback information supplied by the gateway to LifecycleHub providers. */
+	lifecycleGatewayInfo(): { baseUrl: string; token: string };
 	restart(): Promise<void>;
 	shutdown(): Promise<void>;
 }
@@ -150,6 +154,10 @@ export interface BootGatewayOptions {
 	tlsPublicHost?: string;
 	/** Enable the explicit Vite development proxy cookie exception. */
 	viteDevProxy?: boolean;
+	/** Seed both legacy fallbacks before start; listener publication must supersede them. */
+	staleGatewayUrl?: string;
+	/** Explicit callback publisher used to cover CLI/public-proxy overrides. */
+	onBound?: GatewayConfig["onBound"];
 }
 
 export async function bootGateway(
@@ -180,6 +188,10 @@ export async function bootGateway(
 	setProjectRoot(root);
 	resetAgentDirStateForTests();
 	scaffoldBobbitDir(root);
+	if (options.staleGatewayUrl !== undefined) {
+		process.env.BOBBIT_GATEWAY_URL = options.staleGatewayUrl;
+		writeFileSync(join(stateDir, "gateway-url"), options.staleGatewayUrl);
+	}
 
 	let tls: { cert: string; key: string } | undefined;
 	let tlsCaCert: string | undefined;
@@ -223,10 +235,22 @@ export async function bootGateway(
 		builtinsDir: join(REPO_ROOT, "defaults"),
 		builtinPacksDir: join(REPO_ROOT, "market-packs"),
 		basePath,
+		...(options.onBound ? { onBound: options.onBound } : {}),
 	} as Parameters<typeof createGateway>[0] & { basePath: string };
-	let gateway = createGateway(gatewayConfig, gatewayDeps);
-	const port = await gateway.start();
-	const connectHost = host.toLowerCase() === "localhost" ? "localhost" : "127.0.0.1";
+	let gateway: ReturnType<typeof createGateway>;
+	let port: number;
+	try {
+		gateway = createGateway(gatewayConfig, gatewayDeps);
+		port = await gateway.start();
+	} catch (error) {
+		try { await gateway!.shutdown(); } catch { /* best-effort rejected-start cleanup */ }
+		restoreProcessState(processState);
+		rmSync(root, { recursive: true, force: true });
+		throw error;
+	}
+	const peerHost = loopbackForBind(host.trim());
+	const unbracketedPeer = peerHost.startsWith("[") && peerHost.endsWith("]") ? peerHost.slice(1, -1) : peerHost;
+	const connectHost = unbracketedPeer.includes(":") ? `[${unbracketedPeer}]` : unbracketedPeer;
 	const httpProtocol = tls ? "https" : "http";
 	const wsProtocol = tls ? "wss" : "ws";
 	const origin = `${httpProtocol}://${connectHost}:${port}`;
@@ -238,6 +262,12 @@ export async function bootGateway(
 		wsOrigin: `${wsProtocol}://${connectHost}:${port}`,
 		...(tlsCaCert ? { tlsCaCert } : {}),
 		gateway,
+		lifecycleGatewayInfo() {
+			const hub = gateway.sessionManager.lifecycleHub as unknown as {
+				gatewayInfo: () => { baseUrl: string; token: string };
+			};
+			return hub.gatewayInfo();
+		},
 		async restart() {
 			await gateway.shutdown();
 			const next = createGateway({

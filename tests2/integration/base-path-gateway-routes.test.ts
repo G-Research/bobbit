@@ -17,7 +17,9 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("mounted gateway routes, mani
 	let running: RunningGateway;
 
 	beforeAll(async () => {
-		running = await bootGateway(MOUNT);
+		running = await bootGateway(MOUNT, "127.0.0.1", true, {
+			staleGatewayUrl: "http://stale.invalid/wrong-mount",
+		});
 	}, 60_000);
 
 	afterAll(async () => {
@@ -25,6 +27,7 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("mounted gateway routes, mani
 	}, 60_000);
 
 	it("serves mounted API/static/deep-link routes and rejects every off-mount lookalike", async () => {
+		expect(running.lifecycleGatewayInfo().baseUrl).toBe(running.baseUrl);
 		const health = await api(running.baseUrl, "/api/health");
 		expect(health.status).toBe(200);
 		expect(await health.json()).toMatchObject({ status: "ok" });
@@ -89,4 +92,40 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("mounted gateway routes, mani
 		await expectRejectedUpgrade(`${running.wsOrigin}${MOUNT}-other/ws/viewer`);
 		await expectRejectedUpgrade(`${running.wsOrigin}/team/ws/viewer`);
 	});
+});
+
+describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("programmatic mounted gateway callback publication", () => {
+	it("formats a bound IPv6 listener with its actual ephemeral port", async () => {
+		const running = await bootGateway(MOUNT, "::1", true, { serveStatic: false });
+		try {
+			expect(running.lifecycleGatewayInfo().baseUrl).toBe(running.baseUrl);
+			expect(running.baseUrl).toMatch(/^http:\/\/\[::1\]:\d+\/team\/bobbit$/);
+		} finally {
+			await running.shutdown();
+		}
+	}, 60_000);
+
+	it("accepts and canonicalizes an authoritative HTTP(S) callback override", async () => {
+		let actualPort = 0;
+		const running = await bootGateway(MOUNT, "127.0.0.1", true, {
+			serveStatic: false,
+			onBound: (port) => {
+				actualPort = port;
+				return `https://[2001:db8::42]:${port}/public/gateway/`;
+			},
+		});
+		try {
+			expect(actualPort).toBeGreaterThan(0);
+			expect(running.lifecycleGatewayInfo().baseUrl).toBe(`https://[2001:db8::42]:${actualPort}/public/gateway`);
+		} finally {
+			await running.shutdown();
+		}
+	}, 60_000);
+
+	it("rejects an unsafe callback override before agents or extensions resume", async () => {
+		await expect(bootGateway(MOUNT, "127.0.0.1", true, {
+			serveStatic: false,
+			onBound: () => "http://127.0.0.1:3001/team/../escape",
+		})).rejects.toThrow(/Gateway callback URL|dot segments/i);
+	}, 60_000);
 });
