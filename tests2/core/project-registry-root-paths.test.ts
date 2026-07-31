@@ -157,35 +157,92 @@ test("ProjectRegistry's native case probe gives empty-parent provisional aliases
   );
 });
 
-test("ProjectRegistry does not infer insensitive entries from a case-only symlink pair", () => {
+test("ProjectRegistry treats case-only symlink pairs as sensitive without probing", () => {
   const parent = "/case-sensitive-with-symlink";
   const upper = path.posix.join(parent, "Alpha");
   const lower = path.posix.join(parent, "alpha");
-  const removedProbes: string[] = [];
+  const probeParents: string[] = [];
   const identity = createProjectPathIdentity({
     isNativePathApi: dialect => dialect === "posix",
     // Model `Foo -> foo` alongside two genuine case-distinct project roots.
-    realpathSync: candidate => {
-      const normalized = path.posix.resolve(candidate);
-      if (path.posix.basename(normalized).toLowerCase() === ".bobbitprobea") {
-        throw new Error("case-sensitive probe alias does not exist");
+    realpathSync: candidate => path.posix.basename(path.posix.resolve(candidate)) === "Foo"
+      ? path.posix.join(path.posix.dirname(candidate), "foo")
+      : path.posix.resolve(candidate),
+    readdirSync: candidate => {
+      switch (path.posix.resolve(candidate)) {
+        case "/": return ["case-sensitive-with-symlink"];
+        case parent: return ["foo", "Foo", "Alpha", "alpha"];
+        case upper:
+        case lower: return ["src"];
+        default: return [];
       }
-      return path.posix.basename(normalized) === "Foo"
-        ? path.posix.join(path.posix.dirname(normalized), "foo")
-        : normalized;
     },
-    readdirSync: candidate => path.posix.resolve(candidate) === parent
-      ? ["foo", "Foo", "Alpha", "alpha"]
-      : [],
-    createCaseProbe: probeParent => path.posix.join(probeParent, ".BobbitProbeA"),
-    removeCaseProbe: probePath => { removedProbes.push(probePath); },
+    createCaseProbe: probeParent => {
+      probeParents.push(probeParent);
+      return path.posix.join(probeParent, ".BobbitProbeA");
+    },
   });
   const registry = registryWithRoot("upper", upper, identity);
 
   assert.equal(registry.getByPath(lower), undefined);
   const distinct = registry.registerProvisional("lower", lower);
   assert.notEqual(distinct.id, "upper");
-  assert.ok(removedProbes.length > 0, "case probes must clean up only their owned directories");
+  assert.deepEqual(probeParents, [], "case-paired entries are authoritative read-only sensitivity evidence");
+});
+
+test("ProjectRegistry uses read-only entry evidence before creating a case probe", () => {
+  const root = "/read-only-case-evidence/Project";
+  const alias = "/Read-only-case-evidence/project";
+  const probeParents: string[] = [];
+  const identity = createProjectPathIdentity({
+    isNativePathApi: dialect => dialect === "posix",
+    realpathSync: candidate => path.posix.resolve(candidate),
+    readdirSync: candidate => {
+      switch (path.posix.resolve(candidate).toLowerCase()) {
+        case "/": return ["read-only-case-evidence"];
+        case "/read-only-case-evidence": return ["Project"];
+        case "/read-only-case-evidence/project": return ["src"];
+        case "/read-only-case-evidence/project/src": return ["file"];
+        default: return [];
+      }
+    },
+    createCaseProbe: probeParent => {
+      probeParents.push(probeParent);
+      return path.posix.join(probeParent, ".BobbitProbeA");
+    },
+  });
+  const registry = registryWithRoot("read-only-evidence", root, identity);
+
+  assert.equal(registry.getByPath(alias)?.id, "read-only-evidence");
+  assert.equal(registry.findByCwd(`${alias}/SRC`)?.id, "read-only-evidence");
+  assert.deepEqual(probeParents, [], "conclusive directory entries must not trigger watcher-visible probes");
+});
+
+test("ProjectRegistry caches inconclusive directory semantics per path identity", () => {
+  const root = "/cached-case-probe/Project";
+  let probes = 0;
+  let removals = 0;
+  const identity = createProjectPathIdentity({
+    isNativePathApi: dialect => dialect === "posix",
+    realpathSync: candidate => path.posix.resolve(candidate),
+    readdirSync: () => [],
+    createCaseProbe: probeParent => {
+      probes += 1;
+      return path.posix.join(probeParent, `.BobbitProbe${probes}`);
+    },
+    removeCaseProbe: () => { removals += 1; },
+  });
+  const registry = registryWithRoot("cached", root, identity);
+
+  assert.equal(registry.getByPath(root)?.id, "cached");
+  assert.equal(registry.findByCwd(`${root}/src`)?.id, "cached");
+  const probesAfterWarmup = probes;
+  assert.ok(probesAfterWarmup > 0, "empty directories require an owned probe");
+
+  assert.equal(registry.getByPath(root)?.id, "cached");
+  assert.equal(registry.findByCwd(`${root}/src`)?.id, "cached");
+  assert.equal(probes, probesAfterWarmup, "repeated project lookups reuse per-directory semantics");
+  assert.equal(removals, probes, "every owned probe is cleaned up exactly once");
 });
 
 test("ProjectRegistry rejects native POSIX double-slash aliases for Headquarters and existing projects", () => {
