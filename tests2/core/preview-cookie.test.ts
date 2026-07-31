@@ -109,6 +109,23 @@ interface IndependentContenderResult {
 	crossVerified: number;
 }
 
+interface ServerPrebundleManifest {
+	entries: Record<string, string>;
+}
+
+function prebundledServerModule(sourcePath: string): string {
+	const runtimeBundle = process.env.BOBBIT_V2_SERVER_PREBUNDLE;
+	if (!runtimeBundle) throw new Error("cookie process race requires the configured server prebundle");
+	// The configured runtime lives at <cache>/entries/tests2/harness/*.mjs.
+	const cacheDir = path.resolve(path.dirname(runtimeBundle), "..", "..", "..");
+	const manifest = JSON.parse(
+		fs.readFileSync(path.join(cacheDir, "manifest.json"), "utf8"),
+	) as ServerPrebundleManifest;
+	const emitted = manifest.entries[sourcePath];
+	if (!emitted) throw new Error(`server prebundle is missing ${sourcePath}`);
+	return path.join(cacheDir, ...emitted.split("/"));
+}
+
 async function runIndependentKeyContenders(
 	workDir: string,
 	secretsDir: string,
@@ -118,8 +135,10 @@ async function runIndependentKeyContenders(
 	fs.mkdirSync(coordinationDir);
 	const contenderPath = path.join(workDir, "cookie-key-contender.mjs");
 	const launcherPath = path.join(workDir, "cookie-key-launcher.cjs");
-	const signingKeyModule = fileURLToPath(new URL("../../src/server/auth/cookie-signing-key.ts", import.meta.url));
-	const cookieModule = fileURLToPath(new URL("../../src/server/auth/cookie.ts", import.meta.url));
+	// Run exact current production entries as native ESM instead of booting a TS
+	// transform service in each of the three deliberately simultaneous children.
+	const signingKeyModule = prebundledServerModule("src/server/auth/cookie-signing-key.ts");
+	const cookieModule = prebundledServerModule("src/server/auth/cookie.ts");
 
 	fs.writeFileSync(contenderPath, String.raw`
 import fs from "node:fs";
@@ -195,7 +214,7 @@ function waitFor(predicate, label) {
 }
 function launch(index) {
 	const child = spawn(process.execPath, [
-		"--import", "tsx", workerData.contenderPath,
+		workerData.contenderPath,
 		workerData.secretsDir, workerData.coordinationDir, String(workerData.contenderCount), String(index),
 		workerData.signingKeyModule, workerData.cookieModule, String(workerData.nowSeconds),
 	], { cwd: workerData.cwd, env: process.env, shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
