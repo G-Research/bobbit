@@ -20,9 +20,11 @@ function fakeBackend(outcomes: FakeOutcome[], fireTimers = false): {
 	backend: FixtureCommandBackend;
 	calls: Array<{ file: string; args: readonly string[]; options: Record<string, unknown> }>;
 	sleeps: number[];
+	stdin: string[];
 } {
 	const calls: Array<{ file: string; args: readonly string[]; options: Record<string, unknown> }> = [];
 	const sleeps: number[] = [];
+	const stdin: string[] = [];
 	let attempt = 0;
 	const backend: FixtureCommandBackend = {
 		spawn(file, args, options) {
@@ -40,6 +42,7 @@ function fakeBackend(outcomes: FakeOutcome[], fireTimers = false): {
 					close = listener;
 					if (!outcome.hang) queueMicrotask(() => listener(outcome.exitCode ?? 0, outcome.signal ?? null));
 				},
+				endStdin(input) { stdin.push(input); },
 				kill(signal) {
 					if (killed) return true;
 					killed = true;
@@ -59,7 +62,7 @@ function fakeBackend(outcomes: FakeOutcome[], fireTimers = false): {
 		},
 		async sleep(delayMs) { sleeps.push(delayMs); },
 	};
-	return { backend, calls, sleeps };
+	return { backend, calls, sleeps, stdin };
 }
 
 function controlledBackend(options: {
@@ -148,8 +151,28 @@ describe("runFixtureCommand command policy", () => {
 		expect(fake.calls).toEqual([{
 			file: "fixture-tool",
 			args,
-			options: expect.objectContaining({ shell: false, windowsHide: true, windowsVerbatimArguments: false }),
+			options: expect.objectContaining({
+				shell: false,
+				windowsHide: true,
+				windowsVerbatimArguments: false,
+				stdio: ["ignore", "pipe", "pipe"],
+			}),
 		}]);
+		expect(fake.stdin).toEqual([]);
+	});
+
+	it("pipes an explicit bootstrap payload without rendering it in argv", async () => {
+		const fake = fakeBackend([{ stdout: "imported" }]);
+		const payload = "blob\\ndata 7\\nsecret!\\n";
+		const result = await runFixtureCommandWithBackend("git", ["fast-import", "--quiet"], {
+			attempts: 1,
+			stdin: payload,
+		}, fake.backend);
+
+		expect(result.stdout).toBe("imported");
+		expect(fake.stdin).toEqual([payload]);
+		expect(fake.calls[0]?.options.stdio).toEqual(["pipe", "pipe", "pipe"]);
+		expect(fake.calls[0]?.args).toEqual(["fast-import", "--quiet"]);
 	});
 
 	it("retries failures with bounded exponential backoff", async () => {

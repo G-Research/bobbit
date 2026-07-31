@@ -9,6 +9,8 @@ const MAX_ATTEMPTS = 3;
 export interface FixtureCommandOptions {
 	cwd?: string;
 	env?: NodeJS.ProcessEnv;
+	/** Optional literal stdin payload; omitted commands retain stdin-ignore isolation. */
+	stdin?: string;
 	timeoutMs?: number;
 	attempts?: number;
 	retryDelayMs?: number;
@@ -45,6 +47,7 @@ export interface FixtureCommandProcess {
 	onStderr(listener: (chunk: Buffer<ArrayBufferLike> | string) => void): void;
 	onError(listener: (cause: unknown) => void): void;
 	onClose(listener: (exitCode: number | null, signal: NodeJS.Signals | null) => void): void;
+	endStdin?(input: string): void;
 	kill(signal: NodeJS.Signals): boolean;
 }
 
@@ -61,7 +64,7 @@ export interface FixtureCommandBackend {
 		shell: false;
 		windowsHide: true;
 		windowsVerbatimArguments: false;
-		stdio: ["ignore", "pipe", "pipe"];
+		stdio: ["ignore" | "pipe", "pipe", "pipe"];
 	}): FixtureCommandProcess;
 	schedule(callback: () => void, delayMs: number): FixtureCommandTimer;
 	sleep(delayMs: number): Promise<void>;
@@ -78,11 +81,16 @@ function schedule(callback: () => void, delayMs: number): FixtureCommandTimer {
 const productionBackend: FixtureCommandBackend = {
 	spawn(file, args, options) {
 		const child = spawn(file, [...args], options);
+		child.stdin?.on("error", () => {
+			// Close/timeout remains authoritative if a command exits before consuming
+			// its complete bootstrap payload.
+		});
 		return {
-			onStdout: listener => { child.stdout.on("data", listener); },
-			onStderr: listener => { child.stderr.on("data", listener); },
+			onStdout: listener => { child.stdout!.on("data", listener); },
+			onStderr: listener => { child.stderr!.on("data", listener); },
 			onError: listener => { child.once("error", listener); },
 			onClose: listener => { child.once("close", listener); },
+			endStdin: input => { child.stdin?.end(input); },
 			kill: signal => child.kill(signal),
 		};
 	},
@@ -184,7 +192,7 @@ async function runAttempt(
 				shell: false,
 				windowsHide: true,
 				windowsVerbatimArguments: false,
-				stdio: ["ignore", "pipe", "pipe"],
+				stdio: [options.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
 			});
 		} catch (cause) {
 			finish({ exitCode: null, signal: null, stderr: "", timedOut: false, cause });
@@ -253,6 +261,15 @@ async function runAttempt(
 			terminationGrace.unref();
 		}, timeoutMs);
 		timeout.unref();
+		if (options.stdin !== undefined) {
+			try {
+				if (!child.endStdin) throw new Error("fixture command backend does not support stdin");
+				child.endStdin(options.stdin);
+			} catch (cause) {
+				processCause ??= cause;
+				requestTermination();
+			}
+		}
 	});
 }
 
