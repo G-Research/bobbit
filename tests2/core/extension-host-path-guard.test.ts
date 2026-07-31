@@ -124,6 +124,34 @@ describe("isPackPathWithinRoot", () => {
 		assert.equal(isPackPathWithinRoot(group, outside), false);
 	});
 
+	it("rejects an outside symlink before and after it is retargeted", () => {
+		const root = path.join(tmp, "case-outside-symlink-swap", "pack");
+		const outsideDir = path.join(tmp, "case-outside-symlink-swap", "outside");
+		fs.mkdirSync(root, { recursive: true });
+		fs.mkdirSync(outsideDir, { recursive: true });
+		const initialTarget = path.join(root, "inside.js");
+		const retarget = path.join(outsideDir, "outside.js");
+		const outsideLink = path.join(outsideDir, "mutable-entry.js");
+		fs.writeFileSync(initialTarget, "export default 'inside';");
+		fs.writeFileSync(retarget, "export default 'outside';");
+
+		const assertRejected = () => assert.equal(isPackPathWithinRoot(root, outsideLink), false);
+		if (trySymlink(initialTarget, outsideLink)) {
+			// An outside link must not borrow the target's in-pack authority.
+			assertRejected();
+			fs.unlinkSync(outsideLink);
+			fs.symlinkSync(retarget, outsideLink);
+			// Retargeting it outside remains rejected; validation never trusted it.
+			assertRejected();
+		} else {
+			// Model both link targets on restricted hosts. The initial target would
+			// have been accepted by a realpath-only guard, so this pins the spelling
+			// containment check independently of native link support.
+			withRealpathAliases(new Map([[path.resolve(outsideLink), fs.realpathSync(initialTarget)]]), assertRejected);
+			withRealpathAliases(new Map([[path.resolve(outsideLink), fs.realpathSync(retarget)]]), assertRejected);
+		}
+	});
+
 	it("rejects a symlink that escapes the group dir", () => {
 		const root = path.join(tmp, "case-symlink");
 		const group = path.join(root, "group");
