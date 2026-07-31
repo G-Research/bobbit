@@ -36,58 +36,75 @@ function waitForPosixSentinelReady(child: import("node:child_process").ChildProc
 /** Track pids spawned in the suite for after() cleanup. */
 const spawnedPids: number[] = [];
 
-function longRunningTracked() {
+type SpawnLifecycle = {
+	t: ReturnType<typeof spawnTracked>;
+	ready: Promise<void>;
+	closed: Promise<void>;
+};
+
+function longRunningTracked(): SpawnLifecycle {
 	const t = spawnTracked(
 		process.execPath,
 		["-e", "setInterval(()=>{}, 1000)"],
-		{ stdio: ["ignore", "ignore", "ignore", "pipe"] },
+		// POSIX injects its FD3 pipe itself. Passing an array with FD3 would
+		// become an unnecessary inherited FD4 in the payload.
+		{ stdio: "ignore" },
 	);
 	assert.ok(t.child.pid && t.child.pid > 0, "spawn should produce a pid");
 	spawnedPids.push(t.child.pid);
-	return t;
+	// Both events can happen before a caller gets to its first await. Register
+	// the lifecycle settlement pairs immediately after every real spawn.
+	const closed = waitForClose(t.child);
+	const ready = process.platform === "win32" ? Promise.resolve() : waitForPosixSentinelReady(t.child);
+	// Expected pre-ownership reaping closes FD3 without a data acknowledgement.
+	// Observe the rejection now so it never becomes an unhandled promise.
+	void ready.catch(() => {});
+	return { t, ready, closed };
 }
 
-async function establishSurvivalOwnership(t: ReturnType<typeof spawnTracked>): Promise<void> {
+async function establishSurvivalOwnership(lifecycle: SpawnLifecycle): Promise<void> {
 	// Windows spawnTracked owns the real Job before returning. POSIX must wait
 	// for its sentinel to atomically publish ownership on FD 3.
-	if (process.platform !== "win32") await waitForPosixSentinelReady(t.child);
-	t.markSurvival();
+	await lifecycle.ready;
+	lifecycle.t.markSurvival();
 }
 
 describe("verification-harness shutdown — survival contract", () => {
 	it("TrackedChild exposes markSurvival()", async () => {
-		const t = longRunningTracked();
-		assert.strictEqual(typeof t.markSurvival, "function");
+		const lifecycle = longRunningTracked();
+		assert.strictEqual(typeof lifecycle.t.markSurvival, "function");
 		killAllTracked("SIGKILL", true);
-		await waitForClose(t.child);
+		await lifecycle.closed;
 	});
 
 	it("kills POSIX survival-marked children before sentinel readiness", async () => {
 		if (process.platform === "win32") return;
-		const t = longRunningTracked();
-		t.markSurvival();
+		const lifecycle = longRunningTracked();
+		lifecycle.t.markSurvival();
 		killAllTracked("SIGKILL");
-		await waitForClose(t.child);
-		assert.equal(isAlive(t.child.pid), false, "handshake-pending survival child must be reaped");
+		await lifecycle.closed;
+		await assert.rejects(lifecycle.ready, /closed before readiness/);
+		assert.equal(isAlive(lifecycle.t.child.pid), false, "handshake-pending survival child must be reaped");
 	});
 
 	it("keeps only ownership-established survival children during shutdown", async () => {
-		const t = longRunningTracked();
-		await establishSurvivalOwnership(t);
-		assert.ok(isAlive(t.child.pid), "child should be alive before shutdown");
+		const lifecycle = longRunningTracked();
+		await establishSurvivalOwnership(lifecycle);
+		assert.ok(isAlive(lifecycle.t.child.pid), "child should be alive before shutdown");
 		killAllTracked("SIGKILL");
 		assert.ok(_trackedCount() >= 1, "owned survival child must remain registered after ordinary shutdown");
-		assert.ok(isAlive(t.child.pid), "owned survival child must remain alive after ordinary shutdown");
+		assert.ok(isAlive(lifecycle.t.child.pid), "owned survival child must remain alive after ordinary shutdown");
 		killAllTracked("SIGKILL", true);
-		await waitForClose(t.child);
-		assert.equal(isAlive(t.child.pid), false, "includeSurvival must kill an owned survival child");
+		await lifecycle.closed;
+		assert.equal(isAlive(lifecycle.t.child.pid), false, "includeSurvival must kill an owned survival child");
 	});
 
 	it("killAllTracked still kills non-survival children", async () => {
-		const t = longRunningTracked();
+		const lifecycle = longRunningTracked();
 		killAllTracked("SIGKILL");
-		await waitForClose(t.child);
-		assert.equal(isAlive(t.child.pid), false, "non-survival child should be reaped by shutdown");
+		await lifecycle.closed;
+		if (process.platform !== "win32") await assert.rejects(lifecycle.ready, /closed before readiness/);
+		assert.equal(isAlive(lifecycle.t.child.pid), false, "non-survival child should be reaped by shutdown");
 	});
 });
 
