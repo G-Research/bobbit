@@ -2855,12 +2855,30 @@ export class VerificationHarness {
 	 * never targeted and resume fails closed.
 	 */
 	private async _reapRecoveredPosixSentinel(step: ActiveVerification["steps"][number]): Promise<void> {
-		if (this.platform === "win32" || !step.sentinelFile) return;
+		if (this.platform === "win32") return;
+		const isRecoveredContainerTransport = step.restartRecoveryMode === "container-exec" && !!step.containerId;
 		const pending = (message: string): never => {
 			step.sentinelCleanupPending = true;
 			this._persistActive();
 			throw new PendingCommandCleanupError(message);
 		};
+		// A host detached wrapper from an older record may have no POSIX sentinel
+		// identity. It cannot safely be reaped, but its durable exit verdict remains
+		// valid. A recovered docker-exec transport is different: its host group can
+		// outlive the gateway, so every terminal or waiting container outcome must
+		// prove and reap the exact sentinel before it is returned.
+		if (!step.sentinelFile) {
+			if (isRecoveredContainerTransport) {
+				return pending("Recovered container command has no durable host docker-exec sentinel metadata.");
+			}
+			return;
+		}
+		// docker-exec persistence is a new format: do not accept the legacy
+		// compatibility nonce alias, because it is not bound to this transport's
+		// spawn record.
+		if (isRecoveredContainerTransport && (typeof step.pidNonce !== "string" || !step.pidNonce)) {
+			return pending("Recovered container command has no exact persisted host docker-exec sentinel nonce.");
+		}
 		const expectedNonce = this._commandIdentityNonce(step);
 		if (!expectedNonce) {
 			return pending("Recovered command verdict has no durable POSIX sentinel nonce.");
@@ -2879,9 +2897,12 @@ export class VerificationHarness {
 		// ownership. It closes the narrow spawn→state-persist crash window: if
 		// the root PID stamp did not reach disk yet, the live sentinel's verified
 		// identity is still the authority. When both records exist they must agree.
-		const groupId = Number.isFinite(persistedGroupId) && persistedGroupId! > 0
-			? persistedGroupId!
-			: recordedGroupId;
+		const hasPersistedGroupId = Number.isFinite(persistedGroupId) && persistedGroupId! > 0;
+		const groupId = hasPersistedGroupId ? persistedGroupId! : recordedGroupId;
+		// The sentinel atomically publishes its own PGID before the spawned child
+		// can be stamped into active state. That closes the spawn→state-persist
+		// crash window: use this record's PGID when `step.pid` is absent, but when
+		// a persisted group exists it must agree exactly with the sentinel record.
 		if (!Number.isFinite(sentinelPid) || sentinelPid <= 0 || !Number.isFinite(recordedGroupId) || recordedGroupId <= 0 || recordedGroupId !== groupId || record.nonce !== expectedNonce || typeof record.startToken !== "string" || !record.startToken) {
 			return pending("Recovered command sentinel identity did not match persisted group metadata.");
 		}
@@ -3010,6 +3031,19 @@ export class VerificationHarness {
 		let allSettled = true;
 		for (const step of active.steps) {
 			if (!this._commandStepRequiresKillCleanup(step)) continue;
+			// Container state files are not host-visible, so fs.existsSync(exitFile)
+			// cannot decide whether cleanup is complete. A durable container command
+			// instead settles only after its exact host docker-exec sentinel is reaped.
+			if (step.restartRecoveryMode === "container-exec" && step.containerId) {
+				try {
+					await this.recoveredSentinelReaper(step);
+					step.killCompletedAt ??= Date.now();
+				} catch (err) {
+					if (!isPendingCommandCleanupError(err)) throw err;
+					allSettled = false;
+				}
+				continue;
+			}
 			if (step.exitFile && fs.existsSync(step.exitFile)) {
 				// A recovered host command can have published its exit status while
 				// its POSIX group sentinel still owns the old PGID. Reap that verified
@@ -6087,6 +6121,11 @@ export class VerificationHarness {
 			return await finalizeRecoveredExit();
 		}
 		if (step.killReason === "timeout" && step.killCompletedAt) {
+			// A prior boot may have finished the in-container timeout cleanup but
+			// crashed before reaping the detached host docker-exec transport.
+			if (step.restartRecoveryMode === "container-exec" && step.containerId) {
+				await this._reapRecoveredPosixSentinel(step);
+			}
 			return timeoutResult();
 		}
 
@@ -6095,7 +6134,14 @@ export class VerificationHarness {
 		// Case A above never matched them. Re-attach by finalizing from the
 		// in-container exit file, or by verifying the in-container process is
 		// still alive (fresh heartbeat) and polling for its exit.
-		if (step.restartRecoveryMode === "container-exec" && step.containerId && step.exitFile) {
+		if (step.restartRecoveryMode === "container-exec" && step.containerId) {
+			// A partially persisted durable container step has no trustworthy
+			// in-container verdict path, but its detached host transport still must
+			// be identified and reaped before exposing the retryable interruption.
+			if (!step.exitFile) {
+				await this._reapRecoveredPosixSentinel(step);
+				return restartInterrupted("Recovered container command has no durable in-container exit-file metadata.");
+			}
 			return await this._resumeContainerCommandStep(v, step, { finalize, timeoutResult, restartInterrupted });
 		}
 
@@ -6257,12 +6303,16 @@ export class VerificationHarness {
 			const n = parseInt(r.stdout.trim(), 10);
 			return Number.isFinite(n) ? n : null;
 		};
-		const finalizeRecoveredContainerExit = async (code: number): Promise<ResumedVerificationStep> => {
-			// The container exit file is a real command verdict, but the gateway
-			// restart also orphaned its host docker-exec transport group. Do not
-			// publish that verdict until the persisted host sentinel proves and
-			// reaps precisely that original group.
+		const reapRecoveredContainerTransport = async (): Promise<void> => {
+			// The container exit/pid files prove only the in-container command. The
+			// gateway restart also orphaned a host docker-exec transport group. Every
+			// recovered outcome (verdict, timeout, or retryable no-verdict) therefore
+			// waits for this exact durable sentinel identity to be verified and reaped.
+			// On Windows there is no POSIX group sentinel and the reaper is a no-op.
 			await this._reapRecoveredPosixSentinel(step);
+		};
+		const finalizeRecoveredContainerExit = async (code: number): Promise<ResumedVerificationStep> => {
+			await reapRecoveredContainerTransport();
 			return helpers.finalize(code);
 		};
 		const heartbeatFresh = async (): Promise<boolean> => {
@@ -6303,10 +6353,14 @@ export class VerificationHarness {
 					`p=$(cat ${qp} 2>/dev/null) && kill -TERM -- -$p 2>/dev/null; sleep 0.2; p=$(cat ${qp} 2>/dev/null) && kill -KILL -- -$p 2>/dev/null`,
 				).catch(() => undefined);
 			}
+			await reapRecoveredContainerTransport();
 			return helpers.timeoutResult();
 		}
 
-		// 4. Stopped without a durable verdict → retryable pending interrupt.
+		// 4. Stopped without a durable verdict → retryable pending interrupt. The
+		// host docker-exec group may still be alive even after the in-container
+		// heartbeat stopped, so do not publish the waiting result before reaping it.
+		await reapRecoveredContainerTransport();
 		return helpers.restartInterrupted("The in-container command process stopped after restart without writing a durable exit status.");
 	}
 	// ── Nested goals (subgoal verify-step) ───────────────────────────────

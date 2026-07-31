@@ -507,6 +507,167 @@ describe("spawnTracked timeout cleanup", () => {
 		}
 	});
 
+	it("fails a recovered POSIX container verdict closed when host sentinel metadata is absent", async () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-sentinel-metadata-"));
+		try {
+			const harness = makeRecoveryHarness(stateDir, [], { platform: "linux" });
+			(harness as any)._dockerExecCapture = async () => ({ code: 0, stdout: "0\n" });
+			const step: any = {
+				name: "Container without host sentinel", type: "command", status: "running", startedAt: Date.now() - 1_000,
+				containerId: "container-under-test", restartRecoveryMode: "container-exec", pid: 321_654,
+				pidNonce: "missing-sentinel-nonce", exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat",
+			};
+			const active: any = { goalId: "goal", gateId: "implementation", signalId: "signal", overallStatus: "running", startedAt: Date.now(), steps: [step] };
+			let finalized = false;
+			await expect((harness as any)._resumeContainerCommandStep(active, step, {
+				finalize: () => { finalized = true; throw new Error("must not finalize without host sentinel metadata"); },
+				timeoutResult: () => { throw new Error("unexpected timeout"); },
+				restartInterrupted: () => { throw new Error("must not return waiting without host sentinel metadata"); },
+			})).rejects.toThrow(/no durable host docker-exec sentinel metadata/i);
+			expect(finalized).toBe(false);
+			expect(step.sentinelCleanupPending).toBe(true);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	it("uses exact sentinel metadata to bridge the recovered container spawn-to-state crash window", async () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-sentinel-group-"));
+		const sentinelFile = path.join(stateDir, "docker-exec.sentinel.json");
+		const nonce = "container-group-nonce";
+		const groupId = 321_654;
+		const killCalls: number[] = [];
+		try {
+			fs.writeFileSync(sentinelFile, JSON.stringify({ pid: process.pid, pgid: groupId, nonce, startToken: "current-process" }));
+			const harness = makeRecoveryHarness(stateDir, [], {
+				platform: "linux",
+				posixProcessIdentityInspector: () => ({ startToken: "current-process", pgid: groupId }),
+				persistedTreeKiller: pid => { killCalls.push(pid); return "signalled"; },
+			});
+			// Simulate a crash after the pre-spawn sentinel metadata was persisted,
+			// but before JS stamped child.pid into active verification state.
+			(harness as any)._waitForPidToExit = async () => true;
+			const crashedBeforePidStamp: any = {
+				name: "Container without persisted group", type: "command", status: "running", startedAt: Date.now(),
+				containerId: "container-under-test", restartRecoveryMode: "container-exec", pidNonce: nonce, sentinelFile,
+			};
+			await expect((harness as any)._reapRecoveredPosixSentinel(crashedBeforePidStamp)).resolves.toBeUndefined();
+			expect(killCalls).toEqual([groupId]);
+
+			await expect((harness as any)._reapRecoveredPosixSentinel({
+				...crashedBeforePidStamp, pid: groupId + 1,
+			})).rejects.toThrow(/did not match persisted group metadata/i);
+			expect(killCalls).toEqual([groupId]);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves Windows recovered-container finalization without a POSIX sentinel", async () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-sentinel-windows-"));
+		try {
+			const harness = makeRecoveryHarness(stateDir, [], { platform: "win32" });
+			(harness as any)._dockerExecCapture = async () => ({ code: 0, stdout: "0\n" });
+			const step: any = {
+				name: "Windows container", type: "command", status: "running", startedAt: Date.now() - 1_000,
+				containerId: "container-under-test", restartRecoveryMode: "container-exec", exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat",
+			};
+			const result = await (harness as any)._resumeContainerCommandStep({ signalId: "signal" }, step, {
+				finalize: (code: number) => ({ name: step.name, type: step.type, passed: code === 0, output: "finalized", duration_ms: 0 }),
+				timeoutResult: () => { throw new Error("unexpected timeout"); },
+				restartInterrupted: () => { throw new Error("unexpected interruption"); },
+			});
+			expect(result).toMatchObject({ passed: true, output: "finalized" });
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	it("reaps the exact host sentinel before publishing a recovered container timeout", async () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-sentinel-timeout-"));
+		let releaseReap!: () => void;
+		const reapReleased = new Promise<void>(resolve => { releaseReap = resolve; });
+		let resolveReapStarted!: () => void;
+		const reapStarted = new Promise<void>(resolve => { resolveReapStarted = resolve; });
+		let hostGroupLive = true;
+		const events: string[] = [];
+		try {
+			const harness = makeRecoveryHarness(stateDir, [], { platform: "linux" });
+			(harness as any)._reapRecoveredPosixSentinel = async () => {
+				events.push("reap");
+				resolveReapStarted();
+				await reapReleased;
+				hostGroupLive = false;
+			};
+			(harness as any)._dockerExecCapture = async (_cid: string, command: string) => {
+				if (command.includes("kill -TERM")) events.push("container-kill");
+				return { code: 0, stdout: "" };
+			};
+			const step: any = {
+				name: "Timed out container", type: "command", status: "running", startedAt: Date.now() - 1_000,
+				containerId: "container-under-test", restartRecoveryMode: "container-exec", pid: 321_654, pidFile: "/tmp/.bobbit-verif/signal/0.pid",
+				pidNonce: "timeout-nonce", sentinelFile: path.join(stateDir, "docker-exec.sentinel.json"),
+				exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat", deadlineMs: Date.now() - 1,
+			};
+			const result = (harness as any)._resumeContainerCommandStep({ signalId: "signal" }, step, {
+				finalize: () => { throw new Error("unexpected finalize"); },
+				timeoutResult: () => {
+					events.push(`timeout:host-group-live=${hostGroupLive}`);
+					return { name: step.name, type: step.type, passed: false, status: "failed", output: "timeout", duration_ms: 0 };
+				},
+				restartInterrupted: () => { throw new Error("unexpected interruption"); },
+			});
+			await reapStarted;
+			expect(events).toEqual(["container-kill", "reap"]);
+			releaseReap();
+			await expect(result).resolves.toMatchObject({ status: "failed" });
+			expect(events).toEqual(["container-kill", "reap", "timeout:host-group-live=false"]);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	it("reaps the exact host sentinel before returning a recovered container no-verdict wait", async () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-sentinel-no-verdict-"));
+		let releaseReap!: () => void;
+		const reapReleased = new Promise<void>(resolve => { releaseReap = resolve; });
+		let resolveReapStarted!: () => void;
+		const reapStarted = new Promise<void>(resolve => { resolveReapStarted = resolve; });
+		let hostGroupLive = true;
+		const events: string[] = [];
+		try {
+			const harness = makeRecoveryHarness(stateDir, [], { platform: "linux" });
+			(harness as any)._reapRecoveredPosixSentinel = async () => {
+				events.push("reap");
+				resolveReapStarted();
+				await reapReleased;
+				hostGroupLive = false;
+			};
+			(harness as any)._dockerExecCapture = async () => ({ code: 0, stdout: "" });
+			const step: any = {
+				name: "No-verdict container", type: "command", status: "running", startedAt: Date.now() - 1_000,
+				containerId: "container-under-test", restartRecoveryMode: "container-exec", pid: 321_654,
+				pidNonce: "no-verdict-nonce", sentinelFile: path.join(stateDir, "docker-exec.sentinel.json"),
+				exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat", deadlineMs: Date.now() + 10_000,
+			};
+			const result = (harness as any)._resumeContainerCommandStep({ signalId: "signal" }, step, {
+				finalize: () => { throw new Error("unexpected finalize"); },
+				timeoutResult: () => { throw new Error("unexpected timeout"); },
+				restartInterrupted: () => {
+					events.push(`waiting:host-group-live=${hostGroupLive}`);
+					return { name: step.name, type: step.type, passed: false, status: "waiting", output: "no verdict", duration_ms: 0 };
+				},
+			});
+			await reapStarted;
+			expect(events).toEqual(["reap"]);
+			releaseReap();
+			await expect(result).resolves.toMatchObject({ status: "waiting" });
+			expect(events).toEqual(["reap", "waiting:host-group-live=false"]);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
 	it("records the original group for a fast-exiting payload", async () => {
 		if (process.platform === "win32") {
 			expect(process.platform).toBe("win32");
