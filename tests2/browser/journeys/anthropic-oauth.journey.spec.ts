@@ -71,15 +71,11 @@ test.describe("Journey: Anthropic OAuth", () => {
 			popup = undefined;
 			await expect(page.getByRole("heading", { name: "Anthropic Login", exact: true })).toBeVisible();
 
-			const cancelled = page.waitForResponse((response) =>
-				response.url().endsWith("/api/oauth/cancel") && response.request().method() === "POST",
-			);
 			await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
-			expect((await cancelled).status()).toBe(200);
 			await expect(page.getByRole("heading", { name: "Anthropic Login", exact: true })).toHaveCount(0);
 
-			// Retry directly after the cancel response: the dialog waits for the
-			// provider-scoped cancellation before starting the next Pi flow.
+			// Do not await the cancel request: the next dialog must wait for its
+			// provider-scoped cancellation and Pi callback-lease release itself.
 			const retryPopup = page.waitForEvent("popup");
 			await anthropicRow.getByTestId("account-auth-btn-anthropic").getByRole("button").click();
 			popup = await retryPopup;

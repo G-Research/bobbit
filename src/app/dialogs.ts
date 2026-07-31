@@ -468,6 +468,23 @@ export async function checkOAuthStatus(provider = "anthropic"): Promise<boolean>
 
 let oauthExpiryModalOpen = false;
 
+// A cancel request releases Pi's provider-scoped callback lease asynchronously.
+// Keep that teardown visible to the next dialog so a user can cancel and retry
+// immediately without racing the still-active lease.
+const oauthFlowTeardowns = new Map<string, Promise<void>>();
+
+function waitForOAuthFlowTeardown(provider: string): Promise<void> {
+	return oauthFlowTeardowns.get(provider) ?? Promise.resolve();
+}
+
+function trackOAuthFlowTeardown(provider: string, teardown: Promise<void>): Promise<void> {
+	oauthFlowTeardowns.set(provider, teardown);
+	void teardown.finally(() => {
+		if (oauthFlowTeardowns.get(provider) === teardown) oauthFlowTeardowns.delete(provider);
+	});
+	return teardown;
+}
+
 export function showOAuthExpiryModal(credentials: readonly ExpiredAccountOAuthCredential[]): void {
 	if (credentials.length === 0 || oauthExpiryModalOpen) return;
 	oauthExpiryModalOpen = true;
@@ -557,10 +574,10 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 			const flowToCancel = flowId;
 			flowId = "";
 			if (!flowToCancel) return flowCancellation;
-			flowCancellation = gatewayFetch("/api/oauth/cancel", {
+			flowCancellation = trackOAuthFlowTeardown(provider, gatewayFetch("/api/oauth/cancel", {
 				method: "POST",
 				body: JSON.stringify({ flowId: flowToCancel, provider }),
-			}).then(() => undefined, () => undefined);
+			}).then(() => undefined, () => undefined));
 			return flowCancellation;
 		};
 
@@ -612,6 +629,7 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 		const startFlow = async () => {
 			// Wait for teardown before retrying: Pi's Anthropic callback port is
 			// process-wide, so an immediate retry must not race its cancellation.
+			await waitForOAuthFlowTeardown(provider);
 			await abandonFlow();
 			step = "loading";
 			renderOAuthDialog();
