@@ -504,15 +504,15 @@ test.describe("Journey: completed goal gate reset reopens live UI", () => {
 				return response.ok ? (await response.json()).state : null;
 			}, { timeout: 15_000, message: "fixture goal should be complete before reset" }).toBe("complete");
 
+			// Hydrate both tabs before opening the body-level widget popover. The app's
+			// initial session/gate refresh legitimately re-renders the session shell and
+			// dismisses transient popovers; opening it before the second tab was ready
+			// left the fixture waiting on a stale locator instead of exercising reset.
 			await openApp(page);
 			await navigateToHash(page, `#/session/${teamLeadId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
 			const pill = page.locator('[data-testid="goal-status-widget-pill"]').first();
 			await expect(pill).toBeVisible({ timeout: 15_000 });
-			await pill.click();
-			const widgetDropdown = page.locator("#goal-status-dropdown");
-			await expect(widgetDropdown.locator('[data-testid="goal-widget-completed"]')).toBeVisible({ timeout: 15_000 });
-			expect(await browserGoalState(page)).toBe("complete");
 
 			await openApp(dashboardPage);
 			await navigateToHash(dashboardPage, `#/goal/${goalId}`);
@@ -523,10 +523,29 @@ test.describe("Journey: completed goal gate reset reopens live UI", () => {
 			await expect(dashboardDesignGate).toHaveAttribute("data-gate-status", "passed", { timeout: 15_000 });
 			expect(await browserGoalState(dashboardPage)).toBe("complete");
 
+			await pill.click();
+			const widgetDropdown = page.locator("#goal-status-dropdown");
+			await expect(widgetDropdown.locator('[data-testid="goal-widget-completed"]')).toBeVisible({ timeout: 15_000 });
+			expect(await browserGoalState(page)).toBe("complete");
 			const designRow = widgetDropdown.locator('[data-testid="goal-widget-gate"][data-gate-id="design-doc"]');
-			await designRow.locator('[data-testid="goal-widget-gate-reset"]').click();
-			await expect(page.getByText("Reset “Design Doc”?", { exact: true })).toBeVisible({ timeout: 10_000 });
+			await expect(designRow).toHaveAttribute("data-gate-status", "passed");
+			const resetButton = designRow.locator('[data-testid="goal-widget-gate-reset"]');
+			await expect(resetButton, "completed goal exposes its passed-gate reset action").toBeVisible();
+			await resetButton.click();
+			const resetDialogTitle = page.getByRole("heading", { name: "Reset “Design Doc”?", exact: true });
+			await expect(resetDialogTitle).toBeVisible({ timeout: 10_000 });
+			const resetResponsePromise = page.waitForResponse(response =>
+				response.request().method() === "POST"
+				&& new URL(response.url()).pathname.endsWith(`/api/goals/${goalId}/gates/design-doc/reset`),
+			);
 			await page.keyboard.press("Enter");
+			const resetResponse = await resetResponsePromise;
+			const resetBody = await resetResponse.json();
+			expect(resetResponse.status(), JSON.stringify(resetBody)).toBe(200);
+			expect(resetBody).toMatchObject({
+				reopen: { reopened: true, previousState: "complete", state: "in-progress" },
+				affectedGateIds: ["design-doc", "implementation", "ready-to-merge"],
+			});
 
 			await expect(widgetDropdown.locator('[data-testid="goal-widget-completed"]'), "Completed must clear without reload").toHaveCount(0, { timeout: 15_000 });
 			await expect(designRow, "reset gate should render pending in the still-open widget").toHaveAttribute("data-gate-status", "pending", { timeout: 15_000 });
@@ -548,6 +567,7 @@ test.describe("Journey: completed goal gate reset reopens live UI", () => {
 			await reloadedPill.click();
 			await expect(page.locator('#goal-status-dropdown [data-testid="goal-widget-completed"]')).toHaveCount(0);
 			await expect(page.locator('#goal-status-dropdown [data-testid="goal-widget-gate"][data-gate-id="design-doc"]')).toHaveAttribute("data-gate-status", "pending", { timeout: 15_000 });
+			await expect.poll(() => browserGoalState(page), { timeout: 15_000, message: "reloaded session client state should remain reopened" }).toBe("in-progress");
 
 			await dashboardPage.reload({ waitUntil: "domcontentloaded" });
 			await expect(dashboardPage.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first()).toBeVisible({ timeout: 20_000 });
