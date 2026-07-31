@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Page } from "@playwright/test";
 import { test, expect, openApp, navigateToHash } from "../_helpers/journey-fixture.js";
@@ -7,11 +7,12 @@ import { test, expect, openApp, navigateToHash } from "../_helpers/journey-fixtu
 const ACCOUNT_ROUTE = "#/settings/system/account";
 const TOKEN_ENDPOINT = "https://platform.claude.com/v1/oauth/token";
 
-function seedAccountFixture(agentDir: string): void {
+function seedAccountFixture(authPath: string): void {
 	// Deliberately credential-free: the other account slot establishes that
-	// Anthropic cancellation and logout remain provider-scoped.
-	writeFileSync(join(agentDir, "auth.json"), JSON.stringify({
-		"openai-codex": { type: "oauth", expires: Date.now() + 60_000 },
+	// Anthropic cancellation and logout remain provider-scoped. Keep it valid
+	// for the whole browser run even though the exact original file is restored.
+	writeFileSync(authPath, JSON.stringify({
+		"openai-codex": { type: "oauth", expires: Date.now() + 86_400_000 },
 	}), "utf8");
 }
 
@@ -48,10 +49,12 @@ async function openAccountSettings(page: Page): Promise<void> {
 test.describe("Journey: Anthropic OAuth", () => {
 	test("cancels and immediately retries the real Pi-backed gateway flow without exposing credentials", async ({ page, gateway }) => {
 		test.setTimeout(90_000);
+		const authPath = join(gateway.bobbitDir, "agent", "auth.json");
+		const originalAuth = readFileSync(authPath);
 		const restoreProvider = installMockAnthropicProvider();
 		let popup: Page | undefined;
 		try {
-			seedAccountFixture(join(gateway.bobbitDir, "agent"));
+			seedAccountFixture(authPath);
 			await openApp(page);
 			await openAccountSettings(page);
 
@@ -103,7 +106,7 @@ test.describe("Journey: Anthropic OAuth", () => {
 		} finally {
 			if (popup && !popup.isClosed()) await popup.close();
 			restoreProvider();
-			seedAccountFixture(join(gateway.bobbitDir, "agent"));
+			writeFileSync(authPath, originalAuth);
 		}
 	});
 });
