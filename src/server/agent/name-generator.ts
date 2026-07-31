@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { refreshOAuthToken } from "../auth/oauth.js";
 import { redactSensitive } from "../auth/redact.js";
 import { globalAuthPath } from "../bobbit-dir.js";
+import { createAnthropicDirectHeaders, type AnthropicDirectCredentials } from "./anthropic-direct-request.js";
 import { invalidateRoleNameCache } from "./team-names.js";
 
 const defaultFetch: typeof fetch = (input, init) => globalThis.fetch(input, init);
@@ -17,13 +18,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const NAMES_DIR = join(__dirname, "..", "..", "..", "data", "team-names");
 const MODEL = "claude-haiku-4-5-20251001";
 const API_URL = "https://api.anthropic.com/v1/messages";
-const PI_CLAUDE_CODE_USER_AGENT = "claude-cli/2.1.75";
-const PI_CLAUDE_CODE_BETA = "claude-code-20250219,oauth-2025-04-20";
 
-interface AuthCredentials {
-	type: "oauth" | "api-key";
-	access: string;
-}
+type AuthCredentials = AnthropicDirectCredentials;
 
 /**
  * API keys remain a direct stored-credential path. OAuth access is deliberately
@@ -92,18 +88,7 @@ export async function generateRoleNames(roleName: string, roleLabel: string, fet
 		auth = { type: "oauth", access };
 	}
 
-	const headers: Record<string, string> = {
-		"Content-Type": "application/json",
-		"anthropic-version": "2023-06-01",
-	};
-	if (auth.type === "oauth") {
-		headers.Authorization = `Bearer ${auth.access}`;
-		headers["anthropic-beta"] = PI_CLAUDE_CODE_BETA;
-		headers["user-agent"] = PI_CLAUDE_CODE_USER_AGENT;
-		headers["x-app"] = "cli";
-	} else {
-		headers["x-api-key"] = auth.access;
-	}
+	const headers = createAnthropicDirectHeaders(auth);
 
 	const systemText = auth.type === "oauth"
 		? "You are Claude Code, Anthropic's official CLI for Claude. You generate funny names for AI coding agents."
@@ -139,22 +124,15 @@ Output a JSON array of 500 strings. Output ONLY the JSON array, no explanation, 
 	console.log(`[name-gen] Generating names for role "${roleName}" via ${MODEL}…`);
 
 	try {
-		let response = await fetchImpl(API_URL, {
+		const response = await fetchImpl(API_URL, {
 			method: "POST",
 			headers,
 			body: JSON.stringify(body),
 		});
 
-		// A retry resolves credentials through the same Pi-backed path; it never
-		// rewrites auth.json or exposes the rotating token to logs.
-		if (!response.ok && (response.status === 401 || response.status === 403) && auth.type === "oauth") {
-			console.warn(`[name-gen] ${anthropicErrorSummary(response.status)}, retrying credential resolution`);
-			const access = await refreshOAuthToken();
-			if (access) {
-				headers.Authorization = `Bearer ${access}`;
-				response = await fetchImpl(API_URL, { method: "POST", headers, body: JSON.stringify(body) });
-			}
-		}
+		// Pi resolves expiry and refreshes before this request. A Messages 401/403
+		// is a definitive authentication/authorization result, not a signal to
+		// repeat the same Pi-backed credential resolution.
 
 		if (!response.ok) {
 			// The body is classified but never emitted because upstream payloads can

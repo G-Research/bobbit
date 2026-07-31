@@ -9,6 +9,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { refreshOAuthToken } from "../auth/oauth.js";
 import { globalAuthPath } from "../bobbit-dir.js";
+import { createAnthropicDirectHeaders, type AnthropicDirectCredentials } from "./anthropic-direct-request.js";
 import { sanitizeModelErrorText } from "./model-error-sanitizer.js";
 import { discoverAigwModels, normalizeAigwModelString } from "./aigw-manager.js";
 import { aigwUserAgentHeaders } from "./aigw-user-agent.js";
@@ -90,10 +91,7 @@ export interface TitleGenOptions {
 	fetchImpl?: typeof fetch;
 }
 
-interface AuthCredentials {
-	type: "oauth" | "api-key";
-	access: string;
-}
+type AuthCredentials = AnthropicDirectCredentials;
 
 function loadAuth(): AuthCredentials | null {
 	const authPath = globalAuthPath();
@@ -376,19 +374,7 @@ async function generateViaAnthropic(
 		auth = { ...auth, access };
 	}
 
-	const headers: Record<string, string> = {
-		"Content-Type": "application/json",
-		"anthropic-version": "2023-06-01",
-	};
-
-	if (auth.type === "oauth") {
-		headers["Authorization"] = `Bearer ${auth.access}`;
-		headers["anthropic-beta"] = "claude-code-20250219,oauth-2025-04-20";
-		headers["user-agent"] = "claude-cli/2.1.75";
-		headers["x-app"] = "cli";
-	} else {
-		headers["x-api-key"] = auth.access;
-	}
+	const headers = createAnthropicDirectHeaders(auth);
 
 	const coreInstruction = "Output a 2-3 word label for this conversation. MAXIMUM 3 words. Wrap the label in <title>…</title> tags, e.g. <title>Fix Login Bug</title>, <title>Redis Setup</title>, <title>CSV Parser</title>, <title>Dark Mode</title>. No quotes, no markdown, no explanation outside the tags. No emojis. Do NOT reason, think, or plan — emit the <title> tag as your very first tokens.";
 	const systemText = auth.type === "oauth"
@@ -423,22 +409,15 @@ async function generateViaAnthropic(
 	console.log(`[title-gen] Requesting title via ${modelId}…`);
 
 	try {
-		let response = await fetchImpl(ANTHROPIC_API_URL, {
+		const response = await fetchImpl(ANTHROPIC_API_URL, {
 			method: "POST",
 			headers,
 			body: JSON.stringify(body),
 		});
 
-		// Re-resolve through Pi once on authentication failure. Pi owns token
-		// refresh and rotation, so this never races a direct auth.json update.
-		if (!response.ok && (response.status === 401 || response.status === 403) && auth.type === "oauth") {
-			console.warn(`[title-gen] ${describeAnthropicFailure(response.status)}; resolving OAuth credential once more`);
-			const access = await resolveAnthropicOAuthToken(options);
-			if (access) {
-				headers["Authorization"] = `Bearer ${access}`;
-				response = await fetchImpl(ANTHROPIC_API_URL, { method: "POST", headers, body: JSON.stringify(body) });
-			}
-		}
+		// Pi resolves expiry and refreshes before this request. A Messages 401/403
+		// is a definitive authentication/authorization result, not a signal to
+		// repeat the same Pi-backed credential resolution.
 
 		if (!response.ok) {
 			console.error(`[title-gen] Anthropic ${describeAnthropicFailure(response.status)}`);
@@ -600,19 +579,7 @@ async function generateGoalSummaryViaAnthropic(
 		auth = { ...auth, access };
 	}
 
-	const headers: Record<string, string> = {
-		"Content-Type": "application/json",
-		"anthropic-version": "2023-06-01",
-	};
-
-	if (auth.type === "oauth") {
-		headers["Authorization"] = `Bearer ${auth.access}`;
-		headers["anthropic-beta"] = "claude-code-20250219,oauth-2025-04-20";
-		headers["user-agent"] = "claude-cli/2.1.75";
-		headers["x-app"] = "cli";
-	} else {
-		headers["x-api-key"] = auth.access;
-	}
+	const headers = createAnthropicDirectHeaders(auth);
 
 	const systemText = auth.type === "oauth"
 		? `You are Claude Code, Anthropic's official CLI for Claude. ${GOAL_SUMMARY_SYSTEM}`
@@ -633,22 +600,15 @@ async function generateGoalSummaryViaAnthropic(
 	console.log(`[title-gen] Requesting goal summary via ${modelId}…`);
 
 	try {
-		let response = await fetchImpl(ANTHROPIC_API_URL, {
+		const response = await fetchImpl(ANTHROPIC_API_URL, {
 			method: "POST",
 			headers,
 			body: JSON.stringify(body),
 		});
 
-		// Re-resolve through Pi once on authentication failure. Pi owns token
-		// refresh and rotation, so this never races a direct auth.json update.
-		if (!response.ok && (response.status === 401 || response.status === 403) && auth.type === "oauth") {
-			console.warn(`[title-gen] ${describeAnthropicFailure(response.status)}; resolving OAuth credential once more`);
-			const access = await resolveAnthropicOAuthToken(options);
-			if (access) {
-				headers["Authorization"] = `Bearer ${access}`;
-				response = await fetchImpl(ANTHROPIC_API_URL, { method: "POST", headers, body: JSON.stringify(body) });
-			}
-		}
+		// Pi resolves expiry and refreshes before this request. A Messages 401/403
+		// is a definitive authentication/authorization result, not a signal to
+		// repeat the same Pi-backed credential resolution.
 
 		if (!response.ok) {
 			console.error(`[title-gen] Anthropic ${describeAnthropicFailure(response.status)}`);
