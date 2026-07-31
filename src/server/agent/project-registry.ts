@@ -218,14 +218,20 @@ function readOnlyCaseSemantics(
     return undefined;
   }
 
-  for (const name of entries) {
-    const variant = toggledCase(name);
-    if (variant && entries.filter(entry => entry.toLowerCase() === name.toLowerCase()).length > 1) {
-      return false;
-    }
+  // Build counts once: TMPDIR can contain thousands of entries, so filtering
+  // the entire list for every name makes an identity lookup quadratic.
+  const entryNames = entries.map(name => ({ name, folded: name.toLowerCase() }));
+  const foldedCounts = new Map<string, number>();
+  for (const { folded } of entryNames) {
+    foldedCounts.set(folded, (foldedCounts.get(folded) ?? 0) + 1);
   }
 
-  for (const name of entries) {
+  for (const { name, folded } of entryNames) {
+    const variant = toggledCase(name);
+    if (variant && (foldedCounts.get(folded) ?? 0) > 1) return false;
+  }
+
+  for (const { name } of entryNames) {
     const variant = toggledCase(name);
     if (!variant) continue;
     try {

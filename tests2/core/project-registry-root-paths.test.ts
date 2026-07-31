@@ -218,6 +218,37 @@ test("ProjectRegistry uses read-only entry evidence before creating a case probe
   assert.deepEqual(probeParents, [], "conclusive directory entries must not trigger watcher-visible probes");
 });
 
+test("ProjectRegistry processes large read-only directories linearly", () => {
+  const parent = "/large-read-only-case-evidence";
+  const entries = Array.from({ length: 1_000 }, (_, index) => `Entry${index}`);
+  const nativeToLowerCase = String.prototype.toLowerCase;
+  let lowerCaseCalls = 0;
+  const lowerCaseSpy = vi.spyOn(String.prototype, "toLowerCase").mockImplementation(function(this: string) {
+    lowerCaseCalls += 1;
+    return nativeToLowerCase.call(this);
+  });
+  const identity = createProjectPathIdentity({
+    isNativePathApi: dialect => dialect === "posix",
+    realpathSync: candidate => {
+      const resolved = path.posix.resolve(candidate);
+      if (resolved === parent) return resolved;
+      throw new Error(`missing fixture path: ${candidate}`);
+    },
+    readdirSync: candidate => path.posix.resolve(candidate) === parent ? entries : ["large-read-only-case-evidence"],
+    createCaseProbe: probeParent => path.posix.join(probeParent, ".BobbitProbeA"),
+  });
+
+  try {
+    assert.equal(identity(parent), parent);
+  } finally {
+    lowerCaseSpy.mockRestore();
+  }
+
+  // One fold and one case-toggle per entry (plus a fixed amount for ancestors)
+  // proves the entry-pair classification does not scan the directory per name.
+  assert.ok(lowerCaseCalls <= entries.length * 3 + 20, `expected linear normalization, got ${lowerCaseCalls} calls`);
+});
+
 test("ProjectRegistry caches inconclusive directory semantics per path identity", () => {
   const root = "/cached-case-probe/Project";
   let probes = 0;
