@@ -18,61 +18,102 @@ const SPAWN_GUARD_STATE = Symbol.for("bobbit.tests2.tier1-spawn-guard-state");
 
 const PROCESS_TREE_PROBE = String.raw`
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
 
 const grandchildScript = "process.on('SIGTERM', () => {}); setTimeout(() => process.exit(0), 600); setInterval(() => {}, 1000);";
-const parentScript = "const {spawn}=require('child_process'); const child=spawn(process.execPath,['-e',process.argv[1]],{stdio:'ignore'}); const ready=JSON.stringify({event:'grandchild-started',mode:process.argv[2],pid:child.pid}); process.stdout.write(ready+'\\n',()=>{ if(process.argv[2] === 'natural') process.exit(0); else setInterval(()=>{},1000); });";
+const parentScript = "const fs=require('fs'); const {spawn}=require('child_process'); const child=spawn(process.execPath,['-e',process.argv[1]],{stdio:'ignore'}); fs.writeFileSync(process.argv[2],String(child.pid)); if(process.argv[3] === 'exit-root') process.exit(0); setInterval(()=>{},1000);";
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (err) { return err?.code === "EPERM"; } };
 
-function waitForGrandchild(tracked, mode) {
-  const stdout = tracked.child.stdout;
-  if (!stdout) throw new Error(mode + ": tracked probe must expose stdout for its lifecycle acknowledgement");
-  return new Promise((resolve, reject) => {
-    let pending = "";
-    let settled = false;
-    const finish = (callback, value) => {
-      if (settled) return;
-      settled = true;
-      stdout.off("data", onData);
-      tracked.child.off("close", onClose);
-      tracked.child.off("error", onError);
-      callback(value);
-    };
-    const onData = (chunk) => {
-      pending += chunk.toString();
-      let newline;
-      while ((newline = pending.indexOf("\n")) !== -1) {
-        const line = pending.slice(0, newline);
-        pending = pending.slice(newline + 1);
-        try {
-          const message = JSON.parse(line);
-          if (message?.event === "grandchild-started" && message.mode === mode
-            && Number.isSafeInteger(message.pid) && message.pid > 0) {
-            finish(resolve, message.pid);
-            return;
-          }
-        } catch { /* Ignore output that is not our lifecycle acknowledgement. */ }
-      }
-    };
-    const onClose = (code, signal) => finish(reject, new Error(mode + ": probe closed before the grandchild lifecycle acknowledgement (code=" + code + ", signal=" + signal + ")"));
-    const onError = (error) => finish(reject, error);
-    stdout.on("data", onData);
-    tracked.child.once("close", onClose);
-    tracked.child.once("error", onError);
-  });
+// The watcher is armed before the Job supervisor starts. That makes the
+// payload's marker an explicit lifecycle acknowledgement rather than a
+// wall-clock/polling assumption, including during cold Add-Type compilation.
+function prepareGrandchildAcknowledgement(marker, mode) {
+  let child;
+  let stdout = "";
+  let stderr = "";
+  let settled = false;
+  let resolveReady;
+  let rejectReady;
+  const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+  const onStdout = (chunk) => { stdout += chunk.toString(); };
+  const onStderr = (chunk) => { stderr += chunk.toString(); };
+  const cleanup = () => {
+    watcher.close();
+    child?.stdout?.off("data", onStdout);
+    child?.stderr?.off("data", onStderr);
+    child?.off("close", onClose);
+    child?.off("error", onError);
+  };
+  const finish = (callback, value) => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    callback(value);
+  };
+  const markerPid = () => {
+    try {
+      const pid = Number(fs.readFileSync(marker, "utf8"));
+      return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
+    } catch { return undefined; }
+  };
+  const inspectMarker = () => {
+    const pid = markerPid();
+    if (pid != null) finish(resolveReady, pid);
+  };
+  const onClose = (code, signal) => {
+    // A final synchronous read covers a close event delivered before the
+    // directory watch callback for the parent's completed write.
+    const pid = markerPid();
+    if (pid != null) return finish(resolveReady, pid);
+    finish(rejectReady, new Error(
+      mode + ": Job supervisor closed before payload readiness (code=" + code + ", signal=" + signal
+        + ", stdout=" + JSON.stringify(stdout) + ", stderr=" + JSON.stringify(stderr) + ")",
+    ));
+  };
+  const onError = (error) => finish(rejectReady, error);
+  // The unique directory has no pre-existing marker, so observing it before
+  // spawn cannot miss a fast payload's acknowledgement.
+  const watcher = fs.watch(path.dirname(marker), { persistent: false }, inspectMarker);
+  return {
+    ready,
+    attach(tracked) {
+      child = tracked.child;
+      child.stdout?.on("data", onStdout);
+      child.stderr?.on("data", onStderr);
+      child.once("close", onClose);
+      child.once("error", onError);
+    },
+    fail(error) { finish(rejectReady, error); },
+  };
 }
 
 async function run(mode) {
-  const tracked = spawnTracked(process.execPath, ["-e", parentScript, grandchildScript, mode], {
-    stdio: ["ignore", "pipe", "ignore"],
-    ...(mode === "timeout" ? { timeoutMs: 100, killGraceMs: 100 } : {}),
-  });
-  const grandchildPid = await waitForGrandchild(tracked, mode);
-  if (mode === "cancel") tracked.killTree("SIGTERM", 0);
-  if (tracked.child.exitCode === null && tracked.child.signalCode === null) await new Promise(resolve => tracked.child.once("exit", resolve));
-  assert.equal(await tracked.waitForTreeExit(1500), true, mode + ": tracked tree should be exhausted");
-  assert.equal(alive(grandchildPid), false, mode + ": SIGTERM-ignoring grandchild must be reaped");
-  console.log(mode + "-tree-reaped");
+  const markerDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-spawn-tree-"));
+  const marker = path.join(markerDir, "grandchild.pid");
+  const acknowledgement = prepareGrandchildAcknowledgement(marker, mode);
+  try {
+    const tracked = spawnTracked(process.execPath, ["-e", parentScript, grandchildScript, marker, mode === "natural" ? "exit-root" : "stay-root"], {
+      // Capture the native supervisor's own diagnostics if it closes before
+      // the marker; readiness itself never relies on stdio forwarding.
+      stdio: ["ignore", "pipe", "pipe"],
+      ...(mode === "timeout" ? { timeoutMs: 100, killGraceMs: 100 } : {}),
+    });
+    acknowledgement.attach(tracked);
+    const grandchildPid = await acknowledgement.ready;
+    if (mode === "cancel") tracked.killTree("SIGTERM", 0);
+    if (tracked.child.exitCode === null && tracked.child.signalCode === null) await new Promise(resolve => tracked.child.once("exit", resolve));
+    assert.equal(await tracked.waitForTreeExit(1500), true, mode + ": tracked tree should be exhausted");
+    assert.equal(alive(grandchildPid), false, mode + ": SIGTERM-ignoring grandchild must be reaped");
+    console.log(mode + "-tree-reaped");
+  } catch (error) {
+    acknowledgement.fail(error);
+    throw error;
+  } finally {
+    fs.rmSync(markerDir, { recursive: true, force: true });
+  }
 }
 
 // PowerShell must compile the native Job supervisor before the payload can
