@@ -14,7 +14,7 @@ guardProcessEnv();
  *   - Whitespace-only `authCode`    → { success: false, error: "code required" }.
  *   - Unknown `flowId`              → { success: false, error: "Unknown or expired flow ID" }.
  */
-import { describe, it } from "vitest";
+import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -24,7 +24,22 @@ const tmp = mkdtempSync(path.join(tmpdir(), "bobbit-oauth-empty-"));
 mkdirSync(path.join(tmp, "agent"), { recursive: true });
 process.env.BOBBIT_AGENT_DIR = path.join(tmp, "agent");
 
-const { oauthComplete } = await import("../../src/server/auth/oauth.js");
+const { oauthCancel, oauthComplete, oauthStart } = await import("../../src/server/auth/oauth.js");
+const activeAnthropicFlowIds = new Set<string>();
+
+async function startAnthropicFlow(): ReturnType<typeof oauthStart> {
+	const start = await oauthStart("anthropic");
+	activeAnthropicFlowIds.add(start.flowId);
+	return start;
+}
+
+afterEach(async () => {
+	for (const flowId of activeAnthropicFlowIds) oauthCancel(flowId, "anthropic");
+	activeAnthropicFlowIds.clear();
+	// Allow Pi's aborted login promise to settle before the next test acquires
+	// the intentional process-wide Anthropic callback-port lease.
+	for (let i = 0; i < 20; i++) await Promise.resolve();
+});
 
 describe("oauthComplete — input validation", () => {
 	it("unknown flowId → 'Unknown or expired flow ID'", async () => {
@@ -40,8 +55,7 @@ describe("oauthComplete — input validation", () => {
 	// whitespace codes. The Anthropic branch ALSO enforces "code required"
 	// on empty/whitespace, mirroring the external-provider branch.
 	it("empty authCode for a real flow → 'code required'", async () => {
-		const { oauthStart } = await import("../../src/server/auth/oauth.js");
-		const start = await oauthStart("anthropic");
+		const start = await startAnthropicFlow();
 		assert.ok(start.flowId, "flow id should be returned");
 
 		const res1 = await oauthComplete(start.flowId, "");
@@ -49,8 +63,7 @@ describe("oauthComplete — input validation", () => {
 	});
 
 	it("whitespace-only authCode for a real flow → 'code required'", async () => {
-		const { oauthStart } = await import("../../src/server/auth/oauth.js");
-		const start = await oauthStart("anthropic");
+		const start = await startAnthropicFlow();
 		const res = await oauthComplete(start.flowId, "   \t\n  ");
 		assert.deepEqual(res, { success: false, error: "code required" });
 	});
