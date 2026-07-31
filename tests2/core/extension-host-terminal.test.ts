@@ -95,6 +95,7 @@ describe("terminal channel handler", () => {
 		sent.length = 0;
 
 		dataCb?.(`before detach ${marker}\r\n`);
+		await flushTerminalOutput();
 		assert.ok(sent.some(({ frame }) => isTextFrameWithMarker(frame, marker)), "test setup should receive initial PTY output");
 		sent.length = 0;
 
@@ -314,6 +315,7 @@ describe("terminal channel handler", () => {
 		});
 		assert.deepEqual(frames.shift(), { kind: "json", data: { op: "status", state: "attached", pid: 77 } });
 		dataCb?.("hello");
+		await flushTerminalOutput();
 		assert.deepEqual(frames.shift(), { kind: "text", data: "hello" });
 		await session.onClientFrame?.({ kind: "text", data: "pwd\n" });
 		await session.onClientFrame?.({ kind: "json", data: { op: "resize", cols: 120, rows: 40 } });
