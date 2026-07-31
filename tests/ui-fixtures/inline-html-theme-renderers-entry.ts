@@ -158,69 +158,8 @@ function hostFrame(hostId: string): HTMLIFrameElement {
 	return iframe;
 }
 
-function tokenValues(root: HTMLElement): Record<string, string> {
-	const styles = getComputedStyle(root);
-	return {
-		background: styles.getPropertyValue("--background").trim(),
-		foreground: styles.getPropertyValue("--foreground").trim(),
-		card: styles.getPropertyValue("--card").trim(),
-		positive: styles.getPropertyValue("--positive").trim(),
-		chart: styles.getPropertyValue("--chart-1").trim(),
-	};
-}
-
-function frameState(hostId: string): Record<string, unknown> {
-	const host = document.getElementById(hostId);
-	if (!host) throw new Error(`#${hostId} missing`);
-	const iframe = hostFrame(hostId);
-	const frameDocument = iframe.contentDocument;
-	const frameWindow = iframe.contentWindow as (Window & { __inlineThemeAuthored?: unknown }) | null;
-	const root = frameDocument?.documentElement;
-	const card = frameDocument?.getElementById("theme-card");
-	const semantic = frameDocument?.getElementById("semantic-probe");
-	const source = host.querySelector("code-block") as (HTMLElement & { code?: string }) | null;
-	const sourceContainer = source?.parentElement;
-	return {
-		identity: iframe.dataset.fixtureIdentity || "",
-		sandbox: iframe.getAttribute("sandbox"),
-		srcdoc: iframe.srcdoc,
-		dark: root?.classList.contains("dark") ?? false,
-		palette: root?.getAttribute("data-palette") ?? null,
-		font: root ? getComputedStyle(root).fontFamily : "",
-		tokens: root ? tokenValues(root) : {},
-		resolved: root && card && semantic ? {
-			background: getComputedStyle(root).backgroundColor,
-			foreground: getComputedStyle(root).color,
-			card: getComputedStyle(card).backgroundColor,
-			cardForeground: getComputedStyle(card).color,
-			positive: getComputedStyle(semantic).color,
-			chart: getComputedStyle(card).borderTopColor,
-		} : null,
-		authored: frameWindow?.__inlineThemeAuthored ?? null,
-		source: source?.code ?? null,
-		sourceCollapsed: sourceContainer?.classList.contains("max-h-0") ?? null,
-		streamingChrome: iframe.nextElementSibling instanceof HTMLDivElement,
-	};
-}
-
 function tagFrame(hostId: string, identity: string): void {
 	hostFrame(hostId).dataset.fixtureIdentity = identity;
-}
-
-async function dispatchSwipe(hostId: string): Promise<unknown[]> {
-	const doc = hostFrame(hostId).contentDocument;
-	if (!doc) throw new Error("iframe document unavailable");
-	const dispatch = (type: string, property: "touches" | "changedTouches", x: number, y: number) => {
-		const event = new Event(type, { bubbles: true, cancelable: true });
-		Object.defineProperty(event, property, { value: [{ clientX: x, clientY: y }] });
-		doc.dispatchEvent(event);
-	};
-	swipeMessages.length = 0;
-	dispatch("touchstart", "touches", 10, 10);
-	dispatch("touchmove", "touches", 80, 12);
-	dispatch("touchend", "changedTouches", 100, 12);
-	await new Promise((resolve) => window.setTimeout(resolve, 50));
-	return swipeMessages.slice();
 }
 
 window.addEventListener("message", (event) => {
@@ -255,8 +194,8 @@ setHostTheme(false, "azure");
 (window as any).__setInlineThemeHost = setHostTheme;
 (window as any).__renderInlineThemeWrite = renderWriteDocument;
 (window as any).__renderInlineThemeEdit = renderEditDocument;
-(window as any).__inlineThemeFrameState = frameState;
 (window as any).__tagInlineThemeFrame = tagFrame;
-(window as any).__dispatchInlineThemeSwipe = dispatchSwipe;
+(window as any).__inlineThemeSwipeMessages = () => swipeMessages.slice();
+(window as any).__clearInlineThemeSwipeMessages = () => { swipeMessages.length = 0; };
 (window as any).__inlineThemeFetchLog = () => fetchLog.slice();
 (window as any).__inlineThemeFixtureReady = true;

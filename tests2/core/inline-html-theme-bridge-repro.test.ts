@@ -44,11 +44,10 @@ function collectStaticImportGraph(entry: string): Set<string> {
 }
 
 describe("inline HtmlRenderer theme bridge reproducer", () => {
-	it("injects the canonical bridge into completed srcdoc and streaming document.write payloads", () => {
+	it("injects an opaque-origin parent-message bridge into completed and streaming srcdoc", () => {
 		const source = fs.readFileSync(RENDERER_PATH, "utf8");
 		const graph = collectStaticImportGraph(RENDERER_PATH);
 		const completedBinding = source.match(/\.srcdoc\s*=\s*\$\{\s*([^}\n]+?)\s*\}/)?.[1].trim();
-		const streamingWrite = source.match(/\bdoc\.write\(\s*([^);\n]+(?:\([^);\n]*\))?)\s*\)/)?.[1].trim();
 		const missing: string[] = [];
 
 		if (!graph.has(path.normalize(THEME_BRIDGE_PATH))) {
@@ -57,8 +56,17 @@ describe("inline HtmlRenderer theme bridge reproducer", () => {
 		if (!completedBinding || completedBinding === "htmlContent") {
 			missing.push("completed .srcdoc still receives raw htmlContent");
 		}
-		if (!streamingWrite || streamingWrite === "content") {
-			missing.push("streaming document.write still receives raw content");
+		if (!source.includes("iframe.srcdoc = prepareIsolatedInlineHtml(content, readInlineTheme())")) {
+			missing.push("streaming srcdoc does not receive isolated prepared content");
+		}
+		if (source.includes('sandbox="allow-scripts allow-same-origin"')) {
+			missing.push("inline iframe retains same-origin authority");
+		}
+		if (source.includes(".contentDocument") || source.includes("doc.write(")) {
+			missing.push("parent still reaches into the opaque child document");
+		}
+		if (!source.includes("event.source !== parent")) {
+			missing.push("child message bridge does not validate its direct parent source");
 		}
 
 		assert.deepEqual(

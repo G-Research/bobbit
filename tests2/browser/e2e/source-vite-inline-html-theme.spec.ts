@@ -75,36 +75,80 @@ async function hostTheme(page: Page): Promise<ThemeState> {
 }
 
 async function inlineFrameState(page: Page): Promise<InlineFrameState> {
-	return page.locator('iframe[title="theme-card.html"]').evaluate((element) => {
-		const iframe = element as HTMLIFrameElement;
-		const frameWindow = iframe.contentWindow as (Window & {
-			__sourceViteThemeCapture?: ThemeState;
-			__sourceViteFrameIdentity?: string;
-		}) | null;
-		const frameDocument = iframe.contentDocument!;
-		const root = frameDocument.documentElement;
-		const scripts = [...frameDocument.scripts];
-		const style = iframe.contentWindow!.getComputedStyle(root);
+	const iframe = page.locator('iframe[title="theme-card.html"]');
+	const handle = await iframe.elementHandle();
+	const frame = await handle?.contentFrame();
+	if (!frame) throw new Error("isolated source Vite iframe is unavailable");
+	const [parentState, childState] = await Promise.all([
+		iframe.evaluate((element) => ({
+			identity: (element as HTMLIFrameElement).dataset.sourceViteFrameIdentity ?? null,
+			srcdoc: (element as HTMLIFrameElement).srcdoc,
+		})),
+		frame.evaluate(() => {
+			const root = document.documentElement;
+			const scripts = [...document.scripts];
+			const style = getComputedStyle(root);
+			return {
+				capture: (window as any).__sourceViteThemeCapture ?? null,
+				current: {
+					background: style.getPropertyValue("--background").trim(),
+					foreground: style.getPropertyValue("--foreground").trim(),
+					card: style.getPropertyValue("--card").trim(),
+					positive: style.getPropertyValue("--positive").trim(),
+					chart: style.getPropertyValue("--chart-1").trim(),
+					font: style.fontFamily,
+					dark: root.classList.contains("dark"),
+					palette: root.getAttribute("data-palette"),
+				},
+				authoredScriptRan: root.getAttribute("data-source-vite-authored-script") === "true",
+				canonicalBridgeCount: scripts.filter(script => script.hasAttribute("data-bobbit-inline-theme-bridge")).length,
+				swipeBridgeCount: scripts.filter(script => (script.textContent ?? "").includes("preview-swipe-start")).length,
+				snapshotStyleCount: document.querySelectorAll('style[data-bobbit-preview-theme="snapshot"]').length,
+			};
+		}),
+	]);
+	return { ...childState, ...parentState } as InlineFrameState;
+}
+
+async function inlineAuthorityState(page: Page): Promise<Record<string, string | boolean>> {
+	const handle = await page.locator('iframe[title="theme-card.html"]').elementHandle();
+	const frame = await handle?.contentFrame();
+	if (!frame) throw new Error("isolated source Vite iframe is unavailable");
+	return frame.evaluate(() => {
+		function readable(read: () => unknown): boolean {
+			try {
+				read();
+				return true;
+			} catch {
+				return false;
+			}
+		}
 		return {
-			capture: frameWindow?.__sourceViteThemeCapture ?? null,
-			current: {
-				background: style.getPropertyValue("--background").trim(),
-				foreground: style.getPropertyValue("--foreground").trim(),
-				card: style.getPropertyValue("--card").trim(),
-				positive: style.getPropertyValue("--positive").trim(),
-				chart: style.getPropertyValue("--chart-1").trim(),
-				font: style.fontFamily,
-				dark: root.classList.contains("dark"),
-				palette: root.getAttribute("data-palette"),
-			},
-			authoredScriptRan: root.getAttribute("data-source-vite-authored-script") === "true",
-			canonicalBridgeCount: scripts.filter(script => script.hasAttribute("data-bobbit-inline-theme-bridge")).length,
-			swipeBridgeCount: scripts.filter(script => (script.textContent ?? "").includes("preview-swipe-start")).length,
-			snapshotStyleCount: frameDocument.querySelectorAll('style[data-bobbit-preview-theme="snapshot"]').length,
-			identity: frameWindow?.__sourceViteFrameIdentity ?? null,
-			srcdoc: iframe.srcdoc,
+			origin: location.origin,
+			ownStorage: readable(() => localStorage.getItem("gateway.token")),
+			parentDocument: readable(() => parent.document.documentElement),
+			parentStorage: readable(() => parent.localStorage.getItem("gateway.token")),
+			parentGatewayState: readable(() => (parent as any).localStorage.getItem("gateway.url")),
 		};
 	});
+}
+
+async function probeReadableUrl(page: Page, url: string): Promise<{
+	readable: boolean;
+	status: number | null;
+	body: string | null;
+}> {
+	const handle = await page.locator('iframe[title="theme-card.html"]').elementHandle();
+	const frame = await handle?.contentFrame();
+	if (!frame) throw new Error("isolated source Vite iframe is unavailable");
+	return frame.evaluate(async (target) => {
+		try {
+			const response = await fetch(target, { credentials: "include" });
+			return { readable: true, status: response.status, body: await response.text() };
+		} catch {
+			return { readable: false, status: null, body: null };
+		}
+	}, url);
 }
 
 function expectThemeMatches(actual: ThemeState, expected: ThemeState, label: string): void {
@@ -143,7 +187,7 @@ async function attachReport(testInfo: TestInfo, report: RuntimeReport): Promise<
 test.describe("source Vite inline HTML theme runtime", () => {
 	test.describe.configure({ retries: 0 });
 
-	test("real chat WriteRenderer uses the canonical source bridge at parse time and across a live theme switch", async ({ page }, testInfo) => {
+	test("real chat WriteRenderer uses the isolated source bridge at parse time and across a live theme switch", async ({ page }, testInfo) => {
 		test.setTimeout(4 * 60_000);
 		const tempRoot = await mkdtemp(join(tmpdir(), "bobbit-source-vite-inline-theme-"));
 		const workspaceDir = join(tempRoot, "workspace");
@@ -257,10 +301,18 @@ test.describe("source Vite inline HTML theme runtime", () => {
 
 			const initialHost = await hostTheme(page);
 			const initialFrame = await inlineFrameState(page);
+			expect(await iframe.getAttribute("sandbox")).toBe("allow-scripts");
+			expect(await inlineAuthorityState(page)).toEqual({
+				origin: "null",
+				ownStorage: false,
+				parentDocument: false,
+				parentStorage: false,
+				parentGatewayState: false,
+			});
 			expect(initialHost.dark).toBe(false);
 			expect(initialHost.palette).toBe("ocean");
 			expect(initialFrame.authoredScriptRan).toBe(true);
-			expect(initialFrame.canonicalBridgeCount, "inline srcdoc must contain exactly one canonical bridge").toBe(1);
+			expect(initialFrame.canonicalBridgeCount, "inline srcdoc must contain exactly one isolated bridge").toBe(1);
 			expect(initialFrame.swipeBridgeCount, "inline chat iframe must not receive side-panel swipe forwarding").toBe(0);
 			expect(initialFrame.snapshotStyleCount, "inline srcdoc must not use the standalone server-filesystem theme snapshot").toBe(0);
 			expect(initialFrame.capture).not.toBeNull();
@@ -269,12 +321,52 @@ test.describe("source Vite inline HTML theme runtime", () => {
 			expect(initialFrame.srcdoc).toContain("data-bobbit-inline-theme-bridge");
 			expect(initialFrame.srcdoc).not.toContain("data-bobbit-preview-theme=\"snapshot\"");
 			expect(initialFrame.srcdoc).not.toContain("preview-swipe-start");
+			expect(initialFrame.srcdoc).not.toContain("parent.document");
+
+			await page.context().addCookies([
+				{ name: "bobbit_session", value: "host-bobbit-authority", url: gatewayBaseUrl, sameSite: "Strict" },
+				{ name: "sibling_session", value: "host-sibling-authority", url: viteBaseUrl, sameSite: "Strict" },
+			]);
+			const browserCookies = await page.context().cookies(gatewayBaseUrl);
+			expect(
+				browserCookies.some(cookie => cookie.name === "bobbit_session")
+					&& browserCookies.some(cookie => cookie.name === "sibling_session"),
+				"host app must hold Bobbit and sibling cookies before the opaque child authority probe",
+			).toBe(true);
+			const bobbitProbeUrl = `${gatewayBaseUrl}/api/preferences?inline-authority-probe=bobbit`;
+			const [bobbitProbeRequest, bobbitReadable] = await Promise.all([
+				page.waitForRequest(request => request.url() === bobbitProbeUrl),
+				probeReadableUrl(page, bobbitProbeUrl),
+			]);
+			expect(bobbitReadable.readable, "opaque authored HTML must not read Bobbit API responses").toBe(false);
+			const bobbitProbeHeaders = await bobbitProbeRequest.allHeaders();
+			expect(bobbitProbeHeaders.authorization).toBeUndefined();
+			expect(bobbitProbeHeaders.cookie ?? "").not.toContain("bobbit_session");
+			expect(bobbitProbeHeaders.cookie ?? "").not.toContain("sibling_session");
+
+			const siblingProbeUrl = `${viteBaseUrl}/inline-sibling-authority-probe`;
+			await page.route(siblingProbeUrl, async (route) => {
+				const headers = await route.request().allHeaders();
+				const authorized = (headers.cookie ?? "").includes("sibling_session=host-sibling-authority");
+				await route.fulfill({
+					status: authorized ? 200 : 401,
+					contentType: "text/plain",
+					body: authorized ? "sibling-secret" : "sibling-unauthorized",
+				});
+			});
+			const [siblingProbeRequest, siblingReadable] = await Promise.all([
+				page.waitForRequest(request => request.url() === siblingProbeUrl),
+				probeReadableUrl(page, siblingProbeUrl),
+			]);
+			expect(siblingReadable.body, "opaque authored HTML must not receive sibling authenticated data").not.toBe("sibling-secret");
+			if (siblingReadable.readable) expect(siblingReadable.status).toBe(401);
+			const siblingProbeHeaders = await siblingProbeRequest.allHeaders();
+			expect(siblingProbeHeaders.authorization).toBeUndefined();
+			expect(siblingProbeHeaders.cookie ?? "").not.toContain("bobbit_session");
+			expect(siblingProbeHeaders.cookie ?? "").not.toContain("sibling_session");
 
 			await iframe.evaluate(element => {
-				const frameWindow = (element as HTMLIFrameElement).contentWindow as (Window & {
-					__sourceViteFrameIdentity?: string;
-				}) | null;
-				if (frameWindow) frameWindow.__sourceViteFrameIdentity = "same-source-vite-iframe";
+				(element as HTMLIFrameElement).dataset.sourceViteFrameIdentity = "same-source-vite-iframe";
 			});
 			await page.evaluate(() => {
 				const root = document.documentElement;
