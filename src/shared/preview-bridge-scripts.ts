@@ -131,8 +131,128 @@ export const PREVIEW_SWIPE_SCRIPT = `<script>
 })();
 <\/script>`;
 
-/** Combined bridge scripts — convenient single string for server-side injection. */
+/** Combined static bridge scripts — convenient single string for server-side injection. */
 export const PREVIEW_BRIDGE_SCRIPTS = PREVIEW_THEME_BRIDGE + PREVIEW_SWIPE_SCRIPT;
+
+export const PREVIEW_NAVIGATION_MESSAGE_TYPE = "bobbit-preview-navigate";
+
+function scriptString(value: string): string {
+	return JSON.stringify(value).replace(/</g, "\\u003c");
+}
+
+/**
+ * Keep asset resolution on generation-bound authority while handing document
+ * navigation back to an ambient-authenticated browser context. Embedded opaque
+ * frames ask their validated parent to navigate the exact iframe; standalone
+ * popouts perform a top-level same-site navigation and retain `noopener`.
+ */
+export function previewNavigationBridge(
+	capabilityBaseHref: string,
+	canonicalBaseHref: string,
+	canonicalDocumentHref: string,
+): string {
+	return `<script>
+(function() {
+	var MESSAGE_TYPE = ${scriptString(PREVIEW_NAVIGATION_MESSAGE_TYPE)};
+	var capabilityBase = new URL(${scriptString(capabilityBaseHref)}, location.href);
+	var canonicalBase = new URL(${scriptString(canonicalBaseHref)}, location.href);
+	var canonicalDocument = new URL(${scriptString(canonicalDocumentHref)}, location.href);
+	function within(pathname, base) {
+		return pathname === base || pathname.indexOf(base.endsWith('/') ? base : base + '/') === 0;
+	}
+	function canonicalTarget(raw) {
+		if (typeof raw !== 'string' || !raw) return null;
+		if (raw.charAt(0) === '#') return new URL(raw, canonicalDocument.href).href;
+		var requested;
+		try { requested = new URL(raw, document.baseURI); } catch (_) { return null; }
+		if (requested.origin !== capabilityBase.origin) return null;
+		if (within(requested.pathname, capabilityBase.pathname)) {
+			var suffix = requested.pathname.slice(capabilityBase.pathname.length);
+			var target = new URL(canonicalBase.href);
+			target.pathname = canonicalBase.pathname + suffix;
+			target.search = requested.search;
+			target.hash = requested.hash;
+			return target.href;
+		}
+		return within(requested.pathname, canonicalBase.pathname) ? requested.href : null;
+	}
+	function handoff(target) {
+		if (parent === window) location.assign(target);
+		else parent.postMessage({ type: MESSAGE_TYPE, url: target }, '*');
+	}
+	document.addEventListener('click', function(event) {
+		if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+		var node = event.target;
+		while (node && node.nodeType === 1 && String(node.tagName).toLowerCase() !== 'a') node = node.parentElement;
+		if (!node || String(node.tagName).toLowerCase() !== 'a' || node.hasAttribute('download')) return;
+		var targetName = (node.getAttribute('target') || '_self').toLowerCase();
+		if (targetName !== '_self') return;
+		var target = canonicalTarget(node.getAttribute('href'));
+		if (!target) return;
+		event.preventDefault();
+		handoff(target);
+	}, true);
+	document.addEventListener('submit', function(event) {
+		if (event.defaultPrevented) return;
+		var form = event.target;
+		if (!form || String(form.tagName).toLowerCase() !== 'form') return;
+		var submitter = event.submitter;
+		var method = String((submitter && submitter.getAttribute('formmethod')) || form.getAttribute('method') || 'get').toLowerCase();
+		var targetName = String((submitter && submitter.getAttribute('formtarget')) || form.getAttribute('target') || '_self').toLowerCase();
+		if (method !== 'get' || targetName !== '_self') return;
+		var rawAction = (submitter && submitter.getAttribute('formaction')) || form.getAttribute('action') || canonicalDocument.href;
+		var target = canonicalTarget(rawAction);
+		if (!target) return;
+		var url = new URL(target);
+		new FormData(form).forEach(function(value, name) {
+			url.searchParams.append(name, typeof value === 'string' ? value : value.name);
+		});
+		event.preventDefault();
+		handoff(url.href);
+	}, true);
+})();
+<\/script>`;
+}
+
+/**
+ * Parent-side validation for an opaque-frame navigation handoff. The source
+ * window check is owned by the caller; this helper proves the requested URL is
+ * same-origin and remains inside the exact live/artifact preview scope already
+ * loaded in that iframe. Capability routes are never accepted as documents.
+ */
+export function validatedPreviewNavigationTarget(currentIframeSrc: string, requestedHref: unknown): string | null {
+	if (typeof requestedHref !== "string" || !requestedHref || /[\\\u0000-\u001f\u007f]/u.test(requestedHref)) return null;
+	let current: URL;
+	let requested: URL;
+	try {
+		current = new URL(currentIframeSrc);
+		requested = new URL(requestedHref);
+	} catch {
+		return null;
+	}
+	if (!/^https?:$/.test(current.protocol)
+		|| requested.protocol !== current.protocol
+		|| requested.origin !== current.origin
+		|| requested.username
+		|| requested.password) return null;
+	const marker = current.pathname.lastIndexOf("/preview/");
+	if (marker < 0) return null;
+	const prefix = current.pathname.slice(0, marker + "/preview/".length);
+	const remainder = current.pathname.slice(prefix.length);
+	const segments = remainder.split("/");
+	const sessionId = segments[0] ?? "";
+	if (!sessionId || !/^[A-Za-z0-9._~-]+$/.test(sessionId)) return null;
+	let scope = `${prefix}${sessionId}/`;
+	if (segments[1] === "_artifact") {
+		const artifactId = segments[2] ?? "";
+		if (!/^[A-Za-z0-9_-]{1,64}$/.test(artifactId)) return null;
+		scope += `_artifact/${artifactId}/`;
+	}
+	if (!requested.pathname.startsWith(scope)) return null;
+	const relative = requested.pathname.slice(scope.length);
+	if (relative === "_content" || relative.startsWith("_content/")) return null;
+	return requested.href;
+}
 
 /**
  * Inject a `<base>` tag and the bridge scripts into an arbitrary HTML

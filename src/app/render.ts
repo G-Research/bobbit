@@ -116,6 +116,10 @@ import {
 	previewRouteFromStoredValue,
 } from "./gateway-fetch.js";
 import { gatewayRoute } from "../shared/base-path.js";
+import {
+	PREVIEW_NAVIGATION_MESSAGE_TYPE,
+	validatedPreviewNavigationTarget,
+} from "../shared/preview-bridge-scripts.js";
 
 const bobbitIcon = html`<img src=${appUrl("/favicon.svg")} alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
@@ -1777,6 +1781,11 @@ function setupPreviewSwipe(): void {
 			postPreviewTheme(iframe);
 			return;
 		}
+		if (e.data?.type === PREVIEW_NAVIGATION_MESSAGE_TYPE) {
+			const target = validatedPreviewNavigationTarget(iframe.src, e.data?.url);
+			if (target) iframe.src = target;
+			return;
+		}
 		if (!hasUnifiedPanel()) return;
 		const panes = unifiedMobilePanes();
 		const curIdx = unifiedMobilePaneIndex();
@@ -2719,6 +2728,7 @@ export function doRenderApp(): void {
 					class="w-full border-0"
 					style="position:absolute;inset:0;height:100%;"
 					sandbox="allow-scripts"
+					referrerpolicy="no-referrer"
 					src=${src}
 				></iframe>
 			</div>

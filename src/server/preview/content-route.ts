@@ -17,13 +17,24 @@ import fs from "node:fs";
 import { randomBytes } from "node:crypto";
 import type http from "node:http";
 
-import { acquirePreviewDirectoryRead, hashMountDirectory, isPreviewDirectoryAvailable, mountPath, readMountDirectory } from "./mount.js";
+import {
+	acquirePreviewDirectoryRead,
+	ensurePreviewDirectoryGeneration,
+	isPreviewDirectoryAvailable,
+	mountPath,
+	previewDirectoryGenerationMatches,
+	readMountDirectory,
+} from "./mount.js";
 import { artifactMountDir } from "./artifacts.js";
 import { resolveAssetPath } from "./path-guard.js";
 import { mimeTypeFor } from "./mime.js";
 import { tryAuth as cookieTryAuth, type CookieStore } from "../auth/cookie.js";
 import { canonicalHttpOrigin, canonicalRequestOrigin } from "../auth/browser-cookie.js";
-import { injectBaseAndScripts, PREVIEW_BRIDGE_SCRIPTS } from "../../shared/preview-bridge-scripts.js";
+import {
+	injectBaseAndScripts,
+	PREVIEW_BRIDGE_SCRIPTS,
+	previewNavigationBridge,
+} from "../../shared/preview-bridge-scripts.js";
 import { gatewayRoute, normalizeBasePath, withBasePath } from "../../shared/base-path.js";
 import { getPreviewThemeSnapshot } from "./theme-snapshot.js";
 
@@ -424,17 +435,11 @@ export async function handlePreviewRequest(
 	try {
 		let capabilityAuthorized = false;
 		if (routedCapability) {
-			let generation: string;
-			try {
-				generation = await hashMountDirectory(baseDir);
-			} catch {
-				revokePreviewAssetCapability(opts.cookieStore, routedCapability);
-				send(res, 401, JSON.stringify({ error: "Unauthorized" }));
-				return true;
-			}
 			const stillActive = capabilityState(opts.cookieStore).byToken.get(routedCapability.token) === routedCapability;
 			const expired = capabilityNow(opts) >= routedCapability.expiresAt;
-			if (!stillActive || expired || generation !== routedCapability.generation) {
+			if (!stillActive
+				|| expired
+				|| !previewDirectoryGenerationMatches(baseDir, routedCapability.generation)) {
 				revokePreviewAssetCapability(opts.cookieStore, routedCapability);
 				send(res, 401, JSON.stringify({ error: "Unauthorized" }));
 				return true;
@@ -511,7 +516,7 @@ export async function handlePreviewRequest(
 		// postMessage bridge instead of reading parent.document.
 		let generation: string;
 		try {
-			generation = await hashMountDirectory(baseDir);
+			generation = await ensurePreviewDirectoryGeneration(baseDir);
 		} catch {
 			send(res, 404, JSON.stringify({ error: "Preview mount is not available" }));
 			return true;
@@ -526,11 +531,15 @@ export async function handlePreviewRequest(
 			`${internalBaseRoute}${CONTENT_CAPABILITY_SEGMENT}/${issuedCapability.token}/`,
 		);
 		const publicBaseHref = withBasePath(capabilityBaseRoute, basePath);
+		const canonicalBaseHref = withBasePath(internalBaseRoute, basePath);
+		const canonicalDocumentHref = withBasePath(gatewayRoute(`${internalBaseRoute}${rel}`), basePath);
 		const baseTag = `<base data-bobbit-preview-base href="${publicBaseHref}">` + getPreviewThemeSnapshot();
 		const rewritten = injectBaseAndScripts(
 			body,
 			baseTag,
-			PREVIEW_BRIDGE_SCRIPTS + PREVIEW_OPAQUE_THEME_BRIDGE,
+			PREVIEW_BRIDGE_SCRIPTS
+				+ previewNavigationBridge(publicBaseHref, canonicalBaseHref, canonicalDocumentHref)
+				+ PREVIEW_OPAQUE_THEME_BRIDGE,
 		);
 		res.writeHead(200, {
 			"Content-Type": contentType,
@@ -565,7 +574,7 @@ export async function handlePreviewRequest(
 		if (!capabilityAuthorized) {
 			let generation: string;
 			try {
-				generation = await hashMountDirectory(baseDir);
+				generation = await ensurePreviewDirectoryGeneration(baseDir);
 			} catch {
 				send(res, 404, JSON.stringify({ error: "Preview mount is not available" }));
 				return true;
