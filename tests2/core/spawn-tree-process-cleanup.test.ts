@@ -158,6 +158,31 @@ fs.writeFileSync(pidFile, String(tracked.child.pid) + "\n" + nonce + "\n");
 process.stdout.write(JSON.stringify({ pid: tracked.child.pid, pidFile, sentinelFile, nonce }) + "\n", () => process.exit(0));
 `;
 
+const FAST_EXIT_SENTINEL_PROBE = String.raw`
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-fast-sentinel-"));
+const identityFile = path.join(dir, "sentinel.json");
+const tracked = spawnTracked("/bin/sh", ["-c", "exit 0"], {
+  stdio: ["ignore", "ignore", "ignore", "pipe"],
+  posixSentinelIdentity: { file: identityFile, nonce: "fast-exit-nonce" },
+});
+await new Promise((resolve, reject) => {
+  const ready = tracked.child.stdio[3];
+  if (!ready) return reject(new Error("missing sentinel readiness pipe"));
+  ready.once("data", resolve);
+  ready.once("error", reject);
+});
+const identity = JSON.parse(fs.readFileSync(identityFile, "utf8"));
+process.stdout.write(JSON.stringify({ rootPid: tracked.child.pid, identity }) + "\n", () => {
+  try { tracked.killTree("SIGKILL"); } catch {}
+  fs.rmSync(dir, { recursive: true, force: true });
+  process.exit(0);
+});
+`;
+
 type FakeReadyPipe = EventEmitter & { unrefCalls: number; unref(): void };
 type FakeChild = ChildProcess & { killCalls: NodeJS.Signals[]; readyPipe: FakeReadyPipe };
 
@@ -249,6 +274,25 @@ function recoveredSentinelProbe(stateDir: string, exitFile: string): Promise<{ p
 			if (code !== 0) return reject(new Error(`recovered-sentinel probe failed (code=${code}): ${stderr}`));
 			try { resolve(JSON.parse(stdout.trim())); }
 			catch (error) { reject(new Error(`recovered-sentinel probe emitted invalid state: ${stdout}\n${String(error)}`)); }
+		});
+	});
+}
+
+function runNativeJsonProbe(source: string): Promise<any> {
+	const state = (process as NodeJS.Process & { [SPAWN_GUARD_STATE]?: GuardState })[SPAWN_GUARD_STATE];
+	const nativeSpawn = state?.originals?.spawn;
+	if (!nativeSpawn) throw new Error("native probe requires the tier-1 spawn guard's preserved spawn");
+	return new Promise((resolve, reject) => {
+		let stdout = "";
+		let stderr = "";
+		const child = nativeSpawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", source], { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] });
+		child.stdout?.on("data", chunk => { stdout += chunk.toString(); });
+		child.stderr?.on("data", chunk => { stderr += chunk.toString(); });
+		child.once("error", reject);
+		child.once("close", code => {
+			if (code !== 0) return reject(new Error(`native probe failed (code=${code}): ${stderr}`));
+			try { resolve(JSON.parse(stdout.trim())); }
+			catch (error) { reject(new Error(`native probe emitted invalid JSON: ${stdout}\n${String(error)}`)); }
 		});
 	});
 }
@@ -357,6 +401,24 @@ describe("spawnTracked timeout cleanup", () => {
 			}
 			fs.rmSync(stateDir, { recursive: true, force: true });
 		}
+	});
+
+	it("records the original group for a fast-exiting payload", async () => {
+		if (process.platform === "win32") {
+			expect(process.platform).toBe("win32");
+			return;
+		}
+		const result = await runNativeJsonProbe(FAST_EXIT_SENTINEL_PROBE);
+		expect(result.identity.pid).not.toBe(result.rootPid);
+		expect(result.identity.pgid).toBe(result.rootPid);
+		expect(result.identity.startToken).toEqual(expect.any(String));
+	});
+
+	it("never acknowledges a sentinel whose durable identity write fails", () => {
+		const identityScript = SPAWN_TREE_SOURCE.match(/const POSIX_TREE_SENTINEL_CHILD_SCRIPT = (.+);/)?.[1] ?? "";
+		expect(identityScript).toContain("exit 125");
+		expect(identityScript.indexOf("exit 125")).toBeLessThan(identityScript.indexOf("printf . >&3"));
+		expect(SPAWN_TREE_SOURCE).toContain("unset BOBBIT_POSIX_SENTINEL_PGID BOBBIT_POSIX_SENTINEL_IDENTITY_FILE BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE BOBBIT_POSIX_TREE_SENTINEL_CHILD_SCRIPT");
 	});
 
 	it("refuses a reused POSIX sentinel PID before it can signal a group", async () => {

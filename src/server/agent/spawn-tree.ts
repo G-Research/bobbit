@@ -235,8 +235,10 @@ const WINDOWS_JOB_SUPERVISOR_COMMAND = Buffer.from(WINDOWS_JOB_SUPERVISOR, "utf1
 // Run this in a separately invoked shell, rather than a background subshell.
 // POSIX `/bin/sh` preserves the outer shell's `$$` in `( ... ) &`; a new shell
 // gives the identity record the actual sentinel PID needed after root exit.
-const POSIX_TREE_SENTINEL_CHILD_SCRIPT = "trap '' HUP INT TERM; if [ -n \"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE\" ]; then __bobbit_sentinel_start=$(LC_ALL=C LANG=C ps -o lstart= -p \"$$\" 2>/dev/null | sed 's/^ *//'); __bobbit_sentinel_tmp=\"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE.$$.tmp\"; printf '{\"pid\":%s,\"pgid\":%s,\"nonce\":\"%s\",\"startToken\":\"%s\"}\\n' \"$$\" \"$PPID\" \"$BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE\" \"$__bobbit_sentinel_start\" > \"$__bobbit_sentinel_tmp\" && mv \"$__bobbit_sentinel_tmp\" \"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE\"; fi; printf . >&3; while :; do sleep 2147483647 & wait $!; done";
-const POSIX_TREE_SENTINEL_SCRIPT = "/bin/sh -c \"$BOBBIT_POSIX_TREE_SENTINEL_CHILD_SCRIPT\" & exec \"$@\"";
+const POSIX_TREE_SENTINEL_CHILD_SCRIPT = "trap '' HUP INT TERM; if [ -n \"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE\" ]; then __bobbit_sentinel_start=$(LC_ALL=C LANG=C ps -o lstart= -p \"$$\" 2>/dev/null | sed 's/^ *//'); [ -n \"$__bobbit_sentinel_start\" ] || exit 125; __bobbit_sentinel_tmp=\"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE.$$.tmp\"; printf '{\"pid\":%s,\"pgid\":%s,\"nonce\":\"%s\",\"startToken\":\"%s\"}\\n' \"$$\" \"$BOBBIT_POSIX_SENTINEL_PGID\" \"$BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE\" \"$__bobbit_sentinel_start\" > \"$__bobbit_sentinel_tmp\" && mv \"$__bobbit_sentinel_tmp\" \"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE\" || { rm -f \"$__bobbit_sentinel_tmp\"; exit 125; }; fi; printf . >&3; while :; do sleep 2147483647 & wait $!; done";
+// Capture the group leader before starting the sentinel. Its `$PPID` is not a
+// stable identity: a fast root exit can reparent the background shell first.
+const POSIX_TREE_SENTINEL_SCRIPT = "__bobbit_sentinel_pgid=$$; export BOBBIT_POSIX_SENTINEL_PGID=\"$__bobbit_sentinel_pgid\"; /bin/sh -c \"$BOBBIT_POSIX_TREE_SENTINEL_CHILD_SCRIPT\" & unset BOBBIT_POSIX_SENTINEL_PGID BOBBIT_POSIX_SENTINEL_IDENTITY_FILE BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE BOBBIT_POSIX_TREE_SENTINEL_CHILD_SCRIPT; exec \"$@\"";
 
 function withPosixSentinelReadyPipe(stdio: StdioOptions | undefined): StdioOptions {
 	if (Array.isArray(stdio)) return [...stdio.slice(0, 3), "pipe", ...stdio.slice(3)] as StdioOptions;

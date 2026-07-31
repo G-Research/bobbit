@@ -2905,7 +2905,11 @@ export class VerificationHarness {
 	}
 
 	private _commandStepRequiresKillCleanup(step: ActiveVerification["steps"][number]): boolean {
-		return step.type === "command" && (step.status === "running" || (!!step.killRequestedAt && !step.killCompletedAt));
+		return step.type === "command" && (
+			step.status === "running" ||
+			(!!step.killRequestedAt && !step.killCompletedAt) ||
+			!!step.sentinelCleanupPending
+		);
 	}
 
 	private _markPersistedCommandKillIntent(active: ActiveVerification, signal: NodeJS.Signals, reason: "cancelled" | "timeout"): void {
@@ -2985,7 +2989,16 @@ export class VerificationHarness {
 		for (const step of active.steps) {
 			if (!this._commandStepRequiresKillCleanup(step)) continue;
 			if (step.exitFile && fs.existsSync(step.exitFile)) {
-				step.killCompletedAt ??= Date.now();
+				// A recovered host command can have published its exit status while
+				// its POSIX group sentinel still owns the old PGID. Reap that verified
+				// sentinel before treating cancel/stale/terminal cleanup as complete.
+				try {
+					await this._reapRecoveredPosixSentinel(step);
+					step.killCompletedAt ??= Date.now();
+				} catch (err) {
+					if (!isPendingCommandCleanupError(err)) throw err;
+					allSettled = false;
+				}
 				continue;
 			}
 			if (step.restartRecoveryMode === "unsupported" || step.containerId || (!step.pidFile && !step.pid)) {
