@@ -543,6 +543,7 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 		let step: "loading" | "waiting" | "exchanging" | "done" | "error" = "loading";
 		let error = "";
 		let pollTimer: number | undefined;
+		let flowCancellation: Promise<void> = Promise.resolve();
 		let pollStartMs = 0;
 		let pollDelayMs = 1000;
 		const POLL_MAX_DELAY_MS = 8000;
@@ -550,20 +551,39 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 
 		const providerName = accountOAuthProviderLabel(provider);
 
+		// Cancel only this dialog's flow. The server treats a mismatched or already
+		// finished flow as a no-op, so a late teardown cannot affect another login.
+		const abandonFlow = (): Promise<void> => {
+			const flowToCancel = flowId;
+			flowId = "";
+			if (!flowToCancel) return flowCancellation;
+			flowCancellation = gatewayFetch("/api/oauth/cancel", {
+				method: "POST",
+				body: JSON.stringify({ flowId: flowToCancel, provider }),
+			}).then(() => undefined, () => undefined);
+			return flowCancellation;
+		};
+
 		const cleanup = (result: boolean) => {
 			if (pollTimer !== undefined) window.clearTimeout(pollTimer);
+			if (!result) abandonFlow();
 			render(html``, container);
 			container.remove();
 			resolve(result);
+		};
+
+		const showFlowError = (message: string) => {
+			abandonFlow();
+			error = message;
+			step = "error";
+			renderOAuthDialog();
 		};
 
 		const pollFlowStatus = async () => {
 			if (!flowId || step !== "waiting") return;
 			if (pollStartMs === 0) pollStartMs = Date.now();
 			if (Date.now() - pollStartMs > POLL_MAX_TOTAL_MS) {
-				error = "OAuth flow timed out after 5 minutes";
-				step = "error";
-				renderOAuthDialog();
+				showFlowError("OAuth flow timed out after 5 minutes");
 				return;
 			}
 			try {
@@ -577,9 +597,7 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 						return;
 					}
 					if (data.error) {
-						error = data.error;
-						step = "error";
-						renderOAuthDialog();
+						showFlowError(data.error);
 						return;
 					}
 				}
@@ -592,13 +610,23 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 		};
 
 		const startFlow = async () => {
+			// Wait for teardown before retrying: Pi's Anthropic callback port is
+			// process-wide, so an immediate retry must not race its cancellation.
+			await abandonFlow();
+			step = "loading";
+			renderOAuthDialog();
 			try {
 				const res = await gatewayFetch("/api/oauth/start", {
 					method: "POST",
 					body: JSON.stringify({ provider }),
 				});
-				if (!res.ok) throw new Error("Failed to start OAuth flow");
-				const data = await res.json();
+				const data = await res.json().catch(() => ({}));
+				if (!res.ok) {
+					if (res.status === 409 && data.code === "ANTHROPIC_OAUTH_BUSY") {
+						throw new Error("Another Anthropic sign-in is in progress. Close or cancel it, then try again.");
+					}
+					throw new Error("OAuth sign-in could not start. Retry the sign-in flow.");
+				}
 				flowId = data.flowId;
 				authUrl = data.url;
 				callbackServer = data.callbackServer === true;
@@ -608,9 +636,7 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 				renderOAuthDialog();
 				if (callbackServer) pollFlowStatus();
 			} catch (err) {
-				error = err instanceof Error ? err.message : String(err);
-				step = "error";
-				renderOAuthDialog();
+				showFlowError(err instanceof Error ? err.message : "OAuth sign-in could not start. Retry the sign-in flow.");
 			}
 		};
 
@@ -622,22 +648,18 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 			try {
 				const res = await gatewayFetch("/api/oauth/complete", {
 					method: "POST",
-					body: JSON.stringify({ flowId, code: codeValue.trim() }),
+					body: JSON.stringify({ flowId, code: codeValue.trim(), provider }),
 				});
-				const data = await res.json();
+				const data = await res.json().catch(() => ({}));
 				if (data.success) {
 					step = "done";
 					renderOAuthDialog();
 					setTimeout(() => cleanup(true), 500);
 				} else {
-					error = data.error || "OAuth exchange failed";
-					step = "error";
-					renderOAuthDialog();
+					showFlowError(typeof data.error === "string" ? data.error : "OAuth exchange failed. Retry the sign-in flow.");
 				}
-			} catch (err) {
-				error = err instanceof Error ? err.message : String(err);
-				step = "error";
-				renderOAuthDialog();
+			} catch {
+				showFlowError("OAuth exchange could not be completed. Retry the sign-in flow.");
 			}
 		};
 

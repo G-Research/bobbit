@@ -46,7 +46,7 @@ import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { executeCleanupWorktreesRequest } from "./maintenance/cleanup-worktrees-request.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { readToken, validateToken } from "./auth/token.js";
-import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
+import { OAuthBusyError, oauthCancel, oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import type { GateResetReopenOutcome, ServerMessage } from "./ws/protocol.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
@@ -13933,8 +13933,27 @@ async function handleApiRoute(
 			const result = await oauthStart(body?.provider);
 			json(result);
 		} catch (err) {
-			jsonError(500, err);
+			if (err instanceof OAuthBusyError) {
+				json({ error: err.message, code: err.code, retryable: err.retryable }, err.statusCode);
+			} else {
+				jsonError(500, err);
+			}
 		}
+		return;
+	}
+
+	// POST /api/oauth/cancel — abandon only the caller's provider-scoped flow.
+	if (url.pathname === "/api/oauth/cancel" && req.method === "POST") {
+		const body = await readBody(req).catch(() => ({}));
+		if (!body?.flowId || typeof body.flowId !== "string") {
+			json({ error: "Missing flowId" }, 400);
+			return;
+		}
+		if (!body?.provider || typeof body.provider !== "string") {
+			json({ error: "Missing provider" }, 400);
+			return;
+		}
+		json(oauthCancel(body.flowId, body.provider));
 		return;
 	}
 
@@ -13946,7 +13965,7 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const result = await oauthComplete(body.flowId, body.code);
+			const result = await oauthComplete(body.flowId, body.code, body.provider);
 			json(result, result.success ? 200 : 400);
 		} catch (err) {
 			jsonError(500, err);

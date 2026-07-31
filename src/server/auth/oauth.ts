@@ -222,6 +222,34 @@ function hasErrorCode(error: unknown, expected: string): boolean {
 	return false;
 }
 
+/** A rejected refresh token is terminal; network and provider failures are not. */
+function isDefinitiveRefreshFailure(error: unknown): boolean {
+	let current: unknown = error;
+	for (let depth = 0; depth < 3 && current; depth += 1) {
+		if (typeof current === "object" && current !== null) {
+			const candidate = current as { status?: unknown; statusCode?: unknown; response?: { status?: unknown }; cause?: unknown };
+			if ([400, 401, 403].includes(Number(candidate.status))
+				|| [400, 401, 403].includes(Number(candidate.statusCode))
+				|| [400, 401, 403].includes(Number(candidate.response?.status))) return true;
+			current = candidate.cause;
+			continue;
+		}
+		break;
+	}
+	const message = error instanceof Error ? error.message : String(error ?? "");
+	return /\b(?:HTTP\s+)?(?:400|401|403)\b/.test(message);
+}
+
+async function invalidateRejectedAnthropicCredential(attempted: OAuthCredential | undefined): Promise<void> {
+	// A concurrent login/refresh may have replaced this entry while Pi contacted
+	// the provider. Only delete the exact rejected snapshot.
+	if (!attempted) return;
+	await getOAuthCredentialStore().mutate("anthropic", async (current) => {
+		if (current?.type !== "oauth" || current.access !== attempted.access || current.refresh !== attempted.refresh) return undefined;
+		return deleteCredential;
+	});
+}
+
 function sanitizedOAuthFailure(error: unknown): string {
 	const message = error instanceof Error ? error.message : String(error);
 	if (/state mismatch/i.test(message)) return "OAuth state mismatch";
@@ -775,10 +803,20 @@ export function oauthFlowStatus(
 
 /** Resolve a current Anthropic access token through Pi's locked refresh path. */
 export async function refreshOAuthToken(_fetchImpl: typeof fetch = defaultFetch): Promise<string | null> {
+	const stored = getOAuthCredentialStore().readStoredCredentialSync("anthropic");
+	const attempted = stored?.type === "oauth" ? stored : undefined;
 	try {
 		const resolved = await getOAuthModels().getAuth("anthropic");
 		return typeof resolved?.auth.apiKey === "string" ? resolved.auth.apiKey : null;
 	} catch (error) {
+		if (isDefinitiveRefreshFailure(error)) {
+			try {
+				await invalidateRejectedAnthropicCredential(attempted);
+				console.warn("[oauth] Anthropic credentials were rejected and have been cleared");
+			} catch (invalidationError) {
+				console.error(`[oauth] Could not clear rejected Anthropic credentials: ${redactSensitive(invalidationError instanceof Error ? invalidationError.message : String(invalidationError))}`);
+			}
+		}
 		console.error(`[oauth] Anthropic credential refresh failed: ${redactSensitive(error instanceof Error ? error.message : String(error))}`);
 		return null;
 	}
