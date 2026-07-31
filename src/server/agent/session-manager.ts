@@ -2997,29 +2997,28 @@ export class SessionManager {
 		}
 
 		// Resolve sandbox tokens from unified config (with legacy fallback).
-		// Refresh Anthropic before exporting either its env token or its minimal Pi
-		// credential. This matters after a normal gateway restart: the persisted
-		// access token may be expired even though its refresh token is still valid.
+		// Host Anthropic OAuth is never a default sandbox credential. An enabled,
+		// empty ANTHROPIC_OAUTH_TOKEN entry is the explicit opt-in for a current
+		// access-token handoff; a project secret always wins and suppresses it.
 		const secretsStore = projectContext?.secretsStore ?? null;
 		const sandboxTokenEntries = projectConfigStore?.getSandboxTokens() ?? [];
 		const sandboxAuthPolicy = resolveSandboxAgentAuthPolicy(sandboxTokenEntries);
-		// Anthropic retains legacy default forwarding when no policy exists; with
-		// a policy, its dedicated token key is the explicit opt-in.
-		const includeAnthropicAuth = sandboxTokenEntries.length === 0
-			|| sandboxTokenPolicyAllowsAnthropicAuth(sandboxTokenEntries);
-		const anthropicOAuthCurrent = !includeAnthropicAuth
-			|| await refreshSandboxAnthropicOAuthCredential();
+		const explicitProjectAnthropicCredential = hasExplicitSandboxAnthropicCredential(
+			sandboxTokenEntries,
+			secretsStore?.getAll(),
+		);
+		const allowStoredAnthropicOAuth = !explicitProjectAnthropicCredential
+			&& sandboxTokenPolicyAllowsAnthropicAuth(sandboxTokenEntries);
 		bridgeOptions.sandboxCredentials = resolveSandboxTokens(
 			this.preferencesStore,
 			projectConfigStore,
 			secretsStore,
 			this.commandRunner,
-			{ allowStoredAnthropicOAuth: anthropicOAuthCurrent },
+			{ allowStoredAnthropicOAuth },
 		);
 		ensureSandboxAgentAuthFile({
 			prefs: this.preferencesStore,
 			includeCodexAuth: sandboxAuthPolicy.includeCodexAuth,
-			includeAnthropicAuth: includeAnthropicAuth && anthropicOAuthCurrent,
 			includeGoogleAuth: sandboxAuthPolicy.includeGoogleAuth,
 			scope: opts?.projectId,
 		});
@@ -12761,7 +12760,7 @@ export class SessionManager {
 
 // ── Sandbox credential auto-resolution ─────────────────────────────
 
-import { ensureSandboxAgentAuthFile, fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv, refreshSandboxAnthropicOAuthCredential, resolveHostTokenValue, resolveSandboxAgentAuthPolicy, sandboxTokenPolicyAllowsAnthropicAuth, type HostTokenResolutionOptions } from "./host-tokens.js";
+import { ensureSandboxAgentAuthFile, fallbackProviderAllowlistFromPrefs, hasExplicitSandboxAnthropicCredential, mergeHostAgentProviderEnv, resolveHostTokenValue, resolveSandboxAgentAuthPolicy, sandboxTokenPolicyAllowsAnthropicAuth, type HostTokenResolutionOptions } from "./host-tokens.js";
 
 /**
  * Map of auth.json provider keys → env vars that pi-coding-agent checks.
@@ -12862,7 +12861,10 @@ export function resolveLegacySandboxCredentials(
 	}
 
 	for (const [provider, { envVar, extractKey }] of Object.entries(PROVIDER_ENV_MAP)) {
-		const hostEnvVal = process.env[envVar];
+		const allowStoredAnthropicOAuth = hostTokenOptions?.allowStoredAnthropicOAuth === true;
+		const hostEnvVal = provider === "anthropic"
+			? process.env["ANTHROPIC_API_KEY"] || (allowStoredAnthropicOAuth ? process.env[envVar] : undefined)
+			: process.env[envVar];
 		if (hostEnvVal) {
 			result[envVar] = hostEnvVal;
 			continue;
@@ -12878,7 +12880,10 @@ export function resolveLegacySandboxCredentials(
 
 		if (authData && authData[provider]) {
 			const credential = authData[provider];
-			if (provider === "anthropic" && credential?.type === "oauth" && hostTokenOptions?.allowStoredAnthropicOAuth === false) {
+			if (provider === "anthropic" && credential?.type === "oauth") {
+				if (hostTokenOptions?.allowStoredAnthropicOAuth !== true) continue;
+				const resolved = resolveHostTokenValue(envVar, prefs, commandRunner, hostTokenOptions);
+				if (resolved) result[envVar] = resolved;
 				continue;
 			}
 			const key = extractKey(credential);
