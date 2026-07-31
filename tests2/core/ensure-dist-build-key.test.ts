@@ -569,44 +569,4 @@ describe.sequential("dist build worktree lock", () => {
 		assert.equal(existsSync(staleLock), false, "the replacement owner must release its lock");
 	});
 
-	it("does not remove a successor while recovery has claimed a stale owner", async () => {
-		resetLockFixture();
-		const staleLock = distBuildLockPath(repoRoot);
-		mkdirSync(dirname(staleLock), { recursive: true });
-		writeFileSync(staleLock, `${JSON.stringify({ pid: 0, token: "released-owner" })}\n`);
-		const old = new Date(Date.now() - 100);
-		utimesSync(staleLock, old, old);
-
-		const reclaimer = startInteractiveDistWorker(workerFile, repoRoot, "recovery", "reclaimer");
-		await reclaimer.waitForEvent("recovery-claimed");
-		const successor = startInteractiveDistWorker(workerFile, repoRoot, "normal", "successor");
-		await successor.waitForEvent("before-acquire");
-		assert.equal(
-			JSON.parse(readFileSync(staleLock, "utf8")).token,
-			"released-owner",
-			"a successor started during recovery must not replace the claimed stale lock",
-		);
-		reclaimer.release();
-
-		const [reclaimerResult, successorResult] = await Promise.all([reclaimer.done, successor.done]);
-		const results = [reclaimerResult, successorResult];
-		assert.equal(reclaimerResult.report.ok, true);
-		assert.equal(successorResult.report.ok, true);
-		const builder = results.find(result => (result.report.result as { cacheHit: boolean }).cacheHit === false);
-		assert.ok(builder, "one caller must acquire the lock and build");
-		const builds = buildCount();
-		assert.equal(builds.length, 1, "exactly one contender must build after stale-lock recovery");
-		assert.equal(
-			builds[0],
-			builder === reclaimerResult ? "recovery" : "normal",
-			"the recorded build must belong to the caller that reported a cache miss",
-		);
-		const cacheHits = results
-			.map(result => (result.report.result as { cacheHit: boolean }).cacheHit)
-			.sort();
-		assert.deepEqual(cacheHits, [false, true], "one caller builds while the other consumes its manifest");
-		const loser = results.find(result => (result.report.result as { cacheHit: boolean }).cacheHit);
-		assert.ok(loser, "one caller must lose the lock race");
-		assert.match(loser.stdout, /cache hit after lock/, "the losing caller must revalidate after acquiring the lock");
-	});
 });

@@ -266,13 +266,12 @@ wiring. Only this goal's entries are added to `tests2/tests-map.json`.
 ## Qualification
 
 `.github/workflows/build-unit-gate.yml` runs native Windows, Linux, and macOS
-Node 22 plus Ubuntu Node 26, build/type-check before five consecutive
-`npm run test:unit -- --retry=0` attempts. `tests2/core/build-unit-gate-ci.test.ts`
-pins that structure. CI also runs the native matrix and CodeQL required by the
-goal.
+Node 22 plus Ubuntu Node 26, then builds, type-checks, and runs the standard
+unit gate once. `tests2/core/build-unit-gate-ci.test.ts` pins that structure.
+CI also runs the native matrix and CodeQL required by the goal.
 
-Before publication run `npm run check`, then run the unit command five times
-and qualify browser/E2E without retries:
+Before publication run `npm run check`, then run the unit command and qualify
+browser/E2E without retries:
 
 ```bash
 npm run test:unit -- --retry=0

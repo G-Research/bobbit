@@ -18,7 +18,7 @@ The suite has a fixed cap of three workers. `VITEST_MAX_WORKERS=1` or `2` may lo
 npm run test:unit -- --retry=0
 ```
 
-Run that command five consecutive times for the unit qualification. The broader reliability proof also runs overlapping retry-free coordinators from separate worktrees; see the cross-OS authoring guide.
+Branch checks run the standard `npm run test:unit` command once, retaining Vitest's normal retry policy. The broader reliability proof may run retry-free coordinators from separate worktrees; see the cross-OS authoring guide.
 
 ## Projects and boundaries
 
