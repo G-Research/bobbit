@@ -898,7 +898,11 @@ export interface ActiveVerification {
 		pidFile?: string;
 		/** Random nonce expected in the durable process-identity and heartbeat files. */
 		pidNonce?: string;
-		/** Absolute path to the POSIX sentinel's durable identity record. */
+		/**
+		 * Absolute path to the host POSIX sentinel's durable identity record.
+		 * This binds either a detached host shell or a surviving `docker exec`
+		 * transport process group across gateway restart.
+		 */
 		sentinelFile?: string;
 		/** Compatibility alias used by bash_bg-style pidfile records and older tests. */
 		nonce?: string;
@@ -2844,11 +2848,11 @@ export class VerificationHarness {
 	}
 
 	/**
-	 * Reap the POSIX group sentinel left behind when a detached verification
-	 * wrapper writes its durable verdict after the gateway process has exited.
-	 * The sentinel's own PID, nonce, start token, and PGID must match before
-	 * naming the recovered group; otherwise a reused PID is never targeted and
-	 * resume fails closed.
+	 * Reap the host POSIX group sentinel left behind when a detached host shell
+	 * or `docker exec` transport writes its durable verdict after the gateway
+	 * process has exited. The sentinel's own PID, nonce, start token, and PGID
+	 * must match before naming the recovered group; otherwise a reused PID is
+	 * never targeted and resume fails closed.
 	 */
 	private async _reapRecoveredPosixSentinel(step: ActiveVerification["steps"][number]): Promise<void> {
 		if (this.platform === "win32" || !step.sentinelFile) return;
@@ -2858,9 +2862,8 @@ export class VerificationHarness {
 			throw new PendingCommandCleanupError(message);
 		};
 		const expectedNonce = this._commandIdentityNonce(step);
-		const groupId = step.pid;
-		if (!expectedNonce || !Number.isFinite(groupId) || groupId! <= 0) {
-			return pending("Recovered command verdict has no durable POSIX sentinel group identity.");
+		if (!expectedNonce) {
+			return pending("Recovered command verdict has no durable POSIX sentinel nonce.");
 		}
 
 		let record: { pid?: unknown; pgid?: unknown; nonce?: unknown; startToken?: unknown };
@@ -2871,7 +2874,15 @@ export class VerificationHarness {
 		}
 		const sentinelPid = Number(record.pid);
 		const recordedGroupId = Number(record.pgid);
-		if (!Number.isFinite(sentinelPid) || sentinelPid <= 0 || recordedGroupId !== groupId || record.nonce !== expectedNonce || typeof record.startToken !== "string" || !record.startToken) {
+		const persistedGroupId = step.pid;
+		// The sentinel writes its own PGID atomically before acknowledging
+		// ownership. It closes the narrow spawn→state-persist crash window: if
+		// the root PID stamp did not reach disk yet, the live sentinel's verified
+		// identity is still the authority. When both records exist they must agree.
+		const groupId = Number.isFinite(persistedGroupId) && persistedGroupId! > 0
+			? persistedGroupId!
+			: recordedGroupId;
+		if (!Number.isFinite(sentinelPid) || sentinelPid <= 0 || !Number.isFinite(recordedGroupId) || recordedGroupId <= 0 || recordedGroupId !== groupId || record.nonce !== expectedNonce || typeof record.startToken !== "string" || !record.startToken) {
 			return pending("Recovered command sentinel identity did not match persisted group metadata.");
 		}
 		// A missing sentinel means its process group is already gone. Never signal
@@ -5314,12 +5325,12 @@ export class VerificationHarness {
 			// are never routed through this seam, so a fake never reaches container mode
 			// in practice. Kept in the downgrade so that IF a nonDurable runner ever saw
 			// a container step it would still avoid the durable in-container files.
-			const recoveryMode: CommandRecoveryMode =
+			let recoveryMode: CommandRecoveryMode =
 				runnerNonDurable && (recoveryMode0 === "detached" || recoveryMode0 === "container-exec") && !!streamCtx
 					? "pending-retry"
 					: recoveryMode0;
 			let useDetached = recoveryMode === "detached";
-			const useContainerDurable = recoveryMode === "container-exec" && !!streamCtx;
+			let useContainerDurable = recoveryMode === "container-exec" && !!streamCtx;
 			let restartRecoveryUnsupportedReason: string | undefined =
 				recoveryMode === "pending-retry"
 					? (runnerNonDurable
@@ -5401,6 +5412,27 @@ export class VerificationHarness {
 				pidFile = `${containerStateDir}/${streamCtx.stepIndex}.pid`;
 				heartbeatFile = `${containerStateDir}/${streamCtx.stepIndex}.heartbeat`;
 				pidNonce = randomUUID();
+				// The in-container state proves the command's result, while this host
+				// record proves which detached docker-exec transport group is safe to
+				// reap after a gateway restart. Keep it outside the container because
+				// only the host sentinel can publish its PID/start-token identity.
+				try {
+					const stepDir = path.join(this._stateDir, "verifications", streamCtx.signalId);
+					fs.mkdirSync(stepDir, { recursive: true });
+					sentinelFile = path.join(stepDir, `${streamCtx.stepIndex}.docker-exec.sentinel.json`);
+					for (const file of [sentinelFile, sentinelFile + ".tmp"]) {
+						try { fs.unlinkSync(file); } catch { /* not present */ }
+					}
+				} catch (err) {
+					// A container result without its host ownership identity must never
+					// be finalized after restart, so make this attached/retryable rather
+					// than launching a partially durable command.
+					console.warn(`[verification] Failed to set up docker-exec sentinel identity — falling back to attached mode: ${(err as Error).message}`);
+					recoveryMode = "unsupported";
+					useContainerDurable = false;
+					restartRecoveryUnsupportedReason = `Docker-exec sentinel identity setup failed before spawn: ${(err as Error).message}`;
+					sentinelFile = undefined;
+				}
 			}
 
 			const stampActiveCommandStep = (patch: Partial<ActiveVerification["steps"][number]>) => {
@@ -5528,6 +5560,9 @@ export class VerificationHarness {
 					tracked = spawnTracked("docker", ["exec", "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
 						stdio: ["ignore", "pipe", "pipe"],
 						timeoutMs: timeoutSec * 1000,
+						// On POSIX this sentinel is the only durable witness for the
+						// detached host docker-exec group after gateway restart.
+						...(sentinelFile && pidNonce ? { posixSentinelIdentity: { file: sentinelFile, nonce: pidNonce } } : {}),
 						env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
 						onTimeout: () => {
 							// Belt-and-braces: host-side tree-kill of `docker exec`
@@ -5619,14 +5654,17 @@ export class VerificationHarness {
 				// _resumeCommandStep using durable identity + exit files.
 				tracked!.markSurvival();
 			} else if (useContainerDurable && streamCtx) {
-				// Container durable path: the host `docker exec` client's pid is
-				// not the in-container process, so we do not stamp `pid` (resume
-				// re-attaches via `docker exec` reading the in-container pid/exit
-				// files). Stamp timing + mark survival so a graceful shutdown does
-				// not tear down the client and (potentially) the in-container job
-				// before it writes its exit file.
+				// Container durable recovery records two independent identities: the
+				// in-container files establish the command verdict, and the host
+				// docker-exec sentinel establishes the transport group safe to reap.
+				// Mark survival so a graceful shutdown does not tear down the client
+				// before it can publish either durable record.
 				const startTimeMs = Date.now();
 				stampActiveCommandStep({
+					// The host `docker exec` leader is also its detached POSIX
+					// process-group ID. Its durable sentinel identity, not this raw
+					// number alone, authorizes recovered host cleanup.
+					pid: child.pid,
 					startTimeMs,
 					deadlineMs: startTimeMs + timeoutSec * 1000,
 					containerId,
@@ -5635,6 +5673,7 @@ export class VerificationHarness {
 					exitFile,
 					pidFile,
 					pidNonce,
+					sentinelFile,
 					heartbeatFile,
 					bootEpoch: this.bootEpoch,
 					timeoutSec,
@@ -6043,7 +6082,7 @@ export class VerificationHarness {
 		// Case A: child already finished before we restarted. A durable exit file
 		// is a real command verdict and keeps the existing expectFailure/errorPattern
 		// semantics.
-		if (step.exitFile && fs.existsSync(step.exitFile)) {
+		if (!step.containerId && step.exitFile && fs.existsSync(step.exitFile)) {
 			if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume: exit file present for "${step.name}" — finalizing from disk`);
 			return await finalizeRecoveredExit();
 		}
@@ -6218,6 +6257,14 @@ export class VerificationHarness {
 			const n = parseInt(r.stdout.trim(), 10);
 			return Number.isFinite(n) ? n : null;
 		};
+		const finalizeRecoveredContainerExit = async (code: number): Promise<ResumedVerificationStep> => {
+			// The container exit file is a real command verdict, but the gateway
+			// restart also orphaned its host docker-exec transport group. Do not
+			// publish that verdict until the persisted host sentinel proves and
+			// reaps precisely that original group.
+			await this._reapRecoveredPosixSentinel(step);
+			return helpers.finalize(code);
+		};
 		const heartbeatFresh = async (): Promise<boolean> => {
 			if (!step.heartbeatFile) return false;
 			const r = await this._dockerExecCapture(cid, `cat ${shellSingleQuote(step.heartbeatFile)} 2>/dev/null`);
@@ -6229,7 +6276,7 @@ export class VerificationHarness {
 
 		// 1. Already finished.
 		let code = await readExit();
-		if (code !== null) return helpers.finalize(code);
+		if (code !== null) return await finalizeRecoveredContainerExit(code);
 
 		const deadline = step.deadlineMs ?? ((step.startTimeMs ?? step.startedAt) + (step.timeoutSec ?? 300) * 1000);
 
@@ -6240,12 +6287,12 @@ export class VerificationHarness {
 			if (!(await heartbeatFresh())) break;
 			await new Promise(r => setTimeout(r, 1_000));
 			code = await readExit();
-			if (code !== null) return helpers.finalize(code);
+			if (code !== null) return await finalizeRecoveredContainerExit(code);
 		}
 		if (!this._isResumeStillActive(v)) return null;
 
 		code = await readExit();
-		if (code !== null) return helpers.finalize(code);
+		if (code !== null) return await finalizeRecoveredContainerExit(code);
 
 		// 3. Deadline elapsed → kill the in-container process group, then timeout.
 		if (Date.now() >= deadline) {

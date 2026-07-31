@@ -940,7 +940,7 @@
     },
     {
       "path": "tests2/core/spawn-tree-process-cleanup.test.ts",
-      "reason": "Real subprocess regression: timeout cleanup reaps the owned process group/job when a grandchild ignores SIGTERM after its shell leader exits; deterministic Windows seams pin exit/PID-reuse and taskkill-outcome safety.",
+      "reason": "Native POSIX subprocess and recovered-sentinel regressions prove tree cleanup and container-result finalization wait for exact host-sentinel reaping; deterministic Windows seams pin Job ownership/PID-reuse while real Windows Job descendant cleanup runs in the node E2E lane.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

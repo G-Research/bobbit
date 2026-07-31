@@ -122,11 +122,12 @@ async function run(mode) {
   }
 }
 
-// PowerShell must compile the native Job supervisor before the payload can
-// publish readiness. On Windows exercise that native lifecycle directly, then
-// cover timeout delivery deterministically below; POSIX retains its native
-// timeout-tree probe because it has no cold supervisor compilation phase.
-for (const mode of process.platform === "win32" ? ["natural", "cancel"] : ["natural", "timeout", "cancel"]) await run(mode);
+// The unit tier keeps Windows lifecycle assertions on deterministic seams.
+// Native Job-object descendant cleanup runs in the real-fidelity node E2E lane
+// (tests/spawn-tree-shutdown-survival.test.ts) so cold PowerShell/.NET
+// compilation cannot make a fixed wall-clock probe load-bearing here. POSIX
+// retains its native timeout-tree probe because it has no cold supervisor.
+for (const mode of ["natural", "timeout", "cancel"]) await run(mode);
 `;
 
 const RECOVERED_SENTINEL_PROBE = String.raw`
@@ -402,14 +403,19 @@ describe("spawnTracked timeout cleanup", () => {
 		expect(SPAWN_TREE_SOURCE).toMatch(/AssignProcessToJobObject\(job, pi\.hProcess\).*File\.Move\(pendingReadyFile, readyFile\).*ResumeThread\(pi\.hThread\)/s);
 	});
 
-	it("reaps SIGTERM-ignoring descendants through each native process model", async () => {
+	it("reaps SIGTERM-ignoring descendants through the native POSIX process model", async () => {
+		if (process.platform === "win32") {
+			// Windows native Job cleanup is real-fidelity E2E coverage; focused
+			// seams below pin its ownership and timeout state transitions here.
+			expect(process.platform).toBe("win32");
+			return;
+		}
 		const result = await runProbe();
 		expect(result.code, result.stderr).toBe(0);
-		for (const mode of ["natural", "cancel"]) expect(result.stdout).toContain(`${mode}-tree-reaped`);
-		if (process.platform !== "win32") expect(result.stdout).toContain("timeout-tree-reaped");
+		for (const mode of ["natural", "timeout", "cancel"]) expect(result.stdout).toContain(`${mode}-tree-reaped`);
 	});
 
-	it("reaps a recovered POSIX sentinel after its original parent exits", async () => {
+	it("reaps a recovered POSIX sentinel after its original parent exits even if the root PID stamp was interrupted", async () => {
 		if (process.platform === "win32") {
 			expect(process.platform).toBe("win32");
 			return;
@@ -440,7 +446,8 @@ describe("spawnTracked timeout cleanup", () => {
 					status: "running",
 					phase: 0,
 					startedAt: Date.now() - 1_000,
-					pid: rootPid,
+					// Simulate a gateway crash after the sentinel published its durable
+					// identity but before the host root PID stamp reached state.
 					pidFile: probe.pidFile,
 					pidNonce: probe.nonce,
 					sentinelFile: probe.sentinelFile,
@@ -465,6 +472,37 @@ describe("spawnTracked timeout cleanup", () => {
 			if (rootPid && groupAlive(rootPid)) {
 				try { process.kill(-rootPid, "SIGKILL"); } catch { /* test cleanup */ }
 			}
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	it("reaps the persisted docker-exec host sentinel before publishing a recovered container result", async () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-sentinel-order-"));
+		const events: string[] = [];
+		try {
+			const harness = makeRecoveryHarness(stateDir, []);
+			(harness as any)._reapRecoveredPosixSentinel = async (step: any) => {
+				events.push(`reap:${step.pid}:${step.sentinelFile}`);
+			};
+			(harness as any)._dockerExecCapture = async () => ({ code: 0, stdout: "0\n" });
+			const step: any = {
+				name: "Recovered container command", type: "command", status: "running", startedAt: Date.now() - 1_000,
+				containerId: "container-under-test", restartRecoveryMode: "container-exec",
+				pid: 321_654, pidNonce: "host-sentinel-nonce", sentinelFile: path.join(stateDir, "docker-exec.sentinel.json"),
+				exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat",
+			};
+			const active: any = { goalId: "goal", gateId: "implementation", signalId: "signal", overallStatus: "running", startedAt: Date.now(), steps: [step] };
+			const resumed = await (harness as any)._resumeContainerCommandStep(active, step, {
+				finalize: (code: number) => {
+					events.push(`finalize:${code}`);
+					return { name: step.name, type: step.type, passed: code === 0, output: `exit code ${code}`, duration_ms: 0 };
+				},
+				timeoutResult: () => { throw new Error("unexpected timeout"); },
+				restartInterrupted: (reason?: string) => { throw new Error(`unexpected interruption: ${reason}`); },
+			});
+			expect(resumed).toMatchObject({ passed: true });
+			expect(events).toEqual([`reap:321654:${step.sentinelFile}`, "finalize:0"]);
+		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
 		}
 	});

@@ -5,6 +5,9 @@
 
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 const { spawnTracked, killAllTracked, _trackedCount } =
 	await import("../src/server/agent/spawn-tree.ts");
@@ -66,6 +69,28 @@ async function establishSurvivalOwnership(lifecycle: SpawnLifecycle): Promise<vo
 	lifecycle.t.markSurvival();
 }
 
+/** Event-driven readiness for the Windows native Job-object probe. */
+function waitForPidMarker(marker: string): Promise<number> {
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		const finish = (error?: Error, pid?: number) => {
+			if (settled) return;
+			settled = true;
+			watcher.close();
+			if (error) reject(error); else resolve(pid!);
+		};
+		const read = () => {
+			try {
+				const pid = Number(fs.readFileSync(marker, "utf8"));
+				if (Number.isSafeInteger(pid) && pid > 0) finish(undefined, pid);
+			} catch { /* marker has not been atomically published yet */ }
+		};
+		const watcher = fs.watch(path.dirname(marker), { persistent: false }, read);
+		watcher.once("error", error => finish(error));
+		read();
+	});
+}
+
 describe("verification-harness shutdown — survival contract", () => {
 	it("TrackedChild exposes markSurvival()", async () => {
 		const lifecycle = longRunningTracked();
@@ -107,6 +132,32 @@ describe("verification-harness shutdown — survival contract", () => {
 				: "POSIX sentinel ownership was not established",
 		);
 		assert.equal(isAlive(lifecycle.t.child.pid), false, "non-survival child should be reaped by shutdown");
+	});
+
+	it("Windows native Job close reaps a SIGTERM-ignoring descendant", async () => {
+		if (process.platform !== "win32") return;
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-windows-job-e2e-"));
+		const marker = path.join(dir, "grandchild.pid");
+		let tracked: ReturnType<typeof spawnTracked> | undefined;
+		try {
+			tracked = spawnTracked(process.execPath, ["-e", [
+				"const fs=require('node:fs');",
+				"const {spawn}=require('node:child_process');",
+				"const child=spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)\"],{stdio:'ignore'});",
+				"fs.writeFileSync(process.argv[1],String(child.pid));",
+				"setInterval(()=>{},1000);",
+			].join(""), marker], { stdio: "ignore" });
+			spawnedPids.push(tracked.child.pid!);
+			const closed = waitForClose(tracked.child);
+			await tracked.ownershipReady;
+			const grandchildPid = await waitForPidMarker(marker);
+			killAllTracked("SIGKILL", true);
+			await closed;
+			assert.equal(isAlive(grandchildPid), false, "closing the native Job must reap its SIGTERM-ignoring payload descendant");
+		} finally {
+			try { killAllTracked("SIGKILL", true); } catch { /* best effort */ }
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 
