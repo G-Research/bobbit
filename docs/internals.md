@@ -3094,7 +3094,7 @@ Before scheme allow-listing, the sanitizer decodes HTML character references and
 
 ## Chat surface UI invariants
 
-Two surfaces in the chat client previously relied on time-based heuristics that gave intermittent, hard-to-repro misbehaviour (scroll snap-back / vibration in idle sessions, stale messages trailing after newer ones on session navigate). Both have been replaced with deterministic invariants the implementation must preserve.
+Several chat-client surfaces previously relied on time-based heuristics or approximate geometry that caused intermittent, difficult-to-reproduce behavior: scroll snap-back or vibration in idle sessions, stale messages trailing newer ones after session navigation, and composer history recall firing a keypress early. Each now has a deterministic invariant the implementation must preserve.
 
 ### Chat scroll lock invariant
 
@@ -3228,6 +3228,36 @@ The canonical key is computed by `computeStreamingMessageId(msg)` in `src/app/st
 Follow-up not in this fix: `BgProcessRenderer.getCallStart` keys its start-time WeakMap on the `params` object identity rather than on `bgId`. Two render paths produce two distinct `params` objects → two start times. Re-keying on `bgId` would mask the *visible* dual-timer symptom even if the dual-render itself recurred for some other reason - worth doing as defence in depth, but a separate goal.
 
 Regression tests: `tests/dual-render-noid-message.test.ts` (id=undefined/null/numeric/empty-string cases), `tests/message-reducer.test.ts`, `tests/e2e/ui/bg-wait-no-dup.spec.ts`.
+
+### Composer caret-row invariant
+
+**Purpose.** In `MessageEditor` (`src/ui/components/MessageEditor.ts`), ArrowUp and ArrowDown have two roles. Within a multiline draft, they move the caret; at the first or last *visual* row, they browse command history. ArrowUp recalls the prior message and ArrowDown walks forward, eventually restoring the saved draft. The synchronous keydown predicate `_isCursorOnVisualTopRow()` / `_isCursorOnVisualBottomRow()` must therefore answer whether the caret is at a visual edge. A soft-wrapped line spans multiple visual rows without a newline, so this is a layout question, not a string question.
+
+**Why geometry is necessary.** CSS text layout makes several otherwise-obvious implementations incorrect, often only at particular widths, fonts, or offsets:
+
+1. **Trailing newlines do not create a line box.** In `white-space: pre-wrap`, measuring `value.slice(0, pos)` sees a caret at column 0 of line *N* as row *N−1*. This was the original history-recall bug. With `\n\nHello` at offset 2, ArrowUp could recall history instead of moving up. `_measureCaretRowGeometry()` does not difference prefix heights; when the character before the caret is a newline, it adds one row height arithmetically.
+2. **Do not alter the text being measured.** A marker `<span>` at the caret splits the text node and can change Chromium's `overflow-wrap: break-word` point. A `\u200b` sentinel is also unsafe because it creates a Unicode line-break opportunity. Geometry uses read-only `Range` probes on one unsplit text node through `_charRectTop()` / `_charRowTop()`, so the browser's own wrap point is measured rather than changed.
+3. **Exact soft-wrap boundaries are ambiguous.** The same offset may mean the end of row *N* or column 0 of row *N+1*; real `Home` can reach that offset, but DOM geometry cannot observe Chromium's caret affinity. The implementation reads the row before and at the caret. History is allowed only when both readings agree. At a boundary both predicates return `false`, so the key moves the caret. This deliberately favors the non-destructive, self-correcting outcome over overwriting a draft with recalled history.
+
+If geometry cannot be measured (such as no layout engine, an unresolved row height, or degenerate rects), both predicates return `true`. This is intentionally permissive and preserves legacy behavior: a measurement failure must not make command history unreachable.
+
+#### Keydown-path cost
+
+The predicates run synchronously for every ArrowUp/ArrowDown. Large text-only drafts are valid, so their cost must not scale with visual row count.
+
+- **Structural short-circuits come before layout.** A hard newline before the caret proves it is not the top row; a hard newline at or after it proves it is not the bottom row. This covers the original column-0-after-newline repro without layout work.
+- **Wrap detection uses bounded prefixes.** `_firstWrapBoundary()` lays out a growing prefix, then binary-searches single-character rect tops for the first wrap. Greedy line breaking means later text cannot move an earlier overflow point, so the prefix can stop after about a row of text instead of laying out a huge buffer.
+- **Full geometry uses single-character probes, never a per-row rect collection.** The superseded whole-value row collection and linear de-duplication were quadratic and could freeze the keydown handler.
+
+Chromium scenario S12 pins both predicates below 100 ms for a 200 KB / 100 K-row draft and a 500 KB wrapped line, with a scaling bound that rejects merely faster superlinear work. The exact bottom-row path may still require full layout near the end of one huge wrapped line: greedy wrapping cannot be reconstructed from a suffix because available space depends on preceding text.
+
+#### Validation boundary
+
+`tests2/dom/message-editor-arrows.test.ts` documents the history state machine and row arithmetic, but happy-dom has no layout engine and its row model cannot reproduce trailing-newline collapse, font-dependent wrapping, or caret affinity. The authoritative coverage is `tests2/browser/fixtures/message-editor-arrows-real.spec.ts`, which bundles the real component and drives Chromium with trusted key presses through the production send path.
+
+That fixture covers leading, interior, and trailing newlines; soft wraps; fractional line heights; the real-key `Home` boundary cases; and history behavior. Its independent oracle uses `Range.getClientRects()` on an unsplit text node in a plain div. The width/font/content sweep covers every textarea width from 240–340 px, proportional and monospace stacks, break-word content, and space-wrapped prose. Per-pixel coverage is intentional: the marker-split regression occurred at scattered widths that a coarse grid missed.
+
+When changing this area, keep both predicates on `_measureCaretRowGeometry()` so newline arithmetic cannot drift; do not insert content into measured text; retain the structural short-circuits and bounded wrap search; and do not change the history state machine (`_historyIndex`, `_savedDraft`, modifier guards, or autocomplete precedence) as part of geometry work. For symptoms and the focused command, see [Composer ArrowUp recalls history one press too early](debugging.md#composer-arrowup-recalls-history-one-press-too-early--arrowdown-leaves-history-early).
 
 ---
 
