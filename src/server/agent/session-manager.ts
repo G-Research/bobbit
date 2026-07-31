@@ -4817,9 +4817,9 @@ export class SessionManager {
 	}
 
 	private _reconcileAfterAbort(session: SessionInfo): void {
-		// Only unresolved records survive Stop. A user-role echo settled and
-		// removed its record synchronously, so replaying it would duplicate an
-		// instruction that Pi already executed in the cancelled turn.
+		// A user-role echo consumes its steer record, so only unresolved durable
+		// entries remain to be requeued chronologically. Replaying an echoed steer
+		// would duplicate an instruction Pi already executed in the cancelled turn.
 		this._reconcileInFlightSteers(session);
 	}
 
