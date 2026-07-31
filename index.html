@@ -204,6 +204,7 @@
 					var link = document.createElement('link');
 					link.rel = 'manifest';
 					link.id = 'pwa-manifest';
+					link.crossOrigin = 'use-credentials';
 					link.href = href;
 					document.head.appendChild(link);
 				} catch (e) { /* ignore */ }

@@ -620,14 +620,51 @@ describe("client gateway sink regression guard", () => {
 		assert.equal((source.match(/serviceWorker\.register/g) ?? []).length, 0, "main must keep registration inside the mount boundary");
 	});
 
-	it("never reads a stored remote bearer while constructing the shell manifest URL", () => {
+	it("constructs credentialed root and mounted manifest URLs only from the current launch query", () => {
 		const shell = fs.readFileSync(path.resolve("index.html"), "utf8");
-		const manifestStart = shell.indexOf("var params = new URLSearchParams(window.location.search)");
-		const manifestEnd = shell.indexOf("document.head.appendChild(link)", manifestStart);
-		assert.ok(manifestStart >= 0 && manifestEnd > manifestStart, "manifest bootstrap must be discoverable");
-		const bootstrap = shell.slice(manifestStart, manifestEnd);
-		assert.match(bootstrap, /params\.get\(['"]token['"]\)/);
-		assert.doesNotMatch(bootstrap, /localStorage|gateway\.token/, "remote or malformed stored credentials must not escape before validation");
+		const manifestMarker = shell.indexOf("// Inject the PWA manifest link");
+		const scriptStart = shell.lastIndexOf("<script>", manifestMarker);
+		const scriptEnd = shell.indexOf("</script>", manifestMarker);
+		assert.ok(manifestMarker >= 0 && scriptStart >= 0 && scriptEnd > manifestMarker, "manifest bootstrap must be discoverable");
+		const bootstrap = shell.slice(scriptStart + "<script>".length, scriptEnd);
+		const credentialStart = bootstrap.indexOf("var params = new URLSearchParams(window.location.search)");
+		const credentialEnd = bootstrap.indexOf("document.head.appendChild(link)", credentialStart);
+		assert.ok(credentialStart >= 0 && credentialEnd > credentialStart, "manifest credential source must be discoverable");
+		const credentialSource = bootstrap.slice(credentialStart, credentialEnd);
+		assert.match(credentialSource, /params\.get\(['"]token['"]\)/);
+		assert.doesNotMatch(credentialSource, /localStorage|gateway\.token/, "remote or malformed stored credentials must not escape before validation");
+
+		function manifestLink(basePath: string, search: string): Record<string, string> {
+			const appended: Array<Record<string, string>> = [];
+			vm.runInNewContext(bootstrap, {
+				window: {
+					__BOBBIT_BASE_PATH__: basePath,
+					location: { search },
+					localStorage: { getItem: () => "stored-remote-secret" },
+				},
+				document: {
+					createElement: () => ({}),
+					head: { appendChild: (link: Record<string, string>) => appended.push(link) },
+				},
+				URLSearchParams,
+				encodeURIComponent,
+			});
+			assert.equal(appended.length, 1, "manifest bootstrap must append exactly one link");
+			return appended[0]!;
+		}
+
+		for (const [basePath, search, expectedHref] of [
+			["", "?token=launch%20secret", "/manifest.json?token=launch%20secret"],
+			["/team/bobbit", "?token=launch%20secret", "/team/bobbit/manifest.json?token=launch%20secret"],
+			["", "", "/manifest.json"],
+			["/team/bobbit", "?token=localhost", "/team/bobbit/manifest.json"],
+		] as const) {
+			const link = manifestLink(basePath, search);
+			assert.equal(link.rel, "manifest");
+			assert.equal(link.id, "pwa-manifest");
+			assert.equal(link.crossOrigin, "use-credentials");
+			assert.equal(link.href, expectedHref);
+		}
 	});
 
 	it("centralizes direct browser bearer construction", () => {
