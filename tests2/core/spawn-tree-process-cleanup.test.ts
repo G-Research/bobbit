@@ -4,7 +4,7 @@ import fs, { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
-import { killAllTracked, killTreeByPid, spawnTracked } from "../../src/server/agent/spawn-tree.js";
+import { _trackedCount, killAllTracked, killTreeByPid, spawnTracked } from "../../src/server/agent/spawn-tree.js";
 import { VerificationHarness, type ActiveVerification } from "../../src/server/agent/verification-harness.js";
 import { createManualClock } from "../harness/clock.js";
 
@@ -397,6 +397,9 @@ describe("spawnTracked timeout cleanup", () => {
 		expect(SPAWN_TREE_SOURCE).toContain("InheritableStdHandle(-10, GENERIC_READ, out ownIn)");
 		expect(SPAWN_TREE_SOURCE).toContain("InheritableStdHandle(-11, GENERIC_WRITE, out ownOut)");
 		expect(SPAWN_TREE_SOURCE).toContain("InheritableStdHandle(-12, GENERIC_WRITE, out ownErr)");
+		expect(SPAWN_TREE_SOURCE).toContain("Remove-Item Env:BOBBIT_WINDOWS_JOB_PAYLOAD");
+		expect(SPAWN_TREE_SOURCE).toContain("Remove-Item Env:BOBBIT_WINDOWS_JOB_READY_FILE");
+		expect(SPAWN_TREE_SOURCE).toMatch(/AssignProcessToJobObject\(job, pi\.hProcess\).*File\.Move\(pendingReadyFile, readyFile\).*ResumeThread\(pi\.hThread\)/s);
 	});
 
 	it("reaps SIGTERM-ignoring descendants through each native process model", async () => {
@@ -587,7 +590,7 @@ describe("spawnTracked timeout cleanup", () => {
 		}
 	});
 
-	it("keeps a survival-marked Windows Job child alive during shutdown", () => {
+	it("fails Windows restart survival closed before the Job acknowledgement", async () => {
 		const root = fakeChild(2_147_483_646);
 		const tracked = spawnTracked("node", ["worker"], {
 			platform: "win32",
@@ -596,7 +599,46 @@ describe("spawnTracked timeout cleanup", () => {
 		});
 		tracked.markSurvival();
 		killAllTracked();
+		expect(root.killCalls).toEqual(["SIGKILL"]);
+		root.emit("close", 0, null);
+		await expect(tracked.ownershipReady).rejects.toThrow("Windows Job ownership was not established");
+	});
+
+	it("preserves a Windows survival child only after the pre-resume Job acknowledgement", async () => {
+		const root = fakeChild(2_147_483_645);
+		const spawnImpl = ((_cmd: string, _args: string[], options: SpawnOptions) => {
+			const encoded = options.env?.BOBBIT_WINDOWS_JOB_PAYLOAD;
+			const readyFile = options.env?.BOBBIT_WINDOWS_JOB_READY_FILE;
+			expect(encoded).toEqual(expect.any(String));
+			expect(readyFile).toEqual(expect.any(String));
+			fs.writeFileSync(`${readyFile}.tmp`, "ready");
+			fs.renameSync(`${readyFile}.tmp`, readyFile!);
+			return root;
+		}) as unknown as NativeSpawn;
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "win32",
+			spawnImpl,
+			windowsJobSupervisor: true,
+		});
+		await tracked.ownershipReady;
+		tracked.markSurvival();
+		killAllTracked();
 		expect(root.killCalls).toEqual([]);
+		root.emit("close", 0, null);
+	});
+
+	it("does not re-register a POSIX child whose readiness pipe is missing", async () => {
+		const root = fakeChild(123_457);
+		Object.defineProperty(root, "stdio", { value: [null, null, null] });
+		const before = _trackedCount();
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "linux",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => false,
+		});
+		await expect(tracked.ownershipReady).rejects.toThrow("POSIX sentinel ownership was not established");
+		expect(_trackedCount()).toBe(before);
 		root.emit("close", 0, null);
 	});
 

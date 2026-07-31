@@ -51,9 +51,17 @@ function longRunningTracked(): SpawnLifecycle {
 	return { t, ready, closed };
 }
 
+async function assertExactRejection(promise: Promise<void>, message: string): Promise<void> {
+	await assert.rejects(promise, error => {
+		assert.ok(error instanceof Error);
+		assert.equal(error.message, message);
+		return true;
+	});
+}
+
 async function establishSurvivalOwnership(lifecycle: SpawnLifecycle): Promise<void> {
-	// Windows spawnTracked owns the real Job before returning. POSIX must wait
-	// for its sentinel to atomically publish ownership on FD 3.
+	// Wait for the platform's observable ownership acknowledgement before
+	// allowing a shutdown-survival request to take effect.
 	await lifecycle.ready;
 	lifecycle.t.markSurvival();
 }
@@ -72,7 +80,7 @@ describe("verification-harness shutdown — survival contract", () => {
 		lifecycle.t.markSurvival();
 		killAllTracked("SIGKILL");
 		await lifecycle.closed;
-		await assert.rejects(lifecycle.ready);
+		await assertExactRejection(lifecycle.ready, "POSIX sentinel ownership was not established");
 		assert.equal(isAlive(lifecycle.t.child.pid), false, "handshake-pending survival child must be reaped");
 	});
 
@@ -92,7 +100,12 @@ describe("verification-harness shutdown — survival contract", () => {
 		const lifecycle = longRunningTracked();
 		killAllTracked("SIGKILL");
 		await lifecycle.closed;
-		if (process.platform !== "win32") await assert.rejects(lifecycle.ready);
+		await assertExactRejection(
+			lifecycle.ready,
+			process.platform === "win32"
+				? "Windows Job ownership was not established"
+				: "POSIX sentinel ownership was not established",
+		);
 		assert.equal(isAlive(lifecycle.t.child.pid), false, "non-survival child should be reaped by shutdown");
 	});
 });

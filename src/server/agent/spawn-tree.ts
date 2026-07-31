@@ -17,9 +17,10 @@
  *           cancellation). At root exit, the sentinel keeps ownership live for
  *           the final group kill; it is never signalled after that final kill.
  *   Windows — spawn a PowerShell/.NET job-object supervisor. It creates the
- *           payload suspended, assigns it to a KILL_ON_JOB_CLOSE job, then
- *           resumes it. Closing or terminating the supervisor closes the job
- *           and atomically reaps every descendant without PID retargeting.
+ *           payload suspended, assigns it to a KILL_ON_JOB_CLOSE job, atomically
+ *           acknowledges that assignment to the parent, then resumes it.
+ *           Closing or terminating the supervisor closes the job and atomically
+ *           reaps every descendant without PID retargeting.
  *
  * The helper owns the timeout timer (`setTimeout`, `.unref()`'d) so a
  * long-running tracked child never holds the event loop open against a
@@ -32,6 +33,9 @@
  */
 
 import { spawn, type ChildProcess, type StdioOptions } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, watch, type FSWatcher } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Clock } from "../gateway-deps.js";
 import { realClock } from "../gateway-deps.js";
 
@@ -92,15 +96,16 @@ export interface TrackedChild {
 	timedOut(): boolean;
 	/**
 	 * Resolves only after the platform ownership barrier is established: the
-	 * POSIX sentinel acknowledges FD 3, or the Windows Job owns its payload.
-	 * Rejects when that barrier fails, after fail-closed cleanup is initiated.
+	 * POSIX sentinel acknowledges FD 3, or the Windows supervisor atomically
+	 * acknowledges Job assignment before resuming the payload. Rejects when that
+	 * barrier fails, after fail-closed cleanup is initiated.
 	 */
 	readonly ownershipReady: Promise<void>;
 	/**
-	 * Mark this tracked child as surviving gateway shutdown. When set,
-	 * `killAllTracked()` skips this entry so the child outlives the
-	 * gateway process — enabling Layer 1 restart-survival for detached
-	 * verification command steps (see `_resumeCommandStep`).
+	 * Request gateway-shutdown survival. `killAllTracked()` honors it only after
+	 * a durable ownership barrier: the POSIX sentinel FD-3 acknowledgement or
+	 * the Windows supervisor's pre-resume Job acknowledgement (see
+	 * `_resumeCommandStep`).
 	 */
 	markSurvival(): void;
 }
@@ -135,8 +140,10 @@ interface InternalTracked extends TrackedChild {
 	_survivesShutdown: boolean;
 	_escalationTimer?: NodeJS.Timeout;
 	_timeoutTimer?: NodeJS.Timeout;
-	/** Windows job-object ownership was established before the payload resumed. */
+	/** The supervisor is configured to assign the payload to a KILL_ON_JOB_CLOSE Job. */
 	_windowsJobOwned: boolean;
+	/** The supervisor observed Job assignment before the payload was resumed. */
+	_windowsJobSurvivalReady: boolean;
 	/** Resolves when the tracked supervisor's stdio and job handle have closed. */
 	_windowsSupervisorClosed: Promise<void>;
 	_resolveWindowsSupervisorClosed: () => void;
@@ -144,6 +151,8 @@ interface InternalTracked extends TrackedChild {
 
 const TREE_EXIT_POLL_MS = 25;
 const TREE_EXIT_SETTLE_MS = 1_500;
+const POSIX_SENTINEL_READINESS_FAILURE = "POSIX sentinel ownership was not established";
+const WINDOWS_JOB_READINESS_FAILURE = "Windows Job ownership was not established";
 
 function isProcessGroupAlive(pgid: number): boolean {
 	if (!Number.isFinite(pgid) || pgid <= 0) return false;
@@ -169,6 +178,63 @@ function unrefTimer(timer: NodeJS.Timeout | undefined): void {
 function unrefReadyPipe(pipe: unknown): void {
 	const unref = (pipe as { unref?: unknown } | undefined)?.unref;
 	if (typeof unref === "function") unref.call(pipe);
+}
+
+/**
+ * The Windows supervisor publishes this file only after assigning its suspended
+ * payload to the Job. The watch is armed before the supervisor is spawned, and
+ * `confirm()` closes the no-event race without polling.
+ */
+interface WindowsJobReadiness {
+	file: string;
+	ready: Promise<void>;
+	confirm(): boolean;
+	fail(): void;
+	cleanup(): void;
+}
+
+function createWindowsJobReadiness(): WindowsJobReadiness {
+	const directory = mkdtempSync(join(tmpdir(), "bobbit-windows-job-"));
+	const file = join(directory, "owned");
+	let watcher: FSWatcher | undefined;
+	let settled = false;
+	let established = false;
+	let resolveReady!: () => void;
+	let rejectReady!: () => void;
+	const ready = new Promise<void>((resolve, reject) => {
+		resolveReady = resolve;
+		rejectReady = reject;
+	});
+	// A spawn can throw after this watcher is armed. Keep failure observed even
+	// before spawnTracked has returned the promise to a caller.
+	void ready.catch(() => {});
+	const cleanup = () => {
+		try { watcher?.close(); } catch { /* ignore */ }
+		watcher = undefined;
+		try { rmSync(directory, { recursive: true, force: true }); } catch { /* ignore */ }
+	};
+	const finish = (success: boolean) => {
+		if (settled) return;
+		settled = true;
+		if (success) resolveReady(); else rejectReady();
+	};
+	const confirm = () => {
+		if (established) return true;
+		if (settled || !existsSync(file)) return false;
+		established = true;
+		finish(true);
+		return true;
+	};
+	const fail = () => finish(false);
+	try {
+		watcher = watch(directory, { persistent: false }, confirm);
+		watcher.unref?.();
+		watcher.once("error", fail);
+		confirm();
+	} catch {
+		fail();
+	}
+	return { file, ready, confirm, fail, cleanup };
 }
 
 /** A bounded wait that never leaves its losing timeout referenced. */
@@ -200,6 +266,11 @@ function waitWithTimeout(promise: Promise<boolean>, timeoutMs: number): Promise<
  */
 const WINDOWS_JOB_SUPERVISOR = String.raw`
 $payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:BOBBIT_WINDOWS_JOB_PAYLOAD)) | ConvertFrom-Json
+$readyFile = $env:BOBBIT_WINDOWS_JOB_READY_FILE
+# The payload inherits this supervisor's environment; never leak the private
+# command/ready-path envelope to the command process.
+Remove-Item Env:BOBBIT_WINDOWS_JOB_PAYLOAD -ErrorAction SilentlyContinue
+Remove-Item Env:BOBBIT_WINDOWS_JOB_READY_FILE -ErrorAction SilentlyContinue
 Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
@@ -227,10 +298,10 @@ public static class BobbitJobSupervisor {
   static void Check(bool ok) { if (!ok) throw new Win32Exception(Marshal.GetLastWin32Error()); }
   static IntPtr InheritableStdHandle(int n, uint access, out bool owned) { IntPtr h = GetStdHandle(n); owned = h == IntPtr.Zero || h == new IntPtr(-1); if (owned) { h = CreateFile("NUL", access, FILE_SHARE_READ_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero); if (h == new IntPtr(-1)) throw new Win32Exception(Marshal.GetLastWin32Error()); } Check(SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)); return h; }
   static string Quote(string s) { if (s.Length == 0) return "\"\""; if (s.IndexOfAny(new [] {' ', '\t', '"'}) < 0) return s; var b = new StringBuilder("\""); int slashes = 0; foreach (char c in s) { if (c == '\\') { slashes++; continue; } if (c == '"') { b.Append('\\', slashes * 2 + 1); b.Append(c); slashes = 0; continue; } b.Append('\\', slashes); slashes = 0; b.Append(c); } b.Append('\\', slashes * 2); b.Append('"'); return b.ToString(); }
-  public static int Run(string file, string[] args, string cwd) { IntPtr job = IntPtr.Zero; PROCESS_INFORMATION pi = new PROCESS_INFORMATION(); STARTUPINFO si = new STARTUPINFO(); bool assigned = false, ownIn = false, ownOut = false, ownErr = false; try { job = CreateJobObject(IntPtr.Zero, null); if (job == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error()); var limits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION(); limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE; Check(SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf(limits))); si.cb = Marshal.SizeOf(si); si.dwFlags = STARTF_USESTDHANDLES; si.hStdInput = InheritableStdHandle(-10, GENERIC_READ, out ownIn); si.hStdOutput = InheritableStdHandle(-11, GENERIC_WRITE, out ownOut); si.hStdError = InheritableStdHandle(-12, GENERIC_WRITE, out ownErr); var line = new StringBuilder(Quote(file)); foreach (var arg in args) line.Append(' ').Append(Quote(arg)); Check(CreateProcess(null, line, IntPtr.Zero, IntPtr.Zero, true, CREATE_SUSPENDED, IntPtr.Zero, cwd, ref si, out pi)); Check(AssignProcessToJobObject(job, pi.hProcess)); assigned = true; if (ResumeThread(pi.hThread) == 0xffffffff) throw new Win32Exception(Marshal.GetLastWin32Error()); WaitForSingleObject(pi.hProcess, INFINITE); uint code; Check(GetExitCodeProcess(pi.hProcess, out code)); return unchecked((int)code); } finally { if (pi.hThread != IntPtr.Zero) CloseHandle(pi.hThread); if (pi.hProcess != IntPtr.Zero && !assigned) TerminateProcess(pi.hProcess, 1); if (pi.hProcess != IntPtr.Zero) CloseHandle(pi.hProcess); if (ownIn && si.hStdInput != IntPtr.Zero) CloseHandle(si.hStdInput); if (ownOut && si.hStdOutput != IntPtr.Zero) CloseHandle(si.hStdOutput); if (ownErr && si.hStdError != IntPtr.Zero) CloseHandle(si.hStdError); if (job != IntPtr.Zero) CloseHandle(job); } }
+  public static int Run(string file, string[] args, string cwd, string readyFile) { IntPtr job = IntPtr.Zero; PROCESS_INFORMATION pi = new PROCESS_INFORMATION(); STARTUPINFO si = new STARTUPINFO(); bool assigned = false, ownIn = false, ownOut = false, ownErr = false; try { job = CreateJobObject(IntPtr.Zero, null); if (job == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error()); var limits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION(); limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE; Check(SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf(limits))); si.cb = Marshal.SizeOf(si); si.dwFlags = STARTF_USESTDHANDLES; si.hStdInput = InheritableStdHandle(-10, GENERIC_READ, out ownIn); si.hStdOutput = InheritableStdHandle(-11, GENERIC_WRITE, out ownOut); si.hStdError = InheritableStdHandle(-12, GENERIC_WRITE, out ownErr); var line = new StringBuilder(Quote(file)); foreach (var arg in args) line.Append(' ').Append(Quote(arg)); Check(CreateProcess(null, line, IntPtr.Zero, IntPtr.Zero, true, CREATE_SUSPENDED, IntPtr.Zero, cwd, ref si, out pi)); Check(AssignProcessToJobObject(job, pi.hProcess)); assigned = true; if (readyFile != null) { string pendingReadyFile = readyFile + ".tmp"; System.IO.File.WriteAllText(pendingReadyFile, "ready", Encoding.ASCII); System.IO.File.Move(pendingReadyFile, readyFile); } if (ResumeThread(pi.hThread) == 0xffffffff) throw new Win32Exception(Marshal.GetLastWin32Error()); WaitForSingleObject(pi.hProcess, INFINITE); uint code; Check(GetExitCodeProcess(pi.hProcess, out code)); return unchecked((int)code); } finally { if (pi.hThread != IntPtr.Zero) CloseHandle(pi.hThread); if (pi.hProcess != IntPtr.Zero && !assigned) TerminateProcess(pi.hProcess, 1); if (pi.hProcess != IntPtr.Zero) CloseHandle(pi.hProcess); if (ownIn && si.hStdInput != IntPtr.Zero) CloseHandle(si.hStdInput); if (ownOut && si.hStdOutput != IntPtr.Zero) CloseHandle(si.hStdOutput); if (ownErr && si.hStdError != IntPtr.Zero) CloseHandle(si.hStdError); if (job != IntPtr.Zero) CloseHandle(job); } }
 }
 '@
-exit [BobbitJobSupervisor]::Run([string]$payload.file, [string[]]$payload.args, [string]$payload.cwd)
+exit [BobbitJobSupervisor]::Run([string]$payload.file, [string[]]$payload.args, [string]$payload.cwd, [string]$readyFile)
 `;
 
 const WINDOWS_JOB_SUPERVISOR_COMMAND = Buffer.from(WINDOWS_JOB_SUPERVISOR, "utf16le").toString("base64");
@@ -271,8 +342,15 @@ export function spawnTracked(
 	// require PowerShell merely to exercise state transitions.
 	const posixTreeSentinel = opts.posixTreeSentinel ?? (!isWin && opts.spawnImpl == null);
 	const windowsJobSupervisor = opts.windowsJobSupervisor ?? (isWin && opts.spawnImpl == null);
+	// Arm the observer before spawning the supervisor: a fast successful
+	// assignment cannot publish and exit between spawn() and watch().
+	const windowsJobReadiness = windowsJobSupervisor ? createWindowsJobReadiness() : undefined;
 	const windowsPayload = windowsJobSupervisor
-		? Buffer.from(JSON.stringify({ file: cmd, args, cwd: opts.cwd ?? process.cwd() }), "utf8").toString("base64")
+		? Buffer.from(JSON.stringify({
+			file: cmd,
+			args,
+			cwd: opts.cwd ?? process.cwd(),
+		}), "utf8").toString("base64")
 		: undefined;
 	const sentinelEnv = posixTreeSentinel
 		? {
@@ -284,31 +362,47 @@ export function spawnTracked(
 			} : {}),
 		}
 		: opts.env;
-	const child = spawnImpl(
-		windowsJobSupervisor ? "powershell.exe" : (posixTreeSentinel ? "/bin/sh" : cmd),
-		(windowsJobSupervisor
-			? ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", WINDOWS_JOB_SUPERVISOR_COMMAND]
-			: posixTreeSentinel ? ["-c", POSIX_TREE_SENTINEL_SCRIPT, "bobbit-tree-sentinel", cmd, ...args] : args) as string[],
-		{
-			cwd: opts.cwd,
-			env: windowsJobSupervisor
-				? { ...(opts.env ?? process.env), BOBBIT_WINDOWS_JOB_PAYLOAD: windowsPayload }
-				: sentinelEnv,
-			stdio: posixTreeSentinel ? withPosixSentinelReadyPipe(opts.stdio) : opts.stdio,
-			// POSIX: detached:true puts the child in its own process group so we
-			// can kill the whole tree via process.kill(-pgid, sig).
-			detached: !isWin,
-			windowsHide: opts.windowsHide ?? isWin,
-		},
-	);
+	let child: ChildProcess;
+	try {
+		child = spawnImpl(
+			windowsJobSupervisor ? "powershell.exe" : (posixTreeSentinel ? "/bin/sh" : cmd),
+			(windowsJobSupervisor
+				? ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", WINDOWS_JOB_SUPERVISOR_COMMAND]
+				: posixTreeSentinel ? ["-c", POSIX_TREE_SENTINEL_SCRIPT, "bobbit-tree-sentinel", cmd, ...args] : args) as string[],
+			{
+				cwd: opts.cwd,
+				env: windowsJobSupervisor
+					? {
+						...(opts.env ?? process.env),
+						BOBBIT_WINDOWS_JOB_PAYLOAD: windowsPayload,
+						BOBBIT_WINDOWS_JOB_READY_FILE: windowsJobReadiness!.file,
+					}
+					: sentinelEnv,
+				stdio: posixTreeSentinel ? withPosixSentinelReadyPipe(opts.stdio) : opts.stdio,
+				// POSIX: detached:true puts the child in its own process group so we
+				// can kill the whole tree via process.kill(-pgid, sig).
+				detached: !isWin,
+				windowsHide: opts.windowsHide ?? isWin,
+			},
+		);
+	} catch (error) {
+		windowsJobReadiness?.fail();
+		windowsJobReadiness?.cleanup();
+		throw error;
+	}
+	// Covers a supervisor that acknowledged synchronously before the watcher
+	// callback could be dispatched; this is observation, never polling.
+	windowsJobReadiness?.confirm();
 
 	let resolveWindowsSupervisorClosed!: () => void;
 	const windowsSupervisorClosed = new Promise<void>(resolve => { resolveWindowsSupervisorClosed = resolve; });
 	let resolveOwnershipReady!: () => void;
 	let rejectOwnershipReady!: (error: Error) => void;
-	const ownershipReady = (posixTreeSentinel
+	const ownershipReady = (posixTreeSentinel || windowsJobSupervisor)
 		? new Promise<void>((resolve, reject) => { resolveOwnershipReady = resolve; rejectOwnershipReady = reject; })
-		: Promise.resolve());
+		: isWin
+			? Promise.reject(new Error(WINDOWS_JOB_READINESS_FAILURE))
+			: Promise.resolve();
 	// Production callers are not required to await this diagnostic/lifecycle
 	// barrier. Observe rejection internally while retaining it for consumers.
 	void ownershipReady.catch(() => {});
@@ -328,6 +422,7 @@ export function spawnTracked(
 		_treeCompletionUnverified: false,
 		_survivesShutdown: false,
 		_windowsJobOwned: windowsJobSupervisor,
+		_windowsJobSurvivalReady: false,
 		_windowsSupervisorClosed: windowsSupervisorClosed,
 		_resolveWindowsSupervisorClosed: resolveWindowsSupervisorClosed,
 		killed: () => tracked._killed,
@@ -463,6 +558,29 @@ export function spawnTracked(
 		},
 	};
 
+	// Register before observing any readiness failure. A missing/closed pipe can
+	// settle synchronously; adding the entry afterwards would resurrect a child
+	// that the failure path deliberately removed.
+	registry.add(tracked);
+
+	if (windowsJobReadiness) {
+		void windowsJobReadiness.ready.then(
+			() => {
+				tracked._windowsJobSurvivalReady = true;
+				windowsJobReadiness.cleanup();
+				resolveOwnershipReady();
+			},
+			() => {
+				windowsJobReadiness.cleanup();
+				rejectOwnershipReady(new Error(WINDOWS_JOB_READINESS_FAILURE));
+				tracked._survivesShutdown = false;
+				// A watcher/readiness failure is not evidence that a live supervisor
+				// owns its payload. Reap it while its PID is still our witness.
+				if (!tracked._closed) tracked.killTree("SIGKILL");
+			},
+		);
+	}
+
 	// Optional helper-owned timeout.
 	if (opts.timeoutMs != null && opts.timeoutMs > 0) {
 		tracked._timeoutTimer = clock.setTimeout(() => {
@@ -509,7 +627,7 @@ export function spawnTracked(
 		// This should be unreachable because we add FD 3 above. Do not silently
 		// assume ownership if a future caller changes the stdio construction.
 		tracked._treeCompletionUnverified = true;
-		rejectOwnershipReady(new Error("POSIX sentinel readiness pipe is missing"));
+		rejectOwnershipReady(new Error(POSIX_SENTINEL_READINESS_FAILURE));
 	}
 	readyPipe?.once("data", () => {
 		tracked._posixSentinelReady = true;
@@ -527,9 +645,11 @@ export function spawnTracked(
 		// gateway event loop for the lifetime of the surviving payload.
 		if (tracked._survivesShutdown) unrefReadyPipe(readyPipe);
 	});
-	const failPosixSentinelHandshake = (error: unknown = new Error("POSIX sentinel closed before readiness")) => {
+	const failPosixSentinelHandshake = () => {
 		if (tracked._posixSentinelReady || isWin) return;
-		rejectOwnershipReady(error instanceof Error ? error : new Error("POSIX sentinel readiness failed"));
+		// Stream errors vary by platform and Node release. Consumers require one
+		// stable, specific contract for a failed ownership barrier.
+		rejectOwnershipReady(new Error(POSIX_SENTINEL_READINESS_FAILURE));
 		const pid = tracked._pid;
 		tracked._pendingPosixKill = undefined;
 		tracked._pendingPosixFinalization = false;
@@ -569,6 +689,9 @@ export function spawnTracked(
 	};
 	const onClose = () => {
 		tracked._closed = true;
+		if (isWin && windowsJobReadiness && !windowsJobReadiness.confirm()) {
+			windowsJobReadiness.fail();
+		}
 		if (!isWin && tracked._posixSentinelOwned && !tracked._posixSentinelReady) {
 			// A broken sentinel handshake means we never established the ownership
 			// barrier. Never turn the leader's close into a successful tree result.
@@ -588,7 +711,6 @@ export function spawnTracked(
 		onClose();
 	});
 
-	registry.add(tracked);
 	return tracked;
 }
 
@@ -599,10 +721,11 @@ export function spawnTracked(
  */
 export function killAllTracked(signal: "SIGTERM" | "SIGKILL" = "SIGKILL", includeSurvival = false): void {
 	for (const t of Array.from(registry)) {
-		// A child may outlive shutdown only after its platform-specific ownership
-		// barrier is established: a Windows Job or POSIX sentinel acknowledgement.
-		// Before that, failed publication must be reaped.
-		if (!includeSurvival && t._survivesShutdown && (t._windowsJobOwned || t._posixSentinelReady)) continue;
+		// Never infer readiness from a PID. POSIX must acknowledge its sentinel;
+		// Windows must observe the supervisor's post-assignment, pre-resume proof.
+		if (!includeSurvival && t._survivesShutdown && (
+			(t._posixSentinelOwned && t._posixSentinelReady) || t._windowsJobSurvivalReady
+		)) continue;
 		try { t.killTree(signal, 0); } catch { /* best-effort */ }
 	}
 }
