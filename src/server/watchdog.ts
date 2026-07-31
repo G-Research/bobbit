@@ -267,9 +267,14 @@ export function resolveWatchdogProbeTarget(options: ResolveWatchdogProbeTargetOp
 	if (portFlag.present && portFlag.value === undefined) throw new Error("--port requires a value");
 	const port = parsePort(portFlag.present ? portFlag.value : env.PORT, 3001);
 
-	const hasNoTls = args.includes("--no-tls");
-	const hasTls = args.includes("--tls");
-	const protocol: "http:" | "https:" = hasNoTls || (!hasTls && isLoopback(configuredHost)) ? "http:" : "https:";
+	let tls: boolean | undefined;
+	for (const arg of args) {
+		if (arg === "--tls") tls = true;
+		else if (arg === "--no-tls") tls = false;
+	}
+	const protocol: "http:" | "https:" = tls === false || (tls === undefined && isLoopback(configuredHost))
+		? "http:"
+		: "https:";
 	const selectedTarget = { protocol, hostname: probeHostname(configuredHost), port, basePath };
 	if (options.persistedGatewayUrl === undefined) return selectedTarget;
 	try {

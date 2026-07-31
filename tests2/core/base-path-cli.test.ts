@@ -7,6 +7,8 @@ import { describe, it } from "vitest";
 
 interface CliArgs {
 	basePath: string;
+	tls: boolean;
+	tlsExplicit: boolean;
 	[key: string]: unknown;
 }
 
@@ -74,6 +76,18 @@ describe("CLI executable and loopback boundaries", () => {
 		for (const host of ["[::1", "::1]", "[localhost]", "[127.0.0.1]", "localhost.example", "127.0.0.2"]) {
 			assert.equal(isLoopbackHost(host), false, host);
 		}
+	});
+});
+
+describe("CLI TLS selection", () => {
+	it.each([
+		{ argv: ["--no-tls", "--tls"], tls: true },
+		{ argv: ["--tls", "--no-tls"], tls: false },
+	] as const)("uses the final TLS flag in $argv", async ({ argv, tls }) => {
+		const { parseArgs } = await cliModule();
+		const parsed = parseArgs([...argv], {});
+		assert.equal(parsed.tls, tls);
+		assert.equal(parsed.tlsExplicit, true);
 	});
 });
 
