@@ -267,7 +267,7 @@ test("ProjectRegistry preserves read-only evidence when a directory has no finge
   assert.equal(identity(root), "/no-fingerprint-case-evidence/project");
 });
 
-test("ProjectRegistry caches inconclusive directory semantics per path identity", () => {
+test("ProjectRegistry caches an owned probe only after fingerprint stability is verified", () => {
   const root = "/cached-case-probe/Project";
   let probes = 0;
   let removals = 0;
@@ -293,6 +293,94 @@ test("ProjectRegistry caches inconclusive directory semantics per path identity"
   assert.equal(registry.findByCwd(`${root}/src`)?.id, "cached");
   assert.equal(probes, probesAfterWarmup, "repeated project lookups reuse per-directory semantics");
   assert.equal(removals, probes, "every owned probe is cleaned up exactly once");
+});
+
+test("ProjectRegistry retries classification before publishing evidence from a new directory fingerprint", () => {
+  const parent = "/case-classification-race";
+  let revision = 1;
+  let reads = 0;
+  const identity = createProjectPathIdentity({
+    isNativePathApi: dialect => dialect === "posix",
+    isCaseInsensitiveAt: ancestor => ancestor === "/" ? false : undefined,
+    caseSemanticsFingerprint: ancestor => `revision-${revision}:${ancestor}`,
+    realpathSync: candidate => {
+      const resolved = path.posix.resolve(candidate);
+      if (resolved === parent) return resolved;
+      if (resolved === `${parent}/alpha`) return `${parent}/Alpha`;
+      throw new Error(`missing fixture path: ${candidate}`);
+    },
+    readdirSync: candidate => {
+      if (path.posix.resolve(candidate) !== parent) return [];
+      reads += 1;
+      if (reads === 1) {
+        revision = 2;
+        return ["Alpha"];
+      }
+      return ["Alpha", "alpha"];
+    },
+  });
+
+  assert.equal(
+    identity(`${parent}/Child`),
+    `${parent}/Child`,
+    "the retry must classify the replacement directory rather than publish the old insensitive evidence",
+  );
+  assert.equal(reads, 2, "a changed fingerprint receives one bounded reclassification");
+  assert.equal(identity(`${parent}/CHILD`), `${parent}/CHILD`);
+  assert.equal(reads, 2, "the stable replacement's read-only result is reusable");
+});
+
+test("ProjectRegistry reuses stable read-only case evidence", () => {
+  const parent = "/stable-read-only-case";
+  let reads = 0;
+  const identity = createProjectPathIdentity({
+    isNativePathApi: dialect => dialect === "posix",
+    isCaseInsensitiveAt: ancestor => ancestor === "/" ? false : undefined,
+    caseSemanticsFingerprint: ancestor => `stable:${ancestor}`,
+    realpathSync: candidate => {
+      const resolved = path.posix.resolve(candidate);
+      if (resolved === parent || resolved === `${parent}/alpha`) return resolved;
+      throw new Error(`missing fixture path: ${candidate}`);
+    },
+    readdirSync: candidate => {
+      if (path.posix.resolve(candidate) !== parent) return [];
+      reads += 1;
+      return ["Alpha"];
+    },
+  });
+
+  assert.equal(identity(`${parent}/Child`), `${parent}/child`);
+  assert.equal(identity(`${parent}/CHILD`), `${parent}/child`);
+  assert.equal(reads, 1, "matching pre/post fingerprints publish read-only evidence once");
+});
+
+test("ProjectRegistry leaves probe-mutated fingerprints uncached", () => {
+  const parent = "/probe-mutates-fingerprint";
+  let revision = 1;
+  let probes = 0;
+  const identity = createProjectPathIdentity({
+    isNativePathApi: dialect => dialect === "posix",
+    isCaseInsensitiveAt: ancestor => ancestor === "/" ? false : undefined,
+    caseSemanticsFingerprint: ancestor => `revision-${revision}:${ancestor}`,
+    realpathSync: candidate => {
+      const resolved = path.posix.resolve(candidate);
+      if (resolved === parent) return resolved;
+      const error = Object.assign(new Error(`missing fixture path: ${candidate}`), { code: "ENOENT" });
+      throw error;
+    },
+    readdirSync: () => [],
+    createCaseProbe: probeParent => {
+      probes += 1;
+      revision += 1;
+      return path.posix.join(probeParent, `.BobbitProbe${probes}`);
+    },
+    removeCaseProbe: () => {},
+  });
+
+  assert.equal(identity(`${parent}/Child`), `${parent}/Child`);
+  assert.equal(probes, 2, "an unstable probe gets one bounded retry");
+  assert.equal(identity(`${parent}/CHILD`), `${parent}/CHILD`);
+  assert.equal(probes, 4, "probe-mutated semantics are not published under a later fingerprint");
 });
 
 test("ProjectRegistry invalidates cached case semantics when a directory fingerprint changes", () => {

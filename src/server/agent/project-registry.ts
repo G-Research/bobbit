@@ -169,10 +169,11 @@ export interface ProjectPathIdentityOptions {
   /** Read directory entries to establish case semantics without mutation. */
   readdirSync?: (candidate: string) => string[];
   /**
-   * Overrides the case-sensitivity probe. This is deliberately an opt-in
-   * seam for tests and unusual filesystems.
+   * Overrides the case-sensitivity probe. Return `undefined` to defer to the
+   * native classifier; this is deliberately an opt-in seam for tests and
+   * unusual filesystems.
    */
-  isCaseInsensitiveAt?: (existingAncestor: string) => boolean;
+  isCaseInsensitiveAt?: (existingAncestor: string) => boolean | undefined;
   /** Create a uniquely named directory owned by the caller below `parent`. */
   createCaseProbe?: (parent: string, pathApi: "posix" | "win32") => string;
   /** Remove the directory returned by `createCaseProbe`. */
@@ -332,21 +333,37 @@ function hasCaseInsensitiveEntries(
   // an insensitive parent can contain a case-sensitive child directory.
   const cacheKey = `${projectPathFlavor(pathApi)}:${pathApi.resolve(existingAncestor)}`;
   const fingerprintFor = caseSemanticsFingerprint ?? nativeCaseSemanticsFingerprint;
-  const fingerprint = fingerprintFor(existingAncestor);
-  const cached = fingerprint ? caseSemanticsCache?.get(cacheKey) : undefined;
-  if (cached && cached.fingerprint === fingerprint) return cached.semantics === "insensitive";
 
-  let result = readOnlyCaseSemantics(existingAncestor, pathApi, realpathSync, readdirSync);
-  if (result === "unknown") {
-    result = probeCaseSemantics(existingAncestor, pathApi, realpathSync, createCaseProbe, removeCaseProbe);
+  // A fingerprint can change while directory entries are being classified.
+  // Never publish evidence captured for an older incarnation under a newer
+  // fingerprint: retry once against the new incarnation, then retain spelling
+  // rather than making an unstable case-folding decision.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const fingerprintBefore = fingerprintFor(existingAncestor);
+    const cached = fingerprintBefore ? caseSemanticsCache?.get(cacheKey) : undefined;
+    if (cached && cached.fingerprint === fingerprintBefore) return cached.semantics === "insensitive";
+
+    let result = readOnlyCaseSemantics(existingAncestor, pathApi, realpathSync, readdirSync);
+    if (result === "unknown") {
+      result = probeCaseSemantics(existingAncestor, pathApi, realpathSync, createCaseProbe, removeCaseProbe);
+    }
+
+    const fingerprintAfter = fingerprintFor(existingAncestor);
+    if (fingerprintBefore && fingerprintBefore === fingerprintAfter) {
+      if (result !== "unknown") {
+        caseSemanticsCache?.set(cacheKey, { fingerprint: fingerprintBefore, semantics: result });
+      }
+      return result === "insensitive";
+    }
+
+    // No fingerprint means no cache authority, but conclusive read-only or
+    // owned-probe evidence is still useful for this lookup. A changed or
+    // missing fingerprint is retried once; a second unstable attempt falls
+    // back to the conservative, uncached spelling-preserving result below.
+    if (!fingerprintBefore && !fingerprintAfter) return result === "insensitive";
   }
-  // A probe creates and removes a child, changing parent mtime/ctime. Cache
-  // the post-probe identity/version so the next unchanged lookup is reusable.
-  const currentFingerprint = fingerprintFor(existingAncestor);
-  if (currentFingerprint && result !== "unknown") {
-    caseSemanticsCache?.set(cacheKey, { fingerprint: currentFingerprint, semantics: result });
-  }
-  return result === "insensitive";
+
+  return false;
 }
 
 /**
@@ -360,7 +377,7 @@ function normalizeExistingPathCase(
   pathApi: ProjectPathApi,
   realpathSync: (candidate: string) => string,
   readdirSync: (candidate: string) => string[],
-  isCaseInsensitiveAt?: (existingAncestor: string) => boolean,
+  isCaseInsensitiveAt?: (existingAncestor: string) => boolean | undefined,
   createCaseProbe?: (parent: string, pathApi: "posix" | "win32") => string,
   removeCaseProbe?: (probePath: string) => void,
   caseSemanticsCache?: Map<string, CaseSemanticsCacheRecord>,
