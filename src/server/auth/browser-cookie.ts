@@ -301,7 +301,7 @@ function isAcceptedOrigin(
 
 	// The proxy exception exists only for an explicitly identified Vite dev
 	// gateway, whose rewritten Host can differ from the browser-facing loopback
-	// alias. Never infer it from a missing static directory.
+	// alias. Never infer it from a missing static directory or forwarded headers.
 	if (!context.viteDevProxy) return false;
 	const configuredHostname = normalizeConfiguredHostname(context.configuredHost);
 	const bothUseConfiguredHost = configuredHostname !== undefined
@@ -309,7 +309,15 @@ function isAcceptedOrigin(
 		&& requestOrigin.hostname === configuredHostname;
 	const bothLoopback = isLoopbackHostname(browserOrigin.hostname)
 		&& isLoopbackHostname(requestOrigin.hostname);
-	return browserOrigin.protocol === requestOrigin.protocol && (bothUseConfiguredHost || bothLoopback);
+	const sameProtocol = browserOrigin.protocol === requestOrigin.protocol;
+	// Vite may terminate development TLS in front of Bobbit's HTTP loopback
+	// listener. That downgrade is safe only inside the explicit Vite mode and
+	// only when both browser and socket authorities are independently loopback.
+	// The inverse shape (HTTP UI -> HTTPS gateway) cannot retain Secure cookies.
+	const viteTlsTermination = bothLoopback
+		&& browserOrigin.protocol === "https:"
+		&& requestOrigin.protocol === "http:";
+	return (sameProtocol && (bothUseConfiguredHost || bothLoopback)) || viteTlsTermination;
 }
 
 /**

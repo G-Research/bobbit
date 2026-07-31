@@ -22,6 +22,7 @@ export const LOCALHOST_TOKEN = "localhost";
 const INVALID_SAVED_GATEWAY_WARNING = "Invalid saved gateway URL; using this Bobbit deployment instead.";
 const STORAGE_WARNING = "Connected, but the gateway connection could not be saved for the next reload.";
 const NATIVE_TRANSPORT_WARNING = "Preview live updates and embedded previews require the Bobbit UI and gateway to use the same HTTPS hostname (loopback HTTP is also supported). Serve the UI from the gateway origin or through a same-host reverse proxy.";
+const NATIVE_TRANSPORT_UNCONFIRMED_WARNING = "Preview live updates and embedded previews are unavailable because cookie-only gateway authentication could not be confirmed. Bobbit kept the real token for REST and WebSocket access; reconnect through the Vite proxy or a same-host reverse proxy to enable previews.";
 const QR_COOKIE_REENTRY_MESSAGE = "This browser is connected with a private cookie, which cannot authenticate a phone. Re-enter the gateway token to create a secure handoff; it stays only in this tab and is not saved.";
 const SERVICE_WORKER_RELOAD_GUARD_KEY = "bobbit-sw-mount-reload";
 const BOBBIT_CACHE_PREFIX = "bobbit:";
@@ -63,6 +64,8 @@ export interface GatewayConnectionCommitResult {
 export interface GatewayConnectionCommitOptions {
 	/** The sentinel represents an auth-disabled localhost gateway, not a cookie. */
 	localhostTrusted?: boolean;
+	/** A protected request without Bearer authority succeeded for this candidate. */
+	cookieConfirmed?: boolean;
 }
 
 declare const gatewayConnectionSnapshotBrand: unique symbol;
@@ -634,10 +637,10 @@ function revisionAllowsMirrorRollback(storage: Storage, previousRevision: string
 
 /**
  * Publish an authenticated connection in memory, then persist its reload-safe
- * representation. A real bearer remains in memory for the current tab, but a
- * cookie-capable same-host gateway persists only the non-credential sentinel.
- * Insecure non-loopback HTTP and different-host gateways retain the bearer
- * because the server cannot replace it with a usable browser cookie.
+ * representation. URL compatibility alone never proves that a browser retained
+ * the replacement cookie: a real bearer is replaced by the sentinel only after
+ * a protected cookie-only request succeeded. The current tab always retains the
+ * real bearer in memory, including after successful confirmation.
  */
 export function commitGatewayConnection(
 	baseUrl: string,
@@ -646,19 +649,25 @@ export function commitGatewayConnection(
 ): GatewayConnectionCommitResult {
 	const normalized = normalizeGatewayBaseUrl(baseUrl);
 	const previousActiveMode = activeAuthenticationMode;
+	const confirmedCookie = options.cookieConfirmed === true
+		&& cookieCompatibleGatewayBase(normalized);
 	const persistCookieSentinel = Boolean(token)
 		&& token !== LOCALHOST_TOKEN
-		&& cookieCompatibleGatewayBase(normalized);
+		&& confirmedCookie;
 	const persistedToken = persistCookieSentinel ? LOCALHOST_TOKEN : token;
 	const persistedMode: GatewayAuthenticationMode = persistCookieSentinel
-		? "cookie"
+		? options.localhostTrusted ? "localhost" : "cookie"
 		: token === LOCALHOST_TOKEN
 			? options.localhostTrusted
 				? "localhost"
-				: (previousActiveMode === "localhost" || previousActiveMode === "cookie" ? previousActiveMode : "unknown")
+				: confirmedCookie
+					? "cookie"
+					: (previousActiveMode === "localhost" || previousActiveMode === "cookie" ? previousActiveMode : "unknown")
 			: token ? "bearer" : "none";
 	activeConnection = { baseUrl: normalized, token };
-	activeAuthenticationMode = token && token !== LOCALHOST_TOKEN ? "bearer" : persistedMode;
+	activeAuthenticationMode = token && token !== LOCALHOST_TOKEN && !persistCookieSentinel
+		? "bearer"
+		: persistedMode;
 	activeConnectionVersion += 1;
 
 	ensureCrossTabConnectionListener();
@@ -820,7 +829,31 @@ export function gatewayAuthorizationHeaders(token?: string | null): Record<strin
 	return { Authorization: `Bearer ${token}` };
 }
 
-/** Compatibility boundary for cookie-only EventSource/iframe/popout transports. */
+/**
+ * Prove that the browser can use the candidate without Bearer authority. The
+ * ordinary protected cwd read is deliberately CORS-simple and side-effect free.
+ * Redirects cannot count as proof (for example, an OAuth login page).
+ */
+export async function confirmGatewayCookieAuthentication(baseUrl: string): Promise<boolean> {
+	let normalized: string;
+	try {
+		normalized = normalizeGatewayBaseUrl(baseUrl);
+	} catch {
+		return false;
+	}
+	if (!cookieCompatibleGatewayBase(normalized)) return false;
+	try {
+		const response = await fetch(gatewayUrl(gatewayRoute("/api/config/cwd"), normalized), {
+			credentials: "include",
+			redirect: "error",
+		});
+		return response.ok;
+	} catch {
+		return false;
+	}
+}
+
+/** Compatibility and confirmed-auth boundary for native cookie-only transports. */
 export function gatewayNativeTransportSupport(explicitBase?: string): GatewayNativeTransportSupport {
 	let baseUrl: string;
 	try {
@@ -828,9 +861,15 @@ export function gatewayNativeTransportSupport(explicitBase?: string): GatewayNat
 	} catch {
 		return { supported: false, message: NATIVE_TRANSPORT_WARNING };
 	}
-	return cookieCompatibleGatewayBase(baseUrl)
-		? { supported: true }
-		: { supported: false, message: NATIVE_TRANSPORT_WARNING };
+	if (!cookieCompatibleGatewayBase(baseUrl)) {
+		return { supported: false, message: NATIVE_TRANSPORT_WARNING };
+	}
+	const connection = hydrateActiveConnection();
+	if (connection.baseUrl !== baseUrl
+		|| (activeAuthenticationMode !== "cookie" && activeAuthenticationMode !== "localhost")) {
+		return { supported: false, message: NATIVE_TRANSPORT_UNCONFIRMED_WARNING };
+	}
+	return { supported: true };
 }
 
 /** Central credentialed HTTP transport. Route strings are validated at entry. */

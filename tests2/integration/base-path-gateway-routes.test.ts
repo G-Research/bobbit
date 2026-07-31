@@ -92,6 +92,28 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("mounted gateway routes, mani
 		expect(setCookie).not.toContain("; Secure");
 	});
 
+	it("does not trust a mixed-scheme loopback Origin outside explicit Vite proxy mode", async () => {
+		const uiOrigin = "https://localhost:5173";
+		const bootstrap = await api(running.baseUrl, "/api/health", {
+			headers: {
+				Origin: uiOrigin,
+				"Sec-Fetch-Site": "same-origin",
+				"Sec-Fetch-Mode": "cors",
+			},
+		});
+		expect(bootstrap.status, "the real bearer remains valid").toBe(200);
+		expect(bootstrap.headers.get("set-cookie")).toBeNull();
+
+		const cookieOnly = await fetch(`${running.baseUrl}/api/config/cwd`, {
+			headers: {
+				Origin: uiOrigin,
+				"Sec-Fetch-Site": "same-origin",
+				"Sec-Fetch-Mode": "cors",
+			},
+		});
+		expect(cookieOnly.status).toBe(401);
+	});
+
 	it("accepts mounted viewer and session sockets but rejects unprefixed and sibling upgrades", async () => {
 		const sessionId = await registerArchivedSession(running);
 		const viewer = await authenticateSocket(`${running.wsOrigin}${MOUNT}/ws/viewer`);
