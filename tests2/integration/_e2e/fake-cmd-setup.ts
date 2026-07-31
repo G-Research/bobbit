@@ -105,6 +105,8 @@ function createManualVerificationRunner(clock: ManualClock): ResettableVerificat
 				child: child as unknown as TrackedChild["child"],
 				killed: () => killed,
 				timedOut: () => timedOut || !!tracked._timedOut,
+				// Fake children have no OS process tree; ownership is complete at creation.
+				ownershipReady: Promise.resolve(),
 				markSurvival: () => {},
 				waitForTreeExit: async () => true,
 				killTree: () => {

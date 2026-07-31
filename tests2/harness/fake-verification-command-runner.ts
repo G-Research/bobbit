@@ -207,6 +207,8 @@ function makeFakeTracked(spec: VerificationCommandSpawnSpec): TrackedChild {
 		child: child as unknown as TrackedChild["child"],
 		killed: () => killed,
 		timedOut: () => timedOut || !!tracked._timedOut,
+		// Fake children have no OS process tree; ownership is complete at creation.
+		ownershipReady: Promise.resolve(),
 		markSurvival: () => { /* fake children never survive shutdown */ },
 		waitForTreeExit: async () => true,
 		killTree: (_signal, _graceMsOverride) => {
