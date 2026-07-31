@@ -497,7 +497,7 @@ describe("Anthropic persisted status and Pi refresh", () => {
 		assert.equal(typeof await googleRefresh, "string");
 	});
 
-	it("redacts upstream token-shaped refresh failures and retains the credential", async () => {
+	it("redacts upstream token-shaped refresh failures and removes definitively rejected credentials", async () => {
 		const expired = credential(Date.now() - 60_000);
 		await new AtomicCredentialStore(authPath).modify("anthropic", async () => expired);
 		const providerSecret = randomUUID();
@@ -511,8 +511,7 @@ describe("Anthropic persisted status and Pi refresh", () => {
 		const output = errors.mock.calls.flat().join(" ");
 		assert.equal(output.includes(providerSecret), false, "provider response token must not be logged");
 		assert.equal(output.includes(String(expired.refresh)), false, "stored refresh credential must not be logged");
-		const retained = await new AtomicCredentialStore(authPath).read("anthropic");
-		assert.equal(retained?.type, "oauth");
-		sameSecret(retained?.type === "oauth" ? retained.refresh : undefined, expired.refresh);
+		assert.equal(await new AtomicCredentialStore(authPath).read("anthropic"), undefined);
+		assert.equal((await oauthStatus("anthropic")).authenticated, false);
 	});
 });
