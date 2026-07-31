@@ -38,7 +38,7 @@ const PROJECT_ROOT = "/tmp/dynamic-workspace";
 const SESSION_A = "dynamic-workspace-session-a";
 const SESSION_B = "dynamic-workspace-session-b";
 const STORE_KEY = "bobbit-dynamic-panel-workspace-fixture";
-const FIXTURE_GATEWAY_URL = "http://fixture.test";
+const FIXTURE_GATEWAY_URL = "http://fixture.localhost";
 const FIXTURE_GATEWAY_TOKEN = "fixture-token";
 
 const PROJECT: Project = {
