@@ -2,6 +2,7 @@ import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { afterEach, describe, it } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
