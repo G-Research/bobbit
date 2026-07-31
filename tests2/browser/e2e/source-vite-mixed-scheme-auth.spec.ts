@@ -380,8 +380,7 @@ test.describe("HTTPS source Vite to mounted HTTP gateway authentication", () => 
 			const sseResponsePromise = page.waitForResponse(response =>
 				responseAt(response, viteOrigin, ssePath));
 			const iframeResponsePromise = page.waitForResponse(response =>
-				responseAt(response, viteOrigin, previewPath)
-					&& response.request().resourceType() === "document");
+				responseAt(response, viteOrigin, previewPath));
 			await page.reload({ waitUntil: "domcontentloaded" });
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 30_000 });
 
