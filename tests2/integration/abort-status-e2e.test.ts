@@ -14,6 +14,7 @@ import {
 	waitForSessionStatus,
 	queueLenPredicate,
 	toolStartPredicate,
+	waitForCondition,
 	type WsConnection,
 	type WsMsg,
 } from "./_e2e/e2e-setup.js";
@@ -420,9 +421,14 @@ test.describe("Abort status E2E", () => {
 		live.status = "streaming";
 
 		const responsePending = apiFetch(`/api/sessions/${sessionId}/abort`, { method: "POST" });
-		for (let i = 0; i < 20 && live.status !== "aborting"; i++) {
-			await new Promise<void>((resolve) => setImmediate(resolve));
-		}
+		// Deadline-bounded, not turn-bounded: the abort route awaits real work before it
+		// flips the status, so a fixed number of macrotask turns is not a reliable wait —
+		// under CPU contention it expired, and the retries it triggered pushed this file
+		// past the tier-1 wall budget.
+		await waitForCondition(() => live.status === "aborting", {
+			timeoutMs: 10_000,
+			message: "session status to become aborting",
+		}).catch(() => {});
 		expect(live.status).toBe("aborting");
 		gateway.clock.advance(3_000);
 
