@@ -150,49 +150,29 @@ function projectPathFlavor(pathApi: ProjectPathApi): "posix" | "win32" {
 function normalizeProjectPath(
   value: string,
   pathApi: ProjectPathApi,
-  options: { foldCase?: boolean; foldWindowsCase?: boolean } = {},
+  options: { foldCase?: boolean } = {},
 ): string {
   const resolved = pathApi.resolve(value);
   const root = pathApi.parse(resolved).root;
   const isRoot = pathApi.normalize(resolved) === pathApi.normalize(root);
   const normalized = (isRoot ? root : resolved.replace(/[\\/]+$/, "")).replace(/\\/g, "/");
-  const foldCase = options.foldCase ?? (pathApi === path.win32 && (options.foldWindowsCase ?? true));
+  const foldCase = options.foldCase ?? pathApi === path.win32;
   return foldCase ? normalized.toLowerCase() : normalized;
 }
 
 export interface ProjectPathIdentityOptions {
-  /**
-   * A read-only seam for path-identity tests and unusual filesystems. The
-   * production default is `fs.realpathSync`.
-   */
+  /** Read-only seams for path-identity tests and unusual filesystems. */
   realpathSync?: (candidate: string) => string;
-  /** Read directory entries to establish case semantics without mutation. */
-  readdirSync?: (candidate: string) => string[];
-  /**
-   * Overrides the case-sensitivity probe. Return `undefined` to defer to the
-   * native classifier; this is deliberately an opt-in seam for tests and
-   * unusual filesystems.
-   */
+  lstatSync?: (candidate: string) => Pick<fs.Stats, "dev" | "ino">;
+  /** Overrides the native classifier for tests and unusual filesystems. */
   isCaseInsensitiveAt?: (existingAncestor: string) => boolean | undefined;
-  /** Create a uniquely named directory owned by the caller below `parent`. */
+  /** Create and remove a unique, caller-owned case probe below `parent`. */
   createCaseProbe?: (parent: string, pathApi: "posix" | "win32") => string;
-  /** Remove the directory returned by `createCaseProbe`. */
   removeCaseProbe?: (probePath: string) => void;
-  /**
-   * Caller-owned cache of directory entry case semantics. `createProjectPathIdentity`
-   * creates one automatically; entries are invalidated when their fingerprint changes.
-   */
+  /** Cache directory entry case semantics, invalidated by this fingerprint. */
   caseSemanticsCache?: Map<string, CaseSemanticsCacheRecord>;
-  /**
-   * Returns a directory identity/version fingerprint. The native default uses
-   * device, inode, mode, mtime, and ctime; tests may inject deterministic values.
-   */
   caseSemanticsFingerprint?: (existingAncestor: string) => string | undefined;
-  /**
-   * Determines whether a path dialect belongs to the host filesystem. This
-   * lets tests model native Windows case-sensitive and case-insensitive
-   * volumes independently of the machine running them.
-   */
+  /** Lets tests model native Windows/POSIX volumes on another host. */
   isNativePathApi?: (pathApi: "posix" | "win32") => boolean;
 }
 
@@ -221,91 +201,67 @@ function toggledCase(value: string): string | undefined {
   return `${value.slice(0, index)}${toggled}${value.slice(index + 1)}`;
 }
 
-/**
- * Establish semantics from directory entries without changing the filesystem.
- * A case-paired entry is conclusive sensitivity, while a lone entry whose
- * toggled spelling resolves is conclusive insensitivity. Case-only symlinks
- * are covered by the former rule rather than being mistaken for aliases.
- */
-function readOnlyCaseSemantics(
-  existingAncestor: string,
-  pathApi: ProjectPathApi,
-  realpathSync: (candidate: string) => string,
-  readdirSync: (candidate: string) => string[],
-): CaseSemantics {
-  let entries: string[];
-  try {
-    entries = readdirSync(existingAncestor);
-  } catch {
-    return "unknown";
-  }
-
-  // Build counts once: TMPDIR can contain thousands of entries, so filtering
-  // the entire list for every name makes an identity lookup quadratic.
-  const entryNames = entries.map(name => ({ name, folded: name.toLowerCase() }));
-  const foldedCounts = new Map<string, number>();
-  for (const { folded } of entryNames) {
-    foldedCounts.set(folded, (foldedCounts.get(folded) ?? 0) + 1);
-  }
-
-  for (const { name, folded } of entryNames) {
-    const variant = toggledCase(name);
-    if (variant && (foldedCounts.get(folded) ?? 0) > 1) return "sensitive";
-  }
-
-  for (const { name } of entryNames) {
-    const variant = toggledCase(name);
-    if (!variant) continue;
-    try {
-      realpathSync(pathApi.join(existingAncestor, variant));
-      // APFS can preserve the caller's spelling in realpath output, so a
-      // successful alternate lookup of this lone entry is the proof.
-      return "insensitive";
-    } catch {
-      // Try another entry before concluding that the evidence is incomplete.
-    }
-  }
-  return "unknown";
-}
-
 function isExpectedMissingPath(error: unknown): boolean {
   return typeof error === "object" && error !== null && (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
-/** Probe an otherwise inconclusive directory with an owned, unique child. */
-function probeCaseSemantics(
-  existingAncestor: string,
+/**
+ * Compare the requested entry with one case-variant spelling. `lstat` gives a
+ * bounded authoritative answer even where realpath preserves input casing
+ * (APFS), and distinguishes case-paired entries and symlinks on NTFS/POSIX.
+ */
+function classifyKnownEntry(
+  parent: string,
+  entry: string,
   pathApi: ProjectPathApi,
   realpathSync: (candidate: string) => string,
+  lstatSync: (candidate: string) => Pick<fs.Stats, "dev" | "ino">,
+): CaseSemantics {
+  const variant = toggledCase(entry);
+  if (!variant) return "unknown";
+  const target = pathApi.join(parent, entry);
+  const alternate = pathApi.join(parent, variant);
+  try {
+    realpathSync(alternate);
+  } catch (error) {
+    return isExpectedMissingPath(error) ? "sensitive" : "unknown";
+  }
+  try {
+    const a = lstatSync(target);
+    const b = lstatSync(alternate);
+    // Zero inodes are not a stable identity (some network filesystems expose
+    // them), so retain spelling rather than claiming a case alias.
+    if (a.ino === 0 || b.ino === 0) return "unknown";
+    return a.dev === b.dev && a.ino === b.ino ? "insensitive" : "sensitive";
+  } catch {
+    return "unknown";
+  }
+}
+
+/** Classify an empty or otherwise inconclusive directory with one owned probe. */
+function probeCaseSemantics(
+  parent: string,
+  pathApi: ProjectPathApi,
+  realpathSync: (candidate: string) => string,
+  lstatSync: (candidate: string) => Pick<fs.Stats, "dev" | "ino">,
   createCaseProbe?: (parent: string, pathApi: "posix" | "win32") => string,
   removeCaseProbe?: (probePath: string) => void,
 ): CaseSemantics {
-  let probePath: string | undefined;
+  let probe: string | undefined;
   let result: CaseSemantics = "unknown";
   try {
-    probePath = createCaseProbe?.(existingAncestor, projectPathFlavor(pathApi))
-      ?? fs.mkdtempSync(pathApi.join(existingAncestor, ".bobbit-case-probe-"));
-    const variant = toggledCase(pathApi.basename(probePath));
-    if (!variant) return "unknown";
-    // The probe name is freshly allocated, so no case-only alias can predate it.
-    try {
-      realpathSync(pathApi.join(pathApi.dirname(probePath), variant));
-      result = "insensitive";
-    } catch (error) {
-      // A successful owned creation plus an expected missing alternate proves
-      // sensitivity. Permission and other lookup failures remain retryable.
-      result = isExpectedMissingPath(error) ? "sensitive" : "unknown";
-    }
+    probe = createCaseProbe?.(parent, projectPathFlavor(pathApi))
+      ?? fs.mkdtempSync(pathApi.join(parent, ".bobbit-case-probe-"));
+    result = classifyKnownEntry(pathApi.dirname(probe), pathApi.basename(probe), pathApi, realpathSync, lstatSync);
   } catch {
-    // Read-only and unprobeable directories must be retried after recovery.
-    result = "unknown";
+    // Keep the conservative spelling-preserving result.
   } finally {
-    if (probePath) {
+    if (probe) {
       try {
-        if (removeCaseProbe) removeCaseProbe(probePath);
-        else fs.rmSync(probePath, { recursive: true, force: true });
+        if (removeCaseProbe) removeCaseProbe(probe);
+        else fs.rmSync(probe, { recursive: true, force: true });
       } catch {
-        // A failed cleanup must not leave a potentially stale result cached.
+        // A failed cleanup means this run cannot publish probe evidence.
         result = "unknown";
       }
     }
@@ -314,111 +270,86 @@ function probeCaseSemantics(
 }
 
 /**
- * Establish a directory's entry case behaviour, caching only stable read-only
- * evidence with an identity/version fingerprint. An owned probe is reserved
- * for unknown entries and informs only the current lookup because it mutates
- * the directory being classified.
+ * Determine a directory's case behavior in constant filesystem work. Cached
+ * evidence is keyed by a post-observation fingerprint, so later recreation or
+ * NTFS per-directory case-mode changes invalidate it before reuse.
  */
 function hasCaseInsensitiveEntries(
-  existingAncestor: string,
+  parent: string,
+  entry: string | undefined,
   pathApi: ProjectPathApi,
   realpathSync: (candidate: string) => string,
-  readdirSync: (candidate: string) => string[],
+  lstatSync: (candidate: string) => Pick<fs.Stats, "dev" | "ino">,
+  isCaseInsensitiveAt?: (existingAncestor: string) => boolean | undefined,
   createCaseProbe?: (parent: string, pathApi: "posix" | "win32") => string,
   removeCaseProbe?: (probePath: string) => void,
-  caseSemanticsCache?: Map<string, CaseSemanticsCacheRecord>,
-  caseSemanticsFingerprint?: (existingAncestor: string) => string | undefined,
+  cache?: Map<string, CaseSemanticsCacheRecord>,
+  fingerprint?: (existingAncestor: string) => string | undefined,
 ): boolean {
-  // Case sensitivity is a property of a directory's entries, not of the
-  // directory's name in its parent. This distinction matters for NTFS, where
-  // an insensitive parent can contain a case-sensitive child directory.
-  const cacheKey = `${projectPathFlavor(pathApi)}:${pathApi.resolve(existingAncestor)}`;
-  const fingerprintFor = caseSemanticsFingerprint ?? nativeCaseSemanticsFingerprint;
+  const override = isCaseInsensitiveAt?.(parent);
+  if (override !== undefined) return override;
+  const cacheKey = `${projectPathFlavor(pathApi)}:${pathApi.resolve(parent)}`;
+  const fingerprintFor = fingerprint ?? nativeCaseSemanticsFingerprint;
 
-  // A fingerprint can change while directory entries are being classified.
-  // Never publish evidence captured for an older incarnation under a newer
-  // fingerprint: retry once against the new incarnation, then retain spelling
-  // rather than making an unstable case-folding decision.
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const fingerprintBefore = fingerprintFor(existingAncestor);
-    const cached = fingerprintBefore ? caseSemanticsCache?.get(cacheKey) : undefined;
-    if (cached && cached.fingerprint === fingerprintBefore) return cached.semantics === "insensitive";
+    const before = fingerprintFor(parent);
+    const cached = before ? cache?.get(cacheKey) : undefined;
+    if (cached && cached.fingerprint === before) return cached.semantics === "insensitive";
 
-    const result = readOnlyCaseSemantics(existingAncestor, pathApi, realpathSync, readdirSync);
-    if (result === "unknown") {
-      // Creating and removing the owned probe normally changes the parent
-      // mtime/ctime, so its fingerprint cannot establish cache authority.
-      // The probe remains conclusive for this lookup, but every later lookup
-      // must classify afresh.
-      return probeCaseSemantics(existingAncestor, pathApi, realpathSync, createCaseProbe, removeCaseProbe) === "insensitive";
+    const known = entry ? classifyKnownEntry(parent, entry, pathApi, realpathSync, lstatSync) : "unknown";
+    const semantics = known === "unknown"
+      ? probeCaseSemantics(parent, pathApi, realpathSync, lstatSync, createCaseProbe, removeCaseProbe)
+      : known;
+    const after = fingerprintFor(parent);
+    if (semantics === "unknown") return false;
+
+    // A probe necessarily changes directory metadata. Its cleanup completed
+    // before `after`, making that fingerprint authoritative for the result.
+    if (known === "unknown" && after) {
+      cache?.set(cacheKey, { fingerprint: after, semantics });
+      return semantics === "insensitive";
     }
-
-    const fingerprintAfter = fingerprintFor(existingAncestor);
-    if (fingerprintBefore && fingerprintBefore === fingerprintAfter) {
-      caseSemanticsCache?.set(cacheKey, { fingerprint: fingerprintBefore, semantics: result });
-      return result === "insensitive";
+    if (before && before === after) {
+      cache?.set(cacheKey, { fingerprint: before, semantics });
+      return semantics === "insensitive";
     }
-
-    // No fingerprint means no cache authority, but conclusive read-only
-    // evidence is still useful for this lookup. A changed or missing
-    // fingerprint is retried once; a second unstable attempt falls back to
-    // the conservative, uncached spelling-preserving result below.
-    if (!fingerprintBefore && !fingerprintAfter) return result === "insensitive";
+    if (!before && !after) return semantics === "insensitive";
   }
-
   return false;
 }
 
 /**
- * Preserve the physical spelling of components below a sensitive directory,
- * while folding every component whose *parent* proves it has insensitive
- * entries. This separates identity of an existing directory from the case
- * semantics of that directory's children (which can differ on NTFS).
+ * Fold each component only when its parent proves that the component has a
+ * case alias. This preserves case-sensitive NTFS descendants and APFS aliases.
  */
 function normalizeExistingPathCase(
   canonical: string,
   pathApi: ProjectPathApi,
   realpathSync: (candidate: string) => string,
-  readdirSync: (candidate: string) => string[],
-  isCaseInsensitiveAt?: (existingAncestor: string) => boolean | undefined,
-  createCaseProbe?: (parent: string, pathApi: "posix" | "win32") => string,
-  removeCaseProbe?: (probePath: string) => void,
-  caseSemanticsCache?: Map<string, CaseSemanticsCacheRecord>,
-  caseSemanticsFingerprint?: (existingAncestor: string) => string | undefined,
+  lstatSync: (candidate: string) => Pick<fs.Stats, "dev" | "ino">,
+  options: ProjectPathIdentityOptions,
 ): string {
   const root = pathApi.parse(canonical).root;
-  const normalizedRoot = isCaseInsensitiveAt?.(root) ? root.toLowerCase() : root;
   const segments = pathApi.relative(root, canonical).split(/[\\/]+/).filter(Boolean);
   let parent = root;
   const normalized: string[] = [];
 
   for (const segment of segments) {
-    const isCaseInsensitive = isCaseInsensitiveAt?.(parent)
-      ?? hasCaseInsensitiveEntries(
-        parent,
-        pathApi,
-        realpathSync,
-        readdirSync,
-        createCaseProbe,
-        removeCaseProbe,
-        caseSemanticsCache,
-        caseSemanticsFingerprint,
-      );
-    normalized.push(isCaseInsensitive ? segment.toLowerCase() : segment);
-    // Keep the canonical spelling for probes into the next directory. On an
-    // APFS volume it may be the caller's spelling, but it still resolves to
-    // the same directory when its parent was proven insensitive.
+    const insensitive = hasCaseInsensitiveEntries(
+      parent, segment, pathApi, realpathSync, lstatSync, options.isCaseInsensitiveAt,
+      options.createCaseProbe, options.removeCaseProbe, options.caseSemanticsCache,
+      options.caseSemanticsFingerprint,
+    );
+    normalized.push(insensitive ? segment.toLowerCase() : segment);
     parent = pathApi.join(parent, segment);
   }
-
-  return normalizeProjectPath(pathApi.join(normalizedRoot, ...normalized), pathApi, { foldCase: false });
+  const foldRoot = options.isCaseInsensitiveAt?.(root) === true;
+  return normalizeProjectPath(pathApi.join(foldRoot ? root.toLowerCase() : root, ...normalized), pathApi, { foldCase: false });
 }
 
 /**
- * Canonical project identity. Existing prefixes are resolved through realpath;
- * spelling is folded only when the corresponding parent demonstrably accepts
- * a case-variant spelling for its entries. This prevents a case-sensitive
- * macOS/Linux volume from silently collapsing distinct paths.
+ * Canonical project identity. Existing prefixes are realpath-resolved; spelling
+ * folds only with bounded, per-directory proof of an actual case alias.
  */
 export function canonicalProjectPath(
   rootPath: string,
@@ -427,56 +358,26 @@ export function canonicalProjectPath(
   const pathApi = projectPathApi(rootPath);
   const resolved = pathApi.resolve(rootPath);
   const nativePathApi = options.isNativePathApi?.(projectPathFlavor(pathApi)) ?? isNativeProjectPathApi(pathApi);
-  // Do not ask the host filesystem to resolve a foreign path dialect. Its
-  // lexical identity is still useful for comparing persisted paths, and this
-  // keeps drive and UNC roots from becoming host-relative paths on POSIX.
-  // Foreign Windows spellings retain their historical case-folded identity.
   if (!nativePathApi) return normalizeProjectPath(resolved, pathApi);
 
   const realpathSync = options.realpathSync ?? (candidate => fs.realpathSync(candidate));
-  const readdirSync = options.readdirSync ?? (candidate => fs.readdirSync(candidate));
+  const lstatSync = options.lstatSync ?? (candidate => fs.lstatSync(candidate));
   let existing = resolved;
   const suffix: string[] = [];
   while (true) {
     try {
       const canonical = pathApi.resolve(realpathSync(existing));
-      const isCaseInsensitive = options.isCaseInsensitiveAt?.(canonical)
-        ?? hasCaseInsensitiveEntries(
-          canonical,
-          pathApi,
-          realpathSync,
-          readdirSync,
-          options.createCaseProbe,
-          options.removeCaseProbe,
-          options.caseSemanticsCache,
-          options.caseSemanticsFingerprint,
-        );
-      const normalizedSuffix = isCaseInsensitive
-        ? suffix.reverse().map(segment => segment.toLowerCase())
-        : suffix.reverse();
-      const normalizedCanonical = normalizeExistingPathCase(
-        canonical,
-        pathApi,
-        realpathSync,
-        readdirSync,
-        options.isCaseInsensitiveAt,
-        options.createCaseProbe,
-        options.removeCaseProbe,
-        options.caseSemanticsCache,
+      const insensitive = suffix.length > 0 && hasCaseInsensitiveEntries(
+        canonical, undefined, pathApi, realpathSync, lstatSync, options.isCaseInsensitiveAt,
+        options.createCaseProbe, options.removeCaseProbe, options.caseSemanticsCache,
         options.caseSemanticsFingerprint,
       );
-      return normalizeProjectPath(pathApi.join(normalizedCanonical, ...normalizedSuffix), pathApi, {
-        foldCase: false,
-      });
+      const normalizedSuffix = [...suffix].reverse().map(segment => insensitive ? segment.toLowerCase() : segment);
+      const normalizedCanonical = normalizeExistingPathCase(canonical, pathApi, realpathSync, lstatSync, options);
+      return normalizeProjectPath(pathApi.join(normalizedCanonical, ...normalizedSuffix), pathApi, { foldCase: false });
     } catch {
       const parent = pathApi.dirname(existing);
-      if (parent === existing) {
-        return normalizeProjectPath(resolved, pathApi, {
-          // There is no existing ancestor from which to establish case
-          // behaviour, so retaining spelling is the safe choice.
-          foldCase: false,
-        });
-      }
+      if (parent === existing) return normalizeProjectPath(resolved, pathApi, { foldCase: false });
       suffix.push(pathApi.basename(existing));
       existing = parent;
     }

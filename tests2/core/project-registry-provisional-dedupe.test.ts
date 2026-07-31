@@ -42,42 +42,34 @@ function readStoredProjects(stateDir: string): Array<{ id: string; rootPath: str
   return JSON.parse(fs.readFileSync(path.join(stateDir, "projects.json"), "utf-8"));
 }
 
-test("canonicalProjectPath folds nonexistent suffixes only after a read-only insensitive-entry probe", () => {
-  // This is a POSIX-volume simulation, not a claim about the runner's native
-  // filesystem. Declare the dialect explicitly so a Windows runner exercises
-  // the probe instead of treating the POSIX fixture as foreign.
+test("canonicalProjectPath folds nonexistent suffixes only after an owned insensitive probe", () => {
   const pathApi = path.posix;
   const ancestor = pathApi.join(pathApi.sep, "identity", "Ancestor");
-  const child = pathApi.join(ancestor, "KnownEntry");
-  const insensitiveRealpath = (candidate: string): string => {
-    if (
-      candidate === ancestor
-      || candidate === pathApi.join(pathApi.dirname(ancestor), "ancestor")
-      || candidate === child
-      || candidate === pathApi.join(ancestor, "knownEntry")
-    ) return candidate;
-    throw new Error(`not found: ${candidate}`);
-  };
-  const sensitiveRealpath = (candidate: string): string => {
-    if (candidate === ancestor || candidate === child) return candidate;
-    throw new Error(`not found: ${candidate}`);
-  };
-  const readdirSync = (candidate: string): string[] => {
-    if (candidate === pathApi.dirname(ancestor)) return ["Ancestor"];
-    if (candidate === ancestor) return ["KnownEntry"];
-    throw new Error(`not found: ${candidate}`);
-  };
+  const probe = pathApi.join(ancestor, ".BobbitProbe");
+  const missing = (candidate: string): never => { throw Object.assign(new Error(`not found: ${candidate}`), { code: "ENOENT" }); };
   const nativePosixVolume = { isNativePathApi: (dialect: "posix" | "win32") => dialect === "posix" };
 
   assert.equal(
-    canonicalProjectPath(pathApi.join(ancestor, "FutureProject"), { ...nativePosixVolume, realpathSync: insensitiveRealpath, readdirSync }),
+    canonicalProjectPath(pathApi.join(ancestor, "FutureProject"), {
+      ...nativePosixVolume,
+      realpathSync: candidate => candidate === ancestor || candidate === pathApi.join(pathApi.dirname(ancestor), "ancestor") || candidate.toLowerCase() === probe.toLowerCase() ? candidate : missing(candidate),
+      lstatSync: () => ({ dev: 1, ino: 1 }),
+      createCaseProbe: () => probe,
+      removeCaseProbe: () => {},
+    }),
     pathApi.join("/identity", "ancestor", "futureproject"),
-    "an existing entry that accepts a case variant proves folding of future segments is safe",
+    "a same-entry alternate probe proves folding of future segments is safe",
   );
   assert.equal(
-    canonicalProjectPath(pathApi.join(ancestor, "FutureProject"), { ...nativePosixVolume, realpathSync: sensitiveRealpath, readdirSync }),
+    canonicalProjectPath(pathApi.join(ancestor, "FutureProject"), {
+      ...nativePosixVolume,
+      realpathSync: candidate => candidate === ancestor || candidate === probe ? candidate : missing(candidate),
+      lstatSync: () => ({ dev: 1, ino: 1 }),
+      createCaseProbe: () => probe,
+      removeCaseProbe: () => {},
+    }),
     pathApi.join(ancestor, "FutureProject"),
-    "without that proof, a sensitive filesystem retains the requested suffix spelling",
+    "a missing alternate retains the requested suffix spelling",
   );
 });
 
@@ -133,10 +125,7 @@ test("canonicalProjectPath preserves a suffix below a case-sensitive NTFS child 
       }
       throw new Error(`not found: ${candidate}`);
     },
-    readdirSync: (candidate: string): string[] => {
-      if (candidate === sensitiveChild) return ["KnownEntry"];
-      throw new Error(`not found: ${candidate}`);
-    },
+    lstatSync: (candidate: string) => ({ dev: 1, ino: candidate === sensitiveChild ? 1 : 2 }),
     isNativePathApi: (pathApi: "posix" | "win32") => pathApi === "win32",
   };
 
