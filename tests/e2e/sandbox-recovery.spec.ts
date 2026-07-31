@@ -9,7 +9,7 @@ import path from "node:path";
 import { test, expect } from "./in-process-harness.js";
 import { ProjectSandbox } from "../../src/server/agent/project-sandbox.js";
 import { toDockerPath } from "../../src/server/agent/rpc-bridge.js";
-import { isDockerAvailable } from "./test-utils/docker.js";
+import { isDockerSandboxAvailable } from "./test-utils/docker.js";
 import {
 	apiFetch,
 	nonGitCwd,
@@ -20,13 +20,15 @@ import {
 
 // ---------------------------------------------------------------------------
 // Live Docker inode-remount contract. The v2 E2E runner reports this file as
-// Docker-gated, while this case self-skips only when no usable daemon is
-// reachable. With Docker available, every container and remount assertion runs.
+// Docker-gated, while this case self-skips only when no usable sandbox is
+// reachable — that means both a live daemon AND a locally-built `bobbit-agent`
+// image, since every assertion below runs a container from it. With a usable
+// sandbox, every container and remount assertion runs.
 // ---------------------------------------------------------------------------
 
 test.describe("atomic models.json bind mount", () => {
 	test("ProjectSandbox recreation remounts the atomically published inode", async () => {
-		test.skip(!isDockerAvailable(), "Docker not available");
+		test.skip(!isDockerSandboxAvailable(), "Docker sandbox not available (daemon or bobbit-agent image missing)");
 		test.setTimeout(60_000);
 		const root = mkdtempSync(path.join(tmpdir(), "bobbit-model-remount-"));
 		const modelsJson = path.join(root, "models.json");
