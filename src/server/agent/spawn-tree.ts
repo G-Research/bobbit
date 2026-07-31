@@ -572,9 +572,10 @@ export function spawnTracked(
  */
 export function killAllTracked(signal: "SIGTERM" | "SIGKILL" = "SIGKILL", includeSurvival = false): void {
 	for (const t of Array.from(registry)) {
-		// A child may outlive shutdown only after the sentinel has acknowledged
-		// durable ownership. Before that, failed publication must be reaped.
-		if (!includeSurvival && t._survivesShutdown && t._posixSentinelReady) continue;
+		// A child may outlive shutdown only after its platform-specific ownership
+		// barrier is established: a Windows Job or POSIX sentinel acknowledgement.
+		// Before that, failed publication must be reaped.
+		if (!includeSurvival && t._survivesShutdown && (t._windowsJobOwned || t._posixSentinelReady)) continue;
 		try { t.killTree(signal, 0); } catch { /* best-effort */ }
 	}
 }

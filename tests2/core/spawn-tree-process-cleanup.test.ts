@@ -4,7 +4,7 @@ import fs, { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
-import { killTreeByPid, spawnTracked } from "../../src/server/agent/spawn-tree.js";
+import { killAllTracked, killTreeByPid, spawnTracked } from "../../src/server/agent/spawn-tree.js";
 import { VerificationHarness, type ActiveVerification } from "../../src/server/agent/verification-harness.js";
 import { createManualClock } from "../harness/clock.js";
 
@@ -565,6 +565,51 @@ describe("spawnTracked timeout cleanup", () => {
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
 		}
+	});
+
+	it("keeps a survival-marked Windows Job child alive during shutdown", () => {
+		const root = fakeChild(2_147_483_646);
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "win32",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			windowsJobSupervisor: true,
+		});
+		tracked.markSurvival();
+		killAllTracked();
+		expect(root.killCalls).toEqual([]);
+		root.emit("close", 0, null);
+	});
+
+	it("reaps a POSIX survival child before readiness but preserves it after readiness", () => {
+		const pendingRoot = fakeChild(123_458);
+		const pendingSignals: NodeJS.Signals[] = [];
+		const pending = spawnTracked("node", ["worker"], {
+			platform: "linux",
+			spawnImpl: (() => pendingRoot) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			signalProcessGroup: (_pgid, signal) => { pendingSignals.push(signal); },
+		});
+		pending.markSurvival();
+		killAllTracked();
+		expect(pendingSignals).toEqual(["SIGKILL"]);
+		pendingRoot.emit("close", null, "SIGKILL");
+
+		const readyRoot = fakeChild(123_459);
+		const readySignals: NodeJS.Signals[] = [];
+		const ready = spawnTracked("node", ["worker"], {
+			platform: "linux",
+			spawnImpl: (() => readyRoot) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			signalProcessGroup: (_pgid, signal) => { readySignals.push(signal); },
+		});
+		ready.markSurvival();
+		readyRoot.readyPipe.emit("data", Buffer.from("."));
+		killAllTracked();
+		expect(readySignals).toEqual([]);
+		ready.killTree("SIGKILL");
+		readyRoot.emit("close", null, "SIGKILL");
 	});
 
 	it("Windows treats root exit as a PID-reuse boundary, even before inherited stdio closes", async () => {
