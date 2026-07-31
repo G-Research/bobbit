@@ -4,7 +4,7 @@ import path from "node:path";
 import { buildBundle } from "../fixtures/build-bundle.js";
 
 const SHELL = path.resolve("tests/ui-fixtures/fixture-shell.html");
-const FIXTURE_ORIGIN = "http://fixture.test";
+const FIXTURE_ORIGIN = "http://fixture.localhost";
 const FIXTURE_SHELL_URL = `${FIXTURE_ORIGIN}/fixture-shell.html`;
 const ENTRY = path.resolve("tests/ui-fixtures/preview-panel-entry.ts");
 const DYNAMIC_WORKSPACE_ENTRY = path.resolve("tests/ui-fixtures/dynamic-panel-workspace-fixture-entry.ts");
