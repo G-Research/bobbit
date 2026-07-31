@@ -7,7 +7,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { refreshOAuthToken } from "../auth/oauth.js";
+import { invalidateRejectedAnthropicDirectCredential, refreshOAuthToken } from "../auth/oauth.js";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { createAnthropicDirectHeaders, type AnthropicDirectCredentials } from "./anthropic-direct-request.js";
 import { sanitizeModelErrorText } from "./model-error-sanitizer.js";
@@ -420,6 +420,9 @@ async function generateViaAnthropic(
 		// repeat the same Pi-backed credential resolution.
 
 		if (!response.ok) {
+			if (auth.type === "oauth" && (response.status === 401 || response.status === 403)) {
+				await invalidateRejectedAnthropicDirectCredential(auth.access);
+			}
 			console.error(`[title-gen] Anthropic ${describeAnthropicFailure(response.status)}`);
 			return null;
 		}
@@ -611,6 +614,9 @@ async function generateGoalSummaryViaAnthropic(
 		// repeat the same Pi-backed credential resolution.
 
 		if (!response.ok) {
+			if (auth.type === "oauth" && (response.status === 401 || response.status === 403)) {
+				await invalidateRejectedAnthropicDirectCredential(auth.access);
+			}
 			console.error(`[title-gen] Anthropic ${describeAnthropicFailure(response.status)}`);
 			return null;
 		}

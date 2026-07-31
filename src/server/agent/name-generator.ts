@@ -6,7 +6,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { refreshOAuthToken } from "../auth/oauth.js";
+import { invalidateRejectedAnthropicDirectCredential, refreshOAuthToken } from "../auth/oauth.js";
 import { redactSensitive } from "../auth/redact.js";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { createAnthropicDirectHeaders, type AnthropicDirectCredentials } from "./anthropic-direct-request.js";
@@ -138,6 +138,9 @@ Output a JSON array of 500 strings. Output ONLY the JSON array, no explanation, 
 			// The body is classified but never emitted because upstream payloads can
 			// reflect request secrets or contain arbitrary sensitive text.
 			const errorText = await response.text();
+			if (auth.type === "oauth" && (response.status === 401 || response.status === 403)) {
+				await invalidateRejectedAnthropicDirectCredential(auth.access);
+			}
 			console.error(`[name-gen] Anthropic completion failed: ${anthropicErrorSummary(response.status, errorText)}`);
 			return;
 		}

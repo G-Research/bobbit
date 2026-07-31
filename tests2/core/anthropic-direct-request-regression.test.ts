@@ -8,6 +8,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 
 import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
+import { oauthStatus, refreshOAuthToken } from "../../src/server/auth/oauth.js";
 import { generateRoleNames } from "../../src/server/agent/name-generator.js";
 import { generateGoalSummaryTitle, generateSessionTitle } from "../../src/server/agent/title-generator.js";
 
@@ -115,6 +116,51 @@ describe("direct Anthropic request regressions", () => {
 				"x-app": "cli",
 			},
 		]);
+	});
+
+	it("does not authenticate incomplete OAuth rows and persists direct OAuth rejection", async () => {
+		useAuth({ type: "oauth", access: randomUUID(), expires: Date.now() + 60_000 });
+		assert.deepEqual(oauthStatus("anthropic"), { authenticated: false, provider: "anthropic" });
+
+		const access = randomUUID();
+		writeFileSync(path.join(agentDir!, "auth.json"), JSON.stringify({
+			anthropic: { type: "oauth", access, refresh: randomUUID(), expires: Date.now() + 60_000 },
+		}));
+		let requests = 0;
+		const result = await generateSessionTitle([{ role: "user", content: "Persist rejected state" }], {
+			namingModel: "anthropic/claude-opus-5",
+			availableModels: [],
+			fetchImpl: (async () => {
+				requests++;
+				return response(401, "unauthorized");
+			}) as typeof fetch,
+			anthropicOAuthTokenResolver: async () => access,
+		});
+
+		assert.equal(result, null);
+		assert.equal(requests, 1);
+		assert.deepEqual(oauthStatus("anthropic"), { authenticated: false, provider: "anthropic" });
+	});
+
+	it("keeps an OAuth credential on a transient Pi response body containing terminal-looking numerals", async () => {
+		const access = randomUUID();
+		useAuth({ type: "oauth", access, refresh: randomUUID(), expires: Date.now() - 60_000 });
+		const originalFetch = globalThis.fetch;
+		let requests = 0;
+		globalThis.fetch = (async () => {
+			requests++;
+			return response(500, "retry after 401 milliseconds; HTTP request failed. status=401; url=https://platform.claude.com/v1/oauth/token; body=ignored");
+		}) as typeof fetch;
+		try {
+			assert.equal(await refreshOAuthToken(), null);
+			assert.equal(requests, 1);
+			const status = oauthStatus("anthropic");
+			assert.equal(status.authenticated, true);
+			assert.equal(status.provider, "anthropic");
+			assert.equal(typeof status.expires, "number");
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
 	});
 
 	it("keeps title API-key requests isolated from Claude Code OAuth headers", async () => {

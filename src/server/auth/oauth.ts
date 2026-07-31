@@ -224,30 +224,73 @@ function hasErrorCode(error: unknown, expected: string): boolean {
 
 /** A rejected refresh token is terminal; network and provider failures are not. */
 function isDefinitiveRefreshFailure(error: unknown): boolean {
+	// Prefer structured transport metadata. Provider response bodies are
+	// untrusted text and can contain arbitrary numerals (including 400/401/403)
+	// during a transient failure; parsing them would incorrectly delete a usable
+	// credential.
 	let current: unknown = error;
 	for (let depth = 0; depth < 3 && current; depth += 1) {
-		if (typeof current === "object" && current !== null) {
-			const candidate = current as { status?: unknown; statusCode?: unknown; response?: { status?: unknown }; cause?: unknown };
-			if ([400, 401, 403].includes(Number(candidate.status))
-				|| [400, 401, 403].includes(Number(candidate.statusCode))
-				|| [400, 401, 403].includes(Number(candidate.response?.status))) return true;
-			current = candidate.cause;
-			continue;
-		}
-		break;
+		if (typeof current !== "object" || current === null) break;
+		const candidate = current as { status?: unknown; statusCode?: unknown; response?: { status?: unknown }; cause?: unknown };
+		if ([400, 401, 403].includes(Number(candidate.status))
+			|| [400, 401, 403].includes(Number(candidate.statusCode))
+			|| [400, 401, 403].includes(Number(candidate.response?.status))) return true;
+		current = candidate.cause;
 	}
-	const message = error instanceof Error ? error.message : String(error ?? "");
-	return /\b(?:HTTP\s+)?(?:400|401|403)\b/.test(message);
+
+	// Pi 0.82.1's Anthropic refresh adapter wraps its response as
+	// `HTTP request failed. status=<n>; url=<endpoint>; body=<untrusted>`.
+	// Read only that *first* envelope: a later lookalike can only have arrived
+	// in the provider body and must not become a terminal credential decision.
+	const message = error instanceof Error ? error.message : "";
+	const marker = "HTTP request failed. status=";
+	const start = message.indexOf(marker);
+	if (start < 0) return false;
+	const envelope = /^HTTP request failed\. status=(\d+); url=https:\/\/platform\.claude\.com\/v1\/oauth\/token; body=/.exec(message.slice(start));
+	return envelope !== null && [400, 401, 403].includes(Number(envelope[1]));
 }
 
-async function invalidateRejectedAnthropicCredential(attempted: OAuthCredential | undefined): Promise<void> {
+function isCompleteAnthropicOAuthCredential(credential: unknown): credential is OAuthCredential {
+	if (typeof credential !== "object" || credential === null) return false;
+	const candidate = credential as { type?: unknown; access?: unknown; refresh?: unknown; expires?: unknown };
+	return candidate.type === "oauth"
+		&& typeof candidate.access === "string" && candidate.access.length > 0
+		&& typeof candidate.refresh === "string" && candidate.refresh.length > 0
+		&& typeof candidate.expires === "number" && Number.isFinite(candidate.expires);
+}
+
+async function invalidateRejectedAnthropicCredential(attempted: OAuthCredential | undefined): Promise<boolean> {
 	// A concurrent login/refresh may have replaced this entry while Pi contacted
 	// the provider. Only delete the exact rejected snapshot.
-	if (!attempted) return;
+	if (!isCompleteAnthropicOAuthCredential(attempted)) return false;
+	let cleared = false;
 	await getOAuthCredentialStore().mutate("anthropic", async (current) => {
 		if (current?.type !== "oauth" || current.access !== attempted.access || current.refresh !== attempted.refresh) return undefined;
+		cleared = true;
 		return deleteCredential;
 	});
+	return cleared;
+}
+
+/**
+ * Persist a definitive rejection from a direct Anthropic Messages request.
+ * The sent access value is the concurrency guard: a newly logged-in or rotated
+ * credential must never be deleted because an earlier request was rejected.
+ */
+export async function invalidateRejectedAnthropicDirectCredential(access: string): Promise<boolean> {
+	if (!access) return false;
+	try {
+		let cleared = false;
+		await getOAuthCredentialStore().mutate("anthropic", async (current) => {
+			if (current?.type !== "oauth" || current.access !== access) return undefined;
+			cleared = true;
+			return deleteCredential;
+		});
+		return cleared;
+	} catch (error) {
+		console.error(`[oauth] Could not clear rejected Anthropic credentials: ${redactSensitive(error instanceof Error ? error.message : String(error))}`);
+		return false;
+	}
 }
 
 function sanitizedOAuthFailure(error: unknown): string {
@@ -759,6 +802,11 @@ export function oauthStatus(providerInput?: string): { authenticated: boolean; e
 	const provider = normalizeProvider(providerInput);
 	const credential = getOAuthCredentialStore().readStoredCredentialSync(provider);
 	if (!credential || credential.type !== "oauth") return { authenticated: false, provider };
+	// Pi's Anthropic OAuth contract requires an access token, refresh token, and
+	// expiry. Never advertise a corrupt or partial row as an account login.
+	if (provider === "anthropic" && !isCompleteAnthropicOAuthCredential(credential)) {
+		return { authenticated: false, provider };
+	}
 	const expired = typeof credential.expires === "number" && Date.now() > credential.expires;
 	const refreshable = typeof credential.refresh === "string" && credential.refresh.length > 0;
 	const result: { authenticated: boolean; expires?: number; provider: OAuthProviderId; email?: string } = {
@@ -804,15 +852,17 @@ export function oauthFlowStatus(
 /** Resolve a current Anthropic access token through Pi's locked refresh path. */
 export async function refreshOAuthToken(_fetchImpl: typeof fetch = defaultFetch): Promise<string | null> {
 	const stored = getOAuthCredentialStore().readStoredCredentialSync("anthropic");
-	const attempted = stored?.type === "oauth" ? stored : undefined;
+	const attempted = isCompleteAnthropicOAuthCredential(stored) ? stored : undefined;
+	if (!attempted) return null;
 	try {
 		const resolved = await getOAuthModels().getAuth("anthropic");
 		return typeof resolved?.auth.apiKey === "string" ? resolved.auth.apiKey : null;
 	} catch (error) {
 		if (isDefinitiveRefreshFailure(error)) {
 			try {
-				await invalidateRejectedAnthropicCredential(attempted);
-				console.warn("[oauth] Anthropic credentials were rejected and have been cleared");
+				if (await invalidateRejectedAnthropicCredential(attempted)) {
+					console.warn("[oauth] Anthropic credentials were rejected and have been cleared");
+				}
 			} catch (invalidationError) {
 				console.error(`[oauth] Could not clear rejected Anthropic credentials: ${redactSensitive(invalidationError instanceof Error ? invalidationError.message : String(invalidationError))}`);
 			}
