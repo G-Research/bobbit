@@ -206,6 +206,46 @@ describe("browser cookie eligibility", () => {
 		});
 	});
 
+	it("accepts HTTPS loopback Vite terminating TLS for an HTTP loopback gateway only in explicit proxy mode", () => {
+		const viteTlsTermination = {
+			isTls: false,
+			headers: {
+				host: "127.0.0.1:3001",
+				origin: "https://localhost:5173",
+			},
+		};
+		assert.equal(classify(viteTlsTermination, {
+			viteDevProxy: true,
+			configuredHost: "127.0.0.1",
+		}).mayBootstrap, true);
+		assertDenied("origin-mismatch", viteTlsTermination, {
+			viteDevProxy: false,
+			configuredHost: "127.0.0.1",
+		});
+
+		assertDenied("origin-mismatch", {
+			isTls: true,
+			headers: {
+				host: "localhost:3001",
+				origin: "http://localhost:5173",
+			},
+		}, {
+			viteDevProxy: true,
+			configuredHost: "localhost",
+		});
+		assertDenied("insecure-non-loopback-origin", {
+			isTls: false,
+			headers: {
+				host: "100.64.0.8:3001",
+				origin: "https://100.64.0.8:5173",
+				"x-forwarded-proto": "https",
+			},
+		}, {
+			viteDevProxy: true,
+			configuredHost: "100.64.0.8",
+		});
+	});
+
 	it("accepts the HTTPS Vite exception only when request and Origin use the configured remote host", () => {
 		assert.equal(classify({
 			headers: {

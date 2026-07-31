@@ -26,10 +26,11 @@ interface GatewayBoundaryModule {
 	gatewayUrl(route: GatewayRoute, explicitBase?: string): string;
 	gatewayWsUrl(route: GatewayRoute, explicitBase?: string): string;
 	gatewayAuthorizationHeaders(token?: string | null): Record<string, string>;
+	confirmGatewayCookieAuthentication(baseUrl: string): Promise<boolean>;
 	gatewayNativeTransportSupport(explicitBase?: string): { supported: boolean; message?: string };
 	gatewayMobileHandoff(): { supported: true; url: string } | { supported: false; message: string };
 	activeGatewayConnection(): Readonly<{ baseUrl: string; token: string }>;
-	commitGatewayConnection(baseUrl: string, token: string, options?: { localhostTrusted?: boolean }): { persisted: boolean; warning?: string };
+	commitGatewayConnection(baseUrl: string, token: string, options?: { localhostTrusted?: boolean; cookieConfirmed?: boolean }): { persisted: boolean; warning?: string };
 	recordGatewayLocalhostMode(localhostTrusted: boolean): void;
 	gatewayFetch(route: GatewayRoute, init?: RequestInit): Promise<Response>;
 	prepareRuntimeServiceWorkerMount(environment?: any): Promise<{
@@ -262,6 +263,33 @@ describe("gateway authorization and fetch", () => {
 		assert.equal(new Headers((fetchSpy.mock.calls[3]?.[1] as RequestInit).headers).get("Content-Type"), "application/json");
 	});
 
+	it("confirms cookie authority only through a protected credentialed request without a bearer", async () => {
+		const fetchSpy = vi.fn()
+			.mockResolvedValueOnce(new Response("{}", { status: 200 }))
+			.mockResolvedValueOnce(new Response("unauthorized", { status: 401 }))
+			.mockRejectedValueOnce(new Error("redirect or network failure"));
+		installBrowser({ origin: "https://host.example", basePath: "/bobbit", fetch: fetchSpy as unknown as typeof fetch });
+		const boundary = await loadBoundary();
+
+		assert.equal(await boundary.confirmGatewayCookieAuthentication("https://host.example/bobbit"), true);
+		assert.equal(await boundary.confirmGatewayCookieAuthentication("https://host.example/bobbit"), false);
+		assert.equal(await boundary.confirmGatewayCookieAuthentication("https://host.example/bobbit"), false);
+		for (const [input, init] of fetchSpy.mock.calls) {
+			assert.equal(String(input), "https://host.example/bobbit/api/config/cwd");
+			assert.equal((init as RequestInit).credentials, "include");
+			assert.equal((init as RequestInit).redirect, "error");
+			assert.equal(new Headers((init as RequestInit).headers).has("Authorization"), false);
+		}
+	});
+
+	it("does not attempt cookie confirmation for a URL-incompatible remote gateway", async () => {
+		const fetchSpy = vi.fn();
+		installBrowser({ origin: "https://ui.example", fetch: fetchSpy as unknown as typeof fetch });
+		const boundary = await loadBoundary();
+		assert.equal(await boundary.confirmGatewayCookieAuthentication("https://gateway.example/team/bobbit"), false);
+		assert.equal(fetchSpy.mock.calls.length, 0);
+	});
+
 	it("never sends the localhost sentinel as an HTTP bearer", async () => {
 		const fetchSpy = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("ok"));
 		const storage = installBrowser({ origin: "http://localhost:3001", fetch: fetchSpy as unknown as typeof fetch });
@@ -274,34 +302,68 @@ describe("gateway authorization and fetch", () => {
 		assert.equal(new Headers(init.headers).has("Authorization"), false);
 	});
 
-	it("keeps a same-host bearer only in memory and reloads through the bound cookie", async () => {
+	it("persists the sentinel only after cookie confirmation and reloads through the proven cookie", async () => {
 		const fetchSpy = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("ok"));
 		const storage = installBrowser({ origin: "https://host.example", basePath: "/bobbit", fetch: fetchSpy as unknown as typeof fetch });
 		const boundary = await loadBoundary();
+		const cookieConfirmed = await boundary.confirmGatewayCookieAuthentication("https://host.example/bobbit");
+		assert.equal(cookieConfirmed, true);
 
-		assert.deepEqual(boundary.commitGatewayConnection("https://host.example/bobbit", "admin-secret"), { persisted: true });
+		assert.deepEqual(boundary.commitGatewayConnection("https://host.example/bobbit", "admin-secret", {
+			cookieConfirmed,
+		}), { persisted: true });
 		assert.deepEqual(boundary.activeGatewayConnection(), { baseUrl: "https://host.example/bobbit", token: "admin-secret" });
+		assert.deepEqual(boundary.gatewayNativeTransportSupport(), { supported: true });
 		assert.equal(storage.getItem("gateway.url"), "https://host.example/bobbit");
-		assert.equal(storage.getItem("gateway.token"), "localhost", "origin-wide storage must not retain the bearer");
+		assert.equal(storage.getItem("gateway.token"), "localhost", "origin-wide storage must not retain the bearer after proof");
 
 		await boundary.gatewayFetch(gatewayRoute("/api/current-tab"));
-		let init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+		let init = fetchSpy.mock.calls[1]?.[1] as RequestInit;
 		assert.equal(new Headers(init.headers).get("Authorization"), "Bearer admin-secret", "the authenticated tab retains its in-memory credential");
 
 		boundary.__resetGatewayConnectionForTests();
 		assert.deepEqual(boundary.activeGatewayConnection(), { baseUrl: "https://host.example/bobbit", token: "localhost" });
+		assert.deepEqual(boundary.gatewayNativeTransportSupport(), { supported: true });
 		await boundary.gatewayFetch(gatewayRoute("/api/reloaded-tab"));
-		init = fetchSpy.mock.calls[1]?.[1] as RequestInit;
+		init = fetchSpy.mock.calls[2]?.[1] as RequestInit;
 		assert.equal(init.credentials, "include");
 		assert.equal(new Headers(init.headers).has("Authorization"), false, "reload relies on the bound HttpOnly cookie");
 	});
 
-	it("uses cookie persistence across same-host ports and a terminal DNS dot", async () => {
+	it("retains and reloads with the real bearer when cookie confirmation fails", async () => {
+		const fetchSpy = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => (
+			String(input).endsWith("/api/config/cwd")
+				? new Response("unauthorized", { status: 401 })
+				: new Response("ok")
+		));
+		const storage = installBrowser({ origin: "https://host.example", basePath: "/bobbit", fetch: fetchSpy as unknown as typeof fetch });
+		const boundary = await loadBoundary();
+		const cookieConfirmed = await boundary.confirmGatewayCookieAuthentication("https://host.example/bobbit");
+		assert.equal(cookieConfirmed, false);
+
+		boundary.commitGatewayConnection("https://host.example/bobbit", "admin-secret", { cookieConfirmed });
+		assert.equal(storage.getItem("gateway.token"), "admin-secret");
+		assert.equal(storage.getItem("gateway.auth-mode"), "bearer");
+		assert.equal(boundary.gatewayNativeTransportSupport().supported, false);
+		assert.match(boundary.gatewayNativeTransportSupport().message ?? "", /could not be confirmed/i);
+
+		boundary.__resetGatewayConnectionForTests();
+		assert.deepEqual(boundary.activeGatewayConnection(), { baseUrl: "https://host.example/bobbit", token: "admin-secret" });
+		assert.equal(boundary.gatewayNativeTransportSupport().supported, false);
+		await boundary.gatewayFetch(gatewayRoute("/api/reloaded-tab"));
+		const init = fetchSpy.mock.calls[1]?.[1] as RequestInit;
+		assert.equal(new Headers(init.headers).get("Authorization"), "Bearer admin-secret");
+	});
+
+	it("uses confirmed cookie persistence across same-host ports and a terminal DNS dot", async () => {
 		const storage = installBrowser({ origin: "https://host.example.:5173", basePath: "/ui" });
 		const boundary = await loadBoundary();
 
-		assert.deepEqual(boundary.gatewayNativeTransportSupport("https://HOST.example:3001/team/bobbit"), { supported: true });
-		boundary.commitGatewayConnection("https://host.example:3001/team/bobbit", "same-host-secret");
+		assert.equal(boundary.gatewayNativeTransportSupport("https://HOST.example:3001/team/bobbit").supported, false);
+		boundary.commitGatewayConnection("https://host.example:3001/team/bobbit", "same-host-secret", {
+			cookieConfirmed: true,
+		});
+		assert.deepEqual(boundary.gatewayNativeTransportSupport(), { supported: true });
 		assert.equal(storage.getItem("gateway.token"), "localhost");
 		assert.equal(storage.getItem("gateway.auth-mode"), "cookie");
 		assert.equal(storage.getItem("gateway.url"), "https://host.example:3001/team/bobbit");
@@ -321,11 +383,14 @@ describe("gateway authorization and fetch", () => {
 		});
 	});
 
-	it("keeps loopback HTTP eligible for cookie persistence", async () => {
+	it("keeps confirmed loopback HTTP eligible for cookie persistence", async () => {
 		const storage = installBrowser({ origin: "http://app.localhost:5173" });
 		const boundary = await loadBoundary();
-		assert.equal(boundary.gatewayNativeTransportSupport("http://app.localhost:3001/bobbit").supported, true);
-		boundary.commitGatewayConnection("http://app.localhost:3001/bobbit", "loopback-secret");
+		assert.equal(boundary.gatewayNativeTransportSupport("http://app.localhost:3001/bobbit").supported, false);
+		boundary.commitGatewayConnection("http://app.localhost:3001/bobbit", "loopback-secret", {
+			cookieConfirmed: true,
+		});
+		assert.deepEqual(boundary.gatewayNativeTransportSupport(), { supported: true });
 		assert.equal(storage.getItem("gateway.token"), "localhost");
 		assert.equal(storage.getItem("gateway.auth-mode"), "cookie");
 	});
@@ -354,7 +419,7 @@ describe("gateway authorization and fetch", () => {
 	it("requires token re-entry for cookie-only phone handoff after reload", async () => {
 		const storage = installBrowser({ origin: "https://host.example", basePath: "/bobbit" });
 		const boundary = await loadBoundary();
-		boundary.commitGatewayConnection("https://host.example/bobbit", "admin secret");
+		boundary.commitGatewayConnection("https://host.example/bobbit", "admin secret", { cookieConfirmed: true });
 		assert.deepEqual(boundary.gatewayMobileHandoff(), {
 			supported: true,
 			url: "https://host.example/bobbit/?token=admin%20secret",
