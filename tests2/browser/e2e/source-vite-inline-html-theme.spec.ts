@@ -358,7 +358,7 @@ test.describe("source Vite inline HTML theme runtime", () => {
 				{ name: "bobbit_session", value: "host-bobbit-authority", url: gatewayBaseUrl, sameSite: "Strict" },
 				{ name: "sibling_session", value: "host-sibling-authority", url: viteBaseUrl, sameSite: "Strict" },
 			]);
-			const browserCookies = await page.context().cookies(gatewayBaseUrl);
+			const browserCookies = await page.context().cookies([gatewayBaseUrl, viteBaseUrl]);
 			expect(
 				browserCookies.some(cookie => cookie.name === "bobbit_session")
 					&& browserCookies.some(cookie => cookie.name === "sibling_session"),
