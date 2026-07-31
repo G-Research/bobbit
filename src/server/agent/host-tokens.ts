@@ -192,8 +192,8 @@ function hasCurrentOAuthAccess(value: unknown, now = Date.now()): boolean {
 }
 
 /**
- * Refresh the host credential without exporting it. Kept as the narrow
- * gateway-side refresh seam; sandbox setup deliberately does not call it.
+ * Refresh the host credential without exporting it. Sandbox wiring invokes this
+ * only after explicit opt-in, then re-reads and sanitizes the fresh credential.
  */
 export async function refreshSandboxAnthropicOAuthCredential(): Promise<boolean> {
 	const credential = readHostAuthJson()?.anthropic;

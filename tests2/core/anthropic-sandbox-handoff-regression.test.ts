@@ -3,18 +3,23 @@ guardProcessEnv();
 
 import assert from "node:assert/strict";
 import { afterEach, describe, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 
 import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
+import { SessionManager } from "../../src/server/agent/session-manager.js";
 import {
 	buildSandboxAgentAuthJson,
 	refreshSandboxAnthropicOAuthCredential,
 	resolveHostTokenValue,
+	sandboxAgentAuthPath,
 	sandboxTokenPolicyAllowsAnthropicAuth,
 } from "../../src/server/agent/host-tokens.js";
 
+const originalBobbitAgentDir = process.env.BOBBIT_AGENT_DIR;
+const originalBobbitDir = process.env.BOBBIT_DIR;
+const originalBobbitSecretsDir = process.env.BOBBIT_SECRETS_DIR;
 let root: string | undefined;
 let agentDir: string | undefined;
 
@@ -22,9 +27,14 @@ function useHostAuth(auth: unknown): void {
 	root = mkdtempSync(path.join(tmpdir(), "bobbit-anthropic-sandbox-"));
 	agentDir = path.join(root, "agent");
 	process.env.BOBBIT_AGENT_DIR = agentDir;
+	process.env.BOBBIT_DIR = root;
 	process.env.BOBBIT_SECRETS_DIR = path.join(root, "secrets");
 	resetAgentDirStateForTests();
 	mkdirSync(agentDir, { recursive: true });
+	mkdirSync(path.join(root, "secrets"), { recursive: true });
+	mkdirSync(path.join(root, "state"), { recursive: true });
+	writeFileSync(path.join(root, "state", "gateway-url"), "http://127.0.0.1:3001\n");
+	writeFileSync(path.join(root, "secrets", "token"), `${"a".repeat(64)}\n`);
 	writeFileSync(path.join(agentDir, "auth.json"), JSON.stringify({
 		anthropic: auth,
 		"openai-codex": { type: "oauth", access: "unrelated-codex-access" },
@@ -37,6 +47,12 @@ afterEach(() => {
 	if (root) rmSync(root, { recursive: true, force: true });
 	root = undefined;
 	agentDir = undefined;
+	if (originalBobbitAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
+	else process.env.BOBBIT_AGENT_DIR = originalBobbitAgentDir;
+	if (originalBobbitDir === undefined) delete process.env.BOBBIT_DIR;
+	else process.env.BOBBIT_DIR = originalBobbitDir;
+	if (originalBobbitSecretsDir === undefined) delete process.env.BOBBIT_SECRETS_DIR;
+	else process.env.BOBBIT_SECRETS_DIR = originalBobbitSecretsDir;
 	resetAgentDirStateForTests();
 });
 
@@ -92,5 +108,80 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 		assert.deepEqual(buildSandboxAgentAuthJson({ includeAnthropicAuth: true }), {
 			anthropic: { type: "oauth", access: "rotated-access", expires: refreshedExpiry },
 		});
+	});
+
+	it("refreshes an explicitly opted-in host credential during wiring and exports only its minimal entry", async () => {
+		const now = 1_700_000_000_000;
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		useHostAuth({ type: "oauth", access: "expired-access", refresh: "refresh-metadata", expires: now - 1 });
+		const refreshRequest = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+			access_token: "rotated-access",
+			refresh_token: "rotated-refresh",
+			expires_in: 3_600,
+		}), { status: 200, headers: { "Content-Type": "application/json" } }));
+		const manager: any = new SessionManager();
+		manager.projectContextManager = null;
+		manager.projectConfigStore = {
+			get: (key: string) => key === "sandbox" ? "docker" : undefined,
+			getSandboxTokens: () => [{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true }],
+		};
+		manager.sandboxTokenStore = null;
+		manager.sandboxManager = {
+			ensureForProject: async () => {},
+			get: () => ({ getContainerId: async () => "container-test" }),
+		};
+		const bridgeOptions: any = { cwd: "/workspace", env: {} };
+
+		assert.equal(await manager.applySandboxWiring(bridgeOptions, "session-test", { projectId: "project-test" }), true);
+		assert.equal(refreshRequest.mock.calls.length, 1);
+		assert.deepEqual(bridgeOptions.sandboxCredentials, {}, "host OAuth must not also cross through the raw env handoff");
+		assert.deepEqual(JSON.parse(readFileSync(sandboxAgentAuthPath("project-test"), "utf-8")), {
+			anthropic: { type: "oauth", access: "rotated-access", expires: now + 3_600_000 - 300_000 },
+		});
+	});
+
+	it("keeps an explicit project credential ahead of host OAuth during wiring", async () => {
+		useHostAuth({ type: "oauth", access: "expired-access", refresh: "refresh-metadata", expires: Date.now() - 1 });
+		const refreshRequest = vi.spyOn(globalThis, "fetch");
+		const manager: any = new SessionManager();
+		manager.projectContextManager = null;
+		manager.projectConfigStore = {
+			get: (key: string) => key === "sandbox" ? "docker" : undefined,
+			getSandboxTokens: () => [{ key: "ANTHROPIC_API_KEY", enabled: true, value: "project-provided-key" }],
+		};
+		manager.sandboxTokenStore = null;
+		manager.sandboxManager = {
+			ensureForProject: async () => {},
+			get: () => ({ getContainerId: async () => "container-test" }),
+		};
+		const bridgeOptions: any = { cwd: "/workspace", env: {} };
+
+		assert.equal(await manager.applySandboxWiring(bridgeOptions, "session-test", { projectId: "project-test" }), true);
+		assert.equal(refreshRequest.mock.calls.length, 0, "project credentials must suppress host OAuth refresh");
+		assert.deepEqual(bridgeOptions.sandboxCredentials, { ANTHROPIC_API_KEY: "project-provided-key" });
+		assert.deepEqual(JSON.parse(readFileSync(sandboxAgentAuthPath("project-test"), "utf-8")), {});
+	});
+
+	it("denies host OAuth by default during sandbox wiring", async () => {
+		useHostAuth({ type: "oauth", access: "current-host-access", refresh: "refresh-metadata", expires: Date.now() + 60_000 });
+		const refreshRequest = vi.spyOn(globalThis, "fetch");
+		const manager: any = new SessionManager();
+		manager.projectContextManager = null;
+		manager.projectConfigStore = {
+			get: (key: string) => key === "sandbox" ? "docker" : undefined,
+			getSandboxTokens: () => [],
+		};
+		manager.sandboxTokenStore = null;
+		manager.sandboxManager = {
+			ensureForProject: async () => {},
+			get: () => ({ getContainerId: async () => "container-test" }),
+		};
+		const bridgeOptions: any = { cwd: "/workspace", env: {} };
+
+		assert.equal(await manager.applySandboxWiring(bridgeOptions, "session-test", { projectId: "project-test" }), true);
+		assert.equal(refreshRequest.mock.calls.length, 0, "default sandbox setup must not inspect host OAuth");
+		assert.deepEqual(bridgeOptions.sandboxCredentials, {});
+		const sandboxAuth = JSON.parse(readFileSync(sandboxAgentAuthPath("project-test"), "utf-8"));
+		assert.equal(sandboxAuth.anthropic, undefined);
 	});
 });

@@ -2996,10 +2996,9 @@ export class SessionManager {
 			bridgeOptions.cwd = applySandboxCwdOffset("/workspace", opts?.sandboxCwdOffset);
 		}
 
-		// Resolve sandbox tokens from unified config (with legacy fallback).
 		// Host Anthropic OAuth is never a default sandbox credential. An enabled,
-		// empty ANTHROPIC_OAUTH_TOKEN entry is the explicit opt-in for a current
-		// access-token handoff; a project secret always wins and suppresses it.
+		// empty ANTHROPIC_OAUTH_TOKEN entry opts in to one current, non-renewable
+		// auth.json entry. Project credentials win and never trigger host refresh.
 		const secretsStore = projectContext?.secretsStore ?? null;
 		const sandboxTokenEntries = projectConfigStore?.getSandboxTokens() ?? [];
 		const sandboxAuthPolicy = resolveSandboxAgentAuthPolicy(sandboxTokenEntries);
@@ -3007,18 +3006,26 @@ export class SessionManager {
 			sandboxTokenEntries,
 			secretsStore?.getAll(),
 		);
-		const allowStoredAnthropicOAuth = !explicitProjectAnthropicCredential
+		const includeAnthropicAuth = !explicitProjectAnthropicCredential
 			&& sandboxTokenPolicyAllowsAnthropicAuth(sandboxTokenEntries);
+		const anthropicOAuthCurrent = includeAnthropicAuth
+			&& await refreshSandboxAnthropicOAuthCredential();
+
+		// Host OAuth crosses the boundary only through the sanitized auth.json
+		// entry below. This excludes its renewable refresh token and avoids a
+		// second raw-token environment handoff; explicit project credentials still
+		// retain their existing sandboxCredentials precedence.
 		bridgeOptions.sandboxCredentials = resolveSandboxTokens(
 			this.preferencesStore,
 			projectConfigStore,
 			secretsStore,
 			this.commandRunner,
-			{ allowStoredAnthropicOAuth },
+			{ allowStoredAnthropicOAuth: false },
 		);
 		ensureSandboxAgentAuthFile({
 			prefs: this.preferencesStore,
 			includeCodexAuth: sandboxAuthPolicy.includeCodexAuth,
+			includeAnthropicAuth: anthropicOAuthCurrent,
 			includeGoogleAuth: sandboxAuthPolicy.includeGoogleAuth,
 			scope: opts?.projectId,
 		});
@@ -12760,7 +12767,7 @@ export class SessionManager {
 
 // ── Sandbox credential auto-resolution ─────────────────────────────
 
-import { ensureSandboxAgentAuthFile, fallbackProviderAllowlistFromPrefs, hasExplicitSandboxAnthropicCredential, mergeHostAgentProviderEnv, resolveHostTokenValue, resolveSandboxAgentAuthPolicy, sandboxTokenPolicyAllowsAnthropicAuth, type HostTokenResolutionOptions } from "./host-tokens.js";
+import { ensureSandboxAgentAuthFile, fallbackProviderAllowlistFromPrefs, hasExplicitSandboxAnthropicCredential, mergeHostAgentProviderEnv, refreshSandboxAnthropicOAuthCredential, resolveHostTokenValue, resolveSandboxAgentAuthPolicy, sandboxTokenPolicyAllowsAnthropicAuth, type HostTokenResolutionOptions } from "./host-tokens.js";
 
 /**
  * Map of auth.json provider keys → env vars that pi-coding-agent checks.
