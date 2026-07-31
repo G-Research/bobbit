@@ -349,6 +349,109 @@ test.describe("Journey: explicit prefixed gateway on a distinct browser origin",
 		}
 	});
 
+	test("switches the exact mutation target in another open page", async ({ page, gateway }) => {
+		test.setTimeout(90_000);
+		const initialBase = gatewayAlias(gateway, "localhost");
+		const switchedBase = gateway.baseURL;
+		const initialOrigin = new URL(initialBase).origin;
+		const switchedOrigin = new URL(switchedBase).origin;
+		const uiOrigin = new URL(gateway.uiBaseURL).origin;
+		expect(initialOrigin).not.toBe(switchedOrigin);
+		expect(new URL(initialBase).pathname).toBe(GATEWAY_PATH);
+		expect(new URL(switchedBase).pathname).toBe(GATEWAY_PATH);
+
+		const preferences = await adminRequest(gateway, "/api/preferences");
+		expect(preferences.response.status, preferences.text).toBe(200);
+		const originalPlayFinishSound = preferences.body?.playAgentFinishSound;
+		await page.addInitScript(({ base, token }) => {
+			const marker = "bobbit-cross-tab-gateway-bootstrap";
+			if (sessionStorage.getItem(marker) === "1") return;
+			localStorage.setItem("gateway.url", base);
+			localStorage.setItem("gateway.token", token);
+			sessionStorage.setItem(marker, "1");
+		}, { base: initialBase, token: gatewayToken() });
+
+		let secondPage: Page | undefined;
+		try {
+			await page.goto(`${uiOrigin}/`, { waitUntil: "domcontentloaded" });
+			await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 25_000 });
+			await expect.poll(() => page.evaluate(() => {
+				const raw = localStorage.getItem("gateway.connection-revision");
+				return raw ? JSON.parse(raw).baseUrl : null;
+			}), { timeout: 15_000, message: "first page should publish its initial atomic gateway connection" }).toBe(initialBase);
+
+			secondPage = await page.context().newPage();
+			const secondPageRequests: RequestRecord[] = [];
+			secondPage.on("request", request => secondPageRequests.push({
+				url: request.url(),
+				method: request.method(),
+				resourceType: request.resourceType(),
+				authorization: request.headers().authorization,
+				cookie: request.headers().cookie,
+			}));
+			await secondPage.goto(`${uiOrigin}/`, { waitUntil: "domcontentloaded" });
+			await expect(secondPage.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 25_000 });
+			expect(await secondPage.evaluate(() => localStorage.getItem("gateway.url"))).toBe(initialBase);
+			expect(secondPageRequests.some(record => {
+				const url = new URL(record.url);
+				return url.origin === initialOrigin && url.pathname.startsWith(`${GATEWAY_PATH}/api/`);
+			}), "second page should initially use the first exact gateway origin").toBe(true);
+
+			// Reload page 1 so it hydrates the cookie sentinel. The QR handoff then
+			// exposes the normal token re-entry path into the gateway connection dialog.
+			await page.reload({ waitUntil: "domcontentloaded" });
+			await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 25_000 });
+			await page.locator('button[title="Show QR code"]').first().click();
+			await expect(page.getByTestId("qr-auth-required")).toBeVisible({ timeout: 15_000 });
+			await page.getByRole("button", { name: "Re-enter gateway token" }).click();
+			await expect(page.getByRole("heading", { name: "Connect to Gateway" })).toBeVisible({ timeout: 15_000 });
+			await page.locator('input[name="bobbit-gateway-url"]').fill(switchedBase);
+			await page.locator('input[name="bobbit-gateway-auth-token"]').fill(gatewayToken());
+
+			const secondPageReload = secondPage.waitForEvent("framenavigated", {
+				predicate: frame => frame === secondPage!.mainFrame() && new URL(frame.url()).origin === uiOrigin,
+				timeout: 20_000,
+			});
+			await page.getByRole("button", { name: "Connect", exact: true }).click();
+			await secondPageReload;
+			await expect(secondPage.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 25_000 });
+			await expect.poll(() => secondPage!.evaluate(() => localStorage.getItem("gateway.url")), {
+				timeout: 15_000,
+				message: "second page should adopt the newly committed gateway URL",
+			}).toBe(switchedBase);
+
+			const mutationStart = secondPageRequests.length;
+			const enabled = await secondPage.evaluate(() => document.documentElement.dataset.playAgentFinishSound !== "false");
+			const bell = secondPage.locator(`bell-toggle button[title="${enabled ? "Mute" : "Unmute"} agent finish beeps"]`).first();
+			await expect(bell).toBeVisible({ timeout: 15_000 });
+			const mutationResponse = secondPage.waitForResponse(response => {
+				const url = new URL(response.url());
+				return response.request().method() === "PUT"
+					&& url.origin === switchedOrigin
+					&& url.pathname === `${GATEWAY_PATH}/api/preferences`;
+			}, { timeout: 15_000 });
+			await bell.click();
+			const response = await mutationResponse;
+			expect(response.status(), await response.text()).toBe(200);
+
+			const laterMutations = secondPageRequests.slice(mutationStart).filter(record => {
+				const url = new URL(record.url);
+				return record.method === "PUT" && url.pathname === `${GATEWAY_PATH}/api/preferences`;
+			});
+			expect(laterMutations, "the later production UI mutation should fire exactly once").toHaveLength(1);
+			expect(new URL(laterMutations[0]!.url).origin).toBe(switchedOrigin);
+			expect(new URL(laterMutations[0]!.url).origin).not.toBe(initialOrigin);
+			expect(laterMutations[0]!.authorization).toBe(`Bearer ${gatewayToken()}`);
+		} finally {
+			if (secondPage && !secondPage.isClosed()) await secondPage.close().catch(() => undefined);
+			await adminRequest(gateway, "/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ playAgentFinishSound: originalPlayFinishSound ?? null }),
+			}).catch(() => undefined);
+			await page.context().clearCookies().catch(() => undefined);
+		}
+	});
+
 	test("recovers sentinel cookie REST, WebSockets, and later preflights after a gateway restart", async ({ page, gateway }) => {
 		test.setTimeout(120_000);
 		const explicitBase = gatewayAlias(gateway, "localhost");
