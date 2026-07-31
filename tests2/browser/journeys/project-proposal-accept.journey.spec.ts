@@ -49,6 +49,10 @@ type ProjectRouteControls = {
 	releaseConfig: () => void;
 	releasePromote: () => void;
 };
+type ProjectMutationCapture = {
+	mutations: string[];
+	waitForMutation: (method: "POST" | "PUT" | "DELETE", pathname: string | RegExp) => Promise<void>;
+};
 
 async function openSession(page: Page, sessionId: string): Promise<void> {
 	await navigateToHash(page, `#/session/${sessionId}`);
@@ -189,14 +193,23 @@ async function seedAndHydrateProjectProposal(
 	return panel;
 }
 
-function captureProjectMutations(page: Page): string[] {
+function captureProjectMutations(page: Page): ProjectMutationCapture {
 	const mutations: string[] = [];
 	page.on("request", (request) => {
 		if (!["POST", "PUT", "DELETE"].includes(request.method())) return;
 		const url = new URL(request.url());
 		if (url.pathname.startsWith("/api/projects")) mutations.push(`${request.method()} ${url.pathname}`);
 	});
-	return mutations;
+	return {
+		mutations,
+		async waitForMutation(method, pathname): Promise<void> {
+			await page.waitForRequest((request) => {
+				if (request.method() !== method) return false;
+				const path = new URL(request.url()).pathname;
+				return typeof pathname === "string" ? path === pathname : pathname.test(path);
+			});
+		},
+	};
 }
 
 async function injectProjectProposal(page: Page, opts: {
@@ -447,7 +460,9 @@ test.describe("Journey: real project proposal acceptance", () => {
 			await expect(panel.locator('[data-testid="accept-label"]')).toContainText("Accept Project");
 			const button = panel.locator('[data-testid="proposal-primary-submit"] button').first();
 			await expect(button).toBeEnabled({ timeout: 10_000 });
-			await button.click();
+			const registerProject = mutations.waitForMutation("POST", "/api/projects");
+			const writeProjectConfig = mutations.waitForMutation("PUT", /\/api\/projects\/[^/]+\/config$/);
+			await Promise.all([registerProject, writeProjectConfig, button.click()]);
 
 			let created: ProjectRecord | undefined;
 			await expect.poll(async () => {
@@ -469,9 +484,9 @@ test.describe("Journey: real project proposal acceptance", () => {
 				rootPath: sourceBefore.rootPath,
 			});
 			expect(await projectConfig(source.id)).toEqual(sourceConfigBefore);
-			expect(mutations).toContain("POST /api/projects");
-			expect(mutations).toContain(`PUT /api/projects/${createdProjectId}/config`);
-			expect(mutations.some((entry) => entry.includes(`/api/projects/${source.id}`))).toBe(false);
+			expect(mutations.mutations).toContain("POST /api/projects");
+			expect(mutations.mutations).toContain(`PUT /api/projects/${createdProjectId}/config`);
+			expect(mutations.mutations.some((entry) => entry.includes(`/api/projects/${source.id}`))).toBe(false);
 			await expect.poll(() => page.evaluate((id) => (window as any).bobbitState?.projects?.some((project: any) => project.id === id), createdProjectId), {
 				timeout: 10_000,
 				message: "accepted project should appear after the sidebar project refresh",
@@ -503,7 +518,8 @@ test.describe("Journey: real project proposal acceptance", () => {
 			}, "create");
 			const button = panel.locator('[data-testid="proposal-primary-submit"] button').first();
 			await expect(button).toBeEnabled({ timeout: 10_000 });
-			await button.click();
+			const registerProject = mutations.waitForMutation("POST", "/api/projects");
+			await Promise.all([registerProject, button.click()]);
 
 			let created: ProjectRecord | undefined;
 			await expect.poll(async () => {
@@ -516,9 +532,9 @@ test.describe("Journey: real project proposal acceptance", () => {
 			createdProjectId = created!.id;
 			expect(createdProjectId).not.toBe("headquarters");
 			await expectProjectConfigValue(createdProjectId, "test_command", "echo headquarters-create");
-			expect(mutations).toContain("POST /api/projects");
+			expect(mutations.mutations).toContain("POST /api/projects");
 			expect(
-				mutations.some((entry) => (entry.startsWith("POST ") || entry.startsWith("PUT ")) && entry.includes("/api/projects/headquarters")),
+				mutations.mutations.some((entry) => (entry.startsWith("POST ") || entry.startsWith("PUT ")) && entry.includes("/api/projects/headquarters")),
 				"an absent projectId must never rename, configure, or promote Headquarters",
 			).toBe(false);
 			await expect.poll(() => page.evaluate((id) => (window as any).bobbitState?.projects?.some((project: any) => project.id === id), createdProjectId), {
@@ -560,16 +576,19 @@ test.describe("Journey: real project proposal acceptance", () => {
 				test_command: "echo explicit-edit",
 			}, "registered");
 			await expect(panel.locator('[data-testid="accept-label"]')).toContainText("Apply Changes");
-			await panel.locator('[data-testid="proposal-primary-submit"] button').first().click();
+			const button = panel.locator('[data-testid="proposal-primary-submit"] button').first();
+			const renameProject = mutations.waitForMutation("PUT", `/api/projects/${target.id}`);
+			const writeProjectConfig = mutations.waitForMutation("PUT", `/api/projects/${target.id}/config`);
+			await Promise.all([renameProject, writeProjectConfig, button.click()]);
 
 			await expect.poll(async () => (await listProjects()).find((project) => project.id === target.id)?.name, {
 				timeout: 15_000,
 				message: "explicit target should be renamed by edit acceptance",
 			}).toBe(renamed);
 			await expectProjectConfigValue(target.id, "test_command", "echo explicit-edit");
-			expect(mutations).toContain(`PUT /api/projects/${target.id}`);
-			expect(mutations).toContain(`PUT /api/projects/${target.id}/config`);
-			expect(mutations).not.toContain("POST /api/projects");
+			expect(mutations.mutations).toContain(`PUT /api/projects/${target.id}`);
+			expect(mutations.mutations).toContain(`PUT /api/projects/${target.id}/config`);
+			expect(mutations.mutations).not.toContain("POST /api/projects");
 			expect((await listProjects()).find((project) => project.id === source.id)).toMatchObject(sourceBefore);
 			expect(await projectConfig(source.id)).toEqual(sourceConfigBefore);
 		} finally {
@@ -609,7 +628,7 @@ test.describe("Journey: real project proposal acceptance", () => {
 				timeout: 5_000,
 				message: "UNKNOWN_PROJECT rejection must retain the original proposal draft",
 			}).toBe(true);
-			expect(mutations, "unknown projectId must issue no project mutation").toEqual([]);
+			expect(mutations.mutations, "unknown projectId must issue no project mutation").toEqual([]);
 		} finally {
 			await deleteSession(sessionId);
 			rmSync(rootPath, { recursive: true, force: true });
@@ -640,7 +659,10 @@ test.describe("Journey: real project proposal acceptance", () => {
 				root_path: rootPath,
 				test_command: "echo promoted-config",
 			}, "create");
-			await panel.locator('[data-testid="proposal-primary-submit"] button').first().click();
+			const button = panel.locator('[data-testid="proposal-primary-submit"] button').first();
+			const promoteProject = mutations.waitForMutation("POST", `/api/projects/${provisionalProjectId}/promote`);
+			const writeProjectConfig = mutations.waitForMutation("PUT", `/api/projects/${provisionalProjectId}/config`);
+			await Promise.all([promoteProject, writeProjectConfig, button.click()]);
 
 			await expect.poll(async () => {
 				const matches = (await listProjects()).filter((project) => samePath(project.rootPath, rootPath));
@@ -650,16 +672,9 @@ test.describe("Journey: real project proposal acceptance", () => {
 				message: "project assistant acceptance should promote exactly one project in place",
 			}).toBe(true);
 			await expectProjectConfigValue(provisionalProjectId!, "test_command", "echo promoted-config");
-			await expect.poll(
-				() => mutations.includes(`PUT /api/projects/${provisionalProjectId}/config`),
-				{
-					timeout: 10_000,
-					message: "successful provisional acceptance should expose its config mutation to the page request listener",
-				},
-			).toBe(true);
-			expect(mutations).toContain(`POST /api/projects/${provisionalProjectId}/promote`);
-			expect(mutations).toContain(`PUT /api/projects/${provisionalProjectId}/config`);
-			expect(mutations).not.toContain("POST /api/projects");
+			expect(mutations.mutations).toContain(`POST /api/projects/${provisionalProjectId}/promote`);
+			expect(mutations.mutations).toContain(`PUT /api/projects/${provisionalProjectId}/config`);
+			expect(mutations.mutations).not.toContain("POST /api/projects");
 			await expect.poll(async () => {
 				const resp = await apiFetch("/api/sessions");
 				const data = await resp.json();
