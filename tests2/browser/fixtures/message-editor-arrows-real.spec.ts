@@ -493,15 +493,22 @@ test.describe("MessageEditor caret-row geometry (composer history recall)", () =
 	}
 
 	// -- Scenario 9 ---------------------------------------------------------
-	// The reviewer's exact verified repro, pinned by name. 316px, the production
-	// proportional stack, "AV".repeat(100), caret at offset 31 = boundary + 1 — so
-	// this is NOT the ambiguous exact-boundary offset: characters 30 AND 31 are both
-	// on the second visual row, and native ArrowUp with an empty history proves the
-	// caret was not on the first row.
-	test("S9: reviewer repro — 316px production font, AVx100, offset 31 is NOT the top row", async ({ page }) => {
+	// The reviewer's verified repro: 316px, the production proportional stack,
+	// "AV".repeat(100), one character past the oracle's first wrap boundary. This
+	// is NOT the ambiguous exact-boundary offset: both adjacent characters are on
+	// the second visual row, and native ArrowUp with an empty history proves the
+	// caret was not on the first row. The exact boundary is platform/font dependent
+	// (for example, Windows Chromium and Linux Chromium choose different offsets),
+	// so derive the repro position from the independent unsplit-Range oracle.
+	test("S9: reviewer repro — 316px production font, AVx100, one character past the first wrap is NOT the top row", async ({ page }) => {
 		const ta = await mount(page, "s9", { widthPx: 316, fontFamily: "ui-sans-serif, system-ui, sans-serif" });
 		const value = "AV".repeat(100);
-		const POS = 31;
+		const boundary: number = await page.evaluate((v) => (window as any).__oracleFirstWrapOffset(v), value);
+		expect(boundary, `${TAG} S9 precondition — unsplit-Range oracle must find an interior first wrap boundary`)
+			.toBeGreaterThan(1);
+		expect(boundary, `${TAG} S9 precondition — unsplit-Range oracle must leave a character after the first wrap`)
+			.toBeLessThan(value.length - 1);
+		const POS = boundary + 1;
 
 		const diag = await page.evaluate(
 			([v, p]) => (window as any).__caretRowDiagnostic(v, p),
@@ -512,9 +519,10 @@ test.describe("MessageEditor caret-row geometry (composer history recall)", () =
 		expect(diag.clientWidth, `${TAG} S9 precondition — textarea client width must be 316px`).toBe(316);
 		expect(diag.fontFamily, `${TAG} S9 precondition — must use the production proportional stack`)
 			.toBe("ui-sans-serif, system-ui, sans-serif");
-		expect(diag.firstWrapBoundary, `${TAG} S9 precondition — unsplit-Range first wrap boundary must be 30`).toBe(30);
-		expect(diag.oracleRowBefore, `${TAG} S9 precondition — character 30 must be on the second visual row`).toBe(1);
-		expect(diag.oracleRowAt, `${TAG} S9 precondition — character 31 must be on the second visual row`).toBe(1);
+		expect(diag.firstWrapBoundary, `${TAG} S9 precondition — diagnostic must use the unsplit-Range first wrap boundary`)
+			.toBe(boundary);
+		expect(diag.oracleRowBefore, `${TAG} S9 precondition — character before offset ${POS} must be on the second visual row`).toBe(1);
+		expect(diag.oracleRowAt, `${TAG} S9 precondition — character at offset ${POS} must be on the second visual row`).toBe(1);
 
 		// Independent oracle: history EMPTY, so the predicate cannot fire and only
 		// Chromium decides. Caret on row 1 => ArrowUp would land on offset 0.
@@ -554,7 +562,10 @@ test.describe("MessageEditor caret-row geometry (composer history recall)", () =
 		const long = "abcdefghij".repeat(20);
 
 		const boundary: number = await page.evaluate((v) => (window as any).__oracleFirstWrapOffset(v), long);
-		expect(boundary, `${TAG} S10 precondition — 320px monospace must wrap at offset 32`).toBe(32);
+		expect(boundary, `${TAG} S10 precondition — unsplit-Range oracle must find an interior first wrap boundary`)
+			.toBeGreaterThan(1);
+		expect(boundary, `${TAG} S10 precondition — unsplit-Range oracle must leave content after the first wrap`)
+			.toBeLessThan(long.length - 2);
 
 		await sendThroughRealPath(page, ta, "seed");
 		const seeded = await state(page);
@@ -595,7 +606,10 @@ test.describe("MessageEditor caret-row geometry (composer history recall)", () =
 
 		const rowIdx: number[] = await page.evaluate((v) => (window as any).__oracleRowIndexes(v), long);
 		const lastBoundary = rowIdx.indexOf(Math.max(...rowIdx));
-		expect(lastBoundary, `${TAG} S11 precondition — 320px monospace must start its last row at offset 192`).toBe(192);
+		expect(lastBoundary, `${TAG} S11 precondition — unsplit-Range oracle must find an interior final wrap boundary`)
+			.toBeGreaterThan(1);
+		expect(lastBoundary, `${TAG} S11 precondition — unsplit-Range oracle must leave a character after the final wrap`)
+			.toBeLessThan(long.length - 1);
 
 		// Browse into history: the newest entry is the wrapped 200-char value.
 		await ta.click();
