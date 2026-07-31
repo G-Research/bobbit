@@ -58,21 +58,26 @@ async function holdSessionListHydration(page: Page, sessionId: string): Promise<
 	const released = new Promise<void>((resolve) => { releaseGate = resolve; });
 	let markHandlerComplete!: () => void;
 	const handlerComplete = new Promise<void>((resolve) => { markHandlerComplete = resolve; });
+	// The caller establishes this visible editor boundary before installing the
+	// route. It is an event-state read, not a timer or a polling loop.
+	const editorAlreadyRendered = await page.evaluate(() => !!document.querySelector("message-editor"));
+	if (!editorAlreadyRendered) throw new Error("target hydration fixture requires a rendered editor");
 	let captured = false;
-	let editorHasRendered = false;
-	// Do not let the route handler itself await this: an early list refresh can
-	// be necessary to render the editor. It is a one-way event boundary that
-	// makes pre-render requests fall through instead of deadlocking the route.
-	void page.locator("message-editor").first().waitFor({ state: "visible" })
-		.then(() => { editorHasRendered = true; })
-		.catch(() => {});
 	const matcher = (url: URL) => url.pathname === "/api/sessions";
 	const handler = async (route: Route) => {
-		const readyForTargetHydration = editorHasRendered && route.request().method() === "GET" && await page.evaluate((id) => {
+		// This is the target session's post-render refresh continuation. Its
+		// connectingSessionId remains target-owned until the continuation settles;
+		// boot, push, and unrelated-session list refreshes therefore fall through.
+		const isTargetHydrationContinuation = route.request().method() === "GET" && await page.evaluate(({ id, editorReady }) => {
 			const state = (window as any).bobbitState ?? (window as any).__bobbitState;
-			return window.location.hash === `#/session/${id}` && state?.selectedSessionId === id;
-		}, sessionId);
-		if (captured || !readyForTargetHydration) {
+			return window.location.hash === `#/session/${id}`
+				&& state?.selectedSessionId === id
+				&& state?.connectingSessionId === id
+				&& state?.remoteAgent?.gatewaySessionId === id
+				&& !!state?.chatPanel?.agentInterface
+				&& editorReady;
+		}, { id: sessionId, editorReady: editorAlreadyRendered });
+		if (captured || !isTargetHydrationContinuation) {
 			await route.fallback();
 			return;
 		}
@@ -187,9 +192,16 @@ test.describe("CT-13: URL routing and navigation", () => {
 		s.begin(STORY_N03);
 
 		await s.createTestSession("A");
+		await s.createTestSession("B");
 		const goal = await createGoal({ title: "Deep link goal" });
 		goalIds.push(goal.id);
 		await s.open();
+
+		// Establish a rendered editor before arming the A-specific hydration
+		// interceptor. This lets the exact A continuation be held at its own
+		// connectingSessionId boundary, rather than waiting for a later push tick.
+		await s.navigate_to("session", "B");
+		await s.editor.is_visible();
 
 		s.act();
 
@@ -201,12 +213,27 @@ test.describe("CT-13: URL routing and navigation", () => {
 			await navigateToHash(s.page, `#/session/${s.session("A").sessionId}`);
 			await hydration.held;
 			s.assert();
-			await s.editor.is_visible();
+			// The deliberately held final refresh owns the target's editor commit;
+			// the already-rendered B editor above supplies the no-timer readiness
+			// boundary, while the target connection token proves this is A's refresh.
 			const sessionStillOwnsHeldRefresh = await s.page.evaluate((id) => {
 				const state = (window as any).bobbitState ?? (window as any).__bobbitState;
 				return window.location.hash === `#/session/${id}` && state?.selectedSessionId === id;
 			}, s.session("A").sessionId);
 			expect(sessionStillOwnsHeldRefresh, "session route must own its held post-render refresh").toBe(true);
+
+			// The route has already captured the target continuation, so this distinct
+			// list read must take the handler's fallback path and complete before it
+			// is released. A broad route predicate would hold this request too.
+			const unrelatedRefresh = await s.page.evaluate(async () => {
+				const token = localStorage.getItem("gateway.token");
+				const response = await fetch(`/api/sessions?unrelated-refresh=${crypto.randomUUID()}`, {
+					headers: token ? { Authorization: `Bearer ${token}` } : {},
+				});
+				return { ok: response.ok, status: response.status };
+			});
+			expect(unrelatedRefresh, "unrelated session-list refresh must fall through while target hydration is held")
+				.toMatchObject({ ok: true, status: 200 });
 
 			// Queue the goal route while the earlier session continuation is held,
 			// then release its request before awaiting route handling. This preserves

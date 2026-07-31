@@ -138,6 +138,9 @@ export async function measureScroll(page: Page): Promise<ScrollProbe> {
  * later — the same settled lifecycle used by the production re-pin path.
  */
 export async function startTailPhaseTracker(page: Page, key: string, markers: string[], tailPx = TAIL_PX): Promise<void> {
+	if (new Set(markers).size !== markers.length) {
+		throw new Error("tail phase tracker: expected markers must be unique");
+	}
 	await page.evaluate(({ scrollSel, trackerKey, phaseMarkers, pinnedTailPx }) => {
 		const w = window as any;
 		w[trackerKey]?.disconnect?.();
@@ -150,7 +153,10 @@ export async function startTailPhaseTracker(page: Page, key: string, markers: st
 		const evidence = new Map<string, ScrollProbe>();
 		const waiters = new Map<string, Array<{ resolve: (sample: ScrollProbe) => void; reject: (reason: Error) => void }>>();
 		const markerEventIds = new Map<string, string>();
+		const markerOccurrences = new Map<string, number>();
+		const pendingDomEchoes = new Set<string>();
 		let visibleMarkers = new Set<string>();
+		let lastEvidenceHeight = el.scrollHeight;
 		let failure: Error | null = null;
 		let active = true;
 		let framePending = false;
@@ -163,6 +169,13 @@ export async function startTailPhaseTracker(page: Page, key: string, markers: st
 			}
 			waiters.clear();
 		};
+		const exactMarkers = (text: string): Set<string> => {
+			const found = new Set<string>();
+			for (const match of text.matchAll(/(?:^|[^A-Z0-9_-])((?:PRE|POST)-WAIT-CHUNK-\d+#30)(?![A-Z0-9_-])/g)) {
+				found.add(match[1]);
+			}
+			return found;
+		};
 		const textAtMutation = (): string => {
 			const fromMessages = Array.from(document.querySelectorAll("assistant-message"))
 				.map((node) => JSON.stringify((node as any).message ?? ""))
@@ -170,28 +183,33 @@ export async function startTailPhaseTracker(page: Page, key: string, markers: st
 			const remote = w.bobbitState?.remoteAgent ?? w.__bobbitState?.remoteAgent;
 			return `${content.textContent ?? ""} ${fromMessages} ${JSON.stringify(remote?.state?.streamingMessage ?? "")}`;
 		};
-		const detectMarkers = (text: string, transitionOnly: boolean, eventId?: string) => {
-			const found = new Set((text.match(/(?:PRE|POST)-WAIT-CHUNK-\d+#30/g) ?? []));
+		const detectMarkers = (text: string, fromDom: boolean, eventId?: string) => {
+			const found = exactMarkers(text);
 			for (const marker of found) {
-				if (!expected.has(marker)) fail(`unexpected marker ${marker}`);
+				if (!expected.has(marker)) fail(`unexpected exact marker ${marker}`);
 			}
 			for (const marker of expected) {
-				if (!found.has(marker) || (transitionOnly && visibleMarkers.has(marker))) continue;
+				if (!found.has(marker) || (fromDom && visibleMarkers.has(marker))) continue;
 				if (pending.has(marker) || evidence.has(marker)) {
-					// A persistent DOM node is re-observed on unrelated mutations; it
-					// is not a second protocol event. A message_update followed by its
-					// message_end has the same server message id and is likewise one
-					// marker occurrence; a different id is a deterministic duplicate.
-					if (transitionOnly || (eventId && markerEventIds.get(marker) === eventId)) continue;
-					fail(`duplicate marker ${marker}`);
+					if (eventId && markerEventIds.get(marker) === eventId) continue;
+					if (fromDom && pendingDomEchoes.delete(marker)) continue;
+					fail(`duplicate exact marker ${marker}`);
 					continue;
 				}
-				if (eventId) markerEventIds.set(marker, eventId);
-				// The marker was observed before it can be replaced by the next
-				// streaming update. Its evidence must be later settled geometry.
+				if (pending.size !== 0) {
+					fail(`overlapping marker ${marker} arrived before ${pending.keys().next().value} settled`);
+					continue;
+				}
+				if (eventId) {
+					markerEventIds.set(marker, eventId);
+					pendingDomEchoes.add(marker);
+				}
+				markerOccurrences.set(marker, (markerOccurrences.get(marker) ?? 0) + 1);
+				// The exact marker is captured at its commit. Its proof must be a
+				// later, positive, post-repin height that no earlier phase used.
 				pending.set(marker, el.scrollHeight);
 			}
-			if (transitionOnly) visibleMarkers = found;
+			if (fromDom) visibleMarkers = found;
 		};
 		const detectMarkersAtCommit = () => detectMarkers(textAtMutation(), true);
 		const publishSettledEvidence = () => {
@@ -206,6 +224,11 @@ export async function startTailPhaseTracker(page: Page, key: string, markers: st
 					growth,
 				};
 				if (growth <= 0 || sample.distance > pinnedTailPx) continue;
+				if (sample.scrollHeight <= lastEvidenceHeight) {
+					fail(`marker ${marker} reused or regressed settled height ${sample.scrollHeight} (previous ${lastEvidenceHeight})`);
+					continue;
+				}
+				lastEvidenceHeight = sample.scrollHeight;
 				pending.delete(marker);
 				evidence.set(marker, sample);
 				for (const waiter of waiters.get(marker) ?? []) waiter.resolve(sample);
@@ -257,6 +280,17 @@ export async function startTailPhaseTracker(page: Page, key: string, markers: st
 						waiters.set(marker, pendingWaiters);
 					});
 			},
+			finish: () => {
+				if (failure) throw failure;
+				if (pending.size > 0) throw new Error(`tail phase tracker: unsettled marker ${pending.keys().next().value}`);
+				for (const marker of phaseMarkers) {
+					if (markerOccurrences.get(marker) !== 1) {
+						throw new Error(`tail phase tracker: expected one exact marker ${marker}, got ${markerOccurrences.get(marker) ?? 0}`);
+					}
+					if (!evidence.has(marker)) throw new Error(`tail phase tracker: no settled growth evidence for ${marker}`);
+				}
+				return phaseMarkers.map((marker) => evidence.get(marker)!);
+			},
 			disconnect: () => {
 				active = false;
 				mutations.disconnect();
@@ -279,11 +313,18 @@ export async function awaitTailGrowthPhase(page: Page, key: string, marker: stri
 	}, { trackerKey: key, phaseMarker: marker });
 }
 
-export async function stopTailPhaseTracker(page: Page, key: string): Promise<void> {
-	await page.evaluate((trackerKey) => {
+/** Stop the tracker only after every exact marker has one non-overlapping proof. */
+export async function stopTailPhaseTracker(page: Page, key: string): Promise<ScrollProbe[]> {
+	return await page.evaluate((trackerKey) => {
 		const w = window as any;
-		w[trackerKey]?.disconnect?.();
-		w[trackerKey] = null;
+		const tracker = w[trackerKey];
+		if (!tracker) throw new Error(`tail phase tracker ${trackerKey} was not registered`);
+		try {
+			return tracker.finish();
+		} finally {
+			tracker.disconnect();
+			w[trackerKey] = null;
+		}
 	}, key);
 }
 
