@@ -86,6 +86,39 @@ function isSameLockIdentity(expected: LockIdentity, lockPath: string): boolean {
 	}
 }
 
+let beforeStaleLockReclaimForTests: ((lockPath: string) => void) | undefined;
+
+/** @internal Deterministically interleave a replacement owner in lock tests. */
+export function __setBeforeStaleLockReclaimForTests(hook: ((lockPath: string) => void) | undefined): void {
+	beforeStaleLockReclaimForTests = hook;
+}
+
+/**
+ * Reclaim an unchanged stale lock only. A stale observation alone is not
+ * ownership: another process can release the stale directory and acquire a
+ * fresh lock at the same pathname before we remove it.
+ */
+function reclaimStaleAuthFileLock(lockPath: string): boolean {
+	let observed: LockIdentity;
+	try {
+		const stats = statSync(lockPath);
+		if (Date.now() - stats.mtimeMs <= LOCK_STALE_MS) return false;
+		observed = { dev: stats.dev, ino: stats.ino };
+	} catch {
+		return false;
+	}
+
+	beforeStaleLockReclaimForTests?.(lockPath);
+	if (!isSameLockIdentity(observed, lockPath)) return false;
+	try {
+		rmdirSync(lockPath);
+		return true;
+	} catch {
+		// A concurrent releaser/reclaimer is harmless; retry normally.
+		return false;
+	}
+}
+
 /**
  * Acquire the same `<auth.json>.lock` directory namespace used by Pi's
  * proper-lockfile dependency without importing that private implementation.
@@ -140,14 +173,9 @@ async function acquireAuthFileLock(authPath: string): Promise<AuthFileLock> {
 
 			// Match proper-lockfile's stale-directory recovery protocol so a
 			// gateway crash cannot permanently block future credential refreshes.
-			try {
-				if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
-					rmdirSync(lockPath);
-					continue;
-				}
-			} catch {
-				// A concurrent releaser/reclaimer is harmless; retry normally.
-			}
+			// Revalidate the observed directory identity before reclaiming: a
+			// replacement lock at the same pathname belongs to another owner.
+			if (reclaimStaleAuthFileLock(lockPath)) continue;
 
 			if (attempt >= LOCK_RETRIES) throw new Error("Credential store lock timed out");
 			const baseDelay = Math.min(LOCK_MAX_RETRY_MS, LOCK_MIN_RETRY_MS * 2 ** attempt);

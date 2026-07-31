@@ -23,7 +23,10 @@ import type { Credential, OAuthCredential } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeEach, describe, it, vi } from "vitest";
 import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
-import { AtomicCredentialStore } from "../../src/server/auth/credential-store.js";
+import {
+	AtomicCredentialStore,
+	__setBeforeStaleLockReclaimForTests,
+} from "../../src/server/auth/credential-store.js";
 
 const tmp = mkdtempSync(path.join(tmpdir(), "bobbit-anthropic-credential-store-"));
 const agentDir = path.join(tmp, "agent");
@@ -79,6 +82,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	__setBeforeStaleLockReclaimForTests(undefined);
 	globalThis.fetch = realFetch;
 	vi.restoreAllMocks();
 });
@@ -186,6 +190,40 @@ describe("AtomicCredentialStore", () => {
 		} finally {
 			if (!released) await releaseExternal().catch(() => {});
 		}
+	});
+
+	it("does not reclaim a fresh replacement after observing a stale lock", async () => {
+		const store = new AtomicCredentialStore(authPath);
+		await store.modify("anthropic", async () => credential());
+		const lockPath = `${authPath}.lock`;
+		mkdirSync(lockPath, { mode: 0o700 });
+		utimesSync(lockPath, new Date(Date.now() - 31_000), new Date(Date.now() - 31_000));
+
+		let replacement: { dev: number; ino: number } | undefined;
+		let replacementSurvived = false;
+		let finishInspection!: () => void;
+		const inspected = new Promise<void>((resolve) => { finishInspection = resolve; });
+		__setBeforeStaleLockReclaimForTests((observedLockPath) => {
+			rmdirSync(observedLockPath);
+			mkdirSync(observedLockPath, { mode: 0o700 });
+			const stats = statSync(observedLockPath);
+			replacement = { dev: stats.dev, ino: stats.ino };
+			setTimeout(() => {
+				try {
+					const current = statSync(observedLockPath);
+					replacementSurvived = current.dev === replacement?.dev && current.ino === replacement?.ino;
+					rmdirSync(observedLockPath);
+				} finally {
+					finishInspection();
+				}
+			}, 20);
+		});
+
+		await store.modify("anthropic", async () => {
+			await inspected;
+			return undefined;
+		});
+		assert.equal(replacementSurvived, true, "stale recovery must not remove a fresh replacement lock");
 	});
 
 	it("holds the canonical lock across refresh callbacks so one rotating token is spent", async () => {
