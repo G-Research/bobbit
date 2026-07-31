@@ -629,7 +629,7 @@ export class AskUserChoicesWidget extends LitElement {
 			? "Submitting…"
 			: showNext ? "Next" : "Submit";
 		return html`
-			<div class="ask-widget border border-border rounded p-3 bg-card" @keydown=${this._onKeydown}>
+			<div class="ask-widget ${readOnly ? "ask-answered" : ""} border border-border rounded p-3 bg-card" @keydown=${this._onKeydown}>
 				${showTabs ? html`
 				<div role="tablist" class="flex flex-wrap gap-1 border-b border-border mb-3">
 					${this.questions.map((_, i) => this._renderTab(i))}
@@ -734,7 +734,7 @@ export class AskUserChoicesWidget extends LitElement {
 				aria-labelledby=${tabId}
 				data-panel-index=${idx}
 				class="ask-panel">
-				<div class="ask-question text-sm font-medium mb-2">${q.question}</div>
+				<div class="ask-question text-sm font-medium mb-2 ${readOnly ? "text-muted-foreground opacity-70" : ""}">${q.question}</div>
 				<div
 					class="ask-options flex flex-col gap-1.5"
 					role=${groupRole}
@@ -767,7 +767,7 @@ export class AskUserChoicesWidget extends LitElement {
 			"ask-option flex items-center gap-2 p-2 text-sm rounded border",
 			checked ? "border-primary bg-primary/10" : "border-border",
 			isFocused ? "ask-option-focused ring-2 ring-primary/50" : "",
-			readOnly ? "cursor-default opacity-90" : "cursor-pointer hover:bg-muted",
+			readOnly ? (checked ? "cursor-default opacity-70" : "cursor-default opacity-30") : "cursor-pointer hover:bg-muted",
 		].filter(Boolean).join(" ");
 		const role = multi ? "checkbox" : "radio";
 		const ariaChecked = checked ? "true" : "false";
@@ -819,7 +819,7 @@ export class AskUserChoicesWidget extends LitElement {
 			"ask-option ask-option-other flex items-center gap-2 p-2 text-sm rounded border",
 			checked ? "border-primary bg-primary/10" : "border-border",
 			isFocused ? "ask-option-focused ring-2 ring-primary/50" : "",
-			readOnly ? "cursor-default opacity-90" : "cursor-pointer hover:bg-muted",
+			readOnly ? (checked ? "cursor-default opacity-70" : "cursor-default opacity-30") : "cursor-pointer hover:bg-muted",
 		].filter(Boolean).join(" ");
 		const role = multi ? "checkbox" : "radio";
 		const ariaChecked = checked ? "true" : "false";
@@ -864,7 +864,7 @@ export class AskUserChoicesWidget extends LitElement {
 				</label>
 				<input
 					type="text"
-					class="ask-other-input flex-1 self-stretch px-2 py-2 text-sm border border-border rounded bg-background"
+					class="ask-other-input flex-1 self-stretch px-2 py-2 text-sm border border-border rounded bg-background ${readOnly ? (checked ? "opacity-70" : "opacity-30") : ""}"
 					placeholder="Type your answer…"
 					.value=${otherText}
 					?disabled=${readOnly}

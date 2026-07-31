@@ -248,8 +248,12 @@ test.describe("ask_user_choices widget", () => {
 		}));
 		// No Submit button
 		await expect(page.locator(".ask-submit")).toHaveCount(0);
-		// Q1 option "b" should be checked on tab 0
+		// Q1 option "b" should be checked on tab 0; answered cards are subdued
+		// except for the selected response.
 		await expect(page.locator('input[type=radio][value="b"]')).toBeChecked();
+		await expect(page.locator(".ask-widget")).toHaveClass(/ask-answered/);
+		await expect(page.locator('[role="radio"][aria-checked="true"]')).toHaveAttribute("data-disabled", "true");
+		await expect(page.locator('[role="radio"][aria-checked="false"]').first()).toHaveAttribute("data-disabled", "true");
 		// Switch to tab 1 — Other radio checked, text shows "custom"
 		await page.locator('[role="tab"][data-tab-index="1"]').click();
 		await expect(page.locator('input[type=radio][value="__OTHER__"]')).toBeChecked();
