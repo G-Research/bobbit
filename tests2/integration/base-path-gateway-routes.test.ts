@@ -1,3 +1,5 @@
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
@@ -15,10 +17,12 @@ import {
 
 describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("mounted gateway routes, manifest, and sockets", () => {
 	let running: RunningGateway;
+	let gatewayUrlSeenAtRestore: string | undefined;
 
 	beforeAll(async () => {
 		running = await bootGateway(MOUNT, "127.0.0.1", true, {
 			staleGatewayUrl: "http://stale.invalid/wrong-mount",
+			observeSessionRestoreGatewayUrl: (gatewayUrl) => { gatewayUrlSeenAtRestore = gatewayUrl; },
 		});
 	}, 60_000);
 
@@ -26,8 +30,15 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("mounted gateway routes, mani
 		await running?.shutdown();
 	}, 60_000);
 
-	it("serves mounted API/static/deep-link routes and rejects every off-mount lookalike", async () => {
+	it("replaces a stale agent URL before session restore", () => {
 		expect(running.lifecycleGatewayInfo().baseUrl).toBe(running.baseUrl);
+		expect(gatewayUrlSeenAtRestore).toBe(running.baseUrl);
+		expect(running.agentGatewayUrl()).toBe(running.baseUrl);
+		expect(readFileSync(join(running.root, "state", "gateway-url"), "utf8")).toBe(running.baseUrl);
+		expect(readdirSync(join(running.root, "state")).some((name) => /^gateway-url\..*\.tmp$/u.test(name))).toBe(false);
+	});
+
+	it("serves mounted API/static/deep-link routes and rejects every off-mount lookalike", async () => {
 		const health = await api(running.baseUrl, "/api/health");
 		expect(health.status).toBe(200);
 		expect(await health.json()).toMatchObject({ status: "ok" });
@@ -95,37 +106,52 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("mounted gateway routes, mani
 });
 
 describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("programmatic mounted gateway callback publication", () => {
-	it("formats a bound IPv6 listener with its actual ephemeral port", async () => {
-		const running = await bootGateway(MOUNT, "::1", true, { serveStatic: false });
+	it("publishes an absent agent URL before restore using the bound IPv6 port", async () => {
+		let gatewayUrlSeenAtRestore: string | undefined;
+		const running = await bootGateway(MOUNT, "::1", true, {
+			serveStatic: false,
+			observeSessionRestoreGatewayUrl: (gatewayUrl) => { gatewayUrlSeenAtRestore = gatewayUrl; },
+		});
 		try {
 			expect(running.lifecycleGatewayInfo().baseUrl).toBe(running.baseUrl);
 			expect(running.baseUrl).toMatch(/^http:\/\/\[::1\]:\d+\/team\/bobbit$/);
+			expect(gatewayUrlSeenAtRestore).toBe(running.baseUrl);
+			expect(running.agentGatewayUrl()).toBe(running.baseUrl);
+			expect(readFileSync(join(running.root, "state", "gateway-url"), "utf8")).toBe(running.baseUrl);
 		} finally {
 			await running.shutdown();
 		}
 	}, 60_000);
 
-	it("accepts and canonicalizes an authoritative HTTP(S) callback override", async () => {
+	it("accepts and preserves an authoritative HTTP(S) callback publication", async () => {
 		let actualPort = 0;
 		const running = await bootGateway(MOUNT, "127.0.0.1", true, {
 			serveStatic: false,
 			onBound: (port) => {
 				actualPort = port;
-				return `https://[2001:db8::42]:${port}/public/gateway/`;
+				const callbackUrl = `https://[2001:db8::42]:${port}/public/gateway`;
+				writeFileSync(join(process.env.BOBBIT_DIR!, "state", "gateway-url"), callbackUrl);
+				return `${callbackUrl}/`;
 			},
 		});
 		try {
+			const expectedUrl = `https://[2001:db8::42]:${actualPort}/public/gateway`;
 			expect(actualPort).toBeGreaterThan(0);
-			expect(running.lifecycleGatewayInfo().baseUrl).toBe(`https://[2001:db8::42]:${actualPort}/public/gateway`);
+			expect(running.lifecycleGatewayInfo().baseUrl).toBe(expectedUrl);
+			expect(running.agentGatewayUrl()).toBe(expectedUrl);
+			expect(readFileSync(join(running.root, "state", "gateway-url"), "utf8")).toBe(expectedUrl);
 		} finally {
 			await running.shutdown();
 		}
 	}, 60_000);
 
 	it("rejects an unsafe callback override before agents or extensions resume", async () => {
+		let restoreStarted = false;
 		await expect(bootGateway(MOUNT, "127.0.0.1", true, {
 			serveStatic: false,
 			onBound: () => "http://127.0.0.1:3001/team/../escape",
+			observeSessionRestoreGatewayUrl: () => { restoreStarted = true; },
 		})).rejects.toThrow(/Gateway callback URL|dot segments/i);
+		expect(restoreStarted).toBe(false);
 	}, 60_000);
 });

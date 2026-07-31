@@ -1877,6 +1877,18 @@ function defaultPublishedGatewayUrl(config: GatewayConfig, actualPort: number, l
 	return normalizePublishedGatewayUrl(`${protocol}://${publishedUrlHost(callbackHost)}:${actualPort}${config.basePath ?? ""}`);
 }
 
+function persistPublishedGatewayUrl(stateDir: string, gatewayUrl: string, fileSystem: FsLike): void {
+	const target = path.join(stateDir, "gateway-url");
+	const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
+	try {
+		fileSystem.writeFileSync(temp, gatewayUrl, "utf-8");
+		fileSystem.renameSync(temp, target);
+	} catch (error) {
+		try { fileSystem.unlinkSync(temp); } catch { /* best-effort temp cleanup */ }
+		throw error;
+	}
+}
+
 export interface GatewayConfig {
 	host: string;
 	port: number;
@@ -3753,6 +3765,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					// onBound remains authoritative for CLI/public-proxy callers, but only
 					// a canonical HTTP(S) gateway base may cross the agent boundary.
 					publishedGatewayUrl = normalizePublishedGatewayUrl(callbackUrl);
+				} else {
+					// CLI onBound owns its injected/atomic publication. Programmatic callers
+					// without a publisher still need the same durable URL because direct and
+					// sandbox agent setup read this file rather than LifecycleHub memory.
+					persistPublishedGatewayUrl(stateDir, publishedGatewayUrl, gatewayDeps.fsImpl);
 				}
 
 			// Restore persisted teams before sessions so reconstructed records are available
