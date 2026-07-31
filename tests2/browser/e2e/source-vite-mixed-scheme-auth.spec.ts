@@ -1,4 +1,4 @@
-import { expect, test, type Browser, type BrowserContext, type Page, type Response, type TestInfo } from "@playwright/test";
+import { expect, test, type Browser, type BrowserContext, type Page, type Request, type Response, type TestInfo } from "@playwright/test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -379,8 +379,23 @@ test.describe("HTTPS source Vite to mounted HTTP gateway authentication", () => 
 				responseAt(response, viteOrigin, "/api/health"));
 			const sseResponsePromise = page.waitForResponse(response =>
 				responseAt(response, viteOrigin, ssePath));
-			const iframeResponsePromise = page.waitForResponse(response =>
-				responseAt(response, viteOrigin, previewPath));
+			// The preview document has a dynamic mtime cache-buster and may pass through
+			// the controlling root service worker, making page response events brittle.
+			// Bypass the worker so this exact request route owns the reload boundary.
+			const devtools = await page.context().newCDPSession(page);
+			await devtools.send("Network.setBypassServiceWorker", { bypass: true });
+			let captureIframeRequest!: (request: Request) => void;
+			const iframeRequestPromise = new Promise<Request>(resolveRequest => {
+				captureIframeRequest = resolveRequest;
+			});
+			await page.route(url => url.origin === viteOrigin
+				&& url.pathname === previewPath
+				&& url.searchParams.size === 1
+				&& /^\d+$/.test(url.searchParams.get("mtime") ?? ""), async route => {
+				const request = route.request();
+				await route.continue();
+				captureIframeRequest(request);
+			}, { times: 1 });
 			await page.reload({ waitUntil: "domcontentloaded" });
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 30_000 });
 
@@ -421,10 +436,16 @@ test.describe("HTTPS source Vite to mounted HTTP gateway authentication", () => 
 				}]),
 			});
 
-			const iframeResponse = await iframeResponsePromise;
-			expect(iframeResponse.status()).toBe(200);
-			expect(await iframeResponse.request().headerValue("authorization")).toBeNull();
-			expect(await iframeResponse.request().headerValue("cookie")).toContain(`${COOKIE_NAME}=`);
+			const iframeRequest = await iframeRequestPromise;
+			const iframeRequestUrl = new URL(iframeRequest.url());
+			expect(iframeRequestUrl.origin).toBe(viteOrigin);
+			expect(iframeRequestUrl.pathname).toBe(previewPath);
+			expect([...iframeRequestUrl.searchParams.keys()]).toEqual(["mtime"]);
+			expect(iframeRequestUrl.searchParams.get("mtime")).toMatch(/^\d+$/);
+			expect(await iframeRequest.headerValue("authorization")).toBeNull();
+			expect(await iframeRequest.headerValue("cookie")).toMatch(/(?:^|;\s*)bobbit_session=v1\.2\./);
+			await devtools.send("Network.setBypassServiceWorker", { bypass: false });
+			await devtools.detach();
 			const iframe = page.locator(".goal-preview-panel iframe").first();
 			await expect(iframe).toBeVisible();
 			const iframeUrl = new URL((await iframe.getAttribute("src"))!, viteBaseUrl);
