@@ -31,7 +31,16 @@
     },
     {
       "path": "tests2/core/anthropic-oauth-persistence.test.ts",
-      "reason": "Credential-free regression coverage for provider-isolated atomic OAuth persistence, restricted permissions, restart-visible refreshable status, refresh rotation, and redacted failures.",
+      "reason": "Credential-free regression coverage for restart-visible refreshable status, provider-isolated refresh rotation, and redacted failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/anthropic-oauth-credential-store.test.ts",
+      "reason": "Credential-free regression coverage for provider-isolated atomic credential writes, canonical Pi lock coordination, fresh reads, malformed-write protection, and restrictive persistence permissions.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
