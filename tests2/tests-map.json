@@ -4,9 +4,9 @@
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
   "censusTotal": 1138,
   "buckets": {
-    "daily": 62,
+    "daily": 63,
     "v2-browser": 216,
-    "v2-core": 513,
+    "v2-core": 512,
     "v2-dom": 144,
     "v2-integration": 203
   },
@@ -15,7 +15,7 @@
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
-    "relocate": 47,
+    "relocate": 48,
     "rewrite": 145,
     "vitest-e2e": 2
   },
@@ -16819,6 +16819,13 @@
       "method": "relocate",
       "replacement": [],
       "rationale": "Real npm pack and clean-consumer install/audit coverage for dependency-owned shrinkwrap resolution, aligned Pi versions, secure brace-expansion edges, version-conditional protobufjs findings, and bundled fd/rg execution."
+    },
+    {
+      "file": "tests/e2e/anthropic-oauth-restart-sandbox-lock.spec.ts",
+      "bucket": "daily",
+      "method": "relocate",
+      "replacement": [],
+      "rationale": "Real gateway crash/restart preserves an isolated Anthropic OAuth credential and direct mock-model authentication; its companion sandbox and stale-lock checks retain the same secure credential fixture."
     }
   ]
 }

@@ -8,9 +8,11 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 
 import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
-import { completeModelText, type ModelCompletionDependencies } from "../../src/server/agent/model-completion.js";
+import { completeModelText, testModelPreference, type ModelCompletionDependencies } from "../../src/server/agent/model-completion.js";
 import { modelProbeFailure } from "../../src/server/agent/model-probe-result.js";
+import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
 import type { ApiModel } from "../../src/server/agent/model-registry.js";
+import { createMemFs } from "../harness/mem-fs.js";
 
 let agentDir: string | undefined;
 
@@ -27,19 +29,21 @@ afterEach(() => {
 	resetAgentDirStateForTests();
 });
 
-const anthropicModel: ApiModel = {
-	id: "claude-opus-5",
-	name: "Claude Opus 5",
-	provider: "anthropic",
-	api: "anthropic-messages",
-	baseUrl: "https://api.anthropic.com",
-	contextWindow: 200_000,
-	maxTokens: 8_192,
-	reasoning: true,
-	input: ["text"],
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-	authenticated: true,
-};
+function anthropicModel(id = "claude-opus-5"): ApiModel {
+	return {
+		id,
+		name: id,
+		provider: "anthropic",
+		api: "anthropic-messages",
+		baseUrl: "https://api.anthropic.com",
+		contextWindow: 200_000,
+		maxTokens: 8_192,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		authenticated: true,
+	};
+}
 
 describe("Anthropic model probe regressions", () => {
 	it("preserves API-key authentication selection for direct Pi model completions", async () => {
@@ -51,7 +55,7 @@ describe("Anthropic model probe regressions", () => {
 		};
 
 		const result = await completeModelText(
-			anthropicModel,
+			anthropicModel(),
 			undefined,
 			{ systemPrompt: "system", userPrompt: "probe", maxTokens: 5, thinkingLevel: "off" },
 			async (_model, _context, options) => {
@@ -63,6 +67,31 @@ describe("Anthropic model probe regressions", () => {
 
 		assert.equal(result, "OK");
 		assert.deepEqual(calls, [{ maxTokens: 5, timeoutMs: 30_000, maxRetries: 0, cacheRetention: "none", apiKey: "test-anthropic-api-key" }]);
+	});
+
+	it("keeps mocked Pi provider-path failures model-specific across the current three-model matrix", async () => {
+		const prefs = new PreferencesStore(path.resolve("/memfs/anthropic-model-probe"), createMemFs());
+		const matrix = [
+			{ id: "claude-opus-5", status: 404 as const, code: "model_not_found" },
+			{ id: "claude-sonnet-5", status: 401 as const, code: "authentication_failed" },
+			{ id: "claude-fable-5", status: 429 as const, code: "rate_limited" },
+		];
+
+		for (const expected of matrix) {
+			let calledModel: string | undefined;
+			const result = await testModelPreference(prefs, `anthropic/${expected.id}`, async (model) => {
+				calledModel = model.id;
+				throw Object.assign(new Error(`mock Anthropic HTTP ${expected.status}`), {
+					response: { status: expected.status },
+				});
+			});
+			const probe = result as typeof result & { code?: string };
+			assert.equal(calledModel, expected.id, "Pi completion must receive the exact selected model");
+			assert.deepEqual(
+				{ status: probe.status, code: probe.code, modelResolved: probe.modelResolved },
+				{ status: expected.status, code: expected.code, modelResolved: expected.id },
+			);
+		}
 	});
 
 	it("keeps model-not-found, authentication, and rate-limit probe outcomes distinct and redacted", () => {
