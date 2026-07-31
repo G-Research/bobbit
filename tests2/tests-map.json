@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/anthropic-oauth-pi-callback-contract-repro.test.ts",
+      "reason": "Focused failing-first Anthropic OAuth regression pinning Pi's loopback callback and complete current authorization scope set, so the stale Console callback and reduced legacy scope contract cannot return.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/comparative-design-prompts.test.ts",
       "reason": "Prompt-contract coverage proving non-trivial design gates compare independent approaches before implementation, coding agents prefer simple composition of well-tested code without forced DRY, reviewers preserve equal scope, and the canonical/current workflow prompts enforce the same decision standard.",
       "execution": {
