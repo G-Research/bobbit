@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { spawnTracked, killAllTracked, killTreeByPid, type TrackedChild } from "./spawn-tree.js";
 import { realClock, realCommandRunner, type Clock, type CommandRunner, type TimerHandle } from "../gateway-deps.js";
 import { broadcastGateStatusChanged } from "../gate-status-broadcast.js";
@@ -34,6 +34,27 @@ class PendingCommandCleanupError extends Error {
 
 function isPendingCommandCleanupError(err: unknown): err is PendingCommandCleanupError {
 	return err instanceof PendingCommandCleanupError || (err as any)?.name === "PendingCommandCleanupError";
+}
+
+interface PosixProcessIdentity {
+	startToken: string;
+	pgid: number;
+}
+
+function inspectPosixProcessIdentity(pid: number): PosixProcessIdentity | undefined {
+	try {
+		const output = execFileSync("ps", ["-o", "lstart=", "-o", "pgid=", "-p", String(pid)], {
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+			env: { ...process.env, LC_ALL: "C", LANG: "C" },
+		}).trim();
+		const match = /^(.*?)\s+(\d+)$/.exec(output);
+		const pgid = Number(match?.[2]);
+		if (!match || !match[1].trim() || !Number.isFinite(pgid) || pgid <= 0) return undefined;
+		return { startToken: match[1].trim(), pgid };
+	} catch {
+		return undefined;
+	}
 }
 
 function readProcessStartToken(pid: number): string | undefined {
@@ -2525,6 +2546,10 @@ export class VerificationHarness {
 	private readonly commandLifecycleClock: Clock;
 	/** Injectable only for deterministic lifecycle tests; production uses the host platform. */
 	private readonly platform: NodeJS.Platform;
+	/** Reads a live POSIX PID's stable process identity before recovered cleanup. */
+	private readonly posixProcessIdentityInspector: (pid: number) => PosixProcessIdentity | undefined;
+	/** Test seam; production sends the one final signal through killTreeByPid. */
+	private readonly persistedTreeKiller: typeof killTreeByPid;
 	private readonly skipLlmReview: boolean;
 
 	constructor(
@@ -2539,13 +2564,15 @@ export class VerificationHarness {
 		private projectConfigStore?: ProjectConfigStore,
 		projectContextManager?: ProjectContextManager,
 		configCascade?: import("./config-cascade.js").ConfigCascade,
-		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; commandLifecycleClock?: Clock; platform?: NodeJS.Platform; skipLlmReview?: boolean } = {},
+		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; commandLifecycleClock?: Clock; platform?: NodeJS.Platform; skipLlmReview?: boolean; posixProcessIdentityInspector?: (pid: number) => PosixProcessIdentity | undefined; persistedTreeKiller?: typeof killTreeByPid } = {},
 	) {
 		this.commandRunner = deps.commandRunner ?? realCommandRunner;
 		this.commandStepRunner = deps.commandStepRunner ?? realVerificationCommandRunner;
 		this.clock = deps.clock ?? realClock;
 		this.commandLifecycleClock = deps.commandLifecycleClock ?? realClock;
 		this.platform = deps.platform ?? process.platform;
+		this.posixProcessIdentityInspector = deps.posixProcessIdentityInspector ?? inspectPosixProcessIdentity;
+		this.persistedTreeKiller = deps.persistedTreeKiller ?? killTreeByPid;
 		this.skipLlmReview = !!deps.skipLlmReview;
 		this.configCascade = configCascade;
 		// Wrap the broadcast fn so every gate_verification_* event carries a
@@ -2808,9 +2835,9 @@ export class VerificationHarness {
 	/**
 	 * Reap the POSIX group sentinel left behind when a detached verification
 	 * wrapper writes its durable verdict after the gateway process has exited.
-	 * The sentinel's own PID, nonce, and PGID must match the durable record
-	 * before naming the recovered group; otherwise a reused PID is never
-	 * targeted and resume fails closed.
+	 * The sentinel's own PID, nonce, start token, and PGID must match before
+	 * naming the recovered group; otherwise a reused PID is never targeted and
+	 * resume fails closed.
 	 */
 	private async _reapRecoveredPosixSentinel(step: ActiveVerification["steps"][number]): Promise<void> {
 		if (this.platform === "win32" || !step.sentinelFile) return;
@@ -2825,7 +2852,7 @@ export class VerificationHarness {
 			return pending("Recovered command verdict has no durable POSIX sentinel group identity.");
 		}
 
-		let record: { pid?: unknown; pgid?: unknown; nonce?: unknown };
+		let record: { pid?: unknown; pgid?: unknown; nonce?: unknown; startToken?: unknown };
 		try {
 			record = JSON.parse(fs.readFileSync(step.sentinelFile, "utf8"));
 		} catch (err) {
@@ -2833,7 +2860,7 @@ export class VerificationHarness {
 		}
 		const sentinelPid = Number(record.pid);
 		const recordedGroupId = Number(record.pgid);
-		if (!Number.isFinite(sentinelPid) || sentinelPid <= 0 || recordedGroupId !== groupId || record.nonce !== expectedNonce) {
+		if (!Number.isFinite(sentinelPid) || sentinelPid <= 0 || recordedGroupId !== groupId || record.nonce !== expectedNonce || typeof record.startToken !== "string" || !record.startToken) {
 			return pending("Recovered command sentinel identity did not match persisted group metadata.");
 		}
 		// A missing sentinel means its process group is already gone. Never signal
@@ -2843,12 +2870,14 @@ export class VerificationHarness {
 			return;
 		}
 
+		const current = this.posixProcessIdentityInspector(sentinelPid);
+		if (!current || current.startToken !== record.startToken || current.pgid !== groupId) {
+			return pending("Recovered POSIX sentinel no longer matches its original process identity; refusing to target its group.");
+		}
 		// The record is published by the separately-invoked sentinel after it has
-		// installed its traps. A live recorded sentinel keeps this PGID from being
-		// reused, so its nonce + PID + recorded PGID are a durable ownership proof
-		// for this one final negative-PID signal. If it disappeared, return above
-		// without ever naming the historical group.
-		if (killTreeByPid(groupId, "SIGKILL") !== "signalled") {
+		// installed its traps. A live PID with matching start token and PGID keeps
+		// this group identity bound until this one final negative-PID signal.
+		if (this.persistedTreeKiller(groupId, "SIGKILL") !== "signalled") {
 			return pending("Recovered POSIX sentinel group disappeared before cleanup; refusing to retarget its historical PGID.");
 		}
 		if (!await this._waitForPidToExit(sentinelPid)) {

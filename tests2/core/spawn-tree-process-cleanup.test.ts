@@ -258,7 +258,11 @@ function groupAlive(pid: number): boolean {
 	catch (error: any) { return error?.code === "EPERM"; }
 }
 
-function makeRecoveryHarness(stateDir: string, calls: Array<{ kind: string; status: string }>): VerificationHarness {
+function makeRecoveryHarness(
+	stateDir: string,
+	calls: Array<{ kind: string; status: string }>,
+	deps: { platform?: NodeJS.Platform; posixProcessIdentityInspector?: (pid: number) => { startToken: string; pgid: number } | undefined; persistedTreeKiller?: (pid: number, signal?: NodeJS.Signals) => "signalled" | "unsupported" | "invalid" } = {},
+): VerificationHarness {
 	return new VerificationHarness(
 		stateDir,
 		{
@@ -268,6 +272,13 @@ function makeRecoveryHarness(stateDir: string, calls: Array<{ kind: string; stat
 		} as any,
 		() => {},
 		{ get: () => undefined, getAll: () => [] } as any,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		deps,
 	);
 }
 
@@ -329,7 +340,14 @@ describe("spawnTracked timeout cleanup", () => {
 			};
 			fs.writeFileSync(path.join(stateDir, "active-verifications.json"), JSON.stringify({ verifications: [active] }));
 			const calls: Array<{ kind: string; status: string }> = [];
-			await makeRecoveryHarness(stateDir, calls).resumeInterruptedVerifications();
+			await makeRecoveryHarness(stateDir, calls, {
+				// The tier-1 spawn guard blocks `ps`; the native probe above already
+				// proves this is the separately-invoked live sentinel. Production uses
+				// the default C-locale `ps` inspector.
+				posixProcessIdentityInspector: pid => pid === sentinelIdentity.pid
+					? { startToken: sentinelIdentity.startToken, pgid: sentinelIdentity.pgid }
+					: undefined,
+			}).resumeInterruptedVerifications();
 
 			expect(calls).toContainEqual({ kind: "gate", status: "passed" });
 			expect(groupAlive(rootPid), "successful recovered verification must reap the sentinel group left by the exited parent").toBe(false);
@@ -337,6 +355,32 @@ describe("spawnTracked timeout cleanup", () => {
 			if (rootPid && groupAlive(rootPid)) {
 				try { process.kill(-rootPid, "SIGKILL"); } catch { /* test cleanup */ }
 			}
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses a reused POSIX sentinel PID before it can signal a group", async () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-reused-sentinel-"));
+		const sentinelFile = path.join(stateDir, "sentinel.json");
+		const groupId = 123_456;
+		const nonce = "original-sentinel-nonce";
+		fs.writeFileSync(sentinelFile, JSON.stringify({ pid: process.pid, pgid: groupId, nonce, startToken: "original-process" }));
+		const killCalls: Array<{ pid: number; signal: NodeJS.Signals | undefined }> = [];
+		try {
+			const harness = makeRecoveryHarness(stateDir, [], {
+				platform: "linux",
+				posixProcessIdentityInspector: () => ({ startToken: "reused-process", pgid: groupId }),
+				persistedTreeKiller: (pid, signal) => {
+					killCalls.push({ pid, signal });
+					return "signalled";
+				},
+			});
+			await expect((harness as any)._reapRecoveredPosixSentinel({
+				name: "Recovered command", type: "command", status: "running", startedAt: Date.now(),
+				pid: groupId, pidNonce: nonce, sentinelFile,
+			})).rejects.toThrow(/no longer matches its original process identity/i);
+			expect(killCalls, "a mismatched live sentinel PID must not authorize any process-group signal").toEqual([]);
+		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
 		}
 	});
