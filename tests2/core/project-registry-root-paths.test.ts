@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  CASE_EVIDENCE_ENTRY_LIMIT,
   canonicalProjectPath,
   createProjectPathIdentity,
   ProjectRegistry,
@@ -141,6 +142,68 @@ test("ProjectRegistry treats case-paired entries as sensitive without a director
   assert.equal(registry.getByPath(lower), undefined);
   assert.notEqual(registry.registerProvisional("lower", lower).id, "upper");
   assert.equal(probes, 0, "known case-paired entries are resolved by their two lstat identities");
+});
+
+test("ProjectRegistry folds an unwritable nonexistent suffix from bounded read-only evidence", () => {
+  const parent = "/read-only-case-evidence";
+  const knownEntry = path.posix.join(parent, "KnownEntry");
+  let directoryReads = 0;
+  let probeAttempts = 0;
+  const identity = createProjectPathIdentity({
+    isNativePathApi: dialect => dialect === "posix",
+    realpathSync: candidate => {
+      const resolved = path.posix.resolve(candidate);
+      if (resolved === parent || resolved === knownEntry || resolved === path.posix.join(parent, "knownEntry")) return resolved;
+      throw missing(candidate);
+    },
+    lstatSync: candidate => path.posix.resolve(candidate).toLowerCase() === knownEntry.toLowerCase()
+      ? { dev: 1, ino: 1 }
+      : { dev: 1, ino: 2 },
+    readDirectoryEntries: (directory, limit) => {
+      directoryReads += 1;
+      assert.equal(directory, parent);
+      assert.equal(limit, CASE_EVIDENCE_ENTRY_LIMIT);
+      return ["KnownEntry"];
+    },
+    createCaseProbe: () => {
+      probeAttempts += 1;
+      throw Object.assign(new Error("read-only directory"), { code: "EPERM" });
+    },
+  });
+
+  assert.equal(identity(`${parent}/FutureProject`), `${parent}/futureproject`);
+  assert.equal(directoryReads, 1, "a readable parent supplies non-mutating case evidence");
+  assert.equal(probeAttempts, 0, "read-only evidence avoids a failed owned probe");
+});
+
+test("ProjectRegistry bounds opendir work before falling back from inconclusive suffix evidence", () => {
+  const parent = "/bounded-read-only-evidence";
+  let reads = 0;
+  let closes = 0;
+  let probeAttempts = 0;
+  vi.spyOn(fs, "opendirSync").mockImplementation(() => ({
+    readSync: () => {
+      reads += 1;
+      return { name: `000${reads}` };
+    },
+    closeSync: () => { closes += 1; },
+  }) as unknown as fs.Dir);
+  const identity = createProjectPathIdentity({
+    isNativePathApi: dialect => dialect === "posix",
+    realpathSync: candidate => path.posix.resolve(candidate) === parent
+      ? parent
+      : (() => { throw missing(candidate); })(),
+    lstatSync: () => ({ dev: 1, ino: 1 }),
+    createCaseProbe: () => {
+      probeAttempts += 1;
+      throw Object.assign(new Error("read-only directory"), { code: "EPERM" });
+    },
+  });
+
+  assert.equal(identity(`${parent}/FutureProject`), `${parent}/FutureProject`);
+  assert.equal(reads, CASE_EVIDENCE_ENTRY_LIMIT, "opendir must not scan past its fixed evidence budget");
+  assert.equal(closes, 1, "the bounded directory handle is always closed");
+  assert.equal(probeAttempts, 1, "inconclusive evidence retains the owned-probe fallback");
 });
 
 test("ProjectRegistry uses bounded work while keeping owned probe evidence uncached", () => {

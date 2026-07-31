@@ -169,6 +169,8 @@ export interface ProjectPathIdentityOptions {
   /** Create and remove a unique, caller-owned case probe below `parent`. */
   createCaseProbe?: (parent: string, pathApi: "posix" | "win32") => string;
   removeCaseProbe?: (probePath: string) => void;
+  /** Read at most `limit` directory names for non-mutating case evidence. */
+  readDirectoryEntries?: (parent: string, limit: number) => readonly string[];
   /** Cache directory entry case semantics, invalidated by this fingerprint. */
   caseSemanticsCache?: Map<string, CaseSemanticsCacheRecord>;
   caseSemanticsFingerprint?: (existingAncestor: string) => string | undefined;
@@ -177,6 +179,9 @@ export interface ProjectPathIdentityOptions {
 }
 
 type CaseSemantics = "insensitive" | "sensitive" | "unknown";
+
+/** Bound read-only evidence so identity lookups never scan a large directory. */
+export const CASE_EVIDENCE_ENTRY_LIMIT = 8;
 
 export interface CaseSemanticsCacheRecord {
   fingerprint: string;
@@ -238,6 +243,50 @@ function classifyKnownEntry(
   }
 }
 
+/**
+ * Read a fixed number of names without materializing the whole directory.
+ * This is the read-only fallback when an owned probe cannot be created.
+ */
+function readLimitedDirectoryEntries(parent: string, limit: number): string[] {
+  const directory = fs.opendirSync(parent);
+  const entries: string[] = [];
+  try {
+    while (entries.length < limit) {
+      const entry = directory.readSync();
+      if (!entry) break;
+      entries.push(entry.name);
+    }
+  } finally {
+    directory.closeSync();
+  }
+  return entries;
+}
+
+/**
+ * A bounded directory sample can prove its containing directory's behavior
+ * without mutation. Each usable spelling is verified by alternate lookup and
+ * exact entry identity, so a case-paired NTFS entry remains sensitive.
+ */
+function readOnlyCaseSemantics(
+  parent: string,
+  pathApi: ProjectPathApi,
+  realpathSync: (candidate: string) => string,
+  lstatSync: (candidate: string) => Pick<fs.Stats, "dev" | "ino">,
+  readDirectoryEntries: (parent: string, limit: number) => readonly string[],
+): CaseSemantics {
+  let entries: readonly string[];
+  try {
+    entries = readDirectoryEntries(parent, CASE_EVIDENCE_ENTRY_LIMIT);
+  } catch {
+    return "unknown";
+  }
+  for (const entry of entries.slice(0, CASE_EVIDENCE_ENTRY_LIMIT)) {
+    const semantics = classifyKnownEntry(parent, entry, pathApi, realpathSync, lstatSync);
+    if (semantics !== "unknown") return semantics;
+  }
+  return "unknown";
+}
+
 function directoryIdentity(
   directory: string,
   lstatSync: (candidate: string) => Pick<fs.Stats, "dev" | "ino">,
@@ -294,6 +343,7 @@ function hasCaseInsensitiveEntries(
   isCaseInsensitiveAt?: (existingAncestor: string) => boolean | undefined,
   createCaseProbe?: (parent: string, pathApi: "posix" | "win32") => string,
   removeCaseProbe?: (probePath: string) => void,
+  readDirectoryEntries?: (parent: string, limit: number) => readonly string[],
   cache?: Map<string, CaseSemanticsCacheRecord>,
   fingerprint?: (existingAncestor: string) => string | undefined,
 ): boolean {
@@ -307,7 +357,12 @@ function hasCaseInsensitiveEntries(
     const cached = before ? cache?.get(cacheKey) : undefined;
     if (cached && cached.fingerprint === before) return cached.semantics === "insensitive";
 
-    const known = entry ? classifyKnownEntry(parent, entry, pathApi, realpathSync, lstatSync) : "unknown";
+    const known = entry
+      ? classifyKnownEntry(parent, entry, pathApi, realpathSync, lstatSync)
+      : readOnlyCaseSemantics(
+        parent, pathApi, realpathSync, lstatSync,
+        readDirectoryEntries ?? readLimitedDirectoryEntries,
+      );
     if (known === "unknown") {
       // A probe mutates its parent, so the metadata fingerprint cannot show
       // continuity. The current lookup can still use its result when the
@@ -350,8 +405,8 @@ function normalizeExistingPathCase(
   for (const segment of segments) {
     const insensitive = hasCaseInsensitiveEntries(
       parent, segment, pathApi, realpathSync, lstatSync, options.isCaseInsensitiveAt,
-      options.createCaseProbe, options.removeCaseProbe, options.caseSemanticsCache,
-      options.caseSemanticsFingerprint,
+      options.createCaseProbe, options.removeCaseProbe, options.readDirectoryEntries,
+      options.caseSemanticsCache, options.caseSemanticsFingerprint,
     );
     normalized.push(insensitive ? segment.toLowerCase() : segment);
     parent = pathApi.join(parent, segment);
@@ -382,8 +437,8 @@ export function canonicalProjectPath(
       const canonical = pathApi.resolve(realpathSync(existing));
       const insensitive = suffix.length > 0 && hasCaseInsensitiveEntries(
         canonical, undefined, pathApi, realpathSync, lstatSync, options.isCaseInsensitiveAt,
-        options.createCaseProbe, options.removeCaseProbe, options.caseSemanticsCache,
-        options.caseSemanticsFingerprint,
+        options.createCaseProbe, options.removeCaseProbe, options.readDirectoryEntries,
+        options.caseSemanticsCache, options.caseSemanticsFingerprint,
       );
       const normalizedSuffix = [...suffix].reverse().map(segment => insensitive ? segment.toLowerCase() : segment);
       const normalizedCanonical = normalizeExistingPathCase(canonical, pathApi, realpathSync, lstatSync, options);
