@@ -10,7 +10,7 @@
  *   assert → the expected outcomes (tracked)
  *   cleanup → teardown (not tracked)
  */
-import type { Page } from "@playwright/test";
+import type { Page, Route } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import { waitForHealth, createGoal, deleteGoal } from "../e2e-setup.js";
 import {
@@ -29,22 +29,89 @@ import {
 } from "./story-registry.js";
 import { navigateToHash } from "./ui-helpers.js";
 
+async function waitForSessionRouteSettlement(page: Page, sessionId: string): Promise<void> {
+	await page.waitForFunction((id) => {
+		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+		return window.location.hash === `#/session/${id}`
+			&& state?.selectedSessionId === id
+			&& state?.connectingSessionId === null
+			&& state?.connectionStatus === "connected"
+			&& state?.remoteAgent?.gatewaySessionId === id;
+	}, sessionId, { timeout: 20_000 });
+}
+
+type HeldSessionListHydration = {
+	held: Promise<void>;
+	release: () => void;
+	dispose: () => Promise<void>;
+};
+
+/**
+ * Hold only the target session navigation's final list refresh. The app issues
+ * unrelated /api/sessions reads while it boots; if one is held instead, the
+ * target session cannot mount and this test creates a harness-only deadlock.
+ */
+async function holdSessionListHydration(page: Page, sessionId: string): Promise<HeldSessionListHydration> {
+	let markHeld!: () => void;
+	const held = new Promise<void>((resolve) => { markHeld = resolve; });
+	let releaseGate!: () => void;
+	const released = new Promise<void>((resolve) => { releaseGate = resolve; });
+	let markHandlerComplete!: () => void;
+	const handlerComplete = new Promise<void>((resolve) => { markHandlerComplete = resolve; });
+	// The caller establishes this visible editor boundary before installing the
+	// route. It is an event-state read, not a timer or a polling loop.
+	const editorAlreadyRendered = await page.evaluate(() => !!document.querySelector("message-editor"));
+	if (!editorAlreadyRendered) throw new Error("target hydration fixture requires a rendered editor");
+	let captured = false;
+	const matcher = (url: URL) => url.pathname === "/api/sessions";
+	const handler = async (route: Route) => {
+		// This is the target session's post-render refresh continuation. Its
+		// connectingSessionId remains target-owned until the continuation settles;
+		// boot, push, and unrelated-session list refreshes therefore fall through.
+		const isTargetHydrationContinuation = route.request().method() === "GET" && await page.evaluate(({ id, editorReady }) => {
+			const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+			return window.location.hash === `#/session/${id}`
+				&& state?.selectedSessionId === id
+				&& state?.connectingSessionId === id
+				&& state?.remoteAgent?.gatewaySessionId === id
+				&& !!state?.chatPanel?.agentInterface
+				&& editorReady;
+		}, { id: sessionId, editorReady: editorAlreadyRendered });
+		if (captured || !isTargetHydrationContinuation) {
+			await route.fallback();
+			return;
+		}
+		captured = true;
+		markHeld();
+		try {
+			await released;
+			await route.continue();
+		} finally {
+			markHandlerComplete();
+		}
+	};
+	await page.route(matcher, handler);
+	return {
+		held,
+		release: releaseGate,
+		dispose: async () => {
+			releaseGate();
+			// Playwright cannot remove a route handler while it still owns a
+			// request. Release it, wait for continue(), then dispose the route.
+			if (captured) await handlerComplete;
+			await page.unroute(matcher, handler);
+		},
+	};
+}
+
 async function waitForGoalDashboardRoute(page: Page, goalId: string): Promise<void> {
-	await expect.poll(
-		() => page.evaluate((id) => {
-			const state = (window as any).bobbitState;
-			const dashboardVisible = Array.from(document.querySelectorAll(".dashboard-container, .goal-dashboard, goal-dashboard"))
-				.some((el) => {
-					const rect = el.getBoundingClientRect();
-					const style = window.getComputedStyle(el);
-					return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-				});
-			return window.location.hash.includes(`/goal/${id}`)
-				&& state?.goalDashboardId === id
-				&& dashboardVisible;
-		}, goalId),
-		{ timeout: 20_000, intervals: [100, 200, 500, 1000] },
-	).toBe(true);
+	const dashboard = page.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first();
+	await expect(dashboard).toBeVisible({ timeout: 20_000 });
+	const routeOwnsDashboard = await page.evaluate((id) => {
+		const state = (window as any).bobbitState;
+		return window.location.hash.includes(`/goal/${id}`) && state?.goalDashboardId === id;
+	}, goalId);
+	expect(routeOwnsDashboard, "goal route must own the visible dashboard").toBe(true);
 }
 
 test.describe("CT-13: URL routing and navigation", () => {
@@ -122,29 +189,74 @@ test.describe("CT-13: URL routing and navigation", () => {
 	// ---------------------------------------------------------------
 
 	test("N-03/N-10: Deep links and settings sub-navigation @smoke", async () => {
-		test.slow(); // goal-dashboard can be slow to render under concurrent v2-browser load
 		s.begin(STORY_N03);
 
 		await s.createTestSession("A");
+		await s.createTestSession("B");
 		const goal = await createGoal({ title: "Deep link goal" });
 		goalIds.push(goal.id);
 		await s.open();
 
-		s.act();
-
-		// Deep link: session
-		await navigateToHash(s.page, `#/session/${s.session("A").sessionId}`);
-		s.assert();
+		// Establish a rendered editor before arming the A-specific hydration
+		// interceptor. This lets the exact A continuation be held at its own
+		// connectingSessionId boundary, rather than waiting for a later push tick.
+		await s.navigate_to("session", "B");
 		await s.editor.is_visible();
 
-		// Deep link: goal. navigateToHash already waits for the hash to settle,
-		// so no extra waitForFunction is needed (removing it avoids compounding
-		// timeouts when the navigation is slow under load).
 		s.act();
-		await navigateToHash(s.page, `#/goal/${goal.id}`);
-		s.assert();
-		await expect(s.page.locator(".dashboard-container").first())
-			.toBeVisible({ timeout: 20_000 });
+
+		// Deep link: session. Hold the connection's final session-list refresh so
+		// the next navigation races a real, observable hydration continuation.
+		const hydration = await holdSessionListHydration(s.page, s.session("A").sessionId);
+		let hydrationDisposed = false;
+		try {
+			await navigateToHash(s.page, `#/session/${s.session("A").sessionId}`);
+			await hydration.held;
+			s.assert();
+			// The deliberately held final refresh owns the target's editor commit;
+			// the already-rendered B editor above supplies the no-timer readiness
+			// boundary, while the target connection token proves this is A's refresh.
+			const sessionStillOwnsHeldRefresh = await s.page.evaluate((id) => {
+				const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+				return window.location.hash === `#/session/${id}` && state?.selectedSessionId === id;
+			}, s.session("A").sessionId);
+			expect(sessionStillOwnsHeldRefresh, "session route must own its held post-render refresh").toBe(true);
+
+			// The route has already captured the target continuation, so this distinct
+			// list read must take the handler's fallback path and complete before it
+			// is released. A broad route predicate would hold this request too.
+			const unrelatedRefresh = await s.page.evaluate(async () => {
+				const token = localStorage.getItem("gateway.token");
+				const response = await fetch(`/api/sessions?unrelated-refresh=${crypto.randomUUID()}`, {
+					headers: token ? { Authorization: `Bearer ${token}` } : {},
+				});
+				return { ok: response.ok, status: response.status };
+			});
+			expect(unrelatedRefresh, "unrelated session-list refresh must fall through while target hydration is held")
+				.toMatchObject({ ok: true, status: 200 });
+
+			// Queue the goal route while the earlier session continuation is held,
+			// then release its request before awaiting route handling. This preserves
+			// the ownership race without deadlocking the serialized hash router.
+			s.act();
+			await navigateToHash(s.page, `#/goal/${goal.id}`);
+			await hydration.dispose();
+			hydrationDisposed = true;
+			await waitForGoalDashboardRoute(s.page, goal.id);
+			s.assert();
+			await expect(s.page.locator(".dashboard-container").first())
+				.toBeVisible({ timeout: 20_000 });
+
+			// Prove the held target route itself reaches its editor only after the
+			// goal-race assertion; this is a fresh navigation, not a wait for the
+			// deliberately held continuation above.
+			s.act();
+			await navigateToHash(s.page, `#/session/${s.session("A").sessionId}`);
+			s.assert();
+			await s.editor.is_visible();
+		} finally {
+			if (!hydrationDisposed) await hydration.dispose();
+		}
 
 		// Deep link: settings
 		s.act();
@@ -470,6 +582,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 		s.begin(STORY_N02);
 		await s.navigate_to("session", "A");
 		await s.editor.is_visible();
+		await waitForSessionRouteSettlement(s.page, s.session("A").sessionId);
 
 		s.act();
 		await navigateToHash(s.page, `#/goal/${goal.id}`);
@@ -495,6 +608,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 		await navigateToHash(s.page, `#/session/${s.session("A").sessionId}`);
 		s.assert();
 		await s.editor.is_visible();
+		await waitForSessionRouteSettlement(s.page, s.session("A").sessionId);
 
 		// act — session → goal dashboard
 		s.act();

@@ -9,21 +9,20 @@
  *   - manual-integration specs (real-agent / real-LLM / real-Docker — that
  *     is the tier-3 `test:manual` lane, never here).
  *
- * Everything else in that bucket runs here at retries:3 (a TEMPORARY
- * concurrency bridge — see docs/testing-strategy.md "Concurrency & budgets" and
- * the Group B/C notes below; Group A uses node:test's --test-force-exit and has
- * no retry knob wired here), in four groups
- * derived mechanically from tests-map.json (so this is reusable, not
+ * Everything else in that bucket normally runs at retries:3 for developer
+ * workflow resilience. Set BOBBIT_V2_RETRY_FREE=1 to qualify Groups B/C/D with
+ * retries disabled; Group A completes through its owning fixture teardowns and
+ * has no retry knob wired here. The groups are derived mechanically from tests-map.json (so this is reusable, not
  * hand-assembled — it tracks the map, not a frozen list):
  *
  *   Group A — node relocate specs (tests node .test.ts): real git worktree /
  *             sweeper / sandbox-mount / spawn-tree fidelity. Run via `tsx --test`.
  *   Group B — playwright e2e relocate specs (tests/e2e .spec.ts): real
  *             worktree pool / MCP subprocess / port / restart. Run via the legacy
- *             playwright-e2e config at --retries=2 (concurrency bridge).
+ *             playwright-e2e config at retries:3 (or 0 when qualifying).
  *   Group C — adapter browser specs: the geometry/journey specs migrated into
  *             tests2/browser/e2e/. Run via playwright-v2 config, project
- *             `browser-v2-e2e` (retries:3 inherited from the v2 config).
+ *             `browser-v2-e2e` (retries:3 normally, 0 when qualifying).
  *   Group D — Vitest real-fidelity suites explicitly classified `vitest-e2e`;
  *             run in the isolated `v2-e2e-vitest` project.
  *
@@ -47,10 +46,70 @@ import { performance } from "node:perf_hooks";
 import { finished } from "node:stream/promises";
 import { execFileSync } from "node:child_process";
 import { createCpuSampler } from "./assert-budget.mjs";
+import { coordinatorTempDirectory, createE2ERunPaths, createIsolatedE2EEnvironment } from "../run-playwright-e2e.mjs";
+import { copyEnvironment, deleteEnvironmentValue } from "./environment-policy.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
-const SAMPLE_DIR = join(REPO_ROOT, ".profiles", "testing-v2", "samples");
+const PERFORMANCE_REPORT_DIR = join(REPO_ROOT, ".profiles", "testing-v2", "samples");
+
+/**
+ * Give the top-level E2E coordinator its own environment before it starts any
+ * group. Group B's legacy wrapper receives this environment and allocates a
+ * nested root; Groups A/C/D share only this coordinator-owned root.
+ */
+export function createE2EV2CoordinatorEnvironment(paths, inheritedEnv = process.env, platform = process.platform) {
+	const env = createIsolatedE2EEnvironment(paths, inheritedEnv, platform);
+	return copyEnvironment(env, {
+		BOBBIT_V2_RUN_ROOT: paths.root,
+		BOBBIT_V2_RUN_ROOT_OWNER_PID: String(process.pid),
+		BOBBIT_E2E_RUN_ID: paths.runId,
+		BOBBIT_E2E_TMP_ROOT: paths.legacyTempParent,
+		BOBBIT_E2E_PWTEST_CACHE_ROOT: paths.cacheRoot,
+		BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT: paths.cacheRoot,
+		PWTEST_CACHE_DIR: paths.cacheRoot,
+		BOBBIT_E2E_PWTEST_CACHE_DIR: paths.cacheRoot,
+		BOBBIT_E2E_PWTEST_CACHE_OWNED: "1",
+		BOBBIT_E2E_V8CACHE_ROOT: paths.v8CacheRoot,
+		NODE_DISABLE_COMPILE_CACHE: "1",
+	}, platform);
+}
+
+function cleanup(root) {
+	try {
+		// Windows can briefly retain Playwright output handles after its child
+		// exits. Keep retries bounded while tolerating transient EPERM/ENOTEMPTY.
+		rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Copy a fully prepared environment without resurrecting ambient host values. */
+export function composeE2EChildEnvironment(environment, additions = {}, platform = process.platform) {
+	return copyEnvironment(environment, additions, platform);
+}
+
+/** Remove coordinator cache settings before invoking the nested legacy runner. */
+export function createNestedE2EEnvironment(coordinatorEnv, platform = process.platform) {
+	const nestedEnv = { ...coordinatorEnv };
+	for (const key of [
+		"PWTEST_CACHE_DIR",
+		"BOBBIT_E2E_PWTEST_CACHE_ROOT",
+		"BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT",
+		"BOBBIT_E2E_PWTEST_CACHE_DIR",
+		"BOBBIT_E2E_PWTEST_CACHE_OWNED",
+		"BOBBIT_PWTEST_CACHE_ROOT",
+		"BOBBIT_E2E_V8CACHE_ROOT",
+	]) deleteEnvironmentValue(nestedEnv, key, platform);
+	return nestedEnv;
+}
+
+/** Persist the default report outside the disposable run root, uniquely per run. */
+export function defaultPerformanceReportPath(paths) {
+	return join(PERFORMANCE_REPORT_DIR, `${paths.runId}-e2e-v2.json`);
+}
 
 function parseArgs(argv) {
 	const out = { group: null, list: false, json: null };
@@ -114,22 +173,27 @@ function classifyDaily() {
 function dockerAvailable() {
 	try {
 		execFileSync("docker", ["ps"], { stdio: "pipe", timeout: 15_000 });
-		// A live daemon is not enough: the sandbox specs run containers from the
-		// local-only `bobbit-agent` image. Report UNAVAILABLE when it is absent so the
-		// log matches what the specs actually do (self-skip via
-		// isDockerSandboxAvailable() in tests/e2e/test-utils/docker.ts).
-		execFileSync("docker", ["image", "inspect", "bobbit-agent"], { stdio: "pipe", timeout: 15_000 });
 		return true;
 	} catch {
 		return false;
 	}
 }
 
-/** Specs known to require a usable Docker sandbox (their Docker paths skip otherwise). */
+/** Specs known to require a live Docker daemon (their Docker paths skip otherwise). */
 const DOCKER_GATED = ["tests/e2e/sandbox-recovery.spec.ts"];
 
 function npmCmd() {
 	return process.platform === "win32" ? "npm.cmd" : "npm";
+}
+
+// The E2E runner intentionally defaults Groups B/C to two workers. It is a
+// conservative cross-platform baseline; workflow callers can opt into more
+// parallelism with E2E_V2_PW_WORKERS=1..4 (Git Bash supports the same prefix on
+// Windows). Keep the bound aligned with the global browser-render lease cap.
+export function resolveE2ePlaywrightWorkers(env = process.env) {
+	const requested = Number(env.E2E_V2_PW_WORKERS);
+	if (!Number.isInteger(requested) || requested < 1) return 2;
+	return Math.min(4, requested);
 }
 
 function run(command, args, { env = {}, label, shell, captureOutputDir } = {}) {
@@ -144,7 +208,9 @@ function run(command, args, { env = {}, label, shell, captureOutputDir } = {}) {
 
 		const child = spawn(command, args, {
 			cwd: REPO_ROOT,
-			env: { ...process.env, ...env },
+			// `env` is already built from the coordinator's sanitized environment.
+			// Re-merging process.env here would restore deleted credentials/cache roots.
+			env: composeE2EChildEnvironment(env),
 			stdio: capturedOutput ? ["inherit", "pipe", "pipe"] : "inherit",
 			// Default: shell on Windows (needed for npm.cmd/npx.cmd). Callers that
 			// spawn an absolute exe with spaces (e.g. process.execPath under
@@ -223,9 +289,9 @@ const EXTERNAL_FREE_ENV = {
 	BOBBIT_TEST_NO_REMOTE: "1",
 };
 
-async function runGroupA(specs) {
+async function runGroupA(specs, coordinatorEnv) {
 	if (specs.length === 0) return { label: "A/node", code: 0, wallMs: 0, skipped: true };
-	// tsx --test, force-exit so lingering handles never hang the lane.
+	// tsx --test lets node exit only after each fixture has completed its teardown.
 	// RESOURCE CAP: node:test defaults to ~CPU-count concurrent FILES. These are
 	// worktree/pool/sandbox specs that each boot a gateway AND create git worktrees.
 	// Worktree setup does NOT run `npm ci` here (verified 2026-07-16): every
@@ -235,33 +301,41 @@ async function runGroupA(specs) {
 	// files to cut wall time while keeping gateway-boot load modest (override with
 	// E2E_V2_NODE_CONCURRENCY).
 	const nodeConc = process.env.E2E_V2_NODE_CONCURRENCY || "2";
-	const args = ["--test", "--test-force-exit", `--test-concurrency=${nodeConc}`, ...specs];
+	const args = ["--test", `--test-concurrency=${nodeConc}`, ...specs];
 	return run(process.platform === "win32" ? "npx.cmd" : "npx", ["tsx", ...args], {
-		env: { ...EXTERNAL_FREE_ENV, NODE_ENV: "test" },
+		env: composeE2EChildEnvironment(coordinatorEnv, { ...EXTERNAL_FREE_ENV, NODE_ENV: "test" }),
 		label: "A/node-relocate",
 	});
 }
 
-async function runGroupB(specs) {
+export function resolveE2ERetryCount(env = process.env) {
+	return env.BOBBIT_V2_RETRY_FREE === "1" ? 0 : 3;
+}
+
+function isRetryFreeQualification(env = process.env) {
+	return resolveE2ERetryCount(env) === 0;
+}
+
+async function runGroupB(specs, coordinatorEnv) {
 	if (specs.length === 0) return { label: "B/e2e", code: 0, wallMs: 0, skipped: true };
-	// Reuse the project's playwright-e2e runner (cache isolation + external-free
-	// env baked in) at retries:3 — TEMPORARY concurrency bridge (see file header +
-	// docs/testing-strategy.md "Concurrency & budgets"; restore 0 when the higher-N
-	// server-throughput fix lands).
-	// RESOURCE CAP: bound Playwright workers so the e2e browser swarm can't
-	// oversubscribe the box (override with E2E_V2_PW_WORKERS).
-	const pwWorkers = process.env.E2E_V2_PW_WORKERS || "2";
-	return run(npmCmd(), ["run", "test:e2e:run", "--", ...specs, `--workers=${pwWorkers}`, "--retries=3"], {
-		env: { ...EXTERNAL_FREE_ENV },
+	// The legacy wrapper must allocate its own nested Playwright cache rather
+	// than inheriting this coordinator's cache settings. It still inherits the
+	// owned temp directory, so its `createE2ERunPaths()` child is contained here.
+	const nestedEnv = createNestedE2EEnvironment(coordinatorEnv);
+	const retries = resolveE2ERetryCount(coordinatorEnv);
+	// Preserve retries:3 for ordinary workflow use. Retry-free qualification
+	// explicitly passes 0 so no first-attempt failure can be hidden.
+	const pwWorkers = resolveE2ePlaywrightWorkers();
+	return run(npmCmd(), ["run", "test:e2e:run", "--", ...specs, `--workers=${pwWorkers}`, `--retries=${retries}`], {
+		env: composeE2EChildEnvironment(nestedEnv, EXTERNAL_FREE_ENV),
 		label: "B/e2e-relocate",
 	});
 }
 
-async function runGroupC(specs) {
+async function runGroupC(specs, coordinatorEnv) {
 	if (specs.length === 0) return { label: "C/browser", code: 0, wallMs: 0, skipped: true };
-	// playwright-v2 config, browser-v2-e2e project (retries:3 from config —
-	// the concurrency bridge; we intentionally do NOT pass --retries here so the
-	// config's value governs).
+	// playwright-v2 config, browser-v2-e2e project. The config's retry-free
+	// override is inherited through coordinatorEnv when qualifying.
 	// We run the WHOLE project (its testDir IS tests2/browser/e2e — the physical
 	// real-fidelity browser bucket) rather than passing individual spec paths:
 	// Playwright's `--project` is variadic and would swallow trailing positional
@@ -272,10 +346,10 @@ async function runGroupC(specs) {
 	const usesLocal = existsSync(localCli);
 	const cmd = usesLocal ? process.execPath : (process.platform === "win32" ? "npx.cmd" : "npx");
 	const pre = usesLocal ? [localCli] : ["playwright"];
-	// RESOURCE CAP: bound Playwright workers (override with E2E_V2_PW_WORKERS).
-	const pwWorkersC = process.env.E2E_V2_PW_WORKERS || "2";
-	return run(cmd, [...pre, "test", "--config", "playwright-v2.config.ts", "--project", "browser-v2-e2e", `--workers=${pwWorkersC}`], {
-		env: { ...EXTERNAL_FREE_ENV },
+	const pwWorkersC = resolveE2ePlaywrightWorkers();
+	const retryArgs = isRetryFreeQualification(coordinatorEnv) ? ["--retries=0"] : [];
+	return run(cmd, [...pre, "test", "--config", "playwright-v2.config.ts", "--project", "browser-v2-e2e", `--workers=${pwWorkersC}`, ...retryArgs], {
+		env: composeE2EChildEnvironment(coordinatorEnv, EXTERNAL_FREE_ENV),
 		label: "C/adapter-browser",
 		// node.exe path may contain spaces (C:\Program Files\nodejs); spawn it
 		// directly without a shell so the path isn't word-split.
@@ -283,21 +357,25 @@ async function runGroupC(specs) {
 	});
 }
 
-async function runGroupD(specs, { captureOutputDir } = {}) {
-	if (specs.length === 0) return { label: "D/vitest", code: 0, wallMs: 0, skipped: true };
-	const vitestCli = join(REPO_ROOT, "node_modules", "vitest", "vitest.mjs");
-	return run(process.execPath, [
-		vitestCli,
+export function groupDVitestArgs(env = process.env) {
+	return [
 		"run",
 		"--config", "vitest.config.ts",
 		"--project", "v2-e2e-vitest",
 		"--silent=passed-only",
-	], {
-		env: {
+		...(isRetryFreeQualification(env) ? ["--retry=0"] : []),
+	];
+}
+
+async function runGroupD(specs, { captureOutputDir, coordinatorEnv } = {}) {
+	if (specs.length === 0) return { label: "D/vitest", code: 0, wallMs: 0, skipped: true };
+	const vitestCli = join(REPO_ROOT, "node_modules", "vitest", "vitest.mjs");
+	return run(process.execPath, [vitestCli, ...groupDVitestArgs(coordinatorEnv)], {
+		env: composeE2EChildEnvironment(coordinatorEnv, {
 			...EXTERNAL_FREE_ENV,
 			BOBBIT_V2_E2E_VITEST: "1",
 			VITEST_MAX_WORKERS: "1",
-		},
+		}),
 		label: "D/vitest-real-fidelity",
 		shell: false,
 		captureOutputDir,
@@ -322,6 +400,8 @@ async function main() {
 		console.log(`[e2e-v2] Docker ${docker ? "AVAILABLE" : "UNAVAILABLE"} — Docker-gated specs: ${dockerGatedPresent.join(", ")}${docker ? "" : " (Docker paths will self-skip; non-Docker paths still run)"}`);
 	}
 
+	const paths = createE2ERunPaths(coordinatorTempDirectory());
+	const coordinatorEnv = createE2EV2CoordinatorEnvironment(paths);
 	const sampler = createCpuSampler(process.pid, { intervalMs: 1000 });
 	const startWall = performance.now();
 
@@ -330,10 +410,10 @@ async function main() {
 	let groupDResult;
 	if (only) {
 		// Focused group runs retain their existing single-group behavior.
-		if (only === "A") results.push(await runGroupA(A));
-		if (only === "B") results.push(await runGroupB(B));
-		if (only === "C") results.push(await runGroupC(C));
-		if (only === "D") results.push(await runGroupD(D));
+		if (only === "A") results.push(await runGroupA(A, coordinatorEnv));
+		if (only === "B") results.push(await runGroupB(B, coordinatorEnv));
+		if (only === "C") results.push(await runGroupC(C, coordinatorEnv));
+		if (only === "D") results.push(await runGroupD(D, { coordinatorEnv }));
 	} else {
 		// Keep the gateway/worktree/browser-heavy A → B → C lane serialized. Group D
 		// is independent: it owns a separate Vitest coordinator and PID-scoped cache,
@@ -341,12 +421,12 @@ async function main() {
 		// only that bounded lane concurrently, then await it so cleanup, reporting,
 		// failure aggregation, and result ordering remain unchanged.
 		console.log("[e2e-v2] schedule: A → B → C; isolated single-worker D runs concurrently");
-		const groupDCaptureDir = join(REPO_ROOT, ".profiles", "testing-v2", "e2e-captures", `group-d-${process.pid}-${Date.now()}`);
+		const groupDCaptureDir = join(paths.root, "e2e-captures", "group-d");
 		console.log(`[e2e-v2] Group D output captured live at ${groupDCaptureDir} until replay`);
-		const groupDRun = runGroupD(D, { captureOutputDir: groupDCaptureDir });
-		results.push(await runGroupA(A));
-		results.push(await runGroupB(B));
-		results.push(await runGroupC(C));
+		const groupDRun = runGroupD(D, { captureOutputDir: groupDCaptureDir, coordinatorEnv });
+		results.push(await runGroupA(A, coordinatorEnv));
+		results.push(await runGroupB(B, coordinatorEnv));
+		results.push(await runGroupC(C, coordinatorEnv));
 		groupDResult = await groupDRun;
 		results.push(groupDResult);
 	}
@@ -366,8 +446,8 @@ async function main() {
 		}
 	}
 
-	mkdirSync(SAMPLE_DIR, { recursive: true });
-	const samplePath = join(SAMPLE_DIR, `${new Date().toISOString().replace(/[:.]/g, "-")}-e2e-v2.json`);
+	const samplePath = defaultPerformanceReportPath(paths);
+	mkdirSync(dirname(samplePath), { recursive: true });
 	const report = {
 		scope: "e2e-v2",
 		cpuMin: +(sample.cpuMs / 60000).toFixed(3),
@@ -392,7 +472,15 @@ async function main() {
 	console.log(`[e2e-v2] report: ${samplePath}`);
 
 	const anyFailed = results.some((r) => r.code !== 0);
-	process.exit(anyFailed ? 1 : 0);
+	if (anyFailed) {
+		console.error(`[e2e-v2] retained failure diagnostics: ${paths.root}`);
+		process.exit(1);
+	}
+	if (!cleanup(paths.root)) {
+		console.error(`[e2e-v2] could not remove successful run root: ${paths.root}`);
+		process.exit(1);
+	}
+	process.exit(0);
 }
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;

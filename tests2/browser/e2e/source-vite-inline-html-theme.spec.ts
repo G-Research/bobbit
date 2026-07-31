@@ -1,4 +1,6 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -9,6 +11,7 @@ import {
 	readToken,
 } from "./packaged-runtime-helpers.js";
 import {
+	captureSourceProcess,
 	processFailure,
 	startIsolatedSourceGateway,
 	startSourceVite,
@@ -142,6 +145,80 @@ async function attachReport(testInfo: TestInfo, report: RuntimeReport): Promise<
 // processes rather than relying on Playwright's compiled-dist gateway fixture.
 test.describe("source Vite inline HTML theme runtime", () => {
 	test.describe.configure({ retries: 0 });
+
+	test("teardown escalates a SIGTERM-ignoring detached source process and awaits close", async () => {
+		test.setTimeout(10_000);
+		const child = spawn(process.execPath, ["--input-type=module", "--eval", [
+			'process.stdout.write("ready\\n");',
+			'process.on("SIGTERM", () => process.stdout.write("SIGTERM ignored\\n"));',
+			"setInterval(() => {}, 1_000);",
+		].join("")], {
+			detached: process.platform !== "win32",
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		const runtime = captureSourceProcess(child, "SIGTERM-ignoring source helper fixture");
+		try {
+			await new Promise<void>((resolveReady, rejectReady) => {
+				const timeout = setTimeout(() => rejectReady(new Error("SIGTERM-ignoring fixture did not become ready")), 2_000);
+				child.stdout?.on("data", chunk => {
+					if (!String(chunk).includes("ready")) return;
+					clearTimeout(timeout);
+					resolveReady();
+				});
+				child.once("error", error => {
+					clearTimeout(timeout);
+					rejectReady(error);
+				});
+			});
+
+			await stopSourceProcess(runtime, {
+				gracefulStopTimeoutMs: 100,
+				forceStopTimeoutMs: 2_000,
+			});
+
+			expect(runtime.closed, "teardown must wait for close after forced termination").toBe(true);
+			if (process.platform !== "win32") {
+				expect(runtime.stdout.join(""), "fixture must receive graceful SIGTERM before escalation").toContain("SIGTERM ignored");
+				expect(child.signalCode, "detached POSIX process must be force-killed after grace").toBe("SIGKILL");
+			}
+		} finally {
+			if (!runtime.closed) {
+				await stopSourceProcess(runtime, { gracefulStopTimeoutMs: 100, forceStopTimeoutMs: 2_000 });
+			}
+		}
+	});
+
+	test("reaps an inherited-stdio descendant at the owned root-exit boundary", async () => {
+		test.setTimeout(5_000);
+		const child = spawn(process.execPath, ["-e", [
+			'const { spawn } = require("node:child_process");',
+			'const descendant = spawn(process.execPath, ["-e", "process.on(\\\"SIGTERM\\\", () => {}); setInterval(() => {}, 1000);"], { stdio: "inherit" });',
+			'process.stdout.write("ready\\n");',
+			'process.on("SIGTERM", () => process.exit(0));',
+		].join("")], {
+			detached: process.platform !== "win32",
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		const runtime = captureSourceProcess(child, "root-exit boundary fixture");
+		const actualExit = once(child, "exit");
+		const actualClose = once(child, "close");
+		await once(child.stdout!, "data");
+
+		try {
+			await stopSourceProcess(runtime, { gracefulStopTimeoutMs: 500, forceStopTimeoutMs: 1_000 });
+			await actualExit;
+			await actualClose;
+			expect(runtime.exited, "root exit must be recorded before inherited stdio closes").toBe(true);
+			expect(runtime.closed, "the owned process tree must close after teardown").toBe(true);
+			if (process.platform !== "win32") {
+				expect(runtime.finalTreeSignalSent, "the original POSIX group must be finalized at root exit").toBe(true);
+			}
+		} finally {
+			if (!runtime.closed) await stopSourceProcess(runtime, { gracefulStopTimeoutMs: 100, forceStopTimeoutMs: 1_000 });
+		}
+	});
 
 	test("real chat WriteRenderer uses the canonical source bridge at parse time and across a live theme switch", async ({ page }, testInfo) => {
 		test.setTimeout(4 * 60_000);

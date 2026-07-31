@@ -59,6 +59,14 @@ test.describe("Journey: Goal → Team → Gates", () => {
 
 // Behavioral assertions ported from plan-tab-gate-status.spec.ts
 test.describe("Journey: Plan-Tab Gate-Status — behavioral assertions", () => {
+	async function enableSubgoalsForFixture(): Promise<void> {
+		const prefs = await apiFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ subgoalsEnabled: true }),
+		});
+		expect(prefs.status, `enable subgoals for plan-tab fixture: ${await prefs.clone().text()}`).toBe(200);
+	}
+
 	test("gate list API returns gates for a workflow-linked goal", async () => {
 		const goal = await createGoal({ title: "v2-plan-gates-api-check", workflowId: "test-fast" });
 		try {
@@ -88,7 +96,8 @@ test.describe("Journey: Plan-Tab Gate-Status — behavioral assertions", () => {
 	});
 
 	test("plan tab renders archived child with data-archived='true'", async ({ page, gateway }) => {
-		const parent = await createGoal({ title: "v2-plan-archived-parent", team: false });
+		await enableSubgoalsForFixture();
+		const parent = await createGoal({ title: "v2-plan-archived-parent", team: false, subgoalsAllowed: true });
 		const parentId = parent.id as string;
 		try {
 			const r1 = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
@@ -123,7 +132,8 @@ test.describe("Journey: Plan-Tab Gate-Status — behavioral assertions", () => {
 
 	test("route-injected gateStatus:failed renders as data-plan-gate-status on plan node", async ({ page, gateway }) => {
 		test.setTimeout(90_000); // plan-tab with real goal hierarchy: parent+child create, archive, route inject
-		const parent = await createGoal({ title: "v2-plan-gate-status-inject", team: false });
+		await enableSubgoalsForFixture();
+		const parent = await createGoal({ title: "v2-plan-gate-status-inject", team: false, subgoalsAllowed: true });
 		const parentId = parent.id as string;
 		let childId = "";
 		try {

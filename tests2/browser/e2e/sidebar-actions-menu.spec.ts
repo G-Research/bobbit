@@ -98,11 +98,11 @@ test.describe("Sidebar actions menu", () => {
 		await page.mouse.move(1, 1);
 		await expect(actionStrip(row), `${kind} action strip starts visually hidden before keyboard focus`).toHaveCSS("opacity", "0");
 		const lastQuickAction = row.locator(`[data-sidebar-action-id="${lastQuickActionId}"][data-sidebar-action-quick="true"]`).first();
-		await lastQuickAction.focus();
-		await expect(lastQuickAction, `${kind} quick action should be focusable even before hover`).toBeFocused();
-		await expect(actionStrip(row), `${kind} action strip should become visible on focus-within`).toHaveCSS("opacity", "1", { timeout: 15_000 });
-		await page.keyboard.press("Tab");
+		// `press()` drives the native tab order from the real quick-action button
+		// without a direct focus bypass.
+		await lastQuickAction.press("Tab");
 		await expect(trigger, `${kind} hamburger should be reachable from the quick actions with Tab`).toBeFocused();
+		await expect(actionStrip(row), `${kind} action strip should remain visible while its hamburger has focus`).toHaveCSS("opacity", "1", { timeout: 5_000 });
 		await page.keyboard.press("Enter");
 		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
 		await expect(trigger).toHaveAttribute("aria-expanded", "true");
@@ -128,6 +128,18 @@ test.describe("Sidebar actions menu", () => {
 		await openApp(page);
 		await navigateToHash(page, `#/session/${sessionId}`);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+		// The textarea mounts at the start of session hydration. The sidebar's
+		// final `connectingSessionId` clear schedules one more full render, which
+		// otherwise can detach the focused quick action during its native Tab
+		// transfer. Wait for that state transition and its queued render, rather
+		// than racing it with a direct focus call.
+		await page.waitForFunction((id) => {
+			const appState = (window as any).bobbitState ?? (window as any).__bobbitState;
+			return appState?.connectingSessionId !== id;
+		}, sessionId);
+		await page.evaluate(() => new Promise<void>((resolve) => {
+			requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+		}));
 		const row = sessionRow(page, sessionId);
 		await expect(row).toBeVisible({ timeout: 10_000 });
 		return row;

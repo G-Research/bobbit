@@ -81,12 +81,15 @@ async function inputValueAsNumber(page: Page): Promise<number> {
 
 async function setFontSizePx(page: Page, value: string): Promise<void> {
 	const input = fontSizeInput(page);
+	// `fill()` emits the control's real input event. Tab commits the edit with
+	// its native blur/change sequence, including the one-digit "1" -> 10 clamp
+	// path. Do not manually redispatch either event: the input handler schedules
+	// a render, so synthetic events can race that controlled-input update.
 	await input.fill(value);
-	await input.evaluate((el) => {
-		el.dispatchEvent(new Event("input", { bubbles: true }));
-		el.dispatchEvent(new Event("change", { bubbles: true }));
-	});
-	await input.blur();
+	await input.press("Tab");
+	// renderApp batches the controlled value update into the next animation
+	// frame; wait for that frame before the next assertion or interaction.
+	await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
 }
 
 async function setSidebarFontSizeDirect(page: Page, px: number): Promise<void> {

@@ -1,10 +1,11 @@
 # Testing Strategy — Test Suite v2
 
 > **Current operating model.** `npm run test:unit`, `npm run test:browser`, and
-> `npm run test:e2e` are separate implementation-gate phases. Migration plans and
-> measurements under [`docs/testing-v2/`](testing-v2/) are historical unless they
-> explicitly identify themselves as current. The unit-stage reference is
-> [`unit-gate.md`](testing-v2/unit-gate.md).
+> `npm run test:e2e` are separate implementation-gate phases with one shared
+> cross-suite isolation contract. Migration plans and measurements under
+> [`docs/testing-v2/`](testing-v2/) are historical unless they explicitly identify
+> themselves as current. Start with [cross-OS test authoring](testing-v2/cross-os-test-authoring.md)
+> and the [unit-stage reference](testing-v2/unit-gate.md).
 
 ## The phase invariant (read this first)
 
@@ -27,12 +28,46 @@ runner, tier, and project metadata in `tests2/tests-map.json`. New tests land in
 tooling, and `npm run test:unit:inventory` reject orphaned files, duplicate or missing
 ownership, and lost declaration semantics.
 
-The unit phase uses one Vitest coordinator with a fixed three-worker cap and
-`retry: 3`. `VITEST_MAX_WORKERS` may lower the cap only. It has no lane runner,
-ledger reservation, cost sharding, lane logs, or gateway-boot lease. All four tier-1
-projects install the subprocess guard and enforce a hard 25-second solo file budget.
-See [Unit gate operating model](testing-v2/unit-gate.md) for cache, proof-mode, E2E
-ownership, and audit details.
+The unit phase uses one Vitest coordinator with a fixed three-worker cap.
+`VITEST_MAX_WORKERS` may lower the cap only. The normal developer configuration has
+`retry: 3`, but qualification runs `npm run test:unit -- --retry=0`. Browser and
+E2E Groups B–D also normally use `retries: 3`; Group A is retryless because its
+`tsx --test` runner has no retry control. All four tier-1 projects install the
+subprocess guard and enforce a hard 25-second solo file budget. See [Unit gate
+operating model](testing-v2/unit-gate.md) for cache, proof-mode, E2E ownership,
+and audit details.
+
+## Cross-suite reliability foundation
+
+Every unit, DOM, integration, browser, and E2E coordinator owns one canonical run
+root before importing Bobbit discovery/server code or spawning children. Temporary,
+home, Bobbit/config/credential, browser-profile, cache, report, output, socket,
+database, and artifact paths are children of that root. Workers cannot remove it;
+only the allocating coordinator removes a successful root after its reporters and
+children settle, while a failed root is retained for diagnostics.
+
+The machine-global concurrency ledger is the sole mutable exception: it is captured
+before temporary-directory redirection so concurrent coordinators participate in one
+capacity budget. The installed Playwright browser registry is similarly captured
+before HOME changes, but is a read-only dependency rather than shared mutable state.
+All other mutable resources are run-owned.
+
+The shared environment policy removes credentials and ambient Bobbit runtime or
+discovery inputs before imports and child spawns, then replaces harness-owned keys
+canonically (case-insensitively on Windows). Deliberate `BOBBIT_TEST_*` and
+`BOBBIT_V2_*` controls remain unless they are denied runtime input or harness-owned
+roots; a fixture must set any exception explicitly and locally. This keeps Git,
+MCP, marketplace, skill, config, credential, and line-ending fixtures independent
+from a developer host.
+
+Browser/E2E coordinators also own Playwright profiles and caches, use a nested root
+for legacy E2E, serialize same-worktree `dist` readers/builders through atomic
+`ensure-dist` publication, and scope worktree/Docker lookup and teardown by the E2E
+run ID. Tests synchronize on an exact observable lifecycle event, never elapsed
+time. Do not add sleeps, polling, retries, skips, `force-exit`, timeout increases,
+blind reloads, or weaker assertions; repair ownership or readiness instead. See
+[cross-OS test authoring](testing-v2/cross-os-test-authoring.md) and the
+[cross-suite runtime design](design/isolate-unit-runtime.md).
 
 ## Current State (v2)
 
@@ -40,7 +75,7 @@ ownership, and audit details.
 
 | Tier | Projects/buckets | Runner |
 |------|------------------|--------|
-| tier-1 unit | `v2-core`, `v2-dom`, `v2-integration`, `v2-isolated` | direct Vitest, fixed cap 3, `retry: 3` |
+| tier-1 unit | `v2-core`, `v2-dom`, `v2-integration`, `v2-isolated` | direct Vitest, fixed cap 3; qualification uses `--retry=0` |
 | browser | `v2-browser` | Playwright |
 | E2E real fidelity | tests-map `daily`, including conditional `v2-e2e-vitest` | `run-e2e-v2.mjs` Groups A–D |
 | manual integration | `manual-integration` | Playwright manual config |
@@ -772,90 +807,64 @@ focused browser E2E only when the changed interaction needs real app integration
 The implementation gate should still run build, type-check, unit, and the full
 E2E command before merge.
 
-### Playwright transform-cache isolation
+### Coordinator-owned Playwright runtime
 
-`e2e:v2` Group B drives the relocate specs through the same npm wrapper
-(`run-e2e-v2.mjs` calls `npm run test:e2e:run -- <specs> --workers=2 --retries=2` — the concurrency bridge):
+Run the browser and E2E phases through their npm coordinators. Before Playwright
+loads, each coordinator creates a canonical temporary root and assigns its
+profiles, transform/V8 caches, reports, output, and compatibility child beneath
+that root. The v2 E2E coordinator shares its root with Groups A, C, and D;
+Group B clears those cache values and the legacy wrapper creates a nested root.
+This prevents overlapping worktrees from writing a common Playwright cache.
 
-```bash
-npm run test:e2e:run -- <specs>   # the wrapper e2e:v2 Group B reuses
-```
+`BOBBIT_V2_RUN_ROOT`, `BOBBIT_E2E_RUN_ID`, `BOBBIT_E2E_TMP_ROOT`, report paths,
+and Playwright cache paths are generated coordinator outputs. Do not set them as
+caller configuration and do not use a fixed Windows path such as
+`C:\bobbit-e2e`. The only machine-global mutable location is the captured
+concurrency ledger; installed Playwright browser binaries are a read-only host
+dependency.
 
-`scripts/run-playwright-e2e.mjs` runs before Playwright's CLI imports
-transform-cache modules. The wrapper creates a
-run-scoped Playwright transform-cache root, injects
-`scripts/playwright-e2e-cache-bootstrap.cjs` through `NODE_OPTIONS`, and gives
-the runner plus each Playwright worker its own process-local `PWTEST_CACHE_DIR`.
-It also disables Node's compile cache for the run.
+The supported diagnostic controls are:
 
-This isolation matters because Bobbit agents often run E2E commands from
-overlapping worktrees. Playwright's default transform cache is shared by temp
-root, so concurrent cold imports can reuse partial or stale transforms and show
-false startup errors such as missing ESM exports. Setting the cache before
-Playwright imports its cache code avoids that cross-worktree sharing.
+- `BOBBIT_KEEP_PWTEST_CACHE=1` — retain a successful root from the legacy
+  Playwright wrapper for inspection.
+- `BOBBIT_DEBUG_PWTEST_CACHE=1` — print the wrapper-assigned run and cache
+  paths at startup.
+- `E2E_V2_NODE_CONCURRENCY` and `E2E_V2_PW_WORKERS` — tune E2E coordinator
+  concurrency within its documented bounds when measuring capacity.
 
-Supported knobs:
-
-- `BOBBIT_E2E_PWTEST_CACHE_ROOT` — canonical base root override. The wrapper
-  creates `pwtest-transform-cache/<run-id>` below this root.
-- `BOBBIT_PWTEST_CACHE_ROOT` — legacy alias for the same base root. The
-  E2E-prefixed variable wins when both are set.
-- `BOBBIT_E2E_RUN_ID` — optional run-id segment for deterministic cache paths.
-- `BOBBIT_KEEP_PWTEST_CACHE=1` — keep an owned run cache after the command for
-  inspection.
-- `BOBBIT_DEBUG_PWTEST_CACHE=1` — print the run cache root at startup.
-
-Direct Playwright invocations are fallback-only:
-
-```bash
-npx playwright test --config playwright-e2e.config.ts
-```
-
-`playwright-e2e.config.ts` sets a run cache if `PWTEST_CACHE_DIR` is missing,
-and the bootstrap can derive one when preloaded with the cache-root env vars.
-That protects worker startup, but it is weaker than the npm wrapper because the
-direct `npx` runner may have already imported Playwright's default transform
-cache before the config executes.
-
-### Windows temp root
-
-Windows `%LOCALAPPDATA%\Temp\` is scanned by Defender and has historically been
-the hottest filesystem path on the machine. The E2E harnesses relocate their
-scratch space:
-
-- On Windows, the default temp root is `C:\bobbit-e2e\` (not `%LOCALAPPDATA%\Temp\bobbit-e2e\`).
-- Override with `BOBBIT_E2E_TMP_ROOT` for ramdisks or CI runners with a
-  dedicated scratch volume.
-- Keep the temp-root logic in the harnesses and `tests/e2e/e2e-teardown.ts` in
-  sync when editing.
+All other root/cache/run-ID values are internal outputs. Direct Playwright
+invocations are fallback-only because the coordinator must establish isolation
+before Playwright imports its cache modules.
 
 ### Teardown strategy
 
-Per-worker teardown uses **fire-and-forget async `rm`** to release the worker as
-soon as its tests finish. Global teardown (`tests/e2e/e2e-teardown.ts`) is a
-safety net only:
+Workers may remove only children they own. A browser coordinator removes its
+successful root after Playwright and its reporter settle, while failures retain
+the root for diagnosis. The legacy wrapper follows the same success/failure
+rule and honors `BOBBIT_KEEP_PWTEST_CACHE=1` by retaining its successful root.
 
-- It removes the current run's legacy `BOBBIT_DIR` shapes when the env var
-  identifies one.
-- It removes old project-root `.e2e-worker-*` directories.
-- Under the shared E2E temp root, it removes only modern `.e2e-inproc-*` and
-  `.e2e-browser-*` harness directories whose encoded owner PID has exited.
-- It removes an owned Playwright transform cache unless `BOBBIT_KEEP_PWTEST_CACHE=1` is set.
-
-Do **not** change global teardown to sweep every `.e2e-*` directory under the
-shared temp root. Overlapping worktrees and active E2E runs use the same root;
-unknown or live directories must be left alone. Also do **not** re-add
-synchronous `rmSync` to per-worker teardown. It serialises under filesystem
-pressure and was one of the original causes of the flake pattern.
+`tests/e2e/e2e-teardown.ts` does not sweep filesystem paths or scan owner PIDs.
+The wrapper owns root cleanup. Global teardown only discovers Docker resources
+by `bobbit-e2e-run=<generated-run-id>` and removes matching namespace-validated
+containers and volumes. An unlabelled resource, a mismatched namespace, a temp
+parent, or checkout state is never teardown input.
 
 ### Measurement protocol
 
-Use the canonical phase commands when validating a change:
+Use the canonical phase commands when validating a change. Qualification must
+show first-attempt success, not a normal developer retry:
 
 ```bash
-npm run test:unit       # direct Vitest tier-1 run
-npm run test:browser    # Playwright browser-v2
-npm run test:e2e        # real-fidelity Groups A–D
+npm run test:unit -- --retry=0
+BOBBIT_V2_RETRY_FREE=1 npm run test:browser -- --retries=0
+BOBBIT_V2_RETRY_FREE=1 npm run test:e2e
+```
+
+PowerShell qualification uses the same retry-free control:
+
+```powershell
+$env:BOBBIT_V2_RETRY_FREE = '1'; npm run test:browser -- --retries=0
+$env:BOBBIT_V2_RETRY_FREE = '1'; npm run test:e2e
 ```
 
 `npm run test:v2` remains a broader compatibility/orchestration command; it is not
@@ -878,7 +887,7 @@ their transform-cache isolation and phase-specific worker/retry settings.
   qualification evidence.
 - Do not add a third Vitest E2E owner; keep decision coverage in tier 1 when editing
   either approved real-fidelity suite.
-- Do not remove `BOBBIT_E2E_TMP_ROOT`, `BOBBIT_E2E_PWTEST_CACHE_ROOT`, or the
-  Windows `C:\bobbit-e2e` default without measuring the Playwright filesystem cost.
+- Do not turn coordinator-owned root, cache, report, or run-ID outputs into
+  caller-configurable shared locations.
 - Do not set `fullyParallel: true` on reused Playwright E2E projects without a new
   isolation and load proof.

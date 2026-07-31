@@ -10,29 +10,35 @@
  *
  * A `patch` value of `undefined` deletes that key for the duration of `fn`.
  */
+import {
+	deleteEnvironmentValue,
+	environmentKeysEqual,
+	setEnvironmentValue,
+} from "../../scripts/testing-v2/environment-policy.mjs";
+
 export type EnvPatch = Record<string, string | undefined>;
 
 function applyPatch(patch: EnvPatch): void {
 	for (const [key, value] of Object.entries(patch)) {
-		if (value === undefined) delete process.env[key];
-		else process.env[key] = value;
+		if (value === undefined) deleteEnvironmentValue(process.env, key);
+		else setEnvironmentValue(process.env, key, value);
 	}
 }
 
 export function withEnv<T>(patch: EnvPatch, fn: () => T): T {
 	const keys = Object.keys(patch);
-	const hadKey = new Map<string, boolean>();
-	const prior = new Map<string, string | undefined>();
+	const prior = new Map<string, Array<[string, string]>>();
 	for (const key of keys) {
-		const present = Object.prototype.hasOwnProperty.call(process.env, key);
-		hadKey.set(key, present);
-		prior.set(key, present ? process.env[key] : undefined);
+		prior.set(key, Object.keys(process.env)
+			.filter((existing) => environmentKeysEqual(existing, key))
+			.map((existing) => [existing, process.env[existing]!]));
 	}
 
 	const restore = (): void => {
 		for (const key of keys) {
-			if (hadKey.get(key)) process.env[key] = prior.get(key) as string;
-			else delete process.env[key];
+			deleteEnvironmentValue(process.env, key);
+			for (const [spelling, value] of prior.get(key) ?? [])
+				setEnvironmentValue(process.env, spelling, value);
 		}
 	};
 

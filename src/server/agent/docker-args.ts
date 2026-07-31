@@ -45,6 +45,42 @@ export const SANDBOX_STATE_MOUNTS: Array<{ sub: string; readOnly?: boolean }> = 
 	{ sub: "aigw-dns-guard", readOnly: true },
 ];
 
+/** Validated legacy E2E run ID. Invalid/unset values deliberately preserve production names. */
+export function validatedE2ERunId(value = process.env.BOBBIT_E2E_RUN_ID): string | undefined {
+	const runId = value?.trim();
+	return runId && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(runId) ? runId : undefined;
+}
+
+/**
+ * Docker volume names for a project sandbox. Legacy E2E runs get an opaque
+ * run suffix so concurrent coordinators cannot attach the same workspace.
+ * Normal production callers retain the longstanding names exactly.
+ */
+export function projectSandboxVolumeNames(projectId: string, runId = process.env.BOBBIT_E2E_RUN_ID): { workspace: string; worktrees: string } {
+	const validatedRunId = validatedE2ERunId(runId);
+	const suffix = validatedRunId ? `-e2e-${validatedRunId}` : "";
+	return {
+		workspace: `bobbit-workspace-${projectId}${suffix}`,
+		worktrees: `bobbit-worktrees-${projectId}${suffix}`,
+	};
+}
+
+/**
+ * Explicitly create E2E volumes before the container so they carry ownership
+ * labels. Docker's implicit named-volume creation cannot attach labels, which
+ * would make teardown depend on a surviving container to discover a project.
+ */
+export function e2eSandboxVolumeCreateArgs(projectId: string, runId = process.env.BOBBIT_E2E_RUN_ID): string[][] {
+	const validatedRunId = validatedE2ERunId(runId);
+	if (!validatedRunId) return [];
+	return Object.values(projectSandboxVolumeNames(projectId, validatedRunId)).map((name) => [
+		"volume", "create",
+		"--label", `bobbit-project=${projectId}`,
+		"--label", `bobbit-e2e-run=${validatedRunId}`,
+		name,
+	]);
+}
+
 export interface DockerRunConfig {
 	image: string;
 	/** Host path to mount as /workspace (used for bind-mount mode when projectId is not set). */
@@ -59,6 +95,10 @@ export interface DockerRunConfig {
 	labelPrefix?: string;
 	/** Worktree path label for sandbox-pool containers. */
 	worktreePath?: string;
+	/** Additional internally supplied ownership labels. */
+	additionalLabels?: Record<string, string>;
+	/** Captured E2E owner passed from a ProjectSandbox lifecycle operation. */
+	e2eRunId?: string;
 
 	// ── Per-project container ────────────────────────────────────────────
 	/** Project ID — when set, uses a named Docker volume instead of bind mount for /workspace. */
@@ -126,7 +166,7 @@ export interface DockerRunConfig {
 export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: CommandRunner = realCommandRunner): string[] {
 	const {
 		image, workspaceDir,
-		label, labelVersion, labelPrefix, worktreePath,
+		label, labelVersion, labelPrefix, worktreePath, additionalLabels, e2eRunId,
 		projectId, stateDir, sessionId,
 		sandboxMounts, sandboxCredentials,
 		sandboxNetwork,
@@ -168,12 +208,18 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 			args.push("--label", `${labelPrefix}-wt=${worktreePath}`);
 		}
 	}
+	for (const [key, value] of Object.entries(additionalLabels ?? {})) {
+		if (key && value) args.push("--label", `${key}=${value}`);
+	}
 
 	// ── Bind mounts / volumes ──────────────────────────────────────────
 	if (projectId) {
-		// Per-project container: named Docker volumes (survive container recreation)
-		args.push("-v", `bobbit-workspace-${projectId}:/workspace`);
-		args.push("-v", `bobbit-worktrees-${projectId}:/workspace-wt`);
+		// Per-project container: named Docker volumes (survive container recreation).
+		// An E2E coordinator adds a validated run suffix; normal production names
+		// remain unchanged for backwards-compatible container reattachment.
+		const volumes = projectSandboxVolumeNames(projectId, e2eRunId);
+		args.push("-v", `${volumes.workspace}:/workspace`);
+		args.push("-v", `${volumes.worktrees}:/workspace-wt`);
 	} else if (workspaceDir) {
 		// Legacy pool mode: bind-mount host directory as /workspace
 		args.push("-v", `${toDockerPath(workspaceDir)}:/workspace`);

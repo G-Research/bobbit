@@ -3,6 +3,11 @@ import { defineConfig } from "vitest/config";
 import { loadVitestExecutionMap } from "./scripts/testing-v2/test-map-execution.mjs";
 import * as serverPrebundle from "./scripts/testing-v2/server-prebundle.mjs";
 import UnitFileBudgetReporter from "./tests2/harness/unit-file-budget-reporter.js";
+import { getRunRoot, installRunIsolation } from "./tests2/harness/run-isolation.js";
+
+// Must run before server prebundling and test collection so workers inherit
+// only run-owned discovery roots and the credential-neutral environment.
+installRunIsolation();
 
 /** Fixed suite-wide cap. The environment may lower it, never raise it. */
 export const FIXED_UNIT_WORKERS = 3;
@@ -14,7 +19,10 @@ export function resolveMaxWorkers(env: NodeJS.ProcessEnv = process.env): number 
 		: FIXED_UNIT_WORKERS;
 }
 
-export const VITEST_MODULE_CACHE_ROOT = join(".profiles", "testing-v2", "vitest-module-cache");
+// Every mutable Vitest artifact belongs to the coordinator's canonical root.
+// Worker forks inherit that root before they evaluate this configuration.
+export const VITEST_MODULE_CACHE_ROOT = join(getRunRoot(), "vitest-module-cache");
+export const VITEST_COVERAGE_ROOT = join(getRunRoot(), "vitest-coverage");
 
 /**
  * One Vitest parent owns one cache namespace. Its projects and worker forks
@@ -26,6 +34,11 @@ export function resolveVitestModuleCachePath(pid: number = process.pid): string 
 	return join(VITEST_MODULE_CACHE_ROOT, `process-${pid}`);
 }
 
+export function resolveVitestCoveragePath(pid: number = process.pid): string {
+	if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error(`invalid Vitest process id: ${pid}`);
+	return join(VITEST_COVERAGE_ROOT, `process-${pid}`);
+}
+
 const MAX_WORKERS = resolveMaxWorkers();
 const MODULE_CACHE_PATH = resolveVitestModuleCachePath();
 const execution = loadVitestExecutionMap();
@@ -33,6 +46,8 @@ const shared = {
 	pool: "forks" as const,
 	isolate: false,
 	maxWorkers: MAX_WORKERS,
+	// Workflow retries protect developer productivity after an isolated transient.
+	// Retry-free qualification still establishes first-attempt stability.
 	retry: 3,
 	passWithNoTests: true,
 	disableConsoleIntercept: true,
@@ -56,7 +71,7 @@ const fileBoundaryRunner = "tests2/harness/file-boundary-runner.ts";
 const coverage = {
 	provider: "v8" as const,
 	reporter: ["json-summary" as const],
-	reportsDirectory: ".profiles/testing-v2/coverage",
+	reportsDirectory: resolveVitestCoveragePath(),
 	include: ["src/**/*.ts", "src/**/*.js"],
 	exclude: [
 		"src/**/*.d.ts",
@@ -116,7 +131,7 @@ export default defineConfig({
 					environment: "happy-dom",
 					pool: "threads" as const,
 					isolate: true,
-					setupFiles: tier1SetupFiles,
+					setupFiles: [...tier1SetupFiles, "tests2/harness/v2-dom-environment.ts"],
 					include: execution.dom,
 				},
 			},

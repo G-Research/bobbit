@@ -1,6 +1,15 @@
-import { existsSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { mkdirSync } from "node:fs";
+import { basename, join } from "node:path";
+import { captureMachineGlobalLedgerDirectory } from "./scripts/run-playwright-e2e.mjs";
+import { capturePlaywrightBrowserRegistry, getRunRoot, installRunIsolation, isOwnedRunPath } from "./tests2/harness/run-isolation.js";
+
+// Config evaluation precedes isolated E2E worker imports. Preserve host-only
+// runtime inputs before the harness redirects HOME and TMPDIR for Bobbit discovery.
+process.env.BOBBIT_V2_LEDGER_DIR = captureMachineGlobalLedgerDirectory();
+capturePlaywrightBrowserRegistry();
+// Direct Playwright invocations do not pass through the E2E coordinator.
+// Apply the same ambient-runtime scrub before workers import test harnesses.
+installRunIsolation();
 
 /**
  * E2E test config: split into API (in-process) and browser (process-spawned) projects.
@@ -13,25 +22,6 @@ import { join, resolve } from "node:path";
  *
  * Global setup ensures both server and UI are built (builds only what's missing).
  */
-function e2eTempRoot(): string {
-	if (existsSync("/.dockerenv")) return "/tmp";
-	return process.platform === "win32"
-		? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
-		: join(tmpdir(), "bobbit-e2e");
-}
-
-function sanitizeCacheSegment(value: string): string {
-	return value.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 80) || "run";
-}
-
-function e2ePwtestCacheBaseRoot(): string {
-	// Canonical external override. BOBBIT_PWTEST_CACHE_ROOT is a legacy alias
-	// accepted for older local wrappers.
-	return process.env.BOBBIT_E2E_PWTEST_CACHE_ROOT?.trim()
-		|| process.env.BOBBIT_PWTEST_CACHE_ROOT?.trim()
-		|| e2eTempRoot();
-}
-
 function prepareE2ERuntimeCaches(): void {
 	// Must run in the Playwright config process before test workers spawn.
 	// A host-level NODE_COMPILE_CACHE caused false ESM "missing export" errors
@@ -44,21 +34,26 @@ function prepareE2ERuntimeCaches(): void {
 	// fallback protects direct `npx playwright ... --config playwright-e2e.config.ts`
 	// runs before worker startup, even though the runner process may already have
 	// loaded Playwright's default transform-cache module while loading this config.
-	if (!process.env.PWTEST_CACHE_DIR) {
-		const runId = sanitizeCacheSegment(
-			process.env.BOBBIT_E2E_RUN_ID?.trim()
-				|| `direct-${new Date().toISOString().replace(/[:.]/g, "-")}-${process.pid}`,
-		);
-		const runCacheRoot = join(resolve(e2ePwtestCacheBaseRoot()), "pwtest-transform-cache", runId);
-		process.env.BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT = runCacheRoot;
-		process.env.PWTEST_CACHE_DIR = runCacheRoot;
-		process.env.BOBBIT_E2E_PWTEST_CACHE_OWNED = "1";
-	}
+	const runRoot = getRunRoot();
+	const ownedCacheRoot = join(runRoot, "pwtest-transform-cache");
+	// The legacy Docker sandbox namespace is owned by this coordinator's root,
+	// never an inherited value from a concurrent host run.
+	process.env.BOBBIT_E2E_RUN_ID = basename(runRoot);
+	process.env.BOBBIT_E2E_TMP_ROOT = join(runRoot, "tmp", "bobbit-e2e");
+	if (!process.env.PWTEST_CACHE_DIR || !isOwnedRunPath(process.env.PWTEST_CACHE_DIR))
+		process.env.PWTEST_CACHE_DIR = ownedCacheRoot;
+	if (!process.env.BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT || !isOwnedRunPath(process.env.BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT))
+		process.env.BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT = process.env.PWTEST_CACHE_DIR;
+	process.env.BOBBIT_E2E_PWTEST_CACHE_ROOT = process.env.BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT;
+	process.env.BOBBIT_E2E_PWTEST_CACHE_OWNED = "1";
 	const transformCacheDir = process.env.PWTEST_CACHE_DIR!;
-	const runCacheRoot = process.env.BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT?.trim() || transformCacheDir;
+	const runCacheRoot = process.env.BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT!;
 	process.env.BOBBIT_E2E_PWTEST_CACHE_DIR = runCacheRoot;
+	const secretsDir = process.env.BOBBIT_SECRETS_DIR ||= join(runRoot, "e2e-server-secrets");
 	mkdirSync(runCacheRoot, { recursive: true });
 	mkdirSync(transformCacheDir, { recursive: true });
+	mkdirSync(process.env.BOBBIT_E2E_TMP_ROOT!, { recursive: true });
+	mkdirSync(secretsDir, { recursive: true });
 }
 
 prepareE2ERuntimeCaches();
@@ -69,11 +64,12 @@ const recordScreenReporters: Array<[string]> = process.env.RECORDSCREEN === "1"
 	? [["./tests/e2e/report/tier-2-5-reporter.ts"]]
 	: [];
 
-// Keep three retries as the project-level flake absorber for broad E2E runs.
-// Deterministic failures still fail after the retry budget is exhausted.
+// Workflow retries protect developer productivity after isolated transients.
+// Retry-free qualification sets BOBBIT_V2_RETRY_FREE=1 and remains the only
+// evidence of first-attempt stability.
 export default {
 	timeout: 30_000,
-	retries: 3,
+	retries: process.env.BOBBIT_V2_RETRY_FREE === "1" ? 0 : 3,
 	fullyParallel: true,
 	// Top-level cap. Playwright treats this as the max parallelism across
 	// all projects. Per-project `workers` fields below further constrain

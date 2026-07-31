@@ -2598,16 +2598,21 @@ async function toggleSubgoalsEnabled(): Promise<void> {
 	} catch {}
 }
 
-function setSidebarFontSizePx(px: number): void {
+function setSidebarFontSizePx(px: number): number {
 	const scale = sidebarFontSizePxToScale(px);
 	try { localStorage.setItem(SIDEBAR_FONT_SCALE_KEY, String(scale)); } catch { /* private mode */ }
 	applySidebarFontScaleVar(scale);
 	renderApp();
+	return sidebarFontScaleToDisplayPx(scale);
 }
 
 function resetSidebarFontScale(): void {
 	try { localStorage.setItem(SIDEBAR_FONT_SCALE_KEY, String(SIDEBAR_FONT_SCALE_DEFAULT)); } catch { /* private mode */ }
 	applySidebarFontScaleVar(SIDEBAR_FONT_SCALE_DEFAULT);
+	// renderApp is frame-batched. Keep the visible controlled value in sync with
+	// the applied preference until that render flushes.
+	const input = document.getElementById("sidebar-font-size-input") as HTMLInputElement | null;
+	if (input) input.value = String(sidebarFontScaleToDisplayPx(SIDEBAR_FONT_SCALE_DEFAULT));
 	renderApp();
 }
 
@@ -2617,7 +2622,7 @@ function handleSidebarFontSizeInput(e: Event): void {
 	const px = Number.parseFloat(raw);
 	if (!Number.isFinite(px)) return;
 	if (e.type === "input" && px < SIDEBAR_FONT_SIZE_MIN_PX && raw.length < String(SIDEBAR_FONT_SIZE_MIN_PX).length) return;
-	setSidebarFontSizePx(px);
+	input.value = String(setSidebarFontSizePx(px));
 }
 
 function renderSidebarFontScaleControl() {
