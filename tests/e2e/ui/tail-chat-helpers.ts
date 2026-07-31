@@ -129,6 +129,20 @@ export async function measureScroll(page: Page): Promise<ScrollProbe> {
 }
 
 /**
+ * Await a named stream milestone emitted by the real mock agent. These labels
+ * are protocol events, not elapsed-time samples, so each returned measurement
+ * proves a distinct growth phase after the production re-pin lifecycle.
+ */
+export async function awaitTailGrowthPhase(page: Page, marker: string): Promise<ScrollProbe> {
+	await expect(
+		page.getByText(marker, { exact: false }).first(),
+		`tail stream phase ${marker} did not render`,
+	).toBeVisible({ timeout: 20_000 });
+	await settleFrames(page);
+	return measureScroll(page);
+}
+
+/**
  * Observe real transcript growth and sample only after the render lifecycle
  * has let AgentInterface's ResizeObserver re-pin the scroll container.
  *

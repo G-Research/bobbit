@@ -10,7 +10,7 @@
  *   assert → the expected outcomes (tracked)
  *   cleanup → teardown (not tracked)
  */
-import type { Page } from "@playwright/test";
+import type { Page, Route } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import { waitForHealth, createGoal, deleteGoal } from "../e2e-setup.js";
 import {
@@ -40,22 +40,53 @@ async function waitForSessionRouteSettlement(page: Page, sessionId: string): Pro
 	}, sessionId, { timeout: 20_000 });
 }
 
+type HeldSessionListHydration = {
+	held: Promise<void>;
+	release: () => void;
+	dispose: () => Promise<void>;
+};
+
+/**
+ * Hold the one session-list refresh that finishes a fresh session connection.
+ * The session shell and editor are already mounted by then, giving the route
+ * test an observable, deterministic in-flight hydration boundary.
+ */
+async function holdSessionListHydration(page: Page): Promise<HeldSessionListHydration> {
+	let markHeld!: () => void;
+	const held = new Promise<void>((resolve) => { markHeld = resolve; });
+	let releaseGate!: () => void;
+	const released = new Promise<void>((resolve) => { releaseGate = resolve; });
+	let captured = false;
+	const matcher = (url: URL) => url.pathname === "/api/sessions";
+	const handler = async (route: Route) => {
+		if (captured || route.request().method() !== "GET") {
+			await route.fallback();
+			return;
+		}
+		captured = true;
+		markHeld();
+		await released;
+		await route.continue();
+	};
+	await page.route(matcher, handler);
+	return {
+		held,
+		release: releaseGate,
+		dispose: async () => {
+			releaseGate();
+			await page.unroute(matcher, handler);
+		},
+	};
+}
+
 async function waitForGoalDashboardRoute(page: Page, goalId: string): Promise<void> {
-	await expect.poll(
-		() => page.evaluate((id) => {
-			const state = (window as any).bobbitState;
-			const dashboardVisible = Array.from(document.querySelectorAll(".dashboard-container, .goal-dashboard, goal-dashboard"))
-				.some((el) => {
-					const rect = el.getBoundingClientRect();
-					const style = window.getComputedStyle(el);
-					return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-				});
-			return window.location.hash.includes(`/goal/${id}`)
-				&& state?.goalDashboardId === id
-				&& dashboardVisible;
-		}, goalId),
-		{ timeout: 20_000, intervals: [100, 200, 500, 1000] },
-	).toBe(true);
+	const dashboard = page.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first();
+	await expect(dashboard).toBeVisible({ timeout: 20_000 });
+	const routeOwnsDashboard = await page.evaluate((id) => {
+		const state = (window as any).bobbitState;
+		return window.location.hash.includes(`/goal/${id}`) && state?.goalDashboardId === id;
+	}, goalId);
+	expect(routeOwnsDashboard, "goal route must own the visible dashboard").toBe(true);
 }
 
 test.describe("CT-13: URL routing and navigation", () => {
@@ -142,22 +173,33 @@ test.describe("CT-13: URL routing and navigation", () => {
 
 		s.act();
 
-		// Deep link: session
-		await navigateToHash(s.page, `#/session/${s.session("A").sessionId}`);
-		s.assert();
-		await s.editor.is_visible();
-		// The editor mounts before session hydration is complete. Do not navigate
-		// away until the session route has relinquished its async ownership.
-		await waitForSessionRouteSettlement(s.page, s.session("A").sessionId);
+		// Deep link: session. Hold the connection's final session-list refresh so
+		// the next navigation races a real, observable hydration continuation.
+		const hydration = await holdSessionListHydration(s.page);
+		try {
+			await navigateToHash(s.page, `#/session/${s.session("A").sessionId}`);
+			await hydration.held;
+			s.assert();
+			await s.editor.is_visible();
+			const sessionStillHydrating = await s.page.evaluate((id) => {
+				const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+				return window.location.hash === `#/session/${id}`
+					&& state?.selectedSessionId === id
+					&& state?.connectingSessionId === id;
+			}, s.session("A").sessionId);
+			expect(sessionStillHydrating, "session route must still own its held hydration").toBe(true);
 
-		// Deep link: goal. The hash assignment is synchronous, but route handling
-		// is serialized; wait for the dashboard route to finish mounting.
-		s.act();
-		await navigateToHash(s.page, `#/goal/${goal.id}`);
-		await waitForGoalDashboardRoute(s.page, goal.id);
-		s.assert();
-		await expect(s.page.locator(".dashboard-container").first())
-			.toBeVisible({ timeout: 20_000 });
+			// Deep link: goal while the session continuation is held. Its eventual
+			// completion must not restore the older session route.
+			s.act();
+			await navigateToHash(s.page, `#/goal/${goal.id}`);
+			await waitForGoalDashboardRoute(s.page, goal.id);
+			s.assert();
+			await expect(s.page.locator(".dashboard-container").first())
+				.toBeVisible({ timeout: 20_000 });
+		} finally {
+			await hydration.dispose();
+		}
 
 		// Deep link: settings
 		s.act();

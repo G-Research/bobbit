@@ -14,6 +14,7 @@ import {
 	openTailSession,
 	snapshotMessages,
 	assertTranscriptSnapshotsEqual,
+	awaitTailGrowthPhase,
 	startTailSampler,
 	stopTailSampler,
 	waitForBurstDone,
@@ -41,11 +42,31 @@ test.describe("tail-chat: full-stack streaming and transcript fidelity", () => {
 		await sendMessage(page, "STREAM_BURST:2 please tail this chat");
 		await rec.capture("STREAM_BURST:2 dispatched");
 
+		// Each marker is emitted only after its 30th real stream chunk. Checking
+		// these named protocol milestones retains multiple distinct growth phases
+		// without sampling wall-clock instants or depending on observer coalescing.
+		const phaseMarkers = [
+			"PRE-WAIT-CHUNK-1#30",
+			"POST-WAIT-CHUNK-1#30",
+			"PRE-WAIT-CHUNK-2#30",
+			"POST-WAIT-CHUNK-2#30",
+		];
+		let previousHeight = pre.scrollHeight;
+		for (const marker of phaseMarkers) {
+			const phase = await awaitTailGrowthPhase(page, marker);
+			await expectLatestMessagePinned(page, { tailPx: TAIL_PX, label: marker });
+			expect(
+				phase.scrollHeight,
+				`${marker} must add a distinct settled transcript-growth phase`,
+			).toBeGreaterThan(previousHeight);
+			previousHeight = phase.scrollHeight;
+			await rec.capture(`${marker}: scrollHeight=${phase.scrollHeight} distance=${phase.distance}`);
+		}
+
 		await waitForBurstDone(page, 2, 45_000);
 		await waitForSessionStatus(sessionId, "idle");
 		// stopTailSampler disconnects observers and flushes two render frames, so
-		// each sample is post-ResizeObserver re-pin rather than an arbitrary
-		// mutation-to-rAF transient.
+		// every opportunistically observed delta is post-ResizeObserver re-pin.
 		const samples = await stopTailSampler(page, "__tailRealSamples");
 		await rec.capture(`STREAM_BURST_DONE:2; settled-growth-samples=${samples.length}`);
 
@@ -60,9 +81,8 @@ test.describe("tail-chat: full-stack streaming and transcript fidelity", () => {
 			badSamples.length,
 			`tail-chat-real-stream: ${badSamples.length}/${samples.length} settled growth samples were not pinned within ${TAIL_PX}px:\n  ${summary}`,
 		).toBe(0);
-		expect(samples.length, "sampler must observe settled transcript growth").toBeGreaterThan(0);
+		expect(previousHeight, "all named stream phases must grow the transcript").toBeGreaterThan(pre.scrollHeight + 200);
 		expect(samples.every((s) => s.growth > 0), "each sampler record must be a positive settled growth event").toBe(true);
-		expect(samples.at(-1)?.scrollHeight ?? 0, "stream must grow the transcript").toBeGreaterThan(pre.scrollHeight + 200);
 
 		const liveSnap = await snapshotMessages(page);
 		expect(liveSnap.length, "live snapshot must have ≥1 message").toBeGreaterThan(0);
