@@ -355,7 +355,7 @@
     },
     {
       "path": "tests2/browser/e2e/source-vite-inline-html-theme.spec.ts",
-      "reason": "Real Vite development-runtime smoke against an explicitly flagged Vite-proxy gateway using distinct localhost/127.0.0.1 aliases, proving signed-cookie reload plus actual chat WriteRenderer opaque-origin isolation from parent/storage/Bobbit/sibling authority while parse-time and live same-iframe theme behavior remains intact without compiled dist/ui or standalone preview fallback.",
+      "reason": "Real Vite development-runtime smokes against explicitly flagged Vite-proxy gateways, proving signed-cookie reload, actual chat WriteRenderer opaque-origin/theme behavior, and mounted-target multi-page preview iframe/popout navigation through Vite's root proxy without capability navigation or compiled dist/ui fallback.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",

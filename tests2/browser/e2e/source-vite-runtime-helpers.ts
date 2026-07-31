@@ -23,6 +23,8 @@ export interface SourceGatewayOptions {
 	tls?: boolean;
 	/** Explicitly identify this gateway as the target of Vite's development proxy. */
 	viteDevProxy?: boolean;
+	/** Optional deployment mount advertised to and consumed by source Vite. */
+	basePath?: string;
 }
 
 export interface SourceViteOptions {
@@ -224,6 +226,7 @@ export function startIsolatedSourceGateway(options: SourceGatewayOptions): Runni
 		options.tls ? "--tls" : "--no-tls",
 		"--no-ui",
 		...(options.viteDevProxy ? ["--vite-dev-proxy"] : []),
+		...(options.basePath !== undefined ? ["--base-path", options.basePath] : []),
 		"--agent-cli", options.agentPath,
 	];
 	const child = spawn(process.execPath, args, {

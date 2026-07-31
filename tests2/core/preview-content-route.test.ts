@@ -50,8 +50,8 @@ let previewMemoryFs: typeof fs;
 
 beforeAll(() => {
 	const scoped = installScopedMemFs([
-		"createReadStream", "existsSync", "mkdirSync", "readFileSync", "readdirSync",
-		"realpathSync", "statSync", "writeFileSync",
+		"closeSync", "createReadStream", "existsSync", "fstatSync", "mkdirSync", "openSync",
+		"readFileSync", "readdirSync", "realpathSync", "statSync", "utimesSync", "writeFileSync",
 	]);
 	restoreFs = scoped.restore;
 	previewMemoryFs = scoped.fs;
@@ -272,7 +272,7 @@ describe("handlePreviewRequest — MIME table", () => {
 });
 
 describe("handlePreviewRequest — bridge injection", () => {
-	it("injects generation-bound assets plus canonical navigation handoff at root and nested mounts", async () => {
+	it("injects generation-bound assets plus response-relative navigation at root and nested production mounts", async () => {
 		for (const basePath of ["", "/team/bobbit"]) {
 			const o = { ...makeOpts(true), basePath };
 			const res = fakeRes();
@@ -282,8 +282,9 @@ describe("handlePreviewRequest — bridge injection", () => {
 			assert.match(txt, /preview-swipe-start|MutationObserver|preview-swipe-move/);
 			assert.match(txt, /bobbit-preview-theme-request/);
 			assert.match(txt, /bobbit-preview-navigate/);
-			assert.ok(txt.includes(`var canonicalBase = new URL("${basePath}/preview/${SID}/"`));
-			assert.ok(txt.includes(`var canonicalDocument = new URL("${basePath}/preview/${SID}/index.html"`));
+			assert.match(txt, /data-bobbit-preview-navigation/);
+			assert.match(txt, /canonicalDocument = new URL\(location\.href\)/);
+			assert.doesNotMatch(txt, new RegExp(`new URL\\(\"${basePath}/preview/${SID}`));
 		}
 	});
 
@@ -461,7 +462,37 @@ describe("handlePreviewRequest — bridge injection", () => {
 		}
 	});
 
-	it("serves many capability assets without rehashing the tree", async () => {
+	it("serves many capability assets with metadata checks but without another whole-tree byte hash", async () => {
+		const baseFs = createPreviewAsyncFs(previewMemoryFs);
+		let descriptorOpens = 0;
+		const observedFs: PreviewAsyncFs = {
+			...baseFs,
+			open: async (filePath, flags, mode) => {
+				descriptorOpens++;
+				return baseFs.open(filePath, flags, mode);
+			},
+		};
+		setPreviewFsForTesting(observedFs);
+		try {
+			const o = makeOpts(false);
+			const cookie = o.store.mint();
+			const htmlRes = fakeRes();
+			await handlePreviewRequest(fakeReq({ cookie: `${COOKIE_NAME}=${cookie}` }), htmlRes as any, `/preview/${SID}/index.html`, o);
+			const capability = capabilityBase(bodyText(htmlRes));
+			const opensAfterColdHash = descriptorOpens;
+			assert.ok(opensAfterColdHash > 0, "cold document verification must hash exact bytes");
+			for (const asset of ["styles.css", "logo.png", "data.json", "styles.css"]) {
+				const assetRes = fakeRes();
+				await handlePreviewRequest(fakeReq(), assetRes as any, `${capability}${asset}`, o);
+				assert.equal(assetRes.statusCode, 200);
+			}
+			assert.equal(descriptorOpens, opensAfterColdHash, "asset requests must use published metadata instead of rehashing tree bytes");
+		} finally {
+			setPreviewFsForTesting(previewMemoryFs);
+		}
+	});
+
+	it("coalesces one exact fallback hash and revokes old capabilities before externally changed bytes are served", async () => {
 		const baseFs = createPreviewAsyncFs(previewMemoryFs);
 		const root = mountPath(SID);
 		let rootEnumerations = 0;
@@ -478,15 +509,34 @@ describe("handlePreviewRequest — bridge injection", () => {
 			const cookie = o.store.mint();
 			const htmlRes = fakeRes();
 			await handlePreviewRequest(fakeReq({ cookie: `${COOKIE_NAME}=${cookie}` }), htmlRes as any, `/preview/${SID}/index.html`, o);
-			const capability = capabilityBase(bodyText(htmlRes));
-			assert.equal(rootEnumerations, 1, "cold document verification hashes once");
-			for (const asset of ["styles.css", "logo.png", "data.json", "styles.css"]) {
-				const assetRes = fakeRes();
-				await handlePreviewRequest(fakeReq(), assetRes as any, `${capability}${asset}`, o);
-				assert.equal(assetRes.statusCode, 200);
-			}
-			assert.equal(rootEnumerations, 1, "asset requests use constant-time generation checks");
+			const oldCapability = capabilityBase(bodyText(htmlRes));
+			const beforeMutationRequest = rootEnumerations;
+			const dataPath = path.join(root, "data.json");
+			const original = fs.statSync(dataPath);
+			fs.writeFileSync(dataPath, `{"b":2}`);
+			fs.utimesSync(dataPath, original.atime, original.mtime);
+
+			const changed = fakeRes();
+			const unchanged = fakeRes();
+			await Promise.all([
+				handlePreviewRequest(fakeReq(), unchanged as any, `${oldCapability}styles.css`, o),
+				handlePreviewRequest(fakeReq(), changed as any, `${oldCapability}data.json`, o),
+			]);
+			assert.equal(changed.statusCode, 401);
+			assert.equal(unchanged.statusCode, 401, "the first detected tree mutation revokes the complete old generation");
+			assert.doesNotMatch(bodyText(changed), /"b":2/);
+			assert.equal(rootEnumerations - beforeMutationRequest, 3, "concurrent uncertainty must share one metadata scan plus one exact before/after hash");
+
+			const freshHtml = fakeRes();
+			await handlePreviewRequest(fakeReq({ cookie: `${COOKIE_NAME}=${cookie}` }), freshHtml as any, `/preview/${SID}/index.html`, o);
+			const freshCapability = capabilityBase(bodyText(freshHtml));
+			assert.notEqual(freshCapability, oldCapability);
+			const freshAsset = fakeRes();
+			await handlePreviewRequest(fakeReq(), freshAsset as any, `${freshCapability}data.json`, o);
+			assert.equal(freshAsset.statusCode, 200);
+			assert.equal(bodyText(freshAsset), `{"b":2}`);
 		} finally {
+			fs.writeFileSync(path.join(root, "data.json"), `{"a":1}`);
 			setPreviewFsForTesting(previewMemoryFs);
 		}
 	});
@@ -523,7 +573,7 @@ describe("handlePreviewRequest — bridge injection", () => {
 			const writer = writeInline(SID, "<html><body>replacement</body></html>", "index.html");
 			releaseEnumeration();
 			await Promise.all([first, second]);
-			assert.equal(rootEnumerations, 1, "concurrent documents join one cold hash");
+			assert.equal(rootEnumerations, 2, "concurrent documents join one exact before/after cold hash");
 			assert.equal(firstRes.statusCode, 404);
 			assert.equal(secondRes.statusCode, 404);
 			await writer;

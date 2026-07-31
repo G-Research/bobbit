@@ -344,13 +344,14 @@ test.describe("Journey: production gateway mounted below a nested base path", ()
 			writeFileSync(htmlPath, [
 				"<!doctype html>",
 				"<html><head><link rel=\"stylesheet\" href=\"./sibling.css\"></head>",
-				`<body><h1>${PREVIEW_TEXT}</h1><div id=\"sibling\">${SIBLING_MARKER}</div>${isolationScript}</body></html>`,
+				`<body><h1>${PREVIEW_TEXT}</h1><a id=\"next-page\" href=\"next.html\">Next page</a><div id=\"sibling\">${SIBLING_MARKER}</div>${isolationScript}</body></html>`,
 			].join(""));
+			writeFileSync(join(previewFixtureDir, "next.html"), "<!doctype html><html><body><h1>MOUNTED_PREVIEW_PAGE_TWO</h1></body></html>");
 			writeFileSync(join(previewFixtureDir, "sibling.css"), "#sibling { color: rgb(12, 34, 56); }");
 			writeFileSync(join(previewFixtureDir, "probe.json"), JSON.stringify({ scope: "preview-only" }));
 			const mounted = await adminRequest(gateway, `/api/preview/mount?sessionId=${sessionId}`, {
 				method: "POST",
-				body: JSON.stringify({ file: htmlPath, assets: ["sibling.css", "probe.json"] }),
+				body: JSON.stringify({ file: htmlPath, assets: ["next.html", "sibling.css", "probe.json"] }),
 			});
 			expect(mounted.response.status, mounted.text).toBe(200);
 			expect(mounted.body?.url).toBe(`/preview/${sessionId}/${ENTRY}`);
@@ -417,6 +418,10 @@ test.describe("Journey: production gateway mounted below a nested base path", ()
 			await popup.waitForLoadState("domcontentloaded");
 			expectExactlyOneMount(popup.url(), gateway, "/preview");
 			await expect(popup.locator("body")).toContainText(PREVIEW_TEXT, { timeout: 15_000 });
+			await popup.locator("#next-page").click();
+			await expect(popup.getByRole("heading", { name: "MOUNTED_PREVIEW_PAGE_TWO" })).toBeVisible({ timeout: 15_000 });
+			expectExactlyOneMount(popup.url(), gateway, "/preview");
+			expect(new URL(popup.url()).pathname).not.toContain("/_content/");
 			const popupReload = await popup.reload({ waitUntil: "domcontentloaded" });
 			expect(popupReload, "preview popout reload should return its sandboxed HTML response").not.toBeNull();
 			expect(await popupReload!.headerValue("content-security-policy")).toBe("sandbox allow-scripts");
@@ -426,6 +431,12 @@ test.describe("Journey: production gateway mounted below a nested base path", ()
 			}), "response-level sandbox must keep a top-level preview popout out of origin storage").toBe(true);
 			await popup.close();
 			popup = undefined;
+
+			await page.frameLocator(".goal-preview-panel iframe").locator("#next-page").click();
+			await expect(page.frameLocator(".goal-preview-panel iframe").getByRole("heading", { name: "MOUNTED_PREVIEW_PAGE_TWO" })).toBeVisible({ timeout: 15_000 });
+			const navigatedIframeSrc = await iframe.getAttribute("src");
+			expectExactlyOneMount(navigatedIframeSrc!, gateway, "/preview");
+			expect(new URL(navigatedIframeSrc!, gateway.originURL).pathname).not.toContain("/_content/");
 
 			// A stored explicit URL that already includes the runtime mount remains
 			// authoritative. The localhost sentinel must never become an HTTP Bearer.

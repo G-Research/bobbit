@@ -345,9 +345,9 @@ function deleteSession(id: string): void {
 
 test.beforeAll(() => {
 	const scoped = installScopedMemFs([
-		"copyFileSync", "cpSync", "createReadStream", "existsSync", "mkdirSync",
-		"readFileSync", "readdirSync", "realpathSync", "renameSync", "rmSync",
-		"statSync", "unlinkSync", "writeFileSync",
+		"closeSync", "copyFileSync", "cpSync", "createReadStream", "existsSync", "fstatSync",
+		"mkdirSync", "openSync", "readFileSync", "readdirSync", "realpathSync", "renameSync",
+		"rmSync", "statSync", "unlinkSync", "writeFileSync",
 	]);
 	restoreFs = scoped.restore;
 	route = new PreviewMountRouteFixture(scoped.fs);

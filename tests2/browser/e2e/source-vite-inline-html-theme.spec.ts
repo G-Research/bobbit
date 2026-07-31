@@ -1,5 +1,5 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -464,6 +464,154 @@ test.describe("source Vite inline HTML theme runtime", () => {
 			if (vite && vite.child.exitCode !== null) throw processFailure(vite, `failed during test: ${String(error)}`);
 			throw error;
 		} finally {
+			await page.close().catch(() => undefined);
+			if (vite) await stopSourceProcess(vite);
+			if (gateway) await stopSourceProcess(gateway);
+			const gatewayLog = processLog(gateway);
+			const viteLog = processLog(vite);
+			report.gatewayStdout = gatewayLog.stdout;
+			report.gatewayStderr = gatewayLog.stderr;
+			report.viteStdout = viteLog.stdout;
+			report.viteStderr = viteLog.stderr;
+			await attachReport(testInfo, report);
+			await rm(tempRoot, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 });
+		}
+	});
+
+	test("rebases mounted multi-page preview navigation through real source Vite for iframe and popout", async ({ page }, testInfo) => {
+		test.setTimeout(4 * 60_000);
+		const mount = "/team/bobbit";
+		const tempRoot = await mkdtemp(join(tmpdir(), "bobbit-source-vite-preview-navigation-"));
+		const workspaceDir = join(tempRoot, "workspace");
+		const fixtureDir = join(workspaceDir, "preview-navigation");
+		const agentPath = join(tempRoot, "source-vite-write-agent.mjs");
+		const report: RuntimeReport = { requests: [], responses: [] };
+		let gateway: RunningSourceProcess | undefined;
+		let vite: RunningSourceProcess | undefined;
+		let popup: Page | undefined;
+
+		try {
+			await mkdir(fixtureDir, { recursive: true });
+			await writeSourceViteAgent(agentPath);
+			await Promise.all([
+				writeFile(join(fixtureDir, "index.html"), "<!doctype html><html><body><h1>SOURCE_VITE_PAGE_ONE</h1><a id=next href=\"next.html\">Next</a></body></html>"),
+				writeFile(join(fixtureDir, "next.html"), "<!doctype html><html><body><h1>SOURCE_VITE_PAGE_TWO</h1></body></html>"),
+			]);
+
+			const gatewayPort = await getFreePort();
+			const vitePort = await getFreePort();
+			const gatewayOrigin = `http://127.0.0.1:${gatewayPort}`;
+			const gatewayBaseUrl = `${gatewayOrigin}${mount}`;
+			const viteBaseUrl = `http://localhost:${vitePort}`;
+			gateway = startIsolatedSourceGateway({
+				repoRoot: REPO_ROOT,
+				tempRoot,
+				workspaceDir,
+				agentPath,
+				port: gatewayPort,
+				viteDevProxy: true,
+				basePath: mount,
+			});
+			await waitForSourceGateway(gatewayBaseUrl, gateway);
+			const token = await readToken(join(tempRoot, "secrets"));
+			const admin = async (route: string, init: RequestInit = {}): Promise<Response> => {
+				const headers = new Headers(init.headers);
+				headers.set("Authorization", `Bearer ${token}`);
+				if (init.body !== undefined) headers.set("Content-Type", "application/json");
+				return fetch(`${gatewayBaseUrl}${route}`, { ...init, headers });
+			};
+			const providerSeed = await admin("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({
+					customProviders: [{
+						id: "mock",
+						name: "mock",
+						type: "manual",
+						baseUrl: "http://127.0.0.1",
+						models: [{ id: "source-vite-write-agent", name: "source-vite-write-agent" }],
+					}],
+				}),
+			});
+			expect(providerSeed.ok, await providerSeed.clone().text()).toBe(true);
+			const modelSelection = await admin("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({
+					"default.sessionModel": "mock/source-vite-write-agent",
+					"default.sessionThinkingLevel": "off",
+				}),
+			});
+			expect(modelSelection.ok, await modelSelection.clone().text()).toBe(true);
+			const sessionId = await createProjectAndSession(gatewayBaseUrl, token, workspaceDir);
+
+			vite = startSourceVite({
+				repoRoot: REPO_ROOT,
+				tempRoot,
+				gatewayUrl: gatewayBaseUrl,
+				port: vitePort,
+			});
+			await waitForSourceVite(viteBaseUrl, vite);
+			page.on("request", request => report.requests.push(sanitizedRequestUrl(request.url())));
+			page.on("response", response => {
+				const url = new URL(response.url());
+				if (url.origin === viteBaseUrl) report.responses.push({ path: url.pathname, status: response.status() });
+			});
+
+			await page.goto(`${viteBaseUrl}/?token=${encodeURIComponent(token)}`, { waitUntil: "domcontentloaded" });
+			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 30_000 });
+			await page.evaluate(id => { window.location.hash = `#/session/${id}`; }, sessionId);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 30_000 });
+			const previewEvents = page.waitForRequest(request =>
+				new URL(request.url()).pathname === `/api/sessions/${sessionId}/preview-events`,
+			);
+			const previewEnabled = await admin(`/api/sessions/${sessionId}`, {
+				method: "PATCH",
+				body: JSON.stringify({ preview: true }),
+			});
+			expect(previewEnabled.ok, await previewEnabled.clone().text()).toBe(true);
+			await previewEvents;
+			const mounted = await admin(`/api/preview/mount?sessionId=${sessionId}`, {
+				method: "POST",
+				body: JSON.stringify({
+					file: join(fixtureDir, "index.html"),
+					assets: ["next.html"],
+				}),
+			});
+			expect(mounted.ok, await mounted.clone().text()).toBe(true);
+			const iframe = page.locator(".goal-preview-panel iframe").first();
+			const frame = page.frameLocator(".goal-preview-panel iframe").first();
+			await expect(frame.getByRole("heading", { name: "SOURCE_VITE_PAGE_ONE" })).toBeVisible({ timeout: 30_000 });
+			const initialIframeUrl = new URL((await iframe.getAttribute("src"))!, viteBaseUrl);
+			expect(initialIframeUrl.origin).toBe(viteBaseUrl);
+			expect(initialIframeUrl.pathname).toBe(`/preview/${sessionId}/index.html`);
+			expect(initialIframeUrl.pathname).not.toContain(mount);
+
+			await frame.locator("#next").click();
+			await expect(frame.getByRole("heading", { name: "SOURCE_VITE_PAGE_TWO" })).toBeVisible({ timeout: 20_000 });
+			const navigatedIframeUrl = new URL((await iframe.getAttribute("src"))!, viteBaseUrl);
+			expect(navigatedIframeUrl.pathname).toBe(`/preview/${sessionId}/next.html`);
+			expect(navigatedIframeUrl.pathname).not.toContain("/_content/");
+
+			const popoutLink = page.locator('a[title="Open preview in new tab"]').first();
+			const popupPromise = page.waitForEvent("popup");
+			await popoutLink.click();
+			popup = await popupPromise;
+			await expect(popup.getByRole("heading", { name: "SOURCE_VITE_PAGE_ONE" })).toBeVisible({ timeout: 20_000 });
+			await popup.locator("#next").click();
+			await expect(popup.getByRole("heading", { name: "SOURCE_VITE_PAGE_TWO" })).toBeVisible({ timeout: 20_000 });
+			expect(new URL(popup.url()).pathname).toBe(`/preview/${sessionId}/next.html`);
+			expect(new URL(popup.url()).pathname).not.toContain("/_content/");
+			await expect.poll(() => popup!.evaluate(() => window.opener === null)).toBe(true);
+
+			const previewResponses = report.responses.filter(response => response.path.startsWith(`/preview/${sessionId}/`));
+			expect(previewResponses.some(response => response.path.endsWith("/next.html") && response.status === 200)).toBe(true);
+			expect(previewResponses.some(response => response.path.includes(mount) || response.status === 401),
+				"source Vite must expose only its root preview path and every navigation must remain ambient-authenticated").toBe(false);
+		} catch (error) {
+			if (gateway && gateway.child.exitCode !== null) throw processFailure(gateway, `failed during test: ${String(error)}`);
+			if (vite && vite.child.exitCode !== null) throw processFailure(vite, `failed during test: ${String(error)}`);
+			throw error;
+		} finally {
+			if (popup && !popup.isClosed()) await popup.close().catch(() => undefined);
 			await page.close().catch(() => undefined);
 			if (vite) await stopSourceProcess(vite);
 			if (gateway) await stopSourceProcess(gateway);

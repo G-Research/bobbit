@@ -53,11 +53,8 @@ async function loadFixture(page: Page): Promise<void> {
 		const navigationPreview = pathname.endsWith("/navigation.html");
 		const navigationTarget = pathname.endsWith("/next.html");
 		const previewScope = `/preview/${SESSION_A}/`;
-		const navigationBody = `<!doctype html><html><head><base data-bobbit-preview-base href="${previewScope}_content/test-capability/"></head><body><a id="next-page" href="next.html">Next page</a>${previewNavigationBridge(
-			`${previewScope}_content/test-capability/`,
-			previewScope,
-			`${previewScope}navigation.html`,
-		)}</body></html>`;
+		const capability = "a".repeat(43);
+		const navigationBody = `<!doctype html><html><head><base data-bobbit-preview-base href="${previewScope}_content/${capability}/"></head><body><a id="next-page" href="next.html">Next page</a>${previewNavigationBridge()}</body></html>`;
 		await route.fulfill({
 			contentType: svgPreview ? "image/svg+xml" : "text/html",
 			headers: svgPreview || navigationPreview || navigationTarget ? {
