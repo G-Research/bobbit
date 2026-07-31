@@ -244,9 +244,10 @@ test("ProjectRegistry processes large read-only directories linearly", () => {
     lowerCaseSpy.mockRestore();
   }
 
-  // One fold and one case-toggle per entry (plus a fixed amount for ancestors)
-  // proves the entry-pair classification does not scan the directory per name.
-  assert.ok(lowerCaseCalls <= entries.length * 3 + 20, `expected linear normalization, got ${lowerCaseCalls} calls`);
+  // One fold plus two case-toggles per entry proves the entry-pair
+  // classification does not scan the directory per name. Toggling uppercase
+  // `E` calls `toLowerCase` twice, so the linear bound is five per entry.
+  assert.ok(lowerCaseCalls <= entries.length * 5 + 20, `expected linear normalization, got ${lowerCaseCalls} calls`);
 });
 
 test("ProjectRegistry caches inconclusive directory semantics per path identity", () => {
