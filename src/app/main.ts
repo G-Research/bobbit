@@ -69,6 +69,7 @@ import {
 	InvalidGatewayBaseUrlError,
 	LOCALHOST_TOKEN,
 	prepareRuntimeServiceWorkerMount,
+	recordGatewayLocalhostMode,
 	sameOriginGatewayBaseUrl,
 	takeGatewayRecoveryWarning,
 } from "./gateway-fetch.js";
@@ -631,14 +632,23 @@ async function handleHashChange(): Promise<void> {
 async function initApp() {
 	bootMark("initApp-start");
 	// A root-scoped Bobbit worker from an earlier deployment can otherwise own
-	// this mounted page and cache its first authenticated API response. Retire
-	// wrong-mount registrations/caches before hydrating credentials or issuing
-	// any gateway request; a controlled page stops boot after the one safe reload.
+	// this mounted page and cache its first authenticated API response. Resolve
+	// it before hydrating credentials or issuing any gateway request. Incomplete
+	// ownership evidence fails closed rather than deleting sibling app state.
 	const serviceWorkerPreparation = await prepareRuntimeServiceWorkerMount();
 	if (serviceWorkerPreparation.reloadRequested) return;
 
 	const app = document.getElementById("app");
 	if (!app) throw new Error("App container not found");
+	if (!serviceWorkerPreparation.safeToProceed) {
+		const notice = document.createElement("main");
+		notice.setAttribute("role", "alert");
+		notice.style.cssText = "max-width:42rem;margin:12vh auto;padding:2rem;font:16px/1.5 system-ui,sans-serif";
+		notice.textContent = "Bobbit stopped before signing in because another service worker controls this URL. Remove the older root-scoped worker for this origin, then reload.";
+		app.replaceChildren(notice);
+		markAppBooted();
+		return;
+	}
 
 	// Palette is loaded from server preferences after gateway auth (see below)
 
@@ -668,7 +678,7 @@ async function initApp() {
 				if (health.localhost) {
 					savedUrl = fallbackBase;
 					savedToken = LOCALHOST_TOKEN;
-					const commit = commitGatewayConnection(savedUrl, savedToken);
+					const commit = commitGatewayConnection(savedUrl, savedToken, { localhostTrusted: true });
 					if (commit.warning) showHeaderToast(commit.warning);
 				}
 			}
@@ -698,6 +708,25 @@ async function initApp() {
 	if (savedUrl && savedToken) {
 		try {
 			await waitForGateway(savedUrl, savedToken);
+
+			// A protected first load may have failed its pre-authenticated sw.js
+			// request. The successful health probe has now installed the bound cookie,
+			// so retry registration once while preserving the mount-isolation guard.
+			const authenticatedServiceWorkerPreparation = await prepareRuntimeServiceWorkerMount();
+			if (!authenticatedServiceWorkerPreparation.safeToProceed
+				|| authenticatedServiceWorkerPreparation.reloadRequested) return;
+
+			// The sentinel can mean either auth-disabled localhost or an auth-enforced
+			// cookie session. Persist only that non-secret distinction so QR handoff
+			// never presents an unauthenticated link after reload.
+			try {
+				const healthModeResponse = await gatewayFetch("/api/health");
+				if (healthModeResponse.ok) {
+					const healthMode = await healthModeResponse.json();
+					recordGatewayLocalhostMode(healthMode.localhost === true);
+				}
+			} catch { /* unknown mode disables cross-device handoff safely */ }
+
 			if (urlToken) {
 				// Remove only the launch query after successful auth; preserve the
 				// mounted pathname and any deep-link hash.

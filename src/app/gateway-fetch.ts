@@ -12,14 +12,15 @@ import {
 
 export const GW_URL_KEY = "gateway.url";
 export const GW_TOKEN_KEY = "gateway.token";
+export const GW_AUTH_MODE_KEY = "gateway.auth-mode";
 export const LOCALHOST_TOKEN = "localhost";
 
 const INVALID_SAVED_GATEWAY_WARNING = "Invalid saved gateway URL; using this Bobbit deployment instead.";
 const STORAGE_WARNING = "Connected, but the gateway connection could not be saved for the next reload.";
-const NATIVE_TRANSPORT_WARNING = "Preview live updates and embedded previews require the Bobbit UI and gateway to use the same scheme and hostname. Serve the UI from the gateway origin or through a same-host reverse proxy.";
+const NATIVE_TRANSPORT_WARNING = "Preview live updates and embedded previews require the Bobbit UI and gateway to use the same HTTPS hostname (loopback HTTP is also supported). Serve the UI from the gateway origin or through a same-host reverse proxy.";
+const QR_COOKIE_REENTRY_MESSAGE = "This browser is connected with a private cookie, which cannot authenticate a phone. Re-enter the gateway token to create a secure handoff; it stays only in this tab and is not saved.";
 const SERVICE_WORKER_RELOAD_GUARD_KEY = "bobbit-sw-mount-reload";
 const BOBBIT_CACHE_PREFIX = "bobbit:";
-const LEGACY_BOBBIT_CACHE_PREFIX = "bobbit-";
 
 export type InvalidGatewayBaseUrlCode =
 	| "EMPTY"
@@ -54,10 +55,21 @@ export interface GatewayConnectionCommitResult {
 	warning?: string;
 }
 
+export interface GatewayConnectionCommitOptions {
+	/** The sentinel represents an auth-disabled localhost gateway, not a cookie. */
+	localhostTrusted?: boolean;
+}
+
 export interface GatewayNativeTransportSupport {
 	supported: boolean;
 	message?: string;
 }
+
+export type GatewayMobileHandoff =
+	| { supported: true; url: PublicGatewayUrl }
+	| { supported: false; message: string };
+
+type GatewayAuthenticationMode = "none" | "bearer" | "cookie" | "localhost" | "unknown";
 
 interface BobbitServiceWorkerLike {
 	scriptURL: string;
@@ -95,9 +107,12 @@ export interface ServiceWorkerMountPreparationResult {
 	registered: boolean;
 	reloadRequested: boolean;
 	retiredRegistrations: number;
+	/** False means a wrong/unknown controller may still observe mounted auth traffic. */
+	safeToProceed: boolean;
 }
 
 let activeConnection: ActiveGatewayConnection | null = null;
+let activeAuthenticationMode: GatewayAuthenticationMode = "none";
 let recoveryWarning: string | null = null;
 let serviceWorkerReloadRequested = false;
 
@@ -113,14 +128,26 @@ function normalizeHostname(hostname: string): string {
 	return normalized;
 }
 
+function isLoopbackHostname(hostname: string): boolean {
+	const normalized = normalizeHostname(hostname);
+	return normalized === "localhost"
+		|| normalized.endsWith(".localhost")
+		|| normalized === "127.0.0.1"
+		|| normalized === "::1";
+}
+
 function cookieCompatibleGatewayBase(baseUrl: string): boolean {
 	const current = browserWindow();
 	if (!current) return false;
 	try {
 		const page = new URL(current.location.origin);
 		const gateway = new URL(baseUrl);
-		return gateway.protocol === page.protocol
+		const sameSchemeAndHost = gateway.protocol === page.protocol
 			&& normalizeHostname(gateway.hostname) === normalizeHostname(page.hostname);
+		if (!sameSchemeAndHost) return false;
+		// The server deliberately refuses browser-cookie issuance over insecure
+		// non-loopback HTTP. Never replace the only usable bearer in that case.
+		return gateway.protocol === "https:" || isLoopbackHostname(gateway.hostname);
 	} catch {
 		return false;
 	}
@@ -138,6 +165,8 @@ function removeStoredConnection(): void {
 	try { if (typeof localStorage !== "undefined") localStorage.removeItem(GW_URL_KEY); }
 	catch { /* recovery still proceeds in memory */ }
 	try { if (typeof localStorage !== "undefined") localStorage.removeItem(GW_TOKEN_KEY); }
+	catch { /* recovery still proceeds in memory */ }
+	try { if (typeof localStorage !== "undefined") localStorage.removeItem(GW_AUTH_MODE_KEY); }
 	catch { /* recovery still proceeds in memory */ }
 }
 
@@ -230,9 +259,13 @@ function hydrateActiveConnection(): ActiveGatewayConnection {
 	if (activeConnection) return activeConnection;
 	const storedUrl = storageValue(GW_URL_KEY);
 	const storedToken = storageValue(GW_TOKEN_KEY) ?? "";
+	const storedMode = storageValue(GW_AUTH_MODE_KEY);
 	if (storedUrl) {
 		try {
 			activeConnection = { baseUrl: normalizeGatewayBaseUrl(storedUrl), token: storedToken };
+			activeAuthenticationMode = storedToken === LOCALHOST_TOKEN
+				? (storedMode === "localhost" || storedMode === "cookie" ? storedMode : "unknown")
+				: storedToken ? "bearer" : "none";
 			return activeConnection;
 		} catch {
 			// Clear the pair together before any request so a token from a malformed
@@ -240,10 +273,11 @@ function hydrateActiveConnection(): ActiveGatewayConnection {
 			removeStoredConnection();
 			recoveryWarning = INVALID_SAVED_GATEWAY_WARNING;
 		}
-	} else if (storedToken) {
+	} else if (storedToken || storedMode) {
 		removeStoredConnection();
 	}
 	activeConnection = { baseUrl: sameOriginGatewayBaseUrl(), token: "" };
+	activeAuthenticationMode = "none";
 	return activeConnection;
 }
 
@@ -272,52 +306,58 @@ function restoreStorageValue(storage: Storage, key: string, value: string | null
 /**
  * Publish an authenticated connection in memory, then persist its reload-safe
  * representation. A real bearer remains in memory for the current tab, but a
- * same-scheme/same-host gateway is persisted with the non-credential sentinel:
- * the successful authenticated probe has already installed its bound HttpOnly
- * cookie. Different-host gateways retain the bearer because native cookie
- * transports are deliberately unavailable there.
+ * cookie-capable same-host gateway persists only the non-credential sentinel.
+ * Insecure non-loopback HTTP and different-host gateways retain the bearer
+ * because the server cannot replace it with a usable browser cookie.
  */
-export function commitGatewayConnection(baseUrl: string, token: string): GatewayConnectionCommitResult {
+export function commitGatewayConnection(
+	baseUrl: string,
+	token: string,
+	options: GatewayConnectionCommitOptions = {},
+): GatewayConnectionCommitResult {
 	const normalized = normalizeGatewayBaseUrl(baseUrl);
-	activeConnection = { baseUrl: normalized, token };
+	const previousActiveMode = activeAuthenticationMode;
 	const persistCookieSentinel = Boolean(token)
 		&& token !== LOCALHOST_TOKEN
 		&& cookieCompatibleGatewayBase(normalized);
 	const persistedToken = persistCookieSentinel ? LOCALHOST_TOKEN : token;
+	const persistedMode: GatewayAuthenticationMode = persistCookieSentinel
+		? "cookie"
+		: token === LOCALHOST_TOKEN
+			? options.localhostTrusted
+				? "localhost"
+				: (previousActiveMode === "localhost" || previousActiveMode === "cookie" ? previousActiveMode : "unknown")
+			: token ? "bearer" : "none";
+	activeConnection = { baseUrl: normalized, token };
+	activeAuthenticationMode = token && token !== LOCALHOST_TOKEN ? "bearer" : persistedMode;
 
 	let storage: Storage;
 	let previousUrl: string | null;
 	let previousToken: string | null;
+	let previousMode: string | null;
 	try {
 		if (typeof localStorage === "undefined") return { persisted: false, warning: STORAGE_WARNING };
 		storage = localStorage;
 		previousUrl = storage.getItem(GW_URL_KEY);
 		previousToken = storage.getItem(GW_TOKEN_KEY);
+		previousMode = storage.getItem(GW_AUTH_MODE_KEY);
 	} catch {
 		return { persisted: false, warning: STORAGE_WARNING };
 	}
 
-	if (persistCookieSentinel) {
-		// Scrub an older persisted bearer before updating the URL. If either write
-		// fails, never roll the secret back into origin-wide Web Storage.
-		try {
-			storage.setItem(GW_TOKEN_KEY, LOCALHOST_TOKEN);
-			storage.setItem(GW_URL_KEY, normalized);
-		} catch {
-			try { storage.removeItem(GW_URL_KEY); } catch { /* best effort */ }
-			try { storage.setItem(GW_TOKEN_KEY, LOCALHOST_TOKEN); }
-			catch { try { storage.removeItem(GW_TOKEN_KEY); } catch { /* best effort */ } }
-			return { persisted: false, warning: STORAGE_WARNING };
-		}
-	} else {
-		try {
-			storage.setItem(GW_URL_KEY, normalized);
-			storage.setItem(GW_TOKEN_KEY, persistedToken);
-		} catch {
-			try { restoreStorageValue(storage, GW_URL_KEY, previousUrl); } catch { /* best effort */ }
-			try { restoreStorageValue(storage, GW_TOKEN_KEY, previousToken); } catch { /* best effort */ }
-			return { persisted: false, warning: STORAGE_WARNING };
-		}
+	try {
+		// Write the reload-safe credential before publishing its gateway URL. A
+		// same-host candidate bearer is never placed in origin-wide storage.
+		storage.setItem(GW_TOKEN_KEY, persistedToken);
+		storage.setItem(GW_AUTH_MODE_KEY, persistedMode);
+		storage.setItem(GW_URL_KEY, normalized);
+	} catch {
+		// Storage failure affects only the next reload. Restore the authoritative
+		// previous pair/mode while retaining the authenticated candidate in memory.
+		try { restoreStorageValue(storage, GW_URL_KEY, previousUrl); } catch { /* best effort */ }
+		try { restoreStorageValue(storage, GW_TOKEN_KEY, previousToken); } catch { /* best effort */ }
+		try { restoreStorageValue(storage, GW_AUTH_MODE_KEY, previousMode); } catch { /* best effort */ }
+		return { persisted: false, warning: STORAGE_WARNING };
 	}
 
 	try {
@@ -326,6 +366,42 @@ export function commitGatewayConnection(baseUrl: string, token: string): Gateway
 		}));
 	} catch { /* notification is best effort */ }
 	return { persisted: true };
+}
+
+/** Record the non-secret auth mode reported by an authenticated health check. */
+export function recordGatewayLocalhostMode(localhostTrusted: boolean): void {
+	const connection = hydrateActiveConnection();
+	const persistedToken = storageValue(GW_TOKEN_KEY);
+	const persistedUrl = storageValue(GW_URL_KEY);
+	let persistenceMatchesActive = false;
+	try {
+		persistenceMatchesActive = Boolean(persistedUrl)
+			&& normalizeGatewayBaseUrl(persistedUrl!) === connection.baseUrl;
+	} catch { /* malformed persistence is recovered on the next hydration */ }
+	activeAuthenticationMode = localhostTrusted
+		? "localhost"
+		: connection.token === LOCALHOST_TOKEN || (persistenceMatchesActive && persistedToken === LOCALHOST_TOKEN)
+			? "cookie"
+			: connection.token ? "bearer" : "none";
+	if (!persistenceMatchesActive) return;
+	try {
+		if (typeof localStorage !== "undefined") localStorage.setItem(GW_AUTH_MODE_KEY, activeAuthenticationMode);
+	} catch { /* unknown mode fails closed by disabling cross-device handoff */ }
+}
+
+/** Build a phone handoff only when this tab still has a transferable authority. */
+export function gatewayMobileHandoff(): GatewayMobileHandoff {
+	const connection = hydrateActiveConnection();
+	if (connection.token && connection.token !== LOCALHOST_TOKEN) {
+		return {
+			supported: true,
+			url: gatewayUrl(gatewayRoute(`/?token=${encodeURIComponent(connection.token)}`), connection.baseUrl),
+		};
+	}
+	if (connection.token === LOCALHOST_TOKEN && activeAuthenticationMode === "localhost") {
+		return { supported: true, url: gatewayUrl(gatewayRoute("/"), connection.baseUrl) };
+	}
+	return { supported: false, message: QR_COOKIE_REENTRY_MESSAGE };
 }
 
 /** Resolve one internal route against the selected (or explicit) gateway base. */
@@ -382,8 +458,14 @@ export function gatewayFetch(route: GatewayRoute | string, init: RequestInit = {
 	});
 }
 
+function isLegacyRootCacheName(name: string): boolean {
+	// Keep this ownership proof in lockstep with public/sw.js. A broad `bobbit-`
+	// prefix can belong to another shared-origin application.
+	return /^bobbit-(?:v\d+|dev-\d+|[a-z0-9]+-[a-z0-9]{6})$/.test(name);
+}
+
 function cacheMount(cacheName: string): string | null {
-	if (cacheName.startsWith(LEGACY_BOBBIT_CACHE_PREFIX)) return "";
+	if (isLegacyRootCacheName(cacheName)) return "";
 	if (!cacheName.startsWith(BOBBIT_CACHE_PREFIX)) return null;
 	const encodedEnd = cacheName.indexOf(":", BOBBIT_CACHE_PREFIX.length);
 	if (encodedEnd < 0) return null;
@@ -424,10 +506,10 @@ function registrationMount(registration: BobbitServiceWorkerRegistrationLike, or
 }
 
 /**
- * Retire Bobbit service-worker state belonging to another mount before any
- * gateway request can cross a stale root controller. Cache namespaces provide
- * the identity proof: an unrelated `sw.js` registration is never removed merely
- * because its script has a conventional name.
+ * Prepare this mount without mutating disjoint sibling applications. Only a
+ * proven historical root Bobbit registration can be retired: its scope can
+ * control every mounted page. If a wrong controller cannot be proven and
+ * released, fail closed before any gateway credential or request is touched.
  */
 export async function prepareRuntimeServiceWorkerMount(
 	environment: BobbitServiceWorkerMountEnvironment = {},
@@ -437,10 +519,13 @@ export async function prepareRuntimeServiceWorkerMount(
 		registered: false,
 		reloadRequested: false,
 		retiredRegistrations: 0,
+		safeToProceed: true,
 	};
 	const current = browserWindow();
-	const origin = environment.origin ?? current?.location.origin;
-	if (!origin) return result;
+	const rawOrigin = environment.origin ?? current?.location.origin;
+	if (!rawOrigin) return result;
+	let origin: string;
+	try { origin = new URL(rawOrigin).origin; } catch { return { ...result, safeToProceed: false }; }
 
 	const serviceWorker = environment.serviceWorker
 		?? (typeof navigator !== "undefined" && "serviceWorker" in navigator
@@ -451,49 +536,56 @@ export async function prepareRuntimeServiceWorkerMount(
 	const reloadStorage = environment.sessionStorage
 		?? (typeof sessionStorage !== "undefined" ? sessionStorage : undefined);
 	const basePath = runtimeBasePath();
-	const currentCachePrefix = `${BOBBIT_CACHE_PREFIX}${encodeURIComponent(basePath || "/")}:`;
 
 	let cacheNames: string[] = [];
 	let registrations: BobbitServiceWorkerRegistrationLike[] = [];
-	try { cacheNames = cacheStorage ? await cacheStorage.keys() : []; } catch { /* unavailable */ }
-	try { registrations = serviceWorker ? await serviceWorker.getRegistrations() : []; } catch { /* unavailable */ }
-
-	const knownBobbitMounts = new Set<string>();
-	for (const name of cacheNames) {
-		const mount = cacheMount(name);
-		if (mount !== null) knownBobbitMounts.add(mount);
-	}
-
-	for (const registration of registrations) {
-		const mount = registrationMount(registration, origin);
-		if (mount === null || mount === basePath || !knownBobbitMounts.has(mount)) continue;
-		try {
-			if (await registration.unregister()) result.retiredRegistrations += 1;
-		} catch { /* cleanup is best effort */ }
-	}
-
+	let cacheDiscoveryComplete = !cacheStorage;
+	let registrationDiscoveryComplete = !serviceWorker;
 	if (cacheStorage) {
-		for (const name of cacheNames) {
-			const mount = cacheMount(name);
-			const staleScopedCache = name.startsWith(BOBBIT_CACHE_PREFIX)
-				&& !name.startsWith(currentCachePrefix)
-				&& mount !== null;
-			const staleLegacyRootCache = Boolean(basePath) && name.startsWith(LEGACY_BOBBIT_CACHE_PREFIX);
-			if (!staleScopedCache && !staleLegacyRootCache) continue;
+		try { cacheNames = await cacheStorage.keys(); cacheDiscoveryComplete = true; }
+		catch { cacheDiscoveryComplete = false; }
+	}
+	if (serviceWorker) {
+		try { registrations = await serviceWorker.getRegistrations(); registrationDiscoveryComplete = true; }
+		catch { registrationDiscoveryComplete = false; }
+	}
+
+	const rootCacheNames = cacheNames.filter((name) => cacheMount(name) === "");
+	const rootRegistrations = registrations.filter((registration) => registrationMount(registration, origin) === "");
+	const controller = serviceWorker?.controller ?? null;
+	const controllerMount = controller ? workerMount(controller.scriptURL, origin) : null;
+	const wrongController = Boolean(controller) && controllerMount !== basePath;
+
+	const retireProvenRootState = async (): Promise<boolean> => {
+		if (!basePath || !cacheDiscoveryComplete || !registrationDiscoveryComplete) return false;
+		if (rootCacheNames.length === 0 || rootRegistrations.length === 0) return false;
+		let retired = false;
+		for (const registration of rootRegistrations) {
+			try {
+				if (await registration.unregister()) {
+					result.retiredRegistrations += 1;
+					retired = true;
+				}
+			} catch { /* retain it and fail closed when it is the controller */ }
+		}
+		if (!retired || !cacheStorage) return retired;
+		for (const name of rootCacheNames) {
 			try {
 				if (await cacheStorage.delete(name)) result.deletedCaches += 1;
-			} catch { /* cleanup is best effort */ }
+			} catch { /* registration retirement is the security boundary */ }
 		}
-	}
+		return true;
+	};
 
-	const controllerMount = serviceWorker?.controller
-		? workerMount(serviceWorker.controller.scriptURL, origin)
-		: null;
-	const staleBobbitController = controllerMount !== null
-		&& controllerMount !== basePath
-		&& knownBobbitMounts.has(controllerMount);
-	if (staleBobbitController) {
-		const guardValue = `${basePath || "/"}|${serviceWorker!.controller!.scriptURL}`;
+	if (wrongController) {
+		result.safeToProceed = false;
+		// Only the historical root migration has enough independent ownership
+		// evidence to remove. Empty/failed discovery and other mounts are never
+		// guessed from a conventional script filename.
+		const retired = controllerMount === "" ? await retireProvenRootState() : false;
+		if (!retired) return result;
+
+		const guardValue = `${basePath || "/"}|${controller!.scriptURL}`;
 		let alreadyReloaded = false;
 		try { alreadyReloaded = reloadStorage?.getItem(SERVICE_WORKER_RELOAD_GUARD_KEY) === guardValue; }
 		catch { /* use the in-memory guard */ }
@@ -502,18 +594,22 @@ export async function prepareRuntimeServiceWorkerMount(
 			try { reloadStorage?.setItem(SERVICE_WORKER_RELOAD_GUARD_KEY, guardValue); } catch { /* best effort */ }
 			result.reloadRequested = true;
 			try { (environment.reload ?? (() => current?.location.reload()))(); } catch { /* best effort */ }
-			return result;
 		}
-	} else {
-		serviceWorkerReloadRequested = false;
-		try { reloadStorage?.removeItem(SERVICE_WORKER_RELOAD_GUARD_KEY); } catch { /* best effort */ }
+		return result;
 	}
+
+	// A proven, uncontrolled historical root registration can still claim this
+	// mount on a later navigation. Retire only that overlapping state; sibling
+	// mounts and their cache generations remain entirely untouched.
+	await retireProvenRootState();
+	serviceWorkerReloadRequested = false;
+	try { reloadStorage?.removeItem(SERVICE_WORKER_RELOAD_GUARD_KEY); } catch { /* best effort */ }
 
 	if (serviceWorker) {
 		try {
 			await serviceWorker.register(appUrl("/sw.js"), { scope: `${basePath}/` });
 			result.registered = true;
-		} catch { /* installability is best effort */ }
+		} catch { /* authenticated startup retries once after cookie bootstrap */ }
 	}
 	return result;
 }
@@ -573,6 +669,7 @@ export function previewRouteFromStoredValue(value: unknown): GatewayRoute | null
 /** Test-only reset for isolated browser-boundary cases. */
 export function __resetGatewayConnectionForTests(): void {
 	activeConnection = null;
+	activeAuthenticationMode = "none";
 	recoveryWarning = null;
 	serviceWorkerReloadRequested = false;
 }

@@ -350,12 +350,10 @@ test.describe("Journey: production gateway mounted below a nested base path", ()
 			const sentinelApiRequests = requests.slice(sentinelRequestStart).filter(record => new URL(record.url).pathname.startsWith(`${BASE_PATH}/api/`));
 			expect(sentinelApiRequests.some(record => record.authorization === "Bearer localhost"), "localhost sentinel must never be sent as Bearer").toBe(false);
 			expect(sentinelApiRequests.every(record => !new URL(record.url).pathname.includes(`${BASE_PATH}${BASE_PATH}`))).toBe(true);
-			// This fixture enforces Bobbit token auth, so its WebSockets correctly reject
-			// the localhost first-frame sentinel. Restore the real token after proving the
-			// cookie-authenticated HTTP request omitted the meaningless Bearer header.
-			await page.evaluate((realToken) => localStorage.setItem("gateway.token", realToken), token);
-			await page.reload({ waitUntil: "domcontentloaded" });
+			// The mounted signed cookie remains authoritative for this browser after a
+			// normal reload; the real bearer must not be restored to Web Storage.
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
+			expect(await page.evaluate(() => localStorage.getItem("gateway.token"))).toBe("localhost");
 
 			await page.evaluate(() => {
 				(window as any).__copiedBasePathLinks = [];
@@ -381,8 +379,18 @@ test.describe("Journey: production gateway mounted below a nested base path", ()
 
 			const scriptsBeforeQr = requests.filter(record => record.resourceType === "script").length;
 			await page.locator('button[title="Show QR code"]').first().click();
+			const reentry = page.locator('[data-testid="qr-auth-required"]');
+			await expect(reentry).toBeVisible({ timeout: 20_000 });
+			await expect(reentry).toContainText(/private cookie.*Re-enter the gateway token/is);
+			await expect(page.locator('img[alt="Session QR"]')).toHaveCount(0);
+			await page.getByRole("button", { name: "Re-enter gateway token" }).click();
+			await expect(page.getByRole("heading", { name: "Connect to Gateway" })).toBeVisible();
+			await expect(page.locator('[data-testid="gateway-token-reentry-help"]')).toBeVisible();
+			await page.locator('input[name="bobbit-gateway-auth-token"]').fill(token);
+			await page.getByRole("button", { name: "Connect", exact: true }).click();
 			await expect(page.locator('img[alt="Session QR"]')).toBeVisible({ timeout: 20_000 });
 			await expectQrImageEncodes(page, 'img[alt="Session QR"]', `${gateway.baseURL}/?token=${encodeURIComponent(token)}`);
+			expect(await page.evaluate(() => localStorage.getItem("gateway.token"))).toBe("localhost");
 			await page.getByRole("button", { name: /First time on this device.*iPhone/i }).click();
 			await expect(page.locator('img[alt="CA Certificate QR"]')).toBeVisible({ timeout: 10_000 });
 			await expectQrImageEncodes(page, 'img[alt="CA Certificate QR"]', `${gateway.baseURL}/api/ca-cert`);

@@ -16,6 +16,7 @@ type ErrorCode =
 interface GatewayBoundaryModule {
 	GW_URL_KEY: string;
 	GW_TOKEN_KEY: string;
+	GW_AUTH_MODE_KEY: string;
 	LOCALHOST_TOKEN: string;
 	InvalidGatewayBaseUrlError: new (...args: any[]) => Error & { code: ErrorCode };
 	normalizeGatewayBaseUrl(raw: string): string;
@@ -26,14 +27,17 @@ interface GatewayBoundaryModule {
 	gatewayWsUrl(route: GatewayRoute, explicitBase?: string): string;
 	gatewayAuthorizationHeaders(token?: string | null): Record<string, string>;
 	gatewayNativeTransportSupport(explicitBase?: string): { supported: boolean; message?: string };
+	gatewayMobileHandoff(): { supported: true; url: string } | { supported: false; message: string };
 	activeGatewayConnection(): Readonly<{ baseUrl: string; token: string }>;
-	commitGatewayConnection(baseUrl: string, token: string): { persisted: boolean; warning?: string };
+	commitGatewayConnection(baseUrl: string, token: string, options?: { localhostTrusted?: boolean }): { persisted: boolean; warning?: string };
+	recordGatewayLocalhostMode(localhostTrusted: boolean): void;
 	gatewayFetch(route: GatewayRoute, init?: RequestInit): Promise<Response>;
 	prepareRuntimeServiceWorkerMount(environment?: any): Promise<{
 		deletedCaches: number;
 		registered: boolean;
 		reloadRequested: boolean;
 		retiredRegistrations: number;
+		safeToProceed: boolean;
 	}>;
 	__resetGatewayConnectionForTests(): void;
 }
@@ -46,6 +50,18 @@ class MemoryStorage implements Storage {
 	key(index: number): string | null { return [...this.values.keys()][index] ?? null; }
 	removeItem(key: string): void { this.values.delete(key); }
 	setItem(key: string, value: string): void { this.values.set(key, String(value)); }
+}
+
+class FailOnceStorage extends MemoryStorage {
+	private failKey: string | null = null;
+	failNextWrite(key: string): void { this.failKey = key; }
+	override setItem(key: string, value: string): void {
+		if (this.failKey === key) {
+			this.failKey = null;
+			throw new Error("simulated storage write failure");
+		}
+		super.setItem(key, value);
+	}
 }
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
@@ -287,7 +303,80 @@ describe("gateway authorization and fetch", () => {
 		assert.deepEqual(boundary.gatewayNativeTransportSupport("https://HOST.example:3001/team/bobbit"), { supported: true });
 		boundary.commitGatewayConnection("https://host.example:3001/team/bobbit", "same-host-secret");
 		assert.equal(storage.getItem("gateway.token"), "localhost");
+		assert.equal(storage.getItem("gateway.auth-mode"), "cookie");
 		assert.equal(storage.getItem("gateway.url"), "https://host.example:3001/team/bobbit");
+	});
+
+	it("retains the bearer and disables native cookie transports on non-loopback HTTP", async () => {
+		const storage = installBrowser({ origin: "http://192.168.1.20", basePath: "/ui" });
+		const boundary = await loadBoundary();
+
+		assert.equal(boundary.gatewayNativeTransportSupport("http://192.168.1.20/team/bobbit").supported, false);
+		boundary.commitGatewayConnection("http://192.168.1.20/team/bobbit", "lan-secret");
+		assert.equal(storage.getItem("gateway.token"), "lan-secret");
+		assert.equal(storage.getItem("gateway.auth-mode"), "bearer");
+		assert.deepEqual(boundary.gatewayMobileHandoff(), {
+			supported: true,
+			url: "http://192.168.1.20/team/bobbit/?token=lan-secret",
+		});
+	});
+
+	it("keeps loopback HTTP eligible for cookie persistence", async () => {
+		const storage = installBrowser({ origin: "http://app.localhost:5173" });
+		const boundary = await loadBoundary();
+		assert.equal(boundary.gatewayNativeTransportSupport("http://app.localhost:3001/bobbit").supported, true);
+		boundary.commitGatewayConnection("http://app.localhost:3001/bobbit", "loopback-secret");
+		assert.equal(storage.getItem("gateway.token"), "localhost");
+		assert.equal(storage.getItem("gateway.auth-mode"), "cookie");
+	});
+
+	it("restores the previous persisted pair when a same-host commit fails", async () => {
+		const storage = new FailOnceStorage();
+		storage.setItem("gateway.url", "https://previous.example/gateway");
+		storage.setItem("gateway.token", "previous-secret");
+		storage.setItem("gateway.auth-mode", "bearer");
+		installBrowser({ origin: "https://host.example", basePath: "/bobbit", storage });
+		const boundary = await loadBoundary();
+		boundary.activeGatewayConnection();
+		storage.failNextWrite("gateway.url");
+
+		const result = boundary.commitGatewayConnection("https://host.example/bobbit", "candidate-secret");
+		assert.equal(result.persisted, false);
+		assert.deepEqual(boundary.activeGatewayConnection(), {
+			baseUrl: "https://host.example/bobbit",
+			token: "candidate-secret",
+		});
+		assert.equal(storage.getItem("gateway.url"), "https://previous.example/gateway");
+		assert.equal(storage.getItem("gateway.token"), "previous-secret");
+		assert.equal(storage.getItem("gateway.auth-mode"), "bearer");
+	});
+
+	it("requires token re-entry for cookie-only phone handoff after reload", async () => {
+		const storage = installBrowser({ origin: "https://host.example", basePath: "/bobbit" });
+		const boundary = await loadBoundary();
+		boundary.commitGatewayConnection("https://host.example/bobbit", "admin secret");
+		assert.deepEqual(boundary.gatewayMobileHandoff(), {
+			supported: true,
+			url: "https://host.example/bobbit/?token=admin%20secret",
+		});
+
+		boundary.__resetGatewayConnectionForTests();
+		const reloaded = boundary.gatewayMobileHandoff();
+		assert.equal(reloaded.supported, false);
+		if (!reloaded.supported) assert.match(reloaded.message, /Re-enter the gateway token/i);
+		assert.equal(storage.getItem("gateway.token"), "localhost");
+	});
+
+	it("allows untokenized handoff only for confirmed auth-disabled localhost", async () => {
+		installBrowser({ origin: "http://localhost:3001", basePath: "/bobbit" });
+		const boundary = await loadBoundary();
+		boundary.commitGatewayConnection("http://localhost:3001/bobbit", "localhost", { localhostTrusted: true });
+		assert.deepEqual(boundary.gatewayMobileHandoff(), {
+			supported: true,
+			url: "http://localhost:3001/bobbit/",
+		});
+		boundary.recordGatewayLocalhostMode(false);
+		assert.equal(boundary.gatewayMobileHandoff().supported, false, "auth-enforced cookie mode cannot hand off without a token");
 	});
 
 	it("retains a real token for an explicit different-host gateway", async () => {
@@ -310,17 +399,19 @@ function serviceWorkerRegistration(scriptURL: string, scope: string) {
 }
 
 describe("service worker mount preparation", () => {
-	it("retires proven stale Bobbit state and reloads once before registering", async () => {
+	it("retires only proven root Bobbit state and reloads once before registering", async () => {
 		installBrowser({ origin: "https://host.example", basePath: "/team/bobbit" });
 		const boundary = await loadBoundary();
 		const staleRoot = serviceWorkerRegistration("https://host.example/sw.js", "https://host.example/");
 		const current = serviceWorkerRegistration("https://host.example/team/bobbit/sw.js", "https://host.example/team/bobbit/");
-		const unrelated = serviceWorkerRegistration("https://host.example/other/sw.js", "https://host.example/other/");
+		const sibling = serviceWorkerRegistration("https://host.example/other/sw.js", "https://host.example/other/");
 		const register = vi.fn(async () => ({}));
 		const cacheNames = [
 			"bobbit:%2F:old-root",
-			"bobbit-old-legacy-root",
+			"bobbit-v1",
+			"bobbit-other-app",
 			"bobbit:%2Fteam%2Fbobbit:current",
+			"bobbit:%2Fother:sibling",
 			"other-app-cache",
 		];
 		const deleted: string[] = [];
@@ -331,7 +422,7 @@ describe("service worker mount preparation", () => {
 			origin: "https://host.example",
 			serviceWorker: {
 				controller: { scriptURL: "https://host.example/sw.js" },
-				getRegistrations: async () => [staleRoot, current, unrelated],
+				getRegistrations: async () => [staleRoot, current, sibling],
 				register,
 			},
 			cacheStorage: {
@@ -342,15 +433,21 @@ describe("service worker mount preparation", () => {
 			reload,
 		});
 
-		assert.deepEqual(result, { deletedCaches: 2, registered: false, reloadRequested: true, retiredRegistrations: 1 });
+		assert.deepEqual(result, {
+			deletedCaches: 2,
+			registered: false,
+			reloadRequested: true,
+			retiredRegistrations: 1,
+			safeToProceed: false,
+		});
 		assert.equal(staleRoot.unregister.mock.calls.length, 1);
 		assert.equal(current.unregister.mock.calls.length, 0);
-		assert.equal(unrelated.unregister.mock.calls.length, 0, "a generic sibling sw.js is not Bobbit without a Bobbit cache marker");
-		assert.deepEqual(deleted.sort(), ["bobbit-old-legacy-root", "bobbit:%2F:old-root"].sort());
+		assert.equal(sibling.unregister.mock.calls.length, 0, "a disjoint Bobbit mount must remain registered");
+		assert.deepEqual(deleted.sort(), ["bobbit-v1", "bobbit:%2F:old-root"].sort());
 		assert.equal(register.mock.calls.length, 0, "registration waits for the controller-releasing navigation");
 		assert.equal(reload.mock.calls.length, 1);
 
-		await boundary.prepareRuntimeServiceWorkerMount({
+		const second = await boundary.prepareRuntimeServiceWorkerMount({
 			origin: "https://host.example",
 			serviceWorker: {
 				controller: { scriptURL: "https://host.example/sw.js" },
@@ -361,14 +458,15 @@ describe("service worker mount preparation", () => {
 			sessionStorage: guard,
 			reload,
 		});
+		assert.equal(second.safeToProceed, false, "boot stays halted until the old controller is released");
 		assert.equal(reload.mock.calls.length, 1, "the session guard prevents a reload loop");
 	});
 
-	it("retires an uncontrolled wrong mount, preserves unrelated state, and registers the current mount", async () => {
+	it("retires an uncontrolled root migration, preserves sibling Bobbit state, and registers the current mount", async () => {
 		installBrowser({ origin: "https://host.example", basePath: "/team/bobbit" });
 		const boundary = await loadBoundary();
 		const staleRoot = serviceWorkerRegistration("https://host.example/sw.js", "https://host.example/");
-		const unrelated = serviceWorkerRegistration("https://host.example/other/sw.js", "https://host.example/other/");
+		const sibling = serviceWorkerRegistration("https://host.example/other/sw.js", "https://host.example/other/");
 		const register = vi.fn(async () => ({}));
 		const deleted: string[] = [];
 
@@ -376,19 +474,62 @@ describe("service worker mount preparation", () => {
 			origin: "https://host.example",
 			serviceWorker: {
 				controller: null,
-				getRegistrations: async () => [staleRoot, unrelated],
+				getRegistrations: async () => [staleRoot, sibling],
 				register,
 			},
 			cacheStorage: {
-				keys: async () => ["bobbit:%2F:old", "bobbit:%2Fteam%2Fbobbit:current", "unrelated"],
+				keys: async () => [
+					"bobbit:%2F:old",
+					"bobbit:%2Fteam%2Fbobbit:current",
+					"bobbit:%2Fother:sibling",
+					"bobbit-other-app",
+				],
 				delete: async (name: string) => { deleted.push(name); return true; },
 			},
 			sessionStorage: new MemoryStorage(),
 		});
 
-		assert.deepEqual(result, { deletedCaches: 1, registered: true, reloadRequested: false, retiredRegistrations: 1 });
+		assert.deepEqual(result, {
+			deletedCaches: 1,
+			registered: true,
+			reloadRequested: false,
+			retiredRegistrations: 1,
+			safeToProceed: true,
+		});
 		assert.deepEqual(deleted, ["bobbit:%2F:old"]);
-		assert.equal(unrelated.unregister.mock.calls.length, 0);
+		assert.equal(sibling.unregister.mock.calls.length, 0);
 		assert.deepEqual(register.mock.calls[0], ["/team/bobbit/sw.js", { scope: "/team/bobbit/" }]);
+	});
+
+	it.each(["empty", "rejected"] as const)("halts before auth when wrong-mount cache discovery is %s", async (mode) => {
+		installBrowser({ origin: "https://host.example", basePath: "/team/bobbit" });
+		const boundary = await loadBoundary();
+		const staleRoot = serviceWorkerRegistration("https://host.example/sw.js", "https://host.example/");
+		const register = vi.fn(async () => ({}));
+		const remove = vi.fn(async () => true);
+		const reload = vi.fn();
+		const keys = mode === "empty"
+			? async () => []
+			: async (): Promise<string[]> => { throw new Error("cache storage unavailable"); };
+
+		const result = await boundary.prepareRuntimeServiceWorkerMount({
+			origin: "https://host.example",
+			serviceWorker: {
+				controller: { scriptURL: "https://host.example/sw.js" },
+				getRegistrations: async () => [staleRoot],
+				register,
+			},
+			cacheStorage: { keys, delete: remove },
+			sessionStorage: new MemoryStorage(),
+			reload,
+		});
+
+		assert.equal(result.safeToProceed, false);
+		assert.equal(result.reloadRequested, false);
+		assert.equal(result.retiredRegistrations, 0);
+		assert.equal(staleRoot.unregister.mock.calls.length, 0);
+		assert.equal(remove.mock.calls.length, 0);
+		assert.equal(register.mock.calls.length, 0);
+		assert.equal(reload.mock.calls.length, 0);
 	});
 });

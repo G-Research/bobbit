@@ -601,19 +601,33 @@ function sourcePatternViolations(
 describe("client gateway sink regression guard", () => {
 	const files = [...sourceFiles(path.resolve("src/app")), ...sourceFiles(path.resolve("src/ui"))];
 
-	it("retires stale service-worker mount state before gateway connection hydration", () => {
+	it("guards stale workers before auth and retries registration after cookie bootstrap", () => {
 		const source = fs.readFileSync(path.resolve("src/app/main.ts"), "utf8");
 		const initStart = source.indexOf("async function initApp()");
 		const initEnd = source.indexOf("\ninitApp();", initStart);
 		assert.ok(initStart >= 0 && initEnd > initStart, "initApp source must be discoverable");
 		const init = source.slice(initStart, initEnd);
 		const cleanup = init.indexOf("await prepareRuntimeServiceWorkerMount()");
+		const safeDecision = init.indexOf("serviceWorkerPreparation.safeToProceed");
 		const hydrate = init.indexOf("activeGatewayConnection()");
 		const firstFetch = init.indexOf("await fetch(");
+		const authenticated = init.indexOf("await waitForGateway(");
+		const retry = init.indexOf("await prepareRuntimeServiceWorkerMount()", cleanup + 1);
 		assert.ok(cleanup >= 0, "initApp must await stale mount retirement");
-		assert.ok(cleanup < hydrate, "service-worker cleanup must precede credential hydration");
+		assert.ok(cleanup < safeDecision && safeDecision < hydrate, "wrong-controller safety must resolve before credential hydration");
 		assert.ok(cleanup < firstFetch, "service-worker cleanup must precede the first gateway request");
-		assert.equal((source.match(/serviceWorker\.register/g) ?? []).length, 0, "main must not race a separate late worker registration");
+		assert.ok(retry > authenticated, "protected startup must retry worker registration after authenticated cookie bootstrap");
+		assert.equal((source.match(/serviceWorker\.register/g) ?? []).length, 0, "main must keep registration inside the mount boundary");
+	});
+
+	it("never reads a stored remote bearer while constructing the shell manifest URL", () => {
+		const shell = fs.readFileSync(path.resolve("index.html"), "utf8");
+		const manifestStart = shell.indexOf("var params = new URLSearchParams(window.location.search)");
+		const manifestEnd = shell.indexOf("document.head.appendChild(link)", manifestStart);
+		assert.ok(manifestStart >= 0 && manifestEnd > manifestStart, "manifest bootstrap must be discoverable");
+		const bootstrap = shell.slice(manifestStart, manifestEnd);
+		assert.match(bootstrap, /params\.get\(['"]token['"]\)/);
+		assert.doesNotMatch(bootstrap, /localStorage|gateway\.token/, "remote or malformed stored credentials must not escape before validation");
 	});
 
 	it("centralizes direct browser bearer construction", () => {
