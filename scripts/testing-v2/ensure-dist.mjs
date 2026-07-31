@@ -5,9 +5,10 @@
  * minutes cold) while tests2/browser-global-setup.ts only built dist when it was
  * MISSING — silently testing a stale build. Both now funnel through
  * ensureDistBuild(): a sha256 key over the full build input set is compared
- * against dist/.build-manifest.json; on match the build is skipped, on any
- * mismatch or manifest/validation error the build runs (fail-closed) and the
- * manifest is rewritten atomically.
+ * against dist/.build-manifest.json; each reader validates only while holding
+ * the worktree mutex, so it cannot accept artifacts during a destructive build.
+ * On any mismatch or manifest/validation error the build runs (fail-closed) and
+ * the manifest is rewritten atomically.
  *
  * The input set mirrors package.json's `build` pipeline
  * (`build:packs` → `build:server` → `build:ui`):
@@ -360,9 +361,12 @@ export function validateDistBuild(repoRoot, key) {
 
 /**
  * Skip `npm run build` when dist already matches the current input key;
- * otherwise serialize the destructive build per worktree and publish a fresh
- * manifest atomically. Revalidation after acquiring the mutex is essential:
- * waiters must consume the first builder's manifest, never rebuild it.
+ * serialize both cache readers and destructive builds per worktree, then
+ * publish a fresh manifest atomically. Validating before acquiring the mutex is
+ * unsafe: another coordinator can replace artifacts while retaining the old
+ * manifest, allowing a reader to accept a partial build. Revalidation after
+ * acquiring the mutex makes every cache hit a read barrier and lets waiters
+ * consume the first builder's manifest rather than rebuild it.
  *
  * `runBuild`, lock timings, and test hooks are injectable solely for
  * deterministic fixtures; production uses the normal build command and
@@ -375,15 +379,16 @@ export function ensureDistBuild({
 	lockWaitMs,
 	lockPollMs,
 	beforeAcquireLock,
+	afterComputeKey,
 	afterAcquireIntent,
 	afterRecoveryClaim,
 } = {}) {
-	let key = computeDistBuildKey(repoRoot);
-	if (validateDistBuild(repoRoot, key)) {
-		console.log(`[ensure-dist] dist build cache hit: ${key}`);
-		return { key, cacheHit: true };
-	}
+	// Test-only seam for deterministically placing a consumer between computing
+	// its prospective key and reaching the mutex. Production does no speculative
+	// cache validation; the authoritative key is always computed under the lock.
+	if (afterComputeKey) afterComputeKey(computeDistBuildKey(repoRoot));
 
+	let key;
 	beforeAcquireLock?.();
 	const releaseLock = acquireDistBuildLock(repoRoot, {
 		...(lockStaleMs === undefined ? {} : { staleMs: lockStaleMs }),
@@ -399,6 +404,10 @@ export function ensureDistBuild({
 			console.log(`[ensure-dist] dist build cache hit after lock: ${key}`);
 			return { key, cacheHit: true };
 		}
+		// Retire the previous publication before the build mutates dist. If the
+		// build fails after creating only some artifacts, no later reader can pair
+		// those partial artifacts with the old manifest and report a false hit.
+		rmSync(manifestPathFor(repoRoot), { force: true });
 		console.log(`[ensure-dist] dist build cache miss (key ${key}); running npm run build...`);
 		runBuild();
 		// build:packs rewrites the committed market-packs bundles, which are part of

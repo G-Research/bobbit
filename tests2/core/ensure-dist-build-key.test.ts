@@ -58,13 +58,18 @@ function resetFakeRepo(root: string): void {
 }
 
 const DIST_WORKER_SOURCE = String.raw`
-import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ensureDistBuild } from ${JSON.stringify(new URL("../../scripts/testing-v2/ensure-dist.mjs", import.meta.url).href)};
 
 const [repoRoot, mode, reportPath, callerId] = process.argv.slice(2);
 const marker = (name) => join(repoRoot, name);
 const report = (value) => writeFileSync(reportPath, JSON.stringify(value));
+const signal = (event) => process.send?.({ event });
+const waitForParentRelease = () => {
+	signal("awaiting-parent-release");
+	if (readFileSync(0, "utf8") !== "release") throw new Error("parent did not release worker");
+};
 const waitForRelease = () => {
 	const deadline = Date.now() + 5_000;
 	while (!existsSync(marker("allow-build-finish"))) {
@@ -79,7 +84,16 @@ try {
 		lockStaleMs: 1,
 		lockWaitMs: 5_000,
 		lockPollMs: 5,
-		beforeAcquireLock: () => writeFileSync(marker("caller-" + callerId + ".missed"), "missed"),
+		afterComputeKey: () => {
+			if (mode === "late-reader") {
+				signal("late-reader-key-computed");
+				waitForParentRelease();
+			}
+		},
+		beforeAcquireLock: () => {
+			writeFileSync(marker("caller-" + callerId + ".missed"), "missed");
+			if (mode === "late-reader") signal("late-reader-before-acquire");
+		},
 		afterAcquireIntent: () => {
 			if (mode === "crash-intent") {
 				writeFileSync(marker("crash-intent-created"), "created");
@@ -100,12 +114,23 @@ try {
 				throw new Error("intentional build failure");
 			}
 			appendFileSync(marker("build-count"), mode + "\n");
+			mkdirSync(join(repoRoot, "dist", "server"), { recursive: true });
+			mkdirSync(join(repoRoot, "dist", "ui"), { recursive: true });
+			if (mode === "fail-partial") {
+				writeFileSync(join(repoRoot, "dist", "server", "cli.js"), "// partial\n");
+				writeFileSync(join(repoRoot, "dist", "ui", "index.html"), "<partial></partial>\n");
+				throw new Error("intentional partial build failure");
+			}
+			if (mode === "partial-slow") {
+				writeFileSync(join(repoRoot, "dist", "server", "cli.js"), "// partial\n");
+				writeFileSync(join(repoRoot, "dist", "ui", "index.html"), "<partial></partial>\n");
+				signal("partial-build-published");
+				waitForParentRelease();
+			}
 			if (mode === "slow") {
 				writeFileSync(marker("build-started"), "started");
 				waitForRelease();
 			}
-			mkdirSync(join(repoRoot, "dist", "server"), { recursive: true });
-			mkdirSync(join(repoRoot, "dist", "ui"), { recursive: true });
 			writeFileSync(join(repoRoot, "dist", "server", "cli.js"), "// cli\n");
 			writeFileSync(join(repoRoot, "dist", "ui", "index.html"), "<html></html>\n");
 		},
@@ -135,12 +160,19 @@ function waitForFile(file: string, timeoutMs = 5_000): Promise<void> {
 	});
 }
 
+type DistWorkerResult = { stdout: string; stderr: string; report: Record<string, unknown> };
+type InteractiveDistWorker = {
+	done: Promise<DistWorkerResult>;
+	waitForEvent: (event: string) => Promise<void>;
+	release: () => void;
+};
+
 function runDistWorker(
 	workerFile: string,
 	root: string,
 	mode: string,
 	callerId: string,
-): Promise<{ stdout: string; stderr: string; report: Record<string, unknown> }> {
+): Promise<DistWorkerResult> {
 	const reportPath = join(root, `report-${callerId}.json`);
 	return new Promise((resolve, reject) => {
 		let stdout = "";
@@ -159,6 +191,61 @@ function runDistWorker(
 			}
 		});
 	});
+}
+
+/**
+ * Event-driven worker control for timing-sensitive lock regressions. IPC
+ * publishes state transitions and stdin is a one-shot parent release barrier;
+ * no filesystem polling or wall-clock scheduling determines the interleaving.
+ */
+function startInteractiveDistWorker(
+	workerFile: string,
+	root: string,
+	mode: string,
+	callerId: string,
+): InteractiveDistWorker {
+	const reportPath = join(root, `report-${callerId}.json`);
+	let stdout = "";
+	let stderr = "";
+	const observedEvents = new Set<string>();
+	const eventWaiters = new Map<string, Array<() => void>>();
+	const child = nativeSpawn()(process.execPath, [workerFile, root, mode, reportPath, callerId], {
+		cwd: root,
+		stdio: ["pipe", "pipe", "pipe", "ipc"],
+	});
+	child.stdout?.on("data", chunk => { stdout += chunk.toString(); });
+	child.stderr?.on("data", chunk => { stderr += chunk.toString(); });
+	child.on("message", message => {
+		const event = typeof message === "object" && message !== null && "event" in message
+			? (message as { event?: unknown }).event
+			: undefined;
+		if (typeof event !== "string") return;
+		observedEvents.add(event);
+		for (const resolve of eventWaiters.get(event) ?? []) resolve();
+		eventWaiters.delete(event);
+	});
+	const done = new Promise<DistWorkerResult>((resolve, reject) => {
+		child.once("error", reject);
+		child.once("close", code => {
+			if (code !== 0) return reject(new Error(`dist worker ${callerId} exited ${code}: ${stderr}`));
+			try {
+				resolve({ stdout, stderr, report: JSON.parse(requireFile(reportPath)) as Record<string, unknown> });
+			} catch (error) {
+				reject(error);
+			}
+		});
+	});
+	return {
+		done,
+		waitForEvent: event => observedEvents.has(event)
+			? Promise.resolve()
+			: new Promise(resolve => {
+				const waiters = eventWaiters.get(event) ?? [];
+				waiters.push(resolve);
+				eventWaiters.set(event, waiters);
+			}),
+		release: () => child.stdin?.end("release"),
+	};
 }
 
 /** A real child exits after intent publication, intentionally bypassing cleanup. */
@@ -290,8 +377,11 @@ function resetLockFixture(root = repoRoot): void {
 		"allow-build-finish", "build-started", "build-count", "recovery-claimed", "crash-intent-created",
 		"caller-leader.started", "caller-leader.missed", "caller-waiter.started", "caller-waiter.missed",
 		"caller-reclaimer.started", "caller-reclaimer.missed", "caller-successor.started", "caller-successor.missed",
+		"caller-late-reader.started", "caller-late-reader.missed", "caller-partial-builder.started", "caller-partial-builder.missed",
+		"caller-partial-failure.started", "caller-partial-failure.missed", "caller-partial-repair.started", "caller-partial-repair.missed",
 		"report-leader.json", "report-waiter.json", "report-failed.json", "report-repaired.json", "report-stale.json",
 		"report-reclaimer.json", "report-successor.json", "report-crashed.json", "report-recovered-intent.json",
+		"report-late-reader.json", "report-partial-builder.json", "report-partial-failure.json", "report-partial-repair.json",
 	]) {
 		rmSync(join(root, name), { force: true });
 	}
@@ -355,6 +445,63 @@ describe.sequential("dist build worktree lock", () => {
 		assert.equal(recovered.report.ok, true, "a dead stale owner must be reclaimed without manual cleanup");
 		assert.deepEqual(buildCount(), ["normal"]);
 		assert.equal(existsSync(staleLock), false, "the replacement owner must release the recovered lock");
+	});
+
+	it("makes a cache-hit consumer wait for a partial owner before validating", async () => {
+		resetLockFixture();
+		const originalSource = BASE_FILES["src/server/cli.ts"];
+		const oldKey = computeDistBuildKey(repoRoot);
+		writeDistFixture(repoRoot, oldKey);
+
+		// Hold a reader just after it computes the old key. The parent then changes
+		// the source, starts a builder, and waits until that builder has recreated
+		// both critical artifacts with partial contents. IPC + stdin barriers make
+		// this exact interleaving independent of scheduler speed.
+		const reader = startInteractiveDistWorker(workerFile, repoRoot, "late-reader", "late-reader");
+		await reader.waitForEvent("late-reader-key-computed");
+		writeRepoFile(repoRoot, "src/server/cli.ts", "export const cli = 2;\n");
+		const builder = startInteractiveDistWorker(workerFile, repoRoot, "partial-slow", "partial-builder");
+		await builder.waitForEvent("partial-build-published");
+
+		reader.release();
+		// A cache-hit path must enter the mutex instead of validating the retained
+		// old manifest against the partial artifacts outside it.
+		await reader.waitForEvent("late-reader-before-acquire");
+		builder.release();
+
+		const [builderResult, readerResult] = await Promise.all([builder.done, reader.done]);
+		assert.equal(builderResult.report.ok, true);
+		assert.equal(readerResult.report.ok, true);
+		assert.deepEqual(buildCount(), ["partial-slow"], "the reader must consume the completed publication");
+		assert.equal((readerResult.report.result as { cacheHit: boolean }).cacheHit, true);
+		assert.match(readerResult.stdout, /cache hit after lock/);
+		assert.match(readFileSync(join(repoRoot, "dist", "server", "cli.js"), "utf8"), /^\/\/ cli$/m);
+		writeRepoFile(repoRoot, "src/server/cli.ts", originalSource);
+	});
+
+	it("invalidates the previous manifest before a failed partial build", async () => {
+		resetLockFixture();
+		const originalSource = BASE_FILES["src/server/cli.ts"];
+		const oldKey = computeDistBuildKey(repoRoot);
+		writeDistFixture(repoRoot, oldKey);
+		writeRepoFile(repoRoot, "src/server/cli.ts", "export const cli = 2;\n");
+
+		const failed = await runDistWorker(workerFile, repoRoot, "fail-partial", "partial-failure");
+		assert.equal(failed.report.ok, false);
+		assert.match(String(failed.report.message), /intentional partial build failure/);
+		assert.equal(
+			existsSync(join(repoRoot, "dist", ".build-manifest.json")),
+			false,
+			"a failed build must not leave its predecessor's manifest paired with partial artifacts",
+		);
+
+		// Restore the old source key: without pre-build invalidation, this consumer
+		// would accept the old manifest and the partial files as a false cache hit.
+		writeRepoFile(repoRoot, "src/server/cli.ts", originalSource);
+		const repaired = await runDistWorker(workerFile, repoRoot, "normal", "partial-repair");
+		assert.equal(repaired.report.ok, true);
+		assert.equal((repaired.report.result as { cacheHit: boolean }).cacheHit, false);
+		assert.deepEqual(buildCount(), ["fail-partial", "normal"]);
 	});
 
 	it("reclaims a dead stale acquisition intent from a real crashed child", async () => {
