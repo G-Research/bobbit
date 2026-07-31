@@ -220,15 +220,17 @@ test("ProjectRegistry uses read-only entry evidence before creating a case probe
 
 test("ProjectRegistry processes large read-only directories linearly", () => {
   const parent = "/large-read-only-case-evidence";
-  const entries = Array.from({ length: 1_000 }, (_, index) => `Entry${index}`);
-  const nativeToLowerCase = String.prototype.toLowerCase;
-  let lowerCaseCalls = 0;
-  const lowerCaseSpy = vi.spyOn(String.prototype, "toLowerCase").mockImplementation(function(this: string) {
-    lowerCaseCalls += 1;
-    return nativeToLowerCase.call(this);
+  const rawEntries = Array.from({ length: 1_000 }, (_, index) => `entry${index}`);
+  let entryReads = 0;
+  const entries = new Proxy(rawEntries, {
+    get(target, property, receiver) {
+      if (typeof property === "string" && /^\d+$/.test(property)) entryReads += 1;
+      return Reflect.get(target, property, receiver);
+    },
   });
   const identity = createProjectPathIdentity({
     isNativePathApi: dialect => dialect === "posix",
+    caseSemanticsFingerprint: ancestor => `v1:${ancestor}`,
     realpathSync: candidate => {
       const resolved = path.posix.resolve(candidate);
       if (resolved === parent) return resolved;
@@ -238,16 +240,11 @@ test("ProjectRegistry processes large read-only directories linearly", () => {
     createCaseProbe: probeParent => path.posix.join(probeParent, ".BobbitProbeA"),
   });
 
-  try {
-    assert.equal(identity(parent), parent);
-  } finally {
-    lowerCaseSpy.mockRestore();
-  }
-
-  // One fold plus two case-toggles per entry proves the entry-pair
-  // classification does not scan the directory per name. Toggling uppercase
-  // `E` calls `toLowerCase` twice, so the linear bound is five per entry.
-  assert.ok(lowerCaseCalls <= entries.length * 5 + 20, `expected linear normalization, got ${lowerCaseCalls} calls`);
+  assert.equal(identity(parent), parent);
+  // The proxied array counts actual numeric entry reads. A nested rescan (such
+  // as `entries.filter` for every name) exceeds this linear bound by orders of
+  // magnitude even when every entry has already been case-folded.
+  assert.ok(entryReads <= rawEntries.length * 3 + 20, `expected linear entry reads, got ${entryReads}`);
 });
 
 test("ProjectRegistry caches inconclusive directory semantics per path identity", () => {
@@ -258,6 +255,7 @@ test("ProjectRegistry caches inconclusive directory semantics per path identity"
     isNativePathApi: dialect => dialect === "posix",
     realpathSync: candidate => path.posix.resolve(candidate),
     readdirSync: () => [],
+    caseSemanticsFingerprint: ancestor => `unchanged:${ancestor}`,
     createCaseProbe: probeParent => {
       probes += 1;
       return path.posix.join(probeParent, `.BobbitProbe${probes}`);
@@ -275,6 +273,77 @@ test("ProjectRegistry caches inconclusive directory semantics per path identity"
   assert.equal(registry.findByCwd(`${root}/src`)?.id, "cached");
   assert.equal(probes, probesAfterWarmup, "repeated project lookups reuse per-directory semantics");
   assert.equal(removals, probes, "every owned probe is cleaned up exactly once");
+});
+
+test("ProjectRegistry invalidates cached case semantics when a directory fingerprint changes", () => {
+  const root = "/fingerprinted-case/Project";
+  let revision = 1;
+  const identity = createProjectPathIdentity({
+    isNativePathApi: dialect => dialect === "posix",
+    caseSemanticsFingerprint: ancestor => `inode-and-metadata-${revision}:${ancestor}`,
+    realpathSync: candidate => path.posix.resolve(candidate),
+    readdirSync: candidate => {
+      switch (path.posix.resolve(candidate).toLowerCase()) {
+        case "/": return ["fingerprinted-case"];
+        case "/fingerprinted-case": return revision === 1 ? ["Project"] : ["Project", "project"];
+        case "/fingerprinted-case/project": return ["src"];
+        default: return ["file"];
+      }
+    },
+    createCaseProbe: probeParent => path.posix.join(probeParent, ".BobbitProbeA"),
+    removeCaseProbe: () => {},
+  });
+
+  assert.equal(identity(root), "/fingerprinted-case/project", "first directory incarnation is insensitive");
+  revision = 2; // Models deletion/recreation or a per-directory NTFS case-mode change.
+  assert.equal(identity(root), root, "new directory metadata must not reuse the previous semantics");
+});
+
+test("ProjectRegistry retries an unprobeable directory after permission recovery", () => {
+  const parent = "/recoverable-case-probe";
+  let probes = 0;
+  const identity = createProjectPathIdentity({
+    isNativePathApi: dialect => dialect === "posix",
+    caseSemanticsFingerprint: ancestor => `stable:${ancestor}`,
+    realpathSync: candidate => path.posix.resolve(candidate),
+    readdirSync: candidate => path.posix.resolve(candidate) === parent ? [] : ["recoverable-case-probe"],
+    createCaseProbe: probeParent => {
+      probes += 1;
+      if (probes === 1) throw new Error("EACCES");
+      return path.posix.join(probeParent, ".BobbitProbeA");
+    },
+    removeCaseProbe: () => {},
+  });
+
+  assert.equal(identity(parent), parent);
+  assert.equal(identity(parent), parent);
+  assert.equal(probes, 2, "an unprobeable result is unknown and must not be cached");
+  assert.equal(identity(parent), parent);
+  assert.equal(probes, 2, "the recovered authoritative probe is reusable while unchanged");
+});
+
+test("ProjectRegistry invalidates cached probes after directory deletion and recreation", () => {
+  const parent = "/recreated-case-probe";
+  let incarnation = 1;
+  let probes = 0;
+  const identity = createProjectPathIdentity({
+    isNativePathApi: dialect => dialect === "posix",
+    caseSemanticsFingerprint: ancestor => `dev:1:ino:${incarnation}:${ancestor}`,
+    realpathSync: candidate => path.posix.resolve(candidate),
+    readdirSync: candidate => path.posix.resolve(candidate) === parent ? [] : ["recreated-case-probe"],
+    createCaseProbe: probeParent => {
+      probes += 1;
+      return path.posix.join(probeParent, ".BobbitProbeA");
+    },
+    removeCaseProbe: () => {},
+  });
+
+  identity(parent);
+  identity(parent);
+  assert.equal(probes, 1, "unchanged incarnation reuses its authoritative probe");
+  incarnation = 2;
+  identity(parent);
+  assert.equal(probes, 2, "replacement directory identity invalidates the cached probe");
 });
 
 test("ProjectRegistry rejects native POSIX double-slash aliases for Headquarters and existing projects", () => {
