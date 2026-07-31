@@ -1998,7 +1998,15 @@
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/project-onboarding-repositories.journey.spec.ts",
+      "path": "tests2/browser/journeys/project-onboarding-multi-repo-subset.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/project-onboarding-post-archive.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/project-onboarding-select-all.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
@@ -6153,9 +6161,9 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding-repositories.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-multi-repo-subset.journey.spec.ts"
       ],
-      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
+      "replacementNote": "Dedicated journey preserves the selected-subset autoPrompt assertions and cleanup."
     },
     {
       "file": "tests/e2e/ui/add-project-post-archive.spec.ts",
@@ -6163,9 +6171,9 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding-repositories.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-post-archive.journey.spec.ts"
       ],
-      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
+      "replacementNote": "Dedicated journey preserves the ghost .bobbit archive-CTA assertions and cleanup."
     },
     {
       "file": "tests/e2e/ui/add-project-preflight.spec.ts",
@@ -6183,9 +6191,9 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding-repositories.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-select-all.journey.spec.ts"
       ],
-      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
+      "replacementNote": "Dedicated journey preserves the selected-count assertions and cleanup."
     },
     {
       "file": "tests/e2e/ui/add-project-symlink.spec.ts",
