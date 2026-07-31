@@ -1,4 +1,9 @@
-import { gatewayFetch, gatewayUrl } from "../../../app/gateway-fetch.js";
+import {
+  activeGatewayConnection,
+  gatewayFetch,
+  gatewayUrl,
+  LOCALHOST_TOKEN,
+} from "../../../app/gateway-fetch.js";
 import { gatewayRoute } from "../../../shared/base-path.js";
 import type {
   ReviewDecision,
@@ -551,8 +556,18 @@ if (typeof window !== "undefined") {
       const payload = submitted
         ? { annotations, submitted: true }
         : { annotations };
+      const { token } = activeGatewayConnection();
+      const tokenQuery = token && token !== LOCALHOST_TOKEN
+        ? `?token=${encodeURIComponent(token)}`
+        : "";
+      // sendBeacon cannot set a bearer header. Resolve against the selected
+      // in-memory connection so explicit gateway mounts remain intact, and put
+      // only a real bearer in the query; `localhost` is a client sentinel.
+      const route = gatewayRoute(
+        `/api/sessions/${encodeURIComponent(sessionId)}/review/annotations/bulk${tokenQuery}`,
+      );
       navigator.sendBeacon(
-        gatewayUrl(gatewayRoute(`/api/sessions/${sessionId}/review/annotations/bulk`)),
+        gatewayUrl(route),
         new Blob([JSON.stringify(payload)], { type: "application/json" }),
       );
     }

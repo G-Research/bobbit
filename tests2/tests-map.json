@@ -48,6 +48,15 @@
       }
     },
     {
+      "path": "tests2/dom/annotation-store-beacon.test.ts",
+      "reason": "Focused unload-beacon coverage proving annotation bulk saves preserve the selected remote gateway mount, use only the active real token, omit the localhost sentinel, and never reread credentials from localStorage.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
       "path": "tests2/core/base-path-cli.test.ts",
       "reason": "Focused CLI coverage for flag-over-environment base-path selection, unsafe input rejection, mounted startup URLs, persisted peers, and truthful authentication banners.",
       "execution": {
