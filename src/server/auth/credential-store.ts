@@ -67,6 +67,25 @@ function isFileExistsError(error: unknown): boolean {
 	return isRecord(error) && error.code === "EEXIST";
 }
 
+interface LockIdentity {
+	dev: number;
+	ino: number;
+}
+
+function lockIdentity(lockPath: string): LockIdentity {
+	const { dev, ino } = statSync(lockPath);
+	return { dev, ino };
+}
+
+function isSameLockIdentity(expected: LockIdentity, lockPath: string): boolean {
+	try {
+		const actual = lockIdentity(lockPath);
+		return actual.dev === expected.dev && actual.ino === expected.ino;
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Acquire the same `<auth.json>.lock` directory namespace used by Pi's
  * proper-lockfile dependency without importing that private implementation.
@@ -86,23 +105,33 @@ async function acquireAuthFileLock(authPath: string): Promise<AuthFileLock> {
 		try {
 			mkdirSync(lockPath, { mode: DIRECTORY_MODE });
 			bestEffortChmod(lockPath, DIRECTORY_MODE);
+			const identity = lockIdentity(lockPath);
 			let compromised = false;
+			const assertOwnership = () => {
+				if (compromised || !isSameLockIdentity(identity, lockPath)) {
+					compromised = true;
+					throw new Error("Credential store lock was compromised");
+				}
+			};
 			const heartbeat = setInterval(() => {
 				try {
+					// A stale owner must never refresh the lease of a directory that a
+					// reclaimer has removed and recreated at the same pathname.
+					assertOwnership();
 					utimesSync(lockPath, new Date(), new Date());
+					assertOwnership();
 				} catch {
 					compromised = true;
 				}
 			}, Math.max(1_000, Math.floor(LOCK_STALE_MS / 2)));
 			heartbeat.unref();
 			return {
-				assertIntact: () => {
-					if (compromised || !existsSync(lockPath)) {
-						throw new Error("Credential store lock was compromised");
-					}
-				},
+				assertIntact: assertOwnership,
 				release: () => {
 					clearInterval(heartbeat);
+					// Do not remove a lock directory that was reclaimed by another
+					// process while this owner was stalled.
+					assertOwnership();
 					rmdirSync(lockPath);
 				},
 			};
