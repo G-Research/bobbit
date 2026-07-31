@@ -238,6 +238,18 @@ function classifyKnownEntry(
   }
 }
 
+function directoryIdentity(
+  directory: string,
+  lstatSync: (candidate: string) => Pick<fs.Stats, "dev" | "ino">,
+): string | undefined {
+  try {
+    const stat = lstatSync(directory);
+    return stat.ino === 0 ? undefined : `${stat.dev}:${stat.ino}`;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Classify an empty or otherwise inconclusive directory with one owned probe. */
 function probeCaseSemantics(
   parent: string,
@@ -270,9 +282,8 @@ function probeCaseSemantics(
 }
 
 /**
- * Determine a directory's case behavior in constant filesystem work. Cached
- * evidence is keyed by a post-observation fingerprint, so later recreation or
- * NTFS per-directory case-mode changes invalidate it before reuse.
+ * Determine a directory's case behavior in constant filesystem work. Only
+ * stable, non-mutating evidence is cached with its observed fingerprint.
  */
 function hasCaseInsensitiveEntries(
   parent: string,
@@ -297,18 +308,20 @@ function hasCaseInsensitiveEntries(
     if (cached && cached.fingerprint === before) return cached.semantics === "insensitive";
 
     const known = entry ? classifyKnownEntry(parent, entry, pathApi, realpathSync, lstatSync) : "unknown";
-    const semantics = known === "unknown"
-      ? probeCaseSemantics(parent, pathApi, realpathSync, lstatSync, createCaseProbe, removeCaseProbe)
-      : known;
-    const after = fingerprintFor(parent);
-    if (semantics === "unknown") return false;
-
-    // A probe necessarily changes directory metadata. Its cleanup completed
-    // before `after`, making that fingerprint authoritative for the result.
-    if (known === "unknown" && after) {
-      cache?.set(cacheKey, { fingerprint: after, semantics });
-      return semantics === "insensitive";
+    if (known === "unknown") {
+      // A probe mutates its parent, so the metadata fingerprint cannot show
+      // continuity. The current lookup can still use its result when the
+      // parent dev+ino identity is stable across the probe; never cache it.
+      const beforeProbeIdentity = directoryIdentity(parent, lstatSync);
+      const semantics = probeCaseSemantics(parent, pathApi, realpathSync, lstatSync, createCaseProbe, removeCaseProbe);
+      const afterProbeIdentity = directoryIdentity(parent, lstatSync);
+      return beforeProbeIdentity !== undefined
+        && beforeProbeIdentity === afterProbeIdentity
+        && semantics === "insensitive";
     }
+
+    const semantics = known;
+    const after = fingerprintFor(parent);
     if (before && before === after) {
       cache?.set(cacheKey, { fingerprint: before, semantics });
       return semantics === "insensitive";

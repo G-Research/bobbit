@@ -92,7 +92,7 @@ test("ProjectRegistry preserves case-distinct paths on a sensitive volume", () =
   assert.equal(registry.registerProvisional("case-distinct", alias).provisional, true);
 });
 
-test("ProjectRegistry uses one owned probe and caches its post-cleanup evidence", () => {
+test("ProjectRegistry uses one owned probe without caching its evidence", () => {
   const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "project-registry-native-case-"));
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "project-registry-native-case-state-"));
   fixtureDirs.push(fixtureRoot, stateDir);
@@ -143,7 +143,7 @@ test("ProjectRegistry treats case-paired entries as sensitive without a director
   assert.equal(probes, 0, "known case-paired entries are resolved by their two lstat identities");
 });
 
-test("ProjectRegistry uses bounded work for large directories and reuses probe evidence", () => {
+test("ProjectRegistry uses bounded work while keeping owned probe evidence uncached", () => {
   const parent = "/large-directory";
   let probes = 0;
   let realpaths = 0;
@@ -166,8 +166,40 @@ test("ProjectRegistry uses bounded work for large directories and reuses probe e
 
   assert.equal(identity(`${parent}/Child`), `${parent}/child`);
   assert.equal(identity(`${parent}/CHILD`), `${parent}/child`);
-  assert.equal(probes, 1, "the post-cleanup fingerprint caches a single probe result");
-  assert.ok(realpaths <= 6, `expected constant filesystem work, got ${realpaths} realpath calls`);
+  assert.equal(probes, 2, "each lookup must classify owned probe evidence afresh");
+  assert.ok(realpaths <= 12, `expected constant filesystem work, got ${realpaths} realpath calls`);
+});
+
+test("ProjectRegistry preserves spelling when a directory incarnation changes during an owned probe", () => {
+  const parent = "/probe-publication-race";
+  const cache = new Map();
+  let incarnation = 1;
+  const identity = createProjectPathIdentity({
+    isNativePathApi: dialect => dialect === "posix",
+    isCaseInsensitiveAt: directory => directory === "/" ? false : undefined,
+    realpathSync: candidate => {
+      const resolved = path.posix.resolve(candidate);
+      if (resolved === parent || path.posix.dirname(resolved) === parent && /^\.bobbitprobe/i.test(path.posix.basename(resolved))) return resolved;
+      throw missing(candidate);
+    },
+    lstatSync: candidate => path.posix.resolve(candidate) === parent
+      ? { dev: 1, ino: incarnation }
+      : { dev: 1, ino: 1 },
+    createCaseProbe: probeParent => {
+      incarnation = 2;
+      return path.posix.join(probeParent, ".BobbitProbe");
+    },
+    removeCaseProbe: () => {},
+    caseSemanticsCache: cache,
+    caseSemanticsFingerprint: parentPath => `incarnation-${incarnation}:${parentPath}`,
+  });
+
+  assert.equal(
+    identity(`${parent}/Child`),
+    `${parent}/Child`,
+    "probe evidence from a replaced directory must not fold the requested spelling",
+  );
+  assert.equal(cache.size, 0, "probe evidence must not be published under the replacement fingerprint");
 });
 
 test("ProjectRegistry invalidates cached probe evidence when the directory changes", () => {
