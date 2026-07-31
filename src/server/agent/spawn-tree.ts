@@ -91,6 +91,12 @@ export interface TrackedChild {
 	killed(): boolean;
 	timedOut(): boolean;
 	/**
+	 * Resolves only after the platform ownership barrier is established: the
+	 * POSIX sentinel acknowledges FD 3, or the Windows Job owns its payload.
+	 * Rejects when that barrier fails, after fail-closed cleanup is initiated.
+	 */
+	readonly ownershipReady: Promise<void>;
+	/**
 	 * Mark this tracked child as surviving gateway shutdown. When set,
 	 * `killAllTracked()` skips this entry so the child outlives the
 	 * gateway process — enabling Layer 1 restart-survival for detached
@@ -235,7 +241,7 @@ const WINDOWS_JOB_SUPERVISOR_COMMAND = Buffer.from(WINDOWS_JOB_SUPERVISOR, "utf1
 // Run this in a separately invoked shell, rather than a background subshell.
 // POSIX `/bin/sh` preserves the outer shell's `$$` in `( ... ) &`; a new shell
 // gives the identity record the actual sentinel PID needed after root exit.
-const POSIX_TREE_SENTINEL_CHILD_SCRIPT = "trap '' HUP INT TERM; if [ -n \"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE\" ]; then __bobbit_sentinel_start=$(LC_ALL=C LANG=C ps -o lstart= -p \"$$\" 2>/dev/null | sed 's/^ *//'); [ -n \"$__bobbit_sentinel_start\" ] || exit 125; __bobbit_sentinel_tmp=\"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE.$$.tmp\"; printf '{\"pid\":%s,\"pgid\":%s,\"nonce\":\"%s\",\"startToken\":\"%s\"}\\n' \"$$\" \"$BOBBIT_POSIX_SENTINEL_PGID\" \"$BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE\" \"$__bobbit_sentinel_start\" > \"$__bobbit_sentinel_tmp\" && mv \"$__bobbit_sentinel_tmp\" \"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE\" || { rm -f \"$__bobbit_sentinel_tmp\"; exit 125; }; fi; printf . >&3; while :; do sleep 2147483647 & wait $!; done";
+const POSIX_TREE_SENTINEL_CHILD_SCRIPT = "trap '' HUP INT TERM; if [ -n \"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE\" ]; then __bobbit_sentinel_start=$(LC_ALL=C LANG=C ps -o lstart= -p \"$$\" 2>/dev/null | sed 's/^ *//'); [ -n \"$__bobbit_sentinel_start\" ] || exit 125; __bobbit_sentinel_tmp=\"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE.$$.tmp\"; printf '{\"pid\":%s,\"pgid\":%s,\"nonce\":\"%s\",\"startToken\":\"%s\"}\\n' \"$$\" \"$BOBBIT_POSIX_SENTINEL_PGID\" \"$BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE\" \"$__bobbit_sentinel_start\" > \"$__bobbit_sentinel_tmp\" && mv \"$__bobbit_sentinel_tmp\" \"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE\" || { rm -f \"$__bobbit_sentinel_tmp\"; exit 125; }; fi; printf . >&3; exec 3>&-; while :; do sleep 2147483647 & wait $!; done";
 // Capture the group leader before starting the sentinel. Its `$PPID` is not a
 // stable identity: a fast root exit can reparent the background shell first.
 const POSIX_TREE_SENTINEL_SCRIPT = "__bobbit_sentinel_pgid=$$; export BOBBIT_POSIX_SENTINEL_PGID=\"$__bobbit_sentinel_pgid\"; /bin/sh -c \"$BOBBIT_POSIX_TREE_SENTINEL_CHILD_SCRIPT\" & unset BOBBIT_POSIX_SENTINEL_PGID BOBBIT_POSIX_SENTINEL_IDENTITY_FILE BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE BOBBIT_POSIX_TREE_SENTINEL_CHILD_SCRIPT; exec 3>&-; exec \"$@\"";
@@ -298,8 +304,17 @@ export function spawnTracked(
 
 	let resolveWindowsSupervisorClosed!: () => void;
 	const windowsSupervisorClosed = new Promise<void>(resolve => { resolveWindowsSupervisorClosed = resolve; });
+	let resolveOwnershipReady!: () => void;
+	let rejectOwnershipReady!: (error: Error) => void;
+	const ownershipReady = (posixTreeSentinel
+		? new Promise<void>((resolve, reject) => { resolveOwnershipReady = resolve; rejectOwnershipReady = reject; })
+		: Promise.resolve());
+	// Production callers are not required to await this diagnostic/lifecycle
+	// barrier. Observe rejection internally while retaining it for consumers.
+	void ownershipReady.catch(() => {});
 	const tracked: InternalTracked = {
 		child,
+		ownershipReady,
 		_pid: child.pid,
 		_killed: false,
 		_timedOut: false,
@@ -494,9 +509,11 @@ export function spawnTracked(
 		// This should be unreachable because we add FD 3 above. Do not silently
 		// assume ownership if a future caller changes the stdio construction.
 		tracked._treeCompletionUnverified = true;
+		rejectOwnershipReady(new Error("POSIX sentinel readiness pipe is missing"));
 	}
 	readyPipe?.once("data", () => {
 		tracked._posixSentinelReady = true;
+		resolveOwnershipReady();
 		if (tracked._pendingPosixFinalization) {
 			tracked._pendingPosixFinalization = false;
 			finishPosixAtRootExit();
@@ -510,8 +527,9 @@ export function spawnTracked(
 		// gateway event loop for the lifetime of the surviving payload.
 		if (tracked._survivesShutdown) unrefReadyPipe(readyPipe);
 	});
-	const failPosixSentinelHandshake = () => {
+	const failPosixSentinelHandshake = (error: unknown = new Error("POSIX sentinel closed before readiness")) => {
 		if (tracked._posixSentinelReady || isWin) return;
+		rejectOwnershipReady(error instanceof Error ? error : new Error("POSIX sentinel readiness failed"));
 		const pid = tracked._pid;
 		tracked._pendingPosixKill = undefined;
 		tracked._pendingPosixFinalization = false;
@@ -529,8 +547,17 @@ export function spawnTracked(
 		tracked._survivesShutdown = false;
 		registry.delete(tracked);
 	};
+	if (posixTreeSentinel && !readyPipe) failPosixSentinelHandshake();
 	readyPipe?.once("error", failPosixSentinelHandshake);
 	readyPipe?.once("close", failPosixSentinelHandshake);
+	// The shell/sentinel can fail before the listeners above are installed.
+	// Node then records the stream terminal state without replaying `close` to a
+	// late subscriber. Settle the exact production promise rather than leaving
+	// a live caller awaiting a handshake that can no longer arrive.
+	const sentinelReadyPipe = readyPipe as import("node:stream").Readable | undefined;
+	if (sentinelReadyPipe && (sentinelReadyPipe.destroyed || sentinelReadyPipe.readableEnded)) {
+		failPosixSentinelHandshake();
+	}
 	const onExit = () => {
 		tracked._exited = true;
 		if (!isWin) {

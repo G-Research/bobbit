@@ -22,17 +22,6 @@ function waitForClose(child: import("node:child_process").ChildProcess): Promise
 	});
 }
 
-/** FD 3 is the POSIX sentinel's durable ownership acknowledgement. */
-function waitForPosixSentinelReady(child: import("node:child_process").ChildProcess): Promise<void> {
-	const ready = child.stdio[3];
-	if (!ready) return Promise.reject(new Error("POSIX sentinel readiness pipe is missing"));
-	return new Promise((resolve, reject) => {
-		ready.once("data", () => resolve());
-		ready.once("close", () => reject(new Error("POSIX sentinel closed before readiness")));
-		ready.once("error", reject);
-	});
-}
-
 /** Track pids spawned in the suite for after() cleanup. */
 const spawnedPids: number[] = [];
 
@@ -55,7 +44,7 @@ function longRunningTracked(): SpawnLifecycle {
 	// Both events can happen before a caller gets to its first await. Register
 	// the lifecycle settlement pairs immediately after every real spawn.
 	const closed = waitForClose(t.child);
-	const ready = process.platform === "win32" ? Promise.resolve() : waitForPosixSentinelReady(t.child);
+	const ready = t.ownershipReady;
 	// Expected pre-ownership reaping closes FD3 without a data acknowledgement.
 	// Observe the rejection now so it never becomes an unhandled promise.
 	void ready.catch(() => {});
@@ -83,7 +72,7 @@ describe("verification-harness shutdown — survival contract", () => {
 		lifecycle.t.markSurvival();
 		killAllTracked("SIGKILL");
 		await lifecycle.closed;
-		await assert.rejects(lifecycle.ready, /closed before readiness/);
+		await assert.rejects(lifecycle.ready);
 		assert.equal(isAlive(lifecycle.t.child.pid), false, "handshake-pending survival child must be reaped");
 	});
 
@@ -103,7 +92,7 @@ describe("verification-harness shutdown — survival contract", () => {
 		const lifecycle = longRunningTracked();
 		killAllTracked("SIGKILL");
 		await lifecycle.closed;
-		if (process.platform !== "win32") await assert.rejects(lifecycle.ready, /closed before readiness/);
+		if (process.platform !== "win32") await assert.rejects(lifecycle.ready);
 		assert.equal(isAlive(lifecycle.t.child.pid), false, "non-survival child should be reaped by shutdown");
 	});
 });
