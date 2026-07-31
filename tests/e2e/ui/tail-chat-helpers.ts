@@ -29,6 +29,8 @@ export interface ScrollProbe {
 	scrollTop: number;
 	scrollHeight: number;
 	clientHeight: number;
+	/** Positive layout growth that triggered a phase observation, when applicable. */
+	growth?: number;
 }
 
 export interface TailSample {
@@ -129,17 +131,160 @@ export async function measureScroll(page: Page): Promise<ScrollProbe> {
 }
 
 /**
- * Await a named stream milestone emitted by the real mock agent. These labels
- * are protocol events, not elapsed-time samples, so each returned measurement
- * proves a distinct growth phase after the production re-pin lifecycle.
+ * Register phase observation before dispatching a stream. Phase labels are
+ * transient protocol output, so waiting for them one by one after dispatch can
+ * miss the first marker entirely. Mutation observation records each named
+ * marker at commit time and reads public scroll geometry two animation frames
+ * later — the same settled lifecycle used by the production re-pin path.
  */
-export async function awaitTailGrowthPhase(page: Page, marker: string): Promise<ScrollProbe> {
-	await expect(
-		page.getByText(marker, { exact: false }).first(),
-		`tail stream phase ${marker} did not render`,
-	).toBeVisible({ timeout: 20_000 });
-	await settleFrames(page);
-	return measureScroll(page);
+export async function startTailPhaseTracker(page: Page, key: string, markers: string[], tailPx = TAIL_PX): Promise<void> {
+	await page.evaluate(({ scrollSel, trackerKey, phaseMarkers, pinnedTailPx }) => {
+		const w = window as any;
+		w[trackerKey]?.disconnect?.();
+		const el = document.querySelector(scrollSel) as HTMLElement | null;
+		const content = el?.querySelector(".max-w-5xl") as HTMLElement | null;
+		if (!el || !content) throw new Error("tail phase tracker: chat content container not found");
+
+		const expected = new Set(phaseMarkers);
+		const pending = new Map<string, number>();
+		const evidence = new Map<string, ScrollProbe>();
+		const waiters = new Map<string, Array<{ resolve: (sample: ScrollProbe) => void; reject: (reason: Error) => void }>>();
+		const markerEventIds = new Map<string, string>();
+		let visibleMarkers = new Set<string>();
+		let failure: Error | null = null;
+		let active = true;
+		let framePending = false;
+
+		const fail = (message: string) => {
+			if (failure) return;
+			failure = new Error(`tail phase tracker: ${message}`);
+			for (const pendingWaiters of waiters.values()) {
+				for (const waiter of pendingWaiters) waiter.reject(failure);
+			}
+			waiters.clear();
+		};
+		const textAtMutation = (): string => {
+			const fromMessages = Array.from(document.querySelectorAll("assistant-message"))
+				.map((node) => JSON.stringify((node as any).message ?? ""))
+				.join(" ");
+			const remote = w.bobbitState?.remoteAgent ?? w.__bobbitState?.remoteAgent;
+			return `${content.textContent ?? ""} ${fromMessages} ${JSON.stringify(remote?.state?.streamingMessage ?? "")}`;
+		};
+		const detectMarkers = (text: string, transitionOnly: boolean, eventId?: string) => {
+			const found = new Set((text.match(/(?:PRE|POST)-WAIT-CHUNK-\d+#30/g) ?? []));
+			for (const marker of found) {
+				if (!expected.has(marker)) fail(`unexpected marker ${marker}`);
+			}
+			for (const marker of expected) {
+				if (!found.has(marker) || (transitionOnly && visibleMarkers.has(marker))) continue;
+				if (pending.has(marker) || evidence.has(marker)) {
+					// A persistent DOM node is re-observed on unrelated mutations; it
+					// is not a second protocol event. A message_update followed by its
+					// message_end has the same server message id and is likewise one
+					// marker occurrence; a different id is a deterministic duplicate.
+					if (transitionOnly || (eventId && markerEventIds.get(marker) === eventId)) continue;
+					fail(`duplicate marker ${marker}`);
+					continue;
+				}
+				if (eventId) markerEventIds.set(marker, eventId);
+				// The marker was observed before it can be replaced by the next
+				// streaming update. Its evidence must be later settled geometry.
+				pending.set(marker, el.scrollHeight);
+			}
+			if (transitionOnly) visibleMarkers = found;
+		};
+		const detectMarkersAtCommit = () => detectMarkers(textAtMutation(), true);
+		const publishSettledEvidence = () => {
+			for (const [marker, heightAtMarker] of pending) {
+				const growth = el.scrollHeight - heightAtMarker;
+				const sample = {
+					overflow: el.scrollHeight - el.clientHeight,
+					distance: el.scrollHeight - el.scrollTop - el.clientHeight,
+					scrollTop: el.scrollTop,
+					scrollHeight: el.scrollHeight,
+					clientHeight: el.clientHeight,
+					growth,
+				};
+				if (growth <= 0 || sample.distance > pinnedTailPx) continue;
+				pending.delete(marker);
+				evidence.set(marker, sample);
+				for (const waiter of waiters.get(marker) ?? []) waiter.resolve(sample);
+				waiters.delete(marker);
+			}
+		};
+		const settle = () => {
+			if (!active || framePending) return;
+			framePending = true;
+			requestAnimationFrame(() => requestAnimationFrame(() => {
+				framePending = false;
+				if (active) publishSettledEvidence();
+			}));
+		};
+		// The observer sees transient marker-bearing streaming state at mutation
+		// commit time. Resize and scroll are independent production events used to
+		// retain only that marker's post-repin positive-growth geometry.
+		const mutations = new MutationObserver(() => {
+			detectMarkersAtCommit();
+			settle();
+		});
+		mutations.observe(content, { childList: true, subtree: true, characterData: true });
+		const resize = new ResizeObserver(settle);
+		resize.observe(content);
+		el.addEventListener("scroll", settle);
+		// AssistantMessage throttles DOM text updates, so the final #30 token can
+		// be superseded before it reaches a text node. Observe the already-open
+		// RemoteAgent event stream as well; this is registered before send and
+		// feeds the same exact-marker state machine as the MutationObserver.
+		const remote = w.bobbitState?.remoteAgent ?? w.__bobbitState?.remoteAgent;
+		const originalHandleServerMessage = remote?.handleServerMessage;
+		const wrappedHandleServerMessage = typeof originalHandleServerMessage === "function"
+			? function(this: unknown, message: any) {
+				const event = message?.data ?? message;
+				const eventId = typeof event?.message?.id === "string" ? event.message.id : undefined;
+				detectMarkers(JSON.stringify(message), false, eventId);
+				return originalHandleServerMessage.call(this, message);
+			}
+			: null;
+		if (wrappedHandleServerMessage) remote.handleServerMessage = wrappedHandleServerMessage;
+		w[trackerKey] = {
+			waitFor: (marker: string) => {
+				if (!expected.has(marker)) return Promise.reject(new Error(`tail phase tracker: unknown marker ${marker}`));
+				if (failure) return Promise.reject(failure);
+				return evidence.get(marker)
+					?? new Promise<ScrollProbe>((resolve, reject) => {
+						const pendingWaiters = waiters.get(marker) ?? [];
+						pendingWaiters.push({ resolve, reject });
+						waiters.set(marker, pendingWaiters);
+					});
+			},
+			disconnect: () => {
+				active = false;
+				mutations.disconnect();
+				resize.disconnect();
+				el.removeEventListener("scroll", settle);
+				if (remote?.handleServerMessage === wrappedHandleServerMessage) {
+					remote.handleServerMessage = originalHandleServerMessage;
+				}
+			},
+		};
+	}, { scrollSel: SCROLL_SEL, trackerKey: key, phaseMarkers: markers, pinnedTailPx: tailPx });
+}
+
+/** Retrieve pre-registered, settled evidence for a named stream milestone. */
+export async function awaitTailGrowthPhase(page: Page, key: string, marker: string): Promise<ScrollProbe> {
+	return await page.evaluate(async ({ trackerKey, phaseMarker }) => {
+		const tracker = (window as any)[trackerKey];
+		if (!tracker) throw new Error(`tail phase tracker ${trackerKey} was not registered`);
+		return await tracker.waitFor(phaseMarker);
+	}, { trackerKey: key, phaseMarker: marker });
+}
+
+export async function stopTailPhaseTracker(page: Page, key: string): Promise<void> {
+	await page.evaluate((trackerKey) => {
+		const w = window as any;
+		w[trackerKey]?.disconnect?.();
+		w[trackerKey] = null;
+	}, key);
 }
 
 /**

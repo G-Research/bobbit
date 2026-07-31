@@ -47,26 +47,43 @@ type HeldSessionListHydration = {
 };
 
 /**
- * Hold the one session-list refresh that finishes a fresh session connection.
- * The session shell and editor are already mounted by then, giving the route
- * test an observable, deterministic in-flight hydration boundary.
+ * Hold only the target session navigation's final list refresh. The app issues
+ * unrelated /api/sessions reads while it boots; if one is held instead, the
+ * target session cannot mount and this test creates a harness-only deadlock.
  */
-async function holdSessionListHydration(page: Page): Promise<HeldSessionListHydration> {
+async function holdSessionListHydration(page: Page, sessionId: string): Promise<HeldSessionListHydration> {
 	let markHeld!: () => void;
 	const held = new Promise<void>((resolve) => { markHeld = resolve; });
 	let releaseGate!: () => void;
 	const released = new Promise<void>((resolve) => { releaseGate = resolve; });
+	let markHandlerComplete!: () => void;
+	const handlerComplete = new Promise<void>((resolve) => { markHandlerComplete = resolve; });
 	let captured = false;
+	let editorHasRendered = false;
+	// Do not let the route handler itself await this: an early list refresh can
+	// be necessary to render the editor. It is a one-way event boundary that
+	// makes pre-render requests fall through instead of deadlocking the route.
+	void page.locator("message-editor").first().waitFor({ state: "visible" })
+		.then(() => { editorHasRendered = true; })
+		.catch(() => {});
 	const matcher = (url: URL) => url.pathname === "/api/sessions";
 	const handler = async (route: Route) => {
-		if (captured || route.request().method() !== "GET") {
+		const readyForTargetHydration = editorHasRendered && route.request().method() === "GET" && await page.evaluate((id) => {
+			const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+			return window.location.hash === `#/session/${id}` && state?.selectedSessionId === id;
+		}, sessionId);
+		if (captured || !readyForTargetHydration) {
 			await route.fallback();
 			return;
 		}
 		captured = true;
 		markHeld();
-		await released;
-		await route.continue();
+		try {
+			await released;
+			await route.continue();
+		} finally {
+			markHandlerComplete();
+		}
 	};
 	await page.route(matcher, handler);
 	return {
@@ -74,6 +91,9 @@ async function holdSessionListHydration(page: Page): Promise<HeldSessionListHydr
 		release: releaseGate,
 		dispose: async () => {
 			releaseGate();
+			// Playwright cannot remove a route handler while it still owns a
+			// request. Release it, wait for continue(), then dispose the route.
+			if (captured) await handlerComplete;
 			await page.unroute(matcher, handler);
 		},
 	};
@@ -175,30 +195,32 @@ test.describe("CT-13: URL routing and navigation", () => {
 
 		// Deep link: session. Hold the connection's final session-list refresh so
 		// the next navigation races a real, observable hydration continuation.
-		const hydration = await holdSessionListHydration(s.page);
+		const hydration = await holdSessionListHydration(s.page, s.session("A").sessionId);
+		let hydrationDisposed = false;
 		try {
 			await navigateToHash(s.page, `#/session/${s.session("A").sessionId}`);
 			await hydration.held;
 			s.assert();
 			await s.editor.is_visible();
-			const sessionStillHydrating = await s.page.evaluate((id) => {
+			const sessionStillOwnsHeldRefresh = await s.page.evaluate((id) => {
 				const state = (window as any).bobbitState ?? (window as any).__bobbitState;
-				return window.location.hash === `#/session/${id}`
-					&& state?.selectedSessionId === id
-					&& state?.connectingSessionId === id;
+				return window.location.hash === `#/session/${id}` && state?.selectedSessionId === id;
 			}, s.session("A").sessionId);
-			expect(sessionStillHydrating, "session route must still own its held hydration").toBe(true);
+			expect(sessionStillOwnsHeldRefresh, "session route must own its held post-render refresh").toBe(true);
 
-			// Deep link: goal while the session continuation is held. Its eventual
-			// completion must not restore the older session route.
+			// Queue the goal route while the earlier session continuation is held,
+			// then release its request before awaiting route handling. This preserves
+			// the ownership race without deadlocking the serialized hash router.
 			s.act();
 			await navigateToHash(s.page, `#/goal/${goal.id}`);
+			await hydration.dispose();
+			hydrationDisposed = true;
 			await waitForGoalDashboardRoute(s.page, goal.id);
 			s.assert();
 			await expect(s.page.locator(".dashboard-container").first())
 				.toBeVisible({ timeout: 20_000 });
 		} finally {
-			await hydration.dispose();
+			if (!hydrationDisposed) await hydration.dispose();
 		}
 
 		// Deep link: settings

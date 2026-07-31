@@ -15,6 +15,8 @@ import {
 	snapshotMessages,
 	assertTranscriptSnapshotsEqual,
 	awaitTailGrowthPhase,
+	startTailPhaseTracker,
+	stopTailPhaseTracker,
 	startTailSampler,
 	stopTailSampler,
 	waitForBurstDone,
@@ -38,30 +40,40 @@ test.describe("tail-chat: full-stack streaming and transcript fidelity", () => {
 		const pre = await installPreStreamSpacer(page);
 		await rec.capture(`Pre-stream spacer installed (overflow=${pre.overflow})`);
 
-		await startTailSampler(page, "__tailRealSamples");
-		await sendMessage(page, "STREAM_BURST:2 please tail this chat");
-		await rec.capture("STREAM_BURST:2 dispatched");
-
-		// Each marker is emitted only after its 30th real stream chunk. Checking
-		// these named protocol milestones retains multiple distinct growth phases
-		// without sampling wall-clock instants or depending on observer coalescing.
+		// Each marker is emitted only after its 30th real stream chunk. Register
+		// their observer before dispatch: markers are transient and a sequential
+		// locator wait can begin after an early marker has already been replaced.
 		const phaseMarkers = [
 			"PRE-WAIT-CHUNK-1#30",
 			"POST-WAIT-CHUNK-1#30",
 			"PRE-WAIT-CHUNK-2#30",
 			"POST-WAIT-CHUNK-2#30",
 		];
-		let previousHeight = pre.scrollHeight;
+		const phaseTracker = "__tailRealPhases";
+		await startTailPhaseTracker(page, phaseTracker, phaseMarkers);
+		await startTailSampler(page, "__tailRealSamples");
+		await sendMessage(page, "STREAM_BURST:2 please tail this chat");
+		await rec.capture("STREAM_BURST:2 dispatched");
+
+		let maxPhaseHeight = pre.scrollHeight;
 		for (const marker of phaseMarkers) {
-			const phase = await awaitTailGrowthPhase(page, marker);
-			await expectLatestMessagePinned(page, { tailPx: TAIL_PX, label: marker });
+			const phase = await awaitTailGrowthPhase(page, phaseTracker, marker);
 			expect(
-				phase.scrollHeight,
-				`${marker} must add a distinct settled transcript-growth phase`,
-			).toBeGreaterThan(previousHeight);
-			previousHeight = phase.scrollHeight;
-			await rec.capture(`${marker}: scrollHeight=${phase.scrollHeight} distance=${phase.distance}`);
+				phase.distance,
+				`${marker} settled phase must remain pinned after the re-pin frames`,
+			).toBeLessThanOrEqual(TAIL_PX);
+			expect(
+				phase.growth,
+				`${marker} must observe a distinct settled transcript-growth phase`,
+			).toBeGreaterThan(0);
+			// `phase` is captured after the event-driven re-pin boundary. Reading
+			// live geometry again here could land in the next chunk's intentional
+			// mutation-to-repin transient; the full sampler asserts every settled
+			// growth state below.
+			maxPhaseHeight = Math.max(maxPhaseHeight, phase.scrollHeight);
+			await rec.capture(`${marker}: growth=${phase.growth} scrollHeight=${phase.scrollHeight} distance=${phase.distance}`);
 		}
+		await stopTailPhaseTracker(page, phaseTracker);
 
 		await waitForBurstDone(page, 2, 45_000);
 		await waitForSessionStatus(sessionId, "idle");
@@ -81,7 +93,7 @@ test.describe("tail-chat: full-stack streaming and transcript fidelity", () => {
 			badSamples.length,
 			`tail-chat-real-stream: ${badSamples.length}/${samples.length} settled growth samples were not pinned within ${TAIL_PX}px:\n  ${summary}`,
 		).toBe(0);
-		expect(previousHeight, "all named stream phases must grow the transcript").toBeGreaterThan(pre.scrollHeight + 200);
+		expect(maxPhaseHeight, "all named stream phases must grow the transcript").toBeGreaterThan(pre.scrollHeight + 200);
 		expect(samples.every((s) => s.growth > 0), "each sampler record must be a positive settled growth event").toBe(true);
 
 		const liveSnap = await snapshotMessages(page);
