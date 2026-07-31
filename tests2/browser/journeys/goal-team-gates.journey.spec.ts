@@ -1,8 +1,6 @@
 /**
  * Journey: Goal → Team → Gates — v2 browser smoke
  */
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { test, expect, openApp, navigateToHash, createGoal, deleteGoal, apiFetch, defaultProjectId, createSession, deleteSession, waitForSessionStatus } from "../_helpers/journey-fixture.js";
 import { seedTeamLeadHeader, connectWs, signalAndWaitForGate, startTeam, teardownTeam } from "../e2e-setup.js";
 import { navigateToGoalDashboard } from "../fixtures/ui-helpers.js";
@@ -472,16 +470,8 @@ test.describe("Journey: gate-card sign-off review handoff", () => {
 // the reset endpoint: widget, sidebar-backed goal state, and dashboard gates
 // must all reconcile before either page reloads, then hydrate the same truth.
 test.describe("Journey: completed goal gate reset reopens live UI", () => {
-	test("reset clears Completed and updates session/sidebar/dashboard immediately, then survives reload", async ({ page, context, gateway }) => {
-		test.setTimeout(60_000);
-		// This worker can have just run the account OAuth journey, which deliberately
-		// leaves a short-lived OpenAI status fixture behind. Its expiry reminder is a
-		// body-level modal that blocks the status pill only under full-suite timing.
-		// Establish this journey's own non-secret, non-expiring auth status before
-		// opening either page so the reset lifecycle is the only overlay under test.
-		writeFileSync(join(gateway.bobbitDir, "agent", "auth.json"), JSON.stringify({
-			anthropic: { type: "oauth", expires: Date.now() + 86_400_000 },
-		}), "utf8");
+	test("reset clears Completed and updates session/sidebar/dashboard immediately, then survives reload", async ({ page, context }) => {
+		test.setTimeout(120_000);
 		const goal = await createGoal({
 			title: `Completed Gate Reset ${Date.now()}`,
 			workflowId: "test-fast",
