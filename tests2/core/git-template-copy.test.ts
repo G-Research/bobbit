@@ -39,11 +39,11 @@ describe("setup-prepared git template", () => {
 				case "commit --quiet -m Initial fixture":
 					throw new Error("Windows close reported failure after commit");
 				case "rev-parse --verify HEAD^{commit}":
-					return { stdout: "fixture-head\\n", stderr: "", attempts: 1, exitCode: 0 };
+					return { stdout: "fixture-head\n", stderr: "", attempts: 1, exitCode: 0 };
 				case "show HEAD:README.md":
-					return { stdout: "# Bobbit test repository\\n", stderr: "", attempts: 1, exitCode: 0 };
+					return { stdout: "# Bobbit test repository\n", stderr: "", attempts: 1, exitCode: 0 };
 				case "show HEAD:.gitattributes":
-					return { stdout: "* text=auto eol=lf\\n", stderr: "", attempts: 1, exitCode: 0 };
+					return { stdout: "* text=auto eol=lf\n", stderr: "", attempts: 1, exitCode: 0 };
 				case "diff --quiet --cached HEAD --":
 				case "diff --quiet HEAD --":
 					return { stdout: "", stderr: "", attempts: 1, exitCode: 0 };
