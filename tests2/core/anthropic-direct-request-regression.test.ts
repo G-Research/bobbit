@@ -78,13 +78,13 @@ describe("direct Anthropic request regressions", () => {
 		assert.equal(requests[0]!.body.system.includes("Claude Code"), false);
 	});
 
-	it("uses Pi-compatible OAuth identity, rotated retry access, and direct models for both title paths", async () => {
+	it("uses Pi-compatible OAuth identity and treats rejected credentials as definitive", async () => {
 		useAuth({ type: "oauth", access: "stored-access-must-not-be-used", refresh: "refresh-metadata", expires: Date.now() + 60_000 });
 		const requests: Array<{ headers: Record<string, string>; body: any }> = [];
-		const resolvedTokens = ["resolved-initial", "resolved-rotated", "resolved-goal"];
+		const resolvedTokens = ["resolved-initial", "resolved-goal"];
 		const fetchImpl = (async (_url: any, init?: RequestInit) => {
 			requests.push({ headers: { ...(init?.headers as Record<string, string>) }, body: JSON.parse(String(init?.body)) });
-			return requests.length === 1 ? response(401, "ignored upstream body") : titleResponse(requests.length === 2 ? "Session Retry" : "Goal Summary");
+			return requests.length === 1 ? response(401, "ignored upstream body") : titleResponse("Goal Summary");
 		}) as typeof fetch;
 		const options = {
 			namingModel: "anthropic/claude-opus-5",
@@ -93,23 +93,15 @@ describe("direct Anthropic request regressions", () => {
 			anthropicOAuthTokenResolver: async () => resolvedTokens.shift() ?? null,
 		};
 
-		assert.equal(await generateSessionTitle([{ role: "user", content: "Retry the title" }], options), "Session Retry");
+		assert.equal(await generateSessionTitle([{ role: "user", content: "Rejected credential" }], options), null);
 		assert.equal(await generateGoalSummaryTitle("Summarize the OAuth goal", options), "Goal Summary");
-		assert.equal(requests.length, 3);
-		assert.deepEqual(requests.map((request) => request.body.model), ["claude-opus-5", "claude-opus-5", "claude-opus-5"]);
+		assert.equal(requests.length, 2, "a rejected credential must not trigger a second request");
+		assert.deepEqual(requests.map((request) => request.body.model), ["claude-opus-5", "claude-opus-5"]);
 		assert.deepEqual(requests.map((request) => request.headers), [
 			{
 				"Content-Type": "application/json",
 				"anthropic-version": "2023-06-01",
 				Authorization: "Bearer resolved-initial",
-				"anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
-				"user-agent": "claude-cli/2.1.75",
-				"x-app": "cli",
-			},
-			{
-				"Content-Type": "application/json",
-				"anthropic-version": "2023-06-01",
-				Authorization: "Bearer resolved-rotated",
 				"anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
 				"user-agent": "claude-cli/2.1.75",
 				"x-app": "cli",
@@ -154,7 +146,11 @@ describe("direct Anthropic request regressions", () => {
 		try {
 			useAuth({ type: "oauth", access: "stored", refresh: "metadata", expires: Date.now() + 60_000 });
 			for (const [status, pattern] of expected) {
-				const fetchImpl = (async () => response(status, `provider payload ${sentinel}`)) as typeof fetch;
+				let requestCount = 0;
+				const fetchImpl = (async () => {
+					requestCount++;
+					return response(status, `provider payload ${sentinel}`);
+				}) as typeof fetch;
 				const options = {
 					namingModel: "anthropic/claude-opus-5",
 					availableModels: [],
@@ -168,6 +164,7 @@ describe("direct Anthropic request regressions", () => {
 				writeFileSync(path.join(agentDir!, "auth.json"), JSON.stringify({ anthropic: { type: "api-key", key: "role-test-key" } }));
 				await generateRoleNames(uniqueRole(), `status ${status}`, fetchImpl);
 				writeFileSync(path.join(agentDir!, "auth.json"), JSON.stringify({ anthropic: { type: "oauth", access: "stored", refresh: "metadata", expires: Date.now() + 60_000 } }));
+				assert.equal(requestCount, 3, `${status} must be reported after one request per direct call`);
 				const recent = captured.lines.slice(-4).join("\n");
 				assert.match(recent, pattern);
 			}
