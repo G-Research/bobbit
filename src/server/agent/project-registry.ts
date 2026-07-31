@@ -314,9 +314,10 @@ function probeCaseSemantics(
 }
 
 /**
- * Establish a directory's entry case behaviour, caching only authoritative
- * results with an identity/version fingerprint. Read-only evidence avoids
- * watcher-visible mutations; an owned probe is reserved for unknown entries.
+ * Establish a directory's entry case behaviour, caching only stable read-only
+ * evidence with an identity/version fingerprint. An owned probe is reserved
+ * for unknown entries and informs only the current lookup because it mutates
+ * the directory being classified.
  */
 function hasCaseInsensitiveEntries(
   existingAncestor: string,
@@ -343,23 +344,25 @@ function hasCaseInsensitiveEntries(
     const cached = fingerprintBefore ? caseSemanticsCache?.get(cacheKey) : undefined;
     if (cached && cached.fingerprint === fingerprintBefore) return cached.semantics === "insensitive";
 
-    let result = readOnlyCaseSemantics(existingAncestor, pathApi, realpathSync, readdirSync);
+    const result = readOnlyCaseSemantics(existingAncestor, pathApi, realpathSync, readdirSync);
     if (result === "unknown") {
-      result = probeCaseSemantics(existingAncestor, pathApi, realpathSync, createCaseProbe, removeCaseProbe);
+      // Creating and removing the owned probe normally changes the parent
+      // mtime/ctime, so its fingerprint cannot establish cache authority.
+      // The probe remains conclusive for this lookup, but every later lookup
+      // must classify afresh.
+      return probeCaseSemantics(existingAncestor, pathApi, realpathSync, createCaseProbe, removeCaseProbe) === "insensitive";
     }
 
     const fingerprintAfter = fingerprintFor(existingAncestor);
     if (fingerprintBefore && fingerprintBefore === fingerprintAfter) {
-      if (result !== "unknown") {
-        caseSemanticsCache?.set(cacheKey, { fingerprint: fingerprintBefore, semantics: result });
-      }
+      caseSemanticsCache?.set(cacheKey, { fingerprint: fingerprintBefore, semantics: result });
       return result === "insensitive";
     }
 
-    // No fingerprint means no cache authority, but conclusive read-only or
-    // owned-probe evidence is still useful for this lookup. A changed or
-    // missing fingerprint is retried once; a second unstable attempt falls
-    // back to the conservative, uncached spelling-preserving result below.
+    // No fingerprint means no cache authority, but conclusive read-only
+    // evidence is still useful for this lookup. A changed or missing
+    // fingerprint is retried once; a second unstable attempt falls back to
+    // the conservative, uncached spelling-preserving result below.
     if (!fingerprintBefore && !fingerprintAfter) return result === "insensitive";
   }
 

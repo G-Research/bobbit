@@ -267,13 +267,19 @@ test("ProjectRegistry preserves read-only evidence when a directory has no finge
   assert.equal(identity(root), "/no-fingerprint-case-evidence/project");
 });
 
-test("ProjectRegistry caches an owned probe only after fingerprint stability is verified", () => {
-  const root = "/cached-case-probe/Project";
+test("ProjectRegistry uses an owned probe for one lookup without caching it", () => {
+  const parent = "/uncached-case-probe";
   let probes = 0;
   let removals = 0;
   const identity = createProjectPathIdentity({
     isNativePathApi: dialect => dialect === "posix",
-    realpathSync: candidate => path.posix.resolve(candidate),
+    isCaseInsensitiveAt: ancestor => ancestor === "/" ? false : undefined,
+    realpathSync: candidate => {
+      const resolved = path.posix.resolve(candidate);
+      if (resolved === parent) return resolved;
+      if (path.posix.dirname(resolved) === parent && /^\.bobbitprobe/i.test(path.posix.basename(resolved))) return resolved;
+      throw new Error(`missing fixture path: ${candidate}`);
+    },
     readdirSync: () => [],
     caseSemanticsFingerprint: ancestor => `unchanged:${ancestor}`,
     createCaseProbe: probeParent => {
@@ -282,16 +288,11 @@ test("ProjectRegistry caches an owned probe only after fingerprint stability is 
     },
     removeCaseProbe: () => { removals += 1; },
   });
-  const registry = registryWithRoot("cached", root, identity);
 
-  assert.equal(registry.getByPath(root)?.id, "cached");
-  assert.equal(registry.findByCwd(`${root}/src`)?.id, "cached");
-  const probesAfterWarmup = probes;
-  assert.ok(probesAfterWarmup > 0, "empty directories require an owned probe");
-
-  assert.equal(registry.getByPath(root)?.id, "cached");
-  assert.equal(registry.findByCwd(`${root}/src`)?.id, "cached");
-  assert.equal(probes, probesAfterWarmup, "repeated project lookups reuse per-directory semantics");
+  assert.equal(identity(`${parent}/Child`), `${parent}/child`);
+  assert.equal(probes, 1, "an empty parent gets one conclusive owned probe");
+  assert.equal(identity(`${parent}/CHILD`), `${parent}/child`);
+  assert.equal(probes, 2, "owned probe evidence is not published into the cache");
   assert.equal(removals, probes, "every owned probe is cleaned up exactly once");
 });
 
@@ -378,9 +379,9 @@ test("ProjectRegistry leaves probe-mutated fingerprints uncached", () => {
   });
 
   assert.equal(identity(`${parent}/Child`), `${parent}/Child`);
-  assert.equal(probes, 2, "an unstable probe gets one bounded retry");
+  assert.equal(probes, 1, "a conclusive probe is used once for the current lookup");
   assert.equal(identity(`${parent}/CHILD`), `${parent}/CHILD`);
-  assert.equal(probes, 4, "probe-mutated semantics are not published under a later fingerprint");
+  assert.equal(probes, 2, "probe-mutated semantics are not published under a later fingerprint");
 });
 
 test("ProjectRegistry invalidates cached case semantics when a directory fingerprint changes", () => {
