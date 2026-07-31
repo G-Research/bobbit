@@ -6,35 +6,25 @@ import {
 	mkdirSync,
 	openSync,
 	readFileSync,
+	realpathSync,
 	renameSync,
+	rmdirSync,
+	statSync,
 	unlinkSync,
+	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { basename, dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
 
-interface ProperLockfile {
-	lock(
-		path: string,
-		options: {
-			retries: { retries: number; factor: number; minTimeout: number; maxTimeout: number; randomize: boolean };
-			stale: number;
-			onCompromised: (error: Error) => void;
-		},
-	): Promise<() => Promise<void>>;
-}
-
-// Share Pi's proper-lockfile namespace and retry contract. This is a direct
-// dependency rather than an import of Pi's private auth-storage implementation,
-// whose package export is intentionally not public.
-const lockfile = createRequire(import.meta.url)("proper-lockfile") as ProperLockfile;
-
 const FILE_MODE = 0o600;
 const DIRECTORY_MODE = 0o700;
 const LOCK_STALE_MS = 30_000;
+const LOCK_RETRIES = 10;
+const LOCK_MIN_RETRY_MS = 100;
+const LOCK_MAX_RETRY_MS = 10_000;
 export const deleteCredential = Symbol("delete credential");
 
 type RawAuthData = Record<string, unknown>;
@@ -69,10 +59,78 @@ function bestEffortChmod(path: string, mode: number): void {
 	}
 }
 
+function sleep(delayMs: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+function isFileExistsError(error: unknown): boolean {
+	return isRecord(error) && error.code === "EEXIST";
+}
+
+/**
+ * Acquire the same `<auth.json>.lock` directory namespace used by Pi's
+ * proper-lockfile dependency without importing that private implementation.
+ * mkdir is atomic across processes; touching the directory while the callback
+ * is running prevents a healthy, slow token refresh from being reclaimed as
+ * stale. The lock directory deliberately remains empty so Pi can reclaim a
+ * lock left behind by a crashed Bobbit process, and vice versa.
+ */
+interface AuthFileLock {
+	assertIntact(): void;
+	release(): void;
+}
+
+async function acquireAuthFileLock(authPath: string): Promise<AuthFileLock> {
+	const lockPath = `${authPath}.lock`;
+	for (let attempt = 0; ; attempt += 1) {
+		try {
+			mkdirSync(lockPath, { mode: DIRECTORY_MODE });
+			bestEffortChmod(lockPath, DIRECTORY_MODE);
+			let compromised = false;
+			const heartbeat = setInterval(() => {
+				try {
+					utimesSync(lockPath, new Date(), new Date());
+				} catch {
+					compromised = true;
+				}
+			}, Math.max(1_000, Math.floor(LOCK_STALE_MS / 2)));
+			heartbeat.unref();
+			return {
+				assertIntact: () => {
+					if (compromised || !existsSync(lockPath)) {
+						throw new Error("Credential store lock was compromised");
+					}
+				},
+				release: () => {
+					clearInterval(heartbeat);
+					rmdirSync(lockPath);
+				},
+			};
+		} catch (error) {
+			if (!isFileExistsError(error)) throw error;
+
+			// Match proper-lockfile's stale-directory recovery protocol so a
+			// gateway crash cannot permanently block future credential refreshes.
+			try {
+				if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
+					rmdirSync(lockPath);
+					continue;
+				}
+			} catch {
+				// A concurrent releaser/reclaimer is harmless; retry normally.
+			}
+
+			if (attempt >= LOCK_RETRIES) throw new Error("Credential store lock timed out");
+			const baseDelay = Math.min(LOCK_MAX_RETRY_MS, LOCK_MIN_RETRY_MS * 2 ** attempt);
+			await sleep(baseDelay * (1 + Math.random()));
+		}
+	}
+}
+
 /**
  * A fresh-reading, mutation-locked, atomic auth.json CredentialStore.
  *
- * Pi's built-in store and this adapter coordinate through proper-lockfile's
+ * Pi's built-in store and this adapter coordinate through the shared
  * `<auth.json>.lock` directory. Pi currently writes its own file in place;
  * Bobbit cannot make an external Pi process atomic, but every Bobbit mutation
  * uses a same-directory temporary file, fsync, and atomic rename.
@@ -107,15 +165,19 @@ export class AtomicCredentialStore implements CredentialStore {
 		bestEffortChmod(this.authPath, FILE_MODE);
 	}
 
-	private readCurrent(): RawAuthData {
-		return parseAuthData(readFileSync(this.authPath, "utf8"));
+	private canonicalAuthPath(): string {
+		return realpathSync(this.authPath);
 	}
 
-	private atomicWrite(data: RawAuthData): void {
-		const directory = dirname(this.authPath);
+	private readCurrent(authPath = this.authPath): RawAuthData {
+		return parseAuthData(readFileSync(authPath, "utf8"));
+	}
+
+	private atomicWrite(data: RawAuthData, authPath = this.authPath): void {
+		const directory = dirname(authPath);
 		const temporaryPath = join(
 			directory,
-			`.${basename(this.authPath)}.bobbit-${process.pid}-${randomUUID()}.tmp`,
+			`.${basename(authPath)}.bobbit-${process.pid}-${randomUUID()}.tmp`,
 		);
 		let fd: number | undefined;
 		try {
@@ -125,8 +187,8 @@ export class AtomicCredentialStore implements CredentialStore {
 			closeSync(fd);
 			fd = undefined;
 			bestEffortChmod(temporaryPath, FILE_MODE);
-			renameSync(temporaryPath, this.authPath);
-			bestEffortChmod(this.authPath, FILE_MODE);
+			renameSync(temporaryPath, authPath);
+			bestEffortChmod(authPath, FILE_MODE);
 
 			// Persist the directory entry where supported. Opening/fsyncing a
 			// directory is unavailable on Windows and some filesystems.
@@ -171,38 +233,26 @@ export class AtomicCredentialStore implements CredentialStore {
 			| Promise<{ result: T; next?: RawAuthData }>,
 	): Promise<T> {
 		this.ensureStorage();
-		let compromised: Error | undefined;
-		// Deliberately use proper-lockfile's default realpath:true, matching Pi's
-		// async auth mutation path. This makes a symlinked/junction agent directory
-		// coordinate on the same canonical <auth.json>.lock directory.
-		const release = await lockfile.lock(this.authPath, {
-			retries: {
-				retries: 10,
-				factor: 2,
-				minTimeout: 100,
-				maxTimeout: 10_000,
-				randomize: true,
-			},
-			stale: LOCK_STALE_MS,
-			onCompromised: (error) => {
-				compromised = error;
-			},
-		});
+		// Pi's auth storage uses proper-lockfile's default realpath:true. Resolve
+		// before acquiring the shared lock so a symlinked/junction agent directory
+		// coordinates on the canonical `<auth.json>.lock` directory as well.
+		const authPath = this.canonicalAuthPath();
+		const fileLock = await acquireAuthFileLock(authPath);
 		try {
-			if (compromised) throw new Error("Credential store lock was compromised", { cause: compromised });
-			const { result, next } = await fn(this.readCurrent());
-			if (compromised) throw new Error("Credential store lock was compromised", { cause: compromised });
+			fileLock.assertIntact();
+			const { result, next } = await fn(this.readCurrent(authPath));
+			fileLock.assertIntact();
 			if (next !== undefined) {
-				this.atomicWrite(next);
-				if (compromised) throw new Error("Credential store lock was compromised", { cause: compromised });
+				this.atomicWrite(next, authPath);
+				fileLock.assertIntact();
 			}
 			return result;
 		} finally {
 			try {
-				await release();
+				fileLock.release();
 			} catch {
-				// A compromised lock is already reported above; unlock errors must
-				// not replace the original storage result or exception.
+				// A competing stale-lock recovery can remove the directory first. Do
+				// not replace a completed credential result with cleanup failure.
 			}
 		}
 	}
