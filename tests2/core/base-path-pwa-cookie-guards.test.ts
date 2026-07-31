@@ -170,53 +170,112 @@ describe("same-host native transport cookie eligibility", () => {
 	});
 });
 
+interface FakeCacheEntry {
+	request: Request;
+	response: any;
+}
+
 interface WorkerHarness {
 	listeners: Record<string, (event: any) => void>;
 	openedCaches: string[];
-	precacheAdds: string[][];
+	networkRequests: string[];
 	cachePuts: string[];
 	cacheMatches: unknown[];
 	deletedCaches: string[];
+	deletedEntries: string[];
 	cacheKeys: string[];
+	fetchLifetime: Promise<unknown>[];
 	setNetworkFetch(fn: (request: any) => Promise<any>): void;
+	seedCache(name: string, request: string | Request, response: any): void;
+	cacheEntryUrls(name: string): string[];
+	cacheEntryRequests(name: string): Request[];
+}
+
+function fakeWorkerResponse(options: {
+	url?: string;
+	cacheControl?: string;
+	vary?: string;
+	body?: string;
+	type?: string;
+} = {}): any {
+	const headers: Record<string, string> = {};
+	if (options.cacheControl) headers["Cache-Control"] = options.cacheControl;
+	if (options.vary) headers.Vary = options.vary;
+	return {
+		ok: true,
+		url: options.url ?? "",
+		type: options.type ?? "basic",
+		headers: new Headers(headers),
+		body: options.body,
+		clone() { return this; },
+	};
 }
 
 function loadWorker(mount: string): WorkerHarness {
 	let source = fs.readFileSync(path.resolve("public/sw.js"), "utf8");
 	source = source
 		.split("__BOBBIT_BUILD_ID__").join("test-build")
-		.split("/*__BOBBIT_PRECACHE_CHUNKS__*/").join('"/assets/lazy.js"');
+		.split("/*__BOBBIT_PRECACHE_CHUNKS__*/").join(
+			'"/assets/lazy.js", "/assets/private.js", "/assets/authorized.js", "/assets/referrer.js"',
+		);
+	const origin = "https://host.example";
 	const listeners: Record<string, (event: any) => void> = {};
 	const openedCaches: string[] = [];
-	const precacheAdds: string[][] = [];
+	const networkRequests: string[] = [];
 	const cachePuts: string[] = [];
 	const cacheMatches: unknown[] = [];
 	const deletedCaches: string[] = [];
+	const deletedEntries: string[] = [];
 	const cacheKeys: string[] = [];
-	let networkFetch: (request: any) => Promise<any> = async () => ({
-		ok: true,
-		type: "basic",
-		clone() { return this; },
-	});
+	const fetchLifetime: Promise<unknown>[] = [];
+	const cacheEntries = new Map<string, Map<string, FakeCacheEntry>>();
+	let networkFetch: (request: any) => Promise<any> = async () => fakeWorkerResponse();
+
+	const absoluteUrl = (value: string | Request): string => new URL(
+		typeof value === "string" ? value : value.url,
+		origin,
+	).href;
+	const cacheFor = (name: string): Map<string, FakeCacheEntry> => {
+		let entries = cacheEntries.get(name);
+		if (!entries) {
+			entries = new Map();
+			cacheEntries.set(name, entries);
+		}
+		return entries;
+	};
 	const caches = {
 		async open(name: string) {
 			openedCaches.push(name);
+			const entries = cacheFor(name);
 			return {
-				async addAll(values: string[]) { precacheAdds.push([...values]); },
-				async put(request: any) { cachePuts.push(typeof request === "string" ? request : request.url); },
-				async match(request: any) {
+				async put(request: string | Request, response: any) {
+					const storedRequest = typeof request === "string"
+						? new Request(absoluteUrl(request))
+						: request;
+					cachePuts.push(storedRequest.url);
+					entries.set(storedRequest.url, { request: storedRequest, response });
+				},
+				async match(request: string | Request) {
 					cacheMatches.push(request);
-					const value = typeof request === "string" ? request : request.url;
-					if (value === `${mount}/` || (mount === "" && value === "/")) return { offline: true };
-					return undefined;
+					return entries.get(absoluteUrl(request))?.response;
+				},
+				async keys() { return [...entries.values()].map((entry) => entry.request); },
+				async delete(request: string | Request) {
+					const url = absoluteUrl(request);
+					deletedEntries.push(url);
+					return entries.delete(url);
 				},
 			};
 		},
 		async keys() { return [...cacheKeys]; },
-		async delete(name: string) { deletedCaches.push(name); return true; },
+		async delete(name: string) {
+			deletedCaches.push(name);
+			cacheEntries.delete(name);
+			return true;
+		},
 	};
 	const self = {
-		location: { origin: "https://host.example", pathname: `${mount}/sw.js` || "/sw.js" },
+		location: { origin, pathname: `${mount}/sw.js` || "/sw.js" },
 		addEventListener(type: string, listener: (event: any) => void) { listeners[type] = listener; },
 		skipWaiting() {},
 		clients: { async claim() {} },
@@ -225,19 +284,34 @@ function loadWorker(mount: string): WorkerHarness {
 		self,
 		caches,
 		URL,
+		Request,
+		Response,
+		Headers,
 		Promise,
 		Error,
-		fetch: (request: any) => networkFetch(request),
+		fetch: (request: any) => {
+			const value = typeof request === "string" ? new URL(request, origin).href : request.url;
+			networkRequests.push(value);
+			return networkFetch(request);
+		},
 	}, { filename: "public/sw.js" });
 	return {
 		listeners,
 		openedCaches,
-		precacheAdds,
+		networkRequests,
 		cachePuts,
 		cacheMatches,
 		deletedCaches,
+		deletedEntries,
 		cacheKeys,
+		fetchLifetime,
 		setNetworkFetch(fn) { networkFetch = fn; },
+		seedCache(name, request, response) {
+			const storedRequest = typeof request === "string" ? new Request(absoluteUrl(request)) : request;
+			cacheFor(name).set(storedRequest.url, { request: storedRequest, response });
+		},
+		cacheEntryUrls(name) { return [...cacheFor(name).keys()]; },
+		cacheEntryRequests(name) { return [...cacheFor(name).values()].map((entry) => entry.request); },
 	};
 }
 
@@ -247,20 +321,37 @@ async function dispatchExtendable(listener: (event: any) => void): Promise<void>
 	await pending;
 }
 
-function dispatchFetch(worker: WorkerHarness, url: string, options: { method?: string; mode?: string } = {}): Promise<any> | undefined {
+function dispatchFetch(
+	worker: WorkerHarness,
+	url: string,
+	options: { method?: string; mode?: string; headers?: Record<string, string>; referrer?: string } = {},
+): Promise<any> | undefined {
 	let response: Promise<any> | undefined;
 	worker.listeners.fetch({
-		request: { url, method: options.method ?? "GET", mode: options.mode ?? "cors" },
+		request: {
+			url,
+			method: options.method ?? "GET",
+			mode: options.mode ?? "cors",
+			headers: new Headers(options.headers),
+			referrer: options.referrer ?? "",
+		},
 		respondWith(value: Promise<any>) { response = value; },
+		waitUntil(value: Promise<unknown>) { worker.fetchLifetime.push(value); },
 	});
 	return response;
 }
 
-describe("service worker mount isolation", () => {
-	it("re-anchors precache entries and isolates cache cleanup by mount", async () => {
+async function flushFetchLifetime(worker: WorkerHarness): Promise<void> {
+	await Promise.all(worker.fetchLifetime.splice(0));
+}
+
+describe("service worker mount isolation and cache confidentiality", () => {
+	it("re-anchors queryless precache assets and isolates cache cleanup by mount", async () => {
 		const worker = loadWorker("/team/bobbit");
 		await dispatchExtendable(worker.listeners.install);
-		assert.deepEqual(worker.precacheAdds, [["/team/bobbit/assets/lazy.js"]]);
+		assert.ok(worker.networkRequests.includes("https://host.example/team/bobbit/assets/lazy.js"));
+		assert.ok(worker.cachePuts.includes("https://host.example/team/bobbit/assets/lazy.js"));
+		assert.ok(worker.cachePuts.includes("https://host.example/team/bobbit/"), "install creates the sanitized offline shell");
 		const currentCache = worker.openedCaches[0];
 		assert.ok(currentCache.includes("test-build"));
 		assert.match(currentCache, /bobbit/i);
@@ -269,6 +360,31 @@ describe("service worker mount isolation", () => {
 		worker.cacheKeys.push(currentCache, oldCurrentMountCache, "bobbit:another-mount:old-build", "unrelated-app-cache");
 		await dispatchExtendable(worker.listeners.activate);
 		assert.deepEqual(worker.deletedCaches, [oldCurrentMountCache]);
+	});
+
+	it("root cleanup recognizes only historical Bobbit cache names", async () => {
+		const worker = loadWorker("");
+		await dispatchExtendable(worker.listeners.install);
+		const currentCache = worker.openedCaches[0]!;
+		const oldCurrentCache = currentCache.replace("test-build", "old-build");
+		worker.cacheKeys.push(
+			currentCache,
+			oldCurrentCache,
+			"bobbit-v1",
+			"bobbit-dev-1785450000000",
+			"bobbit-mdeadbeef-abc123",
+			"bobbit-other-app",
+			"unrelated-app-cache",
+		);
+
+		await dispatchExtendable(worker.listeners.activate);
+
+		assert.deepEqual(worker.deletedCaches.sort(), [
+			oldCurrentCache,
+			"bobbit-v1",
+			"bobbit-dev-1785450000000",
+			"bobbit-mdeadbeef-abc123",
+		].sort());
 	});
 
 	it("bypasses mounted API/WS/preview and every off-mount or sibling request", () => {
@@ -289,26 +405,145 @@ describe("service worker mount isolation", () => {
 		assert.equal(dispatchFetch(worker, "https://other.example/team/bobbit/assets/app.js"), undefined);
 	});
 
-	it("claims and caches only successful same-origin requests within its mount", async () => {
+	it("never stores tokenized launches/manifests/assets or Authorization requests", async () => {
 		const worker = loadWorker("/team/bobbit");
-		const mounted = dispatchFetch(worker, "https://host.example/team/bobbit/assets/app.js");
-		assert.ok(mounted);
-		await mounted;
-		await Promise.resolve();
-		assert.deepEqual(worker.cachePuts, ["https://host.example/team/bobbit/assets/app.js"]);
+		worker.setNetworkFetch(async (request) => {
+			const url = typeof request === "string" ? request : request.url;
+			return fakeWorkerResponse({
+				url,
+				cacheControl: url.includes("manifest.json") ? "no-store" : undefined,
+				body: url.includes("manifest.json") ? '{"start_url":"/?token=top-secret"}' : undefined,
+			});
+		});
+		const requests = [
+			dispatchFetch(worker, "https://host.example/team/bobbit/?token=top-secret", { mode: "navigate" }),
+			dispatchFetch(worker, "https://host.example/team/bobbit/manifest.json?token=top-secret"),
+			dispatchFetch(worker, "https://host.example/team/bobbit/assets/lazy.js?token=top-secret"),
+			dispatchFetch(worker, "https://host.example/team/bobbit/assets/authorized.js", {
+				headers: { Authorization: "Bearer top-secret" },
+			}),
+			dispatchFetch(worker, "https://host.example/team/bobbit/assets/lazy.js", {
+				referrer: "https://host.example/team/bobbit/?token=top-secret",
+			}),
+		];
+		await Promise.all(requests.map(async (request) => {
+			assert.ok(request);
+			await request;
+		}));
+		await flushFetchLifetime(worker);
+		assert.deepEqual(worker.cachePuts, []);
 	});
 
-	it("uses the mounted root as the offline navigation fallback", async () => {
+	it("does not store immutable assets when the response is private, no-store, or credential-varying", async () => {
+		const policies = [
+			{ cacheControl: "private, max-age=3600" },
+			{ cacheControl: "public, no-store" },
+			{ cacheControl: "NO-STORE" },
+			{ vary: "Accept-Encoding, Authorization" },
+			{ vary: "Cookie" },
+		];
+		for (const policy of policies) {
+			const worker = loadWorker("/team/bobbit");
+			worker.setNetworkFetch(async (request) => fakeWorkerResponse({
+				url: request.url,
+				...policy,
+			}));
+			const response = dispatchFetch(worker, "https://host.example/team/bobbit/assets/lazy.js");
+			assert.ok(response);
+			await response;
+			await flushFetchLifetime(worker);
+			assert.deepEqual(worker.cachePuts, [], JSON.stringify(policy));
+		}
+	});
+
+	it("stores allowlisted assets under sanitized URL-only keys", async () => {
 		const worker = loadWorker("/team/bobbit");
+		const mounted = dispatchFetch(worker, "https://host.example/team/bobbit/assets/lazy.js", {
+			referrer: "https://host.example/team/bobbit/dashboard",
+		});
+		assert.ok(mounted);
+		await mounted;
+		await flushFetchLifetime(worker);
+		assert.deepEqual(worker.cachePuts, ["https://host.example/team/bobbit/assets/lazy.js"]);
+		const cacheName = worker.openedCaches[0]!;
+		const key = worker.cacheEntryRequests(cacheName)[0]!;
+		assert.equal(key.referrer, "");
+		assert.equal(key.credentials, "omit");
+		assert.equal(key.headers.get("Authorization"), null);
+
+		const unlisted = dispatchFetch(worker, "https://host.example/team/bobbit/assets/unlisted.js");
+		assert.ok(unlisted);
+		await unlisted;
+		await flushFetchLifetime(worker);
+		assert.equal(worker.cachePuts.length, 1, "arbitrary /assets paths are not an immutable allowlist");
+	});
+
+	it("purges unsafe entries from the retained Bobbit cache without touching sibling caches", async () => {
+		const worker = loadWorker("/team/bobbit");
+		await dispatchExtendable(worker.listeners.install);
+		const currentCache = worker.openedCaches[0];
+		const unrelatedCache = "unrelated-app-cache";
+		const safeAsset = "https://host.example/team/bobbit/assets/lazy.js";
+		const sensitiveUrls = [
+			"https://host.example/team/bobbit/?token=secret",
+			"https://host.example/team/bobbit/manifest.json",
+			"https://host.example/team/bobbit/session/private-state",
+			"https://host.example/team/bobbit/assets/lazy.js?token=secret",
+			"https://host.example/team/bobbit/assets/private.js",
+		];
+		worker.seedCache(currentCache, sensitiveUrls[0]!, fakeWorkerResponse({ body: "secret launch" }));
+		worker.seedCache(currentCache, sensitiveUrls[1]!, fakeWorkerResponse({ body: '{"start_url":"/?token=secret"}' }));
+		worker.seedCache(currentCache, sensitiveUrls[2]!, fakeWorkerResponse({ body: "private SPA state" }));
+		worker.seedCache(currentCache, sensitiveUrls[3]!, fakeWorkerResponse());
+		worker.seedCache(currentCache, sensitiveUrls[4]!, fakeWorkerResponse({ cacheControl: "private" }));
+		worker.seedCache(
+			currentCache,
+			new Request("https://host.example/team/bobbit/assets/authorized.js", {
+				headers: { Authorization: "Bearer secret" },
+			}),
+			fakeWorkerResponse(),
+		);
+		worker.seedCache(
+			currentCache,
+			new Request("https://host.example/team/bobbit/assets/referrer.js", {
+				referrer: "https://host.example/team/bobbit/?token=referrer-secret",
+			}),
+			fakeWorkerResponse(),
+		);
+		worker.seedCache(currentCache, safeAsset, fakeWorkerResponse());
+		worker.seedCache(unrelatedCache, "https://host.example/other/?token=sibling-secret", fakeWorkerResponse());
+		worker.cacheKeys.push(currentCache, unrelatedCache);
+
+		await dispatchExtendable(worker.listeners.activate);
+
+		const retained = worker.cacheEntryUrls(currentCache);
+		for (const url of sensitiveUrls) assert.ok(!retained.includes(url), url);
+		assert.ok(!retained.includes("https://host.example/team/bobbit/assets/authorized.js"));
+		assert.ok(!retained.includes("https://host.example/team/bobbit/assets/referrer.js"));
+		assert.ok(retained.includes(safeAsset));
+		assert.ok(retained.includes("https://host.example/team/bobbit/"), "marked sanitized shell remains available");
+		assert.deepEqual(worker.cacheEntryUrls(unrelatedCache), ["https://host.example/other/?token=sibling-secret"]);
+		assert.deepEqual(worker.deletedCaches, []);
+	});
+
+	it("uses a script-free token-free mounted shell for offline navigation", async () => {
+		const worker = loadWorker("/team/bobbit");
+		await dispatchExtendable(worker.listeners.install);
 		worker.setNetworkFetch(async () => { throw new Error("offline"); });
 		const response = dispatchFetch(worker, "https://host.example/team/bobbit/session/abc", { mode: "navigate" });
 		assert.ok(response);
-		assert.deepEqual(await response, { offline: true });
+		const shell = await response;
+		assert.equal(shell.headers.get("X-Bobbit-Offline-Shell"), "1");
+		const html = await shell.text();
+		assert.match(html, /Bobbit is offline/);
+		assert.doesNotMatch(html, /<script|token=/i);
 		assert.ok(worker.cacheMatches.includes("/team/bobbit/"));
 	});
 
-	it("retains root-mounted transport bypass and offline fallback", async () => {
+	it("retains root-mounted transport bypass, precache, and offline fallback", async () => {
 		const worker = loadWorker("");
+		await dispatchExtendable(worker.listeners.install);
+		assert.ok(worker.cachePuts.includes("https://host.example/assets/lazy.js"));
 		for (const pathname of [
 			"/api/health",
 			"/ws/viewer",
@@ -320,12 +555,13 @@ describe("service worker mount isolation", () => {
 			assert.equal(dispatchFetch(worker, `https://host.example${pathname}`), undefined, pathname);
 		}
 		assert.ok(dispatchFetch(worker, "https://host.example/preview-other/app.js"), "preview-other is not an authenticated preview route");
-		assert.ok(dispatchFetch(worker, "https://host.example/bobbit/preview-other/app.js"), "nested preview-other remains cacheable");
-		assert.ok(dispatchFetch(worker, "https://host.example/team/bobbit/assets/app.js"), "nested UI assets remain network-first/offline-cacheable");
+		assert.ok(dispatchFetch(worker, "https://host.example/bobbit/preview-other/app.js"), "nested preview-other remains network-first");
+		assert.ok(dispatchFetch(worker, "https://host.example/team/bobbit/assets/app.js"), "nested UI assets remain network-first without entering root cache storage");
 		worker.setNetworkFetch(async () => { throw new Error("offline"); });
 		const response = dispatchFetch(worker, "https://host.example/session/abc", { mode: "navigate" });
 		assert.ok(response);
-		assert.deepEqual(await response, { offline: true });
+		const shell = await response;
+		assert.match(await shell.text(), /Bobbit is offline/);
 		assert.ok(worker.cacheMatches.includes("/"));
 	});
 });
