@@ -589,15 +589,14 @@ describe("spawnTracked timeout cleanup", () => {
 		const reapReleased = new Promise<void>(resolve => { releaseReap = resolve; });
 		let resolveReapStarted!: () => void;
 		const reapStarted = new Promise<void>(resolve => { resolveReapStarted = resolve; });
-		let hostGroupLive = true;
 		const events: string[] = [];
+		const calls: Array<{ kind: string; status: string }> = [];
 		try {
-			const harness = makeRecoveryHarness(stateDir, [], { platform: "linux" });
+			const harness = makeRecoveryHarness(stateDir, calls, { platform: "linux" });
 			(harness as any)._reapRecoveredPosixSentinel = async () => {
 				events.push("reap");
 				resolveReapStarted();
 				await reapReleased;
-				hostGroupLive = false;
 			};
 			(harness as any)._dockerExecCapture = async (_cid: string, command: string) => {
 				if (command.includes("kill -TERM")) events.push("container-kill");
@@ -609,19 +608,25 @@ describe("spawnTracked timeout cleanup", () => {
 				pidNonce: "timeout-nonce", sentinelFile: path.join(stateDir, "docker-exec.sentinel.json"),
 				exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat", deadlineMs: Date.now() - 1,
 			};
-			const result = (harness as any)._resumeContainerCommandStep({ signalId: "signal" }, step, {
-				finalize: () => { throw new Error("unexpected finalize"); },
-				timeoutResult: () => {
-					events.push(`timeout:host-group-live=${hostGroupLive}`);
-					return { name: step.name, type: step.type, passed: false, status: "failed", output: "timeout", duration_ms: 0 };
-				},
-				restartInterrupted: () => { throw new Error("unexpected interruption"); },
-			});
+			const active: ActiveVerification = {
+				goalId: "goal", gateId: "implementation", signalId: "signal", overallStatus: "running", startedAt: Date.now(), currentPhase: 0, steps: [step],
+			};
+			// Resume registers this exact persisted entry in activeVerifications before
+			// entering the container recovery loop. Calling the private helper with an
+			// unregistered object takes a different branch from production and can hide
+			// the lifecycle wait this regression is intended to cover.
+			fs.writeFileSync(path.join(stateDir, "active-verifications.json"), JSON.stringify({ verifications: [active] }));
+			const result = harness.resumeInterruptedVerifications();
 			await reapStarted;
 			expect(events).toEqual(["container-kill", "reap"]);
+			expect(calls).toEqual([]);
 			releaseReap();
-			await expect(result).resolves.toMatchObject({ status: "failed" });
-			expect(events).toEqual(["container-kill", "reap", "timeout:host-group-live=false"]);
+			await expect(result).resolves.toBeUndefined();
+			expect(events).toEqual(["container-kill", "reap"]);
+			expect(calls).toEqual([
+				{ kind: "verification", status: "failed" },
+				{ kind: "gate", status: "failed" },
+			]);
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
 		}
@@ -633,15 +638,14 @@ describe("spawnTracked timeout cleanup", () => {
 		const reapReleased = new Promise<void>(resolve => { releaseReap = resolve; });
 		let resolveReapStarted!: () => void;
 		const reapStarted = new Promise<void>(resolve => { resolveReapStarted = resolve; });
-		let hostGroupLive = true;
 		const events: string[] = [];
+		const calls: Array<{ kind: string; status: string }> = [];
 		try {
-			const harness = makeRecoveryHarness(stateDir, [], { platform: "linux" });
+			const harness = makeRecoveryHarness(stateDir, calls, { platform: "linux" });
 			(harness as any)._reapRecoveredPosixSentinel = async () => {
 				events.push("reap");
 				resolveReapStarted();
 				await reapReleased;
-				hostGroupLive = false;
 			};
 			(harness as any)._dockerExecCapture = async () => ({ code: 0, stdout: "" });
 			const step: any = {
@@ -650,19 +654,24 @@ describe("spawnTracked timeout cleanup", () => {
 				pidNonce: "no-verdict-nonce", sentinelFile: path.join(stateDir, "docker-exec.sentinel.json"),
 				exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat", deadlineMs: Date.now() + 10_000,
 			};
-			const result = (harness as any)._resumeContainerCommandStep({ signalId: "signal" }, step, {
-				finalize: () => { throw new Error("unexpected finalize"); },
-				timeoutResult: () => { throw new Error("unexpected timeout"); },
-				restartInterrupted: () => {
-					events.push(`waiting:host-group-live=${hostGroupLive}`);
-					return { name: step.name, type: step.type, passed: false, status: "waiting", output: "no verdict", duration_ms: 0 };
-				},
-			});
+			const active: ActiveVerification = {
+				goalId: "goal", gateId: "implementation", signalId: "signal", overallStatus: "running", startedAt: Date.now(), currentPhase: 0, steps: [step],
+			};
+			// Exercise crash recovery through its persisted-active contract. This
+			// ensures _isResumeStillActive remains true until the reaper has settled,
+			// rather than bypassing the production loop with an unregistered object.
+			fs.writeFileSync(path.join(stateDir, "active-verifications.json"), JSON.stringify({ verifications: [active] }));
+			const result = harness.resumeInterruptedVerifications();
 			await reapStarted;
 			expect(events).toEqual(["reap"]);
+			expect(calls).toEqual([]);
 			releaseReap();
-			await expect(result).resolves.toMatchObject({ status: "waiting" });
-			expect(events).toEqual(["reap", "waiting:host-group-live=false"]);
+			await expect(result).resolves.toBeUndefined();
+			expect(events).toEqual(["reap"]);
+			expect(calls).toEqual([
+				{ kind: "verification", status: "failed" },
+				{ kind: "gate", status: "pending" },
+			]);
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
 		}
