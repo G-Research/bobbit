@@ -135,37 +135,27 @@ import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/sp
 
 const stateDir = process.env.BOBBIT_RECOVERED_SENTINEL_STATE;
 const exitFile = process.env.BOBBIT_RECOVERED_SENTINEL_EXIT;
-const releaseFile = process.env.BOBBIT_RECOVERED_SENTINEL_RELEASE;
-if (!stateDir || !exitFile || !releaseFile) throw new Error("missing recovered-sentinel probe paths");
+if (!stateDir || !exitFile) throw new Error("missing recovered-sentinel probe paths");
 const nonce = "recovered-sentinel-nonce";
 const pidFile = stateDir + "/root.pid";
 const sentinelFile = stateDir + "/sentinel.json";
-const tracked = spawnTracked("/bin/sh", ["-c", 'while [ ! -f "$BOBBIT_RECOVERED_SENTINEL_RELEASE" ]; do sleep 0.01; done; printf 0 > "$BOBBIT_RECOVERED_SENTINEL_EXIT"'], {
-  stdio: "ignore",
+const tracked = spawnTracked("/bin/sh", ["-c", 'read __bobbit_parent_exit <&4; printf 0 > "$BOBBIT_RECOVERED_SENTINEL_EXIT"'], {
+  // FD 4 blocks the payload until this probe exits and closes its pipe end.
+  // This makes parent death the lifecycle handoff without polling or sleeps.
+  stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"],
   posixSentinelIdentity: { file: sentinelFile, nonce },
   env: process.env,
 });
 tracked.markSurvival();
-const awaitFile = (file) => new Promise((resolve, reject) => {
-  let settled = false;
-  let timeout;
-  const finish = (error) => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(timeout);
-    watcher.close();
-    error ? reject(error) : resolve();
-  };
-  const watcher = fs.watch(stateDir, { persistent: false }, () => {
-    if (fs.existsSync(file)) finish();
-  });
-  timeout = setTimeout(() => finish(new Error("sentinel identity was not written")), 2_000);
-  timeout.unref();
-  if (fs.existsSync(file)) finish();
+await new Promise((resolve, reject) => {
+  const ready = tracked.child.stdio[3];
+  if (!ready) return reject(new Error("sentinel readiness pipe is unavailable"));
+  ready.once("data", resolve);
+  ready.once("error", reject);
 });
-await awaitFile(sentinelFile);
-fs.writeFileSync(pidFile, String(tracked.child.pid) + "\\n" + nonce + "\\n");
-process.stdout.write(JSON.stringify({ pid: tracked.child.pid, pidFile, sentinelFile, nonce }) + "\\n", () => process.exit(0));
+if (!fs.existsSync(sentinelFile)) throw new Error("sentinel acknowledged before publishing its identity");
+fs.writeFileSync(pidFile, String(tracked.child.pid) + "\n" + nonce + "\n");
+process.stdout.write(JSON.stringify({ pid: tracked.child.pid, pidFile, sentinelFile, nonce }) + "\n", () => process.exit(0));
 `;
 
 type FakeReadyPipe = EventEmitter & { unrefCalls: number; unref(): void };
@@ -236,7 +226,7 @@ function waitForFile(file: string, timeoutMs = 5_000): Promise<void> {
 	});
 }
 
-function recoveredSentinelProbe(stateDir: string, exitFile: string, releaseFile: string): Promise<{ pid: number; pidFile: string; sentinelFile: string; nonce: string }> {
+function recoveredSentinelProbe(stateDir: string, exitFile: string): Promise<{ pid: number; pidFile: string; sentinelFile: string; nonce: string }> {
 	const state = (process as NodeJS.Process & { [SPAWN_GUARD_STATE]?: GuardState })[SPAWN_GUARD_STATE];
 	const nativeSpawn = state?.originals?.spawn;
 	if (!nativeSpawn) throw new Error("recovered-sentinel probe requires the tier-1 spawn guard's preserved native spawn");
@@ -250,7 +240,6 @@ function recoveredSentinelProbe(stateDir: string, exitFile: string, releaseFile:
 				...process.env,
 				BOBBIT_RECOVERED_SENTINEL_STATE: stateDir,
 				BOBBIT_RECOVERED_SENTINEL_EXIT: exitFile,
-				BOBBIT_RECOVERED_SENTINEL_RELEASE: releaseFile,
 			},
 		});
 		child.stdout?.on("data", chunk => { stdout += chunk.toString(); });
@@ -299,16 +288,21 @@ describe("spawnTracked timeout cleanup", () => {
 		if (process.platform !== "win32") expect(result.stdout).toContain("timeout-tree-reaped");
 	});
 
-	it.skipIf(process.platform === "win32")("reaps a recovered POSIX sentinel after its original parent exits", async () => {
+	it("reaps a recovered POSIX sentinel after its original parent exits", async () => {
+		if (process.platform === "win32") {
+			expect(process.platform).toBe("win32");
+			return;
+		}
 		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-recovered-sentinel-"));
 		const exitFile = path.join(stateDir, "command.exit");
-		const releaseFile = path.join(stateDir, "release-command");
 		let rootPid: number | undefined;
 		try {
-			const probe = await recoveredSentinelProbe(stateDir, exitFile, releaseFile);
+			const probe = await recoveredSentinelProbe(stateDir, exitFile);
 			rootPid = probe.pid;
-			expect(fs.existsSync(exitFile)).toBe(false);
-			fs.writeFileSync(releaseFile, "go");
+			const sentinelIdentity = JSON.parse(fs.readFileSync(probe.sentinelFile, "utf8"));
+			expect(sentinelIdentity.pid, "the durable record must name the separately-invoked sentinel, not the root wrapper").not.toBe(rootPid);
+			// The probe already exited. Its closed FD 4 now releases the payload,
+			// which publishes this exit file without any timing-based polling.
 			await waitForFile(exitFile);
 			expect(groupAlive(rootPid), "the probe parent exited, but its same-group sentinel must retain the original PGID for recovered cleanup").toBe(true);
 

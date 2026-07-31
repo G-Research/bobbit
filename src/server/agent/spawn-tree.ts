@@ -232,10 +232,14 @@ const WINDOWS_JOB_SUPERVISOR_COMMAND = Buffer.from(WINDOWS_JOB_SUPERVISOR, "utf1
 // The background shell remains in the detached process group but ignores the
 // graceful signal. It makes root exit an ownership-safe place to send SIGKILL:
 // no empty-group/PGID-reuse window exists until that final signal kills it.
-const POSIX_TREE_SENTINEL_SCRIPT = "(trap '' HUP INT TERM; if [ -n \"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE\" ]; then __bobbit_sentinel_start=$(ps -o lstart= -p \"$$\" 2>/dev/null | sed 's/^ *//'); __bobbit_sentinel_pgid=$(ps -o pgid= -p \"$$\" 2>/dev/null | tr -d '[:space:]'); __bobbit_sentinel_tmp=\"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE.$$.tmp\"; printf '{\"pid\":%s,\"pgid\":%s,\"nonce\":\"%s\",\"startToken\":\"%s\"}\\n' \"$$\" \"${__bobbit_sentinel_pgid:-0}\" \"$BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE\" \"$__bobbit_sentinel_start\" > \"$__bobbit_sentinel_tmp\" && mv \"$__bobbit_sentinel_tmp\" \"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE\"; fi; printf . >&3; while :; do sleep 2147483647 & wait $!; done) & exec \"$@\"";
+// Run this in a separately invoked shell, rather than a background subshell.
+// POSIX `/bin/sh` preserves the outer shell's `$$` in `( ... ) &`; a new shell
+// gives the identity record the actual sentinel PID needed after root exit.
+const POSIX_TREE_SENTINEL_CHILD_SCRIPT = "trap '' HUP INT TERM; if [ -n \"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE\" ]; then __bobbit_sentinel_tmp=\"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE.$$.tmp\"; printf '{\"pid\":%s,\"pgid\":%s,\"nonce\":\"%s\"}\\n' \"$$\" \"$PPID\" \"$BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE\" > \"$__bobbit_sentinel_tmp\" && mv \"$__bobbit_sentinel_tmp\" \"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE\"; fi; printf . >&3; while :; do sleep 2147483647 & wait $!; done";
+const POSIX_TREE_SENTINEL_SCRIPT = "/bin/sh -c \"$BOBBIT_POSIX_TREE_SENTINEL_CHILD_SCRIPT\" & exec \"$@\"";
 
 function withPosixSentinelReadyPipe(stdio: StdioOptions | undefined): StdioOptions {
-	if (Array.isArray(stdio)) return [...stdio.slice(0, 3), "pipe"] as StdioOptions;
+	if (Array.isArray(stdio)) return [...stdio.slice(0, 3), "pipe", ...stdio.slice(3)] as StdioOptions;
 	const standard = stdio ?? "pipe";
 	return [standard, standard, standard, "pipe"] as StdioOptions;
 }
@@ -262,11 +266,14 @@ export function spawnTracked(
 	const windowsPayload = windowsJobSupervisor
 		? Buffer.from(JSON.stringify({ file: cmd, args, cwd: opts.cwd ?? process.cwd() }), "utf8").toString("base64")
 		: undefined;
-	const sentinelEnv = posixTreeSentinel && opts.posixSentinelIdentity
+	const sentinelEnv = posixTreeSentinel
 		? {
 			...(opts.env ?? process.env),
-			BOBBIT_POSIX_SENTINEL_IDENTITY_FILE: opts.posixSentinelIdentity.file,
-			BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE: opts.posixSentinelIdentity.nonce,
+			BOBBIT_POSIX_TREE_SENTINEL_CHILD_SCRIPT: POSIX_TREE_SENTINEL_CHILD_SCRIPT,
+			...(opts.posixSentinelIdentity ? {
+				BOBBIT_POSIX_SENTINEL_IDENTITY_FILE: opts.posixSentinelIdentity.file,
+				BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE: opts.posixSentinelIdentity.nonce,
+			} : {}),
 		}
 		: opts.env;
 	const child = spawnImpl(

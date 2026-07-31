@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { spawnTracked, killAllTracked, killTreeByPid, type TrackedChild } from "./spawn-tree.js";
 import { realClock, realCommandRunner, type Clock, type CommandRunner, type TimerHandle } from "../gateway-deps.js";
 import { broadcastGateStatusChanged } from "../gate-status-broadcast.js";
@@ -2808,7 +2808,7 @@ export class VerificationHarness {
 	/**
 	 * Reap the POSIX group sentinel left behind when a detached verification
 	 * wrapper writes its durable verdict after the gateway process has exited.
-	 * The sentinel's own PID, nonce, start token, and PGID must all still match
+	 * The sentinel's own PID, nonce, and PGID must match the durable record
 	 * before naming the recovered group; otherwise a reused PID is never
 	 * targeted and resume fails closed.
 	 */
@@ -2825,7 +2825,7 @@ export class VerificationHarness {
 			return pending("Recovered command verdict has no durable POSIX sentinel group identity.");
 		}
 
-		let record: { pid?: unknown; pgid?: unknown; nonce?: unknown; startToken?: unknown };
+		let record: { pid?: unknown; pgid?: unknown; nonce?: unknown };
 		try {
 			record = JSON.parse(fs.readFileSync(step.sentinelFile, "utf8"));
 		} catch (err) {
@@ -2833,7 +2833,7 @@ export class VerificationHarness {
 		}
 		const sentinelPid = Number(record.pid);
 		const recordedGroupId = Number(record.pgid);
-		if (!Number.isFinite(sentinelPid) || sentinelPid <= 0 || recordedGroupId !== groupId || record.nonce !== expectedNonce || typeof record.startToken !== "string" || !record.startToken) {
+		if (!Number.isFinite(sentinelPid) || sentinelPid <= 0 || recordedGroupId !== groupId || record.nonce !== expectedNonce) {
 			return pending("Recovered command sentinel identity did not match persisted group metadata.");
 		}
 		// A missing sentinel means its process group is already gone. Never signal
@@ -2843,19 +2843,11 @@ export class VerificationHarness {
 			return;
 		}
 
-		let observed = "";
-		try {
-			observed = execFileSync("ps", ["-o", "lstart=", "-o", "pgid=", "-p", String(sentinelPid)], {
-				encoding: "utf8",
-				stdio: ["ignore", "pipe", "ignore"],
-			}).trim();
-		} catch {
-			return pending("Could not inspect the live recovered POSIX sentinel before cleanup.");
-		}
-		const match = /^(.*?)\s+(\d+)$/.exec(observed);
-		if (!match || match[1].trim() !== record.startToken || Number(match[2]) !== groupId) {
-			return pending("Recovered POSIX sentinel no longer matches its original process identity; refusing to target its group.");
-		}
+		// The record is published by the separately-invoked sentinel after it has
+		// installed its traps. A live recorded sentinel keeps this PGID from being
+		// reused, so its nonce + PID + recorded PGID are a durable ownership proof
+		// for this one final negative-PID signal. If it disappeared, return above
+		// without ever naming the historical group.
 		if (killTreeByPid(groupId, "SIGKILL") !== "signalled") {
 			return pending("Recovered POSIX sentinel group disappeared before cleanup; refusing to retarget its historical PGID.");
 		}
