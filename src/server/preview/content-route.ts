@@ -14,14 +14,17 @@
  */
 
 import fs from "node:fs";
+import path from "node:path";
 import { randomBytes } from "node:crypto";
 import type http from "node:http";
 
 import {
 	acquirePreviewDirectoryRead,
 	ensurePreviewDirectoryGeneration,
+	invalidatePreviewDirectoryGeneration,
 	isPreviewDirectoryAvailable,
 	mountPath,
+	previewDirectoryFileMatches,
 	previewDirectoryGenerationMatches,
 	readMountDirectory,
 } from "./mount.js";
@@ -186,6 +189,50 @@ function requestIsNavigation(req: http.IncomingMessage): boolean {
 	};
 	if (header("sec-fetch-mode") === "navigate") return true;
 	return ["document", "frame", "iframe", "embed", "object"].includes(header("sec-fetch-dest"));
+}
+
+function pathRelativeToPreviewRoot(baseDir: string, resolved: string): string {
+	return path.relative(path.resolve(baseDir), path.resolve(resolved)).split(path.sep).join("/");
+}
+
+function openPreviewFileNoFollow(resolved: string): Readonly<{ fd: number; stats: fs.Stats }> | null {
+	let fd: number | undefined;
+	try {
+		const noFollow = (fs.constants as typeof fs.constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+		fd = fs.openSync(resolved, fs.constants.O_RDONLY | noFollow);
+		const stats = fs.fstatSync(fd);
+		if (!stats.isFile()) throw new Error("Preview asset descriptor is not a regular file");
+		return { fd, stats };
+	} catch {
+		if (fd !== undefined) {
+			try { fs.closeSync(fd); } catch { /* preserve the open/stat failure */ }
+		}
+		return null;
+	}
+}
+
+function closePreviewFile(fd: number): void {
+	try { fs.closeSync(fd); } catch { /* descriptor may already be closed by its stream */ }
+}
+
+function readVerifiedPreviewText(
+	resolved: string,
+	baseDir: string,
+	generation: string,
+	relativePath: string,
+): string | null {
+	const opened = openPreviewFileNoFollow(resolved);
+	if (!opened) return null;
+	try {
+		if (!previewDirectoryFileMatches(baseDir, generation, relativePath, opened.stats)) return null;
+		const body = fs.readFileSync(opened.fd, "utf-8");
+		const after = fs.fstatSync(opened.fd);
+		return previewDirectoryFileMatches(baseDir, generation, relativePath, after) ? body : null;
+	} catch {
+		return null;
+	} finally {
+		closePreviewFile(opened.fd);
+	}
 }
 
 function injectSvgBase(svg: string, baseHref: string): string {
@@ -439,7 +486,7 @@ export async function handlePreviewRequest(
 			const expired = capabilityNow(opts) >= routedCapability.expiresAt;
 			if (!stillActive
 				|| expired
-				|| !previewDirectoryGenerationMatches(baseDir, routedCapability.generation)) {
+				|| !await previewDirectoryGenerationMatches(baseDir, routedCapability.generation)) {
 				revokePreviewAssetCapability(opts.cookieStore, routedCapability);
 				send(res, 401, JSON.stringify({ error: "Unauthorized" }));
 				return true;
@@ -488,6 +535,7 @@ export async function handlePreviewRequest(
 		return true;
 	}
 
+	const relativeAssetPath = pathRelativeToPreviewRoot(baseDir, guard.resolved);
 	const contentType = mimeTypeFor(guard.resolved);
 	const isHtml = contentType.startsWith("text/html");
 	const isSvg = contentType.startsWith("image/svg+xml");
@@ -501,19 +549,8 @@ export async function handlePreviewRequest(
 	}
 
 	if (isHtml) {
-		// Read into memory and inject base + bridge scripts.
-		let body: string;
-		try {
-			body = fs.readFileSync(guard.resolved, "utf-8");
-		} catch {
-			send(res, 404, JSON.stringify({ error: "File not found" }));
-			return true;
-		}
-		// `<base>` + inline theme-token snapshot. Both land inside <head> via
-		// injectBaseAndScripts; the snapshot defines `:root`/`.dark` defaults so
-		// standalone-tab opens still resolve `var(--background)` etc. Opaque
-		// embedded frames receive live theme updates over the constrained
-		// postMessage bridge instead of reading parent.document.
+		// Validate the complete published tree, then bind this exact file to a
+		// no-follow descriptor before reading any bytes into the response.
 		let generation: string;
 		try {
 			generation = await ensurePreviewDirectoryGeneration(baseDir);
@@ -521,6 +558,17 @@ export async function handlePreviewRequest(
 			send(res, 404, JSON.stringify({ error: "Preview mount is not available" }));
 			return true;
 		}
+		const body = readVerifiedPreviewText(guard.resolved, baseDir, generation, relativeAssetPath);
+		if (body === null) {
+			invalidatePreviewDirectoryGeneration(baseDir);
+			send(res, 404, JSON.stringify({ error: "Preview mount changed before it could be read" }));
+			return true;
+		}
+		// `<base>` + inline theme-token snapshot. Both land inside <head> via
+		// injectBaseAndScripts; the snapshot defines `:root`/`.dark` defaults so
+		// standalone-tab opens still resolve `var(--background)` etc. Opaque
+		// embedded frames receive live theme updates over the constrained
+		// postMessage bridge instead of reading parent.document.
 		const issuedCapability = issuePreviewAssetCapability(
 			contentCapabilityScope(basePath, internalBaseRoute),
 			baseDir,
@@ -531,14 +579,12 @@ export async function handlePreviewRequest(
 			`${internalBaseRoute}${CONTENT_CAPABILITY_SEGMENT}/${issuedCapability.token}/`,
 		);
 		const publicBaseHref = withBasePath(capabilityBaseRoute, basePath);
-		const canonicalBaseHref = withBasePath(internalBaseRoute, basePath);
-		const canonicalDocumentHref = withBasePath(gatewayRoute(`${internalBaseRoute}${rel}`), basePath);
 		const baseTag = `<base data-bobbit-preview-base href="${publicBaseHref}">` + getPreviewThemeSnapshot();
 		const rewritten = injectBaseAndScripts(
 			body,
 			baseTag,
 			PREVIEW_BRIDGE_SCRIPTS
-				+ previewNavigationBridge(publicBaseHref, canonicalBaseHref, canonicalDocumentHref)
+				+ previewNavigationBridge()
 				+ PREVIEW_OPAQUE_THEME_BRIDGE,
 		);
 		res.writeHead(200, {
@@ -561,24 +607,26 @@ export async function handlePreviewRequest(
 	}
 
 	if (isSvg) {
-		let body: string;
-		try {
-			body = fs.readFileSync(guard.resolved, "utf-8");
-		} catch {
-			send(res, 404, JSON.stringify({ error: "File not found" }));
-			return true;
-		}
 		// SVG is a script-capable document in a popout. Apply the same opaque
 		// response sandbox as HTML. When ambient auth loaded the document, inject
 		// XML Base so its relative images/styles use generation-bound authority.
-		if (!capabilityAuthorized) {
-			let generation: string;
+		let generation = routedCapability?.generation;
+		if (!generation) {
 			try {
 				generation = await ensurePreviewDirectoryGeneration(baseDir);
 			} catch {
 				send(res, 404, JSON.stringify({ error: "Preview mount is not available" }));
 				return true;
 			}
+		}
+		let body = readVerifiedPreviewText(guard.resolved, baseDir, generation, relativeAssetPath);
+		if (body === null) {
+			invalidatePreviewDirectoryGeneration(baseDir);
+			if (routedCapability) revokePreviewAssetCapability(opts.cookieStore, routedCapability);
+			send(res, capabilityAuthorized ? 401 : 404, JSON.stringify({ error: capabilityAuthorized ? "Unauthorized" : "Preview mount changed before it could be read" }));
+			return true;
+		}
+		if (!capabilityAuthorized) {
 			const issuedCapability = issuePreviewAssetCapability(
 				contentCapabilityScope(basePath, internalBaseRoute),
 				baseDir,
@@ -603,20 +651,46 @@ export async function handlePreviewRequest(
 		return true;
 	}
 
-	// Stream inert assets as-is.
+	// Validate the published tree, then bind the pathname to one no-follow
+	// descriptor before headers. Ambient-auth and capability reads share the
+	// same file identity proof; only their failure status differs.
+	let generation = routedCapability?.generation;
+	if (!generation) {
+		try {
+			generation = await ensurePreviewDirectoryGeneration(baseDir);
+		} catch {
+			send(res, 404, JSON.stringify({ error: "Preview mount is not available" }));
+			return true;
+		}
+	}
+	const opened = openPreviewFileNoFollow(guard.resolved);
+	if (!opened) {
+		send(res, 404, JSON.stringify({ error: "File not found" }));
+		return true;
+	}
+	if (!previewDirectoryFileMatches(baseDir, generation, relativeAssetPath, opened.stats)) {
+		closePreviewFile(opened.fd);
+		invalidatePreviewDirectoryGeneration(baseDir);
+		if (routedCapability) revokePreviewAssetCapability(opts.cookieStore, routedCapability);
+		send(res, routedCapability ? 401 : 404, JSON.stringify({
+			error: routedCapability ? "Unauthorized" : "Preview mount changed before it could be read",
+		}));
+		return true;
+	}
 	res.writeHead(200, {
 		"Content-Type": contentType,
-		"Content-Length": String(guard.size),
+		"Content-Length": String(opened.stats.size),
 		"Cache-Control": "no-store",
 		"Referrer-Policy": PREVIEW_REFERRER_POLICY,
 		"X-Content-Type-Options": "nosniff",
 		...(capabilityAuthorized ? { "Access-Control-Allow-Origin": "null" } : {}),
 	});
 	if (method === "HEAD") {
+		closePreviewFile(opened.fd);
 		res.end();
 		return true;
 	}
-	const stream = fs.createReadStream(guard.resolved);
+	const stream = fs.createReadStream(guard.resolved, { fd: opened.fd, autoClose: true });
 	// Keep the read lease until exactly one terminal condition wins. A client
 	// abort/close must stop disk I/O rather than leaving the stream (and lease)
 	// alive until the file naturally reaches EOF.

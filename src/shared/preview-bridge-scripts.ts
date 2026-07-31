@@ -146,20 +146,36 @@ function scriptString(value: string): string {
  * frames ask their validated parent to navigate the exact iframe; standalone
  * popouts perform a top-level same-site navigation and retain `noopener`.
  */
-export function previewNavigationBridge(
-	capabilityBaseHref: string,
-	canonicalBaseHref: string,
-	canonicalDocumentHref: string,
-): string {
-	return `<script>
+export function previewNavigationBridge(): string {
+	return `<script data-bobbit-preview-navigation>
 (function() {
 	var MESSAGE_TYPE = ${scriptString(PREVIEW_NAVIGATION_MESSAGE_TYPE)};
-	var capabilityBase = new URL(${scriptString(capabilityBaseHref)}, location.href);
-	var canonicalBase = new URL(${scriptString(canonicalBaseHref)}, location.href);
-	var canonicalDocument = new URL(${scriptString(canonicalDocumentHref)}, location.href);
 	function within(pathname, base) {
 		return pathname === base || pathname.indexOf(base.endsWith('/') ? base : base + '/') === 0;
 	}
+	// Derive every navigation boundary from the marked base after the response
+	// reaches the browser. Source Vite rebases that element from a mounted
+	// gateway to its root origin, while production leaves it mounted. Keeping no
+	// server-path constants here prevents those two authorities from drifting.
+	var markedBases = document.querySelectorAll('base[' + 'data-bobbit-preview-' + 'base]');
+	if (markedBases.length !== 1) return;
+	var capabilityBase;
+	var canonicalBase;
+	var canonicalDocument;
+	try {
+		capabilityBase = new URL(markedBases[0].href, location.href);
+		var marker = capabilityBase.pathname.lastIndexOf('/_content/');
+		if (marker < 0 || capabilityBase.search || capabilityBase.hash) return;
+		var capabilitySuffix = capabilityBase.pathname.slice(marker + '/_content/'.length);
+		if (!/^[A-Za-z0-9_-]{43}\\/$/.test(capabilitySuffix)) return;
+		canonicalBase = new URL(capabilityBase.href);
+		canonicalBase.pathname = capabilityBase.pathname.slice(0, marker + 1);
+		canonicalDocument = new URL(location.href);
+		if (canonicalDocument.origin !== capabilityBase.origin
+			|| !within(canonicalDocument.pathname, canonicalBase.pathname)) return;
+		var documentRelative = canonicalDocument.pathname.slice(canonicalBase.pathname.length);
+		if (documentRelative === '_content' || documentRelative.indexOf('_content/') === 0) return;
+	} catch (_) { return; }
 	function canonicalTarget(raw) {
 		if (typeof raw !== 'string' || !raw) return null;
 		if (raw.charAt(0) === '#') return new URL(raw, canonicalDocument.href).href;

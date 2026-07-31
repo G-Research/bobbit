@@ -74,12 +74,17 @@ describe("PREVIEW_THEME_BRIDGE — standalone-tab guard", () => {
 		}
 	});
 
+	it("derives the exact live or artifact scope from the response-rebased marked base", () => {
+		const script = previewNavigationBridge();
+		assert.match(script, /querySelectorAll\('base\[' \+ 'data-bobbit-preview-' \+ 'base\]'\)/);
+		assert.match(script, /lastIndexOf\('\/_content\/'\)/);
+		assert.match(script, /\^\[A-Za-z0-9_-\]\{43\}/);
+		assert.match(script, /canonicalDocument = new URL\(location\.href\)/);
+		assert.doesNotMatch(script, /team\/bobbit|preview\/session-a/);
+	});
+
 	it("keeps popouts opener-free by using top-level ambient navigation and parent handoff only for frames", () => {
-		const script = previewNavigationBridge(
-			"/team/bobbit/preview/session-a/_content/token/",
-			"/team/bobbit/preview/session-a/",
-			"/team/bobbit/preview/session-a/index.html",
-		);
+		const script = previewNavigationBridge();
 		assert.match(script, /if \(parent === window\) location\.assign\(target\)/);
 		assert.match(script, /parent\.postMessage\(\{ type: MESSAGE_TYPE, url: target \}, '\*'\)/);
 		assert.doesNotMatch(script, /opener/);

@@ -214,8 +214,9 @@ export async function writeInline(sessionId: string, html: string, entry?: strin
 		if (!stat.isFile() || stat.isSymbolicLink()) throw new PreviewMountError(500, "Inline preview entry is not a regular file");
 		// The entry and full content hash are both checked while the writer fence
 		// is held. Only this explicit verification makes the pathname servable.
-		const contentHash = await hashMountDirectory(dir, { trustedRoot: previewRoot() });
-		markPreviewDirectoryVerified(dir, contentHash);
+		const verified = await hashMountDirectoryWithIdentity(dir, { trustedRoot: previewRoot() });
+		const contentHash = verified.contentHash;
+		markPreviewDirectoryVerified(dir, contentHash, verified.identity);
 		return {
 			url: `/preview/${sessionId}/${safeEntry}`,
 			path: target,
@@ -929,6 +930,105 @@ export async function listMountFiles(root: string, options: PreviewTreeOptions =
 	return out.sort();
 }
 
+type PreviewDirectoryPathIdentity = Readonly<{
+	relativePath: string;
+	kind: "directory" | "file" | "symlink" | "other";
+	stamp: string;
+}>;
+
+type PreviewDirectoryPublishedIdentity = readonly PreviewDirectoryPathIdentity[];
+
+type CapturedPreviewDirectoryIdentity = Readonly<{
+	published: PreviewDirectoryPublishedIdentity;
+	fileStats: ReadonlyMap<string, AsyncTreeStats>;
+}>;
+
+type PreviewIdentityStats = AsyncTreeStats & Partial<Pick<fs.Stats,
+	"size" | "mtimeMs" | "ctimeMs" | "birthtimeMs" | "nlink"
+>>;
+
+function identityScalar(value: number | bigint | undefined): string | number | null {
+	return typeof value === "bigint" ? value.toString() : value ?? null;
+}
+
+function previewPathIdentityStamp(stats: AsyncTreeStats): string {
+	const candidate = stats as PreviewIdentityStats;
+	return JSON.stringify([
+		identityScalar(candidate.dev),
+		identityScalar(candidate.ino),
+		candidate.mode ?? null,
+		candidate.nlink ?? null,
+		candidate.size ?? null,
+		candidate.mtimeMs ?? candidate.mtime?.getTime() ?? null,
+		candidate.ctimeMs ?? null,
+		candidate.birthtimeMs ?? null,
+	]);
+}
+
+function samePreviewDirectoryIdentity(
+	left: PreviewDirectoryPublishedIdentity,
+	right: PreviewDirectoryPublishedIdentity,
+): boolean {
+	return left.length === right.length && left.every((entry, index) => {
+		const candidate = right[index];
+		return candidate?.relativePath === entry.relativePath
+			&& candidate.kind === entry.kind
+			&& candidate.stamp === entry.stamp;
+	});
+}
+
+async function capturePreviewDirectoryIdentity(
+	bound: BoundPreviewDirectoryRoot,
+	concurrency = RECOVERY_IO_CONCURRENCY,
+): Promise<CapturedPreviewDirectoryIdentity> {
+	const published: PreviewDirectoryPathIdentity[] = [];
+	const fileStats = new Map<string, AsyncTreeStats>();
+	const traversal = boundPreviewTraversal(bound);
+	await walkTree(bound.path, entry => {
+		published.push({
+			relativePath: entry.relativePath,
+			kind: entry.kind,
+			stamp: previewPathIdentityStamp(entry.stats),
+		});
+		if (entry.kind === "file") fileStats.set(entry.relativePath, entry.stats);
+	}, {
+		concurrency,
+		fs: traversal.fs,
+	});
+	await bound.assertCurrent();
+	published.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+	return { published, fileStats };
+}
+
+/** Exact bytes plus the cheap published identity used between full hashes. */
+async function hashMountDirectoryWithIdentity(
+	root: string,
+	options: PreviewTreeOptions = {},
+): Promise<Readonly<{ contentHash: string; identity: PreviewDirectoryPublishedIdentity }>> {
+	const bound = await resolveBoundPreviewRoot(root, options);
+	const before = await capturePreviewDirectoryIdentity(bound, options.concurrency);
+	const hash = crypto.createHash("sha256");
+	for (const rel of [...before.fileStats.keys()].sort()) {
+		hash.update(rel, "utf-8");
+		hash.update("\0");
+		const absolute = path.join(bound.path, ...rel.split("/"));
+		await readRegularFileNoFollowInChunks(absolute, chunk => { hash.update(chunk); }, {
+			fs: bound.descriptorFs,
+			chunkSize: HASH_READ_BUFFER_BYTES,
+			containedWithin: bound.canonicalPath,
+			expectedStats: before.fileStats.get(rel),
+		});
+		await bound.assertCurrent();
+		hash.update("\0");
+	}
+	const after = await capturePreviewDirectoryIdentity(bound, options.concurrency);
+	if (!samePreviewDirectoryIdentity(before.published, after.published)) {
+		throw new PreviewMountError(500, "Preview directory changed while its generation was hashed");
+	}
+	await bound.assertCurrent();
+	return { contentHash: hash.digest("hex"), identity: after.published };
+}
+
 /** Stable SHA-256 of sorted path + NUL + streamed bytes + NUL records. */
 export async function hashMountDirectory(root: string, options: PreviewTreeOptions = {}): Promise<string> {
 	const bound = await resolveBoundPreviewRoot(root, options);
@@ -1085,7 +1185,12 @@ let ownedPreviewCleanupTail: Promise<void> = Promise.resolve();
 
 type PreviewDirectoryGenerationState = {
 	epoch: bigint;
-	verified?: Readonly<{ generation: string; contentHash: string }>;
+	verified?: Readonly<{
+		generation: string;
+		contentHash: string;
+		identity?: PreviewDirectoryPublishedIdentity;
+	}>;
+	/** Metadata validation and any exact fallback hash share one owner. */
 	verification?: Promise<string>;
 };
 
@@ -1123,7 +1228,11 @@ export function invalidatePreviewDirectoryGenerationsWithin(directory: string): 
 }
 
 /** Publish bytes that were already fully hashed inside the writer fence. */
-export function publishPreviewDirectoryGeneration(directory: string, contentHash: string): string {
+export function publishPreviewDirectoryGeneration(
+	directory: string,
+	contentHash: string,
+	identity?: PreviewDirectoryPublishedIdentity,
+): string {
 	if (!/^[a-f0-9]{64}$/.test(contentHash)) {
 		throw new PreviewMountError(500, "Preview generation requires an exact content hash");
 	}
@@ -1131,21 +1240,32 @@ export function publishPreviewDirectoryGeneration(directory: string, contentHash
 	const generation = `g${epoch.toString(36)}`;
 	previewDirectoryGenerations.set(previewInstallKey(directory), {
 		epoch,
-		verified: { generation, contentHash },
+		verified: { generation, contentHash, identity },
 	});
 	return generation;
 }
 
+function assertGenerationOwnerCurrent(
+	key: string,
+	directory: string,
+	captured: PreviewDirectoryGenerationState,
+	capturedEpoch: bigint,
+): void {
+	if (previewDirectoryGenerations.get(key) !== captured
+		|| captured.epoch !== capturedEpoch
+		|| !isPreviewDirectoryAvailable(directory)) {
+		throw new PreviewMountError(404, "Preview mount changed during generation verification");
+	}
+}
+
 /**
- * Return a verified generation, hashing once only when this process has no
- * publication record (for example after a restart). Concurrent cold readers
- * join the same verification. Any supported mutation or availability fence
- * that overlaps the hash makes the result fail closed instead of publishing.
+ * Validate cheap file/directory metadata first and run one coalesced exact hash
+ * only on cold start or uncertainty. Any uncertainty rotates the generation,
+ * so an old path capability fails before it can serve externally changed bytes.
  */
 export async function ensurePreviewDirectoryGeneration(directory: string): Promise<string> {
 	const key = previewInstallKey(directory);
 	let state = previewDirectoryGenerations.get(key);
-	if (state?.verified && isPreviewDirectoryAvailable(directory)) return state.verified.generation;
 	if (state?.verification) return state.verification;
 	if (!isPreviewDirectoryAvailable(directory)) {
 		throw new PreviewMountError(404, "Preview mount is not available");
@@ -1156,18 +1276,34 @@ export async function ensurePreviewDirectoryGeneration(directory: string): Promi
 	}
 	const captured = state;
 	const capturedEpoch = state.epoch;
+	const published = state.verified;
 	const verification = (async () => {
 		try {
-			const contentHash = await hashMountDirectory(directory);
-			if (previewDirectoryGenerations.get(key) !== captured
-				|| captured.epoch !== capturedEpoch
-				|| !isPreviewDirectoryAvailable(directory)) {
-				throw new PreviewMountError(404, "Preview mount changed during generation verification");
+			if (published?.identity) {
+				try {
+					const bound = await bindPreviewDirectoryRoot(directory);
+					const current = await capturePreviewDirectoryIdentity(bound);
+					assertGenerationOwnerCurrent(key, directory, captured, capturedEpoch);
+					if (samePreviewDirectoryIdentity(published.identity, current.published)) {
+						return published.generation;
+					}
+				} catch (error) {
+					assertGenerationOwnerCurrent(key, directory, captured, capturedEpoch);
+					// Metadata errors and mismatches are uncertainty, never authority.
+					if (error instanceof PreviewMountError && error.statusCode === 404) throw error;
+				}
 			}
+
+			const exact = await hashMountDirectoryWithIdentity(directory);
+			assertGenerationOwnerCurrent(key, directory, captured, capturedEpoch);
 			const epoch = nextPreviewDirectoryGeneration();
 			const generation = `g${epoch.toString(36)}`;
 			captured.epoch = epoch;
-			captured.verified = { generation, contentHash };
+			captured.verified = {
+				generation,
+				contentHash: exact.contentHash,
+				identity: exact.identity,
+			};
 			return generation;
 		} finally {
 			if (previewDirectoryGenerations.get(key) === captured) captured.verification = undefined;
@@ -1177,10 +1313,33 @@ export async function ensurePreviewDirectoryGeneration(directory: string): Promi
 	return verification;
 }
 
-/** Constant-time asset request check; supported writers invalidate first. */
-export function previewDirectoryGenerationMatches(directory: string, generation: string): boolean {
+/** Metadata-fast asset check with one shared exact fallback on uncertainty. */
+export async function previewDirectoryGenerationMatches(
+	directory: string,
+	generation: string,
+): Promise<boolean> {
+	try {
+		return await ensurePreviewDirectoryGeneration(directory) === generation;
+	} catch {
+		return false;
+	}
+}
+
+/** Recheck the requested pathname against the identity that authorized it. */
+export function previewDirectoryFileMatches(
+	directory: string,
+	generation: string,
+	relativePath: string,
+	stats: AsyncTreeStats,
+): boolean {
 	const state = previewDirectoryGenerations.get(previewInstallKey(directory));
-	return isPreviewDirectoryAvailable(directory) && state?.verified?.generation === generation;
+	const verified = state?.verified;
+	if (!isPreviewDirectoryAvailable(directory)
+		|| verified?.generation !== generation
+		|| !verified.identity) return false;
+	const normalized = relativePath.split(path.sep).join("/");
+	const expected = verified.identity.find(entry => entry.relativePath === normalized);
+	return expected?.kind === "file" && expected.stamp === previewPathIdentityStamp(stats);
 }
 
 function previewInstallKey(directory: string): string {
@@ -1329,9 +1488,13 @@ export async function quarantinePreviewDirectory(
 }
 
 /** Explicitly publish a fully validated directory, or a verified absence. */
-export function markPreviewDirectoryVerified(directory: string, contentHash?: string): void {
+export function markPreviewDirectoryVerified(
+	directory: string,
+	contentHash?: string,
+	identity?: PreviewDirectoryPublishedIdentity,
+): void {
 	const key = previewInstallKey(directory);
-	if (contentHash !== undefined) publishPreviewDirectoryGeneration(directory, contentHash);
+	if (contentHash !== undefined) publishPreviewDirectoryGeneration(directory, contentHash, identity);
 	blockedPreviewInstalls.delete(key);
 }
 
@@ -1687,16 +1850,17 @@ export async function installPreviewDirectoryTransaction(
 				onRename: noteLiveRename,
 			});
 			const entryStats = await regularPreviewEntryStats(destinationRoot, options.entry, io);
-			const installedHash = await hashMountDirectory(destinationRoot, {
+			const installedVerification = await hashMountDirectoryWithIdentity(destinationRoot, {
 				fs: io,
 				trustedRoot: parent,
 				expectedRootStats: options.stagingExpectedRootStats,
 			});
+			const installedHash = installedVerification.contentHash;
 			if (installedHash !== preInstallHash
 				|| (options.expectedContentHash !== undefined && installedHash !== options.expectedContentHash)) {
 				throw new PreviewMountError(500, "Preview installed content hash mismatch");
 			}
-			markPreviewDirectoryVerified(destinationRoot, installedHash);
+			markPreviewDirectoryVerified(destinationRoot, installedHash, installedVerification.identity);
 			installed = { entryStats, contentHash: installedHash };
 		} catch (operationError) {
 			// The fence itself is not a mutation. If this path was available before
