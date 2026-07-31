@@ -397,28 +397,44 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 				method: "PUT",
 				headers: preferenceHeaders,
 				body: JSON.stringify({
+					palette: "ocean",
 					"default.sessionModel": "mock/mock-model",
 					"default.sessionThinkingLevel": "off",
 				}),
 			});
 			expect(
 				defaultSeed.ok,
-				`failed to select packaged mock default: ${defaultSeed.status} ${await defaultSeed.clone().text()}`,
+				`failed to select packaged mock default and ocean palette: ${defaultSeed.status} ${await defaultSeed.clone().text()}`,
 			).toBe(true);
 			expect(await defaultSeed.json()).toMatchObject({
+				palette: "ocean",
 				"default.sessionModel": "mock/mock-model",
 				"default.sessionThinkingLevel": "off",
 			});
 			const sessionId = await createProjectAndSession(baseUrl, token, workspaceDir);
-			await promptSession(wsBaseUrl, sessionId, token);
 
 			page.on("request", request => report.requests.push(request.url()));
+			await page.addInitScript(() => {
+				localStorage.setItem("theme", "light");
+				localStorage.setItem("palette", "ocean");
+			});
 			await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
 			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 30_000 });
+			// The sidebar appears in the initial gateway-starting render, before the
+			// asynchronous preference load. Wait for the app's explicit end-of-boot
+			// marker so a delayed preference/session lifecycle cannot clear this
+			// host palette while the iframe bridge is being observed.
+			await expect(page.locator("body")).toHaveAttribute("data-shortcuts-ready", "1", { timeout: 30_000 });
 			await page.evaluate(() => {
-				document.documentElement.classList.remove("dark");
-				document.documentElement.setAttribute("data-palette", "forest");
+				const root = document.documentElement;
+				root.classList.remove("dark");
+				root.setAttribute("data-palette", "ocean");
+				localStorage.setItem("theme", "light");
+				localStorage.setItem("palette", "ocean");
 			});
+			// Emit only after the host theme lifecycle is settled. This makes the
+			// generated inline document's parse-time bridge observe a stable host.
+			await promptSession(wsBaseUrl, sessionId, token);
 			await page.evaluate(id => { window.location.hash = `#/session/${id}`; }, sessionId);
 
 			const iframe = page.locator('iframe[title="theme-card.html"]');
@@ -430,6 +446,8 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 
 			const initialHost = await hostTheme(page);
 			const initialFrame = await iframeTheme(page);
+			expect(initialHost.dark).toBe(false);
+			expect(initialHost.palette).toBe("ocean");
 			expect(
 				report.bridgeAssets.length,
 				"PACKAGED_INLINE_THEME_BRIDGE_MISSING: compiled dist/ui assets must include the canonical preview theme bridge",
@@ -448,10 +466,15 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 				if (frameWindow) frameWindow.__packedFrameIdentity = "same-packaged-iframe";
 			});
 			await page.evaluate(() => {
-				document.documentElement.classList.add("dark");
-				document.documentElement.setAttribute("data-palette", "ocean");
+				const root = document.documentElement;
+				root.classList.add("dark");
+				root.setAttribute("data-palette", "rose");
+				localStorage.setItem("theme", "dark");
+				localStorage.setItem("palette", "rose");
 			});
 			const switchedHost = await hostTheme(page);
+			expect(switchedHost.dark).toBe(true);
+			expect(switchedHost.palette).toBe("rose");
 			await expect.poll(
 				async () => {
 					const state = await iframeTheme(page);
@@ -465,7 +488,7 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 				{ timeout: 20_000, message: "packaged iframe must mirror a live host theme/palette switch" },
 			).toEqual({
 				dark: true,
-				palette: "ocean",
+				palette: "rose",
 				background: switchedHost.background,
 				identity: "same-packaged-iframe",
 			});
