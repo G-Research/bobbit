@@ -21,6 +21,24 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/anthropic-oauth-adapter.test.ts",
+      "reason": "Credential-free regression coverage pinning Pi's current Anthropic OAuth URL, scopes, callback validation, token exchange, refresh, and the public Models/AuthInteraction adapter boundary.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/anthropic-oauth-persistence.test.ts",
+      "reason": "Credential-free regression coverage for provider-isolated atomic OAuth persistence, restricted permissions, restart-visible refreshable status, refresh rotation, and redacted failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/anthropic-oauth-pi-callback-contract-repro.test.ts",
       "reason": "Focused failing-first Anthropic OAuth regression pinning Pi's loopback callback and complete current authorization scope set, so the stale Console callback and reduced legacy scope contract cannot return.",
       "execution": {
