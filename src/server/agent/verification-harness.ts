@@ -2550,6 +2550,8 @@ export class VerificationHarness {
 	private readonly posixProcessIdentityInspector: (pid: number) => PosixProcessIdentity | undefined;
 	/** Test seam; production sends the one final signal through killTreeByPid. */
 	private readonly persistedTreeKiller: typeof killTreeByPid;
+	/** Test seam for cancellation/stale/terminal recovery paths. */
+	private readonly recoveredSentinelReaper: (step: ActiveVerification["steps"][number]) => Promise<void>;
 	private readonly skipLlmReview: boolean;
 
 	constructor(
@@ -2564,7 +2566,7 @@ export class VerificationHarness {
 		private projectConfigStore?: ProjectConfigStore,
 		projectContextManager?: ProjectContextManager,
 		configCascade?: import("./config-cascade.js").ConfigCascade,
-		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; commandLifecycleClock?: Clock; platform?: NodeJS.Platform; skipLlmReview?: boolean; posixProcessIdentityInspector?: (pid: number) => PosixProcessIdentity | undefined; persistedTreeKiller?: typeof killTreeByPid } = {},
+		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; commandLifecycleClock?: Clock; platform?: NodeJS.Platform; skipLlmReview?: boolean; posixProcessIdentityInspector?: (pid: number) => PosixProcessIdentity | undefined; persistedTreeKiller?: typeof killTreeByPid; recoveredSentinelReaper?: (step: ActiveVerification["steps"][number]) => Promise<void> } = {},
 	) {
 		this.commandRunner = deps.commandRunner ?? realCommandRunner;
 		this.commandStepRunner = deps.commandStepRunner ?? realVerificationCommandRunner;
@@ -2573,6 +2575,7 @@ export class VerificationHarness {
 		this.platform = deps.platform ?? process.platform;
 		this.posixProcessIdentityInspector = deps.posixProcessIdentityInspector ?? inspectPosixProcessIdentity;
 		this.persistedTreeKiller = deps.persistedTreeKiller ?? killTreeByPid;
+		this.recoveredSentinelReaper = deps.recoveredSentinelReaper ?? (step => this._reapRecoveredPosixSentinel(step));
 		this.skipLlmReview = !!deps.skipLlmReview;
 		this.configCascade = configCascade;
 		// Wrap the broadcast fn so every gate_verification_* event carries a
@@ -2993,7 +2996,7 @@ export class VerificationHarness {
 				// its POSIX group sentinel still owns the old PGID. Reap that verified
 				// sentinel before treating cancel/stale/terminal cleanup as complete.
 				try {
-					await this._reapRecoveredPosixSentinel(step);
+					await this.recoveredSentinelReaper(step);
 					step.killCompletedAt ??= Date.now();
 				} catch (err) {
 					if (!isPendingCommandCleanupError(err)) throw err;

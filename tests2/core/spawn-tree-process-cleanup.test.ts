@@ -183,6 +183,61 @@ process.stdout.write(JSON.stringify({ rootPid: tracked.child.pid, identity }) + 
 });
 `;
 
+const NESTED_SENTINEL_PAYLOAD = String.raw`
+import fs from "node:fs";
+import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
+const inherited = {
+  file: process.env.BOBBIT_POSIX_SENTINEL_IDENTITY_FILE,
+  nonce: process.env.BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE,
+  script: process.env.BOBBIT_POSIX_TREE_SENTINEL_CHILD_SCRIPT,
+  pgid: process.env.BOBBIT_POSIX_SENTINEL_PGID,
+};
+const nested = spawnTracked("/bin/sh", ["-c", "exit 0"], { stdio: ["ignore", "ignore", "ignore", "pipe"], posixSentinelIdentity: { file: process.env.BOBBIT_NESTED_SENTINEL_FILE, nonce: "nested-nonce" } });
+await new Promise((resolve, reject) => { const ready = nested.child.stdio[3]; if (!ready) return reject(new Error("missing nested ready")); ready.once("data", resolve); ready.once("error", reject); });
+fs.writeFileSync(process.env.BOBBIT_NESTED_SENTINEL_RESULT, JSON.stringify({ inherited, nested: JSON.parse(fs.readFileSync(process.env.BOBBIT_NESTED_SENTINEL_FILE, "utf8")), outer: JSON.parse(fs.readFileSync(process.env.BOBBIT_OUTER_SENTINEL_FILE, "utf8")) }));
+nested.killTree("SIGKILL");
+`;
+
+const NESTED_SENTINEL_PROBE = String.raw`
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nested-sentinel-"));
+const outerFile = path.join(dir, "outer.json"), nestedFile = path.join(dir, "nested.json"), resultFile = path.join(dir, "result.json");
+const tracked = spawnTracked(process.execPath, ["--import", "tsx", "--input-type=module", "-e", ${JSON.stringify(NESTED_SENTINEL_PAYLOAD)}], { stdio: ["ignore", "ignore", "ignore", "pipe"], env: { ...process.env, BOBBIT_OUTER_SENTINEL_FILE: outerFile, BOBBIT_NESTED_SENTINEL_FILE: nestedFile, BOBBIT_NESTED_SENTINEL_RESULT: resultFile }, posixSentinelIdentity: { file: outerFile, nonce: "outer-nonce" } });
+await new Promise((resolve, reject) => { const ready = tracked.child.stdio[3]; if (!ready) return reject(new Error("missing outer ready")); ready.once("data", resolve); ready.once("error", reject); });
+await new Promise((resolve, reject) => { tracked.child.once("close", resolve); tracked.child.once("error", reject); });
+const result = JSON.parse(fs.readFileSync(resultFile, "utf8"));
+process.stdout.write(JSON.stringify(result) + "\n", () => { fs.rmSync(dir, { recursive: true, force: true }); process.exit(0); });
+`;
+
+const IDENTITY_FAILURE_PROBE = String.raw`
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-sentinel-write-fail-"));
+const tracked = spawnTracked("/bin/sh", ["-c", "exec tail -f /dev/null"], {
+  stdio: ["ignore", "ignore", "ignore", "pipe"],
+  posixSentinelIdentity: { file: path.join(dir, "missing", "sentinel.json"), nonce: "write-fail" },
+});
+const ready = tracked.child.stdio[3];
+let acknowledged = false;
+await new Promise((resolve, reject) => {
+  if (!ready) return reject(new Error("missing readiness pipe"));
+  ready.on("data", () => { acknowledged = true; });
+  ready.once("close", resolve);
+  ready.once("error", reject);
+});
+tracked.killTree("SIGKILL");
+const reaped = await tracked.waitForTreeExit(1_500);
+process.stdout.write(JSON.stringify({ acknowledged, reaped }) + "\n", () => {
+  fs.rmSync(dir, { recursive: true, force: true });
+  process.exit(0);
+});
+`;
+
 type FakeReadyPipe = EventEmitter & { unrefCalls: number; unref(): void };
 type FakeChild = ChildProcess & { killCalls: NodeJS.Signals[]; readyPipe: FakeReadyPipe };
 
@@ -305,7 +360,7 @@ function groupAlive(pid: number): boolean {
 function makeRecoveryHarness(
 	stateDir: string,
 	calls: Array<{ kind: string; status: string }>,
-	deps: { platform?: NodeJS.Platform; posixProcessIdentityInspector?: (pid: number) => { startToken: string; pgid: number } | undefined; persistedTreeKiller?: (pid: number, signal?: NodeJS.Signals) => "signalled" | "unsupported" | "invalid" } = {},
+	deps: { platform?: NodeJS.Platform; posixProcessIdentityInspector?: (pid: number) => { startToken: string; pgid: number } | undefined; persistedTreeKiller?: (pid: number, signal?: NodeJS.Signals) => "signalled" | "unsupported" | "invalid"; recoveredSentinelReaper?: (step: any) => Promise<void> } = {},
 ): VerificationHarness {
 	return new VerificationHarness(
 		stateDir,
@@ -414,11 +469,25 @@ describe("spawnTracked timeout cleanup", () => {
 		expect(result.identity.startToken).toEqual(expect.any(String));
 	});
 
-	it("never acknowledges a sentinel whose durable identity write fails", () => {
-		const identityScript = SPAWN_TREE_SOURCE.match(/const POSIX_TREE_SENTINEL_CHILD_SCRIPT = (.+);/)?.[1] ?? "";
-		expect(identityScript).toContain("exit 125");
-		expect(identityScript.indexOf("exit 125")).toBeLessThan(identityScript.indexOf("printf . >&3"));
-		expect(SPAWN_TREE_SOURCE).toContain("unset BOBBIT_POSIX_SENTINEL_PGID BOBBIT_POSIX_SENTINEL_IDENTITY_FILE BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE BOBBIT_POSIX_TREE_SENTINEL_CHILD_SCRIPT");
+	it("scrubs outer sentinel identity before a nested tracked spawn", async () => {
+		if (process.platform === "win32") {
+			expect(process.platform).toBe("win32");
+			return;
+		}
+		const result = await runNativeJsonProbe(NESTED_SENTINEL_PROBE);
+		expect(result.inherited).toEqual({ file: undefined, nonce: undefined, script: undefined, pgid: undefined });
+		expect(result.outer.nonce).toBe("outer-nonce");
+		expect(result.nested.nonce).toBe("nested-nonce");
+		expect(result.nested.pid).not.toBe(result.outer.pid);
+	});
+
+	it("does not acknowledge or leak when sentinel identity publishing fails", async () => {
+		if (process.platform === "win32") {
+			expect(process.platform).toBe("win32");
+			return;
+		}
+		const result = await runNativeJsonProbe(IDENTITY_FAILURE_PROBE);
+		expect(result).toEqual({ acknowledged: false, reaped: true });
 	});
 
 	it("refuses a reused POSIX sentinel PID before it can signal a group", async () => {
@@ -442,6 +511,34 @@ describe("spawnTracked timeout cleanup", () => {
 				pid: groupId, pidNonce: nonce, sentinelFile,
 			})).rejects.toThrow(/no longer matches its original process identity/i);
 			expect(killCalls, "a mismatched live sentinel PID must not authorize any process-group signal").toEqual([]);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps an exit-file command active until recovered sentinel cleanup settles", async () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-exit-sentinel-cleanup-"));
+		const exitFile = path.join(stateDir, "command.exit");
+		fs.writeFileSync(exitFile, "0\n");
+		const step: any = { name: "Recovered", type: "command", status: "passed", startedAt: Date.now(), exitFile, sentinelCleanupPending: true };
+		const active: any = { goalId: "goal", gateId: "implementation", signalId: "sig", overallStatus: "running", startedAt: Date.now(), currentPhase: 0, steps: [step] };
+		let calls = 0;
+		const harness = makeRecoveryHarness(stateDir, [], {
+			recoveredSentinelReaper: async target => {
+				calls++;
+				if (calls === 1) throw Object.assign(new Error("pending sentinel cleanup"), { name: "PendingCommandCleanupError" });
+				delete target.sentinelCleanupPending;
+			},
+		});
+		try {
+			const pending = await (harness as any)._killPersistedCommandSteps(active, "SIGKILL", { markIntent: false });
+			expect(pending).toBe(false);
+			expect(step.sentinelCleanupPending).toBe(true);
+			expect((harness as any)._hasPendingCommandKillCleanup(active)).toBe(true);
+			const settled = await (harness as any)._killPersistedCommandSteps(active, "SIGKILL", { markIntent: false });
+			expect(settled).toBe(true);
+			expect(calls).toBe(2);
+			expect((harness as any)._hasPendingCommandKillCleanup(active)).toBe(false);
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
 		}
