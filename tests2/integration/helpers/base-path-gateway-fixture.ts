@@ -98,6 +98,8 @@ export interface RunningGateway {
 	gateway: ReturnType<typeof createGateway>;
 	/** Exact callback information supplied by the gateway to LifecycleHub providers. */
 	lifecycleGatewayInfo(): { baseUrl: string; token: string };
+	/** Persisted URL consumed by direct and sandbox session launch paths. */
+	agentGatewayUrl(): string | undefined;
 	restart(): Promise<void>;
 	shutdown(): Promise<void>;
 }
@@ -158,6 +160,8 @@ export interface BootGatewayOptions {
 	staleGatewayUrl?: string;
 	/** Explicit callback publisher used to cover CLI/public-proxy overrides. */
 	onBound?: GatewayConfig["onBound"];
+	/** Observe the persisted agent URL at the exact restore-sessions boundary. */
+	observeSessionRestoreGatewayUrl?: (gatewayUrl: string | undefined) => void;
 }
 
 export async function bootGateway(
@@ -241,6 +245,16 @@ export async function bootGateway(
 	let port: number;
 	try {
 		gateway = createGateway(gatewayConfig, gatewayDeps);
+		if (options.observeSessionRestoreGatewayUrl) {
+			const restoreSessions = gateway.sessionManager.restoreSessions.bind(gateway.sessionManager);
+			const agentGatewayUrl = gateway.sessionManager as unknown as {
+				readGatewayUrlForAgent(): string | undefined;
+			};
+			gateway.sessionManager.restoreSessions = async () => {
+				options.observeSessionRestoreGatewayUrl?.(agentGatewayUrl.readGatewayUrlForAgent());
+				await restoreSessions();
+			};
+		}
 		port = await gateway.start();
 	} catch (error) {
 		try { await gateway!.shutdown(); } catch { /* best-effort rejected-start cleanup */ }
@@ -267,6 +281,12 @@ export async function bootGateway(
 				gatewayInfo: () => { baseUrl: string; token: string };
 			};
 			return hub.gatewayInfo();
+		},
+		agentGatewayUrl() {
+			const manager = gateway.sessionManager as unknown as {
+				readGatewayUrlForAgent(): string | undefined;
+			};
+			return manager.readGatewayUrlForAgent();
 		},
 		async restart() {
 			await gateway.shutdown();
