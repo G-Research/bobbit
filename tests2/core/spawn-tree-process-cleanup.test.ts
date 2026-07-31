@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
-import { readFileSync } from "node:fs";
+import fs, { readFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { EventEmitter } from "node:events";
 import { killTreeByPid, spawnTracked } from "../../src/server/agent/spawn-tree.js";
+import { VerificationHarness, type ActiveVerification } from "../../src/server/agent/verification-harness.js";
 import { createManualClock } from "../harness/clock.js";
 
 const SPAWN_TREE_SOURCE = readFileSync(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url), "utf8");
@@ -126,6 +129,45 @@ async function run(mode) {
 for (const mode of process.platform === "win32" ? ["natural", "cancel"] : ["natural", "timeout", "cancel"]) await run(mode);
 `;
 
+const RECOVERED_SENTINEL_PROBE = String.raw`
+import fs from "node:fs";
+import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
+
+const stateDir = process.env.BOBBIT_RECOVERED_SENTINEL_STATE;
+const exitFile = process.env.BOBBIT_RECOVERED_SENTINEL_EXIT;
+const releaseFile = process.env.BOBBIT_RECOVERED_SENTINEL_RELEASE;
+if (!stateDir || !exitFile || !releaseFile) throw new Error("missing recovered-sentinel probe paths");
+const nonce = "recovered-sentinel-nonce";
+const pidFile = stateDir + "/root.pid";
+const sentinelFile = stateDir + "/sentinel.json";
+const tracked = spawnTracked("/bin/sh", ["-c", 'while [ ! -f "$BOBBIT_RECOVERED_SENTINEL_RELEASE" ]; do sleep 0.01; done; printf 0 > "$BOBBIT_RECOVERED_SENTINEL_EXIT"'], {
+  stdio: "ignore",
+  posixSentinelIdentity: { file: sentinelFile, nonce },
+  env: process.env,
+});
+tracked.markSurvival();
+const awaitFile = (file) => new Promise((resolve, reject) => {
+  let settled = false;
+  let timeout;
+  const finish = (error) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeout);
+    watcher.close();
+    error ? reject(error) : resolve();
+  };
+  const watcher = fs.watch(stateDir, { persistent: false }, () => {
+    if (fs.existsSync(file)) finish();
+  });
+  timeout = setTimeout(() => finish(new Error("sentinel identity was not written")), 2_000);
+  timeout.unref();
+  if (fs.existsSync(file)) finish();
+});
+await awaitFile(sentinelFile);
+fs.writeFileSync(pidFile, String(tracked.child.pid) + "\\n" + nonce + "\\n");
+process.stdout.write(JSON.stringify({ pid: tracked.child.pid, pidFile, sentinelFile, nonce }) + "\\n", () => process.exit(0));
+`;
+
 type FakeReadyPipe = EventEmitter & { unrefCalls: number; unref(): void };
 type FakeChild = ChildProcess & { killCalls: NodeJS.Signals[]; readyPipe: FakeReadyPipe };
 
@@ -172,6 +214,74 @@ function runProbe(): Promise<{ stdout: string; stderr: string; code: number | nu
 	});
 }
 
+function waitForFile(file: string, timeoutMs = 5_000): Promise<void> {
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		let timeout: NodeJS.Timeout | undefined;
+		const finish = (error?: Error) => {
+			if (settled) return;
+			settled = true;
+			if (timeout) clearTimeout(timeout);
+			watcher.close();
+			if (error) reject(error); else resolve();
+		};
+		const watcher = fs.watch(path.dirname(file), { persistent: false }, () => {
+			if (fs.existsSync(file)) finish();
+		});
+		timeout = setTimeout(() => finish(new Error(`timed out waiting for ${file}`)), timeoutMs);
+		// This guard prevents a genuinely broken regression from consuming the
+		// worker forever; file creation, not elapsed time, is the assertion boundary.
+		timeout.unref();
+		if (fs.existsSync(file)) finish();
+	});
+}
+
+function recoveredSentinelProbe(stateDir: string, exitFile: string, releaseFile: string): Promise<{ pid: number; pidFile: string; sentinelFile: string; nonce: string }> {
+	const state = (process as NodeJS.Process & { [SPAWN_GUARD_STATE]?: GuardState })[SPAWN_GUARD_STATE];
+	const nativeSpawn = state?.originals?.spawn;
+	if (!nativeSpawn) throw new Error("recovered-sentinel probe requires the tier-1 spawn guard's preserved native spawn");
+	return new Promise((resolve, reject) => {
+		let stdout = "";
+		let stderr = "";
+		const child = nativeSpawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", RECOVERED_SENTINEL_PROBE], {
+			cwd: process.cwd(),
+			stdio: ["ignore", "pipe", "pipe"],
+			env: {
+				...process.env,
+				BOBBIT_RECOVERED_SENTINEL_STATE: stateDir,
+				BOBBIT_RECOVERED_SENTINEL_EXIT: exitFile,
+				BOBBIT_RECOVERED_SENTINEL_RELEASE: releaseFile,
+			},
+		});
+		child.stdout?.on("data", chunk => { stdout += chunk.toString(); });
+		child.stderr?.on("data", chunk => { stderr += chunk.toString(); });
+		child.once("error", reject);
+		child.once("close", code => {
+			if (code !== 0) return reject(new Error(`recovered-sentinel probe failed (code=${code}): ${stderr}`));
+			try { resolve(JSON.parse(stdout.trim())); }
+			catch (error) { reject(new Error(`recovered-sentinel probe emitted invalid state: ${stdout}\n${String(error)}`)); }
+		});
+	});
+}
+
+function groupAlive(pid: number): boolean {
+	try { process.kill(-pid, 0); return true; }
+	catch (error: any) { return error?.code === "EPERM"; }
+}
+
+function makeRecoveryHarness(stateDir: string, calls: Array<{ kind: string; status: string }>): VerificationHarness {
+	return new VerificationHarness(
+		stateDir,
+		{
+			updateSignalVerification: (_signalId: string, update: any) => calls.push({ kind: "verification", status: update.status }),
+			updateGateStatus: (_goalId: string, _gateId: string, status: string) => calls.push({ kind: "gate", status }),
+			getGate: () => undefined,
+		} as any,
+		() => {},
+		{ get: () => undefined, getAll: () => [] } as any,
+	);
+}
+
 describe("spawnTracked timeout cleanup", () => {
 	it("keeps STARTUPINFO flags unsigned so the Windows Job supervisor Add-Type source compiles", () => {
 		const startupInfo = SPAWN_TREE_SOURCE.match(/public struct STARTUPINFO \{(?<body>[^}]+)\}/s)?.groups?.body;
@@ -187,6 +297,54 @@ describe("spawnTracked timeout cleanup", () => {
 		expect(result.code, result.stderr).toBe(0);
 		for (const mode of ["natural", "cancel"]) expect(result.stdout).toContain(`${mode}-tree-reaped`);
 		if (process.platform !== "win32") expect(result.stdout).toContain("timeout-tree-reaped");
+	});
+
+	it.skipIf(process.platform === "win32")("reaps a recovered POSIX sentinel after its original parent exits", async () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-recovered-sentinel-"));
+		const exitFile = path.join(stateDir, "command.exit");
+		const releaseFile = path.join(stateDir, "release-command");
+		let rootPid: number | undefined;
+		try {
+			const probe = await recoveredSentinelProbe(stateDir, exitFile, releaseFile);
+			rootPid = probe.pid;
+			expect(fs.existsSync(exitFile)).toBe(false);
+			fs.writeFileSync(releaseFile, "go");
+			await waitForFile(exitFile);
+			expect(groupAlive(rootPid), "the probe parent exited, but its same-group sentinel must retain the original PGID for recovered cleanup").toBe(true);
+
+			const active: ActiveVerification = {
+				goalId: "goal-recovered-sentinel",
+				gateId: "implementation",
+				signalId: "sig-recovered-sentinel",
+				overallStatus: "running",
+				startedAt: Date.now() - 1_000,
+				currentPhase: 0,
+				steps: [{
+					name: "Recovered command",
+					type: "command",
+					status: "running",
+					phase: 0,
+					startedAt: Date.now() - 1_000,
+					pid: rootPid,
+					pidFile: probe.pidFile,
+					pidNonce: probe.nonce,
+					sentinelFile: probe.sentinelFile,
+					exitFile,
+					commandCwd: stateDir,
+				}],
+			};
+			fs.writeFileSync(path.join(stateDir, "active-verifications.json"), JSON.stringify({ verifications: [active] }));
+			const calls: Array<{ kind: string; status: string }> = [];
+			await makeRecoveryHarness(stateDir, calls).resumeInterruptedVerifications();
+
+			expect(calls).toContainEqual({ kind: "gate", status: "passed" });
+			expect(groupAlive(rootPid), "successful recovered verification must reap the sentinel group left by the exited parent").toBe(false);
+		} finally {
+			if (rootPid && groupAlive(rootPid)) {
+				try { process.kill(-rootPid, "SIGKILL"); } catch { /* test cleanup */ }
+			}
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
 	});
 
 	it("Windows treats root exit as a PID-reuse boundary, even before inherited stdio closes", async () => {

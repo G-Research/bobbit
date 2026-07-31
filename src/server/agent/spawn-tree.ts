@@ -51,6 +51,12 @@ export interface SpawnTrackedOptions {
 	/** Enable the POSIX same-group sentinel (production default). */
 	posixTreeSentinel?: boolean;
 	/**
+	 * Optional durable identity record written by the POSIX sentinel itself.
+	 * Restart recovery uses it to prove the surviving process still owns the
+	 * original group before it sends the final group kill.
+	 */
+	posixSentinelIdentity?: { file: string; nonce: string };
+	/**
 	 * Enable the Windows job-object supervisor. Production Windows spawns enable
 	 * it by default; lifecycle seams opt in explicitly to avoid requiring
 	 * PowerShell in platform-neutral tests.
@@ -226,7 +232,7 @@ const WINDOWS_JOB_SUPERVISOR_COMMAND = Buffer.from(WINDOWS_JOB_SUPERVISOR, "utf1
 // The background shell remains in the detached process group but ignores the
 // graceful signal. It makes root exit an ownership-safe place to send SIGKILL:
 // no empty-group/PGID-reuse window exists until that final signal kills it.
-const POSIX_TREE_SENTINEL_SCRIPT = "(trap '' HUP INT TERM; printf . >&3; while :; do sleep 2147483647 & wait $!; done) & exec \"$@\"";
+const POSIX_TREE_SENTINEL_SCRIPT = "(trap '' HUP INT TERM; if [ -n \"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE\" ]; then __bobbit_sentinel_start=$(ps -o lstart= -p \"$$\" 2>/dev/null | sed 's/^ *//'); __bobbit_sentinel_pgid=$(ps -o pgid= -p \"$$\" 2>/dev/null | tr -d '[:space:]'); __bobbit_sentinel_tmp=\"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE.$$.tmp\"; printf '{\"pid\":%s,\"pgid\":%s,\"nonce\":\"%s\",\"startToken\":\"%s\"}\\n' \"$$\" \"${__bobbit_sentinel_pgid:-0}\" \"$BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE\" \"$__bobbit_sentinel_start\" > \"$__bobbit_sentinel_tmp\" && mv \"$__bobbit_sentinel_tmp\" \"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE\"; fi; printf . >&3; while :; do sleep 2147483647 & wait $!; done) & exec \"$@\"";
 
 function withPosixSentinelReadyPipe(stdio: StdioOptions | undefined): StdioOptions {
 	if (Array.isArray(stdio)) return [...stdio.slice(0, 3), "pipe"] as StdioOptions;
@@ -256,6 +262,13 @@ export function spawnTracked(
 	const windowsPayload = windowsJobSupervisor
 		? Buffer.from(JSON.stringify({ file: cmd, args, cwd: opts.cwd ?? process.cwd() }), "utf8").toString("base64")
 		: undefined;
+	const sentinelEnv = posixTreeSentinel && opts.posixSentinelIdentity
+		? {
+			...(opts.env ?? process.env),
+			BOBBIT_POSIX_SENTINEL_IDENTITY_FILE: opts.posixSentinelIdentity.file,
+			BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE: opts.posixSentinelIdentity.nonce,
+		}
+		: opts.env;
 	const child = spawnImpl(
 		windowsJobSupervisor ? "powershell.exe" : (posixTreeSentinel ? "/bin/sh" : cmd),
 		(windowsJobSupervisor
@@ -265,7 +278,7 @@ export function spawnTracked(
 			cwd: opts.cwd,
 			env: windowsJobSupervisor
 				? { ...(opts.env ?? process.env), BOBBIT_WINDOWS_JOB_PAYLOAD: windowsPayload }
-				: opts.env,
+				: sentinelEnv,
 			stdio: posixTreeSentinel ? withPosixSentinelReadyPipe(opts.stdio) : opts.stdio,
 			// POSIX: detached:true puts the child in its own process group so we
 			// can kill the whole tree via process.kill(-pgid, sig).

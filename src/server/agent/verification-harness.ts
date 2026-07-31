@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { spawnTracked, killAllTracked, killTreeByPid, type TrackedChild } from "./spawn-tree.js";
 import { realClock, realCommandRunner, type Clock, type CommandRunner, type TimerHandle } from "../gateway-deps.js";
 import { broadcastGateStatusChanged } from "../gate-status-broadcast.js";
@@ -877,6 +877,8 @@ export interface ActiveVerification {
 		pidFile?: string;
 		/** Random nonce expected in the durable process-identity and heartbeat files. */
 		pidNonce?: string;
+		/** Absolute path to the POSIX sentinel's durable identity record. */
+		sentinelFile?: string;
 		/** Compatibility alias used by bash_bg-style pidfile records and older tests. */
 		nonce?: string;
 		/** Container id for attached docker exec command paths (not restart-recoverable). */
@@ -911,6 +913,8 @@ export interface ActiveVerification {
 		killLastAttemptAt?: number;
 		killCompletedAt?: number;
 		killUnsafeReason?: string;
+		/** A recovered POSIX sentinel could not yet be safely reaped; retry before finalizing. */
+		sentinelCleanupPending?: boolean;
 	}>;
 	currentPhase?: number;
 	overallStatus: "running" | "passed" | "failed" | "cancelled";
@@ -2801,6 +2805,66 @@ export class VerificationHarness {
 		};
 	}
 
+	/**
+	 * Reap the POSIX group sentinel left behind when a detached verification
+	 * wrapper writes its durable verdict after the gateway process has exited.
+	 * The sentinel's own PID, nonce, start token, and PGID must all still match
+	 * before naming the recovered group; otherwise a reused PID is never
+	 * targeted and resume fails closed.
+	 */
+	private async _reapRecoveredPosixSentinel(step: ActiveVerification["steps"][number]): Promise<void> {
+		if (this.platform === "win32" || !step.sentinelFile) return;
+		const pending = (message: string): never => {
+			step.sentinelCleanupPending = true;
+			this._persistActive();
+			throw new PendingCommandCleanupError(message);
+		};
+		const expectedNonce = this._commandIdentityNonce(step);
+		const groupId = step.pid;
+		if (!expectedNonce || !Number.isFinite(groupId) || groupId! <= 0) {
+			return pending("Recovered command verdict has no durable POSIX sentinel group identity.");
+		}
+
+		let record: { pid?: unknown; pgid?: unknown; nonce?: unknown; startToken?: unknown };
+		try {
+			record = JSON.parse(fs.readFileSync(step.sentinelFile, "utf8"));
+		} catch (err) {
+			return pending(`Recovered command sentinel identity is unavailable: ${(err as Error).message}`);
+		}
+		const sentinelPid = Number(record.pid);
+		const recordedGroupId = Number(record.pgid);
+		if (!Number.isFinite(sentinelPid) || sentinelPid <= 0 || recordedGroupId !== groupId || record.nonce !== expectedNonce || typeof record.startToken !== "string" || !record.startToken) {
+			return pending("Recovered command sentinel identity did not match persisted group metadata.");
+		}
+		// A missing sentinel means its process group is already gone. Never signal
+		// the historical numeric PGID in that case: it may have been recycled.
+		if (!isPidAlive(sentinelPid)) {
+			delete step.sentinelCleanupPending;
+			return;
+		}
+
+		let observed = "";
+		try {
+			observed = execFileSync("ps", ["-o", "lstart=", "-o", "pgid=", "-p", String(sentinelPid)], {
+				encoding: "utf8",
+				stdio: ["ignore", "pipe", "ignore"],
+			}).trim();
+		} catch {
+			return pending("Could not inspect the live recovered POSIX sentinel before cleanup.");
+		}
+		const match = /^(.*?)\s+(\d+)$/.exec(observed);
+		if (!match || match[1].trim() !== record.startToken || Number(match[2]) !== groupId) {
+			return pending("Recovered POSIX sentinel no longer matches its original process identity; refusing to target its group.");
+		}
+		if (killTreeByPid(groupId, "SIGKILL") !== "signalled") {
+			return pending("Recovered POSIX sentinel group disappeared before cleanup; refusing to retarget its historical PGID.");
+		}
+		if (!await this._waitForPidToExit(sentinelPid)) {
+			return pending("Recovered POSIX sentinel did not exit after its verified group was killed.");
+		}
+		delete step.sentinelCleanupPending;
+	}
+
 	private _mergePersistedActiveVerifications(predicate: (v: ActiveVerification) => boolean): void {
 		for (const persisted of this._loadActive()) {
 			if (!predicate(persisted)) continue;
@@ -2812,9 +2876,10 @@ export class VerificationHarness {
 
 	private _hasPendingCommandKillCleanup(active: ActiveVerification): boolean {
 		return active.steps.some(step =>
-			step.type === "command" &&
-			!!step.killRequestedAt &&
-			!step.killCompletedAt,
+			step.type === "command" && (
+				(!!step.killRequestedAt && !step.killCompletedAt) ||
+				!!step.sentinelCleanupPending
+			),
 		);
 	}
 
@@ -5226,6 +5291,7 @@ export class VerificationHarness {
 			let exitFile: string | undefined;
 			let pidFile: string | undefined;
 			let pidNonce: string | undefined;
+			let sentinelFile: string | undefined;
 			let heartbeatFile: string | undefined;
 			let processStartToken: string | undefined;
 			let diagnosticsPaths: GateStepDiagnosticsPaths | undefined;
@@ -5257,9 +5323,10 @@ export class VerificationHarness {
 					}
 					exitFile = path.join(stepDir, `${streamCtx.stepIndex}.exit`);
 					pidFile = path.join(stepDir, `${streamCtx.stepIndex}.pid.json`);
+					sentinelFile = path.join(stepDir, `${streamCtx.stepIndex}.sentinel.json`);
 					heartbeatFile = path.join(stepDir, `${streamCtx.stepIndex}.heartbeat.json`);
 					pidNonce = randomUUID();
-					for (const file of [exitFile, exitFile + ".tmp", pidFile, pidFile + ".tmp", heartbeatFile, heartbeatFile + ".tmp"]) {
+					for (const file of [exitFile, exitFile + ".tmp", pidFile, pidFile + ".tmp", sentinelFile, sentinelFile + ".tmp", heartbeatFile, heartbeatFile + ".tmp"]) {
 						try { fs.unlinkSync(file); } catch { /* not present */ }
 					}
 					fs.writeFileSync(outFile, "");
@@ -5272,6 +5339,7 @@ export class VerificationHarness {
 					errFile = diagnosticsPaths?.stderrPath;
 					exitFile = undefined;
 					pidFile = undefined;
+					sentinelFile = undefined;
 					pidNonce = undefined;
 					heartbeatFile = undefined;
 				}
@@ -5306,6 +5374,7 @@ export class VerificationHarness {
 					exitFile,
 					pidFile,
 					pidNonce,
+					sentinelFile,
 					heartbeatFile,
 					containerId,
 					bootEpoch: durable ? this.bootEpoch : undefined,
@@ -5443,6 +5512,7 @@ export class VerificationHarness {
 						timeoutMs: timeoutSec * 1000,
 						windowsHide: process.platform === "win32",
 						useDetached: true,
+						...(sentinelFile && pidNonce ? { posixSentinelIdentity: { file: sentinelFile, nonce: pidNonce } } : {}),
 					});
 				} else {
 					// Host attached path routed through the seam (default = real spawn).
@@ -5486,6 +5556,7 @@ export class VerificationHarness {
 					exitFile,
 					pidFile,
 					pidNonce,
+					sentinelFile,
 					heartbeatFile,
 					bootEpoch: this.bootEpoch,
 					timeoutSec,
@@ -5895,6 +5966,10 @@ export class VerificationHarness {
 				duration_ms: Date.now() - step.startedAt,
 			});
 		};
+		const finalizeRecoveredExit = async () => {
+			await this._reapRecoveredPosixSentinel(step);
+			return finalize(readExitFile());
+		};
 		const timeoutResult = () => {
 			const timeoutSec = step.timeoutSec ?? 300;
 			const marker = `[step timed out after ${timeoutSec}s — killed verified subprocess tree after restart]`;
@@ -5925,7 +6000,7 @@ export class VerificationHarness {
 		// semantics.
 		if (step.exitFile && fs.existsSync(step.exitFile)) {
 			if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume: exit file present for "${step.name}" — finalizing from disk`);
-			return finalize(readExitFile());
+			return await finalizeRecoveredExit();
 		}
 		if (step.killReason === "timeout" && step.killCompletedAt) {
 			return timeoutResult();
@@ -5958,12 +6033,12 @@ export class VerificationHarness {
 		const identityFile = await this._waitForCommandIdentityFile(step, () => this._isResumeStillActive(v));
 		if (!this._isResumeStillActive(v)) return null;
 		if (step.exitFile && fs.existsSync(step.exitFile)) {
-			return finalize(readExitFile());
+			return await finalizeRecoveredExit();
 		}
 		const identity = this._verifyPersistedCommandIdentity(step, identityFile);
 		if (!identity.verified || !identity.pid) {
 			if (identity.reason === "command process is no longer alive" && await waitForDurableExitFile()) {
-				return finalize(readExitFile());
+				return await finalizeRecoveredExit();
 			}
 			return restartInterrupted(`Could not verify command process identity after restart: ${identity.reason}`);
 		}
@@ -6007,7 +6082,7 @@ export class VerificationHarness {
 				if (!this._isResumeStillActive(v)) return null;
 				await new Promise<void>(r => this.clock.setTimeout(() => r(), 500));
 				if (step.exitFile && fs.existsSync(step.exitFile)) {
-					return finalize(readExitFile());
+					return await finalizeRecoveredExit();
 				}
 				const current = this._verifyPersistedCommandIdentity(step);
 				if (!current.verified) {
@@ -6018,10 +6093,10 @@ export class VerificationHarness {
 
 			if (!this._isResumeStillActive(v)) return null;
 			if (step.exitFile && fs.existsSync(step.exitFile)) {
-				return finalize(readExitFile());
+				return await finalizeRecoveredExit();
 			}
 			if (identityFailureReason === "command process is no longer alive" && await waitForDurableExitFile()) {
-				return finalize(readExitFile());
+				return await finalizeRecoveredExit();
 			}
 			if (this.clock.now() >= deadline) {
 				return await finalizeTimeoutAfterVerifiedCleanup("The command reached its timeout after restart, but identity verification failed before it could be safely killed.");
