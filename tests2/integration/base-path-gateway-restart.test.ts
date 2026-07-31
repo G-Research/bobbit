@@ -6,7 +6,6 @@ import {
 	BASE_PATH_IMPLEMENTED,
 	bootGateway,
 	cookiePair,
-	expectRejectedUpgrade,
 	MOUNT,
 	type RunningGateway,
 } from "./helpers/base-path-gateway-fixture.js";
@@ -71,10 +70,10 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("direct cross-port browser co
 		});
 		expect(siblingRead.status).toBe(401);
 		expect(siblingRead.headers.get("access-control-allow-origin")).toBeNull();
-		await expectRejectedUpgrade(`${running.wsOrigin}${MOUNT}/ws/viewer`, {
+		await expect(authenticateSocket(`${running.wsOrigin}${MOUNT}/ws/viewer`, {
 			origin: siblingOrigin,
 			headers: { Cookie: cookie },
-		});
+		}, "localhost")).rejects.toThrow("WebSocket authentication rejected");
 
 		// A cookie-authenticated WebSocket reconstructs only its signed Origin.
 		const viewer = await authenticateSocket(`${running.wsOrigin}${MOUNT}/ws/viewer`, {

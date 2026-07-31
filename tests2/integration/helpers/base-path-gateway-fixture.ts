@@ -251,6 +251,10 @@ export function authenticateSocket(url: string, options: ClientOptions = {}, tok
 		socket.once("open", () => socket.send(JSON.stringify({ type: "auth", token })));
 		socket.on("message", (raw) => {
 			const message = JSON.parse(raw.toString()) as { type?: string };
+			if (message.type === "auth_failed") {
+				fail(new Error(`WebSocket authentication rejected: ${url}`));
+				return;
+			}
 			if (message.type !== "auth_ok") return;
 			clearTimeout(timer);
 			socket.off("error", fail);

@@ -3389,42 +3389,36 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		const sessionId = viewerMatch ? "__viewer__" : match![1];
 
 		// Browser WebSockets always carry Origin and automatically attach cookies.
-		// If a current-scope cookie is present it must match the signed UI origin;
-		// token-only/non-browser sockets remain authenticated by their first frame.
+		// Only a cookie bound to this UI origin may skip first-frame authentication.
+		// Ignore valid-but-stale cookies from another UI origin: an explicitly selected
+		// remote gateway must still be able to authenticate with its real Bearer frame.
+		// The stale cookie grants no authority, so localhost-sentinel/cookie-only frames
+		// remain rejected by handleWebSocketConnection below.
 		const wsCookies = collectCookieValues(req, COOKIE_NAME);
 		let websocketCookieAuthenticated = false;
 		let websocketBoundOrigin: string | undefined;
 		if (wsCookies.length > 0) {
 			const isTls = Boolean((req.socket as { encrypted?: boolean }).encrypted);
 			const wsOrigin = browserCookieRequestOrigin({ headers: req.headers, isTls });
-			let hasCurrentScopeCookie = false;
-			let hasExactOriginCookie = false;
-			for (const value of wsCookies) {
-				const scopeVerification = cookieStore.verify(value, { basePath });
-				if (!scopeVerification) continue;
-				hasCurrentScopeCookie = true;
-				if (!wsOrigin) continue;
-				const exactVerification = cookieStore.verify(value, { basePath, origin: wsOrigin });
-				if (exactVerification && (
-					exactVerification.binding
-					|| isBrowserCookieAuthenticationCompatible({ headers: req.headers, isTls }, {
-						deployment: config.staticDir ? "direct" : "vite",
-						configuredHost: config.host,
-					})
-				)) {
-					hasExactOriginCookie = true;
-					// Only the signed v1.2 claim may restore cross-port preflight
-					// state after a process restart. Legacy exact-gateway cookies need
-					// no remembered exception and must not bind a sibling origin.
-					if (exactVerification.binding) websocketBoundOrigin = wsOrigin;
-					break;
+			if (wsOrigin) {
+				for (const value of wsCookies) {
+					const exactVerification = cookieStore.verify(value, { basePath, origin: wsOrigin });
+					if (exactVerification && (
+						exactVerification.binding
+						|| isBrowserCookieAuthenticationCompatible({ headers: req.headers, isTls }, {
+							deployment: config.staticDir ? "direct" : "vite",
+							configuredHost: config.host,
+						})
+					)) {
+						websocketCookieAuthenticated = true;
+						// Only the signed v1.2 claim may restore cross-port preflight
+						// state after a process restart. Legacy exact-gateway cookies need
+						// no remembered exception and must not bind a sibling origin.
+						if (exactVerification.binding) websocketBoundOrigin = wsOrigin;
+						break;
+					}
 				}
 			}
-			if (hasCurrentScopeCookie && !hasExactOriginCookie) {
-				socket.destroy();
-				return;
-			}
-			websocketCookieAuthenticated = hasExactOriginCookie;
 		}
 
 		const ip = req.socket.remoteAddress || "unknown";

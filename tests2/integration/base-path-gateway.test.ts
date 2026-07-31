@@ -178,10 +178,30 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("in-process gateway mounted a
 		);
 		exactViewer.close();
 		exactSession.close();
-		await expectRejectedUpgrade(`${running.wsOrigin}${MOUNT}/ws/viewer`, {
-			origin: otherOrigin,
-			headers: { Cookie: mountedCookie },
-		});
+
+		// The browser can attach a still-valid gateway cookie after the operator
+		// switches to an explicit remote UI origin. That stale cookie is ineligible
+		// for cookie auth, but it must not preempt the real Bearer first frame on
+		// either shared upgrade path.
+		const staleCookieOptions = { origin: otherOrigin, headers: { Cookie: mountedCookie } };
+		const bearerViewer = await authenticateSocket(
+			`${running.wsOrigin}${MOUNT}/ws/viewer`,
+			staleCookieOptions,
+		);
+		const bearerSession = await authenticateSocket(
+			`${running.wsOrigin}${MOUNT}/ws/${sessionId}`,
+			staleCookieOptions,
+		);
+		bearerViewer.close();
+		bearerSession.close();
+
+		// The same stale cookie grants no authority of its own. The client-side
+		// localhost sentinel must still fail when no exact-origin cookie exists.
+		await expect(authenticateSocket(
+			`${running.wsOrigin}${MOUNT}/ws/viewer`,
+			staleCookieOptions,
+			"localhost",
+		)).rejects.toThrow("WebSocket authentication rejected");
 	});
 
 	it("keeps preview API, restore, bootstrap, and live SSE payloads mount-relative while browser outputs are prefixed once", async () => {
