@@ -120,6 +120,15 @@
       }
     },
     {
+      "path": "tests2/integration/base-path-gateway-restart.test.ts",
+      "reason": "Focused real gateway shutdown and recreation coverage proving cookie-bound cross-port browser origins recover through WebSocket and simple HTTP transports without authorizing same-host sibling origins.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
       "path": "tests2/integration/base-path-watchdog.test.ts",
       "reason": "In-process watchdog integration proving mounted health probes reach the gateway, root behavior remains compatible, and persisted generations atomically replace complete targets.",
       "execution": {
