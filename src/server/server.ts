@@ -545,7 +545,7 @@ import {
 } from "./auth/browser-cookie.js";
 import { authorizeChildrenMutation } from "./auth/children-mutation-authz.js";
 import { handlePreviewRequest, pickEntry } from "./preview/content-route.js";
-import { isLoopbackHost } from "./cli-loopback.js";
+import { isLoopbackHost, loopbackForBind } from "./cli-loopback.js";
 import { handlePrWalkthroughApiRoute } from "./pr-walkthrough/routes.js";
 import { normalizeTrustedHosts } from "../shared/pr-walkthrough/url-safety.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
@@ -1815,6 +1815,66 @@ export async function coordinateBootWorktreeLifecycle(
 ): Promise<void> {
 	await runSweepDeletionPhase();
 	await initializePools();
+}
+
+function rawGatewayCallbackPath(raw: string): string {
+	const schemeEnd = raw.indexOf("://") + 3;
+	const remainder = raw.slice(schemeEnd);
+	const boundary = remainder.search(/[/?#]/);
+	const authority = boundary < 0 ? remainder : remainder.slice(0, boundary);
+	if (!authority) throw new Error("Gateway callback URL must include an authority and hostname");
+	if (boundary < 0) return "";
+	const tail = remainder.slice(boundary);
+	if (tail.includes("?")) throw new Error("Gateway callback URL must not contain a query string");
+	if (tail.includes("#")) throw new Error("Gateway callback URL must not contain a fragment");
+	return tail;
+}
+
+/** Validate and canonicalize the final base URL exposed to agents/extensions. */
+function normalizePublishedGatewayUrl(raw: unknown): string {
+	if (typeof raw !== "string" || !raw.trim()) {
+		throw new Error("Gateway callback URL must be a non-empty absolute HTTP(S) URL");
+	}
+	const value = raw.trim();
+	if (/[\\\u0000-\u001f\u007f\s]/u.test(value)) {
+		throw new Error("Gateway callback URL must not contain whitespace, control characters, or backslashes");
+	}
+	if (!/^https?:\/\//i.test(value)) {
+		throw new Error("Gateway callback URL must be an absolute HTTP(S) URL");
+	}
+
+	let parsed: URL;
+	try { parsed = new URL(value); }
+	catch { throw new Error("Gateway callback URL is invalid"); }
+	if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname) {
+		throw new Error("Gateway callback URL must be an absolute HTTP(S) URL with a hostname");
+	}
+	if (parsed.username || parsed.password) throw new Error("Gateway callback URL must not include credentials");
+	if (parsed.search || parsed.hash) throw new Error("Gateway callback URL must not include a query string or fragment");
+
+	// Validate the lexical path before URL parsing can erase dot segments or
+	// decode/re-anchor unsafe input. Published gateway bases use the same mount
+	// grammar as configured base paths and are canonicalized without a trailing slash.
+	const callbackBasePath = normalizeBasePath(rawGatewayCallbackPath(value));
+	return `${parsed.origin}${callbackBasePath}`;
+}
+
+function publishedUrlHost(rawHost: string): string {
+	let host = rawHost.trim();
+	if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+	if (!host || host.includes("[") || host.includes("]")) {
+		throw new Error(`Cannot publish gateway callback URL for invalid listener host ${JSON.stringify(rawHost)}`);
+	}
+	return host.includes(":") ? `[${host}]` : host;
+}
+
+function defaultPublishedGatewayUrl(config: GatewayConfig, actualPort: number, listener: http.Server | https.Server): string {
+	const address = listener.address();
+	if (!address || typeof address === "string") throw new Error("Gateway listener did not publish a TCP address");
+	const configuredHost = config.host.trim() || address.address;
+	const callbackHost = loopbackForBind(configuredHost);
+	const protocol = config.tls ? "https" : "http";
+	return normalizePublishedGatewayUrl(`${protocol}://${publishedUrlHost(callbackHost)}:${actualPort}${config.basePath ?? ""}`);
 }
 
 export interface GatewayConfig {
@@ -3684,8 +3744,16 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// can be published atomically before any agent/extension process resumes.
 			const actualPort = await bindGatewayServer();
 			try {
+				// Programmatic createGateway callers do not have the CLI's onBound
+				// publisher. Install a listener-derived, mounted URL unconditionally so
+				// restored agents and extension hooks can never inherit stale env/state.
+				publishedGatewayUrl = defaultPublishedGatewayUrl(config, actualPort, server);
 				const callbackUrl = await config.onBound?.(actualPort);
-				if (typeof callbackUrl === "string" && callbackUrl) publishedGatewayUrl = callbackUrl;
+				if (callbackUrl !== undefined) {
+					// onBound remains authoritative for CLI/public-proxy callers, but only
+					// a canonical HTTP(S) gateway base may cross the agent boundary.
+					publishedGatewayUrl = normalizePublishedGatewayUrl(callbackUrl);
+				}
 
 			// Restore persisted teams before sessions so reconstructed records are available
 			// to session revival. Both complete before accepting connections.

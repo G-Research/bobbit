@@ -78,6 +78,8 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("headless wildcard-bound gate
 	}, 60_000);
 
 	it("mints a public-Host cross-port cookie without staticDir and retains cookie-only native transports", async () => {
+		expect(running.lifecycleGatewayInfo().baseUrl).toBe(running.baseUrl);
+		expect(running.lifecycleGatewayInfo().baseUrl).toMatch(/^https:\/\/127\.0\.0\.1:\d+\/team\/bobbit$/);
 		const browserHeaders = {
 			...authHeaders(),
 			Origin: uiOrigin,
