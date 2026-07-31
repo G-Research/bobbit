@@ -138,6 +138,15 @@
       }
     },
     {
+      "path": "tests2/integration/base-path-gateway-headless-tls.test.ts",
+      "reason": "Focused real TLS gateway coverage proving a wildcard-bound headless mount issues secure public-Host cookies, retains cookie-only REST, SSE, preview and WebSocket transports, and rejects sibling origins and UI routes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
       "path": "tests2/integration/base-path-gateway-restart.test.ts",
       "reason": "Focused real gateway shutdown and recreation coverage proving cookie-bound cross-port browser origins recover through WebSocket and simple HTTP transports without authorizing same-host sibling origins.",
       "execution": {
