@@ -6,22 +6,28 @@
  */
 
 import type { Server } from "node:http";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
-import type { AuthInteraction, Models, OAuthCredentials } from "@earendil-works/pi-ai";
+import { randomBytes } from "node:crypto";
+import type { AuthInteraction, Models, OAuthCredential } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { clearOAuthCache } from "../agent/model-registry.js";
+import { AtomicCredentialStore, deleteCredential } from "./credential-store.js";
 import { redactSensitive } from "./redact.js";
 
 const defaultFetch: typeof fetch = (input, init) => globalThis.fetch(input, init);
+const OAUTH_PROVIDER_NETWORK_TIMEOUT_MS = 30_000;
 
-// Anthropic OAuth constants (same as in @earendil-works/pi-ai)
-const CLIENT_ID = Buffer.from("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl", "base64").toString();
-const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
-const TOKEN_URL = "https://console.anthropic.com/v1/oauth/token";
-const REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback";
-const SCOPES = "org:create_api_key user:profile user:inference";
+function fetchWithProviderTimeout(
+	fetchImpl: typeof fetch,
+	input: Parameters<typeof fetch>[0],
+	init?: Parameters<typeof fetch>[1],
+): Promise<Response> {
+	const timeoutSignal = AbortSignal.timeout(OAUTH_PROVIDER_NETWORK_TIMEOUT_MS);
+	const signal = init?.signal
+		? AbortSignal.any([init.signal, timeoutSignal])
+		: timeoutSignal;
+	return fetchImpl(input, { ...init, signal });
+}
 
 // Google account / Gemini Code Assist OAuth constants.
 //
@@ -62,14 +68,8 @@ const OAUTH_PROVIDER_LABELS: Record<OAuthProviderId, string> = {
 	"google-gemini-cli": "Google",
 };
 
-interface PendingAnthropicOAuth {
-	provider: "anthropic";
-	verifier: string;
-	createdAt: number;
-}
-
-interface PendingExternalOAuth {
-	provider: "openai-codex";
+interface PendingPiOAuth {
+	provider: "anthropic" | "openai-codex";
 	createdAt: number;
 	submitCode: (code: string) => void;
 	cancelLogin: (err: Error) => void;
@@ -89,13 +89,44 @@ interface PendingGoogleOAuth {
 	createdAt: number;
 }
 
-type PendingOAuth = PendingAnthropicOAuth | PendingExternalOAuth | PendingGoogleOAuth;
+type PendingOAuth = PendingPiOAuth | PendingGoogleOAuth;
 
-// In-memory store for pending OAuth flows (verifier keyed by a flow ID)
+// In-memory store for pending OAuth flows, keyed by Bobbit-owned flow IDs.
 const pendingFlows = new Map<string, PendingOAuth>();
 const FLOW_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const FLOW_CLEANUP_INTERVAL_MS = 60 * 1000; // sweep expired flows every 60s
 let flowCleanupTimer: ReturnType<typeof setInterval> | undefined;
+let anthropicLeaseFlowId: string | undefined;
+
+export class OAuthBusyError extends Error {
+	readonly statusCode = 409;
+	readonly code = "ANTHROPIC_OAUTH_BUSY";
+	readonly retryable = true;
+
+	constructor() {
+		super("Anthropic login is already in progress or its callback port is busy. Close the other login and retry.");
+		this.name = "OAuthBusyError";
+	}
+}
+
+let credentialStoreState: { path: string; store: AtomicCredentialStore } | undefined;
+
+/** Shared fresh-reading credential boundary for all gateway auth.json writers. */
+export function getOAuthCredentialStore(): AtomicCredentialStore {
+	const authPath = globalAuthPath();
+	if (!credentialStoreState || credentialStoreState.path !== authPath) {
+		credentialStoreState = {
+			path: authPath,
+			store: new AtomicCredentialStore(authPath, clearOAuthCache),
+		};
+	}
+	return credentialStoreState.store;
+}
+
+/** Pi's public Models facade is the sole Anthropic OAuth protocol owner. */
+export function getOAuthModels(): Models {
+	return builtinModels({ credentials: getOAuthCredentialStore() });
+}
 
 function ensureFlowCleanupTimer(): void {
 	if (flowCleanupTimer) return;
@@ -108,16 +139,15 @@ function ensureFlowCleanupTimer(): void {
 	if (typeof flowCleanupTimer.unref === "function") flowCleanupTimer.unref();
 }
 
-/** Stop the periodic cleanup timer (test-only). */
+/** Stop the periodic cleanup timer and abort pending callback servers (test-only). */
 export function stopFlowCleanup(): void {
 	if (flowCleanupTimer) {
 		clearInterval(flowCleanupTimer);
 		flowCleanupTimer = undefined;
 	}
-}
-
-function getAuthJsonPath(): string {
-	return globalAuthPath();
+	for (const [flowId, flow] of pendingFlows) cancelPendingFlow(flowId, flow, new Error("OAuth flow cancelled"));
+	pendingFlows.clear();
+	anthropicLeaseFlowId = undefined;
 }
 
 function base64urlEncode(buf: Buffer): string {
@@ -155,55 +185,59 @@ function closeGoogleFlowServer(flow: PendingOAuth): void {
 	flow.server = undefined;
 }
 
+function releaseAnthropicLease(flowId: string): void {
+	if (anthropicLeaseFlowId === flowId) anthropicLeaseFlowId = undefined;
+}
+
+function cancelPendingFlow(flowId: string, flow: PendingOAuth, error: Error): void {
+	if (flow.provider === "google-gemini-cli") {
+		closeGoogleFlowServer(flow);
+	} else {
+		flow.cancelLogin(error);
+		if (flow.provider === "anthropic") releaseAnthropicLease(flowId);
+	}
+}
+
 function cleanupExpiredFlows(): void {
 	const now = Date.now();
 	// Snapshot entries before mutating the map to avoid mutation-during-iteration UB.
-	const entries = Array.from(pendingFlows.entries());
-	for (const [id, flow] of entries) {
+	for (const [id, flow] of Array.from(pendingFlows.entries())) {
 		if (now - flow.createdAt > FLOW_TTL_MS) {
-			if (flow.provider === "openai-codex") {
-				flow.cancelLogin(new Error("OAuth flow expired"));
-			} else if (flow.provider === "google-gemini-cli") {
-				closeGoogleFlowServer(flow);
-			}
+			cancelPendingFlow(id, flow, new Error("OAuth flow expired"));
 			pendingFlows.delete(id);
 		}
 	}
 }
 
-function readAuthData(): Record<string, any> {
-	const authPath = getAuthJsonPath();
-	if (!existsSync(authPath)) return {};
-	try {
-		return JSON.parse(readFileSync(authPath, "utf-8"));
-	} catch {
-		return {};
+function hasErrorCode(error: unknown, expected: string): boolean {
+	let current: unknown = error;
+	for (let depth = 0; depth < 5 && current; depth += 1) {
+		if (typeof current === "object" && current !== null) {
+			if ("code" in current && String(current.code) === expected) return true;
+			current = "cause" in current ? current.cause : undefined;
+		} else {
+			break;
+		}
 	}
+	return false;
 }
 
-function writeAuthData(authData: Record<string, any>): void {
-	const authPath = getAuthJsonPath();
-	const dir = dirname(authPath);
-	if (!existsSync(dir)) {
-		mkdirSync(dir, { recursive: true, mode: 0o700 });
-	}
-	writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
-	try {
-		chmodSync(authPath, 0o600);
-	} catch {
-		// chmod may fail on Windows, that's OK
-	}
-	clearOAuthCache();
+function sanitizedOAuthFailure(error: unknown): string {
+	const message = error instanceof Error ? error.message : String(error);
+	if (/state mismatch/i.test(message)) return "OAuth state mismatch";
+	if (/missing (?:oauth state|authorization code)/i.test(message)) return "Missing OAuth authorization response";
+	if (/expired/i.test(message)) return "OAuth flow expired";
+	if (/cancel/i.test(message)) return "OAuth flow cancelled";
+	return "OAuth login failed. Retry the sign-in flow.";
 }
 
-function storeOAuthCredentials(provider: OAuthProviderId, credentials: OAuthCredentials): void {
-	const authData = readAuthData();
-	authData[provider] = { type: "oauth", ...credentials };
-	writeAuthData(authData);
+async function storeOAuthCredentials(provider: OAuthProviderId, credentials: OAuthCredential): Promise<void> {
+	await getOAuthCredentialStore().modify(provider, async () => credentials);
 }
 
 /**
- * Start an OAuth flow. Returns the authorization URL and a flow ID.
+ * Start an OAuth flow. Anthropic delegates its complete OAuth contract to
+ * Pi's public Models facade; Google and Codex retain their existing adapters.
  */
 export async function oauthStart(
 	providerInput?: string,
@@ -214,42 +248,37 @@ export async function oauthStart(
 	ensureFlowCleanupTimer();
 
 	const provider = normalizeProvider(providerInput);
-	if (provider === "google-gemini-cli") {
-		return oauthStartGoogle(fetchImpl);
-	}
-	if (provider !== "anthropic") {
-		return oauthStartExternal(provider, externalModels ?? builtinModels());
+	if (provider === "google-gemini-cli") return oauthStartGoogle(fetchImpl);
+	if (provider === "openai-codex") {
+		return oauthStartPi(provider, externalModels ?? (await import("@earendil-works/pi-ai/providers/all")).builtinModels(), true);
 	}
 
-	const { randomBytes } = await import("node:crypto");
-	const now = Date.now();
-	const flowId = randomBytes(16).toString("hex");
-	const { verifier, challenge } = await generatePKCE();
-
-	pendingFlows.set(flowId, { provider: "anthropic", verifier, createdAt: now });
-
-	const params = new URLSearchParams({
-		code: "true",
-		client_id: CLIENT_ID,
-		response_type: "code",
-		redirect_uri: REDIRECT_URI,
-		scope: SCOPES,
-		code_challenge: challenge,
-		code_challenge_method: "S256",
-		state: verifier,
-	});
-
-	return { flowId, url: `${AUTHORIZE_URL}?${params.toString()}`, provider };
+	// Pi binds its fixed callback port before notifying auth_url, so only one
+	// Anthropic flow may enter Models.login at a time in this process.
+	if (anthropicLeaseFlowId !== undefined) throw new OAuthBusyError();
+	anthropicLeaseFlowId = "starting";
+	try {
+		// Pi's public builtin Models owns authorization URL construction, callback
+		// parsing, token exchange, state validation, and credential rotation while
+		// persisting through our Pi-compatible CredentialStore.
+		const models = externalModels ?? getOAuthModels();
+		return await oauthStartPi("anthropic", models, externalModels !== undefined);
+	} catch (error) {
+		if (anthropicLeaseFlowId === "starting") anthropicLeaseFlowId = undefined;
+		if (error instanceof OAuthBusyError || hasErrorCode(error, "EADDRINUSE")) throw new OAuthBusyError();
+		throw error;
+	}
 }
 
-async function oauthStartExternal(
-	provider: "openai-codex",
+async function oauthStartPi(
+	provider: "anthropic" | "openai-codex",
 	models: Pick<Models, "login">,
+	persistReturnedCredential: boolean,
 ): Promise<{ flowId: string; url: string; provider: OAuthProviderId; callbackServer?: boolean; instructions?: string }> {
-	const { randomBytes } = await import("node:crypto");
 	const flowId = randomBytes(16).toString("hex");
 	const createdAt = Date.now();
 	const loginAbort = new AbortController();
+	if (provider === "anthropic") anthropicLeaseFlowId = flowId;
 
 	let submitCode!: (code: string) => void;
 	let rejectCode!: (err: Error) => void;
@@ -257,6 +286,9 @@ async function oauthStartExternal(
 		submitCode = resolve;
 		rejectCode = reject;
 	});
+	// A provider may never request manual input (for example, a callback-only
+	// injected test double). Cancellation must not create an unhandled rejection.
+	void manualCodePromise.catch(() => {});
 	const waitForManualCode = (signal?: AbortSignal): Promise<string> => {
 		if (!signal) return manualCodePromise;
 		return new Promise<string>((resolve, reject) => {
@@ -274,9 +306,9 @@ async function oauthStartExternal(
 					signal.removeEventListener("abort", onAbort);
 					resolve(code);
 				},
-				(err) => {
+				(error) => {
 					signal.removeEventListener("abort", onAbort);
-					reject(err);
+					reject(error);
 				},
 			);
 		});
@@ -288,50 +320,37 @@ async function oauthStartExternal(
 		resolveStarted = resolve;
 		rejectStarted = reject;
 	});
-
-	// Only the first auth/device notification or pre-start error settles the
-	// response. Later lifecycle notifications remain safe no-ops for this
-	// one-shot UI contract.
 	let startedSettled = false;
 	const safeResolveStarted = (info: { url: string; instructions?: string }) => {
 		if (startedSettled) return;
 		startedSettled = true;
 		resolveStarted(info);
 	};
-	const safeRejectStarted = (err: Error) => {
+	const safeRejectStarted = (error: Error) => {
 		if (startedSettled) return;
 		startedSettled = true;
-		rejectStarted(err);
+		rejectStarted(error);
+	};
+	const cancelLogin = (error: Error): void => {
+		rejectCode(error);
+		if (!loginAbort.signal.aborted) loginAbort.abort(error);
 	};
 
-	const cancelLogin = (err: Error): void => {
-		rejectCode(err);
-		if (!loginAbort.signal.aborted) loginAbort.abort(err);
-	};
-
-	// Initialise the flow record up-front so the `loginPromise.then/catch`
-	// callbacks below always see a fully-constructed `flow` reference — even if
-	// pi-ai resolves synchronously before this scope finishes evaluating.
-	const flow: PendingExternalOAuth = {
+	const flow: PendingPiOAuth = {
 		provider,
 		createdAt,
 		submitCode,
 		cancelLogin,
-		loginPromise: Promise.resolve(), // overwritten below
+		loginPromise: Promise.resolve(),
 		completed: false,
 	};
+	pendingFlows.set(flowId, flow);
 
 	const interaction: AuthInteraction = {
 		signal: loginAbort.signal,
 		prompt: async (prompt) => {
-			if (prompt.type === "text" || prompt.type === "manual_code") {
-				return waitForManualCode(prompt.signal);
-			}
+			if (prompt.type === "text" || prompt.type === "manual_code") return waitForManualCode(prompt.signal);
 			if (prompt.type === "select") {
-				// Bobbit has no generic OAuth selection UI. A single option is
-				// deterministic; for Codex's multi-option login prompt preserve the
-				// existing browser/callback-server flow. Keep the heuristic fallback
-				// in case Pi changes the option id while retaining its label.
 				if (prompt.options.length === 1) return prompt.options[0].id;
 				const browserOption =
 					prompt.options.find((option) => option.id === "browser") ??
@@ -357,7 +376,6 @@ async function oauthStartExternal(
 					return;
 				case "device_code": {
 					const instructions = `Visit ${event.verificationUri} and enter code ${event.userCode}`;
-					console.log(`[oauth] ${OAUTH_PROVIDER_LABELS[provider]}: ${redactSensitive(instructions)}`);
 					safeResolveStarted({ url: event.verificationUri, instructions });
 					return;
 				}
@@ -369,31 +387,62 @@ async function oauthStartExternal(
 		},
 	};
 
-	const loginPromise = models.login(provider, "oauth", interaction).then((credential) => {
-		if (credential.type !== "oauth") {
-			throw new Error(`OAuth provider returned a non-OAuth credential: ${provider}`);
-		}
-		storeOAuthCredentials(provider, credential);
-		flow.completed = true;
-	}).catch((err) => {
-		const error = err instanceof Error ? err : new Error(String(err));
-		flow.error = redactSensitive(error.message);
-		safeRejectStarted(error);
-		throw error;
-	});
+	const loginPromise = Promise.resolve()
+		.then(() => models.login(provider, "oauth", interaction))
+		.then(async (credential) => {
+			if (credential.type !== "oauth") {
+				throw new Error(`OAuth provider returned a non-OAuth credential: ${provider}`);
+			}
+			// Gateway-backed Pi Models persists Anthropic itself. Injected test
+			// doubles and Codex retain Bobbit's returned-credential path.
+			if (persistReturnedCredential) await storeOAuthCredentials(provider, credential);
+			flow.completed = true;
+		})
+		.catch((error: unknown) => {
+			const normalized = error instanceof Error ? error : new Error(String(error));
+			flow.error = sanitizedOAuthFailure(normalized);
+			safeRejectStarted(normalized);
+			throw normalized;
+		})
+		.finally(() => {
+			if (provider === "anthropic") releaseAnthropicLease(flowId);
+		});
 	void loginPromise.catch(() => {});
 	flow.loginPromise = loginPromise;
-	pendingFlows.set(flowId, flow);
 	ensureFlowCleanupTimer();
 
-	const info = await started;
-	return {
-		flowId,
-		url: info.url,
-		provider,
-		callbackServer: true,
-		instructions: info.instructions,
-	};
+	try {
+		const info = await started;
+		return {
+			flowId,
+			url: info.url,
+			provider,
+			callbackServer: true,
+			instructions: info.instructions,
+		};
+	} catch (error) {
+		pendingFlows.delete(flowId);
+		cancelLogin(new Error("OAuth flow failed to start"));
+		if (provider === "anthropic") releaseAnthropicLease(flowId);
+		if (hasErrorCode(error, "EADDRINUSE")) throw new OAuthBusyError();
+		throw new Error(sanitizedOAuthFailure(error));
+	}
+}
+
+/** Explicitly cancel a pending flow, including Pi's loopback callback server. */
+export function oauthCancel(flowId: string, providerInput?: string): { success: boolean } {
+	const flow = pendingFlows.get(flowId);
+	if (!flow) return { success: true };
+	if (providerInput) {
+		try {
+			if (flow.provider !== normalizeProvider(providerInput)) return { success: true };
+		} catch {
+			return { success: true };
+		}
+	}
+	cancelPendingFlow(flowId, flow, new Error("OAuth flow cancelled"));
+	pendingFlows.delete(flowId);
+	return { success: true };
 }
 
 function buildGoogleAuthorizeUrl(challenge: string, state: string, redirectUri: string): string {
@@ -418,8 +467,7 @@ function buildGoogleAuthorizeUrl(challenge: string, state: string, redirectUri: 
  * display metadata (`email`) is kept alongside the token material; no profile
  * blob or raw provider payload is stored.
  */
-function storeGoogleCredentials(creds: { access: string; refresh?: string; expires: number; email?: string }): void {
-	const authData = readAuthData();
+async function storeGoogleCredentials(creds: { access: string; refresh?: string; expires: number; email?: string }): Promise<void> {
 	const entry: Record<string, unknown> = {
 		type: "oauth",
 		access: creds.access,
@@ -427,8 +475,7 @@ function storeGoogleCredentials(creds: { access: string; refresh?: string; expir
 	};
 	if (creds.refresh) entry.refresh = creds.refresh;
 	if (creds.email) entry.email = creds.email;
-	authData["google-gemini-cli"] = entry;
-	writeAuthData(authData);
+	await getOAuthCredentialStore().modify("google-gemini-cli", async () => entry as OAuthCredential);
 }
 
 /**
@@ -436,7 +483,7 @@ function storeGoogleCredentials(creds: { access: string; refresh?: string; expir
  * Used by both the loopback callback handler and the manual-paste path.
  */
 async function exchangeGoogleCode(flow: PendingGoogleOAuth, code: string, fetchImpl: typeof fetch = defaultFetch): Promise<void> {
-	const tokenResponse = await fetchImpl(GOOGLE_TOKEN_URL, {
+	const tokenResponse = await fetchWithProviderTimeout(fetchImpl, GOOGLE_TOKEN_URL, {
 		method: "POST",
 		headers: { "Content-Type": "application/x-www-form-urlencoded" },
 		body: new URLSearchParams({
@@ -450,10 +497,9 @@ async function exchangeGoogleCode(flow: PendingGoogleOAuth, code: string, fetchI
 	});
 
 	if (!tokenResponse.ok) {
-		const errorText = await tokenResponse.text();
-		const MAX_ERR_CHARS = 256;
-		const truncated = errorText.length > MAX_ERR_CHARS ? `${errorText.slice(0, MAX_ERR_CHARS)}…` : errorText;
-		throw new Error(`Token exchange failed: ${redactSensitive(truncated)}`);
+		// Provider bodies can reflect submitted codes or token-shaped values.
+		// Preserve the actionable status class without returning the body.
+		throw new Error(`Token exchange failed (HTTP ${tokenResponse.status})`);
 	}
 
 	const tokenData = (await tokenResponse.json()) as {
@@ -464,7 +510,7 @@ async function exchangeGoogleCode(flow: PendingGoogleOAuth, code: string, fetchI
 
 	let email: string | undefined;
 	try {
-		const userinfoResponse = await fetchImpl(GOOGLE_USERINFO_URL, {
+		const userinfoResponse = await fetchWithProviderTimeout(fetchImpl, GOOGLE_USERINFO_URL, {
 			headers: { Authorization: `Bearer ${tokenData.access_token}` },
 		});
 		if (userinfoResponse.ok) {
@@ -475,7 +521,7 @@ async function exchangeGoogleCode(flow: PendingGoogleOAuth, code: string, fetchI
 		// userinfo is best-effort display metadata; never fail the login on it.
 	}
 
-	storeGoogleCredentials({
+	await storeGoogleCredentials({
 		access: tokenData.access_token,
 		refresh: tokenData.refresh_token,
 		expires: Date.now() + tokenData.expires_in * 1000 - 5 * 60 * 1000,
@@ -612,26 +658,29 @@ async function completeGoogleFlow(flow: PendingGoogleOAuth, flowId: string, auth
 	}
 }
 
-/**
- * Complete an OAuth flow. Exchanges the authorization code for tokens
- * and stores them in ~/.bobbit/agent/auth.json.
- */
+/** Complete a Bobbit-owned flow through its provider interaction. */
 export async function oauthComplete(
 	flowId: string,
 	authCode: string,
-	fetchImpl: typeof fetch = defaultFetch,
+	fetchOrProvider: typeof fetch | string = defaultFetch,
+	providerInput?: string,
 ): Promise<{ success: boolean; error?: string }> {
+	const fetchImpl = typeof fetchOrProvider === "function" ? fetchOrProvider : defaultFetch;
+	const requestedProvider = typeof fetchOrProvider === "string" ? fetchOrProvider : providerInput;
 	const flow = pendingFlows.get(flowId);
-	if (!flow) {
-		return { success: false, error: "Unknown or expired flow ID" };
+	if (!flow) return { success: false, error: "Unknown or expired flow ID" };
+	if (requestedProvider) {
+		try {
+			if (flow.provider !== normalizeProvider(requestedProvider)) {
+				return { success: false, error: "Unknown or expired flow ID" };
+			}
+		} catch {
+			return { success: false, error: "Unknown or expired flow ID" };
+		}
 	}
 
 	if (Date.now() - flow.createdAt > FLOW_TTL_MS) {
-		if (flow.provider === "openai-codex") {
-			flow.cancelLogin(new Error("OAuth flow expired"));
-		} else if (flow.provider === "google-gemini-cli") {
-			closeGoogleFlowServer(flow);
-		}
+		cancelPendingFlow(flowId, flow, new Error("OAuth flow expired"));
 		pendingFlows.delete(flowId);
 		return { success: false, error: "OAuth flow expired" };
 	}
@@ -642,114 +691,55 @@ export async function oauthComplete(
 			pendingFlows.delete(flowId);
 			return { success: true };
 		}
-		if (!authCode || !authCode.trim()) {
-			return { success: false, error: "code required" };
-		}
+		if (!authCode || !authCode.trim()) return { success: false, error: "code required" };
 		return completeGoogleFlow(flow, flowId, authCode, fetchImpl);
 	}
 
-	if (flow.provider !== "anthropic") {
-		if (!authCode || !authCode.trim()) {
-			return { success: false, error: "code required" };
-		}
-		flow.submitCode(authCode.trim());
-		try {
-			await flow.loginPromise;
-			pendingFlows.delete(flowId);
-			return { success: true };
-		} catch (err) {
-			pendingFlows.delete(flowId);
-			return { success: false, error: err instanceof Error ? err.message : String(err) };
-		}
-	}
-
 	if (!authCode || !authCode.trim()) {
+		// The REST/UI never submits an empty value. For direct callers, treat it
+		// as an explicit cancellation so Pi's fixed callback port is not leased
+		// by an unusable abandoned flow.
+		cancelPendingFlow(flowId, flow, new Error("OAuth flow cancelled"));
+		await flow.loginPromise.catch(() => {});
+		pendingFlows.delete(flowId);
 		return { success: false, error: "code required" };
 	}
-
-	pendingFlows.delete(flowId);
-
-	// The auth code from the callback page is in format "code#state"
-	const parts = authCode.split("#");
-	const code = parts[0];
-	const state = parts[1];
-
-	try {
-		const tokenResponse = await fetchImpl(TOKEN_URL, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				grant_type: "authorization_code",
-				client_id: CLIENT_ID,
-				code,
-				state,
-				redirect_uri: REDIRECT_URI,
-				code_verifier: flow.verifier,
-			}),
-		});
-
-		if (!tokenResponse.ok) {
-			const errorText = await tokenResponse.text();
-			// Truncate provider-supplied error bodies so we never echo a multi-KB
-			// HTML/JSON page back through the API surface or the UI dialog.
-			const MAX_ERR_CHARS = 256;
-			const truncated = errorText.length > MAX_ERR_CHARS
-				? `${errorText.slice(0, MAX_ERR_CHARS)}…`
-				: errorText;
-			return { success: false, error: `Token exchange failed: ${truncated}` };
-		}
-
-		const tokenData = (await tokenResponse.json()) as {
-			access_token: string;
-			refresh_token: string;
-			expires_in: number;
-		};
-
-		const authData = readAuthData();
-
-		authData.anthropic = {
-			type: "oauth",
-			access: tokenData.access_token,
-			refresh: tokenData.refresh_token,
-			expires: Date.now() + tokenData.expires_in * 1000 - 5 * 60 * 1000,
-		};
-
-		writeAuthData(authData);
-
+	if (flow.completed) {
+		pendingFlows.delete(flowId);
 		return { success: true };
-	} catch (err) {
-		return { success: false, error: String(err) };
+	}
+
+	// Pi owns parsing of a bare code, code#state, query string, or full redirect
+	// URL and validates any supplied state before token exchange.
+	flow.submitCode(authCode.trim());
+	try {
+		await flow.loginPromise;
+		pendingFlows.delete(flowId);
+		return { success: true };
+	} catch (error) {
+		pendingFlows.delete(flowId);
+		return { success: false, error: sanitizedOAuthFailure(error) };
 	}
 }
 
 /**
- * Check if OAuth credentials exist and are valid (not expired).
+ * Report configured OAuth status without resolving or exposing bearer tokens.
+ * Anthropic refreshable credentials remain configured while expired; Pi
+ * refreshes them lazily through Models.getAuth().
  */
 export function oauthStatus(providerInput?: string): { authenticated: boolean; expires?: number; provider: OAuthProviderId; email?: string } {
 	const provider = normalizeProvider(providerInput);
-	const authPath = getAuthJsonPath();
-	if (!existsSync(authPath)) return { authenticated: false, provider };
-
-	try {
-		const data = JSON.parse(readFileSync(authPath, "utf-8"));
-		const cred = data[provider];
-		if (!cred || cred.type !== "oauth") return { authenticated: false, provider };
-
-		const expired = cred.expires && Date.now() > cred.expires;
-
-		// strict-OAuth contract: never echo bearer credentials in /status.
-		// `email` is non-secret display metadata and is the ONLY extra field
-		// permitted here (Google account flow); tokens stay omitted.
-		const result: { authenticated: boolean; expires?: number; provider: OAuthProviderId; email?: string } = {
-			provider,
-			authenticated: !expired,
-			expires: cred.expires,
-		};
-		if (typeof cred.email === "string") result.email = cred.email;
-		return result;
-	} catch {
-		return { authenticated: false, provider };
-	}
+	const credential = getOAuthCredentialStore().readStoredCredentialSync(provider);
+	if (!credential || credential.type !== "oauth") return { authenticated: false, provider };
+	const expired = typeof credential.expires === "number" && Date.now() > credential.expires;
+	const refreshable = typeof credential.refresh === "string" && credential.refresh.length > 0;
+	const result: { authenticated: boolean; expires?: number; provider: OAuthProviderId; email?: string } = {
+		provider,
+		authenticated: provider === "anthropic" ? refreshable || !expired : !expired,
+		expires: credential.expires,
+	};
+	if (typeof credential.email === "string") result.email = credential.email;
+	return result;
 }
 
 export function oauthFlowStatus(
@@ -758,19 +748,18 @@ export function oauthFlowStatus(
 ): { complete: boolean; error?: string } {
 	const flow = pendingFlows.get(flowId);
 	if (!flow) return { complete: false, error: "flow not found" };
-	// Defence-in-depth: if a provider was supplied and disagrees with the stored
-	// flow, treat it as not-found to avoid leaking cross-provider status.
 	if (providerInput) {
 		try {
-			const expected = normalizeProvider(providerInput);
-			if (flow.provider !== expected) {
-				return { complete: false, error: "flow not found" };
-			}
+			if (flow.provider !== normalizeProvider(providerInput)) return { complete: false, error: "flow not found" };
 		} catch {
 			return { complete: false, error: "flow not found" };
 		}
 	}
-	if (flow.provider === "anthropic") return { complete: false };
+	if (Date.now() - flow.createdAt > FLOW_TTL_MS) {
+		cancelPendingFlow(flowId, flow, new Error("OAuth flow expired"));
+		pendingFlows.delete(flowId);
+		return { complete: false, error: "OAuth flow expired" };
+	}
 	if (flow.completed) {
 		if (flow.provider === "google-gemini-cli") closeGoogleFlowServer(flow);
 		pendingFlows.delete(flowId);
@@ -784,76 +773,13 @@ export function oauthFlowStatus(
 	return { complete: false };
 }
 
-/**
- * Refresh the OAuth access token using the stored refresh token.
- * Updates ~/.bobbit/agent/auth.json with the new credentials.
- * Returns the new access token, or null if refresh fails.
- */
-export async function refreshOAuthToken(fetchImpl: typeof fetch = defaultFetch): Promise<string | null> {
-	const authPath = getAuthJsonPath();
-	if (!existsSync(authPath)) return null;
-
-	let authData: Record<string, any>;
+/** Resolve a current Anthropic access token through Pi's locked refresh path. */
+export async function refreshOAuthToken(_fetchImpl: typeof fetch = defaultFetch): Promise<string | null> {
 	try {
-		authData = JSON.parse(readFileSync(authPath, "utf-8"));
-	} catch {
-		return null;
-	}
-
-	const cred = authData.anthropic;
-	if (!cred || cred.type !== "oauth" || !cred.refresh) return null;
-
-	// Skip refresh if token is still valid (5-minute buffer already baked into expires)
-	if (cred.expires && Date.now() < cred.expires) return cred.access;
-
-	console.log("[oauth] Access token expired, refreshing...");
-
-	try {
-		const tokenResponse = await fetchImpl(TOKEN_URL, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				grant_type: "refresh_token",
-				client_id: CLIENT_ID,
-				refresh_token: cred.refresh,
-			}),
-		});
-
-		if (!tokenResponse.ok) {
-			const errText = await tokenResponse.text();
-			console.error(`[oauth] Token refresh failed (${tokenResponse.status}): ${errText}`);
-			// Only clear credentials on definitive auth failures (invalid/revoked tokens).
-			// Transient errors (5xx, 429, network) should not destroy valid credentials.
-			const status = tokenResponse.status;
-			if (status === 400 || status === 401 || status === 403) {
-				console.log("[oauth] Credentials revoked or invalid, clearing stored credentials");
-				delete authData.anthropic;
-				writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
-			}
-			return null;
-		}
-
-		const tokenData = (await tokenResponse.json()) as {
-			access_token: string;
-			refresh_token?: string;
-			expires_in: number;
-		};
-
-		authData.anthropic = {
-			type: "oauth",
-			access: tokenData.access_token,
-			refresh: tokenData.refresh_token || cred.refresh, // keep old refresh if not rotated
-			expires: Date.now() + tokenData.expires_in * 1000 - 5 * 60 * 1000,
-		};
-
-		writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
-		try { chmodSync(authPath, 0o600); } catch {}
-
-		clearOAuthCache();
-		console.log("[oauth] Token refreshed successfully");
-		return tokenData.access_token;
-	} catch (err) {
-		console.error("[oauth] Token refresh error:", err);
+		const resolved = await getOAuthModels().getAuth("anthropic");
+		return typeof resolved?.auth.apiKey === "string" ? resolved.auth.apiKey : null;
+	} catch (error) {
+		console.error(`[oauth] Anthropic credential refresh failed: ${redactSensitive(error instanceof Error ? error.message : String(error))}`);
 		return null;
 	}
 }
@@ -868,74 +794,55 @@ export async function refreshOAuthToken(fetchImpl: typeof fetch = defaultFetch):
  * Anthropic contract and its existing callers stay unchanged.
  */
 export async function refreshGoogleOAuthToken(fetchImpl: typeof fetch = defaultFetch): Promise<string | null> {
-	const authPath = getAuthJsonPath();
-	if (!existsSync(authPath)) return null;
-
-	let authData: Record<string, any>;
 	try {
-		authData = JSON.parse(readFileSync(authPath, "utf-8"));
-	} catch {
-		return null;
-	}
+		const postMutation = await getOAuthCredentialStore().mutate("google-gemini-cli", async (current) => {
+			if (!current || current.type !== "oauth") return undefined;
+			if (!current.refresh) return undefined;
+			if (current.expires && Date.now() < current.expires) return undefined;
 
-	const cred = authData["google-gemini-cli"];
-	if (!cred || cred.type !== "oauth" || !cred.refresh) {
-		return cred && cred.type === "oauth" ? cred.access ?? null : null;
-	}
+			console.log("[oauth] Google access token expired, refreshing...");
+			const tokenResponse = await fetchWithProviderTimeout(fetchImpl, GOOGLE_TOKEN_URL, {
+				method: "POST",
+				headers: { "Content-Type": "application/x-www-form-urlencoded" },
+				body: new URLSearchParams({
+					grant_type: "refresh_token",
+					client_id: GOOGLE_CLIENT_ID,
+					client_secret: GOOGLE_CLIENT_SECRET,
+					refresh_token: current.refresh,
+				}).toString(),
+			});
 
-	// Skip refresh if token is still valid (5-minute buffer baked into expires).
-	if (cred.expires && Date.now() < cred.expires) return cred.access;
-
-	console.log("[oauth] Google access token expired, refreshing...");
-
-	try {
-		const tokenResponse = await fetchImpl(GOOGLE_TOKEN_URL, {
-			method: "POST",
-			headers: { "Content-Type": "application/x-www-form-urlencoded" },
-			body: new URLSearchParams({
-				grant_type: "refresh_token",
-				client_id: GOOGLE_CLIENT_ID,
-				client_secret: GOOGLE_CLIENT_SECRET,
-				refresh_token: cred.refresh,
-			}).toString(),
-		});
-
-		if (!tokenResponse.ok) {
-			const errText = await tokenResponse.text();
-			console.error(`[oauth] Google token refresh failed (${tokenResponse.status}): ${redactSensitive(errText)}`);
-			const status = tokenResponse.status;
-			if (status === 400 || status === 401 || status === 403) {
-				console.log("[oauth] Google credentials revoked or invalid, clearing stored credentials");
-				delete authData["google-gemini-cli"];
-				writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
-				try { chmodSync(authPath, 0o600); } catch {}
-				clearOAuthCache();
+			if (!tokenResponse.ok) {
+				console.error(`[oauth] Google token refresh failed (${tokenResponse.status})`);
+				if (tokenResponse.status === 400 || tokenResponse.status === 401 || tokenResponse.status === 403) {
+					console.log("[oauth] Google credentials revoked or invalid, clearing stored credentials");
+					return deleteCredential;
+				}
+				return undefined;
 			}
-			return null;
-		}
 
-		const tokenData = (await tokenResponse.json()) as {
-			access_token: string;
-			refresh_token?: string;
-			expires_in: number;
-		};
-
-		authData["google-gemini-cli"] = {
-			type: "oauth",
-			access: tokenData.access_token,
-			refresh: tokenData.refresh_token || cred.refresh, // refresh_token is usually not rotated
-			expires: Date.now() + tokenData.expires_in * 1000 - 5 * 60 * 1000,
-			...(typeof cred.email === "string" ? { email: cred.email } : {}),
-		};
-
-		writeFileSync(authPath, JSON.stringify(authData, null, 2), "utf-8");
-		try { chmodSync(authPath, 0o600); } catch {}
-
-		clearOAuthCache();
-		console.log("[oauth] Google token refreshed successfully");
-		return tokenData.access_token;
-	} catch (err) {
-		console.error("[oauth] Google token refresh error:", err);
+			const tokenData = (await tokenResponse.json()) as {
+				access_token: string;
+				refresh_token?: string;
+				expires_in: number;
+			};
+			console.log("[oauth] Google token refreshed successfully");
+			return {
+				...current,
+				type: "oauth",
+				access: tokenData.access_token,
+				refresh: tokenData.refresh_token || current.refresh,
+				expires: Date.now() + tokenData.expires_in * 1000 - 5 * 60 * 1000,
+			};
+		});
+		if (!postMutation || postMutation.type !== "oauth") return null;
+		// A fresh CAS loser is returned here, so an external logout cannot make us
+		// serve the stale snapshot captured before provider I/O.
+		const expired = typeof postMutation.expires === "number" && Date.now() >= postMutation.expires;
+		if (expired && postMutation.refresh) return null;
+		return postMutation.access || null;
+	} catch (error) {
+		console.error(`[oauth] Google token refresh error: ${redactSensitive(error instanceof Error ? error.message : String(error))}`);
 		return null;
 	}
 }
@@ -946,7 +853,7 @@ export async function refreshGoogleOAuthToken(fetchImpl: typeof fetch = defaultF
  */
 async function revokeGoogleToken(token: string, fetchImpl: typeof fetch = defaultFetch): Promise<void> {
 	try {
-		await fetchImpl(GOOGLE_REVOKE_URL, {
+		await fetchWithProviderTimeout(fetchImpl, GOOGLE_REVOKE_URL, {
 			method: "POST",
 			headers: { "Content-Type": "application/x-www-form-urlencoded" },
 			body: new URLSearchParams({ token }).toString(),
@@ -966,26 +873,20 @@ async function revokeGoogleToken(token: string, fetchImpl: typeof fetch = defaul
  */
 export async function oauthLogout(providerInput?: string, fetchImpl: typeof fetch = defaultFetch): Promise<{ success: boolean; provider: OAuthProviderId }> {
 	const provider = normalizeProvider(providerInput);
-	const authPath = getAuthJsonPath();
-	if (!existsSync(authPath)) return { success: true, provider };
-
-	let authData: Record<string, any>;
-	try {
-		authData = JSON.parse(readFileSync(authPath, "utf-8"));
-	} catch {
-		return { success: true, provider };
+	if (provider === "anthropic") {
+		// There is no Anthropic revocation endpoint. Pi's public CredentialStore
+		// deletion is the complete provider-scoped logout operation.
+		await getOAuthCredentialStore().delete(provider);
+	} else if (provider === "google-gemini-cli") {
+		await getOAuthCredentialStore().mutate(provider, async (current) => {
+			if (current?.type === "oauth") {
+				const token = current.refresh || current.access;
+				if (token) await revokeGoogleToken(token, fetchImpl);
+			}
+			return deleteCredential;
+		});
+	} else {
+		await getOAuthCredentialStore().delete(provider);
 	}
-
-	const cred = authData[provider];
-	if (provider === "google-gemini-cli" && cred && cred.type === "oauth") {
-		const token = cred.refresh || cred.access;
-		if (typeof token === "string" && token) await revokeGoogleToken(token, fetchImpl);
-	}
-
-	if (cred !== undefined) {
-		delete authData[provider];
-		writeAuthData(authData);
-	}
-
 	return { success: true, provider };
 }
