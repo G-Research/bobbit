@@ -63,18 +63,17 @@ async function waitForActiveSessionWithTextarea(page: Page, previousSessionId: s
 
 /**
  * Open the app authenticated via token query param.
- * Waits for the sidebar "New session" button to confirm the app has loaded.
+ *
+ * Wait for the app's explicit end-of-boot marker, rather than an early shell
+ * element. The header can render while preferences and initial session loading
+ * are still in flight; the marker is set only after the shortcut registry and
+ * authenticated startup path have completed, regardless of sidebar state.
  */
 export async function openApp(page: Page): Promise<void> {
 	const token = await readE2ETokenAsync();
 	const baseUrl = base();
-	await page.goto(`${baseUrl}/?token=${encodeURIComponent(token)}`, { waitUntil: "domcontentloaded" });
-	// Wait for sidebar to be fully loaded — Settings button is always present
-	// regardless of single-project or multi-project mode
-	await expect(
-		page.locator("button").filter({ hasText: "Settings" }).first(),
-	).toBeVisible({ timeout: 20_000 });
-	await page.waitForFunction(() => document.body.dataset.shortcutsReady === "1");
+	await page.goto(`${baseUrl}/?token=${encodeURIComponent(token)}`);
+	await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible({ timeout: 20_000 });
 }
 
 export async function activeSessionId(page: Page): Promise<string | null> {
