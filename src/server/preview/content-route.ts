@@ -37,6 +37,7 @@ import {
 	injectBaseAndScripts,
 	PREVIEW_BRIDGE_SCRIPTS,
 	previewNavigationBridge,
+	previewNavigationHandoffDocument,
 } from "../../shared/preview-bridge-scripts.js";
 import { gatewayRoute, normalizeBasePath, withBasePath } from "../../shared/base-path.js";
 import { getPreviewThemeSnapshot } from "./theme-snapshot.js";
@@ -445,11 +446,11 @@ function isAuthorized(
 	opts: ContentRouteOptions,
 	contentCapability?: PreviewContentCapability | null,
 ): boolean {
-	if (
-		contentCapability
-		&& !requestIsNavigation(req)
-		&& lookupPreviewAssetCapability(contentCapability, opts)
-	) {
+	if (contentCapability && lookupPreviewAssetCapability(contentCapability, opts)) {
+		// Navigation authority stops at the route parser below: a capability-path
+		// document request may receive only the fixed handoff shell, never the
+		// requested preview bytes. This early result preserves auth-before-
+		// disclosure while allowing native browser navigation to reach that shell.
 		return true;
 	}
 	if (opts.isLocalhost) return true;
@@ -577,16 +578,21 @@ export async function handlePreviewRequest(
 	// requests. A short-lived path capability restores only assets from the
 	// exact session/artifact content generation that minted it.
 	let routedCapability: PreviewAssetCapability | null = null;
+	let capabilityNavigation = false;
 	if (rel.startsWith(`${CONTENT_CAPABILITY_SEGMENT}/`)) {
 		const candidate = contentCapabilityFromRoute(rel, basePath, internalBaseRoute);
-		routedCapability = candidate && candidate.path !== "" && !requestIsNavigation(req)
+		capabilityNavigation = requestIsNavigation(req);
+		routedCapability = candidate && (candidate.path !== "" || capabilityNavigation)
 			? lookupPreviewAssetCapability(candidate, opts)
 			: null;
 		if (!candidate || !routedCapability || routedCapability.baseDir !== baseDir) {
 			send(res, 401, JSON.stringify({ error: "Unauthorized" }));
 			return true;
 		}
-		rel = candidate.path;
+		// Navigation requests retain the capability route only long enough to
+		// return an inert canonical-URL handoff. Subresource requests continue to
+		// resolve the generation-bound file below.
+		if (!capabilityNavigation) rel = candidate.path;
 	}
 
 	// Whole-root installs fence the exact destination through post-rename
@@ -624,6 +630,22 @@ export async function handlePreviewRequest(
 			if (!stillActive || expired || !generationMatches) {
 				revokePreviewAssetCapability(opts.cookieStore, routedCapability);
 				send(res, 401, JSON.stringify({ error: "Unauthorized" }));
+				return true;
+			}
+			if (capabilityNavigation) {
+				const capabilityBaseRoute = gatewayRoute(
+					`${internalBaseRoute}${CONTENT_CAPABILITY_SEGMENT}/${routedCapability.token}/`,
+				);
+				const handoff = previewNavigationHandoffDocument(withBasePath(capabilityBaseRoute, basePath));
+				res.writeHead(200, {
+					"Content-Type": "text/html; charset=utf-8",
+					"Cache-Control": "no-store",
+					"Content-Security-Policy": PREVIEW_HTML_CONTENT_SECURITY_POLICY,
+					"Referrer-Policy": PREVIEW_REFERRER_POLICY,
+					"X-Content-Type-Options": "nosniff",
+				});
+				if (method === "HEAD") res.end();
+				else res.end(handoff);
 				return true;
 			}
 			capabilityAuthorized = true;
@@ -716,13 +738,16 @@ export async function handlePreviewRequest(
 			`${internalBaseRoute}${CONTENT_CAPABILITY_SEGMENT}/${issuedCapability.token}/`,
 		);
 		const publicBaseHref = withBasePath(capabilityBaseRoute, basePath);
-		const baseTag = `<base data-bobbit-preview-base href="${publicBaseHref}">` + getPreviewThemeSnapshot();
+		// Install navigation relay in <head>, before an authored nested iframe can
+		// load and emit its inert handoff. Theme/swipe bridges may remain at the
+		// historical body boundary.
+		const baseTag = `<base data-bobbit-preview-base href="${publicBaseHref}">`
+			+ getPreviewThemeSnapshot()
+			+ previewNavigationBridge();
 		const rewritten = injectBaseAndScripts(
 			body,
 			baseTag,
-			PREVIEW_BRIDGE_SCRIPTS
-				+ previewNavigationBridge()
-				+ PREVIEW_OPAQUE_THEME_BRIDGE,
+			PREVIEW_BRIDGE_SCRIPTS + PREVIEW_OPAQUE_THEME_BRIDGE,
 		);
 		res.writeHead(200, {
 			"Content-Type": contentType,

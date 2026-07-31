@@ -67,7 +67,7 @@ beforeAll(() => {
 	const mountRoot = path.join(workspaceRoot, "state", "preview", SID);
 	fs.mkdirSync(path.join(mountRoot, "subdir"), { recursive: true });
 	fs.writeFileSync(path.join(mountRoot, "index.html"), "<html><head><title>x</title></head><body><a id=report href=\"report.html\">report</a></body></html>");
-	fs.writeFileSync(path.join(mountRoot, "report.html"), "<!doctype html><html><body>r</body></html>");
+	fs.writeFileSync(path.join(mountRoot, "report.html"), "<!doctype html><html><body>LIVE_AGENT_DOCUMENT_BYTES</body></html>");
 	fs.writeFileSync(path.join(mountRoot, "styles.css"), "body{color:red}");
 	fs.writeFileSync(path.join(mountRoot, "logo.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
 	fs.writeFileSync(path.join(mountRoot, "data.json"), `{"a":1}`);
@@ -84,6 +84,7 @@ beforeAll(() => {
 
 	fs.mkdirSync(artifactMountPath, { recursive: true });
 	fs.writeFileSync(path.join(artifactMountPath, "01.html"), "<!doctype html><html><head><title>a1</title></head><body>v1</body></html>");
+	fs.writeFileSync(path.join(artifactMountPath, "02.html"), "<!doctype html><html><body>ARTIFACT_AGENT_DOCUMENT_BYTES</body></html>");
 	fs.writeFileSync(path.join(artifactMountPath, "styles.css"), "body{color:blue}");
 });
 
@@ -284,6 +285,7 @@ describe("handlePreviewRequest — bridge injection", () => {
 			assert.match(txt, /bobbit-preview-navigate/);
 			assert.match(txt, /data-bobbit-preview-navigation/);
 			assert.match(txt, /canonicalDocument = new URL\(location\.href\)/);
+			assert.ok(txt.indexOf("data-bobbit-preview-navigation") < txt.indexOf("<title>x</title>"), "nested navigation relay must install before authored frames can parse");
 			assert.doesNotMatch(txt, new RegExp(`new URL\\(\"${basePath}/preview/${SID}`));
 		}
 	});
@@ -341,22 +343,30 @@ describe("handlePreviewRequest — bridge injection", () => {
 		const navigationRes = fakeRes();
 		await handlePreviewRequest(
 			fakeReq({
-				url: `${capabilityPath}styles.css`,
+				url: `${capabilityPath}report.html`,
 				headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" },
 			}),
 			navigationRes as any,
-			`${capabilityPath}styles.css`,
+			`${capabilityPath}report.html`,
 			o,
 		);
-		assert.equal(navigationRes.statusCode, 401, "asset authority must never authorize navigation");
+		assert.equal(navigationRes.statusCode, 200, "native navigation receives only an inert ambient handoff");
+		assert.equal(navigationRes.headers["content-type"], "text/html; charset=utf-8");
+		assert.equal(navigationRes.headers["content-security-policy"], PREVIEW_HTML_CONTENT_SECURITY_POLICY);
+		assert.match(bodyText(navigationRes), /data-bobbit-preview-navigation-handoff/);
+		assert.doesNotMatch(bodyText(navigationRes), /LIVE_AGENT_DOCUMENT_BYTES|body\{color:red\}/);
 		const directoryNavigationRes = fakeRes();
 		await handlePreviewRequest(
-			fakeReq({ url: capabilityPath }),
+			fakeReq({
+				url: capabilityPath,
+				headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "iframe" },
+			}),
 			directoryNavigationRes as any,
 			capabilityPath,
 			o,
 		);
-		assert.equal(directoryNavigationRes.statusCode, 401, "asset authority must not redirect into a document");
+		assert.equal(directoryNavigationRes.statusCode, 200, "capability directory navigation must also receive only the handoff shell");
+		assert.doesNotMatch(bodyText(directoryNavigationRes), /LIVE_AGENT_DOCUMENT_BYTES/);
 
 		const unauthenticatedCanonicalNavigation = fakeRes();
 		await handlePreviewRequest(
@@ -382,6 +392,48 @@ describe("handlePreviewRequest — bridge injection", () => {
 		const stolenPath = capabilityPath.replace(`/preview/${SID}/`, `/preview/${OTHER_SID}/`);
 		await handlePreviewRequest(fakeReq({ url: `${stolenPath}styles.css` }), crossSessionRes as any, `${stolenPath}styles.css`, o);
 		assert.equal(crossSessionRes.statusCode, 401, "a capability must not authenticate another preview tree");
+	});
+
+	it("hands root and nested live/artifact native navigations to canonical ambient authority without document bytes", async () => {
+		for (const basePath of ["", "/team/bobbit"]) {
+			for (const artifact of [false, true]) {
+				const o = { ...makeOpts(false), basePath };
+				const cookie = basePath
+					? o.store.mint({ basePath, origin: "http://x" })
+					: o.store.mint();
+				const internalScope = artifact
+					? `/preview/${SID}/_artifact/${ARTIFACT_ID}/`
+					: `/preview/${SID}/`;
+				const entry = artifact ? "01.html" : "index.html";
+				const target = artifact ? "02.html" : "report.html";
+				const initial = fakeRes();
+				await handlePreviewRequest(
+					fakeReq({ url: `${basePath}${internalScope}${entry}`, cookie: `${COOKIE_NAME}=${cookie}` }),
+					initial as any,
+					`${internalScope}${entry}`,
+					o,
+				);
+				assert.equal(initial.statusCode, 200);
+				const publicScope = `${basePath}${internalScope}`;
+				const capability = capabilityBase(bodyText(initial), publicScope);
+				const navigation = fakeRes();
+				await handlePreviewRequest(
+					fakeReq({
+						url: `${capability}${target}?programmatic=1`,
+						headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": artifact ? "iframe" : "document" },
+					}),
+					navigation as any,
+					`${capability.slice(basePath.length)}${target}`,
+					o,
+				);
+				assert.equal(navigation.statusCode, 200, `${basePath || "root"} ${artifact ? "artifact" : "live"}`);
+				const handoff = bodyText(navigation);
+				assert.match(handoff, new RegExp(`<base data-bobbit-preview-base href="${capability}`));
+				assert.match(handoff, /location\.replace\(target\.href\)/);
+				assert.match(handoff, /parent\.postMessage\(\{ type: MESSAGE_TYPE, url: target\.href \}/);
+				assert.doesNotMatch(handoff, /LIVE_AGENT_DOCUMENT_BYTES|ARTIFACT_AGENT_DOCUMENT_BYTES/);
+			}
+		}
 	});
 
 	it("expires asset authority and rotates it for a fresh document", async () => {
@@ -643,7 +695,9 @@ describe("handlePreviewRequest — bridge injection", () => {
 			`${svgCapability}hostile.svg`,
 			o,
 		);
-		assert.equal(capabilityPopout.statusCode, 401);
+		assert.equal(capabilityPopout.statusCode, 200);
+		assert.match(bodyText(capabilityPopout), /data-bobbit-preview-navigation-handoff/);
+		assert.doesNotMatch(bodyText(capabilityPopout), /parent\.document\.body\.textContent='owned'/);
 	});
 
 	it("injects inline theme snapshot inside <head> on text/html", async () => {

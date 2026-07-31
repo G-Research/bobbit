@@ -140,6 +140,14 @@ function scriptString(value: string): string {
 	return JSON.stringify(value).replace(/</g, "\\u003c");
 }
 
+function htmlAttribute(value: string): string {
+	return value
+		.replace(/&/g, "&amp;")
+		.replace(/"/g, "&quot;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;");
+}
+
 /**
  * Keep asset resolution on generation-bound authority while handing document
  * navigation back to an ambient-authenticated browser context. Embedded opaque
@@ -170,12 +178,21 @@ export function previewNavigationBridge(): string {
 		if (!/^[A-Za-z0-9_-]{43}\\/$/.test(capabilitySuffix)) return;
 		canonicalBase = new URL(capabilityBase.href);
 		canonicalBase.pathname = capabilityBase.pathname.slice(0, marker + 1);
+		var previewMarker = canonicalBase.pathname.lastIndexOf('/preview/');
+		if (previewMarker < 0) return;
+		var scopeSegments = canonicalBase.pathname.slice(previewMarker + '/preview/'.length).split('/').filter(Boolean);
+		var liveScope = scopeSegments.length === 1;
+		if (!liveScope && !(scopeSegments.length === 3 && scopeSegments[1] === '_artifact')) return;
 		canonicalDocument = new URL(location.href);
 		if (canonicalDocument.origin !== capabilityBase.origin
 			|| !within(canonicalDocument.pathname, canonicalBase.pathname)) return;
 		var documentRelative = canonicalDocument.pathname.slice(canonicalBase.pathname.length);
 		if (documentRelative === '_content' || documentRelative.indexOf('_content/') === 0) return;
 	} catch (_) { return; }
+	function crossesScope(relative) {
+		return relative === '_content' || relative.indexOf('_content/') === 0
+			|| (liveScope && (relative === '_artifact' || relative.indexOf('_artifact/') === 0));
+	}
 	function canonicalTarget(raw) {
 		if (typeof raw !== 'string' || !raw) return null;
 		if (raw.charAt(0) === '#') return new URL(raw, canonicalDocument.href).href;
@@ -184,18 +201,69 @@ export function previewNavigationBridge(): string {
 		if (requested.origin !== capabilityBase.origin) return null;
 		if (within(requested.pathname, capabilityBase.pathname)) {
 			var suffix = requested.pathname.slice(capabilityBase.pathname.length);
+			if (crossesScope(suffix)) return null;
 			var target = new URL(canonicalBase.href);
 			target.pathname = canonicalBase.pathname + suffix;
 			target.search = requested.search;
 			target.hash = requested.hash;
 			return target.href;
 		}
-		return within(requested.pathname, canonicalBase.pathname) ? requested.href : null;
+		if (!within(requested.pathname, canonicalBase.pathname)) return null;
+		return crossesScope(requested.pathname.slice(canonicalBase.pathname.length)) ? null : requested.href;
 	}
 	function handoff(target) {
 		if (parent === window) location.assign(target);
 		else parent.postMessage({ type: MESSAGE_TYPE, url: target }, '*');
 	}
+	// Programmatic and nested-frame document loads first receive a fixed inert
+	// handoff document at the capability URL. Relay
+	// only messages from a direct child browsing context; each canonical preview
+	// document repeats this check, so deeply nested frames reach the app through
+	// a source-validated chain without granting document authority to the asset
+	// capability.
+	window.addEventListener('message', function(event) {
+		if (!event.data || event.data.type !== MESSAGE_TYPE) return;
+		var frames = document.querySelectorAll('iframe,frame');
+		var owned = false;
+		for (var i = 0; i < frames.length; i++) {
+			try {
+				if (frames[i].contentWindow === event.source) { owned = true; break; }
+			} catch (_) {}
+		}
+		if (!owned) return;
+		var target = canonicalTarget(event.data.url);
+		if (target) handoff(target);
+	});
+	// Chromium resolves meta refresh against the document URL rather than the
+	// marked asset base. Capture same-scope refresh directives as they are parsed
+	// so an opaque document cannot lose its ambient cookie on the native load.
+	function captureMetaRefresh(meta) {
+		if (!meta || String(meta.getAttribute('http-equiv') || '').trim().toLowerCase() !== 'refresh') return;
+		var content = String(meta.getAttribute('content') || '');
+		var parsed = /^\\s*(\\d+(?:\\.\\d+)?)\\s*(?:;\\s*(?:url\\s*=\\s*)?(.+?))?\\s*$/i.exec(content);
+		if (!parsed) return;
+		var raw = parsed[2] || canonicalDocument.href;
+		if ((raw.charAt(0) === '"' && raw.charAt(raw.length - 1) === '"')
+			|| (raw.charAt(0) === "'" && raw.charAt(raw.length - 1) === "'")) raw = raw.slice(1, -1);
+		var target = canonicalTarget(raw);
+		if (!target) return;
+		meta.removeAttribute('http-equiv');
+		var delay = Math.max(0, Number(parsed[1]) * 1000);
+		setTimeout(function() { handoff(target); }, Number.isFinite(delay) ? delay : 0);
+	}
+	function inspectMetaRefresh(node) {
+		if (!node || node.nodeType !== 1) return;
+		if (String(node.tagName).toLowerCase() === 'meta') captureMetaRefresh(node);
+		var metas = node.querySelectorAll ? node.querySelectorAll('meta[http-equiv]') : [];
+		for (var i = 0; i < metas.length; i++) captureMetaRefresh(metas[i]);
+	}
+	inspectMetaRefresh(document.documentElement);
+	new MutationObserver(function(records) {
+		for (var i = 0; i < records.length; i++) {
+			if (records[i].type === 'attributes') inspectMetaRefresh(records[i].target);
+			for (var j = 0; j < records[i].addedNodes.length; j++) inspectMetaRefresh(records[i].addedNodes[j]);
+		}
+	}).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['http-equiv', 'content'] });
 	document.addEventListener('click', function(event) {
 		if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
 		var node = event.target;
@@ -231,6 +299,60 @@ export function previewNavigationBridge(): string {
 }
 
 /**
+ * Fixed script for a capability-path document navigation. The server returns
+ * this bridge instead of any agent-authored file bytes. It derives the
+ * canonical ambient-auth URL solely from the response-rebased marked base and
+ * its own browser URL, then either navigates a standalone popout or asks its
+ * direct parent to relay the target. The canonical preview bridge above
+ * source-validates each nested relay; the app validates the top-level iframe.
+ */
+export function previewNavigationHandoffBridge(): string {
+	return `<script data-bobbit-preview-navigation-handoff>
+(function() {
+	var MESSAGE_TYPE = ${scriptString(PREVIEW_NAVIGATION_MESSAGE_TYPE)};
+	function within(pathname, base) {
+		return pathname === base || pathname.indexOf(base.endsWith('/') ? base : base + '/') === 0;
+	}
+	var markedBases = document.querySelectorAll('base[' + 'data-bobbit-preview-' + 'base]');
+	if (markedBases.length !== 1) return;
+	var capabilityBase;
+	var current;
+	try {
+		capabilityBase = new URL(markedBases[0].href, location.href);
+		current = new URL(location.href);
+		var marker = capabilityBase.pathname.lastIndexOf('/_content/');
+		if (marker < 0 || capabilityBase.search || capabilityBase.hash) return;
+		var capabilitySuffix = capabilityBase.pathname.slice(marker + '/_content/'.length);
+		if (!/^[A-Za-z0-9_-]{43}\\/$/.test(capabilitySuffix)) return;
+		if (current.origin !== capabilityBase.origin || !within(current.pathname, capabilityBase.pathname)) return;
+		var canonicalBase = new URL(capabilityBase.href);
+		canonicalBase.pathname = capabilityBase.pathname.slice(0, marker + 1);
+		var previewMarker = canonicalBase.pathname.lastIndexOf('/preview/');
+		if (previewMarker < 0) return;
+		var scopeSegments = canonicalBase.pathname.slice(previewMarker + '/preview/'.length).split('/').filter(Boolean);
+		var liveScope = scopeSegments.length === 1;
+		if (!liveScope && !(scopeSegments.length === 3 && scopeSegments[1] === '_artifact')) return;
+		var relative = current.pathname.slice(capabilityBase.pathname.length);
+		if (relative === '_content' || relative.indexOf('_content/') === 0
+			|| (liveScope && (relative === '_artifact' || relative.indexOf('_artifact/') === 0))) return;
+		var target = new URL(canonicalBase.href);
+		target.pathname = canonicalBase.pathname + relative;
+		target.search = current.search;
+		target.hash = current.hash;
+		if (!within(target.pathname, canonicalBase.pathname)) return;
+		if (parent === window) location.replace(target.href);
+		else parent.postMessage({ type: MESSAGE_TYPE, url: target.href }, '*');
+	} catch (_) { return; }
+})();
+<\/script>`;
+}
+
+/** Return the complete, authored-byte-free navigation handoff document. */
+export function previewNavigationHandoffDocument(publicCapabilityBaseHref: string): string {
+	return `<!doctype html><html><head><meta charset="utf-8"><base data-bobbit-preview-base href="${htmlAttribute(publicCapabilityBaseHref)}"></head><body>${previewNavigationHandoffBridge()}</body></html>`;
+}
+
+/**
  * Parent-side validation for an opaque-frame navigation handoff. The source
  * window check is owned by the caller; this helper proves the requested URL is
  * same-origin and remains inside the exact live/artifact preview scope already
@@ -259,14 +381,16 @@ export function validatedPreviewNavigationTarget(currentIframeSrc: string, reque
 	const sessionId = segments[0] ?? "";
 	if (!sessionId || !/^[A-Za-z0-9._~-]+$/.test(sessionId)) return null;
 	let scope = `${prefix}${sessionId}/`;
-	if (segments[1] === "_artifact") {
+	const artifactScope = segments[1] === "_artifact";
+	if (artifactScope) {
 		const artifactId = segments[2] ?? "";
 		if (!/^[A-Za-z0-9_-]{1,64}$/.test(artifactId)) return null;
 		scope += `_artifact/${artifactId}/`;
 	}
 	if (!requested.pathname.startsWith(scope)) return null;
 	const relative = requested.pathname.slice(scope.length);
-	if (relative === "_content" || relative.startsWith("_content/")) return null;
+	if (relative === "_content" || relative.startsWith("_content/")
+		|| (!artifactScope && (relative === "_artifact" || relative.startsWith("_artifact/")))) return null;
 	return requested.href;
 }
 
