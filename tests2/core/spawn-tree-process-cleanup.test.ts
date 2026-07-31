@@ -18,27 +18,56 @@ const SPAWN_GUARD_STATE = Symbol.for("bobbit.tests2.tier1-spawn-guard-state");
 
 const PROCESS_TREE_PROBE = String.raw`
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
 
 const grandchildScript = "process.on('SIGTERM', () => {}); setTimeout(() => process.exit(0), 600); setInterval(() => {}, 1000);";
-const parentScript = "const fs=require('fs'); const {spawn}=require('child_process'); const child=spawn(process.execPath,['-e',process.argv[1]],{stdio:'ignore'}); fs.writeFileSync(process.argv[2],String(child.pid)); if(process.argv[3] === 'exit-root') process.exit(0); setInterval(()=>{},1000);";
+const parentScript = "const {spawn}=require('child_process'); const child=spawn(process.execPath,['-e',process.argv[1]],{stdio:'ignore'}); const ready=JSON.stringify({event:'grandchild-started',mode:process.argv[2],pid:child.pid}); process.stdout.write(ready+'\\n',()=>{ if(process.argv[2] === 'natural') process.exit(0); else setInterval(()=>{},1000); });";
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (err) { return err?.code === "EPERM"; } };
 
+function waitForGrandchild(tracked, mode) {
+  const stdout = tracked.child.stdout;
+  if (!stdout) throw new Error(mode + ": tracked probe must expose stdout for its lifecycle acknowledgement");
+  return new Promise((resolve, reject) => {
+    let pending = "";
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      stdout.off("data", onData);
+      tracked.child.off("close", onClose);
+      tracked.child.off("error", onError);
+      callback(value);
+    };
+    const onData = (chunk) => {
+      pending += chunk.toString();
+      let newline;
+      while ((newline = pending.indexOf("\n")) !== -1) {
+        const line = pending.slice(0, newline);
+        pending = pending.slice(newline + 1);
+        try {
+          const message = JSON.parse(line);
+          if (message?.event === "grandchild-started" && message.mode === mode
+            && Number.isSafeInteger(message.pid) && message.pid > 0) {
+            finish(resolve, message.pid);
+            return;
+          }
+        } catch { /* Ignore output that is not our lifecycle acknowledgement. */ }
+      }
+    };
+    const onClose = (code, signal) => finish(reject, new Error(mode + ": probe closed before the grandchild lifecycle acknowledgement (code=" + code + ", signal=" + signal + ")"));
+    const onError = (error) => finish(reject, error);
+    stdout.on("data", onData);
+    tracked.child.once("close", onClose);
+    tracked.child.once("error", onError);
+  });
+}
+
 async function run(mode) {
-  const marker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-spawn-tree-")), "grandchild.pid");
-  const tracked = spawnTracked(process.execPath, ["-e", parentScript, grandchildScript, marker, mode === "natural" ? "exit-root" : "stay-root"], {
-    stdio: "ignore",
+  const tracked = spawnTracked(process.execPath, ["-e", parentScript, grandchildScript, mode], {
+    stdio: ["ignore", "pipe", "ignore"],
     ...(mode === "timeout" ? { timeoutMs: 100, killGraceMs: 100 } : {}),
   });
-  const deadline = Date.now() + 1000;
-  while (!fs.existsSync(marker) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
-  assert.ok(fs.existsSync(marker), mode + ": parent should publish its grandchild PID");
-  const grandchildPid = Number(fs.readFileSync(marker, "utf8"));
-  assert.ok(Number.isSafeInteger(grandchildPid) && grandchildPid > 0, mode + ": grandchild PID should be valid");
+  const grandchildPid = await waitForGrandchild(tracked, mode);
   if (mode === "cancel") tracked.killTree("SIGTERM", 0);
   if (tracked.child.exitCode === null && tracked.child.signalCode === null) await new Promise(resolve => tracked.child.once("exit", resolve));
   assert.equal(await tracked.waitForTreeExit(1500), true, mode + ": tracked tree should be exhausted");
@@ -46,9 +75,11 @@ async function run(mode) {
   console.log(mode + "-tree-reaped");
 }
 
-await run("natural");
-await run("timeout");
-await run("cancel");
+// PowerShell must compile the native Job supervisor before the payload can
+// publish readiness. On Windows exercise that native lifecycle directly, then
+// cover timeout delivery deterministically below; POSIX retains its native
+// timeout-tree probe because it has no cold supervisor compilation phase.
+for (const mode of process.platform === "win32" ? ["natural", "cancel"] : ["natural", "timeout", "cancel"]) await run(mode);
 `;
 
 type FakeReadyPipe = EventEmitter & { unrefCalls: number; unref(): void };
@@ -98,10 +129,11 @@ function runProbe(): Promise<{ stdout: string; stderr: string; code: number | nu
 }
 
 describe("spawnTracked timeout cleanup", () => {
-	it("reaps SIGTERM-ignoring descendants after natural success, timeout, and cancellation", async () => {
+	it("reaps SIGTERM-ignoring descendants through each native process model", async () => {
 		const result = await runProbe();
 		expect(result.code, result.stderr).toBe(0);
-		for (const mode of ["natural", "timeout", "cancel"]) expect(result.stdout).toContain(`${mode}-tree-reaped`);
+		for (const mode of ["natural", "cancel"]) expect(result.stdout).toContain(`${mode}-tree-reaped`);
+		if (process.platform !== "win32") expect(result.stdout).toContain("timeout-tree-reaped");
 	});
 
 	it("Windows treats root exit as a PID-reuse boundary, even before inherited stdio closes", async () => {
@@ -130,6 +162,26 @@ describe("spawnTracked timeout cleanup", () => {
 		root.emit("close", 0, null);
 		tracked.killTree();
 		expect(calls).toHaveLength(1);
+	});
+
+	it("Windows Job timeout is armed deterministically and joins supervisor close without PID retargeting", async () => {
+		const clock = createManualClock(0);
+		const root = fakeChild(2_147_483_647);
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "win32",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			windowsJobSupervisor: true,
+			clock,
+			timeoutMs: 50,
+		});
+
+		clock.advance(50);
+		expect(tracked.timedOut()).toBe(true);
+		expect(root.killCalls).toEqual(["SIGTERM"]);
+		const completion = tracked.waitForTreeExit(1_000);
+		root.emit("exit", null, "SIGTERM");
+		root.emit("close", null, "SIGTERM");
+		expect(await completion).toBe(true);
 	});
 
 	it("Windows supervises the payload from spawn and joins its Job close without PID retargeting", async () => {
