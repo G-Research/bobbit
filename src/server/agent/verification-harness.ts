@@ -1655,6 +1655,9 @@ export class VerificationHarness {
 				const goal = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId);
 				if (goal && (goal.state === "complete" || goal.state === "shelved")) {
 					if (process.env.BOBBIT_DEBUG) console.log(`[verification] Cleaning resumed verification ${v.signalId} for ${goal.state} goal ${v.goalId}`);
+					// A retry after the crash window must delete this record, not resume it.
+					v.cancelled = true;
+					v.overallStatus = "cancelled";
 					const settled = await this._killPersistedCommandSteps(v, "SIGKILL", { waitForIdentity: true, markIntent: true, reason: "cancelled" });
 					if (settled) {
 						if (this.activeVerifications.get(v.signalId) === v) this.activeVerifications.delete(v.signalId);
