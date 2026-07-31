@@ -13,6 +13,10 @@ import {
 export const GW_URL_KEY = "gateway.url";
 export const GW_TOKEN_KEY = "gateway.token";
 export const GW_AUTH_MODE_KEY = "gateway.auth-mode";
+/** Atomic commit marker and cross-tab snapshot. Legacy keys remain reload-compatible. */
+export const GW_CONNECTION_REVISION_KEY = "gateway.connection-revision";
+/** Mode update bound to one connection generation, so it cannot revert a newer target. */
+export const GW_AUTH_MODE_REVISION_KEY = "gateway.auth-mode-revision";
 export const LOCALHOST_TOKEN = "localhost";
 
 const INVALID_SAVED_GATEWAY_WARNING = "Invalid saved gateway URL; using this Bobbit deployment instead.";
@@ -21,6 +25,7 @@ const NATIVE_TRANSPORT_WARNING = "Preview live updates and embedded previews req
 const QR_COOKIE_REENTRY_MESSAGE = "This browser is connected with a private cookie, which cannot authenticate a phone. Re-enter the gateway token to create a secure handoff; it stays only in this tab and is not saved.";
 const SERVICE_WORKER_RELOAD_GUARD_KEY = "bobbit-sw-mount-reload";
 const BOBBIT_CACHE_PREFIX = "bobbit:";
+const CROSS_TAB_CONNECTION_CHANGED_ERROR = "Gateway changed in another tab; reload before retrying this action.";
 
 export type InvalidGatewayBaseUrlCode =
 	| "EMPTY"
@@ -71,6 +76,24 @@ export type GatewayMobileHandoff =
 
 type GatewayAuthenticationMode = "none" | "bearer" | "cookie" | "localhost" | "unknown";
 
+interface PersistedGatewayConnectionRecord {
+	version: 1;
+	generation: string;
+	baseUrl: string;
+	token: string;
+	authenticationMode: GatewayAuthenticationMode;
+}
+
+interface PersistedGatewayAuthenticationModeRecord {
+	version: 1;
+	generation: string;
+	authenticationMode: GatewayAuthenticationMode;
+}
+
+type PersistedGatewayConnectionRead =
+	| { status: "valid"; record: PersistedGatewayConnectionRecord }
+	| { status: "absent" | "invalid" | "unavailable" };
+
 interface BobbitServiceWorkerLike {
 	scriptURL: string;
 }
@@ -113,8 +136,13 @@ export interface ServiceWorkerMountPreparationResult {
 
 let activeConnection: ActiveGatewayConnection | null = null;
 let activeAuthenticationMode: GatewayAuthenticationMode = "none";
+let activeConnectionGeneration: string | null = null;
 let recoveryWarning: string | null = null;
 let serviceWorkerReloadRequested = false;
+let crossTabListenerWindow: (Window & typeof globalThis) | undefined;
+let crossTabReloadRequested = false;
+let crossTabUnloadStarted = false;
+let fallbackGenerationCounter = 0;
 
 function browserWindow(): (Window & typeof globalThis) | undefined {
 	return typeof window === "undefined" ? undefined : window;
@@ -168,6 +196,93 @@ function removeStoredConnection(): void {
 	catch { /* recovery still proceeds in memory */ }
 	try { if (typeof localStorage !== "undefined") localStorage.removeItem(GW_AUTH_MODE_KEY); }
 	catch { /* recovery still proceeds in memory */ }
+	try { if (typeof localStorage !== "undefined") localStorage.removeItem(GW_CONNECTION_REVISION_KEY); }
+	catch { /* recovery still proceeds in memory */ }
+	try { if (typeof localStorage !== "undefined") localStorage.removeItem(GW_AUTH_MODE_REVISION_KEY); }
+	catch { /* recovery still proceeds in memory */ }
+}
+
+function isGatewayAuthenticationMode(value: unknown): value is GatewayAuthenticationMode {
+	return value === "none" || value === "bearer" || value === "cookie"
+		|| value === "localhost" || value === "unknown";
+}
+
+function authenticationModeMatchesToken(token: string, mode: GatewayAuthenticationMode): boolean {
+	return token === LOCALHOST_TOKEN
+		? mode === "localhost" || mode === "cookie" || mode === "unknown"
+		: token ? mode === "bearer" : mode === "none";
+}
+
+function parsePersistedConnectionRecord(raw: string): PersistedGatewayConnectionRecord | null {
+	let candidate: unknown;
+	try { candidate = JSON.parse(raw); } catch { return null; }
+	if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+	const value = candidate as Partial<PersistedGatewayConnectionRecord>;
+	if (value.version !== 1
+		|| typeof value.generation !== "string"
+		|| !/^[A-Za-z0-9._~-]{1,200}$/.test(value.generation)
+		|| typeof value.baseUrl !== "string"
+		|| typeof value.token !== "string"
+		|| !isGatewayAuthenticationMode(value.authenticationMode)) return null;
+
+	let normalized: string;
+	try { normalized = normalizeGatewayBaseUrl(value.baseUrl); } catch { return null; }
+	if (normalized !== value.baseUrl) return null;
+	if (!authenticationModeMatchesToken(value.token, value.authenticationMode)) return null;
+	return {
+		version: 1,
+		generation: value.generation,
+		baseUrl: normalized,
+		token: value.token,
+		authenticationMode: value.authenticationMode,
+	};
+}
+
+function parsePersistedAuthenticationModeRecord(raw: string): PersistedGatewayAuthenticationModeRecord | null {
+	let candidate: unknown;
+	try { candidate = JSON.parse(raw); } catch { return null; }
+	if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+	const value = candidate as Partial<PersistedGatewayAuthenticationModeRecord>;
+	if (value.version !== 1
+		|| typeof value.generation !== "string"
+		|| !/^[A-Za-z0-9._~-]{1,200}$/.test(value.generation)
+		|| !isGatewayAuthenticationMode(value.authenticationMode)) return null;
+	return { version: 1, generation: value.generation, authenticationMode: value.authenticationMode };
+}
+
+function readPersistedConnectionRecord(): PersistedGatewayConnectionRead {
+	try {
+		if (typeof localStorage === "undefined") return { status: "unavailable" };
+		const raw = localStorage.getItem(GW_CONNECTION_REVISION_KEY);
+		if (raw === null) return { status: "absent" };
+		const record = parsePersistedConnectionRecord(raw);
+		return record ? { status: "valid", record } : { status: "invalid" };
+	} catch {
+		return { status: "unavailable" };
+	}
+}
+
+function newConnectionGeneration(): string {
+	try {
+		const randomUUID = globalThis.crypto?.randomUUID;
+		if (typeof randomUUID === "function") return randomUUID.call(globalThis.crypto);
+	} catch { /* a non-security fallback is sufficient for an ordering marker */ }
+	fallbackGenerationCounter += 1;
+	return `${Date.now().toString(36)}-${fallbackGenerationCounter.toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function persistedConnectionRecord(
+	baseUrl: string,
+	token: string,
+	authenticationMode: GatewayAuthenticationMode,
+): PersistedGatewayConnectionRecord {
+	return {
+		version: 1,
+		generation: newConnectionGeneration(),
+		baseUrl,
+		token,
+		authenticationMode,
+	};
 }
 
 function rawPathnameAfterAuthority(raw: string): string {
@@ -255,8 +370,149 @@ export function sameOriginGatewayBaseUrl(): string {
 	return normalizeGatewayBaseUrl(`${current.location.origin}${runtimeBasePath()}`);
 }
 
+function persistedAuthenticationMode(
+	connectionRecord: PersistedGatewayConnectionRecord,
+): GatewayAuthenticationMode {
+	try {
+		if (typeof localStorage === "undefined") return connectionRecord.authenticationMode;
+		const raw = localStorage.getItem(GW_AUTH_MODE_REVISION_KEY);
+		if (!raw) return connectionRecord.authenticationMode;
+		const modeRecord = parsePersistedAuthenticationModeRecord(raw);
+		if (modeRecord?.generation !== connectionRecord.generation
+			|| !authenticationModeMatchesToken(connectionRecord.token, modeRecord.authenticationMode)) {
+			return connectionRecord.authenticationMode;
+		}
+		return modeRecord.authenticationMode;
+	} catch {
+		return connectionRecord.authenticationMode;
+	}
+}
+
+function notifyGatewayConnectionChanged(baseUrl: string, source: "local" | "cross-tab"): void {
+	try {
+		browserWindow()?.dispatchEvent(new CustomEvent("bobbit:gateway-connection-changed", {
+			// Never expose the current-tab-only bearer through a document-wide event.
+			detail: { baseUrl, source },
+		}));
+	} catch { /* notification is best effort */ }
+}
+
+function requestCrossTabReload(): void {
+	if (crossTabReloadRequested) return;
+	crossTabReloadRequested = true;
+	try {
+		const current = browserWindow();
+		if (current && typeof current.location.reload === "function") current.location.reload();
+	} catch { /* the reconciled boundary still prevents use of the stale target */ }
+}
+
+function applyPersistedConnectionRecord(record: PersistedGatewayConnectionRecord, reloadOnTargetChange: boolean): void {
+	if (record.generation === activeConnectionGeneration) return;
+	const previous = activeConnection;
+	const previousMode = activeAuthenticationMode;
+	const authenticationMode = persistedAuthenticationMode(record);
+	activeConnection = { baseUrl: record.baseUrl, token: record.token };
+	activeAuthenticationMode = authenticationMode;
+	activeConnectionGeneration = record.generation;
+	const targetChanged = previous !== null
+		&& (previous.baseUrl !== record.baseUrl || previous.token !== record.token);
+	if (previous && (targetChanged || previousMode !== authenticationMode)) {
+		notifyGatewayConnectionChanged(record.baseUrl, "cross-tab");
+	}
+	if (targetChanged && reloadOnTargetChange) requestCrossTabReload();
+}
+
+function applyRemovedPersistedConnection(reloadOnTargetChange: boolean): void {
+	if (activeConnectionGeneration === null) return;
+	const fallback: ActiveGatewayConnection = { baseUrl: sameOriginGatewayBaseUrl(), token: "" };
+	const targetChanged = !activeConnection
+		|| activeConnection.baseUrl !== fallback.baseUrl
+		|| activeConnection.token !== fallback.token;
+	activeConnection = fallback;
+	activeAuthenticationMode = "none";
+	activeConnectionGeneration = null;
+	if (targetChanged) notifyGatewayConnectionChanged(fallback.baseUrl, "cross-tab");
+	if (targetChanged && reloadOnTargetChange) requestCrossTabReload();
+}
+
+function reconcilePersistedConnection(reloadOnTargetChange: boolean, eventValue?: string | null): void {
+	let persisted = readPersistedConnectionRecord();
+	// If storage became unavailable after it emitted an event, the event's value
+	// is still an atomic, exact snapshot. It never contains a same-host bearer.
+	if (persisted.status === "unavailable" && eventValue !== undefined) {
+		if (eventValue === null) persisted = { status: "absent" };
+		else {
+			const record = parsePersistedConnectionRecord(eventValue);
+			persisted = record ? { status: "valid", record } : { status: "invalid" };
+		}
+	}
+	if (persisted.status === "valid") {
+		applyPersistedConnectionRecord(persisted.record, reloadOnTargetChange);
+	} else if (persisted.status === "absent") {
+		applyRemovedPersistedConnection(reloadOnTargetChange);
+	} else if (persisted.status === "invalid") {
+		// A malformed atomic record is never combined with any separately stored
+		// token. Fall back without authority, exactly like malformed boot storage.
+		removeStoredConnection();
+		recoveryWarning = INVALID_SAVED_GATEWAY_WARNING;
+		applyRemovedPersistedConnection(reloadOnTargetChange);
+	}
+}
+
+function reconcilePersistedAuthenticationMode(eventValue?: string | null): void {
+	if (!activeConnection || !activeConnectionGeneration) return;
+	let raw: string | null;
+	try {
+		raw = typeof localStorage === "undefined" ? null : localStorage.getItem(GW_AUTH_MODE_REVISION_KEY);
+	} catch {
+		raw = eventValue ?? null;
+	}
+	if (!raw) return;
+	const record = parsePersistedAuthenticationModeRecord(raw);
+	if (!record || record.generation !== activeConnectionGeneration
+		|| !authenticationModeMatchesToken(activeConnection.token, record.authenticationMode)
+		|| record.authenticationMode === activeAuthenticationMode) return;
+	activeAuthenticationMode = record.authenticationMode;
+	notifyGatewayConnectionChanged(activeConnection.baseUrl, "cross-tab");
+}
+
+function ensureCrossTabConnectionListener(): void {
+	const current = browserWindow();
+	if (!current || crossTabListenerWindow === current || typeof current.addEventListener !== "function") return;
+	crossTabListenerWindow = current;
+	current.addEventListener("storage", (event: StorageEvent) => {
+		if (event.key !== GW_CONNECTION_REVISION_KEY
+			&& event.key !== GW_AUTH_MODE_REVISION_KEY
+			&& event.key !== null) return;
+		try {
+			if (event.storageArea && typeof localStorage !== "undefined" && event.storageArea !== localStorage) return;
+		} catch { /* the event value remains usable when storage access is blocked */ }
+		if (event.key === GW_AUTH_MODE_REVISION_KEY) reconcilePersistedAuthenticationMode(event.newValue);
+		else reconcilePersistedConnection(true, event.key === null ? null : event.newValue);
+	});
+	// Capture runs before feature-level unload flushers. Once a remote selection
+	// forces navigation, gatewayUrl must block old-page data from reaching either
+	// the old gateway or the newly selected one.
+	current.addEventListener("beforeunload", () => {
+		if (crossTabReloadRequested) crossTabUnloadStarted = true;
+	}, { capture: true });
+}
+
 function hydrateActiveConnection(): ActiveGatewayConnection {
+	ensureCrossTabConnectionListener();
+	// Storage events are the only post-hydration reader. Every transport consumes
+	// this already-reconciled pair without independently consulting persistence.
 	if (activeConnection) return activeConnection;
+	const persisted = readPersistedConnectionRecord();
+	if (persisted.status === "valid") {
+		applyPersistedConnectionRecord(persisted.record, false);
+		return activeConnection!;
+	}
+	if (persisted.status === "invalid") {
+		removeStoredConnection();
+		recoveryWarning = INVALID_SAVED_GATEWAY_WARNING;
+	}
+
 	const storedUrl = storageValue(GW_URL_KEY);
 	const storedToken = storageValue(GW_TOKEN_KEY) ?? "";
 	const storedMode = storageValue(GW_AUTH_MODE_KEY);
@@ -281,7 +537,7 @@ function hydrateActiveConnection(): ActiveGatewayConnection {
 	return activeConnection;
 }
 
-/** Current in-memory connection. Transports never independently reread storage. */
+/** Current centrally reconciled connection for every browser transport. */
 export function activeGatewayConnection(): Readonly<ActiveGatewayConnection> {
 	const connection = hydrateActiveConnection();
 	return Object.freeze({ ...connection });
@@ -301,6 +557,16 @@ export function takeGatewayRecoveryWarning(): string | null {
 function restoreStorageValue(storage: Storage, key: string, value: string | null): void {
 	if (value === null) storage.removeItem(key);
 	else storage.setItem(key, value);
+}
+
+function revisionAllowsMirrorRollback(storage: Storage, previousRevision: string | null): boolean {
+	try {
+		// The revision itself is never rolled back: setItem is atomic, so a thrown
+		// write leaves it unchanged. This check only protects compatibility mirrors.
+		return storage.getItem(GW_CONNECTION_REVISION_KEY) === previousRevision;
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -331,40 +597,45 @@ export function commitGatewayConnection(
 	activeConnection = { baseUrl: normalized, token };
 	activeAuthenticationMode = token && token !== LOCALHOST_TOKEN ? "bearer" : persistedMode;
 
+	ensureCrossTabConnectionListener();
+	const record = persistedConnectionRecord(normalized, persistedToken, persistedMode);
+	const serializedRecord = JSON.stringify(record);
 	let storage: Storage;
 	let previousUrl: string | null;
 	let previousToken: string | null;
 	let previousMode: string | null;
+	let previousRevision: string | null;
 	try {
 		if (typeof localStorage === "undefined") return { persisted: false, warning: STORAGE_WARNING };
 		storage = localStorage;
 		previousUrl = storage.getItem(GW_URL_KEY);
 		previousToken = storage.getItem(GW_TOKEN_KEY);
 		previousMode = storage.getItem(GW_AUTH_MODE_KEY);
+		previousRevision = storage.getItem(GW_CONNECTION_REVISION_KEY);
 	} catch {
 		return { persisted: false, warning: STORAGE_WARNING };
 	}
 
 	try {
-		// Write the reload-safe credential before publishing its gateway URL. A
-		// same-host candidate bearer is never placed in origin-wide storage.
+		// Write reload-compatible mirrors first, then publish one exact record as
+		// the atomic cross-tab commit marker. Other tabs ignore partial mirrors.
 		storage.setItem(GW_TOKEN_KEY, persistedToken);
 		storage.setItem(GW_AUTH_MODE_KEY, persistedMode);
 		storage.setItem(GW_URL_KEY, normalized);
+		storage.setItem(GW_CONNECTION_REVISION_KEY, serializedRecord);
 	} catch {
-		// Storage failure affects only the next reload. Restore the authoritative
-		// previous pair/mode while retaining the authenticated candidate in memory.
-		try { restoreStorageValue(storage, GW_URL_KEY, previousUrl); } catch { /* best effort */ }
-		try { restoreStorageValue(storage, GW_TOKEN_KEY, previousToken); } catch { /* best effort */ }
-		try { restoreStorageValue(storage, GW_AUTH_MODE_KEY, previousMode); } catch { /* best effort */ }
+		// Restore compatibility mirrors only while no other tab has committed.
+		// Never rewrite the atomic revision: a concurrent successful commit wins.
+		if (revisionAllowsMirrorRollback(storage, previousRevision)) {
+			try { restoreStorageValue(storage, GW_URL_KEY, previousUrl); } catch { /* best effort */ }
+			try { restoreStorageValue(storage, GW_TOKEN_KEY, previousToken); } catch { /* best effort */ }
+			try { restoreStorageValue(storage, GW_AUTH_MODE_KEY, previousMode); } catch { /* best effort */ }
+		}
 		return { persisted: false, warning: STORAGE_WARNING };
 	}
 
-	try {
-		browserWindow()?.dispatchEvent(new CustomEvent("bobbit:gateway-connection-changed", {
-			detail: { baseUrl: normalized, token },
-		}));
-	} catch { /* notification is best effort */ }
+	activeConnectionGeneration = record.generation;
+	notifyGatewayConnectionChanged(normalized, "local");
 	return { persisted: true };
 }
 
@@ -383,9 +654,21 @@ export function recordGatewayLocalhostMode(localhostTrusted: boolean): void {
 		: connection.token === LOCALHOST_TOKEN || (persistenceMatchesActive && persistedToken === LOCALHOST_TOKEN)
 			? "cookie"
 			: connection.token ? "bearer" : "none";
-	if (!persistenceMatchesActive) return;
+	if (!persistenceMatchesActive || persistedToken === null) return;
+
 	try {
-		if (typeof localStorage !== "undefined") localStorage.setItem(GW_AUTH_MODE_KEY, activeAuthenticationMode);
+		if (typeof localStorage === "undefined") return;
+		localStorage.setItem(GW_AUTH_MODE_KEY, activeAuthenticationMode);
+		if (activeConnectionGeneration) {
+			// Bind the mode to the selected generation. A late health response for A
+			// can never overwrite or modify a newer connection B.
+			const modeRecord: PersistedGatewayAuthenticationModeRecord = {
+				version: 1,
+				generation: activeConnectionGeneration,
+				authenticationMode: activeAuthenticationMode,
+			};
+			localStorage.setItem(GW_AUTH_MODE_REVISION_KEY, JSON.stringify(modeRecord));
+		}
 	} catch { /* unknown mode fails closed by disabling cross-device handoff */ }
 }
 
@@ -406,6 +689,7 @@ export function gatewayMobileHandoff(): GatewayMobileHandoff {
 
 /** Resolve one internal route against the selected (or explicit) gateway base. */
 export function gatewayUrl(route: GatewayRoute, explicitBase?: string): PublicGatewayUrl {
+	if (crossTabUnloadStarted) throw new Error(CROSS_TAB_CONNECTION_CHANGED_ERROR);
 	const base = explicitBase === undefined ? gatewayBaseUrl() : normalizeGatewayBaseUrl(explicitBase);
 	return `${base}${route}` as PublicGatewayUrl;
 }
@@ -442,6 +726,9 @@ export function gatewayFetch(route: GatewayRoute | string, init: RequestInit = {
 	const internalRoute = typeof route === "string" ? gatewayRoute(route) : route;
 	const headers = new Headers(init.headers);
 	const method = (init.method ?? "GET").toUpperCase();
+	if (crossTabReloadRequested && method !== "GET" && method !== "HEAD") {
+		return Promise.reject(new Error(CROSS_TAB_CONNECTION_CHANGED_ERROR));
+	}
 	// Keep bodyless reads CORS-simple. A same-host, different-port deployment can
 	// then prove its exact signed cookie after a gateway restart before any later
 	// JSON mutation needs an unauthenticated preflight.
@@ -670,6 +957,9 @@ export function previewRouteFromStoredValue(value: unknown): GatewayRoute | null
 export function __resetGatewayConnectionForTests(): void {
 	activeConnection = null;
 	activeAuthenticationMode = "none";
+	activeConnectionGeneration = null;
 	recoveryWarning = null;
 	serviceWorkerReloadRequested = false;
+	crossTabReloadRequested = false;
+	crossTabUnloadStarted = false;
 }
