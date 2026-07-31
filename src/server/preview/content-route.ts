@@ -215,6 +215,139 @@ function closePreviewFile(fd: number): void {
 	try { fs.closeSync(fd); } catch { /* descriptor may already be closed by its stream */ }
 }
 
+interface PreviewRequestLifecycle {
+	readonly aborted: boolean;
+	ownDescriptor(fd: number): boolean;
+	closeDescriptor(): void;
+	pipeOwnedStream(stream: fs.ReadStream): Promise<void>;
+	dispose(): Promise<void>;
+}
+
+/**
+ * Own the serving lease and opened asset from the first abortable await through
+ * descriptor close. IncomingMessage `close` also fires for an ordinary complete
+ * GET, so only its aborted/incomplete form is destructive.
+ */
+function createPreviewRequestLifecycle(
+	req: http.IncomingMessage,
+	res: http.ServerResponse,
+	releaseRead: () => void,
+): PreviewRequestLifecycle {
+	let aborted = req.aborted === true || res.destroyed === true;
+	let released = false;
+	let ownedFd: number | undefined;
+	let ownedStream: fs.ReadStream | undefined;
+	let streamClosed = false;
+	let streamClosePromise: Promise<void> | undefined;
+
+	const release = () => {
+		if (released) return;
+		released = true;
+		releaseRead();
+	};
+	const closeDescriptor = () => {
+		if (ownedFd === undefined) return;
+		const fd = ownedFd;
+		ownedFd = undefined;
+		closePreviewFile(fd);
+	};
+	const abort = () => {
+		aborted = true;
+		if (ownedStream) {
+			if (!ownedStream.destroyed) ownedStream.destroy();
+			return;
+		}
+		closeDescriptor();
+		release();
+	};
+	const onRequestClose = () => {
+		if (req.aborted || !req.complete) abort();
+	};
+	const onResponseClose = () => {
+		// A normal response close after `end()` must not truncate a completed read.
+		if (!res.writableEnded && !res.writableFinished) abort();
+	};
+	const removeListener = (emitter: unknown, event: string, listener: () => void) => {
+		(emitter as { removeListener?: (name: string, fn: () => void) => void }).removeListener?.(event, listener);
+	};
+	const removeTransportListeners = () => {
+		removeListener(req, "aborted", abort);
+		removeListener(req, "close", onRequestClose);
+		removeListener(res, "close", onResponseClose);
+	};
+
+	if (typeof req.once === "function") {
+		req.once("aborted", abort);
+		req.once("close", onRequestClose);
+	}
+	if (typeof res.once === "function") res.once("close", onResponseClose);
+	if (aborted) abort();
+
+	return {
+		get aborted() { return aborted; },
+		ownDescriptor(fd) {
+			if (ownedFd !== undefined || ownedStream) {
+				throw new Error("Preview request already owns an asset descriptor");
+			}
+			ownedFd = fd;
+			if (!aborted) return true;
+			closeDescriptor();
+			release();
+			return false;
+		},
+		closeDescriptor,
+		async pipeOwnedStream(stream) {
+			if (ownedFd === undefined) throw new Error("Preview stream requires an owned descriptor");
+			if (ownedStream) throw new Error("Preview request already owns a response stream");
+			ownedStream = stream;
+			streamClosePromise = new Promise<void>(resolve => {
+				const onClose = () => {
+					if (streamClosed) return;
+					streamClosed = true;
+					stream.removeListener("error", onError);
+					stream.unpipe(res);
+					// `close` follows ReadStream's auto-close. Closing defensively also
+					// protects descriptor ownership if an injected stream violated it.
+					closeDescriptor();
+					release();
+					resolve();
+				};
+				const onError = () => {
+					try {
+						if (!res.destroyed && !res.writableEnded) res.end();
+					} catch { /* ignore a concurrently closed response */ }
+					if (!stream.destroyed) stream.destroy();
+				};
+				stream.once("close", onClose);
+				stream.once("error", onError);
+			});
+
+			if (aborted) {
+				if (!stream.destroyed) stream.destroy();
+			} else {
+				try {
+					stream.pipe(res);
+				} catch {
+					try {
+						if (!res.destroyed && !res.writableEnded) res.end();
+					} catch { /* ignore a concurrently closed response */ }
+					if (!stream.destroyed) stream.destroy();
+				}
+			}
+			await streamClosePromise;
+		},
+		async dispose() {
+			removeTransportListeners();
+			if (ownedStream && !streamClosed) {
+				if (!ownedStream.destroyed) ownedStream.destroy();
+				await streamClosePromise;
+			}
+			closeDescriptor();
+			release();
+		},
+	};
+}
+
 function readVerifiedPreviewText(
 	resolved: string,
 	baseDir: string,
@@ -479,14 +612,16 @@ export async function handlePreviewRequest(
 		send(res, 404, JSON.stringify({ error: "Preview mount is not available" }));
 		return true;
 	}
+	const requestLifecycle = createPreviewRequestLifecycle(req, res, releaseRead);
 	try {
+		if (requestLifecycle.aborted) return true;
 		let capabilityAuthorized = false;
 		if (routedCapability) {
 			const stillActive = capabilityState(opts.cookieStore).byToken.get(routedCapability.token) === routedCapability;
 			const expired = capabilityNow(opts) >= routedCapability.expiresAt;
-			if (!stillActive
-				|| expired
-				|| !await previewDirectoryGenerationMatches(baseDir, routedCapability.generation)) {
+			const generationMatches = await previewDirectoryGenerationMatches(baseDir, routedCapability.generation);
+			if (requestLifecycle.aborted) return true;
+			if (!stillActive || expired || !generationMatches) {
 				revokePreviewAssetCapability(opts.cookieStore, routedCapability);
 				send(res, 401, JSON.stringify({ error: "Unauthorized" }));
 				return true;
@@ -501,6 +636,7 @@ export async function handlePreviewRequest(
 			return true;
 		}
 		const entry = await pickEntry(baseDir);
+		if (requestLifecycle.aborted) return true;
 		if (!isPreviewDirectoryAvailable(baseDir)) {
 			send(res, 404, JSON.stringify({ error: "Preview mount is not available" }));
 			return true;
@@ -555,9 +691,10 @@ export async function handlePreviewRequest(
 		try {
 			generation = await ensurePreviewDirectoryGeneration(baseDir);
 		} catch {
-			send(res, 404, JSON.stringify({ error: "Preview mount is not available" }));
+			if (!requestLifecycle.aborted) send(res, 404, JSON.stringify({ error: "Preview mount is not available" }));
 			return true;
 		}
+		if (requestLifecycle.aborted) return true;
 		const body = readVerifiedPreviewText(guard.resolved, baseDir, generation, relativeAssetPath);
 		if (body === null) {
 			invalidatePreviewDirectoryGeneration(baseDir);
@@ -615,10 +752,11 @@ export async function handlePreviewRequest(
 			try {
 				generation = await ensurePreviewDirectoryGeneration(baseDir);
 			} catch {
-				send(res, 404, JSON.stringify({ error: "Preview mount is not available" }));
+				if (!requestLifecycle.aborted) send(res, 404, JSON.stringify({ error: "Preview mount is not available" }));
 				return true;
 			}
 		}
+		if (requestLifecycle.aborted) return true;
 		let body = readVerifiedPreviewText(guard.resolved, baseDir, generation, relativeAssetPath);
 		if (body === null) {
 			invalidatePreviewDirectoryGeneration(baseDir);
@@ -659,24 +797,29 @@ export async function handlePreviewRequest(
 		try {
 			generation = await ensurePreviewDirectoryGeneration(baseDir);
 		} catch {
-			send(res, 404, JSON.stringify({ error: "Preview mount is not available" }));
+			if (!requestLifecycle.aborted) send(res, 404, JSON.stringify({ error: "Preview mount is not available" }));
 			return true;
 		}
 	}
+	if (requestLifecycle.aborted) return true;
 	const opened = openPreviewFileNoFollow(guard.resolved);
 	if (!opened) {
-		send(res, 404, JSON.stringify({ error: "File not found" }));
+		if (!requestLifecycle.aborted) send(res, 404, JSON.stringify({ error: "File not found" }));
 		return true;
 	}
+	if (!requestLifecycle.ownDescriptor(opened.fd)) return true;
 	if (!previewDirectoryFileMatches(baseDir, generation, relativeAssetPath, opened.stats)) {
-		closePreviewFile(opened.fd);
+		requestLifecycle.closeDescriptor();
 		invalidatePreviewDirectoryGeneration(baseDir);
 		if (routedCapability) revokePreviewAssetCapability(opts.cookieStore, routedCapability);
-		send(res, routedCapability ? 401 : 404, JSON.stringify({
-			error: routedCapability ? "Unauthorized" : "Preview mount changed before it could be read",
-		}));
+		if (!requestLifecycle.aborted) {
+			send(res, routedCapability ? 401 : 404, JSON.stringify({
+				error: routedCapability ? "Unauthorized" : "Preview mount changed before it could be read",
+			}));
+		}
 		return true;
 	}
+	if (requestLifecycle.aborted) return true;
 	res.writeHead(200, {
 		"Content-Type": contentType,
 		"Content-Length": String(opened.stats.size),
@@ -686,63 +829,26 @@ export async function handlePreviewRequest(
 		...(capabilityAuthorized ? { "Access-Control-Allow-Origin": "null" } : {}),
 	});
 	if (method === "HEAD") {
-		closePreviewFile(opened.fd);
+		requestLifecycle.closeDescriptor();
 		res.end();
 		return true;
 	}
-	const stream = fs.createReadStream(guard.resolved, { fd: opened.fd, autoClose: true });
-	// Keep the read lease until exactly one terminal condition wins. A client
-	// abort/close must stop disk I/O rather than leaving the stream (and lease)
-	// alive until the file naturally reaches EOF.
-	await new Promise<void>(resolve => {
-		let settled = false;
-		const removeListener = (emitter: unknown, event: string, listener: () => void) => {
-			(emitter as { removeListener?: (name: string, fn: () => void) => void }).removeListener?.(event, listener);
-		};
-		const cleanup = () => {
-			stream.removeListener("end", onEnd);
-			stream.removeListener("close", onStreamClose);
-			stream.removeListener("error", onStreamError);
-			removeListener(req, "aborted", onAbort);
-			removeListener(req, "close", onRequestClose);
-			removeListener(res, "close", onAbort);
-		};
-		const settle = () => {
-			if (settled) return;
-			settled = true;
-			cleanup();
-			resolve();
-		};
-		const onAbort = () => {
-			if (!stream.destroyed) stream.destroy();
-			settle();
-		};
-		// IncomingMessage also emits close after an ordinary fully received GET.
-		// Only an incomplete/aborted request close represents client disconnect.
-		const onRequestClose = () => {
-			if (req.aborted || !req.complete) onAbort();
-		};
-		const onEnd = () => settle();
-		const onStreamClose = () => settle();
-		const onStreamError = () => {
-			try {
-				if (!res.destroyed && !res.writableEnded) res.end();
-			} catch { /* ignore a concurrently closed response */ }
-			settle();
-		};
-
-		stream.once("end", onEnd);
-		stream.once("close", onStreamClose);
-		stream.once("error", onStreamError);
-		if (typeof req.once === "function") {
-			req.once("aborted", onAbort);
-			req.once("close", onRequestClose);
-		}
-		if (typeof res.once === "function") res.once("close", onAbort);
-		stream.pipe(res);
-	});
+	let stream: fs.ReadStream;
+	try {
+		stream = fs.createReadStream(guard.resolved, { fd: opened.fd, autoClose: true });
+	} catch {
+		requestLifecycle.closeDescriptor();
+		try {
+			if (!res.destroyed && !res.writableEnded) res.end();
+		} catch { /* ignore a concurrently closed response */ }
+		return true;
+	}
+	// Stream close, not merely source end, proves the descriptor is gone before
+	// the directory lease admits a writer. Request aborts are observed from the
+	// moment the lease is acquired, including during generation verification.
+	await requestLifecycle.pipeOwnedStream(stream);
 	return true;
 	} finally {
-		releaseRead();
+		await requestLifecycle.dispose();
 	}
 }
