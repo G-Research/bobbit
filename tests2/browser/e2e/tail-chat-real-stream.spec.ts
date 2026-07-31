@@ -12,7 +12,6 @@ import {
 	expectLatestMessagePinned,
 	installPreStreamSpacer,
 	openTailSession,
-	settleFrames,
 	snapshotMessages,
 	assertTranscriptSnapshotsEqual,
 	startTailSampler,
@@ -44,22 +43,25 @@ test.describe("tail-chat: full-stack streaming and transcript fidelity", () => {
 
 		await waitForBurstDone(page, 2, 45_000);
 		await waitForSessionStatus(sessionId, "idle");
+		// stopTailSampler disconnects observers and flushes two render frames, so
+		// each sample is post-ResizeObserver re-pin rather than an arbitrary
+		// mutation-to-rAF transient.
 		const samples = await stopTailSampler(page, "__tailRealSamples");
-		await settleFrames(page);
-		await rec.capture(`STREAM_BURST_DONE:2; samples=${samples.length}`);
+		await rec.capture(`STREAM_BURST_DONE:2; settled-growth-samples=${samples.length}`);
 
 		await expectLatestMessagePinned(page, { tailPx: TAIL_PX, label: "end-of-stream" });
 
-		const badSamples = samples.filter((s) => s.distance > s.clientHeight * 0.25);
+		const badSamples = samples.filter((s) => s.distance > TAIL_PX);
 		const summary = badSamples
 			.slice(0, 8)
-			.map((s) => `t=${s.t}ms dist=${Math.round(s.distance)}/${s.clientHeight}`)
+			.map((s) => `t=${s.t}ms growth=${s.growth}px dist=${Math.round(s.distance)}/${s.clientHeight}`)
 			.join("\n  ");
 		expect(
 			badSamples.length,
-			`tail-chat-real-stream: ${badSamples.length}/${samples.length} samples drifted > clientHeight*0.25:\n  ${summary}`,
+			`tail-chat-real-stream: ${badSamples.length}/${samples.length} settled growth samples were not pinned within ${TAIL_PX}px:\n  ${summary}`,
 		).toBe(0);
-		expect(samples.length, "sampler must run across the whole burst").toBeGreaterThan(6);
+		expect(samples.length, "sampler must observe settled transcript growth").toBeGreaterThan(0);
+		expect(samples.every((s) => s.growth > 0), "each sampler record must be a positive settled growth event").toBe(true);
 		expect(samples.at(-1)?.scrollHeight ?? 0, "stream must grow the transcript").toBeGreaterThan(pre.scrollHeight + 200);
 
 		const liveSnap = await snapshotMessages(page);

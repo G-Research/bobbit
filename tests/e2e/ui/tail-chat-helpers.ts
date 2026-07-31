@@ -37,6 +37,8 @@ export interface TailSample {
 	clientHeight: number;
 	scrollHeight: number;
 	scrollTop: number;
+	/** Positive scroll-height delta since the preceding settled sample. */
+	growth: number;
 }
 
 export interface MessageFingerprint {
@@ -126,38 +128,98 @@ export async function measureScroll(page: Page): Promise<ScrollProbe> {
 	}, SCROLL_SEL);
 }
 
-/** In-page sampler used by full-stack streaming specs. */
+/**
+ * Observe real transcript growth and sample only after the render lifecycle
+ * has let AgentInterface's ResizeObserver re-pin the scroll container.
+ *
+ * A wall-clock interval can land between a DOM mutation and the next render
+ * frame, treating that intentional transient as a user-visible regression.
+ * MutationObserver catches transcript commits, ResizeObserver catches layout
+ * growth which has no DOM mutation (for example deferred content hydration),
+ * and two rAFs put the sample after the production re-pin frame. Samples are
+ * therefore assertions about every *settled* observable growth state, not
+ * arbitrary points in time.
+ */
 export async function startTailSampler(page: Page, key: string): Promise<void> {
 	await page.evaluate(({ scrollSel, sampleKey }) => {
 		const w = window as any;
-		const intervalKey = `${sampleKey}Interval`;
-		if (w[intervalKey]) clearInterval(w[intervalKey]);
-		w[sampleKey] = [];
+		const samplerKey = `${sampleKey}Sampler`;
+		w[samplerKey]?.disconnect?.();
+
+		const el = document.querySelector(scrollSel) as HTMLElement | null;
+		const content = el?.querySelector(".max-w-5xl") as HTMLElement | null;
+		if (!el || !content) throw new Error("tail sampler: chat content container not found");
+
 		const start = performance.now();
-		w[intervalKey] = setInterval(() => {
-			const el = document.querySelector(scrollSel) as HTMLElement | null;
-			if (!el) return;
+		let lastSettledHeight = el.scrollHeight;
+		let framePending = false;
+		let active = true;
+		w[sampleKey] = [];
+
+		const recordSettledGrowth = () => {
+			const current = el.scrollHeight;
+			const growth = current - lastSettledHeight;
+			// A shrink resets the comparison point but is not a stream-growth
+			// sample. A later grow is still measured from this settled geometry.
+			lastSettledHeight = current;
+			if (growth <= 0) return;
 			w[sampleKey].push({
 				t: Math.round(performance.now() - start),
 				scrollTop: el.scrollTop,
-				scrollHeight: el.scrollHeight,
+				scrollHeight: current,
 				clientHeight: el.clientHeight,
+				growth,
 			});
-		}, 250);
+		};
+
+		const sampleAfterRepinFrames = () => {
+			if (!active || framePending) return;
+			framePending = true;
+			requestAnimationFrame(() => requestAnimationFrame(() => {
+				framePending = false;
+				if (active) recordSettledGrowth();
+			}));
+		};
+
+		const mutations = new MutationObserver(sampleAfterRepinFrames);
+		mutations.observe(content, { childList: true, subtree: true, characterData: true });
+		const growth = new ResizeObserver(sampleAfterRepinFrames);
+		growth.observe(content);
+
+		w[samplerKey] = {
+			disconnect: () => {
+				active = false;
+				mutations.disconnect();
+				growth.disconnect();
+			},
+			flush: () => new Promise<void>((resolve) => {
+				// Stop observing first so this flush is a stable final state, then
+				// wait through the same production re-pin lifecycle as ordinary
+				// samples before reading public scroll geometry.
+				active = false;
+				mutations.disconnect();
+				growth.disconnect();
+				requestAnimationFrame(() => requestAnimationFrame(() => {
+					recordSettledGrowth();
+					resolve();
+				}));
+			}),
+		};
 	}, { scrollSel: SCROLL_SEL, sampleKey: key });
 }
 
 export async function stopTailSampler(page: Page, key: string): Promise<TailSample[]> {
-	const rawSamples = await page.evaluate((sampleKey) => {
+	const rawSamples = await page.evaluate(async (sampleKey) => {
 		const w = window as any;
-		const intervalKey = `${sampleKey}Interval`;
-		if (w[intervalKey]) clearInterval(w[intervalKey]);
-		w[intervalKey] = null;
+		const samplerKey = `${sampleKey}Sampler`;
+		await w[samplerKey]?.flush?.();
+		w[samplerKey] = null;
 		return (w[sampleKey] || []) as Array<{
 			t: number;
 			scrollTop: number;
 			scrollHeight: number;
 			clientHeight: number;
+			growth: number;
 		}>;
 	}, key);
 	return rawSamples.map((s) => ({
@@ -166,6 +228,7 @@ export async function stopTailSampler(page: Page, key: string): Promise<TailSamp
 		clientHeight: s.clientHeight,
 		scrollHeight: s.scrollHeight,
 		scrollTop: s.scrollTop,
+		growth: s.growth,
 	}));
 }
 
