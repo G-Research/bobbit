@@ -382,6 +382,15 @@
       }
     },
     {
+      "path": "tests2/browser/e2e/source-vite-mixed-scheme-auth.spec.ts",
+      "reason": "Real HTTPS loopback source-Vite journey through the explicit development proxy to an auth-enforced mounted HTTP loopback gateway, proving cookie confirmation precedes sentinel persistence and cookie-only REST, WebSocket, EventSource, preview iframe, and popout transports survive reload without mount duplication or bearer storage.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/browser/e2e/packaged-inline-html-theme.spec.ts",
       "reason": "Clean-consumer npm tarball smoke proving packaged dist/ui bundles the isolated inline bridge and renders an opaque-origin HTML write whose parse-time and live theme state follows the host without iframe recreation or source-module runtime requests.",
       "execution": {
