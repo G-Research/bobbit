@@ -318,6 +318,8 @@ test.describe("Journey: explicit prefixed gateway on a distinct browser origin",
 
 			const popoutLink = page.locator('a[title="Open preview in new tab"]').first();
 			await expect(popoutLink).toBeVisible({ timeout: 15_000 });
+			await expect(popoutLink).toHaveClass(/hover:text-foreground/);
+			await expect(popoutLink).toHaveCSS("cursor", "pointer");
 			const href = await popoutLink.getAttribute("href");
 			expect(new URL(href!, uiOrigin).origin).toBe(gatewayOrigin);
 			expectGatewayPathOnce(href!, explicitBase, "/preview");
@@ -400,6 +402,12 @@ test.describe("Journey: explicit prefixed gateway on a distinct browser origin",
 				/Preview live updates and embedded previews require .* same scheme and hostname/i,
 				{ timeout: 20_000 },
 			);
+			const disabledPopout = page.getByTestId("preview-popout-disabled").first();
+			await expect(disabledPopout).toBeVisible({ timeout: 15_000 });
+			await expect(disabledPopout).toBeDisabled();
+			await expect(disabledPopout).not.toHaveClass(/hover:text-foreground/);
+			await expect(disabledPopout).toHaveCSS("cursor", "not-allowed");
+			await expect(disabledPopout).toHaveCSS("opacity", "0.5");
 			const probe = await transportProbe(page);
 			expect(probe.eventSources.some(source => {
 				const url = new URL(source.url, uiOrigin);

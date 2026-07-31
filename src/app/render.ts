@@ -2760,6 +2760,8 @@ export function doRenderApp(): void {
 
 	const sidePanelChromeButtonClass = "text-muted-foreground hover:text-foreground";
 	const sidePanelChromeButtonStyle = "background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;display:inline-flex;align-items:center;";
+	const sidePanelChromeDisabledButtonClass = "text-muted-foreground";
+	const sidePanelChromeDisabledButtonStyle = "background:none;border:none;cursor:not-allowed;opacity:0.5;padding:2px;flex-shrink:0;display:inline-flex;align-items:center;";
 
 	const previewUrlForTab = (tab?: UnifiedContentTab | null) => {
 		const sid = activeSessionId() || workspaceSessionId();
@@ -2796,9 +2798,10 @@ export function doRenderApp(): void {
 				title="Open preview in new tab"
 			>${icon(ExternalLink, "sm")}</a>
 		` : html`<button
-			class=${sidePanelChromeButtonClass}
-			style=${sidePanelChromeButtonStyle}
+			class=${sidePanelChromeDisabledButtonClass}
+			style=${sidePanelChromeDisabledButtonStyle}
 			title=${gatewayNativeTransportSupport().message || "Preview popout unavailable"}
+			data-testid="preview-popout-disabled"
 			disabled
 		>${icon(ExternalLink, "sm")}</button>`
 		: html`<a

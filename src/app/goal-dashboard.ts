@@ -2170,7 +2170,6 @@ function renderMetaRows(goal: Goal): TemplateResult {
 				<div class="meta-row dashboard-git-row">
 					<git-status-widget
 						.goalId=${goal.id}
-						.token=${activeGatewayConnection().token}
 						.branch=${gs?.branch ?? branch}
 						.primaryBranch=${gs?.primaryBranch ?? "master"}
 						.primaryRef=${gs?.primaryRef ?? `origin/${gs?.primaryBranch ?? "master"}`}

@@ -390,6 +390,14 @@ describe("client gateway sink regression guard", () => {
 		assert.deepEqual(violations, [], `Direct client Bearer construction must use gatewayAuthorizationHeaders:\n${violations.join("\n")}`);
 	});
 
+	it("does not pass legacy credentials into the centralized git-status widget", () => {
+		const source = fs.readFileSync(path.resolve("src/app/goal-dashboard.ts"), "utf8");
+		const widgetStart = source.indexOf("<git-status-widget");
+		const widgetEnd = source.indexOf("></git-status-widget>", widgetStart);
+		assert.ok(widgetStart >= 0 && widgetEnd > widgetStart, "dashboard git-status widget template must be discoverable");
+		assert.doesNotMatch(source.slice(widgetStart, widgetEnd), /\.token\s*=/, "GitStatusWidget owns centralized requests and must not receive a credential property");
+	});
+
 	it("has no bare-origin stored gateway fallback outside the boundary", () => {
 		const bareFallback = /(?:getItem\(\s*(?:GW_URL_KEY|["']gateway\.url["'])\s*\)|gateway\.url)\s*(?:\|\||\?\?)\s*(?:window\.)?location\.origin|setItem\(\s*GW_URL_KEY\s*,\s*window\.location\.origin\s*\)/g;
 		const violations = sourcePatternViolations(
