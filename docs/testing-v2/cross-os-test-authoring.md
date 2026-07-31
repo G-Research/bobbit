@@ -31,16 +31,24 @@ Never use string prefix checks for containment. Normalize lexical inputs with `p
 A user path may not exist yet. In that case, retain the lexical containment check and canonicalize the longest existing prefix before creating or accessing it; do not call `realpath` on a nonexistent leaf and silently fall back to an unverified string comparison. Preserve a lexical alias only when it has passed the same validation as its canonical spelling.
 
 ```ts
-// Good: lexical check first, then paired canonical check when both exist.
+// Good: existing paths are decided by their canonical spelling; lexical
+// containment is the fallback for a path that does not exist yet.
 function isWithin(root: string, candidate: string): boolean {
   const lexicalRoot = resolve(root);
   const lexicalCandidate = resolve(candidate);
-  if (relative(lexicalRoot, lexicalCandidate).startsWith(".." + sep) ||
-      relative(lexicalRoot, lexicalCandidate) === ".." || isAbsolute(relative(lexicalRoot, lexicalCandidate))) return false;
 
-  const realRoot = realpathSync(lexicalRoot);
-  const realCandidate = realpathSync(lexicalCandidate);
-  const rel = relative(realRoot, realCandidate);
+  try {
+    return isRelativeWithin(
+      realpathSync(lexicalRoot),
+      realpathSync(lexicalCandidate),
+    );
+  } catch {
+    return isRelativeWithin(lexicalRoot, lexicalCandidate);
+  }
+}
+
+function isRelativeWithin(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate);
   return rel !== ".." && !rel.startsWith(".." + sep) && !isAbsolute(rel);
 }
 ```
