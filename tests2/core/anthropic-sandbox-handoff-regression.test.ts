@@ -41,7 +41,7 @@ afterEach(() => {
 });
 
 describe("Anthropic sandbox OAuth handoff regressions", () => {
-	it("exports only a sanctioned, current minimal Anthropic OAuth credential", () => {
+	it("exports only a sanctioned, current non-renewable Anthropic OAuth credential", () => {
 		const expires = Date.now() + 60_000;
 		useHostAuth({
 			type: "oauth",
@@ -56,7 +56,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 		assert.equal(sandboxTokenPolicyAllowsAnthropicAuth([{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: false }]), false);
 		assert.equal(sandboxTokenPolicyAllowsAnthropicAuth([{ key: "ANTHROPIC_API_KEY", enabled: true }]), false);
 		assert.deepEqual(buildSandboxAgentAuthJson({ includeAnthropicAuth: true }), {
-			anthropic: { type: "oauth", access: "sandbox-current-access", refresh: "sandbox-refresh-metadata", expires },
+			anthropic: { type: "oauth", access: "sandbox-current-access", expires },
 		});
 		assert.deepEqual(buildSandboxAgentAuthJson({ includeAnthropicAuth: false }), {});
 	});
@@ -90,7 +90,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 		assert.equal(await refreshSandboxAnthropicOAuthCredential(), true);
 		assert.equal(refreshRequest.mock.calls.length, 1);
 		assert.deepEqual(buildSandboxAgentAuthJson({ includeAnthropicAuth: true }), {
-			anthropic: { type: "oauth", access: "rotated-access", refresh: "rotated-refresh", expires: refreshedExpiry },
+			anthropic: { type: "oauth", access: "rotated-access", expires: refreshedExpiry },
 		});
 	});
 });
