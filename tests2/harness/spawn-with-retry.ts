@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_TIMEOUT_MS = 120_000;
+const TERMINATION_GRACE_MS = 1_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 256 * 1024;
 const MAX_ATTEMPTS = 3;
 
@@ -35,6 +36,7 @@ interface AttemptFailure {
 	signal: NodeJS.Signals | null;
 	stderr: string;
 	timedOut: boolean;
+	terminationUnconfirmed?: boolean;
 	cause?: unknown;
 }
 
@@ -43,7 +45,7 @@ export interface FixtureCommandProcess {
 	onStderr(listener: (chunk: Buffer<ArrayBufferLike> | string) => void): void;
 	onError(listener: (cause: unknown) => void): void;
 	onClose(listener: (exitCode: number | null, signal: NodeJS.Signals | null) => void): void;
-	kill(signal: NodeJS.Signals): void;
+	kill(signal: NodeJS.Signals): boolean;
 }
 
 interface FixtureCommandTimer {
@@ -81,7 +83,7 @@ const productionBackend: FixtureCommandBackend = {
 			onStderr: listener => { child.stderr.on("data", listener); },
 			onError: listener => { child.once("error", listener); },
 			onClose: listener => { child.once("close", listener); },
-			kill: signal => { child.kill(signal); },
+			kill: signal => child.kill(signal),
 		};
 	},
 	schedule,
@@ -93,6 +95,7 @@ export class FixtureCommandError extends Error {
 	readonly exitCode: number | null;
 	readonly signal: NodeJS.Signals | null;
 	readonly timedOut: boolean;
+	readonly terminationUnconfirmed: boolean;
 	readonly stderr: string;
 
 	constructor(message: string, attempts: number, failure: AttemptFailure) {
@@ -104,6 +107,7 @@ export class FixtureCommandError extends Error {
 		this.exitCode = failure.exitCode;
 		this.signal = failure.signal;
 		this.timedOut = failure.timedOut;
+		this.terminationUnconfirmed = failure.terminationUnconfirmed === true;
 		this.stderr = failure.stderr;
 	}
 }
@@ -162,11 +166,13 @@ async function runAttempt(
 		let killCause: unknown;
 		let terminationRequested = false;
 		let timeout: FixtureCommandTimer | undefined;
+		let terminationGrace: FixtureCommandTimer | undefined;
 
 		const finish = (result: { stdout: string; stderr: string } | AttemptFailure): void => {
 			if (settled) return;
 			settled = true;
 			timeout?.cancel();
+			terminationGrace?.cancel();
 			resolve(result);
 		};
 
@@ -189,10 +195,10 @@ async function runAttempt(
 			if (terminationRequested) return;
 			terminationRequested = true;
 			try {
-				child.kill("SIGKILL");
+				if (!child.kill("SIGKILL")) killCause = new Error("SIGKILL request returned false");
 			} catch (cause) {
-				// A kill error is diagnostic only. The attempt still cannot settle until
-				// Node confirms `close`; retrying while the child may live is unsafe.
+				// A kill error is diagnostic only while close still has a chance to win.
+				// Retrying without close would overlap a potentially live child.
 				killCause = cause;
 			}
 		};
@@ -209,6 +215,10 @@ async function runAttempt(
 		// Node emits `close` after `error`. Retain process errors for the final
 		// diagnostic, but never let a retry overlap a child whose close is unknown.
 		child.onError(cause => { processCause ??= cause; });
+		const failureStderr = (): string => {
+			const suffix = outputExceeded ? `\nfixture command output exceeded ${maxOutputBytes} bytes` : "";
+			return `${stderr.toString("utf8")}${suffix}`.trim();
+		};
 		child.onClose((exitCode, signal) => {
 			const stderrText = stderr.toString("utf8");
 			// Timeout and post-spawn errors can race delivery of an already-successful
@@ -217,18 +227,30 @@ async function runAttempt(
 				finish({ stdout: stdout.toString("utf8"), stderr: stderrText });
 				return;
 			}
-			const suffix = outputExceeded ? `\nfixture command output exceeded ${maxOutputBytes} bytes` : "";
 			finish({
 				exitCode,
 				signal,
-				stderr: `${stderrText}${suffix}`.trim(),
+				stderr: failureStderr(),
 				timedOut,
 				cause: processCause ?? killCause,
 			});
 		});
 		timeout = backend.schedule(() => {
+			if (settled) return;
 			timedOut = true;
 			requestTermination();
+			if (settled) return;
+			// Close remains authoritative during this grace period. If it never arrives,
+			// fail terminally rather than hang forever or overlap a potentially live child.
+			terminationGrace = backend.schedule(() => finish({
+				exitCode: null,
+				signal: null,
+				stderr: failureStderr(),
+				timedOut: true,
+				terminationUnconfirmed: true,
+				cause: killCause ?? processCause,
+			}), TERMINATION_GRACE_MS);
+			terminationGrace.unref();
 		}, timeoutMs);
 		timeout.unref();
 	});
@@ -274,13 +296,18 @@ export async function runFixtureCommandWithBackend(
 			: typeof cleanupCause === "string"
 				? `: ${redact(cleanupCause, secrets)}`
 				: "";
+		const failureCause = failure.cause instanceof Error
+			? `: ${redact(failure.cause.message, secrets)}`
+			: "";
 		const reason = cleanupCause !== undefined
 			? `timed-out attempt cleanup failed${cleanupMessage}`
-			: failure.timedOut
-				? `timed out after ${timeoutMs}ms`
-				: failure.exitCode === null
-					? `failed to start${failure.cause instanceof Error ? `: ${redact(failure.cause.message, secrets)}` : ""}`
-					: `exited with code ${failure.exitCode}${failure.signal ? ` (${failure.signal})` : ""}`;
+			: failure.terminationUnconfirmed
+				? `timed out after ${timeoutMs}ms; child close was not observed within ${TERMINATION_GRACE_MS}ms, so retry was suppressed${failureCause}`
+				: failure.timedOut
+					? `timed out after ${timeoutMs}ms`
+					: failure.exitCode === null
+						? `failed to start${failureCause}`
+						: `exited with code ${failure.exitCode}${failure.signal ? ` (${failure.signal})` : ""}`;
 		const detail = stderr ? `\nstderr:\n${stderr}` : "";
 		return new FixtureCommandError(
 			`[tests2/fixture-command] ${command} ${reason} after ${attemptsMade} attempt${attemptsMade === 1 ? "" : "s"}${detail}`,
@@ -294,6 +321,7 @@ export async function runFixtureCommandWithBackend(
 		const result = await runAttempt(file, args, options, timeoutMs, maxOutputBytes, backend);
 		if ("stdout" in result) return { ...result, attempts: attempt, exitCode: 0 };
 		lastFailure = result;
+		if (result.terminationUnconfirmed) throw commandError(result);
 		if (attempt < attempts) {
 			if (result.timedOut && options.onTimedOutAttemptClosed) {
 				try {
