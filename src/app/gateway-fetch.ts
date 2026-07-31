@@ -365,7 +365,13 @@ export function gatewayFetch(route: GatewayRoute | string, init: RequestInit = {
 	const connection = hydrateActiveConnection();
 	const internalRoute = typeof route === "string" ? gatewayRoute(route) : route;
 	const headers = new Headers(init.headers);
-	if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+	const method = (init.method ?? "GET").toUpperCase();
+	// Keep bodyless reads CORS-simple. A same-host, different-port deployment can
+	// then prove its exact signed cookie after a gateway restart before any later
+	// JSON mutation needs an unauthenticated preflight.
+	if (!headers.has("Content-Type") && (method !== "GET" && method !== "HEAD")) {
+		headers.set("Content-Type", "application/json");
+	}
 	const authorization = gatewayAuthorizationHeaders(connection.token).Authorization;
 	if (authorization) headers.set("Authorization", authorization);
 	else headers.delete("Authorization");

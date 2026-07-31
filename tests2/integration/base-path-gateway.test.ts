@@ -94,6 +94,7 @@ interface RunningGateway {
 	baseUrl: string;
 	wsOrigin: string;
 	gateway: ReturnType<typeof createGateway>;
+	restart(): Promise<void>;
 	shutdown(): Promise<void>;
 }
 
@@ -166,7 +167,7 @@ async function bootGateway(basePath: string, host = "127.0.0.1", forceAuth = tru
 	resetAgentDirStateForTests();
 	scaffoldBobbitDir(root);
 
-	const gateway = createGateway({
+	const gatewayConfig = {
 		host,
 		port: 0,
 		portExplicit: true,
@@ -182,17 +183,33 @@ async function bootGateway(basePath: string, host = "127.0.0.1", forceAuth = tru
 		builtinsDir: join(REPO_ROOT, "defaults"),
 		builtinPacksDir: join(REPO_ROOT, "market-packs"),
 		basePath,
-	} as Parameters<typeof createGateway>[0] & { basePath: string }, gatewayDeps);
+	} as Parameters<typeof createGateway>[0] & { basePath: string };
+	let gateway = createGateway(gatewayConfig, gatewayDeps);
 	const port = await gateway.start();
 	const connectHost = host.toLowerCase() === "localhost" ? "localhost" : "127.0.0.1";
 	const origin = `http://${connectHost}:${port}`;
-	return {
+	const running: RunningGateway = {
 		root,
 		staticDir,
 		origin,
 		baseUrl: `${origin}${basePath}`,
 		wsOrigin: `ws://${connectHost}:${port}`,
 		gateway,
+		async restart() {
+			await gateway.shutdown();
+			const next = createGateway({
+				...gatewayConfig,
+				port,
+				portExplicit: true,
+			}, gatewayDeps);
+			const reboundPort = await next.start();
+			if (reboundPort !== port) {
+				await next.shutdown();
+				throw new Error(`Gateway restarted on ${reboundPort}, expected ${port}`);
+			}
+			gateway = next;
+			running.gateway = next;
+		},
 		async shutdown() {
 			try { await gateway.shutdown(); }
 			finally {
@@ -203,6 +220,7 @@ async function bootGateway(basePath: string, host = "127.0.0.1", forceAuth = tru
 			}
 		},
 	};
+	return running;
 }
 
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
@@ -632,8 +650,29 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("direct cross-port browser co
 		await running?.shutdown();
 	}, 60_000);
 
-	it("binds a real-bearer bootstrap to an equivalent trailing-dot UI host", async () => {
+	it("recovers only the cookie's exact cross-port origin after process restarts", async () => {
 		const uiOrigin = "http://localhost.:5173";
+		const siblingOrigin = "http://localhost.:5174";
+		const preflight = (origin: string) => fetch(`${running.baseUrl}/api/setup-status/dismiss`, {
+			method: "OPTIONS",
+			headers: {
+				Origin: origin,
+				"Access-Control-Request-Method": "POST",
+				"Access-Control-Request-Headers": "content-type",
+			},
+		});
+		const mutateWithCookie = (origin: string, cookie: string) => fetch(`${running.baseUrl}/api/setup-status/dismiss`, {
+			method: "POST",
+			headers: {
+				Cookie: cookie,
+				Origin: origin,
+				"Content-Type": "application/json",
+				"Sec-Fetch-Site": "same-site",
+				"Sec-Fetch-Mode": "cors",
+			},
+			body: "{}",
+		});
+
 		const bootstrap = await fetch(`${running.baseUrl}/api/health`, {
 			headers: {
 				...authHeaders(),
@@ -649,28 +688,50 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("direct cross-port browser co
 		expect(setCookie).toContain(`Path=${MOUNT}/`);
 		const cookie = cookiePair(setCookie);
 
-		const reload = await fetch(`${running.baseUrl}/api/health`, {
-			headers: { Cookie: cookie, Origin: uiOrigin },
-		});
-		expect(reload.status).toBe(200);
-		expect(reload.headers.get("access-control-allow-origin")).toBe(uiOrigin);
+		await running.restart();
 
-		const wrongPortOrigin = "http://localhost.:5174";
-		const mismatch = await fetch(`${running.baseUrl}/api/health`, {
-			headers: { Cookie: cookie, Origin: wrongPortOrigin },
+		// A fresh process has no volatile preflight state. Neither the exact UI
+		// nor a same-host sibling is reflected until the signed claim is verified.
+		expect((await preflight(uiOrigin)).headers.get("access-control-allow-origin")).toBeNull();
+		expect((await preflight(siblingOrigin)).headers.get("access-control-allow-origin")).toBeNull();
+		const siblingRead = await fetch(`${running.baseUrl}/api/health`, {
+			headers: { Cookie: cookie, Origin: siblingOrigin },
 		});
-		expect(mismatch.status).toBe(401);
-		expect(mismatch.headers.get("access-control-allow-origin")).toBeNull();
+		expect(siblingRead.status).toBe(401);
+		expect(siblingRead.headers.get("access-control-allow-origin")).toBeNull();
+		await expectRejectedUpgrade(`${running.wsOrigin}${MOUNT}/ws/viewer`, {
+			origin: siblingOrigin,
+			headers: { Cookie: cookie },
+		});
 
+		// A cookie-authenticated WebSocket reconstructs only its signed Origin.
 		const viewer = await authenticateSocket(`${running.wsOrigin}${MOUNT}/ws/viewer`, {
 			origin: uiOrigin,
 			headers: { Cookie: cookie },
 		}, "localhost");
 		viewer.close();
-		await expectRejectedUpgrade(`${running.wsOrigin}${MOUNT}/ws/viewer`, {
-			origin: wrongPortOrigin,
-			headers: { Cookie: cookie },
+		const websocketRecoveredPreflight = await preflight(uiOrigin);
+		expect(websocketRecoveredPreflight.headers.get("access-control-allow-origin")).toBe(uiOrigin);
+		const websocketRecoveredMutation = await mutateWithCookie(uiOrigin, cookie);
+		expect(websocketRecoveredMutation.status).toBe(200);
+		expect(websocketRecoveredMutation.headers.get("access-control-allow-origin")).toBe(uiOrigin);
+		expect((await preflight(siblingOrigin)).headers.get("access-control-allow-origin")).toBeNull();
+
+		await running.restart();
+		expect((await preflight(uiOrigin)).headers.get("access-control-allow-origin")).toBeNull();
+
+		// The same recovery is independently available through a CORS-simple GET.
+		const simpleRead = await fetch(`${running.baseUrl}/api/health`, {
+			headers: { Cookie: cookie, Origin: uiOrigin },
 		});
+		expect(simpleRead.status).toBe(200);
+		expect(simpleRead.headers.get("access-control-allow-origin")).toBe(uiOrigin);
+		const httpRecoveredPreflight = await preflight(uiOrigin);
+		expect(httpRecoveredPreflight.headers.get("access-control-allow-origin")).toBe(uiOrigin);
+		const httpRecoveredMutation = await mutateWithCookie(uiOrigin, cookie);
+		expect(httpRecoveredMutation.status).toBe(200);
+		expect(httpRecoveredMutation.headers.get("access-control-allow-origin")).toBe(uiOrigin);
+		expect((await preflight(siblingOrigin)).headers.get("access-control-allow-origin")).toBeNull();
 	});
 });
 

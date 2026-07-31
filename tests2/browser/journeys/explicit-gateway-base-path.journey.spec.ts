@@ -348,6 +348,165 @@ test.describe("Journey: explicit prefixed gateway on a distinct browser origin",
 		}
 	});
 
+	test("recovers sentinel cookie REST, WebSockets, and later preflights after a gateway restart", async ({ page, gateway }) => {
+		test.setTimeout(120_000);
+		const explicitBase = gatewayAlias(gateway, "localhost");
+		const gatewayOrigin = new URL(explicitBase).origin;
+		const uiOrigin = new URL(gateway.uiBaseURL).origin;
+		const context = page.context();
+		const traffic = collectPageTraffic(page);
+		const initMarker = "bobbit-explicit-restart-bootstrap";
+		await page.addInitScript(({ base, token, marker }) => {
+			if (sessionStorage.getItem(marker) === "1") return;
+			localStorage.setItem("gateway.url", base);
+			localStorage.setItem("gateway.token", token);
+			sessionStorage.setItem(marker, "1");
+		}, { base: explicitBase, token: gatewayToken(), marker: initMarker });
+
+		try {
+			const bootstrapPromise = page.waitForResponse(response => {
+				const url = new URL(response.url());
+				return response.request().method() === "GET"
+					&& url.origin === gatewayOrigin
+					&& url.pathname === `${GATEWAY_PATH}/api/health`;
+			}, { timeout: 25_000 });
+			await page.goto(`${uiOrigin}/`, { waitUntil: "domcontentloaded" });
+			await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 25_000 });
+			const bootstrap = await bootstrapPromise;
+			expect(await bootstrap.request().headerValue("authorization")).toBe(`Bearer ${gatewayToken()}`);
+			await expect.poll(() => page.evaluate(() => localStorage.getItem("gateway.token")), {
+				timeout: 15_000,
+				message: "same-host bootstrap should replace the persisted bearer with the cookie sentinel",
+			}).toBe("localhost");
+			expect(await page.evaluate(() => localStorage.getItem("gateway.url"))).toBe(explicitBase);
+			const mountedCookie = (await context.cookies(`${explicitBase}/`))
+				.find(cookie => cookie.name === "bobbit_session" && cookie.path === `${GATEWAY_PATH}/`);
+			expect(mountedCookie?.value).toMatch(/^v1\.2\./);
+
+			// Reload once so the live connection also hydrates the sentinel instead
+			// of retaining the successful bootstrap bearer in this tab's memory.
+			const cookieReadPromise = page.waitForRequest(request => {
+				const url = new URL(request.url());
+				return request.method() === "GET"
+					&& url.origin === gatewayOrigin
+					&& url.pathname === `${GATEWAY_PATH}/api/sessions`;
+			}, { timeout: 25_000 });
+			await page.reload({ waitUntil: "domcontentloaded" });
+			await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 25_000 });
+			const cookieRead = await cookieReadPromise;
+			expect(await cookieRead.headerValue("authorization")).toBeNull();
+			expect(await cookieRead.headerValue("content-type"), "bodyless gatewayFetch GET must remain CORS-simple").toBeNull();
+			await waitForViewerSocket(traffic.sockets, explicitBase);
+
+			await gateway.crash();
+			await gateway.restart();
+			const websocketRecovery = await page.evaluate(async (base) => {
+				const url = new URL(`${base}/ws/viewer`);
+				url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+				const token = localStorage.getItem("gateway.token") ?? "";
+				return await new Promise<{ token: string; messageType: string }>((resolve, reject) => {
+					const socket = new WebSocket(url);
+					const timer = window.setTimeout(() => {
+						socket.close();
+						reject(new Error("cookie-authenticated viewer WebSocket timed out after restart"));
+					}, 15_000);
+					socket.addEventListener("open", () => socket.send(JSON.stringify({ type: "auth", token })));
+					socket.addEventListener("message", (event) => {
+						const message = JSON.parse(String(event.data));
+						if (message?.type !== "auth_ok") return;
+						window.clearTimeout(timer);
+						socket.close();
+						resolve({ token, messageType: message.type });
+					});
+					socket.addEventListener("error", () => {
+						window.clearTimeout(timer);
+						reject(new Error("cookie-authenticated viewer WebSocket failed after restart"));
+					});
+				});
+			}, explicitBase);
+			expect(websocketRecovery).toEqual({ token: "localhost", messageType: "auth_ok" });
+
+			const simpleReadPromise = page.waitForResponse(response => {
+				const url = new URL(response.url());
+				return response.request().method() === "GET"
+					&& url.origin === gatewayOrigin
+					&& url.pathname === `${GATEWAY_PATH}/api/health`;
+			}, { timeout: 15_000 });
+			const simpleReadResult = await page.evaluate(async (base) => {
+				const response = await fetch(`${base}/api/health`, { credentials: "include" });
+				return { status: response.status, body: await response.text() };
+			}, explicitBase);
+			const simpleRead = await simpleReadPromise;
+			expect(simpleReadResult.status, simpleReadResult.body).toBe(200);
+			expect(await simpleRead.request().headerValue("authorization")).toBeNull();
+			expect(await simpleRead.request().headerValue("content-type")).toBeNull();
+			expect(await simpleRead.headerValue("access-control-allow-origin")).toBe(uiOrigin);
+
+			const recoveredPreflight = await fetch(`${explicitBase}/api/setup-status/dismiss`, {
+				method: "OPTIONS",
+				headers: {
+					Origin: uiOrigin,
+					"Access-Control-Request-Method": "POST",
+					"Access-Control-Request-Headers": "content-type",
+				},
+			});
+			expect(recoveredPreflight.status).toBe(204);
+			expect(recoveredPreflight.headers.get("access-control-allow-origin")).toBe(uiOrigin);
+
+			const mutationTrafficStart = traffic.requests.length;
+			const mutationPromise = page.waitForResponse(response => {
+				const url = new URL(response.url());
+				return response.request().method() === "POST"
+					&& url.origin === gatewayOrigin
+					&& url.pathname === `${GATEWAY_PATH}/api/setup-status/dismiss`;
+			}, { timeout: 15_000 });
+			const mutationResult = await page.evaluate(async (base) => {
+				const response = await fetch(`${base}/api/setup-status/dismiss`, {
+					method: "POST",
+					credentials: "include",
+					headers: { "Content-Type": "application/json" },
+					body: "{}",
+				});
+				return { status: response.status, body: await response.text() };
+			}, explicitBase);
+			const mutation = await mutationPromise;
+			expect(mutationResult.status, mutationResult.body).toBe(200);
+			expect(await mutation.request().headerValue("authorization")).toBeNull();
+			expect(await mutation.headerValue("access-control-allow-origin")).toBe(uiOrigin);
+			const mutationTraffic = traffic.requests.slice(mutationTrafficStart).filter(record => {
+				const url = new URL(record.url);
+				return url.origin === gatewayOrigin && url.pathname === `${GATEWAY_PATH}/api/setup-status/dismiss`;
+			});
+			expect(mutationTraffic.some(record => record.method === "POST" && !record.authorization)).toBe(true);
+
+			const uiPort = Number(new URL(uiOrigin).port);
+			const siblingPort = [uiPort + 1, uiPort + 2, uiPort - 1]
+				.find(port => port > 0 && port < 65_536 && port !== gateway.port)!;
+			const siblingOrigin = `http://localhost:${siblingPort}`;
+			const deniedPreflight = await fetch(`${explicitBase}/api/setup-status/dismiss`, {
+				method: "OPTIONS",
+				headers: {
+					Origin: siblingOrigin,
+					"Access-Control-Request-Method": "POST",
+					"Access-Control-Request-Headers": "content-type",
+				},
+			});
+			expect(deniedPreflight.status).toBe(204);
+			expect(deniedPreflight.headers.get("access-control-allow-origin")).toBeNull();
+			const deniedRead = await fetch(`${explicitBase}/api/health`, {
+				headers: {
+					Cookie: `bobbit_session=${mountedCookie!.value}`,
+					Origin: siblingOrigin,
+				},
+			});
+			expect(deniedRead.status).toBe(401);
+			expect(deniedRead.headers.get("access-control-allow-origin")).toBeNull();
+		} finally {
+			traffic.dispose();
+			await context.clearCookies().catch(() => undefined);
+		}
+	});
+
 	test("keeps bearer REST and WebSockets on a different-host prefix but blocks cookie-only preview transports with guidance", async ({ page, gateway }) => {
 		test.setTimeout(120_000);
 		const incompatibleBase = gatewayAlias(gateway, "127.0.0.1");

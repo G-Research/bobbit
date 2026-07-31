@@ -3393,6 +3393,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		// token-only/non-browser sockets remain authenticated by their first frame.
 		const wsCookies = collectCookieValues(req, COOKIE_NAME);
 		let websocketCookieAuthenticated = false;
+		let websocketBoundOrigin: string | undefined;
 		if (wsCookies.length > 0) {
 			const isTls = Boolean((req.socket as { encrypted?: boolean }).encrypted);
 			const wsOrigin = browserCookieRequestOrigin({ headers: req.headers, isTls });
@@ -3412,6 +3413,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					})
 				)) {
 					hasExactOriginCookie = true;
+					// Only the signed v1.2 claim may restore cross-port preflight
+					// state after a process restart. Legacy exact-gateway cookies need
+					// no remembered exception and must not bind a sibling origin.
+					if (exactVerification.binding) websocketBoundOrigin = wsOrigin;
 					break;
 				}
 			}
@@ -3429,6 +3434,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 
 		wss.handleUpgrade(req, socket, head, (ws) => {
+			// The HTTP upgrade has now succeeded with the cookie's exact signed
+			// Origin claim. Rebuild only that origin's volatile CORS allowance so a
+			// subsequent mutation can preflight without retaining the real bearer.
+			if (websocketBoundOrigin) boundBrowserOrigins.add(websocketBoundOrigin);
 			const channels = extensionChannelServices;
 			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostMode || websocketCookieAuthenticated, sandboxTokenStore, projectContextManager, toolManager, packContributionRegistry, preferencesStore, channels?.registry as any, channels?.openPermits as any);
 		});

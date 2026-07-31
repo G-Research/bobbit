@@ -225,6 +225,27 @@ describe("gateway authorization and fetch", () => {
 		assert.equal(new Headers(init.headers).get("X-Test"), "kept");
 	});
 
+	it("keeps bodyless GET and HEAD requests CORS-simple while retaining mutation content types", async () => {
+		const fetchSpy = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("ok"));
+		installBrowser({ origin: "http://localhost:5173", fetch: fetchSpy as unknown as typeof fetch });
+		const boundary = await loadBoundary();
+
+		await boundary.gatewayFetch(gatewayRoute("/api/read"));
+		await boundary.gatewayFetch(gatewayRoute("/api/head"), { method: "HEAD" });
+		await boundary.gatewayFetch(gatewayRoute("/api/explicit-read"), {
+			headers: { "Content-Type": "text/plain" },
+		});
+		await boundary.gatewayFetch(gatewayRoute("/api/mutation"), {
+			method: "POST",
+			body: JSON.stringify({ ok: true }),
+		});
+
+		assert.equal(new Headers((fetchSpy.mock.calls[0]?.[1] as RequestInit).headers).has("Content-Type"), false);
+		assert.equal(new Headers((fetchSpy.mock.calls[1]?.[1] as RequestInit).headers).has("Content-Type"), false);
+		assert.equal(new Headers((fetchSpy.mock.calls[2]?.[1] as RequestInit).headers).get("Content-Type"), "text/plain");
+		assert.equal(new Headers((fetchSpy.mock.calls[3]?.[1] as RequestInit).headers).get("Content-Type"), "application/json");
+	});
+
 	it("never sends the localhost sentinel as an HTTP bearer", async () => {
 		const fetchSpy = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("ok"));
 		const storage = installBrowser({ origin: "http://localhost:3001", fetch: fetchSpy as unknown as typeof fetch });
