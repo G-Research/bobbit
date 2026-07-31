@@ -1756,6 +1756,15 @@
         "tier": "unit",
         "project": "integration"
       }
+    },
+    {
+      "path": "tests2/browser/fixtures/message-editor-arrows-real.spec.ts",
+      "reason": "Chromium reproducing regression for the composer caret-row geometry bug: bundles the real <message-editor> and proves ArrowUp at column 0 of a non-first line moves the caret instead of recalling history, ArrowDown on the penultimate row stays in history browsing, the trailing-newline top/bottom predicate truth table, soft-wrap boundaries measured by an independent Range oracle, long fractional-line-height row identification, and (S8/S9) a per-pixel 240-340px x proportional/monospace-font x break-word/prose sweep pinning both predicates against that oracle so a caret marker that shifts a break-word wrap point cannot regress again (includes the named 316px / production font / \"AV\"x100 / offset 31 case). Exact wrap boundaries are asserted rather than skipped: caret affinity is unobservable from the DOM, so a boundary must satisfy NEITHER predicate (S6, and every boundary offset in the S8 sweep), pinned behaviourally by the reviewers' real-key `Home` repros (S10 ArrowUp must not destroy a 200-char draft, S11 ArrowDown must not swap the browsed entry). S12 pins the measurement cost: the superseded whole-value row collection was O(rows^2) inside the keydown handler (>60 s on a 200 KB many-line draft, ~1.9 s on a 500 KB wrapped one) and now runs in single-digit ms with a non-quadratic scaling bound. Cannot live below Chromium: happy-dom has no layout engine, so the pre-wrap trailing-newline line-box collapse, the font-dependent wrap points and the affinity ambiguity that cause the bug are unobservable.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [
