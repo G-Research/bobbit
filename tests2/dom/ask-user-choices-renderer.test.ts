@@ -62,4 +62,24 @@ describe("AskUserChoicesRenderer error-vs-interactive gating", () => {
 		expect(count(el, ".ask-submit")).toBe(1);
 		expect(count(el, ".ask-error")).toBe(0);
 	});
+
+	it("renders answered choices as a visibly completed, read-only summary", async () => {
+		const el = await renderAsk(PARAMS, {
+			content: [{
+				type: "text",
+				text: JSON.stringify({
+					answers: [
+						{ question: "Q1", selected: "a", other_text: null },
+						{ question: "Q2", selected: "d", other_text: null },
+					],
+				}),
+			}],
+		});
+		const widget = el.querySelector(".ask-widget") as HTMLElement;
+		expect(widget.className).toContain("ask-answered");
+		expect(el.querySelector(".ask-answered-badge")?.textContent).toContain("Answered");
+		expect(widget.querySelector(".ask-question")?.className).toContain("opacity-70");
+		expect(widget.querySelector('[role="radio"][aria-checked="true"]')?.className).toContain("opacity-70");
+		expect(widget.querySelector('[role="radio"][aria-checked="false"]')?.className).toContain("opacity-30");
+	});
 });
