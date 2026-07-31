@@ -9,12 +9,14 @@ import {
 	mkdtempSync,
 	readFileSync,
 	readdirSync,
+	realpathSync,
+	rmdirSync,
 	rmSync,
 	statSync,
 	symlinkSync,
+	utimesSync,
 	writeFileSync,
 } from "node:fs";
-import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
@@ -41,9 +43,24 @@ const {
 } = await import("../../src/server/auth/oauth.js");
 
 const realFetch = globalThis.fetch;
-const properLockfile = createRequire(import.meta.url)("proper-lockfile") as {
-	lock(path: string, options: { stale: number }): Promise<() => Promise<void>>;
-};
+
+/**
+ * A credential-free stand-in for Pi's proper-lockfile protocol. Pi resolves
+ * the auth file's real path, then atomically creates and heartbeats this empty
+ * sibling directory. Keeping the fixture here avoids requiring a root-level
+ * proper-lockfile installation in the no-install unit-test gate.
+ */
+function acquirePiCompatibleExternalLock(file: string): () => Promise<void> {
+	const lockPath = `${realpathSync(file)}.lock`;
+	mkdirSync(lockPath, { mode: 0o700 });
+	const heartbeat = setInterval(() => {
+		utimesSync(lockPath, new Date(), new Date());
+	}, 1_000);
+	return async () => {
+		clearInterval(heartbeat);
+		rmdirSync(lockPath);
+	};
+}
 
 function credential(expires = Date.now() + 60 * 60 * 1000): OAuthCredential {
 	return {
@@ -178,7 +195,7 @@ describe("AtomicCredentialStore", () => {
 		const realAuthPath = path.join(realDir, "auth.json");
 		const aliasAuthPath = path.join(aliasDir, "auth.json");
 		await new AtomicCredentialStore(realAuthPath).modify("anthropic", async () => credential());
-		const releaseExternal = await properLockfile.lock(realAuthPath, { stale: 30_000 });
+		const releaseExternal = acquirePiCompatibleExternalLock(realAuthPath);
 		const aliasedStore = new AtomicCredentialStore(aliasAuthPath);
 		let mutationEntered = false;
 		let released = false;
