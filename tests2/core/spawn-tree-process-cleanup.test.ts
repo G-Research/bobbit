@@ -192,10 +192,15 @@ const inherited = {
   script: process.env.BOBBIT_POSIX_TREE_SENTINEL_CHILD_SCRIPT,
   pgid: process.env.BOBBIT_POSIX_SENTINEL_PGID,
 };
-const nested = spawnTracked("/bin/sh", ["-c", "exit 0"], { stdio: ["ignore", "ignore", "ignore", "pipe"], posixSentinelIdentity: { file: process.env.BOBBIT_NESTED_SENTINEL_FILE, nonce: "nested-nonce" } });
+const nested = spawnTracked(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: ["ignore", "ignore", "ignore", "pipe"], posixSentinelIdentity: { file: process.env.BOBBIT_NESTED_SENTINEL_FILE, nonce: "nested-nonce" } });
+// The nested payload deliberately stays alive until its owned group is killed.
+// Subscribe before FD3 readiness so its close cannot race the subsequent await.
+const nestedClosed = new Promise((resolve, reject) => { nested.child.once("close", resolve); nested.child.once("error", reject); });
 await new Promise((resolve, reject) => { const ready = nested.child.stdio[3]; if (!ready) return reject(new Error("missing nested ready")); ready.once("data", resolve); ready.once("error", reject); });
 fs.writeFileSync(process.env.BOBBIT_NESTED_SENTINEL_RESULT, JSON.stringify({ inherited, nested: JSON.parse(fs.readFileSync(process.env.BOBBIT_NESTED_SENTINEL_FILE, "utf8")), outer: JSON.parse(fs.readFileSync(process.env.BOBBIT_OUTER_SENTINEL_FILE, "utf8")) }));
 nested.killTree("SIGKILL");
+await nestedClosed;
+process.exit(0);
 `;
 
 const NESTED_SENTINEL_PROBE = String.raw`
