@@ -90,6 +90,7 @@ test.describe("tail-chat: full-stack streaming and transcript fidelity", () => {
 
 		await expectLatestMessagePinned(page, { tailPx: TAIL_PX, label: "end-of-stream" });
 
+		expect(samples, "sampler must record at least one settled positive growth event").not.toHaveLength(0);
 		const badSamples = samples.filter((sample) => sample.distance > TAIL_PX);
 		const summary = badSamples
 			.slice(0, 8)

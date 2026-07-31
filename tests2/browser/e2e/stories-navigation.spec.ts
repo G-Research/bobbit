@@ -246,6 +246,14 @@ test.describe("CT-13: URL routing and navigation", () => {
 			s.assert();
 			await expect(s.page.locator(".dashboard-container").first())
 				.toBeVisible({ timeout: 20_000 });
+
+			// Prove the held target route itself reaches its editor only after the
+			// goal-race assertion; this is a fresh navigation, not a wait for the
+			// deliberately held continuation above.
+			s.act();
+			await navigateToHash(s.page, `#/session/${s.session("A").sessionId}`);
+			s.assert();
+			await s.editor.is_visible();
 		} finally {
 			if (!hydrationDisposed) await hydration.dispose();
 		}
