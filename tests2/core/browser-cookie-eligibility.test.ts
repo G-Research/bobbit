@@ -27,7 +27,7 @@ const BASE_REQUEST: BrowserCookieRequestMetadata = {
 };
 
 const BASE_CONTEXT: BrowserCookieEligibilityContext = {
-	deployment: "direct",
+	viteDevProxy: false,
 	configuredHost: "bobbit.example",
 	authentication: { source: "admin-bearer" },
 };
@@ -112,15 +112,14 @@ describe("browser cookie origin authority", () => {
 	});
 
 	it("keeps legacy cookie authority exact-origin instead of accepting an arbitrary same-host port", () => {
-		const context = { deployment: "direct" as const, configuredHost: "bobbit.example" };
 		assert.equal(isBrowserCookieAuthenticationCompatible({
 			headers: { host: "bobbit.example:3001", origin: "https://bobbit.example:3001" },
 			isTls: true,
-		}, context), true);
+		}), true);
 		assert.equal(isBrowserCookieAuthenticationCompatible({
 			headers: { host: "bobbit.example:3001", origin: "https://bobbit.example:5173" },
 			isTls: true,
-		}, context), false);
+		}), false);
 	});
 });
 
@@ -178,7 +177,7 @@ describe("browser cookie eligibility", () => {
 		}).mayBootstrap, true);
 	});
 
-	it("accepts Vite's rewritten Host with a localhost dev Origin", () => {
+	it("accepts Vite's rewritten Host with a localhost dev Origin only in explicit proxy mode", () => {
 		assert.equal(classify({
 			isTls: false,
 			headers: {
@@ -186,20 +185,25 @@ describe("browser cookie eligibility", () => {
 				origin: "http://localhost:5173",
 			},
 		}, {
-			deployment: "vite",
+			viteDevProxy: true,
 			configuredHost: "localhost",
 		}).mayBootstrap, true);
 
-		assert.equal(classify({
+		const rewrittenAlias = {
 			isTls: false,
 			headers: {
 				host: "127.0.0.1:3001",
 				origin: "http://localhost:5173",
 			},
-		}, {
-			deployment: "vite",
+		};
+		assert.equal(classify(rewrittenAlias, {
+			viteDevProxy: true,
 			configuredHost: "localhost",
 		}).mayBootstrap, true);
+		assertDenied("origin-mismatch", rewrittenAlias, {
+			viteDevProxy: false,
+			configuredHost: "localhost",
+		});
 	});
 
 	it("accepts the HTTPS Vite exception only when request and Origin use the configured remote host", () => {
@@ -209,7 +213,7 @@ describe("browser cookie eligibility", () => {
 				origin: "https://100.64.0.8:5173",
 			},
 		}, {
-			deployment: "vite",
+			viteDevProxy: true,
 			configuredHost: "100.64.0.8",
 		}).mayBootstrap, true);
 
@@ -219,7 +223,7 @@ describe("browser cookie eligibility", () => {
 				origin: "https://mesh.example:5173",
 			},
 		}, {
-			deployment: "vite",
+			viteDevProxy: true,
 			configuredHost: "mesh.example",
 		});
 	});
@@ -243,12 +247,15 @@ describe("browser cookie eligibility", () => {
 		assertDenied("origin-mismatch", crossPort, { authentication: { source: "other" } });
 	});
 
-	it("uses normalized hostname equivalence for direct cross-port binding", () => {
+	it("uses normalized public Host authority for headless wildcard-bound cross-port binding", () => {
 		assert.equal(classify({
 			headers: {
 				host: "bobbit.example:3001",
 				origin: "https://BOBBIT.EXAMPLE.:5173",
 			},
+		}, {
+			configuredHost: "0.0.0.0",
+			viteDevProxy: false,
 		}).mayBootstrap, true);
 	});
 
@@ -315,7 +322,7 @@ describe("browser cookie eligibility", () => {
 				origin: "http://100.64.0.8:5173",
 			},
 		}, {
-			deployment: "vite",
+			viteDevProxy: true,
 			configuredHost: "100.64.0.8",
 		});
 	});

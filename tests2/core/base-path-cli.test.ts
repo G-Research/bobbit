@@ -89,6 +89,12 @@ describe("CLI TLS selection", () => {
 		assert.equal(parsed.tls, tls);
 		assert.equal(parsed.tlsExplicit, true);
 	});
+
+	it("does not equate --no-ui with the explicit Vite development proxy mode", async () => {
+		const { parseArgs } = await cliModule();
+		assert.equal(parseArgs(["--no-ui"], {}).viteDevProxy, false);
+		assert.equal(parseArgs(["--no-ui", "--vite-dev-proxy"], {}).viteDevProxy, true);
+	});
 });
 
 describe("base-path CLI selection", () => {

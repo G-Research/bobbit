@@ -30,6 +30,8 @@ export interface CliArgs {
 	tlsExplicit: boolean;
 	forceAuth: boolean;
 	staticDir?: string;
+	/** Internal flag used by Bobbit's Vite development commands only. */
+	viteDevProxy: boolean;
 	agentCliPath?: string;
 	basePath: string;
 }
@@ -139,6 +141,7 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
 		tls: true,  // on by default
 		tlsExplicit: false,
 		forceAuth: false,
+		viteDevProxy: false,
 		basePath: "",
 	};
 	let basePathFlagPresent = false;
@@ -178,6 +181,9 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
 			}
 			case "--no-ui":
 				result.noUi = true;
+				break;
+			case "--vite-dev-proxy":
+				result.viteDevProxy = true;
 				break;
 			case "--auth":
 				result.forceAuth = true;
@@ -308,6 +314,7 @@ export async function runCli(
 		authToken,
 		defaultCwd: args.cwd,
 		staticDir: args.staticDir,
+		viteDevProxy: args.viteDevProxy,
 		basePath: args.basePath,
 		onBound: (actualPort) => {
 			startupUrls = buildStartupUrls({

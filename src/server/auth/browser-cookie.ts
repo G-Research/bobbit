@@ -30,8 +30,11 @@ export type BrowserCookieAuthentication =
 	| { source: "other" };
 
 export interface BrowserCookieEligibilityContext {
-	/** `direct` serves the built UI; `vite` permits the development proxy origin exception. */
-	deployment: "direct" | "vite";
+	/**
+	 * Permit Vite's development-only hostname rewrite exception. Production
+	 * cookie policy never depends on whether this gateway serves static files.
+	 */
+	viteDevProxy: boolean;
 	/** Gateway bind host (`GatewayConfig.host`), used only by the Vite exception. */
 	configuredHost: string;
 	authentication: BrowserCookieAuthentication;
@@ -286,16 +289,20 @@ function isAcceptedOrigin(
 	context: BrowserCookieEligibilityContext,
 ): boolean {
 	if (browserOrigin.origin === requestOrigin.origin) return true;
-	if (context.deployment === "direct") {
-		// A production UI may intentionally select a gateway on another port of
-		// the same scheme/normalized host. Only a real admin bearer may establish
-		// that binding; subsequent renewal is safe only because the caller first
-		// completed centralized verification of the cookie's exact origin claim.
-		const hasBindingAuthority = context.authentication.source === "admin-bearer"
-			|| context.authentication.source === "signed-cookie";
-		return hasBindingAuthority && isSameSchemeHost(browserOrigin, requestOrigin);
-	}
 
+	// A production UI may intentionally select a headless gateway on another
+	// port of the same scheme/normalized public host. Only a real admin bearer
+	// may establish that binding; subsequent renewal is safe only because the
+	// caller first completed centralized verification of the cookie's exact
+	// origin claim. This is the normal production rule, independent of static UI.
+	const hasBindingAuthority = context.authentication.source === "admin-bearer"
+		|| context.authentication.source === "signed-cookie";
+	if (hasBindingAuthority && isSameSchemeHost(browserOrigin, requestOrigin)) return true;
+
+	// The proxy exception exists only for an explicitly identified Vite dev
+	// gateway, whose rewritten Host can differ from the browser-facing loopback
+	// alias. Never infer it from a missing static directory.
+	if (!context.viteDevProxy) return false;
 	const configuredHostname = normalizeConfiguredHostname(context.configuredHost);
 	const bothUseConfiguredHost = configuredHostname !== undefined
 		&& browserOrigin.hostname === configuredHostname
@@ -312,7 +319,6 @@ function isAcceptedOrigin(
  */
 export function isBrowserCookieAuthenticationCompatible(
 	request: Pick<BrowserCookieRequestMetadata, "headers" | "isTls">,
-	_context: Pick<BrowserCookieEligibilityContext, "deployment" | "configuredHost">,
 ): boolean {
 	const originHeader = readSingleHeader(request.headers, "origin");
 	if (originHeader.kind === "missing") return canonicalRequestOrigin(request) !== undefined;

@@ -91,6 +91,8 @@ export interface RunningGateway {
 	origin: string;
 	baseUrl: string;
 	wsOrigin: string;
+	/** Test CA for an optional TLS fixture. */
+	tlsCaCert?: string;
 	gateway: ReturnType<typeof createGateway>;
 	restart(): Promise<void>;
 	shutdown(): Promise<void>;
@@ -141,7 +143,21 @@ function writeStaticFixture(staticDir: string): string {
 	return shell;
 }
 
-export async function bootGateway(basePath: string, host = "127.0.0.1", forceAuth = true): Promise<RunningGateway> {
+export interface BootGatewayOptions {
+	/** Default true. False models a production API/headless gateway. */
+	serveStatic?: boolean;
+	/** Generate a trusted test certificate containing this public hostname. */
+	tlsPublicHost?: string;
+	/** Enable the explicit Vite development proxy cookie exception. */
+	viteDevProxy?: boolean;
+}
+
+export async function bootGateway(
+	basePath: string,
+	host = "127.0.0.1",
+	forceAuth = true,
+	options: BootGatewayOptions = {},
+): Promise<RunningGateway> {
 	const processState = captureProcessState();
 	let root = mkdtempSync(join(tmpdir(), "bobbit-base-path-gateway-"));
 	try { root = realpathSync(root); } catch { /* platform edge */ }
@@ -165,14 +181,40 @@ export async function bootGateway(basePath: string, host = "127.0.0.1", forceAut
 	resetAgentDirStateForTests();
 	scaffoldBobbitDir(root);
 
+	let tls: { cert: string; key: string } | undefined;
+	let tlsCaCert: string | undefined;
+	if (options.tlsPublicHost) {
+		const { createCA, createCert } = await import("mkcert");
+		const ca = await createCA({
+			organization: "Bobbit Test CA",
+			countryCode: "US",
+			state: "Test",
+			locality: "Test",
+			validity: 1,
+		});
+		const leaf = await createCert({
+			ca,
+			domains: [options.tlsPublicHost, "127.0.0.1", "localhost"],
+			validity: 1,
+		});
+		const certPath = join(root, "tls-cert.pem");
+		const keyPath = join(root, "tls-key.pem");
+		writeFileSync(certPath, leaf.cert);
+		writeFileSync(keyPath, leaf.key);
+		tls = { cert: certPath, key: keyPath };
+		tlsCaCert = ca.cert;
+	}
+
 	const gatewayConfig = {
 		host,
 		port: 0,
 		portExplicit: true,
 		authToken: TOKEN,
 		defaultCwd: root,
-		staticDir,
+		...(options.serveStatic === false ? {} : { staticDir }),
+		viteDevProxy: options.viteDevProxy === true,
 		forceAuth,
+		...(tls ? { tls } : {}),
 		skipMcp: true,
 		skipWorktreePool: true,
 		skipTitleGeneration: true,
@@ -185,13 +227,16 @@ export async function bootGateway(basePath: string, host = "127.0.0.1", forceAut
 	let gateway = createGateway(gatewayConfig, gatewayDeps);
 	const port = await gateway.start();
 	const connectHost = host.toLowerCase() === "localhost" ? "localhost" : "127.0.0.1";
-	const origin = `http://${connectHost}:${port}`;
+	const httpProtocol = tls ? "https" : "http";
+	const wsProtocol = tls ? "wss" : "ws";
+	const origin = `${httpProtocol}://${connectHost}:${port}`;
 	const running: RunningGateway = {
 		root,
 		staticDir,
 		origin,
 		baseUrl: `${origin}${basePath}`,
-		wsOrigin: `ws://${connectHost}:${port}`,
+		wsOrigin: `${wsProtocol}://${connectHost}:${port}`,
+		...(tlsCaCert ? { tlsCaCert } : {}),
 		gateway,
 		async restart() {
 			await gateway.shutdown();

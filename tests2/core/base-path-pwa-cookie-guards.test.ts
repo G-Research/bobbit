@@ -142,7 +142,7 @@ describe("same-host native transport cookie eligibility", () => {
 		},
 	};
 	const context: BrowserCookieEligibilityContext = {
-		deployment: "direct",
+		viteDevProxy: false,
 		configuredHost: "bobbit.example",
 		authentication: { source: "admin-bearer" },
 	};

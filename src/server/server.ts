@@ -1824,6 +1824,11 @@ export interface GatewayConfig {
 	authToken: string;
 	defaultCwd: string;
 	staticDir?: string;
+	/**
+	 * Enables only the hostname exception required by Bobbit's Vite development
+	 * proxy. Headless production gateways leave this false.
+	 */
+	viteDevProxy?: boolean;
 	/** Canonical runtime mount; omitted/empty means root-mounted. */
 	basePath?: string;
 	/**
@@ -2807,9 +2812,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					if (verification.binding || isBrowserCookieAuthenticationCompatible({
 						headers: req.headers,
 						isTls,
-					}, {
-						deployment: config.staticDir ? "direct" : "vite",
-						configuredHost: config.host,
 					})) {
 						cookieVerification = verification;
 						break;
@@ -2886,7 +2888,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					headers: req.headers,
 					isTls,
 				}, {
-					deployment: config.staticDir ? "direct" : "vite",
+					viteDevProxy: config.viteDevProxy === true,
 					configuredHost: config.host,
 					authentication,
 					hasSandboxCredential,
@@ -3405,10 +3407,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					const exactVerification = cookieStore.verify(value, { basePath, origin: wsOrigin });
 					if (exactVerification && (
 						exactVerification.binding
-						|| isBrowserCookieAuthenticationCompatible({ headers: req.headers, isTls }, {
-							deployment: config.staticDir ? "direct" : "vite",
-							configuredHost: config.host,
-						})
+						|| isBrowserCookieAuthenticationCompatible({ headers: req.headers, isTls })
 					)) {
 						websocketCookieAuthenticated = true;
 						// Only the signed v1.2 claim may restore cross-port preflight
