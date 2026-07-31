@@ -30,6 +30,16 @@
       }
     },
     {
+      "path": "tests2/core/extension-host-module-memory-isolation.test.ts",
+      "reason": "Exact-registered partition of the ModuleHost resource-limit coverage so its deliberate 16 MB worker OOM cannot share a Vitest parent fork with the remaining concurrent worker-thread fan-out.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "isolated",
+        "reason": "Deliberately OOMs a ModuleHost worker under a 16 MB old-generation limit and must own a dedicated isolated Vitest fork."
+      }
+    },
+    {
       "path": "tests2/core/comparative-design-prompts.test.ts",
       "reason": "Prompt-contract coverage proving non-trivial design gates compare independent approaches before implementation, coding agents prefer simple composition of well-tested code without forced DRY, reviewers preserve equal scope, and the canonical/current workflow prompts enforce the same decision standard.",
       "execution": {
@@ -8636,8 +8646,7 @@
       "execution": {
         "runner": "vitest",
         "tier": "unit",
-        "project": "isolated",
-        "reason": "Spawns extension-host worker threads with module-scoped loader state."
+        "project": "core"
       }
     },
     {

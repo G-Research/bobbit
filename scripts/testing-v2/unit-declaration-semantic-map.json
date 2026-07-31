@@ -1875,6 +1875,17 @@
     "rationale": "The removed synchronous scanner twin is now owned by the async SessionStore-snapshot suite, which retains this traversal, filtering, cap, or missing-root semantic."
   },
   {
+    "baseFile": "tests2/core/extension-host-module-isolation.test.ts",
+    "baseName": "a handler that exceeds the heap cap crashes the worker → ActionError, not an unbounded parent alloc",
+    "current": [
+      {
+        "file": "tests2/core/extension-host-module-memory-isolation.test.ts",
+        "name": "a handler that exceeds the heap cap crashes the worker → ActionError, not an unbounded parent alloc"
+      }
+    ],
+    "rationale": "The unchanged 16 MB ModuleHost worker OOM assertion moved into an exact-registered isolated file so its deliberate resource-limit crash cannot share a Vitest parent fork with the source file's broad concurrent worker-thread fan-out."
+  },
+  {
     "baseFile": "tests2/dom/git-status-widget-multi-repo.test.ts",
     "baseName": "single-repo (one entry) does NOT trigger multi-repo rendering",
     "current": [
