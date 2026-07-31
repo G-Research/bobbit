@@ -8,7 +8,6 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 
 import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
-import * as oauth from "../../src/server/auth/oauth.js";
 import {
 	buildSandboxAgentAuthJson,
 	refreshSandboxAnthropicOAuthCredential,
@@ -70,17 +69,26 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 	});
 
 	it("refreshes before producing the minimal sandbox auth entry", async () => {
-		useHostAuth({ type: "oauth", access: "expired-access", refresh: "refresh-metadata", expires: Date.now() - 1 });
-		const refreshedExpiry = Date.now() + 60_000;
-		const refresh = vi.spyOn(oauth, "refreshOAuthToken").mockImplementation(async () => {
-			writeFileSync(path.join(agentDir!, "auth.json"), JSON.stringify({
-				anthropic: { type: "oauth", access: "rotated-access", refresh: "rotated-refresh", expires: refreshedExpiry, profile: "must-not-copy" },
-			}));
-			return "rotated-access";
+		const now = 1_700_000_000_000;
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		useHostAuth({ type: "oauth", access: "expired-access", refresh: "refresh-metadata", expires: now - 1 });
+		const refreshRequest = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			assert.equal(String(input), "https://platform.claude.com/v1/oauth/token");
+			assert.equal(init?.method, "POST");
+			const body = JSON.parse(String(init?.body));
+			assert.equal(body.grant_type, "refresh_token");
+			assert.equal(body.refresh_token, "refresh-metadata");
+			assert.equal(typeof body.client_id, "string");
+			return new Response(JSON.stringify({
+				access_token: "rotated-access",
+				refresh_token: "rotated-refresh",
+				expires_in: 3_600,
+			}), { status: 200, headers: { "Content-Type": "application/json" } });
 		});
+		const refreshedExpiry = now + 3_600_000 - 300_000;
 
 		assert.equal(await refreshSandboxAnthropicOAuthCredential(), true);
-		assert.equal(refresh.mock.calls.length, 1);
+		assert.equal(refreshRequest.mock.calls.length, 1);
 		assert.deepEqual(buildSandboxAgentAuthJson({ includeAnthropicAuth: true }), {
 			anthropic: { type: "oauth", access: "rotated-access", refresh: "rotated-refresh", expires: refreshedExpiry },
 		});
