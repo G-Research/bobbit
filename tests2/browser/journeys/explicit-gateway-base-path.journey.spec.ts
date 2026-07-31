@@ -558,7 +558,7 @@ test.describe("Journey: explicit prefixed gateway on a distinct browser origin",
 			expect(mounted.body?.url).toBe(`/preview/${sessionId}/${ENTRY}`);
 
 			await expect(page.locator("body")).toContainText(
-				/Preview live updates and embedded previews require .* same scheme and hostname/i,
+				"Preview live updates and embedded previews require the Bobbit UI and gateway to use the same HTTPS hostname (loopback HTTP is also supported). Serve the UI from the gateway origin or through a same-host reverse proxy.",
 				{ timeout: 20_000 },
 			);
 			const disabledPopout = page.getByTestId("preview-popout-disabled").first();
