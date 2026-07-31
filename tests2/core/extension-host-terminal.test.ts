@@ -235,6 +235,56 @@ describe("terminal channel handler", () => {
 		assert.ok(lastTextIndex < statusIndex, "status should remain after replay text frames");
 	});
 
+	it("drains the final multi-frame PTY burst before emitting exit", async () => {
+		let dataCb: ((data: string) => void) | undefined;
+		let exitCb: ((event: { code: number | null; signal?: string | number; reason?: string }) => void) | undefined;
+		const frames: Array<{ kind: string; data: unknown }> = [];
+		const pendingSends: Array<() => void> = [];
+		let blockSends = false;
+		const session = await terminalChannelHandler({
+			host: {
+				pty: {
+					async openTerminal() {
+						return {
+							pid: 79,
+							write() {}, resize() {}, kill() {},
+							onData: (cb: (data: string) => void) => { dataCb = cb; return () => {}; },
+							onExit: (cb: (event: { code: number | null; signal?: string | number; reason?: string }) => void) => { exitCb = cb; return () => {}; },
+						};
+					},
+				},
+			},
+			send: async (frame) => {
+				frames.push(frame as { kind: string; data: unknown });
+				if (!blockSends) return;
+				await new Promise<void>((resolve) => pendingSends.push(resolve));
+			},
+			close: async () => {},
+		});
+		assert.deepEqual(frames.shift(), { kind: "json", data: { op: "status", state: "attached", pid: 79 } });
+
+		blockSends = true;
+		const marker = "FINAL_BURST_MARKER";
+		dataCb?.(`${"x".repeat(REPLAY_CHUNK_BYTES)}${marker}`);
+		await flushTerminalOutput();
+		assert.equal(frames.filter((frame) => frame.kind === "text").length, 1, "setup should block after the first replay-sized chunk");
+
+		exitCb?.({ code: 0, reason: "completed" });
+		await flushTerminalOutput();
+		assert.equal(frames.some((frame) => isExitFrame(frame)), false, "exit must wait behind queued PTY data");
+
+		while (pendingSends.length > 0) {
+			pendingSends.shift()!();
+			await flushTerminalOutput();
+		}
+		const markerIndex = frames.findIndex((frame) => frame.kind === "text" && String(frame.data).includes(marker));
+		const exitIndex = frames.findIndex(isExitFrame);
+		assert.notEqual(markerIndex, -1, "the final burst marker must be delivered");
+		assert.notEqual(exitIndex, -1, "PTY exit must be delivered after the drained burst");
+		assert.ok(markerIndex < exitIndex, "the final burst marker must precede the exit frame");
+		await session.close?.("test cleanup");
+	});
+
 	it("bridges client text/resize/kill frames to PTY and emits output/status/exit frames", async () => {
 		let dataCb: ((data: string) => void) | undefined;
 		let exitCb: ((event: { code: number | null; signal?: string | number; reason?: string }) => void) | undefined;
@@ -500,6 +550,18 @@ function isStatusFrame(frame: unknown) {
 		typeof data === "object" &&
 		(data as { op?: unknown }).op === "status" &&
 		(data as { state?: unknown }).state === "attached",
+	);
+}
+
+function isExitFrame(frame: unknown): boolean {
+	const data = frame && typeof frame === "object" ? (frame as { data?: unknown }).data : undefined;
+	return Boolean(
+		frame &&
+		typeof frame === "object" &&
+		(frame as { kind?: unknown }).kind === "json" &&
+		data &&
+		typeof data === "object" &&
+		(data as { op?: unknown }).op === "exit",
 	);
 }
 
