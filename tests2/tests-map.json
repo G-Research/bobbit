@@ -94,7 +94,7 @@
     },
     {
       "path": "tests2/core/base-path-pwa-cookie-guards.test.ts",
-      "reason": "PWA, cookie, CORS, and source-guard coverage for mount-scoped service-worker caching, duplicate signed cookies, credentialed native transports, and centralized client URL/auth ownership.",
+      "reason": "PWA, cookie, CORS, and source-guard coverage for mount-scoped service-worker caching, duplicate signed cookies, credentialed native transports, centralized client URL/auth ownership, and isolate:false release of selected gateway generations.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -11496,7 +11496,7 @@
       "bucket": "v2-core",
       "method": "codemod",
       "replacement": [],
-      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks).",
+      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks), with an ordered isolate:false gateway-ownership regression.",
       "migrated": true,
       "v2Path": "tests2/core/play-finish-sound.test.ts",
       "execution": {

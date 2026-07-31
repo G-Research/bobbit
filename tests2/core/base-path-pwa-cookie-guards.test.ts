@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
-import { describe, it } from "vitest";
+import { afterEach, describe, it } from "vitest";
 
+import { __resetGatewayConnectionForTests } from "../../src/app/gateway-fetch.ts";
 import {
 	COOKIE_NAME,
 	CookieStore,
@@ -20,6 +21,11 @@ import {
 	type BrowserCookieRequestMetadata,
 } from "../../src/server/auth/browser-cookie.ts";
 import { gatewayRoute, type GatewayRoute } from "../../src/shared/base-path.ts";
+
+// This isolate:false suite selects explicit gateway generations in its
+// cross-tab cases. Release that module-owned state before any later file reuses
+// the browser boundary.
+afterEach(__resetGatewayConnectionForTests);
 
 function fakeRequest(cookie?: string): any {
 	return { headers: cookie ? { cookie } : {} };
