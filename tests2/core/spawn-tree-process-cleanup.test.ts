@@ -488,7 +488,7 @@ describe("spawnTracked timeout cleanup", () => {
 			const step: any = {
 				name: "Recovered container command", type: "command", status: "running", startedAt: Date.now() - 1_000,
 				containerId: "container-under-test", restartRecoveryMode: "container-exec",
-				pid: 321_654, pidNonce: "host-sentinel-nonce", sentinelFile: path.join(stateDir, "docker-exec.sentinel.json"),
+				pid: 321_654, pidFile: "/tmp/.bobbit-verif/signal/0.pid", pidNonce: "host-sentinel-nonce", sentinelFile: path.join(stateDir, "docker-exec.sentinel.json"),
 				exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat",
 			};
 			const active: any = { goalId: "goal", gateId: "implementation", signalId: "signal", overallStatus: "running", startedAt: Date.now(), steps: [step] };
@@ -514,7 +514,7 @@ describe("spawnTracked timeout cleanup", () => {
 			(harness as any)._dockerExecCapture = async () => ({ code: 0, stdout: "0\n" });
 			const step: any = {
 				name: "Container without host sentinel", type: "command", status: "running", startedAt: Date.now() - 1_000,
-				containerId: "container-under-test", restartRecoveryMode: "container-exec", pid: 321_654,
+				containerId: "container-under-test", restartRecoveryMode: "container-exec", pid: 321_654, pidFile: "/tmp/.bobbit-verif/signal/0.pid",
 				pidNonce: "missing-sentinel-nonce", exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat",
 			};
 			const active: any = { goalId: "goal", gateId: "implementation", signalId: "signal", overallStatus: "running", startedAt: Date.now(), steps: [step] };
@@ -570,7 +570,7 @@ describe("spawnTracked timeout cleanup", () => {
 			(harness as any)._dockerExecCapture = async () => ({ code: 0, stdout: "0\n" });
 			const step: any = {
 				name: "Windows container", type: "command", status: "running", startedAt: Date.now() - 1_000,
-				containerId: "container-under-test", restartRecoveryMode: "container-exec", exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat",
+				containerId: "container-under-test", restartRecoveryMode: "container-exec", pidFile: "/tmp/.bobbit-verif/signal/0.pid", exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat",
 			};
 			const result = await (harness as any)._resumeContainerCommandStep({ signalId: "signal" }, step, {
 				finalize: (code: number) => ({ name: step.name, type: step.type, passed: code === 0, output: "finalized", duration_ms: 0 }),
@@ -650,7 +650,7 @@ describe("spawnTracked timeout cleanup", () => {
 			(harness as any)._dockerExecCapture = async () => ({ code: 0, stdout: "" });
 			const step: any = {
 				name: "No-verdict container", type: "command", status: "running", startedAt: Date.now() - 1_000,
-				containerId: "container-under-test", restartRecoveryMode: "container-exec", pid: 321_654,
+				containerId: "container-under-test", restartRecoveryMode: "container-exec", pid: 321_654, pidFile: "/tmp/.bobbit-verif/signal/0.pid",
 				pidNonce: "no-verdict-nonce", sentinelFile: path.join(stateDir, "docker-exec.sentinel.json"),
 				exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat", deadlineMs: Date.now() + 10_000,
 			};

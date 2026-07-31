@@ -248,6 +248,97 @@ test("mixed durable failure and interruption notifies only the failed step", asy
 	assert.doesNotMatch(notices, /step="No verdict sibling"/);
 });
 
+test("persisted container cancellation kills and verifies its payload before reaping the host transport", async () => {
+	const { harness } = makeHarnessForStateDir(undefined, "linux");
+	const events: string[] = [];
+	(harness as any)._dockerExecCapture = async (containerId: string, script: string) => {
+		events.push("payload");
+		assert.equal(containerId, "container-cancel-only");
+		assert.match(script, /cat '\/tmp\/bobbit-cancel\.pid'/);
+		assert.match(script, /kill -TERM -- "-\$p"/);
+		assert.match(script, /kill -0 -- "-\$p"/);
+		assert.doesNotMatch(script, /docker (?:stop|kill)|killall|pkill/);
+		return { code: 0, stdout: "" }; // no live group remains after the exact-group probe
+	};
+	(harness as any).recoveredSentinelReaper = async () => { events.push("sentinel"); };
+	const startedAt = Date.now();
+	const verification = activeVerification("sig-container-cancel", [commandStepFixture({
+		name: "Container payload",
+		startedAt,
+		containerId: "container-cancel-only",
+		pidFile: "/tmp/bobbit-cancel.pid",
+		restartRecoveryMode: "container-exec",
+	})], startedAt);
+	(harness as any).activeVerifications.set(verification.signalId, verification);
+
+	await harness.cancelStaleVerificationsForGates(GOAL_ID, [GATE_ID]);
+
+	assert.deepEqual(events, ["payload", "sentinel"], `${MARKER}: payload cleanup must precede host sentinel reap`);
+	assert.equal((harness as any).activeVerifications.has(verification.signalId), false);
+	assert.ok(verification.steps[0].killCompletedAt, `${MARKER}: cancellation must not complete before payload cleanup`);
+});
+
+test("terminal recovered container exit proves no live payload group before host sentinel cleanup", async () => {
+	const { harness } = makeHarnessForStateDir(undefined, "linux");
+	const events: string[] = [];
+	(harness as any)._dockerExecCapture = async (containerId: string, script: string) => {
+		assert.equal(containerId, "container-terminal-only");
+		if (script.includes("cat '/tmp/bobbit-terminal.exit'")) return { code: 0, stdout: "0\n" };
+		events.push("payload-no-live-group");
+		assert.match(script, /pgid=\$\(ps -o pgid=/);
+		assert.match(script, /kill -0 -- "-\$p"/);
+		return { code: 0, stdout: "" };
+	};
+	(harness as any)._reapRecoveredPosixSentinel = async () => { events.push("sentinel"); };
+	const step = commandStepFixture({
+		name: "Recovered container success",
+		startedAt: Date.now() - 100,
+		containerId: "container-terminal-only",
+		pidFile: "/tmp/bobbit-terminal.pid",
+		exitFile: "/tmp/bobbit-terminal.exit",
+		restartRecoveryMode: "container-exec",
+	});
+	const verification = activeVerification("sig-container-terminal", [step], step.startedAt);
+	(harness as any).activeVerifications.set(verification.signalId, verification);
+
+	const result = await (harness as any)._resumeContainerCommandStep(verification, step, {
+		finalize: (code: number) => ({ name: step.name, type: "command", passed: code === 0, output: String(code), duration_ms: 1 }),
+		timeoutResult: () => { throw new Error("unexpected timeout"); },
+		restartInterrupted: () => { throw new Error("unexpected interruption"); },
+	});
+
+	assert.equal(result?.passed, true);
+	assert.deepEqual(events, ["payload-no-live-group", "sentinel"], `${MARKER}: terminal completion must wait for a no-live-group proof`);
+});
+
+test("Windows persisted container cancellation cannot complete through the POSIX sentinel no-op", async () => {
+	const { harness } = makeHarnessForStateDir(undefined, "win32");
+	const events: string[] = [];
+	(harness as any)._dockerExecCapture = async (containerId: string, script: string) => {
+		events.push("payload");
+		assert.equal(containerId, "container-windows-only");
+		assert.match(script, /cat '\/tmp\/bobbit-windows\.pid'/);
+		return { code: 0, stdout: "" };
+	};
+	// The production POSIX reaper is intentionally a Windows no-op. This seam
+	// makes the ordering observable: the in-container proof must still happen.
+	(harness as any).recoveredSentinelReaper = async () => { events.push("sentinel-no-op"); };
+	const startedAt = Date.now();
+	const verification = activeVerification("sig-container-windows", [commandStepFixture({
+		name: "Windows container payload",
+		startedAt,
+		containerId: "container-windows-only",
+		pidFile: "/tmp/bobbit-windows.pid",
+		restartRecoveryMode: "container-exec",
+	})], startedAt);
+	(harness as any).activeVerifications.set(verification.signalId, verification);
+
+	await harness.cancelAllVerifications(GOAL_ID);
+
+	assert.deepEqual(events, ["payload", "sentinel-no-op"]);
+	assert.equal((harness as any).activeVerifications.has(verification.signalId), false);
+});
+
 test("attached or container recovery stays retryable with clear diagnostics", async () => {
 	const { stateDir, harness, gateStoreCalls } = makeHarnessForStateDir();
 	const startedAt = Date.now() - 100;

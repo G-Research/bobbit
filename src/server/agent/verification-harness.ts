@@ -3036,6 +3036,10 @@ export class VerificationHarness {
 			// instead settles only after its exact host docker-exec sentinel is reaped.
 			if (step.restartRecoveryMode === "container-exec" && step.containerId) {
 				try {
+					// The persisted pidFile identifies a process group inside this exact
+					// container. Do not let the host docker-exec sentinel be reaped (and
+					// do not acknowledge cancellation) until that payload is gone.
+					await this._killAndVerifyRecoveredContainerProcessGroup(step);
 					await this.recoveredSentinelReaper(step);
 					step.killCompletedAt ??= Date.now();
 				} catch (err) {
@@ -5591,6 +5595,10 @@ export class VerificationHarness {
 						wrappedCmd = `echo $$ > ${killPidFile}; ${command}`;
 					}
 					const pidFileForKill = killPidFile;
+					// The durable pidFile names the in-container session leader. Make
+					// that identity true at spawn time so recovered cleanup can prove
+					// `pid === pgid` before signalling only this command's group.
+					wrappedCmd = `exec setsid /bin/sh -c ${shellSingleQuote(wrappedCmd)}`;
 					tracked = spawnTracked("docker", ["exec", "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
 						stdio: ["ignore", "pipe", "pipe"],
 						timeoutMs: timeoutSec * 1000,
@@ -5610,7 +5618,7 @@ export class VerificationHarness {
 								if (!this.commandRunner.spawn) throw new Error("CommandRunner.spawn is required for docker command cleanup");
 								const killer = this.commandRunner.spawn("docker", [
 									"exec", containerId, "/bin/sh", "-c",
-									`p=$(cat ${qp} 2>/dev/null) && kill -TERM -- -$p 2>/dev/null; sleep 0.2; p=$(cat ${qp} 2>/dev/null) && kill -KILL -- -$p 2>/dev/null; rm -f ${qp}`,
+									`p=$(cat ${qp} 2>/dev/null) && kill -TERM -- -$p 2>/dev/null; sleep 0.2; p=$(cat ${qp} 2>/dev/null) && kill -KILL -- -$p 2>/dev/null`,
 								], { stdio: "ignore" });
 								killer.on("error", () => { /* docker missing — best-effort */ });
 							} catch { /* ignore */ }
@@ -6275,6 +6283,44 @@ export class VerificationHarness {
 	}
 
 	/**
+	 * Kill exactly the persisted in-container command process group and prove
+	 * that no member remains. The pid file is written by the `setsid` session
+	 * leader at launch, so a live root must still satisfy pid === pgid before we
+	 * name its negative process-group id. A missing group is already settled;
+	 * every other ambiguity fails closed and leaves cleanup pending for retry.
+	 *
+	 * This deliberately uses `docker exec <persisted-container-id>` rather than
+	 * any container-level stop/kill operation. It is therefore safe while other
+	 * sessions, verification steps, or background processes share the sandbox.
+	 */
+	private async _killAndVerifyRecoveredContainerProcessGroup(step: ActiveVerification["steps"][number]): Promise<void> {
+		if (!step.containerId || !step.pidFile) {
+			throw new PendingCommandCleanupError("Recovered container command has no exact container process-group identity.");
+		}
+		const pidFile = shellSingleQuote(step.pidFile);
+		const script = `
+			p=$(cat ${pidFile} 2>/dev/null || true)
+			case "$p" in ''|*[!0-9]*) echo BOBBIT_CONTAINER_PID_INVALID; exit 64;; esac
+			pgid=$(ps -o pgid= -p "$p" 2>/dev/null | tr -d '[:space:]' || true)
+			if [ -z "$pgid" ]; then
+				# The session leader is gone. A group probe is still required: a
+				# surviving child would make this historical numeric identity unsafe.
+				if kill -0 -- "-$p" 2>/dev/null; then echo BOBBIT_CONTAINER_GROUP_UNVERIFIED; exit 65; fi
+				exit 0
+			fi
+			if [ "$pgid" != "$p" ]; then echo BOBBIT_CONTAINER_GROUP_MISMATCH; exit 66; fi
+			kill -TERM -- "-$p" 2>/dev/null || true
+			sleep 0.2
+			kill -KILL -- "-$p" 2>/dev/null || true
+			if kill -0 -- "-$p" 2>/dev/null; then echo BOBBIT_CONTAINER_GROUP_STILL_LIVE; exit 67; fi
+		`;
+		const result = await this._dockerExecCapture(step.containerId, script);
+		if (result.code === 0) return;
+		const detail = result.stdout.trim() || `docker exec exited ${result.code ?? "without a status"}`;
+		throw new PendingCommandCleanupError(`Recovered container command group cleanup is not yet safe or complete: ${detail}`);
+	}
+
+	/**
 	 * Resume a container command step after a gateway restart. The durable
 	 * exit/pid/heartbeat files live inside the container, so re-attachment is
 	 * done via `docker exec`:
@@ -6306,9 +6352,11 @@ export class VerificationHarness {
 		const reapRecoveredContainerTransport = async (): Promise<void> => {
 			// The container exit/pid files prove only the in-container command. The
 			// gateway restart also orphaned a host docker-exec transport group. Every
-			// recovered outcome (verdict, timeout, or retryable no-verdict) therefore
-			// waits for this exact durable sentinel identity to be verified and reaped.
-			// On Windows there is no POSIX group sentinel and the reaper is a no-op.
+			// recovered outcome (verdict, timeout, or retryable no-verdict) must first
+			// kill and prove absent the exact in-container process group, then reap its
+			// exact host transport sentinel. This applies on Windows too: its host
+			// sentinel reaper is a no-op, never an acknowledgement of payload cleanup.
+			await this._killAndVerifyRecoveredContainerProcessGroup(step);
 			await this._reapRecoveredPosixSentinel(step);
 		};
 		const finalizeRecoveredContainerExit = async (code: number): Promise<ResumedVerificationStep> => {
@@ -6346,13 +6394,6 @@ export class VerificationHarness {
 
 		// 3. Deadline elapsed → kill the in-container process group, then timeout.
 		if (Date.now() >= deadline) {
-			if (step.pidFile) {
-				const qp = shellSingleQuote(step.pidFile);
-				await this._dockerExecCapture(
-					cid,
-					`p=$(cat ${qp} 2>/dev/null) && kill -TERM -- -$p 2>/dev/null; sleep 0.2; p=$(cat ${qp} 2>/dev/null) && kill -KILL -- -$p 2>/dev/null`,
-				).catch(() => undefined);
-			}
 			await reapRecoveredContainerTransport();
 			return helpers.timeoutResult();
 		}
