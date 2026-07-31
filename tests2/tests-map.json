@@ -1669,7 +1669,7 @@
     },
     {
       "path": "tests2/core/spawn-with-retry-policy.test.ts",
-      "reason": "Subprocess-free policy coverage for bounded fixture command retry, timeout/close ordering, authoritative close-zero handling, transactional cleanup redaction, literal argv, and safe process options through an injectable backend.",
+      "reason": "Subprocess-free policy coverage for bounded fixture command retry, timeout/close ordering, authoritative close-zero handling, transactional cleanup redaction, literal argv/optional stdin, and safe process options through an injectable backend.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -1696,7 +1696,7 @@
     },
     {
       "path": "tests2/core/git-template-copy.test.ts",
-      "reason": "Pins setup-prepared immutable Git template reuse, configured master metadata, independent filesystem-only copies, and destination safety after the tier-1 guard is installed.",
+      "reason": "Pins the three-process no-add Git bootstrap, real master commit/tree/index, local identity/hooks/LF configuration, immutable filesystem-only copies, and destination safety after the tier-1 guard is installed.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

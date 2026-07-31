@@ -7,6 +7,16 @@ import { runFixtureCommand } from "./spawn-with-retry.js";
 const STATE_KEY = Symbol.for("bobbit.tests2.git-template-state");
 const README = "# Bobbit test repository\n";
 const GITATTRIBUTES = "* text=auto eol=lf\n";
+const INITIAL_COMMIT_MESSAGE = "Initial fixture\n";
+const COMMIT_IDENTITY = "Bobbit Test <bobbit-test@example.invalid>";
+const COMMIT_TIME = "946684800 +0000";
+
+/** The successful setup path launches exactly these three bounded Git processes. */
+export const GIT_TEMPLATE_NORMAL_PROCESS_PLAN = Object.freeze([
+	{ phase: "initialize", file: "git", args: ["-c", "init.defaultBranch=master", "init", "--quiet", "--object-format=sha1", "--template=", "."] },
+	{ phase: "import", file: "git", args: ["fast-import", "--quiet", "--force"] },
+	{ phase: "index", file: "git", args: ["read-tree", "HEAD"] },
+] as const);
 
 interface GitTemplateState {
 	promise?: Promise<string>;
@@ -73,26 +83,71 @@ function removeContainer(container: string): void {
 	}
 }
 
-async function populatePrivateRepository(container: string, repository: string, env: NodeJS.ProcessEnv): Promise<void> {
-	mkdirSync(repository);
-	await runFixtureCommand("git", ["-c", "init.defaultBranch=master", "init", "--quiet", repository], { cwd: container, env });
-	await runFixtureCommand("git", ["config", "user.name", "Bobbit Test"], { cwd: repository, env });
-	await runFixtureCommand("git", ["config", "user.email", "bobbit-test@example.invalid"], { cwd: repository, env });
-	await runFixtureCommand("git", ["config", "core.autocrlf", "false"], { cwd: repository, env });
-	await runFixtureCommand("git", ["config", "commit.gpgsign", "false"], { cwd: repository, env });
-	const hooks = join(repository, ".git", "hooks-disabled");
-	mkdirSync(hooks);
-	await runFixtureCommand("git", ["config", "core.hooksPath", hooks], { cwd: repository, env });
-	writeFileSync(join(repository, "README.md"), README, "utf8");
-	writeFileSync(join(repository, ".gitattributes"), GITATTRIBUTES, "utf8");
-	await runFixtureCommand("git", ["add", "--", "README.md", ".gitattributes"], { cwd: repository, env });
+function fastImportInput(): string {
+	const data = (value: string): string => `data ${Buffer.byteLength(value)}\n${value}\n`;
+	return [
+		"feature done\n",
+		"blob\nmark :1\n", data(GITATTRIBUTES),
+		"blob\nmark :2\n", data(README),
+		"reset refs/heads/master\n\n",
+		"commit refs/heads/master\nmark :3\n",
+		`author ${COMMIT_IDENTITY} ${COMMIT_TIME}\n`,
+		`committer ${COMMIT_IDENTITY} ${COMMIT_TIME}\n`,
+		data(INITIAL_COMMIT_MESSAGE),
+		"M 100644 :1 .gitattributes\n",
+		"M 100644 :2 README.md\n\n",
+		"done\n",
+	].join("");
 }
 
-async function recreatePrivateRepository(container: string, repository: string, env: NodeJS.ProcessEnv): Promise<void> {
-	// The template is not published until its commit succeeds, so deleting the
-	// whole private attempt is safer than guessing whether a timed-out commit took effect.
+function writeLocalConfiguration(repository: string): void {
+	const hooks = join(repository, ".git", "hooks-disabled");
+	mkdirSync(hooks);
+	const configPath = join(repository, ".git", "config");
+	const initialized = readFileSync(configPath, "utf8").trimEnd();
+	writeFileSync(configPath, `${initialized}\n[user]\n\tname = Bobbit Test\n\temail = bobbit-test@example.invalid\n[core]\n\tautocrlf = false\n\thooksPath = ${JSON.stringify(hooks)}\n[commit]\n\tgpgsign = false\n[index]\n\tversion = 2\n[fastimport]\n\tunpackLimit = 100\n`, "utf8");
+}
+
+async function initializePrivateRepository(repository: string, env: NodeJS.ProcessEnv): Promise<void> {
+	mkdirSync(repository);
+	const command = GIT_TEMPLATE_NORMAL_PROCESS_PLAN[0];
+	await runFixtureCommand(command.file, command.args, { cwd: repository, env });
+	writeLocalConfiguration(repository);
+	writeFileSync(join(repository, "README.md"), README, "utf8");
+	writeFileSync(join(repository, ".gitattributes"), GITATTRIBUTES, "utf8");
+}
+
+async function recreateInitializedRepository(repository: string, env: NodeJS.ProcessEnv): Promise<void> {
+	// A private attempt is never published until its ref and index both exist. A
+	// closed timed-out mutation is replaced wholesale before the bounded retry.
 	rmSync(repository, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 });
-	await populatePrivateRepository(container, repository, env);
+	await initializePrivateRepository(repository, env);
+}
+
+async function importPrivateCommit(repository: string, env: NodeJS.ProcessEnv): Promise<void> {
+	const command = GIT_TEMPLATE_NORMAL_PROCESS_PLAN[1];
+	await runFixtureCommand(command.file, command.args, {
+		cwd: repository,
+		env,
+		stdin: fastImportInput(),
+		onTimedOutAttemptClosed: () => recreateInitializedRepository(repository, env),
+	});
+}
+
+async function recreateCommittedRepository(repository: string, env: NodeJS.ProcessEnv): Promise<void> {
+	await recreateInitializedRepository(repository, env);
+	await importPrivateCommit(repository, env);
+}
+
+async function populatePrivateRepository(repository: string, env: NodeJS.ProcessEnv): Promise<void> {
+	await initializePrivateRepository(repository, env);
+	await importPrivateCommit(repository, env);
+	const command = GIT_TEMPLATE_NORMAL_PROCESS_PLAN[2];
+	await runFixtureCommand(command.file, command.args, {
+		cwd: repository,
+		env,
+		onTimedOutAttemptClosed: () => recreateCommittedRepository(repository, env),
+	});
 }
 
 /**
@@ -113,12 +168,7 @@ export async function prepareGitTemplate(): Promise<string> {
 		const repository = join(container, "repo");
 		const env = templateEnvironment();
 		try {
-			await populatePrivateRepository(container, repository, env);
-			await runFixtureCommand("git", ["commit", "--quiet", "-m", "Initial fixture"], {
-				cwd: repository,
-				env,
-				onTimedOutAttemptClosed: () => recreatePrivateRepository(container, repository, env),
-			});
+			await populatePrivateRepository(repository, env);
 
 			const canonical = realpathSync(repository);
 			shared.path = canonical;
