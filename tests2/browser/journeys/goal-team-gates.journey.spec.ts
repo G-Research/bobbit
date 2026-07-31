@@ -525,8 +525,13 @@ test.describe("Journey: completed goal gate reset reopens live UI", () => {
 
 			const designRow = widgetDropdown.locator('[data-testid="goal-widget-gate"][data-gate-id="design-doc"]');
 			await designRow.locator('[data-testid="goal-widget-gate-reset"]').click();
-			await expect(page.getByText("Reset “Design Doc”?", { exact: true })).toBeVisible({ timeout: 10_000 });
+			const resetTitle = page.getByText("Reset “Design Doc”?", { exact: true });
+			await expect(resetTitle).toBeVisible({ timeout: 10_000 });
+			// Resolve with the modal's keyboard action, which preserves the open
+			// widget. Explicitly wait for modal teardown before reloading so its
+			// backdrop cannot intercept the reloaded status pill.
 			await page.keyboard.press("Enter");
+			await expect(resetTitle).toHaveCount(0, { timeout: 10_000 });
 
 			await expect(widgetDropdown.locator('[data-testid="goal-widget-completed"]'), "Completed must clear without reload").toHaveCount(0, { timeout: 15_000 });
 			await expect(designRow, "reset gate should render pending in the still-open widget").toHaveAttribute("data-gate-status", "pending", { timeout: 15_000 });
