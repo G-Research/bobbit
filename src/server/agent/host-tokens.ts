@@ -69,8 +69,10 @@ const PROVIDER_TOKENS: { envVar: string; label: string; provider: string; envKey
 /** Well-known non-provider tokens that users may want in sandboxes */
 export const SANDBOX_AGENT_AUTH_RELATIVE_PATH = path.join("sandbox-agent-auth", "auth.json");
 export const OPENAI_CODEX_SANDBOX_AUTH_TOKEN_KEYS = new Set(["OPENAI_API_KEY", "OPENAI_CODEX_AUTH"]);
-/** Sandbox-token policy key that permits the minimal Anthropic OAuth credential. */
+/** An empty, enabled OAuth-token entry is the explicit policy required to hand a current host OAuth access token to a sandbox. */
 export const ANTHROPIC_SANDBOX_AUTH_TOKEN_KEYS = new Set(["ANTHROPIC_OAUTH_TOKEN"]);
+/** Project credentials take precedence over any host-derived Anthropic OAuth handoff. */
+export const ANTHROPIC_SANDBOX_CREDENTIAL_KEYS = new Set(["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]);
 /** Sandbox-token policy keys that opt a sandbox into the Google account (Gemini Code Assist) OAuth credential. */
 export const GOOGLE_GEMINI_CLI_SANDBOX_AUTH_TOKEN_KEYS = new Set(["GOOGLE_CLOUD_ACCESS_TOKEN"]);
 
@@ -169,14 +171,13 @@ function sanitizeGoogleCredential(value: unknown): Record<string, any> | undefin
 }
 
 /**
- * Anthropic's Pi credential needs the same minimal OAuth fields as the host
- * store. It is copied only after the shared OAuth resolver has confirmed it is
- * current, so a sandbox never receives an expired access token after restart.
+ * Produce the only Anthropic credential shape that may cross a sandbox
+ * boundary: a current, non-renewable access token. Callers must first apply
+ * their project sandbox-token policy; this helper never supplies a default.
  */
 function sanitizeAnthropicCredential(value: unknown): Record<string, any> | undefined {
 	if (!isUsableOAuthCredential(value)) return undefined;
 	const sanitized: Record<string, any> = { type: "oauth", access: value.access };
-	if (typeof value.refresh === "string" && value.refresh) sanitized.refresh = value.refresh;
 	if (typeof value.expires === "number") sanitized.expires = value.expires;
 	return sanitized;
 }
@@ -191,8 +192,8 @@ function hasCurrentOAuthAccess(value: unknown, now = Date.now()): boolean {
 }
 
 /**
- * Refresh Anthropic through the shared OAuth route, then re-read its persisted
- * Pi-compatible credential. No token material leaves this module.
+ * Refresh the host credential without exporting it. Kept as the narrow
+ * gateway-side refresh seam; sandbox setup deliberately does not call it.
  */
 export async function refreshSandboxAnthropicOAuthCredential(): Promise<boolean> {
 	const credential = readHostAuthJson()?.anthropic;
@@ -204,8 +205,6 @@ export async function refreshSandboxAnthropicOAuthCredential(): Promise<boolean>
 		if (typeof refresh !== "function") return false;
 		await (refresh as () => Promise<unknown>)();
 	} catch {
-		// The caller omits only the host-derived OAuth handoff. Explicit/env API
-		// keys remain available through the ordinary sandbox-token path.
 		return false;
 	}
 	return hasCurrentOAuthAccess(readHostAuthJson()?.anthropic);
@@ -227,7 +226,7 @@ export function sandboxAgentAuthPath(scope?: string): string {
 export interface SandboxAgentAuthOptions {
 	prefs?: PreferencesStore | null;
 	includeCodexAuth?: boolean;
-	/** Opt the sandbox into the current, minimal Anthropic OAuth credential. */
+	/** Caller has applied the project policy and requests a non-renewable Anthropic access-token entry. */
 	includeAnthropicAuth?: boolean;
 	/** Opt the sandbox into the Google account (Gemini Code Assist) OAuth credential. */
 	includeGoogleAuth?: boolean;
@@ -302,6 +301,17 @@ export function sandboxTokenPolicyAllowsCodexAuth(entries: Array<{ key?: string;
 
 export function sandboxTokenPolicyAllowsAnthropicAuth(entries: Array<{ key?: string; enabled?: boolean }> | undefined | null): boolean {
 	return (entries || []).some((entry) => entry.enabled !== false && !!entry.key && ANTHROPIC_SANDBOX_AUTH_TOKEN_KEYS.has(entry.key));
+}
+
+/** True when the project supplies an Anthropic token rather than requesting a host handoff. */
+export function hasExplicitSandboxAnthropicCredential(
+	entries: Array<{ key?: string; enabled?: boolean; value?: string }> | undefined | null,
+	secrets?: Record<string, string> | null,
+): boolean {
+	return (entries || []).some((entry) => {
+		if (entry.enabled === false || !entry.key || !ANTHROPIC_SANDBOX_CREDENTIAL_KEYS.has(entry.key)) return false;
+		return !!nonEmptyString(secrets?.[entry.key] ?? entry.value);
+	});
 }
 
 export function sandboxTokenPolicyAllowsGoogleAuth(entries: Array<{ key?: string; enabled?: boolean }> | undefined | null): boolean {
@@ -442,7 +452,7 @@ export function detectHostTokens(prefs?: PreferencesStore | null, commandRunner:
  * Returns undefined if the token cannot be resolved.
  */
 export interface HostTokenResolutionOptions {
-	/** Prevent forwarding a host-stored Anthropic OAuth access token when shared refresh failed. */
+	/** Explicit sandbox policy allowing a current, non-renewable host Anthropic OAuth access-token handoff. */
 	allowStoredAnthropicOAuth?: boolean;
 }
 
@@ -452,8 +462,15 @@ export function resolveHostTokenValue(
 	commandRunner: CommandRunner = realCommandRunner,
 	options?: HostTokenResolutionOptions,
 ): string | undefined {
-	// Check env var directly
-	if (process.env[envVar]) return process.env[envVar];
+	// Anthropic OAuth is renewable host authority. Never forward it unless the
+	// project explicitly opted in through sandbox_tokens; API keys keep their
+	// established host-token behavior.
+	if (envVar === "ANTHROPIC_OAUTH_TOKEN") {
+		if (process.env["ANTHROPIC_API_KEY"]) return process.env["ANTHROPIC_API_KEY"];
+		if (options?.allowStoredAnthropicOAuth === true && process.env[envVar]) return process.env[envVar];
+	} else if (process.env[envVar]) {
+		return process.env[envVar];
+	}
 
 	// Special cases
 	if (envVar === "GITHUB_TOKEN") {
@@ -463,10 +480,6 @@ export function resolveHostTokenValue(
 			if (token) return token;
 		} catch { /* gh not installed or not authenticated */ }
 		return undefined;
-	}
-
-	if (envVar === "ANTHROPIC_OAUTH_TOKEN" && process.env["ANTHROPIC_API_KEY"]) {
-		return process.env["ANTHROPIC_API_KEY"];
 	}
 
 	// Check auth.json for provider tokens.
@@ -487,8 +500,10 @@ export function resolveHostTokenValue(
 			const data = readHostAuthJson();
 			const providerData = data?.[providerForEnv.provider];
 			if (providerData) {
-				if (providerData.type === "oauth" && providerData.access
-					&& !(providerForEnv.provider === "anthropic" && options?.allowStoredAnthropicOAuth === false)) return providerData.access;
+				if (providerData.type === "oauth" && providerData.access) {
+					if (providerForEnv.provider !== "anthropic") return providerData.access;
+					if (options?.allowStoredAnthropicOAuth === true && hasCurrentOAuthAccess(providerData)) return providerData.access;
+				}
 				if (providerData.type === "api_key" && providerData.key) return providerData.key;
 			}
 		} catch { /* ignore read errors */ }
