@@ -28,23 +28,37 @@ Do not derive writable names from `Date.now()` alone. Use `mkdtemp`, a UUID, or 
 
 Never use string prefix checks for containment. Normalize lexical inputs with `path.resolve`, then use `path.relative` to test containment. Before accessing existing filesystem objects, resolve **both** the root and candidate with `realpath` and repeat the relative-path check; macOS `TMPDIR` aliases, symlinks, junctions, and case-normalizing filesystems otherwise produce false rejections or escapes.
 
-A user path may not exist yet. In that case, retain the lexical containment check and canonicalize the longest existing prefix before creating or accessing it; do not call `realpath` on a nonexistent leaf and silently fall back to an unverified string comparison. Preserve a lexical alias only when it has passed the same validation as its canonical spelling.
+A user path may not exist yet. In that case, canonicalize its longest existing prefix, retain the unresolved suffix, and compare the reconstructed candidate against the canonical root before creating or accessing it; do not call `realpath` on a nonexistent leaf and silently fall back to an unverified string comparison. Preserve a lexical alias only when it has passed the same validation as its canonical spelling.
 
 ```ts
-// Good: existing paths are decided by their canonical spelling; lexical
-// containment is the fallback for a path that does not exist yet.
+// Good: canonical paths decide containment. A missing candidate retains the
+// suffix after its longest canonical existing prefix.
 function isWithin(root: string, candidate: string): boolean {
-  const lexicalRoot = resolve(root);
-  const lexicalCandidate = resolve(candidate);
+  const canonicalRoot = realpathSync(resolve(root));
+  const canonicalCandidate = canonicalizeCandidatePrefix(resolve(candidate));
+  return isRelativeWithin(canonicalRoot, canonicalCandidate);
+}
 
-  try {
-    return isRelativeWithin(
-      realpathSync(lexicalRoot),
-      realpathSync(lexicalCandidate),
-    );
-  } catch {
-    return isRelativeWithin(lexicalRoot, lexicalCandidate);
+function canonicalizeCandidatePrefix(candidate: string): string {
+  const suffix: string[] = [];
+  let existingPrefix = candidate;
+
+  for (;;) {
+    try {
+      return join(realpathSync(existingPrefix), ...suffix);
+    } catch (error) {
+      if (!isMissingPathError(error)) throw error;
+      const parent = dirname(existingPrefix);
+      if (parent === existingPrefix) throw error;
+      suffix.unshift(basename(existingPrefix));
+      existingPrefix = parent;
+    }
   }
+}
+
+function isMissingPathError(error: unknown): error is NodeJS.ErrnoException {
+  return typeof error === "object" && error !== null &&
+    "code" in error && error.code === "ENOENT";
 }
 
 function isRelativeWithin(root: string, candidate: string): boolean {
