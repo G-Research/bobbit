@@ -121,26 +121,71 @@ test("ProjectRegistry preserves case-distinct paths when the native volume is se
   assert.equal(registry.registerProvisional("case-distinct", alias).provisional, true);
 });
 
-test("ProjectRegistry identifies native case aliases when the temp volume is insensitive", () => {
-  if (process.platform !== "darwin") return;
-
+test("ProjectRegistry's native case probe gives empty-parent provisional aliases a stable identity", () => {
   const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "project-registry-native-case-"));
   fixtureDirs.push(fixtureRoot);
-  const root = path.join(fixtureRoot, "ProjectIdentity");
-  const alias = path.join(fixtureRoot, "projectidentity");
-  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "project-registry-native-case-state-"));
+  fixtureDirs.push(stateDir);
+  const root = path.join(fixtureRoot, "PlannedProject");
+  const alias = path.join(fixtureRoot, "plannedproject");
 
-  // Case-sensitive APFS volumes are valid macOS configurations. Only assert
-  // the alias contract when this particular native fixture proves insensitive.
-  try {
-    fs.realpathSync(alias);
-  } catch {
-    return;
+  // Determine the semantics independently, then restore the parent to the
+  // empty state the registry probe must support.
+  fs.mkdirSync(root);
+  const caseInsensitive = fs.existsSync(alias);
+  fs.rmSync(root, { recursive: true, force: true });
+  assert.deepEqual(fs.readdirSync(fixtureRoot), [], "fixture parent must be empty before registration");
+
+  const registry = new ProjectRegistry(stateDir);
+  const first = registry.registerProvisional("upper", root);
+  const second = registry.registerProvisional("lower", alias);
+  assert.deepEqual(fs.readdirSync(fixtureRoot), [], "owned case probes must be removed after lookup");
+
+  if (caseInsensitive) {
+    assert.equal(second.id, first.id, "empty-parent aliases must deduplicate on an insensitive volume");
+    assert.equal(registry.list().length, 1);
+  } else {
+    assert.notEqual(second.id, first.id, "sensitive-volume aliases must remain distinct");
+    assert.equal(registry.list().length, 2);
   }
 
-  const registry = registryWithRoot("native-case", root);
-  assert.equal(registry.getByPath(alias)?.id, "native-case");
-  assert.equal(registry.findByCwd(path.join(alias, "src"))?.id, "native-case");
+  fs.mkdirSync(root);
+  assert.equal(
+    registry.getByPath(alias)?.id,
+    caseInsensitive ? first.id : second.id,
+    "materializing the path must not change its project owner",
+  );
+});
+
+test("ProjectRegistry does not infer insensitive entries from a case-only symlink pair", () => {
+  const parent = "/case-sensitive-with-symlink";
+  const upper = path.posix.join(parent, "Alpha");
+  const lower = path.posix.join(parent, "alpha");
+  const removedProbes: string[] = [];
+  const identity = createProjectPathIdentity({
+    isNativePathApi: dialect => dialect === "posix",
+    // Model `Foo -> foo` alongside two genuine case-distinct project roots.
+    realpathSync: candidate => {
+      const normalized = path.posix.resolve(candidate);
+      if (path.posix.basename(normalized).toLowerCase() === ".bobbitprobea") {
+        throw new Error("case-sensitive probe alias does not exist");
+      }
+      return path.posix.basename(normalized) === "Foo"
+        ? path.posix.join(path.posix.dirname(normalized), "foo")
+        : normalized;
+    },
+    readdirSync: candidate => path.posix.resolve(candidate) === parent
+      ? ["foo", "Foo", "Alpha", "alpha"]
+      : [],
+    createCaseProbe: probeParent => path.posix.join(probeParent, ".BobbitProbeA"),
+    removeCaseProbe: probePath => { removedProbes.push(probePath); },
+  });
+  const registry = registryWithRoot("upper", upper, identity);
+
+  assert.equal(registry.getByPath(lower), undefined);
+  const distinct = registry.registerProvisional("lower", lower);
+  assert.notEqual(distinct.id, "upper");
+  assert.ok(removedProbes.length > 0, "case probes must clean up only their owned directories");
 });
 
 test("ProjectRegistry rejects native POSIX double-slash aliases for Headquarters and existing projects", () => {

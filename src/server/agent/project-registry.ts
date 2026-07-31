@@ -169,10 +169,14 @@ export interface ProjectPathIdentityOptions {
   /** A read-only fallback probe when the ancestor itself is a filesystem root. */
   readdirSync?: (candidate: string) => string[];
   /**
-   * Overrides the read-only case probe. This is deliberately an opt-in seam:
-   * absent proof that a volume is case-insensitive, suffix spelling is kept.
+   * Overrides the case-sensitivity probe. This is deliberately an opt-in
+   * seam for tests and unusual filesystems.
    */
   isCaseInsensitiveAt?: (existingAncestor: string) => boolean;
+  /** Create a uniquely named directory owned by the caller below `parent`. */
+  createCaseProbe?: (parent: string, pathApi: "posix" | "win32") => string;
+  /** Remove the directory returned by `createCaseProbe`. */
+  removeCaseProbe?: (probePath: string) => void;
   /**
    * Determines whether a path dialect belongs to the host filesystem. This
    * lets tests model native Windows case-sensitive and case-insensitive
@@ -191,42 +195,67 @@ function toggledCase(value: string): string | undefined {
 }
 
 /**
- * Establish case behaviour without creating, renaming, or deleting anything.
- * A differently cased spelling of an existing entry proves case-insensitivity
- * only when it resolves to the same canonical target. If no such proof is
- * available (including an empty filesystem root), preserve suffix spelling.
+ * Establish a directory's entry case behaviour with an owned, unique child.
+ * This works for empty directories and cannot be fooled by a case-only
+ * symlink already present in the parent. The probe is removed synchronously
+ * before returning; a read-only or otherwise unprobeable directory retains
+ * its spelling rather than being assumed insensitive.
  */
 function hasCaseInsensitiveEntries(
   existingAncestor: string,
   pathApi: ProjectPathApi,
   realpathSync: (candidate: string) => string,
   readdirSync: (candidate: string) => string[],
+  createCaseProbe?: (parent: string, pathApi: "posix" | "win32") => string,
+  removeCaseProbe?: (probePath: string) => void,
 ): boolean {
   // Case sensitivity is a property of a directory's entries, not of the
   // directory's name in its parent. This distinction matters for NTFS, where
   // an insensitive parent can contain a case-sensitive child directory.
+  let probePath: string | undefined;
+  try {
+    probePath = createCaseProbe?.(existingAncestor, projectPathFlavor(pathApi))
+      ?? fs.mkdtempSync(pathApi.join(existingAncestor, ".bobbit-case-probe-"));
+    const probeName = pathApi.basename(probePath);
+    const variant = toggledCase(probeName);
+    if (!variant) return false;
+    // Existence of the toggled spelling is sufficient: the probe name is
+    // freshly allocated, so no explicit case-only alias can predate it.
+    realpathSync(pathApi.join(pathApi.dirname(probePath), variant));
+    return true;
+  } catch {
+    // Read-only directories and probe failures fall through to the historical
+    // read-only proof below. It is still useful for existing paths, but never
+    // classifies a case-only symlink pair as filesystem-wide semantics.
+  } finally {
+    if (probePath) {
+      try {
+        if (removeCaseProbe) removeCaseProbe(probePath);
+        else fs.rmSync(probePath, { recursive: true, force: true });
+      } catch {
+        // A failed cleanup must not make an identity lookup destructive.
+      }
+    }
+  }
+
   let entries: string[];
   try {
     entries = readdirSync(existingAncestor);
   } catch {
-    // No readable child means no demonstrable case behaviour.
     return false;
   }
 
   return entries.some(name => {
     const variant = toggledCase(name);
     if (!variant) return false;
+    // Two physical entries (including a case-only symlink) prove that this
+    // parent cannot be classified as case-insensitive from either spelling.
+    if (entries.filter(entry => entry.toLowerCase() === name.toLowerCase()).length !== 1) return false;
     try {
-      const candidateRealpath = pathApi.resolve(realpathSync(pathApi.join(existingAncestor, variant)));
-      const expectedRealpath = pathApi.resolve(realpathSync(pathApi.join(existingAncestor, name)));
-      if (candidateRealpath === expectedRealpath) return true;
-
-      // APFS can preserve the caller's spelling in realpath output, so equal
-      // realpath strings alone cannot establish identity. A successful lookup
-      // of both spellings plus exactly one matching directory entry proves the
-      // filesystem resolves them to the same entry. Case-sensitive directories
-      // with distinct `Foo` and `foo` entries have two matching names instead.
-      return entries.filter(entry => entry.toLowerCase() === name.toLowerCase()).length === 1;
+      realpathSync(pathApi.join(existingAncestor, variant));
+      // APFS can preserve the caller's spelling in realpath output, so a
+      // successful alternate lookup plus one matching entry is the proof.
+      return true;
     } catch {
       return false;
     }
@@ -245,6 +274,8 @@ function normalizeExistingPathCase(
   realpathSync: (candidate: string) => string,
   readdirSync: (candidate: string) => string[],
   isCaseInsensitiveAt?: (existingAncestor: string) => boolean,
+  createCaseProbe?: (parent: string, pathApi: "posix" | "win32") => string,
+  removeCaseProbe?: (probePath: string) => void,
 ): string {
   const root = pathApi.parse(canonical).root;
   const normalizedRoot = isCaseInsensitiveAt?.(root) ? root.toLowerCase() : root;
@@ -254,7 +285,7 @@ function normalizeExistingPathCase(
 
   for (const segment of segments) {
     const isCaseInsensitive = isCaseInsensitiveAt?.(parent)
-      ?? hasCaseInsensitiveEntries(parent, pathApi, realpathSync, readdirSync);
+      ?? hasCaseInsensitiveEntries(parent, pathApi, realpathSync, readdirSync, createCaseProbe, removeCaseProbe);
     normalized.push(isCaseInsensitive ? segment.toLowerCase() : segment);
     // Keep the canonical spelling for probes into the next directory. On an
     // APFS volume it may be the caller's spelling, but it still resolves to
@@ -292,7 +323,14 @@ export function canonicalProjectPath(
     try {
       const canonical = pathApi.resolve(realpathSync(existing));
       const isCaseInsensitive = options.isCaseInsensitiveAt?.(canonical)
-        ?? hasCaseInsensitiveEntries(canonical, pathApi, realpathSync, readdirSync);
+        ?? hasCaseInsensitiveEntries(
+          canonical,
+          pathApi,
+          realpathSync,
+          readdirSync,
+          options.createCaseProbe,
+          options.removeCaseProbe,
+        );
       const normalizedSuffix = isCaseInsensitive
         ? suffix.reverse().map(segment => segment.toLowerCase())
         : suffix.reverse();
@@ -302,6 +340,8 @@ export function canonicalProjectPath(
         realpathSync,
         readdirSync,
         options.isCaseInsensitiveAt,
+        options.createCaseProbe,
+        options.removeCaseProbe,
       );
       return normalizeProjectPath(pathApi.join(normalizedCanonical, ...normalizedSuffix), pathApi, {
         foldCase: false,
