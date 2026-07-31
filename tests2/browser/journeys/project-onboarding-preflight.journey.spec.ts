@@ -43,6 +43,10 @@ test.describe("Journey: Project Onboarding — preflight and typeahead", () => {
 		await openApp(page);
 		await page.evaluate(() => { window.location.hash = "#/settings/projects"; });
 		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
+		// The hash changes before the lazy settings module has rendered. Waiting for
+		// its route-owned tab bar prevents the app-shell replacement from detaching
+		// the sidebar Add Project trigger while Playwright is clicking it.
+		await expect(page.locator('[data-testid="settings-tab-bar"]')).toBeVisible();
 		await openAddProjectDialog(page);
 		// Fill the picker input (placeholder "/path/to/project") — this triggers the
 		// preflight fetch for the nested-in-project path.
