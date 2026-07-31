@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { killTreeByPid, spawnTracked } from "../../src/server/agent/spawn-tree.js";
 import { createManualClock } from "../harness/clock.js";
+
+const SPAWN_TREE_SOURCE = readFileSync(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url), "utf8");
 
 type NativeSpawn = typeof import("node:child_process").spawn;
 
@@ -170,6 +173,15 @@ function runProbe(): Promise<{ stdout: string; stderr: string; code: number | nu
 }
 
 describe("spawnTracked timeout cleanup", () => {
+	it("keeps STARTUPINFO flags unsigned so the Windows Job supervisor Add-Type source compiles", () => {
+		const startupInfo = SPAWN_TREE_SOURCE.match(/public struct STARTUPINFO \{(?<body>[^}]+)\}/s)?.groups?.body;
+		expect(startupInfo).toContain("public uint dwFlags;");
+		expect(SPAWN_TREE_SOURCE).toContain("si.dwFlags = STARTF_USESTDHANDLES;");
+		expect(SPAWN_TREE_SOURCE).toContain("InheritableStdHandle(-10, GENERIC_READ, out ownIn)");
+		expect(SPAWN_TREE_SOURCE).toContain("InheritableStdHandle(-11, GENERIC_WRITE, out ownOut)");
+		expect(SPAWN_TREE_SOURCE).toContain("InheritableStdHandle(-12, GENERIC_WRITE, out ownErr)");
+	});
+
 	it("reaps SIGTERM-ignoring descendants through each native process model", async () => {
 		const result = await runProbe();
 		expect(result.code, result.stderr).toBe(0);
