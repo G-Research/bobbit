@@ -1953,7 +1953,7 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 				@click=${() => { if (!active) connectToSession(s.id, true); }}
 			>
 				<span class="shrink-0 inline-flex items-center justify-center ${!active && hasUnseenActivity(s) ? "bobbit-unread-pulse" : ""}">${statusBobbit(s.status, s.isCompacting, s.id, active, s.isAborting, s.role === "team-lead", s.role === "coder", s.accessory, false, !active && hasUnseenActivity(s), true)}</span>
-				<span class="font-bold tracking-wide ${active ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.6667em;">${sessionAcronym(displayTitle)}</span>
+				<span class="font-bold tracking-wide sidebar-collapsed-label ${active ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.6667em;">${sessionAcronym(displayTitle)}</span>
 			</button>
 		`;
 	};
@@ -2000,7 +2000,7 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 					}}
 				><span class="sidebar-chevron-glyph">${expanded ? "▾" : "▸"}</span></span>
 				<span class="shrink-0 inline-flex items-center justify-center ${!active && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">${statusBobbit(session.status, session.isCompacting, session.id, active, session.isAborting, session.role === "team-lead", session.role === "coder", session.accessory, false, !active && hasUnseenActivity(session), true)}</span>
-				<span class="font-bold tracking-wide ${active ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.6667em;">${sessionAcronym(displayTitle)}</span>
+				<span class="font-bold tracking-wide sidebar-collapsed-label ${active ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.6667em;">${sessionAcronym(displayTitle)}</span>
 			</button>
 			${expanded ? children.map(child => html`<div style="${sidebarTreeCollapsedIndentStyle()}">${renderCollapsedSessionChildrenGroup(child)}</div>`) : ""}
 		`;
@@ -2022,7 +2022,7 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 					@click=${(e: Event) => { e.stopPropagation(); toggleTeamLeadExpanded(teamLead.id); renderApp(); }}
 				><span class="sidebar-chevron-glyph">${children.length > 0 ? (tlExpanded ? "▾" : "▸") : ""}</span></span>
 				<span class="shrink-0 inline-flex items-center justify-center ${!tlActive && hasUnseenActivity(teamLead) ? "bobbit-unread-pulse" : ""}">${statusBobbit(teamLead.status, teamLead.isCompacting, teamLead.id, tlActive, teamLead.isAborting, true, false, teamLead.accessory, false, !tlActive && hasUnseenActivity(teamLead), true)}</span>
-				<span class="font-bold tracking-wide ${tlActive ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.6667em;">${sessionAcronym(tlTitle)}</span>
+				<span class="font-bold tracking-wide sidebar-collapsed-label ${tlActive ? "text-foreground" : "text-muted-foreground"}" style="font-family: ui-monospace, monospace; line-height: 1; font-size: 0.6667em;">${sessionAcronym(tlTitle)}</span>
 			</button>
 			${tlExpanded ? children.map(child => html`<div style="${sidebarTreeCollapsedIndentStyle()}">${renderCollapsedRuntimeNode(child)}</div>`) : ""}
 		`;
@@ -2057,7 +2057,7 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 
 	return html`
 		<div class="w-14 shrink-0 h-full flex flex-col items-center sidebar-edge sidebar-root" data-testid="sidebar-collapsed" style="background: var(--sidebar);">
-			<div class="flex-1 overflow-y-auto flex flex-col items-center gap-0.5 py-2 px-0.5">
+			<div class="flex-1 w-full min-w-0 overflow-y-auto overflow-x-hidden flex flex-col items-center gap-0.5 py-2 px-0.5">
 				${sidebarTree.projects.map((projectTree, pi) => {
 					const project = projectTree.project as Project;
 					const staffRows = projectTree.staffRows

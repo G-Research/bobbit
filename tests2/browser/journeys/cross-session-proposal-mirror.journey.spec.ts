@@ -92,6 +92,9 @@ async function driveUnifiedProposal(
 	fields: Record<string, unknown>,
 	source = "seed",
 ): Promise<void> {
+	// A route/session switch can replace remoteAgent after an earlier readiness
+	// check, so wait again immediately before invoking its handler.
+	await ensureUnifiedProposalReady(page);
 	await page.evaluate(
 		({ type, fields, source }) => {
 			const s = (window as any).bobbitState ?? (window as any).__bobbitState;

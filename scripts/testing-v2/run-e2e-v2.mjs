@@ -114,13 +114,18 @@ function classifyDaily() {
 function dockerAvailable() {
 	try {
 		execFileSync("docker", ["ps"], { stdio: "pipe", timeout: 15_000 });
+		// A live daemon is not enough: the sandbox specs run containers from the
+		// local-only `bobbit-agent` image. Report UNAVAILABLE when it is absent so the
+		// log matches what the specs actually do (self-skip via
+		// isDockerSandboxAvailable() in tests/e2e/test-utils/docker.ts).
+		execFileSync("docker", ["image", "inspect", "bobbit-agent"], { stdio: "pipe", timeout: 15_000 });
 		return true;
 	} catch {
 		return false;
 	}
 }
 
-/** Specs known to require a live Docker daemon (their Docker paths skip otherwise). */
+/** Specs known to require a usable Docker sandbox (their Docker paths skip otherwise). */
 const DOCKER_GATED = ["tests/e2e/sandbox-recovery.spec.ts"];
 
 function npmCmd() {

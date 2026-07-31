@@ -112,8 +112,12 @@ test.describe("Journey: Prompt Interaction", () => {
 			await expect(submit).toBeEnabled({ timeout: 15_000 });
 			await submit.click();
 
-			// Once submitted the submit button disappears (widget becomes read-only).
+			// Once submitted the widget becomes an explicitly answered, read-only summary.
 			await expect(widget.locator(".ask-submit")).toHaveCount(0, { timeout: 20_000 });
+			await expect(widget.locator(".ask-widget")).toHaveClass(/ask-answered/);
+			await expect(page.locator(".ask-answered-badge").first()).toHaveText("Answered");
+			await expect(widget.locator('[role="radio"][aria-checked="true"]').first()).toHaveClass(/opacity-70/);
+			await expect(widget.locator('[role="radio"][aria-checked="false"]').first()).toHaveClass(/opacity-30/);
 		} finally {
 			await deleteSession(sessionId);
 		}

@@ -11,7 +11,7 @@
 import { icon } from "@mariozechner/mini-lit";
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html, type TemplateResult } from "lit";
-import { HelpCircle } from "lucide";
+import { Check, HelpCircle } from "lucide";
 import { renderHeader, getToolState, type ToolHeaderState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderContext, ToolRenderResult } from "../types.js";
 // `<ask-user-choices-widget>` is loaded lazily — the 21 kB widget
@@ -137,7 +137,17 @@ export class AskUserChoicesRenderer implements ToolRenderer {
 				<div class="space-y-2">
 					${showHeaderInProgress && !answers && !errored
 						? renderAskHeader("inprogress" as ToolHeaderState, "Multiple-choice question")
-						: renderHeader(state, HelpCircle, "Multiple-choice question")}
+						: answers
+							? renderHeader(
+								state,
+								HelpCircle,
+								"Multiple-choice question",
+								html`<span class="ask-answered-badge inline-flex items-center gap-1 px-1.5 py-0.5 text-xs font-medium rounded border border-green-600/35 bg-green-600/10 text-green-600 dark:text-green-500">
+									${icon(Check, "sm")}
+									Answered
+								</span>`,
+							)
+							: renderHeader(state, HelpCircle, "Multiple-choice question")}
 					<ask-user-choices-widget
 						.questions=${params.questions}
 						.answers=${answers}

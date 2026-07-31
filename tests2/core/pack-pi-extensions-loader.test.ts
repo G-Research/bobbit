@@ -23,12 +23,30 @@ import {
 const memoryFs = createFsFromVolume(new Volume()) as unknown as typeof fs;
 let fixtureSequence = 0;
 
+// Only fixture paths under /memfs are virtualised; everything else must reach the real
+// fs. A blanket mock also intercepts Node's own module resolution (which realpath's the
+// caller's module path when `createRequire(import.meta.url).resolve("esbuild")` runs in
+// pi-extension-discovery.ts) — that path exists on disk but not in the volume, so the
+// blanket mock turned an unrelated resolution into ENOENT whenever esbuild was not
+// already in the require cache, i.e. an order-dependent failure.
+const MEMFS_PATH = /^([a-zA-Z]:)?[\\/]memfs[\\/]/;
+
+function isMemfsTarget(target: unknown): boolean {
+	if (typeof target === "string") return MEMFS_PATH.test(target);
+	if (target instanceof URL) return MEMFS_PATH.test(target.pathname);
+	if (Buffer.isBuffer(target)) return MEMFS_PATH.test(target.toString("utf-8"));
+	return false;
+}
+
 beforeAll(() => {
 	for (const name of [
 		"existsSync", "lstatSync", "mkdirSync", "readFileSync", "realpathSync",
 		"rmSync", "statSync", "symlinkSync", "writeFileSync",
 	] as const) {
-		vi.spyOn(fs, name).mockImplementation(memoryFs[name].bind(memoryFs) as never);
+		const real = (fs[name] as (...args: never[]) => unknown).bind(fs);
+		const virtual = (memoryFs[name] as (...args: never[]) => unknown).bind(memoryFs);
+		vi.spyOn(fs, name).mockImplementation(((...args: never[]) =>
+			(isMemfsTarget(args[0]) ? virtual : real)(...args)) as never);
 	}
 });
 
