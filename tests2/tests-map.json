@@ -48,6 +48,33 @@
       }
     },
     {
+      "path": "tests2/core/anthropic-direct-request-regression.test.ts",
+      "reason": "Credential-free regressions for direct role-name and title Anthropic requests, pinning API-key and Pi OAuth identities, model selection, refresh retry, and sanitized upstream failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/anthropic-model-probe-regression.test.ts",
+      "reason": "Credential-free model-completion and probe regressions preserving Anthropic API-key selection plus distinct, redacted model-not-found, authentication, and rate-limit outcomes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/anthropic-sandbox-handoff-regression.test.ts",
+      "reason": "Credential-free sandbox handoff regressions ensuring only a current minimal Anthropic OAuth entry is exported and expired credentials refresh before export.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/comparative-design-prompts.test.ts",
       "reason": "Prompt-contract coverage proving non-trivial design gates compare independent approaches before implementation, coding agents prefer simple composition of well-tested code without forced DRY, reviewers preserve equal scope, and the canonical/current workflow prompts enforce the same decision standard.",
       "execution": {
