@@ -549,6 +549,7 @@ import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, findSessionSelectableModel } from "./agent/model-registry.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
+import { modelProbeFailure } from "./agent/model-probe-result.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels } from "./agent/image-generation.js";
 import {
@@ -10202,16 +10203,18 @@ async function handleApiRoute(
 				}
 				const latencyMs = Date.now() - started;
 				if (!resp.ok) {
-					const errText = (await resp.text().catch(() => "")).slice(0, 300);
-					json({ ok: false, modelResolved, latencyMs, error: `Gateway ${resp.status}: ${errText || resp.statusText}` });
+					// Provider error bodies can echo credentials. Keep only the HTTP status,
+					// which is enough to distinguish unavailable models, auth, and rate limits.
+					const result = modelProbeFailure(new Error(`Gateway returned HTTP ${resp.status}`), { modelResolved, latencyMs });
+					json(result, result.status || 502);
 					return;
 				}
 				// Best-effort parse; we don't require specific text content—just a successful round-trip.
 				await resp.json().catch(() => ({}));
 				json({ ok: true, modelResolved, latencyMs });
-			} catch (err: any) {
-				const latencyMs = Date.now() - started;
-				json({ ok: false, modelResolved: modelId, latencyMs, error: err?.message || "Request failed" });
+			} catch (err: unknown) {
+				const result = modelProbeFailure(err, { modelResolved: modelId, latencyMs: Date.now() - started });
+				json(result, result.status || 502);
 			}
 		} catch (err: any) {
 			jsonError(500, err, { ok: false, error: err?.message || "Test failed" });

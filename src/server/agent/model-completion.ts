@@ -10,6 +10,8 @@ import { globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import { getAvailableModels, type ApiModel, type CustomProviderConfig } from "./model-registry.js";
 import { GOOGLE_GEMINI_CLI_PROVIDER, codeAssistComplete } from "./google-code-assist.js";
+import { sanitizeModelErrorText } from "./model-error-sanitizer.js";
+import { modelProbeFailure } from "./model-probe-result.js";
 
 interface AuthCredentials {
 	type: string;
@@ -252,7 +254,7 @@ export async function completeModelText(
 	}, options);
 
 	if ((result as any).stopReason === "error") {
-		throw new Error((result as any).errorMessage || "Model returned an error");
+		throw new Error(sanitizeModelErrorText((result as any).errorMessage || "Model returned an error"));
 	}
 	return assistantText(result);
 }
@@ -281,11 +283,11 @@ export async function testProviderApiKey(
 			maxRetries: 0,
 		} as any);
 		if ((result as any).stopReason === "error") {
-			throw new Error((result as any).errorMessage || "Model returned an error");
+			throw new Error(sanitizeModelErrorText((result as any).errorMessage || "Model returned an error"));
 		}
 		return { ok: true, modelResolved: model.id, latencyMs: Date.now() - started };
-	} catch (err: any) {
-		return { ok: false, modelResolved: model.id, latencyMs: Date.now() - started, error: err?.message || "Request failed" };
+	} catch (err: unknown) {
+		return modelProbeFailure(err, { modelResolved: model.id, latencyMs: Date.now() - started });
 	}
 }
 
@@ -316,7 +318,7 @@ export async function testModelPreference(
 			timeoutMs: 15_000,
 		});
 		return { ok: true, modelResolved: model.id, latencyMs: Date.now() - started };
-	} catch (err: any) {
-		return { ok: false, modelResolved: model.id, latencyMs: Date.now() - started, error: err?.message || "Request failed" };
+	} catch (err: unknown) {
+		return modelProbeFailure(err, { modelResolved: model.id, latencyMs: Date.now() - started });
 	}
 }
