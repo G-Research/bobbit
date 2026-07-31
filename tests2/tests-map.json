@@ -21,6 +21,16 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/extension-host-module-memory-isolation.test.ts",
+      "reason": "Exact-registered partition of the ModuleHost resource-limit coverage so its deliberate 16 MB worker OOM cannot share a Vitest parent fork with the remaining concurrent worker-thread fan-out.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "isolated",
+        "reason": "Deliberately OOMs a ModuleHost worker under a 16 MB old-generation limit and must own a dedicated isolated Vitest fork."
+      }
+    },
+    {
       "path": "tests2/core/anthropic-oauth-adapter.test.ts",
       "reason": "Credential-free regression coverage pinning Pi's current Anthropic OAuth URL, scopes, callback validation, token exchange, refresh, and the public Models/AuthInteraction adapter boundary.",
       "execution": {
@@ -8475,8 +8485,7 @@
       "execution": {
         "runner": "vitest",
         "tier": "unit",
-        "project": "isolated",
-        "reason": "Spawns extension-host worker threads with module-scoped loader state."
+        "project": "core"
       }
     },
     {
