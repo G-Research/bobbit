@@ -363,6 +363,15 @@
       }
     },
     {
+      "path": "tests2/core/preview-cookie-concurrency.test.ts",
+      "reason": "Independent-process concurrency regression proving cookie signing-key initialization persists one complete shared key and every contender can verify peer cookies.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/preview-transaction-edge-cases.test.ts",
       "reason": "Deterministic transaction regressions proving pre-mutation failures republish intact verified mounts, blocked non-directory roots detach without traversal, mismatched quarantines retain explicit cleanup ownership, rollback backups remain authoritative, and destination-ancestor swaps receive zero source bytes.",
       "execution": {
