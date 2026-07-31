@@ -1819,6 +1819,24 @@
         "tier": "browser",
         "project": "browser"
       }
+    },
+    {
+      "path": "tests2/core/mcp-manager-marketplace-discovery-config.test.ts",
+      "reason": "Focused config layering, reload, redaction, and ownership discovery coverage split from the marketplace discovery suite to remain inside the tier-1 file wall budget.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/mcp-manager-marketplace-discovery-session.test.ts",
+      "reason": "Focused SessionManager project-scoped MCP manager coverage split from the marketplace discovery suite to remain inside the tier-1 file wall budget.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [
