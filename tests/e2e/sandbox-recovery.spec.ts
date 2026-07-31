@@ -20,10 +20,11 @@ import {
 
 // ---------------------------------------------------------------------------
 // Live Docker inode-remount contract. The v2 E2E runner reports this file as
-// Docker-gated, while this case self-skips only when no usable sandbox is
-// reachable — that means both a live daemon AND a locally-built `bobbit-agent`
-// image, since every assertion below runs a container from it. With a usable
-// sandbox, every container and remount assertion runs.
+// Docker-gated, while this case self-skips when no usable sandbox is reachable
+// (a live daemon AND a locally-built `bobbit-agent` image). It also self-skips
+// when the Docker host resolves an atomically replaced Windows file bind mount
+// by path instead of retaining its original inode: that platform cannot exercise
+// the stale-inode premise that this regression covers.
 // ---------------------------------------------------------------------------
 
 test.describe("atomic models.json bind mount", () => {
@@ -52,8 +53,16 @@ test.describe("atomic models.json bind mount", () => {
 
 			writeFileSync(replacement, '{"generation":1}\n');
 			renameSync(replacement, modelsJson);
-			// Docker still exposes the old bound inode until recreation.
-			expect(readMounted(activeId)).toBe('{"generation":0}');
+			// Native Linux bind mounts retain the old inode until recreation. Docker
+			// Desktop's Windows file-sharing backend may instead resolve the mount by
+			// path and expose the replacement immediately; that behavior is valid, but
+			// cannot exercise this stale-inode regression.
+			const mountedBeforeRecreation = readMounted(activeId);
+			test.skip(
+				mountedBeforeRecreation === '{"generation":1}',
+				"Docker file bind mounts on this platform resolve atomic replacement by path, not inode",
+			);
+			expect(mountedBeforeRecreation).toBe('{"generation":0}');
 
 			const sandbox = new ProjectSandbox({
 				projectId: `${prefix}-project`,
