@@ -16,15 +16,61 @@
  * without going through the network/provider boundary. The HTTP-surface
  * 400/404 cases below still use the REST endpoint to lock the wire shape.
  */
+import type { AuthInteraction, Credential, Models } from "@earendil-works/pi-ai";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { readE2EToken, base } from "./_e2e/e2e-setup.js";
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
 
 let oauthStart: typeof import("../../src/server/auth/oauth.js").oauthStart;
+let oauthCancel: typeof import("../../src/server/auth/oauth.js").oauthCancel;
 let oauthFlowStatus: typeof import("../../src/server/auth/oauth.js").oauthFlowStatus;
+const activeFlowIds = new Set<string>();
+
+/**
+ * Flow-status only needs Pi's in-flight interaction. A test double avoids
+ * claiming Pi's fixed loopback callback port while still exercising the
+ * production lease, provider isolation, and cancellation lifecycle.
+ */
+function pendingAnthropicModels(): Pick<Models, "login"> {
+	return {
+		login: ((provider: string, type: string, interaction: AuthInteraction) => {
+			if (provider !== "anthropic" || type !== "oauth") throw new Error("unexpected OAuth login");
+			interaction.notify({
+				type: "auth_url",
+				url: "https://claude.ai/oauth/authorize?state=test",
+				instructions: "Complete the mocked OAuth flow",
+			});
+			return new Promise<Credential>((_resolve, reject) => {
+				const signal = interaction.signal;
+				if (!signal) {
+					reject(new Error("OAuth interaction did not provide an abort signal"));
+					return;
+				}
+				signal.addEventListener("abort", () => {
+					reject(signal.reason instanceof Error ? signal.reason : new Error("OAuth flow cancelled"));
+				}, { once: true });
+			});
+		}) as Models["login"],
+	};
+}
+
+async function startPendingAnthropicFlow(): ReturnType<typeof oauthStart> {
+	const started = await oauthStart("anthropic", undefined, pendingAnthropicModels());
+	activeFlowIds.add(started.flowId);
+	return started;
+}
 
 test.beforeAll(async () => {
-	({ oauthStart, oauthFlowStatus } = (await loadServerTestRuntime()).oauth);
+	({ oauthStart, oauthCancel, oauthFlowStatus } = (await loadServerTestRuntime()).oauth);
+});
+
+test.afterEach(async () => {
+	for (const flowId of activeFlowIds) oauthCancel(flowId, "anthropic");
+	activeFlowIds.clear();
+	// oauthCancel is intentionally synchronous for the REST endpoint. Let the
+	// aborted Pi login settle and release its single-flow lease before the next
+	// test attempts another Anthropic login.
+	for (let i = 0; i < 20; i += 1) await Promise.resolve();
 });
 
 const headers = () => ({
@@ -52,10 +98,7 @@ test.describe("/api/oauth/flow-status", () => {
 	});
 
 	test("happy path (direct): an in-flight anthropic flow returns { complete: false }", async () => {
-		// `anthropic` flows are local: oauthStart only computes a PKCE pair and
-		// builds an authorize URL. No upstream call is made. We can therefore
-		// observe an in-flight flow deterministically.
-		const started = await oauthStart("anthropic");
+		const started = await startPendingAnthropicFlow();
 		expect(started.flowId).toBeTruthy();
 		expect(started.provider).toBe("anthropic");
 
@@ -75,7 +118,7 @@ test.describe("/api/oauth/flow-status", () => {
 	});
 
 	test("cross-provider isolation (direct): anthropic flow polled as openai-codex → 404", async () => {
-		const started = await oauthStart("anthropic");
+		const started = await startPendingAnthropicFlow();
 		expect(started.flowId).toBeTruthy();
 
 		// Direct call: cross-provider mismatch must read as 'flow not found'.
