@@ -104,6 +104,7 @@
     "mkcert": "^3.2.0",
     "ollama": "^0.6.0",
     "pdfjs-dist": "5.4.394",
+    "proper-lockfile": "^4.1.2",
     "qrcode": "^1.5.4",
     "sortablejs": "^1.15.7",
     "ws": "^8.21.0",
