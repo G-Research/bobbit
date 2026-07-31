@@ -90,7 +90,95 @@ async function loadFixture(page: Page): Promise<void> {
 }
 
 async function frameState(page: Page, hostId: "write-host" | "edit-host"): Promise<any> {
-	return page.evaluate((id) => (window as any).__inlineThemeFrameState(id), hostId);
+	const iframe = page.locator(`#${hostId} iframe`);
+	const handle = await iframe.elementHandle();
+	const frame = await handle?.contentFrame();
+	if (!frame) throw new Error(`isolated iframe missing from #${hostId}`);
+	const [parentState, childState] = await Promise.all([
+		iframe.evaluate((element) => {
+			const frameElement = element as HTMLIFrameElement;
+			const host = frameElement.closest(".fixture-renderer-host");
+			const source = host?.querySelector("code-block") as (HTMLElement & { code?: string }) | null;
+			return {
+				identity: frameElement.dataset.fixtureIdentity || "",
+				sandbox: frameElement.getAttribute("sandbox"),
+				srcdoc: frameElement.srcdoc,
+				source: source?.code ?? null,
+				sourceCollapsed: source?.parentElement?.classList.contains("max-h-0") ?? null,
+				streamingChrome: frameElement.nextElementSibling instanceof HTMLDivElement,
+			};
+		}),
+		frame.evaluate(() => {
+			const root = document.documentElement;
+			const card = document.getElementById("theme-card");
+			const semantic = document.getElementById("semantic-probe");
+			const styles = getComputedStyle(root);
+			return {
+				dark: root.classList.contains("dark"),
+				palette: root.getAttribute("data-palette"),
+				font: styles.fontFamily,
+				tokens: {
+					background: styles.getPropertyValue("--background").trim(),
+					foreground: styles.getPropertyValue("--foreground").trim(),
+					card: styles.getPropertyValue("--card").trim(),
+					positive: styles.getPropertyValue("--positive").trim(),
+					chart: styles.getPropertyValue("--chart-1").trim(),
+				},
+				resolved: card && semantic ? {
+					background: styles.backgroundColor,
+					foreground: styles.color,
+					card: getComputedStyle(card).backgroundColor,
+					cardForeground: getComputedStyle(card).color,
+					positive: getComputedStyle(semantic).color,
+					chart: getComputedStyle(card).borderTopColor,
+				} : null,
+				authored: (window as any).__inlineThemeAuthored ?? null,
+			};
+		}),
+	]);
+	return { ...parentState, ...childState };
+}
+
+async function isolatedAuthority(page: Page, hostId: "write-host" | "edit-host"): Promise<any> {
+	const handle = await page.locator(`#${hostId} iframe`).elementHandle();
+	const frame = await handle?.contentFrame();
+	if (!frame) throw new Error(`isolated iframe missing from #${hostId}`);
+	return frame.evaluate(() => {
+		function readable(read: () => unknown): boolean {
+			try {
+				read();
+				return true;
+			} catch {
+				return false;
+			}
+		}
+		return {
+			origin: location.origin,
+			ownStorage: readable(() => localStorage.getItem("gateway.token")),
+			parentDocument: readable(() => parent.document.documentElement),
+			parentStorage: readable(() => parent.localStorage.getItem("gateway.token")),
+			parentApi: readable(() => (parent as any).__inlineThemeFetchLog()),
+		};
+	});
+}
+
+async function dispatchFrameSwipe(page: Page, hostId: "write-host" | "edit-host"): Promise<unknown[]> {
+	const handle = await page.locator(`#${hostId} iframe`).elementHandle();
+	const frame = await handle?.contentFrame();
+	if (!frame) throw new Error(`isolated iframe missing from #${hostId}`);
+	await page.evaluate(() => (window as any).__clearInlineThemeSwipeMessages());
+	await frame.evaluate(() => {
+		const dispatch = (type: string, property: "touches" | "changedTouches", x: number, y: number) => {
+			const event = new Event(type, { bubbles: true, cancelable: true });
+			Object.defineProperty(event, property, { value: [{ clientX: x, clientY: y }] });
+			document.dispatchEvent(event);
+		};
+		dispatch("touchstart", "touches", 10, 10);
+		dispatch("touchmove", "touches", 80, 12);
+		dispatch("touchend", "changedTouches", 100, 12);
+	});
+	await page.waitForTimeout(50);
+	return page.evaluate(() => (window as any).__inlineThemeSwipeMessages());
 }
 
 async function waitForAuthoredMarker(page: Page, hostId: "write-host" | "edit-host", marker: string): Promise<void> {
@@ -105,7 +193,7 @@ async function documents(page: Page): Promise<Record<string, string>> {
 	return page.evaluate(() => (window as any).__inlineThemeDocuments);
 }
 
-test.describe("inline HTML theme bridge from source renderer modules", () => {
+test.describe("isolated inline HTML theme bridge from source renderer modules", () => {
 	test.beforeEach(async ({ page }) => {
 		await loadFixture(page);
 	});
@@ -132,7 +220,14 @@ test.describe("inline HTML theme bridge from source renderer modules", () => {
 		await waitForAuthoredMarker(page, "write-host", "write-complete");
 
 		const light = await frameState(page, "write-host");
-		expect(light.sandbox).toBe("allow-scripts allow-same-origin");
+		expect(light.sandbox).toBe("allow-scripts");
+		expect(await isolatedAuthority(page, "write-host")).toEqual({
+			origin: "null",
+			ownStorage: false,
+			parentDocument: false,
+			parentStorage: false,
+			parentApi: false,
+		});
 		expect(light.dark).toBe(false);
 		expect(light.palette).toBe("azure");
 		expect(light.font).toContain("Fixture Source Sans");
@@ -168,7 +263,7 @@ test.describe("inline HTML theme bridge from source renderer modules", () => {
 			parse: { dark: false, palette: "azure", tokens: LIGHT_TOKENS },
 		});
 
-		const swipeMessages = await page.evaluate(() => (window as any).__dispatchInlineThemeSwipe("write-host"));
+		const swipeMessages = await dispatchFrameSwipe(page, "write-host");
 		expect(swipeMessages, "inline chat iframe gestures must not emit side-panel swipe messages").toEqual([]);
 
 		await page.locator("#write-host button").first().click();
@@ -176,7 +271,7 @@ test.describe("inline HTML theme bridge from source renderer modules", () => {
 		expect((await frameState(page, "write-host")).source).toBe(fixtureDocuments.write);
 	});
 
-	test("WriteRenderer keeps the canonical bridge through debounced streaming and completion", async ({ page }) => {
+	test("WriteRenderer keeps the isolated bridge through debounced streaming and completion", async ({ page }) => {
 		const fixtureDocuments = await documents(page);
 		await page.evaluate((content) => {
 			(window as any).__setInlineThemeHost(true, "rose");
@@ -185,6 +280,14 @@ test.describe("inline HTML theme bridge from source renderer modules", () => {
 		await waitForAuthoredMarker(page, "write-host", "stream-initial");
 
 		const initial = await frameState(page, "write-host");
+		expect(initial.sandbox).toBe("allow-scripts");
+		expect(await isolatedAuthority(page, "write-host")).toMatchObject({
+			origin: "null",
+			ownStorage: false,
+			parentDocument: false,
+			parentStorage: false,
+			parentApi: false,
+		});
 		expect(initial.authored).toMatchObject({
 			marker: "stream-initial",
 			parse: { dark: true, palette: "rose", tokens: DARK_ROSE_TOKENS },
@@ -205,7 +308,7 @@ test.describe("inline HTML theme bridge from source renderer modules", () => {
 		await waitForAuthoredMarker(page, "write-host", "stream-complete");
 		const complete = await frameState(page, "write-host");
 		expect(complete.streamingChrome).toBe(false);
-		expect(complete.sandbox).toBe("allow-scripts allow-same-origin");
+		expect(complete.sandbox).toBe("allow-scripts");
 		expect(complete.dark).toBe(true);
 		expect(complete.palette).toBe("rose");
 		expect(complete.tokens).toEqual(DARK_ROSE_TOKENS);
@@ -224,7 +327,14 @@ test.describe("inline HTML theme bridge from source renderer modules", () => {
 		await waitForAuthoredMarker(page, "edit-host", "edit-complete");
 
 		const edit = await frameState(page, "edit-host");
-		expect(edit.sandbox).toBe("allow-scripts allow-same-origin");
+		expect(edit.sandbox).toBe("allow-scripts");
+		expect(await isolatedAuthority(page, "edit-host")).toMatchObject({
+			origin: "null",
+			ownStorage: false,
+			parentDocument: false,
+			parentStorage: false,
+			parentApi: false,
+		});
 		expect(edit.tokens).toEqual(LIGHT_TOKENS);
 		expect(edit.resolved).toEqual(LIGHT_RESOLVED);
 		expect(edit.authored).toMatchObject({
@@ -243,6 +353,6 @@ test.describe("inline HTML theme bridge from source renderer modules", () => {
 
 		await page.locator("#edit-host button").first().click();
 		expect((await frameState(page, "edit-host")).sourceCollapsed).toBe(false);
-		expect(await page.evaluate(() => (window as any).__dispatchInlineThemeSwipe("edit-host"))).toEqual([]);
+		expect(await dispatchFrameSwipe(page, "edit-host")).toEqual([]);
 	});
 });
