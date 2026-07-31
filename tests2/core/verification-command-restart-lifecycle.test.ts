@@ -110,7 +110,7 @@ function diagnosticFixture(stateDir: string, signalId: string, contents: { out?:
 	};
 }
 
-function commandStepFixture(args: { name: string; startedAt: number; timeoutSec?: number; outFile?: string; errFile?: string; exitFile?: string; containerId?: string; pid?: number; pidFile?: string; heartbeatFile?: string; nonce?: string }): any {
+function commandStepFixture(args: { name: string; startedAt: number; timeoutSec?: number; outFile?: string; errFile?: string; exitFile?: string; containerId?: string; pid?: number; pidFile?: string; heartbeatFile?: string; nonce?: string; restartRecoveryMode?: "detached" | "container-exec" | "pending-retry" | "unsupported" }): any {
 	return {
 		...COMMAND_STEP_TEMPLATE,
 		...args,
