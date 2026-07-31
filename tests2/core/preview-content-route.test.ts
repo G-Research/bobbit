@@ -492,7 +492,7 @@ describe("handlePreviewRequest — bridge injection", () => {
 		}
 	});
 
-	it("coalesces one exact fallback hash and revokes old capabilities before externally changed bytes are served", async () => {
+	it("denies externally changed bytes and coalesces exact verification after a requested-path mismatch", async () => {
 		const baseFs = createPreviewAsyncFs(previewMemoryFs);
 		const root = mountPath(SID);
 		let rootEnumerations = 0;
@@ -523,12 +523,21 @@ describe("handlePreviewRequest — bridge injection", () => {
 				handlePreviewRequest(fakeReq(), changed as any, `${oldCapability}data.json`, o),
 			]);
 			assert.equal(changed.statusCode, 401);
-			assert.equal(unchanged.statusCode, 401, "the first detected tree mutation revokes the complete old generation");
+			assert.ok([200, 401].includes(unchanged.statusCode), "an overlapping unchanged request may finish or fail closed");
+			if (unchanged.statusCode === 200) assert.equal(bodyText(unchanged), "body{color:red}");
 			assert.doesNotMatch(bodyText(changed), /"b":2/);
-			assert.equal(rootEnumerations - beforeMutationRequest, 3, "concurrent uncertainty must share one metadata scan plus one exact before/after hash");
+			assert.equal(rootEnumerations - beforeMutationRequest, 0, "requested-path metadata must detect the mismatch without a tree walk");
 
+			const beforeFallback = rootEnumerations;
 			const freshHtml = fakeRes();
-			await handlePreviewRequest(fakeReq({ cookie: `${COOKIE_NAME}=${cookie}` }), freshHtml as any, `/preview/${SID}/index.html`, o);
+			const joinedFreshHtml = fakeRes();
+			await Promise.all([
+				handlePreviewRequest(fakeReq({ cookie: `${COOKIE_NAME}=${cookie}` }), freshHtml as any, `/preview/${SID}/index.html`, o),
+				handlePreviewRequest(fakeReq({ cookie: `${COOKIE_NAME}=${cookie}` }), joinedFreshHtml as any, `/preview/${SID}/index.html`, o),
+			]);
+			assert.equal(freshHtml.statusCode, 200);
+			assert.equal(joinedFreshHtml.statusCode, 200);
+			assert.equal(rootEnumerations - beforeFallback, 2, "concurrent uncertainty must share one exact before/after hash");
 			const freshCapability = capabilityBase(bodyText(freshHtml));
 			assert.notEqual(freshCapability, oldCapability);
 			const freshAsset = fakeRes();

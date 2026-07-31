@@ -937,6 +937,7 @@ type PreviewDirectoryPathIdentity = Readonly<{
 }>;
 
 type PreviewDirectoryPublishedIdentity = readonly PreviewDirectoryPathIdentity[];
+type PreviewDirectoryPublishedIdentityIndex = ReadonlyMap<string, PreviewDirectoryPathIdentity>;
 
 type CapturedPreviewDirectoryIdentity = Readonly<{
 	published: PreviewDirectoryPublishedIdentity;
@@ -1183,16 +1184,48 @@ const previewReadWaiters = new Map<string, Set<() => void>>();
 const previewWriterTails = new Map<string, Promise<void>>();
 let ownedPreviewCleanupTail: Promise<void> = Promise.resolve();
 
+type PreviewDirectoryVerifiedGeneration = Readonly<{
+	generation: string;
+	contentHash: string;
+	/** Immutable O(1) identity lookup for the descriptor-bound requested path. */
+	identityByPath?: PreviewDirectoryPublishedIdentityIndex;
+}>;
+
 type PreviewDirectoryGenerationState = {
 	epoch: bigint;
-	verified?: Readonly<{
-		generation: string;
-		contentHash: string;
-		identity?: PreviewDirectoryPublishedIdentity;
-	}>;
-	/** Metadata validation and any exact fallback hash share one owner. */
+	verified?: PreviewDirectoryVerifiedGeneration;
+	/** Root-metadata validation and any exact fallback hash share one owner. */
 	verification?: Promise<string>;
 };
+
+function createVerifiedPreviewDirectoryGeneration(
+	generation: string,
+	contentHash: string,
+	identity?: PreviewDirectoryPublishedIdentity,
+): PreviewDirectoryVerifiedGeneration {
+	if (!identity) return { generation, contentHash };
+	const identityByPath = new Map<string, PreviewDirectoryPathIdentity>();
+	for (const source of identity) {
+		const entry = Object.freeze({ ...source });
+		if (identityByPath.has(entry.relativePath)) {
+			throw new PreviewMountError(500, "Preview generation identity contains duplicate paths");
+		}
+		identityByPath.set(entry.relativePath, entry);
+	}
+	return { generation, contentHash, identityByPath };
+}
+
+function publishedPreviewRootMatches(
+	identityByPath: PreviewDirectoryPublishedIdentityIndex,
+	stats: AsyncTreeStats,
+): boolean {
+	const expected = identityByPath.get("");
+	return expected?.kind === "directory"
+		&& stats.isDirectory()
+		&& !stats.isSymbolicLink()
+		&& hasStableFileIdentity(stats)
+		&& expected.stamp === previewPathIdentityStamp(stats);
+}
 
 const previewDirectoryGenerations = new Map<string, PreviewDirectoryGenerationState>();
 let previewDirectoryGenerationCounter = 0n;
@@ -1240,7 +1273,7 @@ export function publishPreviewDirectoryGeneration(
 	const generation = `g${epoch.toString(36)}`;
 	previewDirectoryGenerations.set(previewInstallKey(directory), {
 		epoch,
-		verified: { generation, contentHash, identity },
+		verified: createVerifiedPreviewDirectoryGeneration(generation, contentHash, identity),
 	});
 	return generation;
 }
@@ -1259,9 +1292,10 @@ function assertGenerationOwnerCurrent(
 }
 
 /**
- * Validate cheap file/directory metadata first and run one coalesced exact hash
- * only on cold start or uncertainty. Any uncertainty rotates the generation,
- * so an old path capability fails before it can serve externally changed bytes.
+ * Validate the published root in O(1), then let the serving descriptor prove
+ * the requested path against the indexed identity. Cold or uncertain state
+ * runs one coalesced exact hash. A requested-path mismatch invalidates this
+ * state at the serving boundary, so changed/new bytes never use an old grant.
  */
 export async function ensurePreviewDirectoryGeneration(directory: string): Promise<string> {
 	const key = previewInstallKey(directory);
@@ -1279,12 +1313,11 @@ export async function ensurePreviewDirectoryGeneration(directory: string): Promi
 	const published = state.verified;
 	const verification = (async () => {
 		try {
-			if (published?.identity) {
+			if (published?.identityByPath) {
 				try {
-					const bound = await bindPreviewDirectoryRoot(directory);
-					const current = await capturePreviewDirectoryIdentity(bound);
+					const currentRoot = await mountAsyncFs.lstat(directory);
 					assertGenerationOwnerCurrent(key, directory, captured, capturedEpoch);
-					if (samePreviewDirectoryIdentity(published.identity, current.published)) {
+					if (publishedPreviewRootMatches(published.identityByPath, currentRoot)) {
 						return published.generation;
 					}
 				} catch (error) {
@@ -1298,12 +1331,13 @@ export async function ensurePreviewDirectoryGeneration(directory: string): Promi
 			assertGenerationOwnerCurrent(key, directory, captured, capturedEpoch);
 			const epoch = nextPreviewDirectoryGeneration();
 			const generation = `g${epoch.toString(36)}`;
-			captured.epoch = epoch;
-			captured.verified = {
+			const verified = createVerifiedPreviewDirectoryGeneration(
 				generation,
-				contentHash: exact.contentHash,
-				identity: exact.identity,
-			};
+				exact.contentHash,
+				exact.identity,
+			);
+			captured.epoch = epoch;
+			captured.verified = verified;
 			return generation;
 		} finally {
 			if (previewDirectoryGenerations.get(key) === captured) captured.verification = undefined;
@@ -1336,9 +1370,9 @@ export function previewDirectoryFileMatches(
 	const verified = state?.verified;
 	if (!isPreviewDirectoryAvailable(directory)
 		|| verified?.generation !== generation
-		|| !verified.identity) return false;
+		|| !verified.identityByPath) return false;
 	const normalized = relativePath.split(path.sep).join("/");
-	const expected = verified.identity.find(entry => entry.relativePath === normalized);
+	const expected = verified.identityByPath.get(normalized);
 	return expected?.kind === "file" && expected.stamp === previewPathIdentityStamp(stats);
 }
 

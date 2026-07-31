@@ -19,7 +19,11 @@ import {
 import {
 	copyPreviewDirectory,
 	createPreviewAsyncFs,
+	ensurePreviewDirectoryGeneration,
 	hashMountDirectory,
+	invalidatePreviewDirectoryGeneration,
+	previewDirectoryFileMatches,
+	publishPreviewDirectoryGeneration,
 	setPreviewFsForTesting,
 	setPreviewRootForTesting,
 	writeInline,
@@ -42,6 +46,10 @@ interface CatalogOperationCounts {
 	sessionOpendir: number;
 }
 
+interface GenerationOperationCounts extends OperationCounts {
+	opendir: number;
+}
+
 function countingFs(base: PreviewAsyncFs, counts: OperationCounts): PreviewAsyncFs {
 	return {
 		...base,
@@ -56,6 +64,16 @@ function countingFs(base: PreviewAsyncFs, counts: OperationCounts): PreviewAsync
 		open: async (filePath, flags, mode) => {
 			counts.open++;
 			return base.open(filePath, flags, mode);
+		},
+	};
+}
+
+function generationCountingFs(base: PreviewAsyncFs, counts: GenerationOperationCounts): PreviewAsyncFs {
+	return {
+		...countingFs(base, counts),
+		opendir: async filePath => {
+			counts.opendir++;
+			return base.opendir(filePath);
 		},
 	};
 }
@@ -151,6 +169,21 @@ function stableHash(memoryFs: typeof fs, root: string, files: readonly string[])
 	return hash.digest("hex");
 }
 
+function publishedStatsStamp(stats: fs.Stats): string {
+	const scalar = (value: number | bigint | undefined): string | number | null =>
+		typeof value === "bigint" ? value.toString() : value ?? null;
+	return JSON.stringify([
+		scalar(stats.dev),
+		scalar(stats.ino),
+		stats.mode ?? null,
+		stats.nlink ?? null,
+		stats.size ?? null,
+		stats.mtimeMs ?? stats.mtime?.getTime() ?? null,
+		stats.ctimeMs ?? null,
+		stats.birthtimeMs ?? null,
+	]);
+}
+
 function writeRecord(
 	memoryFs: typeof fs,
 	sessionId: string,
@@ -227,6 +260,101 @@ afterEach(() => {
 });
 
 describe("preview identity guard operation cost", () => {
+	it("keeps sequential asset waves O(requests) and coalesces mutation re-verification", async () => {
+		const { memoryFs, baseFs, previewRoot } = fixture("generation-waves");
+		const mount = path.join(previewRoot, SID);
+		const files = Array.from({ length: 48 }, (_, index) => `asset-${String(index).padStart(3, "0")}.txt`);
+		memoryFs.mkdirSync(mount, { recursive: true });
+		for (const [index, relativePath] of files.entries()) {
+			memoryFs.writeFileSync(path.join(mount, relativePath), `value-${String(index).padStart(3, "0")}`);
+		}
+
+		const counts: GenerationOperationCounts = { lstat: 0, realpath: 0, open: 0, opendir: 0 };
+		setPreviewFsForTesting(generationCountingFs(baseFs, counts));
+		const generation = await ensurePreviewDirectoryGeneration(mount);
+		assert.equal(counts.open, files.length, "cold verification must hash every file exactly once");
+
+		counts.lstat = 0;
+		counts.realpath = 0;
+		counts.open = 0;
+		counts.opendir = 0;
+		const waveCount = 4;
+		for (let wave = 0; wave < waveCount; wave++) {
+			for (const relativePath of files) {
+				assert.equal(await ensurePreviewDirectoryGeneration(mount), generation);
+				assert.equal(
+					previewDirectoryFileMatches(mount, generation, relativePath, memoryFs.statSync(path.join(mount, relativePath))),
+					true,
+				);
+			}
+		}
+		const requestCount = files.length * waveCount;
+		assert.equal(counts.lstat, requestCount, "each sequential request needs only one root metadata check");
+		assert.equal(counts.realpath, 0);
+		assert.equal(counts.open, 0, "warm asset waves must not rehash bytes");
+		assert.equal(counts.opendir, 0, "warm asset waves must not enumerate the preview tree");
+
+		const changedPath = path.join(mount, files.at(-1)!);
+		const original = memoryFs.statSync(changedPath);
+		memoryFs.writeFileSync(changedPath, "changed-value");
+		memoryFs.utimesSync(changedPath, original.atime, original.mtime);
+		assert.equal(await ensurePreviewDirectoryGeneration(mount), generation);
+		assert.equal(
+			previewDirectoryFileMatches(mount, generation, files.at(-1)!, memoryFs.statSync(changedPath)),
+			false,
+			"changed requested bytes must not match the old generation",
+		);
+
+		invalidatePreviewDirectoryGeneration(mount);
+		counts.lstat = 0;
+		counts.realpath = 0;
+		counts.open = 0;
+		counts.opendir = 0;
+		const refreshed = await Promise.all(Array.from({ length: 12 }, () => ensurePreviewDirectoryGeneration(mount)));
+		assert.equal(new Set(refreshed).size, 1);
+		assert.notEqual(refreshed[0], generation);
+		assert.equal(counts.open, files.length, "concurrent uncertainty must share one exact byte hash");
+		assert.equal(counts.opendir, 2, "one exact hash must enumerate before and after, independent of waiter count");
+		assert.equal(
+			previewDirectoryFileMatches(mount, refreshed[0]!, files.at(-1)!, memoryFs.statSync(changedPath)),
+			true,
+		);
+	});
+
+	it("indexes published requested-path identities instead of scanning the tree", () => {
+		const { memoryFs, previewRoot } = fixture("generation-index");
+		const mount = path.join(previewRoot, SID);
+		const target = "target.txt";
+		memoryFs.mkdirSync(mount, { recursive: true });
+		memoryFs.writeFileSync(path.join(mount, target), "target");
+		const targetStats = memoryFs.statSync(path.join(mount, target));
+		let pathReads = 0;
+		const identity = Array.from({ length: 4_096 }, (_, index) => ({
+			get relativePath() {
+				pathReads++;
+				return `unused-${String(index).padStart(4, "0")}.txt`;
+			},
+			kind: "file" as const,
+			stamp: "unused",
+		}));
+		identity.push({
+			get relativePath() {
+				pathReads++;
+				return target;
+			},
+			kind: "file" as const,
+			stamp: publishedStatsStamp(targetStats),
+		});
+
+		const generation = publishPreviewDirectoryGeneration(mount, "0".repeat(64), identity);
+		assert.equal(pathReads, identity.length, "publishing builds the index once");
+		pathReads = 0;
+		for (let request = 0; request < 256; request++) {
+			assert.equal(previewDirectoryFileMatches(mount, generation, target, targetStats), true);
+		}
+		assert.equal(pathReads, 0, "requested-path verification must not revisit the identity array");
+	});
+
 	it("keeps multi-candidate metadata lookup and deep exact validation linear", async () => {
 		const { memoryFs, baseFs, artifactRoot } = fixture("candidates");
 		const mismatchCount = 24;
