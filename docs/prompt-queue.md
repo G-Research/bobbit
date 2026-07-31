@@ -219,5 +219,6 @@ Late RPC rejection is also guarded: `_dispatchSteer()` only rolls a failed steer
 
 ## Related
 
+- [Composer caret-row invariant](internals.md#composer-caret-row-invariant) — how the composer decides between caret movement and command-history browsing for ArrowUp/ArrowDown, and why the decision requires layout measurement.
 - [session-prompt-tools.md](session-prompt-tools.md) — agent-facing `session_prompt` / `team_prompt` delivery modes that route into `enqueuePrompt()` and `deliverLiveSteer()`.
 - [image-attachment-only-prompts.md](image-attachment-only-prompts.md) — `enqueuePrompt` synthesizes a non-blank text body for attachment-only prompts before they reach the queue, so queued/drained rows never carry a blank `ContentBlock`.
