@@ -310,7 +310,16 @@
     },
     {
       "path": "tests2/browser/e2e/source-vite-inline-html-theme.spec.ts",
-      "reason": "Real Vite development-runtime smoke against an isolated focused-write-agent gateway proving the actual chat WriteRenderer receives parse-time and live same-iframe theme, palette, font, surface, semantic, and chart state from the canonical source bridge without swipe forwarding, compiled dist/ui, or the standalone server-filesystem snapshot path.",
+      "reason": "Real Vite development-runtime smoke against an explicitly flagged Vite-proxy gateway using distinct localhost/127.0.0.1 aliases, proving a signed-cookie reload plus actual chat WriteRenderer parse-time and live same-iframe theme behavior without compiled dist/ui or standalone preview fallback.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/source-vite-headless-cookie.spec.ts",
+      "reason": "Headless Chromium journey against a wildcard-bound TLS gateway with no staticDir and a real source Vite UI on another port of the same public Host, proving natural Secure-cookie bootstrap followed by cookie-only reload, REST, EventSource, preview iframe, and popout transports without the Vite proxy exception.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",

@@ -160,7 +160,10 @@ test.describe("source Vite inline HTML theme runtime", () => {
 			const vitePort = await getFreePort();
 			const gatewayBaseUrl = `http://127.0.0.1:${gatewayPort}`;
 			const gatewayWsUrl = `ws://127.0.0.1:${gatewayPort}`;
-			const viteBaseUrl = `http://127.0.0.1:${vitePort}`;
+			// Browser and proxy target deliberately use different loopback aliases.
+			// The gateway must opt into the narrow Vite-only alias exception rather
+			// than inferring it from --no-ui.
+			const viteBaseUrl = `http://localhost:${vitePort}`;
 
 			gateway = startIsolatedSourceGateway({
 				repoRoot: REPO_ROOT,
@@ -168,6 +171,7 @@ test.describe("source Vite inline HTML theme runtime", () => {
 				workspaceDir,
 				agentPath,
 				port: gatewayPort,
+				viteDevProxy: true,
 			});
 			await waitForSourceGateway(gatewayBaseUrl, gateway);
 			const token = await readToken(join(tempRoot, "secrets"));
@@ -229,8 +233,35 @@ test.describe("source Vite inline HTML theme runtime", () => {
 				localStorage.setItem("theme", "light");
 				localStorage.setItem("palette", "ocean");
 			});
+			const bootstrapHealthPromise = page.waitForResponse(response => {
+				const url = new URL(response.url());
+				return url.origin === viteBaseUrl && url.pathname === "/api/health";
+			});
 			await page.goto(`${viteBaseUrl}/?token=${encodeURIComponent(token)}`, { waitUntil: "domcontentloaded" });
 			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 30_000 });
+			const bootstrapHealth = await bootstrapHealthPromise;
+			expect(await bootstrapHealth.request().headerValue("authorization")).toBe(`Bearer ${token}`);
+			await expect.poll(async () => {
+				const cookie = (await page.context().cookies(viteBaseUrl)).find(entry => entry.name === "bobbit_session");
+				return cookie?.value ?? "";
+			}, { message: "Vite's localhost UI must receive the cookie minted through its 127.0.0.1 gateway alias" }).toMatch(/^v1\.2\./);
+			await expect.poll(
+				() => page.evaluate(() => localStorage.getItem("gateway.token")),
+				{ message: "successful alias bootstrap must persist the cookie sentinel" },
+			).toBe("localhost");
+			await expect.poll(
+				() => new URL(page.url()).search,
+				{ message: "bootstrap token must be removed before testing cookie-only reload" },
+			).toBe("");
+
+			const reloadHealthPromise = page.waitForResponse(response => {
+				const url = new URL(response.url());
+				return url.origin === viteBaseUrl && url.pathname === "/api/health";
+			});
+			await page.reload({ waitUntil: "domcontentloaded" });
+			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 30_000 });
+			const reloadHealth = await reloadHealthPromise;
+			expect(await reloadHealth.request().headerValue("authorization"), "alias reload must use only the proxied browser cookie").toBeNull();
 
 			// Set a known light/palette host state only after boot preferences have
 			// settled, then navigate to the already-completed real Write tool call.
