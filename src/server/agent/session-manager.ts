@@ -2996,15 +2996,30 @@ export class SessionManager {
 			bridgeOptions.cwd = applySandboxCwdOffset("/workspace", opts?.sandboxCwdOffset);
 		}
 
-		// Resolve sandbox tokens from unified config (with legacy fallback)
-		// Get project-scoped config/secrets when available.
+		// Resolve sandbox tokens from unified config (with legacy fallback).
+		// Refresh Anthropic before exporting either its env token or its minimal Pi
+		// credential. This matters after a normal gateway restart: the persisted
+		// access token may be expired even though its refresh token is still valid.
 		const secretsStore = projectContext?.secretsStore ?? null;
-		bridgeOptions.sandboxCredentials = resolveSandboxTokens(this.preferencesStore, projectConfigStore, secretsStore, this.commandRunner);
 		const sandboxTokenEntries = projectConfigStore?.getSandboxTokens() ?? [];
 		const sandboxAuthPolicy = resolveSandboxAgentAuthPolicy(sandboxTokenEntries);
+		// Anthropic retains legacy default forwarding when no policy exists; with
+		// a policy, its dedicated token key is the explicit opt-in.
+		const includeAnthropicAuth = sandboxTokenEntries.length === 0
+			|| sandboxTokenPolicyAllowsAnthropicAuth(sandboxTokenEntries);
+		const anthropicOAuthCurrent = !includeAnthropicAuth
+			|| await refreshSandboxAnthropicOAuthCredential();
+		bridgeOptions.sandboxCredentials = resolveSandboxTokens(
+			this.preferencesStore,
+			projectConfigStore,
+			secretsStore,
+			this.commandRunner,
+			{ allowStoredAnthropicOAuth: anthropicOAuthCurrent },
+		);
 		ensureSandboxAgentAuthFile({
 			prefs: this.preferencesStore,
 			includeCodexAuth: sandboxAuthPolicy.includeCodexAuth,
+			includeAnthropicAuth: includeAnthropicAuth && anthropicOAuthCurrent,
 			includeGoogleAuth: sandboxAuthPolicy.includeGoogleAuth,
 			scope: opts?.projectId,
 		});
@@ -12746,7 +12761,7 @@ export class SessionManager {
 
 // ── Sandbox credential auto-resolution ─────────────────────────────
 
-import { ensureSandboxAgentAuthFile, fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv, resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./host-tokens.js";
+import { ensureSandboxAgentAuthFile, fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv, refreshSandboxAnthropicOAuthCredential, resolveHostTokenValue, resolveSandboxAgentAuthPolicy, sandboxTokenPolicyAllowsAnthropicAuth, type HostTokenResolutionOptions } from "./host-tokens.js";
 
 /**
  * Map of auth.json provider keys → env vars that pi-coding-agent checks.
@@ -12789,7 +12804,13 @@ const PROVIDER_ENV_MAP: Record<string, { envVar: string; extractKey: (cred: any)
  * Falls back to legacy behavior (sandbox_credentials + sandbox_host_token_overrides + sandbox_github_token)
  * when sandbox_tokens is not set.
  */
-export function resolveSandboxTokens(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null, secretsStore?: import("./secrets-store.js").SecretsStore | null, commandRunner: CommandRunner = realCommandRunner): Record<string, string> {
+export function resolveSandboxTokens(
+	prefs?: import("./preferences-store.js").PreferencesStore | null,
+	projectConfig?: import("./project-config-store.js").ProjectConfigStore | null,
+	secretsStore?: import("./secrets-store.js").SecretsStore | null,
+	commandRunner: CommandRunner = realCommandRunner,
+	hostTokenOptions?: HostTokenResolutionOptions,
+): Record<string, string> {
 	const entries = projectConfig?.getSandboxTokens() ?? [];
 
 	// ── New unified path: sandbox_tokens is set ──
@@ -12804,7 +12825,7 @@ export function resolveSandboxTokens(prefs?: import("./preferences-store.js").Pr
 				result[entry.key] = explicitValue;
 			} else {
 				// Empty value = resolve from host.
-				const resolved = resolveHostTokenValue(entry.key, prefs);
+				const resolved = resolveHostTokenValue(entry.key, prefs, commandRunner, hostTokenOptions);
 				if (resolved) {
 					result[entry.key] = resolved;
 				}
@@ -12814,14 +12835,19 @@ export function resolveSandboxTokens(prefs?: import("./preferences-store.js").Pr
 	}
 
 	// ── Legacy fallback: sandbox_tokens not set ──
-	return resolveLegacySandboxCredentials(prefs, projectConfig, commandRunner);
+	return resolveLegacySandboxCredentials(prefs, projectConfig, commandRunner, hostTokenOptions);
 }
 
 /**
  * Legacy credential resolution from sandbox_credentials + sandbox_host_token_overrides + sandbox_github_token.
  * Used as fallback when sandbox_tokens is not configured.
  */
-export function resolveLegacySandboxCredentials(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null, commandRunner: CommandRunner = realCommandRunner): Record<string, string> {
+export function resolveLegacySandboxCredentials(
+	prefs?: import("./preferences-store.js").PreferencesStore | null,
+	projectConfig?: import("./project-config-store.js").ProjectConfigStore | null,
+	commandRunner: CommandRunner = realCommandRunner,
+	hostTokenOptions?: HostTokenResolutionOptions,
+): Record<string, string> {
 	const result: Record<string, string> = {};
 
 	// 1. Read auth.json
@@ -12851,7 +12877,11 @@ export function resolveLegacySandboxCredentials(prefs?: import("./preferences-st
 		}
 
 		if (authData && authData[provider]) {
-			const key = extractKey(authData[provider]);
+			const credential = authData[provider];
+			if (provider === "anthropic" && credential?.type === "oauth" && hostTokenOptions?.allowStoredAnthropicOAuth === false) {
+				continue;
+			}
+			const key = extractKey(credential);
 			if (key) {
 				result[envVar] = key;
 			}
