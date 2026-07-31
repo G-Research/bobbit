@@ -629,6 +629,52 @@ async function handleHashChange(): Promise<void> {
 // INIT
 // ============================================================================
 
+interface BootstrapGatewayConnection {
+	baseUrl: string;
+	token: string;
+	warning?: string;
+}
+
+/**
+ * Recover an empty same-origin connection through a credentialed health probe.
+ * The exact response URL check and redirect rejection prevent an off-mount or
+ * wrong-origin response from authorizing the page-origin fallback. A successful
+ * protected-cookie probe is represented by the non-secret localhost sentinel;
+ * the health mode records whether that sentinel means disabled auth or cookie auth.
+ */
+async function recoverSameOriginGatewayConnection(
+	connection: Readonly<BootstrapGatewayConnection>,
+	fallbackBase: string,
+	fetchHealth: typeof fetch = fetch,
+): Promise<BootstrapGatewayConnection> {
+	if (connection.token || connection.baseUrl !== fallbackBase) return { ...connection };
+
+	try {
+		const healthUrl = gatewayUrl(gatewayRoute("/api/health"), fallbackBase);
+		const response = await fetchHealth(healthUrl, {
+			credentials: "include",
+			redirect: "error",
+		});
+		if (!response.ok || response.redirected || response.url !== healthUrl) return { ...connection };
+
+		const health = await response.json();
+		if (!health || typeof health !== "object" || typeof health.localhost !== "boolean") {
+			return { ...connection };
+		}
+
+		const localhostTrusted = health.localhost === true;
+		const commit = commitGatewayConnection(fallbackBase, LOCALHOST_TOKEN, { localhostTrusted });
+		recordGatewayLocalhostMode(localhostTrusted);
+		return {
+			baseUrl: fallbackBase,
+			token: LOCALHOST_TOKEN,
+			warning: commit.warning,
+		};
+	} catch {
+		return { ...connection };
+	}
+}
+
 async function initApp() {
 	bootMark("initApp-start");
 	// A root-scoped Bobbit worker from an earlier deployment can otherwise own
@@ -668,24 +714,16 @@ async function initApp() {
 	let savedUrl = urlToken ? fallbackBase : initialConnection.baseUrl;
 	let savedToken = urlToken ?? initialConnection.token;
 
-	// Auto-connect in localhost mode. The successful probe is the commit point;
-	// the sentinel is never sent as an HTTP bearer credential.
-	if (!savedToken && savedUrl === fallbackBase) {
-		try {
-			const probe = await fetch(gatewayUrl(gatewayRoute("/api/health"), fallbackBase), { credentials: "include" });
-			if (probe.ok) {
-				const health = await probe.json();
-				if (health.localhost) {
-					savedUrl = fallbackBase;
-					savedToken = LOCALHOST_TOKEN;
-					const commit = commitGatewayConnection(savedUrl, savedToken, { localhostTrusted: true });
-					if (commit.warning) showHeaderToast(commit.warning);
-				}
-			}
-		} catch {
-			// Server not reachable — fall through to disconnected state.
-		}
-	}
+	// Probe only an empty exact same-origin fallback. Both auth-disabled localhost
+	// and a valid signed-cookie session persist the non-secret client sentinel;
+	// real bearer and explicit remote connections remain authoritative.
+	const recoveredConnection = await recoverSameOriginGatewayConnection(
+		{ baseUrl: savedUrl, token: savedToken },
+		fallbackBase,
+	);
+	savedUrl = recoveredConnection.baseUrl;
+	savedToken = recoveredConnection.token;
+	if (recoveredConnection.warning) showHeaderToast(recoveredConnection.warning);
 
 	// If we have credentials, show "starting" immediately instead of
 	// "disconnected" — the gateway may just be booting up.

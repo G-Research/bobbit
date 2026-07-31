@@ -19,6 +19,7 @@ import {
 	type BrowserCookieEligibilityContext,
 	type BrowserCookieRequestMetadata,
 } from "../../src/server/auth/browser-cookie.ts";
+import { gatewayRoute, type GatewayRoute } from "../../src/shared/base-path.ts";
 
 function fakeRequest(cookie?: string): any {
 	return { headers: cookie ? { cookie } : {} };
@@ -598,6 +599,225 @@ function sourcePatternViolations(
 	return violations;
 }
 
+interface BootstrapConnection {
+	baseUrl: string;
+	token: string;
+	warning?: string;
+}
+
+interface BootstrapRecoveryDependencies {
+	gatewayUrl(route: GatewayRoute, baseUrl: string): string;
+	gatewayRoute(raw: string): GatewayRoute;
+	commitGatewayConnection(
+		baseUrl: string,
+		token: string,
+		options: { localhostTrusted: boolean },
+	): { persisted: boolean; warning?: string };
+	recordGatewayLocalhostMode(localhostTrusted: boolean): void;
+}
+
+type BootstrapRecovery = (
+	connection: Readonly<BootstrapConnection>,
+	fallbackBase: string,
+	fetchHealth: typeof fetch,
+) => Promise<BootstrapConnection>;
+
+/** Execute the production helper body without importing main.ts's eager UI graph. */
+function loadBootstrapRecovery(dependencies: BootstrapRecoveryDependencies): BootstrapRecovery {
+	const source = fs.readFileSync(path.resolve("src/app/main.ts"), "utf8");
+	const start = source.indexOf("async function recoverSameOriginGatewayConnection(");
+	const bodyStart = source.indexOf("{", start);
+	const end = source.indexOf("\n}\n\nasync function initApp()", bodyStart);
+	assert.ok(start >= 0 && bodyStart > start && end > bodyStart, "fallback recovery helper must be discoverable");
+	const body = source.slice(bodyStart + 1, end);
+	const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
+		...args: string[]
+	) => (...args: unknown[]) => Promise<BootstrapConnection>;
+	const execute = new AsyncFunction(
+		"connection",
+		"fallbackBase",
+		"fetchHealth",
+		"gatewayUrl",
+		"gatewayRoute",
+		"commitGatewayConnection",
+		"recordGatewayLocalhostMode",
+		"LOCALHOST_TOKEN",
+		body,
+	);
+	return (connection, fallbackBase, fetchHealth) => execute(
+		connection,
+		fallbackBase,
+		fetchHealth,
+		dependencies.gatewayUrl,
+		dependencies.gatewayRoute,
+		dependencies.commitGatewayConnection,
+		dependencies.recordGatewayLocalhostMode,
+		"localhost",
+	);
+}
+
+function fakeHealthResponse(options: {
+	url: string;
+	status?: number;
+	localhost?: boolean;
+	redirected?: boolean;
+}): Response {
+	const status = options.status ?? 200;
+	return {
+		ok: status >= 200 && status < 300,
+		status,
+		url: options.url,
+		redirected: options.redirected ?? false,
+		json: async () => ({ localhost: options.localhost }),
+	} as Response;
+}
+
+class BootstrapMemoryStorage implements Storage {
+	private readonly values = new Map<string, string>();
+	get length(): number { return this.values.size; }
+	clear(): void { this.values.clear(); }
+	getItem(key: string): string | null { return this.values.get(key) ?? null; }
+	key(index: number): string | null { return [...this.values.keys()][index] ?? null; }
+	removeItem(key: string): void { this.values.delete(key); }
+	setItem(key: string, value: string): void { this.values.set(key, String(value)); }
+}
+
+function restoreGlobal(name: string, descriptor: PropertyDescriptor | undefined): void {
+	if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+	else Reflect.deleteProperty(globalThis, name);
+}
+
+describe("client gateway bootstrap recovery", () => {
+	it("persists only the cookie sentinel after protected root and nested fallback probes", async () => {
+		const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+		const originalLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+		const originalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+		try {
+			for (const testCase of [
+				{ label: "missing root connection", basePath: "", malformed: false },
+				{ label: "malformed nested connection", basePath: "/team/bobbit", malformed: true },
+			] as const) {
+				const origin = "https://host.example";
+				const storage = new BootstrapMemoryStorage();
+				if (testCase.malformed) {
+					storage.setItem("gateway.url", "https://attacker.example/a/../bobbit");
+					storage.setItem("gateway.token", "must-not-survive");
+				}
+				const location = {
+					origin,
+					pathname: `${testCase.basePath}/` || "/",
+					search: "",
+					hash: "",
+					href: `${origin}${testCase.basePath}/`,
+				};
+				const windowValue = {
+					location,
+					localStorage: storage,
+					__BOBBIT_BASE_PATH__: testCase.basePath,
+					addEventListener() {},
+					dispatchEvent() { return true; },
+				};
+				Object.defineProperty(globalThis, "window", { configurable: true, value: windowValue });
+				Object.defineProperty(globalThis, "location", { configurable: true, value: location });
+				Object.defineProperty(globalThis, "localStorage", { configurable: true, value: storage });
+
+				const boundary = await import("../../src/app/gateway-fetch.ts");
+				boundary.__resetGatewayConnectionForTests();
+				const fallbackBase = `${origin}${testCase.basePath}`;
+				const initial = boundary.activeGatewayConnection();
+				assert.deepEqual(initial, { baseUrl: fallbackBase, token: "" }, testCase.label);
+				const requests: Array<{ url: string; init?: RequestInit }> = [];
+				const recover = loadBootstrapRecovery({
+					gatewayUrl: boundary.gatewayUrl,
+					gatewayRoute,
+					commitGatewayConnection: boundary.commitGatewayConnection,
+					recordGatewayLocalhostMode: boundary.recordGatewayLocalhostMode,
+				});
+				const recovered = await recover(initial, fallbackBase, async (input, init) => {
+					requests.push({ url: String(input), init });
+					return fakeHealthResponse({ url: `${fallbackBase}/api/health`, localhost: false });
+				});
+
+				assert.deepEqual(recovered, { baseUrl: fallbackBase, token: "localhost", warning: undefined });
+				assert.equal(requests.length, 1);
+				assert.equal(requests[0]?.url, `${fallbackBase}/api/health`);
+				assert.equal(requests[0]?.init?.credentials, "include");
+				assert.equal(requests[0]?.init?.redirect, "error");
+				assert.equal(storage.getItem("gateway.url"), fallbackBase);
+				assert.equal(storage.getItem("gateway.token"), "localhost");
+				assert.equal(storage.getItem("gateway.auth-mode"), "cookie");
+				assert.doesNotMatch(storage.getItem("gateway.connection-revision") ?? "", /must-not-survive/);
+			}
+		} finally {
+			restoreGlobal("window", originalWindow);
+			restoreGlobal("location", originalLocation);
+			restoreGlobal("localStorage", originalStorage);
+		}
+	});
+
+	it("preserves disabled-auth localhost and real bearer semantics", async () => {
+		const commits: Array<{ baseUrl: string; token: string; localhostTrusted: boolean }> = [];
+		const modes: boolean[] = [];
+		const recover = loadBootstrapRecovery({
+			gatewayUrl: (route, baseUrl) => `${baseUrl}${route}`,
+			gatewayRoute,
+			commitGatewayConnection: (baseUrl, token, options) => {
+				commits.push({ baseUrl, token, localhostTrusted: options.localhostTrusted });
+				return { persisted: true };
+			},
+			recordGatewayLocalhostMode: (mode) => { modes.push(mode); },
+		});
+		const fallbackBase = "http://localhost:3001/bobbit";
+		const disabled = await recover({ baseUrl: fallbackBase, token: "" }, fallbackBase, async () => (
+			fakeHealthResponse({ url: `${fallbackBase}/api/health`, localhost: true })
+		));
+		assert.deepEqual(disabled, { baseUrl: fallbackBase, token: "localhost", warning: undefined });
+		assert.deepEqual(commits, [{ baseUrl: fallbackBase, token: "localhost", localhostTrusted: true }]);
+		assert.deepEqual(modes, [true]);
+
+		let bearerProbeCount = 0;
+		const bearer = { baseUrl: fallbackBase, token: "real-bearer" };
+		assert.deepEqual(await recover(bearer, fallbackBase, async () => {
+			bearerProbeCount += 1;
+			throw new Error("real bearer must not use fallback discovery");
+		}), bearer);
+		assert.equal(bearerProbeCount, 0);
+		assert.equal(commits.length, 1);
+	});
+
+	it("fails closed for remote candidates, 401s, redirects, wrong origins, and off-mount responses", async () => {
+		const commits: string[] = [];
+		const recover = loadBootstrapRecovery({
+			gatewayUrl: (route, baseUrl) => `${baseUrl}${route}`,
+			gatewayRoute,
+			commitGatewayConnection: (baseUrl, token) => {
+				commits.push(`${baseUrl}:${token}`);
+				return { persisted: true };
+			},
+			recordGatewayLocalhostMode: () => { throw new Error("rejected probes must not record auth mode"); },
+		});
+		const fallbackBase = "https://host.example/team/bobbit";
+		let remoteProbeCount = 0;
+		const remote = { baseUrl: "https://remote.example/team/bobbit", token: "" };
+		assert.deepEqual(await recover(remote, fallbackBase, async () => {
+			remoteProbeCount += 1;
+			throw new Error("remote candidate must remain authoritative");
+		}), remote);
+		assert.equal(remoteProbeCount, 0);
+
+		for (const response of [
+			fakeHealthResponse({ url: `${fallbackBase}/api/health`, status: 401, localhost: false }),
+			fakeHealthResponse({ url: `${fallbackBase}/api/health`, localhost: false, redirected: true }),
+			fakeHealthResponse({ url: "https://attacker.example/api/health", localhost: false }),
+			fakeHealthResponse({ url: "https://host.example/api/health", localhost: false }),
+		]) {
+			const empty = { baseUrl: fallbackBase, token: "" };
+			assert.deepEqual(await recover(empty, fallbackBase, async () => response), empty);
+		}
+		assert.deepEqual(commits, []);
+	});
+});
+
 describe("client gateway sink regression guard", () => {
 	const files = [...sourceFiles(path.resolve("src/app")), ...sourceFiles(path.resolve("src/ui"))];
 
@@ -610,12 +830,12 @@ describe("client gateway sink regression guard", () => {
 		const cleanup = init.indexOf("await prepareRuntimeServiceWorkerMount()");
 		const safeDecision = init.indexOf("serviceWorkerPreparation.safeToProceed");
 		const hydrate = init.indexOf("activeGatewayConnection()");
-		const firstFetch = init.indexOf("await fetch(");
+		const firstProbe = init.indexOf("await recoverSameOriginGatewayConnection(");
 		const authenticated = init.indexOf("await waitForGateway(");
 		const retry = init.indexOf("await prepareRuntimeServiceWorkerMount()", cleanup + 1);
 		assert.ok(cleanup >= 0, "initApp must await stale mount retirement");
 		assert.ok(cleanup < safeDecision && safeDecision < hydrate, "wrong-controller safety must resolve before credential hydration");
-		assert.ok(cleanup < firstFetch, "service-worker cleanup must precede the first gateway request");
+		assert.ok(cleanup < firstProbe, "service-worker cleanup must precede the first gateway request");
 		assert.ok(retry > authenticated, "protected startup must retry worker registration after authenticated cookie bootstrap");
 		assert.equal((source.match(/serviceWorker\.register/g) ?? []).length, 0, "main must keep registration inside the mount boundary");
 	});
