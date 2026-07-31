@@ -715,7 +715,25 @@
     },
     {
       "path": "tests2/integration/skill-surface-consistency.test.ts",
-      "reason": "Regression test (spec requirement 2) for the 'Fix skill autocomplete gap' goal (9e081770): a REAL two-endpoint gateway test proving the Skills page (/api/slash-skills/details) and composer autocomplete (/api/slash-skills) resolve the IDENTICAL skill-name set for a given project. Registers project P (rootPath owns .claude/skills/only-in-p) and asserts both endpoints for P are set-equal AND include only-in-p; a second project Q proves scope isolation (Q's autocomplete must NOT surface P's skill). Replaces the tautological core test that called discoverSlashSkills twice with identical args and thus could not catch endpoint/parameter/projectId/config-store/market-context divergence.",
+      "reason": "Focused real-gateway endpoint-parity fixture for a project-root skill: both /api/slash-skills and /api/slash-skills/details must return set-equal names and include only-in-p. Split from the former three-scope file so fixed-three-worker execution retains ample per-file wall-budget headroom.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/skill-surface-custom-directory.test.ts",
+      "reason": "Focused real-gateway endpoint-parity fixture for a project-scoped config_directories skill outside the project root: both slash-skill surfaces must include only-in-custom-dir and return set-equal names.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/skill-surface-scope-isolation.test.ts",
+      "reason": "Focused real-gateway endpoint-parity fixture for project isolation: a registered project's only-in-p skill must stay absent from another project's composer/details responses, whose name sets remain equal.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

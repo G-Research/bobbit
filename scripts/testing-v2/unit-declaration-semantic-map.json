@@ -1884,5 +1884,27 @@
       }
     ],
     "rationale": "The renamed test retains the sole `.` repository entry's flat-render compatibility invariant, while named-component multi-repository rendering behavior is covered separately."
+  },
+  {
+    "baseFile": "tests2/integration/skill-surface-consistency.test.ts",
+    "baseName": "a project-scope custom skill directory is honored by BOTH surfaces (Facet 1b)",
+    "current": [
+      {
+        "file": "tests2/integration/skill-surface-custom-directory.test.ts",
+        "name": "both endpoints honor the project-scope custom directory and stay set-equal"
+      }
+    ],
+    "rationale": "The custom-directory real-gateway assertion moved into its own independently registered project fixture without changing either endpoint, the required custom skill inclusion checks, or the set-equality assertion."
+  },
+  {
+    "baseFile": "tests2/integration/skill-surface-consistency.test.ts",
+    "baseName": "a different project Q does not surface P's project-only skill (scope isolation)",
+    "current": [
+      {
+        "file": "tests2/integration/skill-surface-scope-isolation.test.ts",
+        "name": "both endpoints exclude a different project's skill and stay set-equal"
+      }
+    ],
+    "rationale": "The two-project real-gateway isolation assertion moved into its own independently registered fixture and retains both endpoint exclusions plus their set-equality check."
   }
 ]
