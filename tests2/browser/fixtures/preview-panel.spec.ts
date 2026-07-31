@@ -2,7 +2,10 @@ import { test, expect, type Page } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
 import { buildBundle } from "../fixtures/build-bundle.js";
-import { previewNavigationBridge } from "../../../src/shared/preview-bridge-scripts.js";
+import {
+	previewNavigationBridge,
+	previewNavigationHandoffDocument,
+} from "../../../src/shared/preview-bridge-scripts.js";
 
 const SHELL = path.resolve("tests/ui-fixtures/fixture-shell.html");
 const FIXTURE_ORIGIN = "http://fixture.localhost";
@@ -50,14 +53,25 @@ async function loadFixture(page: Page): Promise<void> {
 	await page.context().route(`${FIXTURE_ORIGIN}/**`, async (route) => {
 		const pathname = new URL(route.request().url()).pathname;
 		const svgPreview = pathname.endsWith("/hostile.svg");
-		const navigationPreview = pathname.endsWith("/navigation.html");
-		const navigationTarget = pathname.endsWith("/next.html");
 		const previewScope = `/preview/${SESSION_A}/`;
 		const capability = "a".repeat(43);
-		const navigationBody = `<!doctype html><html><head><base data-bobbit-preview-base href="${previewScope}_content/${capability}/"></head><body><a id="next-page" href="next.html">Next page</a>${previewNavigationBridge()}</body></html>`;
+		const capabilityBase = `${previewScope}_content/${capability}/`;
+		const capabilityNavigation = pathname.startsWith(capabilityBase);
+		const canonicalPreview = [
+			"/navigation.html",
+			"/programmatic-navigation.html",
+			"/meta-navigation.html",
+			"/nested-navigation.html",
+		].some(suffix => pathname.endsWith(suffix) && !capabilityNavigation);
+		const navigationTarget = pathname.endsWith("/next.html") && !capabilityNavigation;
+		const document = (body: string, head = "") => `<!doctype html><html><head><base data-bobbit-preview-base href="${capabilityBase}">${previewNavigationBridge()}${head}</head><body>${body}</body></html>`;
+		const navigationBody = document(`<a id="next-page" href="next.html">Next page</a>`);
+		const programmaticBody = document(`<button id="programmatic-page" onclick="location.assign('next.html')">Programmatic page</button><button id="cross-scope" onclick="parent.postMessage({type:'bobbit-preview-navigate',url:'${FIXTURE_ORIGIN}/preview/other-session/owned.html'},'*')">Cross scope</button>`);
+		const metaBody = document("Waiting for meta navigation", `<meta http-equiv="refresh" content="0;url=next.html">`);
+		const nestedBody = document(`<iframe id="nested-page" src="next.html"></iframe>`);
 		await route.fulfill({
 			contentType: svgPreview ? "image/svg+xml" : "text/html",
-			headers: svgPreview || navigationPreview || navigationTarget ? {
+			headers: svgPreview || canonicalPreview || navigationTarget || capabilityNavigation ? {
 				"Content-Security-Policy": "sandbox allow-scripts",
 				"Referrer-Policy": "no-referrer",
 			} : undefined,
@@ -65,11 +79,19 @@ async function loadFixture(page: Page): Promise<void> {
 				? fs.readFileSync(SHELL, "utf8")
 				: svgPreview
 					? `<svg xmlns="http://www.w3.org/2000/svg"><script>window.__svgScriptRan=true</script><text>Isolated SVG preview</text></svg>`
-					: navigationPreview
-						? navigationBody
-						: navigationTarget
-							? "<!doctype html><html><body><h1>Navigated preview page</h1></body></html>"
-							: "<!doctype html><html><body>Fixture preview</body></html>",
+					: capabilityNavigation
+						? previewNavigationHandoffDocument(capabilityBase)
+						: pathname.endsWith("/navigation.html")
+							? navigationBody
+							: pathname.endsWith("/programmatic-navigation.html")
+								? programmaticBody
+								: pathname.endsWith("/meta-navigation.html")
+									? metaBody
+									: pathname.endsWith("/nested-navigation.html")
+										? nestedBody
+										: navigationTarget
+											? "<!doctype html><html><body><h1>Navigated preview page</h1></body></html>"
+											: "<!doctype html><html><body>Fixture preview</body></html>",
 		});
 	});
 	await page.goto(FIXTURE_SHELL_URL);
@@ -231,6 +253,53 @@ test.describe("Preview panel fixture", () => {
 				catch { return true; }
 			}), "navigated popout document must retain its response-sandboxed opaque origin").toBe(true);
 			await expect.poll(() => popup.evaluate(() => window.opener === null)).toBe(true);
+		} finally {
+			await popup.close();
+		}
+	});
+
+	test("bridges programmatic, meta-refresh, and nested-frame navigation without serving preview bytes from capabilities", async ({ page }) => {
+		const iframe = page.locator(".goal-preview-panel iframe").first();
+		const frame = page.frameLocator(".goal-preview-panel iframe").first();
+
+		await setLivePreview(page, "programmatic-navigation.html", hashOf("c"), "Programmatic navigation");
+		await expect(frame.locator("#programmatic-page")).toBeVisible({ timeout: 5_000 });
+		const programmaticSrc = await iframe.getAttribute("src");
+		await frame.locator("#cross-scope").click();
+		await page.waitForTimeout(100);
+		expect(await iframe.getAttribute("src"), "cross-session authored messages must be denied").toBe(programmaticSrc);
+		const programmaticHandoff = page.waitForResponse(response => new URL(response.url()).pathname.includes("/_content/") && new URL(response.url()).pathname.endsWith("/next.html"));
+		await frame.locator("#programmatic-page").click();
+		expect((await programmaticHandoff).status()).toBe(200);
+		await expect(iframe).toHaveAttribute("src", `${FIXTURE_ORIGIN}/preview/${SESSION_A}/next.html`);
+		await expect(frame.getByRole("heading", { name: "Navigated preview page" })).toBeVisible({ timeout: 5_000 });
+
+		await page.evaluate(() => (window as any).__resetDynamicPanelWorkspaceFixture());
+		const metaDocument = page.waitForResponse(response => new URL(response.url()).pathname.endsWith("/meta-navigation.html"));
+		await setLivePreview(page, "meta-navigation.html", hashOf("d"), "Meta navigation");
+		expect((await metaDocument).status()).toBe(200);
+		await expect(iframe).toHaveAttribute("src", `${FIXTURE_ORIGIN}/preview/${SESSION_A}/next.html`, { timeout: 5_000 });
+		await expect(frame.getByRole("heading", { name: "Navigated preview page" })).toBeVisible({ timeout: 5_000 });
+
+		await page.evaluate(() => (window as any).__resetDynamicPanelWorkspaceFixture());
+		const nestedHandoff = page.waitForResponse(response => new URL(response.url()).pathname.includes("/_content/") && new URL(response.url()).pathname.endsWith("/next.html"));
+		await setLivePreview(page, "nested-navigation.html", hashOf("e"), "Nested navigation");
+		expect((await nestedHandoff).status()).toBe(200);
+		await expect(iframe).toHaveAttribute("src", `${FIXTURE_ORIGIN}/preview/${SESSION_A}/next.html`, { timeout: 5_000 });
+		await expect(frame.getByRole("heading", { name: "Navigated preview page" })).toBeVisible({ timeout: 5_000 });
+
+		await page.evaluate(() => (window as any).__resetDynamicPanelWorkspaceFixture());
+		await setLivePreview(page, "programmatic-navigation.html", hashOf("f"), "Programmatic popout");
+		const popupPromise = page.waitForEvent("popup");
+		await page.locator('a[title="Open preview in new tab"]').first().click();
+		const popup = await popupPromise;
+		try {
+			await expect(popup.locator("#programmatic-page")).toBeVisible({ timeout: 5_000 });
+			const popupHandoff = popup.waitForResponse(response => new URL(response.url()).pathname.includes("/_content/") && new URL(response.url()).pathname.endsWith("/next.html"));
+			await popup.locator("#programmatic-page").click();
+			expect((await popupHandoff).status()).toBe(200);
+			await expect(popup).toHaveURL(`${FIXTURE_ORIGIN}/preview/${SESSION_A}/next.html`);
+			await expect(popup.getByRole("heading", { name: "Navigated preview page" })).toBeVisible({ timeout: 5_000 });
 		} finally {
 			await popup.close();
 		}
