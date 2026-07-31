@@ -129,8 +129,35 @@
       }
     },
     {
-      "path": "tests2/integration/base-path-gateway.test.ts",
-      "reason": "In-process gateway coverage for nested and root HTTP routes, off-mount boundaries, SPA and manifest responses, preview redirects and bases, cookies, and accepted or rejected WebSocket upgrades.",
+      "path": "tests2/integration/base-path-gateway-routes.test.ts",
+      "reason": "Focused in-process gateway coverage for nested mounted HTTP routes, off-mount boundaries, SPA and manifest responses, mount-scoped browser cookies, and accepted or rejected WebSocket upgrades.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/base-path-gateway-origin-auth.test.ts",
+      "reason": "Focused in-process gateway coverage for legacy cookie migration and exact-origin HTTP, CORS preflight, preview, SSE, viewer WebSocket, and session WebSocket authentication boundaries.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/base-path-gateway-preview.test.ts",
+      "reason": "Focused in-process gateway coverage for mount-relative preview REST, restore, bootstrap, and live SSE payloads plus single-prefixed browser redirects and injected preview bases.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/base-path-gateway-root.test.ts",
+      "reason": "Focused in-process gateway coverage for root-mounted API, shell, manifest, cookie, preview, and viewer compatibility plus mixed-case loopback disabled-auth parity across HTTP and WebSocket transports.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
