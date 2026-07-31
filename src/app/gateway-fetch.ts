@@ -65,6 +65,24 @@ export interface GatewayConnectionCommitOptions {
 	localhostTrusted?: boolean;
 }
 
+declare const gatewayConnectionSnapshotBrand: unique symbol;
+
+/** Opaque compare-and-swap token for work deferred across an async boundary. */
+export interface GatewayConnectionSnapshot {
+	readonly connection: Readonly<ActiveGatewayConnection>;
+	readonly [gatewayConnectionSnapshotBrand]: true;
+}
+
+export interface GatewayConnectionSnapshotResult {
+	unchanged: boolean;
+	connection: Readonly<ActiveGatewayConnection>;
+}
+
+export interface GatewayConnectionConditionalCommitResult extends GatewayConnectionCommitResult {
+	committed: boolean;
+	connection: Readonly<ActiveGatewayConnection>;
+}
+
 export interface GatewayNativeTransportSupport {
 	supported: boolean;
 	message?: string;
@@ -143,6 +161,9 @@ let crossTabListenerWindow: (Window & typeof globalThis) | undefined;
 let crossTabReloadRequested = false;
 let crossTabUnloadStarted = false;
 let fallbackGenerationCounter = 0;
+// Monotonic within this tab. Unlike the persisted generation, this also detects
+// A→B→A changes while deferred work is waiting.
+let activeConnectionVersion = 0;
 
 function browserWindow(): (Window & typeof globalThis) | undefined {
 	return typeof window === "undefined" ? undefined : window;
@@ -260,6 +281,10 @@ function readPersistedConnectionRecord(): PersistedGatewayConnectionRead {
 	} catch {
 		return { status: "unavailable" };
 	}
+}
+
+function persistedConnectionIdentity(read: PersistedGatewayConnectionRead): string {
+	return read.status === "valid" ? `valid:${read.record.generation}` : read.status;
 }
 
 function newConnectionGeneration(): string {
@@ -414,6 +439,7 @@ function applyPersistedConnectionRecord(record: PersistedGatewayConnectionRecord
 	activeConnection = { baseUrl: record.baseUrl, token: record.token };
 	activeAuthenticationMode = authenticationMode;
 	activeConnectionGeneration = record.generation;
+	activeConnectionVersion += 1;
 	const targetChanged = previous !== null
 		&& (previous.baseUrl !== record.baseUrl || previous.token !== record.token);
 	if (previous && (targetChanged || previousMode !== authenticationMode)) {
@@ -431,6 +457,7 @@ function applyRemovedPersistedConnection(reloadOnTargetChange: boolean): void {
 	activeConnection = fallback;
 	activeAuthenticationMode = "none";
 	activeConnectionGeneration = null;
+	activeConnectionVersion += 1;
 	if (targetChanged) notifyGatewayConnectionChanged(fallback.baseUrl, "cross-tab");
 	if (targetChanged && reloadOnTargetChange) requestCrossTabReload();
 }
@@ -537,10 +564,46 @@ function hydrateActiveConnection(): ActiveGatewayConnection {
 	return activeConnection;
 }
 
+interface GatewayConnectionSnapshotState extends GatewayConnectionSnapshot {
+	readonly version: number;
+	readonly generation: string | null;
+	readonly persistedIdentity: string;
+}
+
+function persistedSelectionDiffersFromActive(read: PersistedGatewayConnectionRead): boolean {
+	if (read.status === "valid") return read.record.generation !== activeConnectionGeneration;
+	if (read.status === "absent") return activeConnectionGeneration !== null;
+	return read.status === "invalid";
+}
+
+function reconcilePersistedSelectionForSnapshot(
+	read: PersistedGatewayConnectionRead,
+): PersistedGatewayConnectionRead {
+	if (!persistedSelectionDiffersFromActive(read)) return read;
+	reconcilePersistedConnection(false);
+	return readPersistedConnectionRecord();
+}
+
 /** Current centrally reconciled connection for every browser transport. */
 export function activeGatewayConnection(): Readonly<ActiveGatewayConnection> {
 	const connection = hydrateActiveConnection();
 	return Object.freeze({ ...connection });
+}
+
+/**
+ * Capture the selected connection and its atomic persisted generation before
+ * deferred work. This is the only supported CAS token for a later conditional
+ * connection commit.
+ */
+export function captureGatewayConnectionSnapshot(): GatewayConnectionSnapshot {
+	hydrateActiveConnection();
+	const persisted = reconcilePersistedSelectionForSnapshot(readPersistedConnectionRecord());
+	return Object.freeze({
+		connection: Object.freeze({ ...activeConnection! }),
+		version: activeConnectionVersion,
+		generation: activeConnectionGeneration,
+		persistedIdentity: persistedConnectionIdentity(persisted),
+	}) as GatewayConnectionSnapshotState;
 }
 
 export function gatewayBaseUrl(): string {
@@ -596,6 +659,7 @@ export function commitGatewayConnection(
 			: token ? "bearer" : "none";
 	activeConnection = { baseUrl: normalized, token };
 	activeAuthenticationMode = token && token !== LOCALHOST_TOKEN ? "bearer" : persistedMode;
+	activeConnectionVersion += 1;
 
 	ensureCrossTabConnectionListener();
 	const record = persistedConnectionRecord(normalized, persistedToken, persistedMode);
@@ -637,6 +701,55 @@ export function commitGatewayConnection(
 	activeConnectionGeneration = record.generation;
 	notifyGatewayConnectionChanged(normalized, "local");
 	return { persisted: true };
+}
+
+/**
+ * Reconcile a deferred snapshot with both delivered StorageEvents and the latest
+ * atomic storage record. Callers use the returned connection on every outcome,
+ * including a failed or rejected deferred request.
+ */
+export function reconcileGatewayConnectionSnapshot(
+	snapshot: GatewayConnectionSnapshot,
+): GatewayConnectionSnapshotResult {
+	const expected = snapshot as GatewayConnectionSnapshotState;
+	const current = hydrateActiveConnection();
+	if (activeConnectionVersion !== expected.version
+		|| activeConnectionGeneration !== expected.generation
+		|| current.baseUrl !== expected.connection.baseUrl
+		|| current.token !== expected.connection.token) {
+		return { unchanged: false, connection: Object.freeze({ ...current }) };
+	}
+
+	const persisted = readPersistedConnectionRecord();
+	if (persistedConnectionIdentity(persisted) !== expected.persistedIdentity) {
+		reconcilePersistedSelectionForSnapshot(persisted);
+		return { unchanged: false, connection: Object.freeze({ ...hydrateActiveConnection() }) };
+	}
+	return { unchanged: true, connection: Object.freeze({ ...current }) };
+}
+
+/**
+ * Commit only if neither this tab nor persisted cross-tab state changed since
+ * the snapshot. The final synchronous persistence check catches a storage
+ * update even when its StorageEvent has not been delivered yet.
+ */
+export function commitGatewayConnectionIfUnchanged(
+	snapshot: GatewayConnectionSnapshot,
+	baseUrl: string,
+	token: string,
+	options: GatewayConnectionCommitOptions = {},
+): GatewayConnectionConditionalCommitResult {
+	const reconciled = reconcileGatewayConnectionSnapshot(snapshot);
+	if (!reconciled.unchanged) {
+		return { committed: false, persisted: false, connection: reconciled.connection };
+	}
+
+	const commit = commitGatewayConnection(baseUrl, token, options);
+	return {
+		...commit,
+		committed: true,
+		connection: Object.freeze({ ...hydrateActiveConnection() }),
+	};
 }
 
 /** Record the non-secret auth mode reported by an authenticated health check. */
@@ -962,4 +1075,5 @@ export function __resetGatewayConnectionForTests(): void {
 	serviceWorkerReloadRequested = false;
 	crossTabReloadRequested = false;
 	crossTabUnloadStarted = false;
+	activeConnectionVersion = 0;
 }

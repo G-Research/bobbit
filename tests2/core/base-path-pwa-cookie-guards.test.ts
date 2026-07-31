@@ -605,14 +605,24 @@ interface BootstrapConnection {
 	warning?: string;
 }
 
+interface BootstrapConnectionSnapshot {
+	connection: Readonly<BootstrapConnection>;
+}
+
 interface BootstrapRecoveryDependencies {
 	gatewayUrl(route: GatewayRoute, baseUrl: string): string;
 	gatewayRoute(raw: string): GatewayRoute;
-	commitGatewayConnection(
+	captureGatewayConnectionSnapshot(): BootstrapConnectionSnapshot;
+	reconcileGatewayConnectionSnapshot(snapshot: BootstrapConnectionSnapshot): {
+		unchanged: boolean;
+		connection: Readonly<BootstrapConnection>;
+	};
+	commitGatewayConnectionIfUnchanged(
+		snapshot: BootstrapConnectionSnapshot,
 		baseUrl: string,
 		token: string,
 		options: { localhostTrusted: boolean },
-	): { persisted: boolean; warning?: string };
+	): { committed: boolean; persisted: boolean; connection: Readonly<BootstrapConnection>; warning?: string };
 	recordGatewayLocalhostMode(localhostTrusted: boolean): void;
 }
 
@@ -639,7 +649,9 @@ function loadBootstrapRecovery(dependencies: BootstrapRecoveryDependencies): Boo
 		"fetchHealth",
 		"gatewayUrl",
 		"gatewayRoute",
-		"commitGatewayConnection",
+		"captureGatewayConnectionSnapshot",
+		"commitGatewayConnectionIfUnchanged",
+		"reconcileGatewayConnectionSnapshot",
 		"recordGatewayLocalhostMode",
 		"LOCALHOST_TOKEN",
 		body,
@@ -650,7 +662,9 @@ function loadBootstrapRecovery(dependencies: BootstrapRecoveryDependencies): Boo
 		fetchHealth,
 		dependencies.gatewayUrl,
 		dependencies.gatewayRoute,
-		dependencies.commitGatewayConnection,
+		dependencies.captureGatewayConnectionSnapshot,
+		dependencies.commitGatewayConnectionIfUnchanged,
+		dependencies.reconcileGatewayConnectionSnapshot,
 		dependencies.recordGatewayLocalhostMode,
 		"localhost",
 	);
@@ -685,6 +699,77 @@ class BootstrapMemoryStorage implements Storage {
 function restoreGlobal(name: string, descriptor: PropertyDescriptor | undefined): void {
 	if (descriptor) Object.defineProperty(globalThis, name, descriptor);
 	else Reflect.deleteProperty(globalThis, name);
+}
+
+function persistedBootstrapConnection(
+	storage: Storage,
+	connection: { generation: string; baseUrl: string; token: string; authenticationMode: "bearer" | "cookie" | "localhost" },
+): string {
+	const record = JSON.stringify({ version: 1, ...connection });
+	storage.setItem("gateway.url", connection.baseUrl);
+	storage.setItem("gateway.token", connection.token);
+	storage.setItem("gateway.auth-mode", connection.authenticationMode);
+	storage.setItem("gateway.connection-revision", record);
+	return record;
+}
+
+function deferredValue<T>(): { promise: Promise<T>; resolve(value: T): void } {
+	let resolve!: (value: T) => void;
+	return { promise: new Promise<T>((done) => { resolve = done; }), resolve };
+}
+
+function installDeferredBootstrapBrowser(origin = "https://ui.example", basePath = "/bobbit") {
+	const storage = new BootstrapMemoryStorage();
+	const listeners = new Map<string, Array<(event: any) => void>>();
+	const laterRequests: Array<{ url: string; init?: RequestInit }> = [];
+	let reloadCount = 0;
+	const fallbackBase = `${origin}${basePath}`;
+	const location = {
+		origin,
+		pathname: `${basePath}/`,
+		search: "",
+		hash: "",
+		href: `${fallbackBase}/`,
+		reload: () => { reloadCount += 1; },
+	};
+	const windowValue = {
+		location,
+		localStorage: storage,
+		__BOBBIT_BASE_PATH__: basePath,
+		addEventListener(type: string, listener: (event: any) => void) {
+			listeners.set(type, [...(listeners.get(type) ?? []), listener]);
+		},
+		dispatchEvent(event: any) {
+			for (const listener of listeners.get(event.type) ?? []) listener(event);
+			return true;
+		},
+	};
+	Object.defineProperty(globalThis, "window", { configurable: true, value: windowValue });
+	Object.defineProperty(globalThis, "location", { configurable: true, value: location });
+	Object.defineProperty(globalThis, "localStorage", { configurable: true, value: storage });
+	Object.defineProperty(globalThis, "fetch", {
+		configurable: true,
+		value: async (input: RequestInfo | URL, init?: RequestInit) => {
+			laterRequests.push({ url: String(input), init });
+			return new Response("ok");
+		},
+	});
+	return {
+		fallbackBase,
+		laterRequests,
+		reloadCount: () => reloadCount,
+		storage,
+		dispatchStorage(revision: string) {
+			for (const listener of listeners.get("storage") ?? []) {
+				listener({
+					type: "storage",
+					key: "gateway.connection-revision",
+					newValue: revision,
+					storageArea: storage,
+				});
+			}
+		},
+	};
 }
 
 describe("client gateway bootstrap recovery", () => {
@@ -730,7 +815,9 @@ describe("client gateway bootstrap recovery", () => {
 				const recover = loadBootstrapRecovery({
 					gatewayUrl: boundary.gatewayUrl,
 					gatewayRoute,
-					commitGatewayConnection: boundary.commitGatewayConnection,
+					captureGatewayConnectionSnapshot: boundary.captureGatewayConnectionSnapshot,
+					commitGatewayConnectionIfUnchanged: boundary.commitGatewayConnectionIfUnchanged,
+					reconcileGatewayConnectionSnapshot: boundary.reconcileGatewayConnectionSnapshot,
 					recordGatewayLocalhostMode: boundary.recordGatewayLocalhostMode,
 				});
 				const recovered = await recover(initial, fallbackBase, async (input, init) => {
@@ -755,19 +842,138 @@ describe("client gateway bootstrap recovery", () => {
 		}
 	});
 
+	it("lets an emitted cross-tab bearer generation win a deferred successful fallback probe", async () => {
+		const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+		const originalLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+		const originalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+		const originalFetch = Object.getOwnPropertyDescriptor(globalThis, "fetch");
+		try {
+			const browser = installDeferredBootstrapBrowser();
+			const { fallbackBase, laterRequests, storage } = browser;
+			const newer = { baseUrl: "https://gateway.example/team/gw", token: "newer-bearer" };
+			const boundary = await import("../../src/app/gateway-fetch.ts");
+			boundary.__resetGatewayConnectionForTests();
+			const initial = boundary.activeGatewayConnection();
+			const recover = loadBootstrapRecovery({
+				gatewayUrl: boundary.gatewayUrl,
+				gatewayRoute,
+				captureGatewayConnectionSnapshot: boundary.captureGatewayConnectionSnapshot,
+				commitGatewayConnectionIfUnchanged: boundary.commitGatewayConnectionIfUnchanged,
+				reconcileGatewayConnectionSnapshot: boundary.reconcileGatewayConnectionSnapshot,
+				recordGatewayLocalhostMode: boundary.recordGatewayLocalhostMode,
+			});
+			const health = deferredValue<Response>();
+			const probeStarted = deferredValue<void>();
+			const recovery = recover(initial, fallbackBase, async () => {
+				probeStarted.resolve(undefined);
+				return health.promise;
+			});
+			await probeStarted.promise;
+
+			const revision = persistedBootstrapConnection(storage, {
+				generation: "tab-b-bearer",
+				...newer,
+				authenticationMode: "bearer",
+			});
+			browser.dispatchStorage(revision);
+			health.resolve(fakeHealthResponse({ url: `${fallbackBase}/api/health`, localhost: false }));
+
+			assert.deepEqual(await recovery, newer);
+			assert.deepEqual(boundary.activeGatewayConnection(), newer);
+			assert.equal(storage.getItem("gateway.connection-revision"), revision, "late fallback success must not replace tab B's generation");
+			assert.equal(browser.reloadCount(), 1);
+			assert.equal(boundary.gatewayWsUrl(gatewayRoute("/ws/viewer")), "wss://gateway.example/team/gw/ws/viewer");
+			await boundary.gatewayFetch(gatewayRoute("/api/later-read"));
+			await assert.rejects(
+				boundary.gatewayFetch(gatewayRoute("/api/later-mutation"), { method: "POST", body: "{}" }),
+				/Gateway changed in another tab/,
+			);
+			assert.deepEqual(laterRequests.map(request => request.url), ["https://gateway.example/team/gw/api/later-read"]);
+			assert.equal(new Headers(laterRequests[0]?.init?.headers).get("Authorization"), "Bearer newer-bearer");
+		} finally {
+			restoreGlobal("window", originalWindow);
+			restoreGlobal("location", originalLocation);
+			restoreGlobal("localStorage", originalStorage);
+			restoreGlobal("fetch", originalFetch);
+		}
+	});
+
+	it("adopts a newer cookie generation before its delayed StorageEvent and routes every later transport to it", async () => {
+		const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+		const originalLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+		const originalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+		const originalFetch = Object.getOwnPropertyDescriptor(globalThis, "fetch");
+		try {
+			const browser = installDeferredBootstrapBrowser();
+			const { fallbackBase, laterRequests, storage } = browser;
+			const newer = { baseUrl: "https://ui.example:3443/team/gw", token: "localhost" };
+			const boundary = await import("../../src/app/gateway-fetch.ts");
+			boundary.__resetGatewayConnectionForTests();
+			const initial = boundary.activeGatewayConnection();
+			const recover = loadBootstrapRecovery({
+				gatewayUrl: boundary.gatewayUrl,
+				gatewayRoute,
+				captureGatewayConnectionSnapshot: boundary.captureGatewayConnectionSnapshot,
+				commitGatewayConnectionIfUnchanged: boundary.commitGatewayConnectionIfUnchanged,
+				reconcileGatewayConnectionSnapshot: boundary.reconcileGatewayConnectionSnapshot,
+				recordGatewayLocalhostMode: boundary.recordGatewayLocalhostMode,
+			});
+			const health = deferredValue<Response>();
+			const probeStarted = deferredValue<void>();
+			const recovery = recover(initial, fallbackBase, async () => {
+				probeStarted.resolve(undefined);
+				return health.promise;
+			});
+			await probeStarted.promise;
+			const revision = persistedBootstrapConnection(storage, {
+				generation: "tab-b-cookie",
+				...newer,
+				authenticationMode: "cookie",
+			});
+			health.resolve(fakeHealthResponse({ url: `${fallbackBase}/api/health`, localhost: true }));
+
+			assert.deepEqual(await recovery, newer, "the final atomic read must reconcile tab B before its event is delivered");
+			assert.equal(storage.getItem("gateway.connection-revision"), revision);
+			assert.equal(browser.reloadCount(), 0);
+			await boundary.gatewayFetch(gatewayRoute("/api/later-mutation"), { method: "POST", body: "{}" });
+			assert.equal(boundary.gatewayWsUrl(gatewayRoute("/ws/viewer")), "wss://ui.example:3443/team/gw/ws/viewer");
+			assert.deepEqual(laterRequests.map(request => request.url), ["https://ui.example:3443/team/gw/api/later-mutation"]);
+			assert.equal(new Headers(laterRequests[0]?.init?.headers).has("Authorization"), false);
+
+			// Delivery after the synchronous reconciliation is idempotent: it cannot
+			// force a reload or make a later mutation fall back to the stale mount.
+			browser.dispatchStorage(revision);
+			await boundary.gatewayFetch(gatewayRoute("/api/after-event"), { method: "POST", body: "{}" });
+			assert.equal(browser.reloadCount(), 0);
+			assert.deepEqual(laterRequests.map(request => request.url), [
+				"https://ui.example:3443/team/gw/api/later-mutation",
+				"https://ui.example:3443/team/gw/api/after-event",
+			]);
+		} finally {
+			restoreGlobal("window", originalWindow);
+			restoreGlobal("location", originalLocation);
+			restoreGlobal("localStorage", originalStorage);
+			restoreGlobal("fetch", originalFetch);
+		}
+	});
+
 	it("preserves disabled-auth localhost and real bearer semantics", async () => {
 		const commits: Array<{ baseUrl: string; token: string; localhostTrusted: boolean }> = [];
 		const modes: boolean[] = [];
+		const fallbackBase = "http://localhost:3001/bobbit";
+		const fallbackConnection = { baseUrl: fallbackBase, token: "" };
+		const snapshot = { connection: fallbackConnection };
 		const recover = loadBootstrapRecovery({
 			gatewayUrl: (route, baseUrl) => `${baseUrl}${route}`,
 			gatewayRoute,
-			commitGatewayConnection: (baseUrl, token, options) => {
+			captureGatewayConnectionSnapshot: () => snapshot,
+			reconcileGatewayConnectionSnapshot: () => ({ unchanged: true, connection: fallbackConnection }),
+			commitGatewayConnectionIfUnchanged: (_snapshot, baseUrl, token, options) => {
 				commits.push({ baseUrl, token, localhostTrusted: options.localhostTrusted });
-				return { persisted: true };
+				return { committed: true, persisted: true, connection: { baseUrl, token } };
 			},
 			recordGatewayLocalhostMode: (mode) => { modes.push(mode); },
 		});
-		const fallbackBase = "http://localhost:3001/bobbit";
 		const disabled = await recover({ baseUrl: fallbackBase, token: "" }, fallbackBase, async () => (
 			fakeHealthResponse({ url: `${fallbackBase}/api/health`, localhost: true })
 		));
@@ -787,16 +993,20 @@ describe("client gateway bootstrap recovery", () => {
 
 	it("fails closed for remote candidates, 401s, redirects, wrong origins, and off-mount responses", async () => {
 		const commits: string[] = [];
+		const fallbackBase = "https://host.example/team/bobbit";
+		const empty = { baseUrl: fallbackBase, token: "" };
+		const snapshot = { connection: empty };
 		const recover = loadBootstrapRecovery({
 			gatewayUrl: (route, baseUrl) => `${baseUrl}${route}`,
 			gatewayRoute,
-			commitGatewayConnection: (baseUrl, token) => {
+			captureGatewayConnectionSnapshot: () => snapshot,
+			reconcileGatewayConnectionSnapshot: () => ({ unchanged: true, connection: empty }),
+			commitGatewayConnectionIfUnchanged: (_snapshot, baseUrl, token) => {
 				commits.push(`${baseUrl}:${token}`);
-				return { persisted: true };
+				return { committed: true, persisted: true, connection: { baseUrl, token } };
 			},
 			recordGatewayLocalhostMode: () => { throw new Error("rejected probes must not record auth mode"); },
 		});
-		const fallbackBase = "https://host.example/team/bobbit";
 		let remoteProbeCount = 0;
 		const remote = { baseUrl: "https://remote.example/team/bobbit", token: "" };
 		assert.deepEqual(await recover(remote, fallbackBase, async () => {
@@ -811,7 +1021,6 @@ describe("client gateway bootstrap recovery", () => {
 			fakeHealthResponse({ url: "https://attacker.example/api/health", localhost: false }),
 			fakeHealthResponse({ url: "https://host.example/api/health", localhost: false }),
 		]) {
-			const empty = { baseUrl: fallbackBase, token: "" };
 			assert.deepEqual(await recover(empty, fallbackBase, async () => response), empty);
 		}
 		assert.deepEqual(commits, []);

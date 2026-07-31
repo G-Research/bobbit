@@ -64,11 +64,13 @@ import { restoreActiveProjectFromLastSession } from "./skills-active-project.js"
 import { bootMark } from "./boot-timing.js";
 import {
 	activeGatewayConnection,
-	commitGatewayConnection,
+	captureGatewayConnectionSnapshot,
+	commitGatewayConnectionIfUnchanged,
 	gatewayUrl,
 	InvalidGatewayBaseUrlError,
 	LOCALHOST_TOKEN,
 	prepareRuntimeServiceWorkerMount,
+	reconcileGatewayConnectionSnapshot,
 	recordGatewayLocalhostMode,
 	sameOriginGatewayBaseUrl,
 	takeGatewayRecoveryWarning,
@@ -649,29 +651,45 @@ async function recoverSameOriginGatewayConnection(
 ): Promise<BootstrapGatewayConnection> {
 	if (connection.token || connection.baseUrl !== fallbackBase) return { ...connection };
 
+	// Capture both this tab's monotonic selection version and the persisted atomic
+	// generation. If another tab commits while the health request is deferred, its
+	// selection wins even when the corresponding StorageEvent has not arrived yet.
+	const snapshot = captureGatewayConnectionSnapshot();
+	if (snapshot.connection.baseUrl !== connection.baseUrl
+		|| snapshot.connection.token !== connection.token) return { ...snapshot.connection };
+	const connectionAfterProbe = () => {
+		const reconciled = reconcileGatewayConnectionSnapshot(snapshot);
+		return { ...(reconciled.unchanged ? connection : reconciled.connection) };
+	};
+
 	try {
 		const healthUrl = gatewayUrl(gatewayRoute("/api/health"), fallbackBase);
 		const response = await fetchHealth(healthUrl, {
 			credentials: "include",
 			redirect: "error",
 		});
-		if (!response.ok || response.redirected || response.url !== healthUrl) return { ...connection };
+		if (!response.ok || response.redirected || response.url !== healthUrl) return connectionAfterProbe();
 
 		const health = await response.json();
 		if (!health || typeof health !== "object" || typeof health.localhost !== "boolean") {
-			return { ...connection };
+			return connectionAfterProbe();
 		}
 
 		const localhostTrusted = health.localhost === true;
-		const commit = commitGatewayConnection(fallbackBase, LOCALHOST_TOKEN, { localhostTrusted });
+		const commit = commitGatewayConnectionIfUnchanged(
+			snapshot,
+			fallbackBase,
+			LOCALHOST_TOKEN,
+			{ localhostTrusted },
+		);
+		if (!commit.committed) return { ...commit.connection };
 		recordGatewayLocalhostMode(localhostTrusted);
 		return {
-			baseUrl: fallbackBase,
-			token: LOCALHOST_TOKEN,
+			...commit.connection,
 			warning: commit.warning,
 		};
 	} catch {
-		return { ...connection };
+		return connectionAfterProbe();
 	}
 }
 
