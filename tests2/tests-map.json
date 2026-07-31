@@ -75,6 +75,24 @@
       }
     },
     {
+      "path": "tests2/integration/anthropic-oauth-lifecycle.test.ts",
+      "reason": "Real gateway lifecycle coverage with a runtime-only mock Anthropic token provider: typed busy contention, provider-scoped cancel and immediate retry, Pi-backed completion, status/logout isolation, and rejected-credential removal without credential-bearing output.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/anthropic-oauth.journey.spec.ts",
+      "reason": "Chromium journey through real OAuth start, cancel, retry, completion, reload, and logout routes with a runtime-only mock token provider, proving provider isolation and credential-free UI output.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/core/comparative-design-prompts.test.ts",
       "reason": "Prompt-contract coverage proving non-trivial design gates compare independent approaches before implementation, coding agents prefer simple composition of well-tested code without forced DRY, reviewers preserve equal scope, and the canonical/current workflow prompts enforce the same decision standard.",
       "execution": {
