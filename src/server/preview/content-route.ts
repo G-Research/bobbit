@@ -5,18 +5,19 @@
  *
  * - `text/html` responses get a marked, mount-aware `<base>` injected and
  *   the theme/swipe bridge scripts appended.
- * - All other MIME types stream as-is (no body rewrite).
+ * - Script-capable HTML/SVG documents receive an opaque-origin response sandbox.
  * - Path-traversal defence delegates to `path-guard.ts::resolveAssetPath`.
- * - Initial navigation uses the signed browser cookie (or the existing admin
- *   fallback); opaque-frame subresources use a signed, tree-scoped path
- *   capability because SameSite cookies are intentionally unavailable there.
+ * - Initial navigation uses ambient browser auth; opaque-frame subresources use
+ *   a short-lived, exact-generation asset capability because SameSite cookies
+ *   are intentionally unavailable there.
  * - Localhost mode retains its existing auth short-circuit.
  */
 
 import fs from "node:fs";
+import { randomBytes } from "node:crypto";
 import type http from "node:http";
 
-import { acquirePreviewDirectoryRead, isPreviewDirectoryAvailable, mountPath, readMountDirectory } from "./mount.js";
+import { acquirePreviewDirectoryRead, hashMountDirectory, isPreviewDirectoryAvailable, mountPath, readMountDirectory } from "./mount.js";
 import { artifactMountDir } from "./artifacts.js";
 import { resolveAssetPath } from "./path-guard.js";
 import { mimeTypeFor } from "./mime.js";
@@ -28,10 +29,32 @@ import { getPreviewThemeSnapshot } from "./theme-snapshot.js";
 
 const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const VALID_ARTIFACT_ID = /^[A-Za-z0-9_-]{1,64}$/;
-const VALID_CONTENT_CAPABILITY = /^[A-Za-z0-9._-]{1,256}$/;
 const CONTENT_CAPABILITY_SEGMENT = "_content";
+const CONTENT_CAPABILITY_BYTES = 32;
+const VALID_CONTENT_CAPABILITY = /^[A-Za-z0-9_-]{43}$/;
+
+/** Asset capabilities deliberately outlive only an ordinary page load, not a session. */
+export const PREVIEW_ASSET_CAPABILITY_TTL_MS = 5 * 60 * 1_000;
+export const PREVIEW_REFERRER_POLICY = "no-referrer";
 
 type PreviewContentCapability = Readonly<{ token: string; path: string; scope: string }>;
+type PreviewAssetCapability = Readonly<{
+	token: string;
+	scope: string;
+	baseDir: string;
+	generation: string;
+	expiresAt: number;
+}>;
+
+type PreviewAssetCapabilityState = {
+	byToken: Map<string, PreviewAssetCapability>;
+	activeByScope: Map<string, PreviewAssetCapability>;
+};
+
+// The capability is gateway-memory authority, intentionally separate from the
+// 30-day browser CookieStore wire format. A restart revokes every outstanding
+// asset URL. Weak keys also keep short-lived test/gateway stores collectible.
+const previewAssetCapabilities = new WeakMap<CookieStore, PreviewAssetCapabilityState>();
 
 function contentCapabilityScope(basePath: string, internalBaseRoute: string): string {
 	return normalizeBasePath(`${basePath}${internalBaseRoute}`);
@@ -68,10 +91,106 @@ function contentCapabilityCandidate(rel: string, sid: string, basePath: string):
 	return contentCapabilityFromRoute(candidateRel, basePath, internalBaseRoute);
 }
 
+function capabilityNow(opts: ContentRouteOptions): number {
+	const now = opts.assetCapabilityClock?.now() ?? Date.now();
+	if (!Number.isFinite(now) || now < 0) throw new Error("Preview asset capability clock returned an invalid time");
+	return Math.floor(now);
+}
+
+function capabilityState(store: CookieStore): PreviewAssetCapabilityState {
+	let state = previewAssetCapabilities.get(store);
+	if (!state) {
+		state = { byToken: new Map(), activeByScope: new Map() };
+		previewAssetCapabilities.set(store, state);
+	}
+	return state;
+}
+
+function revokePreviewAssetCapability(store: CookieStore, capability: PreviewAssetCapability): void {
+	const state = capabilityState(store);
+	if (state.byToken.get(capability.token) === capability) state.byToken.delete(capability.token);
+	if (state.activeByScope.get(capability.scope) === capability) state.activeByScope.delete(capability.scope);
+}
+
+function sweepExpiredPreviewAssetCapabilities(store: CookieStore, now: number): void {
+	const state = capabilityState(store);
+	for (const capability of state.byToken.values()) {
+		if (now >= capability.expiresAt) revokePreviewAssetCapability(store, capability);
+	}
+}
+
+function lookupPreviewAssetCapability(
+	candidate: PreviewContentCapability,
+	opts: ContentRouteOptions,
+): PreviewAssetCapability | null {
+	const now = capabilityNow(opts);
+	sweepExpiredPreviewAssetCapabilities(opts.cookieStore, now);
+	const capability = capabilityState(opts.cookieStore).byToken.get(candidate.token);
+	if (!capability || capability.scope !== candidate.scope || now >= capability.expiresAt) return null;
+	return capability;
+}
+
+function issuePreviewAssetCapability(
+	scope: string,
+	baseDir: string,
+	generation: string,
+	opts: ContentRouteOptions,
+): PreviewAssetCapability {
+	const now = capabilityNow(opts);
+	sweepExpiredPreviewAssetCapabilities(opts.cookieStore, now);
+	const state = capabilityState(opts.cookieStore);
+	const active = state.activeByScope.get(scope);
+	// Reuse one token for concurrent iframe/popout views of the same immutable
+	// generation. Rotate before it is too close to expiry, and immediately when
+	// the live tree's exact content generation changes.
+	if (
+		active
+		&& active.baseDir === baseDir
+		&& active.generation === generation
+		&& active.expiresAt - now > PREVIEW_ASSET_CAPABILITY_TTL_MS / 4
+	) {
+		return active;
+	}
+	if (active) revokePreviewAssetCapability(opts.cookieStore, active);
+	let token: string;
+	do {
+		token = randomBytes(CONTENT_CAPABILITY_BYTES).toString("base64url");
+	} while (state.byToken.has(token));
+	const capability: PreviewAssetCapability = {
+		token,
+		scope,
+		baseDir,
+		generation,
+		expiresAt: now + PREVIEW_ASSET_CAPABILITY_TTL_MS,
+	};
+	state.byToken.set(capability.token, capability);
+	state.activeByScope.set(scope, capability);
+	return capability;
+}
+
+function requestIsNavigation(req: http.IncomingMessage): boolean {
+	const header = (name: "sec-fetch-mode" | "sec-fetch-dest"): string => {
+		const raw = req.headers[name];
+		return (Array.isArray(raw) ? raw[0] : raw)?.trim().toLowerCase() ?? "";
+	};
+	if (header("sec-fetch-mode") === "navigate") return true;
+	return ["document", "frame", "iframe", "embed", "object"].includes(header("sec-fetch-dest"));
+}
+
+function injectSvgBase(svg: string, baseHref: string): string {
+	const root = /<svg\b[^>]*>/i.exec(svg);
+	if (!root) return svg;
+	const existingBase = /\s+xml:base\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/i;
+	const nextRoot = existingBase.test(root[0])
+		? root[0].replace(existingBase, ` xml:base="${baseHref}"`)
+		: root[0].replace(/^<svg\b/i, match => `${match} xml:base="${baseHref}"`);
+	return `${svg.slice(0, root.index)}${nextRoot}${svg.slice(root.index + root[0].length)}`;
+}
+
 /**
- * Preview HTML is agent-authored and may be served below Bobbit or another
- * application on the same web origin. The response sandbox is therefore the
- * security boundary for both embedded frames and top-level preview popouts.
+ * Preview HTML and SVG are agent-authored and may be served below Bobbit or
+ * another application on the same web origin. The response sandbox is the
+ * security boundary for embedded frames and top-level preview popouts alike.
  */
 export const PREVIEW_HTML_CONTENT_SECURITY_POLICY = "sandbox allow-scripts";
 
@@ -117,10 +236,16 @@ export interface ContentRouteOptions {
 	adminBearerToken?: string;
 	/** Canonical deployment mount. `pathname` itself has already been stripped. */
 	basePath?: string;
+	/** Injectable wall clock for focused capability-expiry tests. */
+	assetCapabilityClock?: Readonly<{ now(): number }>;
 }
 
 function send(res: http.ServerResponse, status: number, body: string, contentType = "application/json") {
-	res.writeHead(status, { "Content-Type": contentType, "Cache-Control": "no-store" });
+	res.writeHead(status, {
+		"Content-Type": contentType,
+		"Cache-Control": "no-store",
+		"Referrer-Policy": PREVIEW_REFERRER_POLICY,
+	});
 	res.end(body);
 }
 
@@ -129,11 +254,12 @@ function isAuthorized(
 	opts: ContentRouteOptions,
 	contentCapability?: PreviewContentCapability | null,
 ): boolean {
-	if (contentCapability) {
-		// Capability values live in the URL path, not a Cookie header. Verify the
-		// signed value against a session/artifact-specific synthetic base scope;
-		// it cannot authenticate APIs or a different preview tree.
-		if (opts.cookieStore.verify(contentCapability.token, { basePath: contentCapability.scope })) return true;
+	if (
+		contentCapability
+		&& !requestIsNavigation(req)
+		&& lookupPreviewAssetCapability(contentCapability, opts)
+	) {
+		return true;
 	}
 	if (opts.isLocalhost) return true;
 	const basePath = normalizeBasePath(opts.basePath);
@@ -214,9 +340,6 @@ export async function handlePreviewRequest(
 	const capability = VALID_SESSION_ID.test(sid)
 		? contentCapabilityCandidate(rel, sid, basePath)
 		: null;
-	const capabilityAuthorized = Boolean(
-		capability && opts.cookieStore.verify(capability.token, { basePath: capability.scope }),
-	);
 
 	// Auth (must come before any route/filesystem disclosure).
 	if (!isAuthorized(req, opts, capability)) {
@@ -260,15 +383,19 @@ export async function handlePreviewRequest(
 	}
 
 	// Opaque sandbox frames do not receive SameSite=Lax cookies on subresource
-	// requests. A signed path capability restores access only to this exact
-	// session/artifact tree; it cannot authenticate Bobbit APIs or siblings.
+	// requests. A short-lived path capability restores only assets from the
+	// exact session/artifact content generation that minted it.
+	let routedCapability: PreviewAssetCapability | null = null;
 	if (rel.startsWith(`${CONTENT_CAPABILITY_SEGMENT}/`)) {
-		const routedCapability = contentCapabilityFromRoute(rel, basePath, internalBaseRoute);
-		if (!routedCapability || !opts.cookieStore.verify(routedCapability.token, { basePath: routedCapability.scope })) {
+		const candidate = contentCapabilityFromRoute(rel, basePath, internalBaseRoute);
+		routedCapability = candidate && candidate.path !== "" && !requestIsNavigation(req)
+			? lookupPreviewAssetCapability(candidate, opts)
+			: null;
+		if (!candidate || !routedCapability || routedCapability.baseDir !== baseDir) {
 			send(res, 401, JSON.stringify({ error: "Unauthorized" }));
 			return true;
 		}
-		rel = routedCapability.path;
+		rel = candidate.path;
 	}
 
 	// Whole-root installs fence the exact destination through post-rename
@@ -280,7 +407,11 @@ export async function handlePreviewRequest(
 
 	// `/preview/<sid>` → 301 redirect to add trailing slash so relative URLs resolve.
 	if (slashIdx < 0) {
-		res.writeHead(301, { Location: withBasePath(gatewayRoute(`/preview/${sid}/`), basePath), "Cache-Control": "no-store" });
+		res.writeHead(301, {
+			Location: withBasePath(gatewayRoute(`/preview/${sid}/`), basePath),
+			"Cache-Control": "no-store",
+			"Referrer-Policy": PREVIEW_REFERRER_POLICY,
+		});
 		res.end();
 		return true;
 	}
@@ -291,6 +422,26 @@ export async function handlePreviewRequest(
 		return true;
 	}
 	try {
+		let capabilityAuthorized = false;
+		if (routedCapability) {
+			let generation: string;
+			try {
+				generation = await hashMountDirectory(baseDir);
+			} catch {
+				revokePreviewAssetCapability(opts.cookieStore, routedCapability);
+				send(res, 401, JSON.stringify({ error: "Unauthorized" }));
+				return true;
+			}
+			const stillActive = capabilityState(opts.cookieStore).byToken.get(routedCapability.token) === routedCapability;
+			const expired = capabilityNow(opts) >= routedCapability.expiresAt;
+			if (!stillActive || expired || generation !== routedCapability.generation) {
+				revokePreviewAssetCapability(opts.cookieStore, routedCapability);
+				send(res, 401, JSON.stringify({ error: "Unauthorized" }));
+				return true;
+			}
+			capabilityAuthorized = true;
+		}
+
 		// `/preview/<sid>/` → pick entry and 302.
 	if (rel === "") {
 		if (!fs.existsSync(baseDir)) {
@@ -306,13 +457,10 @@ export async function handlePreviewRequest(
 			send(res, 404, JSON.stringify({ error: "Preview mount is empty" }));
 			return true;
 		}
-		const redirectBaseRoute = capabilityAuthorized && capability
-			? gatewayRoute(`${internalBaseRoute}${CONTENT_CAPABILITY_SEGMENT}/${capability.token}/`)
-			: internalBaseRoute;
 		res.writeHead(302, {
-			Location: withBasePath(gatewayRoute(`${redirectBaseRoute}${encodeURIComponent(entry)}`), basePath),
+			Location: withBasePath(gatewayRoute(`${internalBaseRoute}${encodeURIComponent(entry)}`), basePath),
 			"Cache-Control": "no-store",
-			...(capabilityAuthorized ? { "Access-Control-Allow-Origin": "null" } : {}),
+			"Referrer-Policy": PREVIEW_REFERRER_POLICY,
 		});
 		res.end();
 		return true;
@@ -337,6 +485,15 @@ export async function handlePreviewRequest(
 
 	const contentType = mimeTypeFor(guard.resolved);
 	const isHtml = contentType.startsWith("text/html");
+	const isSvg = contentType.startsWith("image/svg+xml");
+
+	// A capability is subresource authority only. It must never create a new
+	// opaque document (or recursively mint more authority) even when Fetch
+	// Metadata is missing from a non-browser client.
+	if (capabilityAuthorized && isHtml) {
+		send(res, 403, JSON.stringify({ error: "Preview asset capability cannot authorize HTML" }));
+		return true;
+	}
 
 	if (isHtml) {
 		// Read into memory and inject base + bridge scripts.
@@ -352,16 +509,22 @@ export async function handlePreviewRequest(
 		// standalone-tab opens still resolve `var(--background)` etc. Opaque
 		// embedded frames receive live theme updates over the constrained
 		// postMessage bridge instead of reading parent.document.
-		const requestOrigin = canonicalRequestOrigin({
-			headers: req.headers,
-			isTls: Boolean((req.socket as { encrypted?: boolean } | undefined)?.encrypted),
-		});
-		const capabilityBaseRoute = requestOrigin
-			? gatewayRoute(`${internalBaseRoute}${CONTENT_CAPABILITY_SEGMENT}/${opts.cookieStore.mint({
-				basePath: contentCapabilityScope(basePath, internalBaseRoute),
-				origin: requestOrigin,
-			})}/`)
-			: internalBaseRoute;
+		let generation: string;
+		try {
+			generation = await hashMountDirectory(baseDir);
+		} catch {
+			send(res, 404, JSON.stringify({ error: "Preview mount is not available" }));
+			return true;
+		}
+		const issuedCapability = issuePreviewAssetCapability(
+			contentCapabilityScope(basePath, internalBaseRoute),
+			baseDir,
+			generation,
+			opts,
+		);
+		const capabilityBaseRoute = gatewayRoute(
+			`${internalBaseRoute}${CONTENT_CAPABILITY_SEGMENT}/${issuedCapability.token}/`,
+		);
 		const publicBaseHref = withBasePath(capabilityBaseRoute, basePath);
 		const baseTag = `<base data-bobbit-preview-base href="${publicBaseHref}">` + getPreviewThemeSnapshot();
 		const rewritten = injectBaseAndScripts(
@@ -373,6 +536,7 @@ export async function handlePreviewRequest(
 			"Content-Type": contentType,
 			"Cache-Control": "no-store",
 			"Content-Security-Policy": PREVIEW_HTML_CONTENT_SECURITY_POLICY,
+			"Referrer-Policy": PREVIEW_REFERRER_POLICY,
 			"X-Content-Type-Options": "nosniff",
 			// The scoped path capability is the authority. Reflect only the opaque
 			// sandbox origin so modules/fetch can read their own mounted assets;
@@ -387,11 +551,55 @@ export async function handlePreviewRequest(
 		return true;
 	}
 
-	// Stream other types as-is.
+	if (isSvg) {
+		let body: string;
+		try {
+			body = fs.readFileSync(guard.resolved, "utf-8");
+		} catch {
+			send(res, 404, JSON.stringify({ error: "File not found" }));
+			return true;
+		}
+		// SVG is a script-capable document in a popout. Apply the same opaque
+		// response sandbox as HTML. When ambient auth loaded the document, inject
+		// XML Base so its relative images/styles use generation-bound authority.
+		if (!capabilityAuthorized) {
+			let generation: string;
+			try {
+				generation = await hashMountDirectory(baseDir);
+			} catch {
+				send(res, 404, JSON.stringify({ error: "Preview mount is not available" }));
+				return true;
+			}
+			const issuedCapability = issuePreviewAssetCapability(
+				contentCapabilityScope(basePath, internalBaseRoute),
+				baseDir,
+				generation,
+				opts,
+			);
+			const capabilityBaseRoute = gatewayRoute(
+				`${internalBaseRoute}${CONTENT_CAPABILITY_SEGMENT}/${issuedCapability.token}/`,
+			);
+			body = injectSvgBase(body, withBasePath(capabilityBaseRoute, basePath));
+		}
+		res.writeHead(200, {
+			"Content-Type": contentType,
+			"Cache-Control": "no-store",
+			"Content-Security-Policy": PREVIEW_HTML_CONTENT_SECURITY_POLICY,
+			"Referrer-Policy": PREVIEW_REFERRER_POLICY,
+			"X-Content-Type-Options": "nosniff",
+			...(capabilityAuthorized ? { "Access-Control-Allow-Origin": "null" } : {}),
+		});
+		if (method === "HEAD") res.end();
+		else res.end(body);
+		return true;
+	}
+
+	// Stream inert assets as-is.
 	res.writeHead(200, {
 		"Content-Type": contentType,
 		"Content-Length": String(guard.size),
 		"Cache-Control": "no-store",
+		"Referrer-Policy": PREVIEW_REFERRER_POLICY,
 		"X-Content-Type-Options": "nosniff",
 		...(capabilityAuthorized ? { "Access-Control-Allow-Origin": "null" } : {}),
 	});

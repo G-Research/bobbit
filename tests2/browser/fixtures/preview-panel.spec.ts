@@ -46,11 +46,18 @@ test.beforeAll(() => {
 async function loadFixture(page: Page): Promise<void> {
 	await page.route(`${FIXTURE_ORIGIN}/**`, async (route) => {
 		const pathname = new URL(route.request().url()).pathname;
+		const svgPreview = pathname.endsWith("/hostile.svg");
 		await route.fulfill({
-			contentType: "text/html",
+			contentType: svgPreview ? "image/svg+xml" : "text/html",
+			headers: svgPreview ? {
+				"Content-Security-Policy": "sandbox allow-scripts",
+				"Referrer-Policy": "no-referrer",
+			} : undefined,
 			body: pathname === "/fixture-shell.html"
 				? fs.readFileSync(SHELL, "utf8")
-				: "<!doctype html><html><body>Fixture preview</body></html>",
+				: svgPreview
+					? `<svg xmlns="http://www.w3.org/2000/svg"><script>window.__svgScriptRan=true</script><text>Isolated SVG preview</text></svg>`
+					: "<!doctype html><html><body>Fixture preview</body></html>",
 		});
 	});
 	await page.goto(FIXTURE_SHELL_URL);
@@ -181,6 +188,34 @@ test.describe("Preview panel fixture", () => {
 			timeout: 5_000,
 			message: "fullscreen Refresh should update the iframe cache-buster",
 		}).not.toEqual(refreshedSrc);
+	});
+
+	test("keeps script-capable SVG popouts in an opaque response sandbox", async ({ page }) => {
+		const iframeResponsePromise = page.waitForResponse(response => {
+			const url = new URL(response.url());
+			return url.pathname === `/preview/${SESSION_A}/hostile.svg`
+				&& response.request().resourceType() === "document";
+		});
+		await setLivePreview(page, "hostile.svg", hashOf("f"), "Isolated SVG preview");
+		const iframe = page.locator(".goal-preview-panel iframe").first();
+		await expect(iframe).toBeVisible({ timeout: 5_000 });
+		await expect(iframe).toHaveAttribute("sandbox", "allow-scripts");
+		const iframeResponse = await iframeResponsePromise;
+		expect(await iframeResponse.headerValue("content-security-policy")).toBe("sandbox allow-scripts");
+		expect(await iframeResponse.headerValue("referrer-policy")).toBe("no-referrer");
+
+		const popupPromise = page.waitForEvent("popup");
+		await page.locator('a[title="Open preview in new tab"]').first().click();
+		const popup = await popupPromise;
+		try {
+			await popup.waitForLoadState("domcontentloaded");
+			expect(await popup.evaluate(() => {
+				try { localStorage.getItem("shared-origin-secret"); return false; }
+				catch { return true; }
+			}), "response CSP must keep a top-level SVG popout out of shared-origin storage").toBe(true);
+		} finally {
+			await popup.close();
+		}
 	});
 
 	test("uses the same action order for preview and non-preview panel tabs", async ({ page }) => {

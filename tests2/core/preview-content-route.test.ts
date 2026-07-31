@@ -21,7 +21,9 @@ import { PassThrough } from "node:stream";
 import {
 	handlePreviewRequest,
 	pickEntry,
+	PREVIEW_ASSET_CAPABILITY_TTL_MS,
 	PREVIEW_HTML_CONTENT_SECURITY_POLICY,
+	PREVIEW_REFERRER_POLICY,
 } from "../../src/server/preview/content-route.ts";
 import { setPreviewFsForTesting } from "../../src/server/preview/mount.ts";
 import { COOKIE_NAME, CookieStore } from "../../src/server/auth/cookie.ts";
@@ -61,6 +63,7 @@ beforeAll(() => {
 	fs.writeFileSync(path.join(mountRoot, "styles.css"), "body{color:red}");
 	fs.writeFileSync(path.join(mountRoot, "logo.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
 	fs.writeFileSync(path.join(mountRoot, "data.json"), `{"a":1}`);
+	fs.writeFileSync(path.join(mountRoot, "hostile.svg"), `<svg xmlns="http://www.w3.org/2000/svg"><script>parent.document.body.textContent='owned'</script><image href="logo.png"/></svg>`);
 	fs.writeFileSync(path.join(mountRoot, "subdir", "nested.html"), "<html><body>n</body></html>");
 
 	fs.mkdirSync(ENTRY_INLINE_DIR, { recursive: true });
@@ -97,7 +100,13 @@ interface FakeRes {
 	emit(): boolean;
 }
 
-function fakeReq(opts: { url?: string; method?: string; cookie?: string; auth?: string } = {}): any {
+function fakeReq(opts: {
+	url?: string;
+	method?: string;
+	cookie?: string;
+	auth?: string;
+	headers?: Record<string, string>;
+} = {}): any {
 	return {
 		url: opts.url ?? "/",
 		method: opts.method ?? "GET",
@@ -105,6 +114,7 @@ function fakeReq(opts: { url?: string; method?: string; cookie?: string; auth?: 
 			host: "x",
 			...(opts.cookie ? { cookie: opts.cookie } : {}),
 			...(opts.auth ? { authorization: opts.auth } : {}),
+			...opts.headers,
 		},
 		on() { /* no-op */ },
 	};
@@ -149,9 +159,15 @@ function memoryCookieStore(): CookieStore {
 	return new CookieStore(Buffer.alloc(32, 0x50));
 }
 
-function makeOpts(localhost: boolean) {
+function makeOpts(localhost: boolean, assetCapabilityClock?: Readonly<{ now(): number }>) {
 	const store = memoryCookieStore();
-	return { cookieStore: store, isLocalhost: localhost, store };
+	return { cookieStore: store, isLocalhost: localhost, store, assetCapabilityClock };
+}
+
+function capabilityBase(body: string, routePrefix = `/preview/${SID}/`): string {
+	const matched = body.match(new RegExp(`(?:href|xml:base)="(${routePrefix}_content/[^/]+/)"`))?.[1];
+	assert.ok(matched, "preview document must carry an asset capability base");
+	return matched;
 }
 
 describe("pickEntry", () => {
@@ -270,6 +286,7 @@ describe("handlePreviewRequest — bridge injection", () => {
 			);
 			assert.equal(res.statusCode, 200);
 			assert.equal(res.headers["content-security-policy"], PREVIEW_HTML_CONTENT_SECURITY_POLICY);
+			assert.equal(res.headers["referrer-policy"], PREVIEW_REFERRER_POLICY);
 			assert.doesNotMatch(String(res.headers["content-security-policy"]), /allow-same-origin/i);
 		}
 	});
@@ -284,8 +301,7 @@ describe("handlePreviewRequest — bridge injection", () => {
 			`/preview/${SID}/index.html`,
 			o,
 		);
-		const capabilityPath = bodyText(htmlRes).match(new RegExp(`href="(/preview/${SID}/_content/[^/]+/)"`))?.[1];
-		assert.ok(capabilityPath, "HTML base must carry a signed content capability");
+		const capabilityPath = capabilityBase(bodyText(htmlRes));
 
 		const assetRes = fakeRes();
 		await handlePreviewRequest(
@@ -296,12 +312,166 @@ describe("handlePreviewRequest — bridge injection", () => {
 		);
 		assert.equal(assetRes.statusCode, 200);
 		assert.equal(assetRes.headers["access-control-allow-origin"], "null");
+		assert.equal(assetRes.headers["referrer-policy"], PREVIEW_REFERRER_POLICY);
 		assert.equal(bodyText(assetRes), "body{color:red}");
+
+		const htmlResViaCapability = fakeRes();
+		await handlePreviewRequest(
+			fakeReq({ url: `${capabilityPath}report.html` }),
+			htmlResViaCapability as any,
+			`${capabilityPath}report.html`,
+			o,
+		);
+		assert.equal(htmlResViaCapability.statusCode, 403, "asset authority must never authorize HTML");
+
+		const navigationRes = fakeRes();
+		await handlePreviewRequest(
+			fakeReq({
+				url: `${capabilityPath}styles.css`,
+				headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" },
+			}),
+			navigationRes as any,
+			`${capabilityPath}styles.css`,
+			o,
+		);
+		assert.equal(navigationRes.statusCode, 401, "asset authority must never authorize navigation");
+		const directoryNavigationRes = fakeRes();
+		await handlePreviewRequest(
+			fakeReq({ url: capabilityPath }),
+			directoryNavigationRes as any,
+			capabilityPath,
+			o,
+		);
+		assert.equal(directoryNavigationRes.statusCode, 401, "asset authority must not redirect into a document");
 
 		const crossSessionRes = fakeRes();
 		const stolenPath = capabilityPath.replace(`/preview/${SID}/`, `/preview/${OTHER_SID}/`);
 		await handlePreviewRequest(fakeReq({ url: `${stolenPath}styles.css` }), crossSessionRes as any, `${stolenPath}styles.css`, o);
 		assert.equal(crossSessionRes.statusCode, 401, "a capability must not authenticate another preview tree");
+	});
+
+	it("expires asset authority and rotates it for a fresh document", async () => {
+		let now = 1_700_000_000_000;
+		const o = makeOpts(false, { now: () => now });
+		const browserCookie = o.store.mint();
+		const htmlRes = fakeRes();
+		await handlePreviewRequest(
+			fakeReq({ url: `/preview/${SID}/index.html`, cookie: `${COOKIE_NAME}=${browserCookie}` }),
+			htmlRes as any,
+			`/preview/${SID}/index.html`,
+			o,
+		);
+		const firstCapability = capabilityBase(bodyText(htmlRes));
+
+		now += PREVIEW_ASSET_CAPABILITY_TTL_MS;
+		const expiredRes = fakeRes();
+		await handlePreviewRequest(
+			fakeReq({ url: `${firstCapability}styles.css` }),
+			expiredRes as any,
+			`${firstCapability}styles.css`,
+			o,
+		);
+		assert.equal(expiredRes.statusCode, 401);
+
+		const refreshedHtmlRes = fakeRes();
+		await handlePreviewRequest(
+			fakeReq({ url: `/preview/${SID}/index.html`, cookie: `${COOKIE_NAME}=${browserCookie}` }),
+			refreshedHtmlRes as any,
+			`/preview/${SID}/index.html`,
+			o,
+		);
+		assert.notEqual(capabilityBase(bodyText(refreshedHtmlRes)), firstCapability);
+	});
+
+	it("revokes a leaked capability when the live mount generation changes", async () => {
+		const o = makeOpts(false);
+		const browserCookie = o.store.mint();
+		const htmlRes = fakeRes();
+		await handlePreviewRequest(
+			fakeReq({ url: `/preview/${SID}/index.html`, cookie: `${COOKIE_NAME}=${browserCookie}` }),
+			htmlRes as any,
+			`/preview/${SID}/index.html`,
+			o,
+		);
+		const oldCapability = capabilityBase(bodyText(htmlRes));
+		const dataPath = path.join(workspaceRoot, "state", "preview", SID, "data.json");
+		try {
+			fs.writeFileSync(dataPath, `{"generation":2}`);
+			const staleRes = fakeRes();
+			await handlePreviewRequest(
+				fakeReq({ url: `${oldCapability}data.json` }),
+				staleRes as any,
+				`${oldCapability}data.json`,
+				o,
+			);
+			assert.equal(staleRes.statusCode, 401);
+
+			const newHtmlRes = fakeRes();
+			await handlePreviewRequest(
+				fakeReq({ url: `/preview/${SID}/index.html`, cookie: `${COOKIE_NAME}=${browserCookie}` }),
+				newHtmlRes as any,
+				`/preview/${SID}/index.html`,
+				o,
+			);
+			const newCapability = capabilityBase(bodyText(newHtmlRes));
+			assert.notEqual(newCapability, oldCapability);
+			const currentRes = fakeRes();
+			await handlePreviewRequest(
+				fakeReq({ url: `${newCapability}data.json` }),
+				currentRes as any,
+				`${newCapability}data.json`,
+				o,
+			);
+			assert.equal(currentRes.statusCode, 200);
+			assert.equal(bodyText(currentRes), `{"generation":2}`);
+		} finally {
+			fs.writeFileSync(dataPath, `{"a":1}`);
+		}
+	});
+
+	it("sandboxes script-capable SVG popouts and retains generation-bound assets", async () => {
+		const o = makeOpts(false);
+		const browserCookie = o.store.mint();
+		const svgRes = fakeRes();
+		await handlePreviewRequest(
+			fakeReq({
+				url: `/preview/${SID}/hostile.svg`,
+				cookie: `${COOKIE_NAME}=${browserCookie}`,
+				headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" },
+			}),
+			svgRes as any,
+			`/preview/${SID}/hostile.svg`,
+			o,
+		);
+		assert.equal(svgRes.statusCode, 200);
+		assert.equal(svgRes.headers["content-security-policy"], PREVIEW_HTML_CONTENT_SECURITY_POLICY);
+		assert.equal(svgRes.headers["referrer-policy"], PREVIEW_REFERRER_POLICY);
+		assert.doesNotMatch(String(svgRes.headers["content-security-policy"]), /allow-same-origin/i);
+		const svgCapability = capabilityBase(bodyText(svgRes));
+
+		const imageRes = fakeRes();
+		await handlePreviewRequest(
+			fakeReq({
+				url: `${svgCapability}logo.png`,
+				headers: { "sec-fetch-mode": "no-cors", "sec-fetch-dest": "image" },
+			}),
+			imageRes as any,
+			`${svgCapability}logo.png`,
+			o,
+		);
+		assert.equal(imageRes.statusCode, 200);
+
+		const capabilityPopout = fakeRes();
+		await handlePreviewRequest(
+			fakeReq({
+				url: `${svgCapability}hostile.svg`,
+				headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" },
+			}),
+			capabilityPopout as any,
+			`${svgCapability}hostile.svg`,
+			o,
+		);
+		assert.equal(capabilityPopout.statusCode, 401);
 	});
 
 	it("injects inline theme snapshot inside <head> on text/html", async () => {
