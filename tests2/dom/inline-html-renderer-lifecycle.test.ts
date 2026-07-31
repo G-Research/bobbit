@@ -484,7 +484,7 @@ describe("HTML renderer delegation", () => {
 		expect(requestInit.credentials).toBe("include");
 		const requestHeaders = new Headers(requestInit.headers);
 		expect(requestHeaders.get("Authorization")).toBe("Bearer test-token");
-		expect(requestHeaders.get("Content-Type")).toBe("application/json");
+		expect(requestHeaders.get("Content-Type")).toBeNull();
 
 		const container = document.createElement("div");
 		document.body.appendChild(container);
