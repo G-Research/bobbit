@@ -247,6 +247,26 @@ test("ProjectRegistry processes large read-only directories linearly", () => {
   assert.ok(entryReads <= rawEntries.length * 3 + 20, `expected linear entry reads, got ${entryReads}`);
 });
 
+test("ProjectRegistry preserves read-only evidence when a directory has no fingerprint", () => {
+  const root = "/no-fingerprint-case-evidence/Project";
+  const identity = createProjectPathIdentity({
+    isNativePathApi: dialect => dialect === "posix",
+    // These synthetic paths deliberately have no native stat fingerprint.
+    realpathSync: candidate => path.posix.resolve(candidate),
+    readdirSync: candidate => {
+      switch (path.posix.resolve(candidate).toLowerCase()) {
+        case "/": return ["no-fingerprint-case-evidence"];
+        case "/no-fingerprint-case-evidence": return ["Project"];
+        case "/no-fingerprint-case-evidence/project": return ["src"];
+        default: return ["file"];
+      }
+    },
+  });
+
+  assert.equal(identity(root), "/no-fingerprint-case-evidence/project");
+  assert.equal(identity(root), "/no-fingerprint-case-evidence/project");
+});
+
 test("ProjectRegistry caches inconclusive directory semantics per path identity", () => {
   const root = "/cached-case-probe/Project";
   let probes = 0;

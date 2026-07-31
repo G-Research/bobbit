@@ -334,7 +334,7 @@ function hasCaseInsensitiveEntries(
   const fingerprintFor = caseSemanticsFingerprint ?? nativeCaseSemanticsFingerprint;
   const fingerprint = fingerprintFor(existingAncestor);
   const cached = fingerprint ? caseSemanticsCache?.get(cacheKey) : undefined;
-  if (cached?.fingerprint === fingerprint) return cached.semantics === "insensitive";
+  if (cached && cached.fingerprint === fingerprint) return cached.semantics === "insensitive";
 
   let result = readOnlyCaseSemantics(existingAncestor, pathApi, realpathSync, readdirSync);
   if (result === "unknown") {
