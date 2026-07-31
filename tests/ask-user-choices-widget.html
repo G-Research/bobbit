@@ -13,15 +13,19 @@
   .ask-tab-label { margin-left: 4px; }
   .ask-tab-check { color: #22c55e; margin-left: 4px; }
   .ask-question { font-size: 14px; font-weight: 500; margin-bottom: 8px; }
+  .ask-widget.ask-answered .ask-question { color: #888; opacity: 0.7; }
   .ask-options { display: flex; flex-direction: column; gap: 6px; }
   .ask-option { display: flex; align-items: center; gap: 8px; padding: 8px; font-size: 14px; border: 1px solid #444; border-radius: 4px; cursor: pointer; }
   .ask-option.checked { border-color: #3b82f6; background: rgba(59,130,246,0.1); }
   .ask-option.ask-option-focused { box-shadow: 0 0 0 2px rgba(59,130,246,0.4); }
-  .ask-option[data-disabled="true"] { cursor: default; opacity: 0.9; }
+  .ask-option[data-disabled="true"] { cursor: default; opacity: 0.3; }
+  .ask-option[data-disabled="true"][aria-checked="true"] { opacity: 0.7; }
   .ask-option-index { font-family: ui-monospace, monospace; font-size: 11px; color: #888; width: 18px; text-align: right; user-select: none; }
   .ask-option-check { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; border: 1px solid #444; font-size: 10px; line-height: 1; color: transparent; pointer-events: none; }
   .ask-option.checked .ask-option-check { border-color: #3b82f6; background: #3b82f6; color: #fff; }
   .ask-other-input { margin-left: 8px; flex: 1; padding: 4px 8px; font-size: 12px; border: 1px solid #444; border-radius: 4px; background: #1a1a2e; color: #eee; }
+  .ask-other-input[data-disabled="true"] { opacity: 0.3; }
+  .ask-other-input[data-disabled="true"][data-checked="true"] { opacity: 0.7; }
   .ask-submit { padding: 6px 12px; font-size: 12px; font-weight: 500; border-radius: 4px; background: #3b82f6; color: white; border: 0; cursor: pointer; }
   .ask-submit:disabled { opacity: 0.5; cursor: not-allowed; }
   .ask-submit-row { display: flex; align-items: center; gap: 8px; justify-content: flex-end; margin-top: 12px; }
@@ -385,6 +389,7 @@ class AskWidget {
     }
 
     const readOnly = this.isReadOnly();
+    if (readOnly) root.classList.add("ask-answered");
 
     // Tabs — omitted entirely for single-question asks.
     const tablist = document.createElement("div");
@@ -473,7 +478,11 @@ class AskWidget {
       txt.type = "text";
       txt.className = "ask-other-input";
       txt.value = otherText;
-      if (readOnly) txt.disabled = true;
+      if (readOnly) {
+        txt.disabled = true;
+        txt.setAttribute("data-disabled", "true");
+        if (checked) txt.setAttribute("data-checked", "true");
+      }
       txt.addEventListener("input", (e) => this.onOtherInput(this.activeTab, e.target.value));
       row.appendChild(txt);
       return row;
