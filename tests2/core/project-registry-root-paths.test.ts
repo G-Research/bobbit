@@ -408,7 +408,7 @@ test("ProjectRegistry invalidates cached case semantics when a directory fingerp
   assert.equal(identity(root), root, "new directory metadata must not reuse the previous semantics");
 });
 
-test("ProjectRegistry retries an unprobeable directory after permission recovery", () => {
+test("ProjectRegistry retries an unprobeable directory after permission recovery without caching probes", () => {
   const parent = "/recoverable-case-probe";
   let probes = 0;
   const identity = createProjectPathIdentity({
@@ -428,31 +428,39 @@ test("ProjectRegistry retries an unprobeable directory after permission recovery
   assert.equal(identity(parent), parent);
   assert.equal(probes, 2, "an unprobeable result is unknown and must not be cached");
   assert.equal(identity(parent), parent);
-  assert.equal(probes, 2, "the recovered authoritative probe is reusable while unchanged");
+  assert.equal(probes, 3, "recovered owned-probe evidence is current-lookup-only");
 });
 
-test("ProjectRegistry invalidates cached probes after directory deletion and recreation", () => {
-  const parent = "/recreated-case-probe";
+test("ProjectRegistry invalidates cached read-only evidence after directory recreation", () => {
+  const parent = "/recreated-case-evidence";
   let incarnation = 1;
-  let probes = 0;
+  let reads = 0;
   const identity = createProjectPathIdentity({
     isNativePathApi: dialect => dialect === "posix",
+    isCaseInsensitiveAt: ancestor => ancestor === "/" ? false : undefined,
     caseSemanticsFingerprint: ancestor => `dev:1:ino:${incarnation}:${ancestor}`,
-    realpathSync: candidate => path.posix.resolve(candidate),
-    readdirSync: candidate => path.posix.resolve(candidate) === parent ? [] : ["recreated-case-probe"],
-    createCaseProbe: probeParent => {
-      probes += 1;
-      return path.posix.join(probeParent, ".BobbitProbeA");
+    realpathSync: candidate => {
+      const resolved = path.posix.resolve(candidate);
+      if (resolved === parent) return resolved;
+      if (incarnation === 1 && resolved === `${parent}/alpha`) return `${parent}/Alpha`;
+      throw new Error(`missing fixture path: ${candidate}`);
     },
-    removeCaseProbe: () => {},
+    readdirSync: candidate => {
+      if (path.posix.resolve(candidate) !== parent) return [];
+      reads += 1;
+      return incarnation === 1 ? ["Alpha"] : ["Alpha", "alpha"];
+    },
+    createCaseProbe: () => { throw new Error("read-only evidence must not probe"); },
   });
 
-  identity(parent);
-  identity(parent);
-  assert.equal(probes, 1, "unchanged incarnation reuses its authoritative probe");
+  assert.equal(identity(`${parent}/Child`), `${parent}/child`);
+  assert.equal(identity(`${parent}/CHILD`), `${parent}/child`);
+  assert.equal(reads, 1, "unchanged incarnation reuses stable read-only evidence");
   incarnation = 2;
-  identity(parent);
-  assert.equal(probes, 2, "replacement directory identity invalidates the cached probe");
+  assert.equal(identity(`${parent}/CHILD`), `${parent}/CHILD`);
+  assert.equal(reads, 2, "replacement directory identity reclassifies from its own entries");
+  assert.equal(identity(`${parent}/Child`), `${parent}/Child`);
+  assert.equal(reads, 2, "replacement read-only evidence is cached under its new identity");
 });
 
 test("ProjectRegistry rejects native POSIX double-slash aliases for Headquarters and existing projects", () => {
