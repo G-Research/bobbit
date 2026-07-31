@@ -115,28 +115,23 @@ async function previewDiagnostics(page: Page): Promise<string> {
 		const tab = document.querySelector(`[data-panel-tab-id="${CSS.escape("preview:entry:durable-preview.html")}"]`) as HTMLElement | null;
 		const panel = document.querySelector(".goal-preview-panel") as HTMLElement | null;
 		const iframe = document.querySelector(".goal-preview-panel iframe") as HTMLIFrameElement | null;
-		let iframeBodyText = "";
-		try { iframeBodyText = iframe?.contentDocument?.body?.innerText || ""; } catch (err) { iframeBodyText = `iframe-read-error:${String(err)}`; }
 		return JSON.stringify({
 			tabVisible: !!tab && tab.getBoundingClientRect().width > 0 && tab.getBoundingClientRect().height > 0,
 			tabActive: !!tab?.classList.contains("goal-tab-pill--active"),
 			iframeSrc: iframe?.getAttribute("src") || "",
 			panelText: (panel?.innerText || "").replace(/\s+/g, " ").trim(),
-			iframeBodyText: iframeBodyText.replace(/\s+/g, " ").trim(),
 		});
 	});
 }
 
 async function expectPreviewIframeContains(page: Page, message: string, sessionId: string): Promise<void> {
-	await expect.poll(
-		() => previewDiagnostics(page),
-		{
-			timeout: 15_000,
-			message: `${message}: expected preview iframe diagnostics to contain ${BODY_TEXT}; empty previews usually report "No preview yet."`,
-		},
-	).toContain(BODY_TEXT);
-
 	const iframe = page.locator(".goal-preview-panel iframe").first();
+	await expect(iframe, `${message}: preview iframe should be visible; ${await previewDiagnostics(page)}`).toBeVisible({ timeout: 15_000 });
+	await expect(
+		page.frameLocator(".goal-preview-panel iframe").first().locator("body"),
+		`${message}: isolated preview frame should contain ${BODY_TEXT}; ${await previewDiagnostics(page)}`,
+	).toContainText(BODY_TEXT, { timeout: 15_000 });
+
 	await expect(iframe, `${message}: iframe should have an absolute preview content src`).toHaveAttribute("src", /^https?:\/\//, { timeout: 10_000 });
 	const src = new URL((await iframe.getAttribute("src"))!);
 	expect(src.origin, `${message}: iframe preview should stay on the gateway origin`).toBe(new URL(base()).origin);
@@ -144,6 +139,28 @@ async function expectPreviewIframeContains(page: Page, message: string, sessionI
 	expect([...src.searchParams.keys()], `${message}: iframe preview should carry only the cache buster`).toEqual(["mtime"]);
 	expect(src.searchParams.get("mtime"), `${message}: iframe cache buster should be numeric`).toMatch(/^\d+$/);
 	expect(src.hash, `${message}: iframe preview should not carry a fragment`).toBe("");
+}
+
+async function holdPreviewMirrorEmpty(page: Page): Promise<() => Promise<void>> {
+	await page.evaluate(async () => {
+		const s: any = (window as any).bobbitState ?? (window as any).__bobbitState;
+		const originalDescriptor = Object.getOwnPropertyDescriptor(s, "previewPanelEntry");
+		Object.defineProperty(s, "previewPanelEntry", {
+			configurable: true,
+			enumerable: true,
+			get: () => "",
+			set: () => { /* keep the transient mirror empty through the test render */ },
+		});
+		(window as any).__restoreDurablePreviewMirror = () => {
+			if (originalDescriptor) Object.defineProperty(s, "previewPanelEntry", originalDescriptor);
+			else delete s.previewPanelEntry;
+			delete (window as any).__restoreDurablePreviewMirror;
+		};
+		s.previewPanelMtime = 0;
+		(window as any).__bobbitRenderApp?.();
+		await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+	});
+	return async () => page.evaluate(() => (window as any).__restoreDurablePreviewMirror?.());
 }
 
 /**
@@ -226,35 +243,35 @@ test.describe("Durable HTML preview restart restore", () => {
 
 		// Recreate the restore race: the active server-persisted preview tab has
 		// the entry in its source/state, while the transient previewPanelEntry
-		// mirror is still empty. The iframe can render from the tab entry; the
-		// header controls must use the same source instead of hiding.
-		await page.evaluate(() => {
-			const s: any = (window as any).bobbitState ?? (window as any).__bobbitState;
-			s.previewPanelEntry = "";
-			s.previewPanelMtime = 0;
-			(window as any).__bobbitRenderApp?.();
-		});
-		await expect.poll(
-			() => page.evaluate(() => (window as any).bobbitState?.previewPanelEntry ?? ""),
-			{ timeout: 2_000, message: "test setup should leave the previewPanelEntry mirror empty" },
-		).toBe("");
-		await expectPreviewIframeContains(page, "direct navigation restore with empty preview mirror", sessionId);
+		// mirror is still empty. Hold the mirror empty through a complete render;
+		// normal tab activation eagerly repopulates it as a side effect. The iframe
+		// and header controls must still render from the persisted tab source.
+		const restorePreviewMirror = await holdPreviewMirrorEmpty(page);
+		try {
+			expect(
+				await page.evaluate(() => (window as any).bobbitState?.previewPanelEntry ?? ""),
+				"test setup should leave the previewPanelEntry mirror empty",
+			).toBe("");
+			await expectPreviewIframeContains(page, "direct navigation restore with empty preview mirror", sessionId);
 
-		await expect(
-			page.locator('button[title="Refresh preview"]').first(),
-			"Refresh preview should be visible immediately from the restored preview tab entry, before collapse/expand",
-		).toBeVisible({ timeout: 5_000 });
+			await expect(
+				page.locator('button[title="Refresh preview"]').first(),
+				"Refresh preview should be visible immediately from the restored preview tab entry, before collapse/expand",
+			).toBeVisible({ timeout: 5_000 });
 
-		const encodedSessionId = encodeURIComponent(sessionId);
-		const encodedEntry = encodeURIComponent(mount.entry);
-		const openPreview = page.locator('a[title="Open preview in new tab"]').first();
-		await expect(openPreview, "open-preview action should use the restored preview tab entry").toBeVisible({ timeout: 5_000 });
-		await expect(openPreview, "open-preview action should expose an absolute gateway URL").toHaveAttribute("href", /^https?:\/\//);
-		const openPreviewUrl = new URL((await openPreview.getAttribute("href"))!);
-		expect(openPreviewUrl.origin, "open-preview action should stay on the gateway origin").toBe(new URL(base()).origin);
-		expect(openPreviewUrl.pathname).toBe(`/preview/${encodedSessionId}/${encodedEntry}`);
-		expect(openPreviewUrl.search, "open-preview action should not carry the iframe cache buster").toBe("");
-		expect(openPreviewUrl.hash).toBe("");
+			const encodedSessionId = encodeURIComponent(sessionId);
+			const encodedEntry = encodeURIComponent(mount.entry);
+			const openPreview = page.locator('a[title="Open preview in new tab"]').first();
+			await expect(openPreview, "open-preview action should use the restored preview tab entry").toBeVisible({ timeout: 5_000 });
+			await expect(openPreview, "open-preview action should expose an absolute gateway URL").toHaveAttribute("href", /^https?:\/\//);
+			const openPreviewUrl = new URL((await openPreview.getAttribute("href"))!);
+			expect(openPreviewUrl.origin, "open-preview action should stay on the gateway origin").toBe(new URL(base()).origin);
+			expect(openPreviewUrl.pathname).toBe(`/preview/${encodedSessionId}/${encodedEntry}`);
+			expect(openPreviewUrl.search, "open-preview action should not carry the iframe cache buster").toBe("");
+			expect(openPreviewUrl.hash).toBe("");
+		} finally {
+			await restorePreviewMirror();
+		}
 	});
 
 	test("restores the mounted preview tab and iframe after restart, but keeps a user-closed tab closed", async ({ page, gateway }) => {
