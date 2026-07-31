@@ -353,6 +353,7 @@ export async function startTailSampler(page: Page, key: string): Promise<void> {
 		const start = performance.now();
 		let lastSettledHeight = el.scrollHeight;
 		let framePending = false;
+		let settleVersion = 0;
 		let active = true;
 		w[sampleKey] = [];
 
@@ -373,12 +374,28 @@ export async function startTailSampler(page: Page, key: string): Promise<void> {
 		};
 
 		const sampleAfterRepinFrames = () => {
-			if (!active || framePending) return;
+			if (!active) return;
+			const observedVersion = ++settleVersion;
+			if (framePending) return;
 			framePending = true;
-			requestAnimationFrame(() => requestAnimationFrame(() => {
-				framePending = false;
-				if (active) recordSettledGrowth();
-			}));
+			const waitForLatestGrowth = (version: number) => {
+				requestAnimationFrame(() => requestAnimationFrame(() => {
+					if (!active) {
+						framePending = false;
+						return;
+					}
+					// More transcript/layout growth can arrive while the two-frame
+					// re-pin boundary is pending. Restart from that latest event;
+					// otherwise this callback could read its intentional transient.
+					if (version !== settleVersion) {
+						waitForLatestGrowth(settleVersion);
+						return;
+					}
+					framePending = false;
+					recordSettledGrowth();
+				}));
+			};
+			waitForLatestGrowth(observedVersion);
 		};
 
 		const mutations = new MutationObserver(sampleAfterRepinFrames);
