@@ -29,6 +29,17 @@ import {
 } from "./story-registry.js";
 import { navigateToHash } from "./ui-helpers.js";
 
+async function waitForSessionRouteSettlement(page: Page, sessionId: string): Promise<void> {
+	await page.waitForFunction((id) => {
+		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+		return window.location.hash === `#/session/${id}`
+			&& state?.selectedSessionId === id
+			&& state?.connectingSessionId === null
+			&& state?.connectionStatus === "connected"
+			&& state?.remoteAgent?.gatewaySessionId === id;
+	}, sessionId, { timeout: 20_000 });
+}
+
 async function waitForGoalDashboardRoute(page: Page, goalId: string): Promise<void> {
 	await expect.poll(
 		() => page.evaluate((id) => {
@@ -122,7 +133,6 @@ test.describe("CT-13: URL routing and navigation", () => {
 	// ---------------------------------------------------------------
 
 	test("N-03/N-10: Deep links and settings sub-navigation @smoke", async () => {
-		test.slow(); // goal-dashboard can be slow to render under concurrent v2-browser load
 		s.begin(STORY_N03);
 
 		await s.createTestSession("A");
@@ -136,6 +146,9 @@ test.describe("CT-13: URL routing and navigation", () => {
 		await navigateToHash(s.page, `#/session/${s.session("A").sessionId}`);
 		s.assert();
 		await s.editor.is_visible();
+		// The editor mounts before session hydration is complete. Do not navigate
+		// away until the session route has relinquished its async ownership.
+		await waitForSessionRouteSettlement(s.page, s.session("A").sessionId);
 
 		// Deep link: goal. The hash assignment is synchronous, but route handling
 		// is serialized; wait for the dashboard route to finish mounting.
@@ -470,6 +483,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 		s.begin(STORY_N02);
 		await s.navigate_to("session", "A");
 		await s.editor.is_visible();
+		await waitForSessionRouteSettlement(s.page, s.session("A").sessionId);
 
 		s.act();
 		await navigateToHash(s.page, `#/goal/${goal.id}`);
@@ -495,6 +509,7 @@ test.describe("CT-13: URL routing and navigation", () => {
 		await navigateToHash(s.page, `#/session/${s.session("A").sessionId}`);
 		s.assert();
 		await s.editor.is_visible();
+		await waitForSessionRouteSettlement(s.page, s.session("A").sessionId);
 
 		// act — session → goal dashboard
 		s.act();
