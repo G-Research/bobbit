@@ -58,7 +58,7 @@ function resetFakeRepo(root: string): void {
 }
 
 const DIST_WORKER_SOURCE = String.raw`
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ensureDistBuild } from ${JSON.stringify(new URL("../../scripts/testing-v2/ensure-dist.mjs", import.meta.url).href)};
 
@@ -70,20 +70,10 @@ const waitForParentRelease = () => {
 	signal("awaiting-parent-release");
 	if (readFileSync(0, "utf8") !== "release") throw new Error("parent did not release worker");
 };
-const waitForRelease = () => {
-	const deadline = Date.now() + 5_000;
-	while (!existsSync(marker("allow-build-finish"))) {
-		if (Date.now() >= deadline) throw new Error("test release signal was not published");
-		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-	}
-};
 try {
-	writeFileSync(marker("caller-" + callerId + ".started"), "started");
 	const result = ensureDistBuild({
 		repoRoot,
 		lockStaleMs: 1,
-		lockWaitMs: 5_000,
-		lockPollMs: 5,
 		afterComputeKey: () => {
 			if (mode === "late-reader") {
 				signal("late-reader-key-computed");
@@ -91,12 +81,12 @@ try {
 			}
 		},
 		beforeAcquireLock: () => {
-			writeFileSync(marker("caller-" + callerId + ".missed"), "missed");
+			signal("before-acquire");
 			if (mode === "late-reader") signal("late-reader-before-acquire");
 		},
 		afterAcquireIntent: () => {
 			if (mode === "crash-intent") {
-				writeFileSync(marker("crash-intent-created"), "created");
+				signal("crash-intent-created");
 				// process.exit bypasses the lock acquirer's finally cleanup, modeling a
 				// coordinator that dies after publishing intent but before acquisition.
 				process.exit(86);
@@ -104,8 +94,8 @@ try {
 		},
 		afterRecoveryClaim: () => {
 			if (mode === "recovery") {
-				writeFileSync(marker("recovery-claimed"), "claimed");
-				waitForRelease();
+				signal("recovery-claimed");
+				waitForParentRelease();
 			}
 		},
 		runBuild: () => {
@@ -128,8 +118,8 @@ try {
 				waitForParentRelease();
 			}
 			if (mode === "slow") {
-				writeFileSync(marker("build-started"), "started");
-				waitForRelease();
+				signal("build-started");
+				waitForParentRelease();
 			}
 			writeFileSync(join(repoRoot, "dist", "server", "cli.js"), "// cli\n");
 			writeFileSync(join(repoRoot, "dist", "ui", "index.html"), "<html></html>\n");
@@ -148,24 +138,13 @@ function nativeSpawn(): NativeSpawn {
 	return spawn;
 }
 
-function waitForFile(file: string, timeoutMs = 5_000): Promise<void> {
-	return new Promise((resolve, reject) => {
-		const deadline = Date.now() + timeoutMs;
-		const check = () => {
-			if (existsSync(file)) return resolve();
-			if (Date.now() >= deadline) return reject(new Error(`timed out waiting for ${file}`));
-			setTimeout(check, 5);
-		};
-		check();
-	});
-}
-
 type DistWorkerResult = { stdout: string; stderr: string; report: Record<string, unknown> };
 type InteractiveDistWorker = {
 	done: Promise<DistWorkerResult>;
 	waitForEvent: (event: string) => Promise<void>;
 	release: () => void;
 };
+type EventWaiter = { resolve: () => void; reject: (error: Error) => void };
 
 function runDistWorker(
 	workerFile: string,
@@ -208,11 +187,19 @@ function startInteractiveDistWorker(
 	let stdout = "";
 	let stderr = "";
 	const observedEvents = new Set<string>();
-	const eventWaiters = new Map<string, Array<() => void>>();
+	const eventWaiters = new Map<string, EventWaiter[]>();
+	let completionError: Error | undefined;
 	const child = nativeSpawn()(process.execPath, [workerFile, root, mode, reportPath, callerId], {
 		cwd: root,
 		stdio: ["pipe", "pipe", "pipe", "ipc"],
 	});
+	const failEventWaiters = (error: Error) => {
+		completionError = error;
+		for (const waiters of eventWaiters.values()) {
+			for (const waiter of waiters) waiter.reject(error);
+		}
+		eventWaiters.clear();
+	};
 	child.stdout?.on("data", chunk => { stdout += chunk.toString(); });
 	child.stderr?.on("data", chunk => { stderr += chunk.toString(); });
 	child.on("message", message => {
@@ -221,29 +208,42 @@ function startInteractiveDistWorker(
 			: undefined;
 		if (typeof event !== "string") return;
 		observedEvents.add(event);
-		for (const resolve of eventWaiters.get(event) ?? []) resolve();
+		for (const waiter of eventWaiters.get(event) ?? []) waiter.resolve();
 		eventWaiters.delete(event);
 	});
 	const done = new Promise<DistWorkerResult>((resolve, reject) => {
-		child.once("error", reject);
+		child.once("error", error => {
+			failEventWaiters(error);
+			reject(error);
+		});
 		child.once("close", code => {
-			if (code !== 0) return reject(new Error(`dist worker ${callerId} exited ${code}: ${stderr}`));
+			if (code !== 0) {
+				const error = new Error(`dist worker ${callerId} exited ${code}: ${stderr}`);
+				failEventWaiters(error);
+				return reject(error);
+			}
 			try {
-				resolve({ stdout, stderr, report: JSON.parse(requireFile(reportPath)) as Record<string, unknown> });
+				const result = { stdout, stderr, report: JSON.parse(requireFile(reportPath)) as Record<string, unknown> };
+				resolve(result);
+				failEventWaiters(new Error(`dist worker ${callerId} exited before publishing the requested lifecycle event`));
 			} catch (error) {
-				reject(error);
+				const failure = error instanceof Error ? error : new Error(String(error));
+				failEventWaiters(failure);
+				reject(failure);
 			}
 		});
 	});
 	return {
 		done,
-		waitForEvent: event => observedEvents.has(event)
-			? Promise.resolve()
-			: new Promise(resolve => {
+		waitForEvent: event => {
+			if (observedEvents.has(event)) return Promise.resolve();
+			if (completionError) return Promise.reject(completionError);
+			return new Promise((resolve, reject) => {
 				const waiters = eventWaiters.get(event) ?? [];
-				waiters.push(resolve);
+				waiters.push({ resolve, reject });
 				eventWaiters.set(event, waiters);
-			}),
+			});
+		},
 		release: () => child.stdin?.end("release"),
 	};
 }
@@ -374,11 +374,7 @@ function resetLockFixture(root = repoRoot): void {
 	rmSync(join(root, "dist"), { recursive: true, force: true });
 	rmSync(join(root, ".profiles"), { recursive: true, force: true });
 	for (const name of [
-		"allow-build-finish", "build-started", "build-count", "recovery-claimed", "crash-intent-created",
-		"caller-leader.started", "caller-leader.missed", "caller-waiter.started", "caller-waiter.missed",
-		"caller-reclaimer.started", "caller-reclaimer.missed", "caller-successor.started", "caller-successor.missed",
-		"caller-late-reader.started", "caller-late-reader.missed", "caller-partial-builder.started", "caller-partial-builder.missed",
-		"caller-partial-failure.started", "caller-partial-failure.missed", "caller-partial-repair.started", "caller-partial-repair.missed",
+		"build-count",
 		"report-leader.json", "report-waiter.json", "report-failed.json", "report-repaired.json", "report-stale.json",
 		"report-reclaimer.json", "report-successor.json", "report-crashed.json", "report-recovered-intent.json",
 		"report-late-reader.json", "report-partial-builder.json", "report-partial-failure.json", "report-partial-repair.json",
@@ -401,16 +397,16 @@ describe.sequential("dist build worktree lock", () => {
 
 	it("runs exactly one real multi-process build and makes the waiter consume its manifest", async () => {
 		resetLockFixture();
-		const leader = runDistWorker(workerFile, repoRoot, "slow", "leader");
-		await waitForFile(join(repoRoot, "build-started"));
+		const leader = startInteractiveDistWorker(workerFile, repoRoot, "slow", "leader");
+		await leader.waitForEvent("build-started");
 
-		const waiter = runDistWorker(workerFile, repoRoot, "normal", "waiter");
+		const waiter = startInteractiveDistWorker(workerFile, repoRoot, "normal", "waiter");
 		// The waiter has already observed the cache miss before the owner publishes
 		// the manifest. Releasing now pins the required revalidation-inside-lock path.
-		await waitForFile(join(repoRoot, "caller-waiter.missed"));
-		writeFileSync(join(repoRoot, "allow-build-finish"), "release");
+		await waiter.waitForEvent("before-acquire");
+		leader.release();
 
-		const [leaderResult, waiterResult] = await Promise.all([leader, waiter]);
+		const [leaderResult, waiterResult] = await Promise.all([leader.done, waiter.done]);
 		assert.deepEqual(buildCount(), ["slow"], "only the lock owner may execute the build");
 		assert.equal(leaderResult.report.ok, true);
 		assert.equal(waiterResult.report.ok, true);
@@ -512,9 +508,8 @@ describe.sequential("dist build worktree lock", () => {
 		const old = new Date(Date.now() - 100);
 		utimesSync(staleLock, old, old);
 
-		const crashed = runCrashedDistWorker(workerFile, repoRoot, "crashed");
-		await waitForFile(join(repoRoot, "crash-intent-created"));
-		assert.equal(await crashed, 86, "the child must die without its intent cleanup finally block");
+		const crashed = await runCrashedDistWorker(workerFile, repoRoot, "crashed");
+		assert.equal(crashed, 86, "the child must die without its intent cleanup finally block");
 
 		const intentName = readdirSync(dirname(staleLock)).find(name => name.startsWith(`${staleLock.split(/[\\/]/).pop()}.acquire-`));
 		assert.ok(intentName, "crashed acquirer must leave a published intent");
@@ -536,18 +531,18 @@ describe.sequential("dist build worktree lock", () => {
 		const old = new Date(Date.now() - 100);
 		utimesSync(staleLock, old, old);
 
-		const reclaimer = runDistWorker(workerFile, repoRoot, "recovery", "reclaimer");
-		await waitForFile(join(repoRoot, "recovery-claimed"));
-		const successor = runDistWorker(workerFile, repoRoot, "normal", "successor");
-		await waitForFile(join(repoRoot, "caller-successor.missed"));
+		const reclaimer = startInteractiveDistWorker(workerFile, repoRoot, "recovery", "reclaimer");
+		await reclaimer.waitForEvent("recovery-claimed");
+		const successor = startInteractiveDistWorker(workerFile, repoRoot, "normal", "successor");
+		await successor.waitForEvent("before-acquire");
 		assert.equal(
 			JSON.parse(readFileSync(staleLock, "utf8")).token,
 			"released-owner",
 			"a successor started during recovery must not replace the claimed stale lock",
 		);
-		writeFileSync(join(repoRoot, "allow-build-finish"), "release");
+		reclaimer.release();
 
-		const [reclaimerResult, successorResult] = await Promise.all([reclaimer, successor]);
+		const [reclaimerResult, successorResult] = await Promise.all([reclaimer.done, successor.done]);
 		const results = [reclaimerResult, successorResult];
 		assert.equal(reclaimerResult.report.ok, true);
 		assert.equal(successorResult.report.ok, true);
