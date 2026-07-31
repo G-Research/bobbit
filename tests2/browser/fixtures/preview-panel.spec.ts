@@ -2,6 +2,7 @@ import { test, expect, type Page } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
 import { buildBundle } from "../fixtures/build-bundle.js";
+import { previewNavigationBridge } from "../../../src/shared/preview-bridge-scripts.js";
 
 const SHELL = path.resolve("tests/ui-fixtures/fixture-shell.html");
 const FIXTURE_ORIGIN = "http://fixture.localhost";
@@ -17,6 +18,7 @@ const SIDE_PANEL_WORKSPACE_SRC = path.resolve("src/app/side-panel-workspace.ts")
 const PANEL_WORKSPACE_SRC = path.resolve("src/app/panel-workspace.ts");
 const PREVIEW_PANEL_SRC = path.resolve("src/app/preview-panel.ts");
 const PREVIEW_RENDERER_SRC = path.resolve("src/ui/tools/renderers/PreviewRenderer.ts");
+const PREVIEW_BRIDGE_SRC = path.resolve("src/shared/preview-bridge-scripts.ts");
 
 const SESSION_A = "dynamic-workspace-session-a";
 const PREVIEW_TAB = '.goal-tab-pill[data-panel-tab-kind="preview"]';
@@ -39,17 +41,26 @@ test.beforeAll(() => {
 			PANEL_WORKSPACE_SRC,
 			PREVIEW_PANEL_SRC,
 			PREVIEW_RENDERER_SRC,
+			PREVIEW_BRIDGE_SRC,
 		],
 	});
 });
 
 async function loadFixture(page: Page): Promise<void> {
-	await page.route(`${FIXTURE_ORIGIN}/**`, async (route) => {
+	await page.context().route(`${FIXTURE_ORIGIN}/**`, async (route) => {
 		const pathname = new URL(route.request().url()).pathname;
 		const svgPreview = pathname.endsWith("/hostile.svg");
+		const navigationPreview = pathname.endsWith("/navigation.html");
+		const navigationTarget = pathname.endsWith("/next.html");
+		const previewScope = `/preview/${SESSION_A}/`;
+		const navigationBody = `<!doctype html><html><head><base data-bobbit-preview-base href="${previewScope}_content/test-capability/"></head><body><a id="next-page" href="next.html">Next page</a>${previewNavigationBridge(
+			`${previewScope}_content/test-capability/`,
+			previewScope,
+			`${previewScope}navigation.html`,
+		)}</body></html>`;
 		await route.fulfill({
 			contentType: svgPreview ? "image/svg+xml" : "text/html",
-			headers: svgPreview ? {
+			headers: svgPreview || navigationPreview || navigationTarget ? {
 				"Content-Security-Policy": "sandbox allow-scripts",
 				"Referrer-Policy": "no-referrer",
 			} : undefined,
@@ -57,7 +68,11 @@ async function loadFixture(page: Page): Promise<void> {
 				? fs.readFileSync(SHELL, "utf8")
 				: svgPreview
 					? `<svg xmlns="http://www.w3.org/2000/svg"><script>window.__svgScriptRan=true</script><text>Isolated SVG preview</text></svg>`
-					: "<!doctype html><html><body>Fixture preview</body></html>",
+					: navigationPreview
+						? navigationBody
+						: navigationTarget
+							? "<!doctype html><html><body><h1>Navigated preview page</h1></body></html>"
+							: "<!doctype html><html><body>Fixture preview</body></html>",
 		});
 	});
 	await page.goto(FIXTURE_SHELL_URL);
@@ -140,6 +155,7 @@ test.describe("Preview panel fixture", () => {
 		const iframe = page.locator(".goal-preview-panel iframe").first();
 		await expect(iframe).toBeVisible({ timeout: 5_000 });
 		await expect(iframe).toHaveAttribute("sandbox", "allow-scripts");
+		await expect(iframe).toHaveAttribute("referrerpolicy", "no-referrer");
 		expect(await iframe.getAttribute("sandbox"), "agent-authored previews must retain an opaque origin").not.toContain("allow-same-origin");
 		await expect(iframe).toHaveAttribute("src", new RegExp(`^${FIXTURE_ORIGIN}/preview/${SESSION_A}/report\\.html\\?mtime=\\d+$`));
 		const initialSrc = await iframe.getAttribute("src");
@@ -188,6 +204,39 @@ test.describe("Preview panel fixture", () => {
 			timeout: 5_000,
 			message: "fullscreen Refresh should update the iframe cache-buster",
 		}).not.toEqual(refreshedSrc);
+	});
+
+	test("navigates relative preview pages through the validated iframe and popout ambient-auth handoff", async ({ page }) => {
+		await setLivePreview(page, "navigation.html", hashOf("a"), "Navigation preview");
+		const iframe = page.locator(".goal-preview-panel iframe").first();
+		await expect(iframe).toHaveAttribute("sandbox", "allow-scripts");
+		const frame = page.frameLocator(".goal-preview-panel iframe").first();
+		await expect(frame.locator("#next-page")).toBeVisible({ timeout: 5_000 });
+		await frame.locator("#next-page").click();
+		await expect(iframe).toHaveAttribute("src", `${FIXTURE_ORIGIN}/preview/${SESSION_A}/next.html`);
+		await expect(frame.getByRole("heading", { name: "Navigated preview page" })).toBeVisible({ timeout: 5_000 });
+		expect(await frame.locator("body").evaluate(() => {
+			try { localStorage.getItem("shared-origin-secret"); return false; }
+			catch { return true; }
+		}), "navigated iframe document must retain its opaque origin").toBe(true);
+
+		await setLivePreview(page, "navigation.html", hashOf("b"), "Navigation popout");
+		const popupPromise = page.waitForEvent("popup");
+		await page.locator('a[title="Open preview in new tab"]').first().click();
+		const popup = await popupPromise;
+		try {
+			await expect(popup.locator("#next-page")).toBeVisible({ timeout: 5_000 });
+			await popup.locator("#next-page").click();
+			await expect(popup).toHaveURL(`${FIXTURE_ORIGIN}/preview/${SESSION_A}/next.html`);
+			await expect(popup.getByRole("heading", { name: "Navigated preview page" })).toBeVisible();
+			expect(await popup.evaluate(() => {
+				try { localStorage.getItem("shared-origin-secret"); return false; }
+				catch { return true; }
+			}), "navigated popout document must retain its response-sandboxed opaque origin").toBe(true);
+			await expect.poll(() => popup.evaluate(() => window.opener === null)).toBe(true);
+		} finally {
+			await popup.close();
+		}
 	});
 
 	test("keeps script-capable SVG popouts in an opaque response sandbox", async ({ page }) => {

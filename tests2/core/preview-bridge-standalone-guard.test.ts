@@ -17,7 +17,11 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { PREVIEW_THEME_BRIDGE } from "../../src/shared/preview-bridge-scripts.ts";
+import {
+	PREVIEW_THEME_BRIDGE,
+	previewNavigationBridge,
+	validatedPreviewNavigationTarget,
+} from "../../src/shared/preview-bridge-scripts.ts";
 
 describe("PREVIEW_THEME_BRIDGE — standalone-tab guard", () => {
 	it("contains the parent === window early-return", () => {
@@ -47,5 +51,38 @@ describe("PREVIEW_THEME_BRIDGE — standalone-tab guard", () => {
 		// the guard executes and the function returns cleanly.
 		const fakeWindow = {} as Record<string, unknown>;
 		assert.doesNotThrow(() => fn.call(fakeWindow, fakeWindow, {}));
+	});
+
+	it("validates only canonical navigation inside the exact root or nested artifact scope", () => {
+		const rootCurrent = "https://host.test/preview/session-a/index.html?mtime=1";
+		assert.equal(
+			validatedPreviewNavigationTarget(rootCurrent, "https://host.test/preview/session-a/report.html?q=1#result"),
+			"https://host.test/preview/session-a/report.html?q=1#result",
+		);
+		const nestedCurrent = "https://host.test/team/bobbit/preview/session-a/_artifact/artifact_1/index.html";
+		assert.equal(
+			validatedPreviewNavigationTarget(nestedCurrent, "https://host.test/team/bobbit/preview/session-a/_artifact/artifact_1/pages/two.html"),
+			"https://host.test/team/bobbit/preview/session-a/_artifact/artifact_1/pages/two.html",
+		);
+		for (const denied of [
+			"https://host.test/team/bobbit/preview/session-a/_artifact/other/pages/two.html",
+			"https://host.test/team/bobbit/preview/session-b/index.html",
+			"https://host.test/team/bobbit/preview/session-a/_artifact/artifact_1/_content/stolen/index.html",
+			"https://evil.test/team/bobbit/preview/session-a/_artifact/artifact_1/index.html",
+		]) {
+			assert.equal(validatedPreviewNavigationTarget(nestedCurrent, denied), null, denied);
+		}
+	});
+
+	it("keeps popouts opener-free by using top-level ambient navigation and parent handoff only for frames", () => {
+		const script = previewNavigationBridge(
+			"/team/bobbit/preview/session-a/_content/token/",
+			"/team/bobbit/preview/session-a/",
+			"/team/bobbit/preview/session-a/index.html",
+		);
+		assert.match(script, /if \(parent === window\) location\.assign\(target\)/);
+		assert.match(script, /parent\.postMessage\(\{ type: MESSAGE_TYPE, url: target \}, '\*'\)/);
+		assert.doesNotMatch(script, /opener/);
+		assert.ok(script.indexOf("event.preventDefault()") < script.lastIndexOf("handoff(target)"));
 	});
 });

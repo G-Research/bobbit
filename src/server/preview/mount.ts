@@ -109,12 +109,14 @@ let mountAsyncFs: PreviewAsyncFs = createPreviewAsyncFs(fs);
 
 export function setPreviewRootForTesting(dir: string | undefined): void {
 	_previewRootOverride = dir;
+	clearPreviewDirectoryGenerations();
 }
 
 /** Swap both mount filesystems for a test double. Always reset after the test. */
 export function setPreviewFsForTesting(fsImpl: typeof fs | PreviewAsyncFs | undefined): void {
 	mountSyncFs = fsImpl && "promises" in fsImpl ? fsImpl : fs;
 	mountAsyncFs = fsImpl ? createPreviewAsyncFs(fsImpl) : createPreviewAsyncFs(fs);
+	clearPreviewDirectoryGenerations();
 }
 
 function previewRoot(): string {
@@ -213,7 +215,7 @@ export async function writeInline(sessionId: string, html: string, entry?: strin
 		// The entry and full content hash are both checked while the writer fence
 		// is held. Only this explicit verification makes the pathname servable.
 		const contentHash = await hashMountDirectory(dir, { trustedRoot: previewRoot() });
-		markPreviewDirectoryVerified(dir);
+		markPreviewDirectoryVerified(dir, contentHash);
 		return {
 			url: `/preview/${sessionId}/${safeEntry}`,
 			path: target,
@@ -421,6 +423,11 @@ export function watchMount(sessionId: string, onChange: () => void, options?: Wa
 			}
 		};
 		const debounced = () => {
+			// Invalidate authority on the raw event, not after the notification
+			// debounce. This covers supported direct live-preview edits without a
+			// stale-TTL window; repeated events coalesce naturally into unavailable
+			// generation state until the next exact document verification.
+			invalidatePreviewDirectoryGeneration(dir);
 			options?.onFsEvent?.();
 			if (timer !== undefined) return;
 			timer = clock.setTimeout(fire, 50);
@@ -1076,6 +1083,106 @@ const previewReadWaiters = new Map<string, Set<() => void>>();
 const previewWriterTails = new Map<string, Promise<void>>();
 let ownedPreviewCleanupTail: Promise<void> = Promise.resolve();
 
+type PreviewDirectoryGenerationState = {
+	epoch: bigint;
+	verified?: Readonly<{ generation: string; contentHash: string }>;
+	verification?: Promise<string>;
+};
+
+const previewDirectoryGenerations = new Map<string, PreviewDirectoryGenerationState>();
+let previewDirectoryGenerationCounter = 0n;
+
+function nextPreviewDirectoryGeneration(): bigint {
+	previewDirectoryGenerationCounter += 1n;
+	return previewDirectoryGenerationCounter;
+}
+
+function clearPreviewDirectoryGenerations(): void {
+	previewDirectoryGenerations.clear();
+	previewDirectoryGenerationCounter = 0n;
+}
+
+/**
+ * Revoke every capability generation for a directory synchronously, before a
+ * supported writer can touch the namespace. An in-flight cold verification is
+ * fenced by object identity and cannot publish after this call.
+ */
+export function invalidatePreviewDirectoryGeneration(directory: string): void {
+	previewDirectoryGenerations.set(previewInstallKey(directory), {
+		epoch: nextPreviewDirectoryGeneration(),
+	});
+}
+
+/** Revoke exact and descendant generations before a supported subtree purge. */
+export function invalidatePreviewDirectoryGenerationsWithin(directory: string): void {
+	const rootKey = previewInstallKey(directory);
+	const prefix = rootKey.endsWith(path.sep) ? rootKey : `${rootKey}${path.sep}`;
+	for (const key of [...previewDirectoryGenerations.keys()]) {
+		if (key === rootKey || key.startsWith(prefix)) previewDirectoryGenerations.delete(key);
+	}
+}
+
+/** Publish bytes that were already fully hashed inside the writer fence. */
+export function publishPreviewDirectoryGeneration(directory: string, contentHash: string): string {
+	if (!/^[a-f0-9]{64}$/.test(contentHash)) {
+		throw new PreviewMountError(500, "Preview generation requires an exact content hash");
+	}
+	const epoch = nextPreviewDirectoryGeneration();
+	const generation = `g${epoch.toString(36)}`;
+	previewDirectoryGenerations.set(previewInstallKey(directory), {
+		epoch,
+		verified: { generation, contentHash },
+	});
+	return generation;
+}
+
+/**
+ * Return a verified generation, hashing once only when this process has no
+ * publication record (for example after a restart). Concurrent cold readers
+ * join the same verification. Any supported mutation or availability fence
+ * that overlaps the hash makes the result fail closed instead of publishing.
+ */
+export async function ensurePreviewDirectoryGeneration(directory: string): Promise<string> {
+	const key = previewInstallKey(directory);
+	let state = previewDirectoryGenerations.get(key);
+	if (state?.verified && isPreviewDirectoryAvailable(directory)) return state.verified.generation;
+	if (state?.verification) return state.verification;
+	if (!isPreviewDirectoryAvailable(directory)) {
+		throw new PreviewMountError(404, "Preview mount is not available");
+	}
+	if (!state) {
+		state = { epoch: nextPreviewDirectoryGeneration() };
+		previewDirectoryGenerations.set(key, state);
+	}
+	const captured = state;
+	const capturedEpoch = state.epoch;
+	const verification = (async () => {
+		try {
+			const contentHash = await hashMountDirectory(directory);
+			if (previewDirectoryGenerations.get(key) !== captured
+				|| captured.epoch !== capturedEpoch
+				|| !isPreviewDirectoryAvailable(directory)) {
+				throw new PreviewMountError(404, "Preview mount changed during generation verification");
+			}
+			const epoch = nextPreviewDirectoryGeneration();
+			const generation = `g${epoch.toString(36)}`;
+			captured.epoch = epoch;
+			captured.verified = { generation, contentHash };
+			return generation;
+		} finally {
+			if (previewDirectoryGenerations.get(key) === captured) captured.verification = undefined;
+		}
+	})();
+	state.verification = verification;
+	return verification;
+}
+
+/** Constant-time asset request check; supported writers invalidate first. */
+export function previewDirectoryGenerationMatches(directory: string, generation: string): boolean {
+	const state = previewDirectoryGenerations.get(previewInstallKey(directory));
+	return isPreviewDirectoryAvailable(directory) && state?.verified?.generation === generation;
+}
+
 function previewInstallKey(directory: string): string {
 	const resolved = path.resolve(directory);
 	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
@@ -1222,14 +1329,18 @@ export async function quarantinePreviewDirectory(
 }
 
 /** Explicitly publish a fully validated directory, or a verified absence. */
-export function markPreviewDirectoryVerified(directory: string): void {
-	blockedPreviewInstalls.delete(previewInstallKey(directory));
+export function markPreviewDirectoryVerified(directory: string, contentHash?: string): void {
+	const key = previewInstallKey(directory);
+	if (contentHash !== undefined) publishPreviewDirectoryGeneration(directory, contentHash);
+	blockedPreviewInstalls.delete(key);
 }
 
 function beginPreviewInstall(directory: string): { key: string; token: symbol; wasBlocked: boolean } {
 	const key = previewInstallKey(directory);
 	const token = Symbol("preview-install");
 	const wasBlocked = blockedPreviewInstalls.has(key);
+	// Revoke before the writer waits for active readers or touches the tree.
+	invalidatePreviewDirectoryGeneration(directory);
 	blockedPreviewInstalls.add(key);
 	let tokens = activePreviewInstalls.get(key);
 	if (!tokens) {
@@ -1521,7 +1632,7 @@ export async function installPreviewDirectoryTransaction(
 						trustedRoot: parent,
 						expectedRootStats: backupStats,
 					});
-					markPreviewDirectoryVerified(backupDir);
+					markPreviewDirectoryVerified(backupDir, backupHash);
 				} else if (detached) {
 					// Non-directories and identity-unstable roots are never traversed or
 					// restored. Consume the quarantine as a detached cleanup owner.
@@ -1566,7 +1677,7 @@ export async function installPreviewDirectoryTransaction(
 				if (movedBackupHash !== backupHash) {
 					throw new PreviewMountError(500, "Preview backup content changed during detach");
 				}
-				markPreviewDirectoryVerified(backupDir);
+				markPreviewDirectoryVerified(backupDir, movedBackupHash);
 			}
 
 			await movePreviewDirectoryContents(stagingRoot, destinationRoot, {
@@ -1585,7 +1696,7 @@ export async function installPreviewDirectoryTransaction(
 				|| (options.expectedContentHash !== undefined && installedHash !== options.expectedContentHash)) {
 				throw new PreviewMountError(500, "Preview installed content hash mismatch");
 			}
-			markPreviewDirectoryVerified(destinationRoot);
+			markPreviewDirectoryVerified(destinationRoot, installedHash);
 			installed = { entryStats, contentHash: installedHash };
 		} catch (operationError) {
 			// The fence itself is not a mutation. If this path was available before
@@ -1595,7 +1706,7 @@ export async function installPreviewDirectoryTransaction(
 				try {
 					if (originalLiveStats !== undefined) {
 						if (await currentMatchingStats(destinationRoot, originalLiveStats, io)) {
-							markPreviewDirectoryVerified(destinationRoot);
+							markPreviewDirectoryVerified(destinationRoot, backupHash);
 						}
 					} else if (originalLiveWasAbsent) {
 						await assertPreviewDirectoryAbsent(destinationRoot, io);
@@ -1629,7 +1740,7 @@ export async function installPreviewDirectoryTransaction(
 						if (restoredHash !== backupHash) {
 							throw new PreviewMountError(500, "Rolled-back preview content hash mismatch");
 						}
-						markPreviewDirectoryVerified(destinationRoot);
+						markPreviewDirectoryVerified(destinationRoot, restoredHash);
 					} else {
 						// A blocked root whose detached hash failed can still be restored by
 						// exact inode identity, but must remain unavailable until a later
