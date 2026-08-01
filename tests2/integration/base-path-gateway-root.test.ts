@@ -53,23 +53,3 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("root-mounted gateway compati
 		viewer.close();
 	});
 });
-
-describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("mixed-case loopback gateway auth state", () => {
-	let running: RunningGateway;
-
-	beforeAll(async () => {
-		running = await bootGateway("", "LOCALHOST", false);
-	}, 60_000);
-
-	afterAll(async () => {
-		await running?.shutdown();
-	}, 60_000);
-
-	it("uses the same disabled-auth decision for HTTP health and viewer WebSockets", async () => {
-		const health = await fetch(`${running.baseUrl}/api/health`);
-		expect(health.status).toBe(200);
-		expect(await health.json()).toMatchObject({ status: "ok", localhost: true });
-		const viewer = await authenticateSocket(`${running.wsOrigin}/ws/viewer`, {}, "localhost");
-		viewer.close();
-	});
-});

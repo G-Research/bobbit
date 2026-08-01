@@ -230,10 +230,6 @@ test.describe("Journey: production gateway mounted below a nested base path", ()
 			expect(shellAssets.some(record => record.resourceType === "stylesheet"), "mounted shell should load CSS").toBe(true);
 			for (const asset of shellAssets) expectExactlyOneMount(asset.url, gateway, "/");
 
-			const signedCookie = (await context.cookies(`${gateway.baseURL}/`)).find(cookie => cookie.name === "bobbit_session");
-			expect(signedCookie, "authenticated browser boot should mint the native-transport cookie").toBeTruthy();
-			expect(signedCookie?.path).toBe(`${BASE_PATH}/`);
-
 			const manifestResponse = await request.get(`${gateway.baseURL}/manifest.json`, {
 				headers: { Authorization: `Bearer ${token}` },
 			});

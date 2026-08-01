@@ -196,7 +196,7 @@ describe("gateway authorization and fetch", () => {
 		assert.deepEqual(boundary.gatewayAuthorizationHeaders("real-token"), { Authorization: "Bearer real-token" });
 	});
 
-	it("defaults to credentialed requests while preserving caller headers and credential mode", async () => {
+	it("uses Fetch's same-origin credential default while preserving caller headers and explicit credential mode", async () => {
 		const fetchSpy = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("ok"));
 		const storage = installBrowser({ origin: "https://host.example", basePath: "/team/bobbit", fetch: fetchSpy as unknown as typeof fetch });
 		storage.setItem("gateway.url", "https://host.example/team/bobbit");
@@ -205,7 +205,7 @@ describe("gateway authorization and fetch", () => {
 
 		await boundary.gatewayFetch(gatewayRoute("/api/one"), { headers: { Accept: "application/json" }, mode: "cors" });
 		let init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
-		assert.equal(init.credentials, "include");
+		assert.equal(init.credentials, undefined);
 		assert.equal(init.mode, "cors");
 		assert.equal(new Headers(init.headers).get("Authorization"), "Bearer real-token");
 		assert.equal(new Headers(init.headers).get("Accept"), "application/json");
@@ -224,7 +224,7 @@ describe("gateway authorization and fetch", () => {
 		const boundary = await loadBoundary();
 		await boundary.gatewayFetch(gatewayRoute("/api/health"));
 		const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
-		assert.equal(init.credentials, "include");
+		assert.equal(init.credentials, undefined);
 		assert.equal(new Headers(init.headers).has("Authorization"), false);
 	});
 });
