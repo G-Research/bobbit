@@ -426,9 +426,10 @@ describe("AtomicCredentialStore", () => {
 		assert.equal((await store.read("google-gemini-cli"))?.type, "oauth");
 
 		const atomicWrite = (store as any).atomicWrite.bind(store);
-		const failingFence = vi.spyOn(store as any, "atomicWrite").mockImplementation((data: unknown, target = "") => {
-			if (target.includes(".bobbit-rejected-oauth.google-gemini-cli.json")) throw new Error("fence write failed");
-			return atomicWrite(data, target);
+		const failingFence = vi.spyOn(store as any, "atomicWrite").mockImplementation((data: unknown, target: unknown = "") => {
+			const targetPath = typeof target === "string" ? target : "";
+			if (targetPath.includes(".bobbit-rejected-oauth.google-gemini-cli.json")) throw new Error("fence write failed");
+			return atomicWrite(data, targetPath);
 		});
 		try {
 			await assert.rejects(store.invalidateRejectedOAuthCredential("google-gemini-cli", google.access, google.refresh), /fence write failed/);
