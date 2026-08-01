@@ -11,6 +11,7 @@ import { resolveSystemPromptPath } from "./agent/system-prompt.js";
 import { loadOrCreateToken, readToken } from "./auth/token.js";
 import { ensureTlsCert } from "./auth/tls.js";
 import { loadDesecConfig, updateDesecIp } from "./auth/desec.js";
+import { createGateway } from "./server.js";
 import { bootLog, bootMark } from "./boot-profile.js";
 import { isLoopbackHost, loopbackForBind } from "./cli-loopback.js";
 import { resolveCliGatewayDeps } from "./cli-gateway-deps.js";
@@ -30,18 +31,8 @@ export interface CliArgs {
 	tlsExplicit: boolean;
 	forceAuth: boolean;
 	staticDir?: string;
-	/** Internal flag used by Bobbit's Vite development commands only. */
-	viteDevProxy: boolean;
 	agentCliPath?: string;
 	basePath: string;
-}
-
-export interface CliRunEffects {
-	createGateway?: typeof import("./server.js").createGateway;
-	writeGatewayUrl?: (filePath: string, peerUrl: string) => void;
-	openUrl?: (url: string) => void;
-	registerSignalHandlers?: boolean;
-	stageBundledBinaries?: typeof stageBundledBinaries;
 }
 
 export interface StartupUrls {
@@ -69,8 +60,7 @@ export function buildStartupUrls(input: {
 	const basePath = normalizeBasePath(input.basePath);
 	const authEnforced = Boolean(input.forceAuth) || !isLoopbackHost(input.host);
 	const listenUrl = `${input.protocol}://${urlHost(input.host)}:${input.port}${basePath}`;
-	const peerHost = loopbackForBind(input.host);
-	const peerUrl = `${input.protocol}://${urlHost(peerHost)}:${input.port}${basePath}`;
+	const peerUrl = `${input.protocol}://${urlHost(loopbackForBind(input.host))}:${input.port}${basePath}`;
 	const uiUrl = authEnforced
 		? `${peerUrl}/?token=${encodeURIComponent(input.token)}`
 		: `${peerUrl}/`;
@@ -141,7 +131,6 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
 		tls: true,  // on by default
 		tlsExplicit: false,
 		forceAuth: false,
-		viteDevProxy: false,
 		basePath: "",
 	};
 	let basePathFlagPresent = false;
@@ -171,19 +160,15 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
 			case "--agent-cli":
 				result.agentCliPath = path.resolve(argv[++i]);
 				break;
-			case "--base-path": {
+			case "--base-path":
 				basePathFlagPresent = true;
 				if (i + 1 >= argv.length || argv[i + 1]!.startsWith("--")) {
 					throw new Error("--base-path requires a value (use / for a root mount)");
 				}
 				basePathFlagValue = argv[++i]!;
 				break;
-			}
 			case "--no-ui":
 				result.noUi = true;
-				break;
-			case "--vite-dev-proxy":
-				result.viteDevProxy = true;
 				break;
 			case "--auth":
 				result.forceAuth = true;
@@ -226,14 +211,10 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
 	return result;
 }
 
-export async function runCli(
-	argv: string[] = process.argv.slice(2),
-	env: NodeJS.ProcessEnv = process.env,
-	effects: CliRunEffects = {},
-): Promise<void> {
+async function main() {
 	// Wall-clock anchor for boot instrumentation — process-start (approx) to listen.
 	const bootWallT0 = Date.now();
-	const args = parseArgs(argv, env);
+	const args = parseArgs(process.argv.slice(2));
 
 	// --show-token: print token and exit
 	if (args.showToken) {
@@ -266,7 +247,7 @@ export async function runCli(
 	// finds them via its existing getToolPath() lookup. Idempotent; failures
 	// log a single warning but never crash startup. See src/server/binaries.ts.
 	try {
-		await (effects.stageBundledBinaries ?? stageBundledBinaries)(globalAgentDir());
+		await stageBundledBinaries(globalAgentDir());
 	} catch (e) {
 		console.warn(`[binaries] Staging failed: ${(e as Error).message}`);
 	}
@@ -306,15 +287,13 @@ export async function runCli(
 	let startupUrls: StartupUrls | undefined;
 	const gatewayUrlPath = path.join(bobbitStateDir(), "gateway-url");
 	const ctorT0 = Date.now();
-	const createGatewayImpl = effects.createGateway ?? (await import("./server.js")).createGateway;
-	const gateway = createGatewayImpl({
+	const gateway = createGateway({
 		host: args.host,
 		port: args.port,
 		portExplicit: args.portExplicit,
 		authToken,
 		defaultCwd: args.cwd,
 		staticDir: args.staticDir,
-		viteDevProxy: args.viteDevProxy,
 		basePath: args.basePath,
 		onBound: (actualPort) => {
 			startupUrls = buildStartupUrls({
@@ -325,14 +304,14 @@ export async function runCli(
 				token: authToken,
 				forceAuth: args.forceAuth,
 			});
-			(effects.writeGatewayUrl ?? writeFileAtomic)(gatewayUrlPath, startupUrls.peerUrl);
+			writeFileAtomic(gatewayUrlPath, startupUrls.peerUrl);
 			return startupUrls.peerUrl;
 		},
 		agentCliPath: args.agentCliPath,
 		systemPromptPath,
 		tls,
 		forceAuth: args.forceAuth,
-	}, resolveCliGatewayDeps(env));
+	}, resolveCliGatewayDeps());
 	bootLog(`[boot] createGateway construction in ${Date.now() - ctorT0}ms`);
 
 	const startT0 = Date.now();
@@ -352,9 +331,9 @@ export async function runCli(
 		}
 	}
 
-	// `onBound` publishes this before restore. Keep a defensive construction for
-	// custom/programmatic gateway implementations which do not invoke the hook.
-	startupUrls ??= buildStartupUrls({
+	// createGateway publishes during bind, before persisted sessions resume. Keep a
+	// defensive fallback for custom implementations that do not invoke onBound.
+	const effectiveStartupUrls = startupUrls ?? buildStartupUrls({
 		protocol,
 		host: args.host,
 		port: actualPort,
@@ -369,7 +348,7 @@ export async function runCli(
 	process.stdout.write(`\x1b]0;Bobbit Server\x07`);
 	console.log(formatStartupBanner({
 		version: pkgVersion,
-		urls: startupUrls,
+		urls: effectiveStartupUrls,
 		token: authToken,
 		cwd: args.cwd,
 		staticDir: args.staticDir,
@@ -381,15 +360,11 @@ export async function runCli(
 	//   - BOBBIT_NO_OPEN is set (explicit opt-out)
 	//   - NODE_ENV === "test" (manual integration tests + any test harness; prevents
 	//     browser tab spam from per-test gateway spawns)
-	const suppressOpen = env.BOBBIT_NO_OPEN || env.NODE_ENV === "test";
+	const suppressOpen = process.env.BOBBIT_NO_OPEN || process.env.NODE_ENV === "test";
 	if (args.staticDir && !suppressOpen) {
-		if (effects.openUrl) {
-			effects.openUrl(startupUrls.openUrl);
-		} else {
-			const cmd =
-				process.platform === "win32" ? "start" : process.platform === "darwin" ? "open" : "xdg-open";
-			import("node:child_process").then(({ exec }) => exec(`${cmd} ${startupUrls!.openUrl}`));
-		}
+		const cmd =
+			process.platform === "win32" ? "start" : process.platform === "darwin" ? "open" : "xdg-open";
+		import("node:child_process").then(({ exec }) => exec(`${cmd} ${effectiveStartupUrls.openUrl}`));
 	}
 
 	// Graceful shutdown
@@ -399,10 +374,8 @@ export async function runCli(
 		process.exit(0);
 	};
 
-	if (effects.registerSignalHandlers !== false) {
-		process.on("SIGINT", shutdown);
-		process.on("SIGTERM", shutdown);
-	}
+	process.on("SIGINT", shutdown);
+	process.on("SIGTERM", shutdown);
 }
 
 // Global error handlers — prevent silent zombification from stray rejections
@@ -429,29 +402,9 @@ process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
 	process.exit(1);
 });
 
-/**
- * Node resolves an imported module to its real path while npm exposes POSIX bin
- * entries through a symlink. Compare filesystem identities when possible so an
- * installed `bobbit`/`npx bobbit` entrypoint still executes; retain the lexical
- * fallback for loaders whose synthetic module path does not exist on disk.
- */
-export function isCliEntrypoint(invokedPath: string | undefined, moduleUrl = import.meta.url): boolean {
-	if (!invokedPath) return false;
-	const modulePath = fileURLToPath(moduleUrl);
-	const canonical = (candidate: string): string => {
-		try {
-			return fs.realpathSync(candidate);
-		} catch {
-			return path.resolve(candidate);
-		}
-	};
-	const left = canonical(invokedPath);
-	const right = canonical(modulePath);
-	return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
-}
-
-if (isCliEntrypoint(process.argv[1])) {
-	runCli().catch((err) => {
+const invokedPath = process.argv[1];
+if (invokedPath && path.resolve(invokedPath) === path.resolve(fileURLToPath(import.meta.url))) {
+	main().catch((err) => {
 		console.error("Fatal:", err instanceof Error ? err.message : err);
 		process.exit(1);
 	});

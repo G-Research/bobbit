@@ -364,12 +364,9 @@ Every issuing request must satisfy all of these metadata rules:
   resource path, query, or fragment.
 - With the built UI served directly, `Origin` must match the request origin
   derived from the actual TLS socket and validated `Host`, including its port.
-  In Vite development, the proxy preserves the browser Origin. For an
-  originless same-origin browser `GET`, it reconstructs that source origin from
-  the Vite socket and validated incoming `Host` before replacing `Host` with the
-  gateway target. The source Origin may use a different port when both sides use
-  the configured host, or when both sides are loopback aliases. Non-loopback
-  HTTP is always rejected.
+  In Vite development, the preserved browser Origin may use a different port
+  when both sides use the configured host, or when both sides are loopback
+  aliases. Non-loopback HTTP is always rejected.
 - `Forwarded` and `X-Forwarded-*` are not trusted because the gateway has no
   configured trusted-proxy boundary.
 

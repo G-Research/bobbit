@@ -190,13 +190,16 @@
 		<div id="app"></div>
 		<script>
 			(function() {
-				// Inject the PWA manifest link with a launch token baked into start_url.
-				// Only this page's query is authoritative for this deployment. Never
-				// read gateway.token here: it may belong to an explicit remote gateway
-				// and the shell runs before the centralized URL boundary validates it.
+				// Inject the PWA manifest link with the auth token baked in so iOS
+				// installs a tokenized start_url. Done via JS (rather than a static
+				// <link> tag) to guarantee the href includes the token BEFORE Safari
+				// fetches the manifest — otherwise there's a race where the browser
+				// starts fetching /manifest.json (untokenized) during HTML parsing.
+				// The server validates the token before embedding; invalid tokens
+				// fall through to a plain manifest with start_url="/".
 				try {
 					var params = new URLSearchParams(window.location.search);
-					var token = params.get('token');
+					var token = params.get('token') || localStorage.getItem('gateway.token');
 					var base = window.__BOBBIT_BASE_PATH__ || '';
 					var href = (token && token !== 'localhost')
 						? base + '/manifest.json?token=' + encodeURIComponent(token)

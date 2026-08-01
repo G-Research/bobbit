@@ -532,17 +532,9 @@ import { SandboxManager, type SandboxBootstrap } from "./agent/sandbox-manager.j
 import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource, type SandboxCloneSource } from "./agent/sandbox-clone-source.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
-import { COOKIE_NAME, CookieStore, collectCookieValues, expireCookie, hasRootScopedCookie, issueCookie } from "./auth/cookie.js";
+import { CookieStore, extractCookieValue, issueCookie, tryAuth as cookieTryAuth } from "./auth/cookie.js";
 import { loadOrCreateCookieSigningKey } from "./auth/cookie-signing-key.js";
-import {
-	browserCookieRequestOrigin,
-	browserCookieRequiresSecure,
-	canonicalHttpOrigin,
-	canonicalRequestOrigin,
-	classifyBrowserCookieEligibility,
-	isBrowserCookieAuthenticationCompatible,
-	type BrowserCookieAuthentication,
-} from "./auth/browser-cookie.js";
+import { classifyBrowserCookieEligibility, type BrowserCookieAuthentication } from "./auth/browser-cookie.js";
 import { authorizeChildrenMutation } from "./auth/children-mutation-authz.js";
 import { handlePreviewRequest, pickEntry } from "./preview/content-route.js";
 import { isLoopbackHost, loopbackForBind } from "./cli-loopback.js";
@@ -1854,7 +1846,7 @@ function normalizePublishedGatewayUrl(raw: unknown): string {
 
 	// Validate the lexical path before URL parsing can erase dot segments or
 	// decode/re-anchor unsafe input. Published gateway bases use the same mount
-	// grammar as configured base paths and are canonicalized without a trailing slash.
+	// grammar as configured base paths and omit a trailing slash.
 	const callbackBasePath = normalizeBasePath(rawGatewayCallbackPath(value));
 	return `${parsed.origin}${callbackBasePath}`;
 }
@@ -1896,11 +1888,6 @@ export interface GatewayConfig {
 	authToken: string;
 	defaultCwd: string;
 	staticDir?: string;
-	/**
-	 * Enables only the hostname exception required by Bobbit's Vite development
-	 * proxy. Headless production gateways leave this false.
-	 */
-	viteDevProxy?: boolean;
 	/** Canonical runtime mount; omitted/empty means root-mounted. */
 	basePath?: string;
 	/**
@@ -1972,10 +1959,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		if (delta >= SLOW_PHASE_MS) bootLog(`[boot] ctor ${label} +${delta}ms (@${now - __ckT0}ms)`);
 	};
 	const basePath = normalizeBasePath(config.basePath);
-	// One normalized decision owns banner-equivalent HTTP, WS, preview, and
-	// health behavior. Never recompute this with case-sensitive host literals.
-	const authEnforced = Boolean(config.forceAuth) || !isLoopbackHost(config.host);
-	const isLocalhostMode = !authEnforced;
 	let publishedGatewayUrl: string | undefined;
 	const { gatewayDeps, restoreExplicitRpcBridgeFactory } = installGatewayBridgeDeps(deps);
 	serverCommandRunner = gatewayDeps.commandRunner;
@@ -2190,10 +2173,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const groupPolicyStore = new ToolGroupPolicyStore(configDir);
 	const sandboxTokenStore = new SandboxTokenStore();
 	const cookieStore = new CookieStore(cookieSigningKey, { clock: gatewayDeps.clock });
-	// Preflights carry no Cookie or Authorization value. Remember only origins
-	// that completed a real authenticated bootstrap so later cookie-only
-	// cross-port requests can preflight without widening to every same-host port.
-	const boundBrowserOrigins = new Set<string>();
 	const previewOperations = createPreviewSessionOperationQueue();
 	const withPreviewSessionOperation = previewOperations.run;
 	const sessionManager = new SessionManager({
@@ -2794,6 +2773,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			res.end("Gateway starting");
 			return;
 		}
+		const isLocalhostMode = !config.forceAuth && isLoopbackHost(config.host);
+
 		// Content-origin preview route — served before API auth so iframe loads
 		// can authenticate via the bobbit_session cookie instead of the bearer
 		// token (iframes cannot set Authorization headers).
@@ -2819,35 +2800,14 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				});
 			}
 
-			const isTls = Boolean((req.socket as { encrypted?: boolean }).encrypted);
-			const corsOrigin = canonicalHttpOrigin(req.headers.origin);
-			const requestOrigin = canonicalRequestOrigin({ headers: req.headers, isTls });
-			const reflectCredentialedCors = (origin: string): void => {
-				res.setHeader("Access-Control-Allow-Origin", origin);
-				res.setHeader("Access-Control-Allow-Credentials", "true");
-				res.setHeader("Vary", "Origin");
-			};
+			// When serving the UI (same-origin), reflect the request origin; otherwise allow any.
+			const corsOrigin = config.staticDir ? (req.headers.origin || "*") : "*";
+			res.setHeader("Access-Control-Allow-Origin", corsOrigin);
+			if (corsOrigin !== "*") res.setHeader("Vary", "Origin");
 			res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
 			res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Bobbit-Session-Id, X-Bobbit-Spawning-Session");
 
 			if (req.method === "OPTIONS") {
-				const requestedHeaders = typeof req.headers["access-control-request-headers"] === "string"
-					? req.headers["access-control-request-headers"].split(",").map((value) => value.trim().toLowerCase())
-					: [];
-				// A new explicit remote gateway needs one unauthenticated preflight
-				// before it can prove its Bearer. Permit only that Authorization-shaped
-				// bootstrap; cookie-only preflights require the exact request origin or
-				// an origin previously bound by a successful authenticated response.
-				const mayBootstrapBearer = requestedHeaders.includes("authorization");
-				if (corsOrigin && (
-					corsOrigin === requestOrigin
-					|| boundBrowserOrigins.has(corsOrigin)
-					|| mayBootstrapBearer
-				)) {
-					reflectCredentialedCors(corsOrigin);
-				} else if (req.headers.origin === undefined) {
-					res.setHeader("Access-Control-Allow-Origin", "*");
-				}
 				res.writeHead(204);
 				res.end();
 				return;
@@ -2872,26 +2832,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const isPublicEndpoint = url.pathname === "/api/ca-cert" && req.method === "GET";
 
 			// Extract and verify the signed cookie exactly once in the global auth
-			// flow. Bound cookies must prove both this mount and the exact UI Origin.
-			// Historical v1 cookies remain root-compatible only at the exact gateway
-			// origin; they never inherit the v1.2 cross-port exception.
-			const cookieRequestOrigin = browserCookieRequestOrigin({ headers: req.headers, isTls });
-			let cookieVerification: ReturnType<CookieStore["verify"]> = undefined;
-			if (cookieRequestOrigin) {
-				for (const value of collectCookieValues(req, COOKIE_NAME)) {
-					const verification = cookieStore.verify(value, { basePath, origin: cookieRequestOrigin });
-					if (!verification) continue;
-					if (verification.binding || isBrowserCookieAuthenticationCompatible({
-						headers: req.headers,
-						isTls,
-					})) {
-						cookieVerification = verification;
-						break;
-					}
-				}
-			}
+			// flow. The verification result also carries the renewal decision.
+			const cookieValue = extractCookieValue(req);
+			const cookieVerification = cookieValue === undefined ? undefined : cookieStore.verify(cookieValue);
 			const hasValidCookie = cookieVerification !== undefined;
-			let authentication: BrowserCookieAuthentication = hasValidCookie && cookieVerification
+			let authentication: BrowserCookieAuthentication = cookieVerification
 				? { source: "signed-cookie", needsRenewal: cookieVerification.needsRenewal }
 				: { source: "other" };
 
@@ -2915,7 +2860,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Signed-cookie auth retains precedence over any simultaneously presented
 			// credential, matching the previous short-circuit behavior.
 			let sandboxScope: SandboxScope | undefined;
-			let bearerAuthenticated = false;
 			if (!isLocalhostMode && !isPublicEndpoint && !hasValidCookie) {
 				const authHeader = req.headers.authorization;
 				const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7)
@@ -2944,60 +2888,29 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 						return;
 					}
 					sandboxScope = scope;
-					bearerAuthenticated = true;
 				} else {
 					authentication = { source: "admin-bearer" };
-					bearerAuthenticated = true;
 				}
 			} else if (!isPublicEndpoint && isLocalhostMode && !hasValidCookie) {
 				authentication = { source: "localhost-trusted" };
 			}
 
 			if (!isPublicEndpoint) {
+				const isTls = Boolean((req.socket as { encrypted?: boolean }).encrypted);
 				const cookieEligibility = classifyBrowserCookieEligibility({
 					method: req.method,
 					pathname: url.pathname,
 					headers: req.headers,
 					isTls,
 				}, {
-					viteDevProxy: config.viteDevProxy === true,
+					deployment: config.staticDir ? "direct" : "vite",
 					configuredHost: config.host,
 					authentication,
 					hasSandboxCredential,
 				});
-				const secure = browserCookieRequiresSecure({ headers: req.headers, isTls });
-				// A mounted authenticated request actively removes any still-valid
-				// root Path=/ credential before installing/reusing the mount cookie.
-				if (basePath && !sandboxScope && hasRootScopedCookie(req, cookieStore)) {
-					expireCookie(res, { localhost: !secure, basePath: "" });
+				if (cookieEligibility.mayBootstrap || cookieEligibility.mayRenew) {
+					issueCookie(res, cookieStore, { localhost: isLocalhostMode && !isTls, basePath });
 				}
-				if ((cookieEligibility.mayBootstrap || cookieEligibility.mayRenew) && cookieRequestOrigin) {
-					// Cookie transport safety is independent of the localhost auth bypass.
-					// Authenticated loopback HTTP (including --auth) must omit Secure so
-					// browsers store it; TLS, public Hosts, and invalid Hosts fail secure.
-					issueCookie(res, cookieStore, {
-						localhost: !secure,
-						basePath,
-						origin: cookieRequestOrigin,
-					});
-					boundBrowserOrigins.add(cookieRequestOrigin);
-				}
-			}
-
-			if (hasValidCookie && cookieRequestOrigin) boundBrowserOrigins.add(cookieRequestOrigin);
-
-			// Reflect credentialed CORS only after authentication has established an
-			// exact bound cookie origin or a real Bearer/local authority. A mismatched
-			// same-host cookie request receives neither API data nor readable CORS.
-			if (corsOrigin && (
-				hasValidCookie
-				|| bearerAuthenticated
-				|| authentication.source === "localhost-trusted"
-				|| isPublicEndpoint
-			)) {
-				reflectCredentialedCors(corsOrigin);
-			} else if (req.headers.origin === undefined) {
-				res.setHeader("Access-Control-Allow-Origin", "*");
 			}
 
 			// Enforce sandbox route guard
@@ -3011,7 +2924,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, hasValidCookie, isLocalhostMode);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -3441,6 +3354,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 	});
 
+	const isLocalhostServer = !config.forceAuth && isLoopbackHost(config.host);
+
 	server.on("upgrade", (req, socket, head) => {
 		const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 		const wsPathname = stripBasePath(url.pathname, basePath);
@@ -3462,49 +3377,15 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 
 		const sessionId = viewerMatch ? "__viewer__" : match![1];
 
-		// Browser WebSockets always carry Origin and automatically attach cookies.
-		// Only a cookie bound to this UI origin may skip first-frame authentication.
-		// Ignore valid-but-stale cookies from another UI origin: an explicitly selected
-		// remote gateway must still be able to authenticate with its real Bearer frame.
-		// The stale cookie grants no authority, so localhost-sentinel/cookie-only frames
-		// remain rejected by handleWebSocketConnection below.
-		const wsCookies = collectCookieValues(req, COOKIE_NAME);
-		let websocketCookieAuthenticated = false;
-		let websocketBoundOrigin: string | undefined;
-		if (wsCookies.length > 0) {
-			const isTls = Boolean((req.socket as { encrypted?: boolean }).encrypted);
-			const wsOrigin = browserCookieRequestOrigin({ headers: req.headers, isTls });
-			if (wsOrigin) {
-				for (const value of wsCookies) {
-					const exactVerification = cookieStore.verify(value, { basePath, origin: wsOrigin });
-					if (exactVerification && (
-						exactVerification.binding
-						|| isBrowserCookieAuthenticationCompatible({ headers: req.headers, isTls })
-					)) {
-						websocketCookieAuthenticated = true;
-						// Only the signed v1.2 claim may restore cross-port preflight
-						// state after a process restart. Legacy exact-gateway cookies need
-						// no remembered exception and must not bind a sibling origin.
-						if (exactVerification.binding) websocketBoundOrigin = wsOrigin;
-						break;
-					}
-				}
-			}
-		}
-
 		const ip = req.socket.remoteAddress || "unknown";
-		if (!isLocalhostMode && rateLimiter.isRateLimited(ip)) {
+		if (!isLocalhostServer && rateLimiter.isRateLimited(ip)) {
 			socket.destroy();
 			return;
 		}
 
 		wss.handleUpgrade(req, socket, head, (ws) => {
-			// The HTTP upgrade has now succeeded with the cookie's exact signed
-			// Origin claim. Rebuild only that origin's volatile CORS allowance so a
-			// subsequent mutation can preflight without retaining the real bearer.
-			if (websocketBoundOrigin) boundBrowserOrigins.add(websocketBoundOrigin);
 			const channels = extensionChannelServices;
-			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostMode || websocketCookieAuthenticated, sandboxTokenStore, projectContextManager, toolManager, packContributionRegistry, preferencesStore, channels?.registry as any, channels?.openPermits as any);
+			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore, projectContextManager, toolManager, packContributionRegistry, preferencesStore, channels?.registry as any, channels?.openPermits as any);
 		});
 	});
 
@@ -3756,19 +3637,15 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// can be published atomically before any agent/extension process resumes.
 			const actualPort = await bindGatewayServer();
 			try {
-				// Programmatic createGateway callers do not have the CLI's onBound
-				// publisher. Install a listener-derived, mounted URL unconditionally so
-				// restored agents and extension hooks can never inherit stale env/state.
+				// Programmatic callers do not have the CLI publisher. Install a
+				// listener-derived mounted URL before any agent or extension resumes.
 				publishedGatewayUrl = defaultPublishedGatewayUrl(config, actualPort, server);
 				const callbackUrl = await config.onBound?.(actualPort);
 				if (callbackUrl !== undefined) {
-					// onBound remains authoritative for CLI/public-proxy callers, but only
-					// a canonical HTTP(S) gateway base may cross the agent boundary.
 					publishedGatewayUrl = normalizePublishedGatewayUrl(callbackUrl);
 				} else {
-					// CLI onBound owns its injected/atomic publication. Programmatic callers
-					// without a publisher still need the same durable URL because direct and
-					// sandbox agent setup read this file rather than LifecycleHub memory.
+					// CLI onBound owns its injected publication. Programmatic callers still
+					// need the durable value used by direct and sandbox agent setup.
 					persistPublishedGatewayUrl(stateDir, publishedGatewayUrl, gatewayDeps.fsImpl);
 				}
 
@@ -4267,6 +4144,7 @@ async function handleApiRoute(
 	inboxManager?: InboxManager,
 	marketplaceSourceStore?: MarketplaceSourceStore,
 	marketplaceInstaller?: MarketplaceInstaller,
+	cookieStore?: CookieStore,
 	actionDispatcher?: ActionDispatcher,
 	routeDispatcherArg?: RouteDispatcher,
 	routeRegistryArg?: RouteRegistry,
@@ -4277,8 +4155,6 @@ async function handleApiRoute(
 	fsImpl?: FsLike,
 	clock?: Clock,
 	withPreviewSessionOperation: PreviewSessionOperation = async (_sessionId, operation) => operation(),
-	cookieAuthenticated = false,
-	isLocalhostMode = false,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -4772,10 +4648,11 @@ async function handleApiRoute(
 
 	// GET /api/health — unauthenticated so the client can probe localhost mode
 	if (url.pathname === "/api/health" && req.method === "GET") {
+		const isLocalhost = !config.forceAuth && (config.host === "localhost" || config.host === "127.0.0.1" || config.host === "::1");
 		json({
 			status: "ok",
 			sessions: sessionManager.listSessions().length,
-			localhost: isLocalhostMode,
+			localhost: isLocalhost,
 			aigw: !!getAigwUrl(preferencesStore),
 			setupComplete: isSetupComplete(),
 			orphanedTranscripts: sessionManager.orphanedTranscriptsCount,
@@ -7127,7 +7004,8 @@ async function handleApiRoute(
 		verificationHarness,
 		teamManager,
 		sessionManager,
-		cookieAuthenticated,
+		// Always wired by the sole caller (see handleApiRoute optional-param note).
+		cookieStore: cookieStore!,
 		requireSubgoalsEnabled,
 		getGoalAcrossProjects,
 		getGoalManagerForGoal,
@@ -7410,7 +7288,7 @@ async function handleApiRoute(
 					const rootGoalId = resolvedParentGoal.rootGoalId ?? resolvedParentGoal.id;
 					const authz = authorizeChildrenMutation({
 						mutationClass: "operator",
-						isHumanOperator: cookieAuthenticated,
+						isHumanOperator: cookieTryAuth(req, cookieStore!),
 						// Derive the AUTHENTIC caller from the per-session secret,
 						// never the forgeable public spawning-session header.
 						authenticCallerSessionId: sessionManager.sessionSecretStore.resolveSessionIdBySecret(
@@ -7924,7 +7802,7 @@ async function handleApiRoute(
 			};
 			const authz = authorizeChildrenMutation({
 				mutationClass: "operator",
-				isHumanOperator: cookieAuthenticated,
+				isHumanOperator: cookieTryAuth(req, cookieStore!),
 				// S1: derive the AUTHENTIC caller from the per-session secret,
 				// never the forgeable public spawning-session header.
 				authenticCallerSessionId: sessionManager.sessionSecretStore.resolveSessionIdBySecret(

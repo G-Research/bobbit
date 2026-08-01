@@ -1,18 +1,6 @@
-/**
- * Normalize a host literal only far enough to classify the gateway's supported
- * loopback binds. Brackets are removed only when they are a balanced IPv6
- * wrapper; malformed bracketed values remain non-loopback and therefore fail
- * closed into authenticated mode.
- */
+/** Return whether a listener host is a loopback name/address. */
 export function isLoopbackHost(host: string): boolean {
-	let normalized = host.trim().toLowerCase();
-	if (normalized.startsWith("[") && normalized.endsWith("]")) {
-		const literal = normalized.slice(1, -1);
-		if (literal !== "::1") return false;
-		normalized = literal;
-	} else if (normalized.includes("[") || normalized.includes("]")) {
-		return false;
-	}
+	const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
 	return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
 }
 

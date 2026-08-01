@@ -30,11 +30,8 @@ export type BrowserCookieAuthentication =
 	| { source: "other" };
 
 export interface BrowserCookieEligibilityContext {
-	/**
-	 * Permit Vite's development-only hostname rewrite exception. Production
-	 * cookie policy never depends on whether this gateway serves static files.
-	 */
-	viteDevProxy: boolean;
+	/** `direct` serves the built UI; `vite` permits the development proxy origin exception. */
+	deployment: "direct" | "vite";
 	/** Gateway bind host (`GatewayConfig.host`), used only by the Vite exception. */
 	configuredHost: string;
 	authentication: BrowserCookieAuthentication;
@@ -65,19 +62,6 @@ export interface BrowserCookieEligibility {
 	mayBootstrap: boolean;
 	mayRenew: boolean;
 	reason: BrowserCookieEligibilityReason;
-}
-
-/**
- * Whether a browser session cookie needs the Secure attribute for this request.
- * The direct socket transport and Host header are authoritative: forwarded
- * headers are deliberately ignored. Invalid/missing Host values fail secure.
- */
-export function browserCookieRequiresSecure(
-	request: Pick<BrowserCookieRequestMetadata, "headers" | "isTls">,
-): boolean {
-	if (request.isTls) return true;
-	const requestOrigin = parseRequestOrigin(request.headers, false);
-	return !requestOrigin || !isLoopbackHostname(requestOrigin.hostname);
 }
 
 const INELIGIBLE_SESSION_HEADERS = [
@@ -120,8 +104,7 @@ export function classifyBrowserCookieEligibility(
 	}
 
 	const fetchSite = readSingleHeader(request.headers, "sec-fetch-site");
-	const normalizedFetchSite = fetchSite.kind === "value" ? normalizeToken(fetchSite.value) : undefined;
-	if (normalizedFetchSite !== "same-origin" && normalizedFetchSite !== "same-site") {
+	if (fetchSite.kind !== "value" || normalizeToken(fetchSite.value) !== "same-origin") {
 		return deny("invalid-fetch-site");
 	}
 
@@ -140,23 +123,18 @@ export function classifyBrowserCookieEligibility(
 	const originHeader = readSingleHeader(request.headers, "origin");
 	if (originHeader.kind === "invalid") return deny("invalid-origin");
 	if (originHeader.kind === "missing") {
-		// Same-origin navigational GETs may omit Origin. A `same-site` request and
-		// every mutating request need the serialized browser origin so hostname and
-		// scheme compatibility can be proven rather than inferred.
-		if (normalizedFetchSite === "same-site" || normalizeMethod(request.method) !== "GET") {
-			return deny("origin-required");
-		}
+		// Same-origin navigational GETs may omit Origin. Other methods must provide
+		// it so the production or Vite origin tuple can be classified.
+		if (normalizeMethod(request.method) !== "GET") return deny("origin-required");
 	} else {
 		const browserOrigin = parseOriginHeader(originHeader.value!);
 		if (!browserOrigin) return deny("invalid-origin");
 		if (browserOrigin.protocol === "http:" && !isLoopbackHostname(browserOrigin.hostname)) {
 			return deny("insecure-non-loopback-origin");
 		}
-		if (normalizedFetchSite === "same-site" && browserOrigin.origin === requestOrigin.origin) {
-			// An exact origin is serialized by browsers as `same-origin`, not `same-site`.
-			return deny("invalid-fetch-site");
+		if (!isAcceptedOrigin(browserOrigin, requestOrigin, context)) {
+			return deny("origin-mismatch");
 		}
-		if (!isAcceptedOrigin(browserOrigin, requestOrigin, context)) return deny("origin-mismatch");
 	}
 
 	switch (context.authentication.source) {
@@ -233,35 +211,6 @@ function parseOriginHeader(raw: string): ParsedOrigin | undefined {
 	return parseOrigin(raw);
 }
 
-/** Return the canonical value for one valid serialized HTTP(S) Origin header. */
-export function canonicalHttpOrigin(raw: string | readonly string[] | undefined): string | undefined {
-	if (typeof raw !== "string") return undefined;
-	return parseOriginHeader(raw)?.origin;
-}
-
-/** Canonical actual gateway origin derived only from the socket TLS bit and Host. */
-export function canonicalRequestOrigin(
-	request: Pick<BrowserCookieRequestMetadata, "headers" | "isTls">,
-): string | undefined {
-	return parseRequestOrigin(request.headers, request.isTls)?.origin;
-}
-
-/**
- * Canonical browser authority for a cookie-authenticated API/WS request. A
- * serialized Origin wins; originless same-origin requests fall back to the
- * actual gateway origin. Malformed Origin/Host values fail closed.
- */
-export function browserCookieRequestOrigin(
-	request: Pick<BrowserCookieRequestMetadata, "headers" | "isTls">,
-): string | undefined {
-	const requestOrigin = canonicalRequestOrigin(request);
-	if (!requestOrigin) return undefined;
-	const originHeader = readSingleHeader(request.headers, "origin");
-	if (originHeader.kind === "invalid") return undefined;
-	if (originHeader.kind === "value") return parseOriginHeader(originHeader.value!)?.origin;
-	return requestOrigin;
-}
-
 function parseOrigin(raw: string): ParsedOrigin | undefined {
 	try {
 		const parsed = new URL(raw);
@@ -279,63 +228,21 @@ function parseOrigin(raw: string): ParsedOrigin | undefined {
 	}
 }
 
-function isSameSchemeHost(a: ParsedOrigin, b: ParsedOrigin): boolean {
-	return a.protocol === b.protocol && a.hostname === b.hostname;
-}
-
 function isAcceptedOrigin(
 	browserOrigin: ParsedOrigin,
 	requestOrigin: ParsedOrigin,
 	context: BrowserCookieEligibilityContext,
 ): boolean {
 	if (browserOrigin.origin === requestOrigin.origin) return true;
+	if (context.deployment !== "vite") return false;
 
-	// A production UI may intentionally select a headless gateway on another
-	// port of the same scheme/normalized public host. Only a real admin bearer
-	// may establish that binding; subsequent renewal is safe only because the
-	// caller first completed centralized verification of the cookie's exact
-	// origin claim. This is the normal production rule, independent of static UI.
-	const hasBindingAuthority = context.authentication.source === "admin-bearer"
-		|| context.authentication.source === "signed-cookie";
-	if (hasBindingAuthority && isSameSchemeHost(browserOrigin, requestOrigin)) return true;
-
-	// The proxy exception exists only for an explicitly identified Vite dev
-	// gateway, whose rewritten Host can differ from the browser-facing loopback
-	// alias. Never infer it from a missing static directory or forwarded headers.
-	if (!context.viteDevProxy) return false;
 	const configuredHostname = normalizeConfiguredHostname(context.configuredHost);
 	const bothUseConfiguredHost = configuredHostname !== undefined
 		&& browserOrigin.hostname === configuredHostname
 		&& requestOrigin.hostname === configuredHostname;
 	const bothLoopback = isLoopbackHostname(browserOrigin.hostname)
 		&& isLoopbackHostname(requestOrigin.hostname);
-	const sameProtocol = browserOrigin.protocol === requestOrigin.protocol;
-	// Vite may terminate development TLS in front of Bobbit's HTTP loopback
-	// listener. That downgrade is safe only inside the explicit Vite mode and
-	// only when both browser and socket authorities are independently loopback.
-	// The inverse shape (HTTP UI -> HTTPS gateway) cannot retain Secure cookies.
-	const viteTlsTermination = bothLoopback
-		&& browserOrigin.protocol === "https:"
-		&& requestOrigin.protocol === "http:";
-	return (sameProtocol && (bothUseConfiguredHost || bothLoopback)) || viteTlsTermination;
-}
-
-/**
- * Legacy unbound v1 cookies remain valid only for the gateway's exact origin.
- * Cross-port compatibility is provided exclusively by v1.2's signed origin
- * claim. Requests without Origin retain same-origin/non-browser compatibility.
- */
-export function isBrowserCookieAuthenticationCompatible(
-	request: Pick<BrowserCookieRequestMetadata, "headers" | "isTls">,
-): boolean {
-	const originHeader = readSingleHeader(request.headers, "origin");
-	if (originHeader.kind === "missing") return canonicalRequestOrigin(request) !== undefined;
-	if (originHeader.kind === "invalid") return false;
-	const browserOrigin = parseOriginHeader(originHeader.value!);
-	const requestOrigin = parseRequestOrigin(request.headers, request.isTls);
-	// This helper is now the legacy-v1 compatibility boundary. Bound v1.2
-	// cookies prove their exact cross-port UI origin cryptographically instead.
-	return Boolean(browserOrigin && requestOrigin && browserOrigin.origin === requestOrigin.origin);
+	return bothUseConfiguredHost || bothLoopback;
 }
 
 function normalizeConfiguredHostname(host: string): string | undefined {

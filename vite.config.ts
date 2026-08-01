@@ -108,47 +108,6 @@ function stripH2Request(raw: http.IncomingHttpHeaders, targetHost: string): Reco
 	return out;
 }
 
-/**
- * Recover the source Vite origin for a same-origin browser fetch before the
- * proxy replaces Host with the gateway authority. Browsers legitimately omit
- * Origin on GET; without this narrow reconstruction the gateway binds its
- * session cookie to the target port, then rejects the browser's Vite-origin WS.
- */
-export function viteProxyBrowserOrigin(
-	headers: http.IncomingHttpHeaders,
-	isTls: boolean,
-): string | undefined {
-	// Never repair or override a caller-supplied Origin, including malformed or
-	// duplicate values. The gateway must remain the validation authority.
-	if (headers.origin !== undefined) return undefined;
-	if (headers["sec-fetch-site"] !== "same-origin") return undefined;
-	const fetchMode = headers["sec-fetch-mode"];
-	if (fetchMode !== "cors" && fetchMode !== "same-origin") return undefined;
-
-	const host = headers.host;
-	const authority = headers[":authority"];
-	if (host !== undefined && authority !== undefined && host !== authority) return undefined;
-	const sourceAuthority = host ?? authority;
-	if (
-		typeof sourceAuthority !== "string"
-		|| sourceAuthority !== sourceAuthority.trim()
-		|| sourceAuthority.length === 0
-		|| sourceAuthority.endsWith(":")
-		|| sourceAuthority.includes("\\")
-		|| /[\s,/?#@]/.test(sourceAuthority)
-	) return undefined;
-
-	try {
-		const parsed = new URL(`${isTls ? "https" : "http"}://${sourceAuthority}`);
-		if (parsed.username || parsed.password || !parsed.hostname || parsed.pathname !== "/" || parsed.search || parsed.hash) {
-			return undefined;
-		}
-		return parsed.origin;
-	} catch {
-		return undefined;
-	}
-}
-
 /** Copy headers, stripping HTTP/1.1 connection headers forbidden in HTTP/2. */
 function stripH1Response(raw: http.IncomingHttpHeaders): Record<string, string | string[] | undefined> {
 	const out: Record<string, string | string[] | undefined> = {};
@@ -474,11 +433,6 @@ function dynamicGatewayProxy(): Plugin {
 				const targetPath = gatewayProxyPath(target, incomingUrl);
 				const targetRequestUrl = new URL(targetPath, target.origin);
 				const requestHeaders = stripH2Request(req.headers, target.host);
-				const sourceOrigin = viteProxyBrowserOrigin(
-					req.headers,
-					Boolean((req.socket as { encrypted?: boolean }).encrypted),
-				);
-				if (sourceOrigin) requestHeaders.origin = sourceOrigin;
 				// Manifest and preview HTML are selectively rebased below. Ask for an
 				// identity body so the proxy never rewrites compressed bytes.
 				if (isManifest || isPreview) requestHeaders["accept-encoding"] = "identity";

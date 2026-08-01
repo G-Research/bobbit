@@ -21,8 +21,6 @@ export type GatewayRoute = string & { readonly [gatewayRouteBrand]: true };
 export type PublicGatewayPath = string & { readonly [publicGatewayPathBrand]: true };
 
 const BASE_SEGMENT_RE = /^[A-Za-z0-9._~-]+$/;
-const PREVIEW_SESSION_RE = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
-const PREVIEW_ARTIFACT_RE = /^[A-Za-z0-9_-]{6,64}$/;
 const CONTROL_RE = /[\u0000-\u001f\u007f]/;
 const WHITESPACE_RE = /\s/;
 
@@ -69,44 +67,6 @@ export function gatewayRoute(raw: string): GatewayRoute {
 		throw new InvalidBasePathError("Gateway routes must not contain control characters or backslashes");
 	}
 	return raw as GatewayRoute;
-}
-
-/**
- * Validate preview data received across JSON/SSE/storage boundaries and brand
- * its mount-relative route. Public/mounted URLs are deliberately rejected.
- */
-export function previewGatewayRoute(raw: unknown): GatewayRoute {
-	if (typeof raw !== "string") {
-		throw new InvalidBasePathError("Invalid preview route: expected a string");
-	}
-	const match = /^\/preview\/([^/?#]+)\/(.+)$/u.exec(raw);
-	if (!match || !PREVIEW_SESSION_RE.test(match[1])) {
-		throw new InvalidBasePathError(`Invalid preview route ${JSON.stringify(raw)}`);
-	}
-
-	const tail = match[2];
-	const pathEnd = tail.search(/[?#]/);
-	const rawPath = pathEnd < 0 ? tail : tail.slice(0, pathEnd);
-	if (!rawPath || rawPath.includes("\\") || rawPath.includes("//")) {
-		throw new InvalidBasePathError(`Invalid preview path ${JSON.stringify(raw)}`);
-	}
-	const segments = rawPath.split("/");
-	for (const segment of segments) {
-		if (!segment) throw new InvalidBasePathError(`Invalid preview path ${JSON.stringify(raw)}`);
-		let decoded: string;
-		try {
-			decoded = decodeURIComponent(segment);
-		} catch {
-			throw new InvalidBasePathError(`Invalid preview path ${JSON.stringify(raw)}`);
-		}
-		if (!decoded || decoded === "." || decoded === ".." || /[\\/\u0000-\u001f\u007f]/u.test(decoded)) {
-			throw new InvalidBasePathError(`Invalid preview path ${JSON.stringify(raw)}`);
-		}
-	}
-	if (segments[0] === "_artifact" && (segments.length < 3 || !PREVIEW_ARTIFACT_RE.test(segments[1]))) {
-		throw new InvalidBasePathError(`Invalid preview artifact route ${JSON.stringify(raw)}`);
-	}
-	return gatewayRoute(raw);
 }
 
 /** Identity in root mode; `null` means the pathname is outside the exact mount. */

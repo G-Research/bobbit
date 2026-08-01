@@ -338,9 +338,7 @@ export async function restorePreviewArtifact(
 export async function removeArtifacts(sessionId: string): Promise<void> {
 	if (!VALID_SESSION_ID.test(sessionId || "")) return;
 	invalidatePreviewArtifactCatalog(sessionId);
-	const sessionRoot = path.join(artifactRoot(), sessionId);
-	previewMount.invalidatePreviewDirectoryGenerationsWithin(sessionRoot);
-	await previewMount.removePreviewTree(sessionRoot, { fs: artifactFs });
+	await previewMount.removePreviewTree(path.join(artifactRoot(), sessionId), { fs: artifactFs });
 }
 
 /** Remove artifact directories for sessions absent from the supplied set. */
@@ -369,10 +367,7 @@ export async function sweepOrphanArtifacts(
 		candidates = [];
 		// A failed recursive removal may still have changed descendants. Invalidate
 		// every attempted session before deletion, not only successful outcomes.
-		for (const id of batch) {
-			invalidatePreviewArtifactCatalog(id);
-			previewMount.invalidatePreviewDirectoryGenerationsWithin(path.join(artifactRoot(), id));
-		}
+		for (const id of batch) invalidatePreviewArtifactCatalog(id);
 		const outcomes = await previewMount.removePreviewTrees(
 			batch.map(id => path.join(artifactRoot(), id)),
 			{ fs: artifactFs, concurrency: RECOVERY_IO_CONCURRENCY },
