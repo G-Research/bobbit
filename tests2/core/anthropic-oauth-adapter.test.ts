@@ -665,6 +665,67 @@ describe("Anthropic OAuth Pi browser adapter", () => {
 		activeFlowIds.delete(started.flowId);
 	});
 
+	it("makes logout terminal when a late Pi exchange succeeds", async () => {
+		const issued = oauthCredential();
+		let releaseExchange!: () => void;
+		let exchangeStarted = false;
+		const exchangeBlocked = new Promise<void>((resolve) => { releaseExchange = resolve; });
+		const models: Pick<Models, "login"> = {
+			login: (async (_providerId: string, _type: string, interaction: AuthInteraction) => {
+				interaction.notify({ type: "auth_url", url: currentAuthorizeUrl() });
+				await interaction.prompt({ type: "manual_code", message: "Paste redirect URL" });
+				exchangeStarted = true;
+				await exchangeBlocked;
+				// Model Pi persisting immediately before reporting successful login.
+				writeFileSync(authPath, JSON.stringify({ anthropic: issued }), "utf8");
+				return issued;
+			}) as Models["login"],
+		};
+		const started = await startAnthropic(models);
+		const completion = oauthComplete(started.flowId, randomUUID(), OFFLINE_FETCH);
+		for (let i = 0; i < 100 && !exchangeStarted; i++) await Promise.resolve();
+		assert.equal(exchangeStarted, true);
+
+		await oauthLogout("anthropic");
+		releaseExchange();
+		assert.deepEqual(await completion, { success: false, error: "OAuth flow cancelled" });
+		const document = existsSync(authPath) ? JSON.parse(readFileSync(authPath, "utf8")) as Record<string, unknown> : {};
+		assert.equal(document.anthropic, undefined, "logout must remove the late flow's credential");
+		activeFlowIds.delete(started.flowId);
+	});
+
+	it("removes only the late flow credential after logout", async () => {
+		const issued = oauthCredential();
+		const newer = oauthCredential();
+		let releaseExchange!: () => void;
+		let exchangeStarted = false;
+		const exchangeBlocked = new Promise<void>((resolve) => { releaseExchange = resolve; });
+		const models: Pick<Models, "login"> = {
+			login: (async (_providerId: string, _type: string, interaction: AuthInteraction) => {
+				interaction.notify({ type: "auth_url", url: currentAuthorizeUrl() });
+				await interaction.prompt({ type: "manual_code", message: "Paste redirect URL" });
+				exchangeStarted = true;
+				await exchangeBlocked;
+				writeFileSync(authPath, JSON.stringify({ anthropic: issued }), "utf8");
+				// A newer login wins after Pi's write but before terminal cleanup.
+				queueMicrotask(() => writeFileSync(authPath, JSON.stringify({ anthropic: newer }), "utf8"));
+				return issued;
+			}) as Models["login"],
+		};
+		const started = await startAnthropic(models);
+		const completion = oauthComplete(started.flowId, randomUUID(), OFFLINE_FETCH);
+		for (let i = 0; i < 100 && !exchangeStarted; i++) await Promise.resolve();
+		assert.equal(exchangeStarted, true);
+
+		await oauthLogout("anthropic");
+		releaseExchange();
+		assert.deepEqual(await completion, { success: false, error: "OAuth flow cancelled" });
+		const stored = JSON.parse(readFileSync(authPath, "utf8")).anthropic as OAuthCredential;
+		assert.equal(stored.access, newer.access, "terminal cleanup must not remove a newer credential");
+		assert.equal(stored.refresh, newer.refresh);
+		activeFlowIds.delete(started.flowId);
+	});
+
 	it("forwards a full remote redirect unchanged and accepts a bare authorization code", async () => {
 		for (const mode of ["redirect", "bare"] as const) {
 			const expectedState = randomUUID();

@@ -388,6 +388,11 @@ async function storeOAuthCredentials(
 	await getOAuthCredentialStore().modify(provider, async () => shouldStore() ? credentials : undefined);
 }
 
+/** A logout/rejection after flow start makes its eventual credential terminal. */
+function isTerminalPiFlow(flow: PendingPiOAuth): boolean {
+	return flow.cancelled || credentialGeneration(flow.provider) !== flow.credentialGeneration;
+}
+
 /**
  * Restore the credential displaced by a cancelled re-login, but only if the
  * cancelled result is still the provider's exact current row. This compare and
@@ -590,20 +595,21 @@ async function oauthStartPi(
 				throw new Error(`OAuth provider returned a non-OAuth credential: ${provider}`);
 			}
 			// Keep the exact output before any persistence. It is the only row a
-			// late cancel is ever permitted to remove or replace.
+			// terminal flow is ever permitted to remove or replace.
 			flow.issuedCredential = { ...credential };
-			if (flow.cancelled) {
+			if (isTerminalPiFlow(flow)) {
 				// Pi-backed Anthropic models can persist before resolving; injected
-				// Models persist below. Restore only if this cancelled result remains
-				// current, never overwriting a newer concurrent credential.
+				// Models persist below. A logout/rejection must delete only this exact
+				// late result, never restoring a credential that logout removed.
 				await restoreCancelledOAuthCredentials(provider, credential, flow.previousCredential, flow.credentialGeneration);
 				throw new Error("OAuth flow cancelled");
 			}
 			// Gateway-backed Pi Models persists Anthropic itself. Injected test
-			// doubles and Codex retain Bobbit's returned-credential path. Check the
-			// cancellation state inside the mutation as well as before it.
-			if (persistReturnedCredential) await storeOAuthCredentials(provider, credential, () => !flow.cancelled);
-			if (flow.cancelled) {
+			// doubles and Codex retain Bobbit's returned-credential path. Test
+			// terminal state inside the mutation and after it: logout can happen
+			// while this flow is waiting for the credential-store lock.
+			if (persistReturnedCredential) await storeOAuthCredentials(provider, credential, () => !isTerminalPiFlow(flow));
+			if (isTerminalPiFlow(flow)) {
 				await restoreCancelledOAuthCredentials(provider, credential, flow.previousCredential, flow.credentialGeneration);
 				throw new Error("OAuth flow cancelled");
 			}
@@ -1169,11 +1175,14 @@ async function revokeGoogleToken(token: string, fetchImpl: typeof fetch = defaul
  */
 export async function oauthLogout(providerInput?: string, fetchImpl: typeof fetch = defaultFetch): Promise<{ success: boolean; provider: OAuthProviderId }> {
 	const provider = normalizeProvider(providerInput);
+	// Tombstone this provider before deleting its row. An in-flight Pi login can
+	// resolve after the deletion, but its captured generation then makes its own
+	// exact result removable without touching a newer credential or a provider
+	// that was not logged out.
+	invalidateCredentialGeneration(provider);
 	if (provider === "anthropic") {
 		// There is no Anthropic revocation endpoint. Pi's public CredentialStore
-		// deletion is the complete provider-scoped logout operation. Tombstone the
-		// row first so a cancelled callback that writes late cannot restore it.
-		invalidateCredentialGeneration(provider);
+		// deletion is the complete provider-scoped logout operation.
 		await getOAuthCredentialStore().delete(provider);
 	} else if (provider === "google-gemini-cli") {
 		await getOAuthCredentialStore().mutate(provider, async (current) => {
