@@ -1283,7 +1283,43 @@
     },
     {
       "path": "tests2/browser/journeys/goal-team-gates.journey.spec.ts",
-      "reason": "v2 browser smoke journey — multi-feature integration test, no legacy equivalent.",
+      "reason": "Goal dashboard navigation, title/sidebar rendering, and direct goal API smoke.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/goal-team-gates-plan.journey.spec.ts",
+      "reason": "Independent plan-tab gate-state browser journey split from goal-team-gates to stay below the strict 60-second per-spec wall cap.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/goal-team-gates-verification.journey.spec.ts",
+      "reason": "Independent gate-verification projection and stale-reconcile browser journey split from goal-team-gates to stay below the strict 60-second per-spec wall cap.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/goal-team-gates-signoff.journey.spec.ts",
+      "reason": "Independent gate-card human sign-off handoff browser journey split from goal-team-gates to stay below the strict 60-second per-spec wall cap.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/goal-team-gates-reset.journey.spec.ts",
+      "reason": "Independent completed-goal gate-reset cross-tab reconciliation browser journey split from goal-team-gates to stay below the strict 60-second per-spec wall cap.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
@@ -1890,6 +1926,22 @@
     },
     {
       "path": "tests2/browser/journeys/goal-team-gates.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/goal-team-gates-plan.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/goal-team-gates-verification.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/goal-team-gates-signoff.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/goal-team-gates-reset.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
@@ -6445,9 +6497,9 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E (Issue #1 slim gate-list projection) â€” consolidated into journey-goal-team-gates with behavioral assertions (list strips inline output; detail retains it).",
       "replacement": [
-        "tests2/browser/journeys/goal-team-gates.journey.spec.ts"
+        "tests2/browser/journeys/goal-team-gates-verification.journey.spec.ts"
       ],
-      "replacementNote": "ported as behavioral assertions in the goal-team-gates journey"
+      "replacementNote": "ported as behavioral assertions in the goal-team-gates-verification journey"
     },
     {
       "file": "tests/e2e/ui/gate-verification-stale-reconcile.spec.ts",
@@ -6455,9 +6507,9 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E (Issue #2 stale-reconcile) â€” alive-path baseline consolidated into journey-goal-team-gates; the source spec's stale-death scenario is test.fixme (needs an un-built server death hook).",
       "replacement": [
-        "tests2/browser/journeys/goal-team-gates.journey.spec.ts"
+        "tests2/browser/journeys/goal-team-gates-verification.journey.spec.ts"
       ],
-      "replacementNote": "alive-path baseline ported as a behavioral assertion; stale-death scenario remains fixme upstream"
+      "replacementNote": "alive-path baseline ported as a behavioral assertion in goal-team-gates-verification; stale-death scenario remains fixme upstream"
     },
     {
       "file": "tests/e2e/ui/gate-status-cross-surface.spec.ts",
@@ -6949,9 +7001,9 @@
       "file": "tests/e2e/ui/plan-tab-gate-status.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "rationale": "Non-geometry browser E2E â€” consolidate into journey-goal-team-gates-verification.",
+      "rationale": "Non-geometry browser E2E â€” consolidated into the goal-team-gates-plan journey.",
       "replacement": [
-        "tests2/browser/journeys/goal-team-gates.journey.spec.ts"
+        "tests2/browser/journeys/goal-team-gates-plan.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
