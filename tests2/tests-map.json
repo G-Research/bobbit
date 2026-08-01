@@ -102,6 +102,15 @@
       }
     },
     {
+      "path": "tests2/core/base-path-source-guards.test.ts",
+      "reason": "Repo-wide client source guards preventing bare-origin gateway fallback, raw same-origin API or preview routes at browser URL sinks, and direct Authorization Bearer construction outside the centralized gateway boundary.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/base-path-vite-proxy.test.ts",
       "reason": "Vite proxy and production-build coverage proving mounted gateway HTTP/WS forwarding, response rebasing, root-mounted development, and runtime-based emitted chunk URLs.",
       "execution": {
