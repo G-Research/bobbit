@@ -18,7 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
-import { buildDockerRunArgs, SANDBOX_STATE_MOUNTS } from "./docker-args.js";
+import { buildDockerRunArgs, e2eSandboxVolumeCreateArgs, projectSandboxVolumeNames, SANDBOX_STATE_MOUNTS, validatedE2ERunId } from "./docker-args.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { globalAgentDir } from "../bobbit-dir.js";
 import { toDockerPath } from "./rpc-bridge.js";
@@ -348,6 +348,12 @@ export class ProjectSandbox {
 	private readonly commandRunner: CommandRunner;
 	private readonly clock: Clock;
 	private readonly worktreeSetupRuntime: { skipNpmCi?: boolean; recordSetupPath?: string };
+	/**
+	 * E2E resource owner captured when this sandbox lifecycle begins. It must not
+	 * be reread from process.env during remount, recovery, or destruction: test
+	 * coordinators can coexist in one Node process while their environment changes.
+	 */
+	private readonly e2eRunId: string | undefined;
 
 	constructor(private options: ProjectSandboxOptions, deps: { commandRunner?: CommandRunner; clock?: Clock; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } } = {}) {
 		if (!options || typeof options !== "object" || typeof options.projectId !== "string" || !options.projectId) {
@@ -356,6 +362,7 @@ export class ProjectSandbox {
 		this.commandRunner = deps.commandRunner ?? realCommandRunner;
 		this.clock = deps.clock ?? realClock;
 		this.worktreeSetupRuntime = deps.worktreeSetupRuntime ?? {};
+		this.e2eRunId = validatedE2ERunId();
 	}
 
 	private execDocker(args: readonly string[], options?: any): Promise<{ stdout: string; stderr: string }> {
@@ -834,7 +841,11 @@ export class ProjectSandbox {
 	/** Full destroy: remove container AND volume. */
 	async destroy(): Promise<void> {
 		this.stopHealthMonitor();
-		const volumeName = this._volumeName();
+		const volumes = projectSandboxVolumeNames(this.options.projectId, this.e2eRunId);
+		// Production retains its historic workspace-only destroy behavior. Legacy
+		// E2E owns both run-namespaced volumes and must remove both even when a
+		// spec destroys the container before global teardown can inspect it.
+		const volumeNames = this.e2eRunId ? Object.values(volumes) : [volumes.workspace];
 		if (this.containerId) {
 			try {
 				await this.execDocker(["rm", "-f", this.containerId], {
@@ -843,12 +854,14 @@ export class ProjectSandbox {
 				});
 			} catch { /* already gone */ }
 		}
-		try {
-			await this.execDocker(["volume", "rm", "-f", volumeName], {
-				timeout: 15_000,
-				env: DOCKER_ENV,
-			});
-		} catch { /* volume may not exist */ }
+		for (const volumeName of volumeNames) {
+			try {
+				await this.execDocker(["volume", "rm", "-f", volumeName], {
+					timeout: 15_000,
+					env: DOCKER_ENV,
+				});
+			} catch { /* volume may not exist */ }
+		}
 		this.containerId = null;
 		this._status = "starting";
 		console.log(`[project-sandbox] Destroyed container and volume for project ${this.options.projectId}`);
@@ -859,9 +872,11 @@ export class ProjectSandbox {
 	private async _initContainer(): Promise<void> {
 		const { projectId, image } = this.options;
 		const label = `bobbit-project=${projectId}`;
+		const e2eRunId = this.e2eRunId;
 
-		// 1. Find existing container by label
-		const existingId = await this._findContainerByLabel(label);
+		// 1. Find an existing container only within this test coordinator. A
+		// matching project ID from a sibling E2E run must never be reattached.
+		const existingId = await this._findContainerByLabel(label, e2eRunId);
 
 		if (existingId) {
 			// Docker bind mounts are immutable. If Bobbit restarted with a new
@@ -873,7 +888,7 @@ export class ProjectSandbox {
 			if (staleAgentMounts) {
 				console.warn(`[project-sandbox] Container ${existingId.substring(0, 12)} has stale agent-dir mounts; recreating`);
 				await this._removeContainer(existingId);
-				await this._createContainer();
+				await this._createContainer(e2eRunId);
 				await this._runInitSequence();
 				return;
 			}
@@ -887,7 +902,7 @@ export class ProjectSandbox {
 			if (staleStateMounts) {
 				console.warn(`[project-sandbox] Container ${existingId.substring(0, 12)} has stale state mounts; recreating`);
 				await this._removeContainer(existingId);
-				await this._createContainer();
+				await this._createContainer(e2eRunId);
 				await this._runInitSequence();
 				return;
 			}
@@ -904,7 +919,7 @@ export class ProjectSandbox {
 			if (stale) {
 				console.warn(`[project-sandbox] Container ${existingId.substring(0, 12)} was created from a stale image (image "${image}" has been rebuilt since); recreating`);
 				await this._removeContainer(existingId);
-				await this._createContainer();
+				await this._createContainer(e2eRunId);
 				await this._runInitSequence();
 				return;
 			}
@@ -954,14 +969,20 @@ export class ProjectSandbox {
 			}
 		}
 
-		// 2. No usable container — create new one
-		await this._createContainer();
+		// 2. No usable container — create new one.
+		// Keep the run ID captured before lookup through replacement creation.
+		await this._createContainer(e2eRunId);
 
 		// 3. Run init sequence if needed
 		await this._runInitSequence();
 	}
 
-	private async _createContainer(): Promise<void> {
+	/**
+	 * Create a replacement within the same ownership operation as its lookup.
+	 * The captured run ID prevents an ambient environment change from turning a
+	 * stale-mount remount into a different coordinator's container/volume set.
+	 */
+	private async _createContainer(e2eRunId: string | undefined): Promise<void> {
 		const { projectId, image, sandboxNetwork, sandboxMounts, sandboxCredentials, sandboxAgentAuthAllowed, sandboxAgentAuthGoogleAllowed, sandboxAgentAuthPrefs, githubToken } = this.options;
 
 		// Ensure the state directory and sandbox-visible subdirectories exist for bind mounts
@@ -997,12 +1018,20 @@ export class ProjectSandbox {
 		addMount(this.options.cloneSource);
 		for (const src of Object.values(this.options.cloneSourceByName ?? {})) addMount(src);
 
+		// Docker only labels volumes when explicitly creating them. The labels let
+		// E2E teardown find its resources even after a spec has removed the
+		// container that would otherwise reveal the project ID.
+		for (const volumeArgs of e2eSandboxVolumeCreateArgs(projectId, e2eRunId)) {
+			await this.execDocker(volumeArgs, { timeout: 15_000, env: DOCKER_ENV });
+		}
 		const dockerArgs = buildDockerRunArgs({
 			image,
 			workspaceDir: "", // unused for /workspace — named volume instead
 			projectMarketPacksRoot: path.join(this.options.projectDir, ".bobbit", "config", "market-packs"),
 			label: projectId,
 			labelPrefix: "bobbit-project",
+			additionalLabels: e2eRunId ? { "bobbit-e2e-run": e2eRunId } : undefined,
+			e2eRunId,
 			projectId,
 			stateDir,
 			memoryLimit: `${totalMemGB}g`,
@@ -1269,13 +1298,15 @@ export class ProjectSandbox {
 		}
 	}
 
-	private async _findContainerByLabel(label: string): Promise<string | null> {
+	private async _findContainerByLabel(label: string, e2eRunId?: string): Promise<string | null> {
 		try {
-			const { stdout } = await this.execDocker([
+			const args = [
 				"ps", "-a",
 				"--filter", `label=${label}`,
-				"--format", "{{.ID}}",
-			], {
+			];
+			if (e2eRunId) args.push("--filter", `label=bobbit-e2e-run=${e2eRunId}`);
+			args.push("--format", "{{.ID}}");
+			const { stdout } = await this.execDocker(args, {
 				timeout: 10_000,
 				env: DOCKER_ENV,
 			});
@@ -1357,7 +1388,4 @@ export class ProjectSandbox {
 		return stdout;
 	}
 
-	private _volumeName(): string {
-		return `bobbit-workspace-${this.options.projectId}`;
-	}
 }

@@ -1,70 +1,59 @@
 # Unit gate operating model
 
-`npm run test:unit` is Bobbit's fast, subprocess-free tier-1 gate. It runs the complete map-owned Vitest unit inventory in one coordinator so scheduling stays simple and three suites can run concurrently on the Windows acceptance host without a unit-specific resource broker.
+`npm run test:unit` is Bobbit's fast tier-1 gate. It runs the complete map-owned Vitest inventory through one coordinator. The unit, DOM, and integration projects share the cross-suite isolation foundation with browser and E2E gates, so simultaneous workflow runs do not depend on host HOME, credentials, config, or mutable caches.
 
-The historical design and qualification evidence remain in [`fast-gate-design.md`](fast-gate-design.md) and [`fast-gate-progress.md`](fast-gate-progress.md).
+See [Cross-suite test runtime design](cross-os-unit-gate-design.md) for the full wiring and [Cross-OS test authoring](cross-os-test-authoring.md) before adding a fixture.
 
-## Command and workers
+## Command and qualification
 
-`test:unit` and `test:v2:core` both run Vitest directly:
+`test:unit` and `test:v2:core` run Vitest directly:
 
 ```text
 vitest run --config vitest.config.ts --silent=passed-only
 ```
 
-`vitest.config.ts` applies a fixed suite-wide cap of three workers and `retry: 3`. `VITEST_MAX_WORKERS=1` or `2` may lower the cap for diagnosis; it cannot raise the cap above three.
+The suite has a fixed cap of three workers. `VITEST_MAX_WORKERS=1` or `2` may lower that cap for diagnosis; it cannot raise it. The normal developer configuration retains `retry: 3` as a productivity safety net, but it is not qualification evidence. Qualification is retry-free:
 
-Nothing on the unit command path reserves a test ledger slot or gateway-boot lease, launches a lane runner, writes lane logs, or cost-shards the inventory. Browser, E2E, and compatibility tooling may still use their own orchestration; that does not make it part of `test:unit`.
+```bash
+npm run test:unit -- --retry=0
+```
 
-## Projects and ownership
+Branch checks run the standard `npm run test:unit` command once, retaining Vitest's normal retry policy. The broader reliability proof may run retry-free coordinators from separate worktrees; see the cross-OS authoring guide.
 
-Normal unit collection contains four explicit projects loaded from `tests2/tests-map.json`:
+## Projects and boundaries
+
+Normal collection contains these explicit projects from `tests2/tests-map.json`:
 
 | Project | Runtime | Isolation | Purpose |
 |---|---|---|---|
-| `v2-core` | Node, forks | shared worker modules | pure and server decision coverage |
-| `v2-dom` | happy-dom, threads | per file | DOM/component coverage |
-| `v2-integration` | Node, forks | shared worker modules | in-process gateway and API coverage |
-| `v2-isolated` | Node, forks, one worker | per file | documented module/environment bleeders only |
+| `v2-core` | Node, forks | shared worker modules | Pure and server decision coverage |
+| `v2-dom` | happy-dom, threads | Per file | DOM/component coverage |
+| `v2-integration` | Node, forks | shared worker modules | In-process gateway and API coverage |
+| `v2-isolated` | Node, forks, one worker | Per file | Documented module/environment bleeders only |
 
-`v2-e2e-vitest` is conditional: it exists only when `BOBBIT_V2_E2E_VITEST=1` and is selected by E2E Group D, not by the unit gate.
+`v2-e2e-vitest` exists only when `BOBBIT_V2_E2E_VITEST=1`; E2E Group D selects it rather than the unit gate.
 
-Three Vitest files own real-fidelity E2E coverage:
+All tier-1 projects install `tests2/harness/tier1-spawn-guard.ts`. It blocks async and sync `child_process` APIs, including imports that happened before setup. Use a command seam or copied repository template instead. The inventory audit also rejects direct value imports/requires of `child_process` in unit-owned tests.
 
-- `tests2/core/marketplace-install.test.ts`
-- `tests2/core/orphan-tool-result-rehydration-boundaries.test.ts`
-- `tests2/core/team-manager.test.ts`
+A tier-1 file has a 25-second wall budget from module start through hooks and retries. `BOBBIT_UNIT_CONCURRENT_PROOF=1` makes only loaded file-wall overruns report-only for the simultaneous-load measurement; failed suites, tests, and setup remain fatal. Proof-mode output never qualifies as solo timing evidence.
 
-Fast decisions remain in tier 1 through `marketplace-install-decisions.test.ts`, `orphan-tool-result-recovery.test.ts`, `transcript-orphan-tool-results.test.ts`, and `team-manager-decisions.test.ts`. The E2E orphan owner retains real host/sandbox transcript bytes and lifecycle boundaries; the core orphan suites retain pure sanitizer and mocked bridge/respawn decisions. The inventory loader rejects any unapproved Vitest E2E owner.
+## Canonical run ownership
 
-## Transform caches
+Before prebundling, collection, or worker spawn, Vitest installs run isolation. The coordinator creates one canonical temporary root and redirects all mutable state beneath it: temporary files, HOME, Bobbit/config/agent/secrets, application/XDG paths, transform and V8 caches, coverage, reports, output, sockets, databases, and artifacts. Forks inherit the root but cannot clean it; only the allocating coordinator cleans a successful root after its reporters and children settle. Failed roots are retained.
 
-The unit coordinator prepares an esbuild ESM splitting graph before collection. `server-prebundle.mjs` keys it from the transitive local source graph, config, lockfile, and builder implementation; validates every emitted entry, chunk, and source map; and publishes atomically. The resolver maps server and high-fanout support imports to this content-addressed graph, reducing repeated Vite transformation while preserving source-mapped coverage and module identity.
+The **machine-global concurrency ledger** is the sole mutable exception. It is captured before temp redirection so concurrent gates use the same capacity accounting. Browser binaries are also resolved before HOME is redirected, but that registry is a read-only installed dependency, not a shared writable test resource.
 
-Vitest's transformed-module cache is separate. Each coordinator uses a PID-scoped namespace under `.profiles/testing-v2/vitest-module-cache/process-<pid>`. Projects and workers in one run may share transformed code, while simultaneous Vitest coordinators cannot race on writable cache metadata.
+The shared environment sanitizer runs before imports and child construction. It removes credentials and ambient Bobbit discovery/runtime values such as pack paths, gateway/session/token values, command adapters, CLI/command overrides, and GitHub command selection. Deliberate `BOBBIT_TEST_*` and `BOBBIT_V2_*` controls remain unless they are a denied runtime input or a harness-owned root. Owned keys are replaced canonically and case-insensitively on Windows. Fixtures must provide any needed value locally and restore it; they must never rely on the developer shell.
 
-## Hard boundaries
+## DOM and fixture portability
 
-### Subprocesses
+The DOM setup uses happy-dom's owning per-file window for local/session storage, clears those stores between tests, and restores the prior runtime descriptors. This avoids Node 26 globals that can be present but are not usable browser storage.
 
-All four tier-1 projects install `tests2/harness/tier1-spawn-guard.ts`. It blocks the async and sync `child_process` APIs, including imports that occurred before setup, and tells the test to use a command seam or copied repository template. The one-time Git template is prepared before the guard closes the process APIs; tests copy it without invoking Git.
+Fixtures create writable trees under the active run root (or receive explicit fixture-local paths). Use fixture Git identity/config and line-ending attributes, local `file://` pack/skill trees, loopback or in-process MCP/gateway stubs, explicit config roots, scoped credentials, and canonical LF/CRLF assertions. Do not use global Git configuration, developer HOME, remote services, host commands, or checkout state as fixture input.
 
-The inventory audit also rejects value imports or requires of `child_process` in unit-owned tests. This static check catches direct ownership mistakes, while the runtime guard catches transitive production calls.
+## Caches and audits
 
-### File wall budget
-
-A tier-1 file has a hard 25-second wall budget from module start through hooks and retries. In an ordinary solo run, any overrun fails `test:unit` even when all assertions pass.
-
-For the simultaneous load proof only, set:
-
-```powershell
-$env:BOBBIT_UNIT_CONCURRENT_PROOF = "1"
-npm run test:unit
-```
-
-This mode makes **only loaded file-wall overruns report-only**. Failed suites, failed tests, setup errors, and all other Vitest failures remain fatal. A proof-mode run never qualifies as solo file-budget or solo wall-time evidence; qualification requires ordinary consecutive solo runs.
-
-## Audits
+The server prebundle is content-addressed and atomically published. Vitest transformed modules use a PID-scoped directory below the coordinator root, allowing one run's projects/workers to share transformed code without concurrent coordinators racing on writable metadata.
 
 Run the inventory audit after changing test ownership or fixtures:
 
@@ -72,19 +61,10 @@ Run the inventory audit after changing test ownership or fixtures:
 npm run test:unit:inventory
 ```
 
-It compares the current inventory with the merge-base inventory, verifies declaration-level semantic replacements, exact ownership of the two E2E files, complete/disjoint project scheduling, isolated-project policy, and the tier-1 child-process boundary.
+It verifies map ownership and declaration semantics, exact E2E ownership, project scheduling, isolated-project policy, the child-process boundary, and cross-process ownership tokens for writable/cleaned shared-worker fixture paths.
 
-The same audit scans mutable `v2-core` and `v2-integration` fixture paths. A timestamp alone is not a cross-process owner token: writable or cleaned paths must include a PID, UUID, `mkdtemp` result, or another clearly unique root. This prevents simultaneous `test:unit` processes from deleting or mutating each other's fixtures.
+## Authoring rule
 
-## Windows profiling
+A new test must synchronize on an exact observable lifecycle event, not elapsed time. Do not add sleeps, polling, retries, skips, `force-exit`, timeout increases, blind reloads, incidental fetch interception, or weaker assertions. Repair fixture ownership, teardown, or the real completion event instead.
 
-The Windows profiler invokes Vitest projects directly; it does not invoke a unit lane runner or acquire unit ledger/boot leases:
-
-```bash
-npm run test:v2:profile-windows
-npm run test:v2:profile-windows -- --project v2-core --workers 1 tests2/core/example.test.ts
-```
-
-It profiles `v2-core`, `v2-integration`, `v2-dom`, and `v2-isolated` sequentially with process telemetry. `--workers` can only lower the three-worker cap. `--lane` remains accepted solely as a compatibility alias for `--project`; new usage should say `--project`.
-
-See [`windows-unit-profile-2026-07-14.md`](windows-unit-profile-2026-07-14.md) for retained measurements and current profiler examples.
+Historical design and qualification evidence remain in [fast-gate design](fast-gate-design.md), [fast-gate progress](fast-gate-progress.md), and [Windows profiling](windows-unit-profile-2026-07-14.md).

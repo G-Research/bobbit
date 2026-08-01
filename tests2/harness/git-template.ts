@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
-import { runFixtureCommand } from "./spawn-with-retry.js";
+import { runFixtureCommand, type FixtureCommandOptions, type FixtureCommandResult } from "./spawn-with-retry.js";
 
 const STATE_KEY = Symbol.for("bobbit.tests2.git-template-state");
 const README = "# Bobbit test repository\n";
@@ -54,10 +54,21 @@ function assertSafeDestination(source: string, destination: string): void {
 	}
 }
 
-function templateEnvironment(): NodeJS.ProcessEnv {
+function templateEnvironment(home: string): NodeJS.ProcessEnv {
+	const env = { ...process.env };
+	// Git's command-scoped configuration can be inherited through several
+	// GIT_CONFIG_* variables. Strip those host-owned values before explicitly
+	// selecting the fixture's empty global config below.
+	for (const name of Object.keys(env)) {
+		if (name.startsWith("GIT_CONFIG_")) delete env[name];
+	}
 	return {
-		...process.env,
+		...env,
+		HOME: home,
+		USERPROFILE: home,
+		XDG_CONFIG_HOME: join(home, ".config"),
 		GIT_CONFIG_NOSYSTEM: "1",
+		GIT_CONFIG_GLOBAL: join(home, "gitconfig"),
 		GIT_TERMINAL_PROMPT: "0",
 		GIT_ASKPASS: "",
 		GIT_EDITOR: "true",
@@ -70,6 +81,69 @@ function removeContainer(container: string): void {
 	} catch {
 		// Cleanup must never turn a green test run red because an antivirus scanner
 		// briefly retained a handle. The OS temp directory remains the safe fallback.
+	}
+}
+
+export type GitTemplateCommandRunner = (
+	args: string[],
+	cwd: string,
+	options?: FixtureCommandOptions,
+) => Promise<FixtureCommandResult>;
+
+type InitialFixtureCommitState = "landed" | "absent" | "invalid";
+
+/**
+ * A Windows child-process close can report failure after Git has already
+ * finalized the commit. Probe the committed tree before trying again: retrying
+ * an already-landed initial commit deterministically becomes "nothing to
+ * commit" and masks the successful repository initialization.
+ *
+ * This is exported as a narrow injected-runner seam so the ambiguous-close
+ * recovery is testable without a real child process or timing assumptions.
+ */
+export async function commitInitialFixture(
+	runGit: GitTemplateCommandRunner,
+	repository: string,
+): Promise<void> {
+	let failure: unknown;
+	for (let attempt = 1; attempt <= 3; attempt++) {
+		try {
+			// Commit attempts deliberately bypass runFixtureCommand's generic retry.
+			// Each retry below is guarded by an authoritative repository-state probe.
+			await runGit(["commit", "--quiet", "-m", "Initial fixture"], repository, { attempts: 1 });
+			return;
+		} catch (error) {
+			failure = error;
+			const commitState = await initialFixtureCommitState(runGit, repository);
+			if (commitState === "landed") return;
+			if (commitState === "invalid") {
+				throw new Error("[tests2/git-template] initial commit reported failure after creating an unexpected repository state");
+			}
+		}
+	}
+	throw failure;
+}
+
+/** Classify a failed initial commit without ever retrying an existing HEAD. */
+async function initialFixtureCommitState(runGit: GitTemplateCommandRunner, repository: string): Promise<InitialFixtureCommitState> {
+	try {
+		await runGit(["rev-parse", "--verify", "HEAD^{commit}"], repository, { attempts: 1 });
+	} catch {
+		return "absent";
+	}
+	try {
+		const readme = await runGit(["show", "HEAD:README.md"], repository, { attempts: 1 });
+		const attributes = await runGit(["show", "HEAD:.gitattributes"], repository, { attempts: 1 });
+		await runGit(["diff", "--quiet", "--cached", "HEAD", "--"], repository, { attempts: 1 });
+		await runGit(["diff", "--quiet", "HEAD", "--"], repository, { attempts: 1 });
+		const status = await runGit(["status", "--porcelain", "--untracked-files=all"], repository, { attempts: 1 });
+		return readme.stdout === README
+			&& attributes.stdout === GITATTRIBUTES
+			&& status.stdout.trim() === ""
+			? "landed"
+			: "invalid";
+	} catch {
+		return "invalid";
 	}
 }
 
@@ -89,21 +163,35 @@ export async function prepareGitTemplate(): Promise<string> {
 	shared.promise = (async () => {
 		const container = mkdtempSync(join(tmpdir(), "bb-git-template-"));
 		const repository = join(container, "repo");
+		const home = join(container, "home");
 		mkdirSync(repository);
-		const env = templateEnvironment();
+		mkdirSync(home);
+		writeFileSync(join(home, "gitconfig"), "", "utf8");
+		const env = templateEnvironment(home);
+		const fixtureGit: GitTemplateCommandRunner = (args, cwd, options = {}) => runFixtureCommand(
+			"git",
+			// Both settings are written locally below so every copied fixture remains
+			// stable. Supplying them during bootstrap also prevents the committing
+			// process itself from launching background maintenance before the local
+			// config is available (macOS can otherwise leave maintenance.lock briefly).
+			["-c", "maintenance.auto=false", "-c", "gc.auto=0", ...args],
+			{ ...options, cwd, env },
+		);
 		try {
-			await runFixtureCommand("git", ["-c", "init.defaultBranch=master", "init", "--quiet", repository], { cwd: container, env });
-			await runFixtureCommand("git", ["config", "user.name", "Bobbit Test"], { cwd: repository, env });
-			await runFixtureCommand("git", ["config", "user.email", "bobbit-test@example.invalid"], { cwd: repository, env });
-			await runFixtureCommand("git", ["config", "core.autocrlf", "false"], { cwd: repository, env });
-			await runFixtureCommand("git", ["config", "commit.gpgsign", "false"], { cwd: repository, env });
+			await fixtureGit(["-c", "init.defaultBranch=master", "init", "--quiet", repository], container);
+			await fixtureGit(["config", "user.name", "Bobbit Test"], repository);
+			await fixtureGit(["config", "user.email", "bobbit-test@example.invalid"], repository);
+			await fixtureGit(["config", "core.autocrlf", "false"], repository);
+			await fixtureGit(["config", "commit.gpgsign", "false"], repository);
+			await fixtureGit(["config", "maintenance.auto", "false"], repository);
+			await fixtureGit(["config", "gc.auto", "0"], repository);
 			const hooks = join(repository, ".git", "hooks-disabled");
 			mkdirSync(hooks);
-			await runFixtureCommand("git", ["config", "core.hooksPath", hooks], { cwd: repository, env });
+			await fixtureGit(["config", "core.hooksPath", hooks], repository);
 			writeFileSync(join(repository, "README.md"), README, "utf8");
 			writeFileSync(join(repository, ".gitattributes"), GITATTRIBUTES, "utf8");
-			await runFixtureCommand("git", ["add", "--", "README.md", ".gitattributes"], { cwd: repository, env });
-			await runFixtureCommand("git", ["commit", "--quiet", "-m", "Initial fixture"], { cwd: repository, env });
+			await fixtureGit(["add", "--", "README.md", ".gitattributes"], repository);
+			await commitInitialFixture(fixtureGit, repository);
 
 			const canonical = realpathSync(repository);
 			shared.path = canonical;

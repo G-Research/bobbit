@@ -39,32 +39,53 @@ test.beforeAll(() => {
 	});
 });
 
+function workflowShell(page: Page) {
+	return page.locator(".wf-container").filter({ has: page.getByTestId("workflow-editor") });
+}
+
+function workflowEditor(page: Page) {
+	return workflowShell(page).getByTestId("workflow-editor");
+}
+
+function verifyStep(page: Page) {
+	return workflowEditor(page).getByTestId("wf-vstep-card");
+}
+
+function saveButton(page: Page) {
+	return workflowShell(page).getByRole("button", { name: "Save", exact: true });
+}
+
 async function loadWorkflow(page: Page, workflow: FixtureWorkflow): Promise<void> {
 	await page.goto(`file://${SHELL.replace(/\\/g, "/")}`);
 	await page.addScriptTag({ path: BUNDLE });
 	await page.waitForFunction(() => (window as any).__goalWorkflowEditorReady === true, null, { timeout: 10_000 });
 	await page.evaluate((wf) => (window as any).__loadGoalWorkflowFixture(wf), workflow);
-	await expect(page.locator("input[placeholder='Workflow name']").first()).toHaveValue(workflow.name, { timeout: 10_000 });
 
-	const gateHeader = page.locator(".wf-gate-header").first();
-	if (!(await page.locator(".wf-gate-body").first().isVisible())) await gateHeader.click();
-	const stepHeader = page.locator(".wf-vstep-collapsed-header").first();
+	const editor = workflowEditor(page);
+	await expect(editor).toHaveAttribute("data-workflow-id", workflow.id, { timeout: 10_000 });
+	await expect(editor.locator("input[placeholder='Workflow name']")).toHaveValue(workflow.name);
+
+	const gateHeader = editor.locator(".wf-gate-header").first();
+	const gateBody = editor.locator(".wf-gate-body").first();
+	if (!(await gateBody.isVisible())) await gateHeader.click();
+	const stepHeader = verifyStep(page).locator(".wf-vstep-collapsed-header");
 	await stepHeader.click();
-	await expect(page.locator(".wf-vstep-body").first()).toBeVisible();
+	await expect(verifyStep(page).locator(".wf-vstep-body")).toBeVisible();
 }
 
 async function openAdvanced(page: Page): Promise<void> {
-	const stepBody = page.locator(".wf-vstep-body").first();
+	const step = verifyStep(page);
+	const stepBody = step.locator(".wf-vstep-body");
 	if (!(await stepBody.isVisible())) {
-		await page.locator(".wf-vstep-collapsed-header").first().click();
+		await step.locator(".wf-vstep-collapsed-header").click();
 	}
 	await expect(stepBody).toBeVisible();
 
-	const details = page.locator("details.wf-vstep-advanced").first();
+	const details = step.locator("details.wf-vstep-advanced");
 	if (!(await details.evaluate((node: HTMLDetailsElement) => node.open))) {
 		await details.locator("summary").click();
 	}
-	await expect(page.getByTestId("wf-step-timeout")).toBeVisible();
+	await expect(step.getByTestId("wf-step-timeout")).toBeVisible();
 }
 
 async function putBodies(page: Page): Promise<any[]> {
@@ -74,10 +95,52 @@ async function putBodies(page: Page): Promise<any[]> {
 	});
 }
 
+/**
+ * Save completion is a DOM lifecycle, not merely the fixture's synchronous
+ * fetch log entry. Observe the current editor's Save → Saving… → Save cycle
+ * before clicking, so a re-render cannot close Advanced after it is reopened.
+ */
+async function armSaveCompletion(page: Page): Promise<void> {
+	await page.evaluate(() => {
+		const editor = document.querySelector<HTMLElement>("[data-testid='workflow-editor']");
+		const nav = editor?.closest<HTMLElement>(".wf-container")?.querySelector<HTMLElement>(".wf-nav-right");
+		if (!nav) throw new Error("workflow editor save controls are unavailable");
+
+		let sawSaving = false;
+		(window as any).__workflowTimeoutSaveComplete = new Promise<void>((resolve) => {
+			const observer = new MutationObserver((records) => {
+				for (const record of records) {
+					if (record.type === "characterData") {
+						sawSaving ||= record.oldValue?.trim() === "Saving…" || record.target.textContent?.trim() === "Saving…";
+						continue;
+					}
+					for (const node of [...record.addedNodes, ...record.removedNodes]) {
+						sawSaving ||= node.textContent?.trim() === "Saving…";
+					}
+				}
+				const button = [...nav.querySelectorAll<HTMLButtonElement>("button")]
+					.find((candidate) => candidate.textContent?.trim() === "Save");
+				if (sawSaving && button && !button.disabled) {
+					observer.disconnect();
+					resolve();
+				}
+			});
+			observer.observe(nav, {
+				childList: true,
+				subtree: true,
+				characterData: true,
+				characterDataOldValue: true,
+				attributes: true,
+				attributeFilter: ["disabled"],
+			});
+		});
+	});
+}
+
 async function save(page: Page): Promise<any> {
-	const before = (await putBodies(page)).length;
-	await page.locator("button").filter({ hasText: "Save" }).first().click();
-	await expect.poll(async () => (await putBodies(page)).length, { timeout: 5_000 }).toBe(before + 1);
+	await armSaveCompletion(page);
+	await saveButton(page).click();
+	await page.evaluate(() => (window as any).__workflowTimeoutSaveComplete);
 	return (await putBodies(page)).at(-1);
 }
 
@@ -90,9 +153,9 @@ test("workflow editor explains and preserves review-agent per-turn timeout rules
 	}));
 	await openAdvanced(page);
 
-	const stepBody = page.locator(".wf-vstep-body").first();
-	const typeSelect = page.getByTestId("wf-step-type");
-	const timeoutField = () => page.getByTestId("wf-step-timeout");
+	const stepBody = verifyStep(page).locator(".wf-vstep-body");
+	const typeSelect = verifyStep(page).getByTestId("wf-step-type");
+	const timeoutField = () => verifyStep(page).getByTestId("wf-step-timeout");
 	const timeoutHint = () => timeoutField().locator("xpath=ancestor::div[contains(@class,'wf-field')][1]").locator(".wf-field-hint");
 
 	await expect(timeoutField()).toHaveAttribute("placeholder", "300");
@@ -127,24 +190,24 @@ test("workflow editor explains and preserves review-agent per-turn timeout rules
 		gates: saved.gates,
 	});
 	await openAdvanced(page);
-	await expect(page.getByTestId("wf-step-timeout")).toHaveValue("45");
+	await expect(timeoutField()).toHaveValue("45");
 
 	// Invalid zero is normalized to omitted; a positive fraction is normalized
 	// to its integer editor representation.
-	await page.getByTestId("wf-step-timeout").fill("0");
+	await timeoutField().fill("0");
 	const zeroBody = await save(page);
 	expect(zeroBody.gates[0].verify[0].timeout).toBeUndefined();
 	await openAdvanced(page);
-	await page.getByTestId("wf-step-timeout").fill("3.8");
+	await timeoutField().fill("3.8");
 	const fractionBody = await save(page);
 	expect(fractionBody.gates[0].verify[0].timeout).toBe(3);
 
 	// Switching to human sign-off hides the field and strips the stale timeout
 	// rather than silently serializing an inapplicable review setting.
 	await openAdvanced(page);
-	await expect(page.getByTestId("wf-step-timeout")).toHaveValue("3");
-	await page.getByTestId("wf-step-type").selectOption("human-signoff");
-	await expect(page.getByTestId("wf-step-timeout")).toHaveCount(0);
+	await expect(timeoutField()).toHaveValue("3");
+	await typeSelect.selectOption("human-signoff");
+	await expect(timeoutField()).toHaveCount(0);
 	await stepBody.getByTestId("wf-step-prompt").fill("Approve the timeout contract");
 	await stepBody.getByTestId("wf-step-label").fill("Approve timeout contract");
 	const signoffBody = await save(page);

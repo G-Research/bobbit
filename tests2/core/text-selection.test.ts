@@ -68,6 +68,21 @@ describe("selectText", () => {
 		assert.throws(() => selectText(numberedLines(10), { mode: "slice", from: 1 }), /to|required|invalid.*range/i);
 	});
 
+	it("normalizes CRLF text before selecting lines and enforcing byte budgets", () => {
+		const crlf = ["before", "ERROR first", "after"].join("\r\n");
+		const result = selectText(crlf, { mode: "grep", pattern: "ERROR", context: 1 });
+
+		assert.equal(result.totalLines, 3);
+		assert.equal(result.matchCount, 1);
+		assert.deepEqual(result.selectedLineNumbers, [1, 2, 3]);
+		assert.equal(result.text, "1: before\n2: ERROR first\n3: after");
+		assert.equal(result.text.includes("\r"), false, "rendered selections use canonical LF separators");
+
+		const budgeted = selectText(`é\r\nnext`, { mode: "full" });
+		assert.equal(budgeted.text, "é\nnext");
+		assert.equal(Buffer.byteLength(budgeted.text, "utf-8"), 7, "CRLF input must not consume an extra byte in the rendered text budget");
+	});
+
 	it("grep handles regex matches, merged context ranges, zero matches, and invalid regex", () => {
 		const text = [
 			"one",

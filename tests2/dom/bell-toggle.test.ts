@@ -16,7 +16,41 @@ import {
 import { state } from "../../src/app/state.js";
 
 const SLASH_PATH = 'svg path[d="m2 2 20 20"]';
+
+type Deferred<T> = {
+	promise: Promise<T>;
+	resolve: (value: T) => void;
+	reject: (reason?: unknown) => void;
+};
+
+function deferred<T>(): Deferred<T> {
+	let resolve!: (value: T) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+	return { promise, resolve, reject };
+}
+
+function observeBellState(el: HTMLElement, title: RegExp, slashCount: number): { promise: Promise<void>; disconnect: () => void } {
+	let observer: MutationObserver | undefined;
+	const promise = new Promise<void>((resolve) => {
+		const matches = () => el.querySelector("button")?.getAttribute("title")?.match(title)
+			&& el.querySelectorAll(SLASH_PATH).length === slashCount;
+		const resolveWhenMatched = () => {
+			if (!matches()) return;
+			observer?.disconnect();
+			resolve();
+		};
+		observer = new MutationObserver(resolveWhenMatched);
+		observer.observe(el, { attributes: true, childList: true, subtree: true });
+		resolveWhenMatched();
+	});
+	return { promise, disconnect: () => observer?.disconnect() };
+}
+
 let putCalls: Array<{ url: string; method: string; body: string }>;
+let preferencePutStarted: Deferred<{ url: string; method: string; body: string }>;
+let preferencePutResponse: Deferred<Response>;
+let preferencePutCompleted: Deferred<void>;
 let originalActiveProjectId: typeof state.activeProjectId;
 let projectSequence = 0;
 
@@ -33,8 +67,19 @@ beforeEach(() => {
 	originalActiveProjectId = state.activeProjectId;
 	delete document.documentElement.dataset.playAgentFinishSound; // unset ⇒ default ON
 	putCalls = [];
+	preferencePutStarted = deferred<{ url: string; method: string; body: string }>();
+	preferencePutResponse = deferred<Response>();
+	preferencePutCompleted = deferred<void>();
 	vi.stubGlobal("fetch", async (url: any, init: any = {}) => {
-		putCalls.push({ url: String(url), method: init?.method ?? "GET", body: init?.body });
+		const call = { url: String(url), method: init?.method ?? "GET", body: init?.body };
+		putCalls.push(call);
+		if (/\/api\/preferences$/.test(call.url) && call.method === "PUT") {
+			preferencePutStarted.resolve(call);
+			return preferencePutResponse.promise.then((response) => {
+				preferencePutCompleted.resolve();
+				return response;
+			});
+		}
 		return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
 	});
 });
@@ -64,8 +109,11 @@ describe("<bell-toggle>", () => {
 
 	it("click mutes: swaps to BellOff, flips the dataset, and persists the preference", async () => {
 		const el = await mount();
+		const muted = observeBellState(el, /Unmute agent finish beeps/, 1);
+		const putStarted = preferencePutStarted.promise;
 		(el.querySelector("button") as HTMLButtonElement).click();
-		await (el as any).updateComplete;
+		await Promise.all([muted.promise, putStarted]);
+		muted.disconnect();
 
 		expect(el.querySelector("button")!.getAttribute("title")).toMatch(/Unmute agent finish beeps/);
 		expect(el.querySelectorAll(SLASH_PATH).length).toBe(1);
@@ -74,15 +122,19 @@ describe("<bell-toggle>", () => {
 		const put = putCalls.find(c => /\/api\/preferences$/.test(c.url) && c.method === "PUT");
 		expect(put).toBeTruthy();
 		expect(JSON.parse(put!.body)).toMatchObject({ playAgentFinishSound: false });
+		preferencePutResponse.resolve(new Response("{}", { status: 200 }));
+		await preferencePutCompleted.promise;
 	});
 
 	it("syncs when another surface dispatches the change event", async () => {
 		const el = await mount();
 		expect(el.querySelector("button")!.getAttribute("title")).toMatch(/Mute/);
 
+		const unmuted = observeBellState(el, /Unmute/, 1);
 		document.documentElement.dataset.playAgentFinishSound = "false";
 		window.dispatchEvent(new CustomEvent("bobbit-play-finish-sound-changed", { detail: { enabled: false } }));
-		await (el as any).updateComplete;
+		await unmuted.promise;
+		unmuted.disconnect();
 
 		expect(el.querySelector("button")!.getAttribute("title")).toMatch(/Unmute/);
 		expect(el.querySelectorAll(SLASH_PATH).length).toBe(1);
@@ -114,9 +166,12 @@ describe("<bell-toggle>", () => {
 		const projectId = setActiveProjectOverride("false");
 		document.documentElement.dataset.playAgentFinishSound = "true";
 		const el = await mount();
+		const muted = observeBellState(el, /Unmute agent finish beeps/, 1);
+		const putStarted = preferencePutStarted.promise;
 
 		(el.querySelector("button") as HTMLButtonElement).click();
-		await (el as any).updateComplete;
+		await Promise.all([muted.promise, putStarted]);
+		muted.disconnect();
 
 		expect(getProjectPlayFinishSoundOverride(projectId)).toBe("off");
 		expect(document.documentElement.dataset.playAgentFinishSound).toBe("false");
@@ -125,5 +180,7 @@ describe("<bell-toggle>", () => {
 		expect(putCalls[0].method).toBe("PUT");
 		expect(JSON.parse(putCalls[0].body)).toEqual({ playAgentFinishSound: false });
 		expect(putCalls.some((call) => /\/api\/projects\//.test(call.url))).toBe(false);
+		preferencePutResponse.resolve(new Response("{}", { status: 200 }));
+		await preferencePutCompleted.promise;
 	});
 });

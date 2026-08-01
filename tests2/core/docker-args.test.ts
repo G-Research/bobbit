@@ -11,7 +11,8 @@ import assert from "node:assert";
 import fs from "node:fs";
 import path from "node:path";
 import type { CommandRunner } from "../../src/server/gateway-deps.ts";
-import { buildDockerRunArgs } from "../../src/server/agent/docker-args.js";
+import { buildDockerRunArgs, e2eSandboxVolumeCreateArgs, projectSandboxVolumeNames } from "../../src/server/agent/docker-args.js";
+import { ProjectSandbox } from "../../src/server/agent/project-sandbox.js";
 import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource } from "../../src/server/agent/sandbox-clone-source.js";
 import { toDockerPath } from "../../src/server/agent/rpc-bridge.js";
 import {
@@ -126,6 +127,90 @@ describe("buildDockerRunArgs", () => {
 			args.includes(`bobbit-worktrees-${projectId}:/workspace-wt`),
 			"should mount worktrees named volume",
 		);
+	});
+
+	it("names and labels sandbox volumes by validated legacy E2E run ID without changing production names", () => {
+		const projectId = "test-project-abc";
+		const prior = process.env.BOBBIT_E2E_RUN_ID;
+		try {
+			delete process.env.BOBBIT_E2E_RUN_ID;
+			assert.deepEqual(projectSandboxVolumeNames(projectId), {
+				workspace: `bobbit-workspace-${projectId}`,
+				worktrees: `bobbit-worktrees-${projectId}`,
+			});
+			assert.deepEqual(e2eSandboxVolumeCreateArgs(projectId), []);
+
+			process.env.BOBBIT_E2E_RUN_ID = "legacy-run_123";
+			let args = buildDockerRunArgs({ image: "test", workspaceDir: "/tmp/test", projectId }, NOOP_COMMAND_RUNNER);
+			assert.ok(args.includes(`bobbit-workspace-${projectId}-e2e-legacy-run_123:/workspace`));
+			assert.ok(args.includes(`bobbit-worktrees-${projectId}-e2e-legacy-run_123:/workspace-wt`));
+			assert.deepEqual(e2eSandboxVolumeCreateArgs(projectId), [
+				["volume", "create", "--label", `bobbit-project=${projectId}`, "--label", "bobbit-e2e-run=legacy-run_123", `bobbit-workspace-${projectId}-e2e-legacy-run_123`],
+				["volume", "create", "--label", `bobbit-project=${projectId}`, "--label", "bobbit-e2e-run=legacy-run_123", `bobbit-worktrees-${projectId}-e2e-legacy-run_123`],
+			]);
+
+			process.env.BOBBIT_E2E_RUN_ID = "bad/run-id";
+			args = buildDockerRunArgs({ image: "test", workspaceDir: "/tmp/test", projectId }, NOOP_COMMAND_RUNNER);
+			assert.ok(args.includes(`bobbit-workspace-${projectId}:/workspace`));
+			assert.ok(args.includes(`bobbit-worktrees-${projectId}:/workspace-wt`));
+			assert.ok(!args.some(arg => arg.includes("bad/run-id")));
+			assert.deepEqual(e2eSandboxVolumeCreateArgs(projectId), []);
+			assert.deepEqual(projectSandboxVolumeNames(projectId, "bad/run-id"), {
+				workspace: `bobbit-workspace-${projectId}`,
+				worktrees: `bobbit-worktrees-${projectId}`,
+			});
+
+			// Lifecycle callers capture their owner before an awaited Docker lookup.
+			// The run args and labelled volume creation must keep that captured
+			// namespace instead of rereading a subsequently changed ambient value.
+			process.env.BOBBIT_E2E_RUN_ID = "ambient-retarget";
+			args = buildDockerRunArgs({ image: "test", workspaceDir: "/tmp/test", projectId, e2eRunId: "captured-run" }, NOOP_COMMAND_RUNNER);
+			assert.ok(args.includes(`bobbit-workspace-${projectId}-e2e-captured-run:/workspace`));
+			assert.ok(args.includes(`bobbit-worktrees-${projectId}-e2e-captured-run:/workspace-wt`));
+			assert.deepEqual(e2eSandboxVolumeCreateArgs(projectId, "captured-run"), [
+				["volume", "create", "--label", `bobbit-project=${projectId}`, "--label", "bobbit-e2e-run=captured-run", `bobbit-workspace-${projectId}-e2e-captured-run`],
+				["volume", "create", "--label", `bobbit-project=${projectId}`, "--label", "bobbit-e2e-run=captured-run", `bobbit-worktrees-${projectId}-e2e-captured-run`],
+			]);
+		} finally {
+			if (prior === undefined) delete process.env.BOBBIT_E2E_RUN_ID;
+			else process.env.BOBBIT_E2E_RUN_ID = prior;
+		}
+	});
+
+	it("keeps ProjectSandbox destruction in its captured E2E owner after ambient retargeting", async () => {
+		const projectId = "captured-lifecycle-project";
+		const capturedRunId = "captured-lifecycle-run";
+		const calls: string[][] = [];
+		const commandRunner: CommandRunner = {
+			async execFile(_file, args) {
+				calls.push([...args]);
+				return { stdout: "", stderr: "" };
+			},
+			execFileSync() { return ""; },
+		};
+		const prior = process.env.BOBBIT_E2E_RUN_ID;
+		try {
+			process.env.BOBBIT_E2E_RUN_ID = capturedRunId;
+			const sandbox = new ProjectSandbox({
+				projectId,
+				projectDir: fixtureDir("captured-lifecycle"),
+				repoUrl: "https://example.test/repo.git",
+				image: "test",
+			}, { commandRunner });
+			(sandbox as any).containerId = "captured-container";
+
+			process.env.BOBBIT_E2E_RUN_ID = "ambient-retarget";
+			await sandbox.destroy();
+
+			assert.deepEqual(calls.map((args) => args.slice(0, 4)), [
+				["rm", "-f", "captured-container"],
+				["volume", "rm", "-f", `bobbit-workspace-${projectId}-e2e-${capturedRunId}`],
+				["volume", "rm", "-f", `bobbit-worktrees-${projectId}-e2e-${capturedRunId}`],
+			]);
+		} finally {
+			if (prior === undefined) delete process.env.BOBBIT_E2E_RUN_ID;
+			else process.env.BOBBIT_E2E_RUN_ID = prior;
+		}
 	});
 
 	it("does not mount worktrees volume when projectId is not set", () => {

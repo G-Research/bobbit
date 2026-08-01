@@ -6,22 +6,97 @@
 // other, this test fails — see the INVARIANT note in ledger-lease-bridge.mjs.
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
 import { describe, it, beforeAll, afterAll } from "vitest";
+import {
+	runFixtureCommandWithBackend,
+	type FixtureCommandBackend,
+} from "../harness/spawn-with-retry.js";
 
-// Both modules resolve their state dir from os.tmpdir()/bobbit-test-v2-ledger and
-// read os.tmpdir() live on each call, so pointing TEMP/TMP/TMPDIR at a fresh dir
-// fully isolates this test from the real ledger (and concurrent runs).
+// The production ledger deliberately lives under the OS temp root so all
+// workflow runs on one machine share its caps. This fixture must never use
+// that real pool: an explicit, per-file root avoids inheriting a busy lease
+// from a browser/E2E process or another unit run.
 const origEnv = {
-	TEMP: process.env.TEMP,
-	TMP: process.env.TMP,
-	TMPDIR: process.env.TMPDIR,
+	BOBBIT_V2_LEDGER_DIR: process.env.BOBBIT_V2_LEDGER_DIR,
 	BOBBIT_V2_MAX_BROWSER: process.env.BOBBIT_V2_MAX_BROWSER,
 	BOBBIT_V2_TOTAL_CORES: process.env.BOBBIT_V2_TOTAL_CORES,
 	BOBBIT_V2_LEDGER_PARENT: process.env.BOBBIT_V2_LEDGER_PARENT,
 	BOBBIT_V2_SLOTS_VITEST: process.env.BOBBIT_V2_SLOTS_VITEST,
 };
+const LEDGER_MODULE_URL = pathToFileURL(
+	resolve("scripts/testing-v2/ledger.mjs"),
+).href;
+type NativeSpawn = typeof import("node:child_process").spawn;
+type SpawnGuardState = { originals?: { spawn?: NativeSpawn } };
+const SPAWN_GUARD_STATE = Symbol.for("bobbit.tests2.tier1-spawn-guard-state");
+const LEDGER_CHILD_SCRIPT = `
+const ledger = await import(process.env.BOBBIT_TEST_LEDGER_MODULE_URL);
+const reservation = ledger.reserveWorkerSlots("vitest", { coalesceMs: 0, totalCores: 16 });
+process.stdout.write(JSON.stringify({
+	ledgerDir: ledger.ledgerDir(),
+	tmpdir: (await import("node:os")).tmpdir(),
+	reservations: ledger.readLedger({ totalCores: 16 }).reservations,
+}) + "\\n");
+if (process.env.BOBBIT_TEST_LEDGER_HOLD === "1") {
+	process.stdin.resume();
+	await new Promise((resolve) => process.stdin.once("data", resolve));
+}
+reservation.release();
+`;
+
+// This pre-guard bootstrap command owns both coordinators. The tier-1 test
+// itself only invokes the harness-approved fixture runner; the subprocess fence
+// remains closed for all test logic while the bootstrap proves real processes
+// with separate temp roots share one explicit ledger.
+const TWO_PROCESS_LEDGER_SCRIPT = `
+import { spawn } from "node:child_process";
+
+const workerScript = ${JSON.stringify(LEDGER_CHILD_SCRIPT)};
+const [firstRoot, secondRoot, ledgerRoot] = process.argv.slice(1);
+const start = (tempRoot, hold) => spawn(process.execPath, ["--input-type=module", "--eval", workerScript], {
+	env: {
+		...process.env,
+		TEMP: tempRoot,
+		TMP: tempRoot,
+		TMPDIR: tempRoot,
+		BOBBIT_V2_LEDGER_DIR: ledgerRoot,
+		BOBBIT_TEST_LEDGER_HOLD: hold ? "1" : "0",
+	},
+	stdio: ["pipe", "pipe", "pipe"],
+});
+const awaitFirstJson = (child) => new Promise((resolve, reject) => {
+	let output = "";
+	child.stdout.on("data", (chunk) => {
+		output += chunk;
+		const newline = output.indexOf("\\n");
+		if (newline >= 0) resolve(JSON.parse(output.slice(0, newline)));
+	});
+	child.once("error", reject);
+	child.once("exit", (code) => reject(new Error(\`ledger child exited before reservation (\${code})\`)));
+});
+const awaitExit = (child) => new Promise((resolve, reject) => {
+	let stderr = "";
+	child.stderr.on("data", (chunk) => { stderr += chunk; });
+	child.once("error", reject);
+	child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(\`ledger child exited \${code}: \${stderr}\`)));
+});
+const first = start(firstRoot, true);
+const firstExit = awaitExit(first);
+try {
+	const firstState = await awaitFirstJson(first);
+	const second = start(secondRoot, false);
+	const secondExit = awaitExit(second);
+	const secondState = await awaitFirstJson(second);
+	await secondExit;
+	process.stdout.write(JSON.stringify({ firstPid: first.pid, secondPid: second.pid, firstState, secondState }) + "\\n");
+} finally {
+	first.stdin.end("release\\n");
+	await firstExit;
+}
+`;
 let isolatedTmp: string;
 
 async function loadBoth() {
@@ -30,12 +105,56 @@ async function loadBoth() {
 	return { ledger, bridge };
 }
 
+function preGuardFixtureBackend(): FixtureCommandBackend {
+	const state = (process as NodeJS.Process & { [SPAWN_GUARD_STATE]?: SpawnGuardState })[SPAWN_GUARD_STATE];
+	const spawn = state?.originals?.spawn;
+	if (!spawn) throw new Error("ledger multi-process fixture requires the spawn preserved before the tier-1 guard");
+	return {
+		spawn(file, args, options) {
+			const child = spawn(file, [...args], options);
+			return {
+				onStdout: listener => { child.stdout.on("data", listener); },
+				onStderr: listener => { child.stderr.on("data", listener); },
+				onError: listener => { child.once("error", listener); },
+				onClose: listener => { child.once("close", listener); },
+				kill: signal => { child.kill(signal); },
+			};
+		},
+		schedule(callback, delayMs) {
+			const timer = setTimeout(callback, delayMs);
+			return { cancel: () => clearTimeout(timer), unref: () => timer.unref() };
+		},
+		sleep: delayMs => delayMs === 0 ? Promise.resolve() : new Promise(resolve => setTimeout(resolve, delayMs)),
+	};
+}
+
+async function runTwoProcessLedgerFixture(ledgerRoot: string) {
+	const result = await runFixtureCommandWithBackend(process.execPath, [
+		"--input-type=module",
+		"--eval",
+		TWO_PROCESS_LEDGER_SCRIPT,
+		join(isolatedTmp, "worker-a"),
+		join(isolatedTmp, "worker-b"),
+		ledgerRoot,
+	], {
+		attempts: 1,
+		env: {
+			...process.env,
+			BOBBIT_TEST_LEDGER_MODULE_URL: LEDGER_MODULE_URL,
+		},
+	}, preGuardFixtureBackend());
+	return JSON.parse(result.stdout) as {
+		firstPid: number;
+		secondPid: number;
+		firstState: any;
+		secondState: any;
+	};
+}
+
 describe("ledger-lease-bridge ↔ ledger.mjs interop", () => {
 	beforeAll(() => {
 		isolatedTmp = mkdtempSync(join(tmpdir(), "lease-interop-"));
-		process.env.TEMP = isolatedTmp;
-		process.env.TMP = isolatedTmp;
-		process.env.TMPDIR = isolatedTmp;
+		process.env.BOBBIT_V2_LEDGER_DIR = join(isolatedTmp, "ledger");
 		process.env.BOBBIT_V2_TOTAL_CORES = "24";
 		delete process.env.BOBBIT_V2_LEDGER_PARENT;
 		delete process.env.BOBBIT_V2_SLOTS_VITEST;
@@ -46,6 +165,21 @@ describe("ledger-lease-bridge ↔ ledger.mjs interop", () => {
 			else (process.env as any)[k] = v;
 		}
 		try { rmSync(isolatedTmp, { recursive: true, force: true }); } catch { /* best-effort */ }
+	});
+
+	it("shares an explicit ledger root across processes with distinct temp roots", async () => {
+		const ledgerRoot = join(isolatedTmp, "two-process-ledger");
+		const { firstPid, secondPid, firstState, secondState } = await runTwoProcessLedgerFixture(ledgerRoot);
+
+		assert.equal(firstState.ledgerDir, ledgerRoot);
+		assert.equal(secondState.ledgerDir, ledgerRoot);
+		assert.notEqual(firstState.tmpdir, secondState.tmpdir);
+		assert.equal(secondState.reservations.length, 2);
+		assert.deepEqual(
+			new Set(secondState.reservations.map((reservation: any) => reservation.pid)),
+			new Set([firstPid, secondPid]),
+			"the second coordinator must observe the first reservation in the shared ledger",
+		);
 	});
 
 	it("resolves identical caps (budget-caps.json, env override, opts.cap)", async () => {

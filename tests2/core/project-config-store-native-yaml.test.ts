@@ -113,6 +113,22 @@ describe("ProjectConfigStore — native-YAML migrated fields", () => {
 			assert.equal(store.isDirty(), false);
 		});
 
+		it("loads config and sandbox token values from CRLF-native YAML", () => {
+			writeYaml([
+				"config_directories:",
+				"  - path: /shared/skills",
+				"    types: [skills, mcp]",
+				"sandbox_tokens:",
+				"  - key: GITHUB_TOKEN",
+				"    enabled: true",
+			].join("\r\n") + "\r\n");
+
+			const store = new ProjectConfigStore(tmpDir);
+			assert.deepEqual(store.getConfigDirectories(), [{ path: "/shared/skills", types: ["skills", "mcp"] }]);
+			assert.deepEqual(store.getSandboxTokens(), [{ key: "GITHUB_TOKEN", enabled: true }]);
+			assert.equal(store.isDirty(), false);
+		});
+
 		it("loads legacy JSON-string form, then rewrites native on save", () => {
 			const legacy = JSON.stringify([{ path: "/legacy", types: ["skills"] }]);
 			writeYaml(`config_directories: '${legacy}'\n`);
