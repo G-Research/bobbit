@@ -261,14 +261,9 @@ test.describe("Journey: cross-project proposal banner (design §7)", () => {
 		await createSessionViaUI(page);
 		await ensureUnifiedProposalReady(page);
 
-		// Inject a PROVISIONAL target into the client-side project registry. A real
-		// registered project (via the REST API) is never provisional, so we seed the
-		// provisional target directly — resolveProjectMode reads state.projects.
+		// A real registered project (via the REST API) is never provisional, so the
+		// later revision uses a client-only provisional registry entry.
 		const provisionalTargetId = `v2-provisional-target-${Date.now()}`;
-		await page.evaluate((id) => {
-			const s = (window as any).bobbitState ?? (window as any).__bobbitState;
-			s.projects.push({ id, name: "Provisional Target", provisional: true });
-		}, provisionalTargetId);
 
 		// Rev 1: NO projectId → create mode, independent of the source session.
 		await driveUnifiedProposal(page, "project", {
@@ -283,13 +278,25 @@ test.describe("Journey: cross-project proposal banner (design §7)", () => {
 			.toBe("create");
 
 		// Rev 2 (later revision): ADD an explicit provisional cross-project target.
-		// The recompute must flip the mode create → provisional. With the stale
-		// `prev.mode` code this stayed "create".
-		await driveUnifiedProposal(page, "project", {
-			name: "same-project-first",
-			test_command: "npm test",
-			projectId: provisionalTargetId,
-		});
+		// Seed the client-only target and deliver the revision in one browser task.
+		// Session polling refreshes state.projects every five seconds; separating
+		// these operations let a real refresh erase the fake target and classify it
+		// as invalid before onProposal ran. The recompute must still flip the mode
+		// create → provisional; with the stale `prev.mode` code it stayed "create".
+		await page.evaluate((id) => {
+			const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+			const ra = s?.remoteAgent;
+			if (!ra || typeof ra.onProposal !== "function") {
+				throw new Error("remoteAgent.onProposal handler missing");
+			}
+			s.projects.push({ id, name: "Provisional Target", provisional: true });
+			const rev = ((s?.activeProposals?.project?.rev ?? 0) as number) + 1;
+			ra.onProposal("project", {
+				name: "same-project-first",
+				test_command: "npm test",
+				projectId: id,
+			}, false, rev, "seed");
+		}, provisionalTargetId);
 		await expect
 			.poll(async () => page.evaluate(() => {
 				const s = (window as any).bobbitState ?? (window as any).__bobbitState;

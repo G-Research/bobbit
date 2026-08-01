@@ -15,10 +15,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-let cwd: string;
+const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "slash-skills-at-refs-test-"));
 
 beforeAll(() => {
-	cwd = fs.mkdtempSync(path.join(os.tmpdir(), "slash-skills-at-refs-test-"));
 	const skillRoot = path.join(cwd, ".claude", "skills", "withref");
 	fs.mkdirSync(skillRoot, { recursive: true });
 	fs.mkdirSync(path.join(skillRoot, "references"), { recursive: true });
@@ -49,10 +48,15 @@ afterAll(() => {
 
 const { discoverSlashSkills, getSlashSkill } =
 	await import("../../src/server/skills/slash-skills.ts");
+const skillContext = {
+	serverBase: cwd,
+	globalUserBase: path.join(cwd, "empty-home"),
+	projectBase: cwd,
+};
 
 describe("slash-skills @path refs preserved verbatim", () => {
 	it("@references/REFERENCE.md is NOT inlined into the skill body", () => {
-		const skill = getSlashSkill(cwd, "withref");
+		const skill = getSlashSkill(cwd, "withref", undefined, skillContext);
 		assert.ok(skill, "skill should be discovered");
 		assert.ok(skill!.content.includes("@references/REFERENCE.md"),
 			"`@references/REFERENCE.md` literal must appear in the body");
@@ -61,13 +65,13 @@ describe("slash-skills @path refs preserved verbatim", () => {
 	});
 
 	it("description fallback (first non-blank line) still works", () => {
-		const skill = getSlashSkill(cwd, "no-desc");
+		const skill = getSlashSkill(cwd, "no-desc", undefined, skillContext);
 		assert.ok(skill);
 		assert.equal(skill!.description, "First meaningful line wins");
 	});
 
 	it("autocomplete-style listing still surfaces the skill", () => {
-		const all = discoverSlashSkills(cwd);
+		const all = discoverSlashSkills(cwd, undefined, skillContext);
 		const names = all.map(s => s.name);
 		assert.ok(names.includes("withref"), `expected withref in: ${names.join(", ")}`);
 		assert.ok(names.includes("no-desc"));

@@ -5,9 +5,11 @@ import { join } from "node:path";
 import { inflateSync } from "node:zlib";
 import { afterAll, describe, expect, it } from "vitest";
 import {
+	commitInitialFixture,
 	copyGitTemplate,
 	GIT_TEMPLATE_NORMAL_PROCESS_PLAN,
 	prepareGitTemplate,
+	type GitTemplateCommandRunner,
 } from "../harness/git-template.js";
 
 const root = mkdtempSync(join(tmpdir(), "bb-git-template-test-"));
@@ -100,6 +102,10 @@ describe("setup-prepared git template", () => {
 		expect(realpathSync(hooksPath)).toBe(realpathSync(join(first, ".git", "hooks-disabled")));
 		expect(readdirSync(hooksPath)).toEqual([]);
 
+		// These local settings prevent both bootstrap and copied repositories from
+		// starting automatic maintenance after the immutable tree has been hashed.
+		expect(config).toMatch(/\[maintenance\][\s\S]*?auto = false/);
+		expect(config).toMatch(/\[gc\][\s\S]*?auto = 0/);
 		expect(readFileSync(join(first, "README.md"), "utf8")).toBe("# Bobbit test repository\n");
 		expect(readFileSync(join(first, ".gitattributes"), "utf8")).toBe("* text=auto eol=lf\n");
 
@@ -121,6 +127,81 @@ describe("setup-prepared git template", () => {
 		assertValidIndex(first);
 	});
 
+	it("recovers an ambiguous initial-commit failure without retrying a landed commit", async () => {
+		const calls: string[][] = [];
+		const runner: GitTemplateCommandRunner = async (args) => {
+			calls.push(args);
+			switch (args.join(" ")) {
+				case "commit --quiet -m Initial fixture":
+					throw new Error("Windows close reported failure after commit");
+				case "rev-parse --verify HEAD^{commit}":
+					return { stdout: "fixture-head\n", stderr: "", attempts: 1, exitCode: 0 };
+				case "show HEAD:README.md":
+					return { stdout: "# Bobbit test repository\n", stderr: "", attempts: 1, exitCode: 0 };
+				case "show HEAD:.gitattributes":
+					return { stdout: "* text=auto eol=lf\n", stderr: "", attempts: 1, exitCode: 0 };
+				case "diff --quiet --cached HEAD --":
+				case "diff --quiet HEAD --":
+					return { stdout: "", stderr: "", attempts: 1, exitCode: 0 };
+				case "status --porcelain --untracked-files=all":
+					return { stdout: "", stderr: "", attempts: 1, exitCode: 0 };
+				default:
+					throw new Error(`unexpected command: ${args.join(" ")}`);
+			}
+		};
+
+		await expect(commitInitialFixture(runner, "/fixture/repo")).resolves.toBeUndefined();
+		expect(calls.filter(args => args[0] === "commit")).toHaveLength(1);
+		expect(calls).toEqual([
+			["commit", "--quiet", "-m", "Initial fixture"],
+			["rev-parse", "--verify", "HEAD^{commit}"],
+			["show", "HEAD:README.md"],
+			["show", "HEAD:.gitattributes"],
+			["diff", "--quiet", "--cached", "HEAD", "--"],
+			["diff", "--quiet", "HEAD", "--"],
+			["status", "--porcelain", "--untracked-files=all"],
+		]);
+	});
+
+	it("retries the initial commit only when the failure probe finds no commit", async () => {
+		let commitAttempts = 0;
+		const runner: GitTemplateCommandRunner = async (args) => {
+			if (args[0] === "commit") {
+				commitAttempts++;
+				if (commitAttempts === 1) throw new Error("commit did not start");
+				return { stdout: "", stderr: "", attempts: 1, exitCode: 0 };
+			}
+			if (args.join(" ") === "rev-parse --verify HEAD^{commit}") {
+				throw new Error("HEAD is unborn");
+			}
+			throw new Error(`unexpected command: ${args.join(" ")}`);
+		};
+
+		await expect(commitInitialFixture(runner, "/fixture/repo")).resolves.toBeUndefined();
+		expect(commitAttempts).toBe(2);
+	});
+
+	it("does not retry when a failed commit already left an unexpected HEAD", async () => {
+		let commitAttempts = 0;
+		const runner: GitTemplateCommandRunner = async (args) => {
+			if (args[0] === "commit") {
+				commitAttempts++;
+				throw new Error("Windows close reported failure after commit");
+			}
+			if (args.join(" ") === "rev-parse --verify HEAD^{commit}") {
+				return { stdout: "fixture-head\\n", stderr: "", attempts: 1, exitCode: 0 };
+			}
+			if (args.join(" ") === "show HEAD:README.md") {
+				return { stdout: "unexpected fixture\\n", stderr: "", attempts: 1, exitCode: 0 };
+			}
+			throw new Error(`unexpected command: ${args.join(" ")}`);
+		};
+
+		await expect(commitInitialFixture(runner, "/fixture/repo"))
+			.rejects.toThrow(/unexpected repository state/);
+		expect(commitAttempts).toBe(1);
+	});
+
 	it("creates independent writable copies without modifying the source", async () => {
 		const source = await prepareGitTemplate();
 		const sourceCommit = headCommit(source);
@@ -137,6 +218,18 @@ describe("setup-prepared git template", () => {
 		expect(headCommit(copyOne)).toBe(sourceCommit);
 		expect(headCommit(copyTwo)).toBe(sourceCommit);
 		expect(assertValidIndex(copyTwo)).toEqual(sourceIndex);
+	});
+
+	it("rejects arbitrary template mutations rather than filtering hash changes", async () => {
+		const source = await prepareGitTemplate();
+		const unexpected = join(source, ".git", "objects", "unexpected-template-state");
+		writeFileSync(unexpected, "must not be ignored", "utf8");
+		try {
+			expect(() => copyGitTemplate(join(root, "rejected-mutation"))).toThrow(/immutable template was modified/);
+		} finally {
+			rmSync(unexpected, { force: true });
+		}
+		expect(() => copyGitTemplate(join(root, "restored-source"))).not.toThrow();
 	});
 
 	it("refuses to merge a template into a non-empty destination", async () => {

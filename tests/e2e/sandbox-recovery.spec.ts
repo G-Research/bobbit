@@ -3,13 +3,15 @@
  * plus the narrow live-Docker models.json inode-remount contract.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, expect } from "./in-process-harness.js";
+import { globalAgentDir } from "../../src/server/bobbit-dir.js";
+import { projectSandboxVolumeNames } from "../../src/server/agent/docker-args.js";
 import { ProjectSandbox } from "../../src/server/agent/project-sandbox.js";
-import { toDockerPath } from "../../src/server/agent/rpc-bridge.js";
-import { isDockerSandboxAvailable } from "./test-utils/docker.js";
+import { isDockerAvailable } from "./test-utils/docker.js";
 import {
 	apiFetch,
 	nonGitCwd,
@@ -20,70 +22,153 @@ import {
 
 // ---------------------------------------------------------------------------
 // Live Docker inode-remount contract. The v2 E2E runner reports this file as
-// Docker-gated, while this case self-skips when no usable sandbox is reachable
-// (a live daemon AND a locally-built `bobbit-agent` image). It also self-skips
-// when the Docker host resolves an atomically replaced Windows file bind mount
-// by path instead of retaining its original inode: that platform cannot exercise
-// the stale-inode premise that this regression covers.
+// Docker-gated, while this case self-skips only when no usable daemon is
+// reachable. With Docker available, every container and remount assertion runs.
 // ---------------------------------------------------------------------------
 
 test.describe("atomic models.json bind mount", () => {
-	test("ProjectSandbox recreation remounts the atomically published inode", async () => {
-		test.skip(!isDockerSandboxAvailable(), "Docker sandbox not available (daemon or bobbit-agent image missing)");
-		test.setTimeout(60_000);
+	test("refresh remount for one same-project E2E run preserves the other run's labelled resources", async () => {
+		test.skip(!isDockerAvailable(), "Docker not available");
 		const root = mkdtempSync(path.join(tmpdir(), "bobbit-model-remount-"));
-		const modelsJson = path.join(root, "models.json");
-		const replacement = path.join(root, "models.next.json");
-		const prefix = `bobbit-remount-${process.pid}-${Date.now()}`;
-		let activeName = `${prefix}-0`;
-		let activeId = "";
-		const createContainer = (name: string): string => execFileSync("docker", [
-			"run", "-d", "--name", name,
-			"-v", `${toDockerPath(modelsJson)}:/tmp/models.json:ro`,
-			"bobbit-agent", "sh", "-c", "while true; do sleep 3600; done",
-		], { encoding: "utf-8", timeout: 30_000 }).trim();
-		const readMounted = (containerId: string): string => execFileSync(
-			"docker", ["exec", containerId, "cat", "/tmp/models.json"],
-			{ encoding: "utf-8", timeout: 10_000 },
-		).trim();
+		const source = path.join(root, "source");
+		const projectId = `remount-${randomUUID()}`;
+		const runA = `run-a-${randomUUID()}`;
+		const runB = `run-b-${randomUUID()}`;
+		const originalRunId = process.env.BOBBIT_E2E_RUN_ID;
+		const agentDir = globalAgentDir();
+		const modelsJson = path.join(agentDir, "models.json");
+		const replacement = path.join(agentDir, "models.next.json");
+		const originalModels = existsSync(modelsJson) ? readFileSync(modelsJson) : undefined;
+		const originalReplacement = existsSync(replacement) ? readFileSync(replacement) : undefined;
+		const docker = (args: string[]): string => execFileSync("docker", args, { encoding: "utf-8" }).trim();
+		const containerLabels = (containerId: string): Record<string, string> => JSON.parse(docker([
+			"inspect", "--format", "{{json .Config.Labels}}", containerId,
+		]));
+		const volumeLabels = (volume: string): Record<string, string> => JSON.parse(docker([
+			"volume", "inspect", "--format", "{{json .Labels}}", volume,
+		]));
+		const mountedModels = (containerId: string): string => docker([
+			"exec", containerId, "cat", "/home/node/.bobbit/agent/models.json",
+		]);
+		const exists = (containerId: string): boolean => {
+			try {
+				execFileSync("docker", ["inspect", containerId], { stdio: "ignore" });
+				return true;
+			} catch {
+				return false;
+			}
+		};
+		const volumeExists = (volume: string): boolean => {
+			try {
+				execFileSync("docker", ["volume", "inspect", volume], { stdio: "ignore" });
+				return true;
+			} catch {
+				return false;
+			}
+		};
+		const removeSeededResources = (runId: string): void => {
+			const expectedLabels = { "bobbit-project": projectId, "bobbit-e2e-run": runId };
+			let containerIds: string[] = [];
+			try {
+				containerIds = docker([
+					"ps", "-aq", "--filter", `label=bobbit-project=${projectId}`,
+					"--filter", `label=bobbit-e2e-run=${runId}`,
+				]).split(/\s+/).filter(Boolean);
+			} catch { /* Docker cleanup is best effort after an assertion failure. */ }
+			for (const containerId of containerIds) {
+				try {
+					const labels = containerLabels(containerId);
+					if (labels["bobbit-project"] === expectedLabels["bobbit-project"] && labels["bobbit-e2e-run"] === expectedLabels["bobbit-e2e-run"]) {
+						docker(["rm", "-f", containerId]);
+					}
+				} catch { /* Container may already have been removed by remount. */ }
+			}
+			for (const volume of Object.values(projectSandboxVolumeNames(projectId, runId))) {
+				try {
+					const labels = volumeLabels(volume);
+					if (labels["bobbit-project"] === projectId && labels["bobbit-e2e-run"] === runId) {
+						docker(["volume", "rm", "-f", volume]);
+					}
+				} catch { /* Volume was not created or has already been removed. */ }
+			}
+		};
 		try {
+			mkdirSync(source, { recursive: true });
+			docker(["image", "inspect", "bobbit-agent"]);
+			execFileSync("git", ["init"], { cwd: source, stdio: "ignore" });
+			writeFileSync(path.join(source, "README.md"), "sandbox source\n");
+			execFileSync("git", ["add", "README.md"], { cwd: source, stdio: "ignore" });
+			execFileSync("git", ["-c", "user.name=Bobbit", "-c", "user.email=bobbit@bobbit.ai", "commit", "-m", "sandbox source"], { cwd: source, stdio: "ignore" });
+			mkdirSync(agentDir, { recursive: true });
 			writeFileSync(modelsJson, '{"generation":0}\n');
-			activeId = createContainer(activeName);
-			expect(readMounted(activeId)).toBe('{"generation":0}');
+
+			const createSandbox = () => new ProjectSandbox({
+				projectId,
+				projectDir: root,
+				repoUrl: "file:///workspace-src",
+				cloneSource: { kind: "mounted", hostPath: source, mountPath: "/workspace-src", cloneUrl: "file:///workspace-src" },
+				image: "bobbit-agent",
+			});
+			process.env.BOBBIT_E2E_RUN_ID = runA;
+			const sandboxA = createSandbox();
+			await sandboxA.init();
+			const initialA = await sandboxA.getContainerId();
+
+			process.env.BOBBIT_E2E_RUN_ID = runB;
+			const sandboxB = createSandbox();
+			await sandboxB.init();
+			const initialB = await sandboxB.getContainerId();
+			const volumesA = Object.values(projectSandboxVolumeNames(projectId, runA));
+			const volumesB = Object.values(projectSandboxVolumeNames(projectId, runB));
+			expect(volumesA).not.toEqual(volumesB);
+			for (const [runId, containerId, volumes] of [[runA, initialA, volumesA], [runB, initialB, volumesB]] as const) {
+				expect(containerLabels(containerId)).toMatchObject({ "bobbit-project": projectId, "bobbit-e2e-run": runId });
+				for (const volume of volumes) {
+					expect(volume).toContain(`-e2e-${runId}`);
+					expect(volumeLabels(volume)).toMatchObject({ "bobbit-project": projectId, "bobbit-e2e-run": runId });
+				}
+			}
+			expect(mountedModels(initialA)).toBe('{"generation":0}');
 
 			writeFileSync(replacement, '{"generation":1}\n');
 			renameSync(replacement, modelsJson);
-			// Native Linux bind mounts retain the old inode until recreation. Docker
-			// Desktop's Windows file-sharing backend may instead resolve the mount by
-			// path and expose the replacement immediately; that behavior is valid, but
-			// cannot exercise this stale-inode regression.
-			const mountedBeforeRecreation = readMounted(activeId);
-			test.skip(
-				mountedBeforeRecreation === '{"generation":1}',
-				"Docker file bind mounts on this platform resolve atomic replacement by path, not inode",
-			);
-			expect(mountedBeforeRecreation).toBe('{"generation":0}');
+			// A sandbox's owner was captured at construction. An unrelated ambient
+			// value must not retarget its lookup/removal/replacement lifecycle.
+			process.env.BOBBIT_E2E_RUN_ID = `ambient-retarget-${randomUUID()}`;
+			await sandboxA.refreshAgentModelMount();
+			const recreatedA = await sandboxA.getContainerId();
+			expect(recreatedA).not.toBe(initialA);
+			expect(exists(initialA)).toBe(false);
+			expect(containerLabels(recreatedA)).toMatchObject({ "bobbit-project": projectId, "bobbit-e2e-run": runA });
+			expect(mountedModels(recreatedA)).toBe('{"generation":1}');
 
-			const sandbox = new ProjectSandbox({
-				projectId: `${prefix}-project`,
-				projectDir: root,
-				repoUrl: "https://example.test/repo.git",
-				image: "bobbit-agent",
-			});
-			(sandbox as any).containerId = activeId;
-			(sandbox as any)._status = "ready";
-			(sandbox as any)._initContainer = async () => {
-				activeName = `${prefix}-1`;
-				activeId = createContainer(activeName);
-				(sandbox as any).containerId = activeId;
-			};
-
-			await sandbox.refreshAgentModelMount();
-			expect(readMounted(await sandbox.getContainerId())).toBe('{"generation":1}');
-		} finally {
-			for (const suffix of ["0", "1"]) {
-				try { execFileSync("docker", ["rm", "-f", `${prefix}-${suffix}`], { stdio: "ignore", timeout: 10_000 }); } catch { /* best effort */ }
+			// Run B has the same project ID but a distinct E2E ownership label.
+			// Its container and its independently labelled named volumes must survive.
+			expect(exists(initialB)).toBe(true);
+			expect(containerLabels(initialB)).toMatchObject({ "bobbit-project": projectId, "bobbit-e2e-run": runB });
+			for (const volume of volumesB) {
+				expect(volumeLabels(volume)).toMatchObject({ "bobbit-project": projectId, "bobbit-e2e-run": runB });
 			}
+
+			// Destruction must use that same captured owner rather than the now-
+			// ambient Run B owner, which would otherwise delete sibling volumes.
+			process.env.BOBBIT_E2E_RUN_ID = runB;
+			await sandboxA.destroy();
+			expect(exists(recreatedA)).toBe(false);
+			for (const volume of volumesA) expect(volumeExists(volume)).toBe(false);
+			expect(exists(initialB)).toBe(true);
+			for (const volume of volumesB) {
+				expect(volumeLabels(volume)).toMatchObject({ "bobbit-project": projectId, "bobbit-e2e-run": runB });
+			}
+		} finally {
+			removeSeededResources(runA);
+			removeSeededResources(runB);
+			if (originalModels) writeFileSync(modelsJson, originalModels);
+			else rmSync(modelsJson, { force: true });
+			if (originalReplacement) writeFileSync(replacement, originalReplacement);
+			else rmSync(replacement, { force: true });
+			if (originalRunId === undefined) delete process.env.BOBBIT_E2E_RUN_ID;
+			else process.env.BOBBIT_E2E_RUN_ID = originalRunId;
 			rmSync(root, { recursive: true, force: true });
 		}
 	});

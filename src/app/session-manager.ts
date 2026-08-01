@@ -2647,11 +2647,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		}
 		renderApp();
 
-		// Replace history if the hash changed to a goal-dashboard during the async gap
-		const currentRoute = getRouteFromHash();
-		if (currentRoute.view === "goal-dashboard") {
-			setHashRoute("session", sessionId, true);
-		}
+		// Do not rewrite the hash after an await: a newer route is user intent and
+		// must not be rolled back by this session's asynchronous hydration.
 
 		// (Snapshot request + proposal-check deferral fire immediately after
 		// connect() resolves. Initial workspace hydration runs only after setAgent

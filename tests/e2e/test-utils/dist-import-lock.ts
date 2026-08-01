@@ -10,10 +10,11 @@ const LOCK_WAIT_MS = 25;
 const LOCK_TIMEOUT_MS = 30_000;
 
 function e2eTempRoot(): string {
+	// An explicit coordinator root is always owned. Do not replace it with
+	// Docker's shared `/tmp`, or concurrent coordinators can remove this lock.
+	if (process.env.BOBBIT_E2E_TMP_ROOT) return process.env.BOBBIT_E2E_TMP_ROOT;
 	if (existsSync("/.dockerenv")) return "/tmp";
-	return process.platform === "win32"
-		? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
-		: join(tmpdir(), "bobbit-e2e");
+	return process.platform === "win32" ? "C:\\bobbit-e2e" : join(tmpdir(), "bobbit-e2e");
 }
 
 function lockDir(): string {

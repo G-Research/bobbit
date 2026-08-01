@@ -4,35 +4,33 @@
  * Consolidated from: artifacts-pack, terminal-pack, pr-walkthrough-pack, etc.
  * Note: the marketplace route is #/market, not #/settings/marketplace.
  */
-import { test, expect, openApp } from "../_helpers/journey-fixture.js";
+import { test, expect, navigateToHash, openApp } from "../_helpers/journey-fixture.js";
+
+async function openMarketplace(page: import("@playwright/test").Page): Promise<void> {
+	await openApp(page);
+	await navigateToHash(page, "#/market");
+}
 
 test.describe("Journey: Marketplace Packs", () => {
 	test("marketplace route renders", async ({ page }) => {
-		await openApp(page);
-		await page.evaluate(() => { window.location.hash = "#/market"; });
-		await page.waitForFunction(() => window.location.hash.includes("market"), null, { timeout: 20_000 });
+		await openMarketplace(page);
 		await expect(page.locator("body")).toBeVisible({ timeout: 20_000 });
 	});
 
 	test("sidebar is present on marketplace route", async ({ page }) => {
-		await openApp(page);
-		await page.evaluate(() => { window.location.hash = "#/market"; });
-		await page.waitForFunction(() => window.location.hash.includes("market"), null, { timeout: 20_000 });
+		await openMarketplace(page);
 		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
 	});
 
 	test("app shell stable across marketplace navigation", async ({ page }) => {
 		await openApp(page);
-		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
-		await page.evaluate(() => { window.location.hash = "#/market"; });
-		await page.waitForFunction(() => window.location.hash.includes("market"), null, { timeout: 20_000 });
-		await expect(page.locator("body")).toBeVisible({ timeout: 15_000 });
+		await expect(page.locator(".app-shell")).toBeVisible({ timeout: 15_000 });
+		await navigateToHash(page, "#/market");
+		await expect(page.locator(".app-shell")).toBeVisible({ timeout: 15_000 });
 	});
 
 	test("marketplace page renders pack list or install form", async ({ page }) => {
-		await openApp(page);
-		await page.evaluate(() => { window.location.hash = "#/market"; });
-		await page.waitForFunction(() => window.location.hash.includes("market"), null, { timeout: 20_000 });
+		await openMarketplace(page);
 		// The marketplace page should show either a pack source list, an install form, or pack cards
 		const packContent = page.locator(
 			"[data-testid='marketplace-sources'], [data-testid='pack-list'], .pack-card, " +
@@ -43,9 +41,7 @@ test.describe("Journey: Marketplace Packs", () => {
 	});
 
 	test("marketplace shows Installed / Browse / Sources tab buttons", async ({ page }) => {
-		await openApp(page);
-		await page.evaluate(() => { window.location.hash = "#/market"; });
-		await page.waitForFunction(() => window.location.hash.includes("market"), null, { timeout: 20_000 });
+		await openMarketplace(page);
 
 		// All three tabs must be present.
 		await expect(page.getByTestId("market-tab-installed")).toBeVisible({ timeout: 15_000 });
@@ -54,9 +50,7 @@ test.describe("Journey: Marketplace Packs", () => {
 	});
 
 	test("Sources tab opens the sources panel with an add-source button", async ({ page }) => {
-		await openApp(page);
-		await page.evaluate(() => { window.location.hash = "#/market"; });
-		await page.waitForFunction(() => window.location.hash.includes("market"), null, { timeout: 20_000 });
+		await openMarketplace(page);
 		await expect(page.getByTestId("market-tab-sources")).toBeVisible({ timeout: 15_000 });
 
 		// Click the Sources tab.
@@ -70,9 +64,7 @@ test.describe("Journey: Marketplace Packs", () => {
 	// Ported from marketplace.spec.ts (audit: marketplace-packs PARTIAL): the
 	// Market page must render the Research Preview banner.
 	test("marketplace renders the research-preview banner", async ({ page }) => {
-		await openApp(page);
-		await page.evaluate(() => { window.location.hash = "#/market"; });
-		await page.waitForFunction(() => window.location.hash.includes("market"), null, { timeout: 20_000 });
+		await openMarketplace(page);
 		await expect(page.getByTestId("market-research-preview-banner")).toBeVisible({ timeout: 20_000 });
 	});
 });
@@ -81,9 +73,7 @@ test.describe("Journey: Marketplace Packs", () => {
 // Installed tab opens the installed-panel.
 test.describe("Journey: Marketplace Installed Panel", () => {
 	test("Installed tab opens the installed-panel", async ({ page }) => {
-		await openApp(page);
-		await page.evaluate(() => { window.location.hash = "#/market"; });
-		await page.waitForFunction(() => window.location.hash.includes("market"), null, { timeout: 20_000 });
+		await openMarketplace(page);
 		const tab = page.getByTestId("market-tab-installed");
 		await expect(tab).toBeVisible({ timeout: 20_000 });
 		await tab.click();

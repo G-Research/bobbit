@@ -1,9 +1,12 @@
 import { test, expect, type Page, type TestInfo } from "@playwright/test";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import {
+	capturePackagedCli,
 	cleanConsumerNpmEnv,
 	commandFailure,
 	createProjectAndSession,
@@ -181,6 +184,104 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 	// packaging regression behind a second independently-built consumer.
 	test.describe.configure({ retries: 0 });
 
+	test("teardown escalates an unresponsive packaged runtime without leaking its pipes", async () => {
+		const child = spawn(process.execPath, ["-e", process.platform === "win32"
+			? "console.log('ready'); setInterval(() => {}, 1_000);"
+			: "process.on('SIGTERM', () => {}); console.log('ready'); setInterval(() => {}, 1_000);"], {
+			detached: process.platform !== "win32",
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		const runtime = capturePackagedCli(child);
+		await once(child.stdout!, "data");
+
+		const startedAt = Date.now();
+		await stopPackagedCli(runtime);
+		const elapsedMs = Date.now() - startedAt;
+
+		if (process.platform !== "win32") expect(child.signalCode).toBe("SIGKILL");
+		expect(runtime.closed, "teardown must wait for ChildProcess close").toBe(true);
+		expect(child.exitCode ?? child.signalCode).not.toBeNull();
+		expect(child.stdout?.destroyed, "teardown must release inherited stdout").toBe(true);
+		expect(child.stderr?.destroyed, "teardown must release inherited stderr").toBe(true);
+		expect(elapsedMs, "teardown must remain bounded after escalation").toBeLessThan(10_000);
+	});
+
+	test("teardown does not mistake released stdio for packaged process close", async () => {
+		const child = spawn(process.execPath, ["-e", `
+			const fs = require("node:fs");
+			const keepAlive = setInterval(() => {}, 1_000);
+			process.on("message", message => {
+				if (message !== "release-stdio") return;
+				process.stdout.destroy();
+				process.stderr.destroy();
+				fs.closeSync(1);
+				fs.closeSync(2);
+				process.send?.("stdio-released");
+			});
+			process.stdout.write("ready\\n");
+		`], {
+			detached: process.platform !== "win32",
+			stdio: ["ignore", "pipe", "pipe", "ipc"],
+			windowsHide: true,
+		});
+		const runtime = capturePackagedCli(child);
+		const actualClose = once(child, "close");
+		await once(child.stdout!, "data");
+		const stdoutReleased = once(child.stdout!, "close");
+		child.send("release-stdio");
+		await stdoutReleased;
+
+		try {
+			expect(runtime.closed, "stdio closure must not be recorded as process closure").toBe(false);
+			expect(child.exitCode).toBeNull();
+			expect(child.signalCode).toBeNull();
+
+			await stopPackagedCli(runtime);
+			expect(runtime.closed, "teardown must await actual ChildProcess close").toBe(true);
+			await actualClose;
+			expect(child.exitCode ?? child.signalCode).not.toBeNull();
+		} finally {
+			// Keep this regression self-cleaning against a broken teardown: the
+			// fixture intentionally has no natural exit path after closing stdio.
+			if (!runtime.closed) {
+				child.kill("SIGKILL");
+				await actualClose;
+			}
+		}
+	});
+
+	test("reaps an inherited-stdio descendant at the owned root-exit boundary", async () => {
+		test.setTimeout(5_000);
+		const child = spawn(process.execPath, ["-e", [
+			'const { spawn } = require("node:child_process");',
+			'const descendant = spawn(process.execPath, ["-e", "process.on(\\\"SIGTERM\\\", () => {}); setInterval(() => {}, 1000);"], { stdio: "inherit" });',
+			'process.stdout.write("ready\\n");',
+			'process.on("SIGTERM", () => process.exit(0));',
+		].join("")], {
+			detached: process.platform !== "win32",
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		const runtime = capturePackagedCli(child);
+		const actualExit = once(child, "exit");
+		const actualClose = once(child, "close");
+		await once(child.stdout!, "data");
+
+		try {
+			await stopPackagedCli(runtime);
+			await actualExit;
+			await actualClose;
+			expect(runtime.exited, "root exit must be recorded before inherited stdio closes").toBe(true);
+			expect(runtime.closed, "the owned process tree must close after teardown").toBe(true);
+			if (process.platform !== "win32") {
+				expect(runtime.finalTreeSignalSent, "the original POSIX group must be finalized at root exit").toBe(true);
+			}
+		} finally {
+			if (!runtime.closed) await stopPackagedCli(runtime);
+		}
+	});
+
 	test("clean consumer serves dist UI and executes the bundled isolated theme bridge", async ({ page }, testInfo) => {
 		test.setTimeout(15 * 60_000);
 		const tempRoot = await mkdtemp(join(tmpdir(), "bobbit-packed-inline-theme-"));
@@ -298,28 +399,44 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 				method: "PUT",
 				headers: preferenceHeaders,
 				body: JSON.stringify({
+					palette: "ocean",
 					"default.sessionModel": "mock/mock-model",
 					"default.sessionThinkingLevel": "off",
 				}),
 			});
 			expect(
 				defaultSeed.ok,
-				`failed to select packaged mock default: ${defaultSeed.status} ${await defaultSeed.clone().text()}`,
+				`failed to select packaged mock default and ocean palette: ${defaultSeed.status} ${await defaultSeed.clone().text()}`,
 			).toBe(true);
 			expect(await defaultSeed.json()).toMatchObject({
+				palette: "ocean",
 				"default.sessionModel": "mock/mock-model",
 				"default.sessionThinkingLevel": "off",
 			});
 			const sessionId = await createProjectAndSession(baseUrl, token, workspaceDir);
-			await promptSession(wsBaseUrl, sessionId, token);
 
 			page.on("request", request => report.requests.push(request.url()));
+			await page.addInitScript(() => {
+				localStorage.setItem("theme", "light");
+				localStorage.setItem("palette", "ocean");
+			});
 			await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
 			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 30_000 });
+			// The sidebar appears in the initial gateway-starting render, before the
+			// asynchronous preference load. Wait for the app's explicit end-of-boot
+			// marker so a delayed preference/session lifecycle cannot clear this
+			// host palette while the iframe bridge is being observed.
+			await expect(page.locator("body")).toHaveAttribute("data-shortcuts-ready", "1", { timeout: 30_000 });
 			await page.evaluate(() => {
-				document.documentElement.classList.remove("dark");
-				document.documentElement.setAttribute("data-palette", "forest");
+				const root = document.documentElement;
+				root.classList.remove("dark");
+				root.setAttribute("data-palette", "ocean");
+				localStorage.setItem("theme", "light");
+				localStorage.setItem("palette", "ocean");
 			});
+			// Emit only after the host theme lifecycle is settled. This makes the
+			// generated inline document's parse-time bridge observe a stable host.
+			await promptSession(wsBaseUrl, sessionId, token);
 			await page.evaluate(id => { window.location.hash = `#/session/${id}`; }, sessionId);
 
 			const iframe = page.locator('iframe[title="theme-card.html"]');
@@ -332,6 +449,8 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 			const initialHost = await hostTheme(page);
 			const initialFrame = await iframeTheme(page);
 			expect(await iframe.getAttribute("sandbox")).toBe("allow-scripts");
+			expect(initialHost.dark).toBe(false);
+			expect(initialHost.palette).toBe("ocean");
 			expect(
 				report.bridgeAssets.length,
 				"PACKAGED_INLINE_THEME_BRIDGE_MISSING: compiled dist/ui assets must include the isolated inline theme bridge",
@@ -347,10 +466,15 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 				(element as HTMLIFrameElement).dataset.packedFrameIdentity = "same-packaged-iframe";
 			});
 			await page.evaluate(() => {
-				document.documentElement.classList.add("dark");
-				document.documentElement.setAttribute("data-palette", "ocean");
+				const root = document.documentElement;
+				root.classList.add("dark");
+				root.setAttribute("data-palette", "rose");
+				localStorage.setItem("theme", "dark");
+				localStorage.setItem("palette", "rose");
 			});
 			const switchedHost = await hostTheme(page);
+			expect(switchedHost.dark).toBe(true);
+			expect(switchedHost.palette).toBe("rose");
 			await expect.poll(
 				async () => {
 					const state = await iframeTheme(page);
@@ -364,7 +488,7 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 				{ timeout: 20_000, message: "packaged iframe must mirror a live host theme/palette switch" },
 			).toEqual({
 				dark: true,
-				palette: "ocean",
+				palette: "rose",
 				background: switchedHost.background,
 				identity: "same-packaged-iframe",
 			});

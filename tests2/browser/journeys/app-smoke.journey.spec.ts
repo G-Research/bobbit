@@ -317,6 +317,13 @@ test.describe("Journey: Sidebar Keyboard Nav", () => {
 			// are populated yet (they arrive via WS-driven state). Wait on the OBSERVABLE
 			// row count so a CPU-starved render under N-way load never reads 0/1 rows.
 			await expect.poll(() => page.locator("[data-nav-id]").count(), { timeout: 15_000 }).toBeGreaterThan(1);
+			// Rows render before main.ts finishes loading persisted bindings and attaches
+			// the window listener. Do not derive order or dispatch until that boundary.
+			await page.waitForFunction(
+				() => document.body.dataset.shortcutsReady === "1",
+				null,
+				{ timeout: 15_000 },
+			);
 			const domOrder: string[] = await page.evaluate(() =>
 				Array.from(document.querySelectorAll("[data-nav-id]")).map((el) => el.getAttribute("data-nav-id") || ""));
 			expect(domOrder.length, "sidebar must emit multiple data-nav-id rows").toBeGreaterThan(1);

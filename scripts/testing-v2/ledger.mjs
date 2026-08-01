@@ -8,7 +8,9 @@
  * minutes apart, by granting from a single persisted remaining-core budget
  * while holding an atomic lockfile.
  *
- * State lives under the OS temp root: <tmp>/bobbit-test-v2-ledger/
+ * State lives under the OS temp root: <tmp>/bobbit-test-v2-ledger/ (or under
+ * BOBBIT_V2_LEDGER_DIR when an isolated test fixture explicitly opts out of the
+ * machine-global pool):
  *   - ledger.lock        atomic fs.open(..,"wx") mutex; stale only if owner PID
  *                        dead AND mtime older than 30s.
  *   - reservations.json  { totalCores, generation, reservations: [ ... ] }
@@ -97,7 +99,7 @@ import {
 	statSync,
 	utimesSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { tmpdir, cpus } from "node:os";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { spawnSync, spawn } from "node:child_process";
@@ -164,8 +166,15 @@ function budgetCapFromFile(pool) {
 
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 
+/**
+ * Shared by default so independent workflow runs enforce one machine-wide cap.
+ * A caller may opt into an isolated root for self-tests/fixtures; keep this
+ * override explicit rather than relying on mutable TMPDIR state in a test
+ * worker, which can be inherited or changed by unrelated test infrastructure.
+ */
 export function ledgerDir() {
-	return join(tmpdir(), LEDGER_DIRNAME);
+	const override = process.env.BOBBIT_V2_LEDGER_DIR;
+	return override ? resolve(override) : join(tmpdir(), LEDGER_DIRNAME);
 }
 
 function reservationsPath() {

@@ -128,15 +128,20 @@ test.describe("terminal pack panel", () => {
 		const run = `bobbit_scroll_${Date.now()}`;
 		const burstDone = `${run}_BURST_DONE`;
 		const followUp = `${run}_FOLLOWUP_VISIBLE`;
-		const burstCommand = [
-			...Array.from({ length: 90 }, (_, i) => `echo ${run}_LINE_${String(i).padStart(3, "0")}_abc123xyz`),
-			`echo ${burstDone}`,
-		].join(" && ");
-		await typeCommand(page, burstCommand);
-		await expect.poll(
-			() => receivedTerminalTextIncludes(page, burstDone),
-			{ message: "large-output regression setup: PTY should emit the burst completion marker", timeout: 20_000 },
-		).toBe(true);
+		// `attached` confirms the channel, not that the interactive shell has
+		// consumed input. First prove the shell-to-panel path, then emit the 90-line
+		// payload in acknowledged chunks. This removes the cold-PTY/bulk-output race
+		// without retries or a clock-based settle.
+		await runTerminalCommandAndWaitForOutput(page, `echo ${run}_READY`, `${run}_READY`, "terminal shell readiness");
+		for (let batch = 0; batch < 9; batch += 1) {
+			const start = batch * 10;
+			const end = start + 9;
+			const completion = batch === 8 ? burstDone : `${run}_CHUNK_${batch}_DONE`;
+			const burstCommand = process.platform === "win32"
+				? `(for /L %i in (${start},1,${end}) do @echo ${run}_LINE_%i_abc123xyz) & echo ${completion}`
+				: `i=${start}; while [ "$i" -le ${end} ]; do printf '${run}_LINE_%03d_abc123xyz\\n' "$i"; i=$((i + 1)); done; printf '${completion}\\n'`;
+			await runTerminalCommandAndWaitForOutput(page, burstCommand, completion, `large-output burst chunk ${batch + 1}`);
+		}
 
 		await page.setViewportSize({ width: 980, height: 430 });
 		await assertTerminalLayoutStable(page, "scroll regression after shrinking viewport");
@@ -985,6 +990,19 @@ async function typeCommand(page: import("@playwright/test").Page, command: strin
 	await page.keyboard.insertText(command);
 	await page.keyboard.press("Enter");
 	await expect.poll(() => textFrameCount(page), { timeout: 5_000 }).toBeGreaterThan(textFramesBefore);
+}
+
+async function runTerminalCommandAndWaitForOutput(
+	page: import("@playwright/test").Page,
+	command: string,
+	marker: string,
+	label: string,
+): Promise<void> {
+	await typeCommand(page, command);
+	await expect.poll(
+		() => receivedTerminalTextIncludes(page, marker),
+		{ message: `${label}: PTY should emit completion marker ${marker}`, timeout: 20_000 },
+	).toBe(true);
 }
 
 async function assertTerminalHistoryAndLayout(page: import("@playwright/test").Page, markers: string[], reason: string): Promise<void> {

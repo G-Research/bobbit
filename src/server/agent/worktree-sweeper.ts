@@ -22,6 +22,7 @@
  */
 
 import { performance } from "node:perf_hooks";
+import { promises as fs } from "node:fs";
 import path from "node:path";
 import { cleanupWorktree, type RemoteGitPolicy } from "../skills/git.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
@@ -99,9 +100,51 @@ export interface SweepResult {
 
 type ParsedWorktree = ReturnType<typeof parseGitWorktreeList>[number];
 
-const normalize = normalizeWorktreeHostPath;
+// Keep downstream comparisons purely lexical. The async sweep gathers canonical
+// aliases once before classifying candidates; classifyWorktrees intentionally
+// remains synchronous and side-effect free for its canned-output callers.
+function normalize(value?: string): string | undefined {
+	return value ? normalizeWorktreeHostPath(path.resolve(value)) : undefined;
+}
 
-type SweepFs = Pick<RecoveryFs, "access">;
+type CanonicalPaths = ReadonlyMap<string, string>;
+
+function canonicalPath(value: string | undefined, aliases: CanonicalPaths): string | undefined {
+	const normalized = normalize(value);
+	return normalized ? aliases.get(normalized) ?? normalized : undefined;
+}
+
+async function canonicalizePaths(
+	values: Iterable<string | undefined>,
+	realpath?: (value: string) => Promise<string>,
+	aliases = new Map<string, string>(),
+): Promise<Map<string, string>> {
+	const normalizedPaths = [...new Set([...values].flatMap(value => {
+		const normalized = normalize(value);
+		return normalized && !aliases.has(normalized) ? [normalized] : [];
+	}))];
+	for (const value of normalizedPaths) aliases.set(value, value);
+	// Test seams that model only the async access probe have no filesystem
+	// identity to resolve. Their paths are intentionally compared lexically.
+	if (!realpath) return aliases;
+	await mapWithConcurrency(normalizedPaths, RECOVERY_IO_CONCURRENCY, async normalized => {
+		try {
+			aliases.set(normalized, normalizeWorktreeHostPath(await realpath(normalized)) ?? normalized);
+		} catch { /* a removed/nonexistent record retains its lexical spelling */ }
+	});
+	return aliases;
+}
+
+function ownershipPaths(ownership: SweepOwnership): Array<string | undefined> {
+	return [
+		...ownership.goals,
+		...ownership.sessions,
+		...(ownership.teams ?? []),
+		...ownership.staff,
+	].flatMap(record => [record.worktreePath, record.cwd, ...Object.values(record.repoWorktrees ?? {})]);
+}
+
+type SweepFs = Pick<RecoveryFs, "access"> & { realpath?: (value: string) => Promise<string> };
 type WorktreeCleanup = typeof cleanupWorktree;
 
 interface SweepRepo {
@@ -123,7 +166,7 @@ interface OwnershipGuards {
 	allRecords: SweepRecord[];
 }
 
-function buildOwnershipGuards(ownership: SweepOwnership): OwnershipGuards {
+function buildOwnershipGuards(ownership: SweepOwnership, aliases: CanonicalPaths = new Map()): OwnershipGuards {
 	const ownedBranches = new Set<string>();
 	const ownedPaths = new Set<string>();
 	const archivedBranches = new Set<string>();
@@ -132,28 +175,41 @@ function buildOwnershipGuards(ownership: SweepOwnership): OwnershipGuards {
 	const teamRecords = (ownership.teams ?? []).map(rec => ({ ...rec, archived: false }));
 	const teamIds = new Set(teamRecords.map(rec => rec.id));
 	const allRecords = [...ownership.goals, ...ownership.sessions, ...teamRecords, ...ownership.staff];
+	const addPathAliases = (paths: Set<string>, value: string | undefined): string | undefined => {
+		const lexical = normalize(value);
+		if (lexical) paths.add(lexical);
+		const canonical = canonicalPath(value, aliases);
+		if (canonical) paths.add(canonical);
+		return canonical ?? lexical;
+	};
 	for (const rec of allRecords) {
 		if (rec.archived) {
 			if (rec.branch) archivedBranches.add(rec.branch);
 			continue;
 		}
 		if (rec.branch) ownedBranches.add(rec.branch);
-		const normalizedPath = normalize(rec.worktreePath);
-		if (normalizedPath) ownedPaths.add(normalizedPath);
-		const cwd = normalize(rec.cwd);
-		if (cwd) ownedPaths.add(cwd);
-		if (rec.branch && rec.worktreePath) branchToExpectedPath.set(rec.branch, rec.worktreePath);
+		const normalizedPath = addPathAliases(ownedPaths, rec.worktreePath);
+		addPathAliases(ownedPaths, rec.cwd);
+		if (rec.branch && rec.worktreePath) branchToExpectedPath.set(rec.branch, canonicalPath(rec.worktreePath, aliases) ?? rec.worktreePath);
 		// Durable team-agent records store the branch container, not per-repo
 		// worktrees. Protect component worktrees underneath that container.
 		if (normalizedPath && !rec.repoWorktrees && teamIds.has(rec.id)) teamContainerPaths.add(normalizedPath);
 		if (rec.repoWorktrees) {
-			for (const worktreePath of Object.values(rec.repoWorktrees)) {
-				const normalizedWorktreePath = normalize(worktreePath);
-				if (normalizedWorktreePath) ownedPaths.add(normalizedWorktreePath);
-			}
+			for (const worktreePath of Object.values(rec.repoWorktrees)) addPathAliases(ownedPaths, worktreePath);
 		}
 	}
-	return { ownedBranches, ownedPaths, archivedBranches, teamContainerPaths, branchToExpectedPath, allRecords };
+	// The reference guard also protects children of a record's cwd. Include a
+	// canonical spelling of every record so that containment survives /var ↔
+	// /private/var aliases without adding I/O to its hot comparison path.
+	const canonicalRecords = allRecords.map(record => ({
+		...record,
+		worktreePath: canonicalPath(record.worktreePath, aliases) ?? record.worktreePath,
+		cwd: canonicalPath(record.cwd, aliases) ?? record.cwd,
+		repoWorktrees: record.repoWorktrees && Object.fromEntries(
+			Object.entries(record.repoWorktrees).map(([repo, worktreePath]) => [repo, canonicalPath(worktreePath, aliases) ?? worktreePath]),
+		),
+	}));
+	return { ownedBranches, ownedPaths, archivedBranches, teamContainerPaths, branchToExpectedPath, allRecords: [...allRecords, ...canonicalRecords] };
 }
 
 function ownershipForWorktree(
@@ -222,7 +278,7 @@ export async function sweepOrphanedWorktrees(opts: {
 	getCurrentOwnership?: () => SweepOwnership;
 }): Promise<SweepResult> {
 	const commandRunner = opts.commandRunner ?? realCommandRunner;
-	const sweepFs = opts.fs ?? realRecoveryFs;
+	const sweepFs: SweepFs = opts.fs ?? { ...realRecoveryFs, realpath: value => fs.realpath(value) };
 	const cleanup = opts.cleanupWorktreeImpl ?? cleanupWorktree;
 	const diagEnabled = cpuDiagnosticsEnabled();
 	const diagStart = diagEnabled ? performance.now() : 0;
@@ -245,11 +301,6 @@ export async function sweepOrphanedWorktrees(opts: {
 			teams: opts.teams,
 			staff: opts.staff,
 		};
-		const initialGuards = buildOwnershipGuards(initialOwnership);
-		const currentOwnershipGuards = (): OwnershipGuards => buildOwnershipGuards(
-			opts.getCurrentOwnership ? opts.getCurrentOwnership() : initialOwnership,
-		);
-
 		// Resolve paths without walking upward. The caller supplies the actual Git
 		// root for subdirectory projects; every configured repo must have its own
 		// `.git` marker before Git is allowed to inspect it.
@@ -293,6 +344,38 @@ export async function sweepOrphanedWorktrees(opts: {
 			}
 		});
 
+		// Git reports canonical paths while durable records can retain lexical
+		// TMPDIR spellings. Canonicalize every distinct path asynchronously once,
+		// then retain both spellings in ownership guards for synchronous hot-path
+		// comparisons below.
+		const aliases = await canonicalizePaths([
+			...ownershipPaths(initialOwnership),
+			...repos.flatMap(repo => [repo.repoPath, repo.resolvedWorktreeRoot]),
+			...scans.flatMap(worktrees => worktrees.flatMap(worktree => [worktree.path, worktree.repoPath, worktree.resolvedWorktreeRoot])),
+		], sweepFs.realpath);
+		const initialGuards = buildOwnershipGuards(initialOwnership, aliases);
+		const refreshCurrentOwnershipAliases = async (): Promise<void> => {
+			// This snapshot only tells us which aliases need I/O. A session can claim
+			// a worktree while that I/O yields, so it must never authorize a mutation.
+			const ownershipForAliases = opts.getCurrentOwnership ? opts.getCurrentOwnership() : initialOwnership;
+			await canonicalizePaths(ownershipPaths(ownershipForAliases), sweepFs.realpath, aliases);
+		};
+		const finalOwnershipGuards = (): { guards: OwnershipGuards; hasUnresolvedPaths: boolean } => {
+			// Call this directly after refreshCurrentOwnershipAliases(). It performs
+			// the final synchronous ownership read and has no await before repair or
+			// cleanup begins, leaving no event-loop turn for a new claim to race in.
+			const finalOwnership = opts.getCurrentOwnership ? opts.getCurrentOwnership() : initialOwnership;
+			// A path that first appears in this final snapshot could be a lexical
+			// alias (for example /var while Git reported /private/var). Resolving it
+			// would yield and reopen the ownership race, so do not mutate until a
+			// later sweep can canonicalize it from a stable snapshot.
+			const hasUnresolvedPaths = ownershipPaths(finalOwnership).some(value => {
+				const normalized = normalize(value);
+				return !!normalized && !aliases.has(normalized);
+			});
+			return { guards: buildOwnershipGuards(finalOwnership, aliases), hasUnresolvedPaths };
+		};
+
 		type SweepOutcome =
 			| { kind: "none" }
 			| { kind: "reclaimed" }
@@ -306,8 +389,8 @@ export async function sweepOrphanedWorktrees(opts: {
 		const outcomesByRepo = await mapWithConcurrency(scans, RECOVERY_IO_CONCURRENCY, async (worktrees): Promise<SweepOutcome[]> => {
 			const outcomes: SweepOutcome[] = [];
 			for (const wt of worktrees) {
-				const wtPathNorm = normalize(wt.path);
-				if (!wtPathNorm || wtPathNorm === normalize(wt.repoPath)) {
+				const wtPathNorm = canonicalPath(wt.path, aliases);
+				if (!wtPathNorm || wtPathNorm === canonicalPath(wt.repoPath, aliases)) {
 					outcomes.push({ kind: "none" });
 					continue;
 				}
@@ -345,11 +428,12 @@ export async function sweepOrphanedWorktrees(opts: {
 						if (expected && normalize(expected) !== wtPathNorm) {
 							try {
 								// A new path/repo/team owner, archive, or changed branch owner
-								// can appear while the async repo scan is pending. Rebuild every
-								// guard in the same turn that starts the repair mutation.
-								const currentGuards = currentOwnershipGuards();
+								// can appear while the async repo scan is pending. Resolve unseen
+								// aliases, then synchronously re-read ownership before repair.
+								await refreshCurrentOwnershipAliases();
+								const { guards: currentGuards, hasUnresolvedPaths } = finalOwnershipGuards();
 								const current = ownershipForWorktree(wt.path, branch, currentGuards);
-								if (current.ownedByPath || !current.ownedByBranch || !current.expectedPath || normalize(current.expectedPath) === wtPathNorm) {
+								if (hasUnresolvedPaths || current.ownedByPath || !current.ownedByBranch || !current.expectedPath || normalize(current.expectedPath) === wtPathNorm) {
 									outcomes.push({ kind: "none" });
 									continue;
 								}
@@ -379,9 +463,10 @@ export async function sweepOrphanedWorktrees(opts: {
 					// The scan intentionally starts from a stable snapshot, but cleanup
 					// authorization must be live: session creation remains available while
 					// this post-listen sweep yields on filesystem and Git work.
-					const currentGuards = currentOwnershipGuards();
+					await refreshCurrentOwnershipAliases();
+					const { guards: currentGuards, hasUnresolvedPaths } = finalOwnershipGuards();
 					const current = ownershipForWorktree(wt.path, branch, currentGuards);
-					if (current.ownedByBranch || current.ownedByPath) {
+					if (hasUnresolvedPaths || current.ownedByBranch || current.ownedByPath) {
 						outcomes.push({ kind: "none" });
 						continue;
 					}

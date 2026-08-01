@@ -18,20 +18,21 @@
  * Per-test isolation is the caller's responsibility via `createScope()`
  * (see scope.ts) + `assertNoLeaks()` (see leak-detector.ts).
  */
-import { cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpSync, existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import type WebSocket from "ws";
 
 import type { GatewayDeps } from "../../src/server/gateway-deps.js";
+import { setEnvironmentValue } from "../../scripts/testing-v2/environment-policy.mjs";
 import { testWorkflows, TEST_DEFAULT_COMPONENT } from "../../tests/e2e/seed-workflows.js";
 import { createManualClock, type ManualClock } from "./clock.js";
 import { createFencedCommandRunner } from "./fenced-command-runner.js";
 import { createFencedFetch } from "./fenced-fetch.js";
 import { createFakeVerificationCommandRunner } from "./fake-verification-command-runner.js";
 import { loadServerTestRuntime, serverRuntimeMode } from "./server-runtime.js";
+import { createRunChild, getRunRoot } from "./run-isolation.js";
 
 const HARNESS_DIR = fileURLToPath(new URL(".", import.meta.url));
 const REPO_ROOT = resolve(HARNESS_DIR, "..", "..");
@@ -89,11 +90,9 @@ const BUILTIN_PACK_SKIP_DIRS = new Set(["src", "node_modules"]);
 const MOCK_BRIDGE_SPECIFIER = new URL("../../tests/e2e/in-process-mock-bridge.mjs", import.meta.url).href;
 
 // Keep write-heavy temp dirs off the repo tree so isGitRepo() never fires and
-// sessions do not auto-create worktrees. Windows Defender-heavy project paths
-// are avoided by anchoring under the OS temp root.
-const TMP_ROOT = process.platform === "win32"
-	? (process.env.BOBBIT_V2_TMP_ROOT || "C:\\bobbit-v2")
-	: join(tmpdir(), "bobbit-v2");
+// sessions do not auto-create worktrees. The run root is inherited from the
+// Vitest coordinator and remains isolated from OS-specific host temp paths.
+const TMP_ROOT = join(getRunRoot(), "gateway");
 
 export interface EntityCounts {
 	sessions: number;
@@ -229,7 +228,7 @@ function prepareBuiltinPacksDir(bobbitDir: string): string {
 
 async function boot(): Promise<BootedGateway> {
 	mkdirSync(TMP_ROOT, { recursive: true });
-	let bobbitDir = mkdtempSync(join(TMP_ROOT, `fork-${process.pid}-`));
+	let bobbitDir = createRunChild(`gateway-fork-${process.pid}`);
 	try { bobbitDir = realpathSync(bobbitDir); } catch { /* platform edge */ }
 
 	const stateDir = join(bobbitDir, "state");
@@ -266,9 +265,12 @@ async function boot(): Promise<BootedGateway> {
 
 	// BOBBIT_DIR / BOBBIT_AGENT_DIR are the real runtime dir vars (also set in
 	// production by cli.ts) — NOT test-only flags. Everything else is config.
-	process.env.BOBBIT_DIR = bobbitDir;
-	process.env.BOBBIT_AGENT_DIR = agentDir;
-	process.env.BOBBIT_SECRETS_DIR = secretsDir;
+	setEnvironmentValue(process.env, "BOBBIT_DIR", bobbitDir);
+	setEnvironmentValue(process.env, "HOME", join(bobbitDir, "home"));
+	setEnvironmentValue(process.env, "USERPROFILE", process.env.HOME!);
+	mkdirSync(process.env.HOME!, { recursive: true });
+	setEnvironmentValue(process.env, "BOBBIT_AGENT_DIR", agentDir);
+	setEnvironmentValue(process.env, "BOBBIT_SECRETS_DIR", secretsDir);
 
 	// Seed inline workflows at both cascade levels BEFORE boot (mirrors harness).
 	const yaml = projectYaml();
@@ -361,9 +363,11 @@ async function boot(): Promise<BootedGateway> {
 		try { return realpathSync(a) === realpathSync(b); } catch { return resolve(a) === resolve(b); }
 	};
 	const restoreAgentDirRuntime = (): void => {
-		process.env.BOBBIT_DIR = bobbitDir;
-		process.env.BOBBIT_AGENT_DIR = agentDir;
-		process.env.BOBBIT_SECRETS_DIR = secretsDir;
+		setEnvironmentValue(process.env, "BOBBIT_DIR", bobbitDir);
+		setEnvironmentValue(process.env, "HOME", join(bobbitDir, "home"));
+		setEnvironmentValue(process.env, "USERPROFILE", process.env.HOME!);
+		setEnvironmentValue(process.env, "BOBBIT_AGENT_DIR", agentDir);
+		setEnvironmentValue(process.env, "BOBBIT_SECRETS_DIR", secretsDir);
 		setProjectRoot(bobbitDir);
 		try {
 			const state = getAgentDirState();

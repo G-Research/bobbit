@@ -17,6 +17,16 @@ export interface RunningCli {
 	child: ChildProcess;
 	stdout: string[];
 	stderr: string[];
+	/** The root process identity is no longer safe to target after this boundary. */
+	exited: boolean;
+	/** Set only after ChildProcess emits `close`, never when its stdio closes. */
+	closed: boolean;
+	/** A graceful tree signal was dispatched while the root was still owned. */
+	shutdownStarted: boolean;
+	/** The detached POSIX group was observed while the root identity was live. */
+	posixGroupOwned: boolean;
+	/** A final POSIX group signal was dispatched at the root-exit boundary. */
+	finalTreeSignalSent: boolean;
 }
 
 const PACKED_THEME_HTML = `<!doctype html>
@@ -130,7 +140,7 @@ function displayCommand(command: string, args: readonly string[]): string {
 	return [command, ...args].map(value => /\s/.test(value) ? JSON.stringify(value) : value).join(" ");
 }
 
-function killTree(child: ChildProcess): void {
+function killTree(child: ChildProcess, signal: NodeJS.Signals = "SIGTERM"): void {
 	if (!child.pid) return;
 	if (process.platform === "win32") {
 		spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
@@ -139,7 +149,9 @@ function killTree(child: ChildProcess): void {
 		});
 		return;
 	}
-	try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+	try { process.kill(-child.pid, signal); } catch {
+		try { child.kill(signal); } catch { /* process already exited */ }
+	}
 }
 
 export function runCommand(
@@ -302,9 +314,39 @@ export function startPackagedCli(options: {
 		detached: process.platform !== "win32",
 		stdio: ["ignore", "pipe", "pipe"],
 	});
-	child.stdout?.on("data", chunk => stdout.push(String(chunk)));
-	child.stderr?.on("data", chunk => stderr.push(String(chunk)));
-	return { child, stdout, stderr };
+	return capturePackagedCli(child, stdout, stderr);
+}
+
+export function capturePackagedCli(
+	child: ChildProcess,
+	stdout: string[] = [],
+	stderr: string[] = [],
+): RunningCli {
+	const runtime: RunningCli = {
+		child,
+		stdout,
+		stderr,
+		exited: false,
+		closed: false,
+		shutdownStarted: false,
+		posixGroupOwned: false,
+		finalTreeSignalSent: false,
+	};
+	child.stdout?.on("data", chunk => runtime.stdout.push(String(chunk)));
+	child.stderr?.on("data", chunk => runtime.stderr.push(String(chunk)));
+	// `exit` is the numeric PID/PGID ownership boundary. If graceful teardown
+	// began while the detached POSIX root was alive, finish reaping its still-live
+	// group immediately here; a delayed negative-PID signal could hit a reused ID.
+	child.once("exit", () => {
+		runtime.exited = true;
+		if (runtime.shutdownStarted && runtime.posixGroupOwned && process.platform !== "win32" && !runtime.finalTreeSignalSent) {
+			forceExitedPosixGroup(runtime);
+		}
+	});
+	// Stream `close` is only the pipe lifecycle. The child may deliberately
+	// release all stdio and keep running, so teardown follows process `close`.
+	child.once("close", () => { runtime.closed = true; });
+	return runtime;
 }
 
 export async function waitForHealth(baseUrl: string, runtime: RunningCli, timeoutMs = 60_000): Promise<void> {
@@ -326,15 +368,98 @@ export async function waitForHealth(baseUrl: string, runtime: RunningCli, timeou
 	throw new Error(`packaged CLI health timed out: ${lastError}\nstdout:\n${runtime.stdout.join("")}\nstderr:\n${runtime.stderr.join("")}`);
 }
 
-export async function stopPackagedCli(runtime: RunningCli): Promise<void> {
-	if (runtime.child.exitCode !== null) return;
-	const closed = new Promise<void>(resolve => runtime.child.once("close", () => resolve()));
-	if (process.platform === "win32") killTree(runtime.child);
-	else {
-		try { process.kill(-runtime.child.pid!, "SIGTERM"); } catch { runtime.child.kill("SIGTERM"); }
+const PACKAGED_CLI_TERM_GRACE_MS = 1_000;
+const PACKAGED_CLI_FORCED_CLOSE_WAIT_MS = 8_000;
+
+function rootExited(runtime: RunningCli): boolean {
+	return runtime.exited || runtime.child.exitCode !== null || runtime.child.signalCode !== null;
+}
+
+function signalOwnedTree(runtime: RunningCli, signal: NodeJS.Signals): boolean {
+	if (rootExited(runtime)) return false;
+	const child = runtime.child;
+	if (!child.pid) return false;
+	if (process.platform === "win32") {
+		killTree(child, signal);
+		return true;
 	}
-	await Promise.race([closed, new Promise<void>(resolve => setTimeout(resolve, 10_000))]);
-	if (runtime.child.exitCode === null) killTree(runtime.child);
+	try {
+		// Record continuous group ownership before delivery. The exit handler may
+		// use this identity only once, at the root-exit boundary.
+		process.kill(-child.pid, 0);
+		runtime.posixGroupOwned = true;
+		process.kill(-child.pid, signal);
+	} catch {
+		try { child.kill(signal); } catch { /* root exited between observations */ }
+	}
+	return true;
+}
+
+function forceExitedPosixGroup(runtime: RunningCli): void {
+	const pid = runtime.child.pid;
+	if (!pid || !runtime.posixGroupOwned || runtime.finalTreeSignalSent) return;
+	// This is allowed only because SIGTERM began before the root's exit boundary.
+	// Confirm the original group still exists at that boundary; an empty group is
+	// no longer owned and its numeric PGID must never be signalled later.
+	try {
+		process.kill(-pid, 0);
+		process.kill(-pid, "SIGKILL");
+	} catch { /* group already gone */ }
+	runtime.finalTreeSignalSent = true;
+}
+
+function waitForChildClose(runtime: RunningCli, timeoutMs: number): Promise<boolean> {
+	if (runtime.closed) return Promise.resolve(true);
+	return new Promise(resolve => {
+		let timer: NodeJS.Timeout | undefined;
+		const finish = (closed: boolean) => {
+			if (timer) clearTimeout(timer);
+			runtime.child.removeListener("close", onClose);
+			resolve(closed);
+		};
+		const onClose = () => finish(true);
+		timer = setTimeout(() => finish(false), timeoutMs);
+		runtime.child.once("close", onClose);
+		// The listener above is synchronous, but retain the second check so this
+		// stays correct if a future runtime is constructed asynchronously.
+		if (runtime.closed) finish(true);
+	});
+}
+
+function releaseChildStdio(child: ChildProcess): void {
+	for (const stream of [child.stdin, child.stdout, child.stderr]) {
+		try { stream?.destroy(); } catch { /* best-effort cleanup after failed OS close */ }
+	}
+	// If the OS did not acknowledge the forced kill, detached children must not
+	// retain this Playwright worker through inherited stdio handles.
+	try { child.unref(); } catch { /* child may have exited between checks */ }
+}
+
+export async function stopPackagedCli(runtime: RunningCli): Promise<void> {
+	if (runtime.closed) return;
+	const child = runtime.child;
+	// Root exit is a hard identity boundary. Windows cannot safely retarget a
+	// departed root PID, and a late POSIX PGID action can reach an unrelated group.
+	if (rootExited(runtime)) {
+		releaseChildStdio(child);
+		return;
+	}
+
+	// POSIX children are detached process-group leaders. Start graceful cleanup
+	// while the root identity is owned. If it exits before pipes close, the exit
+	// handler completes the one allowed final group signal at that boundary.
+	// On Windows taskkill /T /F is likewise initiated only while the root is live.
+	runtime.shutdownStarted = signalOwnedTree(runtime, "SIGTERM");
+	if (await waitForChildClose(runtime, PACKAGED_CLI_TERM_GRACE_MS)) return;
+	if (!rootExited(runtime) && process.platform !== "win32") {
+		signalOwnedTree(runtime, "SIGKILL");
+		runtime.finalTreeSignalSent = true;
+	}
+	if (await waitForChildClose(runtime, PACKAGED_CLI_FORCED_CLOSE_WAIT_MS)) return;
+
+	// Pipe release is containment only, not proof of process termination. Never
+	// issue a numeric PID/PGID action after the root exit identity boundary.
+	releaseChildStdio(child);
 }
 
 export async function readToken(secretsDir: string): Promise<string> {

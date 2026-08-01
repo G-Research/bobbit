@@ -41,7 +41,11 @@ export function attachLocalMockAgentClock(gateway: any, sessionId: string): Loca
 	}));
 
 	async function yieldTurn(): Promise<void> {
-		await new Promise<void>((resolve) => setImmediate(resolve));
+		// A prompt may have started its first real-time sleep just before setSleep()
+		// installs this clock. Yield through the timers phase so that hand-off can
+		// settle; a setImmediate-only loop can starve that pre-existing timer while
+		// virtual time reaches its limit.
+		await new Promise<void>((resolve) => setTimeout(resolve, 0));
 	}
 
 	async function advanceUntilSettled<T>(promise: Promise<T>, maxVirtualMs = 10_000): Promise<T> {
