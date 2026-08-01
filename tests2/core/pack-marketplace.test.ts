@@ -272,7 +272,7 @@ describe("#5 legacy → unified A/B equivalence", () => {
 		const projectRoles = [{ name: "coder", label: "c", promptTemplate: "p", accessory: "none", model: "m-p", createdAt: 0, updatedAt: 0 }];
 		const serverStores = { getRoles: () => serverRoles, getTools: () => [], getToolGroupPolicies: () => ({}) };
 		const pcm = { getOrCreate: (id: string) => (id === "p1" ? { roleStore: { getAllLocal: () => projectRoles } } : undefined) } as any;
-		const cascade = new ConfigCascade(builtins, serverStores, pcm);
+		const cascade = new ConfigCascade(builtins, serverStores, pcm, undefined, undefined, EMPTY_GLOBAL);
 
 		// independent legacy merge
 		function legacy(projectId?: string) {
@@ -293,7 +293,7 @@ describe("#5 legacy → unified A/B equivalence", () => {
 		w(path.join(cwd, ".claude", "skills", "dup", "SKILL.md"), skillMd("dup", "FROM-CLAUDE-PROJECT"));
 		w(path.join(cwd, ".claude", "skills", "only", "SKILL.md"), skillMd("only"));
 
-		const got = discoverSlashSkills(cwd);
+		const got = discoverSlashSkills(cwd, undefined, isolatedSkillContext(cwd));
 		const dup = got.find(s => s.name === "dup")!;
 		assert.ok(dup.content.includes("FROM-CLAUDE-PROJECT"), ".claude/skills (project, highest) must win over .bobbit/skills");
 		assert.ok(got.some(s => s.name === "only"));
@@ -301,8 +301,8 @@ describe("#5 legacy → unified A/B equivalence", () => {
 		// legacy reference merge (the §6.2 order, lowest→highest)
 		const byName = new Map<string, any>();
 		for (const s of scanCommandsDir(path.join(cwd, ".claude", "commands"))) byName.set(s.name, s);
-		for (const s of scanSkillDir(path.join(os.homedir(), ".bobbit", "skills"), "personal")) byName.set(s.name, s);
-		for (const s of scanSkillDir(path.join(os.homedir(), ".claude", "skills"), "personal")) byName.set(s.name, s);
+		for (const s of scanSkillDir(path.join(EMPTY_GLOBAL, ".bobbit", "skills"), "personal")) byName.set(s.name, s);
+		for (const s of scanSkillDir(path.join(EMPTY_GLOBAL, ".claude", "skills"), "personal")) byName.set(s.name, s);
 		for (const s of scanSkillDir(path.join(cwd, ".bobbit", "skills"), "project")) byName.set(s.name, s);
 		for (const s of scanSkillDir(path.join(cwd, ".claude", "skills"), "project")) byName.set(s.name, s);
 		const legacyDup = byName.get("dup")!;
@@ -463,7 +463,7 @@ describe("finding #3 — server-scope skill pack resolves for a non-default proj
 		// WITHOUT the market context, serverBase defaults to the project cwd, which
 		// holds no market packs — so the server-scope skill must NOT leak in. This
 		// is exactly why the bug existed before the serverBase wiring landed.
-		const unwired = discoverSlashSkills(projectBase);
+		const unwired = discoverSlashSkills(projectBase, undefined, { serverBase: projectBase, globalUserBase, projectBase });
 		assert.equal(unwired.find((s) => s.name === "srv-scope-skill"), undefined,
 			"without serverBase wiring the server-scope skill must not resolve (proves the wiring is load-bearing)");
 	});

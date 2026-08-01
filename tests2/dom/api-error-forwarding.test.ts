@@ -26,13 +26,21 @@ function setFetchResponder(fn: (url: string, init: any) => { status: number; bod
 	responder = fn;
 }
 
-async function waitFor(fn: () => boolean, timeout = 5000): Promise<void> {
-	const deadline = Date.now() + timeout;
-	while (Date.now() < deadline) {
-		if (fn()) return;
-		await new Promise((r) => setTimeout(r, 10));
-	}
-	throw new Error("waitFor timed out");
+function observeErrorDetails(): { promise: Promise<HTMLElement>; disconnect: () => void } {
+	let observer: MutationObserver | undefined;
+	const promise = new Promise<HTMLElement>((resolve) => {
+		const find = () => document.querySelector<HTMLElement>('[data-testid="error-details-message"]');
+		const resolveWhenPresent = () => {
+			const details = find();
+			if (!details) return;
+			observer?.disconnect();
+			resolve(details);
+		};
+		observer = new MutationObserver(resolveWhenPresent);
+		observer.observe(document.body, { childList: true, subtree: true });
+		resolveWhenPresent();
+	});
+	return { promise, disconnect: () => observer?.disconnect() };
 }
 
 beforeEach(() => {
@@ -52,13 +60,12 @@ describe("createGoal — descriptive error forwarding", () => {
 	it("forwards server error/code/stack into connection-error modal", async () => {
 		setFetchResponder(() => ({ status: 400, body: { error: "Missing title", code: "bad_request", stack: STACK } }));
 
+		const errorDetails = observeErrorDetails();
 		const result = await createGoal("", "/tmp", { projectId: "p1" });
 		expect(result).toBeNull();
 
-		// Dialog renders asynchronously (dynamic import of dialogs.js).
-		await waitFor(() => !!document.querySelector('[data-testid="error-details-message"]'));
-
-		const message = document.querySelector('[data-testid="error-details-message"]');
+		const message = await errorDetails.promise;
+		errorDetails.disconnect();
 		expect(message?.textContent).toBe("Missing title");
 
 		const code = document.querySelector('[data-testid="error-details-code"]');
@@ -83,11 +90,13 @@ describe("createGoal — descriptive error forwarding", () => {
 		// using the fallback string.
 		setFetchResponder(() => ({ status: 400, body: {} }));
 
+		const errorDetails = observeErrorDetails();
 		const result = await createGoal("x", "/tmp", { projectId: "p1" });
 		expect(result).toBeNull();
 
-		await waitFor(() => !!document.querySelector('[data-testid="error-details-message"]'));
-		expect(document.querySelector('[data-testid="error-details-message"]')?.textContent)
+		const message = await errorDetails.promise;
+		errorDetails.disconnect();
+		expect(message.textContent)
 			.toBe("Failed to create goal: 400");
 	});
 });

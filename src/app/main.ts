@@ -813,6 +813,14 @@ async function initApp() {
 				const { loadStaffPageData, navigateToStaffEdit } = await import("./staff-page.js");
 				await loadStaffPageData();
 				navigateToStaffEdit(route.staffId);
+			} else {
+				// A token-only navigation has the landing route. Unlike hash changes,
+				// it does not dispatch a hashchange event, so it must complete the
+				// authenticated transition here rather than remain on the startup shell.
+				state.appView = "authenticated";
+				applyProjectPalette();
+				renderApp();
+				await refreshSessions();
 			}
 		} catch {
 			state.appView = "disconnected";

@@ -40,11 +40,13 @@ import { fileURLToPath } from "node:url";
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 
-const E2E_TEMP_ROOT_RAW = existsSync("/.dockerenv")
-	? "/tmp"
-	: process.platform === "win32"
-		? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
-		: join(tmpdir(), "bobbit-e2e");
+const E2E_TEMP_ROOT_RAW = process.env.BOBBIT_E2E_TMP_ROOT
+	// Docker's `/tmp` is shared across coordinators; use the explicit owned root.
+	|| (existsSync("/.dockerenv")
+		? "/tmp"
+		: process.platform === "win32"
+			? "C:\\bobbit-e2e"
+			: join(tmpdir(), "bobbit-e2e"));
 mkdirSync(E2E_TEMP_ROOT_RAW, { recursive: true });
 const E2E_TEMP_ROOT = (() => {
 	try { return realpathSync(E2E_TEMP_ROOT_RAW); } catch { return E2E_TEMP_ROOT_RAW; }

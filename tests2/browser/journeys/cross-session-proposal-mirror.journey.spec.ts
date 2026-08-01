@@ -43,13 +43,6 @@ import type { Page } from "@playwright/test";
 // Deterministic bug repro — a failure here is the bug, not a flake budget.
 test.describe.configure({ retries: 0 });
 
-async function ensureUnifiedProposalReady(page: Page): Promise<void> {
-	await page.waitForFunction(() => {
-		const s = (window as any).bobbitState ?? (window as any).__bobbitState;
-		return !!s?.remoteAgent && typeof s.remoteAgent.onProposal === "function";
-	}, undefined, { timeout: 20_000 });
-}
-
 async function waitForActiveSessionProjectRoot(page: Page, expectedSessionId?: string): Promise<void> {
 	await page.waitForFunction((expected: string | undefined) => {
 		const s = (window as any).bobbitState ?? (window as any).__bobbitState;
@@ -92,18 +85,17 @@ async function driveUnifiedProposal(
 	fields: Record<string, unknown>,
 	source = "seed",
 ): Promise<void> {
-	// A route/session switch can replace remoteAgent after an earlier readiness
-	// check, so wait again immediately before invoking its handler.
-	await ensureUnifiedProposalReady(page);
-	await page.evaluate(
+	// Wait for, and invoke, the current handler in the same page task. Hydration
+	// can replace remoteAgent after a separate readiness check has completed.
+	await page.waitForFunction(
 		({ type, fields, source }) => {
 			const s = (window as any).bobbitState ?? (window as any).__bobbitState;
 			const ra = s?.remoteAgent;
-			if (!ra || typeof ra.onProposal !== "function") {
-				throw new Error("remoteAgent.onProposal handler missing");
-			}
+			if (!ra || typeof ra.onProposal !== "function") return false;
+
 			const rev = ((s?.activeProposals?.[type]?.rev ?? 0) as number) + 1;
 			ra.onProposal(type, fields, false, rev, source);
+			return true;
 		},
 		{ type, fields, source },
 	);
@@ -128,7 +120,6 @@ test.describe("Journey: cross-session proposal panels populate form-mirror (unif
 	test("role proposal via unified seed path populates mirror + enables Create Role", async ({ page }) => {
 		await openApp(page);
 		await createSessionViaUI(page);
-		await ensureUnifiedProposalReady(page);
 		await assertNotMatchingAssistant(page, "role");
 
 		const fields = {
@@ -169,7 +160,6 @@ test.describe("Journey: cross-session proposal panels populate form-mirror (unif
 	test("tool proposal via unified seed path populates mirror + renders submit", async ({ page }) => {
 		await openApp(page);
 		await createSessionViaUI(page);
-		await ensureUnifiedProposalReady(page);
 		await assertNotMatchingAssistant(page, "tool");
 
 		const fields = {
@@ -207,7 +197,6 @@ test.describe("Journey: cross-session proposal panels populate form-mirror (unif
 		try {
 			await openApp(page);
 			await navigateToHash(page, `#/session/${sessionId}`);
-			await ensureUnifiedProposalReady(page);
 			await assertNotMatchingAssistant(page, "staff");
 			await waitForActiveSessionProjectRoot(page, sessionId);
 

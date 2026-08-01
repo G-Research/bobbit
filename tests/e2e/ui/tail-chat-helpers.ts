@@ -29,6 +29,8 @@ export interface ScrollProbe {
 	scrollTop: number;
 	scrollHeight: number;
 	clientHeight: number;
+	/** Positive layout growth that triggered a phase observation, when applicable. */
+	growth?: number;
 }
 
 export interface TailSample {
@@ -37,6 +39,8 @@ export interface TailSample {
 	clientHeight: number;
 	scrollHeight: number;
 	scrollTop: number;
+	/** Positive scroll-height delta since the preceding settled sample. */
+	growth: number;
 }
 
 export interface MessageFingerprint {
@@ -126,38 +130,313 @@ export async function measureScroll(page: Page): Promise<ScrollProbe> {
 	}, SCROLL_SEL);
 }
 
-/** In-page sampler used by full-stack streaming specs. */
+/**
+ * Register phase observation before dispatching a stream. Phase labels are
+ * transient protocol output, so waiting for them one by one after dispatch can
+ * miss the first marker entirely. Mutation observation records each named
+ * marker at commit time and reads public scroll geometry two animation frames
+ * later — the same settled lifecycle used by the production re-pin path.
+ */
+export async function startTailPhaseTracker(page: Page, key: string, markers: string[], tailPx = TAIL_PX): Promise<void> {
+	if (new Set(markers).size !== markers.length) {
+		throw new Error("tail phase tracker: expected markers must be unique");
+	}
+	await page.evaluate(({ scrollSel, trackerKey, phaseMarkers, pinnedTailPx }) => {
+		const w = window as any;
+		w[trackerKey]?.disconnect?.();
+		const el = document.querySelector(scrollSel) as HTMLElement | null;
+		const content = el?.querySelector(".max-w-5xl") as HTMLElement | null;
+		if (!el || !content) throw new Error("tail phase tracker: chat content container not found");
+
+		const expected = new Set(phaseMarkers);
+		const pending = new Map<string, number>();
+		const evidence = new Map<string, ScrollProbe>();
+		const waiters = new Map<string, Array<{ resolve: (sample: ScrollProbe) => void; reject: (reason: Error) => void }>>();
+		const markerEventIds = new Map<string, string>();
+		const markerOccurrences = new Map<string, number>();
+		const pendingDomEchoes = new Set<string>();
+		let visibleMarkers = new Set<string>();
+		let lastEvidenceHeight = el.scrollHeight;
+		let failure: Error | null = null;
+		let active = true;
+		let framePending = false;
+
+		const fail = (message: string) => {
+			if (failure) return;
+			failure = new Error(`tail phase tracker: ${message}`);
+			for (const pendingWaiters of waiters.values()) {
+				for (const waiter of pendingWaiters) waiter.reject(failure);
+			}
+			waiters.clear();
+		};
+		const exactMarkers = (text: string): Set<string> => {
+			const found = new Set<string>();
+			for (const match of text.matchAll(/(?:^|[^A-Z0-9_-])((?:PRE|POST)-WAIT-CHUNK-\d+#30)(?![A-Z0-9_-])/g)) {
+				found.add(match[1]);
+			}
+			return found;
+		};
+		const textAtMutation = (): string => {
+			const fromMessages = Array.from(document.querySelectorAll("assistant-message"))
+				.map((node) => JSON.stringify((node as any).message ?? ""))
+				.join(" ");
+			const remote = w.bobbitState?.remoteAgent ?? w.__bobbitState?.remoteAgent;
+			return `${content.textContent ?? ""} ${fromMessages} ${JSON.stringify(remote?.state?.streamingMessage ?? "")}`;
+		};
+		const detectMarkers = (text: string, fromDom: boolean, eventId?: string) => {
+			const found = exactMarkers(text);
+			for (const marker of found) {
+				if (!expected.has(marker)) fail(`unexpected exact marker ${marker}`);
+			}
+			for (const marker of expected) {
+				if (!found.has(marker) || (fromDom && visibleMarkers.has(marker))) continue;
+				if (pending.has(marker) || evidence.has(marker)) {
+					if (eventId && markerEventIds.get(marker) === eventId) continue;
+					if (fromDom && pendingDomEchoes.delete(marker)) continue;
+					fail(`duplicate exact marker ${marker}`);
+					continue;
+				}
+				if (pending.size !== 0) {
+					fail(`overlapping marker ${marker} arrived before ${pending.keys().next().value} settled`);
+					continue;
+				}
+				if (eventId) {
+					markerEventIds.set(marker, eventId);
+					pendingDomEchoes.add(marker);
+				}
+				markerOccurrences.set(marker, (markerOccurrences.get(marker) ?? 0) + 1);
+				// The exact marker is captured at its commit. Its proof must be a
+				// later, positive, post-repin height that no earlier phase used.
+				pending.set(marker, el.scrollHeight);
+			}
+			if (fromDom) visibleMarkers = found;
+		};
+		const detectMarkersAtCommit = () => detectMarkers(textAtMutation(), true);
+		const publishSettledEvidence = () => {
+			for (const [marker, heightAtMarker] of pending) {
+				const growth = el.scrollHeight - heightAtMarker;
+				const sample = {
+					overflow: el.scrollHeight - el.clientHeight,
+					distance: el.scrollHeight - el.scrollTop - el.clientHeight,
+					scrollTop: el.scrollTop,
+					scrollHeight: el.scrollHeight,
+					clientHeight: el.clientHeight,
+					growth,
+				};
+				if (growth <= 0 || sample.distance > pinnedTailPx) continue;
+				if (sample.scrollHeight <= lastEvidenceHeight) {
+					fail(`marker ${marker} reused or regressed settled height ${sample.scrollHeight} (previous ${lastEvidenceHeight})`);
+					continue;
+				}
+				lastEvidenceHeight = sample.scrollHeight;
+				pending.delete(marker);
+				evidence.set(marker, sample);
+				for (const waiter of waiters.get(marker) ?? []) waiter.resolve(sample);
+				waiters.delete(marker);
+			}
+		};
+		const settle = () => {
+			if (!active || framePending) return;
+			framePending = true;
+			requestAnimationFrame(() => requestAnimationFrame(() => {
+				framePending = false;
+				if (active) publishSettledEvidence();
+			}));
+		};
+		// The observer sees transient marker-bearing streaming state at mutation
+		// commit time. Resize and scroll are independent production events used to
+		// retain only that marker's post-repin positive-growth geometry.
+		const mutations = new MutationObserver(() => {
+			detectMarkersAtCommit();
+			settle();
+		});
+		mutations.observe(content, { childList: true, subtree: true, characterData: true });
+		const resize = new ResizeObserver(settle);
+		resize.observe(content);
+		el.addEventListener("scroll", settle);
+		// AssistantMessage throttles DOM text updates, so the final #30 token can
+		// be superseded before it reaches a text node. Observe the already-open
+		// RemoteAgent event stream as well; this is registered before send and
+		// feeds the same exact-marker state machine as the MutationObserver.
+		const remote = w.bobbitState?.remoteAgent ?? w.__bobbitState?.remoteAgent;
+		const originalHandleServerMessage = remote?.handleServerMessage;
+		const wrappedHandleServerMessage = typeof originalHandleServerMessage === "function"
+			? function(this: unknown, message: any) {
+				const event = message?.data ?? message;
+				const eventId = typeof event?.message?.id === "string" ? event.message.id : undefined;
+				detectMarkers(JSON.stringify(message), false, eventId);
+				return originalHandleServerMessage.call(this, message);
+			}
+			: null;
+		if (wrappedHandleServerMessage) remote.handleServerMessage = wrappedHandleServerMessage;
+		w[trackerKey] = {
+			waitFor: (marker: string) => {
+				if (!expected.has(marker)) return Promise.reject(new Error(`tail phase tracker: unknown marker ${marker}`));
+				if (failure) return Promise.reject(failure);
+				return evidence.get(marker)
+					?? new Promise<ScrollProbe>((resolve, reject) => {
+						const pendingWaiters = waiters.get(marker) ?? [];
+						pendingWaiters.push({ resolve, reject });
+						waiters.set(marker, pendingWaiters);
+					});
+			},
+			finish: () => {
+				if (failure) throw failure;
+				if (pending.size > 0) throw new Error(`tail phase tracker: unsettled marker ${pending.keys().next().value}`);
+				for (const marker of phaseMarkers) {
+					if (markerOccurrences.get(marker) !== 1) {
+						throw new Error(`tail phase tracker: expected one exact marker ${marker}, got ${markerOccurrences.get(marker) ?? 0}`);
+					}
+					if (!evidence.has(marker)) throw new Error(`tail phase tracker: no settled growth evidence for ${marker}`);
+				}
+				return phaseMarkers.map((marker) => evidence.get(marker)!);
+			},
+			disconnect: () => {
+				active = false;
+				mutations.disconnect();
+				resize.disconnect();
+				el.removeEventListener("scroll", settle);
+				if (remote?.handleServerMessage === wrappedHandleServerMessage) {
+					remote.handleServerMessage = originalHandleServerMessage;
+				}
+			},
+		};
+	}, { scrollSel: SCROLL_SEL, trackerKey: key, phaseMarkers: markers, pinnedTailPx: tailPx });
+}
+
+/** Retrieve pre-registered, settled evidence for a named stream milestone. */
+export async function awaitTailGrowthPhase(page: Page, key: string, marker: string): Promise<ScrollProbe> {
+	return await page.evaluate(async ({ trackerKey, phaseMarker }) => {
+		const tracker = (window as any)[trackerKey];
+		if (!tracker) throw new Error(`tail phase tracker ${trackerKey} was not registered`);
+		return await tracker.waitFor(phaseMarker);
+	}, { trackerKey: key, phaseMarker: marker });
+}
+
+/** Stop the tracker only after every exact marker has one non-overlapping proof. */
+export async function stopTailPhaseTracker(page: Page, key: string): Promise<ScrollProbe[]> {
+	return await page.evaluate((trackerKey) => {
+		const w = window as any;
+		const tracker = w[trackerKey];
+		if (!tracker) throw new Error(`tail phase tracker ${trackerKey} was not registered`);
+		try {
+			return tracker.finish();
+		} finally {
+			tracker.disconnect();
+			w[trackerKey] = null;
+		}
+	}, key);
+}
+
+/**
+ * Observe real transcript growth and sample only after the render lifecycle
+ * has let AgentInterface's ResizeObserver re-pin the scroll container.
+ *
+ * A wall-clock interval can land between a DOM mutation and the next render
+ * frame, treating that intentional transient as a user-visible regression.
+ * MutationObserver catches transcript commits, ResizeObserver catches layout
+ * growth which has no DOM mutation (for example deferred content hydration),
+ * and two rAFs put the sample after the production re-pin frame. Samples are
+ * therefore assertions about every *settled* observable growth state, not
+ * arbitrary points in time.
+ */
 export async function startTailSampler(page: Page, key: string): Promise<void> {
 	await page.evaluate(({ scrollSel, sampleKey }) => {
 		const w = window as any;
-		const intervalKey = `${sampleKey}Interval`;
-		if (w[intervalKey]) clearInterval(w[intervalKey]);
-		w[sampleKey] = [];
+		const samplerKey = `${sampleKey}Sampler`;
+		w[samplerKey]?.disconnect?.();
+
+		const el = document.querySelector(scrollSel) as HTMLElement | null;
+		const content = el?.querySelector(".max-w-5xl") as HTMLElement | null;
+		if (!el || !content) throw new Error("tail sampler: chat content container not found");
+
 		const start = performance.now();
-		w[intervalKey] = setInterval(() => {
-			const el = document.querySelector(scrollSel) as HTMLElement | null;
-			if (!el) return;
+		let lastSettledHeight = el.scrollHeight;
+		let framePending = false;
+		let settleVersion = 0;
+		let active = true;
+		w[sampleKey] = [];
+
+		const recordSettledGrowth = () => {
+			const current = el.scrollHeight;
+			const growth = current - lastSettledHeight;
+			// A shrink resets the comparison point but is not a stream-growth
+			// sample. A later grow is still measured from this settled geometry.
+			lastSettledHeight = current;
+			if (growth <= 0) return;
 			w[sampleKey].push({
 				t: Math.round(performance.now() - start),
 				scrollTop: el.scrollTop,
-				scrollHeight: el.scrollHeight,
+				scrollHeight: current,
 				clientHeight: el.clientHeight,
+				growth,
 			});
-		}, 250);
+		};
+
+		const sampleAfterRepinFrames = () => {
+			if (!active) return;
+			const observedVersion = ++settleVersion;
+			if (framePending) return;
+			framePending = true;
+			const waitForLatestGrowth = (version: number) => {
+				requestAnimationFrame(() => requestAnimationFrame(() => {
+					if (!active) {
+						framePending = false;
+						return;
+					}
+					// More transcript/layout growth can arrive while the two-frame
+					// re-pin boundary is pending. Restart from that latest event;
+					// otherwise this callback could read its intentional transient.
+					if (version !== settleVersion) {
+						waitForLatestGrowth(settleVersion);
+						return;
+					}
+					framePending = false;
+					recordSettledGrowth();
+				}));
+			};
+			waitForLatestGrowth(observedVersion);
+		};
+
+		const mutations = new MutationObserver(sampleAfterRepinFrames);
+		mutations.observe(content, { childList: true, subtree: true, characterData: true });
+		const growth = new ResizeObserver(sampleAfterRepinFrames);
+		growth.observe(content);
+
+		w[samplerKey] = {
+			disconnect: () => {
+				active = false;
+				mutations.disconnect();
+				growth.disconnect();
+			},
+			flush: () => new Promise<void>((resolve) => {
+				// Stop observing first so this flush is a stable final state, then
+				// wait through the same production re-pin lifecycle as ordinary
+				// samples before reading public scroll geometry.
+				active = false;
+				mutations.disconnect();
+				growth.disconnect();
+				requestAnimationFrame(() => requestAnimationFrame(() => {
+					recordSettledGrowth();
+					resolve();
+				}));
+			}),
+		};
 	}, { scrollSel: SCROLL_SEL, sampleKey: key });
 }
 
 export async function stopTailSampler(page: Page, key: string): Promise<TailSample[]> {
-	const rawSamples = await page.evaluate((sampleKey) => {
+	const rawSamples = await page.evaluate(async (sampleKey) => {
 		const w = window as any;
-		const intervalKey = `${sampleKey}Interval`;
-		if (w[intervalKey]) clearInterval(w[intervalKey]);
-		w[intervalKey] = null;
+		const samplerKey = `${sampleKey}Sampler`;
+		await w[samplerKey]?.flush?.();
+		w[samplerKey] = null;
 		return (w[sampleKey] || []) as Array<{
 			t: number;
 			scrollTop: number;
 			scrollHeight: number;
 			clientHeight: number;
+			growth: number;
 		}>;
 	}, key);
 	return rawSamples.map((s) => ({
@@ -166,6 +445,7 @@ export async function stopTailSampler(page: Page, key: string): Promise<TailSamp
 		clientHeight: s.clientHeight,
 		scrollHeight: s.scrollHeight,
 		scrollTop: s.scrollTop,
+		growth: s.growth,
 	}));
 }
 

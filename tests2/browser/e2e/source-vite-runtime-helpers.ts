@@ -7,7 +7,27 @@ export interface RunningSourceProcess {
 	label: string;
 	stdout: string[];
 	stderr: string[];
+	/** The root process identity is no longer safe to target after this boundary. */
+	exited: boolean;
+	closed: boolean;
+	/** A graceful tree signal was dispatched while the root was still owned. */
+	shutdownStarted: boolean;
+	/** The detached POSIX group was observed while the root identity was live. */
+	posixGroupOwned: boolean;
+	/** A final POSIX group signal was dispatched at the root-exit boundary. */
+	finalTreeSignalSent: boolean;
 }
+
+export interface StopSourceProcessOptions {
+	/** Test seam: production teardown keeps a ten-second graceful shutdown window. */
+	gracefulStopTimeoutMs?: number;
+	/** Test seam: bounds how long teardown waits for close after force-killing. */
+	forceStopTimeoutMs?: number;
+}
+
+const SOURCE_PROCESS_GRACEFUL_STOP_TIMEOUT_MS = 10_000;
+const SOURCE_PROCESS_FORCE_STOP_TIMEOUT_MS = 2_000;
+const WINDOWS_TASKKILL_TIMEOUT_MS = 2_000;
 
 export interface SourceGatewayOptions {
 	repoRoot: string;
@@ -160,10 +180,29 @@ function isolatedEnvironment(tempRoot: string): NodeJS.ProcessEnv {
 	};
 }
 
-function captureProcess(child: ChildProcess, label: string): RunningSourceProcess {
-	const runtime = { child, label, stdout: [] as string[], stderr: [] as string[] };
+export function captureSourceProcess(child: ChildProcess, label: string): RunningSourceProcess {
+	const runtime: RunningSourceProcess = {
+		child,
+		label,
+		stdout: [],
+		stderr: [],
+		exited: false,
+		closed: false,
+		shutdownStarted: false,
+		posixGroupOwned: false,
+		finalTreeSignalSent: false,
+	};
 	child.stdout?.on("data", chunk => runtime.stdout.push(String(chunk)));
 	child.stderr?.on("data", chunk => runtime.stderr.push(String(chunk)));
+	// `exit` fences the root numeric identity. A graceful tree signal already
+	// started while it was live may be completed exactly once at this boundary.
+	child.once("exit", () => {
+		runtime.exited = true;
+		if (runtime.shutdownStarted && runtime.posixGroupOwned && process.platform !== "win32" && !runtime.finalTreeSignalSent) {
+			forceExitedPosixGroup(runtime);
+		}
+	});
+	child.once("close", () => { runtime.closed = true; });
 	return runtime;
 }
 
@@ -184,7 +223,7 @@ export function startIsolatedSourceGateway(options: SourceGatewayOptions): Runni
 		detached: process.platform !== "win32",
 		stdio: ["ignore", "pipe", "pipe"],
 	});
-	return captureProcess(child, "isolated Bobbit gateway");
+	return captureSourceProcess(child, "isolated Bobbit gateway");
 }
 
 export function startSourceVite(options: SourceViteOptions): RunningSourceProcess {
@@ -205,7 +244,7 @@ export function startSourceVite(options: SourceViteOptions): RunningSourceProces
 		detached: process.platform !== "win32",
 		stdio: ["ignore", "pipe", "pipe"],
 	});
-	return captureProcess(child, "Vite source server");
+	return captureSourceProcess(child, "Vite source server");
 }
 
 export async function waitForSourceGateway(baseUrl: string, runtime: RunningSourceProcess, timeoutMs = 120_000): Promise<void> {
@@ -243,21 +282,102 @@ export async function waitForSourceVite(baseUrl: string, runtime: RunningSourceP
 	throw processFailure(runtime, `readiness timed out: ${lastError}`);
 }
 
-function killTree(child: ChildProcess): void {
-	if (!child.pid) return;
-	if (process.platform === "win32") {
-		spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
-		return;
-	}
-	try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+function rootExited(runtime: RunningSourceProcess): boolean {
+	return runtime.exited || runtime.child.exitCode !== null || runtime.child.signalCode !== null;
 }
 
-export async function stopSourceProcess(runtime: RunningSourceProcess): Promise<void> {
-	if (runtime.child.exitCode !== null) return;
-	const closed = new Promise<void>(resolveClosed => runtime.child.once("close", () => resolveClosed()));
-	killTree(runtime.child);
-	await Promise.race([closed, new Promise<void>(resolveDelay => setTimeout(resolveDelay, 10_000))]);
-	if (runtime.child.exitCode === null) killTree(runtime.child);
+function signalOwnedProcessTree(runtime: RunningSourceProcess, signal: NodeJS.Signals): boolean {
+	if (rootExited(runtime)) return false;
+	const child = runtime.child;
+	if (!child.pid) return false;
+	if (process.platform === "win32") {
+		// taskkill is Windows' process-tree equivalent. Its own execution must not
+		// turn an already-failing test cleanup into an unbounded worker hang.
+		spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+			stdio: "ignore",
+			windowsHide: true,
+			timeout: WINDOWS_TASKKILL_TIMEOUT_MS,
+		});
+		return true;
+	}
+	try {
+		// Record continuous group ownership before delivery. The exit handler may
+		// use this identity only once, at the root-exit boundary.
+		process.kill(-child.pid, 0);
+		runtime.posixGroupOwned = true;
+		process.kill(-child.pid, signal);
+	} catch {
+		try { child.kill(signal); } catch { /* root exited between observations */ }
+	}
+	return true;
+}
+
+function forceExitedPosixGroup(runtime: RunningSourceProcess): void {
+	const pid = runtime.child.pid;
+	if (!pid || !runtime.posixGroupOwned || runtime.finalTreeSignalSent) return;
+	// SIGTERM started before root exit. Only reap a group still observable at this
+	// exact boundary; once empty, its numeric PGID must never be signalled later.
+	try {
+		process.kill(-pid, 0);
+		process.kill(-pid, "SIGKILL");
+	} catch { /* group already gone */ }
+	runtime.finalTreeSignalSent = true;
+}
+
+function waitForProcessClose(runtime: RunningSourceProcess, timeoutMs: number): Promise<boolean> {
+	if (runtime.closed) return Promise.resolve(true);
+	return new Promise(resolveClosed => {
+		const onClose = () => finish(true);
+		const timeout = setTimeout(() => finish(false), timeoutMs);
+		const finish = (closed: boolean) => {
+			clearTimeout(timeout);
+			runtime.child.removeListener("close", onClose);
+			resolveClosed(closed);
+		};
+		runtime.child.once("close", onClose);
+	});
+}
+
+function releaseProcessStdio(child: ChildProcess): void {
+	for (const stream of [child.stdin, child.stdout, child.stderr]) {
+		try { stream?.destroy(); } catch { /* best-effort cleanup after a failed OS close */ }
+	}
+	// If the OS did not acknowledge the forced kill, detached children must not
+	// retain this Playwright worker through inherited stdio handles.
+	try { child.unref(); } catch { /* child may have exited between checks */ }
+}
+
+export async function stopSourceProcess(
+	runtime: RunningSourceProcess,
+	options: StopSourceProcessOptions = {},
+): Promise<void> {
+	if (runtime.closed) return;
+	const gracefulStopTimeoutMs = options.gracefulStopTimeoutMs ?? SOURCE_PROCESS_GRACEFUL_STOP_TIMEOUT_MS;
+	const forceStopTimeoutMs = options.forceStopTimeoutMs ?? SOURCE_PROCESS_FORCE_STOP_TIMEOUT_MS;
+
+	// Root exit is a hard PID/PGID ownership boundary. Do not send a late
+	// taskkill or negative-PID signal that could hit a reused numeric identity.
+	if (rootExited(runtime)) {
+		releaseProcessStdio(runtime.child);
+		return;
+	}
+
+	// Initiate tree cleanup while the root remains the ownership witness. If it
+	// exits while descendants retain stdio, captureSourceProcess sends the final
+	// POSIX group signal synchronously at that exit boundary.
+	runtime.shutdownStarted = signalOwnedProcessTree(runtime, "SIGTERM");
+	if (await waitForProcessClose(runtime, gracefulStopTimeoutMs)) return;
+
+	// SIGTERM is deliberately not retried here: a stuck gateway may ignore it.
+	// Force-kill only an identity still owned by this runtime, then wait for close
+	// so inherited pipes cannot keep the Playwright worker alive.
+	if (!rootExited(runtime) && process.platform !== "win32") {
+		signalOwnedProcessTree(runtime, "SIGKILL");
+		runtime.finalTreeSignalSent = true;
+	}
+	if (await waitForProcessClose(runtime, forceStopTimeoutMs)) return;
+
+	releaseProcessStdio(runtime.child);
 }
 
 export function processFailure(runtime: RunningSourceProcess, message: string): Error {

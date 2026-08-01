@@ -5,7 +5,7 @@
  * the server from dist/server/cli.js. Without this build step, fullstack
  * browser tests fail because the UI assets don't exist.
  */
-import { execSync, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,8 +39,7 @@ export default function globalSetup() {
 		}
 	}
 	const projectRoot = join(import.meta.dirname, "..", "..");
-	const serverEntry = join(projectRoot, "dist", "server", "cli.js");
-	const uiDir = join(projectRoot, "dist", "ui");
+	const ensureDistScript = join(projectRoot, "scripts", "testing-v2", "ensure-dist.mjs");
 
 	// Keep the standard E2E suite off external services; individual specs may
 	// still exercise local mock servers and local bare git remotes.
@@ -54,18 +53,11 @@ export default function globalSetup() {
 	process.env.NODE_DISABLE_COMPILE_CACHE = "1";
 	delete process.env.NODE_COMPILE_CACHE;
 
-	// Only build what's missing to keep repeated runs fast
-	const needServer = !existsSync(serverEntry);
-	const needUI = !existsSync(uiDir);
-
-	if (needServer && needUI) {
-		console.log("[e2e-setup] Building server and UI...");
-		execSync("npm run build", { cwd: projectRoot, stdio: "inherit" });
-	} else if (needServer) {
-		console.log("[e2e-setup] Building server...");
-		execSync("npm run build:server", { cwd: projectRoot, stdio: "inherit" });
-	} else if (needUI) {
-		console.log("[e2e-setup] Building UI...");
-		execSync("npm run build:ui", { cwd: projectRoot, stdio: "inherit" });
-	}
+	// Serialize cache readers and destructive builds for this worktree. The
+	// manifest validates both server and UI output, rebuilding fail-closed when
+	// either is missing or stale.
+	execFileSync(process.execPath, [ensureDistScript], {
+		cwd: projectRoot,
+		stdio: "inherit",
+	});
 }

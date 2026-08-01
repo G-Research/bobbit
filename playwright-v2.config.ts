@@ -3,24 +3,63 @@
  *
  * Key differences from playwright-e2e.config.ts:
  *   - Chromium only (no Firefox/WebKit)
- *   - retries: 3 (TEMPORARY concurrency bridge — see the `retries` note below
- *     and docs/testing-strategy.md "Concurrency & budgets"; NOT flake-masking)
+ *   - retries: 3 for normal developer workflow; retry-free qualification uses
+ *     BOBBIT_V2_RETRY_FREE=1 without changing the default safety net
  *   - Worker count from the shared ledger (cap 4)
  *   - testDir: tests2/browser
- *   - Separate output dir (test-results-v2)
+ *   - Per-coordinator result artifacts under the owned run root
+ *   - One stable ignored JSON summary for the budget gate
  *   - Global setup: build dist if missing
  */
+import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { seedTransformCacheForRunDir } from "./scripts/testing-v2/pwtest-cache.js";
+import { captureMachineGlobalLedgerDirectory } from "./scripts/run-playwright-e2e.mjs";
+import { capturePlaywrightBrowserRegistry, createRunArtifactDirectory, getRunRoot, installRunIsolation, isOwnedRunPath } from "./tests2/harness/run-isolation.js";
+
+// The browser harness redirects TMPDIR below. Preserve the intentional
+// machine-global concurrency ledger before that isolation takes effect.
+process.env.BOBBIT_V2_LEDGER_DIR = captureMachineGlobalLedgerDirectory();
+
+// This config is evaluated before browser workers import the isolated gateway
+// harness. Pin the host Playwright cache now; workers can then isolate HOME for
+// Bobbit config discovery without making Chromium resolve into their empty home.
+capturePlaywrightBrowserRegistry();
+// Direct Playwright invocations do not pass through the browser coordinator.
+// Scrub host runtime discovery before config evaluation and worker spawn.
+installRunIsolation();
+
+// Allocate this before Playwright spawns workers so every worker inherits the
+// same coordinator-owned root. It is removed only by that coordinator after
+// reporters finish; workers can never clean a sibling's diagnostics.
+const browserRunRoot = getRunRoot();
+process.env.BOBBIT_E2E_TMP_ROOT = join(browserRunRoot, "tmp", "bobbit-e2e");
+process.env.BOBBIT_E2E_PWTEST_CACHE_ROOT = join(browserRunRoot, "pwtest-transform-cache");
+process.env.BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT = process.env.BOBBIT_E2E_PWTEST_CACHE_ROOT;
+process.env.PWTEST_CACHE_DIR = process.env.BOBBIT_E2E_PWTEST_CACHE_ROOT;
+mkdirSync(process.env.BOBBIT_E2E_TMP_ROOT!, { recursive: true });
+const playwrightArtifactsDir = createRunArtifactDirectory("playwright-v2");
+const playwrightResultsDir = join(playwrightArtifactsDir, "test-results");
+// The browser coordinator supplies a unique report path inside its owned run
+// root. Direct config use gets the same isolated default; never fall back to a
+// shared checkout-local "latest" report that concurrent coordinators could race.
+function resolvePlaywrightBudgetReport(): string {
+	const report = resolve(process.env.BOBBIT_V2_PLAYWRIGHT_REPORT_PATH?.trim() || join(playwrightArtifactsDir, "playwright-report.json"));
+	if (!isOwnedRunPath(report)) throw new Error(`Playwright report must be inside the owned run root: ${report}`);
+	mkdirSync(dirname(report), { recursive: true });
+	return report;
+}
+const playwrightBudgetReport = resolvePlaywrightBudgetReport();
 
 function e2eTempRoot(): string {
+	// Coordinators always provide an owned compatibility parent. Prefer it even
+	// in Docker, where `/tmp/bobbit-e2e` would otherwise be shared by runs.
+	if (process.env.BOBBIT_E2E_TMP_ROOT) return process.env.BOBBIT_E2E_TMP_ROOT;
 	if (existsSync("/.dockerenv")) return "/tmp";
-	return process.platform === "win32"
-		? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
-		: join(tmpdir(), "bobbit-e2e");
+	return process.platform === "win32" ? "C:\\bobbit-e2e" : join(tmpdir(), "bobbit-e2e");
 }
 
 function sanitizeCacheSegment(value: string): string {
@@ -40,7 +79,7 @@ function prepareV2RuntimeCaches(): void {
 	if (!process.env.PWTEST_CACHE_DIR) {
 		const runId = sanitizeCacheSegment(
 			process.env.BOBBIT_V2_BROWSER_RUN_ID?.trim()
-				|| `v2-direct-${new Date().toISOString().replace(/[:.]/g, "-")}-${process.pid}`,
+				|| `v2-direct-${process.pid}-${randomUUID()}`,
 		);
 		const runCacheRoot = join(resolve(e2ePwtestCacheBaseRoot()), "pwtest-transform-cache-v2", runId);
 		process.env.BOBBIT_V2_PWTEST_RUN_CACHE_ROOT = runCacheRoot;
@@ -105,22 +144,14 @@ const playwrightWorkers = resolvePlaywrightWorkers();
 
 export default {
 	timeout: 60_000,
-	// TEMPORARY CONCURRENCY BRIDGE (not a flake budget).
-	// Bobbit runs goals CONCURRENTLY in prod. The concurrency proof
-	// (docs/testing-v2/concurrency-proof.md, the N=2 → 3/6 finding) shows a PROVEN
-	// structural server-throughput ceiling: at N≥2 concurrent full runs a rotating
-	// cast of tests hits wall-timeouts / load-induced races under CPU starvation on
-	// one box — NOT assertion/logic bugs (browser render-timeouts + one load-induced
-	// 403 goal-creation were the tier-2 casualties). With retries:0 those spurious
-	// starvation failures would fail concurrent goal gate-loops. The flakes are KNOWN
-	// and DOCUMENTED (not blind-masked). REMOVAL CONDITION: restore `retries: 0` once
-	// the higher-N server-throughput fix (spin-off goal) lands.
-	retries: 3,
+	// Normal workflow retains the developer safety net. Qualification sets
+	// BOBBIT_V2_RETRY_FREE=1 and accepts only first-attempt results.
+	retries: process.env.BOBBIT_V2_RETRY_FREE === "1" ? 0 : 3,
 	fullyParallel: false,
 	workers: playwrightWorkers,
 	reporter: [
 		[process.stdout.isTTY ? "list" : "line"],
-		["json", { outputFile: ".profiles/testing-v2/budgets/playwright-report.json" }],
+		["json", { outputFile: playwrightBudgetReport }],
 	] as Array<[string, unknown?]>,
 	globalSetup: "./tests2/browser-global-setup.ts",
 	globalTeardown: "./tests2/browser-global-teardown.ts",
@@ -152,8 +183,8 @@ export default {
 		{
 			// Real-fidelity browser lane (adapter specs + crash/restart journey).
 			// Run only via `test:e2e:v2` — NOT part of tier-2 `test:v2`.
-			// retries:3 is inherited from the top-level config (temporary concurrency
-			// bridge — see the top-level `retries` note; NOT a flake budget).
+			// Inherits normal retries:3; BOBBIT_V2_RETRY_FREE=1 makes this lane
+			// retry-free for concurrent first-attempt qualification.
 			name: "browser-v2-e2e",
 			testDir: "./tests2/browser/e2e",
 			testMatch: ["**/*.spec.ts"],
@@ -162,5 +193,5 @@ export default {
 			},
 		},
 	],
-	outputDir: "test-results-v2",
+	outputDir: playwrightResultsDir,
 };

@@ -29,11 +29,13 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..", "..");
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 
-const E2E_TEMP_ROOT = existsSync("/.dockerenv")
-	? "/tmp"
-	: process.platform === "win32"
-		? (process.env.BOBBIT_E2E_TMP_ROOT || "C:\\bobbit-e2e")
-		: join(realpathSync(tmpdir()), "bobbit-e2e");
+const E2E_TEMP_ROOT = process.env.BOBBIT_E2E_TMP_ROOT
+	// Docker's `/tmp` is shared across coordinators; use the explicit owned root.
+	|| (existsSync("/.dockerenv")
+		? "/tmp"
+		: process.platform === "win32"
+			? "C:\\bobbit-e2e"
+			: join(realpathSync(tmpdir()), "bobbit-e2e"));
 
 const EXPECTED_HEADER_VALUE =
 	`!node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`;

@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/browser/e2e/app-boot-authenticated.spec.ts",
+      "reason": "Focused browser E2E regression for token-query startup: a valid isolated gateway token must transfer into local storage, clear from the URL, and leave the landing route in the authenticated shell without a retry.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/core/extension-host-module-memory-isolation.test.ts",
       "reason": "Exact-registered partition of the ModuleHost resource-limit coverage so its deliberate 16 MB worker OOM cannot share a Vitest parent fork with the remaining concurrent worker-thread fan-out.",
       "execution": {

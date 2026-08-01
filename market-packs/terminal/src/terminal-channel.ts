@@ -32,20 +32,38 @@ const REPLAY_CHUNK_BYTES = 16 * 1024;
 export async function terminal(ctx: ChannelContext) {
 	let pty: PtyHandle | undefined;
 	let closed = false;
+	let exiting = false;
 	const disposers: Array<() => void> = [];
 	const replay = new TextReplayBuffer(REPLAY_MAX_BYTES);
+	// PTY data and exit callbacks are independent events. Keep their bridge sends
+	// in source order so an exit cannot close the channel between chunks of a
+	// final burst (and silently drop its completion marker).
+	let outbound: Promise<void> | undefined;
+	const enqueueOutbound = <T>(operation: () => Promise<T>): Promise<T> => {
+		// Start an idle callback in the current turn. PTY `onData` is synchronous
+		// in several hosts, and its first bridge send must retain that delivery
+		// boundary while later callbacks still serialize behind it.
+		const result = outbound ? outbound.then(operation) : operation();
+		const settled = result.then(() => undefined, () => undefined);
+		outbound = settled;
+		void settled.then(() => {
+			if (outbound === settled) outbound = undefined;
+		});
+		return result;
+	};
 	const sendJson = async (data: Record<string, unknown>) => {
 		await ctx.send({ kind: "json", data });
 	};
 	const sendJsonTo = async (clientId: string, data: Record<string, unknown>) => {
 		await sendToClient(ctx, clientId, { kind: "json", data });
 	};
-	const sendText = async (data: string) => {
+	const enqueueText = (data: string) => enqueueOutbound(async () => {
+		if (closed) return;
 		for (const chunk of splitUtf8(data, REPLAY_CHUNK_BYTES)) {
 			replay.append(chunk);
 			await ctx.send({ kind: "text", data: chunk });
 		}
-	};
+	});
 	const failPtyOperation = async (operation: string, error: unknown, closeChannel: boolean) => {
 		const message = error instanceof Error ? error.message : String(error);
 		ctx.audit?.({ type: "channel.cleanup", reason: `terminal_${operation}_failed`, error: message });
@@ -61,13 +79,22 @@ export async function terminal(ctx: ChannelContext) {
 		}
 		const init = objectOf(ctx.init) as TerminalInit | undefined;
 		pty = await ctx.host.pty.openTerminal({ cols: numberOf(init?.cols), rows: numberOf(init?.rows) });
-		disposers.push(pty.onData((data) => { void sendText(data).catch(() => undefined); }));
+		disposers.push(pty.onData((data) => {
+			if (!exiting) void enqueueText(data).catch(() => undefined);
+		}));
 		disposers.push(pty.onExit((event) => {
-			if (closed) return;
-			closed = true;
-			void sendJson({ op: "exit", code: event.code, signal: event.signal, reason: event.reason || "exited" })
-				.finally(() => ctx.close(event.reason || "pty exited"))
-				.catch(() => undefined);
+			if (closed || exiting) return;
+			exiting = true;
+			void enqueueOutbound(async () => {
+				if (closed) return;
+				closed = true;
+				const reason = event.reason || "pty exited";
+				try {
+					await sendJson({ op: "exit", code: event.code, signal: event.signal, reason: event.reason || "exited" });
+				} finally {
+					await ctx.close(reason);
+				}
+			}).catch(() => undefined);
 		}));
 		await sendJson({ op: "status", state: "attached", pid: pty.pid });
 	} catch (error) {
@@ -80,7 +107,7 @@ export async function terminal(ctx: ChannelContext) {
 
 	return {
 		async onClientFrame(frame: HostChannelFrame) {
-			if (closed || !pty) return;
+			if (closed || exiting || !pty) return;
 			if (frame.kind === "text") {
 				try {
 					await pty.write(frame.data);
@@ -114,7 +141,7 @@ export async function terminal(ctx: ChannelContext) {
 			}
 		},
 		async onAttach(clientId: string) {
-			if (!closed && pty) {
+			if (!closed && !exiting && pty) {
 				for (const data of replay.chunks(REPLAY_CHUNK_BYTES)) await sendToClient(ctx, clientId, { kind: "text", data });
 				await sendJsonTo(clientId, { op: "status", state: "attached", pid: pty.pid });
 			}
