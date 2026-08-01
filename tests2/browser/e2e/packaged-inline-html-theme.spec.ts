@@ -227,8 +227,16 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 		const actualClose = once(child, "close");
 		await once(child.stdout!, "data");
 		const stdoutReleased = once(child.stdout!, "close");
+		const stderrReleased = once(child.stderr!, "close");
+		const stdioReleased = once(child, "message");
 		child.send("release-stdio");
-		await stdoutReleased;
+		expect((await stdioReleased)[0], "fixture must acknowledge its stdio release").toBe("stdio-released");
+		// Windows keeps the parent pipe handle open after the child closes its
+		// descriptor. Release the inherited endpoints locally as well, then wait
+		// for their close events before proving that this is not process closure.
+		child.stdout?.destroy();
+		child.stderr?.destroy();
+		await Promise.all([stdoutReleased, stderrReleased]);
 
 		try {
 			expect(runtime.closed, "stdio closure must not be recorded as process closure").toBe(false);
