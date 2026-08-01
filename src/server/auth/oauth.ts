@@ -7,11 +7,11 @@
 
 import type { Server } from "node:http";
 import { randomBytes } from "node:crypto";
-import type { AuthInteraction, Credential, Models, OAuthCredential } from "@earendil-works/pi-ai";
+import type { AuthInteraction, Models, OAuthCredential } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { clearOAuthCache } from "../agent/model-registry.js";
-import { AtomicCredentialStore, deleteCredential } from "./credential-store.js";
+import { AtomicCredentialStore, deleteCredential, type StoredCredential } from "./credential-store.js";
 import { redactSensitive } from "./redact.js";
 
 const defaultFetch: typeof fetch = (input, init) => globalThis.fetch(input, init);
@@ -80,8 +80,8 @@ interface PendingPiOAuth {
 	codeSubmitted: boolean;
 	/** Pi owns the Anthropic loopback callback, so a browser callback can begin an exchange without passing Bobbit's manual-complete route. */
 	holdUntilLoginSettlesOnCancel: boolean;
-	/** Snapshot restored only when a cancelled login's exact result is still current. */
-	previousCredential?: Credential;
+	/** Exact persisted row from flow start; may be a legacy `api-key` entry. */
+	previousCredential?: StoredCredential;
 	/** Credential returned by this flow, used to remove/restore a late cancellation precisely. */
 	issuedCredential?: OAuthCredential;
 	/** Logout or definitive invalidation observed since this flow began. */
@@ -390,20 +390,22 @@ async function storeOAuthCredentials(
 async function restoreCancelledOAuthCredentials(
 	provider: OAuthProviderId,
 	credentials: OAuthCredential,
-	previousCredential: Credential | undefined,
+	previousCredential: StoredCredential | undefined,
 	flowCredentialGeneration: number,
 ): Promise<void> {
-	await getOAuthCredentialStore().mutate(provider, async (current) => {
-		if (current?.type !== "oauth"
-			|| current.access !== credentials.access
-			|| current.refresh !== credentials.refresh
-			|| current.expires !== credentials.expires) return undefined;
+	// The credential store remembers the row immediately before this exact write.
+	// That version is newer than the flow-start snapshot when a refresh rotated
+	// credentials while the authorization UI was open, so cancellation restores
+	// the refresh rather than rolling it back. The snapshot remains a fallback
+	// for Pi/external writers that bypass this adapter.
+	await getOAuthCredentialStore().rollbackCredentialIfCurrent(
+		provider,
+		credentials,
+		previousCredential,
 		// A logout or definitive rejection may precede a late provider write.
 		// Never restore its old row; delete only this flow's exact late result.
-		return credentialGeneration(provider) === flowCredentialGeneration
-			? previousCredential ?? deleteCredential
-			: deleteCredential;
-	});
+		() => credentialGeneration(provider) === flowCredentialGeneration,
+	);
 }
 
 /** Provider bodies are untrusted and may contain credentials or arbitrary private data. */
@@ -517,7 +519,7 @@ async function oauthStartPi(
 	// Its callback can enter token exchange without calling Bobbit's manual route,
 	// so cancelling it must retain the lease until Models.login settles. Injected
 	// models are manual-test/Codex adapters and retain immediate prompt cancel.
-	const previousCredential = getOAuthCredentialStore().readStoredCredentialSync(provider);
+	const previousCredential = getOAuthCredentialStore().readStoredCredentialSnapshotSync(provider);
 	const flow: PendingPiOAuth = {
 		provider,
 		createdAt,
@@ -967,7 +969,15 @@ export function oauthStatus(providerInput?: string): { authenticated: boolean; s
 	// Pi's Anthropic OAuth contract requires an access token, refresh token, and
 	// expiry. Never advertise a corrupt or partial row as an account login.
 	if (provider === "anthropic" && !isCompleteAnthropicOAuthCredential(credential)) {
-		return { authenticated: false, provider };
+		// A malformed/partial persisted OAuth row is not a login, but keeping it
+		// visible lets the Account UI offer provider-scoped cleanup.
+		return {
+			authenticated: false,
+			stored: true,
+			refreshable: typeof credential.refresh === "string" && credential.refresh.length > 0,
+			expires: typeof credential.expires === "number" ? credential.expires : undefined,
+			provider,
+		};
 	}
 	const expired = typeof credential.expires === "number" && Date.now() > credential.expires;
 	const refreshable = typeof credential.refresh === "string" && credential.refresh.length > 0;

@@ -33,16 +33,44 @@ const LOCK_MAX_RETRY_MS = 10_000;
 export const deleteCredential = Symbol("delete credential");
 
 type RawAuthData = Record<string, unknown>;
+
+/** Historical Pi files used `api-key`; keep those rows intact on unrelated OAuth rollback. */
+export interface LegacyApiKeyCredential {
+	type: "api-key";
+	key: string;
+	[key: string]: unknown;
+}
+
+export type StoredCredential = Credential | LegacyApiKeyCredential;
 export type CredentialMutation = Credential | typeof deleteCredential | undefined;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function asCredential(value: unknown): Credential | undefined {
+function asStoredCredential(value: unknown): StoredCredential | undefined {
 	if (!isRecord(value)) return undefined;
-	if (value.type !== "oauth" && value.type !== "api_key") return undefined;
-	return value as unknown as Credential;
+	if (value.type !== "oauth" && value.type !== "api_key" && value.type !== "api-key") return undefined;
+	return value as StoredCredential;
+}
+
+/** Pi consumes the canonical spelling, while storage retains the legacy spelling. */
+function asCredential(value: unknown): Credential | undefined {
+	const stored = asStoredCredential(value);
+	if (!stored) return undefined;
+	if (stored.type === "api-key") return { ...stored, type: "api_key" } as Credential;
+	return stored as Credential;
+}
+
+function cloneStoredCredential(credential: StoredCredential | undefined): StoredCredential | undefined {
+	return credential ? { ...credential } as StoredCredential : undefined;
+}
+
+function sameStoredCredential(left: StoredCredential | undefined, right: StoredCredential | undefined): boolean {
+	if (!left || !right || left.type !== right.type) return left === right;
+	const leftEntries = Object.entries(left).sort(([a], [b]) => a.localeCompare(b));
+	const rightEntries = Object.entries(right).sort(([a], [b]) => a.localeCompare(b));
+	return JSON.stringify(leftEntries) === JSON.stringify(rightEntries);
 }
 
 function parseAuthData(content: string): RawAuthData {
@@ -227,6 +255,8 @@ export class AtomicCredentialStore implements CredentialStore {
 	private readonly onDidChange?: () => void;
 	private fileQueue: Promise<void> = Promise.resolve();
 	private readonly providerQueues = new Map<string, Promise<void>>();
+	/** Last committed value per provider, used to undo only a cancelled flow's write. */
+	private readonly rollbackHistory = new Map<string, { before?: StoredCredential; after: StoredCredential }>();
 
 	constructor(authPath: string, onDidChange?: () => void) {
 		this.authPath = authPath;
@@ -382,6 +412,20 @@ export class AtomicCredentialStore implements CredentialStore {
 		}
 	}
 
+	/**
+	 * Read the persisted row without normalizing legacy `api-key` spelling.
+	 * OAuth cancellation needs this exact snapshot so it cannot erase an older
+	 * API-key credential while unwinding a late OAuth result.
+	 */
+	readStoredCredentialSnapshotSync(providerId: string): StoredCredential | undefined {
+		try {
+			if (!existsSync(this.authPath)) return undefined;
+			return cloneStoredCredential(asStoredCredential(this.readCurrent()[providerId]));
+		} catch {
+			return undefined;
+		}
+	}
+
 	async read(providerId: string): Promise<Credential | undefined> {
 		return asCredential((await this.readFresh())[providerId]);
 	}
@@ -399,8 +443,10 @@ export class AtomicCredentialStore implements CredentialStore {
 	): Promise<Credential | undefined> {
 		return this.enqueueProvider(providerId, async () => {
 			let changed = false;
+			let committed: { before?: StoredCredential; after?: StoredCredential } | undefined;
 			const result = await this.withLock(async (data) => {
-				const current = asCredential(data[providerId]);
+				const rawCurrent = asStoredCredential(data[providerId]);
+				const current = asCredential(rawCurrent);
 				const mutation = await fn(current);
 				if (mutation === undefined) return { result: current };
 
@@ -408,14 +454,23 @@ export class AtomicCredentialStore implements CredentialStore {
 				if (mutation === deleteCredential) {
 					if (!(providerId in next)) return { result: undefined };
 					delete next[providerId];
+					committed = { before: cloneStoredCredential(rawCurrent) };
 					changed = true;
 					return { result: undefined, next };
 				}
 				next[providerId] = mutation;
+				committed = {
+					before: cloneStoredCredential(rawCurrent),
+					after: cloneStoredCredential(mutation)!,
+				};
 				changed = true;
 				return { result: mutation, next };
 			});
-			if (changed) this.didChange();
+			if (changed) {
+				if (committed?.after) this.rollbackHistory.set(providerId, committed as { before?: StoredCredential; after: StoredCredential });
+				else this.rollbackHistory.delete(providerId);
+				this.didChange();
+			}
 			return result;
 		});
 	}
@@ -425,6 +480,39 @@ export class AtomicCredentialStore implements CredentialStore {
 		fn: (current: Credential | undefined) => Promise<Credential | undefined>,
 	): Promise<Credential | undefined> {
 		return this.mutate(providerId, fn);
+	}
+
+	/**
+	 * Replace an exact cancelled-flow result with the value immediately before
+	 * that write. A refresh that occurred after login started is therefore kept,
+	 * instead of rolling all the way back to the flow-start snapshot.
+	 */
+	async rollbackCredentialIfCurrent(
+		providerId: string,
+		expected: Credential,
+		fallback: StoredCredential | undefined,
+		shouldRestore: () => boolean,
+	): Promise<void> {
+		await this.enqueueProvider(providerId, async () => {
+			let changed = false;
+			await this.withLock((data) => {
+				const current = asStoredCredential(data[providerId]);
+				if (!sameStoredCredential(current, expected as StoredCredential)) return { result: undefined };
+				const remembered = this.rollbackHistory.get(providerId);
+				const restore = shouldRestore()
+					? (remembered && sameStoredCredential(remembered.after, current) ? remembered.before : fallback)
+					: undefined;
+				const next = { ...data };
+				if (restore) next[providerId] = restore;
+				else delete next[providerId];
+				changed = true;
+				return { result: undefined, next };
+			});
+			if (changed) {
+				this.rollbackHistory.delete(providerId);
+				this.didChange();
+			}
+		});
 	}
 
 	async delete(providerId: string): Promise<void> {
@@ -437,7 +525,10 @@ export class AtomicCredentialStore implements CredentialStore {
 				changed = true;
 				return { result: undefined, next };
 			});
-			if (changed) this.didChange();
+			if (changed) {
+				this.rollbackHistory.delete(providerId);
+				this.didChange();
+			}
 		});
 	}
 }

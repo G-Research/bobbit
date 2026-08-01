@@ -588,10 +588,16 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 			closed = true;
 			startAttempt += 1;
 			if (pollTimer !== undefined) window.clearTimeout(pollTimer);
-			if (!result) abandonFlow();
+			const settled = result ? Promise.resolve() : abandonFlow();
 			render(html``, container);
 			container.remove();
-			resolve(result);
+			// Account settings reload after openOAuthDialog settles. Do not resolve a
+			// cancelled dialog until the server has finished cancelling the flow, or
+			// it can briefly reload the old authenticated account snapshot.
+			void settled.then(
+				() => resolve(result),
+				() => resolve(result),
+			);
 		};
 
 		const showFlowError = (message: string) => {
