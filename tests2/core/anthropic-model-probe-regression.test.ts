@@ -77,6 +77,42 @@ describe("Anthropic model probe regressions", () => {
 		assert.deepEqual(calls, [{ maxTokens: 5, timeoutMs: 30_000, maxRetries: 0, cacheRetention: "none", apiKey: "test-anthropic-api-key" }]);
 	});
 
+	it.each([
+		["access-only", () => ({ type: "oauth", access: randomUUID() })],
+		["missing refresh", () => ({ type: "oauth", access: randomUUID(), expires: Date.now() + 60_000 })],
+		["missing expiry", () => ({ type: "oauth", access: randomUUID(), refresh: randomUUID() })],
+	])("rejects a %s Anthropic OAuth row before refresh or model completion", async (_name, createCredential) => {
+		const credential = createCredential();
+		useAuth(credential);
+		let requests = 0;
+		let refreshes = 0;
+
+		await assert.rejects(
+			() => completeModelText(
+				anthropicModel(),
+				undefined,
+				{ systemPrompt: "system", userPrompt: "probe", maxTokens: 5, thinkingLevel: "off" },
+				async () => {
+					requests++;
+					return { role: "assistant", content: [{ type: "text", text: "unexpected" }], stopReason: "stop" } as any;
+				},
+				{
+					env: {},
+					providerConfigReader: () => undefined,
+					anthropicOAuthTokenResolver: async () => {
+						refreshes++;
+						return randomUUID();
+					},
+				},
+			),
+			/Anthropic OAuth credential could not be resolved/,
+		);
+
+		assert.equal(refreshes, 0, "a partial OAuth row must not enter Pi refresh");
+		assert.equal(requests, 0, "a partial OAuth access value must not reach Pi completion");
+		assert.deepEqual(JSON.parse(readFileSync(path.join(agentDir!, "auth.json"), "utf-8")), { anthropic: credential });
+	});
+
 	it("does not send an expired OAuth access value when Pi refresh temporarily cannot resolve it", async () => {
 		const access = randomUUID();
 		const credential = { type: "oauth", access, refresh: randomUUID(), expires: Date.now() - 60_000 };

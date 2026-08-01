@@ -21,6 +21,14 @@ interface AuthCredentials {
 	expires?: number;
 }
 
+/** Match Pi's Anthropic OAuth contract before an on-disk row can reach a request. */
+function isCompleteAnthropicOAuthCredential(credential: AuthCredentials): boolean {
+	return credential.type === "oauth"
+		&& typeof credential.access === "string" && credential.access.length > 0
+		&& typeof credential.refresh === "string" && credential.refresh.length > 0
+		&& typeof credential.expires === "number" && Number.isFinite(credential.expires);
+}
+
 const PROVIDER_ENV_KEYS: Record<string, string[]> = {
 	anthropic: ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"],
 	openai: ["OPENAI_API_KEY"],
@@ -43,10 +51,22 @@ function loadAuthData(): Record<string, any> | null {
 function authCredentialForProvider(provider: string): AuthCredentials | null {
 	const cred = loadAuthData()?.[provider];
 	if (!cred) return null;
-	if (cred.type === "oauth" && cred.access) return { type: "oauth", access: cred.access, refresh: cred.refresh, expires: cred.expires };
+	if (cred.type === "oauth") {
+		const oauth = { type: "oauth", access: cred.access, refresh: cred.refresh, expires: cred.expires };
+		// Unlike legacy API-key rows, Anthropic OAuth rows are Pi credentials and
+		// must be renewable. Do not let a partial on-disk row become a Bearer token.
+		if (provider === "anthropic") {
+			return isCompleteAnthropicOAuthCredential(oauth) ? oauth : { type: "invalid-oauth" };
+		}
+		if (cred.access) return oauth;
+	}
 	if ((cred.type === "api-key" || cred.type === "api_key") && cred.key) return { type: "api-key", key: cred.key };
 	if (typeof cred.key === "string" && cred.key.trim()) return { type: "api-key", key: cred.key };
-	if (typeof cred.access === "string" && cred.access.trim()) return { type: cred.type || "oauth", access: cred.access, expires: cred.expires };
+	if (typeof cred.access === "string" && cred.access.trim()) {
+		// Untagged access values are not a valid Anthropic credential shape either.
+		if (provider === "anthropic") return { type: "invalid-oauth" };
+		return { type: cred.type || "oauth", access: cred.access, expires: cred.expires };
+	}
 	return null;
 }
 
@@ -162,6 +182,7 @@ async function resolveProviderApiKey(
 	}
 
 	const auth = authCredentialForProvider(provider);
+	if (auth?.type === "invalid-oauth") return { oauthResolutionFailed: true };
 	if (auth?.type === "oauth" && provider === "anthropic" && auth.expires && Date.now() > auth.expires) {
 		const refreshed = await anthropicOAuthTokenResolver();
 		if (refreshed) return { apiKey: refreshed, oauthAccess: refreshed };
