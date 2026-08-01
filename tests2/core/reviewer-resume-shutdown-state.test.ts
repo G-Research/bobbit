@@ -85,6 +85,44 @@ test("shutdown persists re-drive state from session lifecycle state", async () =
 	assert.equal(updates.idle.wasStreaming, false);
 });
 
+test("shutdown releases sessions whose project context was removed without recreating a store", async () => {
+	let getOrCreateCalls = 0;
+	let stopCalls = 0;
+	let closeCalls = 0;
+	const unrelatedStore = {
+		get: () => undefined,
+		update: () => assert.fail("shutdown must not write a removed project's session into another project store"),
+		flush: () => {},
+	};
+	const manager: any = new SessionManager({
+		projectContextManager: {
+			all: () => [{
+				project: { id: "surviving-project" },
+				sessionStore: unrelatedStore,
+				costTracker: { flush: () => {} },
+			}],
+			getOrCreate: () => {
+				getOrCreateCalls++;
+				throw new Error("removed project context must not be recreated during shutdown");
+			},
+		} as any,
+	});
+	const client = { close: () => { closeCalls++; } };
+	const session = makeShutdownSession("removed-project-session", "streaming", {
+		projectId: "removed-project",
+		clients: new Set([client]),
+		rpcClient: { stop: async () => { stopCalls++; } },
+	});
+	manager.sessions.set(session.id, session);
+
+	await manager.shutdown();
+
+	assert.equal(getOrCreateCalls, 0, "shutdown must not lazily recreate a removed project context");
+	assert.equal(stopCalls, 1, "the orphaned runtime must still stop");
+	assert.equal(closeCalls, 1, "attached clients must still close");
+	assert.equal(manager.sessions.has(session.id), false, "the orphaned session must be released");
+});
+
 test("shutdown uses the centralized restart re-drive predicate, not exact streaming", () => {
 	const source = sessionManagerSource();
 	const body = shutdownBody(source);
