@@ -94,7 +94,7 @@
     },
     {
       "path": "tests2/core/base-path-pwa-cookie-guards.test.ts",
-      "reason": "PWA, cookie, CORS, and source-guard coverage for mount-scoped service-worker caching, duplicate signed cookies, credentialed native transports, and centralized client URL/auth ownership.",
+      "reason": "Focused coverage for root and mounted browser-cookie Path values plus service-worker script, scope, transport bypass, precache, and offline fallback mounting.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -108,24 +108,6 @@
         "runner": "vitest",
         "tier": "unit",
         "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/base-path-watchdog.test.ts",
-      "reason": "Pure watchdog target coverage for flag and environment precedence, root and nested mounted health paths, unsafe input rejection, and persisted-target adoption.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/integration/base-path-cli-startup.test.ts",
-      "reason": "Production runCli coverage with injected gateway effects for bound-port startup, flag-over-environment and root precedence, GatewayConfig wiring, persisted and advertised URLs, auth banners, and failure-before-side-effects behavior.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "integration"
       }
     },
     {
@@ -148,7 +130,7 @@
     },
     {
       "path": "tests2/integration/base-path-gateway-origin-auth.test.ts",
-      "reason": "Focused in-process gateway coverage for legacy cookie migration and exact-origin HTTP, CORS preflight, preview, SSE, viewer WebSocket, and session WebSocket authentication boundaries.",
+      "reason": "Focused in-process coverage proving a loopback-mounted gateway with token auth disabled accepts the localhost sentinel on prefixed viewer and session WebSockets.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -174,15 +156,6 @@
       }
     },
     {
-      "path": "tests2/integration/base-path-watchdog.test.ts",
-      "reason": "In-process watchdog integration proving mounted health probes reach the gateway, root behavior remains compatible, and persisted generations atomically replace complete targets.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "integration"
-      }
-    },
-    {
       "path": "tests2/browser/journeys/base-path-mounting.journey.spec.ts",
       "reason": "Production Chromium journey for a nested mount covering shell assets, REST, viewer and session sockets, lazy navigation, deep-link reload, previews and popouts, and off-mount isolation.",
       "execution": {
@@ -193,7 +166,7 @@
     },
     {
       "path": "tests2/browser/journeys/explicit-gateway-base-path.journey.spec.ts",
-      "reason": "Two-origin Chromium journey covering authoritative prefixed gateway URLs, same-host REST/WS/SSE/iframe/popout credentials, duplicate cookies, no double prefix, and distinct-host native-preview blocking.",
+      "reason": "Two-origin Chromium journey proving a stored prefixed gateway URL remains authoritative for REST and viewer traffic without double-prefixing or sending Bearer localhost.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
