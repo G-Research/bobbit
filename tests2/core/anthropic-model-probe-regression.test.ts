@@ -164,13 +164,7 @@ describe("Anthropic model probe regressions", () => {
 
 	it("keeps mocked Pi provider-path failures model-specific across the current three-model matrix", async () => {
 		const prefs = new PreferencesStore(path.resolve("/memfs/anthropic-model-probe"), createMemFs());
-		const matrix = [
-			{ id: "claude-opus-5", status: 404 as const, code: "model_not_found" },
-			{ id: "claude-sonnet-5", status: 401 as const, code: "authentication_failed" },
-			{ id: "claude-fable-5", status: 429 as const, code: "rate_limited" },
-		];
-
-		for (const expected of matrix) {
+		for (const expected of CURRENT_ANTHROPIC_PROBE_MATRIX) {
 			let calledModel: string | undefined;
 			const result = await testModelPreference(prefs, `anthropic/${expected.id}`, async (model) => {
 				calledModel = model.id;

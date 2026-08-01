@@ -14,6 +14,14 @@ import { test, expect } from "./gateway-harness.js";
 
 const ANTHROPIC_SANDBOX_TOKEN = "ANTHROPIC_OAUTH_TOKEN";
 
+// Synthetic provider responses retain the observed model distinctions without
+// making an entitlement claim about a real OAuth credential.
+const CURRENT_ANTHROPIC_PROBE_MATRIX = [
+	{ id: "claude-opus-5", status: 404, code: "model_not_found" },
+	{ id: "claude-sonnet-5", status: 429, code: "rate_limited" },
+	{ id: "claude-opus-4-6", status: 401, code: "authentication_failed" },
+] as const;
+
 type OAuthRow = {
 	type: "oauth";
 	access: string;
@@ -74,6 +82,34 @@ async function assertMockModelUsesStoredCredential(access: string): Promise<void
 	expect(observedApiKey === access).toBe(true);
 }
 
+async function assertMockModelProbeClassifications(bobbitDir: string): Promise<void> {
+	const [{ testModelPreference }, { PreferencesStore }] = await Promise.all([
+		import("../../dist/server/agent/model-completion.js"),
+		import("../../dist/server/agent/preferences-store.js"),
+	]);
+	const probeStateDir = join(bobbitDir, "restart-model-probe-state");
+	const prefs = new PreferencesStore(probeStateDir);
+
+	try {
+		for (const expected of CURRENT_ANTHROPIC_PROBE_MATRIX) {
+			let selectedModel: string | undefined;
+			const result = await testModelPreference(prefs, `anthropic/${expected.id}`, async (model: { id: string }) => {
+				selectedModel = model.id;
+				throw new Error(`HTTP request failed. status=${expected.status}; url=https://api.anthropic.com/v1/messages; body=mocked`);
+			});
+			const probe = result as typeof result & { code?: string };
+			expect(selectedModel).toBe(expected.id);
+			expect({ status: probe.status, code: probe.code, modelResolved: probe.modelResolved }).toEqual({
+				status: expected.status,
+				code: expected.code,
+				modelResolved: expected.id,
+			});
+		}
+	} finally {
+		rmSync(probeStateDir, { recursive: true, force: true });
+	}
+}
+
 test.describe.serial("Anthropic OAuth restart, sandbox, and lock regressions", () => {
 	test("keeps an isolated-agent-dir credential authenticated and usable by the mock model after a real gateway restart", async ({ gateway }) => {
 		const file = authPath(gateway.bobbitDir);
@@ -103,6 +139,7 @@ test.describe.serial("Anthropic OAuth restart, sandbox, and lock regressions", (
 			expect(JSON.stringify(after).includes(credential.access)).toBe(false);
 			expect(JSON.stringify(after).includes(credential.refresh)).toBe(false);
 			await assertMockModelUsesStoredCredential(credential.access);
+			await assertMockModelProbeClassifications(gateway.bobbitDir);
 		} finally {
 			// The harness is already isolated, but leave its fixture state intact for
 			// any later tests sharing this worker.
