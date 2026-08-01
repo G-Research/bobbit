@@ -77,6 +77,34 @@ describe("Anthropic model probe regressions", () => {
 		assert.deepEqual(calls, [{ maxTokens: 5, timeoutMs: 30_000, maxRetries: 0, cacheRetention: "none", apiKey: "test-anthropic-api-key" }]);
 	});
 
+	it("does not send an expired OAuth access value when Pi refresh temporarily cannot resolve it", async () => {
+		const access = randomUUID();
+		const credential = { type: "oauth", access, refresh: randomUUID(), expires: Date.now() - 60_000 };
+		useAuth(credential);
+		let requests = 0;
+
+		await assert.rejects(
+			() => completeModelText(
+				anthropicModel(),
+				undefined,
+				{ systemPrompt: "system", userPrompt: "probe", maxTokens: 5, thinkingLevel: "off" },
+				async () => {
+					requests++;
+					return { role: "assistant", content: [{ type: "text", text: "unexpected" }], stopReason: "stop" } as any;
+				},
+				{
+					env: {},
+					providerConfigReader: () => undefined,
+					anthropicOAuthTokenResolver: async () => null,
+				},
+			),
+			/Anthropic OAuth credential could not be resolved/,
+		);
+
+		assert.equal(requests, 0, "the stale access value must not reach Pi");
+		assert.deepEqual(JSON.parse(readFileSync(path.join(agentDir!, "auth.json"), "utf-8")), { anthropic: credential });
+	});
+
 	it("clears only the matching persisted OAuth credential after a definitive primary completion rejection", async () => {
 		const access = randomUUID();
 		useAuth({ type: "oauth", access, refresh: randomUUID(), expires: Date.now() + 60_000 });

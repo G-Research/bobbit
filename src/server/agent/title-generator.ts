@@ -350,7 +350,7 @@ async function generateViaConfiguredDirectModel(model: ApiModel, userPrompt: str
 		console.log(`[title-gen] Generated title: "${title}"`);
 		return title || null;
 	} catch (err) {
-		console.error(`[title-gen] Direct model "${model.provider}/${model.id}" failed:`, err);
+		console.error(`[title-gen] Direct model "${model.provider}/${model.id}" failed: ${sanitizeModelErrorText(err)}`);
 		return null;
 	}
 }

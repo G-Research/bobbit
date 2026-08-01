@@ -83,6 +83,27 @@ describe("title generation with non-AI-Gateway naming models", () => {
 		assert.equal(calls[0].args.thinkingLevel, "off");
 	});
 
+	it("redacts configured naming-model completion errors before logging", async () => {
+		const sentinel = `secret-${"x".repeat(48)}`;
+		const originalError = console.error;
+		const lines: string[] = [];
+		console.error = (...args: unknown[]) => lines.push(args.map(String).join(" "));
+		try {
+			assert.equal(await generateSessionTitle(
+				[{ role: "user", content: "Keep configured naming-model errors private." }],
+				{
+					namingModel: "direct/direct-title-model",
+					availableModels: [directModel],
+					directModelCompleter: async () => { throw new Error(`Authorization: Bearer ${sentinel}`); },
+				},
+			), null);
+			assert.equal(lines.join("\n").includes(sentinel), false);
+			assert.match(lines.join("\n"), /<redacted-token>/);
+		} finally {
+			console.error = originalError;
+		}
+	});
+
 	it("keeps explicit Anthropic naming direct when AIGW-exclusive models hide built-ins", async () => {
 		const dir = mkdtempSync(path.join(tmpdir(), "bobbit-title-anthropic-"));
 		process.env.BOBBIT_AGENT_DIR = dir;

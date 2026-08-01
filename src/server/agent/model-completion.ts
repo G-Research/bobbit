@@ -142,6 +142,8 @@ interface ResolvedProviderApiKey {
 	apiKey?: string;
 	/** The persisted OAuth access credential actually selected for this request. */
 	oauthAccess?: string;
+	/** Pi could not resolve an expired renewable OAuth credential; do not send its stale access value. */
+	oauthResolutionFailed?: boolean;
 }
 
 async function resolveProviderApiKey(
@@ -150,6 +152,7 @@ async function resolveProviderApiKey(
 	commandRunner: ModelConfigCommandRunner,
 	env: NodeJS.ProcessEnv,
 	providerConfigReader: ModelProviderConfigReader,
+	anthropicOAuthTokenResolver: () => Promise<string | null> = refreshOAuthToken,
 ): Promise<ResolvedProviderApiKey> {
 	const stored = prefs?.get(`providerKey.${provider}`);
 	if (typeof stored === "string" && stored.trim()) return { apiKey: stored.trim() };
@@ -160,8 +163,12 @@ async function resolveProviderApiKey(
 
 	const auth = authCredentialForProvider(provider);
 	if (auth?.type === "oauth" && provider === "anthropic" && auth.expires && Date.now() > auth.expires) {
-		const refreshed = await refreshOAuthToken();
+		const refreshed = await anthropicOAuthTokenResolver();
 		if (refreshed) return { apiKey: refreshed, oauthAccess: refreshed };
+		// A transient Pi refresh failure must not fall through to the expired
+		// stored access value. That request could receive a 401/403 and erase a
+		// still-renewable credential as though the provider rejected the refresh.
+		return { oauthResolutionFailed: true };
 	}
 	if (auth?.access) return {
 		apiKey: auth.access,
@@ -208,6 +215,8 @@ export interface ModelCompletionDependencies {
 	commandRunner?: ModelConfigCommandRunner;
 	env?: NodeJS.ProcessEnv;
 	providerConfigReader?: ModelProviderConfigReader;
+	/** Test seam for Pi's locked Anthropic OAuth resolution. */
+	anthropicOAuthTokenResolver?: () => Promise<string | null>;
 }
 
 export async function completeModelText(
@@ -243,7 +252,17 @@ export async function completeModelText(
 	const commandRunner = dependencies.commandRunner ?? realModelConfigCommandRunner;
 	const env = dependencies.env ?? process.env;
 	const providerConfigReader = dependencies.providerConfigReader ?? readModelsJsonProvider;
-	const resolvedApiKey = await resolveProviderApiKey(prefs, model.provider, commandRunner, env, providerConfigReader);
+	const resolvedApiKey = await resolveProviderApiKey(
+		prefs,
+		model.provider,
+		commandRunner,
+		env,
+		providerConfigReader,
+		dependencies.anthropicOAuthTokenResolver,
+	);
+	if (resolvedApiKey.oauthResolutionFailed) {
+		throw new Error("Anthropic OAuth credential could not be resolved");
+	}
 	const providerHeaders = await resolveProviderHeaders(model.provider, commandRunner, env, providerConfigReader);
 	const options: Record<string, any> = {
 		maxTokens: args.maxTokens ?? 500,
