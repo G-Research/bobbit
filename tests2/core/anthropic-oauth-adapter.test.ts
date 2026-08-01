@@ -183,6 +183,7 @@ beforeEach(() => {
 	rmSync(authPath, { force: true });
 	rmSync(`${authPath}.bobbit-rejected-oauth.json`, { force: true });
 	rmSync(`${authPath}.bobbit-rejected-oauth.anthropic.json`, { force: true });
+	rmSync(`${authPath}.bobbit-rejected-oauth.openai-codex.json`, { force: true });
 	callbackServerHarness.handler = undefined;
 });
 
@@ -816,6 +817,60 @@ describe("Anthropic OAuth Pi browser adapter", () => {
 		const document = JSON.parse(readFileSync(authPath, "utf8")) as Record<string, unknown>;
 		assert.deepEqual(document.anthropic, { type: "api-key", key: apiKey });
 		assert.deepEqual(document["openai-codex"], codex);
+	});
+
+	it("preserves an Anthropic API key while removing a late OAuth result after logout", async () => {
+		const apiKey = { type: "api-key", key: randomUUID() };
+		const issued = oauthCredential();
+		writeFileSync(authPath, JSON.stringify({ anthropic: apiKey }), "utf8");
+		let releaseExchange!: () => void;
+		let exchangeStarted = false;
+		const exchangeBlocked = new Promise<void>((resolve) => { releaseExchange = resolve; });
+		const models: Pick<Models, "login"> = {
+			login: (async (_providerId: string, _type: string, interaction: AuthInteraction) => {
+				interaction.notify({ type: "auth_url", url: currentAuthorizeUrl() });
+				await interaction.prompt({ type: "manual_code", message: "Paste redirect URL" });
+				exchangeStarted = true;
+				await exchangeBlocked;
+				// Pi can commit after logout but before reporting completion.
+				writeFileSync(authPath, JSON.stringify({ anthropic: issued }), "utf8");
+				return issued;
+			}) as Models["login"],
+		};
+		const started = await startAnthropic(models);
+		const completion = oauthComplete(started.flowId, randomUUID(), OFFLINE_FETCH);
+		for (let i = 0; i < 100 && !exchangeStarted; i++) await Promise.resolve();
+		assert.equal(exchangeStarted, true);
+
+		await oauthLogout("anthropic");
+		releaseExchange();
+		assert.deepEqual(await completion, { success: false, error: "OAuth flow cancelled" });
+		const document = JSON.parse(readFileSync(authPath, "utf8")) as Record<string, unknown>;
+		assert.deepEqual(document.anthropic, apiKey, "logout must preserve an API key while terminally removing the late OAuth result");
+		activeFlowIds.delete(started.flowId);
+	});
+
+	it("does not resurrect either cancelled credential when concurrent Codex flows settle out of order", async () => {
+		const original = oauthCredential();
+		const firstIssued = oauthCredential();
+		const secondIssued = oauthCredential();
+		writeFileSync(authPath, JSON.stringify({ "openai-codex": original }), "utf8");
+		const codexModels = (issued: OAuthCredential): Pick<Models, "login"> => ({
+			login: (async (_providerId: string, _type: string, interaction: AuthInteraction) => {
+				interaction.notify({ type: "auth_url", url: currentAuthorizeUrl() });
+				await interaction.prompt({ type: "manual_code", message: "Paste redirect URL" });
+				return issued;
+			}) as Models["login"],
+		});
+		const first = await oauthStart("openai-codex", OFFLINE_FETCH, codexModels(firstIssued));
+		const second = await oauthStart("openai-codex", OFFLINE_FETCH, codexModels(secondIssued));
+		assert.deepEqual(await oauthComplete(first.flowId, randomUUID(), OFFLINE_FETCH, "openai-codex"), { success: true });
+		assert.deepEqual(await oauthComplete(second.flowId, randomUUID(), OFFLINE_FETCH, "openai-codex"), { success: true });
+
+		await oauthCancelAndWait(first.flowId, "openai-codex");
+		await oauthCancelAndWait(second.flowId, "openai-codex");
+		const document = JSON.parse(readFileSync(authPath, "utf8")) as Record<string, unknown>;
+		assert.equal(document["openai-codex"], undefined, "a later cancellation must not restore the earlier cancelled flow's credential");
 	});
 
 	it("finalizes accepted auth and never reports an unknown cancel as cleaned up", async () => {

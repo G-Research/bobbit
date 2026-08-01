@@ -48,8 +48,9 @@ const REJECTED_OAUTH_LEDGER_VERSION = 1;
 // A rejected OAuth access value must be denied immediately even if persisting
 // its sidecar fence fails. The durable fence remains the restart boundary; this
 // narrow in-process record closes the write-failure window without retaining a
-// bearer value.
-const rejectedOAuthInProcess = new Map<string, string>();
+// bearer value. Keep every exact in-flight decision: a stale rejection must
+// never replace the current rejection's fail-closed protection.
+const rejectedOAuthInProcess = new Map<string, Set<string>>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -97,6 +98,13 @@ function rejectionKey(authPath: string, providerId: string): string {
 	}
 }
 
+function rememberRejectedOAuthFingerprint(authPath: string, providerId: string, fingerprint: string): void {
+	const key = rejectionKey(authPath, providerId);
+	const fingerprints = rejectedOAuthInProcess.get(key) ?? new Set<string>();
+	fingerprints.add(fingerprint);
+	rejectedOAuthInProcess.set(key, fingerprints);
+}
+
 function rejectedOAuthFingerprint(authPath: string, providerId: string): string | null | undefined {
 	let canonicalPath: string;
 	try {
@@ -106,8 +114,9 @@ function rejectedOAuthFingerprint(authPath: string, providerId: string): string 
 	} catch {
 		return null;
 	}
-	const inProcess = rejectedOAuthInProcess.get(rejectionKey(canonicalPath, providerId));
-	if (inProcess) return inProcess;
+	// A durable decision always wins over the in-process safety fallback. A
+	// stale invalidation can arrive after a newer rejection committed; it must
+	// never shadow that current fence merely because its caller is still live.
 	const ledgerPath = rejectedLedgerPath(canonicalPath, providerId);
 	if (existsSync(ledgerPath)) {
 		try {
@@ -120,27 +129,31 @@ function rejectedOAuthFingerprint(authPath: string, providerId: string): string 
 			return null;
 		}
 	}
-
 	// Read the prior shared format only when it contains a valid entry for this
 	// provider. A corrupt legacy document cannot be assigned safely, so it must
 	// not hide unrelated provider rows during migration to scoped sidecars.
 	const legacyPath = `${canonicalPath}.bobbit-rejected-oauth.json`;
-	if (!existsSync(legacyPath)) return undefined;
-	try {
-		const legacy: unknown = JSON.parse(readFileSync(legacyPath, "utf8"));
-		if (!isRecord(legacy) || legacy.version !== REJECTED_OAUTH_LEDGER_VERSION || !isRecord(legacy.rejected)) return undefined;
-		const fingerprint = legacy.rejected[providerId];
-		return typeof fingerprint === "string" && /^[a-f0-9]{64}$/i.test(fingerprint) ? fingerprint : undefined;
-	} catch {
-		return undefined;
+	if (existsSync(legacyPath)) {
+		try {
+			const legacy: unknown = JSON.parse(readFileSync(legacyPath, "utf8"));
+			if (isRecord(legacy) && legacy.version === REJECTED_OAUTH_LEDGER_VERSION && isRecord(legacy.rejected)) {
+				const fingerprint = legacy.rejected[providerId];
+				if (typeof fingerprint === "string" && /^[a-f0-9]{64}$/i.test(fingerprint)) return fingerprint;
+			}
+		} catch {
+			// A malformed legacy entry does not override a provider-scoped fallback.
+		}
 	}
+	return undefined;
 }
 
 /** True only for the exact persisted OAuth access value that was definitively rejected. */
 export function isStoredOAuthCredentialRejected(authPath: string, providerId: string, value: unknown): boolean {
 	if (!isRecord(value) || value.type !== "oauth" || typeof value.access !== "string" || !value.access) return false;
-	const fingerprint = rejectedOAuthFingerprint(authPath, providerId);
-	return fingerprint === null || (fingerprint !== undefined && fingerprint === oauthAccessFingerprint(value.access));
+	const fingerprint = oauthAccessFingerprint(value.access);
+	const durableFingerprint = rejectedOAuthFingerprint(authPath, providerId);
+	if (durableFingerprint === null || durableFingerprint === fingerprint) return true;
+	return rejectedOAuthInProcess.get(rejectionKey(authPath, providerId))?.has(fingerprint) ?? false;
 }
 
 /** The single Anthropic OAuth validity predicate for status, catalog, direct, and sandbox paths. */
@@ -527,7 +540,7 @@ export class AtomicCredentialStore implements CredentialStore {
 		const fingerprint = oauthAccessFingerprint(access);
 		// Set before the durable write. If a full disk or permissions error prevents
 		// the sidecar commit, the running gateway still refuses this exact credential.
-		rejectedOAuthInProcess.set(rejectionKey(authPath, providerId), fingerprint);
+		rememberRejectedOAuthFingerprint(authPath, providerId, fingerprint);
 		this.atomicWrite({ version: REJECTED_OAUTH_LEDGER_VERSION, rejected: fingerprint }, rejectedLedgerPath(authPath, providerId));
 	}
 
@@ -662,7 +675,7 @@ export class AtomicCredentialStore implements CredentialStore {
 		providerId: string,
 		expected: Credential,
 		fallback: StoredCredential | undefined,
-		shouldRestore: () => boolean,
+		shouldRestore: (candidate: StoredCredential | undefined) => boolean,
 	): Promise<void> {
 		await this.enqueueProvider(providerId, async () => {
 			let changed = false;
@@ -670,9 +683,10 @@ export class AtomicCredentialStore implements CredentialStore {
 				const current = asStoredCredential(data[providerId]);
 				if (!sameStoredCredential(current, expected as StoredCredential)) return { result: undefined };
 				const remembered = this.rollbackHistory.get(providerId);
-				const restore = shouldRestore()
-					? (remembered && sameStoredCredential(remembered.after, current) ? remembered.before : fallback)
-					: undefined;
+				const candidate = remembered && sameStoredCredential(remembered.after, current)
+					? remembered.before
+					: fallback;
+				const restore = shouldRestore(candidate) ? candidate : undefined;
 				const next = { ...data };
 				if (restore) next[providerId] = restore;
 				else delete next[providerId];
@@ -689,9 +703,9 @@ export class AtomicCredentialStore implements CredentialStore {
 	/** Durably deny an exact OAuth row without replacing it; used before cancellation rollback. */
 	async fenceOAuthCredential(providerId: string, access: string, refresh?: string): Promise<boolean> {
 		if (!access) return false;
-		// A lock acquisition failure cannot be allowed to turn a definitive
-		// rejection/cancellation into a still-usable in-process credential.
-		rejectedOAuthInProcess.set(rejectionKey(this.authPath, providerId), oauthAccessFingerprint(access));
+		// Deny the exact attempted bearer before acquiring the lock. The set keeps
+		// a stale caller from replacing a newer in-process rejection decision.
+		rememberRejectedOAuthFingerprint(this.authPath, providerId, oauthAccessFingerprint(access));
 		const fenced = await this.enqueueProvider(providerId, async () => this.withLock((data, authPath, assertLock) => {
 			const current = asCredential(asStoredCredential(data[providerId]));
 			if (!current || current.type !== "oauth" || current.access !== access || (refresh !== undefined && current.refresh !== refresh)) return { result: false };
@@ -705,9 +719,9 @@ export class AtomicCredentialStore implements CredentialStore {
 
 	async invalidateRejectedOAuthCredential(providerId: string, access: string, refresh?: string): Promise<boolean> {
 		if (!access) return false;
-		// Fail closed before lock acquisition too. The access fingerprint keeps this
-		// precise: a concurrently rotated credential with another access value stays usable.
-		rejectedOAuthInProcess.set(rejectionKey(this.authPath, providerId), oauthAccessFingerprint(access));
+		// Keep lock-acquisition/write failures fail-closed for this exact bearer
+		// without letting a stale rejection erase another rejected value.
+		rememberRejectedOAuthFingerprint(this.authPath, providerId, oauthAccessFingerprint(access));
 		const invalidated = await this.enqueueProvider(providerId, async () => this.withLock((data, authPath, assertLock) => {
 			const current = asCredential(asStoredCredential(data[providerId]));
 			if (!current || current.type !== "oauth" || current.access !== access || (refresh !== undefined && current.refresh !== refresh)) return { result: false };

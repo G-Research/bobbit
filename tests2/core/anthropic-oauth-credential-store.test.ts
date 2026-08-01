@@ -412,6 +412,39 @@ describe("AtomicCredentialStore", () => {
 		sameSecret(refreshedRead?.type === "oauth" ? refreshedRead.access : undefined, rotated.access);
 	});
 
+	it("keeps the current rejection fence when a stale rejection arrives later", async () => {
+		const store = new AtomicCredentialStore(authPath);
+		const stale = credential();
+		const current = credential();
+		await store.modify("anthropic", async () => current);
+		assert.equal(await store.invalidateRejectedOAuthCredential("anthropic", current.access, current.refresh), true);
+		assert.equal(await store.invalidateRejectedOAuthCredential("anthropic", stale.access, stale.refresh), false);
+		// Model an external process retrying the rejected row after it has observed
+		// the durable fence. The stale request must not shadow this current fence.
+		writeFileSync(authPath, JSON.stringify({ anthropic: current }), "utf8");
+		assert.equal(await store.read("anthropic"), undefined);
+	});
+
+	it("keeps an in-process current rejection fence when a stale rejection cannot match", async () => {
+		const store = new AtomicCredentialStore(authPath);
+		const stale = credential();
+		const current = credential();
+		await store.modify("anthropic", async () => current);
+		const atomicWrite = (store as any).atomicWrite.bind(store);
+		const failingFence = vi.spyOn(store as any, "atomicWrite").mockImplementation((data: unknown, target: unknown = "") => {
+			const targetPath = typeof target === "string" ? target : "";
+			if (targetPath.includes(".bobbit-rejected-oauth.anthropic.json")) throw new Error("fence write failed");
+			return atomicWrite(data, targetPath);
+		});
+		try {
+			await assert.rejects(store.invalidateRejectedOAuthCredential("anthropic", current.access, current.refresh), /fence write failed/);
+			assert.equal(await store.invalidateRejectedOAuthCredential("anthropic", stale.access, stale.refresh), false);
+			assert.equal(await store.read("anthropic"), undefined);
+		} finally {
+			failingFence.mockRestore();
+		}
+	});
+
 	it("keeps rejection fences provider-scoped and fails closed if their write fails", async () => {
 		const store = new AtomicCredentialStore(authPath);
 		const anthropic = credential();
