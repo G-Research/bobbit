@@ -3643,11 +3643,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				const callbackUrl = await config.onBound?.(actualPort);
 				if (callbackUrl !== undefined) {
 					publishedGatewayUrl = normalizePublishedGatewayUrl(callbackUrl);
-				} else {
-					// CLI onBound owns its injected publication. Programmatic callers still
-					// need the durable value used by direct and sandbox agent setup.
-					persistPublishedGatewayUrl(stateDir, publishedGatewayUrl, gatewayDeps.fsImpl);
 				}
+				persistPublishedGatewayUrl(stateDir, publishedGatewayUrl, gatewayDeps.fsImpl);
 
 			// Restore persisted teams before sessions so reconstructed records are available
 			// to session revival. Both complete before accepting connections.

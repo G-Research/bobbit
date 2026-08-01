@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -124,19 +124,21 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("programmatic mounted gateway
 
 	it("accepts and preserves an authoritative HTTP(S) callback publication", async () => {
 		let actualPort = 0;
+		let gatewayUrlSeenAtRestore: string | undefined;
 		const running = await bootGateway(MOUNT, "127.0.0.1", true, {
 			serveStatic: false,
 			onBound: (port) => {
 				actualPort = port;
 				const callbackUrl = `https://[2001:db8::42]:${port}/public/gateway`;
-				writeFileSync(join(process.env.BOBBIT_DIR!, "state", "gateway-url"), callbackUrl);
 				return `${callbackUrl}/`;
 			},
+			observeSessionRestoreGatewayUrl: (gatewayUrl) => { gatewayUrlSeenAtRestore = gatewayUrl; },
 		});
 		try {
 			const expectedUrl = `https://[2001:db8::42]:${actualPort}/public/gateway`;
 			expect(actualPort).toBeGreaterThan(0);
 			expect(running.lifecycleGatewayInfo().baseUrl).toBe(expectedUrl);
+			expect(gatewayUrlSeenAtRestore).toBe(expectedUrl);
 			expect(running.agentGatewayUrl()).toBe(expectedUrl);
 			expect(readFileSync(join(running.root, "state", "gateway-url"), "utf8")).toBe(expectedUrl);
 		} finally {
