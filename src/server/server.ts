@@ -1823,7 +1823,7 @@ function rawGatewayCallbackPath(raw: string): string {
 }
 
 /** Validate and canonicalize the final base URL exposed to agents/extensions. */
-function normalizePublishedGatewayUrl(raw: unknown): string {
+function normalizePublishedGatewayUrl(raw: unknown, expectedBasePath?: string): string {
 	if (typeof raw !== "string" || !raw.trim()) {
 		throw new Error("Gateway callback URL must be a non-empty absolute HTTP(S) URL");
 	}
@@ -1848,6 +1848,11 @@ function normalizePublishedGatewayUrl(raw: unknown): string {
 	// decode/re-anchor unsafe input. Published gateway bases use the same mount
 	// grammar as configured base paths and omit a trailing slash.
 	const callbackBasePath = normalizeBasePath(rawGatewayCallbackPath(value));
+	if (expectedBasePath !== undefined && callbackBasePath !== expectedBasePath) {
+		throw new Error(
+			`Gateway callback URL path ${JSON.stringify(callbackBasePath || "/")} must match configured base path ${JSON.stringify(expectedBasePath || "/")}`,
+		);
+	}
 	return `${parsed.origin}${callbackBasePath}`;
 }
 
@@ -3642,7 +3647,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				publishedGatewayUrl = defaultPublishedGatewayUrl(config, actualPort, server);
 				const callbackUrl = await config.onBound?.(actualPort);
 				if (callbackUrl !== undefined) {
-					publishedGatewayUrl = normalizePublishedGatewayUrl(callbackUrl);
+					publishedGatewayUrl = normalizePublishedGatewayUrl(callbackUrl, basePath);
 				}
 				persistPublishedGatewayUrl(stateDir, publishedGatewayUrl, gatewayDeps.fsImpl);
 

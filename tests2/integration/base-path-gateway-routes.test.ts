@@ -122,20 +122,20 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("programmatic mounted gateway
 		}
 	}, 60_000);
 
-	it("accepts and preserves an authoritative HTTP(S) callback publication", async () => {
+	it("accepts an authoritative HTTP(S) origin with the configured mount", async () => {
 		let actualPort = 0;
 		let gatewayUrlSeenAtRestore: string | undefined;
 		const running = await bootGateway(MOUNT, "127.0.0.1", true, {
 			serveStatic: false,
 			onBound: (port) => {
 				actualPort = port;
-				const callbackUrl = `https://[2001:db8::42]:${port}/public/gateway`;
+				const callbackUrl = `https://[2001:db8::42]:${port}${MOUNT}`;
 				return `${callbackUrl}/`;
 			},
 			observeSessionRestoreGatewayUrl: (gatewayUrl) => { gatewayUrlSeenAtRestore = gatewayUrl; },
 		});
 		try {
-			const expectedUrl = `https://[2001:db8::42]:${actualPort}/public/gateway`;
+			const expectedUrl = `https://[2001:db8::42]:${actualPort}${MOUNT}`;
 			expect(actualPort).toBeGreaterThan(0);
 			expect(running.lifecycleGatewayInfo().baseUrl).toBe(expectedUrl);
 			expect(gatewayUrlSeenAtRestore).toBe(expectedUrl);
@@ -144,6 +144,16 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("programmatic mounted gateway
 		} finally {
 			await running.shutdown();
 		}
+	}, 60_000);
+
+	it("rejects a callback path that differs from the configured mount before restore", async () => {
+		let restoreStarted = false;
+		await expect(bootGateway(MOUNT, "127.0.0.1", true, {
+			serveStatic: false,
+			onBound: () => "https://public.example.test/public/gateway/",
+			observeSessionRestoreGatewayUrl: () => { restoreStarted = true; },
+		})).rejects.toThrow(/callback URL path.*must match configured base path/i);
+		expect(restoreStarted).toBe(false);
 	}, 60_000);
 
 	it("rejects an unsafe callback override before agents or extensions resume", async () => {
