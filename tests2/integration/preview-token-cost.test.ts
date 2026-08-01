@@ -40,9 +40,10 @@ import {
 import fs from "node:fs";
 import { buildPreviewSnapshotV3Block, parseSnapshot } from "../../defaults/tools/html/snapshot.ts";
 
-// Keep this token-shape test at a fixed five concurrent session chains;
-// same-session catalog growth is pinned by the dedicated artifact cost tests.
-const SESSION_POOL_SIZE = 5;
+// Ten isolated chains retain all 50 real mounts while keeping each session's
+// artifact catalog to five entries; same-session catalog growth is pinned by
+// the dedicated artifact cost tests.
+const SESSION_POOL_SIZE = 10;
 let sessionIds: string[] = [];
 
 test.beforeAll(async () => {
