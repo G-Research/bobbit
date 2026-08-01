@@ -75,6 +75,7 @@ interface PendingPiOAuth {
 	cancelLogin: (err: Error) => void;
 	loginPromise: Promise<void>;
 	completed: boolean;
+	cancelled: boolean;
 	error?: string;
 }
 
@@ -189,12 +190,14 @@ function releaseAnthropicLease(flowId: string): void {
 	if (anthropicLeaseFlowId === flowId) anthropicLeaseFlowId = undefined;
 }
 
-function cancelPendingFlow(flowId: string, flow: PendingOAuth, error: Error): void {
+function cancelPendingFlow(_flowId: string, flow: PendingOAuth, error: Error): void {
 	if (flow.provider === "google-gemini-cli") {
 		closeGoogleFlowServer(flow);
 	} else {
+		// Mark cancellation before signalling Pi. A provider may already be in its
+		// token exchange and can resolve after abort; that result must not persist.
+		flow.cancelled = true;
 		flow.cancelLogin(error);
-		if (flow.provider === "anthropic") releaseAnthropicLease(flowId);
 	}
 }
 
@@ -302,8 +305,23 @@ function sanitizedOAuthFailure(error: unknown): string {
 	return "OAuth login failed. Retry the sign-in flow.";
 }
 
-async function storeOAuthCredentials(provider: OAuthProviderId, credentials: OAuthCredential): Promise<void> {
-	await getOAuthCredentialStore().modify(provider, async () => credentials);
+async function storeOAuthCredentials(
+	provider: OAuthProviderId,
+	credentials: OAuthCredential,
+	shouldStore: () => boolean = () => true,
+): Promise<void> {
+	await getOAuthCredentialStore().modify(provider, async () => shouldStore() ? credentials : undefined);
+}
+
+/** Remove only the exact credential an aborted login may have written. */
+async function discardCancelledOAuthCredentials(provider: OAuthProviderId, credentials: OAuthCredential): Promise<void> {
+	await getOAuthCredentialStore().mutate(provider, async (current) => {
+		if (current?.type !== "oauth"
+			|| current.access !== credentials.access
+			|| current.refresh !== credentials.refresh
+			|| current.expires !== credentials.expires) return undefined;
+		return deleteCredential;
+	});
 }
 
 /**
@@ -414,6 +432,7 @@ async function oauthStartPi(
 		cancelLogin,
 		loginPromise: Promise.resolve(),
 		completed: false,
+		cancelled: false,
 	};
 	pendingFlows.set(flowId, flow);
 
@@ -464,9 +483,21 @@ async function oauthStartPi(
 			if (credential.type !== "oauth") {
 				throw new Error(`OAuth provider returned a non-OAuth credential: ${provider}`);
 			}
+			if (flow.cancelled) {
+				// Pi-backed Anthropic models can persist before resolving; injected
+				// Models persist below. In either case, remove only this cancelled
+				// result, never a newer credential from another operation.
+				await discardCancelledOAuthCredentials(provider, credential);
+				throw new Error("OAuth flow cancelled");
+			}
 			// Gateway-backed Pi Models persists Anthropic itself. Injected test
-			// doubles and Codex retain Bobbit's returned-credential path.
-			if (persistReturnedCredential) await storeOAuthCredentials(provider, credential);
+			// doubles and Codex retain Bobbit's returned-credential path. Check the
+			// cancellation state inside the mutation as well as before it.
+			if (persistReturnedCredential) await storeOAuthCredentials(provider, credential, () => !flow.cancelled);
+			if (flow.cancelled) {
+				await discardCancelledOAuthCredentials(provider, credential);
+				throw new Error("OAuth flow cancelled");
+			}
 			flow.completed = true;
 		})
 		.catch((error: unknown) => {
@@ -500,7 +531,14 @@ async function oauthStartPi(
 	}
 }
 
-/** Explicitly cancel a pending flow, including Pi's loopback callback server. */
+/**
+ * Explicitly cancel a pending flow, including Pi's loopback callback server.
+ *
+ * Pi cancellation is asynchronous: the provider can be finishing its token
+ * exchange when its interaction is aborted. Keep both the flow and Anthropic's
+ * callback-port lease owned until that login settles, so a retry cannot race a
+ * cancelled exchange or observe credentials it writes after cancellation.
+ */
 export function oauthCancel(flowId: string, providerInput?: string): { success: boolean } {
 	const flow = pendingFlows.get(flowId);
 	if (!flow) return { success: true };
@@ -511,8 +549,22 @@ export function oauthCancel(flowId: string, providerInput?: string): { success: 
 			return { success: true };
 		}
 	}
+	if (flow.provider === "google-gemini-cli") {
+		cancelPendingFlow(flowId, flow, new Error("OAuth flow cancelled"));
+		pendingFlows.delete(flowId);
+		return { success: true };
+	}
+	if (flow.completed) {
+		pendingFlows.delete(flowId);
+		return { success: true };
+	}
 	cancelPendingFlow(flowId, flow, new Error("OAuth flow cancelled"));
-	pendingFlows.delete(flowId);
+	// Do not remove the flow while Models.login can still persist a late result.
+	// `then` supplies both outcomes so this detached cleanup can never reject.
+	void flow.loginPromise.then(
+		() => { if (pendingFlows.get(flowId) === flow) pendingFlows.delete(flowId); },
+		() => { if (pendingFlows.get(flowId) === flow) pendingFlows.delete(flowId); },
+	);
 	return { success: true };
 }
 

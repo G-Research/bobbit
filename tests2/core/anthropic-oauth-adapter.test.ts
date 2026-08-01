@@ -4,7 +4,7 @@ delete process.env.PI_OAUTH_CALLBACK_HOST;
 
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import http from "node:http";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -475,6 +475,41 @@ describe("Anthropic OAuth Pi browser adapter", () => {
 		assert.equal(interactionSeen?.signal?.aborted, true);
 		assert.match(promptError instanceof Error ? promptError.message : String(promptError), /cancelled/i);
 		assert.deepEqual(oauthFlowStatus(started.flowId, "anthropic"), { complete: false, error: "flow not found" });
+
+		const replacement: LoginCapture = {};
+		const replacementStarted = await startAnthropic(pendingModels(replacement));
+		await releasePending(replacement, replacementStarted.flowId);
+	});
+
+	it("waits for an active token exchange before releasing cancellation and blocks its credential", async () => {
+		const credential = oauthCredential();
+		let releaseExchange: (() => void) | undefined;
+		let exchangeStarted = false;
+		const models: Pick<Models, "login"> = {
+			login: (async (_providerId: string, _type: string, interaction: AuthInteraction) => {
+				interaction.notify({ type: "auth_url", url: currentAuthorizeUrl() });
+				await interaction.prompt({ type: "manual_code", message: "Paste redirect URL" });
+				exchangeStarted = true;
+				await new Promise<void>((resolve) => { releaseExchange = resolve; });
+				return credential;
+			}) as Models["login"],
+		};
+		const started = await startAnthropic(models);
+		const completion = oauthComplete(started.flowId, randomUUID(), OFFLINE_FETCH);
+		for (let i = 0; i < 100 && !exchangeStarted; i++) await Promise.resolve();
+		assert.equal(exchangeStarted, true, "the mocked provider must be in its token exchange");
+
+		assert.deepEqual(oauthCancel(started.flowId, "anthropic"), { success: true });
+		assert.deepEqual(oauthFlowStatus(started.flowId, "anthropic"), { complete: false }, "cancellation must retain the active flow until exchange settlement");
+		await assert.rejects(() => startAnthropic(pendingModels({})), /busy|in progress|retry/i);
+
+		releaseExchange?.();
+		assert.deepEqual(await completion, { success: false, error: "OAuth flow cancelled" });
+		const storedAfterCancel = existsSync(authPath)
+			? JSON.parse(readFileSync(authPath, "utf8")) as Record<string, unknown>
+			: {};
+		assert.equal(storedAfterCancel.anthropic, undefined, "a cancelled exchange must not persist its credential");
+		activeFlowIds.delete(started.flowId);
 
 		const replacement: LoginCapture = {};
 		const replacementStarted = await startAnthropic(pendingModels(replacement));
