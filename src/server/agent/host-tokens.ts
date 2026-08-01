@@ -294,8 +294,13 @@ export function buildSandboxAgentAuthJson(options?: PreferencesStore | SandboxAg
 	}
 
 	if (includeAnthropicAuth) {
-		const anthropic = sanitizeAnthropicCredential(readHostAuthJson()?.anthropic);
-		if (anthropic && hasCurrentOAuthAccess(anthropic)) auth.anthropic = anthropic;
+		// Check the renewable host row before reducing it to the sandbox-safe
+		// shape; the deliberately non-renewable export has no refresh field.
+		const hostAnthropic = readHostAuthJson()?.anthropic;
+		if (hasCurrentOAuthAccess(hostAnthropic)) {
+			const anthropic = sanitizeAnthropicCredential(hostAnthropic);
+			if (anthropic) auth.anthropic = anthropic;
+		}
 	}
 
 	if (includeGoogleAuth) {
