@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,7 @@ import { awaitableRm, pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const CLI_ENTRY = join(REPO_ROOT, "src", "server", "cli.ts");
+const BUILT_CLI_ENTRY = join(REPO_ROOT, "dist", "server", "cli.js");
 const MOUNT = "/team/cli-smoke";
 const SHELL_MARKER = "EXECUTABLE_CLI_MOUNT_SMOKE";
 const ASSET_MARKER = "EXECUTABLE_CLI_STATIC_ASSET_OK";
@@ -45,7 +46,7 @@ function escapeRegExp(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-describe("executable CLI nested base-path smoke", () => {
+describe("executable CLI root and nested base-path smoke", () => {
 	it("binds an ephemeral mounted gateway, persists its URL, serves it, and exits cleanly", async () => {
 		const root = mkdtempSync(join(tmpdir(), "bobbit-cli-mount-smoke-"));
 		const projectRoot = join(root, "project");
@@ -157,6 +158,87 @@ describe("executable CLI nested base-path smoke", () => {
 			await forceStop(child);
 			const cleanup = await awaitableRm(root, { maxAttempts: 3, backoffMs: 50 });
 			expect(cleanup.removed, `isolated CLI state cleanup failed: ${String(cleanup.lastError ?? "unknown error")}`).toBe(true);
+		}
+	});
+
+	it.skipIf(process.platform === "win32")("starts the built CLI through an npm-style POSIX bin symlink", async () => {
+		const root = mkdtempSync(join(tmpdir(), "bobbit-cli-symlink-smoke-"));
+		const projectRoot = join(root, "project");
+		const headquartersDir = join(root, "headquarters");
+		const binDir = join(root, "node_modules", ".bin");
+		const cliLink = join(binDir, "bobbit");
+		mkdirSync(projectRoot, { recursive: true });
+		mkdirSync(binDir, { recursive: true });
+		expect(existsSync(BUILT_CLI_ENTRY), "built CLI is required for the packaged entrypoint smoke").toBe(true);
+		symlinkSync(BUILT_CLI_ENTRY, cliLink, "file");
+
+		const childEnv: NodeJS.ProcessEnv = {
+			...process.env,
+			BOBBIT_DIR: headquartersDir,
+			BOBBIT_SECRETS_DIR: join(root, "secrets"),
+			BOBBIT_AGENT_DIR: join(root, "agent"),
+			BOBBIT_NO_OPEN: "1",
+			BOBBIT_SKIP_AIGW_DISCOVERY: "1",
+			BOBBIT_SKIP_MCP: "1",
+			BOBBIT_SKIP_TITLE_GEN: "1",
+			BOBBIT_SKIP_WORKTREE_POOL: "1",
+			BOBBIT_TEST_NO_EXTERNAL: "1",
+			BOBBIT_TEST_NO_REMOTE: "1",
+			NODE_ENV: "test",
+		};
+		delete childEnv.BOBBIT_BASE_PATH;
+
+		const child = spawn(cliLink, [
+			"--cwd", projectRoot,
+			"--host", "127.0.0.1",
+			"--port", "0",
+			"--no-tls",
+			"--no-ui",
+		], {
+			cwd: REPO_ROOT,
+			env: childEnv,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		let output = "";
+		child.stdout?.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+		child.stderr?.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+
+		try {
+			const gatewayUrlPath = join(headquartersDir, "state", "gateway-url");
+			const persistedUrl = await pollUntil(() => {
+				if (child.exitCode !== null || child.signalCode !== null) {
+					throw new Error(`symlinked CLI exited before publishing its gateway URL (${child.exitCode ?? child.signalCode})\n${output}`);
+				}
+				if (!existsSync(gatewayUrlPath)) return "";
+				const value = readFileSync(gatewayUrlPath, "utf8").trim();
+				const parsed = new URL(value);
+				return parsed.port && parsed.port !== "0" ? value : "";
+			}, { timeoutMs: 15_000, intervalMs: 50, label: "symlinked built CLI persisted root URL" });
+
+			const parsed = new URL(persistedUrl);
+			expect(parsed.protocol).toBe("http:");
+			expect(parsed.hostname).toBe("127.0.0.1");
+			expect(parsed.port).toMatch(/^\d+$/);
+			expect(parsed.port).not.toBe("0");
+			expect(parsed.pathname).toBe("/");
+			expect(readFileSync(gatewayUrlPath, "utf8")).toBe(persistedUrl);
+
+			const health = await fetch(`${persistedUrl}/api/health`, { signal: AbortSignal.timeout(5_000) });
+			expect(health.status).toBe(200);
+			expect(await health.json()).toMatchObject({ status: "ok", localhost: true });
+
+			const shutdown = await fetch(`${persistedUrl}/api/shutdown`, {
+				method: "POST",
+				signal: AbortSignal.timeout(5_000),
+			});
+			expect(shutdown.status).toBe(200);
+			expect(await shutdown.json()).toEqual({ status: "shutting down" });
+			expect(await waitForExit(child, 5_000)).toEqual({ code: 0, signal: null });
+			expect(output).toMatch(new RegExp(`Listening:\\s+${escapeRegExp(persistedUrl)}`));
+		} finally {
+			await forceStop(child);
+			const cleanup = await awaitableRm(root, { maxAttempts: 3, backoffMs: 50 });
+			expect(cleanup.removed, `isolated symlinked CLI cleanup failed: ${String(cleanup.lastError ?? "unknown error")}`).toBe(true);
 		}
 	});
 });

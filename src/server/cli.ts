@@ -402,8 +402,25 @@ process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
 	process.exit(1);
 });
 
-const invokedPath = process.argv[1];
-if (invokedPath && path.resolve(invokedPath) === path.resolve(fileURLToPath(import.meta.url))) {
+// npm exposes POSIX bins through symlinks, while Node resolves the loaded module.
+function canonicalPath(candidate: string): string {
+	try {
+		return fs.realpathSync(candidate);
+	} catch {
+		return path.resolve(candidate);
+	}
+}
+
+function isCliEntrypoint(invokedPath: string | undefined): boolean {
+	if (!invokedPath) return false;
+	const invokedRealPath = canonicalPath(invokedPath);
+	const moduleRealPath = canonicalPath(fileURLToPath(import.meta.url));
+	return process.platform === "win32"
+		? invokedRealPath.toLowerCase() === moduleRealPath.toLowerCase()
+		: invokedRealPath === moduleRealPath;
+}
+
+if (isCliEntrypoint(process.argv[1])) {
 	main().catch((err) => {
 		console.error("Fatal:", err instanceof Error ? err.message : err);
 		process.exit(1);
