@@ -277,7 +277,7 @@ export function gatewayNativeTransportSupport(explicitBase?: string): GatewayNat
 	return supported ? { supported: true } : { supported: false, message: NATIVE_TRANSPORT_WARNING };
 }
 
-/** Central credentialed HTTP transport. Route strings are validated at entry. */
+/** Central HTTP transport. Route strings are validated at entry. */
 export function gatewayFetch(route: GatewayRoute | string, init: RequestInit = {}): Promise<Response> {
 	const connection = hydrateActiveConnection();
 	const internalRoute = typeof route === "string" ? gatewayRoute(route) : route;
@@ -286,9 +286,11 @@ export function gatewayFetch(route: GatewayRoute | string, init: RequestInit = {
 	const authorization = gatewayAuthorizationHeaders(connection.token).Authorization;
 	if (authorization) headers.set("Authorization", authorization);
 	else headers.delete("Authorization");
+	// Leave credentials at Fetch's same-origin default unless the caller opted
+	// into another mode. Explicit remote gateways use their bearer without
+	// requiring credentialed CORS, while reverse-proxied same-origin cookies work.
 	return fetch(gatewayUrl(internalRoute, connection.baseUrl), {
 		...init,
-		credentials: init.credentials ?? "include",
 		headers,
 	});
 }

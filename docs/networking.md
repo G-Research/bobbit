@@ -63,6 +63,6 @@ TLS is on by default for non-loopback addresses; disabled for localhost to avoid
 
 ## QR Code
 
-Encodes `window.location.origin` + auth token. Scannable from any device on the NordVPN mesh.
+The session QR encodes the selected gateway base URL, including its mounted prefix, and appends a real Bobbit auth token when one is configured. The client-only `localhost` sentinel is omitted. The QR is scannable from any device on the NordVPN mesh.
 
 See [dev-workflow.md](dev-workflow.md) for the full networking reference, troubleshooting, and local-only setup.
