@@ -328,6 +328,13 @@ function isCompleteAnthropicOAuthCredential(credential: unknown): credential is 
 		&& typeof candidate.expires === "number" && Number.isFinite(candidate.expires);
 }
 
+// The persisted credential has already been narrowed to Pi's OAuth variant by
+// its type tag. Keep this runtime validation boolean so its negative branch
+// remains available to report a malformed on-disk OAuth row.
+function isIncompleteAnthropicOAuthCredential(credential: unknown): boolean {
+	return !isCompleteAnthropicOAuthCredential(credential);
+}
+
 async function invalidateRejectedAnthropicCredential(attempted: OAuthCredential | undefined): Promise<boolean> {
 	// A concurrent login/refresh may have replaced this entry while Pi contacted
 	// the provider. Only delete the exact rejected snapshot.
@@ -968,7 +975,7 @@ export function oauthStatus(providerInput?: string): { authenticated: boolean; s
 	if (!credential || credential.type !== "oauth") return { authenticated: false, provider };
 	// Pi's Anthropic OAuth contract requires an access token, refresh token, and
 	// expiry. Never advertise a corrupt or partial row as an account login.
-	if (provider === "anthropic" && !isCompleteAnthropicOAuthCredential(credential)) {
+	if (provider === "anthropic" && isIncompleteAnthropicOAuthCredential(credential)) {
 		// A malformed/partial persisted OAuth row is not a login, but keeping it
 		// visible lets the Account UI offer provider-scoped cleanup.
 		return {
