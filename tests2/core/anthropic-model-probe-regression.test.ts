@@ -169,7 +169,7 @@ describe("Anthropic model probe regressions", () => {
 		assert.deepEqual(JSON.parse(readFileSync(path.join(agentDir!, "auth.json"), "utf-8")), { anthropic: credential });
 	});
 
-	it("clears only the matching persisted OAuth credential after a definitive primary completion rejection", async () => {
+	it("replaces only the rejected OAuth row with a non-secret Pi-unresolvable tombstone", async () => {
 		const access = randomUUID();
 		useAuth({ type: "oauth", access, refresh: randomUUID(), expires: Date.now() + 60_000 });
 
@@ -185,7 +185,15 @@ describe("Anthropic model probe regressions", () => {
 				{ env: {}, providerConfigReader: () => undefined },
 			),
 		);
-		assert.deepEqual(JSON.parse(readFileSync(path.join(agentDir!, "auth.json"), "utf-8")), {});
+
+		const stored = JSON.parse(readFileSync(path.join(agentDir!, "auth.json"), "utf-8"));
+		assert.deepEqual(Object.keys(stored), ["anthropic"]);
+		assert.deepEqual(Object.keys(stored.anthropic).sort(), ["rejected", "type", "version"]);
+		assert.equal(stored.anthropic.type, "oauth_rejected");
+		assert.equal(stored.anthropic.version, 1);
+		assert.match(stored.anthropic.rejected, /^[a-f0-9]{64}$/i, "the tombstone retains only a one-way rejection fingerprint");
+		assert.equal("access" in stored.anthropic, false, "the rejected bearer must not survive");
+		assert.equal("refresh" in stored.anthropic, false, "the renewable credential must not survive");
 	});
 
 	it("does not remove a newer OAuth credential after an in-flight completion rejection", async () => {
