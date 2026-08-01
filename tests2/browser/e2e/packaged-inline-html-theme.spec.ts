@@ -217,7 +217,9 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 				fs.closeSync(2);
 				process.send?.("stdio-released");
 			});
-			process.stdout.write("ready\\n");
+			// This source is itself a template literal: retain the child script's
+			// escaped newline rather than embedding a syntax-breaking raw newline.
+			process.stdout.write("ready\\\\n");
 		`], {
 			detached: process.platform !== "win32",
 			stdio: ["ignore", "pipe", "pipe", "ipc"],
