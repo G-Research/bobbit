@@ -54,13 +54,19 @@ function assertSafeDestination(source: string, destination: string): void {
 	}
 }
 
-function templateEnvironment(home: string): NodeJS.ProcessEnv {
-	const env = { ...process.env };
-	// Git's command-scoped configuration can be inherited through several
-	// GIT_CONFIG_* variables. Strip those host-owned values before explicitly
-	// selecting the fixture's empty global config below.
+/**
+ * Build a Git environment that cannot inherit an ambient repository, object
+ * store, index, or command-scoped configuration. Fixture bootstrap can run in
+ * parallel across Vitest projects, so an inherited GIT_DIR would make their
+ * otherwise independent `git config` calls contend for one config.lock.
+ */
+export function createGitTemplateEnvironment(
+	home: string,
+	source: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+	const env = { ...source };
 	for (const name of Object.keys(env)) {
-		if (name.startsWith("GIT_CONFIG_")) delete env[name];
+		if (name.toUpperCase().startsWith("GIT_")) delete env[name];
 	}
 	return {
 		...env,
@@ -167,7 +173,7 @@ export async function prepareGitTemplate(): Promise<string> {
 		mkdirSync(repository);
 		mkdirSync(home);
 		writeFileSync(join(home, "gitconfig"), "", "utf8");
-		const env = templateEnvironment(home);
+		const env = createGitTemplateEnvironment(home);
 		const fixtureGit: GitTemplateCommandRunner = (args, cwd, options = {}) => runFixtureCommand(
 			"git",
 			// Both settings are written locally below so every copied fixture remains
