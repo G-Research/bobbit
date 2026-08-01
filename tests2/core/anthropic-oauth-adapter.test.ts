@@ -746,7 +746,8 @@ describe("Anthropic OAuth Pi browser adapter", () => {
 		writeFileSync(authPath, JSON.stringify({ anthropic: rejected }), "utf8");
 		const originalAtomicWrite = (AtomicCredentialStore.prototype as any).atomicWrite as Function;
 		const atomicWrite = vi.spyOn(AtomicCredentialStore.prototype as any, "atomicWrite")
-			.mockImplementation(function (this: AtomicCredentialStore, data: unknown, destination: string) {
+			.mockImplementation(function (this: AtomicCredentialStore, ...args: unknown[]) {
+				const [data, destination] = args;
 				// The rejection fence is written first. Simulate only the subsequent
 				// auth.json deletion failing, as can happen after a durable marker write.
 				if (destination === authPath) throw new Error("credential store unavailable");
