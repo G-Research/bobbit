@@ -25,6 +25,12 @@ const originalAnthropicApiKey = process.env.ANTHROPIC_API_KEY;
 const originalAnthropicOAuthToken = process.env.ANTHROPIC_OAUTH_TOKEN;
 let root: string | undefined;
 let agentDir: string | undefined;
+const SYNTHETIC_PI_REFRESH = "synthetic-pi-refresh";
+
+/** A renewable host row must use Pi's complete OAuth credential shape. */
+function completePiOAuthCredential(access: string, expires: number): { type: "oauth"; access: string; refresh: string; expires: number } {
+	return { type: "oauth", access, refresh: SYNTHETIC_PI_REFRESH, expires };
+}
 
 function useHostAuth(auth: unknown): void {
 	root = mkdtempSync(path.join(tmpdir(), "bobbit-anthropic-sandbox-"));
@@ -67,10 +73,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 	it("exports only a sanctioned, current non-renewable Anthropic OAuth credential", () => {
 		const expires = Date.now() + 60_000;
 		useHostAuth({
-			type: "oauth",
-			access: "sandbox-current-access",
-			refresh: "sandbox-refresh-metadata",
-			expires,
+			...completePiOAuthCredential("sandbox-current-access", expires),
 			email: "must-not-copy@example.test",
 			scope: "must-not-copy",
 		});
@@ -85,7 +88,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 	});
 
 	it("does not hand an expired host OAuth access token to a sandbox when refresh cannot run", () => {
-		useHostAuth({ type: "oauth", access: "expired-access", refresh: "refresh-metadata", expires: Date.now() - 1 });
+		useHostAuth(completePiOAuthCredential("expired-access", Date.now() - 1));
 
 		assert.deepEqual(buildSandboxAgentAuthJson({ includeAnthropicAuth: true }), {});
 		assert.equal(resolveHostTokenValue("ANTHROPIC_OAUTH_TOKEN", undefined, undefined as any, { allowStoredAnthropicOAuth: false }), undefined);
@@ -108,13 +111,13 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 	it("refreshes before producing the minimal sandbox auth entry", async () => {
 		const now = 1_700_000_000_000;
 		vi.spyOn(Date, "now").mockReturnValue(now);
-		useHostAuth({ type: "oauth", access: "expired-access", refresh: "refresh-metadata", expires: now - 1 });
+		useHostAuth(completePiOAuthCredential("expired-access", now - 1));
 		const refreshRequest = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 			assert.equal(String(input), "https://platform.claude.com/v1/oauth/token");
 			assert.equal(init?.method, "POST");
 			const body = JSON.parse(String(init?.body));
 			assert.equal(body.grant_type, "refresh_token");
-			assert.equal(body.refresh_token, "refresh-metadata");
+			assert.equal(body.refresh_token, SYNTHETIC_PI_REFRESH);
 			assert.equal(typeof body.client_id, "string");
 			return new Response(JSON.stringify({
 				access_token: "rotated-access",
@@ -134,7 +137,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 	it("refreshes an explicitly opted-in host credential during wiring and exports only its minimal entry", async () => {
 		const now = 1_700_000_000_000;
 		vi.spyOn(Date, "now").mockReturnValue(now);
-		useHostAuth({ type: "oauth", access: "expired-access", refresh: "refresh-metadata", expires: now - 1 });
+		useHostAuth(completePiOAuthCredential("expired-access", now - 1));
 		const refreshRequest = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
 			access_token: "rotated-access",
 			refresh_token: "rotated-refresh",
@@ -162,7 +165,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 	});
 
 	it("keeps an explicit project credential ahead of host OAuth during wiring", async () => {
-		useHostAuth({ type: "oauth", access: "expired-access", refresh: "refresh-metadata", expires: Date.now() - 1 });
+		useHostAuth(completePiOAuthCredential("expired-access", Date.now() - 1));
 		const refreshRequest = vi.spyOn(globalThis, "fetch");
 		const manager: any = new SessionManager();
 		manager.projectContextManager = null;
@@ -186,7 +189,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 	it("serializes handoffs and rechecks policy after a host refresh", async () => {
 		const now = 1_700_000_000_000;
 		vi.spyOn(Date, "now").mockReturnValue(now);
-		useHostAuth({ type: "oauth", access: "expired-access", refresh: "refresh-metadata", expires: now - 1 });
+		useHostAuth(completePiOAuthCredential("expired-access", now - 1));
 		let entries: Array<{ key: string; enabled: boolean; value?: string }> = [
 			{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true },
 		];
@@ -233,7 +236,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 	});
 
 	it("prefers a host Anthropic API key over an opted-in stored OAuth credential", async () => {
-		useHostAuth({ type: "oauth", access: "current-host-access", refresh: "refresh-metadata", expires: Date.now() + 60_000 });
+		useHostAuth(completePiOAuthCredential("current-host-access", Date.now() + 60_000));
 		process.env.ANTHROPIC_API_KEY = "host-api-key";
 		const refreshRequest = vi.spyOn(globalThis, "fetch");
 		const manager: any = new SessionManager();
@@ -256,7 +259,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 	});
 
 	it("denies host OAuth by default during sandbox wiring", async () => {
-		useHostAuth({ type: "oauth", access: "current-host-access", refresh: "refresh-metadata", expires: Date.now() + 60_000 });
+		useHostAuth(completePiOAuthCredential("current-host-access", Date.now() + 60_000));
 		const refreshRequest = vi.spyOn(globalThis, "fetch");
 		const manager: any = new SessionManager();
 		manager.projectContextManager = null;
