@@ -247,15 +247,17 @@ describe("Anthropic persisted status and Pi refresh", () => {
 		const expired = credential(Date.now() - 60_000);
 		await new AtomicCredentialStore(authPath).modify("anthropic", async () => expired);
 		const providerSecret = randomUUID();
+		const rawProviderBodyDetail = "provider-private-refresh-diagnostic";
 		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
 		globalThis.fetch = (async () => new Response(
-			JSON.stringify({ error: "invalid_grant", refresh_token: providerSecret }),
+			JSON.stringify({ error: "invalid_grant", detail: rawProviderBodyDetail, refresh_token: providerSecret }),
 			{ status: 401, headers: { "Content-Type": "application/json" } },
 		)) as typeof fetch;
 
 		assert.equal(await refreshOAuthToken(), null);
 		const output = errors.mock.calls.flat().join(" ");
 		assert.equal(output.includes(providerSecret), false, "provider response token must not be logged");
+		assert.equal(output.includes(rawProviderBodyDetail), false, "raw Pi/provider response bodies must not be logged");
 		assert.equal(output.includes(String(expired.refresh)), false, "stored refresh credential must not be logged");
 		assert.equal(await new AtomicCredentialStore(authPath).read("anthropic"), undefined);
 		assert.equal((await oauthStatus("anthropic")).authenticated, false);

@@ -105,4 +105,48 @@ test.describe("Journey: Anthropic OAuth", () => {
 			writeFileSync(authPath, originalAuth);
 		}
 	});
+
+	test("cancels a flow returned after its loading dialog closes before opening a popup or polling", async ({ page, gateway }) => {
+		test.setTimeout(90_000);
+		const authPath = join(gateway.bobbitDir, "agent", "auth.json");
+		const originalAuth = readFileSync(authPath);
+		let releaseStartResponse!: () => void;
+		const startResponseHeld = new Promise<void>((resolve) => { releaseStartResponse = resolve; });
+		let markStartReceived!: () => void;
+		const startReceived = new Promise<void>((resolve) => { markStartReceived = resolve; });
+		try {
+			seedAccountFixture(authPath);
+			await page.route("**/api/oauth/start", async (route) => {
+				const response = await route.fetch();
+				markStartReceived();
+				await startResponseHeld;
+				await route.fulfill({ response });
+			});
+			await openApp(page);
+			await openAccountSettings(page);
+			const anthropicRow = page.getByTestId("account-row-anthropic");
+			await anthropicRow.getByTestId("account-auth-btn-anthropic").getByRole("button").click();
+			await startReceived;
+			await page.keyboard.press("Escape");
+			await expect(page.getByRole("heading", { name: "Anthropic Login", exact: true })).toHaveCount(0);
+
+			const lateCancel = page.waitForRequest((request) =>
+				request.url().includes("/api/oauth/cancel") && request.method() === "POST",
+			);
+			releaseStartResponse();
+			await lateCancel;
+			await page.unroute("**/api/oauth/start");
+			await expect(page.getByRole("heading", { name: "Anthropic Login", exact: true })).toHaveCount(0);
+
+			const retryPopup = page.waitForEvent("popup");
+			await anthropicRow.getByTestId("account-auth-btn-anthropic").getByRole("button").click();
+			const popup = await retryPopup;
+			await expect(popup).toHaveURL(/https:\/\/claude\.ai\/oauth\/authorize/);
+			await popup.close();
+			await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
+		} finally {
+			await page.unroute("**/api/oauth/start");
+			writeFileSync(authPath, originalAuth);
+		}
+	});
 });

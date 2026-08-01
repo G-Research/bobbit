@@ -7,7 +7,7 @@
 
 import type { Server } from "node:http";
 import { randomBytes } from "node:crypto";
-import type { AuthInteraction, Models, OAuthCredential } from "@earendil-works/pi-ai";
+import type { AuthInteraction, Credential, Models, OAuthCredential } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { clearOAuthCache } from "../agent/model-registry.js";
@@ -76,8 +76,12 @@ interface PendingPiOAuth {
 	loginPromise: Promise<void>;
 	completed: boolean;
 	cancelled: boolean;
-	/** A submitted callback may be in Pi's token exchange and must settle before retry. */
+	/** A submitted manual callback may be in Pi's token exchange and must settle before retry. */
 	codeSubmitted: boolean;
+	/** Pi owns the Anthropic loopback callback, so a browser callback can begin an exchange without passing Bobbit's manual-complete route. */
+	holdUntilLoginSettlesOnCancel: boolean;
+	/** Snapshot restored only when a cancelled login's exact result is still current. */
+	previousCredential?: Credential;
 	error?: string;
 }
 
@@ -204,13 +208,13 @@ function cancelPendingFlow(_flowId: string, flow: PendingOAuth, error: Error): v
 }
 
 /**
- * Cancel a Pi flow and release an abandoned prompt immediately. Once Bobbit
- * has submitted a code, Pi may be exchanging it or persisting a result, so its
- * flow and Anthropic callback-port lease remain owned until login settles.
+ * Cancel a Pi flow and release an abandoned manual prompt immediately. Once
+ * Bobbit submits a code, or Pi can be exchanging a loopback callback, retain
+ * the flow and Anthropic callback-port lease until login settles.
  */
 function cancelPiFlow(flowId: string, flow: PendingPiOAuth, error: Error): boolean {
 	cancelPendingFlow(flowId, flow, error);
-	if (!flow.codeSubmitted) {
+	if (!flow.codeSubmitted && !flow.holdUntilLoginSettlesOnCancel) {
 		if (pendingFlows.get(flowId) === flow) pendingFlows.delete(flowId);
 		if (flow.provider === "anthropic") releaseAnthropicLease(flowId);
 		return false;
@@ -339,15 +343,30 @@ async function storeOAuthCredentials(
 	await getOAuthCredentialStore().modify(provider, async () => shouldStore() ? credentials : undefined);
 }
 
-/** Remove only the exact credential an aborted login may have written. */
-async function discardCancelledOAuthCredentials(provider: OAuthProviderId, credentials: OAuthCredential): Promise<void> {
+/**
+ * Restore the credential displaced by a cancelled re-login, but only if the
+ * cancelled result is still the provider's exact current row. This compare and
+ * restore runs under one credential-store mutation, so a concurrent refresh,
+ * logout, or replacement can never be overwritten.
+ */
+async function restoreCancelledOAuthCredentials(
+	provider: OAuthProviderId,
+	credentials: OAuthCredential,
+	previousCredential: Credential | undefined,
+): Promise<void> {
 	await getOAuthCredentialStore().mutate(provider, async (current) => {
 		if (current?.type !== "oauth"
 			|| current.access !== credentials.access
 			|| current.refresh !== credentials.refresh
 			|| current.expires !== credentials.expires) return undefined;
-		return deleteCredential;
+		return previousCredential ?? deleteCredential;
 	});
+}
+
+/** Provider bodies are untrusted and may contain credentials or arbitrary private data. */
+function sanitizedProviderFailureForLog(error: unknown): string {
+	const message = redactSensitive(error instanceof Error ? error.message : String(error));
+	return message.replace(/\bbody=[\s\S]*/i, "body=<redacted-provider-body>");
 }
 
 /**
@@ -451,6 +470,11 @@ async function oauthStartPi(
 		if (!loginAbort.signal.aborted) loginAbort.abort(error);
 	};
 
+	// Pi's gateway-backed Anthropic implementation runs its own loopback server.
+	// Its callback can enter token exchange without calling Bobbit's manual route,
+	// so cancelling it must retain the lease until Models.login settles. Injected
+	// models are manual-test/Codex adapters and retain immediate prompt cancel.
+	const previousCredential = getOAuthCredentialStore().readStoredCredentialSync(provider);
 	const flow: PendingPiOAuth = {
 		provider,
 		createdAt,
@@ -460,6 +484,8 @@ async function oauthStartPi(
 		completed: false,
 		cancelled: false,
 		codeSubmitted: false,
+		holdUntilLoginSettlesOnCancel: provider === "anthropic" && !persistReturnedCredential,
+		previousCredential: previousCredential ? { ...previousCredential } : undefined,
 	};
 	pendingFlows.set(flowId, flow);
 
@@ -512,9 +538,9 @@ async function oauthStartPi(
 			}
 			if (flow.cancelled) {
 				// Pi-backed Anthropic models can persist before resolving; injected
-				// Models persist below. In either case, remove only this cancelled
-				// result, never a newer credential from another operation.
-				await discardCancelledOAuthCredentials(provider, credential);
+				// Models persist below. Restore only if this cancelled result remains
+				// current, never overwriting a newer concurrent credential.
+				await restoreCancelledOAuthCredentials(provider, credential, flow.previousCredential);
 				throw new Error("OAuth flow cancelled");
 			}
 			// Gateway-backed Pi Models persists Anthropic itself. Injected test
@@ -522,7 +548,7 @@ async function oauthStartPi(
 			// cancellation state inside the mutation as well as before it.
 			if (persistReturnedCredential) await storeOAuthCredentials(provider, credential, () => !flow.cancelled);
 			if (flow.cancelled) {
-				await discardCancelledOAuthCredentials(provider, credential);
+				await restoreCancelledOAuthCredentials(provider, credential, flow.previousCredential);
 				throw new Error("OAuth flow cancelled");
 			}
 			flow.completed = true;
@@ -963,10 +989,10 @@ export async function refreshOAuthToken(
 					console.warn("[oauth] Anthropic credentials were rejected and have been cleared");
 				}
 			} catch (invalidationError) {
-				console.error(`[oauth] Could not clear rejected Anthropic credentials: ${redactSensitive(invalidationError instanceof Error ? invalidationError.message : String(invalidationError))}`);
+				console.error(`[oauth] Could not clear rejected Anthropic credentials: ${sanitizedProviderFailureForLog(invalidationError)}`);
 			}
 		}
-		console.error(`[oauth] Anthropic credential refresh failed: ${redactSensitive(error instanceof Error ? error.message : String(error))}`);
+		console.error(`[oauth] Anthropic credential refresh failed: ${sanitizedProviderFailureForLog(error)}`);
 		return null;
 	}
 }

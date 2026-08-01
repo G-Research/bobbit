@@ -4,7 +4,7 @@ delete process.env.PI_OAUTH_CALLBACK_HOST;
 
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -516,6 +516,100 @@ describe("Anthropic OAuth Pi browser adapter", () => {
 		const replacement: LoginCapture = {};
 		const replacementStarted = await startAnthropic(pendingModels(replacement));
 		await releasePending(replacement, replacementStarted.flowId);
+	});
+
+	it("retains a real Pi loopback callback flow and lease until its cancelled exchange settles", async () => {
+		const previous = oauthCredential();
+		writeFileSync(authPath, JSON.stringify({ anthropic: previous }), "utf8");
+		const lateAccess = randomUUID();
+		const lateRefresh = randomUUID();
+		let exchangeStarted = false;
+		let releaseExchange!: () => void;
+		const exchangeBlocked = new Promise<void>((resolve) => { releaseExchange = resolve; });
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = (async (input) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url !== "https://platform.claude.com/v1/oauth/token") {
+				throw new Error(`unexpected OAuth provider request: ${url}`);
+			}
+			exchangeStarted = true;
+			await exchangeBlocked;
+			return new Response(JSON.stringify({ access_token: lateAccess, refresh_token: lateRefresh, expires_in: 3600 }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		}) as typeof fetch;
+
+		try {
+			const started = await oauthStart("anthropic");
+			activeFlowIds.add(started.flowId);
+			const state = new URL(started.url).searchParams.get("state");
+			assert.ok(state);
+			dispatchPiCallback(`/callback?code=${encodeURIComponent(randomUUID())}&state=${encodeURIComponent(state)}`);
+			for (let i = 0; i < 100 && !exchangeStarted; i++) await new Promise((resolve) => setTimeout(resolve, 2));
+			assert.equal(exchangeStarted, true, "the real loopback callback must enter Pi token exchange");
+
+			oauthCancel(started.flowId, "anthropic");
+			assert.deepEqual(
+				oauthFlowStatus(started.flowId, "anthropic"),
+				{ complete: false },
+				"a callback exchange has no manual code submission but must retain its flow",
+			);
+			await assert.rejects(() => startAnthropic(pendingModels({})), /busy|in progress|retry/i);
+
+			releaseExchange();
+			let replacement: { flowId: string } | undefined;
+			let replacementCapture: LoginCapture | undefined;
+			for (let i = 0; i < 100 && !replacement; i++) {
+				try {
+					const capture: LoginCapture = {};
+					replacement = await startAnthropic(pendingModels(capture));
+					replacementCapture = capture;
+				} catch {
+					await new Promise((resolve) => setTimeout(resolve, 2));
+				}
+			}
+			assert.ok(replacement, "the loopback lease must release after Pi settles");
+			assert.ok(replacementCapture);
+			const stored = JSON.parse(readFileSync(authPath, "utf8")).anthropic as OAuthCredential;
+			assert.equal(stored.access === previous.access, true, "cancelled callback exchange must restore the prior credential");
+			assert.equal(stored.refresh === previous.refresh, true);
+			activeFlowIds.delete(started.flowId);
+			await releasePending(replacementCapture, replacement.flowId);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	it("restores the prior credential with a compare-and-swap after a cancelled re-login persists late", async () => {
+		const previous = oauthCredential();
+		const replacement = oauthCredential();
+		writeFileSync(authPath, JSON.stringify({ anthropic: previous }), "utf8");
+		let releaseExchange: (() => void) | undefined;
+		let exchangeStarted = false;
+		const models: Pick<Models, "login"> = {
+			login: (async (_providerId: string, _type: string, interaction: AuthInteraction) => {
+				interaction.notify({ type: "auth_url", url: currentAuthorizeUrl() });
+				await interaction.prompt({ type: "manual_code", message: "Paste redirect URL" });
+				exchangeStarted = true;
+				await new Promise<void>((resolve) => { releaseExchange = resolve; });
+				// Simulate Pi persisting before Models.login resolves.
+				writeFileSync(authPath, JSON.stringify({ anthropic: replacement }), "utf8");
+				return replacement;
+			}) as Models["login"],
+		};
+		const started = await startAnthropic(models);
+		const completion = oauthComplete(started.flowId, randomUUID(), OFFLINE_FETCH);
+		for (let i = 0; i < 100 && !exchangeStarted; i++) await Promise.resolve();
+		assert.equal(exchangeStarted, true);
+		oauthCancel(started.flowId, "anthropic");
+		releaseExchange?.();
+		assert.deepEqual(await completion, { success: false, error: "OAuth flow cancelled" });
+		const stored = JSON.parse(readFileSync(authPath, "utf8")).anthropic as OAuthCredential;
+		assert.equal(stored.access === previous.access, true, "cancelled re-login must restore the prior access credential");
+		assert.equal(stored.refresh === previous.refresh, true, "cancelled re-login must restore the prior refresh credential");
+		assert.equal(stored.expires, previous.expires);
+		activeFlowIds.delete(started.flowId);
 	});
 
 	it("forwards a full remote redirect unchanged and accepts a bare authorization code", async () => {

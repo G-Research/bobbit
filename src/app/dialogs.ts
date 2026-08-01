@@ -561,6 +561,8 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 		let error = "";
 		let pollTimer: number | undefined;
 		let flowCancellation: Promise<void> = Promise.resolve();
+		let closed = false;
+		let startAttempt = 0;
 		let pollStartMs = 0;
 		let pollDelayMs = 1000;
 		const POLL_MAX_DELAY_MS = 8000;
@@ -582,6 +584,9 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 		};
 
 		const cleanup = (result: boolean) => {
+			if (closed) return;
+			closed = true;
+			startAttempt += 1;
 			if (pollTimer !== undefined) window.clearTimeout(pollTimer);
 			if (!result) abandonFlow();
 			render(html``, container);
@@ -590,6 +595,7 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 		};
 
 		const showFlowError = (message: string) => {
+			if (closed) return;
 			abandonFlow();
 			error = message;
 			step = "error";
@@ -627,10 +633,13 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 		};
 
 		const startFlow = async () => {
+			const attempt = ++startAttempt;
 			// Wait for teardown before retrying: Pi's Anthropic callback port is
 			// process-wide, so an immediate retry must not race its cancellation.
 			await waitForOAuthFlowTeardown(provider);
+			if (closed || attempt !== startAttempt) return;
 			await abandonFlow();
+			if (closed || attempt !== startAttempt) return;
 			step = "loading";
 			renderOAuthDialog();
 			try {
@@ -639,16 +648,32 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 					body: JSON.stringify({ provider }),
 				});
 				const data = await res.json().catch(() => ({}));
+				if (closed || attempt !== startAttempt) {
+					// Start acquires the provider lease before its response. If close or a
+					// newer attempt wins this race, cancel the late flow before it can
+					// open a popup, start polling, or strand the callback port until TTL.
+					if (typeof data.flowId === "string") {
+						flowCancellation = trackOAuthFlowTeardown(provider, gatewayFetch("/api/oauth/cancel", {
+							method: "POST",
+							body: JSON.stringify({ flowId: data.flowId, provider }),
+						}).then(() => undefined, () => undefined));
+						await flowCancellation;
+					}
+					return;
+				}
 				if (!res.ok) {
 					if (res.status === 409 && data.code === "ANTHROPIC_OAUTH_BUSY") {
 						throw new Error("Another Anthropic sign-in is in progress. Close or cancel it, then try again.");
 					}
 					throw new Error("OAuth sign-in could not start. Retry the sign-in flow.");
 				}
+				if (typeof data.flowId !== "string" || typeof data.url !== "string") {
+					throw new Error("OAuth sign-in could not start. Retry the sign-in flow.");
+				}
 				flowId = data.flowId;
 				authUrl = data.url;
 				callbackServer = data.callbackServer === true;
-				instructions = data.instructions || "";
+				instructions = typeof data.instructions === "string" ? data.instructions : "";
 				step = "waiting";
 				window.open(authUrl, "_blank");
 				renderOAuthDialog();
