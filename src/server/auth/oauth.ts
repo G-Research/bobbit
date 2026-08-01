@@ -116,6 +116,24 @@ const pendingFlows = new Map<string, PendingOAuth>();
 // independently started reauthentication flow.
 const credentialGenerations = new Map<OAuthProviderId, number>();
 const logoutGenerations = new Map<OAuthProviderId, number>();
+// A definitive provider rejection remains authoritative even when the best-effort
+// durable delete fails. The access value is a compare key, not a credential cache:
+// a replacement credential with another access value is immediately unaffected.
+const rejectedOAuthAccess = new Map<OAuthProviderId, string>();
+
+function markRejectedOAuthAccess(provider: OAuthProviderId, access: string): void {
+	if (access) rejectedOAuthAccess.set(provider, access);
+}
+
+function isRejectedOAuthAccess(provider: OAuthProviderId, access: string): boolean {
+	const rejected = rejectedOAuthAccess.get(provider);
+	if (rejected === undefined) return false;
+	if (rejected === access) return true;
+	// A newer credential won while deletion was failing. Do not let an old
+	// rejection poison its status, and release the now-obsolete marker.
+	rejectedOAuthAccess.delete(provider);
+	return false;
+}
 
 function credentialGeneration(provider: OAuthProviderId): number {
 	return credentialGenerations.get(provider) ?? 0;
@@ -185,7 +203,13 @@ export function stopFlowCleanup(): void {
 		clearInterval(flowCleanupTimer);
 		flowCleanupTimer = undefined;
 	}
-	for (const [flowId, flow] of pendingFlows) cancelPendingFlow(flowId, flow, new Error("OAuth flow cancelled"));
+	for (const [flowId, flow] of pendingFlows) {
+		// A completed result is retained solely to let a caller cancel after it
+		// loses a success response. Test teardown must not turn that successful
+		// persisted credential into a cancellation.
+		if (flow.provider !== "google-gemini-cli" && flow.completed) continue;
+		cancelPendingFlow(flowId, flow, new Error("OAuth flow cancelled"));
+	}
 	pendingFlows.clear();
 	anthropicLeaseFlowId = undefined;
 }
@@ -248,9 +272,11 @@ function cancelPendingFlow(_flowId: string, flow: PendingOAuth, error: Error): v
 function cancelPiFlow(flowId: string, flow: PendingPiOAuth, error: Error): Promise<void> {
 	if (flow.cancelSettlement) return flow.cancelSettlement;
 	cancelPendingFlow(flowId, flow, error);
-	if (flow.completed) {
-		// A callback can finish between UI polls. Treat an explicit cancellation as
-		// cancellation nonetheless: undo only the row issued by this exact flow.
+	if (flow.completed || (flow.cleanupFailure !== undefined && flow.issuedCredential)) {
+		// A callback can finish between UI polls. Likewise, a cancellation can
+		// reach Pi while it is persisting its result, then have that first rollback
+		// fail before `completed` is set. In both cases retry only this flow's exact
+		// issued row; never pretend the retained cleanup failure succeeded.
 		flow.cancelSettlement = flow.issuedCredential
 			? restoreCancelledPiFlowCredentials(flow, flow.issuedCredential)
 			: Promise.resolve();
@@ -289,6 +315,14 @@ function cleanupExpiredFlows(): void {
 	// Snapshot entries before mutating the map to avoid mutation-during-iteration UB.
 	for (const [id, flow] of Array.from(pendingFlows.entries())) {
 		if (now - flow.createdAt > FLOW_TTL_MS) {
+			// Completion remains cancellable while retained, but expiry is not an
+			// instruction to revoke an accepted credential. Discard the completed
+			// acknowledgement window without rolling its exact row back.
+			if (flow.completed) {
+				if (flow.provider === "google-gemini-cli") closeGoogleFlowServer(flow);
+				pendingFlows.delete(id);
+				continue;
+			}
 			if (flow.provider === "google-gemini-cli") {
 				cancelPendingFlow(id, flow, new Error("OAuth flow expired"));
 				pendingFlows.delete(id);
@@ -358,8 +392,11 @@ function isIncompleteAnthropicOAuthCredential(credential: unknown): boolean {
 
 async function invalidateRejectedAnthropicCredential(attempted: OAuthCredential | undefined): Promise<boolean> {
 	// A concurrent login/refresh may have replaced this entry while Pi contacted
-	// the provider. Only delete the exact rejected snapshot.
+	// the provider. Only delete the exact rejected snapshot. Record rejection
+	// first: a filesystem failure must never leave this exact known-bad row
+	// appearing authenticated through the status route.
 	if (!isCompleteAnthropicOAuthCredential(attempted)) return false;
+	markRejectedOAuthAccess("anthropic", attempted.access);
 	let cleared = false;
 	await getOAuthCredentialStore().mutate("anthropic", async (current) => {
 		if (current?.type !== "oauth" || current.access !== attempted.access || current.refresh !== attempted.refresh) return undefined;
@@ -377,6 +414,7 @@ async function invalidateRejectedAnthropicCredential(attempted: OAuthCredential 
  */
 export async function invalidateRejectedAnthropicDirectCredential(access: string): Promise<boolean> {
 	if (!access) return false;
+	markRejectedOAuthAccess("anthropic", access);
 	try {
 		let cleared = false;
 		await getOAuthCredentialStore().mutate("anthropic", async (current) => {
@@ -988,7 +1026,9 @@ export async function oauthComplete(
 		return { success: false, error: "code required" };
 	}
 	if (flow.completed) {
-		pendingFlows.delete(flowId);
+		// Keep the exact issued row addressable through the acknowledgement window:
+		// a response can be lost after Pi persisted it, and a subsequent explicit
+		// cancel must still be able to roll back that one credential.
 		return { success: true };
 	}
 
@@ -1018,6 +1058,18 @@ export function oauthStatus(providerInput?: string): { authenticated: boolean; s
 	const provider = normalizeProvider(providerInput);
 	const credential = getOAuthCredentialStore().readStoredCredentialSync(provider);
 	if (!credential || credential.type !== "oauth") return { authenticated: false, provider };
+	// A known rejected row can remain on disk if its guarded delete encountered
+	// an I/O failure. It is still visible as stored for recovery, never as a
+	// working login. A different current access value clears the old marker.
+	if (provider === "anthropic" && typeof credential.access === "string" && isRejectedOAuthAccess(provider, credential.access)) {
+		return {
+			authenticated: false,
+			stored: true,
+			refreshable: false,
+			expires: typeof credential.expires === "number" ? credential.expires : undefined,
+			provider,
+		};
+	}
 	// Pi's Anthropic OAuth contract requires an access token, refresh token, and
 	// expiry. Never advertise a corrupt or partial row as an account login.
 	if (provider === "anthropic" && isIncompleteAnthropicOAuthCredential(credential)) {
@@ -1074,7 +1126,9 @@ export function oauthFlowStatus(
 	}
 	if (flow.completed) {
 		if (flow.provider === "google-gemini-cli") closeGoogleFlowServer(flow);
-		pendingFlows.delete(flowId);
+		// Do not consume completion merely by observing it. The HTTP response can
+		// be lost after the credential is committed; retaining the flow until TTL
+		// lets an explicit cancellation roll back exactly that issued credential.
 		return { complete: true };
 	}
 	if (flow.error) {

@@ -61,6 +61,8 @@ const {
 	invalidateRejectedAnthropicDirectCredential,
 	oauthLogout,
 	oauthStart,
+	oauthStatus,
+	refreshOAuthToken,
 	stopFlowCleanup,
 } = await import("../../src/server/auth/oauth.js");
 
@@ -647,6 +649,96 @@ describe("Anthropic OAuth Pi browser adapter", () => {
 		const stored = JSON.parse(readFileSync(authPath, "utf8")).anthropic as OAuthCredential;
 		assert.equal(stored.access, previous.access, "successful retry must restore the preceding credential");
 		activeFlowIds.delete(started.flowId);
+	});
+
+	it("retries a failed rollback after cancellation races an in-flight exchange", async () => {
+		const previous = oauthCredential();
+		const issued = oauthCredential();
+		writeFileSync(authPath, JSON.stringify({ anthropic: previous }), "utf8");
+		let releaseExchange!: () => void;
+		let exchangeStarted = false;
+		const exchangeBlocked = new Promise<void>((resolve) => { releaseExchange = resolve; });
+		const models: Pick<Models, "login"> = {
+			login: (async (_providerId: string, _type: string, interaction: AuthInteraction) => {
+				interaction.notify({ type: "auth_url", url: currentAuthorizeUrl() });
+				await interaction.prompt({ type: "manual_code", message: "Paste redirect URL" });
+				exchangeStarted = true;
+				await exchangeBlocked;
+				// Pi can persist before reporting its final result to the interaction.
+				writeFileSync(authPath, JSON.stringify({ anthropic: issued }), "utf8");
+				return issued;
+			}) as Models["login"],
+		};
+		const started = await startAnthropic(models);
+		const completion = oauthComplete(started.flowId, randomUUID(), OFFLINE_FETCH);
+		for (let i = 0; i < 100 && !exchangeStarted; i++) await Promise.resolve();
+		assert.equal(exchangeStarted, true);
+
+		const rollback = vi.spyOn(AtomicCredentialStore.prototype, "rollbackCredentialIfCurrent")
+			.mockRejectedValueOnce(new Error("rollback temporarily unavailable"));
+		try {
+			const cancelling = oauthCancelAndWait(started.flowId, "anthropic");
+			releaseExchange();
+			await assert.rejects(() => cancelling, /rollback temporarily unavailable/);
+			assert.deepEqual(await completion, { success: false, error: "OAuth flow cancelled" });
+			assert.deepEqual(await oauthCancelAndWait(started.flowId, "anthropic"), { success: true });
+		} finally {
+			rollback.mockRestore();
+		}
+		const stored = JSON.parse(readFileSync(authPath, "utf8")).anthropic as OAuthCredential;
+		assert.equal(stored.access, previous.access);
+		assert.equal(stored.refresh, previous.refresh);
+		activeFlowIds.delete(started.flowId);
+	});
+
+	it("keeps a completed flow cancellable when its success response is lost", async () => {
+		const previous = oauthCredential();
+		const issued = oauthCredential();
+		writeFileSync(authPath, JSON.stringify({ anthropic: previous }), "utf8");
+		const models: Pick<Models, "login"> = {
+			login: (async (_providerId: string, _type: string, interaction: AuthInteraction) => {
+				interaction.notify({ type: "auth_url", url: currentAuthorizeUrl() });
+				return issued;
+			}) as Models["login"],
+		};
+		const started = await startAnthropic(models);
+		for (let i = 0; i < 20; i++) await Promise.resolve();
+		// Treat this as a success response that reached the gateway but not the UI.
+		assert.deepEqual(await oauthComplete(started.flowId, randomUUID(), OFFLINE_FETCH), { success: true });
+		assert.deepEqual(oauthFlowStatus(started.flowId, "anthropic"), { complete: true });
+		await oauthCancelAndWait(started.flowId, "anthropic");
+		const stored = JSON.parse(readFileSync(authPath, "utf8")).anthropic as OAuthCredential;
+		assert.equal(stored.access, previous.access);
+		assert.equal(stored.refresh, previous.refresh);
+		activeFlowIds.delete(started.flowId);
+	});
+
+	it("does not report a known rejected credential authenticated when durable deletion fails", async () => {
+		const rejected = oauthCredential();
+		const replacement = oauthCredential();
+		writeFileSync(authPath, JSON.stringify({ anthropic: rejected }), "utf8");
+		const mutation = vi.spyOn(AtomicCredentialStore.prototype, "mutate")
+			.mockRejectedValueOnce(new Error("credential store unavailable"));
+		try {
+			assert.equal(await refreshOAuthToken(OFFLINE_FETCH, {
+				getAuth: async () => {
+					const error = Object.assign(new Error("rejected"), { status: 401 });
+					throw error;
+				},
+			}), null);
+		} finally {
+			mutation.mockRestore();
+		}
+		assert.deepEqual(oauthStatus("anthropic"), {
+			authenticated: false,
+			stored: true,
+			refreshable: false,
+			expires: rejected.expires,
+			provider: "anthropic",
+		});
+		// The marker is keyed to the rejected access value, not the provider alone.
+		writeFileSync(authPath, JSON.stringify({ anthropic: replacement }), "utf8");
+		assert.equal(oauthStatus("anthropic").authenticated, true);
 	});
 
 	it("restores only its issued credential when cancellation wins after completion but before polling", async () => {
