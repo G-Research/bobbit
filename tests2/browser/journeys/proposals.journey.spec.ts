@@ -110,7 +110,9 @@ test.describe("Journey: Proposals — behavioral", () => {
 		test.setTimeout(90_000);
 		await openApp(page);
 		await createSessionViaUI(page);
-		await sendMessage(page, "STAY_BUSY:propose_goal:10:150");
+		// Five paced deltas retain the partial-stream lifecycle while avoiding
+		// redundant idle time in this per-spec wall-budgeted journey.
+		await sendMessage(page, "STAY_BUSY:propose_goal:5:100");
 		const badge = page.locator('[data-testid="proposal-streaming-badge"]').first();
 		await expect(badge).toBeVisible({ timeout: 15_000 });
 		await expect(badge).toBeHidden({ timeout: 20_000 });
@@ -120,7 +122,9 @@ test.describe("Journey: Proposals — behavioral", () => {
 		test.setTimeout(90_000);
 		await openApp(page);
 		await createSessionViaUI(page);
-		await sendMessage(page, "STAY_BUSY:propose_goal:10:150");
+		// Retain multiple streamed updates, but keep the deterministic fixture
+		// short enough for the journey's 60-second aggregate budget.
+		await sendMessage(page, "STAY_BUSY:propose_goal:5:100");
 		const badge = page.locator('[data-testid="proposal-streaming-badge"]').first();
 		const submitWrap = page.locator('[data-testid="proposal-primary-submit"]').first();
 		await expect(submitWrap).toBeVisible({ timeout: 15_000 });
@@ -176,7 +180,9 @@ test.describe("Journey: Proposals — behavioral", () => {
 		test.setTimeout(90_000);
 		await openApp(page);
 		await createSessionViaUI(page);
-		await sendMessage(page, "STAY_BUSY:propose_goal:20:150");
+		// Enough updates to exercise a live, growing stream and its terminal
+		// restore path without spending three seconds in the mock fixture.
+		await sendMessage(page, "STAY_BUSY:propose_goal:8:100");
 		const titleInput = page.locator("input[placeholder='Goal title']").first();
 		await expect(titleInput).toBeVisible({ timeout: 15_000 });
 		const badge = page.locator('[data-testid="proposal-streaming-badge"]').first();
