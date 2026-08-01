@@ -259,7 +259,13 @@ test.describe("Anthropic OAuth lifecycle routes", () => {
 			expect(await refreshOAuthToken()).toBeNull();
 			const status = await api("/api/oauth/status?provider=anthropic");
 			expect(status.status).toBe(200);
-			expect(await status.json()).toEqual({ authenticated: false, provider: "anthropic" });
+			expect(await status.json()).toEqual({
+				authenticated: false,
+				stored: true,
+				rejected: true,
+				refreshable: false,
+				provider: "anthropic",
+			});
 		} finally {
 			restoreFetch();
 		}
