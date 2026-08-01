@@ -13935,16 +13935,24 @@ async function handleApiRoute(
 	if (url.pathname === "/api/oauth/start" && req.method === "POST") {
 		try {
 			const body = await readBody(req).catch(() => ({}));
-			// The UI must retry cancellation of this exact retained flow before it
-			// can acquire another Anthropic callback lease.
+			// The retry marker is process-local while the browser can outlive a TTL
+			// sweep or gateway restart. Reconcile its exact flow first: an unknown
+			// flow is already terminal and must not wedge all future starts, but a
+			// still-addressable cleanup failure remains explicitly actionable.
 			if ((body?.provider === undefined || body?.provider === "anthropic") && oauthCancellationRetryState.anthropicFlowId) {
-				json({
-					error: "OAuth cancellation did not complete. Retry cancellation before starting another sign-in.",
-					code: "OAUTH_CANCEL_RETRY_REQUIRED",
-					retryable: true,
-					flowId: oauthCancellationRetryState.anthropicFlowId,
-				}, 409);
-				return;
+				const retryFlowId = oauthCancellationRetryState.anthropicFlowId;
+				const retryStatus = oauthFlowStatus(retryFlowId, "anthropic");
+				if (retryStatus.error === "flow not found") {
+					oauthCancellationRetryState.anthropicFlowId = undefined;
+				} else {
+					json({
+						error: "OAuth cancellation did not complete. Retry cancellation before starting another sign-in.",
+						code: "OAUTH_CANCEL_RETRY_REQUIRED",
+						retryable: true,
+						flowId: retryFlowId,
+					}, 409);
+					return;
+				}
 			}
 			const result = await oauthStart(body?.provider);
 			json(result);
@@ -13974,6 +13982,14 @@ async function handleApiRoute(
 			// released the provider lease, so an immediate UI retry cannot race it.
 			const result = await oauthCancelAndWait(body.flowId, body.provider);
 			if (!result.success) {
+				// A stale browser retry can arrive after TTL cleanup or a gateway
+				// restart. Preserve the honest 404 response, but drop only its matching
+				// in-memory blocker so a later start is not permanently wedged.
+				if (body.provider === "anthropic"
+					&& result.error === "Unknown or expired flow ID"
+					&& oauthCancellationRetryState.anthropicFlowId === body.flowId) {
+					oauthCancellationRetryState.anthropicFlowId = undefined;
+				}
 				json(result, 404);
 				return;
 			}

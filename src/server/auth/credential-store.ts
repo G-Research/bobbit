@@ -301,6 +301,41 @@ interface AuthFileLock {
 	release(): void;
 }
 
+/**
+ * Remove only the exact lock directory this owner created. Re-checking before
+ * `rmdir` alone has a TOCTOU gap: a stalled owner can observe its inode, then
+ * delete a replacement lease at the same pathname. Claim the observed inode
+ * first, validate it at the private path, and only then remove that claim.
+ */
+function releaseAuthFileLock(lockPath: string, identity: LockIdentity): void {
+	if (!isSameLockIdentity(identity, lockPath)) {
+		throw new Error("Credential store lock was compromised");
+	}
+	const claimPath = `${lockPath}.release-${process.pid}-${randomUUID()}`;
+	try {
+		renameSync(lockPath, claimPath);
+	} catch {
+		throw new Error("Credential store lock was compromised");
+	}
+	if (!isSameLockIdentity(identity, claimPath)) {
+		// We claimed a replacement after the pre-claim check. Restore it only if
+		// another owner has not acquired the public pathname; never delete it.
+		try {
+			if (!existsSync(lockPath)) renameSync(claimPath, lockPath);
+		} catch {
+			// A later owner won the pathname. Failing closed is safer than removal.
+		}
+		throw new Error("Credential store lock was compromised");
+	}
+	try {
+		rmdirSync(claimPath);
+	} catch (error) {
+		// The claimed directory is private, so a failure cannot be interpreted as
+		// a successful release by a replacement owner.
+		throw error;
+	}
+}
+
 async function acquireAuthFileLock(authPath: string): Promise<AuthFileLock> {
 	const lockPath = `${authPath}.lock`;
 	for (let attempt = 0; ; attempt += 1) {
@@ -331,10 +366,7 @@ async function acquireAuthFileLock(authPath: string): Promise<AuthFileLock> {
 				assertIntact: assertOwnership,
 				release: () => {
 					clearInterval(heartbeat);
-					// Do not remove a lock directory that was reclaimed by another
-					// process while this owner was stalled.
-					assertOwnership();
-					rmdirSync(lockPath);
+					releaseAuthFileLock(lockPath, identity);
 				},
 			};
 		} catch (error) {
@@ -660,13 +692,15 @@ export class AtomicCredentialStore implements CredentialStore {
 		// A lock acquisition failure cannot be allowed to turn a definitive
 		// rejection/cancellation into a still-usable in-process credential.
 		rejectedOAuthInProcess.set(rejectionKey(this.authPath, providerId), oauthAccessFingerprint(access));
-		return this.enqueueProvider(providerId, async () => this.withLock((data, authPath, assertLock) => {
+		const fenced = await this.enqueueProvider(providerId, async () => this.withLock((data, authPath, assertLock) => {
 			const current = asCredential(asStoredCredential(data[providerId]));
 			if (!current || current.type !== "oauth" || current.access !== access || (refresh !== undefined && current.refresh !== refresh)) return { result: false };
 			this.persistRejectedOAuthCredential(authPath, providerId, access);
 			assertLock();
 			return { result: true };
 		}));
+		if (fenced) this.didChange();
+		return fenced;
 	}
 
 	async invalidateRejectedOAuthCredential(providerId: string, access: string, refresh?: string): Promise<boolean> {
@@ -674,7 +708,7 @@ export class AtomicCredentialStore implements CredentialStore {
 		// Fail closed before lock acquisition too. The access fingerprint keeps this
 		// precise: a concurrently rotated credential with another access value stays usable.
 		rejectedOAuthInProcess.set(rejectionKey(this.authPath, providerId), oauthAccessFingerprint(access));
-		return this.enqueueProvider(providerId, async () => this.withLock((data, authPath, assertLock) => {
+		const invalidated = await this.enqueueProvider(providerId, async () => this.withLock((data, authPath, assertLock) => {
 			const current = asCredential(asStoredCredential(data[providerId]));
 			if (!current || current.type !== "oauth" || current.access !== access || (refresh !== undefined && current.refresh !== refresh)) return { result: false };
 			this.persistRejectedOAuthCredential(authPath, providerId, access);
@@ -683,6 +717,27 @@ export class AtomicCredentialStore implements CredentialStore {
 			delete next[providerId];
 			return { result: true, next };
 		}));
+		if (invalidated) {
+			this.rollbackHistory.delete(providerId);
+			this.didChange();
+		}
+		return invalidated;
+	}
+
+	/** Delete a raw OAuth row, including one hidden by the rejected-credential fence. */
+	async deleteOAuthCredential(providerId: string): Promise<boolean> {
+		const deleted = await this.enqueueProvider(providerId, async () => this.withLock((data) => {
+			const current = asStoredCredential(data[providerId]);
+			if (current?.type !== "oauth") return { result: false };
+			const next = { ...data };
+			delete next[providerId];
+			return { result: true, next };
+		}));
+		if (deleted) {
+			this.rollbackHistory.delete(providerId);
+			this.didChange();
+		}
+		return deleted;
 	}
 
 	async delete(providerId: string): Promise<void> {

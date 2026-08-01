@@ -586,6 +586,14 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 			}).then(async (res) => {
 				const data = await res.json().catch(() => ({}));
 				if (!res.ok) {
+					// Ordinary failed flows are removed by the server after reporting their
+					// terminal error. A subsequent cancel therefore returns the scoped 404;
+					// it is already clean, not a retryable rollback failure. The same is
+					// true when a gateway restarted or TTL swept this dialog's flow.
+					if (res.status === 404 && data.error === "Unknown or expired flow ID") {
+						if (flowId === flowToCancel) flowId = "";
+						return true;
+					}
 					error = typeof data.error === "string" && data.retryable === true
 						? data.error
 						: "OAuth cancellation did not complete. Retry cancellation before starting another sign-in.";
@@ -670,8 +678,8 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 			}
 			try {
 				const res = await gatewayFetch(`/api/oauth/flow-status?flowId=${encodeURIComponent(flowId)}&provider=${encodeURIComponent(provider)}`);
+				const data = await res.json().catch(() => ({}));
 				if (res.ok) {
-					const data = await res.json();
 					if (data.complete) {
 						step = "done";
 						renderOAuthDialog();
@@ -682,6 +690,11 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 						showFlowError(data.error);
 						return;
 					}
+				} else if (res.status === 404 && data.error === "flow not found") {
+					// A provider may have already reported a terminal failure and removed
+					// its flow. Stop polling instead of trapping the dialog in `waiting`.
+					showFlowError("OAuth flow ended before completion. Retry the sign-in flow.");
+					return;
 				}
 			} catch {
 				// Keep polling; the manual paste path remains available.

@@ -557,9 +557,12 @@ function detectProviderAuth(provider: string, prefs: PreferencesStore): boolean 
 let oauthCache: { data: any; expiry: number } | null = null;
 const OAUTH_CACHE_TTL = 10_000; // 10 seconds
 
-/** Invalidate the cached auth.json data so the next read picks up fresh credentials. */
+/** Invalidate credential-derived auth and model availability after every durable auth change. */
 export function clearOAuthCache(): void {
 	oauthCache = null;
+	// `cachedModels` contains the computed authenticated flag. A rejected or
+	// logged-out OAuth row must therefore invalidate both layers immediately.
+	invalidateModelCache();
 }
 
 function readAuthJson(): any {

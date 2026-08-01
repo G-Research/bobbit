@@ -1306,10 +1306,11 @@ export async function oauthLogout(providerInput?: string, fetchImpl: typeof fetc
 			return deleteCredential;
 		});
 	} else {
-		// OAuth logout must never erase an API-key row sharing this provider key.
-		await getOAuthCredentialStore().mutate(provider, async (current) =>
-			current?.type === "oauth" ? deleteCredential : undefined,
-		);
+		// A rejected row is intentionally hidden from normal readers, but logout
+		// remains the user's provider-scoped cleanup control. Inspect the raw row
+		// under the mutation lock so a fence cannot make a renewable OAuth entry
+		// undeletable; API-key rows are left untouched.
+		await getOAuthCredentialStore().deleteOAuthCredential(provider);
 	}
 	return { success: true, provider };
 }
