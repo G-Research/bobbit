@@ -2550,6 +2550,23 @@ export class SessionManager {
 		throw new Error(`Cannot resolve store for session ${id}: no projectId and no test store`);
 	}
 
+	/**
+	 * Resolve a store already owned by a live ProjectContext for shutdown.
+	 * Shutdown must not lazily recreate a context after project removal just to
+	 * persist a session that is being discarded with that project.
+	 */
+	private resolveExistingStoreForShutdown(session: Pick<SessionInfo, "id" | "projectId">): SessionStore | null {
+		if (this.projectContextManager) {
+			for (const ctx of this.projectContextManager.all()) {
+				if (session.projectId ? ctx.project.id === session.projectId : ctx.sessionStore.get(session.id)) {
+					return ctx.sessionStore;
+				}
+			}
+			return null;
+		}
+		return this._testStore;
+	}
+
 	/** Resolve the correct SessionStore for any session by ID (in-memory or persisted). Returns null if not found. */
 	private resolveStoreForId(id: string): SessionStore | null {
 		// Try in-memory first (fast path)
@@ -12711,10 +12728,13 @@ export class SessionManager {
 			// and we write it here to handle the case where shutdown() races
 			// with a pending lifecycle event that hasn't flushed to disk yet.
 			const needsRestartRedrive = sessionNeedsRestartRedrive(session);
-			this.resolveStoreForSession(id).update(id, {
-				wasStreaming: needsRestartRedrive,
-				streamingStartedAt: needsRestartRedrive ? (session.streamingStartedAt ?? this.clock.now()) : undefined,
-			});
+			const store = this.resolveExistingStoreForShutdown(session);
+			if (store) {
+				store.update(id, {
+					wasStreaming: needsRestartRedrive,
+					streamingStartedAt: needsRestartRedrive ? (session.streamingStartedAt ?? this.clock.now()) : undefined,
+				});
+			}
 
 			// Cancel any pending transient/provider-backoff auto-retry so the
 			// timer doesn't fire after the agent has been stopped. Clients are
