@@ -196,7 +196,7 @@ describe("AtomicCredentialStore", () => {
 		}
 	});
 
-	it("keeps a held mutation locked across a reload beyond Pi's 10-second stale deadline", async () => {
+	it("keeps a held mutation locked across a reload beyond Pi's 30-second stale deadline", async () => {
 		vi.useFakeTimers();
 		try {
 			const first = new AtomicCredentialStore(authPath);
@@ -213,11 +213,11 @@ describe("AtomicCredentialStore", () => {
 			});
 			await heldMutationStarted;
 
-			// A fresh store represents a gateway reload. After 10 seconds Pi's
-			// proper-lockfile consumer may reclaim any lock that has not heartbeated.
-			await vi.advanceTimersByTimeAsync(10_001);
+			// A fresh store represents a gateway reload. Pi heartbeats every
+			// 15 seconds and may reclaim only after its 30-second stale lease.
+			await vi.advanceTimersByTimeAsync(30_001);
 			const lockAgeMs = Date.now() - statSync(`${authPath}.lock`).mtimeMs;
-			assert.ok(lockAgeMs < 10_000, "the lock heartbeat must remain fresh for Pi's 10-second stale threshold");
+			assert.ok(lockAgeMs <= 15_001, "the lock heartbeat must follow Pi's 15-second interval");
 			let reloadedMutationEntered = false;
 			const reloadedMutation = new AtomicCredentialStore(authPath).modify("anthropic", async () => {
 				reloadedMutationEntered = true;
@@ -241,7 +241,7 @@ describe("AtomicCredentialStore", () => {
 		await store.modify("anthropic", async () => credential());
 		const lockPath = `${authPath}.lock`;
 		mkdirSync(lockPath, { mode: 0o700 });
-		utimesSync(lockPath, new Date(Date.now() - 10_001), new Date(Date.now() - 10_001));
+		utimesSync(lockPath, new Date(Date.now() - 30_001), new Date(Date.now() - 30_001));
 
 		let replacement: { dev: number; ino: number } | undefined;
 		let replacementSurvived = false;
@@ -279,7 +279,7 @@ describe("AtomicCredentialStore", () => {
 		await store.modify("anthropic", async () => credential());
 		const lockPath = `${authPath}.lock`;
 		mkdirSync(lockPath, { mode: 0o700 });
-		utimesSync(lockPath, new Date(Date.now() - 10_001), new Date(Date.now() - 10_001));
+		utimesSync(lockPath, new Date(Date.now() - 30_001), new Date(Date.now() - 30_001));
 		const owner = statSync(lockPath);
 
 		let renewalApplied = false;
