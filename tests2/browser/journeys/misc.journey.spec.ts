@@ -14,13 +14,9 @@ import fs from "node:fs";
 import path from "node:path";
 
 test.describe("Journey: Notification Policy", () => {
-	test("app renders without notification errors", async ({ page }) => {
+	test("app renders without notification errors and settings route is reachable", async ({ page }) => {
 		await openApp(page);
 		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
-	});
-
-	test("settings route reachable for notification config", async ({ page }) => {
-		await openApp(page);
 		await page.evaluate(() => { window.location.hash = "#/settings/system/general"; });
 		await page.waitForFunction(() => window.location.hash.includes("settings"), null, { timeout: 20_000 });
 		await expect(page.locator("body")).toBeVisible({ timeout: 20_000 });
@@ -87,16 +83,14 @@ test.describe("Journey: Notification Policy", () => {
 });
 
 test.describe("Journey: Review Commenting", () => {
-	test("app shell stable for review commenting scenario", async ({ page }) => {
-		await openApp(page);
-		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
-	});
-
 	test("REVIEW_OPEN trigger shows a Review tab in the side panel", async ({ page }) => {
 		const sessionId = await createSession();
-		await waitForSessionStatus(sessionId, "idle");
 		try {
-			await openApp(page);
+			await Promise.all([
+				openApp(page),
+				waitForSessionStatus(sessionId, "idle"),
+			]);
+			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 			const doneMessages = page.getByText("Done. Used review_open tool.", { exact: true });
@@ -112,9 +106,11 @@ test.describe("Journey: Review Commenting", () => {
 
 	test("Review tab click shows review-document with mock content", async ({ page }) => {
 		const sessionId = await createSession();
-		await waitForSessionStatus(sessionId, "idle");
 		try {
-			await openApp(page);
+			await Promise.all([
+				openApp(page),
+				waitForSessionStatus(sessionId, "idle"),
+			]);
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 			const doneMessages = page.getByText("Done. Used review_open tool.", { exact: true });
@@ -138,9 +134,11 @@ test.describe("Journey: Review Commenting", () => {
 	test("Approve in the review pane posts feedback to chat and closes the Review tab", async ({ page }) => {
 		test.setTimeout(90_000);
 		const sessionId = await createSession();
-		await waitForSessionStatus(sessionId, "idle");
 		try {
-			await openApp(page);
+			await Promise.all([
+				openApp(page),
+				waitForSessionStatus(sessionId, "idle"),
+			]);
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 			const doneMessages = page.getByText("Done. Used review_open tool.", { exact: true });
@@ -169,9 +167,11 @@ test.describe("Journey: Image Attachment", () => {
 	test("attached image renders a tile in the composer and in the sent message", async ({ page }) => {
 		test.setTimeout(90_000);
 		const sessionId = await createSession();
-		await waitForSessionStatus(sessionId, "idle");
 		try {
-			await openApp(page);
+			await Promise.all([
+				openApp(page),
+				waitForSessionStatus(sessionId, "idle"),
+			]);
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 			await page.locator('message-editor input[type="file"]').setInputFiles({
@@ -190,24 +190,14 @@ test.describe("Journey: Image Attachment", () => {
 });
 
 test.describe("Journey: Preview Artifacts", () => {
-	test("session route loads for preview artifact context", async ({ page }) => {
-		const sessionId = await createSession();
-		await waitForSessionStatus(sessionId, "idle");
-		try {
-			await openApp(page);
-			await navigateToHash(page, `#/session/${sessionId}`);
-			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
-		} finally {
-			await deleteSession(sessionId);
-		}
-	});
-
 	test("preview mount via API reaches client state and iframe renders", async ({ page }) => {
 		test.setTimeout(90_000);
 		const sessionId = await createSession();
-		await waitForSessionStatus(sessionId, "idle");
 		try {
-			await openApp(page);
+			await Promise.all([
+				openApp(page),
+				waitForSessionStatus(sessionId, "idle"),
+			]);
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 			const patchResp = await apiFetch(`/api/sessions/${sessionId}`, {
@@ -263,18 +253,6 @@ test.describe("Journey: Preview Artifacts", () => {
 });
 
 test.describe("Journey: Compaction", () => {
-	test("session loads for compaction scenario", async ({ page }) => {
-		const sessionId = await createSession();
-		await waitForSessionStatus(sessionId, "idle");
-		try {
-			await openApp(page);
-			await navigateToHash(page, `#/session/${sessionId}`);
-			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
-		} finally {
-			await deleteSession(sessionId);
-		}
-	});
-
 	// Ported from compaction-persistence.spec.ts (audit: misc GAP / BR53): a
 	// seeded compaction sidecar splices a rich summary row into the snapshot; the
 	// renderer must show the card (data-state complete) and it must survive reload.
@@ -319,9 +297,11 @@ test.describe("Journey: Footer Working Directory", () => {
 		await page.setViewportSize({ width: 1440, height: 900 });
 		const project = await defaultProject();
 		const sessionId = await createSession({ cwd: project.rootPath, projectId: project.id });
-		await waitForSessionStatus(sessionId, "idle");
 		try {
-			await openApp(page);
+			await Promise.all([
+				openApp(page),
+				waitForSessionStatus(sessionId, "idle"),
+			]);
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 
@@ -352,9 +332,11 @@ test.describe("Journey: Prompt Stats", () => {
 	test("stats bar shows model name, context %, and cost after a response", async ({ page }) => {
 		test.setTimeout(90_000);
 		const sessionId = await createSession();
-		await waitForSessionStatus(sessionId, "idle");
 		try {
-			await openApp(page);
+			await Promise.all([
+				openApp(page),
+				waitForSessionStatus(sessionId, "idle"),
+			]);
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 			await sendMessage(page, "Full stats test");
@@ -374,16 +356,14 @@ test.describe("Journey: Prompt Stats", () => {
 });
 
 test.describe("Journey: Cost Tracking", () => {
-	test("app loads without cost tracking errors", async ({ page }) => {
-		await openApp(page);
-		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
-	});
-
 	test("send message → cost display appears after agent response", async ({ page }) => {
 		const sessionId = await createSession();
-		await waitForSessionStatus(sessionId, "idle");
 		try {
-			await openApp(page);
+			await Promise.all([
+				openApp(page),
+				waitForSessionStatus(sessionId, "idle"),
+			]);
+			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
 			await navigateToHash(page, `#/session/${sessionId}`);
 			const editor = page.locator("message-editor textarea").first();
 			await expect(editor).toBeVisible({ timeout: 15_000 });
@@ -412,11 +392,6 @@ test.describe("Journey: Cost Tracking", () => {
 });
 
 test.describe("Journey: Workflow Editor", () => {
-	test("app shell stable for workflow editor flow", async ({ page }) => {
-		await openApp(page);
-		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
-	});
-
 	// Ported from workflow-editor.spec.ts (audit: misc GAP / BR46): the workflow
 	// editor's verify-step type control must expose its testid AND list all four
 	// step types (command/llm-review/agent-qa/human-signoff). PR #644 regressed the
@@ -439,6 +414,7 @@ test.describe("Journey: Workflow Editor", () => {
 		expect(res.status).toBe(201);
 		try {
 			await openApp(page);
+			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
 			await navigateToHash(page, `#/settings/${projectId}/workflows`);
 			const tab = page.locator("[data-testid='workflows-tab']").first();
 			await expect(tab).toBeVisible({ timeout: 15_000 });
@@ -499,9 +475,11 @@ test.describe("Journey: Workflow Editor", () => {
 test.describe("Journey: Dynamic Panels", () => {
 	test("session route renders for dynamic panel scenario", async ({ page }) => {
 		const sessionId = await createSession();
-		await waitForSessionStatus(sessionId, "idle");
 		try {
-			await openApp(page);
+			await Promise.all([
+				openApp(page),
+				waitForSessionStatus(sessionId, "idle"),
+			]);
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 		} finally {
@@ -603,9 +581,11 @@ test.describe("Journey: API Error Modal", () => {
 test.describe("Journey: Auto-Retry Banner", () => {
 	test("auto_retry_pending renders the banner with reason/attempt/delay", async ({ page }) => {
 		const sessionId = await createSession();
-		await waitForSessionStatus(sessionId, "idle");
 		try {
-			await openApp(page);
+			await Promise.all([
+				openApp(page),
+				waitForSessionStatus(sessionId, "idle"),
+			]);
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 
@@ -655,9 +635,11 @@ test.describe("Journey: Goal Proposal Roles Tab", () => {
 test.describe("Journey: Footer Image Model", () => {
 	test("footer shows the resolved image-model id (default gpt-image-2)", async ({ page }) => {
 		const sessionId = await createSession();
-		await waitForSessionStatus(sessionId, "idle");
 		try {
-			await openApp(page);
+			await Promise.all([
+				openApp(page),
+				waitForSessionStatus(sessionId, "idle"),
+			]);
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 			const footer = page.locator("[data-testid='footer-image-model-id']").first();
