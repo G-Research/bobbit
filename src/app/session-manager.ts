@@ -969,9 +969,8 @@ export function deleteProjectDraft(sessionId: string): void { projectDraft.delet
 
 export async function authenticateGateway(url: string, token: string): Promise<void> {
 	const candidate = normalizeGatewayBaseUrl(url);
-	// Browser-default same-origin credentials keep reverse-proxy cookies working
-	// without requiring credentialed CORS from an explicit remote gateway.
 	const healthRes = await fetch(gatewayUrl(gatewayRoute("/api/health"), candidate), {
+		credentials: "include",
 		headers: gatewayAuthorizationHeaders(token),
 	});
 	if (!healthRes.ok) {
