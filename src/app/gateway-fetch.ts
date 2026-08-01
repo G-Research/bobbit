@@ -16,7 +16,7 @@ export const LOCALHOST_TOKEN = "localhost";
 
 const INVALID_SAVED_GATEWAY_WARNING = "Invalid saved gateway URL; using this Bobbit deployment instead.";
 const STORAGE_WARNING = "Connected, but the gateway connection could not be saved for the next reload.";
-const NATIVE_TRANSPORT_WARNING = "Preview live updates and embedded previews require the Bobbit UI and gateway to use the same scheme and hostname. Serve the UI from the gateway origin or through a same-host reverse proxy.";
+const NATIVE_TRANSPORT_WARNING = "Preview live updates and embedded previews require the Bobbit UI and gateway to use the same origin (scheme, hostname, and port). Serve the UI from the gateway origin or route the gateway through a same-origin reverse proxy.";
 
 export type InvalidGatewayBaseUrlCode =
 	| "EMPTY"
@@ -272,8 +272,7 @@ export function gatewayNativeTransportSupport(explicitBase?: string): GatewayNat
 	} catch {
 		return { supported: false, message: NATIVE_TRANSPORT_WARNING };
 	}
-	const supported = gateway.protocol === current.location.protocol
-		&& gateway.hostname.toLowerCase() === current.location.hostname.toLowerCase();
+	const supported = gateway.origin === current.location.origin;
 	return supported ? { supported: true } : { supported: false, message: NATIVE_TRANSPORT_WARNING };
 }
 

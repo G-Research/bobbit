@@ -25,6 +25,7 @@ interface GatewayBoundaryModule {
 	gatewayUrl(route: GatewayRoute, explicitBase?: string): string;
 	gatewayWsUrl(route: GatewayRoute, explicitBase?: string): string;
 	gatewayAuthorizationHeaders(token?: string | null): Record<string, string>;
+	gatewayNativeTransportSupport(explicitBase?: string): { supported: boolean; message?: string };
 	activeGatewayConnection(): Readonly<{ baseUrl: string; token: string }>;
 	gatewayFetch(route: GatewayRoute, init?: RequestInit): Promise<Response>;
 }
@@ -151,6 +152,40 @@ describe("runtime app and gateway URL boundaries", () => {
 		const boundary = await loadBoundary();
 		assert.equal(boundary.gatewayBaseUrl(), "https://host.example/bobbit");
 		assert.deepEqual(boundary.activeGatewayConnection(), { baseUrl: "https://host.example/bobbit", token: "" });
+	});
+
+	it("supports cookie-only native transports for exact-origin mounted gateways", async () => {
+		installBrowser({ origin: "https://host.example:8443", pathname: "/bobbit/", basePath: "/bobbit" });
+		const boundary = await loadBoundary();
+		assert.deepEqual(boundary.gatewayNativeTransportSupport(), { supported: true });
+		assert.deepEqual(
+			boundary.gatewayNativeTransportSupport("https://host.example:8443/team/gateway/"),
+			{ supported: true },
+		);
+	});
+
+	it("rejects cross-port native transports without disabling prefixed bearer REST or WebSockets", async () => {
+		const fetchSpy = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("ok"));
+		const storage = installBrowser({
+			origin: "https://host.example:8443",
+			basePath: "/bobbit",
+			fetch: fetchSpy as unknown as typeof fetch,
+		});
+		storage.setItem("gateway.url", "https://host.example:9443/team/gateway/");
+		storage.setItem("gateway.token", "real-token");
+		const boundary = await loadBoundary();
+
+		const nativeSupport = boundary.gatewayNativeTransportSupport();
+		assert.equal(nativeSupport.supported, false);
+		assert.match(nativeSupport.message ?? "", /same origin \(scheme, hostname, and port\)/);
+		assert.equal(boundary.gatewayUrl(gatewayRoute("/api/health")), "https://host.example:9443/team/gateway/api/health");
+		assert.equal(boundary.gatewayWsUrl(gatewayRoute("/ws/viewer")), "wss://host.example:9443/team/gateway/ws/viewer");
+
+		await boundary.gatewayFetch(gatewayRoute("/api/health"));
+		assert.equal(String(fetchSpy.mock.calls[0]?.[0]), "https://host.example:9443/team/gateway/api/health");
+		const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+		assert.equal(init.credentials, undefined);
+		assert.equal(new Headers(init.headers).get("Authorization"), "Bearer real-token");
 	});
 
 	it("treats a valid stored gateway pathname as authoritative", async () => {
