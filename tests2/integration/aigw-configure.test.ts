@@ -36,6 +36,7 @@ interface RecordedRequest {
 let mockServer: http.Server;
 let mockPort: number;
 let recordedRequests: RecordedRequest[] = [];
+let modelTestResponseStatus: number | undefined;
 
 function resetRecordedRequests(): void {
 	recordedRequests = [];
@@ -76,6 +77,12 @@ test.beforeAll(async () => {
 			headers: req.headers,
 			rawHeaders: [...req.rawHeaders],
 		});
+		if (modelTestResponseStatus !== undefined && req.url === "/v1/chat/completions") {
+			res.writeHead(modelTestResponseStatus, { "Content-Type": "application/json" });
+			// A contradictory numeral in the body proves the server uses Response.status.
+			res.end(JSON.stringify({ error: "provider body said HTTP 401" }));
+			return;
+		}
 		res.writeHead(200, { "Content-Type": "application/json" });
 		res.end(JSON.stringify(MOCK_MODELS));
 	});
@@ -93,6 +100,7 @@ test.afterAll(async () => {
 
 test.afterEach(async () => {
 	await apiFetch("/api/aigw/configure", { method: "DELETE" });
+	modelTestResponseStatus = undefined;
 	resetRecordedRequests();
 });
 
@@ -290,6 +298,35 @@ test.describe("AI Gateway Configure Flow", () => {
 		expect((await response.json()).ok).toBe(true);
 		expect(lastRecordedRequest("/v1/chat/completions")?.method).toBe("POST");
 		expect(lastRecordedRequest("/chat/completions")).toBeUndefined();
+	});
+
+	test("/api/models/test maps direct gateway response statuses without parsing their bodies", async () => {
+		await apiFetch("/api/aigw/configure", {
+			method: "POST",
+			body: JSON.stringify({ url: `http://127.0.0.1:${mockPort}` }),
+		});
+
+		const cases = [
+			{ status: 401, code: "authentication_failed" },
+			{ status: 403, code: "authentication_failed" },
+			{ status: 404, code: "model_not_found" },
+			{ status: 429, code: "rate_limited" },
+		];
+		for (const expected of cases) {
+			modelTestResponseStatus = expected.status;
+			const response = await apiFetch("/api/models/test", {
+				method: "POST",
+				body: JSON.stringify({ pref: "aigw/gresearch/qwen3-coder-480b-a35b" }),
+			});
+			expect(response.status).toBe(expected.status);
+			expect(await response.json()).toMatchObject({
+				ok: false,
+				modelResolved: "gresearch/qwen3-coder-480b-a35b",
+				error: `Gateway returned HTTP ${expected.status}`,
+				status: expected.status,
+				code: expected.code,
+			});
+		}
 	});
 
 	test("/api/models/test probes well-known openai-responses models on their per-provider baseUrl", async () => {

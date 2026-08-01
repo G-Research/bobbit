@@ -549,7 +549,7 @@ import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, findSessionSelectableModel } from "./agent/model-registry.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
-import { modelProbeFailure } from "./agent/model-probe-result.js";
+import { modelProbeFailure, modelProbeFailureFromHttpStatus } from "./agent/model-probe-result.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels } from "./agent/image-generation.js";
 import {
@@ -10203,9 +10203,9 @@ async function handleApiRoute(
 				}
 				const latencyMs = Date.now() - started;
 				if (!resp.ok) {
-					// Provider error bodies can echo credentials. Keep only the HTTP status,
-					// which is enough to distinguish unavailable models, auth, and rate limits.
-					const result = modelProbeFailure(new Error(`Gateway returned HTTP ${resp.status}`), { modelResolved, latencyMs });
+					// Provider error bodies can echo credentials. The response status was observed
+					// directly, so map it without parsing any provider-controlled response text.
+					const result = modelProbeFailureFromHttpStatus(resp.status, { modelResolved, latencyMs });
 					json(result, result.status || 502);
 					return;
 				}

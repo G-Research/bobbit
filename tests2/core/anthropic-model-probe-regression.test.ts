@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 
 import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 import { completeModelText, testModelPreference, type ModelCompletionDependencies } from "../../src/server/agent/model-completion.js";
-import { modelProbeFailure } from "../../src/server/agent/model-probe-result.js";
+import { modelProbeFailure, modelProbeFailureFromHttpStatus } from "../../src/server/agent/model-probe-result.js";
 import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
 import type { ApiModel } from "../../src/server/agent/model-registry.js";
 import { createMemFs } from "../harness/mem-fs.js";
@@ -87,7 +87,8 @@ describe("Anthropic model probe regressions", () => {
 				undefined,
 				{ systemPrompt: "system", userPrompt: "probe", maxTokens: 5, thinkingLevel: "off" },
 				async () => {
-					throw new Error("HTTP request failed. status=401; url=https://api.anthropic.com/v1/messages; body=ignored");
+					// Current Pi Anthropic Messages errors lead with the SDK status.
+					throw new Error("401 Unauthorized: credential rejected");
 				},
 				{ env: {}, providerConfigReader: () => undefined },
 			),
@@ -149,7 +150,7 @@ describe("Anthropic model probe regressions", () => {
 					role: "assistant",
 					content: [],
 					stopReason: "error",
-					errorMessage: "HTTP request failed. status=403; url=https://api.anthropic.com/v1/messages; body=ignored",
+					errorMessage: "403 Forbidden: credential rejected",
 				}) as any,
 				{ env: {}, providerConfigReader: () => undefined },
 			),
@@ -199,17 +200,43 @@ describe("Anthropic model probe regressions", () => {
 		}
 	});
 
-	it("recognizes only trusted Pi envelopes without classifying provider-body numerals", () => {
-		const envelope = new Error("HTTP request failed. status=404; url=https://api.anthropic.com/v1/messages; body=provider said 401");
-		assert.deepEqual({ status: modelProbeFailure(envelope).status, code: modelProbeFailure(envelope).code }, {
+	it("recognizes current and legacy trusted Pi status prefixes without classifying provider-body numerals", () => {
+		const current = new Error("401 Unauthorized: provider body said 404");
+		assert.deepEqual({ status: modelProbeFailure(current).status, code: modelProbeFailure(current).code }, {
+			status: 401,
+			code: "authentication_failed",
+		});
+
+		const legacyEnvelope = new Error("HTTP request failed. status=404; url=https://api.anthropic.com/v1/messages; body=provider said 401");
+		assert.deepEqual({ status: modelProbeFailure(legacyEnvelope).status, code: modelProbeFailure(legacyEnvelope).code }, {
 			status: 404,
 			code: "model_not_found",
 		});
 
-		const untracked = new Error("HTTP request failed. status=500; url=https://api.anthropic.com/v1/messages; body=retry after HTTP 401");
+		const providerBodyOnly = new Error("Provider response: retry after HTTP 401");
 		assert.deepEqual(
-			{ status: modelProbeFailure(untracked).status, code: modelProbeFailure(untracked).code },
+			{ status: modelProbeFailure(providerBodyOnly).status, code: modelProbeFailure(providerBodyOnly).code },
 			{ status: undefined, code: undefined },
 		);
+	});
+
+	it("maps directly observed gateway response statuses without parsing their bodies", () => {
+		const cases: Array<{ status: 401 | 403 | 404 | 429; code: string }> = [
+			{ status: 401, code: "authentication_failed" },
+			{ status: 403, code: "authentication_failed" },
+			{ status: 404, code: "model_not_found" },
+			{ status: 429, code: "rate_limited" },
+		];
+		for (const { status, code } of cases) {
+			const result = modelProbeFailureFromHttpStatus(status, { modelResolved: "gateway-model", latencyMs: 12 });
+			assert.deepEqual(result, {
+				ok: false,
+				modelResolved: "gateway-model",
+				latencyMs: 12,
+				error: `Gateway returned HTTP ${status}`,
+				status,
+				code,
+			});
+		}
 	});
 });
