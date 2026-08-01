@@ -5,13 +5,13 @@ import { execFile as execFileCallback } from "node:child_process";
 import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { promisify } from "node:util";
-import { refreshOAuthToken } from "../auth/oauth.js";
+import { invalidateRejectedAnthropicDirectCredential, refreshOAuthToken } from "../auth/oauth.js";
 import { globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import { getAvailableModels, type ApiModel, type CustomProviderConfig } from "./model-registry.js";
 import { GOOGLE_GEMINI_CLI_PROVIDER, codeAssistComplete } from "./google-code-assist.js";
 import { sanitizeModelErrorText } from "./model-error-sanitizer.js";
-import { modelProbeFailure } from "./model-probe-result.js";
+import { classifyModelProbeError, modelProbeFailure } from "./model-probe-result.js";
 
 interface AuthCredentials {
 	type: string;
@@ -138,33 +138,42 @@ async function resolveProviderHeaders(
 	return Object.keys(headers).length > 0 ? headers : undefined;
 }
 
+interface ResolvedProviderApiKey {
+	apiKey?: string;
+	/** The persisted OAuth access credential actually selected for this request. */
+	oauthAccess?: string;
+}
+
 async function resolveProviderApiKey(
 	prefs: PreferencesStore | undefined,
 	provider: string,
 	commandRunner: ModelConfigCommandRunner,
 	env: NodeJS.ProcessEnv,
 	providerConfigReader: ModelProviderConfigReader,
-): Promise<string | undefined> {
+): Promise<ResolvedProviderApiKey> {
 	const stored = prefs?.get(`providerKey.${provider}`);
-	if (typeof stored === "string" && stored.trim()) return stored.trim();
+	if (typeof stored === "string" && stored.trim()) return { apiKey: stored.trim() };
 
 	for (const key of PROVIDER_ENV_KEYS[provider] || []) {
-		if (env[key]) return env[key];
+		if (env[key]) return { apiKey: env[key] };
 	}
 
 	const auth = authCredentialForProvider(provider);
 	if (auth?.type === "oauth" && provider === "anthropic" && auth.expires && Date.now() > auth.expires) {
 		const refreshed = await refreshOAuthToken();
-		if (refreshed) return refreshed;
+		if (refreshed) return { apiKey: refreshed, oauthAccess: refreshed };
 	}
-	if (auth?.access) return auth.access;
-	if (auth?.key) return auth.key;
+	if (auth?.access) return {
+		apiKey: auth.access,
+		...(auth.type === "oauth" ? { oauthAccess: auth.access } : {}),
+	};
+	if (auth?.key) return { apiKey: auth.key };
 
 	const configs = (prefs?.get("customProviders") as CustomProviderConfig[] | undefined) || [];
 	const custom = configs.find(c => (c.name || c.id) === provider || c.id === provider);
-	if (custom) return custom.apiKey?.trim() || "none";
+	if (custom) return { apiKey: custom.apiKey?.trim() || "none" };
 
-	return resolveConfigValue(providerConfigReader(provider)?.apiKey, commandRunner, env);
+	return { apiKey: await resolveConfigValue(providerConfigReader(provider)?.apiKey, commandRunner, env) };
 }
 
 export function toPiModel(model: ApiModel): Model<Api> {
@@ -234,29 +243,39 @@ export async function completeModelText(
 	const commandRunner = dependencies.commandRunner ?? realModelConfigCommandRunner;
 	const env = dependencies.env ?? process.env;
 	const providerConfigReader = dependencies.providerConfigReader ?? readModelsJsonProvider;
-	const apiKey = await resolveProviderApiKey(prefs, model.provider, commandRunner, env, providerConfigReader);
+	const resolvedApiKey = await resolveProviderApiKey(prefs, model.provider, commandRunner, env, providerConfigReader);
 	const providerHeaders = await resolveProviderHeaders(model.provider, commandRunner, env, providerConfigReader);
 	const options: Record<string, any> = {
 		maxTokens: args.maxTokens ?? 500,
 		timeoutMs: args.timeoutMs ?? 30_000,
 		maxRetries: 0,
 		cacheRetention: "none",
-		...(apiKey ? { apiKey } : {}),
+		...(resolvedApiKey.apiKey ? { apiKey: resolvedApiKey.apiKey } : {}),
 		...(providerHeaders ? { headers: providerHeaders } : {}),
 	};
 	if (args.thinkingLevel && args.thinkingLevel !== "off") {
 		options.reasoning = args.thinkingLevel;
 	}
 
-	const result = await completeFn(toPiModel(model) as any, {
-		systemPrompt: args.systemPrompt,
-		messages: [{ role: "user", content: args.userPrompt, timestamp: Date.now() }],
-	}, options);
+	try {
+		const result = await completeFn(toPiModel(model) as any, {
+			systemPrompt: args.systemPrompt,
+			messages: [{ role: "user", content: args.userPrompt, timestamp: Date.now() }],
+		}, options);
 
-	if ((result as any).stopReason === "error") {
-		throw new Error(sanitizeModelErrorText((result as any).errorMessage || "Model returned an error"));
+		if ((result as any).stopReason === "error") {
+			throw new Error(sanitizeModelErrorText((result as any).errorMessage || "Model returned an error"));
+		}
+		return assistantText(result);
+	} catch (error) {
+		const { status } = classifyModelProbeError(error);
+		if (model.provider === "anthropic" && resolvedApiKey.oauthAccess && (status === 401 || status === 403)) {
+			// The selected access credential is a concurrency guard: a newer login or
+			// refresh must survive an earlier request's definitive rejection.
+			await invalidateRejectedAnthropicDirectCredential(resolvedApiKey.oauthAccess);
+		}
+		throw error;
 	}
-	return assistantText(result);
 }
 
 export async function testProviderApiKey(

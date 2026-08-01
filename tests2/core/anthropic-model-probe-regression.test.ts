@@ -3,9 +3,10 @@ guardProcessEnv();
 
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 
 import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 import { completeModelText, testModelPreference, type ModelCompletionDependencies } from "../../src/server/agent/model-completion.js";
@@ -69,6 +70,91 @@ describe("Anthropic model probe regressions", () => {
 		assert.deepEqual(calls, [{ maxTokens: 5, timeoutMs: 30_000, maxRetries: 0, cacheRetention: "none", apiKey: "test-anthropic-api-key" }]);
 	});
 
+	it("clears only the matching persisted OAuth credential after a definitive primary completion rejection", async () => {
+		const access = randomUUID();
+		useAuth({ type: "oauth", access, refresh: randomUUID(), expires: Date.now() + 60_000 });
+
+		await assert.rejects(
+			() => completeModelText(
+				anthropicModel(),
+				undefined,
+				{ systemPrompt: "system", userPrompt: "probe", maxTokens: 5, thinkingLevel: "off" },
+				async () => {
+					throw new Error("HTTP request failed. status=401; url=https://api.anthropic.com/v1/messages; body=ignored");
+				},
+				{ env: {}, providerConfigReader: () => undefined },
+			),
+		);
+		assert.deepEqual(JSON.parse(readFileSync(path.join(agentDir!, "auth.json"), "utf-8")), {});
+	});
+
+	it("does not remove a newer OAuth credential after an in-flight completion rejection", async () => {
+		const access = randomUUID();
+		const replacement = randomUUID();
+		useAuth({ type: "oauth", access, refresh: randomUUID(), expires: Date.now() + 60_000 });
+
+		await assert.rejects(
+			() => completeModelText(
+				anthropicModel(),
+				undefined,
+				{ systemPrompt: "system", userPrompt: "probe", maxTokens: 5, thinkingLevel: "off" },
+				async () => {
+					writeFileSync(path.join(agentDir!, "auth.json"), JSON.stringify({
+						anthropic: { type: "oauth", access: replacement, refresh: randomUUID(), expires: Date.now() + 60_000 },
+					}));
+					throw new Error("HTTP request failed. status=401; url=https://api.anthropic.com/v1/messages; body=ignored");
+				},
+				{ env: {}, providerConfigReader: () => undefined },
+			),
+		);
+		assert.equal(JSON.parse(readFileSync(path.join(agentDir!, "auth.json"), "utf-8")).anthropic.access, replacement);
+	});
+
+	it("retains API-key authentication after a rejection", async () => {
+		const key = randomUUID();
+		useAuth({ type: "api-key", key });
+
+		await assert.rejects(
+			() => completeModelText(
+				anthropicModel(),
+				undefined,
+				{ systemPrompt: "system", userPrompt: "probe", maxTokens: 5, thinkingLevel: "off" },
+				async () => { throw new Error("HTTP request failed. status=403; url=https://api.anthropic.com/v1/messages; body=ignored"); },
+				{ env: {}, providerConfigReader: () => undefined },
+			),
+		);
+		assert.deepEqual(JSON.parse(readFileSync(path.join(agentDir!, "auth.json"), "utf-8")), {
+			anthropic: { type: "api-key", key },
+		});
+	});
+
+	it("clears the OAuth credential when the model-test completion receives a definitive rejection", async () => {
+		const access = randomUUID();
+		useAuth({ type: "oauth", access, refresh: randomUUID(), expires: Date.now() + 60_000 });
+		const prefs = new PreferencesStore(path.resolve("/memfs/anthropic-model-test"), createMemFs());
+
+		const result = await testModelPreference(prefs, "anthropic/claude-opus-5", (model, selectedPrefs, args) =>
+			completeModelText(
+				model,
+				selectedPrefs,
+				args,
+				async () => ({
+					role: "assistant",
+					content: [],
+					stopReason: "error",
+					errorMessage: "HTTP request failed. status=403; url=https://api.anthropic.com/v1/messages; body=ignored",
+				}) as any,
+				{ env: {}, providerConfigReader: () => undefined },
+			),
+		);
+		assert.deepEqual({ ok: result.ok, status: result.status, code: (result as any).code }, {
+			ok: false,
+			status: 403,
+			code: "authentication_failed",
+		});
+		assert.deepEqual(JSON.parse(readFileSync(path.join(agentDir!, "auth.json"), "utf-8")), {});
+	});
+
 	it("keeps mocked Pi provider-path failures model-specific across the current three-model matrix", async () => {
 		const prefs = new PreferencesStore(path.resolve("/memfs/anthropic-model-probe"), createMemFs());
 		const matrix = [
@@ -81,9 +167,7 @@ describe("Anthropic model probe regressions", () => {
 			let calledModel: string | undefined;
 			const result = await testModelPreference(prefs, `anthropic/${expected.id}`, async (model) => {
 				calledModel = model.id;
-				throw Object.assign(new Error(`mock Anthropic HTTP ${expected.status}`), {
-					response: { status: expected.status },
-				});
+				throw new Error(`HTTP request failed. status=${expected.status}; url=https://api.anthropic.com/v1/messages; body=ignored`);
 			});
 			const probe = result as typeof result & { code?: string };
 			assert.equal(calledModel, expected.id, "Pi completion must receive the exact selected model");
@@ -104,10 +188,7 @@ describe("Anthropic model probe regressions", () => {
 		];
 
 		for (const { status, code } of cases) {
-			const error: Error & { response?: { status: number } } = Object.assign(
-				new Error(`Anthropic HTTP ${status}: Authorization: Bearer ${sentinel}`),
-				{ response: { status } },
-			);
+			const error = new Error(`HTTP request failed. status=${status}; url=https://api.anthropic.com/v1/messages; body=Authorization: Bearer ${sentinel}`);
 			const result = modelProbeFailure(error, { modelResolved: "claude-opus-5", latencyMs: 12 });
 			assert.deepEqual({ status: result.status, code: result.code }, { status, code });
 			assert.equal(result.ok, false);
@@ -117,19 +198,14 @@ describe("Anthropic model probe regressions", () => {
 		}
 	});
 
-	it("recognizes Pi status fields and status-only messages without forwarding their raw provider payload", () => {
-		const nested = Object.assign(new Error("opaque failure"), { cause: { statusCode: 429 } });
-		assert.deepEqual(modelProbeFailure(nested), {
-			ok: false,
-			error: "opaque failure",
-			status: 429,
-			code: "rate_limited",
-		});
-
-		const statusOnly = new Error("request rejected: HTTP 404");
-		assert.deepEqual({ status: modelProbeFailure(statusOnly).status, code: modelProbeFailure(statusOnly).code }, {
+	it("recognizes only trusted Pi envelopes without classifying provider-body numerals", () => {
+		const envelope = new Error("HTTP request failed. status=404; url=https://api.anthropic.com/v1/messages; body=provider said 401");
+		assert.deepEqual({ status: modelProbeFailure(envelope).status, code: modelProbeFailure(envelope).code }, {
 			status: 404,
 			code: "model_not_found",
 		});
+
+		const untracked = new Error("HTTP request failed. status=500; url=https://api.anthropic.com/v1/messages; body=retry after HTTP 401");
+		assert.deepEqual({ status: modelProbeFailure(untracked).status, code: modelProbeFailure(untracked).code }, {});
 	});
 });

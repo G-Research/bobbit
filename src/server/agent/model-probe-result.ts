@@ -33,29 +33,19 @@ function trackedStatus(value: unknown): ModelProbeUpstreamStatus | undefined {
 		: undefined;
 }
 
-function statusFromError(value: unknown, depth = 0): ModelProbeUpstreamStatus | undefined {
-	if (!value || typeof value !== "object" || depth > 1) return undefined;
-	const error = value as {
-		status?: unknown;
-		statusCode?: unknown;
-		response?: { status?: unknown };
-		cause?: unknown;
-	};
-	return trackedStatus(error.status)
-		?? trackedStatus(error.statusCode)
-		?? trackedStatus(error.response?.status)
-		?? statusFromError(error.cause, depth + 1);
+/**
+ * Pi's transport failure is a prefix envelope. Do not scan its body: provider
+ * text is untrusted and may contain unrelated status-looking numerals.
+ */
+function statusFromTrustedPiEnvelope(error: unknown): ModelProbeUpstreamStatus | undefined {
+	if (!(error instanceof Error)) return undefined;
+	const envelope = /^HTTP request failed\. status=(\d+); url=https?:\/\/[^;\s]+; body=/.exec(error.message);
+	return trackedStatus(envelope ? Number(envelope[1]) : undefined);
 }
 
-/**
- * Pi errors vary by provider: some retain a numeric status while others only
- * include it in their message. Preserve the user-actionable upstream classes
- * without passing provider response bodies or credentials through the API.
- */
+/** Preserve Pi's trusted transport envelope without exposing provider bodies. */
 export function classifyModelProbeError(error: unknown): { status?: ModelProbeUpstreamStatus; code?: ModelProbeErrorCode } {
-	const message = error instanceof Error ? error.message : String(error ?? "");
-	const statusFromMessage = /\b(?:HTTP\s+)?(401|403|404|429)\b/.exec(message)?.[1];
-	const status = statusFromError(error) ?? trackedStatus(statusFromMessage ? Number(statusFromMessage) : undefined);
+	const status = statusFromTrustedPiEnvelope(error);
 	return status ? { status, code: ERROR_CODES[status] } : {};
 }
 
