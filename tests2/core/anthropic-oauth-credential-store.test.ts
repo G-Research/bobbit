@@ -193,12 +193,52 @@ describe("AtomicCredentialStore", () => {
 		}
 	});
 
+	it("keeps a held mutation locked across a reload beyond Pi's 10-second stale deadline", async () => {
+		vi.useFakeTimers();
+		try {
+			const first = new AtomicCredentialStore(authPath);
+			await first.modify("anthropic", async () => credential());
+
+			let releaseHeldMutation!: () => void;
+			const held = new Promise<void>((resolve) => { releaseHeldMutation = resolve; });
+			let markHeldMutationStarted!: () => void;
+			const heldMutationStarted = new Promise<void>((resolve) => { markHeldMutationStarted = resolve; });
+			const heldMutation = first.modify("anthropic", async () => {
+				markHeldMutationStarted();
+				await held;
+				return undefined;
+			});
+			await heldMutationStarted;
+
+			// A fresh store represents a gateway reload. After 10 seconds Pi's
+			// proper-lockfile consumer may reclaim any lock that has not heartbeated.
+			await vi.advanceTimersByTimeAsync(10_001);
+			const lockAgeMs = Date.now() - statSync(`${authPath}.lock`).mtimeMs;
+			assert.ok(lockAgeMs < 10_000, "the lock heartbeat must remain fresh for Pi's 10-second stale threshold");
+			let reloadedMutationEntered = false;
+			const reloadedMutation = new AtomicCredentialStore(authPath).modify("anthropic", async () => {
+				reloadedMutationEntered = true;
+				return undefined;
+			});
+			await vi.advanceTimersByTimeAsync(999);
+			assert.equal(reloadedMutationEntered, false, "the reloaded store must not reclaim a held, heartbeating lock");
+
+			releaseHeldMutation();
+			await heldMutation;
+			await vi.runAllTimersAsync();
+			await reloadedMutation;
+			assert.equal(reloadedMutationEntered, true, "the reloaded store must proceed after the original owner releases");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("does not reclaim a replacement installed after stale-lock identity verification", async () => {
 		const store = new AtomicCredentialStore(authPath);
 		await store.modify("anthropic", async () => credential());
 		const lockPath = `${authPath}.lock`;
 		mkdirSync(lockPath, { mode: 0o700 });
-		utimesSync(lockPath, new Date(Date.now() - 31_000), new Date(Date.now() - 31_000));
+		utimesSync(lockPath, new Date(Date.now() - 10_001), new Date(Date.now() - 10_001));
 
 		let replacement: { dev: number; ino: number } | undefined;
 		let replacementSurvived = false;
