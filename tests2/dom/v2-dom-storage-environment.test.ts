@@ -1,6 +1,9 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { PropertySymbol } from "happy-dom";
-import { gatewayFetch } from "../../src/app/gateway-fetch.js";
+import {
+	__resetGatewayConnectionForTests,
+	gatewayFetch,
+} from "../../src/app/gateway-fetch.js";
 import { installDomStorage, restoreDomStorage } from "../harness/v2-dom-environment.js";
 
 type StorageProperty = "localStorage" | "sessionStorage";
@@ -19,7 +22,10 @@ function globalStorageDescriptors(): Record<StorageProperty, PropertyDescriptor 
 	};
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+	__resetGatewayConnectionForTests();
+	vi.unstubAllGlobals();
+});
 
 it("installs the current happy-dom storage when a runtime global is absent", async () => {
 	const configuredDescriptors = globalStorageDescriptors();
@@ -28,16 +34,22 @@ it("installs the current happy-dom storage when a runtime global is absent", asy
 	expect(globalThis.sessionStorage).toBeUndefined();
 
 	const absentDescriptors = installDomStorage();
-	const fetch = vi.fn(async () => new Response("{}", { status: 200 }));
+	const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("{}", { status: 200 }));
 	vi.stubGlobal("fetch", fetch);
 	try {
+		const gatewayBaseUrl = `${window.location.origin}/team/bobbit`;
+		globalThis.localStorage.setItem("gateway.url", gatewayBaseUrl);
 		globalThis.localStorage.setItem("gateway.token", "test-token");
+		__resetGatewayConnectionForTests();
 		await gatewayFetch("/api/storage-regression");
-		expect(fetch).toHaveBeenCalledWith(
-			`${window.location.origin}/api/storage-regression`,
-			expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer test-token" }) }),
-		);
+
+		expect(fetch).toHaveBeenCalledTimes(1);
+		const [requestUrl, requestInit] = fetch.mock.calls[0]!;
+		expect(requestUrl).toBe(`${gatewayBaseUrl}/api/storage-regression`);
+		const requestHeaders = new Headers(requestInit?.headers);
+		expect(requestHeaders.get("Authorization")).toBe("Bearer test-token");
 	} finally {
+		__resetGatewayConnectionForTests();
 		restoreDomStorage(absentDescriptors);
 		restoreGlobalStorage(configuredDescriptors);
 	}

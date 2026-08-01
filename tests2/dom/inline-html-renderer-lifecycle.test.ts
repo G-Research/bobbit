@@ -481,10 +481,10 @@ describe("HTML renderer delegation", () => {
 		expect(fetchMock.mock.calls[0][0]).toContain("https://gateway.test/api/sessions/11111111-1111-4111-8111-111111111111/file-content");
 		expect(fetchMock.mock.calls[0][0]).toContain("snapshotId=edit-call-theme");
 		const requestInit = fetchMock.mock.calls[0][1] as RequestInit;
-		expect(requestInit.credentials).toBe("include");
+		expect(requestInit.credentials).toBeUndefined();
 		const requestHeaders = new Headers(requestInit.headers);
 		expect(requestHeaders.get("Authorization")).toBe("Bearer test-token");
-		expect(requestHeaders.get("Content-Type")).toBeNull();
+		expect(requestHeaders.get("Content-Type")).toBe("application/json");
 
 		const container = document.createElement("div");
 		document.body.appendChild(container);

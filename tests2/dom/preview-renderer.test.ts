@@ -10,6 +10,10 @@ __syncBeforeAll(() => __syncCE());
 // "file:"`, so the happy-dom URL is set to file:// in beforeAll — exactly what the
 // legacy file:// fixture provided.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	__resetGatewayConnectionForTests,
+	commitGatewayConnection,
+} from "../../src/app/gateway-fetch.js";
 
 let PreviewOpenRenderer: typeof import("../../src/ui/tools/renderers/PreviewRenderer.js").PreviewOpenRenderer;
 let render: typeof import("lit").render;
@@ -176,7 +180,6 @@ async function waitForText(re: RegExp, timeout = 3000): Promise<void> {
 
 beforeAll(async () => {
 	(window as any).happyDOM?.setURL?.("file:///test.html");
-	localStorage.setItem("gateway.url", "http://localhost");
 	await import("../../src/app/session-manager.js");
 	await import("../../src/ui/components/Messages.js");
 	({ PreviewOpenRenderer } = await import("../../src/ui/tools/renderers/PreviewRenderer.js"));
@@ -187,6 +190,9 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
+	localStorage.clear();
+	__resetGatewayConnectionForTests();
+	commitGatewayConnection("http://localhost/team/bobbit", "test-token");
 	fetchCalls = [];
 	responder = undefined;
 	installFetchMock();
@@ -195,6 +201,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	__resetGatewayConnectionForTests();
+	localStorage.clear();
 	vi.unstubAllGlobals();
 	document.body.innerHTML = "";
 });
