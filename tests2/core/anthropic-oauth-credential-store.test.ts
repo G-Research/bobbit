@@ -10,6 +10,7 @@ import {
 	readFileSync,
 	readdirSync,
 	realpathSync,
+	renameSync,
 	rmdirSync,
 	rmSync,
 	statSync,
@@ -25,7 +26,7 @@ import { afterAll, afterEach, beforeEach, describe, it, vi } from "vitest";
 import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 import {
 	AtomicCredentialStore,
-	__setBeforeStaleLockReclaimForTests,
+	__setBeforeStaleLockClaimForTests,
 } from "../../src/server/auth/credential-store.js";
 
 const tmp = mkdtempSync(path.join(tmpdir(), "bobbit-anthropic-credential-store-"));
@@ -82,7 +83,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	__setBeforeStaleLockReclaimForTests(undefined);
+	__setBeforeStaleLockClaimForTests(undefined);
 	globalThis.fetch = realFetch;
 	vi.restoreAllMocks();
 });
@@ -192,7 +193,7 @@ describe("AtomicCredentialStore", () => {
 		}
 	});
 
-	it("does not reclaim a fresh replacement after observing a stale lock", async () => {
+	it("does not reclaim a replacement installed after stale-lock identity verification", async () => {
 		const store = new AtomicCredentialStore(authPath);
 		await store.modify("anthropic", async () => credential());
 		const lockPath = `${authPath}.lock`;
@@ -203,8 +204,12 @@ describe("AtomicCredentialStore", () => {
 		let replacementSurvived = false;
 		let finishInspection!: () => void;
 		const inspected = new Promise<void>((resolve) => { finishInspection = resolve; });
-		__setBeforeStaleLockReclaimForTests((observedLockPath) => {
-			rmdirSync(observedLockPath);
+		__setBeforeStaleLockClaimForTests((observedLockPath) => {
+			// This hook runs after the reclaimer's final identity check, covering
+			// the former check-then-rmdir window exactly. Keep the displaced stale
+			// directory allocated so the fresh replacement has a distinct identity.
+			const displacedPath = `${observedLockPath}.fixture-${randomUUID()}`;
+			renameSync(observedLockPath, displacedPath);
 			mkdirSync(observedLockPath, { mode: 0o700 });
 			const stats = statSync(observedLockPath);
 			replacement = { dev: stats.dev, ino: stats.ino };
@@ -214,6 +219,7 @@ describe("AtomicCredentialStore", () => {
 					replacementSurvived = current.dev === replacement?.dev && current.ino === replacement?.ino;
 					rmdirSync(observedLockPath);
 				} finally {
+					rmdirSync(displacedPath);
 					finishInspection();
 				}
 			}, 20);

@@ -86,17 +86,20 @@ function isSameLockIdentity(expected: LockIdentity, lockPath: string): boolean {
 	}
 }
 
-let beforeStaleLockReclaimForTests: ((lockPath: string) => void) | undefined;
+let beforeStaleLockClaimForTests: ((lockPath: string) => void) | undefined;
 
-/** @internal Deterministically interleave a replacement owner in lock tests. */
-export function __setBeforeStaleLockReclaimForTests(hook: ((lockPath: string) => void) | undefined): void {
-	beforeStaleLockReclaimForTests = hook;
+/** @internal Deterministically interleave a replacement owner after identity verification. */
+export function __setBeforeStaleLockClaimForTests(hook: ((lockPath: string) => void) | undefined): void {
+	beforeStaleLockClaimForTests = hook;
 }
 
 /**
  * Reclaim an unchanged stale lock only. A stale observation alone is not
  * ownership: another process can release the stale directory and acquire a
- * fresh lock at the same pathname before we remove it.
+ * fresh lock at the same pathname before we remove it. Rename the visible
+ * directory to a private claim before deleting it, then validate the claimed
+ * directory's identity. This makes the destructive rmdir target immutable:
+ * a replacement at lockPath can never be removed by this recovery attempt.
  */
 function reclaimStaleAuthFileLock(lockPath: string): boolean {
 	let observed: LockIdentity;
@@ -108,10 +111,32 @@ function reclaimStaleAuthFileLock(lockPath: string): boolean {
 		return false;
 	}
 
-	beforeStaleLockReclaimForTests?.(lockPath);
 	if (!isSameLockIdentity(observed, lockPath)) return false;
+	beforeStaleLockClaimForTests?.(lockPath);
+
+	const claimPath = `${lockPath}.reclaim-${process.pid}-${randomUUID()}`;
 	try {
-		rmdirSync(lockPath);
+		// rename is atomic within this directory. Once it succeeds, no subsequent
+		// replacement at lockPath can become the directory we remove below.
+		renameSync(lockPath, claimPath);
+	} catch {
+		return false;
+	}
+
+	if (!isSameLockIdentity(observed, claimPath)) {
+		try {
+			// Restore an intervening replacement only while no later owner has
+			// acquired the public pathname. If it has, leave both directories
+			// untouched rather than clobbering that owner.
+			if (!existsSync(lockPath)) renameSync(claimPath, lockPath);
+		} catch {
+			// The claim was no longer exclusively recoverable. Never delete it.
+		}
+		return false;
+	}
+
+	try {
+		rmdirSync(claimPath);
 		return true;
 	} catch {
 		// A concurrent releaser/reclaimer is harmless; retry normally.
