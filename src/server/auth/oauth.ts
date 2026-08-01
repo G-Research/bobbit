@@ -451,6 +451,7 @@ async function restoreCancelledPiFlowCredentials(flow: PendingPiOAuth, credentia
 			flow.previousCredential,
 			flow.credentialGeneration,
 			cancellationGeneration,
+			logoutGeneration(flow.provider) === flow.logoutGeneration,
 		);
 		flow.cleanupFailure = undefined;
 	} catch (error) {
@@ -471,6 +472,7 @@ async function restoreCancelledOAuthCredentials(
 	previousCredential: StoredCredential | undefined,
 	flowCredentialGeneration: number,
 	cancellationGeneration: number,
+	logoutHasNotTombstonedFlow: boolean,
 ): Promise<void> {
 	// Fence the issued access before rollback. If a later auth.json replacement
 	// fails, a restart still refuses the cancelled renewable credential instead
@@ -486,11 +488,12 @@ async function restoreCancelledOAuthCredentials(
 		credentials,
 		previousCredential,
 		(candidate) =>
-			// A logout/rejection preceding the cancellation permits no OAuth
-			// rollback. An API key is distinct user configuration, so it remains
-			// eligible even when a late Pi OAuth result briefly replaced it.
+			// An explicit logout permits no OAuth rollback, including when it
+			// lands after cancellation captured its generation. An API key is
+			// distinct user configuration, so it remains eligible even when a
+			// late Pi OAuth result briefly replaced it.
 			isApiKeyCredential(candidate)
-			|| (flowCredentialGeneration === cancellationGeneration),
+			|| (logoutHasNotTombstonedFlow && flowCredentialGeneration === cancellationGeneration),
 	);
 }
 
