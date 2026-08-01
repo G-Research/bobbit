@@ -3017,34 +3017,45 @@ export class SessionManager {
 		// empty ANTHROPIC_OAUTH_TOKEN entry opts in to one current, non-renewable
 		// auth.json entry. Project credentials win and never trigger host refresh.
 		const secretsStore = projectContext?.secretsStore ?? null;
-		const sandboxTokenEntries = projectConfigStore?.getSandboxTokens() ?? [];
-		const sandboxAuthPolicy = resolveSandboxAgentAuthPolicy(sandboxTokenEntries);
-		const explicitProjectAnthropicCredential = hasExplicitSandboxAnthropicCredential(
-			sandboxTokenEntries,
-			secretsStore?.getAll(),
-		);
-		const includeAnthropicAuth = !explicitProjectAnthropicCredential
-			&& sandboxTokenPolicyAllowsAnthropicAuth(sandboxTokenEntries);
-		const anthropicOAuthCurrent = includeAnthropicAuth
-			&& await refreshSandboxAnthropicOAuthCredential();
+		await withSandboxAgentAuthFileLock(projectId, async () => {
+			const readSandboxAuthPolicy = () => {
+				const entries = projectConfigStore.getSandboxTokens();
+				const credentials = resolveSandboxTokens(
+					this.preferencesStore,
+					projectConfigStore,
+					secretsStore,
+					this.commandRunner,
+					{ allowStoredAnthropicOAuth: false },
+				);
+				const explicitAnthropicCredential = hasExplicitSandboxAnthropicCredential(entries, secretsStore?.getAll());
+				const hasSandboxAnthropicCredential = !!(
+					credentials.ANTHROPIC_API_KEY || credentials.ANTHROPIC_OAUTH_TOKEN
+				);
+				return {
+					credentials,
+					sandboxAuthPolicy: resolveSandboxAgentAuthPolicy(entries),
+					includeAnthropicAuth: !explicitAnthropicCredential
+						&& !hasSandboxAnthropicCredential
+						&& sandboxTokenPolicyAllowsAnthropicAuth(entries),
+				};
+			};
 
-		// Host OAuth crosses the boundary only through the sanitized auth.json
-		// entry below. This excludes its renewable refresh token and avoids a
-		// second raw-token environment handoff; explicit project credentials still
-		// retain their existing sandboxCredentials precedence.
-		bridgeOptions.sandboxCredentials = resolveSandboxTokens(
-			this.preferencesStore,
-			projectConfigStore,
-			secretsStore,
-			this.commandRunner,
-			{ allowStoredAnthropicOAuth: false },
-		);
-		ensureSandboxAgentAuthFile({
-			prefs: this.preferencesStore,
-			includeCodexAuth: sandboxAuthPolicy.includeCodexAuth,
-			includeAnthropicAuth: anthropicOAuthCurrent,
-			includeGoogleAuth: sandboxAuthPolicy.includeGoogleAuth,
-			scope: opts?.projectId,
+			let policy = readSandboxAuthPolicy();
+			const anthropicOAuthCurrent = policy.includeAnthropicAuth
+				&& await refreshSandboxAnthropicOAuthCredential();
+
+			// Refresh is asynchronous, so the user may have configured an explicit
+			// project key while it was in flight. Re-read policy and credentials under
+			// this project's write lock before changing its shared auth.json.
+			policy = readSandboxAuthPolicy();
+			bridgeOptions.sandboxCredentials = policy.credentials;
+			ensureSandboxAgentAuthFile({
+				prefs: this.preferencesStore,
+				includeCodexAuth: policy.sandboxAuthPolicy.includeCodexAuth,
+				includeAnthropicAuth: anthropicOAuthCurrent && policy.includeAnthropicAuth,
+				includeGoogleAuth: policy.sandboxAuthPolicy.includeGoogleAuth,
+				scope: projectId,
+			});
 		});
 
 		return true;
@@ -12787,7 +12798,7 @@ export class SessionManager {
 
 // ── Sandbox credential auto-resolution ─────────────────────────────
 
-import { ensureSandboxAgentAuthFile, fallbackProviderAllowlistFromPrefs, hasExplicitSandboxAnthropicCredential, mergeHostAgentProviderEnv, refreshSandboxAnthropicOAuthCredential, resolveHostTokenValue, resolveSandboxAgentAuthPolicy, sandboxTokenPolicyAllowsAnthropicAuth, type HostTokenResolutionOptions } from "./host-tokens.js";
+import { ensureSandboxAgentAuthFile, fallbackProviderAllowlistFromPrefs, hasExplicitSandboxAnthropicCredential, mergeHostAgentProviderEnv, refreshSandboxAnthropicOAuthCredential, resolveHostTokenValue, resolveSandboxAgentAuthPolicy, sandboxTokenPolicyAllowsAnthropicAuth, withSandboxAgentAuthFileLock, type HostTokenResolutionOptions } from "./host-tokens.js";
 
 /**
  * Map of auth.json provider keys → env vars that pi-coding-agent checks.

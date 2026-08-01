@@ -20,6 +20,7 @@ import {
 const originalBobbitAgentDir = process.env.BOBBIT_AGENT_DIR;
 const originalBobbitDir = process.env.BOBBIT_DIR;
 const originalBobbitSecretsDir = process.env.BOBBIT_SECRETS_DIR;
+const originalAnthropicApiKey = process.env.ANTHROPIC_API_KEY;
 let root: string | undefined;
 let agentDir: string | undefined;
 
@@ -53,6 +54,8 @@ afterEach(() => {
 	else process.env.BOBBIT_DIR = originalBobbitDir;
 	if (originalBobbitSecretsDir === undefined) delete process.env.BOBBIT_SECRETS_DIR;
 	else process.env.BOBBIT_SECRETS_DIR = originalBobbitSecretsDir;
+	if (originalAnthropicApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+	else process.env.ANTHROPIC_API_KEY = originalAnthropicApiKey;
 	resetAgentDirStateForTests();
 });
 
@@ -159,6 +162,78 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 		assert.equal(await manager.applySandboxWiring(bridgeOptions, "session-test", { projectId: "project-test" }), true);
 		assert.equal(refreshRequest.mock.calls.length, 0, "project credentials must suppress host OAuth refresh");
 		assert.deepEqual(bridgeOptions.sandboxCredentials, { ANTHROPIC_API_KEY: "project-provided-key" });
+		assert.deepEqual(JSON.parse(readFileSync(sandboxAgentAuthPath("project-test"), "utf-8")), {});
+	});
+
+	it("serializes handoffs and rechecks policy after a host refresh", async () => {
+		const now = 1_700_000_000_000;
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		useHostAuth({ type: "oauth", access: "expired-access", refresh: "refresh-metadata", expires: now - 1 });
+		let entries: Array<{ key: string; enabled: boolean; value?: string }> = [
+			{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true },
+		];
+		let resolveRefresh!: (response: Response) => void;
+		let refreshStarted!: () => void;
+		const refreshStartedPromise = new Promise<void>((resolve) => { refreshStarted = resolve; });
+		vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+			refreshStarted();
+			return await new Promise<Response>((resolve) => { resolveRefresh = resolve; });
+		});
+		const manager: any = new SessionManager();
+		manager.projectContextManager = null;
+		manager.projectConfigStore = {
+			get: (key: string) => key === "sandbox" ? "docker" : undefined,
+			getSandboxTokens: () => entries,
+		};
+		manager.sandboxTokenStore = null;
+		manager.sandboxManager = {
+			ensureForProject: async () => {},
+			get: () => ({ getContainerId: async () => "container-test" }),
+		};
+		const firstOptions: any = { cwd: "/workspace", env: {} };
+		const secondOptions: any = { cwd: "/workspace", env: {} };
+
+		const first = manager.applySandboxWiring(firstOptions, "session-one", { projectId: "project-test" });
+		await refreshStartedPromise;
+		entries = [{ key: "ANTHROPIC_API_KEY", enabled: true, value: "project-provided-key" }];
+		const second = manager.applySandboxWiring(secondOptions, "session-two", { projectId: "project-test" });
+		let secondSettled = false;
+		void second.then(() => { secondSettled = true; });
+		await Promise.resolve();
+		assert.equal(secondSettled, false, "a second handoff must wait for the pending shared auth-file decision");
+
+		resolveRefresh(new Response(JSON.stringify({
+			access_token: "rotated-access",
+			refresh_token: "rotated-refresh",
+			expires_in: 3_600,
+		}), { status: 200, headers: { "Content-Type": "application/json" } }));
+		await Promise.all([first, second]);
+
+		assert.deepEqual(firstOptions.sandboxCredentials, { ANTHROPIC_API_KEY: "project-provided-key" });
+		assert.deepEqual(secondOptions.sandboxCredentials, { ANTHROPIC_API_KEY: "project-provided-key" });
+		assert.deepEqual(JSON.parse(readFileSync(sandboxAgentAuthPath("project-test"), "utf-8")), {});
+	});
+
+	it("prefers a host Anthropic API key over an opted-in stored OAuth credential", async () => {
+		useHostAuth({ type: "oauth", access: "current-host-access", refresh: "refresh-metadata", expires: Date.now() + 60_000 });
+		process.env.ANTHROPIC_API_KEY = "host-api-key";
+		const refreshRequest = vi.spyOn(globalThis, "fetch");
+		const manager: any = new SessionManager();
+		manager.projectContextManager = null;
+		manager.projectConfigStore = {
+			get: (key: string) => key === "sandbox" ? "docker" : undefined,
+			getSandboxTokens: () => [{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true }],
+		};
+		manager.sandboxTokenStore = null;
+		manager.sandboxManager = {
+			ensureForProject: async () => {},
+			get: () => ({ getContainerId: async () => "container-test" }),
+		};
+		const bridgeOptions: any = { cwd: "/workspace", env: {} };
+
+		assert.equal(await manager.applySandboxWiring(bridgeOptions, "session-test", { projectId: "project-test" }), true);
+		assert.equal(refreshRequest.mock.calls.length, 0, "the API key makes host OAuth refresh unnecessary");
+		assert.deepEqual(bridgeOptions.sandboxCredentials, { ANTHROPIC_OAUTH_TOKEN: "host-api-key" });
 		assert.deepEqual(JSON.parse(readFileSync(sandboxAgentAuthPath("project-test"), "utf-8")), {});
 	});
 

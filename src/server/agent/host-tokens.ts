@@ -342,6 +342,28 @@ export function ensureSandboxAgentAuthFile(options?: PreferencesStore | SandboxA
 	return authPath;
 }
 
+// Sessions sharing a project mount the same auth.json. Serialize their complete
+// policy → refresh → write operation so an older opt-in cannot write after a
+// newer explicit project credential decision.
+const sandboxAgentAuthFileLocks = new Map<string, Promise<void>>();
+
+export async function withSandboxAgentAuthFileLock<T>(scope: string | undefined, operation: () => Promise<T>): Promise<T> {
+	const authPath = sandboxAgentAuthPath(scope);
+	const previous = sandboxAgentAuthFileLocks.get(authPath) ?? Promise.resolve();
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	const tail = previous.catch(() => {}).then(() => gate);
+	sandboxAgentAuthFileLocks.set(authPath, tail);
+
+	await previous.catch(() => {});
+	try {
+		return await operation();
+	} finally {
+		release();
+		if (sandboxAgentAuthFileLocks.get(authPath) === tail) sandboxAgentAuthFileLocks.delete(authPath);
+	}
+}
+
 export interface DetectedHostToken {
 	envVar: string;
 	label: string;
