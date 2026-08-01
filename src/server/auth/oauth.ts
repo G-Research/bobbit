@@ -337,12 +337,58 @@ function hasErrorCode(error: unknown, expected: string): boolean {
 	return false;
 }
 
-/** Only an explicit 401 proves the credential itself was rejected; a 403 may be model or resource policy. */
+/** Parse one JSON object without scanning past its closing delimiter into Pi's error stack. */
+function parseJsonObjectPrefix(value: string): Record<string, unknown> | undefined {
+	const start = value.search(/\S/);
+	if (start < 0 || value[start] !== "{") return undefined;
+	let depth = 0;
+	let quoted = false;
+	let escaped = false;
+	for (let index = start; index < value.length; index += 1) {
+		const character = value[index];
+		if (quoted) {
+			if (escaped) escaped = false;
+			else if (character === "\\") escaped = true;
+			else if (character === '"') quoted = false;
+			continue;
+		}
+		if (character === '"') quoted = true;
+		else if (character === "{") depth += 1;
+		else if (character === "}" && --depth === 0) {
+			try {
+				const parsed: unknown = JSON.parse(value.slice(start, index + 1));
+				return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+					? parsed as Record<string, unknown>
+					: undefined;
+			} catch {
+				return undefined;
+			}
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Pi's refresh wrapper includes the canonical token endpoint plus the raw
+ * response body in an Error message. Match only an actual nested Pi envelope,
+ * not a lookalike supplied inside an arbitrary provider response body.
+ */
+function piAnthropicRefreshFailure(error: unknown): { status: number; body: Record<string, unknown> | undefined } | undefined {
+	const message = error instanceof Error ? error.message : "";
+	const envelope = /(?:^|;\s*(?:details|cause)=Error:\s*)HTTP request failed\. status=(\d+); url=https:\/\/platform\.claude\.com\/v1\/oauth\/token; body=/.exec(message);
+	if (!envelope?.[1] || envelope.index === undefined) return undefined;
+	const bodyStart = envelope.index + envelope[0].length;
+	return { status: Number(envelope[1]), body: parseJsonObjectPrefix(message.slice(bodyStart)) };
+}
+
+/**
+ * An OAuth token endpoint 401, or its standard 400 `invalid_grant` response,
+ * proves the renewable credential is terminal. A Messages-resource 403 and
+ * other 400s remain non-terminal because they may be model/resource policy or
+ * a transient request error.
+ */
 function isDefinitiveRefreshFailure(error: unknown): boolean {
-	// Prefer structured transport metadata. Provider response bodies are
-	// untrusted text and can contain arbitrary numerals (including 400/401/403)
-	// during a transient failure; parsing them would incorrectly delete a usable
-	// credential.
+	// Prefer structured transport metadata when it definitively identifies 401.
 	let current: unknown = error;
 	for (let depth = 0; depth < 3 && current; depth += 1) {
 		if (typeof current !== "object" || current === null) break;
@@ -353,16 +399,10 @@ function isDefinitiveRefreshFailure(error: unknown): boolean {
 		current = candidate.cause;
 	}
 
-	// Pi 0.82.1's Anthropic refresh adapter wraps its response as
-	// `HTTP request failed. status=<n>; url=<endpoint>; body=<untrusted>`.
-	// Read only that *first* envelope: a later lookalike can only have arrived
-	// in the provider body and must not become a terminal credential decision.
-	const message = error instanceof Error ? error.message : "";
-	const marker = "HTTP request failed. status=";
-	const start = message.indexOf(marker);
-	if (start < 0) return false;
-	const envelope = /^HTTP request failed\. status=(\d+); url=https:\/\/platform\.claude\.com\/v1\/oauth\/token; body=/.exec(message.slice(start));
-	return envelope !== null && Number(envelope[1]) === 401;
+	const failure = piAnthropicRefreshFailure(error);
+	if (!failure) return false;
+	return failure.status === 401
+		|| (failure.status === 400 && failure.body?.error === "invalid_grant");
 }
 
 // The persisted credential has already been narrowed to Pi's OAuth variant by
@@ -375,7 +415,7 @@ function isIncompleteAnthropicOAuthCredential(credential: unknown): boolean {
 async function invalidateRejectedAnthropicCredential(attempted: OAuthCredential | undefined): Promise<boolean> {
 	// A concurrent login/refresh may have replaced this entry while Pi contacted
 	// the provider. The store compares the exact access value under its file lock,
-	// writes a non-secret durable rejection fence, then removes only that row.
+	// then writes a non-secret durable rejection fence and raw Pi auth tombstone.
 	if (!isCompleteAnthropicOAuthCredential(attempted)) return false;
 	const cleared = await getOAuthCredentialStore().invalidateRejectedOAuthCredential("anthropic", attempted.access, attempted.refresh);
 	if (cleared) invalidateCredentialGeneration("anthropic");
@@ -1099,7 +1139,8 @@ export async function oauthComplete(
 export function oauthStatus(providerInput?: string): { authenticated: boolean; stored?: boolean; refreshable?: boolean; expires?: number; provider: OAuthProviderId; email?: string } {
 	const provider = normalizeProvider(providerInput);
 	// Status intentionally reads the raw snapshot so it can distinguish an absent
-	// credential from a rejected row whose deletion failed after its durable fence.
+	// credential from a rejected OAuth row when a legacy/raw write could not be
+	// replaced by the durable non-secret fence tombstone.
 	const credential = getOAuthCredentialStore().readStoredCredentialSnapshotSync(provider);
 	if (!credential || credential.type !== "oauth") return { authenticated: false, provider };
 	if (provider === "anthropic" && isStoredOAuthCredentialRejected(globalAuthPath(), provider, credential)) {
@@ -1217,7 +1258,7 @@ export async function refreshOAuthToken(
 		if (isDefinitiveRefreshFailure(error)) {
 			try {
 				if (await invalidateRejectedAnthropicCredential(attempted)) {
-					console.warn("[oauth] Anthropic credentials were rejected and have been cleared");
+					console.warn("[oauth] Anthropic credentials were rejected and have been disabled");
 				}
 			} catch (invalidationError) {
 				if (isCredentialLockCompromise(invalidationError)) throw invalidationError;

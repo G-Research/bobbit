@@ -45,6 +45,12 @@ export type StoredCredential = Credential | LegacyApiKeyCredential;
 export type CredentialMutation = Credential | typeof deleteCredential | undefined;
 
 const REJECTED_OAUTH_LEDGER_VERSION = 1;
+// Pi's file-backed auth store treats an unknown stored credential type as owned
+// but unresolvable: it neither derives OAuth auth nor falls back to ambient API
+// keys. Keep this non-secret raw entry when an OAuth credential is terminally
+// rejected, so a separately constructed Pi runtime cannot refresh a raw row
+// that Bobbit's sidecar fence has hidden from this adapter.
+const REJECTED_OAUTH_TOMBSTONE_TYPE = "oauth_rejected";
 // A rejected OAuth access value must be denied immediately even if persisting
 // its sidecar fence fails. The durable fence remains the restart boundary; this
 // narrow in-process record closes the write-failure window without retaining a
@@ -88,6 +94,23 @@ function oauthAccessFingerprint(access: string): string {
 	// Persist only a one-way compare value: this ledger must never become another
 	// bearer-token store or reveal renewable credentials in diagnostics.
 	return createHash("sha256").update(access).digest("hex");
+}
+
+function rejectedOAuthTombstone(access: string): RawAuthData[string] {
+	return {
+		type: REJECTED_OAUTH_TOMBSTONE_TYPE,
+		rejected: oauthAccessFingerprint(access),
+		version: REJECTED_OAUTH_LEDGER_VERSION,
+	};
+}
+
+function isRejectedOAuthTombstone(value: unknown, access?: string): boolean {
+	if (!isRecord(value)
+		|| value.type !== REJECTED_OAUTH_TOMBSTONE_TYPE
+		|| value.version !== REJECTED_OAUTH_LEDGER_VERSION
+		|| typeof value.rejected !== "string"
+		|| !/^[a-f0-9]{64}$/i.test(value.rejected)) return false;
+	return access === undefined || value.rejected === oauthAccessFingerprint(access);
 }
 
 function rejectionKey(authPath: string, providerId: string): string {
@@ -680,10 +703,17 @@ export class AtomicCredentialStore implements CredentialStore {
 		await this.enqueueProvider(providerId, async () => {
 			let changed = false;
 			await this.withLock((data) => {
-				const current = asStoredCredential(data[providerId]);
-				if (!sameStoredCredential(current, expected as StoredCredential)) return { result: undefined };
+				const rawCurrent = data[providerId];
+				const current = asStoredCredential(rawCurrent);
+				// Fencing replaces the raw OAuth row with a non-secret, Pi-unresolvable
+				// tombstone before rollback. Accept only the tombstone for this exact
+				// issued access, never a new flow's fence or credential.
+				if (!sameStoredCredential(current, expected as StoredCredential)
+					&& !isRejectedOAuthTombstone(rawCurrent, expected.type === "oauth" ? expected.access : undefined)) {
+					return { result: undefined };
+				}
 				const remembered = this.rollbackHistory.get(providerId);
-				const candidate = remembered && sameStoredCredential(remembered.after, current)
+				const candidate = remembered && sameStoredCredential(remembered.after, expected as StoredCredential)
 					? remembered.before
 					: fallback;
 				const restore = shouldRestore(candidate) ? candidate : undefined;
@@ -700,7 +730,12 @@ export class AtomicCredentialStore implements CredentialStore {
 		});
 	}
 
-	/** Durably deny an exact OAuth row without replacing it; used before cancellation rollback. */
+	/**
+	 * Durably deny an exact OAuth row before cancellation rollback.
+	 *
+	 * The raw tombstone is intentional: Pi hosts that read auth.json directly do
+	 * not know Bobbit's sidecar fence, and must not refresh the rejected bearer.
+	 */
 	async fenceOAuthCredential(providerId: string, access: string, refresh?: string): Promise<boolean> {
 		if (!access) return false;
 		// Deny the exact attempted bearer before acquiring the lock. The set keeps
@@ -711,7 +746,7 @@ export class AtomicCredentialStore implements CredentialStore {
 			if (!current || current.type !== "oauth" || current.access !== access || (refresh !== undefined && current.refresh !== refresh)) return { result: false };
 			this.persistRejectedOAuthCredential(authPath, providerId, access);
 			assertLock();
-			return { result: true };
+			return { result: true, next: { ...data, [providerId]: rejectedOAuthTombstone(access) } };
 		}));
 		if (fenced) this.didChange();
 		return fenced;
@@ -727,9 +762,10 @@ export class AtomicCredentialStore implements CredentialStore {
 			if (!current || current.type !== "oauth" || current.access !== access || (refresh !== undefined && current.refresh !== refresh)) return { result: false };
 			this.persistRejectedOAuthCredential(authPath, providerId, access);
 			assertLock();
-			const next = { ...data };
-			delete next[providerId];
-			return { result: true, next };
+			// Do not delete this row. A separate Pi host reads raw auth.json and
+			// cannot observe Bobbit's sidecar fence; the tombstone owns this provider
+			// while carrying neither an access nor a renewable refresh credential.
+			return { result: true, next: { ...data, [providerId]: rejectedOAuthTombstone(access) } };
 		}));
 		if (invalidated) {
 			this.rollbackHistory.delete(providerId);
@@ -738,11 +774,11 @@ export class AtomicCredentialStore implements CredentialStore {
 		return invalidated;
 	}
 
-	/** Delete a raw OAuth row, including one hidden by the rejected-credential fence. */
+	/** Delete a raw OAuth row or non-secret rejection tombstone for this provider. */
 	async deleteOAuthCredential(providerId: string): Promise<boolean> {
 		const deleted = await this.enqueueProvider(providerId, async () => this.withLock((data) => {
 			const current = asStoredCredential(data[providerId]);
-			if (current?.type !== "oauth") return { result: false };
+			if (current?.type !== "oauth" && !isRejectedOAuthTombstone(data[providerId])) return { result: false };
 			const next = { ...data };
 			delete next[providerId];
 			return { result: true, next };
