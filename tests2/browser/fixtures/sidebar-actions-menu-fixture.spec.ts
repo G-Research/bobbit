@@ -154,7 +154,7 @@ test("render-time session updates use the mounted active gateway connection", as
 	}).toMatchObject({
 		url: `https://fixture.test/team/bobbit/api/sessions/${ids.session}`,
 		method: "PATCH",
-		credentials: "include",
+		credentials: null,
 		authorization: "Bearer fixture-token",
 	});
 });

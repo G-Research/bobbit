@@ -26,7 +26,7 @@ function expectedGatewayRequest(route: string, method = "GET", body: any = null)
 		url: `${FIXTURE_GATEWAY_BASE_URL}${route}`,
 		method,
 		body,
-		credentials: "include",
+		credentials: null,
 		authorization: `Bearer ${FIXTURE_GATEWAY_TOKEN}`,
 	};
 }

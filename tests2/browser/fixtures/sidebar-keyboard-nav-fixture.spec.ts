@@ -252,7 +252,7 @@ test.describe("Sidebar keyboard navigation lightweight fixture", () => {
 		}).toMatchObject({
 			url: `https://fixture.test/team/bobbit/api/sessions/${sessionId}`,
 			method: "PATCH",
-			credentials: "include",
+			credentials: null,
 			authorization: "Bearer fixture-token",
 		});
 	});

@@ -98,7 +98,7 @@ test.describe("Sidebar filter/search lightweight fixture", () => {
 		}).toMatchObject({
 			url: `https://fixture.test/team/bobbit/api/sessions/${ids.readSession}`,
 			method: "PATCH",
-			credentials: "include",
+			credentials: null,
 			authorization: "Bearer fixture-token",
 		});
 	});
