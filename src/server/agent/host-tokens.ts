@@ -464,11 +464,26 @@ export function mergeHostAgentProviderEnv(existing: Record<string, string> | und
  * fallback. Removing only a rejected row before spawning is safe: it cannot
  * revive OAuth and leaves healthy OAuth/API-key rows untouched.
  */
-export async function recoverAnthropicApiKeyRuntime(env?: Record<string, string>): Promise<void> {
-	if (!nonEmptyString(env?.ANTHROPIC_API_KEY) && !nonEmptyString(process.env.ANTHROPIC_API_KEY)) return;
+export async function recoverAnthropicApiKeyRuntime(
+	env?: Record<string, string>,
+	isAnthropicRuntime = false,
+): Promise<void> {
+	// An explicitly injected key is necessarily for this runtime. Inherited host
+	// environment is broader, so consult it only when this direct Pi process is
+	// actually starting an Anthropic model. Do not make unrelated provider
+	// startup contend on, or repair, the Anthropic credential store.
+	const hasApiKey = nonEmptyString(env?.ANTHROPIC_API_KEY)
+		|| (isAnthropicRuntime && nonEmptyString(process.env.ANTHROPIC_API_KEY));
+	if (!hasApiKey) return;
 	const authPath = globalAuthPath();
 	if (!fs.existsSync(authPath)) return;
-	await new AtomicCredentialStore(authPath).deleteRejectedOAuthCredential("anthropic");
+	try {
+		await new AtomicCredentialStore(authPath).deleteRejectedOAuthCredential("anthropic");
+	} catch {
+		// This is opportunistic startup repair, not an OAuth mutation. A corrupt or
+		// contended store must not prevent an unrelated agent from starting with
+		// its explicit API key. OAuth writers still surface lock-compromise errors.
+	}
 }
 
 /**

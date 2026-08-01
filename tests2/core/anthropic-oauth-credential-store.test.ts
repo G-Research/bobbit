@@ -196,7 +196,7 @@ describe("AtomicCredentialStore", () => {
 		}
 	});
 
-	it("keeps a held mutation locked across a reload beyond Pi's 30-second stale deadline", async () => {
+	it("heartbeats a Bobbit-held lock before Pi sync can reclaim it and beyond Pi async stale recovery", async () => {
 		vi.useFakeTimers();
 		try {
 			const first = new AtomicCredentialStore(authPath);
@@ -213,11 +213,18 @@ describe("AtomicCredentialStore", () => {
 			});
 			await heldMutationStarted;
 
-			// A fresh store represents a gateway reload. Pi heartbeats every
-			// 15 seconds and may reclaim only after its 30-second stale lease.
-			await vi.advanceTimersByTimeAsync(30_001);
-			const lockAgeMs = Date.now() - statSync(`${authPath}.lock`).mtimeMs;
-			assert.ok(lockAgeMs <= 15_001, "the lock heartbeat must follow Pi's 15-second interval");
+			// This is the reverse-direction race: Pi's synchronous proper-lockfile
+			// reader can observe Bobbit's shared lock with its 10-second default.
+			// Bobbit must refresh before that reader may treat the lock as stale.
+			await vi.advanceTimersByTimeAsync(10_001);
+			let lockAgeMs = Date.now() - statSync(`${authPath}.lock`).mtimeMs;
+			assert.ok(lockAgeMs <= 5_001, "the Bobbit heartbeat must stay within Pi's 10-second synchronous stale deadline");
+
+			// Bobbit's own stale recovery remains aligned with Pi's async 30-second
+			// holder lease, so a reloaded gateway also leaves this owner intact.
+			await vi.advanceTimersByTimeAsync(20_000);
+			lockAgeMs = Date.now() - statSync(`${authPath}.lock`).mtimeMs;
+			assert.ok(lockAgeMs <= 5_001, "the Bobbit heartbeat must continue through Pi's async stale deadline");
 			let reloadedMutationEntered = false;
 			const reloadedMutation = new AtomicCredentialStore(authPath).modify("anthropic", async () => {
 				reloadedMutationEntered = true;
@@ -236,16 +243,16 @@ describe("AtomicCredentialStore", () => {
 		}
 	});
 
-	it("does not reclaim a Pi-owned lock between 10 seconds and its first 15-second heartbeat", async () => {
+	it("does not reclaim a Pi async lock before its 30-second stale deadline", async () => {
 		vi.useFakeTimers();
 		try {
 			const store = new AtomicCredentialStore(authPath);
 			await store.modify("anthropic", async () => credential());
 			const lockPath = `${realpathSync(authPath)}.lock`;
 			mkdirSync(lockPath, { mode: 0o700 });
-			// Pi's first proper-lockfile heartbeat is not due until 15 seconds.
-			// Set an externally-owned lease to 12 seconds old without a wall-clock wait:
-			// a regressed 10-second Bobbit stale timeout would reclaim it immediately.
+			// Set an externally-owned async Pi lease to 12 seconds old without a
+			// wall-clock wait. Bobbit retains Pi's 30-second stale timeout rather
+			// than treating synchronous proper-lockfile's shorter default as stale.
 			const externalLeaseTime = new Date(Date.now() - 12_000);
 			utimesSync(lockPath, externalLeaseTime, externalLeaseTime);
 			const externalLock = statSync(lockPath);
@@ -257,8 +264,8 @@ describe("AtomicCredentialStore", () => {
 
 			await vi.advanceTimersByTimeAsync(1_000);
 			const currentLock = statSync(lockPath);
-			assert.equal(currentLock.dev, externalLock.dev, "the external Pi lock must not be reclaimed before its first heartbeat");
-			assert.equal(currentLock.ino, externalLock.ino, "the external Pi lock owner must remain intact before 15 seconds");
+			assert.equal(currentLock.dev, externalLock.dev, "the external Pi lock must not be reclaimed before its async stale deadline");
+			assert.equal(currentLock.ino, externalLock.ino, "the external Pi lock owner must remain intact before 30 seconds");
 			assert.equal(mutationEntered, false, "Bobbit must wait for the externally-owned Pi lock");
 
 			rmdirSync(lockPath);

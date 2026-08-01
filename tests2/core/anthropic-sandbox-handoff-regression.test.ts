@@ -13,6 +13,7 @@ import {
 	buildSandboxAgentAuthJson,
 	detectHostTokens,
 	refreshSandboxAnthropicOAuthCredential,
+	recoverAnthropicApiKeyRuntime,
 	resolveHostTokenValue,
 	sandboxAgentAuthPath,
 	sandboxTokenPolicyAllowsAnthropicAuth,
@@ -233,6 +234,22 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 		assert.deepEqual(firstOptions.sandboxCredentials, { ANTHROPIC_API_KEY: "project-provided-key" });
 		assert.deepEqual(secondOptions.sandboxCredentials, { ANTHROPIC_API_KEY: "project-provided-key" });
 		assert.deepEqual(JSON.parse(readFileSync(sandboxAgentAuthPath("project-test"), "utf-8")), {});
+	});
+
+	it("leaves non-Anthropic startup untouched and makes API-key tombstone recovery best effort", async () => {
+		useHostAuth({ type: "oauth_rejected", rejected: "a".repeat(64), version: 1 });
+		process.env.ANTHROPIC_API_KEY = "test-api-key";
+
+		await recoverAnthropicApiKeyRuntime(undefined, false);
+		assert.equal(JSON.parse(readFileSync(path.join(agentDir!, "auth.json"), "utf-8")).anthropic.type, "oauth_rejected");
+
+		await recoverAnthropicApiKeyRuntime({ ANTHROPIC_API_KEY: "test-api-key" });
+		const recovered = JSON.parse(readFileSync(path.join(agentDir!, "auth.json"), "utf-8"));
+		assert.equal("anthropic" in recovered, false);
+		assert.equal(recovered["openai-codex"].access, "unrelated-codex-access");
+
+		writeFileSync(path.join(agentDir!, "auth.json"), "{ malformed", "utf-8");
+		await assert.doesNotReject(() => recoverAnthropicApiKeyRuntime({ ANTHROPIC_API_KEY: "test-api-key" }));
 	});
 
 	it("prefers a host Anthropic API key over an opted-in stored OAuth credential", async () => {

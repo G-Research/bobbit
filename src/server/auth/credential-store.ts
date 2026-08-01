@@ -21,12 +21,14 @@ import type { Credential, CredentialInfo, CredentialStore } from "@earendil-work
 
 const FILE_MODE = 0o600;
 const DIRECTORY_MODE = 0o700;
-// Pi's FileAuthStorageBackend calls proper-lockfile with `stale: 30_000` and
-// a 15-second heartbeat. This shared lock namespace must match that lease so
-// Bobbit never reclaims a healthy Pi lock before its next heartbeat.
-const PI_LOCK_STALE_MS = 30_000;
-const LOCK_STALE_MS = PI_LOCK_STALE_MS;
-const LOCK_HEARTBEAT_MS = 15_000;
+// Pi's async file store uses a 30-second stale lease, while its synchronous
+// proper-lockfile path retains the 10-second default. Keep Bobbit's stale
+// recovery compatible with the longer async lease, but heartbeat more often
+// than the shortest consumer can reclaim our shared lock directory.
+const PI_ASYNC_LOCK_STALE_MS = 30_000;
+const PI_SYNC_LOCK_STALE_MS = 10_000;
+const LOCK_STALE_MS = PI_ASYNC_LOCK_STALE_MS;
+const LOCK_HEARTBEAT_MS = Math.floor(PI_SYNC_LOCK_STALE_MS / 2);
 const LOCK_RETRIES = 10;
 const LOCK_MIN_RETRY_MS = 100;
 const LOCK_MAX_RETRY_MS = 10_000;

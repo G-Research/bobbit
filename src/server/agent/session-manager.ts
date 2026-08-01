@@ -4901,7 +4901,7 @@ export class SessionManager {
 			model: bridgeOptions.initialModel,
 			providers: fallbackProviderAllowlistFromPrefs(this.preferencesStore),
 		});
-		await recoverAnthropicApiKeyRuntime(bridgeOptions.env);
+		await recoverAnthropicApiKeyRuntime(bridgeOptions.env, provider === "anthropic");
 	}
 
 	private safeDispatchError(session: SessionInfo, reason: string): Error {

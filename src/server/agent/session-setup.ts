@@ -58,7 +58,7 @@ import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } f
 import { TOOLS_DIR } from "./tool-manager.js";
 import { profile, profileAsync, recordElapsed } from "./profiling.js";
 import { truncateLargeToolContent } from "./truncate-large-content.js";
-import { fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv, recoverAnthropicApiKeyRuntime } from "./host-tokens.js";
+import { fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv, providerFromModel, recoverAnthropicApiKeyRuntime } from "./host-tokens.js";
 import { sanitizeModelErrorForLog, sanitizeModelErrorText } from "./model-error-sanitizer.js";
 
 export interface PiExtensionDiagnostic {
@@ -1090,7 +1090,10 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	const __t0 = performance.now();
 	// Step 1-5: resolve all configuration
 	resolveBridgeOptions(plan, ctx);
-	if (!plan.sandboxed) await recoverAnthropicApiKeyRuntime(plan.bridgeOptions.env);
+	if (!plan.sandboxed) await recoverAnthropicApiKeyRuntime(
+		plan.bridgeOptions.env,
+		providerFromModel(plan.bridgeOptions.initialModel) === "anthropic",
+	);
 	resolveGoalExtensions(plan, ctx);
 	resolveTools(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
@@ -1330,7 +1333,10 @@ export async function executeWorktreeAsync(
 
 	// Run remaining pipeline steps on the worktree CWD
 	resolveBridgeOptions(plan, ctx);
-	if (!plan.sandboxed) await recoverAnthropicApiKeyRuntime(plan.bridgeOptions.env);
+	if (!plan.sandboxed) await recoverAnthropicApiKeyRuntime(
+		plan.bridgeOptions.env,
+		providerFromModel(plan.bridgeOptions.initialModel) === "anthropic",
+	);
 	resolveGoalExtensions(plan, ctx);
 	resolveTools(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
