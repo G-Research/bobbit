@@ -182,11 +182,12 @@ test.describe("Anthropic OAuth lifecycle routes", () => {
 			const started = await startResponse.json() as { flowId: string; url: string };
 			activeFlows.add(started.flowId);
 
-			const complete = await api("/api/oauth/complete", {
-				method: "POST",
-				body: JSON.stringify({ flowId: started.flowId, provider: "anthropic", code: callbackFor(started) }),
-			});
-			expect(await complete.json()).toEqual({ success: true });
+			// Drive Pi's real loopback callback instead of Bobbit's completion route.
+			// `/complete` consumes the finished flow, leaving a later cancel as a
+			// no-op; a browser callback leaves the completed credential addressable
+			// until the caller confirms it, which is the lifecycle being exercised.
+			const callback = await fetch(callbackFor(started));
+			expect(callback.ok).toBe(true);
 
 			const rollback = vi.spyOn(AtomicCredentialStore.prototype, "rollbackCredentialIfCurrent")
 				.mockRejectedValueOnce(new Error(cancellationFailure));
@@ -196,6 +197,7 @@ test.describe("Anthropic OAuth lifecycle routes", () => {
 					body: JSON.stringify({ flowId: started.flowId, provider: "anthropic" }),
 				});
 				expect(failedCancel.status).toBe(503);
+				expect(rollback).toHaveBeenCalledOnce();
 				expect(await failedCancel.json()).toEqual({
 					error: "OAuth cancellation did not complete. Retry cancellation before starting another sign-in.",
 					code: "OAUTH_CANCEL_RETRY_REQUIRED",
