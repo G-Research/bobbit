@@ -84,8 +84,12 @@ interface PendingPiOAuth {
 	previousCredential?: StoredCredential;
 	/** Credential returned by this flow, used to remove/restore a late cancellation precisely. */
 	issuedCredential?: OAuthCredential;
-	/** Logout or definitive invalidation observed since this flow began. */
+	/** Version of the persisted provider row, used only to prevent rollback resurrection. */
 	credentialGeneration: number;
+	/** Explicit logout tombstone captured when this flow began. */
+	logoutGeneration: number;
+	/** A rollback/store failure must be reported to the cancelling caller and retried. */
+	cleanupFailure?: unknown;
 	/** Idempotent settlement for cancel requests that must wait for Pi's lease release. */
 	cancelSettlement?: Promise<void>;
 	error?: string;
@@ -106,10 +110,12 @@ type PendingOAuth = PendingPiOAuth | PendingGoogleOAuth;
 
 // In-memory store for pending OAuth flows, keyed by Bobbit-owned flow IDs.
 const pendingFlows = new Map<string, PendingOAuth>();
-// A cancellation may finish after a provider has written its credential. Keep
-// a per-provider tombstone generation so that it can discard its own result
-// without resurrecting a credential deliberately removed by logout/rejection.
+// A cancellation may finish after a provider has written its credential. Track
+// persisted-row invalidation separately from explicit logout: both prevent a
+// rollback from restoring an old rejected row, but only logout fences an
+// independently started reauthentication flow.
 const credentialGenerations = new Map<OAuthProviderId, number>();
+const logoutGenerations = new Map<OAuthProviderId, number>();
 
 function credentialGeneration(provider: OAuthProviderId): number {
 	return credentialGenerations.get(provider) ?? 0;
@@ -117,6 +123,14 @@ function credentialGeneration(provider: OAuthProviderId): number {
 
 function invalidateCredentialGeneration(provider: OAuthProviderId): void {
 	credentialGenerations.set(provider, credentialGeneration(provider) + 1);
+}
+
+function logoutGeneration(provider: OAuthProviderId): number {
+	return logoutGenerations.get(provider) ?? 0;
+}
+
+function invalidateLogoutGeneration(provider: OAuthProviderId): void {
+	logoutGenerations.set(provider, logoutGeneration(provider) + 1);
 }
 
 const FLOW_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -238,12 +252,7 @@ function cancelPiFlow(flowId: string, flow: PendingPiOAuth, error: Error): Promi
 		// A callback can finish between UI polls. Treat an explicit cancellation as
 		// cancellation nonetheless: undo only the row issued by this exact flow.
 		flow.cancelSettlement = flow.issuedCredential
-			? restoreCancelledOAuthCredentials(
-				flow.provider,
-				flow.issuedCredential,
-				flow.previousCredential,
-				flow.credentialGeneration,
-			)
+			? restoreCancelledPiFlowCredentials(flow, flow.issuedCredential)
 			: Promise.resolve();
 	} else if (!flow.codeSubmitted && !flow.holdUntilLoginSettlesOnCancel) {
 		if (pendingFlows.get(flowId) === flow) pendingFlows.delete(flowId);
@@ -252,15 +261,27 @@ function cancelPiFlow(flowId: string, flow: PendingPiOAuth, error: Error): Promi
 	} else {
 		// Pi's settlement includes the cancellation guard/credential cleanup in
 		// loginPromise, then releases its callback lease in its finally handler.
-		flow.cancelSettlement = flow.loginPromise.then(() => undefined, () => undefined);
+		// Suppress only expected aborts: a rollback failure means cleanup did not
+		// complete and must reject the route so the caller can retry it.
+		flow.cancelSettlement = flow.loginPromise.then(
+			() => undefined,
+			() => {
+				if (flow.cleanupFailure !== undefined) throw flow.cleanupFailure;
+			},
+		);
 	}
+	const settlement = flow.cancelSettlement!;
 	const removeFlow = () => {
 		if (pendingFlows.get(flowId) === flow) pendingFlows.delete(flowId);
 	};
-	// Supply both handlers: detached cancellation cleanup must not surface an
-	// unhandled rejection if credential persistence itself fails.
-	void flow.cancelSettlement.then(removeFlow, removeFlow);
-	return flow.cancelSettlement;
+	// Detached cleanup still needs a rejection handler, but a failed rollback is
+	// not a successful cancellation: retain the flow and clear the cached failed
+	// settlement so a caller can retry cleanup instead of reporting success while
+	// a renewable credential may remain.
+	void settlement.then(removeFlow, () => {
+		if (flow.cancelSettlement === settlement) flow.cancelSettlement = undefined;
+	});
+	return settlement;
 }
 
 function cleanupExpiredFlows(): void {
@@ -388,9 +409,24 @@ async function storeOAuthCredentials(
 	await getOAuthCredentialStore().modify(provider, async () => shouldStore() ? credentials : undefined);
 }
 
-/** A logout/rejection after flow start makes its eventual credential terminal. */
+/** Only explicit logout (or user cancellation) terminals an in-flight login. */
 function isTerminalPiFlow(flow: PendingPiOAuth): boolean {
-	return flow.cancelled || credentialGeneration(flow.provider) !== flow.credentialGeneration;
+	return flow.cancelled || logoutGeneration(flow.provider) !== flow.logoutGeneration;
+}
+
+async function restoreCancelledPiFlowCredentials(flow: PendingPiOAuth, credentials: OAuthCredential): Promise<void> {
+	try {
+		await restoreCancelledOAuthCredentials(
+			flow.provider,
+			credentials,
+			flow.previousCredential,
+			flow.credentialGeneration,
+		);
+		flow.cleanupFailure = undefined;
+	} catch (error) {
+		flow.cleanupFailure = error;
+		throw error;
+	}
 }
 
 /**
@@ -544,6 +580,7 @@ async function oauthStartPi(
 		holdUntilLoginSettlesOnCancel: provider === "anthropic" && !persistReturnedCredential,
 		previousCredential: previousCredential ? { ...previousCredential } : undefined,
 		credentialGeneration: credentialGeneration(provider),
+		logoutGeneration: logoutGeneration(provider),
 	};
 	pendingFlows.set(flowId, flow);
 
@@ -599,9 +636,9 @@ async function oauthStartPi(
 			flow.issuedCredential = { ...credential };
 			if (isTerminalPiFlow(flow)) {
 				// Pi-backed Anthropic models can persist before resolving; injected
-				// Models persist below. A logout/rejection must delete only this exact
-				// late result, never restoring a credential that logout removed.
-				await restoreCancelledOAuthCredentials(provider, credential, flow.previousCredential, flow.credentialGeneration);
+				// Models persist below. A terminal flow must delete only this exact
+				// late result, never restoring a credential removed by logout/rejection.
+				await restoreCancelledPiFlowCredentials(flow, credential);
 				throw new Error("OAuth flow cancelled");
 			}
 			// Gateway-backed Pi Models persists Anthropic itself. Injected test
@@ -610,7 +647,7 @@ async function oauthStartPi(
 			// while this flow is waiting for the credential-store lock.
 			if (persistReturnedCredential) await storeOAuthCredentials(provider, credential, () => !isTerminalPiFlow(flow));
 			if (isTerminalPiFlow(flow)) {
-				await restoreCancelledOAuthCredentials(provider, credential, flow.previousCredential, flow.credentialGeneration);
+				await restoreCancelledPiFlowCredentials(flow, credential);
 				throw new Error("OAuth flow cancelled");
 			}
 			flow.completed = true;
@@ -965,7 +1002,9 @@ export async function oauthComplete(
 		pendingFlows.delete(flowId);
 		return { success: true };
 	} catch (error) {
-		pendingFlows.delete(flowId);
+		// A cancellation cleanup failure leaves the exact issued row in place.
+		// Keep this flow addressable so the cancel route can retry its rollback.
+		if (flow.cleanupFailure === undefined) pendingFlows.delete(flowId);
 		return { success: false, error: sanitizedOAuthFailure(error) };
 	}
 }
@@ -1040,7 +1079,9 @@ export function oauthFlowStatus(
 	}
 	if (flow.error) {
 		if (flow.provider === "google-gemini-cli") closeGoogleFlowServer(flow);
-		pendingFlows.delete(flowId);
+		// Preserve an actionable cleanup failure for oauthCancelAndWait retry;
+		// ordinary failed flows retain their existing one-shot status semantics.
+		if (flow.provider === "google-gemini-cli" || flow.cleanupFailure === undefined) pendingFlows.delete(flowId);
 		return { complete: false, error: flow.error };
 	}
 	return { complete: false };
@@ -1175,11 +1216,12 @@ async function revokeGoogleToken(token: string, fetchImpl: typeof fetch = defaul
  */
 export async function oauthLogout(providerInput?: string, fetchImpl: typeof fetch = defaultFetch): Promise<{ success: boolean; provider: OAuthProviderId }> {
 	const provider = normalizeProvider(providerInput);
-	// Tombstone this provider before deleting its row. An in-flight Pi login can
-	// resolve after the deletion, but its captured generation then makes its own
-	// exact result removable without touching a newer credential or a provider
-	// that was not logged out.
+	// Tombstone this provider before deleting its row. Unlike an exact old-row
+	// rejection, logout is an explicit user decision and must terminally fence
+	// every in-flight login. Both versions advance so late cleanup cannot restore
+	// the deleted row.
 	invalidateCredentialGeneration(provider);
+	invalidateLogoutGeneration(provider);
 	if (provider === "anthropic") {
 		// There is no Anthropic revocation endpoint. Pi's public CredentialStore
 		// deletion is the complete provider-scoped logout operation.

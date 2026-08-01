@@ -14,6 +14,7 @@ import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeEach, describe, it, vi } from "vitest";
 import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
+import { AtomicCredentialStore } from "../../src/server/auth/credential-store.js";
 
 type FakeCallbackHandler = (
 	request: { url?: string },
@@ -57,6 +58,7 @@ const {
 	oauthCancelAndWait,
 	oauthComplete,
 	oauthFlowStatus,
+	invalidateRejectedAnthropicDirectCredential,
 	oauthLogout,
 	oauthStart,
 	stopFlowCleanup,
@@ -614,6 +616,39 @@ describe("Anthropic OAuth Pi browser adapter", () => {
 		activeFlowIds.delete(started.flowId);
 	});
 
+	it("reports a failed cancellation rollback and permits cleanup retry", async () => {
+		const previous = oauthCredential();
+		const issued = oauthCredential();
+		writeFileSync(authPath, JSON.stringify({ anthropic: previous }), "utf8");
+		const models: Pick<Models, "login"> = {
+			login: (async (_providerId: string, _type: string, interaction: AuthInteraction) => {
+				interaction.notify({ type: "auth_url", url: currentAuthorizeUrl() });
+				return issued;
+			}) as Models["login"],
+		};
+		const started = await startAnthropic(models);
+		for (let i = 0; i < 20; i++) await Promise.resolve();
+		const rollback = vi.spyOn(AtomicCredentialStore.prototype, "rollbackCredentialIfCurrent")
+			.mockRejectedValueOnce(new Error("credential rollback unavailable"));
+		try {
+			await assert.rejects(
+				() => oauthCancelAndWait(started.flowId, "anthropic"),
+				/credential rollback unavailable/,
+				"cancellation must not report success when durable cleanup failed",
+			);
+			assert.deepEqual(
+				await oauthCancelAndWait(started.flowId, "anthropic"),
+				{ success: true },
+				"a failed cleanup remains actionable through retry",
+			);
+		} finally {
+			rollback.mockRestore();
+		}
+		const stored = JSON.parse(readFileSync(authPath, "utf8")).anthropic as OAuthCredential;
+		assert.equal(stored.access, previous.access, "successful retry must restore the preceding credential");
+		activeFlowIds.delete(started.flowId);
+	});
+
 	it("restores only its issued credential when cancellation wins after completion but before polling", async () => {
 		const previous = oauthCredential();
 		const issued = oauthCredential();
@@ -662,6 +697,37 @@ describe("Anthropic OAuth Pi browser adapter", () => {
 		assert.deepEqual(await completion, { success: false, error: "OAuth flow cancelled" });
 		const document = existsSync(authPath) ? JSON.parse(readFileSync(authPath, "utf8")) as Record<string, unknown> : {};
 		assert.equal(document.anthropic, undefined, "a logout must not be undone by a late cancelled callback");
+		activeFlowIds.delete(started.flowId);
+	});
+
+	it("allows reauthentication started before an old credential rejection to complete", async () => {
+		const oldCredential = oauthCredential();
+		const renewedCredential = oauthCredential();
+		writeFileSync(authPath, JSON.stringify({ anthropic: oldCredential }), "utf8");
+		let releaseExchange!: () => void;
+		const exchangeBlocked = new Promise<void>((resolve) => { releaseExchange = resolve; });
+		const models: Pick<Models, "login"> = {
+			login: (async (_providerId: string, _type: string, interaction: AuthInteraction) => {
+				interaction.notify({ type: "auth_url", url: currentAuthorizeUrl() });
+				await interaction.prompt({ type: "manual_code", message: "Paste redirect URL" });
+				await exchangeBlocked;
+				return renewedCredential;
+			}) as Models["login"],
+		};
+		const started = await startAnthropic(models);
+		const completion = oauthComplete(started.flowId, randomUUID(), OFFLINE_FETCH);
+		for (let i = 0; i < 20; i++) await Promise.resolve();
+
+		assert.equal(await invalidateRejectedAnthropicDirectCredential(oldCredential.access), true);
+		releaseExchange();
+		assert.deepEqual(
+			await completion,
+			{ success: true },
+			"rejecting the exact old row must not terminally cancel independent reauthentication",
+		);
+		const stored = JSON.parse(readFileSync(authPath, "utf8")).anthropic as OAuthCredential;
+		assert.equal(stored.access, renewedCredential.access);
+		assert.equal(stored.refresh, renewedCredential.refresh);
 		activeFlowIds.delete(started.flowId);
 	});
 
