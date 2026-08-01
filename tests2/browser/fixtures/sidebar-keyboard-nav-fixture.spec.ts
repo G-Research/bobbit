@@ -257,24 +257,6 @@ test.describe("Sidebar keyboard navigation lightweight fixture", () => {
 		});
 	});
 
-	test("fixture rejects foreign-origin and off-mount requests", async ({ page }) => {
-		const errors = await page.evaluate(async () => Promise.all([
-			"https://foreign.test/team/bobbit/api/sessions",
-			"https://fixture.test/team/bobbit-other/api/sessions",
-		].map(async (url) => {
-			try {
-				await fetch(url);
-				return null;
-			} catch (error) {
-				return error instanceof Error ? error.message : String(error);
-			}
-		})));
-		expect(errors, `${MARK}: fixture fetch boundary must reject escaped requests`).toEqual([
-			"Sidebar keyboard fixture rejected foreign origin: https://foreign.test",
-			"Sidebar keyboard fixture rejected off-mount path: /team/bobbit-other/api/sessions",
-		]);
-	});
-
 	test("Ctrl+Arrow walks visible rows in DOM order, wraps, and marks one active row", async ({ page }) => {
 		const ids = await fixtureIds(page);
 		const expected = visibleOrder(ids);

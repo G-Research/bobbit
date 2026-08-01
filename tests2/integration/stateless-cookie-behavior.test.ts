@@ -113,7 +113,7 @@ function expectSignedCookie(response: RawResponse): string {
 	const cookies = bobbitSetCookies(response);
 	expect(cookies, `expected one signed ${COOKIE_NAME} cookie; body=${response.body}`).toHaveLength(1);
 	const value = cookieValue(cookies[0]);
-	expect(value).toMatch(/^v1\.2\.\d+\.\d+\.[A-Za-z0-9_-]{22}(?:\.[A-Za-z0-9_-]{43}){3}$/);
+	expect(value).toMatch(/^v1\.\d+\.\d+\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/);
 	return cookies[0];
 }
 
@@ -370,7 +370,7 @@ describe.sequential("stateless cookie behavior through the real gateway", () => 
 			expect(attributes).toContain("SameSite=Lax");
 			expect(attributes).toContain("Path=/");
 			expect(attributes).toContain("Max-Age=2592000");
-			expect(attributes).not.toContain("Secure");
+			expect(attributes).toContain("Secure");
 
 			const signedPair = cookiePair(setCookie);
 			const cookieOnly = await rawRequest(gateway.baseURL, "/api/sessions", {

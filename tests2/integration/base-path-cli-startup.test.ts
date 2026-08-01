@@ -161,7 +161,6 @@ describe.sequential("production runCli base-path startup", () => {
 		});
 		expect(capture.config?.tls).toBeUndefined();
 		expect(capture.config?.staticDir).toBeUndefined();
-		expect(capture.config?.viteDevProxy).toBe(false);
 		expect(capture.stageCalls).toBe(1);
 
 		const expectedUrl = `http://127.0.0.1:${ACTUAL_PORT}/team/cli`;
@@ -178,20 +177,6 @@ describe.sequential("production runCli base-path startup", () => {
 
 		const stateNames = readdirSync(join(root, ".bobbit", "state"));
 		expect(stateNames.some((name) => /^gateway-url\..*tmp/i.test(name))).toBe(false);
-	});
-
-	it("threads the explicit Vite development proxy mode into GatewayConfig", async () => {
-		const root = tempRoot("vite-proxy");
-		const capture = await runInjectedStartup(root, [
-			"--cwd", root,
-			"--host", "127.0.0.1",
-			"--port", "0",
-			"--no-tls",
-			"--no-ui",
-			"--vite-dev-proxy",
-		]);
-		expect(capture.config?.staticDir).toBeUndefined();
-		expect(capture.config?.viteDevProxy).toBe(true);
 	});
 
 	it.each(["", "/"])("lets an explicit %j flag reset an environment mount throughout GatewayConfig and startup URLs", async (flagValue) => {

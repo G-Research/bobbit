@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, normalize, resolve } from "node:path";
 import type { CommandRunner } from "../../../src/server/gateway-deps.js";
-import { installCommandRunnerInterceptorForRunners } from "./command-runner-dispatcher.js";
+import { installCommandRunnerInterceptor } from "./command-runner-dispatcher.js";
 
 type RepoState = {
 	root: string;
@@ -274,10 +274,11 @@ export class MaintenanceGitModel {
 		throw commandError(args, cwd);
 	}
 
-	install(runners: Iterable<CommandRunner>): RunnerRestore {
+	install(runner: CommandRunner): RunnerRestore {
 		const state = globalState();
+		state.modelInstallCounts.set(this.owner, (state.modelInstallCounts.get(this.owner) ?? 0) + 1);
 		const model = this;
-		const restoreDispatcher = installCommandRunnerInterceptorForRunners(runners, {
+		const restoreDispatcher = installCommandRunnerInterceptor(runner, {
 			label: `maintenance-git-model:${String(this.owner.description ?? "owner")}`,
 			async execFile(file, args, options, next) {
 				if (basename(file).replace(/\.exe$/i, "").toLowerCase() !== "git") return next();
@@ -288,18 +289,15 @@ export class MaintenanceGitModel {
 				return { stdout: model.run(cwd, args), stderr: "" };
 			},
 		});
-		state.modelInstallCounts.set(this.owner, (state.modelInstallCounts.get(this.owner) ?? 0) + 1);
 
 		let restored = false;
 		return () => {
 			if (restored) return;
 			restored = true;
-			try { restoreDispatcher(); }
-			finally {
-				const remaining = (state.modelInstallCounts.get(this.owner) ?? 1) - 1;
-				if (remaining > 0) state.modelInstallCounts.set(this.owner, remaining);
-				else state.modelInstallCounts.delete(this.owner);
-			}
+			restoreDispatcher();
+			const remaining = (state.modelInstallCounts.get(this.owner) ?? 1) - 1;
+			if (remaining > 0) state.modelInstallCounts.set(this.owner, remaining);
+			else state.modelInstallCounts.delete(this.owner);
 		};
 	}
 

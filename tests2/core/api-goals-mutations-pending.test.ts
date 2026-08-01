@@ -26,6 +26,7 @@ import type { ClassifierPlanStep } from "../../src/server/agent/plan-mutation.ts
 
 let memfs: MemFs;
 const stateDir = path.resolve("/memfs/mutations-pending/state");
+const unauthenticatedCookieStore = { verify: () => false };
 
 function makePlanMutationStore(): PlanMutationStore {
 	return new PlanMutationStore(stateDir, { startSweep: false }, memfs);
@@ -73,7 +74,7 @@ async function getPending(goalId: string, store: PlanMutationStore, opts?: { sub
 		verificationHarness: {},
 		teamManager: { getTeamState: () => undefined },
 		sessionManager: {},
-		cookieAuthenticated: false,
+		cookieStore: unauthenticatedCookieStore,
 		requireSubgoalsEnabled: () => opts?.subgoalsEnabled ?? true,
 		getGoalAcrossProjects: () => (goalExists ? goal : undefined),
 		getGoalManagerForGoal: () => ({}),

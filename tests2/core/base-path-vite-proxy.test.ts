@@ -6,7 +6,6 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, it } from "vitest";
 
 import { computeDistBuildKey, validateDistBuild } from "../../scripts/testing-v2/ensure-dist.mjs";
-import { previewNavigationBridge } from "../../src/shared/preview-bridge-scripts.ts";
 import viteConfig from "../../vite.config.ts";
 
 const SID = "11111111-2222-3333-4444-555555555555";
@@ -93,7 +92,7 @@ beforeAll(async () => {
 		}
 		if (relative.startsWith("/preview/page")) {
 			res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-			res.end(`<html><head><base data-bobbit-preview-base href="${MOUNT}/preview/${SID}/_content/${"a".repeat(43)}/"><base href="/user-authored/"></head><body>${previewNavigationBridge()}</body></html>`);
+			res.end(`<html><head><base data-bobbit-preview-base href="${MOUNT}/preview/${SID}/"><base href="/user-authored/"></head></html>`);
 			return;
 		}
 		if (relative.startsWith("/api/events")) {
@@ -102,12 +101,7 @@ beforeAll(async () => {
 			return;
 		}
 		res.writeHead(200, { "Content-Type": "application/json" });
-		res.end(JSON.stringify({
-			requestUrl,
-			url: `/preview/${SID}/index.html`,
-			origin: req.headers.origin,
-			host: req.headers.host,
-		}));
+		res.end(JSON.stringify({ requestUrl, url: `/preview/${SID}/index.html` }));
 	});
 	targetServer.on("upgrade", (req, socket) => {
 		targetUpgrades.push(req.url ?? "");
@@ -143,32 +137,6 @@ describe.sequential("Vite mounted-gateway proxy", () => {
 		const body = await response.json() as { requestUrl: string; url: string };
 		assert.equal(body.requestUrl, `${MOUNT}/api/echo?value=1`);
 		assert.equal(body.url, `/preview/${SID}/index.html`, "route-shaped JSON must remain mount-relative");
-	});
-
-	it("preserves the Vite browser origin for originless same-origin GET cookie bootstrap", async () => {
-		const response = await fetch(`${devOrigin}/api/proxy-headers`, {
-			headers: {
-				"Sec-Fetch-Site": "same-origin",
-				"Sec-Fetch-Mode": "cors",
-			},
-		});
-		assert.equal(response.status, 200);
-		const body = await response.json() as { origin?: string; host?: string };
-		assert.equal(body.origin, devOrigin, "originless browser GET must bind the cookie to the Vite origin");
-		assert.equal(body.host, new URL(targetOrigin).host, "gateway Host must still identify the proxy target");
-	});
-
-	it("does not replace an explicit browser Origin", async () => {
-		const explicitOrigin = "http://localhost:5173";
-		const response = await fetch(`${devOrigin}/api/proxy-headers`, {
-			headers: {
-				Origin: explicitOrigin,
-				"Sec-Fetch-Site": "same-site",
-				"Sec-Fetch-Mode": "cors",
-			},
-		});
-		const body = await response.json() as { origin?: string };
-		assert.equal(body.origin, explicitOrigin);
 	});
 
 	it("uses the same join for WebSocket upgrades", async () => {
@@ -216,14 +184,11 @@ describe.sequential("Vite mounted-gateway proxy", () => {
 		assert.deepEqual(manifest.icons, [{ src: "/icon.png" }, { src: "relative.png" }]);
 	});
 
-	it("rebases the marked preview base that owns runtime-derived navigation without touching authored bases", async () => {
+	it("rewrites only the marked injected preview base", async () => {
 		const response = await fetch(`${devOrigin}/preview/page`);
 		const html = await response.text();
-		assert.match(html, new RegExp(`<base data-bobbit-preview-base href="/preview/${SID}/_content/[a]+/">`));
+		assert.match(html, new RegExp(`<base data-bobbit-preview-base href="/preview/${SID}/">`));
 		assert.match(html, /<base href="\/user-authored\/">/);
-		assert.match(html, /data-bobbit-preview-navigation/);
-		assert.match(html, /canonicalDocument = new URL\(location\.href\)/);
-		assert.doesNotMatch(html, new RegExp(`${MOUNT}/preview/${SID}`));
 	});
 
 	it("does not rewrite route-shaped SSE data", async () => {

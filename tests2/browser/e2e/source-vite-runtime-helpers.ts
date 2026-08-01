@@ -1,7 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
-import http from "node:http";
-import https from "node:https";
 import { dirname, join, resolve } from "node:path";
 
 export interface RunningSourceProcess {
@@ -37,14 +35,6 @@ export interface SourceGatewayOptions {
 	workspaceDir: string;
 	agentPath: string;
 	port: number;
-	/** Gateway bind host. Source Vite uses 127.0.0.1; headless coverage uses a wildcard. */
-	host?: string;
-	/** Use the TLS material installed by writeSourceTlsFixture. */
-	tls?: boolean;
-	/** Explicitly identify this gateway as the target of Vite's development proxy. */
-	viteDevProxy?: boolean;
-	/** Optional deployment mount advertised to and consumed by source Vite. */
-	basePath?: string;
 }
 
 export interface SourceViteOptions {
@@ -52,14 +42,6 @@ export interface SourceViteOptions {
 	tempRoot: string;
 	gatewayUrl: string;
 	port: number;
-	/** Browser-facing hostname. Non-localhost values make Vite serve HTTPS. */
-	publicHost?: string;
-}
-
-export interface SourceTlsFixture {
-	caCert: string;
-	cert: string;
-	key: string;
 }
 
 const SOURCE_VITE_THEME_HTML = `<!doctype html>
@@ -172,37 +154,6 @@ export async function writeSourceViteAgent(filePath: string): Promise<void> {
 	await writeFile(filePath, sourceViteWriteAgentSource(), "utf8");
 }
 
-/** Install one isolated certificate shared by the TLS gateway and source Vite. */
-export async function writeSourceTlsFixture(tempRoot: string, domains: string[]): Promise<SourceTlsFixture> {
-	const { createCA, createCert } = await import("mkcert");
-	const ca = await createCA({
-		organization: "Bobbit Source Vite Test CA",
-		countryCode: "US",
-		state: "Test",
-		locality: "Test",
-		validity: 1,
-	});
-	const leaf = await createCert({
-		ca,
-		domains: [...new Set(domains)],
-		validity: 1,
-	});
-	const tlsDir = join(tempRoot, "secrets", "tls");
-	const fixture = {
-		caCert: join(tlsDir, "ca.crt"),
-		cert: join(tlsDir, "cert.pem"),
-		key: join(tlsDir, "key.pem"),
-	};
-	await mkdir(tlsDir, { recursive: true });
-	await Promise.all([
-		writeFile(fixture.caCert, ca.cert, "utf8"),
-		writeFile(join(tlsDir, "ca.key"), ca.key, "utf8"),
-		writeFile(fixture.cert, leaf.cert, "utf8"),
-		writeFile(fixture.key, leaf.key, "utf8"),
-	]);
-	return fixture;
-}
-
 function isolatedEnvironment(tempRoot: string): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = { ...process.env };
 	for (const key of [
@@ -257,18 +208,15 @@ export function captureSourceProcess(child: ChildProcess, label: string): Runnin
 
 export function startIsolatedSourceGateway(options: SourceGatewayOptions): RunningSourceProcess {
 	const cliPath = resolve(options.repoRoot, "dist", "server", "cli.js");
-	const args = [
+	const child = spawn(process.execPath, [
 		cliPath,
 		"--cwd", options.workspaceDir,
-		"--host", options.host ?? "127.0.0.1",
+		"--host", "127.0.0.1",
 		"--port", String(options.port),
-		options.tls ? "--tls" : "--no-tls",
+		"--no-tls",
 		"--no-ui",
-		...(options.viteDevProxy ? ["--vite-dev-proxy"] : []),
-		...(options.basePath !== undefined ? ["--base-path", options.basePath] : []),
 		"--agent-cli", options.agentPath,
-	];
-	const child = spawn(process.execPath, args, {
+	], {
 		cwd: options.repoRoot,
 		env: isolatedEnvironment(options.tempRoot),
 		windowsHide: true,
@@ -283,7 +231,7 @@ export function startSourceVite(options: SourceViteOptions): RunningSourceProces
 	const env = isolatedEnvironment(options.tempRoot);
 	env.NODE_ENV = "development";
 	env.GATEWAY_URL = options.gatewayUrl;
-	env.VITE_HOST = options.publicHost ?? "localhost";
+	env.VITE_HOST = "localhost";
 	const child = spawn(process.execPath, [
 		viteCli,
 		"--host", "127.0.0.1",
@@ -299,41 +247,15 @@ export function startSourceVite(options: SourceViteOptions): RunningSourceProces
 	return captureSourceProcess(child, "Vite source server");
 }
 
-async function sourceRuntimeRequest(rawUrl: string): Promise<{ status: number; body: string }> {
-	const url = new URL(rawUrl);
-	const client = url.protocol === "https:" ? https : http;
-	return await new Promise((resolveRequest, rejectRequest) => {
-		const request = client.request(url, {
-			method: "GET",
-			...(url.protocol === "https:" ? { rejectUnauthorized: false } : {}),
-		}, (response) => {
-			const chunks: Buffer[] = [];
-			response.on("data", chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-			response.on("end", () => resolveRequest({
-				status: response.statusCode ?? 0,
-				body: Buffer.concat(chunks).toString("utf8"),
-			}));
-		});
-		request.setTimeout(3_000, () => request.destroy(new Error(`request timed out: ${rawUrl}`)));
-		request.on("error", rejectRequest);
-		request.end();
-	});
-}
-
-export async function waitForSourceGateway(
-	baseUrl: string,
-	runtime: RunningSourceProcess,
-	timeoutMs = 120_000,
-	readyStatuses: readonly number[] = [200],
-): Promise<void> {
+export async function waitForSourceGateway(baseUrl: string, runtime: RunningSourceProcess, timeoutMs = 120_000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	let lastError = "not attempted";
 	while (Date.now() < deadline) {
 		if (runtime.child.exitCode !== null) throw processFailure(runtime, `exited ${runtime.child.exitCode} before readiness`);
 		try {
-			const response = await sourceRuntimeRequest(`${baseUrl}/api/health`);
-			if (readyStatuses.includes(response.status)) return;
-			lastError = `HTTP ${response.status}`;
+			const response = await fetch(`${baseUrl}/api/health`);
+			if (response.ok) return;
+			lastError = `${response.status} ${response.statusText}`;
 		} catch (error) {
 			lastError = String(error);
 		}
@@ -348,10 +270,10 @@ export async function waitForSourceVite(baseUrl: string, runtime: RunningSourceP
 	while (Date.now() < deadline) {
 		if (runtime.child.exitCode !== null) throw processFailure(runtime, `exited ${runtime.child.exitCode} before readiness`);
 		try {
-			const response = await sourceRuntimeRequest(`${baseUrl}/`);
-			const hasSourceEntry = response.body.includes('/src/app/main.ts');
-			if (response.status >= 200 && response.status < 300 && hasSourceEntry) return;
-			lastError = `HTTP ${response.status}; sourceEntry=${hasSourceEntry}`;
+			const response = await fetch(`${baseUrl}/`);
+			const body = await response.text();
+			if (response.ok && body.includes('/src/app/main.ts')) return;
+			lastError = `${response.status} ${response.statusText}; sourceEntry=${body.includes('/src/app/main.ts')}`;
 		} catch (error) {
 			lastError = String(error);
 		}

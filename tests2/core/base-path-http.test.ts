@@ -186,7 +186,7 @@ describe("direct preview browser outputs", () => {
 		);
 		const body = Buffer.concat(response.body).toString("utf8");
 		assert.equal(response.statusCode, 200);
-		assert.match(body, new RegExp(`<base data-bobbit-preview-base href="/team/bobbit/preview/${SID}/_content/[^/]+/">`));
+		assert.match(body, new RegExp(`<base data-bobbit-preview-base href="/team/bobbit/preview/${SID}/">`));
 		assert.equal((body.match(/data-bobbit-preview-base/g) ?? []).length, 1);
 	});
 

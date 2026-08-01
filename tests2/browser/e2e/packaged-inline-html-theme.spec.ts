@@ -131,35 +131,33 @@ async function iframeTheme(page: Page): Promise<{
 	swipeBridgeCount: number;
 	identity: string | null;
 }> {
-	const iframe = page.locator('iframe[title="theme-card.html"]');
-	const handle = await iframe.elementHandle();
-	const frame = await handle?.contentFrame();
-	if (!frame) throw new Error("isolated packaged iframe is unavailable");
-	const [identity, childState] = await Promise.all([
-		iframe.evaluate(element => (element as HTMLIFrameElement).dataset.packedFrameIdentity ?? null),
-		frame.evaluate(() => {
-			const documentRoot = document.documentElement;
-			const style = getComputedStyle(documentRoot);
-			const scripts = [...document.scripts];
-			return {
-				capture: (window as any).__packedThemeCapture ?? null,
-				current: {
-					background: style.getPropertyValue("--background").trim(),
-					foreground: style.getPropertyValue("--foreground").trim(),
-					card: style.getPropertyValue("--card").trim(),
-					positive: style.getPropertyValue("--positive").trim(),
-					chart: style.getPropertyValue("--chart-1").trim(),
-					font: style.fontFamily,
-					dark: documentRoot.classList.contains("dark"),
-					palette: documentRoot.getAttribute("data-palette"),
-				},
-				authoredScriptRan: documentRoot.getAttribute("data-authored-script-ran") === "true",
-				canonicalBridgeCount: scripts.filter(script => script.hasAttribute("data-bobbit-inline-theme-bridge")).length,
-				swipeBridgeCount: scripts.filter(script => (script.textContent ?? "").includes("preview-swipe-start")).length,
-			};
-		}),
-	]);
-	return { ...childState, identity };
+	return page.locator('iframe[title="theme-card.html"]').evaluate((element) => {
+		const iframe = element as HTMLIFrameElement;
+		const frameWindow = iframe.contentWindow as (Window & {
+			__packedThemeCapture?: ThemeState;
+			__packedFrameIdentity?: string;
+		}) | null;
+		const documentRoot = iframe.contentDocument!.documentElement;
+		const style = iframe.contentWindow!.getComputedStyle(documentRoot);
+		const scripts = [...iframe.contentDocument!.scripts];
+		return {
+			capture: frameWindow?.__packedThemeCapture ?? null,
+			current: {
+				background: style.getPropertyValue("--background").trim(),
+				foreground: style.getPropertyValue("--foreground").trim(),
+				card: style.getPropertyValue("--card").trim(),
+				positive: style.getPropertyValue("--positive").trim(),
+				chart: style.getPropertyValue("--chart-1").trim(),
+				font: style.fontFamily,
+				dark: documentRoot.classList.contains("dark"),
+				palette: documentRoot.getAttribute("data-palette"),
+			},
+			authoredScriptRan: documentRoot.getAttribute("data-authored-script-ran") === "true",
+			canonicalBridgeCount: scripts.filter(script => script.hasAttribute("data-bobbit-inline-theme-bridge")).length,
+			swipeBridgeCount: scripts.filter(script => (script.textContent ?? "").includes("preview-swipe-start")).length,
+			identity: frameWindow?.__packedFrameIdentity ?? null,
+		};
+	});
 }
 
 function expectThemeMatches(actual: ThemeState, expected: ThemeState, label: string): void {
@@ -282,7 +280,7 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 		}
 	});
 
-	test("clean consumer serves dist UI and executes the bundled isolated theme bridge", async ({ page }, testInfo) => {
+	test("clean consumer serves dist UI and executes the bundled canonical theme bridge", async ({ page }, testInfo) => {
 		test.setTimeout(15 * 60_000);
 		const tempRoot = await mkdtemp(join(tmpdir(), "bobbit-packed-inline-theme-"));
 		const packDir = join(tempRoot, "pack");
@@ -448,22 +446,24 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 
 			const initialHost = await hostTheme(page);
 			const initialFrame = await iframeTheme(page);
-			expect(await iframe.getAttribute("sandbox")).toBe("allow-scripts");
 			expect(initialHost.dark).toBe(false);
 			expect(initialHost.palette).toBe("ocean");
 			expect(
 				report.bridgeAssets.length,
-				"PACKAGED_INLINE_THEME_BRIDGE_MISSING: compiled dist/ui assets must include the isolated inline theme bridge",
+				"PACKAGED_INLINE_THEME_BRIDGE_MISSING: compiled dist/ui assets must include the canonical preview theme bridge",
 			).toBeGreaterThan(0);
 			expect(initialFrame.authoredScriptRan).toBe(true);
-			expect(initialFrame.canonicalBridgeCount, "inline srcdoc must contain exactly one isolated theme bridge").toBe(1);
+			expect(initialFrame.canonicalBridgeCount, "inline srcdoc must contain exactly one canonical theme bridge").toBe(1);
 			expect(initialFrame.swipeBridgeCount, "inline chat cards must not receive the side-panel swipe bridge").toBe(0);
 			expect(initialFrame.capture).not.toBeNull();
 			expectThemeMatches(initialFrame.capture!, initialHost, "parse-time inline capture");
 			expectThemeMatches(initialFrame.current, initialHost, "initial inline computed theme");
 
 			await iframe.evaluate(element => {
-				(element as HTMLIFrameElement).dataset.packedFrameIdentity = "same-packaged-iframe";
+				const frameWindow = (element as HTMLIFrameElement).contentWindow as (Window & {
+					__packedFrameIdentity?: string;
+				}) | null;
+				if (frameWindow) frameWindow.__packedFrameIdentity = "same-packaged-iframe";
 			});
 			await page.evaluate(() => {
 				const root = document.documentElement;

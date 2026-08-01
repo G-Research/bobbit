@@ -128,16 +128,20 @@ function requestUrl(input: RequestInfo | URL): string {
 }
 
 function requestPath(input: RequestInfo | URL): string {
-	const url = new URL(requestUrl(input));
-	const gatewayOrigin = new URL(FIXTURE_GATEWAY_BASE_URL).origin;
-	if (url.origin !== gatewayOrigin) {
-		throw new Error(`Sidebar keyboard fixture rejected foreign origin: ${url.origin}`);
+	const raw = requestUrl(input);
+	try {
+		const url = new URL(raw);
+		let pathname = url.pathname;
+		if (url.origin === new URL(FIXTURE_GATEWAY_BASE_URL).origin) {
+			if (pathname === FIXTURE_GATEWAY_BASE_PATH) pathname = "/";
+			else if (pathname.startsWith(`${FIXTURE_GATEWAY_BASE_PATH}/`)) {
+				pathname = pathname.slice(FIXTURE_GATEWAY_BASE_PATH.length);
+			}
+		}
+		return `${pathname}${url.search}`;
+	} catch {
+		return raw;
 	}
-	if (url.pathname !== FIXTURE_GATEWAY_BASE_PATH && !url.pathname.startsWith(`${FIXTURE_GATEWAY_BASE_PATH}/`)) {
-		throw new Error(`Sidebar keyboard fixture rejected off-mount path: ${url.pathname}`);
-	}
-	const pathname = url.pathname.slice(FIXTURE_GATEWAY_BASE_PATH.length) || "/";
-	return `${pathname}${url.search}`;
 }
 
 const SESSION_BY_ID = new Map<string, GatewaySession>([

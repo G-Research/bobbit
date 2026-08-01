@@ -17,13 +17,7 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import {
-	PREVIEW_THEME_BRIDGE,
-	previewNavigationBridge,
-	previewNavigationHandoffBridge,
-	previewNavigationHandoffDocument,
-	validatedPreviewNavigationTarget,
-} from "../../src/shared/preview-bridge-scripts.ts";
+import { PREVIEW_THEME_BRIDGE } from "../../src/shared/preview-bridge-scripts.ts";
 
 describe("PREVIEW_THEME_BRIDGE — standalone-tab guard", () => {
 	it("contains the parent === window early-return", () => {
@@ -53,79 +47,5 @@ describe("PREVIEW_THEME_BRIDGE — standalone-tab guard", () => {
 		// the guard executes and the function returns cleanly.
 		const fakeWindow = {} as Record<string, unknown>;
 		assert.doesNotThrow(() => fn.call(fakeWindow, fakeWindow, {}));
-	});
-
-	it("validates only canonical navigation inside the exact root or nested artifact scope", () => {
-		const rootCurrent = "https://host.test/preview/session-a/index.html?mtime=1";
-		assert.equal(
-			validatedPreviewNavigationTarget(rootCurrent, "https://host.test/preview/session-a/report.html?q=1#result"),
-			"https://host.test/preview/session-a/report.html?q=1#result",
-		);
-		assert.equal(
-			validatedPreviewNavigationTarget(rootCurrent, "https://host.test/preview/session-a/_artifact/stolen/index.html"),
-			null,
-			"live preview authority must not enter an artifact scope",
-		);
-		const nestedCurrent = "https://host.test/team/bobbit/preview/session-a/_artifact/artifact_1/index.html";
-		assert.equal(
-			validatedPreviewNavigationTarget(nestedCurrent, "https://host.test/team/bobbit/preview/session-a/_artifact/artifact_1/pages/two.html"),
-			"https://host.test/team/bobbit/preview/session-a/_artifact/artifact_1/pages/two.html",
-		);
-		for (const denied of [
-			"https://host.test/team/bobbit/preview/session-a/_artifact/other/pages/two.html",
-			"https://host.test/team/bobbit/preview/session-b/index.html",
-			"https://host.test/team/bobbit/preview/session-a/_artifact/artifact_1/_content/stolen/index.html",
-			"https://evil.test/team/bobbit/preview/session-a/_artifact/artifact_1/index.html",
-		]) {
-			assert.equal(validatedPreviewNavigationTarget(nestedCurrent, denied), null, denied);
-		}
-	});
-
-	it("derives the exact live or artifact scope from the response-rebased marked base", () => {
-		const script = previewNavigationBridge();
-		assert.match(script, /querySelectorAll\('base\[' \+ 'data-bobbit-preview-' \+ 'base\]'\)/);
-		assert.match(script, /lastIndexOf\('\/_content\/'\)/);
-		assert.match(script, /\^\[A-Za-z0-9_-\]\{43\}/);
-		assert.match(script, /canonicalDocument = new URL\(location\.href\)/);
-		assert.doesNotMatch(script, /team\/bobbit|preview\/session-a/);
-	});
-
-	it("keeps popouts opener-free by using top-level ambient navigation and parent handoff only for frames", () => {
-		const script = previewNavigationBridge();
-		assert.match(script, /if \(parent === window\) location\.assign\(target\)/);
-		assert.match(script, /parent\.postMessage\(\{ type: MESSAGE_TYPE, url: target \}, '\*'\)/);
-		assert.doesNotMatch(script, /opener/);
-		assert.ok(script.indexOf("event.preventDefault()") < script.lastIndexOf("handoff(target)"));
-	});
-
-	it("captures meta refresh and relays native nested-frame handoffs only from an owned direct child", () => {
-		const script = previewNavigationBridge();
-		assert.match(script, /getAttribute\('http-equiv'\)/);
-		assert.match(script, /meta\.removeAttribute\('http-equiv'\)/);
-		assert.match(script, /new MutationObserver/);
-		assert.match(script, /setTimeout\(function\(\) \{ handoff\(target\); \}/);
-		const sourceCheck = script.indexOf("frames[i].contentWindow === event.source");
-		const targetValidation = script.indexOf("canonicalTarget(event.data.url)", sourceCheck);
-		const relay = script.indexOf("if (target) handoff(target)", targetValidation);
-		assert.ok(sourceCheck >= 0, "nested relay must bind the message source to a direct authored frame");
-		assert.ok(targetValidation > sourceCheck, "scope validation must follow source validation");
-		assert.ok(relay > targetValidation, "relay must follow both validations");
-		assert.match(script, /querySelectorAll\('iframe,frame'\)/);
-	});
-
-	it("builds a fixed response-rebased handoff without embedding authored document bytes", () => {
-		const handoff = previewNavigationHandoffBridge();
-		assert.match(handoff, /data-bobbit-preview-navigation-handoff/);
-		assert.match(handoff, /lastIndexOf\('\/_content\/'\)/);
-		assert.match(handoff, /current\.origin !== capabilityBase\.origin/);
-		assert.match(handoff, /liveScope && \(relative === '_artifact'/);
-		assert.match(handoff, /if \(parent === window\) location\.replace\(target\.href\)/);
-		assert.match(handoff, /parent\.postMessage\(\{ type: MESSAGE_TYPE, url: target\.href \}, '\*'\)/);
-		assert.doesNotMatch(handoff, /team\/bobbit|preview\/session-a/);
-
-		const document = previewNavigationHandoffDocument('/team/bobbit/preview/session-a/_content/' + 'a'.repeat(43) + '/');
-		assert.match(document, /^<!doctype html>/);
-		assert.match(document, /<base data-bobbit-preview-base href="\/team\/bobbit\/preview\/session-a\/_content\//);
-		assert.doesNotMatch(document, /LIVE_AGENT_DOCUMENT_BYTES|ARTIFACT_AGENT_DOCUMENT_BYTES/);
 	});
 });

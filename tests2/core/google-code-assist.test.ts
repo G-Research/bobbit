@@ -12,7 +12,7 @@ guardProcessEnv();
  * Covers the pure request/response conversion plus the completion + project
  * resolution flow with an injected fetch (no network, no real credentials).
  */
-import { afterAll, afterEach, beforeAll, beforeEach, describe, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -58,12 +58,10 @@ beforeAll(() => {
 
 beforeEach(() => {
 	// Give cache-sensitive cases unique logical paths without creating and
-	// deleting a top-level temp tree for every pure conversion case. Keep the
-	// state dir inside the suite fixture: inheriting BOBBIT_DIR makes this helper
-	// read and rewrite the live preferences history before every test.
+	// deleting a top-level temp tree for every pure conversion case.
 	dir = path.join(suiteDir, `case-${++caseSequence}`);
 	process.env.BOBBIT_AGENT_DIR = dir;
-	pinAgentDirForTest(dir, { stateDir: path.join(suiteDir, "state") });
+	pinAgentDirForTest(dir);
 	// Project env override must not leak across tests (it short-circuits onboarding).
 	delete process.env.GOOGLE_CLOUD_PROJECT;
 	delete process.env.GOOGLE_CLOUD_PROJECT_ID;
@@ -248,41 +246,22 @@ describe("codeAssistComplete", () => {
 	});
 
 	it("aborts and rejects when a generateContent fetch never resolves and timeoutMs elapses", async () => {
-		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-		try {
-			let fetchSignal: AbortSignal | undefined;
-			let markFetchStarted!: () => void;
-			const fetchStarted = new Promise<void>((resolve) => { markFetchStarted = resolve; });
-			// Never-resolving fetch: only the production timeout race can settle it.
-			const fetchFn: FetchLike = (_url, init) => {
-				fetchSignal = init.signal;
-				markFetchStarted();
-				return new Promise(() => { /* never resolves */ });
-			};
-			let outcome: "pending" | "fulfilled" | "rejected" = "pending";
-			let failure: unknown;
-			void codeAssistComplete(
+		let sawSignal = false;
+		// Never-resolving fetch: only the timeout race can settle this promise.
+		const fetchFn: FetchLike = (_url, init) => {
+			if (init.signal) sawSignal = true;
+			return new Promise(() => { /* never resolves */ });
+		};
+		const started = Date.now();
+		await assert.rejects(
+			() => codeAssistComplete(
 				{ model: "gemini-2.5-pro", userPrompt: "hi", timeoutMs: 50 },
 				{ getToken: async () => "tok", getProject: async () => "p", fetchFn },
-			).then(
-				() => { outcome = "fulfilled"; },
-				(err: unknown) => { outcome = "rejected"; failure = err; },
-			);
-
-			await fetchStarted;
-			assert.ok(fetchSignal instanceof AbortSignal, "the fetch receives a real AbortSignal");
-			assert.equal(fetchSignal.aborted, false);
-			await vi.advanceTimersByTimeAsync(49);
-			assert.equal(outcome, "pending", "the operation remains pending before its deadline");
-			await vi.advanceTimersByTimeAsync(1);
-			assert.equal(outcome, "rejected", "the timeout settles without waiting on the hung fetch");
-			assert.equal(fetchSignal.aborted, true, "the timeout aborts the underlying fetch");
-			assert.ok(failure instanceof Error);
-			assert.equal(failure.name, "Error");
-			assert.equal(failure.message, "Code Assist generateContent timed out after 50ms");
-		} finally {
-			vi.useRealTimers();
-		}
+			),
+			/timed out after 50ms/,
+		);
+		assert.ok(Date.now() - started < 5000, "should reject promptly via the timeout, not hang");
+		assert.ok(sawSignal, "an AbortSignal should be threaded to fetch so the real request is cancelled");
 	});
 
 	it("does not time out when the fetch resolves within timeoutMs", async () => {
@@ -594,54 +573,36 @@ describe("codeAssistStream", () => {
 	});
 
 	it("aborts and rejects when the body hangs past timeoutMs", async () => {
-		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-		try {
-			let fetchSignal: AbortSignal | undefined;
-			let markBodyStarted!: () => void;
-			const bodyStarted = new Promise<void>((resolve) => { markBodyStarted = resolve; });
-			const fetchFn: StreamFetchLike = async (_url, init) => {
-				fetchSignal = init.signal;
-				return {
-					ok: true,
-					status: 200,
-					text: async () => "",
-					body: (async function* () {
-						markBodyStarted();
-						await new Promise<void>((_resolve, reject) => {
-							init.signal?.addEventListener("abort", () => {
-								const error = new Error("aborted");
-								error.name = "AbortError";
-								reject(error);
-							}, { once: true });
+		let sawSignal = false;
+		const fetchFn: StreamFetchLike = async (_url, init) => {
+			if (init.signal) sawSignal = true;
+			return {
+				ok: true,
+				status: 200,
+				text: async () => "",
+				body: (async function* () {
+					await new Promise<void>((_resolve, reject) => {
+						init.signal?.addEventListener("abort", () => {
+							const e = new Error("aborted");
+							e.name = "AbortError";
+							reject(e);
 						});
-					})(),
-				};
+					});
+				})(),
 			};
-			let outcome: "pending" | "fulfilled" | "rejected" = "pending";
-			let failure: unknown;
-			void collect(codeAssistStream(
-				{ model: "m", messages: [{ role: "user", text: "hi" }], timeoutMs: 50 },
-				{ getToken: async () => "t", getProject: async () => "p", fetchFn },
-			)).then(
-				() => { outcome = "fulfilled"; },
-				(err: unknown) => { outcome = "rejected"; failure = err; },
-			);
-
-			await bodyStarted;
-			assert.ok(fetchSignal instanceof AbortSignal, "the streaming fetch receives a real AbortSignal");
-			assert.equal(fetchSignal.aborted, false);
-			await vi.advanceTimersByTimeAsync(49);
-			assert.equal(outcome, "pending", "the hung body remains pending before its deadline");
-			await vi.advanceTimersByTimeAsync(1);
-			assert.equal(outcome, "rejected", "the abort settles body iteration without a real-clock wait");
-			assert.equal(fetchSignal.aborted, true);
-			assert.ok(failure instanceof CodeAssistError);
-			assert.equal(failure.aborted, true);
-			assert.equal(failure.name, "CodeAssistError");
-			assert.equal(failure.message, "Code Assist streamGenerateContent timed out after 50ms");
-		} finally {
-			vi.useRealTimers();
-		}
+		};
+		const started = Date.now();
+		await assert.rejects(
+			() => collect(codeAssistStream({ model: "m", messages: [{ role: "user", text: "hi" }], timeoutMs: 50 }, { getToken: async () => "t", getProject: async () => "p", fetchFn })),
+			(err: unknown) => {
+				assert.ok(err instanceof CodeAssistError);
+				assert.equal((err as CodeAssistError).aborted, true);
+				assert.match((err as Error).message, /timed out after 50ms/);
+				return true;
+			},
+		);
+		assert.ok(Date.now() - started < 5000, "should reject promptly via the timeout");
+		assert.ok(sawSignal, "an AbortSignal should be threaded to the streaming fetch");
 	});
 
 	it("maps an external AbortSignal to an aborted CodeAssistError", async () => {

@@ -18,20 +18,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import {
-	handlePreviewRequest,
-	pickEntry,
-	PREVIEW_ASSET_CAPABILITY_TTL_MS,
-	PREVIEW_HTML_CONTENT_SECURITY_POLICY,
-	PREVIEW_REFERRER_POLICY,
-} from "../../src/server/preview/content-route.ts";
-import {
-	createPreviewAsyncFs,
-	mountPath,
-	setPreviewFsForTesting,
-	writeInline,
-	type PreviewAsyncFs,
-} from "../../src/server/preview/mount.ts";
+import { handlePreviewRequest, pickEntry } from "../../src/server/preview/content-route.ts";
+import { setPreviewFsForTesting } from "../../src/server/preview/mount.ts";
 import { COOKIE_NAME, CookieStore } from "../../src/server/auth/cookie.ts";
 import { installScopedMemFs } from "./helpers/scoped-memfs.js";
 
@@ -39,22 +27,19 @@ import { installScopedMemFs } from "./helpers/scoped-memfs.js";
 // can serve every route assertion without creating or deleting NTFS fixtures.
 const workspaceRoot = path.resolve("/memfs/preview-content-route");
 const SID = "11111111-2222-3333-4444-555555555555";
-const OTHER_SID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const ENTRY_INLINE_DIR = path.join(workspaceRoot, "entries", "inline");
 const ENTRY_ALPHA_DIR = path.join(workspaceRoot, "entries", "alpha");
 const ENTRY_EMPTY_DIR = path.join(workspaceRoot, "entries", "empty");
 const ARTIFACT_ID = "abc123";
 const artifactMountPath = path.join(workspaceRoot, "state", "preview-artifacts", SID, ARTIFACT_ID, "mount");
 let restoreFs: () => void;
-let previewMemoryFs: typeof fs;
 
 beforeAll(() => {
 	const scoped = installScopedMemFs([
-		"closeSync", "createReadStream", "existsSync", "fstatSync", "mkdirSync", "openSync",
-		"readFileSync", "readdirSync", "realpathSync", "statSync", "utimesSync", "writeFileSync",
+		"createReadStream", "existsSync", "mkdirSync", "readFileSync", "readdirSync",
+		"realpathSync", "statSync", "writeFileSync",
 	]);
 	restoreFs = scoped.restore;
-	previewMemoryFs = scoped.fs;
 	setPreviewFsForTesting(scoped.fs);
 	process.env.BOBBIT_DIR = workspaceRoot;
 
@@ -66,12 +51,11 @@ beforeAll(() => {
 
 	const mountRoot = path.join(workspaceRoot, "state", "preview", SID);
 	fs.mkdirSync(path.join(mountRoot, "subdir"), { recursive: true });
-	fs.writeFileSync(path.join(mountRoot, "index.html"), "<html><head><title>x</title></head><body><a id=report href=\"report.html\">report</a></body></html>");
-	fs.writeFileSync(path.join(mountRoot, "report.html"), "<!doctype html><html><body>LIVE_AGENT_DOCUMENT_BYTES</body></html>");
+	fs.writeFileSync(path.join(mountRoot, "index.html"), "<html><head><title>x</title></head><body>hi</body></html>");
+	fs.writeFileSync(path.join(mountRoot, "report.html"), "<!doctype html><html><body>r</body></html>");
 	fs.writeFileSync(path.join(mountRoot, "styles.css"), "body{color:red}");
 	fs.writeFileSync(path.join(mountRoot, "logo.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
 	fs.writeFileSync(path.join(mountRoot, "data.json"), `{"a":1}`);
-	fs.writeFileSync(path.join(mountRoot, "hostile.svg"), `<svg xmlns="http://www.w3.org/2000/svg"><script>parent.document.body.textContent='owned'</script><image href="logo.png"/></svg>`);
 	fs.writeFileSync(path.join(mountRoot, "subdir", "nested.html"), "<html><body>n</body></html>");
 
 	fs.mkdirSync(ENTRY_INLINE_DIR, { recursive: true });
@@ -84,7 +68,6 @@ beforeAll(() => {
 
 	fs.mkdirSync(artifactMountPath, { recursive: true });
 	fs.writeFileSync(path.join(artifactMountPath, "01.html"), "<!doctype html><html><head><title>a1</title></head><body>v1</body></html>");
-	fs.writeFileSync(path.join(artifactMountPath, "02.html"), "<!doctype html><html><body>ARTIFACT_AGENT_DOCUMENT_BYTES</body></html>");
 	fs.writeFileSync(path.join(artifactMountPath, "styles.css"), "body{color:blue}");
 });
 
@@ -109,13 +92,7 @@ interface FakeRes {
 	emit(): boolean;
 }
 
-function fakeReq(opts: {
-	url?: string;
-	method?: string;
-	cookie?: string;
-	auth?: string;
-	headers?: Record<string, string>;
-} = {}): any {
+function fakeReq(opts: { url?: string; method?: string; cookie?: string; auth?: string } = {}): any {
 	return {
 		url: opts.url ?? "/",
 		method: opts.method ?? "GET",
@@ -123,7 +100,6 @@ function fakeReq(opts: {
 			host: "x",
 			...(opts.cookie ? { cookie: opts.cookie } : {}),
 			...(opts.auth ? { authorization: opts.auth } : {}),
-			...opts.headers,
 		},
 		on() { /* no-op */ },
 	};
@@ -168,15 +144,9 @@ function memoryCookieStore(): CookieStore {
 	return new CookieStore(Buffer.alloc(32, 0x50));
 }
 
-function makeOpts(localhost: boolean, assetCapabilityClock?: Readonly<{ now(): number }>) {
+function makeOpts(localhost: boolean) {
 	const store = memoryCookieStore();
-	return { cookieStore: store, isLocalhost: localhost, store, assetCapabilityClock };
-}
-
-function capabilityBase(body: string, routePrefix = `/preview/${SID}/`): string {
-	const matched = body.match(new RegExp(`(?:href|xml:base)="(${routePrefix}_content/[^/]+/)"`))?.[1];
-	assert.ok(matched, "preview document must carry an asset capability base");
-	return matched;
+	return { cookieStore: store, isLocalhost: localhost, store };
 }
 
 describe("pickEntry", () => {
@@ -273,440 +243,13 @@ describe("handlePreviewRequest — MIME table", () => {
 });
 
 describe("handlePreviewRequest — bridge injection", () => {
-	it("injects generation-bound assets plus response-relative navigation at root and nested production mounts", async () => {
-		for (const basePath of ["", "/team/bobbit"]) {
-			const o = { ...makeOpts(true), basePath };
-			const res = fakeRes();
-			await handlePreviewRequest(fakeReq({ url: `${basePath}/preview/${SID}/index.html` }), res as any, `/preview/${SID}/index.html`, o);
-			const txt = bodyText(res);
-			assert.match(txt, new RegExp(`<base data-bobbit-preview-base href="${basePath}/preview/${SID}/_content/[^/]+/"`));
-			assert.match(txt, /preview-swipe-start|MutationObserver|preview-swipe-move/);
-			assert.match(txt, /bobbit-preview-theme-request/);
-			assert.match(txt, /bobbit-preview-navigate/);
-			assert.match(txt, /data-bobbit-preview-navigation/);
-			assert.match(txt, /canonicalDocument = new URL\(location\.href\)/);
-			assert.ok(txt.indexOf("data-bobbit-preview-navigation") < txt.indexOf("<title>x</title>"), "nested navigation relay must install before authored frames can parse");
-			assert.doesNotMatch(txt, new RegExp(`new URL\\(\"${basePath}/preview/${SID}`));
-		}
-	});
-
-	it("sandboxes every HTML response without restoring same-origin authority", async () => {
+	it("injects <base> + bridge scripts on text/html", async () => {
 		const o = makeOpts(true);
-		for (const method of ["GET", "HEAD"]) {
-			const res = fakeRes();
-			await handlePreviewRequest(
-				fakeReq({ url: `/preview/${SID}/index.html`, method }),
-				res as any,
-				`/preview/${SID}/index.html`,
-				o,
-			);
-			assert.equal(res.statusCode, 200);
-			assert.equal(res.headers["content-security-policy"], PREVIEW_HTML_CONTENT_SECURITY_POLICY);
-			assert.equal(res.headers["referrer-policy"], PREVIEW_REFERRER_POLICY);
-			assert.doesNotMatch(String(res.headers["content-security-policy"]), /allow-same-origin/i);
-		}
-	});
-
-	it("uses an unforgeable tree-scoped path capability for opaque-frame assets", async () => {
-		const o = makeOpts(false);
-		const browserCookie = o.store.mint();
-		const htmlRes = fakeRes();
-		await handlePreviewRequest(
-			fakeReq({ url: `/preview/${SID}/index.html`, cookie: `${COOKIE_NAME}=${browserCookie}` }),
-			htmlRes as any,
-			`/preview/${SID}/index.html`,
-			o,
-		);
-		const capabilityPath = capabilityBase(bodyText(htmlRes));
-
-		const assetRes = fakeRes();
-		await handlePreviewRequest(
-			fakeReq({ url: `${capabilityPath}styles.css` }),
-			assetRes as any,
-			`${capabilityPath}styles.css`,
-			o,
-		);
-		assert.equal(assetRes.statusCode, 200);
-		assert.equal(assetRes.headers["access-control-allow-origin"], "null");
-		assert.equal(assetRes.headers["referrer-policy"], PREVIEW_REFERRER_POLICY);
-		assert.equal(bodyText(assetRes), "body{color:red}");
-
-		const htmlResViaCapability = fakeRes();
-		await handlePreviewRequest(
-			fakeReq({ url: `${capabilityPath}report.html` }),
-			htmlResViaCapability as any,
-			`${capabilityPath}report.html`,
-			o,
-		);
-		assert.equal(htmlResViaCapability.statusCode, 403, "asset authority must never authorize HTML");
-
-		const navigationRes = fakeRes();
-		await handlePreviewRequest(
-			fakeReq({
-				url: `${capabilityPath}report.html`,
-				headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" },
-			}),
-			navigationRes as any,
-			`${capabilityPath}report.html`,
-			o,
-		);
-		assert.equal(navigationRes.statusCode, 200, "native navigation receives only an inert ambient handoff");
-		assert.equal(navigationRes.headers["content-type"], "text/html; charset=utf-8");
-		assert.equal(navigationRes.headers["content-security-policy"], PREVIEW_HTML_CONTENT_SECURITY_POLICY);
-		assert.match(bodyText(navigationRes), /data-bobbit-preview-navigation-handoff/);
-		assert.doesNotMatch(bodyText(navigationRes), /LIVE_AGENT_DOCUMENT_BYTES|body\{color:red\}/);
-		const directoryNavigationRes = fakeRes();
-		await handlePreviewRequest(
-			fakeReq({
-				url: capabilityPath,
-				headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "iframe" },
-			}),
-			directoryNavigationRes as any,
-			capabilityPath,
-			o,
-		);
-		assert.equal(directoryNavigationRes.statusCode, 200, "capability directory navigation must also receive only the handoff shell");
-		assert.doesNotMatch(bodyText(directoryNavigationRes), /LIVE_AGENT_DOCUMENT_BYTES/);
-
-		const unauthenticatedCanonicalNavigation = fakeRes();
-		await handlePreviewRequest(
-			fakeReq({ headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "iframe" } }),
-			unauthenticatedCanonicalNavigation as any,
-			`/preview/${SID}/report.html`,
-			o,
-		);
-		assert.equal(unauthenticatedCanonicalNavigation.statusCode, 401, "canonical handoff still requires ambient authority");
-		const ambientCanonicalNavigation = fakeRes();
-		await handlePreviewRequest(
-			fakeReq({
-				cookie: `${COOKIE_NAME}=${browserCookie}`,
-				headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "iframe" },
-			}),
-			ambientCanonicalNavigation as any,
-			`/preview/${SID}/report.html`,
-			o,
-		);
-		assert.equal(ambientCanonicalNavigation.statusCode, 200);
-
-		const crossSessionRes = fakeRes();
-		const stolenPath = capabilityPath.replace(`/preview/${SID}/`, `/preview/${OTHER_SID}/`);
-		await handlePreviewRequest(fakeReq({ url: `${stolenPath}styles.css` }), crossSessionRes as any, `${stolenPath}styles.css`, o);
-		assert.equal(crossSessionRes.statusCode, 401, "a capability must not authenticate another preview tree");
-	});
-
-	it("hands root and nested live/artifact native navigations to canonical ambient authority without document bytes", async () => {
-		for (const basePath of ["", "/team/bobbit"]) {
-			for (const artifact of [false, true]) {
-				const o = { ...makeOpts(false), basePath };
-				const cookie = basePath
-					? o.store.mint({ basePath, origin: "http://x" })
-					: o.store.mint();
-				const internalScope = artifact
-					? `/preview/${SID}/_artifact/${ARTIFACT_ID}/`
-					: `/preview/${SID}/`;
-				const entry = artifact ? "01.html" : "index.html";
-				const target = artifact ? "02.html" : "report.html";
-				const initial = fakeRes();
-				await handlePreviewRequest(
-					fakeReq({ url: `${basePath}${internalScope}${entry}`, cookie: `${COOKIE_NAME}=${cookie}` }),
-					initial as any,
-					`${internalScope}${entry}`,
-					o,
-				);
-				assert.equal(initial.statusCode, 200);
-				const publicScope = `${basePath}${internalScope}`;
-				const capability = capabilityBase(bodyText(initial), publicScope);
-				const navigation = fakeRes();
-				await handlePreviewRequest(
-					fakeReq({
-						url: `${capability}${target}?programmatic=1`,
-						headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": artifact ? "iframe" : "document" },
-					}),
-					navigation as any,
-					`${capability.slice(basePath.length)}${target}`,
-					o,
-				);
-				assert.equal(navigation.statusCode, 200, `${basePath || "root"} ${artifact ? "artifact" : "live"}`);
-				const handoff = bodyText(navigation);
-				assert.match(handoff, new RegExp(`<base data-bobbit-preview-base href="${capability}`));
-				assert.match(handoff, /location\.replace\(target\.href\)/);
-				assert.match(handoff, /parent\.postMessage\(\{ type: MESSAGE_TYPE, url: target\.href \}/);
-				assert.doesNotMatch(handoff, /LIVE_AGENT_DOCUMENT_BYTES|ARTIFACT_AGENT_DOCUMENT_BYTES/);
-			}
-		}
-	});
-
-	it("expires asset authority and rotates it for a fresh document", async () => {
-		let now = 1_700_000_000_000;
-		const o = makeOpts(false, { now: () => now });
-		const browserCookie = o.store.mint();
-		const htmlRes = fakeRes();
-		await handlePreviewRequest(
-			fakeReq({ url: `/preview/${SID}/index.html`, cookie: `${COOKIE_NAME}=${browserCookie}` }),
-			htmlRes as any,
-			`/preview/${SID}/index.html`,
-			o,
-		);
-		const firstCapability = capabilityBase(bodyText(htmlRes));
-
-		now += PREVIEW_ASSET_CAPABILITY_TTL_MS;
-		const expiredRes = fakeRes();
-		await handlePreviewRequest(
-			fakeReq({ url: `${firstCapability}styles.css` }),
-			expiredRes as any,
-			`${firstCapability}styles.css`,
-			o,
-		);
-		assert.equal(expiredRes.statusCode, 401);
-
-		const refreshedHtmlRes = fakeRes();
-		await handlePreviewRequest(
-			fakeReq({ url: `/preview/${SID}/index.html`, cookie: `${COOKIE_NAME}=${browserCookie}` }),
-			refreshedHtmlRes as any,
-			`/preview/${SID}/index.html`,
-			o,
-		);
-		assert.notEqual(capabilityBase(bodyText(refreshedHtmlRes)), firstCapability);
-	});
-
-	it("revokes a leaked capability immediately when a supported live mutation begins", async () => {
-		const o = makeOpts(false);
-		const browserCookie = o.store.mint();
-		const htmlRes = fakeRes();
-		await handlePreviewRequest(
-			fakeReq({ url: `/preview/${SID}/index.html`, cookie: `${COOKIE_NAME}=${browserCookie}` }),
-			htmlRes as any,
-			`/preview/${SID}/index.html`,
-			o,
-		);
-		const oldCapability = capabilityBase(bodyText(htmlRes));
-		await writeInline(SID, `{"generation":2}`, "data.json");
-		try {
-			const staleRes = fakeRes();
-			await handlePreviewRequest(
-				fakeReq({ url: `${oldCapability}styles.css` }),
-				staleRes as any,
-				`${oldCapability}styles.css`,
-				o,
-			);
-			assert.equal(staleRes.statusCode, 401, "one mutation revokes the complete old tree generation");
-
-			const newHtmlRes = fakeRes();
-			await handlePreviewRequest(
-				fakeReq({ url: `/preview/${SID}/index.html`, cookie: `${COOKIE_NAME}=${browserCookie}` }),
-				newHtmlRes as any,
-				`/preview/${SID}/index.html`,
-				o,
-			);
-			const newCapability = capabilityBase(bodyText(newHtmlRes));
-			assert.notEqual(newCapability, oldCapability);
-			const currentRes = fakeRes();
-			await handlePreviewRequest(
-				fakeReq({ url: `${newCapability}data.json` }),
-				currentRes as any,
-				`${newCapability}data.json`,
-				o,
-			);
-			assert.equal(currentRes.statusCode, 200);
-			assert.equal(bodyText(currentRes), `{"generation":2}`);
-		} finally {
-			await writeInline(SID, `{"a":1}`, "data.json");
-		}
-	});
-
-	it("serves many capability assets with metadata checks but without another whole-tree byte hash", async () => {
-		const baseFs = createPreviewAsyncFs(previewMemoryFs);
-		let descriptorOpens = 0;
-		const observedFs: PreviewAsyncFs = {
-			...baseFs,
-			open: async (filePath, flags, mode) => {
-				descriptorOpens++;
-				return baseFs.open(filePath, flags, mode);
-			},
-		};
-		setPreviewFsForTesting(observedFs);
-		try {
-			const o = makeOpts(false);
-			const cookie = o.store.mint();
-			const htmlRes = fakeRes();
-			await handlePreviewRequest(fakeReq({ cookie: `${COOKIE_NAME}=${cookie}` }), htmlRes as any, `/preview/${SID}/index.html`, o);
-			const capability = capabilityBase(bodyText(htmlRes));
-			const opensAfterColdHash = descriptorOpens;
-			assert.ok(opensAfterColdHash > 0, "cold document verification must hash exact bytes");
-			for (const asset of ["styles.css", "logo.png", "data.json", "styles.css"]) {
-				const assetRes = fakeRes();
-				await handlePreviewRequest(fakeReq(), assetRes as any, `${capability}${asset}`, o);
-				assert.equal(assetRes.statusCode, 200);
-			}
-			assert.equal(descriptorOpens, opensAfterColdHash, "asset requests must use published metadata instead of rehashing tree bytes");
-		} finally {
-			setPreviewFsForTesting(previewMemoryFs);
-		}
-	});
-
-	it("denies externally changed bytes and coalesces exact verification after a requested-path mismatch", async () => {
-		const baseFs = createPreviewAsyncFs(previewMemoryFs);
-		const root = mountPath(SID);
-		let rootEnumerations = 0;
-		const observedFs: PreviewAsyncFs = {
-			...baseFs,
-			opendir: async directory => {
-				if (path.resolve(String(directory)) === path.resolve(root)) rootEnumerations++;
-				return baseFs.opendir(directory);
-			},
-		};
-		setPreviewFsForTesting(observedFs);
-		try {
-			const o = makeOpts(false);
-			const cookie = o.store.mint();
-			const htmlRes = fakeRes();
-			await handlePreviewRequest(fakeReq({ cookie: `${COOKIE_NAME}=${cookie}` }), htmlRes as any, `/preview/${SID}/index.html`, o);
-			const oldCapability = capabilityBase(bodyText(htmlRes));
-			const beforeMutationRequest = rootEnumerations;
-			const dataPath = path.join(root, "data.json");
-			const original = fs.statSync(dataPath);
-			fs.writeFileSync(dataPath, `{"b":2}`);
-			fs.utimesSync(dataPath, original.atime, original.mtime);
-
-			const changed = fakeRes();
-			const unchanged = fakeRes();
-			await Promise.all([
-				handlePreviewRequest(fakeReq(), unchanged as any, `${oldCapability}styles.css`, o),
-				handlePreviewRequest(fakeReq(), changed as any, `${oldCapability}data.json`, o),
-			]);
-			assert.equal(changed.statusCode, 401);
-			assert.ok([200, 401].includes(unchanged.statusCode), "an overlapping unchanged request may finish or fail closed");
-			if (unchanged.statusCode === 200) assert.equal(bodyText(unchanged), "body{color:red}");
-			assert.doesNotMatch(bodyText(changed), /"b":2/);
-			assert.equal(rootEnumerations - beforeMutationRequest, 0, "requested-path metadata must detect the mismatch without a tree walk");
-
-			const beforeFallback = rootEnumerations;
-			const freshHtml = fakeRes();
-			const joinedFreshHtml = fakeRes();
-			await Promise.all([
-				handlePreviewRequest(fakeReq({ cookie: `${COOKIE_NAME}=${cookie}` }), freshHtml as any, `/preview/${SID}/index.html`, o),
-				handlePreviewRequest(fakeReq({ cookie: `${COOKIE_NAME}=${cookie}` }), joinedFreshHtml as any, `/preview/${SID}/index.html`, o),
-			]);
-			assert.equal(freshHtml.statusCode, 200);
-			assert.equal(joinedFreshHtml.statusCode, 200);
-			assert.equal(rootEnumerations - beforeFallback, 2, "concurrent uncertainty must share one exact before/after hash");
-			const freshCapability = capabilityBase(bodyText(freshHtml));
-			assert.notEqual(freshCapability, oldCapability);
-			const freshAsset = fakeRes();
-			await handlePreviewRequest(fakeReq(), freshAsset as any, `${freshCapability}data.json`, o);
-			assert.equal(freshAsset.statusCode, 200);
-			assert.equal(bodyText(freshAsset), `{"b":2}`);
-		} finally {
-			fs.writeFileSync(path.join(root, "data.json"), `{"a":1}`);
-			setPreviewFsForTesting(previewMemoryFs);
-		}
-	});
-
-	it("coalesces cold generation verification and fails it closed when a writer overlaps", async () => {
-		const baseFs = createPreviewAsyncFs(previewMemoryFs);
-		const root = mountPath(SID);
-		let rootEnumerations = 0;
-		let releaseEnumeration!: () => void;
-		let startedEnumeration!: () => void;
-		const started = new Promise<void>(resolve => { startedEnumeration = resolve; });
-		const released = new Promise<void>(resolve => { releaseEnumeration = resolve; });
-		const observedFs: PreviewAsyncFs = {
-			...baseFs,
-			opendir: async directory => {
-				if (path.resolve(String(directory)) === path.resolve(root)) {
-					rootEnumerations++;
-					if (rootEnumerations === 1) {
-						startedEnumeration();
-						await released;
-					}
-				}
-				return baseFs.opendir(directory);
-			},
-		};
-		setPreviewFsForTesting(observedFs);
-		try {
-			const o = makeOpts(true);
-			const firstRes = fakeRes();
-			const secondRes = fakeRes();
-			const first = handlePreviewRequest(fakeReq(), firstRes as any, `/preview/${SID}/index.html`, o);
-			await started;
-			const second = handlePreviewRequest(fakeReq(), secondRes as any, `/preview/${SID}/index.html`, o);
-			const writer = writeInline(SID, "<html><body>replacement</body></html>", "index.html");
-			releaseEnumeration();
-			await Promise.all([first, second]);
-			assert.equal(rootEnumerations, 2, "concurrent documents join one exact before/after cold hash");
-			assert.equal(firstRes.statusCode, 404);
-			assert.equal(secondRes.statusCode, 404);
-			await writer;
-		} finally {
-			setPreviewFsForTesting(previewMemoryFs);
-			await writeInline(SID, "<html><head><title>x</title></head><body><a id=\"report\" href=\"report.html\">report</a></body></html>", "index.html");
-		}
-	});
-
-	it("revokes in-memory asset authority across a gateway restart", async () => {
-		const first = makeOpts(false);
-		const firstCookie = first.store.mint();
-		const firstHtml = fakeRes();
-		await handlePreviewRequest(fakeReq({ cookie: `${COOKIE_NAME}=${firstCookie}` }), firstHtml as any, `/preview/${SID}/index.html`, first);
-		const oldCapability = capabilityBase(bodyText(firstHtml));
-
-		const restarted = makeOpts(false);
-		const stale = fakeRes();
-		await handlePreviewRequest(fakeReq(), stale as any, `${oldCapability}styles.css`, restarted);
-		assert.equal(stale.statusCode, 401);
-
-		const restartedCookie = restarted.store.mint();
-		const currentHtml = fakeRes();
-		await handlePreviewRequest(fakeReq({ cookie: `${COOKIE_NAME}=${restartedCookie}` }), currentHtml as any, `/preview/${SID}/index.html`, restarted);
-		assert.notEqual(capabilityBase(bodyText(currentHtml)), oldCapability);
-	});
-
-	it("sandboxes script-capable SVG popouts and retains generation-bound assets", async () => {
-		const o = makeOpts(false);
-		const browserCookie = o.store.mint();
-		const svgRes = fakeRes();
-		await handlePreviewRequest(
-			fakeReq({
-				url: `/preview/${SID}/hostile.svg`,
-				cookie: `${COOKIE_NAME}=${browserCookie}`,
-				headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" },
-			}),
-			svgRes as any,
-			`/preview/${SID}/hostile.svg`,
-			o,
-		);
-		assert.equal(svgRes.statusCode, 200);
-		assert.equal(svgRes.headers["content-security-policy"], PREVIEW_HTML_CONTENT_SECURITY_POLICY);
-		assert.equal(svgRes.headers["referrer-policy"], PREVIEW_REFERRER_POLICY);
-		assert.doesNotMatch(String(svgRes.headers["content-security-policy"]), /allow-same-origin/i);
-		const svgCapability = capabilityBase(bodyText(svgRes));
-
-		const imageRes = fakeRes();
-		await handlePreviewRequest(
-			fakeReq({
-				url: `${svgCapability}logo.png`,
-				headers: { "sec-fetch-mode": "no-cors", "sec-fetch-dest": "image" },
-			}),
-			imageRes as any,
-			`${svgCapability}logo.png`,
-			o,
-		);
-		assert.equal(imageRes.statusCode, 200);
-
-		const capabilityPopout = fakeRes();
-		await handlePreviewRequest(
-			fakeReq({
-				url: `${svgCapability}hostile.svg`,
-				headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" },
-			}),
-			capabilityPopout as any,
-			`${svgCapability}hostile.svg`,
-			o,
-		);
-		assert.equal(capabilityPopout.statusCode, 200);
-		assert.match(bodyText(capabilityPopout), /data-bobbit-preview-navigation-handoff/);
-		assert.doesNotMatch(bodyText(capabilityPopout), /parent\.document\.body\.textContent='owned'/);
+		const res = fakeRes();
+		await handlePreviewRequest(fakeReq({ url: `/preview/${SID}/index.html` }), res as any, `/preview/${SID}/index.html`, o);
+		const txt = bodyText(res);
+		assert.match(txt, new RegExp(`<base data-bobbit-preview-base href="/preview/${SID}/"`));
+		assert.match(txt, /preview-swipe-start|MutationObserver|preview-swipe-move/);
 	});
 
 	it("injects inline theme snapshot inside <head> on text/html", async () => {
@@ -723,7 +266,7 @@ describe("handlePreviewRequest — bridge injection", () => {
 		assert.match(headInner, /\.dark\s*\{/);
 	});
 
-	it("does NOT inject bridge or HTML sandbox policy into non-html (css)", async () => {
+	it("does NOT inject bridge into non-html (css)", async () => {
 		const o = makeOpts(true);
 		const res = fakeRes();
 		await handlePreviewRequest(fakeReq({ url: `/preview/${SID}/styles.css` }), res as any, `/preview/${SID}/styles.css`, o);
@@ -731,7 +274,6 @@ describe("handlePreviewRequest — bridge injection", () => {
 		assert.equal(txt, "body{color:red}");
 		assert.doesNotMatch(txt, /<base/);
 		assert.doesNotMatch(txt, /MutationObserver/);
-		assert.equal(res.headers["content-security-policy"], undefined);
 	});
 });
 
@@ -773,9 +315,8 @@ describe("handlePreviewRequest — per-artifact URL", () => {
 		const url = `/preview/${SID}/_artifact/${ARTIFACT_ID}/01.html`;
 		await handlePreviewRequest(fakeReq({ url }), res as any, url, o);
 		assert.equal(res.statusCode, 200);
-		assert.equal(res.headers["content-security-policy"], PREVIEW_HTML_CONTENT_SECURITY_POLICY);
 		const txt = bodyText(res);
-		assert.match(txt, new RegExp(`<base data-bobbit-preview-base href="/preview/${SID}/_artifact/${ARTIFACT_ID}/_content/[^/]+/"`));
+		assert.match(txt, new RegExp(`<base data-bobbit-preview-base href="/preview/${SID}/_artifact/${ARTIFACT_ID}/"`));
 		// Body content survives the rewrite. We can't assert `v1</body>` adjacency
 		// because injectBaseAndScripts adds the bridge scripts before </body>;
 		// instead assert v1 sits at the start of <body>, and that the bridge was

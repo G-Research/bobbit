@@ -345,9 +345,9 @@ function deleteSession(id: string): void {
 
 test.beforeAll(() => {
 	const scoped = installScopedMemFs([
-		"closeSync", "copyFileSync", "cpSync", "createReadStream", "existsSync", "fstatSync",
-		"mkdirSync", "openSync", "readFileSync", "readdirSync", "realpathSync", "renameSync",
-		"rmSync", "statSync", "unlinkSync", "writeFileSync",
+		"copyFileSync", "cpSync", "createReadStream", "existsSync", "mkdirSync",
+		"readFileSync", "readdirSync", "realpathSync", "renameSync", "rmSync",
+		"statSync", "unlinkSync", "writeFileSync",
 	]);
 	restoreFs = scoped.restore;
 	route = new PreviewMountRouteFixture(scoped.fs);
@@ -623,7 +623,7 @@ test.describe("GET /preview/<sid>/* — content origin", () => {
 		expect(resp.headers.get("content-type") || "").toMatch(/text\/html/);
 		const body = await resp.text();
 		// Marked <base> rewritten to the content-origin path.
-		expect(body).toMatch(new RegExp(`<base data-bobbit-preview-base href="/preview/${sessionId}/_content/[^/]+/">`));
+		expect(body).toContain(`<base data-bobbit-preview-base href="/preview/${sessionId}/">`);
 		// The standalone snapshot retains canonical light/dark theme tokens.
 		expect(body).toContain(`data-bobbit-preview-theme="snapshot"`);
 		expect(body).toContain("--background: canvas;");

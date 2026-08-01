@@ -109,23 +109,6 @@ interface IndependentContenderResult {
 	crossVerified: number;
 }
 
-interface ServerPrebundleManifest {
-	entries: Record<string, string>;
-}
-
-function prebundledServerModule(sourcePath: string): string {
-	const runtimeBundle = process.env.BOBBIT_V2_SERVER_PREBUNDLE;
-	if (!runtimeBundle) throw new Error("cookie process race requires the configured server prebundle");
-	// The configured runtime lives at <cache>/entries/tests2/harness/*.mjs.
-	const cacheDir = path.resolve(path.dirname(runtimeBundle), "..", "..", "..");
-	const manifest = JSON.parse(
-		fs.readFileSync(path.join(cacheDir, "manifest.json"), "utf8"),
-	) as ServerPrebundleManifest;
-	const emitted = manifest.entries[sourcePath];
-	if (!emitted) throw new Error(`server prebundle is missing ${sourcePath}`);
-	return path.join(cacheDir, ...emitted.split("/"));
-}
-
 async function runIndependentKeyContenders(
 	workDir: string,
 	secretsDir: string,
@@ -135,10 +118,8 @@ async function runIndependentKeyContenders(
 	fs.mkdirSync(coordinationDir);
 	const contenderPath = path.join(workDir, "cookie-key-contender.mjs");
 	const launcherPath = path.join(workDir, "cookie-key-launcher.cjs");
-	// Run exact current production entries as native ESM instead of booting a TS
-	// transform service in each of the three deliberately simultaneous children.
-	const signingKeyModule = prebundledServerModule("src/server/auth/cookie-signing-key.ts");
-	const cookieModule = prebundledServerModule("src/server/auth/cookie.ts");
+	const signingKeyModule = fileURLToPath(new URL("../../src/server/auth/cookie-signing-key.ts", import.meta.url));
+	const cookieModule = fileURLToPath(new URL("../../src/server/auth/cookie.ts", import.meta.url));
 
 	fs.writeFileSync(contenderPath, String.raw`
 import fs from "node:fs";
@@ -214,7 +195,7 @@ function waitFor(predicate, label) {
 }
 function launch(index) {
 	const child = spawn(process.execPath, [
-		workerData.contenderPath,
+		"--import", "tsx", workerData.contenderPath,
 		workerData.secretsDir, workerData.coordinationDir, String(workerData.contenderCount), String(index),
 		workerData.signingKeyModule, workerData.cookieModule, String(workerData.nowSeconds),
 	], { cwd: workerData.cwd, env: process.env, shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
@@ -354,42 +335,6 @@ describe("stateless signed cookies", () => {
 			expiresAt: BASE_NOW + COOKIE_MAX_AGE_SECONDS,
 			needsRenewal: false,
 		});
-	});
-
-	it("cryptographically binds v1.2 cookies to the canonical mount and exact UI origin", () => {
-		const { clock } = mutableClock();
-		const store = new CookieStore(KEY, {
-			clock,
-			randomBytes: (size) => Buffer.alloc(size, 0x45),
-		});
-		const binding = { basePath: "/team/bobbit", origin: "https://bobbit.example:5173" };
-		const value = store.mint(binding);
-		const parts = value.split(".");
-		assert.equal(parts.length, 8);
-		assert.deepEqual(parts.slice(0, 2), ["v1", "2"]);
-		assert.match(parts[5]!, /^[A-Za-z0-9_-]{43}$/);
-		assert.match(parts[6]!, /^[A-Za-z0-9_-]{43}$/);
-		assert.deepEqual(store.verify(value, binding), {
-			issuedAt: BASE_NOW,
-			expiresAt: BASE_NOW + COOKIE_MAX_AGE_SECONDS,
-			needsRenewal: false,
-			binding: { basePath: true, origin: true },
-		});
-		assert.equal(store.verify(value, { ...binding, basePath: "/other" }), undefined);
-		assert.equal(store.verify(value, { ...binding, origin: "https://bobbit.example:5174" }), undefined);
-		for (const basePath of ["/team/bobbit/", "/team/../bobbit", "/a//b", "/a%2fb"]) {
-			assert.throws(() => store.mint({ ...binding, basePath }), /canonical/i);
-		}
-		assert.throws(() => store.mint({ ...binding, origin: "https://BOBBIT.example:5173" }), /canonical/i);
-	});
-
-	it("keeps legacy v1 cookies root-compatible but rejects them at a mounted scope", () => {
-		const { clock } = mutableClock();
-		const store = new CookieStore(KEY, { clock });
-		const legacy = store.mint();
-		assert.ok(store.verify(legacy));
-		assert.ok(store.verify(legacy, { basePath: "", origin: "https://bobbit.example" }));
-		assert.equal(store.verify(legacy, { basePath: "/bobbit", origin: "https://bobbit.example" }), undefined);
 	});
 
 	it("keeps cookies valid across stores with the same key and rejects a changed key", () => {

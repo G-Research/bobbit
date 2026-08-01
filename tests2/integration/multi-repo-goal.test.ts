@@ -10,22 +10,11 @@ import { readE2EToken, base, registerProject } from "./_e2e/e2e-setup.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { installCommandRunnerInterceptor } from "./helpers/command-runner-dispatcher.js";
+import type { CommandRunner } from "../../src/server/gateway-deps.js";
 
 let token: string;
 let restoreCommandRunner: (() => void) | undefined;
-const commandRunnerRoots = new Set<string>();
 const headers = () => ({ Authorization: `Bearer ${token}`, "Content-Type": "application/json" });
-
-function ownsCommandCwd(cwd: unknown): boolean {
-	if (typeof cwd !== "string") return false;
-	const candidate = path.resolve(cwd);
-	for (const root of commandRunnerRoots) {
-		const relative = path.relative(root, candidate);
-		if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) return true;
-	}
-	return false;
-}
 
 function componentDir(dir: string): void {
 	fs.mkdirSync(dir, { recursive: true });
@@ -34,26 +23,19 @@ function componentDir(dir: string): void {
 
 test.beforeAll(({ gateway }) => {
 	token = readE2EToken();
-	const runner = gateway.sessionManager.commandRunner;
+	const runner = gateway.sessionManager.commandRunner as CommandRunner;
+	const original = { execFile: runner.execFile, execFileSync: runner.execFileSync, spawn: runner.spawn };
 	const reject = (): never => { throw new Error("multi-repo route fixture is intentionally non-git"); };
-	restoreCommandRunner = installCommandRunnerInterceptor(runner, {
-		label: "multi-repo-goal",
-		async execFile(_file, _args, options, next) {
-			if (!ownsCommandCwd(options?.cwd)) return next();
-			return reject();
-		},
-		execFileSync(_file, _args, options, next) {
-			if (!ownsCommandCwd(options?.cwd)) return next();
-			return reject();
-		},
-	});
+	runner.execFile = async () => reject();
+	runner.execFileSync = () => reject();
+	runner.spawn = undefined;
+	restoreCommandRunner = () => Object.assign(runner, original);
 });
 
 test.afterAll(() => restoreCommandRunner?.());
 
 test("multi-repo goal creates per-repo worktrees", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mr-goal-"));
-	commandRunnerRoots.add(path.resolve(root));
 	componentDir(path.join(root, "api"));
 	componentDir(path.join(root, "web"));
 	componentDir(path.join(root, "shared"));

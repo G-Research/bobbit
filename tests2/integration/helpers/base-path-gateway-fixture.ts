@@ -93,14 +93,11 @@ export interface RunningGateway {
 	origin: string;
 	baseUrl: string;
 	wsOrigin: string;
-	/** Test CA for an optional TLS fixture. */
-	tlsCaCert?: string;
 	gateway: ReturnType<typeof createGateway>;
 	/** Exact callback information supplied by the gateway to LifecycleHub providers. */
 	lifecycleGatewayInfo(): { baseUrl: string; token: string };
 	/** Persisted URL consumed by direct and sandbox session launch paths. */
 	agentGatewayUrl(): string | undefined;
-	restart(): Promise<void>;
 	shutdown(): Promise<void>;
 }
 
@@ -150,12 +147,8 @@ function writeStaticFixture(staticDir: string): string {
 }
 
 export interface BootGatewayOptions {
-	/** Default true. False models a production API/headless gateway. */
+	/** Default true. False exercises API-only callback publication. */
 	serveStatic?: boolean;
-	/** Generate a trusted test certificate containing this public hostname. */
-	tlsPublicHost?: string;
-	/** Enable the explicit Vite development proxy cookie exception. */
-	viteDevProxy?: boolean;
 	/** Seed both legacy fallbacks before start; listener publication must supersede them. */
 	staleGatewayUrl?: string;
 	/** Explicit callback publisher used to cover CLI/public-proxy overrides. */
@@ -197,30 +190,6 @@ export async function bootGateway(
 		writeFileSync(join(stateDir, "gateway-url"), options.staleGatewayUrl);
 	}
 
-	let tls: { cert: string; key: string } | undefined;
-	let tlsCaCert: string | undefined;
-	if (options.tlsPublicHost) {
-		const { createCA, createCert } = await import("mkcert");
-		const ca = await createCA({
-			organization: "Bobbit Test CA",
-			countryCode: "US",
-			state: "Test",
-			locality: "Test",
-			validity: 1,
-		});
-		const leaf = await createCert({
-			ca,
-			domains: [options.tlsPublicHost, "127.0.0.1", "localhost"],
-			validity: 1,
-		});
-		const certPath = join(root, "tls-cert.pem");
-		const keyPath = join(root, "tls-key.pem");
-		writeFileSync(certPath, leaf.cert);
-		writeFileSync(keyPath, leaf.key);
-		tls = { cert: certPath, key: keyPath };
-		tlsCaCert = ca.cert;
-	}
-
 	const gatewayConfig = {
 		host,
 		port: 0,
@@ -228,9 +197,7 @@ export async function bootGateway(
 		authToken: TOKEN,
 		defaultCwd: root,
 		...(options.serveStatic === false ? {} : { staticDir }),
-		viteDevProxy: options.viteDevProxy === true,
 		forceAuth,
-		...(tls ? { tls } : {}),
 		skipMcp: true,
 		skipWorktreePool: true,
 		skipTitleGeneration: true,
@@ -265,16 +232,13 @@ export async function bootGateway(
 	const peerHost = loopbackForBind(host.trim());
 	const unbracketedPeer = peerHost.startsWith("[") && peerHost.endsWith("]") ? peerHost.slice(1, -1) : peerHost;
 	const connectHost = unbracketedPeer.includes(":") ? `[${unbracketedPeer}]` : unbracketedPeer;
-	const httpProtocol = tls ? "https" : "http";
-	const wsProtocol = tls ? "wss" : "ws";
-	const origin = `${httpProtocol}://${connectHost}:${port}`;
+	const origin = `http://${connectHost}:${port}`;
 	const running: RunningGateway = {
 		root,
 		staticDir,
 		origin,
 		baseUrl: `${origin}${basePath}`,
-		wsOrigin: `${wsProtocol}://${connectHost}:${port}`,
-		...(tlsCaCert ? { tlsCaCert } : {}),
+		wsOrigin: `ws://${connectHost}:${port}`,
 		gateway,
 		lifecycleGatewayInfo() {
 			const hub = gateway.sessionManager.lifecycleHub as unknown as {
@@ -287,21 +251,6 @@ export async function bootGateway(
 				readGatewayUrlForAgent(): string | undefined;
 			};
 			return manager.readGatewayUrlForAgent();
-		},
-		async restart() {
-			await gateway.shutdown();
-			const next = createGateway({
-				...gatewayConfig,
-				port,
-				portExplicit: true,
-			}, gatewayDeps);
-			const reboundPort = await next.start();
-			if (reboundPort !== port) {
-				await next.shutdown();
-				throw new Error(`Gateway restarted on ${reboundPort}, expected ${port}`);
-			}
-			gateway = next;
-			running.gateway = next;
 		},
 		async shutdown() {
 			try { await gateway.shutdown(); }
@@ -346,10 +295,6 @@ export function authenticateSocket(url: string, options: ClientOptions = {}, tok
 		socket.once("open", () => socket.send(JSON.stringify({ type: "auth", token })));
 		socket.on("message", (raw) => {
 			const message = JSON.parse(raw.toString()) as { type?: string };
-			if (message.type === "auth_failed") {
-				fail(new Error(`WebSocket authentication rejected: ${url}`));
-				return;
-			}
 			if (message.type !== "auth_ok") return;
 			clearTimeout(timer);
 			socket.off("error", fail);

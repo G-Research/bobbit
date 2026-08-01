@@ -2,11 +2,11 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1137,
+  "censusTotal": 1138,
   "buckets": {
     "daily": 62,
     "v2-browser": 216,
-    "v2-core": 512,
+    "v2-core": 513,
     "v2-dom": 144,
     "v2-integration": 203
   },
@@ -20,25 +20,6 @@
     "vitest-e2e": 2
   },
   "v2Native": [
-    {
-      "path": "tests2/core/controlled-model-fallback-session-manager.test.ts",
-      "reason": "Real SessionManager and current-catalog boundary coverage split from the selector and source-invariant fallback suite so both retain ample tier-1 per-file wall-budget headroom under fixed three-worker contention.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/extension-host-module-memory-isolation.test.ts",
-      "reason": "Exact-registered partition of the ModuleHost resource-limit coverage so its deliberate 16 MB worker OOM cannot share a Vitest parent fork with the remaining concurrent worker-thread fan-out.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "isolated",
-        "reason": "Deliberately OOMs a ModuleHost worker under a 16 MB old-generation limit and must own a dedicated isolated Vitest fork."
-      }
-    },
     {
       "path": "tests2/browser/e2e/app-boot-authenticated.spec.ts",
       "reason": "Focused browser E2E regression for token-query startup: a valid isolated gateway token must transfer into local storage, clear from the URL, and leave the landing route in the authenticated shell without a retry.",
@@ -113,7 +94,7 @@
     },
     {
       "path": "tests2/core/base-path-pwa-cookie-guards.test.ts",
-      "reason": "PWA, cookie, CORS, and source-guard coverage for mount-scoped service-worker caching, duplicate signed cookies, credentialed native transports, centralized client URL/auth ownership, and isolate:false release of selected gateway generations.",
+      "reason": "PWA, cookie, CORS, and source-guard coverage for mount-scoped service-worker caching, duplicate signed cookies, credentialed native transports, and centralized client URL/auth ownership.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -185,25 +166,7 @@
     },
     {
       "path": "tests2/integration/base-path-gateway-root.test.ts",
-      "reason": "Focused in-process gateway coverage for root-mounted API, shell, manifest, cookie, preview, and viewer compatibility plus mixed-case loopback disabled-auth parity across HTTP and WebSocket transports.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "integration"
-      }
-    },
-    {
-      "path": "tests2/integration/base-path-gateway-headless-tls.test.ts",
-      "reason": "Focused real TLS gateway coverage proving a wildcard-bound headless mount issues secure public-Host cookies, retains cookie-only REST, SSE, preview and WebSocket transports, and rejects sibling origins and UI routes.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "integration"
-      }
-    },
-    {
-      "path": "tests2/integration/base-path-gateway-restart.test.ts",
-      "reason": "Focused real gateway shutdown and recreation coverage proving cookie-bound cross-port browser origins recover through WebSocket and simple HTTP transports without authorizing same-host sibling origins.",
+      "reason": "Focused in-process gateway coverage for root-mounted API, shell, manifest, cookie, preview, and viewer compatibility.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -338,7 +301,7 @@
     },
     {
       "path": "tests2/core/inline-html-theme-bridge-repro.test.ts",
-      "reason": "Fast source invariant proving completed and streaming srcdoc payloads use the opaque-origin parent-message theme bridge, never same-origin sandboxing or parent document access, while retaining the canonical bridge module in the compiled UI dependency graph.",
+      "reason": "Fast failing-first regression proving completed srcdoc and streaming document.write inline HTML payloads are prepared through the canonical preview theme bridge in the compiled UI dependency graph.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -356,7 +319,7 @@
     },
     {
       "path": "tests2/dom/inline-html-renderer-lifecycle.test.ts",
-      "reason": "DOM coverage for parser-safe first-head opaque-origin theme preparation, source-validated parent messages, idempotence, hostile authored syntax, fragments and SVG, completed and historical iframe stability, debounced streaming srcdoc lifecycle, theme-backed chrome, and shared .html/.htm write and edit delegation.",
+      "reason": "DOM coverage for parser-safe first-head theme-bridge preparation, idempotence, hostile authored syntax, fragments and SVG, completed and historical iframe stability, debounced streaming-to-complete behavior, theme-backed chrome, and shared .html/.htm write and edit delegation.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -365,7 +328,7 @@
     },
     {
       "path": "tests2/browser/fixtures/inline-html-theme-source.spec.ts",
-      "reason": "Real-browser source-module coverage proving completed, streaming, and edit renderers use opaque-origin script sandboxes without parent/storage/API authority while parse-time and live parent-message theme updates, iframe identity, source disclosure, and swipe isolation remain intact.",
+      "reason": "Real-browser source-module coverage proving WriteRenderer and EditRenderer statically bundle the canonical bridge without server snapshot code, resolve light and dark palette tokens at parse time, update the same iframe live, preserve streaming/edit/source behavior, and omit side-panel swipe forwarding.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
@@ -374,25 +337,7 @@
     },
     {
       "path": "tests2/browser/e2e/source-vite-inline-html-theme.spec.ts",
-      "reason": "Real Vite development-runtime smokes against explicitly flagged Vite-proxy gateways, proving signed-cookie reload, actual chat WriteRenderer opaque-origin/theme behavior, and mounted-target multi-page preview iframe/popout navigation through Vite's root proxy without capability navigation or compiled dist/ui fallback.",
-      "execution": {
-        "runner": "playwright",
-        "tier": "browser",
-        "project": "browser"
-      }
-    },
-    {
-      "path": "tests2/browser/e2e/source-vite-headless-cookie.spec.ts",
-      "reason": "Headless Chromium journey against a wildcard-bound TLS gateway with no staticDir and a real source Vite UI on another port of the same public Host, proving natural Secure-cookie bootstrap followed by cookie-only reload, REST, EventSource, preview iframe, and popout transports without the Vite proxy exception.",
-      "execution": {
-        "runner": "playwright",
-        "tier": "browser",
-        "project": "browser"
-      }
-    },
-    {
-      "path": "tests2/browser/e2e/source-vite-mixed-scheme-auth.spec.ts",
-      "reason": "Real HTTPS loopback source-Vite journey through the explicit development proxy to an auth-enforced mounted HTTP loopback gateway, proving cookie confirmation precedes sentinel persistence and cookie-only REST, WebSocket, EventSource, preview iframe, and popout transports survive reload without mount duplication or bearer storage.",
+      "reason": "Real Vite development-runtime smoke against an isolated focused-write-agent gateway proving the actual chat WriteRenderer receives parse-time and live same-iframe theme, palette, font, surface, semantic, and chart state from the canonical source bridge without swipe forwarding, compiled dist/ui, or the standalone server-filesystem snapshot path.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
@@ -401,7 +346,7 @@
     },
     {
       "path": "tests2/browser/e2e/packaged-inline-html-theme.spec.ts",
-      "reason": "Clean-consumer npm tarball smoke proving packaged dist/ui bundles the isolated inline bridge and renders an opaque-origin HTML write whose parse-time and live theme state follows the host without iframe recreation or source-module runtime requests.",
+      "reason": "Clean-consumer npm tarball smoke proving the packaged CLI serves compiled dist/ui with the canonical bridge bundled, ships canonical src/ui/app.css and referenced UI assets, and renders an inline HTML write whose parse-time and live theme state follows the host without iframe recreation or source-module runtime requests.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
@@ -500,7 +445,7 @@
     },
     {
       "path": "tests2/core/preview-install-transaction-races.test.ts",
-      "reason": "Deterministic deferred regressions for source-ENOENT rollback, stable staging preflight, persistent failed-write fencing, same-key writer serialization, rename-first blocked purge, abort-during-verification handling, stream/descriptor close-before-lease ordering, and serialized owned-quarantine cleanup logging.",
+      "reason": "Deterministic deferred regressions for source-ENOENT rollback, stable staging preflight, persistent failed-write fencing, same-key writer serialization, rename-first blocked purge, aborted stream lease release, and serialized owned-quarantine cleanup logging.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -743,25 +688,7 @@
     },
     {
       "path": "tests2/integration/skill-surface-consistency.test.ts",
-      "reason": "Focused real-gateway endpoint-parity fixture for a project-root skill: both /api/slash-skills and /api/slash-skills/details must return set-equal names and include only-in-p. Split from the former three-scope file so fixed-three-worker execution retains ample per-file wall-budget headroom.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "integration"
-      }
-    },
-    {
-      "path": "tests2/integration/skill-surface-custom-directory.test.ts",
-      "reason": "Focused real-gateway endpoint-parity fixture for a project-scoped config_directories skill outside the project root: both slash-skill surfaces must include only-in-custom-dir and return set-equal names.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "integration"
-      }
-    },
-    {
-      "path": "tests2/integration/skill-surface-scope-isolation.test.ts",
-      "reason": "Focused real-gateway endpoint-parity fixture for project isolation: a registered project's only-in-p skill must stay absent from another project's composer/details responses, whose name sets remain equal.",
+      "reason": "Regression test (spec requirement 2) for the 'Fix skill autocomplete gap' goal (9e081770): a REAL two-endpoint gateway test proving the Skills page (/api/slash-skills/details) and composer autocomplete (/api/slash-skills) resolve the IDENTICAL skill-name set for a given project. Registers project P (rootPath owns .claude/skills/only-in-p) and asserts both endpoints for P are set-equal AND include only-in-p; a second project Q proves scope isolation (Q's autocomplete must NOT surface P's skill). Replaces the tautological core test that called discoverSlashSkills twice with identical args and thus could not catch endpoint/parameter/projectId/config-store/market-context divergence.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -1131,15 +1058,6 @@
     {
       "path": "tests2/core/command-runner-fence.test.ts",
       "reason": "DI seam contract: fenced CommandRunner rejects non-local remotes/gh/docker.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/command-runner-dispatcher.test.ts",
-      "reason": "Pins owner-scoped shared CommandRunner leases: unrelated calls chain, strict owned-scope errors remain, overlapping releases cannot clobber another owner, and exec-only interception leaves sync/spawn identities untouched.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -1697,20 +1615,11 @@
     },
     {
       "path": "tests2/core/spawn-with-retry-policy.test.ts",
-      "reason": "Subprocess-free policy coverage for bounded fixture command retry, timeout/close ordering, authoritative close-zero handling, transactional cleanup redaction, literal argv/optional stdin, and safe process options through an injectable backend.",
+      "reason": "Subprocess-free policy coverage for bounded fixture command retry, timeout, redaction, literal argv, and safe process options through an injectable backend.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
         "project": "core"
-      }
-    },
-    {
-      "path": "tests2/integration/fixture-command-timeout-real-git.test.ts",
-      "reason": "Focused Group D real-Git/platform regression for the timeout-versus-successful-commit race: reproduces blind retry exit code 1 and proves that a timed-out attempt later closing unsuccessfully with one retry remaining recreates private transactional state before retry.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "e2e",
-        "project": "e2e"
       }
     },
     {
@@ -1724,7 +1633,7 @@
     },
     {
       "path": "tests2/core/git-template-copy.test.ts",
-      "reason": "Pins the three-process no-add Git bootstrap, real master commit/tree/index, local identity/hooks/LF configuration, immutable filesystem-only copies, and destination safety after the tier-1 guard is installed.",
+      "reason": "Pins setup-prepared immutable Git template reuse, configured master metadata, independent filesystem-only copies, and destination safety after the tier-1 guard is installed.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -2071,15 +1980,7 @@
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/project-onboarding-multi-repo-subset.journey.spec.ts",
-      "type": "smoke-journey"
-    },
-    {
-      "path": "tests2/browser/journeys/project-onboarding-post-archive.journey.spec.ts",
-      "type": "smoke-journey"
-    },
-    {
-      "path": "tests2/browser/journeys/project-onboarding-select-all.journey.spec.ts",
+      "path": "tests2/browser/journeys/project-onboarding-repositories.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
@@ -6234,9 +6135,9 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding-multi-repo-subset.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-repositories.journey.spec.ts"
       ],
-      "replacementNote": "Dedicated journey preserves the selected-subset autoPrompt assertions and cleanup."
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/add-project-post-archive.spec.ts",
@@ -6244,9 +6145,9 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding-post-archive.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-repositories.journey.spec.ts"
       ],
-      "replacementNote": "Dedicated journey preserves the ghost .bobbit archive-CTA assertions and cleanup."
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/add-project-preflight.spec.ts",
@@ -6264,9 +6165,9 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding-select-all.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-repositories.journey.spec.ts"
       ],
-      "replacementNote": "Dedicated journey preserves the selected-count assertions and cleanup."
+      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
     {
       "file": "tests/e2e/ui/add-project-symlink.spec.ts",
@@ -8691,7 +8592,8 @@
       "execution": {
         "runner": "vitest",
         "tier": "unit",
-        "project": "core"
+        "project": "isolated",
+        "reason": "Spawns extension-host worker threads with module-scoped loader state."
       }
     },
     {
@@ -11550,7 +11452,7 @@
       "bucket": "v2-core",
       "method": "codemod",
       "replacement": [],
-      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks), with an ordered isolate:false gateway-ownership regression.",
+      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks).",
       "migrated": true,
       "v2Path": "tests2/core/play-finish-sound.test.ts",
       "execution": {

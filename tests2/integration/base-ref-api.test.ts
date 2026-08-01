@@ -11,7 +11,6 @@ import { it } from "vitest";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { readE2EToken, base } from "./_e2e/e2e-setup.js";
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
-import { installCommandRunnerInterceptor } from "./helpers/command-runner-dispatcher.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -27,7 +26,6 @@ let fixtureGateway: any;
 const cleanupRoots: string[] = [];
 const cleanupProjectIds: string[] = [];
 const originDevelopRepos = new Set<string>();
-const baseRefRepoRoots = new Set<string>();
 
 const headers = () => ({
 	Authorization: `Bearer ${token}`,
@@ -38,21 +36,6 @@ function createFakeRepo(dir: string): void {
 	fs.mkdirSync(path.join(dir, ".git"), { recursive: true });
 	fs.writeFileSync(path.join(dir, ".git", "HEAD"), "ref: refs/heads/master\n");
 	fs.writeFileSync(path.join(dir, "README.md"), "x\n");
-	baseRefRepoRoots.add(path.resolve(dir));
-}
-
-function isBaseRefRepoPath(cwd: unknown): cwd is string {
-	if (typeof cwd !== "string") return false;
-	const candidate = path.resolve(cwd);
-	for (const root of baseRefRepoRoots) {
-		const relative = path.relative(root, candidate);
-		if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) return true;
-	}
-	return false;
-}
-
-function isGitExecutable(file: string): boolean {
-	return path.basename(file).toLowerCase().replace(/\.exe$/, "") === "git";
 }
 
 function cannedGit(cwd: string, args: readonly string[]): string {
@@ -69,21 +52,17 @@ function cannedGit(cwd: string, args: readonly string[]): string {
 async function installCannedGitRunner(): Promise<void> {
 	const runtime = await loadServerTestRuntime();
 	const runner = runtime.gatewayDeps.realCommandRunner;
-	// Integration files share this runner under isolate:false. Lease only this
-	// fixture's repos so releasing the suite cannot restore over another owner.
-	restoreCommandRunner = installCommandRunnerInterceptor(runner, {
-		label: "base-ref-api",
-		async execFile(file, args, options, next) {
-			const cwd = options?.cwd;
-			if (!isGitExecutable(file) || !isBaseRefRepoPath(cwd)) return next();
-			return { stdout: cannedGit(cwd, args), stderr: "" };
-		},
-		execFileSync(file, args, options, next) {
-			const cwd = options?.cwd;
-			if (!isGitExecutable(file) || !isBaseRefRepoPath(cwd)) return next();
-			return cannedGit(cwd, args);
-		},
-	});
+	const original = { execFile: runner.execFile, execFileSync: runner.execFileSync, spawn: runner.spawn };
+	runner.execFile = async (file, args, options) => {
+		if (path.basename(file).toLowerCase().replace(/\.exe$/, "") !== "git") throw new Error(`unexpected command: ${file}`);
+		return { stdout: cannedGit(String(options?.cwd ?? ""), args), stderr: "" };
+	};
+	runner.execFileSync = (file, args, options) => {
+		if (path.basename(file).toLowerCase().replace(/\.exe$/, "") !== "git") throw new Error(`unexpected command: ${file}`);
+		return cannedGit(String(options?.cwd ?? ""), args);
+	};
+	runner.spawn = undefined;
+	restoreCommandRunner = () => Object.assign(runner, original);
 }
 
 function cleanupDir(dir: string): void {
@@ -191,8 +170,6 @@ test.afterAll(() => {
 	}
 	for (const root of cleanupRoots) cleanupDir(root);
 	restoreCommandRunner?.();
-	baseRefRepoRoots.clear();
-	originDevelopRepos.clear();
 });
 
 // Suite-owned project contexts and the canned runner make each declaration

@@ -113,11 +113,11 @@ function preGuardFixtureBackend(): FixtureCommandBackend {
 		spawn(file, args, options) {
 			const child = spawn(file, [...args], options);
 			return {
-				onStdout: listener => { child.stdout!.on("data", listener); },
-				onStderr: listener => { child.stderr!.on("data", listener); },
+				onStdout: listener => { child.stdout.on("data", listener); },
+				onStderr: listener => { child.stderr.on("data", listener); },
 				onError: listener => { child.once("error", listener); },
 				onClose: listener => { child.once("close", listener); },
-				kill: signal => child.kill(signal),
+				kill: signal => { child.kill(signal); },
 			};
 		},
 		schedule(callback, delayMs) {

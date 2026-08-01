@@ -24,60 +24,18 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 
 const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
 const { SessionStore } = await import("../../src/server/agent/session-store.ts");
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 
-type SessionStoreMemFs = MemFs & {
-	openSync(file: string, flags: string): number;
-	fsyncSync(fd: number): void;
-	closeSync(fd: number): void;
-};
-
-/** Keep cascade semantics real while removing Defender-sensitive store writes. */
-function createSessionStoreMemFs(): SessionStoreMemFs {
-	const memfs = createMemFs() as SessionStoreMemFs;
-	const baseWriteFileSync = memfs.writeFileSync.bind(memfs);
-	const fdPaths = new Map<number, string>();
-	let nextFd = 3;
-
-	memfs.openSync = (file: string) => {
-		const fd = nextFd++;
-		const resolved = path.resolve(file);
-		fdPaths.set(fd, resolved);
-		baseWriteFileSync(resolved, "", "utf-8");
-		return fd;
-	};
-	(memfs as any).writeFileSync = (target: string | number, data: string | NodeJS.ArrayBufferView, encoding?: BufferEncoding) => {
-		const file = typeof target === "number" ? fdPaths.get(target) : target;
-		if (!file) throw Object.assign(new Error(`EBADF: bad file descriptor, write '${target}'`), { code: "EBADF" });
-		return baseWriteFileSync(file, data, encoding as any);
-	};
-	memfs.fsyncSync = () => {};
-	memfs.closeSync = (fd: number) => { fdPaths.delete(fd); };
-	(memfs.promises as any).open = async (file: string) => {
-		const resolved = path.resolve(file);
-		baseWriteFileSync(resolved, "", "utf-8");
-		return {
-			writeFile: async (data: string | NodeJS.ArrayBufferView) => { baseWriteFileSync(resolved, data); },
-			sync: async () => {},
-			close: async () => {},
-		};
-	};
-	return memfs;
-}
-
 describe("SessionManager archive cascade-reap (OrchestrationCore §6)", () => {
 	let stateRoot = "";
-	let storeFs: SessionStoreMemFs;
 	let prevBobbitDir: string | undefined;
 	const managers: any[] = [];
 
 	beforeEach(() => {
 		stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "orch-cascade-"));
-		storeFs = createSessionStoreMemFs();
 		prevBobbitDir = process.env.BOBBIT_DIR;
 		process.env.BOBBIT_DIR = stateRoot;
 	});
@@ -128,7 +86,7 @@ describe("SessionManager archive cascade-reap (OrchestrationCore §6)", () => {
 	}
 
 	it("TERMINATE cascades to live children of EVERY child kind (not just pr-walkthrough)", async () => {
-		const store = new SessionStore(stateRoot, storeFs);
+		const store = new SessionStore(stateRoot);
 		const manager = makeManager(store);
 
 		manager.sessions.set("parent", makeInfo(store, "parent", {}));
@@ -147,7 +105,7 @@ describe("SessionManager archive cascade-reap (OrchestrationCore §6)", () => {
 	});
 
 	it("ARCHIVE (storeArchive) of a DORMANT parent cascade-reaps live + dormant children of every kind", async () => {
-		const store = new SessionStore(stateRoot, storeFs);
+		const store = new SessionStore(stateRoot);
 		const manager = makeManager(store);
 
 		// Parent exists only in the store (dormant — NOT in the in-memory map).
@@ -169,7 +127,7 @@ describe("SessionManager archive cascade-reap (OrchestrationCore §6)", () => {
 	});
 
 	it("ARCHIVE does NOT touch sessions belonging to a different parent", async () => {
-		const store = new SessionStore(stateRoot, storeFs);
+		const store = new SessionStore(stateRoot);
 		const manager = makeManager(store);
 
 		store.put({ id: "parent-a", title: "parent-a", cwd: stateRoot, agentSessionFile: "", createdAt: Date.now(), lastActivity: Date.now() } as any);

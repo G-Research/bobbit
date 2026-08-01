@@ -94,7 +94,7 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("mounted gateway preview and 
 		expect(content.status).toBe(200);
 		const previewHtml = await content.text();
 		expect(previewHtml).toContain(`data-bobbit-preview-base`);
-		expect(previewHtml).toMatch(new RegExp(`href="${MOUNT}/preview/${sessionId}/_content/[^/]+/"`));
+		expect(previewHtml).toContain(`href="${MOUNT}/preview/${sessionId}/"`);
 		expect(previewHtml).not.toContain(`${MOUNT}${MOUNT}`);
 	});
 });

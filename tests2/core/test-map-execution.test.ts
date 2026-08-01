@@ -28,7 +28,6 @@ const MATERIALIZED_PATHS = [
 	"tests2/core/orphan-tool-result-rehydration-boundaries.test.ts",
 	"tests2/core/team-manager.test.ts",
 	"tests2/integration/base-path-cli-entrypoint.test.ts",
-	"tests2/integration/fixture-command-timeout-real-git.test.ts",
 	"tests2/integration/team-spawn-multi-repo-real-git.test.ts",
 ] as const;
 let root: string;
@@ -91,7 +90,6 @@ describe("tests-map execution metadata", () => {
 			"tests2/core/orphan-tool-result-rehydration-boundaries.test.ts",
 			"tests2/core/team-manager.test.ts",
 			"tests2/integration/base-path-cli-entrypoint.test.ts",
-			"tests2/integration/fixture-command-timeout-real-git.test.ts",
 			"tests2/integration/team-spawn-multi-repo-real-git.test.ts",
 		]);
 	});

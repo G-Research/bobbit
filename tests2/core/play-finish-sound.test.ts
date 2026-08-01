@@ -1,12 +1,7 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-	__resetGatewayConnectionForTests,
-	activeGatewayConnection,
-	commitGatewayConnection,
-} from "../../src/app/gateway-fetch.ts";
+import { afterEach, describe, expect, it } from "vitest";
 import {
 	PLAY_FINISH_SOUND_CHANGED,
 	PROJECT_PLAY_FINISH_SOUND_KEY,
@@ -118,35 +113,11 @@ function projectPut(call: CapturedFetch, projectId: string): boolean {
 	return call.path === `/api/projects/${projectId}/config` && call.init.method === "PUT";
 }
 
-function resetOwnedState(): void {
-	finishSoundTest.resetProjectOverrides();
-	__resetGatewayConnectionForTests();
-}
-
-beforeEach(resetOwnedState);
-
 afterEach(() => {
-	resetOwnedState();
+	finishSoundTest.resetProjectOverrides();
 	for (const key of ["document", "window", "localStorage", "CustomEvent", "fetch"]) {
 		Object.defineProperty(globalThis, key, { value: undefined, configurable: true, writable: true });
 	}
-});
-
-describe("isolate:false gateway ownership", () => {
-	it("models a preceding file that selected an explicit mounted gateway", () => {
-		install();
-		commitGatewayConnection("https://gw.test/team/gw", "prior-file-token");
-		expect(activeGatewayConnection()).toEqual({
-			baseUrl: "https://gw.test/team/gw",
-			token: "prior-file-token",
-		});
-	});
-
-	it("restores root-relative sound requests for the following file/test", async () => {
-		const captured = install("true");
-		await setPlayFinishSoundEnabled(false);
-		expect(captured.fetches.map((call) => call.path)).toEqual(["/api/preferences"]);
-	});
 });
 
 describe("global agent-finish sound preference", () => {

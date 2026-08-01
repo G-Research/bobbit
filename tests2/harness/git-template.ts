@@ -7,16 +7,6 @@ import { runFixtureCommand, type FixtureCommandOptions, type FixtureCommandResul
 const STATE_KEY = Symbol.for("bobbit.tests2.git-template-state");
 const README = "# Bobbit test repository\n";
 const GITATTRIBUTES = "* text=auto eol=lf\n";
-const INITIAL_COMMIT_MESSAGE = "Initial fixture\n";
-const COMMIT_IDENTITY = "Bobbit Test <bobbit-test@example.invalid>";
-const COMMIT_TIME = "946684800 +0000";
-
-/** The successful setup path launches exactly these three bounded Git processes. */
-export const GIT_TEMPLATE_NORMAL_PROCESS_PLAN = Object.freeze([
-	{ phase: "initialize", file: "git", args: ["-c", "maintenance.auto=false", "-c", "gc.auto=0", "-c", "init.defaultBranch=master", "init", "--quiet", "--object-format=sha1", "--template=", "."] },
-	{ phase: "import", file: "git", args: ["-c", "maintenance.auto=false", "-c", "gc.auto=0", "fast-import", "--quiet", "--force"] },
-	{ phase: "index", file: "git", args: ["-c", "maintenance.auto=false", "-c", "gc.auto=0", "read-tree", "HEAD"] },
-] as const);
 
 interface GitTemplateState {
 	promise?: Promise<string>;
@@ -92,73 +82,6 @@ function removeContainer(container: string): void {
 		// Cleanup must never turn a green test run red because an antivirus scanner
 		// briefly retained a handle. The OS temp directory remains the safe fallback.
 	}
-}
-
-function fastImportInput(): string {
-	const data = (value: string): string => `data ${Buffer.byteLength(value)}\n${value}\n`;
-	return [
-		"feature done\n",
-		"blob\nmark :1\n", data(GITATTRIBUTES),
-		"blob\nmark :2\n", data(README),
-		"reset refs/heads/master\n\n",
-		"commit refs/heads/master\nmark :3\n",
-		`author ${COMMIT_IDENTITY} ${COMMIT_TIME}\n`,
-		`committer ${COMMIT_IDENTITY} ${COMMIT_TIME}\n`,
-		data(INITIAL_COMMIT_MESSAGE),
-		"M 100644 :1 .gitattributes\n",
-		"M 100644 :2 README.md\n\n",
-		"done\n",
-	].join("");
-}
-
-function writeLocalConfiguration(repository: string): void {
-	const hooks = join(repository, ".git", "hooks-disabled");
-	mkdirSync(hooks);
-	const configPath = join(repository, ".git", "config");
-	const initialized = readFileSync(configPath, "utf8").trimEnd();
-	writeFileSync(configPath, `${initialized}\n[user]\n\tname = Bobbit Test\n\temail = bobbit-test@example.invalid\n[core]\n\tautocrlf = false\n\thooksPath = ${JSON.stringify(hooks)}\n[commit]\n\tgpgsign = false\n[maintenance]\n\tauto = false\n[gc]\n\tauto = 0\n[index]\n\tversion = 2\n[fastimport]\n\tunpackLimit = 100\n`, "utf8");
-}
-
-async function initializePrivateRepository(repository: string, env: NodeJS.ProcessEnv): Promise<void> {
-	mkdirSync(repository);
-	const command = GIT_TEMPLATE_NORMAL_PROCESS_PLAN[0];
-	await runFixtureCommand(command.file, command.args, { cwd: repository, env });
-	writeLocalConfiguration(repository);
-	writeFileSync(join(repository, "README.md"), README, "utf8");
-	writeFileSync(join(repository, ".gitattributes"), GITATTRIBUTES, "utf8");
-}
-
-async function recreateInitializedRepository(repository: string, env: NodeJS.ProcessEnv): Promise<void> {
-	// A private attempt is never published until its ref and index both exist. A
-	// closed timed-out mutation is replaced wholesale before the bounded retry.
-	rmSync(repository, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 });
-	await initializePrivateRepository(repository, env);
-}
-
-async function importPrivateCommit(repository: string, env: NodeJS.ProcessEnv): Promise<void> {
-	const command = GIT_TEMPLATE_NORMAL_PROCESS_PLAN[1];
-	await runFixtureCommand(command.file, command.args, {
-		cwd: repository,
-		env,
-		stdin: fastImportInput(),
-		onTimedOutAttemptClosed: () => recreateInitializedRepository(repository, env),
-	});
-}
-
-async function recreateCommittedRepository(repository: string, env: NodeJS.ProcessEnv): Promise<void> {
-	await recreateInitializedRepository(repository, env);
-	await importPrivateCommit(repository, env);
-}
-
-async function populatePrivateRepository(repository: string, env: NodeJS.ProcessEnv): Promise<void> {
-	await initializePrivateRepository(repository, env);
-	await importPrivateCommit(repository, env);
-	const command = GIT_TEMPLATE_NORMAL_PROCESS_PLAN[2];
-	await runFixtureCommand(command.file, command.args, {
-		cwd: repository,
-		env,
-		onTimedOutAttemptClosed: () => recreateCommittedRepository(repository, env),
-	});
 }
 
 export type GitTemplateCommandRunner = (
@@ -241,11 +164,34 @@ export async function prepareGitTemplate(): Promise<string> {
 		const container = mkdtempSync(join(tmpdir(), "bb-git-template-"));
 		const repository = join(container, "repo");
 		const home = join(container, "home");
+		mkdirSync(repository);
 		mkdirSync(home);
 		writeFileSync(join(home, "gitconfig"), "", "utf8");
 		const env = templateEnvironment(home);
+		const fixtureGit: GitTemplateCommandRunner = (args, cwd, options = {}) => runFixtureCommand(
+			"git",
+			// Both settings are written locally below so every copied fixture remains
+			// stable. Supplying them during bootstrap also prevents the committing
+			// process itself from launching background maintenance before the local
+			// config is available (macOS can otherwise leave maintenance.lock briefly).
+			["-c", "maintenance.auto=false", "-c", "gc.auto=0", ...args],
+			{ ...options, cwd, env },
+		);
 		try {
-			await populatePrivateRepository(repository, env);
+			await fixtureGit(["-c", "init.defaultBranch=master", "init", "--quiet", repository], container);
+			await fixtureGit(["config", "user.name", "Bobbit Test"], repository);
+			await fixtureGit(["config", "user.email", "bobbit-test@example.invalid"], repository);
+			await fixtureGit(["config", "core.autocrlf", "false"], repository);
+			await fixtureGit(["config", "commit.gpgsign", "false"], repository);
+			await fixtureGit(["config", "maintenance.auto", "false"], repository);
+			await fixtureGit(["config", "gc.auto", "0"], repository);
+			const hooks = join(repository, ".git", "hooks-disabled");
+			mkdirSync(hooks);
+			await fixtureGit(["config", "core.hooksPath", hooks], repository);
+			writeFileSync(join(repository, "README.md"), README, "utf8");
+			writeFileSync(join(repository, ".gitattributes"), GITATTRIBUTES, "utf8");
+			await fixtureGit(["add", "--", "README.md", ".gitattributes"], repository);
+			await commitInitialFixture(fixtureGit, repository);
 
 			const canonical = realpathSync(repository);
 			shared.path = canonical;

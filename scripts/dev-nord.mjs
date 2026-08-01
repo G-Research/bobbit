@@ -47,6 +47,6 @@ execSync(`node -e "
 "`, { stdio: "inherit" });
 
 execSync(
-	'npx concurrently -n harness,ui -c yellow,green "node dist/server/harness.js -- --cwd . --no-ui --vite-dev-proxy --nord" "vite"',
+	'npx concurrently -n harness,ui -c yellow,green "node dist/server/harness.js -- --cwd . --no-ui --nord" "vite"',
 	{ stdio: "inherit", env: { ...process.env, BOBBIT_NORD: "1" } },
 );

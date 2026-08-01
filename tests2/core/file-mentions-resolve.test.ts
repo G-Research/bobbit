@@ -31,9 +31,6 @@ beforeAll(() => {
 	fs.mkdirSync(path.join(cwdDir, "src"), { recursive: true });
 	fs.writeFileSync(path.join(cwdDir, "notes.txt"), NOTES_CONTENT, "utf-8");
 	fs.writeFileSync(path.join(cwdDir, "src", "a.ts"), SOURCE_CONTENT, "utf-8");
-	for (const fixture of ["compact-lf.txt", "compact-crlf.txt", "compact-cr.txt"]) {
-		fs.writeFileSync(path.join(cwdDir, fixture), NOTES_CONTENT, "utf-8");
-	}
 	fs.writeFileSync(path.join(cwdDir, "pixel.png"), PIXEL_BYTES);
 	fs.writeFileSync(path.join(cwdDir, "data.bin"), BINARY_BYTES);
 });
@@ -137,9 +134,8 @@ describe("resolveFileMentions", () => {
 			].join("\n"),
 		];
 
-		const results = await Promise.all(cases.map((text) => resolveFileMentions(text, cwdDir)));
-		for (const [index, text] of cases.entries()) {
-			const r = results[index];
+		for (const text of cases) {
+			const r = await resolveFileMentions(text, cwdDir);
 			assert.equal(r.originalText, text);
 			assert.equal(r.modelText, text, "fenced Markdown code must remain byte-for-byte unchanged");
 			assert.deepEqual(r.mentions, [], "fenced Markdown code must not produce file mentions");
@@ -274,8 +270,7 @@ describe("resolveFileMentions", () => {
 		];
 		const token = "@notes.txt";
 
-		const results = await Promise.all(cases.map((text) => resolveFileMentions(text, cwdDir)));
-		for (const [index, text] of cases.entries()) {
+		for (const text of cases) {
 			const start = text.indexOf(token);
 			const codeStart = text.indexOf("`", start + token.length);
 			assert.ok(codeStart >= start + token.length, "fixture must place inline code directly after the prose token or its punctuation");
@@ -285,7 +280,7 @@ describe("resolveFileMentions", () => {
 				"the astral prefix must distinguish UTF-16 ranges from code-point offsets",
 			);
 
-			const r = results[index];
+			const r = await resolveFileMentions(text, cwdDir);
 			const referenceBlock = buildFileReferenceBlock("notes.txt", NOTES_CONTENT);
 			assert.equal(r.originalText, text);
 			assert.deepEqual(
@@ -362,11 +357,10 @@ describe("resolveFileMentions", () => {
 			"an unmatched ` run before @notes.txt",
 			"different unmatched ` and `` runs before @notes.txt",
 		];
-		const results = await Promise.all(cases.map((text) => resolveFileMentions(text, cwdDir)));
 
-		for (const [index, text] of cases.entries()) {
+		for (const text of cases) {
 			const start = text.indexOf("@notes.txt");
-			const r = results[index];
+			const r = await resolveFileMentions(text, cwdDir);
 			assert.equal(r.mentions.length, 1, text);
 			assert.equal(r.mentions[0].path, "notes.txt");
 			assert.deepEqual(r.mentions[0].range, [start, start + "@notes.txt".length]);
@@ -385,11 +379,10 @@ describe("resolveFileMentions", () => {
 				"- second item has @notes.txt before another unmatched ` run",
 			].join("\n"),
 		];
-		const results = await Promise.all(cases.map((text) => resolveFileMentions(text, cwdDir)));
 
-		for (const [index, text] of cases.entries()) {
+		for (const text of cases) {
 			const start = text.indexOf("@notes.txt");
-			const r = results[index];
+			const r = await resolveFileMentions(text, cwdDir);
 			assert.equal(r.mentions.length, 1, text);
 			assert.equal(r.mentions[0].kind, "text");
 			assert.equal(r.mentions[0].path, "notes.txt");
@@ -442,10 +435,9 @@ describe("resolveFileMentions", () => {
 			["1. ~~~text", "   @notes.txt", "   ~~~", "outside @src/a.ts"].join("\n"),
 		];
 
-		const results = await Promise.all(cases.map((text) => resolveFileMentions(text, cwdDir)));
-		for (const [index, text] of cases.entries()) {
+		for (const text of cases) {
 			const start = text.lastIndexOf("@src/a.ts");
-			const r = results[index];
+			const r = await resolveFileMentions(text, cwdDir);
 			assert.equal(r.mentions.length, 1, text);
 			assert.equal(r.mentions[0].path, "src/a.ts");
 			assert.deepEqual(r.mentions[0].range, [start, start + "@src/a.ts".length]);
@@ -502,14 +494,10 @@ describe("resolveFileMentions", () => {
 	});
 
 	it("recognizes fenced code with CR-only, LF, and CRLF line endings", async () => {
-		const cases = ["\r", "\n", "\r\n"].map((eol) => ({
-			eol,
-			text: ["before", "~~~text", "@notes.txt", "~~~", "after @src/a.ts"].join(eol),
-		}));
-		const results = await Promise.all(cases.map(({ text }) => resolveFileMentions(text, cwdDir)));
-		for (const [index, { eol, text }] of cases.entries()) {
+		for (const eol of ["\r", "\n", "\r\n"]) {
+			const text = ["before", "~~~text", "@notes.txt", "~~~", "after @src/a.ts"].join(eol);
 			const start = text.indexOf("@src/a.ts");
-			const r = results[index];
+			const r = await resolveFileMentions(text, cwdDir);
 			assert.equal(r.mentions.length, 1, `line ending ${JSON.stringify(eol)}`);
 			assert.equal(r.mentions[0].path, "src/a.ts");
 			assert.deepEqual(r.mentions[0].range, [start, start + "@src/a.ts".length]);
@@ -534,11 +522,10 @@ describe("resolveFileMentions", () => {
 			["before", "```ts", "@notes.txt", "````", "after @src/a.ts"].join("\n"),
 			["before", "~~~text", "@notes.txt", "~~~~~", "after @src/a.ts"].join("\n"),
 		];
-		const results = await Promise.all(cases.map((text) => resolveFileMentions(text, cwdDir)));
 
-		for (const [index, text] of cases.entries()) {
+		for (const text of cases) {
 			const start = text.indexOf("@src/a.ts");
-			const r = results[index];
+			const r = await resolveFileMentions(text, cwdDir);
 			assert.equal(r.mentions.length, 1, text);
 			assert.equal(r.mentions[0].path, "src/a.ts");
 			assert.deepEqual(r.mentions[0].range, [start, start + "@src/a.ts".length]);
@@ -1270,13 +1257,9 @@ describe("resolveFileMentions", () => {
 
 	it("trims all supported trailing punctuation from range and replacement", async () => {
 		const block = buildFileReferenceBlock("notes.txt", NOTES_CONTENT);
-		const cases = [".", ",", ")", ":", ";"].map((punctuation) => ({
-			punctuation,
-			text: `see @notes.txt${punctuation}`,
-		}));
-		const results = await Promise.all(cases.map(({ text }) => resolveFileMentions(text, cwdDir)));
-		for (const [index, { punctuation }] of cases.entries()) {
-			const r = results[index];
+		for (const punctuation of [".", ",", ")", ":", ";"]) {
+			const text = `see @notes.txt${punctuation}`;
+			const r = await resolveFileMentions(text, cwdDir);
 			assert.equal(r.mentions.length, 1);
 			assert.equal(r.mentions[0].path, "notes.txt");
 			assert.deepEqual(r.mentions[0].range, [4, 4 + "@notes.txt".length]);
@@ -1315,158 +1298,93 @@ describe("resolveFileMentions", () => {
 		const backtick = "`";
 		const missingToken = "@flat-scanner-missing.txt";
 		const validToken = "@notes.txt";
-		const eols = ["\n", "\r\n", "\r"] as const;
-		// One large mixed-EOL scan retains every source-offset variant without
-		// tripling the large payload and deep-parser fallback under worker load.
-		const lineEndingSections = eols.map((eol) => {
-			const sections: string[] = [];
-			for (let repetition = 0; repetition < 12; repetition++) {
-				for (let runLength = 1; runLength <= 12; runLength++) {
-					const run = backtick.repeat(runLength);
-					const shorterRun = backtick.repeat(Math.max(0, runLength - 1));
-					sections.push(
-						`matched ${run}keep ${shorterRun} ${validToken} literal${run}`,
-						`multiline ${run}first line${eol}second ${validToken} literal${run}`,
-						`unmatched ${run} stays prose with ${missingToken}`,
-						"",
-					);
+		const lstatSpy = vi.spyOn(fs.promises, "lstat");
+
+		try {
+			for (const eol of ["\n", "\r\n", "\r"]) {
+				const sections: string[] = [];
+				for (let repetition = 0; repetition < 32; repetition++) {
+					for (let runLength = 1; runLength <= 12; runLength++) {
+						const run = backtick.repeat(runLength);
+						const shorterRun = backtick.repeat(Math.max(0, runLength - 1));
+						sections.push(
+							`matched ${run}keep ${shorterRun} ${validToken} literal${run}`,
+							`multiline ${run}first line${eol}second ${validToken} literal${run}`,
+							`unmatched ${run} stays prose with ${missingToken}`,
+							"",
+						);
+					}
 				}
-			}
-			return sections.join(eol);
-		});
 
-		const three = backtick.repeat(3);
-		const five = backtick.repeat(5);
-		const deepInline = `${"- ".repeat(4_096)}${backtick}deep ${validToken} literal${backtick}`;
-		const text = [
-			...lineEndingSections,
-			three + "text",
-			`${validToken} ${"x".repeat(192 * 1024)}`,
-			five,
-			`container fences \r\n> ${three}text\r\n> ${validToken}\r\n> ${three}`,
-			`- ${five}text\r  ${validToken}\r  ${five}`,
-			`    indented ${validToken}`,
-			deepInline,
-			`😀 outside ${validToken}; missing ${missingToken}.`,
-		].join("\n\n");
-		const start = text.lastIndexOf(validToken);
-		const lstatSpy = vi.spyOn(fs.promises, "lstat");
-		const firstLstatCall = lstatSpy.mock.calls.length;
+				const three = backtick.repeat(3);
+				const five = backtick.repeat(5);
+				const deepInline = `${"- ".repeat(4_096)}${backtick}deep ${validToken} literal${backtick}`;
+				const text = [
+					...sections,
+					three + "text",
+					`${validToken} ${"x".repeat(192 * 1024)}`,
+					five,
+					`container fences ${eol}> ${three}text${eol}> ${validToken}${eol}> ${three}`,
+					`- ${five}text${eol}  ${validToken}${eol}  ${five}`,
+					`    indented ${validToken}`,
+					deepInline,
+					`😀 outside ${validToken}; missing ${missingToken}.`,
+				].join(eol);
+				const start = text.lastIndexOf(validToken);
+				const firstLstatCall = lstatSpy.mock.calls.length;
 
-		try {
-			assert.ok(text.length > 256 * 1024, "fixture must exercise a large flat Markdown scan");
-			assert.throws(
-				() => marked.lexer(deepInline, { async: false }),
-				(error: unknown) => error instanceof RangeError && /call stack/i.test(error.message),
-				"the terminal container must exercise the non-recursive deep-list fallback",
-			);
-			assert.equal(
-				Buffer.byteLength(text.slice(0, start), "utf8"),
-				start + 2,
-				"the final astral prefix must preserve UTF-16 rather than byte offsets",
-			);
-
-			const result = await resolveFileMentions(text, cwdDir);
-			assert.equal(result.originalText, text);
-			assert.deepEqual(
-				result.mentions.map((mention) => ({
-					kind: mention.kind,
-					path: mention.path,
-					range: mention.range,
-				})),
-				[{ kind: "text", path: "notes.txt", range: [start, start + validToken.length] }],
-			);
-			assert.equal(
-				result.modelText,
-				text.slice(0, start)
-					+ buildFileReferenceBlock("notes.txt", NOTES_CONTENT)
-					+ text.slice(start + validToken.length),
-				"matched inline spans, multiline spans, fences, indentation, and fallback containers must stay literal",
-			);
-			assert.deepEqual(result.warnings, []);
-			assert.deepEqual(
-				lstatSpy.mock.calls.slice(firstLstatCall)
-					.map(([target]) => path.resolve(String(target)))
-					.sort(),
-				[
-					path.join(cwdDir, "flat-scanner-missing.txt"),
-					path.join(cwdDir, "notes.txt"),
-				].sort(),
-				"only the repeated unmatched prose token and final valid token may reach the filesystem",
-			);
-		} finally {
-			lstatSpy.mockRestore();
-		}
-	});
-
-	it("preserves exact compact LF, CRLF, and CR source-offset splices", async () => {
-		const cases = [
-			{ label: "LF", eol: "\n", validPath: "compact-lf.txt", missingPath: "compact-lf-missing.txt" },
-			{ label: "CRLF", eol: "\r\n", validPath: "compact-crlf.txt", missingPath: "compact-crlf-missing.txt" },
-			{ label: "CR", eol: "\r", validPath: "compact-cr.txt", missingPath: "compact-cr-missing.txt" },
-		] as const;
-		const fixtures = cases.map(({ eol, validPath, missingPath }) => {
-			const text = [
-				`matched \`keep @${validPath} literal\``,
-				`multiline \`\`first${eol}second @${validPath} literal\`\``,
-				"```text",
-				`@${validPath} and @${missingPath}`,
-				"```",
-				`😀 outside @${validPath}; missing @${missingPath}.`,
-			].join(eol);
-			return { text, start: text.lastIndexOf(`@${validPath}`) };
-		});
-		const lstatSpy = vi.spyOn(fs.promises, "lstat");
-
-		try {
-			const results = await Promise.all(fixtures.map(({ text }) => resolveFileMentions(text, cwdDir)));
-			const probedPaths = lstatSpy.mock.calls.map(([target]) => path.resolve(String(target)));
-
-			for (const [index, { label, validPath, missingPath }] of cases.entries()) {
-				const { text, start } = fixtures[index];
-				const result = results[index];
-				const token = `@${validPath}`;
-				assert.equal(result.originalText, text, `${label}: source text must remain exact`);
-				assert.equal(
-					[...text.slice(0, start)].length,
-					start - 1,
-					`${label}: the astral prefix must distinguish UTF-16 units from code points`,
+				assert.ok(text.length > 256 * 1024, "fixture must exercise a large flat Markdown scan");
+				assert.throws(
+					() => marked.lexer(deepInline, { async: false }),
+					(error: unknown) => error instanceof RangeError && /call stack/i.test(error.message),
+					"the terminal container must exercise the non-recursive deep-list fallback",
 				);
+				assert.equal(
+					Buffer.byteLength(text.slice(0, start), "utf8"),
+					start + 2,
+					"the final astral prefix must preserve UTF-16 rather than byte offsets",
+				);
+
+				const result = await resolveFileMentions(text, cwdDir);
+				assert.equal(result.originalText, text);
 				assert.deepEqual(
-					result.mentions.map((mention) => ({ kind: mention.kind, path: mention.path, range: mention.range })),
-					[{ kind: "text", path: validPath, range: [start, start + token.length] }],
-					`${label}: only the final outside mention may resolve at its exact source range`,
+					result.mentions.map((mention) => ({
+						kind: mention.kind,
+						path: mention.path,
+						range: mention.range,
+					})),
+					[{ kind: "text", path: "notes.txt", range: [start, start + validToken.length] }],
 				);
 				assert.equal(
 					result.modelText,
 					text.slice(0, start)
-						+ buildFileReferenceBlock(validPath, NOTES_CONTENT)
-						+ text.slice(start + token.length),
-					`${label}: inline code and fenced code must remain exact around the outside splice`,
+						+ buildFileReferenceBlock("notes.txt", NOTES_CONTENT)
+						+ text.slice(start + validToken.length),
+					"matched inline spans, multiline spans, fences, indentation, and fallback containers must stay literal",
 				);
-				assert.deepEqual(result.warnings, [], `${label}: the missing prose target stays ordinary text`);
-
-				const expectedProbes = [
-					path.resolve(cwdDir, validPath),
-					path.resolve(cwdDir, missingPath),
-				].sort();
+				assert.deepEqual(result.warnings, []);
 				assert.deepEqual(
-					probedPaths.filter((target) => expectedProbes.includes(target)).sort(),
-					expectedProbes,
-					`${label}: only its distinct outside valid and missing targets may reach lstat`,
+					lstatSpy.mock.calls.slice(firstLstatCall)
+						.map(([target]) => path.resolve(String(target)))
+						.sort(),
+					[
+						path.join(cwdDir, "flat-scanner-missing.txt"),
+						path.join(cwdDir, "notes.txt"),
+					].sort(),
+					"only the repeated unmatched prose token and final valid token may reach the filesystem",
 				);
 			}
 		} finally {
 			lstatSpy.mockRestore();
 		}
 	});
+
 
 	it("maps nested CRLF code compactly while preserving an outside UTF-16 mention range", async () => {
 		const nestedCodeLine = "  > ` keep @notes.txt and @nested-code-missing.txt literal\r\n";
 		const text = [
 			"- > ```text\r\n",
-			// The flat mixed-run fixture above owns the >256 KiB byte-volume case.
-			nestedCodeLine.repeat(512),
+			nestedCodeLine.repeat(2_048),
 			"  > ```\r\n",
 			"\r\n",
 			"unmatched ` marker\r\n",

@@ -1,12 +1,11 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import { copyGitTemplate } from "../harness/git-template.js";
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, registerProject } from "./_e2e/e2e-setup.js";
-import { installCommandRunnerInterceptor } from "./helpers/command-runner-dispatcher.js";
 import {
 	GENERAL_PROMPT_MARKER,
 	GENERAL_ROLE,
@@ -29,16 +28,6 @@ let worktreeProject: { id: string; rootPath: string };
 let worktreeFixtureRoot = "";
 let restoreCommandRunner: (() => void) | undefined;
 const gitCalls: Array<{ cwd: string; args: string[] }> = [];
-
-function ownsCommandCwd(cwd: unknown): cwd is string {
-	if (!worktreeFixtureRoot || typeof cwd !== "string") return false;
-	const pathFromRoot = relative(resolve(worktreeFixtureRoot), resolve(cwd));
-	return pathFromRoot === "" || (!pathFromRoot.startsWith("..") && !isAbsolute(pathFromRoot));
-}
-
-function isGitExecutable(file: string): boolean {
-	return basename(file).toLowerCase().replace(/\.exe$/, "") === "git";
-}
 
 function directorySnapshot(directoryPath: string): { exists: boolean; entries: string[] } {
 	const exists = existsSync(directoryPath);
@@ -80,19 +69,17 @@ function cannedGit(cwd: string, args: readonly string[]): string {
 async function installCannedGitRunner(): Promise<void> {
 	const runtime = await loadServerTestRuntime();
 	const runner = runtime.gatewayDeps.realCommandRunner;
-	restoreCommandRunner = installCommandRunnerInterceptor(runner, {
-		label: "default-standard-session-role-worktree",
-		async execFile(file, args, options, next) {
-			if (!ownsCommandCwd(options?.cwd)) return next();
-			if (!isGitExecutable(file)) throw new Error(`unexpected command: ${file}`);
-			return { stdout: cannedGit(options.cwd, args), stderr: "" };
-		},
-		execFileSync(file, args, options, next) {
-			if (!ownsCommandCwd(options?.cwd)) return next();
-			if (!isGitExecutable(file)) throw new Error(`unexpected command: ${file}`);
-			return cannedGit(options.cwd, args);
-		},
-	});
+	const original = { execFile: runner.execFile, execFileSync: runner.execFileSync, spawn: runner.spawn };
+	runner.execFile = async (file, args, options) => {
+		if (basename(file).toLowerCase().replace(/\.exe$/, "") !== "git") throw new Error(`unexpected command: ${file}`);
+		return { stdout: cannedGit(String(options?.cwd ?? ""), args), stderr: "" };
+	};
+	runner.execFileSync = (file, args, options) => {
+		if (basename(file).toLowerCase().replace(/\.exe$/, "") !== "git") throw new Error(`unexpected command: ${file}`);
+		return cannedGit(String(options?.cwd ?? ""), args);
+	};
+	runner.spawn = undefined;
+	restoreCommandRunner = () => Object.assign(runner, original);
 }
 
 async function waitForGenuineWorktree(gateway: any, sessionId: string, sourceRepo: string): Promise<void> {

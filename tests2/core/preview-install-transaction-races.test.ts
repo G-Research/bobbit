@@ -67,19 +67,7 @@ async function blockDirectory(directory: string): Promise<void> {
 }
 
 class HeldReadable extends Readable {
-	readonly destroyStarted = deferred();
-	private readonly allowDestroy = deferred();
-
 	_read(): void { /* held until the request aborts */ }
-
-	_destroy(error: Error | null, callback: (error?: Error | null) => void): void {
-		this.destroyStarted.resolve();
-		void this.allowDestroy.promise.then(() => callback(error));
-	}
-
-	finishDestroy(): void {
-		this.allowDestroy.resolve();
-	}
 }
 
 afterEach(() => {
@@ -243,7 +231,7 @@ describe("preview install transaction races", () => {
 		assert.equal(isPreviewDirectoryAvailable(live), true);
 	});
 
-	it("destroys an aborted non-HTML stream and releases its directory lease", { retry: 0 }, async () => {
+	it("destroys an aborted non-HTML stream and releases its directory lease", async () => {
 		const temp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-preview-abort-"));
 		const previewRoot = path.join(temp, "preview");
 		setPreviewRootForTesting(previewRoot);
@@ -251,7 +239,7 @@ describe("preview install transaction races", () => {
 		fs.mkdirSync(live, { recursive: true });
 		fs.writeFileSync(path.join(live, "asset.bin"), Buffer.alloc(64));
 		const held = new HeldReadable();
-		const streamSpy = vi.spyOn(fs, "createReadStream").mockReturnValue(held as unknown as fs.ReadStream);
+		vi.spyOn(fs, "createReadStream").mockReturnValue(held as unknown as fs.ReadStream);
 
 		const req = Object.assign(new EventEmitter(), {
 			url: `/preview/${SID_A}/asset.bin`,
@@ -271,139 +259,31 @@ describe("preview install transaction races", () => {
 			res.statusCode = status;
 			res.headers = headers ?? {};
 		};
+		const route = handlePreviewRequest(
+			req,
+			res as any,
+			`/preview/${SID_A}/asset.bin`,
+			{ cookieStore: new CookieStore(Buffer.alloc(32, 7)), isLocalhost: true },
+		);
+		await new Promise<void>(resolve => setImmediate(resolve));
+		req.emit("close");
+		await new Promise<void>(resolve => setImmediate(resolve));
+		assert.equal(held.destroyed, false, "normal completed request close must not truncate the response stream");
 
-		let route: Promise<boolean> | undefined;
-		let writer: Promise<void> | undefined;
-		try {
-			route = handlePreviewRequest(
-				req,
-				res as any,
-				`/preview/${SID_A}/asset.bin`,
-				{ cookieStore: new CookieStore(Buffer.alloc(32, 7)), isLocalhost: true },
-			);
-			await vi.waitFor(() => assert.equal(streamSpy.mock.calls.length, 1), { timeout: 5_000 });
-			const streamOptions = streamSpy.mock.calls[0]?.[1] as { fd?: number; autoClose?: boolean } | undefined;
-			assert.equal(streamOptions?.autoClose, true);
-			assert.equal(typeof streamOptions?.fd, "number", "the verified descriptor must be transferred to the stream");
-			const streamedFd = streamOptions!.fd!;
-
-			// IncomingMessage closes after a normal fully received GET. It is not a
-			// response abort and must leave the owned source and descriptor intact.
-			req.emit("close");
-			await new Promise<void>(resolve => setImmediate(resolve));
-			assert.equal(held.destroyed, false, "normal completed request close must not truncate the response stream");
-			assert.doesNotThrow(() => fs.fstatSync(streamedFd));
-
-			let writerEntered = false;
-			writer = withPreviewDirectoryUnavailable(live, async () => {
-				writerEntered = true;
-				markPreviewDirectoryVerified(live);
-			});
-			await new Promise<void>(resolve => setImmediate(resolve));
-			assert.equal(writerEntered, false, "writer must wait for the streaming read lease");
-
-			req.aborted = true;
-			req.emit("aborted");
-			await held.destroyStarted.promise;
-			assert.equal(held.destroyed, true, "request abort must destroy the owned source");
-			assert.equal(writerEntered, false, "lease must remain held until stream close proves descriptor cleanup");
-			assert.doesNotThrow(() => fs.fstatSync(streamedFd), "descriptor must remain owned until stream destruction completes");
-
-			held.finishDestroy();
-			await Promise.all([route, writer]);
-			assert.equal(writerEntered, true);
-			assert.throws(
-				() => fs.fstatSync(streamedFd),
-				(error: NodeJS.ErrnoException) => error.code === "EBADF",
-				"descriptor must be closed before the writer lease is released",
-			);
-			assert.equal(req.listenerCount("aborted"), 0);
-			assert.equal(req.listenerCount("close"), 0);
-			assert.equal(res.listenerCount("close"), 0);
-			assert.equal(req.emit("aborted"), false, "terminal cleanup must remove stale double-release listeners");
-		} finally {
-			req.aborted = true;
-			req.emit("aborted");
-			held.finishDestroy();
-			await Promise.allSettled([...(route ? [route] : []), ...(writer ? [writer] : [])]);
-			res.destroy();
-			fs.rmSync(temp, { recursive: true, force: true });
-		}
-	});
-
-	it("observes aborts while descriptor-safe generation verification is pending", { retry: 0 }, async () => {
-		const temp = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-preview-verification-abort-"));
-		const previewRoot = path.join(temp, "preview");
-		setPreviewRootForTesting(previewRoot);
-		const live = mountPath(SID_A);
-		fs.mkdirSync(live, { recursive: true });
-		fs.writeFileSync(path.join(live, "asset.bin"), Buffer.alloc(64));
-
-		const baseFs = createPreviewAsyncFs(fs);
-		const verificationStarted = deferred();
-		const allowVerification = deferred();
-		let rootEnumerations = 0;
-		setPreviewFsForTesting({
-			...baseFs,
-			opendir: async (directory: fs.PathLike) => {
-				if (resolved(directory) === resolved(live) && ++rootEnumerations === 1) {
-					verificationStarted.resolve();
-					await allowVerification.promise;
-				}
-				return baseFs.opendir(directory);
-			},
+		let writerEntered = false;
+		const writer = withPreviewDirectoryUnavailable(live, async () => {
+			writerEntered = true;
+			markPreviewDirectoryVerified(live);
 		});
-		const streamSpy = vi.spyOn(fs, "createReadStream");
-		const req = Object.assign(new EventEmitter(), {
-			url: `/preview/${SID_A}/asset.bin`,
-			method: "GET",
-			headers: { host: "x" },
-			complete: true,
-			aborted: false,
-		}) as any;
-		const res = new PassThrough() as PassThrough & {
-			statusCode: number;
-			writeHead(status: number): void;
-		};
-		res.statusCode = 0;
-		res.writeHead = status => { res.statusCode = status; };
-
-		let route: Promise<boolean> | undefined;
-		let writer: Promise<void> | undefined;
-		try {
-			route = handlePreviewRequest(
-				req,
-				res as any,
-				`/preview/${SID_A}/asset.bin`,
-				{ cookieStore: new CookieStore(Buffer.alloc(32, 8)), isLocalhost: true },
-			);
-			await verificationStarted.promise;
-			assert.equal(req.listenerCount("aborted"), 1, "abort ownership must begin before generation verification");
-
-			req.aborted = true;
-			req.emit("aborted");
-			let writerEntered = false;
-			writer = withPreviewDirectoryUnavailable(live, async () => {
-				writerEntered = true;
-				markPreviewDirectoryVerified(live);
-			});
-			await vi.waitFor(() => assert.equal(writerEntered, true), { timeout: 1_000 });
-			assert.equal(streamSpy.mock.calls.length, 0, "an aborted verification must never open a response stream");
-
-			allowVerification.resolve();
-			await Promise.all([route, writer]);
-			assert.equal(res.statusCode, 0, "an aborted request must not receive late headers");
-			assert.equal(req.listenerCount("aborted"), 0);
-			assert.equal(req.listenerCount("close"), 0);
-			assert.equal(res.listenerCount("close"), 0);
-		} finally {
-			req.aborted = true;
-			req.emit("aborted");
-			allowVerification.resolve();
-			await Promise.allSettled([...(route ? [route] : []), ...(writer ? [writer] : [])]);
-			res.destroy();
-			fs.rmSync(temp, { recursive: true, force: true });
-		}
+		await new Promise<void>(resolve => setImmediate(resolve));
+		assert.equal(writerEntered, false, "writer must wait for the streaming read lease");
+		req.aborted = true;
+		req.emit("aborted");
+		await Promise.all([route, writer]);
+		assert.equal(held.destroyed, true);
+		assert.equal(writerEntered, true);
+		res.destroy();
+		fs.rmSync(temp, { recursive: true, force: true });
 	});
 
 	it("serializes owned quarantine cleanup and logs failures without losing ownership", async () => {

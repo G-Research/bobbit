@@ -30,6 +30,7 @@ import { PlanMutationStore } from "../../src/server/agent/plan-mutation-store.ts
 import { ProjectConfigStore } from "../../src/server/agent/project-config-store.ts";
 import { InlineWorkflowStore } from "../../src/server/agent/workflow-store.ts";
 import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../../src/server/agent/nested-goal-routes.ts";
+import type { CookieStore } from "../../src/server/auth/cookie.ts";
 import { createMemFs } from "../harness/mem-fs.js";
 import { SessionSecretStore } from "../../src/server/auth/session-secret.ts";
 
@@ -66,9 +67,11 @@ async function makeHarness(): Promise<Harness> {
 	memfs.mkdirSync(configDir);
 
 	const goalStore = new GoalStore(stateDir, memfs);
-	// The gateway verifies the wire value before dispatch and passes only this
-	// boolean authority into the nested-route module.
-	const humanCookieHeader = "bobbit_session=centrally-verified-fixture";
+	// Wire-shaped stateless value; this route test stubs verification because
+	// signing/expiry behavior belongs to the cookie-core suite.
+	const humanCookieValue = "v1.1700000000.1702592000.AAECAwQFBgcICQoLDA0ODw.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+	const cookieStore = { verify: (value: string) => value === humanCookieValue } as unknown as CookieStore;
+	const humanCookieHeader = `bobbit_session=${humanCookieValue}`;
 	const cfg = new ProjectConfigStore(configDir, memfs);
 	const wf = new InlineWorkflowStore(cfg);
 	wf.setBuiltins([
@@ -146,7 +149,7 @@ async function makeHarness(): Promise<Harness> {
 		verificationHarness,
 		teamManager,
 		sessionManager,
-		cookieAuthenticated: false,
+		cookieStore,
 		requireSubgoalsEnabled: () => true,
 		getGoalAcrossProjects: (gid) => goalStore.get(gid),
 		getGoalManagerForGoal: () => goalManager,
@@ -167,7 +170,6 @@ async function makeHarness(): Promise<Harness> {
 		let payload: any = undefined;
 		const localDeps: NestedGoalRouteDeps = {
 			...deps,
-			cookieAuthenticated: headers.cookie === humanCookieHeader,
 			json: (b, s) => { status = s ?? 200; payload = b; },
 			jsonError: (s, err, extra) => { status = s; payload = { error: String((err as any)?.message ?? err), ...(extra ?? {}) }; },
 		};

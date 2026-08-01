@@ -23,9 +23,8 @@ enableTsWorkerResolver();
  *     declaration, and `process.cwd()` returns the supplied `workingDir`.
  *   - CPU control: a `while(1)` runaway is TERMINATED on timeout (504) — wall-time
  *     termination IS the CPU-cap control (worker_threads has no per-core throttle).
- *   - Memory cap: the exact-registered companion
- *     `extension-host-module-memory-isolation.test.ts` deliberately exceeds
- *     `resourceLimits.maxOldGenerationSizeMb` in its own Vitest fork.
+ *   - Memory cap: a handler that exceeds `resourceLimits.maxOldGenerationSizeMb`
+ *     crashes the worker → ActionError, never an unbounded parent allocation.
  *   - Crash isolation: a thrown/crashing handler becomes an error, the host
  *     survives, and the NEXT invocation still works.
  *   - Host-API proxy: store/session calls are marshalled to (and authorized in) the
@@ -91,9 +90,6 @@ function trySymlink(target: string, linkPath: string): boolean {
 }
 
 beforeAll(() => {
-	// v2-core reuses forks with isolate:false; another file's env restoration can
-	// run after collection, so restore the worker resolver at this file boundary.
-	enableTsWorkerResolver();
 	tmp = makeTmpDir("ext-host-iso-");
 });
 afterAll(() => {
@@ -242,6 +238,22 @@ describe.concurrent("ModuleHost — CPU / wall-time termination (design §9: ter
 			);
 			// The worker was KILLED promptly (not left spinning forever).
 			assert.ok(Date.now() - t0 < 5_000, "timeout should fire and terminate the worker promptly");
+		} finally {
+			mh.dispose();
+		}
+	});
+});
+
+describe.concurrent("ModuleHost — memory cap (resourceLimits)", () => {
+	it("a handler that exceeds the heap cap crashes the worker → ActionError, not an unbounded parent alloc", async () => {
+		// Tight heap cap; a generous timeout so the OOM (not the timer) is what fires.
+		const mh = new ModuleHost({ timeoutMs: 15_000, maxOldGenerationSizeMb: 16 });
+		try {
+			const url = writeModule(`export const actions = { hog: async () => { const a = []; for (;;) { a.push(new Array(1e6).fill(7)); } } };`);
+			await assert.rejects(
+				() => mh.invoke(req(url, "hog", bareCtx())),
+				(e) => e instanceof ActionError && /memory|heap/i.test(e.message),
+			);
 		} finally {
 			mh.dispose();
 		}

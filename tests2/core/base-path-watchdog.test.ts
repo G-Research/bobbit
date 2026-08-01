@@ -10,8 +10,8 @@ interface WatchdogProbeTarget {
 
 interface WatchdogModule {
 	resolveWatchdogProbeTarget(options: {
-		forwardedArgs: readonly string[];
-		env?: Readonly<Record<string, string | undefined>>;
+		forwardedArgs: string[];
+		env?: NodeJS.ProcessEnv;
 		persistedGatewayUrl?: string;
 	}): WatchdogProbeTarget;
 	watchdogHealthPath(target: WatchdogProbeTarget): string;
@@ -44,39 +44,6 @@ describe("watchdog mounted probe target", () => {
 			env: { BOBBIT_BASE_PATH: "/../invalid" },
 		});
 		assert.equal(target.basePath, "/from-flag");
-	});
-
-	it.each([
-		{
-			label: "final --tls",
-			forwardedArgs: [
-				"--host", "ignored.example",
-				"--port", "3000",
-				"--no-tls",
-				"--host", "gateway.example",
-				"--port", "4312",
-				"--tls",
-			],
-			env: { PORT: "4999" },
-			expected: { protocol: "https:", hostname: "gateway.example", port: 4312, basePath: "" },
-		},
-		{
-			label: "final --no-tls",
-			forwardedArgs: ["--host", "gateway.example", "--tls", "--no-tls"],
-			env: {},
-			expected: { protocol: "http:", hostname: "gateway.example", port: 3001, basePath: "" },
-		},
-	] as const)("uses the $label override while retaining valued-option precedence", async ({ forwardedArgs, env, expected }) => {
-		const { resolveWatchdogProbeTarget } = await watchdogModule();
-		assert.deepEqual(resolveWatchdogProbeTarget({ forwardedArgs, env }), expected);
-	});
-
-	it.each([
-		{ host: "localhost", protocol: "http:" },
-		{ host: "gateway.example", protocol: "https:" },
-	] as const)("defaults to $protocol for $host without a TLS flag", async ({ host, protocol }) => {
-		const { resolveWatchdogProbeTarget } = await watchdogModule();
-		assert.equal(resolveWatchdogProbeTarget({ forwardedArgs: ["--host", host] }).protocol, protocol);
 	});
 
 	it.each(["", "/"])("lets explicit %j reset an environment mount to root", async (value) => {

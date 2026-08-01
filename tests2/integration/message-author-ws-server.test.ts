@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { vi } from "vitest";
 
@@ -17,7 +16,6 @@ import {
 	prepareVisibleAgentEvent,
 } from "../../src/server/agent/session-manager.js";
 import {
-	initAuthorSidecarDir,
 	promptAuthorBindingMatchesText,
 	readAuthorSidecar,
 } from "../../src/server/agent/author-sidecar.js";
@@ -361,21 +359,6 @@ test("system image prompt keeps non-text blocks unchanged while projecting only 
 });
 
 test("sidecar append failure degrades a system occurrence to unprefixed usable Pi and visible text", async ({ gateway }) => {
-	// isolate:false fork-mates can repoint the module-owned sidecar singleton.
-	// Reproduce that contamination before targeting the harness ledger below.
-	const contaminatedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-author-sidecar-contamination-"));
-	const contaminatedState = path.join(contaminatedRoot, "state");
-	fs.mkdirSync(contaminatedState, { recursive: true });
-	initAuthorSidecarDir(contaminatedState, {
-		secretsDir: path.join(contaminatedRoot, "secrets"),
-		hmacKey: Buffer.alloc(32, 0x5a),
-	});
-	// The failure injection must bind the module singleton to the physical path
-	// it poisons; otherwise a fork-mate's healthy ledger receives the dispatch.
-	initAuthorSidecarDir(path.join(gateway.bobbitDir, "state"), {
-		secretsDir: path.join(gateway.bobbitDir, "secrets"),
-	});
-
 	const sessionId = await createSession();
 	const agentClock = attachLocalMockAgentClock(gateway, sessionId);
 	const conn = await connectWs(sessionId);
@@ -400,7 +383,6 @@ test("sidecar append failure degrades a system occurrence to unprefixed usable P
 	} finally {
 		conn.close();
 		fs.rmSync(target, { recursive: true, force: true });
-		fs.rmSync(contaminatedRoot, { recursive: true, force: true });
 	}
 });
 

@@ -9,7 +9,6 @@ guardProcessEnv();
 import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
 import { PassThrough } from "node:stream";
-import { basename, resolve } from "node:path";
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { realCommandRunner, type CommandRunner } from "../../src/server/gateway-deps.ts";
@@ -29,7 +28,6 @@ import {
 	resolveGithubPr,
 } from "../../src/server/pr-walkthrough/github-adapter.ts";
 import { resolveDiffForBindingTargetForTesting, submitExportForTesting } from "../../src/server/pr-walkthrough/routes.ts";
-import { installCommandRunnerInterceptor } from "../integration/helpers/command-runner-dispatcher.js";
 
 const cards: PrWalkthroughCard[] = [
 	{
@@ -546,27 +544,15 @@ function localChangesetRunner(): CommandRunner {
 }
 
 async function withDefaultGitRunner<T>(runner: CommandRunner, fn: () => Promise<T>): Promise<T> {
-	const ownedCwd = resolve("/synthetic/pr-walkthrough");
-	const isOwnedGitCall = (file: string, cwd: unknown) =>
-		basename(file).toLowerCase().replace(/\.exe$/, "") === "git"
-		&& typeof cwd === "string"
-		&& resolve(cwd) === ownedCwd;
-	const restoreCommandRunner = installCommandRunnerInterceptor(realCommandRunner, {
-		label: "pr-walkthrough-export-mapper:local-changeset",
-		async execFile(file, args, options, next) {
-			if (!isOwnedGitCall(file, options?.cwd)) return next();
-			return runner.execFile(file, args, options);
-		},
-		spawn(file, args, options, next) {
-			if (!isOwnedGitCall(file, options?.cwd)) return next();
-			if (!runner.spawn) throw new Error(`unexpected missing spawn for ${file} ${args.join(" ")}`);
-			return runner.spawn(file, args, options);
-		},
-	});
+	const previousExecFile = realCommandRunner.execFile;
+	const previousSpawn = realCommandRunner.spawn;
+	realCommandRunner.execFile = runner.execFile;
+	realCommandRunner.spawn = runner.spawn;
 	try {
 		return await fn();
 	} finally {
-		restoreCommandRunner();
+		realCommandRunner.execFile = previousExecFile;
+		realCommandRunner.spawn = previousSpawn;
 	}
 }
 

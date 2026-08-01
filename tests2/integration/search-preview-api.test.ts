@@ -6,7 +6,7 @@ import { apiFetch, base, createSession, deleteSession, readE2EToken } from "./_e
 import * as previewArtifacts from "../../src/server/preview/artifacts.js";
 import * as previewMount from "../../src/server/preview/mount.js";
 
-const SIGNED_COOKIE_VALUE = String.raw`v1\.2\.[1-9]\d*\.[1-9]\d*\.[A-Za-z0-9_-]{22}(?:\.[A-Za-z0-9_-]{43}){3}`;
+const SIGNED_COOKIE_VALUE = String.raw`v1\.[1-9]\d*\.[1-9]\d*\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}`;
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
 	let resolve!: () => void;
@@ -80,7 +80,7 @@ test.describe("Search/preview/archive API migrations", () => {
 			expect(resp.status).toBe(200);
 			expect(resp.headers.get("content-type") || "").toMatch(/text\/html/);
 			const body = await resp.text();
-			expect(body).toMatch(new RegExp(`<base data-bobbit-preview-base href="/preview/${sessionId}/_content/[^/]+/">`));
+			expect(body).toContain(`<base data-bobbit-preview-base href="/preview/${sessionId}/">`);
 			expect(body).toContain('data-bobbit-preview-theme="snapshot"');
 			expect(body).toMatch(/:root\s*{[^}]*--background\s*:/s);
 			expect(body).toMatch(/:root\s*{[^}]*--foreground\s*:/s);

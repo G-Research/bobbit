@@ -14,7 +14,7 @@ const LEGACY_COOKIE = "a".repeat(64);
 const ENTRY = "stateless-cookie-upgrade.html";
 const PREVIEW_TEXT = "STATELESS_COOKIE_PREVIEW_OK";
 const SSE_PREVIEW_TEXT = "STATELESS_COOKIE_SSE_UPDATE_OK";
-const SIGNED_COOKIE = /^v1\.2\.\d+\.\d+\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}$/;
+const SIGNED_COOKIE = /^v1\.\d+\.\d+\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/;
 
 interface CookieWrite {
 	url: string;
@@ -129,7 +129,6 @@ test.describe("Stateless browser cookie upgrade", () => {
 		const context = page.context();
 		const browserURL = new URL(gateway.baseURL);
 		browserURL.hostname = "localhost";
-		expect(browserURL.protocol).toBe("http:");
 		const browserOrigin = browserURL.origin;
 		const recorder = createCookieWriteRecorder(context, browserOrigin);
 		let sessionId: string | undefined;
@@ -202,7 +201,7 @@ test.describe("Stateless browser cookie upgrade", () => {
 			expect(upgradeHeader).toMatch(/;\s*SameSite=Lax(?:;|$)/i);
 			expect(upgradeHeader).toMatch(/;\s*Path=\/(?:;|$)/i);
 			expect(upgradeHeader).toMatch(/;\s*Max-Age=2592000(?:;|$)/i);
-			expect(upgradeHeader).not.toMatch(/;\s*Secure(?:;|$)/i);
+			expect(upgradeHeader).toMatch(/;\s*Secure(?:;|$)/i);
 
 			await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
 			await expect.poll(
@@ -214,7 +213,7 @@ test.describe("Stateless browser cookie upgrade", () => {
 			expect(upgraded).toEqual(expect.objectContaining({
 				value: signedValue,
 				httpOnly: true,
-				secure: false,
+				secure: true,
 				sameSite: "Lax",
 				path: "/",
 			}));
@@ -294,7 +293,8 @@ test.describe("Stateless browser cookie upgrade", () => {
 
 			const reloadHealthPromise = page.waitForResponse(
 				response => pathname(response) === "/api/health"
-					&& response.request().method() === "GET",
+					&& response.request().method() === "GET"
+					&& response.request().headers().authorization?.startsWith("Bearer ") === true,
 				{ timeout: 20_000 },
 			);
 			const reloadSsePromise = page.waitForResponse(
@@ -314,7 +314,7 @@ test.describe("Stateless browser cookie upgrade", () => {
 			).toBe(sessionId);
 
 			const reloadHealth = await reloadHealthPromise;
-			await expectCookieOnlyRequest(reloadHealth, signedValue);
+			expect(await setCookieHeader(reloadHealth), "a fresh signed cookie must not be refreshed on reload").toBeNull();
 			const reloadSse = await reloadSsePromise;
 			expect(reloadSse.status()).toBe(200);
 			await expectCookieOnlyRequest(reloadSse, signedValue);

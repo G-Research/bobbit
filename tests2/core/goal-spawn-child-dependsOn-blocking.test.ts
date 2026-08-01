@@ -34,6 +34,7 @@ import { ProjectConfigStore } from "../../src/server/agent/project-config-store.
 import { InlineWorkflowStore } from "../../src/server/agent/workflow-store.ts";
 import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../../src/server/agent/nested-goal-routes.ts";
 import { ChildTeamScheduler } from "../../src/server/agent/child-team-scheduler.ts";
+import { CookieStore } from "../../src/server/auth/cookie.ts";
 
 interface Harness {
 	tmpRoot: string;
@@ -59,6 +60,7 @@ async function makeHarness(): Promise<Harness> {
 	fs.writeFileSync(path.join(configDir, "project.yaml"), yaml.stringify({}));
 
 	const goalStore = new GoalStore(stateDir);
+	const cookieStore = new CookieStore(Buffer.alloc(32, 0x42));
 	// These tests exercise dependsOn scheduling, not authz. spawn-child /
 	// integrate-child are ORCHESTRATION-class verbs (the cookie does NOT
 	// bypass), so authenticate as the goal's team-lead via a matching
@@ -187,7 +189,7 @@ async function makeHarness(): Promise<Harness> {
 		verificationHarness,
 		teamManager,
 		sessionManager,
-		cookieAuthenticated: false,
+		cookieStore,
 		requireSubgoalsEnabled: () => true,
 		getGoalAcrossProjects: (gid) => goalStore.get(gid),
 		getGoalManagerForGoal: () => goalManager,

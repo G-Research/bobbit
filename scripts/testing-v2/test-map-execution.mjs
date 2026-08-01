@@ -13,7 +13,6 @@ export const APPROVED_E2E_VITEST_PATHS = Object.freeze([
 	"tests2/core/orphan-tool-result-rehydration-boundaries.test.ts",
 	"tests2/core/team-manager.test.ts",
 	"tests2/integration/base-path-cli-entrypoint.test.ts",
-	"tests2/integration/fixture-command-timeout-real-git.test.ts",
 	"tests2/integration/team-spawn-multi-repo-real-git.test.ts",
 ]);
 
@@ -23,7 +22,7 @@ export const ISOLATED_VITEST_FILES = Object.freeze({
 	"tests2/core/extension-host-action-dispatcher.test.ts": "Extension-host worker registration mutates NODE_OPTIONS and module-global dispatcher state.",
 	"tests2/core/extension-host-channel-registry.test.ts": "Extension-host worker registration mutates NODE_OPTIONS and module-global channel state.",
 	"tests2/core/extension-host-isolation-config-invariant.test.ts": "Extension-host isolation configuration is evaluated from process state at module load.",
-	"tests2/core/extension-host-module-memory-isolation.test.ts": "Deliberately OOMs a ModuleHost worker under a 16 MB old-generation limit and must own a dedicated isolated Vitest fork.",
+	"tests2/core/extension-host-module-isolation.test.ts": "Spawns extension-host worker threads with module-scoped loader state.",
 	"tests2/core/extension-host-route-dispatcher.test.ts": "Extension-host worker registration mutates NODE_OPTIONS and module-global route state.",
 	"tests2/core/extension-host-session-event-bus.test.ts": "Exercises a module-global EventTarget that must not retain sibling listeners.",
 	"tests2/core/goal-metadata-edges.test.ts": "Reads BOBBIT_DIR-backed goal metadata state during module initialization.",
