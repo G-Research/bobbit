@@ -1925,26 +1925,6 @@ export interface GatewayConfig {
 	builtinPacksDir?: string;
 }
 
-/** Return the canonical value for one valid serialized HTTP(S) Origin header. */
-function canonicalHttpOrigin(raw: string | readonly string[] | undefined): string | undefined {
-	if (typeof raw !== "string" || raw !== raw.trim() || !/^https?:\/\/[^\s,/?#\\]+$/i.test(raw)) return undefined;
-	try {
-		const parsed = new URL(raw);
-		if (
-			(parsed.protocol !== "http:" && parsed.protocol !== "https:")
-			|| parsed.username
-			|| parsed.password
-			|| !parsed.hostname
-			|| parsed.pathname !== "/"
-			|| parsed.search
-			|| parsed.hash
-		) return undefined;
-		return parsed.origin;
-	} catch {
-		return undefined;
-	}
-}
-
 export function installGatewayBridgeDeps(deps?: GatewayDeps) {
 	const hasExplicitAgentBridgeFactory = !!deps?.agentBridgeFactory;
 	const previousRpcBridgeFactory = hasExplicitAgentBridgeFactory ? getRegisteredRpcBridgeFactory() : null;
@@ -2820,17 +2800,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				});
 			}
 
-			// Credentialed browser requests must reflect one syntactically valid
-			// serialized HTTP(S) origin. Non-browser requests have no Origin and keep
-			// the wildcard compatibility response (without credentials).
-			const corsOrigin = canonicalHttpOrigin(req.headers.origin);
-			if (corsOrigin) {
-				res.setHeader("Access-Control-Allow-Origin", corsOrigin);
-				res.setHeader("Access-Control-Allow-Credentials", "true");
-				res.setHeader("Vary", "Origin");
-			} else if (req.headers.origin === undefined) {
-				res.setHeader("Access-Control-Allow-Origin", "*");
-			}
+			// When serving the UI (same-origin), reflect the request origin; otherwise allow any.
+			const corsOrigin = config.staticDir ? (req.headers.origin || "*") : "*";
+			res.setHeader("Access-Control-Allow-Origin", corsOrigin);
+			if (corsOrigin !== "*") res.setHeader("Vary", "Origin");
 			res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
 			res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Bobbit-Session-Id, X-Bobbit-Spawning-Session");
 
