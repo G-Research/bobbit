@@ -552,11 +552,12 @@ test.describe("Journey: Goal Proposal — dismiss persists across reload", () =>
 		await page.waitForFunction((sidArg: string) => (window as any).bobbitState?.selectedSessionId === sidArg, sid, { timeout: 15_000 });
 
 		// Negative-condition poll: the slot must NOT repopulate (on the mutant it
-		// reappears within ~hundreds of ms).
+		// reappears within ~hundreds of ms). One second covers that deterministic
+		// restore path without burning a fixed five-second per-spec budget.
 		await page.waitForFunction(
 			() => !!(window as any).bobbitState?.activeProposals?.goal?.fields?.title,
 			null,
-			{ timeout: 5_000 },
+			{ timeout: 1_000 },
 		).catch(() => { /* expected: stays dismissed */ });
 
 		// The title input stays mounted (the assistant always renders its form)
