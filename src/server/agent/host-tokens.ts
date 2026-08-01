@@ -9,7 +9,6 @@ import path from "node:path";
 import { globalAuthPath, serverSecretsDir } from "../bobbit-dir.js";
 import {
 	isAnthropicApiKeyCredential,
-	isCompleteAnthropicOAuthCredential,
 	isUsableAnthropicOAuthCredential,
 } from "../auth/credential-store.js";
 import type { PreferencesStore } from "./preferences-store.js";

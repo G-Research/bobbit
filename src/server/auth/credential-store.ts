@@ -414,7 +414,7 @@ export class AtomicCredentialStore implements CredentialStore {
 	 * Provider HTTP calls made from these callbacks must therefore be bounded.
 	 */
 	private withLock<T>(
-		fn: (data: RawAuthData) =>
+		fn: (data: RawAuthData, authPath: string, assertLock: () => void) =>
 			| { result: T; next?: RawAuthData }
 			| Promise<{ result: T; next?: RawAuthData }>,
 	): Promise<T> {
