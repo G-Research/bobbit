@@ -1382,33 +1382,14 @@ The `<error-details>` component (`src/ui/components/ErrorDetails.ts`) renders me
 
 Pinned by `tests/error-modal-call-sites.test.ts` (enumerates every modal call site that must forward `{ code, stack }`) and `tests/error-helpers.test.ts` (helper contract). Add new modal call sites to the former; do not add a new `showConnectionError(...)` without forwarding `errorDetails(err)`.
 
-## Agent `fetch failed` against gateway when started with `--host 0.0.0.0`
+## Wildcard bind appears in an auto-open or advertised gateway URL
 
-- **Symptoms**: under `./run --host 0.0.0.0 --port <port> --no-tls`, the
-  console shows `Listening: http://0.0.0.0:<port>` as expected, but every
-  same-host tool extension that calls back into the gateway (the `team_*`
-  tools, the `Children` tools, image generation, MCP discovery — anything
-  routed through `defaults/tools/_shared/gateway.ts::apiCall`) fails with an
-  opaque `fetch failed`. Under `npm run dev:harness` (which binds to
-  `localhost`) the same code path works.
-- **Why**: `0.0.0.0` and `::` are wildcard *listen* addresses. They tell the
-  kernel "accept connections on every interface" but they are not valid
-  *connect* peers — macOS / BSD reject `connect()` to `0.0.0.0`. If the
-  gateway-url file contains `http://0.0.0.0:<port>`, every agent on the same
-  host that reads it and tries to fetch the gateway hits the kernel rejection
-  before any HTTP frame is sent.
-- **Where the fix lives**: `src/server/cli-loopback.ts` exports the pure
-  helper `loopbackForBind(host)`. `0.0.0.0` → `127.0.0.1`, `::` / `[::]` →
-  `[::1]`, every other host (including `localhost`, LAN IPs, and hostnames)
-  is returned unchanged. `src/server/cli.ts` writes a loopback-normalised
-  `peerUrl` to `<stateDir>/gateway-url` while the human-readable
-  `Listening:` log line and the browser auto-open URL keep using the
-  literal `args.host`. The split is intentional: the operator wants to see
-  the bind address they passed; the agent needs a real connect peer.
-- **Quick checks**: `cat .bobbit/state/gateway-url` should never contain
-  `0.0.0.0` or `::`. If it does, the server is on a pre-fix build, or a new
-  CLI codepath is writing the file directly without routing through
-  `loopbackForBind`. Tests: `tests/cli-loopback-for-bind.test.ts`.
+- **Symptoms**: under `./run --host 0.0.0.0 --port <port> --no-tls`, the console's `Listening` field reports `http://0.0.0.0:<port>` as expected, but the browser, an agent, or an extension tries to connect to that literal wildcard and fails. The IPv6 equivalent uses `::`.
+- **Why**: `0.0.0.0` and `::` are wildcard *listen* addresses. They tell the kernel to accept connections on every interface, but they are not portable *connect* peers; macOS and BSD reject `connect()` to `0.0.0.0`.
+- **Expected split**: only the `Listening` field retains the bind address. The advertised peer URL, tokenized UI/auto-open URL, and persisted `state/gateway-url` use a connectable loopback: `0.0.0.0` maps to `127.0.0.1`, while `::` and `[::]` map to `[::1]`. They retain the actual bound port and configured base path. Because wildcard binds are non-loopback, the UI/auto-open URL includes the enforced real token; the persisted peer base does not.
+- **Where the fix lives**: `loopbackForBind` owns wildcard translation, and `buildStartupUrls` uses its result for `peerUrl`, `uiUrl`, and `openUrl` while leaving `listenUrl` truthful. The gateway's bound callback persists `peerUrl` before sessions resume.
+- **Quick checks**: `cat .bobbit/state/gateway-url` and the browser auto-open target should never use `0.0.0.0` or `[::]` as the URL host; an IPv6 wildcard bind must become `[::1]` in connect targets. If either literal wildcard remains, a startup path bypassed `buildStartupUrls` or `loopbackForBind`. Coverage: `tests2/core/cli-loopback-for-bind.test.ts` and `tests2/core/base-path-cli.test.ts`.
+- **Reference**: [Networking — Advertised and selected gateway URLs](networking.md#advertised-and-selected-gateway-urls).
 
 ## Trigger fired but staff didn't wake
 

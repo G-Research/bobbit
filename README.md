@@ -45,8 +45,10 @@ bobbit [options]
 
 --host <addr>       Bind address (default: localhost)
 --port <n>          Port (default: 3001)
+--base-path <path>  Mount the production UI and API below a URL path (default: /)
 --nord              Bind to NordLynx mesh IP (remote access via NordVPN meshnet)
 --tls / --no-tls    Override TLS auto-detection
+--auth              Require token authentication on a loopback bind
 --cwd <dir>         Working directory for agent sessions (default: .)
 --agent-cli <path>  Path to pi-coding-agent cli.js
 --static <dir>      Serve a custom UI build directory
@@ -54,6 +56,8 @@ bobbit [options]
 --new-token         Force-generate a new auth token
 --show-token        Print the current token and exit
 ```
+
+See the **[Networking guide](docs/networking.md#production-subpath-mounting)** for base-path normalization and reverse-proxy configuration.
 
 ### From source
 
