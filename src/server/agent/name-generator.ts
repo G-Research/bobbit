@@ -42,11 +42,11 @@ function loadAuthKind(): AuthCredentials | null {
 	}
 }
 
-/** Return an allow-listed upstream outcome; provider payloads can contain credentials. */
-function anthropicErrorSummary(status: number, errorText?: string): string {
-	if (status === 404 || /model[^\n]{0,40}not found|model_not_found/i.test(errorText ?? "")) return "model_not_found (404)";
+/** Return an allow-listed upstream outcome based solely on the HTTP status. */
+function anthropicErrorSummary(status: number): string {
+	if (status === 404) return "model_not_found (404)";
 	if (status === 401 || status === 403) return `authentication (${status})`;
-	if (status === 429 || /rate[^\n]{0,20}limit|spend[^\n]{0,20}limit|quota/i.test(errorText ?? "")) return "rate_or_spend_limit (429)";
+	if (status === 429) return "rate_or_spend_limit (429)";
 	if (status >= 500) return `upstream_unavailable (${status})`;
 	return `request_failed (${status})`;
 }
@@ -135,13 +135,10 @@ Output a JSON array of 500 strings. Output ONLY the JSON array, no explanation, 
 		// repeat the same Pi-backed credential resolution.
 
 		if (!response.ok) {
-			// The body is classified but never emitted because upstream payloads can
-			// reflect request secrets or contain arbitrary sensitive text.
-			const errorText = await response.text();
 			if (auth.type === "oauth" && (response.status === 401 || response.status === 403)) {
 				await invalidateRejectedAnthropicDirectCredential(auth.access);
 			}
-			console.error(`[name-gen] Anthropic completion failed: ${anthropicErrorSummary(response.status, errorText)}`);
+			console.error(`[name-gen] Anthropic completion failed: ${anthropicErrorSummary(response.status)}`);
 			return;
 		}
 

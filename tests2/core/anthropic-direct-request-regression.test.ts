@@ -232,6 +232,22 @@ describe("direct Anthropic request regressions", () => {
 		]);
 	});
 
+	it("classifies role-name 429 responses from the HTTP status, not model-not-found body text", async () => {
+		useAuth({ type: "api-key", key: "role-test-key" });
+		const captured = captureConsole(["error"]);
+		try {
+			await generateRoleNames(uniqueRole(), "misleading provider body", (async () =>
+				response(429, "model_not_found")
+			) as typeof fetch);
+
+			assert.equal(captured.lines.length, 1);
+			assert.match(captured.lines[0]!, /rate_or_spend_limit \(429\)/);
+			assert.doesNotMatch(captured.lines[0]!, /model_not_found/);
+		} finally {
+			captured.restore();
+		}
+	});
+
 	it("distinguishes and redacts title and role-name upstream failures", async () => {
 		const sentinel = `sensitive-${"x".repeat(48)}`;
 		const expected = new Map<number, RegExp>([
