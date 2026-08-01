@@ -245,9 +245,8 @@ describe("AtomicCredentialStore", () => {
 		let finishInspection!: () => void;
 		const inspected = new Promise<void>((resolve) => { finishInspection = resolve; });
 		__setBeforeStaleLockClaimForTests((observedLockPath) => {
-			// This hook runs after the reclaimer's final identity check, covering
-			// the former check-then-rmdir window exactly. Keep the displaced stale
-			// directory allocated so the fresh replacement has a distinct identity.
+			// This hook runs immediately before the atomic claim. Keep the displaced
+			// stale directory allocated so the fresh replacement has a distinct identity.
 			const displacedPath = `${observedLockPath}.fixture-${randomUUID()}`;
 			renameSync(observedLockPath, displacedPath);
 			mkdirSync(observedLockPath, { mode: 0o700 });
@@ -270,6 +269,48 @@ describe("AtomicCredentialStore", () => {
 			return undefined;
 		});
 		assert.equal(replacementSurvived, true, "stale recovery must not remove a fresh replacement lock");
+	});
+
+	it("does not reclaim a stale lock renewed by its original owner before the final claim", async () => {
+		const store = new AtomicCredentialStore(authPath);
+		await store.modify("anthropic", async () => credential());
+		const lockPath = `${authPath}.lock`;
+		mkdirSync(lockPath, { mode: 0o700 });
+		utimesSync(lockPath, new Date(Date.now() - 10_001), new Date(Date.now() - 10_001));
+		const owner = statSync(lockPath);
+
+		let renewalApplied = false;
+		let ownerRetained = false;
+		let mutationEntered = false;
+		let finishOwnershipCheck!: () => void;
+		const ownershipChecked = new Promise<void>((resolve) => { finishOwnershipCheck = resolve; });
+		__setBeforeStaleLockClaimForTests((observedLockPath) => {
+			// A heartbeat changes mtime, not inode identity. The reclaimer must
+			// observe that renewed lease and leave this same owner in place.
+			utimesSync(observedLockPath, new Date(), new Date());
+			renewalApplied = true;
+			setTimeout(() => {
+				try {
+					const current = statSync(observedLockPath);
+					ownerRetained = current.dev === owner.dev && current.ino === owner.ino;
+					if (ownerRetained) rmdirSync(observedLockPath);
+				} catch {
+					ownerRetained = false;
+				} finally {
+					finishOwnershipCheck();
+				}
+			}, 20);
+		});
+
+		const mutation = store.modify("anthropic", async () => {
+			mutationEntered = true;
+			return undefined;
+		});
+		await ownershipChecked;
+		assert.equal(renewalApplied, true);
+		assert.equal(ownerRetained, true, "a renewed original lock owner must not be reclaimed");
+		assert.equal(mutationEntered, false, "the contender must wait for the renewed owner to release");
+		await mutation;
 	});
 
 	it("holds the canonical lock across refresh callbacks so one rotating token is spent", async () => {

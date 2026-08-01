@@ -119,9 +119,21 @@ function isSameLockIdentity(expected: LockIdentity, lockPath: string): boolean {
 	}
 }
 
+/** An observed stale lock remains reclaimable only while its identity and lease are unchanged. */
+function isSameStaleLock(expected: LockIdentity, lockPath: string): boolean {
+	try {
+		const stats = statSync(lockPath);
+		return stats.dev === expected.dev
+			&& stats.ino === expected.ino
+			&& Date.now() - stats.mtimeMs > LOCK_STALE_MS;
+	} catch {
+		return false;
+	}
+}
+
 let beforeStaleLockClaimForTests: ((lockPath: string) => void) | undefined;
 
-/** @internal Deterministically interleave a replacement owner after identity verification. */
+/** @internal Deterministically interleave an owner action before the final stale-lock claim. */
 export function __setBeforeStaleLockClaimForTests(hook: ((lockPath: string) => void) | undefined): void {
 	beforeStaleLockClaimForTests = hook;
 }
@@ -131,8 +143,9 @@ export function __setBeforeStaleLockClaimForTests(hook: ((lockPath: string) => v
  * ownership: another process can release the stale directory and acquire a
  * fresh lock at the same pathname before we remove it. Rename the visible
  * directory to a private claim before deleting it, then validate the claimed
- * directory's identity. This makes the destructive rmdir target immutable:
- * a replacement at lockPath can never be removed by this recovery attempt.
+ * directory's identity and lease. This makes the destructive rmdir target
+ * immutable: a replacement at lockPath can never be removed by this recovery
+ * attempt, while a renewed original lease is restored rather than reclaimed.
  */
 function reclaimStaleAuthFileLock(lockPath: string): boolean {
 	let observed: LockIdentity;
@@ -144,7 +157,9 @@ function reclaimStaleAuthFileLock(lockPath: string): boolean {
 		return false;
 	}
 
-	if (!isSameLockIdentity(observed, lockPath)) return false;
+	// A healthy owner can heartbeat the same directory inode after our first
+	// stale observation. Re-check the lease immediately before the atomic claim.
+	if (!isSameStaleLock(observed, lockPath)) return false;
 	beforeStaleLockClaimForTests?.(lockPath);
 
 	const claimPath = `${lockPath}.reclaim-${process.pid}-${randomUUID()}`;
@@ -156,7 +171,9 @@ function reclaimStaleAuthFileLock(lockPath: string): boolean {
 		return false;
 	}
 
-	if (!isSameLockIdentity(observed, claimPath)) {
+	// A heartbeat may have raced the final pre-claim check. Verify the claimed
+	// lease again before deleting, then restore a renewed original owner.
+	if (!isSameStaleLock(observed, claimPath)) {
 		try {
 			// Restore an intervening replacement only while no later owner has
 			// acquired the public pathname. If it has, leave both directories
