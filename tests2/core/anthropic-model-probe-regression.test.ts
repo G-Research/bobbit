@@ -53,6 +53,22 @@ const CURRENT_ANTHROPIC_PROBE_MATRIX = [
 	{ id: "claude-sonnet-5", status: 429 as const, code: "rate_limited" },
 	{ id: "claude-opus-4-6", status: 401 as const, code: "authentication_failed" },
 ] as const;
+
+// These labels model a deferred A/B input matrix without storing credentials,
+// invoking OAuth, or asserting that any factor causes a model result. Header
+// selection itself is isolated in anthropic-direct-request-regression.test.ts.
+const MOCK_ANTHROPIC_FACTOR_MATRIX = [
+	{
+		provenance: "mock current Pi credential provenance",
+		scopeProfile: "current Pi-maintained scope profile",
+		headerProfile: "current Pi direct-header profile",
+	},
+	{
+		provenance: "mock legacy credential provenance",
+		scopeProfile: "synthetic legacy reduced-scope profile",
+		headerProfile: "synthetic legacy direct-header profile",
+	},
+] as const;
 describe("Anthropic model probe regressions", () => {
 	it("preserves API-key authentication selection for direct Pi model completions", async () => {
 		useAuth({ type: "api-key", key: "test-anthropic-api-key" });
@@ -227,20 +243,23 @@ describe("Anthropic model probe regressions", () => {
 		assert.deepEqual(JSON.parse(readFileSync(path.join(agentDir!, "auth.json"), "utf-8")), {});
 	});
 
-	it("keeps mocked Pi provider-path failures model-specific across the current three-model matrix", async () => {
+	it("keeps mock provenance, scope, and header factors non-causal while provider failures stay model-specific", async () => {
 		const prefs = new PreferencesStore(path.resolve("/memfs/anthropic-model-probe"), createMemFs());
-		for (const expected of CURRENT_ANTHROPIC_PROBE_MATRIX) {
-			let calledModel: string | undefined;
-			const result = await testModelPreference(prefs, `anthropic/${expected.id}`, async (model) => {
-				calledModel = model.id;
-				throw new Error(`HTTP request failed. status=${expected.status}; url=https://api.anthropic.com/v1/messages; body=ignored`);
-			});
-			const probe = result as typeof result & { code?: string };
-			assert.equal(calledModel, expected.id, "Pi completion must receive the exact selected model");
-			assert.deepEqual(
-				{ status: probe.status, code: probe.code, modelResolved: probe.modelResolved },
-				{ status: expected.status, code: expected.code, modelResolved: expected.id },
-			);
+		for (const factor of MOCK_ANTHROPIC_FACTOR_MATRIX) {
+			for (const expected of CURRENT_ANTHROPIC_PROBE_MATRIX) {
+				let calledModel: string | undefined;
+				const result = await testModelPreference(prefs, `anthropic/${expected.id}`, async (model) => {
+					calledModel = model.id;
+					throw new Error(`HTTP request failed. status=${expected.status}; url=https://api.anthropic.com/v1/messages; body=ignored`);
+				});
+				const probe = result as typeof result & { code?: string };
+				assert.equal(calledModel, expected.id, "Pi completion must receive the exact selected model");
+				assert.deepEqual(
+					{ status: probe.status, code: probe.code, modelResolved: probe.modelResolved },
+					{ status: expected.status, code: expected.code, modelResolved: expected.id },
+					`${factor.provenance} / ${factor.scopeProfile} / ${factor.headerProfile} must not relabel the provider result`,
+				);
+			}
 		}
 	});
 

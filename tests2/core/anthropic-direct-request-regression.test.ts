@@ -12,6 +12,10 @@ import { tmpdir } from "node:os";
 import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 import { oauthStatus, refreshOAuthToken } from "../../src/server/auth/oauth.js";
 import { generateRoleNames } from "../../src/server/agent/name-generator.js";
+import {
+	createAnthropicDirectHeaders,
+	PI_ANTHROPIC_DIRECT_REQUEST_IDENTITY,
+} from "../../src/server/agent/anthropic-direct-request.js";
 import { generateGoalSummaryTitle, generateSessionTitle } from "../../src/server/agent/title-generator.js";
 
 let agentDir: string | undefined;
@@ -62,6 +66,54 @@ afterEach(() => {
 });
 
 describe("direct Anthropic request regressions", () => {
+	it("keeps the Pi default fixed while a controlled mock factor matrix varies only OAuth identity headers", () => {
+		// Scope and credential provenance are intentionally fixture labels only: this
+		// direct-request helper does not own Pi OAuth scopes or live credential state.
+		const factors = [
+			{
+				provenance: "mock current Pi credential provenance",
+				scopeProfile: "current Pi-maintained scope profile",
+				identity: PI_ANTHROPIC_DIRECT_REQUEST_IDENTITY,
+			},
+			{
+				provenance: "mock legacy credential provenance",
+				scopeProfile: "synthetic legacy reduced-scope profile",
+				identity: {
+					beta: "mock-legacy-beta",
+					userAgent: "mock-legacy-agent",
+					app: "mock-legacy-app",
+				},
+			},
+		] as const;
+		const oauth = { type: "oauth" as const, access: "" };
+		const fixedDefault = createAnthropicDirectHeaders(oauth);
+
+		for (const factor of factors) {
+			const headers = createAnthropicDirectHeaders(oauth, factor.identity);
+			assert.equal(headers.Authorization, "Bearer ");
+			assert.equal(headers["anthropic-beta"], factor.identity.beta, `${factor.provenance} / ${factor.scopeProfile}`);
+			assert.equal(headers["user-agent"], factor.identity.userAgent);
+			assert.equal(headers["x-app"], factor.identity.app);
+			assert.equal(headers["x-api-key"], undefined);
+
+			const apiKeyHeaders = createAnthropicDirectHeaders({ type: "api-key", access: "" }, factor.identity);
+			assert.deepEqual(apiKeyHeaders, {
+				"Content-Type": "application/json",
+				"anthropic-version": "2023-06-01",
+				"x-api-key": "",
+			}, "API-key requests must never receive a mocked OAuth identity");
+		}
+
+		assert.deepEqual(fixedDefault, {
+			"Content-Type": "application/json",
+			"anthropic-version": "2023-06-01",
+			Authorization: "Bearer ",
+			"anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
+			"user-agent": "claude-cli/2.1.75",
+			"x-app": "cli",
+		}, "production callers omit the test seam and retain Pi's exact default identity");
+	});
+
 	it("keeps role-name API-key selection and exact API-key request identity", async () => {
 		useAuth({ type: "api-key", key: "test-api-key" });
 		const requests: Array<{ headers: Record<string, string>; body: any }> = [];
