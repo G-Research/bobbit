@@ -3211,7 +3211,8 @@ function renderDirectoriesTab() {
 type AccountProviderId = AccountOAuthProviderId;
 const ACCOUNT_PROVIDERS = ACCOUNT_OAUTH_PROVIDERS;
 
-let accountStatus: Partial<Record<AccountProviderId, { authenticated: boolean; expires?: number }>> | null = null;
+type AccountStatus = { authenticated: boolean; stored?: boolean; refreshable?: boolean; expires?: number };
+let accountStatus: Partial<Record<AccountProviderId, AccountStatus>> | null = null;
 let accountLoading = false;
 let accountReauthing: AccountProviderId | null = null;
 // Provider whose logout request is in flight (disables that row's Log out button).
@@ -3225,7 +3226,7 @@ export function __testResetAccountTab(opts: {
 	// Seed a status map directly to bypass the network. Omit to leave status
 	// `null` so `renderAccountTab()` runs `loadAccountStatus()` (exercises the
 	// GET /api/oauth/status fetch path used by reload persistence).
-	status?: Partial<Record<AccountProviderId, { authenticated: boolean; expires?: number }>> | null;
+	status?: Partial<Record<AccountProviderId, AccountStatus>> | null;
 } = {}): void {
 	accountStatus = opts.status === undefined ? null : opts.status;
 	accountLoading = false;
@@ -3247,9 +3248,9 @@ function loadAccountStatus(): void {
 					return [provider.id, { authenticated: false }] as const;
 				}
 			}));
-			accountStatus = Object.fromEntries(entries) as Partial<Record<AccountProviderId, { authenticated: boolean; expires?: number }>>;
+			accountStatus = Object.fromEntries(entries) as Partial<Record<AccountProviderId, AccountStatus>>;
 		} catch {
-			accountStatus = Object.fromEntries(ACCOUNT_PROVIDERS.map(provider => [provider.id, { authenticated: false }])) as Partial<Record<AccountProviderId, { authenticated: boolean; expires?: number }>>;
+			accountStatus = Object.fromEntries(ACCOUNT_PROVIDERS.map(provider => [provider.id, { authenticated: false }])) as Partial<Record<AccountProviderId, AccountStatus>>;
 		} finally {
 			accountLoading = false;
 			renderApp();
@@ -3262,14 +3263,13 @@ async function handleReauthenticate(provider: AccountProviderId): Promise<void> 
 	renderApp();
 	try {
 		const success = await openOAuthDialog(provider);
-		if (success) {
-			clearDismissedAccountOAuthExpiryRemindersForProvider(provider);
-			// Refresh status after successful re-auth
-			accountStatus = null;
-			loadAccountStatus();
-		}
+		if (success) clearDismissedAccountOAuthExpiryRemindersForProvider(provider);
 	} finally {
+		// A rejected/expired credential can be deleted while Pi settles a failed
+		// login. Always reload instead of retaining a green cached account row.
+		accountStatus = null;
 		accountReauthing = null;
+		loadAccountStatus();
 		renderApp();
 	}
 }
@@ -3316,9 +3316,11 @@ export function renderAccountTab() {
 			${ACCOUNT_PROVIDERS.map((provider) => {
 				const status = accountStatus?.[provider.id];
 				const authenticated = status?.authenticated ?? false;
+				const stored = status?.stored === true;
 				const expires = status?.expires;
 				const expiresDate = expires ? new Date(expires) : null;
 				const isExpired = expires ? Date.now() > expires : false;
+				const canLogOut = authenticated || stored;
 				const isReauthing = accountReauthing === provider.id;
 				const isLoggingOut = accountLoggingOut === provider.id;
 				const isGoogle = provider.id === "google-gemini-cli";
@@ -3365,7 +3367,7 @@ export function renderAccountTab() {
 								onClick: () => handleReauthenticate(provider.id),
 								children: isReauthing ? "Authenticating..." : authenticated ? "Re-authenticate" : "Log in",
 							})}</span>
-							${authenticated
+							${canLogOut
 								? html`<span data-testid="account-logout-btn-${provider.id}">${Button({
 									variant: "outline",
 									size: "sm",

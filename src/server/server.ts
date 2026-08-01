@@ -46,7 +46,7 @@ import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { executeCleanupWorktreesRequest } from "./maintenance/cleanup-worktrees-request.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { readToken, validateToken } from "./auth/token.js";
-import { OAuthBusyError, oauthCancel, oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
+import { OAuthBusyError, oauthCancelAndWait, oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import type { GateResetReopenOutcome, ServerMessage } from "./ws/protocol.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
@@ -13953,7 +13953,9 @@ async function handleApiRoute(
 			json({ error: "Missing provider" }, 400);
 			return;
 		}
-		json(oauthCancel(body.flowId, body.provider));
+		// Resolve only after Pi has settled its cancelled callback exchange and
+		// released the provider lease, so an immediate UI retry cannot race it.
+		json(await oauthCancelAndWait(body.flowId, body.provider));
 		return;
 	}
 

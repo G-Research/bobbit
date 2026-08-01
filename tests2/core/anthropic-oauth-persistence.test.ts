@@ -104,8 +104,10 @@ describe("Anthropic persisted status and Pi refresh", () => {
 		assert.equal(afterRestart?.type, "oauth");
 		sameSecret(afterRestart?.type === "oauth" ? afterRestart.refresh : undefined, expired.refresh);
 		const status = await oauthStatus("anthropic") as Record<string, unknown>;
-		assert.equal(status.authenticated, true);
-		assert.deepEqual(Object.keys(status).sort(), ["authenticated", "expires", "provider"]);
+		assert.equal(status.authenticated, false, "an expired row is not validated authentication");
+		assert.equal(status.stored, true);
+		assert.equal(status.refreshable, true);
+		assert.deepEqual(Object.keys(status).sort(), ["authenticated", "expires", "provider", "refreshable", "stored"]);
 		assert.equal(JSON.stringify(status).includes(String(expired.access)), false);
 		assert.equal(JSON.stringify(status).includes(String(expired.refresh)), false);
 	});
@@ -140,7 +142,9 @@ describe("Anthropic persisted status and Pi refresh", () => {
 			oauthStatus("anthropic"),
 			new Promise<never>((_, reject) => setTimeout(() => reject(new Error("status blocked behind refresh")), 150)),
 		]);
-		assert.equal(status.authenticated, true);
+		assert.equal(status.authenticated, false, "a stalled refresh must not optimistically authenticate an expired row");
+		assert.equal(status.stored, true);
+		assert.equal(status.refreshable, true);
 		release();
 		assert.equal(typeof await refresh, "string");
 	});

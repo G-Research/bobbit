@@ -113,6 +113,17 @@ describe("Settings Account tab — Google OAuth row", () => {
 		expect(q('[data-testid="account-expires-google-gemini-cli"]')).toBeTruthy();
 	});
 
+	it("does not show an expired refreshable Anthropic row as authenticated and still permits logout", async () => {
+		await resetAccountTab({ status: {
+			anthropic: { authenticated: false, stored: true, refreshable: true, expires: Date.now() - 60_000 },
+		} });
+
+		expect(text(q('[data-testid="account-status-anthropic"]'))).toBe("Expired");
+		expect(text(q('[data-testid="account-status-anthropic"]'))).not.toBe("Authenticated");
+		expect(text(q('[data-testid="account-auth-btn-anthropic"]'))).toContain("Log in");
+		expect(q('[data-testid="account-logout-btn-anthropic"]')).toBeTruthy();
+	});
+
 	it("logout confirms, POSTs /api/oauth/logout for the canonical provider, and returns to 'Log in'", async () => {
 		await resetAccountTab({ status: { "google-gemini-cli": { authenticated: true, expires: FUTURE } } });
 		setNextFetchResponse({ ok: true, body: { authenticated: false } });

@@ -54,8 +54,10 @@ resetAgentDirStateForTests();
 
 const {
 	oauthCancel,
+	oauthCancelAndWait,
 	oauthComplete,
 	oauthFlowStatus,
+	oauthLogout,
 	oauthStart,
 	stopFlowCleanup,
 } = await import("../../src/server/auth/oauth.js");
@@ -609,6 +611,57 @@ describe("Anthropic OAuth Pi browser adapter", () => {
 		assert.equal(stored.access === previous.access, true, "cancelled re-login must restore the prior access credential");
 		assert.equal(stored.refresh === previous.refresh, true, "cancelled re-login must restore the prior refresh credential");
 		assert.equal(stored.expires, previous.expires);
+		activeFlowIds.delete(started.flowId);
+	});
+
+	it("restores only its issued credential when cancellation wins after completion but before polling", async () => {
+		const previous = oauthCredential();
+		const issued = oauthCredential();
+		writeFileSync(authPath, JSON.stringify({ anthropic: previous }), "utf8");
+		const models: Pick<Models, "login"> = {
+			login: (async (_providerId: string, _type: string, interaction: AuthInteraction) => {
+				interaction.notify({ type: "auth_url", url: currentAuthorizeUrl() });
+				return issued;
+			}) as Models["login"],
+		};
+		const started = await startAnthropic(models);
+		for (let i = 0; i < 20; i++) await Promise.resolve();
+		assert.equal(existsSync(authPath), true, "the completed flow should have issued its credential");
+		// Do not poll the completed result away: this models a user cancelling the
+		// waiting dialog after Pi completed but before the UI's next poll.
+		await oauthCancelAndWait(started.flowId, "anthropic");
+		const stored = JSON.parse(readFileSync(authPath, "utf8")).anthropic as OAuthCredential;
+		assert.equal(stored.access === previous.access, true);
+		assert.equal(stored.refresh === previous.refresh, true);
+		activeFlowIds.delete(started.flowId);
+	});
+
+	it("does not resurrect a cancelled credential after logout tombstones the flow", async () => {
+		const previous = oauthCredential();
+		const issued = oauthCredential();
+		writeFileSync(authPath, JSON.stringify({ anthropic: previous }), "utf8");
+		let releaseExchange!: () => void;
+		const exchangeBlocked = new Promise<void>((resolve) => { releaseExchange = resolve; });
+		const models: Pick<Models, "login"> = {
+			login: (async (_providerId: string, _type: string, interaction: AuthInteraction) => {
+				interaction.notify({ type: "auth_url", url: currentAuthorizeUrl() });
+				await interaction.prompt({ type: "manual_code", message: "Paste redirect URL" });
+				await exchangeBlocked;
+				// Model Pi persisting after logout, before its cancelled login resolves.
+				writeFileSync(authPath, JSON.stringify({ anthropic: issued }), "utf8");
+				return issued;
+			}) as Models["login"],
+		};
+		const started = await startAnthropic(models);
+		const completion = oauthComplete(started.flowId, randomUUID(), OFFLINE_FETCH);
+		for (let i = 0; i < 100; i++) await Promise.resolve();
+		oauthCancel(started.flowId, "anthropic");
+		await oauthLogout("anthropic");
+		releaseExchange();
+		await oauthCancelAndWait(started.flowId, "anthropic");
+		assert.deepEqual(await completion, { success: false, error: "OAuth flow cancelled" });
+		const document = existsSync(authPath) ? JSON.parse(readFileSync(authPath, "utf8")) as Record<string, unknown> : {};
+		assert.equal(document.anthropic, undefined, "a logout must not be undone by a late cancelled callback");
 		activeFlowIds.delete(started.flowId);
 	});
 

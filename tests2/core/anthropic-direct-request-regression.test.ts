@@ -157,7 +157,9 @@ describe("direct Anthropic request regressions", () => {
 			assert.equal(await refreshOAuthToken(), null);
 			assert.equal(requests, 1);
 			const status = oauthStatus("anthropic");
-			assert.equal(status.authenticated, true);
+			assert.equal(status.authenticated, false, "a transient refresh failure does not validate an expired credential");
+			assert.equal(status.stored, true);
+			assert.equal(status.refreshable, true);
 			assert.equal(status.provider, "anthropic");
 			assert.equal(typeof status.expires, "number");
 		} finally {
