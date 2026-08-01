@@ -57,12 +57,14 @@ authenticated state, expiry, and permitted display metadata; it never returns ac
 refresh tokens, or API keys.
 
 A valid Anthropic OAuth entry must contain an OAuth access token, refresh token, and finite
-expiry. Incomplete rows are unauthenticated. A complete expired row can remain authenticated in
-status because Pi resolves refresh lazily before use. On a definitive refresh rejection
-(HTTP 400, 401, or 403), Bobbit clears only the exact credential snapshot Pi attempted. Network,
-5xx, and 429 failures retain it so a transient outage does not sign the user out. A direct
-Anthropic request that definitively rejects the specific OAuth access credential likewise removes
-only that matching entry, so status never continues to claim that rejected credential works.
+expiry. Incomplete rows are unauthenticated. A complete expired row is reported as
+`authenticated: false`, even when it remains stored and has a refresh token (`stored: true`,
+`refreshable: true`). Pi validates that refresh candidate lazily before use; it is not a currently
+usable login until that refresh succeeds. On a definitive refresh rejection (HTTP 400, 401, or
+403), Bobbit clears only the exact credential snapshot Pi attempted. Network, 5xx, and 429
+failures retain it so a transient outage does not sign the user out. A direct Anthropic request
+that definitively rejects the specific OAuth access credential likewise removes only that matching
+entry, so status never continues to claim that rejected credential works.
 
 Logout deletes only `auth.json["anthropic"]` and clears the OAuth cache. It does not revoke or
 modify OAuth/API-key credentials for OpenAI or Google; Anthropic has no separate revocation call
