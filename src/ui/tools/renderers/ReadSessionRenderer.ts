@@ -112,9 +112,7 @@ function renderCompactMessage(m: CompactMessage): TemplateResult {
 async function fetchPage(sessionId: string, offset: number, limit: number, verbose: boolean): Promise<any> {
 	const qs = new URLSearchParams({ offset: String(offset), limit: String(limit) });
 	if (verbose) qs.set("verbose", "1");
-	const resp = await gatewayFetch(gatewayRoute(`/api/sessions/${encodeURIComponent(sessionId)}/transcript?${qs.toString()}`), {
-		credentials: "include",
-	});
+	const resp = await gatewayFetch(gatewayRoute(`/api/sessions/${encodeURIComponent(sessionId)}/transcript?${qs.toString()}`));
 	if (!resp.ok) {
 		const body = await resp.json().catch(() => ({}));
 		throw new Error(`${resp.status}: ${(body && body.error) || "transcript fetch failed"}`);

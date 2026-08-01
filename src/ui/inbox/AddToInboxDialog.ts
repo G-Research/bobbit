@@ -56,7 +56,6 @@ export class AddToInboxDialog extends LitElement {
 		try {
 			const res = await gatewayFetch(gatewayRoute(`/api/staff/${encodeURIComponent(this.staffId)}/inbox`), {
 				method: "POST",
-				credentials: "include",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({
 					title,

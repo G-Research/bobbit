@@ -65,7 +65,6 @@ export class InboxPanel extends LitElement {
 				gatewayRoute(`/api/staff/${encodeURIComponent(this.staffId)}/inbox/${encodeURIComponent(entryId)}/dismiss`),
 				{
 					method: "POST",
-					credentials: "include",
 					headers: { "Content-Type": "application/json" },
 					body: JSON.stringify({
 						sessionId: this.sessionId,
@@ -84,7 +83,7 @@ export class InboxPanel extends LitElement {
 		try {
 			await gatewayFetch(gatewayRoute(
 				`/api/staff/${encodeURIComponent(this.staffId)}/inbox/${encodeURIComponent(entryId)}`,
-			), { method: "DELETE", credentials: "include" });
+			), { method: "DELETE" });
 		} finally {
 			this._markBusy(entryId, false);
 		}
