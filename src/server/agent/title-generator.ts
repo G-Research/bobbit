@@ -8,6 +8,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { invalidateRejectedAnthropicDirectCredential, refreshOAuthToken } from "../auth/oauth.js";
+import { isUsableAnthropicOAuthCredential } from "../auth/credential-store.js";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { createAnthropicDirectHeaders, type AnthropicDirectCredentials } from "./anthropic-direct-request.js";
 import { sanitizeModelErrorText } from "./model-error-sanitizer.js";
@@ -104,7 +105,7 @@ function loadAuth(): AuthCredentials | null {
 
 		// OAuth token selection and refresh belong to Pi's credential runtime;
 		// only inspect the credential kind here, never use the stored access token.
-		if (cred.type === "oauth") return { type: "oauth", access: "" };
+		if (cred.type === "oauth" && isUsableAnthropicOAuthCredential(authPath, cred)) return { type: "oauth", access: "" };
 		if ((cred.type === "api-key" || cred.type === "api_key") && cred.key) return { type: "api-key", access: cred.key };
 		return null;
 	} catch {

@@ -180,6 +180,7 @@ beforeEach(() => {
 	process.env.BOBBIT_AGENT_DIR = agentDir;
 	resetAgentDirStateForTests();
 	rmSync(authPath, { force: true });
+	rmSync(`${authPath}.bobbit-rejected-oauth.json`, { force: true });
 	callbackServerHarness.handler = undefined;
 });
 
@@ -718,12 +719,39 @@ describe("Anthropic OAuth Pi browser adapter", () => {
 		activeFlowIds.delete(started.flowId);
 	});
 
+	it("keeps a manually completed flow cancellable when its success response is lost", async () => {
+		const previous = oauthCredential();
+		const issued = oauthCredential();
+		writeFileSync(authPath, JSON.stringify({ anthropic: previous }), "utf8");
+		const models: Pick<Models, "login"> = {
+			login: (async (_providerId: string, _type: string, interaction: AuthInteraction) => {
+				interaction.notify({ type: "auth_url", url: currentAuthorizeUrl() });
+				await interaction.prompt({ type: "manual_code", message: "Paste redirect URL" });
+				return issued;
+			}) as Models["login"],
+		};
+		const started = await startAnthropic(models);
+		assert.deepEqual(await oauthComplete(started.flowId, randomUUID(), OFFLINE_FETCH), { success: true });
+		assert.deepEqual(oauthFlowStatus(started.flowId, "anthropic"), { complete: true });
+		await oauthCancelAndWait(started.flowId, "anthropic");
+		const stored = JSON.parse(readFileSync(authPath, "utf8")).anthropic as OAuthCredential;
+		assert.equal(stored.access, previous.access);
+		assert.equal(stored.refresh, previous.refresh);
+		activeFlowIds.delete(started.flowId);
+	});
+
 	it("does not report a known rejected credential authenticated when durable deletion fails", async () => {
 		const rejected = oauthCredential();
 		const replacement = oauthCredential();
 		writeFileSync(authPath, JSON.stringify({ anthropic: rejected }), "utf8");
-		const mutation = vi.spyOn(AtomicCredentialStore.prototype, "mutate")
-			.mockRejectedValueOnce(new Error("credential store unavailable"));
+		const originalAtomicWrite = (AtomicCredentialStore.prototype as any).atomicWrite as Function;
+		const atomicWrite = vi.spyOn(AtomicCredentialStore.prototype as any, "atomicWrite")
+			.mockImplementation(function (this: AtomicCredentialStore, data: unknown, destination: string) {
+				// The rejection fence is written first. Simulate only the subsequent
+				// auth.json deletion failing, as can happen after a durable marker write.
+				if (destination === authPath) throw new Error("credential store unavailable");
+				return originalAtomicWrite.call(this, data, destination);
+			});
 		try {
 			assert.equal(await refreshOAuthToken(OFFLINE_FETCH, {
 				getAuth: async () => {
@@ -732,7 +760,7 @@ describe("Anthropic OAuth Pi browser adapter", () => {
 				},
 			}), null);
 		} finally {
-			mutation.mockRestore();
+			atomicWrite.mockRestore();
 		}
 		assert.deepEqual(oauthStatus("anthropic"), {
 			authenticated: false,
@@ -741,6 +769,9 @@ describe("Anthropic OAuth Pi browser adapter", () => {
 			expires: rejected.expires,
 			provider: "anthropic",
 		});
+		// A newly constructed store models post-restart consumers: the durable,
+		// non-secret rejection fence must hide the still-present raw row there too.
+		assert.equal(await new AtomicCredentialStore(authPath).read("anthropic"), undefined);
 		// The marker is keyed to the rejected access value, not the provider alone.
 		writeFileSync(authPath, JSON.stringify({ anthropic: replacement }), "utf8");
 		assert.equal(oauthStatus("anthropic").authenticated, true);

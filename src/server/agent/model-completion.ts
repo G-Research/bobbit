@@ -6,6 +6,7 @@ import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { promisify } from "node:util";
 import { invalidateRejectedAnthropicDirectCredential, refreshOAuthToken } from "../auth/oauth.js";
+import { isUsableAnthropicOAuthCredential } from "../auth/credential-store.js";
 import { globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import { getAvailableModels, type ApiModel, type CustomProviderConfig } from "./model-registry.js";
@@ -19,14 +20,6 @@ interface AuthCredentials {
 	key?: string;
 	refresh?: string;
 	expires?: number;
-}
-
-/** Match Pi's Anthropic OAuth contract before an on-disk row can reach a request. */
-function isCompleteAnthropicOAuthCredential(credential: AuthCredentials): boolean {
-	return credential.type === "oauth"
-		&& typeof credential.access === "string" && credential.access.length > 0
-		&& typeof credential.refresh === "string" && credential.refresh.length > 0
-		&& typeof credential.expires === "number" && Number.isFinite(credential.expires);
 }
 
 const PROVIDER_ENV_KEYS: Record<string, string[]> = {
@@ -56,7 +49,7 @@ function authCredentialForProvider(provider: string): AuthCredentials | null {
 		// Unlike legacy API-key rows, Anthropic OAuth rows are Pi credentials and
 		// must be renewable. Do not let a partial on-disk row become a Bearer token.
 		if (provider === "anthropic") {
-			return isCompleteAnthropicOAuthCredential(oauth) ? oauth : { type: "invalid-oauth" };
+			return isUsableAnthropicOAuthCredential(globalAuthPath(), oauth) ? oauth : { type: "invalid-oauth" };
 		}
 		if (cred.access) return oauth;
 	}

@@ -11,7 +11,14 @@ import type { AuthInteraction, Models, OAuthCredential } from "@earendil-works/p
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { clearOAuthCache } from "../agent/model-registry.js";
-import { AtomicCredentialStore, deleteCredential, type StoredCredential } from "./credential-store.js";
+import {
+	AtomicCredentialStore,
+	deleteCredential,
+	isCompleteAnthropicOAuthCredential,
+	isStoredOAuthCredentialRejected,
+	isUsableAnthropicOAuthCredential,
+	type StoredCredential,
+} from "./credential-store.js";
 import { redactSensitive } from "./redact.js";
 
 const defaultFetch: typeof fetch = (input, init) => globalThis.fetch(input, init);
@@ -116,25 +123,6 @@ const pendingFlows = new Map<string, PendingOAuth>();
 // independently started reauthentication flow.
 const credentialGenerations = new Map<OAuthProviderId, number>();
 const logoutGenerations = new Map<OAuthProviderId, number>();
-// A definitive provider rejection remains authoritative even when the best-effort
-// durable delete fails. The access value is a compare key, not a credential cache:
-// a replacement credential with another access value is immediately unaffected.
-const rejectedOAuthAccess = new Map<OAuthProviderId, string>();
-
-function markRejectedOAuthAccess(provider: OAuthProviderId, access: string): void {
-	if (access) rejectedOAuthAccess.set(provider, access);
-}
-
-function isRejectedOAuthAccess(provider: OAuthProviderId, access: string): boolean {
-	const rejected = rejectedOAuthAccess.get(provider);
-	if (rejected === undefined) return false;
-	if (rejected === access) return true;
-	// A newer credential won while deletion was failing. Do not let an old
-	// rejection poison its status, and release the now-obsolete marker.
-	rejectedOAuthAccess.delete(provider);
-	return false;
-}
-
 function credentialGeneration(provider: OAuthProviderId): number {
 	return credentialGenerations.get(provider) ?? 0;
 }
@@ -374,15 +362,6 @@ function isDefinitiveRefreshFailure(error: unknown): boolean {
 	return envelope !== null && [400, 401, 403].includes(Number(envelope[1]));
 }
 
-function isCompleteAnthropicOAuthCredential(credential: unknown): credential is OAuthCredential {
-	if (typeof credential !== "object" || credential === null) return false;
-	const candidate = credential as { type?: unknown; access?: unknown; refresh?: unknown; expires?: unknown };
-	return candidate.type === "oauth"
-		&& typeof candidate.access === "string" && candidate.access.length > 0
-		&& typeof candidate.refresh === "string" && candidate.refresh.length > 0
-		&& typeof candidate.expires === "number" && Number.isFinite(candidate.expires);
-}
-
 // The persisted credential has already been narrowed to Pi's OAuth variant by
 // its type tag. Keep this runtime validation boolean so its negative branch
 // remains available to report a malformed on-disk OAuth row.
@@ -392,17 +371,10 @@ function isIncompleteAnthropicOAuthCredential(credential: unknown): boolean {
 
 async function invalidateRejectedAnthropicCredential(attempted: OAuthCredential | undefined): Promise<boolean> {
 	// A concurrent login/refresh may have replaced this entry while Pi contacted
-	// the provider. Only delete the exact rejected snapshot. Record rejection
-	// first: a filesystem failure must never leave this exact known-bad row
-	// appearing authenticated through the status route.
+	// the provider. The store compares the exact access value under its file lock,
+	// writes a non-secret durable rejection fence, then removes only that row.
 	if (!isCompleteAnthropicOAuthCredential(attempted)) return false;
-	markRejectedOAuthAccess("anthropic", attempted.access);
-	let cleared = false;
-	await getOAuthCredentialStore().mutate("anthropic", async (current) => {
-		if (current?.type !== "oauth" || current.access !== attempted.access || current.refresh !== attempted.refresh) return undefined;
-		cleared = true;
-		return deleteCredential;
-	});
+	const cleared = await getOAuthCredentialStore().invalidateRejectedOAuthCredential("anthropic", attempted.access, attempted.refresh);
 	if (cleared) invalidateCredentialGeneration("anthropic");
 	return cleared;
 }
@@ -414,18 +386,18 @@ async function invalidateRejectedAnthropicCredential(attempted: OAuthCredential 
  */
 export async function invalidateRejectedAnthropicDirectCredential(access: string): Promise<boolean> {
 	if (!access) return false;
-	markRejectedOAuthAccess("anthropic", access);
 	try {
-		let cleared = false;
-		await getOAuthCredentialStore().mutate("anthropic", async (current) => {
-			if (current?.type !== "oauth" || current.access !== access) return undefined;
-			cleared = true;
-			return deleteCredential;
-		});
+		// A Messages request sees only the resolved access credential, so access is
+		// its compare key. Refresh failures provide the stricter access+refresh CAS.
+		const cleared = await getOAuthCredentialStore().invalidateRejectedOAuthCredential("anthropic", access);
 		if (cleared) invalidateCredentialGeneration("anthropic");
 		return cleared;
 	} catch (error) {
-		console.error(`[oauth] Could not clear rejected Anthropic credentials: ${redactSensitive(error instanceof Error ? error.message : String(error))}`);
+		// Durable fencing may have succeeded before an auth.json delete fails. Keep
+		// serving the original request failure, except a compromised lock: ownership
+		// loss must reach the caller rather than being mistaken for a safe cleanup.
+		if (isCredentialLockCompromise(error)) throw error;
+		console.error(`[oauth] Could not clear rejected Anthropic credentials: ${sanitizedProviderFailureForLog(error)}`);
 		return false;
 	}
 }
@@ -498,6 +470,10 @@ async function restoreCancelledOAuthCredentials(
 function sanitizedProviderFailureForLog(error: unknown): string {
 	const message = redactSensitive(error instanceof Error ? error.message : String(error));
 	return message.replace(/\bbody=[\s\S]*/i, "body=<redacted-provider-body>");
+}
+
+function isCredentialLockCompromise(error: unknown): boolean {
+	return error instanceof Error && error.message === "Credential store lock was compromised";
 }
 
 /**
@@ -668,6 +644,9 @@ async function oauthStartPi(
 		.then(async (credential) => {
 			if (credential.type !== "oauth") {
 				throw new Error(`OAuth provider returned a non-OAuth credential: ${provider}`);
+			}
+			if (provider === "anthropic" && !isCompleteAnthropicOAuthCredential(credential)) {
+				throw new Error("Anthropic OAuth provider returned an incomplete renewable credential");
 			}
 			// Keep the exact output before any persistence. It is the only row a
 			// terminal flow is ever permitted to remove or replace.
@@ -1039,7 +1018,9 @@ export async function oauthComplete(
 	flow.submitCode(authCode.trim());
 	try {
 		await flow.loginPromise;
-		pendingFlows.delete(flowId);
+		// Keep the completed flow through its acknowledgement window even for a
+		// manual submission. The response can be lost after persistence; an
+		// explicit cancel must still reach this exact issued credential.
 		return { success: true };
 	} catch (error) {
 		// A cancellation cleanup failure leaves the exact issued row in place.
@@ -1059,12 +1040,11 @@ export async function oauthComplete(
  */
 export function oauthStatus(providerInput?: string): { authenticated: boolean; stored?: boolean; refreshable?: boolean; expires?: number; provider: OAuthProviderId; email?: string } {
 	const provider = normalizeProvider(providerInput);
-	const credential = getOAuthCredentialStore().readStoredCredentialSync(provider);
+	// Status intentionally reads the raw snapshot so it can distinguish an absent
+	// credential from a rejected row whose deletion failed after its durable fence.
+	const credential = getOAuthCredentialStore().readStoredCredentialSnapshotSync(provider);
 	if (!credential || credential.type !== "oauth") return { authenticated: false, provider };
-	// A known rejected row can remain on disk if its guarded delete encountered
-	// an I/O failure. It is still visible as stored for recovery, never as a
-	// working login. A different current access value clears the old marker.
-	if (provider === "anthropic" && typeof credential.access === "string" && isRejectedOAuthAccess(provider, credential.access)) {
+	if (provider === "anthropic" && isStoredOAuthCredentialRejected(globalAuthPath(), provider, credential)) {
 		return {
 			authenticated: false,
 			stored: true,
@@ -1167,8 +1147,8 @@ export async function refreshOAuthToken(
 	_fetchImpl: typeof fetch = defaultFetch,
 	authResolver: OAuthAuthResolver = getOAuthModels(),
 ): Promise<string | null> {
-	const stored = getOAuthCredentialStore().readStoredCredentialSync("anthropic");
-	const attempted = isCompleteAnthropicOAuthCredential(stored) ? stored : undefined;
+	const stored = getOAuthCredentialStore().readStoredCredentialSnapshotSync("anthropic");
+	const attempted = isUsableAnthropicOAuthCredential(globalAuthPath(), stored) ? stored : undefined;
 	if (!attempted) return null;
 	try {
 		const resolved = await authResolver.getAuth("anthropic");
@@ -1182,6 +1162,7 @@ export async function refreshOAuthToken(
 					console.warn("[oauth] Anthropic credentials were rejected and have been cleared");
 				}
 			} catch (invalidationError) {
+				if (isCredentialLockCompromise(invalidationError)) throw invalidationError;
 				console.error(`[oauth] Could not clear rejected Anthropic credentials: ${sanitizedProviderFailureForLog(invalidationError)}`);
 			}
 		}

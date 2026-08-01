@@ -16,7 +16,7 @@ import {
 } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
 
 const FILE_MODE = 0o600;
@@ -44,6 +44,8 @@ export interface LegacyApiKeyCredential {
 export type StoredCredential = Credential | LegacyApiKeyCredential;
 export type CredentialMutation = Credential | typeof deleteCredential | undefined;
 
+const REJECTED_OAUTH_LEDGER_VERSION = 1;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -52,6 +54,66 @@ function asStoredCredential(value: unknown): StoredCredential | undefined {
 	if (!isRecord(value)) return undefined;
 	if (value.type !== "oauth" && value.type !== "api_key" && value.type !== "api-key") return undefined;
 	return value as StoredCredential;
+}
+
+/** Pi's renewable Anthropic OAuth contract, shared by every gateway consumer. */
+export function isCompleteAnthropicOAuthCredential(value: unknown): value is Credential & { type: "oauth"; access: string; refresh: string; expires: number } {
+	if (!isRecord(value)) return false;
+	return value.type === "oauth"
+		&& typeof value.access === "string" && value.access.length > 0
+		&& typeof value.refresh === "string" && value.refresh.length > 0
+		&& typeof value.expires === "number" && Number.isFinite(value.expires);
+}
+
+/** Anthropic API keys remain a separate, non-OAuth authentication path. */
+export function isAnthropicApiKeyCredential(value: unknown): value is Credential & { key: string } {
+	return isRecord(value)
+		&& (value.type === "api-key" || value.type === "api_key")
+		&& typeof value.key === "string" && value.key.trim().length > 0;
+}
+
+function rejectedLedgerPath(authPath: string): string {
+	return `${authPath}.bobbit-rejected-oauth.json`;
+}
+
+function oauthAccessFingerprint(access: string): string {
+	// Persist only a one-way compare value: this ledger must never become another
+	// bearer-token store or reveal renewable credentials in diagnostics.
+	return createHash("sha256").update(access).digest("hex");
+}
+
+function rejectedOAuthFingerprint(authPath: string, providerId: string): string | null | undefined {
+	let ledgerPath: string;
+	try {
+		// The mutation lock follows Pi's realpath contract, so status/direct/sandbox
+		// readers must resolve the same sidecar when an agent directory is a link.
+		ledgerPath = rejectedLedgerPath(realpathSync(authPath));
+	} catch {
+		return null;
+	}
+	if (!existsSync(ledgerPath)) return undefined;
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(ledgerPath, "utf8"));
+		if (!isRecord(parsed) || parsed.version !== REJECTED_OAUTH_LEDGER_VERSION || !isRecord(parsed.rejected)) return null;
+		const fingerprint = parsed.rejected[providerId];
+		return typeof fingerprint === "string" && /^[a-f0-9]{64}$/i.test(fingerprint) ? fingerprint : null;
+	} catch {
+		// A durable rejection ledger that can no longer be read must never make an
+		// OAuth row appear authenticated.
+		return null;
+	}
+}
+
+/** True only for the exact persisted OAuth access value that was definitively rejected. */
+export function isStoredOAuthCredentialRejected(authPath: string, providerId: string, value: unknown): boolean {
+	if (!isRecord(value) || value.type !== "oauth" || typeof value.access !== "string" || !value.access) return false;
+	const fingerprint = rejectedOAuthFingerprint(authPath, providerId);
+	return fingerprint === null || (fingerprint !== undefined && fingerprint === oauthAccessFingerprint(value.access));
+}
+
+/** The single Anthropic OAuth validity predicate for status, catalog, direct, and sandbox paths. */
+export function isUsableAnthropicOAuthCredential(authPath: string, value: unknown): value is Credential & { type: "oauth"; access: string; refresh: string; expires: number } {
+	return isCompleteAnthropicOAuthCredential(value) && !isStoredOAuthCredentialRejected(authPath, "anthropic", value);
 }
 
 /** Pi consumes the canonical spelling, while storage retains the legacy spelling. */
@@ -362,7 +424,7 @@ export class AtomicCredentialStore implements CredentialStore {
 	}
 
 	private async withFileLock<T>(
-		fn: (data: RawAuthData) =>
+		fn: (data: RawAuthData, authPath: string, assertLock: () => void) =>
 			| { result: T; next?: RawAuthData }
 			| Promise<{ result: T; next?: RawAuthData }>,
 	): Promise<T> {
@@ -372,23 +434,45 @@ export class AtomicCredentialStore implements CredentialStore {
 		// coordinates on the canonical `<auth.json>.lock` directory as well.
 		const authPath = this.canonicalAuthPath();
 		const fileLock = await acquireAuthFileLock(authPath);
+		let result: T | undefined;
+		let failure: unknown;
 		try {
 			fileLock.assertIntact();
-			const { result, next } = await fn(this.readCurrent(authPath));
+			const outcome = await fn(this.readCurrent(authPath), authPath, fileLock.assertIntact);
 			fileLock.assertIntact();
-			if (next !== undefined) {
-				this.atomicWrite(next, authPath);
+			if (outcome.next !== undefined) {
+				this.atomicWrite(outcome.next, authPath);
 				fileLock.assertIntact();
 			}
-			return result;
-		} finally {
-			try {
-				fileLock.release();
-			} catch {
-				// A competing stale-lock recovery can remove the directory first. Do
-				// not replace a completed credential result with cleanup failure.
-			}
+			result = outcome.result;
+		} catch (error) {
+			failure = error;
 		}
+		try {
+			fileLock.release();
+		} catch (releaseError) {
+			// Losing lock ownership means the caller cannot safely treat the
+			// operation as committed. Never swallow this security boundary.
+			throw releaseError;
+		}
+		if (failure !== undefined) throw failure;
+		return result as T;
+	}
+
+	private persistRejectedOAuthCredential(authPath: string, providerId: string, access: string): void {
+		const ledgerPath = rejectedLedgerPath(authPath);
+		let rejected: Record<string, string> = {};
+		try {
+			const parsed: unknown = JSON.parse(readFileSync(ledgerPath, "utf8"));
+			if (isRecord(parsed) && parsed.version === REJECTED_OAUTH_LEDGER_VERSION && isRecord(parsed.rejected)) {
+				rejected = Object.fromEntries(Object.entries(parsed.rejected).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+			}
+		} catch {
+			// A missing ledger is expected. A malformed previous ledger is replaced
+			// atomically with the definitive current rejection.
+		}
+		rejected[providerId] = oauthAccessFingerprint(access);
+		this.atomicWrite({ version: REJECTED_OAUTH_LEDGER_VERSION, rejected }, ledgerPath);
 	}
 
 	private async readFresh(): Promise<RawAuthData> {
@@ -423,7 +507,10 @@ export class AtomicCredentialStore implements CredentialStore {
 	readStoredCredentialSync(providerId: string): Credential | undefined {
 		try {
 			if (!existsSync(this.authPath)) return undefined;
-			return asCredential(this.readCurrent()[providerId]);
+			const credential = asCredential(this.readCurrent()[providerId]);
+			return credential && !isStoredOAuthCredentialRejected(this.authPath, providerId, credential)
+				? credential
+				: undefined;
 		} catch {
 			return undefined;
 		}
@@ -444,13 +531,18 @@ export class AtomicCredentialStore implements CredentialStore {
 	}
 
 	async read(providerId: string): Promise<Credential | undefined> {
-		return asCredential((await this.readFresh())[providerId]);
+		const credential = asCredential((await this.readFresh())[providerId]);
+		return credential && !isStoredOAuthCredentialRejected(this.authPath, providerId, credential)
+			? credential
+			: undefined;
 	}
 
 	async list(): Promise<readonly CredentialInfo[]> {
 		return Object.entries(await this.readFresh()).flatMap(([providerId, value]) => {
 			const credential = asCredential(value);
-			return credential ? [{ providerId, type: credential.type }] : [];
+			return credential && !isStoredOAuthCredentialRejected(this.authPath, providerId, credential)
+				? [{ providerId, type: credential.type }]
+				: [];
 		});
 	}
 
@@ -461,11 +553,17 @@ export class AtomicCredentialStore implements CredentialStore {
 		return this.enqueueProvider(providerId, async () => {
 			let changed = false;
 			let committed: { before?: StoredCredential; after?: StoredCredential } | undefined;
-			const result = await this.withLock(async (data) => {
+			const result = await this.withLock(async (data, authPath) => {
 				const rawCurrent = asStoredCredential(data[providerId]);
-				const current = asCredential(rawCurrent);
+				const rawCredential = asCredential(rawCurrent);
+				const current = rawCredential && !isStoredOAuthCredentialRejected(authPath, providerId, rawCredential)
+					? rawCredential
+					: undefined;
 				const mutation = await fn(current);
 				if (mutation === undefined) return { result: current };
+				if (providerId === "anthropic" && mutation !== deleteCredential && mutation.type === "oauth" && !isCompleteAnthropicOAuthCredential(mutation)) {
+					throw new Error("Anthropic OAuth credential is incomplete");
+				}
 
 				const next = { ...data };
 				if (mutation === deleteCredential) {
@@ -530,6 +628,24 @@ export class AtomicCredentialStore implements CredentialStore {
 				this.didChange();
 			}
 		});
+	}
+
+	/**
+	 * Durably fence a definitively rejected OAuth credential before attempting
+	 * deletion. If deleting auth.json then fails, every store-backed consumer
+	 * still fails closed for this exact access value after a gateway restart.
+	 */
+	async invalidateRejectedOAuthCredential(providerId: string, access: string, refresh?: string): Promise<boolean> {
+		if (!access) return false;
+		return this.enqueueProvider(providerId, async () => this.withLock((data, authPath, assertLock) => {
+			const current = asCredential(asStoredCredential(data[providerId]));
+			if (!current || current.type !== "oauth" || current.access !== access || (refresh !== undefined && current.refresh !== refresh)) return { result: false };
+			this.persistRejectedOAuthCredential(authPath, providerId, access);
+			assertLock();
+			const next = { ...data };
+			delete next[providerId];
+			return { result: true, next };
+		}));
 	}
 
 	async delete(providerId: string): Promise<void> {

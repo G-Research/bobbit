@@ -7,6 +7,11 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { globalAuthPath, serverSecretsDir } from "../bobbit-dir.js";
+import {
+	isAnthropicApiKeyCredential,
+	isCompleteAnthropicOAuthCredential,
+	isUsableAnthropicOAuthCredential,
+} from "../auth/credential-store.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 
@@ -120,8 +125,9 @@ function detectAuthJson(): Record<string, boolean> {
 		for (const key of Object.keys(data)) {
 			const credential = data[key];
 			// A persisted Anthropic OAuth row is usable only when it satisfies Pi's
-			// renewable credential shape. API-key rows remain independently valid.
-			result[key] = key !== "anthropic" || isCompleteAnthropicOAuthCredential(credential) || isAnthropicApiKeyCredential(credential);
+			// renewable credential shape and has not been durably rejected. API-key
+			// rows remain independently valid.
+			result[key] = key !== "anthropic" || isUsableAnthropicOAuthCredential(globalAuthPath(), credential) || isAnthropicApiKeyCredential(credential);
 		}
 	}
 	return result;
@@ -159,18 +165,7 @@ function isUsableOAuthCredential(value: unknown): value is Record<string, any> {
 	return isCredentialObject(value) && value.type === "oauth" && typeof value.access === "string" && !!value.access;
 }
 
-/** Pi requires all three renewable fields before an Anthropic OAuth row is usable. */
-export function isCompleteAnthropicOAuthCredential(value: unknown): value is Record<string, any> {
-	return isUsableOAuthCredential(value)
-		&& typeof value.refresh === "string" && value.refresh.length > 0
-		&& typeof value.expires === "number" && Number.isFinite(value.expires);
-}
-
-export function isAnthropicApiKeyCredential(value: unknown): value is Record<string, any> {
-	return isCredentialObject(value)
-		&& (value.type === "api-key" || value.type === "api_key")
-		&& typeof value.key === "string" && value.key.trim().length > 0;
-}
+export { isAnthropicApiKeyCredential, isCompleteAnthropicOAuthCredential } from "../auth/credential-store.js";
 
 /**
  * Sanitize the stored `google-gemini-cli` (Google account / Gemini Code Assist) OAuth
@@ -192,14 +187,14 @@ function sanitizeGoogleCredential(value: unknown): Record<string, any> | undefin
  * their project sandbox-token policy; this helper never supplies a default.
  */
 function sanitizeAnthropicCredential(value: unknown): Record<string, any> | undefined {
-	if (!isCompleteAnthropicOAuthCredential(value)) return undefined;
+	if (!isUsableAnthropicOAuthCredential(globalAuthPath(), value)) return undefined;
 	// The sandbox receives only the current access credential, never host renewal
 	// authority. Completeness is checked before this reduction.
 	return { type: "oauth", access: value.access, expires: value.expires };
 }
 
 function hasCurrentOAuthAccess(value: unknown, now = Date.now()): boolean {
-	return isCompleteAnthropicOAuthCredential(value) && value.expires > now;
+	return isUsableAnthropicOAuthCredential(globalAuthPath(), value) && value.expires > now;
 }
 
 /**
@@ -208,7 +203,7 @@ function hasCurrentOAuthAccess(value: unknown, now = Date.now()): boolean {
  */
 export async function refreshSandboxAnthropicOAuthCredential(): Promise<boolean> {
 	const credential = readHostAuthJson()?.anthropic;
-	if (!isCompleteAnthropicOAuthCredential(credential)) return false;
+	if (!isUsableAnthropicOAuthCredential(globalAuthPath(), credential)) return false;
 	if (hasCurrentOAuthAccess(credential)) return true;
 	try {
 		const oauth: Record<string, unknown> = await import("../auth/oauth.js");

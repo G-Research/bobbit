@@ -7,6 +7,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { invalidateRejectedAnthropicDirectCredential, refreshOAuthToken } from "../auth/oauth.js";
+import { isUsableAnthropicOAuthCredential } from "../auth/credential-store.js";
 import { redactSensitive } from "../auth/redact.js";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { createAnthropicDirectHeaders, type AnthropicDirectCredentials } from "./anthropic-direct-request.js";
@@ -32,7 +33,7 @@ function loadAuthKind(): AuthCredentials | null {
 		const data = JSON.parse(readFileSync(authPath, "utf-8"));
 		const cred = data.anthropic;
 		if (!cred) return null;
-		if (cred.type === "oauth") return { type: "oauth", access: "" };
+		if (cred.type === "oauth" && isUsableAnthropicOAuthCredential(authPath, cred)) return { type: "oauth", access: "" };
 		if ((cred.type === "api-key" || cred.type === "api_key") && typeof cred.key === "string" && cred.key) {
 			return { type: "api-key", access: cred.key };
 		}

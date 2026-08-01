@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { vi } from "vitest";
 import { AtomicCredentialStore } from "../../src/server/auth/credential-store.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
@@ -27,6 +27,7 @@ async function api(path: string, opts: RequestInit = {}): Promise<Response> {
 function restoreCredentialFixture(): void {
 	// Keep the shared gateway usable for later specs without committing any
 	// credential material to the test fixture.
+	rmSync(`${globalAuthPath()}.bobbit-rejected-oauth.json`, { force: true });
 	writeFileSync(globalAuthPath(), JSON.stringify({
 		anthropic: { type: "oauth", expires: Date.now() + 60_000 },
 	}), "utf8");

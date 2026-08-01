@@ -24,7 +24,7 @@ import { inferMeta, discoverAigwModels, getAigwUrl } from "./aigw-manager.js";
 import { getOpenAIModelAdditions } from "./openai-model-additions.js";
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
 import { GOOGLE_GEMINI_CLI_PROVIDER, hasGoogleCodeAssistSpawnCredential } from "./google-code-assist.js";
-import { isAnthropicApiKeyCredential, isCompleteAnthropicOAuthCredential } from "./host-tokens.js";
+import { isAnthropicApiKeyCredential, isUsableAnthropicOAuthCredential } from "../auth/credential-store.js";
 
 // These Pi providers require credential/runtime integration Bobbit does not yet
 // forward to host or sandbox agents. Keep the denylist provider-scoped so future
@@ -595,7 +595,7 @@ function hasOAuthCredentials(provider?: string): boolean {
 
 		if (provider === "anthropic") {
 			const credential = authData[provider];
-			return isCompleteAnthropicOAuthCredential(credential) || isAnthropicApiKeyCredential(credential);
+			return isUsableAnthropicOAuthCredential(globalAuthPath(), credential) || isAnthropicApiKeyCredential(credential);
 		}
 
 		// Check for provider-specific keys

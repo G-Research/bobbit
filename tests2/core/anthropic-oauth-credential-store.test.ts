@@ -79,6 +79,7 @@ beforeEach(() => {
 	process.env.BOBBIT_AGENT_DIR = agentDir;
 	resetAgentDirStateForTests();
 	rmSync(authPath, { force: true });
+	rmSync(`${authPath}.bobbit-rejected-oauth.json`, { force: true });
 	rmSync(`${authPath}.lock`, { recursive: true, force: true });
 });
 
@@ -418,6 +419,34 @@ describe("AtomicCredentialStore", () => {
 			/invalid JSON|JSON object/i,
 		);
 		assert.equal(readFileSync(authPath, "utf8") === malformed, true);
+	});
+
+	it("propagates lock ownership compromise instead of treating the mutation as committed", async () => {
+		const store = new AtomicCredentialStore(authPath);
+		await assert.rejects(
+			store.modify("anthropic", async () => {
+				const lockPath = `${realpathSync(authPath)}.lock`;
+				rmdirSync(lockPath);
+				mkdirSync(lockPath, { mode: 0o700 });
+				return credential();
+			}),
+			/lock was compromised/i,
+		);
+		// The replacement belongs to the fixture, not the failed store owner.
+		rmdirSync(`${realpathSync(authPath)}.lock`);
+	});
+
+	it("rejects incomplete Anthropic OAuth writes without replacing the existing credential", async () => {
+		const store = new AtomicCredentialStore(authPath);
+		const existing = credential();
+		await store.modify("anthropic", async () => existing);
+		await assert.rejects(
+			store.modify("anthropic", async () => ({ type: "oauth", access: randomUUID(), expires: Date.now() + 60_000 } as Credential)),
+			/incomplete/i,
+		);
+		const stored = await store.read("anthropic");
+		assert.equal(stored?.type, "oauth");
+		if (stored?.type === "oauth") sameSecret(stored.access, existing.access);
 	});
 
 	it("uses restrictive permissions and removes same-directory temporary files", async () => {
