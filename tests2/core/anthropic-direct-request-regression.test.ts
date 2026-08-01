@@ -122,7 +122,12 @@ describe("direct Anthropic request regressions", () => {
 
 	it("does not authenticate incomplete OAuth rows and persists direct OAuth rejection", async () => {
 		useAuth({ type: "oauth", access: randomUUID(), expires: Date.now() + 60_000 });
-		assert.deepEqual(oauthStatus("anthropic"), { authenticated: false, stored: true, provider: "anthropic" });
+		const partialStatus = oauthStatus("anthropic");
+		assert.equal(partialStatus.authenticated, false);
+		assert.equal(partialStatus.stored, true);
+		assert.equal(partialStatus.refreshable, false);
+		assert.equal(Number.isFinite(partialStatus.expires), true);
+		assert.equal(partialStatus.provider, "anthropic");
 
 		const access = randomUUID();
 		writeFileSync(path.join(agentDir!, "auth.json"), JSON.stringify({
