@@ -70,10 +70,10 @@ and the button reads **Re-authenticate**, identical to the other providers.
 
 **Refresh.** `refreshGoogleOAuthToken()` (in `src/server/auth/oauth.ts`) exchanges the
 stored refresh token at `oauth2.googleapis.com/token` when the access token is missing or
-expired. It mirrors the Anthropic refresh policy: clear the stored credential only on
-definitive auth failures (400/401/403); keep it on transient 5xx/429/network errors. The
-existing no-arg Anthropic `refreshOAuthToken()` API is untouched, so Anthropic/OpenAI
-behavior is unchanged.
+expired. It clears the stored credential only on definitive auth failures (400/401/403) and
+keeps it on transient 5xx/429/network errors. Anthropic refresh is a separate Pi-owned
+`Models.getAuth()` lifecycle through Bobbit's credential-store adapter, not a shared Bobbit
+PKCE or refresh implementation; see [Anthropic OAuth](anthropic-oauth.md).
 
 **Logout.** `POST /api/oauth/logout { provider }` (handler `oauthLogout`) revokes the token
 at `oauth2.googleapis.com/revoke` where possible, deletes **only** that provider's
