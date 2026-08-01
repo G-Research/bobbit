@@ -1,8 +1,8 @@
 import {
   activeGatewayConnection,
   gatewayFetch,
+  gatewayNativeTransportSupport,
   gatewayUrl,
-  LOCALHOST_TOKEN,
 } from "../../../app/gateway-fetch.js";
 import { gatewayRoute } from "../../../shared/base-path.js";
 import type {
@@ -544,6 +544,13 @@ export const reviewBackend: AnnotationBackend = {
 
 if (typeof window !== "undefined") {
   window.addEventListener("beforeunload", () => {
+    const connection = activeGatewayConnection();
+    // sendBeacon cannot set a bearer header. Exact-origin gateways can instead
+    // authenticate with the signed browser cookie; cross-origin gateways rely
+    // on the ordinary authenticated persistence requests made before unload.
+    // Never put either a real token or the localhost sentinel in the URL.
+    if (!gatewayNativeTransportSupport(connection.baseUrl).supported) return;
+
     for (const [sessionId, sessionCache] of _annotationCache) {
       if (sessionCache.size === 0) continue;
       const annotations: Record<string, ReviewAnnotation[]> = {};
@@ -556,18 +563,11 @@ if (typeof window !== "undefined") {
       const payload = submitted
         ? { annotations, submitted: true }
         : { annotations };
-      const { token } = activeGatewayConnection();
-      const tokenQuery = token && token !== LOCALHOST_TOKEN
-        ? `?token=${encodeURIComponent(token)}`
-        : "";
-      // sendBeacon cannot set a bearer header. Resolve against the selected
-      // in-memory connection so explicit gateway mounts remain intact, and put
-      // only a real bearer in the query; `localhost` is a client sentinel.
       const route = gatewayRoute(
-        `/api/sessions/${encodeURIComponent(sessionId)}/review/annotations/bulk${tokenQuery}`,
+        `/api/sessions/${encodeURIComponent(sessionId)}/review/annotations/bulk`,
       );
       navigator.sendBeacon(
-        gatewayUrl(route),
+        gatewayUrl(route, connection.baseUrl),
         new Blob([JSON.stringify(payload)], { type: "application/json" }),
       );
     }
