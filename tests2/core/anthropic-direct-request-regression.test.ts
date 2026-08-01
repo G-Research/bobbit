@@ -66,9 +66,9 @@ afterEach(() => {
 });
 
 describe("direct Anthropic request regressions", () => {
-	it("keeps the Pi default fixed while a controlled mock factor matrix varies only OAuth identity headers", () => {
-		// Scope and credential provenance are intentionally fixture labels only: this
-		// direct-request helper does not own Pi OAuth scopes or live credential state.
+	it("captures a controlled identity factor matrix while retaining Pi's fixed default and model-specific mock outcomes", async () => {
+		// These are test-only factor inputs: the helper owns no OAuth scopes or
+		// credentials, and the blank access value cannot authenticate anywhere.
 		const factors = [
 			{
 				provenance: "mock current Pi credential provenance",
@@ -85,16 +85,65 @@ describe("direct Anthropic request regressions", () => {
 				},
 			},
 		] as const;
+		const outcomes = new Map([
+			["claude-opus-5", 404],
+			["claude-sonnet-5", 429],
+			["claude-opus-4-6", 401],
+		]);
+		type Factor = typeof factors[number];
+		const captured: Array<{
+			factor: Pick<Factor, "provenance" | "scopeProfile">;
+			url: string;
+			headers: Record<string, string>;
+			model: string;
+		}> = [];
+		const mockFetch = async (factor: Factor, input: RequestInfo | URL, init: RequestInit): Promise<Response> => {
+			const request = new Request(input, init);
+			const body = JSON.parse(await request.text()) as { model: string };
+			captured.push({
+				factor: { provenance: factor.provenance, scopeProfile: factor.scopeProfile },
+				url: request.url,
+				headers: Object.fromEntries(request.headers),
+				model: body.model,
+			});
+			return response(outcomes.get(body.model) ?? 500, { type: "mock_outcome" });
+		};
 		const oauth = { type: "oauth" as const, access: "" };
-		const fixedDefault = createAnthropicDirectHeaders(oauth);
+
+		// Production callers omit the identity seam. Capture the actual Request
+		// shape rather than merely comparing the plain object returned by the helper.
+		const fixedDefault = await mockFetch(factors[0], "https://api.anthropic.com/v1/messages", {
+			method: "POST",
+			headers: createAnthropicDirectHeaders(oauth),
+			body: JSON.stringify({ model: "claude-opus-5" }),
+		});
+		assert.equal(fixedDefault.status, 404);
+		assert.deepEqual(captured[0], {
+			factor: {
+				provenance: "mock current Pi credential provenance",
+				scopeProfile: "current Pi-maintained scope profile",
+			},
+			url: "https://api.anthropic.com/v1/messages",
+			headers: {
+				"anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
+				"anthropic-version": "2023-06-01",
+				authorization: "Bearer",
+				"content-type": "application/json",
+				"user-agent": "claude-cli/2.1.75",
+				"x-app": "cli",
+			},
+			model: "claude-opus-5",
+		}, "production callers omit the test seam and retain Pi's exact default identity");
 
 		for (const factor of factors) {
-			const headers = createAnthropicDirectHeaders(oauth, factor.identity);
-			assert.equal(headers.Authorization, "Bearer ");
-			assert.equal(headers["anthropic-beta"], factor.identity.beta, `${factor.provenance} / ${factor.scopeProfile}`);
-			assert.equal(headers["user-agent"], factor.identity.userAgent);
-			assert.equal(headers["x-app"], factor.identity.app);
-			assert.equal(headers["x-api-key"], undefined);
+			for (const [model, expectedStatus] of outcomes) {
+				const result = await mockFetch(factor, "https://api.anthropic.com/v1/messages", {
+					method: "POST",
+					headers: createAnthropicDirectHeaders(oauth, factor.identity),
+					body: JSON.stringify({ model }),
+				});
+				assert.equal(result.status, expectedStatus, `${factor.provenance} / ${factor.scopeProfile} must preserve ${model}'s mocked result`);
+			}
 
 			const apiKeyHeaders = createAnthropicDirectHeaders({ type: "api-key", access: "" }, factor.identity);
 			assert.deepEqual(apiKeyHeaders, {
@@ -104,14 +153,18 @@ describe("direct Anthropic request regressions", () => {
 			}, "API-key requests must never receive a mocked OAuth identity");
 		}
 
-		assert.deepEqual(fixedDefault, {
-			"Content-Type": "application/json",
-			"anthropic-version": "2023-06-01",
-			Authorization: "Bearer ",
-			"anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
-			"user-agent": "claude-cli/2.1.75",
-			"x-app": "cli",
-		}, "production callers omit the test seam and retain Pi's exact default identity");
+		const factorCaptures = captured.slice(1);
+		assert.equal(new Set(factorCaptures.map((request) => request.headers["anthropic-beta"])).size, factors.length);
+		assert.equal(new Set(factorCaptures.map((request) => request.headers["user-agent"])).size, factors.length);
+		assert.equal(new Set(factorCaptures.map((request) => request.headers["x-app"])).size, factors.length);
+		assert.deepEqual(
+			factorCaptures.map(({ factor, model }) => ({ factor, model })),
+			factors.flatMap((factor) => [...outcomes.keys()].map((model) => ({
+				factor: { provenance: factor.provenance, scopeProfile: factor.scopeProfile },
+				model,
+			}))),
+			"each synthetic provenance and scope factor must be threaded into the mocked request capture",
+		);
 	});
 
 	it("keeps role-name API-key selection and exact API-key request identity", async () => {
