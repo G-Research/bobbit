@@ -76,6 +76,8 @@ interface PendingPiOAuth {
 	loginPromise: Promise<void>;
 	completed: boolean;
 	cancelled: boolean;
+	/** A submitted callback may be in Pi's token exchange and must settle before retry. */
+	codeSubmitted: boolean;
 	error?: string;
 }
 
@@ -201,13 +203,37 @@ function cancelPendingFlow(_flowId: string, flow: PendingOAuth, error: Error): v
 	}
 }
 
+/**
+ * Cancel a Pi flow and release an abandoned prompt immediately. Once Bobbit
+ * has submitted a code, Pi may be exchanging it or persisting a result, so its
+ * flow and Anthropic callback-port lease remain owned until login settles.
+ */
+function cancelPiFlow(flowId: string, flow: PendingPiOAuth, error: Error): boolean {
+	cancelPendingFlow(flowId, flow, error);
+	if (!flow.codeSubmitted) {
+		if (pendingFlows.get(flowId) === flow) pendingFlows.delete(flowId);
+		if (flow.provider === "anthropic") releaseAnthropicLease(flowId);
+		return false;
+	}
+	// `then` supplies both outcomes so this detached cleanup can never reject.
+	void flow.loginPromise.then(
+		() => { if (pendingFlows.get(flowId) === flow) pendingFlows.delete(flowId); },
+		() => { if (pendingFlows.get(flowId) === flow) pendingFlows.delete(flowId); },
+	);
+	return true;
+}
+
 function cleanupExpiredFlows(): void {
 	const now = Date.now();
 	// Snapshot entries before mutating the map to avoid mutation-during-iteration UB.
 	for (const [id, flow] of Array.from(pendingFlows.entries())) {
 		if (now - flow.createdAt > FLOW_TTL_MS) {
-			cancelPendingFlow(id, flow, new Error("OAuth flow expired"));
-			pendingFlows.delete(id);
+			if (flow.provider === "google-gemini-cli") {
+				cancelPendingFlow(id, flow, new Error("OAuth flow expired"));
+				pendingFlows.delete(id);
+			} else {
+				cancelPiFlow(id, flow, new Error("OAuth flow expired"));
+			}
 		}
 	}
 }
@@ -433,6 +459,7 @@ async function oauthStartPi(
 		loginPromise: Promise.resolve(),
 		completed: false,
 		cancelled: false,
+		codeSubmitted: false,
 	};
 	pendingFlows.set(flowId, flow);
 
@@ -558,13 +585,7 @@ export function oauthCancel(flowId: string, providerInput?: string): { success: 
 		pendingFlows.delete(flowId);
 		return { success: true };
 	}
-	cancelPendingFlow(flowId, flow, new Error("OAuth flow cancelled"));
-	// Do not remove the flow while Models.login can still persist a late result.
-	// `then` supplies both outcomes so this detached cleanup can never reject.
-	void flow.loginPromise.then(
-		() => { if (pendingFlows.get(flowId) === flow) pendingFlows.delete(flowId); },
-		() => { if (pendingFlows.get(flowId) === flow) pendingFlows.delete(flowId); },
-	);
+	cancelPiFlow(flowId, flow, new Error("OAuth flow cancelled"));
 	return { success: true };
 }
 
@@ -803,8 +824,12 @@ export async function oauthComplete(
 	}
 
 	if (Date.now() - flow.createdAt > FLOW_TTL_MS) {
-		cancelPendingFlow(flowId, flow, new Error("OAuth flow expired"));
-		pendingFlows.delete(flowId);
+		if (flow.provider === "google-gemini-cli") {
+			cancelPendingFlow(flowId, flow, new Error("OAuth flow expired"));
+			pendingFlows.delete(flowId);
+		} else {
+			cancelPiFlow(flowId, flow, new Error("OAuth flow expired"));
+		}
 		return { success: false, error: "OAuth flow expired" };
 	}
 
@@ -822,9 +847,8 @@ export async function oauthComplete(
 		// The REST/UI never submits an empty value. For direct callers, treat it
 		// as an explicit cancellation so Pi's fixed callback port is not leased
 		// by an unusable abandoned flow.
-		cancelPendingFlow(flowId, flow, new Error("OAuth flow cancelled"));
-		await flow.loginPromise.catch(() => {});
-		pendingFlows.delete(flowId);
+		const exchangeActive = cancelPiFlow(flowId, flow, new Error("OAuth flow cancelled"));
+		if (exchangeActive) await flow.loginPromise.catch(() => {});
 		return { success: false, error: "code required" };
 	}
 	if (flow.completed) {
@@ -833,7 +857,9 @@ export async function oauthComplete(
 	}
 
 	// Pi owns parsing of a bare code, code#state, query string, or full redirect
-	// URL and validates any supplied state before token exchange.
+	// URL and validates any supplied state before token exchange. From this point
+	// cancellation retains the flow and lease until Pi has settled the exchange.
+	flow.codeSubmitted = true;
 	flow.submitCode(authCode.trim());
 	try {
 		await flow.loginPromise;
@@ -884,8 +910,12 @@ export function oauthFlowStatus(
 		}
 	}
 	if (Date.now() - flow.createdAt > FLOW_TTL_MS) {
-		cancelPendingFlow(flowId, flow, new Error("OAuth flow expired"));
-		pendingFlows.delete(flowId);
+		if (flow.provider === "google-gemini-cli") {
+			cancelPendingFlow(flowId, flow, new Error("OAuth flow expired"));
+			pendingFlows.delete(flowId);
+		} else {
+			cancelPiFlow(flowId, flow, new Error("OAuth flow expired"));
+		}
 		return { complete: false, error: "OAuth flow expired" };
 	}
 	if (flow.completed) {

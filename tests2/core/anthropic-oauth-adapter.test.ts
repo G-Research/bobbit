@@ -471,13 +471,15 @@ describe("Anthropic OAuth Pi browser adapter", () => {
 		assert.deepEqual(oauthCancel(started.flowId, "openai-codex"), { success: true });
 		assert.equal(interactionSeen?.signal?.aborted, false, "provider mismatch must not cancel another provider's flow");
 		assert.deepEqual(oauthCancel(started.flowId, "anthropic"), { success: true });
+		assert.deepEqual(oauthFlowStatus(started.flowId, "anthropic"), { complete: false, error: "flow not found" });
+
+		// A prompt has no submitted authorization code, so cancellation must not
+		// wait for Pi's asynchronous prompt rejection before allowing a retry.
+		const replacement: LoginCapture = {};
+		const replacementStarted = await startAnthropic(pendingModels(replacement));
 		for (let i = 0; i < 100 && !promptError; i++) await Promise.resolve();
 		assert.equal(interactionSeen?.signal?.aborted, true);
 		assert.match(promptError instanceof Error ? promptError.message : String(promptError), /cancelled/i);
-		assert.deepEqual(oauthFlowStatus(started.flowId, "anthropic"), { complete: false, error: "flow not found" });
-
-		const replacement: LoginCapture = {};
-		const replacementStarted = await startAnthropic(pendingModels(replacement));
 		await releasePending(replacement, replacementStarted.flowId);
 	});
 
@@ -624,12 +626,14 @@ describe("Anthropic OAuth Pi browser adapter", () => {
 		} finally {
 			dateNow.mockRestore();
 		}
+		assert.deepEqual(oauthFlowStatus(started.flowId, "anthropic"), { complete: false, error: "flow not found" });
+		// Expiry at an unsubmitted prompt must release the lease synchronously,
+		// rather than waiting for Pi to observe the abort signal.
+		const replacement: LoginCapture = {};
+		const replacementStarted = await startAnthropic(pendingModels(replacement));
 		for (let i = 0; i < 100 && !promptError; i++) await Promise.resolve();
 		assert.equal(capture.interaction?.signal?.aborted, true);
 		assert.match(promptError instanceof Error ? promptError.message : String(promptError), /OAuth flow expired/);
-
-		const replacement: LoginCapture = {};
-		const replacementStarted = await startAnthropic(pendingModels(replacement));
 		await releasePending(replacement, replacementStarted.flowId);
 	});
 });
