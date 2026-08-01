@@ -50,7 +50,7 @@ import { authenticateGateway, connectToSession } from "./session-manager.js";
 import { BOBBIT_HUE_ROTATIONS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";
 import { accountOAuthProviderLabel, dismissAccountOAuthExpiryReminders, type ExpiredAccountOAuthCredential } from "./account-oauth-providers.js";
 import { defaultCwdForProjectSession, HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
-import { activeGatewayConnection, gatewayMobileHandoff, gatewayUrl, InvalidGatewayBaseUrlError, LOCALHOST_TOKEN } from "./gateway-fetch.js";
+import { activeGatewayConnection, gatewayBaseUrl, gatewayUrl, InvalidGatewayBaseUrlError, LOCALHOST_TOKEN } from "./gateway-fetch.js";
 import { gatewayRoute } from "../shared/base-path.js";
 // NOTE: session-manager imports from dialogs, so we use dynamic imports to break the cycle
 
@@ -748,28 +748,19 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 // GATEWAY DIALOG
 // ============================================================================
 
-export function openGatewayDialog(options: {
-	requireTransferableToken?: boolean;
-	onConnected?: () => void;
-} = {}): void {
+export function openGatewayDialog(): void {
 	const container = document.createElement("div");
 	document.body.appendChild(container);
 
 	const activeConnection = activeGatewayConnection();
 	let urlValue = activeConnection.baseUrl;
-	let tokenValue = options.requireTransferableToken && activeConnection.token === LOCALHOST_TOKEN
-		? ""
-		: activeConnection.token;
+	let tokenValue = activeConnection.token;
 	let connecting = false;
 	let error = "";
 
 	const cleanup = () => {
 		render(html``, container);
 		container.remove();
-	};
-	const finishConnected = () => {
-		cleanup();
-		options.onConnected?.();
 	};
 
 	const handleConnect = async () => {
@@ -783,7 +774,7 @@ export function openGatewayDialog(options: {
 
 		try {
 			await authenticateGateway(url, token);
-			finishConnected();
+			cleanup();
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			// Validation and auth failures are permanent.
@@ -803,7 +794,7 @@ export function openGatewayDialog(options: {
 				await new Promise(r => setTimeout(r, POLL_INTERVAL));
 				try {
 					await authenticateGateway(url, token);
-					finishConnected();
+					cleanup();
 					return;
 				} catch (retryErr: any) {
 					if (retryErr instanceof InvalidGatewayBaseUrlError || retryErr?.message?.includes("Invalid auth token")) {
@@ -866,16 +857,10 @@ export function openGatewayDialog(options: {
 									})}
 								</div>
 								${error ? html`<error-details .message=${error}></error-details>` : ""}
-								${options.requireTransferableToken ? html`
-									<p class="text-xs text-muted-foreground" data-testid="gateway-token-reentry-help">
-										Re-enter the token printed by the gateway. It remains only in this tab and is not saved after cookie authentication.
-									</p>
-								` : html`
-									<p class="text-xs text-muted-foreground">
-										Start the gateway:
-										<code class="px-1 py-0.5 rounded bg-secondary text-secondary-foreground font-mono text-[11px]">npx bobbit</code>
-									</p>
-								`}
+								<p class="text-xs text-muted-foreground">
+									Start the gateway:
+									<code class="px-1 py-0.5 rounded bg-secondary text-secondary-foreground font-mono text-[11px]">npx bobbit</code>
+								</p>
 							</div>
 						`,
 					})}
@@ -912,7 +897,9 @@ export async function showQrCodeDialog(): Promise<void> {
 		container.remove();
 	};
 
-	const handoff = gatewayMobileHandoff();
+	const token = activeGatewayConnection().token;
+	const tokenQuery = token && token !== LOCALHOST_TOKEN ? `?token=${encodeURIComponent(token)}` : "";
+	const mobileUrl = `${gatewayBaseUrl()}/${tokenQuery}`;
 	const caCertUrl = gatewayUrl(gatewayRoute("/api/ca-cert"));
 
 	let sessionQr = "";
@@ -921,24 +908,14 @@ export async function showQrCodeDialog(): Promise<void> {
 	let firstTimeOs: null | "ios" | "android" = null;
 
 	try {
-		if (handoff.supported) {
-			const { default: QRCode } = await import("qrcode");
-			[sessionQr, certQr] = await Promise.all([
-				QRCode.toDataURL(handoff.url, { width: 280, margin: 2, color: { dark: "#000000", light: "#ffffff" } }),
-				QRCode.toDataURL(caCertUrl, { width: 280, margin: 2, color: { dark: "#000000", light: "#ffffff" } }),
-			]);
-		}
+		const { default: QRCode } = await import("qrcode");
+		[sessionQr, certQr] = await Promise.all([
+			QRCode.toDataURL(mobileUrl, { width: 280, margin: 2, color: { dark: "#000000", light: "#ffffff" } }),
+			QRCode.toDataURL(caCertUrl, { width: 280, margin: 2, color: { dark: "#000000", light: "#ffffff" } }),
+		]);
 	} catch (err) {
 		error = err instanceof Error ? err.message : String(err);
 	}
-
-	const reenterToken = () => {
-		cleanup();
-		openGatewayDialog({
-			requireTransferableToken: true,
-			onConnected: () => { void showQrCodeDialog(); },
-		});
-	};
 
 	const renderDialog = () => render(
 		Dialog({
@@ -954,19 +931,6 @@ export async function showQrCodeDialog(): Promise<void> {
 						<div class="flex flex-col items-center gap-3 mt-3">
 							${error
 								? html`<error-details .message=${error}></error-details>`
-								: !handoff.supported
-									? html`
-										<div class="w-full rounded-md border border-border bg-secondary/40 p-4" data-testid="qr-auth-required">
-											<p class="text-sm text-foreground">${handoff.message}</p>
-											<button
-												type="button"
-												class="mt-3 inline-flex h-9 items-center justify-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-												@click=${reenterToken}
-											>
-												Re-enter gateway token
-											</button>
-										</div>
-									`
 								: firstTimeOs === "ios"
 									? html`
 											<div class="rounded-lg overflow-hidden bg-white p-2">

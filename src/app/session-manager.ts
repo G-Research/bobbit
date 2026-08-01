@@ -16,7 +16,6 @@ import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromSe
 import {
 	activeGatewayConnection,
 	commitGatewayConnection,
-	confirmGatewayCookieAuthentication,
 	gatewayAuthorizationHeaders,
 	gatewayUrl,
 	LOCALHOST_TOKEN,
@@ -984,17 +983,7 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 	// AI Gateway: the gateway handles LLM auth; Anthropic OAuth endpoints
 	// are likely unreachable on air-gapped networks anyway.
 	const healthData = await healthRes.json();
-	// The authenticated Bearer response may attempt to set a cookie, but URL
-	// compatibility and Set-Cookie visibility are not proof that the browser kept
-	// it. Only a second protected request without Bearer authority can justify
-	// replacing the persisted token with the cookie sentinel. A sentinel health
-	// request was already cookie-only and therefore supplies the same proof.
-	const cookieConfirmed = token === LOCALHOST_TOKEN
-		|| (Boolean(token) && await confirmGatewayCookieAuthentication(candidate));
-	const commit = commitGatewayConnection(candidate, token, {
-		cookieConfirmed,
-		localhostTrusted: healthData.localhost === true,
-	});
+	const commit = commitGatewayConnection(candidate, token);
 	if (commit.warning) showHeaderToast(commit.warning);
 	// Extract setup status from health response (avoids extra fetch)
 	if (typeof healthData.setupComplete === "boolean") {

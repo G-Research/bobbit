@@ -64,14 +64,12 @@ import { restoreActiveProjectFromLastSession } from "./skills-active-project.js"
 import { bootMark } from "./boot-timing.js";
 import {
 	activeGatewayConnection,
-	captureGatewayConnectionSnapshot,
-	commitGatewayConnectionIfUnchanged,
+	appUrl,
+	commitGatewayConnection,
 	gatewayUrl,
 	InvalidGatewayBaseUrlError,
 	LOCALHOST_TOKEN,
-	prepareRuntimeServiceWorkerMount,
-	reconcileGatewayConnectionSnapshot,
-	recordGatewayLocalhostMode,
+	runtimeBasePath,
 	sameOriginGatewayBaseUrl,
 	takeGatewayRecoveryWarning,
 } from "./gateway-fetch.js";
@@ -631,88 +629,10 @@ async function handleHashChange(): Promise<void> {
 // INIT
 // ============================================================================
 
-interface BootstrapGatewayConnection {
-	baseUrl: string;
-	token: string;
-	warning?: string;
-}
-
-/**
- * Recover an empty same-origin connection through a credentialed health probe.
- * The exact response URL check and redirect rejection prevent an off-mount or
- * wrong-origin response from authorizing the page-origin fallback. A successful
- * protected-cookie probe is represented by the non-secret localhost sentinel;
- * the health mode records whether that sentinel means disabled auth or cookie auth.
- */
-async function recoverSameOriginGatewayConnection(
-	connection: Readonly<BootstrapGatewayConnection>,
-	fallbackBase: string,
-	fetchHealth: typeof fetch = fetch,
-): Promise<BootstrapGatewayConnection> {
-	if (connection.token || connection.baseUrl !== fallbackBase) return { ...connection };
-
-	// Capture both this tab's monotonic selection version and the persisted atomic
-	// generation. If another tab commits while the health request is deferred, its
-	// selection wins even when the corresponding StorageEvent has not arrived yet.
-	const snapshot = captureGatewayConnectionSnapshot();
-	if (snapshot.connection.baseUrl !== connection.baseUrl
-		|| snapshot.connection.token !== connection.token) return { ...snapshot.connection };
-	const connectionAfterProbe = () => {
-		const reconciled = reconcileGatewayConnectionSnapshot(snapshot);
-		return { ...(reconciled.unchanged ? connection : reconciled.connection) };
-	};
-
-	try {
-		const healthUrl = gatewayUrl(gatewayRoute("/api/health"), fallbackBase);
-		const response = await fetchHealth(healthUrl, {
-			credentials: "include",
-			redirect: "error",
-		});
-		if (!response.ok || response.redirected || response.url !== healthUrl) return connectionAfterProbe();
-
-		const health = await response.json();
-		if (!health || typeof health !== "object" || typeof health.localhost !== "boolean") {
-			return connectionAfterProbe();
-		}
-
-		const localhostTrusted = health.localhost === true;
-		const commit = commitGatewayConnectionIfUnchanged(
-			snapshot,
-			fallbackBase,
-			LOCALHOST_TOKEN,
-			{ localhostTrusted },
-		);
-		if (!commit.committed) return { ...commit.connection };
-		recordGatewayLocalhostMode(localhostTrusted);
-		return {
-			...commit.connection,
-			warning: commit.warning,
-		};
-	} catch {
-		return connectionAfterProbe();
-	}
-}
-
 async function initApp() {
 	bootMark("initApp-start");
-	// A root-scoped Bobbit worker from an earlier deployment can otherwise own
-	// this mounted page and cache its first authenticated API response. Resolve
-	// it before hydrating credentials or issuing any gateway request. Incomplete
-	// ownership evidence fails closed rather than deleting sibling app state.
-	const serviceWorkerPreparation = await prepareRuntimeServiceWorkerMount();
-	if (serviceWorkerPreparation.reloadRequested) return;
-
 	const app = document.getElementById("app");
 	if (!app) throw new Error("App container not found");
-	if (!serviceWorkerPreparation.safeToProceed) {
-		const notice = document.createElement("main");
-		notice.setAttribute("role", "alert");
-		notice.style.cssText = "max-width:42rem;margin:12vh auto;padding:2rem;font:16px/1.5 system-ui,sans-serif";
-		notice.textContent = "Bobbit stopped before signing in because another service worker controls this URL. Remove the older root-scoped worker for this origin, then reload.";
-		app.replaceChildren(notice);
-		markAppBooted();
-		return;
-	}
 
 	// Palette is loaded from server preferences after gateway auth (see below)
 
@@ -732,16 +652,24 @@ async function initApp() {
 	let savedUrl = urlToken ? fallbackBase : initialConnection.baseUrl;
 	let savedToken = urlToken ?? initialConnection.token;
 
-	// Probe only an empty exact same-origin fallback. Both auth-disabled localhost
-	// and a valid signed-cookie session persist the non-secret client sentinel;
-	// real bearer and explicit remote connections remain authoritative.
-	const recoveredConnection = await recoverSameOriginGatewayConnection(
-		{ baseUrl: savedUrl, token: savedToken },
-		fallbackBase,
-	);
-	savedUrl = recoveredConnection.baseUrl;
-	savedToken = recoveredConnection.token;
-	if (recoveredConnection.warning) showHeaderToast(recoveredConnection.warning);
+	// Auto-connect in localhost mode. The successful probe is the commit point;
+	// the sentinel is never sent as an HTTP bearer credential.
+	if (!savedToken && savedUrl === fallbackBase) {
+		try {
+			const probe = await fetch(gatewayUrl(gatewayRoute("/api/health"), fallbackBase), { credentials: "include" });
+			if (probe.ok) {
+				const health = await probe.json();
+				if (health.localhost) {
+					savedUrl = fallbackBase;
+					savedToken = LOCALHOST_TOKEN;
+					const commit = commitGatewayConnection(savedUrl, savedToken);
+					if (commit.warning) showHeaderToast(commit.warning);
+				}
+			}
+		} catch {
+			// Server not reachable — fall through to disconnected state.
+		}
+	}
 
 	// If we have credentials, show "starting" immediately instead of
 	// "disconnected" — the gateway may just be booting up.
@@ -764,25 +692,6 @@ async function initApp() {
 	if (savedUrl && savedToken) {
 		try {
 			await waitForGateway(savedUrl, savedToken);
-
-			// A protected first load may have failed its pre-authenticated sw.js
-			// request. The successful health probe has now installed the bound cookie,
-			// so retry registration once while preserving the mount-isolation guard.
-			const authenticatedServiceWorkerPreparation = await prepareRuntimeServiceWorkerMount();
-			if (!authenticatedServiceWorkerPreparation.safeToProceed
-				|| authenticatedServiceWorkerPreparation.reloadRequested) return;
-
-			// The sentinel can mean either auth-disabled localhost or an auth-enforced
-			// cookie session. Persist only that non-secret distinction so QR handoff
-			// never presents an unauthenticated link after reload.
-			try {
-				const healthModeResponse = await gatewayFetch("/api/health");
-				if (healthModeResponse.ok) {
-					const healthMode = await healthModeResponse.json();
-					recordGatewayLocalhostMode(healthMode.localhost === true);
-				}
-			} catch { /* unknown mode disables cross-device handoff safely */ }
-
 			if (urlToken) {
 				// Remove only the launch query after successful auth; preserve the
 				// mounted pathname and any deep-link hash.
@@ -1195,6 +1104,11 @@ async function initApp() {
 }
 
 initApp();
+
+// Register the worker below the runtime mount so it cannot claim sibling apps.
+if ('serviceWorker' in navigator) {
+	navigator.serviceWorker.register(appUrl('/sw.js'), { scope: `${runtimeBasePath()}/` }).catch(() => {});
+}
 
 // iOS PWA grey-screen recovery (frozen/killed standalone snapshot on relaunch).
 // All paths are gated on standalone display mode, so a normal browser tab and
