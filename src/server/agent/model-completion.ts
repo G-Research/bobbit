@@ -302,7 +302,7 @@ export async function completeModelText(
 		return assistantText(result);
 	} catch (error) {
 		const { status } = classifyModelProbeError(error);
-		if (model.provider === "anthropic" && resolvedApiKey.oauthAccess && (status === 401 || status === 403)) {
+		if (model.provider === "anthropic" && resolvedApiKey.oauthAccess && status === 401) {
 			// The selected access credential is a concurrency guard: a newer login or
 			// refresh must survive an earlier request's definitive rejection.
 			await invalidateRejectedAnthropicDirectCredential(resolvedApiKey.oauthAccess);

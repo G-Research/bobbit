@@ -28,6 +28,7 @@ function restoreCredentialFixture(): void {
 	// Keep the shared gateway usable for later specs without committing any
 	// credential material to the test fixture.
 	rmSync(`${globalAuthPath()}.bobbit-rejected-oauth.json`, { force: true });
+	rmSync(`${globalAuthPath()}.bobbit-rejected-oauth.anthropic.json`, { force: true });
 	writeFileSync(globalAuthPath(), JSON.stringify({
 		anthropic: { type: "oauth", expires: Date.now() + 60_000 },
 	}), "utf8");
@@ -113,7 +114,8 @@ test.describe("Anthropic OAuth lifecycle routes", () => {
 				method: "POST",
 				body: JSON.stringify({ flowId: first.flowId, provider: "openai-codex" }),
 			});
-			expect(wrongProviderCancel.status).toBe(200);
+			expect(wrongProviderCancel.status).toBe(404);
+			expect(await wrongProviderCancel.json()).toEqual({ success: false, error: "Unknown or expired flow ID" });
 			const stillPending = await api(`/api/oauth/flow-status?flowId=${encodeURIComponent(first.flowId)}&provider=anthropic`);
 			expect(stillPending.status).toBe(200);
 			expect(await stillPending.json()).toEqual({ complete: false });

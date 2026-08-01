@@ -46,7 +46,7 @@ import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { executeCleanupWorktreesRequest } from "./maintenance/cleanup-worktrees-request.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { readToken, validateToken } from "./auth/token.js";
-import { OAuthBusyError, oauthCancelAndWait, oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
+import { OAuthBusyError, oauthCancelAndWait, oauthComplete, oauthFinalize, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import type { GateResetReopenOutcome, ServerMessage } from "./ws/protocol.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
@@ -13973,6 +13973,10 @@ async function handleApiRoute(
 			// Resolve only after Pi has settled its cancelled callback exchange and
 			// released the provider lease, so an immediate UI retry cannot race it.
 			const result = await oauthCancelAndWait(body.flowId, body.provider);
+			if (!result.success) {
+				json(result, 404);
+				return;
+			}
 			if (body.provider === "anthropic" && oauthCancellationRetryState.anthropicFlowId === body.flowId) {
 				oauthCancellationRetryState.anthropicFlowId = undefined;
 			}
@@ -14004,6 +14008,18 @@ async function handleApiRoute(
 		} catch (err) {
 			jsonError(500, err);
 		}
+		return;
+	}
+
+	// POST /api/oauth/finalize — accept a completed flow without rolling it back.
+	if (url.pathname === "/api/oauth/finalize" && req.method === "POST") {
+		const body = await readBody(req).catch(() => ({}));
+		if (!body?.flowId || typeof body.flowId !== "string" || !body?.provider || typeof body.provider !== "string") {
+			json({ error: "Missing flowId or provider" }, 400);
+			return;
+		}
+		const result = oauthFinalize(body.flowId, body.provider);
+		json(result, result.success ? 200 : 404);
 		return;
 	}
 

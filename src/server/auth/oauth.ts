@@ -334,7 +334,7 @@ function hasErrorCode(error: unknown, expected: string): boolean {
 	return false;
 }
 
-/** A rejected refresh token is terminal; network and provider failures are not. */
+/** Only an explicit 401 proves the credential itself was rejected; a 403 may be model or resource policy. */
 function isDefinitiveRefreshFailure(error: unknown): boolean {
 	// Prefer structured transport metadata. Provider response bodies are
 	// untrusted text and can contain arbitrary numerals (including 400/401/403)
@@ -344,9 +344,9 @@ function isDefinitiveRefreshFailure(error: unknown): boolean {
 	for (let depth = 0; depth < 3 && current; depth += 1) {
 		if (typeof current !== "object" || current === null) break;
 		const candidate = current as { status?: unknown; statusCode?: unknown; response?: { status?: unknown }; cause?: unknown };
-		if ([400, 401, 403].includes(Number(candidate.status))
-			|| [400, 401, 403].includes(Number(candidate.statusCode))
-			|| [400, 401, 403].includes(Number(candidate.response?.status))) return true;
+		if (Number(candidate.status) === 401
+			|| Number(candidate.statusCode) === 401
+			|| Number(candidate.response?.status) === 401) return true;
 		current = candidate.cause;
 	}
 
@@ -359,7 +359,7 @@ function isDefinitiveRefreshFailure(error: unknown): boolean {
 	const start = message.indexOf(marker);
 	if (start < 0) return false;
 	const envelope = /^HTTP request failed\. status=(\d+); url=https:\/\/platform\.claude\.com\/v1\/oauth\/token; body=/.exec(message.slice(start));
-	return envelope !== null && [400, 401, 403].includes(Number(envelope[1]));
+	return envelope !== null && Number(envelope[1]) === 401;
 }
 
 // The persisted credential has already been narrowed to Pi's OAuth variant by
@@ -451,6 +451,10 @@ async function restoreCancelledOAuthCredentials(
 	previousCredential: StoredCredential | undefined,
 	flowCredentialGeneration: number,
 ): Promise<void> {
+	// Fence the issued access before rollback. If a later auth.json replacement
+	// fails, a restart still refuses the cancelled renewable credential instead
+	// of reviving an authentication the user explicitly abandoned.
+	await getOAuthCredentialStore().fenceOAuthCredential(provider, credentials.access, credentials.refresh);
 	// The credential store remembers the row immediately before this exact write.
 	// That version is newer than the flow-start snapshot when a refresh rotated
 	// credentials while the authorization UI was open, so cancellation restores
@@ -708,22 +712,22 @@ async function oauthStartPi(
  * callback-port lease owned until that login settles, so a retry cannot race a
  * cancelled exchange or observe credentials it writes after cancellation.
  */
-function cancelOAuthFlow(flowId: string, providerInput?: string): Promise<void> {
+function cancelOAuthFlow(flowId: string, providerInput?: string): Promise<boolean> {
 	const flow = pendingFlows.get(flowId);
-	if (!flow) return Promise.resolve();
+	if (!flow) return Promise.resolve(false);
 	if (providerInput) {
 		try {
-			if (flow.provider !== normalizeProvider(providerInput)) return Promise.resolve();
+			if (flow.provider !== normalizeProvider(providerInput)) return Promise.resolve(false);
 		} catch {
-			return Promise.resolve();
+			return Promise.resolve(false);
 		}
 	}
 	if (flow.provider === "google-gemini-cli") {
 		cancelPendingFlow(flowId, flow, new Error("OAuth flow cancelled"));
 		pendingFlows.delete(flowId);
-		return Promise.resolve();
+		return Promise.resolve(true);
 	}
-	return cancelPiFlow(flowId, flow, new Error("OAuth flow cancelled"));
+	return cancelPiFlow(flowId, flow, new Error("OAuth flow cancelled")).then(() => true);
 }
 
 /**
@@ -734,12 +738,39 @@ function cancelOAuthFlow(flowId: string, providerInput?: string): Promise<void> 
 export function oauthCancel(flowId: string, providerInput?: string): { success: boolean } {
 	// Legacy callers intentionally do not await teardown; avoid converting a
 	// credential-store cleanup failure into an unhandled rejection.
+	const flow = pendingFlows.get(flowId);
+	let success = Boolean(flow);
+	if (flow && providerInput) {
+		try {
+			success = flow.provider === normalizeProvider(providerInput);
+		} catch {
+			success = false;
+		}
+	}
 	void cancelOAuthFlow(flowId, providerInput).catch(() => {});
-	return { success: true };
+	return { success };
 }
 
-export async function oauthCancelAndWait(flowId: string, providerInput?: string): Promise<{ success: boolean }> {
-	await cancelOAuthFlow(flowId, providerInput);
+export async function oauthCancelAndWait(flowId: string, providerInput?: string): Promise<{ success: boolean; error?: string }> {
+	return (await cancelOAuthFlow(flowId, providerInput))
+		? { success: true }
+		: { success: false, error: "Unknown or expired flow ID" };
+}
+
+/** Accept a completed flow and remove its acknowledgement window without rollback. */
+export function oauthFinalize(flowId: string, providerInput?: string): { success: boolean; error?: string } {
+	const flow = pendingFlows.get(flowId);
+	if (!flow) return { success: false, error: "Unknown or expired flow ID" };
+	if (providerInput) {
+		try {
+			if (flow.provider !== normalizeProvider(providerInput)) return { success: false, error: "Unknown or expired flow ID" };
+		} catch {
+			return { success: false, error: "Unknown or expired flow ID" };
+		}
+	}
+	if (!flow.completed || flow.cancelled) return { success: false, error: "OAuth flow is not complete" };
+	if (flow.provider === "google-gemini-cli") closeGoogleFlowServer(flow);
+	pendingFlows.delete(flowId);
 	return { success: true };
 }
 
@@ -1253,10 +1284,11 @@ async function revokeGoogleToken(token: string, fetchImpl: typeof fetch = defaul
 /**
  * Log out / clear the stored OAuth credential for a single provider.
  *
- * Strictly provider-partitioned: only `auth.json[canonicalProvider]` is
- * removed. API-key-only entries (e.g. `providerKey.google` in preferences) and
- * other providers' OAuth entries are never touched. For Google, the upstream
- * token is best-effort revoked first. No token material is ever returned.
+ * Strictly provider-partitioned: only an OAuth row at
+ * `auth.json[canonicalProvider]` is removed. API-key entries (including a
+ * legacy row at the same provider key) and other providers are never touched.
+ * For Google, the upstream token is best-effort revoked first. No token
+ * material is ever returned.
  */
 export async function oauthLogout(providerInput?: string, fetchImpl: typeof fetch = defaultFetch): Promise<{ success: boolean; provider: OAuthProviderId }> {
 	const provider = normalizeProvider(providerInput);
@@ -1266,20 +1298,18 @@ export async function oauthLogout(providerInput?: string, fetchImpl: typeof fetc
 	// the deleted row.
 	invalidateCredentialGeneration(provider);
 	invalidateLogoutGeneration(provider);
-	if (provider === "anthropic") {
-		// There is no Anthropic revocation endpoint. Pi's public CredentialStore
-		// deletion is the complete provider-scoped logout operation.
-		await getOAuthCredentialStore().delete(provider);
-	} else if (provider === "google-gemini-cli") {
+	if (provider === "google-gemini-cli") {
 		await getOAuthCredentialStore().mutate(provider, async (current) => {
-			if (current?.type === "oauth") {
-				const token = current.refresh || current.access;
-				if (token) await revokeGoogleToken(token, fetchImpl);
-			}
+			if (current?.type !== "oauth") return undefined;
+			const token = current.refresh || current.access;
+			if (token) await revokeGoogleToken(token, fetchImpl);
 			return deleteCredential;
 		});
 	} else {
-		await getOAuthCredentialStore().delete(provider);
+		// OAuth logout must never erase an API-key row sharing this provider key.
+		await getOAuthCredentialStore().mutate(provider, async (current) =>
+			current?.type === "oauth" ? deleteCredential : undefined,
+		);
 	}
 	return { success: true, provider };
 }

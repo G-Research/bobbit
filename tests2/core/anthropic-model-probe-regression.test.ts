@@ -228,7 +228,7 @@ describe("Anthropic model probe regressions", () => {
 		});
 	});
 
-	it("clears the OAuth credential when the model-test completion receives a definitive rejection", async () => {
+	it("retains the OAuth credential when a model-test completion receives a resource 403", async () => {
 		const access = randomUUID();
 		useAuth({ type: "oauth", access, refresh: randomUUID(), expires: Date.now() + 60_000 });
 		const prefs = new PreferencesStore(path.resolve("/memfs/anthropic-model-test"), createMemFs());
@@ -252,7 +252,11 @@ describe("Anthropic model probe regressions", () => {
 			status: 403,
 			code: "authentication_failed",
 		});
-		assert.deepEqual(JSON.parse(readFileSync(path.join(agentDir!, "auth.json"), "utf-8")), {});
+		assert.equal(
+			JSON.parse(readFileSync(path.join(agentDir!, "auth.json"), "utf-8")).anthropic.access,
+			access,
+			"only a 401 can invalidate the OAuth credential",
+		);
 	});
 
 	it("keeps provider failures model-specific", async () => {

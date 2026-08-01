@@ -416,12 +416,9 @@ async function generateViaAnthropic(
 			body: JSON.stringify(body),
 		});
 
-		// Pi resolves expiry and refreshes before this request. A Messages 401/403
-		// is a definitive authentication/authorization result, not a signal to
-		// repeat the same Pi-backed credential resolution.
-
+		// Only a 401 proves the bearer credential failed; a 403 can be model or resource policy.
 		if (!response.ok) {
-			if (auth.type === "oauth" && (response.status === 401 || response.status === 403)) {
+			if (auth.type === "oauth" && response.status === 401) {
 				await invalidateRejectedAnthropicDirectCredential(auth.access);
 			}
 			console.error(`[title-gen] Anthropic ${describeAnthropicFailure(response.status)}`);
@@ -610,12 +607,9 @@ async function generateGoalSummaryViaAnthropic(
 			body: JSON.stringify(body),
 		});
 
-		// Pi resolves expiry and refreshes before this request. A Messages 401/403
-		// is a definitive authentication/authorization result, not a signal to
-		// repeat the same Pi-backed credential resolution.
-
+		// Only a 401 proves the bearer credential failed; a 403 can be model or resource policy.
 		if (!response.ok) {
-			if (auth.type === "oauth" && (response.status === 401 || response.status === 403)) {
+			if (auth.type === "oauth" && response.status === 401) {
 				await invalidateRejectedAnthropicDirectCredential(auth.access);
 			}
 			console.error(`[title-gen] Anthropic ${describeAnthropicFailure(response.status)}`);

@@ -80,6 +80,8 @@ beforeEach(() => {
 	resetAgentDirStateForTests();
 	rmSync(authPath, { force: true });
 	rmSync(`${authPath}.bobbit-rejected-oauth.json`, { force: true });
+	rmSync(`${authPath}.bobbit-rejected-oauth.anthropic.json`, { force: true });
+	rmSync(`${authPath}.bobbit-rejected-oauth.google-gemini-cli.json`, { force: true });
 	rmSync(`${authPath}.lock`, { recursive: true, force: true });
 });
 
@@ -408,6 +410,32 @@ describe("AtomicCredentialStore", () => {
 		const refreshedRead = await first.read("anthropic");
 		assert.equal(refreshedRead?.type, "oauth");
 		sameSecret(refreshedRead?.type === "oauth" ? refreshedRead.access : undefined, rotated.access);
+	});
+
+	it("keeps rejection fences provider-scoped and fails closed if their write fails", async () => {
+		const store = new AtomicCredentialStore(authPath);
+		const anthropic = credential();
+		const google = credential();
+		await store.modify("anthropic", async () => anthropic);
+		await store.modify("google-gemini-cli", async () => google);
+
+		// A malformed Anthropic fence only denies Anthropic; it cannot hide an
+		// unrelated provider's otherwise valid OAuth row.
+		writeFileSync(`${authPath}.bobbit-rejected-oauth.anthropic.json`, "{", "utf8");
+		assert.equal((await store.read("anthropic")), undefined);
+		assert.equal((await store.read("google-gemini-cli"))?.type, "oauth");
+
+		const atomicWrite = (store as any).atomicWrite.bind(store);
+		const failingFence = vi.spyOn(store as any, "atomicWrite").mockImplementation((data: unknown, target: string) => {
+			if (target.includes(".bobbit-rejected-oauth.google-gemini-cli.json")) throw new Error("fence write failed");
+			return atomicWrite(data, target);
+		});
+		try {
+			await assert.rejects(store.invalidateRejectedOAuthCredential("google-gemini-cli", google.access, google.refresh), /fence write failed/);
+			assert.equal(await store.read("google-gemini-cli"), undefined, "the live process must deny an unfenced rejected credential");
+		} finally {
+			failingFence.mockRestore();
+		}
 	});
 
 	it("fails closed on malformed external writes without replacing their bytes", async () => {

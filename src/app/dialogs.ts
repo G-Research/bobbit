@@ -618,10 +618,24 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 			resolve(result);
 		};
 
+		const finalizeCompletedFlow = () => {
+			if (closed) return;
+			const completedFlowId = flowId;
+			// A successful close accepts the credential. Finalization only removes the
+			// acknowledgement window; unlike cancellation it can never roll back auth.
+			finishCleanup(true);
+			if (completedFlowId) {
+				void gatewayFetch("/api/oauth/finalize", {
+					method: "POST",
+					body: JSON.stringify({ flowId: completedFlowId, provider }),
+				}).catch(() => {});
+			}
+		};
+
 		const cleanup = (result: boolean) => {
 			if (closed || closing) return;
 			if (result) {
-				finishCleanup(true);
+				finalizeCompletedFlow();
 				return;
 			}
 			closing = true;
@@ -661,7 +675,7 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 					if (data.complete) {
 						step = "done";
 						renderOAuthDialog();
-						setTimeout(() => cleanup(true), 500);
+						setTimeout(finalizeCompletedFlow, 500);
 						return;
 					}
 					if (data.error) {
@@ -754,7 +768,7 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 				if (data.success) {
 					step = "done";
 					renderOAuthDialog();
-					setTimeout(() => cleanup(true), 500);
+					setTimeout(finalizeCompletedFlow, 500);
 				} else {
 					showFlowError(typeof data.error === "string" ? data.error : "OAuth exchange failed. Retry the sign-in flow.");
 				}
@@ -837,7 +851,7 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 			render(
 				Dialog({
 					isOpen: true,
-					onClose: () => cleanup(false),
+					onClose: () => step === "done" ? finalizeCompletedFlow() : cleanup(false),
 					width: "min(480px, 92vw)",
 					height: "auto",
 					backdropClassName: "bg-black/50 backdrop-blur-sm",

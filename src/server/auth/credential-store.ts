@@ -45,6 +45,11 @@ export type StoredCredential = Credential | LegacyApiKeyCredential;
 export type CredentialMutation = Credential | typeof deleteCredential | undefined;
 
 const REJECTED_OAUTH_LEDGER_VERSION = 1;
+// A rejected OAuth access value must be denied immediately even if persisting
+// its sidecar fence fails. The durable fence remains the restart boundary; this
+// narrow in-process record closes the write-failure window without retaining a
+// bearer value.
+const rejectedOAuthInProcess = new Map<string, string>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -72,8 +77,10 @@ export function isAnthropicApiKeyCredential(value: unknown): value is Credential
 		&& typeof value.key === "string" && value.key.trim().length > 0;
 }
 
-function rejectedLedgerPath(authPath: string): string {
-	return `${authPath}.bobbit-rejected-oauth.json`;
+function rejectedLedgerPath(authPath: string, providerId: string): string {
+	// Each provider owns its own fence. A corrupt Anthropic sidecar must not
+	// hide a valid Codex/Google account row (or vice versa).
+	return `${authPath}.bobbit-rejected-oauth.${encodeURIComponent(providerId)}.json`;
 }
 
 function oauthAccessFingerprint(access: string): string {
@@ -82,25 +89,50 @@ function oauthAccessFingerprint(access: string): string {
 	return createHash("sha256").update(access).digest("hex");
 }
 
+function rejectionKey(authPath: string, providerId: string): string {
+	try {
+		return `${realpathSync(authPath)}\u0000${providerId}`;
+	} catch {
+		return `${authPath}\u0000${providerId}`;
+	}
+}
+
 function rejectedOAuthFingerprint(authPath: string, providerId: string): string | null | undefined {
-	let ledgerPath: string;
+	let canonicalPath: string;
 	try {
 		// The mutation lock follows Pi's realpath contract, so status/direct/sandbox
 		// readers must resolve the same sidecar when an agent directory is a link.
-		ledgerPath = rejectedLedgerPath(realpathSync(authPath));
+		canonicalPath = realpathSync(authPath);
 	} catch {
 		return null;
 	}
-	if (!existsSync(ledgerPath)) return undefined;
+	const inProcess = rejectedOAuthInProcess.get(rejectionKey(canonicalPath, providerId));
+	if (inProcess) return inProcess;
+	const ledgerPath = rejectedLedgerPath(canonicalPath, providerId);
+	if (existsSync(ledgerPath)) {
+		try {
+			const parsed: unknown = JSON.parse(readFileSync(ledgerPath, "utf8"));
+			if (!isRecord(parsed) || parsed.version !== REJECTED_OAUTH_LEDGER_VERSION) return null;
+			const fingerprint = parsed.rejected;
+			return typeof fingerprint === "string" && /^[a-f0-9]{64}$/i.test(fingerprint) ? fingerprint : null;
+		} catch {
+			// A corrupt fence fails closed for *its provider only*.
+			return null;
+		}
+	}
+
+	// Read the prior shared format only when it contains a valid entry for this
+	// provider. A corrupt legacy document cannot be assigned safely, so it must
+	// not hide unrelated provider rows during migration to scoped sidecars.
+	const legacyPath = `${canonicalPath}.bobbit-rejected-oauth.json`;
+	if (!existsSync(legacyPath)) return undefined;
 	try {
-		const parsed: unknown = JSON.parse(readFileSync(ledgerPath, "utf8"));
-		if (!isRecord(parsed) || parsed.version !== REJECTED_OAUTH_LEDGER_VERSION || !isRecord(parsed.rejected)) return null;
-		const fingerprint = parsed.rejected[providerId];
-		return typeof fingerprint === "string" && /^[a-f0-9]{64}$/i.test(fingerprint) ? fingerprint : null;
+		const legacy: unknown = JSON.parse(readFileSync(legacyPath, "utf8"));
+		if (!isRecord(legacy) || legacy.version !== REJECTED_OAUTH_LEDGER_VERSION || !isRecord(legacy.rejected)) return undefined;
+		const fingerprint = legacy.rejected[providerId];
+		return typeof fingerprint === "string" && /^[a-f0-9]{64}$/i.test(fingerprint) ? fingerprint : undefined;
 	} catch {
-		// A durable rejection ledger that can no longer be read must never make an
-		// OAuth row appear authenticated.
-		return null;
+		return undefined;
 	}
 }
 
@@ -460,19 +492,11 @@ export class AtomicCredentialStore implements CredentialStore {
 	}
 
 	private persistRejectedOAuthCredential(authPath: string, providerId: string, access: string): void {
-		const ledgerPath = rejectedLedgerPath(authPath);
-		let rejected: Record<string, string> = {};
-		try {
-			const parsed: unknown = JSON.parse(readFileSync(ledgerPath, "utf8"));
-			if (isRecord(parsed) && parsed.version === REJECTED_OAUTH_LEDGER_VERSION && isRecord(parsed.rejected)) {
-				rejected = Object.fromEntries(Object.entries(parsed.rejected).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
-			}
-		} catch {
-			// A missing ledger is expected. A malformed previous ledger is replaced
-			// atomically with the definitive current rejection.
-		}
-		rejected[providerId] = oauthAccessFingerprint(access);
-		this.atomicWrite({ version: REJECTED_OAUTH_LEDGER_VERSION, rejected }, ledgerPath);
+		const fingerprint = oauthAccessFingerprint(access);
+		// Set before the durable write. If a full disk or permissions error prevents
+		// the sidecar commit, the running gateway still refuses this exact credential.
+		rejectedOAuthInProcess.set(rejectionKey(authPath, providerId), fingerprint);
+		this.atomicWrite({ version: REJECTED_OAUTH_LEDGER_VERSION, rejected: fingerprint }, rejectedLedgerPath(authPath, providerId));
 	}
 
 	private async readFresh(): Promise<RawAuthData> {
@@ -630,13 +654,26 @@ export class AtomicCredentialStore implements CredentialStore {
 		});
 	}
 
-	/**
-	 * Durably fence a definitively rejected OAuth credential before attempting
-	 * deletion. If deleting auth.json then fails, every store-backed consumer
-	 * still fails closed for this exact access value after a gateway restart.
-	 */
+	/** Durably deny an exact OAuth row without replacing it; used before cancellation rollback. */
+	async fenceOAuthCredential(providerId: string, access: string, refresh?: string): Promise<boolean> {
+		if (!access) return false;
+		// A lock acquisition failure cannot be allowed to turn a definitive
+		// rejection/cancellation into a still-usable in-process credential.
+		rejectedOAuthInProcess.set(rejectionKey(this.authPath, providerId), oauthAccessFingerprint(access));
+		return this.enqueueProvider(providerId, async () => this.withLock((data, authPath, assertLock) => {
+			const current = asCredential(asStoredCredential(data[providerId]));
+			if (!current || current.type !== "oauth" || current.access !== access || (refresh !== undefined && current.refresh !== refresh)) return { result: false };
+			this.persistRejectedOAuthCredential(authPath, providerId, access);
+			assertLock();
+			return { result: true };
+		}));
+	}
+
 	async invalidateRejectedOAuthCredential(providerId: string, access: string, refresh?: string): Promise<boolean> {
 		if (!access) return false;
+		// Fail closed before lock acquisition too. The access fingerprint keeps this
+		// precise: a concurrently rotated credential with another access value stays usable.
+		rejectedOAuthInProcess.set(rejectionKey(this.authPath, providerId), oauthAccessFingerprint(access));
 		return this.enqueueProvider(providerId, async () => this.withLock((data, authPath, assertLock) => {
 			const current = asCredential(asStoredCredential(data[providerId]));
 			if (!current || current.type !== "oauth" || current.access !== access || (refresh !== undefined && current.refresh !== refresh)) return { result: false };

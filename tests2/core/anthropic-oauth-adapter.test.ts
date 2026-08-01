@@ -57,6 +57,7 @@ const {
 	oauthCancel,
 	oauthCancelAndWait,
 	oauthComplete,
+	oauthFinalize,
 	oauthFlowStatus,
 	invalidateRejectedAnthropicDirectCredential,
 	oauthLogout,
@@ -181,6 +182,7 @@ beforeEach(() => {
 	resetAgentDirStateForTests();
 	rmSync(authPath, { force: true });
 	rmSync(`${authPath}.bobbit-rejected-oauth.json`, { force: true });
+	rmSync(`${authPath}.bobbit-rejected-oauth.anthropic.json`, { force: true });
 	callbackServerHarness.handler = undefined;
 });
 
@@ -475,7 +477,7 @@ describe("Anthropic OAuth Pi browser adapter", () => {
 			}) as Models["login"],
 		};
 		const started = await startAnthropic(models);
-		assert.deepEqual(oauthCancel(started.flowId, "openai-codex"), { success: true });
+		assert.deepEqual(oauthCancel(started.flowId, "openai-codex"), { success: false });
 		assert.equal(interactionSeen?.signal?.aborted, false, "provider mismatch must not cancel another provider's flow");
 		assert.deepEqual(oauthCancel(started.flowId, "anthropic"), { success: true });
 		assert.deepEqual(oauthFlowStatus(started.flowId, "anthropic"), { complete: false, error: "flow not found" });
@@ -639,6 +641,8 @@ describe("Anthropic OAuth Pi browser adapter", () => {
 				/credential rollback unavailable/,
 				"cancellation must not report success when durable cleanup failed",
 			);
+			assert.equal(oauthStatus("anthropic").authenticated, false, "a failed rollback must leave a durable denied decision, not accepted auth");
+			assert.equal(existsSync(`${authPath}.bobbit-rejected-oauth.anthropic.json`), true, "the cancellation denial must survive a gateway restart");
 			assert.deepEqual(
 				await oauthCancelAndWait(started.flowId, "anthropic"),
 				{ success: true },
@@ -797,6 +801,39 @@ describe("Anthropic OAuth Pi browser adapter", () => {
 		const stored = JSON.parse(readFileSync(authPath, "utf8")).anthropic as OAuthCredential;
 		assert.equal(stored.access === previous.access, true);
 		assert.equal(stored.refresh === previous.refresh, true);
+		activeFlowIds.delete(started.flowId);
+	});
+
+	it("preserves an Anthropic API-key row on OAuth logout", async () => {
+		const apiKey = randomUUID();
+		const codex = oauthCredential();
+		writeFileSync(authPath, JSON.stringify({
+			anthropic: { type: "api-key", key: apiKey },
+			"openai-codex": codex,
+		}), "utf8");
+
+		assert.deepEqual(await oauthLogout("anthropic"), { success: true, provider: "anthropic" });
+		const document = JSON.parse(readFileSync(authPath, "utf8")) as Record<string, unknown>;
+		assert.deepEqual(document.anthropic, { type: "api-key", key: apiKey });
+		assert.deepEqual(document["openai-codex"], codex);
+	});
+
+	it("finalizes accepted auth and never reports an unknown cancel as cleaned up", async () => {
+		const issued = oauthCredential();
+		const models: Pick<Models, "login"> = {
+			login: (async (_provider, _type, interaction) => {
+				interaction.notify({ type: "auth_url", url: currentAuthorizeUrl() });
+				return issued;
+			}) as Models["login"],
+		};
+		const started = await startAnthropic(models);
+		assert.deepEqual(await oauthComplete(started.flowId, randomUUID(), OFFLINE_FETCH), { success: true });
+		assert.deepEqual(oauthFinalize(started.flowId, "anthropic"), { success: true });
+		assert.deepEqual(await oauthCancelAndWait(started.flowId, "anthropic"), {
+			success: false,
+			error: "Unknown or expired flow ID",
+		});
+		assert.equal(oauthStatus("anthropic").authenticated, true);
 		activeFlowIds.delete(started.flowId);
 	});
 

@@ -62,7 +62,12 @@ function requestFailureSummary(error: unknown): string {
  * Generate 500 funny, role-themed names and write them to data/team-names/<role>.json.
  * Fire-and-forget — failures are logged but don't block role creation.
  */
-export async function generateRoleNames(roleName: string, roleLabel: string, fetchImpl: typeof fetch = defaultFetch): Promise<void> {
+export async function generateRoleNames(
+	roleName: string,
+	roleLabel: string,
+	fetchImpl: typeof fetch = defaultFetch,
+	oauthTokenResolver: () => Promise<string | null> = refreshOAuthToken,
+): Promise<void> {
 	const outPath = join(NAMES_DIR, `${roleName}.json`);
 
 	// Don't overwrite existing curated files
@@ -81,7 +86,7 @@ export async function generateRoleNames(roleName: string, roleLabel: string, fet
 	// every OAuth request rather than trusting an independently-read access token.
 	let auth = configuredAuth;
 	if (auth.type === "oauth") {
-		const access = await refreshOAuthToken();
+		const access = await oauthTokenResolver();
 		if (!access) {
 			console.error("[name-gen] OAuth credential resolution failed");
 			return;
@@ -131,12 +136,11 @@ Output a JSON array of 500 strings. Output ONLY the JSON array, no explanation, 
 			body: JSON.stringify(body),
 		});
 
-		// Pi resolves expiry and refreshes before this request. A Messages 401/403
-		// is a definitive authentication/authorization result, not a signal to
-		// repeat the same Pi-backed credential resolution.
+		// Pi resolves expiry and refreshes before this request. Only a 401 proves
+		// the bearer credential failed; a 403 can be model or resource policy.
 
 		if (!response.ok) {
-			if (auth.type === "oauth" && (response.status === 401 || response.status === 403)) {
+			if (auth.type === "oauth" && response.status === 401) {
 				await invalidateRejectedAnthropicDirectCredential(auth.access);
 			}
 			console.error(`[name-gen] Anthropic completion failed: ${anthropicErrorSummary(response.status)}`);

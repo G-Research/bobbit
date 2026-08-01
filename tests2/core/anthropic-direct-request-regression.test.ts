@@ -186,6 +186,48 @@ describe("direct Anthropic request regressions", () => {
 		assert.equal(requests[0]!.body.system.includes("Claude Code"), false);
 	});
 
+	it("refreshes role-name OAuth through Pi, preserves its identity, and rejects only a 401", async () => {
+		const access = randomUUID();
+		useAuth({ type: "oauth", access, refresh: randomUUID(), expires: Date.now() + 60_000 });
+		const requests: Record<string, string>[] = [];
+		let refreshes = 0;
+		await generateRoleNames(
+			uniqueRole(),
+			"OAuth role",
+			(async (_url, init) => {
+				requests.push(init?.headers as Record<string, string>);
+				return response(401, "unauthorized");
+			}) as typeof fetch,
+			async () => {
+				refreshes++;
+				return access;
+			},
+		);
+
+		assert.equal(refreshes, 1, "role-name generation must resolve OAuth through Pi once");
+		assert.deepEqual(requests, [{
+			"Content-Type": "application/json",
+			"anthropic-version": "2023-06-01",
+			Authorization: `Bearer ${access}`,
+			"anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
+			"user-agent": "claude-cli/2.1.75",
+			"x-app": "cli",
+		}]);
+		assert.deepEqual(oauthStatus("anthropic"), { authenticated: false, provider: "anthropic" });
+	});
+
+	it("keeps role-name OAuth authenticated after a model or resource 403", async () => {
+		const access = randomUUID();
+		useAuth({ type: "oauth", access, refresh: randomUUID(), expires: Date.now() + 60_000 });
+		await generateRoleNames(
+			uniqueRole(),
+			"Forbidden role",
+			(async () => response(403, "model access denied")) as typeof fetch,
+			async () => access,
+		);
+		assert.equal(oauthStatus("anthropic").authenticated, true);
+	});
+
 	it("uses Pi-compatible OAuth identity and treats rejected credentials as definitive", async () => {
 		useAuth({ type: "oauth", access: "stored-access-must-not-be-used", refresh: "refresh-metadata", expires: Date.now() + 60_000 });
 		const requests: Array<{ headers: Record<string, string>; body: any }> = [];
