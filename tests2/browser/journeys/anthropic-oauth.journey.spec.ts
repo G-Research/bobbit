@@ -106,6 +106,77 @@ test.describe("Journey: Anthropic OAuth", () => {
 		}
 	});
 
+	test("keeps the dialog on a retryable cancellation failure and retries the same flow before another start", async ({ page, gateway }) => {
+		test.setTimeout(90_000);
+		const authPath = join(gateway.bobbitDir, "agent", "auth.json");
+		const originalAuth = readFileSync(authPath);
+		let startCalls = 0;
+		let cancelCalls = 0;
+		try {
+			seedAccountFixture(authPath);
+			await page.route("**/api/oauth/start", async (route) => {
+				startCalls += 1;
+				await route.fulfill({
+					contentType: "application/json",
+					body: JSON.stringify({
+						flowId: `retry-flow-${startCalls}`,
+						provider: "anthropic",
+						url: `https://claude.ai/oauth/authorize?state=retry-${startCalls}`,
+						callbackServer: false,
+					}),
+				});
+			});
+			await page.route("**/api/oauth/cancel", async (route) => {
+				cancelCalls += 1;
+				const flowId = (route.request().postDataJSON() as { flowId: string }).flowId;
+				if (cancelCalls === 1) {
+					await route.fulfill({
+						status: 503,
+						contentType: "application/json",
+						body: JSON.stringify({
+							error: "OAuth cancellation did not complete. Retry cancellation before starting another sign-in.",
+							code: "OAUTH_CANCEL_RETRY_REQUIRED",
+							retryable: true,
+							flowId,
+						}),
+					});
+					return;
+				}
+				await route.fulfill({ contentType: "application/json", body: JSON.stringify({ success: true }) });
+			});
+			await openApp(page);
+			await openAccountSettings(page);
+			const anthropicRow = page.getByTestId("account-row-anthropic");
+
+			const firstPopup = page.waitForEvent("popup");
+			await anthropicRow.getByTestId("account-auth-btn-anthropic").getByRole("button").click();
+			const popup = await firstPopup;
+			await popup.close();
+			await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
+			await expect(page.getByText("OAuth cancellation did not complete. Retry cancellation before starting another sign-in.", { exact: true })).toBeVisible();
+			await expect(page.getByRole("button", { name: "Retry cancellation", exact: true })).toBeVisible();
+			expect(startCalls).toBe(1);
+			await expect(anthropicRow.getByTestId("account-auth-btn-anthropic").getByRole("button")).toBeDisabled();
+
+			await page.getByRole("button", { name: "Retry cancellation", exact: true }).click();
+			await expect(page.getByText("OAuth cancellation completed. You can start a new sign-in.", { exact: true })).toBeVisible();
+			expect(cancelCalls).toBe(2);
+			expect(startCalls).toBe(1);
+
+			const retryPopup = page.waitForEvent("popup");
+			await page.getByRole("button", { name: "Try again", exact: true }).click();
+			const replacementPopup = await retryPopup;
+			await replacementPopup.close();
+			expect(startCalls).toBe(2);
+			await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
+			await expect(page.getByRole("heading", { name: "Anthropic Login", exact: true })).toHaveCount(0);
+		} finally {
+			await page.unroute("**/api/oauth/start");
+			await page.unroute("**/api/oauth/cancel");
+			writeFileSync(authPath, originalAuth);
+		}
+	});
+
 	test("cancels a flow returned after its loading dialog closes before opening a popup or polling", async ({ page, gateway }) => {
 		test.setTimeout(90_000);
 		const authPath = join(gateway.bobbitDir, "agent", "auth.json");

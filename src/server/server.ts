@@ -2654,6 +2654,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// Expose bg process manager for API routes and session cleanup
 	(sessionManager as any).bgProcessManager = bgProcessManager;
 	const rateLimiter = new RateLimiter();
+	// A failed Anthropic cancellation leaves an addressable flow in the OAuth
+	// adapter. Keep its ID at the REST boundary so a new browser dialog cannot
+	// start another flow before retrying durable cleanup for that exact flow.
+	let anthropicCancellationRetryFlowId: string | undefined;
 
 	const cleanupInterval = gatewayDeps.clock.setInterval(() => {
 		rateLimiter.cleanup();
@@ -13930,6 +13934,17 @@ async function handleApiRoute(
 	if (url.pathname === "/api/oauth/start" && req.method === "POST") {
 		try {
 			const body = await readBody(req).catch(() => ({}));
+			// The UI must retry cancellation of this exact retained flow before it
+			// can acquire another Anthropic callback lease.
+			if ((body?.provider === undefined || body?.provider === "anthropic") && anthropicCancellationRetryFlowId) {
+				json({
+					error: "OAuth cancellation did not complete. Retry cancellation before starting another sign-in.",
+					code: "OAUTH_CANCEL_RETRY_REQUIRED",
+					retryable: true,
+					flowId: anthropicCancellationRetryFlowId,
+				}, 409);
+				return;
+			}
 			const result = await oauthStart(body?.provider);
 			json(result);
 		} catch (err) {
@@ -13953,9 +13968,25 @@ async function handleApiRoute(
 			json({ error: "Missing provider" }, 400);
 			return;
 		}
-		// Resolve only after Pi has settled its cancelled callback exchange and
-		// released the provider lease, so an immediate UI retry cannot race it.
-		json(await oauthCancelAndWait(body.flowId, body.provider));
+		try {
+			// Resolve only after Pi has settled its cancelled callback exchange and
+			// released the provider lease, so an immediate UI retry cannot race it.
+			const result = await oauthCancelAndWait(body.flowId, body.provider);
+			if (body.provider === "anthropic" && anthropicCancellationRetryFlowId === body.flowId) {
+				anthropicCancellationRetryFlowId = undefined;
+			}
+			json(result);
+		} catch {
+			// Do not expose a credential-store or provider failure. The retained ID
+			// makes this a bounded, actionable retry instead of an opaque 500.
+			if (body.provider === "anthropic") anthropicCancellationRetryFlowId = body.flowId;
+			json({
+				error: "OAuth cancellation did not complete. Retry cancellation before starting another sign-in.",
+				code: "OAUTH_CANCEL_RETRY_REQUIRED",
+				retryable: true,
+				flowId: body.flowId,
+			}, 503);
+		}
 		return;
 	}
 

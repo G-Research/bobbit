@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
+import { vi } from "vitest";
+import { AtomicCredentialStore } from "../../src/server/auth/credential-store.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { readE2EToken, base } from "./_e2e/e2e-setup.js";
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
@@ -163,6 +165,74 @@ test.describe("Anthropic OAuth lifecycle routes", () => {
 				provider: "openai-codex",
 				expires: expect.any(Number),
 			});
+		} finally {
+			restoreFetch();
+		}
+	});
+
+	test("returns a bounded cancellation retry and blocks a replacement flow until that same flow succeeds", async () => {
+		const restoreFetch = installMockAnthropicTokenProvider();
+		const cancellationFailure = "private credential-store detail";
+		try {
+			const startResponse = await api("/api/oauth/start", {
+				method: "POST",
+				body: JSON.stringify({ provider: "anthropic" }),
+			});
+			expect(startResponse.status).toBe(200);
+			const started = await startResponse.json() as { flowId: string; url: string };
+			activeFlows.add(started.flowId);
+
+			const complete = await api("/api/oauth/complete", {
+				method: "POST",
+				body: JSON.stringify({ flowId: started.flowId, provider: "anthropic", code: callbackFor(started) }),
+			});
+			expect(await complete.json()).toEqual({ success: true });
+
+			const rollback = vi.spyOn(AtomicCredentialStore.prototype, "rollbackCredentialIfCurrent")
+				.mockRejectedValueOnce(new Error(cancellationFailure));
+			try {
+				const failedCancel = await api("/api/oauth/cancel", {
+					method: "POST",
+					body: JSON.stringify({ flowId: started.flowId, provider: "anthropic" }),
+				});
+				expect(failedCancel.status).toBe(503);
+				expect(await failedCancel.json()).toEqual({
+					error: "OAuth cancellation did not complete. Retry cancellation before starting another sign-in.",
+					code: "OAUTH_CANCEL_RETRY_REQUIRED",
+					retryable: true,
+					flowId: started.flowId,
+				});
+
+				const blockedStart = await api("/api/oauth/start", {
+					method: "POST",
+					body: JSON.stringify({ provider: "anthropic" }),
+				});
+				expect(blockedStart.status).toBe(409);
+				expect(await blockedStart.json()).toEqual({
+					error: "OAuth cancellation did not complete. Retry cancellation before starting another sign-in.",
+					code: "OAUTH_CANCEL_RETRY_REQUIRED",
+					retryable: true,
+					flowId: started.flowId,
+				});
+			} finally {
+				rollback.mockRestore();
+			}
+
+			const retryCancel = await api("/api/oauth/cancel", {
+				method: "POST",
+				body: JSON.stringify({ flowId: started.flowId, provider: "anthropic" }),
+			});
+			expect(retryCancel.status).toBe(200);
+			expect(await retryCancel.json()).toEqual({ success: true });
+			activeFlows.delete(started.flowId);
+
+			const replacement = await api("/api/oauth/start", {
+				method: "POST",
+				body: JSON.stringify({ provider: "anthropic" }),
+			});
+			expect(replacement.status).toBe(200);
+			const replacementFlow = await replacement.json() as { flowId: string };
+			activeFlows.add(replacementFlow.flowId);
 		} finally {
 			restoreFetch();
 		}

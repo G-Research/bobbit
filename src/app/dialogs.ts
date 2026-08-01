@@ -557,11 +557,13 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 		let callbackServer = false;
 		let instructions = "";
 		let codeValue = "";
-		let step: "loading" | "waiting" | "exchanging" | "done" | "error" = "loading";
+		let step: "loading" | "waiting" | "exchanging" | "cancelling" | "done" | "error" = "loading";
 		let error = "";
 		let pollTimer: number | undefined;
-		let flowCancellation: Promise<void> = Promise.resolve();
+		let flowCancellation: Promise<boolean> | undefined;
+		let cancellingFlowId = "";
 		let closed = false;
+		let closing = false;
 		let startAttempt = 0;
 		let pollStartMs = 0;
 		let pollDelayMs = 1000;
@@ -570,42 +572,79 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 
 		const providerName = accountOAuthProviderLabel(provider);
 
-		// Cancel only this dialog's flow. The server treats a mismatched or already
-		// finished flow as a no-op, so a late teardown cannot affect another login.
-		const abandonFlow = (): Promise<void> => {
+		// Cancel only this dialog's flow. Retain the ID until the server confirms
+		// cleanup: a failed rollback must be retried against the same flow, never
+		// replaced with a new callback-port lease.
+		const abandonFlow = (): Promise<boolean> => {
 			const flowToCancel = flowId;
-			flowId = "";
-			if (!flowToCancel) return flowCancellation;
-			flowCancellation = trackOAuthFlowTeardown(provider, gatewayFetch("/api/oauth/cancel", {
+			if (!flowToCancel) return Promise.resolve(true);
+			if (cancellingFlowId === flowToCancel && flowCancellation) return flowCancellation;
+			cancellingFlowId = flowToCancel;
+			const cancellation = gatewayFetch("/api/oauth/cancel", {
 				method: "POST",
 				body: JSON.stringify({ flowId: flowToCancel, provider }),
-			}).then(() => undefined, () => undefined));
-			return flowCancellation;
+			}).then(async (res) => {
+				const data = await res.json().catch(() => ({}));
+				if (!res.ok) {
+					error = typeof data.error === "string" && data.retryable === true
+						? data.error
+						: "OAuth cancellation did not complete. Retry cancellation before starting another sign-in.";
+					return false;
+				}
+				if (flowId === flowToCancel) flowId = "";
+				return true;
+			}, () => {
+				error = "OAuth cancellation did not complete. Retry cancellation before starting another sign-in.";
+				return false;
+			});
+			flowCancellation = cancellation;
+			trackOAuthFlowTeardown(provider, cancellation.then(() => undefined));
+			void cancellation.then(() => {
+				if (flowCancellation === cancellation) {
+					flowCancellation = undefined;
+					cancellingFlowId = "";
+				}
+			});
+			return cancellation;
 		};
 
-		const cleanup = (result: boolean) => {
+		const finishCleanup = (result: boolean) => {
 			if (closed) return;
 			closed = true;
 			startAttempt += 1;
 			if (pollTimer !== undefined) window.clearTimeout(pollTimer);
-			const settled = result ? Promise.resolve() : abandonFlow();
 			render(html``, container);
 			container.remove();
-			// Account settings reload after openOAuthDialog settles. Do not resolve a
-			// cancelled dialog until the server has finished cancelling the flow, or
-			// it can briefly reload the old authenticated account snapshot.
-			void settled.then(
-				() => resolve(result),
-				() => resolve(result),
-			);
+			resolve(result);
+		};
+
+		const cleanup = (result: boolean) => {
+			if (closed || closing) return;
+			if (result) {
+				finishCleanup(true);
+				return;
+			}
+			closing = true;
+			void abandonFlow().then((cancelled) => {
+				closing = false;
+				if (closed) return;
+				if (cancelled) {
+					finishCleanup(false);
+				} else {
+					step = "error";
+					renderOAuthDialog();
+				}
+			});
 		};
 
 		const showFlowError = (message: string) => {
 			if (closed) return;
-			abandonFlow();
-			error = message;
-			step = "error";
-			renderOAuthDialog();
+			void abandonFlow().then((cancelled) => {
+				if (closed) return;
+				if (cancelled) error = message;
+				step = "error";
+				renderOAuthDialog();
+			});
 		};
 
 		const pollFlowStatus = async () => {
@@ -644,7 +683,13 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 			// process-wide, so an immediate retry must not race its cancellation.
 			await waitForOAuthFlowTeardown(provider);
 			if (closed || attempt !== startAttempt) return;
-			await abandonFlow();
+			if (!await abandonFlow()) {
+				if (!closed) {
+					step = "error";
+					renderOAuthDialog();
+				}
+				return;
+			}
 			if (closed || attempt !== startAttempt) return;
 			step = "loading";
 			renderOAuthDialog();
@@ -659,15 +704,21 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 					// newer attempt wins this race, cancel the late flow before it can
 					// open a popup, start polling, or strand the callback port until TTL.
 					if (typeof data.flowId === "string") {
-						flowCancellation = trackOAuthFlowTeardown(provider, gatewayFetch("/api/oauth/cancel", {
-							method: "POST",
-							body: JSON.stringify({ flowId: data.flowId, provider }),
-						}).then(() => undefined, () => undefined));
-						await flowCancellation;
+						flowId = data.flowId;
+						await abandonFlow();
 					}
 					return;
 				}
 				if (!res.ok) {
+					if (data.code === "OAUTH_CANCEL_RETRY_REQUIRED" && typeof data.flowId === "string") {
+						flowId = data.flowId;
+						error = typeof data.error === "string"
+							? data.error
+							: "OAuth cancellation did not complete. Retry cancellation before starting another sign-in.";
+						step = "error";
+						renderOAuthDialog();
+						return;
+					}
 					if (res.status === 409 && data.code === "ANTHROPIC_OAUTH_BUSY") {
 						throw new Error("Another Anthropic sign-in is in progress. Close or cancel it, then try again.");
 					}
@@ -753,13 +804,31 @@ export function openOAuthDialog(provider = "anthropic"): Promise<boolean> {
 						`;
 					case "exchanging":
 						return html`<p class="text-sm text-muted-foreground">Exchanging code for tokens...</p>`;
+					case "cancelling":
+						return html`<p class="text-sm text-muted-foreground">Cancelling OAuth flow...</p>`;
 					case "done":
 						return html`<p class="text-sm text-green-600 dark:text-green-400">Authenticated successfully.</p>`;
 					case "error":
 						return html`
 							<div class="flex flex-col gap-2">
 								<error-details .message=${error}></error-details>
-								${Button({ variant: "default", size: "sm", onClick: () => { step = "loading"; startFlow(); }, children: "Try again" })}
+								${flowId
+									? Button({
+										variant: "default",
+										size: "sm",
+										onClick: () => {
+											step = "cancelling";
+											renderOAuthDialog();
+											void abandonFlow().then((cancelled) => {
+												if (closed) return;
+												if (cancelled) error = "OAuth cancellation completed. You can start a new sign-in.";
+												step = "error";
+												renderOAuthDialog();
+											});
+										},
+										children: "Retry cancellation",
+									})
+									: Button({ variant: "default", size: "sm", onClick: () => { step = "loading"; startFlow(); }, children: "Try again" })}
 							</div>
 						`;
 				}
