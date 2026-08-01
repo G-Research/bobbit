@@ -2657,7 +2657,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// A failed Anthropic cancellation leaves an addressable flow in the OAuth
 	// adapter. Keep its ID at the REST boundary so a new browser dialog cannot
 	// start another flow before retrying durable cleanup for that exact flow.
-	let anthropicCancellationRetryFlowId: string | undefined;
+	const oauthCancellationRetryState: { anthropicFlowId?: string } = {};
 
 	const cleanupInterval = gatewayDeps.clock.setInterval(() => {
 		rateLimiter.cleanup();
@@ -2821,7 +2821,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -4026,6 +4026,7 @@ async function handleApiRoute(
 	fsImpl?: FsLike,
 	clock?: Clock,
 	withPreviewSessionOperation: PreviewSessionOperation = async (_sessionId, operation) => operation(),
+	oauthCancellationRetryState: { anthropicFlowId?: string } = {},
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -13936,12 +13937,12 @@ async function handleApiRoute(
 			const body = await readBody(req).catch(() => ({}));
 			// The UI must retry cancellation of this exact retained flow before it
 			// can acquire another Anthropic callback lease.
-			if ((body?.provider === undefined || body?.provider === "anthropic") && anthropicCancellationRetryFlowId) {
+			if ((body?.provider === undefined || body?.provider === "anthropic") && oauthCancellationRetryState.anthropicFlowId) {
 				json({
 					error: "OAuth cancellation did not complete. Retry cancellation before starting another sign-in.",
 					code: "OAUTH_CANCEL_RETRY_REQUIRED",
 					retryable: true,
-					flowId: anthropicCancellationRetryFlowId,
+					flowId: oauthCancellationRetryState.anthropicFlowId,
 				}, 409);
 				return;
 			}
@@ -13972,14 +13973,14 @@ async function handleApiRoute(
 			// Resolve only after Pi has settled its cancelled callback exchange and
 			// released the provider lease, so an immediate UI retry cannot race it.
 			const result = await oauthCancelAndWait(body.flowId, body.provider);
-			if (body.provider === "anthropic" && anthropicCancellationRetryFlowId === body.flowId) {
-				anthropicCancellationRetryFlowId = undefined;
+			if (body.provider === "anthropic" && oauthCancellationRetryState.anthropicFlowId === body.flowId) {
+				oauthCancellationRetryState.anthropicFlowId = undefined;
 			}
 			json(result);
 		} catch {
 			// Do not expose a credential-store or provider failure. The retained ID
 			// makes this a bounded, actionable retry instead of an opaque 500.
-			if (body.provider === "anthropic") anthropicCancellationRetryFlowId = body.flowId;
+			if (body.provider === "anthropic") oauthCancellationRetryState.anthropicFlowId = body.flowId;
 			json({
 				error: "OAuth cancellation did not complete. Retry cancellation before starting another sign-in.",
 				code: "OAUTH_CANCEL_RETRY_REQUIRED",
