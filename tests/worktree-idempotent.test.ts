@@ -19,6 +19,12 @@ async function git(args: string[], cwd: string): Promise<string> {
 	return stdout.trim();
 }
 
+/** Configure an identity only in the temporary fixture repository. */
+async function configureFixtureGitIdentity(cwd: string): Promise<void> {
+	await git(["config", "user.name", "Bobbit Test"], cwd);
+	await git(["config", "user.email", "test@bobbit.local"], cwd);
+}
+
 describe("createWorktree idempotency", () => {
 	let bareRepo: string;
 	let cloneRepo: string;
@@ -41,6 +47,7 @@ describe("createWorktree idempotency", () => {
 		await git(["-c", "init.defaultBranch=master", "clone", bareRepo, cloneRepo], tmpDir);
 		// Belt-and-braces: in case clone inherited a non-master HEAD, rename it.
 		await git(["symbolic-ref", "HEAD", "refs/heads/master"], cloneRepo);
+		await configureFixtureGitIdentity(cloneRepo);
 
 		// Make an initial commit so HEAD exists
 		const testFile = path.join(cloneRepo, "README.md");
