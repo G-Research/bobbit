@@ -1136,17 +1136,26 @@ export async function oauthComplete(
  * refreshable Anthropic row is reported as stored but unauthenticated until Pi
  * validates it through a successful lazy refresh.
  */
-export function oauthStatus(providerInput?: string): { authenticated: boolean; stored?: boolean; refreshable?: boolean; expires?: number; provider: OAuthProviderId; email?: string } {
+export function oauthStatus(providerInput?: string): { authenticated: boolean; stored?: boolean; rejected?: boolean; refreshable?: boolean; expires?: number; provider: OAuthProviderId; email?: string } {
 	const provider = normalizeProvider(providerInput);
+	const store = getOAuthCredentialStore();
 	// Status intentionally reads the raw snapshot so it can distinguish an absent
 	// credential from a rejected OAuth row when a legacy/raw write could not be
 	// replaced by the durable non-secret fence tombstone.
-	const credential = getOAuthCredentialStore().readStoredCredentialSnapshotSync(provider);
-	if (!credential || credential.type !== "oauth") return { authenticated: false, provider };
+	const credential = store.readStoredCredentialSnapshotSync(provider);
+	// A tombstone has no Credential shape by design. Still report it as stored so
+	// the Account UI exposes its provider-scoped logout control; it carries no
+	// bearer material and must never be treated as authenticated.
+	if (!credential || credential.type !== "oauth") {
+		return store.hasRejectedOAuthTombstoneSync(provider)
+			? { authenticated: false, stored: true, rejected: true, refreshable: false, provider }
+			: { authenticated: false, provider };
+	}
 	if (provider === "anthropic" && isStoredOAuthCredentialRejected(globalAuthPath(), provider, credential)) {
 		return {
 			authenticated: false,
 			stored: true,
+			rejected: true,
 			refreshable: false,
 			expires: typeof credential.expires === "number" ? credential.expires : undefined,
 			provider,

@@ -771,6 +771,7 @@ describe("Anthropic OAuth Pi browser adapter", () => {
 		assert.deepEqual(oauthStatus("anthropic"), {
 			authenticated: false,
 			stored: true,
+			rejected: true,
 			refreshable: false,
 			expires: rejected.expires,
 			provider: "anthropic",

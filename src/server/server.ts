@@ -46,7 +46,7 @@ import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { executeCleanupWorktreesRequest } from "./maintenance/cleanup-worktrees-request.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { readToken, validateToken } from "./auth/token.js";
-import { OAuthBusyError, oauthCancelAndWait, oauthComplete, oauthFinalize, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
+import { OAuthBusyError, getOAuthCredentialStore, oauthCancelAndWait, oauthComplete, oauthFinalize, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import type { GateResetReopenOutcome, ServerMessage } from "./ws/protocol.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
@@ -10013,6 +10013,11 @@ async function handleApiRoute(
 			json({ error: "Missing 'key' field" }, 400);
 			return;
 		}
+		// Pi intentionally refuses ambient keys while its raw auth file contains an
+		// unknown credential type. A rejected OAuth tombstone is such a type, so an
+		// explicit saved Anthropic key is a user-directed recovery action: remove
+		// only the rejected row, never a healthy OAuth account credential.
+		if (provider === "anthropic") await getOAuthCredentialStore().deleteRejectedOAuthCredential(provider);
 		preferencesStore.set(`providerKey.${provider}`, body.key);
 		json({ ok: true });
 		return;

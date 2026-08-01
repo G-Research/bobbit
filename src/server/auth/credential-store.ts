@@ -774,6 +774,40 @@ export class AtomicCredentialStore implements CredentialStore {
 		return invalidated;
 	}
 
+	/**
+	 * Delete only a rejected OAuth row or its non-secret tombstone.
+	 *
+	 * Saving an explicit API key must recover from a rejected OAuth login without
+	 * deleting a healthy account credential for the same provider.
+	 */
+	async deleteRejectedOAuthCredential(providerId: string): Promise<boolean> {
+		const deleted = await this.enqueueProvider(providerId, async () => this.withLock((data, authPath) => {
+			const rawCurrent = data[providerId];
+			const current = asCredential(asStoredCredential(rawCurrent));
+			if (!isRejectedOAuthTombstone(rawCurrent)
+				&& !(current && isStoredOAuthCredentialRejected(authPath, providerId, current))) {
+				return { result: false };
+			}
+			const next = { ...data };
+			delete next[providerId];
+			return { result: true, next };
+		}));
+		if (deleted) {
+			this.rollbackHistory.delete(providerId);
+			this.didChange();
+		}
+		return deleted;
+	}
+
+	/** True when the raw provider slot is a removable, non-secret OAuth tombstone. */
+	hasRejectedOAuthTombstoneSync(providerId: string): boolean {
+		try {
+			return existsSync(this.authPath) && isRejectedOAuthTombstone(this.readCurrent()[providerId]);
+		} catch {
+			return false;
+		}
+	}
+
 	/** Delete a raw OAuth row or non-secret rejection tombstone for this provider. */
 	async deleteOAuthCredential(providerId: string): Promise<boolean> {
 		const deleted = await this.enqueueProvider(providerId, async () => this.withLock((data) => {

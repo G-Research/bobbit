@@ -425,6 +425,23 @@ describe("AtomicCredentialStore", () => {
 		assert.equal(await store.read("anthropic"), undefined);
 	});
 
+	it("removes a rejected tombstone for explicit API-key recovery without deleting healthy OAuth", async () => {
+		const store = new AtomicCredentialStore(authPath);
+		const rejected = credential();
+		await store.modify("anthropic", async () => rejected);
+		assert.equal(await store.invalidateRejectedOAuthCredential("anthropic", rejected.access, rejected.refresh), true);
+		assert.equal(store.hasRejectedOAuthTombstoneSync("anthropic"), true);
+
+		assert.equal(await store.deleteRejectedOAuthCredential("anthropic"), true);
+		assert.equal(store.hasRejectedOAuthTombstoneSync("anthropic"), false);
+		assert.equal(readDocument().anthropic, undefined);
+
+		const healthy = credential();
+		await store.modify("anthropic", async () => healthy);
+		assert.equal(await store.deleteRejectedOAuthCredential("anthropic"), false);
+		assert.equal((await store.read("anthropic"))?.type, "oauth");
+	});
+
 	it("keeps an in-process current rejection fence when a stale rejection cannot match", async () => {
 		const store = new AtomicCredentialStore(authPath);
 		const stale = credential();

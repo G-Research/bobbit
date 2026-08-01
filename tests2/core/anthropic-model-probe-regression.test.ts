@@ -196,6 +196,36 @@ describe("Anthropic model probe regressions", () => {
 		assert.equal("refresh" in stored.anthropic, false, "the renewable credential must not survive");
 	});
 
+	it.each([
+		["saved", (prefs: PreferencesStore) => prefs.set("providerKey.anthropic", "saved-api-key"), {}, "saved-api-key"],
+		["ambient", (_prefs: PreferencesStore) => {}, { ANTHROPIC_API_KEY: "ambient-api-key" }, "ambient-api-key"],
+	])("uses a %s API key after an OAuth tombstone", async (_source, configure, env, expectedKey) => {
+		const access = randomUUID();
+		useAuth({ type: "oauth", access, refresh: randomUUID(), expires: Date.now() + 60_000 });
+		await assert.rejects(() => completeModelText(
+			anthropicModel(),
+			undefined,
+			{ systemPrompt: "system", userPrompt: "reject", maxTokens: 5, thinkingLevel: "off" },
+			async () => { throw new Error("401 Unauthorized: credential rejected"); },
+			{ env: {}, providerConfigReader: () => undefined },
+		));
+
+		const prefs = new PreferencesStore(`/memfs/anthropic-tombstone-${randomUUID()}`, createMemFs());
+		configure(prefs);
+		const calls: any[] = [];
+		assert.equal(await completeModelText(
+			anthropicModel(),
+			prefs,
+			{ systemPrompt: "system", userPrompt: "recover", maxTokens: 5, thinkingLevel: "off" },
+			async (_model, _context, options) => {
+				calls.push(options);
+				return { role: "assistant", content: [{ type: "text", text: "OK" }], stopReason: "stop" } as any;
+			},
+			{ env, providerConfigReader: () => undefined },
+		), "OK");
+		assert.equal(calls[0]?.apiKey, expectedKey);
+	});
+
 	it("does not remove a newer OAuth credential after an in-flight completion rejection", async () => {
 		const access = randomUUID();
 		const replacement = randomUUID();

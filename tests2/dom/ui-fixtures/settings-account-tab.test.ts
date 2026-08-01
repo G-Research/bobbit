@@ -124,6 +124,17 @@ describe("Settings Account tab — Google OAuth row", () => {
 		expect(q('[data-testid="account-logout-btn-anthropic"]')).toBeTruthy();
 	});
 
+	it("shows a rejected Anthropic tombstone as removable but never authenticated", async () => {
+		await resetAccountTab({ status: {
+			anthropic: { authenticated: false, stored: true, rejected: true, refreshable: false },
+		} });
+
+		expect(text(q('[data-testid="account-status-anthropic"]'))).toBe("Credential rejected");
+		expect(text(q('[data-testid="account-rejected-anthropic"]'))).toMatch(/safe cleanup.*Log out/i);
+		expect(text(q('[data-testid="account-auth-btn-anthropic"]'))).toContain("Log in");
+		expect(q('[data-testid="account-logout-btn-anthropic"]')).toBeTruthy();
+	});
+
 	it("logout confirms, POSTs /api/oauth/logout for the canonical provider, and returns to 'Log in'", async () => {
 		await resetAccountTab({ status: { "google-gemini-cli": { authenticated: true, expires: FUTURE } } });
 		setNextFetchResponse({ ok: true, body: { authenticated: false } });

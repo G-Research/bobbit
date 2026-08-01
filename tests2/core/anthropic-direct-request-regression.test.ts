@@ -213,7 +213,13 @@ describe("direct Anthropic request regressions", () => {
 			"user-agent": "claude-cli/2.1.75",
 			"x-app": "cli",
 		}]);
-		assert.deepEqual(oauthStatus("anthropic"), { authenticated: false, provider: "anthropic" });
+		assert.deepEqual(oauthStatus("anthropic"), {
+			authenticated: false,
+			stored: true,
+			rejected: true,
+			refreshable: false,
+			provider: "anthropic",
+		});
 	});
 
 	it("keeps role-name OAuth authenticated after a model or resource 403", async () => {
@@ -293,7 +299,13 @@ describe("direct Anthropic request regressions", () => {
 
 		assert.equal(result, null);
 		assert.equal(requests, 1);
-		assert.deepEqual(oauthStatus("anthropic"), { authenticated: false, provider: "anthropic" });
+		assert.deepEqual(oauthStatus("anthropic"), {
+			authenticated: false,
+			stored: true,
+			rejected: true,
+			refreshable: false,
+			provider: "anthropic",
+		});
 	});
 
 	it("keeps an OAuth credential on a transient Pi response body containing terminal-looking numerals", async () => {

@@ -3211,7 +3211,7 @@ function renderDirectoriesTab() {
 type AccountProviderId = AccountOAuthProviderId;
 const ACCOUNT_PROVIDERS = ACCOUNT_OAUTH_PROVIDERS;
 
-type AccountStatus = { authenticated: boolean; stored?: boolean; refreshable?: boolean; expires?: number };
+type AccountStatus = { authenticated: boolean; stored?: boolean; rejected?: boolean; refreshable?: boolean; expires?: number };
 let accountStatus: Partial<Record<AccountProviderId, AccountStatus>> | null = null;
 let accountLoading = false;
 let accountReauthing: AccountProviderId | null = null;
@@ -3320,6 +3320,7 @@ export function renderAccountTab() {
 				const expires = status?.expires;
 				const expiresDate = expires ? new Date(expires) : null;
 				const isExpired = expires ? Date.now() > expires : false;
+				const isRejected = status?.rejected === true;
 				const canLogOut = authenticated || stored;
 				const isReauthing = accountReauthing === provider.id;
 				const isLoggingOut = accountLoggingOut === provider.id;
@@ -3337,7 +3338,7 @@ export function renderAccountTab() {
 								<span class="text-sm font-medium text-foreground">Status:</span>
 								${authenticated
 									? html`<span class="text-sm text-green-600 dark:text-green-400" data-testid="account-status-${provider.id}">${provider.authenticatedLabel}</span>`
-									: html`<span class="text-sm text-destructive" data-testid="account-status-${provider.id}">${isExpired ? "Expired" : "Not authenticated"}</span>`}
+									: html`<span class="text-sm text-destructive" data-testid="account-status-${provider.id}">${isRejected ? "Credential rejected" : isExpired ? "Expired" : "Not authenticated"}</span>`}
 							</div>
 							${expiresDate
 								? html`<div class="flex items-center gap-2">
@@ -3345,6 +3346,9 @@ export function renderAccountTab() {
 									<span class="text-sm ${isExpired ? "text-destructive" : "text-muted-foreground"}" data-testid="account-expires-${provider.id}">${expiresDate.toLocaleString()}</span>
 								</div>`
 								: ""}
+						${isRejected
+							? html`<p class="text-xs text-muted-foreground" data-testid="account-rejected-${provider.id}">This rejected credential is stored only for safe cleanup. Log out to remove it before using another authentication method.</p>`
+							: ""}
 						</div>
 
 						${isGoogle
