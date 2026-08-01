@@ -8,6 +8,7 @@ import path from "node:path";
 
 import { globalAuthPath, serverSecretsDir } from "../bobbit-dir.js";
 import {
+	AtomicCredentialStore,
 	isAnthropicApiKeyCredential,
 	isUsableAnthropicOAuthCredential,
 } from "../auth/credential-store.js";
@@ -454,6 +455,20 @@ export function mergeHostAgentProviderEnv(existing: Record<string, string> | und
 	const providerEnv = resolveHostAgentProviderEnv(prefs, options);
 	if (Object.keys(providerEnv).length === 0) return existing;
 	return { ...providerEnv, ...(existing || {}) };
+}
+
+/**
+ * Let a direct Pi runtime use an explicit API key after a rejected OAuth flow.
+ * Pi treats any raw auth.json row as provider-owned, including Bobbit's
+ * non-secret OAuth tombstone, and therefore skips its API-key environment
+ * fallback. Removing only a rejected row before spawning is safe: it cannot
+ * revive OAuth and leaves healthy OAuth/API-key rows untouched.
+ */
+export async function recoverAnthropicApiKeyRuntime(env?: Record<string, string>): Promise<void> {
+	if (!nonEmptyString(env?.ANTHROPIC_API_KEY) && !nonEmptyString(process.env.ANTHROPIC_API_KEY)) return;
+	const authPath = globalAuthPath();
+	if (!fs.existsSync(authPath)) return;
+	await new AtomicCredentialStore(authPath).deleteRejectedOAuthCredential("anthropic");
 }
 
 /**

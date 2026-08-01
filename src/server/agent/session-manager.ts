@@ -4894,13 +4894,14 @@ export class SessionManager {
 		broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
 	}
 
-	private applyDirectProviderEnv(bridgeOptions: RpcBridgeOptions, sandboxed: boolean | undefined, provider?: string): void {
+	private async applyDirectProviderEnv(bridgeOptions: RpcBridgeOptions, sandboxed: boolean | undefined, provider?: string): Promise<void> {
 		if (sandboxed) return;
 		bridgeOptions.env = mergeHostAgentProviderEnv(bridgeOptions.env, this.preferencesStore, {
 			provider,
 			model: bridgeOptions.initialModel,
 			providers: fallbackProviderAllowlistFromPrefs(this.preferencesStore),
 		});
+		await recoverAnthropicApiKeyRuntime(bridgeOptions.env);
 	}
 
 	private safeDispatchError(session: SessionInfo, reason: string): Error {
@@ -7653,7 +7654,7 @@ export class SessionManager {
 			);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 		const restoreSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
-		this.applyDirectProviderEnv(bridgeOptions, !!ps.sandboxed, restoreSpawnProvider);
+		await this.applyDirectProviderEnv(bridgeOptions, !!ps.sandboxed, restoreSpawnProvider);
 
 		const rpcClient = new RpcBridge(bridgeOptions);
 		const eventBuffer = new EventBuffer();
@@ -10144,7 +10145,7 @@ export class SessionManager {
 			this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
 		}
 		const spawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
-		this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, spawnProvider);
+		await this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, spawnProvider);
 
 		// Build and fully validate the replacement while the original bridge stays
 		// subscribed and usable. Role assignment is a two-phase swap: start,
@@ -12568,7 +12569,7 @@ export class SessionManager {
 				);
 			if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 			const forceSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
-			this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, forceSpawnProvider);
+			await this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, forceSpawnProvider);
 
 			const rpcClient = new RpcBridge(bridgeOptions);
 			let switchingSession = true;
@@ -12798,7 +12799,7 @@ export class SessionManager {
 
 // ── Sandbox credential auto-resolution ─────────────────────────────
 
-import { ensureSandboxAgentAuthFile, fallbackProviderAllowlistFromPrefs, hasExplicitSandboxAnthropicCredential, mergeHostAgentProviderEnv, refreshSandboxAnthropicOAuthCredential, resolveHostTokenValue, resolveSandboxAgentAuthPolicy, sandboxTokenPolicyAllowsAnthropicAuth, withSandboxAgentAuthFileLock, type HostTokenResolutionOptions } from "./host-tokens.js";
+import { ensureSandboxAgentAuthFile, fallbackProviderAllowlistFromPrefs, hasExplicitSandboxAnthropicCredential, mergeHostAgentProviderEnv, recoverAnthropicApiKeyRuntime, refreshSandboxAnthropicOAuthCredential, resolveHostTokenValue, resolveSandboxAgentAuthPolicy, sandboxTokenPolicyAllowsAnthropicAuth, withSandboxAgentAuthFileLock, type HostTokenResolutionOptions } from "./host-tokens.js";
 
 /**
  * Map of auth.json provider keys → env vars that pi-coding-agent checks.

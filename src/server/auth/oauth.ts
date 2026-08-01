@@ -1169,7 +1169,10 @@ export function oauthStatus(providerInput?: string): { authenticated: boolean; s
 		return {
 			authenticated: false,
 			stored: true,
-			refreshable: typeof credential.refresh === "string" && credential.refresh.length > 0,
+			// Pi requires the complete access + refresh + expiry contract before it
+			// will enter its locked refresh path. A lone refresh value is not a
+			// recoverable account credential and must not be advertised as one.
+			refreshable: false,
 			expires: typeof credential.expires === "number" ? credential.expires : undefined,
 			provider,
 		};

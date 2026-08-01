@@ -230,6 +230,10 @@ function isFileExistsError(error: unknown): boolean {
 	return isRecord(error) && error.code === "EEXIST";
 }
 
+function isFileNotFoundError(error: unknown): boolean {
+	return isRecord(error) && error.code === "ENOENT";
+}
+
 interface LockIdentity {
 	dev: number;
 	ino: number;
@@ -515,8 +519,8 @@ export class AtomicCredentialStore implements CredentialStore {
 	 */
 	private withLock<T>(
 		fn: (data: RawAuthData, authPath: string, assertLock: () => void) =>
-			| { result: T; next?: RawAuthData }
-			| Promise<{ result: T; next?: RawAuthData }>,
+			| { result: T; next?: RawAuthData; afterCommit?: () => void }
+			| Promise<{ result: T; next?: RawAuthData; afterCommit?: () => void }>,
 	): Promise<T> {
 		const operation = this.fileQueue.then(() => this.withFileLock(fn));
 		this.fileQueue = operation.then(() => undefined, () => undefined);
@@ -525,8 +529,8 @@ export class AtomicCredentialStore implements CredentialStore {
 
 	private async withFileLock<T>(
 		fn: (data: RawAuthData, authPath: string, assertLock: () => void) =>
-			| { result: T; next?: RawAuthData }
-			| Promise<{ result: T; next?: RawAuthData }>,
+			| { result: T; next?: RawAuthData; afterCommit?: () => void }
+			| Promise<{ result: T; next?: RawAuthData; afterCommit?: () => void }>,
 	): Promise<T> {
 		this.ensureStorage();
 		// Pi's auth storage uses proper-lockfile's default realpath:true. Resolve
@@ -544,6 +548,12 @@ export class AtomicCredentialStore implements CredentialStore {
 				this.atomicWrite(outcome.next, authPath);
 				fileLock.assertIntact();
 			}
+			// Some credential changes also retire a provider-scoped rejection
+			// sidecar. Run that only after auth.json is durable: deleting a fence
+			// first could revive the rejected renewable row if the primary write fails.
+			fileLock.assertIntact();
+			outcome.afterCommit?.();
+			fileLock.assertIntact();
 			result = outcome.result;
 		} catch (error) {
 			failure = error;
@@ -565,6 +575,16 @@ export class AtomicCredentialStore implements CredentialStore {
 		// the sidecar commit, the running gateway still refuses this exact credential.
 		rememberRejectedOAuthFingerprint(authPath, providerId, fingerprint);
 		this.atomicWrite({ version: REJECTED_OAUTH_LEDGER_VERSION, rejected: fingerprint }, rejectedLedgerPath(authPath, providerId));
+	}
+
+	/** Remove this provider's fence only after its raw rejected row is durably gone. */
+	private clearRejectedOAuthCredentialFence(authPath: string, providerId: string): void {
+		try {
+			unlinkSync(rejectedLedgerPath(authPath, providerId));
+		} catch (error) {
+			if (!isFileNotFoundError(error)) throw error;
+		}
+		rejectedOAuthInProcess.delete(rejectionKey(authPath, providerId));
 	}
 
 	private async readFresh(): Promise<RawAuthData> {
@@ -790,7 +810,11 @@ export class AtomicCredentialStore implements CredentialStore {
 			}
 			const next = { ...data };
 			delete next[providerId];
-			return { result: true, next };
+			return {
+				result: true,
+				next,
+				afterCommit: () => this.clearRejectedOAuthCredentialFence(authPath, providerId),
+			};
 		}));
 		if (deleted) {
 			this.rollbackHistory.delete(providerId);
@@ -810,12 +834,16 @@ export class AtomicCredentialStore implements CredentialStore {
 
 	/** Delete a raw OAuth row or non-secret rejection tombstone for this provider. */
 	async deleteOAuthCredential(providerId: string): Promise<boolean> {
-		const deleted = await this.enqueueProvider(providerId, async () => this.withLock((data) => {
+		const deleted = await this.enqueueProvider(providerId, async () => this.withLock((data, authPath) => {
 			const current = asStoredCredential(data[providerId]);
 			if (current?.type !== "oauth" && !isRejectedOAuthTombstone(data[providerId])) return { result: false };
 			const next = { ...data };
 			delete next[providerId];
-			return { result: true, next };
+			return {
+				result: true,
+				next,
+				afterCommit: () => this.clearRejectedOAuthCredentialFence(authPath, providerId),
+			};
 		}));
 		if (deleted) {
 			this.rollbackHistory.delete(providerId);
