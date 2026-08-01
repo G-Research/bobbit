@@ -681,6 +681,11 @@ describe("Anthropic OAuth Pi browser adapter", () => {
 			releaseExchange();
 			await assert.rejects(() => cancelling, /rollback temporarily unavailable/);
 			assert.deepEqual(await completion, { success: false, error: "OAuth flow cancelled" });
+			assert.deepEqual(
+				oauthFlowStatus(started.flowId, "anthropic"),
+				{ complete: false, error: "OAuth flow cancelled" },
+				"status must preserve the cancelled terminal outcome while cleanup remains retryable",
+			);
 			assert.deepEqual(await oauthCancelAndWait(started.flowId, "anthropic"), { success: true });
 		} finally {
 			rollback.mockRestore();

@@ -1045,7 +1045,10 @@ export async function oauthComplete(
 		// A cancellation cleanup failure leaves the exact issued row in place.
 		// Keep this flow addressable so the cancel route can retry its rollback.
 		if (flow.cleanupFailure === undefined) pendingFlows.delete(flowId);
-		return { success: false, error: sanitizedOAuthFailure(error) };
+		// Cleanup retry is reported only by cancellation. The completion route is
+		// the terminal login outcome, which remains cancelled even if its cleanup
+		// cannot yet durably remove the issued credential.
+		return { success: false, error: flow.cancelled ? "OAuth flow cancelled" : sanitizedOAuthFailure(error) };
 	}
 }
 
@@ -1130,6 +1133,12 @@ export function oauthFlowStatus(
 		// be lost after the credential is committed; retaining the flow until TTL
 		// lets an explicit cancellation roll back exactly that issued credential.
 		return { complete: true };
+	}
+	if (flow.provider !== "google-gemini-cli" && flow.cancelled && flow.error) {
+		// Once Pi has settled, a failed rollback remains actionable through
+		// oauthCancelAndWait, but it must not rewrite the terminal login outcome
+		// reported to the completer. Before settlement, keep polling pending.
+		return { complete: false, error: "OAuth flow cancelled" };
 	}
 	if (flow.error) {
 		if (flow.provider === "google-gemini-cli") closeGoogleFlowServer(flow);
