@@ -6,37 +6,14 @@ import { seedTeamLeadHeader, connectWs, signalAndWaitForGate, startTeam, teardow
 import { navigateToGoalDashboard } from "../fixtures/ui-helpers.js";
 
 test.describe("Journey: Goal → Team → Gates", () => {
-	test("goal dashboard renders after navigation", async ({ page }) => {
-		const goal = await createGoal({ title: "v2-journey-smoke-goal" });
-		try {
-			await openApp(page);
-			await navigateToHash(page, `#/goal/${goal.id}`);
-			const dashboard = page.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first();
-			await expect(dashboard).toBeVisible({ timeout: 20_000 });
-		} finally {
-			await deleteGoal(goal.id, true);
-		}
-	});
-
-	test("goal title visible in dashboard", async ({ page }) => {
-		const title = "v2-journey-title-visible";
+	test("goal dashboard renders its title and sidebar edge after navigation", async ({ page }) => {
+		const title = "v2-journey-dashboard-title";
 		const goal = await createGoal({ title });
 		try {
 			await openApp(page);
 			await navigateToHash(page, `#/goal/${goal.id}`);
 			await expect(page.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first()).toBeVisible({ timeout: 20_000 });
 			await expect(page.getByText(title).first()).toBeVisible({ timeout: 20_000 });
-		} finally {
-			await deleteGoal(goal.id, true);
-		}
-	});
-
-	test("sidebar shows sidebar-edge after goal navigation", async ({ page }) => {
-		const goal = await createGoal({ title: "v2-journey-sidebar-goal" });
-		try {
-			await openApp(page);
-			await navigateToHash(page, `#/goal/${goal.id}`);
-			await expect(page.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first()).toBeVisible({ timeout: 20_000 });
 			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await deleteGoal(goal.id, true);
@@ -95,69 +72,47 @@ test.describe("Journey: Plan-Tab Gate-Status — behavioral assertions", () => {
 		}
 	});
 
-	test("plan tab renders archived child with data-archived='true'", async ({ page, gateway }) => {
+	test("plan tab renders archived children and route-injected failed gate status", async ({ page, gateway }) => {
+		test.setTimeout(90_000); // real hierarchy: parent + two archived children + route injection
 		await enableSubgoalsForFixture();
-		const parent = await createGoal({ title: "v2-plan-archived-parent", team: false, subgoalsAllowed: true });
+		const parent = await createGoal({ title: "v2-plan-gate-status", team: false, subgoalsAllowed: true });
 		const parentId = parent.id as string;
+		let archivedChildId = "";
+		let failedChildId = "";
 		try {
-			const r1 = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
-				method: "POST",
-				headers: seedTeamLeadHeader(gateway, parentId),
-				body: JSON.stringify({
-					planId: "p1",
-					title: "Child A",
-					spec: "child a spec for plan-tab gate-status journey test, padded to satisfy spec validator minimum length requirement.",
-				}),
-			});
-			expect(r1.status).toBe(201);
-			const childId = (await r1.json()).id as string;
-			// Archive the child so it is sourced from /descendants
-			const arch = await apiFetch(`/api/goals/${childId}?cascade=true`, { method: "DELETE" });
-			expect([200, 204]).toContain(arch.status);
+			const spawnChild = async (planId: string, title: string, spec: string): Promise<string> => {
+				const response = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
+					method: "POST",
+					headers: seedTeamLeadHeader(gateway, parentId),
+					body: JSON.stringify({ planId, title, spec }),
+				});
+				expect(response.status).toBe(201);
+				return (await response.json()).id as string;
+			};
+			archivedChildId = await spawnChild(
+				"p1",
+				"Child A",
+				"child a spec for plan-tab gate-status journey test, padded to satisfy spec validator minimum length requirement.",
+			);
+			failedChildId = await spawnChild(
+				"p2",
+				"Child B",
+				"child b spec for plan-tab gate-status injection journey test, padded to satisfy minimum length requirement here.",
+			);
+			// Archive both children so the plan is sourced from /descendants. Keep
+			// hierarchy mutations serialized: each archive updates the same parent.
+			for (const childId of [archivedChildId, failedChildId]) {
+				const archive = await apiFetch(`/api/goals/${childId}?cascade=true`, { method: "DELETE" });
+				expect([200, 204]).toContain(archive.status);
+			}
 
-			await openApp(page);
-			await navigateToHash(page, `#/goal/${parentId}`);
-			const planTab = page.locator('[data-testid="tab-plan"]').first();
-			await expect(planTab).toBeVisible({ timeout: 15_000 });
-			await planTab.click();
-			await expect(page.locator('[data-testid="plan-tab"]').first()).toBeVisible({ timeout: 15_000 });
-			// Archived node must render with data-archived="true"
-			await expect(page.locator('[data-testid="plan-node"][data-archived="true"]').first()).toBeVisible({ timeout: 20_000 });
-			// Archived pill renders inside the node
-			await expect(page.locator('[data-testid="plan-node-archived-pill"]').first()).toBeVisible({ timeout: 15_000 });
-		} finally {
-			await deleteGoal(parentId, true);
-		}
-	});
-
-	test("route-injected gateStatus:failed renders as data-plan-gate-status on plan node", async ({ page, gateway }) => {
-		test.setTimeout(90_000); // plan-tab with real goal hierarchy: parent+child create, archive, route inject
-		await enableSubgoalsForFixture();
-		const parent = await createGoal({ title: "v2-plan-gate-status-inject", team: false, subgoalsAllowed: true });
-		const parentId = parent.id as string;
-		let childId = "";
-		try {
-			const r1 = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
-				method: "POST",
-				headers: seedTeamLeadHeader(gateway, parentId),
-				body: JSON.stringify({
-					planId: "p2",
-					title: "Child B",
-					spec: "child b spec for plan-tab gate-status injection journey test, padded to satisfy minimum length requirement here.",
-				}),
-			});
-			expect(r1.status).toBe(201);
-			childId = (await r1.json()).id as string;
-			// Archive child so it's served from /descendants
-			await apiFetch(`/api/goals/${childId}?cascade=true`, { method: "DELETE" });
-
-			// Inject gateStatus via route mock before navigation
+			// Inject one archived child's failed status before navigation.
 			await page.route(/\/api\/goals\/[^/]+\/descendants(?:\?.*)?$/, async (route, req) => {
 				if (req.method() !== "GET") return route.fallback();
 				const resp = await route.fetch();
 				const body = await resp.json() as { goals?: Array<{ id: string; [k: string]: unknown }> };
-				for (const g of body.goals ?? []) {
-					if (g.id === childId) Object.assign(g, { gateStatus: "failed", mergeConflict: false });
+				for (const goal of body.goals ?? []) {
+					if (goal.id === failedChildId) Object.assign(goal, { gateStatus: "failed", mergeConflict: false });
 				}
 				await route.fulfill({ response: resp, json: body });
 			});
@@ -169,11 +124,16 @@ test.describe("Journey: Plan-Tab Gate-Status — behavioral assertions", () => {
 			await planTab.click();
 			await expect(page.locator('[data-testid="plan-tab"]').first()).toBeVisible({ timeout: 15_000 });
 
-			const node = page.locator(`[data-testid="plan-node"][data-child-goal-id="${childId}"]`).first();
-			await expect(node).toBeVisible({ timeout: 20_000 });
-			await expect(node).toHaveAttribute("data-plan-gate-status", "failed");
+			const archivedNode = page.locator(`[data-testid="plan-node"][data-child-goal-id="${archivedChildId}"]`).first();
+			await expect(archivedNode).toBeVisible({ timeout: 20_000 });
+			await expect(archivedNode).toHaveAttribute("data-archived", "true");
+			await expect(archivedNode.locator('[data-testid="plan-node-archived-pill"]')).toBeVisible({ timeout: 15_000 });
+
+			const failedNode = page.locator(`[data-testid="plan-node"][data-child-goal-id="${failedChildId}"]`).first();
+			await expect(failedNode).toBeVisible({ timeout: 20_000 });
+			await expect(failedNode).toHaveAttribute("data-plan-gate-status", "failed");
 			await expect(
-				page.locator('[data-testid="plan-node-gate-dot"][data-gate-status="failed"]').first(),
+				failedNode.locator('[data-testid="plan-node-gate-dot"][data-gate-status="failed"]'),
 			).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await deleteGoal(parentId, true);
@@ -196,70 +156,65 @@ test.describe("Journey: Gate-verification UX — slim projection + stale-reconci
 	const STALE_GATE_NAME = "Stale Reconcile Gate";
 	const FAST_CMD = `node -e "process.exit(0)"`;
 
-	function makeWorkflowId(prefix: string): string {
-		return `${prefix}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	function makeWorkflowId(): string {
+		return `gate-ux-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 	}
 
-	async function createCommandWorkflow(
-		workflowId: string,
-		projectId: string,
-		gateId: string,
-		gateName: string,
-		stepName: string,
-		cmd: string,
-	): Promise<void> {
+	async function createGateUxWorkflow(workflowId: string, projectId: string): Promise<void> {
 		const res = await apiFetch("/api/workflows", {
 			method: "POST",
 			body: JSON.stringify({
 				projectId,
 				id: workflowId,
 				name: "Gate-UX Journey Test",
-				description: "One command gate for gate-verification UX journey coverage.",
+				description: "Command gates for gate-verification UX journey coverage.",
 				gates: [
-					{ id: gateId, name: gateName, dependsOn: [], verify: [{ name: stepName, type: "command", run: cmd }] },
+					{ id: SLIM_GATE_ID, name: SLIM_GATE_NAME, dependsOn: [], verify: [{ name: "Big output", type: "command", run: BIG_OUTPUT_CMD }] },
+					{ id: STALE_GATE_ID, name: STALE_GATE_NAME, dependsOn: [], verify: [{ name: "Slow step", type: "command", run: FAST_CMD }] },
 				],
 			}),
 		});
 		expect(res.status, "gate-UX journey: workflow creation must succeed").toBe(201);
 	}
 
-	async function deleteWorkflow(workflowId: string): Promise<void> {
-		await apiFetch(`/api/workflows/${workflowId}`, { method: "DELETE" }).catch(() => { /* best-effort */ });
-	}
-
-	// Issue #1: the gate-LIST endpoint returns a slim projection (inline step
-	// output stripped) while the lazy detail/inspect path still carries the full
-	// output — no behavioural regression on expand.
-	test("gate-list endpoint strips inline step output; full output remains available lazily", async ({ page }) => {
-		const workflowId = makeWorkflowId("slim-projection");
+	// The two independent assertions share one deterministic workflow, goal,
+	// session, and dashboard hydration. Each still signals and verifies its own
+	// gate, preserving the slim-projection and healthy-completion contracts.
+	test("gate list stays slim while a completed verification remains non-stale", async ({ page }) => {
+		const workflowId = makeWorkflowId();
 		const projectId = await defaultProjectId();
 		expect(projectId, "must resolve a default projectId").toBeTruthy();
-		await createCommandWorkflow(workflowId, projectId as string, SLIM_GATE_ID, SLIM_GATE_NAME, "Big output", BIG_OUTPUT_CMD);
-		const goal = await createGoal({ title: `Slim Projection ${Date.now()}`, workflowId, projectId });
+		await createGateUxWorkflow(workflowId, projectId as string);
+		const goal = await createGoal({ title: `Gate UX ${Date.now()}`, workflowId, projectId });
 		const goalId = goal.id as string;
+		let sessionId = "";
+		let conn: Awaited<ReturnType<typeof connectWs>> | undefined;
 		try {
-			const sessionId = await createSession({ goalId });
-			const conn = await connectWs(sessionId);
-			await signalAndWaitForGate(conn, goalId, SLIM_GATE_ID, {}, ["passed", "failed"], 60_000);
+			sessionId = await createSession({ goalId });
+			conn = await connectWs(sessionId);
 
+			await openApp(page);
+			await navigateToGoalDashboard(page, goalId);
+			await expect(page.locator(".wf-checklist-item").filter({ hasText: SLIM_GATE_NAME })).toBeVisible({ timeout: 15_000 });
+			await expect(page.locator(".wf-checklist-item").filter({ hasText: STALE_GATE_NAME })).toBeVisible({ timeout: 15_000 });
+
+			// Issue #1: the gate-LIST payload excludes heavy output, while the
+			// lazy inspect endpoint still exposes it.
+			await signalAndWaitForGate(conn, goalId, SLIM_GATE_ID, {}, ["passed", "failed"], 60_000);
 			const listRes = await apiFetch(`/api/goals/${goalId}/gates`);
 			expect(listRes.status, "/gates list must respond 200").toBe(200);
 			const gates = await listRes.json();
 			const gateArr = (Array.isArray(gates) ? gates : gates.gates ?? []) as any[];
-			const gate = gateArr.find((g: any) => g.gateId === SLIM_GATE_ID || g.id === SLIM_GATE_ID);
+			const gate = gateArr.find((candidate: any) => candidate.gateId === SLIM_GATE_ID || candidate.id === SLIM_GATE_ID);
 			const step = gate?.signals?.[0]?.verification?.steps?.[0];
 			expect(step, "gate must have a completed signal step").toBeTruthy();
 			expect(step.name, "step name preserved in slim projection").toBe("Big output");
 			expect(["passed", "failed"]).toContain(step.status);
-
-			// The heavy inline output must be stripped from the LIST payload.
 			expect(
-				JSON.stringify(gates).includes(BIG_MARKER),
-				"/gates list payload MUST NOT contain full inline step output (Issue #1 slow-load root cause).",
-			).toBe(false);
+			JSON.stringify(gates).includes(BIG_MARKER),
+			"/gates list payload MUST NOT contain full inline step output (Issue #1 slow-load root cause).",
+		).toBe(false);
 			expect(step.output ?? "", "slim projection blanks step.output").not.toContain(BIG_MARKER);
-
-			// …but the full output must remain available via the lazy detail path.
 			const detailRes = await apiFetch(
 				`/api/goals/${goalId}/gates/${SLIM_GATE_ID}/inspect?section=verification&signal_index=-1&mode=full`,
 			);
@@ -269,53 +224,20 @@ test.describe("Journey: Gate-verification UX — slim projection + stale-reconci
 				"full step output MUST remain available via the lazy detail path (no regression).",
 			).toBe(true);
 
-			// DOM smoke: dashboard still renders the gate row.
-			await openApp(page);
-			await navigateToGoalDashboard(page, goalId);
-			await expect(
-				page.locator(".wf-checklist-item").filter({ hasText: SLIM_GATE_NAME }),
-			).toBeVisible({ timeout: 15_000 });
-		} finally {
-			await deleteGoal(goalId, true);
-			await deleteWorkflow(workflowId);
-		}
-	});
-
-	// Issue #2 (alive-path baseline): a verification that runs to normal
-	// completion must report a terminal status and must NOT be flagged stale —
-	// the stale-reconcile fix must not over-eagerly coerce a healthy verification.
-	test("a completed (alive) verification is not flagged stale", async ({ page }) => {
-		const workflowId = makeWorkflowId("stale-reconcile");
-		const projectId = await defaultProjectId();
-		expect(projectId, "must resolve a default projectId").toBeTruthy();
-		await createCommandWorkflow(workflowId, projectId as string, STALE_GATE_ID, STALE_GATE_NAME, "Slow step", FAST_CMD);
-		const goal = await createGoal({ title: `Stale Reconcile ${Date.now()}`, workflowId, projectId });
-		const goalId = goal.id as string;
-		try {
-			await openApp(page);
-			await navigateToGoalDashboard(page, goalId);
-			await expect(
-				page.locator(".wf-checklist-item").filter({ hasText: STALE_GATE_NAME }),
-			).toBeVisible({ timeout: 15_000 });
-
-			const sessionId = await createSession({ goalId });
-			const conn = await connectWs(sessionId);
+			// Issue #2: a normally completed verification must be terminal but
+			// never be marked stale by the reconcile path.
 			await signalAndWaitForGate(conn, goalId, STALE_GATE_ID, {}, ["passed", "failed"], 60_000);
-
 			const sumRes = await apiFetch(`/api/goals/${goalId}/gates/${STALE_GATE_ID}?view=summary`);
 			expect(sumRes.status, "gate summary must respond 200").toBe(200);
 			const summary = await sumRes.json();
-			expect(
-				["passed", "failed"],
-				"completed verification must report a terminal status",
-			).toContain(summary?.latestSignal?.verification?.status);
-			expect(
-				Boolean(summary?.latestSignal?.verification?.stale),
-				"a healthy completed verification must NOT be flagged stale",
-			).toBe(false);
+			expect(["passed", "failed"], "completed verification must report a terminal status")
+				.toContain(summary?.latestSignal?.verification?.status);
+			expect(Boolean(summary?.latestSignal?.verification?.stale), "a healthy completed verification must NOT be flagged stale").toBe(false);
 		} finally {
+			conn?.close();
+			if (sessionId) await deleteSession(sessionId).catch(() => {});
 			await deleteGoal(goalId, true);
-			await deleteWorkflow(workflowId);
+			await apiFetch(`/api/workflows/${workflowId}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
 });
@@ -572,8 +494,11 @@ test.describe("Journey: completed goal gate reset reopens live UI", () => {
 		} finally {
 			conn?.close();
 			await dashboardPage.close().catch(() => {});
-			if (teamLeadId) await deleteSession(teamLeadId).catch(() => {});
+			// A live team-store entry owns its lead session. Tear the team down
+			// before deleting that session so cleanup does not take the rejected
+			// delete path or leave a stale team-store reference behind.
 			await teardownTeam(goalId).catch(() => {});
+			if (teamLeadId) await deleteSession(teamLeadId).catch(() => {});
 			await deleteGoal(goalId, true).catch(() => {});
 		}
 	});
