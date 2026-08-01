@@ -768,7 +768,7 @@ export function oauthFinalize(flowId: string, providerInput?: string): { success
 			return { success: false, error: "Unknown or expired flow ID" };
 		}
 	}
-	if (!flow.completed || flow.cancelled) return { success: false, error: "OAuth flow is not complete" };
+	if (!flow.completed || (flow.provider !== "google-gemini-cli" && flow.cancelled)) return { success: false, error: "OAuth flow is not complete" };
 	if (flow.provider === "google-gemini-cli") closeGoogleFlowServer(flow);
 	pendingFlows.delete(flowId);
 	return { success: true };
