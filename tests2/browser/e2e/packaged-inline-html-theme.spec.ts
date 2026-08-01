@@ -1,5 +1,5 @@
 import { test, expect, type Page, type TestInfo } from "@playwright/test";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -177,6 +177,47 @@ async function attachReport(testInfo: TestInfo, report: RuntimeReport): Promise<
 	});
 }
 
+/** Confirm the child ran its release sequence without treating its pipe state as
+ * process termination. `ChildProcess` keeps pipe handles open until the child
+ * itself closes, even when the child closes its stdout/stderr file descriptors. */
+function requestStdioRelease(child: ChildProcess): Promise<void> {
+	return new Promise((resolveRelease, rejectRelease) => {
+		let settled = false;
+		let timeout: NodeJS.Timeout | undefined;
+		const finish = (error?: Error) => {
+			if (settled) return;
+			settled = true;
+			if (timeout) clearTimeout(timeout);
+			child.removeListener("message", onMessage);
+			child.removeListener("error", onError);
+			child.removeListener("exit", onExit);
+			if (error) rejectRelease(error);
+			else resolveRelease();
+		};
+		const onMessage = (message: unknown) => {
+			if (message === "stdio-released") finish();
+		};
+		const onError = (error: Error) => finish(error);
+		const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+			finish(new Error(`stdio-release fixture exited before acknowledging release (code: ${code}, signal: ${signal})`));
+		};
+		timeout = setTimeout(() => {
+			finish(new Error("stdio-release fixture did not acknowledge the IPC release request"));
+		}, 2_000);
+
+		child.on("message", onMessage);
+		child.once("error", onError);
+		child.once("exit", onExit);
+		if (!child.send) {
+			finish(new Error("stdio-release fixture has no IPC channel"));
+			return;
+		}
+		child.send("release-stdio", error => {
+			if (error) finish(new Error(`failed to send stdio-release request: ${error.message}`, { cause: error }));
+		});
+	});
+}
+
 test.describe("packed Bobbit inline HTML runtime", () => {
 	// A retry repeats npm pack + a clean dependency install and can hide a real
 	// packaging regression behind a second independently-built consumer.
@@ -228,9 +269,7 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 		const runtime = capturePackagedCli(child);
 		const actualClose = once(child, "close");
 		await once(child.stdout!, "data");
-		const stdoutReleased = once(child.stdout!, "close");
-		child.send("release-stdio");
-		await stdoutReleased;
+		await requestStdioRelease(child);
 
 		try {
 			expect(runtime.closed, "stdio closure must not be recorded as process closure").toBe(false);
