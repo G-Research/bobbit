@@ -118,7 +118,10 @@ function detectAuthJson(): Record<string, boolean> {
 	const data = readHostAuthJson();
 	if (data) {
 		for (const key of Object.keys(data)) {
-			result[key] = true;
+			const credential = data[key];
+			// A persisted Anthropic OAuth row is usable only when it satisfies Pi's
+			// renewable credential shape. API-key rows remain independently valid.
+			result[key] = key !== "anthropic" || isCompleteAnthropicOAuthCredential(credential) || isAnthropicApiKeyCredential(credential);
 		}
 	}
 	return result;
@@ -156,6 +159,19 @@ function isUsableOAuthCredential(value: unknown): value is Record<string, any> {
 	return isCredentialObject(value) && value.type === "oauth" && typeof value.access === "string" && !!value.access;
 }
 
+/** Pi requires all three renewable fields before an Anthropic OAuth row is usable. */
+export function isCompleteAnthropicOAuthCredential(value: unknown): value is Record<string, any> {
+	return isUsableOAuthCredential(value)
+		&& typeof value.refresh === "string" && value.refresh.length > 0
+		&& typeof value.expires === "number" && Number.isFinite(value.expires);
+}
+
+export function isAnthropicApiKeyCredential(value: unknown): value is Record<string, any> {
+	return isCredentialObject(value)
+		&& (value.type === "api-key" || value.type === "api_key")
+		&& typeof value.key === "string" && value.key.trim().length > 0;
+}
+
 /**
  * Sanitize the stored `google-gemini-cli` (Google account / Gemini Code Assist) OAuth
  * credential down to exactly the fields a sandboxed agent needs to use and refresh a
@@ -176,19 +192,14 @@ function sanitizeGoogleCredential(value: unknown): Record<string, any> | undefin
  * their project sandbox-token policy; this helper never supplies a default.
  */
 function sanitizeAnthropicCredential(value: unknown): Record<string, any> | undefined {
-	if (!isUsableOAuthCredential(value)) return undefined;
-	const sanitized: Record<string, any> = { type: "oauth", access: value.access };
-	if (typeof value.expires === "number") sanitized.expires = value.expires;
-	return sanitized;
+	if (!isCompleteAnthropicOAuthCredential(value)) return undefined;
+	// The sandbox receives only the current access credential, never host renewal
+	// authority. Completeness is checked before this reduction.
+	return { type: "oauth", access: value.access, expires: value.expires };
 }
 
 function hasCurrentOAuthAccess(value: unknown, now = Date.now()): boolean {
-	return isCredentialObject(value)
-		&& value.type === "oauth"
-		&& typeof value.access === "string"
-		&& !!value.access
-		&& typeof value.expires === "number"
-		&& value.expires > now;
+	return isCompleteAnthropicOAuthCredential(value) && value.expires > now;
 }
 
 /**
@@ -197,7 +208,7 @@ function hasCurrentOAuthAccess(value: unknown, now = Date.now()): boolean {
  */
 export async function refreshSandboxAnthropicOAuthCredential(): Promise<boolean> {
 	const credential = readHostAuthJson()?.anthropic;
-	if (!isCredentialObject(credential) || credential.type !== "oauth") return false;
+	if (!isCompleteAnthropicOAuthCredential(credential)) return false;
 	if (hasCurrentOAuthAccess(credential)) return true;
 	try {
 		const oauth: Record<string, unknown> = await import("../auth/oauth.js");
@@ -526,7 +537,7 @@ export function resolveHostTokenValue(
 					if (providerForEnv.provider !== "anthropic") return providerData.access;
 					if (options?.allowStoredAnthropicOAuth === true && hasCurrentOAuthAccess(providerData)) return providerData.access;
 				}
-				if (providerData.type === "api_key" && providerData.key) return providerData.key;
+				if (providerForEnv.provider === "anthropic" ? isAnthropicApiKeyCredential(providerData) : providerData.type === "api_key" && providerData.key) return providerData.key;
 			}
 		} catch { /* ignore read errors */ }
 	}

@@ -12,7 +12,7 @@ import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 import { completeModelText, testModelPreference, type ModelCompletionDependencies } from "../../src/server/agent/model-completion.js";
 import { modelProbeFailure, modelProbeFailureFromHttpStatus } from "../../src/server/agent/model-probe-result.js";
 import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
-import type { ApiModel } from "../../src/server/agent/model-registry.js";
+import { clearOAuthCache, getAvailableModels, invalidateModelCache, type ApiModel } from "../../src/server/agent/model-registry.js";
 import { createMemFs } from "../harness/mem-fs.js";
 
 let agentDir: string | undefined;
@@ -28,6 +28,8 @@ afterEach(() => {
 	if (agentDir) rmSync(agentDir, { recursive: true, force: true });
 	agentDir = undefined;
 	resetAgentDirStateForTests();
+	clearOAuthCache();
+	invalidateModelCache();
 });
 
 function anthropicModel(id = "claude-opus-5"): ApiModel {
@@ -91,6 +93,31 @@ describe("Anthropic model probe regressions", () => {
 
 		assert.equal(result, "OK");
 		assert.deepEqual(calls, [{ maxTokens: 5, timeoutMs: 30_000, maxRetries: 0, cacheRetention: "none", apiKey: "test-anthropic-api-key" }]);
+	});
+
+	it("never marks the Anthropic catalog authenticated for partial OAuth rows while preserving API-key auth", async () => {
+		delete process.env.ANTHROPIC_API_KEY;
+		delete process.env.ANTHROPIC_OAUTH_TOKEN;
+		useAuth({ type: "oauth", access: randomUUID(), expires: Date.now() + 60_000 });
+		const prefs = new PreferencesStore("/memfs/anthropic-partial-catalog", createMemFs());
+
+		for (const credential of [
+			{ type: "oauth", access: randomUUID(), expires: Date.now() + 60_000 },
+			{ type: "oauth", access: randomUUID(), refresh: randomUUID() },
+		]) {
+			writeFileSync(path.join(agentDir!, "auth.json"), JSON.stringify({ anthropic: credential }));
+			clearOAuthCache();
+			invalidateModelCache();
+			const anthropic = (await getAvailableModels(prefs)).filter(model => model.provider === "anthropic");
+			assert.ok(anthropic.length > 0, "fixture requires the Pi Anthropic catalog");
+			assert.equal(anthropic.every(model => model.authenticated === false), true);
+		}
+
+		writeFileSync(path.join(agentDir!, "auth.json"), JSON.stringify({ anthropic: { type: "api-key", key: "test-anthropic-api-key" } }));
+		clearOAuthCache();
+		invalidateModelCache();
+		const anthropic = (await getAvailableModels(prefs)).filter(model => model.provider === "anthropic");
+		assert.equal(anthropic.every(model => model.authenticated === true), true);
 	});
 
 	it.each([

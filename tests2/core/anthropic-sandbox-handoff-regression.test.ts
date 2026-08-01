@@ -11,6 +11,7 @@ import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 import { SessionManager } from "../../src/server/agent/session-manager.js";
 import {
 	buildSandboxAgentAuthJson,
+	detectHostTokens,
 	refreshSandboxAnthropicOAuthCredential,
 	resolveHostTokenValue,
 	sandboxAgentAuthPath,
@@ -21,6 +22,7 @@ const originalBobbitAgentDir = process.env.BOBBIT_AGENT_DIR;
 const originalBobbitDir = process.env.BOBBIT_DIR;
 const originalBobbitSecretsDir = process.env.BOBBIT_SECRETS_DIR;
 const originalAnthropicApiKey = process.env.ANTHROPIC_API_KEY;
+const originalAnthropicOAuthToken = process.env.ANTHROPIC_OAUTH_TOKEN;
 let root: string | undefined;
 let agentDir: string | undefined;
 
@@ -56,6 +58,8 @@ afterEach(() => {
 	else process.env.BOBBIT_SECRETS_DIR = originalBobbitSecretsDir;
 	if (originalAnthropicApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
 	else process.env.ANTHROPIC_API_KEY = originalAnthropicApiKey;
+	if (originalAnthropicOAuthToken === undefined) delete process.env.ANTHROPIC_OAUTH_TOKEN;
+	else process.env.ANTHROPIC_OAUTH_TOKEN = originalAnthropicOAuthToken;
 	resetAgentDirStateForTests();
 });
 
@@ -85,6 +89,20 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 
 		assert.deepEqual(buildSandboxAgentAuthJson({ includeAnthropicAuth: true }), {});
 		assert.equal(resolveHostTokenValue("ANTHROPIC_OAUTH_TOKEN", undefined, undefined as any, { allowStoredAnthropicOAuth: false }), undefined);
+	});
+
+	it.each([
+		["missing refresh", { type: "oauth", access: "partial-access", expires: Date.now() + 60_000 }],
+		["missing expiry", { type: "oauth", access: "partial-access", refresh: "partial-refresh" }],
+	])("does not advertise, refresh, or export a host OAuth credential %s", async (_caseName, credential) => {
+		delete process.env.ANTHROPIC_API_KEY;
+		delete process.env.ANTHROPIC_OAUTH_TOKEN;
+		useHostAuth(credential);
+
+		assert.equal(detectHostTokens().find(token => token.envVar === "ANTHROPIC_OAUTH_TOKEN")?.available, false);
+		assert.equal(await refreshSandboxAnthropicOAuthCredential(), false);
+		assert.deepEqual(buildSandboxAgentAuthJson({ includeAnthropicAuth: true }), {});
+		assert.equal(resolveHostTokenValue("ANTHROPIC_OAUTH_TOKEN", undefined, undefined as any, { allowStoredAnthropicOAuth: true }), undefined);
 	});
 
 	it("refreshes before producing the minimal sandbox auth entry", async () => {
