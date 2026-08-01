@@ -46,6 +46,13 @@ function anthropicModel(id = "claude-opus-5"): ApiModel {
 	};
 }
 
+// These synthetic outcomes preserve the two current evidence models alongside
+// the established pre-5 Opus control; they do not claim live OAuth entitlement.
+const CURRENT_ANTHROPIC_PROBE_MATRIX = [
+	{ id: "claude-opus-5", status: 404 as const, code: "model_not_found" },
+	{ id: "claude-sonnet-5", status: 429 as const, code: "rate_limited" },
+	{ id: "claude-opus-4-6", status: 401 as const, code: "authentication_failed" },
+] as const;
 describe("Anthropic model probe regressions", () => {
 	it("preserves API-key authentication selection for direct Pi model completions", async () => {
 		useAuth({ type: "api-key", key: "test-anthropic-api-key" });
@@ -206,6 +213,9 @@ describe("Anthropic model probe regressions", () => {
 		});
 
 		const untracked = new Error("HTTP request failed. status=500; url=https://api.anthropic.com/v1/messages; body=retry after HTTP 401");
-		assert.deepEqual({ status: modelProbeFailure(untracked).status, code: modelProbeFailure(untracked).code }, {});
+		assert.deepEqual(
+			{ status: modelProbeFailure(untracked).status, code: modelProbeFailure(untracked).code },
+			{ status: undefined, code: undefined },
+		);
 	});
 });
