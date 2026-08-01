@@ -3,6 +3,7 @@ guardProcessEnv();
 
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import type { Models } from "@earendil-works/pi-ai";
 import { afterEach, describe, it } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -161,6 +162,49 @@ describe("direct Anthropic request regressions", () => {
 			assert.equal(typeof status.expires, "number");
 		} finally {
 			globalThis.fetch = originalFetch;
+		}
+	});
+
+	it("does not relabel post-OAuth API-key resolution as Claude Code OAuth", async () => {
+		const originalOAuth = { type: "oauth", access: randomUUID(), refresh: randomUUID(), expires: Date.now() + 60_000 };
+		useAuth(originalOAuth);
+		const races: Array<{
+			name: string;
+			replaceCredential: unknown;
+			resolved?: { source: string; apiKey: string };
+		}> = [
+			{ name: "logout", replaceCredential: {} },
+			{
+				name: "stored API key",
+				replaceCredential: { anthropic: { type: "api_key", key: "replacement-api-key" } },
+				resolved: { source: "stored credential", apiKey: "replacement-api-key" },
+			},
+			{
+				name: "ambient API key",
+				replaceCredential: {},
+				resolved: { source: "ANTHROPIC_API_KEY", apiKey: "ambient-api-key" },
+			},
+		];
+
+		for (const race of races) {
+			writeFileSync(path.join(agentDir!, "auth.json"), JSON.stringify({ anthropic: originalOAuth }));
+			let requests = 0;
+			const result = await generateSessionTitle([{ role: "user", content: race.name }], {
+				namingModel: "anthropic/claude-sonnet-5",
+				availableModels: [],
+				fetchImpl: (async () => {
+					requests++;
+					return titleResponse();
+				}) as typeof fetch,
+				anthropicOAuthTokenResolver: () => refreshOAuthToken(undefined, {
+					getAuth: async () => {
+						writeFileSync(path.join(agentDir!, "auth.json"), JSON.stringify(race.replaceCredential));
+						return race.resolved ? { auth: { apiKey: race.resolved.apiKey }, source: race.resolved.source } : undefined;
+					},
+				} as Pick<Models, "getAuth">),
+			});
+			assert.equal(result, null, `${race.name} must not produce a direct request`);
+			assert.equal(requests, 0, `${race.name} must not send an API key with OAuth headers`);
 		}
 	});
 

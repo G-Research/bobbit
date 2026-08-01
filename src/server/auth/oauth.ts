@@ -931,14 +931,31 @@ export function oauthFlowStatus(
 	return { complete: false };
 }
 
-/** Resolve a current Anthropic access token through Pi's locked refresh path. */
-export async function refreshOAuthToken(_fetchImpl: typeof fetch = defaultFetch): Promise<string | null> {
+/** Pi identifies request auth resolved from a stored OAuth credential with this source. */
+const PI_OAUTH_AUTH_SOURCE = "OAuth";
+
+type OAuthAuthResolver = Pick<Models, "getAuth">;
+
+/**
+ * Resolve a current Anthropic OAuth access token through Pi's locked refresh path.
+ *
+ * Pi may resolve an API key when the stored OAuth row is removed or replaced
+ * while this request is in flight. The direct Claude Code request paths must
+ * never relabel that key as an OAuth bearer credential, so accept only Pi's
+ * explicit OAuth resolution result.
+ */
+export async function refreshOAuthToken(
+	_fetchImpl: typeof fetch = defaultFetch,
+	authResolver: OAuthAuthResolver = getOAuthModels(),
+): Promise<string | null> {
 	const stored = getOAuthCredentialStore().readStoredCredentialSync("anthropic");
 	const attempted = isCompleteAnthropicOAuthCredential(stored) ? stored : undefined;
 	if (!attempted) return null;
 	try {
-		const resolved = await getOAuthModels().getAuth("anthropic");
-		return typeof resolved?.auth.apiKey === "string" ? resolved.auth.apiKey : null;
+		const resolved = await authResolver.getAuth("anthropic");
+		return resolved?.source === PI_OAUTH_AUTH_SOURCE && typeof resolved.auth.apiKey === "string"
+			? resolved.auth.apiKey
+			: null;
 	} catch (error) {
 		if (isDefinitiveRefreshFailure(error)) {
 			try {
