@@ -28,7 +28,9 @@ config bump transparently invalidates everything.
 2. `cache.mjs` fingerprints each test = sha over the content of its closure; a hit
    replays the prior PASS.
 3. `run.mjs` maps `git diff` → affected tests, drops cache hits, runs the rest
-   through Vitest, and records verdicts on success.
+   through Vitest, and records verdicts **per file** from Vitest's JSON report —
+   every file that individually passed is cached even if another file in the same
+   batch fails (only the failing files stay uncached and re-run next time).
 
 Validated end-to-end: cold run of 5 leaf tests 3.7 s → warm re-run 0.4 s (nothing
 to run); touching one dependency re-selects exactly that one test.

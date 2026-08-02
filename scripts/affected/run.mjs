@@ -5,9 +5,10 @@
 //
 // Selects the Vitest tests reachable from the working changes (vs merge-base
 // with the base ref), drops the ones whose dependency closure is unchanged
-// since their last PASS, and runs only the remainder. On success it records the
-// new verdicts. Browser (*.spec.ts) affected files are reported but not run
-// here (Playwright tier).
+// since their last PASS, and runs only the remainder. Verdicts are recorded
+// per-file from Vitest's JSON report, so every file that individually passed is
+// cached even when a sibling in the same batch fails. Browser (*.spec.ts)
+// affected files are reported but not run here (Playwright tier).
 //
 // Flags:
 //   --base <ref>  base ref for the diff (default: the remote's primary branch,
@@ -18,7 +19,8 @@
 //   --changed a,b explicit changed-file list (bypass git; for CI / simulation)
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { join } from "node:path";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { join, dirname, relative } from "node:path";
 import { buildGraph, affectedTests, REPO_ROOT } from "./graph.mjs";
 import { loadCache, saveCache, partition, record, runnerFingerprint } from "./cache.mjs";
 
@@ -125,22 +127,53 @@ if (toRun.length === 0) {
 
 console.log(`\nrunning ${toRun.length} vitest file(s)...\n`);
 const vitestBin = join(REPO_ROOT, "node_modules", "vitest", "vitest.mjs");
+// Per-file JSON report alongside the console output, so we can cache each file
+// that individually passed even when a sibling in the same batch fails.
+const reportFile = join(REPO_ROOT, ".profiles", "test-cache", `run-${process.pid}.json`);
+mkdirSync(dirname(reportFile), { recursive: true });
 const res = spawnSync(
 	process.execPath,
-	[vitestBin, "run", "--config", "vitest.config.ts", "--silent=passed-only", ...toRun],
+	[vitestBin, "run", "--config", "vitest.config.ts", "--silent=passed-only",
+		"--reporter=default", "--reporter=json", "--outputFile", reportFile, ...toRun],
 	{ cwd: REPO_ROOT, stdio: "inherit" },
 );
 
+// Map the JSON report's per-file verdicts back to repo-relative posix paths.
+const passedFiles = new Set();
+const failedFiles = new Set();
+try {
+	const report = JSON.parse(readFileSync(reportFile, "utf8"));
+	for (const fileResult of report.testResults ?? []) {
+		const rel = relative(REPO_ROOT, fileResult.name).replace(/\\/g, "/");
+		if (!misses.has(rel)) continue;
+		(fileResult.status === "passed" ? passedFiles : failedFiles).add(rel);
+	}
+	rmSync(reportFile, { force: true });
+} catch {
+	// Reporter produced nothing (e.g. Vitest crashed before writing). Fall back
+	// to the conservative whole-batch rule below.
+}
+
 const wall = ((Date.now() - t0) / 1000).toFixed(1);
-if (res.status === 0) {
-	if (!NO_CACHE) {
-		record(cache, fp, graph, misses, "pass");
+if (!NO_CACHE) {
+	// Cache every file that individually passed. If the report is missing, only a
+	// fully-green batch (exit 0) lets us safely cache all misses.
+	const toCache = passedFiles.size > 0 || failedFiles.size > 0
+		? passedFiles
+		: res.status === 0 ? misses : new Set();
+	if (toCache.size > 0) {
+		record(cache, fp, graph, toCache, "pass");
 		saveCache(cache);
 	}
+	if (res.status !== 0) {
+		console.log(`\n${passedFiles.size} passing file(s) cached; ${failedFiles.size} failing file(s) left uncached.`);
+	}
+}
+if (res.status === 0) {
 	console.log(`\nPASS — ran ${toRun.length}/${total} (${pct(toRun.length, total)}) in ${wall}s; ${hits.size} cache hits skipped.`);
 	process.exit(0);
 } else {
-	console.log(`\nFAIL — ran ${toRun.length}/${total} in ${wall}s (verdicts not cached).`);
+	console.log(`\nFAIL — ran ${toRun.length}/${total} in ${wall}s.`);
 	process.exit(res.status || 1);
 }
 
