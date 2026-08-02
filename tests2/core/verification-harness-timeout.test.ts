@@ -29,6 +29,7 @@ const {
 	VerificationHarness,
 	createContainerPayloadReleaseHandshake,
 	createContainerWitnessFrameDecoder,
+	createDockerEngineEventsResponseDecoder,
 	parseDockerExecCreateEvent,
 } = await import("../../src/server/agent/verification-harness.ts");
 const { createFakeVerificationCommandRunner } = await import("../harness/fake-verification-command-runner.js");
@@ -248,6 +249,46 @@ describe("deterministic tracked child", () => {
 			Type: "container", Action: "exec_start", Actor: { ID: containerId, Attributes: { execID: execId } },
 		}))).toBeUndefined();
 		expect(parseDockerExecCreateEvent("not json")).toBeUndefined();
+	});
+
+	it("acknowledges the daemon event subscription before decoding its tagged exec", () => {
+		const containerId = "a".repeat(64);
+		const execId = "b".repeat(64);
+		const events: string[] = [];
+		const failures: Error[] = [];
+		let ready = 0;
+		const decoder = createDockerEngineEventsResponseDecoder(
+			() => { ready++; },
+			line => events.push(line),
+			error => failures.push(error),
+		);
+		const event = JSON.stringify({
+			Type: "container", Action: "exec_create: /bin/sh -c # bobbit-docker-exec:tag",
+			Actor: { ID: containerId, Attributes: { execID: execId } },
+		}) + "\n";
+		const headers = "HTTP/1.1 200 OK\r\nApi-Version: 1.54\r\nTransfer-Encoding: chunked\r\n\r\n";
+		const chunk = `${Buffer.byteLength(event).toString(16)}\r\n${event}\r\n`;
+		// The daemon normally delivers headers before the next event chunk. The
+		// second `consume` is the first tagged exec after watcher readiness.
+		decoder.consume(Buffer.from(headers));
+		expect(ready).toBe(1);
+		expect(events).toEqual([]);
+		decoder.consume(Buffer.from(chunk));
+		expect(events).toEqual([event.trim()]);
+		expect(failures).toEqual([]);
+	});
+
+	it("fails closed when the Docker context rejects the event subscription", () => {
+		const failures: Error[] = [];
+		const decoder = createDockerEngineEventsResponseDecoder(
+			() => { throw new Error("must not acknowledge a rejected subscription"); },
+			() => { throw new Error("must not decode rejected event bytes"); },
+			error => failures.push(error),
+		);
+		decoder.consume(Buffer.from("HTTP/1.1 404 Not Found\r\nApi-Version: 1.54\r\n\r\n"));
+		expect(failures.map(error => error.message)).toEqual([
+			"Docker Engine events handshake was rejected (404, API 1.54)",
+		]);
 	});
 
 	it("reports timeout and closes without launching a process", async () => {
