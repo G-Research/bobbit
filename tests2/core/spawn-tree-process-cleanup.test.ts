@@ -1177,7 +1177,17 @@ const ORIGINAL_START_TOKEN = "original-sentinel-start-token";
 const REUSED_START_TOKEN = "reused-sentinel-start-token";
 const WITNESS_START_TOKEN_MISMATCH = "BOBBIT_CONTAINER_WITNESS_START_TOKEN_MISMATCH";
 
-function makeHarness(stateDir: string): VerificationHarness {
+function makeHarness(
+	stateDir: string,
+	containerProcessIdentityInspector = async (containerId: string, pid: number) => {
+		// The recovered process has reused the sentinel's historical numeric PID
+		// and remains a PGID leader. Only its Linux start token exposes that it is
+		// unrelated work in this shared container.
+		assert.equal(containerId, CONTAINER_ID);
+		assert.equal(pid, SENTINEL_PID);
+		return { pid: SENTINEL_PID, pgid: SENTINEL_PID, startToken: REUSED_START_TOKEN };
+	},
+): VerificationHarness {
 	return new VerificationHarness(
 		stateDir,
 		{
@@ -1193,18 +1203,71 @@ function makeHarness(stateDir: string): VerificationHarness {
 		undefined,
 		undefined,
 		undefined,
-		{
-			platform: "linux",
-			// The recovered process has reused the sentinel's historical numeric
-			// PID and remains a PGID leader. Only its Linux start token exposes
-			// that it is unrelated work in this shared container.
-			containerProcessIdentityInspector: async (containerId: string, pid: number) => {
-				assert.equal(containerId, CONTAINER_ID);
-				assert.equal(pid, SENTINEL_PID);
-				return { pid: SENTINEL_PID, pgid: SENTINEL_PID, startToken: REUSED_START_TOKEN };
-			},
-		} as any,
+		{ platform: "linux", containerProcessIdentityInspector } as any,
 	);
+}
+
+/** Match every supported shell spelling before recording a destructive PGID signal. */
+function isDestructiveContainerGroupSignal(command: string): boolean {
+	return /\bkill\s+-(?:TERM|KILL)\s+(?:--\s+)?-["']?(?:\$\{?\w+\}?|\d+)/.test(command);
+}
+
+function recoveredContainerStep(overrides: Record<string, unknown> = {}): any {
+	return {
+		name: "Recovered container command",
+		type: "command",
+		status: "running",
+		phase: 0,
+		startedAt: Date.now() - 1_000,
+		startTimeMs: Date.now() - 1_000,
+		deadlineMs: Date.now() - 1,
+		containerId: CONTAINER_ID,
+		restartRecoveryMode: "container-exec",
+		exitFile: "/tmp/.bobbit-verif/witness.exit",
+		pidFile: "/tmp/.bobbit-verif/witness.pid",
+		pidNonce: VERIFICATION_NONCE,
+		...overrides,
+	};
+}
+
+async function invokeRecoveredContainerCleanup(
+	harness: VerificationHarness,
+	step: any,
+	signalAttempts: string[],
+	active?: ActiveVerification,
+): Promise<unknown> {
+	(harness as any)._dockerExecCapture = async (containerId: string, command: string) => {
+		assert.equal(containerId, CONTAINER_ID);
+		if (isDestructiveContainerGroupSignal(command)) signalAttempts.push(command);
+		return { code: 0, stdout: "" };
+	};
+	const recovery = active ?? {
+		goalId: "goal-container-witness",
+		gateId: "implementation",
+		signalId: `sig-container-witness-${step.name}`,
+		overallStatus: "running",
+		startedAt: Date.now(),
+		currentPhase: 0,
+		steps: [step],
+	} satisfies ActiveVerification;
+	(harness as any).activeVerifications.set(recovery.signalId, recovery);
+	try {
+		await (harness as any)._resumeContainerCommandStep(recovery, step, {
+			finalize: () => { throw new Error("must not finalize before failed-closed cleanup settles"); },
+			timeoutResult: () => { throw new Error("must not publish a timeout before failed-closed cleanup settles"); },
+			restartInterrupted: () => { throw new Error("must not publish a retryable verdict before failed-closed cleanup settles"); },
+		});
+	} catch (error) {
+		return error;
+	}
+	throw new Error("expected recovered container cleanup to remain pending");
+}
+
+function expectFailedClosedWitness(step: any, error: unknown, signalAttempts: string[], diagnostic: string): void {
+	expect(signalAttempts).toEqual([]);
+	expect(step.killUnsafeReason).toBe(diagnostic);
+	expect(step.containerPayloadCleanupPending).toBe(true);
+	expect(String((error as Error | undefined)?.message)).toContain(diagnostic);
 }
 
 test("PID-reused container sentinel never authorizes a negative-PGID signal", async () => {
@@ -1214,10 +1277,10 @@ test("PID-reused container sentinel never authorizes a negative-PGID signal", as
 		const harness = makeHarness(stateDir);
 		(harness as any)._dockerExecCapture = async (containerId: string, command: string) => {
 			assert.equal(containerId, CONTAINER_ID);
-			if (/kill\s+-(?:TERM|KILL)\s+-"?\$?\w+/.test(command)) {
+			if (isDestructiveContainerGroupSignal(command)) {
 				// Record the resolved destructive target rather than the shell
 				// variable used by the transport script, making the RED diagnostic
-				// independent of shell formatting.
+				// independent of whether the transport uses an optional `--`.
 				signalAttempts.push(`kill -TERM -${SENTINEL_PID}`);
 			}
 			// The unsafe historical recovery implementation reaches this response
@@ -1281,6 +1344,123 @@ test("PID-reused container sentinel never authorizes a negative-PGID signal", as
 		assert.equal(step.killUnsafeReason, WITNESS_START_TOKEN_MISMATCH);
 		assert.equal(step.containerPayloadCleanupPending, true, "identity loss remains durable retryable cleanup");
 		assert.match(String((cleanupError as Error | undefined)?.message), new RegExp(WITNESS_START_TOKEN_MISMATCH));
+	} finally {
+		fs.rmSync(stateDir, { recursive: true, force: true });
+	}
+});
+
+test("container cleanup signal matcher covers optional -- transport syntax", () => {
+	expect(isDestructiveContainerGroupSignal('kill -TERM -"$pgid"')).toBe(true);
+	expect(isDestructiveContainerGroupSignal('kill -KILL -- -"$pgid"')).toBe(true);
+	expect(isDestructiveContainerGroupSignal('kill -TERM -- -321654')).toBe(true);
+	expect(isDestructiveContainerGroupSignal("cat /tmp/.bobbit-verif/witness.exit")).toBe(false);
+});
+
+test.each([
+	["missing witness", recoveredContainerStep({ containerOwnershipWitness: undefined, containerWitnessFile: undefined }), "BOBBIT_CONTAINER_WITNESS_MISSING"],
+	["legacy PID-only evidence", recoveredContainerStep({ containerOwnershipWitness: undefined, containerWitnessFile: undefined, pid: SENTINEL_PID, pgid: SENTINEL_PID }), "BOBBIT_CONTAINER_WITNESS_MISSING"],
+] as const)("recovered container cleanup rejects %s without a destructive signal", async (_caseName, step, diagnostic) => {
+	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-witness-missing-"));
+	try {
+		const signalAttempts: string[] = [];
+		let inspections = 0;
+		const harness = makeHarness(stateDir, async () => {
+			inspections++;
+			return { pid: SENTINEL_PID, pgid: SENTINEL_PID, startToken: ORIGINAL_START_TOKEN };
+		});
+		const error = await invokeRecoveredContainerCleanup(harness, step, signalAttempts);
+		expect(inspections).toBe(0);
+		expectFailedClosedWitness(step, error, signalAttempts, diagnostic);
+	} finally {
+		fs.rmSync(stateDir, { recursive: true, force: true });
+	}
+});
+
+test("recovered container cleanup rejects a nonce-mismatched witness before inspecting or signalling", async () => {
+	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-witness-nonce-"));
+	try {
+		const step = recoveredContainerStep({
+			containerOwnershipWitness: {
+				containerId: CONTAINER_ID,
+				nonce: "other-step-nonce",
+				sentinelPid: SENTINEL_PID,
+				pgid: SENTINEL_PID,
+				startToken: ORIGINAL_START_TOKEN,
+			},
+		});
+		const signalAttempts: string[] = [];
+		let inspections = 0;
+		const harness = makeHarness(stateDir, async () => {
+			inspections++;
+			return { pid: SENTINEL_PID, pgid: SENTINEL_PID, startToken: ORIGINAL_START_TOKEN };
+		});
+		const error = await invokeRecoveredContainerCleanup(harness, step, signalAttempts);
+		expect(inspections).toBe(0);
+		expectFailedClosedWitness(step, error, signalAttempts, "BOBBIT_CONTAINER_WITNESS_NONCE_MISMATCH");
+	} finally {
+		fs.rmSync(stateDir, { recursive: true, force: true });
+	}
+});
+
+test("recovered container cleanup rejects a live sentinel PGID mismatch without signalling", async () => {
+	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-witness-pgid-"));
+	try {
+		const step = recoveredContainerStep({
+			containerOwnershipWitness: {
+				containerId: CONTAINER_ID,
+				nonce: VERIFICATION_NONCE,
+				sentinelPid: SENTINEL_PID,
+				pgid: SENTINEL_PID,
+				startToken: ORIGINAL_START_TOKEN,
+			},
+		});
+		const signalAttempts: string[] = [];
+		const harness = makeHarness(stateDir, async () => ({
+			pid: SENTINEL_PID,
+			pgid: SENTINEL_PID + 1,
+			startToken: ORIGINAL_START_TOKEN,
+		}));
+		const error = await invokeRecoveredContainerCleanup(harness, step, signalAttempts);
+		expectFailedClosedWitness(step, error, signalAttempts, "BOBBIT_CONTAINER_WITNESS_PGID_MISMATCH");
+	} finally {
+		fs.rmSync(stateDir, { recursive: true, force: true });
+	}
+});
+
+test("same-container steps cannot authorize each other's deliberately crossed witnesses", async () => {
+	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-witness-crossed-"));
+	try {
+		const first = recoveredContainerStep({
+			name: "same-container-first",
+			pidNonce: "first-step-nonce",
+			containerOwnershipWitness: {
+				containerId: CONTAINER_ID, nonce: "second-step-nonce", sentinelPid: 111_111, pgid: 111_111, startToken: "second-start",
+			},
+		});
+		const second = recoveredContainerStep({
+			name: "same-container-second",
+			pidNonce: "second-step-nonce",
+			containerOwnershipWitness: {
+				containerId: CONTAINER_ID, nonce: "first-step-nonce", sentinelPid: 222_222, pgid: 222_222, startToken: "first-start",
+			},
+		});
+		const signalAttempts: string[] = [];
+		const harness = makeHarness(stateDir, async () => {
+			throw new Error("crossed witnesses must fail before live identity inspection");
+		});
+		const active: ActiveVerification = {
+			goalId: "goal-container-witness-crossed",
+			gateId: "implementation",
+			signalId: "sig-container-witness-crossed",
+			overallStatus: "running",
+			startedAt: Date.now(),
+			currentPhase: 0,
+			steps: [first, second],
+		};
+		const firstError = await invokeRecoveredContainerCleanup(harness, first, signalAttempts, active);
+		const secondError = await invokeRecoveredContainerCleanup(harness, second, signalAttempts, active);
+		expectFailedClosedWitness(first, firstError, signalAttempts, "BOBBIT_CONTAINER_WITNESS_NONCE_MISMATCH");
+		expectFailedClosedWitness(second, secondError, signalAttempts, "BOBBIT_CONTAINER_WITNESS_NONCE_MISMATCH");
 	} finally {
 		fs.rmSync(stateDir, { recursive: true, force: true });
 	}
