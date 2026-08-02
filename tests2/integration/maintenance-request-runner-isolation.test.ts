@@ -116,6 +116,7 @@ async function bootGatewayFixture(label: string): Promise<GatewayFixture> {
 	const branch = `session/${label}-archived-worktree`;
 	const sessionId = `${label}-archived-session`;
 	const model = new MaintenanceGitModel(`maintenance-request-runner-${label}`);
+	let gateway: ReturnType<typeof createGateway> | undefined;
 	try {
 		activateFixtureRoot(root);
 		mkdirSync(join(root, "state", "session-prompts"), { recursive: true });
@@ -136,7 +137,7 @@ async function bootGatewayFixture(label: string): Promise<GatewayFixture> {
 			agentBridgeFactory: () => null,
 			fsImpl: realFs,
 		};
-		const gateway = createGateway({
+		gateway = createGateway({
 			host: "127.0.0.1",
 			port: 0,
 			portExplicit: true,
@@ -174,6 +175,7 @@ async function bootGatewayFixture(label: string): Promise<GatewayFixture> {
 		} as any);
 		return { label, root, repoPath, worktreePath, branch, sessionId, model, runner, gateway, baseUrl };
 	} catch (error) {
+		try { await gateway?.shutdown(); } catch { /* preserve the setup error */ }
 		model.reset();
 		rmSync(root, { recursive: true, force: true });
 		throw error;
