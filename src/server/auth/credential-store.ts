@@ -237,19 +237,23 @@ function isFileNotFoundError(error: unknown): boolean {
 }
 
 interface LockIdentity {
-	dev: number;
-	ino: number;
+	dev: bigint;
+	ino: bigint;
+	/** Unlike mtime/ctime, a lock heartbeat cannot mutate the creation timestamp. */
+	birthtimeNs: bigint;
 }
 
 function lockIdentity(lockPath: string): LockIdentity {
-	const { dev, ino } = statSync(lockPath);
-	return { dev, ino };
+	const { dev, ino, birthtimeNs } = statSync(lockPath, { bigint: true });
+	return { dev, ino, birthtimeNs };
 }
 
 function isSameLockIdentity(expected: LockIdentity, lockPath: string): boolean {
 	try {
 		const actual = lockIdentity(lockPath);
-		return actual.dev === expected.dev && actual.ino === expected.ino;
+		return actual.dev === expected.dev
+			&& actual.ino === expected.ino
+			&& actual.birthtimeNs === expected.birthtimeNs;
 	} catch {
 		return false;
 	}
@@ -258,13 +262,29 @@ function isSameLockIdentity(expected: LockIdentity, lockPath: string): boolean {
 /** An observed stale lock remains reclaimable only while its identity and lease are unchanged. */
 function isSameStaleLock(expected: LockIdentity, lockPath: string): boolean {
 	try {
-		const stats = statSync(lockPath);
+		const stats = statSync(lockPath, { bigint: true });
 		return stats.dev === expected.dev
 			&& stats.ino === expected.ino
-			&& Date.now() - stats.mtimeMs > LOCK_STALE_MS;
+			&& stats.birthtimeNs === expected.birthtimeNs
+			&& Date.now() - Number(stats.mtimeMs) > LOCK_STALE_MS;
 	} catch {
 		return false;
 	}
+}
+
+// Filesystem identity is the cross-process ownership proof. Keep a second,
+// in-process generation fence as well: filesystems may promptly recycle a
+// directory inode after an owner loses and another Bobbit store reacquires its
+// pathname. This cannot identify a foreign Pi owner, but makes same-process
+// hand-off fail closed even on filesystems with coarse creation timestamps.
+const ownedLockGenerations = new Map<string, string>();
+
+function ownsLockGeneration(lockPath: string, generation: string): boolean {
+	return ownedLockGenerations.get(lockPath) === generation;
+}
+
+function forgetLockGeneration(lockPath: string, generation: string): void {
+	if (ownsLockGeneration(lockPath, generation)) ownedLockGenerations.delete(lockPath);
 }
 
 let beforeStaleLockClaimForTests: ((lockPath: string) => void) | undefined;
@@ -286,9 +306,9 @@ export function __setBeforeStaleLockClaimForTests(hook: ((lockPath: string) => v
 function reclaimStaleAuthFileLock(lockPath: string): boolean {
 	let observed: LockIdentity;
 	try {
-		const stats = statSync(lockPath);
-		if (Date.now() - stats.mtimeMs <= LOCK_STALE_MS) return false;
-		observed = { dev: stats.dev, ino: stats.ino };
+		const stats = statSync(lockPath, { bigint: true });
+		if (Date.now() - Number(stats.mtimeMs) <= LOCK_STALE_MS) return false;
+		observed = { dev: stats.dev, ino: stats.ino, birthtimeNs: stats.birthtimeNs };
 	} catch {
 		return false;
 	}
@@ -349,8 +369,8 @@ interface AuthFileLock {
  * delete a replacement lease at the same pathname. Claim the observed inode
  * first, validate it at the private path, and only then remove that claim.
  */
-function releaseAuthFileLock(lockPath: string, identity: LockIdentity): void {
-	if (!isSameLockIdentity(identity, lockPath)) {
+function releaseAuthFileLock(lockPath: string, identity: LockIdentity, generation: string): void {
+	if (!ownsLockGeneration(lockPath, generation) || !isSameLockIdentity(identity, lockPath)) {
 		throw new Error("Credential store lock was compromised");
 	}
 	const claimPath = `${lockPath}.release-${process.pid}-${randomUUID()}`;
@@ -371,6 +391,7 @@ function releaseAuthFileLock(lockPath: string, identity: LockIdentity): void {
 	}
 	try {
 		rmdirSync(claimPath);
+		forgetLockGeneration(lockPath, generation);
 	} catch (error) {
 		// The claimed directory is private, so a failure cannot be interpreted as
 		// a successful release by a replacement owner.
@@ -385,9 +406,11 @@ async function acquireAuthFileLock(authPath: string): Promise<AuthFileLock> {
 			mkdirSync(lockPath, { mode: DIRECTORY_MODE });
 			bestEffortChmod(lockPath, DIRECTORY_MODE);
 			const identity = lockIdentity(lockPath);
+			const generation = randomUUID();
+			ownedLockGenerations.set(lockPath, generation);
 			let compromised = false;
 			const assertOwnership = () => {
-				if (compromised || !isSameLockIdentity(identity, lockPath)) {
+				if (compromised || !ownsLockGeneration(lockPath, generation) || !isSameLockIdentity(identity, lockPath)) {
 					compromised = true;
 					throw new Error("Credential store lock was compromised");
 				}
@@ -408,7 +431,7 @@ async function acquireAuthFileLock(authPath: string): Promise<AuthFileLock> {
 				assertIntact: assertOwnership,
 				release: () => {
 					clearInterval(heartbeat);
-					releaseAuthFileLock(lockPath, identity);
+					releaseAuthFileLock(lockPath, identity, generation);
 				},
 			};
 		} catch (error) {

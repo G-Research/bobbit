@@ -46,7 +46,7 @@ import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { executeCleanupWorktreesRequest } from "./maintenance/cleanup-worktrees-request.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { readToken, validateToken } from "./auth/token.js";
-import { OAuthBusyError, getOAuthCredentialStore, oauthCancelAndWait, oauthComplete, oauthFinalize, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
+import { OAuthBusyError, getOAuthCredentialStore, oauthCancelAndWait, oauthComplete, oauthFinalize, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus, shutdownOAuthFlows } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import type { GateResetReopenOutcome, ServerMessage } from "./ws/protocol.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
@@ -3795,6 +3795,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				triggerEngine.stop();
 				inboxNudger.stop();
 				wss.close();
+				// Pi's Anthropic callback and exchange outlive the HTTP server. Abort
+				// and await them before tearing down stores or allowing restart.
+				await phase("oauth-flows", () => shutdownOAuthFlows());
 				if (bootBackgroundTask) {
 					await phase("boot-background", () => bootBackgroundTask!);
 				}

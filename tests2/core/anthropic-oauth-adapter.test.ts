@@ -64,6 +64,7 @@ const {
 	oauthStart,
 	oauthStatus,
 	refreshOAuthToken,
+	shutdownOAuthFlows,
 	stopFlowCleanup,
 } = await import("../../src/server/auth/oauth.js");
 
@@ -526,6 +527,42 @@ describe("Anthropic OAuth Pi browser adapter", () => {
 		const replacement: LoginCapture = {};
 		const replacementStarted = await startAnthropic(pendingModels(replacement));
 		await releasePending(replacement, replacementStarted.flowId);
+	});
+
+	it("awaits a pending Anthropic exchange during gateway OAuth shutdown", async () => {
+		const credential = oauthCredential();
+		let releaseExchange!: () => void;
+		let exchangeStarted = false;
+		let interactionSeen: AuthInteraction | undefined;
+		const exchangeBlocked = new Promise<void>((resolve) => { releaseExchange = resolve; });
+		const models: Pick<Models, "login"> = {
+			login: (async (_providerId: string, _type: string, interaction: AuthInteraction) => {
+				interactionSeen = interaction;
+				interaction.notify({ type: "auth_url", url: currentAuthorizeUrl() });
+				await interaction.prompt({ type: "manual_code", message: "Paste redirect URL" });
+				exchangeStarted = true;
+				await exchangeBlocked;
+				return credential;
+			}) as Models["login"],
+		};
+		const started = await startAnthropic(models);
+		const completion = oauthComplete(started.flowId, randomUUID(), OFFLINE_FETCH);
+		for (let i = 0; i < 100 && !exchangeStarted; i++) await Promise.resolve();
+		assert.equal(exchangeStarted, true, "the mocked provider must be in its token exchange");
+
+		let shutdownSettled = false;
+		const shutdown = shutdownOAuthFlows().then(() => { shutdownSettled = true; });
+		await Promise.resolve();
+		assert.equal(interactionSeen?.signal?.aborted, true, "shutdown must abort Pi's pending interaction");
+		assert.equal(shutdownSettled, false, "shutdown must wait for the active exchange to settle");
+
+		releaseExchange();
+		await shutdown;
+		assert.deepEqual(await completion, { success: false, error: "OAuth flow cancelled" });
+		assert.deepEqual(oauthFlowStatus(started.flowId, "anthropic"), { complete: false, error: "flow not found" });
+		const stored = existsSync(authPath) ? JSON.parse(readFileSync(authPath, "utf8")) as Record<string, unknown> : {};
+		assert.equal(stored.anthropic, undefined, "shutdown cancellation must not persist the issued credential");
+		activeFlowIds.delete(started.flowId);
 	});
 
 	it("retains a real Pi loopback callback flow and lease until its cancelled exchange settles", async () => {

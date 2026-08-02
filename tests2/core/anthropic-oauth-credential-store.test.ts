@@ -541,19 +541,24 @@ describe("AtomicCredentialStore", () => {
 		assert.equal(readFileSync(authPath, "utf8") === malformed, true);
 	});
 
-	it("propagates lock ownership compromise instead of treating the mutation as committed", async () => {
+	it("propagates a cross-store lock ownership compromise instead of treating the mutation as committed", async () => {
 		const store = new AtomicCredentialStore(authPath);
+		const replacementStore = new AtomicCredentialStore(authPath);
 		await assert.rejects(
 			store.modify("anthropic", async () => {
+				// A separate store performs the actual competing acquisition after the
+				// original lease disappears. This is deterministic on every supported
+				// filesystem, unlike assuming rmdir/mkdir must allocate a new inode.
 				const lockPath = `${realpathSync(authPath)}.lock`;
 				rmdirSync(lockPath);
-				mkdirSync(lockPath, { mode: 0o700 });
+				await replacementStore.modify("openai-codex", async () => credential());
 				return credential();
 			}),
 			/lock was compromised/i,
 		);
-		// The replacement belongs to the fixture, not the failed store owner.
-		rmdirSync(`${realpathSync(authPath)}.lock`);
+		const document = readDocument();
+		assert.equal(document.anthropic, undefined, "the compromised owner must not commit its mutation");
+		assert.equal(document["openai-codex"]?.type, "oauth", "the replacement owner remains intact");
 	});
 
 	it("rejects incomplete Anthropic OAuth writes without replacing the existing credential", async () => {

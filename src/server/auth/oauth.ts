@@ -187,6 +187,57 @@ function ensureFlowCleanupTimer(): void {
 	if (typeof flowCleanupTimer.unref === "function") flowCleanupTimer.unref();
 }
 
+/**
+ * Stop the periodic sweep and terminally settle pending provider interactions.
+ *
+ * Gateway shutdown must await this boundary: Pi owns Anthropic's callback
+ * listener and can persist after its browser callback starts, so merely
+ * clearing Bobbit's bookkeeping would let an old gateway outlive its teardown.
+ * Completed flows have no live interaction; discard only their acknowledgement
+ * window and preserve their accepted credential.
+ */
+export async function shutdownOAuthFlows(): Promise<void> {
+	if (flowCleanupTimer) {
+		clearInterval(flowCleanupTimer);
+		flowCleanupTimer = undefined;
+	}
+
+	const settlements: Promise<void>[] = [];
+	for (const [flowId, flow] of Array.from(pendingFlows.entries())) {
+		if (flow.provider === "google-gemini-cli") {
+			closeGoogleFlowServer(flow);
+			pendingFlows.delete(flowId);
+			continue;
+		}
+		if (flow.completed) {
+			// Completion precedes this flow's finally lease release, but has no
+			// remaining provider work. Do not turn an accepted login into logout.
+			pendingFlows.delete(flowId);
+			continue;
+		}
+
+		// cancelPiFlow may return immediately for an abandoned manual prompt so
+		// the normal UI can retry. Shutdown is stricter: wait for the underlying
+		// Models.login promise as well, including a callback/exchange that began
+		// without a manual completion request.
+		const cancellation = cancelPiFlow(flowId, flow, new Error("OAuth flow cancelled during gateway shutdown"));
+		settlements.push(Promise.all([
+			cancellation,
+			flow.loginPromise.then(() => undefined, () => undefined),
+		]).then(() => undefined));
+	}
+
+	const results = await Promise.allSettled(settlements);
+	pendingFlows.clear();
+	anthropicLeaseFlowId = undefined;
+	if (results.some((result) => result.status === "rejected")) {
+		// Route cancellation leaves this failure addressable for a user retry. At
+		// shutdown there is no safe retry surface, so stop teardown without leaking
+		// a credential-store/provider detail into the gateway log.
+		throw new Error("OAuth flow cleanup failed during gateway shutdown");
+	}
+}
+
 /** Stop the periodic cleanup timer and abort pending callback servers (test-only). */
 export function stopFlowCleanup(): void {
 	if (flowCleanupTimer) {
