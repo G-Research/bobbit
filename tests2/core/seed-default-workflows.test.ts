@@ -48,6 +48,46 @@ function findGate(workflow: Workflow, id: string) {
 	return gate;
 }
 
+function assertRevisionReadyContentReviewPrompt(prompt: string, source: string): void {
+	const policy = prompt.replace(/\s+/g, " ");
+	const message = `${source} must turn each blocking content finding into an author-ready revision packet`;
+
+	// Keep these assertions intentionally order-independent: the workflow prose may
+	// present the packet fields in a different sequence without weakening policy.
+	assert.match(policy, /(?:revision|author)[ -]ready/i, message);
+	assert.match(policy, /block(?:ing|er)/i, message);
+	assert.match(policy, /(?:artifact )?(?:section|heading|paragraph|requirement|acceptance criterion|diagram|test plan)/i, message);
+	assert.match(policy, /(?:goal[- ]linked|goal (?:requirement|scope)|gap|contradiction)/i, message);
+	assert.match(policy, /(?:implementation|user) consequence/i, message);
+	assert.match(policy, /(?:replacement|addition|wording|outline|contract|data[- ]flow|state sequence|acceptance criterion|test[- ]plan case)/i, message);
+	assert.match(policy, /(?:cross[- ]section|consistency)/i, message);
+	assert.match(policy, /(?:constraints?|references?)/i, message);
+	assert.match(policy, /(?:credible|multiple).{0,160}alternatives?|alternatives?.{0,160}(?:credible|multiple)/i, message);
+	assert.match(policy, /trade-?offs?/i, message);
+	assert.match(policy, /(?:required|blocker)/i, message);
+	assert.match(policy, /(?:optional|bounded improvement)/i, message);
+}
+
+function assertDesignOrAnalysisReviewPrompt(prompt: string, source: string): void {
+	assertRevisionReadyContentReviewPrompt(prompt, source);
+	const policy = prompt.replace(/\s+/g, " ");
+	assert.match(policy, /implementable contracts?/i, `${source} must provide implementable contracts`);
+	assert.match(policy, /testable acceptance criteria/i, `${source} must provide testable acceptance criteria`);
+	assert.match(policy, /(?:do not|must not|not).{0,160}(?:exhaustive pseudocode|formal proof|speculative hardening)/i, `${source} must keep revisions proportionate to the approved goal`);
+}
+
+function assertDocumentationReviewPrompt(prompt: string, source: string): void {
+	assertRevisionReadyContentReviewPrompt(prompt, source);
+	const policy = prompt.replace(/\s+/g, " ");
+	assert.match(policy, /documentation (?:path|file|location)/i, `${source} must identify the documentation location to revise`);
+	assert.match(policy, /(?:section|heading)/i, `${source} must identify the documentation section to revise`);
+	assert.match(policy, /(?:stale|missing) (?:claim|documentation|content)|(?:claim|documentation|content).{0,80}(?:stale|missing)/i, `${source} must identify the stale or missing claim`);
+	assert.match(policy, /(?:replacement wording|proposed wording|replacement outline|proposed outline)/i, `${source} must propose concrete documentation text or outline`);
+	assert.match(policy, /examples?/i, `${source} must include relevant examples when needed`);
+	assert.match(policy, /links?/i, `${source} must include relevant links when needed`);
+	assert.match(policy, /(?:verify|verification).{0,160}(?:documented behavior|documentation).{0,160}(?:implementation|implemented)|(?:implementation|implemented).{0,160}(?:verify|verification).{0,160}(?:documented behavior|documentation)/i, `${source} must explain how to verify documentation matches implementation`);
+}
+
 function assertImplementationReviewPolicy(workflows: Record<string, Workflow>, source: string) {
 	for (const workflowId of IMPLEMENTATION_WORKFLOW_IDS) {
 		const implementation = findGate(workflows[workflowId], "implementation");
@@ -133,6 +173,42 @@ describe("consolidated implementation review defaults", () => {
 				assert.match(security, risk, `${workflowId} security review must cover changed security risks`);
 			}
 			assert.match(security, /remediation.*(?:abuse|regression) tests?/is, `${workflowId} security review must require a remediation test`);
+		}
+	});
+
+	it("makes first-phase design and issue-analysis reviews revision-ready", () => {
+		const workflows = buildDefaultWorkflows("myproj");
+		for (const workflowId of ["general", "feature"] as const) {
+			const reviewSteps = findGate(workflows[workflowId], "design-doc").verify ?? [];
+			assertDesignOrAnalysisReviewPrompt(
+				reviewSteps.find((step) => step.name === "Design review")?.prompt ?? "",
+				`${workflowId}.design-doc.Design review`,
+			);
+			assertDesignOrAnalysisReviewPrompt(
+				reviewSteps.find((step) => step.name === "Gap analysis")?.prompt ?? "",
+				`${workflowId}.design-doc.Gap analysis`,
+			);
+		}
+
+		const issueAnalysis = findGate(workflows["bug-fix"], "issue-analysis").verify ?? [];
+		assertDesignOrAnalysisReviewPrompt(
+			issueAnalysis.find((step) => step.name === "Analysis quality")?.prompt ?? "",
+			"bug-fix.issue-analysis.Analysis quality",
+		);
+		assertDesignOrAnalysisReviewPrompt(
+			issueAnalysis.find((step) => step.name === "Gap analysis")?.prompt ?? "",
+			"bug-fix.issue-analysis.Gap analysis",
+		);
+	});
+
+	it("makes documentation reviews revision-ready", () => {
+		const workflows = buildDefaultWorkflows("myproj");
+		for (const workflowId of ["general", "feature", "bug-fix"] as const) {
+			const documentation = findGate(workflows[workflowId], "documentation");
+			assertDocumentationReviewPrompt(
+				documentation.verify?.find((step) => step.name === "Documentation coverage")?.prompt ?? "",
+				`${workflowId}.documentation.Documentation coverage`,
+			);
 		}
 	});
 
