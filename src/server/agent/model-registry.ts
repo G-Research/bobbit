@@ -24,6 +24,7 @@ import { inferMeta, discoverAigwModels, getAigwUrl } from "./aigw-manager.js";
 import { getOpenAIModelAdditions } from "./openai-model-additions.js";
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
 import { GOOGLE_GEMINI_CLI_PROVIDER, hasGoogleCodeAssistSpawnCredential } from "./google-code-assist.js";
+import { isAnthropicApiKeyCredential, isUsableAnthropicOAuthCredential } from "../auth/credential-store.js";
 
 // These Pi providers require credential/runtime integration Bobbit does not yet
 // forward to host or sandbox agents. Keep the denylist provider-scoped so future
@@ -544,6 +545,8 @@ function detectProviderAuth(provider: string, prefs: PreferencesStore): boolean 
 
 	// Check OAuth credentials (auth.json) — only for OAuth-capable providers so a
 	// google-gemini-cli account token can't authenticate API-key-only `google`.
+	// Anthropic is stricter: Pi requires a renewable OAuth row, while API keys
+	// retain their established, independent authentication path.
 	if (OAUTH_AUTHENTICATED_PROVIDERS.has(provider) && hasOAuthCredentials(provider)) return true;
 
 	return false;
@@ -554,9 +557,12 @@ function detectProviderAuth(provider: string, prefs: PreferencesStore): boolean 
 let oauthCache: { data: any; expiry: number } | null = null;
 const OAUTH_CACHE_TTL = 10_000; // 10 seconds
 
-/** Invalidate the cached auth.json data so the next read picks up fresh credentials. */
+/** Invalidate credential-derived auth and model availability after every durable auth change. */
 export function clearOAuthCache(): void {
 	oauthCache = null;
+	// `cachedModels` contains the computed authenticated flag. A rejected or
+	// logged-out OAuth row must therefore invalidate both layers immediately.
+	invalidateModelCache();
 }
 
 function readAuthJson(): any {
@@ -589,6 +595,11 @@ function hasOAuthCredentials(provider?: string): boolean {
 	if (typeof authData === "object") {
 		// If no specific provider requested, check if any auth exists
 		if (!provider) return Object.keys(authData).length > 0;
+
+		if (provider === "anthropic") {
+			const credential = authData[provider];
+			return isUsableAnthropicOAuthCredential(globalAuthPath(), credential) || isAnthropicApiKeyCredential(credential);
+		}
 
 		// Check for provider-specific keys
 		if (authData[provider]) return true;

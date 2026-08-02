@@ -2550,6 +2550,23 @@ export class SessionManager {
 		throw new Error(`Cannot resolve store for session ${id}: no projectId and no test store`);
 	}
 
+	/**
+	 * Resolve a store already owned by a live ProjectContext for shutdown.
+	 * Shutdown must not lazily recreate a context after project removal just to
+	 * persist a session that is being discarded with that project.
+	 */
+	private resolveExistingStoreForShutdown(session: Pick<SessionInfo, "id" | "projectId">): SessionStore | null {
+		if (this.projectContextManager) {
+			for (const ctx of this.projectContextManager.all()) {
+				if (session.projectId ? ctx.project.id === session.projectId : ctx.sessionStore.get(session.id)) {
+					return ctx.sessionStore;
+				}
+			}
+			return null;
+		}
+		return this._testStore;
+	}
+
 	/** Resolve the correct SessionStore for any session by ID (in-memory or persisted). Returns null if not found. */
 	private resolveStoreForId(id: string): SessionStore | null {
 		// Try in-memory first (fast path)
@@ -2996,17 +3013,49 @@ export class SessionManager {
 			bridgeOptions.cwd = applySandboxCwdOffset("/workspace", opts?.sandboxCwdOffset);
 		}
 
-		// Resolve sandbox tokens from unified config (with legacy fallback)
-		// Get project-scoped config/secrets when available.
+		// Host Anthropic OAuth is never a default sandbox credential. An enabled,
+		// empty ANTHROPIC_OAUTH_TOKEN entry opts in to one current, non-renewable
+		// auth.json entry. Project credentials win and never trigger host refresh.
 		const secretsStore = projectContext?.secretsStore ?? null;
-		bridgeOptions.sandboxCredentials = resolveSandboxTokens(this.preferencesStore, projectConfigStore, secretsStore, this.commandRunner);
-		const sandboxTokenEntries = projectConfigStore?.getSandboxTokens() ?? [];
-		const sandboxAuthPolicy = resolveSandboxAgentAuthPolicy(sandboxTokenEntries);
-		ensureSandboxAgentAuthFile({
-			prefs: this.preferencesStore,
-			includeCodexAuth: sandboxAuthPolicy.includeCodexAuth,
-			includeGoogleAuth: sandboxAuthPolicy.includeGoogleAuth,
-			scope: opts?.projectId,
+		await withSandboxAgentAuthFileLock(projectId, async () => {
+			const readSandboxAuthPolicy = () => {
+				const entries = projectConfigStore.getSandboxTokens();
+				const credentials = resolveSandboxTokens(
+					this.preferencesStore,
+					projectConfigStore,
+					secretsStore,
+					this.commandRunner,
+					{ allowStoredAnthropicOAuth: false },
+				);
+				const explicitAnthropicCredential = hasExplicitSandboxAnthropicCredential(entries, secretsStore?.getAll());
+				const hasSandboxAnthropicCredential = !!(
+					credentials.ANTHROPIC_API_KEY || credentials.ANTHROPIC_OAUTH_TOKEN
+				);
+				return {
+					credentials,
+					sandboxAuthPolicy: resolveSandboxAgentAuthPolicy(entries),
+					includeAnthropicAuth: !explicitAnthropicCredential
+						&& !hasSandboxAnthropicCredential
+						&& sandboxTokenPolicyAllowsAnthropicAuth(entries),
+				};
+			};
+
+			let policy = readSandboxAuthPolicy();
+			const anthropicOAuthCurrent = policy.includeAnthropicAuth
+				&& await refreshSandboxAnthropicOAuthCredential();
+
+			// Refresh is asynchronous, so the user may have configured an explicit
+			// project key while it was in flight. Re-read policy and credentials under
+			// this project's write lock before changing its shared auth.json.
+			policy = readSandboxAuthPolicy();
+			bridgeOptions.sandboxCredentials = policy.credentials;
+			ensureSandboxAgentAuthFile({
+				prefs: this.preferencesStore,
+				includeCodexAuth: policy.sandboxAuthPolicy.includeCodexAuth,
+				includeAnthropicAuth: anthropicOAuthCurrent && policy.includeAnthropicAuth,
+				includeGoogleAuth: policy.sandboxAuthPolicy.includeGoogleAuth,
+				scope: projectId,
+			});
 		});
 
 		return true;
@@ -4845,13 +4894,14 @@ export class SessionManager {
 		broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
 	}
 
-	private applyDirectProviderEnv(bridgeOptions: RpcBridgeOptions, sandboxed: boolean | undefined, provider?: string): void {
+	private async applyDirectProviderEnv(bridgeOptions: RpcBridgeOptions, sandboxed: boolean | undefined, provider?: string): Promise<void> {
 		if (sandboxed) return;
 		bridgeOptions.env = mergeHostAgentProviderEnv(bridgeOptions.env, this.preferencesStore, {
 			provider,
 			model: bridgeOptions.initialModel,
 			providers: fallbackProviderAllowlistFromPrefs(this.preferencesStore),
 		});
+		await recoverAnthropicApiKeyRuntime(bridgeOptions.env, provider === "anthropic");
 	}
 
 	private safeDispatchError(session: SessionInfo, reason: string): Error {
@@ -7604,7 +7654,7 @@ export class SessionManager {
 			);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 		const restoreSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
-		this.applyDirectProviderEnv(bridgeOptions, !!ps.sandboxed, restoreSpawnProvider);
+		await this.applyDirectProviderEnv(bridgeOptions, !!ps.sandboxed, restoreSpawnProvider);
 
 		const rpcClient = new RpcBridge(bridgeOptions);
 		const eventBuffer = new EventBuffer();
@@ -10095,7 +10145,7 @@ export class SessionManager {
 			this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
 		}
 		const spawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
-		this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, spawnProvider);
+		await this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, spawnProvider);
 
 		// Build and fully validate the replacement while the original bridge stays
 		// subscribed and usable. Role assignment is a two-phase swap: start,
@@ -12519,7 +12569,7 @@ export class SessionManager {
 				);
 			if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 			const forceSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
-			this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, forceSpawnProvider);
+			await this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, forceSpawnProvider);
 
 			const rpcClient = new RpcBridge(bridgeOptions);
 			let switchingSession = true;
@@ -12679,10 +12729,13 @@ export class SessionManager {
 			// and we write it here to handle the case where shutdown() races
 			// with a pending lifecycle event that hasn't flushed to disk yet.
 			const needsRestartRedrive = sessionNeedsRestartRedrive(session);
-			this.resolveStoreForSession(id).update(id, {
-				wasStreaming: needsRestartRedrive,
-				streamingStartedAt: needsRestartRedrive ? (session.streamingStartedAt ?? this.clock.now()) : undefined,
-			});
+			const store = this.resolveExistingStoreForShutdown(session);
+			if (store) {
+				store.update(id, {
+					wasStreaming: needsRestartRedrive,
+					streamingStartedAt: needsRestartRedrive ? (session.streamingStartedAt ?? this.clock.now()) : undefined,
+				});
+			}
 
 			// Cancel any pending transient/provider-backoff auto-retry so the
 			// timer doesn't fire after the agent has been stopped. Clients are
@@ -12746,7 +12799,7 @@ export class SessionManager {
 
 // ── Sandbox credential auto-resolution ─────────────────────────────
 
-import { ensureSandboxAgentAuthFile, fallbackProviderAllowlistFromPrefs, mergeHostAgentProviderEnv, resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./host-tokens.js";
+import { ensureSandboxAgentAuthFile, fallbackProviderAllowlistFromPrefs, hasExplicitSandboxAnthropicCredential, mergeHostAgentProviderEnv, recoverAnthropicApiKeyRuntime, refreshSandboxAnthropicOAuthCredential, resolveHostTokenValue, resolveSandboxAgentAuthPolicy, sandboxTokenPolicyAllowsAnthropicAuth, withSandboxAgentAuthFileLock, type HostTokenResolutionOptions } from "./host-tokens.js";
 
 /**
  * Map of auth.json provider keys → env vars that pi-coding-agent checks.
@@ -12789,7 +12842,13 @@ const PROVIDER_ENV_MAP: Record<string, { envVar: string; extractKey: (cred: any)
  * Falls back to legacy behavior (sandbox_credentials + sandbox_host_token_overrides + sandbox_github_token)
  * when sandbox_tokens is not set.
  */
-export function resolveSandboxTokens(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null, secretsStore?: import("./secrets-store.js").SecretsStore | null, commandRunner: CommandRunner = realCommandRunner): Record<string, string> {
+export function resolveSandboxTokens(
+	prefs?: import("./preferences-store.js").PreferencesStore | null,
+	projectConfig?: import("./project-config-store.js").ProjectConfigStore | null,
+	secretsStore?: import("./secrets-store.js").SecretsStore | null,
+	commandRunner: CommandRunner = realCommandRunner,
+	hostTokenOptions?: HostTokenResolutionOptions,
+): Record<string, string> {
 	const entries = projectConfig?.getSandboxTokens() ?? [];
 
 	// ── New unified path: sandbox_tokens is set ──
@@ -12804,7 +12863,7 @@ export function resolveSandboxTokens(prefs?: import("./preferences-store.js").Pr
 				result[entry.key] = explicitValue;
 			} else {
 				// Empty value = resolve from host.
-				const resolved = resolveHostTokenValue(entry.key, prefs);
+				const resolved = resolveHostTokenValue(entry.key, prefs, commandRunner, hostTokenOptions);
 				if (resolved) {
 					result[entry.key] = resolved;
 				}
@@ -12814,14 +12873,19 @@ export function resolveSandboxTokens(prefs?: import("./preferences-store.js").Pr
 	}
 
 	// ── Legacy fallback: sandbox_tokens not set ──
-	return resolveLegacySandboxCredentials(prefs, projectConfig, commandRunner);
+	return resolveLegacySandboxCredentials(prefs, projectConfig, commandRunner, hostTokenOptions);
 }
 
 /**
  * Legacy credential resolution from sandbox_credentials + sandbox_host_token_overrides + sandbox_github_token.
  * Used as fallback when sandbox_tokens is not configured.
  */
-export function resolveLegacySandboxCredentials(prefs?: import("./preferences-store.js").PreferencesStore | null, projectConfig?: import("./project-config-store.js").ProjectConfigStore | null, commandRunner: CommandRunner = realCommandRunner): Record<string, string> {
+export function resolveLegacySandboxCredentials(
+	prefs?: import("./preferences-store.js").PreferencesStore | null,
+	projectConfig?: import("./project-config-store.js").ProjectConfigStore | null,
+	commandRunner: CommandRunner = realCommandRunner,
+	hostTokenOptions?: HostTokenResolutionOptions,
+): Record<string, string> {
 	const result: Record<string, string> = {};
 
 	// 1. Read auth.json
@@ -12836,7 +12900,10 @@ export function resolveLegacySandboxCredentials(prefs?: import("./preferences-st
 	}
 
 	for (const [provider, { envVar, extractKey }] of Object.entries(PROVIDER_ENV_MAP)) {
-		const hostEnvVal = process.env[envVar];
+		const allowStoredAnthropicOAuth = hostTokenOptions?.allowStoredAnthropicOAuth === true;
+		const hostEnvVal = provider === "anthropic"
+			? process.env["ANTHROPIC_API_KEY"] || (allowStoredAnthropicOAuth ? process.env[envVar] : undefined)
+			: process.env[envVar];
 		if (hostEnvVal) {
 			result[envVar] = hostEnvVal;
 			continue;
@@ -12851,7 +12918,14 @@ export function resolveLegacySandboxCredentials(prefs?: import("./preferences-st
 		}
 
 		if (authData && authData[provider]) {
-			const key = extractKey(authData[provider]);
+			const credential = authData[provider];
+			if (provider === "anthropic" && credential?.type === "oauth") {
+				if (hostTokenOptions?.allowStoredAnthropicOAuth !== true) continue;
+				const resolved = resolveHostTokenValue(envVar, prefs, commandRunner, hostTokenOptions);
+				if (resolved) result[envVar] = resolved;
+				continue;
+			}
+			const key = extractKey(credential);
 			if (key) {
 				result[envVar] = key;
 			}

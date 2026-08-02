@@ -192,8 +192,10 @@ test.describe("goal_plan_propose", () => {
 		expect(post).toMatchObject({
 			url: "https://gateway.test/team/bobbit/api/goals/goal-zzz/mutation/req-bbb/decision",
 			method: "POST",
-			credentials: "include",
 		});
+		// gatewayFetch intentionally relies on Fetch's same-origin default: this
+		// keeps reverse-proxy cookies working without requiring credentialed CORS.
+		expect(post.credentials).toBeUndefined();
 		expect(post.headers.authorization).toBe("Bearer fixture-token");
 		expect(JSON.parse(post.body)).toEqual({ decision: "approve" });
 	});

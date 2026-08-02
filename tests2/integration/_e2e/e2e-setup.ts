@@ -496,43 +496,58 @@ export function connectWs(sessionId: string): Promise<WsConnection> {
 		const ws = new WebSocket(`${wsBase()}/ws/${sessionId}`);
 		const messages: WsMsg[] = [];
 		const waiters: Array<{ pred: (m: WsMsg) => boolean; res: (m: WsMsg) => void; rej: (e: Error) => void }> = [];
+		let authPoll: NodeJS.Timeout | undefined;
+		let authTimer: NodeJS.Timeout | undefined;
+		let settled = false;
+		const clearAuthWait = () => {
+			if (authPoll) clearInterval(authPoll);
+			if (authTimer) clearTimeout(authTimer);
+		};
+		const failAuth = (error: Error) => {
+			if (settled) return;
+			settled = true;
+			clearAuthWait();
+			reject(error);
+		};
+		const completeAuth = () => {
+			if (settled || !messages.some((m) => m.type === "auth_ok")) return;
+			settled = true;
+			clearAuthWait();
+			resolvePromise({
+				ws, messages,
+				waitFor(pred, timeoutMs = 15_000) {
+					const existing = messages.find(pred);
+					if (existing) return Promise.resolve(existing);
+					return new Promise((res, rej) => {
+						const t = setTimeout(() => rej(new Error(`WS waitFor timed out (${timeoutMs}ms)`)), timeoutMs);
+						waiters.push({ pred, res: (m) => { clearTimeout(t); res(m); }, rej });
+					});
+				},
+				waitForFrom(fromIndex, pred, timeoutMs = 15_000) {
+					const existing = messages.slice(fromIndex).find(pred);
+					if (existing) return Promise.resolve(existing);
+					return new Promise((res, rej) => {
+						const t = setTimeout(() => rej(new Error(`WS waitForFrom timed out (${timeoutMs}ms)`)), timeoutMs);
+						waiters.push({ pred, res: (m) => { clearTimeout(t); res(m); }, rej });
+					});
+				},
+				messageCount: () => messages.length,
+				send: (m) => ws.send(JSON.stringify(m)),
+				close: () => ws.close(),
+			});
+		};
 		ws.on("message", (raw) => {
 			const msg: WsMsg = JSON.parse(raw.toString());
 			messages.push(msg);
 			for (let i = waiters.length - 1; i >= 0; i--) {
 				if (waiters[i].pred(msg)) { waiters[i].res(msg); waiters.splice(i, 1); }
 			}
+			completeAuth();
 		});
 		ws.on("open", () => ws.send(JSON.stringify({ type: "auth", token: token() })));
-		ws.on("error", reject);
-		const iv = setInterval(() => {
-			if (messages.some((m) => m.type === "auth_ok")) {
-				clearInterval(iv);
-				resolvePromise({
-					ws, messages,
-					waitFor(pred, timeoutMs = 15_000) {
-						const existing = messages.find(pred);
-						if (existing) return Promise.resolve(existing);
-						return new Promise((res, rej) => {
-							const t = setTimeout(() => rej(new Error(`WS waitFor timed out (${timeoutMs}ms)`)), timeoutMs);
-							waiters.push({ pred, res: (m) => { clearTimeout(t); res(m); }, rej });
-						});
-					},
-					waitForFrom(fromIndex, pred, timeoutMs = 15_000) {
-						const existing = messages.slice(fromIndex).find(pred);
-						if (existing) return Promise.resolve(existing);
-						return new Promise((res, rej) => {
-							const t = setTimeout(() => rej(new Error(`WS waitForFrom timed out (${timeoutMs}ms)`)), timeoutMs);
-							waiters.push({ pred, res: (m) => { clearTimeout(t); res(m); }, rej });
-						});
-					},
-					messageCount: () => messages.length,
-					send: (m) => ws.send(JSON.stringify(m)),
-					close: () => ws.close(),
-				});
-			}
-		}, 50);
-		setTimeout(() => { clearInterval(iv); reject(new Error("WS auth timeout")); }, 10_000);
+		ws.on("error", failAuth);
+		authPoll = setInterval(completeAuth, 50);
+		authTimer = setTimeout(() => failAuth(new Error("WS auth timeout")), 10_000);
 	});
 }
 

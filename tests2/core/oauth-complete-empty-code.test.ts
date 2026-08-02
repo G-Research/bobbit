@@ -14,8 +14,9 @@ guardProcessEnv();
  *   - Whitespace-only `authCode`    → { success: false, error: "code required" }.
  *   - Unknown `flowId`              → { success: false, error: "Unknown or expired flow ID" }.
  */
-import { describe, it } from "vitest";
+import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
+import type { AuthInteraction, Credential, Models } from "@earendil-works/pi-ai";
 import { mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -24,7 +25,61 @@ const tmp = mkdtempSync(path.join(tmpdir(), "bobbit-oauth-empty-"));
 mkdirSync(path.join(tmp, "agent"), { recursive: true });
 process.env.BOBBIT_AGENT_DIR = path.join(tmp, "agent");
 
-const { oauthComplete } = await import("../../src/server/auth/oauth.js");
+const { oauthCancel, oauthComplete, oauthStart, stopFlowCleanup } = await import("../../src/server/auth/oauth.js");
+const activeFlows = new Map<string, "anthropic" | "openai-codex">();
+const OFFLINE_FETCH: typeof fetch = async () => {
+	throw new Error("OAuth tests must not call a provider");
+};
+
+interface PendingLogin {
+	aborts: number;
+}
+
+/** The established injected Models seam avoids provider I/O and callback listeners. */
+function abortAwareModels(pending: PendingLogin): Pick<Models, "login"> {
+	return {
+		login: ((_provider: string, _type: string, interaction: AuthInteraction) => {
+			interaction.notify({
+				type: "auth_url",
+				url: "https://example.invalid/authorize",
+				instructions: "Mocked OAuth interaction",
+			});
+			const signal = interaction.signal;
+			if (!signal) return Promise.reject(new Error("Bobbit must provide an OAuth abort signal"));
+			return new Promise<Credential>((_resolve, reject) => {
+				const abort = () => {
+					pending.aborts++;
+					const reason = signal.reason;
+					reject(reason instanceof Error ? reason : new Error("OAuth flow cancelled"));
+				};
+				signal.addEventListener("abort", abort, { once: true });
+				if (signal.aborted) abort();
+			});
+		}) as Models["login"],
+	};
+}
+
+async function startFlow(provider: "anthropic" | "openai-codex"): Promise<{
+	start: Awaited<ReturnType<typeof oauthStart>>;
+	pending: PendingLogin;
+}> {
+	const pending: PendingLogin = { aborts: 0 };
+	const start = await oauthStart(provider, OFFLINE_FETCH, abortAwareModels(pending));
+	activeFlows.set(start.flowId, provider);
+	return { start, pending };
+}
+
+async function settleCancelledLogins(): Promise<void> {
+	for (let i = 0; i < 20; i++) await Promise.resolve();
+}
+
+async function cancelActiveFlows(): Promise<void> {
+	for (const [flowId, provider] of activeFlows) oauthCancel(flowId, provider);
+	activeFlows.clear();
+	await settleCancelledLogins();
+}
+
+afterEach(cancelActiveFlows);
 
 describe("oauthComplete — input validation", () => {
 	it("unknown flowId → 'Unknown or expired flow ID'", async () => {
@@ -32,26 +87,36 @@ describe("oauthComplete — input validation", () => {
 		assert.deepEqual(res, { success: false, error: "Unknown or expired flow ID" });
 	});
 
-	// The empty-code branch lives downstream of the flow lookup. We can't
-	// register a real flow without an upstream provider, but the flow lookup
-	// fails first for unknown ids. We therefore monkey-patch `pendingFlows`
-	// indirectly by starting an Anthropic flow (no network for the start
-	// path — only PKCE crypto), then attempting to complete it with empty/
-	// whitespace codes. The Anthropic branch ALSO enforces "code required"
-	// on empty/whitespace, mirroring the external-provider branch.
-	it("empty authCode for a real flow → 'code required'", async () => {
-		const { oauthStart } = await import("../../src/server/auth/oauth.js");
-		const start = await oauthStart("anthropic");
+	it("empty authCode for a real Codex flow → 'code required' and cancels the interaction", async () => {
+		const { start, pending } = await startFlow("openai-codex");
 		assert.ok(start.flowId, "flow id should be returned");
 
-		const res1 = await oauthComplete(start.flowId, "");
-		assert.deepEqual(res1, { success: false, error: "code required" });
+		const res = await oauthComplete(start.flowId, "");
+		assert.deepEqual(res, { success: false, error: "code required" });
+		assert.equal(pending.aborts, 1, "empty completion must cancel the pending OAuth interaction");
 	});
 
-	it("whitespace-only authCode for a real flow → 'code required'", async () => {
-		const { oauthStart } = await import("../../src/server/auth/oauth.js");
-		const start = await oauthStart("anthropic");
+	it("whitespace-only authCode for a real Codex flow → 'code required' and cancels the interaction", async () => {
+		const { start, pending } = await startFlow("openai-codex");
 		const res = await oauthComplete(start.flowId, "   \t\n  ");
 		assert.deepEqual(res, { success: false, error: "code required" });
+		assert.equal(pending.aborts, 1, "whitespace completion must cancel the pending OAuth interaction");
+	});
+
+	it("isolates Anthropic lease cleanup to its focused cancellation lifecycle", async () => {
+		// Reset the test-only lifecycle before acquiring this process-local lease,
+		// then reset it again in finally so this focused assertion cannot leak.
+		stopFlowCleanup();
+		try {
+			const { start, pending } = await startFlow("anthropic");
+			assert.deepEqual(await oauthComplete(start.flowId, ""), { success: false, error: "code required" });
+			assert.equal(pending.aborts, 1, "empty completion must cancel the Anthropic interaction");
+
+			const retry = await startFlow("anthropic");
+			assert.ok(retry.start.flowId, "cancellation must release the Anthropic lease for an immediate retry");
+		} finally {
+			await cancelActiveFlows();
+			stopFlowCleanup();
+		}
 	});
 });

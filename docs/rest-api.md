@@ -1108,11 +1108,15 @@ The key is used only for a one-off minimal completion probe (`"Reply with: OK"`)
 Responses:
 
 - `200 { ok: true, modelResolved, latencyMs }` — success.
-- `200 { ok: false, modelResolved, latencyMs, error }` — a direct AIGW Responses/completions probe reached an upstream or transport failure.
 - `400 { ok: false, error }` — pref is missing or could not be parsed as `provider/modelId`.
 - `404 { ok: false, error: "Model \"...\" is not in the current available-models list..." }` — pref does not resolve against `/api/models`.
-- `502 { ok: false, modelResolved, latencyMs, error }` — a pi-ai-backed provider/native-API probe failed.
+- `401` or `403` `{ ok: false, modelResolved, latencyMs, error, status, code: "authentication_failed" }` — a trusted upstream authentication failure.
+- `404` `{ ok: false, modelResolved, latencyMs, error, status: 404, code: "model_not_found" }` — a trusted upstream model-specific failure.
+- `429` `{ ok: false, modelResolved, latencyMs, error, status: 429, code: "rate_limited" }` — a trusted upstream rate, quota, or spend-limit failure.
+- `502 { ok: false, modelResolved, latencyMs, error }` — an unclassified provider, transport, or timeout failure.
 - `500 { ok: false, error }` — unexpected model discovery or probe setup failure.
+
+For provider-native paths, classification accepts only a status prefix emitted by Pi; it never scans provider-controlled error text. Direct AI Gateway paths classify the observed HTTP status. The three classified outcomes are intentionally distinct: a `404` does not establish an authentication cause, and a `429` does not establish model availability.
 
 Used by the Settings → Models tab per-row Test button. See [AI Gateway routing — Model probes](ai-gateway-routing.md#model-probes) and [Debugging](debugging.md#reviewnaming-model-mismatch-under-ai-gateway).
 
@@ -1137,33 +1141,39 @@ Provider-aware. Bobbit can hold OAuth credentials for several providers concurre
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/oauth/status?provider=<id>` | OAuth status for one provider. Returns `{ provider, authenticated, expires?, email? }`. |
-| `POST` | `/api/oauth/start` | Begin an OAuth flow for a provider. Body: `{ provider }`. Returns `{ provider, flowId, url, callbackServer?, instructions? }`. |
-| `POST` | `/api/oauth/complete` | Exchange `code` for tokens. Body: `{ flowId, code }`. Returns `{ success: true }` (200) or `{ success: false, error }` (400). |
-| `GET` | `/api/oauth/flow-status?flowId=<id>&provider=<id>` | Poll an in-flight flow. Returns `{ complete, error? }`. |
-| `POST` | `/api/oauth/logout` | Revoke/clear one provider's stored credential. Body: `{ provider }`. Returns `{ success, provider }`, never echoing token material. |
+| `GET` | `/api/oauth/status?provider=<id>` | OAuth status for one provider. Returns provider-safe authentication, storage, rejection, refreshability, expiry, and permitted display metadata. |
+| `POST` | `/api/oauth/start` | Begin an OAuth flow. Body: `{ provider }`. Returns `{ provider, flowId, url, callbackServer?, instructions? }`. Anthropic contention returns actionable retry metadata. |
+| `POST` | `/api/oauth/complete` | Submit a code, query string, or redirect URL to the provider-owned interaction. Body: `{ flowId, code, provider? }`. Returns `{ success: true }` or `{ success: false, error }`. |
+| `POST` | `/api/oauth/cancel` | Cancel one provider-scoped flow. Body: `{ flowId, provider }`. Waits for Pi callback/token-exchange settlement before reporting success. |
+| `POST` | `/api/oauth/finalize` | Accept a completed provider-scoped flow without rolling back its issued credential. Body: `{ flowId, provider }`. |
+| `GET` | `/api/oauth/flow-status?flowId=<id>&provider=<id>` | Poll a flow. Returns `{ complete, error? }`; `provider` is recommended for provider isolation. |
+| `POST` | `/api/oauth/logout` | Revoke/clear one provider's stored OAuth credential or rejection tombstone. Body: `{ provider }`. Returns `{ success, provider }`, never echoing token material. |
 
-**Provider IDs:** `anthropic` (Claude.ai login → API key/refresh token), `openai-codex` (ChatGPT subscription → bearer token), and `google-gemini-cli` (Google account → Gemini Code Assist bearer token). Provider validation is performed by the `normalizeProvider` helper in `src/server/auth/oauth.ts`; for the Google path it also accepts the inbound aliases `google` and `gemini` and collapses them to canonical `google-gemini-cli` (plain `google` stays the Google AI Studio API-key provider elsewhere). An unsupported value causes the surrounding endpoint to throw, which the server wraps as `400 { error: "<thrown message>" }` (e.g. `"Error: Unsupported OAuth provider: foo"` for status, or `500` for start). The error string is implementation-defined — callers should treat any 4xx with an `error` field as "unknown provider". See [Google OAuth & Gemini models](google-oauth-models.md) for the full account-vs-API-key split.
+**Provider IDs:** `anthropic` (Claude account → renewable OAuth credential), `openai-codex` (ChatGPT subscription → bearer token), and `google-gemini-cli` (Google account → Gemini Code Assist bearer token). Provider validation is performed by the `normalizeProvider` helper in `src/server/auth/oauth.ts`; for the Google path it also accepts the inbound aliases `google` and `gemini` and collapses them to canonical `google-gemini-cli` (plain `google` stays the Google AI Studio API-key provider elsewhere). An unsupported value causes the surrounding endpoint to throw, which the server wraps as `400 { error: "<thrown message>" }` (e.g. `"Error: Unsupported OAuth provider: foo"` for status, or `500` for start). The error string is implementation-defined — callers should treat any 4xx with an `error` field as "unknown provider". See [Google OAuth & Gemini models](google-oauth-models.md) for the full account-vs-API-key split.
 
 **Why `provider` everywhere:** the same browser-redirect callback URL is shared between providers, and a user may legitimately have flows in flight for both at once. Keying every operation by `provider` (alongside `flowId`) keeps state strictly partitioned and lets the UI render Settings → Account as parallel rows that can be (re-)authed independently.
 
-**Current auth boundary:** Google OAuth is implemented natively in Bobbit with PKCE and feeds
-the Code Assist provider extension; authenticated account models are available for normal
-session selection. OpenAI Codex constructs Pi's `Models` service with `builtinModels()` and
-calls `Models.login("openai-codex", "oauth", interaction)` using an `AuthInteraction`. Bobbit
-does not use Pi's removed `getOAuthProvider` or `OAuthLoginCallbacks` contracts. See
+**Current auth boundary:** Anthropic constructs Pi's public `Models` service with Bobbit's
+Pi-compatible credential-store adapter and calls `Models.login("anthropic", "oauth", interaction)`.
+Pi owns the current authorization parameters, scopes, loopback callback, callback-state
+validation, token exchange, and refresh contract. Google OAuth is implemented natively in Bobbit
+with PKCE and feeds the Code Assist provider extension; authenticated account models are
+available for normal session selection. OpenAI Codex constructs Pi's `Models` service with
+`builtinModels()` and calls `Models.login("openai-codex", "oauth", interaction)` using an
+`AuthInteraction`. Bobbit does not use Pi's removed `getOAuthProvider` or
+`OAuthLoginCallbacks` contracts. See [Anthropic OAuth](anthropic-oauth.md) and
 [Pi runtime compatibility](pi-runtime-compatibility.md#openai-codex-oauth-migration).
 
 **`GET /api/oauth/status?provider=<id>`** responses:
 
-- `200 { provider: "anthropic", authenticated: true, expires: 1775812345000 }` — credential present and not expired.
-- `200 { provider: "anthropic", authenticated: false, expires: 1700000000000 }` — a stored credential exists, but its expiry timestamp is in the past.
-- `200 { provider: "anthropic", authenticated: false }` — no stored credential, or no confident expiry timestamp is available.
+- `200 { provider: "anthropic", authenticated: true, expires }` — a current credential is usable.
+- `200 { provider: "anthropic", authenticated: false, stored: true, refreshable: true, expires }` — a complete Anthropic row is expired. It remains stored for Pi's lazy refresh, but is not presented as an authenticated login until refresh succeeds.
+- `200 { provider: "anthropic", authenticated: false, stored: true, rejected: true, refreshable: false, expires? }` — this exact OAuth credential was definitively rejected. The row is a non-secret tombstone or fenced equivalent and can be removed through provider-scoped logout; it cannot be refreshed or treated as authenticated.
+- `200 { provider: "anthropic", authenticated: false, stored: true, refreshable: false, expires? }` — an incomplete persisted Anthropic OAuth row. It is visible for cleanup but is not a valid Pi credential.
+- `200 { provider: "anthropic", authenticated: false }` — no stored credential.
 - `400 { error: "<message>" }` — provider value rejected by `normalizeProvider`.
 
-The response intentionally does **not** echo the bearer token / API key — strict-OAuth contract.
-
-The `email?` field appears only for providers that capture non-secret account display metadata (currently `google-gemini-cli`); it is never a token.
+`stored`, `rejected`, and `refreshable` are omitted when they add no state beyond a current credential or absent row. The response intentionally does **not** echo bearer tokens, refresh tokens, or API keys. The `email?` field appears only for providers that capture non-secret account display metadata (currently `google-gemini-cli`).
 
 #### Client expiry reminders
 
@@ -1190,17 +1200,27 @@ Only provider ids, friendly labels, and expiry timestamps participate in this cl
 ```
 
 - `url`: opens in a system browser; the provider's redirect lands on Bobbit's callback handler.
-- `callbackServer`: `true` for OAuth providers that complete via an embedded/loopback callback server (e.g. `openai-codex`, and `google-gemini-cli` via a loopback server on `http://localhost:<ephemeral-port>/oauth2callback`); `false`/absent for providers that require the user to paste the returned `code` back into the UI (e.g. `anthropic`). The Google flow also accepts the manual paste path for remote-gateway setups where the browser cannot reach the gateway loopback.
+- `callbackServer`: `true` for the Pi-backed Anthropic and OpenAI Codex loopback flows, and for `google-gemini-cli` via a loopback server on `http://localhost:<ephemeral-port>/oauth2callback`. Anthropic uses Pi's fixed loopback callback contract. The manual-complete route remains available for remote browser/gateway arrangements: its `code` field may carry a code, query string, or redirect URL, and Pi validates callback state before exchange. The Google flow also accepts the manual paste path when the browser cannot reach the gateway loopback.
 - `instructions`: optional human-readable string the UI may render alongside the URL.
 
-**`POST /api/oauth/complete`** body: `{ flowId, code }` (the stored flow already knows its provider, so the body does not repeat it). Returns:
+**`POST /api/oauth/complete`** body: `{ flowId, code, provider? }`. The optional provider is a defence-in-depth match against the stored flow; a mismatch is indistinguishable from an unknown flow. Anthropic delegates parsing of a bare code, query string, or full redirect URL and callback-state validation to Pi. Returns:
 
-- `200 { success: true }` — token stored.
+- `200 { success: true }` — token stored; a completed flow remains briefly addressable so a lost success response can be finalized or explicitly cancelled.
 - `400 { error: "Missing flowId or code" }` — either field missing or empty.
 - `400 { success: false, error: "code required" }` — `code` empty / whitespace-only after the trim check.
-- `400 { success: false, error: "Unknown or expired flow ID" }` — the `flowId` was never created or has been garbage-collected.
+- `400 { success: false, error: "Unknown or expired flow ID" }` — the `flowId` was never created, was garbage-collected, or did not match the supplied provider.
 - `400 { success: false, error: "OAuth flow expired" }` — the flow exceeded its TTL.
 - `400 { success: false, error: "<provider message>" }` — token-exchange or login-promise rejection. Body always includes `success: false` for non-200 responses from `oauthComplete`; raw thrown exceptions are surfaced as `500 { error: "<message>" }` with no `success` field.
+
+**`POST /api/oauth/cancel`** body: `{ flowId, provider }`. Cancellation is provider-scoped; an unknown or cross-provider flow returns `404 { success: false, error: "Unknown or expired flow ID" }`. Anthropic uses Pi's loopback callback, so the route waits for Pi's cancellation and any callback/token-exchange settlement before it reports success. A successful response means an immediate replacement login can start safely.
+
+- `200 { success: true }` — the flow is cancelled and any safe rollback has completed.
+- `400 { error: "Missing flowId" | "Missing provider" }` — required input missing.
+- `503 { error: "OAuth cancellation did not complete. Retry cancellation before starting another sign-in.", code: "OAUTH_CANCEL_RETRY_REQUIRED", retryable: true, flowId }` — durable cleanup failed. Retry cancellation with the same provider and flow id; do not start another Anthropic login first.
+
+Only one Pi-backed Anthropic flow can hold the fixed callback-port lease. A conflicting `POST /api/oauth/start` returns `409 { code: "ANTHROPIC_OAUTH_BUSY", retryable: true, error }`; cancel the in-flight flow or wait for it to settle, then retry. While a cancellation retry is required, a replacement Anthropic start returns `409` with `code: "OAUTH_CANCEL_RETRY_REQUIRED"`, `retryable: true`, and the blocking `flowId`.
+
+**`POST /api/oauth/finalize`** body: `{ flowId, provider }`. Call this only after accepting a completed result; it removes the short acknowledgement window without rolling back the credential. It returns `200 { success: true }`, `400 { error: "Missing flowId or provider" }`, or `404 { success: false, error: "Unknown or expired flow ID" | "OAuth flow is not complete" }`.
 
 **`GET /api/oauth/flow-status?flowId=<id>&provider=<id>`** is the polling endpoint used by the Settings → Account UI while the user is in the browser. Returns:
 
@@ -1218,9 +1238,10 @@ or on success / failure:
 Response contract:
 
 - `complete: boolean` — `false` while the flow is still pending, `true` once the provider's callback has resolved (regardless of success).
-- `error?: string` — present only when the flow failed (or when the `flowId` is unknown / cross-provider mismatched, in which case the body is `{ complete: false, error: "flow not found" }` with HTTP 404).
+- `error?: string` — present when the flow failed, expired, was cancelled, or is unknown/cross-provider mismatched. Unknown and cross-provider flows return `{ complete: false, error: "flow not found" }` with HTTP 404.
 - HTTP 400 `{ error: "Missing flowId" }` if `flowId` query param is absent.
-- HTTP 404 `{ complete: false, error: "flow not found" }` if the `flowId` is unknown, expired, **or** belongs to a different provider than the supplied `provider` query param.
+- HTTP 404 `{ complete: false, error: "flow not found" }` if the `flowId` is unknown or belongs to a different provider than the supplied `provider` query param.
+- `200 { complete: false, error: "OAuth flow expired" }` when a known flow exceeds its TTL; callers may begin a new flow after its cleanup settles.
 
 `provider` is recommended as a defence-in-depth check: if the stored flow's provider does not match the query parameter, the endpoint returns `404 { error: "flow not found" }` instead of leaking status across providers. The primary key is still `flowId`; the provider check just guarantees that a flow ID accidentally polled with the wrong provider cannot be used to confirm its existence.
 

@@ -46,7 +46,7 @@ import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { executeCleanupWorktreesRequest } from "./maintenance/cleanup-worktrees-request.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { readToken, validateToken } from "./auth/token.js";
-import { oauthComplete, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus } from "./auth/oauth.js";
+import { OAuthBusyError, getOAuthCredentialStore, oauthCancelAndWait, oauthComplete, oauthFinalize, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus, shutdownOAuthFlows } from "./auth/oauth.js";
 import { handleWebSocketConnection } from "./ws/handler.js";
 import type { GateResetReopenOutcome, ServerMessage } from "./ws/protocol.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
@@ -552,6 +552,7 @@ import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, findSessionSelectableModel } from "./agent/model-registry.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
+import { modelProbeFailure, modelProbeFailureFromHttpStatus } from "./agent/model-probe-result.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels } from "./agent/image-generation.js";
 import {
@@ -2744,6 +2745,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// Expose bg process manager for API routes and session cleanup
 	(sessionManager as any).bgProcessManager = bgProcessManager;
 	const rateLimiter = new RateLimiter();
+	// A failed Anthropic cancellation leaves an addressable flow in the OAuth
+	// adapter. Keep its ID at the REST boundary so a new browser dialog cannot
+	// start another flow before retrying durable cleanup for that exact flow.
+	const oauthCancellationRetryState: { anthropicFlowId?: string } = {};
 
 	const cleanupInterval = gatewayDeps.clock.setInterval(() => {
 		rateLimiter.cleanup();
@@ -2929,7 +2934,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -3926,6 +3931,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				triggerEngine.stop();
 				inboxNudger.stop();
 				wss.close();
+				// Pi's Anthropic callback and exchange outlive the HTTP server. Abort
+				// and await them before tearing down stores or allowing restart.
+				await phase("oauth-flows", () => shutdownOAuthFlows());
 				if (bootBackgroundTask) {
 					await phase("boot-background", () => bootBackgroundTask!);
 				}
@@ -4157,6 +4165,7 @@ async function handleApiRoute(
 	fsImpl?: FsLike,
 	clock?: Clock,
 	withPreviewSessionOperation: PreviewSessionOperation = async (_sessionId, operation) => operation(),
+	oauthCancellationRetryState: { anthropicFlowId?: string } = {},
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -4783,8 +4792,18 @@ async function handleApiRoute(
 	// POST /api/shutdown — graceful shutdown (used by coverage teardown to flush V8 coverage)
 	if (url.pathname === "/api/shutdown" && req.method === "POST") {
 		json({ status: "shutting down" });
-		// Defer exit to allow the response to be sent
-		setTimeout(() => process.exit(0), 500);
+		// Defer exit to allow the response to be sent, then settle Pi's callback
+		// and token exchange just as orderly gateway shutdown does.
+		setTimeout(async () => {
+			try {
+				await shutdownOAuthFlows();
+			} catch (error) {
+				// Cleanup failures must not strand the process after acknowledging shutdown.
+				try { console.warn("[shutdown] OAuth flow cleanup failed:", error); } catch { /* best-effort */ }
+			} finally {
+				process.exit(0);
+			}
+		}, 500);
 		return;
 	}
 
@@ -10143,6 +10162,11 @@ async function handleApiRoute(
 			json({ error: "Missing 'key' field" }, 400);
 			return;
 		}
+		// Pi intentionally refuses ambient keys while its raw auth file contains an
+		// unknown credential type. A rejected OAuth tombstone is such a type, so an
+		// explicit saved Anthropic key is a user-directed recovery action: remove
+		// only the rejected row, never a healthy OAuth account credential.
+		if (provider === "anthropic") await getOAuthCredentialStore().deleteRejectedOAuthCredential(provider);
 		preferencesStore.set(`providerKey.${provider}`, body.key);
 		json({ ok: true });
 		return;
@@ -10338,16 +10362,18 @@ async function handleApiRoute(
 				}
 				const latencyMs = Date.now() - started;
 				if (!resp.ok) {
-					const errText = (await resp.text().catch(() => "")).slice(0, 300);
-					json({ ok: false, modelResolved, latencyMs, error: `Gateway ${resp.status}: ${errText || resp.statusText}` });
+					// Provider error bodies can echo credentials. The response status was observed
+					// directly, so map it without parsing any provider-controlled response text.
+					const result = modelProbeFailureFromHttpStatus(resp.status, { modelResolved, latencyMs });
+					json(result, result.status || 502);
 					return;
 				}
 				// Best-effort parse; we don't require specific text content—just a successful round-trip.
 				await resp.json().catch(() => ({}));
 				json({ ok: true, modelResolved, latencyMs });
-			} catch (err: any) {
-				const latencyMs = Date.now() - started;
-				json({ ok: false, modelResolved: modelId, latencyMs, error: err?.message || "Request failed" });
+			} catch (err: unknown) {
+				const result = modelProbeFailure(err, { modelResolved: modelId, latencyMs: Date.now() - started });
+				json(result, result.status || 502);
 			}
 		} catch (err: any) {
 			jsonError(500, err, { ok: false, error: err?.message || "Test failed" });
@@ -14063,10 +14089,78 @@ async function handleApiRoute(
 	if (url.pathname === "/api/oauth/start" && req.method === "POST") {
 		try {
 			const body = await readBody(req).catch(() => ({}));
+			// The retry marker is process-local while the browser can outlive a TTL
+			// sweep or gateway restart. Reconcile its exact flow first: an unknown
+			// flow is already terminal and must not wedge all future starts, but a
+			// still-addressable cleanup failure remains explicitly actionable.
+			if ((body?.provider === undefined || body?.provider === "anthropic") && oauthCancellationRetryState.anthropicFlowId) {
+				const retryFlowId = oauthCancellationRetryState.anthropicFlowId;
+				const retryStatus = oauthFlowStatus(retryFlowId, "anthropic");
+				if (retryStatus.error === "flow not found") {
+					oauthCancellationRetryState.anthropicFlowId = undefined;
+				} else {
+					json({
+						error: "OAuth cancellation did not complete. Retry cancellation before starting another sign-in.",
+						code: "OAUTH_CANCEL_RETRY_REQUIRED",
+						retryable: true,
+						flowId: retryFlowId,
+					}, 409);
+					return;
+				}
+			}
 			const result = await oauthStart(body?.provider);
 			json(result);
 		} catch (err) {
-			jsonError(500, err);
+			if (err instanceof OAuthBusyError) {
+				json({ error: err.message, code: err.code, retryable: err.retryable }, err.statusCode);
+			} else {
+				jsonError(500, err);
+			}
+		}
+		return;
+	}
+
+	// POST /api/oauth/cancel — abandon only the caller's provider-scoped flow.
+	if (url.pathname === "/api/oauth/cancel" && req.method === "POST") {
+		const body = await readBody(req).catch(() => ({}));
+		if (!body?.flowId || typeof body.flowId !== "string") {
+			json({ error: "Missing flowId" }, 400);
+			return;
+		}
+		if (!body?.provider || typeof body.provider !== "string") {
+			json({ error: "Missing provider" }, 400);
+			return;
+		}
+		try {
+			// Resolve only after Pi has settled its cancelled callback exchange and
+			// released the provider lease, so an immediate UI retry cannot race it.
+			const result = await oauthCancelAndWait(body.flowId, body.provider);
+			if (!result.success) {
+				// A stale browser retry can arrive after TTL cleanup or a gateway
+				// restart. Preserve the honest 404 response, but drop only its matching
+				// in-memory blocker so a later start is not permanently wedged.
+				if (body.provider === "anthropic"
+					&& result.error === "Unknown or expired flow ID"
+					&& oauthCancellationRetryState.anthropicFlowId === body.flowId) {
+					oauthCancellationRetryState.anthropicFlowId = undefined;
+				}
+				json(result, 404);
+				return;
+			}
+			if (body.provider === "anthropic" && oauthCancellationRetryState.anthropicFlowId === body.flowId) {
+				oauthCancellationRetryState.anthropicFlowId = undefined;
+			}
+			json(result);
+		} catch {
+			// Do not expose a credential-store or provider failure. The retained ID
+			// makes this a bounded, actionable retry instead of an opaque 500.
+			if (body.provider === "anthropic") oauthCancellationRetryState.anthropicFlowId = body.flowId;
+			json({
+				error: "OAuth cancellation did not complete. Retry cancellation before starting another sign-in.",
+				code: "OAUTH_CANCEL_RETRY_REQUIRED",
+				retryable: true,
+				flowId: body.flowId,
+			}, 503);
 		}
 		return;
 	}
@@ -14079,11 +14173,23 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const result = await oauthComplete(body.flowId, body.code);
+			const result = await oauthComplete(body.flowId, body.code, body.provider);
 			json(result, result.success ? 200 : 400);
 		} catch (err) {
 			jsonError(500, err);
 		}
+		return;
+	}
+
+	// POST /api/oauth/finalize — accept a completed flow without rolling it back.
+	if (url.pathname === "/api/oauth/finalize" && req.method === "POST") {
+		const body = await readBody(req).catch(() => ({}));
+		if (!body?.flowId || typeof body.flowId !== "string" || !body?.provider || typeof body.provider !== "string") {
+			json({ error: "Missing flowId or provider" }, 400);
+			return;
+		}
+		const result = oauthFinalize(body.flowId, body.provider);
+		json(result, result.success ? 200 : 404);
 		return;
 	}
 

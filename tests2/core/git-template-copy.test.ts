@@ -5,6 +5,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import {
 	commitInitialFixture,
 	copyGitTemplate,
+	createGitTemplateEnvironment,
 	prepareGitTemplate,
 	type GitTemplateCommandRunner,
 } from "../harness/git-template.js";
@@ -13,6 +14,30 @@ const root = mkdtempSync(join(tmpdir(), "bb-git-template-test-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 describe("setup-prepared git template", () => {
+	it("removes inherited Git repository state before fixture bootstrap", () => {
+		const home = join(root, "isolated-home");
+		const env = createGitTemplateEnvironment(home, {
+			PATH: "fixture-path",
+			GIT_DIR: "/shared/repository/.git",
+			GIT_WORK_TREE: "/shared/repository",
+			GIT_COMMON_DIR: "/shared/repository/.git",
+			GIT_INDEX_FILE: "/shared/repository/.git/index",
+			GIT_OBJECT_DIRECTORY: "/shared/repository/.git/objects",
+			GIT_CONFIG_COUNT: "1",
+			git_alternate_object_directories: "/shared/objects",
+		});
+
+		expect(env.PATH).toBe("fixture-path");
+		expect(Object.keys(env).filter(name => name.toUpperCase().startsWith("GIT_"))).toEqual([
+			"GIT_CONFIG_NOSYSTEM",
+			"GIT_CONFIG_GLOBAL",
+			"GIT_TERMINAL_PROMPT",
+			"GIT_ASKPASS",
+			"GIT_EDITOR",
+		]);
+		expect(env.GIT_CONFIG_GLOBAL).toBe(join(home, "gitconfig"));
+	});
+
 	it("reuses the configured master repository prepared before the spawn guard", async () => {
 		const first = await prepareGitTemplate();
 		const second = await prepareGitTemplate();

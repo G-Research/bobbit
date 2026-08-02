@@ -4,9 +4,9 @@
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
   "censusTotal": 1138,
   "buckets": {
-    "daily": 62,
+    "daily": 63,
     "v2-browser": 216,
-    "v2-core": 513,
+    "v2-core": 512,
     "v2-dom": 144,
     "v2-integration": 203
   },
@@ -15,7 +15,7 @@
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
-    "relocate": 47,
+    "relocate": 48,
     "rewrite": 145,
     "vitest-e2e": 2
   },
@@ -23,6 +23,97 @@
     {
       "path": "tests2/browser/e2e/app-boot-authenticated.spec.ts",
       "reason": "Focused browser E2E regression for token-query startup: a valid isolated gateway token must transfer into local storage, clear from the URL, and leave the landing route in the authenticated shell without a retry.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/extension-host-module-memory-isolation.test.ts",
+      "reason": "Exact-registered partition of the ModuleHost resource-limit coverage so its deliberate 16 MB worker OOM cannot share a Vitest parent fork with the remaining concurrent worker-thread fan-out.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "isolated",
+        "reason": "Deliberately OOMs a ModuleHost worker under a 16 MB old-generation limit and must own a dedicated isolated Vitest fork."
+      }
+    },
+    {
+      "path": "tests2/core/anthropic-oauth-adapter.test.ts",
+      "reason": "Credential-free regression coverage pinning Pi's current Anthropic OAuth URL, scopes, callback validation, token exchange, refresh, and the public Models/AuthInteraction adapter boundary.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/anthropic-oauth-persistence.test.ts",
+      "reason": "Credential-free regression coverage for restart-visible refreshable status, provider-isolated refresh rotation, and redacted failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/anthropic-oauth-credential-store.test.ts",
+      "reason": "Credential-free regression coverage for provider-isolated atomic credential writes, canonical Pi lock coordination, fresh reads, malformed-write protection, and restrictive persistence permissions.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/anthropic-oauth-pi-callback-contract-repro.test.ts",
+      "reason": "Focused failing-first Anthropic OAuth regression pinning Pi's loopback callback and complete current authorization scope set, so the stale Console callback and reduced legacy scope contract cannot return.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/anthropic-direct-request-regression.test.ts",
+      "reason": "Credential-free regressions for direct role-name and title Anthropic requests, pinning API-key and Pi OAuth identities, model selection, refresh retry, and sanitized upstream failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/anthropic-model-probe-regression.test.ts",
+      "reason": "Credential-free model-completion and probe regressions preserving Anthropic API-key selection plus distinct, redacted model-not-found, authentication, and rate-limit outcomes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/anthropic-sandbox-handoff-regression.test.ts",
+      "reason": "Credential-free sandbox handoff regressions ensuring only a current minimal Anthropic OAuth entry is exported and expired credentials refresh before export.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/anthropic-oauth-lifecycle.test.ts",
+      "reason": "Real gateway lifecycle coverage with a runtime-only mock Anthropic token provider: typed busy contention, provider-scoped cancel and immediate retry, Pi-backed completion, status/logout isolation, and rejected-credential removal without credential-bearing output.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/anthropic-oauth.journey.spec.ts",
+      "reason": "Chromium journey through real OAuth start, cancel, retry, completion, reload, and logout routes with a runtime-only mock token provider, proving provider isolation and credential-free UI output.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
@@ -1336,7 +1427,43 @@
     },
     {
       "path": "tests2/browser/journeys/goal-team-gates.journey.spec.ts",
-      "reason": "v2 browser smoke journey — multi-feature integration test, no legacy equivalent.",
+      "reason": "Goal dashboard navigation, title/sidebar rendering, and direct goal API smoke.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/goal-team-gates-plan.journey.spec.ts",
+      "reason": "Independent plan-tab gate-state browser journey split from goal-team-gates to stay below the strict 60-second per-spec wall cap.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/goal-team-gates-verification.journey.spec.ts",
+      "reason": "Independent gate-verification projection and stale-reconcile browser journey split from goal-team-gates to stay below the strict 60-second per-spec wall cap.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/goal-team-gates-signoff.journey.spec.ts",
+      "reason": "Independent gate-card human sign-off handoff browser journey split from goal-team-gates to stay below the strict 60-second per-spec wall cap.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/goal-team-gates-reset.journey.spec.ts",
+      "reason": "Independent completed-goal gate-reset cross-tab reconciliation browser journey split from goal-team-gates to stay below the strict 60-second per-spec wall cap.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
@@ -1946,6 +2073,22 @@
       "type": "smoke-journey"
     },
     {
+      "path": "tests2/browser/journeys/goal-team-gates-plan.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/goal-team-gates-verification.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/goal-team-gates-signoff.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/goal-team-gates-reset.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
       "path": "tests2/browser/journeys/marketplace-packs.journey.spec.ts",
       "type": "smoke-journey"
     },
@@ -1962,7 +2105,15 @@
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/project-onboarding-repositories.journey.spec.ts",
+      "path": "tests2/browser/journeys/project-onboarding-multi-repo-subset.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/project-onboarding-post-archive.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/project-onboarding-select-all.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
@@ -6117,9 +6268,9 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding-repositories.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-multi-repo-subset.journey.spec.ts"
       ],
-      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
+      "replacementNote": "Dedicated journey preserves the selected-subset autoPrompt assertions and cleanup."
     },
     {
       "file": "tests/e2e/ui/add-project-post-archive.spec.ts",
@@ -6127,9 +6278,9 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding-repositories.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-post-archive.journey.spec.ts"
       ],
-      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
+      "replacementNote": "Dedicated journey preserves the ghost .bobbit archive-CTA assertions and cleanup."
     },
     {
       "file": "tests/e2e/ui/add-project-preflight.spec.ts",
@@ -6147,9 +6298,9 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-project-onboarding.",
       "replacement": [
-        "tests2/browser/journeys/project-onboarding-repositories.journey.spec.ts"
+        "tests2/browser/journeys/project-onboarding-select-all.journey.spec.ts"
       ],
-      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
+      "replacementNote": "Dedicated journey preserves the selected-count assertions and cleanup."
     },
     {
       "file": "tests/e2e/ui/add-project-symlink.spec.ts",
@@ -6490,9 +6641,9 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E (Issue #1 slim gate-list projection) â€” consolidated into journey-goal-team-gates with behavioral assertions (list strips inline output; detail retains it).",
       "replacement": [
-        "tests2/browser/journeys/goal-team-gates.journey.spec.ts"
+        "tests2/browser/journeys/goal-team-gates-verification.journey.spec.ts"
       ],
-      "replacementNote": "ported as behavioral assertions in the goal-team-gates journey"
+      "replacementNote": "ported as behavioral assertions in the goal-team-gates-verification journey"
     },
     {
       "file": "tests/e2e/ui/gate-verification-stale-reconcile.spec.ts",
@@ -6500,9 +6651,9 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E (Issue #2 stale-reconcile) â€” alive-path baseline consolidated into journey-goal-team-gates; the source spec's stale-death scenario is test.fixme (needs an un-built server death hook).",
       "replacement": [
-        "tests2/browser/journeys/goal-team-gates.journey.spec.ts"
+        "tests2/browser/journeys/goal-team-gates-verification.journey.spec.ts"
       ],
-      "replacementNote": "alive-path baseline ported as a behavioral assertion; stale-death scenario remains fixme upstream"
+      "replacementNote": "alive-path baseline ported as a behavioral assertion in goal-team-gates-verification; stale-death scenario remains fixme upstream"
     },
     {
       "file": "tests/e2e/ui/gate-status-cross-surface.spec.ts",
@@ -6994,9 +7145,9 @@
       "file": "tests/e2e/ui/plan-tab-gate-status.spec.ts",
       "bucket": "v2-browser",
       "method": "legacy-pending",
-      "rationale": "Non-geometry browser E2E â€” consolidate into journey-goal-team-gates-verification.",
+      "rationale": "Non-geometry browser E2E â€” consolidated into the goal-team-gates-plan journey.",
       "replacement": [
-        "tests2/browser/journeys/goal-team-gates.journey.spec.ts"
+        "tests2/browser/journeys/goal-team-gates-plan.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -8574,8 +8725,7 @@
       "execution": {
         "runner": "vitest",
         "tier": "unit",
-        "project": "isolated",
-        "reason": "Spawns extension-host worker threads with module-scoped loader state."
+        "project": "core"
       }
     },
     {
@@ -16901,6 +17051,13 @@
       "method": "relocate",
       "replacement": [],
       "rationale": "Real npm pack and clean-consumer install/audit coverage for dependency-owned shrinkwrap resolution, aligned Pi versions, secure brace-expansion edges, version-conditional protobufjs findings, and bundled fd/rg execution."
+    },
+    {
+      "file": "tests/e2e/anthropic-oauth-restart-sandbox-lock.spec.ts",
+      "bucket": "daily",
+      "method": "relocate",
+      "replacement": [],
+      "rationale": "Real gateway crash/restart preserves an isolated Anthropic OAuth credential and direct mock-model authentication; its companion sandbox and stale-lock checks retain the same secure credential fixture."
     }
   ]
 }

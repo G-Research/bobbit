@@ -7,8 +7,11 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { refreshOAuthToken } from "../auth/oauth.js";
+import { invalidateRejectedAnthropicDirectCredential, refreshOAuthToken } from "../auth/oauth.js";
+import { isUsableAnthropicOAuthCredential } from "../auth/credential-store.js";
 import { globalAuthPath } from "../bobbit-dir.js";
+import { createAnthropicDirectHeaders, type AnthropicDirectCredentials } from "./anthropic-direct-request.js";
+import { sanitizeModelErrorText } from "./model-error-sanitizer.js";
 import { discoverAigwModels, normalizeAigwModelString } from "./aigw-manager.js";
 import { aigwUserAgentHeaders } from "./aigw-user-agent.js";
 import { completeModelText } from "./model-completion.js";
@@ -82,17 +85,14 @@ export interface TitleGenOptions {
 	availableModels?: ApiModel[] | (() => Promise<ApiModel[]>);
 	/** Test hook: performs the direct-model completion. */
 	directModelCompleter?: (model: ApiModel, args: { systemPrompt: string; userPrompt: string; maxTokens: number; thinkingLevel: "off" }) => Promise<string | null>;
+	/** Test hook for Pi-backed Anthropic OAuth token resolution. */
+	anthropicOAuthTokenResolver?: () => Promise<string | null>;
 	/** Runtime boundary flag for legacy BOBBIT_SKIP_TITLE_GEN behavior. */
 	skipTitleGeneration?: boolean;
 	fetchImpl?: typeof fetch;
 }
 
-interface AuthCredentials {
-	type: string;
-	access: string;
-	refresh?: string;
-	expires?: number;
-}
+type AuthCredentials = AnthropicDirectCredentials;
 
 function loadAuth(): AuthCredentials | null {
 	const authPath = globalAuthPath();
@@ -103,10 +103,28 @@ function loadAuth(): AuthCredentials | null {
 		const cred = data.anthropic;
 		if (!cred) return null;
 
-		if (cred.type === "oauth" && cred.access) return cred;
-		if (cred.type === "api-key" && cred.key) return { type: "api-key", access: cred.key };
+		// OAuth token selection and refresh belong to Pi's credential runtime;
+		// only inspect the credential kind here, never use the stored access token.
+		if (cred.type === "oauth" && isUsableAnthropicOAuthCredential(authPath, cred)) return { type: "oauth", access: "" };
+		if ((cred.type === "api-key" || cred.type === "api_key") && cred.key) return { type: "api-key", access: cred.key };
 		return null;
 	} catch {
+		return null;
+	}
+}
+
+function describeAnthropicFailure(status: number): string {
+	if (status === 404) return "model not found";
+	if (status === 401 || status === 403) return "authentication failed";
+	if (status === 429) return "rate or spend limit reached";
+	return `request failed (HTTP ${status})`;
+}
+
+async function resolveAnthropicOAuthToken(options?: TitleGenOptions): Promise<string | null> {
+	try {
+		return await (options?.anthropicOAuthTokenResolver ?? refreshOAuthToken)();
+	} catch (error) {
+		console.error(`[title-gen] Anthropic OAuth credential resolution failed: ${sanitizeModelErrorText(error)}`);
 		return null;
 	}
 }
@@ -333,36 +351,31 @@ async function generateViaConfiguredDirectModel(model: ApiModel, userPrompt: str
 		console.log(`[title-gen] Generated title: "${title}"`);
 		return title || null;
 	} catch (err) {
-		console.error(`[title-gen] Direct model "${model.provider}/${model.id}" failed:`, err);
+		console.error(`[title-gen] Direct model "${model.provider}/${model.id}" failed: ${sanitizeModelErrorText(err)}`);
 		return null;
 	}
 }
 
-async function generateViaAnthropic(preview: string, thinkingLevel?: string, modelId = DEFAULT_TITLE_MODEL, fetchImpl: typeof fetch = defaultFetch): Promise<string | null> {
+async function generateViaAnthropic(
+	preview: string,
+	thinkingLevel?: string,
+	modelId = DEFAULT_TITLE_MODEL,
+	fetchImpl: typeof fetch = defaultFetch,
+	options?: TitleGenOptions,
+): Promise<string | null> {
 	let auth = loadAuth();
 	if (!auth) return null;
 
-	if (auth.type === "oauth" && auth.expires && Date.now() > auth.expires) {
-		const newToken = await refreshOAuthToken();
-		if (newToken) {
-			auth = { ...auth, access: newToken };
-		} else {
-			console.error("[title-gen] Token expired and refresh failed");
+	if (auth.type === "oauth") {
+		const access = await resolveAnthropicOAuthToken(options);
+		if (!access) {
+			console.error("[title-gen] Anthropic OAuth credential could not be resolved");
 			return null;
 		}
+		auth = { ...auth, access };
 	}
 
-	const headers: Record<string, string> = {
-		"Content-Type": "application/json",
-		"anthropic-version": "2023-06-01",
-	};
-
-	if (auth.type === "oauth") {
-		headers["Authorization"] = `Bearer ${auth.access}`;
-		headers["anthropic-beta"] = "claude-code-20250219,oauth-2025-04-20";
-	} else {
-		headers["x-api-key"] = auth.access;
-	}
+	const headers = createAnthropicDirectHeaders(auth);
 
 	const coreInstruction = "Output a 2-3 word label for this conversation. MAXIMUM 3 words. Wrap the label in <title>…</title> tags, e.g. <title>Fix Login Bug</title>, <title>Redis Setup</title>, <title>CSV Parser</title>, <title>Dark Mode</title>. No quotes, no markdown, no explanation outside the tags. No emojis. Do NOT reason, think, or plan — emit the <title> tag as your very first tokens.";
 	const systemText = auth.type === "oauth"
@@ -397,25 +410,18 @@ async function generateViaAnthropic(preview: string, thinkingLevel?: string, mod
 	console.log(`[title-gen] Requesting title via ${modelId}…`);
 
 	try {
-		let response = await fetchImpl(ANTHROPIC_API_URL, {
+		const response = await fetchImpl(ANTHROPIC_API_URL, {
 			method: "POST",
 			headers,
 			body: JSON.stringify(body),
 		});
 
-		// On auth errors, try refreshing the token and retrying once
-		if (!response.ok && (response.status === 401 || response.status === 403) && auth.type === "oauth") {
-			console.warn(`[title-gen] Auth error ${response.status}, attempting token refresh...`);
-			const newToken = await refreshOAuthToken();
-			if (newToken) {
-				headers["Authorization"] = `Bearer ${newToken}`;
-				response = await fetchImpl(ANTHROPIC_API_URL, { method: "POST", headers, body: JSON.stringify(body) });
-			}
-		}
-
+		// Only a 401 proves the bearer credential failed; a 403 can be model or resource policy.
 		if (!response.ok) {
-			const errText = await response.text();
-			console.error(`[title-gen] API error ${response.status}: ${errText}`);
+			if (auth.type === "oauth" && response.status === 401) {
+				await invalidateRejectedAnthropicDirectCredential(auth.access);
+			}
+			console.error(`[title-gen] Anthropic ${describeAnthropicFailure(response.status)}`);
 			return null;
 		}
 
@@ -435,7 +441,7 @@ async function generateViaAnthropic(preview: string, thinkingLevel?: string, mod
 		console.log(`[title-gen] Generated title: "${title}"`);
 		return title || null;
 	} catch (err) {
-		console.error("[title-gen] Failed:", err);
+		console.error(`[title-gen] Anthropic request failed: ${sanitizeModelErrorText(err)}`);
 		return null;
 	}
 }
@@ -469,7 +475,7 @@ export async function generateSessionTitle(messages: any[], options?: TitleGenOp
 		// built-ins from the available-model registry. Preserve that established
 		// explicit-preference path rather than silently selecting an AIGW fallback.
 		if (configured?.provider === "anthropic") {
-			return generateViaAnthropic(preview, "off", configured.modelId, fetchImpl);
+			return generateViaAnthropic(preview, "off", configured.modelId, fetchImpl, options);
 		}
 		console.warn(`[title-gen] Naming model "${options.namingModel}" is not available; falling back`);
 	}
@@ -500,7 +506,7 @@ export async function generateSessionTitle(messages: any[], options?: TitleGenOp
 	}
 
 	// Legacy default: direct Anthropic API.
-	return generateViaAnthropic(preview, "off", DEFAULT_TITLE_MODEL, fetchImpl);
+	return generateViaAnthropic(preview, "off", DEFAULT_TITLE_MODEL, fetchImpl, options);
 }
 
 // ── Goal title summarization ──────────────────────────────────────────
@@ -556,31 +562,25 @@ async function generateGoalSummaryViaGateway(aigwUrl: string, modelId: string, g
 /**
  * Generate a 3-word summary of a goal title via direct Anthropic API.
  */
-async function generateGoalSummaryViaAnthropic(goalTitle: string, modelId = DEFAULT_TITLE_MODEL, fetchImpl: typeof fetch = defaultFetch): Promise<string | null> {
+async function generateGoalSummaryViaAnthropic(
+	goalTitle: string,
+	modelId = DEFAULT_TITLE_MODEL,
+	fetchImpl: typeof fetch = defaultFetch,
+	options?: TitleGenOptions,
+): Promise<string | null> {
 	let auth = loadAuth();
 	if (!auth) return null;
 
-	if (auth.type === "oauth" && auth.expires && Date.now() > auth.expires) {
-		const newToken = await refreshOAuthToken();
-		if (newToken) {
-			auth = { ...auth, access: newToken };
-		} else {
-			console.error("[title-gen] Token expired and refresh failed");
+	if (auth.type === "oauth") {
+		const access = await resolveAnthropicOAuthToken(options);
+		if (!access) {
+			console.error("[title-gen] Anthropic OAuth credential could not be resolved");
 			return null;
 		}
+		auth = { ...auth, access };
 	}
 
-	const headers: Record<string, string> = {
-		"Content-Type": "application/json",
-		"anthropic-version": "2023-06-01",
-	};
-
-	if (auth.type === "oauth") {
-		headers["Authorization"] = `Bearer ${auth.access}`;
-		headers["anthropic-beta"] = "claude-code-20250219,oauth-2025-04-20";
-	} else {
-		headers["x-api-key"] = auth.access;
-	}
+	const headers = createAnthropicDirectHeaders(auth);
 
 	const systemText = auth.type === "oauth"
 		? `You are Claude Code, Anthropic's official CLI for Claude. ${GOAL_SUMMARY_SYSTEM}`
@@ -601,25 +601,18 @@ async function generateGoalSummaryViaAnthropic(goalTitle: string, modelId = DEFA
 	console.log(`[title-gen] Requesting goal summary via ${modelId}…`);
 
 	try {
-		let response = await fetchImpl(ANTHROPIC_API_URL, {
+		const response = await fetchImpl(ANTHROPIC_API_URL, {
 			method: "POST",
 			headers,
 			body: JSON.stringify(body),
 		});
 
-		// On auth errors, try refreshing the token and retrying once
-		if (!response.ok && (response.status === 401 || response.status === 403) && auth.type === "oauth") {
-			console.warn(`[title-gen] Auth error ${response.status}, attempting token refresh...`);
-			const newToken = await refreshOAuthToken();
-			if (newToken) {
-				headers["Authorization"] = `Bearer ${newToken}`;
-				response = await fetchImpl(ANTHROPIC_API_URL, { method: "POST", headers, body: JSON.stringify(body) });
-			}
-		}
-
+		// Only a 401 proves the bearer credential failed; a 403 can be model or resource policy.
 		if (!response.ok) {
-			const errText = await response.text();
-			console.error(`[title-gen] API error ${response.status}: ${errText}`);
+			if (auth.type === "oauth" && response.status === 401) {
+				await invalidateRejectedAnthropicDirectCredential(auth.access);
+			}
+			console.error(`[title-gen] Anthropic ${describeAnthropicFailure(response.status)}`);
 			return null;
 		}
 
@@ -639,7 +632,7 @@ async function generateGoalSummaryViaAnthropic(goalTitle: string, modelId = DEFA
 		console.log(`[title-gen] Generated goal summary: "${title}"`);
 		return title || null;
 	} catch (err) {
-		console.error("[title-gen] Goal summary failed:", err);
+		console.error(`[title-gen] Anthropic goal-summary request failed: ${sanitizeModelErrorText(err)}`);
 		return null;
 	}
 }
@@ -664,7 +657,7 @@ export async function generateGoalSummaryTitle(goalTitle: string, options?: Titl
 			return generateViaConfiguredDirectModel(configured.model, userPrompt, GOAL_SUMMARY_SYSTEM, options);
 		}
 		if (configured?.provider === "anthropic") {
-			return generateGoalSummaryViaAnthropic(goalTitle, configured.modelId, fetchImpl);
+			return generateGoalSummaryViaAnthropic(goalTitle, configured.modelId, fetchImpl, options);
 		}
 		console.warn(`[title-gen] Naming model "${options.namingModel}" is not available for goal summary; falling back`);
 	}
@@ -689,5 +682,5 @@ export async function generateGoalSummaryTitle(goalTitle: string, options?: Titl
 		}
 	}
 
-	return generateGoalSummaryViaAnthropic(goalTitle, DEFAULT_TITLE_MODEL, fetchImpl);
+	return generateGoalSummaryViaAnthropic(goalTitle, DEFAULT_TITLE_MODEL, fetchImpl, options);
 }

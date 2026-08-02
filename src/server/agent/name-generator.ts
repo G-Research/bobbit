@@ -6,8 +6,11 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { refreshOAuthToken } from "../auth/oauth.js";
+import { invalidateRejectedAnthropicDirectCredential, refreshOAuthToken } from "../auth/oauth.js";
+import { isUsableAnthropicOAuthCredential } from "../auth/credential-store.js";
+import { redactSensitive } from "../auth/redact.js";
 import { globalAuthPath } from "../bobbit-dir.js";
+import { createAnthropicDirectHeaders, type AnthropicDirectCredentials } from "./anthropic-direct-request.js";
 import { invalidateRoleNameCache } from "./team-names.js";
 
 const defaultFetch: typeof fetch = (input, init) => globalThis.fetch(input, init);
@@ -17,33 +20,54 @@ const NAMES_DIR = join(__dirname, "..", "..", "..", "data", "team-names");
 const MODEL = "claude-haiku-4-5-20251001";
 const API_URL = "https://api.anthropic.com/v1/messages";
 
-interface AuthCredentials {
-	type: string;
-	access: string;
-	refresh?: string;
-	expires?: number;
-}
+type AuthCredentials = AnthropicDirectCredentials;
 
-function loadAuth(): AuthCredentials | null {
+/**
+ * API keys remain a direct stored-credential path. OAuth access is deliberately
+ * not read here: refreshOAuthToken() owns its Pi-backed, locked resolution.
+ */
+function loadAuthKind(): AuthCredentials | null {
 	const authPath = globalAuthPath();
 	if (!existsSync(authPath)) return null;
 	try {
 		const data = JSON.parse(readFileSync(authPath, "utf-8"));
 		const cred = data.anthropic;
 		if (!cred) return null;
-		if (cred.type === "oauth" && cred.access) return cred;
-		if (cred.type === "api-key" && cred.key) return { type: "api-key", access: cred.key };
+		if (cred.type === "oauth" && isUsableAnthropicOAuthCredential(authPath, cred)) return { type: "oauth", access: "" };
+		if ((cred.type === "api-key" || cred.type === "api_key") && typeof cred.key === "string" && cred.key) {
+			return { type: "api-key", access: cred.key };
+		}
 		return null;
 	} catch {
 		return null;
 	}
 }
 
+/** Return an allow-listed upstream outcome based solely on the HTTP status. */
+function anthropicErrorSummary(status: number): string {
+	if (status === 404) return "model_not_found (404)";
+	if (status === 401 || status === 403) return `authentication (${status})`;
+	if (status === 429) return "rate_or_spend_limit (429)";
+	if (status >= 500) return `upstream_unavailable (${status})`;
+	return `request_failed (${status})`;
+}
+
+function requestFailureSummary(error: unknown): string {
+	const message = error instanceof Error ? redactSensitive(error.message) : "";
+	if (/timed?\s*out|aborted/i.test(message)) return "timeout_or_abort";
+	return "request_failed";
+}
+
 /**
- * Generate 50 funny, role-themed names and write them to data/team-names/<role>.json.
+ * Generate 500 funny, role-themed names and write them to data/team-names/<role>.json.
  * Fire-and-forget — failures are logged but don't block role creation.
  */
-export async function generateRoleNames(roleName: string, roleLabel: string, fetchImpl: typeof fetch = defaultFetch): Promise<void> {
+export async function generateRoleNames(
+	roleName: string,
+	roleLabel: string,
+	fetchImpl: typeof fetch = defaultFetch,
+	oauthTokenResolver: () => Promise<string | null> = refreshOAuthToken,
+): Promise<void> {
 	const outPath = join(NAMES_DIR, `${roleName}.json`);
 
 	// Don't overwrite existing curated files
@@ -52,37 +76,29 @@ export async function generateRoleNames(roleName: string, roleLabel: string, fet
 		return;
 	}
 
-	let auth = loadAuth();
-	if (!auth) {
+	const configuredAuth = loadAuthKind();
+	if (!configuredAuth) {
 		console.error(`[name-gen] No auth available, cannot generate names for role "${roleName}"`);
 		return;
 	}
 
-	// Refresh OAuth if expired
-	if (auth.type === "oauth" && auth.expires && Date.now() > auth.expires) {
-		const newToken = await refreshOAuthToken();
-		if (newToken) {
-			auth = { ...auth, access: newToken };
-		} else {
-			console.error("[name-gen] Token expired and refresh failed");
+	// Pi's runtime owns OAuth storage, expiry buffering, and rotation. Resolve on
+	// every OAuth request rather than trusting an independently-read access token.
+	let auth = configuredAuth;
+	if (auth.type === "oauth") {
+		const access = await oauthTokenResolver();
+		if (!access) {
+			console.error("[name-gen] OAuth credential resolution failed");
 			return;
 		}
+		auth = { type: "oauth", access };
 	}
 
-	const headers: Record<string, string> = {
-		"Content-Type": "application/json",
-		"anthropic-version": "2023-06-01",
-	};
-	if (auth.type === "oauth") {
-		headers["Authorization"] = `Bearer ${auth.access}`;
-		headers["anthropic-beta"] = "claude-code-20250219,oauth-2025-04-20";
-	} else {
-		headers["x-api-key"] = auth.access;
-	}
+	const headers = createAnthropicDirectHeaders(auth);
 
 	const systemText = auth.type === "oauth"
-		? `You are Claude Code, Anthropic's official CLI for Claude. You generate funny names for AI coding agents.`
-		: `You generate funny names for AI coding agents.`;
+		? "You are Claude Code, Anthropic's official CLI for Claude. You generate funny names for AI coding agents."
+		: "You generate funny names for AI coding agents.";
 
 	const prompt = `Generate exactly 500 funny names for an AI agent whose role is "${roleLabel}" (id: "${roleName}").
 
@@ -114,25 +130,20 @@ Output a JSON array of 500 strings. Output ONLY the JSON array, no explanation, 
 	console.log(`[name-gen] Generating names for role "${roleName}" via ${MODEL}…`);
 
 	try {
-		let response = await fetchImpl(API_URL, {
+		const response = await fetchImpl(API_URL, {
 			method: "POST",
 			headers,
 			body: JSON.stringify(body),
 		});
 
-		// On auth errors, try refreshing the token and retrying once
-		if (!response.ok && (response.status === 401 || response.status === 403) && auth.type === "oauth") {
-			console.warn(`[name-gen] Auth error ${response.status}, attempting token refresh…`);
-			const newToken = await refreshOAuthToken();
-			if (newToken) {
-				headers["Authorization"] = `Bearer ${newToken}`;
-				response = await fetchImpl(API_URL, { method: "POST", headers, body: JSON.stringify(body) });
-			}
-		}
+		// Pi resolves expiry and refreshes before this request. Only a 401 proves
+		// the bearer credential failed; a 403 can be model or resource policy.
 
 		if (!response.ok) {
-			const errText = await response.text();
-			console.error(`[name-gen] API error ${response.status}: ${errText}`);
+			if (auth.type === "oauth" && response.status === 401) {
+				await invalidateRejectedAnthropicDirectCredential(auth.access);
+			}
+			console.error(`[name-gen] Anthropic completion failed: ${anthropicErrorSummary(response.status)}`);
 			return;
 		}
 
@@ -176,6 +187,6 @@ Output a JSON array of 500 strings. Output ONLY the JSON array, no explanation, 
 
 		console.log(`[name-gen] Wrote ${valid.length} names to ${outPath}`);
 	} catch (err) {
-		console.error("[name-gen] Failed:", err);
+		console.error(`[name-gen] Failed: ${requestFailureSummary(err)}`);
 	}
 }

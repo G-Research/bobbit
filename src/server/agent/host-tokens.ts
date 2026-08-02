@@ -7,6 +7,11 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { globalAuthPath, serverSecretsDir } from "../bobbit-dir.js";
+import {
+	AtomicCredentialStore,
+	isAnthropicApiKeyCredential,
+	isUsableAnthropicOAuthCredential,
+} from "../auth/credential-store.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 
@@ -69,6 +74,10 @@ const PROVIDER_TOKENS: { envVar: string; label: string; provider: string; envKey
 /** Well-known non-provider tokens that users may want in sandboxes */
 export const SANDBOX_AGENT_AUTH_RELATIVE_PATH = path.join("sandbox-agent-auth", "auth.json");
 export const OPENAI_CODEX_SANDBOX_AUTH_TOKEN_KEYS = new Set(["OPENAI_API_KEY", "OPENAI_CODEX_AUTH"]);
+/** An empty, enabled OAuth-token entry is the explicit policy required to hand a current host OAuth access token to a sandbox. */
+export const ANTHROPIC_SANDBOX_AUTH_TOKEN_KEYS = new Set(["ANTHROPIC_OAUTH_TOKEN"]);
+/** Project credentials take precedence over any host-derived Anthropic OAuth handoff. */
+export const ANTHROPIC_SANDBOX_CREDENTIAL_KEYS = new Set(["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]);
 /** Sandbox-token policy keys that opt a sandbox into the Google account (Gemini Code Assist) OAuth credential. */
 export const GOOGLE_GEMINI_CLI_SANDBOX_AUTH_TOKEN_KEYS = new Set(["GOOGLE_CLOUD_ACCESS_TOKEN"]);
 
@@ -114,7 +123,11 @@ function detectAuthJson(): Record<string, boolean> {
 	const data = readHostAuthJson();
 	if (data) {
 		for (const key of Object.keys(data)) {
-			result[key] = true;
+			const credential = data[key];
+			// A persisted Anthropic OAuth row is usable only when it satisfies Pi's
+			// renewable credential shape and has not been durably rejected. API-key
+			// rows remain independently valid.
+			result[key] = key !== "anthropic" || isUsableAnthropicOAuthCredential(globalAuthPath(), credential) || isAnthropicApiKeyCredential(credential);
 		}
 	}
 	return result;
@@ -148,9 +161,11 @@ function sanitizeCodexCredential(value: unknown): Record<string, any> | undefine
 	return sanitized;
 }
 
-function isUsableGoogleOAuthCredential(value: unknown): value is Record<string, any> {
+function isUsableOAuthCredential(value: unknown): value is Record<string, any> {
 	return isCredentialObject(value) && value.type === "oauth" && typeof value.access === "string" && !!value.access;
 }
+
+export { isAnthropicApiKeyCredential, isCompleteAnthropicOAuthCredential } from "../auth/credential-store.js";
 
 /**
  * Sanitize the stored `google-gemini-cli` (Google account / Gemini Code Assist) OAuth
@@ -159,11 +174,46 @@ function isUsableGoogleOAuthCredential(value: unknown): value is Record<string, 
  * sandbox-visible auth.json. Returns undefined for absent or API-key-only values.
  */
 function sanitizeGoogleCredential(value: unknown): Record<string, any> | undefined {
-	if (!isUsableGoogleOAuthCredential(value)) return undefined;
+	if (!isUsableOAuthCredential(value)) return undefined;
 	const sanitized: Record<string, any> = { type: "oauth", access: value.access };
 	if (typeof value.refresh === "string" && value.refresh) sanitized.refresh = value.refresh;
 	if (typeof value.expires === "number") sanitized.expires = value.expires;
 	return sanitized;
+}
+
+/**
+ * Produce the only Anthropic credential shape that may cross a sandbox
+ * boundary: a current, non-renewable access token. Callers must first apply
+ * their project sandbox-token policy; this helper never supplies a default.
+ */
+function sanitizeAnthropicCredential(value: unknown): Record<string, any> | undefined {
+	if (!isUsableAnthropicOAuthCredential(globalAuthPath(), value)) return undefined;
+	// The sandbox receives only the current access credential, never host renewal
+	// authority. Completeness is checked before this reduction.
+	return { type: "oauth", access: value.access, expires: value.expires };
+}
+
+function hasCurrentOAuthAccess(value: unknown, now = Date.now()): boolean {
+	return isUsableAnthropicOAuthCredential(globalAuthPath(), value) && value.expires > now;
+}
+
+/**
+ * Refresh the host credential without exporting it. Sandbox wiring invokes this
+ * only after explicit opt-in, then re-reads and sanitizes the fresh credential.
+ */
+export async function refreshSandboxAnthropicOAuthCredential(): Promise<boolean> {
+	const credential = readHostAuthJson()?.anthropic;
+	if (!isUsableAnthropicOAuthCredential(globalAuthPath(), credential)) return false;
+	if (hasCurrentOAuthAccess(credential)) return true;
+	try {
+		const oauth: Record<string, unknown> = await import("../auth/oauth.js");
+		const refresh = oauth.refreshOAuthToken;
+		if (typeof refresh !== "function") return false;
+		await (refresh as () => Promise<unknown>)();
+	} catch {
+		return false;
+	}
+	return hasCurrentOAuthAccess(readHostAuthJson()?.anthropic);
 }
 
 function sanitizeAuthScope(scope?: string): string | undefined {
@@ -182,6 +232,8 @@ export function sandboxAgentAuthPath(scope?: string): string {
 export interface SandboxAgentAuthOptions {
 	prefs?: PreferencesStore | null;
 	includeCodexAuth?: boolean;
+	/** Caller has applied the project policy and requests a non-renewable Anthropic access-token entry. */
+	includeAnthropicAuth?: boolean;
 	/** Opt the sandbox into the Google account (Gemini Code Assist) OAuth credential. */
 	includeGoogleAuth?: boolean;
 	/** Separate files prevent one project's authorized mount from feeding another project's denied mount. */
@@ -190,7 +242,7 @@ export interface SandboxAgentAuthOptions {
 
 function normalizeSandboxAgentAuthOptions(options?: PreferencesStore | SandboxAgentAuthOptions | null): SandboxAgentAuthOptions {
 	if (!options || typeof (options as any).get === "function") {
-		return { prefs: options as PreferencesStore | null | undefined, includeCodexAuth: false, includeGoogleAuth: false };
+		return { prefs: options as PreferencesStore | null | undefined, includeCodexAuth: false, includeAnthropicAuth: false, includeGoogleAuth: false };
 	}
 	return options as SandboxAgentAuthOptions;
 }
@@ -228,12 +280,22 @@ function resolveSandboxGoogleCredential(): Record<string, any> | undefined {
  * provider-isolated entries: opting into one never includes the other.
  */
 export function buildSandboxAgentAuthJson(options?: PreferencesStore | SandboxAgentAuthOptions | null): Record<string, any> {
-	const { prefs, includeCodexAuth = false, includeGoogleAuth = false } = normalizeSandboxAgentAuthOptions(options);
+	const { prefs, includeCodexAuth = false, includeAnthropicAuth = false, includeGoogleAuth = false } = normalizeSandboxAgentAuthOptions(options);
 	const auth: Record<string, any> = {};
 
 	if (includeCodexAuth) {
 		const codex = resolveSandboxCodexCredential(prefs);
 		if (codex) auth["openai-codex"] = codex;
+	}
+
+	if (includeAnthropicAuth) {
+		// Check the renewable host row before reducing it to the sandbox-safe
+		// shape; the deliberately non-renewable export has no refresh field.
+		const hostAnthropic = readHostAuthJson()?.anthropic;
+		if (hasCurrentOAuthAccess(hostAnthropic)) {
+			const anthropic = sanitizeAnthropicCredential(hostAnthropic);
+			if (anthropic) auth.anthropic = anthropic;
+		}
 	}
 
 	if (includeGoogleAuth) {
@@ -246,6 +308,21 @@ export function buildSandboxAgentAuthJson(options?: PreferencesStore | SandboxAg
 
 export function sandboxTokenPolicyAllowsCodexAuth(entries: Array<{ key?: string; enabled?: boolean }> | undefined | null): boolean {
 	return (entries || []).some((entry) => entry.enabled !== false && !!entry.key && OPENAI_CODEX_SANDBOX_AUTH_TOKEN_KEYS.has(entry.key));
+}
+
+export function sandboxTokenPolicyAllowsAnthropicAuth(entries: Array<{ key?: string; enabled?: boolean }> | undefined | null): boolean {
+	return (entries || []).some((entry) => entry.enabled !== false && !!entry.key && ANTHROPIC_SANDBOX_AUTH_TOKEN_KEYS.has(entry.key));
+}
+
+/** True when the project supplies an Anthropic token rather than requesting a host handoff. */
+export function hasExplicitSandboxAnthropicCredential(
+	entries: Array<{ key?: string; enabled?: boolean; value?: string }> | undefined | null,
+	secrets?: Record<string, string> | null,
+): boolean {
+	return (entries || []).some((entry) => {
+		if (entry.enabled === false || !entry.key || !ANTHROPIC_SANDBOX_CREDENTIAL_KEYS.has(entry.key)) return false;
+		return !!nonEmptyString(secrets?.[entry.key] ?? entry.value);
+	});
 }
 
 export function sandboxTokenPolicyAllowsGoogleAuth(entries: Array<{ key?: string; enabled?: boolean }> | undefined | null): boolean {
@@ -274,6 +351,28 @@ export function ensureSandboxAgentAuthFile(options?: PreferencesStore | SandboxA
 		fs.writeFileSync(authPath, next, { encoding: "utf-8", mode: 0o600 });
 	}
 	return authPath;
+}
+
+// Sessions sharing a project mount the same auth.json. Serialize their complete
+// policy → refresh → write operation so an older opt-in cannot write after a
+// newer explicit project credential decision.
+const sandboxAgentAuthFileLocks = new Map<string, Promise<void>>();
+
+export async function withSandboxAgentAuthFileLock<T>(scope: string | undefined, operation: () => Promise<T>): Promise<T> {
+	const authPath = sandboxAgentAuthPath(scope);
+	const previous = sandboxAgentAuthFileLocks.get(authPath) ?? Promise.resolve();
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	const tail = previous.catch(() => {}).then(() => gate);
+	sandboxAgentAuthFileLocks.set(authPath, tail);
+
+	await previous.catch(() => {});
+	try {
+		return await operation();
+	} finally {
+		release();
+		if (sandboxAgentAuthFileLocks.get(authPath) === tail) sandboxAgentAuthFileLocks.delete(authPath);
+	}
 }
 
 export interface DetectedHostToken {
@@ -359,6 +458,35 @@ export function mergeHostAgentProviderEnv(existing: Record<string, string> | und
 }
 
 /**
+ * Let a direct Pi runtime use an explicit API key after a rejected OAuth flow.
+ * Pi treats any raw auth.json row as provider-owned, including Bobbit's
+ * non-secret OAuth tombstone, and therefore skips its API-key environment
+ * fallback. Removing only a rejected row before spawning is safe: it cannot
+ * revive OAuth and leaves healthy OAuth/API-key rows untouched.
+ */
+export async function recoverAnthropicApiKeyRuntime(
+	env?: Record<string, string>,
+	isAnthropicRuntime = false,
+): Promise<void> {
+	// An explicitly injected key is necessarily for this runtime. Inherited host
+	// environment is broader, so consult it only when this direct Pi process is
+	// actually starting an Anthropic model. Do not make unrelated provider
+	// startup contend on, or repair, the Anthropic credential store.
+	const hasApiKey = nonEmptyString(env?.ANTHROPIC_API_KEY)
+		|| (isAnthropicRuntime && nonEmptyString(process.env.ANTHROPIC_API_KEY));
+	if (!hasApiKey) return;
+	const authPath = globalAuthPath();
+	if (!fs.existsSync(authPath)) return;
+	try {
+		await new AtomicCredentialStore(authPath).deleteRejectedOAuthCredential("anthropic");
+	} catch {
+		// This is opportunistic startup repair, not an OAuth mutation. A corrupt or
+		// contended store must not prevent an unrelated agent from starting with
+		// its explicit API key. OAuth writers still surface lock-compromise errors.
+	}
+}
+
+/**
  * Scan the host for available tokens. Returns env var names + labels + availability.
  * Never returns actual token values.
  */
@@ -385,9 +513,26 @@ export function detectHostTokens(prefs?: PreferencesStore | null, commandRunner:
  * Used by the sandbox token system when a token has an empty value (meaning "from host").
  * Returns undefined if the token cannot be resolved.
  */
-export function resolveHostTokenValue(envVar: string, prefs?: PreferencesStore | null, commandRunner: CommandRunner = realCommandRunner): string | undefined {
-	// Check env var directly
-	if (process.env[envVar]) return process.env[envVar];
+export interface HostTokenResolutionOptions {
+	/** Explicit sandbox policy allowing a current, non-renewable host Anthropic OAuth access-token handoff. */
+	allowStoredAnthropicOAuth?: boolean;
+}
+
+export function resolveHostTokenValue(
+	envVar: string,
+	prefs?: PreferencesStore | null,
+	commandRunner: CommandRunner = realCommandRunner,
+	options?: HostTokenResolutionOptions,
+): string | undefined {
+	// Anthropic OAuth is renewable host authority. Never forward it unless the
+	// project explicitly opted in through sandbox_tokens; API keys keep their
+	// established host-token behavior.
+	if (envVar === "ANTHROPIC_OAUTH_TOKEN") {
+		if (process.env["ANTHROPIC_API_KEY"]) return process.env["ANTHROPIC_API_KEY"];
+		if (options?.allowStoredAnthropicOAuth === true && process.env[envVar]) return process.env[envVar];
+	} else if (process.env[envVar]) {
+		return process.env[envVar];
+	}
 
 	// Special cases
 	if (envVar === "GITHUB_TOKEN") {
@@ -397,10 +542,6 @@ export function resolveHostTokenValue(envVar: string, prefs?: PreferencesStore |
 			if (token) return token;
 		} catch { /* gh not installed or not authenticated */ }
 		return undefined;
-	}
-
-	if (envVar === "ANTHROPIC_OAUTH_TOKEN" && process.env["ANTHROPIC_API_KEY"]) {
-		return process.env["ANTHROPIC_API_KEY"];
 	}
 
 	// Check auth.json for provider tokens.
@@ -421,8 +562,11 @@ export function resolveHostTokenValue(envVar: string, prefs?: PreferencesStore |
 			const data = readHostAuthJson();
 			const providerData = data?.[providerForEnv.provider];
 			if (providerData) {
-				if (providerData.type === "oauth" && providerData.access) return providerData.access;
-				if (providerData.type === "api_key" && providerData.key) return providerData.key;
+				if (providerData.type === "oauth" && providerData.access) {
+					if (providerForEnv.provider !== "anthropic") return providerData.access;
+					if (options?.allowStoredAnthropicOAuth === true && hasCurrentOAuthAccess(providerData)) return providerData.access;
+				}
+				if (providerForEnv.provider === "anthropic" ? isAnthropicApiKeyCredential(providerData) : providerData.type === "api_key" && providerData.key) return providerData.key;
 			}
 		} catch { /* ignore read errors */ }
 	}

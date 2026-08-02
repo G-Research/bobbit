@@ -5,11 +5,14 @@ import { execFile as execFileCallback } from "node:child_process";
 import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { promisify } from "node:util";
-import { refreshOAuthToken } from "../auth/oauth.js";
+import { invalidateRejectedAnthropicDirectCredential, refreshOAuthToken } from "../auth/oauth.js";
+import { isUsableAnthropicOAuthCredential } from "../auth/credential-store.js";
 import { globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import { getAvailableModels, type ApiModel, type CustomProviderConfig } from "./model-registry.js";
 import { GOOGLE_GEMINI_CLI_PROVIDER, codeAssistComplete } from "./google-code-assist.js";
+import { sanitizeModelErrorText } from "./model-error-sanitizer.js";
+import { classifyModelProbeError, modelProbeFailure } from "./model-probe-result.js";
 
 interface AuthCredentials {
 	type: string;
@@ -41,10 +44,22 @@ function loadAuthData(): Record<string, any> | null {
 function authCredentialForProvider(provider: string): AuthCredentials | null {
 	const cred = loadAuthData()?.[provider];
 	if (!cred) return null;
-	if (cred.type === "oauth" && cred.access) return { type: "oauth", access: cred.access, refresh: cred.refresh, expires: cred.expires };
+	if (cred.type === "oauth") {
+		const oauth = { type: "oauth", access: cred.access, refresh: cred.refresh, expires: cred.expires };
+		// Unlike legacy API-key rows, Anthropic OAuth rows are Pi credentials and
+		// must be renewable. Do not let a partial on-disk row become a Bearer token.
+		if (provider === "anthropic") {
+			return isUsableAnthropicOAuthCredential(globalAuthPath(), oauth) ? oauth : { type: "invalid-oauth" };
+		}
+		if (cred.access) return oauth;
+	}
 	if ((cred.type === "api-key" || cred.type === "api_key") && cred.key) return { type: "api-key", key: cred.key };
 	if (typeof cred.key === "string" && cred.key.trim()) return { type: "api-key", key: cred.key };
-	if (typeof cred.access === "string" && cred.access.trim()) return { type: cred.type || "oauth", access: cred.access, expires: cred.expires };
+	if (typeof cred.access === "string" && cred.access.trim()) {
+		// Untagged access values are not a valid Anthropic credential shape either.
+		if (provider === "anthropic") return { type: "invalid-oauth" };
+		return { type: cred.type || "oauth", access: cred.access, expires: cred.expires };
+	}
 	return null;
 }
 
@@ -136,33 +151,50 @@ async function resolveProviderHeaders(
 	return Object.keys(headers).length > 0 ? headers : undefined;
 }
 
+interface ResolvedProviderApiKey {
+	apiKey?: string;
+	/** The persisted OAuth access credential actually selected for this request. */
+	oauthAccess?: string;
+	/** Pi could not resolve an expired renewable OAuth credential; do not send its stale access value. */
+	oauthResolutionFailed?: boolean;
+}
+
 async function resolveProviderApiKey(
 	prefs: PreferencesStore | undefined,
 	provider: string,
 	commandRunner: ModelConfigCommandRunner,
 	env: NodeJS.ProcessEnv,
 	providerConfigReader: ModelProviderConfigReader,
-): Promise<string | undefined> {
+	anthropicOAuthTokenResolver: () => Promise<string | null> = refreshOAuthToken,
+): Promise<ResolvedProviderApiKey> {
 	const stored = prefs?.get(`providerKey.${provider}`);
-	if (typeof stored === "string" && stored.trim()) return stored.trim();
+	if (typeof stored === "string" && stored.trim()) return { apiKey: stored.trim() };
 
 	for (const key of PROVIDER_ENV_KEYS[provider] || []) {
-		if (env[key]) return env[key];
+		if (env[key]) return { apiKey: env[key] };
 	}
 
 	const auth = authCredentialForProvider(provider);
+	if (auth?.type === "invalid-oauth") return { oauthResolutionFailed: true };
 	if (auth?.type === "oauth" && provider === "anthropic" && auth.expires && Date.now() > auth.expires) {
-		const refreshed = await refreshOAuthToken();
-		if (refreshed) return refreshed;
+		const refreshed = await anthropicOAuthTokenResolver();
+		if (refreshed) return { apiKey: refreshed, oauthAccess: refreshed };
+		// A transient Pi refresh failure must not fall through to the expired
+		// stored access value. That request could receive a 401/403 and erase a
+		// still-renewable credential as though the provider rejected the refresh.
+		return { oauthResolutionFailed: true };
 	}
-	if (auth?.access) return auth.access;
-	if (auth?.key) return auth.key;
+	if (auth?.access) return {
+		apiKey: auth.access,
+		...(auth.type === "oauth" ? { oauthAccess: auth.access } : {}),
+	};
+	if (auth?.key) return { apiKey: auth.key };
 
 	const configs = (prefs?.get("customProviders") as CustomProviderConfig[] | undefined) || [];
 	const custom = configs.find(c => (c.name || c.id) === provider || c.id === provider);
-	if (custom) return custom.apiKey?.trim() || "none";
+	if (custom) return { apiKey: custom.apiKey?.trim() || "none" };
 
-	return resolveConfigValue(providerConfigReader(provider)?.apiKey, commandRunner, env);
+	return { apiKey: await resolveConfigValue(providerConfigReader(provider)?.apiKey, commandRunner, env) };
 }
 
 export function toPiModel(model: ApiModel): Model<Api> {
@@ -197,6 +229,8 @@ export interface ModelCompletionDependencies {
 	commandRunner?: ModelConfigCommandRunner;
 	env?: NodeJS.ProcessEnv;
 	providerConfigReader?: ModelProviderConfigReader;
+	/** Test seam for Pi's locked Anthropic OAuth resolution. */
+	anthropicOAuthTokenResolver?: () => Promise<string | null>;
 }
 
 export async function completeModelText(
@@ -232,29 +266,49 @@ export async function completeModelText(
 	const commandRunner = dependencies.commandRunner ?? realModelConfigCommandRunner;
 	const env = dependencies.env ?? process.env;
 	const providerConfigReader = dependencies.providerConfigReader ?? readModelsJsonProvider;
-	const apiKey = await resolveProviderApiKey(prefs, model.provider, commandRunner, env, providerConfigReader);
+	const resolvedApiKey = await resolveProviderApiKey(
+		prefs,
+		model.provider,
+		commandRunner,
+		env,
+		providerConfigReader,
+		dependencies.anthropicOAuthTokenResolver,
+	);
+	if (resolvedApiKey.oauthResolutionFailed) {
+		throw new Error("Anthropic OAuth credential could not be resolved");
+	}
 	const providerHeaders = await resolveProviderHeaders(model.provider, commandRunner, env, providerConfigReader);
 	const options: Record<string, any> = {
 		maxTokens: args.maxTokens ?? 500,
 		timeoutMs: args.timeoutMs ?? 30_000,
 		maxRetries: 0,
 		cacheRetention: "none",
-		...(apiKey ? { apiKey } : {}),
+		...(resolvedApiKey.apiKey ? { apiKey: resolvedApiKey.apiKey } : {}),
 		...(providerHeaders ? { headers: providerHeaders } : {}),
 	};
 	if (args.thinkingLevel && args.thinkingLevel !== "off") {
 		options.reasoning = args.thinkingLevel;
 	}
 
-	const result = await completeFn(toPiModel(model) as any, {
-		systemPrompt: args.systemPrompt,
-		messages: [{ role: "user", content: args.userPrompt, timestamp: Date.now() }],
-	}, options);
+	try {
+		const result = await completeFn(toPiModel(model) as any, {
+			systemPrompt: args.systemPrompt,
+			messages: [{ role: "user", content: args.userPrompt, timestamp: Date.now() }],
+		}, options);
 
-	if ((result as any).stopReason === "error") {
-		throw new Error((result as any).errorMessage || "Model returned an error");
+		if ((result as any).stopReason === "error") {
+			throw new Error(sanitizeModelErrorText((result as any).errorMessage || "Model returned an error"));
+		}
+		return assistantText(result);
+	} catch (error) {
+		const { status } = classifyModelProbeError(error);
+		if (model.provider === "anthropic" && resolvedApiKey.oauthAccess && status === 401) {
+			// The selected access credential is a concurrency guard: a newer login or
+			// refresh must survive an earlier request's definitive rejection.
+			await invalidateRejectedAnthropicDirectCredential(resolvedApiKey.oauthAccess);
+		}
+		throw error;
 	}
-	return assistantText(result);
 }
 
 export async function testProviderApiKey(
@@ -281,11 +335,11 @@ export async function testProviderApiKey(
 			maxRetries: 0,
 		} as any);
 		if ((result as any).stopReason === "error") {
-			throw new Error((result as any).errorMessage || "Model returned an error");
+			throw new Error(sanitizeModelErrorText((result as any).errorMessage || "Model returned an error"));
 		}
 		return { ok: true, modelResolved: model.id, latencyMs: Date.now() - started };
-	} catch (err: any) {
-		return { ok: false, modelResolved: model.id, latencyMs: Date.now() - started, error: err?.message || "Request failed" };
+	} catch (err: unknown) {
+		return modelProbeFailure(err, { modelResolved: model.id, latencyMs: Date.now() - started });
 	}
 }
 
@@ -316,7 +370,7 @@ export async function testModelPreference(
 			timeoutMs: 15_000,
 		});
 		return { ok: true, modelResolved: model.id, latencyMs: Date.now() - started };
-	} catch (err: any) {
-		return { ok: false, modelResolved: model.id, latencyMs: Date.now() - started, error: err?.message || "Request failed" };
+	} catch (err: unknown) {
+		return modelProbeFailure(err, { modelResolved: model.id, latencyMs: Date.now() - started });
 	}
 }

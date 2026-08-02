@@ -11,7 +11,14 @@ export interface AccountOAuthProvider {
 }
 
 export interface AccountOAuthStatus {
+	/** A currently usable credential, not merely a persisted refresh candidate. */
 	authenticated: boolean;
+	/** A credential row exists and may be explicitly logged out. */
+	stored?: boolean;
+	/** A non-secret tombstone replaced a credential that the provider rejected. */
+	rejected?: boolean;
+	/** The stored row has a refresh token but an expired row remains unvalidated. */
+	refreshable?: boolean;
 	expires?: number;
 }
 

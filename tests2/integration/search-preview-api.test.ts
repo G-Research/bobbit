@@ -61,10 +61,11 @@ async function mintCookie(): Promise<string> {
 }
 
 test.describe("Search/preview/archive API migrations", () => {
-	test("preview content route injects standalone theme snapshot tokens", async () => {
+	test("preview theme, artifact ordering, SSE ordering, and purge contracts", async ({ gateway }) => {
 		const sessionId = await createSession();
 		try {
-			const mount = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`, {
+			await test.step("preview content route injects standalone theme snapshot tokens", async () => {
+				const mount = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`, {
 				method: "POST",
 				body: JSON.stringify({
 					html: `<!DOCTYPE html><html><head></head><body><div id="box" style="background:var(--background);color:var(--foreground);">themed</div></body></html>`,
@@ -83,15 +84,11 @@ test.describe("Search/preview/archive API migrations", () => {
 			expect(body).toContain(`<base data-bobbit-preview-base href="/preview/${sessionId}/">`);
 			expect(body).toContain('data-bobbit-preview-theme="snapshot"');
 			expect(body).toMatch(/:root\s*{[^}]*--background\s*:/s);
-			expect(body).toMatch(/:root\s*{[^}]*--foreground\s*:/s);
-		} finally {
-			await deleteSession(sessionId).catch(() => {});
-		}
-	});
+				expect(body).toMatch(/:root\s*{[^}]*--foreground\s*:/s);
+			});
 
-	test("held artifact validation does not block health or session creation and returns the first exact candidate", async ({ gateway }) => {
-		const sessionId = await createSession();
-		let unrelatedSessionId: string | undefined;
+			await test.step("held artifact validation does not block health or session creation and returns the first exact candidate", async () => {
+				let unrelatedSessionId: string | undefined;
 		const fixtureRoot = path.join(gateway.bobbitDir, "preview-async-ordering", randomUUID());
 		const releaseHash = deferred();
 		let scanPromise: Promise<Response> | undefined;
@@ -201,16 +198,14 @@ test.describe("Search/preview/archive API migrations", () => {
 			releaseHash.resolve();
 			await scanPromise?.catch(() => undefined);
 			await mutationPromise?.catch(() => undefined);
-			previewArtifacts.setPreviewArtifactFsForTesting(undefined);
-			if (unrelatedSessionId) await deleteSession(unrelatedSessionId).catch(() => {});
-			await deleteSession(sessionId).catch(() => {});
-			await fs.promises.rm(fixtureRoot, { recursive: true, force: true });
-		}
-	});
+					previewArtifacts.setPreviewArtifactFsForTesting(undefined);
+					if (unrelatedSessionId) await deleteSession(unrelatedSessionId).catch(() => {});
+					await fs.promises.rm(fixtureRoot, { recursive: true, force: true });
+				}
+			});
 
-	test("SSE bootstrap precedes a queued live mutation while artifact validation is pending", async () => {
-		const sessionId = await createSession();
-		const releaseHash = deferred();
+			await test.step("SSE bootstrap precedes a queued live mutation while artifact validation is pending", async () => {
+				const releaseHash = deferred();
 		const abort = new AbortController();
 		let mutationPromise: Promise<Response> | undefined;
 		try {
@@ -264,16 +259,14 @@ test.describe("Search/preview/archive API migrations", () => {
 			expect(events[1]?.artifactId).toBe(liveState.artifactId);
 		} finally {
 			releaseHash.resolve();
-			abort.abort();
-			await mutationPromise?.catch(() => undefined);
-			previewArtifacts.setPreviewArtifactFsForTesting(undefined);
-			await deleteSession(sessionId).catch(() => {});
-		}
-	});
+					abort.abort();
+					await mutationPromise?.catch(() => undefined);
+					previewArtifacts.setPreviewArtifactFsForTesting(undefined);
+				}
+			});
 
-	test("purge waits for preview artifact deletion without blocking health or session creation", async () => {
-		const sessionId = await createSession();
-		let unrelatedSessionId: string | undefined;
+			await test.step("purge waits for preview artifact deletion without blocking health or session creation", async () => {
+				let unrelatedSessionId: string | undefined;
 		const releaseDeletion = deferred();
 		let purgePromise: Promise<Response> | undefined;
 		try {
@@ -315,10 +308,14 @@ test.describe("Search/preview/archive API migrations", () => {
 			expect(purgeResponse.status).toBe(200);
 			await expect(fs.promises.access(artifactSessionDir)).rejects.toMatchObject({ code: "ENOENT" });
 		} finally {
-			releaseDeletion.resolve();
-			await purgePromise?.catch(() => undefined);
+					releaseDeletion.resolve();
+					await purgePromise?.catch(() => undefined);
+					previewArtifacts.setPreviewArtifactFsForTesting(undefined);
+					if (unrelatedSessionId) await deleteSession(unrelatedSessionId).catch(() => {});
+				}
+			});
+		} finally {
 			previewArtifacts.setPreviewArtifactFsForTesting(undefined);
-			if (unrelatedSessionId) await deleteSession(unrelatedSessionId).catch(() => {});
 			await deleteSession(sessionId).catch(() => {});
 		}
 	});
