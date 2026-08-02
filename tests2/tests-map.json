@@ -10257,6 +10257,13 @@
       "rationale": "Existing real-agent/LLM/Docker manual-integration suite; relocate into the daily tier-3 lane unchanged."
     },
     {
+      "file": "tests/manual-integration/verification-container-ownership.spec.ts",
+      "bucket": "daily",
+      "method": "relocate",
+      "replacement": [],
+      "rationale": "Real Docker lifecycle coverage for exact in-container verification ownership, concurrent isolation, and crash recovery; manual-only because it owns a gateway and shared container."
+    },
+    {
       "file": "tests/manual-integration/session-resilience.spec.ts",
       "bucket": "daily",
       "method": "relocate",
