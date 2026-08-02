@@ -370,7 +370,7 @@ function groupAlive(pid: number): boolean {
 function makeRecoveryHarness(
 	stateDir: string,
 	calls: Array<{ kind: string; status: string }>,
-	deps: { platform?: NodeJS.Platform; posixProcessIdentityInspector?: (pid: number) => { startToken: string; pgid: number } | undefined; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>; persistedTreeKiller?: (pid: number, signal?: NodeJS.Signals) => "signalled" | "unsupported" | "invalid"; recoveredSentinelReaper?: (step: any) => Promise<void>; projectContextManager?: any; clock?: any } = {},
+	deps: { platform?: NodeJS.Platform; posixProcessIdentityInspector?: (pid: number) => { startTokenKind: "linux-proc-stat-22"; startToken: string; pgid: number } | undefined; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>; persistedTreeKiller?: (pid: number, signal?: NodeJS.Signals) => "signalled" | "unsupported" | "invalid"; recoveredSentinelReaper?: (step: any) => Promise<void>; projectContextManager?: any; clock?: any } = {},
 ): VerificationHarness {
 	return new VerificationHarness(
 		stateDir,
@@ -420,8 +420,10 @@ describe("spawnTracked timeout cleanup", () => {
 	});
 
 	it("reaps a recovered POSIX sentinel after its original parent exits even if the root PID stamp was interrupted", async () => {
-		if (process.platform === "win32") {
-			expect(process.platform).toBe("win32");
+		if (process.platform !== "linux") {
+			// Durable POSIX recovery intentionally fails closed when an exact kernel
+			// start token is unavailable (including Darwin's coarse `lstart`).
+			expect(process.platform).not.toBe("linux");
 			return;
 		}
 		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-recovered-sentinel-"));
@@ -466,7 +468,7 @@ describe("spawnTracked timeout cleanup", () => {
 				// proves this is the separately-invoked live sentinel. Production uses
 				// the default C-locale `ps` inspector.
 				posixProcessIdentityInspector: pid => pid === sentinelIdentity.pid
-					? { startToken: sentinelIdentity.startToken, pgid: sentinelIdentity.pgid }
+					? { startTokenKind: "linux-proc-stat-22", startToken: sentinelIdentity.startToken, pgid: sentinelIdentity.pgid }
 					: undefined,
 			}).resumeInterruptedVerifications();
 
@@ -543,10 +545,10 @@ describe("spawnTracked timeout cleanup", () => {
 		const groupId = 321_654;
 		const killCalls: number[] = [];
 		try {
-			fs.writeFileSync(sentinelFile, JSON.stringify({ pid: process.pid, pgid: groupId, nonce, startToken: "current-process" }));
+			fs.writeFileSync(sentinelFile, JSON.stringify({ pid: process.pid, pgid: groupId, nonce, startTokenKind: "linux-proc-stat-22", startToken: "current-process" }));
 			const harness = makeRecoveryHarness(stateDir, [], {
 				platform: "linux",
-				posixProcessIdentityInspector: () => ({ startToken: "current-process", pgid: groupId }),
+				posixProcessIdentityInspector: () => ({ startTokenKind: "linux-proc-stat-22", startToken: "current-process", pgid: groupId }),
 				persistedTreeKiller: pid => { killCalls.push(pid); return "signalled"; },
 			});
 			// Simulate a crash after the pre-spawn sentinel metadata was persisted,
@@ -685,8 +687,8 @@ describe("spawnTracked timeout cleanup", () => {
 	});
 
 	it("records the original group for a fast-exiting payload", async () => {
-		if (process.platform === "win32") {
-			expect(process.platform).toBe("win32");
+		if (process.platform !== "linux") {
+			expect(process.platform).not.toBe("linux");
 			return;
 		}
 		const result = await runNativeJsonProbe(FAST_EXIT_SENTINEL_PROBE);
@@ -696,8 +698,8 @@ describe("spawnTracked timeout cleanup", () => {
 	});
 
 	it("scrubs outer sentinel identity before a nested tracked spawn", async () => {
-		if (process.platform === "win32") {
-			expect(process.platform).toBe("win32");
+		if (process.platform !== "linux") {
+			expect(process.platform).not.toBe("linux");
 			return;
 		}
 		const result = await runNativeJsonProbe(NESTED_SENTINEL_PROBE);
@@ -721,12 +723,12 @@ describe("spawnTracked timeout cleanup", () => {
 		const sentinelFile = path.join(stateDir, "sentinel.json");
 		const groupId = 123_456;
 		const nonce = "original-sentinel-nonce";
-		fs.writeFileSync(sentinelFile, JSON.stringify({ pid: process.pid, pgid: groupId, nonce, startToken: "original-process" }));
+		fs.writeFileSync(sentinelFile, JSON.stringify({ pid: process.pid, pgid: groupId, nonce, startTokenKind: "linux-proc-stat-22", startToken: "original-process" }));
 		const killCalls: Array<{ pid: number; signal: NodeJS.Signals | undefined }> = [];
 		try {
 			const harness = makeRecoveryHarness(stateDir, [], {
 				platform: "linux",
-				posixProcessIdentityInspector: () => ({ startToken: "reused-process", pgid: groupId }),
+				posixProcessIdentityInspector: () => ({ startTokenKind: "linux-proc-stat-22", startToken: "reused-process", pgid: groupId }),
 				persistedTreeKiller: (pid, signal) => {
 					killCalls.push({ pid, signal });
 					return "signalled";
@@ -1231,8 +1233,21 @@ test("PID-reused container sentinel never authorizes a negative-PGID signal", as
 			`${WITNESS_START_TOKEN_MISMATCH}: a reused in-container sentinel PID must never receive a negative-PGID signal`,
 		);
 		assert.equal(step.killUnsafeReason, WITNESS_START_TOKEN_MISMATCH);
+		assert.equal(step.containerPayloadCleanupPending, true, "identity loss remains durable retryable cleanup");
 		assert.match(String((cleanupError as Error | undefined)?.message), new RegExp(WITNESS_START_TOKEN_MISMATCH));
 	} finally {
 		fs.rmSync(stateDir, { recursive: true, force: true });
 	}
+});
+
+test("container escalation revalidates the exact witness before TERM and KILL without a timing gap", async () => {
+	const source = fs.readFileSync(new URL("../../src/server/agent/verification-harness.ts", import.meta.url), "utf8");
+	const method = source.slice(source.indexOf("private async _killAndVerifyRecoveredContainerProcessGroup"), source.indexOf("private async _resumeContainerCommandStep"));
+	const term = method.indexOf('kill -TERM -- "-$pgid"');
+	const kill = method.indexOf('kill -KILL -- "-$pgid"');
+	expect(term).toBeGreaterThan(-1);
+	expect(kill).toBeGreaterThan(term);
+	expect(method.slice(0, term).match(/\$\{verify\}/g)?.length).toBe(1);
+	expect(method.slice(term, kill).match(/\$\{verify\}/g)?.length).toBe(1);
+	expect(method.slice(term, kill)).not.toMatch(/sleep|setTimeout|setInterval/);
 });

@@ -37,21 +37,29 @@ function isPendingCommandCleanupError(err: unknown): err is PendingCommandCleanu
 }
 
 interface PosixProcessIdentity {
+	/** Typed so unlike (or coarse) identity sources cannot be compared. */
+	startTokenKind: "linux-proc-stat-22";
 	startToken: string;
 	pgid: number;
 }
 
+/**
+ * Return exact host ownership evidence only. `/proc/<pid>/stat` field 22 is a
+ * kernel process-incarnation token on Linux. Do not substitute `ps lstart` on
+ * Darwin: it is only second-granular and can authorize a reused PID/PGID.
+ */
 function inspectPosixProcessIdentity(pid: number): PosixProcessIdentity | undefined {
+	if (process.platform !== "linux") return undefined;
+	const startToken = readProcessStartToken(pid);
+	if (!startToken) return undefined;
 	try {
-		const output = execFileSync("ps", ["-o", "lstart=", "-o", "pgid=", "-p", String(pid)], {
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "ignore"],
-			env: { ...process.env, LC_ALL: "C", LANG: "C" },
+		const output = execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], {
+			encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
 		}).trim();
-		const match = /^(.*?)\s+(\d+)$/.exec(output);
-		const pgid = Number(match?.[2]);
-		if (!match || !match[1].trim() || !Number.isFinite(pgid) || pgid <= 0) return undefined;
-		return { startToken: match[1].trim(), pgid };
+		const pgid = Number(output);
+		return Number.isSafeInteger(pgid) && pgid > 0
+			? { startTokenKind: "linux-proc-stat-22", startToken, pgid }
+			: undefined;
 	} catch {
 		return undefined;
 	}
@@ -950,6 +958,11 @@ export interface ActiveVerification {
 		killUnsafeReason?: string;
 		/** A recovered POSIX sentinel could not yet be safely reaped; retry before finalizing. */
 		sentinelCleanupPending?: boolean;
+		/** Container cleanup is a two-layer durable state machine. */
+		containerPayloadCleanupPending?: boolean;
+		containerPayloadCleanupCompletedAt?: number;
+		containerTransportCleanupPending?: boolean;
+		containerTransportCleanupCompletedAt?: number;
 	}>;
 	currentPhase?: number;
 	overallStatus: "running" | "passed" | "failed" | "cancelled";
@@ -2897,7 +2910,7 @@ export class VerificationHarness {
 			return pending("Recovered command verdict has no durable POSIX sentinel nonce.");
 		}
 
-		let record: { pid?: unknown; pgid?: unknown; nonce?: unknown; startToken?: unknown };
+		let record: { pid?: unknown; pgid?: unknown; nonce?: unknown; startTokenKind?: unknown; startToken?: unknown };
 		try {
 			record = JSON.parse(fs.readFileSync(step.sentinelFile, "utf8"));
 		} catch (err) {
@@ -2916,19 +2929,18 @@ export class VerificationHarness {
 		// can be stamped into active state. That closes the spawn→state-persist
 		// crash window: use this record's PGID when `step.pid` is absent, but when
 		// a persisted group exists it must agree exactly with the sentinel record.
-		if (!Number.isFinite(sentinelPid) || sentinelPid <= 0 || !Number.isFinite(recordedGroupId) || recordedGroupId <= 0 || recordedGroupId !== groupId || record.nonce !== expectedNonce || typeof record.startToken !== "string" || !record.startToken) {
-			return pending("Recovered command sentinel identity did not match persisted group metadata.");
+		if (!Number.isFinite(sentinelPid) || sentinelPid <= 0 || !Number.isFinite(recordedGroupId) || recordedGroupId <= 0 || recordedGroupId !== groupId || record.nonce !== expectedNonce || record.startTokenKind !== "linux-proc-stat-22" || typeof record.startToken !== "string" || !record.startToken) {
+			return pending("Recovered command sentinel has no typed kernel-stable identity; refusing legacy or coarse recovery evidence.");
 		}
-		// A missing sentinel means its process group is already gone. Never signal
-		// the historical numeric PGID in that case: it may have been recycled.
+		// Sentinel absence is ownership loss, not proof of a reaped group. The old
+		// PGID is no longer safe to observe or signal, so retain retryable intent.
 		if (!isPidAlive(sentinelPid)) {
-			delete step.sentinelCleanupPending;
-			return;
+			return pending("Recovered POSIX sentinel is missing; group completion cannot be proven without reusing its historical PGID.");
 		}
 
 		const current = this.posixProcessIdentityInspector(sentinelPid);
-		if (!current || current.startToken !== record.startToken || current.pgid !== groupId) {
-			return pending("Recovered POSIX sentinel no longer matches its original process identity; refusing to target its group.");
+		if (!current || current.startTokenKind !== record.startTokenKind || current.startToken !== record.startToken || current.pgid !== groupId) {
+			return pending("Recovered POSIX sentinel no longer matches its original exact process identity; refusing to target its group.");
 		}
 		// The record is published by the separately-invoked sentinel after it has
 		// installed its traps. A live PID with matching start token and PGID keeps
@@ -2955,7 +2967,9 @@ export class VerificationHarness {
 		return active.steps.some(step =>
 			step.type === "command" && (
 				(!!step.killRequestedAt && !step.killCompletedAt) ||
-				!!step.sentinelCleanupPending
+				!!step.sentinelCleanupPending ||
+				!!step.containerPayloadCleanupPending ||
+				!!step.containerTransportCleanupPending
 			),
 		);
 	}
@@ -2964,7 +2978,9 @@ export class VerificationHarness {
 		return step.type === "command" && (
 			step.status === "running" ||
 			(!!step.killRequestedAt && !step.killCompletedAt) ||
-			!!step.sentinelCleanupPending
+			!!step.sentinelCleanupPending ||
+			!!step.containerPayloadCleanupPending ||
+			!!step.containerTransportCleanupPending
 		);
 	}
 
@@ -3049,17 +3065,33 @@ export class VerificationHarness {
 			// instead settles only after its exact host docker-exec sentinel is reaped.
 			if (step.restartRecoveryMode === "container-exec" && step.containerId) {
 				try {
-					// The persisted pidFile identifies a process group inside this exact
-					// container. Do not let the host docker-exec sentinel be reaped (and
-					// do not acknowledge cancellation) until that payload is gone.
+					// Durable ordering: exact payload first, then exact host docker-exec
+					// transport. Each phase is persisted independently for crash recovery.
 					await this._killAndVerifyRecoveredContainerProcessGroup(step);
+					step.containerTransportCleanupPending = true;
+					this._persistActive();
 					await this.recoveredSentinelReaper(step);
+					step.containerTransportCleanupCompletedAt ??= Date.now();
+					delete step.containerTransportCleanupPending;
 					step.killCompletedAt ??= Date.now();
 				} catch (err) {
 					if (!isPendingCommandCleanupError(err)) throw err;
 					allSettled = false;
 				}
 				continue;
+			}
+			// Every recovered POSIX destructive action is authorized by the exact
+			// sentinel tuple. Never fall back to command-leader PID/heartbeat.
+			if (step.sentinelFile && this.platform !== "win32") {
+				try {
+					await this.recoveredSentinelReaper(step);
+					step.killCompletedAt ??= Date.now();
+					continue;
+				} catch (err) {
+					if (!isPendingCommandCleanupError(err)) throw err;
+					allSettled = false;
+					continue;
+				}
 			}
 			if (step.exitFile && fs.existsSync(step.exitFile)) {
 				// A recovered host command can have published its exit status while
@@ -3139,6 +3171,21 @@ export class VerificationHarness {
 		step: ActiveVerification["steps"][number],
 	): Promise<{ status: "settled" | "pending" | "unverifiable"; reason?: string }> {
 		const hadPriorKillAttempt = (step.killAttempts ?? 0) > 0 || !!step.killLastAttemptAt || !!step.killCompletedAt;
+		// Recovered host POSIX cleanup has one authority: the persisted sentinel.
+		// A leader PID, heartbeat, or lstart token is never sufficient.
+		if (step.sentinelFile && this.platform !== "win32") {
+			this._markPersistedCommandKillIntent(active, "SIGKILL", "timeout");
+			try {
+				await this.recoveredSentinelReaper(step);
+				step.killCompletedAt ??= Date.now();
+				this._persistActive();
+				return { status: "settled" };
+			} catch (err) {
+				if (!isPendingCommandCleanupError(err)) throw err;
+				this._persistActive();
+				return { status: "pending", reason: (err as Error).message };
+			}
+		}
 		let identity = this._verifyPersistedCommandIdentity(step);
 
 		if (!identity.verified || !identity.pid) {
@@ -3252,8 +3299,9 @@ export class VerificationHarness {
 
 			this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
 			this._persistActive();
-			this._killTrackedForSignal(signalId);
 			const commandKillsSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
+			// Exact payload cleanup precedes host docker-exec transport teardown.
+			if (commandKillsSettled) this._killTrackedForSignal(signalId);
 			this._drainPendingSignoffsForSignal(signalId);
 
 			for (const step of active.steps) {
@@ -3272,11 +3320,15 @@ export class VerificationHarness {
 			}
 			this._persistActive();
 
-			this.broadcastFn(goalId, {
-				type: "gate_verification_complete",
-				goalId, gateId: active.gateId, signalId,
-				status: "cancelled",
-			});
+			// Pending ownership evidence is deliberately non-terminal. The retry path
+			// owns eventual publication after both cleanup phases succeed.
+			if (commandKillsSettled) {
+				this.broadcastFn(goalId, {
+					type: "gate_verification_complete",
+					goalId, gateId: active.gateId, signalId,
+					status: "cancelled",
+				});
+			}
 
 			console.log(`[verification] Cancelled verification ${signalId} for goal ${goalId} (goal completing)`);
 		}
@@ -3310,22 +3362,22 @@ export class VerificationHarness {
 
 			this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
 			this._persistActive();
-			this._killTrackedForSignal(signalId);
 			const commandKillsSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
+			if (commandKillsSettled) this._killTrackedForSignal(signalId);
 			this._drainPendingSignoffsForSignal(signalId);
 			if (commandKillsSettled) {
 				this.activeVerifications.delete(signalId);
+				cancellations.push({
+					signalId,
+					gateId: active.gateId,
+					runningSessionIds: active.steps
+						.filter(step => step.sessionId && step.status === "running")
+						.map(step => step.sessionId!),
+				});
 			} else {
 				this._scheduleCommandKillCleanupRetry(signalId);
 			}
 
-			cancellations.push({
-				signalId,
-				gateId: active.gateId,
-				runningSessionIds: active.steps
-					.filter(step => step.sessionId && step.status === "running")
-					.map(step => step.sessionId!),
-			});
 		}
 
 		if (cancellations.length > 0) this._persistActive();
@@ -5588,6 +5640,13 @@ export class VerificationHarness {
 			let spawnError: Error | undefined;
 			// Container payload cleanup is distinct from host docker-exec cleanup.
 			let containerCleanup: Promise<void> | undefined;
+			// The wrapper emits this one-shot acknowledgement only after its atomic
+			// witness rename and before user payload execution. It combines with host
+			// spawn ownership before a container timeout/survival action is armed.
+			let resolveContainerOwnershipReady!: () => void;
+			const containerOwnershipReady = new Promise<void>(resolve => { resolveContainerOwnershipReady = resolve; });
+			let containerTimedOut = false;
+			let containerTimeoutTimer: TimerHandle | undefined;
 			try {
 				if (containerId) {
 					// Wrap the command so the in-container shell writes its PID
@@ -5614,7 +5673,7 @@ export class VerificationHarness {
 						// parent cannot execute user code until the atomic rename completes.
 						// The sentinel remains after the leader exits, preserving the exact
 						// identity needed for timeout and restart cleanup.
-						wrappedCmd = `mkdir -p ${qDir} 2>/dev/null || exit 125; __bobbit_ready=${qWitness}.ready.$$; rm -f "$__bobbit_ready"; mkfifo "$__bobbit_ready" || exit 125; BOBBIT_WITNESS=${qWitness} BOBBIT_NONCE=${qNonce} BOBBIT_CONTAINER=${qContainer} BOBBIT_READY="$__bobbit_ready" /bin/sh -c 'trap "" HUP INT TERM; __p=$$; __g=$(ps -o pgid= -p "$__p" 2>/dev/null | tr -d "[:space:]" || true); __s=$(awk "{print \\$22}" "/proc/$__p/stat" 2>/dev/null || true); case "$__p:$__g:$__s" in *::*) exit 125;; esac; __t="$BOBBIT_WITNESS.$$.tmp"; printf "{\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s" > "$__t" && mv "$__t" "$BOBBIT_WITNESS" || exit 125; printf . > "$BOBBIT_READY"; while :; do sleep 2147483647 & wait $!; done' & __bobbit_sentinel=$!; IFS= read -r __bobbit_ready_ack < "$__bobbit_ready" || exit 125; rm -f "$__bobbit_ready"; __bp=$$; printf %s "$__bp" > ${qPid}.tmp && mv ${qPid}.tmp ${qPid}; ( while :; do printf '{"pid":%s,"ts":%s}' "$__bp" "$(date +%s 2>/dev/null || printf 0)" > ${qHb}.tmp && mv ${qHb}.tmp ${qHb}; sleep 1; done ) & __hb=$!; ( ${command}\n); __ec=$?; kill "$__hb" 2>/dev/null; wait "$__hb" 2>/dev/null; printf %s "$__ec" > ${qExit}.tmp && mv ${qExit}.tmp ${qExit}; exit $__ec`;
+						wrappedCmd = `mkdir -p ${qDir} 2>/dev/null || exit 125; __bobbit_ready=${qWitness}.ready.$$; rm -f "$__bobbit_ready"; mkfifo "$__bobbit_ready" || exit 125; BOBBIT_WITNESS=${qWitness} BOBBIT_NONCE=${qNonce} BOBBIT_CONTAINER=${qContainer} BOBBIT_READY="$__bobbit_ready" /bin/sh -c 'trap "" HUP INT TERM; __p=$$; __g=$(ps -o pgid= -p "$__p" 2>/dev/null | tr -d "[:space:]" || true); __s=$(awk "{print \\$22}" "/proc/$__p/stat" 2>/dev/null || true); case "$__p:$__g:$__s" in *::*) exit 125;; esac; __t="$BOBBIT_WITNESS.$$.tmp"; printf "{\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s" > "$__t" && mv "$__t" "$BOBBIT_WITNESS" || exit 125; printf . > "$BOBBIT_READY"; while :; do sleep 2147483647 & wait $!; done' >/dev/null 2>&1 & __bobbit_sentinel=$!; IFS= read -r __bobbit_ready_ack < "$__bobbit_ready" || exit 125; rm -f "$__bobbit_ready"; printf 'BOBBIT_CONTAINER_OWNERSHIP_READY\\n'; __bp=$$; printf %s "$__bp" > ${qPid}.tmp && mv ${qPid}.tmp ${qPid}; ( while :; do printf '{"pid":%s,"ts":%s}' "$__bp" "$(date +%s 2>/dev/null || printf 0)" > ${qHb}.tmp && mv ${qHb}.tmp ${qHb}; sleep 1; done ) & __hb=$!; ( ${command}\n); __ec=$?; kill "$__hb" 2>/dev/null; wait "$__hb" 2>/dev/null; printf %s "$__ec" > ${qExit}.tmp && mv ${qExit}.tmp ${qExit}; exit $__ec`;
 					} else {
 						wrappedCmd = `echo $$ > ${killPidFile}; ${command}`;
 					}
@@ -5623,7 +5682,8 @@ export class VerificationHarness {
 					wrappedCmd = `exec setsid /bin/sh -c ${shellSingleQuote(wrappedCmd)}`;
 					tracked = spawnTracked("docker", ["exec", "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
 						stdio: ["ignore", "pipe", "pipe"],
-						timeoutMs: timeoutSec * 1000,
+						// Durable-container timeout is armed only after its atomic witness.
+						timeoutMs: useContainerDurable ? undefined : timeoutSec * 1000,
 						// On POSIX this sentinel is the only durable witness for the
 						// detached host docker-exec group after gateway restart.
 						...(sentinelFile && pidNonce ? { posixSentinelIdentity: { file: sentinelFile, nonce: pidNonce } } : {}),
@@ -5765,6 +5825,7 @@ export class VerificationHarness {
 						stderr += text;
 						if (stderr.length > 1024 * 1024) stderr = stderr.slice(-512 * 1024);
 					}
+					if (text.includes("BOBBIT_CONTAINER_OWNERSHIP_READY")) resolveContainerOwnershipReady();
 					if (streamCtx) {
 						this.broadcastFn(streamCtx.goalId, {
 							type: "gate_verification_step_output",
@@ -5792,6 +5853,39 @@ export class VerificationHarness {
 
 			let settled = false;
 			let settleStarted = false;
+			// Do not arm the execution deadline until the host sentinel/Job and the
+			// in-container atomic witness both acknowledge ownership. No polling: the
+			// wrapper's FIFO acknowledgement is forwarded as a one-shot stream marker.
+			if (useContainerDurable && streamCtx) {
+				void Promise.all([tracked!.ownershipReady, containerOwnershipReady]).then(() => {
+					if (containerTimeoutTimer || !tracked || settled) return;
+					containerTimeoutTimer = this.clock.setTimeout(() => {
+						if (!tracked || settled) return;
+						containerTimedOut = true;
+						const liveStep = this.activeVerifications.get(streamCtx.signalId)?.steps[streamCtx.stepIndex];
+						if (!liveStep) return;
+						const active = this.activeVerifications.get(streamCtx.signalId);
+						if (active) this._markPersistedCommandKillIntent(active, "SIGKILL", "timeout");
+						this._persistActive();
+						containerCleanup ??= this._killAndVerifyRecoveredContainerProcessGroup(liveStep);
+						void containerCleanup.then(
+							() => tracked?.killTree("SIGTERM"),
+							() => this._scheduleCommandKillCleanupRetry(streamCtx.signalId),
+						);
+					}, timeoutSec * 1000);
+					containerTimeoutTimer.unref?.();
+				}).catch(() => {
+					// Host or container readiness failure remains pending/retryable; no
+					// numeric transport fallback is permitted.
+					const active = this.activeVerifications.get(streamCtx.signalId);
+					const liveStep = active?.steps[streamCtx.stepIndex];
+					if (liveStep) {
+						liveStep.containerPayloadCleanupPending = true;
+						this._persistActive();
+					}
+				});
+			}
+
 			let exitCode: number | null = null;
 			let exitSignal: NodeJS.Signals | null = null;
 			let closeGraceTimer: TimerHandle | undefined;
@@ -5809,10 +5903,11 @@ export class VerificationHarness {
 				settleStarted = true;
 				if (closeGraceTimer) processClock.clearTimeout(closeGraceTimer);
 				if (exitFilePollTimer) processClock.clearInterval(exitFilePollTimer);
+				if (containerTimeoutTimer) this.clock.clearTimeout(containerTimeoutTimer);
 				this._trackedCommandChildren.delete(trackedKey);
 				try { stopTail?.(); } catch { /* ignore */ }
 
-				const didTimeOut = tracked!.timedOut();
+				const didTimeOut = tracked!.timedOut() || containerTimedOut;
 				const didCancel = !didTimeOut && this._cancelledTrackedKeys.delete(trackedKey);
 				// Do not report a timeout/cancel cleanup as successful merely because
 				// its shell leader closed. The tracked runner verifies the owned
@@ -5822,12 +5917,29 @@ export class VerificationHarness {
 				// Windows joins its spawn-time Job supervisor. Every result therefore
 				// waits for that ownership barrier, including natural success.
 				const treeCompletionMustBeVerified = true;
-				let treeCleanupVerified = await tracked!.waitForTreeExit();
-				// Never publish the host docker-exec result before its exact
-				// in-container payload group has either been reaped or failed closed.
-				if (containerCleanup) {
-					try { await containerCleanup; } catch { treeCleanupVerified = false; }
+				// A durable container sentinel deliberately outlives the command leader.
+				// Every terminal path therefore reaps the exact payload group *before*
+				// joining/killing its host docker-exec transport or publishing a result.
+				if (useContainerDurable && streamCtx) {
+					const liveStep = this.activeVerifications.get(streamCtx.signalId)?.steps[streamCtx.stepIndex];
+					if (liveStep) containerCleanup ??= this._killAndVerifyRecoveredContainerProcessGroup(liveStep);
 				}
+				if (containerCleanup) {
+					try {
+						await containerCleanup;
+					} catch (error) {
+						const live = streamCtx ? this.activeVerifications.get(streamCtx.signalId) : undefined;
+						if (live) {
+							this._markPersistedCommandKillIntent(live, "SIGKILL", didTimeOut ? "timeout" : "cancelled");
+							this._persistActive();
+							this._scheduleCommandKillCleanupRetry(streamCtx!.signalId);
+						}
+						// Fail closed: do not resolve a terminal command result while exact
+						// payload ownership is pending. The durable retry owns publication.
+						return;
+					}
+				}
+				let treeCleanupVerified = await tracked!.waitForTreeExit();
 				settled = true;
 
 				let outText = stdout;
@@ -6310,6 +6422,7 @@ export class VerificationHarness {
 		// Keep intent pending across restart; do not turn missing evidence into a
 		// numeric-PGID fallback or a terminal verdict.
 		step.killUnsafeReason = reason;
+		step.containerPayloadCleanupPending = true;
 		this._persistActive();
 		throw new PendingCommandCleanupError(reason);
 	}
@@ -6373,28 +6486,33 @@ export class VerificationHarness {
 
 	/** Kill only a group which the exact, live in-group sentinel still owns. */
 	private async _killAndVerifyRecoveredContainerProcessGroup(step: ActiveVerification["steps"][number]): Promise<void> {
+		// A completed payload phase is durable authority to continue at transport
+		// cleanup after a crash. Never probe or re-signal that historical PGID.
+		if (step.containerPayloadCleanupCompletedAt) return;
+		step.containerPayloadCleanupPending = true;
+		this._persistActive();
 		const witness = await this._verifyContainerOwnershipWitness(step);
 		const p = witness.sentinelPid;
 		const pgid = witness.pgid;
 		const start = shellSingleQuote(witness.startToken);
-		const script = `
-			p=${p}; pgid=${pgid}
-			live_p=$(ps -o pid= -p "$p" 2>/dev/null | tr -d '[:space:]' || true)
-			live_g=$(ps -o pgid= -p "$p" 2>/dev/null | tr -d '[:space:]' || true)
-			live_s=$(awk '{print $22}' "/proc/$p/stat" 2>/dev/null || true)
-			[ "$live_p" = "$p" ] || { echo BOBBIT_CONTAINER_WITNESS_STALE; exit 64; }
-			[ "$live_g" = "$pgid" ] || { echo BOBBIT_CONTAINER_WITNESS_PGID_MISMATCH; exit 65; }
-			[ "$live_s" = ${start} ] || { echo BOBBIT_CONTAINER_WITNESS_START_TOKEN_MISMATCH; exit 66; }
-			kill -TERM -- "-$pgid" 2>/dev/null || true
-			sleep 0.2
-			kill -KILL -- "-$pgid" 2>/dev/null || true
-			if kill -0 -- "-$pgid" 2>/dev/null; then echo BOBBIT_CONTAINER_GROUP_STILL_LIVE; exit 67; fi
-		`;
+		// Revalidate immediately before *each* destructive signal. There is no
+		// sleep/polling interval between them: identity loss after TERM aborts
+		// rather than allowing SIGKILL to name a recycled PGID.
+		const verify = `live_p=$(ps -o pid= -p "$p" 2>/dev/null | tr -d '[:space:]' || true); live_g=$(ps -o pgid= -p "$p" 2>/dev/null | tr -d '[:space:]' || true); live_s=$(awk '{print $22}' "/proc/$p/stat" 2>/dev/null || true); [ "$live_p" = "$p" ] || { echo BOBBIT_CONTAINER_WITNESS_STALE; exit 64; }; [ "$live_g" = "$pgid" ] || { echo BOBBIT_CONTAINER_WITNESS_PGID_MISMATCH; exit 65; }; [ "$live_s" = ${start} ] || { echo BOBBIT_CONTAINER_WITNESS_START_TOKEN_MISMATCH; exit 66; };`;
+		const script = `p=${p}; pgid=${pgid}; ${verify} kill -TERM -- "-$pgid" 2>/dev/null || { echo BOBBIT_CONTAINER_TERM_UNDELIVERED; exit 67; }; ${verify} kill -KILL -- "-$pgid" 2>/dev/null || { echo BOBBIT_CONTAINER_KILL_UNDELIVERED; exit 68; };`;
 		const result = await this._dockerExecCapture(step.containerId!, script);
-		if (result.code === 0) return;
+		if (result.code === 0) {
+			step.containerPayloadCleanupCompletedAt = Date.now();
+			delete step.containerPayloadCleanupPending;
+			delete step.killUnsafeReason;
+			this._persistActive();
+			return;
+		}
 		const detail = result.stdout.trim() || `docker exec exited ${result.code ?? "without a status"}`;
 		const marker = /BOBBIT_CONTAINER_WITNESS_(?:STALE|PGID_MISMATCH|START_TOKEN_MISMATCH)/.exec(detail)?.[0];
 		if (marker) this._rejectContainerWitness(step, marker);
+		step.containerPayloadCleanupPending = true;
+		this._persistActive();
 		throw new PendingCommandCleanupError(`Recovered container command group cleanup is not yet safe or complete: ${detail}`);
 	}
 
