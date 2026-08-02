@@ -150,6 +150,39 @@ function createWindowsRootExitWithOpenDescendantRunner() {
 	};
 }
 
+/** A child whose ownership witness has not acknowledged when cancellation arrives. */
+function createPreReadinessRunner() {
+	let acknowledgeOwnership!: () => void;
+	let killCalls = 0;
+	const ownershipReady = new Promise<void>(resolve => { acknowledgeOwnership = resolve; });
+	return {
+		nonDurable: true,
+		acknowledgeOwnership: () => acknowledgeOwnership(),
+		killCalls: () => killCalls,
+		spawn: () => {
+			const stdout = Object.assign(new EventEmitter(), { destroy() {} });
+			const stderr = Object.assign(new EventEmitter(), { destroy() {} });
+			const child = Object.assign(new EventEmitter(), { pid: 910_006, stdout, stderr });
+			let closed = false;
+			const close = () => {
+				if (closed) return;
+				closed = true;
+				child.emit("exit", null, "SIGTERM");
+				child.emit("close", null, "SIGTERM");
+			};
+			return {
+				child,
+				ownershipReady,
+				killed: () => killCalls > 0,
+				timedOut: () => false,
+				markSurvival: () => {},
+				killTree: () => { killCalls++; close(); },
+				waitForTreeExit: async () => closed,
+			} as any;
+		},
+	};
+}
+
 describe("deterministic tracked child", () => {
 	it("reports timeout and closes without launching a process", async () => {
 		const runner = createFakeVerificationCommandRunner();
@@ -268,6 +301,75 @@ describe("runCommandStep tree-kill", () => {
 
 		expect(result.passed).toBe(false);
 		expect(result.output).toContain("subprocess tree completion could not be verified");
+	});
+
+	it("waits for pre-readiness ownership before cancelling and publishing the gate cancellation", async () => {
+		const broadcasts: any[] = [];
+		const runner = createPreReadinessRunner();
+		const harness = makeHarness({ commandStepRunner: runner }, broadcasts);
+		const goalId = "goal-pre-readiness-cancel";
+		const gateId = "gate-pre-readiness-cancel";
+		const signalId = "sig-pre-readiness-cancel";
+		const streamCtx = { goalId, gateId, signalId, stepIndex: 0 };
+		(harness as any).activeVerifications.set(signalId, {
+			goalId, gateId, signalId,
+			overallStatus: "running",
+			startedAt: Date.now(),
+			currentPhase: 0,
+			steps: [{ name: "step", type: "command", status: "running", startedAt: Date.now() }],
+		});
+
+		const step = (harness as any).runCommandStep("true", TEST_DIR, 60, false, streamCtx);
+		expect((harness as any)._trackedCommandChildren.has(`${signalId}:0`)).toBe(true);
+		const cancellation = harness.cancelStaleVerifications(goalId, gateId);
+		await Promise.resolve();
+		expect(runner.killCalls()).toBe(0);
+		expect(broadcasts.some(event => event.type === "gate_verification_complete")).toBe(false);
+
+		runner.acknowledgeOwnership();
+		await cancellation;
+		await step;
+		expect(runner.killCalls()).toBe(1);
+		expect(broadcasts).toContainEqual(expect.objectContaining({
+			type: "gate_verification_complete", goalId, gateId, signalId, status: "cancelled",
+		}));
+		expect((harness as any).activeVerifications.has(signalId)).toBe(false);
+	});
+
+	it("cancels a ready sibling while another command still awaits ownership", async () => {
+		const harness = makeHarness();
+		const signalId = "sig-concurrent-pre-readiness-cancel";
+		let acknowledgeHeld!: () => void;
+		let heldKills = 0;
+		let readyKills = 0;
+		const heldOwnershipReady = new Promise<void>(resolve => { acknowledgeHeld = resolve; });
+		const makeTracked = (ownershipReady: Promise<void>, onKill: () => void) => ({
+			child: Object.assign(new EventEmitter(), { pid: 910_007, stdout: undefined, stderr: undefined }),
+			ownershipReady,
+			killed: () => false,
+			timedOut: () => false,
+			markSurvival: () => {},
+			killTree: onKill,
+			waitForTreeExit: async () => true,
+		});
+		(harness as any).activeVerifications.set(signalId, {
+			goalId: "goal-concurrent-pre-readiness-cancel", gateId: "gate-concurrent-pre-readiness-cancel", signalId,
+			overallStatus: "running", startedAt: Date.now(), currentPhase: 0,
+			steps: [
+				{ name: "held", type: "command", status: "running", startedAt: Date.now() },
+				{ name: "ready", type: "command", status: "running", startedAt: Date.now() },
+			],
+		});
+		(harness as any)._trackedCommandChildren.set(`${signalId}:0`, makeTracked(heldOwnershipReady, () => { heldKills++; }));
+		(harness as any)._trackedCommandChildren.set(`${signalId}:1`, makeTracked(Promise.resolve(), () => { readyKills++; }));
+
+		const cleanup = (harness as any)._killTrackedForSignal(signalId);
+		await Promise.resolve();
+		expect(heldKills).toBe(0);
+		expect(readyKills).toBe(1);
+		acknowledgeHeld();
+		expect(await cleanup).toBe(true);
+		expect(heldKills).toBe(1);
 	});
 
 	it("cancellation kills the tracked command and emits output plus cancelled marker", async () => {

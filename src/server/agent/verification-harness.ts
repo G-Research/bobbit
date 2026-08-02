@@ -3099,6 +3099,11 @@ export class VerificationHarness {
 		let allSettled = true;
 		for (const step of active.steps) {
 			if (!this._commandStepRequiresKillCleanup(step)) continue;
+			// A live TrackedChild has already joined its spawn-time ownership
+			// barrier. Its successful cleanup is stronger than a second recovery
+			// lookup, which could race the sentinel's final removal. Keep the
+			// terminal record durable, but never re-authorize its historical group.
+			if (step.killCompletedAt && !step.sentinelCleanupPending && !step.containerPayloadCleanupPending && !step.containerTransportCleanupPending) continue;
 			// Container state files are not host-visible, so fs.existsSync(exitFile)
 			// cannot decide whether cleanup is complete. A durable container command
 			// instead settles only after its exact host docker-exec sentinel is reaped.
@@ -3281,19 +3286,36 @@ export class VerificationHarness {
 	}
 
 	/**
-	 * Tree-kill any tracked command-step subprocess registered under the given
-	 * signalId. Uses SIGTERM with a 1s SIGKILL escalation so cancellation is
-	 * observable within ~1s (single-timer path, no setInterval poll).
+	 * Cancel live command children only after their spawn-time ownership barrier.
+	 * A durable recovery record may exist before the POSIX sentinel/Windows Job
+	 * acknowledges it; treating that pre-readiness state as recovered ownership
+	 * can leave cancellation pending after the live child was already reaped.
 	 */
-	private _killTrackedForSignal(signalId: string): void {
-		for (const key of Array.from(this._trackedCommandChildren.keys())) {
-			if (key.startsWith(signalId + ":")) {
-				const t = this._trackedCommandChildren.get(key);
-				this._trackedCommandChildren.delete(key);
-				this._cancelledTrackedKeys.add(key);
-				try { t?.killTree("SIGTERM", 1000); } catch { /* best-effort */ }
+	private async _killTrackedForSignal(signalId: string): Promise<boolean> {
+		const prefix = `${signalId}:`;
+		const trackedChildren = Array.from(this._trackedCommandChildren.entries())
+			.filter(([key]) => key.startsWith(prefix));
+		// Mark every child before waiting for any one readiness barrier. A blocked
+		// pre-readiness step must not let an independent ready sibling continue.
+		for (const [key] of trackedChildren) this._cancelledTrackedKeys.add(key);
+		const results = await Promise.all(trackedChildren.map(async ([key, tracked]) => {
+			try {
+				await tracked.ownershipReady;
+				tracked.killTree("SIGTERM", 1000);
+				if (!await tracked.waitForTreeExit()) return false;
+				const stepIndex = Number(key.slice(prefix.length));
+				const step = this.activeVerifications.get(signalId)?.steps[stepIndex];
+				if (step?.type === "command") step.killCompletedAt ??= Date.now();
+				if (this._trackedCommandChildren.get(key) === tracked) this._trackedCommandChildren.delete(key);
+				return true;
+			} catch {
+				// Ownership readiness failure is fail-closed in spawnTracked. Do not
+				// substitute a numeric PID/PGID cleanup; durable recovery remains
+				// pending until exact identity can be proved.
+				return false;
 			}
-		}
+		}));
+		return results.every(Boolean);
 	}
 
 	/**
@@ -3342,10 +3364,17 @@ export class VerificationHarness {
 			// their live tracked cleanup. Container transport remains deferred until
 			// its exact payload phase has settled.
 			const hasContainerCommand = active.steps.some(step => step.type === "command" && !!step.containerId);
-			if (!hasContainerCommand) this._killTrackedForSignal(signalId);
-			const commandKillsSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
+			// A live host child is the current exact authority. Await its ownership
+			// barrier and tree-exit proof before consulting recovery metadata.
+			const liveHostCleanupSettled = hasContainerCommand
+				? true
+				: await this._killTrackedForSignal(signalId);
+			const persistedCleanupSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
 			// Exact payload cleanup precedes host docker-exec transport teardown.
-			if (commandKillsSettled) this._killTrackedForSignal(signalId);
+			const liveTransportCleanupSettled = hasContainerCommand && persistedCleanupSettled
+				? await this._killTrackedForSignal(signalId)
+				: true;
+			const commandKillsSettled = liveHostCleanupSettled && persistedCleanupSettled && liveTransportCleanupSettled;
 			this._drainPendingSignoffsForSignal(signalId);
 
 			for (const step of active.steps) {
@@ -3407,9 +3436,14 @@ export class VerificationHarness {
 			this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
 			this._persistActive();
 			const hasContainerCommand = active.steps.some(step => step.type === "command" && !!step.containerId);
-			if (!hasContainerCommand) this._killTrackedForSignal(signalId);
-			const commandKillsSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
-			if (commandKillsSettled) this._killTrackedForSignal(signalId);
+			const liveHostCleanupSettled = hasContainerCommand
+				? true
+				: await this._killTrackedForSignal(signalId);
+			const persistedCleanupSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
+			const liveTransportCleanupSettled = hasContainerCommand && persistedCleanupSettled
+				? await this._killTrackedForSignal(signalId)
+				: true;
+			const commandKillsSettled = liveHostCleanupSettled && persistedCleanupSettled && liveTransportCleanupSettled;
 			this._drainPendingSignoffsForSignal(signalId);
 			if (commandKillsSettled) {
 				this.activeVerifications.delete(signalId);
