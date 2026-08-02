@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Page } from "@playwright/test";
+import { createRunChild } from "../../harness/run-isolation.js";
 import { apiFetch, expect } from "./journey-fixture.js";
 
 /** Stable selectors from tests/e2e/ui/add-project-helpers.ts */
@@ -50,14 +51,9 @@ export function makeMultiRepoFixture(label: string, names: readonly string[]): s
 	return root;
 }
 
-let dirCounter = 0;
+/** Allocate a securely unique, run-owned directory for an onboarding fixture. */
 export function uniqueDir(label: string): string {
-	const dir = join(
-		tmpdir(),
-		`bobbit-v2-onb-${label}-${process.env.E2E_PORT ?? "0"}-${Date.now()}-${++dirCounter}`,
-	);
-	mkdirSync(dir, { recursive: true });
-	return dir;
+	return createRunChild(`onb-${label}`);
 }
 
 export async function clearAddedProjects(): Promise<void> {
