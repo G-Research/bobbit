@@ -1633,11 +1633,19 @@ export class AgentInterface extends LitElement {
 	/**
 	 * Ctrl/Cmd+Enter composer steer: route the current text through the STEER path
 	 * (`session.steer`) instead of `session.prompt`. Mirrors sendMessage's
-	 * readiness + cleanup, but is text-only — attachments are blocked upstream in
-	 * the editor, so there is no attachment handling and no `/compact` branch here.
+	 * readiness, but is text-only — attachments are blocked upstream in the editor,
+	 * so there is no attachment handling and no `/compact` branch here.
+	 *
+	 * Transactional/readiness-first: this runs the pre-send checks and, only when
+	 * they pass, performs the steer and returns `true`. It deliberately does NOT
+	 * mutate the editor (value/attachments/draft) — the MessageEditor owns its own
+	 * clearing and defers it until this resolves `true` AND its composer snapshot is
+	 * unchanged, so a mid-flight edit or a newly added attachment is never silently
+	 * discarded. Returns `false` when the send cannot proceed (empty text, missing/
+	 * cancelled API key) so the editor keeps the draft, text, and history intact.
 	 */
-	public async _steerSend(text: string) {
-		if (!text.trim()) return;
+	public async _steerSend(text: string): Promise<boolean> {
+		if (!text.trim()) return false;
 		const session = this.session;
 		if (!session) throw new Error("No session set on AgentInterface");
 		if (!session.state.model) throw new Error("No model set on AgentInterface");
@@ -1652,10 +1660,10 @@ export class AgentInterface extends LitElement {
 			if (!apiKey) {
 				if (!this.onApiKeyRequired) {
 					console.error("No API key configured and no onApiKeyRequired handler set");
-					return;
+					return false;
 				}
 				const success = await this.onApiKeyRequired(provider);
-				if (!success) return;
+				if (!success) return false;
 			}
 		}
 
@@ -1664,17 +1672,11 @@ export class AgentInterface extends LitElement {
 			await this.onBeforeSend();
 		}
 
-		// Only clear editor after we know we can send.
-		this._messageEditor.value = "";
-		this._messageEditor.attachments = [];
-		this._clearAttachmentDraft();
-		this._scrollToBottom();
-		// Retain composer focus after a keyboard steer.
-		this._messageEditor.querySelector("textarea")?.focus();
-
 		// RemoteAgent.steer accepts a plain string at runtime (it extractText()s any
 		// non-string message); the Agent type is narrower, hence the cast.
 		session.steer(text as unknown as AgentMessage);
+		this._scrollToBottom();
+		return true;
 	}
 
 
@@ -2510,9 +2512,7 @@ export class AgentInterface extends LitElement {
 							.onSend=${(input: string, attachments: Attachment[]) => {
 								this.sendMessage(input, attachments);
 							}}
-							.onSteerSend=${(text: string) => {
-								void this._steerSend(text);
-							}}
+							.onSteerSend=${(text: string) => this._steerSend(text)}
 							.onAbort=${() => session.abort()}
 							.onSteer=${(msg: any) => {
 								if (typeof (session as any).steerQueued === 'function') {

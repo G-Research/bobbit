@@ -122,7 +122,7 @@ export class MessageEditor extends LitElement {
 	/** Distinct from `onSteer` (the queued-pill Steer button contract). Invoked by
 	 *  the Ctrl/Cmd+Enter composer shortcut to send the current text through the
 	 *  STEER path instead of the normal prompt path. Text-only. */
-	@property() onSteerSend?: (text: string) => void;
+	@property() onSteerSend?: (text: string) => boolean | Promise<boolean>;
 	@property() onRemoveQueued?: (id: string) => void;
 	@property() onEditQueued?: (msg: QueuedMessage) => void;
 	@property() onReorder?: (messageIds: string[]) => void;
@@ -932,7 +932,7 @@ export class MessageEditor extends LitElement {
 		// (Ctrl/Cmd+Enter also satisfies `!e.shiftKey`). IME is already guarded above.
 		if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
 			e.preventDefault();
-			this.handleSteerShortcut();
+			void this.handleSteerShortcut();
 			return;
 		}
 
@@ -1045,6 +1045,7 @@ export class MessageEditor extends LitElement {
 			}
 		}
 		this._sendSizeError = "";
+		this._steerError = ""; // a normal send dismisses any stale steer-attachment alert (D2)
 		const packSlashLaunch = this.attachments.length === 0 ? this._packSlashLaunchFromText(text) : undefined;
 		if (packSlashLaunch) {
 			this._slashMenuOpen = false;
@@ -1078,13 +1079,16 @@ export class MessageEditor extends LitElement {
 		this.addToHistory(text);
 	};
 
-	/** Ctrl/Cmd+Enter: send the current text through the STEER path. Mirrors
-	 *  handleSend's lifecycle (draft cleanup event, history reset, addToHistory)
-	 *  but routes to `onSteerSend` instead of `onSend`. Text-only: attachments are
-	 *  blocked with an inline error rather than silently dropped or downgraded to a
-	 *  normal prompt. Like handleSend, it does NOT clear `this.value` — the parent
-	 *  `onSteerSend` handler clears the editor. */
-	private handleSteerShortcut = () => {
+	/** Ctrl/Cmd+Enter: send the current text through the STEER path. Text-only:
+	 *  attachments are blocked with an inline error rather than silently dropped or
+	 *  downgraded to a normal prompt.
+	 *
+	 *  Transactional/readiness-first: NO irreversible lifecycle work (draft
+	 *  tombstone, history, editor clear) happens until `onSteerSend` confirms the
+	 *  send with a `true` result. On confirmation, the draft is cleared/tombstoned
+	 *  ONLY if the composer still holds exactly what we sent — a mid-flight edit or a
+	 *  newly added attachment during the await is preserved, never discarded. */
+	private handleSteerShortcut = async () => {
 		if (this.processingFiles) return; // same readiness guard as send
 		if (this.attachments.length > 0) {
 			// Block: retain text, attachments, draft, and focus untouched.
@@ -1095,13 +1099,26 @@ export class MessageEditor extends LitElement {
 		if (!text.trim()) return; // non-empty text required
 		this._steerError = "";
 		this._sendSizeError = "";
-		// Parity with handleSend: dispatch a composed event so session-manager clears
-		// the persisted draft without monkey-patching.
-		this.dispatchEvent(new CustomEvent("message-send", { bubbles: true, composed: true }));
-		this.onSteerSend?.(text);
+		// Await readiness + send BEFORE any irreversible lifecycle work. A failed or
+		// cancelled preflight leaves the draft, text, and history fully intact.
+		const sent = await this.onSteerSend?.(text);
+		if (sent !== true) return;
+		// Confirmed sent: record the sent text in command history.
 		this._historyIndex = -1;
 		this._savedDraft = "";
 		void this.addToHistory(text);
+		// Clear + tombstone the draft ONLY if the composer still holds exactly what we
+		// sent. A mid-flight text edit or a newly added attachment must be preserved.
+		if (this.value === text && this.attachments.length === 0) {
+			this.dispatchEvent(new CustomEvent("message-send", { bubbles: true, composed: true }));
+			this.value = "";
+			this.onInput?.(this.value);
+			const ta = this.textareaRef.value;
+			if (ta) {
+				ta.value = "";
+				ta.focus();
+			}
+		}
 	};
 
 	private handleAttachmentClick = () => {

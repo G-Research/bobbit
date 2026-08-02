@@ -23,6 +23,9 @@ interface Spies {
 	onSteerSend: string[];
 }
 
+/** By default the steer mock confirms the send (resolves true) so the editor
+ *  runs its post-send lifecycle. Individual tests override `el.onSteerSend` to
+ *  simulate failure/cancellation or a controllable in-flight promise. */
 async function mount(): Promise<{ el: any; spies: Spies }> {
 	const el = document.createElement("message-editor") as any;
 	el.showModelSelector = false;
@@ -30,10 +33,17 @@ async function mount(): Promise<{ el: any; spies: Spies }> {
 	el.showAttachmentButton = false;
 	const spies: Spies = { onSend: [], onSteerSend: [] };
 	el.onSend = (text: string) => spies.onSend.push(text);
-	el.onSteerSend = (text: string) => spies.onSteerSend.push(text);
+	el.onSteerSend = (text: string) => { spies.onSteerSend.push(text); return true; };
 	document.body.appendChild(el);
 	await el.updateComplete;
 	return { el, spies };
+}
+
+/** Drain the microtask queue so the async `handleSteerShortcut` chain (await
+ *  onSteerSend → addToHistory → clear) settles, then flush the Lit render. */
+async function settle(el: any): Promise<void> {
+	for (let i = 0; i < 5; i++) await Promise.resolve();
+	await el.updateComplete;
 }
 
 const ta = (el: any): HTMLTextAreaElement => el.querySelector("textarea");
@@ -46,10 +56,16 @@ async function setValue(el: any, value: string): Promise<void> {
 	await el.updateComplete;
 }
 
-async function key(el: any, k: string, mods: Partial<KeyboardEventInit> = {}): Promise<KeyboardEvent> {
+function dispatchKey(el: any, k: string, mods: Partial<KeyboardEventInit> = {}): KeyboardEvent {
 	const ev = new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, ...mods });
 	ta(el).dispatchEvent(ev);
-	await el.updateComplete;
+	return ev;
+}
+
+async function key(el: any, k: string, mods: Partial<KeyboardEventInit> = {}): Promise<KeyboardEvent> {
+	const ev = dispatchKey(el, k, mods);
+	// handleSteerShortcut is async & fire-and-forget from keydown — let it settle.
+	await settle(el);
 	return ev;
 }
 
@@ -212,5 +228,108 @@ describe("MessageEditor Ctrl/Cmd+Enter steer shortcut", () => {
 		expect(el._historyIndex).toBe(-1);
 		expect(el._savedDraft).toBe("");
 		expect(recorded).toEqual(["steer me"]);
+	});
+
+	it("a confirmed steer clears the composer and retains focus", async () => {
+		const { el } = await mount();
+		await setValue(el, "steer and clear");
+		ta(el).focus();
+		await key(el, "Enter", { ctrlKey: true });
+
+		expect(el.value).toBe("");
+		expect(ta(el).value).toBe("");
+		expect(el.ownerDocument.activeElement).toBe(ta(el));
+	});
+
+	it("a confirmed steer dispatches the message-send draft-cleanup event", async () => {
+		const { el } = await mount();
+		let sends = 0;
+		el.addEventListener("message-send", () => { sends++; });
+		await setValue(el, "steer me");
+		await key(el, "Enter", { ctrlKey: true });
+		expect(sends).toBe(1);
+	});
+
+	it("a failed/cancelled readiness (onSteerSend false) leaves draft, history and value intact", async () => {
+		const { el, spies } = await mount();
+		el.onSteerSend = (t: string) => { spies.onSteerSend.push(t); return false; };
+		el._historyIndex = -1;
+		const recorded: string[] = [];
+		el.addToHistory = async (t: string) => { recorded.push(t); };
+		let sends = 0;
+		el.addEventListener("message-send", () => { sends++; });
+		await setValue(el, "unsent draft");
+
+		await key(el, "Enter", { ctrlKey: true });
+
+		expect(spies.onSteerSend).toEqual(["unsent draft"]);
+		// No irreversible lifecycle work ran.
+		expect(sends).toBe(0);
+		expect(recorded).toEqual([]);
+		expect(el._historyIndex).toBe(-1);
+		expect(el.value).toBe("unsent draft");
+	});
+
+	it("a mid-flight attachment is preserved, not discarded, when the steer resolves", async () => {
+		const { el } = await mount();
+		let resolveSteer!: (v: boolean) => void;
+		const recorded: string[] = [];
+		el.addToHistory = async (t: string) => { recorded.push(t); };
+		let sends = 0;
+		el.addEventListener("message-send", () => { sends++; });
+		el.onSteerSend = () => new Promise<boolean>((r) => { resolveSteer = r; });
+		await setValue(el, "steer me");
+
+		// Fire the shortcut; the send is still pending.
+		dispatchKey(el, "Enter", { ctrlKey: true });
+		await Promise.resolve();
+		// User adds an attachment while the steer is in flight.
+		el.attachments = [{ id: "a1", type: "image", fileName: "f.png", mimeType: "image/png", content: "AAAA", preview: "AAAA" }];
+		resolveSteer(true);
+		await settle(el);
+
+		// Snapshot no longer matches (attachment present) → nothing cleared/discarded.
+		expect(el.value).toBe("steer me");
+		expect(el.attachments.length).toBe(1);
+		expect(sends).toBe(0);
+		// History still records the sent text (it was confirmed).
+		expect(recorded).toEqual(["steer me"]);
+	});
+
+	it("a mid-flight text edit is preserved, not cleared, when the steer resolves", async () => {
+		const { el } = await mount();
+		let resolveSteer!: (v: boolean) => void;
+		let sends = 0;
+		el.addEventListener("message-send", () => { sends++; });
+		el.onSteerSend = () => new Promise<boolean>((r) => { resolveSteer = r; });
+		await setValue(el, "original");
+
+		dispatchKey(el, "Enter", { ctrlKey: true });
+		await Promise.resolve();
+		// User keeps typing during the await.
+		el.value = "original plus more";
+		resolveSteer(true);
+		await settle(el);
+
+		// Newer text preserved because the snapshot no longer matches what we sent.
+		expect(el.value).toBe("original plus more");
+		expect(sends).toBe(0);
+	});
+
+	it("handleSend clears a stale steer-attachment error (D2)", async () => {
+		const { el, spies } = await mount();
+		// Set the recovery text first (an input event of its own would clear the
+		// error), THEN simulate the blocked-steer alert still being visible.
+		await setValue(el, "recovered via enter");
+		el._steerError = MessageEditor.STEER_ATTACHMENT_ERROR;
+		await el.updateComplete;
+		expect(el.querySelector('[data-testid="composer-steer-error"]')).not.toBeNull();
+
+		// A plain-text normal send (Enter) must dismiss the stale alert.
+		await key(el, "Enter");
+
+		expect(spies.onSend).toEqual(["recovered via enter"]);
+		expect(el._steerError).toBe("");
+		expect(el.querySelector('[data-testid="composer-steer-error"]')).toBeNull();
 	});
 });
