@@ -1737,7 +1737,8 @@
       "execution": {
         "runner": "vitest",
         "tier": "unit",
-        "project": "integration"
+        "project": "isolated",
+        "reason": "It intentionally constructs multiple gateways that mutate module-global serverCommandRunner, so it needs a dedicated isolated fork."
       }
     },
     {
