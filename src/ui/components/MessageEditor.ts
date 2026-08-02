@@ -146,6 +146,11 @@ export class MessageEditor extends LitElement {
 	 *  present. Shown as an inline error; cleared on the next edit or when the
 	 *  attachments change. */
 	@state() private _steerError = "";
+	/** Reentrancy guard for {@link handleSteerShortcut}. True while an async steer
+	 *  send is mid-flight so repeated Ctrl/Cmd+Enter presses during the readiness
+	 *  await cannot steer the same composer snapshot twice. Plain field — NOT
+	 *  `@state`, it must not trigger a re-render. */
+	private _steerInFlight = false;
 	@state() private isRecording = false;
 	private fileInputRef = createRef<HTMLInputElement>();
 
@@ -1095,29 +1100,40 @@ export class MessageEditor extends LitElement {
 			this._steerError = MessageEditor.STEER_ATTACHMENT_ERROR;
 			return;
 		}
+		// Reentrancy guard: while the async readiness/send await is pending the composer
+		// stays enabled, so a second Ctrl/Cmd+Enter (or key auto-repeat) would re-enter
+		// with the same unchanged snapshot and steer the identical text twice. Bail if a
+		// steer is already in flight. Plain field (NOT @state) — it must not trigger a
+		// re-render.
+		if (this._steerInFlight) return;
 		const text = this.value;
 		if (!text.trim()) return; // non-empty text required
 		this._steerError = "";
 		this._sendSizeError = "";
-		// Await readiness + send BEFORE any irreversible lifecycle work. A failed or
-		// cancelled preflight leaves the draft, text, and history fully intact.
-		const sent = await this.onSteerSend?.(text);
-		if (sent !== true) return;
-		// Confirmed sent: record the sent text in command history.
-		this._historyIndex = -1;
-		this._savedDraft = "";
-		void this.addToHistory(text);
-		// Clear + tombstone the draft ONLY if the composer still holds exactly what we
-		// sent. A mid-flight text edit or a newly added attachment must be preserved.
-		if (this.value === text && this.attachments.length === 0) {
-			this.dispatchEvent(new CustomEvent("message-send", { bubbles: true, composed: true }));
-			this.value = "";
-			this.onInput?.(this.value);
-			const ta = this.textareaRef.value;
-			if (ta) {
-				ta.value = "";
-				ta.focus();
+		this._steerInFlight = true;
+		try {
+			// Await readiness + send BEFORE any irreversible lifecycle work. A failed or
+			// cancelled preflight leaves the draft, text, and history fully intact.
+			const sent = await this.onSteerSend?.(text);
+			if (sent !== true) return;
+			// Confirmed sent: record the sent text in command history.
+			this._historyIndex = -1;
+			this._savedDraft = "";
+			void this.addToHistory(text);
+			// Clear + tombstone the draft ONLY if the composer still holds exactly what we
+			// sent. A mid-flight text edit or a newly added attachment must be preserved.
+			if (this.value === text && this.attachments.length === 0) {
+				this.dispatchEvent(new CustomEvent("message-send", { bubbles: true, composed: true }));
+				this.value = "";
+				this.onInput?.(this.value);
+				const ta = this.textareaRef.value;
+				if (ta) {
+					ta.value = "";
+					ta.focus();
+				}
 			}
+		} finally {
+			this._steerInFlight = false;
 		}
 	};
 

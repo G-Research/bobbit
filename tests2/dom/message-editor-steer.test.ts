@@ -316,6 +316,37 @@ describe("MessageEditor Ctrl/Cmd+Enter steer shortcut", () => {
 		expect(sends).toBe(0);
 	});
 
+	it("a re-entrant Ctrl+Enter while a steer is in flight is ignored (guard prevents duplicate sends)", async () => {
+		const { el, spies } = await mount();
+		let resolveSteer!: (v: boolean) => void;
+		el.onSteerSend = (t: string) => {
+			spies.onSteerSend.push(t);
+			return new Promise<boolean>((r) => { resolveSteer = r; });
+		};
+		await setValue(el, "steer once");
+
+		// Fire the shortcut twice while the first send is still pending. The second
+		// press must be dropped by the in-flight reentrancy guard.
+		dispatchKey(el, "Enter", { ctrlKey: true });
+		await Promise.resolve();
+		dispatchKey(el, "Enter", { ctrlKey: true });
+		await Promise.resolve();
+
+		expect(spies.onSteerSend).toEqual(["steer once"]);
+
+		// Resolve the single in-flight send; the composer clears exactly once.
+		resolveSteer(true);
+		await settle(el);
+		expect(spies.onSteerSend).toEqual(["steer once"]);
+		expect(el.value).toBe("");
+
+		// After the guard clears, a fresh Ctrl+Enter steers again as normal.
+		await setValue(el, "steer twice");
+		el.onSteerSend = (t: string) => { spies.onSteerSend.push(t); return true; };
+		await key(el, "Enter", { ctrlKey: true });
+		expect(spies.onSteerSend).toEqual(["steer once", "steer twice"]);
+	});
+
 	it("handleSend clears a stale steer-attachment error (D2)", async () => {
 		const { el, spies } = await mount();
 		// Set the recovery text first (an input event of its own would clear the
