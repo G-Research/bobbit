@@ -330,12 +330,12 @@ function normalCommand(label: string): string {
 }
 
 /**
- * The payload is an adversary: it walks its launcher ancestry to discover the
- * nonce embedded in the old stdout completion protocol, prints a syntactically
- * valid forged success, then either fails or remains live. Assertions below
- * use only externally visible lifecycle state, never this protocol spelling.
+ * The payload is an adversary. It reads the immediate wrapper command line to
+ * recover its nonce, then bypasses the payload FIFO and writes an exact control
+ * line straight to the wrapper's stdout FD. The harness must authenticate the
+ * control-channel writer, not merely its bytes.
  */
-function forgedLegacyCompletionCommand(
+function forgedWrapperFdCompletionCommand(
   label: string,
   action: "fail" | "hold",
 ): string {
@@ -343,8 +343,10 @@ function forgedLegacyCompletionCommand(
   const afterForgery =
     action === "fail"
       ? "exit 23"
-      : `rm -f ${fifo}; mkfifo ${fifo}; IFS= read -r _ < ${fifo}; rm -f ${fifo}`;
-  return `__bobbit_ancestor=$$; __bobbit_nonce=''; while [ "$__bobbit_ancestor" -gt 1 ] && [ -z "$__bobbit_nonce" ]; do __bobbit_nonce=$(tr '\\000' '\\n' < "/proc/$__bobbit_ancestor/cmdline" 2>/dev/null | grep -Eo "BOBBIT_NONCE=['\\\"]?[0-9a-f-]{36}" | sed "s/.*=['\\\"]*//" | head -n 1); __bobbit_ancestor=$(awk '/^PPid:/ { print $2 }' "/proc/$__bobbit_ancestor/status" 2>/dev/null); done; test -n "$__bobbit_nonce" || { printf 'ADVERSARY_NONCE_DISCOVERY_FAILED:${label}\\n' >&2; exit 97; }; printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; printf 'ADVERSARY_FORGED_COMPLETION:${label}\\n'; printf 'BOBBIT_CONTAINER_PAYLOAD_EXIT:%s:0\\n' "$__bobbit_nonce"; ${afterForgery}`;
+      : `IFS= read -r _ < ${fifo}; rm -f ${fifo}`;
+  const prepareHold =
+    action === "hold" ? `rm -f ${fifo}; mkfifo ${fifo}; ` : "";
+  return `__bobbit_parent=$PPID; __bobbit_nonce=$(tr '\\000' '\\n' < "/proc/$__bobbit_parent/cmdline" 2>/dev/null | grep -Eo "BOBBIT_NONCE=['\\\"]?[0-9a-f-]{36}" | sed "s/.*=['\\\"]*//" | head -n 1); test -n "$__bobbit_nonce" || { printf 'ADVERSARY_PARENT_NONCE_DISCOVERY_FAILED:${label}\\n' >&2; exit 97; }; ${prepareHold}printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; printf 'ADVERSARY_DIRECT_WRAPPER_FD_FORGERY:${label}\\n' >&2; printf 'BOBBIT_CONTAINER_LAUNCHER_EXIT:%s:0\\n' "$__bobbit_nonce" > "/proc/$__bobbit_parent/fd/1"; ${afterForgery}`;
 }
 
 async function startStep(
@@ -453,33 +455,59 @@ function assertContainerAlive(
   expect(pid, `${label} PID`).toBeGreaterThan(0);
 }
 
+function readActiveVerification(statePath: string, signalId: string): any | undefined {
+  if (!existsSync(statePath)) return undefined;
+  const state = JSON.parse(readFileSync(statePath, "utf8"));
+  return state.verifications?.find((entry: any) => entry.signalId === signalId);
+}
+
+function waitForActiveVerification(
+  statePath: string,
+  signalId: string,
+  predicate: (entry: any | undefined) => boolean,
+  reason: string,
+): Promise<any | undefined> {
+  return new Promise((resolveState, reject) => {
+    let watcher: ReturnType<typeof watch> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (entry: any | undefined) => {
+      watcher?.close();
+      if (timer) clearTimeout(timer);
+      resolveState(entry);
+    };
+    const observe = () => {
+      try {
+        const entry = readActiveVerification(statePath, signalId);
+        if (predicate(entry)) finish(entry);
+      } catch (error) {
+        watcher?.close();
+        if (timer) clearTimeout(timer);
+        reject(error);
+      }
+    };
+    watcher = watch(resolve(statePath, ".."), (_event, file) => {
+      if (file === "active-verifications.json") observe();
+    });
+    timer = setTimeout(() => {
+      watcher?.close();
+      reject(new Error(reason));
+    }, 120_000);
+    // Covers a transition that completed between the HTTP acknowledgement and
+    // watcher setup without turning this event barrier into polling.
+    observe();
+  });
+}
+
 function waitForActiveRemoval(
   statePath: string,
   signalId: string,
 ): Promise<void> {
-  return new Promise((resolveRemoval, reject) => {
-    const watcher = watch(resolve(statePath, ".."), (_event, file) => {
-      if (file !== "active-verifications.json") return;
-      try {
-        if (
-          !existsSync(statePath) ||
-          !readFileSync(statePath, "utf8").includes(signalId)
-        ) {
-          watcher.close();
-          clearTimeout(timer);
-          resolveRemoval();
-        }
-      } catch (error) {
-        watcher.close();
-        clearTimeout(timer);
-        reject(error);
-      }
-    });
-    const timer = setTimeout(() => {
-      watcher.close();
-      reject(new Error(`restart recovery did not settle ${signalId}`));
-    }, 120_000);
-  });
+  return waitForActiveVerification(
+    statePath,
+    signalId,
+    (entry) => !entry,
+    `restart recovery did not settle ${signalId}`,
+  ).then(() => undefined);
 }
 
 function cleanupDockerProject(projectId: string): void {
@@ -529,6 +557,7 @@ test("container command verification owns only its exact payload and docker-exec
   let projectId = "";
   let containerId = "";
   let siblingPid = 0;
+  const activePath = join(root, ".bobbit", "state", "active-verifications.json");
   try {
     gateway = await startGateway(root, port);
     const projectResponse = await api(gateway, "/api/projects", {
@@ -677,7 +706,7 @@ test("container command verification owns only its exact payload and docker-exec
             {
               name: "forged-nonzero",
               type: "command",
-              run: forgedLegacyCompletionCommand("forged-nonzero", "fail"),
+              run: forgedWrapperFdCompletionCommand("forged-nonzero", "fail"),
               timeout: 30,
             },
           ],
@@ -694,6 +723,18 @@ test("container command verification owns only its exact payload and docker-exec
       "forged-nonzero",
       containerId,
     );
+    const forgedFailureControlLine = await viewer.waitFrom(
+      forgedFailureFrom,
+      (event) =>
+        event.type === "gate_verification_step_output" &&
+        event.signalId === forgedFailure.signalId &&
+        typeof event.text === "string" &&
+        event.text.includes(`BOBBIT_CONTAINER_LAUNCHER_EXIT:${forgedFailure.witness.nonce}:0`),
+    );
+    expect(
+      forgedFailureControlLine.text,
+      "the adversary must reach the wrapper FD rather than the payload FIFO",
+    ).not.toContain("[payload]");
     const forgedFailureDone = await viewer.waitFrom(
       forgedFailureFrom,
       (event) =>
@@ -727,7 +768,7 @@ test("container command verification owns only its exact payload and docker-exec
             {
               name: "forged-hold",
               type: "command",
-              run: forgedLegacyCompletionCommand("forged-hold", "hold"),
+              run: forgedWrapperFdCompletionCommand("forged-hold", "hold"),
               timeout: 30,
             },
           ],
@@ -744,6 +785,18 @@ test("container command verification owns only its exact payload and docker-exec
       "forged-hold",
       containerId,
     );
+    const forgedHoldControlLine = await viewer.waitFrom(
+      forgedHoldFrom,
+      (event) =>
+        event.type === "gate_verification_step_output" &&
+        event.signalId === forgedHold.signalId &&
+        typeof event.text === "string" &&
+        event.text.includes(`BOBBIT_CONTAINER_LAUNCHER_EXIT:${forgedHold.witness.nonce}:0`),
+    );
+    expect(
+      forgedHoldControlLine.text,
+      "the held payload must inject its forged line through the wrapper FD",
+    ).not.toContain("[payload]");
     const forgedHoldActive = await api(
       gateway,
       `/api/goals/${forgedHoldGoal}/verifications/active`,
@@ -901,12 +954,6 @@ test("container command verification owns only its exact payload and docker-exec
       "restart",
       containerId,
     );
-    const activePath = join(
-      root,
-      ".bobbit",
-      "state",
-      "active-verifications.json",
-    );
     const recovered = waitForActiveRemoval(activePath, restartStep.signalId);
     viewer.close();
     viewer = undefined;
@@ -919,6 +966,91 @@ test("container command verification owns only its exact payload and docker-exec
       containerId,
       siblingPid,
       "unrelated sibling after restart recovery",
+    );
+    viewer.close();
+    viewer = undefined;
+
+    // Break the in-container atomic witness path before the wrapper can launch
+    // user code. A regular file where the state directory must be makes mkdir
+    // fail deterministically even for root inside the test container.
+    docker([
+      "exec",
+      containerId,
+      "/bin/sh",
+      "-c",
+      "rm -rf /tmp/.bobbit-verif; : > /tmp/.bobbit-verif",
+    ]);
+    const witnessFailureGoal = await createSandboxGoal(
+      gateway,
+      projectId,
+      "witness-publication-failure",
+      [
+        {
+          id: "witness-publication-failure",
+          name: "witness-publication-failure",
+          dependsOn: [],
+          verify: [
+            {
+              name: "witness-publication-failure",
+              type: "command",
+              run: "printf 'PAYLOAD_STARTED:witness-publication-failure\\n'; exec tail -f /dev/null",
+              timeout: 30,
+            },
+          ],
+        },
+      ],
+    );
+    viewer = await connectViewer(gateway, witnessFailureGoal);
+    const witnessFailureFrom = viewer.mark();
+    const witnessFailureResponse = await api(
+      gateway,
+      `/api/goals/${witnessFailureGoal}/gates/witness-publication-failure/signal`,
+      {
+        method: "POST",
+        body: JSON.stringify({ content: "start witness publication failure" }),
+      },
+    );
+    await expectResponseStatus(witnessFailureResponse, 201);
+    const witnessFailureSignalId = (await witnessFailureResponse.json()).signal.id as string;
+    const pendingFailure = await waitForActiveVerification(
+      activePath,
+      witnessFailureSignalId,
+      (entry) => entry?.steps?.[0]?.containerPayloadCleanupPending === true,
+      "container witness publication failure did not reject ownership readiness",
+    );
+    expect(pendingFailure).toBeTruthy();
+    const failedStep = pendingFailure!.steps[0];
+    expect(
+      failedStep.containerPayloadCleanupPending,
+      "a pre-payload witness failure must reject ownership readiness and remain retryable",
+    ).toBe(true);
+    expect(
+      viewer.messages.slice(witnessFailureFrom).some(
+        (event) =>
+          event.type === "gate_verification_step_output" &&
+          event.signalId === witnessFailureSignalId &&
+          typeof event.text === "string" &&
+          event.text.includes("PAYLOAD_STARTED:witness-publication-failure"),
+      ),
+      "user payload must not start before atomic witness publication",
+    ).toBe(false);
+    expect(
+      viewer.messages.slice(witnessFailureFrom).some(
+        (event) =>
+          event.type === "gate_verification_complete" &&
+          event.signalId === witnessFailureSignalId,
+      ),
+      "no terminal gate publication is permitted while exact payload cleanup proof is absent",
+    ).toBe(false);
+    expect(failedStep.sentinelFile, "host transport needs its own exact sentinel witness").toBeTruthy();
+    const hostWitness = JSON.parse(readFileSync(failedStep.sentinelFile, "utf8"));
+    expect(hostWitness.pid).toBeGreaterThan(0);
+    assertHostGone(failedStep.pid);
+    assertHostGone(hostWitness.pid);
+    assertContainerAlive(
+      containerId,
+      siblingPid,
+      "unrelated sibling after pre-payload witness failure",
     );
   } finally {
     try {
