@@ -1749,7 +1749,7 @@ export class VerificationHarness {
 			this.activeVerifications.set(active.signalId, active);
 			const settled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: true, reason: "cancelled" });
 			if (settled) {
-				if (this.activeVerifications.get(active.signalId) === active) this.activeVerifications.delete(active.signalId);
+				await this._finalizeCancelledVerification(active);
 			} else {
 				this._scheduleCommandKillCleanupRetry(active.signalId);
 			}
@@ -1782,7 +1782,7 @@ export class VerificationHarness {
 					v.overallStatus = "cancelled";
 					const settled = await this._killPersistedCommandSteps(v, "SIGKILL", { waitForIdentity: true, markIntent: true, reason: "cancelled" });
 					if (settled) {
-						if (this.activeVerifications.get(v.signalId) === v) this.activeVerifications.delete(v.signalId);
+						await this._finalizeCancelledVerification(v);
 					} else {
 						this._scheduleCommandKillCleanupRetry(v.signalId);
 					}
@@ -3171,8 +3171,18 @@ export class VerificationHarness {
 			try {
 				const pendingStep = active.steps.find(step => step.type === "command" && !!step.killRequestedAt && !step.killCompletedAt);
 				const signal = pendingStep?.killSignal ?? "SIGKILL";
-				const settled = await this._killPersistedCommandSteps(active, signal, { waitForIdentity: true, markIntent: false });
-				if (!settled) {
+				await this._killPersistedCommandSteps(active, signal, { waitForIdentity: true, markIntent: false });
+				const containerPayloadsSettled = active.steps
+					.filter(step => step.type === "command" && !!step.containerId)
+					.every(step => !!step.containerPayloadCleanupCompletedAt && !step.containerPayloadCleanupPending);
+				if (containerPayloadsSettled) {
+					// The recovered reaper is restart-only. A live docker-exec transport
+					// must be re-driven through its TrackedChild until its own close barrier
+					// reports settled; a false first wait is pending, not authorization to
+					// use the historical sentinel/PID on this boot.
+					await this._killTrackedForSignal(signalId, step => !!step?.containerId);
+				}
+				if (this._hasPendingCommandKillCleanup(active)) {
 					this._persistActive();
 					this._scheduleCommandKillCleanupRetry(signalId);
 					return;
@@ -3229,7 +3239,11 @@ export class VerificationHarness {
 					// A live TrackedChild owns the current docker-exec transport. The
 					// recovered sentinel reaper is restart-only; never use both.
 					if (this._trackedCommandChildren.has(`${active.signalId}:${stepIndex}`)) {
+						// The live tracked transport has not yet proved its close barrier.
+						// Leave it explicitly pending so the retry path re-drives that same
+						// TrackedChild; never fall through to a recovered numeric reaper.
 						if (!step.containerTransportCleanupCompletedAt) step.containerTransportCleanupPending = true;
+						allSettled = false;
 						continue;
 					}
 					if (!step.containerTransportCleanupCompletedAt) {
@@ -6083,6 +6097,7 @@ export class VerificationHarness {
 
 			let settled = false;
 			let settleStarted = false;
+			let hostResultPublicationFailure: string | undefined;
 			// Do not arm the execution deadline until the host sentinel/Job and the
 			// in-container atomic witness both acknowledge ownership. No polling: the
 			// wrapper's FIFO acknowledgement is forwarded as a one-shot stream marker.
@@ -6134,7 +6149,10 @@ export class VerificationHarness {
 				if (closeGraceTimer) processClock.clearTimeout(closeGraceTimer);
 				if (exitFilePollTimer) processClock.clearInterval(exitFilePollTimer);
 				if (containerTimeoutTimer) this.clock.clearTimeout(containerTimeoutTimer);
-				this._trackedCommandChildren.delete(trackedKey);
+				// Keep a durable container transport registered until its exact tree
+				// barrier settles. A host completion-file failure or a false first join
+				// must retry this live TrackedChild, never switch to recovered PID state.
+				if (!useContainerDurable) this._trackedCommandChildren.delete(trackedKey);
 				try { stopTail?.(); } catch { /* ignore */ }
 
 				const didTimeOut = tracked!.timedOut() || containerTimedOut;
@@ -6148,13 +6166,18 @@ export class VerificationHarness {
 						fs.writeFileSync(pending, JSON.stringify({ nonce: pidNonce, exitCode: code }));
 						fs.renameSync(pending, containerCompletionFile);
 					} catch (error) {
+						hostResultPublicationFailure = `Host docker-exec result publication failed: ${(error as Error).message}`;
 						const live = streamCtx ? this.activeVerifications.get(streamCtx.signalId) : undefined;
-						if (live) {
-							const step = live.steps[streamCtx!.stepIndex];
-							if (step) step.killUnsafeReason = `Host docker-exec result publication failed: ${(error as Error).message}`;
+						const step = live?.steps[streamCtx!.stepIndex];
+						if (step) {
+							// The missing host verdict is retryable only while both cleanup
+							// layers remain durable. Do not strand settleFromProcess after
+							// the child exit boundary or publish before exact settlement.
+							step.killUnsafeReason = hostResultPublicationFailure;
+							step.containerPayloadCleanupPending = true;
+							step.containerTransportCleanupPending = true;
 							this._persistActive();
 						}
-						return;
 					}
 				}
 				// Do not report a timeout/cancel cleanup as successful merely because
@@ -6216,6 +6239,7 @@ export class VerificationHarness {
 					}
 				}
 				settled = true;
+				if (treeCleanupVerified || !useContainerDurable) this._trackedCommandChildren.delete(trackedKey);
 
 				let outText = stdout;
 				let errText = stderr;
@@ -6225,6 +6249,20 @@ export class VerificationHarness {
 					errText = readCommandLogTail(errFile);
 				}
 				const tail = (outText + "\n" + errText).trim().slice(-5000);
+
+				if (hostResultPublicationFailure) {
+					if (!treeCleanupVerified) {
+						// Keep the active record pending; the retry will re-drive only the
+						// still-live TrackedChild rather than a recovered transport PID.
+						this._scheduleCommandKillCleanupRetry(streamCtx!.signalId);
+						return;
+					}
+					resolve(withDiagnostics({
+						passed: false,
+						output: tail ? `${tail}\n${hostResultPublicationFailure}` : hostResultPublicationFailure,
+					}));
+					return;
+				}
 
 				if (didTimeOut) {
 					const marker = treeCleanupVerified
