@@ -967,7 +967,9 @@ test("container command verification owns only its exact payload and docker-exec
       siblingPid,
       "unrelated sibling after restart recovery",
     );
-    viewer.close();
+    // Recovery closes its viewer before the gateway crash; keep this transition
+    // idempotent so restart cleanup cannot dereference the already-cleared viewer.
+    viewer?.close();
     viewer = undefined;
 
     // Break the in-container atomic witness path before the wrapper can launch
