@@ -29,6 +29,7 @@ const {
 	VerificationHarness,
 	createContainerPayloadReleaseHandshake,
 	createContainerWitnessFrameDecoder,
+	parseDockerExecCreateEvent,
 } = await import("../../src/server/agent/verification-harness.ts");
 const { createFakeVerificationCommandRunner } = await import("../harness/fake-verification-command-runner.js");
 
@@ -220,23 +221,33 @@ describe("deterministic tracked child", () => {
 		expect(failures.map(error => error.message)).toEqual(["Container payload release writer was installed more than once"]);
 	});
 
-	it("rejects a duplicate synchronous tuple before its queued payload release is installed", () => {
-		const releases: string[] = [];
-		const failures: Error[] = [];
-		const handshake = createContainerPayloadReleaseHandshake(error => failures.push(error));
-		const decoder = createContainerWitnessFrameDecoder(
-			() => handshake.requestRelease(),
-			() => handshake.fail(new Error("malformed or duplicate tuple")),
-		);
+	it("never parses or size-limits payload stdout after the one control candidate", () => {
+		let witnesses = 0;
+		let invalid = 0;
+		const decoder = createContainerWitnessFrameDecoder(() => { witnesses++; }, () => { invalid++; });
 		const tuple = `BOBBIT_CONTAINER_OWNERSHIP_TUPLE ${JSON.stringify({
 			containerId: "b".repeat(64), nonce: "step-nonce", sentinelPid: 101, pgid: 101, startToken: "start-token",
 		})}\n`;
-		// A mocked/fast transport can synchronously flush both frames before the
-		// spawn call returns and before the parent has its stdin writer.
-		decoder(tuple + tuple);
-		expect(handshake.installWriter(() => releases.push("BOBBIT_HOST_RELEASE"))).toBe(false);
-		expect(releases).toEqual([]);
-		expect(failures.map(error => error.message)).toEqual(["malformed or duplicate tuple"]);
+		decoder(tuple);
+		// Both a newline-free record and marker-looking multiline payload exceed
+		// the old 8KiB frame budget. Neither is ownership protocol after release.
+		decoder("x".repeat(9 * 1024));
+		decoder(`\n${tuple}${"payload\n".repeat(2 * 1024)}`);
+		expect(witnesses).toBe(1);
+		expect(invalid).toBe(0);
+	});
+
+	it("accepts only canonical daemon exec-create event records", () => {
+		const containerId = "a".repeat(64);
+		const execId = "b".repeat(64);
+		expect(parseDockerExecCreateEvent(JSON.stringify({
+			Type: "container", Action: "exec_create: /bin/sh -c # bobbit-docker-exec:tag",
+			Actor: { ID: containerId, Attributes: { execID: execId } },
+		}))).toEqual({ containerId, execId, command: "exec_create: /bin/sh -c # bobbit-docker-exec:tag" });
+		expect(parseDockerExecCreateEvent(JSON.stringify({
+			Type: "container", Action: "exec_start", Actor: { ID: containerId, Attributes: { execID: execId } },
+		}))).toBeUndefined();
+		expect(parseDockerExecCreateEvent("not json")).toBeUndefined();
 	});
 
 	it("reports timeout and closes without launching a process", async () => {

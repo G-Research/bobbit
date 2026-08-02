@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { spawnTracked, killAllTracked, killTreeByPid, type TrackedChild } from "./spawn-tree.js";
 import { realClock, realCommandRunner, type Clock, type CommandRunner, type TimerHandle } from "../gateway-deps.js";
 import { broadcastGateStatusChanged } from "../gate-status-broadcast.js";
@@ -172,9 +172,9 @@ export function createContainerPayloadReleaseHandshake(onFailure: (error: Error)
 }
 
 /**
- * Docker stdout is a byte stream, not a message transport. The pre-payload
- * sentinel sends exactly one bounded newline-delimited JSON frame; this decoder
- * retains incomplete frames across chunks and rejects a second authority frame.
+ * Docker stdout is a byte stream, not a message transport. Only the one
+ * pre-release candidate is decoded. Once it is complete, stdout belongs to the
+ * payload again: it is never buffered, framed, or size-limited as control data.
  */
 export function createContainerWitnessFrameDecoder(
 	onWitness: (witness: ContainerOwnershipWitness) => void,
@@ -182,11 +182,14 @@ export function createContainerWitnessFrameDecoder(
 ): (chunk: string) => void {
 	const prefix = "BOBBIT_CONTAINER_OWNERSHIP_TUPLE ";
 	let buffered = "";
-	let witnessed = false;
+	let consumedCandidate = false;
 	let failed = false;
 	const maxFrameBytes = 8 * 1024;
 	return (chunk: string) => {
-		if (failed) return;
+		// A payload can produce arbitrary, unbounded stdout after the one control
+		// record. In particular, it must not be able to make a healthy ownership
+		// boundary fail merely by writing a long line or a marker-looking line.
+		if (failed || consumedCandidate) return;
 		buffered += chunk;
 		if (buffered.length > maxFrameBytes) {
 			failed = true;
@@ -199,7 +202,7 @@ export function createContainerWitnessFrameDecoder(
 			const line = buffered.slice(0, end).replace(/\r$/, "");
 			buffered = buffered.slice(end + 1);
 			if (!line.startsWith(prefix)) continue;
-			if (line.length > maxFrameBytes || witnessed) {
+			if (line.length > maxFrameBytes) {
 				failed = true;
 				onInvalid();
 				return;
@@ -211,7 +214,10 @@ export function createContainerWitnessFrameDecoder(
 					!Number.isSafeInteger(parsed.sentinelPid) || parsed.sentinelPid <= 0 ||
 					!Number.isSafeInteger(parsed.pgid) || parsed.pgid <= 0 ||
 					typeof parsed.startToken !== "string" || !parsed.startToken) throw new Error("invalid witness");
-				witnessed = true;
+				// Consume synchronously before calling out: a synchronous callback may
+				// release the payload, whose output can arrive re-entrantly.
+				consumedCandidate = true;
+				buffered = "";
 				onWitness({
 					containerId: parsed.containerId,
 					nonce: parsed.nonce,
@@ -219,6 +225,7 @@ export function createContainerWitnessFrameDecoder(
 					pgid: parsed.pgid,
 					startToken: parsed.startToken,
 				});
+				return;
 			} catch {
 				failed = true;
 				onInvalid();
@@ -226,6 +233,178 @@ export function createContainerWitnessFrameDecoder(
 			}
 		}
 	};
+}
+
+export type DockerExecCreateEvent = { containerId: string; execId: string; command: string };
+
+/** Parse only daemon-authored exec-create event records. */
+export function parseDockerExecCreateEvent(line: string): DockerExecCreateEvent | undefined {
+	try {
+		const event = JSON.parse(line);
+		const containerId = typeof event?.Actor?.ID === "string" ? event.Actor.ID : undefined;
+		const execId = typeof event?.Actor?.Attributes?.execID === "string" ? event.Actor.Attributes.execID : undefined;
+		const command = typeof event?.Action === "string" ? event.Action : "";
+		if (event?.Type !== "container" || !containerId || !/^[a-f0-9]{64}$/i.test(containerId) ||
+			!execId || !/^[a-f0-9]{64}$/i.test(execId) || !command.startsWith("exec_create:")) return undefined;
+		return { containerId, execId, command };
+	} catch {
+		return undefined;
+	}
+}
+
+type DockerExecInspection = { id: string; containerId: string; pid: number; command: string };
+
+/**
+ * `docker inspect --type exec` uses Docker's selected context (including
+ * Desktop/SSH/TCP contexts) rather than assuming a Unix daemon socket.
+ */
+function inspectDockerExecThroughCurrentContext(execId: string): DockerExecInspection | undefined {
+	try {
+		const raw = execFileSync("docker", ["inspect", "--type", "exec", execId], {
+			encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+		});
+		const value = JSON.parse(raw);
+		const record = Array.isArray(value) ? value[0] : value;
+		const id = typeof record?.ID === "string" ? record.ID : undefined;
+		const containerId = typeof record?.ContainerID === "string" ? record.ContainerID : undefined;
+		const pid = Number(record?.Pid);
+		const config = record?.ProcessConfig;
+		const command = [config?.entrypoint, ...(Array.isArray(config?.arguments) ? config.arguments : [])]
+			.filter((part): part is string => typeof part === "string").join("\u0000");
+		return id === execId && containerId && Number.isSafeInteger(pid) && pid > 0
+			? { id, containerId, pid, command }
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Prove the proposed container supervisor is the only process carrying the engine tag. */
+function hasEngineExecPidWithTag(containerId: string, enginePid: number, commandTag: string): boolean {
+	try {
+		// `docker top` reports container processes in the daemon's PID namespace,
+		// the same namespace as ExecInspect.Pid. It therefore closes the otherwise
+		// ambiguous host-PID/container-PID mapping without a local daemon socket.
+		const table = execFileSync("docker", ["top", containerId, "-eo", "pid,args"], {
+			encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+		});
+		const matches = table.split(/\r?\n/).filter(line =>
+			new RegExp(`^\\s*${enginePid}\\s+`).test(line) && line.includes(commandTag),
+		);
+		return matches.length === 1;
+	} catch {
+		return false;
+	}
+}
+
+function hasUniqueContainerExecTag(containerId: string, pid: number, commandTag: string): boolean {
+	const marker = `BOBBIT_EXEC_TAG=${commandTag}`;
+	const script = `m=${shellSingleQuote(marker)}; p=${pid}; [ -r "/proc/$p/environ" ] || exit 1; n=0; hit=0; for f in /proc/[0-9]*/environ; do [ -r "$f" ] || continue; if tr '\\000' '\\n' < "$f" 2>/dev/null | grep -Fqx "$m"; then n=$((n + 1)); case "$f" in "/proc/$p/environ") hit=1;; esac; fi; done; [ "$hit" = 1 ] && [ "$n" -eq 1 ]`;
+	try {
+		execFileSync("docker", ["exec", containerId, "/bin/sh", "-c", script], {
+			stdio: ["ignore", "ignore", "ignore"],
+		});
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+class DockerExecEventWatcher {
+	private readonly candidate: Promise<string>;
+	private resolveCandidate!: (execId: string) => void;
+	private rejectCandidate!: (error: Error) => void;
+	private child: ChildProcess | undefined;
+	private buffer = "";
+	private stopped = false;
+	private matched = false;
+	private stopPromise: Promise<void> | undefined;
+
+	constructor(private readonly containerId: string, private readonly commandTag: string) {
+		this.candidate = new Promise<string>((resolve, reject) => {
+			this.resolveCandidate = resolve;
+			this.rejectCandidate = reject;
+		});
+		// The caller always awaits or rejects this while the durable transport is
+		// alive. Keep an internal handler so an early watcher failure is not an
+		// unhandled rejection before the sentinel reaches its barrier.
+		void this.candidate.catch(() => undefined);
+	}
+
+	start(): void {
+		try {
+			this.child = spawn("docker", [
+				"events", "--format", "{{json .}}", "--filter", "type=container",
+				"--filter", "event=exec_create", "--filter", `container=${this.containerId}`,
+			], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+			this.child.stdout?.on("data", chunk => this.consume(chunk.toString()));
+			this.child.once("error", error => this.fail(new Error(`Docker exec event watcher failed: ${error.message}`)));
+			this.child.once("close", () => {
+				if (!this.stopped && !this.matched) this.fail(new Error("Docker exec event watcher ended before identifying the tagged exec"));
+			});
+		} catch (error) {
+			this.fail(new Error(`Docker exec event watcher could not start: ${(error as Error).message}`));
+		}
+	}
+
+	private consume(chunk: string): void {
+		if (this.stopped || this.matched) return;
+		this.buffer += chunk;
+		if (this.buffer.length > 64 * 1024) return this.fail(new Error("Docker exec event watcher received an oversized event record"));
+		let candidateId: string | undefined;
+		for (;;) {
+			const end = this.buffer.indexOf("\n");
+			if (end < 0) break;
+			const event = parseDockerExecCreateEvent(this.buffer.slice(0, end));
+			this.buffer = this.buffer.slice(end + 1);
+			if (!event || event.containerId !== this.containerId || !event.command.includes(this.commandTag)) continue;
+			// Two tagged creates in one daemon delivery are ambiguous authority, even
+			// if their container stdout happens to propose the same numeric tuple.
+			if (candidateId) return this.fail(new Error("Docker exec event watcher observed duplicate tagged exec identities"));
+			candidateId = event.execId;
+		}
+		if (candidateId) {
+			this.matched = true;
+			this.resolveCandidate(candidateId);
+		}
+	}
+
+	private fail(error: Error): void {
+		if (this.stopped || this.matched) return;
+		this.matched = true;
+		this.rejectCandidate(error);
+	}
+
+	async verify(): Promise<DockerExecInspection> {
+		try {
+			const execId = await this.candidate;
+			const inspection = inspectDockerExecThroughCurrentContext(execId);
+			if (!inspection || inspection.containerId !== this.containerId || !inspection.command.includes(this.commandTag)) {
+				throw new Error("Docker exec engine identity was missing, mismatched, or ambiguous");
+			}
+			return inspection;
+		} finally {
+			await this.stop();
+		}
+	}
+
+	/** Stop and join the watcher; callers await this to avoid leaked `docker events` clients. */
+	stop(): Promise<void> {
+		if (this.stopPromise) return this.stopPromise;
+		if (!this.matched) {
+			this.matched = true;
+			this.rejectCandidate(new Error("Docker exec event watcher stopped before identifying the tagged exec"));
+		}
+		this.stopped = true;
+		const child = this.child;
+		this.stopPromise = !child || child.exitCode !== null || child.killed
+			? Promise.resolve()
+			: new Promise<void>(resolve => {
+				child.once("close", () => resolve());
+				try { child.kill(); } catch { resolve(); }
+			});
+		return this.stopPromise;
+	}
 }
 
 function readCommandLogTail(filePath: string | undefined, maxBytes = COMMAND_LOG_FINAL_OUTPUT_TAIL_BYTES): string {
@@ -1069,6 +1248,9 @@ export interface ActiveVerification {
 		containerId?: string;
 		/** Atomic in-container ownership witness written before the payload starts. */
 		containerWitnessFile?: string;
+		/** Daemon-authenticated exec identity paired with the container witness. */
+		containerDockerExecId?: string;
+		containerDockerExecTag?: string;
 		/** Exact in-container sentinel identity authorizing a negative-PGID signal. */
 		containerOwnershipWitness?: {
 			containerId: string;
@@ -5685,6 +5867,8 @@ export class VerificationHarness {
 			let containerWitnessFile: string | undefined;
 			let heartbeatFile: string | undefined;
 			let processStartToken: string | undefined;
+			let dockerExecCommandTag: string | undefined;
+			let dockerExecWatcher: DockerExecEventWatcher | undefined;
 			let diagnosticsPaths: GateStepDiagnosticsPaths | undefined;
 
 			if (streamCtx) {
@@ -5748,6 +5932,10 @@ export class VerificationHarness {
 				containerWitnessFile = `${containerStateDir}/${streamCtx.stepIndex}.ownership.json`;
 				heartbeatFile = `${containerStateDir}/${streamCtx.stepIndex}.heartbeat`;
 				pidNonce = randomUUID();
+				// This unguessable marker is embedded in Docker's daemon-authored exec
+				// create event and ProcessConfig. It binds the eventual in-container
+				// sentinel to the engine-created exec, not to payload stdout.
+				dockerExecCommandTag = `bobbit-docker-exec:${randomUUID()}`;
 				// The in-container state proves the command's result, while this host
 				// record proves which detached docker-exec transport group is safe to
 				// reap after a gateway restart. Keep it outside the container because
@@ -5906,33 +6094,42 @@ export class VerificationHarness {
 				? createContainerPayloadReleaseHandshake(failContainerOwnershipHandshake)
 				: undefined;
 			const acknowledgeContainerWitness = (witness: ContainerOwnershipWitness) => {
-				if (!streamCtx || !containerId || !pidNonce || containerHandshakeFailure) return;
-				if (containerWitnessAcknowledged) {
-					containerPayloadRelease?.fail(new Error("Container ownership tuple was duplicated"));
-					return;
-				}
-				if (witness.containerId !== containerId || witness.nonce !== pidNonce) {
-					failContainerOwnershipHandshake(new Error("Container ownership tuple did not match its host step identity"));
-					return;
-				}
-				const active = this.activeVerifications.get(streamCtx.signalId);
-				const step = active?.steps[streamCtx.stepIndex];
-				if (!step) {
-					failContainerOwnershipHandshake(new Error("Container ownership tuple arrived for an inactive step"));
-					return;
-				}
-				step.containerOwnershipWitness = witness;
-				if (!this._persistActive()) {
-					step.containerPayloadCleanupPending = true;
-					failContainerOwnershipHandshake(new Error("Container ownership tuple could not be durably persisted"));
-					return;
-				}
-				containerWitnessAcknowledged = true;
-				// The host alone owns docker exec stdin. Record the release before
-				// acknowledging ownership: a synchronous tuple can precede installation
-				// of the private stdin writer, but it can never drop the release.
-				if (!containerPayloadRelease?.requestRelease()) return;
-				resolveContainerOwnershipReady();
+				void (async () => {
+					try {
+						if (!streamCtx || !containerId || !pidNonce || containerHandshakeFailure) return;
+						if (containerWitnessAcknowledged) throw new Error("Container ownership tuple was duplicated");
+						if (witness.containerId !== containerId || witness.nonce !== pidNonce) {
+							throw new Error("Container ownership tuple did not match its host step identity");
+						}
+						if (!dockerExecWatcher) throw new Error("Docker exec engine identity watcher was unavailable");
+						// Do not persist or release from container-originated bytes. The
+						// witness is accepted only after the current Docker context returns
+						// the daemon-issued tagged exec whose leader PID agrees exactly.
+						const engineExec = await dockerExecWatcher.verify();
+						if (!dockerExecCommandTag ||
+							!hasEngineExecPidWithTag(containerId, engineExec.pid, dockerExecCommandTag) ||
+							!hasUniqueContainerExecTag(containerId, witness.sentinelPid, dockerExecCommandTag)) {
+							throw new Error("Docker exec supervisor PID/ancestry tag was missing, duplicated, or mismatched");
+						}
+						const active = this.activeVerifications.get(streamCtx.signalId);
+						const step = active?.steps[streamCtx.stepIndex];
+						if (!step) throw new Error("Container ownership tuple arrived for an inactive step");
+						step.containerOwnershipWitness = witness;
+						step.containerDockerExecId = engineExec.id;
+						step.containerDockerExecTag = dockerExecCommandTag;
+						if (!this._persistActive()) {
+							step.containerPayloadCleanupPending = true;
+							throw new Error("Container ownership tuple could not be durably persisted");
+						}
+						containerWitnessAcknowledged = true;
+						// The host alone owns docker exec stdin. No container-writable FIFO
+						// participates in this release boundary.
+						if (!containerPayloadRelease?.requestRelease()) return;
+						resolveContainerOwnershipReady();
+					} catch (error) {
+						failContainerOwnershipHandshake(error as Error);
+					}
+				})();
 			};
 			const rejectMalformedContainerWitness = () => {
 				containerPayloadRelease?.fail(new Error("Container ownership tuple was malformed"));
@@ -5943,6 +6140,10 @@ export class VerificationHarness {
 			let containerTimedOut = false;
 			let containerTimeoutTimer: TimerHandle | undefined;
 			try {
+				if (useContainerDurable && containerId && dockerExecCommandTag) {
+					dockerExecWatcher = new DockerExecEventWatcher(containerId, dockerExecCommandTag);
+					dockerExecWatcher.start();
+				}
 				if (containerId) {
 					// Wrap the command so the in-container shell writes its PID
 					// to a temp file. On timeout, we kill that PID's process
@@ -5962,12 +6163,11 @@ export class VerificationHarness {
 						const qWitness = shellSingleQuote(containerWitnessFile);
 						const qNonce = shellSingleQuote(pidNonce);
 						const qContainer = shellSingleQuote(containerId);
-						// The sentinel has the only inherited copy of docker exec stdin (FD 3).
-						// It publishes its tuple to host stdout, waits for the host release on
-						// FD 3, then wakes this parent through a private pre-payload FIFO. The
-						// payload inherits neither endpoint, so it cannot substitute a tuple or
-						// forge the release after inspecting paths/nonces via /proc.
-						wrappedCmd = `mkdir -p ${qDir} 2>/dev/null || exit 125; __bobbit_ready=${qWitness}.ready.$$; rm -f "$__bobbit_ready"; mkfifo "$__bobbit_ready" || exit 125; exec 3<&0; BOBBIT_WITNESS=${qWitness} BOBBIT_NONCE=${qNonce} BOBBIT_CONTAINER=${qContainer} BOBBIT_READY="$__bobbit_ready" /bin/sh -c 'trap "" HUP INT TERM; __fail(){ printf "E\\n" > "$BOBBIT_READY"; exit 125; }; __p=$$; __g=$(awk "{print \\$5}" "/proc/$__p/stat" 2>/dev/null || true); __s=$(awk "{print \\$22}" "/proc/$__p/stat" 2>/dev/null || true); case "$__p:$__g:$__s" in *::*) __fail;; esac; __t="$BOBBIT_WITNESS.$$.tmp"; printf "{\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s" > "$__t" && mv "$__t" "$BOBBIT_WITNESS" || __fail; printf "BOBBIT_CONTAINER_OWNERSHIP_TUPLE {\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s"; IFS= read -r __release <&3 || __fail; [ "$__release" = BOBBIT_HOST_RELEASE ] || __fail; printf ".\\n" > "$BOBBIT_READY" || exit 125; while :; do sleep 2147483647 & wait $!; done' 3<&3 & __bobbit_sentinel=$!; exec 3<&-; exec </dev/null; IFS= read -r __bobbit_ready_ack < "$__bobbit_ready" || exit 125; rm -f "$__bobbit_ready"; [ "$__bobbit_ready_ack" = . ] || { kill "$__bobbit_sentinel" 2>/dev/null; exit 125; }; __bp=$$; printf %s "$__bp" > ${qPid}.tmp && mv ${qPid}.tmp ${qPid}; ( while :; do printf '{"pid":%s,"ts":%s}' "$__bp" "$(date +%s 2>/dev/null || printf 0)" > ${qHb}.tmp && mv ${qHb}.tmp ${qHb}; sleep 1; done ) & __hb=$!; ( ${command}\n); __ec=$?; kill "$__hb" 2>/dev/null; wait "$__hb" 2>/dev/null; exit $__ec`;
+						const qExecTag = shellSingleQuote(dockerExecCommandTag ?? "");
+						// The pre-payload barrier is an anonymous shell pipe. No pathname or
+						// FIFO is writable by a same-UID sibling; FD 3 belongs only to the
+						// engine-bound sentinel and is closed before user code starts.
+						wrappedCmd = `# ${dockerExecCommandTag}\nmkdir -p ${qDir} 2>/dev/null || exit 125; exec 4>&1; exec 3<&0; BOBBIT_WITNESS=${qWitness} BOBBIT_NONCE=${qNonce} BOBBIT_CONTAINER=${qContainer} BOBBIT_EXEC_TAG=${qExecTag} /bin/sh -c 'trap "" HUP INT TERM; __fail(){ exit 125; }; __p=$$; __g=$(awk "{print \$5}" "/proc/$__p/stat" 2>/dev/null || true); __s=$(awk "{print \$22}" "/proc/$__p/stat" 2>/dev/null || true); case "$__p:$__g:$__s" in *::*) __fail;; esac; __t="$BOBBIT_WITNESS.$$.tmp"; printf "{\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s" > "$__t" && mv "$__t" "$BOBBIT_WITNESS" || __fail; printf "BOBBIT_CONTAINER_OWNERSHIP_TUPLE {\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s" >&4; IFS= read -r __release <&3 || __fail; [ "$__release" = BOBBIT_HOST_RELEASE ] || __fail; printf ".\\n"; while :; do sleep 2147483647 & wait $!; done' 3<&3 | { IFS= read -r __bobbit_ready_ack || exit 125; [ "$__bobbit_ready_ack" = . ] || exit 125; exec 3<&-; exec </dev/null; __bp=$$; printf %s "$__bp" > ${qPid}.tmp && mv ${qPid}.tmp ${qPid}; ( while :; do printf '{"pid":%s,"ts":%s}' "$__bp" "$(date +%s 2>/dev/null || printf 0)" > ${qHb}.tmp && mv ${qHb}.tmp ${qHb}; sleep 1; done ) & __hb=$!; ( ${command}\n); __ec=$?; kill "$__hb" 2>/dev/null; wait "$__hb" 2>/dev/null; exit $__ec; }`;
 					} else {
 						wrappedCmd = `echo $$ > ${killPidFile}; ${command}`;
 					}
@@ -6045,13 +6245,19 @@ export class VerificationHarness {
 			}
 
 			if (spawnError || !child || !tracked) {
-				resolve(handleSpawnError(spawnError ?? new Error("spawn returned no child")));
+				void (async () => {
+					await dockerExecWatcher?.stop();
+					resolve(handleSpawnError(spawnError ?? new Error("spawn returned no child")));
+				})();
 				return;
 			}
 
 			// Register so cancellation / shutdown can tree-kill the live child.
 			const trackedKey = streamCtx ? `${streamCtx.signalId}:${streamCtx.stepIndex}` : `__no_ctx_${child.pid ?? Date.now()}`;
 			this._trackedCommandChildren.set(trackedKey, tracked);
+			// A missing/ambiguous event must not leave a detached `docker events`
+			// client behind after the transport exits. `stop()` joins the watcher.
+			child.once("close", () => { void dockerExecWatcher?.stop(); });
 
 			// Stamp the persisted step with everything needed for cross-restart
 			// recovery before doing anything else — if the gateway dies right
