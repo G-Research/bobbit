@@ -69,6 +69,7 @@ const {
 } = await import("../../src/server/auth/oauth.js");
 
 const activeFlowIds = new Set<string>();
+const SERVER_SOURCE = readFileSync(new URL("../../src/server/server.ts", import.meta.url), "utf8");
 
 const REQUIRED_SCOPES = [
 	"org:create_api_key",
@@ -527,6 +528,18 @@ describe("Anthropic OAuth Pi browser adapter", () => {
 		const replacement: LoginCapture = {};
 		const replacementStarted = await startAnthropic(pendingModels(replacement));
 		await releasePending(replacement, replacementStarted.flowId);
+	});
+
+	it("makes direct gateway shutdown wait for OAuth flow settlement before exit", () => {
+		const routeStart = SERVER_SOURCE.indexOf("// POST /api/shutdown");
+		const routeEnd = SERVER_SOURCE.indexOf("// GET /api/ca-cert", routeStart);
+		assert.ok(routeStart >= 0 && routeEnd > routeStart, "shutdown route must be present");
+		const shutdownRoute = SERVER_SOURCE.slice(routeStart, routeEnd);
+		assert.match(
+			shutdownRoute,
+			/setTimeout\(async \(\) => \{\s*await shutdownOAuthFlows\(\);\s*process\.exit\(0\);/,
+			"direct shutdown must await the same OAuth settlement boundary before exiting",
+		);
 	});
 
 	it("awaits a pending Anthropic exchange during gateway OAuth shutdown", async () => {

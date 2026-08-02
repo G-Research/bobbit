@@ -4656,8 +4656,12 @@ async function handleApiRoute(
 	// POST /api/shutdown — graceful shutdown (used by coverage teardown to flush V8 coverage)
 	if (url.pathname === "/api/shutdown" && req.method === "POST") {
 		json({ status: "shutting down" });
-		// Defer exit to allow the response to be sent
-		setTimeout(() => process.exit(0), 500);
+		// Defer exit to allow the response to be sent, then settle Pi's callback
+		// and token exchange just as orderly gateway shutdown does.
+		setTimeout(async () => {
+			await shutdownOAuthFlows();
+			process.exit(0);
+		}, 500);
 		return;
 	}
 
