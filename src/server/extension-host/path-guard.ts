@@ -17,9 +17,12 @@ import path from "node:path";
  * The lexical `path.relative` check alone is insufficient: an entry that is
  * lexically inside its root but is a SYMLINK pointing outside the pack would be
  * followed by `fs.readFileSync` / dynamic `import`, disclosing (or importing)
- * arbitrary host files. We therefore also `fs.realpathSync` BOTH the root and the
- * target, and require the target's realpath to remain under the root's realpath.
- * The lexical check is kept as cheap defense-in-depth.
+ * arbitrary host files. We therefore require both that the candidate's spelling
+ * is contained by either the lexical or canonical root (to preserve macOS
+ * `/var` → `/private/var` aliases) and that its `realpath` remains under the
+ * root's `realpath`. The spelling check prevents a mutable symlink located
+ * outside the pack from being accepted merely because it currently targets an
+ * in-pack file.
  *
  * ENOENT on the target is TOLERATED (returns true): a missing file is not a
  * disclosure, and every caller has an existing not-found path (a `readFileSync`
@@ -28,13 +31,42 @@ import path from "node:path";
  *
  * @returns true when `fileAbs` is safe to read/import, false when it escapes.
  */
-export function isPackPathWithinRoot(rootAbs: string, fileAbs: string): boolean {
-	// 1. Lexical check (defense in depth): fileAbs must be inside rootAbs.
-	const rel = path.relative(rootAbs, fileAbs);
-	if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return false;
+function hasWindowsPathSyntax(value: string): boolean {
+	return /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\");
+}
 
-	// 2. Realpath check: resolve symlinks on BOTH paths and require the target's
-	//    realpath to stay under the pack root's realpath (rejects symlink escape).
+/**
+ * `path.win32.relative()` folds every component. Windows directories can opt
+ * into case sensitivity, so use it only for the boundary predicate and retain
+ * the canonical spelling of every descendant component.
+ */
+function hasCasePreservingWindowsPrefix(rootAbs: string, candidateAbs: string): boolean {
+	const root = path.win32.normalize(rootAbs);
+	const candidate = path.win32.normalize(candidateAbs);
+	const rootPrefix = path.win32.parse(root).root;
+	const candidatePrefix = path.win32.parse(candidate).root;
+	if (rootPrefix.toLowerCase() !== candidatePrefix.toLowerCase()) return false;
+
+	const rootParts = root.slice(rootPrefix.length).split(path.win32.sep).filter(Boolean);
+	const candidateParts = candidate.slice(candidatePrefix.length).split(path.win32.sep).filter(Boolean);
+	return rootParts.every((part, index) => candidateParts[index] === part);
+}
+
+function isStrictlyContained(rootAbs: string, candidateAbs: string): boolean {
+	const rootIsWindows = hasWindowsPathSyntax(rootAbs);
+	const candidateIsWindows = hasWindowsPathSyntax(candidateAbs);
+	if (rootIsWindows !== candidateIsWindows) return false;
+
+	const pathApi = rootIsWindows ? path.win32 : path;
+	const relative = pathApi.relative(rootAbs, candidateAbs);
+	return relative !== ""
+		&& !relative.startsWith(`..${pathApi.sep}`)
+		&& relative !== ".."
+		&& !pathApi.isAbsolute(relative)
+		&& (!rootIsWindows || hasCasePreservingWindowsPrefix(rootAbs, candidateAbs));
+}
+
+export function isPackPathWithinRoot(rootAbs: string, fileAbs: string): boolean {
 	let rootReal: string;
 	try {
 		rootReal = fs.realpathSync(rootAbs);
@@ -42,15 +74,24 @@ export function isPackPathWithinRoot(rootAbs: string, fileAbs: string): boolean 
 		// Cannot prove containment when the pack root itself is unresolvable.
 		return false;
 	}
+
+	// A file may use either the root's lexical spelling or its canonical spelling:
+	// on macOS $TMPDIR can be /var/... while realpath resolves /private/var/....
+	// Do not accept a file merely because the file it currently resolves to is
+	// in-root: an outside symlink can be swapped after this check.
+	const spellingContained = isStrictlyContained(rootAbs, fileAbs) || isStrictlyContained(rootReal, fileAbs);
+	if (!spellingContained) return false;
+
+	// Resolve the target after its spelling has been proven safe, then reject an
+	// in-root symlink that resolves outside the pack.
 	let fileReal: string;
 	try {
 		fileReal = fs.realpathSync(fileAbs);
 	} catch (err: any) {
-		// Missing target: tolerate — the caller's read/stat surfaces not-found.
+		// Missing target is safe only after the lexical/canonical spelling check;
+		// callers retain their existing not-found handling.
 		if (err && err.code === "ENOENT") return true;
 		return false;
 	}
-	const realRel = path.relative(rootReal, fileReal);
-	if (realRel === "" || realRel.startsWith("..") || path.isAbsolute(realRel)) return false;
-	return true;
+	return isStrictlyContained(rootReal, fileReal);
 }

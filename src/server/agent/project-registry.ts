@@ -122,15 +122,357 @@ export function detectSymlinkRoot(
   return { symlink: false };
 }
 
-function canonicalProjectPath(rootPath: string): string {
-  let resolved = path.resolve(rootPath);
-  try { resolved = path.resolve(fs.realpathSync(resolved)); } catch { /* textual fallback */ }
-  const normalized = resolved.replace(/\\/g, "/").replace(/\/+$/, "");
-  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+type ProjectPathApi = typeof path.posix;
+type PathIdentityStat = Pick<fs.Stats, "dev" | "ino"> & Partial<Pick<fs.Stats, "isDirectory">>;
+
+function isWindowsProjectPath(rootPath: string): boolean {
+  // Use the input dialect rather than the host OS so persisted projects can be
+  // compared deterministically in cross-platform tests and migrations. On
+  // POSIX, though, a double-forward-slash path is still a native absolute path
+  // (`//tmp/project` and `/tmp/project` identify the same directory), not a
+  // Windows UNC path. Explicit backslash UNC paths remain portable fixtures.
+  return /^[a-z]:[\\/]/i.test(rootPath)
+    || rootPath.startsWith("\\\\")
+    || (process.platform === "win32" && rootPath.startsWith("//"));
 }
 
-function sameProjectPath(a: string, b: string): boolean {
-  return canonicalProjectPath(a) === canonicalProjectPath(b);
+function projectPathApi(rootPath: string): ProjectPathApi {
+  return isWindowsProjectPath(rootPath) ? path.win32 : path.posix;
+}
+
+function isNativeProjectPathApi(pathApi: ProjectPathApi): boolean {
+  return process.platform === "win32" ? pathApi === path.win32 : pathApi === path.posix;
+}
+
+function projectPathFlavor(pathApi: ProjectPathApi): "posix" | "win32" {
+  return pathApi === path.win32 ? "win32" : "posix";
+}
+
+function normalizeProjectPath(
+  value: string,
+  pathApi: ProjectPathApi,
+  options: { foldCase?: boolean } = {},
+): string {
+  const resolved = pathApi.resolve(value);
+  const root = pathApi.parse(resolved).root;
+  const isRoot = pathApi.normalize(resolved) === pathApi.normalize(root);
+  const normalized = (isRoot ? root : resolved.replace(/[\\/]+$/, "")).replace(/\\/g, "/");
+  // Drive letters and UNC authorities are root syntax rather than directory
+  // entries. Their spelling is stable across Windows implementations, while
+  // every descendant remains case-preserving until this volume proves an alias.
+  const normalizedRoot = root.replace(/\\/g, "/");
+  const rooted = pathApi === path.win32
+    ? `${normalizedRoot.toLowerCase()}${normalized.slice(normalizedRoot.length)}`
+    : normalized;
+  return options.foldCase ? rooted.toLowerCase() : rooted;
+}
+
+export interface ProjectPathIdentityOptions {
+  /** Read-only seams for path-identity tests and unusual filesystems. */
+  realpathSync?: (candidate: string) => string;
+  lstatSync?: (candidate: string) => PathIdentityStat;
+  /** Overrides the native classifier for tests and unusual filesystems. */
+  isCaseInsensitiveAt?: (existingAncestor: string) => boolean | undefined;
+  /** Create and remove a unique, caller-owned case probe below `parent`. */
+  createCaseProbe?: (parent: string, pathApi: "posix" | "win32") => string;
+  removeCaseProbe?: (probePath: string) => void;
+  /** Read at most `limit` directory names for non-mutating case evidence. */
+  readDirectoryEntries?: (parent: string, limit: number) => readonly string[];
+  /** Cache directory entry case semantics, invalidated by this fingerprint. */
+  caseSemanticsCache?: Map<string, CaseSemanticsCacheRecord>;
+  caseSemanticsFingerprint?: (existingAncestor: string) => string | undefined;
+  /** Lets tests model native Windows/POSIX volumes on another host. */
+  isNativePathApi?: (pathApi: "posix" | "win32") => boolean;
+}
+
+type CaseSemantics = "insensitive" | "sensitive" | "unknown";
+
+/** Bound read-only evidence so identity lookups never scan a large directory. */
+export const CASE_EVIDENCE_ENTRY_LIMIT = 8;
+
+export interface CaseSemanticsCacheRecord {
+  fingerprint: string;
+  directoryIdentity: string;
+  semantics: Exclude<CaseSemantics, "unknown">;
+}
+
+function nativeCaseSemanticsFingerprint(existingAncestor: string): string | undefined {
+  try {
+    const stat = fs.statSync(existingAncestor);
+    if (stat.dev === 0 || stat.ino === 0) return undefined;
+    return [stat.dev, stat.ino, stat.mode, stat.mtimeMs, stat.ctimeMs].join(":");
+  } catch {
+    return undefined;
+  }
+}
+
+function toggledCase(value: string): string | undefined {
+  const match = /[a-zA-Z]/.exec(value);
+  if (!match || match.index === undefined) return undefined;
+  const index = match.index;
+  const char = value[index];
+  const toggled = char === char.toLowerCase() ? char.toUpperCase() : char.toLowerCase();
+  return `${value.slice(0, index)}${toggled}${value.slice(index + 1)}`;
+}
+
+function isExpectedMissingPath(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as NodeJS.ErrnoException).code === "ENOENT";
+}
+
+/**
+ * Compare the requested entry with one case-variant spelling. `lstat` gives a
+ * bounded authoritative answer even where realpath preserves input casing
+ * (APFS). Equal inode pairs only prove a directory-wide alias when both are
+ * directories: files can be hard-linked under case-varied names on a
+ * case-sensitive filesystem.
+ */
+function classifyKnownEntry(
+  parent: string,
+  entry: string,
+  pathApi: ProjectPathApi,
+  realpathSync: (candidate: string) => string,
+  lstatSync: (candidate: string) => PathIdentityStat,
+): CaseSemantics {
+  const variant = toggledCase(entry);
+  if (!variant) return "unknown";
+  const target = pathApi.join(parent, entry);
+  const alternate = pathApi.join(parent, variant);
+  try {
+    realpathSync(alternate);
+  } catch (error) {
+    return isExpectedMissingPath(error) ? "sensitive" : "unknown";
+  }
+  try {
+    const a = lstatSync(target);
+    const b = lstatSync(alternate);
+    // Zero device/inode values are not a stable identity (some network
+    // filesystems expose them), so retain spelling rather than claiming an
+    // alias. Unequal entries are safely case-sensitive; equal non-directories
+    // are inconclusive because they may be hard links.
+    if (a.dev === 0 || a.ino === 0 || b.dev === 0 || b.ino === 0) return "unknown";
+    if (a.dev !== b.dev || a.ino !== b.ino) return "sensitive";
+    return a.isDirectory?.() && b.isDirectory?.() ? "insensitive" : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
+ * Read a fixed number of names without materializing the whole directory.
+ * This is the read-only fallback when an owned probe cannot be created.
+ */
+function readLimitedDirectoryEntries(parent: string, limit: number): string[] {
+  const directory = fs.opendirSync(parent);
+  const entries: string[] = [];
+  try {
+    while (entries.length < limit) {
+      const entry = directory.readSync();
+      if (!entry) break;
+      entries.push(entry.name);
+    }
+  } finally {
+    directory.closeSync();
+  }
+  return entries;
+}
+
+/**
+ * A bounded directory sample can prove its containing directory's behavior
+ * without mutation. Each usable spelling is verified by alternate lookup and
+ * exact entry identity, so a case-paired NTFS entry remains sensitive.
+ */
+function readOnlyCaseSemantics(
+  parent: string,
+  pathApi: ProjectPathApi,
+  realpathSync: (candidate: string) => string,
+  lstatSync: (candidate: string) => PathIdentityStat,
+  readDirectoryEntries: (parent: string, limit: number) => readonly string[],
+): CaseSemantics {
+  let entries: readonly string[];
+  try {
+    entries = readDirectoryEntries(parent, CASE_EVIDENCE_ENTRY_LIMIT);
+  } catch {
+    return "unknown";
+  }
+  for (const entry of entries.slice(0, CASE_EVIDENCE_ENTRY_LIMIT)) {
+    const semantics = classifyKnownEntry(parent, entry, pathApi, realpathSync, lstatSync);
+    if (semantics !== "unknown") return semantics;
+  }
+  return "unknown";
+}
+
+function directoryIdentity(
+  directory: string,
+  lstatSync: (candidate: string) => PathIdentityStat,
+): string | undefined {
+  try {
+    const stat = lstatSync(directory);
+    return stat.dev === 0 || stat.ino === 0 ? undefined : `${stat.dev}:${stat.ino}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Classify an empty or otherwise inconclusive directory with one owned probe. */
+function probeCaseSemantics(
+  parent: string,
+  pathApi: ProjectPathApi,
+  realpathSync: (candidate: string) => string,
+  lstatSync: (candidate: string) => PathIdentityStat,
+  createCaseProbe?: (parent: string, pathApi: "posix" | "win32") => string,
+  removeCaseProbe?: (probePath: string) => void,
+): CaseSemantics {
+  let probe: string | undefined;
+  let result: CaseSemantics = "unknown";
+  try {
+    probe = createCaseProbe?.(parent, projectPathFlavor(pathApi))
+      ?? fs.mkdtempSync(pathApi.join(parent, ".bobbit-case-probe-"));
+    result = classifyKnownEntry(pathApi.dirname(probe), pathApi.basename(probe), pathApi, realpathSync, lstatSync);
+  } catch {
+    // Keep the conservative spelling-preserving result.
+  } finally {
+    if (probe) {
+      try {
+        if (removeCaseProbe) removeCaseProbe(probe);
+        else fs.rmSync(probe, { recursive: true, force: true });
+      } catch {
+        // A failed cleanup means this run cannot publish probe evidence.
+        result = "unknown";
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * Determine a directory's case behavior in constant filesystem work. Only
+ * stable, non-mutating evidence is cached with its observed fingerprint.
+ */
+function hasCaseInsensitiveEntries(
+  parent: string,
+  entry: string | undefined,
+  pathApi: ProjectPathApi,
+  realpathSync: (candidate: string) => string,
+  lstatSync: (candidate: string) => PathIdentityStat,
+  isCaseInsensitiveAt?: (existingAncestor: string) => boolean | undefined,
+  createCaseProbe?: (parent: string, pathApi: "posix" | "win32") => string,
+  removeCaseProbe?: (probePath: string) => void,
+  readDirectoryEntries?: (parent: string, limit: number) => readonly string[],
+  cache?: Map<string, CaseSemanticsCacheRecord>,
+  fingerprint?: (existingAncestor: string) => string | undefined,
+): boolean {
+  const override = isCaseInsensitiveAt?.(parent);
+  if (override !== undefined) return override;
+  const cacheKey = `${projectPathFlavor(pathApi)}:${pathApi.resolve(parent)}`;
+  const fingerprintFor = fingerprint ?? nativeCaseSemanticsFingerprint;
+
+  const beforeIdentity = directoryIdentity(parent, lstatSync);
+  const before = fingerprintFor(parent);
+  const cached = before && beforeIdentity ? cache?.get(cacheKey) : undefined;
+  if (cached && cached.fingerprint === before && cached.directoryIdentity === beforeIdentity) {
+    return cached.semantics === "insensitive";
+  }
+
+  const known = entry
+    ? classifyKnownEntry(parent, entry, pathApi, realpathSync, lstatSync)
+    : readOnlyCaseSemantics(
+      parent, pathApi, realpathSync, lstatSync,
+      readDirectoryEntries ?? readLimitedDirectoryEntries,
+    );
+  if (known === "unknown") {
+    // A probe mutates its parent, so the metadata fingerprint cannot show
+    // continuity. The current lookup can still use its result when the
+    // parent dev+ino identity is stable across the probe; never cache it.
+    const semantics = probeCaseSemantics(parent, pathApi, realpathSync, lstatSync, createCaseProbe, removeCaseProbe);
+    const afterProbeIdentity = directoryIdentity(parent, lstatSync);
+    return beforeIdentity !== undefined
+      && beforeIdentity === afterProbeIdentity
+      && semantics === "insensitive";
+  }
+
+  // Read-only evidence is trustworthy only when both the caller's directory
+  // fingerprint and the directory's nonzero dev/ino identity are unchanged.
+  // Do not retry a mixed observation: a replacement must remain conservative.
+  const after = fingerprintFor(parent);
+  const afterIdentity = directoryIdentity(parent, lstatSync);
+  if (before && before === after && beforeIdentity && beforeIdentity === afterIdentity) {
+    cache?.set(cacheKey, { fingerprint: before, directoryIdentity: beforeIdentity, semantics: known });
+    return known === "insensitive";
+  }
+  return false;
+}
+
+/**
+ * Fold each component only when its parent proves that the component has a
+ * case alias. This preserves case-sensitive NTFS descendants and APFS aliases.
+ */
+function normalizeExistingPathCase(
+  canonical: string,
+  pathApi: ProjectPathApi,
+  realpathSync: (candidate: string) => string,
+  lstatSync: (candidate: string) => PathIdentityStat,
+  options: ProjectPathIdentityOptions,
+): string {
+  const root = pathApi.parse(canonical).root;
+  const segments = pathApi.relative(root, canonical).split(/[\\/]+/).filter(Boolean);
+  let parent = root;
+  const normalized: string[] = [];
+
+  for (const segment of segments) {
+    const insensitive = hasCaseInsensitiveEntries(
+      parent, segment, pathApi, realpathSync, lstatSync, options.isCaseInsensitiveAt,
+      options.createCaseProbe, options.removeCaseProbe, options.readDirectoryEntries,
+      options.caseSemanticsCache, options.caseSemanticsFingerprint,
+    );
+    normalized.push(insensitive ? segment.toLowerCase() : segment);
+    parent = pathApi.join(parent, segment);
+  }
+  const foldRoot = options.isCaseInsensitiveAt?.(root) === true;
+  return normalizeProjectPath(pathApi.join(foldRoot ? root.toLowerCase() : root, ...normalized), pathApi, { foldCase: false });
+}
+
+/**
+ * Canonical project identity. Existing prefixes are realpath-resolved; spelling
+ * folds only with bounded, per-directory proof of an actual case alias.
+ */
+export function canonicalProjectPath(
+  rootPath: string,
+  options: ProjectPathIdentityOptions = {},
+): string {
+  const pathApi = projectPathApi(rootPath);
+  const resolved = pathApi.resolve(rootPath);
+  const nativePathApi = options.isNativePathApi?.(projectPathFlavor(pathApi)) ?? isNativeProjectPathApi(pathApi);
+  if (!nativePathApi) return normalizeProjectPath(resolved, pathApi, { foldCase: false });
+
+  const realpathSync = options.realpathSync ?? (candidate => fs.realpathSync(candidate));
+  const lstatSync = options.lstatSync ?? (candidate => fs.lstatSync(candidate));
+  let existing = resolved;
+  const suffix: string[] = [];
+  while (true) {
+    try {
+      const canonical = pathApi.resolve(realpathSync(existing));
+      const insensitive = suffix.length > 0 && hasCaseInsensitiveEntries(
+        canonical, undefined, pathApi, realpathSync, lstatSync, options.isCaseInsensitiveAt,
+        options.createCaseProbe, options.removeCaseProbe, options.readDirectoryEntries,
+        options.caseSemanticsCache, options.caseSemanticsFingerprint,
+      );
+      const normalizedSuffix = [...suffix].reverse().map(segment => insensitive ? segment.toLowerCase() : segment);
+      const normalizedCanonical = normalizeExistingPathCase(canonical, pathApi, realpathSync, lstatSync, options);
+      return normalizeProjectPath(pathApi.join(normalizedCanonical, ...normalizedSuffix), pathApi, { foldCase: false });
+    } catch {
+      const parent = pathApi.dirname(existing);
+      if (parent === existing) return normalizeProjectPath(resolved, pathApi, { foldCase: false });
+      suffix.push(pathApi.basename(existing));
+      existing = parent;
+    }
+  }
+}
+
+export type ProjectPathIdentity = (rootPath: string) => string;
+
+export function createProjectPathIdentity(options: ProjectPathIdentityOptions = {}): ProjectPathIdentity {
+  const caseSemanticsCache = options.caseSemanticsCache ?? new Map<string, CaseSemanticsCacheRecord>();
+  return rootPath => canonicalProjectPath(rootPath, { ...options, caseSemanticsCache });
 }
 
 /**
@@ -168,10 +510,16 @@ export class SymlinkProjectRootError extends Error {
 export class ProjectRegistry {
   private projects = new Map<string, RegisteredProject>();
   private readonly storePath: string;
+  private readonly pathIdentity: ProjectPathIdentity;
 
-  constructor(stateDir: string) {
+  constructor(stateDir: string, options: { pathIdentity?: ProjectPathIdentity } = {}) {
     this.storePath = path.join(stateDir, "projects.json");
+    this.pathIdentity = options.pathIdentity ?? createProjectPathIdentity();
     this.load();
+  }
+
+  private sameProjectPath(a: string, b: string): boolean {
+    return this.pathIdentity(a) === this.pathIdentity(b);
   }
 
   private isVisibleListProject(project: RegisteredProject): boolean {
@@ -259,7 +607,7 @@ export class ProjectRegistry {
   ): void {
     for (const existing of this.projects.values()) {
       if (opts.excludeId !== undefined && existing.id === opts.excludeId) continue;
-      if (!sameProjectPath(existing.rootPath, rootPath)) continue;
+      if (!this.sameProjectPath(existing.rootPath, rootPath)) continue;
       if (isHeadquartersProject(existing)) {
         throw new SpecialProjectMutationError(
           "HEADQUARTERS_IMMUTABLE",
@@ -485,14 +833,13 @@ export class ProjectRegistry {
     return this.projects.get(id);
   }
 
-  /** Find a project whose rootPath matches (normalized). Excludes hidden
-   * synthetic projects (e.g. "system") so that real-project lookups don't
+  /** Find a project whose rootPath matches its canonical identity. Excludes
+   * hidden synthetic projects (e.g. "system") so that real-project lookups don't
    * accidentally match the install-dir anchor of the hidden system project. */
   getByPath(rootPath: string): RegisteredProject | undefined {
-    const normalized = path.resolve(rootPath);
     for (const p of this.projects.values()) {
       if (p.hidden) continue;
-      if (path.resolve(p.rootPath) === normalized) return p;
+      if (this.sameProjectPath(p.rootPath, rootPath)) return p;
     }
     return undefined;
   }
@@ -503,20 +850,28 @@ export class ProjectRegistry {
    * Both sides are canonicalized via realpathSync (best-effort, with textual
    * fallback on EPERM/ENOENT) so a cwd reached through a symlink resolves to
    * a project registered at the canonical path (or vice versa).
-   * `getByPath()` is intentionally NOT canonicalized — it is used as a
-   * duplicate-path guard for `register()` and must match exactly what the
-   * caller passed. */
+   * `getByPath()` uses this same canonical identity for upserts, so symlink,
+   * separator, and case aliases on a demonstrably insensitive filesystem
+   * cannot create a second project. */
   findByCwd(cwd: string): RegisteredProject | undefined {
-    const resolveReal = (p: string) => {
-      try { return fs.realpathSync(p); } catch { return p; }
-    };
-    const normalized = path.resolve(resolveReal(cwd)).replace(/\\/g, "/").toLowerCase();
+    const cwdPathApi = projectPathApi(cwd);
+    const normalized = this.pathIdentity(cwd);
     let best: RegisteredProject | undefined;
     let bestLen = 0;
     for (const p of this.projects.values()) {
       if (p.hidden) continue;
-      const root = path.resolve(resolveReal(p.rootPath)).replace(/\\/g, "/").toLowerCase();
-      if ((normalized === root || normalized.startsWith(root + "/")) && root.length > bestLen) {
+      const rootPathApi = projectPathApi(p.rootPath);
+      // Different dialects cannot contain one another. This also ensures the
+      // relative comparison uses win32 semantics for drive and UNC projects on
+      // every host.
+      if (rootPathApi !== cwdPathApi) continue;
+      const root = this.pathIdentity(p.rootPath);
+      // Identities are already slash-normalized and have folded only proven
+      // insensitive components. Use POSIX relative semantics here so win32's
+      // unconditional case-insensitive comparison cannot re-merge a sensitive
+      // Windows descendant.
+      const relative = path.posix.relative(root, normalized);
+      if ((relative === "" || (!relative.startsWith("../") && relative !== ".." && !path.posix.isAbsolute(relative))) && root.length > bestLen) {
         best = p;
         bestLen = root.length;
       }
@@ -775,7 +1130,7 @@ export class ProjectRegistry {
     // Compatibility: older startup code passed the server run directory here.
     // Treat that as a request for the physical Headquarters directory; callers
     // updated for the split pass headquartersDir() directly.
-    const requestedRoot = sameProjectPath(rootPath, getProjectRoot()) ? headquartersDir(rootPath) : rootPath;
+    const requestedRoot = this.sameProjectPath(rootPath, getProjectRoot()) ? headquartersDir(rootPath) : rootPath;
     const canonicalRoot = (() => {
       try { return path.resolve(fs.realpathSync(requestedRoot)); }
       catch { return path.resolve(requestedRoot); }
@@ -923,9 +1278,12 @@ export class ProjectRegistry {
     // an existing visible normal/provisional scope instead of creating a second
     // project at the same path. Hidden/system anchors remain internal and do
     // not block provisioning; Headquarters' physical directory stays immutable.
-    const normalized = path.resolve(rootPath);
+    // Preserve the input dialect for the injected path-identity seam. Native
+    // path.resolve() turns an absolute POSIX fixture into a Windows path on
+    // Windows, preventing its identity from matching the persisted POSIX root.
+    const normalized = projectPathApi(rootPath).resolve(rootPath);
     for (const p of this.projects.values()) {
-      if (!sameProjectPath(p.rootPath, normalized)) continue;
+      if (!this.sameProjectPath(p.rootPath, normalized)) continue;
       if (isHeadquartersProject(p)) {
         assertNormalMutableProject(p, "used as a provisional project");
       }

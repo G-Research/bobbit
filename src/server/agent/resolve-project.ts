@@ -90,20 +90,33 @@ export type CwdValidationResult =
 
 function realOrResolved(input: string): string {
 	const resolved = path.resolve(input);
-	try { return path.resolve(fs.realpathSync(resolved)); }
-	catch { return resolved; }
+	// A cwd can legitimately be not-yet-created. Canonicalize its longest
+	// existing prefix so /var and /private/var aliases compare consistently
+	// without resolving an attacker-controlled nonexistent suffix.
+	let existing = resolved;
+	const suffix: string[] = [];
+	while (true) {
+		try {
+			const canonical = path.resolve(fs.realpathSync(existing));
+			return path.join(canonical, ...suffix.reverse());
+		} catch {
+			const parent = path.dirname(existing);
+			if (parent === existing) return resolved;
+			suffix.push(path.basename(existing));
+			existing = parent;
+		}
+	}
 }
 
 function comparablePath(input: string): string {
-	const normalized = realOrResolved(input).replace(/\\/g, "/").replace(/\/+$/, "");
+	const normalized = realOrResolved(input);
 	return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
 function isSameOrDescendant(parent: string | undefined, candidate: string): boolean {
 	if (!parent || !candidate) return false;
-	const root = comparablePath(parent);
-	const cwd = comparablePath(candidate);
-	return cwd === root || cwd.startsWith(root + "/");
+	const relative = path.relative(comparablePath(parent), comparablePath(candidate));
+	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
 function repoWorktreeRoots(repoWorktrees: Record<string, string> | undefined): string[] {

@@ -286,11 +286,15 @@ HTML-report long tail (HTML, CSS, JS, images, fonts, video, JSON, etc.); the
 fallback is `application/octet-stream`.
 
 **Path-traversal guard.** `src/server/preview/path-guard.ts::resolveAssetPath`
-rejects backslashes, NULs, absolute paths, and any descendant whose realpath
-escapes the per-session mount. `400` from the guard becomes `403` to the
-caller (traversal); `404` becomes `404`. There is no size guard at read
-time — asset size is the agent's responsibility (see "Explicit asset
-opt-in" above).
+rejects backslashes, NULs, and absolute paths. A missing asset is checked
+against the lexical mount spelling, so it can return `404` without resolving
+an attacker-controlled absent path; an existing asset is checked against the
+canonical mount, preventing symlink escapes. Both checks use component-aware
+path containment rather than a string prefix, and therefore preserve macOS
+`/var` ↔ `/private/var` aliases without accepting sibling paths. `400` from
+the guard becomes `403` to the caller (traversal); `404` becomes `404`. There
+is no size guard at read time — asset size is the agent's responsibility (see
+"Explicit asset opt-in" above).
 
 **Cache headers.** All responses set `Cache-Control: no-store` plus
 `X-Content-Type-Options: nosniff`. Browser caching never gets between the

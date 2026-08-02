@@ -6,11 +6,11 @@
  * Unit tests for the path-traversal defence used by the preview content route.
  * Covers the algorithm spec'd in design doc §3.
  */
-import { describe, it, beforeAll, afterAll } from "vitest";
+import { describe, it, beforeAll, afterAll, vi } from "vitest";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
+import fs from "node:fs";
 import path from "node:path";
-import { resolveAssetPath } from "../../src/server/preview/path-guard.ts";
+import { isPathContained, resolveAssetPath } from "../../src/server/preview/path-guard.ts";
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
 
 let baseDir: string;
@@ -21,22 +21,36 @@ let supportsSymlink = true;
 beforeAll(() => {
 	workspaceRoot = makeTmpDir("bobbit-pg-");
 	baseDir = path.join(workspaceRoot, "preview");
-	mkdirSync(baseDir, { recursive: true });
-	mkdirSync(path.join(baseDir, "gifs"), { recursive: true });
-	writeFileSync(path.join(baseDir, "report.html"), "<html></html>", "utf-8");
-	writeFileSync(path.join(baseDir, "gifs", "01.gif"), "GIF89a-stub", "utf-8");
+	fs.mkdirSync(baseDir, { recursive: true });
+	fs.mkdirSync(path.join(baseDir, "gifs"), { recursive: true });
+	fs.writeFileSync(path.join(baseDir, "report.html"), "<html></html>", "utf-8");
+	fs.writeFileSync(path.join(baseDir, "gifs", "01.gif"), "GIF89a-stub", "utf-8");
 	outsideFile = path.join(workspaceRoot, "secret.txt");
-	writeFileSync(outsideFile, "TOPSECRET", "utf-8");
+	fs.writeFileSync(outsideFile, "TOPSECRET", "utf-8");
 	try {
-		symlinkSync(outsideFile, path.join(baseDir, "evil-symlink"));
+		fs.symlinkSync(outsideFile, path.join(baseDir, "evil-symlink"));
 	} catch {
 		supportsSymlink = false;
 	}
 });
 
 afterAll(() => {
-	rmSync(workspaceRoot, { recursive: true, force: true });
+	fs.rmSync(workspaceRoot, { recursive: true, force: true });
 });
+
+/** Preserve the real production function while simulating an unavailable link. */
+function withRealpathAlias(alias: string, canonical: string, run: () => void): void {
+	const realpathSync = fs.realpathSync.bind(fs);
+	const spy = vi.spyOn(fs, "realpathSync").mockImplementation(((input: unknown, options?: unknown) => {
+		if (path.resolve(String(input)) === path.resolve(alias)) return canonical;
+		return realpathSync(input as Parameters<typeof fs.realpathSync>[0], options as never);
+	}) as never);
+	try {
+		run();
+	} finally {
+		spy.mockRestore();
+	}
+}
 
 describe("resolveAssetPath", () => {
 	it("returns ok for a sibling file", () => {
@@ -98,11 +112,34 @@ describe("resolveAssetPath", () => {
 		if (!r.ok) assert.strictEqual(r.status, 400);
 	});
 
-	it("400 on symlink that escapes baseDir (skipped on Windows without privilege)", () => {
-		if (!supportsSymlink) return;
-		const r = resolveAssetPath(baseDir, "evil-symlink");
-		assert.strictEqual(r.ok, false);
-		if (!r.ok) assert.strictEqual(r.status, 400);
+	it("400 on a symlink that escapes baseDir", () => {
+		const assertRejected = () => {
+			const r = resolveAssetPath(baseDir, "evil-symlink");
+			assert.strictEqual(r.ok, false);
+			if (!r.ok) assert.strictEqual(r.status, 400);
+		};
+		if (supportsSymlink) {
+			assertRejected();
+		} else {
+			// Restricted Windows/container runners still exercise the realpath
+			// containment branch rather than silently omitting the security check.
+			withRealpathAlias(path.join(baseDir, "evil-symlink"), fs.realpathSync(outsideFile), assertRejected);
+		}
+	});
+
+	it("400 when the realpath seam resolves an in-root spelling outside", () => {
+		const assertRejected = () => {
+			const r = resolveAssetPath(baseDir, "simulated-evil-symlink");
+			assert.strictEqual(r.ok, false);
+			if (!r.ok) assert.strictEqual(r.status, 400);
+		};
+		withRealpathAlias(path.join(baseDir, "simulated-evil-symlink"), fs.realpathSync(outsideFile), assertRejected);
+	});
+
+	it("does not fold Windows case-sensitive descendant components during containment", () => {
+		assert.equal(isPathContained("C:\\scope\\preview\\secret.txt", "C:\\scope\\Preview", path.win32), false);
+		assert.equal(isPathContained("C:\\scope\\Preview\\report.html", "c:\\scope\\Preview", path.win32), true);
+		assert.equal(isPathContained("\\\\SERVER\\Share\\Preview\\report.html", "\\\\server\\share\\Preview", path.win32), true);
 	});
 
 	it("404 when the file doesn't exist (within baseDir)", () => {

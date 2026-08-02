@@ -17,10 +17,11 @@
  *   - A lexically-escaping path (../) is rejected (false).
  *   - A missing target (ENOENT) is tolerated (true) — caller handles not-found.
  *
- * Symlink creation can fail on platforms/accounts without the privilege
- * (Windows non-admin): those cases skip gracefully rather than fail.
+ * Symlink creation can fail on restricted Windows/container hosts. Native
+ * links are preferred, with a scoped `realpathSync` seam covering the same
+ * canonical containment behavior when links are unavailable.
  */
-import { describe, it, beforeAll, afterAll } from "vitest";
+import { describe, it, beforeAll, afterAll, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -36,19 +37,92 @@ afterAll(() => {
 	try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
 });
 
-/** Create a symlink, returning false (so the test can skip) when the platform
- *  forbids it (e.g. Windows without the create-symlink privilege). */
-function trySymlink(target: string, linkPath: string): boolean {
+const UNSUPPORTED_LINK_ERRORS = new Set(["EPERM", "EACCES", "EROFS", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "UNKNOWN"]);
+
+/** Prefer a native link, but let every host exercise the realpath invariant. */
+function trySymlink(target: string, linkPath: string, type?: "dir" | "file" | "junction"): boolean {
 	try {
-		fs.symlinkSync(target, linkPath);
+		fs.symlinkSync(target, linkPath, type);
 		return true;
 	} catch (err: any) {
-		if (err && (err.code === "EPERM" || err.code === "EACCES" || err.code === "ENOSYS")) return false;
+		if (UNSUPPORTED_LINK_ERRORS.has(err?.code)) return false;
 		throw err;
 	}
 }
 
+/**
+ * Narrow test-only realpath seam for hosts that cannot create symlinks. The
+ * guard imports the Node fs object and dereferences realpathSync at call time,
+ * so this exercises its actual lexical-root/canonical-candidate comparison.
+ */
+function withRealpathAliases(aliases: ReadonlyMap<string, string>, run: () => void): void {
+	const realpathSync = fs.realpathSync.bind(fs);
+	const spy = vi.spyOn(fs, "realpathSync").mockImplementation(((input: unknown, options?: unknown) => {
+		const alias = aliases.get(path.resolve(String(input)));
+		return alias ?? realpathSync(input as Parameters<typeof fs.realpathSync>[0], options as never);
+	}) as never);
+	try {
+		run();
+	} finally {
+		spy.mockRestore();
+	}
+}
+
 describe("isPackPathWithinRoot", () => {
+	it("accepts a canonical in-pack module from a lexical pack root and still rejects an outside module", () => {
+		const canonicalRoot = path.join(tmp, "canonical-pack-root");
+		const lexicalRoot = path.join(tmp, "lexical-pack-root");
+		fs.mkdirSync(path.join(canonicalRoot, "tools"), { recursive: true });
+		const inside = path.join(canonicalRoot, "tools", "inside.js");
+		const outside = path.join(tmp, "outside-pack-root.js");
+		fs.writeFileSync(inside, "export default 1;");
+		fs.writeFileSync(outside, "export default 2;");
+
+		const assertInvariant = () => {
+			assert.equal(isPackPathWithinRoot(lexicalRoot, fs.realpathSync(inside)), true);
+			assert.equal(isPackPathWithinRoot(lexicalRoot, outside), false);
+		};
+		if (trySymlink(canonicalRoot, lexicalRoot, process.platform === "win32" ? "junction" : "dir")) {
+			assertInvariant();
+		} else {
+			// Restricted Windows/container runners: model the exact native alias.
+			withRealpathAliases(new Map([[path.resolve(lexicalRoot), fs.realpathSync(canonicalRoot)]]), assertInvariant);
+		}
+	});
+
+	it("pins lexical containment boundaries for both POSIX and Windows path dialects", () => {
+		const dialects = [
+			{ pathApi: path.posix, root: "/packs/demo", inside: "/packs/demo/tools/index.js", outside: "/packs/demo-escape/index.js" },
+			{ pathApi: path.win32, root: "C:\\packs\\demo", inside: "C:\\packs\\demo\\tools\\index.js", outside: "C:\\packs\\demo-escape\\index.js" },
+		];
+		for (const { pathApi, root, inside, outside } of dialects) {
+			assert.equal(pathApi.relative(root, inside).startsWith(`..${pathApi.sep}`), false);
+			assert.equal(pathApi.relative(root, outside).startsWith(`..${pathApi.sep}`), true);
+		}
+	});
+
+	it("rejects a case-distinct Windows sibling on a case-sensitive directory", () => {
+		const root = "C:\\scope\\Demo";
+		const sibling = "C:\\scope\\demo\\secret.js";
+		const aliases = new Map([
+			[path.resolve(root), root],
+			[path.resolve(sibling), sibling],
+		]);
+
+		withRealpathAliases(aliases, () => {
+			// Model Windows' case-folding relative() behavior on every host. The
+			// canonical realpaths deliberately preserve their distinct descendants.
+			const relative = vi.spyOn(path, "relative").mockImplementation(((from: string, to: string) =>
+				path.win32.relative(from, to)) as never);
+			try {
+				assert.equal(path.win32.relative(root, sibling), "secret.js");
+				assert.equal(isPackPathWithinRoot(root, sibling), false);
+			} finally {
+				relative.mockRestore();
+			}
+		});
+	});
+
 	it("allows a normal in-pack file", () => {
 		const group = path.join(tmp, "case-ok", "group");
 		fs.mkdirSync(group, { recursive: true });
@@ -72,6 +146,34 @@ describe("isPackPathWithinRoot", () => {
 		assert.equal(isPackPathWithinRoot(group, outside), false);
 	});
 
+	it("rejects an outside symlink before and after it is retargeted", () => {
+		const root = path.join(tmp, "case-outside-symlink-swap", "pack");
+		const outsideDir = path.join(tmp, "case-outside-symlink-swap", "outside");
+		fs.mkdirSync(root, { recursive: true });
+		fs.mkdirSync(outsideDir, { recursive: true });
+		const initialTarget = path.join(root, "inside.js");
+		const retarget = path.join(outsideDir, "outside.js");
+		const outsideLink = path.join(outsideDir, "mutable-entry.js");
+		fs.writeFileSync(initialTarget, "export default 'inside';");
+		fs.writeFileSync(retarget, "export default 'outside';");
+
+		const assertRejected = () => assert.equal(isPackPathWithinRoot(root, outsideLink), false);
+		if (trySymlink(initialTarget, outsideLink)) {
+			// An outside link must not borrow the target's in-pack authority.
+			assertRejected();
+			fs.unlinkSync(outsideLink);
+			fs.symlinkSync(retarget, outsideLink);
+			// Retargeting it outside remains rejected; validation never trusted it.
+			assertRejected();
+		} else {
+			// Model both link targets on restricted hosts. The initial target would
+			// have been accepted by a realpath-only guard, so this pins the spelling
+			// containment check independently of native link support.
+			withRealpathAliases(new Map([[path.resolve(outsideLink), fs.realpathSync(initialTarget)]]), assertRejected);
+			withRealpathAliases(new Map([[path.resolve(outsideLink), fs.realpathSync(retarget)]]), assertRejected);
+		}
+	});
+
 	it("rejects a symlink that escapes the group dir", () => {
 		const root = path.join(tmp, "case-symlink");
 		const group = path.join(root, "group");
@@ -81,12 +183,12 @@ describe("isPackPathWithinRoot", () => {
 		fs.writeFileSync(secret, "export const stolen = true;");
 		// A pack entry lexically inside the group that symlinks to the secret.
 		const link = path.join(group, "renderer.js");
-		if (!trySymlink(secret, link)) {
-			// Platform cannot create symlinks — nothing to assert.
-			return;
+		const assertRejected = () => assert.equal(isPackPathWithinRoot(group, link), false);
+		if (trySymlink(secret, link)) {
+			assertRejected();
+		} else {
+			withRealpathAliases(new Map([[path.resolve(link), fs.realpathSync(secret)]]), assertRejected);
 		}
-		// Lexical check passes (link is inside group), but realpath escapes → reject.
-		assert.equal(isPackPathWithinRoot(group, link), false);
 	});
 
 	it("allows a symlink that stays within the group dir", () => {
@@ -95,8 +197,12 @@ describe("isPackPathWithinRoot", () => {
 		const real = path.join(group, "real.js");
 		fs.writeFileSync(real, "export default 1;");
 		const link = path.join(group, "alias.js");
-		if (!trySymlink(real, link)) return;
-		assert.equal(isPackPathWithinRoot(group, link), true);
+		const assertAccepted = () => assert.equal(isPackPathWithinRoot(group, link), true);
+		if (trySymlink(real, link)) {
+			assertAccepted();
+		} else {
+			withRealpathAliases(new Map([[path.resolve(link), fs.realpathSync(real)]]), assertAccepted);
+		}
 	});
 
 	it("tolerates a missing target (ENOENT) so the caller's not-found path runs", () => {

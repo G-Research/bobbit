@@ -6,7 +6,7 @@
  * `realpathSync`). Implements the algorithm specified in the design doc §3.
  */
 
-import * as fs from "node:fs";
+import fs from "node:fs";
 import * as path from "node:path";
 
 export type PathGuardResult =
@@ -61,15 +61,15 @@ export function resolveAssetPath(baseDir: string, rel: string | null | undefined
 	try {
 		resolvedReal = fs.realpathSync(resolved);
 	} catch {
-		// File doesn't exist; check that the *unresolved* path is contained
-		// before reporting 404 (prevents leaking which paths exist outside).
-		if (!isContained(resolved, baseReal)) {
+		// Do not canonicalize a user-supplied missing path. Compare the lexical
+		// pair instead: baseReal may spell /private/var while baseDir spells /var.
+		if (!isPathContained(resolved, path.resolve(baseDir))) {
 			return { ok: false, status: 400, error: "Path traversal rejected" };
 		}
 		return { ok: false, status: 404, error: "File not found" };
 	}
 
-	if (!isContained(resolvedReal, baseReal)) {
+	if (!isPathContained(resolvedReal, baseReal)) {
 		return { ok: false, status: 400, error: "Path traversal rejected" };
 	}
 
@@ -87,9 +87,28 @@ export function resolveAssetPath(baseDir: string, rel: string | null | undefined
 	return { ok: true, resolved: resolvedReal, size: stat.size };
 }
 
-function isContained(child: string, parent: string): boolean {
-	if (child === parent) return true;
-	const sep = path.sep;
-	const parentWithSep = parent.endsWith(sep) ? parent : parent + sep;
-	return child.startsWith(parentWithSep);
+/**
+ * Boundary-aware containment which preserves Windows descendant component case.
+ *
+ * `path.win32.relative()` folds every component, even when the underlying
+ * Windows directory is case-sensitive. Roots remain case-insensitive (drive
+ * letter or UNC authority), while every component below the root must match
+ * the canonical or lexical root spelling exactly.
+ */
+type PathApi = Pick<typeof path, "relative" | "isAbsolute" | "parse" | "sep">;
+
+export function isPathContained(child: string, parent: string, pathApi: PathApi = path): boolean {
+	const relative = pathApi.relative(parent, child);
+	if (relative !== "" && (relative.startsWith(`..${pathApi.sep}`) || relative === ".." || pathApi.isAbsolute(relative))) {
+		return false;
+	}
+	if (pathApi.sep !== "\\") return true;
+
+	const parentRoot = pathApi.parse(parent).root;
+	const childRoot = pathApi.parse(child).root;
+	if (parentRoot.toLowerCase() !== childRoot.toLowerCase()) return false;
+
+	const parentParts = parent.slice(parentRoot.length).split(/[\\/]+/).filter(Boolean);
+	const childParts = child.slice(childRoot.length).split(/[\\/]+/).filter(Boolean);
+	return parentParts.every((part, index) => childParts[index] === part);
 }
