@@ -40,6 +40,12 @@ function createFakeRepo(dir: string): void {
 
 function cannedGit(cwd: string, args: readonly string[]): string {
 	const key = args.join(" ");
+	// Preserve the route contract under test: only fixture directories created
+	// by createFakeRepo are git-backed. In particular, the data-only docs
+	// component must make the probe fail so the route returns its warning.
+	if (key === "rev-parse --is-inside-work-tree" && !fs.existsSync(path.join(cwd, ".git"))) {
+		throw new Error(`not a git repo: ${cwd}`);
+	}
 	if (key === "rev-parse --show-toplevel") return cwd;
 	if (key === "rev-parse --is-inside-work-tree") return "true";
 	if (key === "rev-parse --verify HEAD" || key === "rev-parse --verify refs/heads/master" || key === "rev-parse --verify develop") return "a".repeat(40);
