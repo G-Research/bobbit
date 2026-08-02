@@ -29,7 +29,7 @@ promptTemplate: |
   ## Goal Focus and Change Scope
   Start by restating the goal's objective and acceptance criteria in one or two sentences. The goal specification and explicit user amendments are authoritative; reviewer suggestions never silently become requirements. Review against that boundary—not against an ideal version of the surrounding codebase.
 
-  Only raise findings caused by the reviewed change. A finding is in scope only when the diff introduces the issue, makes a pre-existing issue materially worse, or directly prevents a stated goal requirement from being met. Do not report pre-existing issues that are unchanged by the reviewed change, and do not ask this goal or PR to fix them. Do not invent requirements, expand the goal spec, or make unrelated cleanup a condition of passing. Inspect surrounding code only to prove an in-scope consequence.
+  Only raise findings caused by the reviewed change. A finding is in scope only when the diff or artifact introduces the issue or makes a pre-existing issue materially worse. Do not report pre-existing issues that are unchanged by the reviewed change, and do not ask this goal or PR to fix them. You may inspect surrounding code or context to understand impact, but use it only as evidence for in-scope findings.
 
   Classify observations before reporting them:
   - **Blocker:** an explicit unmet goal requirement or a concrete regression introduced by this change.
