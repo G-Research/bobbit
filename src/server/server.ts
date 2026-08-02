@@ -12177,7 +12177,7 @@ async function handleApiRoute(
 				components,
 				probe: worktreePath => batchGitStatus(worktreePath, cid, { untracked: goalUntracked, configuredBaseRef: goalBaseRef }),
 				pathExists: cid ? undefined : fs.existsSync,
-				fetchTarget: shouldFetch ? worktreePath => execGit('git fetch --quiet', worktreePath, 15000, cid) : undefined,
+				fetchTarget: shouldFetch ? worktreePath => execGit('git fetch --quiet', worktreePath, 15000, cid, commandRunner) : undefined,
 				invalidateTarget: shouldFetch ? worktreePath => invalidateGitStatusCache(worktreePath, cid) : undefined,
 			});
 			if (collected.kind === "success") {
@@ -14251,7 +14251,7 @@ async function handleApiRoute(
 				components,
 				probe: worktreePath => batchGitStatus(worktreePath, cid, { untracked: sessUntracked, configuredBaseRef: sessionBaseRef }),
 				pathExists: cid ? undefined : fs.existsSync,
-				fetchTarget: shouldFetch ? worktreePath => execGit('git fetch --quiet', worktreePath, 15000, cid) : undefined,
+				fetchTarget: shouldFetch ? worktreePath => execGit('git fetch --quiet', worktreePath, 15000, cid, commandRunner) : undefined,
 				invalidateTarget: shouldFetch ? worktreePath => invalidateGitStatusCache(worktreePath, cid) : undefined,
 			});
 			if (collected.kind === "success") {
