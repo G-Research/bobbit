@@ -1630,6 +1630,52 @@ export class AgentInterface extends LitElement {
 		}
 	}
 
+	/**
+	 * Ctrl/Cmd+Enter composer steer: route the current text through the STEER path
+	 * (`session.steer`) instead of `session.prompt`. Mirrors sendMessage's
+	 * readiness + cleanup, but is text-only — attachments are blocked upstream in
+	 * the editor, so there is no attachment handling and no `/compact` branch here.
+	 */
+	public async _steerSend(text: string) {
+		if (!text.trim()) return;
+		const session = this.session;
+		if (!session) throw new Error("No session set on AgentInterface");
+		if (!session.state.model) throw new Error("No model set on AgentInterface");
+
+		const isStreaming = session.state.isStreaming;
+
+		// Check if API key exists for the provider (only needed when idle — a live
+		// steer rides the already-authenticated open turn). Identical to sendMessage.
+		if (!isStreaming) {
+			const provider = session.state.model.provider;
+			const apiKey = await getAppStorage().providerKeys.get(provider);
+			if (!apiKey) {
+				if (!this.onApiKeyRequired) {
+					console.error("No API key configured and no onApiKeyRequired handler set");
+					return;
+				}
+				const success = await this.onApiKeyRequired(provider);
+				if (!success) return;
+			}
+		}
+
+		// Call onBeforeSend hook before sending
+		if (this.onBeforeSend) {
+			await this.onBeforeSend();
+		}
+
+		// Only clear editor after we know we can send.
+		this._messageEditor.value = "";
+		this._messageEditor.attachments = [];
+		this._clearAttachmentDraft();
+		this._scrollToBottom();
+		// Retain composer focus after a keyboard steer.
+		this._messageEditor.querySelector("textarea")?.focus();
+
+		// RemoteAgent.steer accepts a plain string at runtime (it extractText()s any
+		// non-string message); the Agent type is narrower, hence the cast.
+		session.steer(text as unknown as AgentMessage);
+	}
 
 
 	private _getToolResultsById(): Map<string, ToolResultMessage> {
@@ -2463,6 +2509,9 @@ export class AgentInterface extends LitElement {
 							}}
 							.onSend=${(input: string, attachments: Attachment[]) => {
 								this.sendMessage(input, attachments);
+							}}
+							.onSteerSend=${(text: string) => {
+								void this._steerSend(text);
 							}}
 							.onAbort=${() => session.abort()}
 							.onSteer=${(msg: any) => {

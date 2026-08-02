@@ -65,6 +65,13 @@ export class MessageEditor extends LitElement {
 	 *  fixture data. */
 	static MAX_SERIALIZED_SEND_BYTES = 200 * 1024 * 1024;
 
+	/** Inline error shown when the user attempts a Ctrl/Cmd+Enter steer while
+	 *  attachments are present. The steer protocol is text-only, so we block the
+	 *  action rather than silently dropping attachments or falling back to a
+	 *  normal prompt. */
+	static readonly STEER_ATTACHMENT_ERROR =
+		"Steers don't support attachments. Remove them, or press Enter to send a normal prompt.";
+
 	/** Bytes of the serialized prompt frame RemoteAgent.prompt() will send, given
 	 *  the current text + attachments. Mirrors that frame exactly: each image
 	 *  rides ~3× base64 (images[].data + attachments[].content + attachments[].preview).
@@ -112,6 +119,10 @@ export class MessageEditor extends LitElement {
 	@property() onThinkingChange?: (level: ThinkingLevel) => void;
 	@property() onFilesChange?: (files: Attachment[]) => void;
 	@property() onSteer?: (msg: QueuedMessage) => void;
+	/** Distinct from `onSteer` (the queued-pill Steer button contract). Invoked by
+	 *  the Ctrl/Cmd+Enter composer shortcut to send the current text through the
+	 *  STEER path instead of the normal prompt path. Text-only. */
+	@property() onSteerSend?: (text: string) => void;
 	@property() onRemoveQueued?: (id: string) => void;
 	@property() onEditQueued?: (msg: QueuedMessage) => void;
 	@property() onReorder?: (messageIds: string[]) => void;
@@ -131,6 +142,10 @@ export class MessageEditor extends LitElement {
 	/** Non-empty when the last send was rejected for exceeding the aggregate
 	 *  payload limit (S31). Shown as an inline error; cleared on the next edit. */
 	@state() private _sendSizeError = "";
+	/** Non-empty when a Ctrl/Cmd+Enter steer was blocked because attachments are
+	 *  present. Shown as an inline error; cleared on the next edit or when the
+	 *  attachments change. */
+	@state() private _steerError = "";
 	@state() private isRecording = false;
 	private fileInputRef = createRef<HTMLInputElement>();
 
@@ -851,6 +866,7 @@ export class MessageEditor extends LitElement {
 		const textarea = e.target as HTMLTextAreaElement;
 		this.value = textarea.value;
 		if (this._sendSizeError) this._sendSizeError = ""; // clear the S31 error once the user edits
+		if (this._steerError) this._steerError = ""; // clear the steer-attachment error once the user edits
 		this.onInput?.(this.value);
 		this._updateSlashAutocomplete();
 		this._updateAtAutocomplete();
@@ -909,6 +925,15 @@ export class MessageEditor extends LitElement {
 				this._atMenuOpen = false;
 				return;
 			}
+		}
+
+		// Ctrl/Cmd+Enter steer shortcut. Placed AFTER the slash/@-menu blocks (so an
+		// open autocomplete keeps Enter ownership) and BEFORE the plain Enter branch
+		// (Ctrl/Cmd+Enter also satisfies `!e.shiftKey`). IME is already guarded above.
+		if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
+			e.preventDefault();
+			this.handleSteerShortcut();
+			return;
 		}
 
 		if (e.key === "Enter" && !e.shiftKey) {
@@ -998,6 +1023,7 @@ export class MessageEditor extends LitElement {
 			}
 
 			this.attachments = [...this.attachments, ...newAttachments];
+			this._steerError = "";
 			this.onFilesChange?.(this.attachments);
 			this.processingFiles = false;
 		}
@@ -1052,6 +1078,32 @@ export class MessageEditor extends LitElement {
 		this.addToHistory(text);
 	};
 
+	/** Ctrl/Cmd+Enter: send the current text through the STEER path. Mirrors
+	 *  handleSend's lifecycle (draft cleanup event, history reset, addToHistory)
+	 *  but routes to `onSteerSend` instead of `onSend`. Text-only: attachments are
+	 *  blocked with an inline error rather than silently dropped or downgraded to a
+	 *  normal prompt. Like handleSend, it does NOT clear `this.value` — the parent
+	 *  `onSteerSend` handler clears the editor. */
+	private handleSteerShortcut = () => {
+		if (this.processingFiles) return; // same readiness guard as send
+		if (this.attachments.length > 0) {
+			// Block: retain text, attachments, draft, and focus untouched.
+			this._steerError = MessageEditor.STEER_ATTACHMENT_ERROR;
+			return;
+		}
+		const text = this.value;
+		if (!text.trim()) return; // non-empty text required
+		this._steerError = "";
+		this._sendSizeError = "";
+		// Parity with handleSend: dispatch a composed event so session-manager clears
+		// the persisted draft without monkey-patching.
+		this.dispatchEvent(new CustomEvent("message-send", { bubbles: true, composed: true }));
+		this.onSteerSend?.(text);
+		this._historyIndex = -1;
+		this._savedDraft = "";
+		void this.addToHistory(text);
+	};
+
 	private handleAttachmentClick = () => {
 		this.fileInputRef.value?.click();
 	};
@@ -1086,6 +1138,7 @@ export class MessageEditor extends LitElement {
 		}
 
 		this.attachments = [...this.attachments, ...newAttachments];
+		this._steerError = "";
 		this.onFilesChange?.(this.attachments);
 		this.processingFiles = false;
 		input.value = ""; // Reset input
@@ -1093,6 +1146,7 @@ export class MessageEditor extends LitElement {
 
 	private removeFile(fileId: string) {
 		this.attachments = this.attachments.filter((f) => f.id !== fileId);
+		this._steerError = ""; // removing an attachment dismisses the steer-attachment error
 		this.onFilesChange?.(this.attachments);
 	}
 
@@ -1150,6 +1204,7 @@ export class MessageEditor extends LitElement {
 		}
 
 		this.attachments = [...this.attachments, ...newAttachments];
+		this._steerError = "";
 		this.onFilesChange?.(this.attachments);
 		this.processingFiles = false;
 	};
@@ -1510,12 +1565,12 @@ export class MessageEditor extends LitElement {
 				     NOTE: transform: translateZ(0) is load-bearing on iOS Safari. Without its
 				     own GPU compositing layer the textarea caret is invisible in this position
 				     (bottom of viewport, nested flex). Do not remove without re-testing on iOS. -->
-				${this._sendSizeError
+				${(this._sendSizeError || this._steerError)
 					? html`<div
-							data-testid="composer-size-error"
+							data-testid=${this._steerError ? "composer-steer-error" : "composer-size-error"}
 							class="mx-2 mb-1 px-2 py-1 text-xs rounded bg-destructive/10 text-destructive"
 							role="alert"
-						>${this._sendSizeError}</div>`
+						>${this._steerError || this._sendSizeError}</div>`
 					: nothing}
 				<div class="flex items-center gap-1 px-2 py-2" style="transform: translateZ(0);">
 					${attachButton}

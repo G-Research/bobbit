@@ -157,6 +157,15 @@
       }
     },
     {
+      "path": "tests2/dom/message-editor-steer.test.ts",
+      "reason": "Real-component DOM coverage for the Ctrl/Cmd+Enter composer steer shortcut: both Ctrl and Meta variants route non-empty text to onSteerSend (not onSend), plain Enter still sends a normal prompt, Shift+Enter neither sends, attachments block the steer with an accessible inline composer-steer-error while retaining text/attachments, empty/whitespace is a no-op, IME composition and open slash/@ autocomplete keep Enter ownership, and a successful steer resets history browsing and records history.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
       "path": "tests2/core/base-path-cli.test.ts",
       "reason": "Focused CLI coverage for flag-over-environment base-path selection, unsafe input rejection, mounted startup URLs, persisted peers, and truthful authentication banners.",
       "execution": {
