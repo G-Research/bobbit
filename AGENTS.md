@@ -49,13 +49,13 @@ Treat every new branch, state owner, transformation, API, or abstraction as defe
 
 ## Git conventions
 
-Primary branch is **`master`** (not `main`). Never create a `main` branch.
+Primary branch is **`main`** — verify with `git symbolic-ref refs/remotes/origin/HEAD`; never assume `master` (a stale divergent `origin/master` still exists and gives the wrong base).
 
 **Line endings**: LF everywhere except `*.cmd`/`*.bat`/`*.ps1` (CRLF), pinned via `.gitattributes`. Windows: set `git config --global core.autocrlf false`.
 
-**Worktrees**: dev server runs from the **primary worktree** on `master`; sessions use separate worktrees under `<project-root>-wt/<branch>/`. Always edit in your session worktree, never the primary one. For infra files: edit here → commit → push → `cd <primary-worktree> && git pull origin master` (pushing to remote `master` does NOT update the dev server).
+**Worktrees**: dev server runs from the **primary worktree** on `main`; sessions use separate worktrees under `<project-root>-wt/<branch>/`. Always edit in your session worktree, never the primary one. For infra files: edit here → commit → push → `cd <primary-worktree> && git pull origin main` (pushing to remote `main` does NOT update the dev server).
 
-**Forks**: open PRs against the fork's `master`, not the upstream repo.
+**Forks**: open PRs against the fork's default branch (`main`), not the upstream repo.
 
 See [docs/dev-workflow.md](docs/dev-workflow.md).
 

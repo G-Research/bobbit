@@ -119,7 +119,8 @@ promptTemplate: |-
         `task_update(task_id="...", state="complete", head_sha="<SHA from step c>", result_summary="...")`
      e. Go idle — the team lead will merge your branch locally.
 
-  Primary branch is `master`, not `main`.
+  Do not assume the primary branch is `master` or `main` — verify with
+  `git symbolic-ref refs/remotes/origin/HEAD` and use whatever the repo reports.
 
   ## Definition of Done
   **You are not finished until:**

@@ -374,7 +374,7 @@ The boot sweeper (`worktree-sweeper.ts`) reconciles these against persisted stat
 
 For **goal-scoped** variation (one goal differing from another — enable a feature, seed an index, disable a tool/provider), use **hierarchical goal metadata** and the `goalProvisioned` extension hook rather than a per-goal command. Metadata is inherited down the goal tree and the hook fires at every worktree provisioning in the subtree, so treatments apply symmetrically to every agent and sub-goal. See [goals-workflows-tasks.md — Per-goal worktree provisioning](goals-workflows-tasks.md#per-goal-worktree-provisioning) and [design/goal-metadata.md](design/goal-metadata.md). (The earlier bespoke per-goal `worktreeSetupCommand` field from PR #816 has been removed and is ignored if posted.)
 
-**Base ref for new worktrees.** New worktrees (session, goal, staff, pool) branch off the project's configured `base_ref` when set, otherwise off the remote primary (`origin/master`/`origin/main`) or, for local-only repos with commits, local `HEAD`. Fresh `git init` repos with unborn `HEAD` fall back to no-worktree until an initial commit is made; pool prefill skips them with the same actionable warning. A configured `base_ref` is still honored in unborn repos, while a stale configured ref fails loudly rather than silently falling back. The same value drives the `{{baseBranch}}` workflow variable and the `aheadOfPrimary`/`behindPrimary` git-status comparator. Some worktrees also use it as `@{u}` for local status, but Bobbit-owned branch publication never relies on upstream tracking: when a branch is intentionally published, it uses explicit destination refspecs such as `<branch>:refs/heads/<branch>` or `HEAD:refs/heads/<branch>`. `{{master}}` keeps resolving to the project primary independently. Team-member worktrees branch off the goal branch by hierarchical design and are not affected. Full semantics, validation rules, and error inventory: [design/base-ref.md](design/base-ref.md).
+**Base ref for new worktrees.** New worktrees (session, goal, staff, pool) branch off the project's configured `base_ref` when set, otherwise off the remote primary (`origin/HEAD`, e.g. `origin/main`) or, for local-only repos with commits, local `HEAD`. Fresh `git init` repos with unborn `HEAD` fall back to no-worktree until an initial commit is made; pool prefill skips them with the same actionable warning. A configured `base_ref` is still honored in unborn repos, while a stale configured ref fails loudly rather than silently falling back. The same value drives the `{{baseBranch}}` workflow variable and the `aheadOfPrimary`/`behindPrimary` git-status comparator. Some worktrees also use it as `@{u}` for local status, but Bobbit-owned branch publication never relies on upstream tracking: when a branch is intentionally published, it uses explicit destination refspecs such as `<branch>:refs/heads/<branch>` or `HEAD:refs/heads/<branch>`. `{{master}}` (the legacy template alias) keeps resolving to the project primary independently. Team-member worktrees branch off the goal branch by hierarchical design and are not affected. Full semantics, validation rules, and error inventory: [design/base-ref.md](design/base-ref.md).
 
 ### Local-only Git lifecycle
 
@@ -418,34 +418,34 @@ Bobbit can be run as a downstream **fork** that carries local customisations whi
 
 | Remote | Points at | Role |
 |---|---|---|
-| `origin` | your fork (e.g. `<you>/bobbit`) | Your fork. Day-to-day PRs target its `master`. |
+| `origin` | your fork (e.g. `<you>/bobbit`) | Your fork. Day-to-day PRs target its `main`. |
 | `upstream` | the repository you forked from | The source you track for new commits. |
 
 Add it once with `git remote add upstream <url>`; confirm with `git remote -v`. Targeting the wrong base sends review traffic to a repo you may not control — always verify the PR base before creating it.
 
 ### Syncing changes *from* upstream
 
-Pull new `upstream/master` commits into your fork through a single review-ready PR (some forks automate this with a scheduled job, titled e.g. `[upstream-sync] …`):
+Pull new `upstream/main` commits into your fork through a single review-ready PR (some forks automate this with a scheduled job, titled e.g. `[upstream-sync] …`):
 
 1. `git fetch upstream && git fetch origin`.
-2. Stop if `git rev-list --count origin/master..upstream/master` is `0` — nothing new.
-3. `git switch -c sync/upstream-<date> origin/master`.
-4. `git merge --no-ff upstream/master`, resolve conflicts so your fork-specific behaviour is preserved, validate (`npm run check` + tests), push, open the PR.
+2. Stop if `git rev-list --count origin/main..upstream/main` is `0` — nothing new.
+3. `git switch -c sync/upstream-<date> origin/main`.
+4. `git merge --no-ff upstream/main`, resolve conflicts so your fork-specific behaviour is preserved, validate (`npm run check` + tests), push, open the PR.
 
 **⚠️ Merge-commit rule.** **Merge upstream-sync PRs with a real merge commit — never squash, never rebase.**
 
-- Squash/rebase **discards the merge's second parent**, so git loses all record that upstream's commits already live in your `master`. After that, `git merge-base master upstream/master` stays pinned at an ancient commit, `origin/master..upstream/master` re-counts every already-merged commit as "ahead", and the next sync re-litigates conflicts you already resolved.
-- A merge commit keeps `upstream/master` as a true parent, so future syncs surface **only** genuinely-new commits.
+- Squash/rebase **discards the merge's second parent**, so git loses all record that upstream's commits already live in your `main`. After that, `git merge-base main upstream/main` stays pinned at an ancient commit, `origin/main..upstream/main` re-counts every already-merged commit as "ahead", and the next sync re-litigates conflicts you already resolved.
+- A merge commit keeps `upstream/main` as a true parent, so future syncs surface **only** genuinely-new commits.
 - Enable merge commits on your fork (`allow_merge_commit = true`) and don't require linear history; then use "Create a merge commit" / `gh pr merge <n> --merge`. (If the GitHub UI hides the option right after you change the setting, hard-refresh the PR page — the merge dropdown is cached at load time.)
 
-**If a sync PR was squashed by mistake.** You can't rewrite a protected `master`, so heal the ancestry *forward*: branch off the current `master`, build a commit that records `upstream/master` as a second parent while keeping `master`'s tree, then merge that PR with a merge commit:
+**If a sync PR was squashed by mistake.** You can't rewrite a protected `main`, so heal the ancestry *forward*: branch off the current `main`, build a commit that records `upstream/main` as a second parent while keeping `main`'s tree, then merge that PR with a merge commit:
 
 ```bash
-git switch -c sync/heal origin/master
+git switch -c sync/heal origin/main
 git cherry-pick <new-upstream-commits>          # land any new upstream content cleanly
 TREE=$(git write-tree)
-HEAL=$(git commit-tree "$TREE" -p origin/master -p upstream/master -m "Merge upstream/master (heal ancestry)")
-git reset --hard "$HEAL"                         # branch tip = merge commit, tree = master + new content
+HEAL=$(git commit-tree "$TREE" -p origin/main -p upstream/main -m "Merge upstream/main (heal ancestry)")
+git reset --hard "$HEAL"                         # branch tip = merge commit, tree = main + new content
 # push, open PR, then: gh pr merge <n> --merge   (NEVER squash)
 ```
 
@@ -453,16 +453,16 @@ git reset --hard "$HEAL"                         # branch tip = merge commit, tr
 
 To get a fork change accepted into the upstream project:
 
-1. **Develop upstreamable work on a branch cut from `upstream/master`, not your fork's `master`.** A branch based on upstream produces a PR containing *only* your change — no fork-specific commits (CI tweaks, local config, …) leak in.
+1. **Develop upstreamable work on a branch cut from `upstream/main`, not your fork's `main`.** A branch based on upstream produces a PR containing *only* your change — no fork-specific commits (CI tweaks, local config, …) leak in.
    ```bash
    git fetch upstream
-   git switch -c feature/<name> upstream/master
+   git switch -c feature/<name> upstream/main
    # build the change in focused, self-contained commits
    git push origin feature/<name>
-   gh pr create --repo <upstream-owner>/bobbit --base master --head <you>:feature/<name>
+   gh pr create --repo <upstream-owner>/bobbit --base main --head <you>:feature/<name>
    ```
 2. **Land it in both places.** Merge the branch into your fork (fork PR) and submit it upstream. Once upstream accepts it, the next sync brings it back as a normal ancestor — no duplication, no conflict.
-3. **Extracting a change that currently lives only in your fork.** Cherry-pick just its commits onto a fresh `upstream/master`-based branch, dropping fork-only adaptations, and open the upstream PR from there.
+3. **Extracting a change that currently lives only in your fork.** Cherry-pick just its commits onto a fresh `upstream/main`-based branch, dropping fork-only adaptations, and open the upstream PR from there.
 4. **Keep fork divergence minimal.** Every file your fork edits that upstream also maintains becomes a recurring merge conflict. Prefer additive, isolated changes (new files, local config) over editing files upstream actively changes. The smaller and more separable the divergence, the cheaper both syncing-down and contributing-up become.
 
 ---
