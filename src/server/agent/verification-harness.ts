@@ -6302,6 +6302,10 @@ export class VerificationHarness {
 				? new Promise<void>((resolve, reject) => { resolveContainerOwnershipReady = resolve; rejectContainerOwnershipReady = reject; })
 				: Promise.resolve();
 			let containerWitnessAcknowledged = !useContainerDurable;
+			// A second ownership frame is hostile while the first one is still being
+			// bound to Docker's Engine identity. Once host release is delivered stdout
+			// belongs to the payload and marker-looking output is diagnostic only.
+			let containerWitnessFrameReceived = false;
 			let containerHandshakeFailure: Error | undefined;
 			const failContainerOwnershipHandshake = (error: Error) => {
 				if (containerHandshakeFailure) return;
@@ -6322,6 +6326,7 @@ export class VerificationHarness {
 				? createContainerPayloadReleaseHandshake(failContainerOwnershipHandshake)
 				: undefined;
 			const acknowledgeContainerWitness = (witness: ContainerOwnershipWitness) => {
+				containerWitnessFrameReceived = true;
 				void (async () => {
 					try {
 						if (!streamCtx || !containerId || !pidNonce || containerHandshakeFailure) return;
@@ -6390,8 +6395,6 @@ export class VerificationHarness {
 					let wrappedCmd: string;
 					if (useContainerDurable && containerStateDir && exitFile && heartbeatFile && containerWitnessFile && pidNonce) {
 						const qDir = shellSingleQuote(containerStateDir);
-						const qPid = shellSingleQuote(killPidFile);
-						const qHb = shellSingleQuote(heartbeatFile);
 						const qWitness = shellSingleQuote(containerWitnessFile);
 						const qNonce = shellSingleQuote(pidNonce);
 						const qContainer = shellSingleQuote(containerId);
@@ -6399,7 +6402,16 @@ export class VerificationHarness {
 						// The pre-payload barrier is an anonymous shell pipe. No pathname or
 						// FIFO is writable by a same-UID sibling; FD 3 belongs only to the
 						// engine-bound sentinel and is closed before user code starts.
-						wrappedCmd = `# ${dockerExecCommandTag}\nmkdir -p ${qDir} 2>/dev/null || exit 125; exec 4>&1; exec 3<&0; BOBBIT_WITNESS=${qWitness} BOBBIT_NONCE=${qNonce} BOBBIT_CONTAINER=${qContainer} BOBBIT_EXEC_TAG=${qExecTag} /bin/sh -c 'trap "" HUP INT TERM; __fail(){ exit 125; }; __p=$$; __g=$(awk "{print \\$5}" "/proc/$__p/stat" 2>/dev/null || true); __s=$(awk "{print \\$22}" "/proc/$__p/stat" 2>/dev/null || true); case "$__p:$__g:$__s" in *::*) __fail;; esac; __t="$BOBBIT_WITNESS.$$.tmp"; printf "{\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s" > "$__t" && mv "$__t" "$BOBBIT_WITNESS" || __fail; printf "BOBBIT_CONTAINER_OWNERSHIP_TUPLE {\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s" >&4; IFS= read -r __release <&3 || __fail; [ "$__release" = BOBBIT_HOST_RELEASE ] || __fail; printf ".\\n"; while :; do sleep 2147483647 & wait $!; done' 3<&3 | { IFS= read -r __bobbit_ready_ack || exit 125; [ "$__bobbit_ready_ack" = . ] || exit 125; exec 3<&-; exec </dev/null; __bp=$$; printf %s "$__bp" > ${qPid}.tmp && mv ${qPid}.tmp ${qPid}; ( while :; do printf '{"pid":%s,"ts":%s}' "$__bp" "$(date +%s 2>/dev/null || printf 0)" > ${qHb}.tmp && mv ${qHb}.tmp ${qHb}; sleep 1; done ) & __hb=$!; ( ${command}\n); __ec=$?; kill "$__hb" 2>/dev/null; wait "$__hb" 2>/dev/null; exit $__ec; }`;
+						// The Engine-bound outer session never joins the payload group.  It
+						// owns an anonymous stdin release endpoint and a private pipe from the
+						// inner session.  The inner sentinel publishes its exact tuple before
+						// reading that endpoint; after the payload exits it reports only its
+						// exit code on the private pipe and remains until the outer supervisor
+						// reaps its *currently verified* group.  Thus normal completion cannot
+						// strand docker exec behind a durable sentinel, while restart cleanup
+						// still has the same live exact witness.
+						wrappedCmd = `# ${dockerExecCommandTag}\nmkdir -p ${qDir} 2>/dev/null || exit 125; exec 4>&1; exec 3<&0; env BOBBIT_WITNESS=${qWitness} BOBBIT_NONCE=${qNonce} BOBBIT_CONTAINER=${qContainer} BOBBIT_EXEC_TAG=${qExecTag} setsid /bin/sh -c ${shellSingleQuote(`: BOBBIT_WITNESS=${qWitness} BOBBIT_NONCE=${qNonce}; trap "" HUP INT TERM; __fail(){ exit 125; }; __p=$$; __g=$(awk "{print \\$5}" "/proc/$__p/stat" 2>/dev/null || true); __s=$(awk "{print \\$22}" "/proc/$__p/stat" 2>/dev/null || true); case "$__p" in *[!0-9]*|'') __fail;; esac; case "$__g" in *[!0-9]*|'') __fail;; esac; case "$__s" in *[!0-9]*|'') __fail;; esac; [ "$__p" = "$__g" ] || __fail; __t="$BOBBIT_WITNESS.$$.tmp"; printf "{\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s" > "$__t" && mv "$__t" "$BOBBIT_WITNESS" || __fail; printf "BOBBIT_INNER_READY %s %s %s\\n" "$__p" "$__g" "$__s"; IFS= read -r __release <&3 || __fail; [ "$__release" = BOBBIT_HOST_RELEASE ] || __fail; exec 3<&-; ( unset BOBBIT_WITNESS BOBBIT_NONCE BOBBIT_CONTAINER BOBBIT_EXEC_TAG; ${command}\n) >&4; __ec=$?; printf "BOBBIT_INNER_EXIT %s\\n" "$__ec"; while :; do sleep 2147483647 & wait $!; done`)} | { IFS=' ' read -r __kind __p __g __s __rest || exit 125; [ "$__kind" = BOBBIT_INNER_READY ] && [ -z "$__rest" ] || exit 125; case "$__p" in *[!0-9]*|'') exit 125;; esac; case "$__g" in *[!0-9]*|'') exit 125;; esac; case "$__s" in *[!0-9]*|'') exit 125;; esac; [ "$__p" = "$__g" ] || exit 125; printf "BOBBIT_CONTAINER_OWNERSHIP_TUPLE {\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" ${qContainer} ${qNonce} "$__p" "$__g" "$__s" >&4; IFS=' ' read -r __kind __ec __rest || exit 125; [ "$__kind" = BOBBIT_INNER_EXIT ] && [ -z "$__rest" ] || exit 125; case "$__ec" in *[!0-9]*|'') exit 125;; esac; [ "$__ec" -le 255 ] || exit 125; __verify(){ __lp=$(awk "{print \\$1}" "/proc/$__p/stat" 2>/dev/null || true); __lg=$(awk "{print \\$5}" "/proc/$__p/stat" 2>/dev/null || true); __ls=$(awk "{print \\$22}" "/proc/$__p/stat" 2>/dev/null || true); [ "$__lp" = "$__p" ] && [ "$__lg" = "$__g" ] && [ "$__ls" = "$__s" ]; }; __verify || exit 125; kill -TERM -"$__g" 2>/dev/null || exit 125; __verify || exit 125; kill -KILL -"$__g" 2>/dev/null || exit 125; IFS= read -r __leftover && exit 125; exit "$__ec"; }`;
+
 					} else {
 						wrappedCmd = `echo $$ > ${killPidFile}; ${command}`;
 					}
@@ -6595,9 +6607,15 @@ export class VerificationHarness {
 						if (stderr.length > 1024 * 1024) stderr = stderr.slice(-512 * 1024);
 					}
 					// Decode the sentinel's pre-release frame across split stdout chunks.
-					// A second tuple, including one emitted by a hostile payload, is a
-					// fail-closed transport violation and never becomes new authority.
-					if (stream === "stdout") decodeContainerWitnessFrame?.(text);
+					// A second tuple during Engine attestation is a fail-closed transport
+					// violation. After host release marker-looking payload stdout is not
+					// parsed or treated as authority.
+					if (stream === "stdout") {
+						if (containerWitnessFrameReceived && !containerWitnessAcknowledged && text.includes("BOBBIT_CONTAINER_OWNERSHIP_TUPLE ")) {
+							failContainerOwnershipHandshake(new Error("Container ownership tuple was duplicated before host payload release"));
+						}
+						decodeContainerWitnessFrame?.(text);
+					}
 					if (streamCtx) {
 						this.broadcastFn(streamCtx.goalId, {
 							type: "gate_verification_step_output",
@@ -6716,9 +6734,26 @@ export class VerificationHarness {
 				// Windows joins its spawn-time Job supervisor. Every result therefore
 				// waits for that ownership barrier, including natural success.
 				const treeCompletionMustBeVerified = true;
-				// A durable container sentinel deliberately outlives the command leader.
-				// Every terminal path therefore reaps the exact payload group *before*
-				// joining/killing its host docker-exec transport or publishing a result.
+				// Natural completion is produced by the Engine-bound outer supervisor.
+				// It can return a payload code only after its private inner-pipe exit
+				// report, exact tuple revalidation, TERM/KILL, and inner-pipe EOF. The
+				// host-observed docker-exec close is therefore the completion authority;
+				// do not try to re-signal its deliberately dead sentinel. Exit 125 is
+				// reserved for a supervisor identity/cleanup failure and remains pending
+				// (a payload that itself exits 125 therefore fails closed rather than
+				// claiming an indistinguishable cleanup success).
+				if (useContainerDurable && streamCtx && !didTimeOut && !didCancel && code !== null && code !== 125) {
+					const liveStep = this.activeVerifications.get(streamCtx.signalId)?.steps[streamCtx.stepIndex];
+					if (liveStep && !liveStep.containerPayloadCleanupCompletedAt) {
+						liveStep.containerPayloadCleanupCompletedAt = Date.now();
+						delete liveStep.containerPayloadCleanupPending;
+						delete liveStep.killUnsafeReason;
+						this._persistActive();
+					}
+				}
+				// Timeout, cancellation, an ambiguous outer failure, and restart recovery
+				// retain the existing exact host verifier. They never infer completion
+				// from a numeric process-group or an untrusted container artifact.
 				if (useContainerDurable && streamCtx) {
 					const liveStep = this.activeVerifications.get(streamCtx.signalId)?.steps[streamCtx.stepIndex];
 					if (liveStep) containerCleanup ??= this._killAndVerifyRecoveredContainerProcessGroup(liveStep);
