@@ -270,7 +270,6 @@ export class WorkerChannelModuleHost implements ChannelModuleHost {
 							// immediate.
 							if (activeWorkerOutbound?.kind !== "channel-close" && workerCloseAckId === undefined) cleanup(reason ?? "channel disposed", false);
 						},
-
 					};
 					resolve(session);
 					return;
@@ -319,6 +318,12 @@ export class WorkerChannelModuleHost implements ChannelModuleHost {
 				}
 				if (msg.kind === "channel-outbound-result-received") {
 					if (typeof msg.id !== "number" || workerCloseAckId !== msg.id) return;
+					if (!openSettled) {
+						// A factory can await ctx.close() before posting its open result. Its
+						// receipt must not release the worker before that continuation posts
+						// the late session which the registry closes deterministically.
+						return;
+					}
 					cleanup(workerCloseReason, false);
 					return;
 				}

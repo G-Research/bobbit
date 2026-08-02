@@ -209,8 +209,13 @@ export const channels = {
 			fs.writeFileSync(moduleFile, `
 export const channels = {
   terminal: async (ctx) => ({
-    onClientFrame: async () => {
+    onClientFrame: async (frame) => {
+      if (frame.data === "probe") {
+        ctx.audit({ type: "worker.probe.round-trip" });
+        return;
+      }
       await ctx.send({ kind: "text", data: "FIRST_ACK_BOUNDARY" });
+      ctx.audit({ type: "worker.continuation.after-first-ack" });
       await ctx.send({ kind: "text", data: "SECOND_AFTER_ACK" });
     }
   })
@@ -219,9 +224,24 @@ export const channels = {
 			const firstBlocked = new Deferred();
 			const releaseFirst = new Deferred();
 			const secondDelivered = new Deferred();
+			const probeRoundTrip = new Deferred();
+			const continuationCrossed = new Deferred();
+			let continuationObserved = false;
 			const delivered: unknown[] = [];
 			const moduleHost = new WorkerChannelModuleHost();
-			const registry = new ChannelRegistry({ moduleHost, idGenerator: () => "chan-outbound-ack", idleSweepIntervalMs: false });
+			const registry = new ChannelRegistry({
+				moduleHost,
+				idGenerator: () => "chan-outbound-ack",
+				idleSweepIntervalMs: false,
+				audit: (event) => {
+					const type = (event as { type?: unknown }).type;
+					if (type === "worker.probe.round-trip") probeRoundTrip.resolve();
+					if (type === "worker.continuation.after-first-ack") {
+						continuationObserved = true;
+						continuationCrossed.resolve();
+					}
+				},
+			});
 			const declared: ChannelContributionRef = {
 				...contribution(),
 				modulePath: "../lib/terminal.mjs",
@@ -250,7 +270,16 @@ export const channels = {
 			await firstBlocked.promise;
 			assert.deepEqual(delivered, [{ kind: "text", data: "FIRST_ACK_BOUNDARY" }], "the second worker operation cannot reach the parent before the first acknowledgement");
 
+			// A separate parent → worker control round-trip proves the worker is alive
+			// and processing messages while its first delivery remains blocked. The
+			// continuation audit must still be absent; an unbounded parent FIFO would
+			// let ctx.send resolve immediately and cross this boundary already.
+			await registry.sendFromClient({ sessionId: "sess-1", packId: "pack-a", channelId: "chan-outbound-ack", clientId: "client-1", frame: { kind: "text", data: "probe" } });
+			await probeRoundTrip.promise;
+			assert.equal(continuationObserved, false, "worker continuation must not cross before the first send acknowledgement");
+
 			releaseFirst.resolve();
+			await continuationCrossed.promise;
 			await secondDelivered.promise;
 			await clientFrame;
 			assert.deepEqual(delivered, [
@@ -258,6 +287,68 @@ export const channels = {
 				{ kind: "text", data: "SECOND_AFTER_ACK" },
 			]);
 			await registry.dispose("test done");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("settles an initialization self-close before releasing its worker", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "channel-module-init-close-"));
+		try {
+			const sourceFile = path.join(root, "channels", "terminal.yaml");
+			const moduleFile = path.join(root, "lib", "terminal.mjs");
+			fs.mkdirSync(path.dirname(sourceFile), { recursive: true });
+			fs.mkdirSync(path.dirname(moduleFile), { recursive: true });
+			fs.writeFileSync(moduleFile, `
+export const channels = {
+  terminal: async (ctx) => {
+    await ctx.send({ kind: "json", data: { op: "error", message: "INIT_CLOSE_ERROR_FRAME" } });
+    await ctx.close("init failed");
+    return {
+      close: async () => { ctx.audit({ type: "worker.init-close.cleanup" }); }
+    };
+  }
+};
+`, "utf-8");
+			const frames: unknown[] = [];
+			const closeReasons: Array<string | undefined> = [];
+			const cleanupSeen = new Deferred();
+			let cleanupCalls = 0;
+			const moduleHost = new WorkerChannelModuleHost({ timeoutMs: 1_000 });
+			const session = await moduleHost.open({
+				contribution: {
+					...contribution(),
+					modulePath: "../lib/terminal.mjs",
+					sourceFile,
+					packRoot: root,
+					handler: "terminal",
+				},
+				dispatcher: new ChannelDispatcher(),
+				channelId: "chan-init-close",
+				ctx: {
+					sessionId: "sess-1",
+					packId: "pack-a",
+					contributionId: "terminal-panel",
+					channelId: "chan-init-close",
+					name: "terminal",
+					host: {},
+					send: async (frame) => { frames.push(frame); },
+					sendTo: async () => {},
+					close: async (reason) => { closeReasons.push(reason); },
+					audit: (event) => {
+						if ((event as { type?: unknown }).type === "worker.init-close.cleanup") {
+							cleanupCalls++;
+							cleanupSeen.resolve();
+						}
+					},
+				},
+			});
+			assert.deepEqual(frames, [{ kind: "json", data: { op: "error", message: "INIT_CLOSE_ERROR_FRAME" } }]);
+			assert.deepEqual(closeReasons, ["init failed"], "factory close must reach the parent exactly once before open settles");
+			assert.equal(typeof session.close, "function", "late close hook must remain reachable after the initialization close receipt");
+			await session.close?.("late initialization cleanup");
+			await cleanupSeen.promise;
+			assert.equal(cleanupCalls, 1, "late handler cleanup must run exactly once after open settlement");
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
