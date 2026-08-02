@@ -567,21 +567,40 @@ describe("spawnTracked timeout cleanup", () => {
 		}
 	});
 
-	it("preserves Windows recovered-container finalization without a POSIX sentinel", async () => {
+	it("keeps recovered Windows container transport pending without nonce-bound Job completion evidence", async () => {
 		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-sentinel-windows-"));
+		const calls: Array<{ kind: string; status: string }> = [];
 		try {
-			const harness = makeRecoveryHarness(stateDir, [], { platform: "win32" });
+			const harness = makeRecoveryHarness(stateDir, calls, { platform: "win32" });
 			(harness as any)._dockerExecCapture = async () => ({ code: 0, stdout: "0\n" });
 			const step: any = {
 				name: "Windows container", type: "command", status: "running", startedAt: Date.now() - 1_000,
 				containerId: "container-under-test", restartRecoveryMode: "container-exec", pidNonce: "windows-nonce", containerOwnershipWitness: { containerId: "container-under-test", nonce: "windows-nonce", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" }, pidFile: "/tmp/.bobbit-verif/signal/0.pid", exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat",
 			};
-			const result = await (harness as any)._resumeContainerCommandStep({ signalId: "signal" }, step, {
-				finalize: (code: number) => ({ name: step.name, type: step.type, passed: code === 0, output: "finalized", duration_ms: 0 }),
-				timeoutResult: () => { throw new Error("unexpected timeout"); },
-				restartInterrupted: () => { throw new Error("unexpected interruption"); },
+			const active: ActiveVerification = {
+				goalId: "goal", gateId: "implementation", signalId: "signal", overallStatus: "running", startedAt: Date.now(), currentPhase: 0, steps: [step],
+			};
+			fs.writeFileSync(path.join(stateDir, "active-verifications.json"), JSON.stringify({ verifications: [active] }));
+
+			await expect(harness.resumeInterruptedVerifications()).resolves.toBeUndefined();
+
+			// Windows cannot reopen a historical Job by PID. A missing nonce-bound
+			// post-Job-close record leaves its transport cleanup retryable; it must
+			// never accept the former no-op and publish a terminal verification/gate.
+			expect(calls).toEqual([]);
+			const resumed = (harness as any).activeVerifications.get("signal") as ActiveVerification;
+			expect(resumed).toBeDefined();
+			const resumedStep = resumed.steps[0] as any;
+			expect(resumedStep.containerPayloadCleanupCompletedAt).toEqual(expect.any(Number));
+			expect(resumedStep.containerTransportCleanupPending).toBe(true);
+			expect(resumedStep.sentinelCleanupPending).toBe(true);
+			expect(resumedStep.containerTransportCleanupCompletedAt).toBeUndefined();
+			const persisted = JSON.parse(fs.readFileSync(path.join(stateDir, "active-verifications.json"), "utf8"));
+			expect(persisted.verifications).toHaveLength(1);
+			expect(persisted.verifications[0].steps[0]).toMatchObject({
+				containerTransportCleanupPending: true,
+				sentinelCleanupPending: true,
 			});
-			expect(result).toMatchObject({ passed: true, output: "finalized" });
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
 		}
