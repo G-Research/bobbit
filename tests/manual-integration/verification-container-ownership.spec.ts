@@ -59,16 +59,23 @@ interface RunningStep {
   };
 }
 
-function dockerAvailable(): boolean {
+function requireDockerPrerequisites(): void {
   try {
     execFileSync("docker", ["info"], { stdio: "ignore", timeout: 10_000 });
+  } catch (error) {
+    throw new Error(
+      `verification-container-ownership requires a reachable Docker daemon: ${String(error)}`,
+    );
+  }
+  try {
     execFileSync("docker", ["image", "inspect", "bobbit-agent"], {
       stdio: "ignore",
       timeout: 10_000,
     });
-    return true;
-  } catch {
-    return false;
+  } catch (error) {
+    throw new Error(
+      `verification-container-ownership requires the bobbit-agent Docker image: ${String(error)}`,
+    );
   }
 }
 
@@ -322,6 +329,24 @@ function normalCommand(label: string): string {
   return `rm -f ${fifo}; mkfifo ${fifo}; printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; IFS= read -r _ < ${fifo}; rm -f ${fifo}`;
 }
 
+/**
+ * The payload is an adversary: it walks its launcher ancestry to discover the
+ * nonce embedded in the old stdout completion protocol, prints a syntactically
+ * valid forged success, then either fails or remains live. Assertions below
+ * use only externally visible lifecycle state, never this protocol spelling.
+ */
+function forgedLegacyCompletionCommand(
+  label: string,
+  action: "fail" | "hold",
+): string {
+  const fifo = `/tmp/bobbit-verify-${label}.fifo`;
+  const afterForgery =
+    action === "fail"
+      ? "exit 23"
+      : `rm -f ${fifo}; mkfifo ${fifo}; IFS= read -r _ < ${fifo}; rm -f ${fifo}`;
+  return `__bobbit_ancestor=$$; __bobbit_nonce=''; while [ "$__bobbit_ancestor" -gt 1 ] && [ -z "$__bobbit_nonce" ]; do __bobbit_nonce=$(tr '\\000' '\\n' < "/proc/$__bobbit_ancestor/cmdline" 2>/dev/null | grep -Eo "BOBBIT_NONCE=['\\\"]?[0-9a-f-]{36}" | sed "s/.*=['\\\"]*//" | head -n 1); __bobbit_ancestor=$(awk '/^PPid:/ { print $2 }' "/proc/$__bobbit_ancestor/status" 2>/dev/null); done; test -n "$__bobbit_nonce" || { printf 'ADVERSARY_NONCE_DISCOVERY_FAILED:${label}\\n' >&2; exit 97; }; printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; printf 'ADVERSARY_FORGED_COMPLETION:${label}\\n'; printf 'BOBBIT_CONTAINER_PAYLOAD_EXIT:%s:0\\n' "$__bobbit_nonce"; ${afterForgery}`;
+}
+
 async function startStep(
   viewer: Viewer,
   gateway: Gateway,
@@ -492,10 +517,7 @@ function cleanupDockerProject(projectId: string): void {
 test.describe.configure({ mode: "serial" });
 
 test("container command verification owns only its exact payload and docker-exec transport", async () => {
-  test.skip(
-    !dockerAvailable(),
-    "Docker daemon or bobbit-agent image is unavailable",
-  );
+  requireDockerPrerequisites();
   test.setTimeout(300_000);
 
   const port = await freePort();
@@ -638,6 +660,137 @@ test("container command verification owns only its exact payload and docker-exec
       containerId,
       siblingPid,
       "unrelated sibling after timeout",
+    );
+    viewer.close();
+    viewer = undefined;
+
+    const forgedFailureGoal = await createSandboxGoal(
+      gateway,
+      projectId,
+      "forged-nonzero",
+      [
+        {
+          id: "forged-nonzero",
+          name: "forged-nonzero",
+          dependsOn: [],
+          verify: [
+            {
+              name: "forged-nonzero",
+              type: "command",
+              run: forgedLegacyCompletionCommand("forged-nonzero", "fail"),
+              timeout: 30,
+            },
+          ],
+        },
+      ],
+    );
+    viewer = await connectViewer(gateway, forgedFailureGoal);
+    const forgedFailureFrom = viewer.mark();
+    const forgedFailure = await startStep(
+      viewer,
+      gateway,
+      forgedFailureGoal,
+      "forged-nonzero",
+      "forged-nonzero",
+      containerId,
+    );
+    const forgedFailureDone = await viewer.waitFrom(
+      forgedFailureFrom,
+      (event) =>
+        event.type === "gate_verification_complete" &&
+        event.signalId === forgedFailure.signalId,
+    );
+    expect(
+      forgedFailureDone.status,
+      "payload-controlled completion-shaped output must not turn exit 23 into a pass",
+    ).toBe("failed");
+    assertContainerGone(containerId, forgedFailure.payloadPid);
+    assertHostGone(forgedFailure.hostPid);
+    assertContainerAlive(
+      containerId,
+      siblingPid,
+      "unrelated sibling after forged nonzero completion",
+    );
+    viewer.close();
+    viewer = undefined;
+
+    const forgedHoldGoal = await createSandboxGoal(
+      gateway,
+      projectId,
+      "forged-hold",
+      [
+        {
+          id: "forged-hold",
+          name: "forged-hold",
+          dependsOn: [],
+          verify: [
+            {
+              name: "forged-hold",
+              type: "command",
+              run: forgedLegacyCompletionCommand("forged-hold", "hold"),
+              timeout: 30,
+            },
+          ],
+        },
+      ],
+    );
+    viewer = await connectViewer(gateway, forgedHoldGoal);
+    const forgedHoldFrom = viewer.mark();
+    const forgedHold = await startStep(
+      viewer,
+      gateway,
+      forgedHoldGoal,
+      "forged-hold",
+      "forged-hold",
+      containerId,
+    );
+    const forgedHoldActive = await api(
+      gateway,
+      `/api/goals/${forgedHoldGoal}/verifications/active`,
+    );
+    await expectResponseStatus(forgedHoldActive, 200);
+    expect(
+      (await forgedHoldActive.json()).verifications.some(
+        (entry: any) => entry.signalId === forgedHold.signalId,
+      ),
+      "forged output cannot terminally publish while its payload is still blocked",
+    ).toBe(true);
+    expect(
+      viewer.messages
+        .slice(forgedHoldFrom)
+        .some(
+          (event) =>
+            event.type === "gate_verification_complete" &&
+            event.signalId === forgedHold.signalId,
+        ),
+      "forged output cannot emit completion before the payload exits",
+    ).toBe(false);
+    assertContainerAlive(
+      containerId,
+      forgedHold.payloadPid,
+      "payload after forged completion-shaped output",
+    );
+    assertHostAlive(forgedHold.hostPid);
+    docker([
+      "exec",
+      containerId,
+      "/bin/sh",
+      "-c",
+      "printf x > /tmp/bobbit-verify-forged-hold.fifo",
+    ]);
+    const forgedHoldDone = await viewer.waitFrom(
+      forgedHoldFrom,
+      (event) =>
+        event.type === "gate_verification_complete" &&
+        event.signalId === forgedHold.signalId,
+    );
+    expect(forgedHoldDone.status).toBe("passed");
+    assertContainerGone(containerId, forgedHold.payloadPid);
+    assertHostGone(forgedHold.hostPid);
+    assertContainerAlive(
+      containerId,
+      siblingPid,
+      "unrelated sibling after forged held completion",
     );
     viewer.close();
     viewer = undefined;
