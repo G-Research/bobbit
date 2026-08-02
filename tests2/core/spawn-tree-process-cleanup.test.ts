@@ -544,11 +544,13 @@ describe("spawnTracked timeout cleanup", () => {
 		const nonce = "container-group-nonce";
 		const groupId = 321_654;
 		const killCalls: number[] = [];
+		// A field-22-shaped kernel tick token, not a coarse wall-clock `lstart`.
+		const kernelStartToken = "4242424242";
 		try {
-			fs.writeFileSync(sentinelFile, JSON.stringify({ pid: process.pid, pgid: groupId, nonce, startTokenKind: "linux-proc-stat-22", startToken: "current-process" }));
+			fs.writeFileSync(sentinelFile, JSON.stringify({ pid: process.pid, pgid: groupId, nonce, startTokenKind: "linux-proc-stat-22", startToken: kernelStartToken }));
 			const harness = makeRecoveryHarness(stateDir, [], {
 				platform: "linux",
-				posixProcessIdentityInspector: () => ({ startTokenKind: "linux-proc-stat-22", startToken: "current-process", pgid: groupId }),
+				posixProcessIdentityInspector: () => ({ startTokenKind: "linux-proc-stat-22", startToken: kernelStartToken, pgid: groupId }),
 				persistedTreeKiller: pid => { killCalls.push(pid); return "signalled"; },
 			});
 			// Simulate a crash after the pre-spawn sentinel metadata was persisted,
@@ -737,7 +739,7 @@ describe("spawnTracked timeout cleanup", () => {
 			await expect((harness as any)._reapRecoveredPosixSentinel({
 				name: "Recovered command", type: "command", status: "running", startedAt: Date.now(),
 				pid: groupId, pidNonce: nonce, sentinelFile,
-			})).rejects.toThrow(/no longer matches its original process identity/i);
+			})).rejects.toThrow(/no longer matches its original exact process identity/i);
 			expect(killCalls, "a mismatched live sentinel PID must not authorize any process-group signal").toEqual([]);
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });

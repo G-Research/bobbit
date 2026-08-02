@@ -255,8 +255,10 @@ test("persisted container cancellation kills and verifies its payload before rea
 	(harness as any)._dockerExecCapture = async (containerId: string, script: string) => {
 		events.push("payload");
 		assert.equal(containerId, "container-cancel-only");
-		assert.match(script, /kill -TERM -- "-\$pgid"/);
-		assert.match(script, /kill -0 -- "-\$pgid"/);
+		assert.match(script, /live_p=\$\(ps -o pid=/);
+		assert.equal((script.match(/live_p=\$\(ps -o pid=/g) ?? []).length, 2, "exact tuple must be checked before TERM and again before KILL");
+		assert.match(script, /kill -TERM -- "-\$pgid"[\s\S]*live_p=\$\(ps -o pid=[\s\S]*kill -KILL -- "-\$pgid"/);
+		assert.doesNotMatch(script, /kill -0 -- "-\$pgid"/, "never post-probe a historical PGID after final signal");
 		assert.doesNotMatch(script, /docker (?:stop|kill)|killall|pkill/);
 		return { code: 0, stdout: "" }; // no live group remains after the exact-group probe
 	};
@@ -289,7 +291,9 @@ test("terminal recovered container exit proves no live payload group before host
 		if (script.includes("cat '/tmp/bobbit-terminal.exit'")) return { code: 0, stdout: "0\n" };
 		events.push("payload-no-live-group");
 		assert.match(script, /live_g=\$\(ps -o pgid=/);
-		assert.match(script, /kill -0 -- "-\$pgid"/);
+		assert.equal((script.match(/live_g=\$\(ps -o pgid=/g) ?? []).length, 2, "exact PGID must be checked before both destructive signals");
+		assert.match(script, /kill -TERM -- "-\$pgid"[\s\S]*live_g=\$\(ps -o pgid=[\s\S]*kill -KILL -- "-\$pgid"/);
+		assert.doesNotMatch(script, /kill -0 -- "-\$pgid"/, "never post-probe a historical PGID after final signal");
 		return { code: 0, stdout: "" };
 	};
 	(harness as any)._reapRecoveredPosixSentinel = async () => { events.push("sentinel"); };

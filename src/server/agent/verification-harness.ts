@@ -2929,8 +2929,14 @@ export class VerificationHarness {
 		// can be stamped into active state. That closes the spawn→state-persist
 		// crash window: use this record's PGID when `step.pid` is absent, but when
 		// a persisted group exists it must agree exactly with the sentinel record.
-		if (!Number.isFinite(sentinelPid) || sentinelPid <= 0 || !Number.isFinite(recordedGroupId) || recordedGroupId <= 0 || recordedGroupId !== groupId || record.nonce !== expectedNonce || record.startTokenKind !== "linux-proc-stat-22" || typeof record.startToken !== "string" || !record.startToken) {
+		if (!Number.isFinite(sentinelPid) || sentinelPid <= 0 || !Number.isFinite(recordedGroupId) || recordedGroupId <= 0 || record.nonce !== expectedNonce || record.startTokenKind !== "linux-proc-stat-22" || typeof record.startToken !== "string" || !record.startToken) {
 			return pending("Recovered command sentinel has no typed kernel-stable identity; refusing legacy or coarse recovery evidence.");
+		}
+		// Check group metadata only after typed identity evidence has passed, so a
+		// test (and recovery diagnostic) cannot mistake legacy-token rejection for
+		// a valid exact group-metadata comparison.
+		if (recordedGroupId !== groupId) {
+			return pending("Recovered command sentinel identity did not match persisted group metadata.");
 		}
 		// Sentinel absence is ownership loss, not proof of a reaped group. The old
 		// PGID is no longer safe to observe or signal, so retain retryable intent.
@@ -3299,6 +3305,11 @@ export class VerificationHarness {
 
 			this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
 			this._persistActive();
+			// Attached ordinary commands have no durable recovery identity; preserve
+			// their live tracked cleanup. Container transport remains deferred until
+			// its exact payload phase has settled.
+			const hasContainerCommand = active.steps.some(step => step.type === "command" && !!step.containerId);
+			if (!hasContainerCommand) this._killTrackedForSignal(signalId);
 			const commandKillsSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
 			// Exact payload cleanup precedes host docker-exec transport teardown.
 			if (commandKillsSettled) this._killTrackedForSignal(signalId);
@@ -3362,6 +3373,8 @@ export class VerificationHarness {
 
 			this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
 			this._persistActive();
+			const hasContainerCommand = active.steps.some(step => step.type === "command" && !!step.containerId);
+			if (!hasContainerCommand) this._killTrackedForSignal(signalId);
 			const commandKillsSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
 			if (commandKillsSettled) this._killTrackedForSignal(signalId);
 			this._drainPendingSignoffsForSignal(signalId);
