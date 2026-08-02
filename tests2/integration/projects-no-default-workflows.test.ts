@@ -160,4 +160,99 @@ test.describe("No default workflow scaffold", () => {
 			validateAllWorkflows(workflows, [{ name: projName }]),
 		).toEqual([]);
 	});
+
+	test("Case D — auto-seeding selects the executable component after a data-only component", async () => {
+		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nodef-d-")));
+		projectDir(root);
+		fs.mkdirSync(path.join(root, "data"));
+		fs.mkdirSync(path.join(root, "app"));
+
+		const projName = `nodef-d-${Date.now()}`;
+		const executableComponent = "app";
+		const executableCommands = {
+			build: "npm run build",
+			check: "npm run check",
+			unit: "npm run test:unit",
+			browser: "npm run test:browser",
+			e2e: "npm run test:e2e",
+		};
+		const components = [
+			{ name: "data", repo: "data" },
+			{
+				name: executableComponent,
+				repo: "app",
+				commands: executableCommands,
+				config: { qa_start_command: "npm run dev" },
+			},
+		];
+		const project = await registerProject({
+			name: projName, // Deliberately matches neither component.
+			rootPath: root,
+			components,
+			seedWorkflows: false,
+		});
+
+		const yamlPath = path.join(root, ".bobbit", "config", "project.yaml");
+		await pollUntil(() => fs.existsSync(yamlPath) ? true : null, { timeoutMs: 2000, intervalMs: 25, label: "project.yaml exists" });
+		expect(isWorkflowsAbsentOrEmpty(readProjectYaml(root))).toBe(true);
+
+		const goalRes = await fetch(`${base()}/api/goals`, {
+			method: "POST",
+			headers: headers(),
+			body: JSON.stringify({
+				title: `goal-${Date.now()}`,
+				cwd: root,
+				projectId: project.id,
+				team: false,
+				autoStartTeam: false,
+				worktree: false,
+				workflowId: "feature",
+			}),
+		});
+		expect(goalRes.status, await goalRes.clone().text()).toBe(201);
+		const createdGoal = await goalRes.json();
+
+		const workflows = readProjectYaml(root)!.workflows as Record<string, any>;
+		expect(Object.keys(workflows).sort()).toEqual(["bug-fix", "feature", "general", "parent", "quick-fix"]);
+		const expectedStructuralCommands = [
+			{ command: "build", phase: 0 },
+			{ command: "check", phase: 1 },
+			{ command: "unit", phase: 1 },
+			{ command: "browser", phase: 1 },
+			{ command: "e2e", phase: 1 },
+		];
+		for (const workflowId of ["general", "feature", "bug-fix", "quick-fix"]) {
+			const implementation = workflows[workflowId].gates.find((gate: any) => gate.id === "implementation");
+			expect(implementation, `${workflowId} implementation gate`).toBeTruthy();
+			const structural = (implementation.verify ?? []).filter((step: any) => step.type === "command" && step.component && step.command);
+			expect(
+				structural.map((step: any) => ({ command: step.command, phase: step.phase, component: step.component })),
+				`${workflowId} structural commands`,
+			).toEqual(expectedStructuralCommands.map((step) => ({ ...step, component: executableComponent })));
+			const reviews = (implementation.verify ?? [])
+				.filter((step: any) => step.type === "llm-review" && step.phase === 2)
+				.map((step: any) => step.role)
+				.sort();
+			expect(reviews).toEqual(["code-reviewer", "security-reviewer", "spec-auditor"]);
+		}
+
+		const everyStep = Object.values(workflows).flatMap((workflow: any) =>
+			(workflow.gates ?? []).flatMap((gate: any) => gate.verify ?? []),
+		);
+		expect(everyStep.filter((step: any) => step.component).every((step: any) => step.component === executableComponent)).toBe(true);
+		expect(validateAllWorkflows(workflows, components)).toEqual([]);
+
+		const persistedFeature = workflows.feature;
+		const frozenFeature = createdGoal.workflow;
+		expect(frozenFeature).toBeTruthy();
+		const frozenStructural = frozenFeature.gates
+			.find((gate: any) => gate.id === "implementation")
+			.verify.filter((step: any) => step.type === "command" && step.component && step.command)
+			.map((step: any) => ({ command: step.command, phase: step.phase, component: step.component }));
+		expect(frozenStructural).toEqual(
+			persistedFeature.gates.find((gate: any) => gate.id === "implementation").verify
+				.filter((step: any) => step.type === "command" && step.component && step.command)
+				.map((step: any) => ({ command: step.command, phase: step.phase, component: step.component })),
+		);
+	});
 });
