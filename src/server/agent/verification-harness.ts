@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { spawnTracked, killAllTracked, killTreeByPid, type TrackedChild } from "./spawn-tree.js";
 import { realClock, realCommandRunner, type Clock, type CommandRunner, type TimerHandle } from "../gateway-deps.js";
 import { broadcastGateStatusChanged } from "../gate-status-broadcast.js";
@@ -36,6 +36,65 @@ function isPendingCommandCleanupError(err: unknown): err is PendingCommandCleanu
 	return err instanceof PendingCommandCleanupError || (err as any)?.name === "PendingCommandCleanupError";
 }
 
+type PosixProcessIdentity =
+	| {
+		/** Linux `/proc/<pid>/stat` field 22 is stable for one incarnation. */
+		startTokenKind: "linux-proc-stat-22";
+		startToken: string;
+		pgid: number;
+	}
+	| {
+		/**
+		 * Darwin's `lstart` is only second-granular, so it is authority only when
+		 * paired with the unguessable nonce held in the live sentinel's argv.
+		 */
+		startTokenKind: "darwin-lstart-argv-nonce";
+		startToken: string;
+		pgid: number;
+		sentinelNonce: string;
+	};
+
+function inspectProcessGroupId(pid: number): number | undefined {
+	try {
+		const pgid = Number(execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], {
+			encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+		}).trim());
+		return Number.isSafeInteger(pgid) && pgid > 0 ? pgid : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Return exact host ownership evidence only. Linux uses the kernel's start
+ * tick. Node has no libproc binding, so Darwin pairs `lstart` with an
+ * unguessable nonce held by the live sentinel in argv; `lstart` alone is never
+ * accepted because same-second PID reuse can otherwise authorize another tree.
+ */
+function inspectPosixProcessIdentity(pid: number): PosixProcessIdentity | undefined {
+	if (process.platform === "linux") {
+		const startToken = readProcessStartToken(pid);
+		const pgid = startToken ? inspectProcessGroupId(pid) : undefined;
+		return startToken && pgid ? { startTokenKind: "linux-proc-stat-22", startToken, pgid } : undefined;
+	}
+	if (process.platform !== "darwin") return undefined;
+	try {
+		const startToken = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+			encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, LC_ALL: "C" },
+		}).trim();
+		const command = execFileSync("ps", ["-ww", "-o", "command=", "-p", String(pid)], {
+			encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+		});
+		const sentinelNonce = /(?:^|\s)bobbit-posix-sentinel:([^\s]+)/.exec(command)?.[1];
+		const pgid = startToken && sentinelNonce ? inspectProcessGroupId(pid) : undefined;
+		return startToken && sentinelNonce && pgid
+			? { startTokenKind: "darwin-lstart-argv-nonce", startToken, pgid, sentinelNonce }
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 function readProcessStartToken(pid: number): string | undefined {
 	if (process.platform !== "linux") return undefined;
 	try {
@@ -52,6 +111,528 @@ function readProcessStartToken(pid: number): string | undefined {
 
 function shellSingleQuote(value: string): string {
 	return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+type ContainerOwnershipWitness = NonNullable<ActiveVerification["steps"][number]["containerOwnershipWitness"]>;
+
+/**
+ * The tuple and the private stdin writer become available on independent event
+ * boundaries.  Retain a validated release request until the writer is installed
+ * and make both duplicate requests and writer failures terminal.  This is a
+ * transport handshake only: it never exposes authority to the payload.
+ */
+export function createContainerPayloadReleaseHandshake(onFailure: (error: Error) => void): {
+	requestRelease(): boolean;
+	installWriter(writer: () => void): boolean;
+	fail(error: Error): void;
+	released(): boolean;
+} {
+	let releaseRequired = false;
+	let releaseAttempted = false;
+	let releaseDelivered = false;
+	let failed = false;
+	let writer: (() => void) | undefined;
+	const fail = (error: Error) => {
+		if (failed) return;
+		failed = true;
+		onFailure(error);
+	};
+	const deliver = () => {
+		if (failed || !releaseRequired || releaseAttempted || !writer) return;
+		releaseAttempted = true;
+		try {
+			writer();
+			releaseDelivered = true;
+		} catch (error) {
+			fail(new Error(`Could not release container payload after durable witness publication: ${(error as Error).message}`));
+		}
+	};
+	return {
+		requestRelease: () => {
+			if (releaseRequired) {
+				fail(new Error("Container ownership tuple was duplicated"));
+				return false;
+			}
+			releaseRequired = true;
+			deliver();
+			return !failed;
+		},
+		installWriter: (nextWriter) => {
+			if (writer) {
+				fail(new Error("Container payload release writer was installed more than once"));
+				return false;
+			}
+			writer = nextWriter;
+			deliver();
+			return !failed;
+		},
+		fail,
+		released: () => releaseDelivered,
+	};
+}
+
+/**
+ * Docker stdout is a byte stream, not a message transport. Only the one
+ * pre-release candidate is decoded. Once it is complete, stdout belongs to the
+ * payload again: it is never buffered, framed, or size-limited as control data.
+ */
+export function createContainerWitnessFrameDecoder(
+	onWitness: (witness: ContainerOwnershipWitness) => void,
+	onInvalid: () => void,
+): (chunk: string) => void {
+	const prefix = "BOBBIT_CONTAINER_OWNERSHIP_TUPLE ";
+	let buffered = "";
+	let consumedCandidate = false;
+	let failed = false;
+	const maxFrameBytes = 8 * 1024;
+	return (chunk: string) => {
+		// A payload can produce arbitrary, unbounded stdout after the one control
+		// record. In particular, it must not be able to make a healthy ownership
+		// boundary fail merely by writing a long line or a marker-looking line.
+		if (failed || consumedCandidate) return;
+		buffered += chunk;
+		if (buffered.length > maxFrameBytes) {
+			failed = true;
+			onInvalid();
+			return;
+		}
+		for (;;) {
+			const end = buffered.indexOf("\n");
+			if (end < 0) return;
+			const line = buffered.slice(0, end).replace(/\r$/, "");
+			buffered = buffered.slice(end + 1);
+			if (!line.startsWith(prefix)) continue;
+			if (line.length > maxFrameBytes) {
+				failed = true;
+				onInvalid();
+				return;
+			}
+			try {
+				const parsed = JSON.parse(line.slice(prefix.length));
+				if (!parsed || typeof parsed !== "object" ||
+					typeof parsed.containerId !== "string" || typeof parsed.nonce !== "string" ||
+					!Number.isSafeInteger(parsed.sentinelPid) || parsed.sentinelPid <= 0 ||
+					!Number.isSafeInteger(parsed.pgid) || parsed.pgid <= 0 ||
+					typeof parsed.startToken !== "string" || !parsed.startToken) throw new Error("invalid witness");
+				// Consume synchronously before calling out: a synchronous callback may
+				// release the payload, whose output can arrive re-entrantly.
+				consumedCandidate = true;
+				buffered = "";
+				onWitness({
+					containerId: parsed.containerId,
+					nonce: parsed.nonce,
+					sentinelPid: parsed.sentinelPid,
+					pgid: parsed.pgid,
+					startToken: parsed.startToken,
+				});
+				return;
+			} catch {
+				failed = true;
+				onInvalid();
+				return;
+			}
+		}
+	};
+}
+
+export type DockerExecCreateEvent = { containerId: string; execId: string; command: string };
+type DockerExecLifecycleEvent = DockerExecCreateEvent & { phase: "create" | "start" };
+
+function parseDockerExecLifecycleEvent(line: string): DockerExecLifecycleEvent | undefined {
+	try {
+		const event = JSON.parse(line);
+		const containerId = typeof event?.Actor?.ID === "string" ? event.Actor.ID : undefined;
+		const execId = typeof event?.Actor?.Attributes?.execID === "string" ? event.Actor.Attributes.execID : undefined;
+		const command = typeof event?.Action === "string" ? event.Action : "";
+		const phase = command.startsWith("exec_create:") ? "create" : command.startsWith("exec_start:") ? "start" : undefined;
+		if (event?.Type !== "container" || !containerId || !/^[a-f0-9]{64}$/i.test(containerId) ||
+			!execId || !/^[a-f0-9]{64}$/i.test(execId) || !phase) return undefined;
+		return { containerId, execId, command, phase };
+	} catch {
+		return undefined;
+	}
+}
+
+/** Parse only daemon-authored exec-create event records. */
+export function parseDockerExecCreateEvent(line: string): DockerExecCreateEvent | undefined {
+	const event = parseDockerExecLifecycleEvent(line);
+	return event?.phase === "create"
+		? { containerId: event.containerId, execId: event.execId, command: event.command }
+		: undefined;
+}
+
+type DockerExecInspection = { id: string; containerId: string; pid: number; command: string };
+
+const DOCKER_ENGINE_REQUEST_TIMEOUT_MS = 5_000;
+
+function decodeDockerEngineChunkedBody(wire: Buffer): Buffer | undefined {
+	const chunks: Buffer[] = [];
+	let offset = 0;
+	for (;;) {
+		const headerEnd = wire.indexOf("\r\n", offset);
+		if (headerEnd < 0) return undefined;
+		const sizeText = wire.subarray(offset, headerEnd).toString("ascii").split(";", 1)[0].trim();
+		if (!/^[0-9a-f]+$/i.test(sizeText)) return undefined;
+		const size = Number.parseInt(sizeText, 16);
+		if (!Number.isSafeInteger(size) || size < 0 || size > 128 * 1024) return undefined;
+		const payloadStart = headerEnd + 2;
+		const next = payloadStart + size + 2;
+		if (wire.length < next || wire.subarray(payloadStart + size, next).compare(Buffer.from("\r\n")) !== 0) return undefined;
+		if (size === 0) return Buffer.concat(chunks);
+		chunks.push(wire.subarray(payloadStart, payloadStart + size));
+		offset = next;
+	}
+}
+
+/**
+ * Inspect an exec through the selected Docker context. The Docker CLI's
+ * `inspect --type exec` is not a valid command on current Engines, so use the
+ * context-aware `dial-stdio` bridge and the Engine's canonical `/exec/{id}/json`
+ * endpoint. The unversioned request lets the daemon negotiate its supported API
+ * version; the returned Api-Version header is required evidence of that peer.
+ */
+function inspectDockerExecThroughCurrentContext(execId: string): Promise<DockerExecInspection> {
+	return new Promise((resolve, reject) => {
+		if (!/^[a-f0-9]{64}$/i.test(execId)) {
+			reject(new Error("Docker exec engine identity was not a canonical exec ID"));
+			return;
+		}
+		let child: ChildProcess | undefined;
+		let output = Buffer.alloc(0);
+		let stderr = "";
+		let settled = false;
+		const finish = (error?: Error, inspection?: DockerExecInspection) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			if (error) reject(error);
+			else if (inspection) resolve(inspection);
+			else reject(new Error("Docker Engine exec inspect returned no result"));
+		};
+		const timer = setTimeout(() => {
+			try { child?.kill("SIGKILL"); } catch { /* ignore */ }
+			finish(new Error("Docker Engine exec inspect did not complete within 5 seconds; check the selected Docker context"));
+		}, DOCKER_ENGINE_REQUEST_TIMEOUT_MS);
+		timer.unref?.();
+		try {
+			child = spawn("docker", ["system", "dial-stdio"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+			child.stdout?.on("data", (chunk: Buffer) => {
+				output = Buffer.concat([output, chunk]);
+				if (output.length > 128 * 1024) {
+					try { child?.kill("SIGKILL"); } catch { /* ignore */ }
+					finish(new Error("Docker Engine exec inspect returned oversized HTTP output"));
+				}
+			});
+			child.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-4096); });
+			child.once("error", error => finish(new Error(`Docker Engine exec inspect transport failed: ${error.message}`)));
+			child.once("close", () => {
+				const end = output.indexOf("\r\n\r\n");
+				if (end < 0) return finish(new Error(`Docker Engine exec inspect returned no HTTP response${stderr.trim() ? `: ${stderr.trim()}` : ""}`));
+				const rawHeaders = output.subarray(0, end).toString("latin1");
+				const [statusLine, ...headerLines] = rawHeaders.split("\r\n");
+				const status = /^HTTP\/1\.[01]\s+(\d{3})\b/.exec(statusLine)?.[1];
+				const apiVersion = headerLines.find(line => /^api-version:/i.test(line))?.slice("api-version:".length).trim();
+				const lengthText = headerLines.find(line => /^content-length:/i.test(line))?.slice("content-length:".length).trim();
+				const contentLength = Number(lengthText);
+				const chunked = headerLines.find(line => /^transfer-encoding:/i.test(line))?.toLowerCase().includes("chunked");
+				if (status !== "200" || !apiVersion) {
+					return finish(new Error(`Docker Engine exec inspect was rejected or malformed (${status ?? "invalid HTTP status"}${apiVersion ? `, API ${apiVersion}` : ""})`));
+				}
+				const wireBody = output.subarray(end + 4);
+				const body = Number.isSafeInteger(contentLength) && contentLength >= 2
+					? wireBody.subarray(0, contentLength)
+					: chunked ? decodeDockerEngineChunkedBody(wireBody) : undefined;
+				if (!body || body.length < 2) return finish(new Error("Docker Engine exec inspect returned an incomplete HTTP body"));
+				try {
+					const record = JSON.parse(body.toString("utf8"));
+					const id = typeof record?.ID === "string" ? record.ID : undefined;
+					const containerId = typeof record?.ContainerID === "string" ? record.ContainerID : undefined;
+					const pid = Number(record?.Pid);
+					const config = record?.ProcessConfig;
+					const command = [config?.entrypoint, ...(Array.isArray(config?.arguments) ? config.arguments : [])]
+						.filter((part): part is string => typeof part === "string").join("\u0000");
+					if (id !== execId || !containerId || !record?.Running || !Number.isSafeInteger(pid) || pid <= 0) {
+						return finish(new Error("Docker Engine exec inspect identity was missing, stopped, or malformed"));
+					}
+					finish(undefined, { id, containerId, pid, command });
+				} catch {
+					finish(new Error("Docker Engine exec inspect returned invalid JSON"));
+				}
+			});
+			if (!child.stdin) throw new Error("Docker Engine exec inspect has no stdin transport");
+			child.stdin.end(`GET /exec/${execId}/json HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n`);
+		} catch (error) {
+			finish(new Error(`Docker Engine exec inspect could not start: ${(error as Error).message}`));
+		}
+	});
+}
+
+/** Prove the proposed container supervisor is the only process carrying the engine tag. */
+function hasEngineExecPidWithTag(containerId: string, enginePid: number, commandTag: string): boolean {
+	try {
+		// `docker top` reports container processes in the daemon's PID namespace,
+		// the same namespace as ExecInspect.Pid. It therefore closes the otherwise
+		// ambiguous host-PID/container-PID mapping without a local daemon socket.
+		const table = execFileSync("docker", ["top", containerId, "-eo", "pid,args"], {
+			encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+		});
+		const matches = table.split(/\r?\n/).filter(line =>
+			new RegExp(`^\\s*${enginePid}\\s+`).test(line) && line.includes(commandTag),
+		);
+		return matches.length === 1;
+	} catch {
+		return false;
+	}
+}
+
+function hasUniqueContainerExecTag(containerId: string, pid: number, commandTag: string): boolean {
+	const marker = `BOBBIT_EXEC_TAG=${commandTag}`;
+	const script = `m=${shellSingleQuote(marker)}; p=${pid}; [ -r "/proc/$p/environ" ] || exit 1; n=0; hit=0; for f in /proc/[0-9]*/environ; do [ -r "$f" ] || continue; if tr '\\000' '\\n' < "$f" 2>/dev/null | grep -Fqx "$m"; then n=$((n + 1)); case "$f" in "/proc/$p/environ") hit=1;; esac; fi; done; [ "$hit" = 1 ] && [ "$n" -eq 1 ]`;
+	try {
+		execFileSync("docker", ["exec", containerId, "/bin/sh", "-c", script], {
+			stdio: ["ignore", "ignore", "ignore"],
+		});
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+export type DockerEngineEventsResponseDecoder = {
+	consume(chunk: Buffer): void;
+};
+
+/**
+ * Decode the daemon's chunked `/events` response after `docker system
+ * dial-stdio` has connected to the Docker context. Resolving `onReady` from
+ * the HTTP response headers is the subscription barrier: an exec is never
+ * spawned until the daemon has accepted this exact event stream.
+ */
+export function createDockerEngineEventsResponseDecoder(
+	onReady: () => void,
+	onEvent: (line: string) => void,
+	onFailure: (error: Error) => void,
+): DockerEngineEventsResponseDecoder {
+	let header = Buffer.alloc(0);
+	let body = Buffer.alloc(0);
+	let eventBuffer = "";
+	let ready = false;
+	let failed = false;
+	const fail = (error: Error) => {
+		if (failed) return;
+		failed = true;
+		onFailure(error);
+	};
+	const consumeBody = () => {
+		while (!failed) {
+			const headerEnd = body.indexOf("\r\n");
+			if (headerEnd < 0) return;
+			const sizeText = body.subarray(0, headerEnd).toString("ascii").split(";", 1)[0].trim();
+			if (!/^[0-9a-f]+$/i.test(sizeText)) return fail(new Error("Docker Engine events stream returned an invalid HTTP chunk length"));
+			const size = Number.parseInt(sizeText, 16);
+			if (!Number.isSafeInteger(size) || size < 0 || size > 64 * 1024) return fail(new Error("Docker Engine events stream returned an oversized HTTP chunk"));
+			const total = headerEnd + 2 + size + 2;
+			if (body.length < total) return;
+			if (body.subarray(headerEnd + 2 + size, total).compare(Buffer.from("\r\n")) !== 0) {
+				return fail(new Error("Docker Engine events stream returned a malformed HTTP chunk terminator"));
+			}
+			if (size === 0) return fail(new Error("Docker Engine events stream ended before identifying the tagged exec"));
+			const payload = body.subarray(headerEnd + 2, headerEnd + 2 + size).toString("utf8");
+			body = body.subarray(total);
+			eventBuffer += payload;
+			if (eventBuffer.length > 64 * 1024) return fail(new Error("Docker Engine events stream returned an oversized event record"));
+			for (;;) {
+				const lineEnd = eventBuffer.indexOf("\n");
+				if (lineEnd < 0) break;
+				const line = eventBuffer.slice(0, lineEnd).replace(/\r$/, "");
+				eventBuffer = eventBuffer.slice(lineEnd + 1);
+				if (line) onEvent(line);
+			}
+		}
+	};
+	return {
+		consume(chunk) {
+			if (failed) return;
+			if (!ready) {
+				header = Buffer.concat([header, chunk]);
+				if (header.length > 16 * 1024) return fail(new Error("Docker Engine events handshake returned oversized HTTP headers"));
+				const end = header.indexOf("\r\n\r\n");
+				if (end < 0) return;
+				const rawHeaders = header.subarray(0, end).toString("latin1");
+				const [statusLine, ...headerLines] = rawHeaders.split("\r\n");
+				const status = /^HTTP\/1\.[01]\s+(\d{3})\b/.exec(statusLine)?.[1];
+				const apiVersion = headerLines.find(line => /^api-version:/i.test(line))?.slice("api-version:".length).trim();
+				if (status !== "200") return fail(new Error(`Docker Engine events handshake was rejected (${status ?? "invalid HTTP status"}${apiVersion ? `, API ${apiVersion}` : ""})`));
+				ready = true;
+				body = header.subarray(end + 4);
+				onReady();
+			} else {
+				body = Buffer.concat([body, chunk]);
+				if (body.length > 128 * 1024) return fail(new Error("Docker Engine events stream buffered oversized incomplete HTTP data"));
+			}
+			consumeBody();
+		},
+	};
+}
+
+const DOCKER_EXEC_EVENT_WATCHER_READY_TIMEOUT_MS = 10_000;
+
+class DockerExecEventWatcher {
+	private readonly candidate: Promise<string>;
+	private readonly ready: Promise<void>;
+	private resolveCandidate!: (execId: string) => void;
+	private rejectCandidate!: (error: Error) => void;
+	private resolveReady!: () => void;
+	private rejectReady!: (error: Error) => void;
+	private child: ChildProcess | undefined;
+	private stopped = false;
+	private candidateSettled = false;
+	private candidateQueued = false;
+	private createdExecId: string | undefined;
+	private readySettled = false;
+	private fatalError: Error | undefined;
+	private stderr = "";
+	private startupTimer: NodeJS.Timeout | undefined;
+	private stopPromise: Promise<void> | undefined;
+
+	constructor(private readonly containerId: string, private readonly commandTag: string) {
+		this.candidate = new Promise<string>((resolve, reject) => {
+			this.resolveCandidate = resolve;
+			this.rejectCandidate = reject;
+		});
+		this.ready = new Promise<void>((resolve, reject) => {
+			this.resolveReady = resolve;
+			this.rejectReady = reject;
+		});
+		// Keep handlers attached because startup can fail before the sentinel
+		// reaches its ownership barrier and begins awaiting either promise.
+		void this.candidate.catch(() => undefined);
+		void this.ready.catch(() => undefined);
+	}
+
+	async start(): Promise<void> {
+		try {
+			this.child = spawn("docker", ["system", "dial-stdio"], {
+				stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
+			});
+			const decoder = createDockerEngineEventsResponseDecoder(
+				() => this.acknowledgeReady(),
+				line => this.consumeEvent(line),
+				error => this.fail(error),
+			);
+			this.child.stdout?.on("data", (chunk: Buffer) => decoder.consume(chunk));
+			this.child.stderr?.on("data", (chunk: Buffer) => {
+				this.stderr = (this.stderr + chunk.toString()).slice(-4096);
+			});
+			this.child.once("error", error => this.fail(new Error(`Docker Engine events watcher failed: ${error.message}`)));
+			this.child.once("close", () => {
+				if (!this.stopped && !this.candidateSettled) this.fail(new Error(this.withStderr("Docker Engine events stream ended before identifying the tagged exec")));
+			});
+			const filters = encodeURIComponent(JSON.stringify({
+				type: ["container"], event: ["exec_create", "exec_start"], container: [this.containerId],
+			}));
+			const request = `GET /events?filters=${filters} HTTP/1.1\r\nHost: docker\r\n\r\n`;
+			if (!this.child.stdin) throw new Error("Docker Engine events watcher has no stdin transport");
+			this.startupTimer = setTimeout(() => this.fail(new Error("Docker Engine events handshake did not acknowledge within 10 seconds; check the selected Docker context and daemon availability")), DOCKER_EXEC_EVENT_WATCHER_READY_TIMEOUT_MS);
+			this.startupTimer.unref?.();
+			this.child.stdin.once("error", error => this.fail(new Error(`Docker Engine events request failed: ${error.message}`)));
+			// Keep the dial-stdio input open. EOF or Connection: close turns Docker's
+			// long-lived event response into a snapshot that misses the next exec.
+			this.child.stdin.write(request);
+		} catch (error) {
+			this.fail(new Error(`Docker Engine events watcher could not start: ${(error as Error).message}`));
+		}
+		return this.ready;
+	}
+
+	private acknowledgeReady(): void {
+		if (this.readySettled || this.stopped) return;
+		this.readySettled = true;
+		if (this.startupTimer) clearTimeout(this.startupTimer);
+		this.resolveReady();
+	}
+
+	private consumeEvent(line: string): void {
+		if (this.stopped || this.fatalError) return;
+		const event = parseDockerExecLifecycleEvent(line);
+		if (!event || event.containerId !== this.containerId || !event.command.includes(this.commandTag)) return;
+		if (event.phase === "create") {
+			if (this.createdExecId && this.createdExecId !== event.execId) {
+				this.fail(new Error("Docker Engine events watcher observed duplicate tagged exec identities"));
+				return;
+			}
+			this.createdExecId = event.execId;
+			return;
+		}
+		// ExecInspect may expose an allocated PID before the payload actually runs.
+		// Bind it only after the corresponding daemon exec_start event, not merely
+		// after exec_create, so its Running/PID tuple is a live engine authority.
+		if (event.execId !== this.createdExecId) return;
+		if (this.candidateSettled || this.candidateQueued) {
+			this.fail(new Error("Docker Engine events watcher observed duplicate tagged exec identities"));
+			return;
+		}
+		this.candidateQueued = true;
+		// Defer resolution until this daemon chunk is fully decoded, so two matching
+		// exec_start records delivered together fail closed as ambiguous authority.
+		queueMicrotask(() => {
+			if (this.fatalError || this.candidateSettled) return;
+			this.candidateSettled = true;
+			this.resolveCandidate(event.execId);
+		});
+	}
+
+	private withStderr(message: string): string {
+		const detail = this.stderr.trim();
+		return detail ? `${message}: ${detail}` : message;
+	}
+
+	private fail(error: Error): void {
+		if (this.fatalError || this.stopped) return;
+		this.fatalError = error;
+		if (this.startupTimer) clearTimeout(this.startupTimer);
+		if (!this.readySettled) {
+			this.readySettled = true;
+			this.rejectReady(error);
+		}
+		if (!this.candidateSettled) {
+			this.candidateSettled = true;
+			this.rejectCandidate(error);
+		}
+	}
+
+	async verify(): Promise<DockerExecInspection> {
+		try {
+			const execId = await this.candidate;
+			if (this.fatalError) throw this.fatalError;
+			const inspection = await inspectDockerExecThroughCurrentContext(execId);
+			if (!inspection || inspection.containerId !== this.containerId || !inspection.command.includes(this.commandTag)) {
+				throw new Error("Docker exec engine identity was missing, mismatched, or ambiguous");
+			}
+			return inspection;
+		} finally {
+			await this.stop();
+		}
+	}
+
+	/** Stop and join the raw Engine stream; SIGKILL is required because dial-stdio ignores SIGTERM while a request is open. */
+	stop(): Promise<void> {
+		if (this.stopPromise) return this.stopPromise;
+		if (!this.readySettled || !this.candidateSettled) {
+			this.fail(new Error("Docker Engine events watcher stopped before identifying the tagged exec"));
+		}
+		this.stopped = true;
+		if (this.startupTimer) clearTimeout(this.startupTimer);
+		const child = this.child;
+		this.stopPromise = !child || child.exitCode !== null || child.killed
+			? Promise.resolve()
+			: new Promise<void>(resolve => {
+				child.once("close", () => resolve());
+				try { child.stdin?.destroy(); } catch { /* ignore */ }
+				try { child.kill("SIGKILL"); } catch { resolve(); }
+			});
+		return this.stopPromise;
+	}
 }
 
 function readCommandLogTail(filePath: string | undefined, maxBytes = COMMAND_LOG_FINAL_OUTPUT_TAIL_BYTES): string {
@@ -161,6 +742,7 @@ import {
 	isRestartInterruptError,
 	isRestartInterruptedStep,
 	decideCommandRecoveryMode,
+	supportsHostDetachedCommandRecovery,
 	shouldRerunSessionStepOnResume,
 	type CommandRecoveryMode,
 } from "./verification-logic.js";
@@ -876,10 +1458,35 @@ export interface ActiveVerification {
 		pidFile?: string;
 		/** Random nonce expected in the durable process-identity and heartbeat files. */
 		pidNonce?: string;
+		/**
+		 * Absolute path to the host POSIX sentinel's durable identity record.
+		 * This binds either a detached host shell or a surviving `docker exec`
+		 * transport process group across gateway restart.
+		 */
+		sentinelFile?: string;
+		/** Windows Job supervisor's nonce-bound post-Job-close completion record. */
+		windowsJobCompletionFile?: string;
+		windowsJobCompletionNonce?: string;
+		/** Host-authored docker-exec completion record; container payload cannot author it. */
+		containerCompletionFile?: string;
+		containerCompletionNonce?: string;
 		/** Compatibility alias used by bash_bg-style pidfile records and older tests. */
 		nonce?: string;
 		/** Container id for attached docker exec command paths (not restart-recoverable). */
 		containerId?: string;
+		/** Atomic in-container ownership witness written before the payload starts. */
+		containerWitnessFile?: string;
+		/** Daemon-authenticated exec identity paired with the container witness. */
+		containerDockerExecId?: string;
+		containerDockerExecTag?: string;
+		/** Exact in-container sentinel identity authorizing a negative-PGID signal. */
+		containerOwnershipWitness?: {
+			containerId: string;
+			nonce: string;
+			sentinelPid: number;
+			pgid: number;
+			startToken: string;
+		};
 		/** Absolute path to the detached wrapper's periodically-refreshed heartbeat file. */
 		heartbeatFile?: string;
 		/** OS-specific process start token captured after spawn, used to reject PID reuse. */
@@ -910,6 +1517,13 @@ export interface ActiveVerification {
 		killLastAttemptAt?: number;
 		killCompletedAt?: number;
 		killUnsafeReason?: string;
+		/** A recovered POSIX sentinel could not yet be safely reaped; retry before finalizing. */
+		sentinelCleanupPending?: boolean;
+		/** Container cleanup is a two-layer durable state machine. */
+		containerPayloadCleanupPending?: boolean;
+		containerPayloadCleanupCompletedAt?: number;
+		containerTransportCleanupPending?: boolean;
+		containerTransportCleanupCompletedAt?: number;
 	}>;
 	currentPhase?: number;
 	overallStatus: "running" | "passed" | "failed" | "cancelled";
@@ -917,6 +1531,8 @@ export interface ActiveVerification {
 	cancelled?: boolean;
 	cancelRequestedAt?: number;
 	cancelReason?: string;
+	/** Origin is persisted so delayed cleanup never impersonates a newer signal. */
+	cancelMode?: "explicit" | "stale" | "goal";
 }
 
 type TerminalGateSignalStepStatus = "passed" | "failed" | "timeout" | "skipped";
@@ -1535,7 +2151,7 @@ export class VerificationHarness {
 	}
 
 	/** Persist active verifications to disk. */
-	private _persistActive(): void {
+	private _persistActive(): boolean {
 		try {
 			// When there is nothing active, remove the persist file entirely rather
 			// than writing an empty `{ verifications: [] }`. This unifies the "clear"
@@ -1544,7 +2160,7 @@ export class VerificationHarness {
 			// empty-file-write. Best-effort unlink so concurrent unlinks don't throw.
 			if (this.activeVerifications.size === 0) {
 				try { fs.unlinkSync(this._persistPath); } catch {}
-				return;
+				return true;
 			}
 			const data = { verifications: [...this.activeVerifications.values()] };
 			// Defensive: ensure parent dir exists. It is created at startup but may
@@ -1559,8 +2175,10 @@ export class VerificationHarness {
 				try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 			} catch { /* best-effort durability; rename still prevents torn JSON */ }
 			fs.renameSync(tmp, this._persistPath);
+			return true;
 		} catch (err) {
 			console.error("[verification] Failed to persist active verifications:", err);
+			return false;
 		}
 	}
 
@@ -1601,7 +2219,7 @@ export class VerificationHarness {
 			this.activeVerifications.set(active.signalId, active);
 			const settled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: true, reason: "cancelled" });
 			if (settled) {
-				if (this.activeVerifications.get(active.signalId) === active) this.activeVerifications.delete(active.signalId);
+				await this._finalizeCancelledVerification(active);
 			} else {
 				this._scheduleCommandKillCleanupRetry(active.signalId);
 			}
@@ -1628,8 +2246,16 @@ export class VerificationHarness {
 				// Skip verifications for goals that completed/shelved while we were down
 				const goal = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId);
 				if (goal && (goal.state === "complete" || goal.state === "shelved")) {
-					if (process.env.BOBBIT_DEBUG) console.log(`[verification] Skipping resume for ${v.signalId} — goal ${v.goalId} is ${goal.state}`);
-					this.activeVerifications.delete(v.signalId);
+					if (process.env.BOBBIT_DEBUG) console.log(`[verification] Cleaning resumed verification ${v.signalId} for ${goal.state} goal ${v.goalId}`);
+					// A retry after the crash window must delete this record, not resume it.
+					v.cancelled = true;
+					v.overallStatus = "cancelled";
+					const settled = await this._killPersistedCommandSteps(v, "SIGKILL", { waitForIdentity: true, markIntent: true, reason: "cancelled" });
+					if (settled) {
+						await this._finalizeCancelledVerification(v);
+					} else {
+						this._scheduleCommandKillCleanupRetry(v.signalId);
+					}
 					this._persistActive();
 					continue;
 				}
@@ -2516,6 +3142,18 @@ export class VerificationHarness {
 	/** Executor for verification command STEPS (default = real durable spawn). */
 	private readonly commandStepRunner: VerificationCommandRunner;
 	private readonly clock: Clock;
+	/** Real by default; injectable only to drive exit-without-close regressions deterministically. */
+	private readonly commandLifecycleClock: Clock;
+	/** Injectable only for deterministic lifecycle tests; production uses the host platform. */
+	private readonly platform: NodeJS.Platform;
+	/** Reads a live POSIX PID's stable process identity before recovered cleanup. */
+	private readonly posixProcessIdentityInspector: (pid: number) => PosixProcessIdentity | undefined;
+	/** Test seam; production sends the one final signal through killTreeByPid. */
+	private readonly persistedTreeKiller: typeof killTreeByPid;
+	/** Test seam for cancellation/stale/terminal recovery paths. */
+	private readonly recoveredSentinelReaper: (step: ActiveVerification["steps"][number]) => Promise<void>;
+	/** Test seam for inspecting the exact identity of a live in-container sentinel. */
+	private readonly containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>;
 	private readonly skipLlmReview: boolean;
 
 	constructor(
@@ -2530,11 +3168,17 @@ export class VerificationHarness {
 		private projectConfigStore?: ProjectConfigStore,
 		projectContextManager?: ProjectContextManager,
 		configCascade?: import("./config-cascade.js").ConfigCascade,
-		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; skipLlmReview?: boolean } = {},
+		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; commandLifecycleClock?: Clock; platform?: NodeJS.Platform; skipLlmReview?: boolean; posixProcessIdentityInspector?: (pid: number) => PosixProcessIdentity | undefined; persistedTreeKiller?: typeof killTreeByPid; recoveredSentinelReaper?: (step: ActiveVerification["steps"][number]) => Promise<void>; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined> } = {},
 	) {
 		this.commandRunner = deps.commandRunner ?? realCommandRunner;
 		this.commandStepRunner = deps.commandStepRunner ?? realVerificationCommandRunner;
 		this.clock = deps.clock ?? realClock;
+		this.commandLifecycleClock = deps.commandLifecycleClock ?? realClock;
+		this.platform = deps.platform ?? process.platform;
+		this.posixProcessIdentityInspector = deps.posixProcessIdentityInspector ?? inspectPosixProcessIdentity;
+		this.persistedTreeKiller = deps.persistedTreeKiller ?? killTreeByPid;
+		this.recoveredSentinelReaper = deps.recoveredSentinelReaper ?? (step => this._reapRecoveredPosixSentinel(step));
+		this.containerProcessIdentityInspector = deps.containerProcessIdentityInspector;
 		this.skipLlmReview = !!deps.skipLlmReview;
 		this.configCascade = configCascade;
 		// Wrap the broadcast fn so every gate_verification_* event carries a
@@ -2714,13 +3358,13 @@ export class VerificationHarness {
 		}
 		const filePid = Number(parsed?.pid);
 		const validFilePid = Number.isFinite(filePid) && filePid > 0 ? filePid : undefined;
-		const pid = process.platform === "win32" && typeof step.pid === "number"
+		const pid = this.platform === "win32" && typeof step.pid === "number"
 			? step.pid
 			: (validFilePid ?? step.pid);
 		if (!pid || !Number.isFinite(pid) || pid <= 0) {
 			return { ok: false, reason: "command identity file did not contain a valid process id", retryable: true, mtimeMs };
 		}
-		if (process.platform !== "win32" && typeof step.pid === "number" && validFilePid !== undefined && step.pid !== validFilePid) {
+		if (this.platform !== "win32" && typeof step.pid === "number" && validFilePid !== undefined && step.pid !== validFilePid) {
 			return { pid, ok: false, reason: "command identity process id did not match persisted metadata", retryable: false, mtimeMs };
 		}
 		return { pid, ok: true, reason: "verified", retryable: false, mtimeMs };
@@ -2745,7 +3389,7 @@ export class VerificationHarness {
 			const stat = fs.statSync(step.heartbeatFile);
 			if (Date.now() - stat.mtimeMs > COMMAND_IDENTITY_HEARTBEAT_STALE_MS) return false;
 			const parsed = JSON.parse(fs.readFileSync(step.heartbeatFile, "utf8"));
-			return parsed?.nonce === expectedNonce && (process.platform === "win32" || Number(parsed?.pid) === pid);
+			return parsed?.nonce === expectedNonce && (this.platform === "win32" || Number(parsed?.pid) === pid);
 		} catch {
 			return false;
 		}
@@ -2757,6 +3401,13 @@ export class VerificationHarness {
 	): { verified: boolean; pid?: number; reason: string } {
 		const identity = preReadIdentity ?? this._readCommandIdentityFile(step);
 		if (!identity.ok || !identity.pid) return { verified: false, pid: identity.pid, reason: identity.reason };
+		if (!step.containerId && !supportsHostDetachedCommandRecovery(this.platform)) {
+			return {
+				verified: false,
+				pid: identity.pid,
+				reason: "Windows host-detached command recovery is unsupported: a persisted PID cannot be atomically bound to its original process tree; refusing PID cleanup",
+			};
+		}
 		const pid = identity.pid;
 		if (!isPidAlive(pid)) return { verified: false, pid, reason: "command process is no longer alive" };
 
@@ -2787,6 +3438,111 @@ export class VerificationHarness {
 		};
 	}
 
+	/**
+	 * Reap the host POSIX group sentinel left behind when a detached host shell
+	 * or `docker exec` transport writes its durable verdict after the gateway
+	 * process has exited. The sentinel's own PID, nonce, start token, and PGID
+	 * must match before naming the recovered group; otherwise a reused PID is
+	 * never targeted and resume fails closed.
+	 */
+	private async _reapRecoveredPosixSentinel(step: ActiveVerification["steps"][number]): Promise<void> {
+		const isRecoveredContainerTransport = step.restartRecoveryMode === "container-exec" && !!step.containerId;
+		if (this.platform === "win32") {
+			// The original Job handle is not reopenable by numeric PID. Only the
+			// supervisor's nonce-bound post-Job-close record proves transport exit.
+			if (!isRecoveredContainerTransport || !step.windowsJobCompletionFile ||
+				!step.windowsJobCompletionNonce || step.windowsJobCompletionNonce !== step.pidNonce) {
+				step.sentinelCleanupPending = true;
+				this._persistActive();
+				throw new PendingCommandCleanupError("Recovered Windows docker-exec transport has no exact Job completion evidence.");
+			}
+			try {
+				const proof = JSON.parse(fs.readFileSync(step.windowsJobCompletionFile, "utf8"));
+				if (proof?.nonce !== step.windowsJobCompletionNonce || proof?.jobClosed !== true) throw new Error("missing or nonce-mismatched Job-close proof");
+				delete step.sentinelCleanupPending;
+				return;
+			} catch (error) {
+				step.sentinelCleanupPending = true;
+				this._persistActive();
+				throw new PendingCommandCleanupError(`Recovered Windows docker-exec transport completion is pending: ${(error as Error).message}`);
+			}
+		}
+		const pending = (message: string): never => {
+			step.sentinelCleanupPending = true;
+			this._persistActive();
+			throw new PendingCommandCleanupError(message);
+		};
+		// Legacy pidfiles and heartbeats are observation-only. They never authorize
+		// a recovered POSIX cleanup or terminal cleanup acknowledgement.
+		if (!step.sentinelFile) {
+			return pending(isRecoveredContainerTransport
+				? "Recovered container command has no durable host docker-exec sentinel metadata."
+				: "Recovered POSIX command has no typed exact sentinel evidence; cleanup remains pending.");
+		}
+		// docker-exec persistence is a new format: do not accept the legacy
+		// compatibility nonce alias, because it is not bound to this transport's
+		// spawn record.
+		if (isRecoveredContainerTransport && (typeof step.pidNonce !== "string" || !step.pidNonce)) {
+			return pending("Recovered container command has no exact persisted host docker-exec sentinel nonce.");
+		}
+		const expectedNonce = this._commandIdentityNonce(step);
+		if (!expectedNonce) {
+			return pending("Recovered command verdict has no durable POSIX sentinel nonce.");
+		}
+
+		let record: { pid?: unknown; pgid?: unknown; nonce?: unknown; startTokenKind?: unknown; startToken?: unknown };
+		try {
+			record = JSON.parse(fs.readFileSync(step.sentinelFile, "utf8"));
+		} catch (err) {
+			return pending(`Recovered command sentinel identity is unavailable: ${(err as Error).message}`);
+		}
+		const sentinelPid = Number(record.pid);
+		const recordedGroupId = Number(record.pgid);
+		const persistedGroupId = step.pid;
+		// The sentinel writes its own PGID atomically before acknowledging
+		// ownership. It closes the narrow spawn→state-persist crash window: if
+		// the root PID stamp did not reach disk yet, the live sentinel's verified
+		// identity is still the authority. When both records exist they must agree.
+		const hasPersistedGroupId = Number.isFinite(persistedGroupId) && persistedGroupId! > 0;
+		const groupId = hasPersistedGroupId ? persistedGroupId! : recordedGroupId;
+		// The sentinel atomically publishes its own PGID before the spawned child
+		// can be stamped into active state. That closes the spawn→state-persist
+		// crash window: use this record's PGID when `step.pid` is absent, but when
+		// a persisted group exists it must agree exactly with the sentinel record.
+		const supportedStartTokenKind = record.startTokenKind === "linux-proc-stat-22" || record.startTokenKind === "darwin-lstart-argv-nonce";
+		if (!Number.isFinite(sentinelPid) || sentinelPid <= 0 || !Number.isFinite(recordedGroupId) || recordedGroupId <= 0 || record.nonce !== expectedNonce || !supportedStartTokenKind || typeof record.startToken !== "string" || !record.startToken) {
+			return pending("Recovered command sentinel has no typed exact identity; refusing legacy or coarse recovery evidence.");
+		}
+		// Check group metadata only after typed identity evidence has passed, so a
+		// test (and recovery diagnostic) cannot mistake legacy-token rejection for
+		// a valid exact group-metadata comparison.
+		if (recordedGroupId !== groupId) {
+			return pending("Recovered command sentinel identity did not match persisted group metadata.");
+		}
+		// Sentinel absence is ownership loss, not proof of a reaped group. The old
+		// PGID is no longer safe to observe or signal, so retain retryable intent.
+		if (!isPidAlive(sentinelPid)) {
+			return pending("Recovered POSIX sentinel is missing; group completion cannot be proven without reusing its historical PGID.");
+		}
+
+		const current = this.posixProcessIdentityInspector(sentinelPid);
+		const darwinNonceMatches = record.startTokenKind !== "darwin-lstart-argv-nonce" ||
+			(current?.startTokenKind === "darwin-lstart-argv-nonce" && current.sentinelNonce === expectedNonce);
+		if (!current || current.startTokenKind !== record.startTokenKind || current.startToken !== record.startToken || current.pgid !== groupId || !darwinNonceMatches) {
+			return pending("Recovered POSIX sentinel no longer matches its original exact process identity; refusing to target its group.");
+		}
+		// The record is published by the separately-invoked sentinel after it has
+		// installed its traps. A live PID with matching start token and PGID keeps
+		// this group identity bound until this one final negative-PID signal.
+		if (this.persistedTreeKiller(groupId, "SIGKILL") !== "signalled") {
+			return pending("Recovered POSIX sentinel group disappeared before cleanup; refusing to retarget its historical PGID.");
+		}
+		if (!await this._waitForPidToExit(sentinelPid)) {
+			return pending("Recovered POSIX sentinel did not exit after its verified group was killed.");
+		}
+		delete step.sentinelCleanupPending;
+	}
+
 	private _mergePersistedActiveVerifications(predicate: (v: ActiveVerification) => boolean): void {
 		for (const persisted of this._loadActive()) {
 			if (!predicate(persisted)) continue;
@@ -2798,14 +3554,23 @@ export class VerificationHarness {
 
 	private _hasPendingCommandKillCleanup(active: ActiveVerification): boolean {
 		return active.steps.some(step =>
-			step.type === "command" &&
-			!!step.killRequestedAt &&
-			!step.killCompletedAt,
+			step.type === "command" && (
+				(!!step.killRequestedAt && !step.killCompletedAt) ||
+				!!step.sentinelCleanupPending ||
+				!!step.containerPayloadCleanupPending ||
+				!!step.containerTransportCleanupPending
+			),
 		);
 	}
 
 	private _commandStepRequiresKillCleanup(step: ActiveVerification["steps"][number]): boolean {
-		return step.type === "command" && (step.status === "running" || (!!step.killRequestedAt && !step.killCompletedAt));
+		return step.type === "command" && (
+			step.status === "running" ||
+			(!!step.killRequestedAt && !step.killCompletedAt) ||
+			!!step.sentinelCleanupPending ||
+			!!step.containerPayloadCleanupPending ||
+			!!step.containerTransportCleanupPending
+		);
 	}
 
 	private _markPersistedCommandKillIntent(active: ActiveVerification, signal: NodeJS.Signals, reason: "cancelled" | "timeout"): void {
@@ -2832,6 +3597,41 @@ export class VerificationHarness {
 
 	private _commandKillRetryTimers = new Map<string, NodeJS.Timeout>();
 
+	/** Whether this exact signal is still the gate's current generation. */
+	private _isCurrentGateSignal(active: ActiveVerification): boolean {
+		const gate = this.resolveGateStore(active.goalId)?.getGate?.(active.goalId, active.gateId);
+		const signals = gate?.signals;
+		// Lightweight unit seams do not expose signal history; production does.
+		return !Array.isArray(signals) || signals.length === 0 || signals[signals.length - 1]?.id === active.signalId;
+	}
+
+	/** One terminal cancellation path, invoked only after every cleanup phase settles. */
+	private async _finalizeCancelledVerification(active: ActiveVerification): Promise<void> {
+		if (this._hasPendingCommandKillCleanup(active)) return;
+		// A reset/re-signal may have replaced this active object while delayed exact
+		// cleanup was settling. The obsolete generation must not publish anything.
+		if (this.activeVerifications.get(active.signalId) !== active) return;
+		this.activeVerifications.delete(active.signalId);
+		for (const step of active.steps) {
+			if (!step.sessionId || step.status !== "running") continue;
+			try { await this.sessionManager?.terminateSession(step.sessionId); } catch { /* already stopped */ }
+			try { await this.teamManager?.unregisterReviewerSession(active.goalId, step.sessionId); } catch { /* already stopped */ }
+		}
+		const stillCurrent = this._isCurrentGateSignal(active);
+		this.resolveGateStore(active.goalId)?.updateSignalVerification(active.signalId, {
+			status: "failed",
+			steps: [{ name: "Cancelled", type: "command", passed: false, status: "failed", phase: 0, output: "Verification cancelled.", duration_ms: 0 }],
+		});
+		if (stillCurrent) this.resolveGateStore(active.goalId)?.updateGateStatus(active.goalId, active.gateId, "failed");
+		this._persistActive();
+		// The old signal's terminal event is still useful to clients, but only the
+		// current generation above may mutate the shared gate status.
+		this.broadcastFn(active.goalId, {
+			type: "gate_verification_complete", goalId: active.goalId, gateId: active.gateId,
+			signalId: active.signalId, status: "cancelled",
+		});
+	}
+
 	private _scheduleCommandKillCleanupRetry(signalId: string): void {
 		if (this._commandKillRetryTimers.has(signalId)) return;
 		const timer = this.clock.setTimeout(async () => {
@@ -2841,16 +3641,25 @@ export class VerificationHarness {
 			try {
 				const pendingStep = active.steps.find(step => step.type === "command" && !!step.killRequestedAt && !step.killCompletedAt);
 				const signal = pendingStep?.killSignal ?? "SIGKILL";
-				const settled = await this._killPersistedCommandSteps(active, signal, { waitForIdentity: true, markIntent: false });
-				if (!settled) {
+				await this._killPersistedCommandSteps(active, signal, { waitForIdentity: true, markIntent: false });
+				const containerPayloadsSettled = active.steps
+					.filter(step => step.type === "command" && !!step.containerId)
+					.every(step => !!step.containerPayloadCleanupCompletedAt && !step.containerPayloadCleanupPending);
+				if (containerPayloadsSettled) {
+					// The recovered reaper is restart-only. A live docker-exec transport
+					// must be re-driven through its TrackedChild until its own close barrier
+					// reports settled; a false first wait is pending, not authorization to
+					// use the historical sentinel/PID on this boot.
+					await this._killTrackedForSignal(signalId, step => !!step?.containerId);
+				}
+				if (this._hasPendingCommandKillCleanup(active)) {
 					this._persistActive();
 					this._scheduleCommandKillCleanupRetry(signalId);
 					return;
 				}
 
 				if (active.cancelled || active.overallStatus === "cancelled") {
-					if (this.activeVerifications.get(signalId) === active) this.activeVerifications.delete(signalId);
-					this._persistActive();
+					await this._finalizeCancelledVerification(active);
 					return;
 				}
 
@@ -2882,10 +3691,69 @@ export class VerificationHarness {
 		}
 
 		let allSettled = true;
-		for (const step of active.steps) {
+		for (const [stepIndex, step] of active.steps.entries()) {
 			if (!this._commandStepRequiresKillCleanup(step)) continue;
+			// A live TrackedChild has already joined its spawn-time ownership
+			// barrier. Its successful cleanup is stronger than a second recovery
+			// lookup, which could race the sentinel's final removal. Keep the
+			// terminal record durable, but never re-authorize its historical group.
+			if (step.killCompletedAt && !step.sentinelCleanupPending && !step.containerPayloadCleanupPending && !step.containerTransportCleanupPending) continue;
+			// Container state files are not host-visible, so fs.existsSync(exitFile)
+			// cannot decide whether cleanup is complete. A durable container command
+			// instead settles only after its exact host docker-exec sentinel is reaped.
+			if (step.restartRecoveryMode === "container-exec" && step.containerId) {
+				try {
+					// Durable ordering: exact payload first, then exact host docker-exec
+					// transport. Each phase is persisted independently for crash recovery.
+					await this._killAndVerifyRecoveredContainerProcessGroup(step);
+					// A live TrackedChild owns the current docker-exec transport. The
+					// recovered sentinel reaper is restart-only; never use both.
+					if (this._trackedCommandChildren.has(`${active.signalId}:${stepIndex}`)) {
+						// The live tracked transport has not yet proved its close barrier.
+						// Leave it explicitly pending so the retry path re-drives that same
+						// TrackedChild; never fall through to a recovered numeric reaper.
+						if (!step.containerTransportCleanupCompletedAt) step.containerTransportCleanupPending = true;
+						allSettled = false;
+						continue;
+					}
+					if (!step.containerTransportCleanupCompletedAt) {
+						step.containerTransportCleanupPending = true;
+						this._persistActive();
+						await this.recoveredSentinelReaper(step);
+						step.containerTransportCleanupCompletedAt = Date.now();
+						delete step.containerTransportCleanupPending;
+					}
+					step.killCompletedAt ??= Date.now();
+				} catch (err) {
+					if (!isPendingCommandCleanupError(err)) throw err;
+					allSettled = false;
+				}
+				continue;
+			}
+			// Every recovered POSIX destructive action is authorized by the exact
+			// sentinel tuple. Never fall back to command-leader PID/heartbeat.
+			if (step.sentinelFile && this.platform !== "win32") {
+				try {
+					await this.recoveredSentinelReaper(step);
+					step.killCompletedAt ??= Date.now();
+					continue;
+				} catch (err) {
+					if (!isPendingCommandCleanupError(err)) throw err;
+					allSettled = false;
+					continue;
+				}
+			}
 			if (step.exitFile && fs.existsSync(step.exitFile)) {
-				step.killCompletedAt ??= Date.now();
+				// A recovered host command can have published its exit status while
+				// its POSIX group sentinel still owns the old PGID. Reap that verified
+				// sentinel before treating cancel/stale/terminal cleanup as complete.
+				try {
+					await this.recoveredSentinelReaper(step);
+					step.killCompletedAt ??= Date.now();
+				} catch (err) {
+					if (!isPendingCommandCleanupError(err)) throw err;
+					allSettled = false;
+				}
 				continue;
 			}
 			if (step.restartRecoveryMode === "unsupported" || step.containerId || (!step.pidFile && !step.pid)) {
@@ -2894,48 +3762,10 @@ export class VerificationHarness {
 				continue;
 			}
 
-			const identityFile = options.waitForIdentity
-				? await this._waitForCommandIdentityFile(step, () => this.activeVerifications.get(active.signalId) === active && this._hasPendingCommandKillCleanup(active))
-				: this._readCommandIdentityFile(step);
-			let identity = this._verifyPersistedCommandIdentity(step, identityFile);
-			if (!identity.verified || !identity.pid) {
-				step.killUnsafeReason = identity.reason;
-				if (identity.reason === "command process is no longer alive") {
-					if (step.killReason === "timeout" && (step.killAttempts ?? 0) === 0 && !step.killLastAttemptAt) {
-						step.killUnsafeReason = "command process exited before Bobbit could verify a timeout kill; no command verdict was obtained";
-						delete step.killRequestedAt;
-						delete step.killReason;
-						delete step.killSignal;
-					} else {
-						step.killCompletedAt ??= Date.now();
-					}
-					continue;
-				}
-				allSettled = false;
-				if (process.env.BOBBIT_DEBUG && (step.pidFile || step.pid)) {
-					console.warn(`[verification] Not killing persisted command "${step.name}" for ${active.signalId}: ${identity.reason}`);
-				}
-				continue;
-			}
-
-			step.killAttempts = (step.killAttempts ?? 0) + 1;
-			step.killLastAttemptAt = Date.now();
-			try { killTreeByPid(identity.pid, signal); } catch { /* best-effort */ }
-			const exited = await this._waitForPidToExit(identity.pid);
-			if (exited) {
-				step.killCompletedAt = Date.now();
-				continue;
-			}
-
-			identity = this._verifyPersistedCommandIdentity(step);
-			if (identity.reason === "command process is no longer alive") {
-				step.killCompletedAt = Date.now();
-			} else {
-				allSettled = false;
-				step.killUnsafeReason = identity.verified && identity.pid
-					? "verified command process was still alive after kill attempt; will retry"
-					: `command cleanup could not be verified after kill attempt: ${identity.reason}`;
-			}
+			// Numeric pidfiles, heartbeats, and leader start tokens cannot prove a
+			// recovered process *group* remains ours. A typed sentinel is mandatory.
+			step.killUnsafeReason = "Recovered command has no typed exact sentinel evidence; refusing numeric PID/PGID cleanup.";
+			allSettled = false;
 		}
 		this._persistActive();
 		return allSettled;
@@ -2946,6 +3776,29 @@ export class VerificationHarness {
 		step: ActiveVerification["steps"][number],
 	): Promise<{ status: "settled" | "pending" | "unverifiable"; reason?: string }> {
 		const hadPriorKillAttempt = (step.killAttempts ?? 0) > 0 || !!step.killLastAttemptAt || !!step.killCompletedAt;
+		// Recovered host POSIX cleanup has one authority: the persisted sentinel.
+		// A leader PID, heartbeat, or lstart token is never sufficient.
+		if (step.sentinelFile && this.platform !== "win32") {
+			this._markPersistedCommandKillIntent(active, "SIGKILL", "timeout");
+			try {
+				await this.recoveredSentinelReaper(step);
+				step.killCompletedAt ??= Date.now();
+				this._persistActive();
+				return { status: "settled" };
+			} catch (err) {
+				if (!isPendingCommandCleanupError(err)) throw err;
+				this._persistActive();
+				return { status: "pending", reason: (err as Error).message };
+			}
+		}
+		// No persisted PID/heartbeat fallback survives a restart. Without the
+		// sentinel authority, timeout cleanup is explicitly retryable.
+		if (!step.sentinelFile || this.platform === "win32") {
+			this._markPersistedCommandKillIntent(active, "SIGKILL", "timeout");
+			step.killUnsafeReason = "Recovered timeout has no typed exact sentinel evidence; refusing numeric PID/PGID cleanup.";
+			this._persistActive();
+			return { status: "pending", reason: step.killUnsafeReason };
+		}
 		let identity = this._verifyPersistedCommandIdentity(step);
 
 		if (!identity.verified || !identity.pid) {
@@ -2970,7 +3823,14 @@ export class VerificationHarness {
 		this._markPersistedCommandKillIntent(active, "SIGKILL", "timeout");
 		step.killAttempts = (step.killAttempts ?? 0) + 1;
 		step.killLastAttemptAt = Date.now();
-		try { killTreeByPid(identity.pid, "SIGKILL"); } catch { /* best-effort */ }
+		const killResult = killTreeByPid(identity.pid, "SIGKILL");
+		if (killResult !== "signalled") {
+			step.killUnsafeReason = killResult === "unsupported"
+				? "Persisted Windows PID timeout cleanup is unsupported because ownership cannot be verified atomically"
+				: "Persisted command process group was unavailable before timeout cleanup; refusing to retarget its numeric PID";
+			this._persistActive();
+			return { status: "pending", reason: step.killUnsafeReason };
+		}
 		const exited = await this._waitForPidToExit(identity.pid);
 		if (exited) {
 			step.killCompletedAt = Date.now();
@@ -2995,19 +3855,48 @@ export class VerificationHarness {
 	}
 
 	/**
-	 * Tree-kill any tracked command-step subprocess registered under the given
-	 * signalId. Uses SIGTERM with a 1s SIGKILL escalation so cancellation is
-	 * observable within ~1s (single-timer path, no setInterval poll).
+	 * Cancel live command children only after their spawn-time ownership barrier.
+	 * A durable recovery record may exist before the POSIX sentinel/Windows Job
+	 * acknowledges it; treating that pre-readiness state as recovered ownership
+	 * can leave cancellation pending after the live child was already reaped.
 	 */
-	private _killTrackedForSignal(signalId: string): void {
-		for (const key of Array.from(this._trackedCommandChildren.keys())) {
-			if (key.startsWith(signalId + ":")) {
-				const t = this._trackedCommandChildren.get(key);
-				this._trackedCommandChildren.delete(key);
-				this._cancelledTrackedKeys.add(key);
-				try { t?.killTree("SIGTERM", 1000); } catch { /* best-effort */ }
+	private async _killTrackedForSignal(
+		signalId: string,
+		includeStep: (step: ActiveVerification["steps"][number] | undefined) => boolean = () => true,
+	): Promise<boolean> {
+		const prefix = `${signalId}:`;
+		const active = this.activeVerifications.get(signalId);
+		const trackedChildren = Array.from(this._trackedCommandChildren.entries())
+			.filter(([key]) => key.startsWith(prefix) && includeStep(active?.steps[Number(key.slice(prefix.length))]));
+		// Mark every child before waiting for any one readiness barrier. A blocked
+		// pre-readiness step must not let an independent ready sibling continue.
+		for (const [key] of trackedChildren) this._cancelledTrackedKeys.add(key);
+		const results = await Promise.all(trackedChildren.map(async ([key, tracked]) => {
+			try {
+				await tracked.ownershipReady;
+				tracked.killTree("SIGTERM", 1000);
+				if (!await tracked.waitForTreeExit()) return false;
+				const stepIndex = Number(key.slice(prefix.length));
+				const step = this.activeVerifications.get(signalId)?.steps[stepIndex];
+				if (step?.type === "command") {
+					if (step.containerId) {
+						// This live TrackedChild is the sole host transport authority.
+						if (!step.containerPayloadCleanupCompletedAt) return false;
+						step.containerTransportCleanupCompletedAt ??= Date.now();
+						delete step.containerTransportCleanupPending;
+					}
+					step.killCompletedAt ??= Date.now();
+				}
+				if (this._trackedCommandChildren.get(key) === tracked) this._trackedCommandChildren.delete(key);
+				return true;
+			} catch {
+				// Ownership readiness failure is fail-closed in spawnTracked. Do not
+				// substitute a numeric PID/PGID cleanup; durable recovery remains
+				// pending until exact identity can be proved.
+				return false;
 			}
-		}
+		}));
+		return results.every(Boolean);
 	}
 
 	/**
@@ -3042,18 +3931,25 @@ export class VerificationHarness {
 	 * Cancel ALL in-flight verifications for a goal (all gates).
 	 * Called when a goal completes, a team is torn down, or the goal is shelved.
 	 */
-	async cancelAllVerifications(goalId: string): Promise<void> {
+	async cancelAllVerifications(goalId: string): Promise<boolean> {
 		this._mergePersistedActiveVerifications(v => v.goalId === goalId);
 		for (const [signalId, active] of Array.from(this.activeVerifications)) {
 			if (active.goalId !== goalId) continue;
 			active.cancelled = true;
 			active.overallStatus = "cancelled";
 			active.cancelRequestedAt ??= Date.now();
+			active.cancelMode ??= "goal";
 
 			this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
 			this._persistActive();
-			this._killTrackedForSignal(signalId);
-			const commandKillsSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
+			// Partition siblings by ownership domain. A live docker-exec transport
+			// is never reaped through the recovered sentinel path.
+			const liveHostCleanupSettled = await this._killTrackedForSignal(signalId, step => !step?.containerId);
+			const persistedCleanupSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
+			const liveTransportCleanupSettled = persistedCleanupSettled
+				? await this._killTrackedForSignal(signalId, step => !!step?.containerId)
+				: !Array.from(this._trackedCommandChildren.keys()).some(key => key.startsWith(`${signalId}:`));
+			const commandKillsSettled = liveHostCleanupSettled && persistedCleanupSettled && liveTransportCleanupSettled;
 			this._drainPendingSignoffsForSignal(signalId);
 
 			for (const step of active.steps) {
@@ -3066,28 +3962,27 @@ export class VerificationHarness {
 			}
 
 			if (commandKillsSettled) {
-				this.activeVerifications.delete(signalId);
+				await this._finalizeCancelledVerification(active);
 			} else {
+				this._persistActive();
 				this._scheduleCommandKillCleanupRetry(signalId);
 			}
-			this._persistActive();
-
-			this.broadcastFn(goalId, {
-				type: "gate_verification_complete",
-				goalId, gateId: active.gateId, signalId,
-				status: "cancelled",
-			});
 
 			console.log(`[verification] Cancelled verification ${signalId} for goal ${goalId} (goal completing)`);
 		}
+		return !Array.from(this.activeVerifications.values()).some(active => active.goalId === goalId && active.cancelled);
 	}
 
 	/**
 	 * Cancel any in-flight verifications for the same (goalId, gateId).
 	 * Terminates reviewer sessions and removes from activeVerifications.
 	 */
-	async cancelStaleVerifications(goalId: string, gateId: string): Promise<void> {
-		await this.cancelStaleVerificationsForGates(goalId, [gateId]);
+	async cancelStaleVerifications(
+		goalId: string,
+		gateId: string,
+		mode: "explicit" | "stale" = "stale",
+	): Promise<boolean> {
+		return this.cancelStaleVerificationsForGates(goalId, [gateId], mode);
 	}
 
 	/**
@@ -3096,10 +3991,14 @@ export class VerificationHarness {
 	 * invalidate several gates without a later verification completing between
 	 * per-gate awaits and re-marking a reset gate.
 	 */
-	async cancelStaleVerificationsForGates(goalId: string, gateIds: string[]): Promise<void> {
+	async cancelStaleVerificationsForGates(
+		goalId: string,
+		gateIds: string[],
+		mode: "explicit" | "stale" = "stale",
+	): Promise<boolean> {
 		const gateIdSet = new Set(gateIds);
 		this._mergePersistedActiveVerifications(v => v.goalId === goalId && gateIdSet.has(v.gateId));
-		const cancellations: Array<{ signalId: string; gateId: string; runningSessionIds: string[] }> = [];
+		const cancellations: ActiveVerification[] = [];
 
 		for (const [signalId, active] of Array.from(this.activeVerifications)) {
 			if (active.goalId !== goalId || !gateIdSet.has(active.gateId)) continue;
@@ -3107,59 +4006,34 @@ export class VerificationHarness {
 			active.cancelled = true;
 			active.overallStatus = "cancelled";
 			active.cancelRequestedAt ??= Date.now();
+			active.cancelMode ??= mode;
 
 			this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
 			this._persistActive();
-			this._killTrackedForSignal(signalId);
-			const commandKillsSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
+			const liveHostCleanupSettled = await this._killTrackedForSignal(signalId, step => !step?.containerId);
+			const persistedCleanupSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
+			const liveTransportCleanupSettled = persistedCleanupSettled
+				? await this._killTrackedForSignal(signalId, step => !!step?.containerId)
+				: !Array.from(this._trackedCommandChildren.keys()).some(key => key.startsWith(`${signalId}:`));
+			const commandKillsSettled = liveHostCleanupSettled && persistedCleanupSettled && liveTransportCleanupSettled;
 			this._drainPendingSignoffsForSignal(signalId);
 			if (commandKillsSettled) {
-				this.activeVerifications.delete(signalId);
+				cancellations.push(active);
 			} else {
 				this._scheduleCommandKillCleanupRetry(signalId);
 			}
 
-			cancellations.push({
-				signalId,
-				gateId: active.gateId,
-				runningSessionIds: active.steps
-					.filter(step => step.sessionId && step.status === "running")
-					.map(step => step.sessionId!),
-			});
 		}
 
 		if (cancellations.length > 0) this._persistActive();
 
-		for (const { signalId, gateId, runningSessionIds } of cancellations) {
-			// Terminate all running reviewer sessions after every affected active
-			// verification has already been marked cancelled and removed.
-			for (const sessionId of runningSessionIds) {
-				try {
-					await this.sessionManager?.terminateSession(sessionId);
-				} catch { /* ignore — may already be terminated */ }
-				if (this.teamManager) {
-					try {
-						await this.teamManager.unregisterReviewerSession(goalId, sessionId);
-					} catch { /* ignore */ }
-				}
-			}
-
-			// Persist cancellation to gate store so UI sees "failed" instead of stale "running"
-			this.resolveGateStore(goalId).updateSignalVerification(signalId, {
-				status: "failed",
-				steps: [{ name: "Cancelled", type: "command", passed: false, status: "failed", phase: 0, output: "Verification cancelled.", duration_ms: 0 }],
-			});
-			// Note: gate status is NOT updated here — the caller decides whether to set it
-			// (e.g. explicit user cancel sets it to "failed", but re-signal lets the new verification decide)
-
-			this.broadcastFn(goalId, {
-				type: "gate_verification_complete",
-				goalId, gateId, signalId,
-				status: "cancelled",
-			});
-
-			console.log(`[verification] Cancelled stale verification ${signalId} for gate ${gateId}`);
+		for (const active of cancellations) {
+			await this._finalizeCancelledVerification(active);
+			console.log(`[verification] Cancelled stale verification ${active.signalId} for gate ${active.gateId}`);
 		}
+		return !Array.from(this.activeVerifications.values()).some(active =>
+			active.goalId === goalId && gateIdSet.has(active.gateId) && active.cancelled,
+		);
 	}
 
 	private notifyTeamLead(
@@ -3976,10 +4850,10 @@ export class VerificationHarness {
 				}
 			}
 
-			// If cancelled while steps were running, skip result processing
+			// Cancellation owns terminal publication. Keep this exact generation
+			// durable until cleanup-settled finalization can update its signal.
 			if (active.cancelled) {
-				this.activeVerifications.delete(signal.id);
-				this._persistActive();
+				await this._finalizeCancelledVerification(active);
 				return;
 			}
 
@@ -4014,8 +4888,7 @@ export class VerificationHarness {
 			this.notifyTeamLead(signal.goalId, signal.gateId, status, { steps: results, goalBranch });
 		} catch (err: any) {
 			if (active.cancelled) {
-				this.activeVerifications.delete(signal.id);
-				this._persistActive();
+				await this._finalizeCancelledVerification(active);
 				return;
 			}
 			const errorStep = { name: "Error", type: "command" as const, passed: false, status: "failed" as const, phase: 0, output: err.message, duration_ms: 0 };
@@ -5147,6 +6020,21 @@ export class VerificationHarness {
 	): Promise<{ passed: boolean; output: string; diagnostics?: GateStepDiagnostics }> {
 		return new Promise((resolve) => {
 			const normalizedCwd = cwd.replace(/\\/g, "/");
+			// Container aliases and short IDs are transport selectors, not durable
+			// ownership evidence. Canonicalize to Docker's immutable full ID before
+			// publishing the in-container witness and active verification state.
+			if (containerId && streamCtx) {
+				try {
+					const canonicalContainerId = execFileSync("docker", ["inspect", "--format={{.Id}}", containerId], {
+						encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+					}).trim();
+					if (!/^[a-f0-9]{64}$/i.test(canonicalContainerId)) throw new Error("Docker returned no full container ID");
+					containerId = canonicalContainerId;
+				} catch (error) {
+					resolve({ passed: false, output: `Container exact identity could not be established before spawn: ${(error as Error).message}` });
+					return;
+				}
+			}
 			// Shell selection: default to plain bash (fast), use --login only for
 			// commands that need the full interactive PATH (npm, pytest, gh, etc.).
 			const { shell: shellBin, args: shellArgs } = getVerificationShell(command);
@@ -5176,30 +6064,39 @@ export class VerificationHarness {
 			// are never routed through this seam, so a fake never reaches container mode
 			// in practice. Kept in the downgrade so that IF a nonDurable runner ever saw
 			// a container step it would still avoid the durable in-container files.
-			const recoveryMode: CommandRecoveryMode =
+			let recoveryMode: CommandRecoveryMode =
 				runnerNonDurable && (recoveryMode0 === "detached" || recoveryMode0 === "container-exec") && !!streamCtx
 					? "pending-retry"
 					: recoveryMode0;
 			let useDetached = recoveryMode === "detached";
-			const useContainerDurable = recoveryMode === "container-exec" && !!streamCtx;
+			let useContainerDurable = recoveryMode === "container-exec" && !!streamCtx;
 			let restartRecoveryUnsupportedReason: string | undefined =
 				recoveryMode === "pending-retry"
 					? (runnerNonDurable
 						? "Command step executed via an injected non-durable command-step runner (tier-1 fake); the attached path is not durable, so a gateway restart leaves the step pending/retryable (re-run on the next signal), never a fabricated verdict."
-						: "Windows command verification is using cmd.exe because Git Bash is unavailable; this attached path is not durable, so a gateway restart leaves the step pending/retryable (it is re-run on the next signal), never a fabricated verdict.")
+						: "Windows host-detached command recovery is disabled because a persisted PID cannot be atomically bound to its original process tree. A gateway restart mid-verification leaves the attached step pending/retryable (it is re-run on the next signal), never a fabricated verdict.")
 					: undefined;
 
-			if (recoveryMode === "pending-retry" && !runnerNonDurable && !VerificationHarness._warnedCmdExeDetached) {
+			if (recoveryMode === "pending-retry" && !runnerNonDurable && process.platform === "win32" && !VerificationHarness._warnedCmdExeDetached) {
 				VerificationHarness._warnedCmdExeDetached = true;
-				console.warn("[verification] Git Bash not found on Windows — durable detached command mode unavailable (cmd.exe cannot run the bash exit-file wrapper). A gateway restart mid-verification will leave command steps pending/retryable rather than recovered.");
+				console.warn("[verification] Windows host-detached command recovery is disabled: a persisted PID cannot be atomically bound to its original process tree. A gateway restart mid-verification leaves command steps pending/retryable rather than recovered.");
 			}
 			let outFile: string | undefined;
 			let errFile: string | undefined;
 			let exitFile: string | undefined;
 			let pidFile: string | undefined;
 			let pidNonce: string | undefined;
+			let sentinelFile: string | undefined;
+			let windowsJobCompletionFile: string | undefined;
+			// This host-owned result record is the only durable command verdict for
+			// docker exec. A same-UID payload may inspect its parent and forge every
+			// container-visible path or stream, so those are diagnostics only.
+			let containerCompletionFile: string | undefined;
+			let containerWitnessFile: string | undefined;
 			let heartbeatFile: string | undefined;
 			let processStartToken: string | undefined;
+			let dockerExecCommandTag: string | undefined;
+			let dockerExecWatcher: DockerExecEventWatcher | undefined;
 			let diagnosticsPaths: GateStepDiagnosticsPaths | undefined;
 
 			if (streamCtx) {
@@ -5229,9 +6126,10 @@ export class VerificationHarness {
 					}
 					exitFile = path.join(stepDir, `${streamCtx.stepIndex}.exit`);
 					pidFile = path.join(stepDir, `${streamCtx.stepIndex}.pid.json`);
+					sentinelFile = path.join(stepDir, `${streamCtx.stepIndex}.sentinel.json`);
 					heartbeatFile = path.join(stepDir, `${streamCtx.stepIndex}.heartbeat.json`);
 					pidNonce = randomUUID();
-					for (const file of [exitFile, exitFile + ".tmp", pidFile, pidFile + ".tmp", heartbeatFile, heartbeatFile + ".tmp"]) {
+					for (const file of [exitFile, exitFile + ".tmp", pidFile, pidFile + ".tmp", sentinelFile, sentinelFile + ".tmp", heartbeatFile, heartbeatFile + ".tmp"]) {
 						try { fs.unlinkSync(file); } catch { /* not present */ }
 					}
 					fs.writeFileSync(outFile, "");
@@ -5244,6 +6142,7 @@ export class VerificationHarness {
 					errFile = diagnosticsPaths?.stderrPath;
 					exitFile = undefined;
 					pidFile = undefined;
+					sentinelFile = undefined;
 					pidNonce = undefined;
 					heartbeatFile = undefined;
 				}
@@ -5258,8 +6157,36 @@ export class VerificationHarness {
 				containerStateDir = `/tmp/.bobbit-verif/${streamCtx.signalId}`;
 				exitFile = `${containerStateDir}/${streamCtx.stepIndex}.exit`;
 				pidFile = `${containerStateDir}/${streamCtx.stepIndex}.pid`;
+				containerWitnessFile = `${containerStateDir}/${streamCtx.stepIndex}.ownership.json`;
 				heartbeatFile = `${containerStateDir}/${streamCtx.stepIndex}.heartbeat`;
 				pidNonce = randomUUID();
+				// This unguessable marker is embedded in Docker's daemon-authored exec
+				// create event and ProcessConfig. It binds the eventual in-container
+				// sentinel to the engine-created exec, not to payload stdout.
+				dockerExecCommandTag = `bobbit-docker-exec:${randomUUID()}`;
+				// The in-container state proves the command's result, while this host
+				// record proves which detached docker-exec transport group is safe to
+				// reap after a gateway restart. Keep it outside the container because
+				// only the host sentinel can publish its PID/start-token identity.
+				try {
+					const stepDir = path.join(this._stateDir, "verifications", streamCtx.signalId);
+					fs.mkdirSync(stepDir, { recursive: true });
+					sentinelFile = process.platform === "win32" ? undefined : path.join(stepDir, `${streamCtx.stepIndex}.docker-exec.sentinel.json`);
+					windowsJobCompletionFile = process.platform === "win32" ? path.join(stepDir, `${streamCtx.stepIndex}.docker-exec.job-complete.json`) : undefined;
+					containerCompletionFile = path.join(stepDir, `${streamCtx.stepIndex}.docker-exec.result.json`);
+					for (const file of [sentinelFile, sentinelFile && sentinelFile + ".tmp", windowsJobCompletionFile, windowsJobCompletionFile && windowsJobCompletionFile + ".tmp", containerCompletionFile, containerCompletionFile + ".tmp"].filter((file): file is string => !!file)) {
+						try { fs.unlinkSync(file); } catch { /* not present */ }
+					}
+				} catch (err) {
+					// A container result without its host ownership identity must never
+					// be finalized after restart, so make this attached/retryable rather
+					// than launching a partially durable command.
+					console.warn(`[verification] Failed to set up docker-exec sentinel identity — falling back to attached mode: ${(err as Error).message}`);
+					recoveryMode = "unsupported";
+					useContainerDurable = false;
+					restartRecoveryUnsupportedReason = `Docker-exec sentinel identity setup failed before spawn: ${(err as Error).message}`;
+					sentinelFile = undefined;
+				}
 			}
 
 			const stampActiveCommandStep = (patch: Partial<ActiveVerification["steps"][number]>) => {
@@ -5278,8 +6205,14 @@ export class VerificationHarness {
 					exitFile,
 					pidFile,
 					pidNonce,
+					sentinelFile,
+					windowsJobCompletionFile,
+					windowsJobCompletionNonce: windowsJobCompletionFile ? pidNonce : undefined,
+					containerCompletionFile,
+					containerCompletionNonce: containerCompletionFile ? pidNonce : undefined,
 					heartbeatFile,
 					containerId,
+					containerWitnessFile,
 					bootEpoch: durable ? this.bootEpoch : undefined,
 					timeoutSec,
 					expectFailure,
@@ -5351,14 +6284,103 @@ export class VerificationHarness {
 			// The same is true for any direct `process.kill(child.pid, sig)`.
 			// We use `spawnTracked` which spawns the child in its own process
 			// group (POSIX `detached:true`) so the helper can kill the whole
-			// tree via `process.kill(-pgid, sig)` (or `taskkill /T /F` on
-			// Windows). The helper owns the timeout timer. See spawn-tree.ts.
+			// tree via `process.kill(-pgid, sig)` (or a spawn-time Windows Job
+			// supervisor). The helper owns the timeout timer. See spawn-tree.ts.
 			// This primitive is reusable; any caller that spawns a shell which
 			// may itself spawn descendants should prefer it over raw spawn.
 			let tracked: TrackedChild | undefined;
 			let child: any;
 			let spawnError: Error | undefined;
+			// Container payload cleanup is distinct from host docker-exec cleanup.
+			let containerCleanup: Promise<void> | undefined;
+			// The sentinel publishes its tuple to the host before the payload is
+			// released. Container files are same-UID mutable diagnostics only; the
+			// host-persisted tuple below is the sole later destructive authority.
+			let resolveContainerOwnershipReady!: () => void;
+			let rejectContainerOwnershipReady!: (error: Error) => void;
+			const containerOwnershipReady = useContainerDurable
+				? new Promise<void>((resolve, reject) => { resolveContainerOwnershipReady = resolve; rejectContainerOwnershipReady = reject; })
+				: Promise.resolve();
+			let containerWitnessAcknowledged = !useContainerDurable;
+			// A second ownership frame is hostile while the first one is still being
+			// bound to Docker's Engine identity. Once host release is delivered stdout
+			// belongs to the payload and marker-looking output is diagnostic only.
+			let containerWitnessFrameReceived = false;
+			let containerHandshakeFailure: Error | undefined;
+			const failContainerOwnershipHandshake = (error: Error) => {
+				if (containerHandshakeFailure) return;
+				containerHandshakeFailure = error;
+				const active = streamCtx ? this.activeVerifications.get(streamCtx.signalId) : undefined;
+				const step = active?.steps[streamCtx!.stepIndex];
+				if (step) {
+					step.containerPayloadCleanupPending = true;
+					this._persistActive();
+				}
+				rejectContainerOwnershipReady(error);
+				// If readiness already resolved, the spawn-tree prerequisite cannot
+				// reject retroactively. The still-live tracked transport is then the
+				// only authority available for fail-closed cleanup.
+				tracked?.killTree("SIGKILL");
+			};
+			const containerPayloadRelease = useContainerDurable
+				? createContainerPayloadReleaseHandshake(failContainerOwnershipHandshake)
+				: undefined;
+			const acknowledgeContainerWitness = (witness: ContainerOwnershipWitness) => {
+				containerWitnessFrameReceived = true;
+				void (async () => {
+					try {
+						if (!streamCtx || !containerId || !pidNonce || containerHandshakeFailure) return;
+						if (containerWitnessAcknowledged) throw new Error("Container ownership tuple was duplicated");
+						if (witness.containerId !== containerId || witness.nonce !== pidNonce) {
+							throw new Error("Container ownership tuple did not match its host step identity");
+						}
+						if (!dockerExecWatcher) throw new Error("Docker exec engine identity watcher was unavailable");
+						// Do not persist or release from container-originated bytes. The
+						// witness is accepted only after the current Docker context returns
+						// the daemon-issued tagged exec whose leader PID agrees exactly.
+						const engineExec = await dockerExecWatcher.verify();
+						if (!dockerExecCommandTag ||
+							!hasEngineExecPidWithTag(containerId, engineExec.pid, dockerExecCommandTag) ||
+							!hasUniqueContainerExecTag(containerId, witness.sentinelPid, dockerExecCommandTag)) {
+							throw new Error("Docker exec supervisor PID/ancestry tag was missing, duplicated, or mismatched");
+						}
+						const active = this.activeVerifications.get(streamCtx.signalId);
+						const step = active?.steps[streamCtx.stepIndex];
+						if (!step) throw new Error("Container ownership tuple arrived for an inactive step");
+						step.containerOwnershipWitness = witness;
+						step.containerDockerExecId = engineExec.id;
+						step.containerDockerExecTag = dockerExecCommandTag;
+						if (!this._persistActive()) {
+							step.containerPayloadCleanupPending = true;
+							throw new Error("Container ownership tuple could not be durably persisted");
+						}
+						containerWitnessAcknowledged = true;
+						// The host alone owns docker exec stdin. No container-writable FIFO
+						// participates in this release boundary.
+						if (!containerPayloadRelease?.requestRelease()) return;
+						resolveContainerOwnershipReady();
+					} catch (error) {
+						failContainerOwnershipHandshake(error as Error);
+					}
+				})();
+			};
+			const rejectMalformedContainerWitness = () => {
+				containerPayloadRelease?.fail(new Error("Container ownership tuple was malformed"));
+			};
+			const decodeContainerWitnessFrame = useContainerDurable
+				? createContainerWitnessFrameDecoder(acknowledgeContainerWitness, rejectMalformedContainerWitness)
+				: undefined;
+			let containerTimedOut = false;
+			let containerTimeoutTimer: TimerHandle | undefined;
+			void (async () => {
 			try {
+				if (useContainerDurable && containerId && dockerExecCommandTag) {
+					dockerExecWatcher = new DockerExecEventWatcher(containerId, dockerExecCommandTag);
+					// Wait for the daemon's HTTP 200 subscription acknowledgement before
+					// creating the tagged exec. Starting `docker events` and immediately
+					// spawning misses the first event on a cold client connection.
+					await dockerExecWatcher.start();
+				}
 				if (containerId) {
 					// Wrap the command so the in-container shell writes its PID
 					// to a temp file. On timeout, we kill that PID's process
@@ -5371,38 +6393,57 @@ export class VerificationHarness {
 					const stepKillId = randomUUID().slice(0, 8);
 					const killPidFile = useContainerDurable && pidFile ? pidFile : `/tmp/.bobbit-step-${stepKillId}.pid`;
 					let wrappedCmd: string;
-					if (useContainerDurable && containerStateDir && exitFile && heartbeatFile) {
+					if (useContainerDurable && containerStateDir && exitFile && heartbeatFile && containerWitnessFile && pidNonce) {
 						const qDir = shellSingleQuote(containerStateDir);
-						const qPid = shellSingleQuote(killPidFile);
-						const qHb = shellSingleQuote(heartbeatFile);
-						const qExit = shellSingleQuote(exitFile);
-						// POSIX sh; stdout/stderr intentionally NOT redirected so the
-						// docker exec pipe keeps streaming live output to the host.
-						wrappedCmd = `mkdir -p ${qDir} 2>/dev/null; __bp=$$; printf %s "$__bp" > ${qPid}.tmp && mv ${qPid}.tmp ${qPid}; ( while :; do printf '{"pid":%s,"ts":%s}' "$__bp" "$(date +%s 2>/dev/null || printf 0)" > ${qHb}.tmp && mv ${qHb}.tmp ${qHb}; sleep 1; done ) & __hb=$!; ( ${command}\n); __ec=$?; kill "$__hb" 2>/dev/null; wait "$__hb" 2>/dev/null; printf %s "$__ec" > ${qExit}.tmp && mv ${qExit}.tmp ${qExit}; exit $__ec`;
+						const qWitness = shellSingleQuote(containerWitnessFile);
+						const qNonce = shellSingleQuote(pidNonce);
+						const qContainer = shellSingleQuote(containerId);
+						const qExecTag = shellSingleQuote(dockerExecCommandTag ?? "");
+						// The pre-payload barrier is an anonymous shell pipe. No pathname or
+						// FIFO is writable by a same-UID sibling; FD 3 belongs only to the
+						// engine-bound sentinel and is closed before user code starts.
+						// The Engine-bound outer session never joins the payload group.  It
+						// owns an anonymous stdin release endpoint and a private pipe from the
+						// inner session.  The inner sentinel publishes its exact tuple before
+						// reading that endpoint; after the payload exits it reports only its
+						// exit code on the private pipe and remains until the outer supervisor
+						// reaps its *currently verified* group.  Thus normal completion cannot
+						// strand docker exec behind a durable sentinel, while restart cleanup
+						// still has the same live exact witness.
+						wrappedCmd = `# ${dockerExecCommandTag}\nmkdir -p ${qDir} 2>/dev/null || exit 125; exec 4>&1; exec 3<&0; env BOBBIT_WITNESS=${qWitness} BOBBIT_NONCE=${qNonce} BOBBIT_CONTAINER=${qContainer} BOBBIT_EXEC_TAG=${qExecTag} setsid /bin/sh -c ${shellSingleQuote(`: BOBBIT_WITNESS=${qWitness} BOBBIT_NONCE=${qNonce}; trap "" HUP INT TERM; __fail(){ exit 125; }; __p=$$; __g=$(awk "{print \\$5}" "/proc/$__p/stat" 2>/dev/null || true); __s=$(awk "{print \\$22}" "/proc/$__p/stat" 2>/dev/null || true); case "$__p" in *[!0-9]*|'') __fail;; esac; case "$__g" in *[!0-9]*|'') __fail;; esac; case "$__s" in *[!0-9]*|'') __fail;; esac; [ "$__p" = "$__g" ] || __fail; __t="$BOBBIT_WITNESS.$$.tmp"; printf "{\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s" > "$__t" && mv "$__t" "$BOBBIT_WITNESS" || __fail; printf "BOBBIT_INNER_READY %s %s %s\\n" "$__p" "$__g" "$__s"; IFS= read -r __release <&3 || __fail; [ "$__release" = BOBBIT_HOST_RELEASE ] || __fail; exec 3<&-; ( unset BOBBIT_WITNESS BOBBIT_NONCE BOBBIT_CONTAINER BOBBIT_EXEC_TAG; ${command}\n) >&4; __ec=$?; printf "BOBBIT_INNER_EXIT %s\\n" "$__ec"; while :; do sleep 2147483647 & wait $!; done`)} | { IFS=' ' read -r __kind __p __g __s __rest || exit 125; [ "$__kind" = BOBBIT_INNER_READY ] && [ -z "$__rest" ] || exit 125; case "$__p" in *[!0-9]*|'') exit 125;; esac; case "$__g" in *[!0-9]*|'') exit 125;; esac; case "$__s" in *[!0-9]*|'') exit 125;; esac; [ "$__p" = "$__g" ] || exit 125; printf "BOBBIT_CONTAINER_OWNERSHIP_TUPLE {\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" ${qContainer} ${qNonce} "$__p" "$__g" "$__s" >&4; IFS=' ' read -r __kind __ec __rest || exit 125; [ "$__kind" = BOBBIT_INNER_EXIT ] && [ -z "$__rest" ] || exit 125; case "$__ec" in *[!0-9]*|'') exit 125;; esac; [ "$__ec" -le 255 ] || exit 125; __verify(){ __lp=$(awk "{print \\$1}" "/proc/$__p/stat" 2>/dev/null || true); __lg=$(awk "{print \\$5}" "/proc/$__p/stat" 2>/dev/null || true); __ls=$(awk "{print \\$22}" "/proc/$__p/stat" 2>/dev/null || true); [ "$__lp" = "$__p" ] && [ "$__lg" = "$__g" ] && [ "$__ls" = "$__s" ]; }; __verify || exit 125; kill -TERM -"$__g" 2>/dev/null || exit 125; __verify || exit 125; kill -KILL -"$__g" 2>/dev/null || exit 125; IFS= read -r __leftover && exit 125; exit "$__ec"; }`;
+
 					} else {
 						wrappedCmd = `echo $$ > ${killPidFile}; ${command}`;
 					}
-					const pidFileForKill = killPidFile;
-					tracked = spawnTracked("docker", ["exec", "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
-						stdio: ["ignore", "pipe", "pipe"],
-						timeoutMs: timeoutSec * 1000,
+					// The container wrapper creates its own session; the in-group sentinel
+					// (not this transient leader) is the only cleanup authority.
+					// A docker-exec shell is a process-group leader, so `setsid` forks
+					// and otherwise makes the host CLI exit before its container child.
+					// `-w` joins that exact child without polling, preserving the host
+					// transport ownership boundary until container cleanup is complete.
+					wrappedCmd = `exec setsid -w /bin/sh -c ${shellSingleQuote(wrappedCmd)}`;
+					tracked = spawnTracked("docker", ["exec", "-i", "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
+						stdio: ["pipe", "pipe", "pipe"],
+						// Durable-container timeout is armed only after its atomic witness.
+						timeoutMs: useContainerDurable ? undefined : timeoutSec * 1000,
+						// On POSIX this sentinel is the only durable witness for the
+						// detached host docker-exec group after gateway restart.
+						...(sentinelFile && pidNonce ? { posixSentinelIdentity: { file: sentinelFile, nonce: pidNonce } } : {}),
+						...(useContainerDurable ? { extraOwnershipReady: containerOwnershipReady } : {}),
+						...(windowsJobCompletionFile && pidNonce ? { windowsJobCompletion: { file: windowsJobCompletionFile, nonce: pidNonce } } : {}),
 						env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
 						onTimeout: () => {
-							// Belt-and-braces: host-side tree-kill of `docker exec`
-							// does not reliably reach in-container descendants.
-							// Kill the step's own process group via the persisted
-							// pid file — leaves other concurrent docker exec'd
-							// processes (agent sessions, other verification steps,
-							// bg-processes) untouched.
-							try {
-								const qp = shellSingleQuote(pidFileForKill);
-								if (!this.commandRunner.spawn) throw new Error("CommandRunner.spawn is required for docker command cleanup");
-								const killer = this.commandRunner.spawn("docker", [
-									"exec", containerId, "/bin/sh", "-c",
-									`p=$(cat ${qp} 2>/dev/null) && kill -TERM -- -$p 2>/dev/null; sleep 0.2; p=$(cat ${qp} 2>/dev/null) && kill -KILL -- -$p 2>/dev/null; rm -f ${qp}`,
-								], { stdio: "ignore" });
-								killer.on("error", () => { /* docker missing — best-effort */ });
-							} catch { /* ignore */ }
+							// Host docker-exec cleanup alone cannot reach container children.
+							// Only the exact sentinel witness may authorize the in-container
+							// group signal; missing or stale evidence remains retryable.
+							const active = streamCtx ? this.activeVerifications.get(streamCtx.signalId) : undefined;
+							const liveStep = active?.steps[streamCtx!.stepIndex];
+							if (!liveStep) return;
+							containerCleanup ??= this._killAndVerifyRecoveredContainerProcessGroup(liveStep);
+							void containerCleanup.catch(error => {
+								liveStep.killUnsafeReason = (error as Error).message;
+								this._persistActive();
+							});
 						},
 					});
 				} else if (useDetached) {
@@ -5415,6 +6456,7 @@ export class VerificationHarness {
 						timeoutMs: timeoutSec * 1000,
 						windowsHide: process.platform === "win32",
 						useDetached: true,
+						...(sentinelFile && pidNonce ? { posixSentinelIdentity: { file: sentinelFile, nonce: pidNonce } } : {}),
 					});
 				} else {
 					// Host attached path routed through the seam (default = real spawn).
@@ -5428,18 +6470,38 @@ export class VerificationHarness {
 					});
 				}
 				child = tracked.child;
+				if (useContainerDurable) {
+					const stdin = child.stdin;
+					if (!stdin) {
+						containerPayloadRelease?.fail(new Error("Container payload release writer was unavailable after durable witness publication"));
+					} else {
+						// An asynchronous stdin failure is just as unsafe as a synchronous
+						// write failure: do not let a ready tuple authorize a payload that
+						// never received the host-only release.
+						stdin.once("error", (error: Error) => failContainerOwnershipHandshake(
+							new Error(`Could not release container payload after durable witness publication: ${error.message}`),
+						));
+						containerPayloadRelease?.installWriter(() => stdin.end("BOBBIT_HOST_RELEASE\n"));
+					}
+				}
 			} catch (err) {
 				spawnError = err as Error;
 			}
 
 			if (spawnError || !child || !tracked) {
-				resolve(handleSpawnError(spawnError ?? new Error("spawn returned no child")));
+				void (async () => {
+					await dockerExecWatcher?.stop();
+					resolve(handleSpawnError(spawnError ?? new Error("spawn returned no child")));
+				})();
 				return;
 			}
 
 			// Register so cancellation / shutdown can tree-kill the live child.
 			const trackedKey = streamCtx ? `${streamCtx.signalId}:${streamCtx.stepIndex}` : `__no_ctx_${child.pid ?? Date.now()}`;
 			this._trackedCommandChildren.set(trackedKey, tracked);
+			// A missing/ambiguous event must not leave a detached `docker events`
+			// client behind after the transport exits. `stop()` joins the watcher.
+			child.once("close", () => { void dockerExecWatcher?.stop(); });
 
 			// Stamp the persisted step with everything needed for cross-restart
 			// recovery before doing anything else — if the gateway dies right
@@ -5458,6 +6520,9 @@ export class VerificationHarness {
 					exitFile,
 					pidFile,
 					pidNonce,
+					sentinelFile,
+					windowsJobCompletionFile,
+					windowsJobCompletionNonce: windowsJobCompletionFile ? pidNonce : undefined,
 					heartbeatFile,
 					bootEpoch: this.bootEpoch,
 					timeoutSec,
@@ -5475,22 +6540,31 @@ export class VerificationHarness {
 				// _resumeCommandStep using durable identity + exit files.
 				tracked!.markSurvival();
 			} else if (useContainerDurable && streamCtx) {
-				// Container durable path: the host `docker exec` client's pid is
-				// not the in-container process, so we do not stamp `pid` (resume
-				// re-attaches via `docker exec` reading the in-container pid/exit
-				// files). Stamp timing + mark survival so a graceful shutdown does
-				// not tear down the client and (potentially) the in-container job
-				// before it writes its exit file.
+				// Container durable recovery records two independent identities: the
+				// in-container files establish the command verdict, and the host
+				// docker-exec sentinel establishes the transport group safe to reap.
+				// Mark survival so a graceful shutdown does not tear down the client
+				// before it can publish either durable record.
 				const startTimeMs = Date.now();
 				stampActiveCommandStep({
+					// The host `docker exec` leader is also its detached POSIX
+					// process-group ID. Its durable sentinel identity, not this raw
+					// number alone, authorizes recovered host cleanup.
+					pid: child.pid,
 					startTimeMs,
 					deadlineMs: startTimeMs + timeoutSec * 1000,
 					containerId,
+					containerWitnessFile,
+					containerCompletionFile,
+					containerCompletionNonce: pidNonce,
 					outFile,
 					errFile,
 					exitFile,
 					pidFile,
 					pidNonce,
+					sentinelFile,
+					windowsJobCompletionFile,
+					windowsJobCompletionNonce: windowsJobCompletionFile ? pidNonce : undefined,
 					heartbeatFile,
 					bootEpoch: this.bootEpoch,
 					timeoutSec,
@@ -5503,6 +6577,17 @@ export class VerificationHarness {
 				try { child.unref(); } catch { /* ignore */ }
 				tracked!.markSurvival();
 			}
+
+			// A payload is same-UID hostile. Do not derive a verdict from any marker,
+			// nonce, path, or inherited descriptor it can inspect via /proc; only the
+			// host-observed docker-exec lifecycle result is authoritative.
+			const beginContainerTransportCleanup = (liveStep: ActiveVerification["steps"][number]) => {
+				liveStep.containerTransportCleanupPending = true;
+				this._persistActive();
+				// This is the still-live tracked docker-exec transport, never a
+				// recovered numeric PID. spawnTracked owns its exact host sentinel/Job.
+				tracked?.killTree("SIGTERM");
+			};
 
 			let stdout = "";
 			let stderr = "";
@@ -5520,6 +6605,16 @@ export class VerificationHarness {
 					} else {
 						stderr += text;
 						if (stderr.length > 1024 * 1024) stderr = stderr.slice(-512 * 1024);
+					}
+					// Decode the sentinel's pre-release frame across split stdout chunks.
+					// A second tuple during Engine attestation is a fail-closed transport
+					// violation. After host release marker-looking payload stdout is not
+					// parsed or treated as authority.
+					if (stream === "stdout") {
+						if (containerWitnessFrameReceived && !containerWitnessAcknowledged && text.includes("BOBBIT_CONTAINER_OWNERSHIP_TUPLE ")) {
+							failContainerOwnershipHandshake(new Error("Container ownership tuple was duplicated before host payload release"));
+						}
+						decodeContainerWitnessFrame?.(text);
 					}
 					if (streamCtx) {
 						this.broadcastFn(streamCtx.goalId, {
@@ -5547,23 +6642,167 @@ export class VerificationHarness {
 			}
 
 			let settled = false;
+			let settleStarted = false;
+			let hostResultPublicationFailure: string | undefined;
+			// Do not arm the execution deadline until the host sentinel/Job and the
+			// in-container atomic witness both acknowledge ownership. No polling: the
+			// wrapper's FIFO acknowledgement is forwarded as a one-shot stream marker.
+			if (useContainerDurable && streamCtx) {
+				void tracked!.ownershipReady.then(() => {
+					if (containerTimeoutTimer || !tracked || settled) return;
+					containerTimeoutTimer = this.clock.setTimeout(() => {
+						if (!tracked || settled) return;
+						containerTimedOut = true;
+						const liveStep = this.activeVerifications.get(streamCtx.signalId)?.steps[streamCtx.stepIndex];
+						if (!liveStep) return;
+						const active = this.activeVerifications.get(streamCtx.signalId);
+						if (active) this._markPersistedCommandKillIntent(active, "SIGKILL", "timeout");
+						this._persistActive();
+						containerCleanup ??= this._killAndVerifyRecoveredContainerProcessGroup(liveStep);
+						void containerCleanup.then(
+							() => beginContainerTransportCleanup(liveStep),
+							() => this._scheduleCommandKillCleanupRetry(streamCtx.signalId),
+						);
+					}, timeoutSec * 1000);
+					containerTimeoutTimer.unref?.();
+				}).catch(() => {
+					// Host or container readiness failure remains pending/retryable; no
+					// numeric transport fallback is permitted.
+					const active = this.activeVerifications.get(streamCtx.signalId);
+					const liveStep = active?.steps[streamCtx.stepIndex];
+					if (liveStep) {
+						liveStep.containerPayloadCleanupPending = true;
+						this._persistActive();
+					}
+				});
+			}
+
 			let exitCode: number | null = null;
 			let exitSignal: NodeJS.Signals | null = null;
 			let closeGraceTimer: TimerHandle | undefined;
 			let exitFilePollTimer: TimerHandle | undefined;
-			// These timers are coupled to a real OS child process. Do not schedule them
-			// on the injected/manual gateway clock used by tests; if the child emits
-			// "exit" without a matching "close", virtual time would never advance and
-			// verification would remain running until the outer test times out.
-			const processClock = realClock;
+			// Production always uses real time for OS child lifecycle events. A focused
+			// lifecycle test may inject a manual clock and advance this bounded grace
+			// explicitly, avoiding a wall-clock sleep for exit-without-close coverage.
+			const processClock = this.commandLifecycleClock;
 
-			const settleFromProcess = (code: number | null, signal: NodeJS.Signals | null) => {
-				if (settled) return;
-				settled = true;
+			const settleFromProcess = async (
+				code: number | null,
+				signal: NodeJS.Signals | null,
+			) => {
+				if (settled || settleStarted) return;
+				settleStarted = true;
 				if (closeGraceTimer) processClock.clearTimeout(closeGraceTimer);
 				if (exitFilePollTimer) processClock.clearInterval(exitFilePollTimer);
-				this._trackedCommandChildren.delete(trackedKey);
+				if (containerTimeoutTimer) this.clock.clearTimeout(containerTimeoutTimer);
+				// Keep a durable container transport registered until its exact tree
+				// barrier settles. A host completion-file failure or a false first join
+				// must retry this live TrackedChild, never switch to recovered PID state.
+				if (!useContainerDurable) this._trackedCommandChildren.delete(trackedKey);
 				try { stopTail?.(); } catch { /* ignore */ }
+
+				const didTimeOut = tracked!.timedOut() || containerTimedOut;
+				const didCancel = !didTimeOut && this._cancelledTrackedKeys.delete(trackedKey);
+				// Persist the result from the host's docker-exec lifecycle boundary before
+				// any cleanup can destroy that evidence. Never consume the in-container
+				// exit file: a same-UID payload can forge it after reading parent cmdline.
+				if (useContainerDurable && containerCompletionFile && pidNonce && !didTimeOut && !didCancel && code !== null) {
+					try {
+						const pending = `${containerCompletionFile}.tmp`;
+						fs.writeFileSync(pending, JSON.stringify({ nonce: pidNonce, exitCode: code }));
+						fs.renameSync(pending, containerCompletionFile);
+					} catch (error) {
+						hostResultPublicationFailure = `Host docker-exec result publication failed: ${(error as Error).message}`;
+						const live = streamCtx ? this.activeVerifications.get(streamCtx.signalId) : undefined;
+						const step = live?.steps[streamCtx!.stepIndex];
+						if (step) {
+							// The missing host verdict is retryable only while both cleanup
+							// layers remain durable. Do not strand settleFromProcess after
+							// the child exit boundary or publish before exact settlement.
+							step.killUnsafeReason = hostResultPublicationFailure;
+							step.containerPayloadCleanupPending = true;
+							step.containerTransportCleanupPending = true;
+							this._persistActive();
+						}
+					}
+				}
+				// Do not report a timeout/cancel cleanup as successful merely because
+				// its shell leader closed. The tracked runner verifies the owned
+				// process group or the Windows Job supervisor close barrier.
+				// A zero exit code belongs to the tracked process tree, not merely its
+				// shell leader. POSIX synchronously finalizes a live group at root exit;
+				// Windows joins its spawn-time Job supervisor. Every result therefore
+				// waits for that ownership barrier, including natural success.
+				const treeCompletionMustBeVerified = true;
+				// Natural completion is produced by the Engine-bound outer supervisor.
+				// It can return a payload code only after its private inner-pipe exit
+				// report, exact tuple revalidation, TERM/KILL, and inner-pipe EOF. The
+				// host-observed docker-exec close is therefore the completion authority;
+				// do not try to re-signal its deliberately dead sentinel. Exit 125 is
+				// reserved for a supervisor identity/cleanup failure and remains pending
+				// (a payload that itself exits 125 therefore fails closed rather than
+				// claiming an indistinguishable cleanup success).
+				if (useContainerDurable && streamCtx && !didTimeOut && !didCancel && code !== null && code !== 125) {
+					const liveStep = this.activeVerifications.get(streamCtx.signalId)?.steps[streamCtx.stepIndex];
+					if (liveStep && !liveStep.containerPayloadCleanupCompletedAt) {
+						liveStep.containerPayloadCleanupCompletedAt = Date.now();
+						delete liveStep.containerPayloadCleanupPending;
+						delete liveStep.killUnsafeReason;
+						this._persistActive();
+					}
+				}
+				// Timeout, cancellation, an ambiguous outer failure, and restart recovery
+				// retain the existing exact host verifier. They never infer completion
+				// from a numeric process-group or an untrusted container artifact.
+				if (useContainerDurable && streamCtx) {
+					const liveStep = this.activeVerifications.get(streamCtx.signalId)?.steps[streamCtx.stepIndex];
+					if (liveStep) containerCleanup ??= this._killAndVerifyRecoveredContainerProcessGroup(liveStep);
+				}
+				if (containerCleanup) {
+					try {
+						await containerCleanup;
+					} catch (error) {
+						const live = streamCtx ? this.activeVerifications.get(streamCtx.signalId) : undefined;
+						if (live) {
+							// A normal payload completion with stale witness evidence is not a
+							// cancellation. Preserve its durable payload-pending phase and retry
+							// fail-closed; only actual timeout/cancel paths author a kill intent.
+							if (didTimeOut || didCancel) {
+								this._markPersistedCommandKillIntent(live, "SIGKILL", didTimeOut ? "timeout" : "cancelled");
+							}
+							this._persistActive();
+							this._scheduleCommandKillCleanupRetry(streamCtx!.signalId);
+						}
+						// Fail closed: do not resolve a terminal command result while exact
+						// payload ownership is pending. The durable retry owns publication.
+						return;
+					}
+				}
+				if (useContainerDurable && streamCtx) {
+					const liveStep = this.activeVerifications.get(streamCtx.signalId)?.steps[streamCtx.stepIndex];
+					if (liveStep && !liveStep.containerTransportCleanupPending && !liveStep.containerTransportCleanupCompletedAt) {
+						// The child already crossed its exit boundary, so this only persists
+						// the phase; it never attempts a post-exit host PID signal.
+						liveStep.containerTransportCleanupPending = true;
+						this._persistActive();
+					}
+				}
+				let treeCleanupVerified = await tracked!.waitForTreeExit();
+				if (useContainerDurable && streamCtx) {
+					const liveStep = this.activeVerifications.get(streamCtx.signalId)?.steps[streamCtx.stepIndex];
+					if (liveStep) {
+						if (treeCleanupVerified) {
+							liveStep.containerTransportCleanupCompletedAt ??= Date.now();
+							delete liveStep.containerTransportCleanupPending;
+						} else {
+							liveStep.containerTransportCleanupPending = true;
+							this._scheduleCommandKillCleanupRetry(streamCtx.signalId);
+						}
+						this._persistActive();
+					}
+				}
+				settled = true;
+				if (treeCleanupVerified || !useContainerDurable) this._trackedCommandChildren.delete(trackedKey);
 
 				let outText = stdout;
 				let errText = stderr;
@@ -5573,14 +6812,29 @@ export class VerificationHarness {
 					errText = readCommandLogTail(errFile);
 				}
 				const tail = (outText + "\n" + errText).trim().slice(-5000);
-				const didTimeOut = tracked!.timedOut();
-				const didCancel = !didTimeOut && this._cancelledTrackedKeys.delete(trackedKey);
+
+				if (hostResultPublicationFailure) {
+					if (!treeCleanupVerified) {
+						// Keep the active record pending; the retry will re-drive only the
+						// still-live TrackedChild rather than a recovered transport PID.
+						this._scheduleCommandKillCleanupRetry(streamCtx!.signalId);
+						return;
+					}
+					resolve(withDiagnostics({
+						passed: false,
+						output: tail ? `${tail}\n${hostResultPublicationFailure}` : hostResultPublicationFailure,
+					}));
+					return;
+				}
 
 				if (didTimeOut) {
-					const marker = `[step timed out after ${timeoutSec}s \u2014 killed subprocess tree]`;
+					const marker = treeCleanupVerified
+						? `[step timed out after ${timeoutSec}s \u2014 killed subprocess tree]`
+						: `[step timed out after ${timeoutSec}s \u2014 subprocess tree cleanup could not be verified]`;
 					const combined = tail ? `${tail}\n${marker}` : marker;
-					if (expectFailure) {
-						// Honour expectFailure + errorPattern against the accumulated output.
+					if (treeCleanupVerified && expectFailure) {
+						// Honour expectFailure + errorPattern only after cleanup has been
+						// verified. A failed cleanup must never become a passing result.
 						resolve(withDiagnostics(matchExpectFailure(null, combined, errorPattern)));
 						return;
 					}
@@ -5588,16 +6842,24 @@ export class VerificationHarness {
 					return;
 				}
 				if (didCancel) {
-					const marker = `[step cancelled \u2014 killed subprocess tree]`;
+					const marker = treeCleanupVerified
+						? `[step cancelled \u2014 killed subprocess tree]`
+						: `[step cancelled \u2014 subprocess tree cleanup could not be verified]`;
 					const combined = tail ? `${tail}\n${marker}` : marker;
 					resolve(withDiagnostics({ passed: false, output: combined }));
 					return;
 				}
-				if (expectFailure) {
-					resolve(withDiagnostics(matchExpectFailure(code, tail, errorPattern)));
+				if (treeCompletionMustBeVerified && !treeCleanupVerified) {
+					const marker = "[step command exited but subprocess tree completion could not be verified]";
+					resolve(withDiagnostics({ passed: false, output: tail ? `${tail}\n${marker}` : marker }));
 					return;
 				}
-				resolve(withDiagnostics({ passed: code === 0, output: tail || (signal ? `exit signal ${signal}` : `exit code ${code}`) }));
+				const terminalCode = code;
+				if (expectFailure) {
+					resolve(withDiagnostics(matchExpectFailure(terminalCode, tail, errorPattern)));
+					return;
+				}
+				resolve(withDiagnostics({ passed: terminalCode === 0, output: tail || (signal ? `exit signal ${signal}` : `exit code ${terminalCode}`) }));
 			};
 
 			if (useDetached && exitFile) {
@@ -5618,32 +6880,41 @@ export class VerificationHarness {
 					} catch {
 						return;
 					}
-					try { if (child.pid) killTreeByPid(child.pid, "SIGKILL"); } catch { /* best-effort */ }
-					settleFromProcess(code, null);
+					// The exit file is the wrapper's normal completion record. Do not send
+					// a post-completion numeric-PID/PGID signal here: the root may already
+					// have exited, making that identity unsafe to target.
+					void settleFromProcess(code, null);
 				}, 100);
 				exitFilePollTimer.unref?.();
 			}
 
 			child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+				if (useContainerDurable && (!containerWitnessAcknowledged || !containerPayloadRelease?.released())) {
+					failContainerOwnershipHandshake(new Error("Container ownership witness and host-only payload release were not established before docker exec exited"));
+				}
 				exitCode = code;
 				exitSignal = signal;
 				closeGraceTimer = processClock.setTimeout(() => {
-					if (settled) return;
-					const warning = `[verification] command process exited but stdio did not close within ${COMMAND_EXIT_CLOSE_GRACE_MS}ms; treating the process exit as authoritative and attempting to kill any remaining subprocess group.`;
+					if (settled || settleStarted) return;
+					const warning = `[verification] command process exited but stdio did not close within ${COMMAND_EXIT_CLOSE_GRACE_MS}ms; releasing inherited stream handles without another PID cleanup action.`;
 					stderr += `${stderr ? "\n" : ""}${warning}`;
 					appendRetainedLogChunk(errFile, `${warning}\n`);
-					try { if (child.pid) killTreeByPid(child.pid, "SIGKILL"); } catch { /* best-effort */ }
+					// Root `exit` is a PID-reuse boundary on Windows. Closing streams
+					// unblocks settlement; the spawn-time Job supervisor owns all payload
+					// descendants without a late numeric-PID kill.
 					try { child.stdout?.destroy(); } catch { /* ignore */ }
 					try { child.stderr?.destroy(); } catch { /* ignore */ }
-					settleFromProcess(exitCode, exitSignal);
+					void settleFromProcess(exitCode, exitSignal);
 				}, COMMAND_EXIT_CLOSE_GRACE_MS);
 				closeGraceTimer.unref?.();
 			});
 			child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
-				settleFromProcess(code ?? exitCode, signal ?? exitSignal);
+				void settleFromProcess(code ?? exitCode, signal ?? exitSignal);
 			});
 			child.on("error", (err: Error) => {
-				if (settled) return;
+				if (useContainerDurable && (!containerWitnessAcknowledged || !containerPayloadRelease?.released())) failContainerOwnershipHandshake(err);
+				if (settled || settleStarted) return;
+				settleStarted = true;
 				settled = true;
 				if (closeGraceTimer) processClock.clearTimeout(closeGraceTimer);
 				if (exitFilePollTimer) processClock.clearInterval(exitFilePollTimer);
@@ -5651,6 +6922,10 @@ export class VerificationHarness {
 				try { stopTail?.(); } catch { /* ignore */ }
 				resolve(handleSpawnError(err));
 			});
+			})().catch(error => resolve({
+				passed: false,
+				output: `Verification command setup failed: ${(error as Error).message}`,
+			}));
 		});
 	}
 
@@ -5838,6 +7113,13 @@ export class VerificationHarness {
 				duration_ms: Date.now() - step.startedAt,
 			});
 		};
+		const finalizeRecoveredExit = async () => {
+			// A durable exit is a non-destructive verdict. New records still reap
+			// their exact sentinel, while legacy records never turn pidfiles or
+			// heartbeats into a cleanup authority merely to finalize that verdict.
+			if (step.sentinelFile) await this._reapRecoveredPosixSentinel(step);
+			return finalize(readExitFile());
+		};
 		const timeoutResult = () => {
 			const timeoutSec = step.timeoutSec ?? 300;
 			const marker = `[step timed out after ${timeoutSec}s — killed verified subprocess tree after restart]`;
@@ -5866,11 +7148,21 @@ export class VerificationHarness {
 		// Case A: child already finished before we restarted. A durable exit file
 		// is a real command verdict and keeps the existing expectFailure/errorPattern
 		// semantics.
-		if (step.exitFile && fs.existsSync(step.exitFile)) {
+		if (!step.containerId && step.exitFile && fs.existsSync(step.exitFile)) {
 			if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume: exit file present for "${step.name}" — finalizing from disk`);
-			return finalize(readExitFile());
+			return await finalizeRecoveredExit();
 		}
 		if (step.killReason === "timeout" && step.killCompletedAt) {
+			// A prior boot may have finished the in-container timeout cleanup but
+			// crashed before reaping the detached host docker-exec transport.
+			if (step.restartRecoveryMode === "container-exec" && step.containerId && !step.containerTransportCleanupCompletedAt) {
+				step.containerTransportCleanupPending = true;
+				this._persistActive();
+				await this._reapRecoveredPosixSentinel(step);
+				step.containerTransportCleanupCompletedAt = Date.now();
+				delete step.containerTransportCleanupPending;
+				this._persistActive();
+			}
 			return timeoutResult();
 		}
 
@@ -5879,7 +7171,14 @@ export class VerificationHarness {
 		// Case A above never matched them. Re-attach by finalizing from the
 		// in-container exit file, or by verifying the in-container process is
 		// still alive (fresh heartbeat) and polling for its exit.
-		if (step.restartRecoveryMode === "container-exec" && step.containerId && step.exitFile) {
+		if (step.restartRecoveryMode === "container-exec" && step.containerId) {
+			// A partially persisted durable container step has no trustworthy
+			// in-container verdict path, but its detached host transport still must
+			// be identified and reaped before exposing the retryable interruption.
+			if (!step.exitFile) {
+				await this._reapRecoveredPosixSentinel(step);
+				return restartInterrupted("Recovered container command has no durable in-container exit-file metadata.");
+			}
 			return await this._resumeContainerCommandStep(v, step, { finalize, timeoutResult, restartInterrupted });
 		}
 
@@ -5901,12 +7200,12 @@ export class VerificationHarness {
 		const identityFile = await this._waitForCommandIdentityFile(step, () => this._isResumeStillActive(v));
 		if (!this._isResumeStillActive(v)) return null;
 		if (step.exitFile && fs.existsSync(step.exitFile)) {
-			return finalize(readExitFile());
+			return await finalizeRecoveredExit();
 		}
 		const identity = this._verifyPersistedCommandIdentity(step, identityFile);
 		if (!identity.verified || !identity.pid) {
 			if (identity.reason === "command process is no longer alive" && await waitForDurableExitFile()) {
-				return finalize(readExitFile());
+				return await finalizeRecoveredExit();
 			}
 			return restartInterrupted(`Could not verify command process identity after restart: ${identity.reason}`);
 		}
@@ -5950,7 +7249,7 @@ export class VerificationHarness {
 				if (!this._isResumeStillActive(v)) return null;
 				await new Promise<void>(r => this.clock.setTimeout(() => r(), 500));
 				if (step.exitFile && fs.existsSync(step.exitFile)) {
-					return finalize(readExitFile());
+					return await finalizeRecoveredExit();
 				}
 				const current = this._verifyPersistedCommandIdentity(step);
 				if (!current.verified) {
@@ -5961,10 +7260,10 @@ export class VerificationHarness {
 
 			if (!this._isResumeStillActive(v)) return null;
 			if (step.exitFile && fs.existsSync(step.exitFile)) {
-				return finalize(readExitFile());
+				return await finalizeRecoveredExit();
 			}
 			if (identityFailureReason === "command process is no longer alive" && await waitForDurableExitFile()) {
-				return finalize(readExitFile());
+				return await finalizeRecoveredExit();
 			}
 			if (this.clock.now() >= deadline) {
 				return await finalizeTimeoutAfterVerifiedCleanup("The command reached its timeout after restart, but identity verification failed before it could be safely killed.");
@@ -6012,6 +7311,84 @@ export class VerificationHarness {
 		});
 	}
 
+	private _rejectContainerWitness(step: ActiveVerification["steps"][number], reason: string): never {
+		// Keep intent pending across restart; do not turn missing evidence into a
+		// numeric-PGID fallback or a terminal verdict.
+		step.killUnsafeReason = reason;
+		step.containerPayloadCleanupPending = true;
+		this._persistActive();
+		throw new PendingCommandCleanupError(reason);
+	}
+
+	/**
+	 * Container paths are mutable by the same-UID payload and therefore are never
+	 * a recovery authority. Only the tuple pinned by the host before releasing
+	 * that payload can authorize a later negative-PGID signal.
+	 */
+	private async _readContainerOwnershipWitness(step: ActiveVerification["steps"][number]): Promise<ContainerOwnershipWitness> {
+		if (step.containerOwnershipWitness) return step.containerOwnershipWitness;
+		return this._rejectContainerWitness(step, "BOBBIT_CONTAINER_WITNESS_MISSING");
+	}
+
+	/**
+	 * Prove an in-container sentinel's exact identity before naming its PGID.
+	 * The start token makes a recycled numeric PID fail closed; the sentinel is
+	 * intentionally separate from the command leader so leader exit is safe.
+	 */
+	private async _verifyContainerOwnershipWitness(step: ActiveVerification["steps"][number]): Promise<NonNullable<ActiveVerification["steps"][number]["containerOwnershipWitness"]>> {
+		if (!step.containerId) return this._rejectContainerWitness(step, "BOBBIT_CONTAINER_WITNESS_MISSING");
+		const witness = await this._readContainerOwnershipWitness(step);
+		const nonce = this._commandIdentityNonce(step);
+		if (!nonce || witness.nonce !== nonce) return this._rejectContainerWitness(step, "BOBBIT_CONTAINER_WITNESS_NONCE_MISMATCH");
+		if (witness.containerId !== step.containerId) return this._rejectContainerWitness(step, "BOBBIT_CONTAINER_WITNESS_CONTAINER_MISMATCH");
+		let live: { pid: number; pgid: number; startToken: string } | undefined;
+		if (this.containerProcessIdentityInspector) {
+			live = await this.containerProcessIdentityInspector(step.containerId, witness.sentinelPid);
+		} else {
+			const inspect = await this._dockerExecCapture(step.containerId, `p=${witness.sentinelPid}; awk '{print $1, $5, $22}' "/proc/$p/stat" 2>/dev/null`);
+			const ids = /^\s*(\d+)\s+(\d+)\s+(\S+)\s*$/.exec(inspect.stdout.trim());
+			if (ids) live = { pid: Number(ids[1]), pgid: Number(ids[2]), startToken: ids[3] };
+		}
+		if (!live || live.pid !== witness.sentinelPid) return this._rejectContainerWitness(step, "BOBBIT_CONTAINER_WITNESS_STALE");
+		if (live.startToken !== witness.startToken) return this._rejectContainerWitness(step, "BOBBIT_CONTAINER_WITNESS_START_TOKEN_MISMATCH");
+		if (live.pgid !== witness.pgid) return this._rejectContainerWitness(step, "BOBBIT_CONTAINER_WITNESS_PGID_MISMATCH");
+		return witness;
+	}
+
+	/** Kill only a group which the exact, live in-group sentinel still owns. */
+	private async _killAndVerifyRecoveredContainerProcessGroup(step: ActiveVerification["steps"][number]): Promise<void> {
+		// A completed payload phase is durable authority to continue at transport
+		// cleanup after a crash. Never probe or re-signal that historical PGID.
+		if (step.containerPayloadCleanupCompletedAt) return;
+		step.containerPayloadCleanupPending = true;
+		this._persistActive();
+		const witness = await this._verifyContainerOwnershipWitness(step);
+		const p = witness.sentinelPid;
+		const pgid = witness.pgid;
+		const start = shellSingleQuote(witness.startToken);
+		// Revalidate immediately before *each* destructive signal. There is no
+		// sleep/polling interval between them: identity loss after TERM aborts
+		// rather than allowing SIGKILL to name a recycled PGID.
+		const verify = `live_p=$(awk '{print $1}' "/proc/$p/stat" 2>/dev/null || true); live_g=$(awk '{print $5}' "/proc/$p/stat" 2>/dev/null || true); live_s=$(awk '{print $22}' "/proc/$p/stat" 2>/dev/null || true); [ "$live_p" = "$p" ] || { echo BOBBIT_CONTAINER_WITNESS_STALE; exit 64; }; [ "$live_g" = "$pgid" ] || { echo BOBBIT_CONTAINER_WITNESS_PGID_MISMATCH; exit 65; }; [ "$live_s" = ${start} ] || { echo BOBBIT_CONTAINER_WITNESS_START_TOKEN_MISMATCH; exit 66; };`;
+		// dash accepts the negative process-group operand directly; placing `--`
+		// before a quoted negative number is not portable across container shells.
+		const script = `p=${p}; pgid=${pgid}; ${verify} kill -TERM -"$pgid" 2>/dev/null || { echo BOBBIT_CONTAINER_TERM_UNDELIVERED; exit 67; }; ${verify} kill -KILL -"$pgid" 2>/dev/null || { echo BOBBIT_CONTAINER_KILL_UNDELIVERED; exit 68; };`;
+		const result = await this._dockerExecCapture(step.containerId!, script);
+		if (result.code === 0) {
+			step.containerPayloadCleanupCompletedAt = Date.now();
+			delete step.containerPayloadCleanupPending;
+			delete step.killUnsafeReason;
+			this._persistActive();
+			return;
+		}
+		const detail = result.stdout.trim() || `docker exec exited ${result.code ?? "without a status"}`;
+		const marker = /BOBBIT_CONTAINER_WITNESS_(?:STALE|PGID_MISMATCH|START_TOKEN_MISMATCH)/.exec(detail)?.[0];
+		if (marker) this._rejectContainerWitness(step, marker);
+		step.containerPayloadCleanupPending = true;
+		this._persistActive();
+		throw new PendingCommandCleanupError(`Recovered container command group cleanup is not yet safe or complete: ${detail}`);
+	}
+
 	/**
 	 * Resume a container command step after a gateway restart. The durable
 	 * exit/pid/heartbeat files live inside the container, so re-attachment is
@@ -6035,55 +7412,53 @@ export class VerificationHarness {
 			restartInterrupted: (reason?: string) => ResumedVerificationStep;
 		},
 	): Promise<ResumedVerificationStep | null> {
-		const cid = step.containerId!;
-		const readExit = async (): Promise<number | null> => {
-			const r = await this._dockerExecCapture(cid, `cat ${shellSingleQuote(step.exitFile!)} 2>/dev/null`);
-			const n = parseInt(r.stdout.trim(), 10);
-			return Number.isFinite(n) ? n : null;
+		const readHostControlResult = (): number | null => {
+			// The container-visible exit file is attacker-controlled: a same-UID
+			// payload can discover its path and replace it. Only this host-authored
+			// record, written from docker exec's lifecycle result, is a verdict.
+			if (!step.containerCompletionFile || !step.containerCompletionNonce) return null;
+			try {
+				const record = JSON.parse(fs.readFileSync(step.containerCompletionFile, "utf8"));
+				return record?.nonce === step.containerCompletionNonce &&
+					Number.isSafeInteger(record?.exitCode) && record.exitCode >= 0 && record.exitCode <= 255
+					? record.exitCode
+					: null;
+			} catch {
+				return null;
+			}
 		};
-		const heartbeatFresh = async (): Promise<boolean> => {
-			if (!step.heartbeatFile) return false;
-			const r = await this._dockerExecCapture(cid, `cat ${shellSingleQuote(step.heartbeatFile)} 2>/dev/null`);
-			const m = r.stdout.match(/"ts":(\d+)/);
-			if (!m) return false;
-			const tsMs = parseInt(m[1], 10) * 1000;
-			return Number.isFinite(tsMs) && (Date.now() - tsMs) < 15_000;
+		const reapRecoveredContainerTransport = async (): Promise<void> => {
+			// The container exit/pid files prove only the in-container command. The
+			// gateway restart also orphaned a host docker-exec transport group. Every
+			// recovered outcome (verdict, timeout, or retryable no-verdict) must first
+			// kill and prove absent the exact in-container process group, then reap its
+			// exact host transport sentinel. This applies on Windows too: its host
+			// sentinel reaper is a no-op, never an acknowledgement of payload cleanup.
+			await this._killAndVerifyRecoveredContainerProcessGroup(step);
+			if (step.containerTransportCleanupCompletedAt) return;
+			step.containerTransportCleanupPending = true;
+			this._persistActive();
+			await this._reapRecoveredPosixSentinel(step);
+			step.containerTransportCleanupCompletedAt = Date.now();
+			delete step.containerTransportCleanupPending;
+			this._persistActive();
 		};
-
-		// 1. Already finished.
-		let code = await readExit();
-		if (code !== null) return helpers.finalize(code);
-
-		const deadline = step.deadlineMs ?? ((step.startTimeMs ?? step.startedAt) + (step.timeoutSec ?? 300) * 1000);
-
-		if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume: container step "${step.name}" — polling in-container exit file (deadline in ${Math.max(0, Math.round((deadline - Date.now()) / 1000))}s)`);
-
-		// 2. Poll while the in-container process is alive (fresh heartbeat).
-		while (this._isResumeStillActive(v) && Date.now() < deadline) {
-			if (!(await heartbeatFresh())) break;
-			await new Promise(r => setTimeout(r, 1_000));
-			code = await readExit();
-			if (code !== null) return helpers.finalize(code);
-		}
+		const finalizeRecoveredContainerExit = async (code: number): Promise<ResumedVerificationStep> => {
+			await reapRecoveredContainerTransport();
+			return helpers.finalize(code);
+		};
+		// 1. A host lifecycle record survived the crash.
+		const code = readHostControlResult();
+		if (code !== null) return await finalizeRecoveredContainerExit(code);
 		if (!this._isResumeStillActive(v)) return null;
 
-		code = await readExit();
-		if (code !== null) return helpers.finalize(code);
-
-		// 3. Deadline elapsed → kill the in-container process group, then timeout.
-		if (Date.now() >= deadline) {
-			if (step.pidFile) {
-				const qp = shellSingleQuote(step.pidFile);
-				await this._dockerExecCapture(
-					cid,
-					`p=$(cat ${qp} 2>/dev/null) && kill -TERM -- -$p 2>/dev/null; sleep 0.2; p=$(cat ${qp} 2>/dev/null) && kill -KILL -- -$p 2>/dev/null`,
-				).catch(() => undefined);
-			}
-			return helpers.timeoutResult();
-		}
-
-		// 4. Stopped without a durable verdict → retryable pending interrupt.
-		return helpers.restartInterrupted("The in-container command process stopped after restart without writing a durable exit status.");
+		const deadline = step.deadlineMs ?? ((step.startTimeMs ?? step.startedAt) + (step.timeoutSec ?? 300) * 1000);
+		// 2. We do not poll or trust a container exit/heartbeat file. The missing
+		// host result is a crash-window interruption, except an already-expired
+		// authoritative deadline which still requires exact cleanup before timeout.
+		await reapRecoveredContainerTransport();
+		if (Date.now() >= deadline) return helpers.timeoutResult();
+		return helpers.restartInterrupted("The gateway restarted before the host docker-exec lifecycle boundary recorded a command result; re-signal to retry.");
 	}
 	// ── Nested goals (subgoal verify-step) ───────────────────────────────
 	// `runSubgoalStep` is the single integration point. Stamp-immediately,

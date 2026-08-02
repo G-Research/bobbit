@@ -13,17 +13,25 @@ guardProcessEnv();
  * runner. Real process-tree reaping fidelity belongs to the e2e tier.
  */
 
-import { describe, it, afterAll } from "vitest";
+import { describe, expect, it, afterAll } from "vitest";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createManualClock } from "../harness/clock.js";
 
 const TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "verif-treekill-test-"));
 fs.mkdirSync(path.join(TEST_DIR, "state"), { recursive: true });
 process.env.BOBBIT_DIR = TEST_DIR;
 
-const { VerificationHarness } = await import("../../src/server/agent/verification-harness.ts");
+const {
+	VerificationHarness,
+	createContainerPayloadReleaseHandshake,
+	createContainerWitnessFrameDecoder,
+	createDockerEngineEventsResponseDecoder,
+	parseDockerExecCreateEvent,
+} = await import("../../src/server/agent/verification-harness.ts");
 const { createFakeVerificationCommandRunner } = await import("../harness/fake-verification-command-runner.js");
 
 /** Poll predicate with explicit budget. Returns true if satisfied within the budget. */
@@ -75,7 +83,272 @@ function fakeTreeCommand(): string {
 	return `node -e "console.log('PARENT_PID=910001'); console.log('CHILD_PID=910002'); setTimeout(()=>process.exit(0),300000)"`;
 }
 
+/** Deterministic cleanup-failure seam: no OS process or wall-clock race. */
+function createUnverifiedTimedOutRunner() {
+	return {
+		nonDurable: true,
+		spawn: () => {
+			const stdout = Object.assign(new EventEmitter(), { destroy() {} });
+			const stderr = Object.assign(new EventEmitter(), { destroy() {} });
+			const child = Object.assign(new EventEmitter(), { pid: 910_003, stdout, stderr });
+			const tracked = {
+				child,
+				killed: () => true,
+				timedOut: () => true,
+				markSurvival: () => {},
+				killTree: () => {},
+				waitForTreeExit: async () => false,
+			};
+			queueMicrotask(() => {
+				child.emit("exit", null, "SIGTERM");
+				child.emit("close", null, "SIGTERM");
+			});
+			return tracked as any;
+		},
+	};
+}
+
+/** Windows root exits successfully while an untracked descendant retains stdio. */
+function createNaturalExitWithUnverifiedTreeRunner() {
+	return {
+		nonDurable: true,
+		spawn: () => {
+			const stdout = Object.assign(new EventEmitter(), { destroy() {} });
+			const stderr = Object.assign(new EventEmitter(), { destroy() {} });
+			const child = Object.assign(new EventEmitter(), { pid: 910_005, stdout, stderr });
+			const tracked = {
+				child,
+				killed: () => false,
+				timedOut: () => false,
+				markSurvival: () => {},
+				killTree: () => {},
+				waitForTreeExit: async () => false,
+			};
+			queueMicrotask(() => {
+				child.emit("exit", 0, null);
+				child.emit("close", 0, null);
+			});
+			return tracked as any;
+		},
+	};
+}
+
+function createWindowsRootExitWithOpenDescendantRunner() {
+	return {
+		nonDurable: true,
+		spawn: () => {
+			const stdout = Object.assign(new EventEmitter(), { destroy() {} });
+			const stderr = Object.assign(new EventEmitter(), { destroy() {} });
+			const child = Object.assign(new EventEmitter(), { pid: 910_004, stdout, stderr });
+			const tracked = {
+				child,
+				killed: () => false,
+				timedOut: () => false,
+				markSurvival: () => {},
+				killTree: () => {},
+				// The root has crossed the PID-reuse boundary, so no job/tree
+				// completion is provable and a later taskkill would be unsafe.
+				waitForTreeExit: async () => false,
+			};
+			queueMicrotask(() => child.emit("exit", 0, null));
+			return tracked as any;
+		},
+	};
+}
+
+/** A child whose ownership witness has not acknowledged when cancellation arrives. */
+function createPreReadinessRunner() {
+	let acknowledgeOwnership!: () => void;
+	let killCalls = 0;
+	const ownershipReady = new Promise<void>(resolve => { acknowledgeOwnership = resolve; });
+	return {
+		nonDurable: true,
+		acknowledgeOwnership: () => acknowledgeOwnership(),
+		killCalls: () => killCalls,
+		spawn: () => {
+			const stdout = Object.assign(new EventEmitter(), { destroy() {} });
+			const stderr = Object.assign(new EventEmitter(), { destroy() {} });
+			const child = Object.assign(new EventEmitter(), { pid: 910_006, stdout, stderr });
+			let closed = false;
+			const close = () => {
+				if (closed) return;
+				closed = true;
+				child.emit("exit", null, "SIGTERM");
+				child.emit("close", null, "SIGTERM");
+			};
+			return {
+				child,
+				ownershipReady,
+				killed: () => killCalls > 0,
+				timedOut: () => false,
+				markSurvival: () => {},
+				killTree: () => { killCalls++; close(); },
+				waitForTreeExit: async () => closed,
+			} as any;
+		},
+	};
+}
+
 describe("deterministic tracked child", () => {
+	it("queues a split synchronous ownership tuple until the private release writer is installed", () => {
+		const releases: string[] = [];
+		const failures: Error[] = [];
+		const handshake = createContainerPayloadReleaseHandshake(error => failures.push(error));
+		let hostPersisted = false;
+		const decoder = createContainerWitnessFrameDecoder(
+			witness => {
+				expect(witness).toEqual({
+					containerId: "a".repeat(64), nonce: "step-nonce", sentinelPid: 101, pgid: 101, startToken: "start-token",
+				});
+				hostPersisted = true;
+				expect(handshake.requestRelease()).toBe(true);
+			},
+			() => handshake.fail(new Error("malformed or duplicate tuple")),
+		);
+		const tuple = `BOBBIT_CONTAINER_OWNERSHIP_TUPLE ${JSON.stringify({
+			containerId: "a".repeat(64), nonce: "step-nonce", sentinelPid: 101, pgid: 101, startToken: "start-token",
+		})}\n`;
+		decoder(tuple.slice(0, 37));
+		expect(hostPersisted).toBe(false);
+		expect(releases).toEqual([]);
+		decoder(tuple.slice(37));
+		expect(hostPersisted).toBe(true);
+		expect(releases).toEqual([]);
+
+		expect(handshake.installWriter(() => releases.push("BOBBIT_HOST_RELEASE"))).toBe(true);
+		expect(releases).toEqual(["BOBBIT_HOST_RELEASE"]);
+		expect(handshake.installWriter(() => releases.push("duplicate writer"))).toBe(false);
+		expect(releases).toEqual(["BOBBIT_HOST_RELEASE"]);
+		expect(failures.map(error => error.message)).toEqual(["Container payload release writer was installed more than once"]);
+	});
+
+	it("fails closed when an exact live sibling tuple arrives before the daemon-bound tuple", () => {
+		const containerId = "c".repeat(64);
+		const nonce = "target-step-nonce";
+		const daemonBound = {
+			containerId, nonce, sentinelPid: 101, pgid: 101, startToken: "target-start-token",
+		};
+		// B is a real same-UID sibling: its tuple is complete and its identity
+		// inspector result agrees exactly.  It differs only from the daemon-bound
+		// docker-exec transport for A, which untrusted stdout cannot establish.
+		const exactLiveSibling = {
+			containerId, nonce, sentinelPid: 202, pgid: 202, startToken: "sibling-start-token",
+		};
+		const persisted: unknown[] = [];
+		const releases: string[] = [];
+		const negativeGroupAuthorities: number[] = [];
+		const failures: Error[] = [];
+		let cleanupPending = false;
+		const handshake = createContainerPayloadReleaseHandshake(error => {
+			cleanupPending = true;
+			failures.push(error);
+		});
+		const decoder = createContainerWitnessFrameDecoder(
+			witness => {
+				// The focused seam deliberately makes B's tuple an exact *live*
+				// tuple.  A numeric PID/PGID or a valid start token alone therefore
+				// cannot reach persistence, host release, or group-signal authority.
+				expect(witness).toEqual(exactLiveSibling);
+				if (JSON.stringify(witness) !== JSON.stringify(daemonBound)) {
+					cleanupPending = true;
+					handshake.fail(new Error("Docker exec supervisor identity was not daemon-bound to this tuple"));
+					return;
+				}
+				persisted.push(witness);
+				if (handshake.requestRelease()) releases.push("BOBBIT_HOST_RELEASE");
+			},
+			() => handshake.fail(new Error("malformed ownership tuple")),
+		);
+		const frame = (tuple: typeof daemonBound) =>
+			`BOBBIT_CONTAINER_OWNERSHIP_TUPLE ${JSON.stringify(tuple)}\n`;
+
+		// B wins the stdout scheduling race.  Its frame is exact and live, then
+		// A's legitimate daemon-bound frame arrives too late to replace this
+		// failed-closed boundary.  This has no sleeps, polling, or retry path.
+		decoder(frame(exactLiveSibling));
+		decoder(frame(daemonBound));
+		expect(persisted).toEqual([]);
+		expect(releases).toEqual([]);
+		expect(handshake.released()).toBe(false);
+		expect(cleanupPending).toBe(true);
+		expect(failures.map(error => error.message)).toEqual([
+			"Docker exec supervisor identity was not daemon-bound to this tuple",
+		]);
+		// Negative group cleanup has no authority until a daemon-bound tuple was
+		// durably persisted.  The sibling's exact live PGID is never named.
+		if (persisted.length > 0) negativeGroupAuthorities.push((persisted[0] as typeof daemonBound).pgid);
+		expect(negativeGroupAuthorities).toEqual([]);
+	});
+
+	it("never parses or size-limits payload stdout after the one control candidate", () => {
+		let witnesses = 0;
+		let invalid = 0;
+		const decoder = createContainerWitnessFrameDecoder(() => { witnesses++; }, () => { invalid++; });
+		const tuple = `BOBBIT_CONTAINER_OWNERSHIP_TUPLE ${JSON.stringify({
+			containerId: "b".repeat(64), nonce: "step-nonce", sentinelPid: 101, pgid: 101, startToken: "start-token",
+		})}\n`;
+		decoder(tuple);
+		// Both a newline-free record and marker-looking multiline payload exceed
+		// the old 8KiB frame budget. Neither is ownership protocol after release.
+		decoder("x".repeat(9 * 1024));
+		decoder(`\n${tuple}${"payload\n".repeat(2 * 1024)}`);
+		expect(witnesses).toBe(1);
+		expect(invalid).toBe(0);
+	});
+
+	it("accepts only canonical daemon exec-create event records", () => {
+		const containerId = "a".repeat(64);
+		const execId = "b".repeat(64);
+		expect(parseDockerExecCreateEvent(JSON.stringify({
+			Type: "container", Action: "exec_create: /bin/sh -c # bobbit-docker-exec:tag",
+			Actor: { ID: containerId, Attributes: { execID: execId } },
+		}))).toEqual({ containerId, execId, command: "exec_create: /bin/sh -c # bobbit-docker-exec:tag" });
+		expect(parseDockerExecCreateEvent(JSON.stringify({
+			Type: "container", Action: "exec_start", Actor: { ID: containerId, Attributes: { execID: execId } },
+		}))).toBeUndefined();
+		expect(parseDockerExecCreateEvent("not json")).toBeUndefined();
+	});
+
+	it("acknowledges the daemon event subscription before decoding its tagged exec", () => {
+		const containerId = "a".repeat(64);
+		const execId = "b".repeat(64);
+		const events: string[] = [];
+		const failures: Error[] = [];
+		let ready = 0;
+		const decoder = createDockerEngineEventsResponseDecoder(
+			() => { ready++; },
+			line => events.push(line),
+			error => failures.push(error),
+		);
+		const event = JSON.stringify({
+			Type: "container", Action: "exec_create: /bin/sh -c # bobbit-docker-exec:tag",
+			Actor: { ID: containerId, Attributes: { execID: execId } },
+		}) + "\n";
+		const headers = "HTTP/1.1 200 OK\r\nApi-Version: 1.54\r\nTransfer-Encoding: chunked\r\n\r\n";
+		const chunk = `${Buffer.byteLength(event).toString(16)}\r\n${event}\r\n`;
+		// The daemon normally delivers headers before the next event chunk. The
+		// second `consume` is the first tagged exec after watcher readiness.
+		decoder.consume(Buffer.from(headers));
+		expect(ready).toBe(1);
+		expect(events).toEqual([]);
+		decoder.consume(Buffer.from(chunk));
+		expect(events).toEqual([event.trim()]);
+		expect(failures).toEqual([]);
+	});
+
+	it("fails closed when the Docker context rejects the event subscription", () => {
+		const failures: Error[] = [];
+		const decoder = createDockerEngineEventsResponseDecoder(
+			() => { throw new Error("must not acknowledge a rejected subscription"); },
+			() => { throw new Error("must not decode rejected event bytes"); },
+			error => failures.push(error),
+		);
+		decoder.consume(Buffer.from("HTTP/1.1 404 Not Found\r\nApi-Version: 1.54\r\n\r\n"));
+		expect(failures.map(error => error.message)).toEqual([
+			"Docker Engine events handshake was rejected (404, API 1.54)",
+		]);
+	});
+
 	it("reports timeout and closes without launching a process", async () => {
 		const runner = createFakeVerificationCommandRunner();
 		const tracked = runner.spawn({
@@ -155,6 +428,113 @@ describe("runCommandStep tree-kill", () => {
 		assert.ok(/PARENT_PID=\d+/.test(result.output), `output missing PARENT_PID: ${result.output}`);
 		assert.ok(/CHILD_PID=\d+/.test(result.output), `output missing CHILD_PID: ${result.output}`);
 		assert.strictEqual((harness as any)._trackedCommandChildren.has(`${signalId}:0`), false, "tracked child should be unregistered after timeout settles");
+	});
+
+	it("fails rather than claiming a timeout tree cleanup succeeded when verification is unavailable", async () => {
+		const harness = makeHarness({ commandStepRunner: createUnverifiedTimedOutRunner() });
+		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-unverified-cleanup-"));
+
+		const result = await (harness as any).runCommandStep("true", tmp, 60, true, undefined, "timed out") as { passed: boolean; output: string };
+		expect(result.passed).toBe(false);
+		expect(result.output).toContain("subprocess tree cleanup could not be verified");
+		expect(result.output).not.toContain("killed subprocess tree");
+	});
+
+	it("fails a natural POSIX-style zero exit when tree completion is unverified", async () => {
+		const harness = makeHarness({ commandStepRunner: createNaturalExitWithUnverifiedTreeRunner(), platform: "linux" });
+		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-natural-unverified-"));
+
+		const result = await (harness as any).runCommandStep("true", tmp, 60, false) as { passed: boolean; output: string };
+		expect(result.passed).toBe(false);
+		expect(result.output).toContain("subprocess tree completion could not be verified");
+	});
+
+	it("fails closed when a Windows command exits zero while a descendant keeps stdio open", async () => {
+		const commandLifecycleClock = createManualClock(0);
+		const harness = makeHarness({
+			commandStepRunner: createWindowsRootExitWithOpenDescendantRunner(),
+			commandLifecycleClock,
+			platform: "win32",
+		});
+		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-windows-root-exit-"));
+		const step = (harness as any).runCommandStep("true", tmp, 60, false) as Promise<{ passed: boolean; output: string }>;
+
+		// Drive the bounded exit-without-close grace without a wall-clock sleep.
+		await Promise.resolve();
+		commandLifecycleClock.advance(60_000);
+		const result = await step;
+
+		expect(result.passed).toBe(false);
+		expect(result.output).toContain("subprocess tree completion could not be verified");
+	});
+
+	it("waits for pre-readiness ownership before cancelling and publishing the gate cancellation", async () => {
+		const broadcasts: any[] = [];
+		const runner = createPreReadinessRunner();
+		const harness = makeHarness({ commandStepRunner: runner }, broadcasts);
+		const goalId = "goal-pre-readiness-cancel";
+		const gateId = "gate-pre-readiness-cancel";
+		const signalId = "sig-pre-readiness-cancel";
+		const streamCtx = { goalId, gateId, signalId, stepIndex: 0 };
+		(harness as any).activeVerifications.set(signalId, {
+			goalId, gateId, signalId,
+			overallStatus: "running",
+			startedAt: Date.now(),
+			currentPhase: 0,
+			steps: [{ name: "step", type: "command", status: "running", startedAt: Date.now() }],
+		});
+
+		const step = (harness as any).runCommandStep("true", TEST_DIR, 60, false, streamCtx);
+		expect((harness as any)._trackedCommandChildren.has(`${signalId}:0`)).toBe(true);
+		const cancellation = harness.cancelStaleVerifications(goalId, gateId);
+		await Promise.resolve();
+		expect(runner.killCalls()).toBe(0);
+		expect(broadcasts.some(event => event.type === "gate_verification_complete")).toBe(false);
+
+		runner.acknowledgeOwnership();
+		await cancellation;
+		await step;
+		expect(runner.killCalls()).toBe(1);
+		expect(broadcasts).toContainEqual(expect.objectContaining({
+			type: "gate_verification_complete", goalId, gateId, signalId, status: "cancelled",
+		}));
+		expect((harness as any).activeVerifications.has(signalId)).toBe(false);
+	});
+
+	it("cancels a ready sibling while another command still awaits ownership", async () => {
+		const harness = makeHarness();
+		const signalId = "sig-concurrent-pre-readiness-cancel";
+		let acknowledgeHeld!: () => void;
+		let heldKills = 0;
+		let readyKills = 0;
+		const heldOwnershipReady = new Promise<void>(resolve => { acknowledgeHeld = resolve; });
+		const makeTracked = (ownershipReady: Promise<void>, onKill: () => void) => ({
+			child: Object.assign(new EventEmitter(), { pid: 910_007, stdout: undefined, stderr: undefined }),
+			ownershipReady,
+			killed: () => false,
+			timedOut: () => false,
+			markSurvival: () => {},
+			killTree: onKill,
+			waitForTreeExit: async () => true,
+		});
+		(harness as any).activeVerifications.set(signalId, {
+			goalId: "goal-concurrent-pre-readiness-cancel", gateId: "gate-concurrent-pre-readiness-cancel", signalId,
+			overallStatus: "running", startedAt: Date.now(), currentPhase: 0,
+			steps: [
+				{ name: "held", type: "command", status: "running", startedAt: Date.now() },
+				{ name: "ready", type: "command", status: "running", startedAt: Date.now() },
+			],
+		});
+		(harness as any)._trackedCommandChildren.set(`${signalId}:0`, makeTracked(heldOwnershipReady, () => { heldKills++; }));
+		(harness as any)._trackedCommandChildren.set(`${signalId}:1`, makeTracked(Promise.resolve(), () => { readyKills++; }));
+
+		const cleanup = (harness as any)._killTrackedForSignal(signalId);
+		await Promise.resolve();
+		expect(heldKills).toBe(0);
+		expect(readyKills).toBe(1);
+		acknowledgeHeld();
+		expect(await cleanup).toBe(true);
+		expect(heldKills).toBe(1);
 	});
 
 	it("cancellation kills the tracked command and emits output plus cancelled marker", async () => {

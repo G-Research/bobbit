@@ -11567,10 +11567,13 @@ async function handleApiRoute(
 			}
 		}
 
-		// Cancel any in-flight verifications for the same gate BEFORE seeding
-		// the new one — otherwise cancelStaleVerifications would observe and
-		// tear down the just-seeded active entry.
-		await verificationHarness.cancelStaleVerifications(goalId, gateId);
+		// Mark any old generation cancelled before seeding the new one, but do not
+		// await its exact cleanup: re-signal creates a fresh generation while the
+		// old one remains durably pending. The harness finalizer may update only
+		// that old signal and is forbidden from overwriting this gate's new state.
+		void verificationHarness.cancelStaleVerifications(goalId, gateId).catch(error => {
+			console.error(`[api] Error cancelling stale verification for re-signal ${goalId}/${gateId}:`, error);
+		});
 
 		// Create signal record. Step enumeration is performed synchronously
 		// via `beginVerification` BEFORE `recordSignal` so the gate-store and
@@ -11698,11 +11701,14 @@ async function handleApiRoute(
 			return;
 		}
 
-		await verificationHarness.cancelStaleVerifications(goalId, gateId);
-		// Explicit user cancel: also update gate status to "failed"
-		const cancelCtx = projectContextManager.getContextForGoal(goalId);
-		if (cancelCtx) cancelCtx.gateStore.updateGateStatus(goalId, gateId, "failed");
-		json({ cancelled: true }, 200);
+		// Explicit cancellation is non-terminal until exact cleanup settles. The
+		// harness owns the generation-safe failed-gate publication; this route must
+		// never overwrite a newer re-signal while an old tree is still pending.
+		const settled = await verificationHarness.cancelStaleVerifications(goalId, gateId, "explicit");
+		json(settled
+			? { cancelled: true, pending: false }
+			: { cancelled: true, pending: true, message: "Cancellation is waiting for exact process cleanup" },
+		200);
 		return;
 	}
 

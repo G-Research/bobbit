@@ -178,9 +178,10 @@ export function shouldSuppressRestartInterrupt(steps: ReadonlyArray<{ passed: bo
  *                  as `detached` but the process identity lives in the
  *                  container namespace.
  * - `pending-retry` — the execution path cannot be made durable on this host
- *                  right now (e.g. Windows without Git Bash → cmd.exe cannot
- *                  run the bash wrapper). A restart is a RETRYABLE pending
- *                  interruption, never a fabricated verdict.
+ *                  right now (including all Windows host commands: a persisted
+ *                  PID cannot be atomically bound to its original tree). A
+ *                  restart is a RETRYABLE pending interruption, never a
+ *                  fabricated verdict.
  * - `unsupported` — no streaming context at all (fire-and-forget command with
  *                  nowhere to persist identity). Not restart-recoverable.
  */
@@ -195,10 +196,15 @@ export type CommandRecoveryMode = "detached" | "container-exec" | "pending-retry
  *   1. No streaming context     → `unsupported` (nowhere to persist identity).
  *   2. Runs inside a container  → `container-exec` (durable in-container
  *      pidfile/exit-file + `docker exec` re-attach).
- *   3. Windows without Git Bash → `pending-retry` (cmd.exe can't run the bash
- *      exit-file wrapper; treat a restart as retryable, not a hard failure).
+ *   3. Windows                 → `pending-retry`. Windows cannot atomically
+ *      prove that a persisted numeric PID still identifies the original host
+ *      process tree at a later restart, even when Git Bash is available.
  *   4. Otherwise                → `detached` (host bash exit-file wrapper).
  */
+export function supportsHostDetachedCommandRecovery(platform: NodeJS.Platform): boolean {
+	return platform !== "win32";
+}
+
 export function decideCommandRecoveryMode(opts: {
 	containerId?: string;
 	hasStreamCtx: boolean;
@@ -207,7 +213,7 @@ export function decideCommandRecoveryMode(opts: {
 }): CommandRecoveryMode {
 	if (!opts.hasStreamCtx) return "unsupported";
 	if (opts.containerId) return "container-exec";
-	if (opts.platform === "win32" && !opts.hasGitBash) return "pending-retry";
+	if (!supportsHostDetachedCommandRecovery(opts.platform)) return "pending-retry";
 	return "detached";
 }
 

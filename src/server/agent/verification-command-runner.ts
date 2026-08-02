@@ -54,6 +54,8 @@ export interface VerificationCommandSpawnSpec {
 	readonly windowsHide: boolean;
 	/** True when the harness selected the durable detached wrapper for cmdToRun. */
 	readonly useDetached: boolean;
+	/** Durable identity record for the POSIX group sentinel, when restart recovery is enabled. */
+	readonly posixSentinelIdentity?: { file: string; nonce: string };
 }
 
 export interface VerificationCommandRunner {
@@ -83,6 +85,7 @@ export const realVerificationCommandRunner: VerificationCommandRunner = {
 			stdio: spec.stdio,
 			timeoutMs: spec.timeoutMs,
 			windowsHide: spec.windowsHide,
+			posixSentinelIdentity: spec.posixSentinelIdentity,
 		});
 	},
 };
