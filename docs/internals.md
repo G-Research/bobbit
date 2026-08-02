@@ -1691,7 +1691,7 @@ Current built-in mappings include:
 | `providerKey.mistral` | `MISTRAL_API_KEY` |
 | `providerKey.openrouter` | `OPENROUTER_API_KEY` |
 
-Sandboxed agents do **not** use this direct-host bridge. Their credential exposure remains governed by project `sandbox_tokens`: a sandbox only receives a provider env var when the project policy includes an enabled token row for that env var. If the row has no inline value, host-token resolution can source the value from Settings or host auth, but the explicit `sandbox_tokens` opt-in is still required. This keeps sandbox token policy as the least-privilege boundary.
+Sandboxed agents do **not** use this direct-host bridge. Their credential exposure remains governed by project `sandbox_tokens`: a sandbox only receives a provider env var when the project policy includes an enabled token row for that env var. If the row has no inline value, host-token resolution can source the value from Settings or host auth, but the explicit `sandbox_tokens` opt-in is still required. Anthropic OAuth is stricter: an enabled, valueless `ANTHROPIC_OAUTH_TOKEN` row is the explicit request to hand off only a current, non-renewable host OAuth access token; it never forwards the host refresh token. An explicit project `ANTHROPIC_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` value wins instead and suppresses that host OAuth handoff. This keeps sandbox token policy as the least-privilege boundary.
 
 ### Failure handling
 
@@ -2382,6 +2382,8 @@ sandbox_tokens:
     enabled: true
   - key: OPENAI_CODEX_AUTH              # allows generated Codex auth.json
     enabled: true
+  - key: ANTHROPIC_OAUTH_TOKEN          # enabled with no value opts into a current host OAuth access-token handoff
+    enabled: true
 sandbox_mounts: '["/data/shared:/data:ro"]'  # bind mounts
 ```
 
@@ -2472,17 +2474,19 @@ Full allowlist: see `src/server/auth/sandbox-guard.ts`.
 
 ### Sandbox agent auth.json
 
-Sandbox containers need Pi's agent auth path for OpenAI Codex and Google Code Assist models, but mounting the host `<agentDir>/auth.json` would expose unrelated provider credentials. Bobbit therefore mounts only the active `<agentDir>/sessions/` directory and optional read-only `<agentDir>/models.json`, then writes a generated auth file under `.bobbit/state/sandbox-agent-auth/`. See [Configurable agent directory](configurable-agent-directory.md#sandbox-safeguards).
+Sandbox containers need Pi's agent auth path for OpenAI Codex, Anthropic, and Google Code Assist models, but mounting the host `<agentDir>/auth.json` would expose unrelated provider credentials. Bobbit therefore mounts only the active `<agentDir>/sessions/` directory and optional read-only `<agentDir>/models.json`, then writes a generated auth file under `.bobbit/state/sandbox-agent-auth/`. See [Configurable agent directory](configurable-agent-directory.md#sandbox-safeguards).
 
-The generated file is scoped by project id (`<projectId>.auth.json`) and mounted read-only at `/home/node/.bobbit/agent/auth.json`. Separate files matter because sandbox policy is project-scoped: one project can allow Codex/Google credentials while another denies them without sharing a stale mount.
+The generated file is scoped by project id (`<projectId>.auth.json`) and mounted read-only at `/home/node/.bobbit/agent/auth.json`. Separate files matter because sandbox policy is project-scoped: one project can allow Codex, Anthropic, or Google credentials while another denies them without sharing a stale mount.
 
 Policy rules:
 
-- no `sandbox_tokens` configured: preserve the legacy fallback and include Codex auth when available;
+- no `sandbox_tokens` configured: preserve the legacy fallback and include Codex auth when available; Anthropic OAuth is not handed off by default;
 - `sandbox_tokens` configured: include Codex auth only when an enabled `OPENAI_CODEX_AUTH` or `OPENAI_API_KEY` entry is present;
-- policy denied or no credential found: write `{}` so Pi gets a valid auth path with no secret.
+- an enabled `ANTHROPIC_OAUTH_TOKEN` row with no configured secret explicitly requests a host Anthropic OAuth handoff. Before creating the scoped file, the gateway refreshes the host credential when needed and exports only `{ type: "oauth", access, expires }` — never a refresh token or profile metadata;
+- an explicit non-empty project `ANTHROPIC_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` value takes precedence over the host handoff. It is supplied through the project's normal sandbox-secret path, so the generated `auth.json` does not replace a project's chosen credential;
+- policy denied, an expired/unrefreshable host credential, or no credential found: write `{}` so Pi gets a valid auth path with no secret.
 
-Credential source order is deliberate. `providerKey.openai-codex` from preferences wins first, then sanitized host `openai-codex` auth, then legacy ChatGPT OAuth stored under `openai`. This lets Settings-backed credentials work in Docker while keeping the mounted file minimal (`type`, key/access, refresh, expires only).
+Credential source order is deliberate. `providerKey.openai-codex` from preferences wins first, then sanitized host `openai-codex` auth, then legacy ChatGPT OAuth stored under `openai`. This lets Settings-backed credentials work in Docker while keeping the mounted file minimal. The Anthropic entry is deliberately more restrictive: a sandbox needs an explicit per-project opt-in and receives a current non-renewable access/expiry pair only. See [Anthropic OAuth](anthropic-oauth.md#direct-anthropic-requests-and-sandboxes).
 
 ### Resource limits
 
