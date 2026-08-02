@@ -2,71 +2,261 @@
 // Source: tests/seed-default-workflows.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { describe, it } from "vitest";
+import YAML from "yaml";
 
 import { buildDefaultWorkflows, RALPH_LOOP_DESCRIPTION } from "../../src/server/state-migration/seed-default-workflows.ts";
 
-describe("buildDefaultWorkflows", () => {
-	const wfs = buildDefaultWorkflows("myproj");
+type VerifyStep = {
+	name: string;
+	type: string;
+	role?: string;
+	phase?: number;
+	command?: string;
+	run?: string;
+	expect?: string;
+	optional?: boolean;
+	prompt?: string;
+};
 
-	function findGate(workflow: ReturnType<typeof buildDefaultWorkflows>[string], id: string) {
-		const g = workflow.gates.find((x) => x.id === id);
-		assert.ok(g, `gate ${id} should exist in workflow ${workflow.id}`);
-		return g!;
+type Workflow = {
+	id: string;
+	gates: Array<{ id: string; description?: string; verify?: VerifyStep[] }>;
+};
+
+// Keep the test focused on the persisted workflow behavior rather than the
+// helper's exported TypeScript declaration. The server and per-component
+// derivation are the public consumers of this capability argument.
+type CapabilityAwareDefaultBuilder = (
+	componentName: string,
+	supportedCommands?: Iterable<string>,
+) => Record<string, Workflow>;
+const buildCapabilityAwareDefaults = buildDefaultWorkflows as CapabilityAwareDefaultBuilder;
+
+const IMPLEMENTATION_WORKFLOW_IDS = ["general", "feature", "bug-fix", "quick-fix"] as const;
+const EXPECTED_REVIEWS = [
+	{ name: "Spec and regression conformance", role: "spec-auditor" },
+	{ name: "Integrated implementation review", role: "code-reviewer" },
+	{ name: "Security review", role: "security-reviewer" },
+];
+const SUPERSEDED_REVIEW_NAMES = [
+	/code quality/i,
+	/bug hunt/i,
+	/verifiable bug hunt/i,
+	/systems (?:interaction )?review/i,
+	/regression coverage/i,
+];
+const SUPERSEDED_REVIEW_ROLES = new Set(["bug-hunter", "verifiable-bug-hunter", "systems-reviewer", "regression-reviewer"]);
+
+function findGate(workflow: Workflow, id: string) {
+	const gate = workflow.gates.find((candidate) => candidate.id === id);
+	assert.ok(gate, `gate ${id} should exist in workflow ${workflow.id}`);
+	return gate;
+}
+
+function assertRevisionReadyContentReviewPrompt(prompt: string, source: string): void {
+	const policy = prompt.replace(/\s+/g, " ");
+	const message = `${source} must turn each blocking content finding into an author-ready revision packet`;
+
+	// Keep these assertions intentionally order-independent: the workflow prose may
+	// present the packet fields in a different sequence without weakening policy.
+	assert.match(policy, /(?:revision|author)[ -]ready/i, message);
+	assert.match(policy, /block(?:ing|er)/i, message);
+	assert.match(policy, /(?:artifact )?(?:section|heading|paragraph|requirement|acceptance criterion|diagram|test plan)/i, message);
+	assert.match(policy, /(?:goal[- ]linked|goal (?:requirement|scope)|gap|contradiction)/i, message);
+	assert.match(policy, /(?:implementation|user) consequence/i, message);
+	assert.match(policy, /(?:replacement|addition|wording|outline|contract|data[- ]flow|state sequence|acceptance criterion|test[- ]plan case)/i, message);
+	assert.match(policy, /(?:cross[- ]section|consistency)/i, message);
+	assert.match(policy, /(?:constraints?|references?)/i, message);
+	assert.match(policy, /(?:credible|multiple).{0,160}alternatives?|alternatives?.{0,160}(?:credible|multiple)/i, message);
+	assert.match(policy, /trade-?offs?/i, message);
+	assert.match(policy, /(?:required|blocker)/i, message);
+	assert.match(policy, /(?:optional|bounded improvement)/i, message);
+}
+
+function assertDesignOrAnalysisReviewPrompt(prompt: string, source: string): void {
+	assertRevisionReadyContentReviewPrompt(prompt, source);
+	const policy = prompt.replace(/\s+/g, " ");
+	assert.match(policy, /implementable contracts?/i, `${source} must provide implementable contracts`);
+	assert.match(policy, /testable acceptance criteria/i, `${source} must provide testable acceptance criteria`);
+	assert.match(policy, /(?:do not|must not|not).{0,160}(?:exhaustive pseudocode|formal proof|speculative hardening)/i, `${source} must keep revisions proportionate to the approved goal`);
+}
+
+function assertDocumentationReviewPrompt(prompt: string, source: string): void {
+	assertRevisionReadyContentReviewPrompt(prompt, source);
+	const policy = prompt.replace(/\s+/g, " ");
+	assert.match(policy, /documentation (?:path|file|location)/i, `${source} must identify the documentation location to revise`);
+	assert.match(policy, /(?:section|heading)/i, `${source} must identify the documentation section to revise`);
+	assert.match(policy, /(?:stale|missing) (?:claim|documentation|content)|(?:claim|documentation|content).{0,80}(?:stale|missing)/i, `${source} must identify the stale or missing claim`);
+	assert.match(policy, /(?:replacement wording|proposed wording|replacement outline|proposed outline)/i, `${source} must propose concrete documentation text or outline`);
+	assert.match(policy, /examples?/i, `${source} must include relevant examples when needed`);
+	assert.match(policy, /links?/i, `${source} must include relevant links when needed`);
+	assert.match(policy, /(?:verify|verification).{0,160}(?:documented behavior|documentation).{0,160}(?:implementation|implemented)|(?:implementation|implemented).{0,160}(?:verify|verification).{0,160}(?:documented behavior|documentation)/i, `${source} must explain how to verify documentation matches implementation`);
+}
+
+function assertImplementationReviewPolicy(workflows: Record<string, Workflow>, source: string) {
+	for (const workflowId of IMPLEMENTATION_WORKFLOW_IDS) {
+		const implementation = findGate(workflows[workflowId], "implementation");
+		const verify = implementation.verify ?? [];
+		const reviews = verify.filter((step) => step.type === "llm-review");
+
+		assert.deepEqual(
+			reviews.map(({ name, role, phase }) => ({ name, role, phase })),
+			EXPECTED_REVIEWS.map(({ name, role }) => ({ name, role, phase: 2 })),
+			`${source}.${workflowId}.implementation must contain exactly the three consolidated phase-2 reviews in policy order`,
+		);
+
+		for (const step of verify) {
+			for (const supersededName of SUPERSEDED_REVIEW_NAMES) {
+				assert.doesNotMatch(step.name, supersededName, `${source}.${workflowId}.implementation must not retain ${supersededName}`);
+			}
+			assert.ok(!step.role || !SUPERSEDED_REVIEW_ROLES.has(step.role), `${source}.${workflowId}.implementation must not retain superseded reviewer role ${step.role}`);
+		}
+
+		const build = verify.find((step) => step.name === "Build");
+		assert.ok(build, `${source}.${workflowId}.implementation must retain Build`);
+		assert.equal(build.type, "command");
+		assert.ok(build.phase === undefined || build.phase === 0, `${source}.${workflowId}.implementation Build must run in phase 0`);
+
+		for (const command of ["check", "unit", "browser", "e2e"]) {
+			const step = verify.find((candidate) => candidate.type === "command" && candidate.command === command);
+			assert.ok(step, `${source}.${workflowId}.implementation must run ${command}`);
+			assert.equal(step.phase, 1, `${source}.${workflowId}.implementation ${command} must run in phase 1`);
+		}
+
+		for (const qaStep of verify.filter((step) => step.type === "agent-qa")) {
+			assert.equal(qaStep.optional, true, `${source}.${workflowId}.implementation QA must be optional`);
+			assert.equal(qaStep.phase, 3, `${source}.${workflowId}.implementation QA must run in phase 3`);
+		}
 	}
 
-	it("general has design-time gap-analysis", () => {
-		const designDoc = findGate(wfs.general, "design-doc");
-		const has = designDoc.verify?.some((s) => s.name === "Gap analysis");
-		assert.equal(has, true);
+	const bugFixSteps = findGate(workflows["bug-fix"], "implementation").verify ?? [];
+	const reproducingSuccess = bugFixSteps.find((step) => step.type === "command" && step.expect === "success" && step.run?.includes("test_command"));
+	assert.ok(reproducingSuccess, `${source}.bug-fix.implementation must run the reproducing test after the fix`);
+	assert.equal(reproducingSuccess.phase, 1, `${source}.bug-fix reproducing-test success command must run in phase 1`);
+}
+
+describe("consolidated implementation review defaults", () => {
+	it("seeds exactly three phase-2 implementation reviews with the required roles and execution phases", () => {
+		assertImplementationReviewPolicy(buildDefaultWorkflows("myproj"), "seeded defaults");
 	});
 
-	it("general has post-impl gap-analysis (phase 2)", () => {
-		const impl = findGate(wfs.general, "implementation");
-		const gap = impl.verify?.find((s) => s.name === "Gap analysis");
-		assert.ok(gap);
-		assert.equal(gap!.phase, 2);
-		assert.equal(gap!.role, "spec-auditor");
-	});
+	it("omits unavailable structural commands without disturbing reviews or supported commands", () => {
+		const workflows = buildCapabilityAwareDefaults("minimal-app", ["build", "unit"]);
 
-	it("feature still has both gap-analyses", () => {
-		const f = wfs.feature;
-		assert.ok(findGate(f, "design-doc").verify?.some((s) => s.name === "Gap analysis"));
-		const impl = findGate(f, "implementation");
-		const gap = impl.verify?.find((s) => s.name === "Gap analysis");
-		assert.ok(gap);
-		assert.equal(gap!.phase, 2);
-	});
+		for (const workflowId of IMPLEMENTATION_WORKFLOW_IDS) {
+			const implementation = findGate(workflows[workflowId], "implementation");
+			const structuralCommands = (implementation.verify ?? [])
+				.filter((step) => step.type === "command" && step.command)
+				.map((step) => step.command)
+				.sort();
+			const reviews = (implementation.verify ?? [])
+				.filter((step) => step.type === "llm-review")
+				.map(({ name, role, phase }) => ({ name, role, phase }));
 
-	it("implementation workflows include bug-hunter review", () => {
-		for (const id of ["general", "feature", "bug-fix", "quick-fix"]) {
-			const impl = findGate(wfs[id], "implementation");
-			const bugHunt = impl.verify?.find((s) => s.name === "Bug hunt");
-			assert.ok(bugHunt, `${id}.implementation should include Bug hunt`);
-			assert.equal(bugHunt!.role, "bug-hunter");
-			assert.equal(bugHunt!.type, "llm-review");
+			assert.deepEqual(structuralCommands, ["build", "unit"], `${workflowId} must retain only declared component commands`);
+			assert.deepEqual(
+				reviews,
+				EXPECTED_REVIEWS.map(({ name, role }) => ({ name, role, phase: 2 })),
+				`${workflowId} must preserve the three required phase-2 reviews`,
+			);
 		}
 	});
 
-	it("quick-fix has neither gap-analysis", () => {
-		const qf = wfs["quick-fix"];
-		for (const g of qf.gates) {
-			for (const s of g.verify ?? []) {
-				assert.notEqual(s.name, "Gap analysis");
+	it("keeps the active project workflow config parseable and on the same review policy", () => {
+		const repoRoot = path.resolve(import.meta.dirname, "..", "..");
+		const project = YAML.parse(fs.readFileSync(path.join(repoRoot, ".bobbit", "config", "project.yaml"), "utf8")) as {
+			workflows?: Record<string, Workflow>;
+		};
+		assert.ok(project.workflows, "project.yaml must define workflows");
+		assertImplementationReviewPolicy(project.workflows, ".bobbit/config/project.yaml");
+
+		const prReview = project.workflows["pr-review"];
+		assert.ok(prReview, "PR Review must remain a purpose-built workflow");
+		assert.ok(findGate(prReview, "fetch-pr"), "PR Review must retain its PR fetch gate");
+		const humanSignoff = project.workflows["human-signoff-test"];
+		assert.ok(humanSignoff, "Human Sign-off Test must remain present");
+		assert.ok(humanSignoff.gates.some((gate) => gate.verify?.some((step) => step.type === "human-signoff")), "Human Sign-off Test must retain its human sign-off step");
+	});
+
+	it("keeps the phase-2 prompts implementation-ready", () => {
+		const workflows = buildDefaultWorkflows("myproj");
+		for (const workflowId of IMPLEMENTATION_WORKFLOW_IDS) {
+			const reviews = findGate(workflows[workflowId], "implementation").verify?.filter((step) => step.type === "llm-review") ?? [];
+			const spec = reviews.find((step) => step.role === "spec-auditor")?.prompt ?? "";
+			const code = reviews.find((step) => step.role === "code-reviewer")?.prompt ?? "";
+			const security = reviews.find((step) => step.role === "security-reviewer")?.prompt ?? "";
+
+			for (const requirement of [/goal/i, /(?:design|analysis)/i, /implementation/i, /tests?/i]) {
+				assert.match(spec, requirement, `${workflowId} spec review must compare all implementation inputs`);
 			}
+			assert.match(spec, /ignore documentation.*gap/is, `${workflowId} spec review must exclude documentation-only gaps`);
+			assert.match(spec, /implementation-ready.*remediation/is, `${workflowId} spec review must require actionable blockers`);
+			for (const concern of [/correctness/i, /error handling/i, /edge.*mixed/is, /concurrency.*lifecycle/is, /cross-layer/i, /maintainability/i, /regression coverage/i]) {
+				assert.match(code, concern, `${workflowId} code review must cover integrated implementation risks`);
+			}
+			assert.match(code, /deduplicat.*root cause/is, `${workflowId} code review must deduplicate by root cause`);
+			assert.match(code, /minimal (?:implementation )?fix(?:es)?.*focused tests?/is, `${workflowId} code review must prescribe a minimal fix and focused test`);
+			for (const risk of [/trust boundar/i, /auth/i, /validation/i, /injection/i, /secrets/i, /(?:destructive|resource ownership)/i, /dependency/i, /races/i]) {
+				assert.match(security, risk, `${workflowId} security review must cover changed security risks`);
+			}
+			assert.match(security, /remediation.*(?:abuse|regression) tests?/is, `${workflowId} security review must require a remediation test`);
 		}
 	});
 
-	it("implementation gates carry Ralph-loop description for general/feature/bug-fix", () => {
-		for (const id of ["general", "feature", "bug-fix"]) {
-			const impl = findGate(wfs[id], "implementation");
-			assert.equal(impl.description, RALPH_LOOP_DESCRIPTION, `${id}.implementation.description`);
+	it("makes first-phase design and issue-analysis reviews revision-ready", () => {
+		const workflows = buildDefaultWorkflows("myproj");
+		for (const workflowId of ["general", "feature"] as const) {
+			const reviewSteps = findGate(workflows[workflowId], "design-doc").verify ?? [];
+			assertDesignOrAnalysisReviewPrompt(
+				reviewSteps.find((step) => step.name === "Design review")?.prompt ?? "",
+				`${workflowId}.design-doc.Design review`,
+			);
+			assertDesignOrAnalysisReviewPrompt(
+				reviewSteps.find((step) => step.name === "Gap analysis")?.prompt ?? "",
+				`${workflowId}.design-doc.Gap analysis`,
+			);
+		}
+
+		const issueAnalysis = findGate(workflows["bug-fix"], "issue-analysis").verify ?? [];
+		assertDesignOrAnalysisReviewPrompt(
+			issueAnalysis.find((step) => step.name === "Analysis quality")?.prompt ?? "",
+			"bug-fix.issue-analysis.Analysis quality",
+		);
+		assertDesignOrAnalysisReviewPrompt(
+			issueAnalysis.find((step) => step.name === "Gap analysis")?.prompt ?? "",
+			"bug-fix.issue-analysis.Gap analysis",
+		);
+	});
+
+	it("makes documentation reviews revision-ready", () => {
+		const workflows = buildDefaultWorkflows("myproj");
+		for (const workflowId of ["general", "feature", "bug-fix"] as const) {
+			const documentation = findGate(workflows[workflowId], "documentation");
+			assertDocumentationReviewPrompt(
+				documentation.verify?.find((step) => step.name === "Documentation coverage")?.prompt ?? "",
+				`${workflowId}.documentation.Documentation coverage`,
+			);
 		}
 	});
 
-	it("quick-fix implementation has a (shorter) Ralph-loop description", () => {
-		const impl = findGate(wfs["quick-fix"], "implementation");
-		assert.ok(impl.description && impl.description.toLowerCase().includes("ralph loop"));
+	it("retains the design-time spec gap analysis outside the consolidated implementation reviews", () => {
+		const workflows = buildDefaultWorkflows("myproj");
+		for (const workflowId of ["general", "feature"]) {
+			const review = findGate(workflows[workflowId], "design-doc").verify?.find((step) => step.name === "Gap analysis");
+			assert.ok(review, `${workflowId}.design-doc must retain its design-time gap analysis`);
+			assert.equal(review.role, "spec-auditor");
+		}
+		assert.ok(!workflows["quick-fix"].gates.flatMap((gate) => gate.verify ?? []).some((step) => step.name === "Gap analysis"), "quick-fix must not gain a design gap-analysis step");
+	});
+
+	it("retains Ralph-loop descriptions for the non-quick-fix implementation gates", () => {
+		const workflows = buildDefaultWorkflows("myproj");
+		for (const workflowId of ["general", "feature", "bug-fix"]) {
+			assert.equal(findGate(workflows[workflowId], "implementation").description, RALPH_LOOP_DESCRIPTION);
+		}
 	});
 });

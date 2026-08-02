@@ -2064,6 +2064,15 @@
         "tier": "browser",
         "project": "browser"
       }
+    },
+    {
+      "path": "tests2/core/default-role-policy.test.ts",
+      "reason": "Semantic default-role prompt contract preserving solution-ready reviewer findings, scope authority, bounded convergence, and team-lead evidence-led judgment without brittle prompt snapshots.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [
