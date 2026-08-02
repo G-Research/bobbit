@@ -24,6 +24,20 @@ type FetchLogEntry = { url: string; method: string; body: any };
 let workflows: FixtureWorkflow[] = [];
 let fetchLog: FetchLogEntry[] = [];
 
+type HeldWorkflowRequest = {
+	release: Promise<void>;
+	releaseRequest: () => void;
+	reportRequest: (request: FetchLogEntry) => void;
+};
+
+type HeldWorkflowCreate = HeldWorkflowRequest & { resultId: string };
+
+let heldWorkflowCreate: HeldWorkflowCreate | null = null;
+let heldWorkflowUpdate: HeldWorkflowRequest | null = null;
+let nextWorkflowUpdate: ((request: FetchLogEntry) => void) | null = null;
+let nextWorkflowListFetch: ((request: FetchLogEntry) => void) | null = null;
+let omitNextWorkflowList = false;
+
 class FixtureWebSocket {
 	static CONNECTING = 0;
 	static OPEN = 1;
@@ -77,10 +91,30 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	fetchLog.push({ url, method, body: clone(body) });
 
 	if (url.startsWith("/api/workflows") && !workflowIdFromPath(url)) {
-		if (method === "GET") return response({ workflows: clone(workflows) });
+		if (method === "GET") {
+			const reportListFetch = nextWorkflowListFetch;
+			nextWorkflowListFetch = null;
+			reportListFetch?.({ url, method, body: clone(body) });
+			if (omitNextWorkflowList) {
+				omitNextWorkflowList = false;
+				return response({});
+			}
+			return response({ workflows: clone(workflows) });
+		}
 		if (method === "POST") {
-			const workflow = { ...body, createdAt: Date.now(), updatedAt: Date.now() };
+			const held = heldWorkflowCreate;
+			const workflow = {
+				...body,
+				id: held?.resultId ?? body.id,
+				createdAt: Date.now(),
+				updatedAt: Date.now(),
+			};
 			workflows = [...workflows, workflow];
+			if (held) {
+				held.reportRequest({ url, method, body: clone(body) });
+				await held.release;
+				heldWorkflowCreate = null;
+			}
 			return response(clone(workflow), 201);
 		}
 	}
@@ -93,6 +127,15 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 		}
 		if (method === "PUT") {
 			if (idx < 0) return response({ error: "not found" }, 404);
+			const held = heldWorkflowUpdate;
+			if (held) {
+				held.reportRequest({ url, method, body: clone(body) });
+				await held.release;
+				heldWorkflowUpdate = null;
+			}
+			const reportUpdate = nextWorkflowUpdate;
+			nextWorkflowUpdate = null;
+			reportUpdate?.({ url, method, body: clone(body) });
 			workflows[idx] = { ...workflows[idx], ...body, id, updatedAt: Date.now() };
 			return response(clone(workflows[idx]));
 		}
@@ -116,12 +159,20 @@ function nextFrame(): Promise<void> {
 }
 
 setRenderApp(doRender);
+// The production app's route shell redraws after hash navigation. This focused
+// page fixture owns no shell, so mirror that redraw for Back/list navigation.
+window.addEventListener("hashchange", doRender);
 localStorage.setItem("gateway.url", "http://fixture");
 localStorage.setItem("gateway.token", "fixture-token");
 
-(window as any).__loadGoalWorkflowFixture = async (workflow: FixtureWorkflow) => {
-	workflows = [clone(workflow)];
+(window as any).__loadGoalWorkflowFixture = async (workflow: FixtureWorkflow | FixtureWorkflow[] | null) => {
+	workflows = workflow === null ? [] : Array.isArray(workflow) ? clone(workflow) : [clone(workflow)];
 	fetchLog = [];
+	heldWorkflowCreate = null;
+	heldWorkflowUpdate = null;
+	nextWorkflowUpdate = null;
+	nextWorkflowListFetch = null;
+	omitNextWorkflowList = false;
 	state.projects = [{
 		id: PROJECT_ID,
 		name: "Fixture Project",
@@ -134,9 +185,51 @@ localStorage.setItem("gateway.token", "fixture-token");
 	clearWorkflowPageState();
 	window.location.hash = "#/workflows";
 	await loadWorkflowPageData();
-	navigateToWorkflowEdit(workflow.id);
+	if (workflows[0]) navigateToWorkflowEdit(workflows[0].id);
 	doRender();
 	await nextFrame();
+};
+
+(window as any).__holdNextWorkflowCreate = (resultId: string): Promise<FetchLogEntry> => {
+	if (heldWorkflowCreate) throw new Error("A workflow create is already held");
+	return new Promise((reportRequest) => {
+		let releaseRequest!: () => void;
+		const release = new Promise<void>((resolve) => { releaseRequest = resolve; });
+		heldWorkflowCreate = { resultId, release, releaseRequest, reportRequest };
+	});
+};
+
+(window as any).__releaseHeldWorkflowCreate = () => {
+	if (!heldWorkflowCreate) throw new Error("No workflow create is held");
+	heldWorkflowCreate.releaseRequest();
+};
+
+(window as any).__holdNextWorkflowUpdate = (): Promise<FetchLogEntry> => {
+	if (heldWorkflowUpdate) throw new Error("A workflow update is already held");
+	return new Promise((reportRequest) => {
+		let releaseRequest!: () => void;
+		const release = new Promise<void>((resolve) => { releaseRequest = resolve; });
+		heldWorkflowUpdate = { release, releaseRequest, reportRequest };
+	});
+};
+
+(window as any).__releaseHeldWorkflowUpdate = () => {
+	if (!heldWorkflowUpdate) throw new Error("No workflow update is held");
+	heldWorkflowUpdate.releaseRequest();
+};
+
+(window as any).__waitForNextWorkflowUpdate = (): Promise<FetchLogEntry> => {
+	if (nextWorkflowUpdate) throw new Error("A workflow update is already awaited");
+	return new Promise((resolve) => { nextWorkflowUpdate = resolve; });
+};
+
+(window as any).__waitForNextWorkflowListFetch = (): Promise<FetchLogEntry> => {
+	if (nextWorkflowListFetch) throw new Error("A workflow list fetch is already awaited");
+	return new Promise((resolve) => { nextWorkflowListFetch = resolve; });
+};
+
+(window as any).__omitNextWorkflowList = () => {
+	omitNextWorkflowList = true;
 };
 
 (window as any).__goalWorkflowFetchLog = () => clone(fetchLog);

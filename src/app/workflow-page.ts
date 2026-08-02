@@ -55,6 +55,11 @@ interface EditorInstance {
 	selectedWorkflow: Workflow | null;
 	isNew: boolean;
 	saving: boolean;
+	// Replaced whenever the page installs a different draft. Save responses
+	// only own the draft generation that dispatched them.
+	draftOwnerGeneration: number;
+	// Incremented for every controlled draft mutation.
+	editRevision: number;
 	// Expansion / drag state
 	expandedGateIndices: Set<number>;
 	expandedVStepKeys: Set<string>;
@@ -83,6 +88,8 @@ function makeInstance(id: string): EditorInstance {
 		selectedWorkflow: null,
 		isNew: false,
 		saving: false,
+		draftOwnerGeneration: 0,
+		editRevision: 0,
 		expandedGateIndices: new Set(),
 		expandedVStepKeys: new Set(),
 		dragIndex: null,
@@ -101,6 +108,10 @@ function makeInstance(id: string): EditorInstance {
 
 // Canonical page-level editor instance. Owned by the Workflows page shell.
 const pageInstance: EditorInstance = makeInstance("__page__");
+
+// Never reset this counter: an in-flight save must not mistake a later draft
+// for the one that dispatched it, even if both happen to have the same fields.
+let nextPageDraftOwnerGeneration = 0;
 
 // Embed instances keyed by `workflowKey` (e.g. `__inspector__:bug-fix`,
 // `__editor__:bug-fix`). Embeds keep their own state across re-renders so
@@ -229,6 +240,8 @@ async function fetchWorkflowsScoped(): Promise<Workflow[]> {
 }
 
 function resetPageInstance(): void {
+	pageInstance.draftOwnerGeneration = ++nextPageDraftOwnerGeneration;
+	pageInstance.editRevision = 0;
 	pageInstance.controller = null;
 	pageInstance.editId = "";
 	pageInstance.editName = "";
@@ -282,6 +295,8 @@ function showList(): void {
 
 function showEdit(workflow: Workflow): void {
 	currentView = "edit";
+	pageInstance.draftOwnerGeneration = ++nextPageDraftOwnerGeneration;
+	pageInstance.editRevision = 0;
 	pageInstance.controller = null;
 	pageInstance.selectedWorkflow = workflow;
 	pageInstance.isNew = false;
@@ -301,6 +316,8 @@ function showEdit(workflow: Workflow): void {
 
 function showNewEdit(): void {
 	currentView = "edit";
+	pageInstance.draftOwnerGeneration = ++nextPageDraftOwnerGeneration;
+	pageInstance.editRevision = 0;
 	pageInstance.controller = null;
 	pageInstance.selectedWorkflow = null;
 	pageInstance.isNew = true;
@@ -323,8 +340,7 @@ export function navigateToWorkflowEdit(workflowId: string): void {
 	if (wf) {
 		showEdit(wf);
 	} else {
-		currentView = "list";
-		pageInstance.selectedWorkflow = null;
+		showList();
 	}
 	renderApp();
 }
@@ -548,6 +564,9 @@ async function handleSave(): Promise<void> {
 		return;
 	}
 
+	const submittedOwnerGeneration = pageInstance.draftOwnerGeneration;
+	const submittedRevision = pageInstance.editRevision;
+	const submittedWorkflow = pageInstance.selectedWorkflow;
 	pageInstance.saving = true;
 	renderApp();
 
@@ -568,25 +587,56 @@ async function handleSave(): Promise<void> {
 		}, getConfigProjectId({ preserveHeadquarters: true }) || undefined);
 		if (result) {
 			workflows = await fetchWorkflowsScoped();
-			showEdit(result);
+			if (pageInstance.draftOwnerGeneration !== submittedOwnerGeneration) return;
+			if (pageInstance.editRevision === submittedRevision) {
+				showEdit(result);
+			} else {
+				// A create makes the server's identity authoritative, but must not
+				// replace mutable edits made after the request was dispatched.
+				pageInstance.editId = result.id;
+				pageInstance.selectedWorkflow = result;
+				pageInstance.isNew = false;
+				pageInstance.saving = false;
+				saveAttempted = false;
+				saveBlockedReason = null;
+				renderApp();
+			}
 			return;
 		}
-	} else if (pageInstance.selectedWorkflow) {
-		const ok = await updateWorkflow(pageInstance.selectedWorkflow.id, {
+	} else if (submittedWorkflow) {
+		const submittedWorkflowId = submittedWorkflow.id;
+		const ok = await updateWorkflow(submittedWorkflowId, {
 			name: pageInstance.editName,
 			description: pageInstance.editDescription,
 			gates: gatesWithDeps,
 		}, getConfigProjectId({ preserveHeadquarters: true }) || undefined);
 		if (ok) {
 			workflows = await fetchWorkflowsScoped();
-			const updated = workflows.find((w) => w.id === pageInstance.selectedWorkflow!.id);
+			if (pageInstance.draftOwnerGeneration !== submittedOwnerGeneration) return;
+			if (pageInstance.editRevision !== submittedRevision) {
+				// A successful PUT makes the submitted identity durable even if its
+				// subsequent list refresh is stale, incomplete, or unavailable. Keep
+				// the newer mutable draft rather than letting a missing refresh target
+				// navigate it away.
+				pageInstance.editId = submittedWorkflowId;
+				pageInstance.selectedWorkflow = submittedWorkflow;
+				pageInstance.isNew = false;
+				pageInstance.saving = false;
+				saveAttempted = false;
+				saveBlockedReason = null;
+				renderApp();
+				return;
+			}
+			const updated = workflows.find((w) => w.id === submittedWorkflowId);
 			if (updated) showEdit(updated);
 			else showList();
 			return;
 		}
 	}
-	pageInstance.saving = false;
-	renderApp();
+	if (pageInstance.draftOwnerGeneration === submittedOwnerGeneration) {
+		pageInstance.saving = false;
+		renderApp();
+	}
 }
 
 async function handleDelete(workflow: Workflow): Promise<void> {
@@ -651,6 +701,7 @@ function updateGateField(inst: EditorInstance, index: number, field: string, val
 
 // Build the current draft and notify the controller (if any).
 function notifyControlledChange(inst: EditorInstance): void {
+	inst.editRevision++;
 	if (!inst.controller) return;
 	const draft: Workflow = {
 		id: inst.editId,

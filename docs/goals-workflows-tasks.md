@@ -284,6 +284,12 @@ Timeout authoring is type-aware and leaving the field empty does not serialize a
 
 The editor validates the same user-facing constraints before save: `human-signoff` steps require a card title and prompt; named `command` steps require a component; review-agent timeouts are positive whole seconds with a minimum of one second; and stale hidden fields are stripped when a step changes type so saved workflows use the canonical YAML shape.
 
+##### Save ownership
+
+A save response owns only the editor draft that issued it. Mutable fields changed while a create or update is pending remain in the editor instead of being replaced by the older server snapshot. If navigation installs another workflow draft before the request resolves, the late response may refresh the workflow collection but must not select, replace, or clear the newer draft.
+
+A successful create makes the returned server ID authoritative: the editor switches from new to persisted state with that ID shown as immutable, while retaining only post-submit mutable edits. The next save therefore updates the returned workflow rather than issuing another create or targeting an ID typed after submission. This separates durable identity from editable content and prevents delayed responses from reverting work or redirecting a later save.
+
 #### Dependency DAG
 
 Each gate's `dependsOn` lists sibling gate IDs that must pass before it can be signaled. An empty list is explicit and valid: it makes the gate an independent root/parallel gate. The workflow editor preserves `dependsOn: []` instead of silently converting it into a dependency on the previous gate.
