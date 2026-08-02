@@ -236,47 +236,135 @@ export function createContainerWitnessFrameDecoder(
 }
 
 export type DockerExecCreateEvent = { containerId: string; execId: string; command: string };
+type DockerExecLifecycleEvent = DockerExecCreateEvent & { phase: "create" | "start" };
 
-/** Parse only daemon-authored exec-create event records. */
-export function parseDockerExecCreateEvent(line: string): DockerExecCreateEvent | undefined {
+function parseDockerExecLifecycleEvent(line: string): DockerExecLifecycleEvent | undefined {
 	try {
 		const event = JSON.parse(line);
 		const containerId = typeof event?.Actor?.ID === "string" ? event.Actor.ID : undefined;
 		const execId = typeof event?.Actor?.Attributes?.execID === "string" ? event.Actor.Attributes.execID : undefined;
 		const command = typeof event?.Action === "string" ? event.Action : "";
+		const phase = command.startsWith("exec_create:") ? "create" : command.startsWith("exec_start:") ? "start" : undefined;
 		if (event?.Type !== "container" || !containerId || !/^[a-f0-9]{64}$/i.test(containerId) ||
-			!execId || !/^[a-f0-9]{64}$/i.test(execId) || !command.startsWith("exec_create:")) return undefined;
-		return { containerId, execId, command };
+			!execId || !/^[a-f0-9]{64}$/i.test(execId) || !phase) return undefined;
+		return { containerId, execId, command, phase };
 	} catch {
 		return undefined;
 	}
 }
 
+/** Parse only daemon-authored exec-create event records. */
+export function parseDockerExecCreateEvent(line: string): DockerExecCreateEvent | undefined {
+	const event = parseDockerExecLifecycleEvent(line);
+	return event?.phase === "create"
+		? { containerId: event.containerId, execId: event.execId, command: event.command }
+		: undefined;
+}
+
 type DockerExecInspection = { id: string; containerId: string; pid: number; command: string };
 
-/**
- * `docker inspect --type exec` uses Docker's selected context (including
- * Desktop/SSH/TCP contexts) rather than assuming a Unix daemon socket.
- */
-function inspectDockerExecThroughCurrentContext(execId: string): DockerExecInspection | undefined {
-	try {
-		const raw = execFileSync("docker", ["inspect", "--type", "exec", execId], {
-			encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
-		});
-		const value = JSON.parse(raw);
-		const record = Array.isArray(value) ? value[0] : value;
-		const id = typeof record?.ID === "string" ? record.ID : undefined;
-		const containerId = typeof record?.ContainerID === "string" ? record.ContainerID : undefined;
-		const pid = Number(record?.Pid);
-		const config = record?.ProcessConfig;
-		const command = [config?.entrypoint, ...(Array.isArray(config?.arguments) ? config.arguments : [])]
-			.filter((part): part is string => typeof part === "string").join("\u0000");
-		return id === execId && containerId && Number.isSafeInteger(pid) && pid > 0
-			? { id, containerId, pid, command }
-			: undefined;
-	} catch {
-		return undefined;
+const DOCKER_ENGINE_REQUEST_TIMEOUT_MS = 5_000;
+
+function decodeDockerEngineChunkedBody(wire: Buffer): Buffer | undefined {
+	const chunks: Buffer[] = [];
+	let offset = 0;
+	for (;;) {
+		const headerEnd = wire.indexOf("\r\n", offset);
+		if (headerEnd < 0) return undefined;
+		const sizeText = wire.subarray(offset, headerEnd).toString("ascii").split(";", 1)[0].trim();
+		if (!/^[0-9a-f]+$/i.test(sizeText)) return undefined;
+		const size = Number.parseInt(sizeText, 16);
+		if (!Number.isSafeInteger(size) || size < 0 || size > 128 * 1024) return undefined;
+		const payloadStart = headerEnd + 2;
+		const next = payloadStart + size + 2;
+		if (wire.length < next || wire.subarray(payloadStart + size, next).compare(Buffer.from("\r\n")) !== 0) return undefined;
+		if (size === 0) return Buffer.concat(chunks);
+		chunks.push(wire.subarray(payloadStart, payloadStart + size));
+		offset = next;
 	}
+}
+
+/**
+ * Inspect an exec through the selected Docker context. The Docker CLI's
+ * `inspect --type exec` is not a valid command on current Engines, so use the
+ * context-aware `dial-stdio` bridge and the Engine's canonical `/exec/{id}/json`
+ * endpoint. The unversioned request lets the daemon negotiate its supported API
+ * version; the returned Api-Version header is required evidence of that peer.
+ */
+function inspectDockerExecThroughCurrentContext(execId: string): Promise<DockerExecInspection> {
+	return new Promise((resolve, reject) => {
+		if (!/^[a-f0-9]{64}$/i.test(execId)) {
+			reject(new Error("Docker exec engine identity was not a canonical exec ID"));
+			return;
+		}
+		let child: ChildProcess | undefined;
+		let output = Buffer.alloc(0);
+		let stderr = "";
+		let settled = false;
+		const finish = (error?: Error, inspection?: DockerExecInspection) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			if (error) reject(error);
+			else if (inspection) resolve(inspection);
+			else reject(new Error("Docker Engine exec inspect returned no result"));
+		};
+		const timer = setTimeout(() => {
+			try { child?.kill("SIGKILL"); } catch { /* ignore */ }
+			finish(new Error("Docker Engine exec inspect did not complete within 5 seconds; check the selected Docker context"));
+		}, DOCKER_ENGINE_REQUEST_TIMEOUT_MS);
+		timer.unref?.();
+		try {
+			child = spawn("docker", ["system", "dial-stdio"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+			child.stdout?.on("data", (chunk: Buffer) => {
+				output = Buffer.concat([output, chunk]);
+				if (output.length > 128 * 1024) {
+					try { child?.kill("SIGKILL"); } catch { /* ignore */ }
+					finish(new Error("Docker Engine exec inspect returned oversized HTTP output"));
+				}
+			});
+			child.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-4096); });
+			child.once("error", error => finish(new Error(`Docker Engine exec inspect transport failed: ${error.message}`)));
+			child.once("close", () => {
+				const end = output.indexOf("\r\n\r\n");
+				if (end < 0) return finish(new Error(`Docker Engine exec inspect returned no HTTP response${stderr.trim() ? `: ${stderr.trim()}` : ""}`));
+				const rawHeaders = output.subarray(0, end).toString("latin1");
+				const [statusLine, ...headerLines] = rawHeaders.split("\r\n");
+				const status = /^HTTP\/1\.[01]\s+(\d{3})\b/.exec(statusLine)?.[1];
+				const apiVersion = headerLines.find(line => /^api-version:/i.test(line))?.slice("api-version:".length).trim();
+				const lengthText = headerLines.find(line => /^content-length:/i.test(line))?.slice("content-length:".length).trim();
+				const contentLength = Number(lengthText);
+				const chunked = headerLines.find(line => /^transfer-encoding:/i.test(line))?.toLowerCase().includes("chunked");
+				if (status !== "200" || !apiVersion) {
+					return finish(new Error(`Docker Engine exec inspect was rejected or malformed (${status ?? "invalid HTTP status"}${apiVersion ? `, API ${apiVersion}` : ""})`));
+				}
+				const wireBody = output.subarray(end + 4);
+				const body = Number.isSafeInteger(contentLength) && contentLength >= 2
+					? wireBody.subarray(0, contentLength)
+					: chunked ? decodeDockerEngineChunkedBody(wireBody) : undefined;
+				if (!body || body.length < 2) return finish(new Error("Docker Engine exec inspect returned an incomplete HTTP body"));
+				try {
+					const record = JSON.parse(body.toString("utf8"));
+					const id = typeof record?.ID === "string" ? record.ID : undefined;
+					const containerId = typeof record?.ContainerID === "string" ? record.ContainerID : undefined;
+					const pid = Number(record?.Pid);
+					const config = record?.ProcessConfig;
+					const command = [config?.entrypoint, ...(Array.isArray(config?.arguments) ? config.arguments : [])]
+						.filter((part): part is string => typeof part === "string").join("\u0000");
+					if (id !== execId || !containerId || !record?.Running || !Number.isSafeInteger(pid) || pid <= 0) {
+						return finish(new Error("Docker Engine exec inspect identity was missing, stopped, or malformed"));
+					}
+					finish(undefined, { id, containerId, pid, command });
+				} catch {
+					finish(new Error("Docker Engine exec inspect returned invalid JSON"));
+				}
+			});
+			if (!child.stdin) throw new Error("Docker Engine exec inspect has no stdin transport");
+			child.stdin.end(`GET /exec/${execId}/json HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n`);
+		} catch (error) {
+			finish(new Error(`Docker Engine exec inspect could not start: ${(error as Error).message}`));
+		}
+	});
 }
 
 /** Prove the proposed container supervisor is the only process carrying the engine tag. */
@@ -310,14 +398,101 @@ function hasUniqueContainerExecTag(containerId: string, pid: number, commandTag:
 	}
 }
 
+export type DockerEngineEventsResponseDecoder = {
+	consume(chunk: Buffer): void;
+};
+
+/**
+ * Decode the daemon's chunked `/events` response after `docker system
+ * dial-stdio` has connected to the Docker context. Resolving `onReady` from
+ * the HTTP response headers is the subscription barrier: an exec is never
+ * spawned until the daemon has accepted this exact event stream.
+ */
+export function createDockerEngineEventsResponseDecoder(
+	onReady: () => void,
+	onEvent: (line: string) => void,
+	onFailure: (error: Error) => void,
+): DockerEngineEventsResponseDecoder {
+	let header = Buffer.alloc(0);
+	let body = Buffer.alloc(0);
+	let eventBuffer = "";
+	let ready = false;
+	let failed = false;
+	const fail = (error: Error) => {
+		if (failed) return;
+		failed = true;
+		onFailure(error);
+	};
+	const consumeBody = () => {
+		while (!failed) {
+			const headerEnd = body.indexOf("\r\n");
+			if (headerEnd < 0) return;
+			const sizeText = body.subarray(0, headerEnd).toString("ascii").split(";", 1)[0].trim();
+			if (!/^[0-9a-f]+$/i.test(sizeText)) return fail(new Error("Docker Engine events stream returned an invalid HTTP chunk length"));
+			const size = Number.parseInt(sizeText, 16);
+			if (!Number.isSafeInteger(size) || size < 0 || size > 64 * 1024) return fail(new Error("Docker Engine events stream returned an oversized HTTP chunk"));
+			const total = headerEnd + 2 + size + 2;
+			if (body.length < total) return;
+			if (body.subarray(headerEnd + 2 + size, total).compare(Buffer.from("\r\n")) !== 0) {
+				return fail(new Error("Docker Engine events stream returned a malformed HTTP chunk terminator"));
+			}
+			if (size === 0) return fail(new Error("Docker Engine events stream ended before identifying the tagged exec"));
+			const payload = body.subarray(headerEnd + 2, headerEnd + 2 + size).toString("utf8");
+			body = body.subarray(total);
+			eventBuffer += payload;
+			if (eventBuffer.length > 64 * 1024) return fail(new Error("Docker Engine events stream returned an oversized event record"));
+			for (;;) {
+				const lineEnd = eventBuffer.indexOf("\n");
+				if (lineEnd < 0) break;
+				const line = eventBuffer.slice(0, lineEnd).replace(/\r$/, "");
+				eventBuffer = eventBuffer.slice(lineEnd + 1);
+				if (line) onEvent(line);
+			}
+		}
+	};
+	return {
+		consume(chunk) {
+			if (failed) return;
+			if (!ready) {
+				header = Buffer.concat([header, chunk]);
+				if (header.length > 16 * 1024) return fail(new Error("Docker Engine events handshake returned oversized HTTP headers"));
+				const end = header.indexOf("\r\n\r\n");
+				if (end < 0) return;
+				const rawHeaders = header.subarray(0, end).toString("latin1");
+				const [statusLine, ...headerLines] = rawHeaders.split("\r\n");
+				const status = /^HTTP\/1\.[01]\s+(\d{3})\b/.exec(statusLine)?.[1];
+				const apiVersion = headerLines.find(line => /^api-version:/i.test(line))?.slice("api-version:".length).trim();
+				if (status !== "200") return fail(new Error(`Docker Engine events handshake was rejected (${status ?? "invalid HTTP status"}${apiVersion ? `, API ${apiVersion}` : ""})`));
+				ready = true;
+				body = header.subarray(end + 4);
+				onReady();
+			} else {
+				body = Buffer.concat([body, chunk]);
+				if (body.length > 128 * 1024) return fail(new Error("Docker Engine events stream buffered oversized incomplete HTTP data"));
+			}
+			consumeBody();
+		},
+	};
+}
+
+const DOCKER_EXEC_EVENT_WATCHER_READY_TIMEOUT_MS = 10_000;
+
 class DockerExecEventWatcher {
 	private readonly candidate: Promise<string>;
+	private readonly ready: Promise<void>;
 	private resolveCandidate!: (execId: string) => void;
 	private rejectCandidate!: (error: Error) => void;
+	private resolveReady!: () => void;
+	private rejectReady!: (error: Error) => void;
 	private child: ChildProcess | undefined;
-	private buffer = "";
 	private stopped = false;
-	private matched = false;
+	private candidateSettled = false;
+	private candidateQueued = false;
+	private createdExecId: string | undefined;
+	private readySettled = false;
+	private fatalError: Error | undefined;
+	private stderr = "";
+	private startupTimer: NodeJS.Timeout | undefined;
 	private stopPromise: Promise<void> | undefined;
 
 	constructor(private readonly containerId: string, private readonly commandTag: string) {
@@ -325,60 +500,112 @@ class DockerExecEventWatcher {
 			this.resolveCandidate = resolve;
 			this.rejectCandidate = reject;
 		});
-		// The caller always awaits or rejects this while the durable transport is
-		// alive. Keep an internal handler so an early watcher failure is not an
-		// unhandled rejection before the sentinel reaches its barrier.
+		this.ready = new Promise<void>((resolve, reject) => {
+			this.resolveReady = resolve;
+			this.rejectReady = reject;
+		});
+		// Keep handlers attached because startup can fail before the sentinel
+		// reaches its ownership barrier and begins awaiting either promise.
 		void this.candidate.catch(() => undefined);
+		void this.ready.catch(() => undefined);
 	}
 
-	start(): void {
+	async start(): Promise<void> {
 		try {
-			this.child = spawn("docker", [
-				"events", "--format", "{{json .}}", "--filter", "type=container",
-				"--filter", "event=exec_create", "--filter", `container=${this.containerId}`,
-			], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
-			this.child.stdout?.on("data", chunk => this.consume(chunk.toString()));
-			this.child.once("error", error => this.fail(new Error(`Docker exec event watcher failed: ${error.message}`)));
-			this.child.once("close", () => {
-				if (!this.stopped && !this.matched) this.fail(new Error("Docker exec event watcher ended before identifying the tagged exec"));
+			this.child = spawn("docker", ["system", "dial-stdio"], {
+				stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
 			});
+			const decoder = createDockerEngineEventsResponseDecoder(
+				() => this.acknowledgeReady(),
+				line => this.consumeEvent(line),
+				error => this.fail(error),
+			);
+			this.child.stdout?.on("data", (chunk: Buffer) => decoder.consume(chunk));
+			this.child.stderr?.on("data", (chunk: Buffer) => {
+				this.stderr = (this.stderr + chunk.toString()).slice(-4096);
+			});
+			this.child.once("error", error => this.fail(new Error(`Docker Engine events watcher failed: ${error.message}`)));
+			this.child.once("close", () => {
+				if (!this.stopped && !this.candidateSettled) this.fail(new Error(this.withStderr("Docker Engine events stream ended before identifying the tagged exec")));
+			});
+			const filters = encodeURIComponent(JSON.stringify({
+				type: ["container"], event: ["exec_create", "exec_start"], container: [this.containerId],
+			}));
+			const request = `GET /events?filters=${filters} HTTP/1.1\r\nHost: docker\r\n\r\n`;
+			if (!this.child.stdin) throw new Error("Docker Engine events watcher has no stdin transport");
+			this.startupTimer = setTimeout(() => this.fail(new Error("Docker Engine events handshake did not acknowledge within 10 seconds; check the selected Docker context and daemon availability")), DOCKER_EXEC_EVENT_WATCHER_READY_TIMEOUT_MS);
+			this.startupTimer.unref?.();
+			this.child.stdin.once("error", error => this.fail(new Error(`Docker Engine events request failed: ${error.message}`)));
+			// Keep the dial-stdio input open. EOF or Connection: close turns Docker's
+			// long-lived event response into a snapshot that misses the next exec.
+			this.child.stdin.write(request);
 		} catch (error) {
-			this.fail(new Error(`Docker exec event watcher could not start: ${(error as Error).message}`));
+			this.fail(new Error(`Docker Engine events watcher could not start: ${(error as Error).message}`));
 		}
+		return this.ready;
 	}
 
-	private consume(chunk: string): void {
-		if (this.stopped || this.matched) return;
-		this.buffer += chunk;
-		if (this.buffer.length > 64 * 1024) return this.fail(new Error("Docker exec event watcher received an oversized event record"));
-		let candidateId: string | undefined;
-		for (;;) {
-			const end = this.buffer.indexOf("\n");
-			if (end < 0) break;
-			const event = parseDockerExecCreateEvent(this.buffer.slice(0, end));
-			this.buffer = this.buffer.slice(end + 1);
-			if (!event || event.containerId !== this.containerId || !event.command.includes(this.commandTag)) continue;
-			// Two tagged creates in one daemon delivery are ambiguous authority, even
-			// if their container stdout happens to propose the same numeric tuple.
-			if (candidateId) return this.fail(new Error("Docker exec event watcher observed duplicate tagged exec identities"));
-			candidateId = event.execId;
+	private acknowledgeReady(): void {
+		if (this.readySettled || this.stopped) return;
+		this.readySettled = true;
+		if (this.startupTimer) clearTimeout(this.startupTimer);
+		this.resolveReady();
+	}
+
+	private consumeEvent(line: string): void {
+		if (this.stopped || this.fatalError) return;
+		const event = parseDockerExecLifecycleEvent(line);
+		if (!event || event.containerId !== this.containerId || !event.command.includes(this.commandTag)) return;
+		if (event.phase === "create") {
+			if (this.createdExecId && this.createdExecId !== event.execId) {
+				this.fail(new Error("Docker Engine events watcher observed duplicate tagged exec identities"));
+				return;
+			}
+			this.createdExecId = event.execId;
+			return;
 		}
-		if (candidateId) {
-			this.matched = true;
-			this.resolveCandidate(candidateId);
+		// ExecInspect may expose an allocated PID before the payload actually runs.
+		// Bind it only after the corresponding daemon exec_start event, not merely
+		// after exec_create, so its Running/PID tuple is a live engine authority.
+		if (event.execId !== this.createdExecId) return;
+		if (this.candidateSettled || this.candidateQueued) {
+			this.fail(new Error("Docker Engine events watcher observed duplicate tagged exec identities"));
+			return;
 		}
+		this.candidateQueued = true;
+		// Defer resolution until this daemon chunk is fully decoded, so two matching
+		// exec_start records delivered together fail closed as ambiguous authority.
+		queueMicrotask(() => {
+			if (this.fatalError || this.candidateSettled) return;
+			this.candidateSettled = true;
+			this.resolveCandidate(event.execId);
+		});
+	}
+
+	private withStderr(message: string): string {
+		const detail = this.stderr.trim();
+		return detail ? `${message}: ${detail}` : message;
 	}
 
 	private fail(error: Error): void {
-		if (this.stopped || this.matched) return;
-		this.matched = true;
-		this.rejectCandidate(error);
+		if (this.fatalError || this.stopped) return;
+		this.fatalError = error;
+		if (this.startupTimer) clearTimeout(this.startupTimer);
+		if (!this.readySettled) {
+			this.readySettled = true;
+			this.rejectReady(error);
+		}
+		if (!this.candidateSettled) {
+			this.candidateSettled = true;
+			this.rejectCandidate(error);
+		}
 	}
 
 	async verify(): Promise<DockerExecInspection> {
 		try {
 			const execId = await this.candidate;
-			const inspection = inspectDockerExecThroughCurrentContext(execId);
+			if (this.fatalError) throw this.fatalError;
+			const inspection = await inspectDockerExecThroughCurrentContext(execId);
 			if (!inspection || inspection.containerId !== this.containerId || !inspection.command.includes(this.commandTag)) {
 				throw new Error("Docker exec engine identity was missing, mismatched, or ambiguous");
 			}
@@ -388,20 +615,21 @@ class DockerExecEventWatcher {
 		}
 	}
 
-	/** Stop and join the watcher; callers await this to avoid leaked `docker events` clients. */
+	/** Stop and join the raw Engine stream; SIGKILL is required because dial-stdio ignores SIGTERM while a request is open. */
 	stop(): Promise<void> {
 		if (this.stopPromise) return this.stopPromise;
-		if (!this.matched) {
-			this.matched = true;
-			this.rejectCandidate(new Error("Docker exec event watcher stopped before identifying the tagged exec"));
+		if (!this.readySettled || !this.candidateSettled) {
+			this.fail(new Error("Docker Engine events watcher stopped before identifying the tagged exec"));
 		}
 		this.stopped = true;
+		if (this.startupTimer) clearTimeout(this.startupTimer);
 		const child = this.child;
 		this.stopPromise = !child || child.exitCode !== null || child.killed
 			? Promise.resolve()
 			: new Promise<void>(resolve => {
 				child.once("close", () => resolve());
-				try { child.kill(); } catch { resolve(); }
+				try { child.stdin?.destroy(); } catch { /* ignore */ }
+				try { child.kill("SIGKILL"); } catch { resolve(); }
 			});
 		return this.stopPromise;
 	}
@@ -6139,10 +6367,14 @@ export class VerificationHarness {
 				: undefined;
 			let containerTimedOut = false;
 			let containerTimeoutTimer: TimerHandle | undefined;
+			void (async () => {
 			try {
 				if (useContainerDurable && containerId && dockerExecCommandTag) {
 					dockerExecWatcher = new DockerExecEventWatcher(containerId, dockerExecCommandTag);
-					dockerExecWatcher.start();
+					// Wait for the daemon's HTTP 200 subscription acknowledgement before
+					// creating the tagged exec. Starting `docker events` and immediately
+					// spawning misses the first event on a cold client connection.
+					await dockerExecWatcher.start();
 				}
 				if (containerId) {
 					// Wrap the command so the in-container shell writes its PID
@@ -6167,7 +6399,7 @@ export class VerificationHarness {
 						// The pre-payload barrier is an anonymous shell pipe. No pathname or
 						// FIFO is writable by a same-UID sibling; FD 3 belongs only to the
 						// engine-bound sentinel and is closed before user code starts.
-						wrappedCmd = `# ${dockerExecCommandTag}\nmkdir -p ${qDir} 2>/dev/null || exit 125; exec 4>&1; exec 3<&0; BOBBIT_WITNESS=${qWitness} BOBBIT_NONCE=${qNonce} BOBBIT_CONTAINER=${qContainer} BOBBIT_EXEC_TAG=${qExecTag} /bin/sh -c 'trap "" HUP INT TERM; __fail(){ exit 125; }; __p=$$; __g=$(awk "{print \$5}" "/proc/$__p/stat" 2>/dev/null || true); __s=$(awk "{print \$22}" "/proc/$__p/stat" 2>/dev/null || true); case "$__p:$__g:$__s" in *::*) __fail;; esac; __t="$BOBBIT_WITNESS.$$.tmp"; printf "{\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s" > "$__t" && mv "$__t" "$BOBBIT_WITNESS" || __fail; printf "BOBBIT_CONTAINER_OWNERSHIP_TUPLE {\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s" >&4; IFS= read -r __release <&3 || __fail; [ "$__release" = BOBBIT_HOST_RELEASE ] || __fail; printf ".\\n"; while :; do sleep 2147483647 & wait $!; done' 3<&3 | { IFS= read -r __bobbit_ready_ack || exit 125; [ "$__bobbit_ready_ack" = . ] || exit 125; exec 3<&-; exec </dev/null; __bp=$$; printf %s "$__bp" > ${qPid}.tmp && mv ${qPid}.tmp ${qPid}; ( while :; do printf '{"pid":%s,"ts":%s}' "$__bp" "$(date +%s 2>/dev/null || printf 0)" > ${qHb}.tmp && mv ${qHb}.tmp ${qHb}; sleep 1; done ) & __hb=$!; ( ${command}\n); __ec=$?; kill "$__hb" 2>/dev/null; wait "$__hb" 2>/dev/null; exit $__ec; }`;
+						wrappedCmd = `# ${dockerExecCommandTag}\nmkdir -p ${qDir} 2>/dev/null || exit 125; exec 4>&1; exec 3<&0; BOBBIT_WITNESS=${qWitness} BOBBIT_NONCE=${qNonce} BOBBIT_CONTAINER=${qContainer} BOBBIT_EXEC_TAG=${qExecTag} /bin/sh -c 'trap "" HUP INT TERM; __fail(){ exit 125; }; __p=$$; __g=$(awk "{print \\$5}" "/proc/$__p/stat" 2>/dev/null || true); __s=$(awk "{print \\$22}" "/proc/$__p/stat" 2>/dev/null || true); case "$__p:$__g:$__s" in *::*) __fail;; esac; __t="$BOBBIT_WITNESS.$$.tmp"; printf "{\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s" > "$__t" && mv "$__t" "$BOBBIT_WITNESS" || __fail; printf "BOBBIT_CONTAINER_OWNERSHIP_TUPLE {\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s" >&4; IFS= read -r __release <&3 || __fail; [ "$__release" = BOBBIT_HOST_RELEASE ] || __fail; printf ".\\n"; while :; do sleep 2147483647 & wait $!; done' 3<&3 | { IFS= read -r __bobbit_ready_ack || exit 125; [ "$__bobbit_ready_ack" = . ] || exit 125; exec 3<&-; exec </dev/null; __bp=$$; printf %s "$__bp" > ${qPid}.tmp && mv ${qPid}.tmp ${qPid}; ( while :; do printf '{"pid":%s,"ts":%s}' "$__bp" "$(date +%s 2>/dev/null || printf 0)" > ${qHb}.tmp && mv ${qHb}.tmp ${qHb}; sleep 1; done ) & __hb=$!; ( ${command}\n); __ec=$?; kill "$__hb" 2>/dev/null; wait "$__hb" 2>/dev/null; exit $__ec; }`;
 					} else {
 						wrappedCmd = `echo $$ > ${killPidFile}; ${command}`;
 					}
@@ -6655,6 +6887,10 @@ export class VerificationHarness {
 				try { stopTail?.(); } catch { /* ignore */ }
 				resolve(handleSpawnError(err));
 			});
+			})().catch(error => resolve({
+				passed: false,
+				output: `Verification command setup failed: ${(error as Error).message}`,
+			}));
 		});
 	}
 
