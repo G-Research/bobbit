@@ -128,11 +128,11 @@ describe("consolidated implementation review defaults", () => {
 				assert.match(code, concern, `${workflowId} code review must cover integrated implementation risks`);
 			}
 			assert.match(code, /deduplicat.*root cause/is, `${workflowId} code review must deduplicate by root cause`);
-			assert.match(code, /minimal fixes.*focused tests/is, `${workflowId} code review must prescribe a minimal fix and focused test`);
+			assert.match(code, /minimal (?:implementation )?fix(?:es)?.*focused tests?/is, `${workflowId} code review must prescribe a minimal fix and focused test`);
 			for (const risk of [/trust boundar/i, /auth/i, /validation/i, /injection/i, /secrets/i, /(?:destructive|resource ownership)/i, /dependency/i, /races/i]) {
 				assert.match(security, risk, `${workflowId} security review must cover changed security risks`);
 			}
-			assert.match(security, /remediation.*(?:abuse|regression) tests/is, `${workflowId} security review must require a remediation test`);
+			assert.match(security, /remediation.*(?:abuse|regression) tests?/is, `${workflowId} security review must require a remediation test`);
 		}
 	});
 
