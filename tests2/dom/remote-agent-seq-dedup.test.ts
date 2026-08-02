@@ -43,6 +43,11 @@ class FakeWS {
  */
 function makeAgent() {
 	const ra: any = new RemoteAgent();
+	// Exercise the real reconnect path without an explicit remote base. The
+	// central boundary must use the same-origin active fallback rather than
+	// treating the default empty field as an explicit operator URL.
+	ra._sessionId = "seq-dedup-session";
+	ra._authToken = "localhost";
 	const dispatched: any[] = [];
 	const messages: any[] = [];
 	ra.handleAgentEvent = (data: any) => {

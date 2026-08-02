@@ -521,7 +521,7 @@ test.describe("unified session actions", () => {
 
 		await clickHeaderAction(page, "open-new-window");
 		await expect.poll(() => page.evaluate(() => (window as any).__sessionActionOpenedUrls), { timeout: 5_000 }).toEqual([
-			`${base()}/#/session/${sessionId}`,
+			`${base()}/session/${sessionId}`,
 		]);
 	});
 });

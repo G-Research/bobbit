@@ -8,6 +8,8 @@ import { customElement, property, state } from "lit/decorators.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
 import { ansiToHtml, hasAnsi } from "../utils/ansi.js";
+import { gatewayFetch } from "../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../shared/base-path.js";
 import { getVerificationEventKey } from "../../app/verification-event-bus.js";
 
 interface OutputChunk {
@@ -135,9 +137,7 @@ export class VerificationOutputModal extends LitElement {
 
 	private async _fetchBootstrapOutput(): Promise<void> {
 		try {
-			const token = localStorage.getItem("gateway.token") || "";
-			const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-			const res = await fetch(`/api/goals/${this.goalId}/verifications/active`, { headers });
+			const res = await gatewayFetch(gatewayRoute(`/api/goals/${this.goalId}/verifications/active`));
 			if (!res.ok) return;
 			const data = await res.json();
 			const verifications: Array<any> = data.verifications || [];

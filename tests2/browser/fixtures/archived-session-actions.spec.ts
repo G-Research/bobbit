@@ -243,7 +243,7 @@ test.describe("archived session actions", () => {
 		await openArchivedSidebarMenu(page, archivedId);
 		await menuItem(page, "open-new-window").click();
 		await expect.poll(() => page.evaluate(() => (window as any).__opened), { timeout: 5_000 }).toEqual([
-			{ url: `${base()}/#/session/${archivedId}`, target: "_blank", features: "noopener" },
+			{ url: `${base()}/session/${archivedId}`, target: "_blank", features: "noopener" },
 		]);
 		await expect.poll(() => page.evaluate(() => window.location.hash), { message: "open in new window must not navigate in-place" }).toBe(hashBefore);
 		await closePopover(page);

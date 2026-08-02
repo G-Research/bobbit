@@ -1,5 +1,7 @@
 import { html, LitElement, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { gatewayFetch } from "../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../shared/base-path.js";
 import type { InboxEntry } from "../../server/agent/inbox-store.js";
 import "./InboxEntry.js";
 import "./AddToInboxDialog.js";
@@ -59,11 +61,10 @@ export class InboxPanel extends LitElement {
 	private async _cancel(entryId: string): Promise<void> {
 		this._markBusy(entryId, true);
 		try {
-			await fetch(
-				`/api/staff/${encodeURIComponent(this.staffId)}/inbox/${encodeURIComponent(entryId)}/dismiss`,
+			await gatewayFetch(
+				gatewayRoute(`/api/staff/${encodeURIComponent(this.staffId)}/inbox/${encodeURIComponent(entryId)}/dismiss`),
 				{
 					method: "POST",
-					credentials: "include",
 					headers: { "Content-Type": "application/json" },
 					body: JSON.stringify({
 						sessionId: this.sessionId,
@@ -80,10 +81,9 @@ export class InboxPanel extends LitElement {
 	private async _delete(entryId: string): Promise<void> {
 		this._markBusy(entryId, true);
 		try {
-			await fetch(
+			await gatewayFetch(gatewayRoute(
 				`/api/staff/${encodeURIComponent(this.staffId)}/inbox/${encodeURIComponent(entryId)}`,
-				{ method: "DELETE", credentials: "include" },
-			);
+			), { method: "DELETE" });
 		} finally {
 			this._markBusy(entryId, false);
 		}

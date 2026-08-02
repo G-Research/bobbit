@@ -8,13 +8,20 @@ import {
 	renderApp,
 	activeSessionId,
 	isDesktop,
-	GW_URL_KEY,
-	GW_TOKEN_KEY,
 	GW_SESSION_KEY,
 	type GatewaySession,
 	type Project,
 } from "./state.js";
 import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam, readProposalSnapshot, type GitStatusData } from "./api.js";
+import {
+	activeGatewayConnection,
+	commitGatewayConnection,
+	gatewayAuthorizationHeaders,
+	gatewayUrl,
+	LOCALHOST_TOKEN,
+	normalizeGatewayBaseUrl,
+} from "./gateway-fetch.js";
+import { gatewayRoute } from "../shared/base-path.js";
 import { reconcilePackRenderersForProject } from "./pack-renderers.js";
 import { reconcilePackPanelsForProject, setSessionSwitcher } from "./pack-panels.js";
 import { hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
@@ -961,11 +968,11 @@ export function deleteProjectDraft(sessionId: string): void { projectDraft.delet
 // ============================================================================
 
 export async function authenticateGateway(url: string, token: string): Promise<void> {
-	localStorage.setItem(GW_URL_KEY, url);
-	localStorage.setItem(GW_TOKEN_KEY, token);
-
-	const healthRes = await fetch(`${url}/api/health`, {
-		headers: { Authorization: `Bearer ${token}` },
+	const candidate = normalizeGatewayBaseUrl(url);
+	// Browser-default same-origin credentials keep reverse-proxy cookies working
+	// without requiring credentialed CORS from an explicit remote gateway.
+	const healthRes = await fetch(gatewayUrl(gatewayRoute("/api/health"), candidate), {
+		headers: gatewayAuthorizationHeaders(token),
 	});
 	if (!healthRes.ok) {
 		if (healthRes.status === 401) throw new Error("Invalid auth token");
@@ -977,6 +984,8 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 	// AI Gateway: the gateway handles LLM auth; Anthropic OAuth endpoints
 	// are likely unreachable on air-gapped networks anyway.
 	const healthData = await healthRes.json();
+	const commit = commitGatewayConnection(candidate, token);
+	if (commit.warning) showHeaderToast(commit.warning);
 	// Extract setup status from health response (avoids extra fetch)
 	if (typeof healthData.setupComplete === "boolean") {
 		state.setupComplete = healthData.setupComplete;
@@ -1190,13 +1199,14 @@ function _ensurePromptDraftListeners(): void {
 		const val: string = editor?.value ?? "";
 		if (!val.trim()) return;
 		const gen = _nextDraftGen(_draftSessionId);
-		const url = localStorage.getItem("gateway.url") || window.location.origin;
-		const token = localStorage.getItem("gateway.token") || "";
+		const { token } = activeGatewayConnection();
+		const tokenQuery = token && token !== LOCALHOST_TOKEN ? `?token=${encodeURIComponent(token)}` : "";
 		const body = JSON.stringify({ type: "prompt", data: { text: val, gen } });
 		const blob = new Blob([body], { type: "application/json" });
-		// sendBeacon doesn't support custom headers, so pass token as query param.
-		// The server already accepts ?token= for auth (used by WebSocket connections).
-		navigator.sendBeacon(`${url}/api/sessions/${_draftSessionId}/draft?token=${encodeURIComponent(token)}`, blob);
+		// sendBeacon cannot set a bearer header, so real gateway tokens stay in
+		// the query. The localhost sentinel is client state, not a credential.
+		const route = gatewayRoute(`/api/sessions/${encodeURIComponent(_draftSessionId)}/draft${tokenQuery}`);
+		navigator.sendBeacon(gatewayUrl(route), blob);
 	});
 
 	_draftListenersInstalled = true;
@@ -1642,8 +1652,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 	renderApp();
 
 	try {
-		const url = localStorage.getItem(GW_URL_KEY)!;
-		const token = localStorage.getItem(GW_TOKEN_KEY)!;
+		const { baseUrl: url, token } = activeGatewayConnection();
 
 		const remote = new RemoteAgent();
 

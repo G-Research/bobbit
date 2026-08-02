@@ -622,8 +622,8 @@ test.describe("GET /preview/<sid>/* — content origin", () => {
 		expect(resp.status).toBe(200);
 		expect(resp.headers.get("content-type") || "").toMatch(/text\/html/);
 		const body = await resp.text();
-		// <base> rewritten to content-origin path.
-		expect(body).toContain(`<base href="/preview/${sessionId}/">`);
+		// Marked <base> rewritten to the content-origin path.
+		expect(body).toContain(`<base data-bobbit-preview-base href="/preview/${sessionId}/">`);
 		// The standalone snapshot retains canonical light/dark theme tokens.
 		expect(body).toContain(`data-bobbit-preview-theme="snapshot"`);
 		expect(body).toContain("--background: canvas;");

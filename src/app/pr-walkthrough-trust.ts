@@ -36,7 +36,7 @@ export interface EnsureGithubHostTrustedDeps {
  * already persisted, so trust the PUT and return `true`.
  */
 export async function ensureGithubHostTrusted(host: string, deps?: EnsureGithubHostTrustedDeps): Promise<boolean> {
-	const fetch = deps?.fetch ?? gatewayFetch;
+	const request = deps?.fetch ?? gatewayFetch;
 	const confirm = deps?.confirm ?? confirmAction;
 	const normalized = normalizeTrustedHost(host);
 	if (!normalized) return false;
@@ -48,7 +48,7 @@ export async function ensureGithubHostTrusted(host: string, deps?: EnsureGithubH
 	// to the prompt — we never silently trust an unknown host on a transient error.
 	let managed: string[] = [];
 	try {
-		const res = await fetch("/api/preferences");
+		const res = await request("/api/preferences");
 		if (res.ok) managed = normalizeTrustedHosts((await res.json()).githubTrustedHosts);
 	} catch { /* fall through — prompt anyway */ }
 	if (isTrustedExternalHost(normalized, managed)) return true; // baseline or already trusted
@@ -63,13 +63,13 @@ export async function ensureGithubHostTrusted(host: string, deps?: EnsureGithubH
 	const next = normalizeTrustedHosts([...managed, normalized]);
 	// The PUT is the persist step — only a PUT failure/error aborts.
 	try {
-		const put = await fetch("/api/preferences", { method: "PUT", body: JSON.stringify({ githubTrustedHosts: next }) });
+		const put = await request("/api/preferences", { method: "PUT", body: JSON.stringify({ githubTrustedHosts: next }) });
 		if (!put.ok) return false;
 	} catch { return false; }
 	// Best-effort readback to catch a server-side normalize drop; on a readback error
 	// the PUT already succeeded, so trust it.
 	try {
-		const res = await fetch("/api/preferences");
+		const res = await request("/api/preferences");
 		if (res.ok) return isTrustedExternalHost(normalized, normalizeTrustedHosts((await res.json()).githubTrustedHosts));
 	} catch { /* readback failed but PUT succeeded */ }
 	return true;

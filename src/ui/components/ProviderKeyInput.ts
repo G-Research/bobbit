@@ -3,7 +3,8 @@ import { Badge } from "@mariozechner/mini-lit/dist/Badge.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import { gatewayFetch } from "../../app/api.js";
+import { gatewayFetch } from "../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../shared/base-path.js";
 import { testPiAiProviderKey } from "../../app/pi-ai-lazy.js";
 import { getAppStorage } from "../storage/app-storage.js";
 import { Input } from "./Input.js";
@@ -45,7 +46,7 @@ export class ProviderKeyInput extends LitElement {
 			// client provider-keys store may contain the `gateway-managed` sentinel
 			// used to suppress direct-mode prompts for a remote session; that is not a
 			// real API key and must not make Settings show a key as configured.
-			const res = await gatewayFetch("/api/provider-keys");
+			const res = await gatewayFetch(gatewayRoute("/api/provider-keys"));
 			if (res.ok) {
 				const data = await res.json() as { providers?: unknown };
 				this.hasKey = Array.isArray(data.providers) && data.providers.includes(this.provider);
@@ -88,7 +89,7 @@ export class ProviderKeyInput extends LitElement {
 			try {
 				// Store server-side first so Settings only reports a key as configured
 				// once the runtime's authoritative preference store has it.
-				const res = await gatewayFetch(`/api/provider-keys/${encodeURIComponent(this.provider)}`, {
+				const res = await gatewayFetch(gatewayRoute(`/api/provider-keys/${encodeURIComponent(this.provider)}`), {
 					method: "POST",
 					headers: { "Content-Type": "application/json" },
 					body: JSON.stringify({ key: this.keyInput }),

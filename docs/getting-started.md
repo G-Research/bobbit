@@ -28,16 +28,25 @@ bobbit
 
 ## First launch
 
-When Bobbit starts, you'll see output like this in your terminal:
+On the default loopback bind, Bobbit starts without enforcing token authentication. The terminal output looks like this:
 
 ```
-🔑 Auth token: abc123...
-🌐 http://localhost:3001
+Bobbit Gateway v<version>
+  Listening:  http://localhost:3001
+  Agent CWD:  <current directory>
+  UI:         http://localhost:3001/
+
+  Token authentication is disabled on this loopback bind.
+  Any local process can access the gateway. Use --auth to require the token.
 ```
 
-Your browser should open automatically. If it doesn't, copy the URL from the terminal.
+Your browser should open automatically at the untokenized UI URL. If it doesn't, copy that URL from the terminal. Because the gateway is local-only but any local process can access it, use `--auth` when you want Bobbit to enforce its token:
 
-The **auth token** is like a password — it keeps your Bobbit instance private. It's generated once and saved in `.bobbit/state/token`. You'll need it if you connect from another device.
+```bash
+bobbit --auth
+```
+
+With `--auth`, the banner prints the auth token and secrecy warning, and the browser opens a tokenized URL. The token is generated once and saved in `.bobbit/state/token`. Bobbit also enforces token authentication automatically on non-loopback binds; see [Networking](networking.md) for remote-access guidance.
 
 ## Your first session
 

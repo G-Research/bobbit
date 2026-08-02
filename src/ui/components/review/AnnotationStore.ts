@@ -1,3 +1,10 @@
+import {
+  activeGatewayConnection,
+  gatewayFetch,
+  gatewayNativeTransportSupport,
+  gatewayUrl,
+} from "../../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../../shared/base-path.js";
 import type {
   ReviewDecision,
   ReviewDecisionPayload,
@@ -72,15 +79,6 @@ export async function flushPendingWrites(): Promise<void> {
 
 // ── Internal helpers ─────────────────────────────────────────────────
 
-/** Build auth headers from localStorage (same token used by gatewayFetch in api.ts). */
-function _authHeaders(): Record<string, string> {
-  const token = (typeof localStorage !== "undefined" && localStorage.getItem("gateway.token")) || "";
-  return {
-    Authorization: `Bearer ${token}`,
-    "Content-Type": "application/json",
-  };
-}
-
 function _isKeepaliveSafe(options?: RequestInit): boolean {
   const body = options?.body;
   if (body == null) return true;
@@ -88,11 +86,10 @@ function _isKeepaliveSafe(options?: RequestInit): boolean {
   return new TextEncoder().encode(body).byteLength <= 60 * 1024;
 }
 
-function _serverFetch(url: string, options?: RequestInit): Promise<void> {
-  const p = fetch(url, {
+function _serverFetch(route: string, options?: RequestInit): Promise<void> {
+  const p = gatewayFetch(gatewayRoute(route), {
     ...options,
     keepalive: options?.keepalive ?? _isKeepaliveSafe(options),
-    headers: { ..._authHeaders(), ...options?.headers },
   }).then(() => {}).catch(() => {
     // Persistence is best-effort when the server is unavailable. Callers that
     // await this promise still wait for the request to settle when it can run.
@@ -122,9 +119,7 @@ function _ensureSessionCache(sessionId: string): Map<string, ReviewAnnotation[]>
  */
 export async function initAnnotationStore(sessionId: string): Promise<void> {
   try {
-    const res = await fetch(`/api/sessions/${sessionId}/review/annotations`, {
-      headers: _authHeaders(),
-    });
+    const res = await gatewayFetch(gatewayRoute(`/api/sessions/${sessionId}/review/annotations`));
     if (!res.ok) {
       // Server doesn't have data yet or session not found — start empty
       _annotationCache.set(sessionId, new Map());
@@ -549,6 +544,13 @@ export const reviewBackend: AnnotationBackend = {
 
 if (typeof window !== "undefined") {
   window.addEventListener("beforeunload", () => {
+    const connection = activeGatewayConnection();
+    // sendBeacon cannot set a bearer header. Exact-origin gateways can instead
+    // authenticate with the signed browser cookie; cross-origin gateways rely
+    // on the ordinary authenticated persistence requests made before unload.
+    // Never put either a real token or the localhost sentinel in the URL.
+    if (!gatewayNativeTransportSupport(connection.baseUrl).supported) return;
+
     for (const [sessionId, sessionCache] of _annotationCache) {
       if (sessionCache.size === 0) continue;
       const annotations: Record<string, ReviewAnnotation[]> = {};
@@ -561,8 +563,11 @@ if (typeof window !== "undefined") {
       const payload = submitted
         ? { annotations, submitted: true }
         : { annotations };
+      const route = gatewayRoute(
+        `/api/sessions/${encodeURIComponent(sessionId)}/review/annotations/bulk`,
+      );
       navigator.sendBeacon(
-        `/api/sessions/${sessionId}/review/annotations/bulk`,
+        gatewayUrl(route, connection.baseUrl),
         new Blob([JSON.stringify(payload)], { type: "application/json" }),
       );
     }

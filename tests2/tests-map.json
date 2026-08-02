@@ -39,6 +39,150 @@
       }
     },
     {
+      "path": "tests2/core/base-path.test.ts",
+      "reason": "Pure base-path normalization, validation, exact segment-boundary stripping, and branded route joining coverage for root and nested gateway mounts.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/base-path-browser-boundary.test.ts",
+      "reason": "Browser URL-boundary coverage for runtime app mounts, explicit gateway bases, WebSocket resolution, authorization headers, malformed-storage recovery, and active connection ownership.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/annotation-store-beacon.test.ts",
+      "reason": "Focused unload-beacon coverage proving annotation bulk saves preserve the selected remote gateway mount, use only the active real token, omit the localhost sentinel, and never reread credentials from localStorage.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/core/base-path-cli.test.ts",
+      "reason": "Focused CLI coverage for flag-over-environment base-path selection, unsafe input rejection, mounted startup URLs, persisted peers, and truthful authentication banners.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/base-path-http.test.ts",
+      "reason": "Pure HTTP rewriting coverage for runtime-stamped SPA shells, prefix-aware manifests, direct preview redirects and marked base tags, plus root-mount compatibility.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/base-path-preview-contract.test.ts",
+      "reason": "Preview transport contract coverage proving persisted results remain mount-relative, browser sinks resolve once, and historical mounted URLs recover only validated internal routes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/base-path-pwa-cookie-guards.test.ts",
+      "reason": "Focused coverage for root and mounted browser-cookie Path values plus service-worker script, scope, transport bypass, precache, and offline fallback mounting.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/base-path-source-guards.test.ts",
+      "reason": "Repo-wide client source guards preventing bare-origin gateway fallback, raw same-origin API or preview routes at browser URL sinks, and direct Authorization Bearer construction outside the centralized gateway boundary.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/base-path-vite-proxy.test.ts",
+      "reason": "Vite proxy and production-build coverage proving mounted gateway HTTP/WS forwarding, response rebasing, root-mounted development, and runtime-based emitted chunk URLs.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/base-path-cli-entrypoint.test.ts",
+      "reason": "Real executable CLI entrypoint smoke in the E2E Vitest lane proving an isolated nested mount binds an ephemeral port, persists its mounted gateway URL, serves mounted health and static routes, prints the truthful loopback-auth banner, and terminates cleanly within a bound.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
+      "path": "tests2/integration/base-path-gateway-routes.test.ts",
+      "reason": "Focused in-process gateway coverage for nested mounted HTTP routes, off-mount boundaries, SPA and manifest responses, mount-scoped browser cookies, and accepted or rejected WebSocket upgrades.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/base-path-gateway-origin-auth.test.ts",
+      "reason": "Focused in-process coverage proving a loopback-mounted gateway with token auth disabled accepts the localhost sentinel on prefixed viewer and session WebSockets.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/base-path-gateway-preview.test.ts",
+      "reason": "Focused in-process gateway coverage for mount-relative preview REST, restore, bootstrap, and live SSE payloads plus single-prefixed browser redirects and injected preview bases.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/base-path-gateway-root.test.ts",
+      "reason": "Focused in-process gateway coverage for root-mounted API, shell, manifest, cookie, preview, and viewer compatibility.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/base-path-mounting.journey.spec.ts",
+      "reason": "Production Chromium journey for a nested mount covering shell assets, REST, viewer and session sockets, lazy navigation, deep-link reload, previews and popouts, and off-mount isolation.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/explicit-gateway-base-path.journey.spec.ts",
+      "reason": "Two-origin Chromium journey proving a stored prefixed gateway URL remains authoritative for REST and viewer traffic without double-prefixing or sending Bearer localhost.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/core/reviewer-read-session-policy.test.ts",
       "reason": "Resolved tool-policy coverage proving every first-party reviewer role and project override explicitly denies cross-session transcript reads through read_session.",
       "execution": {

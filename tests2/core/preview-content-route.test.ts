@@ -248,7 +248,7 @@ describe("handlePreviewRequest — bridge injection", () => {
 		const res = fakeRes();
 		await handlePreviewRequest(fakeReq({ url: `/preview/${SID}/index.html` }), res as any, `/preview/${SID}/index.html`, o);
 		const txt = bodyText(res);
-		assert.match(txt, new RegExp(`<base href="/preview/${SID}/"`));
+		assert.match(txt, new RegExp(`<base data-bobbit-preview-base href="/preview/${SID}/"`));
 		assert.match(txt, /preview-swipe-start|MutationObserver|preview-swipe-move/);
 	});
 
@@ -316,7 +316,7 @@ describe("handlePreviewRequest — per-artifact URL", () => {
 		await handlePreviewRequest(fakeReq({ url }), res as any, url, o);
 		assert.equal(res.statusCode, 200);
 		const txt = bodyText(res);
-		assert.match(txt, new RegExp(`<base href="/preview/${SID}/_artifact/${ARTIFACT_ID}/"`));
+		assert.match(txt, new RegExp(`<base data-bobbit-preview-base href="/preview/${SID}/_artifact/${ARTIFACT_ID}/"`));
 		// Body content survives the rewrite. We can't assert `v1</body>` adjacency
 		// because injectBaseAndScripts adds the bridge scripts before </body>;
 		// instead assert v1 sits at the start of <body>, and that the bridge was

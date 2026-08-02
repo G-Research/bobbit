@@ -21,35 +21,12 @@
  */
 
 import type { ProposalType } from "./proposal-registry.js";
+import { gatewayFetch } from "./gateway-fetch.js";
 
-// Mirror of the gateway-localStorage keys defined in `state.ts`. We can't
-// import them from there because state.ts touches `localStorage` at
-// module-load (browser-only), and we want this file unit-testable in node
-// without elaborate global shims. If state.ts ever changes these keys,
-// keep them in sync here — covered by the helper unit test using these
-// exact strings.
-const GW_URL_KEY = "gateway.url";
-const GW_TOKEN_KEY = "gateway.token";
-
-// We DO NOT import from `./api.js` here. The full api.js dep graph reaches
-// `state.ts` at module-load (touches `localStorage`) and on through
-// session-manager / render-helpers / lit, which is fine in the browser but
-// blows up in node-only unit tests. The three draft endpoints we need are
-// trivial; we duplicate them locally and keep this module browser+node
-// safe. (`api.ts`'s `saveDraftToServer` etc remain the canonical impl for
-// the rest of the app and are not removed.)
+// Do not import from api.ts here: its full app-shell graph makes this otherwise
+// node-safe proposal helper expensive and fragile to load in focused tests.
 function draftFetch(path: string, init: RequestInit = {}): Promise<Response> {
-	const url = (typeof localStorage !== "undefined" && localStorage.getItem(GW_URL_KEY))
-		|| (typeof window !== "undefined" ? window.location.origin : "");
-	const token = (typeof localStorage !== "undefined" && localStorage.getItem(GW_TOKEN_KEY)) || "";
-	return fetch(`${url}${path}`, {
-		...init,
-		headers: {
-			Authorization: `Bearer ${token}`,
-			"Content-Type": "application/json",
-			...(init.headers as Record<string, string> | undefined),
-		},
-	});
+	return gatewayFetch(path, init);
 }
 
 // ---- Dismissal fingerprint ----

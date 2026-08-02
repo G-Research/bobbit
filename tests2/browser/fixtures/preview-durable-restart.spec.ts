@@ -127,7 +127,7 @@ async function previewDiagnostics(page: Page): Promise<string> {
 	});
 }
 
-async function expectPreviewIframeContains(page: Page, message: string): Promise<void> {
+async function expectPreviewIframeContains(page: Page, message: string, sessionId: string): Promise<void> {
 	await expect.poll(
 		() => previewDiagnostics(page),
 		{
@@ -137,15 +137,13 @@ async function expectPreviewIframeContains(page: Page, message: string): Promise
 	).toContain(BODY_TEXT);
 
 	const iframe = page.locator(".goal-preview-panel iframe").first();
-	await expect(iframe, `${message}: iframe should have preview content src`).toHaveAttribute(
-		"src",
-		new RegExp(`^/preview/${sessionIdPattern()}/${ENTRY.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\?mtime=\\d+$`),
-		{ timeout: 10_000 },
-	);
-}
-
-function sessionIdPattern(): string {
-	return "[a-f0-9-]+";
+	await expect(iframe, `${message}: iframe should have an absolute preview content src`).toHaveAttribute("src", /^https?:\/\//, { timeout: 10_000 });
+	const src = new URL((await iframe.getAttribute("src"))!);
+	expect(src.origin, `${message}: iframe preview should stay on the gateway origin`).toBe(new URL(base()).origin);
+	expect(src.pathname, `${message}: iframe preview should target the restored session and entry`).toBe(`/preview/${encodeURIComponent(sessionId)}/${encodeURIComponent(ENTRY)}`);
+	expect([...src.searchParams.keys()], `${message}: iframe preview should carry only the cache buster`).toEqual(["mtime"]);
+	expect(src.searchParams.get("mtime"), `${message}: iframe cache buster should be numeric`).toMatch(/^\d+$/);
+	expect(src.hash, `${message}: iframe preview should not carry a fragment`).toBe("");
 }
 
 /**
@@ -224,7 +222,7 @@ test.describe("Durable HTML preview restart restore", () => {
 
 		await openSessionDirectly(page, sessionId);
 		await expectPreviewTabActive(page, "direct navigation restore");
-		await expectPreviewIframeContains(page, "direct navigation restore");
+		await expectPreviewIframeContains(page, "direct navigation restore", sessionId);
 
 		// Recreate the restore race: the active server-persisted preview tab has
 		// the entry in its source/state, while the transient previewPanelEntry
@@ -240,7 +238,7 @@ test.describe("Durable HTML preview restart restore", () => {
 			() => page.evaluate(() => (window as any).bobbitState?.previewPanelEntry ?? ""),
 			{ timeout: 2_000, message: "test setup should leave the previewPanelEntry mirror empty" },
 		).toBe("");
-		await expectPreviewIframeContains(page, "direct navigation restore with empty preview mirror");
+		await expectPreviewIframeContains(page, "direct navigation restore with empty preview mirror", sessionId);
 
 		await expect(
 			page.locator('button[title="Refresh preview"]').first(),
@@ -251,7 +249,12 @@ test.describe("Durable HTML preview restart restore", () => {
 		const encodedEntry = encodeURIComponent(mount.entry);
 		const openPreview = page.locator('a[title="Open preview in new tab"]').first();
 		await expect(openPreview, "open-preview action should use the restored preview tab entry").toBeVisible({ timeout: 5_000 });
-		await expect(openPreview).toHaveAttribute("href", `/preview/${encodedSessionId}/${encodedEntry}`);
+		await expect(openPreview, "open-preview action should expose an absolute gateway URL").toHaveAttribute("href", /^https?:\/\//);
+		const openPreviewUrl = new URL((await openPreview.getAttribute("href"))!);
+		expect(openPreviewUrl.origin, "open-preview action should stay on the gateway origin").toBe(new URL(base()).origin);
+		expect(openPreviewUrl.pathname).toBe(`/preview/${encodedSessionId}/${encodedEntry}`);
+		expect(openPreviewUrl.search, "open-preview action should not carry the iframe cache buster").toBe("");
+		expect(openPreviewUrl.hash).toBe("");
 	});
 
 	test("restores the mounted preview tab and iframe after restart, but keeps a user-closed tab closed", async ({ page, gateway }) => {
@@ -266,14 +269,14 @@ test.describe("Durable HTML preview restart restore", () => {
 		await waitForWorkspacePreviewTab(sessionId);
 
 		await expectPreviewTabActive(page, "before restart");
-		await expectPreviewIframeContains(page, "before restart");
+		await expectPreviewIframeContains(page, "before restart", sessionId);
 
 		await crashAndRestart(gateway, page);
 		await reloadAndReturnToSession(page, sessionId);
 
 		await waitForWorkspacePreviewTab(sessionId);
 		await expectPreviewTabActive(page, "after restart");
-		await expectPreviewIframeContains(page, "after restart");
+		await expectPreviewIframeContains(page, "after restart", sessionId);
 
 		await closePreviewTab(page);
 		await expectWorkspaceHasNoPreviewTab(sessionId);

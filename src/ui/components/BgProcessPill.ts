@@ -3,6 +3,8 @@ import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { customElement, property, state } from "lit/decorators.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Skull } from "lucide";
+import { gatewayFetch } from "../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../shared/base-path.js";
 import { ansiToHtml, hasAnsi } from "../utils/ansi.js";
 import "./LiveTimer.js";
 
@@ -142,11 +144,7 @@ export class BgProcessPill extends LitElement {
 		if (!this.sessionId || !this.process) return;
 		this.loadingLogs = true;
 		try {
-			const url = localStorage.getItem("gateway.url") || window.location.origin;
-			const token = localStorage.getItem("gateway.token") || "";
-			const res = await fetch(`${url}/api/sessions/${this.sessionId}/bg-processes/${this.process.id}/logs?tail=100`, {
-				headers: { Authorization: `Bearer ${token}` },
-			});
+			const res = await gatewayFetch(gatewayRoute(`/api/sessions/${this.sessionId}/bg-processes/${this.process.id}/logs?tail=100`));
 			if (res.ok) {
 				const data = await res.json();
 				this.logs = (data.log || []).map((e: any) =>

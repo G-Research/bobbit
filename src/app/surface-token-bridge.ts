@@ -4,7 +4,8 @@
 // Pack code receives only the HostApi object built by host-api.ts; it cannot import
 // this module or access the RemoteAgent WebSocket that services these requests.
 
-import { GW_TOKEN_KEY, GW_URL_KEY } from "./gateway-fetch.js";
+import { activeGatewayConnection, gatewayWsUrl } from "./gateway-fetch.js";
+import { gatewayRoute } from "../shared/base-path.js";
 import { waitForSurfaceTokenMinter, type PackSurfaceRef } from "./surface-token-minter-registry.js";
 export { registerSurfaceTokenMinter, unregisterSurfaceTokenMinter } from "./surface-token-minter-registry.js";
 export type { PackSurfaceRef, WsSurfaceTokenMinter } from "./surface-token-minter-registry.js";
@@ -48,10 +49,9 @@ function getBackgroundSurfaceTokenTransport(sessionId: string): BackgroundSurfac
 	}
 	if (existing) closeBackgroundTransport(sessionId, existing, "pack surface-token background transport reset");
 
-	const gatewayUrl = localStorage.getItem(GW_URL_KEY) || window.location.origin;
-	const token = localStorage.getItem(GW_TOKEN_KEY) || "";
+	const { token } = activeGatewayConnection();
 	if (!token) throw new Error("pack surface-token transport unavailable (missing gateway token)");
-	const ws = new WebSocket(`${gatewayUrl.replace(/^http/, "ws")}/ws/${encodeURIComponent(sessionId)}`);
+	const ws = new WebSocket(gatewayWsUrl(gatewayRoute(`/ws/${encodeURIComponent(sessionId)}`)));
 	const pending = new Map<string, { resolve: (token: string) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
 	let authorityKey: string | undefined;
 	let resolveReady!: () => void;

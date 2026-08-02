@@ -3,6 +3,8 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
 import { bootMark, bootTimingMeta, bootTimingReport } from "./boot-timing.js";
 import { loadSavedBindings } from "./shortcut-registry.js";
+import { gatewayWsUrl } from "./gateway-fetch.js";
+import { gatewayRoute } from "../shared/base-path.js";
 
 /**
  * Placeholder model used as the initial value of `_state.model` before the
@@ -831,10 +833,15 @@ export class RemoteAgent {
 	 * (`initial` false) failures schedule the next retry silently.
 	 */
 	private _connectWs(initial: boolean): Promise<void> {
-		const wsUrl = this._gatewayUrl.replace(/^http/, "ws");
+		// An unset per-agent base means "use the active gateway", not an explicit
+		// empty operator URL. Non-empty bases remain authoritative on reconnect.
+		const wsUrl = gatewayWsUrl(
+			gatewayRoute(`/ws/${encodeURIComponent(this._sessionId)}`),
+			this._gatewayUrl || undefined,
+		);
 
 		return new Promise<void>((resolve, reject) => {
-			const ws = new WebSocket(`${wsUrl}/ws/${this._sessionId}`);
+			const ws = new WebSocket(wsUrl);
 			this.ws = ws;
 			let settled = false;
 

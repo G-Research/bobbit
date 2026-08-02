@@ -9,8 +9,9 @@
 
 import { LitElement, html, nothing } from "lit";
 import { customElement, state as stateDecorator } from "lit/decorators.js";
-import { GW_TOKEN_KEY } from "../state.js";
 import { searchRebuild } from "../api.js";
+import { activeGatewayConnection, gatewayWsUrl } from "../gateway-fetch.js";
+import { gatewayRoute } from "../../shared/base-path.js";
 import {
 	INDEX_EVENT_NAME,
 	nextDotState,
@@ -39,11 +40,10 @@ let _subscribers = 0;
 
 function _connectViewerWs(): void {
 	if (_viewerWs && (_viewerWs.readyState === WebSocket.OPEN || _viewerWs.readyState === WebSocket.CONNECTING)) return;
-	const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-	const ws = new WebSocket(`${protocol}//${location.host}/ws/viewer`);
+	const ws = new WebSocket(gatewayWsUrl(gatewayRoute("/ws/viewer")));
 	_viewerWs = ws;
 	ws.addEventListener("open", () => {
-		const token = localStorage.getItem(GW_TOKEN_KEY);
+		const { token } = activeGatewayConnection();
 		if (token) ws.send(JSON.stringify({ type: "auth", token }));
 	});
 	ws.addEventListener("message", (event) => {

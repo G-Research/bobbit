@@ -12,6 +12,7 @@
 import { LitElement, html, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { gatewayFetch } from "../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../shared/base-path.js";
 
 type DecisionState = "idle" | "posting-approve" | "posting-reject" | "approved" | "rejected" | "error";
 
@@ -74,7 +75,7 @@ export class ChildrenMutationApproval extends LitElement {
 		this._state = decision === "approve" ? "posting-approve" : "posting-reject";
 		this._errorMessage = "";
 		try {
-			const resp = await gatewayFetch(`/api/goals/${this.goalId}/mutation/${this.requestId}/decision`, {
+			const resp = await gatewayFetch(gatewayRoute(`/api/goals/${this.goalId}/mutation/${this.requestId}/decision`), {
 				method: "POST",
 				body: JSON.stringify({ decision }),
 			});

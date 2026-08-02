@@ -117,6 +117,128 @@ function stripH1Response(raw: http.IncomingHttpHeaders): Record<string, string |
 	return out;
 }
 
+/** Canonical mount carried by the persisted gateway target URL. */
+export function gatewayProxyTargetBase(target: URL): string {
+	if (target.pathname === "/") return "";
+	return target.pathname.replace(/\/+$/, "");
+}
+
+/** Join a root-mounted Vite route to a possibly mounted gateway target once. */
+export function gatewayProxyPath(target: URL, incomingUrl: string): string {
+	const incoming = incomingUrl.startsWith("/") ? incomingUrl : `/${incomingUrl}`;
+	return `${gatewayProxyTargetBase(target)}${incoming}`;
+}
+
+/** Strip the mounted target boundary without accepting sibling string prefixes. */
+function stripGatewayProxyTargetBase(pathname: string, target: URL): string | null {
+	const targetBase = gatewayProxyTargetBase(target);
+	if (!targetBase) return pathname;
+	if (pathname === targetBase) return "/";
+	if (!pathname.startsWith(`${targetBase}/`)) return null;
+	return pathname.slice(targetBase.length);
+}
+
+/** Rebase a mounted root/absolute public URL to the root-mounted Vite origin. */
+function rebaseGatewayPublicUrl(raw: string, target: URL): string {
+	const isRootRelative = raw.startsWith("/") && !raw.startsWith("//");
+	const isAbsolute = /^[A-Za-z][A-Za-z\d+.-]*:/.test(raw) || raw.startsWith("//");
+	if (!isRootRelative && !isAbsolute) return raw;
+	let resolved: URL;
+	try {
+		resolved = new URL(raw, target.origin);
+	} catch {
+		return raw;
+	}
+	if (resolved.origin !== target.origin) return raw;
+	const rebasedPath = stripGatewayProxyTargetBase(resolved.pathname, target);
+	if (rebasedPath === null) return raw;
+	return `${rebasedPath}${resolved.search}${resolved.hash}`;
+}
+
+/** Rebase same-gateway redirects, including relative Location values. */
+export function rebaseGatewayProxyLocation(raw: string, targetRequestUrl: URL, target: URL): string {
+	let resolved: URL;
+	try {
+		resolved = new URL(raw, targetRequestUrl);
+	} catch {
+		return raw;
+	}
+	if (resolved.origin !== target.origin) return raw;
+	const rebasedPath = stripGatewayProxyTargetBase(resolved.pathname, target);
+	if (rebasedPath === null) return raw;
+	return `${rebasedPath}${resolved.search}${resolved.hash}`;
+}
+
+/** Translate the gateway's mount-scoped browser cookie to Vite's root scope. */
+export function rebaseGatewayProxyCookie(cookie: string, target: URL): string {
+	const targetBase = gatewayProxyTargetBase(target);
+	if (!targetBase) return cookie;
+	const expectedPath = `${targetBase}/`;
+	return cookie.replace(/(;\s*Path\s*=\s*)([^;]*)/gi, (match, prefix: string, value: string) =>
+		value.trim() === expectedPath ? `${prefix}/` : match,
+	);
+}
+
+/** Rebase the dynamic mounted manifest for the root-mounted development UI. */
+export function rebaseGatewayProxyManifest(value: unknown, target: URL): unknown {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+	const manifest = value as Record<string, unknown>;
+	const rebased: Record<string, unknown> = { ...manifest };
+	for (const key of ["start_url", "scope"] as const) {
+		if (typeof manifest[key] === "string") {
+			rebased[key] = rebaseGatewayPublicUrl(manifest[key], target);
+		}
+	}
+	if (Array.isArray(manifest.icons)) {
+		rebased.icons = manifest.icons.map((icon) => {
+			if (!icon || typeof icon !== "object" || Array.isArray(icon)) return icon;
+			const record = icon as Record<string, unknown>;
+			return typeof record.src === "string"
+				? { ...record, src: rebaseGatewayPublicUrl(record.src, target) }
+				: icon;
+		});
+	}
+	return rebased;
+}
+
+/** Rewrite only Bobbit's marked preview base element, rejecting ambiguity. */
+export function rebaseGatewayProxyPreviewHtml(html: string, target: URL): string {
+	const markedBasePattern = /<base\b[^>]*\sdata-bobbit-preview-base(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?[^>]*>/gi;
+	const matches = html.match(markedBasePattern) ?? [];
+	if (matches.length === 0) return html;
+	if (matches.length !== 1) {
+		throw new Error("gateway preview response contained duplicate marked base elements");
+	}
+	const markedBase = matches[0];
+	const hrefPattern = /\bhref\s*=\s*(["'])(.*?)\1/i;
+	const href = hrefPattern.exec(markedBase);
+	if (!href) throw new Error("gateway preview response contained a marked base without href");
+	const rebasedHref = rebaseGatewayPublicUrl(href[2], target);
+	const rewrittenBase = markedBase.replace(hrefPattern, `href=${href[1]}${rebasedHref}${href[1]}`);
+	return html.replace(markedBase, () => rewrittenBase);
+}
+
+function translateGatewayProxyHeaders(
+	raw: http.IncomingHttpHeaders,
+	targetRequestUrl: URL,
+	target: URL,
+): Record<string, string | string[] | undefined> {
+	const headers = stripH1Response(raw);
+	const location = headers.location;
+	if (typeof location === "string") {
+		headers.location = rebaseGatewayProxyLocation(location, targetRequestUrl, target);
+	} else if (Array.isArray(location)) {
+		headers.location = location.map((value) => rebaseGatewayProxyLocation(value, targetRequestUrl, target));
+	}
+	const setCookie = headers["set-cookie"];
+	if (typeof setCookie === "string") {
+		headers["set-cookie"] = rebaseGatewayProxyCookie(setCookie, target);
+	} else if (Array.isArray(setCookie)) {
+		headers["set-cookie"] = setCookie.map((value) => rebaseGatewayProxyCookie(value, target));
+	}
+	return headers;
+}
+
 /**
  * Defense-in-depth: Block import.meta.glob calls that reference .bobbit
  * paths or use excessive ../ traversal (3+ levels). Prevents sandbox agents
@@ -293,32 +415,96 @@ function dynamicGatewayProxy(): Plugin {
 	return {
 		name: "dynamic-gateway-proxy",
 		configureServer(server) {
-			// --- HTTP proxy for /api/* ----------------------------------
+			// --- HTTP proxy for root-mounted dev routes -------------------
 			server.middlewares.use((req, res, next) => {
-				// Proxy /api/*, /manifest.json (gateway serves a dynamic manifest
-				// that bakes the auth token into start_url for PWA installs), and
-				// /preview/* (per-session HTML preview mounts served by the gateway
-				// — without this, Vite's SPA fallback returns index.html and the
-				// iframe ends up rendering a nested Bobbit app).
-				const u = req.url || "";
-				const isManifest = u === "/manifest.json" || u.startsWith("/manifest.json?");
-				const isPreview = u.startsWith("/preview/");
-				if (!u.startsWith("/api") && !isManifest && !isPreview) return next();
+				const incomingUrl = req.url || "/";
+				let incomingPathname: string;
+				try {
+					incomingPathname = new URL(incomingUrl, "http://vite.invalid").pathname;
+				} catch {
+					return next();
+				}
+				const isApi = incomingPathname === "/api" || incomingPathname.startsWith("/api/");
+				const isManifest = incomingPathname === "/manifest.json";
+				const isPreview = incomingPathname === "/preview" || incomingPathname.startsWith("/preview/");
+				if (!isApi && !isManifest && !isPreview) return next();
+
 				const target = new URL(readGatewayUrl());
+				const targetPath = gatewayProxyPath(target, incomingUrl);
+				const targetRequestUrl = new URL(targetPath, target.origin);
+				const requestHeaders = stripH2Request(req.headers, target.host);
+				// Manifest and preview HTML are selectively rebased below. Ask for an
+				// identity body so the proxy never rewrites compressed bytes.
+				if (isManifest || isPreview) requestHeaders["accept-encoding"] = "identity";
 				// https.RequestOptions (superset of http.RequestOptions) so the TLS-only
 				// rejectUnauthorized is accepted; http.request ignores it for plain HTTP.
 				const opts: https.RequestOptions = {
 					hostname: target.hostname,
 					port: target.port,
-					path: req.url,
+					path: targetPath,
 					method: req.method,
-					headers: stripH2Request(req.headers, target.host),
+					headers: requestHeaders,
 					rejectUnauthorized: false,
 				};
 				const mod = target.protocol === "https:" ? https : http;
 				const proxyReq = mod.request(opts, (proxyRes: http.IncomingMessage) => {
-					res.writeHead(proxyRes.statusCode ?? 502, stripH1Response(proxyRes.headers));
-					proxyRes.pipe(res, { end: true });
+					const headers = translateGatewayProxyHeaders(proxyRes.headers, targetRequestUrl, target);
+					const contentTypeValue = proxyRes.headers["content-type"];
+					const contentType = Array.isArray(contentTypeValue) ? contentTypeValue[0] : contentTypeValue || "";
+					const contentEncodingValue = proxyRes.headers["content-encoding"];
+					const contentEncoding = Array.isArray(contentEncodingValue)
+						? contentEncodingValue[0]
+						: contentEncodingValue;
+					const canRewriteBody = !contentEncoding || contentEncoding === "identity";
+					const shouldBuffer = req.method !== "HEAD"
+						&& canRewriteBody
+						&& (isManifest || (isPreview && /\btext\/html\b/i.test(contentType)));
+
+					if (!shouldBuffer) {
+						res.writeHead(proxyRes.statusCode ?? 502, headers);
+						proxyRes.pipe(res, { end: true });
+						return;
+					}
+
+					const chunks: Buffer[] = [];
+					proxyRes.on("data", (chunk: Buffer | string) => {
+						chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+					});
+					proxyRes.on("error", () => {
+						if (!res.headersSent) {
+							res.writeHead(502, { "Content-Type": "text/plain" });
+							res.end("Gateway response interrupted");
+						}
+					});
+					proxyRes.on("end", () => {
+						if (res.headersSent) return;
+						let body = Buffer.concat(chunks);
+						try {
+							if (isManifest) {
+								try {
+									const parsed = JSON.parse(body.toString("utf-8"));
+									body = Buffer.from(JSON.stringify(rebaseGatewayProxyManifest(parsed, target)));
+								} catch (error) {
+									if (error instanceof SyntaxError) {
+										// Non-JSON gateway errors are forwarded unchanged.
+									} else {
+										throw error;
+									}
+								}
+							} else {
+								body = Buffer.from(rebaseGatewayProxyPreviewHtml(body.toString("utf-8"), target));
+							}
+						} catch (error) {
+							console.warn(`[api proxy] ${error instanceof Error ? error.message : String(error)}`);
+							res.writeHead(502, { "Content-Type": "text/plain" });
+							res.end("Invalid gateway response");
+							return;
+						}
+						headers["content-length"] = String(body.byteLength);
+						delete headers["content-encoding"];
+						res.writeHead(proxyRes.statusCode ?? 502, headers);
+						res.end(body);
+					});
 				});
 				proxyReq.on("error", (err: Error) => {
 					// ECONNREFUSED is the expected state while the gateway restarts — only
@@ -333,21 +519,28 @@ function dynamicGatewayProxy(): Plugin {
 				req.pipe(proxyReq, { end: true });
 			});
 
-			// --- WebSocket proxy for /ws/* ------------------------------
+			// --- WebSocket proxy for root-mounted /ws/* ------------------
 			server.httpServer?.on("upgrade", (req, socket: import("node:net").Socket, head) => {
-				if (!req.url?.startsWith("/ws")) return;
+				const incomingUrl = req.url || "/";
+				let incomingPathname: string;
+				try {
+					incomingPathname = new URL(incomingUrl, "http://vite.invalid").pathname;
+				} catch {
+					return;
+				}
+				if (incomingPathname !== "/ws" && !incomingPathname.startsWith("/ws/")) return;
 				const target = new URL(readGatewayUrl());
 				const mod = target.protocol === "https:" ? https : http;
 				const proxyReq = mod.request({
 					hostname: target.hostname,
 					port: target.port,
-					path: req.url,
+					path: gatewayProxyPath(target, incomingUrl),
 					method: req.method,
 					headers: stripH2Request(req.headers, target.host),
 					rejectUnauthorized: false,
 				});
 				proxyReq.on("upgrade", (proxyRes, proxySocket, proxyHead) => {
-					// Forward the 101 Switching Protocols response to the client
+					// Forward the 101 Switching Protocols response to the client.
 					let rawResponse = `HTTP/1.1 ${proxyRes.statusCode} ${proxyRes.statusMessage}\r\n`;
 					for (let i = 0; i < proxyRes.rawHeaders.length; i += 2) {
 						rawResponse += `${proxyRes.rawHeaders[i]}: ${proxyRes.rawHeaders[i + 1]}\r\n`;
@@ -372,7 +565,7 @@ function dynamicGatewayProxy(): Plugin {
 	};
 }
 
-export default defineConfig(({ mode }) => ({
+export default defineConfig(({ command, mode }) => ({
 	plugins: [tailwindcss(), blockDangerousGlobs(), localhostGuard(), bobbitSwVersion(), dynamicGatewayProxy()],
 	// Expose a dev-mode boolean via globalThis so code that needs to gate
 	// dev-only behaviour can read `(globalThis as any).__BOBBIT_DEV__` without
@@ -381,6 +574,24 @@ export default defineConfig(({ mode }) => ({
 	define: {
 		"globalThis.__BOBBIT_DEV__": JSON.stringify(mode !== "production"),
 	},
+	// Runtime URL expressions are a production-build concern only. The Vite
+	// development UI, HMR client, and source modules remain rooted at `/`.
+	experimental: command === "build"
+		? {
+			renderBuiltUrl(filename, { hostType }) {
+				// JavaScript synthesizes lazy/module-preload URLs after the server has
+				// rewritten index.html, so resolve those against the stamped runtime mount.
+				if (hostType === "js") {
+					return {
+						runtime: `(globalThis.__BOBBIT_BASE_PATH__ || "") + "/" + ${JSON.stringify(filename)}`,
+					};
+				}
+				// CSS assets live beside their emitted stylesheet. HTML references stay
+				// root-absolute until the gateway rewrites the served SPA shell.
+				return { relative: hostType === "css" };
+			},
+		}
+		: undefined,
 	build: {
 		outDir: "dist/ui",
 		// Emit modern JS — the supported browser matrix (iOS 17+, modern Chrome/Edge/Firefox)

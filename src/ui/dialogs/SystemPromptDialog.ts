@@ -3,7 +3,8 @@ import { DialogContent, DialogHeader } from "@mariozechner/mini-lit/dist/Dialog.
 import { DialogBase } from "@mariozechner/mini-lit/dist/DialogBase.js";
 import { html, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
-import { gatewayFetch } from "../../app/api.js";
+import { gatewayFetch } from "../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../shared/base-path.js";
 
 interface PromptSection {
 	label: string;
@@ -40,7 +41,7 @@ export class SystemPromptDialog extends DialogBase {
 
 	private async fetchSections() {
 		try {
-			const resp = await gatewayFetch(`/api/sessions/${this.sessionId}/prompt-sections`);
+			const resp = await gatewayFetch(gatewayRoute(`/api/sessions/${this.sessionId}/prompt-sections`));
 			if (!resp.ok) {
 				this.error = `Failed to load prompt sections (${resp.status})`;
 				this.loading = false;

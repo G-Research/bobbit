@@ -89,6 +89,13 @@ class FixtureWebSocket {
 window.confirm = () => true;
 window.open = (() => null) as typeof window.open;
 
+// This file:// fixture renders real session rows, whose colour assignment may
+// persist through patchSession during render. Seed a valid mounted gateway so
+// those requests exercise the strict browser URL boundary without relaxing it.
+const FIXTURE_GATEWAY = new URL("https://fixture.test/team/bobbit");
+localStorage.setItem("gateway.url", FIXTURE_GATEWAY.href);
+localStorage.setItem("gateway.token", "fixture-token");
+
 function response(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), {
 		status,
@@ -100,7 +107,11 @@ function requestPath(input: RequestInfo | URL): string {
 	const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
 	try {
 		const url = new URL(raw, window.location.href);
-		return `${url.pathname}${url.search}`;
+		const mount = FIXTURE_GATEWAY.pathname.replace(/\/$/, "");
+		const isMountedGateway = url.origin === FIXTURE_GATEWAY.origin
+			&& (url.pathname === mount || url.pathname.startsWith(`${mount}/`));
+		const pathname = isMountedGateway ? url.pathname.slice(mount.length) || "/" : url.pathname;
+		return `${pathname}${url.search}`;
 	} catch {
 		return raw;
 	}
