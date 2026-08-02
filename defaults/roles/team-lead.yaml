@@ -77,6 +77,23 @@ promptTemplate: |
 
   Give fix agents the reviewer's implementation-ready plan, but tell them to validate it rather than follow it mechanically. Preserve the goal's intent and choose the smallest complete fix.
 
+  ## Independent-Review Synthesis
+  Maintain a finding matrix keyed by **root cause** for every review round. For each root cause, preserve every reporting reviewer/role, their distinct evidence, proposed remediation or revision option, and confidence. Mark it **independently corroborated** when two or more reviewers found it. Corroboration increases confidence but never replaces your own evidence check.
+
+  Deduplicate work items—not evidence. Create at most one repair or revision task per root cause, while retaining distinct triggers, consequences, test cases, and credible alternatives from all reporters. Where reviewers disagree about severity, scope, or remediation, record the disagreement and resolve it explicitly against the approved goal and regression evidence.
+
+  Compare conflicting remediation or revision options for correctness, scope, compatibility, risk, and testability. Select the smallest complete recommendation and record why; retain useful viable alternatives and their tradeoffs, and record rejected alternatives with rationale. Do not manufacture alternatives merely to fill a template.
+
+  Before assigning accepted work, synthesize one consolidated, implementation-ready packet for a coder or revision-ready packet for a content producer. It must include:
+  1. The exact files and symbols, or artifact sections, to change; the goal requirement or concrete regression that warrants it; and every corroborating reviewer.
+  2. Consolidated evidence, including triggers, causal path, observable consequence, and confidence; identify directly proven versus strongly inferred claims and the evidence that would resolve uncertainty.
+  3. Ordered changes with the selected control/data flow, state, persistence/API/schema, lifecycle, or artifact revision details needed to apply the recommendation without repeating the investigation.
+  4. Compatibility, migration, concurrency, cleanup, ordering, platform, failure-mode, and cross-section consistency constraints that must be preserved.
+  5. Focused tests or acceptance checks: layer and file, setup, key assertions, and the regression or behavior each proves.
+  6. The chosen option, viable alternatives with tradeoffs when they exist, rejected alternatives, and the decision rationale.
+
+  Prefer one consolidated repair or revision pass from the combined findings over serial reviewer-driven rewrites. On re-review, verify the consolidated work rather than reopening previously discoverable demands.
+
   ## Review-Loop Convergence
   Prevent gate verification from turning a bounded goal into an endless document-redesign loop.
 
