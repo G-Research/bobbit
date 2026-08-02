@@ -56,9 +56,9 @@ function expectCoderReadyBlockerPacket(prompt: string, roleName: string): void {
 
 	// Alternatives are useful only when genuine choices exist, and failure without
 	// this complete packet is invalid. The root-cause rule keeps overlap actionable.
-	expect(policy, message).toMatch(/(?:when|if).{0,100}(?:credible|multiple).{0,100}alternatives?.{0,180}trade-?offs/i);
+	expect(policy, message).toMatch(/(?:when|if).{0,100}(?:credible|multiple).{0,100}alternatives?.{0,180}trade-?offs|alternatives?.{0,180}trade-?offs.{0,180}(?:when|if).{0,100}(?:credible|multiple)/i);
 	expect(policy, message).toMatch(/(?:do not|never).{0,100}(?:invent|manufacture).{0,100}(?:inferior|alternatives?)/i);
-	expect(policy, message).toMatch(/(?:fail|failure).{0,180}(?:invalid|must not).{0,180}(?:packet|all (?:required )?fields?|complete)/i);
+	expect(policy, message).toMatch(/(?:fail|failure).{0,180}(?:(?:invalid|must not).{0,180}(?:packet|all (?:required )?fields?|complete)|(?:packet|all (?:required )?fields?|complete).{0,180}(?:invalid|must not))/i);
 	expect(policy, message).toMatch(/(?:consolidat|deduplicat).{0,100}root causes?|root causes?.{0,100}(?:consolidat|deduplicat)/i);
 }
 
