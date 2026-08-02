@@ -166,10 +166,14 @@ resolved absolute path must stay **inside the pack root**:
 
 A path *may* use `..` segments (e.g. a tool YAML pointing at `../../lib/SharedRenderer.js`, a
 panel pointing at `../lib/Panel.js`) **as long as the resolved path stays within the pack
-root**. Absolute paths, drive-absolute paths, and leading `/`/`\` are rejected at parse time;
-anything that resolves outside the pack root is rejected (realpath + symlink aware) at serve /
-import time. This is what makes shared `lib/` modules reachable from every declaring file
-without weakening the containment invariant.
+root**. Absolute paths, drive-absolute paths, and leading `/`/`\` are rejected at parse time.
+Before resolution, the candidate must be strictly inside either the configured pack-root spelling
+or the root's canonical spelling; after resolution, it must be strictly inside the canonical root.
+The paired checks permit legitimate filesystem aliases (such as macOS `/var` ↔ `/private/var`),
+reject an in-pack symlink that escapes, and do not trust an outside mutable symlink merely because
+it currently targets an in-pack file. A missing candidate may pass the spelling check so callers
+can retain their normal not-found handling; other resolution failures fail closed. This keeps shared
+`lib/` modules reachable without weakening the containment invariant.
 
 ## Step 1 — the tool YAML (renderer + actions only)
 

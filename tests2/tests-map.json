@@ -2073,6 +2073,15 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/core/project-registry-root-paths.test.ts",
+      "reason": "Cross-platform project registry path identity coverage for dialect-aware canonicalization, containment, and case evidence.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [
