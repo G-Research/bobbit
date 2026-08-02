@@ -2,7 +2,8 @@ import { i18n } from "@mariozechner/mini-lit";
 import { Select } from "@mariozechner/mini-lit/dist/Select.js";
 import { html, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
-import { gatewayFetch } from "../../app/api.js";
+import { gatewayFetch } from "../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../shared/base-path.js";
 import { getPiAiProviders } from "../../app/pi-ai-lazy.js";
 import "../components/CustomProviderCard.js";
 import "../components/ProviderKeyInput.js";
@@ -38,7 +39,7 @@ export class ProvidersModelsTab extends SettingsTab {
 
 	private async loadCustomProviders() {
 		try {
-			const res = await gatewayFetch("/api/custom-providers");
+			const res = await gatewayFetch(gatewayRoute("/api/custom-providers"));
 			if (res.ok) {
 				this.customProviders = await res.json();
 			}
@@ -68,7 +69,7 @@ export class ProvidersModelsTab extends SettingsTab {
 		this.requestUpdate();
 
 		try {
-			const res = await gatewayFetch("/api/models");
+			const res = await gatewayFetch(gatewayRoute("/api/models"));
 			if (res.ok) {
 				const models = await res.json();
 				const providerModels = models.filter((m: any) => m.provider === provider.name);
@@ -180,7 +181,7 @@ export class ProvidersModelsTab extends SettingsTab {
 		this.requestUpdate();
 
 		try {
-			const res = await gatewayFetch("/api/models");
+			const res = await gatewayFetch(gatewayRoute("/api/models"));
 			if (res.ok) {
 				const models = await res.json();
 				const providerModels = models.filter((m: any) => m.provider === provider.name);
@@ -204,7 +205,7 @@ export class ProvidersModelsTab extends SettingsTab {
 		}
 
 		try {
-			const res = await gatewayFetch(`/api/custom-providers/${provider.id}`, { method: "DELETE" });
+			const res = await gatewayFetch(gatewayRoute(`/api/custom-providers/${provider.id}`), { method: "DELETE" });
 			if (!res.ok) throw new Error("Failed to delete provider");
 			await this.loadCustomProviders();
 			this.requestUpdate();

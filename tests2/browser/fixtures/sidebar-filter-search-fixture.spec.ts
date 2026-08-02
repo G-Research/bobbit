@@ -12,6 +12,7 @@ const SIDEBAR_SRC = path.resolve("src/app/sidebar.ts");
 const RENDER_HELPERS_SRC = path.resolve("src/app/render-helpers.ts");
 const STATE_SRC = path.resolve("src/app/state.ts");
 const API_SRC = path.resolve("src/app/api.ts");
+const GATEWAY_FETCH_SRC = path.resolve("src/app/gateway-fetch.ts");
 const SIDEBAR_FILTERS_SRC = path.resolve("src/ui/components/sidebar-filters.ts");
 const SEARCH_BOX_SRC = path.resolve("src/ui/components/SearchBox.ts");
 const SEARCH_STATUS_DOT_SRC = path.resolve("src/app/components/search-status-dot.ts");
@@ -34,6 +35,7 @@ test.beforeAll(() => {
 			RENDER_HELPERS_SRC,
 			STATE_SRC,
 			API_SRC,
+			GATEWAY_FETCH_SRC,
 			SIDEBAR_FILTERS_SRC,
 			SEARCH_BOX_SRC,
 			SEARCH_STATUS_DOT_SRC,
@@ -84,6 +86,21 @@ async function expectSessionHidden(page: Page, sessionId: string, message: strin
 test.describe("Sidebar filter/search lightweight fixture", () => {
 	test.beforeEach(async ({ page }) => {
 		await loadFixture(page);
+	});
+
+	test("render-time session updates use the mounted active gateway connection", async ({ page }) => {
+		const ids = await fixtureIds(page);
+		await expect.poll(() => page.evaluate((sessionId) =>
+			(window as any).__sidebarFilterSearchRequests.find((request: any) =>
+				request.method === "PATCH" && request.url.endsWith(`/api/sessions/${sessionId}`)), ids.readSession), {
+			timeout: 5_000,
+			message: `${MARK}: rendering should persist the assigned session colour through the gateway boundary`,
+		}).toMatchObject({
+			url: `https://fixture.test/team/bobbit/api/sessions/${ids.readSession}`,
+			method: "PATCH",
+			credentials: null,
+			authorization: "Bearer fixture-token",
+		});
 	});
 
 	test("filter defaults and localStorage persistence render with the single-project sidebar", async ({ page }) => {

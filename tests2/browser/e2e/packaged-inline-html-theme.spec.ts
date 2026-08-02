@@ -177,47 +177,6 @@ async function attachReport(testInfo: TestInfo, report: RuntimeReport): Promise<
 	});
 }
 
-/** Confirm the child ran its release sequence without treating its pipe state as
- * process termination. `ChildProcess` keeps pipe handles open until the child
- * itself closes, even when the child closes its stdout/stderr file descriptors. */
-function requestStdioRelease(child: ChildProcess): Promise<void> {
-	return new Promise((resolveRelease, rejectRelease) => {
-		let settled = false;
-		let timeout: NodeJS.Timeout | undefined;
-		const finish = (error?: Error) => {
-			if (settled) return;
-			settled = true;
-			if (timeout) clearTimeout(timeout);
-			child.removeListener("message", onMessage);
-			child.removeListener("error", onError);
-			child.removeListener("exit", onExit);
-			if (error) rejectRelease(error);
-			else resolveRelease();
-		};
-		const onMessage = (message: unknown) => {
-			if (message === "stdio-released") finish();
-		};
-		const onError = (error: Error) => finish(error);
-		const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
-			finish(new Error(`stdio-release fixture exited before acknowledging release (code: ${code}, signal: ${signal})`));
-		};
-		timeout = setTimeout(() => {
-			finish(new Error("stdio-release fixture did not acknowledge the IPC release request"));
-		}, 2_000);
-
-		child.on("message", onMessage);
-		child.once("error", onError);
-		child.once("exit", onExit);
-		if (!child.send) {
-			finish(new Error("stdio-release fixture has no IPC channel"));
-			return;
-		}
-		child.send("release-stdio", error => {
-			if (error) finish(new Error(`failed to send stdio-release request: ${error.message}`, { cause: error }));
-		});
-	});
-}
-
 test.describe("packed Bobbit inline HTML runtime", () => {
 	// A retry repeats npm pack + a clean dependency install and can hide a real
 	// packaging regression behind a second independently-built consumer.
@@ -269,7 +228,17 @@ test.describe("packed Bobbit inline HTML runtime", () => {
 		const runtime = capturePackagedCli(child);
 		const actualClose = once(child, "close");
 		await once(child.stdout!, "data");
-		await requestStdioRelease(child);
+		const stdoutReleased = once(child.stdout!, "close");
+		const stderrReleased = once(child.stderr!, "close");
+		const stdioReleased = once(child, "message");
+		child.send("release-stdio");
+		expect((await stdioReleased)[0], "fixture must acknowledge its stdio release").toBe("stdio-released");
+		// Windows keeps the parent pipe handle open after the child closes its
+		// descriptor. Release the inherited endpoints locally as well, then wait
+		// for their close events before proving that this is not process closure.
+		child.stdout?.destroy();
+		child.stderr?.destroy();
+		await Promise.all([stdoutReleased, stderrReleased]);
 
 		try {
 			expect(runtime.closed, "stdio closure must not be recorded as process closure").toBe(false);

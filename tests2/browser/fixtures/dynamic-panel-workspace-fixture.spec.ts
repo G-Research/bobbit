@@ -4,6 +4,8 @@ import path from "node:path";
 import { buildBundle } from "../fixtures/build-bundle.js";
 
 const SHELL = path.resolve("tests/ui-fixtures/fixture-shell.html");
+const FIXTURE_ORIGIN = "http://fixture.localhost";
+const FIXTURE_SHELL_URL = `${FIXTURE_ORIGIN}/fixture-shell.html`;
 const ENTRY = path.resolve("tests/ui-fixtures/dynamic-panel-workspace-fixture-entry.ts");
 const BUNDLE_DIR = path.resolve(".bobbit/tmp/ui-fixtures");
 const BUNDLE = path.join(BUNDLE_DIR, "dynamic-panel-workspace-fixture-bundle.js");
@@ -58,7 +60,16 @@ test.beforeAll(() => {
 });
 
 async function loadFixture(page: Page): Promise<void> {
-	await page.goto(`file://${SHELL.replace(/\\/g, "/")}`);
+	await page.route(`${FIXTURE_ORIGIN}/**`, async (route) => {
+		const pathname = new URL(route.request().url()).pathname;
+		await route.fulfill({
+			contentType: "text/html",
+			body: pathname === "/fixture-shell.html"
+				? fs.readFileSync(SHELL, "utf8")
+				: "<!doctype html><html><body>Fixture preview</body></html>",
+		});
+	});
+	await page.goto(FIXTURE_SHELL_URL);
 	await page.addScriptTag({ path: BUNDLE });
 	await page.waitForFunction(() => (window as any).__dynamicPanelWorkspaceReady === true, null, { timeout: 10_000 });
 	await page.evaluate(() => (window as any).__resetDynamicPanelWorkspaceFixture());

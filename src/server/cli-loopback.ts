@@ -1,3 +1,9 @@
+/** Return whether a listener host is a loopback name/address. */
+export function isLoopbackHost(host: string): boolean {
+	const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+	return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+}
+
 /** Normalise a bind address to a same-host loopback peer for callbacks.
  *
  * Wildcard bind addresses (`0.0.0.0`, `::`) are valid LISTEN addresses but not

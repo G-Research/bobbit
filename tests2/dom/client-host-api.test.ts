@@ -16,9 +16,17 @@ import { afterEach, describe, expect, it } from "vitest";
 // TDZ. (esbuild's bundler hoisting hid this; the vitest ESM loader does not.)
 import "../../src/app/session-manager.js";
 import { getHostApi } from "../../src/app/host-api.js";
+import {
+	__resetGatewayConnectionForTests,
+	commitGatewayConnection,
+} from "../../src/app/gateway-fetch.js";
 import { registerSurfaceTokenMinter, unregisterSurfaceTokenMinter } from "../../src/app/surface-token-bridge.js";
 
-afterEach(() => { document.body.innerHTML = ""; });
+afterEach(() => {
+	document.body.innerHTML = "";
+	localStorage.clear();
+	__resetGatewayConnectionForTests();
+});
 
 function caps() {
 	const h = getHostApi("sess-1", "tu-1");
@@ -136,8 +144,7 @@ async function packSurfaceTokenMintFallsBackToBackgroundWebSocket() {
 		if (msg.type === "auth") emit({ type: "auth_ok", surfaceTokenKey: "authority-key" });
 		if (msg.type === "ext_surface_token") emit({ type: "ext_surface_token_result", requestId: msg.requestId, ok: true, token: "background-token" });
 	}, sent);
-	localStorage.setItem("gateway.url", "https://gateway.test");
-	localStorage.setItem("gateway.token", "gateway-token");
+	commitGatewayConnection("https://gateway.test", "gateway-token");
 	window.fetch = (async (input: any, init?: any) => {
 		const url = String(input);
 		if (url.includes("/api/ext/surface-token")) return new Response("unexpected pack-bound REST mint", { status: 500 });
@@ -171,8 +178,7 @@ async function staleRegisteredSurfaceTokenMinterFallsBackToBackgroundWebSocket()
 		if (msg.type === "ext_surface_token") emit({ type: "ext_surface_token_result", requestId: msg.requestId, ok: true, token: "background-token" });
 	}, sent);
 	registerSurfaceTokenMinter("sess-stale-minter", async () => { throw new Error("pack surface-token mint: WebSocket not connected"); });
-	localStorage.setItem("gateway.url", "https://gateway.test");
-	localStorage.setItem("gateway.token", "gateway-token");
+	commitGatewayConnection("https://gateway.test", "gateway-token");
 	window.fetch = (async (input: any, init?: any) => {
 		const url = String(input);
 		if (url.includes("/api/ext/store/stats")) {

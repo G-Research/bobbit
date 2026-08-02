@@ -109,8 +109,15 @@ import {
 	setActiveSidePanelTab as setServerActiveSidePanelTab,
 	setSidePanelSizeMode as setServerSidePanelSizeMode,
 } from "./side-panel-workspace.js";
+import {
+	appUrl,
+	gatewayNativeTransportSupport,
+	gatewayUrl,
+	previewRouteFromStoredValue,
+} from "./gateway-fetch.js";
+import { gatewayRoute } from "../shared/base-path.js";
 
-const bobbitIcon = html`<img src="/favicon.svg" alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
+const bobbitIcon = html`<img src=${appUrl("/favicon.svg")} alt="" style="width:20px;height:18px;image-rendering:pixelated;" />`;
 
 let settingsAppInfo: AppInfo | null = null;
 let settingsAppInfoLoadStarted = false;
@@ -1239,8 +1246,8 @@ function previewEntryFromTab(tab: PanelWorkspaceTab): string {
 	const tabState = (tab.state || {}) as Record<string, unknown>;
 	const direct = recordValue(tabState, "entry") || recordValue(source, "entry");
 	if (direct) return direct;
-	const url = recordValue(tabState, "url") || recordValue(source, "url");
-	const match = /^\/preview\/[^/]+\/(.+)$/.exec(url);
+	const url = previewRouteFromStoredValue(recordValue(tabState, "url") || recordValue(source, "url"));
+	const match = url ? /^\/preview\/[^/]+\/(?:_artifact\/[^/]+\/)?([^?#]+)(?:[?#].*)?$/.exec(url) : null;
 	return match ? safeDecode(match[1]) : "";
 }
 
@@ -1249,8 +1256,8 @@ function previewSessionIdFromTab(tab: PanelWorkspaceTab): string {
 	const tabState = (tab.state || {}) as Record<string, unknown>;
 	const direct = recordValue(source, "sessionId") || recordValue(tabState, "sessionId");
 	if (direct) return direct;
-	const url = recordValue(tabState, "url") || recordValue(source, "url");
-	const match = /^\/preview\/([^/]+)\//.exec(url);
+	const url = previewRouteFromStoredValue(recordValue(tabState, "url") || recordValue(source, "url"));
+	const match = url ? /^\/preview\/([^/]+)\//.exec(url) : null;
 	return match ? safeDecode(match[1]) : "";
 }
 
@@ -2608,13 +2615,21 @@ export function doRenderApp(): void {
 				</div>
 			`;
 		}
+		const nativeSupport = gatewayNativeTransportSupport();
+		if (!nativeSupport.supported) {
+			return html`
+				<div class="flex-1 min-h-0 flex items-center justify-center p-6 text-muted-foreground text-sm">
+					${nativeSupport.message || "Preview embedding is unavailable for this gateway."}
+				</div>
+			`;
+		}
 		// When the active tab is backed by a persisted artifact, serve directly
 		// from `/preview/<sid>/_artifact/<artifactId>/<entry>` — each artifact's
-		// bytes live at a stable URL, so switching tabs requires no mount POST
-		// (just an iframe src change, which the browser caches across switches).
-		const src = artifactId
+		// bytes live at a stable URL, so switching tabs requires no mount POST.
+		const route = gatewayRoute(artifactId
 			? `/preview/${encodeURIComponent(sid)}/_artifact/${encodeURIComponent(artifactId)}/${encodeURIComponent(entry)}?mtime=${v}`
-			: `/preview/${encodeURIComponent(sid)}/${encodeURIComponent(entry)}?mtime=${v}`;
+			: `/preview/${encodeURIComponent(sid)}/${encodeURIComponent(entry)}?mtime=${v}`);
+		const src = gatewayUrl(route);
 		return html`
 			<div style="position:relative;flex:1;min-height:0;">
 				<iframe
@@ -2757,9 +2772,11 @@ export function doRenderApp(): void {
 			if (tabEntry) entry = tabEntry;
 			if (!isLivePreviewTab(tab)) artifactId = recordValue(tabState, "artifactId") || recordValue(source, "artifactId");
 		}
-		return artifactId
+		if (!gatewayNativeTransportSupport().supported) return "";
+		const route = gatewayRoute(artifactId
 			? `/preview/${encodeURIComponent(sid)}/_artifact/${encodeURIComponent(artifactId)}/${encodeURIComponent(entry)}`
-			: `/preview/${encodeURIComponent(sid)}/${encodeURIComponent(entry)}`;
+			: `/preview/${encodeURIComponent(sid)}/${encodeURIComponent(entry)}`);
+		return gatewayUrl(route);
 	};
 
 	const sidePanelPopoutUrl = (tab: UnifiedContentTab) => {
@@ -2768,16 +2785,23 @@ export function doRenderApp(): void {
 		return `#/session/${encodeURIComponent(sid)}/panel/${encodeURIComponent(tab.id)}`;
 	};
 
-	const sidePanelPopoutButton = (tab: UnifiedContentTab) => tab.kind === "preview" ? html`
-		<a
-			href=${previewUrlForTab(tab)}
-			target="_blank"
-			rel="noopener noreferrer"
+	const sidePanelPopoutButton = (tab: UnifiedContentTab) => tab.kind === "preview"
+		? gatewayNativeTransportSupport().supported ? html`
+			<a
+				href=${previewUrlForTab(tab)}
+				target="_blank"
+				rel="noopener noreferrer"
+				class=${sidePanelChromeButtonClass}
+				style=${sidePanelChromeButtonStyle}
+				title="Open preview in new tab"
+			>${icon(ExternalLink, "sm")}</a>
+		` : html`<button
 			class=${sidePanelChromeButtonClass}
 			style=${sidePanelChromeButtonStyle}
-			title="Open preview in new tab"
-		>${icon(ExternalLink, "sm")}</a>
-	` : html`<a
+			title=${gatewayNativeTransportSupport().message || "Preview popout unavailable"}
+			disabled
+		>${icon(ExternalLink, "sm")}</button>`
+		: html`<a
 			href=${sidePanelPopoutUrl(tab)}
 			target="_blank"
 			rel="noopener noreferrer"

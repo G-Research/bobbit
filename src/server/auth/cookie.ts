@@ -186,14 +186,17 @@ export function tryAuth(req: http.IncomingMessage, store: CookieStore): boolean 
 export function issueCookie(
 	res: http.ServerResponse,
 	store: CookieStore,
-	opts: { localhost?: boolean } = {},
+	opts: { localhost?: boolean; basePath?: string } = {},
 ): string {
 	const value = store.mint();
+	// The gateway passes its normalized deployment mount. Keep this crypto/auth
+	// module independent from application configuration and filesystem state.
+	const cookiePath = opts.basePath ? `${opts.basePath}/` : "/";
 	const attrs = [
 		`${COOKIE_NAME}=${value}`,
 		"HttpOnly",
 		"SameSite=Lax",
-		"Path=/",
+		`Path=${cookiePath}`,
 		`Max-Age=${COOKIE_MAX_AGE_SECONDS}`,
 	];
 	if (!opts.localhost) attrs.push("Secure");
@@ -213,7 +216,7 @@ export function issueIfMissing(
 	req: http.IncomingMessage,
 	res: http.ServerResponse,
 	store: CookieStore,
-	opts: { localhost?: boolean } = {},
+	opts: { localhost?: boolean; basePath?: string } = {},
 ): string | undefined {
 	const existing = parseCookies(req)[COOKIE_NAME];
 	const verification = existing === undefined ? undefined : store.verify(existing);

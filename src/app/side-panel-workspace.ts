@@ -1,4 +1,5 @@
-import { gatewayFetch } from "./gateway-fetch.js";
+import { gatewayFetch, gatewayNativeTransportSupport, gatewayUrl, previewRouteFromStoredValue } from "./gateway-fetch.js";
+import { gatewayRoute } from "../shared/base-path.js";
 import { activeSessionId, renderApp, state } from "./state.js";
 import {
 	INBOX_PANEL_TAB_ID,
@@ -167,8 +168,15 @@ function normalizeTab(raw: unknown, sessionId: string): SidePanelWorkspaceTab | 
 		const entry = previewEntryLabel(stringValue(source.entry) || previewTabEntryFromId(id) || undefined);
 		if (!entry) return null;
 		const version = positiveInt(source.version) ?? previewTabVersionFromId(id);
+		const previewUrl = previewRouteFromStoredValue(source.url) || previewRouteFromStoredValue(base.state?.url);
+		const previewState = base.state ? { ...base.state } : undefined;
+		if (previewState) {
+			delete previewState.url;
+			if (previewUrl) previewState.url = previewUrl;
+		}
 		return {
 			...base,
+			state: previewState,
 			kind,
 			source: {
 				type: "preview",
@@ -180,7 +188,7 @@ function normalizeTab(raw: unknown, sessionId: string): SidePanelWorkspaceTab | 
 				...(stringValue(source.artifactId) ? { artifactId: stringValue(source.artifactId) } : {}),
 				...(stringValue(source.contentHash) ? { contentHash: stringValue(source.contentHash) } : {}),
 				...(stringValue(source.path) ? { path: stringValue(source.path) } : {}),
-				...(stringValue(source.url) ? { url: stringValue(source.url) } : {}),
+				...(previewUrl ? { url: previewUrl } : {}),
 				...(stringValue(source.toolUseId) ? { toolUseId: stringValue(source.toolUseId) } : {}),
 				...(typeof source.blockIndex === "number" ? { blockIndex: source.blockIndex } : {}),
 			},
@@ -482,6 +490,12 @@ function sidePanelTabFromLegacyMirror(tab: PanelWorkspaceTab, sessionId: string)
 		const version = idVersion ?? positiveInt(source.version) ?? positiveInt(tabState.version);
 		const historical = source.historical === true || tabState.historical === true || idVersion != null;
 		const contentHash = previewContentHashFromTab(tab);
+		const previewUrl = previewRouteFromStoredValue(source.url) || previewRouteFromStoredValue(tabState.url);
+		const nextState = cloneJsonRecord(tab.state);
+		if (nextState) {
+			delete nextState.url;
+			if (previewUrl) nextState.url = previewUrl;
+		}
 		const id = historical && version ? `preview:entry:${encodeComponent(entry)}:v:${version}` : `preview:entry:${encodeComponent(entry)}`;
 		return {
 			id,
@@ -497,11 +511,11 @@ function sidePanelTabFromLegacyMirror(tab: PanelWorkspaceTab, sessionId: string)
 				...(stringValue(source.artifactId) ? { artifactId: stringValue(source.artifactId) } : {}),
 				...(contentHash ? { contentHash } : {}),
 				...(stringValue(source.path) ? { path: stringValue(source.path) } : {}),
-				...(stringValue(source.url) ? { url: stringValue(source.url) } : {}),
+				...(previewUrl ? { url: previewUrl } : {}),
 				...(stringValue(source.toolUseId) ? { toolUseId: stringValue(source.toolUseId) } : {}),
 				...(typeof source.blockIndex === "number" ? { blockIndex: source.blockIndex } : {}),
 			},
-			state: cloneJsonRecord(tab.state),
+			state: nextState,
 			updatedAt,
 		};
 	}
@@ -926,10 +940,13 @@ export function sidePanelSizeMode(sessionId?: string | null): SidePanelSizeMode 
 
 export function sidePanelPopoutUrl(tab: SidePanelWorkspaceTab): string {
 	if (tab.kind === "preview") {
+		if (!gatewayNativeTransportSupport().supported) return "";
 		const source = tab.source as PreviewSource;
 		const entry = encodeComponent(source.entry || "inline.html");
-		if (source.artifactId) return `/preview/${encodeComponent(source.sessionId)}/_artifact/${encodeComponent(source.artifactId)}/${entry}`;
-		return `/preview/${encodeComponent(source.sessionId)}/${entry}`;
+		const route = gatewayRoute(source.artifactId
+			? `/preview/${encodeComponent(source.sessionId)}/_artifact/${encodeComponent(source.artifactId)}/${entry}`
+			: `/preview/${encodeComponent(source.sessionId)}/${entry}`);
+		return gatewayUrl(route);
 	}
 	return `#/session/${encodeComponent(tab.source.sessionId)}/panel/${encodeComponent(tab.id)}`;
 }

@@ -55,7 +55,8 @@ export async function loadAttachment(
 
 	// Convert source to ArrayBuffer
 	if (typeof source === "string") {
-		// It's a URL - fetch it
+		// Deliberately fetch the user-supplied external/content URL as-is; this is
+		// not a gateway route and must not be resolved through gatewayFetch.
 		const response = await fetch(source);
 		if (!response.ok) {
 			throw new Error(i18n("Failed to fetch file"));

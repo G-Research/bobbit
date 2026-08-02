@@ -1,7 +1,7 @@
 import { icon } from "@mariozechner/mini-lit";
 import { ExternalLink, FileText, GitFork, Link, Pencil, RotateCcw, Trash2 } from "lucide";
 import type { TemplateResult } from "lit";
-import { copySidebarLink, gatewayFetch, refreshAgentSession, refreshSessions, sessionDeepLink, type SidebarCopyLinkTitle } from "./api.js";
+import { copySidebarLink, gatewayFetch, refreshAgentSession, refreshSessions, sessionDeepLink, sessionPathDeepLink, type SidebarCopyLinkTitle } from "./api.js";
 import { listLauncherEntrypoints, runResolvedLauncherEntrypoint, type LauncherDispatchResult, type SpawnLaunchTarget } from "./pack-entrypoints.js";
 import { confirmAction, showConnectionError, showRenameDialog } from "./dialogs-lazy.js";
 import { setHashRoute } from "./routing.js";
@@ -484,5 +484,5 @@ function openExternalUrl(url: string): void {
 }
 
 export function openSessionInNewWindow(sessionId: string): void {
-	openExternalUrl(sessionDeepLink(sessionId));
+	openExternalUrl(sessionPathDeepLink(sessionId));
 }

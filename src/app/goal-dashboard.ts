@@ -24,6 +24,8 @@ import { renderPlanTab, computePlanStepsForGoal } from "./goal-dashboard-plan-ta
 import { renderChildrenTab } from "./goal-dashboard-children-tab.js";
 import { ensureGitStatusWidget } from "./lazy-widgets.js";
 import { ensureMarkdownBlock } from "../ui/lazy/markdown-block.js";
+import { activeGatewayConnection, gatewayWsUrl } from "./gateway-fetch.js";
+import { gatewayRoute } from "../shared/base-path.js";
 
 // Module-init trigger — `goal-dashboard.ts` is itself a lazy route chunk,
 // so this runs when the user first navigates to a goal dashboard. The
@@ -576,9 +578,7 @@ let roleDropdownOpen = false;
 
 function connectDashboardWs(): void {
 	dashboardWsIntentionalClose = false;
-	const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-	const wsUrl = `${protocol}//${location.host}/ws/viewer`;
-	const ws = new WebSocket(wsUrl);
+	const ws = new WebSocket(gatewayWsUrl(gatewayRoute("/ws/viewer")));
 	dashboardWs = ws;
 
 	const subscribeToCurrentGoal = () => {
@@ -588,7 +588,7 @@ function connectDashboardWs(): void {
 	};
 
 	ws.addEventListener("open", () => {
-		const token = localStorage.getItem("gateway.token");
+		const { token } = activeGatewayConnection();
 		if (token) {
 			ws.send(JSON.stringify({ type: "auth", token, ...(currentGoalId ? { goalId: currentGoalId } : {}) }));
 		}
@@ -2170,7 +2170,6 @@ function renderMetaRows(goal: Goal): TemplateResult {
 				<div class="meta-row dashboard-git-row">
 					<git-status-widget
 						.goalId=${goal.id}
-						.token=${localStorage.getItem("gateway.token") || ""}
 						.branch=${gs?.branch ?? branch}
 						.primaryBranch=${gs?.primaryBranch ?? "master"}
 						.primaryRef=${gs?.primaryRef ?? `origin/${gs?.primaryBranch ?? "master"}`}

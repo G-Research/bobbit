@@ -1,6 +1,8 @@
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html, nothing } from "lit";
 import { PanelRight } from "lucide";
+import { previewRouteFromStoredValue } from "../../../app/gateway-fetch.js";
+import { gatewayRoute, type GatewayRoute } from "../../../shared/base-path.js";
 import { renderHeader, getToolState } from "../renderer-registry.js";
 import * as previewPanel from "../../../app/preview-panel.js";
 import type { ToolRenderContext, ToolRenderer, ToolRenderResult } from "../types.js";
@@ -31,7 +33,7 @@ interface SnapshotBlock {
 type ParsedSnapshot =
 	| { kind: "inline"; html: string }
 	| { kind: "file"; path: string }
-	| { kind: "preview"; url: string; path: string; entry?: string; contentHash?: string; artifactId?: string };
+	| { kind: "preview"; url: GatewayRoute; path: string; entry?: string; contentHash?: string; artifactId?: string };
 
 function parseSnapshotText(text: string): ParsedSnapshot | null {
 	if (text.startsWith(PREVIEW_SNAPSHOT_MARKER_V3)) {
@@ -39,11 +41,13 @@ function parseSnapshotText(text: string): ParsedSnapshot | null {
 		try {
 			const parsed = JSON.parse(body);
 			if (parsed && parsed.kind === "preview" && typeof parsed.url === "string" && parsed.url) {
+				const url = previewRouteFromStoredValue(parsed.url);
+				if (!url) return null;
 				const contentHash = normalizeContentHash(parsed.contentHash);
 				const artifactId = normalizeArtifactId(parsed.artifactId ?? parsed.artifact_id ?? parsed.aid);
 				return {
 					kind: "preview",
-					url: parsed.url,
+					url,
 					path: typeof parsed.path === "string" ? parsed.path : "",
 					entry: typeof parsed.entry === "string" ? parsed.entry : undefined,
 					...(contentHash ? { contentHash } : {}),
@@ -198,7 +202,7 @@ function previewTabSource(
 	return source;
 }
 
-function previewTabState(parsed: ParsedSnapshot, entry: string | undefined, mtime: number, url: string | undefined, params: PreviewOpenParams | undefined): Record<string, unknown> {
+function previewTabState(parsed: ParsedSnapshot, entry: string | undefined, mtime: number, url: GatewayRoute | undefined, params: PreviewOpenParams | undefined): Record<string, unknown> {
 	const restorable = restorableSnapshot(parsed, params);
 	const contentHash = parsed.kind === "preview" ? parsed.contentHash : undefined;
 	const state: Record<string, unknown> = {
@@ -451,7 +455,7 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				};
 
 				// 3. Enable preview mode (idempotent)
-				const patchResp = await gatewayFetch(`/api/sessions/${sessionId}`, {
+				const patchResp = await gatewayFetch(gatewayRoute(`/api/sessions/${sessionId}`), {
 					method: "PATCH",
 					body: JSON.stringify({ preview: true }),
 				});
@@ -463,10 +467,10 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				// and v1/v2 markers keep their existing mount-endpoint fallback.
 				let mtimeFromPost: number | undefined;
 				let contentHashFromPost: string | undefined;
-				let urlFromPost: string | undefined;
+				let urlFromPost: GatewayRoute | undefined;
 				let artifactIdFromPost: string | undefined;
 				const postMountSnapshot = async (postBody: Record<string, unknown>) => {
-					const postResp = await gatewayFetch(`/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`, {
+					const postResp = await gatewayFetch(gatewayRoute(`/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`), {
 						method: "POST",
 						body: JSON.stringify(postBody),
 					});
@@ -482,7 +486,9 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 						const data = await postResp.json();
 						if (typeof data?.entry === "string" && data.entry) entry = data.entry;
 						if (typeof data?.mtime === "number") mtimeFromPost = data.mtime;
-						if (typeof data?.url === "string" && data.url) urlFromPost = data.url;
+						if (typeof data?.url === "string" && data.url) {
+							urlFromPost = previewRouteFromStoredValue(data.url) ?? undefined;
+						}
 						contentHashFromPost = normalizeContentHash(data?.contentHash);
 						// The server now persists an immutable artifact on every successful mount
 						// and returns its id. Capture it so the resulting tab can restore by
@@ -499,7 +505,7 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				if (parsed.kind === "preview") {
 					if (!snapshotMatchesCurrent) {
 						if (snapshotArtifactId) {
-							const restoreResp = await gatewayFetch(`/api/preview/artifacts/${encodeURIComponent(snapshotArtifactId)}/restore?sessionId=${encodeURIComponent(sessionId)}`, {
+							const restoreResp = await gatewayFetch(gatewayRoute(`/api/preview/artifacts/${encodeURIComponent(snapshotArtifactId)}/restore?sessionId=${encodeURIComponent(sessionId)}`), {
 								method: "POST",
 								body: JSON.stringify({ artifactId: snapshotArtifactId }),
 							});
@@ -510,7 +516,9 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 							const data = await restoreResp.json().catch(() => ({} as any));
 							if (typeof data?.entry === "string" && data.entry) entry = data.entry;
 							if (typeof data?.mtime === "number") mtimeFromPost = data.mtime;
-							if (typeof data?.url === "string" && data.url) urlFromPost = data.url;
+							if (typeof data?.url === "string" && data.url) {
+								urlFromPost = previewRouteFromStoredValue(data.url) ?? undefined;
+							}
 							if (typeof data?.artifactId === "string" && data.artifactId) artifactIdFromPost = data.artifactId;
 							const restoredHash = normalizeContentHash(data?.contentHash);
 							if (snapshotContentHash && !restoredHash) {

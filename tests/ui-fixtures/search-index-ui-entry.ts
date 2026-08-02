@@ -1,6 +1,9 @@
 import { render } from "lit";
 import { renderSettingsPage } from "../../src/app/settings-page.js";
+import { commitGatewayConnection } from "../../src/app/gateway-fetch.js";
 import { setRenderApp, state } from "../../src/app/state.js";
+
+const FIXTURE_GATEWAY_BASE_URL = "https://fixture.test/team/bobbit";
 
 type FetchLogEntry = { url: string; method: string; body: any };
 
@@ -30,6 +33,7 @@ class FixtureWebSocket {
 
 (window as any).WebSocket = FixtureWebSocket;
 window.confirm = () => true;
+commitGatewayConnection(FIXTURE_GATEWAY_BASE_URL, "fixture-token");
 
 function response(body: any, status = 200): Response {
 	return new Response(JSON.stringify(body), {
@@ -38,14 +42,15 @@ function response(body: any, status = 200): Response {
 	});
 }
 
-function requestPath(input: RequestInfo | URL): string {
+function requestUrl(input: RequestInfo | URL): URL {
 	const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-	try {
-		const url = new URL(raw, window.location.href);
-		return `${url.pathname}${url.search}`;
-	} catch {
-		return raw;
-	}
+	return new URL(raw);
+}
+
+function mountedRoute(url: URL): string {
+	const gateway = new URL(FIXTURE_GATEWAY_BASE_URL);
+	if (url.origin !== gateway.origin || !url.pathname.startsWith(`${gateway.pathname}/`)) return "";
+	return `${url.pathname.slice(gateway.pathname.length)}${url.search}`;
 }
 
 function parseBody(init?: RequestInit): any {
@@ -65,16 +70,17 @@ function searchStatsBody() {
 }
 
 window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-	const url = requestPath(input);
+	const request = requestUrl(input);
+	const route = mountedRoute(request);
 	const method = (init?.method || "GET").toUpperCase();
 	const body = parseBody(init);
-	fetchLog.push({ url, method, body });
+	fetchLog.push({ url: request.href, method, body });
 
-	if (url.startsWith("/api/search/stats")) return response(searchStatsBody());
-	if (url === "/api/search/rebuild" && method === "POST") return response({ queued: true }, 202);
-	if (url === "/api/search/compact" && method === "POST") return response({ ok: true });
-	if (url.startsWith("/api/maintenance/orphaned-index-rows")) return response(orphanRows);
-	if (url === "/api/maintenance/cleanup-index-rows" && method === "POST") return response({ deleted: 0 });
+	if (route.startsWith("/api/search/stats")) return response(searchStatsBody());
+	if (route === "/api/search/rebuild" && method === "POST") return response({ queued: true }, 202);
+	if (route === "/api/search/compact" && method === "POST") return response({ ok: true });
+	if (route.startsWith("/api/maintenance/orphaned-index-rows")) return response(orphanRows);
+	if (route === "/api/maintenance/cleanup-index-rows" && method === "POST") return response({ deleted: 0 });
 	return response({});
 }) as typeof window.fetch;
 

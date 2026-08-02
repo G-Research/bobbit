@@ -10,6 +10,7 @@ import type { Attachment } from "../utils/attachment-utils.js";
 import { i18n } from "../utils/i18n.js";
 import { getAppStorage } from "../storage/app-storage.js";
 import { gatewayFetch } from "../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../shared/base-path.js";
 import { listLauncherEntrypoints, runLauncherEntrypoint } from "../../app/pack-entrypoints.js";
 import "./AttachmentTile.js";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
@@ -215,7 +216,7 @@ export class MessageEditor extends LitElement {
 		try {
 			let url = `/api/slash-skills?cwd=${encodeURIComponent(this.cwd)}`;
 			if (this.projectId) url += `&projectId=${encodeURIComponent(this.projectId)}`;
-			const res = await gatewayFetch(url);
+			const res = await gatewayFetch(gatewayRoute(url));
 			if (res.ok) {
 				const data = await res.json();
 				this._slashSkills = this._withPackEntrypoints(mergeBuiltInSlashCommands(data.skills || []));
@@ -357,7 +358,7 @@ export class MessageEditor extends LitElement {
 			if (this.sessionId) url += `&sessionId=${encodeURIComponent(this.sessionId)}`;
 			if (query) url += `&q=${encodeURIComponent(query)}`;
 			url += `&limit=50`;
-			const res = await gatewayFetch(url);
+			const res = await gatewayFetch(gatewayRoute(url));
 			if (res.ok) {
 				const data = await res.json();
 				this._atFiles = Array.isArray(data.files)

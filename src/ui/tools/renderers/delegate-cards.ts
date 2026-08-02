@@ -61,12 +61,6 @@ export function statusIcon(status: string): string {
 	return "✗";
 }
 
-// ── Auth token ──
-
-export function getAuthToken(): string | null {
-	try { return localStorage.getItem("gateway.token") || null; } catch { return null; }
-}
-
 // ── Render primitives ──
 
 /** Render a session link for a delegate (navigates in-place to the session) */

@@ -7,6 +7,7 @@
 import { LitElement, html, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { gatewayFetch } from "../../app/gateway-fetch.js";
+import { gatewayRoute } from "../../shared/base-path.js";
 
 @customElement("children-goal-state-pill")
 export class ChildrenGoalStatePill extends LitElement {
@@ -66,7 +67,7 @@ export class ChildrenGoalStatePill extends LitElement {
 	private async _refetch(): Promise<void> {
 		if (!this.goalId) return;
 		try {
-			const resp = await gatewayFetch(`/api/goals/${this.goalId}`);
+			const resp = await gatewayFetch(gatewayRoute(`/api/goals/${this.goalId}`));
 			if (!resp.ok) return;
 			const body = await resp.json().catch(() => null);
 			const goal = body?.goal || body;

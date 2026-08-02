@@ -4,6 +4,8 @@ import path from "node:path";
 import { buildBundle } from "../fixtures/build-bundle.js";
 
 const SHELL = path.resolve("tests/ui-fixtures/fixture-shell.html");
+const FIXTURE_ORIGIN = "http://fixture.localhost";
+const FIXTURE_SHELL_URL = `${FIXTURE_ORIGIN}/fixture-shell.html`;
 const ENTRY = path.resolve("tests/ui-fixtures/preview-panel-entry.ts");
 const DYNAMIC_WORKSPACE_ENTRY = path.resolve("tests/ui-fixtures/dynamic-panel-workspace-fixture-entry.ts");
 const BUNDLE_DIR = path.resolve(".bobbit/tmp/ui-fixtures");
@@ -42,7 +44,16 @@ test.beforeAll(() => {
 });
 
 async function loadFixture(page: Page): Promise<void> {
-	await page.goto(`file://${SHELL.replace(/\\/g, "/")}`);
+	await page.route(`${FIXTURE_ORIGIN}/**`, async (route) => {
+		const pathname = new URL(route.request().url()).pathname;
+		await route.fulfill({
+			contentType: "text/html",
+			body: pathname === "/fixture-shell.html"
+				? fs.readFileSync(SHELL, "utf8")
+				: "<!doctype html><html><body>Fixture preview</body></html>",
+		});
+	});
+	await page.goto(FIXTURE_SHELL_URL);
 	await page.addScriptTag({ path: BUNDLE });
 	await page.waitForFunction(() => (window as any).__dynamicPanelWorkspaceReady === true, null, { timeout: 10_000 });
 	await page.evaluate(() => (window as any).__resetDynamicPanelWorkspaceFixture());
@@ -121,7 +132,7 @@ test.describe("Preview panel fixture", () => {
 
 		const iframe = page.locator(".goal-preview-panel iframe").first();
 		await expect(iframe).toBeVisible({ timeout: 5_000 });
-		await expect(iframe).toHaveAttribute("src", new RegExp(`^/preview/${SESSION_A}/report\\.html\\?mtime=\\d+$`));
+		await expect(iframe).toHaveAttribute("src", new RegExp(`^${FIXTURE_ORIGIN}/preview/${SESSION_A}/report\\.html\\?mtime=\\d+$`));
 		const initialSrc = await iframe.getAttribute("src");
 		expect(initialSrc).not.toContain("/api/preview/render");
 
@@ -129,7 +140,7 @@ test.describe("Preview panel fixture", () => {
 		await expect(openLinks).toHaveCount(1);
 		const openLink = openLinks.first();
 		await expect(openLink).toBeVisible({ timeout: 5_000 });
-		await expect(openLink).toHaveAttribute("href", `/preview/${SESSION_A}/report.html`);
+		await expect(openLink).toHaveAttribute("href", `${FIXTURE_ORIGIN}/preview/${SESSION_A}/report.html`);
 		await expect(openLink).toHaveAttribute("target", "_blank");
 		await expect(openLink).toHaveAttribute("rel", /noopener.*noreferrer|noreferrer.*noopener/);
 		expect(await openLink.getAttribute("href")).not.toMatch(/[?#]mtime=/);
@@ -218,6 +229,6 @@ test.describe("Preview panel fixture", () => {
 
 		await simulatePreviewChanged(page, "next.html", hashOf("c"));
 		await expect(page.locator(PREVIEW_TAB), "new preview entry should reopen the tab").toHaveCount(1, { timeout: 5_000 });
-		await expect(page.locator(".goal-preview-panel iframe").first()).toHaveAttribute("src", new RegExp(`^/preview/${SESSION_A}/next\\.html\\?mtime=\\d+$`));
+		await expect(page.locator(".goal-preview-panel iframe").first()).toHaveAttribute("src", new RegExp(`^${FIXTURE_ORIGIN}/preview/${SESSION_A}/next\\.html\\?mtime=\\d+$`));
 	});
 });

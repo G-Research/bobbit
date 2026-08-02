@@ -29,6 +29,9 @@ import {
 	updateSidePanelTab,
 	type SidePanelWorkspaceTab,
 } from "./side-panel-workspace.js";
+import { gatewayFetch, gatewayNativeTransportSupport, gatewayUrl, previewRouteFromStoredValue } from "./gateway-fetch.js";
+import { gatewayRoute } from "../shared/base-path.js";
+import { showHeaderToast } from "./header-toast.js";
 
 // WP-E: SSE subscription to per-session preview mount events.
 // The gateway watches <stateDir>/preview/<sid>/ and emits a `preview-changed`
@@ -127,6 +130,10 @@ function sidePanelTabFromLegacy(tab: PanelWorkspaceTab, sessionId: string): Side
 		const rawVersion = typeof source.version === "number" ? source.version : typeof tabState.version === "number" ? tabState.version : undefined;
 		const version = idVersion ?? ((source.historical === true || tabState.historical === true) ? rawVersion : undefined);
 		const contentHash = normalizePreviewContentHash(source.contentHash) || normalizePreviewContentHash(tabState.contentHash);
+		const previewUrl = previewRouteFromStoredValue(source.url) || previewRouteFromStoredValue(tabState.url);
+		const nextState = { ...(tab.state || {}) } as Record<string, unknown>;
+		delete nextState.url;
+		if (previewUrl) nextState.url = previewUrl;
 		const historical = source.historical === true || tabState.historical === true || idVersion != null;
 		const id = historical && typeof version === "number" && version > 0 ? previewVersionedTabId(entry, version) : tab.id;
 		return {
@@ -143,11 +150,11 @@ function sidePanelTabFromLegacy(tab: PanelWorkspaceTab, sessionId: string): Side
 				...(typeof source.artifactId === "string" ? { artifactId: source.artifactId } : {}),
 				...(contentHash ? { contentHash } : {}),
 				...(typeof source.path === "string" ? { path: source.path } : {}),
-				...(typeof source.url === "string" ? { url: source.url } : {}),
+				...(previewUrl ? { url: previewUrl } : {}),
 				...(typeof source.toolUseId === "string" ? { toolUseId: source.toolUseId } : {}),
 				...(typeof source.blockIndex === "number" ? { blockIndex: source.blockIndex } : {}),
 			},
-			state: tab.state,
+			state: nextState,
 			updatedAt,
 		};
 	}
@@ -307,6 +314,9 @@ export function selectHtmlPreviewTab(args: {
 	const isVersionedHistorical = identity.historical;
 	const id = identity.id;
 	const title = identity.title;
+	const decodedPreviewUrl = previewRouteFromStoredValue(args.url)
+		|| previewRouteFromStoredValue(args.state?.url)
+		|| previewRouteFromStoredValue(args.source?.url);
 	const source: Record<string, unknown> = {
 		type: "html-preview",
 		sessionId,
@@ -317,8 +327,10 @@ export function selectHtmlPreviewTab(args: {
 		...args.state,
 		entry,
 		mtime: args.mtime,
-		url: args.url,
 	};
+	delete source.url;
+	delete tabState.url;
+	if (decodedPreviewUrl) tabState.url = decodedPreviewUrl;
 	if (contentHash) {
 		source.contentHash = contentHash;
 		tabState.contentHash = contentHash;
@@ -456,9 +468,8 @@ export function startPreviewSubscription(sessionId: string): void {
 	// preview-changed event. 404 = no mount yet (skip).
 	void (async () => {
 		try {
-			const r = await fetch(
+			const r = await gatewayFetch(
 				`/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`,
-				{ credentials: "include" },
 			);
 			if (!r.ok) return;
 			if (currentSid !== sessionId) return; // session switched mid-flight
@@ -493,8 +504,15 @@ export function startPreviewSubscription(sessionId: string): void {
 		} catch { /* ignore bootstrap failures */ }
 	})();
 
+	const nativeSupport = gatewayNativeTransportSupport();
+	if (!nativeSupport.supported) {
+		if (nativeSupport.message) showHeaderToast(nativeSupport.message);
+		es = null;
+		return;
+	}
+
 	try {
-		es = new EventSource(`/api/sessions/${encodeURIComponent(sessionId)}/preview-events`, {
+		es = new EventSource(gatewayUrl(gatewayRoute(`/api/sessions/${encodeURIComponent(sessionId)}/preview-events`)), {
 			withCredentials: true,
 		});
 		es.addEventListener("preview-changed", (ev: MessageEvent) => {

@@ -81,7 +81,7 @@ test.describe("Search/preview/archive API migrations", () => {
 			expect(resp.status).toBe(200);
 			expect(resp.headers.get("content-type") || "").toMatch(/text\/html/);
 			const body = await resp.text();
-			expect(body).toContain(`<base href="/preview/${sessionId}/">`);
+			expect(body).toContain(`<base data-bobbit-preview-base href="/preview/${sessionId}/">`);
 			expect(body).toContain('data-bobbit-preview-theme="snapshot"');
 			expect(body).toMatch(/:root\s*{[^}]*--background\s*:/s);
 				expect(body).toMatch(/:root\s*{[^}]*--foreground\s*:/s);

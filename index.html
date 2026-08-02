@@ -3,6 +3,12 @@
 	<head>
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+		<!--
+			Runtime mount prefix. The production gateway rewrites this exact marker;
+			Vite development leaves it empty so its UI remains root-mounted.
+			Keep it above every icon, stylesheet, script, and manifest reference.
+		-->
+		<script>window.__BOBBIT_BASE_PATH__ = "";</script>
 		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 
 		<meta name="theme-color" content="#2b2d2b" />
@@ -194,12 +200,14 @@
 				try {
 					var params = new URLSearchParams(window.location.search);
 					var token = params.get('token') || localStorage.getItem('gateway.token');
+					var base = window.__BOBBIT_BASE_PATH__ || '';
 					var href = (token && token !== 'localhost')
-						? '/manifest.json?token=' + encodeURIComponent(token)
-						: '/manifest.json';
+						? base + '/manifest.json?token=' + encodeURIComponent(token)
+						: base + '/manifest.json';
 					var link = document.createElement('link');
 					link.rel = 'manifest';
 					link.id = 'pwa-manifest';
+					link.crossOrigin = 'use-credentials';
 					link.href = href;
 					document.head.appendChild(link);
 				} catch (e) { /* ignore */ }

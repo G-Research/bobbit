@@ -10,13 +10,19 @@ const BUNDLE = path.join(BUNDLE_DIR, "search-index-ui-bundle.js");
 const SETTINGS_SRC = path.resolve("src/app/settings-page.ts");
 const SEARCH_DOT_SRC = path.resolve("src/app/components/search-status-dot.ts");
 const API_SRC = path.resolve("src/app/api.ts");
+const GATEWAY_FETCH_SRC = path.resolve("src/app/gateway-fetch.ts");
+const FIXTURE_GATEWAY_BASE_URL = "https://fixture.test/team/bobbit";
+
+function gatewayUrl(route: string): string {
+	return `${FIXTURE_GATEWAY_BASE_URL}${route}`;
+}
 
 test.beforeAll(() => {
 	fs.mkdirSync(BUNDLE_DIR, { recursive: true });
 	buildBundle({
 		entry: ENTRY,
 		outfile: BUNDLE,
-		deps: [ENTRY, SETTINGS_SRC, SEARCH_DOT_SRC, API_SRC],
+		deps: [ENTRY, SETTINGS_SRC, SEARCH_DOT_SRC, API_SRC, GATEWAY_FETCH_SRC],
 	});
 });
 
@@ -56,7 +62,7 @@ test.describe("Search Index maintenance panel fixture", () => {
 
 		await page.getByRole("button", { name: "Rebuild Index" }).click();
 		await expect.poll(async () =>
-			(await searchFetchLog(page)).some(e => e.url === "/api/search/rebuild" && e.method === "POST"),
+			(await searchFetchLog(page)).some(e => e.url === gatewayUrl("/api/search/rebuild") && e.method === "POST"),
 		).toBe(true);
 
 		await expect(page.locator('[data-status-dot="yellow"]').first()).toBeVisible({ timeout: 5_000 });
@@ -93,7 +99,7 @@ test.describe("Search Index maintenance panel fixture", () => {
 
 		await redPill.locator("[data-status-dot-retry]").click();
 		await expect.poll(async () =>
-			(await searchFetchLog(page)).some(e => e.url === "/api/search/rebuild" && e.method === "POST"),
+			(await searchFetchLog(page)).some(e => e.url === gatewayUrl("/api/search/rebuild") && e.method === "POST"),
 		).toBe(true);
 		await expect(page.locator('[data-status-dot="yellow"]').first()).toBeVisible({ timeout: 5_000 });
 	});
@@ -114,7 +120,8 @@ test.describe("Search Index maintenance panel fixture", () => {
 
 		await page.locator('[data-action="scan-orphan-index-rows"]').click();
 		await expect.poll(async () =>
-			(await searchFetchLog(page)).some(e => e.url.startsWith("/api/maintenance/orphaned-index-rows")),
+			(await searchFetchLog(page)).some(e =>
+				e.url === gatewayUrl("/api/maintenance/orphaned-index-rows") && e.method === "GET"),
 		).toBe(true);
 
 		await expect(page.getByText("2 orphaned rows.")).toBeVisible({ timeout: 5_000 });
