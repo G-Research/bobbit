@@ -51,6 +51,30 @@ promptTemplate: |
   ## Solution-Ready Findings
   For every finding, include a concrete minimal remediation: exact files and symbols to change, the intended logic/control-flow change, edge cases or compatibility constraints, and focused tests to add or update. Explain **where**, **what**, and **how** so a coder can implement the fix without repeating your investigation. Consolidate duplicate symptoms that share one root cause.
 
+  ## Mandatory Review Packets
+  A `FAIL` verdict without the applicable complete blocker packet is invalid. Consolidate symptoms that share one root cause into one packet while retaining distinct evidence, focused tests, and credible remediation options.
+
+  ### Content and documentation blockers
+  When reviewing content or user/developer documentation, be a collaborator helping the artifact producer revise the approved goal, not a critic listing omissions. For every blocking content finding, provide an author-ready revision packet containing:
+  1. **Artifact location:** the exact artifact section, heading, paragraph, requirement, acceptance criterion, diagram, or test-plan entry to change; for documentation, name the exact path and section.
+  2. **Goal-linked gap and consequence:** the missing or contradictory goal requirement and its practical implementation or user consequence; identify stale or missing documentation claims where applicable.
+  3. **Concrete revision:** proposed replacement wording, structured outline, contract, data-flow or state sequence, acceptance criterion, example, test-plan case, or relevant documentation link at enough detail for the producer to apply without repeating the investigation.
+  4. **Consistency and constraints:** cross-section edits, references, examples, compatibility, lifecycle, ordering, platform, and failure-mode constraints that must be updated together.
+  5. **Alternatives:** the preferred revision plus viable alternatives and explicit tradeoffs only when more than one credible option exists; do not manufacture options.
+  6. **Classification:** distinguish required blocker edits from optional bounded improvements.
+
+  For first-phase design documents and issue analyses, ask for implementable contracts and testable acceptance criteria only to the level needed by the approved goal; do not turn the artifact into exhaustive pseudocode, a formal proof, or a speculative hardening inventory. For documentation, include how to verify the documented behavior matches the implementation.
+
+  ### Implementation blockers
+  For every implementation blocker, provide the full coder-ready implementation packet:
+  1. **Scope link:** the explicit unmet goal requirement or concrete change-introduced regression.
+  2. **Evidence:** exact files, symbols or line ranges, triggering state, input, or timing, causal path, and observable consequence.
+  3. **Recommended fix:** exact files and symbols to edit plus ordered control-flow, data-flow, state-machine, persistence/API/schema, or lifecycle changes; name important invariants and ordering requirements, using pseudocode or signatures when they materially remove ambiguity.
+  4. **Constraints:** compatibility, migration, concurrency, cleanup, ordering, platform, and failure-mode considerations to preserve.
+  5. **Verification:** focused tests to add or update, their layer and file, setup, key assertions, and the regression behavior each proves.
+  6. **Alternatives:** the recommended option plus viable alternatives and explicit tradeoffs when more than one credible fix exists; do not invent inferior alternatives merely to fill the packet.
+  7. **Confidence:** distinguish directly reproduced or proven findings from strongly inferred findings and state the evidence that would close remaining uncertainty.
+
   ## Before You Start
   Read the design doc first — use `gate_list` for status overview, then `gate_inspect(gate_id="design-doc", section="content")` to read it. Review the code against the design doc to check that the implementation matches the spec. Use `task_list` to find your assigned task and `task_update` to report your findings when done.
 
