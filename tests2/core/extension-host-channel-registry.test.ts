@@ -199,6 +199,70 @@ export const channels = {
 		}
 	});
 
+	it("admits only one worker outbound operation while the parent send is blocked", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "channel-module-outbound-ack-"));
+		try {
+			const sourceFile = path.join(root, "channels", "terminal.yaml");
+			const moduleFile = path.join(root, "lib", "terminal.mjs");
+			fs.mkdirSync(path.dirname(sourceFile), { recursive: true });
+			fs.mkdirSync(path.dirname(moduleFile), { recursive: true });
+			fs.writeFileSync(moduleFile, `
+export const channels = {
+  terminal: async (ctx) => ({
+    onClientFrame: async () => {
+      await ctx.send({ kind: "text", data: "FIRST_ACK_BOUNDARY" });
+      await ctx.send({ kind: "text", data: "SECOND_AFTER_ACK" });
+    }
+  })
+};
+`, "utf-8");
+			const firstBlocked = new Deferred();
+			const releaseFirst = new Deferred();
+			const secondDelivered = new Deferred();
+			const delivered: unknown[] = [];
+			const moduleHost = new WorkerChannelModuleHost();
+			const registry = new ChannelRegistry({ moduleHost, idGenerator: () => "chan-outbound-ack", idleSweepIntervalMs: false });
+			const declared: ChannelContributionRef = {
+				...contribution(),
+				modulePath: "../lib/terminal.mjs",
+				sourceFile,
+				packRoot: root,
+				handler: "terminal",
+			};
+			await registry.open({
+				sessionId: "sess-1",
+				packId: "pack-a",
+				contribution: declared,
+				clientId: "client-1",
+				client: {
+					onFrame: (frame) => {
+						delivered.push(frame);
+						if (isTextFrameWithMarker(frame, "FIRST_ACK_BOUNDARY")) {
+							firstBlocked.resolve();
+							return releaseFirst.promise;
+						}
+						if (isTextFrameWithMarker(frame, "SECOND_AFTER_ACK")) secondDelivered.resolve();
+					},
+				},
+				openPermit: permit(registry),
+			});
+			const clientFrame = registry.sendFromClient({ sessionId: "sess-1", packId: "pack-a", channelId: "chan-outbound-ack", clientId: "client-1", frame: { kind: "text", data: "go" } });
+			await firstBlocked.promise;
+			assert.deepEqual(delivered, [{ kind: "text", data: "FIRST_ACK_BOUNDARY" }], "the second worker operation cannot reach the parent before the first acknowledgement");
+
+			releaseFirst.resolve();
+			await secondDelivered.promise;
+			await clientFrame;
+			assert.deepEqual(delivered, [
+				{ kind: "text", data: "FIRST_ACK_BOUNDARY" },
+				{ kind: "text", data: "SECOND_AFTER_ACK" },
+			]);
+			await registry.dispose("test done");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("wires worker module targeted sends to only the attaching client", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "channel-module-send-to-"));
 		try {
@@ -426,7 +490,10 @@ export const channels = {
 			// during the explicit drain window so replay is ordered before exit/close.
 			exitCb?.({ code: 0 });
 			dataCb?.(marker);
-			await registry.attach({
+			// The replay send is intentionally queued behind the blocked live marker.
+			// Do not await this attach until that acknowledged outbound operation can
+			// advance; doing so would make the test itself hold the required release.
+			const reconnectingAttach = registry.attach({
 				sessionId: "sess-1",
 				packId: "pack-a",
 				channelId: "chan-packaged-terminal",
@@ -443,6 +510,7 @@ export const channels = {
 
 			releaseMarker.resolve();
 			await replayedMarker.promise;
+			await reconnectingAttach;
 			await exitDelivered.promise;
 			await channelClosed.promise;
 

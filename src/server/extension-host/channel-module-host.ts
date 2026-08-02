@@ -92,18 +92,26 @@ export class WorkerChannelModuleHost implements ChannelModuleHost {
 		let openSettled = false;
 		let closed = false;
 		let workerCloseQueued = false;
-		let workerOutbound: Promise<void> = Promise.resolve();
-		const pendingControls = new Map<number, { resolve: () => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> }>();
-		// Worker messages can arrive before the preceding ctx.send() has reached a
-		// blocked client. Keep every worker-originated delivery and close in FIFO
-		// order so the terminal's final text cannot be overtaken by exit/close.
-		const enqueueWorkerOutbound = (operation: () => Promise<void>): void => {
-			workerOutbound = workerOutbound.then(operation, operation).catch(() => undefined);
+		let workerCloseReason: string | undefined;
+		let workerCloseAckId: number | undefined;
+		let workerCloseAckTimer: ReturnType<typeof setTimeout> | undefined;
+		let activeWorkerOutbound: { id: number; kind: "channel-send" | "channel-send-to" | "channel-close" } | undefined;
+		const pendingControls = new Map<number, { kind: "channel-client-frame" | "channel-attach" | "channel-detach" | "channel-close"; resolve: () => void; reject: (err: Error) => void; settled: Promise<void>; timer: ReturnType<typeof setTimeout> }>();
+		const waitForPendingAttaches = async (): Promise<void> => {
+			const settles = [...pendingControls.values()]
+				.filter((pending) => pending.kind === "channel-attach")
+				.map((pending) => pending.settled);
+			await Promise.all(settles);
 		};
 
 		const cleanup = (reason?: string, rejectPending = true): void => {
 			if (closed) return;
 			closed = true;
+			activeWorkerOutbound = undefined;
+			if (workerCloseAckTimer) clearTimeout(workerCloseAckTimer);
+			workerCloseAckTimer = undefined;
+			workerCloseAckId = undefined;
+			workerCloseReason = undefined;
 			this.live.delete(worker);
 			for (const pending of pendingControls.values()) {
 				clearTimeout(pending.timer);
@@ -111,12 +119,59 @@ export class WorkerChannelModuleHost implements ChannelModuleHost {
 				else pending.resolve();
 			}
 			pendingControls.clear();
+			// Tell a still-running worker to reject both its acknowledged operation and
+			// worker-local backlog before termination. Termination remains the hard
+			// resource bound if it cannot process this final message.
+			try { worker.postMessage({ kind: "channel-outbound-abort", error: reason ?? "channel handler worker closed" }); } catch { /* worker already gone */ }
 			for (const pty of ptys.values()) {
 				try { pty.kill(reason ?? "channel handler worker closed"); } catch { /* best effort */ }
 			}
 			ptys.clear();
 			killChildren(children);
 			void worker.terminate();
+		};
+
+		const acknowledgeWorkerOutbound = (id: number, ok: boolean, error?: unknown): boolean => {
+			try {
+				worker.postMessage({ kind: "channel-outbound-result", id, ok, error: error instanceof Error ? error.message : error === undefined ? undefined : String(error) });
+				return true;
+			} catch {
+				return false;
+			}
+		};
+
+		const runWorkerOutbound = (id: number, kind: "channel-send" | "channel-send-to" | "channel-close", operation: () => Promise<void>): void => {
+			// The worker admission queue permits exactly one posted operation. Treat a
+			// violation as a broken worker protocol rather than creating another parent
+			// queue (which would retain arbitrary pack frames in the gateway process).
+			if (activeWorkerOutbound || !Number.isSafeInteger(id) || id < 1) {
+				acknowledgeWorkerOutbound(id, false, new Error("channel outbound protocol violation"));
+				cleanup("channel outbound protocol violation");
+				return;
+			}
+			activeWorkerOutbound = { id, kind };
+			void operation().then(
+				() => {
+					if (activeWorkerOutbound?.id !== id) return;
+					activeWorkerOutbound = undefined;
+					if (kind === "channel-close") {
+						workerCloseAckId = id;
+						if (!acknowledgeWorkerOutbound(id, true)) {
+							cleanup("channel handler worker closed before close acknowledgement", false);
+							return;
+						}
+						workerCloseAckTimer = setTimeout(() => cleanup("channel handler close acknowledgement timed out", false), this.timeoutMs);
+						return;
+					}
+					if (!closed) acknowledgeWorkerOutbound(id, true);
+				},
+				(err) => {
+					if (activeWorkerOutbound?.id !== id) return;
+					activeWorkerOutbound = undefined;
+					if (!closed) acknowledgeWorkerOutbound(id, false, err);
+					if (kind === "channel-close") cleanup(err instanceof Error ? err.message : String(err), false);
+				},
+			);
 		};
 
 		const invokePty = async (pathParts: unknown, args: unknown[]): Promise<unknown> => {
@@ -163,11 +218,20 @@ export class WorkerChannelModuleHost implements ChannelModuleHost {
 			if (closed) return Promise.reject(new Error("channel handler worker closed"));
 			const id = ++controlSeq;
 			return new Promise<void>((resolve, reject) => {
+				let settle!: () => void;
+				const settled = new Promise<void>((done) => { settle = done; });
 				const timer = setTimeout(() => {
 					if (!pendingControls.delete(id)) return;
+					settle();
 					reject(new ChannelError(504, "channel_timeout", "channel handler operation timed out"));
 				}, this.timeoutMs);
-				pendingControls.set(id, { resolve, reject, timer });
+				pendingControls.set(id, {
+					kind: op,
+					resolve: () => { settle(); resolve(); },
+					reject: (err) => { settle(); reject(err); },
+					settled,
+					timer,
+				});
 				worker.postMessage({ kind: op, id, ...payload });
 			});
 		};
@@ -199,7 +263,14 @@ export class WorkerChannelModuleHost implements ChannelModuleHost {
 							try { await invokeControl("channel-close", { reason }); }
 							finally { cleanup(reason ?? "channel closed"); }
 						},
-						dispose: async (reason) => { cleanup(reason ?? "channel disposed", false); },
+						dispose: async (reason) => {
+							// Handler-originated ctx.close() re-enters here while its outbound
+							// close operation is active. Keep the worker alive just long enough
+							// to receive that operation's acknowledgement; all other disposal is
+							// immediate.
+							if (activeWorkerOutbound?.kind !== "channel-close" && workerCloseAckId === undefined) cleanup(reason ?? "channel disposed", false);
+						},
+
 					};
 					resolve(session);
 					return;
@@ -223,18 +294,32 @@ export class WorkerChannelModuleHost implements ChannelModuleHost {
 					return;
 				}
 				if (msg.kind === "channel-send") {
-					enqueueWorkerOutbound(async () => { await req.ctx.send(msg.frame as HostChannelFrame); });
+					runWorkerOutbound(msg.id, "channel-send", async () => { await req.ctx.send(msg.frame as HostChannelFrame); });
 					return;
 				}
 				if (msg.kind === "channel-send-to") {
-					enqueueWorkerOutbound(async () => { await req.ctx.sendTo(String(msg.clientId ?? ""), msg.frame as HostChannelFrame); });
+					runWorkerOutbound(msg.id, "channel-send-to", async () => { await req.ctx.sendTo(String(msg.clientId ?? ""), msg.frame as HostChannelFrame); });
 					return;
 				}
 				if (msg.kind === "channel-close") {
-					if (!workerCloseQueued) {
-						workerCloseQueued = true;
-						enqueueWorkerOutbound(async () => { await req.ctx.close(typeof msg.reason === "string" ? msg.reason : undefined); });
+					if (workerCloseQueued) {
+						acknowledgeWorkerOutbound(msg.id, false, new Error("channel is already closing"));
+						return;
 					}
+					workerCloseQueued = true;
+					workerCloseReason = typeof msg.reason === "string" ? msg.reason : undefined;
+					runWorkerOutbound(msg.id, "channel-close", async () => {
+						// A reconnect may be replaying data through onAttach while the PTY
+						// reaches its drain boundary. Let that already-started attach finish
+						// before the terminal close removes its client attachment.
+						await waitForPendingAttaches();
+						await req.ctx.close(workerCloseReason);
+					});
+					return;
+				}
+				if (msg.kind === "channel-outbound-result-received") {
+					if (typeof msg.id !== "number" || workerCloseAckId !== msg.id) return;
+					cleanup(workerCloseReason, false);
 					return;
 				}
 				if (msg.kind === "channel-audit") { req.ctx.audit(isRecord(msg.event) ? msg.event as any : { type: "channel.cleanup", reason: "invalid_worker_audit" }); return; }
