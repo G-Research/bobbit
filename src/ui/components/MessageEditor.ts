@@ -113,7 +113,7 @@ export class MessageEditor extends LitElement {
 	@property() showModelSelector = true;
 	@property() showThinkingSelector = true;
 	@property() onInput?: (value: string) => void;
-	@property() onSend?: (input: string, attachments: Attachment[]) => void;
+	@property() onSend?: (input: string, attachments: Attachment[]) => void | Promise<void>;
 	@property() onAbort?: () => void;
 	@property() onModelSelect?: () => void;
 	@property() onThinkingChange?: (level: ThinkingLevel) => void;
@@ -146,11 +146,13 @@ export class MessageEditor extends LitElement {
 	 *  present. Shown as an inline error; cleared on the next edit or when the
 	 *  attachments change. */
 	@state() private _steerError = "";
-	/** Reentrancy guard for {@link handleSteerShortcut}. True while an async steer
-	 *  send is mid-flight so repeated Ctrl/Cmd+Enter presses during the readiness
-	 *  await cannot steer the same composer snapshot twice. Plain field — NOT
-	 *  `@state`, it must not trigger a re-render. */
-	private _steerInFlight = false;
+	/** Shared submit-lock guarding BOTH the steer ({@link handleSteerShortcut}) and
+	 *  normal-send ({@link handleSend}) lifecycles against concurrent/duplicate
+	 *  submission. True while an async submit is mid-flight so a pending steer blocks
+	 *  a normal send and vice-versa (either would otherwise dispatch the same composer
+	 *  snapshot twice during the readiness await). Plain field — NOT `@state`, it must
+	 *  not trigger a re-render. */
+	private _submitInFlight = false;
 	@state() private isRecording = false;
 	private fileInputRef = createRef<HTMLInputElement>();
 
@@ -1034,7 +1036,8 @@ export class MessageEditor extends LitElement {
 		}
 	};
 
-	private handleSend = () => {
+	private handleSend = async () => {
+		if (this._submitInFlight) return;
 		const text = this.value;
 		// S31: reject an oversized send BEFORE anything irreversible (the
 		// 'message-send' event below tombstones the saved draft, and onSend clears
@@ -1073,15 +1076,21 @@ export class MessageEditor extends LitElement {
 			}, { body: packSlashLaunch.body });
 			return;
 		}
-		// Dispatch a composed event that escapes shadow DOM — used by
-		// session-manager for draft cleanup without monkey-patching.
-		this.dispatchEvent(new CustomEvent("message-send", { bubbles: true, composed: true }));
-		this.onSend?.(text, this.attachments);
-		// Reset history browsing state after send
-		this._historyIndex = -1;
-		this._savedDraft = "";
-		// Add to history (fire and forget)
-		this.addToHistory(text);
+	// Dispatch a composed event that escapes shadow DOM — used by
+		// session-manager for draft cleanup without monkey-patching. Take the shared
+		// submit-lock so a pending steer can't run concurrently (and vice-versa).
+		this._submitInFlight = true;
+		try {
+			this.dispatchEvent(new CustomEvent("message-send", { bubbles: true, composed: true }));
+			// Reset history browsing state after send
+			this._historyIndex = -1;
+			this._savedDraft = "";
+			// Add to history (fire and forget)
+			void this.addToHistory(text);
+			await this.onSend?.(text, this.attachments);
+		} finally {
+			this._submitInFlight = false;
+		}
 	};
 
 	/** Ctrl/Cmd+Enter: send the current text through the STEER path. Text-only:
@@ -1100,17 +1109,16 @@ export class MessageEditor extends LitElement {
 			this._steerError = MessageEditor.STEER_ATTACHMENT_ERROR;
 			return;
 		}
-		// Reentrancy guard: while the async readiness/send await is pending the composer
-		// stays enabled, so a second Ctrl/Cmd+Enter (or key auto-repeat) would re-enter
-		// with the same unchanged snapshot and steer the identical text twice. Bail if a
-		// steer is already in flight. Plain field (NOT @state) — it must not trigger a
-		// re-render.
-		if (this._steerInFlight) return;
+		// Shared submit-lock: while the async readiness/send await is pending the composer
+		// stays enabled, so a second Ctrl/Cmd+Enter (or key auto-repeat) — or a normal send
+		// via handleSend — would re-enter with the same unchanged snapshot and submit the
+		// identical text twice. Bail if any submit (steer or normal) is already in flight.
+		if (this._submitInFlight) return;
 		const text = this.value;
 		if (!text.trim()) return; // non-empty text required
 		this._steerError = "";
 		this._sendSizeError = "";
-		this._steerInFlight = true;
+		this._submitInFlight = true;
 		try {
 			// Await readiness + send BEFORE any irreversible lifecycle work. A failed or
 			// cancelled preflight leaves the draft, text, and history fully intact.
@@ -1122,7 +1130,11 @@ export class MessageEditor extends LitElement {
 			void this.addToHistory(text);
 			// Clear + tombstone the draft ONLY if the composer still holds exactly what we
 			// sent. A mid-flight text edit or a newly added attachment must be preserved.
-			if (this.value === text && this.attachments.length === 0) {
+			// `!processingFiles`: a file load started during the readiness await sets
+			// processingFiles=true but hasn't populated `attachments` yet, so the length
+			// check alone would pass and wipe the text draft out from under the pending
+			// attachment. Preserve the composer text while a file is mid-processing.
+			if (this.value === text && this.attachments.length === 0 && !this.processingFiles) {
 				this.dispatchEvent(new CustomEvent("message-send", { bubbles: true, composed: true }));
 				this.value = "";
 				this.onInput?.(this.value);
@@ -1133,7 +1145,7 @@ export class MessageEditor extends LitElement {
 				}
 			}
 		} finally {
-			this._steerInFlight = false;
+			this._submitInFlight = false;
 		}
 	};
 

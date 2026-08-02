@@ -2509,9 +2509,7 @@ export class AgentInterface extends LitElement {
 							.onFilesChange=${(files: Attachment[]) => {
 								this._setAttachmentDraft(files);
 							}}
-							.onSend=${(input: string, attachments: Attachment[]) => {
-								this.sendMessage(input, attachments);
-							}}
+							.onSend=${(input: string, attachments: Attachment[]) => this.sendMessage(input, attachments)}
 							.onSteerSend=${(text: string) => this._steerSend(text)}
 							.onAbort=${() => session.abort()}
 							.onSteer=${(msg: any) => {

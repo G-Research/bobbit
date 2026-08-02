@@ -347,6 +347,80 @@ describe("MessageEditor Ctrl/Cmd+Enter steer shortcut", () => {
 		expect(spies.onSteerSend).toEqual(["steer once", "steer twice"]);
 	});
 
+	it("a pending steer blocks the normal-send path (cross-path steer\u2192send)", async () => {
+		const { el, spies } = await mount();
+		let resolveSteer!: (v: boolean) => void;
+		el.onSteerSend = (t: string) => {
+			spies.onSteerSend.push(t);
+			return new Promise<boolean>((r) => { resolveSteer = r; });
+		};
+		await setValue(el, "steer first");
+
+		// Steer now in flight (shared submit-lock held).
+		dispatchKey(el, "Enter", { ctrlKey: true });
+		await Promise.resolve();
+		expect(spies.onSteerSend).toEqual(["steer first"]);
+
+		// A normal send (plain Enter) while the steer is pending must NOT fire onSend.
+		await key(el, "Enter");
+		expect(spies.onSend).toEqual([]);
+
+		// Resolve the steer; the lock releases and a subsequent normal send works.
+		resolveSteer(true);
+		await settle(el);
+		await setValue(el, "normal after");
+		await key(el, "Enter");
+		expect(spies.onSend).toEqual(["normal after"]);
+	});
+
+	it("a pending normal send blocks the steer path (cross-path send\u2192steer)", async () => {
+		const { el, spies } = await mount();
+		let resolveSend!: () => void;
+		el.onSend = (t: string) => {
+			spies.onSend.push(t);
+			return new Promise<void>((r) => { resolveSend = r; });
+		};
+		await setValue(el, "send first");
+
+		// Normal send now in flight (shared submit-lock held).
+		dispatchKey(el, "Enter");
+		await Promise.resolve();
+		expect(spies.onSend).toEqual(["send first"]);
+
+		// A steer (Ctrl+Enter) while the send is pending must NOT fire onSteerSend.
+		await key(el, "Enter", { ctrlKey: true });
+		expect(spies.onSteerSend).toEqual([]);
+
+		// Resolve the send; the lock releases and a subsequent steer works.
+		resolveSend();
+		await settle(el);
+		await key(el, "Enter", { ctrlKey: true });
+		expect(spies.onSteerSend).toEqual(["send first"]);
+	});
+
+	it("a file mid-processing during steer preflight preserves the text draft (Defect 2)", async () => {
+		const { el } = await mount();
+		let resolveSteer!: (v: boolean) => void;
+		let sends = 0;
+		el.addEventListener("message-send", () => { sends++; });
+		el.onSteerSend = () => new Promise<boolean>((r) => { resolveSteer = r; });
+		await setValue(el, "steer with pending file");
+
+		// Fire the shortcut; the steer is still pending.
+		dispatchKey(el, "Enter", { ctrlKey: true });
+		await Promise.resolve();
+		// A file load starts mid-preflight: processingFiles flips true but attachments
+		// has not been populated yet (length still 0).
+		el.processingFiles = true;
+		resolveSteer(true);
+		await settle(el);
+
+		// Text preserved (not wiped by the length-0 check) and no draft tombstone fired.
+		expect(el.value).toBe("steer with pending file");
+		expect(sends).toBe(0);
+		el.processingFiles = false; // cleanup
+	});
+
 	it("handleSend clears a stale steer-attachment error (D2)", async () => {
 		const { el, spies } = await mount();
 		// Set the recovery text first (an input event of its own would clear the
