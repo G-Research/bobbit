@@ -362,9 +362,34 @@ function signalRecordingBlockingCommand(
   return `rm -f ${termFile}; trap 'printf TERM > ${termFile}' TERM; printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; while :; do sleep 2147483647 & wait $!; done`;
 }
 
-function normalCommand(label: string): string {
+function normalCommand(label: string, emitLargeOutput = false): string {
   const fifo = `/tmp/bobbit-verify-${label}.fifo`;
-  return `rm -f ${fifo}; mkfifo ${fifo}; printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; IFS= read -r _ < ${fifo}; rm -f ${fifo}`;
+  const postReadinessOutput = emitLargeOutput
+    ? `head -c 9217 /dev/zero | tr '\\000' X; printf '\\n'; __i=1; while [ "$__i" -le 128 ]; do printf 'POST_READY_LINE:${label}:%s\\n' "$__i"; __i=$((__i + 1)); done; printf 'POST_READY_DRAINED:${label}\\n';`
+    : "";
+  // Keep the first post-readiness record deliberately newline-free and larger
+  // than the stream decoder's 8 KiB authority-frame bound. Normal user output
+  // must never be confused with a control frame or make terminal publication
+  // outrun payload/transport cleanup.
+  return `rm -f ${fifo}; mkfifo ${fifo}; printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; IFS= read -r _ < ${fifo}; rm -f ${fifo}; ${postReadinessOutput}`;
+}
+
+/**
+ * A same-UID verification payload is an active attacker, not merely a sibling.
+ * On each host-provided target witness pathname it finds the target's nonce in
+ * its live sentinel environment, pre-opens the former predictable readiness
+ * FIFO, and writes B's exact tuple directly to A's private docker-exec FD.
+ *
+ * There is no retry loop: the control FIFO is the explicit test barrier and
+ * each attack inspects /proc exactly once after the host observed A's transport
+ * PID in durable state.
+ */
+function preReleaseTransportForgeryCommand(
+  label: string,
+  termFile: string,
+  controlFifo: string,
+): string {
+  return `rm -f ${termFile} ${controlFifo}; mkfifo ${controlFifo}; trap 'printf TERM > ${termFile}' TERM; printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; __bobbit_own_pgid=$(awk '{print $5}' "/proc/$$/stat" 2>/dev/null); __bobbit_own_witness=; for __bobbit_candidate in /tmp/.bobbit-verif/*/*.ownership.json; do test -f "$__bobbit_candidate" || continue; __bobbit_candidate_pgid=$(sed -n 's/.*"pgid":\\([0-9][0-9]*\\).*/\\1/p' "$__bobbit_candidate"); if test "$__bobbit_candidate_pgid" = "$__bobbit_own_pgid"; then __bobbit_own_witness=$__bobbit_candidate; break; fi; done; test -n "$__bobbit_own_witness" || { printf 'ADVERSARY_OWN_WITNESS_DISCOVERY_FAILED:${label}\\n' >&2; exit 97; }; while IFS= read -r __bobbit_target_witness < ${controlFifo}; do __bobbit_target_pid=; __bobbit_target_nonce=; for __bobbit_environ in /proc/[0-9]*/environ; do if tr '\\000' '\\n' < "$__bobbit_environ" 2>/dev/null | grep -Fqx "BOBBIT_WITNESS=$__bobbit_target_witness"; then __bobbit_target_pid=\${__bobbit_environ#/proc/}; __bobbit_target_pid=\${__bobbit_target_pid%/environ}; __bobbit_target_nonce=$(tr '\\000' '\\n' < "$__bobbit_environ" 2>/dev/null | sed -n 's/^BOBBIT_NONCE=//p'); break; fi; done; test -n "$__bobbit_target_pid" && test -n "$__bobbit_target_nonce" || { printf 'ADVERSARY_TARGET_TRANSPORT_DISCOVERY_FAILED:${label}\\n' >&2; exit 97; }; __bobbit_container=$(sed -n 's/.*"containerId":"\\([^"]*\\)".*/\\1/p' "$__bobbit_own_witness"); __bobbit_sentinel=$(sed -n 's/.*"sentinelPid":\\([0-9][0-9]*\\).*/\\1/p' "$__bobbit_own_witness"); __bobbit_pgid=$(sed -n 's/.*"pgid":\\([0-9][0-9]*\\).*/\\1/p' "$__bobbit_own_witness"); __bobbit_start=$(sed -n 's/.*"startToken":"\\([^"]*\\)".*/\\1/p' "$__bobbit_own_witness"); test -n "$__bobbit_container" && test -n "$__bobbit_sentinel" && test -n "$__bobbit_pgid" && test -n "$__bobbit_start" || { printf 'ADVERSARY_TUPLE_DISCOVERY_FAILED:${label}\\n' >&2; exit 97; }; __bobbit_legacy_ready="$__bobbit_target_witness.ready"; rm -f "$__bobbit_legacy_ready"; mkfifo "$__bobbit_legacy_ready" || exit 97; exec 9<> "$__bobbit_legacy_ready"; printf '.\\n' >&9; printf 'ADVERSARY_PRERELEASE_TRANSPORT_FORGERY:${label}\\n' > "/proc/$__bobbit_target_pid/fd/4"; printf 'BOBBIT_CONTAINER_OWNERSHIP_TUPLE {"containerId":"%s","nonce":"%s","sentinelPid":%s,"pgid":%s,"startToken":"%s"}\\n' "$__bobbit_container" "$__bobbit_target_nonce" "$__bobbit_sentinel" "$__bobbit_pgid" "$__bobbit_start" > "/proc/$__bobbit_target_pid/fd/4" || exit 97; done`;
 }
 
 /**
@@ -995,6 +1020,8 @@ test("container command verification owns only its exact payload and docker-exec
     viewer.close();
     viewer = undefined;
 
+    const concurrentControlFifo = `/tmp/bobbit-verify-concurrent-control-${port}.fifo`;
+    const concurrentTermFile = "/tmp/bobbit-verify-concurrent-b.term";
     const concurrentGoal = await createSandboxGoal(
       gateway,
       projectId,
@@ -1008,9 +1035,10 @@ test("container command verification owns only its exact payload and docker-exec
             {
               name: "b",
               type: "command",
-              run: signalRecordingBlockingCommand(
+              run: preReleaseTransportForgeryCommand(
                 "concurrent-b",
-                "/tmp/bobbit-verify-concurrent-b.term",
+                concurrentTermFile,
+                concurrentControlFifo,
               ),
               timeout: 60,
             },
@@ -1027,14 +1055,15 @@ test("container command verification owns only its exact payload and docker-exec
       "concurrent-b",
       containerId,
     );
-    // Start an independent A step while B remains live in the same shared
-    // container. The malicious payload discovers its own witness/nonce through
-    // /proc, reads B's exact live identity, and atomically writes that tuple
-    // into A's witness.
+
+    // B is already a live same-UID verification step in this shared container.
+    // A has not reached genuine readiness: B receives only A's durable witness
+    // pathname, recovers A's nonce from /proc, poisons the former predictable
+    // readiness FIFO, then writes B's tuple to A's docker-exec transport.
     const concurrentAttackGoal = await createSandboxGoal(
       gateway,
       projectId,
-      "concurrent-substitution",
+      "concurrent-pre-release-forgery",
       [
         {
           id: "a",
@@ -1044,55 +1073,110 @@ test("container command verification owns only its exact payload and docker-exec
             {
               name: "a",
               type: "command",
-              run: witnessSubstitutionCommand("concurrent-a", {
-                witnessFile: second.witnessFile,
-              }),
+              run: blockingCommand("concurrent-pre-release-a"),
               timeout: 60,
             },
           ],
         },
       ],
     );
-    viewer.close();
     viewer = await connectViewer(gateway, concurrentAttackGoal);
-    const first = await startStep(
-      viewer,
+    const attackFrom = viewer.mark();
+    const attackResponse = await api(
       gateway,
-      concurrentAttackGoal,
-      "a",
-      "concurrent-a",
-      containerId,
+      `/api/goals/${concurrentAttackGoal}/gates/a/signal`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          content: "start pre-release transport forgery",
+        }),
+      },
     );
-    expect(first.witness.nonce).not.toBe(second.witness.nonce);
-    expect(first.witness).toMatchObject({
-      containerId: second.witness.containerId,
-      sentinelPid: second.witness.sentinelPid,
-      pgid: second.witness.pgid,
-      startToken: second.witness.startToken,
-    });
+    await expectResponseStatus(attackResponse, 201);
+    const attackSignalId = (await attackResponse.json()).signal.id as string;
+    const preReleaseTarget = await waitForActiveVerification(
+      activePath,
+      attackSignalId,
+      (entry) => {
+        const step = entry?.steps?.[0];
+        return !!step?.pid && typeof step.containerWitnessFile === "string";
+      },
+      "pre-release target did not publish its docker-exec transport identity",
+    );
+    const targetWitnessFile = preReleaseTarget!.steps[0]
+      .containerWitnessFile as string;
+    // This FIFO write is a one-shot release of B's attack, not a readiness poll.
+    docker([
+      "exec",
+      containerId,
+      "/bin/sh",
+      "-c",
+      `printf '%s\\n' ${targetWitnessFile} > ${concurrentControlFifo}`,
+    ]);
+    const preReleaseOutcome = await waitForActiveVerification(
+      activePath,
+      attackSignalId,
+      (entry) => {
+        const step = entry?.steps?.[0];
+        return (
+          step?.containerPayloadCleanupPending === true ||
+          step?.containerOwnershipWitness !== undefined
+        );
+      },
+      "target did not settle either its forged or genuine pre-release ownership boundary",
+    );
+    expect(
+      preReleaseOutcome!.steps[0].containerPayloadCleanupPending,
+      "a concurrent tuple injected into A's docker-exec transport must fail closed",
+    ).toBe(true);
+    expect(
+      docker([
+        "exec",
+        containerId,
+        "/bin/sh",
+        "-c",
+        `test -p ${targetWitnessFile}.ready`,
+      ]),
+      "the concurrent payload must have pre-opened and written the old filesystem readiness path",
+    ).toBe("");
+    expect(
+      preReleaseOutcome!.steps[0].containerOwnershipWitness,
+      "untrusted container output must never become the durable authority",
+    ).toBeUndefined();
+    expect(
+      viewer.messages
+        .slice(attackFrom)
+        .some(
+          (event) =>
+            event.type === "gate_verification_step_output" &&
+            event.signalId === attackSignalId &&
+            typeof event.text === "string" &&
+            event.text.includes("READY:concurrent-pre-release-a:"),
+        ),
+      "a forged readiness path and transport tuple must not release A's payload",
+    ).toBe(false);
     const cancelA = await api(
       gateway,
       `/api/goals/${concurrentAttackGoal}/gates/a/cancel-verification`,
       { method: "POST" },
     );
     await expectResponseStatus(cancelA, 200);
-    assertContainerGone(containerId, first.payloadPid);
-    assertHostGone(first.hostPid);
+    assertHostGone(preReleaseTarget!.steps[0].pid);
     assertNoContainerTermSignal(
       containerId,
-      "/tmp/bobbit-verify-concurrent-b.term",
-      "substituted concurrent step B after cancelling step A",
+      concurrentTermFile,
+      "forging concurrent step B after cancelling target A",
     );
     assertContainerAlive(
       containerId,
       second.payloadPid,
-      "concurrent step B after cancelling step A",
+      "concurrent step B after cancelling forged target A",
     );
     assertHostAlive(second.hostPid);
     assertContainerAlive(
       containerId,
       siblingPid,
-      "unrelated sibling after concurrent cancellation",
+      "unrelated sibling after pre-release concurrent cancellation",
     );
     const cancelB = await api(
       gateway,
@@ -1192,6 +1276,74 @@ test("container command verification owns only its exact payload and docker-exec
     // Recovery closes its viewer before the gateway crash; keep this transition
     // idempotent so restart cleanup cannot dereference the already-cleared viewer.
     viewer?.close();
+    viewer = undefined;
+
+    const largeOutputGoal = await createSandboxGoal(
+      gateway,
+      projectId,
+      "large-post-readiness-output",
+      [
+        {
+          id: "large-post-readiness-output",
+          name: "large-post-readiness-output",
+          dependsOn: [],
+          verify: [
+            {
+              name: "large-post-readiness-output",
+              type: "command",
+              run: normalCommand("large-post-readiness-output", true),
+              timeout: 30,
+            },
+          ],
+        },
+      ],
+    );
+    viewer = await connectViewer(gateway, largeOutputGoal);
+    const largeOutputFrom = viewer.mark();
+    const largeOutputStep = await startStep(
+      viewer,
+      gateway,
+      largeOutputGoal,
+      "large-post-readiness-output",
+      "large-post-readiness-output",
+      containerId,
+    );
+    docker([
+      "exec",
+      containerId,
+      "/bin/sh",
+      "-c",
+      "printf x > /tmp/bobbit-verify-large-post-readiness-output.fifo",
+    ]);
+    const largeOutputDone = await viewer.waitFrom(
+      largeOutputFrom,
+      (event) =>
+        event.type === "gate_verification_complete" &&
+        event.signalId === largeOutputStep.signalId,
+    );
+    expect(largeOutputDone.status).toBe("passed");
+    const largeOutput = viewer.messages
+      .slice(largeOutputFrom)
+      .filter(
+        (event) =>
+          event.type === "gate_verification_step_output" &&
+          event.signalId === largeOutputStep.signalId &&
+          typeof event.text === "string",
+      )
+      .map((event) => event.text)
+      .join("");
+    expect(largeOutput).toContain("X".repeat(8_193));
+    expect(
+      largeOutput.match(/POST_READY_LINE:large-post-readiness-output:/g),
+    ).toHaveLength(128);
+    expect(largeOutput).toContain(
+      "POST_READY_DRAINED:large-post-readiness-output",
+    );
+    // Completion publication is after the exact payload group and its host
+    // docker-exec transport have both been reaped, despite the large stream.
+    assertContainerGone(containerId, largeOutputStep.payloadPid);
+    assertHostGone(largeOutputStep.hostPid);
+    viewer.close();
     viewer = undefined;
 
     // Break the in-container atomic witness path before the wrapper can launch
