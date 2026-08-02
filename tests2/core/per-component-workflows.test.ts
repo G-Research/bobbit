@@ -32,6 +32,12 @@ const COMPONENTS: Component[] = [
 
 const COMPONENT_REFS: WorkflowComponentRef[] = COMPONENTS.map((c) => ({ name: c.name, commands: c.commands }));
 
+const EXPECTED_IMPLEMENTATION_REVIEWS = [
+	{ name: "Spec and regression conformance", role: "spec-auditor" },
+	{ name: "Integrated implementation review", role: "code-reviewer" },
+	{ name: "Security review", role: "security-reviewer" },
+];
+
 describe("buildPerComponentWorkflow", () => {
 	it("scopes all { component, command } refs to the chosen component", () => {
 		const wf = buildPerComponentWorkflow("api", COMPONENTS);
@@ -46,21 +52,26 @@ describe("buildPerComponentWorkflow", () => {
 		}
 	});
 
-	it("inherits design-time gap-analysis, post-impl gap-analysis, and bug hunt from feature", () => {
+	it("uses exactly the consolidated implementation reviews from feature", () => {
 		const wf = buildPerComponentWorkflow("api", COMPONENTS);
-		const designDoc = wf.gates.find((g) => g.id === "design-doc")!;
-		assert.ok(designDoc.verify?.some((s) => s.name === "Gap analysis"));
 		const impl = wf.gates.find((g) => g.id === "implementation")!;
-		const gap = impl.verify?.find((s) => s.name === "Gap analysis");
-		assert.ok(gap);
-		assert.equal(gap!.phase, 2);
-		const bugHunt = impl.verify?.find((s) => s.name === "Bug hunt");
-		assert.ok(bugHunt);
-		assert.equal(bugHunt!.role, "bug-hunter");
+		const reviews = (impl.verify ?? [])
+			.filter((step) => step.type === "llm-review")
+			.map(({ name, role, phase }) => ({ name, role, phase }));
+		assert.deepEqual(reviews, EXPECTED_IMPLEMENTATION_REVIEWS.map((review) => ({ ...review, phase: 2 })));
 	});
 
-	it("derived per-component workflow passes the validator", () => {
+	it("omits unsupported Browser commands while retaining supported scoped commands", () => {
 		const wf = buildPerComponentWorkflow("api", COMPONENTS);
+		const impl = wf.gates.find((g) => g.id === "implementation")!;
+		const commands = (impl.verify ?? []).filter((step) => step.type === "command");
+		assert.ok(!commands.some((step) => step.command === "browser"), "Browser must be omitted when api has no browser command");
+		assert.deepEqual(
+			commands.map((step) => step.command).sort(),
+			["build", "check", "e2e", "unit"],
+		);
+		assert.ok(commands.every((step) => step.component === "api"), "supported commands must remain scoped to api");
+
 		const errors = validateAllWorkflows({ [wf.id]: wf as any }, COMPONENT_REFS);
 		assert.deepEqual(errors, [], `unexpected validator errors: ${JSON.stringify(errors)}`);
 	});
