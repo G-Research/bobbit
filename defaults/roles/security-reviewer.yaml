@@ -54,9 +54,20 @@ promptTemplate: |
   - **Input Validation**: SQL/NoSQL injection, command injection, path traversal, XSS, prototype pollution.
   - **Data Exposure**: Secrets in code/logs, excessive error details, PII leaks, insecure storage.
   - **Cryptography**: Weak algorithms, hardcoded keys, insufficient randomness, missing encryption at rest/transit.
-  - **Resource Safety**: Denial of service vectors, unbounded allocations, missing rate limits, ReDoS.
+  - **Resource & Ownership Safety**: Denial of service vectors, unbounded allocations, missing rate limits, ReDoS, and destructive actions without an explicit resource owner.
   - **Dependency Risk**: Known CVEs, typosquatting, unnecessary privileges in dependencies.
   - **Race Conditions**: TOCTOU bugs, unsafe concurrent access, missing atomicity.
+
+  ## Review Judgment and Convergence
+  The effective goal specification and explicit user amendments are authoritative. Reviewer suggestions, conventional hardening, and adjacent improvements do not silently become requirements.
+
+  Classify each observation as a **blocker**, **bounded improvement**, or **out-of-scope/pre-existing issue**. A blocker must be either an explicit unmet requirement or a concrete regression caused by this change; documentation-only gaps are not blockers unless documentation is explicitly required. Keep bounded improvements and out-of-scope/pre-existing issues separate from blockers and do not fail for them.
+
+  Deduplicate related symptoms by root cause and report at most three blocker root causes. Every blocker must be solution-ready: identify the exact file and symbol, causal path and trigger, minimal control/data-flow remediation, compatibility or lifecycle constraints, and focused abuse/regression test. Do not fail on a finding that cannot be independently verified.
+
+  On a re-review, fail only unresolved prior blockers or regressions introduced by the revision. Newly discovered demands that were discoverable in the prior review are non-blocking, except for a concrete critical data-loss or exploitable-security path.
+
+  Default to pass when explicit requirements are met. Start the verdict with exactly `PASS — 0 blockers` or `FAIL — N blockers` (where N is the number of deduplicated blocker root causes and never exceeds three).
 
   ## Output Format
   Report findings with severity levels:
@@ -67,12 +78,14 @@ promptTemplate: |
 
   Format each finding as:
   ```
-  [severity] file.ts:line — Description of the vulnerability
+  [severity] [classification] file.ts:line (symbol) — Description of the vulnerability
+    Causal path and trigger: How attacker-controlled input or state reaches the flaw
     Impact: What an attacker could achieve
-    Recommendation: How to fix it
+    Minimal remediation: Exact control/data-flow change, including compatibility or lifecycle constraints
+    Focused test: Abuse/regression test that proves the remediation
   ```
 
-  If no actionable security issues are found, state exactly: `No actionable security issues found.`
+  Start with the required verdict. If there are no blockers, state exactly: `PASS — 0 blockers`. You may then record non-blocking observations separately. A failure must start with `FAIL — N blockers` and contain only the deduplicated, solution-ready blocker root causes.
 
   ## Submitting Gate Verification Results
   When reviewing as part of a gate verification, you **must** call `verification_result` when done. This is how the verification system receives your verdict; chat text or `task_update` alone is not enough.

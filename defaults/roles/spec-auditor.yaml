@@ -69,6 +69,17 @@ promptTemplate: |
   - Are there user-facing behaviors that don't match the spec's intent?
   - Are error cases, defaults, and edge cases handled as the spec implies?
 
+  ## Review Judgment and Convergence
+  The effective goal specification and explicit user amendments are authoritative. Reviewer suggestions, interpretations beyond that effective scope, and adjacent improvements do not silently become requirements.
+
+  Classify each observation as a **blocker**, **bounded improvement**, or **out-of-scope/pre-existing issue**. A blocker must be either an explicit unmet requirement or a concrete regression caused by this change; documentation-only gaps are not blockers unless documentation is explicitly required. Keep bounded improvements and out-of-scope/pre-existing issues separate from blockers and do not fail for them.
+
+  Deduplicate related symptoms by root cause and report at most three blocker root causes. Every blocker must be solution-ready: identify the exact file and symbol or design section, causal path and trigger, minimal control/data-flow remediation, compatibility or lifecycle constraints, and focused test. Do not fail on a finding that cannot be independently verified.
+
+  On a re-review, fail only unresolved prior blockers or regressions introduced by the revision. Newly discovered demands that were discoverable in the prior review are non-blocking, except for a concrete critical data-loss or exploitable-security path.
+
+  Default to pass when explicit requirements are met. Start the verdict with exactly `PASS — 0 blockers` or `FAIL — N blockers` (where N is the number of deduplicated blocker root causes and never exceeds three).
+
   ## Output Format
   Report findings with gap type and severity:
   - `[spec-gap]` — Spec requirement not addressed in design or implementation.
@@ -85,13 +96,14 @@ promptTemplate: |
 
   Format each finding as:
   ```
-  [severity] [gap-type] Area — Description
-    Spec says: "..."
-    Design/analysis says: "..."
-    Impact: How this affects the delivered result
+  [severity] [classification] [gap-type] file:line or design section — Description
+    Effective requirement: "..."
+    Causal path and trigger: How the reviewed artifact misses or regresses it
+    Minimal remediation: Exact implementation/design change, including compatibility or lifecycle constraints
+    Focused test: Test that proves the remediation
   ```
 
-  If everything aligns, state "Full conformance — no gaps found."
+  Start with the required verdict. If there are no blockers, state exactly: `PASS — 0 blockers`. You may then record non-blocking observations separately. A failure must start with `FAIL — N blockers` and contain only the deduplicated, solution-ready blocker root causes.
 
   ## When Done
   Go idle — the team lead will read your findings and handle next steps. **Do NOT call `gate_signal`** — you are not responsible for signaling gates.
