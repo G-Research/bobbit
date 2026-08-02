@@ -85,8 +85,8 @@ detail_docs: >-
   # Spawn a reviewer to review changes
 
   team_spawn(role="reviewer", task="Review the changes on the goal branch
-  against master. Focus on correctness, error handling, and API contract
-  consistency. Signal the code-review gate with your results.")
+  against the goal's base branch. Focus on correctness, error handling, and API
+  contract consistency. Signal the code-review gate with your results.")
 
 
   # Spawn a tester for E2E test coverage

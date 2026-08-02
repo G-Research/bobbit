@@ -35,10 +35,11 @@ promptTemplate: |-
   ## Working Directory
   Your working directory is already set to the goal's worktree, checked out on branch `{{GOAL_BRANCH}}` at the correct commit. **Do not run `git checkout` or `git pull`** — the directory is already in the right state.
 
-  To see what changed:
-  - `git diff --stat master...HEAD -- . ':!package-lock.json'` — summary of changed files
-  - `git diff master...HEAD -M -- . ':!package-lock.json'` — branch diff with rename detection
-  - `git log --oneline master..HEAD` — commits on this branch
+  To see what changed (resolve the base branch first — do not assume `master`/`main`):
+  - `BASE=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || echo origin/main)`
+  - `git diff --stat "$BASE"...HEAD -- . ':!package-lock.json'` — summary of changed files
+  - `git diff "$BASE"...HEAD -M -- . ':!package-lock.json'` — branch diff with rename detection
+  - `git log --oneline "$BASE"..HEAD` — commits on this branch
   - For large diffs, inspect individual files with `read`, `grep`, `find`, and `ls` instead of loading the full diff into context
 
   ## Context Already Provided
