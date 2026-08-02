@@ -52,7 +52,7 @@ function expectCoderReadyBlockerPacket(prompt: string, roleName: string): void {
 	expect(policy, message).toMatch(/verification.{0,200}(?:test layer|test file|focused tests?)/i);
 	expect(policy, message).toMatch(/(?:setup|assertions?|regression behavior).{0,220}(?:tests?|verification)|(?:tests?|verification).{0,220}(?:setup|assertions?|regression behavior)/i);
 	expect(policy, message).toMatch(/confidence.{0,180}(?:proven|reproduced|inferred)/i);
-	expect(policy, message).toMatch(/(?:remaining uncertainty|uncertainty).{0,180}(?:evidence|close)/i);
+	expect(policy, message).toMatch(/(?:remaining uncertainty|uncertainty).{0,180}(?:evidence|close)|(?:evidence|close).{0,180}(?:remaining uncertainty|uncertainty)/i);
 
 	// Alternatives are useful only when genuine choices exist, and failure without
 	// this complete packet is invalid. The root-cause rule keeps overlap actionable.
@@ -71,7 +71,7 @@ function expectRevisionReadyArtifactPacket(prompt: string, roleName: string): vo
 	expect(policy, message).toMatch(/(?:goal[- ]linked|goal (?:requirement|scope)|contradiction|gap).{0,180}(?:implementation|user) consequence/i);
 	expect(policy, message).toMatch(/(?:concrete )?(?:replacement|addition|wording|outline|contract|data[- ]?flow|state sequence|acceptance criterion|test[- ]plan case)/i);
 	expect(policy, message).toMatch(/(?:cross[- ]section|consistency).{0,160}(?:edit|constraint|reference)/i);
-	expect(policy, message).toMatch(/(?:when|if).{0,100}(?:credible|multiple).{0,100}(?:revision )?alternatives?.{0,180}trade-?offs/i);
+	expect(policy, message).toMatch(/(?:when|if).{0,100}(?:credible|multiple).{0,100}(?:revision )?alternatives?.{0,180}trade-?offs|(?:revision )?alternatives?.{0,180}trade-?offs.{0,180}(?:when|if).{0,100}(?:credible|multiple)/i);
 	expect(policy, message).toMatch(/(?:required blocker|blocker).{0,160}(?:optional|bounded improvement)|(?:optional|bounded improvement).{0,160}(?:required blocker|blocker)/i);
 }
 
