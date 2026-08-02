@@ -32,6 +32,49 @@ function normalizedPrompt(prompt: string): string {
 	return prompt.replace(/\s+/g, " ");
 }
 
+function expectCoderReadyBlockerPacket(prompt: string, roleName: string): void {
+	const message = `${roleName} must require a coder-ready packet for every blocker`;
+	const policy = normalizedPrompt(prompt);
+
+	// A failure must be anchored to an approved requirement or an introduced regression.
+	expect(policy, message).toMatch(/scope link.{0,120}(?:goal (?:requirement|acceptance criterion)|(?:change[- ]introduced )?regression)/i);
+	expect(policy, message).toMatch(/evidence.{0,180}(?:files?|symbols?|lines?)/i);
+	expect(policy, message).toMatch(/(?:trigger|input|state|timing).{0,160}(?:causal path|causal chain).{0,160}(?:consequence|impact)|(?:causal path|causal chain).{0,160}(?:consequence|impact)/i);
+
+	// The remediation must be executable by a coder, not merely name a symptom.
+	expect(policy, message).toMatch(/(?:recommended|minimal) (?:fix|remediation).{0,180}(?:files?|symbols?)/i);
+	expect(policy, message).toMatch(/(?:ordered|order).{0,160}(?:control[- ]?flow|data[- ]?flow|state(?:[- ]?machine)?|persistence|API|schema|lifecycle)/i);
+	expect(policy, message).toMatch(/(?:invariants?|ordering requirements?)/i);
+	expect(policy, message).toMatch(/(?:pseudocode|signatures?).{0,160}(?:materially|ambiguity|needed)|(?:materially|ambiguity|needed).{0,160}(?:pseudocode|signatures?)/i);
+	expect(policy, message).toMatch(/constraints?.{0,160}(?:compatibility|migration|concurrency|cleanup|ordering|platform|failure)/i);
+
+	// Verification must tell the coder what to add and what it proves.
+	expect(policy, message).toMatch(/verification.{0,200}(?:test layer|test file|focused tests?)/i);
+	expect(policy, message).toMatch(/(?:setup|assertions?|regression behavior).{0,220}(?:tests?|verification)|(?:tests?|verification).{0,220}(?:setup|assertions?|regression behavior)/i);
+	expect(policy, message).toMatch(/confidence.{0,180}(?:proven|reproduced|inferred)/i);
+	expect(policy, message).toMatch(/(?:remaining uncertainty|uncertainty).{0,180}(?:evidence|close)/i);
+
+	// Alternatives are useful only when genuine choices exist, and failure without
+	// this complete packet is invalid. The root-cause rule keeps overlap actionable.
+	expect(policy, message).toMatch(/(?:when|if).{0,100}(?:credible|multiple).{0,100}alternatives?.{0,180}trade-?offs/i);
+	expect(policy, message).toMatch(/(?:do not|never).{0,100}(?:invent|manufacture).{0,100}(?:inferior|alternatives?)/i);
+	expect(policy, message).toMatch(/(?:fail|failure).{0,180}(?:invalid|must not).{0,180}(?:packet|all (?:required )?fields?|complete)/i);
+	expect(policy, message).toMatch(/(?:consolidat|deduplicat).{0,100}root causes?|root causes?.{0,100}(?:consolidat|deduplicat)/i);
+}
+
+function expectRevisionReadyArtifactPacket(prompt: string, roleName: string): void {
+	const message = `${roleName} must require an author-ready revision packet for blocking content findings`;
+	const policy = normalizedPrompt(prompt);
+
+	expect(policy, message).toMatch(/(?:revision[- ]ready|author[- ]ready).{0,140}(?:artifact|packet|finding)/i);
+	expect(policy, message).toMatch(/(?:exact )?(?:artifact )?(?:section|heading|paragraph|requirement|acceptance criterion|diagram|test plan)/i);
+	expect(policy, message).toMatch(/(?:goal[- ]linked|goal (?:requirement|scope)|contradiction|gap).{0,180}(?:implementation|user) consequence/i);
+	expect(policy, message).toMatch(/(?:concrete )?(?:replacement|addition|wording|outline|contract|data[- ]?flow|state sequence|acceptance criterion|test[- ]plan case)/i);
+	expect(policy, message).toMatch(/(?:cross[- ]section|consistency).{0,160}(?:edit|constraint|reference)/i);
+	expect(policy, message).toMatch(/(?:when|if).{0,100}(?:credible|multiple).{0,100}(?:revision )?alternatives?.{0,180}trade-?offs/i);
+	expect(policy, message).toMatch(/(?:required blocker|blocker).{0,160}(?:optional|bounded improvement)|(?:optional|bounded improvement).{0,160}(?:required blocker|blocker)/i);
+}
+
 function expectPromptPolicy(prompt: string, roleName: string): void {
 	const message = `${roleName} must preserve review-convergence policy`;
 	const policy = normalizedPrompt(prompt);
@@ -71,6 +114,20 @@ describe("default reviewer role convergence policies", () => {
 	}
 });
 
+describe("default reviewer blocker packets", () => {
+	for (const roleName of REVIEWER_ROLES) {
+		it(`${roleName} requires a complete implementation-ready blocker packet`, () => {
+			expectCoderReadyBlockerPacket(promptFor(roleName), roleName);
+		});
+	}
+
+	for (const roleName of ["architect", "reviewer", "spec-auditor"] as const) {
+		it(`${roleName} makes first-phase and documentation blockers revision-ready`, () => {
+			expectRevisionReadyArtifactPacket(promptFor(roleName), roleName);
+		});
+	}
+});
+
 describe("default team-lead review judgment policy", () => {
 	it("independently validates and bounds review findings before applying fixes", () => {
 		const policy = normalizedPrompt(promptFor("team-lead"));
@@ -88,6 +145,15 @@ describe("default team-lead review judgment policy", () => {
 		expect(policy, message).toMatch(/(?:accept|reject|defer).{0,160}(?:blocker|finding|demands?)/i);
 		expect(policy, message).toMatch(/(?:scope|finding) ledger/i);
 		expect(policy, message).toMatch(/(?:accepted blocker fixes?.{0,100}smallest complete fix|smallest complete fix)/i);
+
+		// Independent evidence is synthesized rather than silently discarded as duplicates.
+		expect(policy, message).toMatch(/finding matrix.{0,180}(?:root cause|root[- ]cause)/i);
+		expect(policy, message).toMatch(/(?:finding matrix|root cause).{0,220}(?:reporting reviewers?|roles?|evidence|remediation|confidence)/i);
+		expect(policy, message).toMatch(/(?:two|2|more).{0,120}(?:reviewers?|roles?).{0,120}(?:corroborat|independent)/i);
+		expect(policy, message).toMatch(/(?:compare|evaluate).{0,180}(?:correctness|scope|compatibility|risk|testability).{0,180}(?:fix|revision|option)/i);
+		expect(policy, message).toMatch(/(?:disagree|disagreement).{0,180}(?:severity|scope|remediation).{0,180}(?:resolve|goal|evidence)/i);
+		expect(policy, message).toMatch(/(?:deduplicat).{0,120}work items?.{0,160}(?:not|without).{0,160}evidence|(?:preserve|retain).{0,120}(?:independent|corroborat).{0,120}evidence/i);
+		expect(policy, message).toMatch(/(?:accepted|consolidated).{0,180}(?:packet|repair|revision).{0,220}(?:files?|sections?|ordered|constraints?|tests?|corroborating|alternatives?|rationale)/i);
 
 		// The lead converges rather than accepting verifier-driven scope creep.
 		expect(policy, message).toMatch(/do not silently amend the goal spec.{0,100}(?:add acceptance criteria|reviewer suggestions? into requirements?)/i);
