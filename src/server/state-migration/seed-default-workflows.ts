@@ -143,33 +143,26 @@ Identify:
 
 Use your tools to read the design document content from the signal.`;
 
-export const GAP_ANALYSIS_IMPL_PROMPT = `Compare the goal specification and design document to the actual implementation on this branch.
+export const GAP_ANALYSIS_IMPL_PROMPT = `Review spec and regression conformance for the implementation on branch {{branch}} vs origin/{{baseBranch}}.
 
 The goal spec is:
 {{goal_spec}}
 
-Run \`git diff origin/{{baseBranch}}...{{branch}} -- . ':!package-lock.json'\` to see the implementation diff.
-Read the design document content from upstream gates.
+Run \`git diff origin/{{baseBranch}}...{{branch}} -- . ':!package-lock.json'\` to see the implementation and test diff. Read all upstream design and issue-analysis content.
 
-Identify:
-1. Features described in the goal/design but not implemented
-2. Acceptance criteria not met by the code changes
-3. Implemented behavior that contradicts the specification
+Compare the goal, upstream design/analysis, implementation, and tests. Identify requirements, acceptance criteria, edge cases, or regressions that are absent, contradicted, or insufficiently covered by the implementation or tests.
 
-IMPORTANT: Ignore documentation gaps. This gap analysis runs during the implementation phase, BEFORE the documentation gate. Do NOT flag missing or outdated documentation, README updates, design-doc updates, code comments, or other docs-only artifacts as gaps — those are addressed by the dedicated documentation gate later in the workflow. Focus exclusively on code/behavior gaps relative to the spec and design.`;
+IMPORTANT: Ignore documentation-only gaps. This review runs before the documentation gate; do NOT flag missing or outdated documentation, README updates, design-doc updates, code comments, or other docs-only artifacts.
 
-export const CODE_REVIEW_PROMPT = `Review the code changes on branch {{branch}} vs origin/{{baseBranch}} for quality.
+For every blocking finding, provide implementation-ready remediation: exact affected file/location, the minimal code or test change required, and a focused regression test that proves the fix.`;
 
-Start with \`git diff --stat origin/{{baseBranch}}...{{branch}} -- . ':!package-lock.json'\` to see which files changed.
-Then use \`git diff origin/{{baseBranch}}...{{branch}} -M -- . ':!package-lock.json'\` (with rename detection) to see actual content changes.
-For large diffs, review files individually with \`read\` rather than dumping the entire diff into context.
+export const CODE_REVIEW_PROMPT = `Perform an integrated implementation review of the code changes on branch {{branch}} vs origin/{{baseBranch}}.
 
-Check:
-1. Correctness — logic errors, off-by-one, race conditions
-2. Error handling — missing try/catch, unhandled promise rejections
-3. Edge cases — null/undefined, empty arrays, boundary values
-4. Code style — consistent naming, no dead code, clear intent
-5. Test coverage — are new behaviors tested?`;
+Start with \`git diff --stat origin/{{baseBranch}}...{{branch}} -- . ':!package-lock.json'\` to see which files changed. Then use \`git diff origin/{{baseBranch}}...{{branch}} -M -- . ':!package-lock.json'\` (with rename detection) to see actual content changes. For large diffs, review files individually with \`read\` rather than dumping the entire diff into context.
+
+Review correctness, error handling, edge and mixed states, concurrency and lifecycle behavior, cross-layer interactions, maintainability, regression coverage, and independently verifiable bugs. Deduplicate findings by root cause.
+
+For every finding, provide its exact file/location, minimal implementation fix, and focused test that independently demonstrates the defect and verifies the fix.`;
 
 export const BUG_HUNT_PROMPT = `Review the implementation on branch {{branch}} vs origin/{{baseBranch}} for actionable bugs.
 
@@ -177,16 +170,13 @@ Focus on correctness, edge cases, error paths, cross-system interactions, concur
 
 For every finding, include file:line, reproduction conditions, consequence, and why it is a bug.`;
 
-export const SECURITY_REVIEW_PROMPT = `Security review of changes on branch {{branch}} vs origin/{{baseBranch}}.
+export const SECURITY_REVIEW_PROMPT = `Perform a security review of changes on branch {{branch}} vs origin/{{baseBranch}}.
 
 Run \`git diff origin/{{baseBranch}}...{{branch}} -- . ':!package-lock.json'\` to see changes.
 
-Check:
-1. Injection risks — command injection, path traversal, template injection
-2. Auth/authz — are new endpoints properly authenticated?
-3. Data validation — are inputs validated and sanitized?
-4. Secrets handling — no hardcoded secrets, tokens, or credentials
-5. Dependency risks — any new dependencies with known vulnerabilities?`;
+Review changed trust boundaries, authentication and authorization, validation and injection, secrets handling, destructive operations and resource ownership, dependency risk, and security-relevant races.
+
+For every finding, provide the exact affected file/location, minimal remediation, and an abuse or regression test that demonstrates the vulnerability and verifies the fix.`;
 
 // ── Phase 3 nested goals — `parent` meta-workflow prompts ──────────────
 //
@@ -338,13 +328,14 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 				description: RALPH_LOOP_DESCRIPTION,
 				depends_on: ["design-doc"],
 				verify: [
-					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
+					{ name: "Build", type: "command", phase: 0, component: c, command: "build", timeout: 600 },
 					{ name: "Type check passes", type: "command", phase: 1, component: c, command: "check" },
 					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
+					{ name: "Browser tests", type: "command", phase: 1, timeout: 900, component: c, command: "browser" },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
-					{ name: "Gap analysis", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
-					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
-					{ name: "Bug hunt", type: "llm-review", role: "bug-hunter", phase: 2, prompt: BUG_HUNT_PROMPT },
+					{ name: "Spec and regression conformance", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
+					{ name: "Integrated implementation review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
+					{ name: "Security review", type: "llm-review", role: "security-reviewer", phase: 2, prompt: SECURITY_REVIEW_PROMPT },
 				],
 			},
 			{
@@ -380,13 +371,13 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 				description: RALPH_LOOP_DESCRIPTION,
 				depends_on: ["design-doc"],
 				verify: [
-					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
+					{ name: "Build", type: "command", phase: 0, component: c, command: "build", timeout: 600 },
 					{ name: "Type check passes", type: "command", phase: 1, component: c, command: "check" },
 					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
+					{ name: "Browser tests", type: "command", phase: 1, timeout: 900, component: c, command: "browser" },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
-					{ name: "Gap analysis", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
-					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
-					{ name: "Bug hunt", type: "llm-review", role: "bug-hunter", phase: 2, prompt: BUG_HUNT_PROMPT },
+					{ name: "Spec and regression conformance", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
+					{ name: "Integrated implementation review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
 					{ name: "Security review", type: "llm-review", role: "security-reviewer", phase: 2, prompt: SECURITY_REVIEW_PROMPT },
 					{
 						name: "QA testing",
@@ -451,13 +442,14 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 				description: RALPH_LOOP_DESCRIPTION,
 				depends_on: ["reproducing-test"],
 				verify: [
-					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
+					{ name: "Build", type: "command", phase: 0, component: c, command: "build", timeout: 600 },
 					{ name: "Type check", type: "command", phase: 1, component: c, command: "check" },
 					{ name: "Repro test passes (bug fixed)", type: "command", phase: 1, run: "{{reproducing-test.meta.test_command}}", expect: "success" },
 					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
+					{ name: "Browser tests", type: "command", phase: 1, timeout: 900, component: c, command: "browser" },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
-					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
-					{ name: "Bug hunt", type: "llm-review", role: "bug-hunter", phase: 2, prompt: BUG_HUNT_PROMPT },
+					{ name: "Spec and regression conformance", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
+					{ name: "Integrated implementation review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
 					{ name: "Security review", type: "llm-review", role: "security-reviewer", phase: 2, prompt: SECURITY_REVIEW_PROMPT },
 				],
 			},
@@ -483,12 +475,14 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 				name: "Implementation",
 				description: "Ralph loop (minimal): build, test, review.",
 				verify: [
-					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
+					{ name: "Build", type: "command", phase: 0, component: c, command: "build", timeout: 600 },
 					{ name: "Type check passes", type: "command", phase: 1, component: c, command: "check" },
 					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
+					{ name: "Browser tests", type: "command", phase: 1, timeout: 900, component: c, command: "browser" },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
-					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
-					{ name: "Bug hunt", type: "llm-review", role: "bug-hunter", phase: 2, prompt: BUG_HUNT_PROMPT },
+					{ name: "Spec and regression conformance", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
+					{ name: "Integrated implementation review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
+					{ name: "Security review", type: "llm-review", role: "security-reviewer", phase: 2, prompt: SECURITY_REVIEW_PROMPT },
 				],
 			},
 			// quick-fix has no documentation gate — wire ready-to-merge directly off implementation.
