@@ -1,35 +1,16 @@
 /**
- * Pinning test: Layer 1 restart-survival contract for detached verification
- * command steps.
- *
- * Production sequence (`runCommandStep` → `shutdown()`):
- *   1. `tracked = spawnTracked(...)`
- *   2. `child.unref()`          — don't block graceful gateway exit
- *   3. `tracked.markSurvival()` — flag for `killAllTracked` to skip
- *   4. (gateway exit) → `killAllTracked("SIGKILL")` via `shutdown()`
- *   5. Child MUST still be alive for `_resumeCommandStep` on next boot.
- *
- * Before the fix (PR #576 as submitted), `killAllTracked` was
- * indiscriminate and killed every tracked child — including the ones
- * `unref()`'d + marked for survival. The fix adds `markSurvival()` to
- * the `TrackedChild` interface and teaches `killAllTracked` to skip
- * flagged entries.
+ * Pinning test: detached verification commands survive shutdown only after the
+ * platform ownership barrier is established (POSIX sentinel FD 3; Windows Job).
  */
 
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 const { spawnTracked, killAllTracked, _trackedCount } =
 	await import("../src/server/agent/spawn-tree.ts");
-
-async function poll(predicate: () => boolean, budgetMs: number, stepMs = 50): Promise<boolean> {
-	const deadline = Date.now() + budgetMs;
-	while (Date.now() < deadline) {
-		if (predicate()) return true;
-		await new Promise(r => setTimeout(r, stepMs));
-	}
-	return predicate();
-}
 
 function isAlive(pid: number | undefined): boolean {
 	if (!pid || !Number.isFinite(pid) || pid <= 0) return false;
@@ -37,95 +18,151 @@ function isAlive(pid: number | undefined): boolean {
 	catch (err: any) { return err?.code === "EPERM"; }
 }
 
+function waitForClose(child: import("node:child_process").ChildProcess): Promise<void> {
+	return new Promise((resolve, reject) => {
+		child.once("close", () => resolve());
+		child.once("error", reject);
+	});
+}
+
 /** Track pids spawned in the suite for after() cleanup. */
 const spawnedPids: number[] = [];
 
+type SpawnLifecycle = {
+	t: ReturnType<typeof spawnTracked>;
+	ready: Promise<void>;
+	closed: Promise<void>;
+};
+
+function longRunningTracked(): SpawnLifecycle {
+	const t = spawnTracked(
+		process.execPath,
+		["-e", "setInterval(()=>{}, 1000)"],
+		// POSIX injects its FD3 pipe itself. Passing an array with FD3 would
+		// become an unnecessary inherited FD4 in the payload.
+		{ stdio: "ignore" },
+	);
+	assert.ok(t.child.pid && t.child.pid > 0, "spawn should produce a pid");
+	spawnedPids.push(t.child.pid);
+	// Both events can happen before a caller gets to its first await. Register
+	// the lifecycle settlement pairs immediately after every real spawn.
+	const closed = waitForClose(t.child);
+	const ready = t.ownershipReady;
+	// Expected pre-ownership reaping closes FD3 without a data acknowledgement.
+	// Observe the rejection now so it never becomes an unhandled promise.
+	void ready.catch(() => {});
+	return { t, ready, closed };
+}
+
+async function assertExactRejection(promise: Promise<void>, message: string): Promise<void> {
+	await assert.rejects(promise, error => {
+		assert.ok(error instanceof Error);
+		assert.equal(error.message, message);
+		return true;
+	});
+}
+
+async function establishSurvivalOwnership(lifecycle: SpawnLifecycle): Promise<void> {
+	// Wait for the platform's observable ownership acknowledgement before
+	// allowing a shutdown-survival request to take effect.
+	await lifecycle.ready;
+	lifecycle.t.markSurvival();
+}
+
+/** Event-driven readiness for the Windows native Job-object probe. */
+function waitForPidMarker(marker: string): Promise<number> {
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		const finish = (error?: Error, pid?: number) => {
+			if (settled) return;
+			settled = true;
+			watcher.close();
+			if (error) reject(error); else resolve(pid!);
+		};
+		const read = () => {
+			try {
+				const pid = Number(fs.readFileSync(marker, "utf8"));
+				if (Number.isSafeInteger(pid) && pid > 0) finish(undefined, pid);
+			} catch { /* marker has not been atomically published yet */ }
+		};
+		const watcher = fs.watch(path.dirname(marker), { persistent: false }, read);
+		watcher.once("error", error => finish(error));
+		read();
+	});
+}
+
 describe("verification-harness shutdown — survival contract", () => {
-	it("TrackedChild exposes markSurvival()", () => {
-		const t = spawnTracked(
-			process.execPath,
-			["-e", "setTimeout(()=>{},100)"],
-			{ stdio: "ignore" },
-		);
-		if (t.child.pid) spawnedPids.push(t.child.pid);
-		assert.strictEqual(
-			typeof t.markSurvival, "function",
-			"TrackedChild must expose markSurvival() — Layer 1 restart-survival " +
-			"relies on callers marking detached children so killAllTracked " +
-			"skips them on shutdown.",
-		);
-	});
-
-	it("killAllTracked skips survival-marked children", async () => {
-		// Mirrors production: runCommandStep's useDetached path.
-		const t = spawnTracked(
-			process.execPath,
-			["-e", "setInterval(()=>{}, 1000)"],
-			{ stdio: "ignore" },
-		);
-		const pid = t.child.pid;
-		assert.ok(pid && pid > 0, "spawn should produce a pid");
-		spawnedPids.push(pid);
-
-		// Production calls child.unref() then tracked.markSurvival().
-		try { t.child.unref(); } catch { /* ignore */ }
-		t.markSurvival();
-
-		assert.ok(isAlive(pid), "child should be alive before shutdown");
-		assert.ok(_trackedCount() >= 1, "child should be in registry");
-
-		// Simulate VerificationHarness.shutdown().
-		killAllTracked("SIGKILL");
-
-		// The child must survive — _resumeCommandStep needs it on next boot.
-		const wasKilled = await poll(() => !isAlive(pid), 2000);
-		assert.strictEqual(
-			wasKilled, false,
-			"killAllTracked killed a survival-marked child. Layer 1 " +
-			"restart-survival is broken: _resumeCommandStep will see a " +
-			"dead pid and no exit file → step finalised as failed.",
-		);
-	});
-
-	it("killAllTracked still kills NON-survival children", async () => {
-		const t = spawnTracked(
-			process.execPath,
-			["-e", "setInterval(()=>{}, 1000)"],
-			{ stdio: "ignore" },
-		);
-		const pid = t.child.pid!;
-		spawnedPids.push(pid);
-
-		// No markSurvival() — should be killed normally.
-		killAllTracked("SIGKILL");
-		await new Promise<void>((res) => t.child.once("close", () => res()));
-
-		const dead = await poll(() => !isAlive(pid), 3000);
-		assert.ok(dead, "non-survival child should be reaped by killAllTracked");
-	});
-
-	it("killAllTracked with includeSurvival=true kills everything", async () => {
-		const t = spawnTracked(
-			process.execPath,
-			["-e", "setInterval(()=>{}, 1000)"],
-			{ stdio: "ignore" },
-		);
-		const pid = t.child.pid!;
-		spawnedPids.push(pid);
-		t.markSurvival();
-
+	it("TrackedChild exposes markSurvival()", async () => {
+		const lifecycle = longRunningTracked();
+		assert.strictEqual(typeof lifecycle.t.markSurvival, "function");
 		killAllTracked("SIGKILL", true);
-		await new Promise<void>((res) => t.child.once("close", () => res()));
+		await lifecycle.closed;
+	});
 
-		const dead = await poll(() => !isAlive(pid), 3000);
-		assert.ok(dead, "includeSurvival=true should kill even survival-marked children");
+	it("kills POSIX survival-marked children before sentinel readiness", async () => {
+		if (process.platform === "win32") return;
+		const lifecycle = longRunningTracked();
+		lifecycle.t.markSurvival();
+		killAllTracked("SIGKILL");
+		await lifecycle.closed;
+		await assertExactRejection(lifecycle.ready, "POSIX sentinel ownership was not established");
+		assert.equal(isAlive(lifecycle.t.child.pid), false, "handshake-pending survival child must be reaped");
+	});
+
+	it("keeps only ownership-established survival children during shutdown", async () => {
+		const lifecycle = longRunningTracked();
+		await establishSurvivalOwnership(lifecycle);
+		assert.ok(isAlive(lifecycle.t.child.pid), "child should be alive before shutdown");
+		killAllTracked("SIGKILL");
+		assert.ok(_trackedCount() >= 1, "owned survival child must remain registered after ordinary shutdown");
+		assert.ok(isAlive(lifecycle.t.child.pid), "owned survival child must remain alive after ordinary shutdown");
+		killAllTracked("SIGKILL", true);
+		await lifecycle.closed;
+		assert.equal(isAlive(lifecycle.t.child.pid), false, "includeSurvival must kill an owned survival child");
+	});
+
+	it("killAllTracked still kills non-survival children", async () => {
+		const lifecycle = longRunningTracked();
+		killAllTracked("SIGKILL");
+		await lifecycle.closed;
+		await assertExactRejection(
+			lifecycle.ready,
+			process.platform === "win32"
+				? "Windows Job ownership was not established"
+				: "POSIX sentinel ownership was not established",
+		);
+		assert.equal(isAlive(lifecycle.t.child.pid), false, "non-survival child should be reaped by shutdown");
+	});
+
+	it("Windows native Job close reaps a SIGTERM-ignoring descendant", async () => {
+		if (process.platform !== "win32") return;
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-windows-job-e2e-"));
+		const marker = path.join(dir, "grandchild.pid");
+		let tracked: ReturnType<typeof spawnTracked> | undefined;
+		try {
+			tracked = spawnTracked(process.execPath, ["-e", [
+				"const fs=require('node:fs');",
+				"const {spawn}=require('node:child_process');",
+				"const child=spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)\"],{stdio:'ignore'});",
+				"fs.writeFileSync(process.argv[1],String(child.pid));",
+				"setInterval(()=>{},1000);",
+			].join(""), marker], { stdio: "ignore" });
+			spawnedPids.push(tracked.child.pid!);
+			const closed = waitForClose(tracked.child);
+			await tracked.ownershipReady;
+			const grandchildPid = await waitForPidMarker(marker);
+			killAllTracked("SIGKILL", true);
+			await closed;
+			assert.equal(isAlive(grandchildPid), false, "closing the native Job must reap its SIGTERM-ignoring payload descendant");
+		} finally {
+			try { killAllTracked("SIGKILL", true); } catch { /* best effort */ }
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 
 after(() => {
-	// Force-kill everything including survival entries.
 	try { killAllTracked("SIGKILL", true); } catch { /* best-effort */ }
-	// Belt-and-braces: kill any pids we tracked explicitly.
 	for (const pid of spawnedPids) {
 		try { if (isAlive(pid)) process.kill(pid, "SIGKILL"); } catch { /* ignore */ }
 	}
