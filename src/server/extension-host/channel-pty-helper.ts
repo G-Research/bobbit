@@ -27,7 +27,7 @@ export interface ChannelPtyHandle {
 	kill(reason?: string): void;
 	onData(cb: (data: string) => void): () => void;
 	onExit(cb: (event: ChannelPtyExitEvent) => void): () => void;
-	/** Fires after the host has delivered final PTY data following exit. */
+	/** Fires at the PTY provider's output-drained completion boundary. */
 	onDrain?(cb: () => void): () => void;
 }
 
@@ -164,14 +164,13 @@ function wrapPty(proc: PtyProcess, auditExit?: (event: ChannelPtyExitEvent) => v
 		const event = { code, signal, reason: killReason };
 		auditExit?.(event);
 		for (const cb of [...exitListeners]) cb(event);
-		// node-pty can report process exit before its final data callback. The
-		// microtask boundary admits callbacks already queued by the native event
-		// turn, then gives consumers one explicit completion notification.
-		queueMicrotask(() => {
-			if (drained) return;
-			drained = true;
-			for (const cb of [...drainListeners]) cb();
-		});
+		// The installed @homebridge/node-pty-prebuilt-multiarch 0.14.1 provider
+		// emits its public `exit` only after the output socket closes: Unix waits
+		// for `close` in lib/unixTerminal.js, while Windows emits from its output
+		// socket's `close` listener in lib/windowsTerminal.js. Thus `onExit` is
+		// the producer's real output-drained boundary, not an event-loop guess.
+		drained = true;
+		for (const cb of [...drainListeners]) cb();
 	};
 	if (proc.onData) {
 		proc.onData((data) => {

@@ -122,7 +122,7 @@ interface ChannelControlMessage {
 	reason?: string;
 }
 interface ChannelPtyEventMessage {
-	kind: "channel-pty-data" | "channel-pty-exit";
+	kind: "channel-pty-data" | "channel-pty-exit" | "channel-pty-drain";
 	ptyId: string;
 	data?: string;
 	event?: unknown;
@@ -496,13 +496,13 @@ type ChannelSession = {
 };
 
 let channelSession: ChannelSession | undefined;
-const ptyListeners = new Map<string, { data: Set<(data: string) => void>; exit: Set<(event: unknown) => void> }>();
+const ptyListeners = new Map<string, { data: Set<(data: string) => void>; exit: Set<(event: unknown) => void>; drain: Set<() => void> }>();
 
 function buildChannelPtyHandle(value: unknown): unknown {
 	const record = value && typeof value === "object" ? value as Record<string, unknown> : undefined;
 	const ptyId = typeof record?.__channelPtyHandleId === "string" ? record.__channelPtyHandleId : undefined;
 	if (!ptyId || !record) return value;
-	const listeners = { data: new Set<(data: string) => void>(), exit: new Set<(event: unknown) => void>() };
+	const listeners = { data: new Set<(data: string) => void>(), exit: new Set<(event: unknown) => void>(), drain: new Set<() => void>() };
 	ptyListeners.set(ptyId, listeners);
 	return {
 		pid: typeof record.pid === "number" ? record.pid : 0,
@@ -511,6 +511,7 @@ function buildChannelPtyHandle(value: unknown): unknown {
 		kill: (reason?: string) => callHost(["pty", "kill"], [ptyId, reason]).then(() => undefined),
 		onData: (cb: (data: string) => void) => { listeners.data.add(cb); return () => { listeners.data.delete(cb); }; },
 		onExit: (cb: (event: unknown) => void) => { listeners.exit.add(cb); return () => { listeners.exit.delete(cb); }; },
+		onDrain: (cb: () => void) => { listeners.drain.add(cb); return () => { listeners.drain.delete(cb); }; },
 	};
 }
 
@@ -592,11 +593,16 @@ async function handleChannelControl(msg: ChannelControlMessage): Promise<void> {
 function handleChannelPtyEvent(msg: ChannelPtyEventMessage): void {
 	const listeners = ptyListeners.get(msg.ptyId);
 	if (!listeners) return;
-	if (msg.kind === "channel-pty-data") for (const cb of [...listeners.data]) cb(String(msg.data ?? ""));
-	else {
-		ptyListeners.delete(msg.ptyId);
-		for (const cb of [...listeners.exit]) cb(msg.event);
+	if (msg.kind === "channel-pty-data") {
+		for (const cb of [...listeners.data]) cb(String(msg.data ?? ""));
+		return;
 	}
+	if (msg.kind === "channel-pty-exit") {
+		for (const cb of [...listeners.exit]) cb(msg.event);
+		return;
+	}
+	ptyListeners.delete(msg.ptyId);
+	for (const cb of [...listeners.drain]) cb();
 }
 
 async function handleInvoke(msg: InvokeMessage): Promise<void> {
@@ -656,7 +662,7 @@ port.on("message", (msg: ParentMessage) => {
 		void handleChannelControl(msg);
 		return;
 	}
-	if (msg.kind === "channel-pty-data" || msg.kind === "channel-pty-exit") {
+	if (msg.kind === "channel-pty-data" || msg.kind === "channel-pty-exit" || msg.kind === "channel-pty-drain") {
 		handleChannelPtyEvent(msg);
 		return;
 	}

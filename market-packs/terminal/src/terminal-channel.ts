@@ -109,9 +109,9 @@ export async function terminal(ctx: ChannelContext) {
 			if (closed || exiting) return;
 			exiting = true;
 			exitEvent = event;
-			// Legacy/test hosts without the explicit boundary still accept all
-			// callbacks issued in this turn before completing the exit.
-			if (!pty?.onDrain) queueMicrotask(finishExit);
+			// Hosts without onDrain declare their public exit callback to be the
+			// output-drained boundary; only an explicit onDrain may extend it.
+			if (!pty?.onDrain) finishExit();
 		}));
 		if (pty.onDrain) disposers.push(pty.onDrain(finishExit));
 		await sendJson({ op: "status", state: "attached", pid: pty.pid });

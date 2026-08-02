@@ -237,61 +237,87 @@ describe("terminal channel handler", () => {
 	});
 
 	for (const [runtime, handler] of [["source", terminalChannelHandler], ["packaged", packagedTerminalChannelHandler]] as const) {
-		it(`drains exit-before-final-data into live delivery and reconnect replay before one exit and close (${runtime})`, async () => {
-		const marker = "FINAL_EXIT_AFTER_DATA_MARKER";
-		let dataCb: ((data: string) => void) | undefined;
-		let exitCb: ((event: { code: number | null; signal?: string | number; reason?: string }) => void) | undefined;
-		let drainCb: (() => void) | undefined;
-		const sent: Array<{ target: "broadcast" | string; frame: unknown }> = [];
-		let closeCalls = 0;
-		let resolveClosed: (() => void) | undefined;
-		const closed = new Promise<void>((resolve) => { resolveClosed = resolve; });
-		const session = await handler({
-			host: {
-				pty: {
-					async openTerminal() {
-						return {
-							pid: 79,
-							write() {},
-							resize() {},
-							kill() {},
-							onData: (cb: (data: string) => void) => { dataCb = cb; return () => {}; },
-							onExit: (cb: (event: { code: number | null; signal?: string | number; reason?: string }) => void) => { exitCb = cb; return () => {}; },
-							onDrain: (cb: () => void) => { drainCb = cb; return () => {}; },
-						} as any;
+		it(`serializes an exit-before-final-data burst through blocked sends and reconnect replay (${runtime})`, async () => {
+			const marker = "FINAL_EXIT_AFTER_DATA_MARKER";
+			let dataCb: ((data: string) => void) | undefined;
+			let exitCb: ((event: { code: number | null; signal?: string | number; reason?: string }) => void) | undefined;
+			let drainCb: (() => void) | undefined;
+			const sent: Array<{ target: "broadcast" | string; frame: unknown }> = [];
+			const pendingSends: Deferred[] = [];
+			let nextSend = new Deferred<unknown>();
+			let blockSends = false;
+			let closeCalls = 0;
+			const closed = new Deferred();
+			const session = await handler({
+				host: {
+					pty: {
+						async openTerminal() {
+							return {
+								pid: 79,
+								write() {},
+								resize() {},
+								kill() {},
+								onData: (cb: (data: string) => void) => { dataCb = cb; return () => {}; },
+								onExit: (cb: (event: { code: number | null; signal?: string | number; reason?: string }) => void) => { exitCb = cb; return () => {}; },
+								onDrain: (cb: () => void) => { drainCb = cb; return () => {}; },
+							} as any;
+						},
 					},
 				},
-			},
-			send: async (frame: unknown) => { sent.push({ target: "broadcast", frame }); },
-			sendTo: async (clientId: string, frame: unknown) => { sent.push({ target: clientId, frame }); },
-			close: async () => { closeCalls++; resolveClosed?.(); },
-		});
-		sent.length = 0;
+				send: (frame: unknown) => {
+					sent.push({ target: "broadcast", frame });
+					if (!blockSends) return Promise.resolve();
+					const started = nextSend;
+					nextSend = new Deferred<unknown>();
+					started.resolve(frame);
+					const pending = new Deferred();
+					pendingSends.push(pending);
+					return pending.promise;
+				},
+				sendTo: async (clientId: string, frame: unknown) => { sent.push({ target: clientId, frame }); },
+				close: async () => { closeCalls++; closed.resolve(); },
+			});
+			sent.length = 0;
+			blockSends = true;
 
-		exitCb?.({ code: 0 });
-		dataCb?.(marker);
-		await (session.onAttach as unknown as ((clientId: string) => Promise<void>) | undefined)?.("reconnecting-client");
-		drainCb?.();
-		await closed;
+			// The host can signal exit before delivering a multi-frame final burst.
+			exitCb?.({ code: 0 });
+			dataCb?.("FINAL_BURST_ONE");
+			dataCb?.(marker);
+			dataCb?.("FINAL_BURST_THREE");
+			drainCb?.();
 
-		const liveFrames = sent.filter(({ target }) => target === "broadcast").map(({ frame }) => frame);
-		const liveMarkerIndex = liveFrames.findIndex((frame) => isTextFrameWithMarker(frame, marker));
-		const exitIndex = liveFrames.findIndex((frame) => isExitFrame(frame));
-		assert.notEqual(
-			liveMarkerIndex,
-			-1,
-			`${marker} must be delivered live when PTY exit precedes its final data callback`,
-		);
-		assert.notEqual(exitIndex, -1, "PTY exit should be delivered after draining final data");
-		assert.ok(liveMarkerIndex < exitIndex, `${marker} must be delivered before the exit frame`);
-		assert.equal(liveFrames.filter((frame) => isExitFrame(frame)).length, 1, "PTY exit must be emitted exactly once");
-		assert.equal(closeCalls, 1, "terminal channel must close exactly once after the exit frame");
+			assert.deepEqual(sent.map(({ frame }) => frame), [{ kind: "text", data: "FINAL_BURST_ONE" }]);
+			for (const expected of [marker, "FINAL_BURST_THREE"] as const) {
+				const started = nextSend.promise;
+				pendingSends.shift()?.resolve();
+				assert.equal((await started as { kind: string; data: string }).data, expected);
+			}
+			// The last data send remains blocked, leaving the marker replayable while
+			// the queued exit has not yet marked the terminal closed.
+			await (session.onAttach as unknown as ((clientId: string) => Promise<void>) | undefined)?.("reconnecting-client");
+			const replayFrames = sent.filter(({ target }) => target === "reconnecting-client").map(({ frame }) => frame);
+			assert.ok(
+				replayFrames.some((frame) => isTextFrameWithMarker(frame, marker)),
+				`${marker} must be retained for reconnect replay before terminal exit closes`,
+			);
+			assert.equal(closeCalls, 0, "close must remain behind the blocked final data send");
 
-		const replayFrames = sent.filter(({ target }) => target === "reconnecting-client").map(({ frame }) => frame);
-		assert.ok(
-			replayFrames.some((frame) => isTextFrameWithMarker(frame, marker)),
-			`${marker} must be retained for reconnect replay before terminal exit closes`,
-		);
+			const exitStarted = nextSend.promise;
+			pendingSends.shift()?.resolve();
+			assert.ok(isExitFrame(await exitStarted), "exit must wait behind every final data frame");
+			assert.equal(closeCalls, 0, "close must remain behind the blocked exit send");
+			pendingSends.shift()?.resolve();
+			await closed.promise;
+
+			const liveFrames = sent.filter(({ target }) => target === "broadcast").map(({ frame }) => frame);
+			const liveMarkerIndex = liveFrames.findIndex((frame) => isTextFrameWithMarker(frame, marker));
+			const exitIndex = liveFrames.findIndex((frame) => isExitFrame(frame));
+			assert.notEqual(liveMarkerIndex, -1, `${marker} must be delivered live when PTY exit precedes its final data callback`);
+			assert.notEqual(exitIndex, -1, "PTY exit should be delivered after draining final data");
+			assert.ok(liveMarkerIndex < exitIndex, `${marker} must be delivered before the exit frame`);
+			assert.equal(liveFrames.filter((frame) => isExitFrame(frame)).length, 1, "PTY exit must be emitted exactly once");
+			assert.equal(closeCalls, 1, "terminal channel must close exactly once after the exit frame");
 		});
 	}
 
@@ -426,15 +452,17 @@ describe("ChannelPtyService", () => {
 			assert.deepEqual(resizes, [[120, 40]]);
 			let exitCode: number | null | undefined;
 			let drains = 0;
-			pty.onExit((event) => { exitCode = event.code; });
-			pty.onDrain?.(() => { drains++; });
-			pty.kill("test");
-			// The native exit notification may arrive before its final PTY data.
+			const lifecycle: string[] = [];
+			pty.onExit((event) => { exitCode = event.code; lifecycle.push("exit"); });
+			pty.onDrain?.(() => { drains++; lifecycle.push("drain"); });
+			// node-pty's public exit is only emitted after its output socket closes;
+			// data preceding that producer boundary must be delivered before both events.
 			onData?.("FINAL_HELPER_DRAIN_MARKER");
-			await Promise.resolve();
+			pty.kill("test");
 			assert.equal(exitCode, 0);
 			assert.equal(data, "helloFINAL_HELPER_DRAIN_MARKER");
-			assert.equal(drains, 1, "PTY helper must signal one drain boundary after final data");
+			assert.deepEqual(lifecycle, ["exit", "drain"], "provider exit and drain must form one atomic output-complete boundary");
+			assert.equal(drains, 1, "PTY helper must signal one output-complete boundary");
 		} finally {
 			fs.rmSync(cwd, { recursive: true, force: true });
 		}
@@ -541,6 +569,19 @@ function replayTextFor(sent: Array<{ target: "broadcast" | string; frame: unknow
 		))
 		.map((frame) => frame.data)
 		.join("");
+}
+
+class Deferred<T = void> {
+	readonly promise: Promise<T>;
+	private resolvePromise!: (value: T) => void;
+
+	constructor() {
+		this.promise = new Promise<T>((resolve) => { this.resolvePromise = resolve; });
+	}
+
+	resolve(value?: T): void {
+		this.resolvePromise(value as T);
+	}
 }
 
 function byteLength(data: string): number {

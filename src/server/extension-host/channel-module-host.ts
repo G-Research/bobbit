@@ -91,7 +91,15 @@ export class WorkerChannelModuleHost implements ChannelModuleHost {
 		let controlSeq = 0;
 		let openSettled = false;
 		let closed = false;
+		let workerCloseQueued = false;
+		let workerOutbound: Promise<void> = Promise.resolve();
 		const pendingControls = new Map<number, { resolve: () => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+		// Worker messages can arrive before the preceding ctx.send() has reached a
+		// blocked client. Keep every worker-originated delivery and close in FIFO
+		// order so the terminal's final text cannot be overtaken by exit/close.
+		const enqueueWorkerOutbound = (operation: () => Promise<void>): void => {
+			workerOutbound = workerOutbound.then(operation, operation).catch(() => undefined);
+		};
 
 		const cleanup = (reason?: string, rejectPending = true): void => {
 			if (closed) return;
@@ -122,22 +130,24 @@ export class WorkerChannelModuleHost implements ChannelModuleHost {
 				const id = `pty-${++ptySeq}`;
 				ptys.set(id, handle);
 				let exitEvent: unknown;
-				let exitComplete = false;
-				const completeExit = () => {
-					if (exitComplete || exitEvent === undefined) return;
-					exitComplete = true;
+				let drainComplete = false;
+				const completeDrain = () => {
+					if (drainComplete || exitEvent === undefined) return;
+					drainComplete = true;
 					ptys.delete(id);
-					if (!closed) worker.postMessage({ kind: "channel-pty-exit", ptyId: id, event: exitEvent });
+					if (!closed) worker.postMessage({ kind: "channel-pty-drain", ptyId: id });
 				};
 				handle.onData((data) => { if (!closed) worker.postMessage({ kind: "channel-pty-data", ptyId: id, data }); });
 				handle.onExit((event) => {
 					if (exitEvent !== undefined) return;
 					exitEvent = event;
-					// Keep the proxy alive until the helper's drain boundary. The worker
-					// then observes one serialized stream: final data, followed by exit.
-					if (!handle.onDrain) queueMicrotask(completeExit);
+					// Preserve the producer's explicit exit → data → drain stream across
+					// the worker boundary. The helper's node-pty implementation currently
+					// makes exit/drain atomic, while injected hosts may use all three.
+					if (!closed) worker.postMessage({ kind: "channel-pty-exit", ptyId: id, event });
 				});
-				if (handle.onDrain) handle.onDrain(completeExit);
+				if (handle.onDrain) handle.onDrain(completeDrain);
+				else handle.onExit(() => completeDrain());
 				return { __channelPtyHandleId: id, pid: handle.pid };
 			}
 			const ptyId = typeof args[0] === "string" ? args[0] : "";
@@ -212,9 +222,21 @@ export class WorkerChannelModuleHost implements ChannelModuleHost {
 					else pending.reject(new Error(msg.error || "channel handler operation failed"));
 					return;
 				}
-				if (msg.kind === "channel-send") { void req.ctx.send(msg.frame as HostChannelFrame).catch(() => undefined); return; }
-				if (msg.kind === "channel-send-to") { void req.ctx.sendTo(String(msg.clientId ?? ""), msg.frame as HostChannelFrame).catch(() => undefined); return; }
-				if (msg.kind === "channel-close") { void req.ctx.close(typeof msg.reason === "string" ? msg.reason : undefined).catch(() => undefined); return; }
+				if (msg.kind === "channel-send") {
+					enqueueWorkerOutbound(async () => { await req.ctx.send(msg.frame as HostChannelFrame); });
+					return;
+				}
+				if (msg.kind === "channel-send-to") {
+					enqueueWorkerOutbound(async () => { await req.ctx.sendTo(String(msg.clientId ?? ""), msg.frame as HostChannelFrame); });
+					return;
+				}
+				if (msg.kind === "channel-close") {
+					if (!workerCloseQueued) {
+						workerCloseQueued = true;
+						enqueueWorkerOutbound(async () => { await req.ctx.close(typeof msg.reason === "string" ? msg.reason : undefined); });
+					}
+					return;
+				}
 				if (msg.kind === "channel-audit") { req.ctx.audit(isRecord(msg.event) ? msg.event as any : { type: "channel.cleanup", reason: "invalid_worker_audit" }); return; }
 				if (msg.kind === "host-call") {
 					void invokePty(msg.path, Array.isArray(msg.args) ? msg.args : []).then(

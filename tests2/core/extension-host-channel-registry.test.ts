@@ -50,6 +50,41 @@ function assertChannelReject(fn: () => unknown | Promise<unknown>, code: string)
 	return assert.rejects(fn as () => Promise<unknown>, (err: unknown) => err instanceof ChannelError && err.code === code);
 }
 
+class Deferred<T = void> {
+	readonly promise: Promise<T>;
+	private resolvePromise!: (value: T) => void;
+
+	constructor() {
+		this.promise = new Promise<T>((resolve) => { this.resolvePromise = resolve; });
+	}
+
+	resolve(value?: T): void {
+		this.resolvePromise(value as T);
+	}
+}
+
+function isTextFrameWithMarker(frame: unknown, marker: string): boolean {
+	return Boolean(
+		frame &&
+		typeof frame === "object" &&
+		(frame as { kind?: unknown }).kind === "text" &&
+		typeof (frame as { data?: unknown }).data === "string" &&
+		(frame as { data: string }).data.includes(marker),
+	);
+}
+
+function isExitFrame(frame: unknown): boolean {
+	const data = frame && typeof frame === "object" ? (frame as { data?: unknown }).data : undefined;
+	return Boolean(
+		frame &&
+		typeof frame === "object" &&
+		(frame as { kind?: unknown }).kind === "json" &&
+		data &&
+		typeof data === "object" &&
+		(data as { op?: unknown }).op === "exit",
+	);
+}
+
 function noopDispatcher(): ChannelDispatcher {
 	const dispatcher = new ChannelDispatcher();
 	dispatcher.registerName("terminal", () => ({}));
@@ -316,6 +351,110 @@ export const channels = {
 			await registry.close({ sessionId: "sess-1", packId: "pack-a", channelId: "chan-pty", clientId: "client-1", reason: "done" });
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps packaged terminal final output ahead of exit and close across the worker/proxy seam", async () => {
+		const marker = "WORKER_FINAL_EXIT_MARKER";
+		const packRoot = path.join(process.cwd(), "market-packs", "terminal");
+		let dataCb: ((data: string) => void) | undefined;
+		let exitCb: ((event: { code: number | null; signal?: string | number; reason?: string }) => void) | undefined;
+		let drainCb: (() => void) | undefined;
+		const markerBlocked = new Deferred();
+		const releaseMarker = new Deferred();
+		const exitDelivered = new Deferred();
+		const channelClosed = new Deferred();
+		const replayedMarker = new Deferred();
+		const frames: unknown[] = [];
+		let closeCalls = 0;
+		const moduleHost = new WorkerChannelModuleHost({
+			buildHost: () => ({
+				pty: {
+					async openTerminal() {
+						return {
+							pid: 44,
+							write() {},
+							resize() {},
+							kill() {},
+							onData: (cb: (data: string) => void) => { dataCb = cb; return () => {}; },
+							onExit: (cb: (event: { code: number | null; signal?: string | number; reason?: string }) => void) => { exitCb = cb; return () => {}; },
+							onDrain: (cb: () => void) => { drainCb = cb; return () => {}; },
+						};
+					},
+				},
+			}),
+		});
+		const registry = new ChannelRegistry({ moduleHost, idGenerator: () => "chan-packaged-terminal", idleSweepIntervalMs: false });
+		const declared: ChannelContributionRef = {
+			...contribution(),
+			modulePath: "../lib/terminal-channel.mjs",
+			sourceFile: path.join(packRoot, "channels", "terminal.yaml"),
+			packRoot,
+			handler: "terminal",
+			capabilities: ["sessionPty"],
+		};
+		try {
+			await registry.open({
+				sessionId: "sess-1",
+				packId: "pack-a",
+				contribution: declared,
+				clientId: "client-1",
+				client: { autoDrain: false },
+				openPermit: permit(registry),
+			});
+			// Discard startup status frames before installing the intentionally blocked sink.
+			registry.drainClient("sess-1", "pack-a", "chan-packaged-terminal", "client-1");
+			await registry.attach({
+				sessionId: "sess-1",
+				packId: "pack-a",
+				channelId: "chan-packaged-terminal",
+				clientId: "client-1",
+				client: {
+					onFrame: (frame) => {
+						frames.push(frame);
+						if (isTextFrameWithMarker(frame, marker)) {
+							markerBlocked.resolve();
+							return releaseMarker.promise;
+						}
+						if (isExitFrame(frame)) exitDelivered.resolve();
+					},
+					onClose: () => { closeCalls++; channelClosed.resolve(); },
+				},
+			});
+
+			// The main-thread PTY reports exit first, then its final marker. Attach
+			// during the explicit drain window so replay is ordered before exit/close.
+			exitCb?.({ code: 0 });
+			dataCb?.(marker);
+			await registry.attach({
+				sessionId: "sess-1",
+				packId: "pack-a",
+				channelId: "chan-packaged-terminal",
+				clientId: "reconnecting-client",
+				client: {
+					onFrame: (frame) => {
+						if (isTextFrameWithMarker(frame, marker)) replayedMarker.resolve();
+					},
+				},
+			});
+			drainCb?.();
+			await markerBlocked.promise;
+			assert.equal(closeCalls, 0, "the worker must not close while the final marker sink remains blocked");
+
+			releaseMarker.resolve();
+			await replayedMarker.promise;
+			await exitDelivered.promise;
+			await channelClosed.promise;
+
+			const markerIndex = frames.findIndex((frame) => isTextFrameWithMarker(frame, marker));
+			const exitIndex = frames.findIndex((frame) => isExitFrame(frame));
+			assert.notEqual(markerIndex, -1, "the final marker must reach the blocked live sink");
+			assert.notEqual(exitIndex, -1, "the terminal exit frame must reach the live sink");
+			assert.ok(markerIndex < exitIndex, "the final marker must precede the terminal exit frame");
+			assert.equal(frames.filter((frame) => isExitFrame(frame)).length, 1, "the terminal exit frame must be emitted exactly once");
+			assert.equal(closeCalls, 1, "the terminal channel must close exactly once after its exit frame");
+		} finally {
+			await registry.dispose("test done");
 		}
 	});
 });

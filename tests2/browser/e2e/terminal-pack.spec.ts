@@ -92,8 +92,17 @@ test.describe("terminal pack panel", () => {
 		await expect(page.locator(terminalHost())).toContainText(marker3, { timeout: 20_000 });
 		await assertTerminalLayoutStable(page, "after hidden-panel reattach marker output");
 
+		// This production channel journey runs against both the source and bundled
+		// server test runtimes. Pin the last observable output before process exit.
+		const finalMarker = `${marker1}_FINAL_BEFORE_EXIT`;
+		await typeCommand(page, `echo ${finalMarker}`);
+		await expect(page.locator(terminalHost())).toContainText(finalMarker, { timeout: 20_000 });
 		await typeCommand(page, "exit");
 		await expect(page.locator(terminalPanel())).toHaveAttribute("data-terminal-state", /exited|disconnected|idle/, { timeout: 20_000 });
+		const finalFrameOrder = await terminalFrameOrder(page, finalMarker);
+		expect(finalFrameOrder.marker, "terminal final marker must reach the browser before the exit frame").toBeGreaterThanOrEqual(0);
+		expect(finalFrameOrder.exit, "terminal exit frame must follow the final marker").toBeGreaterThan(finalFrameOrder.marker);
+		expect(finalFrameOrder.exitCount, "terminal exit frame must be emitted exactly once").toBe(1);
 
 		const openBeforeRestart = await channelSendCount(page, "ext_channel_open");
 		const startButton = page.locator(terminalPanel()).getByRole("button", { name: "Start or restart terminal" });
@@ -1169,6 +1178,17 @@ async function textFrameCount(page: import("@playwright/test").Page): Promise<nu
 async function receivedTerminalTextIncludes(page: import("@playwright/test").Page, text: string): Promise<boolean> {
 	return page.evaluate((needle) => ((window as any).__terminalE2E?.received ?? [])
 		.some((msg: any) => msg?.type === "ext_channel_frame" && msg?.frame?.kind === "text" && String(msg.frame.data ?? "").includes(needle)), text);
+}
+
+async function terminalFrameOrder(page: import("@playwright/test").Page, marker: string): Promise<{ marker: number; exit: number; exitCount: number }> {
+	return page.evaluate((needle) => {
+		const frames = ((window as any).__terminalE2E?.received ?? [])
+			.filter((msg: any) => msg?.type === "ext_channel_frame")
+			.map((msg: any) => msg.frame);
+		const markerIndex = frames.findIndex((frame: any) => frame?.kind === "text" && String(frame.data ?? "").includes(needle));
+		const exitIndexes = frames.flatMap((frame: any, index: number) => frame?.kind === "json" && frame.data?.op === "exit" ? [index] : []);
+		return { marker: markerIndex, exit: exitIndexes[0] ?? -1, exitCount: exitIndexes.length };
+	}, marker);
 }
 
 async function channelSendCount(page: import("@playwright/test").Page, type: string): Promise<number> {
