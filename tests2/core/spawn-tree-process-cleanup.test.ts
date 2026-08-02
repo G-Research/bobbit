@@ -486,12 +486,15 @@ describe("spawnTracked timeout cleanup", () => {
 				events.push(`reap:${step.pid}:${step.sentinelFile}`);
 			};
 			(harness as any)._dockerExecCapture = async () => ({ code: 0, stdout: "0\n" });
+			const hostResult = path.join(stateDir, "docker-exec.result.json");
+			fs.writeFileSync(hostResult, JSON.stringify({ nonce: "host-sentinel-nonce", exitCode: 0 }));
 			const step: any = {
 				name: "Recovered container command", type: "command", status: "running", startedAt: Date.now() - 1_000,
 				containerId: "container-under-test", restartRecoveryMode: "container-exec",
 				pid: 321_654, pidFile: "/tmp/.bobbit-verif/signal/0.pid", pidNonce: "host-sentinel-nonce", sentinelFile: path.join(stateDir, "docker-exec.sentinel.json"),
 				containerOwnershipWitness: { containerId: "container-under-test", nonce: "host-sentinel-nonce", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },
 				exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat",
+				containerCompletionFile: hostResult, containerCompletionNonce: "host-sentinel-nonce",
 			};
 			const active: any = { goalId: "goal", gateId: "implementation", signalId: "signal", overallStatus: "running", startedAt: Date.now(), steps: [step] };
 			const resumed = await (harness as any)._resumeContainerCommandStep(active, step, {
@@ -514,10 +517,13 @@ describe("spawnTracked timeout cleanup", () => {
 		try {
 			const harness = makeRecoveryHarness(stateDir, [], { platform: "linux" });
 			(harness as any)._dockerExecCapture = async () => ({ code: 0, stdout: "0\n" });
+			const hostResult = path.join(stateDir, "docker-exec.result.json");
+			fs.writeFileSync(hostResult, JSON.stringify({ nonce: "missing-sentinel-nonce", exitCode: 0 }));
 			const step: any = {
 				name: "Container without host sentinel", type: "command", status: "running", startedAt: Date.now() - 1_000,
 				containerId: "container-under-test", restartRecoveryMode: "container-exec", pid: 321_654, pidFile: "/tmp/.bobbit-verif/signal/0.pid",
 				pidNonce: "missing-sentinel-nonce", containerOwnershipWitness: { containerId: "container-under-test", nonce: "missing-sentinel-nonce", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" }, exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat",
+				containerCompletionFile: hostResult, containerCompletionNonce: "missing-sentinel-nonce",
 			};
 			const active: any = { goalId: "goal", gateId: "implementation", signalId: "signal", overallStatus: "running", startedAt: Date.now(), steps: [step] };
 			let finalized = false;

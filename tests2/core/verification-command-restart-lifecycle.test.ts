@@ -110,7 +110,7 @@ function diagnosticFixture(stateDir: string, signalId: string, contents: { out?:
 	};
 }
 
-function commandStepFixture(args: { name: string; startedAt: number; timeoutSec?: number; outFile?: string; errFile?: string; exitFile?: string; containerId?: string; pid?: number; pidFile?: string; heartbeatFile?: string; nonce?: string; pidNonce?: string; windowsJobCompletionFile?: string; windowsJobCompletionNonce?: string; containerOwnershipWitness?: { containerId: string; nonce: string; sentinelPid: number; pgid: number; startToken: string }; restartRecoveryMode?: "detached" | "container-exec" | "pending-retry" | "unsupported" }): any {
+function commandStepFixture(args: { name: string; startedAt: number; timeoutSec?: number; outFile?: string; errFile?: string; exitFile?: string; containerId?: string; pid?: number; pidFile?: string; heartbeatFile?: string; nonce?: string; pidNonce?: string; windowsJobCompletionFile?: string; windowsJobCompletionNonce?: string; containerCompletionFile?: string; containerCompletionNonce?: string; containerOwnershipWitness?: { containerId: string; nonce: string; sentinelPid: number; pgid: number; startToken: string }; restartRecoveryMode?: "detached" | "container-exec" | "pending-retry" | "unsupported" }): any {
 	return {
 		...COMMAND_STEP_TEMPLATE,
 		...args,
@@ -283,12 +283,11 @@ test("persisted container cancellation kills and verifies its payload before rea
 });
 
 test("terminal recovered container exit proves no live payload group before host sentinel cleanup", async () => {
-	const { harness } = makeHarnessForStateDir(undefined, "linux");
+	const { stateDir, harness } = makeHarnessForStateDir(undefined, "linux");
 	const events: string[] = [];
 	(harness as any).containerProcessIdentityInspector = async (_containerId: string, pid: number) => ({ pid, pgid: 321_654, startToken: "container-start" });
 	(harness as any)._dockerExecCapture = async (containerId: string, script: string) => {
 		assert.equal(containerId, "container-terminal-only");
-		if (script.includes("cat '/tmp/bobbit-terminal.exit'")) return { code: 0, stdout: "0\n" };
 		events.push("payload-no-live-group");
 		assert.match(script, /live_g=\$\(awk '\{print \$5\}'/);
 		assert.equal((script.match(/live_g=\$\(awk '\{print \$5\}'/g) ?? []).length, 2, "exact PGID must be checked before both destructive signals");
@@ -297,12 +296,16 @@ test("terminal recovered container exit proves no live payload group before host
 		return { code: 0, stdout: "" };
 	};
 	(harness as any)._reapRecoveredPosixSentinel = async () => { events.push("sentinel"); };
+	const hostControlFile = path.join(stateDir, "container-terminal-result.json");
+	fs.writeFileSync(hostControlFile, JSON.stringify({ nonce: "container-terminal-nonce", exitCode: 0 }));
 	const step = commandStepFixture({
 		name: "Recovered container success",
 		startedAt: Date.now() - 100,
 		containerId: "container-terminal-only",
 		pidFile: "/tmp/bobbit-terminal.pid",
 		exitFile: "/tmp/bobbit-terminal.exit",
+		containerCompletionFile: hostControlFile,
+		containerCompletionNonce: "container-terminal-nonce",
 		restartRecoveryMode: "container-exec",
 		nonce: "container-terminal-nonce",
 		containerOwnershipWitness: { containerId: "container-terminal-only", nonce: "container-terminal-nonce", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },

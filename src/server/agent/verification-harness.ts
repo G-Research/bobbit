@@ -4309,10 +4309,10 @@ export class VerificationHarness {
 				}
 			}
 
-			// If cancelled while steps were running, skip result processing
+			// Cancellation owns terminal publication. Keep this exact generation
+			// durable until cleanup-settled finalization can update its signal.
 			if (active.cancelled) {
-				this.activeVerifications.delete(signal.id);
-				this._persistActive();
+				await this._finalizeCancelledVerification(active);
 				return;
 			}
 
@@ -4347,8 +4347,7 @@ export class VerificationHarness {
 			this.notifyTeamLead(signal.goalId, signal.gateId, status, { steps: results, goalBranch });
 		} catch (err: any) {
 			if (active.cancelled) {
-				this.activeVerifications.delete(signal.id);
-				this._persistActive();
+				await this._finalizeCancelledVerification(active);
 				return;
 			}
 			const errorStep = { name: "Error", type: "command" as const, passed: false, status: "failed" as const, phase: 0, output: err.message, duration_ms: 0 };
@@ -5660,6 +5659,10 @@ export class VerificationHarness {
 					pidFile,
 					pidNonce,
 					sentinelFile,
+					windowsJobCompletionFile,
+					windowsJobCompletionNonce: windowsJobCompletionFile ? pidNonce : undefined,
+					containerCompletionFile,
+					containerCompletionNonce: containerCompletionFile ? pidNonce : undefined,
 					heartbeatFile,
 					containerId,
 					containerWitnessFile,
@@ -5933,31 +5936,12 @@ export class VerificationHarness {
 			// A payload is same-UID hostile. Do not derive a verdict from any marker,
 			// nonce, path, or inherited descriptor it can inspect via /proc; only the
 			// host-observed docker-exec lifecycle result is authoritative.
-			let containerTerminalHandoffStarted = false;
 			const beginContainerTransportCleanup = (liveStep: ActiveVerification["steps"][number]) => {
 				liveStep.containerTransportCleanupPending = true;
 				this._persistActive();
 				// This is the still-live tracked docker-exec transport, never a
 				// recovered numeric PID. spawnTracked owns its exact host sentinel/Job.
 				tracked?.killTree("SIGTERM");
-			};
-			const beginContainerTerminalHandoff = () => {
-				if (!useContainerDurable || !streamCtx || containerTerminalHandoffStarted || !tracked) return;
-				const active = this.activeVerifications.get(streamCtx.signalId);
-				const liveStep = active?.steps[streamCtx.stepIndex];
-				if (!active || !liveStep) return;
-				containerTerminalHandoffStarted = true;
-				// Exact witness cleanup happens while the original host docker-exec
-				// transport is still live. Only after it succeeds may we kill/join that
-				// transport group; terminal publication remains in settleFromProcess.
-				containerCleanup ??= this._killAndVerifyRecoveredContainerProcessGroup(liveStep);
-				void containerCleanup.then(() => {
-					beginContainerTransportCleanup(liveStep);
-				}, () => {
-					// Identity loss is intentionally retryable. Do not kill the host
-					// transport by a historical number or publish a terminal verdict.
-					this._scheduleCommandKillCleanupRetry(streamCtx.signalId);
-				});
 			};
 
 			let stdout = "";

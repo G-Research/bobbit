@@ -11694,7 +11694,7 @@ async function handleApiRoute(
 		json(settled
 			? { cancelled: true, pending: false }
 			: { cancelled: true, pending: true, message: "Cancellation is waiting for exact process cleanup" },
-		settled ? 200 : 202);
+		200);
 		return;
 	}
 
