@@ -113,6 +113,61 @@ function shellSingleQuote(value: string): string {
 	return "'" + value.replace(/'/g, "'\\''") + "'";
 }
 
+type ContainerOwnershipWitness = NonNullable<ActiveVerification["steps"][number]["containerOwnershipWitness"]>;
+
+/**
+ * Docker stdout is a byte stream, not a message transport. The pre-payload
+ * sentinel sends exactly one bounded newline-delimited JSON frame; this decoder
+ * retains incomplete frames across chunks and never lets payload output replace
+ * an already pinned host witness.
+ */
+function createContainerWitnessFrameDecoder(
+	onWitness: (witness: ContainerOwnershipWitness) => void,
+	onInvalid: () => void,
+): (chunk: string) => void {
+	const prefix = "BOBBIT_CONTAINER_OWNERSHIP_TUPLE ";
+	let buffered = "";
+	let consumed = false;
+	const maxFrameBytes = 8 * 1024;
+	return (chunk: string) => {
+		if (consumed) return;
+		buffered += chunk;
+		if (buffered.length > maxFrameBytes) {
+			// A sentinel frame is tiny. A larger pre-release stream is malformed;
+			// discard it rather than retaining unbounded attacker-controlled output.
+			buffered = buffered.slice(-maxFrameBytes);
+		}
+		for (;;) {
+			const end = buffered.indexOf("\n");
+			if (end < 0) return;
+			const line = buffered.slice(0, end).replace(/\r$/, "");
+			buffered = buffered.slice(end + 1);
+			if (!line.startsWith(prefix)) continue;
+			if (line.length > maxFrameBytes) { consumed = true; onInvalid(); return; }
+			try {
+				const parsed = JSON.parse(line.slice(prefix.length));
+				if (!parsed || typeof parsed !== "object" ||
+					typeof parsed.containerId !== "string" || typeof parsed.nonce !== "string" ||
+					!Number.isSafeInteger(parsed.sentinelPid) || parsed.sentinelPid <= 0 ||
+					!Number.isSafeInteger(parsed.pgid) || parsed.pgid <= 0 ||
+					typeof parsed.startToken !== "string" || !parsed.startToken) throw new Error("invalid witness");
+				consumed = true;
+				onWitness({
+					containerId: parsed.containerId,
+					nonce: parsed.nonce,
+					sentinelPid: parsed.sentinelPid,
+					pgid: parsed.pgid,
+					startToken: parsed.startToken,
+				});
+			} catch {
+				consumed = true;
+				onInvalid();
+			}
+			return;
+		}
+	};
+}
+
 function readCommandLogTail(filePath: string | undefined, maxBytes = COMMAND_LOG_FINAL_OUTPUT_TAIL_BYTES): string {
 	if (!filePath || maxBytes <= 0) return "";
 	let fd: number | undefined;
@@ -1626,7 +1681,7 @@ export class VerificationHarness {
 	}
 
 	/** Persist active verifications to disk. */
-	private _persistActive(): void {
+	private _persistActive(): boolean {
 		try {
 			// When there is nothing active, remove the persist file entirely rather
 			// than writing an empty `{ verifications: [] }`. This unifies the "clear"
@@ -1635,7 +1690,7 @@ export class VerificationHarness {
 			// empty-file-write. Best-effort unlink so concurrent unlinks don't throw.
 			if (this.activeVerifications.size === 0) {
 				try { fs.unlinkSync(this._persistPath); } catch {}
-				return;
+				return true;
 			}
 			const data = { verifications: [...this.activeVerifications.values()] };
 			// Defensive: ensure parent dir exists. It is created at startup but may
@@ -1650,8 +1705,10 @@ export class VerificationHarness {
 				try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 			} catch { /* best-effort durability; rename still prevents torn JSON */ }
 			fs.renameSync(tmp, this._persistPath);
+			return true;
 		} catch (err) {
 			console.error("[verification] Failed to persist active verifications:", err);
+			return false;
 		}
 	}
 
@@ -5746,15 +5803,48 @@ export class VerificationHarness {
 			let spawnError: Error | undefined;
 			// Container payload cleanup is distinct from host docker-exec cleanup.
 			let containerCleanup: Promise<void> | undefined;
-			// The wrapper emits this one-shot acknowledgement only after its atomic
-			// witness rename and before user payload execution. It combines with host
-			// spawn ownership before a container timeout/survival action is armed.
+			// The sentinel publishes its tuple to the host before the payload is
+			// released. Container files are same-UID mutable diagnostics only; the
+			// host-persisted tuple below is the sole later destructive authority.
 			let resolveContainerOwnershipReady!: () => void;
 			let rejectContainerOwnershipReady!: (error: Error) => void;
 			const containerOwnershipReady = useContainerDurable
 				? new Promise<void>((resolve, reject) => { resolveContainerOwnershipReady = resolve; rejectContainerOwnershipReady = reject; })
 				: Promise.resolve();
 			let containerWitnessAcknowledged = !useContainerDurable;
+			let releaseContainerPayload: (() => void) | undefined;
+			const acknowledgeContainerWitness = (witness: ContainerOwnershipWitness) => {
+				if (containerWitnessAcknowledged || !streamCtx || !containerId || !pidNonce) return;
+				if (witness.containerId !== containerId || witness.nonce !== pidNonce) {
+					rejectContainerOwnershipReady(new Error("Container ownership tuple did not match its host step identity"));
+					return;
+				}
+				const active = this.activeVerifications.get(streamCtx.signalId);
+				const step = active?.steps[streamCtx.stepIndex];
+				if (!step) {
+					rejectContainerOwnershipReady(new Error("Container ownership tuple arrived for an inactive step"));
+					return;
+				}
+				step.containerOwnershipWitness = witness;
+				if (!this._persistActive()) {
+					step.containerPayloadCleanupPending = true;
+					rejectContainerOwnershipReady(new Error("Container ownership tuple could not be durably persisted"));
+					return;
+				}
+				containerWitnessAcknowledged = true;
+				// The host alone owns docker exec stdin. The sentinel duplicated that
+				// read end before the parent redirected payload stdin to /dev/null, so
+				// a same-UID payload cannot forge this release.
+				releaseContainerPayload?.();
+				resolveContainerOwnershipReady();
+			};
+			const rejectMalformedContainerWitness = () => {
+				if (containerWitnessAcknowledged) return;
+				rejectContainerOwnershipReady(new Error("Container ownership tuple was malformed"));
+			};
+			const decodeContainerWitnessFrame = useContainerDurable
+				? createContainerWitnessFrameDecoder(acknowledgeContainerWitness, rejectMalformedContainerWitness)
+				: undefined;
 			let containerTimedOut = false;
 			let containerTimeoutTimer: TimerHandle | undefined;
 			try {
@@ -5777,16 +5867,12 @@ export class VerificationHarness {
 						const qWitness = shellSingleQuote(containerWitnessFile);
 						const qNonce = shellSingleQuote(pidNonce);
 						const qContainer = shellSingleQuote(containerId);
-						// A separate in-group sentinel publishes the witness before the
-						// payload begins. The FIFO is a readiness barrier, not polling: the
-						// parent cannot execute user code until the atomic rename completes.
-						// The sentinel remains after the leader exits, preserving the exact
-						// identity needed for timeout and restart cleanup.
-						// The FIFO carries only setup acknowledgement. Its writer reports every
-						// setup failure before exiting, so the reader cannot deadlock when
-						// witness publication fails. Payload stdout/stderr are deliberately not
-						// control input: the host observes the docker-exec exit status instead.
-						wrappedCmd = `mkdir -p ${qDir} 2>/dev/null || exit 125; __bobbit_ready=${qWitness}.ready.$$; rm -f "$__bobbit_ready"; mkfifo "$__bobbit_ready" || exit 125; BOBBIT_WITNESS=${qWitness} BOBBIT_NONCE=${qNonce} BOBBIT_CONTAINER=${qContainer} BOBBIT_READY="$__bobbit_ready" /bin/sh -c 'trap "" HUP INT TERM; __fail(){ printf "E\\n" > "$BOBBIT_READY"; exit 125; }; __p=$$; __g=$(awk "{print \\$5}" "/proc/$__p/stat" 2>/dev/null || true); __s=$(awk "{print \\$22}" "/proc/$__p/stat" 2>/dev/null || true); case "$__p:$__g:$__s" in *::*) __fail;; esac; __t="$BOBBIT_WITNESS.$$.tmp"; printf "{\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s" > "$__t" && mv "$__t" "$BOBBIT_WITNESS" || __fail; printf ".\\n" > "$BOBBIT_READY" || exit 125; while :; do sleep 2147483647 & wait $!; done' >/dev/null 2>&1 & __bobbit_sentinel=$!; IFS= read -r __bobbit_ready_ack < "$__bobbit_ready" || exit 125; rm -f "$__bobbit_ready"; [ "$__bobbit_ready_ack" = . ] || { kill "$__bobbit_sentinel" 2>/dev/null; exit 125; }; printf 'BOBBIT_CONTAINER_OWNERSHIP_READY\\n'; __bp=$$; printf %s "$__bp" > ${qPid}.tmp && mv ${qPid}.tmp ${qPid}; ( while :; do printf '{"pid":%s,"ts":%s}' "$__bp" "$(date +%s 2>/dev/null || printf 0)" > ${qHb}.tmp && mv ${qHb}.tmp ${qHb}; sleep 1; done ) & __hb=$!; ( ${command}\n); __ec=$?; kill "$__hb" 2>/dev/null; wait "$__hb" 2>/dev/null; exit $__ec`;
+						// The sentinel has the only inherited copy of docker exec stdin (FD 3).
+						// It publishes its tuple to host stdout, waits for the host release on
+						// FD 3, then wakes this parent through a private pre-payload FIFO. The
+						// payload inherits neither endpoint, so it cannot substitute a tuple or
+						// forge the release after inspecting paths/nonces via /proc.
+						wrappedCmd = `mkdir -p ${qDir} 2>/dev/null || exit 125; __bobbit_ready=${qWitness}.ready.$$; rm -f "$__bobbit_ready"; mkfifo "$__bobbit_ready" || exit 125; BOBBIT_WITNESS=${qWitness} BOBBIT_NONCE=${qNonce} BOBBIT_CONTAINER=${qContainer} BOBBIT_READY="$__bobbit_ready" /bin/sh -c 'trap "" HUP INT TERM; __fail(){ printf "E\\n" > "$BOBBIT_READY"; exit 125; }; __p=$$; __g=$(awk "{print \\$5}" "/proc/$__p/stat" 2>/dev/null || true); __s=$(awk "{print \\$22}" "/proc/$__p/stat" 2>/dev/null || true); case "$__p:$__g:$__s" in *::*) __fail;; esac; __t="$BOBBIT_WITNESS.$$.tmp"; printf "{\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s" > "$__t" && mv "$__t" "$BOBBIT_WITNESS" || __fail; printf "BOBBIT_CONTAINER_OWNERSHIP_TUPLE {\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s"; IFS= read -r __release <&3 || __fail; [ "$__release" = BOBBIT_HOST_RELEASE ] || __fail; printf ".\\n" > "$BOBBIT_READY" || exit 125; while :; do sleep 2147483647 & wait $!; done' 3<&0 & __bobbit_sentinel=$!; exec </dev/null; IFS= read -r __bobbit_ready_ack < "$__bobbit_ready" || exit 125; rm -f "$__bobbit_ready"; [ "$__bobbit_ready_ack" = . ] || { kill "$__bobbit_sentinel" 2>/dev/null; exit 125; }; __bp=$$; printf %s "$__bp" > ${qPid}.tmp && mv ${qPid}.tmp ${qPid}; ( while :; do printf '{"pid":%s,"ts":%s}' "$__bp" "$(date +%s 2>/dev/null || printf 0)" > ${qHb}.tmp && mv ${qHb}.tmp ${qHb}; sleep 1; done ) & __hb=$!; ( ${command}\n); __ec=$?; kill "$__hb" 2>/dev/null; wait "$__hb" 2>/dev/null; exit $__ec`;
 					} else {
 						wrappedCmd = `echo $$ > ${killPidFile}; ${command}`;
 					}
@@ -5798,7 +5884,7 @@ export class VerificationHarness {
 					// transport ownership boundary until container cleanup is complete.
 					wrappedCmd = `exec setsid -w /bin/sh -c ${shellSingleQuote(wrappedCmd)}`;
 					tracked = spawnTracked("docker", ["exec", "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
-						stdio: ["ignore", "pipe", "pipe"],
+						stdio: ["pipe", "pipe", "pipe"],
 						// Durable-container timeout is armed only after its atomic witness.
 						timeoutMs: useContainerDurable ? undefined : timeoutSec * 1000,
 						// On POSIX this sentinel is the only durable witness for the
@@ -5845,6 +5931,11 @@ export class VerificationHarness {
 					});
 				}
 				child = tracked.child;
+				if (useContainerDurable) {
+					releaseContainerPayload = () => {
+						try { child.stdin?.end("BOBBIT_HOST_RELEASE\n"); } catch { rejectContainerOwnershipReady(new Error("Could not release container payload after durable witness publication")); }
+					};
+				}
 			} catch (err) {
 				spawnError = err as Error;
 			}
@@ -5961,12 +6052,10 @@ export class VerificationHarness {
 						stderr += text;
 						if (stderr.length > 1024 * 1024) stderr = stderr.slice(-512 * 1024);
 					}
-					// This setup edge is emitted before the wrapper executes the payload.
-					// It is never a verdict; payload stdout/stderr remain untrusted data.
-					if (!containerWitnessAcknowledged && /(?:^|\n)BOBBIT_CONTAINER_OWNERSHIP_READY\r?(?:\n|$)/.test(text)) {
-						containerWitnessAcknowledged = true;
-						resolveContainerOwnershipReady();
-					}
+					// Decode only the sentinel's pre-release frame. This retains split
+					// stdout chunks and consumes exactly one tuple; later payload stdout is
+					// never a mutable ownership channel.
+					if (!containerWitnessAcknowledged && stream === "stdout") decodeContainerWitnessFrame?.(text);
 					if (streamCtx) {
 						this.broadcastFn(streamCtx.goalId, {
 							type: "gate_verification_step_output",
@@ -6626,34 +6715,14 @@ export class VerificationHarness {
 		throw new PendingCommandCleanupError(reason);
 	}
 
-	/** Read the atomic in-container record. Legacy PID files are deliberately not accepted. */
-	private async _readContainerOwnershipWitness(step: ActiveVerification["steps"][number]): Promise<NonNullable<ActiveVerification["steps"][number]["containerOwnershipWitness"]>> {
+	/**
+	 * Container paths are mutable by the same-UID payload and therefore are never
+	 * a recovery authority. Only the tuple pinned by the host before releasing
+	 * that payload can authorize a later negative-PGID signal.
+	 */
+	private async _readContainerOwnershipWitness(step: ActiveVerification["steps"][number]): Promise<ContainerOwnershipWitness> {
 		if (step.containerOwnershipWitness) return step.containerOwnershipWitness;
-		if (!step.containerId || !step.containerWitnessFile) return this._rejectContainerWitness(step, "BOBBIT_CONTAINER_WITNESS_MISSING");
-		const result = await this._dockerExecCapture(step.containerId, `cat ${shellSingleQuote(step.containerWitnessFile)} 2>/dev/null`);
-		try {
-			const parsed = JSON.parse(result.stdout.trim());
-			if (!parsed || typeof parsed !== "object") throw new Error("not an object");
-			const witness = {
-				containerId: parsed.containerId,
-				nonce: parsed.nonce,
-				sentinelPid: parsed.sentinelPid,
-				pgid: parsed.pgid,
-				startToken: parsed.startToken,
-			};
-			if (typeof witness.containerId !== "string" || typeof witness.nonce !== "string" ||
-				!Number.isSafeInteger(witness.sentinelPid) || witness.sentinelPid <= 0 ||
-				!Number.isSafeInteger(witness.pgid) || witness.pgid <= 0 ||
-				typeof witness.startToken !== "string" || !witness.startToken) {
-				return this._rejectContainerWitness(step, "BOBBIT_CONTAINER_WITNESS_MISSING");
-			}
-			step.containerOwnershipWitness = witness;
-			this._persistActive();
-			return witness;
-		} catch (error) {
-			if (error instanceof PendingCommandCleanupError) throw error;
-			return this._rejectContainerWitness(step, "BOBBIT_CONTAINER_WITNESS_MISSING");
-		}
+		return this._rejectContainerWitness(step, "BOBBIT_CONTAINER_WITNESS_MISSING");
 	}
 
 	/**
