@@ -563,11 +563,29 @@ export function spawnTracked(
 	// that the failure path deliberately removed.
 	registry.add(tracked);
 
+	// A timeout measures owned payload execution, not sentinel/Job setup. Arming
+	// it before the ownership boundary races cold process startup and can kill a
+	// payload before it ever runs. The readiness callbacks below invoke this
+	// synchronously with their acknowledgement; platforms without a boundary arm
+	// immediately to retain their existing attached-process semantics.
+	const armTimeout = () => {
+		if (tracked._timeoutTimer || opts.timeoutMs == null || opts.timeoutMs <= 0 || tracked._closed) return;
+		tracked._timeoutTimer = clock.setTimeout(() => {
+			if (tracked._closed) return;
+			tracked._timedOut = true;
+			try { opts.onTimeout?.(); } catch { /* ignore */ }
+			tracked.killTree("SIGTERM");
+		}, opts.timeoutMs);
+		unrefTimer(tracked._timeoutTimer);
+	};
+	if (!posixTreeSentinel && !windowsJobSupervisor) armTimeout();
+
 	if (windowsJobReadiness) {
 		void windowsJobReadiness.ready.then(
 			() => {
 				tracked._windowsJobSurvivalReady = true;
 				windowsJobReadiness.cleanup();
+				armTimeout();
 				resolveOwnershipReady();
 			},
 			() => {
@@ -581,18 +599,6 @@ export function spawnTracked(
 		);
 	}
 
-	// Optional helper-owned timeout.
-	if (opts.timeoutMs != null && opts.timeoutMs > 0) {
-		tracked._timeoutTimer = clock.setTimeout(() => {
-			if (tracked._closed) return;
-			tracked._timedOut = true;
-			try { opts.onTimeout?.(); } catch { /* ignore */ }
-			tracked.killTree("SIGTERM");
-		}, opts.timeoutMs);
-		// .unref() so a stuck child cannot block graceful exit; harness
-		// shutdown calls killAllTracked() for explicit cleanup.
-		unrefTimer(tracked._timeoutTimer);
-	}
 
 	const clearEscalation = () => {
 		if (tracked._escalationTimer) clock.clearTimeout(tracked._escalationTimer);
@@ -631,6 +637,7 @@ export function spawnTracked(
 	}
 	readyPipe?.once("data", () => {
 		tracked._posixSentinelReady = true;
+		armTimeout();
 		resolveOwnershipReady();
 		if (tracked._pendingPosixFinalization) {
 			tracked._pendingPosixFinalization = false;

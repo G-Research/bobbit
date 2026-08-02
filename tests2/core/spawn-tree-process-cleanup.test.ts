@@ -922,12 +922,16 @@ describe("spawnTracked timeout cleanup", () => {
 		const root = fakeChild(2_147_483_647);
 		const tracked = spawnTracked("node", ["worker"], {
 			platform: "win32",
-			spawnImpl: (() => root) as unknown as NativeSpawn,
+			spawnImpl: ((_cmd: string, _args: string[], options: SpawnOptions) => {
+				fs.writeFileSync(String(options.env?.BOBBIT_WINDOWS_JOB_READY_FILE), "ready");
+				return root;
+			}) as unknown as NativeSpawn,
 			windowsJobSupervisor: true,
 			clock,
 			timeoutMs: 50,
 		});
 
+		await tracked.ownershipReady;
 		clock.advance(50);
 		expect(tracked.timedOut()).toBe(true);
 		expect(root.killCalls).toEqual(["SIGTERM"]);
