@@ -110,16 +110,10 @@ describe("isPackPathWithinRoot", () => {
 		]);
 
 		withRealpathAliases(aliases, () => {
-			// Model Windows' case-folding relative() behavior on every host. The
-			// canonical realpaths deliberately preserve their distinct descendants.
-			const relative = vi.spyOn(path, "relative").mockImplementation(((from: string, to: string) =>
-				path.win32.relative(from, to)) as never);
-			try {
-				assert.equal(path.win32.relative(root, sibling), "secret.js");
-				assert.equal(isPackPathWithinRoot(root, sibling), false);
-			} finally {
-				relative.mockRestore();
-			}
+			// Use win32 directly on every host. Spying on path.relative is recursive
+			// on Windows, where path and path.win32 are the same object.
+			assert.equal(path.win32.relative(root, sibling), "secret.js");
+			assert.equal(isPackPathWithinRoot(root, sibling), false);
 		});
 	});
 
