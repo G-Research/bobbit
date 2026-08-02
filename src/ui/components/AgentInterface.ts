@@ -1606,10 +1606,15 @@ export class AgentInterface extends LitElement {
 			await this.onBeforeSend();
 		}
 
-		// Only clear editor after we know we can send
-		this._messageEditor.value = "";
-		this._messageEditor.attachments = [];
-		this._clearAttachmentDraft();
+		// Only clear editor after we know we can send. Snapshot-aware: clear ONLY when
+		// the composer still holds exactly what was submitted (`=== input`). Text typed
+		// during the async auth/onBeforeSend readiness window (e.g. an edited steer sent
+		// via handleSend's distinct-text path) must never be wiped.
+		if (this._messageEditor.value === input) {
+			this._messageEditor.value = "";
+			this._messageEditor.attachments = [];
+			this._clearAttachmentDraft();
+		}
 		// Snap to bottom when sending a message.
 		// Set flag and scroll immediately, then re-assert after render
 		// (scroll events from layout changes can race and unset the flag).
@@ -1630,6 +1635,54 @@ export class AgentInterface extends LitElement {
 		}
 	}
 
+	/**
+	 * Ctrl/Cmd+Enter composer steer: route the current text through the STEER path
+	 * (`session.steer`) instead of `session.prompt`. Mirrors sendMessage's
+	 * readiness, but is text-only — attachments are blocked upstream in the editor,
+	 * so there is no attachment handling and no `/compact` branch here.
+	 *
+	 * Transactional/readiness-first: this runs the pre-send checks and, only when
+	 * they pass, performs the steer and returns `true`. It deliberately does NOT
+	 * mutate the editor (value/attachments/draft) — the MessageEditor owns its own
+	 * clearing and defers it until this resolves `true` AND its composer snapshot is
+	 * unchanged, so a mid-flight edit or a newly added attachment is never silently
+	 * discarded. Returns `false` when the send cannot proceed (empty text, missing/
+	 * cancelled API key) so the editor keeps the draft, text, and history intact.
+	 */
+	public async _steerSend(text: string): Promise<boolean> {
+		if (!text.trim()) return false;
+		const session = this.session;
+		if (!session) throw new Error("No session set on AgentInterface");
+		if (!session.state.model) throw new Error("No model set on AgentInterface");
+
+		const isStreaming = session.state.isStreaming;
+
+		// Check if API key exists for the provider (only needed when idle — a live
+		// steer rides the already-authenticated open turn). Identical to sendMessage.
+		if (!isStreaming) {
+			const provider = session.state.model.provider;
+			const apiKey = await getAppStorage().providerKeys.get(provider);
+			if (!apiKey) {
+				if (!this.onApiKeyRequired) {
+					console.error("No API key configured and no onApiKeyRequired handler set");
+					return false;
+				}
+				const success = await this.onApiKeyRequired(provider);
+				if (!success) return false;
+			}
+		}
+
+		// Call onBeforeSend hook before sending
+		if (this.onBeforeSend) {
+			await this.onBeforeSend();
+		}
+
+		// RemoteAgent.steer accepts a plain string at runtime (it extractText()s any
+		// non-string message); the Agent type is narrower, hence the cast.
+		session.steer(text as unknown as AgentMessage);
+		this._scrollToBottom();
+		return true;
+	}
 
 
 	private _getToolResultsById(): Map<string, ToolResultMessage> {
@@ -2461,9 +2514,8 @@ export class AgentInterface extends LitElement {
 							.onFilesChange=${(files: Attachment[]) => {
 								this._setAttachmentDraft(files);
 							}}
-							.onSend=${(input: string, attachments: Attachment[]) => {
-								this.sendMessage(input, attachments);
-							}}
+							.onSend=${(input: string, attachments: Attachment[]) => this.sendMessage(input, attachments)}
+							.onSteerSend=${(text: string) => this._steerSend(text)}
 							.onAbort=${() => session.abort()}
 							.onSteer=${(msg: any) => {
 								if (typeof (session as any).steerQueued === 'function') {

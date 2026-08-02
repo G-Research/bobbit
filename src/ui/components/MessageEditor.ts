@@ -65,6 +65,13 @@ export class MessageEditor extends LitElement {
 	 *  fixture data. */
 	static MAX_SERIALIZED_SEND_BYTES = 200 * 1024 * 1024;
 
+	/** Inline error shown when the user attempts a Ctrl/Cmd+Enter steer while
+	 *  attachments are present. The steer protocol is text-only, so we block the
+	 *  action rather than silently dropping attachments or falling back to a
+	 *  normal prompt. */
+	static readonly STEER_ATTACHMENT_ERROR =
+		"Steers don't support attachments. Remove them, or press Enter to send a normal prompt.";
+
 	/** Bytes of the serialized prompt frame RemoteAgent.prompt() will send, given
 	 *  the current text + attachments. Mirrors that frame exactly: each image
 	 *  rides ~3× base64 (images[].data + attachments[].content + attachments[].preview).
@@ -106,12 +113,16 @@ export class MessageEditor extends LitElement {
 	@property() showModelSelector = true;
 	@property() showThinkingSelector = true;
 	@property() onInput?: (value: string) => void;
-	@property() onSend?: (input: string, attachments: Attachment[]) => void;
+	@property() onSend?: (input: string, attachments: Attachment[]) => void | Promise<void>;
 	@property() onAbort?: () => void;
 	@property() onModelSelect?: () => void;
 	@property() onThinkingChange?: (level: ThinkingLevel) => void;
 	@property() onFilesChange?: (files: Attachment[]) => void;
 	@property() onSteer?: (msg: QueuedMessage) => void;
+	/** Distinct from `onSteer` (the queued-pill Steer button contract). Invoked by
+	 *  the Ctrl/Cmd+Enter composer shortcut to send the current text through the
+	 *  STEER path instead of the normal prompt path. Text-only. */
+	@property() onSteerSend?: (text: string) => boolean | Promise<boolean>;
 	@property() onRemoveQueued?: (id: string) => void;
 	@property() onEditQueued?: (msg: QueuedMessage) => void;
 	@property() onReorder?: (messageIds: string[]) => void;
@@ -131,6 +142,18 @@ export class MessageEditor extends LitElement {
 	/** Non-empty when the last send was rejected for exceeding the aggregate
 	 *  payload limit (S31). Shown as an inline error; cleared on the next edit. */
 	@state() private _sendSizeError = "";
+	/** Non-empty when a Ctrl/Cmd+Enter steer was blocked because attachments are
+	 *  present. Shown as an inline error; cleared on the next edit or when the
+	 *  attachments change. */
+	@state() private _steerError = "";
+	/** Content-aware submit-lock guarding BOTH the steer ({@link handleSteerShortcut})
+	 *  and normal-send ({@link handleSend}) lifecycles against concurrent DUPLICATE
+	 *  submission. Holds the exact text of every submit currently mid-flight (via any
+	 *  path — steer or normal), so submitting the SAME text concurrently is blocked
+	 *  (repeated Ctrl/Cmd+Enter of one snapshot; steer-in-flight + plain-Enter of the
+	 *  same text) while a DISTINCT edited submission is still allowed to proceed. Plain
+	 *  field — NOT `@state`, it must not trigger a re-render. */
+	private _inFlightSubmits = new Set<string>();
 	@state() private isRecording = false;
 	private fileInputRef = createRef<HTMLInputElement>();
 
@@ -851,6 +874,7 @@ export class MessageEditor extends LitElement {
 		const textarea = e.target as HTMLTextAreaElement;
 		this.value = textarea.value;
 		if (this._sendSizeError) this._sendSizeError = ""; // clear the S31 error once the user edits
+		if (this._steerError) this._steerError = ""; // clear the steer-attachment error once the user edits
 		this.onInput?.(this.value);
 		this._updateSlashAutocomplete();
 		this._updateAtAutocomplete();
@@ -909,6 +933,15 @@ export class MessageEditor extends LitElement {
 				this._atMenuOpen = false;
 				return;
 			}
+		}
+
+		// Ctrl/Cmd+Enter steer shortcut. Placed AFTER the slash/@-menu blocks (so an
+		// open autocomplete keeps Enter ownership) and BEFORE the plain Enter branch
+		// (Ctrl/Cmd+Enter also satisfies `!e.shiftKey`). IME is already guarded above.
+		if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
+			e.preventDefault();
+			void this.handleSteerShortcut();
+			return;
 		}
 
 		if (e.key === "Enter" && !e.shiftKey) {
@@ -998,13 +1031,17 @@ export class MessageEditor extends LitElement {
 			}
 
 			this.attachments = [...this.attachments, ...newAttachments];
+			this._steerError = "";
 			this.onFilesChange?.(this.attachments);
 			this.processingFiles = false;
 		}
 	};
 
-	private handleSend = () => {
+	private handleSend = async () => {
 		const text = this.value;
+		// Content-aware lock: block only an identical concurrent submission (same text
+		// mid-flight via any path); a distinct edited submission is still allowed.
+		if (this._inFlightSubmits.has(text)) return;
 		// S31: reject an oversized send BEFORE anything irreversible (the
 		// 'message-send' event below tombstones the saved draft, and onSend clears
 		// the composer). Over the limit → inline error, retain everything.
@@ -1019,6 +1056,7 @@ export class MessageEditor extends LitElement {
 			}
 		}
 		this._sendSizeError = "";
+		this._steerError = ""; // a normal send dismisses any stale steer-attachment alert (D2)
 		const packSlashLaunch = this.attachments.length === 0 ? this._packSlashLaunchFromText(text) : undefined;
 		if (packSlashLaunch) {
 			this._slashMenuOpen = false;
@@ -1041,15 +1079,86 @@ export class MessageEditor extends LitElement {
 			}, { body: packSlashLaunch.body });
 			return;
 		}
-		// Dispatch a composed event that escapes shadow DOM — used by
-		// session-manager for draft cleanup without monkey-patching.
-		this.dispatchEvent(new CustomEvent("message-send", { bubbles: true, composed: true }));
-		this.onSend?.(text, this.attachments);
-		// Reset history browsing state after send
-		this._historyIndex = -1;
-		this._savedDraft = "";
-		// Add to history (fire and forget)
-		this.addToHistory(text);
+	// Dispatch a composed event that escapes shadow DOM — used by
+		// session-manager for draft cleanup without monkey-patching. Take the shared
+		// content-aware submit-lock so an identical steer/send can't run concurrently.
+		this._inFlightSubmits.add(text);
+		try {
+			this.dispatchEvent(new CustomEvent("message-send", { bubbles: true, composed: true }));
+			// Reset history browsing state after send
+			this._historyIndex = -1;
+			this._savedDraft = "";
+			// Add to history (fire and forget)
+			void this.addToHistory(text);
+			await this.onSend?.(text, this.attachments);
+		} finally {
+			this._inFlightSubmits.delete(text);
+		}
+	};
+
+	/** Ctrl/Cmd+Enter: send the current text through the STEER path. Text-only:
+	 *  attachments are blocked with an inline error rather than silently dropped or
+	 *  downgraded to a normal prompt.
+	 *
+	 *  Transactional/readiness-first: NO irreversible lifecycle work (draft
+	 *  tombstone, history, editor clear) happens until `onSteerSend` confirms the
+	 *  send with a `true` result. On confirmation, the draft is cleared/tombstoned
+	 *  ONLY if the composer still holds exactly what we sent — a mid-flight edit or a
+	 *  newly added attachment during the await is preserved, never discarded. */
+	private handleSteerShortcut = async () => {
+		if (this.processingFiles) return; // same readiness guard as send
+		if (this.attachments.length > 0) {
+			// Block: retain text, attachments, draft, and focus untouched.
+			this._steerError = MessageEditor.STEER_ATTACHMENT_ERROR;
+			return;
+		}
+		const text = this.value;
+		if (!text.trim()) return; // non-empty text required
+		// Content-aware submit-lock: while the async readiness/send await is pending the
+		// composer stays enabled, so a second Ctrl/Cmd+Enter (or key auto-repeat) — or a
+		// normal send via handleSend — could re-enter with the SAME unchanged snapshot and
+		// submit the identical text twice. Bail only if this exact text is already in
+		// flight; a distinct edited steer is still allowed through.
+		if (this._inFlightSubmits.has(text)) return;
+		// Capture the session this steer originated on. Its async preflight may resolve
+		// AFTER a session switch; the success cleanup below is guarded to only touch the
+		// composer while we're still on this originating session.
+		const originSessionId = this.sessionId;
+		this._steerError = "";
+		this._sendSizeError = "";
+		this._inFlightSubmits.add(text);
+		try {
+			// Await readiness + send BEFORE any irreversible lifecycle work. A failed or
+			// cancelled preflight leaves the draft, text, and history fully intact.
+			const sent = await this.onSteerSend?.(text);
+			if (sent !== true) return;
+			// Confirmed sent: record the sent text in command history.
+			this._historyIndex = -1;
+			this._savedDraft = "";
+			void this.addToHistory(text);
+			// Clear + tombstone the draft ONLY if the composer still holds exactly what we
+			// sent. A mid-flight text edit or a newly added attachment must be preserved.
+			// `!processingFiles`: a file load started during the readiness await sets
+			// processingFiles=true but hasn't populated `attachments` yet, so the length
+			// check alone would pass and wipe the text draft out from under the pending
+			// attachment. Preserve the composer text while a file is mid-processing.
+		// `this.sessionId === originSessionId`: a steer whose preflight resolves after a
+		// session switch must NOT clear/tombstone the now-current (different) session's
+		// composer. (Fully tombstoning the ORIGIN session's draft on switch-away is a
+		// documented follow-up requiring session-manager changes — out of scope here.)
+			if (this.sessionId === originSessionId && this.value === text && this.attachments.length === 0 && !this.processingFiles) {
+				this.dispatchEvent(new CustomEvent("message-send", { bubbles: true, composed: true }));
+				this.value = "";
+				this.onInput?.(this.value);
+				const ta = this.textareaRef.value;
+				if (ta) {
+					ta.value = "";
+					ta.focus();
+				}
+			}
+		} finally {
+			this._inFlightSubmits.delete(text);
+		}
 	};
 
 	private handleAttachmentClick = () => {
@@ -1086,6 +1195,7 @@ export class MessageEditor extends LitElement {
 		}
 
 		this.attachments = [...this.attachments, ...newAttachments];
+		this._steerError = "";
 		this.onFilesChange?.(this.attachments);
 		this.processingFiles = false;
 		input.value = ""; // Reset input
@@ -1093,6 +1203,7 @@ export class MessageEditor extends LitElement {
 
 	private removeFile(fileId: string) {
 		this.attachments = this.attachments.filter((f) => f.id !== fileId);
+		this._steerError = ""; // removing an attachment dismisses the steer-attachment error
 		this.onFilesChange?.(this.attachments);
 	}
 
@@ -1150,6 +1261,7 @@ export class MessageEditor extends LitElement {
 		}
 
 		this.attachments = [...this.attachments, ...newAttachments];
+		this._steerError = "";
 		this.onFilesChange?.(this.attachments);
 		this.processingFiles = false;
 	};
@@ -1510,12 +1622,12 @@ export class MessageEditor extends LitElement {
 				     NOTE: transform: translateZ(0) is load-bearing on iOS Safari. Without its
 				     own GPU compositing layer the textarea caret is invisible in this position
 				     (bottom of viewport, nested flex). Do not remove without re-testing on iOS. -->
-				${this._sendSizeError
+				${(this._sendSizeError || this._steerError)
 					? html`<div
-							data-testid="composer-size-error"
+							data-testid=${this._steerError ? "composer-steer-error" : "composer-size-error"}
 							class="mx-2 mb-1 px-2 py-1 text-xs rounded bg-destructive/10 text-destructive"
 							role="alert"
-						>${this._sendSizeError}</div>`
+						>${this._steerError || this._sendSizeError}</div>`
 					: nothing}
 				<div class="flex items-center gap-1 px-2 py-2" style="transform: translateZ(0);">
 					${attachButton}
