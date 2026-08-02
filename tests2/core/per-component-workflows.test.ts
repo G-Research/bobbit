@@ -75,6 +75,24 @@ describe("buildPerComponentWorkflow", () => {
 		const errors = validateAllWorkflows({ [wf.id]: wf as any }, COMPONENT_REFS);
 		assert.deepEqual(errors, [], `unexpected validator errors: ${JSON.stringify(errors)}`);
 	});
+
+	it("retains only declared commands while keeping the three required reviews", () => {
+		const sparse = { name: "sparse", repo: "sparse", commands: { check: "npm run check" } } satisfies Component;
+		const wf = buildPerComponentWorkflow(sparse.name, [sparse]);
+		const implementation = wf.gates.find((gate) => gate.id === "implementation")!;
+		const commands = (implementation.verify ?? []).filter((step) => step.type === "command");
+		const reviews = (implementation.verify ?? [])
+			.filter((step) => step.type === "llm-review")
+			.map(({ name, role, phase }) => ({ name, role, phase }));
+
+		assert.deepEqual(commands.map((step) => step.command), ["check"]);
+		assert.ok(commands.every((step) => step.component === sparse.name), "retained command must target the requested component");
+		assert.deepEqual(reviews, EXPECTED_IMPLEMENTATION_REVIEWS.map((review) => ({ ...review, phase: 2 })));
+		assert.deepEqual(
+			validateAllWorkflows({ [wf.id]: wf as any }, [{ name: sparse.name, commands: sparse.commands }]),
+			[],
+		);
+	});
 });
 
 describe("buildAllComponentsWorkflow", () => {
