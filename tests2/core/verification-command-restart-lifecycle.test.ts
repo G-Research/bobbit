@@ -110,7 +110,7 @@ function diagnosticFixture(stateDir: string, signalId: string, contents: { out?:
 	};
 }
 
-function commandStepFixture(args: { name: string; startedAt: number; timeoutSec?: number; outFile?: string; errFile?: string; exitFile?: string; containerId?: string; pid?: number; pidFile?: string; heartbeatFile?: string; nonce?: string; containerOwnershipWitness?: { containerId: string; nonce: string; sentinelPid: number; pgid: number; startToken: string }; restartRecoveryMode?: "detached" | "container-exec" | "pending-retry" | "unsupported" }): any {
+function commandStepFixture(args: { name: string; startedAt: number; timeoutSec?: number; outFile?: string; errFile?: string; exitFile?: string; containerId?: string; pid?: number; pidFile?: string; heartbeatFile?: string; nonce?: string; pidNonce?: string; windowsJobCompletionFile?: string; windowsJobCompletionNonce?: string; containerOwnershipWitness?: { containerId: string; nonce: string; sentinelPid: number; pgid: number; startToken: string }; restartRecoveryMode?: "detached" | "container-exec" | "pending-retry" | "unsupported" }): any {
 	return {
 		...COMMAND_STEP_TEMPLATE,
 		...args,
@@ -349,6 +349,29 @@ test("Windows persisted container cancellation cannot complete through the POSIX
 
 	assert.deepEqual(events, ["payload", "sentinel-no-op"]);
 	assert.equal((harness as any).activeVerifications.has(verification.signalId), false);
+});
+
+test("Windows recovered docker-exec transport requires nonce-bound Job-close evidence", async () => {
+	const { stateDir, harness } = makeHarnessForStateDir(undefined, "win32");
+	const step = commandStepFixture({
+		name: "Windows recovered transport",
+		startedAt: Date.now(),
+		containerId: "container-windows-proof",
+		restartRecoveryMode: "container-exec",
+		nonce: "windows-job-proof-nonce",
+		pidNonce: "windows-job-proof-nonce",
+		windowsJobCompletionFile: path.join(stateDir, "missing-job-proof.json"),
+		windowsJobCompletionNonce: "windows-job-proof-nonce",
+	});
+	await assert.rejects(
+		() => (harness as any)._reapRecoveredPosixSentinel(step),
+		/Job completion evidence|completion is pending/i,
+	);
+	assert.equal(step.sentinelCleanupPending, true);
+
+	fs.writeFileSync(step.windowsJobCompletionFile, JSON.stringify({ nonce: "windows-job-proof-nonce", jobClosed: true }));
+	await (harness as any)._reapRecoveredPosixSentinel(step);
+	assert.equal(step.sentinelCleanupPending, undefined);
 });
 
 test("attached or container recovery stays retryable with clear diagnostics", async () => {

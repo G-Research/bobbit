@@ -60,6 +60,10 @@ export interface SpawnTrackedOptions {
 	 * original group before it sends the final group kill.
 	 */
 	posixSentinelIdentity?: { file: string; nonce: string };
+	/** Spawn-site ownership prerequisite composed into the single public readiness boundary. */
+	extraOwnershipReady?: Promise<void>;
+	/** Nonce-bound Windows Job completion proof for restart recovery. */
+	windowsJobCompletion?: { file: string; nonce: string };
 	/**
 	 * Enable the Windows job-object supervisor. Production Windows spawns enable
 	 * it by default; lifecycle seams opt in explicitly to avoid requiring
@@ -267,10 +271,14 @@ function waitWithTimeout(promise: Promise<boolean>, timeoutMs: number): Promise<
 const WINDOWS_JOB_SUPERVISOR = String.raw`
 $payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:BOBBIT_WINDOWS_JOB_PAYLOAD)) | ConvertFrom-Json
 $readyFile = $env:BOBBIT_WINDOWS_JOB_READY_FILE
+$completionFile = $env:BOBBIT_WINDOWS_JOB_COMPLETION_FILE
+$completionNonce = $env:BOBBIT_WINDOWS_JOB_COMPLETION_NONCE
 # The payload inherits this supervisor's environment; never leak the private
 # command/ready-path envelope to the command process.
 Remove-Item Env:BOBBIT_WINDOWS_JOB_PAYLOAD -ErrorAction SilentlyContinue
 Remove-Item Env:BOBBIT_WINDOWS_JOB_READY_FILE -ErrorAction SilentlyContinue
+Remove-Item Env:BOBBIT_WINDOWS_JOB_COMPLETION_FILE -ErrorAction SilentlyContinue
+Remove-Item Env:BOBBIT_WINDOWS_JOB_COMPLETION_NONCE -ErrorAction SilentlyContinue
 Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
@@ -298,10 +306,10 @@ public static class BobbitJobSupervisor {
   static void Check(bool ok) { if (!ok) throw new Win32Exception(Marshal.GetLastWin32Error()); }
   static IntPtr InheritableStdHandle(int n, uint access, out bool owned) { IntPtr h = GetStdHandle(n); owned = h == IntPtr.Zero || h == new IntPtr(-1); if (owned) { h = CreateFile("NUL", access, FILE_SHARE_READ_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero); if (h == new IntPtr(-1)) throw new Win32Exception(Marshal.GetLastWin32Error()); } Check(SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)); return h; }
   static string Quote(string s) { if (s.Length == 0) return "\"\""; if (s.IndexOfAny(new [] {' ', '\t', '"'}) < 0) return s; var b = new StringBuilder("\""); int slashes = 0; foreach (char c in s) { if (c == '\\') { slashes++; continue; } if (c == '"') { b.Append('\\', slashes * 2 + 1); b.Append(c); slashes = 0; continue; } b.Append('\\', slashes); slashes = 0; b.Append(c); } b.Append('\\', slashes * 2); b.Append('"'); return b.ToString(); }
-  public static int Run(string file, string[] args, string cwd, string readyFile) { IntPtr job = IntPtr.Zero; PROCESS_INFORMATION pi = new PROCESS_INFORMATION(); STARTUPINFO si = new STARTUPINFO(); bool assigned = false, ownIn = false, ownOut = false, ownErr = false; try { job = CreateJobObject(IntPtr.Zero, null); if (job == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error()); var limits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION(); limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE; Check(SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf(limits))); si.cb = Marshal.SizeOf(si); si.dwFlags = STARTF_USESTDHANDLES; si.hStdInput = InheritableStdHandle(-10, GENERIC_READ, out ownIn); si.hStdOutput = InheritableStdHandle(-11, GENERIC_WRITE, out ownOut); si.hStdError = InheritableStdHandle(-12, GENERIC_WRITE, out ownErr); var line = new StringBuilder(Quote(file)); foreach (var arg in args) line.Append(' ').Append(Quote(arg)); Check(CreateProcess(null, line, IntPtr.Zero, IntPtr.Zero, true, CREATE_SUSPENDED, IntPtr.Zero, cwd, ref si, out pi)); Check(AssignProcessToJobObject(job, pi.hProcess)); assigned = true; if (readyFile != null) { string pendingReadyFile = readyFile + ".tmp"; System.IO.File.WriteAllText(pendingReadyFile, "ready", Encoding.ASCII); System.IO.File.Move(pendingReadyFile, readyFile); } if (ResumeThread(pi.hThread) == 0xffffffff) throw new Win32Exception(Marshal.GetLastWin32Error()); WaitForSingleObject(pi.hProcess, INFINITE); uint code; Check(GetExitCodeProcess(pi.hProcess, out code)); return unchecked((int)code); } finally { if (pi.hThread != IntPtr.Zero) CloseHandle(pi.hThread); if (pi.hProcess != IntPtr.Zero && !assigned) TerminateProcess(pi.hProcess, 1); if (pi.hProcess != IntPtr.Zero) CloseHandle(pi.hProcess); if (ownIn && si.hStdInput != IntPtr.Zero) CloseHandle(si.hStdInput); if (ownOut && si.hStdOutput != IntPtr.Zero) CloseHandle(si.hStdOutput); if (ownErr && si.hStdError != IntPtr.Zero) CloseHandle(si.hStdError); if (job != IntPtr.Zero) CloseHandle(job); } }
+  public static int Run(string file, string[] args, string cwd, string readyFile, string completionFile, string completionNonce) { IntPtr job = IntPtr.Zero; PROCESS_INFORMATION pi = new PROCESS_INFORMATION(); STARTUPINFO si = new STARTUPINFO(); bool assigned = false, ownIn = false, ownOut = false, ownErr = false; try { job = CreateJobObject(IntPtr.Zero, null); if (job == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error()); var limits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION(); limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE; Check(SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf(limits))); si.cb = Marshal.SizeOf(si); si.dwFlags = STARTF_USESTDHANDLES; si.hStdInput = InheritableStdHandle(-10, GENERIC_READ, out ownIn); si.hStdOutput = InheritableStdHandle(-11, GENERIC_WRITE, out ownOut); si.hStdError = InheritableStdHandle(-12, GENERIC_WRITE, out ownErr); var line = new StringBuilder(Quote(file)); foreach (var arg in args) line.Append(' ').Append(Quote(arg)); Check(CreateProcess(null, line, IntPtr.Zero, IntPtr.Zero, true, CREATE_SUSPENDED, IntPtr.Zero, cwd, ref si, out pi)); Check(AssignProcessToJobObject(job, pi.hProcess)); assigned = true; if (readyFile != null) { string pendingReadyFile = readyFile + ".tmp"; System.IO.File.WriteAllText(pendingReadyFile, "ready", Encoding.ASCII); System.IO.File.Move(pendingReadyFile, readyFile); } if (ResumeThread(pi.hThread) == 0xffffffff) throw new Win32Exception(Marshal.GetLastWin32Error()); WaitForSingleObject(pi.hProcess, INFINITE); uint code; Check(GetExitCodeProcess(pi.hProcess, out code)); return unchecked((int)code); } finally { if (pi.hThread != IntPtr.Zero) CloseHandle(pi.hThread); if (pi.hProcess != IntPtr.Zero && !assigned) TerminateProcess(pi.hProcess, 1); if (pi.hProcess != IntPtr.Zero) CloseHandle(pi.hProcess); if (ownIn && si.hStdInput != IntPtr.Zero) CloseHandle(si.hStdInput); if (ownOut && si.hStdOutput != IntPtr.Zero) CloseHandle(si.hStdOutput); if (ownErr && si.hStdError != IntPtr.Zero) CloseHandle(si.hStdError); if (job != IntPtr.Zero) { CloseHandle(job); if (assigned && completionFile != null && completionNonce != null) { string pendingCompletion = completionFile + ".tmp"; System.IO.File.WriteAllText(pendingCompletion, "{\"nonce\":\"" + completionNonce + "\",\"jobClosed\":true}", Encoding.ASCII); System.IO.File.Move(pendingCompletion, completionFile); } } } }
 }
 '@
-exit [BobbitJobSupervisor]::Run([string]$payload.file, [string[]]$payload.args, [string]$payload.cwd, [string]$readyFile)
+exit [BobbitJobSupervisor]::Run([string]$payload.file, [string[]]$payload.args, [string]$payload.cwd, [string]$readyFile, [string]$completionFile, [string]$completionNonce)
 `;
 
 const WINDOWS_JOB_SUPERVISOR_COMMAND = Buffer.from(WINDOWS_JOB_SUPERVISOR, "utf16le").toString("base64");
@@ -383,6 +391,10 @@ export function spawnTracked(
 						...(opts.env ?? process.env),
 						BOBBIT_WINDOWS_JOB_PAYLOAD: windowsPayload,
 						BOBBIT_WINDOWS_JOB_READY_FILE: windowsJobReadiness!.file,
+						...(opts.windowsJobCompletion ? {
+							BOBBIT_WINDOWS_JOB_COMPLETION_FILE: opts.windowsJobCompletion.file,
+							BOBBIT_WINDOWS_JOB_COMPLETION_NONCE: opts.windowsJobCompletion.nonce,
+						} : {}),
 					}
 					: sentinelEnv,
 				stdio: posixTreeSentinel ? withPosixSentinelReadyPipe(opts.stdio) : opts.stdio,
@@ -405,11 +417,16 @@ export function spawnTracked(
 	const windowsSupervisorClosed = new Promise<void>(resolve => { resolveWindowsSupervisorClosed = resolve; });
 	let resolveOwnershipReady!: () => void;
 	let rejectOwnershipReady!: (error: Error) => void;
-	const ownershipReady = (posixTreeSentinel || windowsJobSupervisor)
+	const platformOwnershipReady = (posixTreeSentinel || windowsJobSupervisor)
 		? new Promise<void>((resolve, reject) => { resolveOwnershipReady = resolve; rejectOwnershipReady = reject; })
 		: isWin
 			? Promise.reject(new Error(WINDOWS_JOB_READINESS_FAILURE))
 			: Promise.resolve();
+	// Container witness publication is a spawn-site prerequisite, never a
+	// second authority. Consumers observe one readiness boundary.
+	const ownershipReady = opts.extraOwnershipReady
+		? Promise.all([platformOwnershipReady, opts.extraOwnershipReady]).then(() => undefined)
+		: platformOwnershipReady;
 	// Production callers are not required to await this diagnostic/lifecycle
 	// barrier. Observe rejection internally while retaining it for consumers.
 	void ownershipReady.catch(() => {});
@@ -435,12 +452,17 @@ export function spawnTracked(
 		killed: () => tracked._killed,
 		timedOut: () => tracked._timedOut,
 		markSurvival: () => {
-			tracked._survivesShutdown = true;
-			// FD 3 remains open for the payload's lifetime, so its parent Socket
-			// must not keep a gateway alive after this deliberately detached child
-			// has acknowledged the sentinel handshake. Unref preserves the stream and
-			// normal `close` settlement for explicit later cleanup.
-			if (tracked._posixSentinelReady) unrefReadyPipe(readyPipe);
+			// Ordinary platform readiness remains synchronous at this boundary. Only
+			// a container's additional witness must delay survival acknowledgement.
+			if (!opts.extraOwnershipReady) {
+				tracked._survivesShutdown = true;
+				if (tracked._posixSentinelReady) unrefReadyPipe(readyPipe);
+				return;
+			}
+			void ownershipReady.then(() => {
+				tracked._survivesShutdown = true;
+				if (tracked._posixSentinelReady) unrefReadyPipe(readyPipe);
+			}, () => { tracked._survivesShutdown = false; });
 		},
 		async waitForTreeExit(timeoutMs?: number): Promise<boolean> {
 			// Once the root's exit event fired without completion already observed,
@@ -569,6 +591,9 @@ export function spawnTracked(
 	// settle synchronously; adding the entry afterwards would resurrect a child
 	// that the failure path deliberately removed.
 	registry.add(tracked);
+	// A rejected external prerequisite (for example an in-container witness)
+	// fails closed while this live tracked child is still the sole authority.
+	if (opts.extraOwnershipReady) void opts.extraOwnershipReady.catch(() => tracked.killTree("SIGKILL"));
 
 	// A timeout measures owned payload execution, not sentinel/Job setup. Arming
 	// it before the ownership boundary races cold process startup and can kill a

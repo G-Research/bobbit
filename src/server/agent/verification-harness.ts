@@ -942,6 +942,9 @@ export interface ActiveVerification {
 		 * transport process group across gateway restart.
 		 */
 		sentinelFile?: string;
+		/** Windows Job supervisor's nonce-bound post-Job-close completion record. */
+		windowsJobCompletionFile?: string;
+		windowsJobCompletionNonce?: string;
 		/** Compatibility alias used by bash_bg-style pidfile records and older tests. */
 		nonce?: string;
 		/** Container id for attached docker exec command paths (not restart-recoverable). */
@@ -2911,23 +2914,38 @@ export class VerificationHarness {
 	 * never targeted and resume fails closed.
 	 */
 	private async _reapRecoveredPosixSentinel(step: ActiveVerification["steps"][number]): Promise<void> {
-		if (this.platform === "win32") return;
 		const isRecoveredContainerTransport = step.restartRecoveryMode === "container-exec" && !!step.containerId;
+		if (this.platform === "win32") {
+			// The original Job handle is not reopenable by numeric PID. Only the
+			// supervisor's nonce-bound post-Job-close record proves transport exit.
+			if (!isRecoveredContainerTransport || !step.windowsJobCompletionFile ||
+				!step.windowsJobCompletionNonce || step.windowsJobCompletionNonce !== step.pidNonce) {
+				step.sentinelCleanupPending = true;
+				this._persistActive();
+				throw new PendingCommandCleanupError("Recovered Windows docker-exec transport has no exact Job completion evidence.");
+			}
+			try {
+				const proof = JSON.parse(fs.readFileSync(step.windowsJobCompletionFile, "utf8"));
+				if (proof?.nonce !== step.windowsJobCompletionNonce || proof?.jobClosed !== true) throw new Error("missing or nonce-mismatched Job-close proof");
+				delete step.sentinelCleanupPending;
+				return;
+			} catch (error) {
+				step.sentinelCleanupPending = true;
+				this._persistActive();
+				throw new PendingCommandCleanupError(`Recovered Windows docker-exec transport completion is pending: ${(error as Error).message}`);
+			}
+		}
 		const pending = (message: string): never => {
 			step.sentinelCleanupPending = true;
 			this._persistActive();
 			throw new PendingCommandCleanupError(message);
 		};
-		// A host detached wrapper from an older record may have no POSIX sentinel
-		// identity. It cannot safely be reaped, but its durable exit verdict remains
-		// valid. A recovered docker-exec transport is different: its host group can
-		// outlive the gateway, so every terminal or waiting container outcome must
-		// prove and reap the exact sentinel before it is returned.
+		// Legacy pidfiles and heartbeats are observation-only. They never authorize
+		// a recovered POSIX cleanup or terminal cleanup acknowledgement.
 		if (!step.sentinelFile) {
-			if (isRecoveredContainerTransport) {
-				return pending("Recovered container command has no durable host docker-exec sentinel metadata.");
-			}
-			return;
+			return pending(isRecoveredContainerTransport
+				? "Recovered container command has no durable host docker-exec sentinel metadata."
+				: "Recovered POSIX command has no typed exact sentinel evidence; cleanup remains pending.");
 		}
 		// docker-exec persistence is a new format: do not accept the legacy
 		// compatibility nonce alias, because it is not bound to this transport's
@@ -3047,6 +3065,26 @@ export class VerificationHarness {
 
 	private _commandKillRetryTimers = new Map<string, NodeJS.Timeout>();
 
+	/** One terminal cancellation path, invoked only after every cleanup phase settles. */
+	private async _finalizeCancelledVerification(active: ActiveVerification): Promise<void> {
+		if (this._hasPendingCommandKillCleanup(active)) return;
+		if (this.activeVerifications.get(active.signalId) === active) this.activeVerifications.delete(active.signalId);
+		for (const step of active.steps) {
+			if (!step.sessionId || step.status !== "running") continue;
+			try { await this.sessionManager?.terminateSession(step.sessionId); } catch { /* already stopped */ }
+			try { await this.teamManager?.unregisterReviewerSession(active.goalId, step.sessionId); } catch { /* already stopped */ }
+		}
+		this.resolveGateStore(active.goalId)?.updateSignalVerification(active.signalId, {
+			status: "failed",
+			steps: [{ name: "Cancelled", type: "command", passed: false, status: "failed", phase: 0, output: "Verification cancelled.", duration_ms: 0 }],
+		});
+		this._persistActive();
+		this.broadcastFn(active.goalId, {
+			type: "gate_verification_complete", goalId: active.goalId, gateId: active.gateId,
+			signalId: active.signalId, status: "cancelled",
+		});
+	}
+
 	private _scheduleCommandKillCleanupRetry(signalId: string): void {
 		if (this._commandKillRetryTimers.has(signalId)) return;
 		const timer = this.clock.setTimeout(async () => {
@@ -3064,8 +3102,7 @@ export class VerificationHarness {
 				}
 
 				if (active.cancelled || active.overallStatus === "cancelled") {
-					if (this.activeVerifications.get(signalId) === active) this.activeVerifications.delete(signalId);
-					this._persistActive();
+					await this._finalizeCancelledVerification(active);
 					return;
 				}
 
@@ -3097,7 +3134,7 @@ export class VerificationHarness {
 		}
 
 		let allSettled = true;
-		for (const step of active.steps) {
+		for (const [stepIndex, step] of active.steps.entries()) {
 			if (!this._commandStepRequiresKillCleanup(step)) continue;
 			// A live TrackedChild has already joined its spawn-time ownership
 			// barrier. Its successful cleanup is stronger than a second recovery
@@ -3112,11 +3149,19 @@ export class VerificationHarness {
 					// Durable ordering: exact payload first, then exact host docker-exec
 					// transport. Each phase is persisted independently for crash recovery.
 					await this._killAndVerifyRecoveredContainerProcessGroup(step);
-					step.containerTransportCleanupPending = true;
-					this._persistActive();
-					await this.recoveredSentinelReaper(step);
-					step.containerTransportCleanupCompletedAt ??= Date.now();
-					delete step.containerTransportCleanupPending;
+					// A live TrackedChild owns the current docker-exec transport. The
+					// recovered sentinel reaper is restart-only; never use both.
+					if (this._trackedCommandChildren.has(`${active.signalId}:${stepIndex}`)) {
+						if (!step.containerTransportCleanupCompletedAt) step.containerTransportCleanupPending = true;
+						continue;
+					}
+					if (!step.containerTransportCleanupCompletedAt) {
+						step.containerTransportCleanupPending = true;
+						this._persistActive();
+						await this.recoveredSentinelReaper(step);
+						step.containerTransportCleanupCompletedAt = Date.now();
+						delete step.containerTransportCleanupPending;
+					}
 					step.killCompletedAt ??= Date.now();
 				} catch (err) {
 					if (!isPendingCommandCleanupError(err)) throw err;
@@ -3156,55 +3201,10 @@ export class VerificationHarness {
 				continue;
 			}
 
-			const identityFile = options.waitForIdentity
-				? await this._waitForCommandIdentityFile(step, () => this.activeVerifications.get(active.signalId) === active && this._hasPendingCommandKillCleanup(active))
-				: this._readCommandIdentityFile(step);
-			let identity = this._verifyPersistedCommandIdentity(step, identityFile);
-			if (!identity.verified || !identity.pid) {
-				step.killUnsafeReason = identity.reason;
-				if (identity.reason === "command process is no longer alive") {
-					if (step.killReason === "timeout" && (step.killAttempts ?? 0) === 0 && !step.killLastAttemptAt) {
-						step.killUnsafeReason = "command process exited before Bobbit could verify a timeout kill; no command verdict was obtained";
-						delete step.killRequestedAt;
-						delete step.killReason;
-						delete step.killSignal;
-					} else {
-						step.killCompletedAt ??= Date.now();
-					}
-					continue;
-				}
-				allSettled = false;
-				if (process.env.BOBBIT_DEBUG && (step.pidFile || step.pid)) {
-					console.warn(`[verification] Not killing persisted command "${step.name}" for ${active.signalId}: ${identity.reason}`);
-				}
-				continue;
-			}
-
-			step.killAttempts = (step.killAttempts ?? 0) + 1;
-			step.killLastAttemptAt = Date.now();
-			const killResult = killTreeByPid(identity.pid, signal);
-			if (killResult !== "signalled") {
-				step.killUnsafeReason = killResult === "unsupported"
-					? "Persisted Windows PID cleanup is unsupported because ownership cannot be verified atomically"
-					: "Persisted command process group was unavailable before cleanup; refusing to retarget its numeric PID";
-				allSettled = false;
-				continue;
-			}
-			const exited = await this._waitForPidToExit(identity.pid);
-			if (exited) {
-				step.killCompletedAt = Date.now();
-				continue;
-			}
-
-			identity = this._verifyPersistedCommandIdentity(step);
-			if (identity.reason === "command process is no longer alive") {
-				step.killCompletedAt = Date.now();
-			} else {
-				allSettled = false;
-				step.killUnsafeReason = identity.verified && identity.pid
-					? "verified command process was still alive after kill attempt; will retry"
-					: `command cleanup could not be verified after kill attempt: ${identity.reason}`;
-			}
+			// Numeric pidfiles, heartbeats, and leader start tokens cannot prove a
+			// recovered process *group* remains ours. A typed sentinel is mandatory.
+			step.killUnsafeReason = "Recovered command has no typed exact sentinel evidence; refusing numeric PID/PGID cleanup.";
+			allSettled = false;
 		}
 		this._persistActive();
 		return allSettled;
@@ -3229,6 +3229,14 @@ export class VerificationHarness {
 				this._persistActive();
 				return { status: "pending", reason: (err as Error).message };
 			}
+		}
+		// No persisted PID/heartbeat fallback survives a restart. Without the
+		// sentinel authority, timeout cleanup is explicitly retryable.
+		if (!step.sentinelFile || this.platform === "win32") {
+			this._markPersistedCommandKillIntent(active, "SIGKILL", "timeout");
+			step.killUnsafeReason = "Recovered timeout has no typed exact sentinel evidence; refusing numeric PID/PGID cleanup.";
+			this._persistActive();
+			return { status: "pending", reason: step.killUnsafeReason };
 		}
 		let identity = this._verifyPersistedCommandIdentity(step);
 
@@ -3291,10 +3299,14 @@ export class VerificationHarness {
 	 * acknowledges it; treating that pre-readiness state as recovered ownership
 	 * can leave cancellation pending after the live child was already reaped.
 	 */
-	private async _killTrackedForSignal(signalId: string): Promise<boolean> {
+	private async _killTrackedForSignal(
+		signalId: string,
+		includeStep: (step: ActiveVerification["steps"][number] | undefined) => boolean = () => true,
+	): Promise<boolean> {
 		const prefix = `${signalId}:`;
+		const active = this.activeVerifications.get(signalId);
 		const trackedChildren = Array.from(this._trackedCommandChildren.entries())
-			.filter(([key]) => key.startsWith(prefix));
+			.filter(([key]) => key.startsWith(prefix) && includeStep(active?.steps[Number(key.slice(prefix.length))]));
 		// Mark every child before waiting for any one readiness barrier. A blocked
 		// pre-readiness step must not let an independent ready sibling continue.
 		for (const [key] of trackedChildren) this._cancelledTrackedKeys.add(key);
@@ -3305,7 +3317,15 @@ export class VerificationHarness {
 				if (!await tracked.waitForTreeExit()) return false;
 				const stepIndex = Number(key.slice(prefix.length));
 				const step = this.activeVerifications.get(signalId)?.steps[stepIndex];
-				if (step?.type === "command") step.killCompletedAt ??= Date.now();
+				if (step?.type === "command") {
+					if (step.containerId) {
+						// This live TrackedChild is the sole host transport authority.
+						if (!step.containerPayloadCleanupCompletedAt) return false;
+						step.containerTransportCleanupCompletedAt ??= Date.now();
+						delete step.containerTransportCleanupPending;
+					}
+					step.killCompletedAt ??= Date.now();
+				}
 				if (this._trackedCommandChildren.get(key) === tracked) this._trackedCommandChildren.delete(key);
 				return true;
 			} catch {
@@ -3360,20 +3380,13 @@ export class VerificationHarness {
 
 			this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
 			this._persistActive();
-			// Attached ordinary commands have no durable recovery identity; preserve
-			// their live tracked cleanup. Container transport remains deferred until
-			// its exact payload phase has settled.
-			const hasContainerCommand = active.steps.some(step => step.type === "command" && !!step.containerId);
-			// A live host child is the current exact authority. Await its ownership
-			// barrier and tree-exit proof before consulting recovery metadata.
-			const liveHostCleanupSettled = hasContainerCommand
-				? true
-				: await this._killTrackedForSignal(signalId);
+			// Partition siblings by ownership domain. A live docker-exec transport
+			// is never reaped through the recovered sentinel path.
+			const liveHostCleanupSettled = await this._killTrackedForSignal(signalId, step => !step?.containerId);
 			const persistedCleanupSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
-			// Exact payload cleanup precedes host docker-exec transport teardown.
-			const liveTransportCleanupSettled = hasContainerCommand && persistedCleanupSettled
-				? await this._killTrackedForSignal(signalId)
-				: true;
+			const liveTransportCleanupSettled = persistedCleanupSettled
+				? await this._killTrackedForSignal(signalId, step => !!step?.containerId)
+				: !Array.from(this._trackedCommandChildren.keys()).some(key => key.startsWith(`${signalId}:`));
 			const commandKillsSettled = liveHostCleanupSettled && persistedCleanupSettled && liveTransportCleanupSettled;
 			this._drainPendingSignoffsForSignal(signalId);
 
@@ -3387,20 +3400,10 @@ export class VerificationHarness {
 			}
 
 			if (commandKillsSettled) {
-				this.activeVerifications.delete(signalId);
+				await this._finalizeCancelledVerification(active);
 			} else {
+				this._persistActive();
 				this._scheduleCommandKillCleanupRetry(signalId);
-			}
-			this._persistActive();
-
-			// Pending ownership evidence is deliberately non-terminal. The retry path
-			// owns eventual publication after both cleanup phases succeed.
-			if (commandKillsSettled) {
-				this.broadcastFn(goalId, {
-					type: "gate_verification_complete",
-					goalId, gateId: active.gateId, signalId,
-					status: "cancelled",
-				});
 			}
 
 			console.log(`[verification] Cancelled verification ${signalId} for goal ${goalId} (goal completing)`);
@@ -3424,7 +3427,7 @@ export class VerificationHarness {
 	async cancelStaleVerificationsForGates(goalId: string, gateIds: string[]): Promise<void> {
 		const gateIdSet = new Set(gateIds);
 		this._mergePersistedActiveVerifications(v => v.goalId === goalId && gateIdSet.has(v.gateId));
-		const cancellations: Array<{ signalId: string; gateId: string; runningSessionIds: string[] }> = [];
+		const cancellations: ActiveVerification[] = [];
 
 		for (const [signalId, active] of Array.from(this.activeVerifications)) {
 			if (active.goalId !== goalId || !gateIdSet.has(active.gateId)) continue;
@@ -3435,25 +3438,15 @@ export class VerificationHarness {
 
 			this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
 			this._persistActive();
-			const hasContainerCommand = active.steps.some(step => step.type === "command" && !!step.containerId);
-			const liveHostCleanupSettled = hasContainerCommand
-				? true
-				: await this._killTrackedForSignal(signalId);
+			const liveHostCleanupSettled = await this._killTrackedForSignal(signalId, step => !step?.containerId);
 			const persistedCleanupSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
-			const liveTransportCleanupSettled = hasContainerCommand && persistedCleanupSettled
-				? await this._killTrackedForSignal(signalId)
-				: true;
+			const liveTransportCleanupSettled = persistedCleanupSettled
+				? await this._killTrackedForSignal(signalId, step => !!step?.containerId)
+				: !Array.from(this._trackedCommandChildren.keys()).some(key => key.startsWith(`${signalId}:`));
 			const commandKillsSettled = liveHostCleanupSettled && persistedCleanupSettled && liveTransportCleanupSettled;
 			this._drainPendingSignoffsForSignal(signalId);
 			if (commandKillsSettled) {
-				this.activeVerifications.delete(signalId);
-				cancellations.push({
-					signalId,
-					gateId: active.gateId,
-					runningSessionIds: active.steps
-						.filter(step => step.sessionId && step.status === "running")
-						.map(step => step.sessionId!),
-				});
+				cancellations.push(active);
 			} else {
 				this._scheduleCommandKillCleanupRetry(signalId);
 			}
@@ -3462,35 +3455,9 @@ export class VerificationHarness {
 
 		if (cancellations.length > 0) this._persistActive();
 
-		for (const { signalId, gateId, runningSessionIds } of cancellations) {
-			// Terminate all running reviewer sessions after every affected active
-			// verification has already been marked cancelled and removed.
-			for (const sessionId of runningSessionIds) {
-				try {
-					await this.sessionManager?.terminateSession(sessionId);
-				} catch { /* ignore — may already be terminated */ }
-				if (this.teamManager) {
-					try {
-						await this.teamManager.unregisterReviewerSession(goalId, sessionId);
-					} catch { /* ignore */ }
-				}
-			}
-
-			// Persist cancellation to gate store so UI sees "failed" instead of stale "running"
-			this.resolveGateStore(goalId).updateSignalVerification(signalId, {
-				status: "failed",
-				steps: [{ name: "Cancelled", type: "command", passed: false, status: "failed", phase: 0, output: "Verification cancelled.", duration_ms: 0 }],
-			});
-			// Note: gate status is NOT updated here — the caller decides whether to set it
-			// (e.g. explicit user cancel sets it to "failed", but re-signal lets the new verification decide)
-
-			this.broadcastFn(goalId, {
-				type: "gate_verification_complete",
-				goalId, gateId, signalId,
-				status: "cancelled",
-			});
-
-			console.log(`[verification] Cancelled stale verification ${signalId} for gate ${gateId}`);
+		for (const active of cancellations) {
+			await this._finalizeCancelledVerification(active);
+			console.log(`[verification] Cancelled stale verification ${active.signalId} for gate ${active.gateId}`);
 		}
 	}
 
@@ -5546,6 +5513,7 @@ export class VerificationHarness {
 			let pidFile: string | undefined;
 			let pidNonce: string | undefined;
 			let sentinelFile: string | undefined;
+			let windowsJobCompletionFile: string | undefined;
 			let containerWitnessFile: string | undefined;
 			let heartbeatFile: string | undefined;
 			let processStartToken: string | undefined;
@@ -5619,8 +5587,9 @@ export class VerificationHarness {
 				try {
 					const stepDir = path.join(this._stateDir, "verifications", streamCtx.signalId);
 					fs.mkdirSync(stepDir, { recursive: true });
-					sentinelFile = path.join(stepDir, `${streamCtx.stepIndex}.docker-exec.sentinel.json`);
-					for (const file of [sentinelFile, sentinelFile + ".tmp"]) {
+					sentinelFile = process.platform === "win32" ? undefined : path.join(stepDir, `${streamCtx.stepIndex}.docker-exec.sentinel.json`);
+					windowsJobCompletionFile = process.platform === "win32" ? path.join(stepDir, `${streamCtx.stepIndex}.docker-exec.job-complete.json`) : undefined;
+					for (const file of [sentinelFile, sentinelFile && sentinelFile + ".tmp", windowsJobCompletionFile, windowsJobCompletionFile && windowsJobCompletionFile + ".tmp"].filter((file): file is string => !!file)) {
 						try { fs.unlinkSync(file); } catch { /* not present */ }
 					}
 				} catch (err) {
@@ -5739,7 +5708,11 @@ export class VerificationHarness {
 			// witness rename and before user payload execution. It combines with host
 			// spawn ownership before a container timeout/survival action is armed.
 			let resolveContainerOwnershipReady!: () => void;
-			const containerOwnershipReady = new Promise<void>(resolve => { resolveContainerOwnershipReady = resolve; });
+			let rejectContainerOwnershipReady!: (error: Error) => void;
+			const containerOwnershipReady = useContainerDurable
+				? new Promise<void>((resolve, reject) => { resolveContainerOwnershipReady = resolve; rejectContainerOwnershipReady = reject; })
+				: Promise.resolve();
+			let containerWitnessAcknowledged = !useContainerDurable;
 			let containerTimedOut = false;
 			let containerTimeoutTimer: TimerHandle | undefined;
 			try {
@@ -5768,7 +5741,7 @@ export class VerificationHarness {
 						// parent cannot execute user code until the atomic rename completes.
 						// The sentinel remains after the leader exits, preserving the exact
 						// identity needed for timeout and restart cleanup.
-						wrappedCmd = `mkdir -p ${qDir} 2>/dev/null || exit 125; __bobbit_ready=${qWitness}.ready.$$; rm -f "$__bobbit_ready"; mkfifo "$__bobbit_ready" || exit 125; BOBBIT_WITNESS=${qWitness} BOBBIT_NONCE=${qNonce} BOBBIT_CONTAINER=${qContainer} BOBBIT_READY="$__bobbit_ready" /bin/sh -c 'trap "" HUP INT TERM; __p=$$; __g=$(awk "{print \\$5}" "/proc/$__p/stat" 2>/dev/null || true); __s=$(awk "{print \\$22}" "/proc/$__p/stat" 2>/dev/null || true); case "$__p:$__g:$__s" in *::*) exit 125;; esac; __t="$BOBBIT_WITNESS.$$.tmp"; printf "{\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s" > "$__t" && mv "$__t" "$BOBBIT_WITNESS" || exit 125; printf ".\n" > "$BOBBIT_READY"; while :; do sleep 2147483647 & wait $!; done' >/dev/null 2>&1 & __bobbit_sentinel=$!; IFS= read -r __bobbit_ready_ack < "$__bobbit_ready" || exit 125; rm -f "$__bobbit_ready"; printf 'BOBBIT_CONTAINER_OWNERSHIP_READY\\n'; __bp=$$; printf %s "$__bp" > ${qPid}.tmp && mv ${qPid}.tmp ${qPid}; ( while :; do printf '{"pid":%s,"ts":%s}' "$__bp" "$(date +%s 2>/dev/null || printf 0)" > ${qHb}.tmp && mv ${qHb}.tmp ${qHb}; sleep 1; done ) & __hb=$!; ( ${command}\n); __ec=$?; kill "$__hb" 2>/dev/null; wait "$__hb" 2>/dev/null; printf %s "$__ec" > ${qExit}.tmp && mv ${qExit}.tmp ${qExit}; printf 'BOBBIT_CONTAINER_PAYLOAD_EXIT:%s:%s\\n' ${qNonce} "$__ec"; exit $__ec`;
+						wrappedCmd = `mkdir -p ${qDir} 2>/dev/null || exit 125; __bobbit_ready=${qWitness}.ready.$$; rm -f "$__bobbit_ready"; mkfifo "$__bobbit_ready" || exit 125; BOBBIT_WITNESS=${qWitness} BOBBIT_NONCE=${qNonce} BOBBIT_CONTAINER=${qContainer} BOBBIT_READY="$__bobbit_ready" /bin/sh -c 'trap "" HUP INT TERM; __p=$$; __g=$(awk "{print \\$5}" "/proc/$__p/stat" 2>/dev/null || true); __s=$(awk "{print \\$22}" "/proc/$__p/stat" 2>/dev/null || true); case "$__p:$__g:$__s" in *::*) exit 125;; esac; __t="$BOBBIT_WITNESS.$$.tmp"; printf "{\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s" > "$__t" && mv "$__t" "$BOBBIT_WITNESS" || exit 125; printf ".\n" > "$BOBBIT_READY"; while :; do sleep 2147483647 & wait $!; done' >/dev/null 2>&1 & __bobbit_sentinel=$!; IFS= read -r __bobbit_ready_ack < "$__bobbit_ready" || exit 125; rm -f "$__bobbit_ready"; printf 'BOBBIT_CONTAINER_OWNERSHIP_READY\\n'; __bobbit_payload_out="$__bobbit_ready.out"; __bobbit_payload_err="$__bobbit_ready.err"; mkfifo "$__bobbit_payload_out" "$__bobbit_payload_err" || exit 125; ( while IFS= read -r __bobbit_line; do printf '[payload] %s\\n' "$__bobbit_line"; done < "$__bobbit_payload_out" ) & __bobbit_out_forwarder=$!; ( while IFS= read -r __bobbit_line; do printf '[payload] %s\\n' "$__bobbit_line" >&2; done < "$__bobbit_payload_err" ) & __bobbit_err_forwarder=$!; __bp=$$; printf %s "$__bp" > ${qPid}.tmp && mv ${qPid}.tmp ${qPid}; ( while :; do printf '{"pid":%s,"ts":%s}' "$__bp" "$(date +%s 2>/dev/null || printf 0)" > ${qHb}.tmp && mv ${qHb}.tmp ${qHb}; sleep 1; done ) & __hb=$!; ( ${command}\n) >"$__bobbit_payload_out" 2>"$__bobbit_payload_err"; __ec=$?; wait "$__bobbit_out_forwarder"; wait "$__bobbit_err_forwarder"; rm -f "$__bobbit_payload_out" "$__bobbit_payload_err"; kill "$__hb" 2>/dev/null; wait "$__hb" 2>/dev/null; printf %s "$__ec" > ${qExit}.tmp && mv ${qExit}.tmp ${qExit}; printf 'BOBBIT_CONTAINER_LAUNCHER_EXIT:%s:%s\\n' ${qNonce} "$__ec"; exit $__ec`;
 					} else {
 						wrappedCmd = `echo $$ > ${killPidFile}; ${command}`;
 					}
@@ -5786,6 +5759,8 @@ export class VerificationHarness {
 						// On POSIX this sentinel is the only durable witness for the
 						// detached host docker-exec group after gateway restart.
 						...(sentinelFile && pidNonce ? { posixSentinelIdentity: { file: sentinelFile, nonce: pidNonce } } : {}),
+						...(useContainerDurable ? { extraOwnershipReady: containerOwnershipReady } : {}),
+						...(windowsJobCompletionFile && pidNonce ? { windowsJobCompletion: { file: windowsJobCompletionFile, nonce: pidNonce } } : {}),
 						env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
 						onTimeout: () => {
 							// Host docker-exec cleanup alone cannot reach container children.
@@ -5856,6 +5831,8 @@ export class VerificationHarness {
 					pidFile,
 					pidNonce,
 					sentinelFile,
+					windowsJobCompletionFile,
+					windowsJobCompletionNonce: windowsJobCompletionFile ? pidNonce : undefined,
 					heartbeatFile,
 					bootEpoch: this.bootEpoch,
 					timeoutSec,
@@ -5894,6 +5871,8 @@ export class VerificationHarness {
 					pidFile,
 					pidNonce,
 					sentinelFile,
+					windowsJobCompletionFile,
+					windowsJobCompletionNonce: windowsJobCompletionFile ? pidNonce : undefined,
 					heartbeatFile,
 					bootEpoch: this.bootEpoch,
 					timeoutSec,
@@ -5944,11 +5923,13 @@ export class VerificationHarness {
 				// The nonce is a random UUID generated by this harness, so it contains
 				// no regexp syntax. Retain one marker-sized tail for arbitrary stream
 				// chunking without introducing a timer or filesystem poll.
-				const marker = `BOBBIT_CONTAINER_PAYLOAD_EXIT:${pidNonce}:`;
+				const marker = `BOBBIT_CONTAINER_LAUNCHER_EXIT:${pidNonce}:`;
 				const candidate = containerCompletionMarkerTail + text;
 				const markerOffset = candidate.indexOf(marker);
 				containerCompletionMarkerTail = candidate.slice(-Math.max(marker.length + 4, 128));
-				if (markerOffset < 0) return;
+				// Payload output is line-prefixed by the launcher. Accept only an exact
+				// control-channel line, never a marker embedded in payload data.
+				if (markerOffset < 0 || (markerOffset > 0 && candidate[markerOffset - 1] !== "\n")) return;
 				const match = /^(\d+)(?:\r?\n|$)/.exec(candidate.slice(markerOffset + marker.length));
 				if (!match) return;
 				const code = Number(match[1]);
@@ -5974,7 +5955,10 @@ export class VerificationHarness {
 						stderr += text;
 						if (stderr.length > 1024 * 1024) stderr = stderr.slice(-512 * 1024);
 					}
-					if (text.includes("BOBBIT_CONTAINER_OWNERSHIP_READY")) resolveContainerOwnershipReady();
+					if (text.includes("BOBBIT_CONTAINER_OWNERSHIP_READY")) {
+						containerWitnessAcknowledged = true;
+						resolveContainerOwnershipReady();
+					}
 					observeContainerPayloadCompletion(text);
 					if (streamCtx) {
 						this.broadcastFn(streamCtx.goalId, {
@@ -6007,7 +5991,7 @@ export class VerificationHarness {
 			// in-container atomic witness both acknowledge ownership. No polling: the
 			// wrapper's FIFO acknowledgement is forwarded as a one-shot stream marker.
 			if (useContainerDurable && streamCtx) {
-				void Promise.all([tracked!.ownershipReady, containerOwnershipReady]).then(() => {
+				void tracked!.ownershipReady.then(() => {
 					if (containerTimeoutTimer || !tracked || settled) return;
 					containerTimeoutTimer = this.clock.setTimeout(() => {
 						if (!tracked || settled) return;
@@ -6190,6 +6174,9 @@ export class VerificationHarness {
 			}
 
 			child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+				if (useContainerDurable && !containerWitnessAcknowledged) {
+					rejectContainerOwnershipReady(new Error("Container ownership witness was not established before docker exec exited"));
+				}
 				exitCode = code;
 				exitSignal = signal;
 				closeGraceTimer = processClock.setTimeout(() => {
@@ -6210,6 +6197,7 @@ export class VerificationHarness {
 				void settleFromProcess(code ?? exitCode, signal ?? exitSignal);
 			});
 			child.on("error", (err: Error) => {
+				if (useContainerDurable && !containerWitnessAcknowledged) rejectContainerOwnershipReady(err);
 				if (settled || settleStarted) return;
 				settleStarted = true;
 				settled = true;
@@ -6407,7 +6395,10 @@ export class VerificationHarness {
 			});
 		};
 		const finalizeRecoveredExit = async () => {
-			await this._reapRecoveredPosixSentinel(step);
+			// A durable exit is a non-destructive verdict. New records still reap
+			// their exact sentinel, while legacy records never turn pidfiles or
+			// heartbeats into a cleanup authority merely to finalize that verdict.
+			if (step.sentinelFile) await this._reapRecoveredPosixSentinel(step);
 			return finalize(readExitFile());
 		};
 		const timeoutResult = () => {
@@ -6445,11 +6436,11 @@ export class VerificationHarness {
 		if (step.killReason === "timeout" && step.killCompletedAt) {
 			// A prior boot may have finished the in-container timeout cleanup but
 			// crashed before reaping the detached host docker-exec transport.
-			if (step.restartRecoveryMode === "container-exec" && step.containerId) {
+			if (step.restartRecoveryMode === "container-exec" && step.containerId && !step.containerTransportCleanupCompletedAt) {
 				step.containerTransportCleanupPending = true;
 				this._persistActive();
 				await this._reapRecoveredPosixSentinel(step);
-				step.containerTransportCleanupCompletedAt ??= Date.now();
+				step.containerTransportCleanupCompletedAt = Date.now();
 				delete step.containerTransportCleanupPending;
 				this._persistActive();
 			}
@@ -6736,10 +6727,11 @@ export class VerificationHarness {
 			// exact host transport sentinel. This applies on Windows too: its host
 			// sentinel reaper is a no-op, never an acknowledgement of payload cleanup.
 			await this._killAndVerifyRecoveredContainerProcessGroup(step);
+			if (step.containerTransportCleanupCompletedAt) return;
 			step.containerTransportCleanupPending = true;
 			this._persistActive();
 			await this._reapRecoveredPosixSentinel(step);
-			step.containerTransportCleanupCompletedAt ??= Date.now();
+			step.containerTransportCleanupCompletedAt = Date.now();
 			delete step.containerTransportCleanupPending;
 			this._persistActive();
 		};
