@@ -170,8 +170,8 @@ When the user clicks Stop (or presses Escape), the server attempts a graceful ab
 
 **Force-kill recovery flow** (exactly-once at the transcript level):
 
-1. User clicks Stop. `SessionManager.forceAbort()` enters abort handling. The shadow ledger (`session.inFlightSteerTexts`) holds every steer text recorded by `_dispatchSteer()` but not yet echoed as `message_end(role:user)`.
-2. If the graceful abort does not settle, the agent process is stopped and `_reconcileAfterAbort()` re-enqueues each ledger entry at the front of `promptQueue` with `isSteered: true` (via `enqueueAtFront()`), then clears the ledger.
+1. User clicks Stop. `SessionManager.forceAbort()` enters abort handling. The shadow ledger (`session.inFlightSteerTexts`) holds every dispatched steer that has not reached a proven user-role `message_end` echo.
+2. If the graceful abort does not settle, the agent process is stopped and `_reconcileAfterAbort()` re-enqueues only the unresolved ledger entries at the front of `promptQueue` with `isSteered: true` (via `enqueueAtFront()`), then clears the ledger. Reverse traversal preserves their original dispatch order and keeps recovered steers ahead of ordinary queued work.
 3. A synthetic `agent_end` is emitted and a fresh subprocess is spawned.
 4. `drainQueue()` runs. The re-enqueued steered rows are popped via `dequeueAllSteered()`, joined into a single prompt, and dispatched once.
 
@@ -179,13 +179,13 @@ The same reconciliation runs on the graceful path: when `handleAgentLifecycle` s
 
 ### The shadow ledger
 
-`SessionInfo.inFlightSteerTexts: string[]` is a per-session array of steer texts whose lifecycle is bounded between **dispatch start** (recorded by `_dispatchSteer()` before the row-removal store update) and **echo** (`message_end` whose user-role body matches an entry, mirroring the SDK's `_steeringMessages` text-match splice).
+`SessionInfo.inFlightSteerTexts` is a per-session array of durable steer records. A record's lifecycle is bounded between **dispatch start** (recorded by `_dispatchSteer()` before the row-removal store update) and a proven user-role echo. The record carries a stable prompt ID as well as the original text so settlement can distinguish repeated identical steers.
 
-- **Record + persist**: `_dispatchSteer()` appends the batch text before removing queue rows, then persists `messageQueue` and `inFlightSteerTexts` in the same store update. A gateway restart after row removal but before transcript echo can therefore recover the text exactly once.
-- **Splice**: in `_consumeSteerEcho()`, called from `handleAgentLifecycle` for every event. Silent no-op for non-matching messages (regular prompts, follow-ups, skill-expansion echoes whose body has been rewritten).
-- **Drain**: in `_reconcileAfterAbort()` and during `restoreSession()` after `switch_session` has replayed durable echoes. Any ledger entry still un-echoed is re-enqueued at the front with `isSteered: true`, then the ledger is cleared.
+- **Record + persist**: `_dispatchSteer()` appends the batch record before removing queue rows, then persists `messageQueue` and `inFlightSteerTexts` in the same store update. A gateway restart after row removal but before transcript echo can therefore recover the text exactly once.
+- **Settle**: `_consumeSteerEcho()` accepts only a user or user-with-attachments `message_end`. When a prompt-author binding is available, it matches by prompt ID; only legacy/unbound echoes fall back to the first matching text. A replayed terminal frame that is already settled is ignored, so it cannot consume a later same-text steer.
+- **Drain**: `_reconcileAfterAbort()` and `restoreSession()` run after durable echoes have been replayed. They re-enqueue only records that remain unresolved, in dispatch order, with `isSteered: true`, then clear the ledger.
 
-The ledger exists because the SDK's in-process steering mirror is not a durable restart/abort recovery surface. Mirroring the SDK's text-match removal logic at Bobbit's persisted-session layer gives Bobbit a single, bounded reconciliation point without an upstream PR. Bounded growth is enforced by construction: every push has a paired echo or abort-drain; neither path is silently dropped.
+The ledger exists because the SDK's in-process steering mirror is not a durable restart/abort recovery surface. The proven user-role echo is Bobbit's durable settlement boundary: it shows the steer reached Pi, so it must never be replayed after Stop or a restart. Entries without that proof are recovered exactly once from the ledger. Bounded growth is enforced by construction: every push has a paired settlement or recovery drain; neither path is silently dropped.
 
 Late RPC rejection is also guarded: `_dispatchSteer()` only rolls a failed steer back into the queue if its ledger entry is still present. If abort/restart reconciliation already drained that entry, the catch path persists the cleared ledger and does **not** enqueue a duplicate.
 

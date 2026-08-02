@@ -1,4 +1,4 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Locator, type Page } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
 import { buildBundle } from "../fixtures/build-bundle.js";
@@ -42,12 +42,26 @@ test.beforeAll(() => {
 	});
 });
 
-async function loadWorkflow(page: Page, workflow: FixtureWorkflow): Promise<void> {
+async function loadWorkflow(page: Page, workflow: FixtureWorkflow | FixtureWorkflow[]): Promise<void> {
 	await page.goto(`file://${SHELL.replace(/\\/g, "/")}`);
 	await page.addScriptTag({ path: BUNDLE });
 	await page.waitForFunction(() => (window as any).__goalWorkflowEditorReady === true, null, { timeout: 10_000 });
 	await page.evaluate((wf) => (window as any).__loadGoalWorkflowFixture(wf), workflow);
-	await expect(page.locator("input[placeholder='Workflow name']").first()).toHaveValue(workflow.name, { timeout: 10_000 });
+	const firstWorkflow = Array.isArray(workflow) ? workflow[0] : workflow;
+	await expect(page.locator("input[placeholder='Workflow name']").first()).toHaveValue(firstWorkflow.name, { timeout: 10_000 });
+}
+
+async function loadNewWorkflowEditor(page: Page): Promise<void> {
+	await page.goto(`file://${SHELL.replace(/\\/g, "/")}`);
+	await page.addScriptTag({ path: BUNDLE });
+	await page.waitForFunction(() => (window as any).__goalWorkflowEditorReady === true, null, { timeout: 10_000 });
+	await page.evaluate(() => (window as any).__loadGoalWorkflowFixture(null));
+	await page.getByRole("button", { name: "create one by hand" }).click();
+	await expect(page.locator("input[placeholder='e.g. bug-fix']")).toBeVisible();
+}
+
+function saveButton(page: Page): Locator {
+	return page.locator(".wf-nav-right button").last();
 }
 
 async function expandFirstGate(page: Page): Promise<void> {
@@ -182,5 +196,103 @@ test.describe("Goal/workflow editor fixture", () => {
 
 		const body = await lastPutBody(page);
 		expect(body.gates[0].verify.map((step: any) => step.phase ?? 0)).toEqual([0, 1]);
+	});
+
+	test("preserves mutable edits after a held create while saving the server-created ID", async ({ page }) => {
+		await loadNewWorkflowEditor(page);
+		const workflowId = page.locator("input[placeholder='e.g. bug-fix']");
+		const workflowName = page.locator("input[placeholder='Workflow name']");
+		await workflowId.fill("submitted-workflow-id");
+		await workflowName.fill("Submitted workflow name");
+
+		const createRequest = page.evaluate(() =>
+			(window as any).__holdNextWorkflowCreate("server-created-workflow-id"),
+		);
+		await saveButton(page).click();
+		const capturedCreate = await createRequest;
+		expect(capturedCreate).toMatchObject({
+			url: "/api/workflows?projectId=fixture-project",
+			method: "POST",
+			body: { id: "submitted-workflow-id", name: "Submitted workflow name" },
+		});
+		await expect(saveButton(page)).toHaveText("Saving…");
+
+		await workflowId.fill("post-submit-id-must-not-persist");
+		await workflowName.fill("Mutable name after create submit");
+		await page.evaluate(() => (window as any).__releaseHeldWorkflowCreate());
+
+		const persistedWorkflowId = page.locator(".wf-identity-row").first().locator("input[disabled]");
+		await expect(persistedWorkflowId).toBeDisabled();
+		await expect(persistedWorkflowId).toHaveValue("server-created-workflow-id");
+		await expect(workflowName).toHaveValue("Mutable name after create submit");
+		await expect(saveButton(page)).toHaveText("Save");
+		await expect(saveButton(page)).toBeEnabled();
+
+		const updateRequest = page.evaluate(() => (window as any).__waitForNextWorkflowUpdate());
+		await saveButton(page).click();
+		const capturedUpdate = await updateRequest;
+		expect(capturedUpdate).toMatchObject({
+			url: "/api/workflows/server-created-workflow-id?projectId=fixture-project",
+			method: "PUT",
+			body: { name: "Mutable name after create submit" },
+		});
+		const requests = await page.evaluate(() => (window as any).__goalWorkflowFetchLog());
+		expect(requests.filter((request: any) => request.method === "POST")).toHaveLength(1);
+	});
+
+	test("preserves a newer draft when a held PUT refresh omits its target", async ({ page }) => {
+		await loadWorkflow(page, workflowWithSteps([]));
+		const workflowName = page.locator("input[placeholder='Workflow name']");
+		const updateRequest = page.evaluate(() => (window as any).__holdNextWorkflowUpdate());
+
+		await saveButton(page).click();
+		const capturedUpdate = await updateRequest;
+		expect(capturedUpdate).toMatchObject({
+			url: "/api/workflows/fixture-workflow?projectId=fixture-project",
+			method: "PUT",
+			body: { name: "Fixture Workflow" },
+		});
+		await expect(saveButton(page)).toHaveText("Saving…");
+
+		await workflowName.fill("Mutable name after update submit");
+		await page.evaluate(() => (window as any).__omitNextWorkflowList());
+		await page.evaluate(() => (window as any).__releaseHeldWorkflowUpdate());
+
+		await expect(page.locator(".wf-identity-row").first().locator("input[disabled]")).toHaveValue("fixture-workflow");
+		await expect(workflowName).toHaveValue("Mutable name after update submit");
+		await expect(saveButton(page)).toHaveText("Save");
+		await expect(saveButton(page)).toBeEnabled();
+
+		const nextUpdate = page.evaluate(() => (window as any).__waitForNextWorkflowUpdate());
+		await saveButton(page).click();
+		await expect(nextUpdate).resolves.toMatchObject({
+			url: "/api/workflows/fixture-workflow?projectId=fixture-project",
+			method: "PUT",
+			body: { name: "Mutable name after update submit" },
+		});
+	});
+
+	test("ignores a held response after navigation installs another workflow draft", async ({ page }) => {
+		const workflowA = { ...workflowWithSteps([]), id: "workflow-a", name: "Workflow A" };
+		const workflowB = { ...workflowWithSteps([]), id: "workflow-b", name: "Workflow B" };
+		await loadWorkflow(page, [workflowA, workflowB]);
+		const updateRequest = page.evaluate(() => (window as any).__holdNextWorkflowUpdate());
+
+		await saveButton(page).click();
+		const capturedUpdate = await updateRequest;
+		expect(capturedUpdate).toMatchObject({ url: "/api/workflows/workflow-a?projectId=fixture-project" });
+		await page.locator(".wf-back").click();
+		await page.locator(".wf-row[data-workflow-id='workflow-b']").click();
+		const workflowName = page.locator("input[placeholder='Workflow name']");
+		await expect(workflowName).toHaveValue("Workflow B");
+
+		const listFetch = page.evaluate(() => (window as any).__waitForNextWorkflowListFetch());
+		await page.evaluate(() => (window as any).__releaseHeldWorkflowUpdate());
+		await listFetch;
+		await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+
+		await expect(page.locator(".wf-identity-row").first().locator("input[disabled]")).toHaveValue("workflow-b");
+		await expect(workflowName).toHaveValue("Workflow B");
+		await expect(saveButton(page)).toHaveText("Save");
 	});
 });
