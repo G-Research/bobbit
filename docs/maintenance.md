@@ -16,6 +16,12 @@ The card shows the active path, startup source, default path, persisted/pending 
 
 The scanner builds one inventory from Bobbit state, git metadata, filesystem worktree-root directories, and the in-memory worktree pool. It covers live and archived sessions, goals, teams, delegates/child sessions, staff worktrees, pool entries, `git worktree list --porcelain`, and directories under each visible project's resolved worktree root. Multi-repo projects are evaluated per component repo, and configured `worktree_root` values are resolved through the same helper used for worktree creation.
 
+### Command-runner isolation
+
+Maintenance worktree scans and cleanup use the gateway/request-scoped `CommandRunner` resolved when the gateway is constructed. This keeps concurrent in-process gateways isolated: each gateway's injected command fixture supplies only its own Git-probe results, so one gateway cannot affect another's worktree classification or cleanup decisions.
+
+The module default runner is an outer-construction fallback only. Request handling must use its resolved runner rather than shared module state, preserving the gateway's dependency boundary for both production and injected environments.
+
 ### Actionable-first scan
 
 Click **Scan** or **Rescan** to call `GET /api/maintenance/worktrees`. The default response includes safe candidates plus troubleshooting rows; the UI shows safe candidates first and hides protected or diagnostic rows behind a disclosure.
