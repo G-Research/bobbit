@@ -1606,10 +1606,15 @@ export class AgentInterface extends LitElement {
 			await this.onBeforeSend();
 		}
 
-		// Only clear editor after we know we can send
-		this._messageEditor.value = "";
-		this._messageEditor.attachments = [];
-		this._clearAttachmentDraft();
+		// Only clear editor after we know we can send. Snapshot-aware: clear ONLY when
+		// the composer still holds exactly what was submitted (`=== input`). Text typed
+		// during the async auth/onBeforeSend readiness window (e.g. an edited steer sent
+		// via handleSend's distinct-text path) must never be wiped.
+		if (this._messageEditor.value === input) {
+			this._messageEditor.value = "";
+			this._messageEditor.attachments = [];
+			this._clearAttachmentDraft();
+		}
 		// Snap to bottom when sending a message.
 		// Set flag and scroll immediately, then re-assert after render
 		// (scroll events from layout changes can race and unset the flag).

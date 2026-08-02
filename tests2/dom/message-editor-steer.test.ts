@@ -347,6 +347,58 @@ describe("MessageEditor Ctrl/Cmd+Enter steer shortcut", () => {
 		expect(spies.onSteerSend).toEqual(["steer once", "steer twice"]);
 	});
 
+	it("a DISTINCT edited steer is NOT dropped while an earlier steer is in flight", async () => {
+		const { el, spies } = await mount();
+		const resolvers: Array<(v: boolean) => void> = [];
+		el.onSteerSend = (t: string) => {
+			spies.onSteerSend.push(t);
+			return new Promise<boolean>((r) => { resolvers.push(r); });
+		};
+		await setValue(el, "first");
+
+		// First steer in flight.
+		dispatchKey(el, "Enter", { ctrlKey: true });
+		await Promise.resolve();
+		expect(spies.onSteerSend).toEqual(["first"]);
+
+		// User edits the composer to distinct text and steers again while the first is
+		// still pending. The content-aware lock keys on text, so the DISTINCT edit is
+		// allowed through (not blocked as a duplicate).
+		el.value = "second";
+		dispatchKey(el, "Enter", { ctrlKey: true });
+		await Promise.resolve();
+		expect(spies.onSteerSend).toEqual(["first", "second"]);
+
+		// Resolve both in-flight sends.
+		resolvers.forEach((r) => r(true));
+		await settle(el);
+	});
+
+	it("a steer resolving AFTER a session switch does not touch the now-current session", async () => {
+		const { el } = await mount();
+		let resolveSteer!: (v: boolean) => void;
+		let sends = 0;
+		el.addEventListener("message-send", () => { sends++; });
+		el.onSteerSend = () => new Promise<boolean>((r) => { resolveSteer = r; });
+		el.sessionId = "A";
+		await setValue(el, "steer on A");
+
+		// Steer fired on session A; preflight still pending.
+		dispatchKey(el, "Enter", { ctrlKey: true });
+		await Promise.resolve();
+
+		// Session switches to B (and its composer holds different text) before the steer
+		// resolves. The same-session guard means the success cleanup must NOT clear or
+		// tombstone session B's composer.
+		el.sessionId = "B";
+		el.value = "draft on B";
+		resolveSteer(true);
+		await settle(el);
+
+		expect(sends).toBe(0);
+		expect(el.value).toBe("draft on B");
+	});
+
 	it("a pending steer blocks the normal-send path (cross-path steer\u2192send)", async () => {
 		const { el, spies } = await mount();
 		let resolveSteer!: (v: boolean) => void;
