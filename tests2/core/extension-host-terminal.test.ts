@@ -235,6 +235,63 @@ describe("terminal channel handler", () => {
 		assert.ok(lastTextIndex < statusIndex, "status should remain after replay text frames");
 	});
 
+	it("drains exit-before-final-data into live delivery and reconnect replay before one exit and close", async () => {
+		const marker = "FINAL_EXIT_AFTER_DATA_MARKER";
+		let dataCb: ((data: string) => void) | undefined;
+		let exitCb: ((event: { code: number | null; signal?: string | number; reason?: string }) => void) | undefined;
+		let drainCb: (() => void) | undefined;
+		const sent: Array<{ target: "broadcast" | string; frame: unknown }> = [];
+		let closeCalls = 0;
+		let resolveClosed: (() => void) | undefined;
+		const closed = new Promise<void>((resolve) => { resolveClosed = resolve; });
+		const session = await terminalChannelHandler({
+			host: {
+				pty: {
+					async openTerminal() {
+						return {
+							pid: 79,
+							write() {},
+							resize() {},
+							kill() {},
+							onData: (cb: (data: string) => void) => { dataCb = cb; return () => {}; },
+							onExit: (cb: (event: { code: number | null; signal?: string | number; reason?: string }) => void) => { exitCb = cb; return () => {}; },
+							onDrain: (cb: () => void) => { drainCb = cb; return () => {}; },
+						} as any;
+					},
+				},
+			},
+			send: async (frame: unknown) => { sent.push({ target: "broadcast", frame }); },
+			sendTo: async (clientId: string, frame: unknown) => { sent.push({ target: clientId, frame }); },
+			close: async () => { closeCalls++; resolveClosed?.(); },
+		});
+		sent.length = 0;
+
+		exitCb?.({ code: 0 });
+		dataCb?.(marker);
+		await (session.onAttach as unknown as ((clientId: string) => Promise<void>) | undefined)?.("reconnecting-client");
+		drainCb?.();
+		await closed;
+
+		const liveFrames = sent.filter(({ target }) => target === "broadcast").map(({ frame }) => frame);
+		const liveMarkerIndex = liveFrames.findIndex((frame) => isTextFrameWithMarker(frame, marker));
+		const exitIndex = liveFrames.findIndex((frame) => isExitFrame(frame));
+		assert.notEqual(
+			liveMarkerIndex,
+			-1,
+			`${marker} must be delivered live when PTY exit precedes its final data callback`,
+		);
+		assert.notEqual(exitIndex, -1, "PTY exit should be delivered after draining final data");
+		assert.ok(liveMarkerIndex < exitIndex, `${marker} must be delivered before the exit frame`);
+		assert.equal(liveFrames.filter((frame) => isExitFrame(frame)).length, 1, "PTY exit must be emitted exactly once");
+		assert.equal(closeCalls, 1, "terminal channel must close exactly once after the exit frame");
+
+		const replayFrames = sent.filter(({ target }) => target === "reconnecting-client").map(({ frame }) => frame);
+		assert.ok(
+			replayFrames.some((frame) => isTextFrameWithMarker(frame, marker)),
+			`${marker} must be retained for reconnect replay before terminal exit closes`,
+		);
+	});
+
 	it("bridges client text/resize/kill frames to PTY and emits output/status/exit frames", async () => {
 		let dataCb: ((data: string) => void) | undefined;
 		let exitCb: ((event: { code: number | null; signal?: string | number; reason?: string }) => void) | undefined;
@@ -487,6 +544,18 @@ function isTextFrameWithMarker(frame: unknown, marker: string) {
 		(frame as { kind?: unknown }).kind === "text" &&
 		typeof (frame as { data?: unknown }).data === "string" &&
 		(frame as { data: string }).data.includes(marker),
+	);
+}
+
+function isExitFrame(frame: unknown) {
+	const data = frame && typeof frame === "object" ? (frame as { data?: unknown }).data : undefined;
+	return Boolean(
+		frame &&
+		typeof frame === "object" &&
+		(frame as { kind?: unknown }).kind === "json" &&
+		data &&
+		typeof data === "object" &&
+		(data as { op?: unknown }).op === "exit",
 	);
 }
 
