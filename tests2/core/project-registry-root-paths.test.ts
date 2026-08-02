@@ -64,19 +64,24 @@ test("ProjectRegistry preserves foreign Windows descendant case while normalizin
   );
 });
 
-test("ProjectRegistry.findByCwd respects case-sensitive Windows identity components", () => {
-  const sensitiveIdentity = createProjectPathIdentity({ isNativePathApi: dialect => dialect === "win32" });
+test("ProjectRegistry.findByCwd respects modeled case-sensitive Windows identity components", () => {
+  // `C:\\` is real on Windows runners. Model both the volume and its case
+  // evidence so host filesystem semantics cannot fold fixture descendants.
+  const modeledWindowsIdentity = (caseInsensitive: boolean) => createProjectPathIdentity({
+    isNativePathApi: dialect => dialect === "win32",
+    realpathSync: candidate => path.win32.resolve(candidate),
+    isCaseInsensitiveAt: () => caseInsensitive,
+  });
+  const sensitiveIdentity = modeledWindowsIdentity(false);
   const sensitive = registryWithRoot("sensitive-drive", "C:\\Workspace\\Sensitive\\Foo", sensitiveIdentity);
+  assert.equal(sensitive.findByCwd("C:\\Workspace\\Sensitive\\Foo\\child")?.id, "sensitive-drive");
   assert.equal(sensitive.findByCwd("C:\\Workspace\\Sensitive\\foo\\child"), undefined);
 
-  const insensitive = registryWithRoot(
-    "insensitive-drive",
-    "C:\\Workspace\\Sensitive\\Foo",
-    value => value.replace(/\\/g, "/").toLowerCase(),
-  );
+  const insensitive = registryWithRoot("insensitive-drive", "C:\\Workspace\\Sensitive\\Foo", modeledWindowsIdentity(true));
   assert.equal(insensitive.findByCwd("C:\\Workspace\\Sensitive\\foo\\child")?.id, "insensitive-drive");
 
   const sensitiveUnc = registryWithRoot("sensitive-unc", "\\\\server\\share\\Sensitive\\Foo", sensitiveIdentity);
+  assert.equal(sensitiveUnc.findByCwd("\\\\server\\share\\Sensitive\\Foo\\child")?.id, "sensitive-unc");
   assert.equal(sensitiveUnc.findByCwd("\\\\server\\share\\Sensitive\\foo\\child"), undefined);
 });
 
