@@ -74,6 +74,16 @@ export function readyToMergeGate(): SeededGate {
 	};
 }
 
+export const REVISION_READY_CONTENT_PACKET_PROMPT = `For every blocking content finding, provide an author-ready revision packet; a failure without this packet is invalid:
+1. **Artifact location:** exact section, heading, paragraph, requirement, acceptance criterion, diagram, or test-plan entry; for documentation, exact path and section.
+2. **Goal-linked gap and consequence:** the unmet or contradictory goal requirement and practical implementation or user consequence.
+3. **Concrete revision:** directly usable replacement wording, addition, outline, contract, data-flow or state sequence, acceptance criterion, example, or test-plan case.
+4. **Consistency and constraints:** cross-section edits, references, examples, compatibility, lifecycle, ordering, platform, and failure-mode constraints to update together.
+5. **Alternatives:** preferred revision plus credible alternatives and explicit tradeoffs only when they exist; do not manufacture options.
+6. **Classification:** required blocker edits versus optional bounded improvements; do not fail for the latter.
+
+For design documents and issue analyses, require implementable contracts and testable acceptance criteria only as needed for the approved goal — not exhaustive pseudocode, a formal proof, or speculative hardening. For documentation, also name the exact documentation path and section, stale or missing claim, proposed wording or outline, relevant examples or links, and how to verify the documented behavior against the implementation.`;
+
 export const DOC_PROMPT = `Review documentation for the changes on branch {{branch}} vs origin/{{baseBranch}}.
 
 Run \`git diff origin/{{baseBranch}}...{{branch}} -- . ':!package-lock.json'\` to see all changes.
@@ -113,6 +123,8 @@ AGENTS.md is loaded into every agent turn — its size is a direct per-turn toke
 - Adds a categorical subsection past ~12 entries without splitting it.
 If the diff fixes any of the above (e.g. it shortens long entries, dedupes recipe↔debug pairs, splits a large subsection), say so and PASS.
 
+${REVISION_READY_CONTENT_PACKET_PROMPT}
+
 Summarize with PASS/FAIL for each check and specific items to address.`;
 
 export const DESIGN_REVIEW_PROMPT = `Review this design document for structure, clarity, comparative reasoning, and completeness.
@@ -126,7 +138,9 @@ For every non-trivial change, FAIL unless the design:
 
 A quick-fix exemption is acceptable only for one local behavior following an obvious established pattern with no new public API, state owner, persistence, auth, dependency, or cross-layer flow; the design must state why comparison is unnecessary. Do not force reuse where contracts, ownership, or lifecycle differ, and do not demand speculative generalization or adjacent features.
 
-Regardless of comparative-design exemption, every design must list file changes with specific descriptions, define specific and testable acceptance criteria, cover edge/error handling, and include an E2E test plan that validates the user journey end-to-end.`;
+Regardless of comparative-design exemption, every design must list file changes with specific descriptions, define specific and testable acceptance criteria, cover edge/error handling, and include an E2E test plan that validates the user journey end-to-end.
+
+${REVISION_READY_CONTENT_PACKET_PROMPT}`;
 
 export const GAP_ANALYSIS_DESIGN_PROMPT = `Compare the goal specification to this design document.
 
@@ -141,7 +155,9 @@ Identify:
 5. Compared approaches that do not target the same acceptance criteria and constraints
 6. Scope expansion added to justify an abstraction or possible future reuse
 
-Use your tools to read the design document content from the signal.`;
+Use your tools to read the design document content from the signal.
+
+${REVISION_READY_CONTENT_PACKET_PROMPT}`;
 
 export const GAP_ANALYSIS_IMPL_PROMPT = `Review spec and regression conformance for the implementation on branch {{branch}} vs origin/{{baseBranch}}.
 
@@ -422,7 +438,9 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 1. Reproduction steps are specific enough to follow mechanically
 2. Root cause references actual source files and lines
 3. Analysis distinguishes symptoms from underlying cause
-4. **Test plan** — the analysis must describe what test will verify the fix.`,
+4. **Test plan** — the analysis must describe what test will verify the fix.
+
+${REVISION_READY_CONTENT_PACKET_PROMPT}`,
 					},
 					{ name: "Gap analysis", type: "llm-review", role: "spec-auditor", prompt: GAP_ANALYSIS_DESIGN_PROMPT },
 				],
