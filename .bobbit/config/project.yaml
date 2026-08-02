@@ -78,6 +78,20 @@ workflows:
               testable acceptance criteria, cover edge/error handling, and
               include an E2E test plan that validates the user journey
               end-to-end.
+
+              Treat this as a revision-ready content review. A FAIL is valid only
+              for an explicit unmet goal requirement or concrete regression and
+              is invalid without a complete author-ready revision packet for
+              every blocker. For each blocker, identify the exact artifact
+              location; explain the goal-linked gap and practical consequence;
+              provide concrete replacement wording, an outline, contract,
+              data-flow/state sequence, acceptance criterion, example, or
+              test-plan case; state consistency edits and constraints; include
+              credible alternatives with tradeoffs only when they exist; and
+              separate required edits from bounded improvements. Require
+              implementable contracts and testable acceptance criteria only to
+              the level needed by the approved goal, not exhaustive pseudocode,
+              formal proof, or speculative hardening.
           - name: Gap analysis
             type: llm-review
             role: spec-auditor
@@ -116,6 +130,20 @@ workflows:
 
               Use your tools to read the design document content from the
               signal.
+
+              Treat this as a revision-ready content review. A FAIL is valid only
+              for an explicit unmet goal requirement or concrete regression and
+              is invalid without a complete author-ready revision packet for
+              every blocker. For each blocker, identify the exact artifact
+              location; explain the goal-linked gap and practical consequence;
+              provide concrete replacement wording, an outline, contract,
+              data-flow/state sequence, acceptance criterion, example, or
+              test-plan case; state consistency edits and constraints; include
+              credible alternatives with tradeoffs only when they exist; and
+              separate required edits from bounded improvements. Require
+              implementable contracts and testable acceptance criteria only to
+              the level needed by the approved goal, not exhaustive pseudocode,
+              formal proof, or speculative hardening.
       - id: implementation
         name: Implementation
         depends_on:
@@ -210,6 +238,18 @@ workflows:
               documented; stale docs are updated; documentation placement is
               appropriate; and new docs have good hierarchy, resilience, WHY,
               and big-picture context.
+
+              Treat this as a revision-ready documentation review. A FAIL is
+              valid only for an explicit unmet goal requirement or concrete
+              change-introduced regression and is invalid without an author-ready
+              revision packet for every blocker. For each blocker, name exact
+              documentation paths and sections; identify the stale or missing
+              claim and its goal-linked consequence; give proposed replacement
+              wording or outline with relevant examples or links; state related
+              cross-section edits and constraints; include credible alternatives
+              with tradeoffs only when they exist; separate required edits from
+              bounded improvements; and explain how to verify the documented
+              behavior against the implementation.
       - id: ready-to-merge
         name: Ready to Merge
         depends_on:
@@ -408,6 +448,20 @@ workflows:
               testable acceptance criteria, cover edge/error handling, and
               include an E2E test plan that validates the user journey
               end-to-end.
+
+              Treat this as a revision-ready content review. A FAIL is valid only
+              for an explicit unmet goal requirement or concrete regression and
+              is invalid without a complete author-ready revision packet for
+              every blocker. For each blocker, identify the exact artifact
+              location; explain the goal-linked gap and practical consequence;
+              provide concrete replacement wording, an outline, contract,
+              data-flow/state sequence, acceptance criterion, example, or
+              test-plan case; state consistency edits and constraints; include
+              credible alternatives with tradeoffs only when they exist; and
+              separate required edits from bounded improvements. Require
+              implementable contracts and testable acceptance criteria only to
+              the level needed by the approved goal, not exhaustive pseudocode,
+              formal proof, or speculative hardening.
           - name: Gap analysis
             type: llm-review
             role: spec-auditor
@@ -426,6 +480,20 @@ workflows:
               not target the same acceptance criteria, and scope expansion added
               to justify an abstraction or possible future reuse. Use your tools
               to read the design document content from the signal.
+
+              Treat this as a revision-ready content review. A FAIL is valid only
+              for an explicit unmet goal requirement or concrete regression and
+              is invalid without a complete author-ready revision packet for
+              every blocker. For each blocker, identify the exact artifact
+              location; explain the goal-linked gap and practical consequence;
+              provide concrete replacement wording, an outline, contract,
+              data-flow/state sequence, acceptance criterion, example, or
+              test-plan case; state consistency edits and constraints; include
+              credible alternatives with tradeoffs only when they exist; and
+              separate required edits from bounded improvements. Require
+              implementable contracts and testable acceptance criteria only to
+              the level needed by the approved goal, not exhaustive pseudocode,
+              formal proof, or speculative hardening.
       - id: implementation
         name: Implementation
         depends_on:
@@ -525,6 +593,18 @@ workflows:
               features/API/config/behavior changes are documented, existing docs
               are updated, placement is appropriate, and documentation quality
               standards are met.
+
+              Treat this as a revision-ready documentation review. A FAIL is
+              valid only for an explicit unmet goal requirement or concrete
+              change-introduced regression and is invalid without an author-ready
+              revision packet for every blocker. For each blocker, name exact
+              documentation paths and sections; identify the stale or missing
+              claim and its goal-linked consequence; give proposed replacement
+              wording or outline with relevant examples or links; state related
+              cross-section edits and constraints; include credible alternatives
+              with tradeoffs only when they exist; separate required edits from
+              bounded improvements; and explain how to verify the documented
+              behavior against the implementation.
       - id: ready-to-merge
         name: Ready to Merge
         depends_on:
@@ -554,8 +634,23 @@ workflows:
         verify:
           - name: Analysis quality
             type: llm-review
-            prompt: Review the issue analysis for completeness. Check reproduction steps,
-              root cause, symptom/cause distinction, and test plan.
+            prompt: >-
+              Review the issue analysis for completeness. Check reproduction
+              steps, root cause, symptom/cause distinction, and test plan.
+
+              Treat this as a revision-ready content review. A FAIL is valid
+              only for an explicit unmet goal requirement or concrete regression
+              and is invalid without a complete author-ready revision packet for
+              every blocker. For each blocker, identify the exact artifact
+              location; explain the goal-linked gap and practical consequence;
+              provide a concrete reproduction, root-cause contract, proposed
+              wording or structured revision, and test-plan case; state
+              consistency edits and constraints; include credible alternatives
+              with tradeoffs only when they exist; and separate required edits
+              from bounded improvements. Require implementable contracts and
+              testable acceptance criteria only to the level needed by the
+              approved goal, not exhaustive pseudocode, formal proof, or
+              speculative hardening.
           - name: Gap analysis
             type: llm-review
             role: spec-auditor
@@ -570,6 +665,17 @@ workflows:
 
               Identify bug symptoms not analyzed, missing reproduction steps,
               and root cause gaps.
+
+              Treat every blocker as a revision-ready content finding. A FAIL is
+              invalid without an author-ready revision packet identifying the
+              exact artifact location, goal-linked gap and consequence, concrete
+              revision (including reproduction/root-cause contract and test-plan
+              case), consistency edits and constraints, credible alternatives
+              with tradeoffs when they exist, and required edits versus bounded
+              improvements. Keep contracts and acceptance criteria implementable
+              and testable only to the approved goal's needed level; do not
+              demand exhaustive pseudocode, formal proof, or speculative
+              hardening.
       - id: reproducing-test
         name: Reproducing Test
         depends_on:
@@ -686,6 +792,18 @@ workflows:
               {{baseBranch}}. Verify user-facing features/API/config/behavior
               changes are documented, existing docs are updated, placement is
               appropriate, and documentation quality standards are met.
+
+              Treat this as a revision-ready documentation review. A FAIL is
+              valid only for an explicit unmet goal requirement or concrete
+              change-introduced regression and is invalid without an author-ready
+              revision packet for every blocker. For each blocker, name exact
+              documentation paths and sections; identify the stale or missing
+              claim and its goal-linked consequence; give proposed replacement
+              wording or outline with relevant examples or links; state related
+              cross-section edits and constraints; include credible alternatives
+              with tradeoffs only when they exist; separate required edits from
+              bounded improvements; and explain how to verify the documented
+              behavior against the implementation.
       - id: ready-to-merge
         name: Ready to Merge
         depends_on:
