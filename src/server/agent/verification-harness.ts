@@ -5740,7 +5740,11 @@ export class VerificationHarness {
 					}
 					// The container wrapper creates its own session; the in-group sentinel
 					// (not this transient leader) is the only cleanup authority.
-					wrappedCmd = `exec setsid /bin/sh -c ${shellSingleQuote(wrappedCmd)}`;
+					// A docker-exec shell is a process-group leader, so `setsid` forks
+					// and otherwise makes the host CLI exit before its container child.
+					// `-w` joins that exact child without polling, preserving the host
+					// transport ownership boundary until container cleanup is complete.
+					wrappedCmd = `exec setsid -w /bin/sh -c ${shellSingleQuote(wrappedCmd)}`;
 					tracked = spawnTracked("docker", ["exec", "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
 						stdio: ["ignore", "pipe", "pipe"],
 						// Durable-container timeout is armed only after its atomic witness.
