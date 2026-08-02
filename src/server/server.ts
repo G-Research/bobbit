@@ -16839,7 +16839,7 @@ async function handleApiRoute(
 	// ─── Maintenance endpoints ──────────────────────────────────────────
 	// These replace the old automatic cleanup-on-startup behavior.
 	// Users can preview orphaned resources and choose to clean them up.
-	const worktreeInventory = () => new WorktreeInventoryService({ projectContextManager, sessionManager, commandRunner: serverCommandRunner, remotePolicy: serverRemoteGitPolicy });
+	const worktreeInventory = () => new WorktreeInventoryService({ projectContextManager, sessionManager, commandRunner: commandRunner!, remotePolicy: serverRemoteGitPolicy });
 
 	// GET /api/maintenance/worktrees
 	if (url.pathname === "/api/maintenance/worktrees" && req.method === "GET") {
