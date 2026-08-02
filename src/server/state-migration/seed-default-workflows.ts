@@ -319,8 +319,46 @@ export function buildParentWorkflow(): SeededWorkflow {
 	};
 }
 
-/** Build the four canonical workflows targeting `componentName` (typically the project name). */
-export function buildDefaultWorkflows(componentName: string): Record<string, SeededWorkflow> {
+/**
+ * Remove structural command steps unavailable on a known target component.
+ *
+ * Omitting capabilities deliberately preserves the complete canonical template
+ * for callers that only need its policy shape. When capabilities are known for
+ * persistence, retain every gate and non-structural step (including reviews,
+ * free-form commands, and agent QA) and remove only missing `{ component,
+ * command }` references.
+ */
+export function filterUnsupportedComponentCommands(
+	workflow: SeededWorkflow,
+	componentName: string,
+	supportedCommands?: Iterable<string>,
+): SeededWorkflow {
+	if (supportedCommands === undefined) return workflow;
+
+	const supported = new Set(supportedCommands);
+	return {
+		...workflow,
+		gates: workflow.gates.map((gate) => ({
+			...gate,
+			verify: gate.verify?.filter((step) => (
+				step.type !== "command"
+				|| step.component !== componentName
+				|| !step.command
+				|| supported.has(step.command)
+			)),
+		})),
+	};
+}
+
+/**
+ * Build the four canonical workflows targeting `componentName` (typically the
+ * project name). Supply component capabilities only when persisting them for a
+ * concrete project; omitted capabilities retain the complete canonical shape.
+ */
+export function buildDefaultWorkflows(
+	componentName: string,
+	supportedCommands?: Iterable<string>,
+): Record<string, SeededWorkflow> {
 	const c = componentName;
 
 	const general: SeededWorkflow = {
@@ -513,11 +551,18 @@ ${REVISION_READY_CONTENT_PACKET_PROMPT}`,
 		],
 	};
 
-	return {
+	const workflows = {
 		general,
 		feature,
 		"bug-fix": bugFix,
 		"quick-fix": quickFix,
 		parent: buildParentWorkflow(),
 	};
+
+	return Object.fromEntries(
+		Object.entries(workflows).map(([id, workflow]) => [
+			id,
+			filterUnsupportedComponentCommands(workflow, c, supportedCommands),
+		]),
+	);
 }

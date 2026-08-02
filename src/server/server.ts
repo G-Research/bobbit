@@ -7393,7 +7393,19 @@ async function handleApiRoute(
 				// Layer 2: store is empty → auto-seed defaults.
 				if (!resolvedWorkflow && targetCtx.workflowStore.getAll().length === 0) {
 					const projName = resolved.project.name || "project";
-					const seeds = buildDefaultWorkflows(projName);
+					// Structural command steps resolve through components[name].commands at
+					// verification time. Prefer the project-named component but fall back
+					// to the first valid configured component when names differ; an absent
+					// or data-only target supplies no capabilities, so no invalid command
+					// references are persisted.
+					const components = targetCtx.projectConfigStore.getComponents();
+					const targetComponent = components.find((component) => component.name === projName)
+						?? components.find((component) => component.name.length > 0);
+					const componentName = targetComponent?.name || projName;
+					const seeds = buildDefaultWorkflows(
+						componentName,
+						targetComponent ? Object.keys(targetComponent.commands ?? {}) : [],
+					);
 					seeds.parent = buildParentWorkflow();
 					for (const wf of Object.values(seeds)) {
 						targetCtx.workflowStore.put(wf as unknown as Workflow);
