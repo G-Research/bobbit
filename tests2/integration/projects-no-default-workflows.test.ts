@@ -12,6 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import yaml from "yaml";
+import { validateAllWorkflows } from "../../src/server/agent/workflow-validator.ts";
 
 let token: string;
 
@@ -145,6 +146,18 @@ test.describe("No default workflow scaffold", () => {
 		});
 		// Goal creation should succeed and project.yaml should now have workflows.
 		expect([200, 201]).toContain(goalRes.status);
-		expect(isWorkflowsAbsentOrEmpty(readProjectYaml(root))).toBe(false);
+		const seeded = readProjectYaml(root)!;
+		expect(isWorkflowsAbsentOrEmpty(seeded)).toBe(false);
+
+		const workflows = seeded.workflows as Record<string, any>;
+		const structuralCommands = Object.values(workflows).flatMap((workflow: any) =>
+			(workflow.gates ?? []).flatMap((gate: any) =>
+				(gate.verify ?? []).filter((step: any) => step.type === "command" && step.component && step.command),
+			),
+		);
+		expect(structuralCommands).toEqual([]);
+		expect(
+			validateAllWorkflows(workflows, [{ name: projName }]),
+		).toEqual([]);
 	});
 });

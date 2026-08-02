@@ -27,6 +27,15 @@ type Workflow = {
 	gates: Array<{ id: string; description?: string; verify?: VerifyStep[] }>;
 };
 
+// Keep the test focused on the persisted workflow behavior rather than the
+// helper's exported TypeScript declaration. The server and per-component
+// derivation are the public consumers of this capability argument.
+type CapabilityAwareDefaultBuilder = (
+	componentName: string,
+	supportedCommands?: Iterable<string>,
+) => Record<string, Workflow>;
+const buildCapabilityAwareDefaults = buildDefaultWorkflows as CapabilityAwareDefaultBuilder;
+
 const IMPLEMENTATION_WORKFLOW_IDS = ["general", "feature", "bug-fix", "quick-fix"] as const;
 const EXPECTED_REVIEWS = [
 	{ name: "Spec and regression conformance", role: "spec-auditor" },
@@ -133,6 +142,28 @@ function assertImplementationReviewPolicy(workflows: Record<string, Workflow>, s
 describe("consolidated implementation review defaults", () => {
 	it("seeds exactly three phase-2 implementation reviews with the required roles and execution phases", () => {
 		assertImplementationReviewPolicy(buildDefaultWorkflows("myproj"), "seeded defaults");
+	});
+
+	it("omits unavailable structural commands without disturbing reviews or supported commands", () => {
+		const workflows = buildCapabilityAwareDefaults("minimal-app", ["build", "unit"]);
+
+		for (const workflowId of IMPLEMENTATION_WORKFLOW_IDS) {
+			const implementation = findGate(workflows[workflowId], "implementation");
+			const structuralCommands = (implementation.verify ?? [])
+				.filter((step) => step.type === "command" && step.command)
+				.map((step) => step.command)
+				.sort();
+			const reviews = (implementation.verify ?? [])
+				.filter((step) => step.type === "llm-review")
+				.map(({ name, role, phase }) => ({ name, role, phase }));
+
+			assert.deepEqual(structuralCommands, ["build", "unit"], `${workflowId} must retain only declared component commands`);
+			assert.deepEqual(
+				reviews,
+				EXPECTED_REVIEWS.map(({ name, role }) => ({ name, role, phase: 2 })),
+				`${workflowId} must preserve the three required phase-2 reviews`,
+			);
+		}
 	});
 
 	it("keeps the active project workflow config parseable and on the same review policy", () => {
