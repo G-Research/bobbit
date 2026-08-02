@@ -15,11 +15,15 @@
 // This suite owns command-step cancellation bookkeeping, not OS process
 // fidelity. Opt into the non-spawning runner before the gateway singleton is
 // imported and booted.
-import { resetAndInstallFakeCommandStepTestState } from "./_e2e/fake-cmd-setup.js";
+import { EventEmitter } from "node:events";
+
+import { resetAndInstallFakeCommandStepTestState, trackFakeCommandStepConnection } from "./_e2e/fake-cmd-setup.js";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, createGoal, defaultProjectId, deleteGoal } from "./_e2e/e2e-setup.js";
+import { apiFetch, connectWs, createGoal, createSession, defaultProjectId, deleteGoal, deleteSession, type WsConnection } from "./_e2e/e2e-setup.js";
 import type { ManualClock } from "../harness/clock.js";
+import type { VerificationCommandRunner, VerificationCommandSpawnSpec } from "../../src/server/agent/verification-command-runner.js";
+import type { TrackedChild } from "../../src/server/agent/spawn-tree.js";
 
 type SlowWorkflowGoal = {
 	workflowId: string;
@@ -108,6 +112,95 @@ async function getActiveVerifications(goalId: string): Promise<any[]> {
 	expect(res.ok).toBe(true);
 	const data = await res.json();
 	return data.verifications || [];
+}
+
+async function getGateState(goalId: string): Promise<any> {
+	const res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate`);
+	expect(res.status).toBe(200);
+	return res.json();
+}
+
+/**
+ * A deterministic command-runner seam: `settle()` is the test's stand-in for
+ * exact identity proof plus tree reaping. Until then `waitForTreeExit()` stays
+ * pending even after `killTree()`, so no wall-clock race is involved.
+ */
+interface PendingCleanupChild {
+	killed: boolean;
+	settled: boolean;
+	settle: () => void;
+	waitForKill: () => Promise<void>;
+}
+
+class PendingExactCleanupRunner implements VerificationCommandRunner {
+	readonly nonDurable = true;
+	readonly children: PendingCleanupChild[] = [];
+	private readonly spawnWaiters = new Map<number, Array<() => void>>();
+
+	spawn(_spec: VerificationCommandSpawnSpec): TrackedChild {
+		const child = Object.assign(new EventEmitter(), {
+			pid: 970_000 + this.children.length,
+			stdout: Object.assign(new EventEmitter(), { destroy() {} }),
+			stderr: Object.assign(new EventEmitter(), { destroy() {} }),
+			unref() {},
+			kill() { return true; },
+		});
+		let resolveTreeExit!: (settled: boolean) => void;
+		let resolveKill!: () => void;
+		const treeExit = new Promise<boolean>(resolve => { resolveTreeExit = resolve; });
+		const killed = new Promise<void>(resolve => { resolveKill = resolve; });
+		const record: PendingCleanupChild = {
+			killed: false,
+			settled: false,
+			settle: () => {
+				if (record.settled) return;
+				record.settled = true;
+				child.emit("exit", null, "SIGTERM");
+				child.emit("close", null, "SIGTERM");
+				resolveTreeExit(true);
+			},
+			waitForKill: () => killed,
+		};
+		this.children.push(record);
+		for (const resolve of this.spawnWaiters.get(this.children.length - 1) ?? []) resolve();
+		this.spawnWaiters.delete(this.children.length - 1);
+
+		return {
+			child: child as unknown as TrackedChild["child"],
+			ownershipReady: Promise.resolve(),
+			waitForTreeExit: async () => treeExit,
+			killed: () => record.killed,
+			timedOut: () => false,
+			markSurvival: () => {},
+			killTree: () => {
+				if (record.killed) return;
+				record.killed = true;
+				resolveKill();
+			},
+		};
+	}
+
+	waitForSpawn(index: number): Promise<void> {
+		if (this.children[index]) return Promise.resolve();
+		return new Promise(resolve => {
+			const waiters = this.spawnWaiters.get(index) ?? [];
+			waiters.push(resolve);
+			this.spawnWaiters.set(index, waiters);
+		});
+	}
+
+	async waitForKill(index: number): Promise<void> {
+		await this.waitForSpawn(index);
+		return this.children[index].waitForKill();
+	}
+
+	settle(index: number): void {
+		this.children[index]?.settle();
+	}
+
+	settleAll(): void {
+		for (const child of this.children) child.settle();
+	}
 }
 
 /** Observe cancellation state without adding wall-clock sleeps to tier 1. */
@@ -307,6 +400,116 @@ test.describe("Cancel Verification API", () => {
 				method: "POST",
 			});
 		} finally {
+			await cleanupSlowWorkflowGoal(setup);
+		}
+	});
+
+	test("defers explicit cancellation publication until exact cleanup settles", async ({ gateway }) => {
+		let setup: SlowWorkflowGoal | undefined;
+		let sessionId: string | undefined;
+		let conn: WsConnection | undefined;
+		let cancelRequest: Promise<Response> | undefined;
+		const runner = new PendingExactCleanupRunner();
+		gateway.teamManager.verificationHarness!.commandStepRunner = runner;
+		try {
+			setup = await createSlowWorkflowGoal("Pending Explicit Cancel");
+			sessionId = await createSession({ goalId: setup.goalId });
+			conn = trackFakeCommandStepConnection(await connectWs(sessionId));
+
+			const signalRes = await apiFetch(`/api/goals/${setup.goalId}/gates/slow-gate/signal`, {
+				method: "POST",
+				body: JSON.stringify({ content: "Cancellation must await exact cleanup." }),
+			});
+			expect(signalRes.status).toBe(201);
+			const signalId = (await signalRes.json()).signal.id as string;
+			await runner.waitForSpawn(0);
+			const eventCursor = conn.messageCount();
+
+			cancelRequest = apiFetch(`/api/goals/${setup.goalId}/gates/slow-gate/cancel-verification`, { method: "POST" });
+			await runner.waitForKill(0);
+
+			const pending = await getGateState(setup.goalId);
+			expect(pending.status, "PENDING_CANCEL_GATE_STATUS_PUBLISHED_EARLY").toBe("pending");
+			expect(pending.signals.find((signal: any) => signal.id === signalId)?.verification.status,
+				"PENDING_CANCEL_SIGNAL_FINALIZED_EARLY").toBe("running");
+			expect(conn.messages.slice(eventCursor).filter((event: any) =>
+				event.type === "gate_verification_complete" && event.signalId === signalId),
+				"PENDING_CANCEL_COMPLETION_PUBLISHED_EARLY").toHaveLength(0);
+
+			// This is the sole release point: it models successful exact witness
+			// verification and the terminal tree-reap acknowledgement.
+			runner.settle(0);
+			const cancelRes = await cancelRequest;
+			expect(cancelRes.status).toBe(200);
+			expect((await cancelRes.json()).cancelled).toBe(true);
+
+			const finalized = await getGateState(setup.goalId);
+			const cancelledSignals = finalized.signals.filter((signal: any) => signal.id === signalId && signal.verification.status === "failed");
+			expect(cancelledSignals, "EXACT_CLEANUP_MUST_FINALIZE_CURRENT_SIGNAL_ONCE").toHaveLength(1);
+			expect(finalized.status).toBe("failed");
+			expect(conn.messages.slice(eventCursor).filter((event: any) =>
+				event.type === "gate_verification_complete" && event.signalId === signalId && event.status === "cancelled"),
+				"EXACT_CLEANUP_MUST_PUBLISH_ONE_COMPLETION").toHaveLength(1);
+		} finally {
+			runner.settleAll();
+			await cancelRequest?.catch(() => {});
+			conn?.close();
+			if (sessionId) await deleteSession(sessionId).catch(() => {});
+			await cleanupSlowWorkflowGoal(setup);
+		}
+	});
+
+	test("late cancellation finalization cannot overwrite a newer re-signal", async ({ gateway }) => {
+		let setup: SlowWorkflowGoal | undefined;
+		let sessionId: string | undefined;
+		let conn: WsConnection | undefined;
+		let resignalRequest: Promise<Response> | undefined;
+		const runner = new PendingExactCleanupRunner();
+		gateway.teamManager.verificationHarness!.commandStepRunner = runner;
+		try {
+			setup = await createSlowWorkflowGoal("Pending Re-signal Generation");
+			sessionId = await createSession({ goalId: setup.goalId });
+			conn = trackFakeCommandStepConnection(await connectWs(sessionId));
+
+			const firstRes = await apiFetch(`/api/goals/${setup.goalId}/gates/slow-gate/signal`, {
+				method: "POST",
+				body: JSON.stringify({ content: "Old generation" }),
+			});
+			expect(firstRes.status).toBe(201);
+			const firstSignalId = (await firstRes.json()).signal.id as string;
+			await runner.waitForSpawn(0);
+			const eventCursor = conn.messageCount();
+
+			resignalRequest = apiFetch(`/api/goals/${setup.goalId}/gates/slow-gate/signal`, {
+				method: "POST",
+				body: JSON.stringify({ content: "New generation" }),
+			});
+			await runner.waitForKill(0);
+			await new Promise<void>(resolve => setImmediate(resolve));
+
+			const beforeOldCleanup = await getGateState(setup.goalId);
+			expect(beforeOldCleanup.signals, "RESIGNAL_MUST_CREATE_NEW_GENERATION_BEFORE_OLD_CLEANUP_SETTLES").toHaveLength(2);
+			const secondSignalId = beforeOldCleanup.signals.at(-1)?.id as string;
+			expect(secondSignalId).not.toBe(firstSignalId);
+			expect(beforeOldCleanup.signals.at(-1)?.verification.status).toBe("running");
+
+			const oldCompletion = conn.waitForFrom(eventCursor, (event: any) =>
+				event.type === "gate_verification_complete" && event.signalId === firstSignalId && event.status === "cancelled");
+			runner.settle(0);
+			await oldCompletion;
+			const resignalRes = await resignalRequest;
+			expect(resignalRes.status).toBe(201);
+
+			const afterOldCleanup = await getGateState(setup.goalId);
+			expect(afterOldCleanup.signals.find((signal: any) => signal.id === firstSignalId)?.verification.status).toBe("failed");
+			expect(afterOldCleanup.signals.find((signal: any) => signal.id === secondSignalId)?.verification.status,
+				"LATE_CANCEL_MUST_NOT_FINALIZE_NEW_SIGNAL").toBe("running");
+			expect(afterOldCleanup.status, "LATE_CANCEL_MUST_NOT_OVERWRITE_NEW_GATE_STATE").toBe("pending");
+		} finally {
+			runner.settleAll();
+			await resignalRequest?.catch(() => {});
+			conn?.close();
+			if (sessionId) await deleteSession(sessionId).catch(() => {});
 			await cleanupSlowWorkflowGoal(setup);
 		}
 	});
