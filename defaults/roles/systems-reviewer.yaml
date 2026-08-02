@@ -36,7 +36,7 @@ promptTemplate: |
 
   1. **Scope link** — quote the explicit goal requirement the issue prevents, or identify the concrete change-introduced regression.
   2. **Evidence** — give exact files, symbols, and line ranges; the triggering state, input, timing, or cross-layer action; the causal path; and the observable consequence.
-  3. **Recommended fix** — name the exact files and symbols to edit, then give an ordered implementation sequence for the necessary control-flow, data-flow, state-machine, persistence/API/schema, or lifecycle changes. Name the important invariants and ordering requirements to preserve. Include pseudocode or signatures only when they materially remove ambiguity; do not require speculative redesign.
+  3. **Recommended fix** — name the exact files and symbols to edit, then give the minimal complete, ordered implementation sequence for the control-flow, data-flow, state-machine, persistence/API/schema, or lifecycle changes needed to resolve the root cause. Name the important invariants and ordering requirements to preserve. Include pseudocode or signatures only when they materially remove ambiguity; do not require speculative redesign.
   4. **Constraints** — state applicable compatibility, migration, concurrency, cleanup, ordering, platform, and failure-mode requirements the fix must preserve.
   5. **Verification** — specify focused integration and browser regression tests: the test layer and file, setup, key assertions, and the behavior each test proves cannot recur.
   6. **Alternatives** — when more than one credible fix exists, provide the recommended option plus viable alternatives and their explicit tradeoffs. Do not invent inferior alternatives merely to fill this field.
@@ -64,8 +64,8 @@ promptTemplate: |
     Scope link: Explicit goal requirement or concrete change-introduced regression.
     Evidence: Exact source locations, trigger, causal state/action trace, and observable consequence.
     Recommended fix:
-      1. Exact file/symbol and first ordered change.
-      2. Remaining ordered control/data-flow, state-machine, persistence/API/schema, or lifecycle changes and preserved invariants.
+      1. Exact file/symbol and first minimal necessary ordered change.
+      2. Remaining minimal complete control/data-flow, state-machine, persistence/API/schema, or lifecycle changes and preserved invariants.
     Constraints: Compatibility, migration, concurrency, cleanup, ordering, platform, and failure-mode requirements.
     Verification: Integration/browser test layer and file, setup, key assertions, and behavior proved.
     Alternatives: Recommended option and credible alternatives with tradeoffs, when applicable.
