@@ -116,26 +116,82 @@ function shellSingleQuote(value: string): string {
 type ContainerOwnershipWitness = NonNullable<ActiveVerification["steps"][number]["containerOwnershipWitness"]>;
 
 /**
+ * The tuple and the private stdin writer become available on independent event
+ * boundaries.  Retain a validated release request until the writer is installed
+ * and make both duplicate requests and writer failures terminal.  This is a
+ * transport handshake only: it never exposes authority to the payload.
+ */
+export function createContainerPayloadReleaseHandshake(onFailure: (error: Error) => void): {
+	requestRelease(): boolean;
+	installWriter(writer: () => void): boolean;
+	fail(error: Error): void;
+	released(): boolean;
+} {
+	let releaseRequired = false;
+	let releaseAttempted = false;
+	let releaseDelivered = false;
+	let failed = false;
+	let writer: (() => void) | undefined;
+	const fail = (error: Error) => {
+		if (failed) return;
+		failed = true;
+		onFailure(error);
+	};
+	const deliver = () => {
+		if (failed || !releaseRequired || releaseAttempted || !writer) return;
+		releaseAttempted = true;
+		try {
+			writer();
+			releaseDelivered = true;
+		} catch (error) {
+			fail(new Error(`Could not release container payload after durable witness publication: ${(error as Error).message}`));
+		}
+	};
+	return {
+		requestRelease: () => {
+			if (releaseRequired) {
+				fail(new Error("Container ownership tuple was duplicated"));
+				return false;
+			}
+			releaseRequired = true;
+			deliver();
+			return !failed;
+		},
+		installWriter: (nextWriter) => {
+			if (writer) {
+				fail(new Error("Container payload release writer was installed more than once"));
+				return false;
+			}
+			writer = nextWriter;
+			deliver();
+			return !failed;
+		},
+		fail,
+		released: () => releaseDelivered,
+	};
+}
+
+/**
  * Docker stdout is a byte stream, not a message transport. The pre-payload
  * sentinel sends exactly one bounded newline-delimited JSON frame; this decoder
- * retains incomplete frames across chunks and never lets payload output replace
- * an already pinned host witness.
+ * retains incomplete frames across chunks and rejects a second authority frame.
  */
-function createContainerWitnessFrameDecoder(
+export function createContainerWitnessFrameDecoder(
 	onWitness: (witness: ContainerOwnershipWitness) => void,
 	onInvalid: () => void,
 ): (chunk: string) => void {
 	const prefix = "BOBBIT_CONTAINER_OWNERSHIP_TUPLE ";
 	let buffered = "";
-	let consumed = false;
+	let witnessed = false;
+	let failed = false;
 	const maxFrameBytes = 8 * 1024;
 	return (chunk: string) => {
-		if (consumed) return;
+		if (failed) return;
 		buffered += chunk;
 		if (buffered.length > maxFrameBytes) {
-			// A sentinel frame is tiny. A larger pre-release stream is malformed;
-			// discard it rather than retaining unbounded attacker-controlled output.
-			buffered = buffered.slice(-maxFrameBytes);
+			failed = true;
+			onInvalid();
+			return;
 		}
 		for (;;) {
 			const end = buffered.indexOf("\n");
@@ -143,7 +199,11 @@ function createContainerWitnessFrameDecoder(
 			const line = buffered.slice(0, end).replace(/\r$/, "");
 			buffered = buffered.slice(end + 1);
 			if (!line.startsWith(prefix)) continue;
-			if (line.length > maxFrameBytes) { consumed = true; onInvalid(); return; }
+			if (line.length > maxFrameBytes || witnessed) {
+				failed = true;
+				onInvalid();
+				return;
+			}
 			try {
 				const parsed = JSON.parse(line.slice(prefix.length));
 				if (!parsed || typeof parsed !== "object" ||
@@ -151,7 +211,7 @@ function createContainerWitnessFrameDecoder(
 					!Number.isSafeInteger(parsed.sentinelPid) || parsed.sentinelPid <= 0 ||
 					!Number.isSafeInteger(parsed.pgid) || parsed.pgid <= 0 ||
 					typeof parsed.startToken !== "string" || !parsed.startToken) throw new Error("invalid witness");
-				consumed = true;
+				witnessed = true;
 				onWitness({
 					containerId: parsed.containerId,
 					nonce: parsed.nonce,
@@ -160,10 +220,10 @@ function createContainerWitnessFrameDecoder(
 					startToken: parsed.startToken,
 				});
 			} catch {
-				consumed = true;
+				failed = true;
 				onInvalid();
+				return;
 			}
-			return;
 		}
 	};
 }
@@ -5826,35 +5886,56 @@ export class VerificationHarness {
 				? new Promise<void>((resolve, reject) => { resolveContainerOwnershipReady = resolve; rejectContainerOwnershipReady = reject; })
 				: Promise.resolve();
 			let containerWitnessAcknowledged = !useContainerDurable;
-			let releaseContainerPayload: (() => void) | undefined;
+			let containerHandshakeFailure: Error | undefined;
+			const failContainerOwnershipHandshake = (error: Error) => {
+				if (containerHandshakeFailure) return;
+				containerHandshakeFailure = error;
+				const active = streamCtx ? this.activeVerifications.get(streamCtx.signalId) : undefined;
+				const step = active?.steps[streamCtx!.stepIndex];
+				if (step) {
+					step.containerPayloadCleanupPending = true;
+					this._persistActive();
+				}
+				rejectContainerOwnershipReady(error);
+				// If readiness already resolved, the spawn-tree prerequisite cannot
+				// reject retroactively. The still-live tracked transport is then the
+				// only authority available for fail-closed cleanup.
+				tracked?.killTree("SIGKILL");
+			};
+			const containerPayloadRelease = useContainerDurable
+				? createContainerPayloadReleaseHandshake(failContainerOwnershipHandshake)
+				: undefined;
 			const acknowledgeContainerWitness = (witness: ContainerOwnershipWitness) => {
-				if (containerWitnessAcknowledged || !streamCtx || !containerId || !pidNonce) return;
+				if (!streamCtx || !containerId || !pidNonce || containerHandshakeFailure) return;
+				if (containerWitnessAcknowledged) {
+					containerPayloadRelease?.fail(new Error("Container ownership tuple was duplicated"));
+					return;
+				}
 				if (witness.containerId !== containerId || witness.nonce !== pidNonce) {
-					rejectContainerOwnershipReady(new Error("Container ownership tuple did not match its host step identity"));
+					failContainerOwnershipHandshake(new Error("Container ownership tuple did not match its host step identity"));
 					return;
 				}
 				const active = this.activeVerifications.get(streamCtx.signalId);
 				const step = active?.steps[streamCtx.stepIndex];
 				if (!step) {
-					rejectContainerOwnershipReady(new Error("Container ownership tuple arrived for an inactive step"));
+					failContainerOwnershipHandshake(new Error("Container ownership tuple arrived for an inactive step"));
 					return;
 				}
 				step.containerOwnershipWitness = witness;
 				if (!this._persistActive()) {
 					step.containerPayloadCleanupPending = true;
-					rejectContainerOwnershipReady(new Error("Container ownership tuple could not be durably persisted"));
+					failContainerOwnershipHandshake(new Error("Container ownership tuple could not be durably persisted"));
 					return;
 				}
 				containerWitnessAcknowledged = true;
-				// The host alone owns docker exec stdin. The sentinel duplicated that
-				// read end before the parent redirected payload stdin to /dev/null, so
-				// a same-UID payload cannot forge this release.
-				releaseContainerPayload?.();
+				// The host alone owns docker exec stdin. Record the release before
+				// acknowledging ownership: a synchronous tuple can precede installation
+				// of the private stdin writer, but it can never drop the release.
+				if (!containerPayloadRelease?.requestRelease()) return;
 				resolveContainerOwnershipReady();
 			};
 			const rejectMalformedContainerWitness = () => {
-				if (containerWitnessAcknowledged) return;
-				rejectContainerOwnershipReady(new Error("Container ownership tuple was malformed"));
+				containerPayloadRelease?.fail(new Error("Container ownership tuple was malformed"));
 			};
 			const decodeContainerWitnessFrame = useContainerDurable
 				? createContainerWitnessFrameDecoder(acknowledgeContainerWitness, rejectMalformedContainerWitness)
@@ -5886,7 +5967,7 @@ export class VerificationHarness {
 						// FD 3, then wakes this parent through a private pre-payload FIFO. The
 						// payload inherits neither endpoint, so it cannot substitute a tuple or
 						// forge the release after inspecting paths/nonces via /proc.
-						wrappedCmd = `mkdir -p ${qDir} 2>/dev/null || exit 125; __bobbit_ready=${qWitness}.ready.$$; rm -f "$__bobbit_ready"; mkfifo "$__bobbit_ready" || exit 125; BOBBIT_WITNESS=${qWitness} BOBBIT_NONCE=${qNonce} BOBBIT_CONTAINER=${qContainer} BOBBIT_READY="$__bobbit_ready" /bin/sh -c 'trap "" HUP INT TERM; __fail(){ printf "E\\n" > "$BOBBIT_READY"; exit 125; }; __p=$$; __g=$(awk "{print \\$5}" "/proc/$__p/stat" 2>/dev/null || true); __s=$(awk "{print \\$22}" "/proc/$__p/stat" 2>/dev/null || true); case "$__p:$__g:$__s" in *::*) __fail;; esac; __t="$BOBBIT_WITNESS.$$.tmp"; printf "{\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s" > "$__t" && mv "$__t" "$BOBBIT_WITNESS" || __fail; printf "BOBBIT_CONTAINER_OWNERSHIP_TUPLE {\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s"; IFS= read -r __release <&3 || __fail; [ "$__release" = BOBBIT_HOST_RELEASE ] || __fail; printf ".\\n" > "$BOBBIT_READY" || exit 125; while :; do sleep 2147483647 & wait $!; done' 3<&0 & __bobbit_sentinel=$!; exec </dev/null; IFS= read -r __bobbit_ready_ack < "$__bobbit_ready" || exit 125; rm -f "$__bobbit_ready"; [ "$__bobbit_ready_ack" = . ] || { kill "$__bobbit_sentinel" 2>/dev/null; exit 125; }; __bp=$$; printf %s "$__bp" > ${qPid}.tmp && mv ${qPid}.tmp ${qPid}; ( while :; do printf '{"pid":%s,"ts":%s}' "$__bp" "$(date +%s 2>/dev/null || printf 0)" > ${qHb}.tmp && mv ${qHb}.tmp ${qHb}; sleep 1; done ) & __hb=$!; ( ${command}\n); __ec=$?; kill "$__hb" 2>/dev/null; wait "$__hb" 2>/dev/null; exit $__ec`;
+						wrappedCmd = `mkdir -p ${qDir} 2>/dev/null || exit 125; __bobbit_ready=${qWitness}.ready.$$; rm -f "$__bobbit_ready"; mkfifo "$__bobbit_ready" || exit 125; exec 3<&0; BOBBIT_WITNESS=${qWitness} BOBBIT_NONCE=${qNonce} BOBBIT_CONTAINER=${qContainer} BOBBIT_READY="$__bobbit_ready" /bin/sh -c 'trap "" HUP INT TERM; __fail(){ printf "E\\n" > "$BOBBIT_READY"; exit 125; }; __p=$$; __g=$(awk "{print \\$5}" "/proc/$__p/stat" 2>/dev/null || true); __s=$(awk "{print \\$22}" "/proc/$__p/stat" 2>/dev/null || true); case "$__p:$__g:$__s" in *::*) __fail;; esac; __t="$BOBBIT_WITNESS.$$.tmp"; printf "{\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s" > "$__t" && mv "$__t" "$BOBBIT_WITNESS" || __fail; printf "BOBBIT_CONTAINER_OWNERSHIP_TUPLE {\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s"; IFS= read -r __release <&3 || __fail; [ "$__release" = BOBBIT_HOST_RELEASE ] || __fail; printf ".\\n" > "$BOBBIT_READY" || exit 125; while :; do sleep 2147483647 & wait $!; done' 3<&3 & __bobbit_sentinel=$!; exec 3<&-; exec </dev/null; IFS= read -r __bobbit_ready_ack < "$__bobbit_ready" || exit 125; rm -f "$__bobbit_ready"; [ "$__bobbit_ready_ack" = . ] || { kill "$__bobbit_sentinel" 2>/dev/null; exit 125; }; __bp=$$; printf %s "$__bp" > ${qPid}.tmp && mv ${qPid}.tmp ${qPid}; ( while :; do printf '{"pid":%s,"ts":%s}' "$__bp" "$(date +%s 2>/dev/null || printf 0)" > ${qHb}.tmp && mv ${qHb}.tmp ${qHb}; sleep 1; done ) & __hb=$!; ( ${command}\n); __ec=$?; kill "$__hb" 2>/dev/null; wait "$__hb" 2>/dev/null; exit $__ec`;
 					} else {
 						wrappedCmd = `echo $$ > ${killPidFile}; ${command}`;
 					}
@@ -5897,7 +5978,7 @@ export class VerificationHarness {
 					// `-w` joins that exact child without polling, preserving the host
 					// transport ownership boundary until container cleanup is complete.
 					wrappedCmd = `exec setsid -w /bin/sh -c ${shellSingleQuote(wrappedCmd)}`;
-					tracked = spawnTracked("docker", ["exec", "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
+					tracked = spawnTracked("docker", ["exec", "-i", "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
 						stdio: ["pipe", "pipe", "pipe"],
 						// Durable-container timeout is armed only after its atomic witness.
 						timeoutMs: useContainerDurable ? undefined : timeoutSec * 1000,
@@ -5946,9 +6027,18 @@ export class VerificationHarness {
 				}
 				child = tracked.child;
 				if (useContainerDurable) {
-					releaseContainerPayload = () => {
-						try { child.stdin?.end("BOBBIT_HOST_RELEASE\n"); } catch { rejectContainerOwnershipReady(new Error("Could not release container payload after durable witness publication")); }
-					};
+					const stdin = child.stdin;
+					if (!stdin) {
+						containerPayloadRelease?.fail(new Error("Container payload release writer was unavailable after durable witness publication"));
+					} else {
+						// An asynchronous stdin failure is just as unsafe as a synchronous
+						// write failure: do not let a ready tuple authorize a payload that
+						// never received the host-only release.
+						stdin.once("error", (error: Error) => failContainerOwnershipHandshake(
+							new Error(`Could not release container payload after durable witness publication: ${error.message}`),
+						));
+						containerPayloadRelease?.installWriter(() => stdin.end("BOBBIT_HOST_RELEASE\n"));
+					}
 				}
 			} catch (err) {
 				spawnError = err as Error;
@@ -6066,10 +6156,10 @@ export class VerificationHarness {
 						stderr += text;
 						if (stderr.length > 1024 * 1024) stderr = stderr.slice(-512 * 1024);
 					}
-					// Decode only the sentinel's pre-release frame. This retains split
-					// stdout chunks and consumes exactly one tuple; later payload stdout is
-					// never a mutable ownership channel.
-					if (!containerWitnessAcknowledged && stream === "stdout") decodeContainerWitnessFrame?.(text);
+					// Decode the sentinel's pre-release frame across split stdout chunks.
+					// A second tuple, including one emitted by a hostile payload, is a
+					// fail-closed transport violation and never becomes new authority.
+					if (stream === "stdout") decodeContainerWitnessFrame?.(text);
 					if (streamCtx) {
 						this.broadcastFn(streamCtx.goalId, {
 							type: "gate_verification_step_output",
@@ -6326,8 +6416,8 @@ export class VerificationHarness {
 			}
 
 			child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
-				if (useContainerDurable && !containerWitnessAcknowledged) {
-					rejectContainerOwnershipReady(new Error("Container ownership witness was not established before docker exec exited"));
+				if (useContainerDurable && (!containerWitnessAcknowledged || !containerPayloadRelease?.released())) {
+					failContainerOwnershipHandshake(new Error("Container ownership witness and host-only payload release were not established before docker exec exited"));
 				}
 				exitCode = code;
 				exitSignal = signal;
@@ -6349,7 +6439,7 @@ export class VerificationHarness {
 				void settleFromProcess(code ?? exitCode, signal ?? exitSignal);
 			});
 			child.on("error", (err: Error) => {
-				if (useContainerDurable && !containerWitnessAcknowledged) rejectContainerOwnershipReady(err);
+				if (useContainerDurable && (!containerWitnessAcknowledged || !containerPayloadRelease?.released())) failContainerOwnershipHandshake(err);
 				if (settled || settleStarted) return;
 				settleStarted = true;
 				settled = true;

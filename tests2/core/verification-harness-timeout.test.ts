@@ -25,7 +25,11 @@ const TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "verif-treekill-test-"));
 fs.mkdirSync(path.join(TEST_DIR, "state"), { recursive: true });
 process.env.BOBBIT_DIR = TEST_DIR;
 
-const { VerificationHarness } = await import("../../src/server/agent/verification-harness.ts");
+const {
+	VerificationHarness,
+	createContainerPayloadReleaseHandshake,
+	createContainerWitnessFrameDecoder,
+} = await import("../../src/server/agent/verification-harness.ts");
 const { createFakeVerificationCommandRunner } = await import("../harness/fake-verification-command-runner.js");
 
 /** Poll predicate with explicit budget. Returns true if satisfied within the budget. */
@@ -184,6 +188,57 @@ function createPreReadinessRunner() {
 }
 
 describe("deterministic tracked child", () => {
+	it("queues a split synchronous ownership tuple until the private release writer is installed", () => {
+		const releases: string[] = [];
+		const failures: Error[] = [];
+		const handshake = createContainerPayloadReleaseHandshake(error => failures.push(error));
+		let hostPersisted = false;
+		const decoder = createContainerWitnessFrameDecoder(
+			witness => {
+				expect(witness).toEqual({
+					containerId: "a".repeat(64), nonce: "step-nonce", sentinelPid: 101, pgid: 101, startToken: "start-token",
+				});
+				hostPersisted = true;
+				expect(handshake.requestRelease()).toBe(true);
+			},
+			() => handshake.fail(new Error("malformed or duplicate tuple")),
+		);
+		const tuple = `BOBBIT_CONTAINER_OWNERSHIP_TUPLE ${JSON.stringify({
+			containerId: "a".repeat(64), nonce: "step-nonce", sentinelPid: 101, pgid: 101, startToken: "start-token",
+		})}\n`;
+		decoder(tuple.slice(0, 37));
+		expect(hostPersisted).toBe(false);
+		expect(releases).toEqual([]);
+		decoder(tuple.slice(37));
+		expect(hostPersisted).toBe(true);
+		expect(releases).toEqual([]);
+
+		expect(handshake.installWriter(() => releases.push("BOBBIT_HOST_RELEASE"))).toBe(true);
+		expect(releases).toEqual(["BOBBIT_HOST_RELEASE"]);
+		expect(handshake.installWriter(() => releases.push("duplicate writer"))).toBe(false);
+		expect(releases).toEqual(["BOBBIT_HOST_RELEASE"]);
+		expect(failures.map(error => error.message)).toEqual(["Container payload release writer was installed more than once"]);
+	});
+
+	it("rejects a duplicate synchronous tuple before its queued payload release is installed", () => {
+		const releases: string[] = [];
+		const failures: Error[] = [];
+		const handshake = createContainerPayloadReleaseHandshake(error => failures.push(error));
+		const decoder = createContainerWitnessFrameDecoder(
+			() => handshake.requestRelease(),
+			() => handshake.fail(new Error("malformed or duplicate tuple")),
+		);
+		const tuple = `BOBBIT_CONTAINER_OWNERSHIP_TUPLE ${JSON.stringify({
+			containerId: "b".repeat(64), nonce: "step-nonce", sentinelPid: 101, pgid: 101, startToken: "start-token",
+		})}\n`;
+		// A mocked/fast transport can synchronously flush both frames before the
+		// spawn call returns and before the parent has its stdin writer.
+		decoder(tuple + tuple);
+		expect(handshake.installWriter(() => releases.push("BOBBIT_HOST_RELEASE"))).toBe(false);
+		expect(releases).toEqual([]);
+		expect(failures.map(error => error.message)).toEqual(["malformed or duplicate tuple"]);
+	});
+
 	it("reports timeout and closes without launching a process", async () => {
 		const runner = createFakeVerificationCommandRunner();
 		const tracked = runner.spawn({
