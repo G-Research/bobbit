@@ -1105,6 +1105,20 @@ test("container command verification owns only its exact payload and docker-exec
     );
     const targetWitnessFile = preReleaseTarget!.steps[0]
       .containerWitnessFile as string;
+    // This is A's own, pre-release inner sentinel tuple.  It is captured before
+    // B receives A's transport pathname, so either secure schedule below has a
+    // stable expected identity: B's same-UID tuple can never become authority.
+    const targetInnerWitness = JSON.parse(
+      docker(["exec", containerId, "cat", targetWitnessFile]),
+    ) as RunningStep["witness"];
+    expect(targetInnerWitness).toMatchObject({
+      containerId: preReleaseTarget!.steps[0].containerId,
+      nonce: preReleaseTarget!.steps[0].pidNonce,
+    });
+    expect(targetInnerWitness).not.toMatchObject({
+      sentinelPid: second.witness.sentinelPid,
+      startToken: second.witness.startToken,
+    });
     // This FIFO write is a one-shot release of B's attack, not a readiness poll.
     docker([
       "exec",
@@ -1125,9 +1139,14 @@ test("container command verification owns only its exact payload and docker-exec
       },
       "target did not settle either its forged or genuine pre-release ownership boundary",
     );
+    const preReleaseStep = preReleaseOutcome!.steps[0];
+    const failedClosedBeforeRelease =
+      preReleaseStep.containerPayloadCleanupPending === true &&
+      preReleaseStep.containerOwnershipWitness === undefined;
+    const daemonBoundBeforeForgery = preReleaseStep.containerOwnershipWitness !== undefined;
     expect(
-      preReleaseOutcome!.steps[0].containerPayloadCleanupPending,
-      "a concurrent tuple injected into A's docker-exec transport must fail closed",
+      failedClosedBeforeRelease || daemonBoundBeforeForgery,
+      "the forged tuple must either fail closed before host release or lose to A's daemon-bound tuple",
     ).toBe(true);
     expect(
       docker([
@@ -1139,28 +1158,64 @@ test("container command verification owns only its exact payload and docker-exec
       ]),
       "the concurrent payload must have pre-opened and written the old filesystem readiness path",
     ).toBe("");
-    expect(
-      preReleaseOutcome!.steps[0].containerOwnershipWitness,
-      "untrusted container output must never become the durable authority",
-    ).toBeUndefined();
-    expect(
-      viewer.messages
-        .slice(attackFrom)
-        .some(
-          (event) =>
-            event.type === "gate_verification_step_output" &&
-            event.signalId === attackSignalId &&
-            typeof event.text === "string" &&
-            event.text.includes("READY:concurrent-pre-release-a:"),
-        ),
-      "a forged readiness path and transport tuple must not release A's payload",
-    ).toBe(false);
+
+    const readyBeforeOutcome = viewer.messages
+      .slice(attackFrom)
+      .some(
+        (event) =>
+          event.type === "gate_verification_step_output" &&
+          event.signalId === attackSignalId &&
+          typeof event.text === "string" &&
+          event.text.includes("READY:concurrent-pre-release-a:"),
+      );
+    let daemonBoundPayloadPid: number | undefined;
+    if (failedClosedBeforeRelease) {
+      expect(
+        readyBeforeOutcome,
+        "a forged readiness path and transport tuple must not release A's payload",
+      ).toBe(false);
+      expect(
+        preReleaseStep.containerOwnershipWitness,
+        "untrusted container output must never become the durable authority",
+      ).toBeUndefined();
+    } else {
+      // The scheduler may observe A's Engine-tagged exec first.  A late forged
+      // B tuple is then payload output only: the durable authority remains A's
+      // exact daemon-bound inner sentinel and host release is legitimate.
+      expect(preReleaseStep.containerPayloadCleanupPending).not.toBe(true);
+      expect(preReleaseStep.containerOwnershipWitness).toEqual(targetInnerWitness);
+      expect(preReleaseStep.containerOwnershipWitness).not.toMatchObject({
+        sentinelPid: second.witness.sentinelPid,
+        startToken: second.witness.startToken,
+      });
+      // A can run only after the durable A tuple above; the old FIFO write alone
+      // is never a release authority.
+      if (readyBeforeOutcome) {
+        expect(preReleaseStep.containerOwnershipWitness).toEqual(targetInnerWitness);
+      }
+      const readyA = await viewer.waitFrom(
+        attackFrom,
+        (event) =>
+          event.type === "gate_verification_step_output" &&
+          event.signalId === attackSignalId &&
+          typeof event.text === "string" &&
+          event.text.includes("READY:concurrent-pre-release-a:"),
+      );
+      daemonBoundPayloadPid = Number(/PAYLOAD=(\d+)/.exec(readyA.text)?.[1]);
+      expect(daemonBoundPayloadPid, "daemon-bound A must be the only payload released").toBeGreaterThan(0);
+    }
+
     const cancelA = await api(
       gateway,
       `/api/goals/${concurrentAttackGoal}/gates/a/cancel-verification`,
       { method: "POST" },
     );
     await expectResponseStatus(cancelA, 200);
+    if (daemonBoundBeforeForgery) {
+      // The cancellation route acknowledges only after exact payload cleanup and
+      // exact host docker-exec transport cleanup, in that order.
+      assertContainerGone(containerId, daemonBoundPayloadPid!);
+    }
     assertHostGone(preReleaseTarget!.steps[0].pid);
     assertNoContainerTermSignal(
       containerId,
@@ -1170,7 +1225,7 @@ test("container command verification owns only its exact payload and docker-exec
     assertContainerAlive(
       containerId,
       second.payloadPid,
-      "concurrent step B after cancelling forged target A",
+      "concurrent step B after cancelling target A",
     );
     assertHostAlive(second.hostPid);
     assertContainerAlive(

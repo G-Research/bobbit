@@ -222,6 +222,64 @@ describe("deterministic tracked child", () => {
 		expect(failures.map(error => error.message)).toEqual(["Container payload release writer was installed more than once"]);
 	});
 
+	it("fails closed when an exact live sibling tuple arrives before the daemon-bound tuple", () => {
+		const containerId = "c".repeat(64);
+		const nonce = "target-step-nonce";
+		const daemonBound = {
+			containerId, nonce, sentinelPid: 101, pgid: 101, startToken: "target-start-token",
+		};
+		// B is a real same-UID sibling: its tuple is complete and its identity
+		// inspector result agrees exactly.  It differs only from the daemon-bound
+		// docker-exec transport for A, which untrusted stdout cannot establish.
+		const exactLiveSibling = {
+			containerId, nonce, sentinelPid: 202, pgid: 202, startToken: "sibling-start-token",
+		};
+		const persisted: unknown[] = [];
+		const releases: string[] = [];
+		const negativeGroupAuthorities: number[] = [];
+		const failures: Error[] = [];
+		let cleanupPending = false;
+		const handshake = createContainerPayloadReleaseHandshake(error => {
+			cleanupPending = true;
+			failures.push(error);
+		});
+		const decoder = createContainerWitnessFrameDecoder(
+			witness => {
+				// The focused seam deliberately makes B's tuple an exact *live*
+				// tuple.  A numeric PID/PGID or a valid start token alone therefore
+				// cannot reach persistence, host release, or group-signal authority.
+				expect(witness).toEqual(exactLiveSibling);
+				if (JSON.stringify(witness) !== JSON.stringify(daemonBound)) {
+					cleanupPending = true;
+					handshake.fail(new Error("Docker exec supervisor identity was not daemon-bound to this tuple"));
+					return;
+				}
+				persisted.push(witness);
+				if (handshake.requestRelease()) releases.push("BOBBIT_HOST_RELEASE");
+			},
+			() => handshake.fail(new Error("malformed ownership tuple")),
+		);
+		const frame = (tuple: typeof daemonBound) =>
+			`BOBBIT_CONTAINER_OWNERSHIP_TUPLE ${JSON.stringify(tuple)}\n`;
+
+		// B wins the stdout scheduling race.  Its frame is exact and live, then
+		// A's legitimate daemon-bound frame arrives too late to replace this
+		// failed-closed boundary.  This has no sleeps, polling, or retry path.
+		decoder(frame(exactLiveSibling));
+		decoder(frame(daemonBound));
+		expect(persisted).toEqual([]);
+		expect(releases).toEqual([]);
+		expect(handshake.released()).toBe(false);
+		expect(cleanupPending).toBe(true);
+		expect(failures.map(error => error.message)).toEqual([
+			"Docker exec supervisor identity was not daemon-bound to this tuple",
+		]);
+		// Negative group cleanup has no authority until a daemon-bound tuple was
+		// durably persisted.  The sibling's exact live PGID is never named.
+		if (persisted.length > 0) negativeGroupAuthorities.push((persisted[0] as typeof daemonBound).pgid);
+		expect(negativeGroupAuthorities).toEqual([]);
+	});
+
 	it("never parses or size-limits payload stdout after the one control candidate", () => {
 		let witnesses = 0;
 		let invalid = 0;
