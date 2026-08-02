@@ -27,6 +27,8 @@ export interface ChannelPtyHandle {
 	kill(reason?: string): void;
 	onData(cb: (data: string) => void): () => void;
 	onExit(cb: (event: ChannelPtyExitEvent) => void): () => void;
+	/** Fires after the host has delivered final PTY data following exit. */
+	onDrain?(cb: () => void): () => void;
 }
 
 export interface ChannelPtyHost {
@@ -150,7 +152,9 @@ export class ChannelPtyService {
 function wrapPty(proc: PtyProcess, auditExit?: (event: ChannelPtyExitEvent) => void): ChannelPtyHandle {
 	const dataListeners = new Set<(data: string) => void>();
 	const exitListeners = new Set<(event: ChannelPtyExitEvent) => void>();
+	const drainListeners = new Set<() => void>();
 	let exited = false;
+	let drained = false;
 	let killReason: string | undefined;
 	let killFallbackTimer: ReturnType<typeof setTimeout> | undefined;
 	const emitExit = (code: number | null, signal?: string | number) => {
@@ -160,13 +164,23 @@ function wrapPty(proc: PtyProcess, auditExit?: (event: ChannelPtyExitEvent) => v
 		const event = { code, signal, reason: killReason };
 		auditExit?.(event);
 		for (const cb of [...exitListeners]) cb(event);
+		// node-pty can report process exit before its final data callback. The
+		// microtask boundary admits callbacks already queued by the native event
+		// turn, then gives consumers one explicit completion notification.
+		queueMicrotask(() => {
+			if (drained) return;
+			drained = true;
+			for (const cb of [...drainListeners]) cb();
+		});
 	};
 	if (proc.onData) {
 		proc.onData((data) => {
+			if (drained) return;
 			for (const cb of [...dataListeners]) cb(data);
 		});
 	} else if (proc.on) {
 		proc.on("data", (data) => {
+			if (drained) return;
 			for (const cb of [...dataListeners]) cb(data);
 		});
 	}
@@ -200,6 +214,7 @@ function wrapPty(proc: PtyProcess, auditExit?: (event: ChannelPtyExitEvent) => v
 		},
 		onData: (cb) => { dataListeners.add(cb); return () => { dataListeners.delete(cb); }; },
 		onExit: (cb) => { exitListeners.add(cb); return () => { exitListeners.delete(cb); }; },
+		onDrain: (cb) => { drainListeners.add(cb); return () => { drainListeners.delete(cb); }; },
 	};
 }
 

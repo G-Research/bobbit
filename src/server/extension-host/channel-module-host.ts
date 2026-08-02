@@ -121,11 +121,23 @@ export class WorkerChannelModuleHost implements ChannelModuleHost {
 				const handle = await host.pty.openTerminal(args[0] as any);
 				const id = `pty-${++ptySeq}`;
 				ptys.set(id, handle);
+				let exitEvent: unknown;
+				let exitComplete = false;
+				const completeExit = () => {
+					if (exitComplete || exitEvent === undefined) return;
+					exitComplete = true;
+					ptys.delete(id);
+					if (!closed) worker.postMessage({ kind: "channel-pty-exit", ptyId: id, event: exitEvent });
+				};
 				handle.onData((data) => { if (!closed) worker.postMessage({ kind: "channel-pty-data", ptyId: id, data }); });
 				handle.onExit((event) => {
-					ptys.delete(id);
-					if (!closed) worker.postMessage({ kind: "channel-pty-exit", ptyId: id, event });
+					if (exitEvent !== undefined) return;
+					exitEvent = event;
+					// Keep the proxy alive until the helper's drain boundary. The worker
+					// then observes one serialized stream: final data, followed by exit.
+					if (!handle.onDrain) queueMicrotask(completeExit);
 				});
+				if (handle.onDrain) handle.onDrain(completeExit);
 				return { __channelPtyHandleId: id, pid: handle.pid };
 			}
 			const ptyId = typeof args[0] === "string" ? args[0] : "";

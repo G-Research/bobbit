@@ -20,6 +20,8 @@ type PtyHandle = {
 	kill(reason?: string): void | Promise<void>;
 	onData(cb: (data: string) => void): () => void;
 	onExit(cb: (event: { code: number | null; signal?: string | number; reason?: string }) => void): () => void;
+	/** Signals that the host has delivered all final data following exit. */
+	onDrain?(cb: () => void): () => void;
 };
 
 type TerminalInit = { cols?: number; rows?: number };
@@ -33,6 +35,8 @@ export async function terminal(ctx: ChannelContext) {
 	let pty: PtyHandle | undefined;
 	let closed = false;
 	let exiting = false;
+	let exitEvent: { code: number | null; signal?: string | number; reason?: string } | undefined;
+	let exitFinalized = false;
 	const disposers: Array<() => void> = [];
 	const replay = new TextReplayBuffer(REPLAY_MAX_BYTES);
 	// PTY data and exit callbacks are independent events. Keep their bridge sends
@@ -79,12 +83,12 @@ export async function terminal(ctx: ChannelContext) {
 		}
 		const init = objectOf(ctx.init) as TerminalInit | undefined;
 		pty = await ctx.host.pty.openTerminal({ cols: numberOf(init?.cols), rows: numberOf(init?.rows) });
-		disposers.push(pty.onData((data) => {
-			if (!exiting) void enqueueText(data).catch(() => undefined);
-		}));
-		disposers.push(pty.onExit((event) => {
-			if (closed || exiting) return;
-			exiting = true;
+		const finishExit = () => {
+			if (closed || exitFinalized || !exitEvent) return;
+			exitFinalized = true;
+			const event = exitEvent;
+			// Queue the exit behind every data frame accepted before the host's drain
+			// boundary. This joins the outbound chain before the one channel close.
 			void enqueueOutbound(async () => {
 				if (closed) return;
 				closed = true;
@@ -95,7 +99,21 @@ export async function terminal(ctx: ChannelContext) {
 					await ctx.close(reason);
 				}
 			}).catch(() => undefined);
+		};
+		disposers.push(pty.onData((data) => {
+			// Native PTY exit notification can precede its final buffered data. Keep
+			// accepting data until the host declares the stream drained.
+			if (!closed) void enqueueText(data).catch(() => undefined);
 		}));
+		disposers.push(pty.onExit((event) => {
+			if (closed || exiting) return;
+			exiting = true;
+			exitEvent = event;
+			// Legacy/test hosts without the explicit boundary still accept all
+			// callbacks issued in this turn before completing the exit.
+			if (!pty?.onDrain) queueMicrotask(finishExit);
+		}));
+		if (pty.onDrain) disposers.push(pty.onDrain(finishExit));
 		await sendJson({ op: "status", state: "attached", pid: pty.pid });
 	} catch (error) {
 		closed = true;
@@ -141,7 +159,7 @@ export async function terminal(ctx: ChannelContext) {
 			}
 		},
 		async onAttach(clientId: string) {
-			if (!closed && !exiting && pty) {
+			if (!closed && pty) {
 				for (const data of replay.chunks(REPLAY_CHUNK_BYTES)) await sendToClient(ctx, clientId, { kind: "text", data });
 				await sendJsonTo(clientId, { op: "status", state: "attached", pid: pty.pid });
 			}

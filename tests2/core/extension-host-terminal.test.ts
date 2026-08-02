@@ -17,6 +17,7 @@ import { loadPackContributions } from "../../src/server/agent/pack-contributions
 import { PackContributionRegistry } from "../../src/server/extension-host/pack-contribution-registry.ts";
 import { ChannelPtyService } from "../../src/server/extension-host/channel-pty-helper.ts";
 import { terminal as terminalChannelHandler } from "../../market-packs/terminal/src/terminal-channel.ts";
+import { terminal as packagedTerminalChannelHandler } from "../../market-packs/terminal/lib/terminal-channel.mjs";
 import type { PackEntry } from "../../src/server/agent/pack-types.ts";
 
 const repoRoot = process.cwd();
@@ -235,7 +236,8 @@ describe("terminal channel handler", () => {
 		assert.ok(lastTextIndex < statusIndex, "status should remain after replay text frames");
 	});
 
-	it("drains exit-before-final-data into live delivery and reconnect replay before one exit and close", async () => {
+	for (const [runtime, handler] of [["source", terminalChannelHandler], ["packaged", packagedTerminalChannelHandler]] as const) {
+		it(`drains exit-before-final-data into live delivery and reconnect replay before one exit and close (${runtime})`, async () => {
 		const marker = "FINAL_EXIT_AFTER_DATA_MARKER";
 		let dataCb: ((data: string) => void) | undefined;
 		let exitCb: ((event: { code: number | null; signal?: string | number; reason?: string }) => void) | undefined;
@@ -244,7 +246,7 @@ describe("terminal channel handler", () => {
 		let closeCalls = 0;
 		let resolveClosed: (() => void) | undefined;
 		const closed = new Promise<void>((resolve) => { resolveClosed = resolve; });
-		const session = await terminalChannelHandler({
+		const session = await handler({
 			host: {
 				pty: {
 					async openTerminal() {
@@ -290,7 +292,8 @@ describe("terminal channel handler", () => {
 			replayFrames.some((frame) => isTextFrameWithMarker(frame, marker)),
 			`${marker} must be retained for reconnect replay before terminal exit closes`,
 		);
-	});
+		});
+	}
 
 	it("bridges client text/resize/kill frames to PTY and emits output/status/exit frames", async () => {
 		let dataCb: ((data: string) => void) | undefined;
@@ -422,9 +425,16 @@ describe("ChannelPtyService", () => {
 			assert.deepEqual(writes, ["pwd\n"]);
 			assert.deepEqual(resizes, [[120, 40]]);
 			let exitCode: number | null | undefined;
+			let drains = 0;
 			pty.onExit((event) => { exitCode = event.code; });
+			pty.onDrain?.(() => { drains++; });
 			pty.kill("test");
+			// The native exit notification may arrive before its final PTY data.
+			onData?.("FINAL_HELPER_DRAIN_MARKER");
+			await Promise.resolve();
 			assert.equal(exitCode, 0);
+			assert.equal(data, "helloFINAL_HELPER_DRAIN_MARKER");
+			assert.equal(drains, 1, "PTY helper must signal one drain boundary after final data");
 		} finally {
 			fs.rmSync(cwd, { recursive: true, force: true });
 		}
