@@ -4795,8 +4795,14 @@ async function handleApiRoute(
 		// Defer exit to allow the response to be sent, then settle Pi's callback
 		// and token exchange just as orderly gateway shutdown does.
 		setTimeout(async () => {
-			await shutdownOAuthFlows();
-			process.exit(0);
+			try {
+				await shutdownOAuthFlows();
+			} catch (error) {
+				// Cleanup failures must not strand the process after acknowledging shutdown.
+				try { console.warn("[shutdown] OAuth flow cleanup failed:", error); } catch { /* best-effort */ }
+			} finally {
+				process.exit(0);
+			}
 		}, 500);
 		return;
 	}

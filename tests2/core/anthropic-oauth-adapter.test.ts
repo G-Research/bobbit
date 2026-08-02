@@ -530,15 +530,15 @@ describe("Anthropic OAuth Pi browser adapter", () => {
 		await releasePending(replacement, replacementStarted.flowId);
 	});
 
-	it("makes direct gateway shutdown wait for OAuth flow settlement before exit", () => {
+	it("makes direct gateway shutdown settle OAuth flows and exit despite cleanup failure", () => {
 		const routeStart = SERVER_SOURCE.indexOf("// POST /api/shutdown");
 		const routeEnd = SERVER_SOURCE.indexOf("// GET /api/ca-cert", routeStart);
 		assert.ok(routeStart >= 0 && routeEnd > routeStart, "shutdown route must be present");
 		const shutdownRoute = SERVER_SOURCE.slice(routeStart, routeEnd);
 		assert.match(
 			shutdownRoute,
-			/setTimeout\(async \(\) => \{\s*await shutdownOAuthFlows\(\);\s*process\.exit\(0\);/,
-			"direct shutdown must await the same OAuth settlement boundary before exiting",
+			/setTimeout\(async \(\) => \{\s*try \{\s*await shutdownOAuthFlows\(\);\s*\} catch \(error\) \{[\s\S]*console\.warn\(\"\[shutdown\] OAuth flow cleanup failed:\", error\)[\s\S]*\} finally \{\s*process\.exit\(0\);\s*\}/,
+			"direct shutdown must await OAuth settlement, log cleanup failure, and still exit",
 		);
 	});
 
