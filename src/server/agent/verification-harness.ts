@@ -3097,7 +3097,9 @@ export class VerificationHarness {
 		});
 		if (stillCurrent) this.resolveGateStore(active.goalId)?.updateGateStatus(active.goalId, active.gateId, "failed");
 		this._persistActive();
-		if (stillCurrent) this.broadcastFn(active.goalId, {
+		// The old signal's terminal event is still useful to clients, but only the
+		// current generation above may mutate the shared gate status.
+		this.broadcastFn(active.goalId, {
 			type: "gate_verification_complete", goalId: active.goalId, gateId: active.gateId,
 			signalId: active.signalId, status: "cancelled",
 		});
@@ -3388,13 +3390,14 @@ export class VerificationHarness {
 	 * Cancel ALL in-flight verifications for a goal (all gates).
 	 * Called when a goal completes, a team is torn down, or the goal is shelved.
 	 */
-	async cancelAllVerifications(goalId: string): Promise<void> {
+	async cancelAllVerifications(goalId: string): Promise<boolean> {
 		this._mergePersistedActiveVerifications(v => v.goalId === goalId);
 		for (const [signalId, active] of Array.from(this.activeVerifications)) {
 			if (active.goalId !== goalId) continue;
 			active.cancelled = true;
 			active.overallStatus = "cancelled";
 			active.cancelRequestedAt ??= Date.now();
+			active.cancelMode ??= "goal";
 
 			this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
 			this._persistActive();
@@ -3426,14 +3429,19 @@ export class VerificationHarness {
 
 			console.log(`[verification] Cancelled verification ${signalId} for goal ${goalId} (goal completing)`);
 		}
+		return !Array.from(this.activeVerifications.values()).some(active => active.goalId === goalId && active.cancelled);
 	}
 
 	/**
 	 * Cancel any in-flight verifications for the same (goalId, gateId).
 	 * Terminates reviewer sessions and removes from activeVerifications.
 	 */
-	async cancelStaleVerifications(goalId: string, gateId: string): Promise<void> {
-		await this.cancelStaleVerificationsForGates(goalId, [gateId]);
+	async cancelStaleVerifications(
+		goalId: string,
+		gateId: string,
+		mode: "explicit" | "stale" = "stale",
+	): Promise<boolean> {
+		return this.cancelStaleVerificationsForGates(goalId, [gateId], mode);
 	}
 
 	/**
@@ -3442,7 +3450,11 @@ export class VerificationHarness {
 	 * invalidate several gates without a later verification completing between
 	 * per-gate awaits and re-marking a reset gate.
 	 */
-	async cancelStaleVerificationsForGates(goalId: string, gateIds: string[]): Promise<void> {
+	async cancelStaleVerificationsForGates(
+		goalId: string,
+		gateIds: string[],
+		mode: "explicit" | "stale" = "stale",
+	): Promise<boolean> {
 		const gateIdSet = new Set(gateIds);
 		this._mergePersistedActiveVerifications(v => v.goalId === goalId && gateIdSet.has(v.gateId));
 		const cancellations: ActiveVerification[] = [];
@@ -3453,6 +3465,7 @@ export class VerificationHarness {
 			active.cancelled = true;
 			active.overallStatus = "cancelled";
 			active.cancelRequestedAt ??= Date.now();
+			active.cancelMode ??= mode;
 
 			this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
 			this._persistActive();
@@ -3477,6 +3490,9 @@ export class VerificationHarness {
 			await this._finalizeCancelledVerification(active);
 			console.log(`[verification] Cancelled stale verification ${active.signalId} for gate ${active.gateId}`);
 		}
+		return !Array.from(this.activeVerifications.values()).some(active =>
+			active.goalId === goalId && gateIdSet.has(active.gateId) && active.cancelled,
+		);
 	}
 
 	private notifyTeamLead(
