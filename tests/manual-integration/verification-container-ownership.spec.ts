@@ -369,10 +369,13 @@ async function startStep(
   expect(step.pid).toBeGreaterThan(0);
   expect(step.pidNonce).toBeTruthy();
   expect(step.containerWitnessFile).toBeTruthy();
+  // The API input may be Docker's short selector. Durable authority records
+  // Docker's canonical immutable ID, which must also bind the witness.
+  expect(step.containerId).toMatch(/^[a-f0-9]{64}$/i);
   const witness = JSON.parse(
     docker(["exec", containerId, "cat", step.containerWitnessFile]),
   );
-  expect(witness).toMatchObject({ containerId, nonce: step.pidNonce });
+  expect(witness).toMatchObject({ containerId: step.containerId, nonce: step.pidNonce });
   expect(witness.sentinelPid).toBeGreaterThan(0);
   expect(witness.pgid).toBeGreaterThan(0);
   expect(witness.startToken).toBeTruthy();
@@ -400,10 +403,13 @@ function assertHostAlive(pid: number): void {
 function assertContainerGone(containerId: string, pid: number): void {
   let alive = true;
   try {
-    execFileSync("docker", ["exec", containerId, "kill", "-0", String(pid)], {
-      stdio: "ignore",
+    // `kill -0` reports a zombie until the container's PID 1 reaps it. A Z
+    // state is terminal, not a live payload that can retain work or signals.
+    const state = execFileSync("docker", ["exec", containerId, "/bin/sh", "-c", `awk '{print $3}' /proc/${pid}/stat 2>/dev/null || true`], {
+      encoding: "utf8",
       timeout: 10_000,
-    });
+    }).trim();
+    alive = state !== "" && state !== "Z";
   } catch {
     alive = false;
   }
@@ -415,7 +421,7 @@ function assertContainerAlive(
   pid: number,
   label: string,
 ): void {
-  execFileSync("docker", ["exec", containerId, "kill", "-0", String(pid)], {
+  execFileSync("docker", ["exec", containerId, "/bin/sh", "-c", `kill -0 ${pid}`], {
     stdio: "ignore",
     timeout: 10_000,
   });

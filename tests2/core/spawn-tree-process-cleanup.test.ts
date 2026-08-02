@@ -149,13 +149,8 @@ const tracked = spawnTracked("/bin/sh", ["-c", 'read __bobbit_parent_exit <&4; p
   env: process.env,
 });
 tracked.markSurvival();
-await new Promise((resolve, reject) => {
-  const ready = tracked.child.stdio[3];
-  if (!ready) return reject(new Error("sentinel readiness pipe is unavailable"));
-  ready.once("data", resolve);
-  ready.once("error", reject);
-});
-if (!fs.existsSync(sentinelFile)) throw new Error("sentinel acknowledged before publishing its identity");
+await tracked.ownershipReady;
+if (!fs.existsSync(sentinelFile)) throw new Error("sentinel ownershipReady resolved before publishing its identity");
 fs.writeFileSync(pidFile, String(tracked.child.pid) + "\n" + nonce + "\n");
 process.stdout.write(JSON.stringify({ pid: tracked.child.pid, pidFile, sentinelFile, nonce }) + "\n", () => process.exit(0));
 `;
@@ -370,7 +365,7 @@ function groupAlive(pid: number): boolean {
 function makeRecoveryHarness(
 	stateDir: string,
 	calls: Array<{ kind: string; status: string }>,
-	deps: { platform?: NodeJS.Platform; posixProcessIdentityInspector?: (pid: number) => { startTokenKind: "linux-proc-stat-22"; startToken: string; pgid: number } | undefined; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>; persistedTreeKiller?: (pid: number, signal?: NodeJS.Signals) => "signalled" | "unsupported" | "invalid"; recoveredSentinelReaper?: (step: any) => Promise<void>; projectContextManager?: any; clock?: any } = {},
+	deps: { platform?: NodeJS.Platform; posixProcessIdentityInspector?: (pid: number) => any; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>; persistedTreeKiller?: (pid: number, signal?: NodeJS.Signals) => "signalled" | "unsupported" | "invalid"; recoveredSentinelReaper?: (step: any) => Promise<void>; projectContextManager?: any; clock?: any } = {},
 ): VerificationHarness {
 	return new VerificationHarness(
 		stateDir,
@@ -420,10 +415,8 @@ describe("spawnTracked timeout cleanup", () => {
 	});
 
 	it("reaps a recovered POSIX sentinel after its original parent exits even if the root PID stamp was interrupted", async () => {
-		if (process.platform !== "linux") {
-			// Durable POSIX recovery intentionally fails closed when an exact kernel
-			// start token is unavailable (including Darwin's coarse `lstart`).
-			expect(process.platform).not.toBe("linux");
+		if (process.platform !== "linux" && process.platform !== "darwin") {
+			expect(["linux", "darwin"]).not.toContain(process.platform);
 			return;
 		}
 		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-recovered-sentinel-"));
@@ -464,11 +457,13 @@ describe("spawnTracked timeout cleanup", () => {
 			fs.writeFileSync(path.join(stateDir, "active-verifications.json"), JSON.stringify({ verifications: [active] }));
 			const calls: Array<{ kind: string; status: string }> = [];
 			await makeRecoveryHarness(stateDir, calls, {
-				// The tier-1 spawn guard blocks `ps`; the native probe above already
-				// proves this is the separately-invoked live sentinel. Production uses
-				// the default C-locale `ps` inspector.
+				// The tier-1 spawn guard blocks `ps`; the native probe above proves
+				// Darwin publication and ownershipReady, while this seam drives the
+				// corresponding recovered exact-identity state transition.
 				posixProcessIdentityInspector: pid => pid === sentinelIdentity.pid
-					? { startTokenKind: "linux-proc-stat-22", startToken: sentinelIdentity.startToken, pgid: sentinelIdentity.pgid }
+					? sentinelIdentity.startTokenKind === "darwin-lstart-argv-nonce"
+						? { startTokenKind: "darwin-lstart-argv-nonce", startToken: sentinelIdentity.startToken, pgid: sentinelIdentity.pgid, sentinelNonce: sentinelIdentity.nonce }
+						: { startTokenKind: "linux-proc-stat-22", startToken: sentinelIdentity.startToken, pgid: sentinelIdentity.pgid }
 					: undefined,
 			}).resumeInterruptedVerifications();
 
@@ -741,6 +736,55 @@ describe("spawnTracked timeout cleanup", () => {
 				pid: groupId, pidNonce: nonce, sentinelFile,
 			})).rejects.toThrow(/no longer matches its original exact process identity/i);
 			expect(killCalls, "a mismatched live sentinel PID must not authorize any process-group signal").toEqual([]);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects same-second Darwin PID reuse when the process-held nonce differs", async () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-darwin-same-second-reuse-"));
+		const sentinelFile = path.join(stateDir, "sentinel.json");
+		const groupId = 234_567;
+		const nonce = "darwin-original-128-bit-nonce";
+		const startToken = "Sun Aug  2 19:39:25 2026";
+		const killCalls: number[] = [];
+		try {
+			fs.writeFileSync(sentinelFile, JSON.stringify({ pid: process.pid, pgid: groupId, nonce, startTokenKind: "darwin-lstart-argv-nonce", startToken }));
+			const harness = makeRecoveryHarness(stateDir, [], {
+				platform: "darwin",
+				posixProcessIdentityInspector: () => ({ startTokenKind: "darwin-lstart-argv-nonce", startToken, pgid: groupId, sentinelNonce: "darwin-reused-128-bit-nonce" }),
+				persistedTreeKiller: pid => { killCalls.push(pid); return "signalled"; },
+			});
+			await expect((harness as any)._reapRecoveredPosixSentinel({
+				name: "Darwin same-second reused sentinel", type: "command", status: "running", startedAt: Date.now(),
+				pid: groupId, pidNonce: nonce, sentinelFile,
+			})).rejects.toThrow(/no longer matches its original exact process identity/i);
+			expect(killCalls, "same-second lstart equality without the live nonce must not authorize a group signal").toEqual([]);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	it("authorizes a Darwin sentinel only when lstart and its live nonce match", async () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-darwin-exact-sentinel-"));
+		const sentinelFile = path.join(stateDir, "sentinel.json");
+		const groupId = 234_568;
+		const nonce = "darwin-exact-128-bit-nonce";
+		const startToken = "Sun Aug  2 19:39:25 2026";
+		const killCalls: number[] = [];
+		try {
+			fs.writeFileSync(sentinelFile, JSON.stringify({ pid: process.pid, pgid: groupId, nonce, startTokenKind: "darwin-lstart-argv-nonce", startToken }));
+			const harness = makeRecoveryHarness(stateDir, [], {
+				platform: "darwin",
+				posixProcessIdentityInspector: () => ({ startTokenKind: "darwin-lstart-argv-nonce", startToken, pgid: groupId, sentinelNonce: nonce }),
+				persistedTreeKiller: pid => { killCalls.push(pid); return "signalled"; },
+			});
+			(harness as any)._waitForPidToExit = async () => true;
+			await expect((harness as any)._reapRecoveredPosixSentinel({
+				name: "Exact Darwin sentinel", type: "command", status: "running", startedAt: Date.now(),
+				pid: groupId, pidNonce: nonce, sentinelFile,
+			})).resolves.toBeUndefined();
+			expect(killCalls).toEqual([groupId]);
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
 		}
@@ -1170,11 +1214,11 @@ test("PID-reused container sentinel never authorizes a negative-PGID signal", as
 		const harness = makeHarness(stateDir);
 		(harness as any)._dockerExecCapture = async (containerId: string, command: string) => {
 			assert.equal(containerId, CONTAINER_ID);
-			if (/kill\s+-(?:TERM|KILL)\s+--\s+-\$?\w+/.test(command)) {
+			if (/kill\s+-(?:TERM|KILL)\s+-"?\$?\w+/.test(command)) {
 				// Record the resolved destructive target rather than the shell
 				// variable used by the transport script, making the RED diagnostic
 				// independent of shell formatting.
-				signalAttempts.push(`kill -TERM -- -${SENTINEL_PID}`);
+				signalAttempts.push(`kill -TERM -${SENTINEL_PID}`);
 			}
 			// The unsafe historical recovery implementation reaches this response
 			// after finding no exit file, then attempts to signal -321654. The fixed
@@ -1245,8 +1289,8 @@ test("PID-reused container sentinel never authorizes a negative-PGID signal", as
 test("container escalation revalidates the exact witness before TERM and KILL without a timing gap", async () => {
 	const source = fs.readFileSync(new URL("../../src/server/agent/verification-harness.ts", import.meta.url), "utf8");
 	const method = source.slice(source.indexOf("private async _killAndVerifyRecoveredContainerProcessGroup"), source.indexOf("private async _resumeContainerCommandStep"));
-	const term = method.indexOf('kill -TERM -- "-$pgid"');
-	const kill = method.indexOf('kill -KILL -- "-$pgid"');
+	const term = method.indexOf('kill -TERM -"$pgid"');
+	const kill = method.indexOf('kill -KILL -"$pgid"');
 	expect(term).toBeGreaterThan(-1);
 	expect(kill).toBeGreaterThan(term);
 	expect(method.slice(0, term).match(/\$\{verify\}/g)?.length).toBe(1);

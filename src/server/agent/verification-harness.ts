@@ -36,29 +36,59 @@ function isPendingCommandCleanupError(err: unknown): err is PendingCommandCleanu
 	return err instanceof PendingCommandCleanupError || (err as any)?.name === "PendingCommandCleanupError";
 }
 
-interface PosixProcessIdentity {
-	/** Typed so unlike (or coarse) identity sources cannot be compared. */
-	startTokenKind: "linux-proc-stat-22";
-	startToken: string;
-	pgid: number;
+type PosixProcessIdentity =
+	| {
+		/** Linux `/proc/<pid>/stat` field 22 is stable for one incarnation. */
+		startTokenKind: "linux-proc-stat-22";
+		startToken: string;
+		pgid: number;
+	}
+	| {
+		/**
+		 * Darwin's `lstart` is only second-granular, so it is authority only when
+		 * paired with the unguessable nonce held in the live sentinel's argv.
+		 */
+		startTokenKind: "darwin-lstart-argv-nonce";
+		startToken: string;
+		pgid: number;
+		sentinelNonce: string;
+	};
+
+function inspectProcessGroupId(pid: number): number | undefined {
+	try {
+		const pgid = Number(execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], {
+			encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+		}).trim());
+		return Number.isSafeInteger(pgid) && pgid > 0 ? pgid : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 /**
- * Return exact host ownership evidence only. `/proc/<pid>/stat` field 22 is a
- * kernel process-incarnation token on Linux. Do not substitute `ps lstart` on
- * Darwin: it is only second-granular and can authorize a reused PID/PGID.
+ * Return exact host ownership evidence only. Linux uses the kernel's start
+ * tick. Node has no libproc binding, so Darwin pairs `lstart` with an
+ * unguessable nonce held by the live sentinel in argv; `lstart` alone is never
+ * accepted because same-second PID reuse can otherwise authorize another tree.
  */
 function inspectPosixProcessIdentity(pid: number): PosixProcessIdentity | undefined {
-	if (process.platform !== "linux") return undefined;
-	const startToken = readProcessStartToken(pid);
-	if (!startToken) return undefined;
+	if (process.platform === "linux") {
+		const startToken = readProcessStartToken(pid);
+		const pgid = startToken ? inspectProcessGroupId(pid) : undefined;
+		return startToken && pgid ? { startTokenKind: "linux-proc-stat-22", startToken, pgid } : undefined;
+	}
+	if (process.platform !== "darwin") return undefined;
 	try {
-		const output = execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], {
-			encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+		const startToken = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+			encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, LC_ALL: "C" },
 		}).trim();
-		const pgid = Number(output);
-		return Number.isSafeInteger(pgid) && pgid > 0
-			? { startTokenKind: "linux-proc-stat-22", startToken, pgid }
+		const command = execFileSync("ps", ["-ww", "-o", "command=", "-p", String(pid)], {
+			encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+		});
+		const sentinelNonce = /(?:^|\s)bobbit-posix-sentinel:([^\s]+)/.exec(command)?.[1];
+		const pgid = startToken && sentinelNonce ? inspectProcessGroupId(pid) : undefined;
+		return startToken && sentinelNonce && pgid
+			? { startTokenKind: "darwin-lstart-argv-nonce", startToken, pgid, sentinelNonce }
 			: undefined;
 	} catch {
 		return undefined;
@@ -2929,8 +2959,9 @@ export class VerificationHarness {
 		// can be stamped into active state. That closes the spawn→state-persist
 		// crash window: use this record's PGID when `step.pid` is absent, but when
 		// a persisted group exists it must agree exactly with the sentinel record.
-		if (!Number.isFinite(sentinelPid) || sentinelPid <= 0 || !Number.isFinite(recordedGroupId) || recordedGroupId <= 0 || record.nonce !== expectedNonce || record.startTokenKind !== "linux-proc-stat-22" || typeof record.startToken !== "string" || !record.startToken) {
-			return pending("Recovered command sentinel has no typed kernel-stable identity; refusing legacy or coarse recovery evidence.");
+		const supportedStartTokenKind = record.startTokenKind === "linux-proc-stat-22" || record.startTokenKind === "darwin-lstart-argv-nonce";
+		if (!Number.isFinite(sentinelPid) || sentinelPid <= 0 || !Number.isFinite(recordedGroupId) || recordedGroupId <= 0 || record.nonce !== expectedNonce || !supportedStartTokenKind || typeof record.startToken !== "string" || !record.startToken) {
+			return pending("Recovered command sentinel has no typed exact identity; refusing legacy or coarse recovery evidence.");
 		}
 		// Check group metadata only after typed identity evidence has passed, so a
 		// test (and recovery diagnostic) cannot mistake legacy-token rejection for
@@ -2945,7 +2976,9 @@ export class VerificationHarness {
 		}
 
 		const current = this.posixProcessIdentityInspector(sentinelPid);
-		if (!current || current.startTokenKind !== record.startTokenKind || current.startToken !== record.startToken || current.pgid !== groupId) {
+		const darwinNonceMatches = record.startTokenKind !== "darwin-lstart-argv-nonce" ||
+			(current?.startTokenKind === "darwin-lstart-argv-nonce" && current.sentinelNonce === expectedNonce);
+		if (!current || current.startTokenKind !== record.startTokenKind || current.startToken !== record.startToken || current.pgid !== groupId || !darwinNonceMatches) {
 			return pending("Recovered POSIX sentinel no longer matches its original exact process identity; refusing to target its group.");
 		}
 		// The record is published by the separately-invoked sentinel after it has
@@ -5412,6 +5445,21 @@ export class VerificationHarness {
 	): Promise<{ passed: boolean; output: string; diagnostics?: GateStepDiagnostics }> {
 		return new Promise((resolve) => {
 			const normalizedCwd = cwd.replace(/\\/g, "/");
+			// Container aliases and short IDs are transport selectors, not durable
+			// ownership evidence. Canonicalize to Docker's immutable full ID before
+			// publishing the in-container witness and active verification state.
+			if (containerId && streamCtx) {
+				try {
+					const canonicalContainerId = execFileSync("docker", ["inspect", "--format={{.Id}}", containerId], {
+						encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+					}).trim();
+					if (!/^[a-f0-9]{64}$/i.test(canonicalContainerId)) throw new Error("Docker returned no full container ID");
+					containerId = canonicalContainerId;
+				} catch (error) {
+					resolve({ passed: false, output: `Container exact identity could not be established before spawn: ${(error as Error).message}` });
+					return;
+				}
+			}
 			// Shell selection: default to plain bash (fast), use --login only for
 			// commands that need the full interactive PATH (npm, pytest, gh, etc.).
 			const { shell: shellBin, args: shellArgs } = getVerificationShell(command);
@@ -6594,7 +6642,9 @@ export class VerificationHarness {
 		// sleep/polling interval between them: identity loss after TERM aborts
 		// rather than allowing SIGKILL to name a recycled PGID.
 		const verify = `live_p=$(awk '{print $1}' "/proc/$p/stat" 2>/dev/null || true); live_g=$(awk '{print $5}' "/proc/$p/stat" 2>/dev/null || true); live_s=$(awk '{print $22}' "/proc/$p/stat" 2>/dev/null || true); [ "$live_p" = "$p" ] || { echo BOBBIT_CONTAINER_WITNESS_STALE; exit 64; }; [ "$live_g" = "$pgid" ] || { echo BOBBIT_CONTAINER_WITNESS_PGID_MISMATCH; exit 65; }; [ "$live_s" = ${start} ] || { echo BOBBIT_CONTAINER_WITNESS_START_TOKEN_MISMATCH; exit 66; };`;
-		const script = `p=${p}; pgid=${pgid}; ${verify} kill -TERM -- "-$pgid" 2>/dev/null || { echo BOBBIT_CONTAINER_TERM_UNDELIVERED; exit 67; }; ${verify} kill -KILL -- "-$pgid" 2>/dev/null || { echo BOBBIT_CONTAINER_KILL_UNDELIVERED; exit 68; };`;
+		// dash accepts the negative process-group operand directly; placing `--`
+		// before a quoted negative number is not portable across container shells.
+		const script = `p=${p}; pgid=${pgid}; ${verify} kill -TERM -"$pgid" 2>/dev/null || { echo BOBBIT_CONTAINER_TERM_UNDELIVERED; exit 67; }; ${verify} kill -KILL -"$pgid" 2>/dev/null || { echo BOBBIT_CONTAINER_KILL_UNDELIVERED; exit 68; };`;
 		const result = await this._dockerExecCapture(step.containerId!, script);
 		if (result.code === 0) {
 			step.containerPayloadCleanupCompletedAt = Date.now();

@@ -257,8 +257,8 @@ test("persisted container cancellation kills and verifies its payload before rea
 		assert.equal(containerId, "container-cancel-only");
 		assert.match(script, /live_p=\$\(awk '\{print \$1\}'/);
 		assert.equal((script.match(/live_p=\$\(awk '\{print \$1\}'/g) ?? []).length, 2, "exact tuple must be checked before TERM and again before KILL");
-		assert.match(script, /kill -TERM -- "-\$pgid"[\s\S]*live_p=\$\(awk '\{print \$1\}'[\s\S]*kill -KILL -- "-\$pgid"/);
-		assert.doesNotMatch(script, /kill -0 -- "-\$pgid"/, "never post-probe a historical PGID after final signal");
+		assert.match(script, /kill -TERM -"\$pgid"[\s\S]*live_p=\$\(awk '\{print \$1\}'[\s\S]*kill -KILL -"\$pgid"/);
+		assert.doesNotMatch(script, /kill -0 -"\$pgid"/, "never post-probe a historical PGID after final signal");
 		assert.doesNotMatch(script, /docker (?:stop|kill)|killall|pkill/);
 		return { code: 0, stdout: "" }; // no live group remains after the exact-group probe
 	};
@@ -292,8 +292,8 @@ test("terminal recovered container exit proves no live payload group before host
 		events.push("payload-no-live-group");
 		assert.match(script, /live_g=\$\(awk '\{print \$5\}'/);
 		assert.equal((script.match(/live_g=\$\(awk '\{print \$5\}'/g) ?? []).length, 2, "exact PGID must be checked before both destructive signals");
-		assert.match(script, /kill -TERM -- "-\$pgid"[\s\S]*live_g=\$\(awk '\{print \$5\}'[\s\S]*kill -KILL -- "-\$pgid"/);
-		assert.doesNotMatch(script, /kill -0 -- "-\$pgid"/, "never post-probe a historical PGID after final signal");
+		assert.match(script, /kill -TERM -"\$pgid"[\s\S]*live_g=\$\(awk '\{print \$5\}'[\s\S]*kill -KILL -"\$pgid"/);
+		assert.doesNotMatch(script, /kill -0 -"\$pgid"/, "never post-probe a historical PGID after final signal");
 		return { code: 0, stdout: "" };
 	};
 	(harness as any)._reapRecoveredPosixSentinel = async () => { events.push("sentinel"); };
@@ -327,7 +327,7 @@ test("Windows persisted container cancellation cannot complete through the POSIX
 	(harness as any)._dockerExecCapture = async (containerId: string, script: string) => {
 		events.push("payload");
 		assert.equal(containerId, "container-windows-only");
-		assert.match(script, /kill -TERM -- "-\$pgid"/);
+		assert.match(script, /kill -TERM -"\$pgid"/);
 		return { code: 0, stdout: "" };
 	};
 	// The production POSIX reaper is intentionally a Windows no-op. This seam
