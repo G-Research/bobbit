@@ -39,17 +39,32 @@ this lease.
 
 Flows expire after five minutes. Cancellation aborts Pi's interaction and is provider-scoped.
 Before a code is submitted, cancellation immediately releases the flow. If Pi is already
-exchanging a submitted code, Bobbit retains the flow and callback-port lease until that exchange
-settles. This prevents a retry from racing the prior exchange, and prevents a cancelled flow from
-leaving its own credential behind.
+exchanging a submitted code, or can be exchanging through its loopback callback, Bobbit retains
+the flow and callback-port lease until that exchange settles. This makes `409 ANTHROPIC_OAUTH_BUSY`
+a useful retry signal rather than permitting a second login to race the first.
 
-## Credential storage and status
+A completed flow is retained for a short acknowledgement window. If the success response was
+lost, an explicit cancellation can still remove exactly the credential that flow issued. Bobbit
+first fences that result, then restores only the safe predecessor: a credential written by a newer
+login, refresh, or explicit logout is never overwritten. If durable cleanup fails, cancellation
+returns retryable `OAUTH_CANCEL_RETRY_REQUIRED` and the flow stays blocked until that same
+cancellation is retried. Logout is terminal for every in-flight login and prevents a late result
+from restoring a logged-out credential.
+
+## Credential storage, locking, and status
 
 Pi reads and writes the gateway's agent `auth.json` through Bobbit's `AtomicCredentialStore`.
-The adapter uses Pi's lock namespace, fresh reads, atomic replacement, restrictive file modes
-where supported, and stale-lock reclamation that verifies lock ownership before removal. Those
-properties preserve rotating credentials across concurrent gateway activity and gateway restart
-without inventing a second credential store.
+The adapter uses Pi's canonical, realpath-resolved `auth.json.lock` namespace, fresh reads, atomic
+replacement, and restrictive file modes where supported. It holds the shared lock through a
+refresh callback so a competing Pi process re-reads a rotated winner rather than spending the
+same refresh token.
+
+The lock is heartbeated before Pi's synchronous stale deadline and honors Pi's longer asynchronous
+lease before recovery. A contender may reclaim only an unchanged stale lock: it atomically claims
+the observed directory, rechecks its identity and lease, and never removes a replacement or a
+renewed owner. A releasing owner applies the same identity check; losing ownership is a failure,
+not a successful credential write. These rules preserve rotating credentials across concurrent
+gateway activity and restart without inventing a second credential store.
 
 Credentials are partitioned by provider. Anthropic state cannot be read, cancelled, logged out,
 or reported through another provider's flow id. `GET /api/oauth/status` returns only provider,
@@ -60,15 +75,40 @@ A valid Anthropic OAuth entry must contain an OAuth access token, refresh token,
 expiry. Incomplete rows are unauthenticated. A complete expired row is reported as
 `authenticated: false`, even when it remains stored and has a refresh token (`stored: true`,
 `refreshable: true`). Pi validates that refresh candidate lazily before use; it is not a currently
-usable login until that refresh succeeds. On a definitive refresh rejection (HTTP 400, 401, or
-403), Bobbit clears only the exact credential snapshot Pi attempted. Network, 5xx, and 429
-failures retain it so a transient outage does not sign the user out. A direct Anthropic request
-that definitively rejects the specific OAuth access credential likewise removes only that matching
-entry, so status never continues to claim that rejected credential works.
+usable login until that refresh succeeds.
 
-Logout deletes only `auth.json["anthropic"]` and clears the OAuth cache. It does not revoke or
-modify OAuth/API-key credentials for OpenAI or Google; Anthropic has no separate revocation call
-in this lifecycle.
+## Rejected OAuth credentials and API-key recovery
+
+A credential is terminally rejected only on evidence that identifies the credential rather than a
+model or quota outcome: Pi's refresh `401`, or its token-endpoint `400 invalid_grant`; direct
+Anthropic Messages paths treat only `401` for the exact OAuth access value as terminal. Network,
+5xx, `429`, generic `400`, and direct `403` failures retain the credential because they can be
+transient or resource-specific.
+
+On a terminal rejection, Bobbit compares the credential that was used under the credential lock.
+If it is still current, it replaces the provider row with a non-secret `oauth_rejected` tombstone
+and writes a provider-scoped durable fence containing only a one-way access-value fingerprint.
+Neither the access token nor refresh token remains in the tombstone or fence. The raw tombstone
+also stops another Pi host that reads `auth.json` directly from trying to refresh the rejected
+credential. A failed fence write remains fail-closed in the running gateway; a corrupt fence
+fails closed only for its own provider.
+
+A tombstone reports `authenticated: false`, `stored: true`, `rejected: true`, and
+`refreshable: false`. It is therefore visible for provider-scoped logout/cleanup but can never
+look like a working account after restart. Rejections compare exact credentials, so an in-flight
+failure cannot erase a newly logged-in or rotated replacement.
+
+Anthropic API-key authentication remains independent. Saving an explicit Anthropic provider key
+removes only a rejected OAuth tombstone, never a healthy OAuth or API-key row. When an
+Anthropic agent is started with an explicit injected key, or with an ambient key for an Anthropic
+runtime, Bobbit also makes the same best-effort tombstone cleanup before Pi starts; this lets Pi
+use the API-key fallback, which it otherwise suppresses for an unknown raw credential type.
+Saved provider keys and supported API-key environment paths can therefore recover service after a
+rejected OAuth login without reviving renewable OAuth authority.
+
+Logout deletes only the Anthropic OAuth row or rejection tombstone and clears the OAuth cache. It
+does not revoke or modify OAuth/API-key credentials for OpenAI or Google; Anthropic has no
+separate revocation call in this lifecycle.
 
 ## Direct Anthropic requests and sandboxes
 
@@ -77,9 +117,6 @@ access through the same Pi-backed refresh path. Their OAuth request identity is 
 the direct-request helper and tracks Pi's current Claude Code identity. API-key requests retain
 Anthropic's API-key headers and never inherit OAuth-only identity headers. This avoids drift
 between direct paths without treating request identity as an explanation of a model outcome.
-
-API-key authentication remains independent: configured provider keys and supported API-key
-environment paths continue to work without an OAuth credential.
 
 A Docker sandbox does not receive renewable host Anthropic authority by default. A project must
 explicitly opt in to a current OAuth access-token handoff, and Bobbit refreshes it on the gateway
