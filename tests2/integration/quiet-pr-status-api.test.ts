@@ -1,10 +1,15 @@
+import { join } from "node:path";
+import { awaitableRm } from "../../tests/e2e/test-utils/cleanup.js";
+import { copyGitTemplate } from "../harness/git-template.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, nonGitCwd } from "./_e2e/e2e-setup.js";
 
 type QuietPrGoal = { id: string; branch: string; cwd: string; worktreePath: string; projectId?: string };
 
 async function cleanupGoal(goal: QuietPrGoal | undefined): Promise<void> {
-	if (goal) await deleteGoal(goal.id).catch(() => {});
+	if (!goal) return;
+	await deleteGoal(goal.id).catch(() => {});
+	await awaitableRm(goal.cwd, { maxAttempts: 5, backoffMs: 50 });
 }
 
 async function expectEmptyNoContent(resp: Response, label: string): Promise<void> {
@@ -12,14 +17,21 @@ async function expectEmptyNoContent(resp: Response, label: string): Promise<void
 	expect(await resp.text(), `${label} 204 response must have no body`).toBe("");
 }
 
-async function createGoalWithNoPrBranch(gateway: any): Promise<QuietPrGoal> {
-	const cwd = nonGitCwd();
+async function createGoalWithUnsupportedPrRemote(gateway: any): Promise<QuietPrGoal> {
+	// Use a real local-only repository so coordinated cwd preflight succeeds but
+	// PR identity resolution remains ineligible without ever invoking GitHub.
+	// A non-Git cwd would intentionally fall back to the gateway repository and
+	// make this fixture depend on the gateway branch's real PR state.
+	const cwd = copyGitTemplate(join(
+		nonGitCwd(),
+		`bobbit-quiet-pr-status-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+	));
 	const goal = await createGoal({
-		title: `quiet pr-status no-pr ${Date.now()}`,
+		title: `quiet pr-status unsupported-remote ${Date.now()}`,
 		cwd,
 		worktree: false,
 		autoStartTeam: false,
-		spec: "Route fixture for quiet optional PR status probes with no matching GitHub PR.",
+		spec: "Route fixture for quiet optional PR probes with an ineligible local-only remote.",
 	});
 	const branch = "feature/no-pr";
 	const projectId = typeof goal.projectId === "string" ? goal.projectId : undefined;
@@ -32,18 +44,18 @@ async function createGoalWithNoPrBranch(gateway: any): Promise<QuietPrGoal> {
 }
 
 test.describe("quiet optional PR status probes", () => {
-	test("keeps bare session PR absence as 404 but returns empty 204 in optional mode", async ({ gateway }) => {
+	test("keeps an ineligible session PR target as bare 404 and optional 204", async ({ gateway }) => {
 		let goal: QuietPrGoal | undefined;
 		let sessionId: string | undefined;
 		try {
-			goal = await createGoalWithNoPrBranch(gateway);
+			goal = await createGoalWithUnsupportedPrRemote(gateway);
 			sessionId = await createSession({ goalId: goal.id, cwd: goal.cwd, projectId: goal.projectId });
 
 			const bareResp = await apiFetch(`/api/sessions/${sessionId}/pr-status`);
-			expect(bareResp.status, "bare session PR-status absence should remain 404").toBe(404);
+			expect(bareResp.status, "ineligible bare session PR target should remain 404").toBe(404);
 
 			const optionalResp = await apiFetch(`/api/sessions/${sessionId}/pr-status?optional=1`);
-			await expectEmptyNoContent(optionalResp, "quiet optional session PR-status absence");
+			await expectEmptyNoContent(optionalResp, "ineligible optional session PR target");
 		} finally {
 			if (sessionId) await deleteSession(sessionId);
 			await cleanupGoal(goal);
@@ -55,15 +67,15 @@ test.describe("quiet optional PR status probes", () => {
 		expect(resp.status, "missing session should remain 404 even for quiet PR-status probes").toBe(404);
 	});
 
-	test("keeps bare goal PR absence as 404 but returns empty 204 in optional mode", async ({ gateway }) => {
+	test("keeps an ineligible goal PR target as bare 404 and optional 204", async ({ gateway }) => {
 		let goal: QuietPrGoal | undefined;
 		try {
-			goal = await createGoalWithNoPrBranch(gateway);
+			goal = await createGoalWithUnsupportedPrRemote(gateway);
 			const bareResp = await apiFetch(`/api/goals/${goal.id}/pr-status`);
-			expect(bareResp.status, "bare goal PR-status absence should remain 404").toBe(404);
+			expect(bareResp.status, "ineligible bare goal PR target should remain 404").toBe(404);
 
 			const optionalResp = await apiFetch(`/api/goals/${goal.id}/pr-status?optional=1`);
-			await expectEmptyNoContent(optionalResp, "quiet optional goal PR-status absence");
+			await expectEmptyNoContent(optionalResp, "ineligible optional goal PR target");
 		} finally {
 			await cleanupGoal(goal);
 		}
