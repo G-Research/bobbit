@@ -440,8 +440,24 @@ function forgedInnerSentinelExitCommand(
   return `${prepareHold}__bobbit_sentinel=$PPID; test -r "/proc/$__bobbit_sentinel/fd/1" || { printf 'ADVERSARY_SENTINEL_FD_UNAVAILABLE:${label}\\n' >&2; exit 97; }; printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; printf 'ADVERSARY_VALID_INNER_EXIT_FORGERY:${label}:SENTINEL=%s\\n' "$__bobbit_sentinel" >&2; printf 'BOBBIT_INNER_EXIT 0\\n' > "/proc/$__bobbit_sentinel/fd/1"; ${afterForgery}`;
 }
 
+function honestExitCommand(label: string, code: number): string {
+  return `printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; printf 'HONEST_EXIT_${code}:${label}\\n' >&2; exit ${code}`;
+}
+
 function honestExit125Command(label: string): string {
-  return `printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; printf 'HONEST_EXIT_125:${label}\\n' >&2; exit 125`;
+  return honestExitCommand(label, 125);
+}
+
+/** B's command has hostile `docker top`-looking CR/LF rows and copied A identity. */
+function structuredTopAbuseCommand(
+  label: string,
+  termFile: string,
+  controlFifo: string,
+  copiedTag: string,
+  copiedNonce: string,
+): string {
+  const syntheticRows = `\r\n77771 1 77771 bobbit-container-sentinel:${copiedTag}:77771:77771:77771\r\n77772 77771 77771 nonce=${copiedNonce}`;
+  return `: '${syntheticRows}'; ${preReleaseTransportForgeryCommand(label, termFile, controlFifo)}`;
 }
 
 /**
@@ -570,7 +586,30 @@ function releaseFifo(containerId: string, label: string): void {
 
 function assertStepCleaned(containerId: string, step: RunningStep): void {
   assertContainerGone(containerId, step.payloadPid);
+  assertContainerGone(containerId, step.witness.sentinelPid);
+  assertContainerGroupGone(containerId, step.witness.pgid);
   assertHostGone(step.hostPid);
+}
+
+function assertContainerGroupGone(containerId: string, pgid: number): void {
+  const members = docker([
+    "exec",
+    containerId,
+    "/bin/sh",
+    "-c",
+    `for f in /proc/[0-9]*/stat; do awk -v g=${pgid} '$5 == g && $3 != "Z" { print $1 }' "$f" 2>/dev/null; done`,
+  ])
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(Number);
+  expect(members, `container process group ${pgid} must be gone`).toEqual([]);
+}
+
+function containerProcessCount(containerId: string): number {
+  return docker(["top", containerId, "-eo", "pid"])
+    .split(/\r?\n/)
+    .slice(1)
+    .filter((line) => /^\s*\d+\s*$/.test(line)).length;
 }
 
 function assertHostGone(pid: number): void {
@@ -804,6 +843,86 @@ function waitForActiveRemoval(
     (entry) => !entry,
     `restart recovery did not settle ${signalId}`,
   ).then(() => undefined);
+}
+
+async function waitForHostResultBeforePayloadCleanup(
+  statePath: string,
+  signalId: string,
+): Promise<any> {
+  return waitForActiveVerification(
+    statePath,
+    signalId,
+    (entry) => {
+      const step = entry?.steps?.[0];
+      if (
+        !step?.containerCompletionFile ||
+        !step?.containerCompletionNonce ||
+        step.containerPayloadCleanupCompletedAt ||
+        !step.containerPayloadCleanupPending
+      )
+        return false;
+      try {
+        const result = JSON.parse(
+          readFileSync(step.containerCompletionFile, "utf8"),
+        );
+        return (
+          result.nonce === step.containerCompletionNonce &&
+          Number.isSafeInteger(result.exitCode)
+        );
+      } catch {
+        return false;
+      }
+    },
+    `host docker-exec result did not precede payload cleanup for ${signalId}`,
+  );
+}
+
+function waitForRecoveredRemovalAfterPayloadCleanup(
+  statePath: string,
+  signalId: string,
+): Promise<void> {
+  return new Promise((resolveRecovered, rejectRecovered) => {
+    let observedCleanup = false;
+    let watcher: ReturnType<typeof watch> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (error?: Error) => {
+      watcher?.close();
+      if (timer) clearTimeout(timer);
+      if (error) rejectRecovered(error);
+      else resolveRecovered();
+    };
+    const observe = () => {
+      try {
+        const entry = readActiveVerification(statePath, signalId);
+        if (entry?.steps?.[0]?.containerPayloadCleanupCompletedAt)
+          observedCleanup = true;
+        if (!entry) {
+          finish(
+            observedCleanup
+              ? undefined
+              : new Error(
+                  `recovered terminal removal preceded exact payload cleanup for ${signalId}`,
+                ),
+          );
+        }
+      } catch (error) {
+        finish(error as Error);
+      }
+    };
+    watcher = watch(resolve(statePath, ".."), (_event, file) => {
+      if (file === "active-verifications.json") observe();
+    });
+    timer = setTimeout(
+      () =>
+        finish(
+          new Error(
+            `recovery did not terminally settle ${signalId} after cleanup`,
+          ),
+        ),
+      120_000,
+    );
+    observe();
+  });
 }
 
 async function createContainerFixture(
@@ -1383,6 +1502,41 @@ test("container command verification owns only its exact payload and docker-exec
     assertStepCleaned(containerId, largeOutputStep);
     viewer.close();
     viewer = undefined;
+
+    const stableProcessCount = containerProcessCount(containerId);
+    for (const label of [
+      "fast-natural-1",
+      "fast-natural-2",
+      "fast-natural-3",
+      "fast-natural-4",
+    ]) {
+      const goal = await createCommandGoal(gateway, projectId, {
+        title: label,
+        gateId: "natural",
+        run: normalCommand(label),
+        timeout: 30,
+      });
+      viewer = await connectViewer(gateway, goal);
+      const from = viewer.mark();
+      const step = await startStep(
+        viewer,
+        gateway,
+        goal,
+        "natural",
+        label,
+        containerId,
+      );
+      releaseFifo(containerId, label);
+      const done = await viewer.waitFrom(from, completionEvent(step.signalId));
+      expect(done.status, `${label} terminal status`).toBe("passed");
+      assertStepCleaned(containerId, step);
+      expect(
+        containerProcessCount(containerId),
+        `${label} must not retain a sentinel or process group`,
+      ).toBe(stableProcessCount);
+      viewer.close();
+      viewer = undefined;
+    }
   } finally {
     killContainerProcess(fixture, siblingPid);
     viewer?.close();
@@ -1629,6 +1783,43 @@ test("honest payload exit 125 is terminal only after payload and transport clean
     viewer.close();
     viewer = undefined;
 
+    const ordinaryGoal = await createCommandGoal(
+      fixture.gateway,
+      fixture.projectId,
+      {
+        title: "honest-23-failed",
+        gateId: "ordinary",
+        run: honestExitCommand("honest-23-failed", 23),
+        timeout: 30,
+      },
+    );
+    viewer = await connectViewer(fixture.gateway, ordinaryGoal);
+    const ordinaryFrom = viewer.mark();
+    const ordinary = await startStep(
+      viewer,
+      fixture.gateway,
+      ordinaryGoal,
+      "ordinary",
+      "honest-23-failed",
+      fixture.containerId,
+    );
+    const ordinaryStep = await viewer.waitFrom(
+      ordinaryFrom,
+      stepCompletionEvent(ordinary.signalId),
+    );
+    expect(ordinaryStep.status, "honest exit 23 is a failed verdict").toBe(
+      "failed",
+    );
+    expect(ordinaryStep.output).toContain("HONEST_EXIT_23:honest-23-failed");
+    assertStepCleaned(fixture.containerId, ordinary);
+    assertContainerAlive(
+      fixture.containerId,
+      sibling.pid,
+      "sibling after honest exit 23",
+    );
+    viewer.close();
+    viewer = undefined;
+
     const expectedGoal = await createCommandGoal(
       fixture.gateway,
       fixture.projectId,
@@ -1669,6 +1860,81 @@ test("honest payload exit 125 is terminal only after payload and transport clean
     viewer?.close();
     killContainerProcess(fixture, sibling?.pid);
     await disposeFixture(fixture);
+  }
+});
+
+test("recovery cleans an exact exited sentinel group before publishing its host result", async () => {
+  requireDockerPrerequisites();
+  test.setTimeout(300_000);
+  let fixture: ContainerFixture | undefined;
+  let gateway: Gateway | undefined;
+  let viewer: Viewer | undefined;
+  try {
+    fixture = await createContainerFixture("result-crash-window");
+    gateway = fixture.gateway;
+    const goalId = await createCommandGoal(gateway, fixture.projectId, {
+      title: "result-crash-window",
+      gateId: "result",
+      run: normalCommand("result-crash-window"),
+      timeout: 30,
+    });
+    const activePath = join(
+      fixture.root,
+      ".bobbit",
+      "state",
+      "active-verifications.json",
+    );
+    viewer = await connectViewer(gateway, goalId);
+    const from = viewer.mark();
+    const step = await startStep(
+      viewer,
+      gateway,
+      goalId,
+      "result",
+      "result-crash-window",
+      fixture.containerId,
+    );
+    const terminalAfterCleanup = waitForRecoveredRemovalAfterPayloadCleanup(
+      activePath,
+      step.signalId,
+    );
+    releaseFifo(fixture.containerId, "result-crash-window");
+    const hostResultBeforeCleanup = await waitForHostResultBeforePayloadCleanup(
+      activePath,
+      step.signalId,
+    );
+    expect(hostResultBeforeCleanup.steps[0].containerOwnershipWitness).toEqual(
+      step.witness,
+    );
+    expect(
+      viewer.messages.slice(from).some(completionEvent(step.signalId)),
+      "the live gateway must not publish a terminal event while exact cleanup is pending",
+    ).toBe(false);
+    viewer.close();
+    viewer = undefined;
+    await crashGateway(gateway);
+    gateway = await startGateway(fixture.root, gateway.port);
+    await terminalAfterCleanup;
+    assertStepCleaned(fixture.containerId, step);
+    const signalsResponse = await api(
+      gateway,
+      `/api/goals/${goalId}/gates/result/signals`,
+    );
+    await expectResponseStatus(signalsResponse, 200);
+    const recoveredSignal = (await signalsResponse.json()).signals.find(
+      (signal: any) => signal.id === step.signalId,
+    );
+    expect(
+      recoveredSignal?.verification?.status,
+      "recovered terminal publication follows the durably observed exact cleanup",
+    ).toBe("passed");
+  } finally {
+    viewer?.close();
+    await stopGateway(gateway);
+    if (fixture) {
+      cleanupDockerProject(fixture.projectId);
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -1788,6 +2054,141 @@ test("a copied daemon tag on B's non-descendant cannot replace A's cancelled own
     viewerA?.close();
     viewerB?.close();
     killContainerProcess(fixture, replacementPid);
+    killContainerProcess(fixture, b?.payloadPid);
+    await disposeFixture(fixture);
+  }
+});
+
+test("structured docker-top row injection cannot substitute concurrent ownership", async () => {
+  requireDockerPrerequisites();
+  test.setTimeout(300_000);
+  let fixture: ContainerFixture | undefined;
+  let viewerA: Viewer | undefined;
+  let viewerB: Viewer | undefined;
+  let sibling: ContainerIdentity | undefined;
+  let a: RunningStep | undefined;
+  let b: RunningStep | undefined;
+  try {
+    fixture = await createContainerFixture("structured-top");
+    sibling = startSameUidSibling(
+      fixture.containerId,
+      "structured-top-sibling",
+    );
+    const aGoal = await createCommandGoal(fixture.gateway, fixture.projectId, {
+      title: "structured-top-a",
+      gateId: "a",
+      run: blockingCommand("structured-top-a"),
+      timeout: 60,
+    });
+    viewerA = await connectViewer(fixture.gateway, aGoal);
+    a = await startStep(
+      viewerA,
+      fixture.gateway,
+      aGoal,
+      "a",
+      "structured-top-a",
+      fixture.containerId,
+    );
+    const attestedA = await readActiveStep(fixture.gateway, aGoal, a.signalId);
+    const attestationA = attestedA.containerOwnershipAttestation;
+    expect(attestationA).toMatchObject({
+      containerId: a.witness.containerId,
+      nonce: a.witness.nonce,
+      sentinelPid: a.witness.sentinelPid,
+      pgid: a.witness.pgid,
+      startToken: a.witness.startToken,
+    });
+    expect(attestationA.tag).toBeTruthy();
+
+    const controlFifo = `/tmp/bobbit-structured-top-control-${fixture.gateway.port}.fifo`;
+    const bTermFile = `/tmp/bobbit-structured-top-b-${fixture.gateway.port}.term`;
+    const bGoal = await createCommandGoal(fixture.gateway, fixture.projectId, {
+      title: "structured-top-b",
+      gateId: "b",
+      run: structuredTopAbuseCommand(
+        "structured-top-b",
+        bTermFile,
+        controlFifo,
+        attestationA.tag,
+        a.witness.nonce,
+      ),
+      timeout: 60,
+    });
+    viewerB = await connectViewer(fixture.gateway, bGoal);
+    b = await startStep(
+      viewerB,
+      fixture.gateway,
+      bGoal,
+      "b",
+      "structured-top-b",
+      fixture.containerId,
+    );
+    expect(b.witness.nonce).not.toBe(a.witness.nonce);
+    expect(b.witness.pgid).not.toBe(a.witness.pgid);
+    const bFrom = viewerB.mark();
+    docker([
+      "exec",
+      fixture.containerId,
+      "/bin/sh",
+      "-c",
+      `printf '%s %s %s %s %s\\n' ${a.witness.nonce} ${a.witness.containerId} ${b.witness.sentinelPid} ${b.witness.pgid} ${b.witness.startToken} > ${controlFifo}`,
+    ]);
+    await viewerB.waitFrom(
+      bFrom,
+      outputEvent(
+        b.signalId,
+        "ADVERSARY_PRERELEASE_TRANSPORT_FORGERY:structured-top-b",
+      ),
+    );
+
+    const unchangedA = await readActiveStep(fixture.gateway, aGoal, a.signalId);
+    expect(
+      unchangedA.containerOwnershipWitness,
+      "embedded synthetic rows and B's tuple cannot become A's persisted authority",
+    ).toEqual(a.witness);
+    expect(unchangedA.containerOwnershipAttestation).toEqual(attestationA);
+    expect(unchangedA.containerOwnershipWitness).not.toMatchObject({
+      sentinelPid: b.witness.sentinelPid,
+      pgid: b.witness.pgid,
+      startToken: b.witness.startToken,
+    });
+
+    await cancelStep(a, fixture.gateway);
+    assertStepCleaned(fixture.containerId, a);
+    assertNoContainerTermSignal(
+      fixture.containerId,
+      bTermFile,
+      "B group after cancelling structured-top target A",
+    );
+    assertContainerAlive(
+      fixture.containerId,
+      b.payloadPid,
+      "B payload after A cancellation",
+    );
+    assertContainerAlive(
+      fixture.containerId,
+      b.witness.sentinelPid,
+      "B sentinel after A cancellation",
+    );
+    assertHostAlive(b.hostPid);
+    assertContainerAlive(
+      fixture.containerId,
+      sibling.pid,
+      "unrelated sibling after A cancellation",
+    );
+
+    await cancelStep(b, fixture.gateway);
+    assertStepCleaned(fixture.containerId, b);
+    assertContainerAlive(
+      fixture.containerId,
+      sibling.pid,
+      "unrelated sibling after B cleanup",
+    );
+  } finally {
+    viewerA?.close();
+    viewerB?.close();
+    killContainerProcess(fixture, sibling?.pid);
+    killContainerProcess(fixture, a?.payloadPid);
     killContainerProcess(fixture, b?.payloadPid);
     await disposeFixture(fixture);
   }
