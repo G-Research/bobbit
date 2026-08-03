@@ -448,6 +448,48 @@ function assertCorruptProfileRecovery(repo) {
   }
 }
 
+function assertPoisonedStateCannotEscapeDist(repo) {
+  const external = join(dirname(repo), "cache-contract-external-sentinel");
+  const linkedParent = join(repo, "dist", "cache-contract-state-escape");
+  const sentinel = join(external, "stale-output.js");
+  const sentinelBytes = Buffer.from("cache-contract external sentinel must survive\n");
+  const poisonedOutput = relative(repo, join(linkedParent, "stale-output.js"));
+
+  remove(external);
+  mkdirSync(external, { recursive: true });
+  writeFileSync(sentinel, sentinelBytes);
+  try {
+    // The sidecar path is lexically within dist, but its existing parent is a
+    // symlink (or junction) to a location outside the isolated repository.
+    symlinkSync(external, linkedParent, process.platform === "win32" ? "junction" : "dir");
+    const linkStat = lstatSync(linkedParent);
+    assert(linkStat.isSymbolicLink() || (process.platform === "win32" && linkStat.isDirectory()), "failed to create the dist reparse-point fixture");
+
+    // Preserve every required sidecar field and a matching buildinfo fingerprint
+    // so this is structurally valid poisoned state, not malformed-state recovery.
+    const state = JSON.parse(readFileSync(buildProfilePath(repo, BUILD_STATE), "utf8"));
+    assert(Array.isArray(state.outputs), "successful build state lacks an outputs array");
+    assert(!state.outputs.includes(poisonedOutput), "poisoned output unexpectedly overlaps normal state");
+    state.outputs.push(poisonedOutput);
+    writeFileSync(buildProfilePath(repo, BUILD_STATE), `${JSON.stringify(state, null, 2)}\n`);
+
+    runEmitter(repo, { label: "poisoned symlink state recovery" });
+    assert(readFileSync(sentinel).equals(sentinelBytes), "poisoned state deletion escaped dist through a reparse point");
+    assertBuildArtifacts(repo);
+    assertBuildProfiles(repo);
+    const recovered = JSON.parse(readFileSync(buildProfilePath(repo, BUILD_STATE), "utf8"));
+    assert(!recovered.outputs.includes(poisonedOutput), "unsafe state was retained instead of cold-recovering");
+  } finally {
+    // Never recursively remove a link/junction: its target is deliberately
+    // outside the fixture and contains the sentinel asserted above.
+    try { unlinkReparsePoint(linkedParent); }
+    catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    remove(external);
+  }
+}
+
 function assertMutationRecovery(repo) {
   const added = "cache-contract-added";
   const renamed = "cache-contract-renamed";
@@ -541,6 +583,7 @@ function runRepositoryFidelity(repo) {
   assertMutationRecovery(repo);
   assertInputFingerprintInvalidation(repo);
   assertCorruptProfileRecovery(repo);
+  assertPoisonedStateCannotEscapeDist(repo);
   assertInterruptionRecovery(repo);
 
   // Check and build caches remain byte-for-byte independent when interleaved.
