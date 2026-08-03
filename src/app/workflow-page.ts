@@ -972,7 +972,7 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 		nextGates[gateIdx] = nextGate;
 		inst.editGates = nextGates;
 		notifyControlledChange(inst);
-		if (rerender || saveAttempted) renderApp();
+		if (rerender) renderApp();
 	};
 
 	const stepType = step.type || "command";
