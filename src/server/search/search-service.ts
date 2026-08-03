@@ -229,10 +229,13 @@ export class SearchService {
 			});
 			// This listener deliberately remains installed for the worker's entire
 			// lifetime. An unhandled Worker "error" otherwise terminates the gateway.
-			worker.on("error", (err) => {
-				console.warn("[search] worker error:", err);
+			const failStart = (err: unknown): void => {
 				this._handleWorkerFailure(worker, err);
 				reject(new SearchUnavailableError("worker-backoff"));
+			};
+			worker.on("error", (err) => {
+				console.warn("[search] worker error:", err);
+				failStart(err);
 			});
 			worker.on("exit", (code) => {
 				if (this._worker === worker) this._handleWorkerFailure(worker, new Error(`search worker exited (${code})`));
@@ -248,7 +251,7 @@ export class SearchService {
 				// delayed rebuild and return stale/partial HTTP 200 results.
 				if (state.needsRebuild) this._markDegraded("rebuilding", true);
 				resolve();
-			}, reject);
+			}, failStart);
 		});
 		this._workerStart = start;
 		// A failed spawn/open must not poison lazy recovery forever. Retain the
