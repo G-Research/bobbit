@@ -10,7 +10,7 @@ import { createMemFs } from "../harness/mem-fs.js";
 describe("ProjectConfigStore durable publication", () => {
 	it("surfaces a publication failure without changing existing project.yaml bytes", () => {
 		const memfs = createMemFs();
-		const configDir = "/memfs/project-config-durability";
+		const configDir = path.resolve("/memfs/project-config-durability");
 		const configFile = path.join(configDir, "project.yaml");
 		const originalBytes = "build_command: npm run previous-build\n";
 		memfs.mkdirSync(configDir, { recursive: true });

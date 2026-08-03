@@ -5,6 +5,8 @@ import path from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, registerProject } from "./_e2e/e2e-setup.js";
 
+const testOnPosix = process.platform === "win32" ? test.skip : test;
+
 type LiveConfigStore = {
 	getAll(): Record<string, string>;
 	getComponents(): unknown[];
@@ -207,7 +209,7 @@ test.describe("project-config persistence failures through production settings r
 		}
 	});
 
-	test("project settings PUT creates and preserves owner-only secrets.json files on POSIX", { skip: process.platform === "win32" }, async () => {
+	testOnPosix("project settings PUT creates and preserves owner-only secrets.json files on POSIX", async () => {
 		const rootPath = mkdtempSync(path.join(tmpdir(), "bobbit-route-secret-file-mode-"));
 		let projectId = "";
 		try {

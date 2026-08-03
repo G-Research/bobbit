@@ -8,7 +8,7 @@ import {
 } from "../../src/server/agent/project-config-store.js";
 import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 
-const CONFIG_DIR = "/memfs/project-config-durability";
+const CONFIG_DIR = path.resolve("/memfs/project-config-durability");
 const CONFIG_FILE = path.join(CONFIG_DIR, "project.yaml");
 
 type MutableMemFs = {
