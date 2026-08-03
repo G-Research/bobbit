@@ -413,7 +413,7 @@ describe("BgProcessManager spawn failures", () => {
 		const spawnFailure = (result!.info as any).spawnFailure;
 		assert.equal(spawnFailure.kind, "spawn");
 		assert.equal(spawnFailure.code, "ENOENT");
-		assert.match(spawnFailure.message, /failed to start/i);
+		assert.match(spawnFailure.message, /\bcould not be started\b/i, "safe diagnostic identifies the actionable start failure");
 		assert.equal(h.tailerStops.length, 2, "both tailers stop exactly once");
 		const runtime = (h.mgr as any).processes.get(session).get(info.id);
 		assert.equal(runtime._statusTimer, null, "status watcher is cancelled");
@@ -520,7 +520,7 @@ describe("bash_bg spawn-failure text", () => {
 			const listed = await execute("call", { action: "list" });
 			for (const result of [waited, listed]) {
 				const text = result.content[0].text;
-				assert.match(text, /failed to start/i);
+				assert.match(text, /\b(?:could not be started|failed to start)\b/i, "response identifies the actionable start failure");
 				assert.doesNotMatch(text, /code null|\[exited\]/i);
 			}
 		} finally {

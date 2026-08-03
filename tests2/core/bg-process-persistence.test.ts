@@ -294,7 +294,7 @@ describe("BgProcessManager — persistence round-trip", () => {
 		assert.equal(beforeRestart.terminalReason, "spawn-failed");
 		assert.equal(beforeRestart.spawnFailure.kind, "spawn");
 		assert.equal(beforeRestart.spawnFailure.code, "EACCES");
-		assert.match(beforeRestart.spawnFailure.message, /failed to start/i);
+		assert.match(beforeRestart.spawnFailure.message, /\bcould not be started\b/i, "durable safe diagnostic identifies the actionable start failure");
 		assert.doesNotMatch(JSON.stringify(beforeRestart), /PERSISTENCE-SECRET/);
 
 		const h2 = h.reload();
