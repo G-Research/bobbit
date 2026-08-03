@@ -51,7 +51,8 @@ import { handleWebSocketConnection } from "./ws/handler.js";
 import type { GateResetReopenOutcome, ServerMessage } from "./ws/protocol.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { DEFAULT_OVERFLOW_GUARD, describeWsPayload, guardWebSocketOverflow } from "./ws-overflow-guard.js";
-import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, scanSkillDirResolved, type SkillMarketContext, type SlashSkill } from "./skills/slash-skills.js";
+import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, scanSkillDirResolved, type SkillMarketContext } from "./skills/slash-skills.js";
+import { adoptedSkillEntries, type AdoptedSkillLedgerReader } from "./skills/adopted-skill-entries.js";
 import { enumerateFiles } from "./skills/file-enumeration.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { OrchestrationCore, OrchestrationCoreError, dismissHttpStatus, isSettledStatus, type WaitResult } from "./agent/orchestration-core.js";
@@ -4606,35 +4607,11 @@ async function handleApiRoute(
 				const store = scope === "project" ? ctx?.projectConfigStore : projectConfigStore;
 				return store?.getPackActivation(scope as PackOrderScope, packName) ?? {};
 			},
-			adoptedEntries: (scope) => aggregateAdoptedExtensions({
-				server: projectConfigStore.getAdoptedExtensions("server"),
-				"global-user": projectConfigStore.getAdoptedExtensions("global-user"),
-				...(effectiveProjectId && ctx ? { project: ctx.projectConfigStore.getAdoptedExtensions("project") } : {}),
-			}, effectiveProjectId)
-				.filter((record) => record.scope === scope && record.kind === "skills" && record.enabled)
-				.flatMap((record): PackEntry[] => {
-					try {
-						const directory = "directory" in record.source ? record.source.directory : "";
-						const scan = scanSkillDirResolved(directory, "custom");
-						const skills = scan.skills.map((skill): { name: string; item: SlashSkill } => ({
-							name: `adopt-${record.id}--${skill.name}`,
-							item: { ...skill, name: `adopt-${record.id}--${skill.name}` },
-						}));
-						return [{
-							id: `adopt:${record.scope}:${record.id}`,
-							kind: "adopted",
-							adoptionId: record.id,
-							scope: record.scope,
-							path: directory,
-							readOnly: true,
-							onlyTypes: ["skills"],
-							layout: "skills-flat",
-							preloaded: { skills },
-						}];
-					} catch {
-						return [];
-					}
-				}),
+			adoptedEntries: (scope) => adoptedSkillEntries(scope, {
+				serverConfigStore: projectConfigStore as AdoptedSkillLedgerReader,
+				projectConfigStore: ctx?.projectConfigStore as AdoptedSkillLedgerReader | undefined,
+				projectId: effectiveProjectId ?? undefined,
+			}),
 		};
 	}
 
