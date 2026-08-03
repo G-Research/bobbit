@@ -1778,6 +1778,8 @@ export interface ActiveVerification {
 		sentinelCleanupPending?: boolean;
 		/** Container cleanup is a two-layer durable state machine. */
 		containerPayloadCleanupPending?: boolean;
+		/** Durable observation authority after an exact pre-signal witness validation. */
+		containerPayloadSignalAttemptedAt?: number;
 		containerPayloadCleanupCompletedAt?: number;
 		containerTransportCleanupPending?: boolean;
 		containerTransportCleanupCompletedAt?: number;
@@ -6975,6 +6977,11 @@ export class VerificationHarness {
 						this._persistActive();
 					}
 				}
+				// A retained docker-exec transport is a second exact cleanup phase. Do
+				// not publish its already-durable host result (or a timeout/cancel
+				// verdict) until the live TrackedChild has proved its own close barrier.
+				// The retry owner re-drives this same child and resumes exactly once.
+				if (useContainerDurable && !treeCleanupVerified) return;
 				settled = true;
 				if (treeCleanupVerified || !useContainerDurable) this._trackedCommandChildren.delete(trackedKey);
 
@@ -7494,12 +7501,8 @@ export class VerificationHarness {
 		return this._rejectContainerWitness(step, "BOBBIT_CONTAINER_WITNESS_MISSING");
 	}
 
-	/**
-	 * Prove an in-container sentinel's exact identity before naming its PGID.
-	 * The start token makes a recycled numeric PID fail closed; the sentinel is
-	 * intentionally separate from the command leader so leader exit is safe.
-	 */
-	private async _verifyContainerOwnershipWitness(step: ActiveVerification["steps"][number]): Promise<NonNullable<ActiveVerification["steps"][number]["containerOwnershipWitness"]>> {
+	/** Validate the immutable witness/attestation pair before any live observation. */
+	private async _validatedContainerOwnershipWitness(step: ActiveVerification["steps"][number]): Promise<NonNullable<ActiveVerification["steps"][number]["containerOwnershipWitness"]>> {
 		if (!step.containerId) return this._rejectContainerWitness(step, "BOBBIT_CONTAINER_WITNESS_MISSING");
 		const witness = await this._readContainerOwnershipWitness(step);
 		const nonce = this._commandIdentityNonce(step);
@@ -7517,11 +7520,21 @@ export class VerificationHarness {
 			!Number.isSafeInteger(attestation.enginePgid) || attestation.enginePgid <= 0) {
 			return this._rejectContainerWitness(step, "BOBBIT_CONTAINER_ENGINE_ATTESTATION_MISMATCH");
 		}
+		return witness;
+	}
+
+	/**
+	 * Prove an in-container sentinel's exact live identity before naming its PGID.
+	 * The start token makes a recycled numeric PID fail closed; the sentinel is
+	 * intentionally separate from the command leader so leader exit is safe.
+	 */
+	private async _verifyContainerOwnershipWitness(step: ActiveVerification["steps"][number]): Promise<NonNullable<ActiveVerification["steps"][number]["containerOwnershipWitness"]>> {
+		const witness = await this._validatedContainerOwnershipWitness(step);
 		let live: { pid: number; pgid: number; startToken: string } | undefined;
 		if (this.containerProcessIdentityInspector) {
-			live = await this.containerProcessIdentityInspector(step.containerId, witness.sentinelPid);
+			live = await this.containerProcessIdentityInspector(step.containerId!, witness.sentinelPid);
 		} else {
-			const inspect = await this._dockerExecCapture(step.containerId, `p=${witness.sentinelPid}; awk '{print $1, $5, $22}' "/proc/$p/stat" 2>/dev/null`);
+			const inspect = await this._dockerExecCapture(step.containerId!, `p=${witness.sentinelPid}; awk '{print $1, $5, $22}' "/proc/$p/stat" 2>/dev/null`);
 			const ids = /^\s*(\d+)\s+(\d+)\s+(\S+)\s*$/.exec(inspect.stdout.trim());
 			if (ids) live = { pid: Number(ids[1]), pgid: Number(ids[2]), startToken: ids[3] };
 		}
@@ -7531,6 +7544,32 @@ export class VerificationHarness {
 		return witness;
 	}
 
+	/** Engine's structured rows are the sole completion authority after an exact signal attempt. */
+	private async _observeContainerPayloadCleanup(step: ActiveVerification["steps"][number], enginePgid: number): Promise<void> {
+		let rows: readonly DockerTopStateRow[];
+		try {
+			rows = await this.containerProcessTopSnapshot(step.containerId!);
+			assertDockerTopStateRows(rows);
+		} catch (error) {
+			step.containerPayloadCleanupPending = true;
+			this._persistActive();
+			throw new PendingCommandCleanupError(`Recovered container command group cleanup is not yet safe or complete: Docker Engine top snapshot was unavailable or malformed: ${(error as Error).message}`);
+		}
+		// Zombies are not executable or signalable. A live member with the attested
+		// daemon PGID is ambiguous after a signal attempt (the number may be reused),
+		// so it remains pending and can never trigger another numeric signal.
+		if (rows.some(row => row.pgid === enginePgid && !row.state.startsWith("Z"))) {
+			step.containerPayloadCleanupPending = true;
+			this._persistActive();
+			throw new PendingCommandCleanupError("Recovered container command group cleanup is not yet safe or complete: BOBBIT_CONTAINER_GROUP_REMAINS");
+		}
+		step.containerPayloadCleanupCompletedAt = Date.now();
+		delete step.containerPayloadCleanupPending;
+		delete step.containerPayloadSignalAttemptedAt;
+		delete step.killUnsafeReason;
+		this._persistActive();
+	}
+
 	/** Kill only a group which the exact, live in-group sentinel still owns. */
 	private async _killAndVerifyRecoveredContainerProcessGroup(step: ActiveVerification["steps"][number]): Promise<void> {
 		// A completed payload phase is durable authority to continue at transport
@@ -7538,23 +7577,40 @@ export class VerificationHarness {
 		if (step.containerPayloadCleanupCompletedAt) return;
 		step.containerPayloadCleanupPending = true;
 		this._persistActive();
-		const witness = await this._verifyContainerOwnershipWitness(step);
+		const witness = await this._validatedContainerOwnershipWitness(step);
+		const enginePgid = step.containerOwnershipAttestation!.enginePgid;
+		const hasPersistedSignalAttempt = Number.isSafeInteger(step.containerPayloadSignalAttemptedAt) && step.containerPayloadSignalAttemptedAt! > 0;
+
+		let liveWitness = true;
+		try {
+			await this._verifyContainerOwnershipWitness(step);
+		} catch (error) {
+			// After a persisted exact signal attempt, a vanished/reused sentinel is
+			// expected. Its historical numeric PGID remains forbidden; only the
+			// already-attested Engine snapshot can converge the cleanup.
+			const reason = (error as Error).message;
+			if (!hasPersistedSignalAttempt ||
+				!/BOBBIT_CONTAINER_WITNESS_(?:STALE|PGID_MISMATCH|START_TOKEN_MISMATCH)/.test(reason)) throw error;
+			liveWitness = false;
+		}
+		if (!liveWitness) return await this._observeContainerPayloadCleanup(step, enginePgid);
+
 		const p = witness.sentinelPid;
 		const pgid = witness.pgid;
-		// Docker Engine top reports daemon-namespace process identities. This
-		// durable group was atomically bound to the tagged sentinel before payload
-		// release; it is completion evidence only, never a signal target.
-		const enginePgid = step.containerOwnershipAttestation!.enginePgid;
 		const start = shellSingleQuote(witness.startToken);
+		// Persist the transition after exact live validation and before the first
+		// destructive request. A crash anywhere below therefore restarts in safe
+		// observation mode if the sentinel has already exited or been reused.
+		if (!hasPersistedSignalAttempt) {
+			step.containerPayloadSignalAttemptedAt = Date.now();
+			if (!this._persistActive()) {
+				throw new PendingCommandCleanupError("Recovered container command group cleanup could not persist its exact signal-attempt phase.");
+			}
+		}
 		// Revalidate immediately before *each* destructive signal. There is no
 		// sleep/polling interval between them: identity loss after TERM aborts
 		// rather than allowing SIGKILL to name a recycled PGID.
 		const verify = `live_p=$(awk '{print $1}' "/proc/$p/stat" 2>/dev/null || true); live_g=$(awk '{print $5}' "/proc/$p/stat" 2>/dev/null || true); live_s=$(awk '{print $22}' "/proc/$p/stat" 2>/dev/null || true); [ "$live_p" = "$p" ] || { echo BOBBIT_CONTAINER_WITNESS_STALE; exit 64; }; [ "$live_g" = "$pgid" ] || { echo BOBBIT_CONTAINER_WITNESS_PGID_MISMATCH; exit 65; }; [ "$live_s" = ${start} ] || { echo BOBBIT_CONTAINER_WITNESS_START_TOKEN_MISMATCH; exit 66; };`;
-		// dash accepts the negative process-group operand directly; placing `--`
-		// before a quoted negative number is not portable across container shells.
-		// A numeric process-group liveness probe cannot prove cleanup: it remains
-		// successful while the kernel retains zombies for container init to reap.
-		// The bounded Engine snapshot below is therefore the sole completion authority.
 		const script = `p=${p}; pgid=${pgid}; ${verify} kill -TERM -"$pgid" 2>/dev/null || { echo BOBBIT_CONTAINER_TERM_UNDELIVERED; exit 67; }; ${verify} kill -KILL -"$pgid" 2>/dev/null || { echo BOBBIT_CONTAINER_KILL_UNDELIVERED; exit 68; };`;
 		const result = await this._dockerExecCapture(step.containerId!, script);
 		if (result.code !== 0) {
@@ -7565,27 +7621,7 @@ export class VerificationHarness {
 			this._persistActive();
 			throw new PendingCommandCleanupError(`Recovered container command group cleanup is not yet safe or complete: ${detail}`);
 		}
-		let rows: readonly DockerTopStateRow[];
-		try {
-			rows = await this.containerProcessTopSnapshot(step.containerId!);
-			assertDockerTopStateRows(rows);
-		} catch (error) {
-			step.containerPayloadCleanupPending = true;
-			this._persistActive();
-			throw new PendingCommandCleanupError(`Recovered container command group cleanup is not yet safe or complete: Docker Engine top snapshot was unavailable or malformed: ${(error as Error).message}`);
-		}
-		// Zombies are not executable or signalable. Any non-zombie member of the
-		// attested daemon-namespace group—including a freshly reused numeric PGID—
-		// keeps cleanup pending.
-		if (rows.some(row => row.pgid === enginePgid && !row.state.startsWith("Z"))) {
-			step.containerPayloadCleanupPending = true;
-			this._persistActive();
-			throw new PendingCommandCleanupError("Recovered container command group cleanup is not yet safe or complete: BOBBIT_CONTAINER_GROUP_REMAINS");
-		}
-		step.containerPayloadCleanupCompletedAt = Date.now();
-		delete step.containerPayloadCleanupPending;
-		delete step.killUnsafeReason;
-		this._persistActive();
+		await this._observeContainerPayloadCleanup(step, enginePgid);
 	}
 
 	/** Recover from the host-authored Docker lifecycle result or fail closed. */
