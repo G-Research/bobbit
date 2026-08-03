@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -12,6 +14,7 @@ const CONFIG_FILE = path.join(CONFIG_DIR, "project.yaml");
 type MutableMemFs = {
 	writeFileSync: (...args: any[]) => unknown;
 	readFileSync: (...args: any[]) => unknown;
+	statSync: (...args: any[]) => unknown;
 	lstatSync: (...args: any[]) => unknown;
 	renameSync: (...args: any[]) => unknown;
 };
@@ -94,6 +97,47 @@ function seedStore(): { fs: MemFs; store: ProjectConfigStore } {
 }
 
 describe("ProjectConfigStore durability", () => {
+	it("creates its owned temp file with the existing target's POSIX mode", () => {
+		const { fs, store } = seedStore();
+		const mutable = fs as MutableMemFs;
+		const originalLstat = mutable.lstatSync.bind(fs);
+		const originalStat = mutable.statSync.bind(fs);
+		const originalWrite = mutable.writeFileSync.bind(fs);
+		let tempWriteOptions: unknown;
+		const withPrivateMode = (stat: unknown) => ({ ...(stat as object), mode: 0o100600 });
+		mutable.lstatSync = (pathname: string, ...args: any[]) => String(pathname) === CONFIG_FILE
+			? withPrivateMode(originalLstat(pathname, ...args))
+			: originalLstat(pathname, ...args);
+		mutable.statSync = (pathname: string, ...args: any[]) => String(pathname) === CONFIG_FILE
+			? withPrivateMode(originalStat(pathname, ...args))
+			: originalStat(pathname, ...args);
+		mutable.writeFileSync = (pathname: string, data: unknown, ...args: any[]) => {
+			if (siblingTemp(String(pathname))) tempWriteOptions = args[0];
+			return originalWrite(pathname, data, ...args);
+		};
+
+		store.set("build_command", "npm run private-replacement");
+
+		expect(tempWriteOptions).toEqual(expect.objectContaining({ mode: 0o600 }));
+	});
+
+	it("preserves an existing project.yaml mode across a successful POSIX atomic replacement", { skip: process.platform === "win32" }, () => {
+		const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-project-config-mode-"));
+		const configFile = path.join(configDir, "project.yaml");
+		try {
+			fs.writeFileSync(configFile, "build_command: npm run old-build\n", "utf-8");
+			fs.chmodSync(configFile, 0o600);
+			const store = new ProjectConfigStore(configDir);
+
+			store.set("build_command", "npm run replacement-build");
+
+			expect(fs.readFileSync(configFile, "utf-8")).toContain("build_command: npm run replacement-build");
+			expect(fs.statSync(configFile).mode & 0o777).toBe(0o600);
+		} finally {
+			fs.rmSync(configDir, { recursive: true, force: true });
+		}
+	});
+
 	it("publishes through one owned sibling temp file, preserves target bytes on temp-write failure, and never cleans unrelated siblings", () => {
 		const { fs, store } = seedStore();
 		const originalBytes = readConfig(fs);
