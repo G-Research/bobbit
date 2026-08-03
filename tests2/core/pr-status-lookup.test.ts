@@ -11,6 +11,7 @@ import {
 	__resetPrStatusCachesForTests,
 	__setGhExecFileForPrStatusTests,
 	buildGhBranchRulesArgs,
+	buildGhPrHeadListArgs,
 	buildGhPrMergeArgs,
 	buildGhPrMergePermissionsArgs,
 	buildGhPrViewArgs,
@@ -57,10 +58,28 @@ describe("PR status GitHub CLI lookup", () => {
 		assert.ok(!args.includes(branch));
 	});
 
-	it("builds PR merge as execFile-safe argv", () => {
-		const branch = "feature/ok && node -e \"throw new Error('shell executed')\"";
-		assert.deepEqual(buildGhPrMergeArgs(branch, "squash", true), ["pr", "merge", branch, "--squash", "--admin"]);
-		assert.deepEqual(buildGhPrMergeArgs(undefined, "merge", false), ["pr", "merge", "--merge"]);
+	it("binds coordinated head lookup and merge to a server-derived repository", () => {
+		const github = { host: "github.com", owner: "acme", repository: "widget" };
+		const enterprise = { host: "ghe.example.test:8443", owner: "acme", repository: "widget" };
+		for (const branch of ["feature/ok", "release.2027", "17"]) {
+			const args = buildGhPrHeadListArgs(github, branch);
+			assert.deepEqual(args.slice(0, 6), ["pr", "list", "--repo", "acme/widget", "--head", branch]);
+			assert.notEqual(args[2], branch, "head text must never occupy the free-form selector position");
+		}
+		assert.deepEqual(buildGhPrHeadListArgs(enterprise, "feature/slash").slice(0, 6), [
+			"pr", "list", "--repo", "ghe.example.test:8443/acme/widget", "--head", "feature/slash",
+		]);
+		assert.deepEqual(buildGhPrMergeArgs(17, github, "squash", true), [
+			"pr", "merge", "17", "--repo", "acme/widget", "--squash", "--admin",
+		]);
+		assert.deepEqual(buildGhPrMergeArgs(23, enterprise, "merge", false), [
+			"pr", "merge", "23", "--repo", "ghe.example.test:8443/acme/widget", "--merge",
+		]);
+		for (const attacker of ["https://github.com/private/other/pull/9", "--repo=private/other", "-R", "bad\nhead"]) {
+			const args = buildGhPrHeadListArgs(github, attacker);
+			assert.equal(args[5], attacker);
+			assert.equal(args[3], "acme/widget");
+		}
 
 		const source = fs.readFileSync(new URL("../../src/server/server.ts", import.meta.url), "utf-8");
 		assert.ok(!source.includes("execAsync(`gh pr merge"));

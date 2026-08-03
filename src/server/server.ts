@@ -2,7 +2,7 @@ import { exec } from "node:child_process";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory } from "./agent/rpc-bridge.js";
 import { resolveGatewayDeps, realCommandRunner, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
-import { parseTrustedGithubRemote, RemoteStateCoordinator, type PullRequestIdentity, type RemoteStateAddress, type RemoteStateIntent, type RemoteStateTelemetryEvent, type RepositorySnapshotBinding } from "./remote-state-coordinator.js";
+import { parseTrustedGithubRemote, RemoteStateCoordinator, type PullRequestIdentity, type RemoteStateAddress, type RemoteStateIntent, type RemoteStateTelemetryEvent, type RepositorySnapshotBinding, type TrustedGithubRemote } from "./remote-state-coordinator.js";
 import { resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
 export type { Clock, CommandRunner, ExecFileResult, FsLike, GatewayDeps, ResolvedGatewayDeps, TimerHandle } from "./gateway-deps.js";
 export { defaultRpcBridgeFactory, realClock, realCommandRunner, realFetch, realFs, resolveGatewayDeps } from "./gateway-deps.js";
@@ -87,7 +87,7 @@ import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from 
 import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
-import { resolveHookScopeContext } from "./agent/hook-scope-context.js";
+import { resolveConfiguredComponent, resolveHookScopeContext } from "./agent/hook-scope-context.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
 import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
@@ -1084,6 +1084,31 @@ export function buildGhPrViewArgs(branch?: string): string[] {
 	return branch ? ["pr", "view", branch, "--json", PR_STATUS_FIELDS] : ["pr", "view", "--json", PR_STATUS_FIELDS];
 }
 
+export function githubRepositorySelector(remote: TrustedGithubRemote): string {
+	const repository = `${remote.owner}/${remote.repository}`;
+	return remote.host === "github.com" ? repository : `${remote.host}/${repository}`;
+}
+
+/** Repository-scoped head lookup: the branch is data for --head, never a PR selector. */
+export function buildGhPrHeadListArgs(remote: TrustedGithubRemote, branch: string): string[] {
+	return [
+		"pr", "list",
+		"--repo", githubRepositorySelector(remote),
+		"--head", branch,
+		"--state", "all",
+		"--limit", "2",
+		"--json", PR_STATUS_FIELDS,
+	];
+}
+
+export function buildGhCommitPullsArgs(remote: TrustedGithubRemote, oid: string): string[] {
+	return [
+		"api",
+		...(remote.host === "github.com" ? [] : ["--hostname", remote.host]),
+		`repos/${remote.owner}/${remote.repository}/commits/${oid}/pulls`,
+	];
+}
+
 export function buildGhPrMergePermissionsArgs(owner: string, name: string, number: number): string[] {
 	return [
 		"api", "graphql",
@@ -1102,8 +1127,14 @@ export function buildGhRulesetArgs(owner: string, name: string, rulesetId: numbe
 	return ["api", `repos/${owner}/${name}/rulesets/${rulesetId}`];
 }
 
-export function buildGhPrMergeArgs(branch: string | undefined, method: string, admin: unknown): string[] {
-	return ["pr", "merge", ...(branch ? [branch] : []), `--${method}`, ...(admin ? ["--admin"] : [])];
+export function buildGhPrMergeArgs(number: number, remote: TrustedGithubRemote, method: string, admin: unknown): string[] {
+	if (!Number.isSafeInteger(number) || number <= 0) throw new Error("PR merge requires a positive PR number");
+	return [
+		"pr", "merge", String(number),
+		"--repo", githubRepositorySelector(remote),
+		`--${method}`,
+		...(admin ? ["--admin"] : []),
+	];
 }
 
 async function execGh(args: readonly string[], cwd: string, timeout = 10_000): Promise<string> {
@@ -1157,8 +1188,11 @@ function parseGithubPrRepo(url: unknown): { owner: string; name: string } | null
 async function getViewerMergePermissions(
 	cwd: string,
 	pr: { url?: string; number?: number; baseRefName?: string },
+	trustedRemote?: TrustedGithubRemote,
 ): Promise<{ viewerIsAdmin: boolean; viewerCanMergeAsAdmin: boolean }> {
-	const repo = parseGithubPrRepo(pr.url);
+	const repo = trustedRemote
+		? { owner: trustedRemote.owner, name: trustedRemote.repository }
+		: parseGithubPrRepo(pr.url);
 	if (repo && typeof pr.number === "number") {
 		try {
 			const stdout = await execGh(buildGhPrMergePermissionsArgs(repo.owner, repo.name, pr.number), cwd);
@@ -1274,11 +1308,56 @@ async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string
 	return fetchPrStatus(cwd, branch, fallbackCwd, "legacy-null");
 }
 
-async function fetchCoordinatedPrStatus(cwd: string, branch?: string): Promise<any | null> {
-	// The coordinator owns fallback selection before starting a refresh. Passing no
-	// fallback here is deliberate: one canonical refresh may execute exactly one
-	// external PR fast-state read, including definitive no-PR and failure cycles.
-	return fetchPrStatus(cwd, branch, undefined, "throw-transient");
+type CoordinatedPrSelector = { kind: "head" | "oid"; value: string };
+type CoordinatedPrLookupTarget = {
+	executionCwd: string;
+	remote: TrustedGithubRemote;
+	selector: CoordinatedPrSelector;
+};
+
+function normalizeCoordinatedPr(raw: any, target: CoordinatedPrLookupTarget): any {
+	const number = Number(raw?.number);
+	const url = raw?.url ?? raw?.html_url;
+	const headRefName = raw?.headRefName ?? raw?.head?.ref;
+	const baseRefName = raw?.baseRefName ?? raw?.base?.ref;
+	if (!Number.isSafeInteger(number) || number <= 0 || typeof url !== "string") {
+		throw new Error("Pull request lookup returned an invalid result");
+	}
+	let parsed: URL;
+	try { parsed = new URL(url); } catch { throw new Error("Pull request lookup returned an invalid URL"); }
+	const segments = parsed.pathname.split("/").filter(Boolean);
+	if (
+		parsed.host.toLowerCase() !== target.remote.host
+		|| segments.length !== 4
+		|| segments[0]?.toLowerCase() !== target.remote.owner
+		|| segments[1]?.toLowerCase() !== target.remote.repository
+		|| segments[2] !== "pull"
+		|| Number(segments[3]) !== number
+	) throw new Error("Pull request lookup escaped the selected repository");
+	return {
+		number,
+		url,
+		title: raw.title,
+		state: typeof raw.state === "string" ? raw.state.toUpperCase() : raw.state,
+		mergeable: raw.mergeable ?? null,
+		headRefName,
+		baseRefName,
+		reviewDecision: raw.reviewDecision || null,
+	};
+}
+
+async function fetchCoordinatedPrStatus(target: CoordinatedPrLookupTarget): Promise<any | null> {
+	const args = target.selector.kind === "head"
+		? buildGhPrHeadListArgs(target.remote, target.selector.value)
+		: buildGhCommitPullsArgs(target.remote, target.selector.value);
+	const stdout = await execGh(args, target.executionCwd);
+	const results = JSON.parse(stdout);
+	if (!Array.isArray(results)) throw new Error("Pull request lookup returned an invalid result");
+	if (results.length === 0) return null;
+	if (results.length !== 1) throw new Error("Pull request lookup was ambiguous");
+	const pr = normalizeCoordinatedPr(results[0], target);
+	const permissions = await getViewerMergePermissions(target.executionCwd, pr, target.remote);
+	return { ...pr, ...permissions };
 }
 
 export async function __getCachedPrStatusForTests(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
@@ -1349,10 +1428,19 @@ async function resolvePullRequestHeadIdentity(
 	commandRunner?: CommandRunner,
 ): Promise<string | undefined> {
 	const knownBranch = branch?.trim();
-	if (knownBranch) return `ref:${knownBranch}`;
+	if (knownBranch) {
+		if (/^[\-]|[\u0000-\u001f\u007f]/.test(knownBranch)) return undefined;
+		try {
+			const checked = await execGitArgs(["check-ref-format", "--branch", knownBranch], cwd, 5_000, containerId, commandRunner);
+			return checked === knownBranch ? `ref:${knownBranch}` : undefined;
+		} catch { return undefined; }
+	}
 	try {
 		const symbolicHead = await execGitArgs(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd, 5_000, containerId, commandRunner);
-		if (symbolicHead && symbolicHead !== "HEAD") return `ref:${symbolicHead}`;
+		if (symbolicHead && symbolicHead !== "HEAD") {
+			const checked = await execGitArgs(["check-ref-format", "--branch", symbolicHead], cwd, 5_000, containerId, commandRunner);
+			if (checked === symbolicHead) return `ref:${symbolicHead}`;
+		}
 	} catch { /* detached or unavailable; verify the commit object below */ }
 	try {
 		const oid = await execGitArgs(["rev-parse", "--verify", "HEAD^{commit}"], cwd, 5_000, containerId, commandRunner);
@@ -2885,8 +2973,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			return undefined;
 		}
 	};
-	type PrSnapshotTarget = {
-		executionCwd: string;
+	type PrSnapshotTarget = CoordinatedPrLookupTarget & {
 		branch: string | undefined;
 		identity: PullRequestIdentity;
 	};
@@ -2932,7 +3019,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		const project = owningContext.project;
 		const components = owningContext.projectConfigStore.getComponents();
 		const multiRepo = components.some(component => component.repo !== ".");
-		const configuredRepos = new Set(components.map(component => component.repo));
 		const projectRoot = canonicalOwnedPath(project.rootPath);
 		let worktreeLayoutRoot = projectRoot;
 		if (!multiRepo) {
@@ -2969,33 +3055,50 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				candidates.push(canonical);
 			}
 		};
-		const repoWorktrees = Array.isArray(owner.repoWorktrees)
+		const repoWorktreeEntries = Array.isArray(owner.repoWorktrees)
 			? owner.repoWorktrees.map(entry => [entry.repo, entry.worktreePath] as const)
 			: Object.entries(owner.repoWorktrees ?? {});
+		const repoWorktrees: Record<string, string> = {};
+		for (const [repo, worktreePath] of repoWorktreeEntries) {
+			// Duplicate coordinates are ambiguous and therefore unusable.
+			if (repo in repoWorktrees && comparableOwnedPath(repoWorktrees[repo]) !== comparableOwnedPath(worktreePath)) return [];
+			repoWorktrees[repo] = worktreePath;
+		}
 
-		// Entity paths are usable only after canonical containment proof. Persisted
-		// metadata is not provenance by itself; the registered project/config owns
-		// the project and worktree boundaries.
+		if (multiRepo) {
+			const selected = resolveConfiguredComponent(components, project.rootPath, {
+				cwd: owner.cwd ?? owner.worktreePath ?? "",
+				worktreePath: owner.worktreePath,
+				repoPath: owner.repoPath,
+				repoWorktrees,
+			});
+			if (!selected) return [];
+			const selectedWorktree = repoWorktrees[selected.repo];
+			const selectedSource = canonicalOwnedPath(selected.repo === "."
+				? projectRoot
+				: path.join(projectRoot, selected.repo));
+			if (!isSameOrDescendantOwnedPath(projectRoot, selectedSource)) return [];
+
+			// Once a component is selected, every candidate must belong to that exact
+			// repository. A broken member may fall back only to its authoritative source,
+			// never to a healthy sibling selected by object/configuration order.
+			if (selectedWorktree) {
+				const selectedWorktreeRoot = canonicalOwnedPath(selectedWorktree);
+				add(selectedWorktreeRoot, [configuredWorktreeRoot]);
+				if (!owner.sandboxed) add(owner.cwd, [selectedWorktreeRoot, selectedSource]);
+			}
+			else if (!owner.sandboxed) add(owner.cwd, [selectedSource]);
+			add(selectedSource, [projectRoot]);
+			return candidates;
+		}
+
+		// Single-repository compatibility retains owned worktree/source fallbacks.
 		const executionRoots = [projectRoot, configuredWorktreeRoot];
 		if (!owner.sandboxed) add(owner.cwd, executionRoots);
 		add(owner.worktreePath, executionRoots);
-		for (const [repo, worktreePath] of repoWorktrees) {
-			if (configuredRepos.has(repo)) add(worktreePath, [configuredWorktreeRoot]);
-		}
-		// Legacy/server-authored repoPath can preserve a more specific project
-		// repository, but only after canonical containment under the registry root.
+		for (const worktreePath of Object.values(repoWorktrees)) add(worktreePath, [configuredWorktreeRoot]);
 		add(owner.repoPath, [projectRoot]);
-
-		// Broken worktrees also recover through registry/config-derived component
-		// roots. An outside-project owner.repoPath never reaches this list.
-		if (multiRepo) {
-			for (const component of components) {
-				const componentRoot = component.repo === "." ? projectRoot : path.join(projectRoot, component.repo);
-				add(componentRoot, [projectRoot]);
-			}
-		} else {
-			add(projectRoot, [projectRoot]);
-		}
+		add(projectRoot, [projectRoot]);
 		return candidates;
 	};
 	const resolvePrSnapshotTarget = async (
@@ -3026,9 +3129,15 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			),
 		]);
 		if (!remote || !head) return undefined;
+		const separator = head.indexOf(":");
+		const kind = head.slice(0, separator);
+		const value = head.slice(separator + 1);
+		if ((kind !== "ref" && kind !== "oid") || !value) return undefined;
 		return {
 			executionCwd,
-			branch,
+			remote,
+			selector: { kind: kind === "ref" ? "head" : "oid", value },
+			branch: kind === "ref" ? value : undefined,
 			identity: remoteStateCoordinator.resolvePullRequestIdentity({ ...remote, head }),
 		};
 	};
@@ -3042,7 +3151,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			? { kind: "sidebar", id: address.id }
 			: address;
 		const key = remoteStateCoordinator.registerPullRequest(target.identity, {
-			refresh: () => fetchCoordinatedPrStatus(target.executionCwd, target.branch),
+			refresh: () => fetchCoordinatedPrStatus(target),
 			address: effectiveAddress,
 		});
 		const force = intentValue === "explicit";
@@ -3055,6 +3164,23 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			? remoteStateCoordinator.refreshSnapshot(key, readOpts)
 			: remoteStateCoordinator.readSnapshot(key, readOpts);
 	};
+	const resolvePrMergeAuthorization = async (
+		target: PrSnapshotTarget,
+		address: RemoteStateAddress,
+		clientBranch: unknown,
+	): Promise<{ number: number } | { error: string; status: number }> => {
+		const snapshot = await prSnapshotFor(target, address, "explicit");
+		const data = snapshot.data as { number?: unknown; headRefName?: unknown } | null | undefined;
+		if (snapshot.stale || snapshot.lastError || !data || !Number.isSafeInteger(data.number) || Number(data.number) <= 0) {
+			return { error: "Current PR status is unavailable; refresh and try again", status: 409 };
+		}
+		if (clientBranch !== undefined) {
+			if (typeof clientBranch !== "string" || clientBranch !== data.headRefName) {
+				return { error: "PR head changed; refresh before merging", status: 409 };
+			}
+		}
+		return { number: Number(data.number) };
+	};
 	const invalidatePrSnapshot = (target: PrSnapshotTarget | undefined): void => {
 		if (target) remoteStateCoordinator.invalidate(target.identity.key, { allowImmediateRefresh: true });
 	};
@@ -3066,6 +3192,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		resolvePrSnapshotTarget,
 		prSnapshotFor,
 		invalidateGitSnapshot: invalidateRemoteGitSnapshot,
+		resolvePrMergeAuthorization,
 		invalidatePrSnapshot,
 	};
 	inboxNudger.start();
@@ -12963,7 +13090,9 @@ async function handleApiRoute(
 			getFreshPr: async (_cwd, _branch) => {
 				if (!goal) return null;
 				const target = await remoteState.resolvePrSnapshotTarget(goal, goal.branch);
-				return target ? getCachedPrStatus(target.executionCwd, target.branch) : null;
+				if (!target) return null;
+				const snapshot = await remoteState.prSnapshotFor(target, { kind: "goal", id: goalId }, "automatic");
+				return snapshot.data && typeof snapshot.data === "object" ? snapshot.data : null;
 			},
 			setCachedPr: (id, pr) => prStatusStore.set(id, pr),
 			pathExists: fs.existsSync,
@@ -13013,10 +13142,14 @@ async function handleApiRoute(
 			json({ error: "Invalid merge method. Must be merge, squash, or rebase." }, 400);
 			return;
 		}
-		const clientGoalBranch = typeof body?.branch === "string" ? body.branch : undefined;
-		const resolvedGoalBranch = clientGoalBranch || goal.branch;
+		const authorization = await remoteState.resolvePrMergeAuthorization(
+			target,
+			{ kind: "goal", id: goalId },
+			body?.branch,
+		);
+		if ("error" in authorization) { json({ error: authorization.error }, authorization.status); return; }
 		try {
-			await serverCommandRunner.execFile("gh", buildGhPrMergeArgs(resolvedGoalBranch, method, body?.admin), { cwd: target.executionCwd, encoding: "utf-8", timeout: 30000 });
+			await serverCommandRunner.execFile("gh", buildGhPrMergeArgs(authorization.number, target.remote, method, body?.admin), { cwd: target.executionCwd, encoding: "utf-8", timeout: 30000 });
 			_prCache.delete(target.executionCwd);
 			if (target.branch) _prCache.delete(`${target.executionCwd}::${target.branch}`);
 			// Status, invalidation, and merge all consume the same ownership-validated target.
@@ -15616,14 +15749,15 @@ async function handleApiRoute(
 			json({ error: "Invalid merge method. Must be merge, squash, or rebase." }, 400);
 			return;
 		}
-		// Prefer the client-provided branch (headRefName from PR status) so the merge
-		// targets the exact PR the widget displayed — avoids mismatches when the session's
-		// persisted branch differs from the PR's head ref (e.g. staff/team agent worktrees).
-		const clientBranch = typeof body?.branch === "string" ? body.branch : undefined;
-		const sessMergeBranch = clientBranch || selector.branch;
+		const authorization = await remoteState.resolvePrMergeAuthorization(
+			selector.target,
+			{ kind: "session", id },
+			body?.branch,
+		);
+		if ("error" in authorization) { json({ error: authorization.error }, authorization.status); return; }
 		try {
-			// PR merge uses `gh` CLI on the same ownership-validated host target as status.
-			await serverCommandRunner.execFile("gh", buildGhPrMergeArgs(sessMergeBranch, method, body?.admin), { cwd: selector.target.executionCwd, encoding: "utf-8", timeout: 30000 });
+			// Merge the immutable number returned by a current repository-bound refresh.
+			await serverCommandRunner.execFile("gh", buildGhPrMergeArgs(authorization.number, selector.target.remote, method, body?.admin), { cwd: selector.target.executionCwd, encoding: "utf-8", timeout: 30000 });
 			_prCache.delete(selector.target.executionCwd);
 			if (selector.target.branch) _prCache.delete(`${selector.target.executionCwd}::${selector.target.branch}`);
 			remoteState.invalidatePrSnapshot(selector.target);

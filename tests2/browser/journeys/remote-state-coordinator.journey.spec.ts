@@ -217,7 +217,7 @@ test.describe("Journey: remote-state coordinator", () => {
 						});
 					}
 				}
-				if (command === "gh" && args[0] === "pr" && args[1] === "view" && options?.cwd === fixture!.repo) {
+				if (command === "gh" && args[0] === "pr" && args[1] === "list" && options?.cwd === fixture!.repo) {
 					prReads++;
 					if (heldPrRead) await heldPrRead;
 					if (failPrReads) {
@@ -227,7 +227,7 @@ test.describe("Journey: remote-state coordinator", () => {
 						});
 					}
 					return {
-						stdout: JSON.stringify({
+						stdout: JSON.stringify([{
 							number: 42,
 							url: "https://github.com/bobbit-fixtures/remote-state/pull/42",
 							title: prTitle,
@@ -236,7 +236,7 @@ test.describe("Journey: remote-state coordinator", () => {
 							headRefName: "master",
 							baseRefName: "master",
 							reviewDecision,
-						}),
+						}]),
 						stderr: "",
 					};
 				}

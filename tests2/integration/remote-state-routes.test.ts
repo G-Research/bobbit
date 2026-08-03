@@ -86,20 +86,21 @@ test.describe("remote-state coordinator routes", () => {
 				return { stdout: "", stderr: "" };
 			}
 			if (commandName(file) === "git" && args[0] === "pull") return { stdout: "Already up to date.", stderr: "" };
-			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "view") {
+			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "list") {
 				prReads += 1;
 				const customPort = Number(remoteOrigin?.match(/:(2222|2223)\//)?.[1]);
 				const number = customPort || 42;
+				const responseHost = customPort ? `example.github.test:${customPort}` : "example.github.test";
 				return {
-					stdout: JSON.stringify({
+					stdout: JSON.stringify([{
 						number,
-						url: `https://example.github.test/acme/widget/pull/${number}`,
+						url: `https://${responseHost}/acme/widget/pull/${number}`,
 						title: `safe title ${number}`,
 						state: "OPEN",
 						mergeable: "MERGEABLE",
 						headRefName: "master",
 						baseRefName: "master",
-					}),
+					}]),
 					stderr: "",
 				};
 			}
@@ -283,7 +284,8 @@ test.describe("remote-state coordinator routes", () => {
 			expect(retainedPort2222Body).toMatchObject({ data: { number: 2222 } });
 			expect(prReads).toBe(beforeCustomPorts + 2);
 			for (const body of [port2222Body, coldPort2223Body, port2223Body, retainedPort2222Body]) {
-				expect(JSON.stringify(body)).not.toContain("example.github.test:22");
+				expect(JSON.stringify(body)).not.toContain("ssh://");
+				expect(JSON.stringify(body)).not.toContain("token:secret");
 			}
 
 			// An untrusted remote is rejected before any `gh` call; configured GHE and
@@ -336,14 +338,12 @@ test.describe("remote-state coordinator routes", () => {
 			if (commandName(file) === "git" && args.join(" ") === "remote get-url origin") {
 				return { stdout: `${fixtureRemote}\n`, stderr: "" };
 			}
-			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "view") {
+			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "list") {
 				prReads += 1;
 				if (mode === "no-pr") {
 					markNoPrStarted();
 					await noPrGate;
-					const error = new Error(`no pull requests found for branch ${fixtureBranch}`);
-					(error as any).stderr = `no pull requests found for branch ${fixtureBranch}`;
-					throw error;
+					return { stdout: "[]", stderr: "" };
 				}
 				const error = new Error("network timeout while reading fixture PR state");
 				(error as any).stderr = "fixture transport unavailable";
@@ -437,11 +437,11 @@ test.describe("remote-state coordinator routes", () => {
 			if (commandName(file) === "git" && args.join(" ") === "remote get-url origin") {
 				return { stdout: "https://github.com/acme/local-preflight-fallback.git\n", stderr: "" };
 			}
-			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "view") {
+			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "list") {
 				prReads += 1;
 				prReadCwd = String(options?.cwd);
 				return {
-					stdout: JSON.stringify({
+					stdout: JSON.stringify([{
 						number: 88,
 						url: "https://github.com/acme/local-preflight-fallback/pull/88",
 						title: "fallback result",
@@ -449,7 +449,7 @@ test.describe("remote-state coordinator routes", () => {
 						mergeable: "MERGEABLE",
 						headRefName: branch,
 						baseRefName: "main",
-					}),
+					}]),
 					stderr: "",
 				};
 			}
@@ -617,6 +617,131 @@ test.describe("remote-state coordinator routes", () => {
 		}
 	});
 
+
+	test("rejects selector abuse and binds numeric and slash heads to the owned repository", async ({ gateway }) => {
+		test.setTimeout(30_000);
+		const ownedCwd = gitCwd();
+		const goal = await createGoal({
+			title: `PR selector binding ${Date.now()}`,
+			cwd: ownedCwd,
+			worktree: false,
+			autoStartTeam: false,
+		});
+		const goalId = String(goal.id);
+		if (typeof goal.projectId !== "string") throw new Error("fixture goal project unavailable");
+		const goalStore = gateway.sessionManager.getGoalStoreForProject(goal.projectId);
+		const runner = (gateway.sessionManager as any).commandRunner;
+		const originalExecFile = runner.execFile;
+		const ghCalls: string[][] = [];
+		const outsideSentinel = "PRIVATE REPOSITORY SENTINEL";
+		let returnOutsideResult = false;
+
+		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+			const command = commandName(file);
+			if (command === "git" && args.join(" ") === "remote get-url origin") {
+				return { stdout: "https://github.com/acme/owned-selector.git\n", stderr: "" };
+			}
+			if (command === "gh") {
+				ghCalls.push([...args]);
+				if (args[0] === "pr" && args[1] === "view") {
+					return { stdout: JSON.stringify({ title: outsideSentinel }), stderr: "" };
+				}
+				if (args[0] === "pr" && args[1] === "merge") return { stdout: "merged", stderr: "" };
+				if (args[0] === "api") {
+					return { stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }), stderr: "" };
+				}
+				const head = args[args.indexOf("--head") + 1];
+				const wrongRepo = args[args.indexOf("--repo") + 1] !== "acme/owned-selector";
+				return {
+					stdout: JSON.stringify([wrongRepo || returnOutsideResult ? {
+						number: 999,
+						url: "https://github.com/private/outside/pull/999",
+						title: outsideSentinel,
+						headRefName: head,
+					} : {
+						number: head === "17" ? 117 : 118,
+						url: `https://github.com/acme/owned-selector/pull/${head === "17" ? 117 : 118}`,
+						title: `owned ${head}`,
+						state: "OPEN",
+						mergeable: "MERGEABLE",
+						headRefName: head,
+						baseRefName: "main",
+					}]),
+					stderr: "",
+				};
+			}
+			return originalExecFile.call(runner, file, args, options);
+		};
+
+		try {
+			for (const attacker of [
+				"https://github.com/private/outside/pull/123",
+				"--repo=private/outside",
+				"-R",
+				"bad\nhead",
+			]) {
+				goalStore.update(goalId, { cwd: ownedCwd, repoPath: ownedCwd, worktreePath: ownedCwd, branch: attacker, setupStatus: "ready" });
+				const before = ghCalls.length;
+				const status = await apiFetch(`/api/goals/${goalId}/pr-status?intent=explicit&optional=1`);
+				expect(status.status, attacker).toBe(204);
+				const merge = await apiFetch(`/api/goals/${goalId}/pr-merge`, {
+					method: "POST",
+					body: JSON.stringify({ method: "squash", branch: attacker }),
+				});
+				expect(merge.status, attacker).toBe(409);
+				expect(ghCalls).toHaveLength(before);
+			}
+
+			goalStore.update(goalId, { cwd: ownedCwd, repoPath: ownedCwd, worktreePath: ownedCwd, branch: "17", setupStatus: "ready" });
+			const numericStatus = await apiFetch(`/api/goals/${goalId}/pr-status?intent=explicit`);
+			expect(numericStatus.status).toBe(200);
+			expect(await numericStatus.json()).toMatchObject({ data: { number: 117, title: "owned 17" } });
+			const numericLookup = ghCalls.find(args => args[0] === "pr" && args[1] === "list");
+			expect(numericLookup?.slice(0, 6)).toEqual(["pr", "list", "--repo", "acme/owned-selector", "--head", "17"]);
+			expect(ghCalls.some(args => args[0] === "pr" && args[1] === "view")).toBe(false);
+
+			returnOutsideResult = true;
+			await new Promise(resolve => setTimeout(resolve, 260));
+			const escaped = await apiFetch(`/api/goals/${goalId}/pr-status?intent=explicit`);
+			expect(escaped.status).toBe(200);
+			const escapedBody = await escaped.json();
+			expect(escapedBody).toMatchObject({ stale: true, lastError: "unavailable", data: { number: 117, title: "owned 17" } });
+			expect(JSON.stringify(escapedBody)).not.toContain(outsideSentinel);
+			returnOutsideResult = false;
+			await new Promise(resolve => setTimeout(resolve, 260));
+			const recovered = await apiFetch(`/api/goals/${goalId}/pr-status?intent=explicit`);
+			expect(recovered.status).toBe(200);
+			expect(await recovered.json()).toMatchObject({ stale: false, data: { number: 117 } });
+
+			const callsBeforeInjectedMerge = ghCalls.length;
+			const injectedMerge = await apiFetch(`/api/goals/${goalId}/pr-merge`, {
+				method: "POST",
+				body: JSON.stringify({ method: "squash", branch: "https://github.com/private/outside/pull/123" }),
+			});
+			expect(injectedMerge.status).toBe(409);
+			expect(ghCalls.slice(callsBeforeInjectedMerge).some(args => args[0] === "pr" && args[1] === "merge")).toBe(false);
+
+			const merge = await apiFetch(`/api/goals/${goalId}/pr-merge`, {
+				method: "POST",
+				body: JSON.stringify({ method: "rebase", branch: "17" }),
+			});
+			expect(merge.status).toBe(200);
+			expect([...ghCalls].reverse().find(args => args[0] === "pr" && args[1] === "merge")?.slice(0, 5)).toEqual([
+				"pr", "merge", "117", "--repo", "acme/owned-selector",
+			]);
+
+			goalStore.update(goalId, { branch: "feature/slash.ok" });
+			const slash = await apiFetch(`/api/goals/${goalId}/pr-status?intent=explicit`);
+			expect(slash.status).toBe(200);
+			expect(await slash.json()).toMatchObject({ data: { number: 118, title: "owned feature/slash.ok" } });
+			const publicOutput = JSON.stringify({ numericLookup, ghCalls });
+			expect(publicOutput).not.toContain(outsideSentinel);
+		} finally {
+			runner.execFile = originalExecFile;
+			await deleteGoal(goalId);
+		}
+	});
+
 	test("uses the owned project repository for broken sandbox status and merge", async ({ gateway }) => {
 		test.setTimeout(30_000);
 		const sessionId = await createRemoteStateSession(gateway, gitCwd());
@@ -649,6 +774,9 @@ test.describe("remote-state coordinator routes", () => {
 				if (cwd === ownedRepo || cwd === ambientCwd) return { stdout: ".git\n", stderr: "" };
 				throw new Error("broken host worktree");
 			}
+			if (commandName(file) === "docker" && args.includes("check-ref-format")) {
+				return { stdout: `${branch}\n`, stderr: "" };
+			}
 			if (commandName(file) === "git" && args.join(" ") === "remote get-url origin") {
 				return { stdout: cwd === ownedRepo
 					? "https://github.com/acme/owned.git\n"
@@ -665,7 +793,7 @@ test.describe("remote-state coordinator routes", () => {
 				}
 				prReads += 1;
 				return {
-					stdout: JSON.stringify({
+					stdout: JSON.stringify([{
 						number: 23,
 						url: "https://github.com/acme/owned/pull/23",
 						title: "owned fallback",
@@ -673,7 +801,7 @@ test.describe("remote-state coordinator routes", () => {
 						mergeable: "MERGEABLE",
 						headRefName: branch,
 						baseRefName: "main",
-					}),
+					}]),
 					stderr: "",
 				};
 			}
@@ -707,23 +835,23 @@ test.describe("remote-state coordinator routes", () => {
 		}
 	});
 
-	test("selects the requested owned component fallback in a multi-repository project", async ({ gateway }) => {
+	test("binds goal, session, and sandbox PR operations to the requested multi-repository component", async ({ gateway }) => {
 		test.setTimeout(30_000);
 		const fixtureRoot = mkdtempSync(join(tmpdir(), "bobbit-pr-component-containment-"));
 		const apiRepo = join(fixtureRoot, "api");
 		const webRepo = join(fixtureRoot, "web");
 		const worktreeRoot = join(fixtureRoot, "worktrees");
-		const apiWorktree = join(worktreeRoot, "api");
-		const brokenWebWorktree = join(worktreeRoot, "web-missing");
-		const outsideRepo = join(dirname(fixtureRoot), `outside-component-${Date.now()}`);
-		for (const directory of [apiRepo, webRepo, apiWorktree, outsideRepo]) mkdirSync(directory, { recursive: true });
+		const apiWorktree = join(worktreeRoot, "branch", "api");
+		const brokenWebWorktree = join(worktreeRoot, "branch", "web");
+		for (const directory of [apiRepo, webRepo, apiWorktree]) mkdirSync(directory, { recursive: true });
+		const branch = "41"; // Numeric branch names remain heads, never PR-number selectors.
 
 		const project = await registerProject({
 			name: `PR component containment ${Date.now()}`,
 			rootPath: fixtureRoot,
 			components: [
 				{ name: "api", repo: "api" },
-				{ name: "web", repo: "web" },
+				{ name: "web", repo: "web", relative_path: "src" },
 			],
 			config: { worktree_root: worktreeRoot },
 			seedWorkflows: false,
@@ -736,55 +864,95 @@ test.describe("remote-state coordinator routes", () => {
 			autoStartTeam: false,
 		});
 		const goalId = String(goal.id);
-		const goalStore = gateway.sessionManager.getGoalStoreForProject(project.id);
-		goalStore.update(goalId, {
-			cwd: brokenWebWorktree,
-			worktreePath: brokenWebWorktree,
-			repoPath: webRepo,
-			repoWorktrees: { web: brokenWebWorktree, injected: outsideRepo },
-			branch: "41",
+		const productionRepoWorktrees = { api: apiWorktree, web: brokenWebWorktree };
+		gateway.sessionManager.getGoalStoreForProject(project.id).update(goalId, {
+			cwd: join(brokenWebWorktree, "src"),
+			worktreePath: worktreeRoot,
+			repoPath: fixtureRoot,
+			repoWorktrees: productionRepoWorktrees,
+			branch,
 			setupStatus: "ready",
 		});
 
+		const normalSessionId = await createRemoteStateSession(gateway, webRepo, project.id);
+		gateway.sessionManager.updateSessionMeta(normalSessionId, {
+			branch,
+			repoPath: fixtureRoot,
+			worktreePath: worktreeRoot,
+			repoWorktrees: productionRepoWorktrees,
+		});
+		const normalSession = gateway.sessionManager.getSession(normalSessionId) as any;
+		normalSession.cwd = join(brokenWebWorktree, "src");
+		normalSession.repoPath = fixtureRoot;
+		normalSession.worktreePath = worktreeRoot;
+		normalSession.repoWorktrees = productionRepoWorktrees;
+
+		const sandboxSessionId = await createRemoteStateSession(gateway, webRepo, project.id);
+		gateway.sessionManager.updateSessionMeta(sandboxSessionId, {
+			branch,
+			repoPath: fixtureRoot,
+			worktreePath: worktreeRoot,
+			repoWorktrees: productionRepoWorktrees,
+		});
+		const sandboxSession = gateway.sessionManager.getSession(sandboxSessionId) as any;
+		sandboxSession.sandboxed = true;
+		sandboxSession.containerId = "fixture-web-component";
+		sandboxSession.cwd = "/workspace-wt/branch/web/src";
+		sandboxSession.repoPath = fixtureRoot;
+		sandboxSession.worktreePath = worktreeRoot;
+		sandboxSession.repoWorktrees = productionRepoWorktrees;
+
 		const runner = (gateway.sessionManager as any).commandRunner;
 		const originalExecFile = runner.execFile;
-		const ghCwds: string[] = [];
 		const gitProbeCwds: string[] = [];
-		let prReads = 0;
-		let prMerges = 0;
+		const ghCalls: Array<{ args: string[]; cwd: string }> = [];
+		const apiSentinel = "WRONG API COMPONENT SENTINEL";
 		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
 			const command = commandName(file);
 			const cwd = String(options?.cwd ?? "");
+			if (command === "docker" && args.includes("rev-parse") && args.includes("--abbrev-ref")) {
+				return { stdout: `${branch}\n`, stderr: "" };
+			}
+			if (command === "docker" && args.includes("check-ref-format")) {
+				return { stdout: `${branch}\n`, stderr: "" };
+			}
+			if (command === "git" && args.join(" ") === `check-ref-format --branch ${branch}`) {
+				return { stdout: `${branch}\n`, stderr: "" };
+			}
 			if (command === "git" && (args.join(" ") === "rev-parse --git-dir" || args.join(" ") === "rev-parse --show-toplevel")) {
 				gitProbeCwds.push(cwd);
-				if (cwd === webRepo || cwd === apiWorktree || cwd === outsideRepo) return { stdout: ".git\n", stderr: "" };
-				throw new Error("broken component worktree");
+				if (cwd === webRepo || cwd === apiWorktree || cwd === apiRepo) return { stdout: ".git\n", stderr: "" };
+				throw new Error("broken requested component worktree");
 			}
 			if (command === "git" && args.join(" ") === "remote get-url origin") {
 				return { stdout: cwd === webRepo
 					? "https://github.com/acme/owned-web.git\n"
-					: "https://github.com/private/wrong-component.git\n", stderr: "" };
+					: "https://github.com/private/wrong-api.git\n", stderr: "" };
 			}
 			if (command === "gh") {
-				ghCwds.push(cwd);
-				if (args[0] === "pr" && args[1] === "merge") {
-					prMerges += 1;
-					return { stdout: "merged", stderr: "" };
-				}
+				ghCalls.push({ args: [...args], cwd });
+				if (args[0] === "pr" && args[1] === "merge") return { stdout: "merged", stderr: "" };
 				if (args[0] === "api") {
 					return { stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }), stderr: "" };
 				}
-				prReads += 1;
+				const repoIndex = args.indexOf("--repo");
+				const headIndex = args.indexOf("--head");
+				const correctRepo = args[repoIndex + 1] === "acme/owned-web";
 				return {
-					stdout: JSON.stringify({
+					stdout: JSON.stringify([correctRepo ? {
 						number: 41,
 						url: "https://github.com/acme/owned-web/pull/41",
 						title: "owned web component",
 						state: "OPEN",
 						mergeable: "MERGEABLE",
-						headRefName: "41",
+						headRefName: args[headIndex + 1],
 						baseRefName: "main",
-					}),
+					} : {
+						number: 666,
+						url: "https://github.com/private/wrong-api/pull/666",
+						title: apiSentinel,
+						headRefName: branch,
+					}]),
 					stderr: "",
 				};
 			}
@@ -792,26 +960,37 @@ test.describe("remote-state coordinator routes", () => {
 		};
 
 		try {
-			const status = await apiFetch(`/api/goals/${goalId}/pr-status?intent=explicit`);
-			expect(status.status).toBe(200);
-			expect(await status.json()).toMatchObject({ data: { number: 41, title: "owned web component" } });
-			const merge = await apiFetch(`/api/goals/${goalId}/pr-merge`, {
-				method: "POST",
-				body: JSON.stringify({ method: "rebase", branch: "41" }),
-			});
-			expect(merge.status).toBe(200);
+			const routeCases = [
+				{ base: `/api/goals/${goalId}`, kind: "goal" },
+				{ base: `/api/sessions/${normalSessionId}`, kind: "session" },
+				{ base: `/api/sessions/${sandboxSessionId}`, kind: "sandbox" },
+			];
+			for (const routeCase of routeCases) {
+				const status = await apiFetch(`${routeCase.base}/pr-status?intent=explicit`);
+				expect(status.status, `${routeCase.kind} status`).toBe(200);
+				expect(await status.json()).toMatchObject({ data: { number: 41, title: "owned web component" } });
+				const merge = await apiFetch(`${routeCase.base}/pr-merge`, {
+					method: "POST",
+					body: JSON.stringify({ method: "rebase", branch }),
+				});
+				expect(merge.status, `${routeCase.kind} merge`).toBe(200);
+			}
 			expect(gitProbeCwds).not.toContain(apiWorktree);
 			expect(gitProbeCwds).not.toContain(apiRepo);
-			expect(gitProbeCwds).not.toContain(outsideRepo);
-			expect(prReads).toBe(1);
-			expect(prMerges).toBe(1);
-			expect(ghCwds.every(cwd => cwd === webRepo)).toBe(true);
+			expect(JSON.stringify(ghCalls)).not.toContain(apiSentinel);
+			for (const call of ghCalls.filter(call => call.args[0] === "pr" && call.args[1] === "list")) {
+				expect(call.cwd).toBe(webRepo);
+				expect(call.args.slice(0, 6)).toEqual(["pr", "list", "--repo", "acme/owned-web", "--head", branch]);
+			}
+			for (const call of ghCalls.filter(call => call.args[0] === "pr" && call.args[1] === "merge")) {
+				expect(call.cwd).toBe(webRepo);
+				expect(call.args.slice(0, 5)).toEqual(["pr", "merge", "41", "--repo", "acme/owned-web"]);
+			}
 		} finally {
 			runner.execFile = originalExecFile;
-			await deleteGoal(goalId);
+			await Promise.all([deleteSession(normalSessionId), deleteSession(sandboxSessionId), deleteGoal(goalId)]);
 			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 			await awaitableRm(fixtureRoot, { maxAttempts: 5, backoffMs: 50 });
-			await awaitableRm(outsideRepo, { maxAttempts: 5, backoffMs: 50 });
 		}
 	});
 
@@ -857,13 +1036,16 @@ test.describe("remote-state coordinator routes", () => {
 			if (commandName(file) === "docker" && args.at(-1) === "git rev-parse --abbrev-ref HEAD") {
 				return { stdout: `${branch}\n`, stderr: "" };
 			}
+			if (commandName(file) === "docker" && args.includes("check-ref-format")) {
+				return { stdout: `${branch}\n`, stderr: "" };
+			}
 			if (commandName(file) === "git" && args.join(" ") === "remote get-url origin") {
 				return { stdout: "https://github.com/acme/merge-invalidation.git\n", stderr: "" };
 			}
-			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "view") {
+			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "list") {
 				prReads += 1;
 				return {
-					stdout: JSON.stringify({
+					stdout: JSON.stringify([{
 						number: 99,
 						url: "https://github.com/acme/merge-invalidation/pull/99",
 						title: `merge version ${version}`,
@@ -871,7 +1053,7 @@ test.describe("remote-state coordinator routes", () => {
 						mergeable: "MERGEABLE",
 						headRefName: branch,
 						baseRefName: "main",
-					}),
+					}]),
 					stderr: "",
 				};
 			}
@@ -896,7 +1078,7 @@ test.describe("remote-state coordinator routes", () => {
 
 			const goalMerge = await apiFetch(`/api/goals/${goalId}/pr-merge`, {
 				method: "POST",
-				body: JSON.stringify({ method: "squash", branch: "client-goal-display-branch" }),
+				body: JSON.stringify({ method: "squash", branch }),
 			});
 			expect(goalMerge.status).toBe(200);
 			const afterGoalMerge = await Promise.all([
@@ -916,27 +1098,29 @@ test.describe("remote-state coordinator routes", () => {
 				expect(await response.json()).toMatchObject({ stale: false, data: { state: "MERGED", title: "merge version 2" } });
 			}
 
+			await new Promise(resolve => setTimeout(resolve, 260));
 			const sessionMerge = await apiFetch(`/api/sessions/${sessionId}/pr-merge`, {
 				method: "POST",
-				body: JSON.stringify({ method: "rebase", branch: "client-session-display-branch" }),
+				body: JSON.stringify({ method: "rebase", branch }),
 			});
 			expect(sessionMerge.status).toBe(200);
 			const staleAfterSessionMerge = await apiFetch(`/api/goals/${goalId}/pr-status?intent=automatic`);
 			expect(await staleAfterSessionMerge.json()).toMatchObject({ stale: true, data: { title: "merge version 2" } });
-			await waitForReads(3);
+			await waitForReads(4);
 			const sessionFresh = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=automatic`);
 			expect(await sessionFresh.json()).toMatchObject({ stale: false, data: { title: "merge version 3" } });
 
 			rejectMerge = true;
+			await new Promise(resolve => setTimeout(resolve, 260));
 			const readsBeforeRejectedMerge = prReads;
 			const rejectedMerge = await apiFetch(`/api/sessions/${sessionId}/pr-merge`, {
 				method: "POST",
-				body: JSON.stringify({ method: "merge", branch: "client-rejected-display-branch" }),
+				body: JSON.stringify({ method: "merge", branch }),
 			});
 			expect(rejectedMerge.status).toBe(500);
 			const retained = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=automatic`);
 			expect(await retained.json()).toMatchObject({ stale: false, data: { title: "merge version 3" } });
-			expect(prReads).toBe(readsBeforeRejectedMerge);
+			expect(prReads).toBe(readsBeforeRejectedMerge + 1);
 		} finally {
 			runner.execFile = originalExecFile;
 			await deleteSession(sessionId);
@@ -960,7 +1144,7 @@ test.describe("remote-state coordinator routes", () => {
 			if (commandName(file) === "git" && args.join(" ") === "remote get-url origin") {
 				return { stdout: "https://token:secret@github.com/acme/route-failure.git\n", stderr: "" };
 			}
-			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "view") {
+			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "list") {
 				prReads += 1;
 				if (failure) {
 					const error = new Error(`${failure} token:secret https://secret@example.test/private`);
@@ -972,7 +1156,7 @@ test.describe("remote-state coordinator routes", () => {
 					await recoveryGate;
 				}
 				return {
-					stdout: JSON.stringify({
+					stdout: JSON.stringify([{
 						number: 77,
 						url: "https://github.com/acme/route-failure/pull/77",
 						title: `safe version ${version}`,
@@ -980,7 +1164,7 @@ test.describe("remote-state coordinator routes", () => {
 						mergeable: "MERGEABLE",
 						headRefName: "master",
 						baseRefName: "master",
-					}),
+					}]),
 					stderr: "",
 				};
 			}
@@ -1109,20 +1293,32 @@ test.describe("remote-state coordinator routes", () => {
 				if (headUnavailable) throw new Error("unborn HEAD");
 				if (String(options?.cwd) === sibling) return { stdout: `${privateSiblingHead}\n`, stderr: "" };
 			}
-			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "view") {
+			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "list") {
 				prReads += 1;
-				const isSibling = String(options?.cwd) === sibling;
-				const number = isSibling ? 202 : 101;
 				return {
-					stdout: JSON.stringify({
-						number,
-						url: `https://github.com/acme/private-head-isolation/pull/${number}`,
-						title: isSibling ? "sibling result" : "primary result",
+					stdout: JSON.stringify([{
+						number: 101,
+						url: "https://github.com/acme/private-head-isolation/pull/101",
+						title: "primary result",
 						state: "OPEN",
 						mergeable: "MERGEABLE",
-						headRefName: isSibling ? "public-sibling" : "public-primary",
+						headRefName: "public-primary",
 						baseRefName: "main",
-					}),
+					}]),
+					stderr: "",
+				};
+			}
+			if (commandName(file) === "gh" && args[0] === "api" && args.some(arg => arg.includes("/commits/"))) {
+				prReads += 1;
+				return {
+					stdout: JSON.stringify([{
+						number: 202,
+						html_url: "https://github.com/acme/private-head-isolation/pull/202",
+						title: "sibling result",
+						state: "open",
+						head: { ref: "public-sibling" },
+						base: { ref: "main" },
+					}]),
 					stderr: "",
 				};
 			}
