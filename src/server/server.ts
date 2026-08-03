@@ -3066,6 +3066,26 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		&& left.remote.owner === right.remote.owner
 		&& left.remote.repository === right.remote.repository
 	);
+	const resolveConfiguredPrSourceIdentity = async (source: string): Promise<OwnedPrRepositoryIdentity | undefined> => {
+		let rawTopLevel: string;
+		try {
+			rawTopLevel = (await execGitArgs(
+				["rev-parse", "--show-toplevel"],
+				source,
+				5_000,
+				undefined,
+				gatewayDeps.commandRunner,
+			)).trim();
+		} catch {
+			return undefined;
+		}
+		if (!rawTopLevel) return undefined;
+		const absoluteTopLevel = path.isAbsolute(rawTopLevel) ? rawTopLevel : path.resolve(source, rawTopLevel);
+		// A configured nested component must be a repository root in its own right.
+		// Merely resolving Git through an enclosing repository is not ownership.
+		if (comparableOwnedPath(absoluteTopLevel) !== comparableOwnedPath(source)) return undefined;
+		return resolveOwnedPrRepositoryIdentity(source);
+	};
 	const ownedPrCandidates = async (owner: PrRouteOwner): Promise<OwnedPrCandidate[]> => {
 		// Project scope comes from the store that owns the entity, never from its
 		// mutable/persisted projectId or repository metadata.
@@ -3135,25 +3155,33 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				: path.join(projectRoot, selected.repo));
 			if (!isSameOrDescendantOwnedPath(projectRoot, selectedSource)) return [];
 
-			// Distinct configured repositories may not become aliases or containment
-			// overlaps after symlink/junction canonicalization. Otherwise a lexical
-			// component coordinate could authorize a sibling repository.
-			for (const sibling of components) {
-				if (sibling.repo === selected.repo) continue;
-				const siblingSource = canonicalOwnedPath(sibling.repo === "."
+			// Validate every distinct configured source as an exact Git top-level.
+			// Canonical path aliases and duplicate Git identities remain ambiguous, but
+			// genuine nested repositories are allowed even though their paths overlap.
+			const configuredSources = new Map<string, { source: string; identity: OwnedPrRepositoryIdentity }>();
+			const sourcePaths = new Set<string>();
+			const sourceIdentities: OwnedPrRepositoryIdentity[] = [];
+			for (const component of components) {
+				if (configuredSources.has(component.repo)) continue;
+				const source = canonicalOwnedPath(component.repo === "."
 					? projectRoot
-					: path.join(projectRoot, sibling.repo));
-				if (
-					isSameOrDescendantOwnedPath(siblingSource, selectedSource)
-					|| isSameOrDescendantOwnedPath(selectedSource, siblingSource)
-				) return [];
+					: path.join(projectRoot, component.repo));
+				if (!isSameOrDescendantOwnedPath(projectRoot, source)) return [];
+				const sourcePath = comparableOwnedPath(source);
+				if (sourcePaths.has(sourcePath)) return [];
+				const identity = await resolveConfiguredPrSourceIdentity(source);
+				if (!identity || sourceIdentities.some(existing => sameOwnedPrRepository(existing, identity))) return [];
+				sourcePaths.add(sourcePath);
+				sourceIdentities.push(identity);
+				configuredSources.set(component.repo, { source, identity });
 			}
 
 			// The registered source repository is authoritative. A selected worktree
 			// (including a cwd below it) is eligible only when canonical Git common-dir
 			// and normalized trusted remote both match that source exactly.
-			const sourceIdentity = await resolveOwnedPrRepositoryIdentity(selectedSource);
-			if (!sourceIdentity) return [];
+			const selectedConfiguredSource = configuredSources.get(selected.repo);
+			if (!selectedConfiguredSource || comparableOwnedPath(selectedConfiguredSource.source) !== comparableOwnedPath(selectedSource)) return [];
+			const sourceIdentity = selectedConfiguredSource.identity;
 			const addMatchingRepository = async (candidate: unknown, allowedRoots: readonly string[]) => {
 				const before = candidates.length;
 				add(candidate, allowedRoots);

@@ -950,12 +950,17 @@ test.describe("remote-state coordinator routes", () => {
 			if (command === "git" && args.join(" ") === "rev-parse --path-format=absolute --git-common-dir") {
 				gitProbeCwds.push(cwd);
 				if (cwd === webRepo) return { stdout: `${join(webRepo, ".git")}\n`, stderr: "" };
-				if (cwd === canonicalApiWorktree || cwd === join(canonicalApiWorktree, "src")) {
+				if (cwd === apiRepo || cwd === canonicalApiWorktree || cwd === join(canonicalApiWorktree, "src")) {
 					return { stdout: `${join(apiRepo, ".git")}\n`, stderr: "" };
 				}
 				throw new Error("unknown repository identity");
 			}
-			if (command === "git" && (args.join(" ") === "rev-parse --git-dir" || args.join(" ") === "rev-parse --show-toplevel")) {
+			if (command === "git" && args.join(" ") === "rev-parse --show-toplevel") {
+				gitProbeCwds.push(cwd);
+				if (cwd === webRepo || cwd === apiRepo) return { stdout: `${cwd}\n`, stderr: "" };
+				throw new Error("unknown configured component source");
+			}
+			if (command === "git" && args.join(" ") === "rev-parse --git-dir") {
 				gitProbeCwds.push(cwd);
 				if (cwd === webRepo || cwd === canonicalApiWorktree || cwd === apiRepo) return { stdout: ".git\n", stderr: "" };
 				throw new Error("broken requested component worktree");
@@ -1011,10 +1016,11 @@ test.describe("remote-state coordinator routes", () => {
 				});
 				expect(merge.status, `${routeCase.kind} merge`).toBe(200);
 			}
-			// The alias is probed only to reject its API identity; all GitHub reads and
-			// destructive actions use the authoritative web source fallback.
+			// Every configured source is validated locally as an exact Git top-level;
+			// the aliased worktree is then rejected by identity. GitHub reads and
+			// destructive actions still use only the authoritative web source fallback.
+			expect(gitProbeCwds).toContain(apiRepo);
 			expect(gitProbeCwds).toContain(join(canonicalApiWorktree, "src"));
-			expect(gitProbeCwds).not.toContain(apiRepo);
 			expect(JSON.stringify(ghCalls)).not.toContain(apiSentinel);
 			for (const call of ghCalls.filter(call => call.args[0] === "pr" && call.args[1] === "list")) {
 				expect(call.cwd).toBe(webRepo);
@@ -1029,6 +1035,149 @@ test.describe("remote-state coordinator routes", () => {
 			await Promise.all([deleteSession(normalSessionId), deleteSession(sandboxSessionId), deleteGoal(goalId)]);
 			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 			await awaitableRm(fixtureRoot, { maxAttempts: 5, backoffMs: 50 });
+		}
+	});
+
+	test("keeps genuine root and nested repositories bound to their exact PR targets", async ({ gateway }) => {
+		test.setTimeout(30_000);
+		const projectRoot = mkdtempSync(join(tmpdir(), "bobbit-pr-root-nested-"));
+		const nestedSource = join(projectRoot, "packages", "nested");
+		const worktreeRoot = mkdtempSync(join(tmpdir(), "bobbit-pr-root-nested-wt-"));
+		const branchContainer = join(worktreeRoot, "branch");
+		const rootWorktree = branchContainer;
+		const nestedWorktree = join(branchContainer, "packages", "nested");
+		mkdirSync(nestedSource, { recursive: true });
+		mkdirSync(nestedWorktree, { recursive: true });
+		const branch = "feature/root-and-nested";
+
+		const project = await registerProject({
+			name: `Root nested PR binding ${Date.now()}`,
+			rootPath: projectRoot,
+			components: [
+				{ name: "root", repo: "." },
+				{ name: "nested", repo: "packages/nested" },
+			],
+			config: { worktree_root: worktreeRoot },
+			seedWorkflows: false,
+		});
+		const goals = await Promise.all([
+			createGoal({ projectId: project.id, title: `Root PR ${Date.now()}`, cwd: projectRoot, worktree: false, autoStartTeam: false }),
+			createGoal({ projectId: project.id, title: `Nested PR ${Date.now()}`, cwd: nestedSource, worktree: false, autoStartTeam: false }),
+		]);
+		const [rootGoalId, nestedGoalId] = goals.map(goal => String(goal.id));
+		const repoWorktrees = { ".": rootWorktree, "packages/nested": nestedWorktree };
+		const goalStore = gateway.sessionManager.getGoalStoreForProject(project.id);
+		goalStore.update(rootGoalId, {
+			cwd: rootWorktree,
+			worktreePath: branchContainer,
+			repoPath: projectRoot,
+			repoWorktrees,
+			branch,
+			setupStatus: "ready",
+		});
+		goalStore.update(nestedGoalId, {
+			cwd: nestedWorktree,
+			worktreePath: branchContainer,
+			repoPath: projectRoot,
+			repoWorktrees,
+			branch,
+			setupStatus: "ready",
+		});
+
+		const repositoryByCwd = new Map([
+			[projectRoot, { topLevel: projectRoot, commonDir: join(projectRoot, ".git"), slug: "acme/root-repository", number: 101, title: "root repository PR" }],
+			[rootWorktree, { topLevel: rootWorktree, commonDir: join(projectRoot, ".git"), slug: "acme/root-repository", number: 101, title: "root repository PR" }],
+			[nestedSource, { topLevel: nestedSource, commonDir: join(nestedSource, ".git"), slug: "acme/nested-repository", number: 202, title: "nested repository PR" }],
+			[nestedWorktree, { topLevel: nestedWorktree, commonDir: join(nestedSource, ".git"), slug: "acme/nested-repository", number: 202, title: "nested repository PR" }],
+		]);
+		const runner = (gateway.sessionManager as any).commandRunner;
+		const originalExecFile = runner.execFile;
+		const ghCalls: Array<{ args: string[]; cwd: string }> = [];
+		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+			const command = commandName(file);
+			const cwd = String(options?.cwd ?? "");
+			const repository = repositoryByCwd.get(cwd);
+			if (command === "git" && args.join(" ") === "rev-parse --show-toplevel") {
+				if (!repository || (cwd !== projectRoot && cwd !== nestedSource)) throw new Error("not a configured source");
+				return { stdout: `${repository.topLevel}\n`, stderr: "" };
+			}
+			if (command === "git" && args.join(" ") === "rev-parse --path-format=absolute --git-common-dir") {
+				if (!repository) throw new Error("unknown repository");
+				return { stdout: `${repository.commonDir}\n`, stderr: "" };
+			}
+			if (command === "git" && args.join(" ") === "rev-parse --git-dir") {
+				if (!repository) throw new Error("unknown repository");
+				return { stdout: ".git\n", stderr: "" };
+			}
+			if (command === "git" && args.join(" ") === "remote get-url origin") {
+				if (!repository) throw new Error("unknown repository");
+				return { stdout: `https://github.com/${repository.slug}.git\n`, stderr: "" };
+			}
+			if (command === "git" && args.join(" ") === `check-ref-format --branch ${branch}`) {
+				return { stdout: `${branch}\n`, stderr: "" };
+			}
+			if (command === "gh") {
+				ghCalls.push({ args: [...args], cwd });
+				if (args[0] === "pr" && args[1] === "list") {
+					if (!repository) throw new Error("GitHub read escaped configured repository");
+					const repoIndex = args.indexOf("--repo");
+					if (args[repoIndex + 1] !== repository.slug) throw new Error("GitHub repository selector mismatch");
+					return {
+						stdout: JSON.stringify([{
+							number: repository.number,
+							url: `https://github.com/${repository.slug}/pull/${repository.number}`,
+							title: repository.title,
+							state: "OPEN",
+							mergeable: "MERGEABLE",
+							headRefName: branch,
+							baseRefName: "main",
+						}]),
+						stderr: "",
+					};
+				}
+				if (args[0] === "pr" && args[1] === "merge") return { stdout: "merged", stderr: "" };
+				if (args[0] === "api") {
+					return { stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }), stderr: "" };
+				}
+			}
+			return originalExecFile.call(runner, file, args, options);
+		};
+
+		try {
+			const routeCases = [
+				{ goalId: rootGoalId, repository: repositoryByCwd.get(rootWorktree)! },
+				{ goalId: nestedGoalId, repository: repositoryByCwd.get(nestedWorktree)! },
+			];
+			for (const routeCase of routeCases) {
+				const status = await apiFetch(`/api/goals/${routeCase.goalId}/pr-status?intent=explicit`);
+				expect(status.status).toBe(200);
+				expect(await status.json()).toMatchObject({
+					stale: false,
+					data: { number: routeCase.repository.number, title: routeCase.repository.title },
+				});
+				const merge = await apiFetch(`/api/goals/${routeCase.goalId}/pr-merge`, {
+					method: "POST",
+					body: JSON.stringify({ method: "rebase", branch }),
+				});
+				expect(merge.status).toBe(200);
+			}
+
+			const listCalls = ghCalls.filter(call => call.args[0] === "pr" && call.args[1] === "list");
+			expect(listCalls.some(call => call.cwd === rootWorktree && call.args.includes("acme/root-repository"))).toBe(true);
+			expect(listCalls.some(call => call.cwd === nestedWorktree && call.args.includes("acme/nested-repository"))).toBe(true);
+			const mergeCalls = ghCalls.filter(call => call.args[0] === "pr" && call.args[1] === "merge");
+			expect(mergeCalls).toEqual(expect.arrayContaining([
+				expect.objectContaining({ cwd: rootWorktree, args: expect.arrayContaining(["101", "acme/root-repository"]) }),
+				expect.objectContaining({ cwd: nestedWorktree, args: expect.arrayContaining(["202", "acme/nested-repository"]) }),
+			]));
+		} finally {
+			runner.execFile = originalExecFile;
+			await Promise.all(goals.map(goal => deleteGoal(String(goal.id))));
+			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
+			await Promise.all([
+				awaitableRm(projectRoot, { maxAttempts: 5, backoffMs: 50 }),
+				awaitableRm(worktreeRoot, { maxAttempts: 5, backoffMs: 50 }),
+			]);
 		}
 	});
 
