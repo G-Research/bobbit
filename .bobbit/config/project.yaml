@@ -78,6 +78,20 @@ workflows:
               testable acceptance criteria, cover edge/error handling, and
               include an E2E test plan that validates the user journey
               end-to-end.
+
+              Treat this as a revision-ready content review. A FAIL is valid only
+              for an explicit unmet goal requirement or concrete regression and
+              is invalid without a complete author-ready revision packet for
+              every blocker. For each blocker, identify the exact artifact
+              location; explain the goal-linked gap and practical consequence;
+              provide concrete replacement wording, an outline, contract,
+              data-flow/state sequence, acceptance criterion, example, or
+              test-plan case; state consistency edits and constraints; include
+              credible alternatives with tradeoffs only when they exist; and
+              separate required edits from bounded improvements. Require
+              implementable contracts and testable acceptance criteria only to
+              the level needed by the approved goal, not exhaustive pseudocode,
+              formal proof, or speculative hardening.
           - name: Gap analysis
             type: llm-review
             role: spec-auditor
@@ -116,6 +130,20 @@ workflows:
 
               Use your tools to read the design document content from the
               signal.
+
+              Treat this as a revision-ready content review. A FAIL is valid only
+              for an explicit unmet goal requirement or concrete regression and
+              is invalid without a complete author-ready revision packet for
+              every blocker. For each blocker, identify the exact artifact
+              location; explain the goal-linked gap and practical consequence;
+              provide concrete replacement wording, an outline, contract,
+              data-flow/state sequence, acceptance criterion, example, or
+              test-plan case; state consistency edits and constraints; include
+              credible alternatives with tradeoffs only when they exist; and
+              separate required edits from bounded improvements. Require
+              implementable contracts and testable acceptance criteria only to
+              the level needed by the approved goal, not exhaustive pseudocode,
+              formal proof, or speculative hardening.
       - id: implementation
         name: Implementation
         depends_on:
@@ -123,6 +151,7 @@ workflows:
         verify:
           - name: Build
             type: command
+            phase: 0
             timeout: 600
             component: bobbit
             command: build
@@ -138,158 +167,56 @@ workflows:
             command: unit
           - name: Browser tests
             type: command
-            phase: 2
+            phase: 1
             timeout: 900
             component: bobbit
             command: browser
           - name: E2E tests
             type: command
-            phase: 3
+            phase: 1
             timeout: 900
             component: bobbit
             command: e2e
-          - name: Gap analysis
+          - name: Spec and regression conformance
             type: llm-review
             role: spec-auditor
-            phase: 4
+            phase: 2
             prompt: >-
-              Compare the goal specification and design document to the actual
-              implementation on this branch.
-
-
-              The goal spec is:
-
+              Compare the goal specification below, available upstream design or
+              issue analysis, implementation, and tests on branch {{branch}}
+              against origin/{{baseBranch}}.
 
               {{goal_spec}}
 
-
-              Run `git diff origin/{{baseBranch}}...{{branch}} -- .
-              ':!package-lock.json'` to see the implementation diff.
-
-
-              Read the design document content from upstream gates.
-
-
-              Identify:
-
-
-              1. Features described in the goal/design but not implemented
-
-
-              2. Acceptance criteria not met by the code changes
-
-
-              3. Implemented behavior that contradicts the specification
-
-
-              IMPORTANT: Ignore documentation gaps. This gap analysis runs
-              during the implementation phase, BEFORE the documentation gate. Do
-              NOT flag missing or outdated documentation, README updates,
-              design-doc updates, code comments, or other docs-only artifacts as
-              gaps — those are addressed by the dedicated documentation gate
-              later in the workflow. Focus exclusively on code/behavior gaps
-              relative to the spec and design.
-          - name: Code quality review
+              Ignore documentation-only gaps. Identify unmet behavior,
+              acceptance criteria, regressions, contradictions, and missing
+              regression coverage. Every blocker must include implementation-ready
+              remediation and focused tests that prove the fix.
+          - name: Integrated implementation review
             type: llm-review
             role: code-reviewer
-            phase: 4
+            phase: 2
             prompt: >-
-              Review the code changes on branch {{branch}} vs
-              origin/{{baseBranch}} for quality.
+              Review the implementation on branch {{branch}} versus
+              origin/{{baseBranch}}. Cover correctness, error handling,
+              edge and mixed states, concurrency and lifecycle, cross-layer
+              interactions, maintainability, regression coverage, and
+              independently verifiable bugs.
 
-
-              Start with `git diff --stat origin/{{baseBranch}}...{{branch}} --
-              . ':!package-lock.json'` to see which files changed.
-
-
-              Then use `git diff origin/{{baseBranch}}...{{branch}} -M -- .
-              ':!package-lock.json'` (with rename detection) to see actual
-              content changes — this collapses pure renames into one-line
-              summaries.
-
-
-              For large diffs, review files individually with `read` rather than
-              dumping the entire diff into context.
-
-
-              Check:
-
-
-              1. Correctness — logic errors, off-by-one, race conditions
-
-
-              2. Error handling — missing try/catch, unhandled promise
-              rejections
-
-
-              3. Edge cases — null/undefined, empty arrays, boundary values
-
-
-              4. Code style — consistent naming, no dead code, clear intent
-
-
-              5. Test coverage — are new behaviors tested?
-          - name: E2E user journey coverage
-            type: llm-review
-            phase: 4
-            prompt: >-
-              Verify that the implementation includes browser-based E2E tests
-              covering the user journey for this feature.
-
-
-              The goal spec is:
-
-
-              {{goal_spec}}
-
-
-              Run `git diff origin/{{baseBranch}}...{{branch}} -- .
-              ':!package-lock.json'` to see all changes.
-
-
-              Check navigation, happy path, persistence, cleanup, and
-              integration coverage in tests/e2e/ui/*.spec.ts or
-              tests/e2e/*.spec.ts. FAIL if no new E2E tests were added for
-              user-facing behavior, or if persistence/cleanup are skipped.
-          - name: Bug hunt
-            type: llm-review
-            role: bug-hunter
-            phase: 4
-            prompt: Review the implementation on branch {{branch}} vs origin/{{baseBranch}}
-              for actionable bugs. Focus on correctness, edge cases, error
-              paths, cross-system interactions, concurrency/lifecycle, and
-              dangerous behavior. Fail only for critical/high actionable bugs;
-              include file:line, reproduction conditions, consequence, and why
-              it is a bug.
-          - name: Verifiable bug hunt
-            type: llm-review
-            role: verifiable-bug-hunter
-            phase: 4
-            prompt: Look for verifiable bugs in the implementation diff.
+              Deduplicate findings by root cause. For each blocker, provide an
+              exact minimal fix and focused tests that independently verify it.
           - name: Security review
             type: llm-review
             role: security-reviewer
-            phase: 4
+            phase: 2
             prompt: >-
-              Security review of changes on branch {{branch}} vs
-              origin/{{baseBranch}}.
+              Review changed trust boundaries, authentication and authorization,
+              validation and injection, secrets, destructive or resource
+              ownership, dependency risk, and security-relevant races on branch
+              {{branch}} versus origin/{{baseBranch}}.
 
-
-              Run `git diff origin/{{baseBranch}}...{{branch}} -- .
-              ':!package-lock.json'` to see changes.
-
-
-              Check injection risks, auth/authz, data validation, secrets
-              handling, and dependency risks.
-          - name: Systems interaction review
-            type: llm-review
-            role: systems-reviewer
-            phase: 4
-            prompt: >-
-              Perform the complete Systems Interaction Review defined by the
-              systems-reviewer role for branch {{branch}} versus {{baseBranch}}.
-              Inspect every changed cross-layer state and action path, continue
-              after the first finding, and submit the verification result.
+              For each blocker, provide minimal remediation plus abuse and
+              regression tests that verify the fix.
       - id: documentation
         name: Documentation
         depends_on:
@@ -311,6 +238,18 @@ workflows:
               documented; stale docs are updated; documentation placement is
               appropriate; and new docs have good hierarchy, resilience, WHY,
               and big-picture context.
+
+              Treat this as a revision-ready documentation review. A FAIL is
+              valid only for an explicit unmet goal requirement or concrete
+              change-introduced regression and is invalid without an author-ready
+              revision packet for every blocker. For each blocker, name exact
+              documentation paths and sections; identify the stale or missing
+              claim and its goal-linked consequence; give proposed replacement
+              wording or outline with relevant examples or links; state related
+              cross-section edits and constraints; include credible alternatives
+              with tradeoffs only when they exist; separate required edits from
+              bounded improvements; and explain how to verify the documented
+              behavior against the implementation.
       - id: ready-to-merge
         name: Ready to Merge
         depends_on:
@@ -509,6 +448,20 @@ workflows:
               testable acceptance criteria, cover edge/error handling, and
               include an E2E test plan that validates the user journey
               end-to-end.
+
+              Treat this as a revision-ready content review. A FAIL is valid only
+              for an explicit unmet goal requirement or concrete regression and
+              is invalid without a complete author-ready revision packet for
+              every blocker. For each blocker, identify the exact artifact
+              location; explain the goal-linked gap and practical consequence;
+              provide concrete replacement wording, an outline, contract,
+              data-flow/state sequence, acceptance criterion, example, or
+              test-plan case; state consistency edits and constraints; include
+              credible alternatives with tradeoffs only when they exist; and
+              separate required edits from bounded improvements. Require
+              implementable contracts and testable acceptance criteria only to
+              the level needed by the approved goal, not exhaustive pseudocode,
+              formal proof, or speculative hardening.
           - name: Gap analysis
             type: llm-review
             role: spec-auditor
@@ -527,6 +480,20 @@ workflows:
               not target the same acceptance criteria, and scope expansion added
               to justify an abstraction or possible future reuse. Use your tools
               to read the design document content from the signal.
+
+              Treat this as a revision-ready content review. A FAIL is valid only
+              for an explicit unmet goal requirement or concrete regression and
+              is invalid without a complete author-ready revision packet for
+              every blocker. For each blocker, identify the exact artifact
+              location; explain the goal-linked gap and practical consequence;
+              provide concrete replacement wording, an outline, contract,
+              data-flow/state sequence, acceptance criterion, example, or
+              test-plan case; state consistency edits and constraints; include
+              credible alternatives with tradeoffs only when they exist; and
+              separate required edits from bounded improvements. Require
+              implementable contracts and testable acceptance criteria only to
+              the level needed by the approved goal, not exhaustive pseudocode,
+              formal proof, or speculative hardening.
       - id: implementation
         name: Implementation
         depends_on:
@@ -534,6 +501,7 @@ workflows:
         verify:
           - name: Build
             type: command
+            phase: 0
             timeout: 600
             component: bobbit
             command: build
@@ -549,72 +517,60 @@ workflows:
             command: unit
           - name: Browser tests
             type: command
-            phase: 2
+            phase: 1
             timeout: 900
             component: bobbit
             command: browser
           - name: E2E tests
             type: command
-            phase: 3
+            phase: 1
             timeout: 900
             component: bobbit
             command: e2e
-          - name: Gap analysis
+          - name: Spec and regression conformance
             type: llm-review
             role: spec-auditor
-            phase: 4
+            phase: 2
             prompt: >-
-              Compare the goal specification and design document to the actual
-              implementation on this branch. Ignore documentation gaps; focus
-              exclusively on code/behavior gaps relative to the spec and design.
-
-
-              The goal spec is:
-
+              Compare the goal specification below, available upstream design or
+              issue analysis, implementation, and tests on branch {{branch}}
+              against origin/{{baseBranch}}.
 
               {{goal_spec}}
-          - name: Code quality review
+
+              Ignore documentation-only gaps. Identify unmet behavior,
+              acceptance criteria, regressions, contradictions, and missing
+              regression coverage. Every blocker must include implementation-ready
+              remediation and focused tests that prove the fix.
+          - name: Integrated implementation review
             type: llm-review
             role: code-reviewer
-            phase: 4
-            prompt: Review the code changes on branch {{branch}} vs origin/{{baseBranch}}
-              for quality. Check correctness, error handling, edge cases, code
-              style, and test coverage.
-          - name: Bug hunt
-            type: llm-review
-            role: bug-hunter
-            phase: 4
-            prompt: Review the implementation on branch {{branch}} vs origin/{{baseBranch}}
-              for actionable bugs. Focus on correctness, edge cases, error
-              paths, cross-system interactions, concurrency/lifecycle, and
-              dangerous behavior. Fail only for critical/high actionable bugs;
-              include file:line, reproduction conditions, consequence, and why
-              it is a bug.
-          - name: Verifiable bug hunt
-            type: llm-review
-            role: verifiable-bug-hunter
-            phase: 4
-            prompt: Look for verifiable bugs in the implementation diff.
+            phase: 2
+            prompt: >-
+              Review the implementation on branch {{branch}} versus
+              origin/{{baseBranch}}. Cover correctness, error handling,
+              edge and mixed states, concurrency and lifecycle, cross-layer
+              interactions, maintainability, regression coverage, and
+              independently verifiable bugs.
+
+              Deduplicate findings by root cause. For each blocker, provide an
+              exact minimal fix and focused tests that independently verify it.
           - name: Security review
             type: llm-review
             role: security-reviewer
-            phase: 4
-            prompt: Security review of changes on branch {{branch}} vs
-              origin/{{baseBranch}}. Check injection, auth/authz, validation,
-              secrets, and dependency risks.
-          - name: Systems interaction review
-            type: llm-review
-            role: systems-reviewer
-            phase: 4
+            phase: 2
             prompt: >-
-              Perform the complete Systems Interaction Review defined by the
-              systems-reviewer role for branch {{branch}} versus {{baseBranch}}.
-              Inspect every changed cross-layer state and action path, continue
-              after the first finding, and submit the verification result.
+              Review changed trust boundaries, authentication and authorization,
+              validation and injection, secrets, destructive or resource
+              ownership, dependency risk, and security-relevant races on branch
+              {{branch}} versus origin/{{baseBranch}}.
+
+              For each blocker, provide minimal remediation plus abuse and
+              regression tests that verify the fix.
           - name: QA testing
             type: agent-qa
             role: qa-tester
-            phase: 5
+            phase: 3
             optional: true
             optionalLabel: Enable QA Testing
             description: Spawn a QA agent that builds the project, starts an ephemeral
@@ -637,6 +593,18 @@ workflows:
               features/API/config/behavior changes are documented, existing docs
               are updated, placement is appropriate, and documentation quality
               standards are met.
+
+              Treat this as a revision-ready documentation review. A FAIL is
+              valid only for an explicit unmet goal requirement or concrete
+              change-introduced regression and is invalid without an author-ready
+              revision packet for every blocker. For each blocker, name exact
+              documentation paths and sections; identify the stale or missing
+              claim and its goal-linked consequence; give proposed replacement
+              wording or outline with relevant examples or links; state related
+              cross-section edits and constraints; include credible alternatives
+              with tradeoffs only when they exist; separate required edits from
+              bounded improvements; and explain how to verify the documented
+              behavior against the implementation.
       - id: ready-to-merge
         name: Ready to Merge
         depends_on:
@@ -666,8 +634,23 @@ workflows:
         verify:
           - name: Analysis quality
             type: llm-review
-            prompt: Review the issue analysis for completeness. Check reproduction steps,
-              root cause, symptom/cause distinction, and test plan.
+            prompt: >-
+              Review the issue analysis for completeness. Check reproduction
+              steps, root cause, symptom/cause distinction, and test plan.
+
+              Treat this as a revision-ready content review. A FAIL is valid
+              only for an explicit unmet goal requirement or concrete regression
+              and is invalid without a complete author-ready revision packet for
+              every blocker. For each blocker, identify the exact artifact
+              location; explain the goal-linked gap and practical consequence;
+              provide a concrete reproduction, root-cause contract, proposed
+              wording or structured revision, and test-plan case; state
+              consistency edits and constraints; include credible alternatives
+              with tradeoffs only when they exist; and separate required edits
+              from bounded improvements. Require implementable contracts and
+              testable acceptance criteria only to the level needed by the
+              approved goal, not exhaustive pseudocode, formal proof, or
+              speculative hardening.
           - name: Gap analysis
             type: llm-review
             role: spec-auditor
@@ -682,6 +665,17 @@ workflows:
 
               Identify bug symptoms not analyzed, missing reproduction steps,
               and root cause gaps.
+
+              Treat every blocker as a revision-ready content finding. A FAIL is
+              invalid without an author-ready revision packet identifying the
+              exact artifact location, goal-linked gap and consequence, concrete
+              revision (including reproduction/root-cause contract and test-plan
+              case), consistency edits and constraints, credible alternatives
+              with tradeoffs when they exist, and required edits versus bounded
+              improvements. Keep contracts and acceptance criteria implementable
+              and testable only to the approved goal's needed level; do not
+              demand exhaustive pseudocode, formal proof, or speculative
+              hardening.
       - id: reproducing-test
         name: Reproducing Test
         depends_on:
@@ -701,6 +695,7 @@ workflows:
         verify:
           - name: Build
             type: command
+            phase: 0
             timeout: 600
             component: bobbit
             command: build
@@ -721,76 +716,60 @@ workflows:
             command: unit
           - name: Browser tests
             type: command
-            phase: 2
+            phase: 1
             timeout: 900
             component: bobbit
             command: browser
           - name: E2E tests
             type: command
-            phase: 3
+            phase: 1
             timeout: 900
             component: bobbit
             command: e2e
-          - name: Gap analysis
+          - name: Spec and regression conformance
             type: llm-review
             role: spec-auditor
-            phase: 4
+            phase: 2
             prompt: >-
-              Compare the goal specification and design document to the actual
-              implementation on this branch. Ignore documentation gaps; focus
-              exclusively on code/behavior gaps relative to the spec and design.
-
-
-              The goal spec is:
+              Compare the goal specification below, available upstream design or
+              issue analysis, implementation, and tests on branch {{branch}}
+              against origin/{{baseBranch}}.
 
               {{goal_spec}}
-          - name: Code quality review
+
+              Ignore documentation-only gaps. Identify unmet behavior,
+              acceptance criteria, regressions, contradictions, and missing
+              regression coverage. Every blocker must include implementation-ready
+              remediation and focused tests that prove the fix.
+          - name: Integrated implementation review
             type: llm-review
             role: code-reviewer
-            phase: 4
-            prompt: Review the code changes on branch {{branch}} vs {{baseBranch}} for
-              quality. Check root-cause fix, minimality, error handling,
-              regression risk, and test coverage.
-          - name: Regression test coverage
-            type: llm-review
-            phase: 4
-            prompt: Verify that the bug fix includes a regression test that would catch
-              reintroduction. PASS if at least one unit, fixture, or E2E test
-              covers the fixed behavior; FAIL if no regression test was added.
-          - name: Bug hunt
-            type: llm-review
-            role: bug-hunter
-            phase: 4
-            prompt: Review the implementation on branch {{branch}} vs {{baseBranch}} for
-              actionable bugs. Focus on correctness, edge cases, error paths,
-              cross-system interactions, concurrency/lifecycle, and dangerous
-              behavior. Fail only for critical/high actionable bugs; include
-              file:line, reproduction conditions, consequence, and why it is a
-              bug.
-          - name: Verifiable bug hunt
-            type: llm-review
-            role: verifiable-bug-hunter
-            phase: 4
-            prompt: Look for verifiable bugs in the implementation diff.
+            phase: 2
+            prompt: >-
+              Review the implementation on branch {{branch}} versus
+              origin/{{baseBranch}}. Cover correctness, error handling,
+              edge and mixed states, concurrency and lifecycle, cross-layer
+              interactions, maintainability, regression coverage, and
+              independently verifiable bugs.
+
+              Deduplicate findings by root cause. For each blocker, provide an
+              exact minimal fix and focused tests that independently verify it.
           - name: Security review
             type: llm-review
             role: security-reviewer
-            phase: 4
-            prompt: Security review of changes on branch {{branch}} vs {{baseBranch}}. Check
-              injection, auth/authz, validation, secrets, and dependency risks.
-          - name: Systems interaction review
-            type: llm-review
-            role: systems-reviewer
-            phase: 4
+            phase: 2
             prompt: >-
-              Perform the complete Systems Interaction Review defined by the
-              systems-reviewer role for branch {{branch}} versus {{baseBranch}}.
-              Inspect every changed cross-layer state and action path, continue
-              after the first finding, and submit the verification result.
+              Review changed trust boundaries, authentication and authorization,
+              validation and injection, secrets, destructive or resource
+              ownership, dependency risk, and security-relevant races on branch
+              {{branch}} versus origin/{{baseBranch}}.
+
+              For each blocker, provide minimal remediation plus abuse and
+              regression tests that verify the fix.
           - name: QA testing
             type: agent-qa
             role: qa-tester
-            phase: 5
+            phase: 3
             optional: true
             optionalLabel: Enable QA Testing
             description: Spawn a QA agent that builds the project, starts an ephemeral
@@ -813,6 +792,18 @@ workflows:
               {{baseBranch}}. Verify user-facing features/API/config/behavior
               changes are documented, existing docs are updated, placement is
               appropriate, and documentation quality standards are met.
+
+              Treat this as a revision-ready documentation review. A FAIL is
+              valid only for an explicit unmet goal requirement or concrete
+              change-introduced regression and is invalid without an author-ready
+              revision packet for every blocker. For each blocker, name exact
+              documentation paths and sections; identify the stale or missing
+              claim and its goal-linked consequence; give proposed replacement
+              wording or outline with relevant examples or links; state related
+              cross-section edits and constraints; include credible alternatives
+              with tradeoffs only when they exist; separate required edits from
+              bounded improvements; and explain how to verify the documented
+              behavior against the implementation.
       - id: ready-to-merge
         name: Ready to Merge
         depends_on:
@@ -841,6 +832,7 @@ workflows:
         verify:
           - name: Build
             type: command
+            phase: 0
             timeout: 600
             component: bobbit
             command: build
@@ -856,61 +848,56 @@ workflows:
             command: unit
           - name: Browser tests
             type: command
-            phase: 2
+            phase: 1
             timeout: 900
             component: bobbit
             command: browser
           - name: E2E tests
             type: command
-            phase: 3
+            phase: 1
             timeout: 900
             component: bobbit
             command: e2e
-          - name: Gap analysis
+          - name: Spec and regression conformance
             type: llm-review
             role: spec-auditor
-            phase: 4
+            phase: 2
             prompt: >-
-              Compare the goal specification to the actual implementation on
-              this branch. Ignore documentation gaps; focus exclusively on
-              code/behavior gaps.
-
-
-              The goal spec is:
-
+              Compare the goal specification below, available upstream design or
+              issue analysis, implementation, and tests on branch {{branch}}
+              against origin/{{baseBranch}}.
 
               {{goal_spec}}
-          - name: Code quality review
+
+              Ignore documentation-only gaps. Identify unmet behavior,
+              acceptance criteria, regressions, contradictions, and missing
+              regression coverage. Every blocker must include implementation-ready
+              remediation and focused tests that prove the fix.
+          - name: Integrated implementation review
             type: llm-review
             role: code-reviewer
-            phase: 4
-            prompt: Review the code changes on branch {{branch}} vs {{baseBranch}} for
-              quality. Check correctness, error handling, edge cases,
-              minimality, and test coverage.
-          - name: Bug hunt
-            type: llm-review
-            role: bug-hunter
-            phase: 4
-            prompt: Review the implementation on branch {{branch}} vs {{baseBranch}} for
-              actionable bugs. Focus on correctness, edge cases, error paths,
-              cross-system interactions, concurrency/lifecycle, and dangerous
-              behavior. Fail only for critical/high actionable bugs; include
-              file:line, reproduction conditions, consequence, and why it is a
-              bug.
-          - name: Verifiable bug hunt
-            type: llm-review
-            role: verifiable-bug-hunter
-            phase: 4
-            prompt: Look for verifiable bugs in the implementation diff.
-          - name: Systems interaction review
-            type: llm-review
-            role: systems-reviewer
-            phase: 4
+            phase: 2
             prompt: >-
-              Perform the complete Systems Interaction Review defined by the
-              systems-reviewer role for branch {{branch}} versus {{baseBranch}}.
-              Inspect every changed cross-layer state and action path, continue
-              after the first finding, and submit the verification result.
+              Review the implementation on branch {{branch}} versus
+              origin/{{baseBranch}}. Cover correctness, error handling,
+              edge and mixed states, concurrency and lifecycle, cross-layer
+              interactions, maintainability, regression coverage, and
+              independently verifiable bugs.
+
+              Deduplicate findings by root cause. For each blocker, provide an
+              exact minimal fix and focused tests that independently verify it.
+          - name: Security review
+            type: llm-review
+            role: security-reviewer
+            phase: 2
+            prompt: >-
+              Review changed trust boundaries, authentication and authorization,
+              validation and injection, secrets, destructive or resource
+              ownership, dependency risk, and security-relevant races on branch
+              {{branch}} versus origin/{{baseBranch}}.
+
+              For each blocker, provide minimal remediation plus abuse and
+              regression tests that verify the fix.
       - id: ready-to-merge
         name: Ready to Merge
         depends_on:
