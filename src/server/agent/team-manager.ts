@@ -324,7 +324,13 @@ export interface TeamState {
 
 /** Start behaviour selected by the caller. Scheduler starts retain pause guards. */
 export interface StartTeamOptions {
-	/** An explicit operator start may compose the canonical paused-goal resume lifecycle. */
+	/**
+	 * Explicit REST starts may return an established live lead. This is separate
+	 * from pause-resume authority so an active snapshot cannot acquire either
+	 * lifecycle permission if the goal becomes paused before the start lock runs.
+	 */
+	explicitIdempotent?: boolean;
+	/** A paused, authorized snapshot may compose the canonical resume lifecycle. */
 	resumePaused?: boolean;
 }
 
@@ -1913,20 +1919,24 @@ export class TeamManager {
 		}
 		this.assertGoalCanStart(goal);
 		const existingTeam = this.teams.get(goalId);
-		// A paused explicit start must run the canonical resume lifecycle even if
-		// an earlier attempt already left team tracking behind.
-		if (existingTeam && (!options.resumePaused || !goal.paused)) {
+		// A paused, authorized start must run the canonical resume lifecycle even
+		// if an earlier attempt already left team tracking behind. Every other
+		// existing-team path is a pure idempotency/error decision: it must not
+		// mutate a pause that raced an active REST snapshot.
+		if (existingTeam && !(goal.paused && options.resumePaused)) {
 			const existingLead = existingTeam.teamLeadSessionId
 				? this.sessionManager.getSession(existingTeam.teamLeadSessionId)
 				: undefined;
-			// An explicit operator retry is idempotent: when the original start
-			// already created a live lead, return it rather than treating the retry
-			// as a request to create another team. Scheduler calls retain their
-			// historical "already active" rejection semantics.
-			if (options.resumePaused && existingLead && existingLead.status !== "terminated") {
+			if (options.explicitIdempotent && existingLead && existingLead.status !== "terminated") {
 				return existingLead;
 			}
-			if (options.resumePaused) {
+			// An active REST snapshot that becomes paused while waiting for the
+			// start lock has no resume authority. It may only observe an already
+			// live lead above; otherwise preserve the paused lifecycle.
+			if (goal.paused && !options.resumePaused) {
+				throw new GoalPausedError(goalId);
+			}
+			if (options.explicitIdempotent) {
 				throw new TeamStartError(
 					"TEAM_LEAD_UNAVAILABLE",
 					"The existing team lead is unavailable. Stop the team before starting a replacement.",
@@ -1963,11 +1973,16 @@ export class TeamManager {
 				const resumedExistingLead = resumedExistingTeam.teamLeadSessionId
 					? this.sessionManager.getSession(resumedExistingTeam.teamLeadSessionId)
 					: undefined;
-				if (resumedExistingLead && resumedExistingLead.status !== "terminated") return resumedExistingLead;
-				throw new TeamStartError(
-					"TEAM_LEAD_UNAVAILABLE",
-					"The existing team lead is unavailable. Stop the team before starting a replacement.",
-				);
+				if (options.explicitIdempotent && resumedExistingLead && resumedExistingLead.status !== "terminated") {
+					return resumedExistingLead;
+				}
+				if (options.explicitIdempotent) {
+					throw new TeamStartError(
+						"TEAM_LEAD_UNAVAILABLE",
+						"The existing team lead is unavailable. Stop the team before starting a replacement.",
+					);
+				}
+				throw new TeamStartError("TEAM_ALREADY_ACTIVE", `Team already active for goal: ${goalId}`);
 			}
 		}
 
