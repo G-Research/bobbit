@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { awaitableRm } from "../../tests/e2e/test-utils/cleanup.js";
@@ -60,6 +60,7 @@ test.describe("remote-state coordinator routes", () => {
 		const originalExecFile = runner.execFile;
 		let gitFetches = 0;
 		let prReads = 0;
+		const permissionApiCalls: string[][] = [];
 		let localOnly = false;
 		let remoteHost = "example.github.test";
 		let remoteOrigin: string | undefined;
@@ -99,13 +100,22 @@ test.describe("remote-state coordinator routes", () => {
 						state: "OPEN",
 						mergeable: "MERGEABLE",
 						headRefName: "master",
-						baseRefName: "master",
+						baseRefName: customPort ? "private/base" : "master",
 					}]),
 					stderr: "",
 				};
 			}
 			if (commandName(file) === "gh" && args[0] === "api") {
-				return { stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }), stderr: "" };
+				permissionApiCalls.push([...args]);
+				if (args.includes("graphql")) {
+					// A missing GraphQL repository still takes the best-effort branch-rules
+					// path, and every API call must stay on the exact trusted GHE authority.
+					return { stdout: JSON.stringify({ data: { repository: null } }), stderr: "" };
+				}
+				const endpoint = String(args.at(-1));
+				if (endpoint.includes("/rules/branches/")) return { stdout: JSON.stringify([{ ruleset_id: 73 }]), stderr: "" };
+				if (endpoint.endsWith("/rulesets/73")) return { stdout: JSON.stringify({ current_user_can_bypass: "pull_requests_only" }), stderr: "" };
+				throw new Error(`unexpected permission API args: ${args.join(" ")}`);
 			}
 			return originalExecFile.call(runner, file, args, options);
 		};
@@ -261,12 +271,20 @@ test.describe("remote-state coordinator routes", () => {
 			// credential-free authority owns a distinct canonical PR record.
 			const beforeCustomPorts = prReads;
 			remoteOrigin = "ssh://git@example.github.test:2222/acme/widget.git";
+			const port2222PermissionStart = permissionApiCalls.length;
 			const port2222Response = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`);
 			expect(port2222Response.status).toBe(200);
 			const port2222Body = await port2222Response.json();
 			expect(port2222Body).toMatchObject({ data: { number: 2222 } });
+			const port2222PermissionCalls = permissionApiCalls.slice(port2222PermissionStart);
+			expect(port2222PermissionCalls).toHaveLength(3);
+			expect(port2222PermissionCalls.every(args => (
+				args[0] === "api" && args[1] === "--hostname" && args[2] === "example.github.test:2222"
+			))).toBe(true);
+			expect(port2222PermissionCalls.some(args => String(args.at(-1)).includes("private%2Fbase"))).toBe(true);
 
 			remoteOrigin = "ssh://git@example.github.test:2223/acme/widget.git";
+			const port2223PermissionStart = permissionApiCalls.length;
 			const coldPort2223 = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=automatic`);
 			expect(coldPort2223.status).toBe(200);
 			const coldPort2223Body = await coldPort2223.json();
@@ -277,6 +295,12 @@ test.describe("remote-state coordinator routes", () => {
 			const port2223Response = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=automatic`);
 			const port2223Body = await port2223Response.json();
 			expect(port2223Body).toMatchObject({ data: { number: 2223 } });
+			const port2223PermissionCalls = permissionApiCalls.slice(port2223PermissionStart);
+			expect(port2223PermissionCalls).toHaveLength(3);
+			expect(port2223PermissionCalls.every(args => (
+				args[0] === "api" && args[1] === "--hostname" && args[2] === "example.github.test:2223"
+			))).toBe(true);
+			expect(port2223PermissionCalls.some(args => String(args.at(-1)).includes("private%2Fbase"))).toBe(true);
 
 			remoteOrigin = "ssh://git@example.github.test:2222/acme/widget.git";
 			const retainedPort2222 = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=automatic`);
@@ -842,8 +866,12 @@ test.describe("remote-state coordinator routes", () => {
 		const webRepo = join(fixtureRoot, "web");
 		const worktreeRoot = join(fixtureRoot, "worktrees");
 		const apiWorktree = join(worktreeRoot, "branch", "api");
-		const brokenWebWorktree = join(worktreeRoot, "branch", "web");
+		const aliasedWebWorktree = join(worktreeRoot, "branch", "web");
 		for (const directory of [apiRepo, webRepo, apiWorktree]) mkdirSync(directory, { recursive: true });
+		// A lexical web coordinate canonicalizes to the healthy API sibling. Junction
+		// mode also exercises Windows without requiring developer-mode symlink rights.
+		symlinkSync(apiWorktree, aliasedWebWorktree, process.platform === "win32" ? "junction" : "dir");
+		const canonicalApiWorktree = realpathSync(aliasedWebWorktree);
 		const branch = "41"; // Numeric branch names remain heads, never PR-number selectors.
 
 		const project = await registerProject({
@@ -864,9 +892,9 @@ test.describe("remote-state coordinator routes", () => {
 			autoStartTeam: false,
 		});
 		const goalId = String(goal.id);
-		const productionRepoWorktrees = { api: apiWorktree, web: brokenWebWorktree };
+		const productionRepoWorktrees = { api: apiWorktree, web: aliasedWebWorktree };
 		gateway.sessionManager.getGoalStoreForProject(project.id).update(goalId, {
-			cwd: join(brokenWebWorktree, "src"),
+			cwd: join(aliasedWebWorktree, "src"),
 			worktreePath: worktreeRoot,
 			repoPath: fixtureRoot,
 			repoWorktrees: productionRepoWorktrees,
@@ -882,7 +910,7 @@ test.describe("remote-state coordinator routes", () => {
 			repoWorktrees: productionRepoWorktrees,
 		});
 		const normalSession = gateway.sessionManager.getSession(normalSessionId) as any;
-		normalSession.cwd = join(brokenWebWorktree, "src");
+		normalSession.cwd = join(aliasedWebWorktree, "src");
 		normalSession.repoPath = fixtureRoot;
 		normalSession.worktreePath = worktreeRoot;
 		normalSession.repoWorktrees = productionRepoWorktrees;
@@ -919,9 +947,17 @@ test.describe("remote-state coordinator routes", () => {
 			if (command === "git" && args.join(" ") === `check-ref-format --branch ${branch}`) {
 				return { stdout: `${branch}\n`, stderr: "" };
 			}
+			if (command === "git" && args.join(" ") === "rev-parse --path-format=absolute --git-common-dir") {
+				gitProbeCwds.push(cwd);
+				if (cwd === webRepo) return { stdout: `${join(webRepo, ".git")}\n`, stderr: "" };
+				if (cwd === canonicalApiWorktree || cwd === join(canonicalApiWorktree, "src")) {
+					return { stdout: `${join(apiRepo, ".git")}\n`, stderr: "" };
+				}
+				throw new Error("unknown repository identity");
+			}
 			if (command === "git" && (args.join(" ") === "rev-parse --git-dir" || args.join(" ") === "rev-parse --show-toplevel")) {
 				gitProbeCwds.push(cwd);
-				if (cwd === webRepo || cwd === apiWorktree || cwd === apiRepo) return { stdout: ".git\n", stderr: "" };
+				if (cwd === webRepo || cwd === canonicalApiWorktree || cwd === apiRepo) return { stdout: ".git\n", stderr: "" };
 				throw new Error("broken requested component worktree");
 			}
 			if (command === "git" && args.join(" ") === "remote get-url origin") {
@@ -975,7 +1011,9 @@ test.describe("remote-state coordinator routes", () => {
 				});
 				expect(merge.status, `${routeCase.kind} merge`).toBe(200);
 			}
-			expect(gitProbeCwds).not.toContain(apiWorktree);
+			// The alias is probed only to reject its API identity; all GitHub reads and
+			// destructive actions use the authoritative web source fallback.
+			expect(gitProbeCwds).toContain(join(canonicalApiWorktree, "src"));
 			expect(gitProbeCwds).not.toContain(apiRepo);
 			expect(JSON.stringify(ghCalls)).not.toContain(apiSentinel);
 			for (const call of ghCalls.filter(call => call.args[0] === "pr" && call.args[1] === "list")) {

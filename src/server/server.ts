@@ -1109,22 +1109,32 @@ export function buildGhCommitPullsArgs(remote: TrustedGithubRemote, oid: string)
 	];
 }
 
-export function buildGhPrMergePermissionsArgs(owner: string, name: string, number: number): string[] {
+function ghApiHostnameArgs(remote: TrustedGithubRemote): string[] {
+	return remote.host === "github.com" ? [] : ["--hostname", remote.host];
+}
+
+export function buildGhPrMergePermissionsArgs(remote: TrustedGithubRemote, number: number): string[] {
 	return [
-		"api", "graphql",
+		"api", ...ghApiHostnameArgs(remote), "graphql",
 		"-f", `query=${PR_MERGE_PERMISSIONS_QUERY}`,
-		"-F", `owner=${owner}`,
-		"-F", `name=${name}`,
+		"-F", `owner=${remote.owner}`,
+		"-F", `name=${remote.repository}`,
 		"-F", `number=${number}`,
 	];
 }
 
-export function buildGhBranchRulesArgs(owner: string, name: string, branch: string): string[] {
-	return ["api", `repos/${owner}/${name}/rules/branches/${encodeURIComponent(branch)}`];
+export function buildGhBranchRulesArgs(remote: TrustedGithubRemote, branch: string): string[] {
+	return [
+		"api", ...ghApiHostnameArgs(remote),
+		`repos/${remote.owner}/${remote.repository}/rules/branches/${encodeURIComponent(branch)}`,
+	];
 }
 
-export function buildGhRulesetArgs(owner: string, name: string, rulesetId: number): string[] {
-	return ["api", `repos/${owner}/${name}/rulesets/${rulesetId}`];
+export function buildGhRulesetArgs(remote: TrustedGithubRemote, rulesetId: number): string[] {
+	return [
+		"api", ...ghApiHostnameArgs(remote),
+		`repos/${remote.owner}/${remote.repository}/rulesets/${rulesetId}`,
+	];
 }
 
 export function buildGhPrMergeArgs(number: number, remote: TrustedGithubRemote, method: string, admin: unknown): string[] {
@@ -1172,14 +1182,14 @@ async function getViewerIsAdmin(cwd: string): Promise<boolean> {
 	}
 }
 
-function parseGithubPrRepo(url: unknown): { owner: string; name: string } | null {
+function parseGithubPrRepo(url: unknown): TrustedGithubRemote | null {
 	if (typeof url !== "string" || !url) return null;
 	try {
 		const parsed = new URL(url);
 		if (parsed.protocol !== "https:" || parsed.hostname !== "github.com") return null;
-		const [owner, name, pull, number] = parsed.pathname.split("/").filter(Boolean);
-		if (!owner || !name || pull !== "pull" || !number || !/^\d+$/.test(number)) return null;
-		return { owner, name };
+		const [owner, repository, pull, number] = parsed.pathname.split("/").filter(Boolean);
+		if (!owner || !repository || pull !== "pull" || !number || !/^\d+$/.test(number)) return null;
+		return { host: "github.com", owner, repository };
 	} catch {
 		return null;
 	}
@@ -1190,12 +1200,10 @@ async function getViewerMergePermissions(
 	pr: { url?: string; number?: number; baseRefName?: string },
 	trustedRemote?: TrustedGithubRemote,
 ): Promise<{ viewerIsAdmin: boolean; viewerCanMergeAsAdmin: boolean }> {
-	const repo = trustedRemote
-		? { owner: trustedRemote.owner, name: trustedRemote.repository }
-		: parseGithubPrRepo(pr.url);
-	if (repo && typeof pr.number === "number") {
+	const remote = trustedRemote ?? parseGithubPrRepo(pr.url);
+	if (remote && typeof pr.number === "number") {
 		try {
-			const stdout = await execGh(buildGhPrMergePermissionsArgs(repo.owner, repo.name, pr.number), cwd);
+			const stdout = await execGh(buildGhPrMergePermissionsArgs(remote, pr.number), cwd);
 			const parsed = JSON.parse(stdout);
 			const repository = parsed?.data?.repository;
 			const perm = repository?.viewerPermission ?? "";
@@ -1203,7 +1211,7 @@ async function getViewerMergePermissions(
 
 			let viewerCanMergeAsAdmin = repository?.pullRequest?.viewerCanMergeAsAdmin === true;
 			if (!viewerCanMergeAsAdmin && typeof pr.baseRefName === "string" && pr.baseRefName) {
-				viewerCanMergeAsAdmin = await getViewerCanBypassBranchRules(cwd, repo, pr.baseRefName);
+				viewerCanMergeAsAdmin = await getViewerCanBypassBranchRules(cwd, remote, pr.baseRefName);
 			}
 
 			return { viewerIsAdmin: perm === "ADMIN", viewerCanMergeAsAdmin };
@@ -1216,11 +1224,11 @@ async function getViewerMergePermissions(
 
 async function getViewerCanBypassBranchRules(
 	cwd: string,
-	repo: { owner: string; name: string },
+	remote: TrustedGithubRemote,
 	branch: string,
 ): Promise<boolean> {
 	try {
-		const stdout = await execGh(buildGhBranchRulesArgs(repo.owner, repo.name, branch), cwd);
+		const stdout = await execGh(buildGhBranchRulesArgs(remote, branch), cwd);
 		const rules = JSON.parse(stdout);
 		if (!Array.isArray(rules)) return false;
 
@@ -1232,7 +1240,7 @@ async function getViewerCanBypassBranchRules(
 
 		for (const rulesetId of rulesetIds) {
 			try {
-				const detail = JSON.parse(await execGh(buildGhRulesetArgs(repo.owner, repo.name, rulesetId), cwd));
+				const detail = JSON.parse(await execGh(buildGhRulesetArgs(remote, rulesetId), cwd));
 				if (isBypassMode(detail?.current_user_can_bypass)) return true;
 			} catch {
 				// Continue checking other matching rulesets.
@@ -3010,7 +3018,54 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		const relative = path.relative(comparableOwnedPath(root), comparableOwnedPath(candidate));
 		return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 	};
-	const ownedPrCandidates = async (owner: PrRouteOwner): Promise<string[]> => {
+	type OwnedPrRepositoryIdentity = {
+		commonDir: string;
+		remote: TrustedGithubRemote;
+	};
+	type OwnedPrCandidate = {
+		cwd: string;
+		/** Multi-repo candidates stay bound to the authoritative source remote. */
+		remote?: TrustedGithubRemote;
+	};
+	const resolveOwnedPrRepositoryIdentity = async (cwd: string): Promise<OwnedPrRepositoryIdentity | undefined> => {
+		let rawCommonDir: string;
+		try {
+			rawCommonDir = (await execGitArgs(
+				["rev-parse", "--path-format=absolute", "--git-common-dir"],
+				cwd,
+				5_000,
+				undefined,
+				gatewayDeps.commandRunner,
+			)).trim();
+		} catch {
+			try {
+				rawCommonDir = (await execGitArgs(
+					["rev-parse", "--git-common-dir"],
+					cwd,
+					5_000,
+					undefined,
+					gatewayDeps.commandRunner,
+				)).trim();
+			} catch {
+				return undefined;
+			}
+		}
+		if (!rawCommonDir) return undefined;
+		const remote = await parsePrRemote(cwd);
+		if (!remote) return undefined;
+		const absoluteCommonDir = path.isAbsolute(rawCommonDir) ? rawCommonDir : path.resolve(cwd, rawCommonDir);
+		return {
+			commonDir: comparableOwnedPath(absoluteCommonDir),
+			remote,
+		};
+	};
+	const sameOwnedPrRepository = (left: OwnedPrRepositoryIdentity, right: OwnedPrRepositoryIdentity): boolean => (
+		left.commonDir === right.commonDir
+		&& left.remote.host === right.remote.host
+		&& left.remote.owner === right.remote.owner
+		&& left.remote.repository === right.remote.repository
+	);
+	const ownedPrCandidates = async (owner: PrRouteOwner): Promise<OwnedPrCandidate[]> => {
 		// Project scope comes from the store that owns the entity, never from its
 		// mutable/persisted projectId or repository metadata.
 		const owningContext = projectContextManager.getContextForGoal(owner.id)
@@ -3079,17 +3134,45 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				: path.join(projectRoot, selected.repo));
 			if (!isSameOrDescendantOwnedPath(projectRoot, selectedSource)) return [];
 
-			// Once a component is selected, every candidate must belong to that exact
-			// repository. A broken member may fall back only to its authoritative source,
-			// never to a healthy sibling selected by object/configuration order.
+			// Distinct configured repositories may not become aliases or containment
+			// overlaps after symlink/junction canonicalization. Otherwise a lexical
+			// component coordinate could authorize a sibling repository.
+			for (const sibling of components) {
+				if (sibling.repo === selected.repo) continue;
+				const siblingSource = canonicalOwnedPath(sibling.repo === "."
+					? projectRoot
+					: path.join(projectRoot, sibling.repo));
+				if (
+					isSameOrDescendantOwnedPath(siblingSource, selectedSource)
+					|| isSameOrDescendantOwnedPath(selectedSource, siblingSource)
+				) return [];
+			}
+
+			// The registered source repository is authoritative. A selected worktree
+			// (including a cwd below it) is eligible only when canonical Git common-dir
+			// and normalized trusted remote both match that source exactly.
+			const sourceIdentity = await resolveOwnedPrRepositoryIdentity(selectedSource);
+			if (!sourceIdentity) return [];
+			const addMatchingRepository = async (candidate: unknown, allowedRoots: readonly string[]) => {
+				const before = candidates.length;
+				add(candidate, allowedRoots);
+				if (candidates.length === before) return;
+				const added = candidates[candidates.length - 1];
+				const identity = await resolveOwnedPrRepositoryIdentity(added);
+				if (!identity || !sameOwnedPrRepository(sourceIdentity, identity)) {
+					candidates.pop();
+					seen.delete(comparableOwnedPath(added));
+				}
+			};
+
 			if (selectedWorktree) {
 				const selectedWorktreeRoot = canonicalOwnedPath(selectedWorktree);
-				add(selectedWorktreeRoot, [configuredWorktreeRoot]);
-				if (!owner.sandboxed) add(owner.cwd, [selectedWorktreeRoot, selectedSource]);
+				await addMatchingRepository(selectedWorktreeRoot, [configuredWorktreeRoot]);
+				if (!owner.sandboxed) await addMatchingRepository(owner.cwd, [selectedWorktreeRoot, selectedSource]);
 			}
-			else if (!owner.sandboxed) add(owner.cwd, [selectedSource]);
+			else if (!owner.sandboxed) await addMatchingRepository(owner.cwd, [selectedSource]);
 			add(selectedSource, [projectRoot]);
-			return candidates;
+			return candidates.map(cwd => ({ cwd, remote: sourceIdentity.remote }));
 		}
 
 		// Single-repository compatibility retains owned worktree/source fallbacks.
@@ -3099,7 +3182,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		for (const worktreePath of Object.values(repoWorktrees)) add(worktreePath, [configuredWorktreeRoot]);
 		add(owner.repoPath, [projectRoot]);
 		add(projectRoot, [projectRoot]);
-		return candidates;
+		return candidates.map(cwd => ({ cwd }));
 	};
 	const resolvePrSnapshotTarget = async (
 		owner: PrRouteOwner,
@@ -3109,18 +3192,19 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		// Selection is local-only and restricted to entity/project-owned candidates.
 		// A broken worktree can recover through its persisted repoPath or registered
 		// project root, but a merely Git-valid ambient directory is never eligible.
-		let executionCwd: string | undefined;
+		let selectedCandidate: OwnedPrCandidate | undefined;
 		for (const candidate of await ownedPrCandidates(owner)) {
 			try {
-				await execGitArgs(["rev-parse", "--git-dir"], candidate, 5_000, undefined, gatewayDeps.commandRunner);
-				executionCwd = candidate;
+				await execGitArgs(["rev-parse", "--git-dir"], candidate.cwd, 5_000, undefined, gatewayDeps.commandRunner);
+				selectedCandidate = candidate;
 				break;
 			} catch { /* try the next owned candidate before any GitHub read */ }
 		}
-		if (!executionCwd) return undefined;
+		if (!selectedCandidate) return undefined;
+		const executionCwd = selectedCandidate.cwd;
 
 		const [remote, head] = await Promise.all([
-			parsePrRemote(executionCwd),
+			selectedCandidate.remote ? Promise.resolve(selectedCandidate.remote) : parsePrRemote(executionCwd),
 			resolvePullRequestHeadIdentity(
 				identitySource?.cwd ?? executionCwd,
 				branch,

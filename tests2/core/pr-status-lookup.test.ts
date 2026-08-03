@@ -32,8 +32,10 @@ describe("PR status GitHub CLI lookup", () => {
 		assert.deepEqual(buildGhPrViewArgs(), ["pr", "view", "--json", PR_FIELDS]);
 	});
 
-	it("builds bypass permission gh api calls as execFile-safe argv", () => {
-		const permissionsArgs = buildGhPrMergePermissionsArgs("acme", "widget", 7);
+	it("binds every permission API call to the server-derived GitHub host", () => {
+		const github = { host: "github.com", owner: "acme", repository: "widget" };
+		const enterprise = { host: "ghe.example.test:8443", owner: "acme", repository: "widget" };
+		const permissionsArgs = buildGhPrMergePermissionsArgs(github, 7);
 		assert.equal(permissionsArgs[0], "api");
 		assert.equal(permissionsArgs[1], "graphql");
 		assert.ok(permissionsArgs.includes("-f"));
@@ -42,20 +44,34 @@ describe("PR status GitHub CLI lookup", () => {
 		assert.ok(permissionsArgs.includes("owner=acme"));
 		assert.ok(permissionsArgs.includes("name=widget"));
 		assert.ok(permissionsArgs.includes("number=7"));
+		assert.ok(!permissionsArgs.includes("--hostname"));
 
-		assert.deepEqual(buildGhRulesetArgs("acme", "widget", 18370627), [
+		assert.deepEqual(buildGhPrMergePermissionsArgs(enterprise, 9).slice(0, 4), [
+			"api", "--hostname", "ghe.example.test:8443", "graphql",
+		]);
+		assert.deepEqual(buildGhRulesetArgs(github, 18370627), [
 			"api",
+			"repos/acme/widget/rulesets/18370627",
+		]);
+		assert.deepEqual(buildGhRulesetArgs(enterprise, 18370627), [
+			"api", "--hostname", "ghe.example.test:8443",
 			"repos/acme/widget/rulesets/18370627",
 		]);
 	});
 
 	it("builds branch rules lookup with malicious branch text encoded in one argv element", () => {
+		const github = { host: "github.com", owner: "acme", repository: "widget" };
+		const enterprise = { host: "ghe.example.test:8443", owner: "acme", repository: "widget" };
 		const branch = "master; $(node -e 'throw new Error()')/feature\nname";
-		const args = buildGhBranchRulesArgs("acme", "widget", branch);
+		const args = buildGhBranchRulesArgs(github, branch);
 		assert.equal(args.length, 2);
 		assert.equal(args[0], "api");
 		assert.equal(args[1], `repos/acme/widget/rules/branches/${encodeURIComponent(branch)}`);
 		assert.ok(!args.includes(branch));
+		assert.deepEqual(buildGhBranchRulesArgs(enterprise, branch), [
+			"api", "--hostname", "ghe.example.test:8443",
+			`repos/acme/widget/rules/branches/${encodeURIComponent(branch)}`,
+		]);
 	});
 
 	it("binds coordinated head lookup and merge to a server-derived repository", () => {
@@ -132,7 +148,7 @@ describe("PR status GitHub CLI lookup", () => {
 		});
 		assert.deepEqual(calls.map((call) => call.args), [
 			["pr", "view", branch, "--json", PR_FIELDS],
-			buildGhPrMergePermissionsArgs("acme", "widget", 7),
+			buildGhPrMergePermissionsArgs({ host: "github.com", owner: "acme", repository: "widget" }, 7),
 		]);
 	});
 
@@ -176,11 +192,12 @@ describe("PR status GitHub CLI lookup", () => {
 
 		assert.equal(status?.viewerIsAdmin, false);
 		assert.equal(status?.viewerCanMergeAsAdmin, true);
+		const remote = { host: "github.com", owner: "acme", repository: "widget" };
 		assert.deepEqual(calls, [
 			["pr", "view", "feature/ruleset-bypass", "--json", PR_FIELDS],
-			buildGhPrMergePermissionsArgs("acme", "widget", 8),
-			buildGhBranchRulesArgs("acme", "widget", "master"),
-			buildGhRulesetArgs("acme", "widget", 18370627),
+			buildGhPrMergePermissionsArgs(remote, 8),
+			buildGhBranchRulesArgs(remote, "master"),
+			buildGhRulesetArgs(remote, 18370627),
 		]);
 	});
 
