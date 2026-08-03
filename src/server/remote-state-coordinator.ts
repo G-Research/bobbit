@@ -65,6 +65,40 @@ export interface RemoteStateReadOptions {
 	forceCoalesceMs?: number;
 }
 
+export type RemoteStateTelemetryOutcome =
+	| "fresh"
+	| "admitted"
+	| "joined"
+	| "backoff"
+	| "budget"
+	| "coalesced"
+	| "queued"
+	| "started"
+	| "success"
+	| "failure"
+	| "identity_failure";
+
+/**
+ * Credential-safe operational telemetry. Every string is a closed enum or a
+ * one-way record digest; paths, remotes, refs, commands and error text are never
+ * accepted by this shape.
+ */
+export interface RemoteStateTelemetryEvent {
+	type: "remote_state_refresh";
+	source: RemoteStateSource;
+	outcome: RemoteStateTelemetryOutcome;
+	observedAt: number;
+	record?: string;
+	intent?: RemoteStateIntent;
+	cadence?: "active" | "sidebar";
+	queueDepth?: number;
+	waitMs?: number;
+	durationMs?: number;
+	ageMs?: number;
+	stale?: boolean;
+	errorKind?: RemoteStateErrorKind;
+}
+
 export interface RemoteStateCoordinatorOptions {
 	clock?: Pick<Clock, "now">;
 	commandRunner?: CommandRunner;
@@ -75,6 +109,8 @@ export interface RemoteStateCoordinatorOptions {
 	identityProbeTimeoutMs?: number;
 	/** Receives only public addresses and safe copied snapshots. */
 	broadcast?: (address: RemoteStateAddress, snapshot: RemoteStateSnapshot<unknown>) => void;
+	/** Best-effort sink which receives only the closed, credential-safe event shape. */
+	telemetry?: (event: RemoteStateTelemetryEvent) => void;
 	repositoryFreshnessMs?: number;
 	activePrFreshnessMs?: number;
 	sidebarPrFreshnessMs?: number;
@@ -172,6 +208,72 @@ export function isTrustedGithubRemoteHost(host: string, configuredEnterpriseHost
 	return configuredEnterpriseHosts.some((candidate) => normalizeGithubHost(candidate) === normalized);
 }
 
+export interface TrustedGithubRemote {
+	host: string;
+	owner: string;
+	repository: string;
+}
+
+/**
+ * Parse a complete Git remote and trust-gate its actual host. URL and scp forms
+ * are deliberately separate so a trusted-looking suffix embedded in an
+ * attacker-controlled URL can never become the canonical PR identity.
+ */
+export function parseTrustedGithubRemote(
+	remote: string,
+	configuredEnterpriseHosts: readonly string[] = [],
+): TrustedGithubRemote | undefined {
+	const value = remote.trim();
+	if (!value || /[\u0000-\u001f\u007f]/.test(value)) return undefined;
+
+	let host: string;
+	let rawOwner: string;
+	let rawRepository: string;
+	if (value.includes("://")) {
+		let url: URL;
+		try { url = new URL(value); } catch { return undefined; }
+		if (url.protocol !== "https:" && url.protocol !== "http:" && url.protocol !== "ssh:") return undefined;
+		if (url.search || url.hash || url.port) return undefined;
+		if (url.protocol === "ssh:" && url.password) return undefined;
+		if (url.protocol === "ssh:" && url.username && url.username !== "git") return undefined;
+		host = url.hostname;
+		if (!/^\/[^/]+\/[^/]+\/?$/.test(url.pathname)) return undefined;
+		const segments = url.pathname.replace(/^\//, "").replace(/\/$/, "").split("/");
+		[rawOwner, rawRepository] = segments;
+	} else {
+		const scp = value.match(/^git@([^:/\s]+):([^/\s]+)\/([^/\s]+?)\/?$/);
+		if (!scp) return undefined;
+		[, host, rawOwner, rawRepository] = scp;
+	}
+
+	if (!host || !isTrustedGithubRemoteHost(host, configuredEnterpriseHosts)) return undefined;
+	const owner = decodeGithubPathSegment(rawOwner);
+	const decodedRepository = decodeGithubPathSegment(rawRepository);
+	if (!owner || !decodedRepository) return undefined;
+	const repository = stripGitSuffix(decodedRepository);
+	if (!repository || !isGithubRepositorySegment(owner) || !isGithubRepositorySegment(repository)) return undefined;
+	return {
+		host: normalizeGithubHost(host),
+		owner: owner.toLowerCase(),
+		repository: repository.toLowerCase(),
+	};
+}
+
+function decodeGithubPathSegment(value: string): string | undefined {
+	if (/%(?:2f|5c|00)/i.test(value)) return undefined;
+	try {
+		const decoded = decodeURIComponent(value);
+		if (!decoded || /[\/\\\u0000]|%(?:2f|5c|00)/i.test(decoded)) return undefined;
+		return decoded;
+	} catch {
+		return undefined;
+	}
+}
+
+function isGithubRepositorySegment(value: string): boolean {
+	return value !== "." && value !== ".." && /^[A-Za-z0-9_.-]+$/.test(value);
+}
+
 export function normalizePullRequestIdentity(input: PullRequestIdentityInput): string {
 	const host = normalizeGithubHost(input.host);
 	const owner = input.owner.trim().toLowerCase();
@@ -248,6 +350,7 @@ export class RemoteStateCoordinator {
 	private readonly maxConcurrentIdentityProbes: number;
 	private readonly identityProbeTimeoutMs: number;
 	private readonly broadcast?: RemoteStateCoordinatorOptions["broadcast"];
+	private readonly telemetry?: RemoteStateCoordinatorOptions["telemetry"];
 	private readonly repositoryFreshnessMs: number;
 	private readonly activePrFreshnessMs: number;
 	private readonly sidebarPrFreshnessMs: number;
@@ -269,6 +372,7 @@ export class RemoteStateCoordinator {
 		this.maxConcurrentIdentityProbes = Math.max(1, options.maxConcurrentIdentityProbes ?? this.maxConcurrent);
 		this.identityProbeTimeoutMs = Math.max(1, options.identityProbeTimeoutMs ?? DEFAULT_IDENTITY_PROBE_TIMEOUT_MS);
 		this.broadcast = options.broadcast;
+		this.telemetry = options.telemetry;
 		this.repositoryFreshnessMs = options.repositoryFreshnessMs ?? DEFAULT_REPOSITORY_FRESHNESS_MS;
 		this.activePrFreshnessMs = options.activePrFreshnessMs ?? DEFAULT_ACTIVE_PR_FRESHNESS_MS;
 		this.sidebarPrFreshnessMs = options.sidebarPrFreshnessMs ?? DEFAULT_SIDEBAR_PR_FRESHNESS_MS;
@@ -283,7 +387,10 @@ export class RemoteStateCoordinator {
 		const existing = this.repositoryIdentityInFlight.get(executionAlias);
 		if (existing) return { ...(await existing) };
 
-		const pending = this.resolveRepositoryIdentityUncached(input.cwd, executionNamespace, input.executeGit);
+		const pending = this.resolveRepositoryIdentityUncached(input.cwd, executionNamespace, input.executeGit).catch((error) => {
+			this.emitTelemetry(undefined, "identity_failure", { source: "repository", errorKind: categorizeError(error) });
+			throw error;
+		});
 		this.repositoryIdentityInFlight.set(executionAlias, pending);
 		try {
 			return { ...(await pending) };
@@ -348,10 +455,7 @@ export class RemoteStateCoordinator {
 		if (options.address) record.addresses.set(addressKey(options.address), { ...options.address });
 		const intent = options.intent ?? "automatic";
 		const now = this.clock.now();
-		if (!this.isFresh(record, intent, now, options.cadence) && this.shouldStart(record, intent, now, options)) {
-			if (intent === "explicit" && options.forceRequestedAt !== undefined) record.lastForceRequestAt = options.forceRequestedAt;
-			this.startRefresh(record);
-		}
+		this.requestRefresh(record, intent, now, options);
 		return this.snapshot(record, now, options.cadence);
 	}
 
@@ -375,7 +479,7 @@ export class RemoteStateCoordinator {
 		if (record.source !== "repository") throw new Error("ensureFreshRepository requires a repository key");
 		if (options.address) record.addresses.set(addressKey(options.address), { ...options.address });
 		const now = this.clock.now();
-		if (!this.isFresh(record, "automatic", now, "active") && this.shouldStart(record, "automatic", now, { cadence: "active" })) this.startRefresh(record);
+		this.requestRefresh(record, "automatic", now, { cadence: "active" });
 		await record.inFlight;
 		return this.snapshot(record, this.clock.now(), "active");
 	}
@@ -385,10 +489,7 @@ export class RemoteStateCoordinator {
 		const record = this.requireRecord(key) as RemoteStateRecord<T>;
 		if (options.address) record.addresses.set(addressKey(options.address), { ...options.address });
 		const intent = options.intent ?? "explicit";
-		if (!this.isFresh(record, intent, this.clock.now(), options.cadence) && this.shouldStart(record, intent, this.clock.now(), options)) {
-			if (intent === "explicit" && options.forceRequestedAt !== undefined) record.lastForceRequestAt = options.forceRequestedAt;
-			this.startRefresh(record);
-		}
+		this.requestRefresh(record, intent, this.clock.now(), options);
 		await record.inFlight;
 		return this.snapshot(record, this.clock.now(), options.cadence);
 	}
@@ -436,26 +537,59 @@ export class RemoteStateCoordinator {
 		return cadence === "sidebar" ? this.sidebarPrFreshnessMs : this.activePrFreshnessMs;
 	}
 
-	private shouldStart(record: RemoteStateRecord<unknown>, intent: RemoteStateIntent, now: number, options: RemoteStateReadOptions = {}): boolean {
-		if (record.inFlight || (intent !== "explicit" && now < record.nextRetryAt)) return false;
+	private requestRefresh(
+		record: RemoteStateRecord<unknown>,
+		intent: RemoteStateIntent,
+		now: number,
+		options: RemoteStateReadOptions = {},
+	): void {
+		const cadence = options.cadence ?? "active";
+		if (this.isFresh(record, intent, now, cadence)) {
+			this.emitTelemetry(record, "fresh", { intent, cadence });
+			return;
+		}
+		if (record.inFlight) {
+			this.emitTelemetry(record, "joined", { intent, cadence });
+			return;
+		}
+		if (intent !== "explicit" && now < record.nextRetryAt) {
+			this.emitTelemetry(record, "backoff", { intent, cadence });
+			return;
+		}
 		if (
 			intent === "explicit"
 			&& options.forceRequestedAt !== undefined
 			&& options.forceCoalesceMs !== undefined
 			&& record.lastForceRequestAt !== undefined
 			&& Math.abs(options.forceRequestedAt - record.lastForceRequestAt) < options.forceCoalesceMs
-		) return false;
+		) {
+			this.emitTelemetry(record, "coalesced", { intent, cadence });
+			return;
+		}
 		// A failed attempt still consumes the automatic external-call budget.
-		return intent === "explicit" || record.lastAttemptAt === undefined || now - record.lastAttemptAt >= this.freshness(record, options.cadence ?? "active");
+		if (intent !== "explicit" && record.lastAttemptAt !== undefined && now - record.lastAttemptAt < this.freshness(record, cadence)) {
+			this.emitTelemetry(record, "budget", { intent, cadence });
+			return;
+		}
+		if (intent === "explicit" && options.forceRequestedAt !== undefined) record.lastForceRequestAt = options.forceRequestedAt;
+		this.emitTelemetry(record, "admitted", { intent, cadence });
+		this.startRefresh(record, intent, cadence);
 	}
 
-	private startRefresh(record: RemoteStateRecord<unknown>): void {
+	private startRefresh(record: RemoteStateRecord<unknown>, intent: RemoteStateIntent, cadence: "active" | "sidebar"): void {
 		if (record.inFlight) return;
+		const queuedAt = this.clock.now();
+		if (this.active >= this.maxConcurrent) {
+			this.emitTelemetry(record, "queued", { intent, cadence, queueDepth: this.queued.length + 1 });
+		}
 		const refresh = async () => {
-			record.lastAttemptAt = this.clock.now();
+			const startedAt = this.clock.now();
+			record.lastAttemptAt = startedAt;
+			this.emitTelemetry(record, "started", { intent, cadence, waitMs: Math.max(0, startedAt - queuedAt) });
 			// Invalidation before execution is satisfied by this refresh. Invalidation
 			// while remote I/O is running remains pending for the next eligible read.
 			const invalidationVersion = record.invalidationVersion;
+			let outcome: "success" | "failure" = "success";
 			try {
 				const data = await record.refresh();
 				record.lastGood = safeClone(data);
@@ -466,6 +600,7 @@ export class RemoteStateCoordinator {
 				record.lastError = undefined;
 				this.reconcilePullRequestNumber(record, data);
 			} catch (error) {
+				outcome = "failure";
 				const now = this.clock.now();
 				record.invalidated = true;
 				record.failureCount += 1;
@@ -473,6 +608,12 @@ export class RemoteStateCoordinator {
 				const exponent = Math.min(record.failureCount - 1, 16);
 				record.nextRetryAt = now + Math.min(this.backoffMaxMs, this.backoffBaseMs * 2 ** exponent);
 			} finally {
+				this.emitTelemetry(record, outcome, {
+					intent,
+					cadence,
+					durationMs: Math.max(0, this.clock.now() - startedAt),
+					...(record.lastError ? { errorKind: record.lastError.kind } : {}),
+				});
 				// Remote admission is released before entity-local projection. The
 				// canonical in-flight promise remains installed until fanout completes,
 				// so forced callers still join rather than starting duplicate fetches.
@@ -545,6 +686,38 @@ export class RemoteStateCoordinator {
 
 	private emit(address: RemoteStateAddress, snapshot: RemoteStateSnapshot<unknown>): void {
 		try { this.broadcast?.({ ...address }, safeClone(snapshot)); } catch { /* broadcast failure cannot strand canonical state */ }
+	}
+
+	private emitTelemetry(
+		record: RemoteStateRecord<unknown> | undefined,
+		outcome: RemoteStateTelemetryOutcome,
+		detail: Omit<RemoteStateTelemetryEvent, "type" | "source" | "outcome" | "observedAt" | "record"> & { source?: RemoteStateSource } = {},
+	): void {
+		if (!this.telemetry) return;
+		try {
+			const now = this.clock.now();
+			const refreshedAt = record?.refreshedAt;
+			const ageMs = refreshedAt === undefined ? undefined : Math.max(0, now - refreshedAt);
+			const stale = record
+				? record.invalidated || refreshedAt === undefined || now - refreshedAt >= this.freshness(record, detail.cadence ?? "active")
+				: undefined;
+			const event: RemoteStateTelemetryEvent = {
+				type: "remote_state_refresh",
+				source: record?.source ?? detail.source ?? "repository",
+				outcome,
+				observedAt: now,
+				...(record ? { record: opaqueKey("state:", record.key) } : {}),
+				...(detail.intent ? { intent: detail.intent } : {}),
+				...(detail.cadence ? { cadence: detail.cadence } : {}),
+				...(detail.queueDepth === undefined ? {} : { queueDepth: detail.queueDepth }),
+				...(detail.waitMs === undefined ? {} : { waitMs: detail.waitMs }),
+				...(detail.durationMs === undefined ? {} : { durationMs: detail.durationMs }),
+				...(ageMs === undefined ? {} : { ageMs }),
+				...(stale === undefined ? {} : { stale }),
+				...(detail.errorKind ? { errorKind: detail.errorKind } : {}),
+			};
+			this.telemetry(event);
+		} catch { /* diagnostics are strictly best-effort */ }
 	}
 
 	private async readGit(

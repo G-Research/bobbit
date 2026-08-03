@@ -18,14 +18,22 @@ test.describe("remote-state coordinator routes", () => {
 		let prReads = 0;
 		let localOnly = false;
 		let remoteHost = "example.github.test";
+		let remoteOrigin: string | undefined;
 		let goalId: string | undefined;
 		let originalTrustedHosts: unknown = [];
 		let ws: Awaited<ReturnType<typeof connectWs>> | undefined;
+		const telemetry: Array<Record<string, unknown>> = [];
+		const originalDebug = console.debug;
+		console.debug = (...args: unknown[]) => {
+			const line = args.map(String).join(" ");
+			if (!line.startsWith("[remote-state] ")) return;
+			try { telemetry.push(JSON.parse(line.slice("[remote-state] ".length))); } catch { /* assertion below catches missing events */ }
+		};
 
 		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
 			if (file === "git" && args.join(" ") === "remote get-url origin") {
 				if (localOnly) throw new Error("no origin configured");
-				return { stdout: `https://token:secret@${remoteHost}/acme/widget.git\n`, stderr: "" };
+				return { stdout: `${remoteOrigin ?? `https://token:secret@${remoteHost}/acme/widget.git`}\n`, stderr: "" };
 			}
 			if (file === "git" && args.join(" ") === "fetch --quiet") {
 				gitFetches += 1;
@@ -63,6 +71,7 @@ test.describe("remote-state coordinator routes", () => {
 			expect(trusted.status).toBe(200);
 			ws = await connectWs(sessionId);
 			const cursor = ws.messageCount();
+			const gitTelemetryCursor = telemetry.length;
 			const gitResponses = await Promise.all([
 				apiFetch(`/api/sessions/${sessionId}/git-status?intent=explicit`),
 				apiFetch(`/api/sessions/${sessionId}/git-status?intent=explicit`),
@@ -72,6 +81,9 @@ test.describe("remote-state coordinator routes", () => {
 				return response.json();
 			}));
 			expect(gitFetches).toBe(1);
+			const gitTelemetry = telemetry.slice(gitTelemetryCursor).filter(event => event.source === "repository");
+			expect(gitTelemetry.filter(event => event.outcome === "started")).toHaveLength(1);
+			expect(gitTelemetry.filter(event => event.outcome === "success")).toHaveLength(1);
 			for (const body of gitBodies) {
 				expect(body).toMatchObject({ source: "repository", stale: false, observedAt: expect.any(Number), refreshedAt: expect.any(Number), ageMs: expect.any(Number) });
 				expect(JSON.stringify(body)).not.toContain("token:secret");
@@ -82,6 +94,7 @@ test.describe("remote-state coordinator routes", () => {
 			expect(JSON.stringify(gitFrame)).not.toContain("token:secret");
 			expect(JSON.stringify(gitFrame)).not.toContain("example.github.test/acme/widget.git");
 
+			const prTelemetryCursor = telemetry.length;
 			const prResponses = await Promise.all([
 				apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`),
 				apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`),
@@ -91,6 +104,9 @@ test.describe("remote-state coordinator routes", () => {
 				return response.json();
 			}));
 			expect(prReads).toBe(1);
+			const prTelemetry = telemetry.slice(prTelemetryCursor).filter(event => event.source === "pull_request");
+			expect(prTelemetry.filter(event => event.outcome === "started")).toHaveLength(1);
+			expect(prTelemetry.filter(event => event.outcome === "success")).toHaveLength(1);
 			for (const body of prBodies) {
 				expect(body).toMatchObject({ source: "pr", stale: false, data: { number: 42 }, observedAt: expect.any(Number), refreshedAt: expect.any(Number) });
 				expect(JSON.stringify(body)).not.toContain("token:secret");
@@ -144,6 +160,25 @@ test.describe("remote-state coordinator routes", () => {
 			await new Promise<void>(resolve => setImmediate(resolve));
 			expect(prReads).toBe(beforeBust + 1);
 
+			// Trusted-looking substrings inside an untrusted URL must not alias the
+			// genuine record, trigger `gh`, or broadcast retained genuine PR data.
+			for (const spoof of [
+				"https://evil.example/a/https://example.github.test/acme/widget.git",
+				"ssh://git@evil.example/a/git@example.github.test:acme/widget.git",
+			]) {
+				remoteOrigin = spoof;
+				const beforeSpoof = prReads;
+				const spoofCursor = ws.messageCount();
+				for (const intent of ["automatic", "explicit"]) {
+					const response = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=${intent}&optional=1`);
+					expect(response.status).toBe(204);
+				}
+				await new Promise<void>(resolve => setImmediate(resolve));
+				expect(prReads).toBe(beforeSpoof);
+				expect(ws.messages.slice(spoofCursor).filter(message => message.type === "remote_state_snapshot" && message.resource === "pr")).toHaveLength(0);
+			}
+			remoteOrigin = undefined;
+
 			// An untrusted remote is rejected before any `gh` call; configured GHE and
 			// local-only repositories retain their separate supported paths.
 			remoteHost = "gitlab.example.test";
@@ -161,6 +196,7 @@ test.describe("remote-state coordinator routes", () => {
 			expect(gitFetches).toBe(beforeLocalRead);
 		} finally {
 			runner.execFile = originalExecFile;
+			console.debug = originalDebug;
 			ws?.close();
 			if (goalId) await deleteGoal(goalId);
 			await deleteSession(sessionId);
@@ -168,6 +204,133 @@ test.describe("remote-state coordinator routes", () => {
 				method: "PUT",
 				body: JSON.stringify({ githubTrustedHosts: originalTrustedHosts }),
 			}).catch(() => {});
+		}
+	});
+
+	test("retains PR last-good state through categorized failures, backoff, and concurrent forced recovery", async ({ gateway }) => {
+		test.setTimeout(30_000);
+		const sessionId = await createSession({ cwd: gitCwd() });
+		const runner = (gateway.sessionManager as any).commandRunner;
+		const originalExecFile = runner.execFile;
+		let prReads = 0;
+		let version = 1;
+		let failure: string | undefined;
+		let recoveryGate: Promise<void> | undefined;
+		let recoveryStarted: (() => void) | undefined;
+		let ws: Awaited<ReturnType<typeof connectWs>> | undefined;
+
+		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+			if (file === "git" && args.join(" ") === "remote get-url origin") {
+				return { stdout: "https://token:secret@github.com/acme/route-failure.git\n", stderr: "" };
+			}
+			if (file === "gh" && args[0] === "pr" && args[1] === "view") {
+				prReads += 1;
+				if (failure) {
+					const error = new Error(`${failure} token:secret https://secret@example.test/private`);
+					(error as any).stderr = "private stderr and review body";
+					throw error;
+				}
+				if (recoveryGate) {
+					recoveryStarted?.();
+					await recoveryGate;
+				}
+				return {
+					stdout: JSON.stringify({
+						number: 77,
+						url: "https://github.com/acme/route-failure/pull/77",
+						title: `safe version ${version}`,
+						state: "OPEN",
+						mergeable: "MERGEABLE",
+						headRefName: "master",
+						baseRefName: "master",
+					}),
+					stderr: "",
+				};
+			}
+			if (file === "gh" && args[0] === "api") {
+				return { stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }), stderr: "" };
+			}
+			return originalExecFile.call(runner, file, args, options);
+		};
+
+		try {
+			ws = await connectWs(sessionId);
+			const seededResponse = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`);
+			expect(seededResponse.status).toBe(200);
+			let retained = await seededResponse.json();
+			expect(retained).toMatchObject({ stale: false, data: { title: "safe version 1" } });
+
+			for (const scenario of [
+				{ message: "network timeout", kind: "offline" },
+				{ message: "HTTP 401 bad credentials", kind: "auth" },
+				{ message: "HTTP 429 secondary rate limit", kind: "rate_limited" },
+			]) {
+				gateway.clock.advance(20_000);
+				failure = scenario.message;
+				const beforeFailure = prReads;
+				const cursor = ws.messageCount();
+				const staleResponse = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=automatic`);
+				expect(staleResponse.status).toBe(200);
+				const failureFrame = await ws.waitForFrom(
+					cursor,
+					message => message.type === "remote_state_snapshot" && message.resource === "pr" && message.snapshot?.lastError === scenario.kind,
+				);
+				expect(prReads).toBeGreaterThan(beforeFailure);
+				const afterFailure = prReads;
+				expect(failureFrame.snapshot).toMatchObject({
+					stale: true,
+					lastError: scenario.kind,
+					refreshedAt: retained.refreshedAt,
+					data: retained.data,
+				});
+				expect(JSON.stringify(failureFrame)).not.toContain("token:secret");
+				expect(JSON.stringify(failureFrame)).not.toContain("private stderr");
+
+				const duringBackoff = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=automatic`);
+				expect(await duringBackoff.json()).toMatchObject({
+					stale: true,
+					lastError: scenario.kind,
+					refreshedAt: retained.refreshedAt,
+					data: retained.data,
+				});
+				expect(prReads).toBe(afterFailure);
+
+				failure = undefined;
+				version += 1;
+				gateway.clock.advance(1);
+				// Route force requests use a short real-time burst marker. Keep this
+				// recovery distinct from the previous explicit cycle while the two
+				// requests below still land in the same burst and join one flight.
+				await new Promise(resolve => setTimeout(resolve, 260));
+				let releaseRecovery!: () => void;
+				let markRecoveryStarted!: () => void;
+				const recoveryStartedPromise = new Promise<void>(resolve => { markRecoveryStarted = resolve; });
+				recoveryStarted = markRecoveryStarted;
+				recoveryGate = new Promise<void>(resolve => { releaseRecovery = resolve; });
+				const beforeRecovery = prReads;
+				const recovering = Promise.all([
+					apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`),
+					apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`),
+				]);
+				await recoveryStartedPromise;
+				await new Promise<void>(resolve => setImmediate(resolve));
+				releaseRecovery();
+				const recoveryResponses = await recovering;
+				recoveryGate = undefined;
+				recoveryStarted = undefined;
+				expect(prReads).toBe(beforeRecovery + 1);
+				const recoveryBodies = await Promise.all(recoveryResponses.map(response => response.json()));
+				for (const body of recoveryBodies) {
+					expect(body).toMatchObject({ stale: false, data: { title: `safe version ${version}` } });
+					expect(body.lastError).toBeUndefined();
+				}
+				retained = recoveryBodies[0];
+			}
+		} finally {
+			recoveryGate = undefined;
+			runner.execFile = originalExecFile;
+			ws?.close();
+			await deleteSession(sessionId);
 		}
 	});
 
