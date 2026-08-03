@@ -1,7 +1,7 @@
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html, nothing } from "lit";
 import { PanelRight } from "lucide";
-import { previewRouteFromStoredValue } from "../../../app/gateway-fetch.js";
+import { previewEntryFromStoredValue, previewRouteFromStoredValue } from "../../../app/gateway-fetch.js";
 import { gatewayRoute, type GatewayRoute } from "../../../shared/base-path.js";
 import { renderHeader, getToolState } from "../renderer-registry.js";
 import * as previewPanel from "../../../app/preview-panel.js";
@@ -41,8 +41,10 @@ function parseSnapshotText(text: string): ParsedSnapshot | null {
 		try {
 			const parsed = JSON.parse(body);
 			if (parsed && parsed.kind === "preview" && typeof parsed.url === "string" && parsed.url) {
-				const url = previewRouteFromStoredValue(parsed.url);
-				if (!url) return null;
+				const rawEntry = parsed.entry !== undefined ? parsed.entry : parsed.e;
+				const entry = rawEntry === undefined ? undefined : previewEntryFromStoredValue(rawEntry);
+				const url = previewRouteFromStoredValue(parsed.url, rawEntry);
+				if (!url || (rawEntry !== undefined && !entry)) return null;
 				const rawContentHash = parsed.contentHash;
 				const rawArtifactId = parsed.artifactId ?? parsed.artifact_id ?? parsed.aid;
 				const contentHash = normalizeContentHash(rawContentHash);
@@ -54,7 +56,7 @@ function parseSnapshotText(text: string): ParsedSnapshot | null {
 					kind: "preview",
 					url,
 					path: typeof parsed.path === "string" ? parsed.path : "",
-					entry: typeof parsed.entry === "string" ? parsed.entry : undefined,
+					...(entry ? { entry } : {}),
 					...(contentHash ? { contentHash } : {}),
 					...(artifactId ? { artifactId } : {}),
 				};

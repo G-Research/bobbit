@@ -298,20 +298,53 @@ function previewRouteCandidate(raw: string): GatewayRoute | null {
 	try { return previewGatewayRoute(raw); } catch { return null; }
 }
 
+/**
+ * Decode the single entry filename carried by compact v3 snapshot markers.
+ * The value is a filename, not a route segment, so decode it before validating
+ * it and encode it again only when reconstructing the internal preview route.
+ */
+export function previewEntryFromStoredValue(value: unknown): string | null {
+	if (typeof value !== "string") return null;
+	const raw = value.trim();
+	if (!raw || raw.length > 255) return null;
+	let entry: string;
+	try { entry = decodeURIComponent(raw); } catch { return null; }
+	if (
+		!entry || entry.length > 255 || entry === "." || entry === ".." ||
+		/[\\/\u0000-\u001f\u007f]/u.test(entry)
+	) return null;
+	return entry;
+}
+
+function compactPreviewRouteCandidate(raw: string, entry: string | undefined): GatewayRoute | null {
+	if (!entry || !/^\/preview\/[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}\/$/iu.test(raw)) return null;
+	return previewRouteCandidate(`${raw}${encodeURIComponent(entry)}`);
+}
+
+function previewRouteCandidateWithEntry(raw: string, entry: string | undefined): GatewayRoute | null {
+	return previewRouteCandidate(raw) || compactPreviewRouteCandidate(raw, entry);
+}
+
 function splitPathSuffix(raw: string): { pathname: string; suffix: string } {
 	const boundary = raw.search(/[?#]/);
 	return boundary < 0 ? { pathname: raw, suffix: "" } : { pathname: raw.slice(0, boundary), suffix: raw.slice(boundary) };
 }
 
-function stripKnownPreviewMount(pathname: string, suffix: string, basePath: string): GatewayRoute | null {
+function stripKnownPreviewMount(pathname: string, suffix: string, basePath: string, entry: string | undefined): GatewayRoute | null {
 	const stripped = stripBasePath(pathname, basePath);
-	return stripped === null ? null : previewRouteCandidate(`${stripped}${suffix}`);
+	return stripped === null ? null : previewRouteCandidateWithEntry(`${stripped}${suffix}`, entry);
 }
 
-/** Decode a current or historical preview URL to the internal `/preview/...` route. */
-export function previewRouteFromStoredValue(value: unknown): GatewayRoute | null {
+/**
+ * Decode a current or historical preview URL to the internal `/preview/...` route.
+ * Compact v3 markers may store only `/preview/<session>/`; when a safe entry is
+ * supplied, reconstruct that route and run it through the same strict validator.
+ */
+export function previewRouteFromStoredValue(value: unknown, entryValue?: unknown): GatewayRoute | null {
 	if (typeof value !== "string" || !value || /[\\\u0000-\u001f\u007f]/u.test(value)) return null;
-	const direct = previewRouteCandidate(value);
+	const entry = entryValue === undefined ? undefined : previewEntryFromStoredValue(entryValue);
+	if (entryValue !== undefined && !entry) return null;
+	const direct = previewRouteCandidateWithEntry(value, entry);
 	if (direct) return direct;
 
 	const connection = hydrateActiveConnection();
@@ -325,14 +358,14 @@ export function previewRouteFromStoredValue(value: unknown): GatewayRoute | null
 		if (!selected || absolute.origin !== selected.origin) return null;
 		pathname = absolute.pathname;
 		suffix = `${absolute.search}${absolute.hash}`;
-		const known = stripKnownPreviewMount(pathname, suffix, selected.pathname === "/" ? "" : selected.pathname);
+		const known = stripKnownPreviewMount(pathname, suffix, selected.pathname === "/" ? "" : selected.pathname, entry);
 		if (known) return known;
 	} else if (value.startsWith("/")) {
 		({ pathname, suffix } = splitPathSuffix(value));
 		const selectedBasePath = selected && selected.pathname !== "/" ? selected.pathname : "";
 		const knownBases = new Set([runtimeBasePath(), selectedBasePath]);
 		for (const base of knownBases) {
-			const known = stripKnownPreviewMount(pathname, suffix, base);
+			const known = stripKnownPreviewMount(pathname, suffix, base, entry);
 			if (known) return known;
 		}
 	} else {
@@ -343,7 +376,7 @@ export function previewRouteFromStoredValue(value: unknown): GatewayRoute | null
 	// mount. Only the validated internal suffix survives; the historical origin
 	// and prefix are never fetched or navigated.
 	const marker = pathname.lastIndexOf("/preview/");
-	return marker < 0 ? null : previewRouteCandidate(`${pathname.slice(marker)}${suffix}`);
+	return marker < 0 ? null : previewRouteCandidateWithEntry(`${pathname.slice(marker)}${suffix}`, entry);
 }
 
 /** Test-only reset for isolated browser-boundary cases. */
