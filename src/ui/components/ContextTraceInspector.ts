@@ -12,7 +12,9 @@ export interface SafeTraceProviderRow {
 }
 
 export interface SafeTraceEntry {
-	event: ContextTraceEvent;
+	/** `event` is retained for standalone renderer callers; the controller uses `hook`. */
+	event?: ContextTraceEvent;
+	hook?: ContextTraceEvent;
 	ts: number;
 	providers: SafeTraceProviderRow[];
 }
@@ -89,17 +91,20 @@ export class ContextTraceInspector extends LitElement {
 	private renderEntries(items: ContextTraceInspectorItem[]) {
 		return html`
 			<div class="context-trace-events" data-testid="context-trace-events">
-				${items.map(({ entry }) => html`
-					<article class="context-trace-event" data-testid="context-trace-event">
+				${items.map(({ entry }) => {
+					const event = entry.event ?? entry.hook ?? "Unknown event";
+					return html`
+					<article class="context-trace-event" data-testid="context-trace-event" data-context-trace-hook=${event}>
 						<div class="context-trace-event__header">
-							<h3>${entry.event}</h3>
+							<h3>${event}</h3>
 							<time datetime=${machineTime(entry.ts)}>${localizedTime(entry.ts)}</time>
 						</div>
 						${entry.providers.length > 0
-							? html`<ul class="context-trace-providers" aria-label="Providers for ${entry.event}">${entry.providers.map((provider) => this.renderProvider(provider))}</ul>`
+							? html`<ul class="context-trace-providers" aria-label="Providers for ${event}">${entry.providers.map((provider) => this.renderProvider(provider))}</ul>`
 							: html`<p class="context-trace-muted">No provider activity was recorded.</p>`}
 					</article>
-				`)}
+					`;
+				})}
 			</div>
 		`;
 	}

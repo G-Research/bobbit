@@ -53,6 +53,7 @@ const states = new Map<string, ContextTraceState>();
 let request: Request | null = null;
 let requestGeneration = 0;
 let openedSessionId: string | null = null;
+const openers = new Map<string, HTMLElement>();
 
 function emptyState(): ContextTraceState {
 	return {
@@ -183,8 +184,9 @@ export function contextTraceStateFor(sessionId: string): ContextTraceState {
 	return stateFor(sessionId);
 }
 
-export function openContextTraceInspector(sessionId: string, _opener?: HTMLElement): void {
+export function openContextTraceInspector(sessionId: string, opener?: HTMLElement): void {
 	if (openedSessionId && openedSessionId !== sessionId) abortRequest();
+	if (opener) openers.set(sessionId, opener);
 	openedSessionId = sessionId;
 	void refreshContextTrace(sessionId);
 }
@@ -278,9 +280,24 @@ export function stopContextTraceInspector(): void {
 	openedSessionId = null;
 }
 
+/** Restore focus after Context closes without moving focus during a refresh. */
+export function restoreContextTraceInspectorFocus(sessionId: string): void {
+	const opener = openers.get(sessionId);
+	openers.delete(sessionId);
+	queueMicrotask(() => {
+		if (activeSessionId() !== sessionId || state.selectedSessionId !== sessionId) return;
+		const target = opener?.isConnected
+			? opener
+			: document.querySelector<HTMLElement>('[data-testid="session-actions-trigger"]')
+				?? document.querySelector<HTMLElement>("textarea");
+		try { target?.focus({ preventScroll: true }); } catch { target?.focus(); }
+	});
+}
+
 /** Test-only reset to keep module state from leaking between DOM fixtures. */
 export function __resetContextTraceForTests(): void {
 	abortRequest();
 	states.clear();
+	openers.clear();
 	openedSessionId = null;
 }

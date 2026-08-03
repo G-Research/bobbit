@@ -102,7 +102,7 @@ import {
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
 import { openInboxPanel } from "./inbox-panel.js";
-import { contextTraceStateFor, loadEarlierContextTrace, refreshContextTrace, stopContextTraceInspector } from "./context-trace.js";
+import { contextTraceStateFor, loadEarlierContextTrace, refreshContextTrace, restoreContextTraceInspectorFocus, stopContextTraceInspector } from "./context-trace.js";
 import { renderPackPanelContent } from "./pack-panels.js";
 import {
 	closeSidePanelTab as closeServerSidePanelTab,
@@ -944,7 +944,7 @@ async function openHeaderSessionActionsPopover(input: {
 		const current = _openHeaderSessionActionsPopover;
 		const action = current?.actions.find((item) => String(item.id) === event.detail.actionId);
 		closeHeaderSessionActionsPopover(false);
-		void action?.run(event);
+		void action?.run(event, input.trigger);
 	}) as EventListener);
 	element.addEventListener("close", () => {
 		if (_openHeaderSessionActionsPopover?.element === element) {
@@ -981,7 +981,7 @@ function renderHeaderSessionActionButton(action: SessionActionDescriptor, mobile
 				event.preventDefault();
 				event.stopPropagation();
 				closeHeaderSessionActionsPopover(false);
-				void action.run(event);
+				void action.run(event, event.currentTarget instanceof HTMLElement ? event.currentTarget : undefined);
 			}}
 			title=${action.title || action.label}
 			aria-label=${action.label}
@@ -2419,7 +2419,10 @@ export function doRenderApp(): void {
 			state.inboxPanelOpen = false;
 			state.inboxAddDialogOpen = false;
 		}
-		if (tab.kind === "context") stopContextTraceInspector();
+		if (tab.kind === "context") {
+			stopContextTraceInspector();
+			restoreContextTraceInspectorFocus(sid);
+		}
 		if (tab.kind === "preview") {
 			const remainingPreviewTabs = tabsBefore.filter((candidate) => candidate.id !== tab.id && candidate.kind === "preview");
 			if (remainingPreviewTabs.length === 0) {
@@ -2498,7 +2501,7 @@ export function doRenderApp(): void {
 				role="button"
 				aria-label=${`Dismiss ${label}`}
 				title=${`Dismiss ${label}`}
-				data-testid="side-panel-close"
+				data-testid=${tab.kind === "context" ? "context-trace-close" : "side-panel-close"}
 				@click=${(event: Event) => closeUnifiedPanelTab(tab, event)}
 			>${icon(X, "xs")}</span>` : ""}</div>
 	`;

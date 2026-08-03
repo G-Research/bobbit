@@ -1,6 +1,8 @@
 import { icon } from "@mariozechner/mini-lit";
 import { Activity, ExternalLink, FileText, GitFork, Link, Pencil, RotateCcw, Trash2 } from "lucide";
-import { openContextTraceInspector } from "./context-trace.js";
+import { openContextTraceInspector, stopContextTraceInspector } from "./context-trace.js";
+import { CONTEXT_PANEL_TAB_ID } from "./panel-workspace.js";
+import { openSidePanelTab } from "./side-panel-workspace.js";
 import type { TemplateResult } from "lit";
 import { copySidebarLink, gatewayFetch, refreshAgentSession, refreshSessions, sessionDeepLink, sessionPathDeepLink, type SidebarCopyLinkTitle } from "./api.js";
 import { listLauncherEntrypoints, runResolvedLauncherEntrypoint, type LauncherDispatchResult, type SpawnLaunchTarget } from "./pack-entrypoints.js";
@@ -47,7 +49,7 @@ export interface SessionActionDescriptor {
 	tone?: "default" | "danger";
 	quick?: boolean;
 	visible?: boolean;
-	run: (event: Event) => void | Promise<void>;
+	run: (event: Event, opener?: HTMLElement) => void | Promise<void>;
 	trailingToggle?: SessionActionTrailingToggle;
 }
 
@@ -229,11 +231,7 @@ export function buildArchivedSessionActions(input: BuildArchivedSessionActionsIn
 			icon: icon(Activity, "xs"),
 			priority: ARCHIVED_BUILTIN_PRIORITIES["view-context-trace"],
 			quick: false,
-			run: (event: Event) => {
-				event.preventDefault();
-				event.stopPropagation();
-				openContextTraceInspector(session.id, event.currentTarget instanceof HTMLElement ? event.currentTarget : undefined);
-			},
+			run: (event: Event, opener?: HTMLElement) => openContextTracePanel(session.id, event, opener),
 		},
 		{
 			id: "open-new-window",
@@ -389,11 +387,7 @@ export function buildSessionActions(input: BuildSessionActionsInput): SessionAct
 			icon: icon(Activity, "xs"),
 			priority: BUILTIN_PRIORITIES["view-context-trace"],
 			quick: false,
-			run: (event: Event) => {
-				event.preventDefault();
-				event.stopPropagation();
-				openContextTraceInspector(session.id, event.currentTarget instanceof HTMLElement ? event.currentTarget : undefined);
-			},
+			run: (event: Event, opener?: HTMLElement) => openContextTracePanel(session.id, event, opener),
 		},
 		{
 			id: "open-new-window",
@@ -412,6 +406,27 @@ export function buildSessionActions(input: BuildSessionActionsInput): SessionAct
 	return actions
 		.filter((action) => action.visible !== false)
 		.sort((a, b) => a.priority - b.priority);
+}
+
+function openContextTracePanel(sessionId: string, event: Event, opener?: HTMLElement): void {
+	event.preventDefault();
+	event.stopPropagation();
+	const focusOpener = opener ?? (event.currentTarget instanceof HTMLElement ? event.currentTarget : undefined);
+	// The inspector is a persisted side-panel tab. `openSidePanelTab` applies its
+	// optimistic workspace before returning, so the controller can fetch while the
+	// non-modal panel mounts and moves focus to its heading.
+	void openSidePanelTab({
+		id: CONTEXT_PANEL_TAB_ID,
+		kind: "context",
+		title: "Context",
+		label: "Context",
+		source: { type: "context", sessionId },
+		updatedAt: Date.now(),
+	}, { focus: true }).catch((error) => {
+		console.warn("[context-trace] failed to open side-panel tab", error);
+		stopContextTraceInspector();
+	});
+	openContextTraceInspector(sessionId, focusOpener);
 }
 
 function isChildSession(session: GatewaySession): boolean {
