@@ -142,8 +142,17 @@ let currentView: View = "list";
 let workflows: Workflow[] = [];
 let loading = true;
 
-// Project components cache (for the `component` step-field dropdown).
+// Project components cache (for the `component` step-field dropdown and
+// command-environment inheritance labels). This contains only declared
+// component configuration, never host process environment values.
+type ProjectComponentMetadata = { name: string; env?: Record<string, string> };
+let projectComponents: ProjectComponentMetadata[] = [];
 let projectComponentNames: string[] = [];
+
+const COMMAND_ENV_KEY_MAX_LENGTH = 128;
+const COMMAND_ENV_VALUE_MAX_LENGTH = 16_384;
+const COMMAND_ENV_MAX_ENTRIES = 100;
+const COMMAND_ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 // Draft metadata rows per gate (ordered list of [key, value] pairs). Mirrors
 // `gate.metadata` for editing but keeps blank rows visible. Synced into
@@ -187,6 +196,7 @@ export function validateStep(step: VerifyStep): Record<string, string> {
 		if (!hasRun && !hasCmd) errs.run = "Either a free-form `run` or a named `command` is required.";
 		if (hasRun && hasCmd) errs.command = "Specify exactly one of `run` or `command`, not both.";
 		if (hasCmd && !(step.component && step.component.trim())) errs.component = "Component is required for named commands.";
+		Object.assign(errs, validateCommandEnvironment(step.env));
 	}
 	return errs;
 }
@@ -203,7 +213,34 @@ function collectValidationErrors(gates: WorkflowGate[]): { gateIdx: number; step
 	return out;
 }
 
+function validateCommandEnvironment(env: Record<string, string> | undefined): Record<string, string> {
+	const errors: Record<string, string> = {};
+	const entries = Object.entries(env || {});
+	if (entries.length > COMMAND_ENV_MAX_ENTRIES) {
+		errors.env = `Maximum ${COMMAND_ENV_MAX_ENTRIES} variables per environment.`;
+		return errors;
+	}
+	const lowerKeys = new Map<string, string>();
+	entries.forEach(([key, value], index) => {
+		const row = `env.${index}`;
+		if (!key) errors[`${row}.key`] = "Variable name is required.";
+		else if (!COMMAND_ENV_KEY_PATTERN.test(key)) errors[`${row}.key`] = "Use letters, numbers, and underscores; start with a letter or underscore.";
+		else if (key.length > COMMAND_ENV_KEY_MAX_LENGTH) errors[`${row}.key`] = `Variable names can be at most ${COMMAND_ENV_KEY_MAX_LENGTH} characters.`;
+		if (value.length > COMMAND_ENV_VALUE_MAX_LENGTH) errors[`${row}.value`] = `Values can be at most ${COMMAND_ENV_VALUE_MAX_LENGTH} characters.`;
+		const duplicate = lowerKeys.get(key.toLowerCase());
+		if (duplicate && duplicate !== key) {
+			errors[`${row}.key`] = `“${key}” duplicates “${duplicate}”. Variable names must be unique ignoring case.`;
+			const firstIndex = entries.findIndex(([candidate]) => candidate === duplicate);
+			errors[`env.${firstIndex}.key`] = `“${duplicate}” duplicates “${key}”. Variable names must be unique ignoring case.`;
+		} else {
+			lowerKeys.set(key.toLowerCase(), key);
+		}
+	});
+	return errors;
+}
+
 async function loadProjectComponentsForEditor(): Promise<void> {
+	projectComponents = [];
 	projectComponentNames = [];
 	const projectId = getConfigProjectId({ preserveHeadquarters: true });
 	if (!projectId) return;
@@ -212,9 +249,13 @@ async function loadProjectComponentsForEditor(): Promise<void> {
 		if (!res.ok) return;
 		const data = await res.json().catch(() => null);
 		const comps = data && Array.isArray(data.components) ? data.components : [];
-		projectComponentNames = comps
-			.map((c: any) => (c && typeof c.name === "string") ? c.name : "")
-			.filter((n: string) => n.length > 0);
+		projectComponents = comps
+			.filter((c: any) => c && typeof c.name === "string" && c.name.length > 0)
+			.map((c: any) => ({
+				name: c.name,
+				env: c.env && typeof c.env === "object" && !Array.isArray(c.env) ? { ...c.env } : undefined,
+			}));
+		projectComponentNames = projectComponents.map(c => c.name);
 	} catch {
 		/* swallow — select degrades to a free-text option list */
 	} finally {
@@ -303,7 +344,7 @@ function showEdit(workflow: Workflow): void {
 	pageInstance.editId = workflow.id;
 	pageInstance.editName = workflow.name;
 	pageInstance.editDescription = workflow.description;
-	pageInstance.editGates = workflow.gates.map((g) => ({ ...g, dependsOn: [...g.dependsOn], verify: g.verify ? g.verify.map(v => ({ ...v })) : undefined, metadata: g.metadata ? { ...g.metadata } : undefined }));
+	pageInstance.editGates = workflow.gates.map((g) => ({ ...g, dependsOn: [...g.dependsOn], verify: g.verify ? g.verify.map(v => ({ ...v, env: v.env ? { ...v.env } : undefined })) : undefined, metadata: g.metadata ? { ...g.metadata } : undefined }));
 	pageInstance.saving = false;
 	pageInstance.expandedGateIndices = new Set();
 	pageInstance.expandedVStepKeys = new Set();
@@ -366,7 +407,7 @@ function compactPhases(gates: WorkflowGate[]): WorkflowGate[] {
 		const remap = new Map(phases.map((p, i) => [p, i]));
 		return {
 			...g,
-			verify: g.verify.map(s => ({ ...s, phase: remap.get(s.phase ?? 0) ?? 0 })),
+			verify: g.verify.map(s => ({ ...s, env: s.env ? { ...s.env } : undefined, phase: remap.get(s.phase ?? 0) ?? 0 })),
 		};
 	});
 }
@@ -710,7 +751,7 @@ function notifyControlledChange(inst: EditorInstance): void {
 		gates: inst.editGates.map((g) => ({
 			...g,
 			dependsOn: [...g.dependsOn],
-			verify: g.verify ? g.verify.map((v) => ({ ...v })) : undefined,
+			verify: g.verify ? g.verify.map((v) => ({ ...v, env: v.env ? { ...v.env } : undefined })) : undefined,
 			metadata: g.metadata ? { ...g.metadata } : undefined,
 		})),
 	} as Workflow;
@@ -928,6 +969,7 @@ function mutateStepForTypeChange(prev: VerifyStep, newType: VerifyStep["type"]):
 		delete next.run;
 		delete next.expect;
 		delete next.command;
+		delete next.env;
 	} else {
 		delete next.prompt;
 		delete next.label;
@@ -947,6 +989,109 @@ function mutateStepForTypeChange(prev: VerifyStep, newType: VerifyStep["type"]):
 		if (next.prompt === undefined) next.prompt = "";
 	}
 	return next;
+}
+
+function commandEnvironmentContext(step: VerifyStep): { component?: ProjectComponentMetadata; precedence: string; empty: string } {
+	const component = step.component ? projectComponents.find(candidate => candidate.name === step.component) : undefined;
+	if (component) {
+		return {
+			component,
+			precedence: `Precedence: Step override → ${component.name} Command Environment → Bobbit process environment.`,
+			empty: `No environment overrides. This step inherits ${component.name} Command Environment.`,
+		};
+	}
+	if (step.run && !step.component) {
+		return {
+			precedence: "Precedence: Step override → Bobbit process environment.",
+			empty: "No environment overrides. This step uses the Bobbit process environment.",
+		};
+	}
+	return {
+		precedence: "Select a component to show inherited command environment.",
+		empty: "No environment overrides.",
+	};
+}
+
+function renderCommandEnvironmentEditor(
+	step: VerifyStep,
+	errs: Record<string, string>,
+	readOnly: boolean,
+	updateStep: (patch: Partial<VerifyStep>, rerender?: boolean) => void,
+): TemplateResult {
+	const entries = Object.entries(step.env || {});
+	const context = commandEnvironmentContext(step);
+	const inheritedKeys = new Set(Object.keys(context.component?.env || {}).map(key => key.toLowerCase()));
+	const updateEntry = (oldKey: string, newKey: string, newValue: string) => {
+		const env = { ...(step.env || {}) };
+		if (oldKey !== newKey) delete env[oldKey];
+		env[newKey] = newValue;
+		updateStep({ env });
+	};
+	return html`
+		<div class="wf-field wf-command-environment" data-testid="wf-step-environment">
+			<div class="wf-environment-heading">
+				<span class="wf-field-label">Environment overrides (${entries.length})</span>
+				${!readOnly && entries.length > 0 ? html`<button class="wf-criteria-add-btn" data-testid="wf-step-env-add" ?disabled=${entries.length >= COMMAND_ENV_MAX_ENTRIES} @click=${(e: Event) => {
+					e.stopPropagation();
+					updateStep({ env: { ...(step.env || {}), "": "" } }, true);
+					queueMicrotask(() => {
+						const inputs = document.querySelectorAll<HTMLInputElement>("[data-testid='wf-step-env-key']");
+						inputs[inputs.length - 1]?.focus();
+					});
+				}}>Add variable</button>` : nothing}
+			</div>
+			<div class="wf-field-hint" data-testid="wf-step-env-intro">Overrides apply to this command step only.</div>
+			<div class="wf-field-hint" data-testid="wf-step-env-precedence">${context.precedence}</div>
+			<div class="wf-environment-warning" role="note">Stored as plaintext. Do not enter API keys, tokens, passwords, or other secrets. Use Sandbox Tokens or Provider API Keys for sensitive values.</div>
+			<div class="wf-field-hint">Values are passed literally; Bobbit does not expand $VAR or \${VAR}.</div>
+			${entries.length === 0 ? html`
+				<div class="wf-field-hint" data-testid="wf-step-env-empty">${context.empty}</div>
+				${readOnly ? nothing : html`<button class="wf-criteria-add-btn" data-testid="wf-step-env-add" @click=${(e: Event) => {
+					e.stopPropagation();
+					updateStep({ env: { "": "" } }, true);
+					queueMicrotask(() => document.querySelector<HTMLInputElement>("[data-testid='wf-step-env-key']")?.focus());
+				}}>Add variable</button>`}
+			` : html`
+				<div class="wf-environment-list">
+					${entries.map(([key, value], index) => {
+						const keyId = `wf-step-env-key-${key || index}`;
+						const valueId = `wf-step-env-value-${key || index}`;
+						const keyError = errs[`env.${index}.key`];
+						const valueError = errs[`env.${index}.value`];
+						const origin = context.component ? inheritedKeys.has(key.toLowerCase()) ? "Overrides component" : "Step only" : "";
+						return html`
+							<div class="wf-env-row" data-testid="wf-step-env-row">
+								<div class="wf-env-input-wrap">
+									<label class="wf-field-label" for=${keyId}>Name</label>
+									<input id=${keyId} class="wf-input ${keyError ? "wf-input-error" : ""}" data-testid="wf-step-env-key" placeholder="VARIABLE_NAME" .value=${key}
+										?disabled=${readOnly} aria-invalid=${keyError ? "true" : "false"} aria-describedby=${keyError ? `${keyId}-error` : nothing}
+										@click=${(e: Event) => e.stopPropagation()}
+										@input=${(e: Event) => updateEntry(key, (e.target as HTMLInputElement).value, value)} />
+									${keyError ? html`<div id=${`${keyId}-error`} class="wf-field-error">${keyError}</div>` : nothing}
+								</div>
+								<div class="wf-env-input-wrap">
+									<label class="wf-field-label" for=${valueId}>Value</label>
+									<input id=${valueId} class="wf-input ${valueError ? "wf-input-error" : ""}" data-testid="wf-step-env-value" placeholder="Value (blank is allowed)" .value=${value}
+										?disabled=${readOnly} aria-invalid=${valueError ? "true" : "false"} aria-describedby=${valueError ? `${valueId}-error` : nothing}
+										@click=${(e: Event) => e.stopPropagation()}
+										@input=${(e: Event) => updateEntry(key, key, (e.target as HTMLInputElement).value)} />
+									${valueError ? html`<div id=${`${valueId}-error`} class="wf-field-error">${valueError}</div>` : nothing}
+								</div>
+								${origin ? html`<span class="wf-environment-origin" data-testid="wf-step-env-origin" aria-label=${origin}>${origin}</span>` : nothing}
+								${readOnly ? nothing : html`<button class="wf-criteria-remove" data-testid="wf-step-env-remove" title="Remove variable" aria-label=${key ? `Remove ${key} variable` : `Remove variable ${index + 1}`} @click=${(e: Event) => {
+									e.stopPropagation();
+									const env = { ...(step.env || {}) };
+									delete env[key];
+									updateStep({ env: Object.keys(env).length ? env : undefined }, true);
+								}}>${icon(Trash2, "sm")}</button>`}
+							</div>
+						`;
+					})}
+				</div>
+				${errs.env ? html`<div class="wf-field-error">${errs.env}</div>` : nothing}
+			`}
+		</div>
+	`;
 }
 
 function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateIdx: number, step: VerifyStep, stepIdx: number): TemplateResult {
@@ -1131,7 +1276,7 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 						</div>
 					` : nothing}
 
-					<details class="wf-vstep-advanced" ?open=${!!(step.timeout || step.role || step.description || step.component || (step.phase != null && step.phase !== 0) || (saveAttempted && Object.keys(errs).length > 0))}>
+					<details class="wf-vstep-advanced" ?open=${!!(step.timeout || step.role || step.description || step.component || step.env || (step.phase != null && step.phase !== 0) || (saveAttempted && Object.keys(errs).length > 0))}>
 						<summary class="wf-vstep-advanced-summary">Advanced</summary>
 						<div class="wf-vstep-advanced-fields">
 							<div class="wf-field">
@@ -1179,7 +1324,7 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 										<select class="wf-select ${errs.component ? "wf-input-error" : ""}" data-testid="wf-step-component" .value=${step.component || ""}
 											?disabled=${readOnly}
 											@click=${(e: Event) => e.stopPropagation()}
-											@change=${(e: Event) => updateStep({ component: (e.target as HTMLSelectElement).value || undefined })}>
+											@change=${(e: Event) => updateStep({ component: (e.target as HTMLSelectElement).value || undefined }, true)}>
 											<option value="" ?selected=${!step.component}>(first component)</option>
 											${componentOptions.map(n => html`<option value="${n}" ?selected=${step.component === n}>${n}</option>`)}
 										</select>
@@ -1187,12 +1332,13 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 										<input class="wf-input ${errs.component ? "wf-input-error" : ""}" data-testid="wf-step-component" .value=${step.component || ""} placeholder="Component name"
 											?disabled=${readOnly}
 											@click=${(e: Event) => e.stopPropagation()}
-											@input=${(e: Event) => updateStep({ component: (e.target as HTMLInputElement).value || undefined })} />
+											@input=${(e: Event) => updateStep({ component: (e.target as HTMLInputElement).value || undefined }, true)} />
 									`}
 									<div class="wf-field-hint">Required when using a named <code>command</code>; empty is valid only for free-form <code>run</code>.</div>
 									${errs.component ? html`<div class="wf-field-error" data-testid="wf-step-component-error">${errs.component}</div>` : nothing}
 								</div>
 							` : nothing}
+							${stepType === "command" ? renderCommandEnvironmentEditor(step, errs, readOnly, updateStep) : nothing}
 							<div class="wf-field">
 								<label class="wf-field-label">Description</label>
 								<textarea class="wf-textarea" data-testid="wf-step-description" rows="2" .value=${step.description || ""} placeholder="Free-form description (shown in tooltips and the opt-in card)"
@@ -1424,7 +1570,7 @@ function seedEmbedInstance(
 	inst.editGates = (wf.gates || []).map((g) => ({
 		...g,
 		dependsOn: [...(g.dependsOn || [])],
-		verify: g.verify ? g.verify.map((v) => ({ ...v })) : undefined,
+		verify: g.verify ? g.verify.map((v) => ({ ...v, env: v.env ? { ...v.env } : undefined })) : undefined,
 		metadata: g.metadata ? { ...g.metadata } : undefined,
 	}));
 	inst.expandedGateIndices = expandAll
