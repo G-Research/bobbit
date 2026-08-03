@@ -35,6 +35,9 @@ type SlowWorkflowGoal = {
 	projectId: string;
 	goalId: string;
 };
+type SlowGateSignal = { signal: { id: string } };
+type SlowGateState = { status: string; signals: Array<{ id: string; verification: { status: string } }> };
+type ActiveVerificationSummary = Pick<ActiveVerification, "gateId" | "overallStatus">;
 
 function makeSlowWorkflowId(): string {
 	return `test-cancel-verif-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -104,25 +107,46 @@ async function deleteSlowWorkflow(workflowId: string, projectId: string): Promis
 	await apiFetch(`/api/workflows/${encodeURIComponent(workflowId)}?projectId=${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
 }
 
+async function cancelSlowVerification(goalId: string): Promise<Response> {
+	return apiFetch(`/api/goals/${goalId}/gates/slow-gate/cancel-verification`, { method: "POST" });
+}
+
+async function signalSlowVerification(goalId: string, content: string): Promise<Response> {
+	return apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {
+		method: "POST",
+		body: JSON.stringify({ content }),
+	});
+}
+
 async function cleanupSlowWorkflowGoal(setup: SlowWorkflowGoal | undefined): Promise<void> {
 	if (!setup) return;
-	await apiFetch(`/api/goals/${setup.goalId}/gates/slow-gate/cancel-verification`, { method: "POST" }).catch(() => {});
+	await cancelSlowVerification(setup.goalId).catch(() => {});
 	await deleteGoal(setup.goalId).catch(() => {});
 	await deleteSlowWorkflow(setup.workflowId, setup.projectId);
 }
 
+async function withSlowWorkflowGoal(title: string, run: (setup: SlowWorkflowGoal) => Promise<void>): Promise<void> {
+	let setup: SlowWorkflowGoal | undefined;
+	try {
+		setup = await createSlowWorkflowGoal(title);
+		await run(setup);
+	} finally {
+		await cleanupSlowWorkflowGoal(setup);
+	}
+}
+
 /** Get active verifications for a goal. */
-async function getActiveVerifications(goalId: string): Promise<any[]> {
+async function getActiveVerifications(goalId: string): Promise<ActiveVerificationSummary[]> {
 	const res = await apiFetch(`/api/goals/${goalId}/verifications/active`);
 	expect(res.ok).toBe(true);
-	const data = await res.json();
+	const data = await res.json() as { verifications?: ActiveVerificationSummary[] };
 	return data.verifications || [];
 }
 
-async function getGateState(goalId: string): Promise<any> {
+async function getGateState(goalId: string): Promise<SlowGateState> {
 	const res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate`);
 	expect(res.status).toBe(200);
-	return res.json();
+	return await res.json() as SlowGateState;
 }
 
 /**
@@ -354,6 +378,15 @@ async function observeUntil<T>(
 	throw new Error(`cancel-verification state did not settle after ${maxVirtualMs}ms of virtual time`);
 }
 
+function waitForSlowVerification(
+	clock: ManualClock,
+	goalId: string,
+	pred: (verifications: ActiveVerificationSummary[]) => boolean,
+	maxVirtualMs: number,
+): Promise<ActiveVerificationSummary[]> {
+	return observeUntil(clock, () => getActiveVerifications(goalId), pred, maxVirtualMs);
+}
+
 // Keep the stateful cancellation cases serial so cleanup and re-signal
 // transitions cannot overlap in the shared verification harness.
 test.describe.configure({ mode: "serial" });
@@ -364,63 +397,36 @@ test.describe("Cancel Verification API", () => {
 	test.afterEach(async ({ gateway }) => resetAndInstallFakeCommandStepTestState(gateway));
 
 	test("cancel a running verification returns cancelled: true", async ({ gateway }) => {
-		let setup: SlowWorkflowGoal | undefined;
-		try {
-			setup = await createSlowWorkflowGoal("Cancel Running Verif");
-			const { goalId } = setup;
-
+		await withSlowWorkflowGoal("Cancel Running Verif", async ({ goalId }) => {
 			// Signal the gate to start a slow verification
-			const signalRes = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "Test signal" }),
-			});
+			const signalRes = await signalSlowVerification(goalId, "Test signal");
 			expect(signalRes.status).toBe(201);
 
 			// Observe the running record without a wall-clock polling interval.
-			await observeUntil(
-				gateway.clock,
-				() => getActiveVerifications(goalId),
-				(v) => v.length > 0 && v.some(a => a.overallStatus === "running"),
-				10000,
-			);
+			await waitForSlowVerification(gateway.clock, goalId,
+				(v) => v.length > 0 && v.some(a => a.overallStatus === "running"), 10000);
 
 			// Cancel the verification
-			const cancelRes = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/cancel-verification`, {
-				method: "POST",
-			});
+			const cancelRes = await cancelSlowVerification(goalId);
 			expect(cancelRes.status).toBe(200);
 			const cancelBody = await cancelRes.json();
 			expect(cancelBody.cancelled).toBe(true);
 
 			// Cancellation bookkeeping is synchronous; drive any queued cleanup with
 			// the gateway's manual clock instead of sleeping between REST reads.
-			await observeUntil(
-				gateway.clock,
-				() => getActiveVerifications(goalId),
-				(v) => !v.some(a => a.gateId === "slow-gate" && a.overallStatus === "running"),
-				5000,
-			);
-		} finally {
-			await cleanupSlowWorkflowGoal(setup);
-		}
+			await waitForSlowVerification(gateway.clock, goalId,
+				(v) => !v.some(a => a.gateId === "slow-gate" && a.overallStatus === "running"), 5000);
+		});
 	});
 
 	test("cancel when nothing is running returns cancelled: false (idempotent)", async () => {
-		let setup: SlowWorkflowGoal | undefined;
-		try {
-			setup = await createSlowWorkflowGoal("Cancel Idle Verif");
-			const { goalId } = setup;
-
+		await withSlowWorkflowGoal("Cancel Idle Verif", async ({ goalId }) => {
 			// No signal sent — nothing is running
-			const cancelRes = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/cancel-verification`, {
-				method: "POST",
-			});
+			const cancelRes = await cancelSlowVerification(goalId);
 			expect(cancelRes.status).toBe(200);
 			const cancelBody = await cancelRes.json();
 			expect(cancelBody.cancelled).toBe(false);
-		} finally {
-			await cleanupSlowWorkflowGoal(setup);
-		}
+		});
 	});
 
 	test("cancel on non-existent goal returns 404", async () => {
@@ -433,11 +439,7 @@ test.describe("Cancel Verification API", () => {
 	});
 
 	test("cancel on shelved goal returns 400", async () => {
-		let setup: SlowWorkflowGoal | undefined;
-		try {
-			setup = await createSlowWorkflowGoal("Cancel Shelved Verif");
-			const { goalId } = setup;
-
+		await withSlowWorkflowGoal("Cancel Shelved Verif", async ({ goalId }) => {
 			// Shelve the goal via PUT
 			const shelveRes = await apiFetch(`/api/goals/${goalId}`, {
 				method: "PUT",
@@ -446,23 +448,15 @@ test.describe("Cancel Verification API", () => {
 			expect(shelveRes.ok).toBe(true);
 
 			// Try to cancel verification on shelved goal
-			const cancelRes = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/cancel-verification`, {
-				method: "POST",
-			});
+			const cancelRes = await cancelSlowVerification(goalId);
 			expect(cancelRes.status).toBe(400);
 			const body = await cancelRes.json();
 			expect(body.error).toContain("shelved");
-		} finally {
-			await cleanupSlowWorkflowGoal(setup);
-		}
+		});
 	});
 
 	test("cancel on archived goal returns 409", async () => {
-		let setup: SlowWorkflowGoal | undefined;
-		try {
-			setup = await createSlowWorkflowGoal("Cancel Archived Verif");
-			const { goalId } = setup;
-
+		await withSlowWorkflowGoal("Cancel Archived Verif", async ({ goalId }) => {
 			// Archive the goal via DELETE
 			const archiveRes = await apiFetch(`/api/goals/${goalId}?cascade=true`, {
 				method: "DELETE",
@@ -470,73 +464,40 @@ test.describe("Cancel Verification API", () => {
 			expect(archiveRes.ok).toBe(true);
 
 			// Try to cancel verification on archived goal
-			const cancelRes = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/cancel-verification`, {
-				method: "POST",
-			});
+			const cancelRes = await cancelSlowVerification(goalId);
 			expect(cancelRes.status).toBe(409);
 			const body = await cancelRes.json();
 			expect(body.error).toContain("archived");
-		} finally {
-			await cleanupSlowWorkflowGoal(setup);
-		}
+		});
 	});
 
 	test("re-signal after cancel succeeds (no 409)", async ({ gateway }) => {
-		let setup: SlowWorkflowGoal | undefined;
-		try {
-			setup = await createSlowWorkflowGoal("Re-signal After Cancel");
-			const { goalId } = setup;
-
+		await withSlowWorkflowGoal("Re-signal After Cancel", async ({ goalId }) => {
 			// Signal the gate to start verification
-			const signal1Res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "Signal v1" }),
-			});
+			const signal1Res = await signalSlowVerification(goalId, "Signal v1");
 			expect(signal1Res.status).toBe(201);
 
-			await observeUntil(
-				gateway.clock,
-				() => getActiveVerifications(goalId),
-				(v) => v.length > 0 && v.some(a => a.overallStatus === "running"),
-				10000,
-			);
+			await waitForSlowVerification(gateway.clock, goalId,
+				(v) => v.length > 0 && v.some(a => a.overallStatus === "running"), 10000);
 
 			// Cancel the verification
-			const cancelRes = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/cancel-verification`, {
-				method: "POST",
-			});
+			const cancelRes = await cancelSlowVerification(goalId);
 			expect(cancelRes.status).toBe(200);
 			expect((await cancelRes.json()).cancelled).toBe(true);
 
-			await observeUntil(
-				gateway.clock,
-				() => getActiveVerifications(goalId),
-				(v) => !v.some(a => a.gateId === "slow-gate" && a.overallStatus === "running"),
-				5000,
-			);
+			await waitForSlowVerification(gateway.clock, goalId,
+				(v) => !v.some(a => a.gateId === "slow-gate" && a.overallStatus === "running"), 5000);
 
 			// Re-signal — should succeed, not 409
-			const signal2Res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "Signal v2" }),
-			});
+			const signal2Res = await signalSlowVerification(goalId, "Signal v2");
 			expect(signal2Res.status).toBe(201);
 
 			// Verify the new signal starts verification without a real wait.
-			await observeUntil(
-				gateway.clock,
-				() => getActiveVerifications(goalId),
-				(v) => v.length > 0,
-				10000,
-			);
+			await waitForSlowVerification(gateway.clock, goalId, (v) => v.length > 0, 10000);
 
 			// Cancel again to clean up the slow verification
-			await apiFetch(`/api/goals/${goalId}/gates/slow-gate/cancel-verification`, {
-				method: "POST",
-			});
-		} finally {
-			await cleanupSlowWorkflowGoal(setup);
-		}
+			await cancelSlowVerification(goalId);
+		});
 	});
 
 	test("defers explicit cancellation publication until exact cleanup settles", async ({ gateway }) => {
@@ -551,21 +512,18 @@ test.describe("Cancel Verification API", () => {
 			sessionId = await createSession({ goalId: setup.goalId });
 			conn = trackFakeCommandStepConnection(await connectWs(sessionId));
 
-			const signalRes = await apiFetch(`/api/goals/${setup.goalId}/gates/slow-gate/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "Cancellation must await exact cleanup." }),
-			});
+			const signalRes = await signalSlowVerification(setup.goalId, "Cancellation must await exact cleanup.");
 			expect(signalRes.status).toBe(201);
-			const signalId = (await signalRes.json()).signal.id as string;
+			const signalId = (await signalRes.json() as SlowGateSignal).signal.id;
 			await runner.waitForSpawn(0);
 			const eventCursor = conn.messageCount();
 
-			cancelRequest = apiFetch(`/api/goals/${setup.goalId}/gates/slow-gate/cancel-verification`, { method: "POST" });
+			cancelRequest = cancelSlowVerification(setup.goalId);
 			await runner.waitForKill(0);
 
 			const pending = await getGateState(setup.goalId);
 			expect(pending.status, "PENDING_CANCEL_GATE_STATUS_PUBLISHED_EARLY").toBe("pending");
-			expect(pending.signals.find((signal: any) => signal.id === signalId)?.verification.status,
+			expect(pending.signals.find(signal => signal.id === signalId)?.verification.status,
 				"PENDING_CANCEL_SIGNAL_FINALIZED_EARLY").toBe("running");
 			expect(conn.messages.slice(eventCursor).filter((event: any) =>
 				event.type === "gate_verification_complete" && event.signalId === signalId),
@@ -579,7 +537,7 @@ test.describe("Cancel Verification API", () => {
 			expect((await cancelRes.json()).cancelled).toBe(true);
 
 			const finalized = await getGateState(setup.goalId);
-			const cancelledSignals = finalized.signals.filter((signal: any) => signal.id === signalId && signal.verification.status === "failed");
+			const cancelledSignals = finalized.signals.filter(signal => signal.id === signalId && signal.verification.status === "failed");
 			expect(cancelledSignals, "EXACT_CLEANUP_MUST_FINALIZE_CURRENT_SIGNAL_ONCE").toHaveLength(1);
 			expect(finalized.status).toBe("failed");
 			expect(conn.messages.slice(eventCursor).filter((event: any) =>
@@ -606,19 +564,13 @@ test.describe("Cancel Verification API", () => {
 			sessionId = await createSession({ goalId: setup.goalId });
 			conn = trackFakeCommandStepConnection(await connectWs(sessionId));
 
-			const firstRes = await apiFetch(`/api/goals/${setup.goalId}/gates/slow-gate/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "Old generation" }),
-			});
+			const firstRes = await signalSlowVerification(setup.goalId, "Old generation");
 			expect(firstRes.status).toBe(201);
-			const firstSignalId = (await firstRes.json()).signal.id as string;
+			const firstSignalId = (await firstRes.json() as SlowGateSignal).signal.id;
 			await runner.waitForSpawn(0);
 			const eventCursor = conn.messageCount();
 
-			resignalRequest = apiFetch(`/api/goals/${setup.goalId}/gates/slow-gate/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "New generation" }),
-			});
+			resignalRequest = signalSlowVerification(setup.goalId, "New generation");
 			await runner.waitForKill(0);
 			await new Promise<void>(resolve => setImmediate(resolve));
 
@@ -636,8 +588,8 @@ test.describe("Cancel Verification API", () => {
 			expect(resignalRes.status).toBe(201);
 
 			const afterOldCleanup = await getGateState(setup.goalId);
-			expect(afterOldCleanup.signals.find((signal: any) => signal.id === firstSignalId)?.verification.status).toBe("failed");
-			expect(afterOldCleanup.signals.find((signal: any) => signal.id === secondSignalId)?.verification.status,
+			expect(afterOldCleanup.signals.find(signal => signal.id === firstSignalId)?.verification.status).toBe("failed");
+			expect(afterOldCleanup.signals.find(signal => signal.id === secondSignalId)?.verification.status,
 				"LATE_CANCEL_MUST_NOT_FINALIZE_NEW_SIGNAL").toBe("running");
 			expect(afterOldCleanup.status, "LATE_CANCEL_MUST_NOT_OVERWRITE_NEW_GATE_STATE").toBe("pending");
 		} finally {
@@ -717,47 +669,26 @@ test.describe("Cancel Verification API", () => {
 	});
 
 	test("double cancel is idempotent", async ({ gateway }) => {
-		let setup: SlowWorkflowGoal | undefined;
-		try {
-			setup = await createSlowWorkflowGoal("Double Cancel");
-			const { goalId } = setup;
-
+		await withSlowWorkflowGoal("Double Cancel", async ({ goalId }) => {
 			// Signal the gate
-			const signalRes = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "Test signal" }),
-			});
+			const signalRes = await signalSlowVerification(goalId, "Test signal");
 			expect(signalRes.status).toBe(201);
 
-			await observeUntil(
-				gateway.clock,
-				() => getActiveVerifications(goalId),
-				(v) => v.length > 0 && v.some(a => a.overallStatus === "running"),
-				10000,
-			);
+			await waitForSlowVerification(gateway.clock, goalId,
+				(v) => v.length > 0 && v.some(a => a.overallStatus === "running"), 10000);
 
 			// Cancel once
-			const cancel1 = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/cancel-verification`, {
-				method: "POST",
-			});
+			const cancel1 = await cancelSlowVerification(goalId);
 			expect(cancel1.status).toBe(200);
 			expect((await cancel1.json()).cancelled).toBe(true);
 
-			await observeUntil(
-				gateway.clock,
-				() => getActiveVerifications(goalId),
-				(v) => !v.some(a => a.gateId === "slow-gate" && a.overallStatus === "running"),
-				5000,
-			);
+			await waitForSlowVerification(gateway.clock, goalId,
+				(v) => !v.some(a => a.gateId === "slow-gate" && a.overallStatus === "running"), 5000);
 
 			// Cancel again — should be no-op
-			const cancel2 = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/cancel-verification`, {
-				method: "POST",
-			});
+			const cancel2 = await cancelSlowVerification(goalId);
 			expect(cancel2.status).toBe(200);
 			expect((await cancel2.json()).cancelled).toBe(false);
-		} finally {
-			await cleanupSlowWorkflowGoal(setup);
-		}
+		});
 	});
 });

@@ -84,74 +84,26 @@ function fakeTreeCommand(): string {
 	return `node -e "console.log('PARENT_PID=910001'); console.log('CHILD_PID=910002'); setTimeout(()=>process.exit(0),300000)"`;
 }
 
-/** Deterministic cleanup-failure seam: no OS process or wall-clock race. */
-function createUnverifiedTimedOutRunner() {
+function createFakeChild(pid: number, pipes = true) {
+	const stream = () => Object.assign(new EventEmitter(), { destroy() {} });
+	return Object.assign(new EventEmitter(), { pid, stdout: pipes ? stream() : undefined, stderr: pipes ? stream() : undefined });
+}
+
+/** Deterministic cleanup-failure seams: no OS process or wall-clock race. */
+function createUnverifiedTreeRunner(options: { pid: number; killed: boolean; timedOut: boolean; closes?: boolean }) {
+	const { pid, killed, timedOut, closes = true } = options;
 	return {
 		nonDurable: true,
 		spawn: () => {
-			const stdout = Object.assign(new EventEmitter(), { destroy() {} });
-			const stderr = Object.assign(new EventEmitter(), { destroy() {} });
-			const child = Object.assign(new EventEmitter(), { pid: 910_003, stdout, stderr });
+			const child = createFakeChild(pid);
 			const tracked = {
-				child,
-				killed: () => true,
-				timedOut: () => true,
-				markSurvival: () => {},
-				killTree: () => {},
+				child, killed: () => killed, timedOut: () => timedOut, markSurvival: () => {}, killTree: () => {},
 				waitForTreeExit: async () => false,
 			};
 			queueMicrotask(() => {
-				child.emit("exit", null, "SIGTERM");
-				child.emit("close", null, "SIGTERM");
+				child.emit("exit", timedOut ? null : 0, timedOut ? "SIGTERM" : null);
+				if (closes) child.emit("close", timedOut ? null : 0, timedOut ? "SIGTERM" : null);
 			});
-			return tracked as any;
-		},
-	};
-}
-
-/** Windows root exits successfully while an untracked descendant retains stdio. */
-function createNaturalExitWithUnverifiedTreeRunner() {
-	return {
-		nonDurable: true,
-		spawn: () => {
-			const stdout = Object.assign(new EventEmitter(), { destroy() {} });
-			const stderr = Object.assign(new EventEmitter(), { destroy() {} });
-			const child = Object.assign(new EventEmitter(), { pid: 910_005, stdout, stderr });
-			const tracked = {
-				child,
-				killed: () => false,
-				timedOut: () => false,
-				markSurvival: () => {},
-				killTree: () => {},
-				waitForTreeExit: async () => false,
-			};
-			queueMicrotask(() => {
-				child.emit("exit", 0, null);
-				child.emit("close", 0, null);
-			});
-			return tracked as any;
-		},
-	};
-}
-
-function createWindowsRootExitWithOpenDescendantRunner() {
-	return {
-		nonDurable: true,
-		spawn: () => {
-			const stdout = Object.assign(new EventEmitter(), { destroy() {} });
-			const stderr = Object.assign(new EventEmitter(), { destroy() {} });
-			const child = Object.assign(new EventEmitter(), { pid: 910_004, stdout, stderr });
-			const tracked = {
-				child,
-				killed: () => false,
-				timedOut: () => false,
-				markSurvival: () => {},
-				killTree: () => {},
-				// The root has crossed the PID-reuse boundary, so no job/tree
-				// completion is provable and a later taskkill would be unsafe.
-				waitForTreeExit: async () => false,
-			};
-			queueMicrotask(() => child.emit("exit", 0, null));
 			return tracked as any;
 		},
 	};
@@ -167,9 +119,7 @@ function createPreReadinessRunner() {
 		acknowledgeOwnership: () => acknowledgeOwnership(),
 		killCalls: () => killCalls,
 		spawn: () => {
-			const stdout = Object.assign(new EventEmitter(), { destroy() {} });
-			const stderr = Object.assign(new EventEmitter(), { destroy() {} });
-			const child = Object.assign(new EventEmitter(), { pid: 910_006, stdout, stderr });
+			const child = createFakeChild(910_006);
 			let closed = false;
 			const close = () => {
 				if (closed) return;
@@ -178,16 +128,41 @@ function createPreReadinessRunner() {
 				child.emit("close", null, "SIGTERM");
 			};
 			return {
-				child,
-				ownershipReady,
-				killed: () => killCalls > 0,
-				timedOut: () => false,
-				markSurvival: () => {},
-				killTree: () => { killCalls++; close(); },
-				waitForTreeExit: async () => closed,
+				child, ownershipReady, killed: () => killCalls > 0, timedOut: () => false, markSurvival: () => {},
+				killTree: () => { killCalls++; close(); }, waitForTreeExit: async () => closed,
 			} as any;
 		},
 	};
+}
+
+function setActiveCommandVerification(harness: any, goalId: string, gateId: string, signalId: string, names = ["step"]) {
+	(harness as any).activeVerifications.set(signalId, {
+		goalId, gateId, signalId, overallStatus: "running", startedAt: Date.now(), currentPhase: 0,
+		steps: names.map(name => ({ name, type: "command", status: "running", startedAt: Date.now() })),
+	});
+}
+
+async function startFakeTreeStep(kind: "timeout" | "cancel", tmp: string) {
+	const broadcasts: any[] = [];
+	const harness = makeHarness({ commandStepRunner: createFakeVerificationCommandRunner() }, broadcasts);
+	const goalId = `goal-${kind}`;
+	const gateId = `gate-${kind}`;
+	const signalId = kind === "timeout" ? "sig-timeout-1" : "sig-cancel-1";
+	const streamCtx = { goalId, gateId, signalId, stepIndex: 0 };
+	setActiveCommandVerification(harness, goalId, gateId, signalId);
+	const stepPromise = (harness as any).runCommandStep(fakeTreeCommand(), tmp, 60, false, streamCtx, undefined, undefined);
+	const registered = await poll(() => (harness as any)._trackedCommandChildren.size > 0, 3000);
+	assert.ok(registered, "tracked child should be registered shortly after spawn");
+	const pidsReady = await poll(() => {
+		const out = (harness as any).activeVerifications.get(signalId)?.steps?.[0]?.output ?? "";
+		return /PARENT_PID=\d+/.test(out) && /CHILD_PID=\d+/.test(out);
+	}, 3000);
+	assert.ok(pidsReady, `fake command should stream both pid markers before ${kind}`);
+	assert.ok(
+		broadcasts.some(e => e.type === "gate_verification_step_output" && /PARENT_PID=\d+/.test(e.text ?? "")),
+		"stdout marker should be broadcast as live step output",
+	);
+	return { broadcasts, harness, goalId, gateId, signalId, stepPromise };
 }
 
 describe("deterministic tracked child", () => {
@@ -442,40 +417,8 @@ describe("deterministic tracked child", () => {
 
 describe("runCommandStep tree-kill", () => {
 	it("kills the tracked command on step timeout and emits output plus marker", async () => {
-		const broadcasts: any[] = [];
-		const harness = makeHarness({ commandStepRunner: createFakeVerificationCommandRunner() }, broadcasts);
 		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-timeout-"));
-
-		const goalId = "goal-timeout";
-		const gateId = "gate-timeout";
-		const signalId = "sig-timeout-1";
-		const streamCtx = { goalId, gateId, signalId, stepIndex: 0 };
-		(harness as any).activeVerifications.set(signalId, {
-			goalId, gateId, signalId,
-			overallStatus: "running",
-			startedAt: Date.now(),
-			currentPhase: 0,
-			steps: [{ name: "step", type: "command", status: "running", startedAt: Date.now() }],
-		});
-
-		const stepPromise = (harness as any).runCommandStep(
-			fakeTreeCommand(), tmp, 60, false, streamCtx, undefined, undefined,
-		);
-
-		const registered = await poll(() => (harness as any)._trackedCommandChildren.size > 0, 3000);
-		assert.ok(registered, "tracked child should be registered shortly after spawn");
-
-		const pidsReady = await poll(() => {
-			const av = (harness as any).activeVerifications.get(signalId);
-			const out = av?.steps?.[0]?.output ?? "";
-			return /PARENT_PID=\d+/.test(out) && /CHILD_PID=\d+/.test(out);
-		}, 3000);
-		assert.ok(pidsReady, "fake command should stream both pid markers before timeout");
-		assert.ok(
-			broadcasts.some(e => e.type === "gate_verification_step_output" && /PARENT_PID=\d+/.test(e.text ?? "")),
-			"stdout marker should be broadcast as live step output",
-		);
-
+		const { harness, signalId, stepPromise } = await startFakeTreeStep("timeout", tmp);
 		const tracked = (harness as any)._trackedCommandChildren.get(`${signalId}:0`);
 		assert.ok(tracked, "tracked child should still be registered before forced timeout");
 		tracked._timedOut = true;
@@ -493,7 +436,7 @@ describe("runCommandStep tree-kill", () => {
 	});
 
 	it("fails rather than claiming a timeout tree cleanup succeeded when verification is unavailable", async () => {
-		const harness = makeHarness({ commandStepRunner: createUnverifiedTimedOutRunner() });
+		const harness = makeHarness({ commandStepRunner: createUnverifiedTreeRunner({ pid: 910_003, killed: true, timedOut: true }) });
 		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-unverified-cleanup-"));
 
 		const result = await (harness as any).runCommandStep("true", tmp, 60, true, undefined, "timed out") as { passed: boolean; output: string };
@@ -503,7 +446,7 @@ describe("runCommandStep tree-kill", () => {
 	});
 
 	it("fails a natural POSIX-style zero exit when tree completion is unverified", async () => {
-		const harness = makeHarness({ commandStepRunner: createNaturalExitWithUnverifiedTreeRunner(), platform: "linux" });
+		const harness = makeHarness({ commandStepRunner: createUnverifiedTreeRunner({ pid: 910_005, killed: false, timedOut: false }), platform: "linux" });
 		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-natural-unverified-"));
 
 		const result = await (harness as any).runCommandStep("true", tmp, 60, false) as { passed: boolean; output: string };
@@ -514,7 +457,7 @@ describe("runCommandStep tree-kill", () => {
 	it("fails closed when a Windows command exits zero while a descendant keeps stdio open", async () => {
 		const commandLifecycleClock = createManualClock(0);
 		const harness = makeHarness({
-			commandStepRunner: createWindowsRootExitWithOpenDescendantRunner(),
+			commandStepRunner: createUnverifiedTreeRunner({ pid: 910_004, killed: false, timedOut: false, closes: false }),
 			commandLifecycleClock,
 			platform: "win32",
 		});
@@ -538,13 +481,7 @@ describe("runCommandStep tree-kill", () => {
 		const gateId = "gate-pre-readiness-cancel";
 		const signalId = "sig-pre-readiness-cancel";
 		const streamCtx = { goalId, gateId, signalId, stepIndex: 0 };
-		(harness as any).activeVerifications.set(signalId, {
-			goalId, gateId, signalId,
-			overallStatus: "running",
-			startedAt: Date.now(),
-			currentPhase: 0,
-			steps: [{ name: "step", type: "command", status: "running", startedAt: Date.now() }],
-		});
+		setActiveCommandVerification(harness, goalId, gateId, signalId);
 
 		const step = (harness as any).runCommandStep("true", TEST_DIR, 60, false, streamCtx);
 		expect((harness as any)._trackedCommandChildren.has(`${signalId}:0`)).toBe(true);
@@ -571,7 +508,7 @@ describe("runCommandStep tree-kill", () => {
 		let readyKills = 0;
 		const heldOwnershipReady = new Promise<void>(resolve => { acknowledgeHeld = resolve; });
 		const makeTracked = (ownershipReady: Promise<void>, onKill: () => void) => ({
-			child: Object.assign(new EventEmitter(), { pid: 910_007, stdout: undefined, stderr: undefined }),
+			child: createFakeChild(910_007, false),
 			ownershipReady,
 			killed: () => false,
 			timedOut: () => false,
@@ -579,14 +516,7 @@ describe("runCommandStep tree-kill", () => {
 			killTree: onKill,
 			waitForTreeExit: async () => true,
 		});
-		(harness as any).activeVerifications.set(signalId, {
-			goalId: "goal-concurrent-pre-readiness-cancel", gateId: "gate-concurrent-pre-readiness-cancel", signalId,
-			overallStatus: "running", startedAt: Date.now(), currentPhase: 0,
-			steps: [
-				{ name: "held", type: "command", status: "running", startedAt: Date.now() },
-				{ name: "ready", type: "command", status: "running", startedAt: Date.now() },
-			],
-		});
+		setActiveCommandVerification(harness, "goal-concurrent-pre-readiness-cancel", "gate-concurrent-pre-readiness-cancel", signalId, ["held", "ready"]);
 		(harness as any)._trackedCommandChildren.set(`${signalId}:0`, makeTracked(heldOwnershipReady, () => { heldKills++; }));
 		(harness as any)._trackedCommandChildren.set(`${signalId}:1`, makeTracked(Promise.resolve(), () => { readyKills++; }));
 
@@ -600,40 +530,8 @@ describe("runCommandStep tree-kill", () => {
 	});
 
 	it("cancellation kills the tracked command and emits output plus cancelled marker", async () => {
-		const broadcasts: any[] = [];
-		const harness = makeHarness({ commandStepRunner: createFakeVerificationCommandRunner() }, broadcasts);
 		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-cancel-"));
-
-		const goalId = "goal-cancel";
-		const gateId = "gate-cancel";
-		const signalId = "sig-cancel-1";
-		const streamCtx = { goalId, gateId, signalId, stepIndex: 0 };
-		(harness as any).activeVerifications.set(signalId, {
-			goalId, gateId, signalId,
-			overallStatus: "running",
-			startedAt: Date.now(),
-			currentPhase: 0,
-			steps: [{ name: "step", type: "command", status: "running", startedAt: Date.now() }],
-		});
-
-		const stepPromise = (harness as any).runCommandStep(
-			fakeTreeCommand(), tmp, 60, false, streamCtx, undefined, undefined,
-		);
-
-		const registered = await poll(() => (harness as any)._trackedCommandChildren.size > 0, 3000);
-		assert.ok(registered, "tracked child should be registered shortly after spawn");
-
-		const pidsReady = await poll(() => {
-			const av = (harness as any).activeVerifications.get(signalId);
-			const out = av?.steps?.[0]?.output ?? "";
-			return /PARENT_PID=\d+/.test(out) && /CHILD_PID=\d+/.test(out);
-		}, 3000);
-		assert.ok(pidsReady, "fake command should stream both pid markers before cancel");
-		assert.ok(
-			broadcasts.some(e => e.type === "gate_verification_step_output" && /PARENT_PID=\d+/.test(e.text ?? "")),
-			"stdout marker should be broadcast as live step output",
-		);
-
+		const { harness, goalId, gateId, signalId, stepPromise } = await startFakeTreeStep("cancel", tmp);
 		await harness.cancelStaleVerifications(goalId, gateId);
 
 		const result = await withTimeout(stepPromise, 15000, "cancelled command step should resolve") as { passed: boolean; output: string };
