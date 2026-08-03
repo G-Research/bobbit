@@ -135,6 +135,9 @@ describe("Claude Agent SDK event translator", () => {
 			expect(danglingEnd).toBeLessThan(agentEnd);
 			expect(events[danglingEnd]).toMatchObject({ toolCallId: "tool-root-1", isError: true });
 			expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+			if (terminalKey === "assistantAbort") {
+				expect(events[agentEnd]).toMatchObject({ error: "Request aborted by caller" });
+			}
 		}
 	});
 
