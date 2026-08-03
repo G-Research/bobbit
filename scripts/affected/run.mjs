@@ -11,7 +11,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { buildGraph, affectedTests, REPO_ROOT } from "./graph.mjs";
-import { loadCache, partition, record, runnerFingerprint, saveCache } from "./cache.mjs";
+import { loadCache, partition, record, runnerFingerprint, saveCache, snapshotTestHashes } from "./cache.mjs";
 
 function arg(name, fallback = "") {
 	const index = process.argv.indexOf(name);
@@ -369,6 +369,10 @@ function main() {
 	if (!existsSync(vitestBin)) throw new Error(`Vitest executable not found: ${vitestBin}`);
 	const reportRoot = join(REPO_ROOT, ".profiles", "test-cache");
 	mkdirSync(reportRoot, { recursive: true });
+	// Certify exactly the bytes present before Vitest starts. RUN-ALL still does
+	// not read prior verdicts; this snapshot is used only to validate fresh ones.
+	const preRunFingerprint = NO_CACHE ? undefined : runnerFingerprint();
+	const preRunHashes = NO_CACHE ? new Map() : snapshotTestHashes(graph, toRun);
 	const childStdio = JSON_OUTPUT ? ["inherit", 2, 2] : "inherit";
 	const passed = new Set();
 	const failed = new Set();
@@ -395,15 +399,25 @@ function main() {
 		if (!Number.isInteger(run.status) || run.status !== 0) exitStatus = 1;
 	}
 
+	let cachedPassing = new Set();
 	if (!NO_CACHE) {
-		// A bypassed RUN-ALL starts a fresh bucket without reading prior records.
-		if (!fingerprint) fingerprint = runnerFingerprint();
+		const postRunFingerprint = runnerFingerprint();
+		const postRunHashes = snapshotTestHashes(graph, toRun);
 		const observed = new Set([...passed, ...failed]);
 		const passing = observed.size > 0 ? passed : exitStatus === 0 ? new Set(toRun) : new Set();
-		const invalid = new Set(toRun.filter((test) => !passing.has(test)));
-		record(cache, fingerprint, graph, invalid, "fail");
-		record(cache, fingerprint, graph, passing, "pass");
-		if (passing.size > 0 || invalid.size > 0) saveCache(cache);
+		if (postRunFingerprint === preRunFingerprint) {
+			cachedPassing = new Set([...passing].filter((test) => {
+				const before = preRunHashes.get(test);
+				return typeof before === "string" && postRunHashes.get(test) === before;
+			}));
+		}
+		const invalid = new Set(toRun.filter((test) => !cachedPassing.has(test)));
+		// A bypassed RUN-ALL starts a fresh bucket without reading prior records.
+		// record() consumes only the pre-run hashes validated above, so a cache
+		// write race can lose optimization but cannot bless post-run bytes.
+		record(cache, preRunFingerprint, invalid, "fail");
+		record(cache, preRunFingerprint, cachedPassing, "pass", preRunHashes);
+		if (cachedPassing.size > 0 || invalid.size > 0) saveCache(cache);
 	}
 
 	const result = makeResult({
@@ -418,7 +432,7 @@ function main() {
 	});
 	emitResult(result);
 	if (!JSON_OUTPUT && exitStatus !== 0) {
-		console.log(`${passed.size} passing file(s) cached; ${toRun.length - passed.size} file(s) left uncached.`);
+		console.log(`${cachedPassing.size} passing file(s) cached; ${toRun.length - cachedPassing.size} file(s) left uncached.`);
 	}
 	return exitStatus;
 }
