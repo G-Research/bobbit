@@ -709,6 +709,7 @@ async function handleRefreshAdoption(adoption: AdoptedExtension): Promise<void> 
 }
 
 async function handleRemoveAdoption(adoption: AdoptedExtension): Promise<void> {
+	const { confirmAction } = await import("./dialogs.js");
 	const ok = await confirmAction(
 		"Remove adopted extension",
 		`Remove ${adoption.provenance.sourceLocation}? The source asset and existing Tools policy settings are untouched.`,
@@ -747,6 +748,7 @@ async function handleUpdateAdoption(adoption: AdoptedExtension, updates: { enabl
 
 async function handleToggleAdoptionOperation(adoption: AdoptedExtension, operation: AdoptionOperation, selected: boolean): Promise<void> {
 	if (selected && operation.classification !== "read-only-hint") {
+		const { confirmAction } = await import("./dialogs.js");
 		const ok = await confirmAction(
 			"Enable operation",
 		"This operation is not positively declared read-only. Enabling it only exposes the operation; normal allow/ask/never policy in Tools still applies.",
