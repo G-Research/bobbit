@@ -289,6 +289,60 @@ describe("PreviewOpenRenderer", () => {
 		expect(postBody.html).not.toContain("__preview_snapshot_v1__");
 	});
 
+	it("reopens a truncated snapshot after a client-only compaction placeholder shifts its index", async () => {
+		const html = "<p>reopened after compaction</p>";
+		const fullSnapshot = MARKER_V3 + JSON.stringify({
+			kind: "preview",
+			url: `/preview/${SESSION_ID}/inline.html`,
+			path: `${SESSION_ID}/inline.html`,
+			contentHash: HASH,
+		}) + " ".repeat(32_768);
+		const result = {
+			role: "toolResult", toolCallId: TOOL_USE_ID, toolName: "preview_open", isError: false,
+			content: [
+				{ type: "text", text: "Preview panel is open and will auto-update." },
+				{ type: "text", text: MARKER_V3, _truncated: true, _originalLength: fullSnapshot.length, preview: fullSnapshot.slice(0, 512) },
+			],
+			timestamp: Date.now(),
+		};
+		const clientOnlyCompactionPlaceholder = {
+			role: "assistant",
+			content: [{ type: "text", text: "Compacting earlier transcript…" }],
+			timestamp: Date.now(),
+		};
+		const runtimeMessages = [
+			result,
+			{
+				role: "toolResult", toolCallId: "unrelated-runtime-call", toolName: "write", isError: false,
+				content: [{ type: "text", text: "unrelated status" }, { type: "text", text: "unrelated runtime block" }],
+				timestamp: Date.now(),
+			},
+		];
+		// The compaction row is visible only in the client transcript. It shifts this
+		// result to index 1, while raw runtime index 1 is an unrelated tool result.
+		setMessages([clientOnlyCompactionPlaceholder, result]);
+		responder = (url, init) => {
+			if (url.endsWith(`/tool-content/1/1`)) {
+				return { status: 200, body: { content: runtimeMessages[1].content[1].text } };
+			}
+			if (url.includes("/tool-content/")) return { status: 200, body: { content: fullSnapshot } };
+			if (init?.method === "POST" && url.includes("/api/preview/mount")) {
+				return { status: 200, body: { entry: "inline.html", mtime: 345, contentHash: HASH } };
+			}
+			return { status: 200, body: { ok: true } };
+		};
+		renderPreview(container(), { html }, result, false);
+		fetchCalls = [];
+
+		btn().click();
+		await waitForText(/Opened/);
+
+		expect(fetchCalls.map((call) => call.method)).toEqual(["GET", "PATCH", "POST"]);
+		expect(fetchCalls[0].url).toContain("/tool-content/");
+		expect(fetchCalls[0].url).not.toMatch(/\/tool-content\/1\/1$/);
+		expect(JSON.parse(fetchCalls[2].body)).toEqual({ html });
+	});
+
 	it("v2 marker: click POSTs {kind:file, path} and shows Opened", async () => {
 		const filePath = "/abs/path/to/report.html";
 		renderPreview(container(), { file: filePath }, makeFileResultWithSnapshot(filePath), false);
