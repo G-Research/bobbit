@@ -142,6 +142,6 @@ describe("UnitFileBudgetReporter", () => {
 		const config = readFileSync(new URL("../../vitest.config.ts", import.meta.url), "utf8");
 		assert.doesNotMatch(config, new RegExp(UNIT_CONCURRENT_PROOF_ENV));
 		assert.match(config, /export const FIXED_UNIT_WORKERS = 3/);
-		assert.match(config, /retry: 3/);
+		assert.match(config, /retry: process\.env\.BOBBIT_V2_RETRY_FREE === "1" \? 0 : 3/);
 	});
 });
