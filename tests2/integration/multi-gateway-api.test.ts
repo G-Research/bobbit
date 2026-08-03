@@ -107,6 +107,13 @@ test.describe("multi-gateway REST API", () => {
 		expect(proxied.status).toBe(200);
 		expect(secured.requests.at(-1)).toMatchObject({ path: "/v1/models", authorization: "Bearer integration-secret" });
 
+		const modelTest = await apiFetch("/api/models/test", {
+			method: "POST",
+			body: JSON.stringify({ pref: "local-openai/claude-local" }),
+		});
+		expect(modelTest.status).toBe(200);
+		expect(secured.requests.at(-1)).toMatchObject({ path: "/v1/chat/completions", authorization: "Bearer integration-secret" });
+
 		// Omitted apiKey keeps the private key for a stable row id.
 		const preserve = await putGateways([{ ...row, url: secured.url }]);
 		expect(preserve.status).toBe(200);
@@ -118,6 +125,22 @@ test.describe("multi-gateway REST API", () => {
 		const cleared = await clear.json();
 		expect(cleared.gateways[0].apiKeyConfigured).toBeUndefined();
 		expect(JSON.stringify(cleared)).not.toContain("integration-secret");
+	});
+
+	test("rejects unsafe gateway URLs before persistence, key resolution, or network traffic", async () => {
+		const unsafeUrl = `${secured.url}?x-api-key=do-not-reflect`;
+		const before = secured.requests.length;
+		const attempts = [
+			await putGateways([{ name: "unsafe", url: unsafeUrl, type: "openai-compatible", enabled: true }]),
+			await apiFetch("/api/aigw/test", { method: "POST", body: JSON.stringify({ url: unsafeUrl, type: "openai-compatible" }) }),
+			await apiFetch("/api/aigw/configure", { method: "POST", body: JSON.stringify({ url: unsafeUrl }) }),
+		];
+		for (const response of attempts) {
+			expect(response.status).toBe(400);
+			expect(JSON.stringify(await response.json())).not.toContain("do-not-reflect");
+		}
+		expect(secured.requests).toHaveLength(before);
+		expect((await (await apiFetch("/api/aigw/gateways")).json()).gateways).toEqual([]);
 	});
 
 	test("resolves test and legacy configure key expressions before outbound discovery", async () => {

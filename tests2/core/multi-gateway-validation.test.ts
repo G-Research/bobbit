@@ -8,6 +8,8 @@ import path from "node:path";
 import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
 import {
 	buildOpenAiCompatibleProviderBlock,
+	filterValidatedProviderUrls,
+	getGatewayStatus,
 	listGateways,
 	migrateGatewayPrefs,
 	saveGateways,
@@ -46,6 +48,55 @@ describe("named gateway validation and migration", () => {
 		assert.throws(() => saveGateways(prefs, [local(), { ...local(), id: "two" }]), /duplicate/i);
 		assert.throws(() => saveGateways(prefs, [{ ...local(), type: "aigw", name: "enterprise" }]), /must be named/i);
 		assert.doesNotThrow(() => saveGateways(prefs, [{ id: "a", name: "aigw", url: "http://localhost:1111/v1", type: "aigw", enabled: true }, local()]));
+	});
+
+	it("rejects unsafe URLs before persistence without reflecting their credential-like input", () => {
+		const prefs = new PreferencesStore(path.join(dir, "state"));
+		for (const url of [
+			"relative/path",
+			"file:///tmp/models",
+			"ftp://example.test/v1",
+			"http://user:password@example.test/v1",
+			"https://example.test/v1#secret-fragment",
+			"https://example.test/v1?x-api-key=super-secret",
+		]) {
+			try {
+				saveGateways(prefs, [{ ...local(), url }]);
+				assert.fail("unsafe URL unexpectedly persisted");
+			} catch (error) {
+				assert.match(String(error), /Gateway URL/);
+				assert.ok(!String(error).includes("super-secret"));
+				assert.ok(!String(error).includes("password"));
+			}
+			assert.equal(prefs.get("modelGateways"), undefined);
+		}
+		assert.doesNotThrow(() => saveGateways(prefs, [{ ...local(), url: "https://example.test/v1?region=us" }]));
+	});
+
+	it("filters credentialed cross-origin well-known providers while preserving same-origin routing", async () => {
+		const origin = "https://gateway.example.test";
+		const lookup = ((_hostname: string, _options: any, callback: any) => callback(null, [{ address: "8.8.8.8", family: 4 }])) as any;
+		const config: any = { provider: {
+			same: { options: { baseURL: `${origin}/openai/v1` }, models: {} },
+			external: { options: { baseURL: "https://models.example.test/v1" }, models: {} },
+		} };
+		const credentialed = await filterValidatedProviderUrls(config, origin, Date.now() + 1_000, lookup, false);
+		assert.deepEqual(Object.keys(credentialed.provider ?? {}), ["same"]);
+		const anonymous = await filterValidatedProviderUrls(config, origin, Date.now() + 1_000, lookup);
+		assert.deepEqual(Object.keys(anonymous.provider ?? {}).sort(), ["external", "same"]);
+	});
+
+	it("preserves a credential-resolution error in status while retaining last-good models", async () => {
+		const prefs = new PreferencesStore(path.join(dir, "state"));
+		saveGateways(prefs, [local()]);
+		setGatewayApiKey(prefs, "local-id", "!false");
+		fs.writeFileSync(path.join(dir, "models.json"), JSON.stringify({ providers: {
+			local: { baseUrl: "http://localhost:1111/v1", models: [{ id: "retained" }] },
+		} }));
+		const saved = listGateways(prefs)[0];
+		const expected = 'Unable to resolve API key for gateway "local"';
+		assert.deepEqual(await getGatewayStatus(prefs, saved), { state: "unreachable", models: [{ id: "retained" }], error: expected });
+		assert.deepEqual((await syncGatewaysModelsJson(prefs)).local, { state: "unreachable", models: [{ id: "retained" }], error: expected });
 	});
 
 	it("treats an existing empty list as authoritative and cleans legacy settings", () => {
