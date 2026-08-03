@@ -420,6 +420,30 @@ describe("unit run isolation", () => {
       expect(readFileSync(config, "utf8"), config).toContain(playwrightRetryPolicy);
   });
 
+  it("owns E2E Playwright artifacts beneath each coordinator root", async () => {
+    const configSource = readFileSync("playwright-e2e.config.ts", "utf8");
+    const config = await import("../../playwright-e2e.config.ts");
+    const root = getRunRoot();
+    const temp = mkdtempSync(join(tmpdir(), "e2e-output-isolation-"));
+    try {
+      const firstRoot = createE2ERunPaths(temp).root;
+      const secondRoot = createE2ERunPaths(temp).root;
+      const firstOutput = config.resolveE2EOutputDir(firstRoot);
+      const secondOutput = config.resolveE2EOutputDir(secondRoot);
+      const outputDir = (config.default as { outputDir?: string }).outputDir;
+
+      expect(configSource).toContain("outputDir: resolveE2EOutputDir(),");
+      expect(outputDir).toBe(config.resolveE2EOutputDir(root));
+      expect(isOwnedRunChild(root, outputDir!)).toBe(true);
+      expect(outputDir).not.toBe(join(process.cwd(), "test-results"));
+      expect(isOwnedRunChild(firstRoot, firstOutput)).toBe(true);
+      expect(isOwnedRunChild(secondRoot, secondOutput)).toBe(true);
+      expect(firstOutput).not.toBe(secondOutput);
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
+
   it("keeps the gateway fixture beneath the inherited run root", () => {
     const source = readFileSync("tests2/harness/gateway.ts", "utf8");
     expect(source).toContain('from "./run-isolation.js"');
