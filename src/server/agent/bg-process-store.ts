@@ -65,6 +65,11 @@ export interface PersistedBgProcess {
 	killRequested: boolean;
 	/** epoch ms of the kill request (Fix 1); undefined when never killed. */
 	killRequestedAt?: number;
+	/**
+	 * Epoch ms when the primary Docker command exited non-zero before the wrapper
+	 * status could be read. Null unless its bounded status grace is pending.
+	 */
+	dockerExitWithoutStatusAt?: number | null;
 	startTime: number;
 	endTime: number | null;
 	// HOST-owned, gateway-written — ALWAYS host for BOTH host and docker spawns:
@@ -105,6 +110,7 @@ export type UpdatableBgFields = Pick<
 	| "processPid"
 	| "killRequested"
 	| "killRequestedAt"
+	| "dockerExitWithoutStatusAt"
 >;
 
 function bgKey(sessionId: string, id: string): string {

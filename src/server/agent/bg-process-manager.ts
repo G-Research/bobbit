@@ -515,7 +515,7 @@ export interface BgProcess {
 	_statusTimer: ReturnType<Clock["setInterval"]> | null;
 	_projectionTimer: ReturnType<Clock["setTimeout"]> | null;
 	_killIntent: number | null;
-	/** Runtime-only monotonic start of a Docker primary-exit status retry window. */
+	/** Durable start of a Docker primary-exit status retry window; null unless pending. */
 	_dockerExitWithoutStatusAt: number | null;
 	_killEscalate: ReturnType<Clock["setTimeout"]> | null;
 	_pidResolveTimer: ReturnType<Clock["setTimeout"]> | null;
@@ -612,13 +612,21 @@ export class BgProcessManager {
 			// child `error`. A Docker status read can be transiently unavailable while
 			// the wrapper has already written its real result, so let the existing status
 			// watcher retry it for a short bounded window before terminalizing a setup
-			// failure. The timestamp is runtime-only: the pending classification never
-			// outlives a gateway restart.
+			// failure. Its timestamp is persisted, so recovery preserves the original
+			// deadline rather than extending the retry window after a gateway restart.
 			if (
 				bg.paths.inContainer && bg.status === "running" && !hasDurableStatus &&
 				!bg.killRequested && typeof code === "number" && code !== 0
 			) {
-				bg._dockerExitWithoutStatusAt ??= this.clock.now();
+				if (bg._dockerExitWithoutStatusAt == null) {
+					bg._dockerExitWithoutStatusAt = this.clock.now();
+					// The original grace deadline must survive a gateway restart: recovery
+					// must not reset it and turn a Docker setup failure into an indefinite
+					// re-attach. This update is synchronous in BgProcessStore.
+					this.store(sessionId)?.update(sessionId, bg.id, {
+						dockerExitWithoutStatusAt: bg._dockerExitWithoutStatusAt,
+					});
+				}
 			}
 		});
 		if (!containerId && typeof child.unref === "function") child.unref();
@@ -905,7 +913,7 @@ export class BgProcessManager {
 		this.writeProjection(bg);
 		this.store(sessionId)?.update(sessionId, bg.id, {
 			status: bg.status, exitCode: bg.exitCode, terminalReason: bg.terminalReason,
-			spawnFailure: bg.spawnFailure, endTime: bg.endTime,
+			spawnFailure: bg.spawnFailure, dockerExitWithoutStatusAt: null, endTime: bg.endTime,
 		});
 		bg._resolveExited();
 		this.broadcast(sessionId, {
@@ -1093,6 +1101,24 @@ export class BgProcessManager {
 			// final spool (projection fallback), then reconcile with the real code.
 			this.restoreLoadOutput(bg);
 			this.reconcileExit(sessionId, bg, parseInt(statusMatch[0], 10), "normal");
+			return;
+		}
+
+		// A Docker primary command can fail before its wrapper publishes status. The
+		// timestamp is durable so a restart preserves the ORIGINAL bounded deadline:
+		// do not consult liveness here, which could otherwise misclassify it as lost or
+		// attach it forever. A real durable status above always wins. Kill intent keeps
+		// its existing recovery path, including re-issuing the kill when still alive.
+		if (bg._dockerExitWithoutStatusAt != null && !bg.killRequested) {
+			this.restoreLoadOutput(bg);
+			if (this.clock.now() - bg._dockerExitWithoutStatusAt >= DOCKER_EXIT_STATUS_GRACE_MS) {
+				this.reconcileSpawnFailure(sessionId, bg, { code: "UNKNOWN" });
+				return;
+			}
+			this.writeProjection(bg);
+			this.store(sessionId)?.update(sessionId, bg.id, { outOffset: bg.outOffset, errOffset: bg.errOffset });
+			this.startTailers(sessionId, bg);
+			this.startStatusWatcher(sessionId, bg);
 			return;
 		}
 
@@ -1289,7 +1315,7 @@ export class BgProcessManager {
 			killRequested: rec.killRequested ?? false, killRequestedAt: rec.killRequestedAt ?? null,
 			exited, _resolveExited: resolveExited, _logBytes: 0,
 			_tailers: null, _statusTimer: null, _projectionTimer: null,
-			_killIntent: null, _dockerExitWithoutStatusAt: null, _killEscalate: null,
+			_killIntent: null, _dockerExitWithoutStatusAt: rec.dockerExitWithoutStatusAt ?? null, _killEscalate: null,
 			_pidResolveTimer: null,
 		};
 		if (rec.status !== "running") resolveExited();
@@ -1516,6 +1542,7 @@ export class BgProcessManager {
 			inContainer: bg.paths.inContainer,
 			outOffset: bg.outOffset, errOffset: bg.errOffset,
 			killRequested: bg.killRequested, killRequestedAt: bg.killRequestedAt ?? undefined,
+			dockerExitWithoutStatusAt: bg._dockerExitWithoutStatusAt,
 		};
 	}
 
