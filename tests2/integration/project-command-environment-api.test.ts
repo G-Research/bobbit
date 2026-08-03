@@ -111,7 +111,7 @@ test.describe("Project command environment API", () => {
 		let project: Project | undefined;
 		let rootPath: string | undefined;
 		try {
-			({ project, rootPath } = await createProject([{ name: "api", repo: ".", commands: { test: "node test.js" }, env: { CI: "0" } ]));
+			({ project, rootPath } = await createProject([{ name: "api", repo: ".", commands: { test: "node test.js" }, env: { CI: "0" } }]));
 			const id = `command-env-workflow-${Date.now()}`;
 			const created = await apiFetch("/api/workflows", {
 				method: "POST",

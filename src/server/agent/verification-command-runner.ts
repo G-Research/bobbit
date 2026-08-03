@@ -50,7 +50,7 @@ export interface VerificationCommandSpawnSpec {
 	readonly command: string;
 	readonly cwd: string;
 	/** Immutable effective command environment captured immediately before spawn. */
-	readonly env: NodeJS.ProcessEnv;
+	readonly env?: NodeJS.ProcessEnv;
 	readonly timeoutMs: number;
 	readonly stdio: StdioOptions;
 	readonly windowsHide: boolean;
