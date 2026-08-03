@@ -2793,6 +2793,9 @@ export class SessionManager {
 	 */
 	async cleanupSandboxNetwork(): Promise<void> {
 		if (!this.ownsSandboxNetwork) return;
+		// Consume ownership before yielding so repeated or concurrent cleanup calls
+		// cannot issue more than one removal attempt for the same creation grant.
+		this.ownsSandboxNetwork = false;
 		try {
 			await this.commandRunner.execFile("docker", ["network", "rm", SessionManager.SANDBOX_NETWORK], { timeout: 10_000 });
 			console.log(`[session-manager] Removed Docker network "${SessionManager.SANDBOX_NETWORK}"`);
