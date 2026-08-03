@@ -1,12 +1,11 @@
 // v2-native — sound selective-unit graph, inventory, repository-read, and cache-dependency contract.
-import { beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadVitestExecutionMap } from "../../scripts/testing-v2/test-map-execution.mjs";
 import {
 	affectedTests,
-	buildGraph,
 	DOM_ENV,
 	extractRepositoryReadDependencies,
 	FILE_BOUNDARY_RUNNER,
@@ -23,13 +22,7 @@ import {
 	validateImpactInventory,
 	validateRepositoryScanInventory,
 } from "../../scripts/affected/impact-rules.mjs";
-
-type Graph = ReturnType<typeof buildGraph>;
-let graph: Graph;
-
-beforeAll(() => {
-	graph = buildGraph();
-});
+import { AFFECTED_GRAPH as graph } from "./helpers/affected-graph-fixture.js";
 
 function expectBounded(path: string, expectedTest: string): void {
 	const plan = affectedTests(graph, [path]);

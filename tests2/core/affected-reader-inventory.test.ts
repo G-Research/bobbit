@@ -1,12 +1,11 @@
 // v2-native — exhaustive indirect and dynamic repository-reader audit contract.
-import { beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { testHash } from "../../scripts/affected/cache.mjs";
 import {
 	affectedTests,
-	buildGraph,
 	REPO_ROOT,
 } from "../../scripts/affected/graph.mjs";
 import {
@@ -16,6 +15,7 @@ import {
 	validateIndirectRepositoryReadRegistry,
 	validateUnresolvedRepositoryReadAudit,
 } from "../../scripts/affected/impact-rules.mjs";
+import { AFFECTED_GRAPH as graph } from "./helpers/affected-graph-fixture.js";
 
 const INDIRECT_READ_PAIRS = [
 	{ consumer: "tests2/core/reviewer-archive-metadata.test.ts", input: "src/server/agent/session-manager.ts" },
@@ -68,7 +68,6 @@ const DIRECT_DYNAMIC_FAMILY_IDS = [
 	"committed-config-cascade",
 ] as const;
 
-type Graph = ReturnType<typeof buildGraph>;
 type UnresolvedRead = { expression: string; status: string };
 type UnresolvedReadAuditEntry = {
 	consumer: string;
@@ -76,11 +75,6 @@ type UnresolvedReadAuditEntry = {
 	declarations?: readonly string[];
 	reads: readonly { expression: string; count: number }[];
 };
-let graph: Graph;
-
-beforeAll(() => {
-	graph = buildGraph();
-});
 
 function expectBounded(path: string, expectedTest: string): void {
 	const plan = affectedTests(graph, [path]);

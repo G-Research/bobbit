@@ -1,10 +1,9 @@
 // v2-native — semantic and fail-closed selective-unit classification contract.
-import { beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
 	affectedTests,
-	buildGraph,
 	REPO_ROOT,
 } from "../../scripts/affected/graph.mjs";
 import {
@@ -12,15 +11,7 @@ import {
 	classifyExecutionMapSourceChange,
 	packageExecutionProjection,
 } from "../../scripts/affected/classification.mjs";
-
-type Graph = ReturnType<typeof buildGraph>;
-let graph: Graph;
-
-beforeAll(() => {
-	// Runtime attribution is independently pinned by affected-test-runner.test.ts.
-	// Avoid resolving that unrelated closure in this classifier-only partition.
-	graph = buildGraph({ serverRuntimeFiles: [] });
-});
+import { AFFECTED_GRAPH as graph } from "./helpers/affected-graph-fixture.js";
 
 function packageChange(before: Record<string, unknown>, after: Record<string, unknown>) {
 	return affectedTests(graph, [{
