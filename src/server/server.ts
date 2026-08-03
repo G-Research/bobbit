@@ -53,7 +53,7 @@ import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { DEFAULT_OVERFLOW_GUARD, describeWsPayload, guardWebSocketOverflow } from "./ws-overflow-guard.js";
 import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
 import { enumerateFiles } from "./skills/file-enumeration.js";
-import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
+import { TeamManager, GateDependencyError, TeamStartError } from "./agent/team-manager.js";
 import { OrchestrationCore, OrchestrationCoreError, dismissHttpStatus, isSettledStatus, type WaitResult } from "./agent/orchestration-core.js";
 import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-routes.js";
 import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
@@ -62,6 +62,7 @@ import { freezeWorkflowDefinition } from "./agent/workflow-validator.js";
 import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
 import { readSubgoalNestingPrefs, checkCanSpawnChild, inheritedChildOverrides, clampMaxDepth } from "./agent/subgoal-nesting-limit.js";
 import { GoalPausedError, requireAncestorsNotPaused } from "./agent/goal-paused-guard.js";
+import { resumeOperatorPausedGoal } from "./agent/goal-resume.js";
 import { collectDescendants, enrichDescendantsForPlan } from "./agent/goal-descendants.js";
 import { computeTreeCost } from "./agent/cost-tracker.js";
 import { backfillLegacyCostGoalIds, backfillLegacyCostGoalIdsFromTranscripts } from "./agent/cost-backfill.js";
@@ -2722,6 +2723,19 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		projectContextManager,
 		toolManager,
 		orchestrationCore,
+		// Keep team-start's auto-resume on the same canonical lifecycle as
+		// POST /goals/:id/resume: durable update, stale-conflict clearing, then
+		// a goal_state_changed broadcast. TeamManager supplies the per-goal lock.
+		resumeGoal: async (goalId) => {
+			const context = projectContextManager.getContextForGoal(goalId);
+			const goal = context?.goalStore.get(goalId);
+			if (!goal || !context) throw new Error(`Goal not found: ${goalId}`);
+			await resumeOperatorPausedGoal(
+				goal,
+				context.goalManager,
+				(resumedGoalId) => broadcastToAll({ type: "goal_state_changed", goalId: resumedGoalId }),
+			);
+		},
 		commandRunner: gatewayDeps.commandRunner,
 	}, undefined, gatewayDeps.clock);
 	const bgProcessManager = new BgProcessManager(
@@ -12016,18 +12030,31 @@ async function handleApiRoute(
 	const teamStartMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/start$/);
 	if (teamStartMatch && req.method === "POST") {
 		const goalId = teamStartMatch[1];
-		// Guard: goal spec must be set before starting the team.
 		const startGoal = getGoalAcrossProjects(goalId);
-		const trimmedSpec = (startGoal?.spec ?? "").trim();
+		if (!startGoal) {
+			json({ error: "Goal not found", code: "GOAL_NOT_FOUND", goalId }, 404);
+			return;
+		}
+		// Guard: goal spec must be set before starting the team.
+		const trimmedSpec = startGoal.spec.trim();
 		if (!trimmedSpec || trimmedSpec.length < 20 || trimmedSpec.toLowerCase() === "placeholder") {
 			json({ error: "Goal spec must be set before starting the team. Update via PUT /api/goals/:id.", code: "SPEC_REQUIRED" }, 400);
 			return;
 		}
 		try {
-			const session = await teamManager.startTeam(goalId);
+			const session = await teamManager.startTeam(goalId, { resumePaused: true });
 			json({ sessionId: session.id, title: session.title }, 201);
 		} catch (err) {
-			jsonError(400, err);
+			if (err instanceof TeamStartError) {
+				json({ error: err.message, code: err.code, goalId }, err.status);
+			} else if (err instanceof GoalPausedError) {
+				json({ error: err.message, code: err.code, goalId: err.goalId }, err.status);
+			} else {
+				// Preserve the diagnostic server-side, but never surface an internal
+				// error or stack trace in the Start team UI.
+				console.error(`[team-start] failed for ${goalId}:`, err);
+				json({ error: "Unable to start the team. Check the goal setup and try again.", code: "TEAM_START_FAILED", goalId }, 500);
+			}
 		}
 		return;
 	}
