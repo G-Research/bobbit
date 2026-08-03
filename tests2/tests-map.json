@@ -2154,6 +2154,24 @@
         "tier": "unit",
         "project": "integration"
       }
+    },
+    {
+      "path": "tests2/dom/paused-team-start-client.test.ts",
+      "reason": "DOM coverage for refreshing paused-goal state and its new team lead after Start team, while rendering a concise stack-free failure message.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/browser/paused-team-start.spec.ts",
+      "reason": "Chromium journey proving Start Team auto-resumes a paused goal, presents an in-flight state for exactly one POST, renders the resumed goal and team lead without reload, and gives a concise retryable stack-free failure.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [
