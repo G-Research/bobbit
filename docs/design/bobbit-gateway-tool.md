@@ -379,7 +379,7 @@ Semantic filter notes:
 | `cancel_verification` | POST | `/api/goals/:goalId/gates/:gateId/cancel-verification` | `goalId`, `gateId` | — |
 | `create_staff` | POST | `/api/staff` | `name`, `systemPrompt` | body: `description`, `triggers`, `roleId`, `cwd`, `projectId` |
 | `delete_staff` | DELETE | `/api/staff/:staffId` | `staffId` | — |
-| `team_start` | POST | `/api/goals/:goalId/team/start` | `goalId` | — (requires goal spec set → 400 `SPEC_REQUIRED` otherwise) |
+| `team_start` | POST | `/api/goals/:goalId/team/start` | `goalId` | — (requires goal spec set → 400 `SPEC_REQUIRED`; cannot resume an operator-paused goal because this Bearer-only wrapper lacks the required UI-cookie or authoritative-lead-secret authority) |
 | `team_teardown` | POST | `/api/goals/:goalId/team/teardown?cascade=true\|false` | `goalId`, `cascade` | — (409 `HAS_DESCENDANT_TEAMS` when cascade=false + live descendants) |
 
 **Notes / flags:**
