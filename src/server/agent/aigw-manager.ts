@@ -23,8 +23,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
 import { BOBBIT_AIGW_USER_AGENT, aigwUserAgentHeaders } from "./aigw-user-agent.js";
-import { resolveGatewayCredential } from "./gateway-credential-resolver.js";
-export { GatewayCredentialResolutionError, resolveGatewayCredential } from "./gateway-credential-resolver.js";
+import { GatewayCredentialResolutionError, resolveGatewayCredential } from "./gateway-credential-resolver.js";
+export { GatewayCredentialResolutionError, resolveGatewayCredential };
 import type { PreferencesStore } from "./preferences-store.js";
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -732,6 +732,33 @@ function normalizeOpenAiBaseUrl(url: string): string {
 	return stripped.endsWith("/v1") ? stripped : `${stripped}/v1`;
 }
 
+const GATEWAY_URL_ERROR = "Gateway URL must be an absolute HTTP(S) URL without credentials, fragments, or credential query parameters";
+const CREDENTIAL_QUERY_PARAMETER = /(?:^|[-_.])(?:api[-_.]?key|access[-_.]?token|auth(?:orization)?|token|key|secret|password|credential|bearer)(?:$|[-_.])/i;
+
+/**
+ * Validate a URL before it can become durable gateway configuration. Keep the
+ * message independent of the submitted value so malformed credential-bearing
+ * URLs cannot be reflected into API responses or logs.
+ */
+export function validateGatewayUrl(value: unknown): string {
+	if (typeof value !== "string" || !value.trim()) throw new Error(GATEWAY_URL_ERROR);
+	const url = value.trim();
+	let parsed: URL;
+	try { parsed = new URL(url); }
+	catch { throw new Error(GATEWAY_URL_ERROR); }
+	if (
+		(parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+		!parsed.hostname ||
+		parsed.username ||
+		parsed.password ||
+		parsed.hash ||
+		[...parsed.searchParams.keys()].some((name) => CREDENTIAL_QUERY_PARAMETER.test(name))
+	) throw new Error(GATEWAY_URL_ERROR);
+	// Keep the established spelling/property bytes for ordinary saved URLs while
+	// trimming a terminal path slash before an optional query string.
+	return url.replace(/\/+(?=[?#]|$)/, "");
+}
+
 /**
  * Validate and save records. `apiKey` is deliberately accepted separately by
  * callers; this function never serializes secret expressions into modelGateways.
@@ -741,12 +768,11 @@ export function saveGateways(prefs: PreferencesStore, gateways: readonly ModelGa
 	let aigwCount = 0;
 	const saved: ModelGateway[] = gateways.map((candidate) => {
 		const name = typeof candidate?.name === "string" ? candidate.name.trim() : "";
-		const url = typeof candidate?.url === "string" ? candidate.url.trim() : "";
 		if (!name) throw new Error("Gateway name must not be empty");
 		if (!GATEWAY_NAME_PATTERN.test(name)) throw new Error(`Invalid gateway name "${name}"`);
 		if (BUILTIN_PROVIDER_IDS.has(name)) throw new Error(`Gateway name "${name}" collides with a built-in provider id`);
 		if (names.has(name)) throw new Error(`Duplicate gateway name "${name}"`);
-		if (!url) throw new Error(`Gateway "${name}" URL must not be empty`);
+		const url = validateGatewayUrl(candidate?.url);
 		if (candidate.type !== "aigw" && candidate.type !== "openai-compatible") throw new Error(`Invalid gateway type for "${name}"`);
 		if (candidate.type === "aigw") {
 			aigwCount++;
@@ -782,9 +808,20 @@ export function getGatewayApiKeyExpression(prefs: PreferencesStore, gatewayId: s
 }
 
 
-/** Resolve a gateway key immediately before an outbound HTTP request. */
-export async function resolveGatewayRequestHeaders(prefs: PreferencesStore, gateway: ModelGateway): Promise<Record<string, string>> {
+/** Resolve a gateway key only for a request sent to its configured origin. */
+export async function resolveGatewayRequestHeaders(
+	prefs: PreferencesStore,
+	gateway: ModelGateway,
+	targetUrl: string = gateway.url,
+): Promise<Record<string, string>> {
+	// Resolve first so a broken command expression still fails closed instead of
+	// allowing an unauthenticated request to proceed on an external target.
 	const credential = await resolveGatewayCredential(getGatewayApiKeyExpression(prefs, gateway.id), gateway.name);
+	try {
+		if (new URL(targetUrl).origin !== new URL(gateway.url).origin) return {};
+	} catch {
+		return {};
+	}
 	return credential ? { Authorization: `Bearer ${credential}` } : {};
 }
 
@@ -803,7 +840,16 @@ export function migrateGatewayPrefs(prefs: PreferencesStore): { migrated: boolea
 		prefs.remove("aigw.exclusive");
 		return { migrated: false, gateways: [] };
 	}
-	const gateways = saveGateways(prefs, [{ id: randomUUID(), name: "aigw", url: legacyUrl.trim().replace(/\/+$/, ""), type: "aigw", enabled: true }]);
+	// A legacy value was already persisted under the old singleton shape. Only
+	// migrate it when it satisfies the current safe durable-record contract.
+	let url: string;
+	try { url = validateGatewayUrl(legacyUrl); }
+	catch {
+		prefs.remove("aigw.url");
+		prefs.remove("aigw.exclusive");
+		return { migrated: false, gateways: [] };
+	}
+	const gateways = saveGateways(prefs, [{ id: randomUUID(), name: "aigw", url, type: "aigw", enabled: true }]);
 	prefs.remove("aigw.url");
 	prefs.remove("aigw.exclusive");
 	return { migrated: true, gateways };
@@ -871,11 +917,11 @@ export async function getGatewayStatus(prefs: PreferencesStore, gateway: ModelGa
 		const credential = await resolveGatewayCredential(getGatewayApiKeyExpression(prefs, gateway.id), gateway.name);
 		const models = await discoverGatewayModels(gateway, credential);
 		return models.length ? { state: "reachable", models } : { state: "empty", models: [] };
-	} catch {
+	} catch (error) {
 		const retained = readModelsJson()?.providers?.[gateway.name];
 		const models = hasMatchingRetainedProvider(retained, gateway) && Array.isArray(retained.models)
 			? retained.models as AigwModel[] : [];
-		return { state: "unreachable", models, error: "Gateway is unreachable" };
+		return { state: "unreachable", models, error: error instanceof GatewayCredentialResolutionError ? error.message : "Gateway is unreachable" };
 	}
 }
 
@@ -916,7 +962,7 @@ export async function syncGatewaysModelsJson(prefs: PreferencesStore): Promise<R
 			if (aigwDiscovery) successfulAigwDiscoveries.push(aigwDiscovery);
 			successfulDiscoveries++;
 			status[gateway.name] = models.length ? { state: "reachable", models } : { state: "empty", models: [] };
-		} catch {
+		} catch (error) {
 			const retained = before[gateway.name];
 			if (hasMatchingRetainedProvider(retained, gateway)) data.providers[gateway.name] = retained;
 			else if (Object.prototype.hasOwnProperty.call(data.providers, gateway.name)) {
@@ -924,7 +970,11 @@ export async function syncGatewaysModelsJson(prefs: PreferencesStore): Promise<R
 				prunedProviders = true;
 			}
 			const models = hasMatchingRetainedProvider(retained, gateway) && Array.isArray(retained.models) ? retained.models as AigwModel[] : [];
-			status[gateway.name] = { state: "unreachable", models, error: "Gateway is unreachable" };
+			status[gateway.name] = {
+				state: "unreachable",
+				models,
+				error: error instanceof GatewayCredentialResolutionError ? error.message : "Gateway is unreachable",
+			};
 		}
 	}
 	// A total outage must not rewrite a valid catalog (or accidentally publish an
@@ -1631,7 +1681,7 @@ export function proxyRequest(
 		const body = Buffer.concat(chunks);
 		let credentialHeaders: Record<string, string> = {};
 		try {
-			if (gateway && prefs) credentialHeaders = await resolveGatewayRequestHeaders(prefs, gateway);
+			if (gateway && prefs) credentialHeaders = await resolveGatewayRequestHeaders(prefs, gateway, targetUrl);
 		} catch (error) {
 			// Do not issue an unauthenticated retry after a key command fails.
 			outgoingRes.writeHead(502, { "Content-Type": "application/json" });
@@ -1954,12 +2004,16 @@ export async function filterValidatedProviderUrls(
 	configuredOrigin: string,
 	deadline: number,
 	lookupImpl: DnsLookup = originalGatewayDnsLookup,
+	allowCrossOrigin = true,
 ): Promise<WellKnownConfig> {
 	const disabled = new Set(Array.isArray(config.disabled_providers) ? config.disabled_providers : []);
 	const candidates = Object.entries(config.provider ?? {}).flatMap(([name, provider]) => {
 		if (!provider || disabled.has(name) || typeof provider.options?.baseURL !== "string") return [];
 		const target = validateProviderBaseTarget(provider.options.baseURL, configuredOrigin);
-		return target ? [{ name, provider, target }] : [];
+		// models.json has one provider-level apiKey. It cannot safely express a
+		// credential-less per-model external base URL, so omit those models when
+		// this gateway has a bearer credential instead of leaking it cross-origin.
+		return target && (allowCrossOrigin || target.origin === configuredOrigin) ? [{ name, provider, target }] : [];
 	});
 	// Resolve distinct DNS names concurrently. One slow or duplicated provider can
 	// consume only the remaining shared discovery budget, never N × DNS timeout.
@@ -2030,7 +2084,13 @@ async function discoverAigwResult(baseUrl: string, authorization?: string): Prom
 	const requestHeaders = authorization ? { Authorization: `Bearer ${authorization}` } : undefined;
 	const fetchedWellKnown = await fetchWellKnownConfigBeforeDeadline(url, discoveryDeadline, requestHeaders);
 	if (fetchedWellKnown && fetchedWellKnown.provider) {
-		const wellKnown = await filterValidatedProviderUrls(fetchedWellKnown, gateway.origin, discoveryDeadline);
+		const wellKnown = await filterValidatedProviderUrls(
+			fetchedWellKnown,
+			gateway.origin,
+			discoveryDeadline,
+			originalGatewayDnsLookup,
+			!authorization,
+		);
 		return { models: translateWellKnown(wellKnown, url), wellKnown };
 	}
 
@@ -2147,8 +2207,7 @@ export function discoverGatewayModels(gateway: ModelGateway, authorization?: str
  * Returns the discovered models.
  */
 export async function configureAigw(baseUrl: string, prefs: PreferencesStore): Promise<AigwModel[]> {
-	const gateway = normalizeHttpUrl(baseUrl);
-	const normalizedUrl = gateway.href.replace(/\/$/, "");
+	const normalizedUrl = validateGatewayUrl(baseUrl);
 	const result = await discoverAigwResult(normalizedUrl);
 	// Legacy fallback Claude entries are normalized during discovery. Do not
 	// remap authoritative well-known models merely because their ID contains

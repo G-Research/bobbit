@@ -563,6 +563,7 @@ import {
 	GatewayCredentialResolutionError,
 	resolveGatewayCredential,
 	resolveGatewayRequestHeaders,
+	validateGatewayUrl,
 	saveGateways,
 	setGatewayApiKey,
 	migrateGatewayPrefs,
@@ -10390,6 +10391,9 @@ async function handleApiRoute(
 			return;
 		}
 		const type = body.type === "openai-compatible" ? "openai-compatible" : "aigw";
+		let gatewayUrl: string;
+		try { gatewayUrl = validateGatewayUrl(body.url); }
+		catch (error: any) { json({ error: error?.message || "Invalid gateway URL" }, 400); return; }
 		try {
 			// A saved Settings row sends its stable id, allowing Test to resolve the
 			// private expression without returning it to the browser. The saved URL
@@ -10398,11 +10402,11 @@ async function handleApiRoute(
 			const matchingGateway = typeof body.gatewayId === "string"
 				? listGateways(preferencesStore).find((candidate) => candidate.id === body.gatewayId)
 				: undefined;
-			const savedGateway = matchingGateway && matchingGateway.url === body.url.trim() && matchingGateway.type === type
+			const savedGateway = matchingGateway && matchingGateway.url === gatewayUrl && matchingGateway.type === type
 				? matchingGateway
 				: undefined;
 			const gateway: ModelGateway = {
-				id: savedGateway?.id ?? randomUUID(), name: savedGateway?.name ?? "test", url: body.url, type, enabled: true,
+				id: savedGateway?.id ?? randomUUID(), name: savedGateway?.name ?? "test", url: gatewayUrl, type, enabled: true,
 			};
 			const expression = body.apiKey === undefined && savedGateway
 				? getGatewayApiKeyExpression(preferencesStore, savedGateway.id)
@@ -10451,7 +10455,9 @@ async function handleApiRoute(
 	if (url.pathname === "/api/aigw/configure" && req.method === "POST") {
 		const body = await readBody(req);
 		if (!body?.url || typeof body.url !== "string") { json({ error: "Missing 'url' field" }, 400); return; }
-		const normalizedUrl = body.url.replace(/\/+$/, "");
+		let normalizedUrl: string;
+		try { normalizedUrl = validateGatewayUrl(body.url); }
+		catch (error: any) { json({ error: error?.message || "Invalid gateway URL" }, 400); return; }
 		if (body.apiKey !== undefined && body.apiKey !== null && typeof body.apiKey !== "string") {
 			json({ error: "apiKey must be a string or null" }, 400);
 			return;
@@ -10547,11 +10553,11 @@ async function handleApiRoute(
 				return;
 			}
 			const baseUrl = gateway.url.replace(/\/+$/, "");
-			// Resolve the reference immediately before this outbound probe. A
-			// command-resolution error exits through the outer error response; it
-			// must never cause an unauthenticated retry.
-			const gatewayHeaders = await resolveGatewayRequestHeaders(preferencesStore, gateway);
 			const modelBaseUrl = (resolved.baseUrl || baseUrl).replace(/\/+$/, "");
+			// Select the final model endpoint before resolving a key. A per-model
+			// well-known URL on another origin must never receive this gateway's
+			// provider-level bearer credential.
+			const gatewayHeaders = await resolveGatewayRequestHeaders(preferencesStore, gateway, modelBaseUrl);
 			if (resolved.api !== "openai-responses" && resolved.api !== "openai-completions") {
 				// Converse and future provider-native APIs must be exercised through
 				// pi-ai; never relabel them as a root chat-completions request.

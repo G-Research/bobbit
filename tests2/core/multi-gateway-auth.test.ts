@@ -1,6 +1,7 @@
 // v2-native — request-time gateway credential resolution and redaction boundary.
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
+import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +10,7 @@ import type { ModelConfigCommandRunner } from "../../src/server/agent/model-conf
 import {
 	GatewayCredentialResolutionError,
 	listGateways,
+	proxyRequest,
 	resolveGatewayCredential,
 	resolveGatewayRequestHeaders,
 	saveGateways,
@@ -53,6 +55,42 @@ describe("multi-gateway optional credentials", () => {
 		process.env.MULTI_GATEWAY_TOKEN = "secret-token";
 		assert.deepEqual(listGateways(prefs), [{ ...gateway, apiKeyConfigured: true }]);
 		assert.deepEqual(await resolveGatewayRequestHeaders(prefs, gateway), { Authorization: "Bearer secret-token" });
+	});
+
+	it("sends a gateway bearer only to its configured origin", async () => {
+		const prefs = new PreferencesStore(stateDir);
+		const received: Array<{ target: "configured" | "external"; authorization?: string }> = [];
+		const recipient = (target: "configured" | "external") => http.createServer((req, res) => {
+			received.push({ target, authorization: req.headers.authorization });
+			res.end("ok");
+		});
+		const configured = recipient("configured");
+		const external = recipient("external");
+		await Promise.all([configured, external].map((server) => new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))));
+		const configuredUrl = `http://127.0.0.1:${(configured.address() as any).port}`;
+		const externalUrl = `http://127.0.0.1:${(external.address() as any).port}`;
+		const configuredGateway = { ...gateway, url: configuredUrl };
+		saveGateways(prefs, [configuredGateway]);
+		setGatewayApiKey(prefs, configuredGateway.id, "literal-secret");
+		const forwarder = http.createServer((req, res) => proxyRequest(req.url === "/same" ? configuredUrl : externalUrl, req, res, configuredGateway, prefs));
+		await new Promise<void>((resolve) => forwarder.listen(0, "127.0.0.1", resolve));
+		try {
+			const forwarderUrl = `http://127.0.0.1:${(forwarder.address() as any).port}`;
+			await (await fetch(`${forwarderUrl}/same`)).text();
+			await (await fetch(`${forwarderUrl}/external`)).text();
+			assert.deepEqual(received, [
+				{ target: "configured", authorization: "Bearer literal-secret" },
+				{ target: "external", authorization: undefined },
+			]);
+			assert.deepEqual(await resolveGatewayRequestHeaders(prefs, configuredGateway, externalUrl), {});
+			setGatewayApiKey(prefs, configuredGateway.id, "!false");
+			await assert.rejects(
+				resolveGatewayRequestHeaders(prefs, configuredGateway, externalUrl),
+				(error: unknown) => error instanceof GatewayCredentialResolutionError,
+			);
+		} finally {
+			await Promise.all([forwarder, configured, external].map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+		}
 	});
 
 	it("fails closed when a key command fails or emits no key and never reflects the expression", async () => {
