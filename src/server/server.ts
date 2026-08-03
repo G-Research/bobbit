@@ -2534,7 +2534,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	sessionManager.lifecycleHub = new LifecycleHub({
 		registry: packContributionRegistry,
 		moduleHost,
-		trace: new ContextTraceStore(bobbitStateDir(), gatewayDeps.fsImpl),
+		trace: new ContextTraceStore(bobbitStateDir(), gatewayDeps.fsImpl, (sessionId, entry) => {
+			broadcastToSession(sessionId, { type: "context_trace_updated", sessionId, ts: entry.ts });
+		}),
 		// Hierarchical goal-metadata resolver. The hub is shared across projects
 		// while each GoalStore is per ProjectContext, so route STRICTLY by goalId
 		// (never the caller-supplied projectId, which may be stale/cross-project).
@@ -6450,7 +6452,17 @@ async function handleApiRoute(
 	// GET /api/sessions/:id/context-trace?limit=N — per-turn provider dispatch trace.
 	const contextTraceMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/context-trace$/);
 	if (contextTraceMatch && req.method === "GET") {
-		const sessionId = contextTraceMatch[1];
+		let sessionId: string;
+		try {
+			sessionId = decodeURIComponent(contextTraceMatch[1]);
+		} catch {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		if (!sessionManager.getSession(sessionId) && !sessionManager.getPersistedSession(sessionId)) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
 		let limit: number | undefined;
 		const rawLimit = url.searchParams.get("limit");
 		if (rawLimit !== null) {

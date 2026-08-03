@@ -44,4 +44,30 @@ describe("ContextTraceStore", () => {
 		assert.ok(rows[0].ts > 0, "oldest entries should be dropped");
 		assert.equal(rows.at(-1)?.ts, 259, "newest entry should be retained");
 	});
+
+	it("notifies an observer only after the trace is durable", () => {
+		const memfs = createMemFs();
+		const observed: TraceEntry[] = [];
+		const store = new ContextTraceStore(STATE_DIR, memfs, (sessionId, appended) => {
+			assert.deepEqual(store.readTrace(sessionId), [appended]);
+			observed.push(appended);
+		});
+		const appended = entry(1);
+
+		store.appendTrace("sess-1", appended);
+
+		assert.deepEqual(observed, [appended]);
+	});
+
+	it("isolates observer failures from durable trace writes", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs, () => {
+			throw new Error("invalidation transport unavailable");
+		});
+
+		store.appendTrace("sess-1", entry(1));
+		store.appendTrace("sess-1", entry(2));
+
+		assert.deepEqual(store.readTrace("sess-1").map((row) => row.ts), [1, 2]);
+	});
 });
