@@ -4196,7 +4196,7 @@ async function handleApiRoute(
 	packContributionRegistryArg?: PackContributionRegistry,
 	extensionChannelServices?: ExtensionChannelServices,
 	fetchImpl: typeof fetch = fetch,
-	commandRunner?: CommandRunner,
+	commandRunner: CommandRunner = realCommandRunner,
 	fsImpl?: FsLike,
 	clock?: Clock,
 	withPreviewSessionOperation: PreviewSessionOperation = async (_sessionId, operation) => operation(),
@@ -4899,7 +4899,7 @@ async function handleApiRoute(
 		const dockerContextRoot = resolveSandboxDockerContext(resolved.project.rootPath);
 		// Docker must use this request's gateway-owned runner: test coordinators
 		// fence host commands through that seam rather than allowing direct spawns.
-		const status = await checkDockerAvailability(configured ? imageName : undefined, dockerContextRoot ?? undefined, commandRunner!);
+		const status = await checkDockerAvailability(configured ? imageName : undefined, dockerContextRoot ?? undefined, commandRunner);
 		json({ ...status, configured });
 		return;
 	}
