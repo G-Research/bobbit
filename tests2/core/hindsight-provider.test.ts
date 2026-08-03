@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 
 import provider, { __setClientFactory } from "../../market-packs/hindsight/src/provider.ts";
 import { routes } from "../../market-packs/hindsight/src/routes.ts";
-import { CONFIG_KEY, LAST_ERROR_KEY, QUEUE_KEY } from "../../market-packs/hindsight/src/shared.ts";
+import { CONFIG_KEY, LAST_ERROR_KEY, QUEUE_KEY, type StoreReadResult } from "../../market-packs/hindsight/src/shared.ts";
 
 // ── Fakes ─────────────────────────────────────────────────────────────────────
 function makeStore() {
@@ -25,6 +25,9 @@ function makeStore() {
 	return {
 		map,
 		get: async <T = unknown>(k: string): Promise<T | null> => (map.has(k) ? (structuredClone(map.get(k)) as T) : null),
+		read: async <T = unknown>(k: string): Promise<StoreReadResult<T>> => map.has(k)
+			? ({ state: "present" as const, value: structuredClone(map.get(k)) as T })
+			: ({ state: "absent" as const }),
 		put: async <T = unknown>(k: string, v: T): Promise<void> => {
 			map.set(k, structuredClone(v));
 		},
@@ -267,12 +270,12 @@ test("retry queue: queue read failure rejects without replacing an unknown snaps
 	const remoteCanary = "remote-retain-secret-canary";
 	const storeCanary = "queue-read-secret-canary";
 	const store = makeStore();
-	const durableGet = store.get;
+	const durableRead = store.read;
 	const durablePut = store.put;
 	let queuePutCalls = 0;
-	store.get = async <T = unknown>(key: string): Promise<T | null> => {
-		if (key === QUEUE_KEY) throw new Error(storeCanary);
-		return durableGet<T>(key);
+	store.read = async <T = unknown>(key: string): Promise<StoreReadResult<T>> => {
+		if (key === QUEUE_KEY) return { state: "error", diagnostic: { code: "STORE_READ_IO", retryable: true, message: storeCanary } } as StoreReadResult<T>;
+		return durableRead<T>(key);
 	};
 	store.put = async <T = unknown>(key: string, value: T): Promise<void> => {
 		if (key === QUEUE_KEY) queuePutCalls++;
@@ -306,6 +309,81 @@ test("retry queue: queue read failure rejects without replacing an unknown snaps
 		assert.equal(store.map.has(QUEUE_KEY), false, "no retry queue snapshot is written after a failed read");
 		assert.equal(store.map.has(LAST_ERROR_KEY), false, "the unsaved remote error is not recorded");
 		assert.doesNotMatch(JSON.stringify([...store.map.entries()]), new RegExp(`${remoteCanary}|${storeCanary}`));
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("unknown queue blocks both drains and status never reports it as empty", async () => {
+	const store = makeStore();
+	await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888" });
+	await store.put(QUEUE_KEY, [{ content: "must-not-drain", tags: { kind: "turn" }, ts: 1 }]);
+	const durableRead = store.read;
+	const canary = "queue-read-secret-canary";
+	store.read = async <T = unknown>(key: string): Promise<StoreReadResult<T>> => key === QUEUE_KEY
+		? { state: "error", diagnostic: { code: "STORE_READ_IO", retryable: true, message: canary } } as StoreReadResult<T>
+		: durableRead<T>(key);
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		// No turn summary: this isolates the head drain from a new retain.
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store } });
+		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store } });
+		assert.equal(calls.retain.length, 0, "unknown queue must not issue remote drain retains");
+		assert.deepEqual(await store.get(QUEUE_KEY), [{ content: "must-not-drain", tags: { kind: "turn" }, ts: 1 }]);
+
+		const status = await routes.status({ host: { store } } as never) as Record<string, unknown>;
+		assert.equal(status.queueDepth, null, "unknown durable state is not an empty queue");
+		assert.equal(status.queueState, "unavailable");
+		assert.deepEqual(status.queueError, { code: "STORE_READ_IO", retryable: true });
+		assert.doesNotMatch(JSON.stringify(status), new RegExp(canary));
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("status preserves a valid stored empty queue", async () => {
+	const store = makeStore();
+	await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888" });
+	await store.put(QUEUE_KEY, []);
+	__setClientFactory(() => makeClient().client);
+	try {
+		const status = await routes.status({ host: { store } } as never) as Record<string, unknown>;
+		assert.equal(status.queueDepth, 0);
+		assert.equal(status.queueState, "available");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("unreadable config is visible, sanitized, and cannot be overwritten", async () => {
+	const store = makeStore();
+	const durableRead = store.read;
+	const durablePut = store.put;
+	const canary = "config-read-secret-canary";
+	let configWrites = 0;
+	store.read = async <T = unknown>(key: string): Promise<StoreReadResult<T>> => key === CONFIG_KEY
+		? { state: "error", diagnostic: { code: "STORE_READ_IO", retryable: true, message: canary } } as StoreReadResult<T>
+		: durableRead<T>(key);
+	store.put = async <T>(key: string, value: T) => {
+		if (key === CONFIG_KEY) configWrites++;
+		return durablePut(key, value);
+	};
+	let clientCalls = 0;
+	__setClientFactory(() => {
+		clientCalls++;
+		return makeClient().client;
+	});
+	try {
+		const get = await routes.config({ host: { store } } as never, { method: "GET" } as never) as Record<string, unknown>;
+		const set = await routes.config({ host: { store } } as never, { method: "POST", body: { bank: "new-bank" } } as never) as Record<string, unknown>;
+		const recall = await routes.recall({ host: { store } } as never, { body: { query: "do not call remote" } } as never) as Record<string, unknown>;
+		assert.equal(get.error, "HINDSIGHT_CONFIG_UNAVAILABLE");
+		assert.equal(set.error, "HINDSIGHT_CONFIG_UNAVAILABLE");
+		assert.equal(recall.error, "HINDSIGHT_CONFIG_UNAVAILABLE");
+		assert.equal(configWrites, 0);
+		assert.equal(clientCalls, 0);
+		assert.doesNotMatch(JSON.stringify([get, set, recall]), new RegExp(canary));
 	} finally {
 		__setClientFactory(null);
 	}
