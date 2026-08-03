@@ -1441,8 +1441,10 @@ The declaration fields are strict:
 - **`mode`** is required and is exactly `observe` or `decide`.
 - **`capabilities`** is required and duplicate-free. Its only values are `store`, `session`,
   and `agents`; `[]` is valid. These are descriptive metadata only and do not confer access.
-- **`budget`** is optional. `maxTokens` defaults to `1600` and is clamped to `64..8192`;
-  `timeoutMs` defaults to `1500` and is clamped to `100..10000`.
+- **`budget`** is optional. An omitted or non-mapping `budget`, and each missing, non-numeric,
+  or non-finite field, falls back independently to `maxTokens: 1600` and `timeoutMs: 1500`.
+  Finite numeric values are then clamped: `maxTokens` to `64..8192` and `timeoutMs` to
+  `100..10000`.
 - **`config`**, when present, must be a mapping and is retained verbatim. **`activation`**,
   when present, must be a mapping containing no keys other than optional `requiresConfig`.
   That value, when present, is a non-empty, duplicate-free array of non-empty strings.
