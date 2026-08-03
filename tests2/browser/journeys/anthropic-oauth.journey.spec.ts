@@ -7,6 +7,7 @@ const OAUTH_ROUTE = "**/api/oauth/**";
 type OAuthCall = {
 	method: string;
 	path: string;
+	search?: string;
 	body?: Record<string, unknown>;
 };
 
@@ -18,7 +19,6 @@ type MockOAuthRoutes = {
 type MockOAuthOptions = {
 	failFirstCancellation?: boolean;
 	beforeStartResponse?: () => Promise<void>;
-	callbackServerForFlow?: (flowId: string) => boolean;
 	onStartReceived?: () => void;
 };
 
@@ -34,7 +34,7 @@ async function installMockOAuthRoutes(page: Page, options: MockOAuthOptions = {}
 	let nextFlow = 0;
 	let cancellationAttempts = 0;
 	const calls: OAuthCall[] = [];
-	const flows = new Set<string>();
+	const flows = new Map<string, { complete: boolean }>();
 	const authenticated = new Map<string, boolean>([
 		["anthropic", false],
 		["openai-codex", true],
@@ -50,7 +50,7 @@ async function installMockOAuthRoutes(page: Page, options: MockOAuthOptions = {}
 		const body = request.method() === "POST"
 			? request.postDataJSON() as Record<string, unknown>
 			: undefined;
-		calls.push({ method: request.method(), path: url.pathname, ...(body ? { body } : {}) });
+		calls.push({ method: request.method(), path: url.pathname, ...(url.search ? { search: url.search } : {}), ...(body ? { body } : {}) });
 		const json = (value: unknown, status = 200) => route.fulfill({
 			status,
 			contentType: "application/json",
@@ -68,15 +68,21 @@ async function installMockOAuthRoutes(page: Page, options: MockOAuthOptions = {}
 		if (url.pathname === "/api/oauth/start" && request.method() === "POST") {
 			if (body?.provider !== "anthropic") return json({ error: "Unexpected provider" }, 400);
 			const flowId = `anthropic-flow-${++nextFlow}`;
-			flows.add(flowId);
+			flows.set(flowId, { complete: false });
 			options.onStartReceived?.();
 			await options.beforeStartResponse?.();
 			return json({
 				flowId,
 				provider: "anthropic",
 				url: `https://oauth.example/authorize?flow=${encodeURIComponent(flowId)}`,
-				callbackServer: options.callbackServerForFlow?.(flowId) === true,
+				callbackServer: true,
 			});
+		}
+		if (url.pathname === "/api/oauth/flow-status" && request.method() === "GET") {
+			const flowId = url.searchParams.get("flowId") ?? "";
+			const flow = flows.get(flowId);
+			if (url.searchParams.get("provider") !== "anthropic" || !flow) return json({ error: "flow not found" }, 404);
+			return json({ flowId, provider: "anthropic", ...flow });
 		}
 		if (url.pathname === "/api/oauth/cancel" && request.method() === "POST") {
 			cancellationAttempts += 1;
@@ -94,9 +100,11 @@ async function installMockOAuthRoutes(page: Page, options: MockOAuthOptions = {}
 		}
 		if (url.pathname === "/api/oauth/complete" && request.method() === "POST") {
 			const flowId = typeof body?.flowId === "string" ? body.flowId : "";
-			if (!flows.has(flowId) || body?.provider !== "anthropic" || typeof body.code !== "string" || !body.code) {
+			const flow = flows.get(flowId);
+			if (!flow || body?.provider !== "anthropic" || typeof body.code !== "string" || !body.code) {
 				return json({ success: false, error: "Unknown flow" }, 404);
 			}
+			flow.complete = true;
 			authenticated.set("anthropic", true);
 			return json({ success: true });
 		}
@@ -144,17 +152,26 @@ test.describe("Journey: Anthropic OAuth", () => {
 			await expect(openAiRow.getByTestId("account-status-openai-codex")).toHaveText("Authenticated");
 
 			const firstPopup = page.waitForEvent("popup");
+			const firstFlowStatus = page.waitForRequest((request) =>
+				request.url().includes("/api/oauth/flow-status?flowId=anthropic-flow-1&provider=anthropic"),
+			);
 			await anthropicRow.getByTestId("account-auth-btn-anthropic").getByRole("button").click();
 			popup = await firstPopup;
 			await expect(popup).toHaveURL(/https:\/\/oauth\.example\/authorize\?flow=anthropic-flow-1/);
 			await popup.close();
 			popup = undefined;
+			await firstFlowStatus;
 			await expect(page.getByRole("heading", { name: "Anthropic Login", exact: true })).toBeVisible();
 			expect(callsFor(oauth, "/api/oauth/start")).toEqual([{
 				method: "POST",
 				path: "/api/oauth/start",
 				body: { provider: "anthropic" },
 			}]);
+			expect(callsFor(oauth, "/api/oauth/flow-status")).toContainEqual({
+				method: "GET",
+				path: "/api/oauth/flow-status",
+				search: "?flowId=anthropic-flow-1&provider=anthropic",
+			});
 
 			await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
 			await expect(page.getByRole("heading", { name: "Anthropic Login", exact: true })).toHaveCount(0);
@@ -165,20 +182,30 @@ test.describe("Journey: Anthropic OAuth", () => {
 			}]);
 
 			const retryPopup = page.waitForEvent("popup");
+			const retryFlowStatus = page.waitForRequest((request) =>
+				request.url().includes("/api/oauth/flow-status?flowId=anthropic-flow-2&provider=anthropic"),
+			);
 			await anthropicRow.getByTestId("account-auth-btn-anthropic").getByRole("button").click();
 			popup = await retryPopup;
 			await expect(popup).toHaveURL(/https:\/\/oauth\.example\/authorize\?flow=anthropic-flow-2/);
 			await popup.close();
 			popup = undefined;
+			await retryFlowStatus;
 			await expect(page.getByRole("heading", { name: "Anthropic Login", exact: true })).toBeVisible();
-			await page.getByPlaceholder("Paste code here (format: code#state)").fill("mock-code#mock-state");
+			expect(callsFor(oauth, "/api/oauth/flow-status")).toContainEqual({
+				method: "GET",
+				path: "/api/oauth/flow-status",
+				search: "?flowId=anthropic-flow-2&provider=anthropic",
+			});
+			const manualRedirect = "https://oauth.example/callback?code=mock-code&state=mock-state";
+			await page.getByPlaceholder("Paste redirect URL or code").fill(manualRedirect);
 			await page.getByRole("button", { name: "Submit", exact: true }).click();
 			await expect(page.getByText("Authenticated successfully.", { exact: true })).toBeVisible();
 			await expect(anthropicRow.getByTestId("account-status-anthropic")).toHaveText("Authenticated");
 			expect(callsFor(oauth, "/api/oauth/complete")).toEqual([{
 				method: "POST",
 				path: "/api/oauth/complete",
-				body: { flowId: "anthropic-flow-2", code: "mock-code#mock-state", provider: "anthropic" },
+				body: { flowId: "anthropic-flow-2", code: manualRedirect, provider: "anthropic" },
 			}]);
 
 			await page.reload({ waitUntil: "domcontentloaded" });
@@ -245,7 +272,6 @@ test.describe("Journey: Anthropic OAuth", () => {
 		const startReceived = new Promise<void>((resolve) => { markStartReceived = resolve; });
 		const oauth = await installMockOAuthRoutes(page, {
 			beforeStartResponse: () => startResponseHeld,
-			callbackServerForFlow: (flowId) => flowId === "anthropic-flow-1",
 			onStartReceived: markStartReceived,
 		});
 		try {
