@@ -172,7 +172,7 @@ Compare the goal, upstream design/analysis, implementation, and tests. Identify 
 
 **Stage scope:** Evaluate implementation and test work due through phase 2. When this workflow separately schedules optional phase-3 QA, leave missing QA execution, scenarios, or results to that QA step rather than failing this review. When a downstream Ready-to-Merge gate owns publication, base synchronization, and PR creation, leave those requirements to that gate. These boundaries are conditional: do not defer any concrete implementation or test defect that this phase-2 review can establish.
 
-IMPORTANT: Ignore documentation-only gaps only when this workflow has a downstream Documentation gate; do NOT flag missing or outdated documentation, README updates, design-doc updates, code comments, or other docs-only artifacts in that case.
+IMPORTANT: Ignore documentation-only gaps. Do NOT flag missing or outdated documentation, README updates, design-doc updates, code comments, or other docs-only artifacts.
 
 For every blocking finding, provide implementation-ready remediation: exact affected file/location, the minimal code or test change required, and a focused regression test that proves the fix.`;
 
