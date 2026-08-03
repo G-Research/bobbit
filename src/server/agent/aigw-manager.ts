@@ -889,7 +889,17 @@ export async function syncGatewaysModelsJson(prefs: PreferencesStore): Promise<R
 	const data = readModelsJson();
 	if (!data.providers) data.providers = {};
 	const before = { ...data.providers };
-	for (const name of new Set([...managedProviderNames(prefs), "aigw"])) if (!enabledNames.has(name)) delete data.providers[name];
+	// A config change can require a stale managed block to be pruned even while
+	// every live gateway is down. Track that separately from discovery success:
+	// a pure outage leaves the file byte-identical, while an explicit removal,
+	// rename, disable, or URL mismatch is durably published.
+	let prunedProviders = false;
+	for (const name of new Set([...managedProviderNames(prefs), "aigw"])) {
+		if (!enabledNames.has(name) && Object.prototype.hasOwnProperty.call(data.providers, name)) {
+			delete data.providers[name];
+			prunedProviders = true;
+		}
+	}
 	const status: Record<string, GatewayStatus> = {};
 	const successfulAigwDiscoveries: Array<{ wellKnown: WellKnownConfig | null; models: AigwModel[] }> = [];
 	let successfulDiscoveries = 0;
@@ -909,14 +919,18 @@ export async function syncGatewaysModelsJson(prefs: PreferencesStore): Promise<R
 		} catch {
 			const retained = before[gateway.name];
 			if (hasMatchingRetainedProvider(retained, gateway)) data.providers[gateway.name] = retained;
-			else delete data.providers[gateway.name];
+			else if (Object.prototype.hasOwnProperty.call(data.providers, gateway.name)) {
+				delete data.providers[gateway.name];
+				prunedProviders = true;
+			}
 			const models = hasMatchingRetainedProvider(retained, gateway) && Array.isArray(retained.models) ? retained.models as AigwModel[] : [];
 			status[gateway.name] = { state: "unreachable", models, error: "Gateway is unreachable" };
 		}
 	}
 	// A total outage must not rewrite a valid catalog (or accidentally publish an
-	// empty one). Partial success may still publish its fresh authoritative rows.
-	if (enabled.length > 0 && successfulDiscoveries === 0) return status;
+	// empty one). It must still publish configuration-driven pruning so removed
+	// or mismatched managed providers cannot remain selectable until recovery.
+	if (enabled.length > 0 && successfulDiscoveries === 0 && !prunedProviders) return status;
 	// Write before publishing managed names or changing DNS/env runtime authority.
 	writeModelsJson(data);
 	prefs.set(MANAGED_PROVIDERS_PREF_KEY, [...enabledNames]);

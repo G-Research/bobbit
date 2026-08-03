@@ -89,6 +89,13 @@ test.describe("multi-gateway REST API", () => {
 		expect(JSON.stringify(prefs)).not.toContain("integration-secret");
 		expect(prefs.modelGateways).toEqual([expect.objectContaining({ id: row.id, name: "local-openai" })]);
 
+		const testedWithStoredKey = await apiFetch("/api/aigw/test", {
+			method: "POST",
+			body: JSON.stringify({ gatewayId: row.id, url: secured.url, type: "openai-compatible" }),
+		});
+		expect(testedWithStoredKey.status).toBe(200);
+		expect(secured.requests.at(-1)).toMatchObject({ path: "/v1/models", authorization: "Bearer integration-secret" });
+
 		const tested = await apiFetch("/api/aigw/test", {
 			method: "POST",
 			body: JSON.stringify({ url: secured.url, type: "openai-compatible", apiKey: "integration-secret" }),

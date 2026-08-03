@@ -10385,12 +10385,29 @@ async function handleApiRoute(
 			json({ error: "apiKey must be a string or null" }, 400);
 			return;
 		}
+		if (body.gatewayId !== undefined && (typeof body.gatewayId !== "string" || !body.gatewayId.trim())) {
+			json({ error: "gatewayId must be a non-empty string" }, 400);
+			return;
+		}
 		const type = body.type === "openai-compatible" ? "openai-compatible" : "aigw";
 		try {
+			// A saved Settings row sends its stable id, allowing Test to resolve the
+			// private expression without returning it to the browser. The saved URL
+			// and type must also match: a public row id must not authorize sending a
+			// stored credential to an arbitrary prospective endpoint.
+			const matchingGateway = typeof body.gatewayId === "string"
+				? listGateways(preferencesStore).find((candidate) => candidate.id === body.gatewayId)
+				: undefined;
+			const savedGateway = matchingGateway && matchingGateway.url === body.url.trim() && matchingGateway.type === type
+				? matchingGateway
+				: undefined;
 			const gateway: ModelGateway = {
-				id: randomUUID(), name: "test", url: body.url, type, enabled: true,
+				id: savedGateway?.id ?? randomUUID(), name: savedGateway?.name ?? "test", url: body.url, type, enabled: true,
 			};
-			const credential = await resolveGatewayCredential(body.apiKey, gateway.name);
+			const expression = body.apiKey === undefined && savedGateway
+				? getGatewayApiKeyExpression(preferencesStore, savedGateway.id)
+				: body.apiKey;
+			const credential = await resolveGatewayCredential(expression, gateway.name);
 			const models = await discoverGatewayModels(gateway, credential);
 			json({ ok: true, models: shapeGatewayModelsForDisplay(gateway, models) });
 		} catch (error: any) {
