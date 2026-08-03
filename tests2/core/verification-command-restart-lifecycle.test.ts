@@ -110,7 +110,7 @@ function diagnosticFixture(stateDir: string, signalId: string, contents: { out?:
 	};
 }
 
-function commandStepFixture(args: { name: string; startedAt: number; timeoutSec?: number; outFile?: string; errFile?: string; exitFile?: string; containerId?: string; pid?: number; pidFile?: string; heartbeatFile?: string; nonce?: string; pidNonce?: string; windowsJobCompletionFile?: string; windowsJobCompletionNonce?: string; containerCompletionFile?: string; containerCompletionNonce?: string; containerOwnershipWitness?: { containerId: string; nonce: string; sentinelPid: number; pgid: number; startToken: string }; restartRecoveryMode?: "detached" | "container-exec" | "pending-retry" | "unsupported" }): any {
+function commandStepFixture(args: { name: string; startedAt: number; timeoutSec?: number; outFile?: string; errFile?: string; exitFile?: string; containerId?: string; pid?: number; pidFile?: string; heartbeatFile?: string; nonce?: string; pidNonce?: string; windowsJobCompletionFile?: string; windowsJobCompletionNonce?: string; containerCompletionFile?: string; containerCompletionNonce?: string; containerOwnershipWitness?: { containerId: string; nonce: string; sentinelPid: number; pgid: number; startToken: string }; containerOwnershipAttestation?: { version: 1; containerId: string; nonce: string; execId: string; enginePid: number; tag: string; sentinelPid: number; pgid: number; startToken: string }; restartRecoveryMode?: "detached" | "container-exec" | "pending-retry" | "unsupported" }): any {
 	return {
 		...COMMAND_STEP_TEMPLATE,
 		...args,
@@ -272,6 +272,7 @@ test("persisted container cancellation kills and verifies its payload before rea
 		restartRecoveryMode: "container-exec",
 		nonce: "container-cancel-nonce",
 		containerOwnershipWitness: { containerId: "container-cancel-only", nonce: "container-cancel-nonce", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },
+		containerOwnershipAttestation: { version: 1, containerId: "container-cancel-only", nonce: "container-cancel-nonce", execId: "exec", enginePid: 1, tag: "tag", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },
 	})], startedAt);
 	(harness as any).activeVerifications.set(verification.signalId, verification);
 
@@ -309,6 +310,7 @@ test("terminal recovered container exit proves no live payload group before host
 		restartRecoveryMode: "container-exec",
 		nonce: "container-terminal-nonce",
 		containerOwnershipWitness: { containerId: "container-terminal-only", nonce: "container-terminal-nonce", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },
+		containerOwnershipAttestation: { version: 1, containerId: "container-terminal-only", nonce: "container-terminal-nonce", execId: "exec", enginePid: 1, tag: "tag", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },
 	});
 	const verification = activeVerification("sig-container-terminal", [step], step.startedAt);
 	(harness as any).activeVerifications.set(verification.signalId, verification);
@@ -345,6 +347,7 @@ test("Windows persisted container cancellation cannot complete through the POSIX
 		restartRecoveryMode: "container-exec",
 		nonce: "container-windows-nonce",
 		containerOwnershipWitness: { containerId: "container-windows-only", nonce: "container-windows-nonce", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },
+		containerOwnershipAttestation: { version: 1, containerId: "container-windows-only", nonce: "container-windows-nonce", execId: "exec", enginePid: 1, tag: "tag", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },
 	})], startedAt);
 	(harness as any).activeVerifications.set(verification.signalId, verification);
 
