@@ -322,11 +322,17 @@ describe("packed-consumer audit run-root ownership", () => {
 							return { code: 0, stdout: "", stderr: "", rendered: "npm" };
 						},
 					}),
-					error => /ENOTDIR|not a directory/i.test(String(error)),
+					error => {
+						const code = error && typeof error === "object"
+							? (error as NodeJS.ErrnoException).code
+							: undefined;
+						return code === "ENOENT" || code === "ENOTDIR";
+					},
 				);
 			});
 			assert.equal(npmCalls, 0);
 			assert.equal(existsSync(unusableRoot), true, "allocation failure must not remove the supplied root");
+			assert.equal(existsSync(fixtureRoot), true, "allocation failure must not remove the supplied parent");
 		} finally {
 			await rm(fixtureRoot, { recursive: true, force: true });
 		}
