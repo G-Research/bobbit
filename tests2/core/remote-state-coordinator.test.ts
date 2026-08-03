@@ -54,6 +54,29 @@ describe("RemoteStateCoordinator", () => {
 		assert.equal(calls, 2);
 	});
 
+	it("preserves the automatic repository budget across invalidation while explicit force bypasses it", async () => {
+		const clock = new ManualClock();
+		let calls = 0;
+		const coordinator = new RemoteStateCoordinator({ clock });
+		const key = registerRepository(coordinator, async () => ({ call: ++calls }));
+
+		await coordinator.refreshSnapshot(key, { intent: "explicit", forceRequestedAt: 100, forceCoalesceMs: 250 });
+		coordinator.invalidate(key);
+		const stale = coordinator.readSnapshot(key, { intent: "automatic" });
+		await settle();
+		assert.equal(stale.stale, true);
+		assert.equal(calls, 1, "mutation invalidation does not erase the 30-second automatic attempt budget");
+
+		const forced = await coordinator.refreshSnapshot<{ call: number }>(key, {
+			intent: "explicit",
+			forceRequestedAt: 101,
+			forceCoalesceMs: 250,
+		});
+		assert.equal(calls, 2);
+		assert.deepEqual(forced.data, { call: 2 });
+		assert.equal(forced.stale, false);
+	});
+
 	it("forces explicit reads but joins an in-flight automatic refresh", async () => {
 		const clock = new ManualClock();
 		let calls = 0;
@@ -105,6 +128,56 @@ describe("RemoteStateCoordinator", () => {
 		assert.deepEqual(recovered.data, { value: 3 });
 		assert.equal(recovered.stale, false);
 		assert.equal(recovered.lastError, undefined);
+	});
+
+	it("retains invalidation that races an in-flight refresh", async () => {
+		const clock = new ManualClock();
+		let calls = 0;
+		const resolvers: Array<(value: unknown) => void> = [];
+		const coordinator = new RemoteStateCoordinator({ clock });
+		const key = registerRepository(coordinator, async () => {
+			calls += 1;
+			return new Promise((resolve) => { resolvers.push(resolve); });
+		});
+
+		const first = coordinator.refreshSnapshot(key, { intent: "explicit" });
+		await settle();
+		coordinator.invalidate(key, { allowImmediateRefresh: true });
+		resolvers.shift()?.({ call: 1 });
+		const raced = await first;
+		assert.equal(raced.stale, true, "a completion must not clear newer invalidation");
+
+		coordinator.readSnapshot(key, { intent: "automatic" });
+		await settle();
+		assert.equal(calls, 2, "immediate invalidation starts one next canonical refresh");
+		resolvers.shift()?.({ call: 2 });
+		await settle();
+	});
+
+	it("keeps immediate PR invalidation subject to backoff while explicit force can recover", async () => {
+		const clock = new ManualClock();
+		let calls = 0;
+		let fail = false;
+		const coordinator = new RemoteStateCoordinator({ clock, backoffBaseMs: 100 });
+		const identity = coordinator.resolvePullRequestIdentity({ owner: "acme", repository: "widget", head: "feature" });
+		const key = coordinator.registerPullRequest(identity, {
+			refresh: async () => {
+				calls += 1;
+				if (fail) throw new Error("offline");
+				return { number: 7, call: calls };
+			},
+		});
+		await coordinator.refreshSnapshot(key, { intent: "explicit" });
+		fail = true;
+		clock.advance(20_000);
+		await coordinator.refreshSnapshot(key, { intent: "automatic" });
+		coordinator.invalidate(key, { allowImmediateRefresh: true });
+		coordinator.readSnapshot(key, { intent: "automatic" });
+		await settle();
+		assert.equal(calls, 2, "automatic cache-bust retry still honors failure backoff");
+		fail = false;
+		await coordinator.refreshSnapshot(key, { intent: "explicit" });
+		assert.equal(calls, 3, "explicit force bypasses backoff without duplicating in-flight work");
 	});
 
 	it("blocks staff freshness on the same in-flight repository refresh", async () => {

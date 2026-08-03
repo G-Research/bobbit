@@ -219,6 +219,8 @@ export interface RemoteStateSnapshot {
 /** Entity-addressed coordinator completion, safe for session and viewer sockets. */
 export interface RemoteStateSnapshotMessage {
 	type: "remote_state_snapshot";
+	/** Runtime discriminator used by consumers; snapshot.source remains metadata. */
+	resource: "git" | "pr";
 	sessionId?: string;
 	goalId?: string;
 	snapshot: RemoteStateSnapshot;
