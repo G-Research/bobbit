@@ -1596,11 +1596,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		refreshBgProcessesForSession(sessionId);
 		startGitStatusPoll(sessionId);
 
-		// The cached and fresh connection paths both reconcile the authoritative
-		// workspace before deciding whether a persisted Context tab needs data.
-		await hydrateSidePanelWorkspace(sessionId);
-		await cached.remoteAgent.reconcileSubmittedReviewWorkspace();
-		if (isStale()) { cleanupRemote(cached.remoteAgent); return; }
+		// A cached session retains its already-hydrated workspace and its prior
+		// submitted-review reconciliation. Re-hydrating here races that ownership,
+		// adds a second fetch, and can block a cache reactivation. Sync Context
+		// against the known workspace only; fresh connections hydrate below.
 		syncContextTraceInspector(sessionId);
 
 		// Re-fetch proposal drafts for this session. The slow path (fresh
