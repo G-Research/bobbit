@@ -67,6 +67,10 @@ export interface RemoteStateCoordinatorOptions {
 	clock?: Pick<Clock, "now">;
 	commandRunner?: CommandRunner;
 	maxConcurrent?: number;
+	/** Repository identity probes use a separate bound so they cannot starve refreshes. */
+	maxConcurrentIdentityProbes?: number;
+	/** Finite timeout applied to every Git subprocess used to resolve repository identity. */
+	identityProbeTimeoutMs?: number;
 	/** Receives only public addresses and safe copied snapshots. */
 	broadcast?: (address: RemoteStateAddress, snapshot: RemoteStateSnapshot<unknown>) => void;
 	repositoryFreshnessMs?: number;
@@ -107,6 +111,7 @@ const DEFAULT_ACTIVE_PR_FRESHNESS_MS = 20_000;
 const DEFAULT_SIDEBAR_PR_FRESHNESS_MS = 60_000;
 const DEFAULT_BACKOFF_BASE_MS = 5_000;
 const DEFAULT_BACKOFF_MAX_MS = 5 * 60_000;
+const DEFAULT_IDENTITY_PROBE_TIMEOUT_MS = 5_000;
 
 /**
  * Normalizes a remote without ever returning its credential-bearing form. This value
@@ -189,6 +194,13 @@ function safeClone<T>(value: T): T {
 	return structuredClone(value);
 }
 
+function isIdentityProbeTimeout(error: unknown): boolean {
+	const candidate = error as { code?: unknown; killed?: unknown; signal?: unknown; message?: unknown } | undefined;
+	const code = typeof candidate?.code === "string" ? candidate.code.toLowerCase() : "";
+	const message = typeof candidate?.message === "string" ? candidate.message.toLowerCase() : "";
+	return candidate?.killed === true || candidate?.signal != null || code === "etimedout" || /timed out|timeout/.test(message);
+}
+
 function categorizeError(error: unknown): RemoteStateErrorKind {
 	const candidate = error as { code?: unknown; status?: unknown; message?: unknown; stderr?: unknown } | undefined;
 	const text = [candidate?.code, candidate?.status, candidate?.message, candidate?.stderr]
@@ -209,6 +221,8 @@ export class RemoteStateCoordinator {
 	private readonly clock: Pick<Clock, "now">;
 	private readonly commandRunner: CommandRunner;
 	private readonly maxConcurrent: number;
+	private readonly maxConcurrentIdentityProbes: number;
+	private readonly identityProbeTimeoutMs: number;
 	private readonly broadcast?: RemoteStateCoordinatorOptions["broadcast"];
 	private readonly repositoryFreshnessMs: number;
 	private readonly activePrFreshnessMs: number;
@@ -217,14 +231,19 @@ export class RemoteStateCoordinator {
 	private readonly backoffMaxMs: number;
 	private readonly records = new Map<string, RemoteStateRecord<unknown>>();
 	private readonly repositoryAliases = new Map<string, string>();
+	private readonly repositoryIdentityInFlight = new Map<string, Promise<RepositoryIdentity>>();
 	private readonly prAliases = new Map<string, string>();
 	private active = 0;
 	private readonly queued: Array<() => void> = [];
+	private activeIdentityProbes = 0;
+	private readonly queuedIdentityProbes: Array<() => void> = [];
 
 	constructor(options: RemoteStateCoordinatorOptions = {}) {
 		this.clock = options.clock ?? realClock;
 		this.commandRunner = options.commandRunner ?? realCommandRunner;
 		this.maxConcurrent = Math.max(1, options.maxConcurrent ?? 4);
+		this.maxConcurrentIdentityProbes = Math.max(1, options.maxConcurrentIdentityProbes ?? this.maxConcurrent);
+		this.identityProbeTimeoutMs = Math.max(1, options.identityProbeTimeoutMs ?? DEFAULT_IDENTITY_PROBE_TIMEOUT_MS);
 		this.broadcast = options.broadcast;
 		this.repositoryFreshnessMs = options.repositoryFreshnessMs ?? DEFAULT_REPOSITORY_FRESHNESS_MS;
 		this.activePrFreshnessMs = options.activePrFreshnessMs ?? DEFAULT_ACTIVE_PR_FRESHNESS_MS;
@@ -235,19 +254,42 @@ export class RemoteStateCoordinator {
 
 	/** Resolve worktree siblings through their Git common directory, not cwd/branch. */
 	async resolveRepositoryIdentity(input: RepositoryIdentityInput): Promise<RepositoryIdentity> {
-		const cwd = input.cwd;
-		const commonDir = await this.readGit(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
-			?? await this.readGit(cwd, ["rev-parse", "--git-common-dir"]);
-		if (!commonDir) throw new Error("Unable to resolve Git common directory");
-		const normalizedCommonDir = normalizeLocalPath(isAbsolutePath(commonDir) ? commonDir : path.resolve(cwd, commonDir));
-		const origin = await this.readGit(cwd, ["remote", "get-url", "origin"]);
-		const remote = origin ? normalizeRemoteIdentity(origin) : LOCAL_REMOTE;
-		const alias = `${input.executionNamespace?.trim() ?? "host"}\0${normalizedCommonDir}\0${remote}`;
-		const existing = this.repositoryAliases.get(alias);
-		if (existing) return { key: existing, hasRemote: remote !== LOCAL_REMOTE };
-		const key = opaqueKey(REPOSITORY_PREFIX, alias);
-		this.repositoryAliases.set(alias, key);
-		return { key, hasRemote: remote !== LOCAL_REMOTE };
+		const executionNamespace = input.executionNamespace?.trim() || "host";
+		const executionAlias = `${executionNamespace}\0${normalizeLocalPath(input.cwd)}`;
+		const existing = this.repositoryIdentityInFlight.get(executionAlias);
+		if (existing) return { ...(await existing) };
+
+		const pending = this.resolveRepositoryIdentityUncached(input.cwd, executionNamespace);
+		this.repositoryIdentityInFlight.set(executionAlias, pending);
+		try {
+			return { ...(await pending) };
+		} finally {
+			if (this.repositoryIdentityInFlight.get(executionAlias) === pending) {
+				this.repositoryIdentityInFlight.delete(executionAlias);
+			}
+		}
+	}
+
+	private async resolveRepositoryIdentityUncached(cwd: string, executionNamespace: string): Promise<RepositoryIdentity> {
+		await this.acquireIdentityProbe();
+		try {
+			// Older Git versions do not support --path-format. Only this compatibility
+			// probe may fail silently; all other probe failures remain generic.
+			const commonDir = await this.readGit(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"], { suppressFailure: true })
+				?? await this.readGit(cwd, ["rev-parse", "--git-common-dir"]);
+			if (!commonDir) throw new Error("Unable to resolve Git common directory");
+			const normalizedCommonDir = normalizeLocalPath(isAbsolutePath(commonDir) ? commonDir : path.resolve(cwd, commonDir));
+			const origin = await this.readGit(cwd, ["remote", "get-url", "origin"], { missingRemoteIsUndefined: true });
+			const remote = origin ? normalizeRemoteIdentity(origin) : LOCAL_REMOTE;
+			const canonicalAlias = `${executionNamespace}\0${normalizedCommonDir}\0${remote}`;
+			const existing = this.repositoryAliases.get(canonicalAlias);
+			if (existing) return { key: existing, hasRemote: remote !== LOCAL_REMOTE };
+			const key = opaqueKey(REPOSITORY_PREFIX, canonicalAlias);
+			this.repositoryAliases.set(canonicalAlias, key);
+			return { key, hasRemote: remote !== LOCAL_REMOTE };
+		} finally {
+			this.releaseIdentityProbe();
+		}
 	}
 
 	resolvePullRequestIdentity(input: PullRequestIdentityInput): PullRequestIdentity {
@@ -428,14 +470,47 @@ export class RemoteStateCoordinator {
 		for (const address of record.addresses.values()) this.broadcast({ ...address }, safeClone(snapshot));
 	}
 
-	private async readGit(cwd: string, args: string[]): Promise<string | undefined> {
+	private async readGit(
+		cwd: string,
+		args: string[],
+		options: { suppressFailure?: boolean; missingRemoteIsUndefined?: boolean } = {},
+	): Promise<string | undefined> {
 		try {
-			const result = await this.commandRunner.execFile("git", args, { cwd, encoding: "utf-8", windowsHide: true });
+			const result = await this.commandRunner.execFile("git", args, {
+				cwd,
+				encoding: "utf-8",
+				windowsHide: true,
+				timeout: this.identityProbeTimeoutMs,
+			});
 			const value = result.stdout.toString().trim();
 			return value || undefined;
-		} catch {
-			return undefined;
+		} catch (error) {
+			if (options.suppressFailure && !isIdentityProbeTimeout(error)) return undefined;
+			// `git remote get-url origin` reports absence as a command failure. Test
+			// runners do not necessarily model Git's exact stderr, so every bounded
+			// non-timeout failure on this optional probe means local-only.
+			if (options.missingRemoteIsUndefined && !isIdentityProbeTimeout(error)) return undefined;
+			// Never carry subprocess details, paths, remotes, or stderr beyond the
+			// identity boundary. Callers only need to know that resolution failed.
+			throw new Error("Repository identity probe failed");
 		}
+	}
+
+	private async acquireIdentityProbe(): Promise<void> {
+		if (this.activeIdentityProbes < this.maxConcurrentIdentityProbes) {
+			this.activeIdentityProbes += 1;
+			return;
+		}
+		await new Promise<void>((resolve) => this.queuedIdentityProbes.push(resolve));
+	}
+
+	private releaseIdentityProbe(): void {
+		const next = this.queuedIdentityProbes.shift();
+		if (next) {
+			next();
+			return;
+		}
+		this.activeIdentityProbes -= 1;
 	}
 
 	private async acquire(): Promise<void> {

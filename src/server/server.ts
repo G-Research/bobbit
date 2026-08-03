@@ -1204,11 +1204,29 @@ function isBypassMode(mode: unknown): boolean {
 	return mode === "always" || mode === "pull_requests_only";
 }
 
-async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
+function isDefinitiveNoPullRequestError(error: unknown): boolean {
+	const candidate = error as { message?: unknown; stderr?: unknown } | undefined;
+	const text = [candidate?.message, candidate?.stderr]
+		.map((part) => typeof part === "string" || Buffer.isBuffer(part) ? String(part) : "")
+		.join(" ")
+		.toLowerCase();
+	return /no pull requests? found(?: for (?:the )?branch)?|no pull request found|could not resolve to a pullrequest/.test(text);
+}
+
+async function fetchPrStatus(
+	cwd: string,
+	branch: string | undefined,
+	fallbackCwd: string | undefined,
+	failureMode: "legacy-null" | "throw-transient",
+): Promise<any | null> {
 	const cacheKey = branch ? `${cwd}::${branch}` : cwd;
 	const args = buildGhPrViewArgs(branch);
+	const failures: unknown[] = [];
 
-	// Try cwd first, then fallback (e.g. main repo when worktree git link is broken)
+	// Try cwd first, then fallback (e.g. main repo when worktree git link is broken).
+	// A coordinated refresh may publish null only when every attempted lookup
+	// positively reports that no PR exists. Transport/auth/parse failures must
+	// remain failures so the coordinator retains its last-good snapshot.
 	const cwdsToTry = [cwd, ...(fallbackCwd && fallbackCwd !== cwd ? [fallbackCwd] : [])];
 	for (const dir of cwdsToTry) {
 		try {
@@ -1230,12 +1248,24 @@ async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string
 			const ttl = pr.state === "OPEN" ? 10_000 : 900_000; // OPEN: 10s, CLOSED/MERGED: 15min
 			_prCache.set(cacheKey, { data, ts: Date.now(), ttl });
 			return data;
-		} catch {
-			// Try next cwd
+		} catch (error) {
+			failures.push(error);
 		}
 	}
-	_prCache.set(cacheKey, { data: null, ts: Date.now(), ttl: PR_NULL_CACHE_TTL_MS });
-	return null;
+
+	if (failureMode === "legacy-null" || (failures.length > 0 && failures.every(isDefinitiveNoPullRequestError))) {
+		_prCache.set(cacheKey, { data: null, ts: Date.now(), ttl: PR_NULL_CACHE_TTL_MS });
+		return null;
+	}
+	throw failures.find(error => !isDefinitiveNoPullRequestError(error)) ?? new Error("Pull request status unavailable");
+}
+
+async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
+	return fetchPrStatus(cwd, branch, fallbackCwd, "legacy-null");
+}
+
+async function fetchCoordinatedPrStatus(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
+	return fetchPrStatus(cwd, branch, fallbackCwd, "throw-transient");
 }
 
 export async function __getCachedPrStatusForTests(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
@@ -2674,7 +2704,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					return { fetched: identity.hasRemote };
 				},
 			});
-			return remoteStateCoordinator.ensureFreshRepository(key);
+			const snapshot = await remoteStateCoordinator.ensureFreshRepository(key);
+			return { ...snapshot, hasRemote: identity.hasRemote };
 		},
 	});
 	triggerEngine.start();
@@ -2805,7 +2836,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		if (!remote) return undefined;
 		const identity = remoteStateCoordinator.resolvePullRequestIdentity({ ...remote, head: branch });
 		const key = remoteStateCoordinator.registerPullRequest(identity, {
-			refresh: () => _fetchPrStatus(cwd, branch, fallbackCwd),
+			refresh: () => fetchCoordinatedPrStatus(cwd, branch, fallbackCwd),
 			address,
 		});
 		const force = intentValue === "explicit";
