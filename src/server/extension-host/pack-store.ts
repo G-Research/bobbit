@@ -367,13 +367,30 @@ export function createPackStore(opts?: { rootDir?: string; quota?: PackStoreQuot
 	 * unlinking the primary afterwards may briefly leave two names for the same
 	 * data, but can never destroy either one.
 	 */
-	const quarantineCorrupt = async (file: string): Promise<StoreReadDiagnostic> => {
+	const quarantineCorrupt = async (file: string, raw: string): Promise<StoreReadDiagnostic> => {
 		const dest = quarantineFile(file);
 		try {
 			await fs.promises.link(file, dest);
 		} catch (err) {
-			if ((err as NodeJS.ErrnoException | undefined)?.code === "EEXIST") return quarantineFullDiagnostic();
-			return corruptDiagnostic(false);
+			if ((err as NodeJS.ErrnoException | undefined)?.code !== "EEXIST") return corruptDiagnostic(false);
+
+			// A prior synchronous read intentionally retains the primary to avoid an
+			// unlink TOCTOU race, but it may already have captured these exact corrupt
+			// bytes in the single recovery slot. Under the async pack lock, that
+			// identical evidence makes removing the still-corrupt primary safe.
+			let quarantinedRaw: string;
+			try {
+				quarantinedRaw = await fs.promises.readFile(dest, "utf8");
+			} catch {
+				return quarantineFullDiagnostic();
+			}
+			if (quarantinedRaw !== raw) return quarantineFullDiagnostic();
+			try {
+				await fs.promises.unlink(file);
+				return corruptDiagnostic(true);
+			} catch {
+				return corruptDiagnostic(false);
+			}
 		}
 		try {
 			await fs.promises.unlink(file);
@@ -433,17 +450,17 @@ export function createPackStore(opts?: { rootDir?: string; quota?: PackStoreQuot
 				try {
 					env = JSON.parse(raw) as StoreEnvelope<T>;
 				} catch {
-					return { state: "error", diagnostic: await quarantineCorrupt(file) };
+					return { state: "error", diagnostic: await quarantineCorrupt(file, raw) };
 				}
 				if (!env || typeof env !== "object" || Array.isArray(env) || !("v" in env)) {
-					return { state: "error", diagnostic: await quarantineCorrupt(file) };
+					return { state: "error", diagnostic: await quarantineCorrupt(file, raw) };
 				}
 				// Unknown versions are intentionally preserved for a newer host to read.
 				if (env.v !== 1) {
 					return { state: "error", diagnostic: { code: "STORE_READ_UNSUPPORTED_VERSION", retryable: false } };
 				}
 				if (!Object.prototype.hasOwnProperty.call(env, "value")) {
-					return { state: "error", diagnostic: await quarantineCorrupt(file) };
+					return { state: "error", diagnostic: await quarantineCorrupt(file, raw) };
 				}
 				return { state: "present", value: env.value };
 			});

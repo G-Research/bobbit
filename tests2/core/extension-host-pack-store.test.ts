@@ -225,6 +225,40 @@ describe("createPackStore — UH-1 tri-state durable reads (reproducing contract
 		}
 	});
 
+	it("async recovery clears an unchanged corrupt primary already evidenced by readSync", async () => {
+		const root = fs.mkdtempSync(path.join(rootDir, "uh1-sync-then-async-"));
+		try {
+			const store = requireTriStateRead(createPackStore({ rootDir: root }));
+			const packId = "pack-uh1";
+			const key = "syncasync";
+			const file = storeFile(root, packId, key);
+			const corrupt = '{"v":1';
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, corrupt);
+
+			const syncResult = store.readSync(packId, key);
+			assert.equal(syncResult.state, "error");
+			if (syncResult.state === "error") {
+				assert.equal(syncResult.diagnostic.code, "STORE_READ_CORRUPT");
+				assert.equal(syncResult.diagnostic.quarantined, undefined, "sync recovery retains the live pathname for TOCTOU safety");
+			}
+			assert.equal(fs.readFileSync(`${file}.corrupt`, "utf8"), corrupt, "sync recovery must leave bounded identical evidence");
+			assert.ok(fs.existsSync(file), "sync recovery must retain the corrupt primary");
+
+			const asyncResult = await store.read(packId, key);
+			assert.equal(asyncResult.state, "error", "the triggering async corrupt read remains unavailable");
+			if (asyncResult.state === "error") {
+				assert.equal(asyncResult.diagnostic.code, "STORE_READ_CORRUPT");
+				assert.equal(asyncResult.diagnostic.quarantined, true, "identical prior evidence permits async cleanup under the pack lock");
+			}
+			assert.ok(!fs.existsSync(file), "the async lock holder clears only the unchanged corrupt primary");
+			assert.equal(fs.readFileSync(`${file}.corrupt`, "utf8"), corrupt, "the single recovery slot retains the corrupt evidence");
+			assert.deepEqual(await store.read(packId, key), { state: "absent" }, "recovery ends at a real absent state");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("does not retain or unlink a valid primary that replaces corrupt sync input during quarantine", () => {
 		const root = fs.mkdtempSync(path.join(rootDir, "uh1-sync-replace-"));
 		const originalLinkSync = fs.linkSync;
