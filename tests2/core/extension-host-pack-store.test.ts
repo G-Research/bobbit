@@ -180,30 +180,50 @@ describe("createPackStore — UH-1 tri-state durable reads (reproducing contract
 		}
 	});
 
-	for (const mode of ["async", "sync"] as const) {
-		it(`${mode} corrupt reads use one stable recovery slot and recover to absent`, async () => {
-			const root = fs.mkdtempSync(path.join(rootDir, `uh1-bounded-${mode}-`));
-			try {
-				const store = requireTriStateRead(createPackStore({ rootDir: root }));
-				const key = `corrupt${mode}`;
-				const file = storeFile(root, "pack-uh1", key);
-				fs.mkdirSync(path.dirname(file), { recursive: true });
-				fs.writeFileSync(file, '{"v":1');
-				const result = mode === "async" ? await store.read("pack-uh1", key) : store.readSync("pack-uh1", key);
-				assert.equal(result.state, "error");
-				if (result.state === "error") {
-					assert.equal(result.diagnostic.code, "STORE_READ_CORRUPT");
-					assert.equal(result.diagnostic.quarantined, true);
-				}
-				assert.ok(!fs.existsSync(file), "the corrupt primary must move out of the live key path");
-				assert.ok(fs.existsSync(`${file}.corrupt`), "one bounded recovery slot must retain the corrupt value");
-				const recovered = mode === "async" ? await store.read("pack-uh1", key) : store.readSync("pack-uh1", key);
-				assert.deepEqual(recovered, { state: "absent" }, "a later read can recover after the corrupt primary is quarantined");
-			} finally {
-				fs.rmSync(root, { recursive: true, force: true });
+	it("async corrupt reads use one stable recovery slot and recover to absent", async () => {
+		const root = fs.mkdtempSync(path.join(rootDir, "uh1-bounded-async-"));
+		try {
+			const store = requireTriStateRead(createPackStore({ rootDir: root }));
+			const file = storeFile(root, "pack-uh1", "corruptasync");
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, '{"v":1');
+			const result = await store.read("pack-uh1", "corruptasync");
+			assert.equal(result.state, "error");
+			if (result.state === "error") {
+				assert.equal(result.diagnostic.code, "STORE_READ_CORRUPT");
+				assert.equal(result.diagnostic.quarantined, true);
 			}
-		});
-	}
+			assert.ok(!fs.existsSync(file), "the async recovery moves the corrupt primary out of the live key path");
+			assert.ok(fs.existsSync(`${file}.corrupt`), "one bounded recovery slot must retain the corrupt value");
+			assert.deepEqual(await store.read("pack-uh1", "corruptasync"), { state: "absent" }, "a later async read can recover after quarantine");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("sync corrupt reads retain the primary, bound evidence, and recover through put", async () => {
+		const root = fs.mkdtempSync(path.join(rootDir, "uh1-bounded-sync-"));
+		try {
+			const store = requireTriStateRead(createPackStore({ rootDir: root }));
+			const key = "corruptsync";
+			const file = storeFile(root, "pack-uh1", key);
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, '{"v":1');
+			const result = store.readSync("pack-uh1", key);
+			assert.equal(result.state, "error");
+			if (result.state === "error") assert.equal(result.diagnostic.code, "STORE_READ_CORRUPT");
+			assert.ok(fs.existsSync(file), "sync recovery must never unlink the corrupt primary pathname");
+			assert.equal(fs.readFileSync(`${file}.corrupt`, "utf8"), '{"v":1', "one bounded recovery slot must retain corrupt evidence");
+			const repeated = store.readSync("pack-uh1", key);
+			assert.equal(repeated.state, "error");
+			if (repeated.state === "error") assert.equal(repeated.diagnostic.code, "STORE_READ_CORRUPT_QUARANTINE_FULL");
+			assert.equal(fs.readdirSync(path.dirname(file)).filter((name) => name.startsWith("corruptsync.json.corrupt")).length, 1, "repeated sync reads must not create sidecars");
+			await store.put("pack-uh1", key, { recovered: true });
+			assert.deepEqual(store.readSync("pack-uh1", key), { state: "present", value: { recovered: true } }, "a later put safely recovers the live key");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
 
 	it("does not retain or unlink a valid primary that replaces corrupt sync input during quarantine", () => {
 		const root = fs.mkdtempSync(path.join(rootDir, "uh1-sync-replace-"));
@@ -239,6 +259,45 @@ describe("createPackStore — UH-1 tri-state durable reads (reproducing contract
 			assert.deepEqual(store.readSync(packId, key), { state: "present", value: { ok: true } }, "the valid replacement must remain readable");
 		} finally {
 			fs.linkSync = originalLinkSync;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("never unlinks a valid replacement after the sync recovery-slot comparison", () => {
+		const root = fs.mkdtempSync(path.join(rootDir, "uh1-sync-post-compare-"));
+		const originalReadFileSync = fs.readFileSync;
+		try {
+			const store = requireTriStateRead(createPackStore({ rootDir: root }));
+			const packId = "pack-uh1";
+			const key = "syncpostcompare";
+			const file = storeFile(root, packId, key);
+			const corrupt = '{"v":1';
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, corrupt);
+
+			let replaced = false;
+			fs.readFileSync = ((candidate: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+				if (!replaced && String(candidate) === `${file}.corrupt`) {
+					const recoveryBytes = (originalReadFileSync as (...readArgs: unknown[]) => string)(candidate, ...args);
+					replaced = true;
+					const replacement = `${file}.replacement`;
+					fs.writeFileSync(replacement, JSON.stringify({ v: 1, value: { ok: true } }));
+					fs.renameSync(replacement, file);
+					return recoveryBytes;
+				}
+				return (originalReadFileSync as (...readArgs: unknown[]) => string)(candidate, ...args);
+			}) as typeof fs.readFileSync;
+
+			const result = store.readSync(packId, key);
+			fs.readFileSync = originalReadFileSync;
+			assert.equal(replaced, true, "the test must replace the primary after recovery-slot comparison reads corrupt bytes");
+			assert.equal(result.state, "error", "the triggering corrupt read remains unavailable");
+			if (result.state === "error") assert.equal(result.diagnostic.code, "STORE_READ_CORRUPT");
+			assert.deepEqual(store.readSync(packId, key), { state: "present", value: { ok: true } }, "the post-comparison atomic replacement must remain readable");
+			assert.equal(fs.readFileSync(`${file}.corrupt`, "utf8"), corrupt, "the recovery slot retains only corrupt evidence");
+			assert.equal(fs.readdirSync(path.dirname(file)).filter((name) => name.startsWith("syncpostcompare.json.corrupt")).length, 1, "later reads must not add recovery sidecars");
+		} finally {
+			fs.readFileSync = originalReadFileSync;
 			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});

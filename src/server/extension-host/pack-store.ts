@@ -394,8 +394,9 @@ export function createPackStore(opts?: { rootDir?: string; quota?: PackStoreQuot
 		try {
 			// `readSync` cannot take the async pack lock. A concurrent atomic put can
 			// replace the pathname after we read corrupt bytes but before this link.
-			// In that case the link holds the newer value, not the corrupt snapshot;
-			// remove only our duplicate recovery link and never unlink the primary.
+			// If the link captured that replacement, remove only the duplicate
+			// recovery link. Crucially, sync recovery must never unlink the primary:
+			// it could be replaced immediately after this comparison.
 			if (fs.readFileSync(dest, "utf8") !== raw) {
 				fs.unlinkSync(dest);
 				return corruptDiagnostic(false);
@@ -403,12 +404,11 @@ export function createPackStore(opts?: { rootDir?: string; quota?: PackStoreQuot
 		} catch {
 			return corruptDiagnostic(false);
 		}
-		try {
-			fs.unlinkSync(file);
-			return corruptDiagnostic(true);
-		} catch {
-			return corruptDiagnostic(false);
-		}
+		// Unlike async recovery, retain the live pathname. There is no synchronous
+		// lock shared with `put`, so path-unlinking it would have a TOCTOU window
+		// that can delete a concurrent atomic replacement. The hardlink above is
+		// bounded evidence; a subsequent put replaces the corrupt primary safely.
+		return corruptDiagnostic(false);
 	};
 
 	return {
