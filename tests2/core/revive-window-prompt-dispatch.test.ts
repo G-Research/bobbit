@@ -55,7 +55,7 @@ function queueRows(texts: string[]): any[] {
 	return texts.map((text, i) => ({ id: `q-${i}`, text, isSteered: false, createdAt: Date.now() }));
 }
 
-function makeDormantManager(sessionId: string, opts?: { restoredQueue?: string[] }) {
+function makeDormantManager(sessionId: string, opts?: { restoredQueue?: string[]; manualRetryRequired?: boolean }) {
 	const manager: any = new SessionManager();
 	managers.push(manager);
 	const restoredQueueRows = opts?.restoredQueue ? queueRows(opts.restoredQueue) : undefined;
@@ -68,6 +68,7 @@ function makeDormantManager(sessionId: string, opts?: { restoredQueue?: string[]
 		createdAt: Date.now(),
 		lastActivity: Date.now(),
 		messageQueue: restoredQueueRows,
+		manualRetryRequired: opts?.manualRetryRequired === true,
 	};
 	manager._testStore = {
 		get: vi.fn((id: string) => id === sessionId ? persisted : undefined),
@@ -110,6 +111,7 @@ function makeDormantManager(sessionId: string, opts?: { restoredQueue?: string[]
 			clients: new Set(),
 			eventBuffer: new EventBuffer(),
 			promptQueue: new PromptQueue(restoredQueueRows),
+			manualRetryRequired: persisted.manualRetryRequired,
 			streamingStartedAt: undefined,
 			unsubscribe: () => {},
 			isCompacting: false,
@@ -201,5 +203,25 @@ describe("revive-window prompt dispatch (CS-R2 follow-up)", () => {
 		await flushMicrotasks();
 
 		assert.deepEqual(promptCalls, ["persisted prompt"], "restored persisted queue is drained once after revive");
+	});
+
+	it("keeps persisted manual-retry work parked after a dormant client revive", async () => {
+		const sessionId = "s-revive-manual-retry";
+		const { manager, restoreGate, promptCalls, restoredSessions } = makeDormantManager(sessionId, {
+			restoredQueue: ["parked persisted prompt"],
+			manualRetryRequired: true,
+		});
+		const attachedClient: any = { readyState: 1, send: vi.fn() };
+
+		assert.equal(manager.addClient(sessionId, attachedClient), true, "attach should trigger dormant restore");
+		restoreGate.resolve();
+		await flushMicrotasks();
+
+		const revived = restoredSessions[0];
+		assert.equal(manager.sessions.get(sessionId), revived, "client attaches to the canonical revived session");
+		assert.equal(revived.clients.has(attachedClient), true, "the parked-state marker is available to the attached client");
+		assert.equal(revived.manualRetryRequired, true, "persisted manual-retry state survives revive");
+		assert.deepEqual(promptCalls, [], "replacement release must not dispatch parked durable work");
+		assert.equal(revived.promptQueue.peek()?.text, "parked persisted prompt");
 	});
 });

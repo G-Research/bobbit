@@ -2173,6 +2173,7 @@ export class SessionManager {
 				// override a later canonical turn error or manual-recovery rejection.
 				// The durable rows remain queued until explicit Retry/fresh user intent.
 				&& !canonical.lastTurnErrored
+				&& !canonical.manualRetryRequired
 				&& !canonical.isCompacting
 				&& !this._bootRepromptedSessions.has(sessionId)
 				&& !canonical.promptQueue.isEmpty
@@ -5011,6 +5012,7 @@ export class SessionManager {
 		if (scheduled) {
 			console.log(`[session-manager] ${source} dispatch for ${session.id} failed with retryable delivery error; auto-retry scheduled. Error: ${reason.slice(0, 200)}`);
 		} else {
+			this.surfaceManualRetryRequired(session);
 			console.warn(`[session-manager] ${source} dispatch for ${session.id} exhausted retryable delivery auto-retries; leaving recovered row queued for manual Retry. Error: ${reason.slice(0, 200)}`);
 		}
 		return true;
@@ -5084,6 +5086,7 @@ export class SessionManager {
 			if (providerAuthFailure) this.surfaceProviderAuthFailure(session, reason, source);
 			else broadcastStatus(session, "idle");
 			this.broadcastQueue(session);
+			this.surfaceManualRetryRequired(session);
 			return;
 		}
 		if (providerAuthFailure) {
@@ -12429,7 +12432,14 @@ export class SessionManager {
 		// An abort during the post-error backoff window (status "idle") would
 		// otherwise leave the timer to fire a spurious retry on a session someone
 		// just stopped (reachable via the team-abort route). No-op when none pending.
-		if (session) this.cancelPendingAutoRetry(session, "terminated");
+		if (session) {
+			this.cancelPendingAutoRetry(session, "terminated");
+			// An idle Stop cancels the only automatic retry owner. Do not leave
+			// durable errored work looking like a healthy idle session.
+			if (session.lastTurnErrored && !session.pendingAutoRetryTimer) {
+				this.surfaceManualRetryRequired(session);
+			}
+		}
 
 		// Outside a replacement, an idle abort remains a no-op. During replacement,
 		// queue behind the current owner so Stop has deterministic invocation order

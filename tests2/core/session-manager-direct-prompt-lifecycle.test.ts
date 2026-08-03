@@ -725,6 +725,42 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		);
 		assert.equal(session.promptQueue.length, 1, "failed prompt should remain queued for manual Retry after exhaustion");
 		assert.equal(session.promptQueue.peek()?.text, "retry until transport budget exhausts");
+		assert.equal(session.manualRetryRequired, true, "exhaustion without a retry owner must visibly park durable work");
+		assert.equal(
+			client.sent.some((msg: any) => msg.type === "event" && msg.data?.type === "manual_retry_required"),
+			true,
+			"exhaustion must notify attached clients that explicit Retry is required",
+		);
+		assert.ok(
+			manager._testStore.update.mock.calls.some(([, update]: any[]) => update.manualRetryRequired === true),
+			"exhaustion must persist the parked manual-retry state",
+		);
+	});
+
+	it("surfaces durable work when an explicit Retry dispatch is rejected", async () => {
+		const manager = makeManager();
+		const prompt = vi.fn(async () => ({ success: false, error: "invalid request schema" }));
+		const { session, client } = putSession(manager, {
+			lastTurnErrored: true,
+			lastTurnErrorMessage: "invalid request schema",
+			lastPromptText: "retry this parked prompt",
+			rpcClient: { prompt },
+		});
+
+		await assert.rejects(() => manager.retryLastPrompt(session.id), /invalid request schema/);
+
+		assert.equal(session.pendingAutoRetryTimer, undefined, "a rejected explicit Retry has no automatic owner");
+		assert.equal(session.manualRetryRequired, true, "rejected Retry must leave its durable row visibly parked");
+		assert.equal(session.promptQueue.length, 1, "the explicit Retry row remains durable");
+		assert.equal(
+			client.sent.some((msg: any) => msg.type === "event" && msg.data?.type === "manual_retry_required"),
+			true,
+			"the rejected explicit Retry must notify attached clients",
+		);
+		assert.ok(
+			manager._testStore.update.mock.calls.some(([, update]: any[]) => update.manualRetryRequired === true),
+			"the rejected explicit Retry must persist the parked-state marker",
+		);
 	});
 
 	it("retryLastPrompt routes mid-work provider-auth prompt failures through recovery", async () => {
