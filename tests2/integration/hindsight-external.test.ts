@@ -61,7 +61,7 @@ const PACK_NAME = "hindsight";
 const PROVIDER_ID = "memory";
 // Built pack source (lib/*.mjs produced by scripts/build-market-packs.mjs).
 const PACK_SRC = path.resolve(__dirname, "..", "..", "market-packs", PACK_NAME);
-const STUB_PATH = path.resolve(__dirname, "hindsight-stub.mjs");
+const STUB_PATH = path.resolve(__dirname, "..", "..", "tests", "e2e", "hindsight-stub.mjs");
 
 // The pack-store key the loader persists provider config under. Must mirror
 // providerConfigStoreKey("memory") in src/server/agent/pack-contributions.ts.
