@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
 	bobbitStateDir,
@@ -199,8 +199,15 @@ function archivedItem(body: any, fixture: GatewayFixture): any {
 
 describe.sequential("maintenance request command-runner isolation", () => {
 	const processState = snapshotProcessState();
-	let gatewayA: GatewayFixture | undefined;
-	let gatewayB: GatewayFixture | undefined;
+	let gatewayA!: GatewayFixture;
+	let gatewayB!: GatewayFixture;
+
+	beforeAll(async () => {
+		// Both cases must boot A then B: selected-test runs still exercise the
+		// live-gateway construction order that exposes mutable runner leaks.
+		gatewayA = await bootGatewayFixture("gateway-a");
+		gatewayB = await bootGatewayFixture("gateway-b");
+	});
 
 	afterAll(async () => {
 		try {
@@ -214,12 +221,9 @@ describe.sequential("maintenance request command-runner isolation", () => {
 	it("keeps archived-worktree scans on the runner captured by each live gateway", async () => {
 		// Construction order is the regression trigger: current production code stores
 		// B's runner globally, then A's request incorrectly resolves through B.
-		gatewayA = await bootGatewayFixture("gateway-a");
-		gatewayB = await bootGatewayFixture("gateway-b");
-
 		const [responseA, responseB] = await Promise.all([
-			fetch(`${gatewayA.baseUrl}/api/maintenance/archived-session-worktrees`, { headers: { Authorization: `Bearer ${TOKEN}` } }),
-			fetch(`${gatewayB.baseUrl}/api/maintenance/archived-session-worktrees`, { headers: { Authorization: `Bearer ${TOKEN}` } }),
+			fetch(`${gatewayA!.baseUrl}/api/maintenance/archived-session-worktrees`, { headers: { Authorization: `Bearer ${TOKEN}` } }),
+			fetch(`${gatewayB!.baseUrl}/api/maintenance/archived-session-worktrees`, { headers: { Authorization: `Bearer ${TOKEN}` } }),
 		]);
 		expect(responseA.status).toBe(200);
 		expect(responseB.status).toBe(200);
