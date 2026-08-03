@@ -2523,16 +2523,36 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// sessionId, but remove the previous one first to avoid listener stacking.
 			const gitStatusAgentInterface = state.chatPanel.agentInterface as typeof state.chatPanel.agentInterface & {
 				__gitStatusDropdownOpenHandler?: EventListener;
+				__remoteStateRefreshHandler?: EventListener;
 			};
 			if (gitStatusAgentInterface.__gitStatusDropdownOpenHandler) {
 				gitStatusAgentInterface.removeEventListener("git-status-dropdown-open", gitStatusAgentInterface.__gitStatusDropdownOpenHandler);
 			}
 			gitStatusAgentInterface.__gitStatusDropdownOpenHandler = () => {
-				// Pill open combines remote fetch and full untracked loading in one request
-				// so the paired dropdown event cannot abort the fetch-only refresh.
-				refreshGitStatusForSession(sessionId, { fetch: true, untracked: true, source: "user" });
+				// Dropdown visibility joins fresh/in-flight remote work while requesting
+				// the complete local untracked projection. Only the footer forces.
+				refreshGitStatusForSession(sessionId, { untracked: true, intent: "visible", source: "user" });
 			};
 			gitStatusAgentInterface.addEventListener("git-status-dropdown-open", gitStatusAgentInterface.__gitStatusDropdownOpenHandler);
+			if (gitStatusAgentInterface.__remoteStateRefreshHandler) {
+				gitStatusAgentInterface.removeEventListener("remote-state-refresh", gitStatusAgentInterface.__remoteStateRefreshHandler);
+			}
+			gitStatusAgentInterface.__remoteStateRefreshHandler = (event: Event) => {
+				const resource = (event as CustomEvent<{ resource?: string }>).detail?.resource;
+				if (resource === "pr") {
+					void refreshPrStatusForSession(sessionId, "explicit");
+					return;
+				}
+				if (resource === "git") {
+					void refreshGitStatusForSession(sessionId, { fetch: true, intent: "explicit", source: "user" });
+					return;
+				}
+				void Promise.all([
+					refreshGitStatusForSession(sessionId, { fetch: true, intent: "explicit", source: "user" }),
+					refreshPrStatusForSession(sessionId, "explicit"),
+				]);
+			};
+			gitStatusAgentInterface.addEventListener("remote-state-refresh", gitStatusAgentInterface.__remoteStateRefreshHandler);
 			state.chatPanel.agentInterface.onGitPush = async () => {
 				try {
 					const res = await gatewayFetch(`/api/sessions/${sessionId}/git-push`, {
@@ -3465,7 +3485,7 @@ function withUntrackedStatusPreserved(current: ClientGitStatus | undefined, inco
 
 async function refreshGitStatusForSession(
 	sessionId: string,
-	opts?: { fetch?: boolean; untracked?: boolean; quiet?: boolean; source?: "event" | "poll" | "user" },
+	opts?: { fetch?: boolean; untracked?: boolean; quiet?: boolean; intent?: "automatic" | "visible" | "explicit"; source?: "event" | "poll" | "user" },
 ): Promise<void> {
 	const ai = state.chatPanel?.agentInterface;
 	if (!ai) return;
@@ -3496,6 +3516,7 @@ async function refreshGitStatusForSession(
 			const result = await fetchGitStatus(sessionId, {
 				fetch: opts?.fetch,
 				untracked: opts?.untracked,
+				intent: opts?.intent,
 				signal,
 			});
 			if (result.kind === "error") errorAttempts++;
@@ -3528,9 +3549,9 @@ async function refreshGitStatusForSession(
 
 /** Export for UI event wiring — callable from outside this module (dropdown open). */
 export function requestGitStatusUntrackedRefetch(sessionId: string): void {
-	// Match pill open: fetch remotes and full untracked details together to avoid
-	// the paired event abort race.
-	refreshGitStatusForSession(sessionId, { fetch: true, untracked: true, source: "user" });
+	// Dropdown open is visible/SWR and includes full local untracked details;
+	// the footer's explicit refresh is the only force path.
+	refreshGitStatusForSession(sessionId, { untracked: true, intent: "visible", source: "user" });
 }
 
 /** Abort and drop any in-flight refresh for `sessionId`. Called on session switch / disconnect. */

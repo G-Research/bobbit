@@ -159,12 +159,43 @@ test.describe("Journey: remote-state coordinator", () => {
 			]);
 			await expect.poll(() => fetches, { timeout: 5_000 }).toBe(1);
 
-			// Let teardown settle the shared refresh before restoring the injected
-			// runner. Completion fan-out and explicit recovery are covered by the
-			// deterministic coordinator and route suites; this browser journey keeps
-			// the multi-client SWR contract within the 60-second per-spec budget.
+			// Completion reaches both surfaces. Opening the dashboard dropdown then
+			// requests visible/SWR data plus local untracked files, but a fresh record
+			// must not force another external fetch.
 			releaseInitialFetch?.();
+			await expect.poll(() => snapshotMeta(dashboardWidget), { timeout: 10_000 }).toMatchObject({ stale: false });
+			await expect.poll(() => snapshotMeta(sessionWidget), { timeout: 10_000 }).toMatchObject({ stale: false });
+			await dashboardWidget.locator("button").first().click();
+			await expect(page.locator("#git-status-dropdown")).toBeVisible();
+			await page.waitForTimeout(250);
 			await expect.poll(() => fetches, { timeout: 5_000 }).toBe(1);
+
+			// The footer is deliberately explicit and resource-aware. Exercise the
+			// real dashboard handlers: repository metadata forces one Git refresh;
+			// failed PR metadata targets the PR route instead of silently fetching Git.
+			await dashboardWidget.evaluate(async (node: any) => {
+				node.remoteStale = true;
+				node.remoteLastError = "unavailable";
+				node.remoteSource = "repository";
+				node.requestUpdate();
+				await node.updateComplete;
+			});
+			await page.locator('#git-status-dropdown [data-testid="remote-state-status"] button', { hasText: "Refresh" }).click();
+			await expect.poll(() => fetches, { timeout: 10_000 }).toBe(2);
+
+			await dashboardWidget.evaluate(async (node: any) => {
+				node.remoteStale = true;
+				node.remoteLastError = "unavailable";
+				node.remoteSource = "pr";
+				node.requestUpdate();
+				await node.updateComplete;
+			});
+			const explicitPrRequest = page.waitForRequest((request) =>
+				request.url().includes(`/api/goals/${goalId}/pr-status`)
+				&& request.url().includes("intent=explicit"),
+			);
+			await page.locator('#git-status-dropdown [data-testid="remote-state-status"] button', { hasText: "Refresh" }).click();
+			await explicitPrRequest;
 		} finally {
 			runner.execFile = originalExecFile;
 			await page.goto("about:blank").catch(() => {});
