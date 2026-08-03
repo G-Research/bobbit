@@ -51,6 +51,7 @@ const EXPECTED_BUILD_SERVER = "node scripts/build-server.mjs && shx chmod +x dis
 const EXPECTED_BUILD = "npm run build:packs && npm run build:server && npm run build:ui";
 const EXPECTED_CLEAN = "shx rm -rf dist .profiles/build-server.tsbuildinfo .profiles/build-server-state.json";
 const TEST_FAULT_ENV = "BOBBIT_BUILD_SERVER_TEST_FAULT_AFTER_TSC";
+const LINKED_OUTPUT_DIAGNOSTIC = "refusing linked output-tree path before compiler invocation";
 const fixtureOnly = process.argv.slice(2).includes("--fixture-only");
 // On Windows, prefer System32\tar.exe (bsdtar) over msys/Git Bash GNU tar.
 // GNU tar can interpret native drive paths as remote hosts; bsdtar accepts them.
@@ -499,11 +500,30 @@ function assertMissingOrCorruptStateRetiresStaleOutputs(repo) {
 }
 
 function assertLinkedOutputTreeIsRejectedBeforeEmit(repo) {
-  for (const [label, linkedPath, sentinelPath] of [
-    ["dist symlink or junction", join(repo, "dist"), "server/cli.js"],
-    ["expected-output parent symlink or junction", join(repo, "dist", "server"), "cli.js"],
+  for (const { label, linkedPath, sentinelPath, target, linkType } of [
+    {
+      label: "dist symlink or junction",
+      linkedPath: join(repo, "dist"),
+      sentinelPath: "server/cli.js",
+      target: external => external,
+      linkType: process.platform === "win32" ? "junction" : "dir",
+    },
+    {
+      label: "expected-output parent symlink or junction",
+      linkedPath: join(repo, "dist", "server"),
+      sentinelPath: "cli.js",
+      target: external => external,
+      linkType: process.platform === "win32" ? "junction" : "dir",
+    },
+    {
+      label: "expected-output leaf symlink",
+      linkedPath: join(repo, "dist", "server", "cli.js"),
+      sentinelPath: "cli.js",
+      target: (_external, sentinel) => sentinel,
+      linkType: "file",
+    },
   ]) {
-    const external = join(dirname(repo), `cache-contract-external-emit-${label.slice(0, 4)}`);
+    const external = join(dirname(repo), `cache-contract-external-emit-${label.replaceAll(/[^a-z]+/gi, "-")}`);
     const sentinel = join(external, ...sentinelPath.split("/"));
     const sentinelBytes = Buffer.from(`external ${label} sentinel must not be overwritten\n`);
     remove(external);
@@ -514,12 +534,13 @@ function assertLinkedOutputTreeIsRejectedBeforeEmit(repo) {
       // Replacing an actual output tree entry is safe only in this disposable
       // archive. The reparse point below must be rejected before tsc can write.
       remove(linkedPath);
-      symlinkSync(external, linkedPath, process.platform === "win32" ? "junction" : "dir");
+      symlinkSync(target(external, sentinel), linkedPath, linkType);
       const linkStat = lstatSync(linkedPath);
-      assert(linkStat.isSymbolicLink() || (process.platform === "win32" && linkStat.isDirectory()), `${label}: failed to create reparse-point fixture`);
+      assert(linkStat.isSymbolicLink() || (process.platform === "win32" && linkType === "junction" && linkStat.isDirectory()), `${label}: failed to create reparse-point fixture`);
 
       const result = runEmitter(repo, { expect: "nonzero", label: `${label} pre-emit rejection` });
       assert(result.status !== 0, `${label}: wrapper unexpectedly permitted TypeScript emission`);
+      assert(result.output.includes(`${LINKED_OUTPUT_DIAGNOSTIC}: ${linkedPath}`), `${label}: expected exact linked-output diagnostic was absent:\n${result.output}`);
       assert(readFileSync(sentinel).equals(sentinelBytes), `${label}: TypeScript overwrote the external sentinel`);
       assert(JSON.stringify(treeManifest(external)) === JSON.stringify(before), `${label}: TypeScript created or changed external outputs`);
     } finally {
@@ -534,6 +555,47 @@ function assertLinkedOutputTreeIsRejectedBeforeEmit(repo) {
     runBuild(repo, `recover after ${label}`);
     assertBuildArtifacts(repo);
   }
+}
+
+function assertMissingOrCorruptStateRetiresEmptyIncludeRoot(repo) {
+  const rootName = "cache-contract-isolated-root";
+  const sourceRoot = join(repo, "src", rootName);
+  const source = join(sourceRoot, "last-source.ts");
+  const outputs = [
+    `${rootName}/last-source.js`,
+    `${rootName}/last-source.js.map`,
+    `${rootName}/last-source.d.ts`,
+    `${rootName}/last-source.d.ts.map`,
+  ];
+  const configPath = join(repo, "tsconfig.server.json");
+  const originalConfig = readFileSync(configPath, "utf8");
+  try {
+    const config = JSON.parse(originalConfig);
+    config.include = [...config.include, `src/${rootName}/**/*.ts`];
+    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+
+    for (const [stateLabel, invalidateState] of [
+      ["missing", () => remove(buildProfilePath(repo, BUILD_STATE))],
+      ["corrupt", () => writeFileSync(buildProfilePath(repo, BUILD_STATE), "not JSON")],
+    ]) {
+      mkdirSync(sourceRoot, { recursive: true });
+      writeFileSync(source, "export const isolatedRootLastSource = true;\n");
+      runBuild(repo, `warm isolated include root before ${stateLabel} state`);
+      for (const output of outputs)
+        assert(existsSync(join(repo, "dist", output)), `${stateLabel} isolated include root: warm build omitted dist/${output}`);
+
+      remove(source);
+      invalidateState();
+      runBuild(repo, `recover ${stateLabel} state after emptying isolated include root`);
+      assertNoOutputs(repo, outputs, `${stateLabel} state empty isolated include root`);
+      assertBuildProfiles(repo);
+    }
+  } finally {
+    remove(sourceRoot);
+    writeFileSync(configPath, originalConfig);
+  }
+  runBuild(repo, "cleanup after empty isolated include root");
+  assertNoOutputs(repo, outputs, "empty isolated include root cleanup");
 }
 
 function assertPoisonedStateCannotEscapeDist(repo) {
@@ -672,6 +734,7 @@ function runRepositoryFidelity(repo) {
   assertInputFingerprintInvalidation(repo);
   assertCorruptProfileRecovery(repo);
   assertMissingOrCorruptStateRetiresStaleOutputs(repo);
+  assertMissingOrCorruptStateRetiresEmptyIncludeRoot(repo);
   assertLinkedOutputTreeIsRejectedBeforeEmit(repo);
   assertPoisonedStateCannotEscapeDist(repo);
   assertInterruptionRecovery(repo);
