@@ -1,6 +1,8 @@
 // Pure change classification for the affected-test graph. Git collection lives
 // in run.mjs; this module accepts normalized strings or rich change records.
 
+import ts from "typescript";
+
 const posix = (value) => String(value ?? "")
 	.replace(/\\/g, "/")
 	.replace(/^\.\//, "")
@@ -131,72 +133,140 @@ export function normalizeChange(change) {
 	};
 }
 
-function findDelimitedBlock(source, name, open) {
-	const declaration = source.indexOf(name);
-	if (declaration < 0) return undefined;
-	const equals = source.indexOf("=", declaration + name.length);
-	if (equals < 0) return undefined;
-	const start = source.indexOf(open, equals + 1);
-	if (start < 0) return undefined;
-	const close = open === "[" ? "]" : "}";
-	let depth = 0;
-	let quote = "";
-	let escaped = false;
-	for (let index = start; index < source.length; index += 1) {
-		const char = source[index];
-		if (quote) {
-			if (escaped) escaped = false;
-			else if (char === "\\") escaped = true;
-			else if (char === quote) quote = "";
-			continue;
-		}
-		if (char === '"' || char === "'" || char === "`") {
-			quote = char;
-			continue;
-		}
-		if (char === open) depth += 1;
-		else if (char === close && --depth === 0) return { start, end: index + 1, text: source.slice(start, index + 1) };
-	}
-	return undefined;
+const EXECUTION_TABLE_NAMES = Object.freeze([
+	"APPROVED_E2E_VITEST_PATHS",
+	"ISOLATED_VITEST_FILES",
+]);
+
+function literalText(node) {
+	return ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)
+		? node.text
+		: undefined;
 }
 
-function replaceBlocks(source, blocks) {
-	let result = source.replace(/\r\n/g, "\n");
-	const found = [];
-	for (const [name, open] of blocks) {
-		const block = findDelimitedBlock(result, name, open);
-		if (!block) return undefined;
-		found.push({ ...block, name });
-	}
-	for (const block of found.sort((a, b) => b.start - a.start)) {
-		result = `${result.slice(0, block.start)}<${block.name}-table>${result.slice(block.end)}`;
-	}
-	return { source: result, blocks: found };
+function isTestPath(value) {
+	if (!/^tests2\/(?:core|dom|integration)\/.+\.test\.ts$/.test(value) || value.includes("\\")) return false;
+	return value.split("/").every((part) => part !== "" && part !== "." && part !== "..");
 }
 
-function testPathsInText(value) {
-	return new Set([...String(value).matchAll(/["'`](tests2\/(?:core|dom|integration)\/[^"'`]+\.test\.ts)["'`]/g)]
-		.map((match) => posix(match[1])));
+function isExportedConstDeclaration(sourceFile, declaration) {
+	const declarationList = declaration.parent;
+	const statement = declarationList?.parent;
+	return ts.isVariableDeclarationList(declarationList)
+		&& (declarationList.flags & ts.NodeFlags.Const) !== 0
+		&& declarationList.declarations.length === 1
+		&& ts.isVariableStatement(statement)
+		&& statement.parent === sourceFile
+		&& statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) === true
+		&& statement.modifiers.every((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword);
+}
+
+function frozenTableValue(sourceFile, declaration) {
+	if (!isExportedConstDeclaration(sourceFile, declaration)) return undefined;
+	const initializer = declaration.initializer;
+	if (!initializer || !ts.isCallExpression(initializer) || initializer.questionDotToken || initializer.arguments.length !== 1) {
+		return undefined;
+	}
+	const callee = initializer.expression;
+	if (!ts.isPropertyAccessExpression(callee)
+		|| callee.questionDotToken
+		|| !ts.isIdentifier(callee.expression)
+		|| callee.expression.text !== "Object"
+		|| callee.name.text !== "freeze") {
+		return undefined;
+	}
+	return { initializer, table: initializer.arguments[0] };
+}
+
+function approvedPaths(table) {
+	if (!ts.isArrayLiteralExpression(table)) return undefined;
+	const paths = new Set();
+	for (const element of table.elements) {
+		const path = literalText(element);
+		if (path === undefined || !isTestPath(path) || paths.has(path)) return undefined;
+		paths.add(path);
+	}
+	return paths;
+}
+
+function isolatedPaths(table) {
+	if (!ts.isObjectLiteralExpression(table)) return undefined;
+	const paths = new Set();
+	for (const property of table.properties) {
+		if (!ts.isPropertyAssignment(property) || !ts.isStringLiteral(property.name)) return undefined;
+		const path = property.name.text;
+		const reason = literalText(property.initializer);
+		if (!isTestPath(path) || reason === undefined || paths.has(path)) return undefined;
+		paths.add(path);
+	}
+	return paths;
 }
 
 /**
- * Recognize table-only edits to test-map-execution.mjs. Any algorithm edit is
- * deliberately not classified and therefore fails closed to RUN-ALL.
+ * Parse and validate the two execution ownership tables without evaluating
+ * source. Only their exact, data-only Object.freeze initializers may vary.
+ */
+function parseExecutionMapTables(source) {
+	const normalized = source.replace(/\r\n/g, "\n");
+	const sourceFile = ts.createSourceFile(
+		TEST_EXECUTION_MAP_SOURCE,
+		normalized,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.JS,
+	);
+	if (sourceFile.parseDiagnostics?.length) return undefined;
+
+	const declarations = new Map(EXECUTION_TABLE_NAMES.map((name) => [name, []]));
+	const visit = (node) => {
+		if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && declarations.has(node.name.text)) {
+			declarations.get(node.name.text).push(node);
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(sourceFile);
+
+	const initializers = [];
+	const paths = new Set();
+	for (const name of EXECUTION_TABLE_NAMES) {
+		const matches = declarations.get(name);
+		if (matches.length !== 1) return undefined;
+		const frozen = frozenTableValue(sourceFile, matches[0]);
+		if (!frozen) return undefined;
+		const tablePaths = name === "APPROVED_E2E_VITEST_PATHS"
+			? approvedPaths(frozen.table)
+			: isolatedPaths(frozen.table);
+		if (!tablePaths) return undefined;
+		for (const path of tablePaths) {
+			if (paths.has(path)) return undefined;
+			paths.add(path);
+		}
+		initializers.push({
+			name,
+			start: frozen.initializer.getStart(sourceFile),
+			end: frozen.initializer.end,
+		});
+	}
+
+	let comparableSource = normalized;
+	for (const initializer of initializers.sort((a, b) => b.start - a.start)) {
+		comparableSource = `${comparableSource.slice(0, initializer.start)}<${initializer.name}-initializer>${comparableSource.slice(initializer.end)}`;
+	}
+	return { comparableSource, paths };
+}
+
+/**
+ * Recognize table-only edits to test-map-execution.mjs. Any algorithm edit or
+ * unsupported/ambiguous table syntax deliberately fails closed to RUN-ALL.
  */
 export function classifyExecutionMapSourceChange(before, after) {
 	if (typeof before !== "string" || typeof after !== "string") return { recognized: false, paths: new Set() };
-	const blocks = [
-		["APPROVED_E2E_VITEST_PATHS", "["],
-		["ISOLATED_VITEST_FILES", "{"],
-	];
-	const oldSource = replaceBlocks(before, blocks);
-	const newSource = replaceBlocks(after, blocks);
-	if (!oldSource || !newSource || oldSource.source !== newSource.source) return { recognized: false, paths: new Set() };
-	const paths = new Set();
-	for (const block of [...oldSource.blocks, ...newSource.blocks]) {
-		for (const path of testPathsInText(block.text)) paths.add(path);
+	const oldSource = parseExecutionMapTables(before);
+	const newSource = parseExecutionMapTables(after);
+	if (!oldSource || !newSource || oldSource.comparableSource !== newSource.comparableSource) {
+		return { recognized: false, paths: new Set() };
 	}
-	return { recognized: true, paths };
+	return { recognized: true, paths: new Set([...oldSource.paths, ...newSource.paths]) };
 }
 
 function materializedMapRecords(input) {
