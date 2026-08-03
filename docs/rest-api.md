@@ -122,7 +122,8 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `DELETE` | `/api/sessions/:id/bg-processes/:pid` | Legacy: kill-if-running, else dismiss |
 | `GET` | `/api/sessions/:id/cost` | Persisted cumulative token usage and cost for a single session. Returns 404 when no cost record exists. Response includes `cacheHitRate: number \| null`. See [session-cost.md](session-cost.md) and [Cache-hit rate](cache-hit-rate.md). |
 | `GET` | `/api/sessions/:id/cost/breakdown` | Session cost plus delegate-session breakdown, used by the session cost popover; cost objects include `cacheHitRate: number \| null`. |
-| `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Lazy-load full tool input content for a truncated block (see [Large content truncation](#large-content-truncation)) |
+| `GET` | `/api/sessions/:id/tool-content/by-tool-call/:toolCallId/:blockIndex` | Preferred identity-addressed lazy-load for a truncated tool-content block. `?expected=preview-snapshot` verifies a historical preview marker before returning it (see [Large content truncation](#large-content-truncation)). |
+| `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Legacy positional lazy-load for a truncated block; retained for compatibility (see [Large content truncation](#large-content-truncation)). |
 | `GET` | `/api/sessions/:id/transcript` | Paginated, regex-filterable transcript reader. Backs the `read_session` tool. Query params: `offset` (negative = from end), `limit` (default 20, clamped 1..200), `pattern`, `case_sensitive`, `context` (±5 max), `verbose`, `include_tool_results` / `includeToolResults`. Direct REST remains backward-compatible: omitted include flag keeps tool results unredacted; pass false/0 to redact. `read_session` passes false by default. Errors: `session_not_found` (404), `transcript_unavailable` (404), `invalid_regex` / `invalid_params` (400). See [Transcript reads and tool-result redaction](read-session.md). |
 | `GET` | `/api/sessions/:id/transcript/before-compaction` | Paginated read of the orphaned pre-compaction entries for a single compaction event. Query params: `compactionId` (required, sidecar entry id), `cursor` (from previous response's `nextCursor`), `limit` (default 50, clamped 1..200). Response envelope `{ total, returned, nextCursor, messages[] }`. Requires normal bearer/session authentication, then resolves the target session across gateway-accessible projects; any authenticated same-gateway caller that can reach the target session may read it, matching `read_session` / `GET /api/sessions/:id/transcript`. Errors: `session_not_found` (404), `transcript_unavailable` (404), `compaction_not_found` (404), `invalid_params` (400), `internal_error` (500). Split resolution order is sidecar `firstKeptEntryId`, then the in-file compaction entry's `firstKeptEntryId`, then the inline `type:"compaction"` marker itself for retained-tail-only or unresolvable-id checkpoints. Reader: `readOrphanedBeforeCompaction` in `src/server/agent/transcript-reader.ts` using the target session's sandbox-aware transcript read path. See [docs/compaction-history.md](compaction-history.md). |
 | `POST` | `/api/sessions/:id/provider-hooks/before-prompt` | Per-turn lifecycle dispatch, called only by the generated provider-bridge pi extension. Body `{ prompt?, turn?: { index } }`. Dispatches the `beforePrompt` hook and returns `{ content, tail, blocks }` — `content` is the fenced dynamic-context text delivered by the bridge as a hidden `bobbit:dynamic-context` custom/user-side message (or `""`), `tail` is temporary legacy system-prompt-tail back-compat for old bridges, and `blocks` is metadata-only `{ id, providerId, title, tokenEstimate }[]`. The endpoint also refreshes the prompt inspector's Dynamic Context snapshot best-effort; current bridges consume `content` and filter stale persisted dynamic-context custom messages from future LLM contexts instead of using `message_end` scrub. `404` for unknown session; `{ content: "", tail: "", blocks: [] }` when no Lifecycle Hub is configured. See [docs/lifecycle-hub.md](lifecycle-hub.md#per-turn--lifecycle-wiring-g14). |
@@ -2186,12 +2187,30 @@ Before `switch_session`, worktree-backed continues move the cloned JSONL into th
 
 When an agent writes a large file (>32KB of tool input content), the server truncates the content in WebSocket broadcasts and the EventBuffer to prevent memory pressure from multi-megabyte payloads being serialized/deserialized on every streaming token. The full content is preserved in the agent's `.jsonl` session file and available on demand.
 
-**`GET /api/sessions/:id/tool-content/:messageIndex/:blockIndex`** — Returns the full, untruncated tool input content for a specific content block.
+### Tool-content identity resolution
 
-- `messageIndex` — zero-based index into the session's message history
-- `blockIndex` — zero-based index into the message's content blocks
+**`GET /api/sessions/:id/tool-content/by-tool-call/:toolCallId/:blockIndex`** is the preferred full-content route. It returns `200 { content: string }` for the requested zero-based content block, resolved by the URL-encoded tool-call id rather than a visible message position.
 
-Returns `200` with `{ content: string }` on success. Returns `404` if the session, message, or block is not found, or if the block has no extractable content.
+The route resolves the identity against the runtime transcript in both forms that can carry it:
+
+- a `toolResult` message whose `toolCallId` equals `:toolCallId`;
+- an assistant `toolCall` or `tool_use` content block whose `id` equals `:toolCallId`.
+
+Without `expected`, the assistant call is selected when present (otherwise the tool result); the requested block must be the exact identity-bearing assistant-call block, so a neighbouring block on the same assistant message is refused. With `?expected=preview-snapshot`, the matching tool-result message is selected and the returned text must begin with a supported preview-snapshot marker. This lets historical, truncated preview cards retrieve their snapshot without trusting client-visible positions, while preserving legacy v1/v2 parsing in the renderer.
+
+The route fails closed rather than returning a block from a different call:
+
+| Status | Code | Meaning |
+|---|---|---|
+| `404` | `session_not_found` | The live session is unavailable. |
+| `404` | `transcript_tool_call_unavailable` | Neither a matching tool result nor assistant tool-call block remains in the runtime transcript. |
+| `404` | `transcript_block_unavailable` | The requested block is absent or has no extractable text/input content. |
+| `409` | `tool_call_block_mismatch` | Generic identity lookup named a block other than the assistant tool-call block. |
+| `409` | `snapshot_block_mismatch` | A preview lookup named the wrong block or the returned text is not a supported snapshot marker. |
+
+`PreviewRenderer` uses this route for truncated historical snapshots. The other full-content UI consumer, the generic **Load full content** path, was migrated to the same identity resolution so client-only rows cannot misaddress the runtime transcript.
+
+**`GET /api/sessions/:id/tool-content/:messageIndex/:blockIndex`** remains available for positional callers. It returns the full, untruncated tool input content for a specific block at a zero-based runtime message and content-block index. It returns `200 { content: string }` on success and the legacy `404` responses when the session, message, block, or extractable content is missing. New client callers should use the identity route because their rendered history can contain rows absent from the runtime transcript.
 
 **How truncation works:**
 
