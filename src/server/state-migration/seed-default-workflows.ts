@@ -74,6 +74,16 @@ export function readyToMergeGate(): SeededGate {
 	};
 }
 
+export const REVISION_READY_CONTENT_PACKET_PROMPT = `For every blocking content finding, provide an author-ready revision packet; a failure without this packet is invalid:
+1. **Artifact location:** exact section, heading, paragraph, requirement, acceptance criterion, diagram, or test-plan entry; for documentation, exact path and section.
+2. **Goal-linked gap and consequence:** the unmet or contradictory goal requirement and practical implementation or user consequence.
+3. **Concrete revision:** directly usable replacement wording, addition, outline, contract, data-flow or state sequence, acceptance criterion, example, or test-plan case.
+4. **Consistency and constraints:** cross-section edits, references, examples, compatibility, lifecycle, ordering, platform, and failure-mode constraints to update together.
+5. **Alternatives:** preferred revision plus credible alternatives and explicit tradeoffs only when they exist; do not manufacture options.
+6. **Classification:** required blocker edits versus optional bounded improvements; do not fail for the latter.
+
+For design documents and issue analyses, require implementable contracts and testable acceptance criteria only as needed for the approved goal — not exhaustive pseudocode, a formal proof, or speculative hardening. For documentation, also name the exact documentation path and section, stale or missing claim, proposed wording or outline, relevant examples or links, and how to verify the documented behavior against the implementation.`;
+
 export const DOC_PROMPT = `Review documentation for the changes on branch {{branch}} vs origin/{{baseBranch}}.
 
 Run \`git diff origin/{{baseBranch}}...{{branch}} -- . ':!package-lock.json'\` to see all changes.
@@ -113,6 +123,10 @@ AGENTS.md is loaded into every agent turn — its size is a direct per-turn toke
 - Adds a categorical subsection past ~12 entries without splitting it.
 If the diff fixes any of the above (e.g. it shortens long entries, dedupes recipe↔debug pairs, splits a large subsection), say so and PASS.
 
+${REVISION_READY_CONTENT_PACKET_PROMPT}
+
+**Stage scope:** Review documentation only. When a downstream Ready-to-Merge gate owns branch publication, base synchronization, and PR creation, leave those requirements to that gate; do not fail this documentation review for them. This boundary does not excuse stale, missing, or inaccurate documentation for a documented behavior.
+
 Summarize with PASS/FAIL for each check and specific items to address.`;
 
 export const DESIGN_REVIEW_PROMPT = `Review this design document for structure, clarity, comparative reasoning, and completeness.
@@ -126,7 +140,9 @@ For every non-trivial change, FAIL unless the design:
 
 A quick-fix exemption is acceptable only for one local behavior following an obvious established pattern with no new public API, state owner, persistence, auth, dependency, or cross-layer flow; the design must state why comparison is unnecessary. Do not force reuse where contracts, ownership, or lifecycle differ, and do not demand speculative generalization or adjacent features.
 
-Regardless of comparative-design exemption, every design must list file changes with specific descriptions, define specific and testable acceptance criteria, cover edge/error handling, and include an E2E test plan that validates the user journey end-to-end.`;
+Regardless of comparative-design exemption, every design must list file changes with specific descriptions, define specific and testable acceptance criteria, cover edge/error handling, and include an E2E test plan that validates the user journey end-to-end.
+
+${REVISION_READY_CONTENT_PACKET_PROMPT}`;
 
 export const GAP_ANALYSIS_DESIGN_PROMPT = `Compare the goal specification to this design document.
 
@@ -141,35 +157,37 @@ Identify:
 5. Compared approaches that do not target the same acceptance criteria and constraints
 6. Scope expansion added to justify an abstraction or possible future reuse
 
-Use your tools to read the design document content from the signal.`;
+Use your tools to read the design document content from the signal.
 
-export const GAP_ANALYSIS_IMPL_PROMPT = `Compare the goal specification and design document to the actual implementation on this branch.
+${REVISION_READY_CONTENT_PACKET_PROMPT}`;
+
+export const GAP_ANALYSIS_IMPL_PROMPT = `Review spec and regression conformance for the implementation on branch {{branch}} vs origin/{{baseBranch}}.
 
 The goal spec is:
 {{goal_spec}}
 
-Run \`git diff origin/{{baseBranch}}...{{branch}} -- . ':!package-lock.json'\` to see the implementation diff.
-Read the design document content from upstream gates.
+Run \`git diff origin/{{baseBranch}}...{{branch}} -- . ':!package-lock.json'\` to see the implementation and test diff. Read all upstream design and issue-analysis content.
 
-Identify:
-1. Features described in the goal/design but not implemented
-2. Acceptance criteria not met by the code changes
-3. Implemented behavior that contradicts the specification
+Compare the goal, upstream design/analysis, implementation, and tests. Identify requirements, acceptance criteria, edge cases, or regressions that are absent, contradicted, or insufficiently covered by the implementation or tests.
 
-IMPORTANT: Ignore documentation gaps. This gap analysis runs during the implementation phase, BEFORE the documentation gate. Do NOT flag missing or outdated documentation, README updates, design-doc updates, code comments, or other docs-only artifacts as gaps — those are addressed by the dedicated documentation gate later in the workflow. Focus exclusively on code/behavior gaps relative to the spec and design.`;
+**Stage scope:** Evaluate implementation and test work due through phase 2. When this workflow separately schedules optional phase-3 QA, leave missing QA execution, scenarios, or results to that QA step rather than failing this review. When a downstream Ready-to-Merge gate owns publication, base synchronization, and PR creation, leave those requirements to that gate. These boundaries are conditional: do not defer any concrete implementation or test defect that this phase-2 review can establish.
 
-export const CODE_REVIEW_PROMPT = `Review the code changes on branch {{branch}} vs origin/{{baseBranch}} for quality.
+IMPORTANT: Ignore documentation-only gaps. Do NOT flag missing or outdated documentation, README updates, design-doc updates, code comments, or other docs-only artifacts.
 
-Start with \`git diff --stat origin/{{baseBranch}}...{{branch}} -- . ':!package-lock.json'\` to see which files changed.
-Then use \`git diff origin/{{baseBranch}}...{{branch}} -M -- . ':!package-lock.json'\` (with rename detection) to see actual content changes.
-For large diffs, review files individually with \`read\` rather than dumping the entire diff into context.
+For every blocking finding, provide implementation-ready remediation: exact affected file/location, the minimal code or test change required, and a focused regression test that proves the fix.`;
 
-Check:
-1. Correctness — logic errors, off-by-one, race conditions
-2. Error handling — missing try/catch, unhandled promise rejections
-3. Edge cases — null/undefined, empty arrays, boundary values
-4. Code style — consistent naming, no dead code, clear intent
-5. Test coverage — are new behaviors tested?`;
+export const CODE_REVIEW_PROMPT = `Perform an integrated implementation review of the code changes on branch {{branch}} vs origin/{{baseBranch}}.
+
+Start with \`git diff --stat origin/{{baseBranch}}...{{branch}} -- . ':!package-lock.json'\` to see which files changed. Then use \`git diff origin/{{baseBranch}}...{{branch}} -M -- . ':!package-lock.json'\` (with rename detection) to see actual content changes. For large diffs, review files individually with \`read\` rather than dumping the entire diff into context.
+
+Review correctness, error handling, edge and mixed states, concurrency and lifecycle behavior, cross-layer interactions, maintainability, regression coverage, and independently verifiable bugs. Deduplicate findings by root cause.
+
+For every finding, provide its exact file/location, minimal implementation fix, and focused test that independently demonstrates the defect and verifies the fix.`;
+
+/** Implementation review policy for workflows with a mandatory downstream documentation gate. */
+export const CODE_REVIEW_BEFORE_DOCUMENTATION_PROMPT = `${CODE_REVIEW_PROMPT}
+
+IMPORTANT: This review runs before the mandatory documentation gate. Ignore documentation-only gaps — missing or outdated documentation, README updates, design-document updates, code comments, and other docs-only artifacts — and do not fail implementation for them. Concrete implementation defects remain in scope.`;
 
 export const BUG_HUNT_PROMPT = `Review the implementation on branch {{branch}} vs origin/{{baseBranch}} for actionable bugs.
 
@@ -177,16 +195,18 @@ Focus on correctness, edge cases, error paths, cross-system interactions, concur
 
 For every finding, include file:line, reproduction conditions, consequence, and why it is a bug.`;
 
-export const SECURITY_REVIEW_PROMPT = `Security review of changes on branch {{branch}} vs origin/{{baseBranch}}.
+export const SECURITY_REVIEW_PROMPT = `Perform a security review of changes on branch {{branch}} vs origin/{{baseBranch}}.
 
 Run \`git diff origin/{{baseBranch}}...{{branch}} -- . ':!package-lock.json'\` to see changes.
 
-Check:
-1. Injection risks — command injection, path traversal, template injection
-2. Auth/authz — are new endpoints properly authenticated?
-3. Data validation — are inputs validated and sanitized?
-4. Secrets handling — no hardcoded secrets, tokens, or credentials
-5. Dependency risks — any new dependencies with known vulnerabilities?`;
+Review changed trust boundaries, authentication and authorization, validation and injection, secrets handling, destructive operations and resource ownership, dependency risk, and security-relevant races.
+
+For every finding, provide the exact affected file/location, minimal remediation, and an abuse or regression test that demonstrates the vulnerability and verifies the fix.`;
+
+/** Security review policy for workflows with a mandatory downstream documentation gate. */
+export const SECURITY_REVIEW_BEFORE_DOCUMENTATION_PROMPT = `${SECURITY_REVIEW_PROMPT}
+
+IMPORTANT: This review runs before the mandatory Documentation gate. Ignore documentation-only omissions — missing or outdated documentation, README updates, design-document updates, code comments, and other docs-only artifacts — and do not fail this security review for them. Concrete security defects remain in scope.`;
 
 // ── Phase 3 nested goals — `parent` meta-workflow prompts ──────────────
 //
@@ -313,8 +333,46 @@ export function buildParentWorkflow(): SeededWorkflow {
 	};
 }
 
-/** Build the four canonical workflows targeting `componentName` (typically the project name). */
-export function buildDefaultWorkflows(componentName: string): Record<string, SeededWorkflow> {
+/**
+ * Remove structural command steps unavailable on a known target component.
+ *
+ * Omitting capabilities deliberately preserves the complete canonical template
+ * for callers that only need its policy shape. When capabilities are known for
+ * persistence, retain every gate and non-structural step (including reviews,
+ * free-form commands, and agent QA) and remove only missing `{ component,
+ * command }` references.
+ */
+export function filterUnsupportedComponentCommands(
+	workflow: SeededWorkflow,
+	componentName: string,
+	supportedCommands?: Iterable<string>,
+): SeededWorkflow {
+	if (supportedCommands === undefined) return workflow;
+
+	const supported = new Set(supportedCommands);
+	return {
+		...workflow,
+		gates: workflow.gates.map((gate) => ({
+			...gate,
+			verify: gate.verify?.filter((step) => (
+				step.type !== "command"
+				|| step.component !== componentName
+				|| !step.command
+				|| supported.has(step.command)
+			)),
+		})),
+	};
+}
+
+/**
+ * Build the four canonical workflows targeting `componentName` (typically the
+ * project name). Supply component capabilities only when persisting them for a
+ * concrete project; omitted capabilities retain the complete canonical shape.
+ */
+export function buildDefaultWorkflows(
+	componentName: string,
+	supportedCommands?: Iterable<string>,
+): Record<string, SeededWorkflow> {
 	const c = componentName;
 
 	const general: SeededWorkflow = {
@@ -338,13 +396,14 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 				description: RALPH_LOOP_DESCRIPTION,
 				depends_on: ["design-doc"],
 				verify: [
-					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
+					{ name: "Build", type: "command", phase: 0, component: c, command: "build", timeout: 600 },
 					{ name: "Type check passes", type: "command", phase: 1, component: c, command: "check" },
 					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
+					{ name: "Browser tests", type: "command", phase: 1, timeout: 900, component: c, command: "browser" },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
-					{ name: "Gap analysis", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
-					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
-					{ name: "Bug hunt", type: "llm-review", role: "bug-hunter", phase: 2, prompt: BUG_HUNT_PROMPT },
+					{ name: "Spec and regression conformance", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
+					{ name: "Integrated implementation review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_BEFORE_DOCUMENTATION_PROMPT },
+					{ name: "Security review", type: "llm-review", role: "security-reviewer", phase: 2, prompt: SECURITY_REVIEW_BEFORE_DOCUMENTATION_PROMPT },
 				],
 			},
 			{
@@ -380,14 +439,14 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 				description: RALPH_LOOP_DESCRIPTION,
 				depends_on: ["design-doc"],
 				verify: [
-					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
+					{ name: "Build", type: "command", phase: 0, component: c, command: "build", timeout: 600 },
 					{ name: "Type check passes", type: "command", phase: 1, component: c, command: "check" },
 					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
+					{ name: "Browser tests", type: "command", phase: 1, timeout: 900, component: c, command: "browser" },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
-					{ name: "Gap analysis", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
-					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
-					{ name: "Bug hunt", type: "llm-review", role: "bug-hunter", phase: 2, prompt: BUG_HUNT_PROMPT },
-					{ name: "Security review", type: "llm-review", role: "security-reviewer", phase: 2, prompt: SECURITY_REVIEW_PROMPT },
+					{ name: "Spec and regression conformance", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
+					{ name: "Integrated implementation review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_BEFORE_DOCUMENTATION_PROMPT },
+					{ name: "Security review", type: "llm-review", role: "security-reviewer", phase: 2, prompt: SECURITY_REVIEW_BEFORE_DOCUMENTATION_PROMPT },
 					{
 						name: "QA testing",
 						type: "agent-qa",
@@ -431,7 +490,11 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 1. Reproduction steps are specific enough to follow mechanically
 2. Root cause references actual source files and lines
 3. Analysis distinguishes symptoms from underlying cause
-4. **Test plan** — the analysis must describe what test will verify the fix.`,
+4. **Test plan** — the analysis must describe what test will verify the fix.
+
+**Stage scope:** Judge the issue-analysis artifact only. The downstream Reproducing Test gate owns the executable reproducer; Implementation owns the fix and executed regression tests; Documentation owns documentation; and Ready-to-Merge owns branch publication, base synchronization, and PR creation. Do not fail this analysis for missing downstream outputs, but keep concrete shortcomings in this artifact's reproduction, root-cause, or test plan in scope.
+
+${REVISION_READY_CONTENT_PACKET_PROMPT}`,
 					},
 					{ name: "Gap analysis", type: "llm-review", role: "spec-auditor", prompt: GAP_ANALYSIS_DESIGN_PROMPT },
 				],
@@ -451,14 +514,15 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 				description: RALPH_LOOP_DESCRIPTION,
 				depends_on: ["reproducing-test"],
 				verify: [
-					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
+					{ name: "Build", type: "command", phase: 0, component: c, command: "build", timeout: 600 },
 					{ name: "Type check", type: "command", phase: 1, component: c, command: "check" },
 					{ name: "Repro test passes (bug fixed)", type: "command", phase: 1, run: "{{reproducing-test.meta.test_command}}", expect: "success" },
 					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
+					{ name: "Browser tests", type: "command", phase: 1, timeout: 900, component: c, command: "browser" },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
-					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
-					{ name: "Bug hunt", type: "llm-review", role: "bug-hunter", phase: 2, prompt: BUG_HUNT_PROMPT },
-					{ name: "Security review", type: "llm-review", role: "security-reviewer", phase: 2, prompt: SECURITY_REVIEW_PROMPT },
+					{ name: "Spec and regression conformance", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
+					{ name: "Integrated implementation review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_BEFORE_DOCUMENTATION_PROMPT },
+					{ name: "Security review", type: "llm-review", role: "security-reviewer", phase: 2, prompt: SECURITY_REVIEW_BEFORE_DOCUMENTATION_PROMPT },
 				],
 			},
 			{
@@ -483,12 +547,14 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 				name: "Implementation",
 				description: "Ralph loop (minimal): build, test, review.",
 				verify: [
-					{ name: "Build", type: "command", component: c, command: "build", timeout: 600 },
+					{ name: "Build", type: "command", phase: 0, component: c, command: "build", timeout: 600 },
 					{ name: "Type check passes", type: "command", phase: 1, component: c, command: "check" },
 					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
+					{ name: "Browser tests", type: "command", phase: 1, timeout: 900, component: c, command: "browser" },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
-					{ name: "Code quality review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
-					{ name: "Bug hunt", type: "llm-review", role: "bug-hunter", phase: 2, prompt: BUG_HUNT_PROMPT },
+					{ name: "Spec and regression conformance", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
+					{ name: "Integrated implementation review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
+					{ name: "Security review", type: "llm-review", role: "security-reviewer", phase: 2, prompt: SECURITY_REVIEW_PROMPT },
 				],
 			},
 			// quick-fix has no documentation gate — wire ready-to-merge directly off implementation.
@@ -501,11 +567,18 @@ export function buildDefaultWorkflows(componentName: string): Record<string, See
 		],
 	};
 
-	return {
+	const workflows = {
 		general,
 		feature,
 		"bug-fix": bugFix,
 		"quick-fix": quickFix,
 		parent: buildParentWorkflow(),
 	};
+
+	return Object.fromEntries(
+		Object.entries(workflows).map(([id, workflow]) => [
+			id,
+			filterUnsupportedComponentCommands(workflow, c, supportedCommands),
+		]),
+	);
 }

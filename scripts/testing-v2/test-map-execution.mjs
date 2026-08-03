@@ -27,6 +27,7 @@ export const ISOLATED_VITEST_FILES = Object.freeze({
 	"tests2/core/extension-host-session-event-bus.test.ts": "Exercises a module-global EventTarget that must not retain sibling listeners.",
 	"tests2/core/goal-metadata-edges.test.ts": "Reads BOBBIT_DIR-backed goal metadata state during module initialization.",
 	"tests2/core/lifecycle-hub.test.ts": "Exercises module-global lifecycle listeners that must not leak across files.",
+	"tests2/integration/maintenance-request-runner-isolation.test.ts": "It intentionally constructs multiple gateways that mutate module-global serverCommandRunner, so it needs a dedicated isolated fork.",
 });
 
 const UNIT_PROJECTS = new Set(["core", "dom", "integration", "isolated"]);
@@ -143,7 +144,7 @@ export function loadVitestExecutionMap({
 	for (const [path, owners] of materializedOwnership) {
 		if (owners.length > 1) errors.push(`${path}: duplicate materialized execution ownership (${owners.join(", ")})`);
 	}
-	if (projects.isolated.length > 10) errors.push(`isolated execution has ${projects.isolated.length} files; maximum is 10`);
+	if (projects.isolated.length > 11) errors.push(`isolated execution has ${projects.isolated.length} files; maximum is 11`);
 
 	const physicalVitest = collectVitestFiles(repoRoot);
 	for (const path of physicalVitest) {

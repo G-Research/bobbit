@@ -30,18 +30,20 @@ import {
 /**
  * Build a feature-style workflow scoped to a single component.
  *
- * Clones `buildDefaultWorkflows(componentName).feature` and rewrites the
- * top-level workflow id/name/description. The underlying `{ component, command }`
- * step refs already target `componentName` because the seed uses the supplied
- * component name throughout.
+ * Clones the capability-filtered `buildDefaultWorkflows(componentName).feature`
+ * and rewrites the top-level workflow id/name/description. Structural command
+ * filtering is shared with default-workflow persistence; non-command steps and
+ * gates are always preserved.
  *
  * Resulting workflow id: `feature-${componentName}`.
  */
 export function buildPerComponentWorkflow(
 	componentName: string,
-	_allComponents: Component[],
+	allComponents: Component[],
 ): SeededWorkflow {
-	const def = buildDefaultWorkflows(componentName).feature;
+	const component = allComponents.find(({ name }) => name === componentName);
+	const def = buildDefaultWorkflows(componentName, Object.keys(component?.commands ?? {})).feature;
+
 	return {
 		...def,
 		id: `feature-${componentName}`,
