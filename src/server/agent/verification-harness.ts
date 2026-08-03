@@ -3389,6 +3389,19 @@ export class VerificationHarness {
 	private _trackedCommandChildren = new Map<string, TrackedChild>();
 
 	/**
+	 * A live tree whose exact close barrier succeeded but whose corresponding
+	 * durable completion transition has not committed yet. Retaining the child
+	 * lets a retry re-observe that barrier without another process-tree signal.
+	 */
+	private _trackedTreeExitAwaitingPersistence = new WeakSet<TrackedChild>();
+
+	/** Prevent a close handler from racing the cancellation currently joining this tree. */
+	private _trackedCleanupInFlight = new WeakSet<TrackedChild>();
+
+	/** A cancellation owns this child until its exact cleanup transition commits. */
+	private _cancellingTrackedChildren = new WeakSet<TrackedChild>();
+
+	/**
 	 * Tracked-child keys that were killed by an explicit cancellation rather
 	 * than a timeout or natural exit. Read in `runCommandStep`'s close
 	 * handler so the resolved output carries the cancellation marker even
@@ -4060,6 +4073,57 @@ export class VerificationHarness {
 	}
 
 	/**
+	 * Commit a live command tree's already-observed completion before releasing
+	 * its sole cleanup authority. The identity checks prevent a delayed cleanup
+	 * from persisting an obsolete signal generation after a reset.
+	 */
+	private _persistTrackedCommandCleanup(
+		signalId: string,
+		key: string,
+		tracked: TrackedChild,
+		active: ActiveVerification,
+		stepIndex: number,
+		step: ActiveVerification["steps"][number],
+	): boolean {
+		if (this.activeVerifications.get(signalId) !== active || active.steps[stepIndex] !== step || this._trackedCommandChildren.get(key) !== tracked) return false;
+
+		const hadKillCompletedAt = step.killCompletedAt !== undefined;
+		const previousKillCompletedAt = step.killCompletedAt;
+		const hadTransportCompletedAt = step.containerTransportCleanupCompletedAt !== undefined;
+		const previousTransportCompletedAt = step.containerTransportCleanupCompletedAt;
+		const hadTransportPending = step.containerTransportCleanupPending !== undefined;
+		const previousTransportPending = step.containerTransportCleanupPending;
+
+		if (step.containerId) {
+			// This live TrackedChild is the sole host transport authority.
+			step.containerTransportCleanupCompletedAt ??= Date.now();
+			delete step.containerTransportCleanupPending;
+		}
+		step.killCompletedAt ??= Date.now();
+
+		try {
+			if (!this._persistActive()) throw new Error("active verification persistence failed");
+		} catch {
+			// No durable completion means the child must remain the only authority.
+			// Restore all completion state, retain explicit pending cleanup, and let
+			// the existing retry owner re-check this same child without PID fallback.
+			if (hadKillCompletedAt) step.killCompletedAt = previousKillCompletedAt;
+			else delete step.killCompletedAt;
+			if (step.containerId) {
+				if (hadTransportCompletedAt) step.containerTransportCleanupCompletedAt = previousTransportCompletedAt;
+				else delete step.containerTransportCleanupCompletedAt;
+				if (hadTransportPending) step.containerTransportCleanupPending = previousTransportPending;
+				else step.containerTransportCleanupPending = true;
+			}
+			if (this.activeVerifications.get(signalId) === active && this._trackedCommandChildren.get(key) === tracked) {
+				this._scheduleCommandKillCleanupRetry(signalId);
+			}
+			return false;
+		}
+		return true;
+	}
+
+	/**
 	 * Cancel live command children only after their spawn-time ownership barrier.
 	 * A durable recovery record may exist before the POSIX sentinel/Windows Job
 	 * acknowledges it; treating that pre-readiness state as recovered ownership
@@ -4075,32 +4139,44 @@ export class VerificationHarness {
 			.filter(([key]) => key.startsWith(prefix) && includeStep(active?.steps[Number(key.slice(prefix.length))]));
 		// Mark every child before waiting for any one readiness barrier. A blocked
 		// pre-readiness step must not let an independent ready sibling continue.
-		for (const [key] of trackedChildren) this._cancelledTrackedKeys.add(key);
+		for (const [key, tracked] of trackedChildren) {
+			this._cancelledTrackedKeys.add(key);
+			this._cancellingTrackedChildren.add(tracked);
+		}
 		const results = await Promise.all(trackedChildren.map(async ([key, tracked]) => {
 			try {
 				await tracked.ownershipReady;
 				const stepIndex = Number(key.slice(prefix.length));
-				const step = this.activeVerifications.get(signalId)?.steps[stepIndex];
+				const step = active?.steps[stepIndex];
 				if (step?.type === "command" && step.containerId) {
 					// The transport sentinel is intentionally retained after docker CLI
 					// root exit. Never reap it before the exact payload phase settles.
 					if (!step.containerPayloadCleanupCompletedAt) return false;
-					tracked.killTree("SIGKILL");
-				} else {
+				}
+				this._trackedCleanupInFlight.add(tracked);
+				if (step?.type === "command" && step.containerId) {
+					if (!this._trackedTreeExitAwaitingPersistence.has(tracked)) tracked.killTree("SIGKILL");
+				} else if (!this._trackedTreeExitAwaitingPersistence.has(tracked)) {
 					tracked.killTree("SIGTERM", 1000);
 				}
-				if (!await tracked.waitForTreeExit()) return false;
-				if (step?.type === "command") {
-					if (step.containerId) {
-						// This live TrackedChild is the sole host transport authority.
-						step.containerTransportCleanupCompletedAt ??= Date.now();
-						delete step.containerTransportCleanupPending;
+				if (!await tracked.waitForTreeExit()) {
+					this._trackedCleanupInFlight.delete(tracked);
+					return false;
+				}
+				this._trackedTreeExitAwaitingPersistence.add(tracked);
+				if (step?.type === "command" && active) {
+					if (!this._persistTrackedCommandCleanup(signalId, key, tracked, active, stepIndex, step)) {
+						this._trackedCleanupInFlight.delete(tracked);
+						return false;
 					}
-					step.killCompletedAt ??= Date.now();
 				}
 				if (this._trackedCommandChildren.get(key) === tracked) this._trackedCommandChildren.delete(key);
+				this._trackedTreeExitAwaitingPersistence.delete(tracked);
+				this._trackedCleanupInFlight.delete(tracked);
+				this._cancellingTrackedChildren.delete(tracked);
 				return true;
 			} catch {
+				this._trackedCleanupInFlight.delete(tracked);
 				// Ownership readiness failure is fail-closed in spawnTracked. Do not
 				// substitute a numeric PID/PGID cleanup; durable recovery remains
 				// pending until exact identity can be proved.
@@ -6883,7 +6959,10 @@ export class VerificationHarness {
 				// Keep a durable container transport registered until its exact tree
 				// barrier settles. A host completion-file failure or a false first join
 				// must retry this live TrackedChild, never switch to recovered PID state.
-				if (!useContainerDurable) this._trackedCommandChildren.delete(trackedKey);
+				// An explicit cancellation owns this live TrackedChild until it has
+				// durably committed the exact tree-exit transition. Its close handler
+				// must not release that authority ahead of _killTrackedForSignal().
+				if (!useContainerDurable && !this._cancellingTrackedChildren.has(tracked!)) this._trackedCommandChildren.delete(trackedKey);
 				try { stopTail?.(); } catch { /* ignore */ }
 
 				const didTimeOut = tracked!.timedOut() || containerTimedOut;
@@ -6982,8 +7061,14 @@ export class VerificationHarness {
 				// verdict) until the live TrackedChild has proved its own close barrier.
 				// The retry owner re-drives this same child and resumes exactly once.
 				if (useContainerDurable && !treeCleanupVerified) return;
+				// A first cancellation join can race the close event and return false.
+				// Once this close handler has the exact barrier, re-drive the retained
+				// child so its completion is durable before this command resolves.
+				if (this._cancellingTrackedChildren.has(tracked!) && !this._trackedCleanupInFlight.has(tracked!) && streamCtx) {
+					if (!await this._killTrackedForSignal(streamCtx.signalId)) return;
+				}
 				settled = true;
-				if (treeCleanupVerified || !useContainerDurable) this._trackedCommandChildren.delete(trackedKey);
+				if ((treeCleanupVerified || !useContainerDurable) && !this._cancellingTrackedChildren.has(tracked!)) this._trackedCommandChildren.delete(trackedKey);
 
 				let outText = stdout;
 				let errText = stderr;
