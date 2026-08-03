@@ -31,13 +31,15 @@ function goal(state: PersistedGoal["state"] = "complete"): PersistedGoal {
 	};
 }
 
-function fixture(memfs = createMemFs(), suffix = Math.random().toString(36).slice(2)): {
+type Fixture = {
 	memfs: MemFs;
 	stateDir: string;
 	goals: GoalStore;
 	gates: GateStore;
 	coordinator: GateResetCoordinator;
-} {
+};
+
+async function fixture(memfs = createMemFs(), suffix = Math.random().toString(36).slice(2)): Promise<Fixture> {
 	const stateDir = path.resolve("/memfs/gate-reset-intent", suffix);
 	memfs.mkdirSync(stateDir, { recursive: true });
 	const goals = new GoalStore(stateDir, memfs);
@@ -48,11 +50,14 @@ function fixture(memfs = createMemFs(), suffix = Math.random().toString(36).slic
 		gates.updateGateStatus("goal-1", "root", "passed");
 		gates.updateGateStatus("goal-1", "child", "passed");
 	}
+	// The explicit barrier models a completed startup write before tests
+	// simulate a process restart; normal hot-path mutations remain coalesced.
+	await Promise.all([goals.flush(), gates.flush()]);
 	const coordinator = new GateResetCoordinator(stateDir, goals, gates, memfs);
 	return { memfs, stateDir, goals, gates, coordinator };
 }
 
-function beginReset(ctx: ReturnType<typeof fixture>) {
+function beginReset(ctx: Fixture) {
 	return ctx.coordinator.begin({
 		goalId: "goal-1",
 		gateId: "root",
@@ -63,14 +68,14 @@ function beginReset(ctx: ReturnType<typeof fixture>) {
 	}).intent;
 }
 
-function restart(ctx: ReturnType<typeof fixture>) {
+function restart(ctx: Fixture): Fixture {
 	const goals = new GoalStore(ctx.stateDir, ctx.memfs);
 	const gates = new GateStore(ctx.stateDir, ctx.memfs);
 	const coordinator = new GateResetCoordinator(ctx.stateDir, goals, gates, ctx.memfs);
 	return { ...ctx, goals, gates, coordinator };
 }
 
-function expectRecovered(ctx: ReturnType<typeof fixture>): void {
+function expectRecovered(ctx: Fixture): void {
 	expect(ctx.goals.get("goal-1")?.state).toBe("in-progress");
 	expect(ctx.gates.getGate("goal-1", "root")?.status).toBe("pending");
 	expect(ctx.gates.getGate("goal-1", "child")?.status).toBe("pending");
@@ -80,8 +85,8 @@ function expectRecovered(ctx: ReturnType<typeof fixture>): void {
 describe("durable gate-reset intent", () => {
 	it.each(["after-intent", "after-goal", "after-gates"] as const)(
 		"idempotently recovers a restart %s",
-		(phase) => {
-			let ctx = fixture();
+		async (phase) => {
+			let ctx = await fixture();
 			const intent = beginReset(ctx);
 			if (phase === "after-goal" || phase === "after-gates") {
 				ctx.goals.updateStrict("goal-1", { state: "in-progress" });
@@ -98,8 +103,8 @@ describe("durable gate-reset intent", () => {
 		},
 	);
 
-	it.each(["goal", "gate", "intent"] as const)("propagates and rolls back a strict %s write failure", (target) => {
-		const ctx = fixture();
+	it.each(["goal", "gate", "intent"] as const)("propagates and rolls back a strict %s write failure", async (target) => {
+		const ctx = await fixture();
 		const originalRename = ctx.memfs.renameSync.bind(ctx.memfs) as (...args: any[]) => void;
 		let failed = false;
 		(ctx.memfs as any).renameSync = (from: string, to: string) => {
@@ -130,8 +135,8 @@ describe("durable gate-reset intent", () => {
 		expect(ctx.coordinator.intents.get("goal-1")?.id).toBe(intent.id);
 	});
 
-	it("retains a fully committed intent when final clear fails, then clears it on restart", () => {
-		let ctx = fixture();
+	it("retains a fully committed intent when final clear fails, then clears it on restart", async () => {
+		let ctx = await fixture();
 		const intent = beginReset(ctx);
 		ctx.coordinator.commitDurable(intent, workflow);
 		const originalRename = ctx.memfs.renameSync.bind(ctx.memfs) as (...args: any[]) => void;
@@ -153,8 +158,8 @@ describe("durable gate-reset intent", () => {
 		expectRecovered(ctx);
 	});
 
-	it("does not reopen a goal made dormant before boot recovery", () => {
-		let ctx = fixture();
+	it("does not reopen a goal made dormant before boot recovery", async () => {
+		let ctx = await fixture();
 		beginReset(ctx);
 		ctx.goals.updateStrict("goal-1", { paused: true });
 		ctx = restart(ctx);

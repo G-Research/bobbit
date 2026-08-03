@@ -122,7 +122,8 @@ describe("Gov-2: goal-plan signal freezes execution.verify[] durably", () => {
 		// After: GET /plan reports frozen:true (same in-memory store).
 		assert.equal(readFrozen(store.get(goal.id)), true, "execution must be frozen after goal-plan signal");
 
-		// Durable: a fresh GoalStore over the same state dir still sees it.
+		// Durable: wait for the coalesced persistence barrier before a reboot.
+		await store.flush();
 		const reloaded = new GoalStore(stateDir, memfs);
 		assert.equal(readFrozen(reloaded.get(goal.id)), true, "freeze must survive a store reload (persisted)");
 	});

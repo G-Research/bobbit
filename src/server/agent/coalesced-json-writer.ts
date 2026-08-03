@@ -47,7 +47,12 @@ export class CoalescedJsonWriter {
 		}, this.debounceMs);
 	}
 
-	/** Start a write immediately, coalescing with any active writer. */
+	/**
+	 * Start a write immediately and wait through any drain that starts at its
+	 * settlement boundary. This is the shutdown/reload durability barrier: a
+	 * mutation that lands as an earlier drain resolves must be published before
+	 * this promise resolves.
+	 */
 	flush(): Promise<void> {
 		this.revision++;
 		this.requested = true;
@@ -55,7 +60,13 @@ export class CoalescedJsonWriter {
 			this.clock.clearTimeout(this.timer);
 			this.timer = null;
 		}
-		return this.startDrain();
+		return this.flushAll();
+	}
+
+	private async flushAll(): Promise<void> {
+		do {
+			await this.startDrain();
+		} while (this.inFlight !== null || this.requested);
 	}
 
 	/**

@@ -93,16 +93,18 @@ describe("SessionStore", () => {
 			assert.equal(store.get("nonexistent"), undefined);
 		});
 
-		it("round-trips parked manual-retry state and its clearing across restore", () => {
+		it("round-trips parked manual-retry state and its clearing across restore", async () => {
 			const store = freshStore();
 			store.put(makeSession({
 				messageQueue: [{ id: "parked", text: "retry me", isSteered: false, createdAt: 1 }],
 				manualRetryRequired: true,
 			}));
 
+			await store.flushAsync();
 			assert.equal(new SessionStore(stateDir, memfs).get("sess-1")?.manualRetryRequired, true);
 
 			store.update("sess-1", { manualRetryRequired: false });
+			await store.flushAsync();
 			assert.equal(new SessionStore(stateDir, memfs).get("sess-1")?.manualRetryRequired, false);
 		});
 
@@ -173,7 +175,7 @@ describe("SessionStore", () => {
 			assert.equal(updated.teamGoalId, "goal-42");
 		});
 
-		it("persists first-class child session metadata", () => {
+		it("persists first-class child session metadata", async () => {
 			const walkthroughAllowedTools = ["read", "grep", "find", "ls", "readonly_bash", "submit_pr_walkthrough_yaml"];
 			const store1 = freshStore();
 			store1.put(makeSession({
@@ -185,7 +187,7 @@ describe("SessionStore", () => {
 				walkthroughTargetKey: "github:owner/repo#123",
 				allowedTools: walkthroughAllowedTools,
 			} as any));
-			store1.flush();
+			await store1.flushAsync();
 
 			const store2 = freshStore();
 			const restored = store2.get("sess-1")!;
@@ -199,7 +201,7 @@ describe("SessionStore", () => {
 			assert.equal(restored.delegateOf, undefined);
 		});
 
-		it("round-trips durable delegate task fields (instructions + context) through disk", () => {
+		it("round-trips durable delegate task fields (instructions + context) through disk", async () => {
 			// Delegate restart survival: the delegate's task (instructions + context) is
 			// its durable equivalent of a worker's goal spec. It must survive a reboot so
 			// restoreSession() can rebuild the system prompt from it.
@@ -211,7 +213,7 @@ describe("SessionStore", () => {
 				instructions: "restart-live-survivor-MARKER helper task",
 				context: ctx,
 			}));
-			store1.flush();
+			await store1.flushAsync();
 
 			// New store instance reads from the same on-disk file (a real reboot).
 			const store2 = freshStore();
@@ -230,11 +232,11 @@ describe("SessionStore", () => {
 			assert.equal(updated.taskId, "t-1");
 		});
 
-		it("lastReadAt round-trips through disk", () => {
+		it("lastReadAt round-trips through disk", async () => {
 			const store1 = freshStore();
 			store1.put(makeSession());
 			store1.update("sess-1", { lastReadAt: 12345 });
-			store1.flush();
+			await store1.flushAsync();
 			// New store instance reads from same on-disk file
 			const store2 = freshStore();
 			assert.equal(store2.get("sess-1")!.lastReadAt, 12345);
@@ -387,11 +389,11 @@ describe("SessionStore", () => {
 			assert.deepEqual(store.getDraft("sess-1", "goal"), { title: "g2", gen: 3 });
 		});
 
-		it("monotonic gen survives a disk reload (rejects stale write after reopen)", () => {
+		it("monotonic gen survives a disk reload (rejects stale write after reopen)", async () => {
 			const store1 = freshStore();
 			store1.put(makeSession());
 			store1.setDraft("sess-1", "prompt", { text: "newest", gen: 4 });
-			store1.flush();
+			await store1.flushAsync();
 			// New store instance reloads the persisted draft (and its gen).
 			const store2 = freshStore();
 			assert.deepEqual(store2.getDraft("sess-1", "prompt"), { text: "newest", gen: 4 });
@@ -415,10 +417,11 @@ describe("SessionStore", () => {
 	// -----------------------------------------------------------------------
 
 	describe("persistence", () => {
-		it("persists sessions to disk and reloads", () => {
+		it("persists sessions to disk and reloads", async () => {
 			const store1 = freshStore();
 			store1.put(makeSession({ id: "s1", title: "First" }));
 			store1.put(makeSession({ id: "s2", title: "Second" }));
+			await store1.flushAsync();
 
 			// Create a new store instance — it should reload from disk
 			const store2 = freshStore();
@@ -427,14 +430,14 @@ describe("SessionStore", () => {
 			assert.equal(store2.get("s2")!.title, "Second");
 		});
 
-		it("persists Opus 4.8 model selection to disk and reloads without fallback", () => {
+		it("persists Opus 4.8 model selection to disk and reloads without fallback", async () => {
 			const store1 = freshStore();
 			store1.put(makeSession({
 				id: "opus48-session",
 				modelProvider: "anthropic",
 				modelId: "claude-opus-4-8",
 			}));
-			store1.flush();
+			await store1.flushAsync();
 
 			const store2 = freshStore();
 			const reloaded = store2.get("opus48-session");
@@ -583,13 +586,13 @@ describe("SessionStore", () => {
 	// -----------------------------------------------------------------------
 
 	describe("flush()", () => {
-		it("flushes debounced writes immediately", async () => {
+		it("flushAsync drains debounced writes", async () => {
 			const store = freshStore();
 			store.put(makeSession({ id: "s1" }));
 			// update() uses debounced save
 			store.update("s1", { title: "Debounced" });
-			// flush forces write
-			store.flush();
+			// The async durability barrier forces and drains the write.
+			await store.flushAsync();
 
 			// Verify by reading file directly (v2 shape: {version, epoch, sessions[]})
 			const raw = JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"));
