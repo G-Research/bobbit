@@ -27,16 +27,30 @@ function gitIdentityRunner(values: Record<string, { commonDir?: string; origin?:
 }
 
 describe("remote state canonical identity", () => {
-	it("normalizes scp-style GitHub remotes and host aliases", () => {
+	it("normalizes scp-style GitHub remotes, host aliases, and URL port authorities", () => {
 		assert.equal(normalizeRemoteIdentity("git@github.com:Acme/Widget.git"), "github.com/acme/widget");
 		assert.equal(normalizeRemoteIdentity("github.com:Acme/Widget.git"), "github.com/acme/widget");
 		assert.equal(normalizeGithubHost("WWW.GitHub.Com."), "github.com");
+		assert.equal(
+			normalizeRemoteIdentity("https://ghe.example.test:443/Acme/Widget.git"),
+			normalizeRemoteIdentity("https://ghe.example.test/Acme/Widget.git"),
+		);
+		assert.equal(
+			normalizeRemoteIdentity("ssh://git@ghe.example.test:22/Acme/Widget.git"),
+			normalizeRemoteIdentity("ssh://git@ghe.example.test/Acme/Widget.git"),
+		);
+		assert.notEqual(
+			normalizeRemoteIdentity("ssh://git@ghe.example.test:2222/Acme/Widget.git"),
+			normalizeRemoteIdentity("ssh://git@ghe.example.test:2223/Acme/Widget.git"),
+		);
+		assert.equal(normalizeRemoteIdentity("https://token:secret@ghe.example.test:8443/Acme/Widget.git"), "ghe.example.test:8443/acme/widget");
 	});
 
 	it("trust-gates PR remotes to GitHub and configured enterprise hosts", () => {
 		assert.equal(isTrustedGithubRemoteHost("www.github.com"), true);
 		assert.equal(isTrustedGithubRemoteHost("ssh.github.com"), true);
 		assert.equal(isTrustedGithubRemoteHost("ghe.example.test", ["GHE.EXAMPLE.TEST."]), true);
+		assert.equal(isTrustedGithubRemoteHost("ghe.example.test:2222", ["GHE.EXAMPLE.TEST."]), true);
 		assert.equal(isTrustedGithubRemoteHost("gitlab.example.test", ["ghe.example.test"]), false);
 		assert.equal(isTrustedGithubRemoteHost("api.github.com"), false);
 	});
@@ -48,6 +62,14 @@ describe("remote state canonical identity", () => {
 		assert.deepEqual(parseTrustedGithubRemote("git@github.com:Acme/Widget.git"), expected);
 		assert.deepEqual(
 			parseTrustedGithubRemote("https://GHE.Example.Test/Acme/Widget.git", ["ghe.example.test"]),
+			{ host: "ghe.example.test", owner: "acme", repository: "widget" },
+		);
+		assert.deepEqual(
+			parseTrustedGithubRemote("ssh://git@GHE.Example.Test:2222/Acme/Widget.git", ["ghe.example.test"]),
+			{ host: "ghe.example.test:2222", owner: "acme", repository: "widget" },
+		);
+		assert.deepEqual(
+			parseTrustedGithubRemote("ssh://git@GHE.Example.Test:22/Acme/Widget.git", ["ghe.example.test"]),
 			{ host: "ghe.example.test", owner: "acme", repository: "widget" },
 		);
 	});
@@ -147,11 +169,22 @@ describe("remote state canonical identity", () => {
 		assert.equal(identity.key.includes("token"), false);
 	});
 
-	it("uses host-qualified PR aliases and reconciles a head with its number", () => {
+	it("requires a canonical PR selector and keeps custom-port aliases distinct", () => {
 		const coordinator = new RemoteStateCoordinator();
 		const head = coordinator.resolvePullRequestIdentity({ host: "ghe.example.test", owner: "Acme", repository: "Widget.git", head: "feature/a" });
 		const publicGithub = coordinator.resolvePullRequestIdentity({ owner: "acme", repository: "widget", head: "feature/a" });
+		const port2222 = coordinator.resolvePullRequestIdentity({ host: "ghe.example.test:2222", owner: "acme", repository: "widget", head: "feature/a" });
+		const port2223 = coordinator.resolvePullRequestIdentity({ host: "ghe.example.test:2223", owner: "acme", repository: "widget", head: "feature/a" });
 		assert.notEqual(head.key, publicGithub.key);
+		assert.notEqual(port2222.key, port2223.key);
+		assert.throws(
+			() => normalizePullRequestIdentity({ owner: "acme", repository: "widget" }),
+			/requires a number or resolved head/,
+		);
+		assert.throws(
+			() => normalizePullRequestIdentity({ owner: "acme", repository: "widget", head: "  " }),
+			/requires a number or resolved head/,
+		);
 		assert.equal(normalizePullRequestIdentity({ host: "www.github.com", owner: "Acme", repository: "Widget", number: 7 }), "github.com/acme/widget#number:7");
 	});
 });

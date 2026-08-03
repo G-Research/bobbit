@@ -42,11 +42,13 @@ test.describe("remote-state coordinator routes", () => {
 			if (file === "git" && args[0] === "pull") return { stdout: "Already up to date.", stderr: "" };
 			if (file === "gh" && args[0] === "pr" && args[1] === "view") {
 				prReads += 1;
+				const customPort = Number(remoteOrigin?.match(/:(2222|2223)\//)?.[1]);
+				const number = customPort || 42;
 				return {
 					stdout: JSON.stringify({
-						number: 42,
-						url: "https://example.github.test/acme/widget/pull/42",
-						title: "safe title",
+						number,
+						url: `https://example.github.test/acme/widget/pull/${number}`,
+						title: `safe title ${number}`,
 						state: "OPEN",
 						mergeable: "MERGEABLE",
 						headRefName: "master",
@@ -179,8 +181,39 @@ test.describe("remote-state coordinator routes", () => {
 			}
 			remoteOrigin = undefined;
 
+			// A trusted GHE hostname remains trusted on custom SSH ports, while each
+			// credential-free authority owns a distinct canonical PR record.
+			const beforeCustomPorts = prReads;
+			remoteOrigin = "ssh://git@example.github.test:2222/acme/widget.git";
+			const port2222Response = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`);
+			expect(port2222Response.status).toBe(200);
+			const port2222Body = await port2222Response.json();
+			expect(port2222Body).toMatchObject({ data: { number: 2222 } });
+
+			remoteOrigin = "ssh://git@example.github.test:2223/acme/widget.git";
+			const coldPort2223 = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=automatic`);
+			expect(coldPort2223.status).toBe(200);
+			const coldPort2223Body = await coldPort2223.json();
+			for (let attempt = 0; attempt < 20 && prReads < beforeCustomPorts + 2; attempt += 1) {
+				await new Promise<void>(resolve => setImmediate(resolve));
+			}
+			expect(prReads).toBe(beforeCustomPorts + 2);
+			const port2223Response = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=automatic`);
+			const port2223Body = await port2223Response.json();
+			expect(port2223Body).toMatchObject({ data: { number: 2223 } });
+
+			remoteOrigin = "ssh://git@example.github.test:2222/acme/widget.git";
+			const retainedPort2222 = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=automatic`);
+			const retainedPort2222Body = await retainedPort2222.json();
+			expect(retainedPort2222Body).toMatchObject({ data: { number: 2222 } });
+			expect(prReads).toBe(beforeCustomPorts + 2);
+			for (const body of [port2222Body, coldPort2223Body, port2223Body, retainedPort2222Body]) {
+				expect(JSON.stringify(body)).not.toContain("example.github.test:22");
+			}
+
 			// An untrusted remote is rejected before any `gh` call; configured GHE and
 			// local-only repositories retain their separate supported paths.
+			remoteOrigin = undefined;
 			remoteHost = "gitlab.example.test";
 			const beforeUntrusted = prReads;
 			const untrustedResponse = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit&optional=1`);
@@ -331,6 +364,110 @@ test.describe("remote-state coordinator routes", () => {
 			runner.execFile = originalExecFile;
 			ws?.close();
 			await deleteSession(sessionId);
+		}
+	});
+
+	test("resolves missing PR branch metadata per sibling head without cross-record leakage", async ({ gateway }) => {
+		test.setTimeout(30_000);
+		const primary = gitCwd();
+		const sibling = join(primary, `.remote-pr-head-sibling-${Date.now()}`);
+		const siblingBranch = `remote-pr-head-sibling-${Date.now()}`;
+		const runner = (gateway.sessionManager as any).commandRunner;
+		const originalExecFile = runner.execFile;
+		await runner.execFile("git", ["worktree", "add", "-b", siblingBranch, sibling], { cwd: primary, encoding: "utf-8", timeout: 10_000 });
+		const primarySession = await createSession({ cwd: primary });
+		const siblingSession = await createSession({ cwd: sibling });
+		gateway.sessionManager.updateSessionMeta(primarySession, { branch: "" });
+		gateway.sessionManager.updateSessionMeta(siblingSession, { branch: "" });
+		const privatePrimaryHead = "private-primary-selector";
+		const privateSiblingHead = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		let headUnavailable = false;
+		let prReads = 0;
+		let primaryWs: Awaited<ReturnType<typeof connectWs>> | undefined;
+		let siblingWs: Awaited<ReturnType<typeof connectWs>> | undefined;
+		const telemetry: Array<Record<string, unknown>> = [];
+		const originalDebug = console.debug;
+		console.debug = (...args: unknown[]) => {
+			const line = args.map(String).join(" ");
+			if (!line.startsWith("[remote-state] ")) return;
+			try { telemetry.push(JSON.parse(line.slice("[remote-state] ".length))); } catch { /* assertions below cover safety */ }
+		};
+
+		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+			if (file === "git" && args.join(" ") === "remote get-url origin") {
+				return { stdout: "https://github.com/acme/private-head-isolation.git\n", stderr: "" };
+			}
+			if (file === "git" && args.join(" ") === "symbolic-ref --quiet --short HEAD") {
+				if (headUnavailable || String(options?.cwd) === sibling) throw new Error("detached or unavailable HEAD");
+				return { stdout: `${privatePrimaryHead}\n`, stderr: "" };
+			}
+			if (file === "git" && args.join(" ") === "rev-parse --verify HEAD^{commit}") {
+				if (headUnavailable) throw new Error("unborn HEAD");
+				if (String(options?.cwd) === sibling) return { stdout: `${privateSiblingHead}\n`, stderr: "" };
+			}
+			if (file === "gh" && args[0] === "pr" && args[1] === "view") {
+				prReads += 1;
+				const isSibling = String(options?.cwd) === sibling;
+				const number = isSibling ? 202 : 101;
+				return {
+					stdout: JSON.stringify({
+						number,
+						url: `https://github.com/acme/private-head-isolation/pull/${number}`,
+						title: isSibling ? "sibling result" : "primary result",
+						state: "OPEN",
+						mergeable: "MERGEABLE",
+						headRefName: isSibling ? "public-sibling" : "public-primary",
+						baseRefName: "main",
+					}),
+					stderr: "",
+				};
+			}
+			if (file === "gh" && args[0] === "api") {
+				return { stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }), stderr: "" };
+			}
+			return originalExecFile.call(runner, file, args, options);
+		};
+
+		try {
+			[primaryWs, siblingWs] = await Promise.all([connectWs(primarySession), connectWs(siblingSession)]);
+			const primaryCursor = primaryWs.messageCount();
+			const siblingCursor = siblingWs.messageCount();
+			const [primaryResponse, siblingResponse] = await Promise.all([
+				apiFetch(`/api/sessions/${primarySession}/pr-status?intent=explicit`),
+				apiFetch(`/api/sessions/${siblingSession}/pr-status?intent=explicit`),
+			]);
+			expect(primaryResponse.status).toBe(200);
+			expect(siblingResponse.status).toBe(200);
+			const [primaryBody, siblingBody] = await Promise.all([primaryResponse.json(), siblingResponse.json()]);
+			expect(primaryBody).toMatchObject({ data: { number: 101, title: "primary result" } });
+			expect(siblingBody).toMatchObject({ data: { number: 202, title: "sibling result" } });
+			expect(prReads).toBe(2);
+
+			const [primaryFrame, siblingFrame] = await Promise.all([
+				primaryWs.waitForFrom(primaryCursor, message => message.type === "remote_state_snapshot" && message.resource === "pr"),
+				siblingWs.waitForFrom(siblingCursor, message => message.type === "remote_state_snapshot" && message.resource === "pr"),
+			]);
+			expect(primaryFrame.snapshot.data).toMatchObject({ number: 101 });
+			expect(siblingFrame.snapshot.data).toMatchObject({ number: 202 });
+
+			headUnavailable = true;
+			const beforeUnsupported = prReads;
+			const unsupported = await apiFetch(`/api/sessions/${primarySession}/pr-status?intent=explicit&optional=1`);
+			expect(unsupported.status).toBe(204);
+			expect(prReads).toBe(beforeUnsupported);
+
+			const publicOutput = JSON.stringify({ primaryBody, siblingBody, primaryFrame, siblingFrame, telemetry });
+			expect(publicOutput).not.toContain(privatePrimaryHead);
+			expect(publicOutput).not.toContain(privateSiblingHead);
+			expect(publicOutput).not.toContain("#head:");
+		} finally {
+			runner.execFile = originalExecFile;
+			console.debug = originalDebug;
+			primaryWs?.close();
+			siblingWs?.close();
+			await Promise.all([deleteSession(primarySession), deleteSession(siblingSession)]);
+			await runner.execFile("git", ["worktree", "remove", "--force", sibling], { cwd: primary, encoding: "utf-8", timeout: 10_000 });
+			rmSync(sibling, { recursive: true, force: true });
 		}
 	});
 

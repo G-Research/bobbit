@@ -1334,6 +1334,27 @@ async function execGitArgs(args: string[], cwd: string, timeout = 5000, containe
 	const { stdout } = await runner.execFile("git", args, { cwd, encoding: "utf-8", timeout });
 	return String(stdout).trim();
 }
+
+/** Private canonical selector used only as hashed coordinator identity input. */
+async function resolvePullRequestHeadIdentity(
+	cwd: string,
+	branch: string | undefined,
+	containerId?: string,
+	commandRunner?: CommandRunner,
+): Promise<string | undefined> {
+	const knownBranch = branch?.trim();
+	if (knownBranch) return `ref:${knownBranch}`;
+	try {
+		const symbolicHead = await execGitArgs(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd, 5_000, containerId, commandRunner);
+		if (symbolicHead && symbolicHead !== "HEAD") return `ref:${symbolicHead}`;
+	} catch { /* detached or unavailable; verify the commit object below */ }
+	try {
+		const oid = await execGitArgs(["rev-parse", "--verify", "HEAD^{commit}"], cwd, 5_000, containerId, commandRunner);
+		return /^[0-9a-f]{40,64}$/i.test(oid) ? `oid:${oid.toLowerCase()}` : undefined;
+	} catch {
+		return undefined;
+	}
+}
 // Argument-vector variant of execGitSafe: never passes user input through a shell.
 async function execGitArgsSafe(args: string[], cwd: string, fallback = "", containerId?: string, commandRunner?: CommandRunner): Promise<string> {
 	try { return await execGitArgs(args, cwd, 5000, containerId, commandRunner); } catch { return fallback; }
@@ -2847,14 +2868,22 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		fallbackCwd: string | undefined,
 		address: RemoteStateAddress,
 		intentValue: string | null,
+		identitySource?: { cwd: string; containerId?: string },
 	) => {
 		const forceRequestedAt = performance.now();
 		const remote = await parsePrRemote(cwd);
 		if (!remote) return undefined;
+		const head = await resolvePullRequestHeadIdentity(
+			identitySource?.cwd ?? cwd,
+			branch,
+			identitySource?.containerId,
+			gatewayDeps.commandRunner,
+		);
+		if (!head) return undefined;
 		const effectiveAddress: RemoteStateAddress = intentValue === "sidebar" && address.kind === "goal"
 			? { kind: "sidebar", id: address.id }
 			: address;
-		const identity = remoteStateCoordinator.resolvePullRequestIdentity({ ...remote, head: branch });
+		const identity = remoteStateCoordinator.resolvePullRequestIdentity({ ...remote, head });
 		const key = remoteStateCoordinator.registerPullRequest(identity, {
 			refresh: () => fetchCoordinatedPrStatus(cwd, branch, fallbackCwd),
 			address: effectiveAddress,
@@ -2871,9 +2900,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	};
 	const invalidatePrSnapshot = async (cwd: string, branch: string | undefined): Promise<void> => {
 		try {
-			const remote = await parsePrRemote(cwd);
-			if (remote) remoteStateCoordinator.invalidate(
-				remoteStateCoordinator.resolvePullRequestIdentity({ ...remote, head: branch }).key,
+			const [remote, head] = await Promise.all([
+				parsePrRemote(cwd),
+				resolvePullRequestHeadIdentity(cwd, branch, undefined, gatewayDeps.commandRunner),
+			]);
+			if (remote && head) remoteStateCoordinator.invalidate(
+				remoteStateCoordinator.resolvePullRequestIdentity({ ...remote, head }).key,
 				{ allowImmediateRefresh: true },
 			);
 		} catch { /* no prior snapshot or unavailable identity */ }
@@ -15036,7 +15068,14 @@ async function handleApiRoute(
 		// PR status uses `gh` CLI which needs host filesystem — use worktreePath for sandboxed sessions
 		const prCwd = cid ? (session.worktreePath || process.cwd()) : cwd;
 		const optional = url.searchParams.get("optional") === "1";
-		const snapshot = await remoteState.prSnapshotFor(prCwd, sessionBranch, process.cwd(), { kind: "session", id }, url.searchParams.get("intent"));
+		const snapshot = await remoteState.prSnapshotFor(
+			prCwd,
+			sessionBranch,
+			process.cwd(),
+			{ kind: "session", id },
+			url.searchParams.get("intent"),
+			{ cwd, containerId: cid },
+		);
 		if (!snapshot) {
 			// Local-only and untrusted/non-GitHub remotes are fetch-free. Normal route
 			// reads must never fall back to an independent legacy `gh` lookup.

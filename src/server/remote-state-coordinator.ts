@@ -182,7 +182,7 @@ export function normalizeRemoteIdentity(remote: string): string {
 		try {
 			const url = new URL(value);
 			if (url.protocol === "file:") return `file:${normalizeLocalPath(decodeURIComponent(url.pathname))}`;
-			if (url.hostname) return normalizeHostedPath(url.hostname, url.pathname);
+			if (url.hostname) return normalizeHostedPath(normalizeUrlAuthority(url), url.pathname);
 		} catch {
 			// Invalid URL-shaped values fall through to local path normalization.
 		}
@@ -196,14 +196,22 @@ export function normalizeRemoteIdentity(remote: string): string {
 	return `file:${normalizeLocalPath(value)}`;
 }
 
-/** Normalized GitHub/GHE location for PR identity, preserving the credential host boundary. */
+/** Normalized GitHub/GHE authority for PR identity, preserving a non-default port boundary. */
 export function normalizeGithubHost(host?: string): string {
-	const normalized = (host ?? "github.com").trim().replace(/\.$/, "").toLowerCase();
-	return normalized === "www.github.com" || normalized === "ssh.github.com" ? "github.com" : normalized;
+	const candidate = (host ?? "github.com").trim();
+	const authority = /^([^:/]+?)(?::(\d+))?$/.exec(candidate);
+	if (!authority) return candidate.replace(/\.$/, "").toLowerCase();
+	const normalizedHostname = authority[1].replace(/\.$/, "").toLowerCase();
+	const canonicalHostname = normalizedHostname === "www.github.com" || normalizedHostname === "ssh.github.com"
+		? "github.com"
+		: normalizedHostname;
+	return authority[2] ? `${canonicalHostname}:${authority[2]}` : canonicalHostname;
 }
 
 export function isTrustedGithubRemoteHost(host: string, configuredEnterpriseHosts: readonly string[] = []): boolean {
-	const normalized = normalizeGithubHost(host);
+	const hostname = authorityHostname(host);
+	if (!hostname) return false;
+	const normalized = normalizeGithubHost(hostname);
 	if (normalized === "github.com") return true;
 	return configuredEnterpriseHosts.some((candidate) => normalizeGithubHost(candidate) === normalized);
 }
@@ -233,10 +241,11 @@ export function parseTrustedGithubRemote(
 		let url: URL;
 		try { url = new URL(value); } catch { return undefined; }
 		if (url.protocol !== "https:" && url.protocol !== "http:" && url.protocol !== "ssh:") return undefined;
-		if (url.search || url.hash || url.port) return undefined;
+		if (url.search || url.hash) return undefined;
 		if (url.protocol === "ssh:" && url.password) return undefined;
 		if (url.protocol === "ssh:" && url.username && url.username !== "git") return undefined;
-		host = url.hostname;
+		if (!isTrustedGithubRemoteHost(url.hostname, configuredEnterpriseHosts)) return undefined;
+		host = normalizeUrlAuthority(url);
 		if (!/^\/[^/]+\/[^/]+\/?$/.test(url.pathname)) return undefined;
 		const segments = url.pathname.replace(/^\//, "").replace(/\/$/, "").split("/");
 		[rawOwner, rawRepository] = segments;
@@ -279,10 +288,34 @@ export function normalizePullRequestIdentity(input: PullRequestIdentityInput): s
 	const owner = input.owner.trim().toLowerCase();
 	const repository = stripGitSuffix(input.repository.trim()).toLowerCase();
 	if (!owner || !repository) throw new Error("Pull request identity requires owner and repository");
-	const selector = input.number !== undefined
-		? `number:${input.number}`
-		: input.head?.trim() ? `head:${input.head.trim()}` : "head:default";
+	let selector: string;
+	if (input.number !== undefined) {
+		if (!Number.isSafeInteger(input.number) || input.number <= 0) throw new Error("Pull request identity requires a positive integer number");
+		selector = `number:${input.number}`;
+	} else {
+		const head = input.head?.trim();
+		if (!head) throw new Error("Pull request identity requires a number or resolved head");
+		selector = `head:${head}`;
+	}
 	return `${host}/${owner}/${repository}#${selector}`;
+}
+
+function normalizeUrlAuthority(url: URL): string {
+	const hostname = url.hostname.replace(/\.$/, "").toLowerCase();
+	const defaultPort = (url.protocol === "https:" && url.port === "443")
+		|| (url.protocol === "http:" && url.port === "80")
+		|| (url.protocol === "ssh:" && url.port === "22");
+	return url.port && !defaultPort ? `${hostname}:${url.port}` : hostname;
+}
+
+function authorityHostname(authority: string): string | undefined {
+	const candidate = authority.trim();
+	if (!candidate || candidate.includes("@") || candidate.includes("/")) return undefined;
+	try {
+		return new URL(`https://${candidate}`).hostname.replace(/\.$/, "").toLowerCase();
+	} catch {
+		return undefined;
+	}
 }
 
 function normalizeHostedPath(host: string, pathname: string): string {
