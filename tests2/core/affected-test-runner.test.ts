@@ -8,6 +8,7 @@ import {
 	affectedTests,
 	buildGraph,
 	DOM_ENV,
+	extractRepositoryReadDependencies,
 	FILE_BOUNDARY_RUNNER,
 	GATEWAY_HARNESS,
 	REPO_ROOT,
@@ -21,8 +22,11 @@ import {
 import {
 	SHIPPED_INPUT_FAMILIES,
 	impactRulesForPath,
+	inventoryRepositoryScanInputs,
 	inventoryShippedInputs,
+	repositoryScanRulesForPath,
 	validateImpactInventory,
+	validateRepositoryScanInventory,
 } from "../../scripts/affected/impact-rules.mjs";
 
 type Graph = ReturnType<typeof buildGraph>;
@@ -115,6 +119,64 @@ describe("affected graph inventory and boundaries", () => {
 			.toBeLessThan(graph.meta.bootTests.size);
 		expect(graph.testDeps.get([...graph.meta.bootTests][0])?.has(GATEWAY_HARNESS)).toBe(true);
 	});
+
+	it.each([
+		[
+			"src/app/api.ts",
+			["tests2/core/api-sidebar-expansion-regression.test.ts", "tests2/core/base-path-source-guards.test.ts"],
+		],
+		[
+			"src/app/render.ts",
+			["tests2/core/bobbit-loading-animation-regression.test.ts", "tests2/core/base-path-source-guards.test.ts"],
+		],
+		[
+			"src/ui/ChatPanel.ts",
+			["tests2/core/bobbit-loading-animation-regression.test.ts", "tests2/core/base-path-source-guards.test.ts"],
+		],
+	])("attributes computed source read %s to its readers and cache closures", (dependency, readers) => {
+		const plan = affectedTests(graph, [dependency]);
+		expect(plan.kind).toBe("bounded");
+		expect(plan.affected.size).toBeGreaterThan(0);
+		expect(plan.affected.size).toBeLessThan(graph.testFiles.length);
+		expect(graph.meta.repositoryReads.get(readers[0])?.has(dependency), `${readers[0]} static-read inventory`).toBe(true);
+		for (const reader of readers) {
+			expect(plan.affected.has(reader), `${dependency} -> ${reader}`).toBe(true);
+			expect(graph.testDeps.get(reader)?.has(dependency), `${reader} hash closure includes ${dependency}`).toBe(true);
+		}
+	});
+
+	it("extracts only safe repository-contained static read operands", () => {
+		const source = String.raw`
+			import fs, { readFileSync } from "node:fs";
+			import path, { resolve } from "node:path";
+			import { fileURLToPath } from "node:url";
+			const __dirname = fileURLToPath(new URL(".", import.meta.url));
+			const PROJECT_ROOT = resolve(__dirname, "..", "..");
+			const tempRoot = makeTemporaryRoot();
+			const dynamicPath = getDynamicPath();
+			readFileSync(new URL("../../src/app/api.ts", import.meta.url));
+			readFileSync("src\\app\\api.ts");
+			readFileSync(path.resolve("src/app/render.ts"));
+			fs.readFileSync(path.join(process.cwd(), "src", "ui", "ChatPanel.ts"));
+			readFileSync(resolve(PROJECT_ROOT, "package.json"));
+			readFileSync(path.join(tempRoot, "fixture.txt"));
+			readFileSync(dynamicPath);
+			readFileSync("../outside-repository.txt");
+		`;
+		const extracted = extractRepositoryReadDependencies({
+			repoRoot: REPO_ROOT,
+			importerPath: "tests2/core/static-read-fixture.test.ts",
+			source,
+		});
+		expect([...extracted.dependencies].sort()).toEqual([
+			"package.json",
+			"src/app/api.ts",
+			"src/app/render.ts",
+			"src/ui/ChatPanel.ts",
+		]);
+		expect(extracted.reads.filter((read: { status: string }) => read.status === "unresolved")).toHaveLength(2);
+		expect(extracted.reads.some((read: { status: string }) => read.status === "outside-repository")).toBe(true);
+	});
 });
 
 describe("shipped dynamic input ownership", () => {
@@ -129,6 +191,20 @@ describe("shipped dynamic input ownership", () => {
 			for (const input of familyInputs) {
 				expect(impactRulesForPath(input).map((rule: { id: string }) => rule.id), input).toContain(family.id);
 			}
+		}
+	});
+
+	it("inventories every executable declared computed-scan input", () => {
+		const inventory = inventoryRepositoryScanInputs(REPO_ROOT);
+		const validation = validateRepositoryScanInventory(REPO_ROOT, graph.testFiles);
+		expect(inventory.length).toBeGreaterThan(0);
+		expect(validation.issues).toEqual([]);
+		expect(inventory).toContain("src/app/api.ts");
+		expect(inventory).toContain("src/ui/ChatPanel.ts");
+		for (const input of inventory) {
+			expect(repositoryScanRulesForPath(input).map((rule: { id: string }) => rule.id), input)
+				.toContain("client-source-guards");
+			expect(graph.testDeps.get("tests2/core/base-path-source-guards.test.ts")?.has(input), input).toBe(true);
 		}
 	});
 
@@ -159,14 +235,22 @@ describe("shipped dynamic input ownership", () => {
 });
 
 describe("semantic and fail-closed classification", () => {
-	it("keeps package scripts and publication metadata bounded", () => {
-		const before = { name: "fixture", scripts: { test: "old" }, files: ["dist/"] };
-		const after = { name: "renamed", scripts: { test: "new" }, files: ["dist/", "docs/"] };
+	it("keeps package scripts, publication metadata, and version consumers bounded", () => {
+		const before = { name: "fixture", version: "1.0.0", scripts: { test: "old" }, files: ["dist/"] };
+		const after = { name: "renamed", version: "1.0.1", scripts: { test: "new" }, files: ["dist/", "docs/"] };
 		const plan = packageChange(before, after);
 		expect(plan.kind).toBe("bounded");
-		expect(plan.affected.has("tests2/core/package-files.test.ts")).toBe(true);
-		expect(plan.affected.has("tests2/core/aigw-user-agent.test.ts")).toBe(true);
-		expect(plan.affected.has("tests2/core/unit-file-budget-reporter.test.ts")).toBe(true);
+		for (const consumer of [
+			"tests2/core/package-files.test.ts",
+			"tests2/core/aigw-user-agent.test.ts",
+			"tests2/core/unit-file-budget-reporter.test.ts",
+			"tests2/integration/aigw-configure.test.ts",
+			"tests2/integration/aigw-title-generator.test.ts",
+			"tests2/integration/app-info-api.test.ts",
+		]) {
+			expect(plan.affected.has(consumer), consumer).toBe(true);
+			expect(graph.testDeps.get(consumer)?.has("package.json"), `${consumer} hash closure includes package.json`).toBe(true);
+		}
 		expect(plan.affected.size).toBeLessThan(graph.testFiles.length);
 	});
 

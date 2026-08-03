@@ -149,6 +149,9 @@ export const IMPACT_RULES = Object.freeze([
 			"tests2/core/support-packaging.test.ts",
 			"tests2/core/unit-file-budget-reporter.test.ts",
 			"tests2/core/unit-lanes-scheduling.test.ts",
+			"tests2/integration/aigw-configure.test.ts",
+			"tests2/integration/aigw-title-generator.test.ts",
+			"tests2/integration/app-info-api.test.ts",
 		]),
 	},
 ]);
@@ -165,9 +168,31 @@ export const SHIPPED_INPUT_FAMILIES = Object.freeze([
 	{ id: "committed-config-cascade", qualifies: (path) => path.startsWith(".bobbit/config/") },
 ]);
 
+const REPOSITORY_EXECUTABLE_RE = /\.(?:ts|tsx|mts|cts|mjs|cjs|js|jsx)$/i;
+
+/**
+ * Computed repository scans cannot be recovered from a single readFile call.
+ * Keep those broad-but-bounded ownership edges data-first and independently
+ * enumerable so a newly added file under a declared root cannot be missed.
+ */
+export const REPOSITORY_SCAN_RULES = Object.freeze([
+	{
+		id: "client-source-guards",
+		roots: frozen(["src/app", "src/ui"]),
+		matches: (path) => (path.startsWith("src/app/") || path.startsWith("src/ui/"))
+			&& REPOSITORY_EXECUTABLE_RE.test(path),
+		consumers: frozen(["tests2/core/base-path-source-guards.test.ts"]),
+	},
+]);
+
 export function impactRulesForPath(pathValue) {
 	const path = posix(pathValue);
 	return IMPACT_RULES.filter((rule) => rule.matches(path));
+}
+
+export function repositoryScanRulesForPath(pathValue) {
+	const path = posix(pathValue);
+	return REPOSITORY_SCAN_RULES.filter((rule) => rule.matches(path));
 }
 
 function walkFiles(repoRoot, relativeRoot, out) {
@@ -195,6 +220,38 @@ export function inventoryShippedInputs(repoRoot) {
 	// matched by a family. That independence makes a newly added family fail the
 	// inventory validation instead of silently becoming an affected-test blind spot.
 	return [...new Set(candidates)].sort();
+}
+
+/** Enumerate every executable input covered by a declared computed scan. */
+export function inventoryRepositoryScanInputs(repoRoot) {
+	const candidates = [];
+	for (const rule of REPOSITORY_SCAN_RULES) {
+		for (const root of rule.roots) walkFiles(repoRoot, root, candidates);
+	}
+	return [...new Set(candidates)]
+		.filter((path) => repositoryScanRulesForPath(path).length > 0)
+		.sort();
+}
+
+/** Validate declared scans independently from static read extraction. */
+export function validateRepositoryScanInventory(repoRoot, unitTests) {
+	const testSet = unitTests instanceof Set ? unitTests : new Set(unitTests);
+	const inputs = inventoryRepositoryScanInputs(repoRoot);
+	const issues = [];
+	for (const rule of REPOSITORY_SCAN_RULES) {
+		const owned = inputs.filter((path) => rule.matches(path));
+		if (owned.length === 0) issues.push(`${rule.id}: computed repository scan is empty`);
+		for (const root of rule.roots) {
+			const rootPrefix = `${posix(root).replace(/\/$/, "")}/`;
+			if (!owned.some((path) => path.startsWith(rootPrefix))) {
+				issues.push(`${rule.id}: computed repository scan root is empty: ${root}`);
+			}
+		}
+		for (const consumer of rule.consumers) {
+			if (!testSet.has(consumer)) issues.push(`${rule.id}: unit consumer is missing or not unit-owned: ${consumer}`);
+		}
+	}
+	return { inputs, issues };
 }
 
 /**
