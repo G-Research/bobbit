@@ -11,11 +11,12 @@ import {
 	createSession,
 	deleteGoal,
 	deleteSession,
+	rawApiFetch,
 	teardownTeam,
 } from "./_e2e/e2e-setup.js";
 
 type Goal = { id: string; state: string; paused?: boolean; archived?: boolean };
-type StartBody = { sessionId?: string; title?: string; error?: string; code?: string; stack?: string };
+type StartBody = { sessionId?: string; title?: string; error?: string; code?: string; goalId?: string; stack?: string };
 
 async function createManualTeamGoal(label: string): Promise<Goal> {
 	return createGoal({
@@ -33,9 +34,26 @@ async function getGoal(goalId: string): Promise<Goal> {
 	return response.json();
 }
 
-async function start(goalId: string): Promise<{ response: Response; body: StartBody }> {
-	const response = await apiFetch(`/api/goals/${goalId}/team/start`, { method: "POST" });
+async function start(goalId: string, headers?: Record<string, string>): Promise<{ response: Response; body: StartBody }> {
+	const response = await rawApiFetch(`/api/goals/${goalId}/team/start`, { method: "POST", headers });
 	return { response, body: await response.json() };
+}
+
+let humanCookie = "";
+
+test.beforeAll(async () => {
+	// Mint the same signed UI cookie that authorizes the canonical resume route.
+	const response = await rawApiFetch("/api/goals", {
+		headers: { "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" },
+	});
+	const setCookies = (response.headers as any).getSetCookie?.() as string[] | undefined
+		?? (response.headers.get("set-cookie") ? [response.headers.get("set-cookie") as string] : []);
+	humanCookie = setCookies.map(cookie => cookie.split(";")[0]).find(cookie => cookie.startsWith("bobbit_session=")) ?? "";
+	expect(humanCookie, "browser-signaled operator auth must mint a signed cookie").not.toBe("");
+});
+
+function humanHeaders(): Record<string, string> {
+	return { Cookie: humanCookie };
 }
 
 test.describe("paused team-start API lifecycle", () => {
@@ -52,7 +70,7 @@ test.describe("paused team-start API lifecycle", () => {
 			expect((await getGoal(goal.id)).paused).toBe(true);
 
 			const cursor = observer.messageCount();
-			const { response, body } = await start(goal.id);
+			const { response, body } = await start(goal.id, humanHeaders());
 			expect(response.status, JSON.stringify(body)).toBe(201);
 			expect(body.sessionId).toEqual(expect.any(String));
 			await observer.waitForFrom(cursor, message => message.type === "goal_state_changed" && message.goalId === goal.id);
@@ -91,17 +109,22 @@ test.describe("paused team-start API lifecycle", () => {
 		}
 	});
 
-	test("concurrent and repeated POST /team/start requests return one canonical team lead", async ({ gateway }) => {
+	test("concurrent and repeated paused POST /team/start requests return one canonical team lead", async ({ gateway }) => {
 		const goal = await createManualTeamGoal("idempotent");
 		try {
-			const concurrent = await Promise.all(Array.from({ length: 4 }, () => start(goal.id)));
+			const pause = await apiFetch(`/api/goals/${goal.id}/pause`, {
+				method: "POST",
+				body: JSON.stringify({ cascade: false }),
+			});
+			expect(pause.status).toBe(200);
+			const concurrent = await Promise.all(Array.from({ length: 4 }, () => start(goal.id, humanHeaders())));
 			for (const result of concurrent) expect(result.response.status, JSON.stringify(result.body)).toBe(201);
 			const leadIds = new Set(concurrent.map(result => result.body.sessionId));
 			expect(leadIds.size).toBe(1);
 			const [leadId] = leadIds;
 			expect(leadId).toEqual(expect.any(String));
 
-			const repeated = await start(goal.id);
+			const repeated = await start(goal.id, humanHeaders());
 			expect(repeated.response.status, JSON.stringify(repeated.body)).toBe(201);
 			expect(repeated.body.sessionId).toBe(leadId);
 
@@ -114,6 +137,56 @@ test.describe("paused team-start API lifecycle", () => {
 			expect(liveLeads).toEqual([expect.objectContaining({ id: leadId })]);
 		} finally {
 			await teardownTeam(goal.id);
+			await deleteGoal(goal.id);
+		}
+	});
+
+	test("rejects unauthorized paused starts without resuming or creating a session", async ({ gateway }) => {
+		const goal = await createManualTeamGoal("authz");
+		let foreignSessionId: string | undefined;
+		try {
+			const active = await start(goal.id);
+			expect(active.response.status, JSON.stringify(active.body)).toBe(201);
+			const leadId = active.body.sessionId!;
+			const pause = await apiFetch(`/api/goals/${goal.id}/pause`, {
+				method: "POST",
+				body: JSON.stringify({ cascade: false }),
+			});
+			expect(pause.status).toBe(200);
+			foreignSessionId = await createSession();
+			const foreignSecret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(foreignSessionId);
+			const leadCount = () => gateway.sessionManager.listSessions()
+				.filter((session: any) => session.goalId === goal.id && session.role === "team-lead").length;
+			const initialLeadCount = leadCount();
+
+			for (const [label, headers] of [
+				["Bearer only", {}],
+				["forged public lead header", { "X-Bobbit-Spawning-Session": leadId }],
+				["foreign session secret", { "X-Bobbit-Session-Secret": foreignSecret }],
+			] as const) {
+				const result = await start(goal.id, headers);
+				expect(result.response.status, `${label}: ${JSON.stringify(result.body)}`).toBe(403);
+				expect(result.body).toMatchObject({
+					code: "NOT_TEAM_LEAD",
+					error: expect.stringMatching(/authorized/i),
+					goalId: goal.id,
+				});
+				expect((await getGoal(goal.id)).paused, `${label} must not resume the goal`).toBe(true);
+				expect(leadCount(), `${label} must not create another team lead`).toBe(initialLeadCount);
+				expect(gateway.teamManager.getTeamState(goal.id)?.teamLeadSessionId).toBe(leadId);
+			}
+
+			// An established lead can use its authentic secret, unlike the forged
+			// public identity header above.
+			const leadSecret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(leadId);
+			const authorized = await start(goal.id, { "X-Bobbit-Session-Secret": leadSecret });
+			expect(authorized.response.status, JSON.stringify(authorized.body)).toBe(201);
+			expect(authorized.body.sessionId).toBe(leadId);
+			expect((await getGoal(goal.id)).paused).not.toBe(true);
+			expect(leadCount()).toBe(initialLeadCount);
+		} finally {
+			await teardownTeam(goal.id);
+			if (foreignSessionId) await deleteSession(foreignSessionId);
 			await deleteGoal(goal.id);
 		}
 	});
