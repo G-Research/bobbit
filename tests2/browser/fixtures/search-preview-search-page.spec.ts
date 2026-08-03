@@ -186,6 +186,28 @@ test.describe("Search page grouped-results fixture", () => {
 		await expect(sessionCards).toHaveCount(1);
 	});
 
+	test("503 recovery is explicit, never renders false No matches, and manual retry recovers", async ({ page }) => {
+		const recovered = goal("recovered-goal", "Recovered result");
+		await page.evaluate((fixture) => (window as any).__setSearchPageFixture(fixture), {
+			query: "recover-token",
+			searchResponses: [
+				{ status: 503, reason: "rebuilding", state: "ready", retryAfter: "2" },
+				{ status: 200, results: [recovered], total: 1 },
+			],
+		});
+		await expect(page.locator("input[placeholder='Search everything...']")).toHaveValue("recover-token");
+
+		const unavailable = page.locator('[data-role="search-unavailable"]');
+		await expect(unavailable).toBeVisible({ timeout: 10_000 });
+		await expect(unavailable).toHaveAttribute("data-reason", "rebuilding");
+		await expect(unavailable).toContainText("Search is rebuilding");
+		await expect(page.getByText(/No matches for "recover-token"/)).toHaveCount(0);
+
+		await unavailable.getByRole("button", { name: "Try again now" }).click();
+		await expect(page.locator('[data-role="result-group"]')).toContainText("Recovered result", { timeout: 10_000 });
+		await expect(unavailable).toHaveCount(0);
+	});
+
 	test("stale-click shows an inline toast, not a modal", async ({ page }) => {
 		await setupSearch(page, [], "");
 		await page.evaluate(() => {

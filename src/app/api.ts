@@ -870,17 +870,51 @@ async function fetchArchivedSearchSessionsPage(limit: number, afterCursor: numbe
 // SEARCH API
 // ============================================================================
 
-export async function searchApi(query: string, type?: string, limit?: number, offset?: number): Promise<{ results: any[]; total: number }> {
+export type SearchUnavailableReason = "rebuilding" | "backpressure" | "degraded" | "worker-backoff" | "initializing" | "closed" | string;
+
+export type SearchApiResponse =
+	| { available: true; results: any[]; total: number }
+	| { available: false; reason: SearchUnavailableReason; state?: string; retryAfterMs?: number };
+
+function retryAfterMs(response: Response): number | undefined {
+	const raw = response.headers.get("Retry-After");
+	if (!raw) return undefined;
+	const seconds = Number(raw);
+	if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+	const date = Date.parse(raw);
+	return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
+}
+
+/** Query search without disguising a recoverable 503 as an empty result set. */
+export async function searchApi(query: string, type?: string, limit?: number, offset?: number): Promise<SearchApiResponse> {
+	const params = new URLSearchParams({ q: query, includeArchived: "true" });
+	if (type && type !== "all") params.set("type", type);
+	if (limit !== undefined) params.set("limit", String(limit));
+	if (offset !== undefined) params.set("offset", String(offset));
 	try {
-		const params = new URLSearchParams({ q: query, includeArchived: "true" });
-		if (type && type !== "all") params.set("type", type);
-		if (limit !== undefined) params.set("limit", String(limit));
-		if (offset !== undefined) params.set("offset", String(offset));
 		const res = await gatewayFetch(`/api/search?${params}`);
-		if (!res.ok) return { results: [], total: 0 };
-		return await res.json();
-	} catch {
-		return { results: [], total: 0 };
+		if (res.status === 503) {
+			const body = await res.json().catch(() => ({})) as { error?: unknown; reason?: unknown; state?: unknown };
+			if (body.error === "search-unavailable") {
+				return {
+					available: false,
+					reason: typeof body.reason === "string" ? body.reason : "degraded",
+					state: typeof body.state === "string" ? body.state : undefined,
+					retryAfterMs: retryAfterMs(res),
+				};
+			}
+		}
+		if (!res.ok) throw new Error(`Search failed: ${res.status}`);
+		const body = await res.json() as { results?: unknown; total?: unknown };
+		return {
+			available: true,
+			results: Array.isArray(body.results) ? body.results : [],
+			total: typeof body.total === "number" ? body.total : 0,
+		};
+	} catch (err) {
+		// A transport failure must not turn an existing or pending search into a
+		// misleading "No matches" result either.
+		return { available: false, reason: "degraded", state: err instanceof Error ? err.message : undefined };
 	}
 }
 
@@ -895,6 +929,9 @@ export interface SearchStats {
 	engine: string;
 	engineVersion: string;
 	state: "ready" | "rebuilding" | "disabled" | "error" | "initializing" | "closed" | string;
+	/** The worker is recovering, so stats are intentionally not queryable yet. */
+	degraded?: boolean;
+	unavailableReason?: SearchUnavailableReason | null;
 }
 
 export async function searchStats(projectId?: string): Promise<SearchStats | null> {

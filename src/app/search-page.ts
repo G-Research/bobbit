@@ -4,9 +4,9 @@
 
 import { html, nothing, type TemplateResult } from "lit";
 import { icon } from "@mariozechner/mini-lit";
-import { ArrowLeft, Search, Loader2, Archive, ChevronRight, Goal as GoalIcon, MessagesSquare, MessageSquare, Bot } from "lucide";
+import { ArrowLeft, Search, Loader2, Archive, ChevronRight, Goal as GoalIcon, MessagesSquare, MessageSquare, Bot, TriangleAlert } from "lucide";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
-import { searchApi } from "./api.js";
+import { searchApi, type SearchApiResponse } from "./api.js";
 import { renderApp } from "./state.js";
 import { setHashRoute, getRouteFromHash } from "./routing.js";
 import { connectToSession } from "./session-manager.js";
@@ -66,27 +66,79 @@ let _staleIds = new Set<string>();
 let _staleToast: { kind: string; id: string; at: number } | null = null;
 let _staleToastTimer: ReturnType<typeof setTimeout> | null = null;
 let _staleListenerBound = false;
+let _searchRunId = 0;
+let _retryTimer: ReturnType<typeof setTimeout> | null = null;
+let _retryAttempts = 0;
+let _unavailable: Extract<SearchApiResponse, { available: false }> | null = null;
+let _unavailableAppend = false;
+
+const MAX_SEARCH_RETRIES = 3;
+const MAX_RETRY_DELAY_MS = 4_000;
 
 // ============================================================================
 // SEARCH LOGIC
 // ============================================================================
 
+function _clearSearchRetry(): void {
+	if (_retryTimer) clearTimeout(_retryTimer);
+	_retryTimer = null;
+}
+
+function _clearSearchUnavailable(): void {
+	_clearSearchRetry();
+	_retryAttempts = 0;
+	_unavailable = null;
+	_unavailableAppend = false;
+}
+
+function _retryDelay(unavailable: Extract<SearchApiResponse, { available: false }>): number {
+	const base = unavailable.reason === "backpressure" ? 300
+		: unavailable.reason === "rebuilding" ? 750
+			: unavailable.reason === "worker-backoff" ? 1_500 : 1_000;
+	const exponential = Math.min(MAX_RETRY_DELAY_MS, base * 2 ** _retryAttempts);
+	// Retry-After is an explicit server instruction. The exponential cap keeps
+	// locally selected retries short while still never retrying earlier than it.
+	return Math.max(exponential, unavailable.retryAfterMs ?? 0);
+}
+
+function _scheduleSearchRetry(append: boolean, runId: number): void {
+	_clearSearchRetry();
+	if (_retryAttempts >= MAX_SEARCH_RETRIES || !_unavailable) return;
+	const delay = _retryDelay(_unavailable);
+	_retryAttempts++;
+	_retryTimer = setTimeout(() => {
+		_retryTimer = null;
+		if (runId !== _searchRunId || !_unavailable || !_query.trim()) return;
+		void _doSearch(append);
+	}, delay);
+}
+
 async function _doSearch(append = false): Promise<void> {
 	if (!_query.trim()) {
+		_searchRunId++;
 		_results = [];
 		_total = 0;
 		_loading = false;
+		_clearSearchUnavailable();
 		if (!append) _expanded.clear();
 		renderApp();
 		return;
 	}
+	_clearSearchRetry();
+	const runId = ++_searchRunId;
 	_loading = true;
 	if (!append) _expanded.clear();
 	renderApp();
 	const querySnapshot = _query;
 	try {
-		const data = await searchApi(_query, "all", 50, append ? _offset : 0);
-		if (_query !== querySnapshot) return; // discard stale response
+		const data = await searchApi(querySnapshot, "all", 50, append ? _offset : 0);
+		if (runId !== _searchRunId || _query !== querySnapshot) return; // discard stale response
+		if (!data.available) {
+			_unavailable = data;
+			_unavailableAppend = append;
+			_scheduleSearchRetry(append, runId);
+			return;
+		}
 		if (!append) {
 			_results = data.results as SearchResultItem[];
 			_offset = data.results.length;
@@ -95,19 +147,37 @@ async function _doSearch(append = false): Promise<void> {
 			_offset += data.results.length;
 		}
 		_total = data.total;
-	} catch (err) {
-		console.error("[search-page] Search failed:", err);
+		// Only a response for the current run is allowed to dismiss recovery UI.
+		_clearSearchUnavailable();
+	} finally {
+		if (runId === _searchRunId) {
+			_loading = false;
+			renderApp();
+		}
 	}
-	_loading = false;
-	renderApp();
+}
+
+function _trySearchAgain(): void {
+	if (!_query.trim()) return;
+	_clearSearchRetry();
+	_retryAttempts = 0;
+	void _doSearch(_unavailableAppend);
 }
 
 function _handleInput(e: Event): void {
 	_query = (e.target as HTMLInputElement).value;
 	if (_debounceTimer) clearTimeout(_debounceTimer);
+	// Fence in-flight responses and retry timers from the prior query, without
+	// dismissing its recovery status until this query succeeds.
+	_searchRunId++;
+	_clearSearchRetry();
+	if (!_query.trim()) {
+		// Clearing the input is an explicit route reset, not a failed search.
+		_clearSearchUnavailable();
+	}
 	_debounceTimer = setTimeout(() => {
 		_offset = 0;
-		_doSearch();
+		void _doSearch();
 		// Update URL without navigation
 		const newHash = _query ? `#/search?q=${encodeURIComponent(_query)}` : "#/search";
 		if (window.location.hash !== newHash) {
@@ -125,6 +195,8 @@ function _handleKeydown(e: KeyboardEvent): void {
 			_total = 0;
 			_offset = 0;
 			_expanded.clear();
+			_clearSearchUnavailable();
+			_searchRunId++;
 			renderApp();
 		} else {
 			_initialized = false;
@@ -146,7 +218,7 @@ function _toggleFilter(type: string): void {
 }
 
 function _loadMore(): void {
-	_doSearch(true);
+	void _doSearch(true);
 }
 
 // ============================================================================
@@ -381,6 +453,8 @@ export function initSearchPage(): void {
 /** Reset init flag so the next initSearchPage() reads the URL again (called on hashchange away). */
 export function resetSearchPage(): void {
 	_initialized = false;
+	_searchRunId++;
+	_clearSearchUnavailable();
 }
 
 
@@ -585,6 +659,40 @@ function _renderGroupCard(group: ResultGroup) {
 // RENDER — results list
 // ============================================================================
 
+function _searchUnavailableCopy(reason: string): { label: string; detail: string; spinning: boolean } {
+	if (reason === "rebuilding" || reason === "initializing") {
+		return { label: "Search is rebuilding", detail: "Results will return when rebuilding finishes.", spinning: true };
+	}
+	if (reason === "backpressure") {
+		return { label: "Search is catching up", detail: "Search is handling a busy queue. Results will return shortly.", spinning: true };
+	}
+	return { label: "Search is recovering", detail: "The search worker is reconnecting. Existing results are kept.", spinning: false };
+}
+
+function _renderSearchUnavailable(): TemplateResult | typeof nothing {
+	if (!_unavailable || !_query.trim()) return nothing;
+	const copy = _searchUnavailableCopy(_unavailable.reason);
+	return html`
+		<div
+			data-role="search-unavailable"
+			data-reason=${_unavailable.reason}
+			class="flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-foreground"
+			role="status"
+		>
+			<span class="shrink-0 text-amber-700 dark:text-amber-300">
+				${copy.spinning ? html`<span class="inline-flex animate-spin">${icon(Loader2, "sm")}</span>` : icon(TriangleAlert, "sm")}
+			</span>
+			<span class="min-w-0 flex-1"><strong>${copy.label}.</strong> <span class="text-muted-foreground">${copy.detail}</span></span>
+			<button
+				data-action="retry-search"
+				class="shrink-0 rounded px-2 py-1 font-medium text-foreground hover:bg-amber-500/20 transition-colors disabled:opacity-50"
+				?disabled=${_loading}
+				@click=${_trySearchAgain}
+			>Try again now</button>
+		</div>
+	`;
+}
+
 function _renderResults(): TemplateResult | typeof nothing {
 	// Loading state (no results yet)
 	if (_loading && _results.length === 0) {
@@ -596,8 +704,8 @@ function _renderResults(): TemplateResult | typeof nothing {
 		`;
 	}
 
-	// Empty state
-	if (!_loading && _query && _results.length === 0) {
+	// Empty state. A 503 is recoverable and must never masquerade as no matches.
+	if (!_loading && !_unavailable && _query && _results.length === 0) {
 		return html`
 			<div class="flex flex-col items-center justify-center py-12 text-muted-foreground text-sm gap-1">
 				<span>No matches for "${_query}"</span>
@@ -625,6 +733,7 @@ function _renderResults(): TemplateResult | typeof nothing {
 	});
 
 	if (filtered.length === 0) {
+		if (_unavailable) return nothing;
 		return html`
 			<div class="flex flex-col items-center justify-center py-12 text-muted-foreground text-sm gap-1">
 				<span>No matches for the selected filters</span>
@@ -695,6 +804,9 @@ export function renderSearchPage(): TemplateResult {
 						</button>
 					`)}
 				</div>
+
+				<!-- Search recovery status -->
+				${_renderSearchUnavailable()}
 
 				<!-- Stale-result toast -->
 				${_staleToast ? html`
