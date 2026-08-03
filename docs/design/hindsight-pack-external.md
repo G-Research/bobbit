@@ -299,8 +299,9 @@ constructed, no Hindsight network is touched, and spawn args/prompt text stay at
 baseline until configured (§9.5).
 
 Health is treated as a runtime condition layered on top of activation: when active but the client
-reports unhealthy/times out, recalls skip (non-fatal) and retains queue (§8); the pack stays
-"configured" and the `status` route reports `unhealthy`.
+reports unhealthy/times out, recalls skip (non-fatal) and failed retains attempt the durable queue
+contract in §8. A retry exists only after its queue snapshot persists; the pack stays "configured"
+and the `status` route reports `unhealthy`.
 
 ### 5.2 Hooks
 
@@ -308,8 +309,8 @@ reports unhealthy/times out, recalls skip (non-fatal) and retains queue (§8); t
 |---|---|
 | `sessionSetup` | If `autoRecall`: `recall(bank, ctx.prompt /* goal/task spec */, { maxTokens: recallBudget, tags, tagsMatch })`. Map results → `ContextBlock[]` titled **"Relevant memory"**, `authority:"memory"`. On error/timeout ⇒ `{ blocks: [] }` + diagnostic. |
 | `beforePrompt` | If `autoRecall`: `recall(bank, ctx.prompt /* user turn */, …)` under a deadline = provider `timeoutMs`; skip on timeout (non-fatal). Same block mapping. |
-| `afterTurn` | If `autoRetain`: build a compact turn summary (user text + final assistant text, capped ~2000 chars), `retain(bank, summary, { tags, sync:false })` **async** (fire-and-forget). On failure, push `{ content, tags, ts }` onto the retry queue (§8). Also drains one queue head per call. |
-| `beforeCompact` | If `autoRetain`: `retain(bank, <about-to-be-lost span summary>, { tags, sync:true })` — synchronous so the memory lands before context is dropped. Failure ⇒ queue. |
+| `afterTurn` | If `autoRetain`: build a compact turn summary (user text + final assistant text, capped ~2000 chars), `retain(bank, summary, { tags, sync:false })` **async** (fire-and-forget). On remote failure, attempt to persist `{ content, tags, ts }` to the retry queue (§8); only a durable write creates a retry. A compound failure emits the fixed non-secret diagnostic while the Lifecycle Hub keeps the main turn available. Also drains one queue head per call. |
+| `beforeCompact` | If `autoRetain`: `retain(bank, <about-to-be-lost span summary>, { tags, sync:true })` — synchronous so the memory lands before context is dropped. On remote failure, use the same durable-enqueue and non-fatal compound-failure contract (§8). |
 | `sessionShutdown` | Best-effort **one-pass** queue drain. No throw. |
 
 ### 5.3 Block shape & fencing
@@ -459,9 +460,9 @@ overlay are added **in the loader path, not the provider** (so every provider be
 - **Auto-tag taxonomy** on retain: `project/goal/agent/session/kind` all present and correct.
 - **`recallScope`**: `project` ⇒ `project:<id>` tag filter sent; `all` ⇒ no project filter.
 - **Provider store capability + retry queue**: provider hooks receive proxied `ctx.host.store`
-  with `capabilities.store === true`; failure enqueues durably; cap 100 drops oldest; later
-  `afterTurn` drains head; `sessionShutdown` one-pass drain; `status.queueDepth` reads the same
-  pack-store key.
+  with `capabilities.store === true`; a failed retain is recoverable only after its enqueue
+  persists; cap 100 drops oldest; later `afterTurn` drains head with durable-removal semantics;
+  `sessionShutdown` makes one pass; `status.queueDepth` reads the same pack-store key.
 - **Block shape**: `authority:"memory"`, title, reason, content formatting; empty recall ⇒ no
   block.
 
