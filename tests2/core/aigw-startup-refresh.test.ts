@@ -173,8 +173,15 @@ describe("startupAigwCheck — models.json refresh on startup", () => {
 		const before = readFileSync(path.join(tmp, "models.json"));
 
 		const prefs = new PreferencesStore(stateDir);
-		// Port 1 is reserved (TCPMUX) and reliably refuses connections.
-		prefs.set("aigw.url", "http://127.0.0.1:1");
+		// Exercise the persisted multi-gateway path directly. Port 1 is reserved
+		// (TCPMUX) and reliably refuses connections.
+		prefs.set("modelGateways", [{
+			id: "retained-aigw",
+			name: "aigw",
+			url: "http://127.0.0.1:1",
+			type: "aigw",
+			enabled: true,
+		}]);
 
 		const warnings: string[] = [];
 		const origWarn = console.warn;
