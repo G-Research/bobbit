@@ -242,6 +242,20 @@ interface PrStatus extends RemoteStateMetadata {
 	headRefName?: string;
 }
 let prStatus: PrStatus | null = null;
+/** Metadata is independent of PR data so cold/failed reads still render safely. */
+let prSnapshotMetadata: RemoteStateMetadata | undefined;
+
+function copyRemoteStateMetadata(value: RemoteStateMetadata): RemoteStateMetadata | undefined {
+	const metadata: RemoteStateMetadata = {
+		...(value.observedAt === undefined ? {} : { observedAt: value.observedAt }),
+		...(value.refreshedAt === undefined ? {} : { refreshedAt: value.refreshedAt }),
+		...(value.ageMs === undefined ? {} : { ageMs: value.ageMs }),
+		...(value.stale === undefined ? {} : { stale: value.stale }),
+		...(value.source === undefined ? {} : { source: value.source }),
+		...(value.lastError === undefined ? {} : { lastError: value.lastError }),
+	};
+	return Object.keys(metadata).length > 0 ? metadata : undefined;
+}
 
 /** Aggregated cost for goal */
 interface GoalCost {
@@ -604,21 +618,7 @@ function applyDashboardRemoteStateSnapshot(message: Record<string, unknown>): bo
 		return true;
 	}
 	if (resource !== "pr" && resource !== "pr_status") return false;
-	if (isPrStatus(snapshot.data)) {
-		const next: PrStatus = { ...snapshot.data, ...snapshot };
-		if (JSON.stringify(next) === JSON.stringify(prStatus)) return false;
-		prStatus = next;
-		state.prStatusCache.set(currentGoalId!, next);
-		return true;
-	}
-	// Keep the last good PR visible on coordinator failure. A clean empty
-	// snapshot is authoritative no-PR state.
-	if (snapshot.data === null && !snapshot.lastError && prStatus !== null) {
-		prStatus = null;
-		state.prStatusCache.delete(currentGoalId!);
-		return true;
-	}
-	return false;
+	return applyDashboardPrSnapshot(currentGoalId!, snapshot as RemoteStateSnapshot<PrStatus>);
 }
 
 function connectDashboardWs(): void {
@@ -839,6 +839,7 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 
 		if (prStatusRes && prStatusRes.status === 204) {
 			prStatus = null;
+			prSnapshotMetadata = undefined;
 			state.prStatusCache.delete(goalId);
 		} else if (prStatusRes && prStatusRes.ok) {
 			const snapshot = parseRemoteStateSnapshot<PrStatus>(await prStatusRes.json());
@@ -994,6 +995,7 @@ export function clearDashboardState(): void {
 	if (gitStatusAbort) { gitStatusAbort.abort(); gitStatusAbort = null; }
 	gitStatusLastRefreshAt = 0;
 	prStatus = null;
+	prSnapshotMetadata = undefined;
 	goalCost = null;
 	costPopoverOpen = false;
 	stopAgentPolling();
@@ -1384,30 +1386,44 @@ function startGitStatusPolling(goalId: string): void {
 }
 
 function applyDashboardPrSnapshot(goalId: string, snapshot: RemoteStateSnapshot<PrStatus>): boolean {
+	const metadata = copyRemoteStateMetadata(snapshot);
+	const metadataChanged = JSON.stringify(metadata) !== JSON.stringify(prSnapshotMetadata);
+	prSnapshotMetadata = metadata;
 	if (isPrStatus(snapshot.data)) {
-		const next: PrStatus = { ...snapshot.data, ...snapshot };
-		if (JSON.stringify(next) === JSON.stringify(prStatus)) return false;
+		const next: PrStatus = { ...snapshot.data, ...metadata };
+		if (JSON.stringify(next) === JSON.stringify(prStatus)) return metadataChanged;
 		prStatus = next;
 		state.prStatusCache.set(goalId, next);
 		return true;
 	}
 	if (snapshot.data === null && !snapshot.stale && !snapshot.lastError) {
 		const cacheDeleted = state.prStatusCache.delete(goalId);
-		const changed = prStatus !== null || cacheDeleted;
+		const changed = prStatus !== null || cacheDeleted || metadataChanged;
 		prStatus = null;
 		return changed;
 	}
-	return false;
+	// Failure/cold snapshots retain the last-good PR projection while updating
+	// its complete PR metadata record; never mix fields from the Git snapshot.
+	if (prStatus && metadata) {
+		const next = { ...prStatus, ...metadata };
+		if (JSON.stringify(next) !== JSON.stringify(prStatus)) {
+			prStatus = next;
+			state.prStatusCache.set(goalId, next);
+			return true;
+		}
+	}
+	return metadataChanged;
 }
 
-async function refreshGoalPrStatus(goalId: string, intent: "automatic" | "visible"): Promise<void> {
+async function refreshGoalPrStatus(goalId: string, intent: "automatic" | "visible" | "explicit"): Promise<void> {
 	try {
 		const res = await gatewayFetch(`/api/goals/${goalId}/pr-status?optional=1&intent=${intent}`).catch(() => null);
 		if (!res || currentGoalId !== goalId) return;
 		if (res.status === 204) {
 			const cacheDeleted = state.prStatusCache.delete(goalId);
-			const changed = prStatus !== null || cacheDeleted;
+			const changed = prStatus !== null || prSnapshotMetadata !== undefined || cacheDeleted;
 			prStatus = null;
+			prSnapshotMetadata = undefined;
 			if (changed) renderApp();
 			return;
 		}
@@ -1818,6 +1834,7 @@ async function handlePrMerge(e: CustomEvent<{ method: string; admin?: boolean; b
 		}
 		if (prRes && prRes.status === 204) {
 			prStatus = null;
+			prSnapshotMetadata = undefined;
 			state.prStatusCache.delete(goalId);
 		} else if (prRes && prRes.ok) {
 			const snapshot = parseRemoteStateSnapshot<PrStatus>(await prRes.json());
@@ -1830,14 +1847,31 @@ async function handlePrMerge(e: CustomEvent<{ method: string; admin?: boolean; b
 
 async function handleGitFetch(): Promise<void> {
 	if (!currentGoalId) return;
-	await refreshGoalGitStatus(currentGoalId, { fetch: true });
+	await refreshGoalGitStatus(currentGoalId, { fetch: true, intent: "explicit" });
+}
+
+async function handleRemoteStateRefresh(event: CustomEvent<{ resource?: string }>): Promise<void> {
+	if (!currentGoalId) return;
+	const goalId = currentGoalId;
+	if (event.detail?.resource === "pr") {
+		await refreshGoalPrStatus(goalId, "explicit");
+		return;
+	}
+	if (event.detail?.resource === "git") {
+		await refreshGoalGitStatus(goalId, { fetch: true, intent: "explicit" });
+		return;
+	}
+	await Promise.all([
+		refreshGoalGitStatus(goalId, { fetch: true, intent: "explicit" }),
+		refreshGoalPrStatus(goalId, "explicit"),
+	]);
 }
 
 async function handleGitStatusDropdownOpen(): Promise<void> {
 	if (!currentGoalId) return;
-	// Opening explicitly refreshes remote refs and loads the complete file list
-	// in one request. The coordinator owns force/single-flight semantics for it.
-	await refreshGoalGitStatus(currentGoalId, { fetch: true, untracked: true, intent: "explicit" });
+	// Dropdown visibility joins fresh/in-flight refs while the same request loads
+	// complete local untracked details. The footer is the explicit force path.
+	await refreshGoalGitStatus(currentGoalId, { untracked: true, intent: "visible" });
 }
 
 // ============================================================================
@@ -2217,6 +2251,10 @@ function renderTreeCostRow(): TemplateResult | typeof nothing {
 function renderMetaRows(goal: Goal): TemplateResult {
 	const branch = goal.branch || "";
 	const gs = gitStatus;
+	// Prefer the complete PR metadata record after any PR read, matching the
+	// session widget. Field-by-field fallback can hide a PR error behind a
+	// healthy Git `stale: false` while displaying an unrelated Git age/source.
+	const remoteMetadata = prSnapshotMetadata ?? gs ?? undefined;
 	const hideGitAffordances = isHeadquartersNoWorktreeGoal(goal);
 
 	return html`
@@ -2266,12 +2304,12 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.statusFiles=${gs?.status ?? []}
 						.repos=${gs?.repos as any}
 						.loading=${!gs && !!branch}
-						.remoteStale=${gs?.stale ?? prStatus?.stale ?? false}
-						.remoteObservedAt=${gs?.observedAt ?? prStatus?.observedAt}
-						.remoteRefreshedAt=${gs?.refreshedAt ?? prStatus?.refreshedAt}
-						.remoteAgeMs=${gs?.ageMs ?? prStatus?.ageMs}
-						.remoteLastError=${gs?.lastError ?? prStatus?.lastError}
-						.remoteSource=${gs?.source ?? prStatus?.source}
+						.remoteStale=${remoteMetadata?.stale ?? false}
+						.remoteObservedAt=${remoteMetadata?.observedAt}
+						.remoteRefreshedAt=${remoteMetadata?.refreshedAt}
+						.remoteAgeMs=${remoteMetadata?.ageMs}
+						.remoteLastError=${remoteMetadata?.lastError}
+						.remoteSource=${remoteMetadata?.source}
 						.prState=${prStatus?.state}
 						.prUrl=${prStatus?.url}
 						.prNumber=${prStatus?.number}
@@ -2283,6 +2321,7 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.headRefName=${prStatus?.headRefName}
 						@pr-merge=${handlePrMerge}
 						@git-fetch=${handleGitFetch}
+						@remote-state-refresh=${handleRemoteStateRefresh}
 						@git-status-dropdown-open=${handleGitStatusDropdownOpen}
 					></git-status-widget>
 					${goal.worktreePath ? html`

@@ -114,11 +114,35 @@ describe("GitStatusWidget interactions", () => {
 		expect(dd()).toBeTruthy();
 	});
 
-	it("clicking pill fires git-fetch event on open", async () => {
+	it("clicking pill requests visible dropdown data without forcing git fetch", async () => {
 		const el = await mount({ branch: "master", clean: true, statusFiles: [] });
-		const events = recordEvents(el, ["git-fetch"]);
+		const events = recordEvents(el, ["git-fetch", "git-status-dropdown-open"]);
 		await openDropdown(el);
-		expect(events.some((e) => e.type === "git-fetch")).toBe(true);
+		expect(events.map((event) => event.type)).toEqual(["git-status-dropdown-open"]);
+	});
+
+	it.each([
+		["pr", "pr"],
+		["repository", "git"],
+		[undefined, "all"],
+	] as const)("footer refresh maps %s metadata to the %s coordinator resource", async (source, resource) => {
+		const el = await mount({
+			branch: "feature/remote",
+			clean: true,
+			statusFiles: [],
+			remoteStale: true,
+			remoteLastError: "unavailable",
+			remoteAgeMs: 65_000,
+			remoteSource: source,
+			prState: source === "pr" ? "OPEN" : undefined,
+			prNumber: source === "pr" ? 42 : undefined,
+		});
+		const events = recordEvents(el, ["git-fetch", "remote-state-refresh"]);
+		await openDropdown(el);
+		const status = dd()!.querySelector('[data-testid="remote-state-status"]')!;
+		expect(status.textContent).toContain("showing last known state");
+		btnByText(status, "Refresh")!.click();
+		expect(events).toEqual([{ type: "remote-state-refresh", detail: { resource } }]);
 	});
 
 	it("clicking pill again closes dropdown", async () => {

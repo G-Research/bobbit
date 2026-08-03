@@ -265,13 +265,9 @@ export class GitStatusWidget extends LitElement {
         if (wasExpanded && !this._dropdownEl) {
             this.requestUpdate('expanded', false);
         }
-        // Preserve both parts of the open contract: revalidate remote refs and
-        // ask the parent for the complete untracked-file projection. Server-side
-        // single-flight joins the two explicit requests when they share work.
-        this.dispatchEvent(new CustomEvent('git-fetch', {
-            bubbles: true,
-            composed: true,
-        }));
+        // Opening is a visible/SWR read that also asks for the complete local
+        // untracked-file projection. It must not behave like the footer's
+        // explicit force refresh when the server snapshot is already fresh.
         this.dispatchEvent(new CustomEvent('git-status-dropdown-open', {
             bubbles: true,
             composed: true,
@@ -1114,7 +1110,16 @@ export class GitStatusWidget extends LitElement {
 
     private _requestRemoteRefresh(e: Event) {
         e.stopPropagation();
-        this.dispatchEvent(new CustomEvent('git-fetch', { bubbles: true, composed: true }));
+        const resource = this.remoteSource === 'pr'
+            ? 'pr'
+            : this.remoteSource === 'repository'
+                ? 'git'
+                : 'all';
+        this.dispatchEvent(new CustomEvent('remote-state-refresh', {
+            bubbles: true,
+            composed: true,
+            detail: { resource },
+        }));
     }
 
     private _renderRemoteSnapshotStatus() {
