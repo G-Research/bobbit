@@ -69,7 +69,7 @@ function captureConsoleErrors(): { lines: string[]; restore: () => void } {
 	return { lines, restore: () => { console.error = original; } };
 }
 
-function startStreamingTitleGateway(): Promise<{
+function startStreamingTitleGateway(requiredToken?: string): Promise<{
 	url: string;
 	getAuthorizationHeaders: () => Array<string | undefined>;
 	close: () => Promise<void>;
@@ -84,6 +84,9 @@ function startStreamingTitleGateway(): Promise<{
 		req.on("data", (chunk) => { requestBody += chunk; });
 		req.on("end", () => {
 			assert.equal(JSON.parse(requestBody).stream, true, "the real Pi completion path must request a stream");
+			if (requiredToken && req.headers.authorization !== `Bearer ${requiredToken}`) {
+				res.writeHead(401); res.end(); return;
+			}
 			res.writeHead(200, { "Content-Type": "text/event-stream" });
 			res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: "<title>Anonymous Gateway</title>" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
 		});
@@ -297,6 +300,32 @@ describe("multi-gateway consumers", () => {
 			);
 		} finally {
 			await service.close();
+		}
+	});
+
+	it("resolves a title gateway credential command exactly once in the real completion path", async () => {
+		const service = await startStreamingTitleGateway("title-command-token");
+		const commandMarker = path.join(agentDir, "title-credential-command-count");
+		try {
+			const registered = gateway("command-title", service.url);
+			const prefs = new PreferencesStore(path.join(agentDir, "command-title-state"));
+			prefs.set("modelGateways", [registered]);
+			const command = `require("node:fs").appendFileSync(${JSON.stringify(commandMarker)}, "x"); process.stdout.write("title-command-token")`;
+			prefs.set(`providerKey.gateway.${registered.id}`, `!${process.execPath} -e ${JSON.stringify(command)}`);
+			const model: ApiModel = {
+				id: "title-model", name: "Title model", provider: registered.name, api: "openai-completions", baseUrl: `${registered.url}/v1`,
+				contextWindow: 8192, maxTokens: 4096, reasoning: false, input: ["text"], cost: COST, authenticated: true,
+			};
+
+			assert.equal(await generateSessionTitle(
+				[{ role: "user", content: "Resolve this credential once." }],
+				{ namingModel: `${registered.name}/${model.id}`, gateways: [registered], availableModels: [model], preferencesStore: prefs },
+			), "Anonymous Gateway");
+			assert.equal(fs.readFileSync(commandMarker, "utf8"), "x");
+			assert.deepEqual(service.getAuthorizationHeaders(), ["Bearer title-command-token"]);
+		} finally {
+			await service.close();
+			fs.rmSync(commandMarker, { force: true });
 		}
 	});
 
