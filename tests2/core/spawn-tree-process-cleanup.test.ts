@@ -493,6 +493,7 @@ describe("spawnTracked timeout cleanup", () => {
 				containerId: "container-under-test", restartRecoveryMode: "container-exec",
 				pid: 321_654, pidFile: "/tmp/.bobbit-verif/signal/0.pid", pidNonce: "host-sentinel-nonce", sentinelFile: path.join(stateDir, "docker-exec.sentinel.json"),
 				containerOwnershipWitness: { containerId: "container-under-test", nonce: "host-sentinel-nonce", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },
+				containerOwnershipAttestation: { version: 1, containerId: "container-under-test", nonce: "host-sentinel-nonce", execId: "exec", enginePid: 1, tag: "tag", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },
 				exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat",
 				containerCompletionFile: hostResult, containerCompletionNonce: "host-sentinel-nonce",
 			};
@@ -522,7 +523,7 @@ describe("spawnTracked timeout cleanup", () => {
 			const step: any = {
 				name: "Container without host sentinel", type: "command", status: "running", startedAt: Date.now() - 1_000,
 				containerId: "container-under-test", restartRecoveryMode: "container-exec", pid: 321_654, pidFile: "/tmp/.bobbit-verif/signal/0.pid",
-				pidNonce: "missing-sentinel-nonce", containerOwnershipWitness: { containerId: "container-under-test", nonce: "missing-sentinel-nonce", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" }, exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat",
+				pidNonce: "missing-sentinel-nonce", containerOwnershipWitness: { containerId: "container-under-test", nonce: "missing-sentinel-nonce", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" }, containerOwnershipAttestation: { version: 1, containerId: "container-under-test", nonce: "missing-sentinel-nonce", execId: "exec", enginePid: 1, tag: "tag", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" }, exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat",
 				containerCompletionFile: hostResult, containerCompletionNonce: "missing-sentinel-nonce",
 			};
 			const active: any = { goalId: "goal", gateId: "implementation", signalId: "signal", overallStatus: "running", startedAt: Date.now(), steps: [step] };
@@ -581,7 +582,7 @@ describe("spawnTracked timeout cleanup", () => {
 			(harness as any)._dockerExecCapture = async () => ({ code: 0, stdout: "0\n" });
 			const step: any = {
 				name: "Windows container", type: "command", status: "running", startedAt: Date.now() - 1_000,
-				containerId: "container-under-test", restartRecoveryMode: "container-exec", pidNonce: "windows-nonce", containerOwnershipWitness: { containerId: "container-under-test", nonce: "windows-nonce", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" }, pidFile: "/tmp/.bobbit-verif/signal/0.pid", exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat",
+				containerId: "container-under-test", restartRecoveryMode: "container-exec", pidNonce: "windows-nonce", containerOwnershipWitness: { containerId: "container-under-test", nonce: "windows-nonce", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" }, containerOwnershipAttestation: { version: 1, containerId: "container-under-test", nonce: "windows-nonce", execId: "exec", enginePid: 1, tag: "tag", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" }, pidFile: "/tmp/.bobbit-verif/signal/0.pid", exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat",
 			};
 			const active: ActiveVerification = {
 				goalId: "goal", gateId: "implementation", signalId: "signal", overallStatus: "running", startedAt: Date.now(), currentPhase: 0, steps: [step],
@@ -1251,6 +1252,15 @@ function recoveredContainerStep(overrides: Record<string, unknown> = {}): any {
 		exitFile: "/tmp/.bobbit-verif/witness.exit",
 		pidFile: "/tmp/.bobbit-verif/witness.pid",
 		pidNonce: VERIFICATION_NONCE,
+		containerOwnershipWitness: {
+			containerId: CONTAINER_ID, nonce: VERIFICATION_NONCE,
+			sentinelPid: SENTINEL_PID, pgid: SENTINEL_PID, startToken: ORIGINAL_START_TOKEN,
+		},
+		containerOwnershipAttestation: {
+			version: 1, containerId: CONTAINER_ID, nonce: VERIFICATION_NONCE,
+			execId: "engine-exec", enginePid: 77, tag: "attested-sentinel",
+			sentinelPid: SENTINEL_PID, pgid: SENTINEL_PID, startToken: ORIGINAL_START_TOKEN,
+		},
 		...overrides,
 	};
 }
@@ -1333,6 +1343,11 @@ test("PID-reused container sentinel never authorizes a negative-PGID signal", as
 				sentinelPid: SENTINEL_PID,
 				pgid: SENTINEL_PID,
 				startToken: ORIGINAL_START_TOKEN,
+			},
+			containerOwnershipAttestation: {
+				version: 1, containerId: CONTAINER_ID, nonce: VERIFICATION_NONCE,
+				execId: "engine-exec", enginePid: 77, tag: "attested-sentinel",
+				sentinelPid: SENTINEL_PID, pgid: SENTINEL_PID, startToken: ORIGINAL_START_TOKEN,
 			},
 		};
 		const active: ActiveVerification = {
