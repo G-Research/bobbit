@@ -277,6 +277,39 @@ describe("BgProcessManager — persistence round-trip", () => {
 		h2.mgr.cleanup(S);
 	});
 
+	it("spawn-failed is durable across restart, resolves immediately, and does not reattach live machinery", async () => {
+		const h = makeHarness();
+		const S = freshSession();
+		const info = h.mgr.create(S, "run.sh", h.stateDir);
+		const child = h.lastChild();
+		const nativeEmit = child.emit.bind(child);
+		child.emit = ((event: string | symbol, ...args: unknown[]) => {
+			if (event === "error" && child.listenerCount("error") === 0) return false;
+			return nativeEmit(event, ...args);
+		}) as typeof child.emit;
+
+		child.emit("error", Object.assign(new Error("EACCES /private/PERSISTENCE-SECRET"), { code: "EACCES" }));
+		const beforeRestart = h.store().get(S, info.id)! as any;
+		assert.equal(beforeRestart.status, "exited");
+		assert.equal(beforeRestart.terminalReason, "spawn-failed");
+		assert.equal(beforeRestart.spawnFailure.kind, "spawn");
+		assert.equal(beforeRestart.spawnFailure.code, "EACCES");
+		assert.match(beforeRestart.spawnFailure.message, /failed to start/i);
+		assert.doesNotMatch(JSON.stringify(beforeRestart), /PERSISTENCE-SECRET/);
+
+		const h2 = h.reload();
+		await h2.mgr.restoreSession(S);
+		const restored = h2.mgr.list(S).find(p => p.id === info.id)! as any;
+		assert.equal(restored.status, "exited");
+		assert.equal(restored.terminalReason, "spawn-failed");
+		assert.deepEqual(restored.spawnFailure, beforeRestart.spawnFailure);
+		const waited = await h2.mgr.waitForExit(S, info.id, 1_000);
+		assert.equal(waited?.timedOut, false, "restored terminal records settle waits immediately");
+		assert.equal(h2.specs.length, 0, "restored spawn failure starts no tailers");
+		assert.equal(h2.sent.filter(m => m.type === "bg_process_exited").length, 0, "restart hydration does not re-broadcast a historical failure");
+		h2.mgr.cleanup(S);
+	});
+
 	it("combined-projection interleaving survives restart (order + per-stream arrays)", async () => {
 		const h = makeHarness();
 		const S = freshSession();

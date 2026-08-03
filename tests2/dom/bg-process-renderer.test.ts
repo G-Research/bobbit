@@ -14,6 +14,7 @@ __syncBeforeAll(() => __syncCE());
 import { afterEach, describe, expect, it } from "vitest";
 import { render } from "lit";
 import { BgProcessRenderer } from "../../src/ui/tools/renderers/BgProcessRenderer.js";
+import { BgProcessPill } from "../../src/ui/components/BgProcessPill.js";
 import "../../src/ui/components/ConsoleBlock.js";
 
 const renderer = new BgProcessRenderer();
@@ -86,5 +87,25 @@ describe("BgProcessRenderer ANSI color support", () => {
 		const div = await renderBg("");
 		const block = div.querySelector("console-block")!;
 		expect(block.textContent || "").toContain("(no output)");
+	});
+});
+
+describe("BgProcessPill spawn-failed terminal rendering", () => {
+	it("renders a distinct failed-to-start label and preserves unrecoverable as exit status unknown", () => {
+		const pill = new BgProcessPill() as any;
+		const failed = {
+			id: "bg-1", name: "failed job", command: "noop", pid: 0,
+			status: "exited", exitCode: null, terminalReason: "spawn-failed",
+			spawnFailure: { kind: "spawn", code: "ENOENT", message: "Background process failed to start." },
+			startTime: 1000, endTime: 1000,
+		};
+		const host = document.createElement("div");
+		render(pill._terminalLabel(failed), host);
+		expect(host.textContent).toContain("failed to start");
+		expect(host.textContent).not.toContain("exit status unknown");
+
+		host.replaceChildren();
+		render(pill._terminalLabel({ ...failed, terminalReason: "unrecoverable", spawnFailure: undefined }), host);
+		expect(host.textContent).toContain("exit status unknown");
 	});
 });
