@@ -1883,6 +1883,156 @@ test("recovery cleans an exact exited sentinel group before publishing its host 
   }
 });
 
+test("missing retained host transport witness keeps container recovery pending until exact restoration", async () => {
+  requireDockerPrerequisites();
+  let fixture: ContainerFixture | undefined;
+  let gateway: Gateway | undefined;
+  let viewer: Viewer | undefined;
+  let sibling: ContainerIdentity | undefined;
+  try {
+    fixture = await createContainerFixture("missing-host-transport-witness");
+    gateway = fixture.gateway;
+    sibling = startSameUidSibling(
+      fixture.containerId,
+      "missing-host-transport-witness-sibling",
+    );
+    const goalId = await createCommandGoal(gateway, fixture.projectId, {
+      title: "missing-host-transport-witness",
+      gateId: "result",
+      run: normalCommand("missing-host-transport-witness"),
+      timeout: 30,
+    });
+    const activePath = join(
+      fixture.root,
+      ".bobbit",
+      "state",
+      "active-verifications.json",
+    );
+    viewer = await connectViewer(gateway, goalId);
+    const from = viewer.mark();
+    const step = await startStep(
+      viewer,
+      gateway,
+      goalId,
+      "result",
+      "missing-host-transport-witness",
+      fixture.containerId,
+    );
+    const durableStep = await readActiveStep(gateway, goalId, step.signalId);
+    const sentinelFile = durableStep.sentinelFile as string | undefined;
+    expect(
+      sentinelFile,
+      "readiness must durably retain the host docker-exec sentinel identity",
+    ).toBeTruthy();
+    expect(existsSync(sentinelFile!)).toBe(true);
+    const exactWitness = readFileSync(sentinelFile!, "utf8");
+    const parsedTransportWitness = JSON.parse(exactWitness);
+    expect(parsedTransportWitness).toMatchObject({
+      pgid: step.hostPid,
+      nonce: durableStep.pidNonce,
+    });
+    expect(parsedTransportWitness.pid).toBeGreaterThan(0);
+
+    // Corrupt only the host-side transport authority after the container tuple
+    // and daemon attestation are durable. The payload itself may finish, but a
+    // missing host witness must never make its historical process group a target
+    // or authorize terminal publication.
+    rmSync(sentinelFile!);
+    const terminalAfterExactCleanup = waitForRecoveredRemovalAfterPayloadCleanup(
+      activePath,
+      step.signalId,
+    );
+    releaseFifo(fixture.containerId, "missing-host-transport-witness");
+    const pending = await waitForActiveVerification(
+      activePath,
+      step.signalId,
+      (entry) => {
+        const activeStep = entry?.steps?.[0];
+        return (
+          !!activeStep?.containerPayloadCleanupCompletedAt &&
+          activeStep.containerTransportCleanupPending === true &&
+          !activeStep.containerTransportCleanupCompletedAt
+        );
+      },
+      "missing host transport witness did not leave cleanup durably pending",
+    );
+    const pendingStep = pending!.steps[0];
+    expect(pendingStep.containerOwnershipWitness).toEqual(step.witness);
+    expect(pendingStep.containerTransportCleanupPending).toBe(true);
+    expect(pendingStep.containerTransportCleanupCompletedAt).toBeUndefined();
+    assertContainerGone(fixture.containerId, step.payloadPid);
+    assertContainerGone(fixture.containerId, step.witness.sentinelPid);
+    assertContainerGroupGone(fixture.containerId, step.witness.pgid);
+    assertNoContainerTermSignal(
+      fixture.containerId,
+      sibling.termFile,
+      "unrelated same-UID sibling while transport witness is missing",
+    );
+    assertContainerAlive(
+      fixture.containerId,
+      sibling.pid,
+      "unrelated same-UID sibling while transport witness is missing",
+    );
+    expect(
+      viewer.messages.slice(from).some(completionEvent(step.signalId)),
+      "a missing host transport witness cannot publish terminal completion",
+    ).toBe(false);
+    const pendingSignals = await api(
+      gateway,
+      `/api/goals/${goalId}/gates/result/signals`,
+    );
+    await expectResponseStatus(pendingSignals, 200);
+    const pendingSignal = (await pendingSignals.json()).signals.find(
+      (signal: any) => signal.id === step.signalId,
+    );
+    expect(
+      pendingSignal?.verification,
+      "a missing host transport witness cannot publish a terminal gate verdict",
+    ).toBeUndefined();
+
+    // The original atomically retained witness is restored only after a gateway
+    // crash removes the live-child authority. Recovery can then validate this
+    // exact tuple before it reaps the retained host transport sentinel.
+    viewer.close();
+    viewer = undefined;
+    await crashGateway(gateway);
+    writeFileSync(sentinelFile!, exactWitness);
+    gateway = await startGateway(fixture.root, gateway.port);
+    await terminalAfterExactCleanup;
+    assertStepCleaned(fixture.containerId, step);
+    assertNoContainerTermSignal(
+      fixture.containerId,
+      sibling.termFile,
+      "unrelated same-UID sibling after exact host transport recovery",
+    );
+    assertContainerAlive(
+      fixture.containerId,
+      sibling.pid,
+      "unrelated same-UID sibling after exact host transport recovery",
+    );
+    const recoveredSignals = await api(
+      gateway,
+      `/api/goals/${goalId}/gates/result/signals`,
+    );
+    await expectResponseStatus(recoveredSignals, 200);
+    const recoveredSignal = (await recoveredSignals.json()).signals.find(
+      (signal: any) => signal.id === step.signalId,
+    );
+    expect(
+      recoveredSignal?.verification?.status,
+      "terminal gate publication follows exact payload and host transport cleanup",
+    ).toBe("passed");
+  } finally {
+    viewer?.close();
+    killContainerProcess(fixture, sibling?.pid);
+    await stopGateway(gateway);
+    if (fixture) {
+      cleanupDockerProject(fixture.projectId);
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("a copied daemon tag on B's non-descendant cannot replace A's cancelled ownership", async () => {
   requireDockerPrerequisites();
   test.setTimeout(300_000);
