@@ -51,8 +51,9 @@ test.describe("Project/add-project API data paths", () => {
 			});
 			projectId = project.id;
 
+			const canonicalRootPath = fs.realpathSync(rootPath);
 			let projects = await listProjects();
-			expect(projects.find((p: any) => p.id === projectId && p.rootPath === rootPath)).toBeTruthy();
+			expect(projects.find((p: any) => p.id === projectId && p.rootPath === canonicalRootPath)).toBeTruthy();
 
 			await deleteProject(projectId);
 			projectId = undefined;

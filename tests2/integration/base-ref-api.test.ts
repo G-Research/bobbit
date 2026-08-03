@@ -32,6 +32,10 @@ const headers = () => ({
 	"Content-Type": "application/json",
 });
 
+function canonicalPath(dir: string): string {
+	return fs.realpathSync(dir);
+}
+
 function createFakeRepo(dir: string): void {
 	fs.mkdirSync(path.join(dir, ".git"), { recursive: true });
 	fs.writeFileSync(path.join(dir, ".git", "HEAD"), "ref: refs/heads/master\n");
@@ -80,8 +84,9 @@ function copyTemplateRepo(root: string): void {
 }
 
 function fixtureRepo(prefix: string, opts?: { originDevelop?: boolean }): string {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-baseref-${prefix}-`));
-	copyTemplateRepo(root);
+	const lexicalRoot = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-baseref-${prefix}-`));
+	copyTemplateRepo(lexicalRoot);
+	const root = canonicalPath(lexicalRoot);
 	cleanupRoots.push(root);
 	if (opts?.originDevelop) fakeOriginRef(root, "develop");
 	return root;
@@ -133,7 +138,7 @@ test.beforeAll(async ({ gateway }) => {
 	const gitRoot = fixtureRepo("shared-git", { originDevelop: true });
 	gitProjectId = registerProject(gateway, "baseref-git", gitRoot);
 
-	const multiRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-multi-"));
+	const multiRoot = canonicalPath(fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-multi-")));
 	cleanupRoots.push(multiRoot);
 	const repoA = path.join(multiRoot, "api");
 	const repoB = path.join(multiRoot, "web");
@@ -153,9 +158,10 @@ test.beforeAll(async ({ gateway }) => {
 		],
 	);
 
-	warningRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-warning-"));
+	const lexicalWarningRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-baseref-warning-"));
+	fs.mkdirSync(path.join(lexicalWarningRoot, "docs"), { recursive: true });
+	warningRoot = canonicalPath(lexicalWarningRoot);
 	cleanupRoots.push(warningRoot);
-	fs.mkdirSync(path.join(warningRoot, "docs"), { recursive: true });
 	warningProjectId = registerProject(gateway, "baseref-warning", warningRoot, [{ name: "docs", repo: "docs" }]);
 });
 

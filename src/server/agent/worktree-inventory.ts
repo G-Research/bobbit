@@ -243,6 +243,9 @@ function isBobbitOwnedBranch(branch: string | undefined): boolean {
 	return !!branch && (branch.startsWith("session/") || branch.startsWith("goal/") || branch.startsWith("staff-") || isBobbitPoolBranch(branch));
 }
 
+// Inventory scanning is background I/O and must stay entirely asynchronous.
+// Paths are normalized lexically here; filesystem identity is established by
+// the async access/opendir and Git probes in the scan pipeline.
 function norm(p?: string): string | undefined { return normalizeWorktreeHostPath(p); }
 function repoKey(repoPath: string | undefined): string { return norm(repoPath) ?? ""; }
 function stableId(prefix: string, ...parts: Array<string | undefined>): string {

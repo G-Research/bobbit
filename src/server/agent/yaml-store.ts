@@ -123,7 +123,8 @@ export class YamlStore<T extends object> {
 	protected itemPath(key: string): string {
 		const filePath = path.join(this.dir, `${key}.yaml`);
 		const resolved = path.resolve(filePath);
-		if (!resolved.startsWith(path.resolve(this.dir))) {
+		const relative = path.relative(path.resolve(this.dir), resolved);
+		if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
 			throw new Error(`Invalid key: path traversal detected`);
 		}
 		return filePath;
