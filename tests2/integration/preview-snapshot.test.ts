@@ -3,7 +3,9 @@
  *
  * Exercises:
  *   - Extension (via mock-agent) emits a 2-block tool_result containing the marker-prefixed snapshot.
- *   - GET /api/sessions/:id/tool-content/:mi/:bi returns the full untruncated snapshot text.
+ *   - GET /api/sessions/:id/tool-content/:mi/:bi preserves the legacy positional contract.
+ *   - GET /api/sessions/:id/tool-content/by-tool-call/:id/:bi resolves snapshots by
+ *     tool-call identity, independently of client-visible message positions.
  *   - get_messages response served to clients has large snapshots replaced by a truncated stub,
  *     so the full payload never flows through the WS history channel.
  */
@@ -86,6 +88,89 @@ test.describe("preview_open snapshot persistence + truncation", () => {
 			expect(body.content.length).toBeGreaterThan(size);
 			expect(body.content.startsWith(MARKER)).toBe(true);
 			expect(body.content).toContain("x".repeat(size));
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("identity endpoint restores a truncated snapshot without a message index", async ({ gateway }) => {
+		const sessionId = await createSession();
+		try {
+			const size = 50_000;
+			await runPreviewOpenWithSize(sessionId, size);
+			const session = gateway.sessionManager.getSession(sessionId);
+			if (!session) throw new Error("test session was not found");
+			const response = await session.rpcClient.getMessages();
+			const messages = response.data?.messages || response.data || [];
+			const result = messages.find((message: any) => message.role === "toolResult" && message.toolName === "preview_open");
+			if (!result) throw new Error("preview tool result was not found");
+			const blockIndex = result.content.findIndex((block: any) => typeof block.text === "string" && block.text.startsWith(MARKER));
+			expect(result.toolCallId).toEqual(expect.any(String));
+			expect(blockIndex).toBeGreaterThanOrEqual(0);
+
+			// This route deliberately has no message index: client-side synthetic
+			// compaction rows cannot make it point at a different raw transcript row.
+			const contentResp = await apiFetch(
+				`/api/sessions/${sessionId}/tool-content/by-tool-call/${encodeURIComponent(result.toolCallId)}/${blockIndex}?expected=preview-snapshot`,
+			);
+			expect(contentResp.status).toBe(200);
+			const body = await contentResp.json();
+			expect(body.content).toContain("x".repeat(size));
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("identity endpoint resolves an assistant tool-call input and refuses sibling blocks", async ({ gateway }) => {
+		const sessionId = await createSession();
+		const session = gateway.sessionManager.getSession(sessionId);
+		if (!session) throw new Error("test session was not found");
+		const originalGetMessages = session.rpcClient.getMessages.bind(session.rpcClient);
+		(session.rpcClient as any).getMessages = async () => ({
+			data: { messages: [{
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: "assistant-input", input: { content: "assistant input" } },
+					{ type: "text", text: "unrelated sibling" },
+				],
+			}] },
+		});
+		try {
+			const exact = await apiFetch(`/api/sessions/${sessionId}/tool-content/by-tool-call/assistant-input/0`);
+			expect(exact.status).toBe(200);
+			expect(await exact.json()).toMatchObject({ content: "assistant input" });
+
+			const wrongBlock = await apiFetch(`/api/sessions/${sessionId}/tool-content/by-tool-call/assistant-input/1`);
+			expect(wrongBlock.status).toBe(409);
+			expect(await wrongBlock.json()).toMatchObject({ error: "tool_call_block_mismatch" });
+		} finally {
+			(session.rpcClient as any).getMessages = originalGetMessages;
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("identity endpoint reports unavailable calls and refuses non-snapshot blocks", async ({ gateway }) => {
+		const sessionId = await createSession();
+		try {
+			await runPreviewOpenWithSize(sessionId, 1000);
+			const session = gateway.sessionManager.getSession(sessionId);
+			if (!session) throw new Error("test session was not found");
+			const response = await session.rpcClient.getMessages();
+			const messages = response.data?.messages || response.data || [];
+			const result = messages.find((message: any) => message.role === "toolResult" && message.toolName === "preview_open");
+			if (!result) throw new Error("preview tool result was not found");
+			expect(result.toolCallId).toEqual(expect.any(String));
+
+			const missing = await apiFetch(`/api/sessions/${sessionId}/tool-content/by-tool-call/missing-call/0?expected=preview-snapshot`);
+			expect(missing.status).toBe(404);
+			expect(await missing.json()).toMatchObject({ error: "transcript_tool_call_unavailable" });
+
+			// Block zero is the tool status text, not the marker-prefixed snapshot.
+			const wrongBlock = await apiFetch(
+				`/api/sessions/${sessionId}/tool-content/by-tool-call/${encodeURIComponent(result.toolCallId)}/0?expected=preview-snapshot`,
+			);
+			expect(wrongBlock.status).toBe(409);
+			expect(await wrongBlock.json()).toMatchObject({ error: "snapshot_block_mismatch" });
 		} finally {
 			await deleteSession(sessionId);
 		}
