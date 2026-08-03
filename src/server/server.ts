@@ -587,6 +587,7 @@ import { resolveProjectForRequest, validateExecutionCwd, type CwdOwnershipSource
 import { GoalManager } from "./agent/goal-manager.js";
 import { cleanupGateDiagnosticsForGoal } from "./agent/gate-diagnostics-cleanup.js";
 import type { WorktreeReferenceRecord } from "./agent/worktree-reference-guard.js";
+import { worktreeRoot as resolveWorktreeRoot } from "./skills/worktree-paths.js";
 import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
 import { detectHostTokens, resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
@@ -2890,50 +2891,111 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		identity: PullRequestIdentity;
 	};
 	type PrRouteOwner = {
-		projectId?: string;
+		id: string;
 		cwd?: string;
 		worktreePath?: string;
 		repoPath?: string;
 		repoWorktrees?: Readonly<Record<string, string>> | ReadonlyArray<{ repo: string; worktreePath: string }>;
 		sandboxed?: boolean;
 	};
-	const ownedPrCandidates = (owner: PrRouteOwner): string[] => {
+	const canonicalOwnedPath = (inputPath: string): string => {
+		const resolved = path.resolve(inputPath);
+		// Match execution-cwd ownership validation: resolve the longest existing
+		// prefix so a symlink cannot move a missing suffix across project bounds.
+		let existing = resolved;
+		const suffix: string[] = [];
+		while (true) {
+			try {
+				return path.join(path.resolve(fs.realpathSync(existing)), ...suffix.reverse());
+			} catch {
+				const parent = path.dirname(existing);
+				if (parent === existing) return resolved;
+				suffix.push(path.basename(existing));
+				existing = parent;
+			}
+		}
+	};
+	const comparableOwnedPath = (inputPath: string): string => {
+		const canonical = canonicalOwnedPath(inputPath);
+		return process.platform === "win32" ? canonical.toLowerCase() : canonical;
+	};
+	const isSameOrDescendantOwnedPath = (root: string, candidate: string): boolean => {
+		const relative = path.relative(comparableOwnedPath(root), comparableOwnedPath(candidate));
+		return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+	};
+	const ownedPrCandidates = async (owner: PrRouteOwner): Promise<string[]> => {
+		// Project scope comes from the store that owns the entity, never from its
+		// mutable/persisted projectId or repository metadata.
+		const owningContext = projectContextManager.getContextForGoal(owner.id)
+			?? projectContextManager.getContextForSession(owner.id);
+		if (!owningContext) return [];
+		const project = owningContext.project;
+		const components = owningContext.projectConfigStore.getComponents();
+		const multiRepo = components.some(component => component.repo !== ".");
+		const configuredRepos = new Set(components.map(component => component.repo));
+		const projectRoot = canonicalOwnedPath(project.rootPath);
+		let worktreeLayoutRoot = projectRoot;
+		if (!multiRepo) {
+			// A registered project may be a subdirectory of its repository. Derive
+			// the default sibling worktree root from that authoritative project path,
+			// not from mutable owner.repoPath metadata.
+			try {
+				const rawTopLevel = (await execGitArgs(
+					["rev-parse", "--show-toplevel"],
+					projectRoot,
+					5_000,
+					undefined,
+					gatewayDeps.commandRunner,
+				)).trim();
+				if (rawTopLevel && path.isAbsolute(rawTopLevel)) {
+					const topLevel = canonicalOwnedPath(rawTopLevel);
+					if (isSameOrDescendantOwnedPath(topLevel, projectRoot)) worktreeLayoutRoot = topLevel;
+				}
+			} catch { /* non-Git project roots keep their registered layout root */ }
+		}
+		const configuredWorktreeRoot = canonicalOwnedPath(resolveWorktreeRoot({
+			rootPath: worktreeLayoutRoot,
+			worktreeRoot: owningContext.projectConfigStore.get("worktree_root") || undefined,
+		}));
 		const candidates: string[] = [];
 		const seen = new Set<string>();
-		const add = (candidate: unknown) => {
+		const add = (candidate: unknown, allowedRoots: readonly string[]) => {
 			if (typeof candidate !== "string" || !candidate.trim() || !path.isAbsolute(candidate)) return;
-			const normalized = path.resolve(candidate);
-			const key = process.platform === "win32" ? normalized.toLowerCase() : normalized;
+			const canonical = canonicalOwnedPath(candidate);
+			if (!allowedRoots.some(root => isSameOrDescendantOwnedPath(root, canonical))) return;
+			const key = comparableOwnedPath(canonical);
 			if (!seen.has(key)) {
 				seen.add(key);
-				candidates.push(normalized);
+				candidates.push(canonical);
 			}
 		};
 		const repoWorktrees = Array.isArray(owner.repoWorktrees)
 			? owner.repoWorktrees.map(entry => [entry.repo, entry.worktreePath] as const)
 			: Object.entries(owner.repoWorktrees ?? {});
 
-		// Every candidate originates in persisted entity metadata or the owning
-		// project registry/config. Never consult the gateway process repository.
-		if (!owner.sandboxed) add(owner.cwd);
-		add(owner.worktreePath);
-		for (const [, worktreePath] of repoWorktrees) add(worktreePath);
+		// Entity paths are usable only after canonical containment proof. Persisted
+		// metadata is not provenance by itself; the registered project/config owns
+		// the project and worktree boundaries.
+		const executionRoots = [projectRoot, configuredWorktreeRoot];
+		if (!owner.sandboxed) add(owner.cwd, executionRoots);
+		add(owner.worktreePath, executionRoots);
+		for (const [repo, worktreePath] of repoWorktrees) {
+			if (configuredRepos.has(repo)) add(worktreePath, [configuredWorktreeRoot]);
+		}
+		// Legacy/server-authored repoPath can preserve a more specific project
+		// repository, but only after canonical containment under the registry root.
+		add(owner.repoPath, [projectRoot]);
 
-		const project = owner.projectId ? projectRegistry.get(owner.projectId) : undefined;
-		const components = owner.projectId
-			? projectContextManager.getOrCreate(owner.projectId)?.projectConfigStore.getComponents() ?? []
-			: [];
-		const multiRepo = components.some(component => component.repo !== ".");
-		const addRepositoryRoots = (root: string | undefined) => {
-			if (!root) return;
-			if (!multiRepo) {
-				add(root);
-				return;
+		// Broken worktrees also recover through registry/config-derived component
+		// roots. An outside-project owner.repoPath never reaches this list.
+		if (multiRepo) {
+			for (const component of components) {
+				const componentRoot = component.repo === "." ? projectRoot : path.join(projectRoot, component.repo);
+				add(componentRoot, [projectRoot]);
 			}
-			for (const component of components) add(component.repo === "." ? root : path.join(root, component.repo));
-		};
-		addRepositoryRoots(owner.repoPath);
-		addRepositoryRoots(project?.rootPath);
+		} else {
+			add(projectRoot, [projectRoot]);
+		}
 		return candidates;
 	};
 	const resolvePrSnapshotTarget = async (
@@ -2945,7 +3007,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		// A broken worktree can recover through its persisted repoPath or registered
 		// project root, but a merely Git-valid ambient directory is never eligible.
 		let executionCwd: string | undefined;
-		for (const candidate of ownedPrCandidates(owner)) {
+		for (const candidate of await ownedPrCandidates(owner)) {
 			try {
 				await execGitArgs(["rev-parse", "--git-dir"], candidate, 5_000, undefined, gatewayDeps.commandRunner);
 				executionCwd = candidate;
@@ -8453,7 +8515,9 @@ async function handleApiRoute(
 				state: body.state,
 				spec: body.spec,
 				team: true, // Always-on team mode
-				repoPath: body.repoPath,
+				// repoPath is lifecycle-owned structural metadata. Preserve PUT's
+				// unknown-field compatibility by ignoring it rather than allowing an
+				// API caller to manufacture a PR fallback ownership binding.
 				branch: body.branch,
 				reattemptOf: body.reattemptOf,
 			});
