@@ -468,6 +468,11 @@ describe("spawnTracked timeout cleanup", () => {
 		expect(SPAWN_TREE_SOURCE).toMatch(/AssignProcessToJobObject\(job, pi\.hProcess\).*File\.Move\(pendingReadyFile, readyFile\).*ResumeThread\(pi\.hThread\)/s);
 	});
 
+	it("treats unset optional Windows Job file arguments as absent after PowerShell string conversion", () => {
+		expect(SPAWN_TREE_SOURCE).toContain("if (!String.IsNullOrEmpty(readyFile))");
+		expect(SPAWN_TREE_SOURCE).toContain("if (assigned && !String.IsNullOrEmpty(completionFile) && !String.IsNullOrEmpty(completionNonce))");
+	});
+
 	it("reaps SIGTERM-ignoring descendants through the native POSIX process model", async () => {
 		if (process.platform === "win32") {
 			// Windows native Job cleanup is real-fidelity E2E coverage; focused
