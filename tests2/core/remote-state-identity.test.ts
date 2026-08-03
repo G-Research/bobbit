@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 import type { CommandRunner } from "../../src/server/gateway-deps.ts";
 import {
+	isTrustedGithubRemoteHost,
 	normalizeGithubHost,
 	normalizePullRequestIdentity,
 	normalizeRemoteIdentity,
@@ -29,6 +30,14 @@ describe("remote state canonical identity", () => {
 		assert.equal(normalizeRemoteIdentity("git@github.com:Acme/Widget.git"), "github.com/acme/widget");
 		assert.equal(normalizeRemoteIdentity("github.com:Acme/Widget.git"), "github.com/acme/widget");
 		assert.equal(normalizeGithubHost("WWW.GitHub.Com."), "github.com");
+	});
+
+	it("trust-gates PR remotes to GitHub and configured enterprise hosts", () => {
+		assert.equal(isTrustedGithubRemoteHost("www.github.com"), true);
+		assert.equal(isTrustedGithubRemoteHost("ssh.github.com"), true);
+		assert.equal(isTrustedGithubRemoteHost("ghe.example.test", ["GHE.EXAMPLE.TEST."]), true);
+		assert.equal(isTrustedGithubRemoteHost("gitlab.example.test", ["ghe.example.test"]), false);
+		assert.equal(isTrustedGithubRemoteHost("api.github.com"), false);
 	});
 
 	it("canonicalizes Windows local paths", () => {

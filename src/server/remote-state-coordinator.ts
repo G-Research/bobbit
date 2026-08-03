@@ -93,6 +93,8 @@ interface RemoteStateRecord<T> {
 	lastAttemptAt?: number;
 	lastForceRequestAt?: number;
 	invalidated: boolean;
+	/** Monotonic marker so invalidation racing a refresh is not cleared by that refresh. */
+	invalidationVersion: number;
 	failureCount: number;
 	nextRetryAt: number;
 	lastError?: RemoteStateLastError;
@@ -162,6 +164,12 @@ export function normalizeRemoteIdentity(remote: string): string {
 export function normalizeGithubHost(host?: string): string {
 	const normalized = (host ?? "github.com").trim().replace(/\.$/, "").toLowerCase();
 	return normalized === "www.github.com" || normalized === "ssh.github.com" ? "github.com" : normalized;
+}
+
+export function isTrustedGithubRemoteHost(host: string, configuredEnterpriseHosts: readonly string[] = []): boolean {
+	const normalized = normalizeGithubHost(host);
+	if (normalized === "github.com") return true;
+	return configuredEnterpriseHosts.some((candidate) => normalizeGithubHost(candidate) === normalized);
 }
 
 export function normalizePullRequestIdentity(input: PullRequestIdentityInput): string {
@@ -351,8 +359,13 @@ export class RemoteStateCoordinator {
 	invalidate(key: string, options: { allowImmediateRefresh?: boolean } = {}): void {
 		const record = this.requireRecord(key);
 		record.invalidated = true;
-		// A successful explicit Git mutation changed refs outside this coordinator.
-		// Its next normal read must be allowed to revalidate immediately.
+		record.invalidationVersion += 1;
+		// A force completed before this mutation/cache-bust is no longer equivalent;
+		// concurrent force callers still join through the installed in-flight promise.
+		record.lastForceRequestAt = undefined;
+		// PR creation/cache-bust must make the next canonical read eligible now.
+		// Normal repository mutations deliberately retain the 30-second automatic
+		// attempt budget; an explicit force still bypasses both cadence and backoff.
 		if (options.allowImmediateRefresh) record.lastAttemptAt = undefined;
 	}
 
@@ -396,6 +409,7 @@ export class RemoteStateCoordinator {
 			source,
 			refresh: options.refresh,
 			invalidated: false,
+			invalidationVersion: 0,
 			failureCount: 0,
 			nextRetryAt: 0,
 			addresses: new Map(),
@@ -439,11 +453,14 @@ export class RemoteStateCoordinator {
 		if (record.inFlight) return;
 		const refresh = async () => {
 			record.lastAttemptAt = this.clock.now();
+			// Invalidation before execution is satisfied by this refresh. Invalidation
+			// while remote I/O is running remains pending for the next eligible read.
+			const invalidationVersion = record.invalidationVersion;
 			try {
 				const data = await record.refresh();
 				record.lastGood = safeClone(data);
 				record.refreshedAt = this.clock.now();
-				record.invalidated = false;
+				record.invalidated = record.invalidationVersion !== invalidationVersion;
 				record.failureCount = 0;
 				record.nextRetryAt = 0;
 				record.lastError = undefined;

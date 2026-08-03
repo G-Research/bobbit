@@ -2,7 +2,7 @@ import { exec } from "node:child_process";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory } from "./agent/rpc-bridge.js";
 import { resolveGatewayDeps, realCommandRunner, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
-import { RemoteStateCoordinator, type RemoteStateAddress, type RemoteStateIntent, type RepositorySnapshotBinding } from "./remote-state-coordinator.js";
+import { isTrustedGithubRemoteHost, RemoteStateCoordinator, type RemoteStateAddress, type RemoteStateIntent, type RepositorySnapshotBinding } from "./remote-state-coordinator.js";
 import { resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
 export type { Clock, CommandRunner, ExecFileResult, FsLike, GatewayDeps, ResolvedGatewayDeps, TimerHandle } from "./gateway-deps.js";
 export { defaultRpcBridgeFactory, realClock, realCommandRunner, realFetch, realFs, resolveGatewayDeps } from "./gateway-deps.js";
@@ -2816,7 +2816,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					executeGit: (args: readonly string[], timeoutMs: number) => execGitArgs([...args], cwd, timeoutMs, containerId, gatewayDeps.commandRunner),
 				} : {}),
 			});
-			remoteStateCoordinator.invalidate(identity.key, { allowImmediateRefresh: true });
+			// Mutation invalidation marks retained data stale but does not erase the
+			// record-owned 30-second automatic attempt budget. Explicit reads bypass it.
+			remoteStateCoordinator.invalidate(identity.key);
 		} catch {
 			// A completed Git action must not fail because an optional prior snapshot
 			// was never registered or identity lookup is temporarily unavailable.
@@ -2827,6 +2829,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const origin = stripTokenFromGitUrl(await execGit("git remote get-url origin", cwd, 5_000, undefined, gatewayDeps.commandRunner));
 			const match = origin.match(/(?:https?:\/\/|ssh:\/\/git@|git@)([^/:]+)[:/]([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
 			if (!match) return undefined;
+			const configuredEnterpriseHosts = normalizeTrustedHosts(preferencesStore.get("githubTrustedHosts"));
+			if (!isTrustedGithubRemoteHost(match[1], configuredEnterpriseHosts)) return undefined;
 			return { host: match[1], owner: match[2], repository: match[3] };
 		} catch {
 			return undefined;
@@ -2842,15 +2846,18 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		const forceRequestedAt = performance.now();
 		const remote = await parsePrRemote(cwd);
 		if (!remote) return undefined;
+		const effectiveAddress: RemoteStateAddress = intentValue === "sidebar" && address.kind === "goal"
+			? { kind: "sidebar", id: address.id }
+			: address;
 		const identity = remoteStateCoordinator.resolvePullRequestIdentity({ ...remote, head: branch });
 		const key = remoteStateCoordinator.registerPullRequest(identity, {
 			refresh: () => fetchCoordinatedPrStatus(cwd, branch, fallbackCwd),
-			address,
+			address: effectiveAddress,
 		});
 		const force = intentValue === "explicit";
 		const readOpts = {
 			...coordinatorIntent(intentValue),
-			address,
+			address: effectiveAddress,
 			...(force ? { forceRequestedAt, forceCoalesceMs: 250 } : {}),
 		};
 		return force
@@ -2860,7 +2867,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const invalidatePrSnapshot = async (cwd: string, branch: string | undefined): Promise<void> => {
 		try {
 			const remote = await parsePrRemote(cwd);
-			if (remote) remoteStateCoordinator.invalidate(remoteStateCoordinator.resolvePullRequestIdentity({ ...remote, head: branch }).key);
+			if (remote) remoteStateCoordinator.invalidate(
+				remoteStateCoordinator.resolvePullRequestIdentity({ ...remote, head: branch }).key,
+				{ allowImmediateRefresh: true },
+			);
 		} catch { /* no prior snapshot or unavailable identity */ }
 	};
 	const remoteStateRoutes = {
@@ -3523,7 +3533,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		if (!goal) return;
 		_prCache.delete(goal.cwd);
 		if (goal.branch) _prCache.delete(`${goal.cwd}::${goal.branch}`);
-		broadcastToAll({ type: "pr_status_changed", goalId });
+		// Publish the legacy cache-bust only after the canonical record is stale and
+		// immediately eligible, so the reacting client cannot race the invalidation.
+		void remoteStateRoutes.invalidatePrSnapshot(goal.cwd, goal.branch).finally(() => {
+			broadcastToAll({ type: "pr_status_changed", goalId });
+		});
 	});
 	// Broadcast a message to all WebSocket clients subscribed to a specific session.
 	function broadcastToSession(sessionId: string, event: any): void {
@@ -12604,9 +12618,9 @@ async function handleApiRoute(
 		const optional = url.searchParams.get("optional") === "1";
 		const snapshot = await remoteState.prSnapshotFor(cwd, goal.branch, process.cwd(), { kind: "goal", id: goalId }, url.searchParams.get("intent"));
 		if (!snapshot) {
-			// Local-only/non-GitHub repositories retain their established no-PR path.
-			const pr = await getCachedPrStatus(cwd, goal.branch, process.cwd());
-			if (pr) { prStatusStore.set(goalId, pr); json(pr); } else if (optional) { noContent(); } else { json({ error: "No PR found" }, 404); }
+			// Local-only and untrusted/non-GitHub remotes are fetch-free. Normal route
+			// reads must never fall back to an independent legacy `gh` lookup.
+			if (optional) { noContent(); } else { json({ error: "No PR found" }, 404); }
 			return;
 		}
 		const publicSnapshot = remoteState.publicSnapshot(snapshot);
@@ -12648,9 +12662,9 @@ async function handleApiRoute(
 		const cwd = goal.cwd;
 		_prCache.delete(cwd);
 		if (goal.branch) _prCache.delete(`${cwd}::${goal.branch}`);
-		// Legacy broadcast remains for rolling clients; coordinator consumers receive
-		// the next canonical snapshot after invalidation.
-		void remoteState.invalidatePrSnapshot(cwd, goal.branch);
+		// Complete canonical invalidation before broadcasting/responding so a client
+		// reacting immediately can start the next eligible single-flight refresh.
+		await remoteState.invalidatePrSnapshot(cwd, goal.branch);
 		broadcastToAll({ type: "pr_status_changed", goalId });
 		json({ ok: true });
 		return;
@@ -15019,12 +15033,9 @@ async function handleApiRoute(
 		const optional = url.searchParams.get("optional") === "1";
 		const snapshot = await remoteState.prSnapshotFor(prCwd, sessionBranch, process.cwd(), { kind: "session", id }, url.searchParams.get("intent"));
 		if (!snapshot) {
-			const pr = await getCachedPrStatus(prCwd, sessionBranch, process.cwd());
-			if (pr) {
-				const goalId = session.goalId;
-				if (goalId) prStatusStore.set(goalId, pr);
-				json(pr);
-			} else if (optional) { noContent(); } else { json({ error: "No PR found" }, 404); }
+			// Local-only and untrusted/non-GitHub remotes are fetch-free. Normal route
+			// reads must never fall back to an independent legacy `gh` lookup.
+			if (optional) { noContent(); } else { json({ error: "No PR found" }, 404); }
 			return;
 		}
 		const publicSnapshot = remoteState.publicSnapshot(snapshot);

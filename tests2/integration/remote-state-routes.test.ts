@@ -1,7 +1,7 @@
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, connectWs, createSession, deleteSession, gitCwd } from "./_e2e/e2e-setup.js";
+import { apiFetch, connectWs, createGoal, createSession, deleteGoal, deleteSession, gitCwd } from "./_e2e/e2e-setup.js";
 
 /**
  * Route-level proof that the coordinator is the only remote-read authority.
@@ -17,13 +17,15 @@ test.describe("remote-state coordinator routes", () => {
 		let gitFetches = 0;
 		let prReads = 0;
 		let localOnly = false;
-		const credentialUrl = "https://token:secret@example.github.test/acme/widget.git";
+		let remoteHost = "example.github.test";
+		let goalId: string | undefined;
+		let originalTrustedHosts: unknown = [];
 		let ws: Awaited<ReturnType<typeof connectWs>> | undefined;
 
 		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
 			if (file === "git" && args.join(" ") === "remote get-url origin") {
 				if (localOnly) throw new Error("no origin configured");
-				return { stdout: `${credentialUrl}\n`, stderr: "" };
+				return { stdout: `https://token:secret@${remoteHost}/acme/widget.git\n`, stderr: "" };
 			}
 			if (file === "git" && args.join(" ") === "fetch --quiet") {
 				gitFetches += 1;
@@ -52,6 +54,13 @@ test.describe("remote-state coordinator routes", () => {
 		};
 
 		try {
+			const originalPreferences = await apiFetch("/api/preferences");
+			if (originalPreferences.ok) originalTrustedHosts = (await originalPreferences.json()).githubTrustedHosts ?? [];
+			const trusted = await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ githubTrustedHosts: ["example.github.test"] }),
+			});
+			expect(trusted.status).toBe(200);
 			ws = await connectWs(sessionId);
 			const cursor = ws.messageCount();
 			const gitResponses = await Promise.all([
@@ -96,6 +105,53 @@ test.describe("remote-state coordinator routes", () => {
 			await new Promise<void>(resolve => setImmediate(resolve));
 			expect(prReads).toBe(2);
 
+			// Sidebar goal demand is addressed to the viewer/global channel rather than
+			// only goal-attached sockets. This unrelated session socket observes it.
+			const goal = await createGoal({
+				title: `remote state sidebar ${Date.now()}`,
+				cwd: gitCwd(),
+				worktree: false,
+				autoStartTeam: false,
+			});
+			goalId = String(goal.id);
+			if (typeof goal.projectId !== "string") throw new Error("remote-state goal did not resolve a project");
+			gateway.sessionManager.getGoalStoreForProject(goal.projectId).update(goalId, {
+				cwd: gitCwd(),
+				repoPath: gitCwd(),
+				worktreePath: gitCwd(),
+				branch: `remote-state-sidebar-${Date.now()}`,
+				setupStatus: "ready",
+			});
+			gateway.clock.advance(60_000);
+			const sidebarCursor = ws.messageCount();
+			const sidebarResponse = await apiFetch(`/api/goals/${goalId}/pr-status?intent=sidebar`);
+			expect(sidebarResponse.status).toBe(200);
+			const sidebarFrame = await ws.waitForFrom(
+				sidebarCursor,
+				message => message.type === "remote_state_snapshot" && message.goalId === goalId && message.resource === "pr",
+			);
+			expect(sidebarFrame.snapshot).toMatchObject({ source: "pr", data: { number: 42 } });
+
+			// Cache-bust completes canonical invalidation before replying, so the next
+			// automatic read is immediately eligible and remains one single flight.
+			const beforeBust = prReads;
+			const bust = await apiFetch(`/api/goals/${goalId}/pr-cache-bust`, { method: "POST" });
+			expect(bust.status).toBe(200);
+			await Promise.all([
+				apiFetch(`/api/goals/${goalId}/pr-status?intent=automatic`),
+				apiFetch(`/api/goals/${goalId}/pr-status?intent=automatic`),
+			]);
+			await new Promise<void>(resolve => setImmediate(resolve));
+			expect(prReads).toBe(beforeBust + 1);
+
+			// An untrusted remote is rejected before any `gh` call; configured GHE and
+			// local-only repositories retain their separate supported paths.
+			remoteHost = "gitlab.example.test";
+			const beforeUntrusted = prReads;
+			const untrustedResponse = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit&optional=1`);
+			expect(untrustedResponse.status).toBe(204);
+			expect(prReads).toBe(beforeUntrusted);
+
 			// A no-origin repository remains entirely local: status still works but no
 			// `git fetch` is attempted by the coordinator.
 			localOnly = true;
@@ -106,11 +162,16 @@ test.describe("remote-state coordinator routes", () => {
 		} finally {
 			runner.execFile = originalExecFile;
 			ws?.close();
+			if (goalId) await deleteGoal(goalId);
 			await deleteSession(sessionId);
+			await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ githubTrustedHosts: originalTrustedHosts }),
+			}).catch(() => {});
 		}
 	});
 
-	test("shares refs across sibling worktrees without sharing dirty state, and invalidates immediately after a mutation", async ({ gateway }) => {
+	test("shares refs across sibling worktrees without sharing dirty state and preserves the mutation budget", async ({ gateway }) => {
 		test.setTimeout(30_000);
 		const primary = gitCwd();
 		const sibling = join(primary, `.remote-state-sibling-${Date.now()}`);
@@ -177,13 +238,16 @@ test.describe("remote-state coordinator routes", () => {
 				expect(JSON.stringify(frame)).not.toContain("token:secret");
 			}
 
-			// A successful pull is a mutation boundary. The following automatic read
-			// must not wait for the 30-second remote freshness window.
+			// A successful mutation marks retained refs stale without erasing the
+			// canonical 30-second automatic-call budget. Explicit force bypasses it.
 			const beforeMutation = fetches;
 			const pull = await apiFetch(`/api/sessions/${primarySession}/git-pull`, { method: "POST" });
 			expect(pull.status).toBe(200);
-			await apiFetch(`/api/sessions/${primarySession}/git-status?intent=automatic`);
+			const automatic = await apiFetch(`/api/sessions/${primarySession}/git-status?intent=automatic`);
+			expect((await automatic.json()).stale).toBe(true);
 			await new Promise<void>(resolve => setImmediate(resolve));
+			expect(fetches).toBe(beforeMutation);
+			await apiFetch(`/api/sessions/${primarySession}/git-status?intent=explicit`);
 			expect(fetches).toBe(beforeMutation + 1);
 		} finally {
 			releaseFetch();
