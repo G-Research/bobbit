@@ -8,6 +8,18 @@ export interface McpServerConfig {
   headers?: Record<string, string>;
 }
 
+/** Read-only, sanitized facts returned by an MCP initialize handshake. */
+export interface McpInitializeSnapshot {
+  /** Protocol version Bobbit requested during initialize. */
+  requestedProtocol: string;
+  /** Protocol version accepted/reported by the server, when valid. */
+  negotiatedProtocol?: string;
+  /** Server identity reported by the server, when valid. */
+  serverName?: string;
+  /** Server version reported by the server, when valid. */
+  serverVersion?: string;
+}
+
 /** MCP config file format */
 export interface McpConfigFile {
   mcpServers: Record<string, McpServerConfig>;
