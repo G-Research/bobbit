@@ -95,7 +95,7 @@
     },
     {
       "path": "tests2/core/anthropic-oauth-pi-callback-contract-repro.test.ts",
-      "reason": "Focused failing-first Anthropic OAuth regression pinning Pi's loopback callback and complete current authorization scope set, so the stale Console callback and reduced legacy scope contract cannot return.",
+      "reason": "Focused dependency-source contract pinning Pi's loopback callback and complete current authorization scope set without starting Pi's fixed listener, so concurrent unit coordinators cannot contend while the stale Console callback and reduced legacy scope contract remain blocked.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -131,7 +131,7 @@
     },
     {
       "path": "tests2/integration/anthropic-oauth-lifecycle.test.ts",
-      "reason": "Real gateway lifecycle coverage with a runtime-only mock Anthropic token provider: typed busy contention, provider-scoped cancel and immediate retry, Pi-backed completion, status/logout isolation, and rejected-credential removal without credential-bearing output.",
+      "reason": "Real gateway lifecycle coverage with a deterministic injected Pi-shaped Models facade and runtime-only refresh provider: typed busy contention, provider-scoped cancel and immediate retry, completion, status/logout isolation, and rejected-credential removal without credential-bearing output or Pi's fixed listener.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
