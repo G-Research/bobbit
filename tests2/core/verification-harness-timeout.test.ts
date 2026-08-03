@@ -61,8 +61,7 @@ async function withTimeout<T>(promise: Promise<T>, budgetMs: number, label: stri
 }
 
 /** Minimal stubs for a bare-bones VerificationHarness. */
-function makeHarness(deps: Record<string, unknown> = {}, broadcasts: any[] = []) {
-	const stateDir = fs.mkdtempSync(path.join(TEST_DIR, "harness-"));
+function makeHarness(deps: Record<string, unknown> = {}, broadcasts: any[] = [], stateDir = fs.mkdtempSync(path.join(TEST_DIR, "harness-"))) {
 	fs.mkdirSync(stateDir, { recursive: true });
 	const stubGateStore = {
 		updateSignalVerification: () => {},
@@ -534,6 +533,117 @@ describe("runCommandStep tree-kill", () => {
 		expect(await (harness as any)._killTrackedForSignal(signalId)).toBe(true);
 		expect(events).toEqual(["transport:SIGKILL"]);
 		expect(step.containerTransportCleanupCompletedAt).toEqual(expect.any(Number));
+	});
+
+	it("durably commits a retried live transport cleanup before restart finalization", async () => {
+		const broadcasts: any[] = [];
+		const harness = makeHarness({}, broadcasts);
+		const signalId = "sig-durable-live-transport";
+		const events: string[] = [];
+		let waits = 0;
+		const tracked = {
+			child: createFakeChild(910_009, false),
+			ownershipReady: Promise.resolve(),
+			killed: () => events.includes("signal"),
+			timedOut: () => false,
+			markSurvival: () => {},
+			killTree: () => { events.push("signal"); },
+			waitForTreeExit: async () => ++waits > 1,
+		};
+		setActiveCommandVerification(harness, "goal-durable-live-transport", "gate-durable-live-transport", signalId);
+		const active = (harness as any).activeVerifications.get(signalId);
+		active.cancelled = true;
+		active.overallStatus = "cancelled";
+		const step = active.steps[0];
+		Object.assign(step, {
+			containerId: "container-durable-live-transport",
+			restartRecoveryMode: "container-exec",
+			containerPayloadCleanupCompletedAt: Date.now(),
+			containerTransportCleanupPending: true,
+		});
+		(harness as any)._trackedCommandChildren.set(`${signalId}:0`, tracked);
+		(harness as any)._persistActive();
+
+		expect(await (harness as any)._killTrackedForSignal(signalId)).toBe(false);
+		expect((harness as any)._trackedCommandChildren.get(`${signalId}:0`)).toBe(tracked);
+		expect(JSON.parse(fs.readFileSync((harness as any)._persistPath, "utf8")).verifications[0].steps[0]).toMatchObject({
+			containerTransportCleanupPending: true,
+		});
+
+		expect(await (harness as any)._killTrackedForSignal(signalId)).toBe(true);
+		const persisted = JSON.parse(fs.readFileSync((harness as any)._persistPath, "utf8")).verifications[0];
+		expect(persisted.steps[0]).toMatchObject({
+			containerTransportCleanupCompletedAt: expect.any(Number),
+			killCompletedAt: expect.any(Number),
+		});
+		expect(persisted.steps[0].containerTransportCleanupPending).toBeUndefined();
+		expect((harness as any)._trackedCommandChildren.has(`${signalId}:0`)).toBe(false);
+
+		const recoveredBroadcasts: any[] = [];
+		const recovered = makeHarness({}, recoveredBroadcasts, path.dirname((harness as any)._persistPath));
+		(recovered as any).recoveredSentinelReaper = async () => { throw new Error("must not recover an already durable live transport"); };
+		await recovered.resumeInterruptedVerifications();
+		expect(recoveredBroadcasts.filter(event => event.type === "gate_verification_complete")).toEqual([
+			expect.objectContaining({ signalId, status: "cancelled" }),
+		]);
+		expect(fs.existsSync((harness as any)._persistPath)).toBe(false);
+		expect(events).toEqual(["signal", "signal"]);
+	});
+
+	it("retains exact transport authority when durable completion persistence fails", async () => {
+		const broadcasts: any[] = [];
+		const harness = makeHarness({}, broadcasts);
+		const signalId = "sig-transport-persist-failure";
+		let signals = 0;
+		let waits = 0;
+		const tracked = {
+			child: createFakeChild(910_010, false),
+			ownershipReady: Promise.resolve(),
+			killed: () => signals > 0,
+			timedOut: () => false,
+			markSurvival: () => {},
+			killTree: () => { signals++; },
+			waitForTreeExit: async () => { waits++; return true; },
+		};
+		setActiveCommandVerification(harness, "goal-transport-persist-failure", "gate-transport-persist-failure", signalId);
+		const active = (harness as any).activeVerifications.get(signalId);
+		const step = active.steps[0];
+		Object.assign(step, {
+			containerId: "container-transport-persist-failure",
+			restartRecoveryMode: "container-exec",
+			containerPayloadCleanupCompletedAt: Date.now(),
+			containerTransportCleanupPending: true,
+		});
+		(harness as any)._trackedCommandChildren.set(`${signalId}:0`, tracked);
+		(harness as any)._persistActive();
+		const persist = (harness as any)._persistActive.bind(harness);
+		let failOnce = true;
+		(harness as any)._persistActive = () => {
+			if (failOnce) {
+				failOnce = false;
+				throw new Error("injected persistence failure");
+			}
+			return persist();
+		};
+
+		expect(await (harness as any)._killTrackedForSignal(signalId)).toBe(false);
+		expect((harness as any)._trackedCommandChildren.get(`${signalId}:0`)).toBe(tracked);
+		expect(step.containerTransportCleanupPending).toBe(true);
+		expect(step.containerTransportCleanupCompletedAt).toBeUndefined();
+		expect(step.killCompletedAt).toBeUndefined();
+		expect(JSON.parse(fs.readFileSync((harness as any)._persistPath, "utf8")).verifications[0].steps[0]).toMatchObject({
+			containerTransportCleanupPending: true,
+		});
+		expect(broadcasts).toEqual([]);
+
+		expect(await (harness as any)._killTrackedForSignal(signalId)).toBe(true);
+		expect(signals).toBe(1);
+		expect(waits).toBe(2);
+		expect((harness as any)._trackedCommandChildren.has(`${signalId}:0`)).toBe(false);
+		expect(JSON.parse(fs.readFileSync((harness as any)._persistPath, "utf8")).verifications[0].steps[0]).toMatchObject({
+			containerTransportCleanupCompletedAt: expect.any(Number),
+			killCompletedAt: expect.any(Number),
+		});
 	});
 
 	it("cancels a ready sibling while another command still awaits ownership", async () => {
