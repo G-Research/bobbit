@@ -4064,19 +4064,6 @@ function prepareSandboxTokensStructured(
 	};
 }
 
-/** Strip redacted sentinel from incoming structured sandbox_tokens, persisting real values
- *  to the SecretsStore. Returns the structured array suitable for setSandboxTokens(). */
-function mergeSandboxTokensStructured(
-	incoming: Array<{ key: string; enabled?: boolean; value?: string }>,
-	secretsStore?: import("./agent/secrets-store.js").SecretsStore | null,
-): Array<{ key: string; enabled: boolean }> {
-	const prepared = prepareSandboxTokensStructured(incoming);
-	if (secretsStore && Object.keys(prepared.secretUpdates).length > 0) {
-		secretsStore.update(prepared.secretUpdates);
-	}
-	return prepared.tokens;
-}
-
 /** Deliberately avoid passing filesystem errors or config contents to API clients. */
 function projectConfigPersistenceFailure(error: unknown): { status: number; body: { error: string; code: string } } {
 	if (error instanceof ProjectConfigLoadError) {
@@ -4099,8 +4086,8 @@ function projectConfigPersistenceFailure(error: unknown): { status: number; body
 
 /** Merge redacted sentinel values with existing stored values before saving. */
 function mergeSandboxSecrets(updates: Record<string, string>, configStore: import("./agent/project-config-store.js").ProjectConfigStore, secretsStore?: import("./agent/secrets-store.js").SecretsStore | null): void {
-	// sandbox_tokens is now handled via mergeSandboxTokensStructured at the
-	// migrated-fields layer in the PUT handler. This helper only handles the
+	// sandbox_tokens is staged at the migrated-fields layer in the PUT handler.
+	// This helper only handles the
 	// remaining legacy flat sandbox_credentials key.
 	void configStore;
 	void secretsStore;
