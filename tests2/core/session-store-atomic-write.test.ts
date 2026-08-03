@@ -61,6 +61,7 @@ function createSessionStoreMemFs(): SessionStoreMemFs {
 type FingerprintTrackingFs = SessionStoreMemFs & {
 	primaryReads: number;
 	failPrimaryStat: boolean;
+	omitPrimaryCtime: boolean;
 	externalWrite(data: string): void;
 	resetPrimaryReads(): void;
 };
@@ -76,6 +77,7 @@ function createFingerprintTrackingFs(storeFile: string): FingerprintTrackingFs {
 
 	memfs.primaryReads = 0;
 	memfs.failPrimaryStat = false;
+	memfs.omitPrimaryCtime = false;
 	memfs.resetPrimaryReads = () => { memfs.primaryReads = 0; };
 	memfs.externalWrite = (data: string) => {
 		baseWriteFileSync(primary, data, "utf-8");
@@ -90,7 +92,11 @@ function createFingerprintTrackingFs(storeFile: string): FingerprintTrackingFs {
 		if (isPrimary && memfs.failPrimaryStat) throw Object.assign(new Error("injected stat failure"), { code: "EIO" });
 		const stat = (baseStatSync as (...callArgs: unknown[]) => import("node:fs").Stats)(file, ...args);
 		return isPrimary
-			? { ...stat, mtimeMs: fingerprintVersion, ctimeMs: fingerprintVersion }
+			? {
+				...stat,
+				mtimeMs: fingerprintVersion,
+				...(memfs.omitPrimaryCtime ? {} : { ctimeMs: fingerprintVersion }),
+			}
 			: stat;
 	}) as typeof memfs.statSync;
 	memfs.renameSync = ((from: PathLike, to: PathLike) => {
@@ -184,6 +190,31 @@ describe("SessionStore atomic write", () => {
 		await store.flushAsync();
 		assert.equal(fs.primaryReads, 1, "stat errors must disable the fast path and fully validate");
 		assert.equal(store.getWrittenEpoch(), 42);
+
+		fs.failPrimaryStat = false;
+		fs.omitPrimaryCtime = true;
+		fs.resetPrimaryReads();
+		store.put(makeSession("s4"));
+		await store.flushAsync();
+		assert.equal(fs.primaryReads, 1, "missing ctime must fall back to a full epoch read");
+		assert.equal(store.getWrittenEpoch(), 43);
+	});
+
+	it("fences concurrent store instances so one stale writer cannot interleave tmp publication", async () => {
+		const first = new SessionStore(stateDir, memfs);
+		const second = new SessionStore(stateDir, memfs);
+		first.put(makeSession("first"));
+		second.put(makeSession("second"));
+
+		const [firstResult, secondResult] = await Promise.allSettled([first.flushAsync(), second.flushAsync()]);
+		assert.equal(firstResult.status, "fulfilled");
+		assert.equal(secondResult.status, "rejected", "the second unloaded snapshot must see the first epoch");
+		assert.equal(second.isStaleGuardTripped(), true);
+		assert.deepEqual(
+			JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8")).sessions.map((session: PersistedSession) => session.id),
+			["first"],
+		);
+		assert.equal(memfs.existsSync(TMP), false, "serialized writers must leave no shared tmp artifact");
 	});
 
 	it("does not leave a .tmp file behind after a successful save", async () => {
