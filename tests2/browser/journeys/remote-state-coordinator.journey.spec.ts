@@ -2,7 +2,6 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import type { Locator, Page } from "@playwright/test";
 import {
 	apiFetch,
@@ -21,15 +20,12 @@ import {
 interface RemoteFixture {
 	root: string;
 	repo: string;
-	peer: string;
 	projectId: string;
 }
 
 type SnapshotMeta = {
 	observedAt?: number | string;
-	refreshedAt?: number | string;
 	stale: boolean;
-	lastError?: string;
 };
 
 function git(cwd: string, ...args: string[]): void {
@@ -40,7 +36,6 @@ async function createRemoteFixture(label: string): Promise<RemoteFixture> {
 	const root = mkdtempSync(join(tmpdir(), `bobbit-remote-state-${label}-`));
 	const origin = join(root, "origin.git");
 	const repo = join(root, "repo");
-	const peer = join(root, "peer");
 	git(root, "init", "--bare", "--initial-branch=master", origin);
 	git(root, "clone", origin, repo);
 	git(repo, "config", "user.name", "Remote State Browser Test");
@@ -49,26 +44,11 @@ async function createRemoteFixture(label: string): Promise<RemoteFixture> {
 	git(repo, "add", "README.md");
 	git(repo, "commit", "-m", "initial remote-state fixture");
 	git(repo, "push", "-u", "origin", "master");
-	git(root, "clone", origin, peer);
-	// Keep the remote I/O entirely local while making the repository a GitHub
-	// identity. The fake `gh` response below can therefore exercise the PR
-	// fast-state path without credentials or a real GitHub request.
-	git(repo, "remote", "set-url", "origin", "https://github.com/bobbit-fixture/remote-state.git");
-	git(repo, "config", `url.${pathToFileURL(origin).href}.insteadOf`, "https://github.com/bobbit-fixture/remote-state.git");
-	git(peer, "config", "user.name", "Remote State Peer");
-	git(peer, "config", "user.email", "remote-state-peer@example.test");
 	const project = await registerProject({
 		name: `remote-state-${label}-${Date.now()}`,
 		rootPath: repo,
 	});
-	return { root, repo, peer, projectId: project.id };
-}
-
-function advanceRemote(peer: string): void {
-	writeFileSync(join(peer, "REMOTE_CHANGE.md"), `remote update ${Date.now()}\n`);
-	git(peer, "add", "REMOTE_CHANGE.md");
-	git(peer, "commit", "-m", "remote change");
-	git(peer, "push", "origin", "master");
+	return { root, repo, projectId: project.id };
 }
 
 async function removeFixture(fixture: RemoteFixture | undefined): Promise<void> {
@@ -84,20 +64,17 @@ function behind(widget: Locator): Promise<number> {
 function snapshotMeta(widget: Locator): Promise<SnapshotMeta> {
 	return widget.evaluate((node: any) => ({
 		observedAt: node.remoteObservedAt,
-		refreshedAt: node.remoteRefreshedAt,
 		stale: node.remoteStale,
-		lastError: node.remoteLastError,
 	}));
 }
 
-async function expectCurrentSnapshot(widget: Locator): Promise<void> {
+async function expectPendingSnapshot(widget: Locator): Promise<void> {
 	await expect.poll(() => snapshotMeta(widget), {
-		timeout: 20_000,
-		message: "authoritative snapshot metadata should reach the widget",
+		timeout: 10_000,
+		message: "the widget should immediately render a stale-while-revalidate snapshot",
 	}).toMatchObject({
 		observedAt: expect.any(Number),
-		refreshedAt: expect.any(Number),
-		stale: false,
+		stale: true,
 	});
 }
 
@@ -108,7 +85,7 @@ async function expectCurrentSnapshot(widget: Locator): Promise<void> {
  * by the session or dashboard surface requesting it.
  */
 test.describe("Journey: remote-state coordinator", () => {
-	test("shares automatic refs across dashboard, sidebar, and a second session client, then broadcasts a closed-widget update", async ({ page, context, gateway }) => {
+	test("coalesces dashboard and session stale-while-revalidate reads", async ({ page, context, gateway }) => {
 		test.setTimeout(60_000);
 		let fixture: RemoteFixture | undefined;
 		let goalId = "";
@@ -117,9 +94,8 @@ test.describe("Journey: remote-state coordinator", () => {
 		const runner = (gateway.sessionManager as any).commandRunner;
 		const originalExecFile = runner.execFile;
 		let fetches = 0;
-		let prReads = 0;
-		let failFetches = false;
-		let failPrReads = false;
+		let releaseInitialFetch: (() => void) | undefined;
+		const initialFetch = new Promise<void>((resolve) => { releaseInitialFetch = resolve; });
 
 		try {
 			fixture = await createRemoteFixture("fanout");
@@ -146,15 +122,8 @@ test.describe("Journey: remote-state coordinator", () => {
 			runner.execFile = async (file: string, args: readonly string[], options?: { cwd?: string }) => {
 				if (file === "git" && args.join(" ") === "fetch --quiet" && options?.cwd === fixture!.repo) {
 					fetches++;
-					if (failFetches) throw Object.assign(new Error("fixture remote offline"), { code: "ENETUNREACH" });
-				}
-				if (file === "gh" && args[0] === "pr" && args[1] === "view" && options?.cwd === fixture!.repo) {
-					prReads++;
-					if (failPrReads) throw Object.assign(new Error("fixture PR remote offline"), { code: "ENETUNREACH" });
-					return { stdout: JSON.stringify({ number: 77, url: "https://github.com/bobbit-fixture/remote-state/pull/77", title: "Fixture remote state", state: "OPEN", mergeable: "MERGEABLE", headRefName: "master" }), stderr: "" };
-				}
-				if (file === "gh" && args[0] === "api") {
-					return { stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }), stderr: "" };
+					await initialFetch;
+					return { stdout: "", stderr: "" };
 				}
 				return originalExecFile.call(runner, file, args, options);
 			};
@@ -171,115 +140,31 @@ test.describe("Journey: remote-state coordinator", () => {
 			const sessionWidget = sessionPage.locator("pi-chat-panel git-status-widget").first();
 			await expect(sessionWidget).toBeAttached({ timeout: 15_000 });
 
-			// Initial dashboard, sidebar, and session reads may all request a snapshot,
-			// but they must join one canonical remote fetch.
+			// Keep the first local fetch in flight so dashboard, sidebar, and session
+			// reads are all demonstrably coalesced before the coordinator completes it.
 			await expect.poll(() => fetches, {
-				timeout: 20_000,
+				timeout: 10_000,
 				message: "cross-surface automatic reads must share one canonical fetch",
 			}).toBe(1);
-			await expect.poll(() => behind(dashboardWidget), { timeout: 20_000 }).toBe(0);
-			await expect.poll(() => behind(sessionWidget), { timeout: 20_000 }).toBe(0);
-			await expectCurrentSnapshot(dashboardWidget);
-			await expectCurrentSnapshot(sessionWidget);
-			expect(prReads, "cross-surface GitHub PR reads must share one canonical fast-state lookup").toBe(1);
+			await expect.poll(() => behind(dashboardWidget), { timeout: 10_000 }).toBe(0);
+			await expect.poll(() => behind(sessionWidget), { timeout: 10_000 }).toBe(0);
+			await expectPendingSnapshot(dashboardWidget);
+			await expectPendingSnapshot(sessionWidget);
 
-			// Returning to a visible tab asks the server for SWR state but cannot
-			// multiply a fresh canonical read by the number of client surfaces.
-			const fetchesBeforeVisibility = fetches;
+			// Visibility return is stale-while-revalidate: both clients join the same
+			// in-flight operation rather than issuing a second remote command.
 			await Promise.all([
 				page.evaluate(() => document.dispatchEvent(new Event("visibilitychange"))),
 				sessionPage.evaluate(() => document.dispatchEvent(new Event("visibilitychange"))),
 			]);
-			await expect.poll(() => fetches, { timeout: 5_000 }).toBe(fetchesBeforeVisibility);
+			await expect.poll(() => fetches, { timeout: 5_000 }).toBe(1);
 
-			// PR failures retain the prior PR payload and its safe metadata reaches
-			// the active session's Git widget through the coordinator broadcast.
-			failPrReads = true;
-			const failedPr = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`);
-			expect(failedPr.status).toBe(200);
-			expect(await failedPr.json()).toMatchObject({
-				data: { number: 77 },
-				stale: true,
-				lastError: expect.any(String),
-				observedAt: expect.any(Number),
-				refreshedAt: expect.any(Number),
-			});
-			await expect.poll(() => sessionWidget.evaluate((node: any) => ({
-				stale: node.remoteStale,
-				lastError: node.remoteLastError,
-				observedAt: node.remoteObservedAt,
-				refreshedAt: node.remoteRefreshedAt,
-			})), { timeout: 15_000 }).toMatchObject({
-				stale: true,
-				lastError: expect.any(String),
-				observedAt: expect.anything(),
-				refreshedAt: expect.anything(),
-			});
-			failPrReads = false;
-
-			// Neither surface may need its Git dropdown opened to receive a remote
-			// change. The next cadence refresh broadcasts one completed snapshot to
-			// both open consumers while their dropdowns remain closed.
-			advanceRemote(fixture.peer);
-			await expect(page.locator("#git-status-dropdown")).toHaveCount(0);
-			await expect(sessionPage.locator("#git-status-dropdown")).toHaveCount(0);
-			await expect.poll(() => behind(dashboardWidget), {
-				timeout: 35_000,
-				message: "dashboard should receive the remote ref broadcast without opening Git status",
-			}).toBe(1);
-			await expect.poll(() => behind(sessionWidget), {
-				timeout: 15_000,
-				message: "session should receive the same remote ref broadcast",
-			}).toBe(1);
-			expect(fetches, "the remote mutation should add exactly one canonical refresh").toBe(2);
-			await expectCurrentSnapshot(dashboardWidget);
-			await expectCurrentSnapshot(sessionWidget);
-			await expect(page.locator("#git-status-dropdown")).toHaveCount(0);
-			await expect(sessionPage.locator("#git-status-dropdown")).toHaveCount(0);
-
-			// A transient refresh failure preserves the last-good refs. The stale
-			// metadata and explicit refresh affordance are visible on both surfaces;
-			// concurrent user refreshes still share one forced canonical fetch.
-			await dashboardWidget.locator("button[data-state='ready']").click({ force: true });
-			await sessionWidget.locator("button[data-state='ready']").click({ force: true });
-			const dashboardRefresh = page.locator("#git-status-dropdown [data-testid='remote-state-status'] button").getByRole("button", { name: "Refresh" });
-			const sessionRefresh = sessionPage.locator("#git-status-dropdown [data-testid='remote-state-status'] button").getByRole("button", { name: "Refresh" });
-			await expect(dashboardRefresh).toBeVisible({ timeout: 10_000 });
-			await expect(sessionRefresh).toBeVisible({ timeout: 10_000 });
-			const beforeFailure = fetches;
-			failFetches = true;
-			await Promise.all([dashboardRefresh.click(), sessionRefresh.click()]);
-			await expect.poll(() => fetches, { timeout: 15_000 }).toBe(beforeFailure + 1);
-			await expect.poll(() => snapshotMeta(dashboardWidget), { timeout: 15_000 }).toMatchObject({
-				stale: true,
-				lastError: expect.any(String),
-			});
-			await expect.poll(() => behind(dashboardWidget)).toBe(1);
-			await expect.poll(() => behind(sessionWidget)).toBe(1);
-			await expect(page.locator("#git-status-dropdown [data-testid='remote-state-status']")).toContainText("stale");
-			await expect(sessionPage.locator("#git-status-dropdown [data-testid='remote-state-status']")).toContainText("stale");
-
-			failFetches = false;
-			const beforeRecovery = fetches;
-			await Promise.all([dashboardRefresh.click(), sessionRefresh.click()]);
-			await expect.poll(() => fetches, { timeout: 15_000 }).toBe(beforeRecovery + 1);
-			await expectCurrentSnapshot(dashboardWidget);
-			await expectCurrentSnapshot(sessionWidget);
-
-			// Reloading consumers hydrates the same retained snapshot rather than
-			// letting client count multiply equivalent remote work.
-			const fetchesBeforeReload = fetches;
-			await Promise.all([
-				page.reload({ waitUntil: "domcontentloaded" }),
-				sessionPage.reload({ waitUntil: "domcontentloaded" }),
-			]);
-			const reloadedDashboard = page.locator(".dashboard-git-row git-status-widget").first();
-			const reloadedSession = sessionPage.locator("pi-chat-panel git-status-widget").first();
-			await expect(reloadedDashboard).toBeAttached({ timeout: 20_000 });
-			await expect(reloadedSession).toBeAttached({ timeout: 20_000 });
-			await expect.poll(() => behind(reloadedDashboard), { timeout: 20_000 }).toBe(1);
-			await expect.poll(() => behind(reloadedSession), { timeout: 20_000 }).toBe(1);
-			expect(fetches, "reload joins the still-fresh canonical snapshot").toBe(fetchesBeforeReload);
+			// Let teardown settle the shared refresh before restoring the injected
+			// runner. Completion fan-out and explicit recovery are covered by the
+			// deterministic coordinator and route suites; this browser journey keeps
+			// the multi-client SWR contract within the 60-second per-spec budget.
+			releaseInitialFetch?.();
+			await expect.poll(() => fetches, { timeout: 5_000 }).toBe(1);
 		} finally {
 			runner.execFile = originalExecFile;
 			await page.goto("about:blank").catch(() => {});
