@@ -263,6 +263,54 @@ test("UH-2: remote retain and queue persistence failure rejects with a sanitized
 	}
 });
 
+test("retry queue: queue read failure rejects without replacing an unknown snapshot", async () => {
+	const remoteCanary = "remote-retain-secret-canary";
+	const storeCanary = "queue-read-secret-canary";
+	const store = makeStore();
+	const durableGet = store.get;
+	const durablePut = store.put;
+	let queuePutCalls = 0;
+	store.get = async <T = unknown>(key: string): Promise<T | null> => {
+		if (key === QUEUE_KEY) throw new Error(storeCanary);
+		return durableGet<T>(key);
+	};
+	store.put = async <T = unknown>(key: string, value: T): Promise<void> => {
+		if (key === QUEUE_KEY) queuePutCalls++;
+		await durablePut(key, value);
+	};
+	__setClientFactory(() => ({
+		health: async () => ({ ok: true }),
+		ensureBank: async () => {},
+		recall: async () => ({ memories: [] }),
+		retain: async () => {
+			throw new Error(remoteCanary);
+		},
+		reflect: async () => ({ text: "reflection" }),
+		listBanks: async () => ({ banks: ["bobbit"] }),
+	}));
+	try {
+		const error = await provider.afterTurn({
+			config: { ...ACTIVE },
+			host: { store },
+			sessionId: "s",
+			prompt: "retain this turn",
+		}).then(
+			() => null,
+			(error: unknown) => error,
+		);
+
+		assert.ok(error, "QUEUE_READ_FAILURE_MUST_REJECT");
+		assert.equal((error as Error).message, "HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED");
+		assert.doesNotMatch((error as Error).message, new RegExp(`${remoteCanary}|${storeCanary}`));
+		assert.equal(queuePutCalls, 0, "a failed read must not replace the unknown queue snapshot");
+		assert.equal(store.map.has(QUEUE_KEY), false, "no retry queue snapshot is written after a failed read");
+		assert.equal(store.map.has(LAST_ERROR_KEY), false, "the unsaved remote error is not recorded");
+		assert.doesNotMatch(JSON.stringify([...store.map.entries()]), new RegExp(`${remoteCanary}|${storeCanary}`));
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
 test("retry queue: successful durable enqueue remains non-fatal", async () => {
 	const { client, state } = makeClient();
 	state.failRetain = true;

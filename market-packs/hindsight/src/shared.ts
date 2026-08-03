@@ -170,13 +170,23 @@ export const LAST_ERROR_KEY = "last-error";
 export const CONFIG_KEY = "provider-config:memory";
 export const QUEUE_CAP = 100;
 
-export async function loadQueue(store: StoreLike): Promise<QueueEntry[]> {
+export type QueueLoadResult = { loaded: true; queue: QueueEntry[] } | { loaded: false };
+
+/** Load a queue snapshot for a mutation. A failed read is distinct from a
+ * legitimately empty queue so callers never overwrite an unknown snapshot. */
+export async function loadQueueForMutation(store: StoreLike): Promise<QueueLoadResult> {
 	try {
 		const v = await store.get<QueueEntry[]>(QUEUE_KEY);
-		return Array.isArray(v) ? v : [];
+		return { loaded: true, queue: Array.isArray(v) ? v : [] };
 	} catch {
-		return [];
+		return { loaded: false };
 	}
+}
+
+/** Best-effort queue read for non-mutating consumers such as routes and drains. */
+export async function loadQueue(store: StoreLike): Promise<QueueEntry[]> {
+	const result = await loadQueueForMutation(store);
+	return result.loaded ? result.queue : [];
 }
 
 export type QueueSaveResult = { durable: true } | { durable: false };
@@ -191,9 +201,12 @@ export async function saveQueue(store: StoreLike, q: QueueEntry[]): Promise<Queu
 	}
 }
 
-/** Append a failed retain; FIFO-evict the oldest beyond the cap (100). */
+/** Append a failed retain; FIFO-evict the oldest beyond the cap (100).
+ * A queue-read failure is not an empty queue: do not write a replacement. */
 export async function enqueueRetain(store: StoreLike, entry: QueueEntry): Promise<QueueSaveResult> {
-	const q = [...(await loadQueue(store)), entry];
+	const loaded = await loadQueueForMutation(store);
+	if (!loaded.loaded) return { durable: false };
+	const q = [...loaded.queue, entry];
 	return saveQueue(store, q.length > QUEUE_CAP ? q.slice(-QUEUE_CAP) : q);
 }
 
