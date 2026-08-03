@@ -263,6 +263,11 @@ type DiskFingerprint = {
 	ctimeMs?: number;
 };
 
+export interface PersistenceMetrics {
+	bytes: number;
+	durationMs: number;
+}
+
 export class SessionStore {
 	private readonly storeDir: string;
 	private readonly storeFile: string;
@@ -285,6 +290,7 @@ export class SessionStore {
 	/** Active promise-based purge writer; synchronous mutations fold into it. */
 	private asyncSaveInFlight: Promise<void> | null = null;
 	private asyncSaveRequested = false;
+	private lastPersistenceMetrics: PersistenceMetrics | null = null;
 
 	constructor(stateDir: string, fsImpl: FsLike = realFs, clock: Clock = realClock) {
 		this.fs = fsImpl as SessionStoreFs;
@@ -542,9 +548,14 @@ export class SessionStore {
 		return this.writtenEpoch;
 	}
 
-	/** Write sessions to disk immediately (synchronous). */
-	private saveNow(): void {
+	/**
+	 * Shutdown-only synchronous durability path. Normal mutations use the async
+	 * writer below so session traffic never performs whole-file disk I/O on the
+	 * gateway event loop.
+	 */
+	private saveNowSync(): void {
 		if (this.staleGuardTripped) return;
+		const startedAt = performance.now();
 		// Preserve the synchronous API while preventing a newer in-memory mutation
 		// from racing an older promise-based purge snapshot to sessions.json.
 		if (this.asyncSaveInFlight) {
@@ -601,6 +612,7 @@ export class SessionStore {
 			}
 			this.fs.renameSync(tmp, this.storeFile);
 			this.writtenEpoch = nextEpoch;
+			this.lastPersistenceMetrics = { bytes: Buffer.byteLength(json), durationMs: performance.now() - startedAt };
 			// Refresh only after the atomic replacement succeeds. A stat failure
 			// leaves the fast path disabled so the next save performs full validation.
 			this.diskFingerprint = this.currentDiskFingerprint();
@@ -614,9 +626,30 @@ export class SessionStore {
 		}
 	}
 
+	/**
+	 * Queue the structural snapshot for the next turn. This preserves the legacy
+	 * immediate-save cadence without performing its filesystem work on the
+	 * mutation call stack, and leaves `flush()` a synchronous shutdown barrier.
+	 */
+	private saveNow(): void {
+		if (this.saveTimer) {
+			this.clock.clearTimeout(this.saveTimer);
+			this.saveTimer = null;
+		}
+		if (this.asyncSaveInFlight) {
+			this.asyncSaveRequested = true;
+			return;
+		}
+		this.saveTimer = this.clock.setTimeout(() => {
+			this.saveTimer = null;
+			void this.requestAsyncSave();
+		}, 0);
+	}
+
 	/** Promise-based save preserving epoch checks, backups, fsync, and atomic rename. */
 	private async saveNowAsync(): Promise<void> {
 		if (this.staleGuardTripped) return;
+		const startedAt = performance.now();
 		try {
 			await this.fs.promises.mkdir(this.storeDir, { recursive: true });
 
@@ -657,6 +690,7 @@ export class SessionStore {
 			}
 			await this.fs.promises.rename(tmp, this.storeFile);
 			this.writtenEpoch = nextEpoch;
+			this.lastPersistenceMetrics = { bytes: Buffer.byteLength(json), durationMs: performance.now() - startedAt };
 			this.diskFingerprint = await this.currentDiskFingerprintAsync();
 		} catch (err) {
 			console.error("[session-store] Failed to save sessions:", err);
@@ -697,7 +731,7 @@ export class SessionStore {
 		if (this.saveTimer) return; // already scheduled
 		this.saveTimer = this.clock.setTimeout(() => {
 			this.saveTimer = null;
-			this.saveNow();
+			void this.requestAsyncSave();
 		}, SessionStore.SAVE_DEBOUNCE_MS);
 	}
 
@@ -736,13 +770,10 @@ export class SessionStore {
 
 	/**
 	 * Fields whose persistence is required for the session to survive a hard
-	 * restart (kill -9, OS crash, container OOM). When any of these change we
-	 * flush synchronously instead of going through the 1s save debounce —
-	 * otherwise the gateway can advertise the session as `idle` to the API
-	 * before the recovery-critical disk write has landed, and a kill in that
-	 * window archives the session on next boot.
+	 * restart (kill -9, OS crash, container OOM). They bypass the high-frequency
+	 * activity debounce and enter the serialized async writer immediately; the
+	 * public `flush()`/`flushAsync()` paths retain shutdown durability.
 	 *
-	 * Lower-frequency by nature, so synchronous writes are not a perf concern.
 	 * `lastActivity` / `lastReadAt` are intentionally excluded — they fire on
 	 * every event and benefit from coalescing.
 	 */
@@ -765,7 +796,7 @@ export class SessionStore {
 		this.generation++;
 		Object.assign(existing, updates);
 
-		// Recovery-critical fields must survive a hard kill — flush synchronously.
+		// Recovery-critical fields bypass the high-frequency debounce.
 		const critical = SessionStore.RECOVERY_CRITICAL_FIELDS.some(f => f in updates);
 		if (critical) {
 			// If a debounced save is pending, cancel it — saveNow supersedes it.
@@ -928,12 +959,32 @@ export class SessionStore {
 		return true;
 	}
 
-	/** Flush any pending debounced save immediately (e.g. before shutdown). */
+	/**
+	 * Flush any pending debounced save synchronously at shutdown. Normal hot-path
+	 * writes are async; this compatibility method remains synchronous because its
+	 * existing lifecycle callers do not await it.
+	 */
 	flush(): void {
+		const hadScheduledSave = this.saveTimer !== null;
 		if (this.saveTimer) {
 			this.clock.clearTimeout(this.saveTimer);
 			this.saveTimer = null;
-			this.saveNow();
 		}
+		if (this.asyncSaveInFlight) this.asyncSaveRequested = true;
+		else if (hadScheduledSave) this.saveNowSync();
+	}
+
+	/** Latest atomic persistence duration and serialized byte count. */
+	getPersistenceMetrics(): PersistenceMetrics | null {
+		return this.lastPersistenceMetrics;
+	}
+
+	/** Await all pending persistence for async shutdown paths and focused tests. */
+	async flushAsync(): Promise<void> {
+		if (this.saveTimer) {
+			this.clock.clearTimeout(this.saveTimer);
+			this.saveTimer = null;
+		}
+		await this.requestAsyncSave();
 	}
 }
