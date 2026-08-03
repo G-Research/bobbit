@@ -115,6 +115,69 @@ function shellSingleQuote(value: string): string {
 
 type ContainerOwnershipWitness = NonNullable<ActiveVerification["steps"][number]["containerOwnershipWitness"]>;
 
+/** A daemon-bound proof that the persisted sentinel is a descendant of this exact Docker exec. */
+export type ContainerOwnershipAttestation = {
+	readonly version: 1;
+	readonly containerId: string;
+	readonly nonce: string;
+	readonly execId: string;
+	readonly enginePid: number;
+	readonly tag: string;
+	readonly sentinelPid: number;
+	readonly pgid: number;
+	readonly startToken: string;
+};
+
+export type DockerTopRow = { pid: number; ppid: number; pgid: number; args: string };
+
+function exactSentinelArgument(tag: string, witness: ContainerOwnershipWitness): string {
+	return `bobbit-container-sentinel:${tag}:${witness.sentinelPid}:${witness.pgid}:${witness.startToken}`;
+}
+
+/**
+ * The frame is not authority: bind it to one daemon exec-inspect result and one
+ * Docker top snapshot before publishing it.  The unique tagged sentinel row
+ * must have an unbroken parent chain to the engine-owned exec PID.  The helper
+ * keeps publication before release mechanically testable without giving payload
+ * bytes, paths, environment, or inherited descriptors any verdict authority.
+ */
+export async function attestAndReleaseContainerOwnership(input: {
+	frame: ContainerOwnershipWitness;
+	containerId: string;
+	nonce: string;
+	tag: string;
+	verifyExec: () => Promise<{ id: string; containerId: string; pid: number; command: string }>;
+	snapshot: (containerId: string) => Promise<readonly DockerTopRow[]>;
+	persist: (attestation: ContainerOwnershipAttestation) => boolean;
+	release: () => boolean;
+}): Promise<ContainerOwnershipAttestation> {
+	const { frame, containerId, nonce, tag } = input;
+	if (frame.containerId !== containerId || frame.nonce !== nonce) throw new Error("Container ownership frame did not match its host step identity");
+	const exec = await input.verifyExec();
+	if (exec.containerId !== containerId || !exec.command.includes(tag)) throw new Error("Docker exec engine identity was missing or mismatched");
+	const rows = await input.snapshot(containerId);
+	const expectedArg = exactSentinelArgument(tag, frame);
+	const matches = rows.filter(row => row.args.includes(expectedArg));
+	if (matches.length !== 1) throw new Error("Docker sentinel tag was missing or ambiguous");
+	const sentinel = matches[0];
+	if (sentinel.pid !== frame.sentinelPid || sentinel.pgid !== frame.pgid) throw new Error("Docker sentinel tuple did not match the live daemon snapshot");
+	const byPid = new Map(rows.map(row => [row.pid, row]));
+	let cursor: DockerTopRow | undefined = sentinel;
+	const seen = new Set<number>();
+	while (cursor && cursor.pid !== exec.pid && !seen.has(cursor.pid)) {
+		seen.add(cursor.pid);
+		cursor = byPid.get(cursor.ppid);
+	}
+	if (!cursor || cursor.pid !== exec.pid) throw new Error("Docker sentinel ancestry did not terminate at the engine exec PID");
+	const attestation: ContainerOwnershipAttestation = {
+		version: 1, containerId, nonce, execId: exec.id, enginePid: exec.pid, tag,
+		sentinelPid: frame.sentinelPid, pgid: frame.pgid, startToken: frame.startToken,
+	};
+	if (!input.persist(attestation)) throw new Error("Container ownership attestation could not be durably persisted");
+	if (!input.release()) throw new Error("Container payload release failed after durable ownership attestation");
+	return attestation;
+}
+
 /**
  * The tuple and the private stdin writer become available on independent event
  * boundaries.  Retain a validated release request until the writer is installed
@@ -367,35 +430,18 @@ function inspectDockerExecThroughCurrentContext(execId: string): Promise<DockerE
 	});
 }
 
-/** Prove the proposed container supervisor is the only process carrying the engine tag. */
-function hasEngineExecPidWithTag(containerId: string, enginePid: number, commandTag: string): boolean {
-	try {
-		// `docker top` reports container processes in the daemon's PID namespace,
-		// the same namespace as ExecInspect.Pid. It therefore closes the otherwise
-		// ambiguous host-PID/container-PID mapping without a local daemon socket.
-		const table = execFileSync("docker", ["top", containerId, "-eo", "pid,args"], {
-			encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
-		});
-		const matches = table.split(/\r?\n/).filter(line =>
-			new RegExp(`^\\s*${enginePid}\\s+`).test(line) && line.includes(commandTag),
-		);
-		return matches.length === 1;
-	} catch {
-		return false;
+/** One Docker top snapshot supplies the daemon PID namespace parent-chain proof. */
+async function readDockerTopSnapshot(containerId: string): Promise<DockerTopRow[]> {
+	const table = execFileSync("docker", ["top", containerId, "-eo", "pid,ppid,pgid,args"], {
+		encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+	});
+	const rows: DockerTopRow[] = [];
+	for (const line of table.split(/\r?\n/).slice(1)) {
+		const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line);
+		if (!match) continue;
+		rows.push({ pid: Number(match[1]), ppid: Number(match[2]), pgid: Number(match[3]), args: match[4] });
 	}
-}
-
-function hasUniqueContainerExecTag(containerId: string, pid: number, commandTag: string): boolean {
-	const marker = `BOBBIT_EXEC_TAG=${commandTag}`;
-	const script = `m=${shellSingleQuote(marker)}; p=${pid}; [ -r "/proc/$p/environ" ] || exit 1; n=0; hit=0; for f in /proc/[0-9]*/environ; do [ -r "$f" ] || continue; if tr '\\000' '\\n' < "$f" 2>/dev/null | grep -Fqx "$m"; then n=$((n + 1)); case "$f" in "/proc/$p/environ") hit=1;; esac; fi; done; [ "$hit" = 1 ] && [ "$n" -eq 1 ]`;
-	try {
-		execFileSync("docker", ["exec", containerId, "/bin/sh", "-c", script], {
-			stdio: ["ignore", "ignore", "ignore"],
-		});
-		return true;
-	} catch {
-		return false;
-	}
+	return rows;
 }
 
 export type DockerEngineEventsResponseDecoder = {
@@ -1474,11 +1520,8 @@ export interface ActiveVerification {
 		nonce?: string;
 		/** Container id for attached docker exec command paths (not restart-recoverable). */
 		containerId?: string;
-		/** Atomic in-container ownership witness written before the payload starts. */
-		containerWitnessFile?: string;
-		/** Daemon-authenticated exec identity paired with the container witness. */
-		containerDockerExecId?: string;
-		containerDockerExecTag?: string;
+		/** Versioned daemon-backed ancestry proof paired atomically with the witness. */
+		containerOwnershipAttestation?: ContainerOwnershipAttestation;
 		/** Exact in-container sentinel identity authorizing a negative-PGID signal. */
 		containerOwnershipWitness?: {
 			containerId: string;
@@ -3698,9 +3741,8 @@ export class VerificationHarness {
 			// lookup, which could race the sentinel's final removal. Keep the
 			// terminal record durable, but never re-authorize its historical group.
 			if (step.killCompletedAt && !step.sentinelCleanupPending && !step.containerPayloadCleanupPending && !step.containerTransportCleanupPending) continue;
-			// Container state files are not host-visible, so fs.existsSync(exitFile)
-			// cannot decide whether cleanup is complete. A durable container command
-			// instead settles only after its exact host docker-exec sentinel is reaped.
+			// Container cleanup settles only after its exact payload sentinel and host
+			// docker-exec transport are reaped; no container-visible artifact is read.
 			if (step.restartRecoveryMode === "container-exec" && step.containerId) {
 				try {
 					// Durable ordering: exact payload first, then exact host docker-exec
@@ -3775,7 +3817,6 @@ export class VerificationHarness {
 		active: ActiveVerification,
 		step: ActiveVerification["steps"][number],
 	): Promise<{ status: "settled" | "pending" | "unverifiable"; reason?: string }> {
-		const hadPriorKillAttempt = (step.killAttempts ?? 0) > 0 || !!step.killLastAttemptAt || !!step.killCompletedAt;
 		// Recovered host POSIX cleanup has one authority: the persisted sentinel.
 		// A leader PID, heartbeat, or lstart token is never sufficient.
 		if (step.sentinelFile && this.platform !== "win32") {
@@ -3793,63 +3834,8 @@ export class VerificationHarness {
 		}
 		// No persisted PID/heartbeat fallback survives a restart. Without the
 		// sentinel authority, timeout cleanup is explicitly retryable.
-		if (!step.sentinelFile || this.platform === "win32") {
-			this._markPersistedCommandKillIntent(active, "SIGKILL", "timeout");
-			step.killUnsafeReason = "Recovered timeout has no typed exact sentinel evidence; refusing numeric PID/PGID cleanup.";
-			this._persistActive();
-			return { status: "pending", reason: step.killUnsafeReason };
-		}
-		let identity = this._verifyPersistedCommandIdentity(step);
-
-		if (!identity.verified || !identity.pid) {
-			step.killUnsafeReason = identity.reason;
-			if (identity.reason === "command process is no longer alive") {
-				step.killCompletedAt ??= Date.now();
-				this._persistActive();
-				return hadPriorKillAttempt
-					? { status: "settled" }
-					: {
-						status: "unverifiable",
-						reason: "The command process was no longer alive at its timeout deadline before Bobbit could verify cleanup, and no durable exit status was recorded.",
-					};
-			}
-
-			this._markPersistedCommandKillIntent(active, "SIGKILL", "timeout");
-			step.killUnsafeReason = `timeout cleanup is pending until command identity can be verified safely: ${identity.reason}`;
-			this._persistActive();
-			return { status: "pending", reason: step.killUnsafeReason };
-		}
-
 		this._markPersistedCommandKillIntent(active, "SIGKILL", "timeout");
-		step.killAttempts = (step.killAttempts ?? 0) + 1;
-		step.killLastAttemptAt = Date.now();
-		const killResult = killTreeByPid(identity.pid, "SIGKILL");
-		if (killResult !== "signalled") {
-			step.killUnsafeReason = killResult === "unsupported"
-				? "Persisted Windows PID timeout cleanup is unsupported because ownership cannot be verified atomically"
-				: "Persisted command process group was unavailable before timeout cleanup; refusing to retarget its numeric PID";
-			this._persistActive();
-			return { status: "pending", reason: step.killUnsafeReason };
-		}
-		const exited = await this._waitForPidToExit(identity.pid);
-		if (exited) {
-			step.killCompletedAt = Date.now();
-			delete step.killUnsafeReason;
-			this._persistActive();
-			return { status: "settled" };
-		}
-
-		identity = this._verifyPersistedCommandIdentity(step);
-		if (identity.reason === "command process is no longer alive") {
-			step.killCompletedAt = Date.now();
-			delete step.killUnsafeReason;
-			this._persistActive();
-			return { status: "settled" };
-		}
-
-		step.killUnsafeReason = identity.verified && identity.pid
-			? "verified command process was still alive after timeout kill attempt; will retry before finalizing the timeout"
-			: `timeout cleanup could not be verified after kill attempt: ${identity.reason}`;
+		step.killUnsafeReason = "Recovered timeout has no typed exact sentinel evidence; refusing numeric PID/PGID cleanup.";
 		this._persistActive();
 		return { status: "pending", reason: step.killUnsafeReason };
 	}
@@ -6059,11 +6045,8 @@ export class VerificationHarness {
 			// file tailers) runs against a fake. Production (real runner) is never
 			// nonDurable, so this is a strict no-op there.
 			const runnerNonDurable = !!this.commandStepRunner.nonDurable;
-			// The `container-exec` arm is defensive-only: container steps are dispatched
-			// by the `if (containerId)` branch below via a DIRECT spawnTracked call and
-			// are never routed through this seam, so a fake never reaches container mode
-			// in practice. Kept in the downgrade so that IF a nonDurable runner ever saw
-			// a container step it would still avoid the durable in-container files.
+			// Container steps bypass this runner seam, but retain the defensive downgrade
+			// should an injected non-durable runner ever be given one.
 			let recoveryMode: CommandRecoveryMode =
 				runnerNonDurable && (recoveryMode0 === "detached" || recoveryMode0 === "container-exec") && !!streamCtx
 					? "pending-retry"
@@ -6092,7 +6075,6 @@ export class VerificationHarness {
 			// docker exec. A same-UID payload may inspect its parent and forge every
 			// container-visible path or stream, so those are diagnostics only.
 			let containerCompletionFile: string | undefined;
-			let containerWitnessFile: string | undefined;
 			let heartbeatFile: string | undefined;
 			let processStartToken: string | undefined;
 			let dockerExecCommandTag: string | undefined;
@@ -6148,17 +6130,9 @@ export class VerificationHarness {
 				}
 			}
 
-			// Container durable recovery: persist exit/pid/heartbeat paths INSIDE
-			// the container. The host cannot read them via `fs`; resume reads them
-			// with `docker exec`. Host stdout/stderr streaming (outFile/errFile,
-			// the pipe path) is unchanged so live output still works.
-			let containerStateDir: string | undefined;
+			// Docker durability retains only host-authored result and transport records;
+			// no container path, PID file, exit file, or heartbeat influences a verdict.
 			if (useContainerDurable && streamCtx) {
-				containerStateDir = `/tmp/.bobbit-verif/${streamCtx.signalId}`;
-				exitFile = `${containerStateDir}/${streamCtx.stepIndex}.exit`;
-				pidFile = `${containerStateDir}/${streamCtx.stepIndex}.pid`;
-				containerWitnessFile = `${containerStateDir}/${streamCtx.stepIndex}.ownership.json`;
-				heartbeatFile = `${containerStateDir}/${streamCtx.stepIndex}.heartbeat`;
 				pidNonce = randomUUID();
 				// This unguessable marker is embedded in Docker's daemon-authored exec
 				// create event and ProcessConfig. It binds the eventual in-container
@@ -6210,9 +6184,7 @@ export class VerificationHarness {
 					windowsJobCompletionNonce: windowsJobCompletionFile ? pidNonce : undefined,
 					containerCompletionFile,
 					containerCompletionNonce: containerCompletionFile ? pidNonce : undefined,
-					heartbeatFile,
 					containerId,
-					containerWitnessFile,
 					bootEpoch: durable ? this.bootEpoch : undefined,
 					timeoutSec,
 					expectFailure,
@@ -6331,33 +6303,24 @@ export class VerificationHarness {
 					try {
 						if (!streamCtx || !containerId || !pidNonce || containerHandshakeFailure) return;
 						if (containerWitnessAcknowledged) throw new Error("Container ownership tuple was duplicated");
-						if (witness.containerId !== containerId || witness.nonce !== pidNonce) {
-							throw new Error("Container ownership tuple did not match its host step identity");
-						}
-						if (!dockerExecWatcher) throw new Error("Docker exec engine identity watcher was unavailable");
-						// Do not persist or release from container-originated bytes. The
-						// witness is accepted only after the current Docker context returns
-						// the daemon-issued tagged exec whose leader PID agrees exactly.
-						const engineExec = await dockerExecWatcher.verify();
-						if (!dockerExecCommandTag ||
-							!hasEngineExecPidWithTag(containerId, engineExec.pid, dockerExecCommandTag) ||
-							!hasUniqueContainerExecTag(containerId, witness.sentinelPid, dockerExecCommandTag)) {
-							throw new Error("Docker exec supervisor PID/ancestry tag was missing, duplicated, or mismatched");
-						}
+						if (!dockerExecWatcher || !dockerExecCommandTag) throw new Error("Docker exec engine identity watcher was unavailable");
 						const active = this.activeVerifications.get(streamCtx.signalId);
 						const step = active?.steps[streamCtx.stepIndex];
 						if (!step) throw new Error("Container ownership tuple arrived for an inactive step");
-						step.containerOwnershipWitness = witness;
-						step.containerDockerExecId = engineExec.id;
-						step.containerDockerExecTag = dockerExecCommandTag;
-						if (!this._persistActive()) {
-							step.containerPayloadCleanupPending = true;
-							throw new Error("Container ownership tuple could not be durably persisted");
-						}
+						await attestAndReleaseContainerOwnership({
+							frame: witness, containerId, nonce: pidNonce, tag: dockerExecCommandTag,
+							verifyExec: () => dockerExecWatcher!.verify(),
+							snapshot: readDockerTopSnapshot,
+							persist: attestation => {
+								step.containerOwnershipWitness = witness;
+								step.containerOwnershipAttestation = attestation;
+								if (this._persistActive()) return true;
+								step.containerPayloadCleanupPending = true;
+								return false;
+							},
+							release: () => containerPayloadRelease?.requestRelease() ?? false,
+						});
 						containerWitnessAcknowledged = true;
-						// The host alone owns docker exec stdin. No container-writable FIFO
-						// participates in this release boundary.
-						if (!containerPayloadRelease?.requestRelease()) return;
 						resolveContainerOwnershipReady();
 					} catch (error) {
 						failContainerOwnershipHandshake(error as Error);
@@ -6382,37 +6345,30 @@ export class VerificationHarness {
 					await dockerExecWatcher.start();
 				}
 				if (containerId) {
-					// Wrap the command so the in-container shell writes its PID
-					// to a temp file. On timeout, we kill that PID's process
-					// group — scoped to this step's subtree, not container-wide.
-					// When durable recovery is enabled, the PID file is the
-					// persisted in-container path and the wrapper also writes a
-					// heartbeat + atomic exit-code file so a resume after gateway
-					// restart can finalize from the exit code (or re-attach by
-					// process group) instead of fabricating a verdict.
-					const stepKillId = randomUUID().slice(0, 8);
-					const killPidFile = useContainerDurable && pidFile ? pidFile : `/tmp/.bobbit-step-${stepKillId}.pid`;
+					// Container execution uses a daemon-bound sentinel; container-visible
+					// PID, heartbeat, and exit artifacts are deliberately not created.
 					let wrappedCmd: string;
-					if (useContainerDurable && containerStateDir && exitFile && heartbeatFile && containerWitnessFile && pidNonce) {
-						const qDir = shellSingleQuote(containerStateDir);
-						const qWitness = shellSingleQuote(containerWitnessFile);
+					if (useContainerDurable && pidNonce) {
 						const qNonce = shellSingleQuote(pidNonce);
 						const qContainer = shellSingleQuote(containerId);
 						const qExecTag = shellSingleQuote(dockerExecCommandTag ?? "");
-						// The pre-payload barrier is an anonymous shell pipe. No pathname or
-						// FIFO is writable by a same-UID sibling; FD 3 belongs only to the
-						// engine-bound sentinel and is closed before user code starts.
-						// The Engine-bound outer session never joins the payload group.  It
-						// owns an anonymous stdin release endpoint and a private pipe from the
-						// inner session.  The inner sentinel publishes its exact tuple before
-						// reading that endpoint; after the payload exits it reports only its
-						// exit code on the private pipe and remains until the outer supervisor
-						// reaps its *currently verified* group.  Thus normal completion cannot
-						// strand docker exec behind a durable sentinel, while restart cleanup
-						// still has the same live exact witness.
-						wrappedCmd = `# ${dockerExecCommandTag}\nmkdir -p ${qDir} 2>/dev/null || exit 125; exec 4>&1; exec 3<&0; env BOBBIT_WITNESS=${qWitness} BOBBIT_NONCE=${qNonce} BOBBIT_CONTAINER=${qContainer} BOBBIT_EXEC_TAG=${qExecTag} setsid /bin/sh -c ${shellSingleQuote(`: BOBBIT_WITNESS=${qWitness} BOBBIT_NONCE=${qNonce}; trap "" HUP INT TERM; __fail(){ exit 125; }; __p=$$; __g=$(awk "{print \\$5}" "/proc/$__p/stat" 2>/dev/null || true); __s=$(awk "{print \\$22}" "/proc/$__p/stat" 2>/dev/null || true); case "$__p" in *[!0-9]*|'') __fail;; esac; case "$__g" in *[!0-9]*|'') __fail;; esac; case "$__s" in *[!0-9]*|'') __fail;; esac; [ "$__p" = "$__g" ] || __fail; __t="$BOBBIT_WITNESS.$$.tmp"; printf "{\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$BOBBIT_CONTAINER" "$BOBBIT_NONCE" "$__p" "$__g" "$__s" > "$__t" && mv "$__t" "$BOBBIT_WITNESS" || __fail; printf "BOBBIT_INNER_READY %s %s %s\\n" "$__p" "$__g" "$__s"; IFS= read -r __release <&3 || __fail; [ "$__release" = BOBBIT_HOST_RELEASE ] || __fail; exec 3<&-; ( unset BOBBIT_WITNESS BOBBIT_NONCE BOBBIT_CONTAINER BOBBIT_EXEC_TAG; ${command}\n) >&4; __ec=$?; printf "BOBBIT_INNER_EXIT %s\\n" "$__ec"; while :; do sleep 2147483647 & wait $!; done`)} | { IFS=' ' read -r __kind __p __g __s __rest || exit 125; [ "$__kind" = BOBBIT_INNER_READY ] && [ -z "$__rest" ] || exit 125; case "$__p" in *[!0-9]*|'') exit 125;; esac; case "$__g" in *[!0-9]*|'') exit 125;; esac; case "$__s" in *[!0-9]*|'') exit 125;; esac; [ "$__p" = "$__g" ] || exit 125; printf "BOBBIT_CONTAINER_OWNERSHIP_TUPLE {\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" ${qContainer} ${qNonce} "$__p" "$__g" "$__s" >&4; IFS=' ' read -r __kind __ec __rest || exit 125; [ "$__kind" = BOBBIT_INNER_EXIT ] && [ -z "$__rest" ] || exit 125; case "$__ec" in *[!0-9]*|'') exit 125;; esac; [ "$__ec" -le 255 ] || exit 125; __verify(){ __lp=$(awk "{print \\$1}" "/proc/$__p/stat" 2>/dev/null || true); __lg=$(awk "{print \\$5}" "/proc/$__p/stat" 2>/dev/null || true); __ls=$(awk "{print \\$22}" "/proc/$__p/stat" 2>/dev/null || true); [ "$__lp" = "$__p" ] && [ "$__lg" = "$__g" ] && [ "$__ls" = "$__s" ]; }; __verify || exit 125; kill -TERM -"$__g" 2>/dev/null || exit 125; __verify || exit 125; kill -KILL -"$__g" 2>/dev/null || exit 125; IFS= read -r __leftover && exit 125; exit "$__ec"; }`;
+						// A private stdin release boundary delays P until the host has bound
+						// S to the daemon exec and atomically persisted the exact authority.
+						const sentinelProgram = `trap "" HUP INT TERM; __container=$1; __nonce=$2; __p=$3; __g=$4; __s=$5; printf "BOBBIT_CONTAINER_OWNERSHIP_TUPLE {\\"containerId\\":\\"%s\\",\\"nonce\\":\\"%s\\",\\"sentinelPid\\":%s,\\"pgid\\":%s,\\"startToken\\":\\"%s\\"}\\n" "$__container" "$__nonce" "$__p" "$__g" "$__s"; exec </dev/null >/dev/null 2>&1; while :; do sleep 2147483647 & wait $!; done`;
+						// S computes its PID/PGID/start token before execing its permanent
+						// image. The complete tuple and random tag are consequently immutable
+						// argv bytes visible in the single daemon `docker top` snapshot.
+						const sentinelBootstrap = `__tag=$1; __p=$$; __g=$(awk "{print \\$5}" "/proc/$__p/stat" 2>/dev/null || true); __s=$(awk "{print \\$22}" "/proc/$__p/stat" 2>/dev/null || true); case "$__p:$__g:$__s" in *[!0-9:]*|*::*) exit 126;; esac; exec /bin/sh -c ${shellSingleQuote(sentinelProgram)} "bobbit-container-sentinel:$__tag:$__p:$__g:$__s" ${qContainer} ${qNonce} "$__p" "$__g" "$__s"`;
+						// H is the session leader and direct kernel parent of P. It waits P and
+						// exits with exactly P's status; docker exec therefore gets the result
+						// exclusively through H -> R child waits. S is a separate in-group
+						// child that intentionally survives H so exact cancellation/recovery can
+						// still name the group while no user-controlled byte can choose a code.
+						const innerProgram = `trap "" HUP INT TERM; __fail(){ exit 126; }; /bin/sh -c ${shellSingleQuote(sentinelBootstrap)} bobbit-sentinel-bootstrap ${qExecTag} & IFS= read -r __release <&3 || __fail; [ "$__release" = BOBBIT_HOST_RELEASE ] || __fail; exec 3<&-; ( ${command} ); __payload_status=$?; exit "$__payload_status"`;
+						wrappedCmd = `# ${dockerExecCommandTag}\nexec 3<&0; ${innerProgram}`;
 
 					} else {
+						const killPidFile = `/tmp/.bobbit-step-${randomUUID().slice(0, 8)}.pid`;
 						wrappedCmd = `echo $$ > ${killPidFile}; ${command}`;
 					}
 					// The container wrapper creates its own session; the in-group sentinel
@@ -6540,11 +6496,8 @@ export class VerificationHarness {
 				// _resumeCommandStep using durable identity + exit files.
 				tracked!.markSurvival();
 			} else if (useContainerDurable && streamCtx) {
-				// Container durable recovery records two independent identities: the
-				// in-container files establish the command verdict, and the host
-				// docker-exec sentinel establishes the transport group safe to reap.
-				// Mark survival so a graceful shutdown does not tear down the client
-				// before it can publish either durable record.
+				// Preserve host result/transport records before readiness; the daemon-bound
+				// attestation later supplies the only in-container cleanup authority.
 				const startTimeMs = Date.now();
 				stampActiveCommandStep({
 					// The host `docker exec` leader is also its detached POSIX
@@ -6554,18 +6507,14 @@ export class VerificationHarness {
 					startTimeMs,
 					deadlineMs: startTimeMs + timeoutSec * 1000,
 					containerId,
-					containerWitnessFile,
 					containerCompletionFile,
 					containerCompletionNonce: pidNonce,
 					outFile,
 					errFile,
-					exitFile,
-					pidFile,
 					pidNonce,
 					sentinelFile,
 					windowsJobCompletionFile,
 					windowsJobCompletionNonce: windowsJobCompletionFile ? pidNonce : undefined,
-					heartbeatFile,
 					bootEpoch: this.bootEpoch,
 					timeoutSec,
 					expectFailure,
@@ -6644,9 +6593,8 @@ export class VerificationHarness {
 			let settled = false;
 			let settleStarted = false;
 			let hostResultPublicationFailure: string | undefined;
-			// Do not arm the execution deadline until the host sentinel/Job and the
-			// in-container atomic witness both acknowledge ownership. No polling: the
-			// wrapper's FIFO acknowledgement is forwarded as a one-shot stream marker.
+			// Do not arm the deadline until host transport ownership and the daemon-bound
+			// in-container attestation both acknowledge readiness; no polling is used.
 			if (useContainerDurable && streamCtx) {
 				void tracked!.ownershipReady.then(() => {
 					if (containerTimeoutTimer || !tracked || settled) return;
@@ -6734,15 +6682,10 @@ export class VerificationHarness {
 				// Windows joins its spawn-time Job supervisor. Every result therefore
 				// waits for that ownership barrier, including natural success.
 				const treeCompletionMustBeVerified = true;
-				// Natural completion is produced by the Engine-bound outer supervisor.
-				// It can return a payload code only after its private inner-pipe exit
-				// report, exact tuple revalidation, TERM/KILL, and inner-pipe EOF. The
-				// host-observed docker-exec close is therefore the completion authority;
-				// do not try to re-signal its deliberately dead sentinel. Exit 125 is
-				// reserved for a supervisor identity/cleanup failure and remains pending
-				// (a payload that itself exits 125 therefore fails closed rather than
-				// claiming an indistinguishable cleanup success).
-				if (useContainerDurable && streamCtx && !didTimeOut && !didCancel && code !== null && code !== 125) {
+				// H is the kernel parent of the payload, so the Docker Engine's observed
+				// exit status is the payload status for every ordinary value 0..255.
+				// Setup cannot reach this point before the ownership readiness boundary.
+				if (useContainerDurable && streamCtx && !didTimeOut && !didCancel && code !== null) {
 					const liveStep = this.activeVerifications.get(streamCtx.signalId)?.steps[streamCtx.stepIndex];
 					if (liveStep && !liveStep.containerPayloadCleanupCompletedAt) {
 						liveStep.containerPayloadCleanupCompletedAt = Date.now();
@@ -7166,19 +7109,9 @@ export class VerificationHarness {
 			return timeoutResult();
 		}
 
-		// Container durable recovery: the exit/pid/heartbeat files live INSIDE the
-		// container and are read via `docker exec`, so the host `fs.existsSync`
-		// Case A above never matched them. Re-attach by finalizing from the
-		// in-container exit file, or by verifying the in-container process is
-		// still alive (fresh heartbeat) and polling for its exit.
+		// A container restart can consume only the host-authored docker-exec result;
+		// absent that record it performs exact cleanup then remains retryable.
 		if (step.restartRecoveryMode === "container-exec" && step.containerId) {
-			// A partially persisted durable container step has no trustworthy
-			// in-container verdict path, but its detached host transport still must
-			// be identified and reaped before exposing the retryable interruption.
-			if (!step.exitFile) {
-				await this._reapRecoveredPosixSentinel(step);
-				return restartInterrupted("Recovered container command has no durable in-container exit-file metadata.");
-			}
 			return await this._resumeContainerCommandStep(v, step, { finalize, timeoutResult, restartInterrupted });
 		}
 
@@ -7341,6 +7274,17 @@ export class VerificationHarness {
 		const nonce = this._commandIdentityNonce(step);
 		if (!nonce || witness.nonce !== nonce) return this._rejectContainerWitness(step, "BOBBIT_CONTAINER_WITNESS_NONCE_MISMATCH");
 		if (witness.containerId !== step.containerId) return this._rejectContainerWitness(step, "BOBBIT_CONTAINER_WITNESS_CONTAINER_MISMATCH");
+		// Legacy witness-only state has no daemon ancestry authority. Do not name a
+		// historical group during live cancellation or restart recovery unless the
+		// atomically persisted v1 attestation agrees with every exact field.
+		const attestation = step.containerOwnershipAttestation;
+		if (!attestation || attestation.version !== 1) return this._rejectContainerWitness(step, "BOBBIT_CONTAINER_ENGINE_ATTESTATION_MISSING");
+		if (attestation.containerId !== step.containerId || attestation.nonce !== nonce ||
+			attestation.sentinelPid !== witness.sentinelPid || attestation.pgid !== witness.pgid ||
+			attestation.startToken !== witness.startToken || !attestation.execId || !attestation.tag ||
+			!Number.isSafeInteger(attestation.enginePid) || attestation.enginePid <= 0) {
+			return this._rejectContainerWitness(step, "BOBBIT_CONTAINER_ENGINE_ATTESTATION_MISMATCH");
+		}
 		let live: { pid: number; pgid: number; startToken: string } | undefined;
 		if (this.containerProcessIdentityInspector) {
 			live = await this.containerProcessIdentityInspector(step.containerId, witness.sentinelPid);
@@ -7389,20 +7333,7 @@ export class VerificationHarness {
 		throw new PendingCommandCleanupError(`Recovered container command group cleanup is not yet safe or complete: ${detail}`);
 	}
 
-	/**
-	 * Resume a container command step after a gateway restart. The durable
-	 * exit/pid/heartbeat files live inside the container, so re-attachment is
-	 * done via `docker exec`:
-	 *   1. Exit file present → finalize from the recovered exit code (honours
-	 *      expectFailure/errorPattern), same as the host detached path.
-	 *   2. Otherwise, while the in-container heartbeat is fresh and the deadline
-	 *      has not passed, poll for the exit file.
-	 *   3. On deadline → kill the in-container process group via `docker exec`
-	 *      and return the timeout result.
-	 *   4. Heartbeat stale and no exit file → the job stopped without a durable
-	 *      verdict; return a retryable pending interrupt (never a fabricated
-	 *      failure), matching the host detached semantics.
-	 */
+	/** Recover from the host-authored Docker lifecycle result or fail closed. */
 	private async _resumeContainerCommandStep(
 		v: ActiveVerification,
 		step: ActiveVerification["steps"][number],
@@ -7413,9 +7344,7 @@ export class VerificationHarness {
 		},
 	): Promise<ResumedVerificationStep | null> {
 		const readHostControlResult = (): number | null => {
-			// The container-visible exit file is attacker-controlled: a same-UID
-			// payload can discover its path and replace it. Only this host-authored
-			// record, written from docker exec's lifecycle result, is a verdict.
+			// Only this host-authored Docker lifecycle record is a restart verdict.
 			if (!step.containerCompletionFile || !step.containerCompletionNonce) return null;
 			try {
 				const record = JSON.parse(fs.readFileSync(step.containerCompletionFile, "utf8"));
@@ -7428,8 +7357,7 @@ export class VerificationHarness {
 			}
 		};
 		const reapRecoveredContainerTransport = async (): Promise<void> => {
-			// The container exit/pid files prove only the in-container command. The
-			// gateway restart also orphaned a host docker-exec transport group. Every
+			// The gateway restart orphaned a host docker-exec transport group. Every
 			// recovered outcome (verdict, timeout, or retryable no-verdict) must first
 			// kill and prove absent the exact in-container process group, then reap its
 			// exact host transport sentinel. This applies on Windows too: its host

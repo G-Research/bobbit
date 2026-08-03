@@ -27,6 +27,7 @@ process.env.BOBBIT_DIR = TEST_DIR;
 
 const {
 	VerificationHarness,
+	attestAndReleaseContainerOwnership,
 	createContainerPayloadReleaseHandshake,
 	createContainerWitnessFrameDecoder,
 	createDockerEngineEventsResponseDecoder,
@@ -190,6 +191,55 @@ function createPreReadinessRunner() {
 }
 
 describe("deterministic tracked child", () => {
+	it("atomically persists only a daemon-ancestry-attested sentinel before release", async () => {
+		const frame = { containerId: "container", nonce: "nonce", sentinelPid: 12, pgid: 11, startToken: "start" };
+		const tag = "tag";
+		const args = "sh -c bobbit-container-sentinel:tag:12:11:start";
+		const calls: string[] = [];
+		const input = {
+			frame, containerId: "container", nonce: "nonce", tag,
+			verifyExec: async () => ({ id: "exec", containerId: "container", pid: 10, command: "docker exec tag" }),
+			snapshot: async () => [
+				{ pid: 10, ppid: 1, pgid: 10, args: "docker exec tag" },
+				{ pid: 11, ppid: 10, pgid: 11, args: "session leader" },
+				{ pid: 12, ppid: 11, pgid: 11, args },
+			],
+			persist: () => { calls.push("persist"); return true; },
+			release: () => { calls.push("release"); return true; },
+		};
+		await expect(attestAndReleaseContainerOwnership(input)).resolves.toMatchObject({ version: 1, execId: "exec", enginePid: 10, sentinelPid: 12, pgid: 11 });
+		expect(calls).toEqual(["persist", "release"]);
+	});
+
+	it.each([
+		["forged-first exact tuple", [{ pid: 10, ppid: 1, pgid: 10, args: "docker tag" }, { pid: 99, ppid: 10, pgid: 11, args: "sh bobbit-container-sentinel:tag:12:11:start" }]],
+		["changed PGID", [{ pid: 10, ppid: 1, pgid: 10, args: "docker tag" }, { pid: 11, ppid: 10, pgid: 11, args: "session" }, { pid: 12, ppid: 11, pgid: 13, args: "sh bobbit-container-sentinel:tag:12:11:start" }]],
+		["changed start token", [{ pid: 10, ppid: 1, pgid: 10, args: "docker tag" }, { pid: 11, ppid: 10, pgid: 11, args: "session" }, { pid: 12, ppid: 11, pgid: 11, args: "sh bobbit-container-sentinel:tag:12:11:reused" }]],
+		["cloned non-descendant tag", [{ pid: 10, ppid: 1, pgid: 10, args: "docker tag" }, { pid: 12, ppid: 77, pgid: 11, args: "sh bobbit-container-sentinel:tag:12:11:start" }]],
+	] as const)("rejects %s without persistence or release", async (_name, snapshot) => {
+		const calls: string[] = [];
+		const frame = { containerId: "container", nonce: "nonce", sentinelPid: 12, pgid: 11, startToken: "start" };
+		await expect(attestAndReleaseContainerOwnership({
+			frame, containerId: "container", nonce: "nonce", tag: "tag",
+			verifyExec: async () => ({ id: "exec", containerId: "container", pid: 10, command: "docker tag" }),
+			snapshot: async () => snapshot,
+			persist: () => { calls.push("persist"); return true; },
+			release: () => { calls.push("release"); return true; },
+		})).rejects.toThrow();
+		expect(calls).toEqual([]);
+	});
+
+	it("does not release when durable ownership attestation persistence fails", async () => {
+		const calls: string[] = [];
+		await expect(attestAndReleaseContainerOwnership({
+			frame: { containerId: "container", nonce: "nonce", sentinelPid: 12, pgid: 11, startToken: "start" }, containerId: "container", nonce: "nonce", tag: "tag",
+			verifyExec: async () => ({ id: "exec", containerId: "container", pid: 10, command: "docker tag" }),
+			snapshot: async () => [{ pid: 10, ppid: 1, pgid: 10, args: "docker tag" }, { pid: 11, ppid: 10, pgid: 11, args: "session" }, { pid: 12, ppid: 11, pgid: 11, args: "sh bobbit-container-sentinel:tag:12:11:start" }],
+			persist: () => { calls.push("persist"); return false; },
+			release: () => { calls.push("release"); return true; },
+		})).rejects.toThrow(/durably persisted/);
+		expect(calls).toEqual(["persist"]);
+	});
 	it("queues a split synchronous ownership tuple until the private release writer is installed", () => {
 		const releases: string[] = [];
 		const failures: Error[] = [];
