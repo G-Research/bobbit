@@ -3,8 +3,9 @@
  * Real compiler contract for the persistent `npm run check` caches.
  *
  * This deliberately is not a tier-1 test: it starts real TypeScript compiler
- * processes and builds an isolated archive of the current revision.  It never
- * changes the checkout from which it is launched.  Run it explicitly with:
+ * processes and builds an isolated archive of committed HEAD. It requires a
+ * clean checkout for that repository-fidelity path and never changes it. Run
+ * it explicitly with:
  *
  *   node scripts/testing-v2/check-cache-contract.mjs
  *
@@ -38,6 +39,11 @@ const NPM = process.platform === "win32" ? "npm.cmd" : "npm";
 const CACHE_NAMES = ["check-server.tsbuildinfo", "check-web.tsbuildinfo", "check-tests2.tsbuildinfo"];
 const EXPECTED_CHECK = "shx mkdir -p .profiles && tsc -p tsconfig.server.json --noEmit --incremental --tsBuildInfoFile .profiles/check-server.tsbuildinfo && tsc -p tsconfig.web.json --noEmit --incremental --tsBuildInfoFile .profiles/check-web.tsbuildinfo && tsc -p tsconfig.tests2.json --noEmit --incremental --tsBuildInfoFile .profiles/check-tests2.tsbuildinfo";
 const fixtureOnly = process.argv.slice(2).includes("--fixture-only");
+// On Windows, prefer System32\tar.exe (bsdtar) over msys/Git Bash GNU tar.
+// GNU tar can interpret native drive paths as remote hosts; bsdtar accepts them.
+const TAR_BIN = process.platform === "win32" && existsSync("C:\\Windows\\System32\\tar.exe")
+  ? "C:\\Windows\\System32\\tar.exe"
+  : "tar";
 let root;
 
 function fail(message) {
@@ -224,6 +230,11 @@ function normalized(value) {
   return value.trim().replace(/\s+/g, " ");
 }
 
+function assertCleanCheckout() {
+  const status = run("git", ["status", "--porcelain=v1", "--untracked-files=all"], REPO_ROOT, { label: "git status" });
+  assert(status.output === "", `full contract requires a clean checkout because its HEAD archive excludes pending changes; commit or stash them, or run with --fixture-only.\nDirty entries:\n${status.output}`);
+}
+
 function assertStaticContract(repo) {
   const pkg = JSON.parse(readFileSync(join(repo, "package.json"), "utf8"));
   assert(normalized(pkg.scripts?.check ?? "") === EXPECTED_CHECK, "package.json check must be the approved canonical sequential cache command");
@@ -239,7 +250,7 @@ function archiveHead(destination) {
   // would corrupt it.  The generous bound covers the source archive, never deps.
   const binary = spawnSync("git", ["archive", "--format=tar", "HEAD"], { cwd: REPO_ROOT, windowsHide: true, maxBuffer: 128 * 1024 * 1024 });
   if (binary.error || binary.status !== 0) fail(`git archive HEAD failed: ${binary.error?.message ?? binary.stderr?.toString()}`);
-  const extracted = spawnSync("tar", ["-xf", "-", "-C", destination], { input: binary.stdout, encoding: "utf8", windowsHide: true, maxBuffer: 128 * 1024 * 1024 });
+  const extracted = spawnSync(TAR_BIN, ["-xf", "-", "-C", destination], { input: binary.stdout, encoding: "utf8", windowsHide: true, maxBuffer: 128 * 1024 * 1024 });
   if (extracted.error || extracted.status !== 0) fail(`tar archive extraction failed: ${extracted.error?.message ?? extracted.stderr}`);
 }
 
@@ -319,6 +330,7 @@ function runRepositoryFidelity(repo) {
 
 try {
   assert(existsSync(TYPESCRIPT), `repository-local TypeScript executable is missing: ${TYPESCRIPT}`);
+  if (!fixtureOnly) assertCleanCheckout();
   root = mkdtempSync(join(tmpdir(), "bobbit-check-cache-contract-"));
   const compilerFixture = join(root, "compiler-fixture");
   runCompilerFixture(compilerFixture);
