@@ -10,6 +10,32 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 - **First look**: the failure tail now contains either `test timed out after <n>ms` (with `test at <file>:<line>`) or `[run-unit] HUNG FILE: <path>`. Do not just raise the timeout — read the named file/test.
 - **Pinning tests**: `tests/run-unit-wrapper.test.ts`, `tests/hung-test-reporter.test.ts`, `tests/run-unit-heartbeat-diagnostics.test.ts`, `tests/run-unit-hung-test-integration.test.ts`.
 
+## Tier-1 credential-lock test consumes its file budget
+
+- **Symptom**: `anthropic-oauth-credential-store.test.ts` passes on a retry or exceeds its per-file budget, usually in the tests that hold a Bobbit or Pi lock while fake timers are active.
+- **Cause**: the lock owner has a repeating heartbeat interval. `vi.runAllTimersAsync()` drains every due timer, including newly scheduled heartbeats and retries, so it is not a finite way to wait for a contender. It can turn an assertion about a 10-second heartbeat or 30-second stale-owner compatibility contract into an unbounded fake-timer race.
+- **Correct synchronization**: expose promises from the owner/contender callbacks and await the lifecycle point being asserted. Advance fake time only to the named contract boundary or the maximum retry interval, then await the contender's observable start promise. After releasing a lock, do not use a timer drain as a proxy for the contender having progressed. This preserves the 10-second synchronous heartbeat, 30-second asynchronous stale-owner protection, and post-release acquisition assertions without relying on elapsed wall time.
+- **Diagnostic**: inspect the two lock-contention cases in `tests2/core/anthropic-oauth-credential-store.test.ts`. A newly added `runAllTimersAsync()` in either release path is a regression; `tests2/core/unit-flake-source-contract-repro.test.ts` pins that prohibition.
+- **Retry-free checks**:
+
+  ```bash
+  npm run test:unit -- --retry=0 tests2/core/anthropic-oauth-credential-store.test.ts
+  npm run test:unit -- --retry=0 tests2/core/unit-flake-source-contract-repro.test.ts
+  ```
+
+## Tier-1 sandbox-status test invokes Docker or leaks between gateways
+
+- **Symptom**: `sandbox.test.ts` intermittently consumes its file budget, most visibly on Windows; status requests may wait for a real Docker invocation despite the integration gateway's command fence.
+- **Cause**: `/api/sandbox-status` resolved Docker through the real or mutable server-global `CommandRunner` instead of the runner injected for that gateway request. The bypass can invoke host Docker and lets one gateway's runner selection affect another's tests.
+- **Correct propagation**: the request handler receives the gateway's injected `CommandRunner` and must pass that exact runner to `checkDockerAvailability()`. The integration harness's fenced runner then rejects Docker deterministically, allowing the status route to return its normal unavailable shape without external Docker state. Do not replace this with a Docker-dependent test, a broad mock, or a longer timeout.
+- **Diagnostic**: trace the `commandRunner` argument from gateway creation through `handleApiRoute()` to the sandbox-status call. The route must not reference `serverCommandRunner`; `tests2/core/unit-flake-source-contract-repro.test.ts` statically guards both requirements.
+- **Retry-free checks**:
+
+  ```bash
+  npm run test:unit -- --retry=0 tests2/integration/sandbox.test.ts
+  npm run test:unit -- --retry=0 tests2/core/unit-flake-source-contract-repro.test.ts
+  ```
+
 ## Verification step stuck in `running`
 
 - **Symptom**: a `command`-type verification step (e.g. `npm run test:e2e`) stays in `running` long past its configured `timeout`. `ps` shows orphaned `npm`/`playwright`/Chromium descendants of the gateway.
