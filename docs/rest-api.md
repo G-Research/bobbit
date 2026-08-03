@@ -92,6 +92,101 @@ These endpoints expose restart support only for gateways launched through `npm r
 
 `POST /api/harness/restart` is gated on the server, not just hidden by the UI. On success it touches `.bobbit/state/gateway-restart`, the same sentinel used by `npm run restart-server`; the harness observes that file change, rebuilds the server, and relaunches the gateway.
 
+### Marketplace adoptions
+
+The Market adoption routes reference unmodified stock MCP servers and Claude-style skill
+directories. They are separate from Marketplace source/pack routes: a returned adoption always
+has `provenance.class: "adopted"`, never inferred pack provenance. See [Adopt stock extensions](marketplace.md#adopt-stock-extensions-without-a-pack)
+for lifecycle, precedence, and permission behavior.
+
+#### Authentication and scope
+
+`GET` follows the gateway's normal API authentication. Every mutation (`POST`, `PATCH`,
+refresh, and `DELETE`) requires either an admin `Authorization: Bearer` credential or a valid
+signed browser cookie accompanied by same-origin browser mutation evidence. Localhost trust by
+itself is insufficient because an adoption can start a host command or contact a remote
+endpoint. Sandbox credentials are explicitly denied for these mutations, including when
+otherwise presented alongside a request. The API does not provide fields for command
+environment values, HTTP headers, or an adoption-owned working directory.
+
+`scope` is one of `"server"`, `"global-user"`, or `"project"`. `projectId` is required for
+`"project"` scope, and the project must exist. A project-scoped list only includes that
+project's records; server/global-user records remain visible in the normal scope order.
+
+#### Routes
+
+| Method | Path | Request / response contract |
+|---|---|---|
+| `GET` | `/api/marketplace/adoptions?projectId=` | Returns `{ adoptions }` across visible scopes. `projectId` is optional; an invalid value is `400`. |
+| `POST` | `/api/marketplace/adoptions` | Body `{ kind: "mcp" \| "skills", scope, projectId?, source }`. Creates an adoption and returns `201 { adoption }`; the same normalized scope/kind/source identity is idempotent and returns `200 { adoption }`. |
+| `POST` | `/api/marketplace/adoptions/:id/refresh?scope=&projectId=` | Re-scans a skills directory or reloads/reconnects MCP and returns `200 { adoption }`. |
+| `PATCH` | `/api/marketplace/adoptions/:id` | Body `{ scope, projectId?, enabled?, operations? }`. Only enablement and known MCP operation selections may change; source/kind/namespace cannot change. Returns `200 { adoption }`. |
+| `DELETE` | `/api/marketplace/adoptions/:id?scope=&projectId=` | Deletes the ledger record, invalidates/reloads runtime state as needed, and returns `204`. It never removes the source asset, manual MCP configuration, or policy rows. |
+
+`source` accepts exactly one of these shapes:
+
+```json
+{ "transport": "stdio", "command": "npx", "args": ["-y", "example-mcp"] }
+```
+
+```json
+{ "transport": "http", "url": "https://mcp.example.com/mcp" }
+```
+
+```json
+{ "directory": "/absolute/path/to/skills" }
+```
+
+The stdio form requires a non-empty command and string arguments. The HTTP URL must be
+`http:` or `https:` and has no credentials, query, or fragment. The skills directory must be
+absolute. `operations`, when patching an MCP adoption, is an array of known
+`{ name, selected }` choices; unknown operation names and any operation update for a skills
+adoption return `400`. Unsupported source fields and invalid requests return `400`; a missing
+project or adoption returns `404`.
+
+#### Safe adoption wire shape
+
+List and mutation responses return a redacted adoption record. Stdio command arguments are
+accepted only on create and are omitted from every response; endpoints have already rejected
+credential-bearing URL components. The public shape includes the safe source form, generated
+id/namespace, scope/project, enabled state, MCP operation classifications/selections, and:
+
+```json
+{
+  "provenance": {
+    "class": "adopted",
+    "sourceType": "stdio",
+    "sourceLocation": "npx",
+    "createdAt": "2026-01-01T00:00:00.000Z",
+    "updatedAt": "2026-01-01T00:00:00.000Z"
+  },
+  "conformance": {
+    "state": "partial",
+    "checkedAt": "2026-01-01T00:00:00.000Z",
+    "mcp": {
+      "requestedProtocol": "2025-03-26",
+      "negotiatedProtocol": "2025-03-26",
+      "serverName": "example",
+      "serverVersion": "1.0.0",
+      "loadedTools": ["read_document"],
+      "rejectedTools": [{ "name": "write_document", "reason": "invalid_operation_schema" }]
+    },
+    "failures": []
+  }
+}
+```
+
+For a skills adoption, `conformance.skills` instead carries `loadedSkills` (the generated
+`adopt-<id>--<skill>` names) and `rejectedSkills` (`path` plus a controlled reason).
+Conformance state is `pending`, `loaded`, `partial`, `rejected`, or `unreachable`. MCP fields
+for negotiation and server identity are optional because they exist only after a successful
+handshake. Failure and rejection text uses controlled, sanitized categories; clients must not
+expect raw process, transport, header, credential, or command-argument details.
+
+Refreshing or creating an unreachable/partial asset still returns its durable record when the
+ledger mutation succeeded. This lets clients show a recoverable state without concealing
+unrelated extensions or treating a connection failure as a startup failure.
+
 ### Sessions
 
 | Method | Path | Description |

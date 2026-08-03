@@ -225,6 +225,113 @@ basename + a realpath-aware pack-root containment check) before any file is read
 manifest's `contents` names are publisher-authored and this helper also runs on Browse, before
 any install. A rejected name simply yields no description row.
 
+## Adopt stock extensions without a pack
+
+**Adoption** is for a stock MCP server or a plain Claude-style skills directory that you
+want to use unchanged. It is not a Marketplace source or an installed pack: Market packs
+are copied/materialized and carry pack provenance, whereas an adoption retains an explicit
+`provenance.class: "adopted"` record that points to its source. This distinction keeps an
+adopted asset from being presented as first-party or publisher-authored.
+
+### Why adoption uses a ledger
+
+Bobbit persists the scoped adoption choice in its native `adopted_extensions` configuration
+ledger, then synthesizes ordinary contributions at the existing resolver and MCP reload
+boundaries. It does not generate, copy, or symlink a pack.
+
+That split is intentional: the ledger makes an adoption idempotent, removable, and stable
+across restart, while in-memory contributions keep the existing scanner, `PackResolver`,
+`SkillLoader`, MCP normalization, `McpManager`, proxy/meta tools, and policy path as the
+single runtime owners. A generated pack would add a second materialization/reconciliation
+lifecycle and could drift from the stock source. See the [EP-9 design](design/adopt-vanilla-extensions.md)
+for the full comparison and data-flow contract.
+
+### What can be adopted
+
+Market's **Installed** panel starts with **Adopt extension**. Choose a scope and one of:
+
+- **MCP command** — a stdio command plus optional arguments.
+- **MCP endpoint** — an `http:` or `https:` endpoint.
+- **Skills directory** — an absolute directory containing normal Claude-style skill folders
+  and `SKILL.md` files.
+
+Skills are read in place; Bobbit never copies or edits the directory. The existing skill
+scanner and frontmatter handling apply, including `allowed-tools`; that field remains a
+restriction on skill metadata, not a tool grant.
+
+Adoption deliberately has a narrow source shape. A stdio adoption owns no environment,
+headers, or working directory. An HTTP adoption owns no headers and rejects credentials,
+queries, and fragments. Market responses and cards omit stdio arguments and display only a
+sanitized source location, so this flow is not a way to persist or expose secrets.
+
+Click **Inspect & adopt** to validate and persist the request, then scan/reload it through
+the normal runtime path. The adopted card identifies its scope, source type/location,
+namespace, conformance, loaded/rejected assets, and available MCP server/protocol version.
+Use **Refresh** to scan/reconnect again, or **Remove** to delete the ledger record. Removal
+does not modify the source directory, manual MCP configuration, or existing Tools policies.
+
+### Scope, identity, and precedence
+
+Adoptions use the normal `server`, `global-user`, and `project` scopes. Project records are
+visible only in their owning project; server and global-user records participate in the
+normal cross-scope order. The server creates an immutable safe id from the normalized
+scope, kind, source, and project identity. Repeating the same adoption returns the existing
+record instead of creating another connection or skill contribution.
+
+Each record also has a generated namespace:
+
+- MCP server/tool identities use `adopt_<id>` (for example, `mcp_adopt_<id>` and its
+  generated operations).
+- Skill commands use `adopt-<id>--<skill>`.
+
+The namespace prevents a stock asset from silently replacing a first-party, Market, manual,
+or project asset. Adopted skills are injected below the legacy/custom skill band, so existing
+custom and Claude/project skills retain their established higher precedence. Adopted MCP
+contributions are added after ordered pack contributions and before the existing manual MCP
+overlay; a deliberately matching manual MCP entry therefore still wins. Existing deterministic
+route conflict diagnostics remain authoritative if a collision nevertheless reaches runtime.
+
+On startup, Bobbit loads the ledger before constructing the resolver and MCP managers, so the
+same contributions are reconstructed. Removing a record first persists its deletion, then
+invalidates/reloads the affected runtime; a reload failure cannot bring the record back after
+a restart.
+
+### MCP exposure is least privilege
+
+Discovery is evidence, not authority. On an adoption's first successful MCP discovery, Bobbit
+selects only an operation whose annotations explicitly say `readOnlyHint: true` and do not
+also say it is destructive. It excludes missing, unknown, malformed, contradictory, or
+mutation-indicating annotations and never infers safety from an operation name or description.
+
+The selected-operation list is a durable **hard exposure boundary**, not an automatic
+`allow` decision. Existing Tools/role policy still determines `allow`, `ask`, or `never`; an
+existing `never` continues to win. New operations found on a later refresh start unselected,
+even if they report a read-only hint. Users may make an explicit selection change on the
+adopted MCP card; that change reloads the standard manager but does not alter policy grants.
+If an automatically selected operation later reports mutation/contradictory hints, Bobbit
+revokes that automatic selection.
+
+### Conformance and failure isolation
+
+Adoptions report `pending`, `loaded`, `partial`, `rejected`, or `unreachable` conformance.
+MCP reports include requested/negotiated protocol and server identity/version when the
+handshake supplies them, plus loaded and rejected operations. Skill reports include loaded
+namespaced commands and rejected candidates. Rejection reasons and failure messages are
+controlled/sanitized categories (such as malformed frontmatter, missing directory, invalid
+operation schema, or connection failure), rather than raw spawned-process or network output.
+
+A malformed skill, unavailable directory, invalid command, unreachable endpoint, partial tool
+list, or protocol/version problem affects that adoption's record only. Valid sibling skills and
+unrelated packs, skills, MCP servers, and startup continue to work. The record stays visible so
+it can be refreshed or removed instead of disappearing as if it had never existed.
+
+### Pi boundary
+
+Pi extensions are **not** an adoption type. Continue to install a Pi extension through a
+schema-2 pack as described below. EP-9 only reports
+`PI_EXTENSION_PROBE_HARNESS_VERSION` in existing Pi discovery diagnostics when available; it
+does not change Pi runtime arguments, probing, trust, activation, or the RPC bridge.
+
 ## Marketplace pi extensions
 
 Marketplace pi extensions let a schema-2 pack ship an unmodified standalone pi runtime extension. They are intentionally not Bobbit tools: Bobbit installs the pack, resolves the extension entry, and passes it to `pi-coding-agent` with `--extension <path>` so existing bare-pi extensions keep their source layout and runtime behavior.
