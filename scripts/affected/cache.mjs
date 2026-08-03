@@ -158,21 +158,27 @@ export function saveCache(cache, options = {}) {
 	writeFileSync(cacheFile, JSON.stringify(isRecord(cache) ? cache : {}));
 }
 
+/** Capture dependency hashes without granting them a verdict. */
+export function snapshotTestHashes(graph, tests, options = {}) {
+	const hashes = new Map();
+	for (const test of tests) {
+		const deps = graph.testDeps.get(test);
+		if (deps) hashes.set(test, testHash(test, deps, options));
+	}
+	return hashes;
+}
+
 /** Partition a bounded candidate set into {hits, misses}. */
 export function partition(cache, fingerprint, graph, tests, options = {}) {
 	const candidateBucket = isRecord(cache) ? cache[fingerprint] : undefined;
 	const bucket = isRecord(candidateBucket) ? candidateBucket : {};
+	const hashes = snapshotTestHashes(graph, tests, options);
 	const hits = new Set();
 	const misses = new Set();
 	for (const test of tests) {
-		const deps = graph.testDeps.get(test);
-		if (!deps) {
-			misses.add(test);
-			continue;
-		}
-		const hash = testHash(test, deps, options);
+		const hash = hashes.get(test);
 		const cached = bucket[test];
-		if (isRecord(cached) && cached.hash === hash && cached.verdict === "pass") hits.add(test);
+		if (typeof hash === "string" && isRecord(cached) && cached.hash === hash && cached.verdict === "pass") hits.add(test);
 		else misses.add(test);
 	}
 	return { hits, misses };
@@ -180,23 +186,26 @@ export function partition(cache, fingerprint, graph, tests, options = {}) {
 
 /**
  * Record per-file verdicts. Only PASS records are retained; a failure or
- * ambiguous verdict removes any stale PASS for that file.
+ * ambiguous verdict removes any stale PASS for that file. PASS hashes must be
+ * captured before execution and validated as unchanged by the caller: this
+ * function deliberately never reads repository bytes.
  */
-export function record(cache, fingerprint, graph, tests, verdict, options = {}) {
+export function record(cache, fingerprint, tests, verdict, stableHashes = new Map()) {
 	const safeCache = isRecord(cache) ? cache : {};
 	const existing = safeCache[fingerprint];
-	const bucket = isRecord(existing) ? existing : (safeCache[fingerprint] = {});
+	let bucket = isRecord(existing) ? existing : undefined;
 	for (const test of tests) {
 		if (verdict !== "pass") {
-			delete bucket[test];
+			if (bucket) delete bucket[test];
 			continue;
 		}
-		const deps = graph.testDeps.get(test);
-		if (!deps) {
-			delete bucket[test];
+		const hash = stableHashes.get(test);
+		if (typeof hash !== "string") {
+			if (bucket) delete bucket[test];
 			continue;
 		}
-		bucket[test] = { hash: testHash(test, deps, options), verdict: "pass" };
+		if (!bucket) bucket = safeCache[fingerprint] = {};
+		bucket[test] = { hash, verdict: "pass" };
 	}
 	return safeCache;
 }

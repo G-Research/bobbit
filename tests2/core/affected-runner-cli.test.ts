@@ -82,6 +82,9 @@ const outputFile = args[outputIndex + 1];
 const files = args.filter(value => value.endsWith(".test.ts"));
 mkdirSync(dirname(process.env.AFFECTED_FIXTURE_LOG), { recursive: true });
 appendFileSync(process.env.AFFECTED_FIXTURE_LOG, JSON.stringify(files) + "\n");
+if (process.env.FAKE_MUTATE_PATH) {
+  appendFileSync(resolve(process.env.FAKE_MUTATE_PATH), "\n// mutated during fake Vitest execution\n");
+}
 const failures = new Set((process.env.FAKE_FAIL || "").split(",").filter(Boolean));
 const results = files.map(file => ({
   name: resolve(file),
@@ -338,6 +341,57 @@ describe("affected runner CLI", () => {
 		expect(invocations(fixture)).toHaveLength(6);
 	});
 
+	it("does not certify code, non-code, or runner inputs mutated during execution", async () => {
+		const fixture = await makeFixture();
+		const cacheFile = path.join(fixture.root, ".profiles", "test-cache", "results.json");
+		const cachedTests = (): string[] => {
+			try {
+				const cache = JSON.parse(readFileSync(cacheFile, "utf8"));
+				return Object.values(cache).flatMap(bucket => Object.keys(bucket as Record<string, unknown>));
+			} catch {
+				return [];
+			}
+		};
+
+		const codeMutation = await run(fixture, ["--changed", "src/a.ts"], {
+			FAKE_MUTATE_PATH: "src/a.ts",
+		});
+		expect(codeMutation.status).toBe(0);
+		expect(cachedTests()).not.toContain("tests2/core/a.test.ts");
+		const afterCodeMutation = await run(fixture, ["--changed", "src/a.ts"]);
+		expect(afterCodeMutation.json.counts).toMatchObject({ selected: 1, cacheHit: 0, run: 1 });
+		const unchangedWarmHit = await run(fixture, ["--changed", "src/a.ts"]);
+		expect(unchangedWarmHit.json.outcome).toBe("cache-hit-all");
+
+		rmSync(cacheFile, { force: true });
+		const nonCodeMutation = await run(fixture, ["--changed", "defaults/roles/coder.yaml"], {
+			FAKE_MUTATE_PATH: "defaults/roles/coder.yaml",
+		});
+		expect(nonCodeMutation.status).toBe(0);
+		expect(cachedTests()).not.toContain("tests2/core/a.test.ts");
+		const afterNonCodeMutation = await run(fixture, ["--changed", "defaults/roles/coder.yaml"]);
+		expect(afterNonCodeMutation.json.counts).toMatchObject({ selected: 1, cacheHit: 0, run: 1 });
+
+		rmSync(cacheFile, { force: true });
+		const runnerMutation = await run(fixture, ["--all"], {
+			FAKE_MUTATE_PATH: "vitest.config.ts",
+		});
+		expect(runnerMutation.status).toBe(0);
+		expect(runnerMutation.json).toMatchObject({
+			kind: "run-all",
+			cachePolicy: "bypass",
+			counts: { selected: 2, cacheHit: 0, run: 2 },
+		});
+		const cacheModuleUrl = `${pathToFileURL(path.join(fixture.root, "scripts", "affected", "cache.mjs")).href}?toctou=${Date.now()}`;
+		const cache: any = await import(cacheModuleUrl);
+		const postChangeFingerprint = cache.runnerFingerprint({ repoRoot: fixture.root });
+		const stored = JSON.parse(readFileSync(cacheFile, "utf8"));
+		expect(stored[postChangeFingerprint]).toBeUndefined();
+		expect(cachedTests()).toEqual([]);
+		const afterRunnerMutation = await run(fixture, ["--changed", "src/a.ts"]);
+		expect(afterRunnerMutation.json.counts).toMatchObject({ selected: 1, cacheHit: 0, run: 1 });
+	});
+
 	it("invalidates hashes for dynamic inputs and fingerprints every execution boundary", async () => {
 		const fixture = await makeFixture();
 		const cacheModuleUrl = `${pathToFileURL(path.join(fixture.root, "scripts", "affected", "cache.mjs")).href}?test=${Date.now()}`;
@@ -384,9 +438,14 @@ describe("affected runner CLI", () => {
 		write(fixture.root, ".profiles/test-cache/results.json", "not json");
 		expect(cache.loadCache(options)).toEqual({});
 		const graph = { testDeps: new Map([["tests2/core/a.test.ts", deps]]) };
-		const records = cache.record({}, "fp", graph, new Set(["tests2/core/a.test.ts"]), "pass", options);
-		expect(records.fp["tests2/core/a.test.ts"].verdict).toBe("pass");
-		cache.record(records, "fp", graph, new Set(["tests2/core/a.test.ts"]), "fail", options);
+		const tests = new Set(["tests2/core/a.test.ts"]);
+		const stableHashes = cache.snapshotTestHashes(graph, tests, options);
+		const records = cache.record({}, "fp", tests, "pass", stableHashes);
+		expect(records.fp["tests2/core/a.test.ts"]).toEqual({
+			hash: stableHashes.get("tests2/core/a.test.ts"),
+			verdict: "pass",
+		});
+		cache.record(records, "fp", tests, "fail");
 		expect(records.fp).toEqual({});
 	});
 });
