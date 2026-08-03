@@ -84,6 +84,21 @@ describe("affected graph inventory and boundaries", () => {
 		expect(graph.testDeps.get(execution.dom[0])?.has(FILE_BOUNDARY_RUNNER)).toBe(false);
 	});
 
+	it("models cwd-relative literal source reads as selection and cache dependencies", () => {
+		const test = "tests2/core/run-isolation.test.ts";
+		for (const dependency of [
+			GATEWAY_HARNESS,
+			"scripts/testing-v2/run-e2e-v2.mjs",
+			"playwright-e2e.config.ts",
+			"playwright-v2.config.ts",
+		]) expect(graph.testDeps.get(test)?.has(dependency), dependency).toBe(true);
+
+		const plan = affectedTests(graph, [GATEWAY_HARNESS]);
+		expect(plan.kind).toBe("bounded");
+		expect(plan.affected.has(test)).toBe(true);
+		expect(plan.affected.size).toBeLessThan(graph.testFiles.length);
+	});
+
 	it("uses the shared runtime-entry closure for gateway attribution", () => {
 		const sharedRuntime = graph.meta.runtimeFiles.find((path: string) => path.startsWith("src/shared/"));
 		expect(sharedRuntime, "the bundled server runtime must include an imported src/shared dependency").toBeTruthy();
@@ -196,6 +211,31 @@ describe("semantic and fail-closed classification", () => {
 		["unknown-build-input.toml", /unknown executable\/infrastructure input/],
 	])("pins broad fallback for %s", (path, reason) => {
 		expectRunAll(affectedTests(graph, [path]), reason);
+	});
+
+	it("reports known broad triggers before earlier unknown infrastructure", () => {
+		const vitest = affectedTests(graph, [
+			".github/workflows/build-unit-gate.yml",
+			"vitest.config.ts",
+		]);
+		expectRunAll(vitest, /Vitest config change/);
+		expect(vitest.reasons).toEqual(["Vitest config change: vitest.config.ts"]);
+
+		const lockfile = affectedTests(graph, [".npmrc", "package-lock.json"]);
+		expectRunAll(lockfile, /lockfile change/);
+		expect(lockfile.reasons).toEqual(["lockfile change: package-lock.json"]);
+
+		const dependency = affectedTests(graph, [
+			".npmrc",
+			{
+				path: "package.json",
+				status: "M",
+				before: "{}",
+				after: '{"dependencies":{"fixture":"1"}}',
+			},
+		]);
+		expectRunAll(dependency, /package execution projection changed/);
+		expect(dependency.reasons).toEqual(["package execution projection changed: package.json"]);
 	});
 
 	it("fails closed for unresolved deletes/renames and normalizes Windows paths/case", () => {

@@ -176,10 +176,11 @@ describe("affected correctness qualification primitives", () => {
 		expect(() => parseVitestReport({}, repoRoot)).toThrow("missing testResults");
 	});
 
-	it("reports graph-only selection as explicitly non-executable", () => {
+	it("reports graph-only selection as explicitly non-executable with an accurate scope", () => {
 		const graph = {
 			srcToTests: new Map([
 				["src/shared/runtime.ts", new Set([UNIT[0], "tests2/browser/advisory.spec.ts"])],
+				["tests2/harness/suite-setup.ts", new Set(UNIT)],
 			]),
 		};
 		const diagnostic = graphOnlyDiagnostic(graph, [{
@@ -188,8 +189,16 @@ describe("affected correctness qualification primitives", () => {
 		}], UNIT);
 		expect(diagnostic).toEqual({
 			executable: false,
-			label: "graph-only diagnostic (broad triggers ignored; never executed)",
+			label: "graph-only diagnostic (bounded static closure; broad triggers ignored; never executed)",
 			selected: [UNIT[0]],
+		});
+		expect(graphOnlyDiagnostic(graph, [{
+			status: "M",
+			path: "tests2/harness/suite-setup.ts",
+		}], UNIT)).toMatchObject({
+			executable: false,
+			label: "graph-only diagnostic (full unit closure; broad triggers ignored; never executed)",
+			selected: UNIT,
 		});
 	});
 

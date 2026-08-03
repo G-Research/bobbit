@@ -223,13 +223,49 @@ export function changedTestsMapPaths(before, after) {
 	return changed;
 }
 
+function broadRunAllReasonForPath(pathValue) {
+	const candidate = posix(pathValue);
+	const path = candidate.toLowerCase();
+	if (ROOT_LOCKFILES.has(path)) return `lockfile change: ${candidate}`;
+	if (/^tsconfig(?:\.[^/]+)?\.json$/i.test(candidate)) return `TypeScript config change: ${candidate}`;
+	if (/^vitest\.config\.(?:[cm]?[jt]s)$/i.test(candidate)) return `Vitest config change: ${candidate}`;
+	if (AFFECTED_EXECUTION_FILES.has(path)) return `affected runner implementation change: ${candidate}`;
+	if (GLOBAL_EXECUTION_FILES.has(path)) return `unit runtime implementation change: ${candidate}`;
+	return undefined;
+}
+
 export function broadRunAllReason(change) {
+	for (const path of [change.path, change.oldPath].filter(Boolean)) {
+		const reason = broadRunAllReasonForPath(path);
+		if (reason) return reason;
+	}
+	return undefined;
+}
+
+function semanticRunAllReason(change) {
 	const path = change.path.toLowerCase();
-	if (ROOT_LOCKFILES.has(path)) return `lockfile change: ${change.path}`;
-	if (/^tsconfig(?:\.[^/]+)?\.json$/i.test(change.path)) return `TypeScript config change: ${change.path}`;
-	if (/^vitest\.config\.(?:[cm]?[jt]s)$/i.test(change.path)) return `Vitest config change: ${change.path}`;
-	if (AFFECTED_EXECUTION_FILES.has(path)) return `affected runner implementation change: ${change.path}`;
-	if (GLOBAL_EXECUTION_FILES.has(path)) return `unit runtime implementation change: ${change.path}`;
+	if (path === "package.json") {
+		try {
+			return packageExecutionChanged(change.before, change.after)
+				? `package execution projection changed: ${change.path}`
+				: undefined;
+		} catch (error) {
+			return `package semantic comparison unavailable: ${error instanceof Error ? error.message : String(error)}`;
+		}
+	}
+	if (path === "scripts/testing-v2/test-map-execution.mjs") {
+		return classifyExecutionMapSourceChange(change.before, change.after).recognized
+			? undefined
+			: `test execution-map algorithm or semantic base changed: ${change.path}`;
+	}
+	if (path === "tests2/tests-map.json") {
+		try {
+			changedTestsMapPaths(change.before, change.after);
+			return undefined;
+		} catch (error) {
+			return `tests-map semantic comparison unavailable: ${error instanceof Error ? error.message : String(error)}`;
+		}
+	}
 	return undefined;
 }
 
@@ -294,23 +330,26 @@ export function classifyAffectedTests(graph, changed) {
 	const unmapped = [];
 	let sawNonDocumentation = false;
 
+	// Determine known suite-wide invalidators before mapping any individual input.
+	// Git orders changes by path, so returning from the mapping loop would let an
+	// earlier unknown file hide the actionable lock/config/semantic reason.
 	for (const change of changes) {
 		if (!change.path || change.path === "." || change.path.startsWith("../") || change.path.includes("/../")) {
 			return allUnitPlan(graph, [`invalid changed path: ${change.path || "(empty)"}`], [change.path]);
 		}
-
+	}
+	for (const change of changes) {
 		const broadReason = broadRunAllReason(change);
 		if (broadReason) return allUnitPlan(graph, [broadReason]);
+	}
+	for (const change of changes) {
+		const semanticReason = semanticRunAllReason(change);
+		if (semanticReason) return allUnitPlan(graph, [semanticReason]);
+	}
 
+	for (const change of changes) {
 		if (change.path.toLowerCase() === "package.json") {
 			sawNonDocumentation = true;
-			try {
-				if (packageExecutionChanged(change.before, change.after)) {
-					return allUnitPlan(graph, [`package execution projection changed: ${change.path}`]);
-				}
-			} catch (error) {
-				return allUnitPlan(graph, [`package semantic comparison unavailable: ${error instanceof Error ? error.message : String(error)}`]);
-			}
 			addMappedTests(graph, change.path, affected, browserAffected);
 			reasons.push(`package metadata/scripts change: ${change.path}`);
 			continue;

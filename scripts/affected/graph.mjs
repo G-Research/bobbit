@@ -30,9 +30,17 @@ export const FILE_BOUNDARY_RUNNER = "tests2/harness/file-boundary-runner.ts";
 const EXECUTABLE_RE = /\.(?:ts|tsx|mts|cts|mjs|cjs|js|jsx)$/i;
 const SOURCE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".mjs", ".cjs", ".js", ".jsx", ".json"];
 const IMPORT_RE = /(?:\b(?:import|export)\s+(?!type\b)(?:[^"'`;]*?\s+from\s*)?|\brequire\s*\(|\bimport\s*\()\s*(["'`])([^"'`]+)\1/gms;
+// Tests sometimes validate repository source/config bytes through cwd-relative
+// filesystem reads instead of imports. Literal reads are real cache/selection
+// dependencies; computed reads still require an explicit impact rule.
+const REPO_LITERAL_READ_RE = /\b(?:readFileSync|readFile)\s*\(\s*(["'`])([^"'`${}]+)\1/gms;
 // Browser fixtures name their esbuild entry files through path.resolve() rather
 // than imports. Treat those repo-relative literals as ordinary graph edges.
 const TEST_RESOURCE_RE = /(["'`])(tests\/(?:fixtures|ui-fixtures)\/[^"'`]+)\1/gms;
+// Run-isolation contracts iterate root Playwright config names from a literal
+// array before passing the variable to readFileSync(). Preserve those computed
+// literal reads without pretending to resolve arbitrary data flow.
+const ROOT_TEST_CONFIG_RE = /(["'`])(playwright[^/"'`]*\.config\.[cm]?[jt]s)\1/gms;
 
 const posix = (value) => String(value).replace(/\\/g, "/").replace(/^\.\//, "");
 
@@ -56,6 +64,20 @@ function walk(dir, predicate, out = []) {
 		else if (predicate(entry.name, absolute)) out.push(absolute);
 	}
 	return out;
+}
+
+function resolveRepoLiteral(repoRoot, value) {
+	const path = posix(value);
+	if (!path || isAbsolute(value) || path === ".." || path.startsWith("../") || path.includes("/../")) return undefined;
+	const absolute = resolve(repoRoot, path);
+	const relativePath = repoPath(repoRoot, absolute);
+	if (!relativePath) return undefined;
+	try {
+		return statSync(absolute).isFile() ? relativePath : undefined;
+	} catch (error) {
+		if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") throw error;
+		return undefined;
+	}
 }
 
 function resolveSpec(repoRoot, importer, specifier) {
@@ -155,6 +177,13 @@ export function buildGraph(value) {
 			dependencies.add(dependency);
 			if (!edges.has(dependency)) pending.push(dependency);
 		}
+		REPO_LITERAL_READ_RE.lastIndex = 0;
+		for (const match of source.matchAll(REPO_LITERAL_READ_RE)) {
+			const dependency = resolveRepoLiteral(repoRoot, match[2]);
+			if (!dependency) continue;
+			dependencies.add(dependency);
+			if (!edges.has(dependency)) pending.push(dependency);
+		}
 		TEST_RESOURCE_RE.lastIndex = 0;
 		for (const match of source.matchAll(TEST_RESOURCE_RE)) {
 			const dependency = posix(match[2]);
@@ -163,6 +192,13 @@ export function buildGraph(value) {
 			} catch {
 				continue;
 			}
+			dependencies.add(dependency);
+			if (!edges.has(dependency)) pending.push(dependency);
+		}
+		ROOT_TEST_CONFIG_RE.lastIndex = 0;
+		for (const match of source.matchAll(ROOT_TEST_CONFIG_RE)) {
+			const dependency = resolveRepoLiteral(repoRoot, match[2]);
+			if (!dependency) continue;
 			dependencies.add(dependency);
 			if (!edges.has(dependency)) pending.push(dependency);
 		}

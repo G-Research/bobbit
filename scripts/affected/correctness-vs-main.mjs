@@ -110,10 +110,16 @@ export function graphOnlyDiagnostic(graph, changes, unitInventory) {
 			}
 		}
 	}
+	const selectedPaths = sortedPaths(selected);
+	const scope = selectedPaths.length === 0
+		? "empty static closure"
+		: selectedPaths.length === unitSet.size
+			? "full unit closure"
+			: "bounded static closure";
 	return {
 		executable: false,
-		label: "graph-only diagnostic (broad triggers ignored; never executed)",
-		selected: sortedPaths(selected),
+		label: `graph-only diagnostic (${scope}; broad triggers ignored; never executed)`,
+		selected: selectedPaths,
 	};
 }
 
@@ -599,7 +605,7 @@ async function runFailureBaseline({ sample, parent, worktree, sampleRoot, report
 	rmSync(profiles, { recursive: true, force: true });
 
 	const installEnv = createQualificationEnvironment(ensureOwnedDirectory(sampleRoot, "baseline-install"));
-	const installInvocation = npmInvocation(["ci", "--no-audit", "--no-fund"], { env: installEnv });
+	const installInvocation = npmInvocation(["ci", "--include=optional", "--no-audit", "--no-fund"], { env: installEnv });
 	const install = await checked(installInvocation.file, installInvocation.args, {
 		cwd: worktree,
 		env: installEnv,
@@ -646,7 +652,7 @@ async function qualifySample({ sample, graph, affectedTests, worktree, root }) {
 	rmSync(profiles, { recursive: true, force: true });
 	const sampleRoot = ensureOwnedDirectory(root, "runs", sample.id);
 	const installEnv = createQualificationEnvironment(ensureOwnedDirectory(sampleRoot, "install"));
-	const installInvocation = npmInvocation(["ci", "--no-audit", "--no-fund"], { env: installEnv });
+	const installInvocation = npmInvocation(["ci", "--include=optional", "--no-audit", "--no-fund"], { env: installEnv });
 	const install = await checked(installInvocation.file, installInvocation.args, {
 		cwd: worktree,
 		env: installEnv,
