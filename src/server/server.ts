@@ -86,6 +86,7 @@ import { PackContributionRegistry } from "./extension-host/pack-contribution-reg
 import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
+import { resolveHookScopeContext } from "./agent/hook-scope-context.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
 import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
@@ -2549,6 +2550,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			}
 			return ctx.goalManager.getEffectiveGoalMetadata(goalId);
 		},
+		// Scope construction is deliberately project-first: the resolver receives
+		// only coordinates owned by the dispatched session and never falls back to
+		// another project by goal id.
+		scopeContextResolver: (input) => resolveHookScopeContext(projectContextManager, input),
 		// Least-privilege, store-only host for provider hooks (capabilities.store ===
 		// true; session/agents denied) — gives a provider its own pack-scoped durable
 		// store via the same parent-authorized path routes use.
@@ -6337,22 +6342,50 @@ async function handleApiRoute(
 	//
 	// Resolve a session's lifecycle dispatch context from live or persisted state.
 	// Returns undefined when the session is unknown (→ 404 for the hook endpoints).
-	const resolveHookCtx = (id: string): Omit<HookCtx, "budget" | "config" | "gateway"> | undefined => {
+	const resolveHookCtx = (id: string): {
+		base: Omit<HookCtx, "budget" | "config" | "gateway" | "scopeContext">;
+		scopeInput: {
+			projectId?: string;
+			goalId?: string;
+			roleName?: string;
+			cwd: string;
+			worktreePath?: string;
+			repoPath?: string;
+			repoWorktrees?: Readonly<Record<string, string>>;
+		};
+	} | undefined => {
 		const live = sessionManager.getSession(id);
 		const persisted = sessionManager.getPersistedSession(id);
-		if (!live && !persisted) return undefined;
-		const projectId = live?.projectId ?? persisted?.projectId;
-		return {
+		const source = live ?? persisted;
+		if (!source) return undefined;
+		const projectId = source.projectId;
+		const goalId = source.goalId ?? source.teamGoalId;
+		const repoWorktrees = Array.isArray(source.repoWorktrees)
+			? Object.fromEntries(source.repoWorktrees.map(({ repo, worktreePath }) => [repo, worktreePath]))
+			: source.repoWorktrees;
+		const base = {
 			sessionId: id,
 			projectId,
-			scope: projectId ? "project" : "global",
-			cwd: live?.cwd ?? persisted?.cwd ?? process.cwd(),
+			scope: projectId ? "project" as const : "global" as const,
+			cwd: source.cwd ?? process.cwd(),
 			// Effective goal: team members, delegates, and reviewers carry the goal
 			// only in teamGoalId, so fall back to it before persisted state. Without
 			// this, disabled-provider filtering would not apply at the provider hook
 			// endpoints (beforePrompt / beforeCompact) for non-lead sessions.
-			goalId: live?.goalId ?? live?.teamGoalId ?? persisted?.goalId ?? persisted?.teamGoalId,
-			roleName: live?.role ?? persisted?.role,
+			goalId,
+			roleName: source.role,
+		};
+		return {
+			base,
+			scopeInput: {
+				projectId,
+				goalId,
+				roleName: source.role,
+				cwd: source.cwd ?? process.cwd(),
+				worktreePath: source.worktreePath,
+				repoPath: source.repoPath,
+				repoWorktrees,
+			},
 		};
 	};
 
@@ -6365,8 +6398,8 @@ async function handleApiRoute(
 			json({ error: "prompt must be a string" }, 400);
 			return;
 		}
-		const base = resolveHookCtx(sessionId);
-		if (!base) {
+		const hookContext = resolveHookCtx(sessionId);
+		if (!hookContext) {
 			json({ error: "Session not found" }, 404);
 			return;
 		}
@@ -6378,10 +6411,10 @@ async function handleApiRoute(
 		try {
 			const turnIndex = body?.turn?.index;
 			const { blocks } = await hub.dispatch("beforePrompt", {
-				...base,
+				...hookContext.base,
 				prompt: typeof body?.prompt === "string" ? body.prompt : undefined,
 				turn: typeof turnIndex === "number" && Number.isFinite(turnIndex) ? { index: turnIndex } : undefined,
-			});
+			}, hookContext.scopeInput);
 			const content = blocks.length ? blocks.map(fenceBlock).join("\n\n") : "";
 			// Temporary back-compat for generated bridges from the system-prompt-tail era.
 			// New bridges consume `content` only and must never return systemPrompt.
@@ -6424,8 +6457,8 @@ async function handleApiRoute(
 			json({ error: "summary must be a string" }, 400);
 			return;
 		}
-		const base = resolveHookCtx(sessionId);
-		if (!base) {
+		const hookContext = resolveHookCtx(sessionId);
+		if (!hookContext) {
 			json({ error: "Session not found" }, 404);
 			return;
 		}
@@ -6436,10 +6469,10 @@ async function handleApiRoute(
 		}
 		try {
 			await hub.dispatch("beforeCompact", {
-				...base,
+				...hookContext.base,
 				span: typeof body?.span === "string" ? body.span : undefined,
 				summary: typeof body?.summary === "string" ? body.summary : undefined,
-			});
+			}, hookContext.scopeInput);
 			json({});
 		} catch (err: any) {
 			jsonError(500, err);
