@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Real compiler contract for the persistent `npm run check` caches.
+ * Real compiler contract for independent persistent check and server-emission caches.
  *
  * This deliberately is not a tier-1 test: it starts real TypeScript compiler
  * processes and builds an isolated archive of committed HEAD. It requires a
@@ -13,12 +13,15 @@
  * script which it validates has landed.
  */
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
+  chmodSync,
   cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  renameSync,
   readFileSync,
   readdirSync,
   rmdirSync,
@@ -37,7 +40,14 @@ const REPO_ROOT = resolve(HERE, "..", "..");
 const TYPESCRIPT = join(REPO_ROOT, "node_modules", "typescript", "bin", "tsc");
 const NPM = process.platform === "win32" ? "npm.cmd" : "npm";
 const CACHE_NAMES = ["check-server.tsbuildinfo", "check-web.tsbuildinfo", "check-tests2.tsbuildinfo"];
+const BUILD_CACHE = "build-server.tsbuildinfo";
+const BUILD_STATE = "build-server-state.json";
+const BUILD_PROFILES = [BUILD_CACHE, BUILD_STATE];
 const EXPECTED_CHECK = "shx mkdir -p .profiles && tsc -p tsconfig.server.json --noEmit --incremental --tsBuildInfoFile .profiles/check-server.tsbuildinfo && tsc -p tsconfig.web.json --noEmit --incremental --tsBuildInfoFile .profiles/check-web.tsbuildinfo && tsc -p tsconfig.tests2.json --noEmit --incremental --tsBuildInfoFile .profiles/check-tests2.tsbuildinfo";
+const EXPECTED_BUILD_SERVER = "node scripts/build-server.mjs && shx chmod +x dist/server/cli.js && shx rm -rf dist/server/defaults && node scripts/copy-defaults.mjs && shx rm -rf dist/server/builtin-packs && node scripts/copy-builtin-packs.mjs";
+const EXPECTED_BUILD = "npm run build:packs && npm run build:server && npm run build:ui";
+const EXPECTED_CLEAN = "shx rm -rf dist .profiles/build-server.tsbuildinfo .profiles/build-server-state.json";
+const TEST_FAULT_ENV = "BOBBIT_BUILD_SERVER_TEST_FAULT_AFTER_TSC";
 const fixtureOnly = process.argv.slice(2).includes("--fixture-only");
 // On Windows, prefer System32\tar.exe (bsdtar) over msys/Git Bash GNU tar.
 // GNU tar can interpret native drive paths as remote hosts; bsdtar accepts them.
@@ -54,12 +64,12 @@ function assert(condition, message) {
   if (!condition) fail(message);
 }
 
-function run(command, args, cwd, { expect = 0, label = command } = {}) {
+function run(command, args, cwd, { expect = 0, label = command, env = {} } = {}) {
   const result = spawnSync(command, args, {
     cwd,
     encoding: "utf8",
     windowsHide: true,
-    env: { ...process.env, NO_COLOR: "1" },
+    env: { ...process.env, NO_COLOR: "1", ...env },
   });
   if (result.error) fail(`${label} could not start: ${result.error.message}`);
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
@@ -248,10 +258,19 @@ function assertCleanCheckout() {
 function assertStaticContract(repo) {
   const pkg = JSON.parse(readFileSync(join(repo, "package.json"), "utf8"));
   assert(normalized(pkg.scripts?.check ?? "") === EXPECTED_CHECK, "package.json check must be the approved canonical sequential cache command");
+  assert(normalized(pkg.scripts?.["build:server"] ?? "") === EXPECTED_BUILD_SERVER, "build:server must preserve the approved wrapper/copy command chain exactly");
+  assert(normalized(pkg.scripts?.build ?? "") === EXPECTED_BUILD, "npm run build must preserve build:packs, build:server, build:ui ordering");
+  assert(normalized(pkg.scripts?.clean ?? "") === EXPECTED_CLEAN, "npm clean must remove dist and only the independent build profiles");
   const build = pkg.scripts?.["build:server"] ?? "";
-  assert(!/(?:\.profiles|check-(?:server|web|tests2)\.tsbuildinfo|--incremental|--tsBuildInfoFile)/.test(build), "build:server must not consume check caches or incremental settings");
+  assert(!/(?:check-(?:server|web|tests2)\.tsbuildinfo)/.test(build), "build:server must never consume check cache identities");
+  assert(existsSync(join(repo, "scripts", "build-server.mjs")), "build:server wrapper is missing");
+  const wrapper = readFileSync(join(repo, "scripts", "build-server.mjs"), "utf8");
+  for (const name of BUILD_PROFILES)
+    assert(wrapper.includes(`.profiles/${name}`), `build wrapper must own .profiles/${name}`);
+  for (const name of CACHE_NAMES)
+    assert(!wrapper.includes(name), `build wrapper must not mention check cache ${name}`);
   const serverConfig = readFileSync(join(repo, "tsconfig.server.json"), "utf8");
-  assert(!/(?:incremental|tsBuildInfoFile|check-(?:server|web|tests2)\.tsbuildinfo)/.test(serverConfig), "canonical tsconfig.server.json must not own check cache settings");
+  assert(!/(?:incremental|tsBuildInfoFile|check-(?:server|web|tests2)\.tsbuildinfo|build-server\.tsbuildinfo)/.test(serverConfig), "canonical tsconfig.server.json must not own incremental cache settings");
 }
 
 function archiveHead(destination) {
@@ -325,19 +344,219 @@ function assertBuildArtifacts(repo) {
     assert(existsSync(join(repo, "dist", "server", "builtin-packs", "market-packs", pack)), `build did not copy builtin pack: ${pack}`);
 }
 
+function buildProfilePath(repo, name) {
+  return join(repo, ".profiles", name);
+}
+
+function assertBuildProfiles(repo) {
+  for (const name of BUILD_PROFILES) {
+    const path = buildProfilePath(repo, name);
+    assert(existsSync(path) && statSync(path).size > 0, `build did not publish ${relative(repo, path)}`);
+  }
+  try { JSON.parse(readFileSync(buildProfilePath(repo, BUILD_STATE), "utf8")); }
+  catch { fail("build state sidecar is not valid JSON after a successful build"); }
+}
+
+function snapshot(paths) {
+  return new Map(paths.map(path => [path, readFileSync(path)]));
+}
+
+function assertSnapshotUnchanged(before, label) {
+  for (const [path, bytes] of before)
+    assert(existsSync(path) && readFileSync(path).equals(bytes), `${label} changed ${path}`);
+}
+
+function distManifest(repo) {
+  const entries = [];
+  const root = join(repo, "dist");
+  const walk = dir => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (entry.isFile()) {
+        const stat = statSync(path);
+        entries.push({
+          path: relative(root, path).replaceAll("\\", "/"),
+          sha256: createHash("sha256").update(readFileSync(path)).digest("hex"),
+          mode: stat.mode & 0o777,
+        });
+      }
+    }
+  };
+  walk(root);
+  return entries.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function runLegacyBuild(repo) {
+  run(process.execPath, [TYPESCRIPT, "-p", "tsconfig.server.json"], repo, { label: "legacy non-incremental server emit" });
+  const cli = join(repo, "dist", "server", "cli.js");
+  assert(existsSync(cli), "legacy emit did not create dist/server/cli.js");
+  chmodSync(cli, statSync(cli).mode | 0o111);
+  remove(join(repo, "dist", "server", "defaults"));
+  run(process.execPath, ["scripts/copy-defaults.mjs"], repo, { label: "legacy copy defaults" });
+  remove(join(repo, "dist", "server", "builtin-packs"));
+  run(process.execPath, ["scripts/copy-builtin-packs.mjs"], repo, { label: "legacy copy builtin packs" });
+}
+
+function runBuild(repo, label = "build:server", options = {}) {
+  return runNpm(["run", "build:server"], repo, { label, ...options });
+}
+
+function runEmitter(repo, options = {}) {
+  return run(process.execPath, ["scripts/build-server.mjs"], repo, { label: "build-server wrapper", ...options });
+}
+
+function assertNoOutputs(repo, outputs, label) {
+  for (const output of outputs)
+    assert(!existsSync(join(repo, "dist", output)), `${label}: retained stale dist/${output}`);
+}
+
+function contractSourceOutputs(name) {
+  return [`server/${name}.js`, `server/${name}.js.map`, `server/${name}.d.ts`, `server/${name}.d.ts.map`];
+}
+
+function assertInputFingerprintInvalidation(repo) {
+  const inputs = ["tsconfig.server.json", "package.json", "package-lock.json"];
+  let previousState = readFileSync(buildProfilePath(repo, BUILD_STATE), "utf8");
+  const originals = new Map(inputs.map(name => [name, readFileSync(join(repo, name), "utf8")]));
+  try {
+    for (const name of inputs) {
+      append(join(repo, name), "\n");
+      runEmitter(repo);
+      const currentState = readFileSync(buildProfilePath(repo, BUILD_STATE), "utf8");
+      assert(currentState !== previousState, `${name} change did not invalidate the build state fingerprint`);
+      previousState = currentState;
+    }
+    writeFileSync(join(repo, "src", "server", "cache-contract-input-diagnostic.ts"), "type InputFingerprintDiagnostic = MissingInputFingerprintDiagnostic;\n");
+    expectFailure(() => runEmitter(repo, { expect: "nonzero", label: "input fingerprint diagnostic" }), "MissingInputFingerprintDiagnostic");
+  } finally {
+    remove(join(repo, "src", "server", "cache-contract-input-diagnostic.ts"));
+    for (const [name, contents] of originals) writeFileSync(join(repo, name), contents);
+  }
+  runEmitter(repo);
+}
+
+function assertCorruptProfileRecovery(repo) {
+  for (const [name, corruption] of [[BUILD_CACHE, ""], [BUILD_CACHE, "not build info"], [BUILD_STATE, ""], [BUILD_STATE, "not JSON"]]) {
+    writeFileSync(buildProfilePath(repo, name), corruption);
+    // A missing emitted artifact makes recovery observable rather than allowing an
+    // old output tree to mask a compiler invocation.
+    remove(join(repo, "dist", "server", "cli.js"));
+    runBuild(repo, `recovery from ${name || "empty"}`);
+    assertBuildArtifacts(repo);
+    assertBuildProfiles(repo);
+  }
+}
+
+function assertMutationRecovery(repo) {
+  const added = "cache-contract-added";
+  const renamed = "cache-contract-renamed";
+  const addedPath = join(repo, "src", "server", `${added}.ts`);
+  const renamedPath = join(repo, "src", "server", `${renamed}.ts`);
+  try {
+    writeFileSync(addedPath, "export const cacheContractAdded = 'added';\n");
+    runBuild(repo, "build with added source");
+    for (const output of contractSourceOutputs(added)) assert(existsSync(join(repo, "dist", output)), `new source omitted dist/${output}`);
+
+    remove(addedPath);
+    runBuild(repo, "build after source deletion");
+    assertNoOutputs(repo, contractSourceOutputs(added), "source deletion");
+
+    writeFileSync(addedPath, "export const cacheContractRenamed = 'rename';\n");
+    runBuild(repo, "build before source rename");
+    renameSync(addedPath, renamedPath);
+    runBuild(repo, "build after source rename");
+    assertNoOutputs(repo, contractSourceOutputs(added), "source rename");
+    for (const output of contractSourceOutputs(renamed)) assert(existsSync(join(repo, "dist", output)), `renamed source omitted dist/${output}`);
+
+    writeFileSync(join(repo, "src", "shared", "cache-contract-shared.ts"), "export interface CacheContractShared { value: string }\nexport const cacheContractShared: CacheContractShared = { value: 'ok' };\n");
+    writeFileSync(join(repo, "src", "server", "cache-contract-importer.ts"), "import { cacheContractShared } from '../shared/cache-contract-shared.js';\nconst cacheContractString: string = cacheContractShared.value;\nvoid cacheContractString;\n");
+    runBuild(repo, "build shared import baseline");
+    writeFileSync(join(repo, "src", "shared", "cache-contract-shared.ts"), "export interface CacheContractShared { value: number }\nexport const cacheContractShared: CacheContractShared = { value: 1 };\n");
+    remove(join(repo, "dist", "server", "defaults"));
+    remove(join(repo, "dist", "server", "builtin-packs"));
+    expectFailure(() => runBuild(repo, "changed shared import diagnostic", { expect: "nonzero" }), "cache-contract-importer.ts");
+    assert(!existsSync(join(repo, "dist", "server", "defaults")), "failed compiler invocation ran copy-defaults");
+    assert(!existsSync(join(repo, "dist", "server", "builtin-packs")), "failed compiler invocation ran copy-builtin-packs");
+  } finally {
+    remove(addedPath);
+    remove(renamedPath);
+    remove(join(repo, "src", "shared", "cache-contract-shared.ts"));
+    remove(join(repo, "src", "server", "cache-contract-importer.ts"));
+  }
+  runBuild(repo, "build after source mutation cleanup");
+  assertNoOutputs(repo, [...contractSourceOutputs(added), ...contractSourceOutputs(renamed), ...contractSourceOutputs("cache-contract-importer"), "shared/cache-contract-shared.js", "shared/cache-contract-shared.js.map", "shared/cache-contract-shared.d.ts", "shared/cache-contract-shared.d.ts.map"], "mutation cleanup");
+}
+
+function assertInterruptionRecovery(repo) {
+  const stateBefore = readFileSync(buildProfilePath(repo, BUILD_STATE));
+  const source = join(repo, "src", "server", "cache-contract-interrupted.ts");
+  try {
+    writeFileSync(source, "export const interruptedBuild = true;\n");
+    const interrupted = runEmitter(repo, { expect: "nonzero", label: "post-tsc interruption", env: { [TEST_FAULT_ENV]: "1" } });
+    assert(interrupted.output.includes(TEST_FAULT_ENV), `interruption fault did not identify ${TEST_FAULT_ENV}:\n${interrupted.output}`);
+    assert(readFileSync(buildProfilePath(repo, BUILD_STATE)).equals(stateBefore), "interrupted build published a successful state sidecar");
+    runBuild(repo, "recovery after post-tsc interruption");
+    assertBuildProfiles(repo);
+    for (const output of contractSourceOutputs("cache-contract-interrupted")) assert(existsSync(join(repo, "dist", output)), `interruption recovery omitted ${output}`);
+  } finally {
+    remove(source);
+  }
+  runBuild(repo, "cleanup after interruption recovery");
+  assertNoOutputs(repo, contractSourceOutputs("cache-contract-interrupted"), "interruption cleanup");
+}
+
 function runRepositoryFidelity(repo) {
   assertStaticContract(repo);
   // The tests2 graph intentionally resolves generated server declarations.
-  runNpm(["run", "build:server"], repo, { label: "repository prerequisite build:server" });
+  runBuild(repo, "repository prerequisite build:server");
   remove(join(repo, ".profiles"));
   runNpm(["run", "check"], repo, { label: "repository cold check" });
   for (const cache of CACHE_NAMES) assert(statSync(join(repo, ".profiles", cache)).size > 0, `repository check missed ${cache}`);
-  runNpm(["run", "check"], repo, { label: "repository warm check" });
-  runNpm(["run", "build:server"], repo, { label: "repository build after warm check" });
-  assertBuildArtifacts(repo);
+  // Keep this initial snapshot to prove the cold check has populated all three
+  // identities before the independent build flow is exercised.
+  const checkBeforeBuild = snapshot(profilePaths(repo));
+  assert(checkBeforeBuild.size === CACHE_NAMES.length, "cold check did not produce all independent cache identities");
+
+  // Legacy and cached flows must publish precisely the same shipped dist tree.
   remove(join(repo, "dist"));
-  runNpm(["run", "build:server"], repo, { label: "repository rebuild after dist deletion" });
+  remove(join(repo, ".profiles"));
+  runLegacyBuild(repo);
+  const legacyManifest = distManifest(repo);
+  const legacyCliMode = statSync(join(repo, "dist", "server", "cli.js")).mode & 0o111;
+  remove(join(repo, "dist"));
+  remove(join(repo, ".profiles"));
+  runBuild(repo, "cold cached build");
   assertBuildArtifacts(repo);
+  assertBuildProfiles(repo);
+  assert(JSON.stringify(distManifest(repo)) === JSON.stringify(legacyManifest), "cached build changed the legacy dist path/byte/mode manifest");
+  assert((statSync(join(repo, "dist", "server", "cli.js")).mode & 0o111) === legacyCliMode, "cached build changed CLI executable mode");
+  runBuild(repo, "warm cached build");
+  assertBuildArtifacts(repo);
+
+  remove(join(repo, "dist"));
+  runBuild(repo, "warm build after dist deletion");
+  assertBuildArtifacts(repo);
+
+  assertMutationRecovery(repo);
+  assertInputFingerprintInvalidation(repo);
+  assertCorruptProfileRecovery(repo);
+  assertInterruptionRecovery(repo);
+
+  // Check and build caches remain byte-for-byte independent when interleaved.
+  remove(join(repo, ".profiles"));
+  runNpm(["run", "check"], repo, { label: "interleaving initial check" });
+  const checksBefore = snapshot(profilePaths(repo));
+  runBuild(repo, "build interleaved after check");
+  assertSnapshotUnchanged(checksBefore, "build cache flow");
+  const buildBefore = snapshot(BUILD_PROFILES.map(name => buildProfilePath(repo, name)));
+  runNpm(["run", "check"], repo, { label: "check interleaved after build" });
+  assertSnapshotUnchanged(buildBefore, "check cache flow");
+
+  runNpm(["run", "clean"], repo, { label: "npm clean build profile cleanup" });
+  assert(!existsSync(join(repo, "dist")), "npm clean retained dist");
+  for (const name of BUILD_PROFILES) assert(!existsSync(buildProfilePath(repo, name)), `npm clean retained ${name}`);
+  assertSnapshotUnchanged(checksBefore, "npm clean");
 }
 
 try {
