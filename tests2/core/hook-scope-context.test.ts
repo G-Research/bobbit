@@ -1,5 +1,6 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import path from "node:path";
 
 import {
   GOAL_METADATA_WALK_DEPTH_CAP,
@@ -248,6 +249,53 @@ describe("resolveHookScopeContext", () => {
     );
   });
 
+  it("preserves project-config Windows separators for native and sandbox component paths", () => {
+    const nativeRoot = path.join(path.parse(process.cwd()).root, "worktrees", "native-component");
+    const native = projectFixture("native-component", {
+      components: [{ name: "web", repo: ".", relativePath: "apps\\web" }],
+    });
+    const sandbox = projectFixture("windows-config-sandbox", {
+      components: [{ name: "web", repo: "apps\\web", relativePath: "client" }],
+    });
+    const unsafe = projectFixture("unsafe-windows-config", {
+      components: [
+        { name: "drive", repo: ".", relativePath: "C:\\private" },
+        { name: "unc", repo: ".", relativePath: "\\\\server\\share" },
+        { name: "traversal", repo: "apps\\..\\private" },
+      ],
+    });
+    const { resolve } = resolverFor(native, sandbox, unsafe);
+
+    assert.deepEqual(
+      resolve({
+        projectId: "native-component",
+        cwd: path.join(nativeRoot, "apps", "web", "src"),
+        worktreePath: nativeRoot,
+      })?.component,
+      { name: "web", repo: ".", relativePath: "apps\\web" },
+      "a platform-native cwd must not be rejected merely for Windows separators",
+    );
+    assert.deepEqual(
+      resolve({
+        projectId: "windows-config-sandbox",
+        cwd: "/workspace/apps/web/client/src",
+        repoPath: "/host/project",
+        repoWorktrees: { "apps\\web": "/host/project/apps/web" },
+      })?.component,
+      { name: "web", repo: "apps\\web", relativePath: "client" },
+      "safe Windows-style configured paths map through canonical container coordinates",
+    );
+    assert.equal(
+      resolve({
+        projectId: "unsafe-windows-config",
+        cwd: path.join(nativeRoot, "apps", "web", "src"),
+        worktreePath: nativeRoot,
+      })?.component,
+      undefined,
+      "drive, UNC, and traversal component paths remain rejected",
+    );
+  });
+
   it("rejects malformed or ambiguous sandbox container coordinates", () => {
     const single = projectFixture("sandbox-single", {
       components: [{ name: "web", repo: ".", relativePath: "apps/web" }],
@@ -273,6 +321,15 @@ describe("resolveHookScopeContext", () => {
         worktreePath: "/host/worktrees/goal-branch",
       })?.component,
       undefined,
+    );
+    assert.equal(
+      resolve({
+        projectId: "sandbox-single",
+        cwd: "/workspace-wt/goal-branch\\apps\\web",
+        worktreePath: "/host/worktrees/goal-branch",
+      })?.component,
+      undefined,
+      "container namespaces retain strict slash-only validation",
     );
     assert.equal(
       resolve({

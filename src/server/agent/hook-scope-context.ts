@@ -3,7 +3,7 @@ import type { ProjectContextManager } from "./project-context-manager.js";
 import { isHeadquartersProject, isSystemProject } from "./project-registry.js";
 import { walkGoalMetadataLineage, type GoalMetadata } from "./goal-metadata.js";
 import type { HookScopeComponent, HookScopeContext } from "./lifecycle-hub.js";
-import type { Component } from "./project-config-store.js";
+import { isSafeRelPath, type Component } from "./project-config-store.js";
 
 /** Coordinates owned by a lifecycle session boundary; never resolve outside them. */
 export interface HookScopeResolutionInput {
@@ -178,9 +178,9 @@ function componentCoordinates(
 	}
 	// A branch-container worktree does not identify one member repository.
 	if (!repoRoot && multiRepo && input.worktreePath) return undefined;
-	if (!repoRoot) repoRoot = component.repo === "." ? projectRoot : path.join(input.repoPath ?? projectRoot, component.repo);
+	if (!repoRoot) repoRoot = component.repo === "." ? projectRoot : path.join(input.repoPath ?? projectRoot, ...componentPathParts(component.repo));
 	const resolvedRepoRoot = path.resolve(repoRoot);
-	const root = path.resolve(resolvedRepoRoot, component.relativePath ?? "");
+	const root = path.resolve(resolvedRepoRoot, ...componentPathParts(component.relativePath ?? ""));
 	return isWithin(root, resolvedRepoRoot) ? { repoRoot: resolvedRepoRoot, root } : undefined;
 }
 
@@ -188,9 +188,16 @@ type SandboxContainerCwd = { base: "workspace" | "worktree"; rest: string[] };
 
 /** Parse only canonical container paths; never normalize away traversal. */
 function parseSandboxContainerCwd(cwd: string): SandboxContainerCwd | "invalid" | undefined {
-	if (typeof cwd !== "string" || cwd.includes("\\") || cwd.includes("\0")) return "invalid";
+	if (typeof cwd !== "string") return "invalid";
+	const isContainerPath = cwd === "/workspace"
+		|| cwd.startsWith("/workspace/")
+		|| cwd === "/workspace-wt"
+		|| cwd.startsWith("/workspace-wt/");
+	// Only paths in the exact container namespace receive container syntax
+	// validation. In particular, a native Windows host cwd contains backslashes.
+	if (!isContainerPath) return undefined;
+	if (cwd.includes("\\") || cwd.includes("\0")) return "invalid";
 	const parts = cwd.split("/");
-	if (parts[0] !== "" || (parts[1] !== "workspace" && parts[1] !== "workspace-wt")) return undefined;
 	if (!parts.slice(1).every(isSafePathSegment)) return "invalid";
 	if (parts[1] === "workspace") return { base: "workspace", rest: parts.slice(2) };
 	// `/workspace-wt` is a branch container, not a repository root.
@@ -209,7 +216,7 @@ function mapSandboxCwdToHost(
 	if (!isSafeAbsoluteHostPath(repoRoot)) return undefined;
 	let relative = cwd.rest;
 	if (multiRepo) {
-		const repoParts = component.repo.split("/");
+		const repoParts = componentPathParts(component.repo);
 		if (!repoParts.every(isSafePathSegment) || !repoParts.every((part, index) => relative[index] === part)) return undefined;
 		relative = relative.slice(repoParts.length);
 		// A container worktree needs its own host worktree. `/workspace` may
@@ -227,10 +234,14 @@ function mapSandboxCwdToHost(
 }
 
 function isSafeComponentPath(value: string, allowEmptyOrDot: boolean): boolean {
-	if (typeof value !== "string" || value.includes("\0") || path.posix.isAbsolute(value) || path.isAbsolute(value)) return false;
+	if (typeof value !== "string") return false;
 	if ((value === "" || value === ".") && allowEmptyOrDot) return true;
-	if (!value || value.includes("\\")) return false;
-	return value.split("/").every(isSafePathSegment);
+	return !!value && isSafeRelPath(value);
+}
+
+/** Config paths accept either native separator; use path segments for local joins. */
+function componentPathParts(value: string): string[] {
+	return value.split(/[\\/]+/).filter(Boolean);
 }
 
 function isSafeAbsoluteHostPath(value: unknown): value is string {
