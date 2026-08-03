@@ -87,6 +87,7 @@ import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extensi
 import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
+import { adoptedSkillEntries, type AdoptedSkillLedgerReader } from "../skills/adopted-skill-entries.js";
 import { headquartersDir } from "../bobbit-dir.js";
 import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
 import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, shouldSkipRemotePushForTests, detectPrimaryBranch, isGitRepo, getRepoRoot, isUnresolvedHeadWorktreeError, type RemoteGitPolicy } from "../skills/git.js";
@@ -3920,23 +3921,29 @@ export class SessionManager {
 			// base + server config store so server/global-user market skill packs
 			// resolve for the active project even when its root != server cwd.
 			const headquartersScope = projectId === HEADQUARTERS_PROJECT_ID;
+			const owningProjectStore = !headquartersScope && projectId
+				? (this.projectContextManager?.getOrCreate(projectId)?.projectConfigStore ?? projectConfigStore)
+				: undefined;
 			const marketContext: SkillMarketContext = {
 				serverBase: headquartersDir(),
 				globalUserBase: os.homedir(),
 				projectBase: headquartersScope ? "" : discoveryRoot,
 				serverConfigStore: this.projectConfigStore,
-				projectConfigStore: headquartersScope ? undefined : projectConfigStore as SkillMarketContext["projectConfigStore"],
+				projectConfigStore: owningProjectStore as SkillMarketContext["projectConfigStore"],
 				// pack-schema-v1 §7: filter disabled market-pack skills out of the runtime
 				// activation catalog too, using the SAME pack_activation store (server/
 				// global-user → server config store; project → the project's config store).
 				packActivation: (scope, packName) => {
-					const store = scope === "project"
-						? (!headquartersScope && projectId && this.projectContextManager
-							? this.projectContextManager.getOrCreate(projectId)?.projectConfigStore
-							: undefined)
-						: this.projectConfigStore;
-					return store?.getPackActivation(scope, packName) ?? {};
+					const store = (scope === "project" ? owningProjectStore : this.projectConfigStore) as {
+						getPackActivation?: (scope: "server" | "global-user" | "project", packName: string) => { skills?: string[] };
+					} | undefined;
+					return store?.getPackActivation?.(scope, packName) ?? {};
 				},
+				adoptedEntries: (scope) => adoptedSkillEntries(scope, {
+					serverConfigStore: this.projectConfigStore as AdoptedSkillLedgerReader | undefined,
+					projectConfigStore: owningProjectStore as AdoptedSkillLedgerReader | undefined,
+					projectId: headquartersScope ? undefined : projectId,
+				}),
 			};
 			const all = discoverSlashSkills(discoveryRoot, projectConfigStore, marketContext);
 			// Filter: omit disable-model-invocation and skills with empty descriptions.

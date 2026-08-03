@@ -3,6 +3,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { PackEntry } from "../../src/server/agent/pack-types.js";
+import { createAdoptedExtension, type AdoptionScope, type AdoptedExtension } from "../../src/server/agent/adopted-extensions.js";
+import { SessionManager } from "../../src/server/agent/session-manager.js";
+import { adoptedSkillEntries } from "../../src/server/skills/adopted-skill-entries.js";
+import { resolveSkillExpansions } from "../../src/server/skills/resolve-skill-expansions.js";
 import {
 	discoverSlashSkills,
 	discoverSlashSkillsResolved,
@@ -119,5 +123,39 @@ describe("adopted Claude-style skills", () => {
 		expect(winner?.item.content).toBe("Manual body");
 		expect(winner?.origin.kind).toBe("legacy-implicit");
 		expect(winner?.shadows.map((shadow) => shadow.kind)).toContain("adopted");
+	});
+
+	it("expands and catalogs project adoptions only for their owning project", () => {
+		const root = tempRoot();
+		const cwd = path.join(root, "project");
+		const source = path.join(root, "stock-skills");
+		writeSkill(source, "summarize", ["---", "name: summarize", "description: Summarize", "allowed-tools: read", "---", "ADOPTED $ARGUMENTS"].join("\n"));
+		const adoption = createAdoptedExtension({ kind: "skills", scope: "project", projectId: "project-a", source: { directory: source } });
+		const ledger = (records: Partial<Record<AdoptionScope, Record<string, AdoptedExtension>>>) => ({
+			get: () => undefined,
+			getPackActivation: () => ({}),
+			getAdoptedExtensions: (scope: AdoptionScope) => records[scope] ?? {},
+		});
+		const serverStore = ledger({});
+		const projectAStore = ledger({ project: { [adoption.id]: adoption } });
+		const projectBStore = ledger({});
+		const context = (projectId: string, projectStore: typeof projectAStore) => ({
+			serverBase: root, globalUserBase: root, projectBase: cwd,
+			serverConfigStore: serverStore as any,
+			projectConfigStore: projectStore as any,
+			adoptedEntries: (scope: AdoptionScope) => adoptedSkillEntries(scope, { serverConfigStore: serverStore, projectConfigStore: projectStore, projectId }),
+		});
+		const name = `adopt-${adoption.id}--summarize`;
+		const expanded = resolveSkillExpansions(`/${name} this`, cwd, projectAStore, undefined, context("project-a", projectAStore));
+		expect(expanded.modelText).toContain("ADOPTED this");
+		invalidateSlashSkillsCache();
+		expect(resolveSkillExpansions(`/${name}`, cwd, projectAStore, undefined, context("project-b", projectAStore)).unknown).toEqual([name]);
+
+		const manager: any = new SessionManager({ projectConfigStore: serverStore as any });
+		manager.projectContextManager = { getOrCreate: (id: string) => id === "project-a" ? { projectConfigStore: projectAStore } : { projectConfigStore: projectBStore } };
+		invalidateSlashSkillsCache();
+		expect(manager.computeSkillsCatalog(["activate_skill"], cwd, projectAStore, "project-a").map((skill: { name: string }) => skill.name)).toContain(name);
+		invalidateSlashSkillsCache();
+		expect(manager.computeSkillsCatalog(["activate_skill"], cwd, projectBStore, "project-b").map((skill: { name: string }) => skill.name)).not.toContain(name);
 	});
 });
