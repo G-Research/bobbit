@@ -17,6 +17,7 @@ import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
 import { invalidateModelCache, type ApiModel } from "../../src/server/agent/model-registry.js";
 import { generateGoalSummaryTitle, generateSessionTitle } from "../../src/server/agent/title-generator.js";
 import { completeModelText, testModelPreference } from "../../src/server/agent/model-completion.js";
+import { GatewayCredentialResolutionError } from "../../src/server/agent/aigw-manager.js";
 import { createMemFs } from "../harness/mem-fs.js";
 
 const previousSkipTitleGen = process.env.BOBBIT_SKIP_TITLE_GEN;
@@ -150,6 +151,38 @@ describe("title generation with non-AI-Gateway naming models", () => {
 		assert.equal(calls.length, 1);
 		assert.equal(calls[0].model.provider, "openai-codex");
 		assert.equal(calls[0].args.thinkingLevel, "off");
+	});
+
+	it("resolves named gateway title credentials strictly at completion time", async () => {
+		const prefs = new PreferencesStore(path.resolve("/memfs/title-gateway"), createMemFs());
+		const gateway = { id: "title-gateway", name: "title-gateway", url: "http://127.0.0.1:9", type: "openai-compatible" as const, enabled: true };
+		prefs.set("modelGateways", [gateway]);
+		const model = { ...directModel, provider: gateway.name };
+		const seen: Array<string | undefined> = [];
+		const complete = async (_model: any, _context: any, options: any) => {
+			seen.push(options.apiKey);
+			return { role: "assistant", content: [{ type: "text", text: "OK" }], stopReason: "stop" } as any;
+		};
+		const dependencies = {
+			env: { TITLE_GATEWAY_TOKEN: "from-env" },
+			commandRunner: { async execFile() { return { stdout: "from-command", stderr: "" }; } },
+		};
+		for (const [expression, expected] of [[undefined, undefined], ["literal-token", "literal-token"], ["TITLE_GATEWAY_TOKEN", "from-env"], ["!echo token", "from-command"]] as const) {
+			if (expression === undefined) prefs.remove(`providerKey.gateway.${gateway.id}`);
+			else prefs.set(`providerKey.gateway.${gateway.id}`, expression);
+			await completeModelText(model, prefs, { systemPrompt: "test", userPrompt: "test" }, complete, dependencies);
+			assert.equal(seen.pop(), expected);
+		}
+
+		prefs.set(`providerKey.gateway.${gateway.id}`, "!failing-command");
+		const beforeFailure = seen.length;
+		await assert.rejects(
+			completeModelText(model, prefs, { systemPrompt: "test", userPrompt: "test" }, complete, {
+				commandRunner: { async execFile() { throw new Error("credential output must not leak"); } },
+			}),
+			GatewayCredentialResolutionError,
+		);
+		assert.equal(seen.length, beforeFailure, "a failed gateway key command must make zero completion calls");
 	});
 
 	it("model completions reuse OpenAI Codex OAuth credentials, matching chat auth", async () => {

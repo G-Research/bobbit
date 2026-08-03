@@ -12,6 +12,7 @@ import { getAvailableModels, type ApiModel, type CustomProviderConfig } from "./
 import { GOOGLE_GEMINI_CLI_PROVIDER, codeAssistComplete } from "./google-code-assist.js";
 import { sanitizeModelErrorText } from "./model-error-sanitizer.js";
 import { classifyModelProbeError, modelProbeFailure } from "./model-probe-result.js";
+import { resolveGatewayCredential } from "./gateway-credential-resolver.js";
 
 interface AuthCredentials {
 	type: string;
@@ -144,6 +145,29 @@ interface ResolvedProviderApiKey {
 	oauthResolutionFailed?: boolean;
 }
 
+interface GatewayCredentialSource {
+	name: string;
+	expression: unknown;
+}
+
+/**
+ * Resolve a model provider back to its persisted gateway row without importing
+ * aigw-manager (which would create a model-registry import cycle). A matching
+ * gateway owns authentication exclusively: do not fall through to generic
+ * provider credentials or models.json indirection.
+ */
+function gatewayCredentialSource(prefs: PreferencesStore | undefined, provider: string): GatewayCredentialSource | undefined {
+	const gateways = prefs?.get("modelGateways");
+	if (!Array.isArray(gateways)) return undefined;
+	for (const candidate of gateways) {
+		if (!candidate || typeof candidate !== "object") continue;
+		const row = candidate as Record<string, unknown>;
+		if (row.name !== provider || row.enabled === false || typeof row.id !== "string" || !row.id.trim()) continue;
+		return { name: provider, expression: prefs?.get(`providerKey.gateway.${row.id}`) };
+	}
+	return undefined;
+}
+
 async function resolveProviderApiKey(
 	prefs: PreferencesStore | undefined,
 	provider: string,
@@ -251,14 +275,23 @@ export async function completeModelText(
 	const commandRunner = dependencies.commandRunner ?? realModelConfigCommandRunner;
 	const env = dependencies.env ?? process.env;
 	const providerConfigReader = dependencies.providerConfigReader ?? readModelsJsonProvider;
-	const resolvedApiKey = await resolveProviderApiKey(
-		prefs,
-		model.provider,
-		commandRunner,
-		env,
-		providerConfigReader,
-		dependencies.anthropicOAuthTokenResolver,
-	);
+	const gatewayCredential = gatewayCredentialSource(prefs, model.provider);
+	// Gateway credentials deliberately use the strict resolver. A failed command
+	// must reject before Pi receives a model/completion call, rather than falling
+	// through to models.json or any generic provider credential unauthenticated.
+	const resolvedGatewayCredential = gatewayCredential
+		? await resolveGatewayCredential(gatewayCredential.expression, gatewayCredential.name, env, commandRunner)
+		: undefined;
+	const resolvedApiKey = gatewayCredential
+		? { apiKey: resolvedGatewayCredential }
+		: await resolveProviderApiKey(
+			prefs,
+			model.provider,
+			commandRunner,
+			env,
+			providerConfigReader,
+			dependencies.anthropicOAuthTokenResolver,
+		);
 	if (resolvedApiKey.oauthResolutionFailed) {
 		throw new Error("Anthropic OAuth credential could not be resolved");
 	}

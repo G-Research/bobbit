@@ -10495,8 +10495,9 @@ export class SessionManager {
 		const gateways = this.getConfiguredGateways().filter((gateway) => gateway.enabled);
 		// Automatic Claude fallback is intentionally AIGW-only. A local gateway
 		// named after Claude is not an enterprise AIGW and must not affect fallback.
-		const aigwUrl = gateways.find((gateway) => gateway.type === "aigw")?.url;
-		return { namingModel: namingModel || undefined, fallbackModel: sessionModel || undefined, gateways, aigwUrl, thinkingLevel: "off", preferencesStore: this.preferencesStore, skipTitleGeneration: this.skipTitleGeneration };
+		const aigwGateway = gateways.find((gateway) => gateway.type === "aigw");
+		const aigwUrl = aigwGateway?.url;
+		return { namingModel: namingModel || undefined, fallbackModel: sessionModel || undefined, gateways, aigwUrl, aigwGateway, thinkingLevel: "off", preferencesStore: this.preferencesStore, skipTitleGeneration: this.skipTitleGeneration };
 	}
 
 	private async autoGenerateTitleFromText(session: SessionInfo, userText: string): Promise<void> {

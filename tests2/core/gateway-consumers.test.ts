@@ -13,13 +13,48 @@ import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
 import { getAvailableModels, invalidateModelCache, type ApiModel } from "../../src/server/agent/model-registry.js";
 import { SessionManager, gatewayModelBinding } from "../../src/server/agent/session-manager.js";
-import { generateSessionTitle } from "../../src/server/agent/title-generator.js";
-import type { ModelGateway } from "../../src/server/agent/aigw-manager.js";
+import { generateGoalSummaryTitle, generateSessionTitle } from "../../src/server/agent/title-generator.js";
+import { GatewayCredentialResolutionError, type ModelGateway } from "../../src/server/agent/aigw-manager.js";
 
 const COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
 function gateway(name: string, url: string, type: ModelGateway["type"] = "openai-compatible"): ModelGateway {
 	return { id: `id-${name}`, name, url, type, enabled: true };
+}
+
+function startTitleGateway(requiredToken: string): Promise<{
+	url: string;
+	getRequests: () => Array<{ path: string; authorization: string | undefined }>;
+	close: () => Promise<void>;
+}> {
+	const requests: Array<{ path: string; authorization: string | undefined }> = [];
+	const server = http.createServer((req, res) => {
+		requests.push({ path: req.url || "", authorization: req.headers.authorization });
+		if (req.url === "/.well-known/opencode") {
+			res.writeHead(404); res.end(); return;
+		}
+		if (req.url === "/v1/models") {
+			res.writeHead(200, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ data: [{ id: "claude-haiku-local" }] })); return;
+		}
+		if (req.url === "/v1/chat/completions") {
+			if (req.headers.authorization !== `Bearer ${requiredToken}`) {
+				res.writeHead(401, { "Content-Type": "application/json" });
+				res.end(JSON.stringify({ error: "missing authorization" })); return;
+			}
+			res.writeHead(200, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ choices: [{ message: { content: "<title>Authenticated Gateway</title>" } }] })); return;
+		}
+		res.writeHead(404); res.end();
+	});
+	return new Promise((resolve) => server.listen(0, "127.0.0.1", () => {
+		const port = (server.address() as { port: number }).port;
+		resolve({
+			url: `http://127.0.0.1:${port}`,
+			getRequests: () => [...requests],
+			close: () => new Promise<void>((done) => server.close(() => done())),
+		});
+	}));
 }
 
 function startGateway(requiredToken?: string): Promise<{
@@ -151,6 +186,58 @@ describe("multi-gateway consumers", () => {
 			assert.equal(service.getModelRequests(), 2, "same named gateway is cached, distinct gateway names are not conflated");
 			assert.equal(gatewayModelBinding(first, { id: "claude-local", wireId: "must-not-use-wire-id" }), "local-a/claude-local");
 			assert.equal(gatewayModelBinding(gateway("aigw", service.url, "aigw"), { id: "aws/claude-haiku" }), "aigw/claude-haiku");
+		} finally {
+			await service.close();
+		}
+	});
+
+	it("uses strict credentials for explicit title models and makes command failures observable", async () => {
+		const named = gateway("named", "http://127.0.0.1:1234");
+		const model: ApiModel = {
+			id: "title-model", name: "Title model", provider: named.name, api: "openai-completions", baseUrl: `${named.url}/v1`,
+			contextWindow: 8192, maxTokens: 4096, reasoning: false, input: ["text"], cost: COST, authenticated: true,
+		};
+		const prefs = new PreferencesStore(path.join(agentDir, "strict-title-state"));
+		prefs.set("modelGateways", [named]);
+		prefs.set(`providerKey.gateway.${named.id}`, "!exit 1");
+		let completions = 0;
+		const options = {
+			namingModel: `${named.name}/${model.id}`,
+			gateways: [named],
+			availableModels: [model],
+			preferencesStore: prefs,
+			directModelCompleter: async () => { completions++; return "<title>must not run</title>"; },
+		};
+		await assert.rejects(
+			generateSessionTitle([{ role: "user", content: "Use the secured model." }], options),
+			(error: unknown) => error instanceof GatewayCredentialResolutionError && error.message === 'Unable to resolve API key for gateway "named"',
+		);
+		await assert.rejects(
+			generateGoalSummaryTitle("Use the secured model", options),
+			GatewayCredentialResolutionError,
+		);
+		assert.equal(completions, 0, "failed credentials must make zero title completion calls");
+	});
+
+	it("sends implicit AIGW title and summary credentials only to its configured origin and fails closed", async () => {
+		const service = await startTitleGateway("title-token");
+		try {
+			const enterprise = gateway("aigw", service.url, "aigw");
+			const prefs = new PreferencesStore(path.join(agentDir, "implicit-title-state"));
+			prefs.set("modelGateways", [enterprise]);
+			prefs.set(`providerKey.gateway.${enterprise.id}`, "title-token");
+			const options = { gateways: [enterprise], aigwGateway: enterprise, preferencesStore: prefs };
+			assert.equal(await generateSessionTitle([{ role: "user", content: "Give this a secure title." }], options), "Authenticated Gateway");
+			assert.equal(await generateGoalSummaryTitle("Give this goal a secure title", options), "Authenticated Gateway");
+			const gatewayRequests = service.getRequests().filter((request) => request.path.startsWith("/v1/"));
+			assert.ok(gatewayRequests.length >= 3);
+			assert.deepEqual(gatewayRequests.map((request) => request.authorization), gatewayRequests.map(() => "Bearer title-token"));
+
+			prefs.set(`providerKey.gateway.${enterprise.id}`, "!exit 1");
+			const beforeFailure = service.getRequests().length;
+			await assert.rejects(generateSessionTitle([{ role: "user", content: "No unauthenticated retry." }], options), GatewayCredentialResolutionError);
+			await assert.rejects(generateGoalSummaryTitle("No unauthenticated retry", options), GatewayCredentialResolutionError);
+			assert.equal(service.getRequests().length, beforeFailure, "credential resolution failures must make zero gateway fetch calls");
 		} finally {
 			await service.close();
 		}
