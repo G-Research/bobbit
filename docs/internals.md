@@ -2921,10 +2921,10 @@ For the parallel pattern on the agent stream (different event family, same shape
 
 Background process pills render live state from `BgProcessManager` snapshots, not from browser-local assumptions. This matters because an exited process may remain visible for hours, survive reconnects, or be rehydrated through REST; using `Date.now() - startTime` after exit makes old processes look like they ran until the current page render.
 
-**Contract.** `BgProcessInfo` includes `startTime: number` and `endTime: number | null` as epoch-millisecond timestamps, plus `status: "running" | "exited" | "unrecoverable"`, `exitCode: number | null`, and `terminalReason: "normal" | "killed" | "unrecoverable" | null` (null while running).
+**Contract.** `BgProcessInfo` includes `startTime: number` and `endTime: number | null` as epoch-millisecond timestamps, plus `status: "running" | "exited" | "unrecoverable"`, `exitCode: number | null`, and `terminalReason: "normal" | "killed" | "unrecoverable" | "spawn-failed" | null` (null while running). A `spawn-failed` terminal may also include the safe `{ kind: "spawn", code, message }` diagnostic.
 
 - While `status === "running"`, `endTime` is `null` and the UI may render a live elapsed timer from `startTime`.
-- On child `exit`, the server updates `status`, `exitCode`, and `endTime` once before resolving waiters or broadcasting the exit event.
+- On terminalization, the server updates `status`, `exitCode`, `terminalReason`, and `endTime` once before resolving waiters or broadcasting the exit event. A known spawn failure is `status: "exited"` with `terminalReason: "spawn-failed"`; `unrecoverable` remains reserved for a lost outcome during restart recovery.
 - Exited processes with a numeric `endTime` render fixed runtime as `endTime - startTime`; the value must not grow after re-render, reconnect, REST hydration, or page reload.
 - Legacy exited snapshots with missing/null/invalid `endTime` render runtime as unavailable (`—`) instead of falling back to time-since-start.
 
@@ -2933,7 +2933,7 @@ Background process pills render live state from `BgProcessManager` snapshots, no
 - `GET /api/sessions/:id/bg-processes` returns `{ processes: BgProcessInfo[] }` for initial hydration and reconnect refresh.
 - `GET /api/sessions/:id/bg-processes/:pid/wait` returns `{ info, timedOut, aborted }`; `info.endTime` is numeric only when the snapshot is exited. This is a long-poll — it streams chunked with a periodic heartbeat to survive undici's ~300 s `headersTimeout` (see [Long-poll heartbeat (chunked keep-alive)](#long-poll-heartbeat-chunked-keep-alive)).
 - `bg_process_created` carries the full running `process` snapshot with `endTime: null`.
-- `bg_process_exited` carries `processId`, `exitCode`, `endTime`, and `terminalReason` so the client can freeze an existing pill immediately. `terminalReason` is `"normal"` (clean exit), `"killed"` (user-requested kill), or `"unrecoverable"` (real exit code could not be recovered after a restart); `exitCode` is `null` for the latter two and clients must not fabricate one.
+- `bg_process_exited` carries `processId`, `exitCode`, `endTime`, `terminalReason`, and optional `spawnFailure` so the client can freeze an existing pill immediately. `terminalReason` is `"normal"` (clean exit), `"killed"` (user-requested kill), `"unrecoverable"` (real exit code could not be recovered after a restart), or `"spawn-failed"` (known shell/runtime startup failure). `exitCode` is `null` for the latter three and clients must not fabricate one.
 - `bg_process_dismissed` carries `processId` and tells the client to remove the pill; it fires on explicit dismiss (and the legacy kill-then-dismiss path) after the persisted log/status files are purged.
 
 The REST and WS contracts are additive for older clients, but new clients must treat missing `endTime` as unknown rather than deriving a misleading final duration from the current clock. See [websocket-protocol.md](websocket-protocol.md#background-process-events) and [rest-api.md](rest-api.md) for the full event/route shapes.
@@ -2944,8 +2944,11 @@ The REST and WS contracts are additive for older clients, but new clients must t
 
 `bash_bg` background processes survive a gateway restart and **re-attach** to
 still-running processes: live output keeps streaming and the real exit code is
-captured, as if the server never restarted. This is needed because the old
-`BgProcessManager` was in-memory only — a restart lost every record, all output,
+captured, as if the server never restarted. Host working-directory preflight
+runs before allocating persistent process state, while container paths are left
+to Docker runtime validation because they are in a different namespace.
+
+This is needed because the old `BgProcessManager` was in-memory only — a restart lost every record, all output,
 and the live handle, and you cannot re-attach to a dead parent's stdout/stderr
 pipes.
 

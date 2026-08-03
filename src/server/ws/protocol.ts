@@ -246,9 +246,9 @@ export type ServerMessage =
 	| { type: "side_panel_workspace"; sessionId: string; workspace: SidePanelWorkspace }
 	| { type: "task_changed"; task: unknown }
 	| { type: "tasks_list"; tasks: unknown[] }
-	| { type: "bg_process_created"; process: { id: string; name: string; command: string; pid: number; status: "running" | "exited" | "unrecoverable"; exitCode: number | null; terminalReason: "normal" | "killed" | "unrecoverable" | null; startTime: number; endTime: number | null } }
+	| { type: "bg_process_created"; process: { id: string; name: string; command: string; pid: number; status: "running" | "exited" | "unrecoverable"; exitCode: number | null; terminalReason: "normal" | "killed" | "unrecoverable" | "spawn-failed" | null; spawnFailure?: { kind: "spawn"; code: "ENOENT" | "EACCES" | "EPERM" | "UNKNOWN"; message: string }; startTime: number; endTime: number | null } }
 	| { type: "bg_process_output"; processId: string; stream: "stdout" | "stderr"; text: string; ts: number }
-	| { type: "bg_process_exited"; processId: string; exitCode: number | null; endTime: number | null; terminalReason: "normal" | "killed" | "unrecoverable" }
+	| { type: "bg_process_exited"; processId: string; exitCode: number | null; endTime: number | null; terminalReason: "normal" | "killed" | "unrecoverable" | "spawn-failed"; spawnFailure?: { kind: "spawn"; code: "ENOENT" | "EACCES" | "EPERM" | "UNKNOWN"; message: string } }
 	| { type: "bg_process_dismissed"; processId: string }
 	| { type: "gate_signal_received"; goalId: string; gateId: string; signalId: string }
 	| { type: "gate_verification_started"; goalId: string; gateId: string; signalId: string; startedAt?: number; steps?: Array<{ name: string; type: string; phase?: number }>; seq?: number }

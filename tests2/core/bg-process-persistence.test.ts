@@ -277,6 +277,39 @@ describe("BgProcessManager — persistence round-trip", () => {
 		h2.mgr.cleanup(S);
 	});
 
+	it("spawn-failed is durable across restart, resolves immediately, and does not reattach live machinery", async () => {
+		const h = makeHarness();
+		const S = freshSession();
+		const info = h.mgr.create(S, "run.sh", h.stateDir);
+		const child = h.lastChild();
+		const nativeEmit = child.emit.bind(child);
+		child.emit = ((event: string | symbol, ...args: unknown[]) => {
+			if (event === "error" && child.listenerCount("error") === 0) return false;
+			return nativeEmit(event, ...args);
+		}) as typeof child.emit;
+
+		child.emit("error", Object.assign(new Error("EACCES /private/PERSISTENCE-SECRET"), { code: "EACCES" }));
+		const beforeRestart = h.store().get(S, info.id)! as any;
+		assert.equal(beforeRestart.status, "exited");
+		assert.equal(beforeRestart.terminalReason, "spawn-failed");
+		assert.equal(beforeRestart.spawnFailure.kind, "spawn");
+		assert.equal(beforeRestart.spawnFailure.code, "EACCES");
+		assert.match(beforeRestart.spawnFailure.message, /\bcould not be started\b/i, "durable safe diagnostic identifies the actionable start failure");
+		assert.doesNotMatch(JSON.stringify(beforeRestart), /PERSISTENCE-SECRET/);
+
+		const h2 = h.reload();
+		await h2.mgr.restoreSession(S);
+		const restored = h2.mgr.list(S).find(p => p.id === info.id)! as any;
+		assert.equal(restored.status, "exited");
+		assert.equal(restored.terminalReason, "spawn-failed");
+		assert.deepEqual(restored.spawnFailure, beforeRestart.spawnFailure);
+		const waited = await h2.mgr.waitForExit(S, info.id, 1_000);
+		assert.equal(waited?.timedOut, false, "restored terminal records settle waits immediately");
+		assert.equal(h2.specs.length, 0, "restored spawn failure starts no tailers");
+		assert.equal(h2.sent.filter(m => m.type === "bg_process_exited").length, 0, "restart hydration does not re-broadcast a historical failure");
+		h2.mgr.cleanup(S);
+	});
+
 	it("combined-projection interleaving survives restart (order + per-stream arrays)", async () => {
 		const h = makeHarness();
 		const S = freshSession();
@@ -925,6 +958,29 @@ describe("DockerTailer — live copytruncate detection (Fix 4)", () => {
 		clock.advance(1000);
 		assert.deepEqual(resets, [], "no rebase while the spool grows");
 		tailer.stop();
+	});
+
+	it("follower error without exit is consumed and stops the probe and follower", () => {
+		const clock = createManualClock();
+		const child = fakeChild();
+		let kills = 0;
+		child.kill = () => { kills++; return true; };
+		let probes = 0;
+		const deps: DockerExec = {
+			probeSize: () => { probes++; return 0; },
+			follow: () => child,
+		};
+		const tailer = new DockerTailer("/tmp/s.out.spool", "cid", "stdout", () => {}, undefined, deps, clock);
+		tailer.start(0);
+		assert.doesNotThrow(() => child.emit("error", Object.assign(new Error("follower launch failed"), { code: "ENOENT" })),
+			"the child error event must always be handled");
+		const runtime = tailer as any;
+		assert.equal(runtime.child, null, "failed follower is released");
+		assert.equal(runtime.probeTimer, null, "probe timer is stopped");
+		assert.equal(kills, 1, "follower cleanup requests termination exactly once");
+		const probesAtFailure = probes;
+		clock.advance(5_000);
+		assert.equal(probes, probesAtFailure, "no probe survives an error-only follower failure");
 	});
 });
 

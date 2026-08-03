@@ -24,9 +24,11 @@ import path from "node:path";
 import type { ChildProcess } from "node:child_process";
 import { createFsFromVolume, Volume } from "memfs";
 
-import { BgProcessManager, type SpawnFn, type BgEnv, type TailerFactory, type Tailer } from "../../src/server/agent/bg-process-manager.ts";
+import { BgProcessManager, type SpawnFn, type BgEnv, type BgPaths, type TailerFactory, type Tailer } from "../../src/server/agent/bg-process-manager.ts";
 import type { BgProcessStore, PersistedBgProcess, UpdatableBgFields } from "../../src/server/agent/bg-process-store.ts";
 import { createManualClock } from "../harness/clock.js";
+import shellExtension from "../../defaults/tools/shell/extension.ts";
+import type { ServerMessage } from "../../src/server/ws/protocol.ts";
 
 // --- Fake child plumbing --------------------------------------------------
 
@@ -73,14 +75,24 @@ function makeFakeChild(): FakeChild {
 	return child;
 }
 
-function makeManager(env?: Partial<BgEnv>) {
+function makeManager(env?: Partial<BgEnv>, onSpawn?: (paths: BgPaths) => void) {
 	const stateDir = path.join(os.tmpdir(), `bobbit-bgmgr-${++managerId}`);
+	fs.mkdirSync(stateDir, { recursive: true });
 	const store = new MemoryBgProcessStore(stateDir);
 	let last: FakeChild | null = null;
-	const spawn: SpawnFn = () => { last = makeFakeChild(); return last as unknown as ChildProcess; };
-	const tailerFactory: TailerFactory = () => {
-		const mk = (): Tailer => ({ start() {}, stop() {} });
-		return { out: mk(), err: mk() };
+	let spawnCalls = 0;
+	const spawn: SpawnFn = (_command, _cwd, _containerId, paths) => {
+		spawnCalls++;
+		onSpawn?.(paths);
+		last = makeFakeChild();
+		return last as unknown as ChildProcess;
+	};
+	const tailerStops: string[] = [];
+	const tailerSpecs: any[] = [];
+	const tailerFactory: TailerFactory = (spec) => {
+		tailerSpecs.push(spec);
+		const mk = (stream: string): Tailer => ({ start() {}, stop() { tailerStops.push(stream); } });
+		return { out: mk("stdout"), err: mk("stderr") };
 	};
 	const killCalls: Array<[number, string]> = [];
 	const fullEnv: BgEnv = {
@@ -89,8 +101,10 @@ function makeManager(env?: Partial<BgEnv>) {
 		dockerCli: env?.dockerCli ?? (() => ({ code: 0, stdout: "" })),
 	};
 	const clock = createManualClock();
+	const sent: any[] = [];
+	const client = { readyState: 1, send: (data: string) => sent.push(JSON.parse(data)) };
 	const mgr = new BgProcessManager(
-		() => undefined,
+		() => new Set([client]) as any,
 		spawn,
 		() => store as unknown as BgProcessStore,
 		tailerFactory,
@@ -99,7 +113,8 @@ function makeManager(env?: Partial<BgEnv>) {
 		fs,
 	);
 	return {
-		mgr, stateDir, store, clock,
+		mgr, stateDir, store, clock, sent, tailerStops, tailerSpecs,
+		spawnCalls: () => spawnCalls,
 		last: () => { if (!last) throw new Error("spawn not called"); return last; },
 		killCalls,
 		/** Drive a clean exit: write the status file then emit the child `exit` hint. */
@@ -309,6 +324,273 @@ describe("BgProcessManager.waitForExit — state machine", () => {
 			h.clock.advance(10_000);
 			h.mgr.cleanup(SESSION);
 		});
+	});
+});
+
+describe("BgProcessManager spawn failures", () => {
+	it("rejects a missing host cwd before allocating an ID, persisting, or spawning", () => {
+		const h = makeManager();
+		const session = freshSession();
+		const rawPathSentinel = "/private/DO-NOT-LEAK/missing-cwd";
+
+		assert.throws(() => h.mgr.create(session, "noop", rawPathSentinel), (error: any) => {
+			assert.equal(error?.publicCode, "BG_CWD_MISSING");
+			assert.match(error?.message ?? "", /working directory.*available/i);
+			assert.doesNotMatch(JSON.stringify(error), /DO-NOT-LEAK/);
+			return true;
+		});
+		assert.equal(h.spawnCalls(), 0, "preflight must run before spawn");
+		assert.equal(h.store.getForSession(session).length, 0, "preflight must not persist a phantom record");
+
+		const next = h.mgr.create(session, "echo ok", h.stateDir);
+		assert.equal(next.id, "bg-1", "a rejected create must not consume an ID");
+		h.mgr.cleanup(session);
+	});
+
+	it("rejects a host cwd that is a file with a stable, sanitized diagnostic", () => {
+		const h = makeManager();
+		const session = freshSession();
+		const cwdFile = path.join(h.stateDir, "not-a-directory-SECRET-SENTINEL");
+		fs.writeFileSync(cwdFile, "not a directory");
+
+		assert.throws(() => h.mgr.create(session, "noop", cwdFile), (error: any) => {
+			assert.equal(error?.publicCode, "BG_CWD_NOT_DIRECTORY");
+			assert.match(error?.message ?? "", /directory/i);
+			assert.doesNotMatch(JSON.stringify(error), /SECRET-SENTINEL/);
+			assert.deepEqual(error?.diagnostic, { operation: "stat-cwd", code: "ENOTDIR" });
+			return true;
+		});
+		assert.equal(h.spawnCalls(), 0);
+		assert.equal(h.store.getForSession(session).length, 0);
+	});
+
+	it("maps permission and unknown cwd stat failures to sanitized, stable diagnostics", () => {
+		const h = makeManager();
+		const session = freshSession();
+		const originalStat = (fs as any).statSync;
+		try {
+			for (const [nativeCode, safeCode] of [["EACCES", "EACCES"], ["WEIRD_NATIVE_CODE", "UNKNOWN"]]) {
+				(fs as any).statSync = (target: string) => {
+					if (target === h.stateDir) throw Object.assign(new Error(`/private/CWD-STAT-SECRET ${nativeCode}`), { code: nativeCode });
+					return originalStat(target);
+				};
+				assert.throws(() => h.mgr.create(session, "noop", h.stateDir), (error: any) => {
+					assert.equal(error?.publicCode, "BG_CWD_UNAVAILABLE");
+					assert.deepEqual(error?.diagnostic, { operation: "stat-cwd", code: safeCode });
+					assert.doesNotMatch(JSON.stringify(error), /CWD-STAT-SECRET|WEIRD_NATIVE_CODE/);
+					return true;
+				});
+			}
+			assert.equal(h.spawnCalls(), 0);
+			assert.equal(h.store.getForSession(session).length, 0);
+		} finally {
+			(fs as any).statSync = originalStat;
+		}
+	});
+
+	it("error-only child never throws unhandled, terminalizes once, stops machinery, persists, broadcasts, and settles waits", async () => {
+		const h = makeManager();
+		const session = freshSession();
+		const info = h.mgr.create(session, "noop", h.stateDir);
+		const child = h.last();
+		const nativeEmit = child.emit.bind(child);
+		let suppressedUnhandledError: Error | null = null;
+		child.emit = ((event: string | symbol, ...args: unknown[]) => {
+			if (event === "error" && child.listenerCount("error") === 0) {
+				suppressedUnhandledError = args[0] as Error;
+				return false;
+			}
+			return nativeEmit(event, ...args);
+		}) as typeof child.emit;
+
+		const wait = h.mgr.waitForExit(session, info.id, 10_000);
+		const rawCause = Object.assign(new Error("ENOENT /private/SECRET-SPAWN-PATH"), { code: "ENOENT" });
+		child.emit("error", rawCause); // deliberately never emits exit
+		assert.equal(suppressedUnhandledError, null, "the native error event must always have a listener");
+		assert.equal(h.mgr.list(session).find(p => p.id === info.id)?.status, "exited", "an error-only child must not remain running");
+		const result = await wait;
+
+		assert.ok(result);
+		assert.equal(result!.timedOut, false);
+		assert.equal(result!.info.status, "exited");
+		assert.equal(result!.info.exitCode, null);
+		assert.equal((result!.info as any).terminalReason, "spawn-failed");
+		const spawnFailure = (result!.info as any).spawnFailure;
+		assert.equal(spawnFailure.kind, "spawn");
+		assert.equal(spawnFailure.code, "ENOENT");
+		assert.match(spawnFailure.message, /\bcould not be started\b/i, "safe diagnostic identifies the actionable start failure");
+		assert.equal(h.tailerStops.length, 2, "both tailers stop exactly once");
+		const runtime = (h.mgr as any).processes.get(session).get(info.id);
+		assert.equal(runtime._statusTimer, null, "status watcher is cancelled");
+		assert.equal(runtime._projectionTimer, null, "projection debounce is cancelled");
+		assert.equal(runtime._killEscalate, null, "kill escalation is cancelled");
+		h.tailerSpecs[0].onChunk("stdout", "late tailer output\\n", 18);
+		assert.equal(h.mgr.getLogs(session, info.id)?.log.length, 0, "late tailer chunks are ignored after terminalization");
+		assert.equal(h.sent.filter((message) => message.type === "bg_process_output").length, 0);
+		const persisted = h.store.get(session, info.id)! as any;
+		assert.equal(persisted.terminalReason, "spawn-failed");
+		assert.deepEqual(persisted.spawnFailure, spawnFailure);
+		assert.doesNotMatch(JSON.stringify({ persisted, sent: h.sent }), /SECRET-SPAWN-PATH/, "raw runtime causes never cross persistence or WS");
+		const exited = h.sent.filter((message) => message.type === "bg_process_exited");
+		assert.deepEqual(exited, [{ type: "bg_process_exited", processId: info.id, exitCode: null, endTime: result!.info.endTime, terminalReason: "spawn-failed", spawnFailure }]);
+
+		h.driveExit(session, info.id, 0); // late status + exit cannot overwrite or announce again
+		assert.equal(h.mgr.list(session)[0].terminalReason, "spawn-failed");
+		assert.equal(h.sent.filter((message) => message.type === "bg_process_exited").length, 1);
+		h.mgr.cleanup(session);
+	});
+
+	it("cancels pending Docker PID retries after a runtime error and permits a later normal create", async () => {
+		let pidReads = 0;
+		const h = makeManager({ dockerCli(argv) {
+			if (argv.includes("cat") && argv[argv.length - 1].endsWith(".pid")) { pidReads++; return { code: 1, stdout: "" }; }
+			return { code: 0, stdout: "" };
+		} });
+		const session = freshSession();
+		const first = h.mgr.create(session, "noop", "/container/workspace", "container-id");
+		const readsBeforeError = pidReads;
+		h.last().emit("error", Object.assign(new Error("docker spawn failed"), { code: "EACCES" }));
+		h.clock.advance(10_000);
+		const runtime = (h.mgr as any).processes.get(session).get(first.id);
+		assert.equal(runtime._pidResolveTimer, null, "terminalization cancels the owned Docker PID retry");
+		assert.equal(pidReads, readsBeforeError, "a terminal record must not keep scheduling Docker PID reads");
+		assert.equal((h.mgr.list(session).find(p => p.id === first.id) as any).terminalReason, "spawn-failed");
+
+		const second = h.mgr.create(session, "echo ok", "/container/workspace", "container-id");
+		assert.equal(second.id, "bg-2");
+		h.driveExit(session, second.id, 0);
+		const completed = await h.mgr.waitForExit(session, second.id, 1000);
+		assert.equal(completed?.info.terminalReason, "normal", "a failed spawn must not poison later commands");
+		h.mgr.cleanup(session);
+	});
+
+	it("skips host cwd stat for Docker while retaining sandbox refusal before either stat or spawn", () => {
+		const h = makeManager({ dockerCli: () => ({ code: 0, stdout: "123\n" }) });
+		const session = freshSession();
+		let stats = 0;
+		const originalStat = (fs as any).statSync;
+		(fs as any).statSync = (...args: unknown[]) => { stats++; return originalStat(...args); };
+		try {
+			h.mgr.create(session, "noop", "/missing-only-inside-container", "container-id");
+			assert.equal(stats, 0, "Docker cwd is authoritative inside the container, never preflighted on host");
+			assert.throws(() => h.mgr.create(session, "noop", h.stateDir, undefined, true), /Sandboxed session/);
+			assert.equal(stats, 0, "sandbox guard precedes host cwd validation");
+			assert.equal(h.spawnCalls(), 1, "sandbox refusal must not spawn");
+		} finally {
+			(fs as any).statSync = originalStat;
+			h.mgr.cleanup(session);
+		}
+	});
+
+	it("Docker primary non-zero without a wrapper status terminalizes once as spawn-failed", async () => {
+		const pidNonces = new Map<string, string>();
+		const statuses = new Map<string, string>();
+		const h = makeManager({ dockerCli(argv) {
+			const target = argv.at(-1) ?? "";
+			if (target.endsWith(".pid")) return { code: 0, stdout: `4242\n${pidNonces.get(target) ?? ""}\n` };
+			if (target.endsWith(".status")) {
+				const status = statuses.get(target);
+				return status == null ? { code: 1, stdout: "" } : { code: 0, stdout: status };
+			}
+			if (argv[0] === "inspect" || argv.includes("-0")) return { code: 0, stdout: argv[0] === "inspect" ? "true\n" : "" };
+			return { code: 0, stdout: "" };
+		} }, (paths) => pidNonces.set(paths.containerPid!, paths.nonce));
+		const session = freshSession();
+		try {
+			const first = h.mgr.create(session, "noop", "/workspace", "container-id");
+			h.last().emit("exit", 125); // docker exec setup failure; wrapper never wrote status
+			const failed = h.mgr.list(session).find(p => p.id === first.id)! as any;
+			assert.equal(failed.status, "exited");
+			const result = await h.mgr.waitForExit(session, first.id, 1_000);
+			assert.equal(result?.timedOut, false);
+			assert.equal(failed.exitCode, null);
+			assert.equal(failed.terminalReason, "spawn-failed");
+			assert.deepEqual(failed.spawnFailure, { kind: "spawn", code: "UNKNOWN", message: "Background process could not be started" });
+			assert.deepEqual((h.store.get(session, first.id) as any).spawnFailure, failed.spawnFailure, "failure is durable");
+			assert.equal(h.sent.filter(m => m.type === "bg_process_exited").length, 1, "exactly one terminal event");
+			const runtime = (h.mgr as any).processes.get(session).get(first.id);
+			assert.equal(runtime._tailers, null, "tailers stopped");
+			assert.equal(runtime._statusTimer, null, "status watcher stopped");
+			assert.equal(runtime._pidResolveTimer, null, "pid resolver stopped");
+			assert.equal(h.tailerStops.length, 2, "both tailers stopped once");
+
+			h.last().emit("exit", 125); // late child event must not overwrite or double-report
+			assert.equal(h.mgr.list(session).find(p => p.id === first.id)?.terminalReason, "spawn-failed");
+			assert.equal(h.sent.filter(m => m.type === "bg_process_exited").length, 1);
+
+			const second = h.mgr.create(session, "noop", "/workspace", "container-id");
+			statuses.set((h.mgr as any).processes.get(session).get(second.id).paths.containerStatus, "7\n");
+			h.last().emit("exit", 1);
+			const normal = h.mgr.list(session).find(p => p.id === second.id)!;
+			assert.equal(normal.terminalReason, "normal", "durable wrapper status wins over Docker primary exit code");
+			assert.equal(normal.exitCode, 7);
+
+			const third = h.mgr.create(session, "noop", "/workspace", "container-id");
+			assert.equal(h.mgr.kill(session, third.id), true);
+			h.last().emit("exit", 125);
+			const killing = h.mgr.list(session).find(p => p.id === third.id)!;
+			assert.equal(killing.status, "running", "a requested kill must not be rewritten as a spawn failure");
+			assert.equal((h.store.get(session, third.id) as any).killRequested, true, "kill intent stays durable");
+			statuses.set((h.mgr as any).processes.get(session).get(third.id).paths.containerStatus, "143\n");
+			h.last().emit("exit", 125);
+			assert.equal(h.mgr.list(session).find(p => p.id === third.id)?.terminalReason, "normal");
+		} finally {
+			h.mgr.cleanup(session);
+		}
+	});
+});
+
+describe("spawn-failure protocol contract", () => {
+	it("broadcasts the safe diagnostic in the typed terminal event", () => {
+		const event: ServerMessage = {
+			type: "bg_process_exited", processId: "bg-1", exitCode: null, endTime: 2,
+			terminalReason: "spawn-failed",
+			spawnFailure: { kind: "spawn", code: "UNKNOWN", message: "Background process failed to start." },
+		};
+		assert.equal(event.type, "bg_process_exited");
+		assert.equal((event as any).spawnFailure.code, "UNKNOWN");
+	});
+});
+
+describe("bash_bg spawn-failure text", () => {
+	it("wait and list show a concise failed-to-start diagnostic instead of a null exit code", async () => {
+		const prior = {
+			sessionId: process.env.BOBBIT_SESSION_ID,
+			token: process.env.BOBBIT_TOKEN,
+			url: process.env.BOBBIT_GATEWAY_URL,
+		};
+		process.env.BOBBIT_SESSION_ID = "test-session";
+		process.env.BOBBIT_TOKEN = "test-token";
+		process.env.BOBBIT_GATEWAY_URL = "http://gateway.test";
+		const failed = {
+			id: "bg-1", name: "compile", command: "npm run build", pid: 0, status: "exited", exitCode: null,
+			terminalReason: "spawn-failed", startTime: 1, endTime: 2,
+			spawnFailure: { kind: "spawn", code: "ENOENT", message: "Background process failed to start." },
+		};
+		vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
+			const url = String(input);
+			const body = url.includes("/wait?")
+				? { info: failed, timedOut: false, aborted: false }
+				: { processes: [failed] };
+			return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+		}));
+		const tools: any[] = [];
+		try {
+			shellExtension({ registerTool: (tool: any) => tools.push(tool) } as any);
+			const execute = tools.find((tool) => tool.name === "bash_bg").execute;
+			const waited = await execute("call", { action: "wait", id: "bg-1", timeout: 1 });
+			const listed = await execute("call", { action: "list" });
+			for (const result of [waited, listed]) {
+				const text = result.content[0].text;
+				assert.match(text, /\b(?:could not be started|failed to start)\b/i, "response identifies the actionable start failure");
+				assert.doesNotMatch(text, /code null|\[exited\]/i);
+			}
+		} finally {
+			vi.unstubAllGlobals();
+			for (const [key, value] of Object.entries(prior)) {
+				if (value == null) delete process.env[key]; else process.env[key] = value;
+			}
+		}
 	});
 });
 

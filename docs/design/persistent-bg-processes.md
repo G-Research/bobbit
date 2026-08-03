@@ -501,7 +501,9 @@ export interface PersistedBgProcess {
   status: "running" | "exited" | "unrecoverable";
   exitCode: number | null;    // null while running, when killed-without-status, OR unrecoverable
   /** why the process reached a terminal state; null while running. Authoritative source of truth. */
-  terminalReason: "normal" | "killed" | "unrecoverable" | null;
+  terminalReason: "normal" | "killed" | "unrecoverable" | "spawn-failed" | null;
+  /** present only for a known startup failure; category/message are sanitized */
+  spawnFailure?: { kind: "spawn"; code: "ENOENT" | "EACCES" | "EPERM" | "UNKNOWN"; message: string };
   startTime: number;
   endTime: number | null;
   // HOST-owned, gateway-written — ALWAYS host for BOTH host and docker spawns:
@@ -532,12 +534,15 @@ export interface PersistedBgProcess {
 ```
 
 `status` gains a third value **`"unrecoverable"`** (the §7 fallback), and **`terminalReason`** makes
-the three terminal outcomes distinguishable: `"normal"` (status file read), `"killed"` (explicitly
-killed, may have no status file), `"unrecoverable"` (lost across restart / pid reused). It is the
-single authoritative field — there is **no** separate `unrecoverable` boolean anywhere. This
-requires widening the union in `BgProcess`, `BgProcessInfo` (`bg-process-manager.ts`), the WS event
-types (`src/server/ws/protocol.ts`), and the client/UI types (§9). `exitCode` is never fabricated;
-it stays `null` for `killed`-without-status and `unrecoverable`.
+the terminal outcomes distinguishable: `"normal"` (status file read), `"killed"` (explicitly
+killed, may have no status file), `"unrecoverable"` (a prior live outcome lost across restart / pid
+reused), and `"spawn-failed"` (a known shell or runtime startup failure). It is the single
+authoritative field — there is **no** separate `unrecoverable` boolean anywhere. A spawn failure is
+`status="exited"`, has `exitCode=null`, and may retain only its safe `spawnFailure` category/message;
+`unrecoverable` must not be repurposed for it. This requires widening the union in `BgProcess`,
+`BgProcessInfo` (`bg-process-manager.ts`), the WS event types (`src/server/ws/protocol.ts`), and the
+client/UI types (§9). `exitCode` is never fabricated; it stays `null` for `killed`-without-status,
+`unrecoverable`, and `spawn-failed`.
 
 **Every host process is persisted** — there is no non-persistent path. The POSIX wrapper and the
 Node bg-runner helper (§4.1/§4.1.1) both write the durable host projection + status snapshot and a
@@ -714,6 +719,13 @@ This **replaces** the current reliance on `child.on("exit")`. The child `exit` e
 have a handle, i.e. while live) is used only as a *hint* to check the status file promptly rather
 than waiting for the next poll; the **authoritative** exit code always comes from the status file,
 never from `child.exitCode` (which, post-restart, we don't have).
+
+A native child `error` may occur without an `exit`, so its listener is attached before the process is
+published. It terminalizes once as `status="exited"`, `terminalReason="spawn-failed"`,
+`exitCode=null`, stops tailers/timers, synchronously persists the outcome, resolves waiters, and then
+broadcasts. A late `exit` is ignored by the first-wins terminal transition. Host cwd validation occurs
+before ID/path allocation so a missing or non-directory cwd creates no phantom record; Docker paths
+skip host validation because only the container runtime can evaluate them.
 
 ## 7. Restore + re-attach reconciliation
 
@@ -967,10 +979,11 @@ files in place only if the session is merely restarting — on real terminate it
 The `bg_process_*` events in `src/server/ws/protocol.ts`:
 
 - `bg_process_created` / `bg_process_output` — unchanged.
-- `bg_process_exited` — gains `terminalReason: "normal" | "killed" | "unrecoverable"` as the
-  **single authoritative field**. There is **no** standalone `unrecoverable?` boolean (dropped to
-  avoid two overlapping fields). `exitCode` is `number | null` and is `null` for `"killed"`-without-
-  status and `"unrecoverable"`.
+- `bg_process_exited` carries `terminalReason: "normal" | "killed" | "unrecoverable" | "spawn-failed"`
+  as the **single authoritative field**, plus optional sanitized `spawnFailure` for the final case.
+  There is **no** standalone `unrecoverable?` boolean (dropped to avoid two overlapping fields).
+  `exitCode` is `number | null` and is `null` for `"killed"`-without-status, `"unrecoverable"`, and
+  `"spawn-failed"`.
 - **NEW** `bg_process_dismissed` — `{ type: "bg_process_dismissed"; processId: string }`.
 
 ### 9.4 Client + UI
@@ -984,7 +997,9 @@ The `bg_process_*` events in `src/server/ws/protocol.ts`:
   - `"normal"` → `exit N` (from `exitCode`);
   - `"killed"` (exitCode `null`) → **"killed"**;
   - `"unrecoverable"` → **"exit status unknown"** with a distinct amber marker (title "process was
-    lost across a restart").
+    lost across a restart");
+  - `"spawn-failed"` → **"failed to start"** with the safe diagnostic, distinct from restart-only
+    `"unrecoverable"`.
   Kill button only for `running`; Remove (dismiss) for **all** terminal states (`exited` and
   `unrecoverable`).
 
@@ -993,9 +1008,10 @@ The `bg_process_*` events in `src/server/ws/protocol.ts`:
 ### Create (host)
 ```
 agent -> POST /bg-processes -> bgMgr.create()
+  host cwd preflight (exists + directory; Docker skips host stat)
   generate nonce; compute BgPaths under <stateDir>/bg-processes/<sid>/
   spawnFn(cmd, cwd, undefined, paths)            # POSIX wrapper: pidfile($$+nonce); bg trimmer bounds both spools; ( cmd ) >> out.spool 2>> err.spool; code=$?; kill trimmer; printf code > status
-  child.unref();  hostPid = child.pid
+  attach child error/exit listeners before publish; child.unref(); hostPid = child.pid
   REQUIRED post-spawn: read pidfile -> processPid (host: <pid> file/child.pid)
   store.put(record status=running, terminalReason=null, nonce, hostPid, processPid)   # SYNC flush before created
   tailerFactory({outSpool,errSpool}).start(0,0) # poll BOTH SPOOLS -> appendLog (combined capped log[]) -> bg_process_output WS
@@ -1194,7 +1210,8 @@ class BgProcessManager {
   // getLogs/grep/head/slice/waitForExit/list unchanged (read the COMBINED PROJECTION's interleaved view)
 }
 // BgProcess / BgProcessInfo: pid -> { hostPid, processPid }; status widened to "running" | "exited" | "unrecoverable";
-// + terminalReason: "normal" | "killed" | "unrecoverable" | null  (authoritative; null while running)
+// + terminalReason: "normal" | "killed" | "unrecoverable" | "spawn-failed" | null  (authoritative; null while running)
+// + optional sanitized spawnFailure for "spawn-failed"
 // (no `persistent` flag — every host path is persistent + re-attachable: POSIX wrapper or Node helper)
 ```
 

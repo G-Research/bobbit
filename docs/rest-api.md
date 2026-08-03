@@ -307,23 +307,40 @@ type BgProcessInfo = {
   status: "running" | "exited" | "unrecoverable";
   exitCode: number | null;
   // Why the process reached a terminal state; null while running. Authoritative for UI rendering.
-  // "normal" → real exitCode; "killed" → user kill (exitCode usually null); "unrecoverable" → lost
-  // across a restart (exitCode null, never fabricated). Optional/undefined for legacy snapshots.
-  terminalReason?: "normal" | "killed" | "unrecoverable" | null;
+  // "normal" → real exitCode; "killed" → user kill; "unrecoverable" → restart-only lost outcome;
+  // "spawn-failed" → known shell/runtime startup failure. The latter three use exitCode null.
+  // Optional/undefined for legacy snapshots.
+  terminalReason?: "normal" | "killed" | "unrecoverable" | "spawn-failed" | null;
+  // Present only for terminalReason="spawn-failed". Values are server-sanitized.
+  spawnFailure?: {
+    kind: "spawn";
+    code: "ENOENT" | "EACCES" | "EPERM" | "UNKNOWN";
+    message: string;
+  };
   startTime: number;
   endTime: number | null;
 };
 ```
 
-`endTime` is `null` while `status === "running"`. On child exit the server sets `endTime` once, and list / wait snapshots preserve that final value so reloads and reconnects keep showing the fixed `endTime - startTime` runtime.
+`endTime` is `null` while `status === "running"`. On terminalization the server sets `endTime` once, and list / wait snapshots preserve that final value so reloads and reconnects keep showing the fixed `endTime - startTime` runtime.
 
-- `POST /api/sessions/:id/bg-processes` returns `201 BgProcessInfo` for the created process.
+- `POST /api/sessions/:id/bg-processes` returns `201 BgProcessInfo` for the created process. For a host session, it first validates the working directory before allocating or persisting a process. Container-session paths are intentionally not host-statted; Docker/runtime failures remain authoritative. A sandboxed session with no container returns `403` rather than executing on the host.
 - `GET /api/sessions/:id/bg-processes` returns `{ processes: BgProcessInfo[] }` for UI hydration. Background processes survive a gateway restart — this list is rehydrated from the on-disk store and re-attached processes keep streaming. See [docs/bg-process-persistence.md](bg-process-persistence.md).
-- `GET /api/sessions/:id/bg-processes/:pid/wait` returns `{ info: BgProcessInfo, timedOut: boolean, aborted: boolean }`; `info.endTime` is numeric after exit and remains `null` for running timeout/abort snapshots.
+- `GET /api/sessions/:id/bg-processes/:pid/wait` returns `{ info: BgProcessInfo, timedOut: boolean, aborted: boolean }`; `info.endTime` is numeric after exit and remains `null` for running timeout/abort snapshots. A known startup failure settles wait normally with `info.status === "exited"`, `info.terminalReason === "spawn-failed"`, and its optional safe diagnostic.
+
+Host working-directory preflight failures are stable `409` responses using the standard `{ error, code }` shape:
+
+| Code | Meaning |
+|---|---|
+| `BG_CWD_MISSING` | The host working directory no longer exists. |
+| `BG_CWD_NOT_DIRECTORY` | The resolved working-directory path is a file or other non-directory. |
+| `BG_CWD_UNAVAILABLE` | The gateway cannot inspect the host working directory. |
+
+These responses deliberately omit raw paths and operating-system errors. The stable code and concise message are safe to surface and sufficient to retry after repairing the session/worktree. A post-preflight runtime failure is not a `POST` error: it is returned as a durable terminal snapshot with `terminalReason: "spawn-failed"`; its optional `spawnFailure` object retains only the sanitized category and message for list, wait, REST hydration, and diagnostics.
 
 Older exited snapshots may omit `endTime` or set it to `null`. Clients must render those runtimes as unknown/non-growing instead of substituting `Date.now()` for an exit timestamp.
 
-**WS events.** `bg_process_created` / `bg_process_output` carry the running snapshot and streamed output; `bg_process_exited` carries `processId`, `exitCode`, `endTime`, and `terminalReason` (the authoritative terminal field — `exitCode` is `null` for `killed`/`unrecoverable`); `bg_process_dismissed` carries `{ processId }` so all clients drop the pill when a process is dismissed.
+**WS events.** `bg_process_created` / `bg_process_output` carry the running snapshot and streamed output; `bg_process_exited` carries `processId`, `exitCode`, `endTime`, `terminalReason`, and optional `spawnFailure`. `terminalReason` is authoritative: `exitCode` is `null` for `killed`, `unrecoverable`, and `spawn-failed`; only `spawn-failed` carries the safe startup diagnostic. `bg_process_dismissed` carries `{ processId }` so all clients drop the pill when a process is dismissed.
 
 ### Proposal drafts
 

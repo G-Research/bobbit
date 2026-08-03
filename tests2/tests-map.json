@@ -2091,6 +2091,15 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/browser/journeys/bg-spawn-failure.journey.spec.ts",
+      "reason": "Real browser journey through WebSocket delivery, persisted REST rehydration, distinct spawn-failed diagnostic rendering, and user removal of a background process whose container runtime cannot start.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [

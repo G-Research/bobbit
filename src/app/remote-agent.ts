@@ -608,7 +608,7 @@ export class RemoteAgent {
 	onGoalSetupEvent?: () => void;
 	/** Callback fired when compaction state changes (start/end). */
 	onCompactionChange?: (isCompacting: boolean) => void;
-	onBgProcessEvent?: (msg: { type: string; processId?: string; stream?: string; text?: string; ts?: number; exitCode?: number | null; terminalReason?: "normal" | "killed" | "unrecoverable" | null; endTime?: number | null; process?: any }) => void;
+	onBgProcessEvent?: (msg: { type: string; processId?: string; stream?: string; text?: string; ts?: number; exitCode?: number | null; terminalReason?: "normal" | "killed" | "unrecoverable" | "spawn-failed" | null; spawnFailure?: { kind: "spawn"; code: "ENOENT" | "EACCES" | "EPERM" | "UNKNOWN"; message: string } | null; endTime?: number | null; process?: any }) => void;
 	/** Callback fired when preview panel flag changes for a session. */
 	onPreviewChanged?: (sessionId: string, preview: boolean) => void;
 	/** Callback fired when server detects PR creation and busts the cache. */
