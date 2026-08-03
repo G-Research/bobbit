@@ -7,7 +7,7 @@ import { apiFetch, bobbitDir, createGoal, createSession, deleteGoal, deleteSessi
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
-import type { VerificationCommandSpawnSpec } from "../../src/server/agent/verification-command-runner.js";
+import type { VerificationCommandRunner, VerificationCommandSpawnSpec } from "../../src/server/agent/verification-command-runner.js";
 
 interface Project { id: string }
 
@@ -106,7 +106,7 @@ test.describe("Project command environment API", () => {
 		const spawnSpecs: Array<{ env: NodeJS.ProcessEnv }> = [];
 		harness.commandStepRunner = {
 			nonDurable: true,
-			spawn(spec: VerificationCommandSpawnSpec, options) {
+			spawn(spec: VerificationCommandSpawnSpec, options?: Parameters<VerificationCommandRunner["spawn"]>[1]) {
 				spawnSpecs.push({ env: { ...spec.env } });
 				return fake.spawn(spec, options);
 			},
