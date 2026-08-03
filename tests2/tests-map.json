@@ -2039,6 +2039,15 @@
       }
     },
     {
+      "path": "tests2/core/browser-run-wrapper.test.ts",
+      "reason": "Pure coordinator-wrapper coverage for unique external browser roots and reports, machine-ledger capture before temp isolation, caller flag forwarding, and retry-free environment propagation without nested Playwright execution.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/dom/v2-dom-storage-environment.test.ts",
       "reason": "Regression coverage proving the v2-dom setup replaces an absent runtime storage global with the current happy-dom window storage so gatewayFetch reaches its deterministic fetch stub.",
       "execution": {
