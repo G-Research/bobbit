@@ -23,6 +23,7 @@ import {
 } from "../skills/resolve-file-mentions.js";
 import { buildMergedModelText } from "../skills/merge-mentions.js";
 import { resolveModelStateMeta } from "../agent/model-registry.js";
+import { cachePostureMessage, cacheStallMessage, type CachePosture } from "../agent/cache-posture.js";
 import {
 	appendCompactionSidecarEntry,
 	makeCompactionId,
@@ -309,6 +310,25 @@ const MANUAL_RETRY_REQUIRED_MESSAGE = "Queued work is parked because this turn f
  * transient notification. Replay it on a newly authenticated live attachment
  * so a reload cannot make parked queue work appear to be a healthy idle state.
  */
+function replayCachePostureOnAttach(ws: WebSocket, posture: CachePosture | undefined): void {
+	if (!posture) return;
+	send(ws, {
+		type: "event",
+		data: { type: "cache_posture", posture, message: cachePostureMessage(posture) },
+	});
+	if (posture.stallWarning) {
+		send(ws, {
+			type: "event",
+			data: {
+				type: "cache_stall",
+				posture,
+				message: cacheStallMessage(),
+				cumulative: posture.stallWarning,
+			},
+		});
+	}
+}
+
 function replayManualRetryRequiredOnAttach(
 	ws: WebSocket,
 	session: {
@@ -813,6 +833,7 @@ export function handleWebSocketConnection(
 			send(ws, { type: "session_status", status: session.status, statusVersion: session.statusVersion ?? 0, ...(session.streamingStartedAt ? { streamingStartedAt: session.streamingStartedAt } : {}) });
 			send(ws, { type: "session_title", sessionId, title: session.title });
 			send(ws, { type: "queue_update", sessionId, queue: session.promptQueue.toArray() });
+			replayCachePostureOnAttach(ws, sessionManager.getPersistedSession(sessionId)?.cachePosture);
 			replayManualRetryRequiredOnAttach(ws, session);
 
 			// Rehydrate any on-disk proposal drafts for this session so the

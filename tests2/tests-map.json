@@ -30,6 +30,15 @@
       }
     },
     {
+      "path": "tests2/core/cache-posture.test.ts",
+      "reason": "Fail-closed direct-Anthropic Messages cache-capability classifier coverage.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/extension-host-module-memory-isolation.test.ts",
       "reason": "Exact-registered partition of the ModuleHost resource-limit coverage so its deliberate 16 MB worker OOM cannot share a Vitest parent fork with the remaining concurrent worker-thread fan-out.",
       "execution": {

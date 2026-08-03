@@ -6,6 +6,7 @@ import { isMessageAuthor, LOCAL_USER_AUTHOR, type MessageAuthor } from "../../sh
 import { isPromptSource, type PromptSource } from "../../shared/prompt-source.js";
 import type { QueuedMessage } from "../ws/protocol.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
+import type { CachePosture } from "./cache-posture.js";
 import type { ThinkingLevel } from "../../shared/thinking-levels.js";
 
 const VERIFIER_SESSION_ID_RE = /^(?:llm-review|agent-qa)-/;
@@ -151,6 +152,8 @@ export interface PersistedSession {
 	messageQueue?: QueuedMessage[];
 	/** Durable manual-retry recovery state for queued work parked after a terminal failure. */
 	manualRetryRequired?: boolean;
+	/** Sanitized cache capability, health, and historical stall diagnostic. */
+	cachePosture?: CachePosture;
 	/** Steers accepted for dispatch but not yet echoed; strings are legacy rows. */
 	inFlightSteerTexts?: PersistedInFlightSteer[];
 	/** Server-side draft storage, keyed by draft type (e.g. "prompt", "goal", "role") */
@@ -223,6 +226,7 @@ export type UpdatableSessionFields = Pick<
 	| "preview"
 	| "messageQueue"
 	| "manualRetryRequired"
+	| "cachePosture"
 	| "inFlightSteerTexts"
 	| "archived"
 	| "archivedAt"
@@ -754,7 +758,7 @@ export class SessionStore {
 		"role", "assistantType", "taskId", "staffId",
 		"teamGoalId", "teamLeadSessionId",
 		"modelProvider", "modelId", "effectiveThinkingLevel",
-		"manualRetryRequired", "inFlightSteerTexts",
+		"manualRetryRequired", "cachePosture", "inFlightSteerTexts",
 		"sidePanelWorkspace",
 	];
 

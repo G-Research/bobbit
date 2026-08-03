@@ -4,7 +4,7 @@ import type { SessionBridgeOwner, SessionInfo, SessionManager } from "../agent/s
 import type { PreferencesStore } from "../agent/preferences-store.js";
 import { sanitizeModelErrorText } from "../agent/model-error-sanitizer.js";
 import { applyModelString } from "../agent/review-model-override.js";
-import { getAvailableModels, resolveModelStateMeta } from "../agent/model-registry.js";
+import { getAvailableModels, resolveModelStateMeta, type ApiModel } from "../agent/model-registry.js";
 import type { ServerMessage } from "./protocol.js";
 
 type RuntimePersistedSession = {
@@ -23,7 +23,7 @@ type RuntimeModelSessionManager = Omit<
 	getPersistedSession(sessionId: string): RuntimePersistedSession | undefined;
 	restartAgent(sessionId: string, expectedOwner?: SessionBridgeOwner): Promise<void>;
 	/** Atomic durable tuple seam; SessionManager owns the store implementation. */
-	persistSessionModel(sessionId: string, provider: string, modelId: string, effectiveThinkingLevel?: ThinkingLevel): void;
+	persistSessionModel(sessionId: string, provider: string, modelId: string, effectiveThinkingLevel?: ThinkingLevel, resolvedModel?: ApiModel): void;
 };
 type RuntimeModelStateSessionManager = Pick<RuntimeModelSessionManager, "getPersistedSession">;
 type RuntimeModelSession = Pick<
@@ -132,8 +132,9 @@ function commitRuntimeTuple(
 	sessionManager: RuntimeModelSessionManager,
 	session: RuntimeModelSession,
 	tuple: RuntimeModelTuple,
+	resolvedModel?: ApiModel,
 ): void {
-	sessionManager.persistSessionModel(session.id, tuple.provider, tuple.id, tuple.thinkingLevel);
+	sessionManager.persistSessionModel(session.id, tuple.provider, tuple.id, tuple.thinkingLevel, resolvedModel);
 	session.spawnPinnedModel = `${tuple.provider}/${tuple.id}`;
 	session.spawnPinnedThinkingLevel = tuple.thinkingLevel;
 	sessionManager.updateModelNameFile(session.id, session.spawnPinnedModel);
@@ -510,7 +511,7 @@ export async function applyRuntimeSessionModelSelection(
 			throw new Error("runtime tuple read-back mismatch: the session bridge was replaced before commit");
 		}
 
-		commitRuntimeTuple(sessionManager, session, requested);
+		commitRuntimeTuple(sessionManager, session, requested, selectedModel);
 		mutationStarted = false;
 		if (broadcastModelState) broadcastTuple(session, requested, broadcastModelState);
 		return requested;
