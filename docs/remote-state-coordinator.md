@@ -32,11 +32,11 @@ Only complete remotes hosted on GitHub or a configured trusted GitHub Enterprise
 
 ## Snapshot contract
 
-REST responses and `remote_state_snapshot` WebSocket messages carry a copied public snapshot:
+The shared [REST status contract](rest-api.md#coordinated-remote-state-status) defines query intent, Git flat-field compatibility, PR absence, and endpoint error behavior. Its copied public snapshot body is:
 
 ```ts
 {
-  data?: GitStatusProjection | PullRequestFastState;
+  data?: GitStatusProjection | PullRequestFastState | null;
   observedAt: number;
   refreshedAt?: number;
   ageMs: number;
@@ -46,7 +46,19 @@ REST responses and `remote_state_snapshot` WebSocket messages carry a copied pub
 }
 ```
 
-Git-status REST routes preserve their established flat status fields for compatibility and attach the same coordinator metadata; their nested `data` projection represents that entity's local status. PR-status routes return the snapshot envelope directly.
+Git-status REST routes preserve their established flat status fields for compatibility and attach the same coordinator metadata; their nested `data` projection represents that entity's local status. PR-status routes return the snapshot envelope directly. A WebSocket completion wraps the body rather than sending it as the complete frame:
+
+```ts
+{
+  type: "remote_state_snapshot";
+  resource: "git" | "pr";
+  sessionId?: string;
+  goalId?: string;
+  snapshot: RemoteStateSnapshot;
+}
+```
+
+`resource` routes the message while `snapshot.source` identifies repository or PR state. Clients apply the addressed completion without starting an equivalent follow-up read.
 
 Metadata has these meanings:
 
@@ -56,7 +68,7 @@ Metadata has these meanings:
 - `stale` means no successful value exists, the freshness window expired, or the record was invalidated.
 - `source` distinguishes repository-ref state from PR fast state.
 - `lastError` is a safe category for the latest failed refresh. Absence means there is no retained coordinator error, not that every adjacent Git operation succeeded.
-- `data` is omitted when the coordinator is cold or has failed without a last-good value.
+- `data` is omitted when the coordinator is cold or has failed without a last-good value. For PR state, `data: null` instead means an eligible lookup succeeded and definitively found no pull request.
 
 Consumers must use the metadata together. In particular, `refreshedAt` and `stale` determine freshness; `observedAt` only timestamps the projection.
 
@@ -91,7 +103,7 @@ A failed attempt consumes the automatic window. Automatic recovery is admitted o
 
 These are **external-call budgets**, not browser polling intervals. A REST request that returns `fresh`, `joined`, `budget`, or `backoff` does not issue another `git fetch` or PR fast-state command. Active demand can refresh a PR record at the shorter window even if sidebar readers share that record.
 
-Opening Git status may explicitly revalidate remote refs and request full untracked status. The canonical fetch is still single-flight, then each bound worktree recomputes local status independently. This preserves per-worktree dirty and untracked files while making fetched refs consistent.
+Opening Git status requests visibility revalidation and full untracked status. It returns or joins fresh/in-flight remote work rather than forcing another fetch; the explicit refresh control is the forced path. After a canonical fetch, each bound worktree recomputes local status independently. This preserves per-worktree dirty and untracked files while making fetched refs consistent.
 
 Staff Git triggers run on their existing 60-second tick. Before comparing a configured ref, they await the same repository record's eligible refresh. A stale or failed result suppresses the trigger rather than comparing in an uncertain order. Remote changes are therefore visible on the next tick without creating a staff-only fetch stream, and commit subjects are not copied into staff prompts.
 

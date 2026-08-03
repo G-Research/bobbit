@@ -110,10 +110,10 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `POST` | `/api/sessions/:archivedId/continue` | Create a new session whose agent CLI rehydrates from a clone of the archived `.jsonl` while preserving user-visible transcript content losslessly. See [Continue-Archived endpoint](#continue-archived-endpoint) |
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
 | `GET` | `/api/sessions/:id/draft?type=:type` | Read a persisted UI draft. Missing drafts return `404` by default; `optional=1` returns empty `204` for expected absence when the session exists. |
-| `GET` | `/api/sessions/:id/git-status` | Read-only Git status for the session working directory (branch, upstream, ahead/behind, dirty files). Never publishes or updates a remote branch. |
+| `GET` | `/api/sessions/:id/git-status` | Read-only Git status for the session working directory (branch, upstream, ahead/behind, dirty files). Never publishes or updates a remote branch. See [Coordinated remote-state status](#coordinated-remote-state-status). |
 | `GET` | `/api/sessions/:id/commits` | Commit list for the session branch. Supports `direction=behind` and `vs=primary`; includes changed files for each commit. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
 | `GET` | `/api/sessions/:id/git-diff` | Unified diff for the working tree, or for one committed file when `commit=<sha>&file=<path>` is supplied. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
-| `GET` | `/api/sessions/:id/pr-status` | PR status for session's branch (via `gh pr view`). Missing PRs return `404` by default; `optional=1` returns empty `204` when the session exists. |
+| `GET` | `/api/sessions/:id/pr-status` | Coordinated PR fast state for the session branch. See [Coordinated remote-state status](#coordinated-remote-state-status) for the snapshot envelope and missing-PR behavior. |
 | `POST` | `/api/sessions/:id/bg-processes` | Start a background process and return its `BgProcessInfo` snapshot |
 | `GET` | `/api/sessions/:id/bg-processes` | List active/exited background process snapshots for REST hydration |
 | `GET` | `/api/sessions/:id/bg-processes/:pid/wait` | Long-poll until a background process exits, times out, or is interrupted |
@@ -425,14 +425,105 @@ Per-session review annotations are stored server-side so they survive browser cl
 | `PUT` | `/api/goals/:id/workflow` | Replace the goal's complete frozen workflow snapshot, validate it, and reconcile gate state. See [Goal workflow replacement](#goal-workflow-replacement). |
 | `DELETE` | `/api/goals/:id` | Delete a goal and its tasks |
 | `GET` | `/api/goals/:id/commits` | Commit history for goal branch (excludes primary branch commits); includes changed files for each commit. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
-| `GET` | `/api/goals/:id/git-status` | Read-only Git status for the goal worktree (branch, ahead/behind primary, clean). Never publishes or updates a remote branch. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
+| `GET` | `/api/goals/:id/git-status` | Read-only Git status for the goal worktree (branch, ahead/behind primary, clean). Never publishes or updates a remote branch. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. See [Coordinated remote-state status](#coordinated-remote-state-status). |
 | `GET` | `/api/goals/:id/git-diff` | Unified diff for the goal worktree, or for one committed file when `commit=<sha>&file=<path>` is supplied. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
 | `GET` | `/api/goals/:id/cost` | Aggregate cost across all sessions linked to a goal (includes `cacheHitRate`) |
 | `GET` | `/api/goals/:id/cost/breakdown` | Goal aggregate plus per-session breakdown, used by the goal cost popover; cost objects include `cacheHitRate: number \| null`. |
-| `GET` | `/api/goals/:id/pr-status` | PR status for goal branch (cached, via `gh pr view`). Missing PRs return `404` by default; `optional=1` returns empty `204` when the goal exists. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
+| `GET` | `/api/goals/:id/pr-status` | Coordinated PR fast state for the goal branch. No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. See [Coordinated remote-state status](#coordinated-remote-state-status) for the snapshot envelope and missing-PR behavior. |
 | `GET` | `/api/goals/:id/github-link` | PR URL or sanitized GitHub branch fallback. No-worktree goals return `200 { available: false, reason: "no-worktree", message }`. Still available, but the sidebar `Open on GitHub` item now mirrors the goal-row PR badge instead of gating on this endpoint. See [Goal GitHub link endpoint](#goal-github-link-endpoint) |
 | `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`). No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
 | `POST` | `/api/goals/:id/integrate-child/:childId` | Locally merge a direct child's branch into the parent and auto-archive it on success. Body `{ force?: boolean }`. Never pushes either branch. See [Child-goal integration](#child-goal-integration). |
+
+### Coordinated remote-state status
+
+The session and goal `git-status` and `pr-status` routes use the server-owned remote-state coordinator. This keeps remote freshness authoritative on the server so additional browsers and surfaces do not multiply equivalent `git fetch` or GitHub reads. The full identity, budget, failure, and redaction model is in [Remote-state coordinator](remote-state-coordinator.md).
+
+#### Request intent
+
+All four routes accept `intent`:
+
+| Value | Behavior |
+|---|---|
+| omitted or `automatic` | Return the current snapshot immediately and start or join eligible stale revalidation under the active cadence. |
+| `visible` | Return immediate stale-while-revalidate state for a visibility return. Freshness, backoff, and single-flight still apply. |
+| `explicit` | Await forced refresh. It bypasses freshness and automatic backoff, but concurrent and short-burst forced requests still coalesce. |
+| `sidebar` | Request automatic PR state under the 60-second sidebar window instead of the 20-second active window. It does not create a browser-specific record. |
+
+`sidebar` changes cadence only for PR state; a Git route still uses the repository's normal automatic policy. On Git routes, legacy `fetch=true` has the same blocking revalidation role as `intent=explicit`. It may be combined with `untracked=1` so the response reflects newly fetched refs and includes the full untracked-file scan. Without either explicit form, stale revalidation completes asynchronously and is delivered through WebSocket.
+
+#### Response envelopes
+
+The public coordinator metadata is:
+
+```ts
+type RemoteStateMetadata = {
+  observedAt: number;
+  refreshedAt?: number;
+  ageMs: number;
+  stale: boolean;
+  source: "repository" | "pr";
+  lastError?: "offline" | "auth" | "rate_limited" | "unavailable";
+};
+```
+
+A successful Git-status response remains a flat `GitStatusEnvelope` for compatibility and also contains the metadata plus `data`, a copy of that entity's local `GitStatusEnvelope` projection:
+
+```ts
+type CoordinatedGitStatus = GitStatusEnvelope &
+  RemoteStateMetadata & {
+    source: "repository";
+    data: GitStatusEnvelope;
+  };
+```
+
+The nested projection remains entity-local: sibling worktrees share fetched refs, not dirty or untracked files. A cold remote-ref record has no `refreshedAt`; the Git route can still return local status in both the flat fields and `data`.
+
+PR-status responses use the envelope directly:
+
+```ts
+type PullRequestFastState = {
+  number: number;
+  url: string;
+  title: string;
+  state: string;
+  mergeable: string;
+  headRefName: string;
+  baseRefName: string;
+  reviewDecision: string | null;
+  viewerIsAdmin: boolean;
+  viewerCanMergeAsAdmin: boolean;
+};
+
+type CoordinatedPrStatus = RemoteStateMetadata & {
+  source: "pr";
+  data?: PullRequestFastState | null;
+};
+```
+
+On a cold eligible PR record, `data` and `refreshedAt` are absent while the first automatic refresh runs. A successful lookup that finds no PR sets `data: null`. After a transient failure, the envelope retains the last successful `data` and `refreshedAt`, marks `stale: true`, advances `ageMs`, and sets a safe `lastError`; a cold failure has no retained `data` or `refreshedAt`. Explicit reads await that success or failure envelope.
+
+PR absence has two distinct route outcomes:
+
+- If the target cannot be resolved to an eligible GitHub or trusted GitHub Enterprise repository and head, the default response is `404 { error: "No PR found" }`; `optional=1` returns empty `204`. No independent fallback lookup runs.
+- If the target is eligible and a successful lookup returns `data: null`, the default response is `200` with that envelope; `optional=1` returns empty `204`. Cold and failed eligible snapshots remain `200` envelopes even with `optional=1`, because their freshness/error metadata is meaningful.
+
+Unknown entities, missing host worktrees, no-worktree goals/Headquarters sessions, sandbox resolution, and the existing explicit Git/PR mutation routes retain their endpoint-specific behavior.
+
+#### Completion WebSocket frame
+
+A completed refresh is entity-addressed and wraps the snapshot body:
+
+```ts
+{
+  type: "remote_state_snapshot";
+  resource: "git" | "pr";
+  sessionId?: string;
+  goalId?: string;
+  snapshot: RemoteStateSnapshot;
+}
+```
+
+`resource` is the routing discriminator. `snapshot.source` is independently `"repository" | "pr"`. Session completions carry `sessionId`; goal and sidebar completions carry `goalId` on their authorized channel. Clients apply the completion directly and must not trigger another equivalent REST, `git fetch`, or GitHub read.
 
 ### Child-goal integration
 
