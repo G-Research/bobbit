@@ -12416,7 +12416,11 @@ async function handleApiRoute(
 				} catch {
 					snapshot = { data: collected.envelope, observedAt: clock?.now() ?? Date.now(), stale: false, source: "repository", ageMs: 0 };
 				}
-				json({ ...snapshot, data: snapshot.data ?? collected.envelope });
+				// Preserve the established flat GitStatusEnvelope for existing consumers
+				// (including multi-repo `aggregate`/`repos`) while also carrying the
+				// coordinator's safe freshness metadata. Repository snapshots share
+				// fetched refs only; status itself is always worktree-local.
+				json({ ...collected.envelope, ...snapshot, data: collected.envelope });
 			} else if (collected.kind === "not-repository") {
 				json({ error: "Not a git repository" }, 400);
 			} else {
@@ -14586,7 +14590,11 @@ async function handleApiRoute(
 				} catch {
 					snapshot = { data: collected.envelope, observedAt: clock?.now() ?? Date.now(), stale: false, source: "repository", ageMs: 0 };
 				}
-				json({ ...snapshot, data: snapshot.data ?? collected.envelope });
+				// Preserve the established flat GitStatusEnvelope for existing consumers
+				// (including multi-repo `aggregate`/`repos`) while also carrying the
+				// coordinator's safe freshness metadata. Repository snapshots share
+				// fetched refs only; status itself is always worktree-local.
+				json({ ...collected.envelope, ...snapshot, data: collected.envelope });
 			} else if (collected.kind === "not-repository") {
 				json({ error: "Not a git repository" }, 400);
 			} else {
