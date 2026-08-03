@@ -67,6 +67,15 @@
       }
     },
     {
+      "path": "tests2/core/unit-flake-source-contract-repro.test.ts",
+      "reason": "Static regression guard pinning bounded credential-lock fake-timer advancement and injected command-runner propagation on the sandbox-status route.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/anthropic-oauth-pi-callback-contract-repro.test.ts",
       "reason": "Focused failing-first Anthropic OAuth regression pinning Pi's loopback callback and complete current authorization scope set, so the stale Console callback and reduced legacy scope contract cannot return.",
       "execution": {
