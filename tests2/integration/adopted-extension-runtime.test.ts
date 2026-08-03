@@ -131,10 +131,27 @@ test.describe("adopted extension runtime API", () => {
 				?? (cookieProbe.headers.get("set-cookie") ? [cookieProbe.headers.get("set-cookie") as string] : []);
 			const cookie = setCookies.map(value => value.split(";")[0]).find(value => value.startsWith("bobbit_session="));
 			expect(cookie).toBeTruthy();
-			const cookiePatch = await fetch(`${gateway.baseURL}/api/marketplace/adoptions/${encodeURIComponent(adoption.id)}`, {
+			const patchUrl = `${gateway.baseURL}/api/marketplace/adoptions/${encodeURIComponent(adoption.id)}`;
+			const patchBody = JSON.stringify({ scope: adoption.scope, enabled: false });
+			const deniedHeaders: Array<Record<string, string>> = [
+				{ Cookie: cookie!, "Content-Type": "application/json" },
+				{ Cookie: cookie!, "Content-Type": "application/json", Origin: gateway.baseURL, "Sec-Fetch-Site": "same-site", "Sec-Fetch-Mode": "cors" },
+				{ Cookie: cookie!, "Content-Type": "application/json", Origin: "https://attacker.invalid", "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "cors" },
+			];
+			for (const headers of deniedHeaders) {
+				const denied = await fetch(patchUrl, { method: "PATCH", headers, body: patchBody });
+				expect(denied.status).toBe(401);
+			}
+			const cookiePatch = await fetch(patchUrl, {
 				method: "PATCH",
-				headers: { Cookie: cookie!, "Content-Type": "application/json" },
-				body: JSON.stringify({ scope: adoption.scope, enabled: false }),
+				headers: {
+					Cookie: cookie!,
+					"Content-Type": "application/json",
+					Origin: gateway.baseURL,
+					"Sec-Fetch-Site": "same-origin",
+					"Sec-Fetch-Mode": "cors",
+				},
+				body: patchBody,
 			});
 			expect(cookiePatch.status).toBe(200);
 
@@ -172,6 +189,14 @@ test.describe("adopted extension runtime API", () => {
 			expect(healthy.operations?.some(operation => operation.name === "bad_schema")).toBe(false);
 			expect(healthy.conformance.mcp?.loadedTools).toEqual(expect.arrayContaining(["list_records", "discover_records", "create_record"]));
 			expect(healthy.conformance).toMatchObject({ state: "partial", mcp: { rejectedTools: [{ name: "bad_schema", reason: "invalid_operation_schema" }] } });
+			const servers = await responseJson<Array<{ name: string; ownerContributions?: Array<{ contributionId?: string }> }>>(
+				await apiFetch(`/api/mcp-servers?projectId=${encodeURIComponent(gateway.defaultProjectId)}`),
+				200,
+			);
+			const runtime = servers.find(server => server.name === healthy!.namespace);
+			expect(runtime).toBeDefined();
+			expect(runtime?.name).toMatch(/^adopt_[a-z0-9-]+$/);
+			expect(runtime?.ownerContributions?.some(owner => owner.contributionId === `adopt:server:${healthy!.id}`)).toBe(true);
 
 			unreachable = (await adopt({ kind: "mcp", scope: "server", source: { transport: "http", url: "http://127.0.0.1:1/mcp" } })).adoption;
 			expect(unreachable.conformance).toMatchObject({ state: "unreachable", failures: [{ code: "connection_failed", message: expect.any(String) }] });
