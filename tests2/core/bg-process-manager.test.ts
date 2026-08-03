@@ -24,7 +24,7 @@ import path from "node:path";
 import type { ChildProcess } from "node:child_process";
 import { createFsFromVolume, Volume } from "memfs";
 
-import { BgProcessManager, type SpawnFn, type BgEnv, type TailerFactory, type Tailer } from "../../src/server/agent/bg-process-manager.ts";
+import { BgProcessManager, type SpawnFn, type BgEnv, type BgPaths, type TailerFactory, type Tailer } from "../../src/server/agent/bg-process-manager.ts";
 import type { BgProcessStore, PersistedBgProcess, UpdatableBgFields } from "../../src/server/agent/bg-process-store.ts";
 import { createManualClock } from "../harness/clock.js";
 import shellExtension from "../../defaults/tools/shell/extension.ts";
@@ -75,13 +75,18 @@ function makeFakeChild(): FakeChild {
 	return child;
 }
 
-function makeManager(env?: Partial<BgEnv>) {
+function makeManager(env?: Partial<BgEnv>, onSpawn?: (paths: BgPaths) => void) {
 	const stateDir = path.join(os.tmpdir(), `bobbit-bgmgr-${++managerId}`);
 	fs.mkdirSync(stateDir, { recursive: true });
 	const store = new MemoryBgProcessStore(stateDir);
 	let last: FakeChild | null = null;
 	let spawnCalls = 0;
-	const spawn: SpawnFn = () => { spawnCalls++; last = makeFakeChild(); return last as unknown as ChildProcess; };
+	const spawn: SpawnFn = (_command, _cwd, _containerId, paths) => {
+		spawnCalls++;
+		onSpawn?.(paths);
+		last = makeFakeChild();
+		return last as unknown as ChildProcess;
+	};
 	const tailerStops: string[] = [];
 	const tailerSpecs: any[] = [];
 	const tailerFactory: TailerFactory = (spec) => {
@@ -473,6 +478,63 @@ describe("BgProcessManager spawn failures", () => {
 			assert.equal(h.spawnCalls(), 1, "sandbox refusal must not spawn");
 		} finally {
 			(fs as any).statSync = originalStat;
+			h.mgr.cleanup(session);
+		}
+	});
+
+	it("Docker primary non-zero without a wrapper status terminalizes once as spawn-failed", async () => {
+		const pidNonces = new Map<string, string>();
+		const statuses = new Map<string, string>();
+		const h = makeManager({ dockerCli(argv) {
+			const target = argv.at(-1) ?? "";
+			if (target.endsWith(".pid")) return { code: 0, stdout: `4242\n${pidNonces.get(target) ?? ""}\n` };
+			if (target.endsWith(".status")) {
+				const status = statuses.get(target);
+				return status == null ? { code: 1, stdout: "" } : { code: 0, stdout: status };
+			}
+			if (argv[0] === "inspect" || argv.includes("-0")) return { code: 0, stdout: argv[0] === "inspect" ? "true\n" : "" };
+			return { code: 0, stdout: "" };
+		} }, (paths) => pidNonces.set(paths.containerPid!, paths.nonce));
+		const session = freshSession();
+		try {
+			const first = h.mgr.create(session, "noop", "/workspace", "container-id");
+			h.last().emit("exit", 125); // docker exec setup failure; wrapper never wrote status
+			const failed = h.mgr.list(session).find(p => p.id === first.id)! as any;
+			assert.equal(failed.status, "exited");
+			const result = await h.mgr.waitForExit(session, first.id, 1_000);
+			assert.equal(result?.timedOut, false);
+			assert.equal(failed.exitCode, null);
+			assert.equal(failed.terminalReason, "spawn-failed");
+			assert.deepEqual(failed.spawnFailure, { kind: "spawn", code: "UNKNOWN", message: "Background process could not be started" });
+			assert.deepEqual((h.store.get(session, first.id) as any).spawnFailure, failed.spawnFailure, "failure is durable");
+			assert.equal(h.sent.filter(m => m.type === "bg_process_exited").length, 1, "exactly one terminal event");
+			const runtime = (h.mgr as any).processes.get(session).get(first.id);
+			assert.equal(runtime._tailers, null, "tailers stopped");
+			assert.equal(runtime._statusTimer, null, "status watcher stopped");
+			assert.equal(runtime._pidResolveTimer, null, "pid resolver stopped");
+			assert.equal(h.tailerStops.length, 2, "both tailers stopped once");
+
+			h.last().emit("exit", 125); // late child event must not overwrite or double-report
+			assert.equal(h.mgr.list(session).find(p => p.id === first.id)?.terminalReason, "spawn-failed");
+			assert.equal(h.sent.filter(m => m.type === "bg_process_exited").length, 1);
+
+			const second = h.mgr.create(session, "noop", "/workspace", "container-id");
+			statuses.set((h.mgr as any).processes.get(session).get(second.id).paths.containerStatus, "7\n");
+			h.last().emit("exit", 1);
+			const normal = h.mgr.list(session).find(p => p.id === second.id)!;
+			assert.equal(normal.terminalReason, "normal", "durable wrapper status wins over Docker primary exit code");
+			assert.equal(normal.exitCode, 7);
+
+			const third = h.mgr.create(session, "noop", "/workspace", "container-id");
+			assert.equal(h.mgr.kill(session, third.id), true);
+			h.last().emit("exit", 125);
+			const killing = h.mgr.list(session).find(p => p.id === third.id)!;
+			assert.equal(killing.status, "running", "a requested kill must not be rewritten as a spawn failure");
+			assert.equal((h.store.get(session, third.id) as any).killRequested, true, "kill intent stays durable");
+			statuses.set((h.mgr as any).processes.get(session).get(third.id).paths.containerStatus, "143\n");
+			h.last().emit("exit", 125);
+			assert.equal(h.mgr.list(session).find(p => p.id === third.id)?.terminalReason, "normal");
+		} finally {
 			h.mgr.cleanup(session);
 		}
 	});

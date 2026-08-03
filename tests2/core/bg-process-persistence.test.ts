@@ -959,6 +959,29 @@ describe("DockerTailer — live copytruncate detection (Fix 4)", () => {
 		assert.deepEqual(resets, [], "no rebase while the spool grows");
 		tailer.stop();
 	});
+
+	it("follower error without exit is consumed and stops the probe and follower", () => {
+		const clock = createManualClock();
+		const child = fakeChild();
+		let kills = 0;
+		child.kill = () => { kills++; return true; };
+		let probes = 0;
+		const deps: DockerExec = {
+			probeSize: () => { probes++; return 0; },
+			follow: () => child,
+		};
+		const tailer = new DockerTailer("/tmp/s.out.spool", "cid", "stdout", () => {}, undefined, deps, clock);
+		tailer.start(0);
+		assert.doesNotThrow(() => child.emit("error", Object.assign(new Error("follower launch failed"), { code: "ENOENT" })),
+			"the child error event must always be handled");
+		const runtime = tailer as any;
+		assert.equal(runtime.child, null, "failed follower is released");
+		assert.equal(runtime.probeTimer, null, "probe timer is stopped");
+		assert.equal(kills, 1, "follower cleanup requests termination exactly once");
+		const probesAtFailure = probes;
+		clock.advance(5_000);
+		assert.equal(probes, probesAtFailure, "no probe survives an error-only follower failure");
+	});
 });
 
 describe("bg-runner helper — bounded ring + real exit code", () => {
