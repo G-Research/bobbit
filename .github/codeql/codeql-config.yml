@@ -36,7 +36,11 @@ paths-ignore:
   - "**/*.test.ts"
   - "**/*.spec.ts"
   - "**/fixtures/**"
-  - vite.config.ts
+  # NOTE: vite.config.ts is intentionally NOT ignored. Despite the name it is a
+  # 711-line reverse-proxy/gateway (origin checks, cookie/location rebasing, TLS)
+  # — part of the untrusted-agent boundary we keep in scope. Its log-injection /
+  # file-system-race noise is already covered by the rule excludes below; its
+  # js/disabling-certificate-validation findings must stay visible.
 
 # Each exclusion mutes a query whose threat model does not apply to a
 # single-user local tool. Verified @precision noted for auditability.
