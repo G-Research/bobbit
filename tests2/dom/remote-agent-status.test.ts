@@ -183,6 +183,82 @@ describe("RemoteAgent gateway availability frames", () => {
 		vi.useRealTimers();
 	});
 
+	it("maps untrusted retry hints to capped local buckets", () => {
+		const bucket = (RemoteAgent as any)._serverRetryDelayBucket;
+		expect(bucket(1)).toBe(250);
+		expect(bucket(251)).toBe(1_000);
+		expect(bucket(Number.MAX_VALUE)).toBe(30_000);
+		for (const invalidHint of [undefined, null, -1, 0, NaN, Infinity, "1000"]) {
+			expect(bucket(invalidHint)).toBe(1_000);
+		}
+	});
+
+	it("caps initial availability retries without using a server-provided timer", async () => {
+		vi.useFakeTimers();
+		const originalWebSocket = globalThis.WebSocket;
+		const frames = [
+			{ type: "error", code: "SERVER_SATURATED", retryAfterMs: Number.MAX_VALUE },
+			{ type: "auth_ok" },
+		];
+		let sockets = 0;
+		class MockWebSocket {
+			static readonly CONNECTING = 0;
+			static readonly OPEN = 1;
+			static readonly CLOSING = 2;
+			static readonly CLOSED = 3;
+			readyState = MockWebSocket.CONNECTING;
+			onopen: ((event: Event) => void) | null = null;
+			onmessage: ((event: MessageEvent) => void) | null = null;
+			onerror: ((event: Event) => void) | null = null;
+			onclose: ((event: CloseEvent) => void) | null = null;
+			constructor(_url: string) {
+				sockets++;
+				queueMicrotask(() => {
+					this.readyState = MockWebSocket.OPEN;
+					this.onopen?.(new Event("open"));
+				});
+			}
+			send(raw: string): void {
+				if (JSON.parse(raw).type !== "auth") return;
+				const frame = frames.shift();
+				queueMicrotask(() => this.onmessage?.({ data: JSON.stringify(frame) } as MessageEvent));
+			}
+			close(): void {
+				this.readyState = MockWebSocket.CLOSED;
+				this.onclose?.({} as CloseEvent);
+			}
+		}
+		(globalThis as any).WebSocket = MockWebSocket;
+		const agent = new RemoteAgent();
+		try {
+			const connected = agent.connect("https://gateway.test", "token", "session-1");
+			await vi.advanceTimersByTimeAsync(0);
+			await vi.advanceTimersByTimeAsync(29_999);
+			expect(sockets).toBe(1);
+			await vi.advanceTimersByTimeAsync(1);
+			await connected;
+			expect(sockets).toBe(2);
+		} finally {
+			agent.disconnect();
+			(globalThis as any).WebSocket = originalWebSocket;
+		}
+	});
+
+	it("keeps reconnect retries exponential when a server bucket is shorter", async () => {
+		vi.useFakeTimers();
+		const agent = new RemoteAgent();
+		const reconnect = vi.fn().mockResolvedValue(undefined);
+		(agent as any)._connectWs = reconnect;
+		(agent as any)._reconnectAttempt = 2;
+		(agent as any)._scheduleReconnect((RemoteAgent as any)._serverRetryDelayBucket(1));
+
+		await vi.advanceTimersByTimeAsync(3_999);
+		expect(reconnect).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(1);
+		expect(reconnect).toHaveBeenCalledOnce();
+		agent.disconnect();
+	});
+
 	it("keeps a human-visible starting state and retries SERVER_STARTING and SERVER_SATURATED frames before connecting", async () => {
 		vi.useFakeTimers();
 		const originalWebSocket = globalThis.WebSocket;
