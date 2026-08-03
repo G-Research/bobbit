@@ -91,7 +91,7 @@ describe("restoreSession lastActivity gating", () => {
 		if (fs.existsSync(STORE_FILE)) fs.unlinkSync(STORE_FILE);
 	});
 
-	it("does NOT bump lastActivity for events fired during restore", () => {
+	it("does NOT bump lastActivity for events fired during restore", async () => {
 		const store = freshStore();
 		store.put(makeSession());
 		const ctx = makeRestoreHandler(store, "sess-1");
@@ -108,12 +108,12 @@ describe("restoreSession lastActivity gating", () => {
 		// In-memory mirror unchanged
 		assert.equal(ctx.session.lastActivity, ORIGINAL_TS);
 		// On-disk lastActivity unchanged
-		store.flush();
+		await store.flush();
 		const persisted = store.get("sess-1")!;
 		assert.equal(persisted.lastActivity, ORIGINAL_TS, "persisted lastActivity must be preserved");
 	});
 
-	it("bumps lastActivity for events fired after switch_session resolves", () => {
+	it("bumps lastActivity for events fired after switch_session resolves", async () => {
 		const store = freshStore();
 		store.put(makeSession());
 		const ctx = makeRestoreHandler(store, "sess-1");
@@ -129,7 +129,7 @@ describe("restoreSession lastActivity gating", () => {
 		assert.equal(ctx.updates.length, 1, "exactly one update after restoring flips false");
 		assert.ok(typeof ctx.updates[0].lastActivity === "number");
 		assert.ok((ctx.updates[0].lastActivity as number) >= before);
-		store.flush();
+		await store.flush();
 		const persisted = store.get("sess-1")!;
 		assert.notEqual(persisted.lastActivity, ORIGINAL_TS);
 		assert.ok(persisted.lastActivity >= before);
