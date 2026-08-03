@@ -27,16 +27,29 @@ for (const event of ["index:progress", "index:complete", "index:error"] as const
 }
 
 type Request = { id: number; command: string; payload?: any };
+const MAX_QUEUED_RPCS = 1_024;
+const MAX_QUEUED_RPC_BYTES = 16 * 1024 * 1024;
+let queuedCount = 0;
+let queuedBytes = 0;
 // Mutations, queries, and close are ordered. In particular, a graceful close
-// cannot race an earlier fire-and-forget ingest or its mirror flush.
+// cannot race an earlier fire-and-forget ingest or its mirror flush. The
+// parent applies the same limits, but enforce them here too: a future caller
+// must not turn this worker's serial queue into an unbounded memory sink.
 let requestQueue: Promise<void> = Promise.resolve();
 port.on("message", (request: Request) => {
+	const bytes = estimateRequestBytes(request);
+	if (queuedCount >= MAX_QUEUED_RPCS || bytes > MAX_QUEUED_RPC_BYTES || queuedBytes + bytes > MAX_QUEUED_RPC_BYTES) {
+		port.postMessage({ kind: "response", id: request.id, ok: false, error: "SEARCH_UNAVAILABLE: worker queue saturated" });
+		return;
+	}
+	queuedCount++;
+	queuedBytes += bytes;
 	const operation = requestQueue.then(() => handle(request));
 	requestQueue = operation.then(() => undefined, () => undefined);
 	void operation.then(
 		(value) => port.postMessage({ kind: "response", id: request.id, ok: true, value }),
 		(error: unknown) => port.postMessage({ kind: "response", id: request.id, ok: false, error: error instanceof Error ? error.message : String(error) }),
-	);
+	).finally(() => { queuedCount--; queuedBytes -= bytes; });
 });
 
 async function handle({ command, payload }: Request): Promise<unknown> {
@@ -152,3 +165,22 @@ async function stats() {
 	return { lastRebuildAt: (await store!.readMeta())?.createdAt ?? null, rowCountsBySource: counts, datasetBytes: directorySize(store!.dataDir) };
 }
 function directorySize(dir: string): number { let total = 0; const pending = [dir]; while (pending.length) { const p = pending.pop()!; try { const st = fs.lstatSync(p); if (st.isDirectory()) pending.push(...fs.readdirSync(p).map((e) => path.join(p, e))); else if (st.isFile()) total += st.size; } catch { /* best effort */ } } return total; }
+
+function estimateRequestBytes(request: Request): number {
+	const seen = new Set<object>();
+	const measure = (value: unknown, depth: number): number => {
+		if (depth > 12 || value == null) return 8;
+		if (typeof value === "string") return 8 + value.length * 2;
+		if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return 16;
+		if (typeof value !== "object") return 16;
+		if (value instanceof ArrayBuffer) return value.byteLength;
+		if (ArrayBuffer.isView(value)) return value.byteLength;
+		if (seen.has(value)) return 8;
+		seen.add(value);
+		if (Array.isArray(value)) return 16 + value.reduce((total, item) => total + measure(item, depth + 1), 0);
+		let total = 24;
+		for (const [key, item] of Object.entries(value as Record<string, unknown>)) total += key.length * 2 + measure(item, depth + 1);
+		return total;
+	};
+	return request.command.length * 2 + measure(request.payload, 0);
+}

@@ -218,6 +218,9 @@ export class FlexSearchStore {
 	private _flushInFlight: Promise<void> | null = null;
 	private _flushAgain = false;
 	private _dirty = false;
+	/** Compaction requests and completed snapshots share the flush serialisation lane. */
+	private _snapshotRequest = 0;
+	private _snapshotWritten = 0;
 	private _closed = false;
 	private _atomicRename = atomicRename;
 	private readonly _onPersistenceMetric?: (metric: FlexStorePersistenceMetric) => void;
@@ -532,10 +535,13 @@ export class FlexSearchStore {
 
 	/** Compact the append-only mirror into one atomic snapshot. */
 	async compact(): Promise<void> {
-		await this._flushNow();
-		const dir = path.join(this.dataDir, INDEX_SUBDIR);
-		await fs.promises.mkdir(dir, { recursive: true });
-		await this._writeSnapshot(dir);
+		// Never write `${SNAPSHOT_FILE}.tmp` outside the flush lane: a debounce
+		// flush and an admin compaction otherwise race over the same temp path.
+		const request = ++this._snapshotRequest;
+		do {
+			this._dirty = true;
+			await this._flushNow();
+		} while (this._snapshotWritten < request);
 	}
 
 	/** Flush pending writes. Used by SearchService.close(). */
@@ -605,7 +611,11 @@ export class FlexSearchStore {
 				try { size = (await fs.promises.stat(path.join(dir, JOURNAL_FILE))).size; } catch { /* no journal */ }
 				// A bounded journal prevents unbounded recovery time. Compaction is
 				// deliberately worker-only and never serialises FlexSearch exports.
-				if (size >= JOURNAL_COMPACT_BYTES || (this._closed && journalBytes > 0)) await this._writeSnapshot(dir);
+				const snapshotRequest = this._snapshotRequest;
+				if (this._snapshotWritten < snapshotRequest || size >= JOURNAL_COMPACT_BYTES || (this._closed && journalBytes > 0)) {
+					await this._writeSnapshot(dir);
+					this._snapshotWritten = Math.max(this._snapshotWritten, snapshotRequest);
+				}
 			} catch (err) {
 				if (this._isBenignTeardownError(err)) return;
 				throw err;
