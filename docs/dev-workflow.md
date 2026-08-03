@@ -257,15 +257,17 @@ reuse, so a warm build after `dist/` is deleted regenerates the full TypeScript
 output. It also retires the four emitted artifacts for a deleted or renamed source.
 Malformed profiles, a failed/interrupted emit, and input-fingerprint changes cold
 recover rather than trusting stale state. Before TypeScript emits, the wrapper
-checks physical output-tree and reparse-point confinement, so a linked `dist` or
-parent of an expected output fails before it can write outside the repository. It
-repeats that confinement check immediately before destructive stale-output cleanup.
+validates every existing output-tree component. A linked `dist`, expected-output
+parent, or expected-output leaf hard-fails before TypeScript emission; the same
+validation runs immediately before destructive stale-output cleanup.
 
 When the sidecar is missing, malformed, or otherwise unrecoverable, its old-output
-manifest is not trusted. The cold reset scans only canonical compiler output roots,
-never follows symlinks, junctions, or other reparse points, preserves copied trees
-and current output modes, and removes stale TypeScript artifacts. Deleted or renamed
-sources therefore cannot retain output merely because no prior manifest is available.
+manifest is not trusted. The manifest-free cold reset scans stable, canonical
+configured output/include roots without following symlinks, junctions, or other
+reparse points, including when an entire included source root has become empty. It
+preserves copied trees and current output modes while removing stale TypeScript
+artifacts. Deleted or renamed sources therefore cannot retain output merely because
+no prior manifest is available.
 
 The build profile and the three check profiles are strictly separate: builds never
 read or write check profiles, and checks never read or write build profiles. `npm clean`
@@ -278,8 +280,7 @@ npm run build:server
 ```
 
 Removing `.profiles/` wholesale is also safe. The next check and build recreate only
-their respective profiles. The emitter realpath-confines stale-output removal to the
-physical repository and output roots, rejecting a symlink or Windows junction escape.
+their respective profiles.
 
 For the focused compiler and build-isolation contract, run this from a clean checkout:
 
