@@ -530,6 +530,11 @@ export interface PersistedBgProcess {
   /** bytes of each spool already consumed by the tailer — lets re-attach resume */
   outOffset: number;
   errOffset: number;
+  /**
+   * Epoch ms when a nonzero primary Docker exit had no readable wrapper status.
+   * Persisted only while its bounded status grace is pending.
+   */
+  dockerExitWithoutStatusAt?: number | null;
 }
 ```
 
@@ -565,7 +570,7 @@ export class BgProcessStore {
   put(p: PersistedBgProcess): void;                    // immediate saveNow (structural)
   update(sessionId: string, id: string,
          updates: Partial<Pick<PersistedBgProcess,
-           "status"|"exitCode"|"terminalReason"|"endTime"|"outOffset"|"errOffset"|"hostPid"|"processPid">>): void;
+           "status"|"exitCode"|"terminalReason"|"endTime"|"outOffset"|"errOffset"|"hostPid"|"processPid"|"dockerExitWithoutStatusAt">>): void;
   remove(sessionId: string, id: string): void;         // index entry only
   removeForSession(sessionId: string): void;
   flush(): void;
@@ -576,10 +581,13 @@ export class BgProcessStore {
 
 **Write cadence:** `put` on create (structural → `saveNow`); `update` on exit and on
 offset-advance. Offsets advance frequently, so `outOffset`/`errOffset` updates use the **debounced**
-path (like `lastActivity`), while `status`/`exitCode`/`terminalReason`/`endTime` **and the
-post-spawn `processPid`** (§4.0) are **recovery-critical** → flush synchronously (mirror
-`SessionStore.RECOVERY_CRITICAL_FIELDS`). Losing a few KB of replayed offset
-on a hard kill is harmless — the tailer re-reads from the persisted offset and the dedupe in the
+path (like `lastActivity`), while `status`/`exitCode`/`terminalReason`/`endTime`, the
+post-spawn `processPid` (§4.0), and a pending Docker status-grace timestamp are
+**recovery-critical** → flush synchronously (mirror
+`SessionStore.RECOVERY_CRITICAL_FIELDS`). Persisting the timestamp preserves the original
+bounded deadline across a restart rather than restarting its grace period.
+
+Losing a few KB of replayed offset on a hard kill is harmless — the tailer re-reads from the persisted offset and the dedupe in the
 pill (`_fetchedUpTo`) and manager handle the small overlap.
 
 ### 5.3 Wiring per project
@@ -727,6 +735,27 @@ broadcasts. A late `exit` is ignored by the first-wins terminal transition. Host
 before ID/path allocation so a missing or non-directory cwd creates no phantom record; Docker paths
 skip host validation because only the container runtime can evaluate them.
 
+### Docker primary-exit status grace
+
+A nonzero exit from the primary host-side `docker exec` process can race the
+in-container wrapper's status write or its readback. It starts a bounded retry
+window, not an immediate terminal outcome. The first observed exit time is
+persisted synchronously as `dockerExitWithoutStatusAt`; this fixes the deadline
+at its original start, so a gateway restart cannot repeatedly extend the grace.
+
+Every status check, including restore, reads the durable host status snapshot
+first and then the reachable container status. A valid wrapper-written exit code
+is authoritative and completes the process normally. If no status is available,
+a restored pending marker resumes only the remaining grace; an already-expired
+marker becomes `terminalReason="spawn-failed"`. This path does not use liveness
+to relabel the failed Docker setup as `unrecoverable` or attach it indefinitely.
+
+An explicit persisted kill intent remains authoritative and follows normal kill
+reconciliation rather than this startup-failure path. Any terminal transition
+clears `dockerExitWithoutStatusAt` in the synchronous terminal store update.
+Records written before the marker existed simply follow the pre-existing status
+and liveness reconciliation.
+
 ## 7. Restore + re-attach reconciliation
 
 Hook into boot right where sessions restore. Restore is **per-session**:
@@ -751,6 +780,16 @@ if status == "exited" or "unrecoverable":
 
 if status == "running":
     always load the HOST projection tail first   # output is retained regardless of the outcome below
+    durableStatus = read HOST snapshot first, then reachable container status
+    if durableStatus is a real exit code:
+        complete normally with that code          # wrapper status is authoritative
+        Done.
+    elif dockerExitWithoutStatusAt is pending and no kill intent:
+        if its original bounded deadline has expired:
+            complete as terminalReason="spawn-failed"
+        else:
+            resume only the remaining grace with tailers + status watcher
+            Done.
     liveness = checkAlive(record)        # processPid/container probe + nonce re-check (§7.1)
     case ALIVE (nonce matches):
         # re-attach (host spawn, or docker whose container still resolves + wrapper alive)

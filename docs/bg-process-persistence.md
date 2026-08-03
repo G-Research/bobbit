@@ -212,6 +212,31 @@ A terminal record (`exited` / `unrecoverable`), including a known
 tail; the client re-fetches via `GET` on reconnect. Only a previously `running`
 record is considered for liveness or re-attachment.
 
+### Docker primary-exit status grace
+
+A nonzero exit from the host-side `docker exec` command can arrive before the
+in-container wrapper's status is readable. It is therefore a hint, not an
+immediate outcome. The manager records the first such exit as a pending,
+bounded status-grace timestamp and flushes that marker synchronously. The
+persisted timestamp preserves the original deadline rather than granting a new
+full grace period after every gateway restart.
+
+On restore, the gateway reads the durable host status snapshot first (and the
+container status when it is still reachable). A valid wrapper-written exit code
+always wins and is recorded as the normal outcome. With no status, a pending
+marker resumes only its remaining grace while tailing and status watching
+continue. If its original deadline has already passed, the process becomes
+`terminalReason="spawn-failed"`; it is not treated as an unknown
+restart-loss outcome. This avoids both prematurely rejecting a wrapper that has
+finished and indefinitely re-attaching a failed Docker setup.
+
+The wrapper's recorded real exit code and an explicit persisted kill intent
+remain authoritative. A kill follows the existing kill/recovery path rather
+than being converted to a startup failure. Every terminal transition clears the
+pending-grace marker in the same durable terminal update before notifying
+waiters or clients. Older stored records that lack the marker use the ordinary
+liveness/status reconciliation described above.
+
 **Pid-reuse guard (nonce).** A status file is authoritative — a reused pid can't
 un-write it, so its presence means the process finished. When there is no status
 file and the persisted `processPid` is alive, the gateway re-reads the pidfile
