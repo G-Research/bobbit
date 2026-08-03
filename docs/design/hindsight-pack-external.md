@@ -389,25 +389,38 @@ a clean dormant signal.
 
 ## 8. Retry queue, diagnostics & config merge
 
-### 8.1 Queue semantics
+### 8.1 Queue durability and ordering
 
-- Backed by provider-accessible `ctx.host.store` under a single pack-scoped key (e.g.
-  `retain-queue`), an array of `{ content, tags, ts }`. This requires and tests the provider
-  store-capability addendum in §1.3; an in-memory queue is explicitly insufficient because provider
-  workers terminate after every hook invocation.
-- On any retain failure (network/timeout/http) the entry is **appended**.
-- **Cap 100**: when appending would exceed 100, **drop the oldest** (FIFO eviction).
-- **Drain**: each `afterTurn` drains the **queue head** (one entry) by retrying its retain before
-  doing the turn's own retain; success removes it, failure leaves it (and the turn's own failure,
-  if any, re-appends at the tail). `sessionShutdown` does one best-effort full pass.
-- Depth is surfaced via the `status` route (`queueDepth`) and reflected in the panel (G2.3).
+- The queue is backed by provider-accessible `ctx.host.store` under one pack-scoped key (for
+  example, `retain-queue`), as an array of `{ content, tags, ts }`. This requires the provider
+  store-capability addendum in §1.3; an in-memory queue is insufficient because provider workers
+  terminate after every hook invocation.
+- Saving a queue snapshot has two explicit outcomes: **durable** only after the store write
+  succeeds, or **not durable** when it fails. A remote retain failure is recoverable only after
+  the failed retain has been durably appended; attempting to enqueue is not itself a recovery
+  guarantee.
+- **Cap 100**: when a durable append would exceed 100 entries, drop the oldest (FIFO eviction).
+  Normal successful retains, FIFO ordering, and this cap behavior are otherwise unchanged.
+- **Drain**: each `afterTurn` retries the queue **head** before its own retain; `sessionShutdown`
+  makes one best-effort full pass. A remotely successful retry is removed only after the replacement
+  queue snapshot is durable. If that save fails, the loaded queue remains the retry decision and
+  neither the provider nor `status` may claim the queue was durably shortened. A later retry may
+  therefore send the entry again rather than silently losing it.
+- Depth is surfaced through `status.queueDepth` and reflected in the panel (G2.3).
 
-### 8.2 Diagnostics
+### 8.2 Diagnostics and lifecycle boundary
 
-Recall skips, retain failures, health flips, and queue evictions are recorded as **non-fatal
-diagnostics** through the Hub's context-trace channel (`GET /api/sessions/:id/context-trace`,
-G1.2) and summarised by the `status` route (`lastError`, `queueDepth`). The session is never
-blocked or failed by any Hindsight condition.
+Recall skips, retain failures, health flips, and queue evictions are non-fatal diagnostics through
+the Hub's context trace (`GET /api/sessions/:id/context-trace`, G1.2) and the `status` route
+(`lastError`, `queueDepth`). A failed remote retain **and** failed queue persistence emits the fixed,
+non-secret lifecycle diagnostic `HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED`; it must not include
+remote or store error details. The Lifecycle Hub fault-isolates that provider error, so the main
+agent turn remains available even though no durable retry exists.
+
+Once queue persistence succeeds, the retry is valid even if writing the optional `last-error`
+diagnostic fails. Conversely, a failed drain-save records the fixed non-secret
+`HINDSIGHT_QUEUE_DRAIN_PERSISTENCE_FAILED` diagnostic and does not claim durable removal. These
+outcomes do not change dormancy: an unconfigured pack still performs no Hindsight or queue work.
 
 ### 8.3 Loader/store config merge
 
