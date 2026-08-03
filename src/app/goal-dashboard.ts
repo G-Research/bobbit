@@ -2262,10 +2262,7 @@ function renderTreeCostRow(): TemplateResult | typeof nothing {
 function renderMetaRows(goal: Goal): TemplateResult {
 	const branch = goal.branch || "";
 	const gs = gitStatus;
-	// Prefer the complete PR metadata record after any PR read, matching the
-	// session widget. Field-by-field fallback can hide a PR error behind a
-	// healthy Git `stale: false` while displaying an unrelated Git age/source.
-	const remoteMetadata = prSnapshotMetadata ?? gs ?? undefined;
+	const gitSnapshotMetadata = gs ? copyRemoteStateMetadata(gs) : undefined;
 	const hideGitAffordances = isHeadquartersNoWorktreeGoal(goal);
 
 	return html`
@@ -2315,12 +2312,8 @@ function renderMetaRows(goal: Goal): TemplateResult {
 						.statusFiles=${gs?.status ?? []}
 						.repos=${gs?.repos as any}
 						.loading=${!gs && !!branch}
-						.remoteStale=${remoteMetadata?.stale ?? false}
-						.remoteObservedAt=${remoteMetadata?.observedAt}
-						.remoteRefreshedAt=${remoteMetadata?.refreshedAt}
-						.remoteAgeMs=${remoteMetadata?.ageMs}
-						.remoteLastError=${remoteMetadata?.lastError}
-						.remoteSource=${remoteMetadata?.source}
+						.remoteGitSnapshot=${gitSnapshotMetadata}
+						.remotePrSnapshot=${prSnapshotMetadata}
 						.prState=${prStatus?.state}
 						.prUrl=${prStatus?.url}
 						.prNumber=${prStatus?.number}
