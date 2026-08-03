@@ -286,6 +286,27 @@ describe("preview_open extension (v3 mount contract)", () => {
 		}
 	});
 
+	it("v3 builder validates optional metadata before serialising a capped fallback", () => {
+		const entry = "report.html";
+		const block = buildPreviewSnapshotV3Block(
+			`/preview/${SID}/${entry}`,
+			`${SID}/${entry}`,
+			"not-a-sha256",
+			{ artifactId: "invalid artifact id", entry },
+		);
+		assert.ok(block.length <= 250, `fallback must stay capped, got ${block.length} (${block})`);
+		const payload = JSON.parse(block.slice(PREVIEW_SNAPSHOT_MARKER_V3.length));
+		assert.equal(payload.contentHash, undefined);
+		assert.equal(payload.artifactId, undefined);
+		assert.equal(payload.aid, undefined);
+		const parsed = parseSnapshot(block);
+		assert.ok(parsed && parsed.kind === "preview");
+		if (parsed && parsed.kind === "preview") {
+			assert.equal(parsed.contentHash, undefined);
+			assert.equal(parsed.artifactId, undefined);
+		}
+	});
+
 	it("builder still round-trips on long legacy host-absolute paths (contract preserved)", async () => {
 		// The builder accepts any non-empty string for backwards compatibility
 		// with archived sessions that recorded the legacy host-abs `path` form.
