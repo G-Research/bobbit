@@ -34,7 +34,7 @@ Scannable checklists for common issues. Each entry: symptom â†’ where to look â†
 - **Expected behavior**: pending/retryable is correct when no durable verdict or exact cleanup authority exists. A valid host-authored result can be finalized only after its payload and transport cleanup settle. If a supported host command remains live, Bobbit reattaches only after its current identity matches durable evidence; Docker recovery instead requires its host-persisted witness and Engine attestation.
 - **Where to look**: inspect retained step output first with `gate_inspect(section="verification", step="<name>", mode="tail"|"grep"|"slice")`, then inspect `active-verifications.json` for the pending cleanup reason and durable recovery state. Do not rerun until you have checked the retained diagnostics.
 - **Cleanup**: timeout/cancel recovery persists intent and keeps active state until exact cleanup settles. An unsafe/pending reason means Bobbit refused to signal an unverified or reused identity; investigate the ownership evidence and Docker Engine availability instead of manually killing a recorded numeric PID.
-- **Reference**: [Restart-safe command gate verification](verification-restart.md).
+- **Reference**: [Exact process ownership for command verification](verification-restart.md).
 - **Pinning tests**: `tests2/core/verification-command-restart-lifecycle.test.ts`, `tests2/core/verification-command-restart-regression.test.ts`, `tests2/core/verification-harness-restart.test.ts`.
 
 ## Gate verification stuck on a `human-signoff` step
@@ -853,11 +853,10 @@ Lesson for extension authors: never read tool params from the first `execute()` 
 
 ## Gate re-signal cancellation
 
-- `cancelStaleVerifications()` in `verification-harness.ts` terminates old reviewer sessions and persists `status: "failed"` to the gate store
-- Cancelled flag checked after `Promise.all` to suppress stale results
-- Check `sessionManager` and `teamManager` passed to `VerificationHarness`
-- Inspect: `GET /api/goals/:goalId/verifications/active`
-- **Stuck verification?** Cancel manually via `POST /api/goals/:goalId/gates/:gateId/cancel-verification` (returns `{ cancelled: true }` or `{ cancelled: false }` if nothing was running). The goal dashboard also shows a Cancel button when a verification is in "running" state.
+- A re-signal initiates cancellation of the old generation before it seeds the new one. The old cancellation mark and command kill intent are durable first; reviewer/sign-off draining and exact command payload or host transport cleanup may continue while the new verification runs.
+- **Cancellation requested/pending is not terminal.** `POST /api/goals/:goalId/gates/:gateId/cancel-verification` can return `{ "cancelled": true, "pending": true, "message": "Cancellation is waiting for exact process cleanup" }`. Keep observing `GET /api/goals/:goalId/verifications/active`; restart recovery retries the same exact cleanup authority.
+- **Terminal cancellation** returns `{ "cancelled": true, "pending": false }` only after exact cleanup settles. With no running verification, the idempotent response is `{ "cancelled": false, "message": "No running verification to cancel" }`.
+- Old finalization updates only the old signal; it cannot publish a verdict for, or overwrite the gate state of, a newer generation.
 - **Zombie detection**: On re-signal, the server checks `areVerificationSessionsAlive()` before returning 409. Reviewer/agent steps are alive iff `sessionManager.getSession(step.sessionId)` resolves; command steps are alive only within the current harness lifetime (`step.bootEpoch === harness.bootEpoch && isPidAlive(step.pid)`). Persisted timeout/cancel kill intent is handled by restart cleanup; a stale `running` row from a previous gateway lifetime must not lock the gate.
 
 ## HTTP 409 `Verification already in progress` after gateway restart
@@ -865,7 +864,7 @@ Lesson for extension authors: never read tool params from the first `execute()` 
 - **Symptom**: after a gateway restart, `POST /api/goals/:id/gates/:gateId/signal` on the same commit returns `409 { error: "Verification already in progress for this commit", existingSignalId: ... }` even though the UI shows the prior command verification as pending or failed.
 - **Cause class**: duplicate detection still sees an active verification for that signal. A valid active entry means either a same-process command is genuinely live, a reviewer session is live, or command timeout/cancel cleanup is still pending. A stale entry from a previous gateway lifetime must not lock the gate.
 - **Fix**: command liveness for duplicate detection is bounded to the current harness lifetime (`bootEpoch` + live PID). Restart recovery then either finalizes from the durable exit file, leaves no-verdict interruptions pending/retryable, or keeps durable kill intent only until verified cleanup completes. Completed or unrecoverable entries are removed from memory and `active-verifications.json` in `resumeInterruptedVerifications()`.
-- **If it recurs**: grep server stdout for `[api] Rejecting gate_signal as duplicate` and inspect `active-verifications.json`. A stale `bootEpoch` with no pending `killRequestedAt` means resume cleanup did not run. A current entry with `killRequestedAt` / `killUnsafeReason` means Bobbit is intentionally preserving cleanup state until it can verify the command tree is gone. See [Restart-safe command gate verification](verification-restart.md).
+- **If it recurs**: grep server stdout for `[api] Rejecting gate_signal as duplicate` and inspect `active-verifications.json`. A stale `bootEpoch` with no pending `killRequestedAt` means resume cleanup did not run. A current entry with `killRequestedAt` / `killUnsafeReason` means Bobbit is intentionally preserving cleanup state until it can verify the command tree is gone. See [Exact process ownership for command verification](verification-restart.md).
 - **Pinning tests**: `tests2/core/verification-harness-restart.test.ts`, `tests2/core/verification-command-restart-lifecycle.test.ts`, `tests/e2e/verification-restart-resignal.spec.ts`.
 
 ## Gate marked `failed` after gateway restart with a "Resume Error" step
