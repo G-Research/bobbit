@@ -168,9 +168,12 @@ test.describe("Persisted prompt sections", () => {
 
 		const deleteResponse = await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
 		expect(deleteResponse.status).toBe(200);
-		const archivedResponse = await apiFetch(`/api/sessions/${sessionId}/context-trace?limit=1`);
+		const archivedResponse = await apiFetch(`/api/sessions/${sessionId}/context-trace?limit=2`);
 		expect(archivedResponse.status).toBe(200);
-		expect((await archivedResponse.json()).entries).toMatchObject([{ ts: 1_001, hook: "afterTurn" }]);
+		expect((await archivedResponse.json()).entries).toMatchObject([
+			{ ts: 1_001, hook: "afterTurn" },
+			{ hook: "sessionShutdown" },
+		]);
 
 		for (const id of ["does-not-exist", "%E0%A4%A"]) {
 			const response = await apiFetch(`/api/sessions/${id}/context-trace`);
