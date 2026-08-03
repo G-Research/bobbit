@@ -330,9 +330,20 @@ export function parseDockerExecCreateEvent(line: string): DockerExecCreateEvent 
 		: undefined;
 }
 
-type DockerExecInspection = { id: string; containerId: string; pid: number; command: string };
+type DockerExecInspection = {
+	id: string;
+	containerId: string;
+	pid: number;
+	command: string;
+};
+type DockerEngineHttpResponse = {
+	status: number;
+	apiVersion: string;
+	body: Buffer;
+};
 
 const DOCKER_ENGINE_REQUEST_TIMEOUT_MS = 5_000;
+const DOCKER_ENGINE_MAX_RESPONSE_BYTES = 128 * 1024;
 
 function decodeDockerEngineChunkedBody(wire: Buffer): Buffer | undefined {
 	const chunks: Buffer[] = [];
@@ -340,114 +351,288 @@ function decodeDockerEngineChunkedBody(wire: Buffer): Buffer | undefined {
 	for (;;) {
 		const headerEnd = wire.indexOf("\r\n", offset);
 		if (headerEnd < 0) return undefined;
-		const sizeText = wire.subarray(offset, headerEnd).toString("ascii").split(";", 1)[0].trim();
+		const sizeText = wire
+			.subarray(offset, headerEnd)
+			.toString("ascii")
+			.split(";", 1)[0]
+			.trim();
 		if (!/^[0-9a-f]+$/i.test(sizeText)) return undefined;
 		const size = Number.parseInt(sizeText, 16);
-		if (!Number.isSafeInteger(size) || size < 0 || size > 128 * 1024) return undefined;
+		if (
+			!Number.isSafeInteger(size) ||
+			size < 0 ||
+			size > DOCKER_ENGINE_MAX_RESPONSE_BYTES
+		)
+			return undefined;
 		const payloadStart = headerEnd + 2;
 		const next = payloadStart + size + 2;
-		if (wire.length < next || wire.subarray(payloadStart + size, next).compare(Buffer.from("\r\n")) !== 0) return undefined;
-		if (size === 0) return Buffer.concat(chunks);
+		if (
+			wire.length < next ||
+			wire.subarray(payloadStart + size, next).compare(Buffer.from("\r\n")) !==
+				0
+		)
+			return undefined;
+		if (size === 0)
+			return next === wire.length ? Buffer.concat(chunks) : undefined;
 		chunks.push(wire.subarray(payloadStart, payloadStart + size));
 		offset = next;
 	}
+}
+
+/** Parse one bounded `docker system dial-stdio` HTTP response. */
+function parseDockerEngineHttpResponse(
+	output: Buffer,
+): DockerEngineHttpResponse | undefined {
+	const end = output.indexOf("\r\n\r\n");
+	if (end < 0 || end > 16 * 1024) return undefined;
+	const [statusLine, ...headerLines] = output
+		.subarray(0, end)
+		.toString("latin1")
+		.split("\r\n");
+	const status = Number(/^HTTP\/1\.[01]\s+(\d{3})\b/.exec(statusLine)?.[1]);
+	if (!Number.isSafeInteger(status)) return undefined;
+	const headerValues = (name: string) =>
+		headerLines
+			.filter((line) => line.toLowerCase().startsWith(`${name}:`))
+			.map((line) => line.slice(name.length + 1).trim());
+	const apiVersion = headerValues("api-version");
+	const lengths = headerValues("content-length");
+	const transferEncodings = headerValues("transfer-encoding");
+	if (
+		apiVersion.length !== 1 ||
+		!apiVersion[0] ||
+		lengths.length > 1 ||
+		transferEncodings.length > 1 ||
+		(lengths.length && transferEncodings.length)
+	)
+		return undefined;
+	const wireBody = output.subarray(end + 4);
+	let body: Buffer | undefined;
+	if (lengths.length === 1) {
+		if (!/^(?:0|[1-9]\d*)$/.test(lengths[0])) return undefined;
+		const length = Number(lengths[0]);
+		if (
+			!Number.isSafeInteger(length) ||
+			length > DOCKER_ENGINE_MAX_RESPONSE_BYTES ||
+			wireBody.length !== length
+		)
+			return undefined;
+		body = wireBody;
+	} else if (transferEncodings[0]?.toLowerCase() === "chunked") {
+		body = decodeDockerEngineChunkedBody(wireBody);
+	}
+	return body ? { status, apiVersion: apiVersion[0], body } : undefined;
+}
+
+/** Run one bounded request through the selected Docker context. */
+function requestDockerEngineThroughCurrentContext(
+	request: string,
+	operation: string,
+): Promise<DockerEngineHttpResponse> {
+	return new Promise((resolve, reject) => {
+		let child: ChildProcess | undefined;
+		let output = Buffer.alloc(0);
+		let stderr = "";
+		let settled = false;
+		const finish = (error?: Error, response?: DockerEngineHttpResponse) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			if (error) reject(error);
+			else if (response) resolve(response);
+			else reject(new Error(`${operation} returned no result`));
+		};
+		const timer = setTimeout(() => {
+			try {
+				child?.kill("SIGKILL");
+			} catch {
+				/* ignore */
+			}
+			finish(
+				new Error(
+					`${operation} did not complete within 5 seconds; check the selected Docker context`,
+				),
+			);
+		}, DOCKER_ENGINE_REQUEST_TIMEOUT_MS);
+		timer.unref?.();
+		try {
+			child = spawn("docker", ["system", "dial-stdio"], {
+				stdio: ["pipe", "pipe", "pipe"],
+				windowsHide: true,
+			});
+			child.stdout?.on("data", (chunk: Buffer) => {
+				output = Buffer.concat([output, chunk]);
+				if (output.length > DOCKER_ENGINE_MAX_RESPONSE_BYTES) {
+					try {
+						child?.kill("SIGKILL");
+					} catch {
+						/* ignore */
+					}
+					finish(new Error(`${operation} returned oversized HTTP output`));
+				}
+			});
+			child.stderr?.on("data", (chunk: Buffer) => {
+				stderr = (stderr + chunk.toString()).slice(-4096);
+			});
+			child.once("error", (error) =>
+				finish(new Error(`${operation} transport failed: ${error.message}`)),
+			);
+			child.once("close", () => {
+				const response = parseDockerEngineHttpResponse(output);
+				if (!response)
+					return finish(
+						new Error(
+							`${operation} returned no or malformed HTTP response${stderr.trim() ? `: ${stderr.trim()}` : ""}`,
+						),
+					);
+				if (response.status !== 200)
+					return finish(
+						new Error(
+							`${operation} was rejected (${response.status}, API ${response.apiVersion})`,
+						),
+					);
+				finish(undefined, response);
+			});
+			if (!child.stdin) throw new Error(`${operation} has no stdin transport`);
+			child.stdin.end(request);
+		} catch (error) {
+			finish(
+				new Error(`${operation} could not start: ${(error as Error).message}`),
+			);
+		}
+	});
 }
 
 /**
  * Inspect an exec through the selected Docker context. The Docker CLI's
  * `inspect --type exec` is not a valid command on current Engines, so use the
  * context-aware `dial-stdio` bridge and the Engine's canonical `/exec/{id}/json`
- * endpoint. The unversioned request lets the daemon negotiate its supported API
- * version; the returned Api-Version header is required evidence of that peer.
+ * endpoint. The returned Api-Version header identifies the daemon peer.
  */
-function inspectDockerExecThroughCurrentContext(execId: string): Promise<DockerExecInspection> {
-	return new Promise((resolve, reject) => {
-		if (!/^[a-f0-9]{64}$/i.test(execId)) {
-			reject(new Error("Docker exec engine identity was not a canonical exec ID"));
-			return;
+async function inspectDockerExecThroughCurrentContext(
+	execId: string,
+): Promise<DockerExecInspection> {
+	if (!/^[a-f0-9]{64}$/i.test(execId))
+		throw new Error("Docker exec engine identity was not a canonical exec ID");
+	const operation = "Docker Engine exec inspect";
+	const response = await requestDockerEngineThroughCurrentContext(
+		`GET /exec/${execId}/json HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n`,
+		operation,
+	);
+	let record: any;
+	try {
+		record = JSON.parse(response.body.toString("utf8"));
+	} catch {
+		throw new Error("Docker Engine exec inspect returned invalid JSON");
+	}
+	const id = typeof record?.ID === "string" ? record.ID : undefined;
+	const containerId =
+		typeof record?.ContainerID === "string" ? record.ContainerID : undefined;
+	const pid = Number(record?.Pid);
+	const config = record?.ProcessConfig;
+	const command = [
+		config?.entrypoint,
+		...(Array.isArray(config?.arguments) ? config.arguments : []),
+	]
+		.filter((part): part is string => typeof part === "string")
+		.join("\u0000");
+	if (
+		id !== execId ||
+		!containerId ||
+		!record?.Running ||
+		!Number.isSafeInteger(pid) ||
+		pid <= 0
+	) {
+		throw new Error(
+			"Docker Engine exec inspect identity was missing, stopped, or malformed",
+		);
+	}
+	return { id, containerId, pid, command };
+}
+
+const DOCKER_TOP_TITLES = ["PID", "PPID", "PGID", "COMMAND"] as const;
+
+/** Parse the exact structured schema returned by Engine `/containers/{id}/top`. */
+export function parseDockerTopSnapshotResponse(
+	record: unknown,
+): DockerTopRow[] {
+	if (
+		!record ||
+		typeof record !== "object" ||
+		!Array.isArray((record as any).Titles) ||
+		!Array.isArray((record as any).Processes)
+	) {
+		throw new Error(
+			"Docker Engine top response was missing Titles or Processes arrays",
+		);
+	}
+	const titles = (record as any).Titles;
+	if (
+		titles.length !== DOCKER_TOP_TITLES.length ||
+		titles.some(
+			(title: unknown, index: number) => title !== DOCKER_TOP_TITLES[index],
+		)
+	) {
+		throw new Error(
+			"Docker Engine top response used an unsupported column schema",
+		);
+	}
+	const rows: DockerTopRow[] = [];
+	const seenPids = new Set<number>();
+	for (const process of (record as any).Processes) {
+		if (
+			!Array.isArray(process) ||
+			process.length !== DOCKER_TOP_TITLES.length ||
+			process.some((cell) => typeof cell !== "string")
+		) {
+			throw new Error(
+				"Docker Engine top response contained a malformed process row",
+			);
 		}
-		let child: ChildProcess | undefined;
-		let output = Buffer.alloc(0);
-		let stderr = "";
-		let settled = false;
-		const finish = (error?: Error, inspection?: DockerExecInspection) => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timer);
-			if (error) reject(error);
-			else if (inspection) resolve(inspection);
-			else reject(new Error("Docker Engine exec inspect returned no result"));
+		const [pidText, ppidText, pgidText, args] = process;
+		const parsePositive = (text: string): number | undefined => {
+			if (!/^[1-9]\d*$/.test(text)) return undefined;
+			const value = Number(text);
+			return Number.isSafeInteger(value) && value > 0 ? value : undefined;
 		};
-		const timer = setTimeout(() => {
-			try { child?.kill("SIGKILL"); } catch { /* ignore */ }
-			finish(new Error("Docker Engine exec inspect did not complete within 5 seconds; check the selected Docker context"));
-		}, DOCKER_ENGINE_REQUEST_TIMEOUT_MS);
-		timer.unref?.();
-		try {
-			child = spawn("docker", ["system", "dial-stdio"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
-			child.stdout?.on("data", (chunk: Buffer) => {
-				output = Buffer.concat([output, chunk]);
-				if (output.length > 128 * 1024) {
-					try { child?.kill("SIGKILL"); } catch { /* ignore */ }
-					finish(new Error("Docker Engine exec inspect returned oversized HTTP output"));
-				}
-			});
-			child.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-4096); });
-			child.once("error", error => finish(new Error(`Docker Engine exec inspect transport failed: ${error.message}`)));
-			child.once("close", () => {
-				const end = output.indexOf("\r\n\r\n");
-				if (end < 0) return finish(new Error(`Docker Engine exec inspect returned no HTTP response${stderr.trim() ? `: ${stderr.trim()}` : ""}`));
-				const rawHeaders = output.subarray(0, end).toString("latin1");
-				const [statusLine, ...headerLines] = rawHeaders.split("\r\n");
-				const status = /^HTTP\/1\.[01]\s+(\d{3})\b/.exec(statusLine)?.[1];
-				const apiVersion = headerLines.find(line => /^api-version:/i.test(line))?.slice("api-version:".length).trim();
-				const lengthText = headerLines.find(line => /^content-length:/i.test(line))?.slice("content-length:".length).trim();
-				const contentLength = Number(lengthText);
-				const chunked = headerLines.find(line => /^transfer-encoding:/i.test(line))?.toLowerCase().includes("chunked");
-				if (status !== "200" || !apiVersion) {
-					return finish(new Error(`Docker Engine exec inspect was rejected or malformed (${status ?? "invalid HTTP status"}${apiVersion ? `, API ${apiVersion}` : ""})`));
-				}
-				const wireBody = output.subarray(end + 4);
-				const body = Number.isSafeInteger(contentLength) && contentLength >= 2
-					? wireBody.subarray(0, contentLength)
-					: chunked ? decodeDockerEngineChunkedBody(wireBody) : undefined;
-				if (!body || body.length < 2) return finish(new Error("Docker Engine exec inspect returned an incomplete HTTP body"));
-				try {
-					const record = JSON.parse(body.toString("utf8"));
-					const id = typeof record?.ID === "string" ? record.ID : undefined;
-					const containerId = typeof record?.ContainerID === "string" ? record.ContainerID : undefined;
-					const pid = Number(record?.Pid);
-					const config = record?.ProcessConfig;
-					const command = [config?.entrypoint, ...(Array.isArray(config?.arguments) ? config.arguments : [])]
-						.filter((part): part is string => typeof part === "string").join("\u0000");
-					if (id !== execId || !containerId || !record?.Running || !Number.isSafeInteger(pid) || pid <= 0) {
-						return finish(new Error("Docker Engine exec inspect identity was missing, stopped, or malformed"));
-					}
-					finish(undefined, { id, containerId, pid, command });
-				} catch {
-					finish(new Error("Docker Engine exec inspect returned invalid JSON"));
-				}
-			});
-			if (!child.stdin) throw new Error("Docker Engine exec inspect has no stdin transport");
-			child.stdin.end(`GET /exec/${execId}/json HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n`);
-		} catch (error) {
-			finish(new Error(`Docker Engine exec inspect could not start: ${(error as Error).message}`));
-		}
-	});
+		const pid = parsePositive(pidText);
+		const ppid = parsePositive(ppidText);
+		const pgid = parsePositive(pgidText);
+		if (!pid || !ppid || !pgid)
+			throw new Error(
+				"Docker Engine top response contained a non-positive process identity",
+			);
+		if (seenPids.has(pid))
+			throw new Error(
+				"Docker Engine top response contained duplicate process IDs",
+			);
+		seenPids.add(pid);
+		// ARGS is one daemon JSON cell. Its contents—including embedded newlines—are
+		// never tokenized into rows or otherwise allowed to invent ancestry nodes.
+		rows.push({ pid, ppid, pgid, args });
+	}
+	if (rows.length === 0)
+		throw new Error("Docker Engine top response contained no process rows");
+	return rows;
 }
 
 /** One Docker top snapshot supplies the daemon PID namespace parent-chain proof. */
-async function readDockerTopSnapshot(containerId: string): Promise<DockerTopRow[]> {
-	const table = execFileSync("docker", ["top", containerId, "-eo", "pid,ppid,pgid,args"], {
-		encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
-	});
-	const rows: DockerTopRow[] = [];
-	for (const line of table.split(/\r?\n/).slice(1)) {
-		const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line);
-		if (!match) continue;
-		rows.push({ pid: Number(match[1]), ppid: Number(match[2]), pgid: Number(match[3]), args: match[4] });
+async function readDockerTopSnapshot(
+	containerId: string,
+): Promise<DockerTopRow[]> {
+	if (!/^[a-f0-9]{64}$/i.test(containerId))
+		throw new Error("Docker top snapshot required a canonical container ID");
+	const response = await requestDockerEngineThroughCurrentContext(
+		`GET /containers/${containerId}/top?ps_args=${encodeURIComponent("-eo pid,ppid,pgid,args")} HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n`,
+		"Docker Engine top snapshot",
+	);
+	let record: unknown;
+	try {
+		record = JSON.parse(response.body.toString("utf8"));
+	} catch {
+		throw new Error("Docker Engine top snapshot returned invalid JSON");
 	}
-	return rows;
+	return parseDockerTopSnapshotResponse(record);
 }
 
 export type DockerEngineEventsResponseDecoder = {
@@ -6695,19 +6880,11 @@ export class VerificationHarness {
 				const treeCompletionMustBeVerified = true;
 				// H is the kernel parent of the payload, so the Docker Engine's observed
 				// exit status is the payload status for every ordinary value 0..255.
-				// Setup cannot reach this point before the ownership readiness boundary.
-				if (useContainerDurable && streamCtx && !didTimeOut && !didCancel && code !== null) {
-					const liveStep = this.activeVerifications.get(streamCtx.signalId)?.steps[streamCtx.stepIndex];
-					if (liveStep && !liveStep.containerPayloadCleanupCompletedAt) {
-						liveStep.containerPayloadCleanupCompletedAt = Date.now();
-						delete liveStep.containerPayloadCleanupPending;
-						delete liveStep.killUnsafeReason;
-						this._persistActive();
-					}
-				}
-				// Timeout, cancellation, an ambiguous outer failure, and restart recovery
-				// retain the existing exact host verifier. They never infer completion
-				// from a numeric process-group or an untrusted container artifact.
+				// It is verdict evidence, never payload-cleanup evidence: S remains live
+				// after H exits and only the exact sentinel reaper may close that phase.
+				// Timeout, cancellation, natural exits (including 125), and restart
+				// recovery all retain the same exact host verifier. They never infer
+				// completion from a numeric process-group or an untrusted artifact.
 				if (useContainerDurable && streamCtx) {
 					const liveStep = this.activeVerifications.get(streamCtx.signalId)?.steps[streamCtx.stepIndex];
 					if (liveStep) containerCleanup ??= this._killAndVerifyRecoveredContainerProcessGroup(liveStep);
@@ -7327,7 +7504,9 @@ export class VerificationHarness {
 		const verify = `live_p=$(awk '{print $1}' "/proc/$p/stat" 2>/dev/null || true); live_g=$(awk '{print $5}' "/proc/$p/stat" 2>/dev/null || true); live_s=$(awk '{print $22}' "/proc/$p/stat" 2>/dev/null || true); [ "$live_p" = "$p" ] || { echo BOBBIT_CONTAINER_WITNESS_STALE; exit 64; }; [ "$live_g" = "$pgid" ] || { echo BOBBIT_CONTAINER_WITNESS_PGID_MISMATCH; exit 65; }; [ "$live_s" = ${start} ] || { echo BOBBIT_CONTAINER_WITNESS_START_TOKEN_MISMATCH; exit 66; };`;
 		// dash accepts the negative process-group operand directly; placing `--`
 		// before a quoted negative number is not portable across container shells.
-		const script = `p=${p}; pgid=${pgid}; ${verify} kill -TERM -"$pgid" 2>/dev/null || { echo BOBBIT_CONTAINER_TERM_UNDELIVERED; exit 67; }; ${verify} kill -KILL -"$pgid" 2>/dev/null || { echo BOBBIT_CONTAINER_KILL_UNDELIVERED; exit 68; };`;
+		// The final liveness check is post-KILL only: it is not authority to signal
+		// a historical group, merely proof that this cleanup attempt removed it.
+		const script = `p=${p}; pgid=${pgid}; ${verify} kill -TERM -"$pgid" 2>/dev/null || { echo BOBBIT_CONTAINER_TERM_UNDELIVERED; exit 67; }; ${verify} kill -KILL -"$pgid" 2>/dev/null || { echo BOBBIT_CONTAINER_KILL_UNDELIVERED; exit 68; }; kill -0 -"$pgid" 2>/dev/null && { echo BOBBIT_CONTAINER_GROUP_REMAINS; exit 69; };`;
 		const result = await this._dockerExecCapture(step.containerId!, script);
 		if (result.code === 0) {
 			step.containerPayloadCleanupCompletedAt = Date.now();
