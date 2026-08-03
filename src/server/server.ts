@@ -4196,7 +4196,7 @@ async function handleApiRoute(
 	packContributionRegistryArg?: PackContributionRegistry,
 	extensionChannelServices?: ExtensionChannelServices,
 	fetchImpl: typeof fetch = fetch,
-	commandRunner?: CommandRunner,
+	commandRunner: CommandRunner = realCommandRunner,
 	fsImpl?: FsLike,
 	clock?: Clock,
 	withPreviewSessionOperation: PreviewSessionOperation = async (_sessionId, operation) => operation(),
@@ -4897,7 +4897,7 @@ async function handleApiRoute(
 		const imageName = scopedConfigStore.get("sandbox_image") || "bobbit-agent";
 		const configured = sandboxConfig === "docker";
 		const dockerContextRoot = resolveSandboxDockerContext(resolved.project.rootPath);
-		const status = await checkDockerAvailability(configured ? imageName : undefined, dockerContextRoot ?? undefined);
+		const status = await checkDockerAvailability(configured ? imageName : undefined, dockerContextRoot ?? undefined, commandRunner);
 		json({ ...status, configured });
 		return;
 	}
