@@ -305,7 +305,7 @@ describe("LifecycleHub", () => {
 		}
 	});
 
-	it("continues dispatch when the scope resolver throws and keeps the warning single-line", async () => {
+	it("continues dispatch when the scope resolver throws and emits a constant warning", async () => {
 		const tmp = tmpDir();
 		const observed: unknown[] = [];
 		const moduleHost = {
@@ -328,7 +328,7 @@ describe("LifecycleHub", () => {
 			const result = await lifecycleHub.dispatch("sessionSetup", base(tmp, "session\nforged\rentry"));
 			assert.deepEqual(result.diagnostics, []);
 			assert.deepEqual(observed, [undefined]);
-			assert.deepEqual(warn.mock.calls, [["[lifecycle-hub] scopeContextResolver threw for session session\\nforged\\rentry: Error: scope failure\\nforged log\\rentry"]]);
+			assert.deepEqual(warn.mock.calls, [["[lifecycle-hub] scopeContextResolver threw; continuing without scope context"]]);
 		} finally {
 			warn.mockRestore();
 			fs.rmSync(tmp, { recursive: true, force: true });
