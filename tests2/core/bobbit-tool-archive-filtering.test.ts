@@ -5,7 +5,7 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, vi } from "vitest";
 import { loadBobbitTools, stubFetch, type CapturedTool } from "./helpers/bobbit-harness.ts";
 import { SearchService } from "../../src/server/search/search-service.js";
 
@@ -238,9 +238,11 @@ describe("bobbit_read — archive-hidden search default", () => {
 		const service = new SearchService({ stateDir: "unused-search-state", projectId: "proj-search" });
 		const queries: any[] = [];
 		(service as any)._state = "ready";
-		// SearchService is a worker-RPC client. Mock that boundary rather than
-		// restoring a main-thread FlexSearch store just to observe the query.
-		(service as any)._call = (command: string, query: any) => {
+		// Queryability recovery is separately tested. Stub it here so this remains
+		// an isolated worker-RPC payload contract test without starting a worker.
+		const ensureQueryableWorker = vi.fn().mockResolvedValue(undefined);
+		(service as any)._ensureQueryableWorker = ensureQueryableWorker;
+		(service as any)._post = (command: string, query: any) => {
 			expect(command).toBe("search");
 			queries.push(query);
 			return Promise.resolve({ results: [], total: 0 });
@@ -248,6 +250,7 @@ describe("bobbit_read — archive-hidden search default", () => {
 
 		await service.search("archive visibility");
 
+		expect(ensureQueryableWorker).toHaveBeenCalledOnce();
 		expect(queries[0]).toMatchObject({ includeArchived: false });
 	});
 });
