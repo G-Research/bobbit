@@ -112,7 +112,7 @@ import {
 
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections, persistPromptSections } from "./agent/system-prompt.js";
 import { configureProfilingRuntime, recordElapsed } from "./agent/profiling.js";
-import { cpuDiagnosticsEnabled, getCpuDiagnostics, type CpuDiagnostics } from "./agent/cpu-diagnostics.js";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics, getEventLoopLagMonitor, shutdownEventLoopLagMonitor, type CpuDiagnostics } from "./agent/cpu-diagnostics.js";
 import { resolveGrantPolicy, computeEffectiveAllowedTools } from "./agent/tool-activation.js";
 import { parseMcpToolName } from "./mcp/mcp-meta.js";
 import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
@@ -3010,6 +3010,25 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// during high-volume mock-agent event bursts. Loopback never benefits
 	// from compression in production either, so this is a strict win.
 	const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: WS_MAX_PAYLOAD_BYTES });
+	// This monitor is intentionally independent of BOBBIT_CPU_DIAG. It is cheap
+	// enough to leave running and gives upgrade handling a short, honest busy
+	// window immediately after an observed main-thread stall.
+	const eventLoopLagMonitor = getEventLoopLagMonitor();
+
+	const rejectUnavailableWebSocket = (req: http.IncomingMessage, socket: import("node:stream").Duplex, head: Buffer, code: "SERVER_STARTING" | "SERVER_SATURATED", retryAfterMs: number) => {
+		wss.handleUpgrade(req, socket, head, (ws) => {
+			const message = code === "SERVER_STARTING"
+				? "Gateway is starting. Retrying automatically…"
+				: "Gateway is busy. Retrying automatically…";
+			// The frame is deliberately sent before auth: it contains no session or
+			// credential information, and lets browser clients distinguish a boot
+			// gate from a transport failure (HTTP Upgrade response headers are not
+			// exposed to the WebSocket API).
+			ws.send(JSON.stringify({ type: "error", code, message, retryAfterMs }), () => {
+				ws.close(1013, code);
+			});
+		});
+	};
 
 	// Broadcast a message to WebSocket clients belonging to a specific goal.
 	// Recipients are the matching goal's session sockets plus explicit
@@ -3376,7 +3395,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			return;
 		}
 		if (!gatewayReady) {
-			socket.destroy();
+			rejectUnavailableWebSocket(req, socket, head, "SERVER_STARTING", 1_000);
+			return;
+		}
+		if (eventLoopLagMonitor.isSaturated()) {
+			rejectUnavailableWebSocket(req, socket, head, "SERVER_SATURATED", Math.max(250, eventLoopLagMonitor.retryAfterMs()));
 			return;
 		}
 		const viewerMatch = wsPathname === "/ws/viewer";
@@ -3941,6 +3964,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				}
 				await phase("extension-channels", () => disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown"));
 				await phase("cpu-diagnostics", () => shutdownCpuDiagnostics());
+				shutdownEventLoopLagMonitor();
 				try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
 				// Worktree pools are intentionally NOT drained on shutdown.
 				//
