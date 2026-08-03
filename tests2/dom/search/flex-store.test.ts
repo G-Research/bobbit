@@ -70,6 +70,35 @@ test("open → upsert → search round-trip", async () => {
 	}
 });
 
+test("concurrent compactions serialize snapshot writes", async () => {
+	const dir = tmp("flex-compact-");
+	const store = await FlexSearchStore.open({ dataDir: dir });
+	const internals = store as unknown as { _writeSnapshot(dir: string): Promise<void> };
+	const original = internals._writeSnapshot.bind(store);
+	let active = 0;
+	let maxActive = 0;
+	let release!: () => void;
+	const entered = new Promise<void>((resolve) => {
+		internals._writeSnapshot = async (snapshotDir: string) => {
+			active++;
+			maxActive = Math.max(maxActive, active);
+			resolve();
+			await new Promise<void>((resume) => { release = resume; });
+			try { await original(snapshotDir); } finally { active--; }
+		};
+	});
+	try {
+		const first = store.compact();
+		await entered;
+		const second = store.compact();
+		release();
+		await Promise.all([first, second]);
+		expect(maxActive).toBe(1);
+	} finally {
+		await store.close();
+	}
+});
+
 test("persistence across reopen", async () => {
 	const dir = tmp("flex-persist-");
 	const a = await FlexSearchStore.open({ dataDir: dir });
