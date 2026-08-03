@@ -1,6 +1,6 @@
 # EP-9 — Adopt Vanilla Extensions
 
-**Status:** proposed implementation design  
+**Status:** proposed implementation design
 **Goal:** adopt an unmodified stock MCP transport or Claude-style skill directory without creating a publisher-authored Bobbit pack.
 
 ## Decision
