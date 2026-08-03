@@ -27,6 +27,7 @@ process.env.BOBBIT_DIR = TEST_DIR;
 
 const {
 	VerificationHarness,
+	attestAndReleaseContainerOwnership,
 	createContainerPayloadReleaseHandshake,
 	createContainerWitnessFrameDecoder,
 	createDockerEngineEventsResponseDecoder,
@@ -60,8 +61,7 @@ async function withTimeout<T>(promise: Promise<T>, budgetMs: number, label: stri
 }
 
 /** Minimal stubs for a bare-bones VerificationHarness. */
-function makeHarness(deps: Record<string, unknown> = {}, broadcasts: any[] = []) {
-	const stateDir = fs.mkdtempSync(path.join(TEST_DIR, "harness-"));
+function makeHarness(deps: Record<string, unknown> = {}, broadcasts: any[] = [], stateDir = fs.mkdtempSync(path.join(TEST_DIR, "harness-"))) {
 	fs.mkdirSync(stateDir, { recursive: true });
 	const stubGateStore = {
 		updateSignalVerification: () => {},
@@ -83,74 +83,26 @@ function fakeTreeCommand(): string {
 	return `node -e "console.log('PARENT_PID=910001'); console.log('CHILD_PID=910002'); setTimeout(()=>process.exit(0),300000)"`;
 }
 
-/** Deterministic cleanup-failure seam: no OS process or wall-clock race. */
-function createUnverifiedTimedOutRunner() {
+function createFakeChild(pid: number, pipes = true) {
+	const stream = () => Object.assign(new EventEmitter(), { destroy() {} });
+	return Object.assign(new EventEmitter(), { pid, stdout: pipes ? stream() : undefined, stderr: pipes ? stream() : undefined });
+}
+
+/** Deterministic cleanup-failure seams: no OS process or wall-clock race. */
+function createUnverifiedTreeRunner(options: { pid: number; killed: boolean; timedOut: boolean; closes?: boolean }) {
+	const { pid, killed, timedOut, closes = true } = options;
 	return {
 		nonDurable: true,
 		spawn: () => {
-			const stdout = Object.assign(new EventEmitter(), { destroy() {} });
-			const stderr = Object.assign(new EventEmitter(), { destroy() {} });
-			const child = Object.assign(new EventEmitter(), { pid: 910_003, stdout, stderr });
+			const child = createFakeChild(pid);
 			const tracked = {
-				child,
-				killed: () => true,
-				timedOut: () => true,
-				markSurvival: () => {},
-				killTree: () => {},
+				child, killed: () => killed, timedOut: () => timedOut, markSurvival: () => {}, killTree: () => {},
 				waitForTreeExit: async () => false,
 			};
 			queueMicrotask(() => {
-				child.emit("exit", null, "SIGTERM");
-				child.emit("close", null, "SIGTERM");
+				child.emit("exit", timedOut ? null : 0, timedOut ? "SIGTERM" : null);
+				if (closes) child.emit("close", timedOut ? null : 0, timedOut ? "SIGTERM" : null);
 			});
-			return tracked as any;
-		},
-	};
-}
-
-/** Windows root exits successfully while an untracked descendant retains stdio. */
-function createNaturalExitWithUnverifiedTreeRunner() {
-	return {
-		nonDurable: true,
-		spawn: () => {
-			const stdout = Object.assign(new EventEmitter(), { destroy() {} });
-			const stderr = Object.assign(new EventEmitter(), { destroy() {} });
-			const child = Object.assign(new EventEmitter(), { pid: 910_005, stdout, stderr });
-			const tracked = {
-				child,
-				killed: () => false,
-				timedOut: () => false,
-				markSurvival: () => {},
-				killTree: () => {},
-				waitForTreeExit: async () => false,
-			};
-			queueMicrotask(() => {
-				child.emit("exit", 0, null);
-				child.emit("close", 0, null);
-			});
-			return tracked as any;
-		},
-	};
-}
-
-function createWindowsRootExitWithOpenDescendantRunner() {
-	return {
-		nonDurable: true,
-		spawn: () => {
-			const stdout = Object.assign(new EventEmitter(), { destroy() {} });
-			const stderr = Object.assign(new EventEmitter(), { destroy() {} });
-			const child = Object.assign(new EventEmitter(), { pid: 910_004, stdout, stderr });
-			const tracked = {
-				child,
-				killed: () => false,
-				timedOut: () => false,
-				markSurvival: () => {},
-				killTree: () => {},
-				// The root has crossed the PID-reuse boundary, so no job/tree
-				// completion is provable and a later taskkill would be unsafe.
-				waitForTreeExit: async () => false,
-			};
-			queueMicrotask(() => child.emit("exit", 0, null));
 			return tracked as any;
 		},
 	};
@@ -166,9 +118,7 @@ function createPreReadinessRunner() {
 		acknowledgeOwnership: () => acknowledgeOwnership(),
 		killCalls: () => killCalls,
 		spawn: () => {
-			const stdout = Object.assign(new EventEmitter(), { destroy() {} });
-			const stderr = Object.assign(new EventEmitter(), { destroy() {} });
-			const child = Object.assign(new EventEmitter(), { pid: 910_006, stdout, stderr });
+			const child = createFakeChild(910_006);
 			let closed = false;
 			const close = () => {
 				if (closed) return;
@@ -177,19 +127,105 @@ function createPreReadinessRunner() {
 				child.emit("close", null, "SIGTERM");
 			};
 			return {
-				child,
-				ownershipReady,
-				killed: () => killCalls > 0,
-				timedOut: () => false,
-				markSurvival: () => {},
-				killTree: () => { killCalls++; close(); },
-				waitForTreeExit: async () => closed,
+				child, ownershipReady, killed: () => killCalls > 0, timedOut: () => false, markSurvival: () => {},
+				killTree: () => { killCalls++; close(); }, waitForTreeExit: async () => closed,
 			} as any;
 		},
 	};
 }
 
+function setActiveCommandVerification(harness: any, goalId: string, gateId: string, signalId: string, names = ["step"]) {
+	(harness as any).activeVerifications.set(signalId, {
+		goalId, gateId, signalId, overallStatus: "running", startedAt: Date.now(), currentPhase: 0,
+		steps: names.map(name => ({ name, type: "command", status: "running", startedAt: Date.now() })),
+	});
+}
+
+async function startFakeTreeStep(kind: "timeout" | "cancel", tmp: string) {
+	const broadcasts: any[] = [];
+	const harness = makeHarness({ commandStepRunner: createFakeVerificationCommandRunner() }, broadcasts);
+	const goalId = `goal-${kind}`;
+	const gateId = `gate-${kind}`;
+	const signalId = kind === "timeout" ? "sig-timeout-1" : "sig-cancel-1";
+	const streamCtx = { goalId, gateId, signalId, stepIndex: 0 };
+	setActiveCommandVerification(harness, goalId, gateId, signalId);
+	const stepPromise = (harness as any).runCommandStep(fakeTreeCommand(), tmp, 60, false, streamCtx, undefined, undefined);
+	const registered = await poll(() => (harness as any)._trackedCommandChildren.size > 0, 3000);
+	assert.ok(registered, "tracked child should be registered shortly after spawn");
+	const pidsReady = await poll(() => {
+		const out = (harness as any).activeVerifications.get(signalId)?.steps?.[0]?.output ?? "";
+		return /PARENT_PID=\d+/.test(out) && /CHILD_PID=\d+/.test(out);
+	}, 3000);
+	assert.ok(pidsReady, `fake command should stream both pid markers before ${kind}`);
+	assert.ok(
+		broadcasts.some(e => e.type === "gate_verification_step_output" && /PARENT_PID=\d+/.test(e.text ?? "")),
+		"stdout marker should be broadcast as live step output",
+	);
+	return { broadcasts, harness, goalId, gateId, signalId, stepPromise };
+}
+
 describe("deterministic tracked child", () => {
+	it("atomically persists only a daemon-ancestry-attested sentinel before release", async () => {
+		const frame = { containerId: "container", nonce: "nonce", sentinelPid: 12, pgid: 11, startToken: "start" };
+		const tag = "tag";
+		const args = "sh -c bobbit-container-sentinel:tag:12:11:start";
+		const calls: string[] = [];
+		const input = {
+			frame, containerId: "container", nonce: "nonce", tag,
+			verifyExec: async () => ({ id: "exec", containerId: "container", pid: 10, command: "docker exec tag" }),
+			snapshot: async () => [
+				{ pid: 10, ppid: 1, pgid: 10, args: "docker exec tag" },
+				{ pid: 11, ppid: 10, pgid: 11, args: "session leader" },
+				{ pid: 12, ppid: 11, pgid: 11, args },
+			],
+			persist: () => { calls.push("persist"); return true; },
+			release: () => { calls.push("release"); return true; },
+		};
+		await expect(attestAndReleaseContainerOwnership(input)).resolves.toMatchObject({ version: 1, execId: "exec", enginePid: 10, enginePgid: 11, sentinelPid: 12, pgid: 11 });
+		expect(calls).toEqual(["persist", "release"]);
+	});
+
+	it("accepts a container frame whose PID and PGID differ from Docker's daemon namespace", async () => {
+		const calls: string[] = [];
+		await expect(attestAndReleaseContainerOwnership({
+			frame: { containerId: "container", nonce: "nonce", sentinelPid: 12, pgid: 11, startToken: "start" }, containerId: "container", nonce: "nonce", tag: "tag",
+			verifyExec: async () => ({ id: "exec", containerId: "container", pid: 1001, command: "docker tag" }),
+			snapshot: async () => [{ pid: 1001, ppid: 1, pgid: 1001, args: "docker tag" }, { pid: 9002, ppid: 1001, pgid: 9001, args: "session" }, { pid: 9003, ppid: 9002, pgid: 9001, args: "sh bobbit-container-sentinel:tag:12:11:start" }],
+			persist: () => { calls.push("persist"); return true; },
+			release: () => { calls.push("release"); return true; },
+		})).resolves.toMatchObject({ enginePid: 1001, enginePgid: 9001, sentinelPid: 12, pgid: 11 });
+		expect(calls).toEqual(["persist", "release"]);
+	});
+
+	it.each([
+		["changed sentinel PID in immutable argv", [{ pid: 10, ppid: 1, pgid: 10, args: "docker tag" }, { pid: 99, ppid: 10, pgid: 11, args: "sh bobbit-container-sentinel:tag:99:11:start" }]],
+		["changed sentinel PGID in immutable argv", [{ pid: 10, ppid: 1, pgid: 10, args: "docker tag" }, { pid: 11, ppid: 10, pgid: 11, args: "session" }, { pid: 12, ppid: 11, pgid: 13, args: "sh bobbit-container-sentinel:tag:12:13:start" }]],
+		["changed start token", [{ pid: 10, ppid: 1, pgid: 10, args: "docker tag" }, { pid: 11, ppid: 10, pgid: 11, args: "session" }, { pid: 12, ppid: 11, pgid: 11, args: "sh bobbit-container-sentinel:tag:12:11:reused" }]],
+		["cloned non-descendant tag", [{ pid: 10, ppid: 1, pgid: 10, args: "docker tag" }, { pid: 12, ppid: 77, pgid: 11, args: "sh bobbit-container-sentinel:tag:12:11:start" }]],
+	] as const)("rejects %s without persistence or release", async (_name, snapshot) => {
+		const calls: string[] = [];
+		const frame = { containerId: "container", nonce: "nonce", sentinelPid: 12, pgid: 11, startToken: "start" };
+		await expect(attestAndReleaseContainerOwnership({
+			frame, containerId: "container", nonce: "nonce", tag: "tag",
+			verifyExec: async () => ({ id: "exec", containerId: "container", pid: 10, command: "docker tag" }),
+			snapshot: async () => snapshot,
+			persist: () => { calls.push("persist"); return true; },
+			release: () => { calls.push("release"); return true; },
+		})).rejects.toThrow();
+		expect(calls).toEqual([]);
+	});
+
+	it("does not release when durable ownership attestation persistence fails", async () => {
+		const calls: string[] = [];
+		await expect(attestAndReleaseContainerOwnership({
+			frame: { containerId: "container", nonce: "nonce", sentinelPid: 12, pgid: 11, startToken: "start" }, containerId: "container", nonce: "nonce", tag: "tag",
+			verifyExec: async () => ({ id: "exec", containerId: "container", pid: 10, command: "docker tag" }),
+			snapshot: async () => [{ pid: 10, ppid: 1, pgid: 10, args: "docker tag" }, { pid: 11, ppid: 10, pgid: 11, args: "session" }, { pid: 12, ppid: 11, pgid: 11, args: "sh bobbit-container-sentinel:tag:12:11:start" }],
+			persist: () => { calls.push("persist"); return false; },
+			release: () => { calls.push("release"); return true; },
+		})).rejects.toThrow(/durably persisted/);
+		expect(calls).toEqual(["persist"]);
+	});
 	it("queues a split synchronous ownership tuple until the private release writer is installed", () => {
 		const releases: string[] = [];
 		const failures: Error[] = [];
@@ -380,40 +416,8 @@ describe("deterministic tracked child", () => {
 
 describe("runCommandStep tree-kill", () => {
 	it("kills the tracked command on step timeout and emits output plus marker", async () => {
-		const broadcasts: any[] = [];
-		const harness = makeHarness({ commandStepRunner: createFakeVerificationCommandRunner() }, broadcasts);
 		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-timeout-"));
-
-		const goalId = "goal-timeout";
-		const gateId = "gate-timeout";
-		const signalId = "sig-timeout-1";
-		const streamCtx = { goalId, gateId, signalId, stepIndex: 0 };
-		(harness as any).activeVerifications.set(signalId, {
-			goalId, gateId, signalId,
-			overallStatus: "running",
-			startedAt: Date.now(),
-			currentPhase: 0,
-			steps: [{ name: "step", type: "command", status: "running", startedAt: Date.now() }],
-		});
-
-		const stepPromise = (harness as any).runCommandStep(
-			fakeTreeCommand(), tmp, 60, false, streamCtx, undefined, undefined,
-		);
-
-		const registered = await poll(() => (harness as any)._trackedCommandChildren.size > 0, 3000);
-		assert.ok(registered, "tracked child should be registered shortly after spawn");
-
-		const pidsReady = await poll(() => {
-			const av = (harness as any).activeVerifications.get(signalId);
-			const out = av?.steps?.[0]?.output ?? "";
-			return /PARENT_PID=\d+/.test(out) && /CHILD_PID=\d+/.test(out);
-		}, 3000);
-		assert.ok(pidsReady, "fake command should stream both pid markers before timeout");
-		assert.ok(
-			broadcasts.some(e => e.type === "gate_verification_step_output" && /PARENT_PID=\d+/.test(e.text ?? "")),
-			"stdout marker should be broadcast as live step output",
-		);
-
+		const { harness, signalId, stepPromise } = await startFakeTreeStep("timeout", tmp);
 		const tracked = (harness as any)._trackedCommandChildren.get(`${signalId}:0`);
 		assert.ok(tracked, "tracked child should still be registered before forced timeout");
 		tracked._timedOut = true;
@@ -431,7 +435,7 @@ describe("runCommandStep tree-kill", () => {
 	});
 
 	it("fails rather than claiming a timeout tree cleanup succeeded when verification is unavailable", async () => {
-		const harness = makeHarness({ commandStepRunner: createUnverifiedTimedOutRunner() });
+		const harness = makeHarness({ commandStepRunner: createUnverifiedTreeRunner({ pid: 910_003, killed: true, timedOut: true }) });
 		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-unverified-cleanup-"));
 
 		const result = await (harness as any).runCommandStep("true", tmp, 60, true, undefined, "timed out") as { passed: boolean; output: string };
@@ -441,7 +445,7 @@ describe("runCommandStep tree-kill", () => {
 	});
 
 	it("fails a natural POSIX-style zero exit when tree completion is unverified", async () => {
-		const harness = makeHarness({ commandStepRunner: createNaturalExitWithUnverifiedTreeRunner(), platform: "linux" });
+		const harness = makeHarness({ commandStepRunner: createUnverifiedTreeRunner({ pid: 910_005, killed: false, timedOut: false }), platform: "linux" });
 		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-natural-unverified-"));
 
 		const result = await (harness as any).runCommandStep("true", tmp, 60, false) as { passed: boolean; output: string };
@@ -452,7 +456,7 @@ describe("runCommandStep tree-kill", () => {
 	it("fails closed when a Windows command exits zero while a descendant keeps stdio open", async () => {
 		const commandLifecycleClock = createManualClock(0);
 		const harness = makeHarness({
-			commandStepRunner: createWindowsRootExitWithOpenDescendantRunner(),
+			commandStepRunner: createUnverifiedTreeRunner({ pid: 910_004, killed: false, timedOut: false, closes: false }),
 			commandLifecycleClock,
 			platform: "win32",
 		});
@@ -476,13 +480,7 @@ describe("runCommandStep tree-kill", () => {
 		const gateId = "gate-pre-readiness-cancel";
 		const signalId = "sig-pre-readiness-cancel";
 		const streamCtx = { goalId, gateId, signalId, stepIndex: 0 };
-		(harness as any).activeVerifications.set(signalId, {
-			goalId, gateId, signalId,
-			overallStatus: "running",
-			startedAt: Date.now(),
-			currentPhase: 0,
-			steps: [{ name: "step", type: "command", status: "running", startedAt: Date.now() }],
-		});
+		setActiveCommandVerification(harness, goalId, gateId, signalId);
 
 		const step = (harness as any).runCommandStep("true", TEST_DIR, 60, false, streamCtx);
 		expect((harness as any)._trackedCommandChildren.has(`${signalId}:0`)).toBe(true);
@@ -501,6 +499,153 @@ describe("runCommandStep tree-kill", () => {
 		expect((harness as any).activeVerifications.has(signalId)).toBe(false);
 	});
 
+	it("reaps a live retained container transport only after payload cleanup", async () => {
+		const harness = makeHarness();
+		const signalId = "sig-container-transport-handoff";
+		const events: string[] = [];
+		const tracked = {
+			child: createFakeChild(910_008, false),
+			ownershipReady: Promise.resolve(),
+			killed: () => events.includes("transport"),
+			timedOut: () => false,
+			markSurvival: () => {},
+			killTree: (signal: string) => { events.push(`transport:${signal}`); },
+			waitForTreeExit: async () => events.includes("transport:SIGKILL"),
+		};
+		setActiveCommandVerification(harness, "goal-container-transport-handoff", "gate-container-transport-handoff", signalId);
+		const step = (harness as any).activeVerifications.get(signalId).steps[0];
+		Object.assign(step, {
+			containerId: "container-handoff",
+			restartRecoveryMode: "container-exec",
+			containerTransportCleanupPending: true,
+			// The host docker-exec result is already durable, but the exact payload
+			// sentinel has not yet been reaped.
+			containerCompletionFile: "/host/result.json",
+			containerCompletionNonce: "handoff-nonce",
+		});
+		(harness as any)._trackedCommandChildren.set(`${signalId}:0`, tracked);
+
+		expect(await (harness as any)._killTrackedForSignal(signalId)).toBe(false);
+		expect(events).toEqual([]);
+		step.containerPayloadCleanupCompletedAt = Date.now();
+		delete step.containerPayloadCleanupPending;
+
+		expect(await (harness as any)._killTrackedForSignal(signalId)).toBe(true);
+		expect(events).toEqual(["transport:SIGKILL"]);
+		expect(step.containerTransportCleanupCompletedAt).toEqual(expect.any(Number));
+	});
+
+	it("durably commits a retried live transport cleanup before restart finalization", async () => {
+		const broadcasts: any[] = [];
+		const harness = makeHarness({}, broadcasts);
+		const signalId = "sig-durable-live-transport";
+		const events: string[] = [];
+		let waits = 0;
+		const tracked = {
+			child: createFakeChild(910_009, false),
+			ownershipReady: Promise.resolve(),
+			killed: () => events.includes("signal"),
+			timedOut: () => false,
+			markSurvival: () => {},
+			killTree: () => { events.push("signal"); },
+			waitForTreeExit: async () => ++waits > 1,
+		};
+		setActiveCommandVerification(harness, "goal-durable-live-transport", "gate-durable-live-transport", signalId);
+		const active = (harness as any).activeVerifications.get(signalId);
+		active.cancelled = true;
+		active.overallStatus = "cancelled";
+		const step = active.steps[0];
+		Object.assign(step, {
+			containerId: "container-durable-live-transport",
+			restartRecoveryMode: "container-exec",
+			containerPayloadCleanupCompletedAt: Date.now(),
+			containerTransportCleanupPending: true,
+		});
+		(harness as any)._trackedCommandChildren.set(`${signalId}:0`, tracked);
+		(harness as any)._persistActive();
+
+		expect(await (harness as any)._killTrackedForSignal(signalId)).toBe(false);
+		expect((harness as any)._trackedCommandChildren.get(`${signalId}:0`)).toBe(tracked);
+		expect(JSON.parse(fs.readFileSync((harness as any)._persistPath, "utf8")).verifications[0].steps[0]).toMatchObject({
+			containerTransportCleanupPending: true,
+		});
+
+		expect(await (harness as any)._killTrackedForSignal(signalId)).toBe(true);
+		const persisted = JSON.parse(fs.readFileSync((harness as any)._persistPath, "utf8")).verifications[0];
+		expect(persisted.steps[0]).toMatchObject({
+			containerTransportCleanupCompletedAt: expect.any(Number),
+			killCompletedAt: expect.any(Number),
+		});
+		expect(persisted.steps[0].containerTransportCleanupPending).toBeUndefined();
+		expect((harness as any)._trackedCommandChildren.has(`${signalId}:0`)).toBe(false);
+
+		const recoveredBroadcasts: any[] = [];
+		const recovered = makeHarness({}, recoveredBroadcasts, path.dirname((harness as any)._persistPath));
+		(recovered as any).recoveredSentinelReaper = async () => { throw new Error("must not recover an already durable live transport"); };
+		await recovered.resumeInterruptedVerifications();
+		expect(recoveredBroadcasts.filter(event => event.type === "gate_verification_complete")).toEqual([
+			expect.objectContaining({ signalId, status: "cancelled" }),
+		]);
+		expect(fs.existsSync((harness as any)._persistPath)).toBe(false);
+		expect(events).toEqual(["signal", "signal"]);
+	});
+
+	it("retains exact transport authority when durable completion persistence fails", async () => {
+		const broadcasts: any[] = [];
+		const harness = makeHarness({}, broadcasts);
+		const signalId = "sig-transport-persist-failure";
+		let signals = 0;
+		let waits = 0;
+		const tracked = {
+			child: createFakeChild(910_010, false),
+			ownershipReady: Promise.resolve(),
+			killed: () => signals > 0,
+			timedOut: () => false,
+			markSurvival: () => {},
+			killTree: () => { signals++; },
+			waitForTreeExit: async () => { waits++; return true; },
+		};
+		setActiveCommandVerification(harness, "goal-transport-persist-failure", "gate-transport-persist-failure", signalId);
+		const active = (harness as any).activeVerifications.get(signalId);
+		const step = active.steps[0];
+		Object.assign(step, {
+			containerId: "container-transport-persist-failure",
+			restartRecoveryMode: "container-exec",
+			containerPayloadCleanupCompletedAt: Date.now(),
+			containerTransportCleanupPending: true,
+		});
+		(harness as any)._trackedCommandChildren.set(`${signalId}:0`, tracked);
+		(harness as any)._persistActive();
+		const persist = (harness as any)._persistActive.bind(harness);
+		let failOnce = true;
+		(harness as any)._persistActive = () => {
+			if (failOnce) {
+				failOnce = false;
+				throw new Error("injected persistence failure");
+			}
+			return persist();
+		};
+
+		expect(await (harness as any)._killTrackedForSignal(signalId)).toBe(false);
+		expect((harness as any)._trackedCommandChildren.get(`${signalId}:0`)).toBe(tracked);
+		expect(step.containerTransportCleanupPending).toBe(true);
+		expect(step.containerTransportCleanupCompletedAt).toBeUndefined();
+		expect(step.killCompletedAt).toBeUndefined();
+		expect(JSON.parse(fs.readFileSync((harness as any)._persistPath, "utf8")).verifications[0].steps[0]).toMatchObject({
+			containerTransportCleanupPending: true,
+		});
+		expect(broadcasts).toEqual([]);
+
+		expect(await (harness as any)._killTrackedForSignal(signalId)).toBe(true);
+		expect(signals).toBe(1);
+		expect(waits).toBe(2);
+		expect((harness as any)._trackedCommandChildren.has(`${signalId}:0`)).toBe(false);
+		expect(JSON.parse(fs.readFileSync((harness as any)._persistPath, "utf8")).verifications[0].steps[0]).toMatchObject({
+			containerTransportCleanupCompletedAt: expect.any(Number),
+			killCompletedAt: expect.any(Number),
+		});
+	});
+
 	it("cancels a ready sibling while another command still awaits ownership", async () => {
 		const harness = makeHarness();
 		const signalId = "sig-concurrent-pre-readiness-cancel";
@@ -509,7 +654,7 @@ describe("runCommandStep tree-kill", () => {
 		let readyKills = 0;
 		const heldOwnershipReady = new Promise<void>(resolve => { acknowledgeHeld = resolve; });
 		const makeTracked = (ownershipReady: Promise<void>, onKill: () => void) => ({
-			child: Object.assign(new EventEmitter(), { pid: 910_007, stdout: undefined, stderr: undefined }),
+			child: createFakeChild(910_007, false),
 			ownershipReady,
 			killed: () => false,
 			timedOut: () => false,
@@ -517,14 +662,7 @@ describe("runCommandStep tree-kill", () => {
 			killTree: onKill,
 			waitForTreeExit: async () => true,
 		});
-		(harness as any).activeVerifications.set(signalId, {
-			goalId: "goal-concurrent-pre-readiness-cancel", gateId: "gate-concurrent-pre-readiness-cancel", signalId,
-			overallStatus: "running", startedAt: Date.now(), currentPhase: 0,
-			steps: [
-				{ name: "held", type: "command", status: "running", startedAt: Date.now() },
-				{ name: "ready", type: "command", status: "running", startedAt: Date.now() },
-			],
-		});
+		setActiveCommandVerification(harness, "goal-concurrent-pre-readiness-cancel", "gate-concurrent-pre-readiness-cancel", signalId, ["held", "ready"]);
 		(harness as any)._trackedCommandChildren.set(`${signalId}:0`, makeTracked(heldOwnershipReady, () => { heldKills++; }));
 		(harness as any)._trackedCommandChildren.set(`${signalId}:1`, makeTracked(Promise.resolve(), () => { readyKills++; }));
 
@@ -538,40 +676,8 @@ describe("runCommandStep tree-kill", () => {
 	});
 
 	it("cancellation kills the tracked command and emits output plus cancelled marker", async () => {
-		const broadcasts: any[] = [];
-		const harness = makeHarness({ commandStepRunner: createFakeVerificationCommandRunner() }, broadcasts);
 		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-cancel-"));
-
-		const goalId = "goal-cancel";
-		const gateId = "gate-cancel";
-		const signalId = "sig-cancel-1";
-		const streamCtx = { goalId, gateId, signalId, stepIndex: 0 };
-		(harness as any).activeVerifications.set(signalId, {
-			goalId, gateId, signalId,
-			overallStatus: "running",
-			startedAt: Date.now(),
-			currentPhase: 0,
-			steps: [{ name: "step", type: "command", status: "running", startedAt: Date.now() }],
-		});
-
-		const stepPromise = (harness as any).runCommandStep(
-			fakeTreeCommand(), tmp, 60, false, streamCtx, undefined, undefined,
-		);
-
-		const registered = await poll(() => (harness as any)._trackedCommandChildren.size > 0, 3000);
-		assert.ok(registered, "tracked child should be registered shortly after spawn");
-
-		const pidsReady = await poll(() => {
-			const av = (harness as any).activeVerifications.get(signalId);
-			const out = av?.steps?.[0]?.output ?? "";
-			return /PARENT_PID=\d+/.test(out) && /CHILD_PID=\d+/.test(out);
-		}, 3000);
-		assert.ok(pidsReady, "fake command should stream both pid markers before cancel");
-		assert.ok(
-			broadcasts.some(e => e.type === "gate_verification_step_output" && /PARENT_PID=\d+/.test(e.text ?? "")),
-			"stdout marker should be broadcast as live step output",
-		);
-
+		const { harness, goalId, gateId, signalId, stepPromise } = await startFakeTreeStep("cancel", tmp);
 		await harness.cancelStaleVerifications(goalId, gateId);
 
 		const result = await withTimeout(stepPromise, 15000, "cancelled command step should resolve") as { passed: boolean; output: string };

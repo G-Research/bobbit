@@ -600,8 +600,30 @@ Branch names are never interpolated into a shell command; PR lookup and remote r
 | `POST` | `/api/goals/:id/gates/:gateId/signal` | Signal a gate (`{ status, content?, verifiedBy? }`) |
 | `POST` | `/api/goals/:id/gates/:gateId/reset` | Reset the gate plus transitive downstream dependents to `pending`; preserves signal history. See [Gate reset endpoint](#gate-reset-endpoint). |
 | `POST` | `/api/goals/:id/gates/:gateId/bypass` | **Human-only.** Force a not-yet-passed gate to `bypassed` (`{ whyBypassed, whoAmI, isInitiatedByHuman: true }`); persists a synthetic audit signal. Never advertised to agents. See [Gate bypass endpoint](#gate-bypass-endpoint). |
-| `POST` | `/api/goals/:id/gates/:gateId/cancel-verification` | Cancel a stuck running verification (idempotent) |
+| `POST` | `/api/goals/:id/gates/:gateId/cancel-verification` | Cancel a stuck running verification. See [Cancel verification endpoint](#cancel-verification-endpoint). |
 | `POST` | `/api/goals/:id/gates/:gateId/signoff` | Resolve a parked `human-signoff` step (`{ signalId, stepName, decision: "pass"\|"fail", feedback? }`); idempotent 409 on already-resolved steps. See [Sign-off endpoint](#sign-off-endpoint). |
+
+### Cancel verification endpoint
+
+`POST /api/goals/:goalId/gates/:gateId/cancel-verification` requests cancellation of the gate's running verification. It is idempotent and always returns `200` in one of these shapes:
+
+```json
+{ "cancelled": false, "message": "No running verification to cancel" }
+```
+
+No running verification existed.
+
+```json
+{ "cancelled": true, "pending": false }
+```
+
+Cancellation is terminal: exact cleanup settled.
+
+```json
+{ "cancelled": true, "pending": true, "message": "Cancellation is waiting for exact process cleanup" }
+```
+
+Cancellation intent is durable, but this is **not** terminal. Exact command payload cleanup — and, for Docker command steps, host `docker exec` transport cleanup — must settle before the old signal receives its terminal cancellation result. Clients can inspect `GET /api/goals/:goalId/verifications/active` while `pending` is `true`.
 
 ### Goal Team
 
