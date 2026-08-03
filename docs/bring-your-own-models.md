@@ -60,8 +60,8 @@ Legacy `/api/aigw/status`, configure, refresh, and proxy endpoints still operate
 
 ## Limits and report-only findings
 
-- Generic gateway discovery obtains model metadata from `/v1/models`. Missing context/output fields fall back to 128,000 context tokens and 16,384 output tokens, unless supported endpoint values are larger. There are no per-model overrides in this feature.
-- AIGW well-known discovery uses positive finite `limit.context` and `limit.output`; absent or invalid values use the same defaults.
+- Generic gateway discovery starts with `inferMeta(modelId)`. Recognized families keep their family baseline (for example, current GPT-5.6 is 272,000 context / 128,000 output and Claude Sonnet is 1,000,000 / 16,384); unknown IDs use the `DEFAULT_META` baseline of 128,000 / 16,384. Positive endpoint context/output fields are combined with those baselines by `max`, so they can raise a limit but never lower it. There are no per-model overrides in this feature.
+- AIGW well-known discovery is separate: supplied positive finite `limit.context` and `limit.output` are authoritative; absent or invalid values use `DEFAULT_META` (128,000 / 16,384).
 - A generic endpoint can accept image payloads even when inferred metadata does not label an unfamiliar model as vision-capable. This is a picker-labeling limitation, not a guarantee of model capability.
 - Existing custom-provider settings with type `openai-images`, `gemini-images`, or `google-imagen` are image-generation configuration. They may save successfully but contribute zero LLM session models. They are intentionally not consolidated with gateways.
 - Native Ollama, llama.cpp, and vLLM discovery types, per-model metadata overrides, image-provider changes, and host-service exposure to sandboxes are out of scope.
