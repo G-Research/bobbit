@@ -24,7 +24,9 @@ type GateStoreCall =
 let lifecycleSequence = 0;
 const suiteRoot = makeTmpDir("verif-command-lifecycle-unit-");
 
-afterAll(() => fs.rmSync(suiteRoot, { recursive: true, force: true }));
+afterAll(() => {
+	fs.rmSync(suiteRoot, { recursive: true, force: true });
+});
 
 function makeLifecycleStateDir(): string {
 	const stateDir = path.join(suiteRoot, String(++lifecycleSequence).padStart(2, "0"), "state");
@@ -83,7 +85,9 @@ function stepByName(update: any, name: string): any {
 	return update?.steps?.find((step: any) => step.name === name);
 }
 
-function notificationText(notifications: Array<{ message: string }>): string { return notifications.map(entry => entry.message).join("\n---\n"); }
+function notificationText(notifications: Array<{ message: string }>): string {
+	return notifications.map(entry => entry.message).join("\n---\n");
+}
 
 function deferred<T = void>() {
 	let resolve!: (value: T | PromiseLike<T>) => void;
@@ -139,12 +143,6 @@ function activeVerification(signalId: string, steps: any[], startedAt = Date.now
 	return { ...ACTIVE_VERIFICATION_TEMPLATE, signalId, startedAt, steps };
 }
 
-function seedActiveCommand(stateDir: string, signalId: string, name: string, contents?: { out?: string; err?: string; exit?: string }, stepArgs: any = {}, extraSteps: (startedAt: number) => any[] = () => []) {
-	const startedAt = Date.now() - 100;
-	const files = contents && diagnosticFixture(stateDir, signalId, contents);
-	persistActive(stateDir, activeVerification(signalId, [commandStepFixture({ name, startedAt, ...files, ...stepArgs }), ...extraSteps(startedAt)], startedAt));
-}
-
 const CONTAINER_PROCESS = Object.freeze({ sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" });
 function containerOwnership(containerId: string, nonce: string) {
 	return { containerOwnershipWitness: { containerId, nonce, ...CONTAINER_PROCESS }, containerOwnershipAttestation: { version: 1, containerId, nonce, execId: "exec", enginePid: 1, enginePgid: 2, tag: "tag", ...CONTAINER_PROCESS } };
@@ -197,7 +195,9 @@ test("persisted identity rejects stale heartbeat evidence", () => {
 
 test("resume finalizes a successful command from authored durable exit and output files", async () => {
 	const { stateDir, harness, gateStoreCalls } = makeHarnessForStateDir();
-	seedActiveCommand(stateDir, "sig-success", "Recovered command", { out: "before restart\nafter restart\n", err: "", exit: "0\n" });
+	const startedAt = Date.now() - 100;
+	const files = diagnosticFixture(stateDir, "sig-success", { out: "before restart\nafter restart\n", err: "", exit: "0\n" });
+	persistActive(stateDir, activeVerification("sig-success", [commandStepFixture({ name: "Recovered command", startedAt, ...files })], startedAt));
 
 	await harness.resumeInterruptedVerifications();
 	const step = stepByName(latestSignalUpdate(gateStoreCalls), "Recovered command");
@@ -209,7 +209,9 @@ test("resume finalizes a successful command from authored durable exit and outpu
 
 test("resume preserves a real durable non-zero command verdict", async () => {
 	const { stateDir, harness, gateStoreCalls, notifications } = makeHarnessForStateDir();
-	seedActiveCommand(stateDir, "sig-failure", "Real failed command", { out: "assertion failed after restart\n", err: "", exit: "7\n" });
+	const startedAt = Date.now() - 100;
+	const files = diagnosticFixture(stateDir, "sig-failure", { out: "assertion failed after restart\n", err: "", exit: "7\n" });
+	persistActive(stateDir, activeVerification("sig-failure", [commandStepFixture({ name: "Real failed command", startedAt, ...files })], startedAt));
 
 	await harness.resumeInterruptedVerifications();
 	const step = stepByName(latestSignalUpdate(gateStoreCalls), "Real failed command");
@@ -220,7 +222,9 @@ test("resume preserves a real durable non-zero command verdict", async () => {
 
 test("no durable verdict remains restart-interrupted and pending", async () => {
 	const { stateDir, harness, gateStoreCalls, notifications } = makeHarnessForStateDir();
-	seedActiveCommand(stateDir, "sig-no-verdict", "No verdict", { out: "probe started\n", err: "" });
+	const startedAt = Date.now() - 100;
+	const files = diagnosticFixture(stateDir, "sig-no-verdict", { out: "probe started\n", err: "" });
+	persistActive(stateDir, activeVerification("sig-no-verdict", [commandStepFixture({ name: "No verdict", startedAt, ...files })], startedAt));
 
 	await harness.resumeInterruptedVerifications();
 	const step = stepByName(latestSignalUpdate(gateStoreCalls), "No verdict");
@@ -232,7 +236,12 @@ test("no durable verdict remains restart-interrupted and pending", async () => {
 
 test("mixed durable failure and interruption notifies only the failed step", async () => {
 	const { stateDir, harness, gateStoreCalls, notifications } = makeHarnessForStateDir();
-	seedActiveCommand(stateDir, "sig-mixed", "Real failed command", { out: "real failure\n", err: "", exit: "7\n" }, {}, startedAt => [commandStepFixture({ name: "No verdict sibling", startedAt })]);
+	const startedAt = Date.now() - 100;
+	const failed = diagnosticFixture(stateDir, "sig-mixed", { out: "real failure\n", err: "", exit: "7\n" });
+	persistActive(stateDir, activeVerification("sig-mixed", [
+		commandStepFixture({ name: "Real failed command", startedAt, ...failed }),
+		commandStepFixture({ name: "No verdict sibling", startedAt }),
+	], startedAt));
 
 	await harness.resumeInterruptedVerifications();
 	const update = latestSignalUpdate(gateStoreCalls);
@@ -373,7 +382,8 @@ test("Windows recovered docker-exec transport requires nonce-bound Job-close evi
 
 test("attached or container recovery stays retryable with clear diagnostics", async () => {
 	const { stateDir, harness, gateStoreCalls } = makeHarnessForStateDir();
-	seedActiveCommand(stateDir, "sig-attached", "Container attached command", undefined, { containerId: "container-under-test" });
+	const startedAt = Date.now() - 100;
+	persistActive(stateDir, activeVerification("sig-attached", [commandStepFixture({ name: "Container attached command", startedAt, containerId: "container-under-test" })], startedAt));
 
 	await harness.resumeInterruptedVerifications();
 	const step = stepByName(latestSignalUpdate(gateStoreCalls), "Container attached command");
@@ -385,7 +395,13 @@ test("attached or container recovery stays retryable with clear diagnostics", as
 
 test("resume reads bounded tails instead of whole retained logs", async () => {
 	const { stateDir, harness, gateStoreCalls } = makeHarnessForStateDir();
-	seedActiveCommand(stateDir, "sig-large", "Large retained output", { out: `HEAD_STDOUT_SENTINEL\n${"x".repeat(1_200_000)}\nTAIL_STDOUT_SENTINEL\n`, err: "STDERR_TAIL_SENTINEL\n", exit: "7\n" });
+	const startedAt = Date.now() - 100;
+	const files = diagnosticFixture(stateDir, "sig-large", {
+		out: `HEAD_STDOUT_SENTINEL\n${"x".repeat(1_200_000)}\nTAIL_STDOUT_SENTINEL\n`,
+		err: "STDERR_TAIL_SENTINEL\n",
+		exit: "7\n",
+	});
+	persistActive(stateDir, activeVerification("sig-large", [commandStepFixture({ name: "Large retained output", startedAt, ...files })], startedAt));
 
 	await harness.resumeInterruptedVerifications();
 	const output = stepByName(latestSignalUpdate(gateStoreCalls), "Large retained output")?.output ?? "";
@@ -402,7 +418,7 @@ test("recovered command success delegates remaining waiting phases", async () =>
 		{ name: "Recovered command", type: "command", status: "running", phase: 0, startedAt, exitFile: "authored" },
 		{ name: "Downstream review", type: "llm-review", status: "waiting", phase: 1, startedAt },
 	], startedAt);
-	trackVerification(harness, verification);
+	(harness as any).activeVerifications.set(verification.signalId, verification);
 	(harness as any)._resumeCommandStep = async () => ({ name: "Recovered command", type: "command", passed: true, output: "recovered", duration_ms: 1 });
 	let continued = false;
 	(harness as any)._continueResumeWithRemainingPhases = async (active: any) => {
@@ -421,7 +437,7 @@ test("cancelled or superseded resume cannot update gate state after cancellation
 	const { harness, gateStoreCalls, broadcasts, notifications } = makeHarnessForStateDir();
 	const startedAt = Date.now();
 	const verification = activeVerification("sig-stale", [commandStepFixture({ name: "Slow resumed command", startedAt })], startedAt);
-	trackVerification(harness, verification);
+	(harness as any).activeVerifications.set(verification.signalId, verification);
 	const resumeStarted = deferred<void>();
 	const allowFinish = deferred<void>();
 	(harness as any)._resumeCommandStep = async () => {
@@ -449,7 +465,7 @@ test("normal verification keeps recovered phases and executes only downstream th
 		{ name: "Recovered phase", type: "command", status: "passed", phase: 0, startedAt, durationMs: 12, output: "recovered-success" },
 		{ name: "Downstream command", type: "command", status: "waiting", phase: 1, startedAt },
 	], startedAt);
-	trackVerification(harness, active);
+	(harness as any).activeVerifications.set(signal.id, active);
 	(harness as any)._persistActive();
 	const gate = {
 		id: GATE_ID,
