@@ -472,6 +472,9 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 		},
 		store: {
 			get: (key: string) => callHost(["store", "get"], [key]),
+			// Durable reads preserve absent/present/error across the worker boundary;
+			// packs must not treat an unreadable store as an empty one.
+			read: (key: string) => callHost(["store", "read"], [key]),
 			put: (key: string, value: unknown, opts?: unknown) => callHost(["store", "put"], [key, value, opts]),
 			list: (prefix?: string) => callHost(["store", "list"], [prefix]),
 		},

@@ -332,9 +332,17 @@ describe("hindsight pack — external mode (stub)", () => {
 		const { id } = await newSession("retain", { goalId: goal.id });
 		await callBeforePrompt(id, "warm up Hindsight provider before turn");
 		const prompt = "Remember that we migrated the billing service to the new queue.";
+		const retainedBefore = stub.retained("bobbit").length;
 		const echoed = await driveTurn(id, prompt);
 		// INVARIANT: lifecycle hooks never mutate the user's message text.
 		expect(echoed).toBe(prompt);
+		// afterTurn drains the initially absent durable queue before retaining this
+		// turn. This is a real provider ModuleHost worker call, so it proves the
+		// tri-state store.read proxy supports the healthy absent-queue path.
+		await waitForCondition((async () => stub.retained("bobbit").length > retainedBefore) as unknown as () => boolean, {
+			timeoutMs: 10_000,
+			message: "afterTurn retained through the worker store.read proxy",
+		});
 	});
 
 	test("an unhealthy Hindsight skips recall non-fatally and surfaces a diagnostic", async () => {

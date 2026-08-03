@@ -515,6 +515,7 @@ test.describe("gate inspect slicing", () => {
 			const persistedGateStore = new GateStore(gateStoreDir, memfs);
 			persistedGateStore.initGatesForGoal(goalId, ["failed-retained-diagnostics-gate"]);
 			persistedGateStore.recordSignal(structuredClone(liveSignal));
+			await persistedGateStore.flush();
 			const reloadedGateStore = new GateStore(gateStoreDir, memfs);
 			const reloadedGate = reloadedGateStore.getGate(goalId, "failed-retained-diagnostics-gate");
 			const reloadedSignal = reloadedGate?.signals.find((signal: any) => signal.id === post.signal.id);

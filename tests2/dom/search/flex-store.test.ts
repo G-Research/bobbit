@@ -18,7 +18,6 @@ import { expect, test } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
-	FLEX_EXPORT_BUNDLE_FILE,
 	FlexSearchStore,
 	extractIdentifierTokens,
 	recencyMultiplier,
@@ -71,6 +70,43 @@ test("open → upsert → search round-trip", async () => {
 	}
 });
 
+test("concurrent compactions coalesce into one durable snapshot", async () => {
+	const dir = tmp("flex-compact-");
+	const store = await FlexSearchStore.open({ dataDir: dir });
+	const internals = store as unknown as { _writeSnapshot(dir: string): Promise<void> };
+	const original = internals._writeSnapshot.bind(store);
+	let active = 0;
+	let maxActive = 0;
+	let snapshotWrites = 0;
+	let release!: () => void;
+	const entered = new Promise<void>((resolve) => {
+		internals._writeSnapshot = async (snapshotDir: string) => {
+			snapshotWrites++;
+			active++;
+			maxActive = Math.max(maxActive, active);
+			resolve();
+			await new Promise<void>((resume) => { release = resume; });
+			try { await original(snapshotDir); } finally { active--; }
+		};
+	});
+	try {
+		// upsert schedules a debounced journal flush; compact must serialize with
+		// that lane rather than racing its snapshot/journal files.
+		await store.upsert([doc({ id: "durable", text: "compacted mirror" })]);
+		const first = store.compact();
+		await entered;
+		const second = store.compact();
+		release();
+		await Promise.all([first, second]);
+		expect(maxActive).toBe(1);
+		expect(snapshotWrites).toBe(1);
+		const snapshot = JSON.parse(fs.readFileSync(path.join(dir, "index", "__docs__.json"), "utf-8")) as { docs: unknown[] };
+		expect(snapshot.docs).toHaveLength(1);
+	} finally {
+		await store.close();
+	}
+});
+
 test("persistence across reopen", async () => {
 	const dir = tmp("flex-persist-");
 	const a = await FlexSearchStore.open({ dataDir: dir });
@@ -90,19 +126,19 @@ test("persistence across reopen", async () => {
 	}
 });
 
-test("deleteByIds cascades to chunk rows via parent_id", async () => {
+test("parent hash lookup supports chunked-entry deduplication and is cleared with its parent", async () => {
 	const dir = tmp();
 	const store = await FlexSearchStore.open({ dataDir: dir });
 	try {
 		await store.upsert([
-			doc({ id: "parent", text: "parent" }),
-			doc({ id: "parent:chunk:0", parent_id: "parent", text: "first" }),
-			doc({ id: "parent:chunk:1", parent_id: "parent", text: "second" }),
+			doc({ id: "parent:chunk:0", parent_id: "parent", content_hash: "parent-v1", text: "first" }),
+			doc({ id: "parent:chunk:1", parent_id: "parent", content_hash: "parent-v1", text: "second" }),
 			doc({ id: "other", text: "other" }),
 		]);
-		expect(store.count()).toBe(4);
+		expect(store.getHashForEntry("parent")).toBe("parent-v1");
 		await store.deleteByIds(["parent"]);
 		expect(store.count()).toBe(1);
+		expect(store.getHashForEntry("parent")).toBeNull();
 		expect(store.getById("other")).not.toBeNull();
 	} finally {
 		await store.close();
@@ -232,13 +268,8 @@ test("corrupt index file is tolerated on open", async () => {
 	}
 });
 
-// Regression: a single failed import file (e.g. tag index) used to leave
-// the store with a partial in-memory index and the next debounced flush
-// would silently overwrite the on-disk export with that incomplete state
-// — tag filters would degrade without further warning. Any failure must
-// trigger a full rebuild from `__docs__.json`.
-test("partial import failure rebuilds index from mirror; tag filters survive", async () => {
-	const dir = tmp("flex-partial-");
+test("the durable mirror is sufficient to rebuild filters and results after restart", async () => {
+	const dir = tmp("flex-restart-");
 	const seed = await FlexSearchStore.open({ dataDir: dir });
 	await seed.upsert([
 		doc({ id: "live-1", project_id: "p1", text: "alpha", archived: false }),
@@ -247,19 +278,13 @@ test("partial import failure rebuilds index from mirror; tag filters survive", a
 	]);
 	await seed.close();
 
-	// Corrupt one tag entry inside the versioned export bundle while leaving
-	// the atomic docs mirror and all other export entries intact.
-	const bundlePath = path.join(dir, "index", FLEX_EXPORT_BUNDLE_FILE);
-	const bundle = JSON.parse(fs.readFileSync(bundlePath, "utf8")) as { exports: Array<[string, unknown]> };
-	const tagEntry = bundle.exports.find(([key]) => key.endsWith(".tag"));
-	expect(tagEntry, "expected a tag export entry to corrupt").toBeTruthy();
-	tagEntry![1] = { malformed: true };
-	fs.writeFileSync(bundlePath, JSON.stringify(bundle));
-
+	const indexDir = path.join(dir, "index");
+	// A Flex export is derived cache data. Its absence must not affect restart
+	// correctness; the next query derives the in-memory index from the mirror.
+	expect(fs.existsSync(path.join(indexDir, "__index__.json"))).toBe(false);
 	const store = await FlexSearchStore.open({ dataDir: dir });
 	try {
 		expect(store.count()).toBe(3);
-		// Tag filtering must still be correct after rebuild.
 		const live = await store.search({ q: "alpha" });
 		expect(live.results.map((r) => r.id).sort()).toEqual(["live-1", "live-2"]);
 		const p1 = await store.search({ q: "alpha", projectId: "p1" });
@@ -268,6 +293,7 @@ test("partial import failure rebuilds index from mirror; tag filters survive", a
 		expect(all.results.map((r) => r.id).sort()).toEqual(["dead-1", "live-1", "live-2"]);
 	} finally {
 		await store.close();
+		fs.rmSync(dir, { recursive: true, force: true });
 	}
 });
 

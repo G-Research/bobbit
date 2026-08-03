@@ -1,0 +1,78 @@
+name: "CodeQL config"
+
+# ---------------------------------------------------------------------------
+# Threat model (the basis for every exclusion below)
+# ---------------------------------------------------------------------------
+# Bobbit is a SINGLE-USER, LOCALLY-RUN developer tool. It is not a SaaS /
+# multi-tenant server. That means:
+#   * The "user" the CodeQL queries treat as an untrusted remote attacker IS
+#     the operator running the tool. Operator input reaching the operator's
+#     own terminal, logs, or filesystem does not cross a privilege boundary.
+#   * The process already has the operator's full filesystem and network
+#     privileges *by design*. "Exfiltration to an outbound request" and
+#     "insecure temp file readable by other users" assume a boundary that
+#     does not exist on a single-user machine.
+#
+# There IS one real untrusted-input boundary: the agent ingests external
+# content (repo contents, web pages, MCP/tool output, other models' output).
+# Injection sinks reachable from THAT data are in scope, so the command /
+# path / request-forgery / regex queries are deliberately KEPT below.
+#
+# Suite: security-extended is retained (NOT the default code-scanning suite)
+# specifically to keep js/indirect-command-line-injection, which is
+# @precision medium and would be dropped by the default suite. query-filters
+# can only remove queries a suite already selected, not add them back.
+# ---------------------------------------------------------------------------
+
+queries:
+  - uses: security-extended
+
+# Non-production code is not attack surface. Alerts here are pure noise.
+paths-ignore:
+  - tests
+  - tests2
+  - scripts
+  - tools          # dev-only tooling (e.g. tools/dummy-aigw test double)
+  - "**/*.test.ts"
+  - "**/*.spec.ts"
+  - "**/fixtures/**"
+  # NOTE: vite.config.ts is intentionally NOT ignored. Despite the name it is a
+  # 711-line reverse-proxy/gateway (origin checks, cookie/location rebasing, TLS)
+  # — part of the untrusted-agent boundary we keep in scope. Its log-injection /
+  # file-system-race noise is already covered by the rule excludes below; its
+  # js/disabling-certificate-validation findings must stay visible.
+
+# Each exclusion mutes a query whose threat model does not apply to a
+# single-user local tool. Verified @precision noted for auditability.
+query-filters:
+  # --- operator input -> operator's own terminal/logs (no trust boundary) ---
+  - exclude:
+      id: js/log-injection              # precision medium; forged log entries need an untrusted user
+  - exclude:
+      id: js/tainted-format-string      # precision high; CodeQL's own stated impact is "garbled output"
+  - exclude:
+      id: js/stack-trace-exposure       # precision very-high; "exposed to the user" == the operator
+
+  # --- assumes remote exfil / SSRF backdoor; requests go to own localhost, ---
+  # --- and the tool has full filesystem access by design --------------------
+  - exclude:
+      id: js/file-access-to-http        # precision medium; "outbound request" is to the tool's own server
+  - exclude:
+      id: js/http-to-file-access        # precision medium; network-data-to-file backdoor heuristic
+
+  # --- assumes a second local user on a shared host (negated by single-user) ---
+  - exclude:
+      id: js/insecure-temporary-file    # precision medium; predictable temp names only matter multi-user
+  - exclude:
+      id: js/file-system-race           # precision medium; TOCTOU by a competing process; also flags the
+                                        # safe openSync(path,"wx") atomic-create pattern (confirmed FP)
+
+  # --- DoS via property writes from an untrusted remote client (none exists) ---
+  - exclude:
+      id: js/remote-property-injection  # precision medium
+
+# Deliberately KEPT (reachable from untrusted external content the agent
+# processes, so still in scope): js/command-line-injection,
+# js/indirect-command-line-injection, js/shell-command-injection-from-environment,
+# js/path-injection, js/request-forgery, js/regex-injection, js/redos,
+# js/insecure-randomness.

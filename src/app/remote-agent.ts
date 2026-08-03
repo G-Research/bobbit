@@ -267,7 +267,14 @@ function parseGoalWorkflowValidationError(result: any, input?: Record<string, un
  * Duck-types the Agent interface from pi-agent-core so it can be used
  * with ChatPanel / AgentInterface without changes.
  */
-export type ConnectionStatus = "connected" | "reconnecting" | "disconnected";
+export type ConnectionStatus = "connected" | "reconnecting" | "starting" | "disconnected";
+
+class GatewayRetryError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "GatewayRetryError";
+	}
+}
 
 /** Canonical client-side session status. Mirrors the server's `SessionStatus`
  *  union (`src/server/agent/session-manager.ts`). The legacy boolean readers
@@ -528,8 +535,19 @@ export class RemoteAgent {
 	};
 	/** Timestamp of last streamingMessage update when content contains truncated blocks. */
 	private _lastTruncatedStreamUpdate = 0;
-	private static readonly MAX_RECONNECT_DELAY = 30_000;
-	private static readonly BASE_RECONNECT_DELAY = 1_000;
+	/**
+	 * Retry timer values are deliberately client-owned. Gateway availability
+	 * frames arrive before authentication, so their advisory metadata must never
+	 * influence a timer duration.
+	 */
+	private static readonly RECONNECT_DELAYS = [250, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const;
+
+	private _nextReconnectDelay(): number {
+		return RemoteAgent.RECONNECT_DELAYS[Math.min(
+			this._reconnectAttempt + 1,
+			RemoteAgent.RECONNECT_DELAYS.length - 1,
+		)];
+	}
 
 	// Agent interface properties (used by AgentInterface / ChatPanel)
 	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
@@ -812,23 +830,40 @@ export class RemoteAgent {
 			}
 		} catch { /* ignore */ }
 
-		// Race the WebSocket connect against a timeout so we don't hang
-		// forever on degraded mobile networks.
-		const timeout = new Promise<never>((_, reject) => {
-			setTimeout(() => reject(new Error("Connection timed out")), RemoteAgent.CONNECT_TIMEOUT_MS);
-		});
-
-		try {
-			await Promise.race([this._connectWs(true), timeout]);
-		} catch (err) {
-			// If timed out, clean up the pending WebSocket
-			this._intentionalDisconnect = true;
-			this.ws?.close();
-			this.ws = null;
-			throw err;
+		// An explicit SERVER_STARTING/SERVER_SATURATED frame is actionable: keep
+		// trying with bounded backoff instead of presenting the misleading generic
+		// 15-second timeout. Transport and auth failures retain the old behavior.
+		for (;;) {
+			try {
+				await this._connectInitialAttempt();
+				break;
+			} catch (err) {
+				if (!(err instanceof GatewayRetryError) || this._intentionalDisconnect) {
+					// If timed out, clean up the pending WebSocket.
+					this._intentionalDisconnect = true;
+					this.ws?.close();
+					this.ws = null;
+					throw err;
+				}
+				this._setConnectionStatus("starting");
+				const delay = this._nextReconnectDelay();
+				this._reconnectAttempt++;
+				await new Promise<void>((resolve) => setTimeout(resolve, delay));
+				if (this._intentionalDisconnect) throw new Error("Connection cancelled");
+			}
 		}
 	}
 
+
+	private _connectInitialAttempt(): Promise<void> {
+		return new Promise<void>((resolve, reject) => {
+			const timeout = setTimeout(() => reject(new Error("Connection timed out")), RemoteAgent.CONNECT_TIMEOUT_MS);
+			this._connectWs(true).then(
+				() => { clearTimeout(timeout); resolve(); },
+				(error) => { clearTimeout(timeout); reject(error); },
+			);
+		});
+	}
 
 	/**
 	 * Internal WebSocket connect. When `initial` is true the returned promise
@@ -847,6 +882,7 @@ export class RemoteAgent {
 			const ws = new WebSocket(wsUrl);
 			this.ws = ws;
 			let settled = false;
+			let suppressCloseReconnect = false;
 
 			ws.onopen = () => {
 				bootMark("ws-open");
@@ -929,6 +965,20 @@ export class RemoteAgent {
 						return;
 					} else if (msg.type === "error") {
 						settled = true;
+						if (msg.code === "SERVER_STARTING" || msg.code === "SERVER_SATURATED") {
+							suppressCloseReconnect = true;
+							const retry = new GatewayRetryError(
+								typeof msg.message === "string" ? msg.message : "Gateway is temporarily unavailable. Retrying automatically…",
+							);
+							ws.close(1013, msg.code);
+							if (initial) reject(retry);
+							else {
+								this._setConnectionStatus("starting");
+								this._scheduleReconnect();
+								resolve();
+							}
+							return;
+						}
 						if (initial) {
 							reject(new Error(msg.message || "Connection error"));
 						}
@@ -966,8 +1016,10 @@ export class RemoteAgent {
 					this.ws = null;
 					this._unregisterHostApiTransports("session WebSocket closed");
 				}
-				// If this wasn't an intentional disconnect, attempt to reconnect
-				if (!this._intentionalDisconnect) {
+				// An explicit gateway retry schedules its own delay above; every other
+				// unexpected close follows the normal reconnect path.
+				if (!this._intentionalDisconnect && !suppressCloseReconnect) {
+					this._setConnectionStatus("reconnecting");
 					this._scheduleReconnect();
 				}
 			};
@@ -981,14 +1033,9 @@ export class RemoteAgent {
 	}
 
 	private _scheduleReconnect(): void {
-		if (this._intentionalDisconnect) return;
+		if (this._intentionalDisconnect || this._reconnectTimer) return;
 
-		this._setConnectionStatus("reconnecting");
-
-		const delay = Math.min(
-			RemoteAgent.BASE_RECONNECT_DELAY * Math.pow(2, this._reconnectAttempt),
-			RemoteAgent.MAX_RECONNECT_DELAY,
-		);
+		const delay = this._nextReconnectDelay();
 		this._reconnectAttempt++;
 
 		this._reconnectTimer = setTimeout(async () => {

@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { cpuDiagnosticsEnabled, createCpuDiagnostics } from "../../src/server/agent/cpu-diagnostics.ts";
+import { cpuDiagnosticsEnabled, createCpuDiagnostics, createEventLoopLagMonitor } from "../../src/server/agent/cpu-diagnostics.ts";
 
 function deferred<T>() {
 	let resolve!: (value: T | PromiseLike<T>) => void;
@@ -228,6 +228,32 @@ describe("cpu diagnostics", () => {
 		} finally {
 			await diag.shutdown();
 			errorLog.mockRestore();
+		}
+	});
+});
+
+describe("always-on event-loop lag guard", () => {
+	it("attributes a blocking persistence operation, exposes a bounded busy window, and includes bytes in its warning", () => {
+		let now = 10_000;
+		const warnings: string[] = [];
+		const monitor = createEventLoopLagMonitor({
+			thresholdMs: 250,
+			sampleMs: 1_000,
+			now: () => now,
+			warn: message => warnings.push(message),
+		});
+		try {
+			monitor.recordOperation("gate-store:serialize", 420, { bytes: 9_437_184 });
+			assert.equal(monitor.isSaturated(), true);
+			assert.equal(monitor.retryAfterMs(), 1_000, "the retry hint remains available for at least one sampling interval");
+			assert.match(warnings[0] ?? "", /blocked 420\.0ms during gate-store:serialize/);
+			assert.match(warnings[0] ?? "", /bytes=9437184/);
+
+			now += 1_001;
+			assert.equal(monitor.isSaturated(), false, "the busy response is transient and does not reject future connections indefinitely");
+			assert.equal(monitor.retryAfterMs(), 0);
+		} finally {
+			monitor.shutdown();
 		}
 	});
 });

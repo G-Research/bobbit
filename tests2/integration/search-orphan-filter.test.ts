@@ -9,11 +9,10 @@
  *  - weak-match message row (snippet has no <b>) dropped
  *  - weak-match goal row kept, with matchedOn === "metadata"
  *
- * Strategy: reach into the in-process gateway to index orphan rows directly
- * against a live FlexSearchStore, then query via the normal search path
- * (projectContextManager.searchAll) and assert the filter did its job.
- * This avoids racing the fire-and-forget indexer and keeps the tests fast
- * and deterministic.
+ * Strategy: inject orphan rows through SearchService's worker-RPC fixture
+ * seam, then query via the normal search path (projectContextManager.searchAll)
+ * and assert the filter did its job. This avoids racing the fire-and-forget
+ * indexer without exposing a main-thread FlexSearchStore.
  *
  * ## Test isolation (history note)
  *
@@ -97,9 +96,7 @@ async function upsertSyntheticDoc(
 	const ctx = pcm(tracker.gw).getOrCreate(tracker.projectId);
 	expect(ctx).toBeTruthy();
 	await ctx.searchIndex.whenReady();
-	const store = ctx.searchIndex.getStore();
-	expect(store).toBeTruthy();
-	await store.upsert([doc]);
+	await ctx.searchIndex.injectDocumentsForTest([doc]);
 	if (track) tracker.ids.push(String(doc.id));
 }
 
@@ -113,10 +110,9 @@ async function indexOrphan(
 async function purgeInserted(tracker: Inserted): Promise<void> {
 	if (tracker.ids.length === 0) return;
 	const ctx = pcm(tracker.gw).getOrCreate(tracker.projectId);
-	const store = ctx?.searchIndex?.getStore();
-	if (!store) return;
+	if (!ctx?.searchIndex) return;
 	try {
-		await store.deleteByIds(tracker.ids);
+		await ctx.searchIndex.deleteDocumentsForTest(tracker.ids);
 	} catch {
 		/* best-effort cleanup — don't mask the real test failure */
 	}
@@ -139,7 +135,6 @@ async function waitForSyntheticHit(
 	predicate: (row: any) => boolean,
 ): Promise<any> {
 	let lastOut: any;
-	let lastStoreDoc: unknown;
 	let matchedHit: any;
 	try {
 		await expect
@@ -152,8 +147,6 @@ async function waitForSyntheticHit(
 					// production orphan/weak-match filter drops real goal metadata matches, the
 					// searched hit still never appears and this helper times out.
 					await upsertSyntheticDoc(tracker, doc, { track: false });
-					const ctx = pcm(tracker.gw).getOrCreate(tracker.projectId);
-					lastStoreDoc = ctx?.searchIndex?.getStore()?.getById?.(String(doc.id));
 					lastOut = await searchAll(tracker.gw, query, tracker.projectId);
 					const hits = lastOut.results.filter(predicate);
 					matchedHit = hits[0];
@@ -163,7 +156,7 @@ async function waitForSyntheticHit(
 			)
 			.toBe(1);
 	} catch (err) {
-		console.error("[search-synthetic-hit-timeout]", JSON.stringify({ query, docId: doc.id, lastStoreDoc, lastOut }, null, 2));
+		console.error("[search-synthetic-hit-timeout]", JSON.stringify({ query, docId: doc.id, lastOut }, null, 2));
 		throw err;
 	}
 	return matchedHit;
