@@ -766,7 +766,7 @@ describe("BgProcessManager — docker", () => {
 		const completed = h2.mgr.list(S).find(p => p.id === info.id)!;
 		assert.equal(completed.terminalReason, "normal");
 		assert.equal(completed.exitCode, 37, "the wrapper's exact result wins over Docker's 125");
-		assert.equal((h2.store().get(S, info.id) as any).dockerExitWithoutStatusAt, undefined, "terminalization clears the persisted grace marker");
+		assert.equal((h2.store().get(S, info.id) as any).dockerExitWithoutStatusAt, null, "terminalization clears the persisted grace marker");
 	});
 
 	it("reload at an expired Docker status grace terminalizes spawn-failed and clears its marker", async () => {
@@ -798,9 +798,9 @@ describe("BgProcessManager — docker", () => {
 		assert.equal(failed.exitCode, null);
 		const persisted = h2.store().get(S, info.id) as any;
 		assert.equal(persisted.terminalReason, "spawn-failed");
-		assert.equal(persisted.dockerExitWithoutStatusAt, undefined, "terminalization removes the recovery marker");
+		assert.equal(persisted.dockerExitWithoutStatusAt, null, "terminalization clears the recovery marker");
 		const diskRecord = JSON.parse(fs.readFileSync(path.join(h2.stateDir, "bg-processes.json"), "utf-8")).processes[0];
-		assert.equal(diskRecord.dockerExitWithoutStatusAt, undefined, "cleared marker is persisted before the terminal outcome is exposed");
+		assert.equal(diskRecord.dockerExitWithoutStatusAt, null, "cleared marker is persisted before the terminal outcome is exposed");
 	});
 
 	it("restores kill intent and legacy Docker records without a status-grace marker", async () => {
@@ -809,7 +809,10 @@ describe("BgProcessManager — docker", () => {
 		const dockerCli = (argv: string[]) => {
 			calls.push(argv);
 			const target = argv.at(-1) ?? "";
-			if (target.endsWith(".pid")) return { code: 0, stdout: `4242\n${pidNonces.get(target) ?? "NONCE-D"}\n` };
+			if (target.endsWith(".pid")) {
+				const nonce = pidNonces.get(target);
+				return nonce == null ? { code: 1, stdout: "" } : { code: 0, stdout: `4242\n${nonce}\n` };
+			}
 			if (target.endsWith(".status")) return { code: 1, stdout: "" };
 			if (argv[0] === "inspect") return { code: 0, stdout: "true\n" };
 			if (argv.includes("-0")) return { code: 0, stdout: "" };
@@ -835,6 +838,11 @@ describe("BgProcessManager — docker", () => {
 		);
 
 		const legacy = seedDockerRecord(h2, S, { id: "bg-legacy" });
+		assert.ok(!Object.hasOwn(legacy, "dockerExitWithoutStatusAt"), "legacy record intentionally omits the new grace marker");
+		// Model the same live wrapper identity as the record. The old fallback nonce
+		// happened to match only this helper's default and obscured a missing pidfile
+		// fixture; an unreadable/mismatched pidfile correctly terminalizes as lost.
+		pidNonces.set(legacy.containerPid!, legacy.nonce);
 		await h2.mgr.restoreSession(S);
 		const legacyRestored = h2.mgr.list(S).find(p => p.id === legacy.id)!;
 		assert.equal(legacyRestored.status, "running", "legacy records without a grace marker still re-attach normally");
