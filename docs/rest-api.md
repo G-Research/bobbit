@@ -484,12 +484,10 @@ PR-status responses use the envelope directly:
 ```ts
 type PullRequestFastState = {
   number: number;
-  url: string;
+  url: string; // canonical credential-free HTTPS URL for the validated repository/number
   title: string;
-  state: string;
-  mergeable: string;
-  headRefName: string;
-  baseRefName: string;
+  state: "OPEN" | "MERGED" | "CLOSED";
+  mergeable: string | null;
   reviewDecision: string | null;
   viewerIsAdmin: boolean;
   viewerCanMergeAsAdmin: boolean;

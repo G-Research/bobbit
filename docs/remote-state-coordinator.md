@@ -28,7 +28,11 @@ A repository without `origin` remains valid local state. Its refresh path does n
 
 A pull-request identity combines normalized host, owner, repository, and either a resolved head identity or PR number. Once a head lookup returns a PR number, both selectors alias the same record.
 
-Only complete remotes hosted on GitHub or a configured trusted GitHub Enterprise host are eligible for PR lookup. Host and non-default port remain part of the identity, preserving enterprise separation and host-scoped `gh` credentials. Untrusted hosts, malformed paths, encoded separators, query strings, fragments, and trusted-looking substrings embedded in another URL are rejected rather than falling back to an independent lookup.
+Only complete remotes hosted on GitHub or a configured trusted GitHub Enterprise host are eligible for PR lookup. The Git transport identity remains port-sensitive, but PR/API authority is derived separately: SSH transport ports are dropped, while explicit HTTP(S) web/API ports remain part of the PR identity and every host-scoped `gh` call. Untrusted hosts, malformed paths, encoded separators, query strings, fragments, and trusted-looking substrings embedded in another URL are rejected rather than falling back to an independent lookup.
+
+A repository-scoped head lookup validates every candidate against the exact server-owned head and head repository. It selects the unique open PR when present; otherwise it selects the uniquely newest terminal PR, allowing safe branch reuse without a second external read. Ambiguous, malformed, or cross-repository results fail closed and retain any last-good snapshot. Candidate refs, repository ownership, and ordering fields are validation inputs only and are never published.
+
+Published PR URLs are reconstructed from the validated server-derived HTTPS authority, owner, repository, and positive PR number. Upstream URLs containing credentials, query strings, fragments, mismatched authorities, non-HTTPS schemes, or non-canonical paths are rejected. Clients apply the same safe-link shape defensively before assigning a URL to a navigation sink.
 
 ## Snapshot contract
 
