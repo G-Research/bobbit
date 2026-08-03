@@ -1,5 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
-import { ExternalLink, FileText, GitFork, Link, Pencil, RotateCcw, Trash2 } from "lucide";
+import { Activity, ExternalLink, FileText, GitFork, Link, Pencil, RotateCcw, Trash2 } from "lucide";
+import { openContextTraceInspector } from "./context-trace.js";
 import type { TemplateResult } from "lit";
 import { copySidebarLink, gatewayFetch, refreshAgentSession, refreshSessions, sessionDeepLink, sessionPathDeepLink, type SidebarCopyLinkTitle } from "./api.js";
 import { listLauncherEntrypoints, runResolvedLauncherEntrypoint, type LauncherDispatchResult, type SpawnLaunchTarget } from "./pack-entrypoints.js";
@@ -19,12 +20,14 @@ export type SessionActionId =
 	| "fork"
 	| "copy-link"
 	| "view-system-prompt"
+	| "view-context-trace"
 	| "open-new-window";
 
 export type ArchivedSessionActionId =
 	| "continue-archived"
 	| "copy-link"
 	| "view-system-prompt"
+	| "view-context-trace"
 	| "open-new-window";
 
 export interface SessionActionTrailingToggle {
@@ -76,6 +79,7 @@ const BUILTIN_PRIORITIES: Record<SessionActionId, number> = {
 	"fork": 40,
 	"copy-link": 50,
 	"view-system-prompt": 60,
+	"view-context-trace": 65,
 	"open-new-window": 70,
 };
 
@@ -83,6 +87,7 @@ const ARCHIVED_BUILTIN_PRIORITIES: Record<ArchivedSessionActionId, number> = {
 	"continue-archived": 10,
 	"copy-link": 20,
 	"view-system-prompt": 30,
+	"view-context-trace": 35,
 	"open-new-window": 40,
 };
 
@@ -215,6 +220,19 @@ export function buildArchivedSessionActions(input: BuildArchivedSessionActionsIn
 				event.preventDefault();
 				event.stopPropagation();
 				void import("../ui/dialogs/SystemPromptDialog.js").then(({ SystemPromptDialog }) => SystemPromptDialog.show(session.id));
+			},
+		},
+		{
+			id: "view-context-trace",
+			label: "View context trace",
+			title: "Inspect read-only context provider activity",
+			icon: icon(Activity, "xs"),
+			priority: ARCHIVED_BUILTIN_PRIORITIES["view-context-trace"],
+			quick: false,
+			run: (event: Event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				openContextTraceInspector(session.id, event.currentTarget instanceof HTMLElement ? event.currentTarget : undefined);
 			},
 		},
 		{
@@ -362,6 +380,19 @@ export function buildSessionActions(input: BuildSessionActionsInput): SessionAct
 			run: (event: Event) => {
 				event.stopPropagation();
 				void import("../ui/dialogs/SystemPromptDialog.js").then(({ SystemPromptDialog }) => SystemPromptDialog.show(session.id));
+			},
+		},
+		{
+			id: "view-context-trace",
+			label: "View context trace",
+			title: "Inspect read-only context provider activity",
+			icon: icon(Activity, "xs"),
+			priority: BUILTIN_PRIORITIES["view-context-trace"],
+			quick: false,
+			run: (event: Event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				openContextTraceInspector(session.id, event.currentTarget instanceof HTMLElement ? event.currentTarget : undefined);
 			},
 		},
 		{
