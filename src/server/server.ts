@@ -2,7 +2,7 @@ import { exec } from "node:child_process";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory } from "./agent/rpc-bridge.js";
 import { resolveGatewayDeps, realCommandRunner, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
-import { RemoteStateCoordinator, type RemoteStateAddress, type RemoteStateIntent } from "./remote-state-coordinator.js";
+import { RemoteStateCoordinator, type RemoteStateAddress, type RemoteStateIntent, type RepositorySnapshotBinding } from "./remote-state-coordinator.js";
 import { resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
 export type { Clock, CommandRunner, ExecFileResult, FsLike, GatewayDeps, ResolvedGatewayDeps, TimerHandle } from "./gateway-deps.js";
 export { defaultRpcBridgeFactory, realClock, realCommandRunner, realFetch, realFs, resolveGatewayDeps } from "./gateway-deps.js";
@@ -2704,7 +2704,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					return { fetched: identity.hasRemote };
 				},
 			});
-			const snapshot = await remoteStateCoordinator.ensureFreshRepository(key);
+			const snapshot = await remoteStateCoordinator.ensureFreshRepository<{ fetched: boolean }>(key);
 			return { ...snapshot, hasRemote: identity.hasRemote };
 		},
 	});
@@ -2734,6 +2734,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		containerId: string | undefined,
 		address: RemoteStateAddress,
 		intentValue: string | null,
+		binding?: RepositorySnapshotBinding,
 	) => {
 		const forceRequestedAt = performance.now();
 		const legacyFetch = intentValue === "force";
@@ -2747,17 +2748,20 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const identity = await remoteStateCoordinator.resolveRepositoryIdentity({
 				cwd,
 				executionNamespace: containerId ? `container:${containerId}` : undefined,
+				...(containerId ? {
+					executeGit: (args: readonly string[], timeoutMs: number) => execGitArgs([...args], cwd, timeoutMs, containerId, gatewayDeps.commandRunner),
+				} : {}),
 			});
 			const key = remoteStateCoordinator.registerRepository(identity, {
-				// A canonical repository record owns fetched-ref freshness only. Git
-				// status is worktree-local (branch, dirty files, untracked names), so
-				// it is always collected by the addressed route below and is never
-				// retained or broadcast by this shared record.
+				// A canonical repository record owns fetched-ref freshness. After it
+				// completes, each bound entity recomputes its own local status without
+				// further remote I/O so sibling dirty state remains isolated.
 				refresh: async (): Promise<void> => {
 					if (identity.hasRemote) await execGit("git fetch --quiet", cwd, 15_000, containerId, gatewayDeps.commandRunner);
 					invalidateGitStatusCache(cwd, containerId);
 				},
 				address,
+				binding,
 			});
 			return force
 				? remoteStateCoordinator.refreshSnapshot(key, readOpts)
@@ -2781,8 +2785,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		containerId: string | undefined,
 		address: RemoteStateAddress,
 		intentValue: string | null,
+		binding?: RepositorySnapshotBinding,
 	) => {
-		const results = await Promise.allSettled(worktrees.map(worktree => gitSnapshotFor(worktree, containerId, address, intentValue)));
+		const results = await Promise.allSettled(worktrees.map(worktree => gitSnapshotFor(worktree, containerId, address, intentValue, binding)));
 		return results.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
 	};
 	const publicGitSnapshot = (snapshots: readonly any[]) => {
@@ -2807,6 +2812,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const identity = await remoteStateCoordinator.resolveRepositoryIdentity({
 				cwd,
 				executionNamespace: containerId ? `container:${containerId}` : undefined,
+				...(containerId ? {
+					executeGit: (args: readonly string[], timeoutMs: number) => execGitArgs([...args], cwd, timeoutMs, containerId, gatewayDeps.commandRunner),
+				} : {}),
 			});
 			remoteStateCoordinator.invalidate(identity.key, { allowImmediateRefresh: true });
 		} catch {
@@ -12489,24 +12497,34 @@ async function handleApiRoute(
 		try {
 			const address = { kind: "goal", id: goalId } as const;
 			const worktrees = [...new Set([cwd, ...components.map(component => component.worktreePath)])];
+			const collectStatus = (untracked: boolean) => collectGitStatusEnvelope({
+				rootPath: cwd,
+				components,
+				probe: worktreePath => batchGitStatus(worktreePath, cid, { untracked, configuredBaseRef: goalBaseRef }),
+				pathExists: cid ? undefined : fs.existsSync,
+			});
+			const binding: RepositorySnapshotBinding = {
+				address,
+				invalidate: () => { for (const worktree of worktrees) invalidateGitStatusCache(worktree, cid); },
+				project: async () => {
+					const projected = await collectStatus(false);
+					if (projected.kind !== "success") throw new Error("Local Git status projection failed");
+					return projected.envelope;
+				},
+			};
 			const intentValue = shouldFetch ? "force" : url.searchParams.get("intent");
 			const isExplicit = intentValue === "force" || intentValue === "explicit";
 			// Explicit revalidation must complete before local status is sampled so
 			// ahead/behind data reflects the fetched refs in this same response.
 			let remoteSnapshots = isExplicit
-				? await remoteState.gitSnapshotsFor(worktrees, cid, address, intentValue)
+				? await remoteState.gitSnapshotsFor(worktrees, cid, address, intentValue, binding)
 				: undefined;
 			if (isExplicit) {
 				for (const worktree of worktrees) invalidateGitStatusCache(worktree, cid);
 			}
-			const collected = await collectGitStatusEnvelope({
-				rootPath: cwd,
-				components,
-				probe: worktreePath => batchGitStatus(worktreePath, cid, { untracked: goalUntracked, configuredBaseRef: goalBaseRef }),
-				pathExists: cid ? undefined : fs.existsSync,
-			});
+			const collected = await collectStatus(goalUntracked);
 			if (collected.kind === "success") {
-				remoteSnapshots ??= await remoteState.gitSnapshotsFor(worktrees, cid, address, intentValue);
+				remoteSnapshots ??= await remoteState.gitSnapshotsFor(worktrees, cid, address, intentValue, binding);
 				const snapshot = remoteState.publicGitSnapshot(remoteSnapshots);
 				// Preserve the established flat GitStatusEnvelope as the response owner
 				// while attaching copied coordinator metadata and a nested data projection.
@@ -14671,24 +14689,34 @@ async function handleApiRoute(
 		try {
 			const address = { kind: "session", id } as const;
 			const worktrees = [...new Set([cwd, ...components.map(component => component.worktreePath)])];
+			const collectStatus = (untracked: boolean) => collectGitStatusEnvelope({
+				rootPath: cwd,
+				components,
+				probe: worktreePath => batchGitStatus(worktreePath, cid, { untracked, configuredBaseRef: sessionBaseRef }),
+				pathExists: cid ? undefined : fs.existsSync,
+			});
+			const binding: RepositorySnapshotBinding = {
+				address,
+				invalidate: () => { for (const worktree of worktrees) invalidateGitStatusCache(worktree, cid); },
+				project: async () => {
+					const projected = await collectStatus(false);
+					if (projected.kind !== "success") throw new Error("Local Git status projection failed");
+					return projected.envelope;
+				},
+			};
 			const intentValue = shouldFetch ? "force" : url.searchParams.get("intent");
 			const isExplicit = intentValue === "force" || intentValue === "explicit";
 			// Explicit revalidation must complete before local status is sampled so
 			// ahead/behind data reflects the fetched refs in this same response.
 			let remoteSnapshots = isExplicit
-				? await remoteState.gitSnapshotsFor(worktrees, cid, address, intentValue)
+				? await remoteState.gitSnapshotsFor(worktrees, cid, address, intentValue, binding)
 				: undefined;
 			if (isExplicit) {
 				for (const worktree of worktrees) invalidateGitStatusCache(worktree, cid);
 			}
-			const collected = await collectGitStatusEnvelope({
-				rootPath: cwd,
-				components,
-				probe: worktreePath => batchGitStatus(worktreePath, cid, { untracked: sessUntracked, configuredBaseRef: sessionBaseRef }),
-				pathExists: cid ? undefined : fs.existsSync,
-			});
+			const collected = await collectStatus(sessUntracked);
 			if (collected.kind === "success") {
-				remoteSnapshots ??= await remoteState.gitSnapshotsFor(worktrees, cid, address, intentValue);
+				remoteSnapshots ??= await remoteState.gitSnapshotsFor(worktrees, cid, address, intentValue, binding);
 				const snapshot = remoteState.publicGitSnapshot(remoteSnapshots);
 				// Preserve the established flat GitStatusEnvelope as the response owner
 				// while attaching copied coordinator metadata and a nested data projection.

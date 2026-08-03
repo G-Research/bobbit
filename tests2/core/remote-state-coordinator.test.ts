@@ -145,6 +145,48 @@ describe("RemoteStateCoordinator", () => {
 		assert.equal(calls, 2, "active demand revalidates at 20 seconds");
 	});
 
+	it("reprojects entity-local repository status to every bound address after one refresh", async () => {
+		const clock = new ManualClock();
+		const events: Array<{ address: string; snapshot: RemoteStateSnapshot<unknown> }> = [];
+		const invalidated: string[] = [];
+		let refreshes = 0;
+		const coordinator = new RemoteStateCoordinator({
+			clock,
+			broadcast: (address, snapshot) => events.push({ address: `${address.kind}:${address.id}`, snapshot }),
+		});
+		const identity = { key: "repo:shared", hasRemote: true };
+		const key = coordinator.registerRepository(identity, {
+			refresh: async () => { refreshes += 1; },
+			address: { kind: "session", id: "s1" },
+			binding: {
+				address: { kind: "session", id: "s1" },
+				invalidate: () => { invalidated.push("session"); },
+				project: async () => {
+					assert.deepEqual(invalidated.sort(), ["goal", "session"]);
+					return { branch: "feature/session", dirty: true };
+				},
+			},
+		});
+		coordinator.registerRepository(identity, {
+			refresh: async () => { refreshes += 1; },
+			address: { kind: "goal", id: "g1" },
+			binding: {
+				address: { kind: "goal", id: "g1" },
+				invalidate: () => { invalidated.push("goal"); },
+				project: async () => ({ branch: "feature/goal", dirty: false }),
+			},
+		});
+
+		await coordinator.refreshSnapshot(key, { intent: "explicit" });
+		assert.equal(refreshes, 1);
+		assert.equal(events.length, 2, "each public entity receives one completion frame");
+		assert.deepEqual(
+			events.map(event => [event.address, (event.snapshot.data as { branch: string }).branch]).sort(),
+			[["goal:g1", "feature/goal"], ["session:s1", "feature/session"]],
+		);
+		assert.equal(events.every(event => event.snapshot.refreshedAt === clock.value && event.snapshot.stale === false), true);
+	});
+
 	it("bounds distinct refreshes and emits one safe completion per public address", async () => {
 		const clock = new ManualClock();
 		const broadcasts: Array<{ address: string; snapshot: RemoteStateSnapshot<unknown> }> = [];

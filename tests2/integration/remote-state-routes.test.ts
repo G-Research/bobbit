@@ -162,16 +162,17 @@ test.describe("remote-state coordinator routes", () => {
 			expect(JSON.stringify(primaryBody)).not.toContain("SIBLING_ONLY_DIRTY.txt");
 			expect(JSON.stringify(siblingBody)).toContain("SIBLING_ONLY_DIRTY.txt");
 
-			// A completion is entity-addressed only to consumers bound before that
-			// single-flight finishes. A concurrent route may instead receive the same
-			// fresh authoritative response without causing a duplicate broadcast.
+			// The one canonical completion recomputes and broadcasts entity-local
+			// status for both sibling consumers without sharing untracked state.
 			await new Promise<void>(resolve => setImmediate(resolve));
 			const gitFrames = [
 				...primaryWs.messages.slice(primaryCursor),
 				...siblingWs.messages.slice(siblingCursor),
 			].filter(message => message.type === "remote_state_snapshot" && message.resource === "git");
-			expect(gitFrames.length).toBeGreaterThan(0);
+			expect(gitFrames).toHaveLength(2);
+			expect(new Set(gitFrames.map(frame => frame.sessionId))).toEqual(new Set([primarySession, siblingSession]));
 			for (const frame of gitFrames) {
+				expect(frame.snapshot.data).toMatchObject({ branch: expect.any(String) });
 				expect(JSON.stringify(frame)).not.toContain("SIBLING_ONLY_DIRTY.txt");
 				expect(JSON.stringify(frame)).not.toContain("token:secret");
 			}

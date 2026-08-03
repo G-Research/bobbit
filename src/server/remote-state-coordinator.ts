@@ -33,6 +33,8 @@ export interface RepositoryIdentityInput {
 	cwd: string;
 	/** Different execution environments with coincident paths must not share state. */
 	executionNamespace?: string;
+	/** Runs Git in the repository's execution environment (for example, a sandbox). */
+	executeGit?: (args: readonly string[], timeoutMs: number) => Promise<string>;
 }
 
 export interface RepositoryIdentity {
@@ -96,11 +98,25 @@ interface RemoteStateRecord<T> {
 	lastError?: RemoteStateLastError;
 	inFlight?: Promise<void>;
 	readonly addresses: Map<string, RemoteStateAddress>;
+	readonly repositoryBindings: Map<string, RepositorySnapshotBinding>;
 }
 
 interface RegisterOptions<T> {
 	refresh: Refresh<T>;
 	address?: RemoteStateAddress;
+}
+
+/** Entity-local projection recomputed after shared repository refs refresh. */
+export interface RepositorySnapshotBinding<T = unknown> {
+	address: RemoteStateAddress;
+	/** Invalidates every local-status cache owned by this entity before projection. */
+	invalidate?: () => void;
+	/** Must perform local-only work; remote I/O remains owned by the canonical refresh. */
+	project: () => Promise<T>;
+}
+
+interface RegisterRepositoryOptions<T> extends RegisterOptions<T> {
+	binding?: RepositorySnapshotBinding;
 }
 
 const REPOSITORY_PREFIX = "repo:";
@@ -259,7 +275,7 @@ export class RemoteStateCoordinator {
 		const existing = this.repositoryIdentityInFlight.get(executionAlias);
 		if (existing) return { ...(await existing) };
 
-		const pending = this.resolveRepositoryIdentityUncached(input.cwd, executionNamespace);
+		const pending = this.resolveRepositoryIdentityUncached(input.cwd, executionNamespace, input.executeGit);
 		this.repositoryIdentityInFlight.set(executionAlias, pending);
 		try {
 			return { ...(await pending) };
@@ -270,16 +286,20 @@ export class RemoteStateCoordinator {
 		}
 	}
 
-	private async resolveRepositoryIdentityUncached(cwd: string, executionNamespace: string): Promise<RepositoryIdentity> {
+	private async resolveRepositoryIdentityUncached(
+		cwd: string,
+		executionNamespace: string,
+		executeGit?: RepositoryIdentityInput["executeGit"],
+	): Promise<RepositoryIdentity> {
 		await this.acquireIdentityProbe();
 		try {
 			// Older Git versions do not support --path-format. Only this compatibility
 			// probe may fail silently; all other probe failures remain generic.
-			const commonDir = await this.readGit(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"], { suppressFailure: true })
-				?? await this.readGit(cwd, ["rev-parse", "--git-common-dir"]);
+			const commonDir = await this.readGit(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"], { suppressFailure: true }, executeGit)
+				?? await this.readGit(cwd, ["rev-parse", "--git-common-dir"], {}, executeGit);
 			if (!commonDir) throw new Error("Unable to resolve Git common directory");
 			const normalizedCommonDir = normalizeLocalPath(isAbsolutePath(commonDir) ? commonDir : path.resolve(cwd, commonDir));
-			const origin = await this.readGit(cwd, ["remote", "get-url", "origin"], { missingRemoteIsUndefined: true });
+			const origin = await this.readGit(cwd, ["remote", "get-url", "origin"], { missingRemoteIsUndefined: true }, executeGit);
 			const remote = origin ? normalizeRemoteIdentity(origin) : LOCAL_REMOTE;
 			const canonicalAlias = `${executionNamespace}\0${normalizedCommonDir}\0${remote}`;
 			const existing = this.repositoryAliases.get(canonicalAlias);
@@ -301,8 +321,13 @@ export class RemoteStateCoordinator {
 		return { key };
 	}
 
-	registerRepository<T>(identity: RepositoryIdentity, options: RegisterOptions<T>): string {
-		return this.register(identity.key, "repository", options);
+	registerRepository<T>(identity: RepositoryIdentity, options: RegisterRepositoryOptions<T>): string {
+		const key = this.register(identity.key, "repository", options);
+		if (options.binding) {
+			const record = this.requireRecord(key);
+			record.repositoryBindings.set(addressKey(options.binding.address), options.binding);
+		}
+		return key;
 	}
 
 	registerPullRequest<T>(identity: PullRequestIdentity, options: RegisterOptions<T>): string {
@@ -374,6 +399,7 @@ export class RemoteStateCoordinator {
 			failureCount: 0,
 			nextRetryAt: 0,
 			addresses: new Map(),
+			repositoryBindings: new Map(),
 		};
 		if (options.address) record.addresses.set(addressKey(options.address), { ...options.address });
 		this.records.set(key, record as RemoteStateRecord<unknown>);
@@ -430,9 +456,12 @@ export class RemoteStateCoordinator {
 				const exponent = Math.min(record.failureCount - 1, 16);
 				record.nextRetryAt = now + Math.min(this.backoffMaxMs, this.backoffBaseMs * 2 ** exponent);
 			} finally {
-				record.inFlight = undefined;
+				// Remote admission is released before entity-local projection. The
+				// canonical in-flight promise remains installed until fanout completes,
+				// so forced callers still join rather than starting duplicate fetches.
 				this.release();
-				this.broadcastRecord(record);
+				await this.broadcastRecord(record);
+				record.inFlight = undefined;
 			}
 		};
 		record.inFlight = this.acquire().then(refresh);
@@ -464,25 +493,59 @@ export class RemoteStateCoordinator {
 		};
 	}
 
-	private broadcastRecord(record: RemoteStateRecord<unknown>): void {
+	private async broadcastRecord(record: RemoteStateRecord<unknown>): Promise<void> {
 		if (!this.broadcast) return;
+		const projectedAddresses = new Set<string>();
+
+		if (record.source === "repository" && record.repositoryBindings.size > 0) {
+			// Invalidate every bound entity before any projector runs. This ensures a
+			// refresh owned by one sibling worktree cannot leave another sibling's
+			// short-lived local status cache pinned to pre-fetch refs.
+			for (const binding of record.repositoryBindings.values()) {
+				try { binding.invalidate?.(); } catch { /* local cache invalidation is best-effort */ }
+			}
+			for (const binding of record.repositoryBindings.values()) {
+				const key = addressKey(binding.address);
+				projectedAddresses.add(key);
+				try {
+					const data = await binding.project();
+					const snapshot = { ...this.snapshot(record, this.clock.now(), "active"), data: safeClone(data) };
+					this.emit(binding.address, snapshot);
+				} catch {
+					// A local projector failure must not turn a successful canonical fetch
+					// into a remote failure. Metadata still tells the entity that refs were
+					// refreshed; its next normal local read can recover independently.
+					this.emit(binding.address, this.snapshot(record, this.clock.now(), "active"));
+				}
+			}
+		}
+
 		const snapshot = this.snapshot(record, this.clock.now(), "active");
-		for (const address of record.addresses.values()) this.broadcast({ ...address }, safeClone(snapshot));
+		for (const address of record.addresses.values()) {
+			if (!projectedAddresses.has(addressKey(address))) this.emit(address, snapshot);
+		}
+	}
+
+	private emit(address: RemoteStateAddress, snapshot: RemoteStateSnapshot<unknown>): void {
+		try { this.broadcast?.({ ...address }, safeClone(snapshot)); } catch { /* broadcast failure cannot strand canonical state */ }
 	}
 
 	private async readGit(
 		cwd: string,
 		args: string[],
 		options: { suppressFailure?: boolean; missingRemoteIsUndefined?: boolean } = {},
+		executeGit?: RepositoryIdentityInput["executeGit"],
 	): Promise<string | undefined> {
 		try {
-			const result = await this.commandRunner.execFile("git", args, {
-				cwd,
-				encoding: "utf-8",
-				windowsHide: true,
-				timeout: this.identityProbeTimeoutMs,
-			});
-			const value = result.stdout.toString().trim();
+			const stdout = executeGit
+				? await executeGit(args, this.identityProbeTimeoutMs)
+				: (await this.commandRunner.execFile("git", args, {
+					cwd,
+					encoding: "utf-8",
+					windowsHide: true,
+					timeout: this.identityProbeTimeoutMs,
+				})).stdout.toString();
+			const value = stdout.trim();
 			return value || undefined;
 		} catch (error) {
 			if (options.suppressFailure && !isIdentityProbeTimeout(error)) return undefined;

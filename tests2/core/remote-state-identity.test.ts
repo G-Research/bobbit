@@ -52,6 +52,33 @@ describe("remote state canonical identity", () => {
 		assert.ok(!a.key.includes("token"));
 	});
 
+	it("runs sandbox identity probes through the execution-aware Git adapter", async () => {
+		const calls: Array<{ args: readonly string[]; timeoutMs: number }> = [];
+		const coordinator = new RemoteStateCoordinator({
+			commandRunner: {
+				async execFile() { throw new Error("host Git must not run for sandbox identity"); },
+			},
+			identityProbeTimeoutMs: 1_234,
+		});
+		const identity = await coordinator.resolveRepositoryIdentity({
+			cwd: "/workspace-wt/session/feature",
+			executionNamespace: "container:test",
+			executeGit: async (args, timeoutMs) => {
+				calls.push({ args: [...args], timeoutMs });
+				if (args[0] === "rev-parse") return "/workspace/.git";
+				if (args[0] === "remote") return "git@github.com:Acme/Widget.git";
+				throw new Error("unexpected Git probe");
+			},
+		});
+
+		assert.equal(identity.hasRemote, true);
+		assert.deepEqual(calls.map(call => call.args.join(" ")), [
+			"rev-parse --path-format=absolute --git-common-dir",
+			"remote get-url origin",
+		]);
+		assert.equal(calls.every(call => call.timeoutMs === 1_234), true);
+	});
+
 	it("marks repositories without origin local so callers can remain fetch-free", async () => {
 		const coordinator = new RemoteStateCoordinator({
 			commandRunner: gitIdentityRunner({ "/repo": { commonDir: "/repo/.git" } }),
