@@ -258,7 +258,8 @@ type SessionStoreFs = FsLike & {
 type DiskFingerprint = {
 	size: number;
 	mtimeMs: number;
-	ctimeMs?: number;
+	/** Required: without a change-time value metadata is not a safe fast-path. */
+	ctimeMs: number;
 };
 
 export interface PersistenceMetrics {
@@ -294,6 +295,13 @@ export class SessionStore {
 	private persistenceFailureSequence = 0;
 	private lastPersistenceError: unknown = null;
 	private lastPersistenceMetrics: PersistenceMetrics | null = null;
+
+	/**
+	 * Serialize whole-file publication across store instances in this process.
+	 * A per-instance drain is insufficient: two independently constructed
+	 * stores otherwise both rotate backups and write the shared `.tmp` path.
+	 */
+	private static fileWriteTails = new Map<string, Promise<void>>();
 
 	constructor(stateDir: string, fsImpl: FsLike = realFs, clock: Clock = realClock) {
 		this.fs = fsImpl as SessionStoreFs;
@@ -426,6 +434,29 @@ export class SessionStore {
 			&& a.ctimeMs === b.ctimeMs;
 	}
 
+	/**
+	 * Atomically reserve this file's write slot before awaiting the prior writer.
+	 * The reservation, rather than a best-effort `.tmp` convention, prevents two
+	 * SessionStore instances from interleaving backup rotation and tmp+rename.
+	 */
+	private async withFileWriteFence<T>(write: () => Promise<T>): Promise<T> {
+		const key = path.resolve(this.storeFile);
+		const previous = SessionStore.fileWriteTails.get(key) ?? Promise.resolve();
+		let release!: () => void;
+		const completion = new Promise<void>((resolve) => { release = resolve; });
+		const tail = previous.catch(() => undefined).then(() => completion);
+		SessionStore.fileWriteTails.set(key, tail);
+		await previous.catch(() => undefined);
+		try {
+			return await write();
+		} finally {
+			release();
+			if (SessionStore.fileWriteTails.get(key) === tail) {
+				SessionStore.fileWriteTails.delete(key);
+			}
+		}
+	}
+
 
 	private async peekDiskEpochAsync(): Promise<number> {
 		try {
@@ -448,11 +479,11 @@ export class SessionStore {
 			const mtimeMs = Number(stat.mtimeMs);
 			if (!Number.isFinite(size) || !Number.isFinite(mtimeMs)) return null;
 			const ctimeMs = Number(stat.ctimeMs);
-			return {
-				size,
-				mtimeMs,
-				...(Number.isFinite(ctimeMs) ? { ctimeMs } : {}),
-			};
+			// Size + mtime is not a sufficient identity on filesystems that expose
+			// coarse timestamp resolution. Re-read the epoch when ctime is absent
+			// instead of treating an external same-size rewrite as our own write.
+			if (!Number.isFinite(size) || !Number.isFinite(mtimeMs) || !Number.isFinite(ctimeMs)) return null;
+			return { size, mtimeMs, ctimeMs };
 		} catch {
 			return null;
 		}
@@ -507,6 +538,11 @@ export class SessionStore {
 
 	/** Promise-based save preserving epoch checks, backups, fsync, and atomic rename. */
 	private async saveNowAsync(): Promise<number> {
+		return this.withFileWriteFence(() => this.saveNowUnlockedAsync());
+	}
+
+	/** Runs inside the per-file fence so check, backup rotation, and rename agree. */
+	private async saveNowUnlockedAsync(): Promise<number> {
 		if (this.staleGuardTripped) {
 			throw new Error("Session persistence refused: stale-snapshot guard is active");
 		}
@@ -588,7 +624,9 @@ export class SessionStore {
 				} catch (err) {
 					this.persistenceFailureSequence++;
 					this.lastPersistenceError = err;
-					console.error("[session-store] Failed to save sessions:", err);
+					// The stale guard already emitted its actionable REFUSING diagnostic.
+					// Keep hot-path retries quiet while explicit barriers still reject.
+					if (!this.staleGuardTripped) console.error("[session-store] Failed to save sessions:", err);
 					// Do not spin on a broken disk. A later mutation or explicit barrier
 					// may retry; barriers observe this failure instead of false success.
 					this.asyncSaveRequested = false;
@@ -775,14 +813,16 @@ export class SessionStore {
 			if (this.asyncSaveInFlight) await this.asyncSaveInFlight;
 			return false;
 		}
+		const failureSequence = this.persistenceFailureSequence;
 		this.generation++;
+		const targetGeneration = this.generation;
 		existing.archived = true;
 		existing.archivedAt = this.clock.now();
 		if (this.saveTimer) {
 			this.clock.clearTimeout(this.saveTimer);
 			this.saveTimer = null;
 		}
-		await this.requestAsyncSave();
+		await this.persistThroughGeneration(targetGeneration, failureSequence);
 		this.onIndexUpdate?.(existing);
 		return true;
 	}
@@ -839,13 +879,18 @@ export class SessionStore {
 			if (this.asyncSaveInFlight) await this.asyncSaveInFlight;
 			return false;
 		}
+		const failureSequence = this.persistenceFailureSequence;
 		this.generation++;
+		const targetGeneration = this.generation;
 		this.sessions.delete(id);
 		if (this.saveTimer) {
 			this.clock.clearTimeout(this.saveTimer);
 			this.saveTimer = null;
 		}
-		await this.requestAsyncSave();
+		// A promise-returning purge is a durability barrier. Never record the
+		// migration tombstone as if its matching row deletion had been published
+		// when the fenced sessions write was rejected.
+		await this.persistThroughGeneration(targetGeneration, failureSequence);
 		await recordDeletionTombstoneAsync(this.storeDir, "sessions.json", id, this.fs.promises);
 		return true;
 	}
@@ -873,17 +918,23 @@ export class SessionStore {
 			this.clock.clearTimeout(this.saveTimer);
 			this.saveTimer = null;
 		}
-		const targetGeneration = this.generation;
-		const failureSequence = this.persistenceFailureSequence;
+		await this.persistThroughGeneration(this.generation, this.persistenceFailureSequence);
+	}
+
+	/**
+	 * Wait until one fixed mutation generation is atomically published.
+	 * Do not start a speculative zero-generation writer: it can outlive a flush
+	 * caller and leaves a settlement-boundary mutation attached to a stale drain.
+	 */
+	private async persistThroughGeneration(targetGeneration: number, failureSequence: number): Promise<void> {
 		// Stop as soon as this call's generation is durable; unrelated traffic
 		// must not make creation/shutdown barriers wait indefinitely.
-		let pending: Promise<void> | null = this.asyncSaveInFlight ?? this.requestAsyncSave();
 		while (this.publishedGeneration < targetGeneration) {
+			const pending = this.asyncSaveInFlight ?? this.requestAsyncSave();
 			await pending;
 			if (this.persistenceFailureSequence !== failureSequence) {
 				throw this.lastPersistenceError ?? new Error("Session persistence failed");
 			}
-			pending = this.asyncSaveInFlight ?? this.requestAsyncSave();
 		}
 		if (this.persistenceFailureSequence !== failureSequence) {
 			throw this.lastPersistenceError ?? new Error("Session persistence failed");

@@ -94,7 +94,7 @@ describe("SessionStore stale-snapshot guard", () => {
 		try {
 			// Trigger and await the async durability barrier for an in-memory put.
 			store.put(makeSession("s-stale"));
-			await store.flushAsync();
+			await assert.rejects(store.flushAsync(), /stale-snapshot|newer than loaded epoch/i);
 
 			// On-disk file must be unchanged (still epoch 50, external-1).
 			const onDisk = JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"));
@@ -112,7 +112,7 @@ describe("SessionStore stale-snapshot guard", () => {
 		// Subsequent put — still no write.
 		const errsBefore = errors.length;
 		store.put(makeSession("s-stale-2"));
-		await store.flushAsync();
+		await assert.rejects(store.flushAsync(), /stale-snapshot|newer than loaded epoch/i);
 		const onDisk2 = JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"));
 		assert.equal(onDisk2.epoch, 50, "second put still must not overwrite");
 		assert.equal(errors.length, errsBefore, "guard latched — no further error spam");
@@ -130,7 +130,7 @@ describe("SessionStore stale-snapshot guard", () => {
 		console.error = () => {};
 		try {
 			staleStore.put(makeSession("stale-writer"));
-			await staleStore.flushAsync();
+			await assert.rejects(staleStore.flushAsync(), /stale-snapshot|newer than loaded epoch/i);
 		} finally {
 			console.error = origErr;
 		}

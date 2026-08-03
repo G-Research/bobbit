@@ -313,7 +313,7 @@ describe("SessionStore real filesystem fidelity", () => {
 		assert.equal(readDeletionTombstones(stateDir, "sessions.json").has("victim"), true);
 	});
 
-	it("purgeAsync retains the stale epoch/fingerprint refusal", async () => {
+	it("purgeAsync rejects when the stale epoch guard refuses its durable delete", async () => {
 		const root = freshRoot();
 		const stateDir = path.join(root, "state");
 		const storeFile = path.join(stateDir, "sessions.json");
@@ -332,7 +332,7 @@ describe("SessionStore real filesystem fidelity", () => {
 		const originalError = console.error;
 		console.error = (...args: unknown[]) => { errors.push(args); };
 		try {
-			assert.equal(await stale.purgeAsync("victim"), true);
+			await assert.rejects(stale.purgeAsync("victim"), /stale-snapshot|newer than loaded epoch/i);
 		} finally {
 			console.error = originalError;
 		}
@@ -340,7 +340,11 @@ describe("SessionStore real filesystem fidelity", () => {
 		assert.equal(stale.isStaleGuardTripped(), true);
 		assert.deepEqual(JSON.parse(fs.readFileSync(storeFile, "utf-8")), external);
 		assert.ok(errors.some((args) => String(args[0]).includes("REFUSING to save")));
-		assert.equal(readDeletionTombstones(stateDir, "sessions.json").has("victim"), true);
+		assert.equal(
+			readDeletionTombstones(stateDir, "sessions.json").has("victim"),
+			false,
+			"a rejected durable purge must not publish a tombstone for a deletion that was not saved",
+		);
 	});
 
 	it("walks real nested transcript directories and ignores tracked or old jsonl files", async () => {
