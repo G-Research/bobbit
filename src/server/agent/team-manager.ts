@@ -1923,7 +1923,7 @@ export class TeamManager {
 			// already created a live lead, return it rather than treating the retry
 			// as a request to create another team. Scheduler calls retain their
 			// historical "already active" rejection semantics.
-			if (options.resumePaused && existingLead?.status !== "terminated") {
+			if (options.resumePaused && existingLead && existingLead.status !== "terminated") {
 				return existingLead;
 			}
 			if (options.resumePaused) {
@@ -1963,7 +1963,7 @@ export class TeamManager {
 				const resumedExistingLead = resumedExistingTeam.teamLeadSessionId
 					? this.sessionManager.getSession(resumedExistingTeam.teamLeadSessionId)
 					: undefined;
-				if (resumedExistingLead?.status !== "terminated") return resumedExistingLead;
+				if (resumedExistingLead && resumedExistingLead.status !== "terminated") return resumedExistingLead;
 				throw new TeamStartError(
 					"TEAM_LEAD_UNAVAILABLE",
 					"The existing team lead is unavailable. Stop the team before starting a replacement.",
