@@ -1965,20 +1965,44 @@ export async function refreshAgentSession(sessionId: string, opts?: { force?: bo
 // TEAM API
 // ============================================================================
 
+function startTeamFailureMessage(code?: string): string {
+	switch (code) {
+		case "GOAL_PAUSED":
+			return "The goal could not be resumed automatically. Resume it, then try starting the team again.";
+		case "SPEC_REQUIRED":
+			return "Add a goal specification, then try starting the team again.";
+		case "GOAL_NOT_FOUND":
+			return "This goal is no longer available. Refresh and try again.";
+		default:
+			return "The team could not be started. Try again, or refresh if the problem persists.";
+	}
+}
+
 export async function startTeam(goalId: string): Promise<string | null> {
+	let sessionId: string;
 	try {
-		const res = await gatewayFetch(`/api/goals/${goalId}/team/start`, {
+		const res = await gatewayFetch(`/api/goals/${encodeURIComponent(goalId)}/team/start`, {
 			method: "POST",
 		});
 		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		const data = await res.json();
-		await refreshSessions();
-		return data.sessionId;
+		if (typeof data?.sessionId !== "string" || !data.sessionId) {
+			throw new Error("The team start request did not return a session.");
+		}
+		sessionId = data.sessionId;
 	} catch (err) {
-		const { message, code, stack } = errorDetails(err);
-		showConnectionError("Failed to start team", message, { code, stack });
+		const code = errorDetails(err).code ?? "TEAM_START_FAILED";
+		// The server error can include implementation details (including a stack).
+		// Keep the actionable code, but never expose those details in this user flow.
+		void showConnectionError("Failed to start team", startTeamFailureMessage(code), { code });
 		return null;
 	}
+
+	// A paused-goal start resumes the goal before creating the lead. Refresh both
+	// lists before callers connect so every surface observes the resumed goal and
+	// its team without relying on a later poll or a manual reload.
+	await refreshSessions();
+	return sessionId;
 }
 
 export async function getTeamState(goalId: string): Promise<any | null> {
