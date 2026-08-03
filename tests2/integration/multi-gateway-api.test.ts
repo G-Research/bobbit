@@ -3,6 +3,8 @@ import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch } from "./_e2e/e2e-setup.js";
 import { startupAigwCheck } from "../../src/server/agent/aigw-manager.js";
 
+const integrationKeyEnv = "BOBBIT_MULTI_GATEWAY_TEST_KEY";
+
 interface Stub {
 	url: string;
 	requests: Array<{ path: string; authorization?: string }>;
@@ -50,6 +52,7 @@ test.describe("multi-gateway REST API", () => {
 	let empty: Stub;
 
 	test.beforeAll(async () => {
+		process.env[integrationKeyEnv] = "integration-secret";
 		secured = await startStub(["claude-local", "qwen-local"], "integration-secret");
 		empty = await startStub([]);
 	});
@@ -57,6 +60,7 @@ test.describe("multi-gateway REST API", () => {
 	test.afterAll(async () => {
 		await secured.close();
 		await empty.close();
+		delete process.env[integrationKeyEnv];
 	});
 
 	test.afterEach(async () => {
@@ -121,14 +125,14 @@ test.describe("multi-gateway REST API", () => {
 
 		const tested = await apiFetch("/api/aigw/test", {
 			method: "POST",
-			body: JSON.stringify({ url: secured.url, type: "openai-compatible", apiKey: "!printf integration-secret" }),
+			body: JSON.stringify({ url: secured.url, type: "openai-compatible", apiKey: integrationKeyEnv }),
 		});
 		expect(tested.status).toBe(200);
 		expect(secured.requests.at(-1)).toMatchObject({ path: "/v1/models", authorization: "Bearer integration-secret" });
 
 		const configured = await apiFetch("/api/aigw/configure", {
 			method: "POST",
-			body: JSON.stringify({ url: secured.url, apiKey: "!printf integration-secret" }),
+			body: JSON.stringify({ url: secured.url, apiKey: integrationKeyEnv }),
 		});
 		expect(configured.status).toBe(200);
 		expect(secured.requests.some((request) => request.path === "/v1/models" && request.authorization === "Bearer integration-secret")).toBe(true);
