@@ -1,11 +1,16 @@
 # Cross-OS residual reconciliation ledger
 
 **Reference extraction:** `e3051de63cf611143a989f7928bd9f9a7ed9beae^2..e3051de63cf611143a989f7928bd9f9a7ed9beae`
-**Validation head:** `be8018b859d3688cf21ea44caa976be5cfe6b342` (current goal head; production baseline is `origin/main` `0299fe6b8268f01f136d2a6787983e662e0fdc94`).
 
-This is a semantic reconciliation, not a cherry-pick plan. Categories are: **1** merged by a focused PR; **2** superseded by stronger current behavior; **3** intentionally obsolete/inapplicable; **4** genuinely missing. Each of the 50 unique reference files appears exactly once below. A file can contain multiple independently classified behaviors.
+**Authoritative production baseline:** `origin/main` at **`0299fe6b8268f01f136d2a6787983e662e0fdc94`**, refreshed and confirmed with `git fetch origin main && git rev-parse origin/main`. This exact production commit—not the goal branch—is the authority for every classification and allow-list decision.
 
-| # | Reference file | Category | Reconciled behavior and current-head validation |
+**Audit-artifact proof:** the initial committed audit/design artifact is `9e69181592df93f8d1be9014b06b3569886ec7dc`. `git diff --name-only 0299fe6b8268f01f136d2a6787983e662e0fdc94..9e69181592df93f8d1be9014b06b3569886ec7dc` returns only this ledger and `docs/design/qualify-cross-os-tests.md`; it therefore introduces no semantic production change and is not a production baseline.
+
+This refresh rechecked all 50 extracted file rows, including every mixed-category row, against `0299fe6b8268f01f136d2a6787983e662e0fdc94`. It is a semantic reconciliation, not a cherry-pick plan. Categories are: **1** merged by a focused PR; **2** superseded by stronger current behavior; **3** intentionally obsolete/inapplicable; **4** genuinely missing. Each of the 50 unique reference files appears exactly once below. A file can contain multiple independently classified behaviors.
+
+**Category-4 allow-list:** only the exact implementation/test/document paths and symbols in `docs/design/qualify-cross-os-tests.md` may change for this residual. The closed set is items 2, 3, 4, 5, 18, 19, 20, 24, 34, 37, 39, 42, and 49 in the table below (12 behaviors; item 2 includes its paired fast-gate documentation). No category 1/2/3 row is implementation authority.
+
+| # | Reference file | Category | Reconciled behavior and production-baseline validation |
 |---:|---|:---:|---|
 | 1 | `.gitignore` | 3 | The reference checkout-local `test-results-v2*` wildcard is obsolete: browser artifacts now live in each coordinator's system-temp root. Retaining the legacy fixed-path ignore is harmless; a broad checkout artifact policy would contradict run ownership. |
 | 2 | `docs/testing-v2/fast-gate-design.md` | 4 | The historical `--retry=0` prose must be adapted to `BOBBIT_V2_RETRY_FREE=1`. `vitest.config.ts` still hard-codes `retry: 3`, so the required unit retry-free control and its documentation are missing. |
@@ -60,7 +65,7 @@ This is a semantic reconciliation, not a cherry-pick plan. Categories are: **1**
 
 ## Validated category-4 implementation list
 
-The following are the complete missing set, validated against the head above rather than copied from the historical patch:
+The following are the complete missing set, validated against authoritative production baseline `0299fe6b8268f01f136d2a6787983e662e0fdc94` rather than copied from the historical patch:
 
 1. Unit retry-free configuration and its fast-gate/unit-lane documentation and pin.
 2. Packed-consumer run-root child allocation and ownership pin.
