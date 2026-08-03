@@ -106,7 +106,15 @@ import { truncateLargeToolContent } from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName, normalizeAigwModelString, writeAigwDnsGuardExtension } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { findSessionSelectableModel, getAvailableModels, modelRecencyRank, resolveModelStateMeta, type ApiModel } from "./model-registry.js";
-import { CACHE_STALL_INPUT_THRESHOLD, cachePostureMessage, cacheStallMessage, classifyCachePosture, type CachePosture } from "./cache-posture.js";
+import {
+	CACHE_STALL_INPUT_THRESHOLD,
+	cachePostureMessage,
+	cacheStallMessage,
+	classifyCachePosture,
+	type CachePosture,
+	type CachePostureUsageBaseline,
+	type CacheStallHistory,
+} from "./cache-posture.js";
 import { isSessionSelectableModelString, isSpawnPinnableModelString } from "./google-code-assist.js";
 import { clampThinkingLevel, isKnownThinkingLevel, type ThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
@@ -9269,10 +9277,10 @@ export class SessionManager {
 			// cannot advance shared authority until their lifecycle commit wins.
 			if (session._deferVerifiedTupleCommit !== true) {
 				this.persistSessionModel(session.id, provider, modelId, effectiveThinking);
-				// Selector-only regression harnesses deliberately extract this method
-				// without the registry-backed cache-posture helper. Keep that seam
-				// optional while production refreshes posture after the verified tuple.
-				await this.refreshCachePostureAfterVerifiedSelection?.(session, provider, modelId);
+				// Do not yield between the verified durable tuple and client-visible
+				// model state: a newer selection may otherwise overtake this broadcast.
+				// Production refreshes posture independently after the tuple commits.
+				void this.refreshCachePostureAfterVerifiedSelection?.(session, provider, modelId);
 				this._writeModelNameFile(session.id, modelString);
 				broadcast(session.clients, {
 					type: "state",
@@ -9577,7 +9585,7 @@ export class SessionManager {
 			}
 			if (session._deferVerifiedTupleCommit !== true) {
 				this.persistSessionModel(session.id, provider, modelId, effective);
-				await this.refreshCachePostureAfterVerifiedSelection(session, provider, modelId);
+				void this.refreshCachePostureAfterVerifiedSelection(session, provider, modelId);
 			}
 			session.spawnPinnedModel = `${provider}/${modelId}`;
 			session.spawnPinnedThinkingLevel = effective;
@@ -10400,7 +10408,7 @@ export class SessionManager {
 				verifiedReplacementTuple.modelId,
 				verifiedReplacementTuple.thinkingLevel,
 			);
-			await this.refreshCachePostureAfterVerifiedSelection(
+			void this.refreshCachePostureAfterVerifiedSelection(
 				session,
 				verifiedReplacementTuple.provider,
 				verifiedReplacementTuple.modelId,
@@ -10619,7 +10627,7 @@ export class SessionManager {
 	/**
 	 * Persist cache posture separately from the atomic model/thinking tuple.
 	 * Callers must pass the exact catalog row they verified; absent or mismatched
-	 * metadata deliberately fails closed and clears any previous cache posture.
+	 * metadata deliberately fails closed and clears only the current posture.
 	 */
 	persistCachePostureForResolvedModel(
 		sessionId: string,
@@ -10639,28 +10647,58 @@ export class SessionManager {
 			&& previous?.provider === classification.posture.provider
 			&& previous.model === classification.posture.model
 			&& previous.api === classification.posture.api;
-		const cachePosture = classification.capable
+		const migratedHistory: CacheStallHistory | undefined = !persisted.cacheStallHistory && previous?.stallWarning
 			? {
-				...classification.posture,
-				...(sameCapableModel && previous?.healthyAt ? { healthyAt: previous.healthyAt } : {}),
-				...(sameCapableModel && previous?.stallWarning ? { stallWarning: previous.stallWarning } : {}),
+				posture: {
+					provider: previous.provider,
+					model: previous.model,
+					api: previous.api,
+					expectedCaching: previous.expectedCaching,
+					ttl: previous.ttl,
+				},
+				warning: previous.stallWarning,
 			}
 			: undefined;
-		// Avoid creating an own `cachePosture: undefined` property for sessions
-		// that have never had a proven cache-capable model. A prior posture must
-		// still be explicitly cleared when the verified model becomes unproven.
-		if (!cachePosture && !previous) return;
-		store.update(sessionId, { cachePosture });
+		if (!classification.capable) {
+			// A session-wide warning must survive an unproven selection so switching
+			// back cannot reset the once-only guard or erase original evidence.
+			if (!previous && !persisted.cachePostureUsageBaseline) return;
+			store.update(sessionId, {
+				cachePosture: undefined,
+				cachePostureUsageBaseline: undefined,
+				...(migratedHistory ? { cacheStallHistory: migratedHistory } : {}),
+			});
+			const session = this.sessions.get(sessionId);
+			if (session) session.cachePosture = undefined;
+			return;
+		}
+
+		const currentCost = this.getSessionCost(sessionId);
+		const baseline: CachePostureUsageBaseline = sameCapableModel && persisted.cachePostureUsageBaseline
+			? persisted.cachePostureUsageBaseline
+			: {
+				inputTokens: currentCost?.inputTokens ?? 0,
+				cacheReadTokens: currentCost?.cacheReadTokens ?? 0,
+				cacheWriteTokens: currentCost?.cacheWriteTokens ?? 0,
+			};
+		const cachePosture: CachePosture = {
+			...classification.posture,
+			...(sameCapableModel && previous?.healthyAt ? { healthyAt: previous.healthyAt } : {}),
+			...(sameCapableModel && previous?.stallWarning ? { stallWarning: previous.stallWarning } : {}),
+		};
+		store.update(sessionId, {
+			cachePosture,
+			cachePostureUsageBaseline: baseline,
+			...(migratedHistory ? { cacheStallHistory: migratedHistory } : {}),
+		});
 		const session = this.sessions.get(sessionId);
 		if (!session) return;
 		session.cachePosture = cachePosture;
-		if (cachePosture) {
-			emitSessionEvent(session, {
-				type: "cache_posture",
-				posture: cachePosture,
-				message: cachePostureMessage(cachePosture),
-			});
-		}
+		emitSessionEvent(session, {
+			type: "cache_posture",
+			posture: cachePosture,
+			message: cachePostureMessage(cachePosture),
+		});
 	}
 
 	/** Resolve exact catalog metadata only after a model/thinking tuple verifies. */
@@ -10675,16 +10713,18 @@ export class SessionManager {
 				? findSessionSelectableModel(await getAvailableModels(this.preferencesStore), provider, modelId)
 				: undefined;
 		} catch {
-			// Cache visibility must never turn a verified model selection into a
-			// failed session startup. Missing exact metadata remains fail-closed.
+			// A catalog lookup failure is not evidence that a verified posture became
+			// unsupported. Leave the current state untouched and fail closed later.
+			return;
 		}
 		this.persistCachePostureForResolvedModel(session.id, provider, modelId, resolvedModel);
 	}
 
 	/**
 	 * Evaluate cache telemetry at the same synchronous boundary that records
-	 * cumulative usage. Persist before broadcasting so concurrent final usage
-	 * events and restart/reattach cannot duplicate the historical warning.
+	 * cumulative usage. Deltas begin at capable-posture establishment, so usage
+	 * reported for a prior unproven model cannot mark a new posture healthy or
+	 * trigger its cold-turn warning.
 	 */
 	private recordCachePostureUsage(session: SessionInfo, cumulativeCost: {
 		inputTokens: number;
@@ -10692,10 +10732,29 @@ export class SessionManager {
 		cacheWriteTokens: number;
 	}): void {
 		const store = this.resolveStoreForSession(session.id);
-		const posture = store.get(session.id)?.cachePosture;
+		const persisted = store.get(session.id);
+		const posture = persisted?.cachePosture;
 		if (!posture) return;
+		const baseline = persisted.cachePostureUsageBaseline;
+		if (!baseline) {
+			// Legacy records predate baselines. Establish one before interpreting
+			// their totals rather than attributing earlier model usage to this one.
+			store.update(session.id, {
+				cachePostureUsageBaseline: {
+					inputTokens: cumulativeCost.inputTokens,
+					cacheReadTokens: cumulativeCost.cacheReadTokens,
+					cacheWriteTokens: cumulativeCost.cacheWriteTokens,
+				},
+			});
+			return;
+		}
+		const usage = {
+			inputTokens: Math.max(0, cumulativeCost.inputTokens - baseline.inputTokens),
+			cacheReadTokens: Math.max(0, cumulativeCost.cacheReadTokens - baseline.cacheReadTokens),
+			cacheWriteTokens: Math.max(0, cumulativeCost.cacheWriteTokens - baseline.cacheWriteTokens),
+		};
 		const now = this.clock.now();
-		if (cumulativeCost.cacheReadTokens > 0 && posture.healthyAt === undefined) {
+		if (usage.cacheReadTokens > 0 && posture.healthyAt === undefined) {
 			const healthy = { ...posture, healthyAt: now };
 			store.update(session.id, { cachePosture: healthy });
 			session.cachePosture = healthy;
@@ -10707,27 +10766,36 @@ export class SessionManager {
 			return;
 		}
 		if (
-			cumulativeCost.inputTokens < CACHE_STALL_INPUT_THRESHOLD
-			|| cumulativeCost.cacheReadTokens !== 0
+			usage.inputTokens < CACHE_STALL_INPUT_THRESHOLD
+			|| usage.cacheReadTokens !== 0
+			|| persisted.cacheStallHistory
 			|| posture.stallWarning
 		) return;
 
-		const stalled: CachePosture = {
-			...posture,
-			stallWarning: {
-				at: now,
-				inputTokens: cumulativeCost.inputTokens,
-				cacheReadTokens: cumulativeCost.cacheReadTokens,
-				cacheWriteTokens: cumulativeCost.cacheWriteTokens,
-			},
+		const warning = {
+			at: now,
+			...usage,
 		};
-		store.update(session.id, { cachePosture: stalled });
+		const stalled: CachePosture = { ...posture, stallWarning: warning };
+		const history: CacheStallHistory = {
+			posture: {
+				provider: posture.provider,
+				model: posture.model,
+				api: posture.api,
+				expectedCaching: posture.expectedCaching,
+				ttl: posture.ttl,
+			},
+			warning,
+		};
+		// Store the session-wide latch before emitting. It remains authoritative
+		// after a switch away from this capable model and across restart/attach.
+		store.update(session.id, { cachePosture: stalled, cacheStallHistory: history });
 		session.cachePosture = stalled;
 		emitSessionEvent(session, {
 			type: "cache_stall",
 			posture: stalled,
 			message: cacheStallMessage(),
-			cumulative: stalled.stallWarning,
+			cumulative: warning,
 		});
 	}
 

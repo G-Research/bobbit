@@ -6,7 +6,7 @@ import { isMessageAuthor, LOCAL_USER_AUTHOR, type MessageAuthor } from "../../sh
 import { isPromptSource, type PromptSource } from "../../shared/prompt-source.js";
 import type { QueuedMessage } from "../ws/protocol.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
-import type { CachePosture } from "./cache-posture.js";
+import type { CachePosture, CachePostureUsageBaseline, CacheStallHistory } from "./cache-posture.js";
 import type { ThinkingLevel } from "../../shared/thinking-levels.js";
 
 const VERIFIER_SESSION_ID_RE = /^(?:llm-review|agent-qa)-/;
@@ -152,8 +152,12 @@ export interface PersistedSession {
 	messageQueue?: QueuedMessage[];
 	/** Durable manual-retry recovery state for queued work parked after a terminal failure. */
 	manualRetryRequired?: boolean;
-	/** Sanitized cache capability, health, and historical stall diagnostic. */
+	/** Sanitized capability and health state for the currently selected model. */
 	cachePosture?: CachePosture;
+	/** Cumulative counters at current capable-posture establishment. */
+	cachePostureUsageBaseline?: CachePostureUsageBaseline;
+	/** Session-wide historical stall latch, retained across model changes. */
+	cacheStallHistory?: CacheStallHistory;
 	/** Steers accepted for dispatch but not yet echoed; strings are legacy rows. */
 	inFlightSteerTexts?: PersistedInFlightSteer[];
 	/** Server-side draft storage, keyed by draft type (e.g. "prompt", "goal", "role") */
@@ -227,6 +231,8 @@ export type UpdatableSessionFields = Pick<
 	| "messageQueue"
 	| "manualRetryRequired"
 	| "cachePosture"
+	| "cachePostureUsageBaseline"
+	| "cacheStallHistory"
 	| "inFlightSteerTexts"
 	| "archived"
 	| "archivedAt"
@@ -758,7 +764,7 @@ export class SessionStore {
 		"role", "assistantType", "taskId", "staffId",
 		"teamGoalId", "teamLeadSessionId",
 		"modelProvider", "modelId", "effectiveThinkingLevel",
-		"manualRetryRequired", "cachePosture", "inFlightSteerTexts",
+		"manualRetryRequired", "cachePosture", "cachePostureUsageBaseline", "cacheStallHistory", "inFlightSteerTexts",
 		"sidePanelWorkspace",
 	];
 
