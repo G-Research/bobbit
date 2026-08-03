@@ -15,6 +15,7 @@ import { getAvailableModels, invalidateModelCache, type ApiModel } from "../../s
 import { SessionManager, gatewayModelBinding } from "../../src/server/agent/session-manager.js";
 import { generateGoalSummaryTitle, generateSessionTitle } from "../../src/server/agent/title-generator.js";
 import { GatewayCredentialResolutionError, type ModelGateway } from "../../src/server/agent/aigw-manager.js";
+import { completeModelText } from "../../src/server/agent/model-completion.js";
 
 const COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
@@ -70,13 +71,16 @@ function captureConsoleErrors(): { lines: string[]; restore: () => void } {
 
 function startStreamingTitleGateway(): Promise<{
 	url: string;
+	getAuthorizationHeaders: () => Array<string | undefined>;
 	close: () => Promise<void>;
 }> {
+	const authorizationHeaders: Array<string | undefined> = [];
 	const server = http.createServer((req, res) => {
 		if (req.url !== "/v1/chat/completions") {
 			res.writeHead(404); res.end(); return;
 		}
 		let requestBody = "";
+		authorizationHeaders.push(req.headers.authorization);
 		req.on("data", (chunk) => { requestBody += chunk; });
 		req.on("end", () => {
 			assert.equal(JSON.parse(requestBody).stream, true, "the real Pi completion path must request a stream");
@@ -88,6 +92,7 @@ function startStreamingTitleGateway(): Promise<{
 		const port = (server.address() as { port: number }).port;
 		resolve({
 			url: `http://127.0.0.1:${port}`,
+			getAuthorizationHeaders: () => [...authorizationHeaders],
 			close: () => new Promise((done) => server.close(() => done())),
 		});
 	}));
@@ -273,14 +278,87 @@ describe("multi-gateway consumers", () => {
 					id: "title-model", name: "Title model", provider: registered.name, api: "openai-completions", baseUrl: `${registered.url}/v1`,
 					contextWindow: 8192, maxTokens: 4096, reasoning: false, input: ["text"], cost: COST, authenticated: true,
 				};
-				assert.equal(await generateSessionTitle(
-					[{ role: "user", content: "Use the local model without a key." }],
-					{ namingModel: `${registered.name}/${model.id}`, gateways: [registered], availableModels: [model], preferencesStore: prefs },
-				), "Anonymous Gateway");
+				for (const staleGenericKey of ["stale-generic-key", undefined]) {
+					if (staleGenericKey) prefs.set(`providerKey.${registered.name}`, staleGenericKey);
+					else prefs.remove(`providerKey.${registered.name}`);
+					fs.writeFileSync(path.join(agentDir, "models.json"), JSON.stringify({
+						providers: { [registered.name]: { apiKey: "retained-stale-key" } },
+					}));
+					assert.equal(await generateSessionTitle(
+						[{ role: "user", content: "Use the local model without a key." }],
+						{ namingModel: `${registered.name}/${model.id}`, gateways: [registered], availableModels: [model], preferencesStore: prefs },
+					), "Anonymous Gateway");
+				}
 			}
+			assert.deepEqual(
+				service.getAuthorizationHeaders(),
+				["Bearer none", "Bearer none", "Bearer none", "Bearer none"],
+				"Pi's anonymous sentinel must not revive generic or retained credentials",
+			);
 		} finally {
 			await service.close();
 		}
+	});
+
+	it("keeps an outage-retained gateway anonymous after its key is cleared", async () => {
+		const service = await startStreamingTitleGateway();
+		try {
+			const registered = gateway("retained-clear", service.url);
+			const prefs = new PreferencesStore(path.join(agentDir, "retained-clear-state"));
+			prefs.set("modelGateways", [registered]);
+			prefs.set(`providerKey.gateway.${registered.id}`, "previous-key");
+			fs.writeFileSync(path.join(agentDir, "models.json"), JSON.stringify({
+				providers: { [registered.name]: { apiKey: "previous-key" } },
+			}));
+			// An outage retains the prior models.json block while the user clears its key.
+			prefs.remove(`providerKey.gateway.${registered.id}`);
+			const model: ApiModel = {
+				id: "retained-model", name: "Retained model", provider: registered.name, api: "openai-completions", baseUrl: `${registered.url}/v1`,
+				contextWindow: 8192, maxTokens: 4096, reasoning: false, input: ["text"], cost: COST, authenticated: true,
+			};
+			assert.equal(await completeModelText(model, prefs, { systemPrompt: "test", userPrompt: "test" }), "<title>Anonymous Gateway</title>");
+			assert.deepEqual(service.getAuthorizationHeaders(), ["Bearer none"]);
+		} finally {
+			await service.close();
+		}
+	});
+
+	it("makes matching gateway rows authoritative over generic credentials and stale config commands", async () => {
+		const registered = gateway("anonymous-owner", "http://127.0.0.1:1234");
+		const prefs = new PreferencesStore(path.join(agentDir, "anonymous-owner-state"));
+		prefs.set("modelGateways", [registered]);
+		const model: ApiModel = {
+			id: "anonymous-model", name: "Anonymous model", provider: registered.name, api: "openai-completions", baseUrl: `${registered.url}/v1`,
+			contextWindow: 8192, maxTokens: 4096, reasoning: false, input: ["text"], cost: COST, authenticated: true,
+		};
+		const resolvedApiKeys: string[] = [];
+		const configReads: string[] = [];
+		let commandCalls = 0;
+		const complete = async (_model: unknown, _context: unknown, options?: { apiKey?: string }) => {
+			resolvedApiKeys.push(options?.apiKey ?? "");
+			return { role: "assistant", content: [{ type: "text", text: "OK" }], stopReason: "stop" } as any;
+		};
+
+		for (const [privateExpression, genericExpression, staleExpression] of [
+			[undefined, "unrelated-generic-key", "retained-literal-key"],
+			["", "unrelated-generic-key", "retained-literal-key"],
+			["none", "", "!stale-provider-command"],
+		] as const) {
+			if (privateExpression === undefined) prefs.remove(`providerKey.gateway.${registered.id}`);
+			else prefs.set(`providerKey.gateway.${registered.id}`, privateExpression);
+			prefs.set(`providerKey.${registered.name}`, genericExpression);
+			await completeModelText(model, prefs, { systemPrompt: "test", userPrompt: "test" }, complete, {
+				providerConfigReader: (provider) => {
+					configReads.push(provider);
+					return { apiKey: staleExpression };
+				},
+				commandRunner: { async execFile() { commandCalls++; return { stdout: "must-not-run", stderr: "" }; } },
+			});
+		}
+
+		assert.deepEqual(resolvedApiKeys, ["none", "none", "none"]);
+		assert.deepEqual(configReads, [], "matching gateway rows must not read stale provider config");
+		assert.equal(commandCalls, 0, "matching gateway rows must not execute stale provider config commands");
 	});
 
 	it("uses strict credentials for explicit title models and makes command failures observable", async () => {
