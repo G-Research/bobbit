@@ -87,7 +87,7 @@ describe("sandbox Docker context resolution", () => {
 		assert.match(SERVER_SOURCE, /checkDockerAvailability\(imageName, dockerContextRoot \?\? undefined, gatewayDeps\.commandRunner\)/);
 		assert.match(SERVER_SOURCE, /buildSandboxImage\(imageName, dockerContextRoot, gatewayDeps\.commandRunner\)/);
 		assert.match(SERVER_SOURCE, /ensureImageAgentVersion\(imageName, dockerContextRoot \?\? undefined, gatewayDeps\.commandRunner\)/);
-		assert.match(SERVER_SOURCE, /checkDockerAvailability\(configured \? imageName : undefined, dockerContextRoot \?\? undefined, commandRunner!\)/);
+		assert.match(SERVER_SOURCE, /checkDockerAvailability\(configured \? imageName : undefined, dockerContextRoot \?\? undefined, commandRunner\)/);
 		assert.match(SERVER_SOURCE, /buildSandboxImage\(imageName, dockerContextRoot, commandRunner!\)/);
 		assert.match(SERVER_SOURCE, /checkDockerAvailability\(undefined, undefined, commandRunner!\)/);
 	});
