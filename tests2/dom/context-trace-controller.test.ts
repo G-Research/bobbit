@@ -11,8 +11,11 @@ import {
 	notifyContextTraceUpdated,
 	openContextTraceInspector,
 	stopContextTraceInspector,
+	syncContextTraceInspector,
 } from "../../src/app/context-trace.js";
 import { setRenderApp, state } from "../../src/app/state.js";
+import "../../src/ui/components/ContextTraceInspector.js";
+import type { ContextTraceInspector } from "../../src/ui/components/ContextTraceInspector.js";
 
 const SESSION_A = "a / trace";
 const SESSION_B = "b";
@@ -50,6 +53,8 @@ afterEach(() => {
 	stopContextTraceInspector();
 	state.selectedSessionId = null;
 	state.remoteAgent = null;
+	state.sidePanelWorkspaceBySession = {};
+	document.body.innerHTML = "";
 	vi.unstubAllGlobals();
 });
 
@@ -147,5 +152,77 @@ describe("context trace controller", () => {
 			error: "Unable to load context trace.",
 			refreshError: true,
 		});
+	});
+
+	it("passes actual controller state through the inspector for paging and cached refresh failures", async () => {
+		const fetch = vi.fn()
+			.mockResolvedValueOnce(response(Array.from({ length: 100 }, (_, index) => entry(index))))
+			.mockRejectedValueOnce(new Error("raw stack and token"))
+			.mockResolvedValueOnce(response(Array.from({ length: 200 }, (_, index) => entry(index))));
+		vi.stubGlobal("fetch", fetch);
+
+		const inspector = document.createElement("context-trace-inspector") as ContextTraceInspector;
+		inspector.addEventListener("context-trace-load-earlier", () => { void loadEarlierContextTrace(SESSION_A); });
+		document.body.appendChild(inspector);
+		setRenderApp(() => { inspector.state = contextTraceStateFor(SESSION_A); });
+
+		openContextTraceInspector(SESSION_A);
+		await vi.waitFor(() => expect(contextTraceStateFor(SESSION_A).hasEarlier).toBe(true));
+		await vi.waitFor(() => expect(inspector.querySelector("button[aria-label='Load 100 earlier context trace events']")).not.toBeNull());
+
+		notifyContextTraceUpdated(SESSION_A);
+		await vi.waitFor(() => expect(contextTraceStateFor(SESSION_A).refreshError).toBe(true));
+		await vi.waitFor(() => expect(inspector.querySelector("[role='alert']")?.textContent).toContain("Showing the most recently loaded activity."));
+		expect(inspector.querySelector("[role='alert'] button")?.textContent).toBe("Retry");
+		expect(inspector.querySelectorAll("[data-testid='context-trace-event']")).toHaveLength(100);
+
+		(inspector.querySelector("button[aria-label='Load 100 earlier context trace events']") as HTMLButtonElement).click();
+		await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(3));
+		expect(String(fetch.mock.calls[2]?.[0])).toContain("limit=200");
+		await vi.waitFor(() => expect(contextTraceStateFor(SESSION_A).items).toHaveLength(200));
+		document.body.innerHTML = "";
+	});
+
+	it("ignores non-active opens and revalidates one inactive invalidation on sync", async () => {
+		let resolveActive!: (value: Response) => void;
+		let activeSignal: AbortSignal | undefined;
+		const activeRequest = new Promise<Response>((resolve) => { resolveActive = resolve; });
+		const fetch = vi.fn((_: RequestInfo | URL, init?: RequestInit) => {
+			if (!activeSignal) {
+				activeSignal = init?.signal as AbortSignal | undefined;
+				return activeRequest;
+			}
+			return Promise.resolve(response([entry(2)]));
+		});
+		vi.stubGlobal("fetch", fetch);
+		state.sidePanelWorkspaceBySession[SESSION_A] = {
+			version: 1,
+			sessionId: SESSION_A,
+			revision: 1,
+			tabs: [{ id: "context", kind: "context", title: "Context", label: "Context", source: { type: "context", sessionId: SESSION_A }, updatedAt: 1 }],
+			activeTabId: "context",
+			sizeMode: "split",
+			updatedAt: 1,
+		};
+
+		openContextTraceInspector(SESSION_A);
+		await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+		const activeState = contextTraceStateFor(SESSION_A);
+		openContextTraceInspector(SESSION_B);
+		expect(fetch).toHaveBeenCalledTimes(1);
+		expect(activeSignal?.aborted).toBe(false);
+		expect(contextTraceStateFor(SESSION_A)).toBe(activeState);
+		expect(activeState.status).toBe("loading");
+		resolveActive(response([entry(1)]));
+		await vi.waitFor(() => expect(contextTraceStateFor(SESSION_A).items).toHaveLength(1));
+
+		activate(SESSION_B);
+		notifyContextTraceUpdated(SESSION_A);
+		activate(SESSION_A);
+		syncContextTraceInspector(SESSION_A);
+		await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+		syncContextTraceInspector(SESSION_A);
+		await Promise.resolve();
+		expect(fetch).toHaveBeenCalledTimes(2);
 	});
 });

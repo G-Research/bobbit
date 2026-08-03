@@ -8,6 +8,18 @@ import type { ContextTraceInspector, ContextTraceState } from "../../src/ui/comp
 
 const timestamp = Date.UTC(2025, 0, 2, 3, 4, 5);
 
+function traceState(patch: Partial<ContextTraceState> & Pick<ContextTraceState, "status" | "items">): ContextTraceState {
+	const base: ContextTraceState = {
+		status: "idle",
+		items: [],
+		limit: 100,
+		hasEarlier: false,
+		isRefreshing: false,
+		refreshError: false,
+	};
+	return { ...base, ...patch };
+}
+
 function mount(state: ContextTraceState): ContextTraceInspector {
 	const inspector = document.createElement("context-trace-inspector") as ContextTraceInspector;
 	inspector.state = state;
@@ -28,17 +40,17 @@ afterEach(() => { document.body.innerHTML = ""; });
 
 describe("ContextTraceInspector", () => {
 	it("renders newest-first normalized entries while preserving provider order", async () => {
-		const inspector = mount({
+		const inspector = mount(traceState({
 			status: "ready",
 			items: [
-				{ kind: "trace", entry: { event: "afterTurn", ts: timestamp + 1, providers: [
+				{ kind: "trace", entry: { hook: "afterTurn", ts: timestamp + 1, providers: [
 					{ id: "first-provider", latencyMs: 12, keptBlocks: 3, omittedBlocks: 1 },
 					{ id: "second-provider", latencyMs: 27, keptBlocks: 4, omittedBlocks: 0, error: "Timed out" },
 				] } },
-				{ kind: "trace", entry: { event: "beforePrompt", ts: timestamp, providers: [] } },
+				{ kind: "trace", entry: { hook: "beforePrompt", ts: timestamp, providers: [] } },
 			],
-			canLoadEarlier: true,
-		});
+			hasEarlier: true,
+		}));
 		await settle(inspector);
 
 		const cards = [...inspector.querySelectorAll<HTMLElement>("[data-testid='context-trace-event']")];
@@ -53,32 +65,34 @@ describe("ContextTraceInspector", () => {
 		expect(text(cards[0])).toContain("Kept 3");
 		expect(text(cards[0])).toContain("Omitted 1");
 		expect(text(cards[0])).toContain("Timed out");
+		expect(cards[0].querySelector("[role='status']")).toBeNull();
 		expect(inspector.querySelector("time")?.getAttribute("datetime")).toBe(new Date(timestamp + 1).toISOString());
 		expect(text(inspector)).toContain("Trace history is bounded; oldest events rotate out.");
 	});
 
 	it("shows stable loading, empty, and fixed error states", async () => {
-		const inspector = mount({ status: "loading", items: [] });
+		const inspector = mount(traceState({ status: "loading", items: [] }));
 		await settle(inspector);
 		expect(inspector.querySelector("[role='tabpanel']")?.getAttribute("aria-busy")).toBe("true");
 		expect(text(inspector)).toContain("Loading context trace…");
 		expect(inspector.querySelectorAll("[aria-hidden='true']")).toHaveLength(2);
 
-		inspector.state = { status: "ready", items: [] };
+		inspector.state = traceState({ status: "ready", items: [] });
 		await settle(inspector);
 		expect(inspector.querySelector("[data-testid='context-trace-empty']")).not.toBeNull();
 
-		inspector.state = { status: "error", items: [] };
+		inspector.state = traceState({ status: "error", items: [] });
 		await settle(inspector);
 		expect(text(inspector.querySelector("[role='alert']")!)).toBe("Context trace could not be loaded. Retry");
 	});
 
-	it("keeps cached rows visible for refresh errors and emits control events", async () => {
-		const inspector = mount({
-			status: "error",
-			items: [{ kind: "trace", entry: { event: "sessionSetup", ts: timestamp, providers: [] } }],
-			canLoadEarlier: true,
-		});
+	it("uses refreshError with cached rows and emits control events", async () => {
+		const inspector = mount(traceState({
+			status: "ready",
+			items: [{ kind: "trace", entry: { hook: "sessionSetup", ts: timestamp, providers: [] } }],
+			hasEarlier: true,
+			refreshError: true,
+		}));
 		const events: string[] = [];
 		for (const type of ["context-trace-retry", "context-trace-refresh", "context-trace-load-earlier"]) {
 			inspector.addEventListener(type, () => events.push(type));
@@ -93,22 +107,20 @@ describe("ContextTraceInspector", () => {
 		expect(events).toEqual(["context-trace-refresh", "context-trace-retry", "context-trace-load-earlier"]);
 	});
 
-	it("contains only the typed, sanitized fields and never renders unknown raw payload strings", async () => {
+	it("contains only typed sanitized fields and never renders unknown raw payload strings", async () => {
 		const secret = "gateway-token-secret /private/stack.ts prompt contents";
-		const inspector = mount({
+		const inspector = mount(traceState({
 			status: "ready",
 			items: [{
 				kind: "trace",
 				entry: {
-					event: "Unknown event",
+					hook: "Unknown event",
 					ts: timestamp,
 					providers: [{ id: "Unknown provider", latencyMs: 0, keptBlocks: 0, omittedBlocks: 0, error: "Provider error" }],
-					// The renderer's public type excludes server response fields. Simulate
-					// an untrusted object anyway to pin that the projection ignores it.
 					...( { prompt: secret, stack: secret, error: secret } as object),
 				},
 			} as ContextTraceState["items"][number]],
-		});
+		}));
 		await settle(inspector);
 		const output = text(inspector);
 		expect(output).toContain("Unknown event");
@@ -119,7 +131,7 @@ describe("ContextTraceInspector", () => {
 	});
 
 	it("labels the non-modal tabpanel and focuses its heading once on entry", async () => {
-		const inspector = mount({ status: "idle", items: [] });
+		const inspector = mount(traceState({ status: "idle", items: [] }));
 		await settle(inspector);
 		const panel = inspector.querySelector("[role='tabpanel']");
 		const heading = inspector.querySelector<HTMLElement>("[data-context-trace-heading]");
