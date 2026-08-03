@@ -29,7 +29,8 @@ test.use({ enableWorktreePool: true });
 
 import { apiFetch } from "./e2e-setup.js";
 import { waitForPool, pollSessionUntilSessionBranch } from "./test-utils/pool-polling.mjs";
-import { mkdirSync, existsSync, statSync } from "node:fs";
+import { mkdirSync, existsSync, statSync, mkdtempSync, realpathSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -47,88 +48,104 @@ function reflog(repo: string, branch: string): string {
 }
 
 test.describe.serial("pool claim restart-resume", () => {
-	let repoPath: string;
-	let projectId: string;
-
-	test.beforeAll(async () => {
-		const base = join(tmpdir(), `bobbit-e2e-pool-restart-${Date.now()}`);
-		repoPath = join(base, "repo");
-		mkdirSync(repoPath, { recursive: true });
-		execFileSync("git", ["init", "--initial-branch=master"], { cwd: repoPath });
-		execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: repoPath });
-		execFileSync("git", ["config", "user.name", "Test"], { cwd: repoPath });
-		execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: repoPath });
-
-		const reg = await apiFetch("/api/projects", {
-			method: "POST",
-			body: JSON.stringify({ name: "pool-restart-project", rootPath: repoPath }),
-		});
-		expect(reg.status).toBe(201);
-		const project = await reg.json();
-		projectId = project.id;
-	});
-
 	test("session/<id8> branch is byte-stable across simulated restart; no git branch -m runs post-restart", async ({ gateway }) => {
-		// Step 1 — pool warms.
-		const ready = await waitForPool(projectId, 1);
-		expect(ready).toBeGreaterThan(0);
+		// Each test owns one canonical root. `mkdtemp` makes concurrent
+		// coordinators independent; realpath prevents macOS /var aliases from
+		// leaking into project and worktree assertions.
+		const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), "bobbit-e2e-pool-restart-")));
+		const repoPath = join(fixtureRoot, "repo");
+		let projectId: string | undefined;
+		let sessionId: string | undefined;
 
-		// Step 2 — claim one. Branch must be session/<id8> immediately.
-		const sessResp = await apiFetch("/api/sessions", {
-			method: "POST",
-			body: JSON.stringify({ cwd: repoPath, worktree: true, projectId }),
-		});
-		expect(sessResp.status).toBe(201);
-		const sessionId = (await sessResp.json()).id;
+		try {
+			mkdirSync(repoPath, { recursive: true });
+			execFileSync("git", ["init", "--initial-branch=master"], { cwd: repoPath });
+			execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: repoPath });
+			execFileSync("git", ["config", "user.name", "Test"], { cwd: repoPath });
+			execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: repoPath });
 
-		const before = await pollSessionUntilSessionBranch(sessionId);
-		expect(before.branch).toMatch(/^session\/[a-f0-9]{8}$/);
-		expect(before.branch).not.toMatch(/^pool\//);
-		expect(before.branch).not.toMatch(/^session\/new-session-/);
+			const reg = await apiFetch("/api/projects", {
+				method: "POST",
+				body: JSON.stringify({ name: "pool-restart-project", rootPath: repoPath }),
+			});
+			expect(reg.status).toBe(201);
+			projectId = (await reg.json()).id;
 
-		// Container dir convention: branch.replace(/\//g, "-") under <repo>-wt/.
-		const expectedDirSlug = before.branch.replace(/\//g, "-");
-		const expectedDir = join(`${repoPath}-wt`, expectedDirSlug);
-		// Worktree path persisted on the session row should match.
-		expect(before.worktreePath).toBeTruthy();
-		expect(existsSync(before.worktreePath!)).toBe(true);
-		// The worktreePath should resolve to the canonical container.
-		expect(before.worktreePath!.replace(/\\/g, "/")).toContain(expectedDirSlug);
+			// Step 1 — pool warms.
+			const ready = await waitForPool(projectId, 1);
+			expect(ready).toBeGreaterThan(0);
 
-		// Capture pre-restart fingerprint of the branch.
-		const reflogBefore = reflog(repoPath, before.branch);
-		const dirStatBefore = statSync(expectedDir);
-		const inoBefore = dirStatBefore.ino;
+			// Step 2 — claim one. Branch must be session/<id8> immediately.
+			const sessResp = await apiFetch("/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ cwd: repoPath, worktree: true, projectId }),
+			});
+			expect(sessResp.status).toBe(201);
+			sessionId = (await sessResp.json()).id;
 
-		// Step 3 — simulate restart by re-invoking restoreSessions().
-		// This is exactly the path the server takes at boot. Module-cached
-		// singletons (sessions Map etc.) survive, so this exercises the
-		// idempotent re-restore branch — but the persisted on-disk state is
-		// what's authoritative. If anything in the restore path tried to
-		// rename the branch or move the dir, we'd see it.
-		const sm = (gateway as any).sessionManager;
-		// Defensive: rebuild the dormant set so re-restore behaves like a
-		// cold boot for this session.
-		try { (sm as any).sessions.delete(sessionId); } catch { /* best-effort */ }
-		await sm.restoreSessions().catch(() => {});
+			const before = await pollSessionUntilSessionBranch(sessionId);
+			expect(before.branch).toMatch(/^session\/[a-f0-9]{8}$/);
+			expect(before.branch).not.toMatch(/^pool\//);
+			expect(before.branch).not.toMatch(/^session\/new-session-/);
 
-		// Step 4 — assert byte-stability.
-		const afterResp = await apiFetch(`/api/sessions/${sessionId}`);
-		expect(afterResp.status).toBe(200);
-		const after = await afterResp.json();
-		expect(after.branch).toBe(before.branch);
-		expect(after.worktreePath).toBe(before.worktreePath);
+			// Container dir convention: branch.replace(/\//g, "-") under <repo>-wt/.
+			const expectedDirSlug = before.branch.replace(/\//g, "-");
+			const expectedDir = join(`${repoPath}-wt`, expectedDirSlug);
+			// Worktree path persisted on the session row should match.
+			expect(before.worktreePath).toBeTruthy();
+			expect(existsSync(before.worktreePath!)).toBe(true);
+			// The worktreePath should resolve to the canonical container.
+			expect(before.worktreePath!.replace(/\\/g, "/")).toContain(expectedDirSlug);
 
-		// Step 5 — no rename happened post-restart: reflog unchanged + inode stable.
-		const reflogAfter = reflog(repoPath, before.branch);
-		expect(reflogAfter).toBe(reflogBefore);
-		expect(existsSync(expectedDir)).toBe(true);
-		const dirStatAfter = statSync(expectedDir);
-		// On Linux/macOS the inode is stable across a no-op restore. On
-		// Windows `ino` may be 0/unstable across stat calls; guard the
-		// stricter assertion.
-		if (process.platform !== "win32" && inoBefore !== 0) {
-			expect(dirStatAfter.ino).toBe(inoBefore);
+			// Capture pre-restart fingerprint of the branch.
+			const reflogBefore = reflog(repoPath, before.branch);
+			const dirStatBefore = statSync(expectedDir);
+			const inoBefore = dirStatBefore.ino;
+
+			// Step 3 — simulate restart by re-invoking restoreSessions().
+			// This is exactly the path the server takes at boot. Module-cached
+			// singletons (sessions Map etc.) survive, so this exercises the
+			// idempotent re-restore branch — but the persisted on-disk state is
+			// what's authoritative. If anything in the restore path tried to
+			// rename the branch or move the dir, we'd see it.
+			const sm = (gateway as any).sessionManager;
+			// Defensive: rebuild the dormant set so re-restore behaves like a
+			// cold boot for this session.
+			try { (sm as any).sessions.delete(sessionId); } catch { /* best-effort */ }
+			await sm.restoreSessions().catch(() => {});
+
+			// Step 4 — assert byte-stability.
+			const afterResp = await apiFetch(`/api/sessions/${sessionId}`);
+			expect(afterResp.status).toBe(200);
+			const after = await afterResp.json();
+			expect(after.branch).toBe(before.branch);
+			expect(after.worktreePath).toBe(before.worktreePath);
+
+			// Step 5 — no rename happened post-restart: reflog unchanged + inode stable.
+			const reflogAfter = reflog(repoPath, before.branch);
+			expect(reflogAfter).toBe(reflogBefore);
+			expect(existsSync(expectedDir)).toBe(true);
+			const dirStatAfter = statSync(expectedDir);
+			// On Linux/macOS the inode is stable across a no-op restore. On
+			// Windows `ino` may be 0/unstable across stat calls; guard the
+			// stricter assertion.
+			if (process.platform !== "win32" && inoBefore !== 0) {
+				expect(dirStatAfter.ino).toBe(inoBefore);
+			}
+		} finally {
+			// Ordered cleanup keeps the gateway's session/worktree handles closed
+			// before deleting this test's canonical fixture root. Failures remain
+			// visible instead of being swallowed by best-effort cleanup.
+			if (sessionId) {
+				const response = await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+				expect(response.status).toBe(200);
+			}
+			if (projectId) {
+				const response = await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" });
+				expect(response.status).toBe(200);
+			}
+			await rm(fixtureRoot, { recursive: true, force: true });
+			expect(existsSync(fixtureRoot), `owned fixture root was not removed: ${fixtureRoot}`).toBe(false);
 		}
 	});
 });
