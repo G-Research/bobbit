@@ -1,0 +1,23 @@
+{
+  "fixtureSchema": "claude-sdk-event-translator/v1",
+  "provenance": {
+    "kind": "hand-authored captured-shape record",
+    "source": "@anthropic-ai/claude-agent-sdk published declarations",
+    "sdkVersion": "0.3.220",
+    "claudeCodeVersion": "2.1.220",
+    "note": "SDKPartialAssistantMessage / BetaRawMessageStreamEvent tool_use input_json_delta sequence, including a truncated JSON form."
+  },
+  "valid": [
+    { "type": "stream_event", "uuid": "stream-envelope-start", "session_id": "sdk-stream-1", "timestamp_ms": 10, "event": { "type": "message_start", "message": { "id": "stream-model-1", "role": "assistant", "content": [] } } },
+    { "type": "stream_event", "uuid": "stream-envelope-block", "session_id": "sdk-stream-1", "timestamp_ms": 10, "event": { "type": "content_block_start", "index": 0, "content_block": { "type": "tool_use", "id": "stream-tool-1", "name": "Glob", "input": {} } } },
+    { "type": "stream_event", "uuid": "stream-envelope-delta-a", "session_id": "sdk-stream-1", "timestamp_ms": 10, "event": { "type": "content_block_delta", "index": 0, "delta": { "type": "input_json_delta", "partial_json": "{\"pattern\":" } } },
+    { "type": "stream_event", "uuid": "stream-envelope-delta-b", "session_id": "sdk-stream-1", "timestamp_ms": 10, "event": { "type": "content_block_delta", "index": 0, "delta": { "type": "input_json_delta", "partial_json": "\"*.ts\"}" } } },
+    { "type": "result", "subtype": "success", "uuid": "stream-result", "session_id": "sdk-stream-1", "is_error": false, "num_turns": 1, "result": "", "total_cost_usd": 0, "usage": { "input_tokens": 1, "output_tokens": 1 } }
+  ],
+  "truncated": [
+    { "type": "stream_event", "uuid": "truncated-start", "session_id": "sdk-stream-2", "event": { "type": "message_start", "message": { "id": "truncated-model-1", "role": "assistant", "content": [] } } },
+    { "type": "stream_event", "uuid": "truncated-block", "session_id": "sdk-stream-2", "event": { "type": "content_block_start", "index": 0, "content_block": { "type": "tool_use", "id": "truncated-tool-1", "name": "Glob", "input": {} } } },
+    { "type": "stream_event", "uuid": "truncated-delta", "session_id": "sdk-stream-2", "event": { "type": "content_block_delta", "index": 0, "delta": { "type": "input_json_delta", "partial_json": "{\"pattern\":" } } },
+    { "type": "result", "subtype": "success", "uuid": "truncated-result", "session_id": "sdk-stream-2", "is_error": false, "num_turns": 1, "result": "", "total_cost_usd": 0, "usage": { "input_tokens": 1, "output_tokens": 1 } }
+  ]
+}
