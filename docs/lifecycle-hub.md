@@ -415,7 +415,7 @@ session id and `404` when the session is unknown (neither live nor persisted).
 |---|---|---|
 | `POST /api/sessions/:id/provider-hooks/before-prompt` | provider-bridge extension | Body `{ prompt?, turn?: { index } }`. Dispatches `beforePrompt`; responds `{ content, blocks, tail }` while `tail` remains as temporary legacy back-compat for old bridges. |
 | `POST /api/sessions/:id/provider-hooks/before-compact` | provider-bridge extension | Dispatches `beforeCompact` and responds `{}` once provider flushes settle (bounded by per-provider timeouts). |
-| `GET /api/sessions/:id/context-trace?limit=N` | inspector / diagnostics | Returns `{ entries }` from the [trace store](#the-trace-store), oldest→newest; `limit` keeps the most recent N (clamped to 1000). |
+| `GET /api/sessions/:id/context-trace?limit=N` | inspector / diagnostics | Returns lifecycle-dispatch metadata `{ entries }` from the [trace store](#the-trace-store), oldest→newest; a positive `limit` keeps the most recent N (capped at 1000). The [Context Trace Inspector](#context-trace-inspector) starts at 100 and uses bounded expansion. |
 
 **`before-prompt` response shape.** `content` is the accepted blocks joined as fenced
 `<context-block …>` envelopes, or `""` when no block survived budgeting:
@@ -526,8 +526,9 @@ gateway callback. Never reintroduce a global TLS downgrade in the bridge.
 
 ## The trace store
 
-`ContextTraceStore` records each dispatch as one JSON line, so you can reconstruct exactly what
-ambient context a session received and why blocks were dropped.
+`ContextTraceStore` records one metadata row for each lifecycle dispatch. The trace explains
+*that* provider work ran and its budget outcome without retaining the ambient context itself;
+this supports observability without creating another prompt/content viewer.
 
 - **Location:** `<stateDir>/session-context-trace/<sessionId>.jsonl` (the directory is created
   lazily; the session id is sanitised to a safe basename). This mirrors the `bg-process` state
@@ -544,15 +545,74 @@ ambient context a session received and why blocks were dropped.
       ms: number;        // invocation duration
       blocks: number;    // blocks KEPT after budgeting
       omitted: number;   // budget-omitted + malformed-dropped count
-      error?: string;    // error / "timeout" / "malformed block(s) dropped"
+      error?: string;    // diagnostic; the UI maps this to a safe status
     }[];
   }
   ```
+
+  The schema is additive and remains backward compatible. It intentionally has no context-block
+  text, prompt, secret, token, or decision/mutation fields. Future additive inspector item kinds
+  (for example, decisions) must not change the meaning or shape of existing trace rows.
 - **Reads:** `readTrace(sessionId, limit?)` returns entries oldest→newest; `limit` keeps the
   most recent N. Corrupt/partial lines are skipped rather than failing the read.
-- **Size cap:** the file is capped at **2 MB**. On append, if the file exceeds the cap it is
-  rewritten keeping only the newest lines that fit (drop-oldest), via a temp-file rename so a
-  reader never sees a half-written file.
+- **Retention:** each per-session JSONL file is capped at exactly **2 MiB**. After an append that
+  exceeds the cap, the store retains the newest complete rows that fit and rotates out the oldest
+  complete rows, using a temporary-file rename so readers do not observe a partial rewrite.
+
+## Context Trace Inspector
+
+The **Context trace** inspector is the user-facing, read-only view of this metadata. It makes
+provider activity debuggable and budget outcomes visible while preserving the boundary between
+observability and the private context supplied to the model.
+
+### Open, persistence, and accessibility
+
+From the active session, choose **Session actions → View context trace**. This opens a **Context**
+tab in the shared right-side workspace rather than replacing the transcript. The tab is persisted
+with that session's workspace, so returning to or cold-reloading a historical persisted session
+rehydrates the open inspector and reloads its trace. Closing the tab remains authoritative; it is
+not recreated merely because trace data exists.
+
+The inspector uses the shared side-panel layout, including narrow-screen behavior. It is keyboard
+accessible: opening the non-modal tab moves focus to its heading, refreshes retain the current
+focus, and closing it restores focus to the action that opened it when possible (with a safe
+session-actions/composer fallback). Its controls have screen-reader names and loading/error states.
+
+### What it shows — and what it never shows
+
+The newest lifecycle event appears first. For each event, the inspector shows:
+
+- lifecycle event and local time;
+- provider id and latency;
+- kept and omitted block counts; and
+- a sanitized provider status, when applicable: **Timed out**, **Malformed blocks omitted**, or
+  **Provider error**.
+
+Provider order within an event is preserved. All endpoint values are treated as untrusted and are
+normalized before reaching the component: unrecognized events/providers become safe fallback
+labels, invalid numbers are bounded, and arbitrary provider error text becomes one of the status
+categories above. The inspector never renders context-block contents, prompts, gateway tokens,
+secrets, raw provider errors, stack traces, or filesystem paths. It is deliberately not a prompt
+or error-detail inspector.
+
+### Loading and updates
+
+Requests run only while the Context tab belongs to the active session. The initial read asks for
+100 recent rows. **Load 100 earlier** increases the bounded recent-history window by 100 rows at a
+time, up to 1,000; it is not an unbounded poll or cursor walk. The API supplies that window in
+oldest→newest order, while the inspector reverses only the events for newest-first display and
+leaves every event's provider order untouched.
+
+The panel shows loading, empty, and retryable error states. A refresh failure after rows have
+loaded keeps those rows visible with a non-sensitive refresh warning. Requests are aborted on a
+session switch, disconnect, or Context-tab close, and stale responses cannot update another
+session's inspector.
+
+A successful trace append sends the session WebSocket a metadata-only
+`context_trace_updated` invalidation. An open active inspector then re-reads its bounded REST
+window; the trace data itself is never sent over WebSocket. An inactive session remembers the
+invalidation and revalidates once when its persisted inspector is next opened or synchronized.
+There is no polling loop.
 
 ## Status / wiring roadmap
 
