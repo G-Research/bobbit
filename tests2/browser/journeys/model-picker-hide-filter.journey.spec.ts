@@ -43,17 +43,18 @@ test.describe("Journey: gateway statuses and picker visibility", () => {
 		await expect(page.getByTestId("gateway-status").filter({ hasText: "Unavailable · 1 retained model" })).toBeVisible();
 		await page.getByTestId("gateway-test-btn").first().click();
 
-		await page.locator('[data-row-label="Session"] button').first().click();
-		await expect(page.locator("agent-model-selector")).toBeVisible();
-		await expect(page.getByTestId("model-filter-has-key")).toBeVisible();
-		await page.getByTestId("model-filter-has-key").click();
-		await expect(page.locator('[data-model-id="hidden"]')).toHaveCount(0);
-		await expect(page.locator('[data-model-id="current"]')).toBeVisible();
-		await expect(page.locator('[data-model-id="ready"]')).toBeVisible();
+		await page.locator('[data-testid="model-row"][data-row-label="Session"]').first().locator('button[title="Choose model"]').click();
+		const modelPicker = page.locator("agent-model-selector").filter({ has: page.getByRole("heading", { name: "Select Model" }) });
+		await expect(modelPicker.getByRole("heading", { name: "Select Model" })).toBeVisible();
+		await expect(modelPicker.getByTestId("model-filter-has-key")).toBeVisible();
+		await modelPicker.getByTestId("model-filter-has-key").click();
+		await expect(modelPicker.locator('[data-model-id="hidden"]')).toHaveCount(0);
+		await expect(modelPicker.locator('[data-model-id="current"]')).toBeVisible();
+		await expect(modelPicker.locator('[data-model-id="ready"]')).toBeVisible();
 		await page.keyboard.press("Escape");
 		await page.reload();
 		await expect(page.getByTestId("gateways-editor")).toBeVisible({ timeout: 15_000 });
-		await page.locator('[data-row-label="Session"] button').first().click();
-		await expect(page.locator('[data-model-id="hidden"]')).toHaveCount(0);
+		await page.locator('[data-testid="model-row"][data-row-label="Session"]').first().locator('button[title="Choose model"]').click();
+		await expect(modelPicker.locator('[data-model-id="hidden"]')).toHaveCount(0);
 	});
 });
