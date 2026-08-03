@@ -242,6 +242,36 @@ describe("preview_open extension (v3 mount contract)", () => {
 		assert.strictEqual(body.file, undefined);
 	});
 
+	it.each(["100%.html", "%41.html"])("preserves raw literal-percent entry %s in compact v3 markers", async (entry) => {
+		const tool = getTool();
+		fetchResponder = (url, init) => {
+			if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
+				return {
+					status: 200,
+					body: {
+						url: `/preview/${SID}/${entry}`,
+						path: `/state/preview/${SID}/${entry}`,
+						relPath: `${SID}/${entry}`,
+						entry,
+						mtime: 1714512345678,
+						contentHash: HASH,
+						artifactId: ARTIFACT_ID,
+					},
+				};
+			}
+			return { status: 200, body: { ok: true } };
+		};
+
+		const res = await tool.execute(`call-literal-percent-${entry}`, { html: "<p>literal percent</p>" });
+		const parsed = parseSnapshot(res.content[1]?.text);
+		assert.ok(parsed && parsed.kind === "preview");
+		if (parsed && parsed.kind === "preview") {
+			assert.equal(parsed.url, `/preview/${SID}/`, "capped marker should use the compact directory URL");
+			assert.equal(parsed.path, entry);
+			assert.equal(parsed.entry, entry, "snapshot entry must remain raw rather than URL-decoded");
+		}
+	});
+
 	it("v3 marker block is constant-size and ≤ 250 bytes for the canonical normalised path", async () => {
 		// Canonical normalised form — `<sid>/<entry>` regardless of host OS.
 		// This is what the extension feeds the builder in production.

@@ -163,6 +163,54 @@ describe("historical preview URL-only recovery", () => {
 		assert.equal(parse(compact, "path\\secret.html"), null);
 	});
 
+	it.each([
+		["empty", ""],
+		["current directory", "."],
+		["parent directory", ".."],
+		["forward slash", "nested/secret.html"],
+		["backslash", "nested\\secret.html"],
+		["NUL control", "unsafe\0.html"],
+		["unit-separator control", "unsafe\u001f.html"],
+		["over-length", `${"x".repeat(256)}.html`],
+	] as const)("rejects unsafe compact entry: %s", async (_name, entry) => {
+		installBrowser("/bobbit", "https://gateway.example/team/gw");
+		const parse = await historicalParser();
+		assert.equal(parse(`/preview/${SID}/`, entry), null);
+	});
+
+	it("round-trips literal percent filenames without collapsing their disk targets", async () => {
+		installBrowser("/bobbit", "https://gateway.example/team/gw");
+		const parse = await historicalParser();
+		const mounted = new Map<string, Awaited<ReturnType<typeof writeInline>>>();
+
+		for (const entry of ["100%.html", "%41.html"]) {
+			const result = await writeInline(SID, `<h1>${entry}</h1>`, entry);
+			mounted.set(entry, result);
+			assert.equal(result.url, `/preview/${SID}/${entry}`);
+			assert.equal(fs.readFileSync(result.path, "utf8"), `<h1>${entry}</h1>`);
+
+			const block = buildPreviewSnapshotV3Block(result.url, result.relPath, "a".repeat(64), {
+				artifactId: "pa_abc123xyz",
+				entry,
+			});
+			const snapshot = parseSnapshot(block);
+			assert.ok(snapshot && snapshot.kind === "preview");
+			if (!snapshot || snapshot.kind !== "preview") continue;
+			assert.equal(snapshot.url, `/preview/${SID}/`, "the capped marker must compact the URL");
+			assert.equal(snapshot.entry, entry, "the compact marker must retain the raw filename");
+
+			const route = parse(snapshot.url, snapshot.entry);
+			assert.equal(route, `/preview/${SID}/${encodeURIComponent(entry)}`);
+			assert.equal(decodeURIComponent(route!.slice(`/preview/${SID}/`.length)), entry);
+		}
+
+		const literalPercent = mounted.get("%41.html")!;
+		const decodedName = await writeInline(SID, "<h1>A</h1>", "A.html");
+		assert.notEqual(literalPercent.path, decodedName.path, "a literal %41 filename must not target A.html");
+		assert.equal(fs.readFileSync(literalPercent.path, "utf8"), "<h1>%41.html</h1>");
+		assert.equal(fs.readFileSync(decodedName.path, "utf8"), "<h1>A</h1>");
+	});
+
 	it("round-trips every compact and fallback payload shape emitted by the v3 writer", async () => {
 		installBrowser("/bobbit", "https://gateway.example/team/gw");
 		const parse = await historicalParser();
