@@ -18,10 +18,16 @@ const ARCHIVED_SAFE_ACTION_IDS = [
 	"continue-archived",
 	"copy-link",
 	"view-system-prompt",
+	"open-new-window",
+] as const;
+const ACTIVE_ARCHIVED_SAFE_ACTION_IDS = [
+	"continue-archived",
+	"copy-link",
+	"view-system-prompt",
 	"view-context-trace",
 	"open-new-window",
 ] as const;
-const ARCHIVED_ACTION_LABELS: Record<typeof ARCHIVED_SAFE_ACTION_IDS[number], string> = {
+const ARCHIVED_ACTION_LABELS: Record<typeof ACTIVE_ARCHIVED_SAFE_ACTION_IDS[number], string> = {
 	"continue-archived": "Continue in new session",
 	"copy-link": "Copy link",
 	"view-system-prompt": "View System Prompt",
@@ -168,7 +174,7 @@ async function popoverLabels(page: Page): Promise<string[]> {
 async function expectArchivedSafeMenu(page: Page, expectedIds: readonly string[] = ARCHIVED_SAFE_ACTION_IDS): Promise<void> {
 	expect(await popoverActionIds(page)).toEqual([...expectedIds]);
 	const labels = await popoverLabels(page);
-	const expectedLabels = expectedIds.map((id) => ARCHIVED_ACTION_LABELS[id as typeof ARCHIVED_SAFE_ACTION_IDS[number]]);
+	const expectedLabels = expectedIds.map((id) => ARCHIVED_ACTION_LABELS[id as typeof ACTIVE_ARCHIVED_SAFE_ACTION_IDS[number]]);
 	expect(labels).toEqual(expectedLabels);
 	for (const forbidden of FORBIDDEN_LABELS) {
 		expect(labels.join("\n"), `${forbidden} must not appear in archived session menus`).not.toContain(forbidden);
@@ -259,7 +265,7 @@ test.describe("archived session actions", () => {
 		}, archivedId), { timeout: 15_000 }).toBe(true);
 
 		await openHeaderMenu(page);
-		await expectArchivedSafeMenu(page);
+		await expectArchivedSafeMenu(page, ACTIVE_ARCHIVED_SAFE_ACTION_IDS);
 	});
 
 	test("mobile archived header menu exposes the same safe actions", async ({ page }) => {
@@ -270,7 +276,7 @@ test.describe("archived session actions", () => {
 		await openApp(page);
 		await openArchivedSession(page, archivedId);
 		await openHeaderMenu(page);
-		await expectArchivedSafeMenu(page);
+		await expectArchivedSafeMenu(page, ACTIVE_ARCHIVED_SAFE_ACTION_IDS);
 		const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
 		expect(overflow, "mobile archived header menu must not create horizontal overflow").toBeLessThanOrEqual(1);
 	});

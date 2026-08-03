@@ -10,7 +10,7 @@ import { confirmAction, showConnectionError, showRenameDialog } from "./dialogs-
 import { setHashRoute } from "./routing.js";
 import { shortcutHint } from "./shortcut-registry.js";
 import { connectToSession, forkSession, terminateSession } from "./session-manager.js";
-import { state, type GatewaySession } from "./state.js";
+import { activeSessionId, state, type GatewaySession } from "./state.js";
 import { ensureContinueSessionChooser } from "./lazy-widgets.js";
 import { errorDetails } from "./error-helpers.js";
 import { entrypointIconNode } from "./entrypoint-icon-registry.js";
@@ -231,6 +231,9 @@ export function buildArchivedSessionActions(input: BuildArchivedSessionActionsIn
 			icon: icon(Activity, "xs"),
 			priority: ARCHIVED_BUILTIN_PRIORITIES["view-context-trace"],
 			quick: false,
+			// Context tabs belong to the mounted session workspace. Do not expose an
+			// action for an archived sidebar row while another session is active.
+			visible: activeSessionId() === session.id,
 			run: (event: Event, opener?: HTMLElement) => openContextTracePanel(session.id, event, opener),
 		},
 		{
@@ -387,6 +390,9 @@ export function buildSessionActions(input: BuildSessionActionsInput): SessionAct
 			icon: icon(Activity, "xs"),
 			priority: BUILTIN_PRIORITIES["view-context-trace"],
 			quick: false,
+			// The inspector is session-workspace scoped, so only the active
+			// descriptor can open it.
+			visible: activeSessionId() === session.id,
 			run: (event: Event, opener?: HTMLElement) => openContextTracePanel(session.id, event, opener),
 		},
 		{
@@ -411,6 +417,9 @@ export function buildSessionActions(input: BuildSessionActionsInput): SessionAct
 function openContextTracePanel(sessionId: string, event: Event, opener?: HTMLElement): void {
 	event.preventDefault();
 	event.stopPropagation();
+	// The menu can outlive a session switch for one render turn. Refuse the
+	// stale invocation rather than writing a Context tab into another workspace.
+	if (activeSessionId() !== sessionId) return;
 	const focusOpener = opener ?? (event.currentTarget instanceof HTMLElement ? event.currentTarget : undefined);
 	// The inspector is a persisted side-panel tab. `openSidePanelTab` applies its
 	// optimistic workspace before returning, so the controller can fetch while the
