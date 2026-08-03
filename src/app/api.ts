@@ -54,6 +54,8 @@ const _prevSessionStatus = new Map<string, string>();
 /** Throttle PR status polling — don't hit GitHub API on every session poll. */
 let _lastPrRefresh = 0;
 const PR_POLL_INTERVAL_MS = 60_000;
+/** Active session/dashboard demand; canonical server records arbitrate external reads. */
+export const ACTIVE_PR_POLL_INTERVAL_MS = 20_000;
 
 /** Reset PR poll throttle so next session poll triggers an immediate refresh.
  *  Called on visibilitychange (tab becomes visible) to avoid stale badges. */
@@ -64,7 +66,8 @@ export function resetPrPollThrottle(): void {
 export type RemoteStateIntent = "automatic" | "visible" | "explicit" | "sidebar";
 
 export interface RemoteStateSnapshot<T> extends RemoteStateMetadata {
-	data: T | null;
+	/** Omitted while a coordinator record is cold or has failed without last-good data. */
+	data?: T | null;
 }
 
 function safeRemoteStateError(value: unknown): RemoteStateError | undefined {
@@ -80,7 +83,9 @@ function safeRemoteStateError(value: unknown): RemoteStateError | undefined {
  */
 export function parseRemoteStateSnapshot<T>(value: unknown): RemoteStateSnapshot<T> {
 	const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
-	const isEnvelope = "data" in record && ("observedAt" in record || "refreshedAt" in record || "stale" in record || "source" in record || "lastError" in record || "ageMs" in record);
+	// Cold coordinator envelopes intentionally omit `data`. Metadata is therefore
+	// the discriminator; legacy flat PR/Git responses carry none of these fields.
+	const isEnvelope = "observedAt" in record || "refreshedAt" in record || "stale" in record || "source" in record || "lastError" in record || "ageMs" in record;
 	const metadata: RemoteStateMetadata = {
 		...(typeof record.observedAt === "number" || typeof record.observedAt === "string" ? { observedAt: record.observedAt } : {}),
 		...(typeof record.refreshedAt === "number" || typeof record.refreshedAt === "string" ? { refreshedAt: record.refreshedAt } : {}),
@@ -89,7 +94,7 @@ export function parseRemoteStateSnapshot<T>(value: unknown): RemoteStateSnapshot
 		...(typeof record.source === "string" ? { source: record.source } : {}),
 		...(safeRemoteStateError(record.lastError) ? { lastError: safeRemoteStateError(record.lastError) } : {}),
 	};
-	return { data: (isEnvelope ? record.data : value) as T | null, ...metadata };
+	return { ...(isEnvelope && !("data" in record) ? {} : { data: (isEnvelope ? record.data : value) as T | null }), ...metadata };
 }
 
 function appendRemoteStateIntent(qs: string, intent: RemoteStateIntent | undefined): string {
@@ -1527,7 +1532,11 @@ export async function refreshPrStatusCache(skipRender = false): Promise<boolean>
 				if (res.status === 204 || res.status === 404) return { goalId: g.id, pr: null, noPr: true };
 				if (!res.ok) return { goalId: g.id, pr: null, noPr: false };
 				const snapshot = parseRemoteStateSnapshot<RemotePrStatus>(await res.json());
-				return { goalId: g.id, pr: snapshot.data ? { ...snapshot.data, ...snapshot } : null, noPr: snapshot.data === null && !snapshot.lastError };
+				const data = snapshot.data;
+				const pr = data && typeof data === "object" && typeof data.state === "string"
+					? { ...data, ...snapshot, state: data.state }
+					: null;
+				return { goalId: g.id, pr, noPr: data === null && !snapshot.stale && !snapshot.lastError };
 			} catch {
 				return { goalId: g.id, pr: null, noPr: false };
 			}

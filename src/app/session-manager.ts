@@ -14,7 +14,7 @@ import {
 	type Project,
 	type RemoteStateMetadata,
 } from "./state.js";
-import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam, readProposalSnapshot, parseRemoteStateSnapshot, type GitStatusData } from "./api.js";
+import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam, readProposalSnapshot, parseRemoteStateSnapshot, ACTIVE_PR_POLL_INTERVAL_MS, type GitStatusData } from "./api.js";
 import {
 	activeGatewayConnection,
 	commitGatewayConnection,
@@ -1341,8 +1341,8 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 	_flushDraft();
 	_teardownDraftHandlers();
 
-	// Abort any in-flight git-status refresh for the outgoing session, and stop the poll.
-	stopGitStatusPoll();
+	// Abort any in-flight git-status refresh for the outgoing session, and stop active polls.
+	stopActiveRemoteStatePolling();
 	if (state.selectedSessionId) abortGitStatusForSession(state.selectedSessionId);
 
 	const outgoingPanel = transferActiveSessionToCache(state.selectedSessionId, sessionId);
@@ -1594,7 +1594,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// Refresh git status and bg processes (lightweight, fire-and-forget)
 		refreshGitStatusForSession(sessionId, { quiet: fastGit.quietRecheck });
 		refreshBgProcessesForSession(sessionId);
-		startGitStatusPoll(sessionId);
+		startActiveRemoteStatePolling(sessionId);
 
 		// Re-fetch proposal drafts for this session. The slow path (fresh
 		// connect) gets these via the WS-auth `proposal_update {source:"rehydrate"}`
@@ -1785,9 +1785,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (status === "connected" && isActive) {
 				refreshGitStatusForSession(sessionId);
 				refreshBgProcessesForSession(sessionId);
-				startGitStatusPoll(sessionId);
+				startActiveRemoteStatePolling(sessionId);
 			} else if (status === "disconnected" && isActive) {
-				stopGitStatusPoll();
+				stopActiveRemoteStatePolling();
 				abortGitStatusForSession(sessionId);
 			}
 			if (isActive) renderApp();
@@ -1898,21 +1898,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		};
 
 		remote.onPrStatusChanged = (goalId) => {
-			// Targeted PR status refresh — bypasses the 60s poll throttle
-			(async () => {
-				try {
-					const res = await gatewayFetch(`/api/goals/${goalId}/pr-status?optional=1`);
-					if (res.status === 204) {
-						state.prStatusCache.delete(goalId);
-					} else if (res.ok) {
-						const data = await res.json();
-						state.prStatusCache.set(goalId, data);
-					} else if (res.status === 404) {
-						state.prStatusCache.delete(goalId);
-					}
-					renderApp();
-				} catch { /* silently ignore network errors */ }
-			})();
+			const session = state.gatewaySessions.find((candidate) => candidate.id === sessionId);
+			const linkedGoalId = session?.teamGoalId ?? session?.goalId;
+			if (linkedGoalId === goalId) void refreshPrStatusForSession(sessionId, "visible");
 		};
 
 		remote.onGoalProposal = (proposal, _streaming = false) => {
@@ -2627,7 +2615,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 						body: JSON.stringify({ method, ...(admin ? { admin: true } : {}), ...(branch ? { branch } : {}) }),
 					});
 					if (res.ok) {
-						refreshPrStatusForSession(sessionId);
+						refreshPrStatusForSession(sessionId, "explicit");
 						refreshPrStatusCache();
 						return undefined;
 					}
@@ -2667,7 +2655,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		pruneGitRepoCache(state.gatewaySessions.map((s) => s.id));
 		refreshGitStatusForSession(sessionId, { quiet: slowGit.quietRecheck });
 		refreshBgProcessesForSession(sessionId);
-		startGitStatusPoll(sessionId);
+		startActiveRemoteStatePolling(sessionId);
 
 		// ── Run draft restores, refreshSessions, and storage.providerKeys
 		// in parallel. Draft restores must complete before we unlock proposal
@@ -3091,7 +3079,7 @@ export async function terminateSession(sessionId: string, opts?: { goalId?: stri
 
 export function backToSessions(): void {
 	flushAndTeardownDraft();
-	stopGitStatusPoll();
+	stopActiveRemoteStatePolling();
 	const outgoingId = state.selectedSessionId;
 	if (outgoingId) abortGitStatusForSession(outgoingId);
 	transferActiveSessionToCache(outgoingId);
@@ -3240,6 +3228,27 @@ const _gitStatusAborts = new Map<string, AbortController>();
  *  Event-driven refreshes bump this so the poll can coalesce and skip ticks. */
 let gitStatusLastRefreshAt = 0;
 let gitStatusPollTimer: ReturnType<typeof setInterval> | null = null;
+let prStatusPollTimer: ReturnType<typeof setInterval> | null = null;
+
+function stopActiveRemoteStatePolling(): void {
+	stopGitStatusPoll();
+	if (prStatusPollTimer) {
+		clearInterval(prStatusPollTimer);
+		prStatusPollTimer = null;
+	}
+}
+
+function startActiveRemoteStatePolling(sessionId: string): void {
+	stopActiveRemoteStatePolling();
+	startGitStatusPoll(sessionId);
+	// Active PR demand is independent of the 30-second Git status path.
+	void refreshPrStatusForSession(sessionId, "visible");
+	prStatusPollTimer = setInterval(() => {
+		if (activeSessionId() !== sessionId) { stopActiveRemoteStatePolling(); return; }
+		if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+		void refreshPrStatusForSession(sessionId, "automatic");
+	}, ACTIVE_PR_POLL_INTERVAL_MS);
+}
 
 function stopGitStatusPoll(): void {
 	if (gitStatusPollTimer) {
@@ -3269,6 +3278,8 @@ if (typeof document !== "undefined") {
 		if (document.visibilityState !== "visible") return;
 		const sid = activeSessionId();
 		if (!sid) return;
+		// PR state remains active even when the Git widget has been classified hidden.
+		void refreshPrStatusForSession(sid, "visible");
 		const ai = state.chatPanel?.agentInterface;
 		if (!ai || isGitWidgetHiddenState(ai.gitRepoKnown)) return;
 		refreshGitStatusForSession(sid, { source: "event" });
@@ -3513,7 +3524,6 @@ async function refreshGitStatusForSession(
 		console.warn("[git-status] refresh failed after retries", { sessionId });
 	}
 
-	refreshPrStatusForSession(sessionId);
 }
 
 /** Export for UI event wiring — callable from outside this module (dropdown open). */
@@ -3532,14 +3542,14 @@ function abortGitStatusForSession(sessionId: string): void {
 	}
 }
 
-async function refreshPrStatusForSession(sessionId: string): Promise<void> {
+async function refreshPrStatusForSession(sessionId: string, intent: "automatic" | "visible" | "explicit" = "automatic"): Promise<void> {
 	const sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
-	const goalId = sessionData?.goalId;
+	const goalId = sessionData?.teamGoalId ?? sessionData?.goalId;
 
-	// Build the URL: goal-scoped if available, otherwise session-scoped
+	// Build the URL: goal-scoped if available, otherwise session-scoped.
 	const prStatusUrl = goalId
-		? `/api/goals/${goalId}/pr-status?optional=1`
-		: `/api/sessions/${sessionId}/pr-status?optional=1`;
+		? `/api/goals/${goalId}/pr-status?optional=1&intent=${intent}`
+		: `/api/sessions/${sessionId}/pr-status?optional=1&intent=${intent}`;
 
 	const ai = state.chatPanel?.agentInterface;
 	if (!ai) return;
@@ -3562,15 +3572,19 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 		if (!res) return;
 		if (res.status === 204) {
 			if (activeSessionId() === sessionId) clearPr();
+			if (goalId) state.prStatusCache.delete(goalId);
+			renderApp();
 			return;
 		}
 		if (!res.ok) return;
 
 		const snapshot = parseRemoteStateSnapshot<Record<string, unknown>>(await res.json());
 		const data = snapshot.data;
+		let changed = false;
 		if (activeSessionId() === sessionId) {
 			const widget = ai as typeof ai & RemoteSnapshotWidgetState;
 			widget.remotePrSnapshot = copyRemoteStateMetadata(snapshot);
+			changed = true;
 			if (data === null && !snapshot.stale && !snapshot.lastError) {
 				clearPr();
 			} else if (isRecord(data) && typeof data.state === "string") {
@@ -3594,9 +3608,13 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 				...(typeof data.reviewDecision === "string" ? { reviewDecision: data.reviewDecision } : {}),
 				...(typeof data.mergeable === "string" ? { mergeable: data.mergeable } : {}),
 				viewerCanMergeAsAdmin: data.viewerCanMergeAsAdmin === true,
+				...copyRemoteStateMetadata(snapshot),
 			});
-			renderApp();
+			changed = true;
+		} else if (goalId && data === null && !snapshot.stale && !snapshot.lastError) {
+			changed = state.prStatusCache.delete(goalId) || changed;
 		}
+		if (changed) renderApp();
 	} catch {
 		// Invalid coordinator data is transient from the session view's
 		// perspective; preserve the last-good PR projection until a later read.

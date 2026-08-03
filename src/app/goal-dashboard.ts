@@ -7,7 +7,7 @@ import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, type Goal, type RemoteStateMetadata } from "./state.js";
 import { isHeadquartersProject } from "./headquarters.js";
-import { gatewayFetch, deleteGoal, startTeam, teardownTeamWithDialog, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, refreshGateStatusForGoal, scheduleGateStatusRefreshForGoal, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, pauseGoalWithDialog, resumeGoalWithDialog, isGoalPauseResumeActionPending, parseRemoteStateSnapshot, type GateState, type GateSignal, type VerificationTimeoutInfo } from "./api.js";
+import { gatewayFetch, deleteGoal, startTeam, teardownTeamWithDialog, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, refreshGateStatusForGoal, scheduleGateStatusRefreshForGoal, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, pauseGoalWithDialog, resumeGoalWithDialog, isGoalPauseResumeActionPending, parseRemoteStateSnapshot, ACTIVE_PR_POLL_INTERVAL_MS, type RemoteStateSnapshot, type GateState, type GateSignal, type VerificationTimeoutInfo } from "./api.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { GATE_STATUS_CLIENT_EVENT, shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
@@ -258,6 +258,7 @@ let goalCost: GoalCost | null = null;
 let costPollTimer: ReturnType<typeof setInterval> | null = null;
 let costPopoverOpen = false;
 let gitStatusPollTimer: ReturnType<typeof setInterval> | null = null;
+let prStatusPollTimer: ReturnType<typeof setInterval> | null = null;
 let dashboardRemoteVisibilityHandler: (() => void) | null = null;
 let setupPollTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -838,11 +839,10 @@ export async function loadDashboardData(goalId: string): Promise<void> {
 
 		if (prStatusRes && prStatusRes.status === 204) {
 			prStatus = null;
+			state.prStatusCache.delete(goalId);
 		} else if (prStatusRes && prStatusRes.ok) {
 			const snapshot = parseRemoteStateSnapshot<PrStatus>(await prStatusRes.json());
-			prStatus = snapshot.data ? { ...snapshot.data, ...snapshot } : null;
-			// Sync to sidebar cache so badge persists even if polling skips this goal.
-			if (prStatus && currentGoalId) state.prStatusCache.set(currentGoalId, prStatus);
+			applyDashboardPrSnapshot(goalId, snapshot);
 		}
 
 		const teamState = await getTeamState(goalId);
@@ -1365,59 +1365,61 @@ function startGitStatusPolling(goalId: string): void {
 		if (document.visibilityState !== "visible" || currentGoalId !== goalId) return;
 		// Visibility return renders retained state and joins server single-flight.
 		void refreshGoalGitStatus(goalId, { intent: "visible" });
-		void gatewayFetch(`/api/goals/${goalId}/pr-status?optional=1&intent=visible`)
-			.then(async (res) => {
-				if (!res.ok || currentGoalId !== goalId) return;
-				const snapshot = parseRemoteStateSnapshot<PrStatus>(await res.json());
-				if (!snapshot.data) return;
-				const next = { ...snapshot.data, ...snapshot } as PrStatus;
-				if (JSON.stringify(next) === JSON.stringify(prStatus)) return;
-				prStatus = next;
-				state.prStatusCache.set(goalId, next);
-				renderApp();
-			})
-			.catch(() => { /* retained state is already rendered */ });
+		void refreshGoalPrStatus(goalId, "visible");
 	};
 	document.addEventListener("visibilitychange", dashboardRemoteVisibilityHandler);
 	gitStatusPollTimer = setInterval(() => {
 		if (!currentGoalId || currentGoalId !== goalId) return;
-		if (document.visibilityState !== "visible") return;
-		void pollGoalRemoteSnapshots(goalId);
+		if (document.visibilityState !== "visible" || gitRepoKnown === "no") return;
+		// Git remains on its existing local-status cadence.
+		if (performance.now() - gitStatusLastRefreshAt >= 10_000) {
+			void refreshGoalGitStatus(goalId, { intent: "automatic" });
+		}
 	}, 60_000);
+	prStatusPollTimer = setInterval(() => {
+		if (!currentGoalId || currentGoalId !== goalId) return;
+		if (document.visibilityState !== "visible") return;
+		void refreshGoalPrStatus(goalId, "automatic");
+	}, ACTIVE_PR_POLL_INTERVAL_MS);
 }
 
-async function pollGoalRemoteSnapshots(goalId: string): Promise<void> {
-	if (gitRepoKnown === 'no') { stopGitStatusPolling(); return; }
-	// Automatic polls request snapshots only; freshness and external I/O budgets
-	// remain owned by the coordinator.
-	if (performance.now() - gitStatusLastRefreshAt >= 10_000) {
-		void refreshGoalGitStatus(goalId, { intent: "automatic" });
+function applyDashboardPrSnapshot(goalId: string, snapshot: RemoteStateSnapshot<PrStatus>): boolean {
+	if (isPrStatus(snapshot.data)) {
+		const next: PrStatus = { ...snapshot.data, ...snapshot };
+		if (JSON.stringify(next) === JSON.stringify(prStatus)) return false;
+		prStatus = next;
+		state.prStatusCache.set(goalId, next);
+		return true;
 	}
+	if (snapshot.data === null && !snapshot.stale && !snapshot.lastError) {
+		const cacheDeleted = state.prStatusCache.delete(goalId);
+		const changed = prStatus !== null || cacheDeleted;
+		prStatus = null;
+		return changed;
+	}
+	return false;
+}
 
-	let needRender = false;
+async function refreshGoalPrStatus(goalId: string, intent: "automatic" | "visible"): Promise<void> {
 	try {
-		const prRes = await gatewayFetch(`/api/goals/${goalId}/pr-status?optional=1&intent=automatic`).catch(() => null);
-		if (currentGoalId !== goalId) return;
-		if (prRes?.status === 204) {
-			if (prStatus !== null) {
-				prStatus = null;
-				needRender = true;
-			}
-		} else if (prRes?.ok) {
-			const snapshot = parseRemoteStateSnapshot<PrStatus>(await prRes.json());
-			const newPr = snapshot.data ? { ...snapshot.data, ...snapshot } as PrStatus : null;
-			if (newPr && JSON.stringify(newPr) !== JSON.stringify(prStatus)) {
-				prStatus = newPr;
-				needRender = true;
-				state.prStatusCache.set(goalId, newPr);
-			}
+		const res = await gatewayFetch(`/api/goals/${goalId}/pr-status?optional=1&intent=${intent}`).catch(() => null);
+		if (!res || currentGoalId !== goalId) return;
+		if (res.status === 204) {
+			const cacheDeleted = state.prStatusCache.delete(goalId);
+			const changed = prStatus !== null || cacheDeleted;
+			prStatus = null;
+			if (changed) renderApp();
+			return;
 		}
+		if (!res.ok) return;
+		const snapshot = parseRemoteStateSnapshot<PrStatus>(await res.json());
+		if (currentGoalId === goalId && applyDashboardPrSnapshot(goalId, snapshot)) renderApp();
 	} catch { /* retain last good PR state on transient errors */ }
-	if (needRender) renderApp();
 }
 
 function stopGitStatusPolling(): void {
 	if (gitStatusPollTimer) { clearInterval(gitStatusPollTimer); gitStatusPollTimer = null; }
+	if (prStatusPollTimer) { clearInterval(prStatusPollTimer); prStatusPollTimer = null; }
 	if (dashboardRemoteVisibilityHandler) {
 		document.removeEventListener("visibilitychange", dashboardRemoteVisibilityHandler);
 		dashboardRemoteVisibilityHandler = null;
@@ -1816,13 +1818,11 @@ async function handlePrMerge(e: CustomEvent<{ method: string; admin?: boolean; b
 		}
 		if (prRes && prRes.status === 204) {
 			prStatus = null;
+			state.prStatusCache.delete(goalId);
 		} else if (prRes && prRes.ok) {
 			const snapshot = parseRemoteStateSnapshot<PrStatus>(await prRes.json());
-			prStatus = snapshot.data ? { ...snapshot.data, ...snapshot } : null;
-			// Immediately update the goal grouping cache so it reflects the merge.
-			if (prStatus) state.prStatusCache.set(goalId, prStatus);
+			applyDashboardPrSnapshot(goalId, snapshot);
 		}
-		else prStatus = null;
 	} catch { /* ignore */ }
 	refreshPrStatusCache();
 	renderApp();
