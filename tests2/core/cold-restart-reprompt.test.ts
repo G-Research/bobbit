@@ -196,6 +196,37 @@ function makeTeamManager(sm: any, pcm: any): any {
 }
 
 describe("cold-restart re-prompt (reproducing)", () => {
+	it("does not drain persisted manual-retry work when a cold restore coordinator releases", async () => {
+		const prompts: string[] = [];
+		const bridge: any = {
+			running: true,
+			async start() {}, async stop() {}, async waitForReady() {},
+			async prompt(text: string) { prompts.push(text); return { success: true }; },
+			async promptWhenReady(text: string) { return this.prompt(text); },
+			async steer() { return { success: true }; }, async abort() { return { success: true }; },
+			async getState() { return { success: true }; },
+			async getMessages() { return { success: true, data: { messages: [] } }; },
+			async setModel() { return { success: true }; }, async setThinkingLevel() { return { success: true }; },
+			async compact() { return { success: true }; }, async sendCommand() { return { success: true }; },
+			onEvent() { return () => {}; },
+		};
+		const m = makeManager(bridge);
+		const ps = {
+			...makeMidTurnPersistedSession("cold-manual-retry"),
+			wasStreaming: false,
+			messageQueue: [{ id: "parked-row", text: "parked before cold restore", isSteered: false, createdAt: Date.now() }],
+			manualRetryRequired: true,
+		};
+
+		await m._restoreSessionCoalesced(ps);
+		await flush();
+
+		const restored = m.sessions.get(ps.id);
+		assert.equal(restored?.manualRetryRequired, true, "the restored session retains its attach-visible parked marker");
+		assert.equal(restored?.promptQueue.peek()?.id, "parked-row", "the durable row survives untouched");
+		assert.deepEqual(prompts, [], "coordinator release must not dispatch manually parked work");
+	});
+
 	it("mid-turn re-prompt waits for ready, then prompts with a generous timeout", async () => {
 		// Recording cold-agent bridge: prompt rejects with the cold-start timeout
 		// UNLESS waitForReady was awaited first (ready flag flipped). This
