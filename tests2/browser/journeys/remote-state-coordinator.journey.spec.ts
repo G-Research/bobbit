@@ -26,10 +26,10 @@ interface RemoteFixture {
 }
 
 type SnapshotMeta = {
-	observedAt: number;
-	refreshedAt: number | null;
+	observedAt?: number | string;
+	refreshedAt?: number | string;
 	stale: boolean;
-	lastError?: { code: string };
+	lastError?: string;
 };
 
 function git(cwd: string, ...args: string[]): void {
@@ -81,8 +81,13 @@ function behind(widget: Locator): Promise<number> {
 	return widget.evaluate((node: any) => node.behind);
 }
 
-function snapshotMeta(widget: Locator): Promise<SnapshotMeta | undefined> {
-	return widget.evaluate((node: any) => node.remoteState);
+function snapshotMeta(widget: Locator): Promise<SnapshotMeta> {
+	return widget.evaluate((node: any) => ({
+		observedAt: node.remoteObservedAt,
+		refreshedAt: node.remoteRefreshedAt,
+		stale: node.remoteStale,
+		lastError: node.remoteLastError,
+	}));
 }
 
 async function expectCurrentSnapshot(widget: Locator): Promise<void> {
@@ -237,8 +242,8 @@ test.describe("Journey: remote-state coordinator", () => {
 			// concurrent user refreshes still share one forced canonical fetch.
 			await dashboardWidget.locator("button[data-state='ready']").click({ force: true });
 			await sessionWidget.locator("button[data-state='ready']").click({ force: true });
-			const dashboardRefresh = page.locator("#git-status-dropdown [data-testid='remote-state-age'] button").getByRole("button", { name: "Refresh" });
-			const sessionRefresh = sessionPage.locator("#git-status-dropdown [data-testid='remote-state-age'] button").getByRole("button", { name: "Refresh" });
+			const dashboardRefresh = page.locator("#git-status-dropdown [data-testid='remote-state-status'] button").getByRole("button", { name: "Refresh" });
+			const sessionRefresh = sessionPage.locator("#git-status-dropdown [data-testid='remote-state-status'] button").getByRole("button", { name: "Refresh" });
 			await expect(dashboardRefresh).toBeVisible({ timeout: 10_000 });
 			await expect(sessionRefresh).toBeVisible({ timeout: 10_000 });
 			const beforeFailure = fetches;
@@ -247,12 +252,12 @@ test.describe("Journey: remote-state coordinator", () => {
 			await expect.poll(() => fetches, { timeout: 15_000 }).toBe(beforeFailure + 1);
 			await expect.poll(() => snapshotMeta(dashboardWidget), { timeout: 15_000 }).toMatchObject({
 				stale: true,
-				lastError: { code: expect.any(String) },
+				lastError: expect.any(String),
 			});
 			await expect.poll(() => behind(dashboardWidget)).toBe(1);
 			await expect.poll(() => behind(sessionWidget)).toBe(1);
-			await expect(page.locator("#git-status-dropdown [data-testid='remote-state-age']")).toContainText("stale");
-			await expect(sessionPage.locator("#git-status-dropdown [data-testid='remote-state-age']")).toContainText("stale");
+			await expect(page.locator("#git-status-dropdown [data-testid='remote-state-status']")).toContainText("stale");
+			await expect(sessionPage.locator("#git-status-dropdown [data-testid='remote-state-status']")).toContainText("stale");
 
 			failFetches = false;
 			const beforeRecovery = fetches;
