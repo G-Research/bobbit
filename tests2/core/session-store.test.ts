@@ -599,9 +599,9 @@ describe("SessionStore", () => {
 			assert.equal(raw.sessions[0].title, "Debounced");
 		});
 
-		it("flush is a no-op when nothing is pending", () => {
+		it("flush is an awaitable no-op when nothing is pending", async () => {
 			const store = freshStore();
-			store.flush(); // should not throw
+			await store.flush();
 		});
 	});
 
