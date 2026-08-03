@@ -121,6 +121,15 @@
       }
     },
     {
+      "path": "tests2/core/session-manager-sandbox-network-ownership.test.ts",
+      "reason": "Focused failing-first regression pinning per-SessionManager Docker sandbox-network creation ownership: non-creators never remove the shared network and its creator removes it during owned cleanup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/anthropic-oauth-pi-callback-contract-repro.test.ts",
       "reason": "Focused failing-first Anthropic OAuth regression pinning Pi's loopback callback and complete current authorization scope set, so the stale Console callback and reduced legacy scope contract cannot return.",
       "execution": {
