@@ -231,6 +231,10 @@ function toolResultMessage(tool: OpenTool, content: unknown, isError: boolean): 
 	};
 }
 
+function isTerminalEvent(type: string, input: Record<string, unknown>): boolean {
+	return type === "result" || type === "error" || type === "abort" || (type === "assistant" && input.is_error === true);
+}
+
 function drain(state: ClaudeSdkTranslatorState, events: ClaudeSdkTranslatedEvent[], source: Record<string, unknown>): ClaudeSdkTranslatorState {
 	let next: ClaudeSdkTranslatorState = { ...state, partitions: { ...state.partitions }, terminated: true };
 	for (const [partitionKey, original] of Object.entries(state.partitions)) {
@@ -279,7 +283,7 @@ export function translateClaudeSdkEvent(state: ClaudeSdkTranslatorState, input: 
 	const type = nonEmptyString(input.type);
 	if (!type) return { state: next, events, diagnostics: [diagnostic("malformed", partitionKey, "SDK event is missing type")] };
 
-	if (type === "result" || type === "error" || type === "abort") return { state: drain(next, events, input), events, diagnostics };
+	if (isTerminalEvent(type, input)) return { state: drain(next, events, input), events, diagnostics };
 
 	if (type === "assistant") {
 		const message = isRecord(input.message) ? input.message : undefined;
