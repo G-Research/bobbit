@@ -30,6 +30,15 @@
       }
     },
     {
+      "path": "tests2/browser/e2e/context-trace-inspector.spec.ts",
+      "reason": "Real-browser Context trace inspector journey with an isolated provider pack: it pins ordered safe provider rows, raw-content/error redaction, active-session isolation, post-append WebSocket refresh, persisted historical reload, focus restoration, and cleanup.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/core/extension-host-module-memory-isolation.test.ts",
       "reason": "Exact-registered partition of the ModuleHost resource-limit coverage so its deliberate 16 MB worker OOM cannot share a Vitest parent fork with the remaining concurrent worker-thread fan-out.",
       "execution": {
