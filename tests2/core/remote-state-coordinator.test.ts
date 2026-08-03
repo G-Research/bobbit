@@ -260,6 +260,61 @@ describe("RemoteStateCoordinator", () => {
 		assert.equal(events.every(event => event.snapshot.refreshedAt === clock.value && event.snapshot.stale === false), true);
 	});
 
+	it("emits best-effort structured telemetry without identities, URLs, refs, data, or raw errors", async () => {
+		const clock = new ManualClock();
+		const events: Array<Record<string, unknown>> = [];
+		let releaseFirst: (() => void) | undefined;
+		let throwFromSink = false;
+		const coordinator = new RemoteStateCoordinator({
+			clock,
+			maxConcurrent: 1,
+			backoffBaseMs: 100,
+			telemetry: (event) => {
+				events.push(event as unknown as Record<string, unknown>);
+				if (throwFromSink) throw new Error("telemetry sink unavailable");
+			},
+		});
+		const first = coordinator.registerRepository(
+			{ key: "repo:https://token:secret@example.test/private/repo.git", hasRemote: true },
+			{ refresh: async () => new Promise<void>(resolve => { releaseFirst = resolve; }) },
+		);
+		const second = coordinator.registerPullRequest(
+			{ key: "pr:C:/private/worktree#refs/private/feature" },
+			{ refresh: async () => { throw new Error("401 token:secret https://example.test stderr review body"); } },
+		);
+
+		coordinator.readSnapshot(first, { intent: "automatic" });
+		const firstCompletion = coordinator.refreshSnapshot(first, { intent: "visible" });
+		coordinator.readSnapshot(second, { intent: "automatic", cadence: "sidebar" });
+		await settle();
+		assert.ok(events.some(event => event.outcome === "joined"));
+		assert.ok(events.some(event => event.outcome === "queued"));
+
+		throwFromSink = true;
+		releaseFirst?.();
+		await firstCompletion;
+		await coordinator.refreshSnapshot(second, { intent: "automatic", cadence: "sidebar" });
+		throwFromSink = false;
+		assert.ok(events.some(event => event.source === "pull_request" && event.outcome === "started"), "a throwing sink must not strand the queued permit");
+		throwFromSink = true;
+		assert.doesNotThrow(() => coordinator.readSnapshot(first, { intent: "automatic" }));
+		throwFromSink = false;
+		coordinator.invalidate(first);
+		coordinator.readSnapshot(first, { intent: "automatic" });
+		coordinator.readSnapshot(second, { intent: "automatic", cadence: "sidebar" });
+
+		const outcomes = new Set(events.map(event => event.outcome));
+		for (const outcome of ["admitted", "started", "joined", "queued", "success", "failure", "fresh", "budget", "backoff"]) {
+			assert.ok(outcomes.has(outcome), `missing telemetry outcome ${outcome}`);
+		}
+		const failure = events.find(event => event.outcome === "failure");
+		assert.equal(failure?.errorKind, "auth");
+		const serialized = JSON.stringify(events);
+		for (const sensitive of ["token:secret", "https://", "C:/private", "refs/private", "feature", "stderr", "review body"]) {
+			assert.equal(serialized.includes(sensitive), false, sensitive);
+		}
+	});
+
 	it("bounds distinct refreshes and emits one safe completion per public address", async () => {
 		const clock = new ManualClock();
 		const broadcasts: Array<{ address: string; snapshot: RemoteStateSnapshot<unknown> }> = [];

@@ -6,6 +6,7 @@ import {
 	normalizeGithubHost,
 	normalizePullRequestIdentity,
 	normalizeRemoteIdentity,
+	parseTrustedGithubRemote,
 	RemoteStateCoordinator,
 } from "../../src/server/remote-state-coordinator.ts";
 
@@ -38,6 +39,32 @@ describe("remote state canonical identity", () => {
 		assert.equal(isTrustedGithubRemoteHost("ghe.example.test", ["GHE.EXAMPLE.TEST."]), true);
 		assert.equal(isTrustedGithubRemoteHost("gitlab.example.test", ["ghe.example.test"]), false);
 		assert.equal(isTrustedGithubRemoteHost("api.github.com"), false);
+	});
+
+	it("parses only whole trusted GitHub remote inputs", () => {
+		const expected = { host: "github.com", owner: "acme", repository: "widget" };
+		assert.deepEqual(parseTrustedGithubRemote("https://token:secret@github.com/Acme/Widget.git"), expected);
+		assert.deepEqual(parseTrustedGithubRemote("ssh://git@ssh.github.com/Acme/Widget.git"), expected);
+		assert.deepEqual(parseTrustedGithubRemote("git@github.com:Acme/Widget.git"), expected);
+		assert.deepEqual(
+			parseTrustedGithubRemote("https://GHE.Example.Test/Acme/Widget.git", ["ghe.example.test"]),
+			{ host: "ghe.example.test", owner: "acme", repository: "widget" },
+		);
+	});
+
+	it("rejects trusted-looking substrings, extra paths, and encoded separators", () => {
+		const rejected = [
+			"https://evil.example/a/https://github.com/acme/widget.git",
+			"ssh://git@evil.example/a/git@github.com:acme/widget.git",
+			"https://github.com/prefix/acme/widget.git",
+			"https://github.com/acme/widget.git//",
+			"https://github.com/acme%2Fother/widget.git",
+			"https://github.com/acme/widget%5Cother.git",
+			"https://github.com/acme/widget%252Fother.git",
+			"https://github.com/acme/widget.git?token=secret",
+			"git@github.com:acme%2Fother/widget.git",
+		];
+		for (const remote of rejected) assert.equal(parseTrustedGithubRemote(remote), undefined, remote);
 	});
 
 	it("canonicalizes Windows local paths", () => {

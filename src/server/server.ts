@@ -2,7 +2,7 @@ import { exec } from "node:child_process";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory } from "./agent/rpc-bridge.js";
 import { resolveGatewayDeps, realCommandRunner, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
-import { isTrustedGithubRemoteHost, RemoteStateCoordinator, type RemoteStateAddress, type RemoteStateIntent, type RepositorySnapshotBinding } from "./remote-state-coordinator.js";
+import { parseTrustedGithubRemote, RemoteStateCoordinator, type RemoteStateAddress, type RemoteStateIntent, type RemoteStateTelemetryEvent, type RepositorySnapshotBinding } from "./remote-state-coordinator.js";
 import { resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
 export type { Clock, CommandRunner, ExecFileResult, FsLike, GatewayDeps, ResolvedGatewayDeps, TimerHandle } from "./gateway-deps.js";
 export { defaultRpcBridgeFactory, realClock, realCommandRunner, realFetch, realFs, resolveGatewayDeps } from "./gateway-deps.js";
@@ -189,6 +189,13 @@ function isMissingOptionalExtensionChannelModule(err: unknown): boolean {
 	const code = (err as { code?: unknown } | null)?.code;
 	const message = err instanceof Error ? err.message : String(err);
 	return code === "ERR_MODULE_NOT_FOUND" && (message.includes("channel-registry") || message.includes("channel-open-permits"));
+}
+
+function remoteStateTelemetrySink(event: RemoteStateTelemetryEvent): void {
+	// The coordinator event type is deliberately closed: it cannot carry remotes,
+	// cwd/ref values, command details, response data, or raw errors. Keep this as
+	// one structured line so operators can aggregate call-budget outcomes safely.
+	console.debug(`[remote-state] ${JSON.stringify(event)}`);
 }
 
 function extensionChannelAuditSink(event: Record<string, unknown>): void {
@@ -2683,6 +2690,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const remoteStateCoordinator = new RemoteStateCoordinator({
 		clock: gatewayDeps.clock,
 		commandRunner: gatewayDeps.commandRunner,
+		telemetry: remoteStateTelemetrySink,
 		broadcast: (address, snapshot) => {
 			const publicSnapshot = publicRemoteSnapshot(snapshot);
 			const resource = snapshot.source === "repository" ? "git" : "pr";
@@ -2827,11 +2835,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const parsePrRemote = async (cwd: string): Promise<{ host: string; owner: string; repository: string } | undefined> => {
 		try {
 			const origin = stripTokenFromGitUrl(await execGit("git remote get-url origin", cwd, 5_000, undefined, gatewayDeps.commandRunner));
-			const match = origin.match(/(?:https?:\/\/|ssh:\/\/git@|git@)([^/:]+)[:/]([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
-			if (!match) return undefined;
 			const configuredEnterpriseHosts = normalizeTrustedHosts(preferencesStore.get("githubTrustedHosts"));
-			if (!isTrustedGithubRemoteHost(match[1], configuredEnterpriseHosts)) return undefined;
-			return { host: match[1], owner: match[2], repository: match[3] };
+			return parseTrustedGithubRemote(origin, configuredEnterpriseHosts);
 		} catch {
 			return undefined;
 		}
