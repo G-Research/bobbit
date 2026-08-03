@@ -2145,6 +2145,15 @@
         "tier": "unit",
         "project": "integration"
       }
+    },
+    {
+      "path": "tests2/core/hook-scope-context.test.ts",
+      "reason": "Focused EP-2b scope-context coverage for project-safe goal lineage and metadata, component coordinates, bounded degradation, cross-project isolation, and deep immutable snapshots.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [
