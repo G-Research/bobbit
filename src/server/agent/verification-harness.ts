@@ -122,6 +122,8 @@ export type ContainerOwnershipAttestation = {
 	readonly nonce: string;
 	readonly execId: string;
 	readonly enginePid: number;
+	/** Daemon-namespace group of the tagged sentinel at pre-release attestation. */
+	readonly enginePgid: number;
 	readonly tag: string;
 	readonly sentinelPid: number;
 	readonly pgid: number;
@@ -130,6 +132,9 @@ export type ContainerOwnershipAttestation = {
 
 /** A daemon `docker top` row. PIDs are in Docker's daemon namespace, not the container namespace. */
 export type DockerTopRow = { pid: number; ppid: number; pgid: number; args: string };
+
+/** A strictly parsed Engine top row including the kernel process state. */
+export type DockerTopStateRow = DockerTopRow & { state: string };
 
 function exactSentinelArgument(tag: string, witness: ContainerOwnershipWitness): string {
 	return `bobbit-container-sentinel:${tag}:${witness.sentinelPid}:${witness.pgid}:${witness.startToken}`;
@@ -176,7 +181,7 @@ export async function attestAndReleaseContainerOwnership(input: {
 	}
 	if (!cursor || cursor.pid !== exec.pid) throw new Error("Docker sentinel ancestry did not terminate at the engine exec PID");
 	const attestation: ContainerOwnershipAttestation = {
-		version: 1, containerId, nonce, execId: exec.id, enginePid: exec.pid, tag,
+		version: 1, containerId, nonce, execId: exec.id, enginePid: exec.pid, enginePgid: sentinel.pgid, tag,
 		sentinelPid: frame.sentinelPid, pgid: frame.pgid, startToken: frame.startToken,
 	};
 	if (!input.persist(attestation)) throw new Error("Container ownership attestation could not be durably persisted");
@@ -551,79 +556,87 @@ async function inspectDockerExecThroughCurrentContext(
 }
 
 const DOCKER_TOP_TITLES = ["PID", "PPID", "PGID", "COMMAND"] as const;
+const DOCKER_TOP_STATE_TITLES = ["PID", "PPID", "PGID", "STAT", "COMMAND"] as const;
 
-/** Parse the exact structured schema returned by Engine `/containers/{id}/top`. */
-export function parseDockerTopSnapshotResponse(
-	record: unknown,
-): DockerTopRow[] {
-	if (
-		!record ||
-		typeof record !== "object" ||
-		!Array.isArray((record as any).Titles) ||
-		!Array.isArray((record as any).Processes)
-	) {
-		throw new Error(
-			"Docker Engine top response was missing Titles or Processes arrays",
-		);
+type DockerTopCells = readonly [pid: number, ppid: number, pgid: number, ...rest: string[]];
+
+/** Reject a missing, malformed, or PID-ambiguous Engine state snapshot. */
+function isDockerProcessState(state: unknown): state is string {
+	// `ps -o stat` emits one kernel state character followed by zero or more
+	// standard modifiers (`<NLsl+`). The first character is the only state.
+	return typeof state === "string" && /^[DIRSTtWXZ][<NLsl+]*$/.test(state);
+}
+
+function assertDockerTopStateRows(rows: readonly DockerTopStateRow[]): void {
+	if (!Array.isArray(rows) || rows.length === 0) throw new Error("Docker Engine top response contained no process rows");
+	const seenPids = new Set<number>();
+	for (const row of rows) {
+		if (!row || !Number.isSafeInteger(row.pid) || row.pid <= 0 || !Number.isSafeInteger(row.ppid) || row.ppid <= 0 || !Number.isSafeInteger(row.pgid) || row.pgid <= 0 || typeof row.args !== "string" || !isDockerProcessState(row.state)) {
+			throw new Error("Docker Engine top response contained a malformed process row");
+		}
+		if (seenPids.has(row.pid)) throw new Error("Docker Engine top response contained duplicate process IDs");
+		seenPids.add(row.pid);
+	}
+}
+
+/** Validate the exact structured schema returned by Engine `/containers/{id}/top`. */
+function parseDockerTopRows(record: unknown, expectedTitles: readonly string[]): DockerTopCells[] {
+	if (!record || typeof record !== "object" || !Array.isArray((record as any).Titles) || !Array.isArray((record as any).Processes)) {
+		throw new Error("Docker Engine top response was missing Titles or Processes arrays");
 	}
 	const titles = (record as any).Titles;
-	if (
-		titles.length !== DOCKER_TOP_TITLES.length ||
-		titles.some(
-			(title: unknown, index: number) => title !== DOCKER_TOP_TITLES[index],
-		)
-	) {
-		throw new Error(
-			"Docker Engine top response used an unsupported column schema",
-		);
+	if (titles.length !== expectedTitles.length || titles.some((title: unknown, index: number) => title !== expectedTitles[index])) {
+		throw new Error("Docker Engine top response used an unsupported column schema");
 	}
-	const rows: DockerTopRow[] = [];
+	const rows: DockerTopCells[] = [];
 	const seenPids = new Set<number>();
+	const parsePositive = (text: string): number | undefined => {
+		if (!/^[1-9]\d*$/.test(text)) return undefined;
+		const value = Number(text);
+		return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+	};
 	for (const process of (record as any).Processes) {
-		if (
-			!Array.isArray(process) ||
-			process.length !== DOCKER_TOP_TITLES.length ||
-			process.some((cell) => typeof cell !== "string")
-		) {
-			throw new Error(
-				"Docker Engine top response contained a malformed process row",
-			);
+		if (!Array.isArray(process) || process.length !== expectedTitles.length || process.some((cell) => typeof cell !== "string")) {
+			throw new Error("Docker Engine top response contained a malformed process row");
 		}
-		const [pidText, ppidText, pgidText, args] = process;
-		const parsePositive = (text: string): number | undefined => {
-			if (!/^[1-9]\d*$/.test(text)) return undefined;
-			const value = Number(text);
-			return Number.isSafeInteger(value) && value > 0 ? value : undefined;
-		};
-		const pid = parsePositive(pidText);
-		const ppid = parsePositive(ppidText);
-		const pgid = parsePositive(pgidText);
+		const pid = parsePositive(process[0]);
+		const ppid = parsePositive(process[1]);
+		const pgid = parsePositive(process[2]);
 		if (!pid || !ppid || !pgid)
-			throw new Error(
-				"Docker Engine top response contained a non-positive process identity",
-			);
-		if (seenPids.has(pid))
-			throw new Error(
-				"Docker Engine top response contained duplicate process IDs",
-			);
+			throw new Error("Docker Engine top response contained a non-positive process identity");
+		if (seenPids.has(pid)) throw new Error("Docker Engine top response contained duplicate process IDs");
 		seenPids.add(pid);
-		// ARGS is one daemon JSON cell. Its contents—including embedded newlines—are
-		// never tokenized into rows or otherwise allowed to invent ancestry nodes.
-		rows.push({ pid, ppid, pgid, args });
+		rows.push([pid, ppid, pgid, ...process.slice(3)]);
 	}
-	if (rows.length === 0)
-		throw new Error("Docker Engine top response contained no process rows");
+	if (rows.length === 0) throw new Error("Docker Engine top response contained no process rows");
 	return rows;
 }
 
-/** One Docker top snapshot supplies the daemon PID namespace parent-chain proof. */
-async function readDockerTopSnapshot(
+/** Parse the structured daemon snapshot used to bind a sentinel to one exec. */
+export function parseDockerTopSnapshotResponse(record: unknown): DockerTopRow[] {
+	return parseDockerTopRows(record, DOCKER_TOP_TITLES).map(([pid, ppid, pgid, args]) => ({ pid, ppid, pgid, args }));
+}
+
+/** Parse a structured daemon snapshot used to determine whether an owned group has live members. */
+export function parseDockerTopStateSnapshotResponse(record: unknown): DockerTopStateRow[] {
+	const rows = parseDockerTopRows(record, DOCKER_TOP_STATE_TITLES).map(([pid, ppid, pgid, state, args]) => {
+		if (!isDockerProcessState(state)) throw new Error("Docker Engine top response contained an unsupported process state");
+		return { pid, ppid, pgid, state, args };
+	});
+	assertDockerTopStateRows(rows);
+	return rows;
+}
+
+/** One bounded Docker top request, with a caller-selected exact schema. */
+async function readDockerTopSnapshot<T>(
 	containerId: string,
-): Promise<DockerTopRow[]> {
+	psArgs: string,
+	parse: (record: unknown) => T,
+): Promise<T> {
 	if (!/^[a-f0-9]{64}$/i.test(containerId))
 		throw new Error("Docker top snapshot required a canonical container ID");
 	const response = await requestDockerEngineThroughCurrentContext(
-		`GET /containers/${containerId}/top?ps_args=${encodeURIComponent("-eo pid,ppid,pgid,args")} HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n`,
+		`GET /containers/${containerId}/top?ps_args=${encodeURIComponent(psArgs)} HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n`,
 		"Docker Engine top snapshot",
 	);
 	let record: unknown;
@@ -632,7 +645,17 @@ async function readDockerTopSnapshot(
 	} catch {
 		throw new Error("Docker Engine top snapshot returned invalid JSON");
 	}
-	return parseDockerTopSnapshotResponse(record);
+	return parse(record);
+}
+
+/** One Docker top snapshot supplies the daemon PID namespace parent-chain proof. */
+async function readDockerTopAncestrySnapshot(containerId: string): Promise<DockerTopRow[]> {
+	return readDockerTopSnapshot(containerId, "-eo pid,ppid,pgid,args", parseDockerTopSnapshotResponse);
+}
+
+/** A separate, bounded Engine snapshot is the only completion authority after group signalling. */
+async function readDockerTopStateSnapshot(containerId: string): Promise<DockerTopStateRow[]> {
+	return readDockerTopSnapshot(containerId, "-eo pid,ppid,pgid,stat,args", parseDockerTopStateSnapshotResponse);
 }
 
 export type DockerEngineEventsResponseDecoder = {
@@ -3388,6 +3411,8 @@ export class VerificationHarness {
 	private readonly recoveredSentinelReaper: (step: ActiveVerification["steps"][number]) => Promise<void>;
 	/** Test seam for inspecting the exact identity of a live in-container sentinel. */
 	private readonly containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>;
+	/** Test seam for the bounded Engine snapshot used as post-signal completion evidence. */
+	private readonly containerProcessTopSnapshot: (containerId: string) => Promise<readonly DockerTopStateRow[]>;
 	private readonly skipLlmReview: boolean;
 
 	constructor(
@@ -3402,7 +3427,7 @@ export class VerificationHarness {
 		private projectConfigStore?: ProjectConfigStore,
 		projectContextManager?: ProjectContextManager,
 		configCascade?: import("./config-cascade.js").ConfigCascade,
-		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; commandLifecycleClock?: Clock; platform?: NodeJS.Platform; skipLlmReview?: boolean; posixProcessIdentityInspector?: (pid: number) => PosixProcessIdentity | undefined; persistedTreeKiller?: typeof killTreeByPid; recoveredSentinelReaper?: (step: ActiveVerification["steps"][number]) => Promise<void>; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined> } = {},
+		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; commandLifecycleClock?: Clock; platform?: NodeJS.Platform; skipLlmReview?: boolean; posixProcessIdentityInspector?: (pid: number) => PosixProcessIdentity | undefined; persistedTreeKiller?: typeof killTreeByPid; recoveredSentinelReaper?: (step: ActiveVerification["steps"][number]) => Promise<void>; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>; containerProcessTopSnapshot?: (containerId: string) => Promise<readonly DockerTopStateRow[]> } = {},
 	) {
 		this.commandRunner = deps.commandRunner ?? realCommandRunner;
 		this.commandStepRunner = deps.commandStepRunner ?? realVerificationCommandRunner;
@@ -3413,6 +3438,7 @@ export class VerificationHarness {
 		this.persistedTreeKiller = deps.persistedTreeKiller ?? killTreeByPid;
 		this.recoveredSentinelReaper = deps.recoveredSentinelReaper ?? (step => this._reapRecoveredPosixSentinel(step));
 		this.containerProcessIdentityInspector = deps.containerProcessIdentityInspector;
+		this.containerProcessTopSnapshot = deps.containerProcessTopSnapshot ?? readDockerTopStateSnapshot;
 		this.skipLlmReview = !!deps.skipLlmReview;
 		this.configCascade = configCascade;
 		// Wrap the broadcast fn so every gate_verification_* event carries a
@@ -6506,7 +6532,7 @@ export class VerificationHarness {
 						await attestAndReleaseContainerOwnership({
 							frame: witness, containerId, nonce: pidNonce, tag: dockerExecCommandTag,
 							verifyExec: () => dockerExecWatcher!.verify(),
-							snapshot: readDockerTopSnapshot,
+							snapshot: readDockerTopAncestrySnapshot,
 							persist: attestation => {
 								step.containerOwnershipWitness = witness;
 								step.containerOwnershipAttestation = attestation;
@@ -7470,7 +7496,8 @@ export class VerificationHarness {
 		if (attestation.containerId !== step.containerId || attestation.nonce !== nonce ||
 			attestation.sentinelPid !== witness.sentinelPid || attestation.pgid !== witness.pgid ||
 			attestation.startToken !== witness.startToken || !attestation.execId || !attestation.tag ||
-			!Number.isSafeInteger(attestation.enginePid) || attestation.enginePid <= 0) {
+			!Number.isSafeInteger(attestation.enginePid) || attestation.enginePid <= 0 ||
+			!Number.isSafeInteger(attestation.enginePgid) || attestation.enginePgid <= 0) {
 			return this._rejectContainerWitness(step, "BOBBIT_CONTAINER_ENGINE_ATTESTATION_MISMATCH");
 		}
 		let live: { pid: number; pgid: number; startToken: string } | undefined;
@@ -7497,6 +7524,10 @@ export class VerificationHarness {
 		const witness = await this._verifyContainerOwnershipWitness(step);
 		const p = witness.sentinelPid;
 		const pgid = witness.pgid;
+		// Docker Engine top reports daemon-namespace process identities. This
+		// durable group was atomically bound to the tagged sentinel before payload
+		// release; it is completion evidence only, never a signal target.
+		const enginePgid = step.containerOwnershipAttestation!.enginePgid;
 		const start = shellSingleQuote(witness.startToken);
 		// Revalidate immediately before *each* destructive signal. There is no
 		// sleep/polling interval between them: identity loss after TERM aborts
@@ -7504,23 +7535,40 @@ export class VerificationHarness {
 		const verify = `live_p=$(awk '{print $1}' "/proc/$p/stat" 2>/dev/null || true); live_g=$(awk '{print $5}' "/proc/$p/stat" 2>/dev/null || true); live_s=$(awk '{print $22}' "/proc/$p/stat" 2>/dev/null || true); [ "$live_p" = "$p" ] || { echo BOBBIT_CONTAINER_WITNESS_STALE; exit 64; }; [ "$live_g" = "$pgid" ] || { echo BOBBIT_CONTAINER_WITNESS_PGID_MISMATCH; exit 65; }; [ "$live_s" = ${start} ] || { echo BOBBIT_CONTAINER_WITNESS_START_TOKEN_MISMATCH; exit 66; };`;
 		// dash accepts the negative process-group operand directly; placing `--`
 		// before a quoted negative number is not portable across container shells.
-		// The final liveness check is post-KILL only: it is not authority to signal
-		// a historical group, merely proof that this cleanup attempt removed it.
-		const script = `p=${p}; pgid=${pgid}; ${verify} kill -TERM -"$pgid" 2>/dev/null || { echo BOBBIT_CONTAINER_TERM_UNDELIVERED; exit 67; }; ${verify} kill -KILL -"$pgid" 2>/dev/null || { echo BOBBIT_CONTAINER_KILL_UNDELIVERED; exit 68; }; kill -0 -"$pgid" 2>/dev/null && { echo BOBBIT_CONTAINER_GROUP_REMAINS; exit 69; };`;
+		// A numeric process-group liveness probe cannot prove cleanup: it remains
+		// successful while the kernel retains zombies for container init to reap.
+		// The bounded Engine snapshot below is therefore the sole completion authority.
+		const script = `p=${p}; pgid=${pgid}; ${verify} kill -TERM -"$pgid" 2>/dev/null || { echo BOBBIT_CONTAINER_TERM_UNDELIVERED; exit 67; }; ${verify} kill -KILL -"$pgid" 2>/dev/null || { echo BOBBIT_CONTAINER_KILL_UNDELIVERED; exit 68; };`;
 		const result = await this._dockerExecCapture(step.containerId!, script);
-		if (result.code === 0) {
-			step.containerPayloadCleanupCompletedAt = Date.now();
-			delete step.containerPayloadCleanupPending;
-			delete step.killUnsafeReason;
+		if (result.code !== 0) {
+			const detail = result.stdout.trim() || `docker exec exited ${result.code ?? "without a status"}`;
+			const marker = /BOBBIT_CONTAINER_WITNESS_(?:STALE|PGID_MISMATCH|START_TOKEN_MISMATCH)/.exec(detail)?.[0];
+			if (marker) this._rejectContainerWitness(step, marker);
+			step.containerPayloadCleanupPending = true;
 			this._persistActive();
-			return;
+			throw new PendingCommandCleanupError(`Recovered container command group cleanup is not yet safe or complete: ${detail}`);
 		}
-		const detail = result.stdout.trim() || `docker exec exited ${result.code ?? "without a status"}`;
-		const marker = /BOBBIT_CONTAINER_WITNESS_(?:STALE|PGID_MISMATCH|START_TOKEN_MISMATCH)/.exec(detail)?.[0];
-		if (marker) this._rejectContainerWitness(step, marker);
-		step.containerPayloadCleanupPending = true;
+		let rows: readonly DockerTopStateRow[];
+		try {
+			rows = await this.containerProcessTopSnapshot(step.containerId!);
+			assertDockerTopStateRows(rows);
+		} catch (error) {
+			step.containerPayloadCleanupPending = true;
+			this._persistActive();
+			throw new PendingCommandCleanupError(`Recovered container command group cleanup is not yet safe or complete: Docker Engine top snapshot was unavailable or malformed: ${(error as Error).message}`);
+		}
+		// Zombies are not executable or signalable. Any non-zombie member of the
+		// attested daemon-namespace group—including a freshly reused numeric PGID—
+		// keeps cleanup pending.
+		if (rows.some(row => row.pgid === enginePgid && !row.state.startsWith("Z"))) {
+			step.containerPayloadCleanupPending = true;
+			this._persistActive();
+			throw new PendingCommandCleanupError("Recovered container command group cleanup is not yet safe or complete: BOBBIT_CONTAINER_GROUP_REMAINS");
+		}
+		step.containerPayloadCleanupCompletedAt = Date.now();
+		delete step.containerPayloadCleanupPending;
+		delete step.killUnsafeReason;
 		this._persistActive();
-		throw new PendingCommandCleanupError(`Recovered container command group cleanup is not yet safe or complete: ${detail}`);
 	}
 
 	/** Recover from the host-authored Docker lifecycle result or fail closed. */

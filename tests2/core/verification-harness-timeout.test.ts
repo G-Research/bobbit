@@ -182,7 +182,7 @@ describe("deterministic tracked child", () => {
 			persist: () => { calls.push("persist"); return true; },
 			release: () => { calls.push("release"); return true; },
 		};
-		await expect(attestAndReleaseContainerOwnership(input)).resolves.toMatchObject({ version: 1, execId: "exec", enginePid: 10, sentinelPid: 12, pgid: 11 });
+		await expect(attestAndReleaseContainerOwnership(input)).resolves.toMatchObject({ version: 1, execId: "exec", enginePid: 10, enginePgid: 11, sentinelPid: 12, pgid: 11 });
 		expect(calls).toEqual(["persist", "release"]);
 	});
 
@@ -194,7 +194,7 @@ describe("deterministic tracked child", () => {
 			snapshot: async () => [{ pid: 1001, ppid: 1, pgid: 1001, args: "docker tag" }, { pid: 9002, ppid: 1001, pgid: 9001, args: "session" }, { pid: 9003, ppid: 9002, pgid: 9001, args: "sh bobbit-container-sentinel:tag:12:11:start" }],
 			persist: () => { calls.push("persist"); return true; },
 			release: () => { calls.push("release"); return true; },
-		})).resolves.toMatchObject({ enginePid: 1001, sentinelPid: 12, pgid: 11 });
+		})).resolves.toMatchObject({ enginePid: 1001, enginePgid: 9001, sentinelPid: 12, pgid: 11 });
 		expect(calls).toEqual(["persist", "release"]);
 	});
 

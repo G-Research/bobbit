@@ -57,6 +57,10 @@ function makeHarnessForStateDir(stateDir = makeLifecycleStateDir(), platform?: N
 			commandRunner: { execFile: async () => ({ stdout: "", stderr: "" }) },
 			commandStepRunner: createFakeVerificationCommandRunner(),
 			platform,
+			// Container lifecycle tests own no Engine fixture. Their exact signal
+			// mock represents a completed payload group; this structured snapshot
+			// supplies an unrelated live init row as the post-signal authority.
+			containerProcessTopSnapshot: async () => [{ pid: 1, ppid: 1, pgid: 1, state: "S", args: "init" }],
 		},
 	);
 	harness.setTeamLeadNotifier((goalId, message) => notifications.push({ goalId, message }));
@@ -143,7 +147,7 @@ function seedActiveCommand(stateDir: string, signalId: string, name: string, con
 
 const CONTAINER_PROCESS = Object.freeze({ sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" });
 function containerOwnership(containerId: string, nonce: string) {
-	return { containerOwnershipWitness: { containerId, nonce, ...CONTAINER_PROCESS }, containerOwnershipAttestation: { version: 1, containerId, nonce, execId: "exec", enginePid: 1, tag: "tag", ...CONTAINER_PROCESS } };
+	return { containerOwnershipWitness: { containerId, nonce, ...CONTAINER_PROCESS }, containerOwnershipAttestation: { version: 1, containerId, nonce, execId: "exec", enginePid: 1, enginePgid: 2, tag: "tag", ...CONTAINER_PROCESS } };
 }
 function containerStep(args: any) { return commandStepFixture({ ...args, restartRecoveryMode: "container-exec", ...containerOwnership(args.containerId, args.nonce) }); }
 function trackVerification(harness: any, verification: any): void { harness.activeVerifications.set(verification.signalId, verification); }

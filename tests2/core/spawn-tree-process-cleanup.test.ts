@@ -420,7 +420,7 @@ function groupAlive(pid: number): boolean {
 function makeRecoveryHarness(
 	stateDir: string,
 	calls: Array<{ kind: string; status: string }>,
-	deps: { platform?: NodeJS.Platform; posixProcessIdentityInspector?: (pid: number) => any; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>; persistedTreeKiller?: (pid: number, signal?: NodeJS.Signals) => "signalled" | "unsupported" | "invalid"; recoveredSentinelReaper?: (step: any) => Promise<void>; projectContextManager?: any; clock?: any } = {},
+	deps: { platform?: NodeJS.Platform; posixProcessIdentityInspector?: (pid: number) => any; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>; containerProcessTopSnapshot?: (containerId: string) => Promise<readonly any[]>; persistedTreeKiller?: (pid: number, signal?: NodeJS.Signals) => "signalled" | "unsupported" | "invalid"; recoveredSentinelReaper?: (step: any) => Promise<void>; projectContextManager?: any; clock?: any } = {},
 ): VerificationHarness {
 	return new VerificationHarness(
 		stateDir,
@@ -440,14 +440,15 @@ function makeRecoveryHarness(
 		{
 			...deps,
 			containerProcessIdentityInspector: deps.containerProcessIdentityInspector ?? (async (_containerId, pid) => ({ pid, pgid: pid, startToken: "container-start" })),
+			containerProcessTopSnapshot: deps.containerProcessTopSnapshot ?? (async () => [{ pid: 1, ppid: 1, pgid: 1, state: "S", args: "init" }]),
 		},
 	);
 }
 
-function recoveredContainerOwnership(nonce: string, { containerId = "container-under-test", sentinelPid = 321_654, pgid = sentinelPid, startToken = "container-start", execId = "exec", enginePid = 1, tag = "tag" }: { containerId?: string; sentinelPid?: number; pgid?: number; startToken?: string; execId?: string; enginePid?: number; tag?: string } = {}): Record<string, unknown> {
+function recoveredContainerOwnership(nonce: string, { containerId = "container-under-test", sentinelPid = 321_654, pgid = sentinelPid, startToken = "container-start", execId = "exec", enginePid = 1, enginePgid = 2, tag = "tag" }: { containerId?: string; sentinelPid?: number; pgid?: number; startToken?: string; execId?: string; enginePid?: number; enginePgid?: number; tag?: string } = {}): Record<string, unknown> {
 	return {
 		containerOwnershipWitness: { containerId, nonce, sentinelPid, pgid, startToken },
-		containerOwnershipAttestation: { version: 1, containerId, nonce, execId, enginePid, tag, sentinelPid, pgid, startToken },
+		containerOwnershipAttestation: { version: 1, containerId, nonce, execId, enginePid, enginePgid, tag, sentinelPid, pgid, startToken },
 	};
 }
 
@@ -1249,6 +1250,7 @@ function makeHarness(
 		assert.equal(pid, SENTINEL_PID);
 		return { pid: SENTINEL_PID, pgid: SENTINEL_PID, startToken: REUSED_START_TOKEN };
 	},
+	containerProcessTopSnapshot = async () => [{ pid: 1, ppid: 1, pgid: 1, state: "S", args: "init" }],
 ): VerificationHarness {
 	return new VerificationHarness(
 		stateDir,
@@ -1265,7 +1267,7 @@ function makeHarness(
 		undefined,
 		undefined,
 		undefined,
-		{ platform: "linux", containerProcessIdentityInspector } as any,
+		{ platform: "linux", containerProcessIdentityInspector, containerProcessTopSnapshot } as any,
 	);
 }
 
@@ -1288,7 +1290,7 @@ function recoveredContainerStep(overrides: Record<string, unknown> = {}): any {
 		exitFile: "/tmp/.bobbit-verif/witness.exit",
 		pidFile: "/tmp/.bobbit-verif/witness.pid",
 		pidNonce: VERIFICATION_NONCE,
-		...recoveredContainerOwnership(VERIFICATION_NONCE, { containerId: CONTAINER_ID, sentinelPid: SENTINEL_PID, startToken: ORIGINAL_START_TOKEN, execId: "engine-exec", enginePid: 77, tag: "attested-sentinel" }),
+		...recoveredContainerOwnership(VERIFICATION_NONCE, { containerId: CONTAINER_ID, sentinelPid: SENTINEL_PID, startToken: ORIGINAL_START_TOKEN, execId: "engine-exec", enginePid: 77, enginePgid: SENTINEL_PID, tag: "attested-sentinel" }),
 		...overrides,
 	};
 }
@@ -1477,6 +1479,61 @@ test("same-container steps cannot authorize each other's deliberately crossed wi
 		const secondError = await invokeRecoveredContainerCleanup(harness, second, signalAttempts, active);
 		expectFailedClosedWitness(first, firstError, signalAttempts, "BOBBIT_CONTAINER_WITNESS_NONCE_MISMATCH");
 		expectFailedClosedWitness(second, secondError, signalAttempts, "BOBBIT_CONTAINER_WITNESS_NONCE_MISMATCH");
+	} finally {
+		fs.rmSync(stateDir, { recursive: true, force: true });
+	}
+});
+
+test("zombie-only container group completes exact cleanup", async () => {
+	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-zombie-cleanup-"));
+	try {
+		const signalAttempts: string[] = [];
+		const harness = makeHarness(
+			stateDir,
+			async () => ({ pid: SENTINEL_PID, pgid: SENTINEL_PID, startToken: ORIGINAL_START_TOKEN }),
+			async () => [
+				{ pid: SENTINEL_PID, ppid: 1, pgid: SENTINEL_PID, state: "Z", args: "sentinel" },
+				{ pid: SENTINEL_PID + 1, ppid: 1, pgid: SENTINEL_PID, state: "Z", args: "payload" },
+				{ pid: 1, ppid: 1, pgid: 1, state: "S", args: "init" },
+			],
+		);
+		(harness as any)._dockerExecCapture = async (_containerId: string, command: string) => {
+			if (isDestructiveContainerGroupSignal(command)) signalAttempts.push(command);
+			return { code: 0, stdout: "" };
+		};
+		const step = recoveredContainerStep();
+		await expect((harness as any)._killAndVerifyRecoveredContainerProcessGroup(step)).resolves.toBeUndefined();
+		expect(signalAttempts).toHaveLength(1);
+		expect(step.containerPayloadCleanupCompletedAt).toEqual(expect.any(Number));
+		expect(step.containerPayloadCleanupPending).toBeUndefined();
+	} finally {
+		fs.rmSync(stateDir, { recursive: true, force: true });
+	}
+});
+
+test.each([
+	["a mixed zombie and live member", async () => [
+		{ pid: SENTINEL_PID, ppid: 1, pgid: SENTINEL_PID, state: "Z", args: "sentinel" },
+		{ pid: SENTINEL_PID + 1, ppid: 1, pgid: SENTINEL_PID, state: "S", args: "live-payload" },
+	]],
+	["a live exact-group member", async () => [
+		{ pid: SENTINEL_PID, ppid: 1, pgid: SENTINEL_PID, state: "R", args: "reused-group-member" },
+	]],
+	["malformed Engine evidence", async () => { throw new Error("Docker Engine top response contained a malformed process row"); }],
+	["an empty Engine snapshot", async () => []],
+] as const)("container cleanup remains pending for %s", async (_caseName, snapshot) => {
+	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-live-cleanup-"));
+	try {
+		const harness = makeHarness(
+			stateDir,
+			async () => ({ pid: SENTINEL_PID, pgid: SENTINEL_PID, startToken: ORIGINAL_START_TOKEN }),
+			snapshot,
+		);
+		(harness as any)._dockerExecCapture = async () => ({ code: 0, stdout: "" });
+		const step = recoveredContainerStep();
+		await expect((harness as any)._killAndVerifyRecoveredContainerProcessGroup(step)).rejects.toThrow(/cleanup is not yet safe or complete/);
+		expect(step.containerPayloadCleanupCompletedAt).toBeUndefined();
+		expect(step.containerPayloadCleanupPending).toBe(true);
 	} finally {
 		fs.rmSync(stateDir, { recursive: true, force: true });
 	}
