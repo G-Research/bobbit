@@ -1,7 +1,8 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import {
+	attributeFullRunFailures,
 	buildAuditReport,
 	compareSelectionEvidence,
 	createQualificationEnvironment,
@@ -88,14 +89,18 @@ describe("affected correctness qualification primitives", () => {
 		expect(invocation.file).not.toMatch(/\.cmd$/i);
 	});
 
-	it("requires every direct, native-observed, and full-run-failing test while allowing over-selection", () => {
+	it("requires direct, native-observed, and newly attributed failing tests while allowing over-selection", () => {
 		const safe = compareSelectionEvidence({
 			selected: [UNIT[0], UNIT[1], UNIT[2]],
 			directChangedUnit: [UNIT[0]],
 			nativeChangedObserved: [UNIT[1]],
-			fullRunFailures: [],
+			fullRunFailures: [UNIT[2]],
+			baselineRunFailures: [UNIT[2]],
 		});
 		expect(safe).toMatchObject({
+			fullRunFailures: [UNIT[2]],
+			baselineRunFailures: [UNIT[2]],
+			attributedFullRunFailures: [],
 			required: [UNIT[0], UNIT[1]],
 			underSelected: [],
 			overSelected: [UNIT[2]],
@@ -106,10 +111,55 @@ describe("affected correctness qualification primitives", () => {
 			selected: [UNIT[0]],
 			directChangedUnit: [UNIT[0]],
 			nativeChangedObserved: [UNIT[1]],
-			fullRunFailures: [UNIT[2]],
+			fullRunFailures: [UNIT[0], UNIT[2]],
+			baselineRunFailures: [UNIT[0]],
 		});
+		expect(unsafe.attributedFullRunFailures).toEqual([UNIT[2]]);
 		expect(unsafe.underSelected).toEqual([UNIT[1], UNIT[2]]);
 		expect(unsafe.safe).toBe(false);
+	});
+
+	it("subtracts clean baseline failures but retains failures newly present in the changed run", async () => {
+		const attributed = await attributeFullRunFailures({
+			fullRunFailures: [UNIT[0], UNIT[2]],
+			runBaseline: async () => ({
+				code: 1,
+				evidence: { observed: UNIT, failures: [UNIT[0]] },
+			}),
+		});
+		expect(attributed).toMatchObject({
+			baselineRan: true,
+			fullRunFailures: [UNIT[0], UNIT[2]],
+			baselineRunFailures: [UNIT[0]],
+			attributedFullRunFailures: [UNIT[2]],
+		});
+	});
+
+	it("fails closed when a non-zero baseline has no named failing-test evidence", async () => {
+		await expect(attributeFullRunFailures({
+			fullRunFailures: [UNIT[0]],
+			label: "fixture baseline",
+			runBaseline: async () => ({
+				code: 1,
+				evidence: { observed: UNIT, failures: [] },
+			}),
+		})).rejects.toThrow("fixture baseline: baseline full unit run exited 1 without named failing-test evidence");
+	});
+
+	it("does not run an extra baseline when the changed full run has no failures", async () => {
+		const runBaseline = vi.fn();
+		const attributed = await attributeFullRunFailures({
+			fullRunFailures: [],
+			runBaseline,
+		});
+		expect(runBaseline).not.toHaveBeenCalled();
+		expect(attributed).toEqual({
+			baselineRan: false,
+			fullRunFailures: [],
+			baselineRunFailures: [],
+			attributedFullRunFailures: [],
+			baseline: undefined,
+		});
 	});
 
 	it("parses auditable Vitest touched and failing file evidence", () => {
@@ -160,8 +210,13 @@ describe("affected correctness qualification primitives", () => {
 		expect(summary.safe).toBe(false);
 	});
 
-	it("renders commit, plan, commands, evidence, discrepancies, and timings in the audit output", () => {
-		const evidence = compareSelectionEvidence({ selected: UNIT, nativeChangedObserved: [UNIT[0]] });
+	it("renders commit, plan, commands, failure attribution, exit codes, discrepancies, and timings", () => {
+		const evidence = compareSelectionEvidence({
+			selected: UNIT,
+			nativeChangedObserved: [UNIT[0]],
+			fullRunFailures: [UNIT[1]],
+			baselineRunFailures: [UNIT[1]],
+		});
 		const row = {
 			id: "sample",
 			commit: "a".repeat(40),
@@ -171,8 +226,24 @@ describe("affected correctness qualification primitives", () => {
 			changedInputs: [{ status: "M", path: "src/example.ts" }],
 			plan: { kind: "bounded", cachePolicy: "eligible", selected: UNIT, reasons: ["closure"] },
 			graphOnlyDiagnostic: undefined,
-			commands: { nativeChanged: "vitest --changed parent", fullUnit: "npm run test:unit -- --retry=0" },
-			timings: { selectionMs: 1, installMs: 2, nativeChangedMs: 3, fullUnitMs: 4 },
+			failureBaseline: { ran: true, revision: "c".repeat(40) },
+			commands: {
+				nativeChanged: "vitest --changed parent",
+				fullUnit: "npm run test:unit -- --retry=0",
+				baselineCheckout: "git checkout baseline",
+				baselineInstall: "npm ci",
+				baselineFullUnit: "npm run test:unit baseline",
+			},
+			exitCodes: { nativeChanged: 0, fullUnit: 1, baselineCheckout: 0, baselineInstall: 0, baselineFullUnit: 1 },
+			timings: {
+				selectionMs: 1,
+				installMs: 2,
+				nativeChangedMs: 3,
+				fullUnitMs: 4,
+				baselineCheckoutMs: 5,
+				baselineInstallMs: 6,
+				baselineFullUnitMs: 7,
+			},
 			evidence,
 		};
 		const report = buildAuditReport([row], { generatedAt: "2026-01-01T00:00:00.000Z" });
@@ -183,9 +254,16 @@ describe("affected correctness qualification primitives", () => {
 			"executable plan: bounded; cache=eligible; selected=3",
 			row.commands.nativeChanged,
 			row.commands.fullUnit,
+			"failure baseline: cccccccccccccccccccccccccccccccccccccccc",
+			row.commands.baselineInstall,
+			row.commands.baselineFullUnit,
+			"exit codes: native=0, full=1, baseline-checkout=0, baseline-install=0, baseline-full=1",
+			`full failures (1): ${UNIT[1]}`,
+			`baseline failures (1): ${UNIT[1]}`,
+			"attributed failures (0): (none)",
 			"under-selected (0)",
 			"over-selected (2)",
-			"selection=1, install=2, native=3, full=4",
+			"selection=1, install=2, native=3, full=4, baseline-checkout=5, baseline-install=6, baseline-full=7",
 		]) expect(text).toContain(expected);
 	});
 

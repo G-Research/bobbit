@@ -118,20 +118,74 @@ export function graphOnlyDiagnostic(graph, changes, unitInventory) {
 }
 
 /**
+ * Lazily obtain a clean failure baseline only when the changed full run named
+ * failures. A non-zero baseline without named failing-test evidence is a
+ * harness crash, not evidence that may be subtracted.
+ */
+export async function attributeFullRunFailures({
+	fullRunFailures = [],
+	runBaseline,
+	label = "clean failure baseline",
+} = {}) {
+	const failures = sortedPaths(fullRunFailures);
+	if (failures.length === 0) {
+		return {
+			baselineRan: false,
+			fullRunFailures: failures,
+			baselineRunFailures: [],
+			attributedFullRunFailures: [],
+			baseline: undefined,
+		};
+	}
+	if (typeof runBaseline !== "function") {
+		throw new Error(`${label}: changed full-run failures require clean baseline evidence`);
+	}
+	const baseline = await runBaseline();
+	if (!baseline || typeof baseline.code !== "number" || !baseline.evidence
+		|| !Array.isArray(baseline.evidence.observed) || !Array.isArray(baseline.evidence.failures)) {
+		throw new Error(`${label}: missing complete Vitest baseline evidence`);
+	}
+	const observed = sortedPaths(baseline.evidence.observed);
+	const baselineFailures = sortedPaths(baseline.evidence.failures);
+	if (observed.length === 0) {
+		throw new Error(`${label}: baseline full unit run observed no test files`);
+	}
+	if (baseline.code !== 0 && baselineFailures.length === 0) {
+		throw new Error(`${label}: baseline full unit run exited ${baseline.code} without named failing-test evidence (crashed or incomplete)`);
+	}
+	if (baseline.code === 0 && baselineFailures.length > 0) {
+		throw new Error(`${label}: baseline report names failures despite exit code 0`);
+	}
+	const baselineSet = new Set(baselineFailures);
+	return {
+		baselineRan: true,
+		fullRunFailures: failures,
+		baselineRunFailures: baselineFailures,
+		attributedFullRunFailures: failures.filter((path) => !baselineSet.has(path)),
+		baseline,
+	};
+}
+
+/**
  * The safety oracle. Required evidence is the union of directly changed
- * map-owned unit tests, Vitest --changed observations, and full-run failures.
+ * map-owned unit tests, Vitest --changed observations, and failures newly
+ * present relative to the clean full-suite baseline.
  */
 export function compareSelectionEvidence({
 	selected = [],
 	directChangedUnit = [],
 	nativeChangedObserved = [],
 	fullRunFailures = [],
+	baselineRunFailures = [],
 } = {}) {
 	const selectedSet = new Set(sortedPaths(selected));
 	const direct = sortedPaths(directChangedUnit);
 	const native = sortedPaths(nativeChangedObserved);
 	const failures = sortedPaths(fullRunFailures);
-	const required = sortedPaths([...direct, ...native, ...failures]);
+	const baselineFailures = sortedPaths(baselineRunFailures);
+	const baselineSet = new Set(baselineFailures);
+	const attributedFailures = failures.filter((path) => !baselineSet.has(path));
+	const required = sortedPaths([...direct, ...native, ...attributedFailures]);
 	const underSelected = required.filter((path) => !selectedSet.has(path));
 	const requiredSet = new Set(required);
 	const overSelected = sortedPaths(selectedSet).filter((path) => !requiredSet.has(path));
@@ -140,6 +194,8 @@ export function compareSelectionEvidence({
 		directChangedUnit: direct,
 		nativeChangedObserved: native,
 		fullRunFailures: failures,
+		baselineRunFailures: baselineFailures,
+		attributedFullRunFailures: attributedFailures,
 		required,
 		underSelected,
 		overSelected,
@@ -219,7 +275,7 @@ export function buildAuditReport(rows, metadata = {}) {
 		generatedAt: metadata.generatedAt ?? new Date().toISOString(),
 		repository: metadata.repository ?? REPO_ROOT,
 		sampleManifest: metadata.sampleManifest ?? DEFAULT_SAMPLE_PATH,
-		contract: "selected is a superset of direct changed unit tests, Vitest --changed observations, and full-run failures",
+		contract: "selected is a superset of direct changed unit tests, Vitest --changed observations, and changed-run failures absent from a clean baseline",
 		cachePolicy: "qualification disables affected-result cache use; historical installs and Vitest state are invocation-local",
 		rows,
 		summary,
@@ -243,12 +299,25 @@ export function renderAuditReport(report) {
 		}
 		lines.push(`native command: ${row.commands.nativeChanged}`);
 		lines.push(`full command: ${row.commands.fullUnit}`);
+		if (row.failureBaseline?.ran) {
+			lines.push(`failure baseline: ${row.failureBaseline.revision}`);
+			lines.push(`baseline checkout command: ${row.commands.baselineCheckout}`);
+			lines.push(`baseline install command: ${row.commands.baselineInstall}`);
+			lines.push(`baseline full command: ${row.commands.baselineFullUnit}`);
+		} else {
+			lines.push("failure baseline: not run (changed full run named no failures)");
+		}
+		lines.push(`exit codes: native=${row.exitCodes?.nativeChanged ?? "(unknown)"}, full=${row.exitCodes?.fullUnit ?? "(unknown)"}, baseline-checkout=${row.exitCodes?.baselineCheckout ?? "(not run)"}, baseline-install=${row.exitCodes?.baselineInstall ?? "(not run)"}, baseline-full=${row.exitCodes?.baselineFullUnit ?? "(not run)"}`);
 		lines.push(`native observed (${row.evidence.nativeChangedObserved.length}): ${row.evidence.nativeChangedObserved.join(", ") || "(none)"}`);
 		lines.push(`full failures (${row.evidence.fullRunFailures.length}): ${row.evidence.fullRunFailures.join(", ") || "(none)"}`);
+		const baselineFailures = row.evidence.baselineRunFailures ?? [];
+		const attributedFailures = row.evidence.attributedFullRunFailures ?? row.evidence.fullRunFailures;
+		lines.push(`baseline failures (${baselineFailures.length}): ${baselineFailures.join(", ") || "(none)"}`);
+		lines.push(`attributed failures (${attributedFailures.length}): ${attributedFailures.join(", ") || "(none)"}`);
 		lines.push(`required (${row.evidence.required.length}): ${row.evidence.required.join(", ") || "(none)"}`);
 		lines.push(`under-selected (${row.evidence.underSelected.length}): ${row.evidence.underSelected.join(", ") || "(none)"}`);
 		lines.push(`over-selected (${row.evidence.overSelected.length}): ${row.evidence.overSelected.join(", ") || "(none)"}`);
-		lines.push(`timings ms: selection=${row.timings.selectionMs}, install=${row.timings.installMs}, native=${row.timings.nativeChangedMs}, full=${row.timings.fullUnitMs}`);
+		lines.push(`timings ms: selection=${row.timings.selectionMs}, install=${row.timings.installMs}, native=${row.timings.nativeChangedMs}, full=${row.timings.fullUnitMs}, baseline-checkout=${row.timings.baselineCheckoutMs ?? "(not run)"}, baseline-install=${row.timings.baselineInstallMs ?? "(not run)"}, baseline-full=${row.timings.baselineFullUnitMs ?? "(not run)"}`);
 		lines.push("");
 	}
 	lines.push(`summary: ${JSON.stringify(report.summary)}`);
@@ -520,7 +589,51 @@ function parseArgs(argv) {
 }
 
 function help() {
-	return `Usage: node scripts/affected/correctness-vs-main.mjs [options]\n\nOptions:\n  --sample PATH      Fixed immutable sample manifest\n  --only ID,ID       Run a subset of manifest sample ids\n  --report PATH      Also write the complete audit JSON\n  --help             Show this help\n\nThis command is expensive: every sample runs npm ci, Vitest --changed, and the full retry-free unit suite.`;
+	return `Usage: node scripts/affected/correctness-vs-main.mjs [options]\n\nOptions:\n  --sample PATH      Fixed immutable sample manifest\n  --only ID,ID       Run a subset of manifest sample ids\n  --report PATH      Also write the complete audit JSON\n  --help             Show this help\n\nThis command is expensive: every sample runs npm ci, Vitest --changed, and the full retry-free unit suite. A clean full-suite baseline is run lazily when the changed full run names failures.`;
+}
+
+async function runFailureBaseline({ sample, parent, worktree, sampleRoot, reports, profiles }) {
+	const revision = sample.syntheticChanges?.length ? sample.commit : parent;
+	const checkoutArgs = ["checkout", "--detach", "--force", revision];
+	const checkout = await checked("git", checkoutArgs, { cwd: worktree, timeout: 120_000 });
+	rmSync(profiles, { recursive: true, force: true });
+
+	const installEnv = createQualificationEnvironment(ensureOwnedDirectory(sampleRoot, "baseline-install"));
+	const installInvocation = npmInvocation(["ci", "--no-audit", "--no-fund"], { env: installEnv });
+	const install = await checked(installInvocation.file, installInvocation.args, {
+		cwd: worktree,
+		env: installEnv,
+		timeout: 15 * 60_000,
+	});
+
+	const report = join(reports, "baseline-full-unit.json");
+	const args = ["run", "test:unit", "--", "--retry=0", "--reporter=json", `--outputFile=${report}`];
+	const env = createQualificationEnvironment(ensureOwnedDirectory(sampleRoot, "baseline-full-unit"));
+	const invocation = npmInvocation(args, { env });
+	const full = await runExecFile(invocation.file, invocation.args, {
+		cwd: worktree,
+		env,
+		timeout: 20 * 60_000,
+	});
+	if (full.code !== 0 && !existsSync(report)) {
+		throw new Error(`${sample.id}: baseline full unit run failed without JSON evidence: ${(full.stderr || full.stdout).trim().slice(-2000)}`);
+	}
+	return {
+		code: full.code,
+		evidence: readVitestReport(report, worktree),
+		revision,
+		commands: {
+			checkout: commandString("git", checkoutArgs),
+			install: commandString(installInvocation.file, installInvocation.args),
+			fullUnit: commandString(invocation.file, invocation.args),
+		},
+		exitCodes: { checkout: checkout.code, install: install.code, fullUnit: full.code },
+		timings: {
+			checkoutMs: checkout.durationMs,
+			installMs: install.durationMs,
+			fullUnitMs: full.durationMs,
+		},
+	};
 }
 
 async function qualifySample({ sample, graph, affectedTests, worktree, root }) {
@@ -564,11 +677,26 @@ async function qualifySample({ sample, graph, affectedTests, worktree, root }) {
 	}
 	const nativeEvidence = readVitestReport(nativeReport, worktree);
 	const fullEvidence = readVitestReport(fullReport, worktree);
+	if (fullEvidence.observed.length === 0) {
+		throw new Error(`${sample.id}: changed full unit run observed no test files`);
+	}
+	if (full.code !== 0 && fullEvidence.failures.length === 0) {
+		throw new Error(`${sample.id}: changed full unit run exited ${full.code} without named failing-test evidence (crashed or incomplete)`);
+	}
+	if (full.code === 0 && fullEvidence.failures.length > 0) {
+		throw new Error(`${sample.id}: changed full unit report names failures despite exit code 0`);
+	}
+	const attribution = await attributeFullRunFailures({
+		fullRunFailures: fullEvidence.failures,
+		label: `${sample.id}: clean failure baseline`,
+		runBaseline: () => runFailureBaseline({ sample, parent, worktree, sampleRoot, reports, profiles }),
+	});
 	const evidence = compareSelectionEvidence({
 		selected: computed.plan.selected,
 		directChangedUnit: directlyChangedUnitTests(changes, historicalUnit),
 		nativeChangedObserved: nativeEvidence.observed,
-		fullRunFailures: fullEvidence.failures,
+		fullRunFailures: attribution.fullRunFailures,
+		baselineRunFailures: attribution.baselineRunFailures,
 	});
 	const documentationOnly = isDocumentationOnly(changes);
 	if (!documentationOnly && computed.plan.selected.length === 0) {
@@ -587,16 +715,32 @@ async function qualifySample({ sample, graph, affectedTests, worktree, root }) {
 		graphOnlyDiagnostic: computed.plan.kind === "run-all" || sample.requireGraphOnlyDiagnostic
 			? computed.graphOnlyDiagnostic
 			: undefined,
+		failureBaseline: {
+			ran: attribution.baselineRan,
+			revision: attribution.baseline?.revision ?? null,
+		},
 		commands: {
 			nativeChanged: commandString(nativeInvocation.file, nativeInvocation.args),
 			fullUnit: commandString(fullInvocation.file, fullInvocation.args),
+			baselineCheckout: attribution.baseline?.commands.checkout ?? null,
+			baselineInstall: attribution.baseline?.commands.install ?? null,
+			baselineFullUnit: attribution.baseline?.commands.fullUnit ?? null,
 		},
-		exitCodes: { nativeChanged: native.code, fullUnit: full.code },
+		exitCodes: {
+			nativeChanged: native.code,
+			fullUnit: full.code,
+			baselineCheckout: attribution.baseline?.exitCodes.checkout ?? null,
+			baselineInstall: attribution.baseline?.exitCodes.install ?? null,
+			baselineFullUnit: attribution.baseline?.exitCodes.fullUnit ?? null,
+		},
 		timings: {
 			selectionMs: computed.selectionMs,
 			installMs: install.durationMs,
 			nativeChangedMs: native.durationMs,
 			fullUnitMs: full.durationMs,
+			baselineCheckoutMs: attribution.baseline?.timings.checkoutMs ?? null,
+			baselineInstallMs: attribution.baseline?.timings.installMs ?? null,
+			baselineFullUnitMs: attribution.baseline?.timings.fullUnitMs ?? null,
 		},
 		evidence,
 	};
