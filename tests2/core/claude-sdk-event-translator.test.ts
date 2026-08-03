@@ -8,6 +8,7 @@ import {
 	createClaudeSdkTranslatorState,
 	translateClaudeSdkEvent,
 	type ClaudeSdkTranslation,
+	type ClaudeSdkTranslatorState,
 } from "../../src/server/agent/claude-sdk-event-translator.ts";
 
 type FixtureRecord = Record<string, unknown>;
@@ -33,7 +34,7 @@ function fixtureMessages(record: FixtureRecord): readonly unknown[] {
 	return record.messages as readonly unknown[];
 }
 
-function feed(inputs: readonly unknown[]): { state: unknown; events: Event[]; diagnostics: Event[] } {
+function feed(inputs: readonly unknown[]): { state: ClaudeSdkTranslatorState; events: Event[]; diagnostics: Event[] } {
 	let state = createClaudeSdkTranslatorState();
 	const events: Event[] = [];
 	const diagnostics: Event[] = [];
@@ -276,6 +277,84 @@ describe("Claude Agent SDK event translator", () => {
 		expect(events.some((event) => event.parentToolUseId === childRootName && textInMessage(event, "child"))).toBe(true);
 		expect(events.some((event) => event.parentToolUseId === undefined && textInMessage(event, "root"))).toBe(true);
 		expect(events).toContainEqual(expect.objectContaining({ type: "tool_execution_end", toolCallId: "toString", parentToolUseId: "constructor" }));
+	});
+
+	it("reconciles all streamed assistant identities exactly once and suppresses late frames", () => {
+		const messages = fixtureMessages(fixture("root-tool-lifecycle.json"));
+		const streamedAndFinal = feed(messages.slice(0, 6));
+		const assistantEnds = streamedAndFinal.events.filter((event) => messageWithRole(event, "assistant"));
+		expect(assistantEnds).toHaveLength(1);
+		expect(JSON.stringify(streamedAndFinal.events)).not.toContain("argumentsJson");
+
+		for (const event of [
+			{ type: "stream_event", uuid: "root-assistant-1", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "late" } } },
+			{ type: "stream_event", uuid: "late-envelope", event: { type: "content_block_delta", index: 0, message: { id: "root-model-message-1" }, delta: { type: "text_delta", text: "late" } } },
+		]) {
+			const late = translateClaudeSdkEvent(streamedAndFinal.state, event);
+			expect(late.events).toEqual([]);
+			expect(late.diagnostics).toMatchObject([{ code: "late_event" }]);
+		}
+
+		const terminal = translateClaudeSdkEvent(streamedAndFinal.state, fixture("terminal-and-permission.json").resultSuccess);
+		expect(terminal.events.filter((event) => messageWithRole(event as unknown as Event, "assistant"))).toHaveLength(0);
+
+		const twoMessages = feed([
+			{ type: "stream_event", uuid: "envelope-1", event: { type: "message_start", message: { id: "model-1", content: [] } } },
+			{ type: "assistant", uuid: "envelope-1", message: { id: "model-1", content: [{ type: "text", text: "one" }] } },
+			{ type: "stream_event", uuid: "envelope-2", event: { type: "message_start", message: { id: "model-2", content: [] } } },
+			{ type: "assistant", uuid: "envelope-2", message: { id: "model-2", content: [{ type: "text", text: "two" }] } },
+			fixture("terminal-and-permission.json").resultSuccess,
+		]);
+		expect(twoMessages.events.filter((event) => messageWithRole(event, "assistant"))).toHaveLength(2);
+		const partitionPartials = [...((twoMessages.state as unknown as { partitions: ReadonlyMap<unknown, { partials: ReadonlyMap<unknown, unknown> }> }).partitions.values())]
+			.reduce((total, partition) => total + partition.partials.size, 0);
+		expect(partitionPartials).toBe(0);
+	});
+
+	it("keeps stream updates monotonic and maps normalized content indexes", () => {
+		let state = createClaudeSdkTranslatorState();
+		state = translateClaudeSdkEvent(state, { type: "stream_event", uuid: "stream", event: { type: "message_start", message: { id: "model", content: [] } } }).state;
+		state = translateClaudeSdkEvent(state, { type: "stream_event", uuid: "stream", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "first" } } }).state;
+		state = translateClaudeSdkEvent(state, { type: "stream_event", uuid: "stream", event: { type: "content_block_stop", index: 0 } }).state;
+		for (const event of [
+			{ type: "stream_event", uuid: "stream", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "replay" } } },
+			{ type: "stream_event", uuid: "stream", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "late" } } },
+		]) {
+			const duplicate = translateClaudeSdkEvent(state, event);
+			expect(duplicate.events).toEqual([]);
+			expect(duplicate.diagnostics).toMatchObject([{ code: "duplicate" }]);
+		}
+		const usageOnly = translateClaudeSdkEvent(state, { type: "stream_event", uuid: "stream", event: { type: "message_delta", usage: { input_tokens: 2 } } });
+		expect(usageOnly.events).toEqual([]);
+
+		const normalized = feed([
+			{ type: "stream_event", uuid: "indexes", event: { type: "content_block_start", index: 0, content_block: { type: "image", source: "unsupported" } } },
+			{ type: "stream_event", uuid: "indexes", event: { type: "content_block_start", index: 1, content_block: { type: "text", text: "kept" } } },
+		]);
+		const update = normalized.events.at(-1) as Event;
+		expect(update.assistantMessageEvent).toMatchObject({ type: "text_start", contentIndex: 0 });
+	});
+
+	it("completes every batched tool result in block order without synthetic failures", () => {
+		const inputs: unknown[] = [
+			{ type: "assistant", uuid: "parallel", message: { content: [
+				{ type: "tool_use", id: "tool-one", name: "Read", input: { path: "one" } },
+				{ type: "tool_use", id: "tool-two", name: "Glob", input: { pattern: "two" } },
+			], stop_reason: "tool_use" } },
+			{ type: "user", uuid: "parallel-results", message: { content: [
+				{ type: "tool_result", tool_use_id: "tool-one", content: "one" },
+				{ type: "tool_result", tool_use_id: "tool-two", content: "two", is_error: true },
+			] } },
+			fixture("terminal-and-permission.json").resultSuccess,
+		];
+		const { events, diagnostics } = feed(inputs);
+		expect(diagnostics).toEqual([]);
+		const ends = events.filter((event) => event.type === "tool_execution_end");
+		expect(ends).toEqual([
+			expect.objectContaining({ toolCallId: "tool-one", isError: false }),
+			expect.objectContaining({ toolCallId: "tool-two", isError: true }),
+		]);
+		expect(JSON.stringify(events)).not.toContain("ended before a result was received");
 	});
 
 	it("remains an offline translator seam with no existing session setup or dispatch coupling", () => {
