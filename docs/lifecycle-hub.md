@@ -195,7 +195,7 @@ class LifecycleHub {
 
   dispatch(
     hook: LifecycleHook,
-    base: Omit<HookCtx, "budget" | "config" | "gateway">,
+    base: HookDispatchBase,
   ): Promise<{ blocks: ContextBlock[]; diagnostics: HubDiagnostic[] }>;
 }
 ```
@@ -205,11 +205,40 @@ class LifecycleHub {
 1. **Resolve providers.** It asks `registry.listProviders(base.projectId)` (G1.1's resolver —
    installed, active, enabled providers for the project scope) and keeps only those whose
    `hooks` include the requested hook.
-2. **Build a `HookCtx` per provider** by merging the caller's `base` context with the
-   provider's YAML `config`, the provider's clamped `budget.maxTokens`, and the gateway
-   coordinates from `gatewayInfo()`. The full `HookCtx` shape:
+2. **Resolve the optional scope snapshot once.** At the lifecycle dispatch boundary, the Hub
+   asks its project-safe resolver for `scopeContext` using only the dispatched session's own
+   project and goal coordinates. A resolver failure is non-fatal and leaves the field absent.
+   The result is one detached, deeply frozen snapshot shared by every provider invoked for that
+   event; the Hub never resolves it per provider.
+3. **Build a `HookCtx` per provider** by merging the caller's `base` context, that one optional
+   snapshot, the provider's YAML `config`, the provider's clamped `budget.maxTokens`, and the
+   gateway coordinates from `gatewayInfo()`. The full `HookCtx` shape is:
 
    ```ts
+   interface HookScopeAncestryEntry {
+     readonly id: string;
+     readonly title?: string;
+   }
+
+   interface HookScopeGoal {
+     readonly id: string;
+     readonly title?: string;
+     readonly ancestry?: readonly HookScopeAncestryEntry[];
+     readonly depth?: number;
+     readonly metadata?: Readonly<Record<string, unknown>>;
+   }
+
+   interface HookScopeContext {
+     readonly project?: { readonly id: string; readonly name?: string };
+     readonly goal?: HookScopeGoal;
+     readonly role?: string;
+     readonly component?: {
+       readonly name: string;
+       readonly repo: string;
+       readonly relativePath?: string;
+     };
+   }
+
    interface HookCtx {
      sessionId: string; projectId?: string; scope: "project" | "global"; cwd: string;
      goalId?: string; roleName?: string; prompt?: string; turn?: { index: number };
@@ -217,18 +246,52 @@ class LifecycleHub {
      config: Record<string, unknown>;
      runtime?: { baseUrl: string; headers: Record<string, string>; status: string };
      gateway: { baseUrl: string; token: string };
+     readonly scopeContext?: HookScopeContext;
    }
    ```
-3. **Invoke each provider on the worker tier.** It calls `moduleHost.invoke({ exportKind:
+4. **Invoke each provider on the worker tier.** It calls `moduleHost.invoke({ exportKind:
    "providers", member: hook, url, packRoot, epoch, ctx, arg })` with the provider's
    `budget.timeoutMs` as the per-provider timeout. The worker resolves the module's hook from
    the **default-export object** (see [provider module contract](#provider-module-contract)).
-4. **Collect + validate + force provenance** on the returned blocks (per the rules above).
-5. **Apply budgets** across all collected blocks — per-provider maxima from each provider's
+5. **Collect + validate + force provenance** on the returned blocks (per the rules above).
+6. **Apply budgets** across all collected blocks — per-provider maxima from each provider's
    budget, global from `globalMaxTokens`.
-6. **Write one trace row** for the dispatch.
-7. **Return** the kept blocks plus a list of diagnostics. `dispatch` **never throws** because
+7. **Write one trace row** for the dispatch.
+8. **Return** the kept blocks plus a list of diagnostics. `dispatch` **never throws** because
    of a provider — provider faults become diagnostics.
+
+### `scopeContext`: bounded advisory scope
+
+`scopeContext` is optional, read-only context for lifecycle providers. Its sections are emitted
+only when independently resolvable; an identifier is required only when its enclosing section is
+present. It helps a provider label or tailor its own advisory output, but grants **no** capability:
+it does not authorize filesystem, session, agent, store, or cross-project access. The Host API
+version and schema, provider activation, hook scheduling, invocation counts, ordering, budgets,
+and context blocks are unchanged for providers that ignore the field.
+
+The resolver has a strict trust and privacy boundary: it reads from the session's declared project
+only, through that project's context and goal store. It never searches another project for a goal
+with the same id or falls back to a different project. Headquarters, system, hidden, unknown, and
+non-project sessions yield no `scopeContext`; a normal goal-less session can still yield its
+project, role, and an unambiguous component.
+
+When a live goal can be resolved, `goal.ancestry` is ordered **root to leaf**, including the leaf.
+`goal.depth` is the root-based number of entries, so a root has depth `1`; it is present only when
+that complete contiguous lineage was verified. `goal.metadata` is likewise present only for a
+complete lineage and is the established ancestry-merged effective metadata (ancestors first,
+descendant values winning). It is cloned before freezing, so providers cannot mutate goal-store
+state or another provider's view.
+
+Component coordinates are configured identifiers only: `name`, repository-relative `repo`, and
+optional configured `relativePath`. No absolute project, worktree, repository, or component path
+is exposed. The component is omitted when no unique match can be established — including a
+multi-repository branch-container worktree and equal-depth matches.
+
+Missing or archived goal records leave goal context absent. Missing or archived ancestors, cycles,
+and bounded-walk caps degrade to a safe partial leaf/ancestry view rather than throwing or
+inventing a root; in those cases `depth` and effective `metadata` are omitted. The snapshot is
+deeply frozen once at dispatch and the same object reference is passed to every provider for that
+event. Providers must treat absent fields and partial ancestry as normal conditions.
 
 ### Diagnostics — one bad provider never breaks the rest
 

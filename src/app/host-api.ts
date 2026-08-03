@@ -27,6 +27,7 @@ import {
 	type HostSessionEventName,
 	type HostSessionEventMap,
 	type StorePutOptions,
+	type StoreReadResult,
 	type StoreStats,
 } from "../shared/extension-host/host-api.js";
 import { gatewayFetch } from "./gateway-fetch.js";
@@ -207,9 +208,9 @@ export function getHostApi(
 		}
 		return resp;
 	};
-	// Slice B1: POST a store op to /api/ext/store/:op carrying the SERVER-MINTED
-	// surface token (NOT a raw `tool`) so the server derives the trusted packId.
-	const storeOp = async (op: "get" | "put" | "list" | "delete" | "deletePrefix" | "stats", payload: Record<string, unknown>): Promise<unknown> => {
+	// POST a store op to /api/ext/store/:op carrying the SERVER-MINTED surface
+	// token (NOT a raw `tool`) so the server derives the trusted packId.
+	const storeOp = async (op: "get" | "read" | "put" | "list" | "delete" | "deletePrefix" | "stats", payload: Record<string, unknown>): Promise<unknown> => {
 		if (!surface) throw new Error("host.store requires a pack-served renderer context");
 		const resp = await scopedFetch((token) => ({
 			path: `/api/ext/store/${op}`,
@@ -386,6 +387,8 @@ export function getHostApi(
 		} as HostApi["ui"],
 		store: {
 			get: async (key: string) => (await storeOp("get", { key })) as never,
+			read: async <T = unknown>(key: string): Promise<StoreReadResult<T>> =>
+				await storeOp("read", { key }) as StoreReadResult<T>,
 			put: async (key: string, value: unknown, opts?: StorePutOptions) => {
 				await storeOp("put", { key, value, opts });
 			},

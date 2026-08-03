@@ -75,6 +75,20 @@ provider reads.
 The `config` route validates overrides against this schema before persisting; an empty string
 clears an optional string (`externalUrl`/`apiKey`), and numeric keys must be positive.
 
+### Durable configuration availability
+
+The activation lookup uses the server's synchronous tri-state store read, while routes use the
+matching asynchronous Host API read. A **proven absent** config key starts from schema defaults;
+a valid stored object overlays those defaults. An unreadable or malformed stored config is neither
+case: the provider remains unavailable rather than activating with defaults, and `config` GET/SET
+returns `HINDSIGHT_CONFIG_UNAVAILABLE` with a safe diagnostic. This prevents a configuration change
+from overwriting a snapshot that the gateway could not establish was absent.
+
+This distinction does not change dormancy. A valid empty/default configuration is available but
+remains dormant until it has a non-empty `externalUrl`. See [durable store reads in the Extension
+Host guide](extension-host-authoring.md#durable-reads-distinguish-absence-from-an-unknown-value) for
+the shared store contract and recovery behavior.
+
 ## Bank & tag taxonomy
 
 **One shared, tag-scoped bank.** All Bobbit memory lives in a single Hindsight bank, id from
@@ -142,26 +156,28 @@ recoverable only when that queue snapshot persists. If the remote retain and que
 fail, no durable retry exists and the provider/lifecycle path emits the fixed, non-secret
 `HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED` diagnostic; the main turn still remains available.
 
-- **Mutation read safety** — enqueue distinguishes a rejected queue read from a legitimately empty
-  queue. An unknown snapshot is never replaced: enqueue performs no write and returns not-durable.
-  Following a remote retain failure, this surfaces the same fixed diagnostic without remote or store
-  details and without failing the main turn.
-- **Compatibility boundary** — this safeguard is local to mutation enqueue. Route/status and drain
-  reads remain best-effort; it does not change Host store read semantics or add backups or CAS.
+- **Empty versus unknown** — a proven absent queue and a valid stored `[]` are available, with
+  depth `0`; they are the only empty states. A read error or a present non-array queue is unknown.
+  It is never replaced with `[]`, drained, or reported as having no work.
+- **Retry behavior** — when the queue is unknown, `afterTurn` and `sessionShutdown` leave it intact
+  and record the fixed `HINDSIGHT_QUEUE_UNAVAILABLE` condition when diagnostics can be persisted.
+  A later hook retries the read. A failed remote retain still attempts enqueue, but enqueue returns
+  not-durable rather than overwriting the unknown snapshot, causing the fixed retain-and-queue
+  diagnostic above.
 - **Cap 100** — a durable append past 100 entries drops the oldest (FIFO eviction).
-- **Drain on `afterTurn`** — each turn retries the **queue head** (one entry) before doing the
-  turn's own retain. A remotely successful retry is removed only after the shortened queue snapshot
+- **Drain safety** — `afterTurn` retries one queue head; `sessionShutdown` makes one best-effort
+  full pass. A remotely successful retry is removed only after the shortened queue snapshot
   persists. If that save fails, the durable queue remains the retry decision, the provider records
   `HINDSIGHT_QUEUE_DRAIN_PERSISTENCE_FAILED`, and a later retry may send the entry again rather
   than silently losing it.
-- **Drain on `sessionShutdown`** — one best-effort full pass with the same durable-removal rule.
 
 The queue is durable (not in-memory) precisely because provider workers terminate after every hook
 invocation, so an in-memory queue would lose everything between turns. Once the queue snapshot has
 persisted, its retry remains valid even if the optional `last-error` write fails. Recall skips,
-retain failures, and health flips are non-fatal diagnostics through `last-error` when it can be
-written and the Hub's [context-trace](lifecycle-hub.md#the-trace-store); `status` surfaces the
-queue depth.
+retain failures, queue availability, and health flips are non-fatal diagnostics through `last-error`
+when it can be written and the Hub's [context-trace](lifecycle-hub.md#the-trace-store). The
+`status` route makes unknown queue state explicit for operators rather than presenting it as an
+empty backlog.
 
 ## Pack routes
 
@@ -174,8 +190,8 @@ list) rather than erroring.
 
 | Route | Contract |
 |---|---|
-| `config` | GET → merged effective config with secrets redacted (`apiKey` collapsed to `apiKeySet`). SET (with body) → validate against the schema, persist overrides to the pack store, return the new effective config. |
-| `status` | `{ configured, mode, healthy, bank, namespace, recallScope, autoRecall, autoRetain, queueDepth, lastError? }`. `healthy` is a fresh `client.health()` probe when configured (short timeout), else `false`. `queueDepth` is the retry-queue length. |
+| `config` | GET → merged effective config with secrets redacted (`apiKey` collapsed to `apiKeySet`). SET (with body) → validate against the schema, persist overrides, return the new effective config. If the persisted snapshot is unreadable or invalid, both return `HINDSIGHT_CONFIG_UNAVAILABLE` rather than defaults or an overwrite. |
+| `status` | `{ configured, mode, healthy, bank, namespace, recallScope, autoRecall, autoRetain, queueDepth, queueState, lastError? }`. `healthy` is a fresh `client.health()` probe when configured (short timeout), else `false`. `queueState: "available"` has numeric `queueDepth` (including `0`); `queueState: "unavailable"` has `queueDepth: null` and a safe `queueError` diagnostic. |
 | `recall` | `{ query, scope? }` → resolves bank + tags and calls `client.recall`; returns `{ memories }`. Manual/diagnostic surface. |
 | `retain` | `{ content, tags?, sync? }` → `ensureBank` + `client.retain` with merged auto-tags (`kind:manual`); returns `{ ok }`. |
 | `reflect` | `{ prompt }` → `client.reflect` → `{ text }`. |

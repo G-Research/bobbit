@@ -8,6 +8,7 @@ import {
 	utimesSync,
 	writeFileSync,
 } from "node:fs";
+import { request } from "node:http";
 import { join } from "node:path";
 
 import { test, expect } from "./gateway-harness.js";
@@ -38,11 +39,25 @@ function writeAnthropicCredential(file: string, credential: OAuthRow): void {
 }
 
 async function oauthStatus(baseURL: string): Promise<Record<string, unknown>> {
-	const response = await fetch(`${baseURL}/api/oauth/status?provider=anthropic`, {
-		headers: { Authorization: `Bearer ${process.env.BOBBIT_TOKEN}` },
+	const { status, body } = await new Promise<{ status: number | undefined; body: string }>((resolve, reject) => {
+		const client = request(`${baseURL}/api/oauth/status?provider=anthropic`, {
+			agent: false,
+			headers: {
+				Authorization: `Bearer ${process.env.BOBBIT_TOKEN}`,
+				Connection: "close",
+			},
+		}, response => {
+			let body = "";
+			response.setEncoding("utf8");
+			response.on("data", chunk => { body += chunk; });
+			response.once("error", reject);
+			response.once("end", () => resolve({ status: response.statusCode, body }));
+		});
+		client.once("error", reject);
+		client.end();
 	});
-	expect(response.status).toBe(200);
-	return response.json() as Promise<Record<string, unknown>>;
+	expect(status).toBe(200);
+	return JSON.parse(body) as Record<string, unknown>;
 }
 
 async function assertMockModelUsesStoredCredential(access: string): Promise<void> {
