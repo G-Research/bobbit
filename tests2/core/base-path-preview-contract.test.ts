@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, it, vi } from "vitest";
 
 import { previewGatewayRoute, type GatewayRoute } from "../../src/shared/base-path.ts";
 import { setPreviewRootForTesting, writeInline } from "../../src/server/preview/mount.ts";
+import { buildPreviewSnapshotV3Block, parseSnapshot } from "../../defaults/tools/html/snapshot.ts";
 
 const SID = "11111111-2222-3333-4444-555555555555";
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
@@ -58,11 +59,22 @@ function installBrowser(basePath: string, explicitGateway?: string): void {
 	Object.defineProperty(globalThis, "localStorage", { configurable: true, value: storage });
 }
 
-async function historicalParser(): Promise<(raw: unknown) => GatewayRoute | null> {
+type StoredPreviewParser = (raw: unknown, entry?: unknown) => GatewayRoute | null;
+
+async function historicalParser(): Promise<StoredPreviewParser> {
+	// The production decoder gains the optional `entry` parameter for compact v3
+	// markers. Cast at this boundary keeps this regression test compilable before
+	// that implementation lands while still exercising the runtime contract.
 	const boundary = await import("../../src/app/gateway-fetch.ts") as unknown as {
-		previewRouteFromStoredValue(raw: unknown): GatewayRoute | null;
+		previewRouteFromStoredValue: StoredPreviewParser;
 	};
 	return boundary.previewRouteFromStoredValue;
+}
+
+function decodeV3Snapshot(block: string, parse: StoredPreviewParser): GatewayRoute | null {
+	const snapshot = parseSnapshot(block);
+	assert.ok(snapshot && snapshot.kind === "preview", "writer must emit a readable v3 preview snapshot");
+	return parse(snapshot.url, snapshot.entry);
 }
 
 describe("preview gateway route decoder", () => {
@@ -135,12 +147,61 @@ describe("historical preview URL-only recovery", () => {
 		);
 	});
 
+	it("reconstructs compact v3 directory URLs only when their explicit entry is safe", async () => {
+		installBrowser("/bobbit", "https://gateway.example/team/gw");
+		const parse = await historicalParser();
+		const compact = `/preview/${SID}/`;
+		const expected = `/preview/${SID}/roadmap.html`;
+
+		assert.equal(parse(compact), null, "a compact URL without entry is genuinely malformed");
+		assert.equal(parse(compact, "roadmap.html"), expected);
+		assert.equal(parse(`/bobbit${compact}`, "roadmap.html"), expected);
+		assert.equal(parse(`https://gateway.example/team/gw${compact}`, "roadmap.html"), expected);
+		assert.equal(parse(`/retired/deployment${compact}`, "roadmap.html"), expected);
+		assert.equal(parse(compact, "../secret.html"), null);
+		assert.equal(parse(compact, "nested/secret.html"), null);
+		assert.equal(parse(compact, "path\\secret.html"), null);
+	});
+
+	it("round-trips every compact and fallback payload shape emitted by the v3 writer", async () => {
+		installBrowser("/bobbit", "https://gateway.example/team/gw");
+		const parse = await historicalParser();
+		const cases = [
+			{ name: "compact content hash and artifact id", entry: "x.html", hash: "a".repeat(64), artifactId: "pa_abc123xyz", compact: true, metadata: ["contentHash", "artifactId"] },
+			{ name: "compact content hash and aid alias", entry: `${"x".repeat(7)}.html`, hash: "a".repeat(64), artifactId: "pa_abc123xyz", compact: true, metadata: ["contentHash", "aid"] },
+			{ name: "compact artifact fallback without hash", entry: `${"x".repeat(20)}.html`, hash: undefined, artifactId: "pa_abc123xyz", compact: true, metadata: ["artifactId"] },
+			{ name: "compact aid fallback without hash", entry: `${"x".repeat(47)}.html`, hash: undefined, artifactId: "pa_abc123xyz", compact: true, metadata: ["aid"] },
+			{ name: "full URL fallback without optional metadata", entry: "report.html", hash: undefined, artifactId: undefined, compact: false, metadata: [] },
+		] as const;
+
+		for (const fixture of cases) {
+			const url = `/preview/${SID}/${fixture.entry}`;
+			const block = buildPreviewSnapshotV3Block(url, `${SID}/${fixture.entry}`, fixture.hash, {
+				artifactId: fixture.artifactId,
+				entry: fixture.entry,
+			});
+			assert.ok(block.length <= 250, `${fixture.name} must respect the marker cap`);
+			const snapshot = parseSnapshot(block);
+			assert.ok(snapshot && snapshot.kind === "preview");
+			if (!snapshot || snapshot.kind !== "preview") continue;
+			const payload = JSON.parse(block.slice("__preview_snapshot_v3__\n".length));
+			assert.equal(snapshot.url.endsWith("/"), fixture.compact, fixture.name);
+			assert.deepEqual(
+				["contentHash", "artifactId", "aid"].filter(key => payload[key] !== undefined),
+				fixture.metadata,
+				fixture.name,
+			);
+			assert.equal(decodeV3Snapshot(block, parse), url, fixture.name);
+		}
+	});
+
 	it.each([
 		`https://other.example/team/gw/preview/${SID}/index.html`,
 		`/preview-other/${SID}/index.html`,
 		"/old/preview/not-a-uuid/index.html",
 		`/old/preview/${SID}/../secret`,
 		`/old/preview/${SID}/%2e%2e/secret`,
+		`/old/preview/${SID}//index.html`,
 		`javascript:alert(1)/preview/${SID}/index.html`,
 	])("rejects historical lookalike %j", async (raw) => {
 		installBrowser("/bobbit", "https://gateway.example/team/gw");
