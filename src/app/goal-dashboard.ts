@@ -1833,10 +1833,9 @@ async function handleGitFetch(): Promise<void> {
 
 async function handleGitStatusDropdownOpen(): Promise<void> {
 	if (!currentGoalId) return;
-	// Opening is visible SWR, not an independent force-fetch. It only asks for
-	// local untracked details while the coordinator joins fresh/in-flight remote
-	// state. The dropdown's Refresh button remains the explicit path.
-	await refreshGoalGitStatus(currentGoalId, { untracked: true, intent: "visible" });
+	// Opening explicitly refreshes remote refs and loads the complete file list
+	// in one request. The coordinator owns force/single-flight semantics for it.
+	await refreshGoalGitStatus(currentGoalId, { fetch: true, untracked: true, intent: "explicit" });
 }
 
 // ============================================================================
